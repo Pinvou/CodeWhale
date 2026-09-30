@@ -212,6 +212,40 @@ pub(crate) trait ControlledCleanupSink: Send + Sync {
     fn cleanup(&self, generation: &str, scope: ControlledCleanupScope);
 }
 
+/// E2E-06：B 端断线恢复所需的本地材料（令牌只以内存数组存在，Debug 脱敏）。
+pub(crate) struct ControlledResumeMaterial {
+    pub(crate) lease: LeaseContext,
+    pub(crate) resume_token: [u8; 32],
+    pub(crate) original_deadline_b: u64,
+}
+
+impl std::fmt::Debug for ControlledResumeMaterial {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ControlledResumeMaterial")
+            .field("lease", &self.lease)
+            .field("resume_token", &"[REDACTED]")
+            .field("original_deadline_b", &self.original_deadline_b)
+            .finish()
+    }
+}
+
+/// E2E-06：B 端恢复相位推进（worker 按 Relay/A 的帧顺序调用）。
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum ControlledResumeStep<'a> {
+    Provisional { activation_id: &'a str },
+    Confirmed { activation_id: &'a str },
+    ActivationAcknowledged { activation_id: &'a str },
+    PostActivationLiveness {
+        activation_id: &'a str,
+        liveness_epoch_b: &'a str,
+    },
+    ReadyAcknowledged { activation_id: &'a str },
+}
+
+/// B 端恢复失败时投影的本地错误码（有界，UI 直接显示为失败终态）。
+const RESUME_FAILED_CODE: &str = "desktop_remote_resume_invalid";
+
 struct Inner {
     phase: ControlledStatusKind,
     intent: u64,
@@ -609,10 +643,11 @@ impl ControlledDeviceManager {
     pub(crate) fn complete_resumed(
         &self,
         operation: ControlledOperation,
+        activation_id: &str,
+        now_b: u64,
         liveness_epoch_a: impl Into<String>,
         resume_token: [u8; 32],
         transport_key_fingerprint: [u8; 32],
-        now_b: u64,
     ) -> Result<ControlledStatus> {
         let mut inner = self.inner.lock();
         ensure_operation(&inner, &operation)?;
@@ -623,6 +658,35 @@ impl ControlledDeviceManager {
             return Err(ControlledStateError::new("lease_unavailable"));
         };
         let epoch = liveness_epoch_a.into();
+        // E2E-06：先用完整的 `controller_resumed` 让旧 gate 消费旧材料；任何
+        // 相位、activation 或轮换材料不符都必须终止候选，绝不产生半恢复状态。
+        let watchdog_deadline = inner
+            .watchdog
+            .as_ref()
+            .and_then(|watchdog| watchdog.deadline_b());
+        let accepted = match inner.resume_gate.as_mut() {
+            Some(gate) => gate
+                .accept_resumed(
+                    activation_id,
+                    epoch.clone(),
+                    resume_token,
+                    transport_key_fingerprint,
+                    now_b,
+                    watchdog_deadline,
+                )
+                .is_ok(),
+            None => false,
+        };
+        if !accepted {
+            let generation = inner.generation.clone().unwrap_or_default();
+            clear_sensitive(&mut inner, u64::MAX, true);
+            inner.device_name = None;
+            inner.phase = ControlledStatusKind::Error;
+            inner.error_code = Some(RESUME_FAILED_CODE.to_owned());
+            drop(inner);
+            self.notify_cleanup(&generation);
+            return Err(ControlledStateError::new("desktop_remote_resume_failed"));
+        }
         let deadline = now_b.saturating_add(30_000);
         // Replacing the gate with the already-authenticated final material is
         // the single transition that cancels the old watchdog.
@@ -642,6 +706,107 @@ impl ControlledDeviceManager {
         Ok(status_locked(&inner))
     }
 
+    /// E2E-06：断线（`desktop_relay_connection{connected:false}`）后取恢复材料并让
+    /// 本端 gate 进入 `Prepared`；相位不符或 gate 已终止时失败关闭并清理本代。
+    pub(crate) fn begin_resume(
+        &self,
+        operation: ControlledOperation,
+        now_b: u64,
+    ) -> Result<ControlledResumeMaterial> {
+        let mut inner = self.inner.lock();
+        ensure_operation(&inner, &operation)?;
+        if inner.phase != ControlledStatusKind::Reconnecting {
+            return Err(ControlledStateError::new("desktop_remote_phase_invalid"));
+        }
+        let Some(context) = inner.lease_context.clone() else {
+            return Err(ControlledStateError::new("lease_unavailable"));
+        };
+        let deadline = inner
+            .watchdog
+            .as_ref()
+            .and_then(|watchdog| watchdog.deadline_b());
+        let (prepared, original_deadline_b, resume_token) = match inner.resume_gate.as_mut() {
+            Some(gate) => {
+                let prepared = gate.prepare(now_b, deadline).is_ok();
+                (prepared, gate.original_deadline_b(), gate.current_token())
+            }
+            None => (false, 0, [0_u8; 32]),
+        };
+        if !prepared {
+            let generation = inner.generation.clone().unwrap_or_default();
+            clear_sensitive(&mut inner, u64::MAX, true);
+            inner.device_name = None;
+            inner.phase = ControlledStatusKind::Error;
+            inner.error_code = Some(RESUME_FAILED_CODE.to_owned());
+            drop(inner);
+            self.notify_cleanup(&generation);
+            return Err(ControlledStateError::new("desktop_remote_resume_failed"));
+        }
+        Ok(ControlledResumeMaterial {
+            lease: context,
+            resume_token,
+            original_deadline_b,
+        })
+    }
+
+    /// E2E-06：按帧顺序推进 B 端恢复相位；任一步失败即终止候选并清理本代。
+    pub(crate) fn advance_resume(
+        &self,
+        operation: ControlledOperation,
+        step: ControlledResumeStep<'_>,
+        now_b: u64,
+    ) -> Result<ControlledStatus> {
+        let mut inner = self.inner.lock();
+        ensure_operation(&inner, &operation)?;
+        if inner.phase != ControlledStatusKind::Reconnecting {
+            return Err(ControlledStateError::new("desktop_remote_phase_invalid"));
+        }
+        let deadline = inner
+            .watchdog
+            .as_ref()
+            .and_then(|watchdog| watchdog.deadline_b());
+        let advanced = match inner.resume_gate.as_mut() {
+            Some(gate) => match step {
+                ControlledResumeStep::Provisional { activation_id } => {
+                    gate.accept_provisional(activation_id, now_b, deadline).is_ok()
+                }
+                ControlledResumeStep::Confirmed { activation_id } => {
+                    gate.confirm(activation_id, now_b, deadline).is_ok()
+                }
+                ControlledResumeStep::ActivationAcknowledged { activation_id } => gate
+                    .acknowledge_activation(activation_id, now_b, deadline)
+                    .is_ok(),
+                ControlledResumeStep::PostActivationLiveness {
+                    activation_id,
+                    liveness_epoch_b,
+                } => gate
+                    .send_post_activation_liveness(
+                        activation_id,
+                        liveness_epoch_b,
+                        now_b,
+                        deadline,
+                    )
+                    .is_ok(),
+                ControlledResumeStep::ReadyAcknowledged { activation_id } => {
+                    gate.acknowledge_ready(activation_id, now_b, deadline).is_ok()
+                }
+            },
+            None => false,
+        };
+        if !advanced {
+            let generation = inner.generation.clone().unwrap_or_default();
+            clear_sensitive(&mut inner, u64::MAX, true);
+            inner.device_name = None;
+            inner.phase = ControlledStatusKind::Error;
+            inner.error_code = Some(RESUME_FAILED_CODE.to_owned());
+            drop(inner);
+            self.notify_cleanup(&generation);
+            return Err(ControlledStateError::new("desktop_remote_resume_failed"));
+        }
+        Ok(status_locked(&inner))
+    }
+
+
     pub(crate) fn stop(&self) -> ControlledStatus {
         self.terminate_local(
             "desktop_remote_stopped",
@@ -653,6 +818,15 @@ impl ControlledDeviceManager {
     /// E2E-06：A 端显式断开（`controller_disconnect`）到达时终结当前租约：清空
     /// 租约/会话密钥/远端任务与凭证，**保留**用户工作区授权，投影为停止态
     /// （A 需要重新让对方刷新连接码后再连）。只有已连接的代际可以接受该帧。
+    /// E2E-06：当前生效的 A 端 liveness epoch（恢复完成后会轮换成 Relay 下发的值）。
+    pub(crate) fn live_liveness_epoch(&self) -> Option<String> {
+        let inner = self.inner.lock();
+        if inner.phase != ControlledStatusKind::Connected {
+            return None;
+        }
+        inner.liveness_epoch_a.clone()
+    }
+
     pub(crate) fn accept_remote_disconnect(&self) -> Result<ControlledStatus> {
         {
             let inner = self.inner.lock();
@@ -1176,6 +1350,93 @@ mod tests {
         assert_eq!(manager.status().status, ControlledStatusKind::Reserving);
         assert_eq!(manager.status().workspace_count, 1);
         assert!(!manager.status().code_mode_allowed);
+    }
+
+    /// E2E-06：B 端恢复相位必须按冻结顺序推进（provisional → confirmed →
+    /// activation_ack → post_activation_liveness → ready_ack → resumed），顺序错乱
+    /// 或材料复用失败关闭并清理本代。
+    #[test]
+    fn resume_sequence_advances_the_gate_and_rotates_material() {
+        let manager = ControlledDeviceManager::default();
+        let operation = manager.start(None, Vec::new()).unwrap();
+        register(&manager, &operation);
+        manager.mark_claimed(operation.clone()).unwrap();
+        manager
+            .complete_connected(operation.clone(), lease(&operation.generation))
+            .unwrap();
+        assert_eq!(
+            manager.mark_transport_disconnected(5_000).status,
+            ControlledStatusKind::Reconnecting
+        );
+        let material = manager.begin_resume(operation.clone(), 6_000).unwrap();
+        assert_eq!(material.original_deadline_b, 30_000);
+        assert!(format!("{material:?}").contains("[REDACTED]"));
+        assert_eq!(material.resume_token, [1; 32]);
+
+        let activation = "activation-0001";
+        for (step, now_b) in [
+            (
+                ControlledResumeStep::Provisional {
+                    activation_id: activation,
+                },
+                7_000,
+            ),
+            (
+                ControlledResumeStep::Confirmed {
+                    activation_id: activation,
+                },
+                8_000,
+            ),
+            (
+                ControlledResumeStep::ActivationAcknowledged {
+                    activation_id: activation,
+                },
+                9_000,
+            ),
+            (
+                ControlledResumeStep::PostActivationLiveness {
+                    activation_id: activation,
+                    liveness_epoch_b: "live-b-2",
+                },
+                10_000,
+            ),
+            (
+                ControlledResumeStep::ReadyAcknowledged {
+                    activation_id: activation,
+                },
+                11_000,
+            ),
+        ] {
+            manager.advance_resume(operation.clone(), step, now_b).unwrap();
+        }
+        let resumed = manager
+            .complete_resumed(operation.clone(), activation, 12_000, "live-a-2", [3; 32], [4; 32])
+            .unwrap();
+        assert_eq!(resumed.status, ControlledStatusKind::Connected);
+        assert_eq!(manager.live_liveness_epoch(), Some("live-a-2".to_owned()));
+
+        // 第二次断线后相位错乱（未 provisional 就 confirm）必须失败关闭。
+        manager.mark_transport_disconnected(13_000);
+        manager.begin_resume(operation.clone(), 14_000).unwrap();
+        assert_eq!(
+            manager
+                .advance_resume(
+                    operation,
+                    ControlledResumeStep::Confirmed {
+                        activation_id: "activation-0002",
+                    },
+                    15_000,
+                )
+                .unwrap_err()
+                .code,
+            "desktop_remote_resume_failed"
+        );
+        assert_eq!(manager.status().status, ControlledStatusKind::Error);
+        assert_eq!(
+            manager.status().error_code.as_deref(),
+            Some("desktop_remote_resume_invalid")
+        );
+        assert!(manager.live_lease().is_err());
     }
 
     #[test]

@@ -377,6 +377,9 @@ impl ControllerTransportSender {
     /// Resume starts without an installed runtime lease. Only its explicit
     /// handshake frames may bypass lease admission; the resume state machine
     /// remains responsible for binding the old context and token to the peer.
+    ///
+    /// E2E-06：`controller_resume_ready_ack` 是同一族里的第三个出站帧
+    /// （B 由 Relay 驱动确认，A 需要独立 ack 才能让 Relay 提交轮换）。
     pub(crate) fn try_send_sensitive_resume_control<T: Serialize>(
         &self,
         value: &T,
@@ -388,7 +391,11 @@ impl ControllerTransportSender {
         let validated = self.validate_control(text.as_str())?;
         if !matches!(
             validated.get("type").and_then(Value::as_str),
-            Some("controller_resume_prepare" | "encrypted_resume_confirm")
+            Some(
+                "controller_resume_prepare"
+                    | "encrypted_resume_confirm"
+                    | "controller_resume_ready_ack"
+            )
         ) {
             return Err(ControllerSendError::InvalidFrame("message.type".into()));
         }

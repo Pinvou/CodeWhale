@@ -8,11 +8,51 @@
 use serde_json::Value;
 
 use crate::features::remote_control::controller::capabilities::CapabilitySnapshotManager;
-use crate::features::remote_control::controller::controlled::ControlledDeviceManager;
+use crate::features::remote_control::controller::controlled::{
+    ControlledCleanupScope, ControlledCleanupSink, ControlledDeviceManager,
+};
 use crate::features::remote_control::controller::protocol::LeaseContext;
-use crate::features::remote_control::controller::relay_runtime::ControlledBusinessPort;
+use crate::features::remote_control::controller::relay_runtime::{
+    ControlledBusinessPort, controlled_monotonic_millis,
+};
 use base64::Engine as _;
+use std::sync::Arc;
 use tauri::{AppHandle, Manager as _};
+
+/// E2E-06：B 端清理端口。`ControlledDeviceManager` 在 stop / refresh / 远端断开 /
+/// 恢复失败等任何终态都会触发它；这里用同一代的任务登记表中断本代远端任务，
+/// 任务生命周期钩子会顺带回收临时模型凭证、待决权限与传输暂存
+/// （`controller/task.rs` 的 `RemoteTaskService::cleanup`）。
+pub(crate) struct DesktopControlledCleanup {
+    app: AppHandle,
+}
+
+impl DesktopControlledCleanup {
+    pub(crate) fn new(app: AppHandle) -> Self {
+        Self { app }
+    }
+}
+
+impl ControlledCleanupSink for DesktopControlledCleanup {
+    fn cleanup(&self, generation: &str, scope: ControlledCleanupScope) {
+        // 审核修复：只有涉及远端任务/待决权限/临时模型的清理才需要中断任务；
+        // 纯凭证（session_keys/workspace_grants）清理不得顺带打断任务。
+        if !(scope.remote_tasks || scope.pending_permissions || scope.temporary_models) {
+            return;
+        }
+        let Some(runtime) =
+            self.app
+                .try_state::<Arc<super::desktop_remote_task::DesktopRemoteTaskRuntime>>()
+        else {
+            // 任务运行时未装配（例如单元测试环境）：本代没有任何远端任务需要清理。
+            return;
+        };
+        let now_b = controlled_monotonic_millis();
+        let _ = runtime
+            .service()
+            .interrupt_generation(generation, "remote_control_stopped", now_b);
+    }
+}
 
 /// 绑定 app handle 的 B 端业务端口（每个连接一个实例）。
 pub(crate) struct DesktopControlledBusiness {

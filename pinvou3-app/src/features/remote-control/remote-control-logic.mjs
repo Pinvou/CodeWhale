@@ -39,6 +39,11 @@ export function connectionErrorKey(code) {
     case 'protocol_version_unsupported':
     case 'unsupported_capability':
       return 'errorVersion';
+    // E2E-07：A 端连接链路的两个有界码必须有自己的文案，不再回落到通用文案。
+    case 'endpoint_offline':
+      return 'errorOffline';
+    case 'invalid_message':
+      return 'errorProtocol';
     default:
       return 'errorGeneric';
   }

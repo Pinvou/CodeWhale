@@ -2268,6 +2268,7 @@ dictJa["controllerConnection"] = {
   errorOffline: "相手の端末がオフラインか、遠隔操作が無効です。",
   errorVersion: "バージョンが互換ではありません。最新版に更新してください。",
   errorGeneric: "接続に失敗しました。もう一度お試しください。",
+  errorProtocol: "相手から認識できないデータを受信しました。再試行し、続く場合は双方のバージョンをご確認ください。",
   errorLocalFormat: "7 桁の接続コード（英数字）を入力してください。",
   historyTitle: "リモート接続履歴",
   historyEmpty: "リモート接続の履歴はまだありません。",

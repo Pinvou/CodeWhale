@@ -2269,6 +2269,7 @@ dictEn["controllerConnection"] = {
   errorOffline: "The other device is offline or remote control is off.",
   errorVersion: "The two versions are incompatible. Please update to the latest release.",
   errorGeneric: "The connection failed. Please try again.",
+  errorProtocol: "The other device sent something unrecognized. Retry, and check both versions if it keeps happening.",
   errorLocalFormat: "Enter the 7-character code (letters and digits).",
   historyTitle: "Remote connections",
   historyEmpty: "No remote connection yet.",

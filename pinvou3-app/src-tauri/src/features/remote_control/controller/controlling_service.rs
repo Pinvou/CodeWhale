@@ -19,6 +19,7 @@ use uuid::Uuid;
 
 use super::controlling::{
     ControllerLease, ControllerOperation, ControllingDeviceManager, ControllingStatus,
+    ResumeStep,
 };
 use super::controlling_session::{
     ControllingSessionManager, ControllingSessionProjection,
@@ -35,6 +36,10 @@ use super::crypto::{
 use super::encrypted_lane::ControllingLaneState;
 use super::journal::{JournalEvent, JournalSnapshot, MAX_EVENT_PAYLOAD_BYTES};
 use super::protocol::LeaseContext;
+use super::resume::{
+    build_controller_resume_prepare, build_controller_resume_ready_ack, new_resume_challenge,
+    resume_frame_matches_lease,
+};
 use super::relay_transport::{
     AuthenticatedLease, ControllerRole, ControllerTransportConfig, ControllerTransportEvent,
     ControllerTransportSender, spawn_controller_transport,
@@ -71,6 +76,12 @@ pub(crate) enum ControllerLaneEvent {
 #[async_trait::async_trait]
 pub(crate) trait ControllingLane: Send {
     async fn next_lane_event(&mut self) -> Option<ControllerLaneEvent>;
+
+    /// E2E-06：发送恢复族的敏感控制帧（prepare/confirm/ready_ack）。默认实现
+    /// 失败关闭，只有真实 transport 端口实现它；测试替身可覆写以记录帧。
+    fn send_resume_control(&self, _message: Value) -> Result<(), String> {
+        Err("controller_resume_unsupported".to_owned())
+    }
 }
 
 /// A 端权威 journal 落库端口（E2E-05）：由命令层实现——按会话引用写入 A 的
@@ -96,6 +107,12 @@ pub(crate) struct ControllerTransportPort {
 impl ControllingLane for ControllerTransportPort {
     async fn next_lane_event(&mut self) -> Option<ControllerLaneEvent> {
         self.inbound.recv().await
+    }
+
+    fn send_resume_control(&self, message: Value) -> Result<(), String> {
+        self.sender
+            .try_send_sensitive_resume_control(&message)
+            .map_err(|_| "controller_resume_send_failed".to_owned())
     }
 }
 
@@ -373,37 +390,349 @@ pub(crate) async fn serve_controlling_lane_with_interval(
     heartbeat.tick().await;
     let mut liveness = LivenessExpectations::default();
     let mut journal = JournalExpectations::default();
+    let mut resume = ResumeAttempt::default();
+    let mut resume_baseline = lane_monotonic_millis();
+    let mut resume_deadline = tokio::time::Instant::now();
     loop {
         tokio::select! {
             biased;
             _ = heartbeat.tick() => {
-                if let Some(frame) = next_liveness_frame(manager, &mut liveness) {
-                    (sinks.on_liveness)(frame);
+                // 恢复期间不发心跳：业务与存活闸门都已挂起。
+                if !resume.is_active() {
+                    if let Some(frame) = next_liveness_frame(manager, &mut liveness) {
+                        (sinks.on_liveness)(frame);
+                    }
                 }
+            }
+            // 本地恢复预算耗尽：清空通道并按有界错误结束本次连接（Relay 侧
+            // 自己的 deadline 是权威，本地只保证不会无限等待）。
+            _ = tokio::time::sleep_until(resume_deadline), if resume.is_active() => {
+                business.clear();
+                fail_resume(manager, sinks);
+                return;
             }
             event = lane.next_lane_event() => {
                 let Some(event) = event else { return };
                 match event {
                     ControllerLaneEvent::Disconnected => {
-                        // 断线后不再有可用租约/会话密钥：先清空业务通道，再投影状态。
-                        business.clear();
+                        if resume.is_active() {
+                            continue;
+                        }
+                        // 断线：保留密钥材料并挂起业务/存活帧，随后启动恢复流程。
+                        business.suspend();
                         let status = manager.mark_transport_disconnected();
                         (sinks.on_status)(&status);
+                        let now_b = lane_monotonic_millis().saturating_sub(resume_baseline);
+                        if begin_resume(lane, manager, &mut resume, now_b) {
+                            resume_deadline =
+                                tokio::time::Instant::now() + RESUME_BUDGET;
+                        } else {
+                            business.clear();
+                            fail_resume(manager, sinks);
+                            return;
+                        }
                     }
                     ControllerLaneEvent::Frame(json) => {
-                        dispatch_inbound_frame(
-                            manager,
-                            sessions,
-                            business,
-                            &mut journal,
-                            &mut liveness,
-                            &json,
-                            sinks,
-                        );
+                        if resume.is_active() {
+                            let now_b = lane_monotonic_millis().saturating_sub(resume_baseline);
+                            match handle_resume_frame(lane, manager, business, &mut resume, now_b, &json) {
+                                ResumeOutcome::Progressed | ResumeOutcome::Ignored => {}
+                                ResumeOutcome::Completed => {
+                                    resume.reset();
+                                    liveness = LivenessExpectations::default();
+                                    journal = JournalExpectations::default();
+                                    // 恢复后重新计时（Relay 会重置 30 秒预算）。
+                                    resume_baseline = lane_monotonic_millis();
+                                }
+                                ResumeOutcome::Failed => {
+                                    business.clear();
+                                    fail_resume(manager, sinks);
+                                    return;
+                                }
+                            }
+                        } else {
+                            dispatch_inbound_frame(
+                                manager,
+                                sessions,
+                                business,
+                                &mut journal,
+                                &mut liveness,
+                                &json,
+                                sinks,
+                            );
+                        }
                     }
                 }
             }
         }
+    }
+}
+
+/// 恢复尝试的本地预算（与 Relay 的 `RESUME_BUDGET_MS` 同量级，不放大对端预算）。
+const RESUME_BUDGET: Duration = Duration::from_secs(30);
+
+/// 恢复尝试的本地状态：`challenge_b64` 非空即代表一次进行中的恢复。
+#[derive(Default)]
+struct ResumeAttempt {
+    lease: Option<LeaseContext>,
+    activation_id: Option<String>,
+    challenge_b64: String,
+    confirmed: bool,
+    ready_sent: bool,
+}
+
+impl ResumeAttempt {
+    fn is_active(&self) -> bool {
+        !self.challenge_b64.is_empty()
+    }
+
+    fn reset(&mut self) {
+        *self = Self::default();
+    }
+}
+
+enum ResumeOutcome {
+    Ignored,
+    Progressed,
+    Completed,
+    Failed,
+}
+
+/// 本地单调毫秒（与 B 端 watchdog 同源），用于恢复预算比较。
+fn lane_monotonic_millis() -> u64 {
+    super::relay_runtime::controlled_monotonic_millis()
+}
+
+/// 恢复失败收尾：清空活动上下文并把状态投影为有界错误。
+fn fail_resume(manager: &ControllingDeviceManager, sinks: &mut ControllingLaneSinks<'_>) {
+    let Some(operation) = manager.current_operation() else {
+        return;
+    };
+    if let Ok(status) = manager.fail_connection(operation, PEER_UNAVAILABLE_ERROR) {
+        (sinks.on_status)(&status);
+    }
+}
+
+/// 断线后启动恢复：取旧租约的恢复材料、生成挑战并发出 `controller_resume_prepare`。
+fn begin_resume(
+    lane: &(impl ControllingLane + ?Sized),
+    manager: &ControllingDeviceManager,
+    resume: &mut ResumeAttempt,
+    now_b: u64,
+) -> bool {
+    let Some(operation) = manager.current_operation() else {
+        return false;
+    };
+    let Ok(material) = manager.begin_resume(operation, now_b) else {
+        return false;
+    };
+    let Ok(challenge) = new_resume_challenge() else {
+        return false;
+    };
+    let request_id = format!("request-resume-{}", Uuid::new_v4().simple());
+    let Ok(frame) = build_controller_resume_prepare(
+        &material.lease,
+        ControllerRole::ControllerA,
+        &request_id,
+        &material.resume_token,
+        &challenge,
+        material.original_deadline_b,
+    ) else {
+        return false;
+    };
+    if lane.send_resume_control(frame).is_err() {
+        return false;
+    }
+    resume.lease = Some(material.lease);
+    resume.activation_id = None;
+    resume.challenge_b64 = challenge;
+    resume.confirmed = false;
+    resume.ready_sent = false;
+    true
+}
+
+/// 按 Relay/B 的恢复帧推进本地相位。任何相位不符、对端确认验签失败或
+/// `controller_resumed` 材料不完整都失败关闭。
+fn handle_resume_frame(
+    lane: &(impl ControllingLane + ?Sized),
+    manager: &ControllingDeviceManager,
+    business: &ControllingLaneState,
+    resume: &mut ResumeAttempt,
+    now_b: u64,
+    json: &str,
+) -> ResumeOutcome {
+    let Ok(frame) = serde_json::from_str::<Value>(json) else {
+        return ResumeOutcome::Ignored;
+    };
+    let Some(kind) = frame.get("type").and_then(Value::as_str) else {
+        return ResumeOutcome::Ignored;
+    };
+    let Some(operation) = manager.current_operation() else {
+        return ResumeOutcome::Failed;
+    };
+    let Some(lease) = resume.lease.clone() else {
+        return ResumeOutcome::Failed;
+    };
+    // 审核修复：Relay/A 的恢复帧必须绑定当前租约；旧代际或旧租约的残留帧一律
+    // 丢弃，既不推进相位也不终止候选。
+    if !resume_frame_matches_lease(&lease, &frame) {
+        return ResumeOutcome::Ignored;
+    }
+    let request_id = || format!("request-resume-{}", Uuid::new_v4().simple());
+    match kind {
+        "controller_resume_provisional" => {
+            let Some(activation_id) = frame.get("activation_id").and_then(Value::as_str) else {
+                return ResumeOutcome::Ignored;
+            };
+            if resume.activation_id.is_some() {
+                return ResumeOutcome::Ignored;
+            }
+            if manager
+                .advance_resume(operation, ResumeStep::Provisional { activation_id }, now_b)
+                .is_err()
+            {
+                return ResumeOutcome::Failed;
+            }
+            let Ok(confirm) = business.seal_resume_confirm(&request_id(), activation_id) else {
+                return ResumeOutcome::Failed;
+            };
+            if lane.send_resume_control(confirm).is_err() {
+                return ResumeOutcome::Failed;
+            }
+            resume.activation_id = Some(activation_id.to_owned());
+            ResumeOutcome::Progressed
+        }
+        // B 的确认只用于交叉验证（本地相位由 Relay 的帧推进）。
+        "encrypted_resume_confirm" => match business.open_resume_confirm(&frame) {
+            Ok(()) => ResumeOutcome::Progressed,
+            Err(_) => ResumeOutcome::Ignored,
+        },
+        "controller_resume_activation_pending" => {
+            let Some(activation_id) = frame.get("activation_id").and_then(Value::as_str) else {
+                return ResumeOutcome::Ignored;
+            };
+            if resume.confirmed {
+                return ResumeOutcome::Ignored;
+            }
+            if manager
+                .advance_resume(
+                    operation.clone(),
+                    ResumeStep::Confirmed { activation_id },
+                    now_b,
+                )
+                .is_err()
+            {
+                return ResumeOutcome::Failed;
+            }
+            if manager
+                .advance_resume(
+                    operation,
+                    ResumeStep::ActivationPending { activation_id },
+                    now_b,
+                )
+                .is_err()
+            {
+                return ResumeOutcome::Failed;
+            }
+            resume.confirmed = true;
+            ResumeOutcome::Progressed
+        }
+        "controller_post_activation_liveness_confirmed" => {
+            let Some(activation_id) = frame.get("activation_id").and_then(Value::as_str) else {
+                return ResumeOutcome::Ignored;
+            };
+            let Some(liveness_epoch_b) = frame.get("liveness_epoch_b").and_then(Value::as_str)
+            else {
+                return ResumeOutcome::Ignored;
+            };
+            let Some(heartbeat_sequence_b) =
+                frame.get("heartbeat_sequence_b").and_then(Value::as_str)
+            else {
+                return ResumeOutcome::Ignored;
+            };
+            if resume.ready_sent {
+                return ResumeOutcome::Ignored;
+            }
+            if manager
+                .advance_resume(
+                    operation.clone(),
+                    ResumeStep::LivenessConfirmed { activation_id },
+                    now_b,
+                )
+                .is_err()
+            {
+                return ResumeOutcome::Failed;
+            }
+            let Ok(ready) = build_controller_resume_ready_ack(
+                &lease,
+                ControllerRole::ControllerA,
+                &request_id(),
+                activation_id,
+                liveness_epoch_b,
+                heartbeat_sequence_b,
+            ) else {
+                return ResumeOutcome::Failed;
+            };
+            if lane.send_resume_control(ready).is_err() {
+                return ResumeOutcome::Failed;
+            }
+            // 本端 ready_ack 也是 gate 的最后一步本地相位：只有完成它，
+            // `controller_resumed` 才可能被接受。
+            if manager
+                .advance_resume(
+                    operation,
+                    ResumeStep::ReadyAcknowledged { activation_id },
+                    now_b,
+                )
+                .is_err()
+            {
+                return ResumeOutcome::Failed;
+            }
+            resume.ready_sent = true;
+            ResumeOutcome::Progressed
+        }
+        "controller_resumed" => {
+            if !resume.ready_sent {
+                return ResumeOutcome::Ignored;
+            }
+            let Some(activation_id) = frame.get("activation_id").and_then(Value::as_str) else {
+                return ResumeOutcome::Ignored;
+            };
+            let Some(liveness_epoch_a) = frame.get("liveness_epoch_a").and_then(Value::as_str)
+            else {
+                return ResumeOutcome::Ignored;
+            };
+            let Some(new_token) = frame.get("new_resume_token_b64").and_then(Value::as_str) else {
+                return ResumeOutcome::Ignored;
+            };
+            let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(new_token) else {
+                return ResumeOutcome::Ignored;
+            };
+            let Ok(token) = <[u8; 32]>::try_from(decoded.as_slice()) else {
+                return ResumeOutcome::Ignored;
+            };
+            let Ok(fingerprint) = business.resume_fingerprint(activation_id) else {
+                return ResumeOutcome::Failed;
+            };
+            if manager
+                .complete_resumed(
+                    operation,
+                    activation_id,
+                    now_b,
+                    liveness_epoch_a,
+                    token,
+                    fingerprint,
+                    RESUME_BUDGET.as_millis() as u64,
+                )
+                .is_err()
+            {
+                return ResumeOutcome::Failed;
+            }
+            business.activate();
+            ResumeOutcome::Completed
+        }
+        "error" => ResumeOutcome::Failed,
+        _ => ResumeOutcome::Ignored,
     }
 }
 
@@ -854,13 +1183,16 @@ mod tests {
     use std::cell::RefCell;
     use std::collections::VecDeque;
 
+    use base64::Engine as _;
+    use serde_json::json;
+
     use super::*;
     use crate::features::remote_control::controller::controlled_handshake::ControlledHandshake;
     use crate::features::remote_control::controller::crypto::AuthenticatedRelayTrustConfig;
     use crate::features::remote_control::controller::relay_transport::transport_channels;
     use crate::features::remote_control::controller::test_support::{
         PairingFixture, encode, lease_context, paired_session_keys, pairing_fixture, signed_relay,
-        signed_reservation,
+        role_session_keys, signed_reservation,
     };
     use crate::features::remote_control::controller::encrypted_lane::EncryptedLane;
 
@@ -950,14 +1282,35 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
     struct TestLane {
         events: VecDeque<ControllerLaneEvent>,
+        /// E2E-06：恢复族出站帧（prepare/confirm/ready_ack）的记录口。
+        resume_frames: Arc<std::sync::Mutex<Vec<Value>>>,
+    }
+
+    impl TestLane {
+        fn with_events(events: Vec<ControllerLaneEvent>) -> Self {
+            Self {
+                events: VecDeque::from(events),
+                ..Self::default()
+            }
+        }
+
+        fn resume_frames(&self) -> Vec<Value> {
+            self.resume_frames.lock().unwrap().clone()
+        }
     }
 
     #[async_trait::async_trait]
     impl ControllingLane for TestLane {
         async fn next_lane_event(&mut self) -> Option<ControllerLaneEvent> {
             self.events.pop_front()
+        }
+
+        fn send_resume_control(&self, message: Value) -> Result<(), String> {
+            self.resume_frames.lock().unwrap().push(message);
+            Ok(())
         }
     }
 
@@ -1263,6 +1616,7 @@ mod tests {
                 ControllerLaneEvent::Disconnected,
                 ControllerLaneEvent::Frame("{}".to_owned()),
             ]),
+            ..TestLane::default()
         };
         let mut statuses = Vec::new();
         let sessions = ControllingSessionManager::default();
@@ -1294,10 +1648,458 @@ mod tests {
         assert!(sessions_seen.is_empty());
         assert!(tasks_seen.is_empty());
         assert!(journal_seen.is_empty());
+        let frames = lane.resume_frames();
+        assert_eq!(frames.len(), 1, "断线后必须发出恢复准备帧");
+        assert_eq!(frames[0]["type"], "controller_resume_prepare");
+        assert_eq!(frames[0]["sender_role"], "A");
+        assert_eq!(frames[0]["original_deadline_ms"], "30000");
+        assert!(
+            !frames[0].to_string().contains("resume_token_b64\":\"[7, 7"),
+            "恢复令牌必须以 base64 传输而不是调试形式"
+        );
         assert_eq!(
             projection(&manager.status())["status"],
             "reconnecting",
             "断线后不能继续声称 connected"
+        );
+    }
+
+    /// E2E-08：完整旅程——连接 → 能力快照 → 普通文本任务（A 构造并封帧、B 解封
+    /// 校验）→ 权威 journal 正文与终态回流到 A → 显式断开 → 断开后旧 generation
+    /// 的残留帧一律丢弃、业务通道不再可用。
+    ///
+    /// B 侧真实的接纳/执行由 DEV-13 的服务用例覆盖；本用例聚焦「一条旅程里各段
+    /// 状态是否互相衔接」，因此 B 的回应帧按冻结形状直接产出。
+    #[tokio::test]
+    async fn full_journey_connect_snapshot_task_text_and_disconnect_drops_stale_frames() {
+        let manager = ControllingDeviceManager::default();
+        let operation = manager.connect("234-4567").unwrap();
+        manager.complete_reserved(operation.clone()).unwrap();
+        let PairingFixture {
+            reservation,
+            a_keys,
+            b_keys,
+            ..
+        } = pairing_fixture("relay-key-service-journey");
+        let (a_session, b_session) = paired_session_keys(a_keys, b_keys, &reservation);
+        let lease = lease_context(&reservation);
+        manager
+            .complete_connected(
+                operation,
+                ControllerLease {
+                    context: lease.clone(),
+                    device_display_name: DEVICE_DISPLAY_NAME_PLACEHOLDER.to_owned(),
+                    liveness_epoch_a: "liveness-epoch-a-0001".into(),
+                    resume_deadline_b: 30_000,
+                    resume_token: [7_u8; 32],
+                    transport_key_fingerprint: [9_u8; 32],
+                    negotiated_capabilities: vec![
+                        "encrypted_frames_v1".into(),
+                        "pairing_v1".into(),
+                        "snapshot_journal_v1".into(),
+                        "task_v1".into(),
+                    ],
+                },
+            )
+            .unwrap();
+        let business = ControllingLaneState::default();
+        business
+            .install(HandshakeRole::A, &lease, a_session)
+            .unwrap();
+        let capabilities = vec![
+            "encrypted_frames_v1".to_owned(),
+            "pairing_v1".to_owned(),
+            "snapshot_journal_v1".to_owned(),
+            "task_v1".to_owned(),
+        ];
+        let sessions = ControllingSessionManager::default();
+        let session = sessions
+            .open(None, "Session", "chat", &lease, &capabilities)
+            .unwrap();
+        // 旅程第 2 段：B 的能力快照先落到 A 的会话状态（任务意图需要能力 revision）。
+        sessions
+            .apply_capability_snapshot(
+                &session.session_ref,
+                &json!({
+                    "v": 1,
+                    "type": "capability_snapshot",
+                    "connection_id": lease.connection_id,
+                    "controller_lease_id": lease.controller_lease_id,
+                    "lease_epoch": lease.lease_epoch,
+                    "relay_epoch": lease.relay_epoch,
+                    "remote_control_generation": lease.remote_control_generation,
+                    "request_id": "request-snapshot-1",
+                    "capability_revision": "4",
+                    "expires_at_ms": "30000",
+                    "modes": ["chat"],
+                    "tools": [],
+                    "skills": [],
+                    "workspaces": [],
+                }),
+                &lease,
+            )
+            .unwrap();
+
+        // A → B：真实任务意图（冻结 payload）封帧后必须能被 B 解封并校验。
+        let intent = sessions
+            .task_intent(&session.session_ref, "hello from A", &lease)
+            .unwrap();
+        let submit_frame = business
+            .seal("task_submit", &intent.payload, &capabilities)
+            .unwrap();
+        let mut responder = EncryptedLane::new(HandshakeRole::B, &lease, b_session).unwrap();
+        let (kind, payload) = responder.open(&submit_frame, &capabilities).unwrap();
+        assert_eq!(kind, "task_submit");
+        assert_eq!(payload["type"], "task_submit");
+        assert_eq!(payload["input"]["text"], "hello from A");
+
+        // B → A：能力快照、终态与正文（journal_event）。
+        let snapshot_frame = responder
+            .seal(
+                "capability_snapshot",
+                &json!({
+                    "v": 1,
+                    "type": "capability_snapshot",
+                    "connection_id": lease.connection_id,
+                    "controller_lease_id": lease.controller_lease_id,
+                    "lease_epoch": lease.lease_epoch,
+                    "relay_epoch": lease.relay_epoch,
+                    "remote_control_generation": lease.remote_control_generation,
+                    "request_id": "request-snapshot-1",
+                    "capability_revision": "4",
+                    "expires_at_ms": "30000",
+                    "modes": ["chat"],
+                    "tools": [],
+                    "skills": [],
+                    "workspaces": [],
+                }),
+                &capabilities,
+            )
+            .unwrap();
+        let status_frame = responder
+            .seal(
+                "task_status",
+                &json!({
+                    "v": 1,
+                    "type": "task_status",
+                    "connection_id": lease.connection_id,
+                    "controller_lease_id": lease.controller_lease_id,
+                    "lease_epoch": lease.lease_epoch,
+                    "relay_epoch": lease.relay_epoch,
+                    "remote_control_generation": lease.remote_control_generation,
+                    "request_id": "request-status-1",
+                    "task_id": intent.task_id.clone().unwrap_or_default(),
+                    "session_id": session.session_id,
+                    "task_status": "succeeded",
+                    "result_digest": "0".repeat(64),
+                }),
+                &capabilities,
+            )
+            .unwrap();
+        let text_event = JournalEvent {
+            event_id: "event-0001".to_owned(),
+            epoch: "epoch-1".to_owned(),
+            sequence: 1,
+            kind: "assistant_delta".to_owned(),
+            session_id: session.session_id.clone(),
+            task_id: intent.task_id.clone(),
+            terminal_status: None,
+            payload: json!({"text": "hello from B"}),
+        };
+        let raw = serde_json::to_vec(&text_event).unwrap();
+        let text_frame = responder
+            .seal(
+                "journal_event",
+                &json!({
+                    "v": 1,
+                    "type": "journal_event",
+                    "connection_id": lease.connection_id,
+                    "controller_lease_id": lease.controller_lease_id,
+                    "lease_epoch": lease.lease_epoch,
+                    "relay_epoch": lease.relay_epoch,
+                    "remote_control_generation": lease.remote_control_generation,
+                    "session_id": text_event.session_id,
+                    "journal_epoch": text_event.epoch,
+                    "event_sequence": text_event.sequence.to_string(),
+                    "event_kind": text_event.kind,
+                    "event_b64": base64::engine::general_purpose::STANDARD.encode(&raw),
+                    "event_bytes": raw.len().to_string(),
+                }),
+                &capabilities,
+            )
+            .unwrap();
+
+        let mut lane = TestLane::with_events(vec![
+            ControllerLaneEvent::Frame(snapshot_frame.to_string()),
+            ControllerLaneEvent::Frame(status_frame.to_string()),
+            ControllerLaneEvent::Frame(text_frame.to_string()),
+        ]);
+        let mut session_projections = Vec::new();
+        let mut task_events = Vec::new();
+        let mut journal_seen: Vec<JournalEvent> = Vec::new();
+        let mut on_status = |_: &ControllingStatus| {};
+        let mut on_session = |projection: &ControllingSessionProjection| {
+            session_projections.push(projection.capability_revision);
+        };
+        let mut on_task = |event: Value| task_events.push(event);
+        let mut on_journal = |event: &JournalEvent| journal_seen.push(event.clone());
+        let mut on_snapshot = |_: &JournalSnapshot| {};
+        let mut on_liveness = |_: Value| {};
+        let mut sinks = ControllingLaneSinks {
+            on_status: &mut on_status,
+            on_session: &mut on_session,
+            on_task: &mut on_task,
+            on_journal: &mut on_journal,
+            on_snapshot: &mut on_snapshot,
+            on_liveness: &mut on_liveness,
+        };
+        serve_controlling_lane(&mut lane, &manager, &sessions, &business, &mut sinks).await;
+        assert_eq!(session_projections, vec![Some(4)], "能力快照必须落到会话状态");
+        assert_eq!(task_events.len(), 1);
+        assert_eq!(task_events[0]["status"], "succeeded");
+        assert_eq!(task_events[0]["sessionId"], session.session_id);
+        assert_eq!(journal_seen.len(), 1);
+        assert_eq!(journal_seen[0].payload["text"], "hello from B");
+
+        // 显式断开：本地回到 disconnected，业务通道被清空。
+        let status = manager.disconnect();
+        business.clear();
+        assert_eq!(projection(&status)["status"], "disconnected");
+        assert!(!business.is_installed());
+
+        // 断开后即使旧 generation 的残留帧到达，也不得产生任何投影。
+        let mut foreign_lease = lease.clone();
+        foreign_lease.remote_control_generation = "generation-other".into();
+        let mut foreign = EncryptedLane::new(
+            HandshakeRole::B,
+            &foreign_lease,
+            responder_session(&foreign_lease),
+        )
+        .unwrap();
+        let stale = foreign
+            .seal(
+                "task_status",
+                &json!({
+                    "v": 1,
+                    "type": "task_status",
+                    "connection_id": foreign_lease.connection_id,
+                    "controller_lease_id": foreign_lease.controller_lease_id,
+                    "lease_epoch": foreign_lease.lease_epoch,
+                    "relay_epoch": foreign_lease.relay_epoch,
+                    "remote_control_generation": foreign_lease.remote_control_generation,
+                    "request_id": "request-status-2",
+                    "task_id": "task-0001",
+                    "session_id": session.session_id,
+                    "task_status": "succeeded",
+                    "result_digest": "0".repeat(64),
+                }),
+                &capabilities,
+            )
+            .unwrap();
+        let mut stale_lane =
+            TestLane::with_events(vec![ControllerLaneEvent::Frame(stale.to_string())]);
+        let seen_before = task_events.len();
+        let mut stale_status = |_: &ControllingStatus| {};
+        let mut stale_session = |_: &ControllingSessionProjection| {};
+        let mut stale_task = |event: Value| task_events.push(event);
+        let mut stale_journal = |_: &JournalEvent| {};
+        let mut stale_snapshot = |_: &JournalSnapshot| {};
+        let mut stale_liveness = |_: Value| {};
+        let mut stale_sinks = ControllingLaneSinks {
+            on_status: &mut stale_status,
+            on_session: &mut stale_session,
+            on_task: &mut stale_task,
+            on_journal: &mut stale_journal,
+            on_snapshot: &mut stale_snapshot,
+            on_liveness: &mut stale_liveness,
+        };
+        serve_controlling_lane(
+            &mut stale_lane,
+            &manager,
+            &sessions,
+            &business,
+            &mut stale_sinks,
+        )
+        .await;
+        assert_eq!(task_events.len(), seen_before, "断开后的残留帧不得产生任务投影");
+        assert_eq!(journal_seen.len(), 1, "断开后的残留帧不得产生正文投影");
+    }
+
+    /// E2E-06：A 端按 Relay/B 的帧顺序完成整条恢复序列：prepare → provisional →
+    /// (对端 confirm) → activation_pending → post_activation_liveness_confirmed →
+    /// ready_ack → resumed，且业务闸门在 resumed 之前始终关闭。
+    #[tokio::test]
+    async fn resume_sequence_reopens_business_only_after_controller_resumed() {
+        let manager = ControllingDeviceManager::default();
+        let operation = manager.connect("234-4567").unwrap();
+        manager.complete_reserved(operation.clone()).unwrap();
+        manager
+            .complete_connected(
+                operation,
+                ControllerLease {
+                    context: LeaseContext {
+                        connection_id: "connection-0001".into(),
+                        controller_lease_id: "controller-lease-0001".into(),
+                        lease_epoch: "1".into(),
+                        relay_epoch: "epoch-test-1".into(),
+                        remote_control_generation: "generation-0001".into(),
+                    },
+                    device_display_name: DEVICE_DISPLAY_NAME_PLACEHOLDER.to_owned(),
+                    liveness_epoch_a: "liveness-epoch-a-0001".into(),
+                    resume_deadline_b: 30_000,
+                    resume_token: [7_u8; 32],
+                    transport_key_fingerprint: [9_u8; 32],
+                    negotiated_capabilities: vec![
+                        "encrypted_frames_v1".into(),
+                        "pairing_v1".into(),
+                        "resume_v1".into(),
+                        "task_v1".into(),
+                    ],
+                },
+            )
+            .unwrap();
+        let lease = manager.live_lease().unwrap();
+        let sessions = ControllingSessionManager::default();
+        let business = ControllingLaneState::default();
+        // 安装真实加密通道：恢复确认与 resumed 后的业务帧都走同一条通道。
+        let PairingFixture {
+            reservation,
+            a_keys,
+            b_keys,
+            ..
+        } = pairing_fixture("relay-key-service-resume");
+        let session = role_session_keys(
+            HandshakeRole::A,
+            a_keys,
+            b_keys.public_key().to_bytes(),
+            &reservation,
+        );
+        let lane_lease = LeaseContext {
+            connection_id: lease.connection_id.clone(),
+            controller_lease_id: lease.controller_lease_id.clone(),
+            lease_epoch: lease.lease_epoch.clone(),
+            relay_epoch: lease.relay_epoch.clone(),
+            remote_control_generation: lease.remote_control_generation.clone(),
+        };
+        business
+            .install(HandshakeRole::A, &lane_lease, session)
+            .unwrap();
+
+        let mut lane = TestLane::with_events(vec![
+            ControllerLaneEvent::Disconnected,
+            ControllerLaneEvent::Frame(
+                json!({
+                    "v": 1,
+                    "type": "controller_resume_provisional",
+                    "activation_id": "activation-0001",
+                    "original_deadline_ms": "30000",
+                    "connection_id": lane_lease.connection_id,
+                    "controller_lease_id": lane_lease.controller_lease_id,
+                    "lease_epoch": lane_lease.lease_epoch,
+                    "relay_epoch": lane_lease.relay_epoch,
+                    "remote_control_generation": lane_lease.remote_control_generation,
+                })
+                .to_string(),
+            ),
+            ControllerLaneEvent::Frame(
+                json!({
+                    "v": 1,
+                    "type": "controller_resume_activation_pending",
+                    "activation_id": "activation-0001",
+                    "original_deadline_ms": "30000",
+                    "connection_id": lane_lease.connection_id,
+                    "controller_lease_id": lane_lease.controller_lease_id,
+                    "lease_epoch": lane_lease.lease_epoch,
+                    "relay_epoch": lane_lease.relay_epoch,
+                    "remote_control_generation": lane_lease.remote_control_generation,
+                })
+                .to_string(),
+            ),
+            ControllerLaneEvent::Frame(
+                json!({
+                    "v": 1,
+                    "type": "controller_post_activation_liveness_confirmed",
+                    "activation_id": "activation-0001",
+                    "liveness_epoch_b": "live-b-2",
+                    "heartbeat_sequence_b": "1",
+                    "connection_id": lane_lease.connection_id,
+                    "controller_lease_id": lane_lease.controller_lease_id,
+                    "lease_epoch": lane_lease.lease_epoch,
+                    "relay_epoch": lane_lease.relay_epoch,
+                    "remote_control_generation": lane_lease.remote_control_generation,
+                })
+                .to_string(),
+            ),
+            ControllerLaneEvent::Frame(
+                json!({
+                    "v": 1,
+                    "type": "controller_resumed",
+                    "activation_id": "activation-0001",
+                    "liveness_epoch_a": "live-a-2",
+                    "liveness_epoch_b": "live-b-2",
+                    "new_resume_token_b64": base64::engine::general_purpose::STANDARD.encode([3_u8; 32]),
+                    "connection_id": lane_lease.connection_id,
+                    "controller_lease_id": lane_lease.controller_lease_id,
+                    "lease_epoch": lane_lease.lease_epoch,
+                    "relay_epoch": lane_lease.relay_epoch,
+                    "remote_control_generation": lane_lease.remote_control_generation,
+                })
+                .to_string(),
+            ),
+        ]);
+        let mut statuses: Vec<String> = Vec::new();
+        let mut on_status = |status: &ControllingStatus| {
+            statuses.push(projection(status)["status"].as_str().unwrap().to_owned());
+        };
+        let mut on_session = |_: &ControllingSessionProjection| {};
+        let mut on_task = |_: Value| {};
+        let mut on_journal = |_: &JournalEvent| {};
+        let mut on_snapshot = |_: &JournalSnapshot| {};
+        let mut on_liveness = |_: Value| {};
+        let mut sinks = ControllingLaneSinks {
+            on_status: &mut on_status,
+            on_session: &mut on_session,
+            on_task: &mut on_task,
+            on_journal: &mut on_journal,
+            on_snapshot: &mut on_snapshot,
+            on_liveness: &mut on_liveness,
+        };
+        serve_controlling_lane(&mut lane, &manager, &sessions, &business, &mut sinks).await;
+
+        let frames = lane.resume_frames();
+        let kinds: Vec<&str> = frames
+            .iter()
+            .filter_map(|frame| frame.get("type").and_then(Value::as_str))
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![
+                "controller_resume_prepare",
+                "encrypted_resume_confirm",
+                "controller_resume_ready_ack",
+            ],
+            "恢复必须按冻结顺序发出 prepare/confirm/ready_ack"
+        );
+        assert_eq!(frames[2]["liveness_epoch_b"], "live-b-2");
+        assert_eq!(
+            statuses,
+            vec!["reconnecting".to_owned()],
+            "恢复成功不产生错误投影"
+        );
+        assert_eq!(
+            projection(&manager.status())["status"],
+            "connected",
+            "controller_resumed 之后必须回到 connected"
+        );
+        assert_eq!(
+            manager.live_liveness_epoch().as_deref(),
+            Some("live-a-2"),
+            "恢复必须采用 Relay 下发的 A 端 liveness epoch"
+        );
+        assert!(!business.is_suspended(), "恢复后业务通道必须重新打开");
+        assert!(
+            manager.send_resume_control(&json!({})).is_err(),
+            "非恢复族的帧不得走恢复敏感队列"
         );
     }
 
@@ -1448,6 +2250,7 @@ mod tests {
                 ControllerLaneEvent::Frame(foreign.to_string()),
                 ControllerLaneEvent::Frame(status_frame.to_string()),
             ]),
+            ..TestLane::default()
         };
         let mut statuses = Vec::new();
         let mut session_projections = Vec::new();
@@ -1707,6 +2510,7 @@ mod tests {
                 ControllerLaneEvent::Frame(response_frame.to_string()),
                 ControllerLaneEvent::Frame(journal_frame.to_string()),
             ]),
+            ..TestLane::default()
         };
         let mut task_events = Vec::new();
         let mut session_projections = Vec::new();
@@ -1840,6 +2644,7 @@ mod tests {
                 ControllerLaneEvent::Frame(bad_base.to_string()),
                 ControllerLaneEvent::Frame(good.to_string()),
             ]),
+            ..TestLane::default()
         };
         let mut snapshots_seen: Vec<JournalSnapshot> = Vec::new();
         let mut on_status = |_: &ControllingStatus| {};

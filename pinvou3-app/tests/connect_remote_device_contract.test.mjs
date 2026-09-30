@@ -34,6 +34,8 @@ test('every service failure maps to one shared copy key', () => {
     'controller_busy', 'desktop_controller_active', 'desktop_controller_pending',
     'endpoint_not_found', 'controller_offline', 'pairing_code_invalid', 'pairing_expired',
     'protocol_version_unsupported', 'unsupported_capability', 'anything_else',
+    // E2E-07：A 端连接链路自己的有界码也必须有专属文案。
+    'endpoint_offline', 'invalid_message',
   ]) {
     const key = connectionErrorKey(code);
     keys.add(key);
@@ -42,8 +44,10 @@ test('every service failure maps to one shared copy key', () => {
     assert.ok(dict.ja.controllerConnection[key], `copy key ${key} must exist`);
   }
   // Distinct server reasons collapse onto a small bounded set of copy keys.
-  assert.ok(keys.size <= 4);
+  assert.ok(keys.size <= 6);
   assert.equal(connectionErrorKey('endpoint_not_found'), connectionErrorKey('pairing_expired'));
+  assert.equal(connectionErrorKey('endpoint_offline'), 'errorOffline');
+  assert.equal(connectionErrorKey('invalid_message'), 'errorProtocol');
 });
 
 test('the dialog never persists or replays a code', () => {

@@ -11,10 +11,14 @@
 use base64::Engine as _;
 use parking_lot::Mutex;
 use serde_json::{Value, json};
+use std::sync::atomic::{AtomicBool, Ordering};
 
-use super::crypto::{ControllerRole, FrameDirection, LeaseBinding, SendCipher, ReceiveCipher, SessionKeys};
+use super::crypto::{
+    ControllerRole, FrameDirection, LeaseBinding, ReceiveCipher, ResumeConfirmCipher, SendCipher,
+    SessionKeys,
+};
 use super::protocol::{
-    MAX_ENCRYPTED_WIRE_BYTES, RuntimeValidationContext, SenderRole,
+    MAX_ENCRYPTED_WIRE_BYTES, RuntimeValidationContext, SenderRole, validate_controller_message_json,
     validate_controller_runtime_message_json, validate_controller_runtime_payload_json,
 };
 
@@ -48,6 +52,7 @@ pub(crate) struct EncryptedLane {
     send: SendCipher,
     receive: ReceiveCipher,
     liveness: super::crypto::LivenessCipher,
+    resume_confirm: ResumeConfirmCipher,
     sequence: u64,
 }
 
@@ -79,8 +84,104 @@ impl EncryptedLane {
             send: ciphers.send,
             receive: ciphers.receive,
             liveness: ciphers.liveness_a,
+            resume_confirm: ciphers.resume_confirm,
             sequence: 0,
         })
+    }
+
+    /// E2E-06：把恢复确认封成冻结的 `encrypted_resume_confirm` 信封。恢复发生在
+    /// 旧上下文里，因此该帧不受「业务通道挂起」影响（挂起只关业务与存活帧）。
+    pub(crate) fn seal_resume_confirm(
+        &self,
+        request_id: &str,
+        activation_id: &str,
+    ) -> Result<Value, LaneFailure> {
+        let sealed = self
+            .resume_confirm
+            .seal(activation_id)
+            .map_err(|_| LaneFailure::Invalid)?;
+        let frame = json!({
+            "v": 1,
+            "type": "encrypted_resume_confirm",
+            "request_id": request_id,
+            "connection_id": self.lease.connection_id,
+            "controller_lease_id": self.lease.controller_lease_id,
+            "lease_epoch": self.lease.lease_epoch,
+            "relay_epoch": self.lease.relay_epoch,
+            "remote_control_generation": self.lease.remote_control_generation,
+            "activation_id": activation_id,
+            "sender_role": role_wire(self.role),
+            "ciphertext_b64": base64::engine::general_purpose::STANDARD.encode(&sealed),
+            "ciphertext_bytes": sealed.len().to_string(),
+        });
+        validate_controller_message_json(&frame.to_string(), self.sender_role())
+            .map_err(map_validation_failure)?;
+        Ok(frame)
+    }
+
+    /// E2E-06：校验并解封对端的恢复确认；只确认「对端仍持有旧的 resume 秘密」，
+    /// 不返回任何材料。租约不符、activation 不符、角色不符或篡改一律失败关闭。
+    pub(crate) fn open_resume_confirm(&self, frame: &Value) -> Result<(), LaneFailure> {
+        if frame.get("type").and_then(Value::as_str) != Some("encrypted_resume_confirm") {
+            return Err(LaneFailure::Invalid);
+        }
+        let validated = validate_controller_message_json(&frame.to_string(), self.peer_role())
+            .map_err(map_validation_failure)?;
+        if validated.get("sender_role").and_then(Value::as_str)
+            != Some(role_wire(self.peer_controller_role()))
+        {
+            return Err(LaneFailure::Invalid);
+        }
+        for (field, expected) in [
+            ("connection_id", self.lease.connection_id.as_str()),
+            (
+                "controller_lease_id",
+                self.lease.controller_lease_id.as_str(),
+            ),
+            ("lease_epoch", self.lease.lease_epoch.as_str()),
+            ("relay_epoch", self.lease.relay_epoch.as_str()),
+            (
+                "remote_control_generation",
+                self.lease.remote_control_generation.as_str(),
+            ),
+        ] {
+            if validated.get(field).and_then(Value::as_str) != Some(expected) {
+                return Err(LaneFailure::Invalid);
+            }
+        }
+        let activation_id = validated
+            .get("activation_id")
+            .and_then(Value::as_str)
+            .ok_or(LaneFailure::Invalid)?;
+        let sealed = base64::engine::general_purpose::STANDARD
+            .decode(
+                validated
+                    .get("ciphertext_b64")
+                    .and_then(Value::as_str)
+                    .ok_or(LaneFailure::Invalid)?,
+            )
+            .map_err(|_| LaneFailure::Invalid)?;
+        let declared = validated
+            .get("ciphertext_bytes")
+            .and_then(Value::as_str)
+            .and_then(|value| value.parse::<u64>().ok())
+            .ok_or(LaneFailure::Invalid)?;
+        if sealed.len() as u64 != declared {
+            return Err(LaneFailure::Invalid);
+        }
+        self.resume_confirm
+            .open(self.peer_controller_role(), activation_id, &sealed)
+            .map_err(|_| LaneFailure::Invalid)
+    }
+
+    /// E2E-06：恢复完成后轮换 resume gate 的传输指纹（两侧各自计算本端值）。
+    pub(crate) fn resume_fingerprint(
+        &self,
+        activation_id: &str,
+    ) -> Result<[u8; 32], LaneFailure> {
+        self.resume_confirm
+            .fingerprint(activation_id)
+            .map_err(|_| LaneFailure::Invalid)
     }
 
     /// E2E-06：A 端把 `controller_liveness_a` 明文封进
@@ -302,6 +403,13 @@ impl EncryptedLane {
         }
     }
 
+    fn peer_controller_role(&self) -> ControllerRole {
+        match self.role {
+            ControllerRole::A => ControllerRole::B,
+            ControllerRole::B => ControllerRole::A,
+        }
+    }
+
     fn runtime_context(&self, negotiated_capabilities: &[String]) -> RuntimeValidationContext {
         RuntimeValidationContext {
             lease: Some(self.lease.clone()),
@@ -318,6 +426,14 @@ fn uint_field(value: &Value, field: &'static str) -> Result<u64, LaneFailure> {
         .ok_or(LaneFailure::Invalid)
 }
 
+/// 协议 `sender_role` 字段的线格式（crypto 的角色 `wire()` 不对外可见）。
+fn role_wire(role: ControllerRole) -> &'static str {
+    match role {
+        ControllerRole::A => "A",
+        ControllerRole::B => "B",
+    }
+}
+
 fn map_validation_failure(error: super::protocol::ControllerProtocolError) -> LaneFailure {
     match error.code {
         "message_too_large" | "plaintext_too_large" => LaneFailure::TooLarge,
@@ -329,6 +445,10 @@ fn map_validation_failure(error: super::protocol::ControllerProtocolError) -> La
 #[derive(Default)]
 struct LaneStore {
     lane: Mutex<Option<EncryptedLane>>,
+    /// E2E-06：断线恢复期间业务与存活帧挂起，但**保留**通道与密钥材料——
+    /// resume 复用同一个 lease（lease_epoch 不变），确认帧与恢复后的业务帧都
+    /// 需要旧上下文。恢复失败或显式断开时才 `clear()`。
+    suspended: AtomicBool,
 }
 
 impl LaneStore {
@@ -341,15 +461,33 @@ impl LaneStore {
     ) -> Result<(), LaneFailure> {
         let lane = EncryptedLane::new(role, lease, session)?;
         *self.lane.lock() = Some(lane);
+        self.suspended.store(false, Ordering::SeqCst);
         Ok(())
     }
 
     pub(crate) fn clear(&self) {
         *self.lane.lock() = None;
+        self.suspended.store(false, Ordering::SeqCst);
     }
 
     pub(crate) fn is_installed(&self) -> bool {
         self.lane.lock().is_some()
+    }
+
+    /// 断线进入恢复流程：业务与存活帧失败关闭，但保留通道材料。
+    pub(crate) fn suspend(&self) {
+        if self.is_installed() {
+            self.suspended.store(true, Ordering::SeqCst);
+        }
+    }
+
+    /// `controller_resumed` 之后重新打开业务闸门。
+    pub(crate) fn activate(&self) {
+        self.suspended.store(false, Ordering::SeqCst);
+    }
+
+    pub(crate) fn is_suspended(&self) -> bool {
+        self.suspended.load(Ordering::SeqCst)
     }
 
     /// 加密业务载荷；通道未安装（或已被清理）时失败关闭。
@@ -359,6 +497,9 @@ impl LaneStore {
         payload: &Value,
         negotiated_capabilities: &[String],
     ) -> Result<Value, LaneFailure> {
+        if self.suspended.load(Ordering::SeqCst) {
+            return Err(LaneFailure::Invalid);
+        }
         let mut guard = self.lane.lock();
         let lane = guard.as_mut().ok_or(LaneFailure::Invalid)?;
         lane.seal(payload_kind, payload, negotiated_capabilities)
@@ -369,9 +510,61 @@ impl LaneStore {
         frame: &Value,
         negotiated_capabilities: &[String],
     ) -> Result<(String, Value), LaneFailure> {
+        if self.suspended.load(Ordering::SeqCst) {
+            return Err(LaneFailure::Invalid);
+        }
         let mut guard = self.lane.lock();
         let lane = guard.as_mut().ok_or(LaneFailure::Invalid)?;
         lane.open(frame, negotiated_capabilities)
+    }
+
+    /// E2E-06：存活帧与业务帧同闸门（恢复期间不接受挑战应答）。
+    pub(crate) fn seal_liveness(
+        &self,
+        inner: &Value,
+        negotiated_capabilities: &[String],
+    ) -> Result<Value, LaneFailure> {
+        if self.suspended.load(Ordering::SeqCst) {
+            return Err(LaneFailure::Invalid);
+        }
+        let guard = self.lane.lock();
+        let lane = guard.as_ref().ok_or(LaneFailure::Invalid)?;
+        lane.seal_liveness(inner, negotiated_capabilities)
+    }
+
+    pub(crate) fn open_liveness(&self, frame: &Value) -> Result<Value, LaneFailure> {
+        if self.suspended.load(Ordering::SeqCst) {
+            return Err(LaneFailure::Invalid);
+        }
+        let guard = self.lane.lock();
+        let lane = guard.as_ref().ok_or(LaneFailure::Invalid)?;
+        lane.open_liveness(frame)
+    }
+
+    /// E2E-06：恢复确认不受挂起影响，但仍要求通道已安装。
+    pub(crate) fn seal_resume_confirm(
+        &self,
+        request_id: &str,
+        activation_id: &str,
+    ) -> Result<Value, LaneFailure> {
+        let guard = self.lane.lock();
+        let lane = guard.as_ref().ok_or(LaneFailure::Invalid)?;
+        lane.seal_resume_confirm(request_id, activation_id)
+    }
+
+    pub(crate) fn open_resume_confirm(&self, frame: &Value) -> Result<(), LaneFailure> {
+        let guard = self.lane.lock();
+        let lane = guard.as_ref().ok_or(LaneFailure::Invalid)?;
+        lane.open_resume_confirm(frame)
+    }
+
+    pub(crate) fn resume_fingerprint(
+        &self,
+        activation_id: &str,
+    ) -> Result<[u8; 32], LaneFailure> {
+        let guard = self.lane.lock();
+        let lane = guard.as_ref().ok_or(LaneFailure::Invalid)?;
+        lane.resume_fingerprint(activation_id)
     }
 }
 
@@ -403,6 +596,20 @@ macro_rules! lane_state {
                 self.store.is_installed()
             }
 
+            /// E2E-06：断线进入恢复流程（保留密钥材料，业务/存活帧挂起）。
+            pub(crate) fn suspend(&self) {
+                self.store.suspend()
+            }
+
+            /// E2E-06：`controller_resumed` 之后重新打开业务闸门。
+            pub(crate) fn activate(&self) {
+                self.store.activate()
+            }
+
+            pub(crate) fn is_suspended(&self) -> bool {
+                self.store.is_suspended()
+            }
+
             pub(crate) fn seal(
                 &self,
                 payload_kind: &str,
@@ -426,15 +633,31 @@ macro_rules! lane_state {
                 inner: &Value,
                 negotiated_capabilities: &[String],
             ) -> Result<Value, LaneFailure> {
-                let guard = self.store.lane.lock();
-                let lane = guard.as_ref().ok_or(LaneFailure::Invalid)?;
-                lane.seal_liveness(inner, negotiated_capabilities)
+                self.store.seal_liveness(inner, negotiated_capabilities)
             }
 
             pub(crate) fn open_liveness(&self, frame: &Value) -> Result<Value, LaneFailure> {
-                let guard = self.store.lane.lock();
-                let lane = guard.as_ref().ok_or(LaneFailure::Invalid)?;
-                lane.open_liveness(frame)
+                self.store.open_liveness(frame)
+            }
+
+            /// E2E-06：恢复确认（旧上下文，不受挂起影响）。
+            pub(crate) fn seal_resume_confirm(
+                &self,
+                request_id: &str,
+                activation_id: &str,
+            ) -> Result<Value, LaneFailure> {
+                self.store.seal_resume_confirm(request_id, activation_id)
+            }
+
+            pub(crate) fn open_resume_confirm(&self, frame: &Value) -> Result<(), LaneFailure> {
+                self.store.open_resume_confirm(frame)
+            }
+
+            pub(crate) fn resume_fingerprint(
+                &self,
+                activation_id: &str,
+            ) -> Result<[u8; 32], LaneFailure> {
+                self.store.resume_fingerprint(activation_id)
             }
         }
     };
@@ -699,6 +922,96 @@ mod tests {
         wrong_inner["type"] = json!("controller_liveness");
         assert_eq!(
             a.seal_liveness(&wrong_inner, &capabilities()).unwrap_err(),
+            LaneFailure::Invalid
+        );
+    }
+
+    /// E2E-06：恢复期间业务与存活帧挂起（但保留材料），确认帧照常可用；
+    /// `activate` 后业务帧恢复，`clear` 则彻底丢弃材料。
+    #[test]
+    fn suspended_lane_blocks_business_and_liveness_but_keeps_resume_material() {
+        let PairingFixture {
+            reservation,
+            a_keys,
+            b_keys,
+            ..
+        } = pairing_fixture("relay-key-suspend");
+        let (a_session, b_session) = paired_session_keys(a_keys, b_keys, &reservation);
+        let lease = lease_context(&reservation);
+        let a_state = ControllingLaneState::default();
+        let b_state = ControlledLaneState::default();
+        a_state
+            .install(ControllerRole::A, &lease, a_session)
+            .unwrap();
+        b_state
+            .install(ControllerRole::B, &lease, b_session)
+            .unwrap();
+
+        let payload = task_submit_payload(&lease);
+        let frame = a_state
+            .seal("task_submit", &payload, &capabilities())
+            .unwrap();
+        b_state.open(&frame, &capabilities()).unwrap();
+
+        // 断线：业务与存活帧挂起，但通道与密钥材料保留。
+        a_state.suspend();
+        b_state.suspend();
+        assert!(a_state.is_suspended() && b_state.is_suspended());
+        assert!(a_state.is_installed() && b_state.is_installed());
+        assert_eq!(
+            a_state
+                .seal("task_submit", &payload, &capabilities())
+                .unwrap_err(),
+            LaneFailure::Invalid
+        );
+        assert_eq!(
+            b_state
+                .seal_liveness(&json!({}), &capabilities())
+                .unwrap_err(),
+            LaneFailure::Invalid
+        );
+        assert_eq!(
+            b_state.open(&frame, &capabilities()).unwrap_err(),
+            LaneFailure::Invalid
+        );
+
+        // 恢复确认不受挂起影响，且绑定同一 activation_id 与角色。
+        let confirm = a_state
+            .seal_resume_confirm("request-resume-confirm-1", "activation-0001")
+            .unwrap();
+        assert_eq!(confirm["type"], "encrypted_resume_confirm");
+        assert_eq!(confirm["sender_role"], "A");
+        b_state.open_resume_confirm(&confirm).unwrap();
+        let mut wrong_activation = confirm.clone();
+        wrong_activation["activation_id"] = json!("activation-0002");
+        assert_eq!(
+            b_state.open_resume_confirm(&wrong_activation).unwrap_err(),
+            LaneFailure::Invalid
+        );
+        // 指纹两侧各自计算且互不相同（角色域分离）。
+        assert_ne!(
+            a_state.resume_fingerprint("activation-0001").unwrap(),
+            b_state.resume_fingerprint("activation-0001").unwrap()
+        );
+
+        // `controller_resumed` 之后业务闸门重新打开，序号继续（同一 lease 上下文）。
+        a_state.activate();
+        b_state.activate();
+        assert!(!a_state.is_suspended());
+        let resumed = a_state
+            .seal("task_submit", &payload, &capabilities())
+            .unwrap();
+        assert_eq!(resumed["frame_sequence"], "2");
+        b_state.open(&resumed, &capabilities()).unwrap();
+
+        // 恢复失败/显式断开：材料彻底清空。
+        a_state.clear();
+        assert!(!a_state.is_installed());
+        assert!(!a_state.is_suspended());
+        assert_eq!(
+            a_state
+                .seal_resume_confirm("request-resume-confirm-1", "activation-0001")
+                .unwrap_err(),
             LaneFailure::Invalid
         );
     }

@@ -42,7 +42,9 @@ function statusKey(status) {
     case 'resume_provisional':
     case 'resume_activated_pending_liveness':
       return 'statusReconnecting';
-    case 'refreshing':
+    // E2E-07：刷新有自己的进行中文案（复用该面板既有的 `refreshing` 词条），
+    // 不再借用「正在停止」的语义。
+    case 'refreshing': return 'refreshing';
     case 'stopping': return 'statusStopping';
     case 'stopped': return 'statusStopped';
     case 'error': return 'statusError';
