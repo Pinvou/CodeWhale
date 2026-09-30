@@ -172,7 +172,7 @@ jobs:
           fi
           # 用命令替换(非管道)避免 grep -q 提前关闭管道导致 env SIGPIPE
           # (set -o pipefail 下 SIGPIPE 会让 step flaky 失败)。
-          echo "$out" | grep -q "^RUST_MIN_STACK=16777216$"
+          grep -q "^RUST_MIN_STACK=16777216$" <<< "$out"
 
       # 4) 运行时契约:不继承编译器栈覆盖。
       #    复制仓库契约测试到最小 crate,按正式入口方式注入 wrapper 后跑
