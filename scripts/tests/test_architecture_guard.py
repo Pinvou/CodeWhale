@@ -421,29 +421,34 @@ class ArchitectureGuardUnitTests(unittest.TestCase):
         )
         anchor = self.guard.RUST_DEPENDENCY_MIGRATION_ANCHOR
         self.assertTrue(self.guard.migration_anchor_is_ancestor(REPO_ROOT, anchor))
-        anchor_state = self.guard.rust_state_from_git(REPO_ROOT, anchor)
+        merge_state, anchor_state, target_state = (
+            self.guard.migration_semantic_states_from_git(REPO_ROOT, anchor, "origin/main")
+        )
+        migration_limits, migration_cycles = self.guard.merged_migration_limits(
+            merge_state, anchor_state, target_state
+        )
         self.assertEqual(
-            dict(anchor_state[0]["rust_cyclic_feature_dependencies"]),
+            dict(migration_limits["rust_cyclic_feature_dependencies"]),
             baseline["rules"]["rust_cyclic_feature_dependencies"],
         )
         self.assertEqual(
-            dict(anchor_state[0]["rust_platform_depends_on_upper_layer"]),
+            dict(migration_limits["rust_platform_depends_on_upper_layer"]),
             baseline["rules"]["rust_platform_depends_on_upper_layer"],
         )
-        self.assertEqual(anchor_state[1], baseline["rust_feature_cycles"])
+        self.assertEqual(migration_cycles, baseline["rust_feature_cycles"])
         self.assertEqual([], self.guard.compare_baseline_ratchet(
-            baseline, previous, anchor_state, anchor_state, anchor_state
+            baseline, previous, merge_state, anchor_state, target_state
         ))
 
         expanded = json.loads(json.dumps(baseline))
         expanded["rules"]["rust_cyclic_feature_dependencies"]["assistant->knowledge"] += 1
         self.assertTrue(self.guard.compare_baseline_ratchet(
-            expanded, previous, anchor_state, anchor_state, anchor_state
+            expanded, previous, merge_state, anchor_state, target_state
         ))
         expanded = json.loads(json.dumps(baseline))
         expanded["rust_feature_cycles"].append(["assistant", "sessions"])
         self.assertTrue(self.guard.compare_baseline_ratchet(
-            expanded, previous, anchor_state, anchor_state, anchor_state
+            expanded, previous, merge_state, anchor_state, target_state
         ))
 
     def test_baseline_rule_presence_and_cycle_migration_are_monotonic(self):
@@ -478,23 +483,27 @@ class ArchitectureGuardUnitTests(unittest.TestCase):
         unmarked_empty["generated_from"] = "future-main-unrelated-commit"
         unmarked_empty["rules"]["common_platform_binaries"] = {"old": 1}
         self.assertTrue(self.guard.compare_baseline_ratchet(current, unmarked_empty))
-        anchor_state = self.guard.rust_state_from_git(
-            REPO_ROOT, self.guard.RUST_DEPENDENCY_MIGRATION_ANCHOR
+        merge_state, anchor_state, target_state = (
+            self.guard.migration_semantic_states_from_git(
+                REPO_ROOT, self.guard.RUST_DEPENDENCY_MIGRATION_ANCHOR, "origin/main"
+            )
         )
         self.assertTrue(self.guard.compare_baseline_ratchet(
-            current, unmarked_empty, anchor_state
+            current, unmarked_empty, merge_state
         ))
         self.assertEqual([], self.guard.compare_baseline_ratchet(
-            current, unmarked_empty, anchor_state, anchor_state, anchor_state
+            current, unmarked_empty, merge_state, anchor_state, target_state
         ))
-        reduced_edges = Counter(anchor_state[2])
+        reduced_edges = Counter(target_state[2])
         reduced_edges[("assistant", "remote_control")] -= 1
         self.assertTrue(self.guard.compare_baseline_ratchet(
-            current, unmarked_empty, anchor_state, anchor_state,
-            (anchor_state[0], anchor_state[1], reduced_edges),
+            current, unmarked_empty, merge_state, anchor_state,
+            (target_state[0], target_state[1], reduced_edges),
         ))
         self.assertTrue(
-            self.guard.compare_baseline_ratchet(current, unmarked_empty, anchor_state, anchor_state, ({}, [], Counter()))
+            self.guard.compare_baseline_ratchet(
+                current, unmarked_empty, merge_state, anchor_state, ({}, [], Counter())
+            )
         )
         removed_marker = json.loads(json.dumps(cycle_empty))
         del removed_marker["migrations"]
