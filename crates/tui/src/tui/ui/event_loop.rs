@@ -586,6 +586,27 @@ pub async fn run_tui(
                 Ok(goal) => {
                     match apply_loaded_session_with_goal(&mut app, config, &saved, goal.as_ref()) {
                         Ok(()) => {
+                            // The engine below is built and synced from App
+                            // state: without this seed, a multi-root session
+                            // resumed from the CLI runs single-root for the
+                            // whole process lifetime. The seed routes through
+                            // the same normalize the writers use, so a legacy
+                            // or hand-edited record cannot seed an entry the
+                            // intake filter would have dropped.
+                            app.workspace_roots = codewhale_core::normalize_workspace_roots(
+                                &app.workspace,
+                                &saved.metadata.workspace_roots,
+                            );
+                            // Name the inherited set in the transcript: the
+                            // roots arrived from another host and no header
+                            // chrome reports them.
+                            if let Some(notice) = workspace_roots_notice(
+                                app.ui_locale,
+                                &app.workspace,
+                                &app.workspace_roots,
+                            ) {
+                                app.add_message(HistoryCell::System { content: notice });
+                            }
                             app.status_message = Some(format!(
                                 "Resumed session: {}",
                                 crate::session_manager::truncate_id(&saved.metadata.id)
@@ -730,6 +751,7 @@ pub async fn run_tui(
                 system_prompt_override: false,
                 model: app.model.clone(),
                 workspace: app.workspace.clone(),
+                workspace_roots: app.workspace_roots.clone(),
                 mode: app.mode,
             })
             .await;
@@ -1145,6 +1167,7 @@ async fn submit_decided_composer_input(
                     system_prompt_override: false,
                     model: app.model.clone(),
                     workspace: app.workspace.clone(),
+                    workspace_roots: app.workspace_roots.clone(),
                     mode: app.mode,
                 })
                 .await;
@@ -3694,6 +3717,7 @@ pub(crate) async fn run_event_loop(
                         system_prompt_override: false,
                         model: app.model.clone(),
                         workspace: app.workspace.clone(),
+                        workspace_roots: app.workspace_roots.clone(),
                         mode: app.mode,
                     })
                     .await;

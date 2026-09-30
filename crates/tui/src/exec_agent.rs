@@ -202,10 +202,19 @@ pub(crate) async fn run_exec_agent(
         ..crate::tools::spec::RuntimeToolServices::default()
     };
 
+    // Roots enter exec only through the persisted session metadata (Runtime
+    // API / headless), so capture them once at resume: the engine starts with
+    // this set and the save path must write the same set back, or a follow-up
+    // `exec --resume` silently degrades the thread to single-root.
+    let resume_workspace_roots: Vec<PathBuf> = resume_session
+        .as_ref()
+        .map_or_else(Vec::new, |saved| saved.metadata.workspace_roots.clone());
+
     let engine_config = EngineConfig {
         model: effective_model.clone(),
         active_route_limits,
         workspace: workspace.clone(),
+        workspace_roots: resume_workspace_roots.clone(),
         session_id: None,
         subagent_state_root: None,
         plugin_registry: Some(std::sync::Arc::clone(&engine_plugin_registry)),
@@ -356,12 +365,23 @@ pub(crate) async fn run_exec_agent(
     let mode = AppMode::Agent;
 
     let resuming_session = resume_session.is_some();
+    let latest_workspace_roots = resume_workspace_roots;
     let mut loaded_session_id = None;
     if let Some(saved) = resume_session {
         let saved_id = saved.metadata.id.clone();
         if saved.metadata.workspace != workspace && output_format == ExecOutputFormat::Text {
+            // The engine runs the SAVED workspace/root pair (the
+            // `Op::SyncSession` below re-normalizes it against itself), so
+            // the CLI `--workspace` does not re-anchor a resumed session and
+            // there is nothing to validate here — the lane never mints a
+            // moved row. The warning only tells the user which directory the
+            // session actually runs in (round-22 SF22-3 retires the round-21
+            // hard block, which refused legitimate resumes against a
+            // workspace the lane never adopts and named a
+            // `--workspace-roots` flag that does not exist).
             eprintln!(
-                "Warning: session {} was created in a different workspace ({}). Resuming anyway.",
+                "Warning: session {} was created in a different workspace ({}). \
+                 Resuming in the session's own workspace.",
                 truncate_id(&saved_id),
                 saved.metadata.workspace.display(),
             );
@@ -375,6 +395,7 @@ pub(crate) async fn run_exec_agent(
                 system_prompt_override: false,
                 model: saved.metadata.model,
                 workspace: saved.metadata.workspace,
+                workspace_roots: saved.metadata.workspace_roots.clone(),
                 mode,
             })
             .await?;
@@ -914,6 +935,7 @@ pub(crate) async fn run_exec_agent(
                             id: effective_provider_id.as_deref(),
                         },
                         &latest_workspace,
+                        &latest_workspace_roots,
                         &latest_system_prompt,
                         latest_session_id.as_deref(),
                         u64::from(usage.input_tokens) + u64::from(usage.output_tokens),

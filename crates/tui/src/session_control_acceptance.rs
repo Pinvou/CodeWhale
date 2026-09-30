@@ -121,8 +121,8 @@ pub const ACCEPTANCE_MATRIX: &[AcceptanceCase] = &[
     },
     AcceptanceCase {
         contract: Contract::ControlPlane,
-        behavior: "An external writer is refused with a typed conflict while a session is live",
-        test: "an_external_writer_is_refused_while_a_session_is_live",
+        behavior: "External writers converge by last-write-wins (the live-session refusal is retired; the registry serves retention pruning)",
+        test: "external_writers_converge_by_last_write_wins_guard_retired",
     },
     AcceptanceCase {
         contract: Contract::PersistentSessions,
@@ -722,48 +722,37 @@ mod tests {
     }
 
     #[test]
-    fn an_external_writer_is_refused_while_a_session_is_live() {
-        // The archive-race gate. The TUI owns the in-memory copy, so an
-        // out-of-band write must fail closed rather than be reverted later.
+    fn external_writers_converge_by_last_write_wins_guard_retired() {
+        // Round-20 B20-3: the External live-session refusal is retired. The
+        // process-local registry cannot coexist with the runtime HTTP lane in
+        // any shipped topology, so the refusal could never engage; an
+        // external writer now converges by last-write-wins at the store
+        // layer. The registry itself remains — same-process retention pruning
+        // consults it — which is why set_live_session stays.
         let _lock = crate::test_support::lock_test_env();
         let fx = Fixture::new();
         fx.save("owned", "Open in the TUI", &fx.workspace);
         crate::session_manager::set_live_session(Some("owned"));
 
-        let refused = fx
-            .manager
+        fx.manager
             .set_session_archived("owned", true, SessionMutator::External)
-            .expect_err("external write must be refused while the session is live");
-        assert_eq!(refused.kind(), std::io::ErrorKind::ResourceBusy);
+            .expect("the retired guard no longer refuses external writes");
         assert!(
-            !fx.manager
+            fx.manager
                 .load_session("owned")
                 .expect("reload")
                 .metadata
                 .archived,
-            "a refused write must not have partially applied"
+            "the external write landed"
         );
+        fx.manager
+            .rename_session("owned", "Renamed out-of-band", SessionMutator::External)
+            .expect("external rename converges too");
 
-        let refused_rename = fx
-            .manager
-            .rename_session("owned", "Nope", SessionMutator::External)
-            .expect_err("external rename must be refused too");
-        assert_eq!(refused_rename.kind(), std::io::ErrorKind::ResourceBusy);
-
-        // The owner is still allowed.
-        assert!(
-            fx.manager
-                .set_session_archived("owned", true, SessionMutator::Owner)
-                .is_ok()
-        );
-
-        // Releasing the claim re-opens external writes.
+        // The registry still tracks the interactive claim for retention.
+        assert!(crate::session_manager::is_live_session("owned"));
         crate::session_manager::set_live_session(None);
-        assert!(
-            fx.manager
-                .rename_session("owned", "Now allowed", SessionMutator::External)
-                .is_ok()
-        );
+        assert!(!crate::session_manager::is_live_session("owned"));
     }
 
     #[test]

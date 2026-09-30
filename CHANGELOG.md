@@ -7,6 +7,112 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Resuming or forking a thread that does not exist now fails loudly:
+  `POST /v1/threads/{id}/resume` and `POST /v1/threads/{id}/fork` answer
+  HTTP 404, and the stdio `thread/resume` / `thread/fork` methods answer the
+  typed `thread_not_found` error (`-32004`), where both lanes previously
+  answered success with a `status: "missing"` body that every caller had to
+  know to check.
+- Declared workspace root sets are validated at intake instead of silently
+  reshaped. `POST /v1/threads`, `PATCH /v1/threads/{id}`, and the stdio
+  `thread/start` / `thread/resume` / `thread/fork` equivalents now reject,
+  with HTTP 400 or a JSON-RPC error: a root that is not an absolute path
+  (`~/shared` is refused rather than silently dropped from the set), a root
+  that normalizes to the filesystem root (`/`, `/..`), and a root that is an
+  ancestor of the primary workspace (its parent directory). Each of those
+  widened the per-turn sandbox's writable roots past what the caller
+  declared; a root that merely sits under the primary is still accepted.
+  The checks are lexical: enforcement canonicalizes per root, so symlink
+  spellings can carry a sibling past the ancestor rejection (canonicalize-
+  at-intake is scheduled). Declared sets are additionally capped at 64
+  entries at the validating intakes; the headless `POST /tool` lane
+  normalizes without the validator and caps at its invoke entry (round-23
+  SF23-2).
+  The resume lane that moves the primary (`cwd` without `workspace_roots`)
+  validates the re-based persisted set with the same rules instead of
+  re-anchoring it tolerantly, so a persisted entry that becomes an ancestor
+  of the new primary errors rather than silently widening the row.
+- Approval grants for shell commands are keyed to the command family AND
+  the `cwd`/`working_dir` operand (length-prefixed in the key), and a
+  `cwd: null` spelling no longer falls back to the no-operand family —
+  previously a session-approved plain command could be replayed redirected
+  into another root. Stored grants re-key; re-approval is required.
+- The exec approval context judges the `cwd`/`working_dir` operand through
+  the same canonical resolution execution uses: a symlinked operand
+  (`link/..`) no longer normalizes back into the primary and fires a
+  primary-scoped allow while executing in an attached root.
+- Known limitation of that canonical judging (and of the file gates that
+  share its judgment), disclosed rather than silently shipped: persisted
+  rule scopes hold their *declared* spelling while the judgment now reads
+  the operand's *canonical* spelling, so on any system where the two differ
+  (macOS `/tmp` ↔ `/private/tmp`, `/var` ↔ `/private/var`, a symlinked
+  spelling) a scoped rule spelled the other way stops firing for
+  operand-carrying calls — in BOTH spelling directions, and including a
+  scoped **deny**, which is fail-open (the denied command runs). Windows is
+  harder hit and fails closed: `std::fs::canonicalize` returns
+  `\\?\`-prefixed verbatim paths that scope matching cannot spell, so at
+  this head every existing cwd-carrying operand degrades every exact scoped
+  allow to the ordinary approval modal on Windows. Capturing canonical
+  scope spellings (and trimming Windows verbatim prefixes) is scheduled
+  post-merge.
+- The headless `/tool` and stdio tool-call lane judges exec policy on the
+  same resolved operand cwd execution uses and routes its declared root set
+  through the shared shape normalizer, closing two silent mismatches: a
+  symlink-spelled operand no longer evades a deny scoped to the canonical
+  target, and a relative or `..` operand no longer leaves every scoped rule
+  inert for the call. A declared root set is also capped at 64 entries at
+  every validating intake, so one hostile or buggy declaration cannot turn
+  per-turn boundary work into a permanent stall.
+- `PUT /v1/sessions` stamps the saved session's `workspace` AND
+  `workspace_roots` as one re-normalized pair from the engine snapshot
+  (matching `/rename` and `/fork`): a thread moved by PATCH since the last
+  save no longer leaves the session anchored at an abandoned workspace next
+  to a set led by the new directory — a later resume-thread would have
+  re-admitted the abandoned directory as a writable primary root.
+- A cached resume that carries a `cwd` or `workspace_roots` override now
+  bumps the persisted row's `updated_at`, so recency listings reflect the
+  override; a parameterless cached resume stays write-free exactly like
+  base.
+- Session ids are trimmed once at the intake boundary:
+  `PATCH /v1/sessions/{id}` and `PUT /v1/sessions` judge the trimmed value
+  (a padded id is one session, not two rows distinguished by whitespace),
+  and an explicit-but-empty id answers 400 instead of being silently turned
+  into "create new".
+- `PATCH /v1/threads/{id}` with a `workspace`-only change now validates the
+  re-based root set with the same intake rules as a replacement, instead of
+  re-anchoring it tolerantly (a persisted entry that becomes an ancestor of
+  the new primary errors rather than widening the row).
+- The `/cd` receipt for a moved-away directory changed severity from a
+  passive notice to a typed warning, and its guard widened to every
+  workspace swap lane.
+- The cached-resume path no longer bumps `archived_at` (the preserve arm
+  existed to protect it and is unreachable); `isolated_worktree` defaults
+  flipped from false to true for resume-lane worktree children; and
+  `string_field` deny rules now match raw (untrimmed) collected values,
+  narrowing what they deny.
+- Relative `--workspace` values are resolved against the process working
+  directory at startup instead of reaching the boundary checks as a root
+  whose normalized form contains every path — **on lanes that route through
+  `resolve_workspace`**; the headless `codewhale exec` / `codewhale serve`
+  lanes currently pass the value through unabsolutized (recorded as the
+  round-22 SF22-5 deferral).
+- A worktree child session's exec lane no longer inherits the parent
+  session's writable roots: the lane is re-derived at spawn and at resume
+  from the child's own workspace.
+- Session failure diagnostics collect candidate string fields verbatim: the
+  classifier no longer trims surrounding whitespace before matching (this
+  PR's change; base v0.9.12 carries the trim).
+
+### Removed
+
+- The never-fires `PUT`/`PATCH /v1/sessions` live-session conflict (409)
+  was removed: the process-local registry cannot coexist with the runtime
+  HTTP server in any shipped topology. Same-process writers converge by
+  last-write-wins at the store layer; the registry itself remains for
+  retention pruning.
+
 ### Fixed
 
 - API-backed `[search]` providers now visibly degrade directly to the

@@ -159,6 +159,11 @@ pub struct SessionMetadata {
     pub model_provider_id: Option<String>,
     /// Workspace directory
     pub workspace: PathBuf,
+    /// Additional workspace roots attached to this session; `workspace` is
+    /// always the primary root. Sessions written before multi-root support
+    /// have no key and load as an empty set (single-root behavior).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub workspace_roots: Vec<PathBuf>,
     /// Optional mode label (agent/plan/etc.)
     #[serde(default)]
     pub mode: Option<String>,
@@ -199,16 +204,19 @@ fn is_not_archived(archived: &bool) -> bool {
 
 /// Sessions currently owned by an in-process interactive surface (the TUI).
 ///
-/// A saved session is a file, and a running TUI holds the authoritative copy
-/// in memory: it autosaves the whole document from `App` state. That makes an
-/// out-of-band write to the *same* session unsafe — the next autosave would
-/// silently revert it. Rather than let that happen quietly, the owner claims
-/// the id here and any external writer is refused.
+/// The registry's remaining consumer is the orphan-reclamation keep-chain:
+/// a running TUI holds the authoritative session copy in memory and re-saves
+/// the whole document, so the directory `reclaim_orphaned_session_dirs`
+/// sweeps must never treat a live owner's session as an orphan. (The
+/// write-conflict guard this registry used to feed was retired — round-20
+/// B20-3: the process-local External lane never coexists with the
+/// interactive surface in a shipped topology, so external writes converge
+/// by last-write-wins at the store layer.)
 ///
 /// A static registry rather than a field on `RuntimeApiState` because the
 /// embedded Runtime API runs inside the TUI process; a standalone
-/// `codewhale web` has an empty registry and is therefore never blocked, which
-/// is exactly right — there is no TUI holding anything.
+/// `codewhale web` has an empty registry, and the reclaim sweep needs no
+/// entries there — a headless process holds no interactive autosave.
 static LIVE_SESSIONS: std::sync::OnceLock<std::sync::RwLock<std::collections::HashSet<String>>> =
     std::sync::OnceLock::new();
 
@@ -287,9 +295,11 @@ pub fn is_claimed_session_dir(session_id: &str) -> bool {
 
 /// Who is asking to mutate a saved session.
 ///
-/// This is an authority distinction, not a convenience one: the owner may
-/// write because it will update its in-memory copy in the same step; anyone
-/// else may not, because it cannot.
+/// This was an authority distinction when a live owner's out-of-band write
+/// could revert the next autosave; since the live guard's retirement
+/// (round-20 B20-3) both spellings write, so the parameter is retained only
+/// in the API shape. The owner distinction still documents intent: the owner
+/// updates its cached copy atomically with the write, anyone else cannot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionMutator {
     /// The in-process surface that currently owns the session (the TUI). It
@@ -297,7 +307,7 @@ pub enum SessionMutator {
     /// write — see `App::apply_session_mutation`.
     Owner,
     /// Any other writer: the Runtime API, the web dashboard, a second
-    /// process. Refused while the session is claimed.
+    /// process. Writes converge by last-write-wins at the store layer.
     External,
 }
 
@@ -305,13 +315,19 @@ pub enum SessionMutator {
 ///
 /// The TUI owns at most one session at a time, so switching sessions must
 /// release the previous claim in the same step — otherwise a `/new` would
-/// leave the old id permanently locked against the dashboard.
+/// leave the old id in the registry and the orphan-reclamation sweep would
+/// keep a directory no interactive surface is using.
 pub fn set_live_session(session_id: Option<&str>) {
-    if let Ok(mut live) = live_sessions().write() {
-        live.clear();
-        if let Some(id) = session_id.map(str::trim).filter(|id| !id.is_empty()) {
-            live.insert(id.to_string());
-        }
+    // Recover a poisoned write lock rather than dropping the claim: a lost
+    // claim unblocks external writers against a session that may still
+    // autosave, and the wholesale clear below makes any stale content moot.
+    let mut live = match live_sessions().write() {
+        Ok(live) => live,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    live.clear();
+    if let Some(id) = session_id.map(str::trim).filter(|id| !id.is_empty()) {
+        live.insert(id.to_string());
     }
 }
 
@@ -335,27 +351,21 @@ fn is_session_uuid(name: &str) -> bool {
 ///
 /// The registry is process-local. Reclamation must not treat a missing entry
 /// here as proof that no other Codewhale process still owns the directory.
+///
+/// The query is judged against the trimmed id, the same normalized value
+/// `set_live_session` stores: every store path trims (`validated_session_id`),
+/// so the keep-chain compares one canonical value. A poisoned lock means
+/// ownership cannot be determined, so the answer fails closed: treat the
+/// session as live and keep its directory out of the orphan sweep, rather
+/// than reclaim a directory an autosave nobody can see is still writing.
 #[must_use]
 pub fn is_live_session(session_id: &str) -> bool {
+    let trimmed = session_id.trim();
     live_sessions()
         .read()
-        .is_ok_and(|live| live.contains(session_id))
+        .map(|live| live.contains(trimmed))
+        .unwrap_or(true)
 }
-
-/// The error an external writer gets when the session is live.
-///
-/// `ResourceBusy` so callers can map it to a typed conflict rather than
-/// pattern-matching on a message.
-fn live_session_conflict(session_id: &str) -> std::io::Error {
-    std::io::Error::new(
-        std::io::ErrorKind::ResourceBusy,
-        format!(
-            "session '{session_id}' is open in an interactive Codewhale session; \
-             change it there instead — an external write would be reverted by its next autosave"
-        ),
-    )
-}
-
 /// File-name stem of the sidecar mapping session ids to the session
 /// instance (process boot) that created their persisted record. Lives in
 /// the sessions directory next to the `<id>.json` records it describes.
@@ -894,6 +904,7 @@ impl SavedSession {
             model_provider: default_model_provider(),
             model_provider_id: None,
             workspace,
+            workspace_roots: Vec::new(),
             mode: None,
             cost: SessionCostSnapshot::default(),
             parent_session_id: None,
@@ -1624,9 +1635,11 @@ impl SessionManager {
         archived: bool,
         mutator: SessionMutator,
     ) -> std::io::Result<SessionMetadata> {
-        if mutator == SessionMutator::External && is_live_session(id) {
-            return Err(live_session_conflict(id));
-        }
+        let _ = mutator; // retained in the API shape; the live guard is retired (round-20 B20-3)
+        // Round-20 B20-3: no live-session guard here — the registry is
+        // process-local and the External mutator's only lane (the runtime
+        // HTTP server) never coexists with an interactive surface in a
+        // shipped topology, so the check could never engage.
         let mut session = self.load_session(id)?;
         if session.metadata.archived == archived {
             return Ok(session.metadata);
@@ -1666,6 +1679,16 @@ impl SessionManager {
         metadata.created_at = persisted.created_at;
         metadata.parent_session_id = persisted.parent_session_id;
         metadata.forked_from_message_count = persisted.forked_from_message_count;
+        // The persisted set is the authority only against roots-blind
+        // writers: an empty incoming set may mean "rebuilt without knowing
+        // about multi-root", so the persisted set wins there. A non-empty
+        // incoming set is a deliberate live-owner mutation (a `/cd` primary
+        // swap, or a snapshot stamped from the loaded session) and must
+        // survive the merge - overwriting it would durably revert the swap
+        // and resurrect abandoned directories on the next resume.
+        if metadata.workspace_roots.is_empty() {
+            metadata.workspace_roots = persisted.workspace_roots;
+        }
         true
     }
 
@@ -1681,9 +1704,10 @@ impl SessionManager {
         mutator: SessionMutator,
     ) -> std::io::Result<SessionMetadata> {
         let title = normalize_session_title(title)?;
-        if mutator == SessionMutator::External && is_live_session(id) {
-            return Err(live_session_conflict(id));
-        }
+        let _ = mutator; // retained in the API shape; the live guard is retired (round-20 B20-3)
+        // Round-20 B20-3: no live-session guard (see set_session_archived) —
+        // the External lane cannot coexist with the interactive surface that
+        // populates the registry.
         let mut session = self.load_session(id)?;
         if session.metadata.title == title {
             return Ok(session.metadata);
@@ -2219,6 +2243,7 @@ pub fn create_saved_session_with_id_and_mode(
             model_provider: default_model_provider(),
             model_provider_id: None,
             workspace: workspace.to_path_buf(),
+            workspace_roots: Vec::new(),
             mode: mode.map(str::to_string),
             cost: SessionCostSnapshot::default(),
             parent_session_id: None,
@@ -2638,6 +2663,134 @@ mod tests {
         );
     }
 
+    #[test]
+    fn workspace_roots_default_for_legacy_sessions_and_round_trip() {
+        let tmp = tempdir().expect("tempdir");
+        let manager = SessionManager::new(tmp.path().to_path_buf()).expect("manager");
+        let workspace = tmp.path().join("ws");
+        let messages = vec![make_test_message("user", "hi")];
+        let session = create_saved_session_with_id_and_mode(
+            "roots-session".to_string(),
+            &messages,
+            "deepseek-v4-flash",
+            &workspace,
+            0,
+            None,
+            None,
+        );
+
+        // A session written before multi-root support has no workspace_roots
+        // key; it must load as an empty (single-root) set, and a roots-less
+        // session must keep that key off the wire.
+        let mut value = serde_json::to_value(&session).expect("serialize session");
+        let metadata = value.get_mut("metadata").expect("metadata object");
+        assert!(metadata.get("workspace_roots").is_none());
+        let metadata = metadata.take();
+        let mut metadata: SessionMetadata =
+            serde_json::from_value(metadata).expect("legacy metadata decodes");
+        assert!(metadata.workspace_roots.is_empty());
+
+        // Roots survive a save/load round-trip byte-faithfully.
+        metadata.workspace_roots = vec![workspace.clone(), tmp.path().join("shared")];
+        let mut session = session;
+        session.metadata = metadata;
+        manager.save_session(&session).expect("save session");
+        let loaded = manager.load_session("roots-session").expect("load session");
+        assert_eq!(
+            loaded.metadata.workspace_roots,
+            vec![workspace, tmp.path().join("shared")]
+        );
+    }
+
+    #[test]
+    fn workspace_switch_survives_autosave_merge_and_restart() {
+        // /cd round trip: disk holds the pre-switch state; the live owner
+        // swaps the primary (/A -> /C, roots [/A,/B] -> [/C,/B]); the
+        // autosave stamps the live set and merges against disk; the
+        // restart+resume re-normalizes. The abandoned directory must not
+        // resurrect as a writable root.
+        let tmp = tempdir().expect("tempdir");
+        let manager = SessionManager::new(tmp.path().to_path_buf()).expect("manager");
+        let workspace = tmp.path().join("a");
+        let messages = vec![make_test_message("user", "hi")];
+        let mut session = create_saved_session_with_id_and_mode(
+            "switch-session".to_string(),
+            &messages,
+            "deepseek-v4-flash",
+            &workspace,
+            0,
+            None,
+            Some("agent"),
+        );
+        session.metadata.workspace_roots = vec![workspace.clone(), tmp.path().join("b")];
+        manager
+            .save_session(&session)
+            .expect("save pre-switch session");
+
+        // The /cd swap in memory: new primary, old primary leaves the set.
+        let mut live = manager
+            .load_session("switch-session")
+            .expect("load for switch");
+        let new_workspace = tmp.path().join("c");
+        live.metadata.workspace = new_workspace.clone();
+        live.metadata.workspace_roots = vec![new_workspace.clone(), tmp.path().join("b")];
+
+        // Autosave: stamp the live set, then merge against disk exactly as
+        // build_session_snapshot does.
+        live.metadata.total_tokens = 5;
+        assert!(manager.merge_persisted_lifecycle(&mut live.metadata));
+        manager.save_session(&live).expect("autosave");
+
+        // Restart + resume: reload, then re-normalize the way the engine
+        // resolves roots on resume.
+        let resumed = manager.load_session("switch-session").expect("reload");
+        assert_eq!(resumed.metadata.workspace, new_workspace);
+        assert_eq!(
+            resumed.metadata.workspace_roots,
+            vec![new_workspace, tmp.path().join("b")],
+            "the abandoned directory must not resurrect as a writable root"
+        );
+    }
+
+    #[test]
+    fn merge_persisted_lifecycle_restores_persisted_workspace_roots() {
+        let tmp = tempdir().expect("tempdir");
+        let manager = SessionManager::new(tmp.path().to_path_buf()).expect("manager");
+        let workspace = tmp.path().join("ws");
+        let messages = vec![make_test_message("user", "hi")];
+        let mut session = create_saved_session_with_id_and_mode(
+            "merge-roots-session".to_string(),
+            &messages,
+            "deepseek-v4-flash",
+            &workspace,
+            0,
+            None,
+            Some("agent"),
+        );
+        session.metadata.workspace_roots = vec![workspace.clone(), tmp.path().join("shared")];
+        manager.save_session(&session).expect("save session");
+
+        // A host without multi-root awareness rebuilds the metadata through
+        // the historical constructor and would rewrite the file with an
+        // empty root set; the lifecycle merge must restore the persisted
+        // set instead of letting that rewrite erase it.
+        let mut rewritten = create_saved_session_with_id_and_mode(
+            session.metadata.id.clone(),
+            &messages,
+            "deepseek-v4-flash",
+            &workspace,
+            0,
+            None,
+            Some("agent"),
+        );
+        assert!(rewritten.metadata.workspace_roots.is_empty());
+        assert!(manager.merge_persisted_lifecycle(&mut rewritten.metadata));
+        assert_eq!(
+            rewritten.metadata.workspace_roots,
+            vec![workspace, tmp.path().join("shared")]
+        );
+    }
+
     /// Coverage state round-trips with the money it qualifies, and a session
     /// written before coverage existed is detected as *unknown* rather than being
     /// read as a complete total covering zero turns (#4318).
@@ -2864,6 +3017,7 @@ mod tests {
                 model_provider: "deepseek".to_string(),
                 model_provider_id: None,
                 workspace: workspace.to_path_buf(),
+                workspace_roots: Vec::new(),
                 mode: None,
                 cost: SessionCostSnapshot::default(),
                 parent_session_id: None,
@@ -2905,6 +3059,7 @@ mod tests {
                 model_provider: "deepseek".to_string(),
                 model_provider_id: None,
                 workspace: workspace.to_path_buf(),
+                workspace_roots: Vec::new(),
                 mode: Some("yolo".to_string()),
                 cost: SessionCostSnapshot::default(),
                 parent_session_id: None,
@@ -4857,4 +5012,100 @@ mod tests {
             "unexpected error: {err}"
         );
     }
+
+    /// The live-session claim is judged on the trimmed id — the same
+    /// normalized value `set_live_session` stores — so a padded id cannot
+    /// read as a stranger to the guard while every store path
+    /// (`validated_session_id`) reads it as the owner.
+    #[test]
+    fn live_session_claim_matches_the_trimmed_query() {
+        let _lock = crate::shell_dispatcher::test_env_lock::lock_test_env();
+        set_live_session(Some("  sess-pad  "));
+        assert!(is_live_session("sess-pad"));
+        assert!(
+            is_live_session("  sess-pad  "),
+            "a padded id must hit the claim the trimmed id would hit"
+        );
+        assert!(!is_live_session("sess-other"));
+        set_live_session(None);
+        assert!(!is_live_session("  sess-pad  "));
+    }
+
+    /// A poisoned claim lock means ownership cannot be determined, so the
+    /// answer fails closed: the session counts as live and external writers
+    /// take the conflict instead of racing an autosave nobody can see.
+    #[test]
+    fn live_session_claim_fails_closed_on_a_poisoned_lock() {
+        let _lock = crate::shell_dispatcher::test_env_lock::lock_test_env();
+        set_live_session(Some("sess-poison"));
+        // Poison the lock by panicking while holding its write guard, then
+        // clear the poison in the same test — the process-global lock is
+        // shared with every other test in this binary, and only the env lock
+        // above keeps the poisoned window single-threaded.
+        let _ = std::panic::catch_unwind(|| {
+            let _guard = live_sessions().write();
+            panic!("poison the live-session claim lock");
+        });
+        assert!(
+            live_sessions().read().is_err(),
+            "the lock must actually be poisoned for this pin to mean anything"
+        );
+        assert!(
+            is_live_session("sess-poison"),
+            "poisoned: the known claim must still read as live"
+        );
+        assert!(
+            is_live_session("sess-unknown"),
+            "poisoned: an unknown id must also read as live (fail closed)"
+        );
+        live_sessions().clear_poison();
+        set_live_session(None);
+        assert!(!is_live_session("sess-unknown"));
+    }
+}
+
+#[test]
+fn reclaim_keeps_a_live_claimed_session_dir() {
+    // Round-21 should-fix 5 (the keystone for B20-3's registry-retention
+    // decision): the retired HTTP guard left the registry one real
+    // consumer — the orphan-dir reclaim must keep a directory whose id
+    // is claimed live by the interactive surface, or that keep would be
+    // dead code. Hermetic under ENV_LOCK + PINVOU3_HOME.
+    let _lock = crate::shell_dispatcher::test_env_lock::lock_test_env();
+    let prev_home = std::env::var("PINVOU3_HOME").ok();
+    let home =
+        std::env::temp_dir().join(format!("pinvou3-reclaim-live-home-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&home);
+    // SAFETY: platform::paths::tests::ENV_LOCK held; env writes are serialized.
+    unsafe { std::env::set_var("PINVOU3_HOME", &home) };
+    let manager = SessionManager::new(home.join("sessions")).expect("session manager");
+
+    // An orphan session directory in the exact shape the runtime mints.
+    let id = "3f2504e0-4f89-41d3-9a0c-0305e82c3301";
+    let dir = home.join("sessions").join(id);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    // Unclaimed: the orphan is reclaimed.
+    manager.reclaim_orphaned_session_dirs();
+    assert!(!dir.exists(), "an unclaimed orphan is reclaimed");
+
+    // Re-create it and claim it live: the reclaim must keep it.
+    std::fs::create_dir_all(&dir).unwrap();
+    set_live_session(Some(id));
+    manager.reclaim_orphaned_session_dirs();
+    assert!(dir.exists(), "a live-claimed orphan survives the reclaim");
+
+    set_live_session(None);
+    manager.reclaim_orphaned_session_dirs();
+    assert!(!dir.exists(), "releasing the claim re-opens the reclaim");
+
+    // SAFETY: ENV_LOCK held for the whole test; restoring the caller's
+    // environment.
+    unsafe {
+        match prev_home {
+            Some(home) => std::env::set_var("PINVOU3_HOME", home),
+            None => std::env::remove_var("PINVOU3_HOME"),
+        }
+    }
+    let _ = std::fs::remove_dir_all(&home);
 }
