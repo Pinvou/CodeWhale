@@ -3,8 +3,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
 use super::{
-    binding::{LiveRemoteContext, require_live_locked, require_live_mapping_locked},
-    migration::persist_changed,
+    binding::{LiveRemoteContext, require_live_locked},
+    persistence::persist_changed,
 };
 use crate::features::sessions::SessionStore;
 use crate::features::sessions::validators::validate_session_id;
@@ -12,7 +12,7 @@ use crate::features::sessions::validators::validate_session_id;
 pub(super) const REMOTE_PROXY_SCHEMA_VERSION: u32 = 3;
 pub(super) const MAX_PENDING_REQUESTS: usize = 64;
 pub(super) const MAX_RETIRED_REQUESTS: usize = 4096;
-pub(super) const MAX_PROJECTION_ENTRIES: usize = 512;
+pub(crate) const MAX_PROJECTION_ENTRIES: usize = 512;
 pub(super) const MAX_PROJECTION_BYTES: usize = 1024 * 1024;
 pub(super) const MAX_PROJECTION_BODY_BYTES: usize = 16 * 1024;
 pub(super) const MAX_PROJECTION_ATTACHMENTS: usize = 16;
@@ -54,7 +54,7 @@ pub(crate) struct RemoteProxyRecord {
 
 impl RemoteProxyRecord {
     /// The same durable invariant is checked before every write and after
-    /// decoding legacy migration input or a native v3 record.
+    /// strictly decoding the current v3 record.
     pub(super) fn validate_stored(&self) -> Result<()> {
         validate_session_id(&self.local_session_id)?;
         if !self.local_session_id.starts_with("remote-")
@@ -244,6 +244,9 @@ pub(crate) struct RemoteOfflineView {
     pub(crate) projection: AuthenticatedProjection,
     pub(crate) authenticated_cursor: Option<AuthenticatedCursor>,
     pub(crate) pending_unknown_count: usize,
+    /// Only never-attempted handles are discoverable after restart so the UI
+    /// can offer explicit abandon. Attempted requests remain outcome-unknown.
+    pub(crate) unattempted_pending: Vec<PendingRemoteRequest>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -271,41 +274,6 @@ pub(crate) trait SnapshotVerificationPort {
     ) -> Result<()>;
 }
 
-/// Only constructible after a verifier accepts the bound snapshot. The
-/// fields are private so a caller cannot set an `authenticated: true` flag.
-pub(crate) struct AuthenticatedSnapshot {
-    local_session_id: String,
-    remote_ref: String,
-    context: LiveRemoteContext,
-    projection: AuthenticatedProjection,
-    cursor: AuthenticatedCursor,
-}
-
-impl AuthenticatedSnapshot {
-    pub(crate) fn verify(
-        local_session_id: &str,
-        remote_ref: &str,
-        context: &LiveRemoteContext,
-        candidate: SnapshotCandidate,
-        verifier: &dyn SnapshotVerificationPort,
-    ) -> Result<Self> {
-        validate_snapshot_window(&candidate.projection, &candidate.cursor)?;
-        verifier.verify_authenticated_snapshot(
-            local_session_id,
-            remote_ref,
-            context,
-            &candidate,
-        )?;
-        Ok(Self {
-            local_session_id: local_session_id.to_owned(),
-            remote_ref: remote_ref.to_owned(),
-            context: context.clone(),
-            projection: candidate.projection,
-            cursor: candidate.cursor,
-        })
-    }
-}
-
 pub(super) fn validate_snapshot_window(
     projection: &AuthenticatedProjection,
     cursor: &AuthenticatedCursor,
@@ -328,25 +296,6 @@ pub(super) fn validate_snapshot_window(
         Some(last) if last == cursor.sequence => Ok(()),
         None if cursor.sequence == 0 => Ok(()),
         _ => bail!("snapshot projection does not end at its authenticated cursor"),
-    }
-}
-
-fn require_next_cursor(
-    current: Option<&AuthenticatedCursor>,
-    next: &AuthenticatedCursor,
-) -> Result<()> {
-    if next.journal_epoch.is_empty() || next.journal_epoch.len() > 128 {
-        bail!("invalid remote journal epoch");
-    }
-    match current {
-        None if next.sequence == 1 => Ok(()),
-        Some(previous)
-            if previous.journal_epoch == next.journal_epoch
-                && previous.sequence.checked_add(1) == Some(next.sequence) =>
-        {
-            Ok(())
-        }
-        _ => bail!("remote journal cursor is not the next event in the current epoch"),
     }
 }
 
@@ -456,23 +405,6 @@ pub(super) struct RemoteProxyFile {
 }
 
 impl SessionStore {
-    pub(crate) fn update_remote_ui(&self, id: &str, mut ui: RemoteUiMetadata) -> Result<()> {
-        ui.validate()?;
-        if let Some(value) = &ui.last_opened_at {
-            let instant = chrono::DateTime::parse_from_rfc3339(value)
-                .map_err(|_| anyhow::anyhow!("invalid RemoteProxy last-opened timestamp"))?;
-            ui.last_opened_at = Some(instant.with_timezone(&chrono::Utc).to_rfc3339());
-        }
-        let mut state = self.remote_proxies.lock();
-        let mut record = state
-            .records
-            .get(id)
-            .ok_or_else(|| anyhow::anyhow!("unknown RemoteProxy"))?
-            .clone();
-        record.ui = ui;
-        persist_changed(&mut state, id, record)
-    }
-
     /// Trusted, single-source list for DEV-31's history adapter. No historic
     /// remote reference or B mapping is exposed to the offline UI.
     pub(crate) fn list_remote_proxy_history(&self) -> Vec<RemoteProxyListItem> {
@@ -509,90 +441,13 @@ impl SessionStore {
                 .iter()
                 .filter(|item| item.dispatch_state == PendingDispatchState::AttemptMayHaveOccurred)
                 .count(),
+            unattempted_pending: record
+                .pending
+                .iter()
+                .filter(|item| item.dispatch_state == PendingDispatchState::PreparedNeverAttempted)
+                .cloned()
+                .collect(),
         })
-    }
-
-    /// Atomic content+cursor update for a B-authenticated journal event.
-    /// DEV-30 owns event interpretation and redaction before this call.
-    pub(crate) fn append_remote_projection(
-        &self,
-        id: &str,
-        remote_ref: &str,
-        context: &LiveRemoteContext,
-        entry: ProjectionEntry,
-    ) -> Result<()> {
-        entry.validate()?;
-        let mut state = self.remote_proxies.lock();
-        require_live_locked(&state, id, remote_ref, context)?;
-        let mut record = state.records.get(id).expect("checked RemoteProxy").clone();
-        if let Some(_existing) =
-            record.projection.entries.iter().find(|old| {
-                old.journal_epoch == entry.journal_epoch && old.sequence == entry.sequence
-            })
-        {
-            bail!("duplicate remote projection journal key");
-        }
-        let cursor = AuthenticatedCursor {
-            journal_epoch: entry.journal_epoch.clone(),
-            sequence: entry.sequence,
-        };
-        require_next_cursor(record.authenticated_cursor.as_ref(), &cursor)?;
-        if record.retired_epochs.contains(&cursor.journal_epoch) {
-            bail!("retired remote journal epoch cannot be replayed");
-        }
-        record.projection.entries.push(entry);
-        record.projection.validate()?;
-        record.authenticated_cursor = Some(cursor);
-        persist_changed(&mut state, id, record)
-    }
-
-    /// Atomic snapshot replacement lets DEV-30 compact a full bounded window
-    /// without a schema edit. It remains a projection, not B's authority.
-    pub(crate) fn replace_remote_projection_from_authenticated_snapshot(
-        &self,
-        snapshot: AuthenticatedSnapshot,
-    ) -> Result<()> {
-        validate_snapshot_window(&snapshot.projection, &snapshot.cursor)?;
-        let mut state = self.remote_proxies.lock();
-        require_live_locked(
-            &state,
-            &snapshot.local_session_id,
-            &snapshot.remote_ref,
-            &snapshot.context,
-        )?;
-        let mut record = state
-            .records
-            .get(&snapshot.local_session_id)
-            .expect("checked RemoteProxy")
-            .clone();
-        if record
-            .retired_epochs
-            .contains(&snapshot.cursor.journal_epoch)
-        {
-            bail!("retired remote journal epoch cannot be restored");
-        }
-        if let Some(previous) = &record.authenticated_cursor {
-            if previous.journal_epoch == snapshot.cursor.journal_epoch
-                && snapshot.cursor.sequence < previous.sequence
-            {
-                bail!("remote projection cursor moved backwards");
-            }
-            if previous.journal_epoch == snapshot.cursor.journal_epoch
-                && snapshot.cursor.sequence == previous.sequence
-                && snapshot.projection != record.projection
-            {
-                bail!("same remote journal cursor has conflicting projection content");
-            }
-            if previous.journal_epoch != snapshot.cursor.journal_epoch {
-                if record.retired_epochs.len() >= MAX_RETIRED_EPOCHS {
-                    bail!("retired remote journal epoch capacity reached");
-                }
-                record.retired_epochs.push(previous.journal_epoch.clone());
-            }
-        }
-        record.projection = snapshot.projection;
-        record.authenticated_cursor = Some(snapshot.cursor);
-        persist_changed(&mut state, &snapshot.local_session_id, record)
     }
 
     /// Correlation slot for DEV-29's prepare/persist/dispatch. No input body,
@@ -703,51 +558,6 @@ impl SessionStore {
             task_id: task_id.to_owned(),
             request_fingerprint: fingerprint.to_owned(),
             disposition: RetiredRequestDisposition::AbandonedNeverAttempted,
-        });
-        persist_changed(&mut state, id, record)
-    }
-
-    /// Complete an authenticated terminal result without ever releasing its
-    /// correlation identifiers. Authentication is the caller's obligation;
-    /// all live A/B binding and pending checks happen under the same mutex as
-    /// retirement and persistence, so a post-verification rebind cannot win.
-    pub(crate) fn retire_remote_pending_terminal(
-        &self,
-        id: &str,
-        remote_ref: &str,
-        context: &LiveRemoteContext,
-        controlled_session_id: &str,
-        client_request_id: &str,
-        task_id: &str,
-        fingerprint: &str,
-    ) -> Result<()> {
-        let mut state = self.remote_proxies.lock();
-        require_live_mapping_locked(&state, id, remote_ref, context, controlled_session_id)?;
-        let mut record = state
-            .records
-            .get(id)
-            .expect("checked live RemoteProxy")
-            .clone();
-        let index = record
-            .pending
-            .iter()
-            .position(|item| item.client_request_id == client_request_id && item.task_id == task_id)
-            .ok_or_else(|| anyhow::anyhow!("unknown remote pending request"))?;
-        let pending = &record.pending[index];
-        if pending.request_fingerprint != fingerprint
-            || pending.dispatch_state != PendingDispatchState::AttemptMayHaveOccurred
-        {
-            bail!("remote request has no attempted dispatch to retire");
-        }
-        if record.retired_requests.len() >= MAX_RETIRED_REQUESTS {
-            bail!("retired remote request capacity reached");
-        }
-        record.pending.remove(index);
-        record.retired_requests.push(RetiredRemoteRequest {
-            client_request_id: client_request_id.to_owned(),
-            task_id: task_id.to_owned(),
-            request_fingerprint: fingerprint.to_owned(),
-            disposition: RetiredRequestDisposition::Terminal,
         });
         persist_changed(&mut state, id, record)
     }

@@ -3,7 +3,8 @@
  *
  * This is a separate domain from the existing `webAccess` WebUI share:
  * `controlledDevice` (B), `controllerConnection` + `remoteCapabilities` +
- * `remoteModels` + `remoteHistories` + `transcript` (A) live here, and every async completion
+ * `remoteModels` and lease/task status (A) live here; durable history is only
+ * the SessionStore RemoteProxy projection. Every async completion
  * is gated by the intent sequence and generation/lease epoch held in
  * `features/remote-control/remote-control-state.js`.
  *
@@ -31,6 +32,15 @@
     var capabilityOutcomeOrder = [];
     var capabilityFlights = Object.create(null);
     var capabilityRenewalTimer = null;
+    var modelListIntent = 0;
+    var capabilityReadIntent = 0;
+    var controlledTerminalSequence = 0;
+    var controllerTerminalSequence = 0;
+    var proxyListIntent = 0;
+    var proxyReadIntents = Object.create(null);
+    var proxyReadEpoch = 0;
+    var proxyOpenIntent = 0;
+    var proxyRefreshTimer = null;
     var CAPABILITY_RESPONSE_TIMEOUT_MS = 8_000;
     var CAPABILITY_MAX_ATTEMPTS = 3;
     var CAPABILITY_RENEWAL_LEAD_MS = 5_000;
@@ -50,9 +60,9 @@
       "controllerConnection",
       "remoteCapabilities",
       "remoteModels",
-      "remoteHistories",
-      "tasks",
-      "transcript",
+      "remoteProxyHistories",
+      "remoteProxyHistory",
+      "remoteProxyNotice",
       "controlledTasks",
       "controlledTranscript",
       "remotePermissions",
@@ -94,12 +104,13 @@
       subscribed = true;
       listen("desktop-remote-controlled-status", function (event) {
         var payload = event && event.payload ? event.payload : event || {};
+        noteControlledTerminal(payload);
         clientLog(
           "event status=" + String(payload.status || "") + " code=" + (payload.pairingCode ? "yes" : "no")
-          + " expires=" + String(payload.pairingExpiresAtMs || payload.expiresAtMs || "")
+          + " expires=" + String(payload.pairingExpiresAtMs || "")
           + " gen=" + String(payload.generation || ""),
         );
-        publish(logic.applyControlledStatus(current(), payload));
+        publish(logic.applyControlledStatus(current(), controlledStatusPayload(payload)));
       }).then(function (off) {
         unlisten.push(off);
       }).catch(function () {});
@@ -107,10 +118,12 @@
         var payload = event && event.payload ? event.payload : event || {};
         var state = current();
         var controlledSession = state.controlledSession || {};
-        var sessionId = payload.sessionId || payload.session_id || "";
-        publish(controlledSession.sessionId && String(controlledSession.sessionId) === String(sessionId)
-          ? logic.applyControlledTaskEvent(state, payload)
-          : logic.applyTaskEvent(state, payload));
+        // This event is the current frozen task_status protocol projection.
+        // The separate local task-event channel uses camelCase.
+        var sessionId = payload.session_id || "";
+        if (controlledSession.sessionId && String(controlledSession.sessionId) === String(sessionId)) {
+          publish(logic.applyControlledTaskEvent(state, payload));
+        }
       }).then(function (off) {
         unlisten.push(off);
       }).catch(function () {});
@@ -138,25 +151,33 @@
       }).then(function (off) {
         unlisten.push(off);
       }).catch(function () {});
-      listen("desktop-remote-controller-session", function (event) {
+      // A 端状态事件：后台 keeper 会在 connecting / safety_handshake /
+      // connected / reconnecting / error 之间推进。没有这条监听时，前端只能
+      // 看到一次性命令返回值，窗口重载后会误以为 A 端仍然空闲。
+      // Rust authenticates this narrow result against the live RemoteProxy.
+      // The WebView still checks its exact local/ref/session/lease binding.
+      listen("desktop-remote-proxy-capability", function (event) {
         var payload = event && event.payload ? event.payload : event || {};
-        applyControllerSession(payload);
         settleCapabilityResponse(payload);
       }).then(function (off) {
         unlisten.push(off);
       }).catch(function () {});
-      // A 端状态事件：后台 keeper 会在 connecting / safety_handshake /
-      // connected / reconnecting / error 之间推进。没有这条监听时，前端只能
-      // 看到一次性命令返回值，窗口重载后会误以为 A 端仍然空闲。
       listen("desktop-remote-controller-status", function (event) {
         var payload = event && event.payload ? event.payload : event || {};
-        publish(logic.applyControllerStatus(current(), controllerStatusPayload(payload)));
+        var projection = controllerStatusPayload(payload);
+        noteControllerTerminal(projection);
+        publish(logic.applyControllerStatus(current(), projection));
       }).then(function (off) {
         unlisten.push(off);
       }).catch(function () {});
-      listen("desktop-remote-controller-journal", function (event) {
+      listen("desktop_remote_proxy", function (event) {
         var payload = event && event.payload ? event.payload : event || {};
-        publish(logic.applyJournalEvent(current(), payload));
+        var before = current();
+        var after = logic.applyRemoteProxyNotice(before, payload);
+        if (after !== before) {
+          publish(after);
+          scheduleRemoteProxyRefresh(after.remoteProxyNotice);
+        }
       }).then(function (off) {
         unlisten.push(off);
       }).catch(function () {});
@@ -169,6 +190,11 @@
         } catch (_) {}
       });
       subscribed = false;
+      if (proxyRefreshTimer) clearTimeout(proxyRefreshTimer);
+      proxyRefreshTimer = null;
+      ++proxyListIntent;
+      ++proxyReadEpoch;
+      proxyReadIntents = Object.create(null);
       if (capabilityRenewalTimer) clearTimeout(capabilityRenewalTimer);
       capabilityRenewalTimer = null;
       Object.keys(capabilityWaiters).forEach(function (requestId) {
@@ -179,46 +205,57 @@
       });
     }
 
-    function controlledIntent() {
-      var next = logic.beginControlledIntent(current());
+    function controlledIntent(openNewGeneration) {
+      var next = logic.beginControlledIntent(current(), openNewGeneration);
       publish(next);
       return next.intents.controlled;
     }
 
-    function controllerIntent() {
-      var next = logic.beginControllerIntent(current());
+    function controllerIntent(openNewConnection) {
+      var next = logic.beginControllerIntent(current(), openNewConnection);
       publish(next);
       return next.intents.controller;
     }
 
     function applyControlled(intent, result) {
       var payload = result && typeof result === "object" ? result : {};
+      noteControlledTerminal(payload);
       clientLog(
         "result status=" + String(payload.status || "") + " code=" + (payload.pairingCode ? "yes" : "no")
-        + " expires=" + String(payload.pairingExpiresAtMs || payload.expiresAtMs || "")
+        + " expires=" + String(payload.pairingExpiresAtMs || "")
         + " gen=" + String(payload.generation || ""),
       );
-      publish(logic.applyControlledStatus(current(), {
-        intent: intent,
-        status: payload.kind || payload.status || "idle",
-        generation: payload.remoteControlGeneration || payload.generation || null,
-        pairingCode: payload.pairingCode || null,
-        expiresAtMs: payload.expiresAtMs || payload.pairingExpiresAtMs || null,
-        deviceName: payload.deviceName || null,
-        controllerDeviceName: payload.controllerDeviceName || null,
-        workspaces: payload.workspaces || null,
-        error: payload.errorCode || payload.lastError || null,
-      }));
+      publish(logic.applyControlledStatus(current(), Object.assign(
+        controlledStatusPayload(payload), { intent: intent },
+      )));
       return result;
+    }
+
+    /** The sole Rust ControlledStatus DTO has camelCase fields. */
+    function controlledStatusPayload(result) {
+      var wire = result && typeof result === "object" ? result : {};
+      return {
+        status: wire.status || "idle",
+        generation: wire.generation || null,
+        pairingCode: wire.pairingCode || null,
+        expiresAtMs: wire.pairingExpiresAtMs || null,
+        deviceName: wire.deviceName || null,
+        controllerDeviceName: wire.controllerDeviceName || null,
+        error: wire.errorCode || null,
+      };
     }
 
     function applyController(intent, result) {
       var payload = controllerStatusPayload(result);
+      noteControllerTerminal(payload);
       publish(logic.applyControllerStatus(current(), {
         intent: intent,
         status: payload.status,
         connectionId: payload.connectionId,
+        controllerLeaseId: payload.controllerLeaseId,
         leaseEpoch: payload.leaseEpoch,
+        relayEpoch: payload.relayEpoch,
+        generation: payload.generation,
         deviceName: payload.deviceName,
         error: payload.error,
       }));
@@ -228,11 +265,21 @@
     function controlledStart(deviceName, workspaces) {
       ensureAvailable();
       subscribe();
-      var intent = controlledIntent();
+      var intent = controlledIntent(true);
       return invoke("desktop_remote_controlled_start", {
         deviceName: deviceName || null,
         workspaces: Array.isArray(workspaces) ? workspaces : [],
       }).then(function (result) {
+        if (current().controlledTerminatedOpenIntent === intent) {
+          var terminalSequence = controlledTerminalSequence;
+          return invoke("desktop_remote_controlled_status", {}).then(function (authoritative) {
+            if (terminalSequence !== controlledTerminalSequence) return result;
+            publish(logic.reconcileControlledOpenStatus(
+              current(), intent, controlledStatusPayload(authoritative), result && result.generation,
+            ));
+            return result;
+          });
+        }
         return applyControlled(intent, result);
       }).catch(function (failure) { throw asBoundedError(failure); });
     }
@@ -320,8 +367,18 @@
     function controllerConnect(code) {
       ensureAvailable();
       subscribe();
-      var intent = controllerIntent();
+      var intent = controllerIntent(true);
       return invoke("desktop_remote_controller_connect", { code: code }).then(function (result) {
+        if (current().controllerTerminatedOpenIntent === intent) {
+          var terminalSequence = controllerTerminalSequence;
+          return invoke("desktop_remote_controller_status", {}).then(function (authoritative) {
+            if (terminalSequence !== controllerTerminalSequence) return result;
+            publish(logic.reconcileControllerOpenStatus(
+              current(), intent, controllerStatusPayload(authoritative),
+            ));
+            return result;
+          });
+        }
         return applyController(intent, result);
       }).catch(function (failure) { throw asBoundedError(failure); });
     }
@@ -354,9 +411,12 @@
     function controllerStatus() {
       ensureAvailable();
       subscribe();
+      var before = current();
       return invoke("desktop_remote_controller_status", {}).then(function (result) {
+        if (!sameControllerView(before, current())) return result;
         var payload = controllerStatusPayload(result);
-        publish(logic.applyControllerStatus(current(), payload));
+        noteControllerTerminal(payload);
+        publish(logic.applyControllerStatus(current(), Object.assign({}, payload, { authoritativeRead: true })));
         return result;
       }).catch(function (failure) { throw asBoundedError(failure); });
     }
@@ -368,47 +428,13 @@
       return {
         status: wire.status || "idle",
         connectionId: lease.connectionId || null,
+        controllerLeaseId: lease.controllerLeaseId || null,
         leaseEpoch: lease.leaseEpoch || null,
+        relayEpoch: lease.relayEpoch || null,
+        generation: lease.remoteControlGeneration || null,
         deviceName: wire.deviceDisplayName || null,
         error: wire.errorCode || null,
       };
-    }
-
-    /**
-     * E2E-03: the A-side remote session and task intent. The view passes only UI
-     * fields (title, mode, text); every protocol field, identifier and the input
-     * digest are built in Rust. The composed payload is returned for the
-     * encrypted dispatch task (E2E-04) and is never assembled here.
-     */
-    function controllerSessionOpen(title, mode) {
-      ensureAvailable();
-      subscribe();
-      // 复用当前连接上的会话引用：重复打开是幂等的，不会为同一连接不断创建
-      // 新会话（Rust 侧按引用复用并重新校验 lease 绑定）。
-      var snapshot = current();
-      var existing = snapshot.controllerConnection && snapshot.controllerConnection.sessionRef;
-      return invoke("desktop_remote_controller_session_open", {
-        remoteRef: existing || null,
-        title: title || "",
-        mode: mode || "chat",
-      }).then(function (result) {
-        return applyControllerSession(result);
-      }).catch(function (failure) { throw asBoundedError(failure); });
-    }
-
-    function controllerSessionState(remoteRef) {
-      ensureAvailable();
-      return invoke("desktop_remote_controller_session_state", { remoteRef: remoteRef });
-    }
-
-    function controllerSessionClose(remoteRef) {
-      ensureAvailable();
-      return invoke("desktop_remote_controller_session_close", { remoteRef: remoteRef });
-    }
-
-    function controllerCapabilityRequest(remoteRef) {
-      ensureAvailable();
-      return invoke("desktop_remote_controller_capability_request", { remoteRef: remoteRef });
     }
 
     function rememberCapabilityOutcome(requestId, outcome) {
@@ -435,25 +461,26 @@
       var requestId = payload && payload.capabilityRequestId
         ? String(payload.capabilityRequestId)
         : "";
-      if (!requestId) return;
+      if (!requestId || !logic.matchesRemoteProxyCapabilityBinding(current(), payload)) return;
       var error = payload.capabilityError ? String(payload.capabilityError) : "";
       var outcome = {
-        ok: !error && payload.capabilityRevision != null,
+        ok: !error && payload.mappingConfirmed === true
+          && Number.isSafeInteger(payload.capabilityRevision) && payload.capabilityRevision > 0,
         code: error || "capability_snapshot_unavailable",
         payload: payload,
       };
-      finishCapabilityWaiter(requestId, outcome);
-      // A successful snapshot satisfies every retry already in flight for the
-      // same session. Late failures from older attempts must not regress it.
-      if (outcome.ok && payload.sessionId) {
-        Object.keys(capabilityWaiters).forEach(function (pendingId) {
-          var waiter = capabilityWaiters[pendingId];
-          if (String(waiter.sessionId || "") === String(payload.sessionId)) {
-            finishCapabilityWaiter(pendingId, outcome);
-          }
-        });
-        scheduleCapabilityRenewal(payload);
+      var waiter = capabilityWaiters[requestId];
+      if (!waiter) {
+        rememberCapabilityOutcome(requestId, outcome);
+        return;
       }
+      if (waiter.sessionId !== payload.sessionId || waiter.remoteRef !== payload.remoteSessionRef) return;
+      var before = current();
+      var after = logic.applyRemoteProxyCapabilityResult(before, payload);
+      if (after === before) return;
+      publish(after);
+      finishCapabilityWaiter(requestId, outcome);
+      if (outcome.ok) scheduleCapabilityRenewal(payload);
     }
 
     function waitForCapabilityResponse(intent, remoteRef) {
@@ -463,6 +490,16 @@
       if (capabilityOutcomes[requestId]) {
         var remembered = capabilityOutcomes[requestId];
         delete capabilityOutcomes[requestId];
+        if (remembered.payload.sessionId !== sessionId
+          || remembered.payload.remoteSessionRef !== remoteRef
+          || !logic.matchesRemoteProxyCapabilityBinding(current(), remembered.payload)) {
+          return Promise.reject(asBoundedError("capability_snapshot_unavailable"));
+        }
+        var before = current();
+        var after = logic.applyRemoteProxyCapabilityResult(before, remembered.payload);
+        if (after === before) return Promise.reject(asBoundedError("capability_snapshot_unavailable"));
+        publish(after);
+        if (remembered.ok) scheduleCapabilityRenewal(remembered.payload);
         return remembered.ok
           ? Promise.resolve(remembered.payload)
           : Promise.reject(asBoundedError(remembered.code));
@@ -470,15 +507,6 @@
       return new Promise(function (resolve, reject) {
         var timer = setTimeout(function () {
           delete capabilityWaiters[requestId];
-          var connection = current().controllerConnection || {};
-          if (
-            String(connection.sessionRef || "") === String(remoteRef || "") &&
-            connection.capabilityRevision != null &&
-            connection.capabilityStatus === "ready"
-          ) {
-            resolve(connection);
-            return;
-          }
           reject(asBoundedError("capability_snapshot_timeout"));
         }, CAPABILITY_RESPONSE_TIMEOUT_MS);
         capabilityWaiters[requestId] = {
@@ -486,6 +514,7 @@
           reject: reject,
           timer: timer,
           sessionId: sessionId,
+          remoteRef: remoteRef,
         };
       });
     }
@@ -549,104 +578,6 @@
       return beginCapabilityHandshake(remoteRef, false);
     }
 
-    function controllerApplyCapabilitySnapshot(remoteRef, payload) {
-      ensureAvailable();
-      var body = payload && typeof payload === "object" ? payload : {};
-      return invoke("desktop_remote_controller_apply_capability_snapshot", {
-        remoteRef: remoteRef,
-        payload: body,
-      }).then(function (result) {
-        // 同一个快照同时进入能力域（revision/modes/描述符），字段名按 UI 侧
-        // 约定映射；wire 字段名不会泄漏到状态。
-        publish(logic.applyCapabilities(current(), capabilitySnapshotForUi(body)));
-        return applyControllerSession(result);
-      }).catch(function (failure) { throw asBoundedError(failure); });
-    }
-
-    function descriptorList(value, idKey) {
-      if (!Array.isArray(value)) return [];
-      return value.slice(0, 256).map(function (item) {
-        var entry = item && typeof item === "object" ? item : {};
-        return {
-          id: entry[idKey] || entry.id || "",
-          displayName: entry.display_name || entry.displayName || "",
-          codeAllowed: !!entry.code_allowed,
-        };
-      });
-    }
-
-    function capabilitySnapshotForUi(payload) {
-      var wire = payload && typeof payload === "object" ? payload : {};
-      var revision = Number(wire.capability_revision);
-      return {
-        connectionId: wire.connection_id || null,
-        leaseEpoch: wire.lease_epoch || null,
-        relayEpoch: wire.relay_epoch || null,
-        remoteControlGeneration: wire.remote_control_generation || null,
-        capabilityRevision: isFinite(revision) ? revision : 0,
-        modes: Array.isArray(wire.modes) ? wire.modes.slice(0, 2) : [],
-        tools: descriptorList(wire.tools, "tool_id"),
-        skills: descriptorList(wire.skills, "skill_id"),
-        workspaces: descriptorList(wire.workspaces, "workspace_id"),
-        expiresAtMs: wire.expires_at_ms || null,
-      };
-    }
-
-    function controllerTaskIntent(remoteRef, text) {
-      ensureAvailable();
-      return invoke("desktop_remote_controller_task_intent", {
-        remoteRef: remoteRef,
-        text: String(text || ""),
-      });
-    }
-
-    function controllerTaskCancelIntent(remoteRef, taskId) {
-      ensureAvailable();
-      return invoke("desktop_remote_controller_task_cancel_intent", {
-        remoteRef: remoteRef,
-        taskId: taskId,
-      });
-    }
-
-    /**
-     * E2E-04: compose and send one encrypted task / cancel frame. The protocol
-     * payload is built and sealed in Rust; the UI only supplies the session
-     * reference plus the text or task id.
-     */
-    function controllerTaskSend(remoteRef, text, modelSource) {
-      ensureAvailable();
-      var visibleText = String(text || "").trim();
-      return invoke("desktop_remote_controller_task_send", {
-        remoteRef: remoteRef,
-        text: visibleText,
-        modelSource: modelSource || "controlled_device",
-      }).catch(function (failure) { throw asBoundedError(failure); }).then(function (result) {
-        // The encrypted task-status acknowledgement intentionally carries no
-        // prompt. Retain the text from the successfully queued local intent so
-        // ChatView can show the sent message immediately; the authoritative
-        // journal entry replaces this fallback by task id when it arrives.
-        var projection = result && typeof result === "object" ? result : {};
-        var taskId = projection.taskId || projection.task_id || null;
-        if (taskId) {
-          publish(logic.applyTaskEvent(current(), {
-            taskId: taskId,
-            sessionId: projection.sessionId || projection.session_id || null,
-            status: "admitted",
-            text: visibleText,
-          }));
-        }
-        return result;
-      });
-    }
-
-    function controllerTaskCancelSend(remoteRef, taskId) {
-      ensureAvailable();
-      return invoke("desktop_remote_controller_task_cancel_send", {
-        remoteRef: remoteRef,
-        taskId: taskId,
-      }).catch(function (failure) { throw asBoundedError(failure); });
-    }
-
     /** B submits through the same authoritative remote task service as A. */
     function controlledTaskSend(sessionId, text) {
       ensureAvailable();
@@ -656,12 +587,13 @@
         text: visibleText,
       }).catch(function (failure) { throw asBoundedError(failure); }).then(function (result) {
         var projection = result && typeof result === "object" ? result : {};
-        var taskId = projection.taskId || projection.task_id || null;
-        if (taskId) {
+        // The B Command returns the frozen task_status protocol projection.
+        var taskId = projection.task_id || null;
+        if (taskId && projection.session_id === sessionId && projection.task_status) {
           publish(logic.applyControlledTaskEvent(current(), {
             taskId: taskId,
-            sessionId: projection.sessionId || projection.session_id || sessionId,
-            status: projection.taskStatus || projection.task_status || "admitted",
+            sessionId: projection.session_id,
+            status: projection.task_status,
             text: visibleText,
           }));
         }
@@ -669,110 +601,237 @@
       });
     }
 
-    function applyControllerSession(result) {
-      var payload = result && typeof result === "object" ? result : {};
-      publish(logic.applyControllerSession(current(), {
-        sessionRef: payload.sessionRef || null,
-        sessionId: payload.sessionId || null,
-        mode: payload.mode || null,
-        connectionId: payload.connectionId || null,
-        leaseEpoch: payload.leaseEpoch || null,
-        capabilityRevision: payload.capabilityRevision == null ? null : payload.capabilityRevision,
-        capabilityValidForMs: payload.capabilityValidForMs == null ? null : payload.capabilityValidForMs,
-        capabilityError: payload.capabilityError || null,
-        capabilityRequestId: payload.capabilityRequestId || null,
-        temporaryModelAvailable: payload.temporaryModelAvailable === true,
-      }));
-      return result;
-    }
-
-    function controllerListHistory() {
+    function capabilitiesSnapshot(remoteRef) {
       ensureAvailable();
-      return invoke("desktop_remote_controller_list_history", {}).then(function (result) {
-        publish(logic.applyHistories(current(), result || []));
-        return result;
-      });
-    }
-
-    function controllerCreateHistory(title, deviceDisplayName, sessionRef) {
-      ensureAvailable();
-      return invoke("desktop_remote_controller_create_history", {
-        title: title,
-        deviceDisplayName: deviceDisplayName,
-        sessionRef: sessionRef,
-      });
-    }
-
-    function capabilitiesSnapshot() {
-      ensureAvailable();
-      return invoke("desktop_remote_capabilities_snapshot", {}).then(function (snapshot) {
-        var before = current();
-        var after = logic.applyCapabilities(before, snapshot);
-        if (after === before) return null;
+      var intent = ++capabilityReadIntent;
+      var before = current();
+      var connection = before.controllerConnection || {};
+      if (!requiredOpaqueId(remoteRef) || connection.status !== "connected"
+        || connection.sessionRef !== remoteRef || !connection.connectionId
+        || !connection.controllerLeaseId || !connection.leaseEpoch
+        || !connection.relayEpoch || !connection.generation) {
+        return Promise.reject(asBoundedError("capability_snapshot_unavailable"));
+      }
+      return invoke("desktop_remote_controller_capability_snapshot", { remoteRef: remoteRef }).then(function (snapshot) {
+        if (intent !== capabilityReadIntent || !sameControllerView(before, current())) return null;
+        var after = logic.applyCapabilities(current(), snapshot);
+        if (after === current()) return null;
         publish(after);
-        return snapshot;
-      });
+        return after.remoteCapabilities;
+      }).catch(function (failure) { throw asBoundedError(failure); });
+    }
+
+    function noteControlledTerminal(payload) {
+      var status = payload && payload.status;
+      if (status === "stopped" || status === "error" || status === "disabled") {
+        controlledTerminalSequence += 1;
+      }
+    }
+
+    function noteControllerTerminal(payload) {
+      var status = payload && payload.status;
+      if (status === "idle" || status === "disconnected" || status === "error") {
+        controllerTerminalSequence += 1;
+      }
+    }
+
+    function sameControllerView(before, after) {
+      var left = before.controllerConnection || {};
+      var right = after.controllerConnection || {};
+      return before.intents.controller === after.intents.controller
+        && left.status === right.status
+        && left.connectionId === right.connectionId
+        && left.controllerLeaseId === right.controllerLeaseId
+        && left.leaseEpoch === right.leaseEpoch
+        && left.relayEpoch === right.relayEpoch
+        && left.generation === right.generation
+        && left.sessionRef === right.sessionRef
+        && left.capabilityRevision === right.capabilityRevision;
     }
 
     function listExportableModels() {
       ensureAvailable();
+      var intent = ++modelListIntent;
+      var before = current();
       return invoke("desktop_remote_model_list_exportable", {}).then(function (models) {
-        publish(logic.applyModels(current(), models || []));
-        return models || [];
+        if (intent !== modelListIntent || !sameControllerView(before, current())) return [];
+        var next = logic.applyModels(current(), models);
+        if (next !== current()) publish(next);
+        return next.remoteModels;
       });
     }
 
-    function openRemoteSession(remoteSessionRef, title, codeMode) {
+    function listRemoteProxyHistory() {
       ensureAvailable();
-      return invoke("desktop_remote_task_open_session", {
-        remoteSessionRef: remoteSessionRef,
-        title: title,
-        codeMode: !!codeMode,
-      });
+      var intent = ++proxyListIntent;
+      return invoke("desktop_remote_proxy_history_list", {}).then(function (records) {
+        if (intent !== proxyListIntent) return [];
+        var before = current();
+        var after = logic.projectRemoteProxyList(before, records);
+        if (after === before) throw asBoundedError("remote_proxy_projection_invalid");
+        if (after !== before) publish(after);
+        return after.remoteProxyHistories;
+      }).catch(function (failure) { throw asBoundedError(failure); });
     }
 
-    function switchRemoteSession(remoteSessionRef, sessionId) {
+    function openLiveRemoteProxy(existingLocalSessionId) {
       ensureAvailable();
-      return invoke("desktop_remote_task_switch_session", {
-        remoteSessionRef: remoteSessionRef,
-        sessionId: sessionId,
-      });
-    }
-
-    /**
-     * Submits one task. `payload` must be the already-built protocol payload
-     * (binding + input digest); `modelId` is only forwarded when the task uses
-     * an A-side temporary model, because Rust resolves the credential itself.
-     */
-    function submitRemoteTask(payload, selectedModelId, permissionRequest) {
-      ensureAvailable();
-      var body = payload && typeof payload === "object" ? payload : {};
-      if (!logic.matchesLiveContext(current(), body)) {
-        var stale = new Error("task_binding_stale");
-        stale.code = "task_binding_stale";
-        return Promise.reject(stale);
+      subscribe();
+      if (existingLocalSessionId != null
+        && (!requiredOpaqueId(existingLocalSessionId) || !existingLocalSessionId.startsWith("remote-"))) {
+        return Promise.reject(invalidTaskIntent());
       }
-      return invoke("desktop_remote_task_submit", {
-        payload: body,
-        selectedModelId: selectedModelId || null,
-        permissionRequest: permissionRequest || null,
+      var intent = ++proxyOpenIntent;
+      return invoke("desktop_remote_proxy_open_live", {
+        existingLocalSessionId: existingLocalSessionId || null,
       }).then(function (result) {
-        publish(logic.applyControlledTaskEvent(current(), result || {}));
-        return result;
-      });
+        if (intent !== proxyOpenIntent) throw asBoundedError("remote_proxy_binding_mismatch");
+        if (existingLocalSessionId && result.localSessionId !== existingLocalSessionId) {
+          throw asBoundedError("remote_proxy_binding_mismatch");
+        }
+        var before = current();
+        var after = logic.applyRemoteProxyBinding(before, result);
+        if (after === before) throw asBoundedError("remote_proxy_binding_mismatch");
+        publish(after);
+        return {
+          localSessionId: result.localSessionId,
+          remoteRef: result.remoteSessionRef,
+        };
+      }).catch(function (failure) { throw asBoundedError(failure); });
     }
 
-    function cancelRemoteTask(taskId) {
+    function readRemoteProxyHistory(localSessionId, options) {
       ensureAvailable();
-      return invoke("desktop_remote_task_cancel", { taskId: taskId }).then(function (result) {
-        publish(logic.applyControlledTaskEvent(current(), result || {}));
-        return result;
-      });
+      if (!requiredOpaqueId(localSessionId) || !localSessionId.startsWith("remote-")) {
+        return Promise.reject(invalidTaskIntent());
+      }
+      var intent = (proxyReadIntents[localSessionId] || 0) + 1;
+      proxyReadIntents[localSessionId] = intent;
+      var epoch = proxyReadEpoch;
+      var navigationRead = options && options.navigation === true;
+      return invoke("desktop_remote_proxy_history_read", { localSessionId: localSessionId })
+        .then(function (record) {
+          if (epoch !== proxyReadEpoch || intent !== proxyReadIntents[localSessionId]
+            || !record || record.localSessionId !== localSessionId) return null;
+          var before = current();
+          var after = logic.projectRemoteProxyRead(before, record);
+          if (after === before) throw asBoundedError("remote_proxy_projection_invalid");
+          // Navigation consumes this verified value directly and publishes it
+          // only after sessions adopts the ID. A background read of another
+          // proxy must never replace the selected ChatView projection.
+          if (!navigationRead && state.activeSessionId === localSessionId) publish(after);
+          return after.remoteProxyHistory;
+        }).catch(function (failure) { throw asBoundedError(failure); });
     }
 
-    function remoteTaskStatus(taskId) {
+    function selectRemoteProxyHistory(record) {
+      if (!record || state.activeSessionId !== record.localSessionId) return false;
+      var before = current();
+      var after = logic.projectRemoteProxyRead(before, record);
+      if (after === before) return false;
+      publish(after);
+      return true;
+    }
+
+    function deleteRemoteProxyHistory(localSessionId) {
       ensureAvailable();
-      return invoke("desktop_remote_task_status", { taskId: taskId });
+      if (!requiredOpaqueId(localSessionId) || !localSessionId.startsWith("remote-")) {
+        return Promise.reject(invalidTaskIntent());
+      }
+      return invoke("desktop_remote_proxy_history_delete", { localSessionId: localSessionId })
+        .then(function () {
+          ++proxyListIntent;
+          proxyReadIntents[localSessionId] = (proxyReadIntents[localSessionId] || 0) + 1;
+          publish(logic.hideRemoteProxyHistory(current(), localSessionId));
+          listRemoteProxyHistory().catch(function () {});
+        }).catch(function (failure) { throw asBoundedError(failure); });
+    }
+
+    function scheduleRemoteProxyRefresh(notice) {
+      if (proxyRefreshTimer) clearTimeout(proxyRefreshTimer);
+      proxyRefreshTimer = setTimeout(function () {
+        proxyRefreshTimer = null;
+        if (current().remoteProxyNotice !== notice || !isAvailable()) return;
+        var selected = current().remoteProxyHistory;
+        listRemoteProxyHistory().catch(function () {});
+        if (selected && selected.localSessionId === notice.localSessionId) {
+          readRemoteProxyHistory(selected.localSessionId).catch(function () {});
+        }
+      }, 50);
+    }
+
+    function invalidTaskIntent() {
+      var error = new Error("remote_task_intent_invalid");
+      error.code = "remote_task_intent_invalid";
+      return error;
+    }
+
+    function requiredOpaqueId(value) {
+      return typeof value === "string" && value.length > 0 && value.length <= 128
+        && /^[A-Za-z0-9._:-]+$/.test(value);
+    }
+
+    /** A-side intent only. Rust owns IDs, digest, binding and encrypted wire bytes. */
+    function submitRemoteTask(localSessionId, remoteRef, intent) {
+      ensureAvailable();
+      if (!requiredOpaqueId(localSessionId) || !requiredOpaqueId(remoteRef) || !intent || typeof intent !== "object") {
+        return Promise.reject(invalidTaskIntent());
+      }
+      var body;
+      if (intent.kind === "new") {
+        if (typeof intent.text !== "string" || !intent.text.trim()
+          || new TextEncoder().encode(intent.text).length > 65536
+          || (intent.modelSource !== "controlled_device" && intent.modelSource !== "controller_temporary")) {
+          return Promise.reject(invalidTaskIntent());
+        }
+        if (intent.modelSource === "controller_temporary" && !requiredOpaqueId(intent.selectedModelId)) {
+          return Promise.reject(invalidTaskIntent());
+        }
+        if (intent.modelSource === "controlled_device" && intent.selectedModelId != null) {
+          return Promise.reject(invalidTaskIntent());
+        }
+        if (Object.keys(intent).some(function (key) {
+          return ["kind", "text", "modelSource", "selectedModelId"].indexOf(key) < 0;
+        })) return Promise.reject(invalidTaskIntent());
+        body = {
+          kind: "new",
+          text: intent.text,
+          modelSource: intent.modelSource,
+          selectedModelId: intent.modelSource === "controller_temporary" ? intent.selectedModelId : null,
+        };
+      } else if (intent.kind === "retry") {
+        var handle = intent.handle;
+        if (!handle || typeof handle !== "object"
+          || !requiredOpaqueId(handle.taskId) || !requiredOpaqueId(handle.clientRequestId)
+          || !/^[a-fA-F0-9]{64}$/.test(handle.requestFingerprint || "")
+          || Object.keys(handle).some(function (key) {
+            return ["taskId", "clientRequestId", "requestFingerprint"].indexOf(key) < 0;
+          }) || Object.keys(intent).some(function (key) {
+            return ["kind", "handle"].indexOf(key) < 0;
+          })) return Promise.reject(invalidTaskIntent());
+        body = { kind: "retry", handle: {
+          taskId: handle.taskId,
+          clientRequestId: handle.clientRequestId,
+          requestFingerprint: handle.requestFingerprint,
+        } };
+      } else return Promise.reject(invalidTaskIntent());
+      return invoke("desktop_remote_task_dispatch_a", {
+        localSessionId: localSessionId,
+        remoteRef: remoteRef,
+        intent: body,
+      }).catch(function (failure) { throw asBoundedError(failure); });
+    }
+
+    function abandonPreparedRemoteTask(localSessionId, clientRequestId, taskId) {
+      ensureAvailable();
+      if (!requiredOpaqueId(localSessionId) || !requiredOpaqueId(clientRequestId) || !requiredOpaqueId(taskId)) {
+        return Promise.reject(invalidTaskIntent());
+      }
+      return invoke("desktop_remote_task_abandon_prepared_a", {
+        localSessionId: localSessionId,
+        clientRequestId: clientRequestId,
+        taskId: taskId,
+      }).catch(function (failure) { throw asBoundedError(failure); });
     }
 
     function permissionList(taskId) {
@@ -872,68 +931,6 @@
       return invoke("desktop_remote_artifact_download_abort", { transferId: transferId });
     }
 
-    function historyList() {
-      ensureAvailable();
-      return invoke("desktop_remote_history_list", {}).then(function (records) {
-        publish(logic.applyHistories(current(), records || []));
-        return records || [];
-      });
-    }
-
-    function historyLoad(historyId) {
-      ensureAvailable();
-      return invoke("desktop_remote_history_load", { historyId: historyId });
-    }
-
-    function historyDelete(historyId) {
-      ensureAvailable();
-      return invoke("desktop_remote_history_delete", { historyId: historyId }).then(function (deleted) {
-        if (deleted) {
-          var next = shallow(current());
-          next.remoteHistories = (next.remoteHistories || []).filter(function (record) {
-            return record.historyId !== historyId;
-          });
-          publish(next);
-        }
-        return deleted;
-      });
-    }
-
-    function historyMarkOffline(historyId) {
-      ensureAvailable();
-      return invoke("desktop_remote_history_mark_offline", { historyId: historyId }).then(function (record) {
-        var next = shallow(current());
-        next.remoteHistories = (next.remoteHistories || []).map(function (entry) {
-          if (entry.historyId !== historyId) return entry;
-          return {
-            historyId: entry.historyId,
-            title: entry.title,
-            deviceDisplayName: entry.deviceDisplayName,
-            state: "offline_copy",
-            lastSequence: entry.lastSequence,
-            lastTerminalStatus: entry.lastTerminalStatus,
-          };
-        });
-        publish(next);
-        return record;
-      });
-    }
-
-    function journalReplay(epoch, sequence) {
-      ensureAvailable();
-      return invoke("desktop_remote_journal_replay", { epoch: epoch, sequence: sequence });
-    }
-
-    function journalSnapshot() {
-      ensureAvailable();
-      return invoke("desktop_remote_journal_snapshot", {});
-    }
-
-    function journalAcknowledge(sequence) {
-      ensureAvailable();
-      return invoke("desktop_remote_journal_acknowledge", { sequence: sequence });
-    }
-
     function shallow(value) {
       var copy = {};
       Object.keys(value || {}).forEach(function (key) {
@@ -946,7 +943,7 @@
 
     // 窗口重载 / bridge 重建后，以 Rust 状态机为权威恢复 A 端连接状态；
     // 否则后端 connected 而前端 idle，下一次连接会被本地状态机拒绝。
-    controllerStatus().catch(function () {});
+    if (isAvailable()) controllerStatus().catch(function () {});
 
     return {
       isAvailable: function () {
@@ -967,26 +964,17 @@
       controllerConnect: controllerConnect,
       controllerDisconnect: controllerDisconnect,
       controllerStatus: controllerStatus,
-      controllerSessionOpen: controllerSessionOpen,
-      controllerSessionState: controllerSessionState,
-      controllerSessionClose: controllerSessionClose,
-      controllerCapabilityRequest: controllerCapabilityRequest,
       controllerCapabilitySend: controllerCapabilitySend,
-      controllerApplyCapabilitySnapshot: controllerApplyCapabilitySnapshot,
-      controllerTaskIntent: controllerTaskIntent,
-      controllerTaskCancelIntent: controllerTaskCancelIntent,
-      controllerTaskSend: controllerTaskSend,
-      controllerTaskCancelSend: controllerTaskCancelSend,
       controlledTaskSend: controlledTaskSend,
-      controllerListHistory: controllerListHistory,
-      controllerCreateHistory: controllerCreateHistory,
       capabilitiesSnapshot: capabilitiesSnapshot,
       listExportableModels: listExportableModels,
-      openRemoteSession: openRemoteSession,
-      switchRemoteSession: switchRemoteSession,
+      listRemoteProxyHistory: listRemoteProxyHistory,
+      openLiveRemoteProxy: openLiveRemoteProxy,
+      readRemoteProxyHistory: readRemoteProxyHistory,
+      selectRemoteProxyHistory: selectRemoteProxyHistory,
+      deleteRemoteProxyHistory: deleteRemoteProxyHistory,
       submitRemoteTask: submitRemoteTask,
-      cancelRemoteTask: cancelRemoteTask,
-      remoteTaskStatus: remoteTaskStatus,
+      abandonPreparedRemoteTask: abandonPreparedRemoteTask,
       permissionList: permissionList,
       permissionDecide: permissionDecide,
       permissionDenyTask: permissionDenyTask,
@@ -998,13 +986,6 @@
       artifactDownloadBegin: artifactDownloadBegin,
       artifactDownloadChunk: artifactDownloadChunk,
       artifactDownloadAbort: artifactDownloadAbort,
-      historyList: historyList,
-      historyLoad: historyLoad,
-      historyDelete: historyDelete,
-      historyMarkOffline: historyMarkOffline,
-      journalReplay: journalReplay,
-      journalSnapshot: journalSnapshot,
-      journalAcknowledge: journalAcknowledge,
     };
   };
 })(typeof window !== "undefined" ? window : globalThis);

@@ -156,7 +156,7 @@ for (const [lane, source] of Object.entries(sources)) {
     assert.equal(operation.pendingSubmission, false);
     assert.equal(h.api.getVoiceOperationId(null, 'chat'), operation.operationId);
     assert.equal(h.events.length, 0);
-    assert.match(chat, /return result === 'restored' \? false : result;/);
+    assert.match(chat, /return result === 'restored' \|\| result === 'held' \? false : result;/);
   });
 
   test(`${lane}: queued admission cannot associate the same voice with another manual message`, () => {
@@ -324,6 +324,7 @@ for (const navigation of ['none', 'session', 'new-draft', 'after-rollback']) {
     Object.assign(ctx, {
       voice: () => h.api, sessionStates: buffers, ensureSessionInFlight: null,
       ensureSessionDraftOutcome: null, sessionSwitchRequestToken: 0, pendingTaskDraftRecovery: null,
+      activeRemoteProxyId: null, isRemoteProxyView: () => false,
       freshBuffer: () => ({ composerDraft: '', messages: [], chatItems: [] }),
       getBuffer: sid => buffers[sid], saveWorkingSetTo() {},
       loadWorkingSetFrom: buffer => Object.assign(h.state, buffer),
@@ -429,7 +430,10 @@ for (const lane of ['desktop', 'web']) {
           controlledChatActive: false, controlledLinkReady: false,
           controlledSession: { sessionId: null },
           remoteChatActive: false, remoteConnection: null, remoteLinkReady: false,
-          remoteSendIdentity: null, effectiveRemoteModelSource: null,
+          remoteSendIdentity: null, effectiveRemoteModelSource: null, remoteBinding: null,
+          remoteNewDispatchReady: false, selectedRemoteModelId: null,
+          isRemoteProxyView: () => false,
+          isKnownRemoteProxy: () => false,
           createDocumentWritingMessageMeta: () => ({ pinvouScene: 'work:document-writing' }),
           requiredCapabilitiesForMeta, prepareSceneCapabilities, canPrepareSceneCapabilities: () => true,
           isWeb: lane === 'web', can: () => true, setSceneCapabilityStatus() {},
@@ -473,7 +477,7 @@ for (const lane of ['desktop', 'web']) {
         const sendStart = chat.indexOf('      const sendChatMessage = useCallback(');
         const sendEnd = chat.indexOf('\n      // ConversationTimeline', sendStart);
         const dispatchStart = chat.indexOf('      const dispatchChatMessage = useCallback(');
-        const dispatchEnd = chat.indexOf('      const openRemoteSession = useCallback(', dispatchStart);
+        const dispatchEnd = chat.indexOf('      // SessionStore mapping/lease establishment', dispatchStart);
         const taskStart = chat.indexOf('        sendTask: async (outgoing, context) => {');
         const taskEnd = chat.indexOf('\n        onTaskAccepted:', taskStart);
         const task = chat.slice(taskStart, taskEnd).trim().replace(/^sendTask:/, 'this.voiceTask =').replace(/,$/, ';');

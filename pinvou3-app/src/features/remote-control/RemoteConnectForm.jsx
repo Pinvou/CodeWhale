@@ -74,11 +74,16 @@ export default function RemoteConnectForm({
         }
         return;
       }
-      const result = await bridge.desktopRemoteControl.controllerConnect(code);
+      await bridge.desktopRemoteControl.controllerConnect(code);
+      if (!isAttemptCurrent()) return;
+      const opened = await bridge.desktopRemoteControl.openLiveRemoteProxy(null);
+      if (!isAttemptCurrent()) return;
+      if (await onConnected?.(opened, isAttemptCurrent) === false && isAttemptCurrent()) {
+        throw new Error('remote_proxy_binding_mismatch');
+      }
       if (!isAttemptCurrent()) return;
       onValueChange?.('');
       onUiStateChange?.('empty');
-      onConnected?.(result);
     } catch (failure) {
       if (!isAttemptCurrent()) return;
       const rawCode = failure?.code || '';

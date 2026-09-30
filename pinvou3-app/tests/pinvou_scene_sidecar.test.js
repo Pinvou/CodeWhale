@@ -29,10 +29,11 @@ const expectedDispatchChatMessageDependencies = [
   'hasReadyAttachment',
   'personalWorkbenchSceneActive',
   'pptDesignSceneActive',
+  'remoteBinding',
   'remoteChatActive',
-  'remoteConnection',
-  'remoteLinkReady',
+  'remoteNewDispatchReady',
   'remoteSendIdentity',
+  'selectedRemoteModelId',
   't',
   'visualPosterSceneActive',
 ];

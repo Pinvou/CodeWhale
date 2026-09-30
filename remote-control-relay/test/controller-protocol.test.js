@@ -128,7 +128,7 @@ function validMessage(type, role = fixture.message_role_matrix[type][0]) {
 function validPayload(type) {
   const base = { v: 1, type, ...LEASE };
   switch (type) {
-    case "capability_snapshot_request": return { ...base, request_id: "request-capability-1", known_revision: "0" };
+    case "capability_snapshot_request": return { ...base, request_id: "request-capability-1", session_id: "session-ref-0001", known_revision: "0" };
     case "capability_snapshot": return structuredClone(fixture.capability_snapshot_vector);
     case "capability_snapshot_error": return { ...base, request_id: "request-capability-1", session_id: "session-1", code: "capability_snapshot_unavailable" };
     case "task_submit": return structuredClone(fixture.task_submit_vectors.controlled);
@@ -292,6 +292,17 @@ test("temporary model URLs follow the shared strict ASCII grammar", () => {
 test("runtime capability and artifact metadata stay minimal, revision-bound and path-free", () => {
   const capability = validPayload("capability_snapshot");
   validateControllerPayload(capability, "B", LEASE);
+  for (const field of ["session_id", "controlled_session_id"]) {
+    const missing = { ...capability };
+    delete missing[field];
+    assertProtocolError("missing_field", () => validateControllerPayload(missing, "B", LEASE));
+  }
+  const requestWithoutRef = validPayload("capability_snapshot_request");
+  delete requestWithoutRef.session_id;
+  assertProtocolError("missing_field", () => validateControllerPayload(requestWithoutRef, "A", LEASE));
+  const errorWithoutRef = validPayload("capability_snapshot_error");
+  delete errorWithoutRef.session_id;
+  assertProtocolError("missing_field", () => validateControllerPayload(errorWithoutRef, "B", LEASE));
   const leakedCapability = structuredClone(capability);
   leakedCapability.workspaces[0].path = "C:\\private";
   assertProtocolError("unknown_field", () => validateControllerPayload(leakedCapability, "B", LEASE));

@@ -31,6 +31,25 @@ pub(crate) trait DispatchRemoteUseCase: Send + Sync {
 /// after SessionStore confirms the durable dispatch-attempt barrier.
 pub(crate) trait RemoteTaskDispatchPort: Send + Sync {
     fn prepare(&self, request: &RemoteDispatchRequest) -> Result<PreparedRemoteTask, UseCaseError>;
+    /// Host admission must atomically hold its authenticated manager/lane
+    /// guard through the SessionStore insert. A prior context read is not
+    /// authority after a disconnect or lease rotation.
+    fn reserve_pending(
+        &self,
+        store: &SessionStore,
+        local_session_id: &str,
+        remote_ref: &str,
+        live: &LiveRemoteContext,
+        pending: PendingRemoteRequest,
+    ) -> Result<PendingReservation, UseCaseError>;
+    fn mark_dispatch_attempt(
+        &self,
+        store: &SessionStore,
+        local_session_id: &str,
+        remote_ref: &str,
+        live: &LiveRemoteContext,
+        handle: &RemoteRetryHandle,
+    ) -> Result<(), UseCaseError>;
     fn send_encrypted(&self, payload: &Value) -> Result<(), UseCaseError>;
 
     /// Fault-injection seam; the production adapter uses the no-op default.
@@ -88,9 +107,8 @@ impl RemoteRetryHandle {
     }
 }
 
-/// DEV-30 can authenticate a B terminal event before handing it to this
-/// storage-only reconciliation boundary. No Tauri event or projection is
-/// emitted here, and callers cannot construct a verified result directly.
+/// DEV-30 authenticates a B terminal event before the single projection
+/// transaction consumes it. Callers cannot construct a verified result directly.
 pub(crate) struct RemoteTerminalCandidate {
     pub(crate) local_session_id: String,
     pub(crate) remote_session_ref: String,
@@ -129,6 +147,13 @@ impl VerifiedRemoteTerminal {
         verifier.verify_terminal(&candidate)?;
         Ok(Self { candidate })
     }
+
+    /// Transfer the already verified terminal binding to the projection
+    /// transaction. The proof cannot be cloned or reconstructed
+    /// from its fields, so this consumes it exactly once.
+    pub(crate) fn into_candidate(self) -> RemoteTerminalCandidate {
+        self.candidate
+    }
 }
 
 type OutboxKey = (String, String, String);
@@ -149,57 +174,6 @@ impl RemoteDispatchService {
         }
     }
 
-    /// Atomically retire correlation IDs only after a separately authenticated
-    /// B terminal event is bound to the exact current A/B session and attempt.
-    pub(crate) fn reconcile_terminal(
-        &self,
-        verified: VerifiedRemoteTerminal,
-    ) -> Result<(), UseCaseError> {
-        let terminal = verified.candidate;
-        let live = self
-            .store
-            .remote_dispatch_live_context(&terminal.local_session_id, &terminal.remote_session_ref)
-            .map_err(|_| error("remote_binding_mismatch"))?;
-        if live != terminal.live {
-            return Err(error("remote_binding_mismatch"));
-        }
-        let record = self
-            .store
-            .remote_proxy_snapshot(&terminal.local_session_id)
-            .ok_or_else(|| error("remote_proxy_not_found"))?;
-        if record.remote_session_ref != terminal.remote_session_ref
-            || record.controlled_session_id.as_deref()
-                != Some(terminal.controlled_session_id.as_str())
-            || record.peer_id != live.peer_id
-        {
-            return Err(error("remote_terminal_mapping_mismatch"));
-        }
-        let pending = record
-            .pending
-            .iter()
-            .find(|item| {
-                item.task_id == terminal.task_id
-                    && item.client_request_id == terminal.client_request_id
-            })
-            .ok_or_else(|| error("remote_pending_not_found"))?;
-        if pending.request_fingerprint != terminal.request_fingerprint
-            || pending.dispatch_state != PendingDispatchState::AttemptMayHaveOccurred
-        {
-            return Err(error("remote_terminal_correlation_mismatch"));
-        }
-        self.store
-            .retire_remote_pending_terminal(
-                &terminal.local_session_id,
-                &terminal.remote_session_ref,
-                &terminal.live,
-                &terminal.controlled_session_id,
-                &terminal.client_request_id,
-                &terminal.task_id,
-                &terminal.request_fingerprint,
-            )
-            .map_err(|_| error("remote_terminal_persist_failed"))
-    }
-
     pub(crate) fn dispatch_new(
         &self,
         mut request: RemoteDispatchRequest,
@@ -218,7 +192,14 @@ impl RemoteDispatchService {
             || semantics.mode.is_empty()
             || semantics.model_source.is_empty()
             || semantics.input_digest.len() != 64
-            || semantics.model_profile_id.is_some()
+            || match semantics.model_source.as_str() {
+                "controller_temporary" => semantics
+                    .model_profile_id
+                    .as_deref()
+                    .is_none_or(|id| !valid_remote_identifier(id)),
+                "controlled_device" => semantics.model_profile_id.is_some(),
+                _ => true,
+            }
             || !semantics.model_execution_digest.is_empty()
         {
             return Err(error("remote_request_invalid"));
@@ -269,6 +250,9 @@ impl RemoteDispatchService {
         // DEV-15 performs the only package build. Nothing can be persisted or
         // sent until the exact returned wire payload is validated.
         let prepared = self.port.prepare(&request)?;
+        if prepared.model_profile_id != request.semantics.model_profile_id {
+            return Err(error("remote_model_profile_mismatch"));
+        }
         request.semantics.model_profile_id = prepared.model_profile_id;
         let payload = prepared.payload;
         validate_prepared_payload(&payload, &request)?;
@@ -290,8 +274,9 @@ impl RemoteDispatchService {
             dispatch_state: PendingDispatchState::PreparedNeverAttempted,
         };
         match self
-            .store
-            .insert_remote_pending(
+            .port
+            .reserve_pending(
+                &self.store,
                 &semantics.local_session_id,
                 &semantics.remote_session_ref,
                 &request.live,
@@ -403,14 +388,13 @@ impl RemoteDispatchService {
             return Ok(handle.report(RemoteDispatchState::PreparedNotSent));
         }
         if self
-            .store
-            .mark_remote_dispatch_attempt(
+            .port
+            .mark_dispatch_attempt(
+                &self.store,
                 local_session_id,
                 remote_session_ref,
                 live,
-                &handle.client_request_id,
-                &handle.task_id,
-                &handle.request_fingerprint,
+                handle,
             )
             .is_err()
         {
@@ -435,9 +419,11 @@ impl RemoteDispatchService {
         }))
     }
 
-    /// Only a genuinely lost ephemeral payload may take this path. A durable
-    /// `PreparedNeverAttempted` record is the proof that sending never began.
-    pub(crate) fn abandon_lost_payload(
+    /// Explicitly abandon a durable never-attempted request, whether its
+    /// in-process package is still cached or was lost on restart. Dropping
+    /// the cached package under the same gate as retry prevents a send after
+    /// the decision; persistence failure leaves a retryable abandon only.
+    pub(crate) fn abandon_prepared_remote_task(
         &self,
         local_session_id: &str,
         client_request_id: &str,
@@ -448,10 +434,7 @@ impl RemoteDispatchService {
             client_request_id.to_owned(),
             task_id.to_owned(),
         );
-        let ephemeral = self.ephemeral.lock();
-        if ephemeral.contains_key(&key) {
-            return Err(error("remote_payload_still_available"));
-        }
+        let mut ephemeral = self.ephemeral.lock();
         let record = self
             .store
             .remote_proxy_snapshot(local_session_id)
@@ -464,6 +447,7 @@ impl RemoteDispatchService {
         if pending.dispatch_state != PendingDispatchState::PreparedNeverAttempted {
             return Err(error("remote_outcome_unknown"));
         }
+        ephemeral.remove(&key);
         self.store
             .abandon_unattempted_remote_pending(
                 local_session_id,
@@ -592,6 +576,8 @@ mod tests {
         credential_available: AtomicBool,
         fail_prepare: AtomicBool,
         fail_after_persist: AtomicBool,
+        disconnect_after_prepare: AtomicBool,
+        disconnect_after_persist: AtomicBool,
         lose_ack: AtomicBool,
         model_route: Mutex<Value>,
         sent_route: Mutex<Option<Value>>,
@@ -609,6 +595,8 @@ mod tests {
                 credential_available: AtomicBool::new(true),
                 fail_prepare: AtomicBool::new(false),
                 fail_after_persist: AtomicBool::new(false),
+                disconnect_after_prepare: AtomicBool::new(false),
+                disconnect_after_persist: AtomicBool::new(false),
                 lose_ack: AtomicBool::new(false),
                 model_route: Mutex::new(serde_json::json!({
                     "preset": "openai", "wire_api": "chat_completions",
@@ -638,6 +626,39 @@ mod tests {
     }
 
     impl RemoteTaskDispatchPort for FakePort {
+        fn reserve_pending(
+            &self,
+            store: &SessionStore,
+            local_session_id: &str,
+            remote_ref: &str,
+            live: &LiveRemoteContext,
+            pending: PendingRemoteRequest,
+        ) -> Result<PendingReservation, UseCaseError> {
+            store
+                .insert_remote_pending(local_session_id, remote_ref, live, pending)
+                .map_err(|_| error("remote_pending_persist_failed"))
+        }
+
+        fn mark_dispatch_attempt(
+            &self,
+            store: &SessionStore,
+            local_session_id: &str,
+            remote_ref: &str,
+            live: &LiveRemoteContext,
+            handle: &RemoteRetryHandle,
+        ) -> Result<(), UseCaseError> {
+            store
+                .mark_remote_dispatch_attempt(
+                    local_session_id,
+                    remote_ref,
+                    live,
+                    &handle.client_request_id,
+                    &handle.task_id,
+                    &handle.request_fingerprint,
+                )
+                .map_err(|_| error("remote_attempt_persist_failed"))
+        }
+
         fn prepare(
             &self,
             request: &RemoteDispatchRequest,
@@ -679,6 +700,10 @@ mod tests {
             if let Some(field) = *self.tamper_field.lock() {
                 payload[field] = "forged".into();
             }
+            if self.disconnect_after_prepare.load(Ordering::SeqCst) {
+                let mut state = self.store.remote_proxies.lock();
+                state.current_context = None;
+            }
             Ok(PreparedRemoteTask {
                 model_profile_id,
                 payload,
@@ -707,6 +732,10 @@ mod tests {
         }
 
         fn after_persist(&self) -> Result<(), UseCaseError> {
+            if self.disconnect_after_persist.load(Ordering::SeqCst) {
+                let mut state = self.store.remote_proxies.lock();
+                state.current_context = None;
+            }
             if self.fail_after_persist.load(Ordering::SeqCst) {
                 Err(error("injected_after_persist"))
             } else {
@@ -733,7 +762,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let store = SessionStore::boot_at_test_dir(temp.path()).unwrap();
         let live = live();
-        let opened = store.open_remote_proxy(None, &live).unwrap();
+        let opened = store.test_commit_remote_proxy_open(None, &live).unwrap();
         store
             .confirm_remote_mapping(
                 &opened.local_session_id,
@@ -756,7 +785,7 @@ mod tests {
                 capability_revision: 3,
                 mode: "chat".into(),
                 model_source: "controller_temporary".into(),
-                model_profile_id: None,
+                model_profile_id: Some("model-1".into()),
                 model_execution_digest: String::new(),
                 text: "hello".into(),
                 input_digest: "a".repeat(64),
@@ -775,6 +804,26 @@ mod tests {
             live: request.live.clone(),
             semantics: request.semantics.clone(),
         }
+    }
+
+    #[test]
+    fn selected_profile_mismatch_fails_before_outbox_or_send() {
+        let (_temp, store, mut request) = setup();
+        let local_id = request.semantics.local_session_id.clone();
+        let port = Arc::new(FakePort::new(store.clone(), local_id.clone()));
+        let service = RemoteDispatchService::new(store.clone(), port.clone());
+        request.semantics.model_profile_id = Some("different-model".into());
+        let error = service.dispatch_new(request).err().unwrap();
+        assert_eq!(error.code(), "remote_model_profile_mismatch");
+        assert!(
+            store
+                .remote_proxy_snapshot(&local_id)
+                .unwrap()
+                .pending
+                .is_empty()
+        );
+        assert_eq!(port.prepare_count.load(Ordering::SeqCst), 1);
+        assert_eq!(port.send_count.load(Ordering::SeqCst), 0);
     }
 
     fn handle(store: &SessionStore, request: &RemoteDispatchRequest) -> RemoteRetryHandle {
@@ -853,6 +902,49 @@ mod tests {
                 .unwrap()
                 .pending
                 .is_empty()
+        );
+        assert_eq!(port.send_count.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn disconnect_after_prepare_cannot_reserve_pending() {
+        let (_temp, store, request) = setup();
+        let local_id = request.semantics.local_session_id.clone();
+        let port = Arc::new(FakePort::new(store.clone(), local_id.clone()));
+        port.disconnect_after_prepare.store(true, Ordering::SeqCst);
+        let service = RemoteDispatchService::new(store.clone(), port.clone());
+
+        assert_eq!(
+            service.dispatch_new(request).unwrap_err().code(),
+            "remote_pending_persist_failed"
+        );
+        assert!(
+            store
+                .remote_proxy_snapshot(&local_id)
+                .unwrap()
+                .pending
+                .is_empty()
+        );
+        assert_eq!(port.send_count.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn disconnect_after_reserve_cannot_mark_attempt_or_send() {
+        let (_temp, store, request) = setup();
+        let local_id = request.semantics.local_session_id.clone();
+        let port = Arc::new(FakePort::new(store.clone(), local_id.clone()));
+        port.disconnect_after_persist.store(true, Ordering::SeqCst);
+        let service = RemoteDispatchService::new(store.clone(), port.clone());
+
+        assert_eq!(
+            service.dispatch_new(request).unwrap().state,
+            RemoteDispatchState::PreparedNotSent
+        );
+        let record = store.remote_proxy_snapshot(&local_id).unwrap();
+        assert_eq!(record.pending.len(), 1);
+        assert_eq!(
+            record.pending[0].dispatch_state,
+            PendingDispatchState::PreparedNeverAttempted
         );
         assert_eq!(port.send_count.load(Ordering::SeqCst), 0);
     }
@@ -948,6 +1040,7 @@ mod tests {
     fn controlled_device_new_has_no_profile_or_temporary_package() {
         let (_temp, store, mut request) = setup();
         request.semantics.model_source = "controlled_device".into();
+        request.semantics.model_profile_id = None;
         let port = Arc::new(FakePort::new(
             store.clone(),
             request.semantics.local_session_id.clone(),
@@ -990,7 +1083,7 @@ mod tests {
         assert_eq!(port.send_count.load(Ordering::SeqCst), 1);
         assert!(
             service
-                .abandon_lost_payload(
+                .abandon_prepared_remote_task(
                     &request.semantics.local_session_id,
                     &request.client_request_id,
                     &request.task_id
@@ -1036,7 +1129,7 @@ mod tests {
         );
         assert!(
             service
-                .abandon_lost_payload(
+                .abandon_prepared_remote_task(
                     &request.semantics.local_session_id,
                     &request.client_request_id,
                     &request.task_id
@@ -1046,7 +1139,7 @@ mod tests {
     }
 
     #[test]
-    fn lost_pre_barrier_payload_can_only_be_retired_then_replaced_with_fresh_ids() {
+    fn available_pre_barrier_payload_can_be_abandoned_and_ids_stay_retired() {
         let (_temp, store, request) = setup();
         let port = Arc::new(FakePort::new(
             store.clone(),
@@ -1058,28 +1151,20 @@ mod tests {
             service.dispatch_new(same_request(&request)).unwrap().state,
             RemoteDispatchState::PreparedNotSent
         );
-        assert!(
-            service
-                .abandon_lost_payload(
-                    &request.semantics.local_session_id,
-                    &request.client_request_id,
-                    &request.task_id
-                )
-                .is_err()
-        );
-        drop(service);
-        let fresh_service = RemoteDispatchService::new(store.clone(), port.clone());
-        assert_eq!(
-            retry(&fresh_service, &store, &request).unwrap_err().code(),
-            "remote_payload_unavailable"
-        );
-        fresh_service
-            .abandon_lost_payload(
+        service
+            .abandon_prepared_remote_task(
                 &request.semantics.local_session_id,
                 &request.client_request_id,
                 &request.task_id,
             )
             .unwrap();
+        assert_eq!(port.send_count.load(Ordering::SeqCst), 0);
+        drop(service);
+        let fresh_service = RemoteDispatchService::new(store.clone(), port.clone());
+        assert_eq!(
+            retry(&fresh_service, &store, &request).unwrap_err().code(),
+            "remote_request_id_retired"
+        );
         assert_eq!(
             fresh_service
                 .dispatch_new(same_request(&request))
@@ -1102,6 +1187,80 @@ mod tests {
             RemoteDispatchState::Queued
         );
         assert_eq!(port.send_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn failed_abandon_drops_cached_payload_but_preserves_durable_pending_for_retry() {
+        let (temp, store, request) = setup();
+        let local_id = request.semantics.local_session_id.clone();
+        let port = Arc::new(FakePort::new(store.clone(), local_id.clone()));
+        port.fail_after_persist.store(true, Ordering::SeqCst);
+        let service = RemoteDispatchService::new(store.clone(), port.clone());
+        assert_eq!(
+            service.dispatch_new(same_request(&request)).unwrap().state,
+            RemoteDispatchState::PreparedNotSent
+        );
+        let original_path = {
+            let mut state = store.remote_proxies.lock();
+            std::mem::replace(
+                &mut state.path,
+                temp.path().join("missing-parent/remote.json"),
+            )
+        };
+        assert_eq!(
+            service
+                .abandon_prepared_remote_task(
+                    &local_id,
+                    &request.client_request_id,
+                    &request.task_id
+                )
+                .unwrap_err()
+                .code(),
+            "remote_pending_abandon_failed"
+        );
+        store.remote_proxies.lock().path = original_path;
+        let record = store.remote_proxy_snapshot(&local_id).unwrap();
+        assert_eq!(record.pending.len(), 1);
+        assert!(record.retired_requests.is_empty());
+        assert_eq!(
+            retry(&service, &store, &request).unwrap_err().code(),
+            "remote_payload_unavailable"
+        );
+        service
+            .abandon_prepared_remote_task(&local_id, &request.client_request_id, &request.task_id)
+            .unwrap();
+        assert!(
+            store
+                .remote_proxy_snapshot(&local_id)
+                .unwrap()
+                .pending
+                .is_empty()
+        );
+        assert_eq!(port.send_count.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn restarted_prepared_request_can_be_abandoned_without_payload() {
+        let (temp, store, request) = setup();
+        let local_id = request.semantics.local_session_id.clone();
+        let port = Arc::new(FakePort::new(store.clone(), local_id.clone()));
+        port.fail_after_persist.store(true, Ordering::SeqCst);
+        let service = RemoteDispatchService::new(store.clone(), port);
+        assert_eq!(
+            service.dispatch_new(same_request(&request)).unwrap().state,
+            RemoteDispatchState::PreparedNotSent
+        );
+        drop(service);
+        drop(store);
+        let restarted = SessionStore::boot_at_test_dir(temp.path()).unwrap();
+        let port = Arc::new(FakePort::new(restarted.clone(), local_id.clone()));
+        let service = RemoteDispatchService::new(restarted.clone(), port);
+        service
+            .abandon_prepared_remote_task(&local_id, &request.client_request_id, &request.task_id)
+            .unwrap();
+        let record = restarted.remote_proxy_snapshot(&local_id).unwrap();
+        assert!(record.pending.is_empty());
+        assert_eq!(record.retired_requests.len(), 1);
     }
 
     #[test]
@@ -1170,18 +1329,6 @@ mod tests {
         );
     }
 
-    struct AcceptTerminal;
-
-    impl RemoteTerminalVerificationPort for AcceptTerminal {
-        fn verify_terminal(&self, candidate: &RemoteTerminalCandidate) -> Result<(), UseCaseError> {
-            if candidate.authenticated_event_id == "authenticated-event-1" {
-                Ok(())
-            } else {
-                Err(error("terminal_not_authenticated"))
-            }
-        }
-    }
-
     fn terminal_candidate(
         request: &RemoteDispatchRequest,
         fingerprint: String,
@@ -1199,70 +1346,70 @@ mod tests {
     }
 
     #[test]
-    fn authenticated_terminal_reconciles_exact_binding_only_and_retires_ids() {
-        let (_temp, store, request) = setup();
-        let port = Arc::new(FakePort::new(
-            store.clone(),
-            request.semantics.local_session_id.clone(),
-        ));
-        let service = RemoteDispatchService::new(store.clone(), port);
+    fn terminal_proof_only_exposes_the_original_candidate_by_consuming_it() {
+        struct CountingVerifier(AtomicUsize);
+        impl RemoteTerminalVerificationPort for CountingVerifier {
+            fn verify_terminal(
+                &self,
+                candidate: &RemoteTerminalCandidate,
+            ) -> Result<(), UseCaseError> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                if candidate.authenticated_event_id == "authenticated-event-1" {
+                    Ok(())
+                } else {
+                    Err(error("terminal_not_authenticated"))
+                }
+            }
+        }
+
+        let (_temp, _store, request) = setup();
+        let verifier = CountingVerifier(AtomicUsize::new(0));
+        let fingerprint = "a".repeat(64);
+        let mut malformed = terminal_candidate(&request, fingerprint.clone());
+        malformed.request_fingerprint = "not-a-digest".into();
         assert_eq!(
-            service.dispatch_new(same_request(&request)).unwrap().state,
-            RemoteDispatchState::Queued
-        );
-        let fingerprint = store
-            .remote_proxy_snapshot(&request.semantics.local_session_id)
-            .unwrap()
-            .pending[0]
-            .request_fingerprint
-            .clone();
-        let mut bad = terminal_candidate(&request, fingerprint.clone());
-        bad.controlled_session_id = "forged-b-session".into();
-        assert_eq!(
-            service
-                .reconcile_terminal(VerifiedRemoteTerminal::verify(bad, &AcceptTerminal).unwrap())
-                .unwrap_err()
+            VerifiedRemoteTerminal::verify(malformed, &verifier)
+                .err()
+                .unwrap()
                 .code(),
-            "remote_terminal_mapping_mismatch"
+            "remote_terminal_invalid"
         );
-        let mut bad = terminal_candidate(&request, fingerprint.clone());
-        bad.live.generation = "old-generation".into();
+        assert_eq!(verifier.0.load(Ordering::SeqCst), 0);
+
+        let mut unauthenticated = terminal_candidate(&request, fingerprint.clone());
+        unauthenticated.authenticated_event_id = "unverified".into();
         assert_eq!(
-            service
-                .reconcile_terminal(VerifiedRemoteTerminal::verify(bad, &AcceptTerminal).unwrap())
-                .unwrap_err()
-                .code(),
-            "remote_binding_mismatch"
-        );
-        let mut bad = terminal_candidate(&request, fingerprint.clone());
-        bad.authenticated_event_id = "unverified".into();
-        assert_eq!(
-            VerifiedRemoteTerminal::verify(bad, &AcceptTerminal)
+            VerifiedRemoteTerminal::verify(unauthenticated, &verifier)
                 .err()
                 .unwrap()
                 .code(),
             "terminal_not_authenticated"
         );
-        service
-            .reconcile_terminal(
-                VerifiedRemoteTerminal::verify(
-                    terminal_candidate(&request, fingerprint),
-                    &AcceptTerminal,
-                )
-                .unwrap(),
-            )
-            .unwrap();
-        let record = store
-            .remote_proxy_snapshot(&request.semantics.local_session_id)
-            .unwrap();
-        assert!(record.pending.is_empty());
-        assert_eq!(record.retired_requests.len(), 1);
+        assert_eq!(verifier.0.load(Ordering::SeqCst), 1);
+
+        let proof: VerifiedRemoteTerminal = VerifiedRemoteTerminal::verify(
+            terminal_candidate(&request, fingerprint.clone()),
+            &verifier,
+        )
+        .unwrap();
+        let recovered: RemoteTerminalCandidate = proof.into_candidate();
+        assert_eq!(verifier.0.load(Ordering::SeqCst), 2);
         assert_eq!(
-            service
-                .dispatch_new(same_request(&request))
-                .unwrap_err()
-                .code(),
-            "remote_request_id_retired"
+            recovered.local_session_id,
+            request.semantics.local_session_id
         );
+        assert_eq!(
+            recovered.remote_session_ref,
+            request.semantics.remote_session_ref
+        );
+        assert_eq!(
+            recovered.controlled_session_id,
+            request.semantics.controlled_session_id
+        );
+        assert_eq!(recovered.task_id, request.task_id);
+        assert_eq!(recovered.client_request_id, request.client_request_id);
+        assert_eq!(recovered.request_fingerprint, fingerprint);
+        assert_eq!(recovered.authenticated_event_id, "authenticated-event-1");
+        assert_eq!(recovered.live, request.live);
     }
 }

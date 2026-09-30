@@ -78,7 +78,7 @@ fn local_chat_command_guard_rejects_remote_proxy_without_backend_dispatch() {
         control_connected: true,
         encrypted_channel_connected: true,
     };
-    let remote = store.open_remote_proxy(None, &context).unwrap();
+    let remote = store.test_commit_remote_proxy_open(None, &context).unwrap();
     let error = ensure_chat_session(&store, &remote.local_session_id, "save_session_messages")
         .expect_err("remote session must not use local transcript command");
     assert!(error.contains("authenticated remote route"));

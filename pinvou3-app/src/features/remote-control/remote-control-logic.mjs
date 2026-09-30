@@ -100,15 +100,11 @@ export function controlledDeviceUiState(device, secondsRemaining = 0, localState
   const status = String(device?.status || 'idle');
   if (status === 'error') return 'error';
   if (status === 'refreshing') return 'refreshing';
-  if (status === 'reserving' || status === 'registering') return 'reserving';
-  if (status === 'safety_handshake' || status === 'handshake_pending') return 'handshake';
-  if (
-    status === 'reconnecting'
-    || status === 'resume_provisional'
-    || status === 'resume_activated_pending_liveness'
-  ) return 'reconnecting';
+  if (status === 'reserving') return 'reserving';
+  if (status === 'safety_handshake') return 'handshake';
+  if (status === 'reconnecting') return 'reconnecting';
   if (status === 'connected') return 'connected';
-  if (status === 'waiting_connection' || status === 'waiting_for_pairing') {
+  if (status === 'waiting_connection') {
     if (!device?.pairingCode || Number(secondsRemaining) <= 0) return 'expired';
     if (Number(secondsRemaining) <= 60) return 'expiring';
     return 'waiting';
@@ -187,7 +183,7 @@ export function controllerConnectionUiState(connection, inputState = 'empty', lo
   if (localErrorCode) return connectionErrorState(localErrorCode);
   const status = String(connection?.status || 'idle');
   if (status === 'connecting') return 'connecting';
-  if (status === 'safety_handshake' || status === 'handshake_pending') return 'safety_handshake';
+  if (status === 'safety_handshake') return 'safety_handshake';
   if (status === 'connected') return 'connected';
   if (status === 'reconnecting') return 'reconnecting';
   // A deliberate new input/submit attempt (including its bounded failure)

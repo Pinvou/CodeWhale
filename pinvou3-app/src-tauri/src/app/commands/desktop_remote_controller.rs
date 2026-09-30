@@ -4,30 +4,21 @@
 //! device credential, token, or key, and do not equate window visibility with
 //! disconnection.
 
-use serde::Deserialize;
 use tauri::{AppHandle, Emitter, State};
 
+use crate::features::remote_control::RemoteControlManager;
 use crate::features::remote_control::controller::controlling::{
-    ControllingDeviceManager, ControllingLeaseInfo, ControllingStateError, ControllingStatus,
-    RemoteHistoryEntry,
+    ControllingDeviceManager, ControllingStateError, ControllingStatus,
 };
-use crate::features::remote_control::controller::controlling_session::ControllingSessionManager;
 use crate::features::remote_control::controller::controlling_service::{
     CONTROLLER_STATUS_EVENT, connect_controlling_device,
 };
+use crate::features::remote_control::controller::controlling_session::ControllingSessionManager;
 use crate::features::remote_control::controller::relay_runtime::log_controller_event;
-use crate::features::remote_control::RemoteControlManager;
 use std::sync::Arc;
 
 const STATUS_EVENT: &str = CONTROLLER_STATUS_EVENT;
 const UNSUPPORTED: &str = "desktop_remote_control_unsupported";
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RemoteHistoryCreateRequest {
-    title: String,
-    b_session_reference: Option<String>,
-}
 
 fn controlling_error(error: ControllingStateError) -> String {
     error.code.to_owned()
@@ -51,7 +42,7 @@ pub async fn desktop_remote_controller_connect(
     manager: State<'_, ControllingDeviceManager>,
     relay: State<'_, RemoteControlManager>,
     sessions: State<'_, ControllingSessionManager>,
-    history: State<'_, Arc<super::desktop_remote_history::DesktopRemoteHistoryRuntime>>,
+    history: State<'_, Arc<super::desktop_remote_journal::DesktopRemoteJournalRuntime>>,
     code: String,
 ) -> Result<ControllingStatus, String> {
     ensure_supported(&manager)?;
@@ -59,10 +50,7 @@ pub async fn desktop_remote_controller_connect(
     sessions.clear();
     // A 端排障日志：把「用户点了连接」和「本地状态机拒绝」都留痕。此前这两步
     // 没有任何落盘痕迹，失败只能从界面文案反推。
-    log_controller_event(
-        "connect_requested",
-        &relay.controller_endpoint_log_detail(),
-    );
+    log_controller_event("connect_requested", &relay.controller_endpoint_log_detail());
     let operation = match manager.connect(&code) {
         Ok(operation) => operation,
         Err(error) => {
@@ -74,7 +62,7 @@ pub async fn desktop_remote_controller_connect(
     emit_status(&app, &status);
     let journal: Arc<dyn crate::features::remote_control::controller::controlling_service::ControllingJournalSink> =
         Arc::new(
-            super::desktop_remote_history::DesktopControllerJournalSink::new(
+            super::desktop_remote_journal::DesktopControllerJournalSink::new(
                 app.clone(),
                 history.inner().clone(),
             ),
@@ -107,36 +95,6 @@ pub fn desktop_remote_controller_status(
 ) -> Result<ControllingStatus, String> {
     ensure_supported(&manager)?;
     Ok(manager.status())
-}
-
-#[tauri::command]
-pub fn desktop_remote_controller_live_context(
-    manager: State<'_, ControllingDeviceManager>,
-) -> Result<ControllingLeaseInfo, String> {
-    ensure_supported(&manager)?;
-    manager
-        .live_lease()
-        .map(ControllingLeaseInfo::from)
-        .map_err(controlling_error)
-}
-
-#[tauri::command]
-pub fn desktop_remote_controller_create_history(
-    manager: State<'_, ControllingDeviceManager>,
-    request: RemoteHistoryCreateRequest,
-) -> Result<RemoteHistoryEntry, String> {
-    ensure_supported(&manager)?;
-    manager
-        .create_history(&request.title, request.b_session_reference.as_deref())
-        .map_err(controlling_error)
-}
-
-#[tauri::command]
-pub fn desktop_remote_controller_list_history(
-    manager: State<'_, ControllingDeviceManager>,
-) -> Result<Vec<RemoteHistoryEntry>, String> {
-    ensure_supported(&manager)?;
-    Ok(manager.history())
 }
 
 #[cfg(test)]
