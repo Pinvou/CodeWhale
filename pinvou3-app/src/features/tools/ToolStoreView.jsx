@@ -641,7 +641,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
     };
 
     // API Key 配置弹窗（需要 config_fields 的工具安装前弹出）
-    const TsConfigDialog = ({ config, theme, onConfirm, onCancel, copy }) => {
+    const TsConfigDialog = ({ config, theme, onConfirm, onCancel, copy, onOpenError }) => {
       const [values, setValues] = useState({});
       if (!config) return null;
       const fields = config.fields || [];
@@ -664,7 +664,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
               )}
               {config.configDocUrl && (
                 <button
-                  onClick={() => invokeTauri('open_external_url', { url: config.configDocUrl })}
+                  onClick={() => invokeTauri('open_external_url', { url: config.configDocUrl }).catch(onOpenError)}
                   className={`text-[13px] mb-4 inline-block text-[#007AFF] dark:text-[#0A84FF] hover:underline`}
                 >
                   {config.configDocLabel || copy.configDocDefault} →
@@ -673,7 +673,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
               {/* 引导链接放最上,不夹在输入框中间 */}
               {fields.find(f => f.helpUrl) && (
                 <button
-                  onClick={() => invokeTauri('open_external_url', { url: fields.find(f => f.helpUrl).helpUrl })}
+                  onClick={() => invokeTauri('open_external_url', { url: fields.find(f => f.helpUrl).helpUrl }).catch(onOpenError)}
                   className={`text-[13px] mb-4 inline-block text-[#007AFF] dark:text-[#0A84FF] hover:underline`}
                 >
                   {copy.configHelpFeishu}
@@ -2446,6 +2446,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
             key={(externalAuthAvailable && configDialog?.backendId) || 'closed'}
             config={externalAuthAvailable ? configDialog : null}
             copy={storeCopy}
+            onOpenError={browserOpenFailed}
             onCancel={() => { if (configDialog?.backendId) finishToolConfiguration(configDialog.backendId, false); setConfigDialog(null); }}
             onConfirm={(values) => { const bid = configDialog.backendId; setConfigDialog(null); if (bid === 'ima') connectIma(values); else doInstall(bid, values); }}
           />, document.body)}
@@ -2502,11 +2503,11 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
             ), document.body);
           })()}
           <ConnectorSsoDialog state={eipSso} name={storeCopy.toolNames.eip} copy={storeCopy}
-            onOpen={() => { if (eipSso.url) invokeTauri('open_external_url', { url: eipSso.url }); }}
+            onOpen={() => { if (eipSso.url) invokeTauri('open_external_url', { url: eipSso.url }).catch(browserOpenFailed); }}
             onDismiss={() => { setEipSso(null); setBusyId(busy => releaseBusy(busy, 'eip')); }}
             onCancel={() => { finishToolConfiguration('eip', false); invokeTauri('eip_cancel').catch(() => {}); setEipSso(null); setBusyId(busy => releaseBusy(busy, 'eip')); }} />
           <ConnectorSsoDialog state={zhidaoSso} name={storeCopy.toolNames.zhidao} copy={storeCopy}
-            onOpen={() => { if (zhidaoSso.url) invokeTauri('open_external_url', { url: zhidaoSso.url }); }}
+            onOpen={() => { if (zhidaoSso.url) invokeTauri('open_external_url', { url: zhidaoSso.url }).catch(browserOpenFailed); }}
             onDismiss={() => { setZhidaoSso(null); setBusyId(busy => releaseBusy(busy, 'zhidao')); }}
             onCancel={() => { finishToolConfiguration('zhidao', false); invokeTauri('zhidao_cancel').catch(() => {}); setZhidaoSso(null); setBusyId(busy => releaseBusy(busy, 'zhidao')); }} />
           {/* 上传包展示名/说明编辑弹窗（edit_display 动作触发；条件挂载，state 初值即当前覆盖值）。
