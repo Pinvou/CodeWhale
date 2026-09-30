@@ -101,9 +101,7 @@ pub fn desktop_remote_controller_session_state(
 ) -> Result<ControllingSessionProjection, String> {
     ensure_supported(&manager)?;
     let (lease, _) = live_context(&manager)?;
-    sessions
-        .state(&remote_ref, &lease)
-        .map_err(session_error)
+    sessions.state(&remote_ref, &lease).map_err(session_error)
 }
 
 #[tauri::command]
@@ -193,7 +191,11 @@ pub fn desktop_remote_controller_capability_send(
         .capability_request(&remote_ref, &lease)
         .map_err(session_error)?;
     let frame = business
-        .seal("capability_snapshot_request", &intent.payload, &capabilities)
+        .seal(
+            "capability_snapshot_request",
+            &intent.payload,
+            &capabilities,
+        )
         .map_err(|error| error.code().to_owned())?;
     manager
         .send_authenticated_business(&frame)

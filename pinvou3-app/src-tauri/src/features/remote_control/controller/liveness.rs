@@ -154,7 +154,7 @@ impl ControllerLivenessWatchdog {
         Ok(())
     }
 
-/// Accept AEAD-authenticated direct A liveness plaintext. The validator
+    /// Accept AEAD-authenticated direct A liveness plaintext. The validator
     /// binds the full lease context, epoch, role, sequence and challenge; this
     /// method additionally enforces the challenge's local RTT and deadline
     /// monotonicity.
@@ -399,7 +399,10 @@ pub(crate) fn build_liveness_challenge(
         || challenge_b64.is_empty()
         || challenge_b64.len() > MAX_LIVENESS_ID_BYTES
     {
-        return Err(LivenessError::new("invalid_field", "controller_liveness_challenge_a"));
+        return Err(LivenessError::new(
+            "invalid_field",
+            "controller_liveness_challenge_a",
+        ));
     }
     Ok(serde_json::json!({
         "v": 1,
@@ -907,7 +910,10 @@ mod tests {
                 0,
             )
             .unwrap();
-        assert!(!watchdog.needs_evidence(0), "刚续期且余量充足时不必打扰对端");
+        assert!(
+            !watchdog.needs_evidence(0),
+            "刚续期且余量充足时不必打扰对端"
+        );
         assert!(!watchdog.needs_evidence(10_000));
         assert!(
             watchdog.needs_evidence(25_000),
@@ -924,11 +930,11 @@ mod tests {
     /// role_liveness_v1），并拒绝畸形标识/挑战值。
     #[test]
     fn b_side_evidence_frames_match_the_frozen_contract() {
-        use base64::Engine as _;
         use super::super::protocol::{
             RuntimeValidationContext, SenderRole, validate_controller_message_json,
             validate_controller_runtime_message_json,
         };
+        use base64::Engine as _;
 
         let lease = lease();
         let (challenge_id, challenge_b64) = new_liveness_challenge().unwrap();
@@ -941,7 +947,10 @@ mod tests {
             16
         );
         let (other_id, other_b64) = new_liveness_challenge().unwrap();
-        assert_ne!((challenge_id.clone(), challenge_b64.clone()), (other_id, other_b64));
+        assert_ne!(
+            (challenge_id.clone(), challenge_b64.clone()),
+            (other_id, other_b64)
+        );
 
         let context = RuntimeValidationContext {
             lease: Some(lease.clone()),
@@ -973,7 +982,8 @@ mod tests {
         }
         assert!(build_liveness_challenge(&lease, "request-live-3", "", &challenge_b64).is_err());
         assert!(
-            build_liveness_attestation_request(&lease, "request-live-4", &challenge_id, "").is_err()
+            build_liveness_attestation_request(&lease, "request-live-4", &challenge_id, "")
+                .is_err()
         );
     }
 }

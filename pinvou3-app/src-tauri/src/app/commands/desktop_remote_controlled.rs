@@ -8,6 +8,7 @@ use serde::Deserialize;
 use tauri::{AppHandle, Emitter, State};
 
 use crate::features::files::file_ingest::validate_browsable_path;
+use crate::features::remote_control::RemoteControlManager;
 use crate::features::remote_control::controller::controlled::{
     ControlledDeviceManager, ControlledStateError, ControlledStatus, ControlledWorkspaceInfo,
     WorkspaceAuthorizationRequest,
@@ -15,7 +16,6 @@ use crate::features::remote_control::controller::controlled::{
 use crate::features::remote_control::controller::relay_runtime::{
     ControlledRelayWorker, controlled_monotonic_millis,
 };
-use crate::features::remote_control::RemoteControlManager;
 
 const STATUS_EVENT: &str = "desktop-remote-controlled-status";
 const UNSUPPORTED: &str = "desktop_remote_control_unsupported";
