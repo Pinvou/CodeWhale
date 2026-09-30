@@ -7,7 +7,9 @@ import {
   validateRemoteFiles,
 } from '../src/features/remote-control/remote-file-transfer.mjs';
 
-globalThis.crypto ||= webcrypto;
+if (!Object.hasOwn(globalThis, 'crypto')) {
+  Object.defineProperty(globalThis, 'crypto', { value: webcrypto, configurable: true });
+}
 
 function file(name, content, type = 'text/plain') {
   const bytes = new TextEncoder().encode(content);
