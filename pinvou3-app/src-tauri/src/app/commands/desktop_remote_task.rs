@@ -14,12 +14,12 @@ use tokio_util::sync::CancellationToken;
 
 use crate::features::assistant::engine_pool::EnginePool;
 use crate::features::assistant::remote_turn::{EnginePoolChatEngine, EnginePoolChatTurnPort};
-use crate::features::codex_acp::remote_turn::{AcpPoolCodeTurnPort, RemoteWorkspaceAuthorizations};
 use crate::features::codex_acp::AcpPool;
+use crate::features::codex_acp::remote_turn::{AcpPoolCodeTurnPort, RemoteWorkspaceAuthorizations};
 use crate::features::remote_control::controller::capabilities::CapabilitySnapshotManager;
 use crate::features::remote_control::controller::controlled::ControlledDeviceManager;
 use crate::features::remote_control::controller::protocol::{
-    validate_controller_runtime_payload_json, LeaseContext, RuntimeValidationContext, SenderRole,
+    LeaseContext, RuntimeValidationContext, SenderRole, validate_controller_runtime_payload_json,
 };
 use crate::features::remote_control::controller::task::{
     AdmissionOutcome, CancelOutcome, ChatTurnExecutor, CodeTurnExecutor, ControllerTaskEventSink,
@@ -122,7 +122,9 @@ impl DesktopRemoteTaskRuntime {
         pool: EnginePool,
         acp_pool: AcpPool,
     ) -> Arc<Self> {
-        let service = Arc::new(RemoteTaskService::new(Arc::new(RemoteTaskLedger::in_memory())));
+        let service = Arc::new(RemoteTaskService::new(Arc::new(
+            RemoteTaskLedger::in_memory(),
+        )));
         let authorizations = Arc::new(RemoteWorkspaceAuthorizations::default());
         service.set_session_provisioner(Arc::new(DesktopRemoteSessionProvisioner::new(
             store,
@@ -130,9 +132,9 @@ impl DesktopRemoteTaskRuntime {
         )));
         service.register_executor(
             TASK_MODE_CHAT,
-            Arc::new(ChatTurnExecutor::new(Arc::new(EnginePoolChatTurnPort::new(
-                Arc::new(EnginePoolChatEngine::new(Arc::new(pool))),
-            )))),
+            Arc::new(ChatTurnExecutor::new(Arc::new(
+                EnginePoolChatTurnPort::new(Arc::new(EnginePoolChatEngine::new(Arc::new(pool)))),
+            ))),
         );
         service.register_executor(
             TASK_MODE_CODE,
@@ -197,10 +199,7 @@ fn sanitized_reason(reason: &str) -> String {
     }
 }
 
-fn validated_task_payload(
-    payload: &Value,
-    lease: &LeaseContext,
-) -> Result<Value, String> {
+fn validated_task_payload(payload: &Value, lease: &LeaseContext) -> Result<Value, String> {
     let encoded = serde_json::to_string(payload).map_err(|_| "task_request_invalid".to_owned())?;
     let context = RuntimeValidationContext {
         lease: Some(lease.clone()),
@@ -304,7 +303,10 @@ pub fn desktop_remote_task_submit(
         capabilities
             .workspace_for_task(revision, &lease, &workspace_id, now_b)
             .map_err(|error| error.code.to_owned())?;
-        if !runtime.authorizations().authorize(&session_id, &workspace_id) {
+        if !runtime
+            .authorizations()
+            .authorize(&session_id, &workspace_id)
+        {
             return Err("task_workspace_capacity".to_owned());
         }
     }
@@ -322,9 +324,8 @@ pub fn desktop_remote_task_submit(
             let status = service
                 .status_payload(&task_id)
                 .map_err(|error| error.code.to_owned())?;
-            let events: Arc<dyn ControllerTaskEventSink> = Arc::new(TaskEventBridge {
-                app: app.clone(),
-            });
+            let events: Arc<dyn ControllerTaskEventSink> =
+                Arc::new(TaskEventBridge { app: app.clone() });
             let dispatch_service = Arc::clone(&service);
             tauri::async_runtime::spawn(async move {
                 if let Err(error) = dispatch_service
@@ -389,13 +390,8 @@ pub fn desktop_remote_task_interrupt_all(
 ) -> Result<Vec<String>, String> {
     ensure_supported(&controlled)?;
     let reason = sanitized_reason(&reason);
-    let records = runtime
-        .service()
-        .interrupt_all(&reason, monotonic_millis());
-    Ok(records
-        .into_iter()
-        .map(|record| record.task_id)
-        .collect())
+    let records = runtime.service().interrupt_all(&reason, monotonic_millis());
+    Ok(records.into_iter().map(|record| record.task_id).collect())
 }
 
 #[cfg(test)]

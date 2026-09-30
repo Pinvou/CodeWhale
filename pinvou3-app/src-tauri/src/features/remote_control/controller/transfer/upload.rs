@@ -67,7 +67,10 @@ mod tests {
         }
 
         fn abort(&self, handle_id: &str) -> std::result::Result<(), String> {
-            self.calls.lock().unwrap().push(format!("abort:{handle_id}"));
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("abort:{handle_id}"));
             Ok(())
         }
     }

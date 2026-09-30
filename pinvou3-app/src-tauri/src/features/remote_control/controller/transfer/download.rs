@@ -63,8 +63,14 @@ mod tests {
         assert_eq!(chunk_count(1024, 1024), 1);
         assert_eq!(chunk_count(1025, 1024), 2);
         // A caller asking for a wider chunk than the protocol allows is clamped.
-        assert_eq!(chunk_count(MAX_TRANSFER_CHUNK_BYTES as u64 * 2, usize::MAX), 2);
-        assert_eq!(chunk_offset(3, usize::MAX), MAX_TRANSFER_CHUNK_BYTES as u64 * 3);
+        assert_eq!(
+            chunk_count(MAX_TRANSFER_CHUNK_BYTES as u64 * 2, usize::MAX),
+            2
+        );
+        assert_eq!(
+            chunk_offset(3, usize::MAX),
+            MAX_TRANSFER_CHUNK_BYTES as u64 * 3
+        );
     }
 
     #[test]
