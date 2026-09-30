@@ -121,6 +121,29 @@ export default function ControlledDevicePanel({ t, bs, supported }) {
     return () => { cancelled = true; };
   }, []);
 
+  // 进入面板时主动同步一次后端状态：事件丢失时（例如只错过了 status 事件）
+  // 也能立刻显示真实状态与连接码。dev 模式改完刷新窗口即生效。
+  useEffect(() => {
+    const remote = bridge && bridge.available && bridge.desktopRemoteControl;
+    if (!remote || typeof remote.controlledSync !== 'function') return undefined;
+    let cancelled = false;
+    Promise.resolve(remote.controlledSync()).catch(() => {
+      if (!cancelled) { /* 同步失败不阻塞面板渲染 */ }
+    });
+    return () => { cancelled = true; };
+  }, []);
+
+  // 把前端持有的被控状态写入 Rust 日志文件，支持人员可直接读取定位
+  // 「后端已出码、界面无码」这类投影问题（确认问题后随诊断行一起移除）。
+  useEffect(() => {
+    const remote = bridge && bridge.available && bridge.desktopRemoteControl;
+    if (!remote || typeof remote.clientLog !== 'function') return undefined;
+    Promise.resolve(remote.clientLog(
+      `ui status=${String(status)} code=${device.pairingCode ? 'yes' : 'no'} expires=${String(device.expiresAtMs)} gen=${String(device.generation)}`,
+    )).catch(() => {});
+    return undefined;
+  }, [status, device.pairingCode, device.expiresAtMs, device.generation]);
+
   const endpointLabelKey = (id) => `endpoint${String(id || '').charAt(0).toUpperCase()}${String(id || '').slice(1)}`;
   const canSwitchEndpoint = !!(
     bridge
@@ -136,7 +159,9 @@ export default function ControlledDevicePanel({ t, bs, supported }) {
     try {
       await action(bridge.desktopRemoteControl);
     } catch (failure) {
-      setError((failure && failure.code) || 'error');
+      // 有界码优先；没有 code 时退回 message（至少能看出是哪条命令失败），
+      // 最后才是占位符——避免界面只显示 "(error)" 而无从定位。
+      setError((failure && (failure.code || failure.message)) || 'error');
     } finally {
       setBusy(null);
     }
@@ -295,7 +320,15 @@ export default function ControlledDevicePanel({ t, bs, supported }) {
       )}
       <p className="settings-hint">{copy.readOnlyNotice}</p>
 
-      {error && <p className="settings-error" role="alert">{copy.errorGeneric}</p>}
+      {(error || (status === 'error' && device.errorCode)) && (
+        <p className="settings-error" role="alert">
+          {copy.errorGeneric}
+          {/* 有界错误码直接透出：面板只显示通用文案时，用户与支持两端都无法定位 */}
+          {(error || device.errorCode) && (
+            <span className="settings-error-code"> ({String(error || device.errorCode)})</span>
+          )}
+        </p>
+      )}
     </section>
   );
 }

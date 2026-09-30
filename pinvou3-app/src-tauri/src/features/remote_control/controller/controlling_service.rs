@@ -44,6 +44,7 @@ use super::relay_transport::{
     AuthenticatedLease, ControllerRole, ControllerTransportConfig, ControllerTransportEvent,
     ControllerTransportSender, spawn_controller_transport,
 };
+use super::relay_runtime::log_controller_event;
 use crate::features::remote_control::RemoteControlManager;
 
 pub(crate) const CONTROLLER_STATUS_EVENT: &str = "desktop-remote-controller-status";
@@ -100,6 +101,7 @@ pub(crate) struct ControllerTransportPort {
     sender: ControllerTransportSender,
     inbound: mpsc::UnboundedReceiver<ControllerLaneEvent>,
     relay_error_code: Option<&'static str>,
+    relay_error_seen: bool,
     lane_disconnected: bool,
 }
 
@@ -137,6 +139,14 @@ impl ControllingRelayPort for ControllerTransportPort {
                     };
                     if value.get("type").and_then(Value::as_str) == Some("error") {
                         self.relay_error_code = relay_error_code(&value);
+                        self.relay_error_seen = true;
+                        // 原始码（协议枚举名，不含文案或凭据）直接落盘：闭集外的码会
+                        // 被公共错误映射兜底成 invalid_message，只在端上排障日志里
+                        // 保留原文才能定位 Relay 到底拒绝在哪一步。
+                        log_controller_event(
+                            "relay_error",
+                            value.get("code").and_then(Value::as_str).unwrap_or("unknown"),
+                        );
                     }
                     return Some(value);
                 }
@@ -146,6 +156,10 @@ impl ControllingRelayPort for ControllerTransportPort {
 
     fn relay_error_code(&self) -> Option<&'static str> {
         self.relay_error_code
+    }
+
+    fn relay_error_seen(&self) -> bool {
+        self.relay_error_seen
     }
 
     fn lane_disconnected(&self) -> bool {
@@ -175,6 +189,7 @@ fn spawn_controlling_lane(relay_url: &str) -> (ControllerTransportSender, Contro
         sender: sender.clone(),
         inbound: inbound_rx,
         relay_error_code: None,
+        relay_error_seen: false,
         lane_disconnected: false,
     };
     (sender, port)
@@ -203,6 +218,19 @@ fn public_failure_code(port: &impl ControllingRelayPort, timed_out: bool) -> &'s
         return PEER_UNAVAILABLE_ERROR;
     }
     GENERIC_CONNECT_ERROR
+}
+
+/// 失败归因（有界、不含凭据）：公共码 + 来源（Relay 明确报错 / 通道断开 / 本地校验）。
+/// 只用于端上排障日志，不改变任何面向用户的错误语义。
+fn failure_origin_detail(port: &impl ControllingRelayPort, code: &str) -> String {
+    let origin = if port.relay_error_seen() {
+        "relay"
+    } else if port.lane_disconnected() {
+        "lane"
+    } else {
+        "local"
+    };
+    format!("{code}/origin:{origin}")
 }
 
 /// A 端连接核心：推到 `controller_joined`、安装租约并进入 connected。
@@ -244,14 +272,20 @@ pub(crate) async fn run_controlling_connection<P: ControllingRelayPort>(
 
     let outcome = match driven {
         Ok(Ok(outcome)) => outcome,
-        Ok(Err(_handshake_error)) => {
+        Ok(Err(handshake_error)) => {
             let code = public_failure_code(port, false);
+            // 本地握手层的原始有界码 + 失败归因：公共码会把闭集外的 Relay 错误码
+            // 兜底成 invalid_message，只留公共码时无法区分「Relay 报了什么」与
+            // 「本地校验拒绝」。两者都是协议枚举名，不含任何凭据。
+            log_controller_event("handshake_failed", handshake_error.code);
+            log_controller_event("connect_failed", &failure_origin_detail(port, code));
             sender.stop();
             business.clear();
             return Err(fail_connection(manager, operation, code, on_status));
         }
         Err(_elapsed) => {
             let code = public_failure_code(port, true);
+            log_controller_event("connect_failed", &failure_origin_detail(port, code));
             sender.stop();
             business.clear();
             return Err(fail_connection(manager, operation, code, on_status));
@@ -1086,6 +1120,22 @@ fn task_event_projection(lease: &LeaseContext, payload: &Value) -> Option<Value>
     }))
 }
 
+/// 把状态投影压成一行排障文本：与 UI 收到的 `status` / `errorCode` 同源，
+/// 不含连接码、租约、指纹或设备标识。
+fn controller_status_log_detail(status: &ControllingStatus) -> String {
+    let Ok(value) = serde_json::to_value(status) else {
+        return "unavailable".to_owned();
+    };
+    let state = value
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    match value.get("errorCode").and_then(Value::as_str) {
+        Some(code) => format!("state:{state}/error:{code}"),
+        None => format!("state:{state}"),
+    }
+}
+
 /// A 端连接入口：加载信任根、生成握手密钥、绑定受控 Relay 通道、推进握手，
 /// 并在成功后把通道保活交给后台任务。
 pub(crate) async fn connect_controlling_device(
@@ -1116,10 +1166,16 @@ pub(crate) async fn connect_controlling_device(
     let business = app.state::<ControllingLaneState>();
     business.clear();
 
+    // A 端排障日志：先把「这次到底连的是哪个端点的哪条路径」写死，再把每个状态
+    // 投影与最终结果码记下来。没有这几行时，「连接码无效或已过期」无法区分
+    // 「码不对」与「两端其实在各自的 Relay 上」。
+    let endpoint_detail = relay.controller_endpoint_log_detail();
+    log_controller_event("connect_started", &endpoint_detail);
     let mut emit = |status: &ControllingStatus| {
+        log_controller_event("status", &controller_status_log_detail(status));
         let _ = app.emit(CONTROLLER_STATUS_EVENT, status);
     };
-    let status = run_controlling_connection(
+    let status = match run_controlling_connection(
         manager,
         operation,
         &mut port,
@@ -1129,7 +1185,18 @@ pub(crate) async fn connect_controlling_device(
         HANDSHAKE_DEADLINE,
         &mut emit,
     )
-    .await?;
+    .await
+    {
+        Ok(status) => {
+            log_controller_event("connected", &endpoint_detail);
+            status
+        }
+        Err(error) => {
+            // 错误码已由 `fail_connection` 收敛为有界集合，直接落盘即可。
+            log_controller_event("connect_failed", &error);
+            return Err(error);
+        }
+    };
 
     let keeper = app.clone();
     tauri::async_runtime::spawn(async move {
@@ -1138,6 +1205,7 @@ pub(crate) async fn connect_controlling_device(
         let business = keeper.state::<ControllingLaneState>();
         let device = manager.inner();
         let mut on_status = |status: &ControllingStatus| {
+            log_controller_event("status", &controller_status_log_detail(status));
             let _ = keeper.emit(CONTROLLER_STATUS_EVENT, status);
         };
         let mut on_session = |projection: &ControllingSessionProjection| {
@@ -1219,8 +1287,18 @@ mod tests {
             self.step += 1;
             match self.step {
                 1 => Some(self.reservation.clone()),
-                2 => Some(self.peer.commit().unwrap()),
-                3 => {
+                // Relay router 契约：发送方的 `finished_receipt_commit` 会被原样回投
+                // 给发送方（`remote-control-relay/test/controller-router.test.js`）。
+                // 这里按真实链路注入自帧回投：A 端必须跳过它，而不是当成对端
+                // commitment 失败关闭（2026-09-20 真机正是此处的对偶问题）。
+                2 => self
+                    .outbound
+                    .borrow()
+                    .iter()
+                    .find(|message| message["type"] == "finished_receipt_commit")
+                    .cloned(),
+                3 => Some(self.peer.commit().unwrap()),
+                4 => {
                     let a_commit = self
                         .outbound
                         .borrow()
@@ -1230,7 +1308,7 @@ mod tests {
                     self.peer.accept_peer_commitment(&a_commit).unwrap();
                     Some(self.peer.finished().unwrap())
                 }
-                4 => {
+                5 => {
                     let a_finished = self
                         .outbound
                         .borrow()

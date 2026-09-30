@@ -648,6 +648,51 @@ pub(super) fn apply_runtime_relay_override(mut config: WebAccessConfig) -> WebAc
     config
 }
 
+/// A 端控制通道地址的来源标记，只用于有界排障日志。
+///
+/// 2026-09-20 实测：开发期遗留的用户级环境变量把 A 端指向测试 Relay，而 B 端连接码
+/// 注册在生产 Relay，现象是「连接码无效或已过期」，但端上没有任何痕迹说明地址被
+/// 覆盖。这里把来源显式记下来（`env` / `settings` / `profile`），不含任何凭据。
+pub(super) fn controller_relay_url_source() -> &'static str {
+    if std::env::var("PINVOU_REMOTE_RUNTIME_RELAY_WS_URL")
+        .map(|url| !url.trim().is_empty())
+        .unwrap_or(false)
+    {
+        return "runtime_env";
+    }
+    if std::env::var("PINVOU_REMOTE_RELAY_WS_URL")
+        .map(|url| !url.trim().is_empty())
+        .unwrap_or(false)
+    {
+        return "env";
+    }
+    if load_relay_settings().is_some() {
+        return "settings";
+    }
+    "profile"
+}
+
+/// 只保留端点的路径部分：排障需要区分 `/pinvou3/remote/ws` 与
+/// `/pinvou3/remote-test/ws`，但查询串里可能带凭据，绝不能落盘。
+pub(super) fn relay_url_path(url: &str) -> String {
+    let after_scheme = url.split_once("://").map(|(_, rest)| rest).unwrap_or("");
+    let path = match after_scheme.find('/') {
+        Some(index) => &after_scheme[index..],
+        None => "",
+    };
+    path.split(['?', '#']).next().unwrap_or("").to_string()
+}
+
+/// A 端连接前写进排障日志的一行端点标记：内置 profile + 来源 + 路径。
+pub(super) fn controller_endpoint_log_detail() -> String {
+    format!(
+        "profile:{}/source:{}/path:{}",
+        super::active_endpoint_profile().id,
+        controller_relay_url_source(),
+        relay_url_path(&controller_relay_ws_url())
+    )
+}
+
 pub(super) fn public_url(config: &WebAccessConfig) -> String {
     let mut url = format!(
         "{}/#endpoint={}&token={}",
@@ -679,4 +724,24 @@ pub(super) fn percent_encode(value: &str) -> String {
 /// parent module, so it stays `pub(super)`.
 pub(super) fn new_stream_epoch() -> String {
     format!("epoch_{}", crate::features::remote_control::short_token(24))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::relay_url_path;
+
+    #[test]
+    fn relay_url_path_keeps_only_the_path_and_drops_credentials() {
+        assert_eq!(
+            relay_url_path("wss://pinvou.com/pinvou3/remote/ws"),
+            "/pinvou3/remote/ws"
+        );
+        assert_eq!(
+            relay_url_path("wss://pinvou.com/pinvou3/remote-test/ws?token=hunter2"),
+            "/pinvou3/remote-test/ws"
+        );
+        assert_eq!(relay_url_path("ws://127.0.0.1:8787/pinvou3/remote/ws"), "/pinvou3/remote/ws");
+        assert_eq!(relay_url_path("wss://pinvou.com"), "");
+        assert_eq!(relay_url_path("not-a-url"), "");
+    }
 }

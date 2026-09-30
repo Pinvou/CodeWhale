@@ -426,4 +426,115 @@ node --test pinvou3-app/tests/<相关契约>.test.mjs
 错误边界接住（用户侧表现为「设置页面加载失败」），而源码契约测试与 `build:ui` 都发现不了——只有
 jsdom 冒烟能复现（本次即由 `test:settings-ui` 的 ① 断言捕获）。
 
+## 13. 生产打通与端上排障记录（2026-09-20）
+
+### 13.1 生产 controller lane 已启用
+
+生产 relay（8787）已部署含 controller-v1 的版本并启用 `PINVOU_DESKTOP_CONTROLLER_ENABLED=1`（`development + TOFU`，安全降级经用户确认），
+配置、密钥、验收与回滚见 `Windows双端远程控制发布与回滚.md` 第 8 节。
+
+### 13.2 排障中修复的 6 个端上缺陷（全部为客户端，均有提交与回归证据）
+
+| 现象 | 根因 | 修复 |
+|---|---|---|
+| 点「开启远程控制」报 `desktop_remote_control_unsupported` | 面板可见性用 `shared/platform.js` 的 `can`（桌面端“非 false 即允许”），bridge 注入的 `can` 却要求显式 `true` | 统一 bridge 的能力语义（`33c6a6515`） |
+| 日志出现 `registration_sent` 后 30 秒超时 | `controller_relay_message` 白名单漏了 `desktop_pairing_registered`，relay 生成的连接码回包从未进入控制通道（relay 侧 registrations 已增长） | 放行该结果帧并补回归用例（`f952553bd`） |
+| 端点通道偶发 20 秒未就绪即失败 | 注册前未等待端点 socket 认证为 B，且就绪等待无重试 | `wait_endpoint_ready` + 注册有界重试（幂等复用 `registration_request_id`）（`ac421eb90`、`eac888b3f`） |
+| 面板只显示 `(error)` / `(desktop_remote_control_failed)` | Tauri 对 `Err(String)` 直接抛字符串，bridge 只读 `code/message` 导致真实有界码被兜底吞掉 | `asBoundedError` 支持字符串并面向前端透出（`84d2ec1b6`、`eac888b3f`） |
+| 后端已 `waiting_connection` 但界面无码 | 状态代际门只认旧拼写 `registering/waiting_for_pairing`，新 generation 的 `waiting_connection` 被丢弃 | `starting` 接受 `reserving/waiting_connection`（`ddc376767`） |
+| 同上（更深一层） | 域切片 `snapshotStateSlice` 读顶层键，而 feature 只把状态挂在嵌套键 `desktopRemoteControl` → `bs.controlledDevice` 恒为 `undefined` | `publish` 时把 7 个切片镜像到顶层，并在安装时镜像初始状态（`2edc456cf`；注意必须在 `STATE_SLICES` 初始化之后调用，见 `0fba53786` 的回归修复） |
+
+### 13.3 端上排障能力（保留）
+
+- `~/.pinvou3/logs/remote-control.log`：B 端（`[controlled]`）起停/注册/握手/端点就绪/relay 拒绝码，以及前端 `event`/`result`/`ui` 三类投影
+  （`desktop_remote_client_log` 命令 + bridge `clientLog`）。只写阶段与有界值，不含 endpoint/lease/token。
+- A 端（`[controller]`）：`connect_requested`（含 `profile/source/path` 端点标记）、`connect_rejected`、`connect_started`、
+  每次状态投影 `status`（与界面同源的 `state`/`error`）、`connected` / `connect_failed`（有界结果码）。
+- 验收记录（2026-09-20 16:29）：`registered=waiting_connection` 与前端 `event/result/ui` 四层一致 `code=yes`，被控端成功显示 7 位连接码。
+
+### 13.4 剩余
+
+- A 端用该连接码连接并完成普通文本任务（真机或第二实例；同机受单实例插件限制）。
+- E2E-07 浏览器冒烟、E2E-08 完整旅程与发布缺口登记、以及关闭 TOFU 的前置（端点清单 + registry 迁移）。
+
+### 13.5 A 端「连接码无效或已过期」根因与 A 端日志补齐（2026-09-20）
+
+- **现象**：使用另一台设备（B 端，连接码注册在**生产** Relay）的连接码，在**未过期**的情况下仍报
+  「连接码无效或已过期」（映射自 Relay 的 `pairing_code_invalid`）。
+- **根因**：本机 A 端残留 **User 级**环境变量 `PINVOU_REMOTE_PUBLIC_URL` / `PINVOU_REMOTE_RELAY_WS_URL` /
+  `PINVOU_REMOTE_RELAY_SIGNING_KEY_ID` / `PINVOU_REMOTE_RELAY_SIGNING_PUBLIC_KEY_B64`（指向测试端点
+  `/pinvou3/remote-test`），且运行中的 dev 实例继承了这份环境。于是 A 端把 claim 发到测试 Relay，而 B 的码
+  注册在生产 Relay，两端不在同一实例 → claim 必然 `pairing_code_invalid`。
+  生产 Relay 的健康检查（`endpoint_count=29 / desktop_open_count=16`）与测试 Relay（`endpoint_count=0 /
+  ws_connection_count=1（未认证）`）互相对照即是证据。
+- **修复**：清除本机 User 级覆盖变量并以干净环境重启；同时补 A 端有界排障日志（此前 A 端完全没有落盘痕迹，
+  失败只能从界面文案反推，这是本次排查最耗时的原因）。日志写入器泛化为 `log_relay_event(scope, …)`，
+  `controlled` / `controller` 两个 scope 共用同一份有界规则与同一文件。
+- **保守默认（登记）**：保留 `PINVOU_REMOTE_*` 覆盖能力供本地/测试使用，但**生产环境不得设置任何
+  `PINVOU_REMOTE_*` 环境变量**；一旦被覆盖，A 端每次连接都会写出 `source:env|settings|profile` 与端点路径，
+  可直接自查，无需再靠猜。生产默认走内置 `production` profile（地址 + 信任根均内置，用户零配置）。
+- **验证**：`cargo test remote_control::` **328 通过 / 0 失败**（新增 3 条：A/B 日志行格式、有界洗白、端点路径脱敏）；
+  `cargo test remote_control::controller::relay_runtime` **17 通过 / 0 失败**；
+  `cargo test remote_control::manager::persistence` **1 通过 / 0 失败**；`python scripts/architecture-guard.py` 通过。
+
+### 13.6 开发入口不再单独覆盖 Relay 地址（同类根因收口）
+
+- **同类隐患**：`pinvou3-app/run-dev.sh` 原先只 `export PINVOU_REMOTE_PUBLIC_URL` /
+  `PINVOU_REMOTE_RELAY_WS_URL`（指向 remote-test），**不设置**信任根，于是 controller 握手会用内置
+  production 信任根去验 remote-test 的 transcript，必然失败关闭；同时这与
+  `docs/PINVOU-开源执行代办.md` 中「移除生产远控默认地址」的登记项同源。
+- **修复**：改为选中内置 `test` profile（`PINVOU_REMOTE_ENDPOINT_PROFILE=test`），地址与信任根同源；
+  切回生产只需 `PINVOU_REMOTE_ENDPOINT_PROFILE=production`；地址级覆盖仍保留给自建 Relay，
+  并在脚本注释与 `docs/remote-e2e-test-endpoint.md` 中写明「只覆盖地址不会同步换信任根」。
+- **验证**：`node --test pinvou3-app/tests/tauri_platform_layout.test.js` 通过；
+  `node --test pinvou3-app/tests/knowledge_host_packaging.test.mjs` 通过；`python scripts/architecture-guard.py` 通过。
+
+### 13.7 真机首次 A↔B 握手失败：Relay 自帧回投未被两端过滤（已修复）
+
+- **现象**：A 端拿到 `controller_pairing_reserved`（日志 `status state:safety_handshake`）后约 40 秒以
+  `endpoint_offline` 收尾；B 端界面报错，B 端日志为
+  `[controlled] stage=handshake_failed detail=controller_handshake_rejected`。
+- **根因**：Relay router 契约会把**发送方自己的** `finished_receipt_commit` **原样回投**给发送方
+  （`remote-control-relay/test/controller-router.test.js:84-86` 明确断言 socket-A 与 socket-B 都收到该帧；
+  `controller-router.js:170-176` 先投发送方再投对端）。两端此前都把该类型的入站帧当作对端 commitment 处理，
+  于是 `sender_role` 与本端不符 → B 端在发出自己的 commit 后立刻收到回投并 `controller_handshake_rejected`
+  结束整条通道，A 端随后因对端离线收到 `endpoint_offline`。E2E-02 此后一直只有单测（无 Relay 回投），
+  真机首跑才暴露。
+- **修复**：`protocol.rs` 新增 `is_self_echoed_handshake_frame(message, own_role)`（只按本端角色匹配
+  `finished_receipt_commit` / `encrypted_handshake_finished`）；A 端 `next_of_type` 与 B 端预握手分派
+  都跳过自帧回投并继续等待，绝不吞掉对端帧，其余类型的分派与失败关闭语义不变。
+- **回归**：A 端单测夹具（`ControlledPeerPort`）改为按真实链路注入自帧回投再推进握手；B 端新增自帧判定用例
+  （对端帧/预留/joined/加密业务帧均不受影响）。
+- **验证**：`cargo test remote_control::` **330 通过 / 0 失败**；`python scripts/architecture-guard.py` 通过。
+- **端上影响（登记）**：B 端必须安装含本修复的包才能通过握手；对方设备上的旧包会稳定停在这一步。
+
+### 13.8 真机 A↔B 第二处失败：`finished_receipt_ack` 误传本端 receipt（已修复）
+
+- **现象**：自帧回投修复后 A 端推进到 `safety_handshake`，随即失败，界面提示
+  「对方返回的数据无法识别，请重试；若持续出现请检查双方版本」（= `<code>invalid_message</code>`）。
+- **根因**：Relay 的收据校验要求 `finished_receipt_ack` 携带 **`sender_role` 那一方**（即刚收到
+  对端 Finished、因此解开对端 receipt 的一侧）的 receipt secret：`controller-lease.js:312-337`
+  先按 `sender_role` 取对端先前的 commitment，再用帧里的 secret 重算比对；契约样例见
+  `remote-control-relay/test/controller-handshake.test.js:153-158`（A 的 receipt 由 B 提交、B 的
+  receipt 由 A 提交）。两端实现却都回传了**本端** receipt，于是 Relay 报 `finished_receipt_invalid`；
+  该码不在端上公共错误闭集内，被兜底成 `invalid_message`，界面文案因此指向「数据无法识别」。
+- **修复**：两端 `accept_peer_finished` 改为回传刚从对端 Finished 解开的 `peer_receipt`；同步修正
+  `crypto.rs` 里 `to_base64` 的误导性注释（原注释写成「回传本端 receipt」，正是缺陷来源）。
+- **回归**：新增与 Relay 同构的校验用例（`receipt_ack_carries_the_peer_receipt_matching_its_commitment`）：
+  用 ack 里的 secret 按 `sender_role` 重算 commitment，必须等于对端先前提交的 commitment；反向用例
+  确认「拿本端 receipt 当对端 receipt」必然对不上（即修复前的行为）。
+- **验证**：`cargo test remote_control::` **331 通过 / 0 失败**；`python scripts/architecture-guard.py` 通过。
+- **端上影响（登记）**：两端都需安装含本修复的包；只有一端更新时仍会在收据阶段失败。
+
+### 13.9 A 端失败归因日志（Relay 原始码 + 本地握手码）
+
+- **动机**：13.7/13.8 两轮都出现了「公共码掩盖真实原因」：闭集外的 Relay 错误码会被
+  `public_failure_code` 兜底成 `invalid_message`，单看界面文案分不清是 Relay 拒绝还是本地校验拒绝。
+- **改动**：A 端 transport 收到 `error` 帧时把**原始有界码**写入排障日志（`stage=relay_error`），
+  并记录是否收到过 Relay 错误帧；失败时补两行：
+  `stage=handshake_failed detail=<本地握手码>` 与
+  `stage=connect_failed detail=<公共码>/origin:relay|lane|local`。
+  所有值仍是协议枚举名，不含文案、连接码或凭据。
+- **验证**：`cargo test remote_control::` **331 通过 / 0 失败**；`python scripts/architecture-guard.py` 通过。
+
 全量 `cargo test` 一次编译约 1.5–5 分钟：同一模块的多处改动应攒成一次编译，任务边界才跑全量回归。

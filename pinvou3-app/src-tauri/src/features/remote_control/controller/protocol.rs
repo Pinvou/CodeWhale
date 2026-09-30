@@ -1415,6 +1415,26 @@ pub(crate) fn validate_controller_message_json(
     validate_controller_message_json_in_context(input, sender_role, None)
 }
 
+/// A/B 在线上报文里的角色字面量（`sender_role` / `receiver_role`）。
+pub(crate) const ROLE_A: &str = "A";
+pub(crate) const ROLE_B: &str = "B";
+
+/// Relay router 契约：`finished_receipt_commit` 会**同时**回投给发送方
+/// （`remote-control-relay/test/controller-router.test.js` 明确断言 socket-A 与
+/// socket-B 都收到该帧）。因此两端都会收到 `sender_role` 等于本端角色的自帧回投：
+/// 它既不是对端输入，也不是错序报文，必须跳过而不是失败关闭（2026-09-20 真机实测：
+/// B 端把自帧当对端 commitment 校验，直接 `controller_handshake_rejected`，A 端随后
+/// 因对端离线收到 `endpoint_offline`）。
+///
+/// `encrypted_handshake_finished` 当前只在两端之间单投，这里一并覆盖，避免将来
+/// 路由改成广播时再次踩同类问题；判定只按本端角色，绝不吞掉对端帧。
+pub(crate) fn is_self_echoed_handshake_frame(message: &Value, own_role: &str) -> bool {
+    matches!(
+        message.get("type").and_then(Value::as_str),
+        Some("finished_receipt_commit") | Some("encrypted_handshake_finished")
+    ) && message.get("sender_role").and_then(Value::as_str) == Some(own_role)
+}
+
 pub(crate) fn validate_controller_message_json_in_context(
     input: &str,
     sender_role: SenderRole,
@@ -3606,6 +3626,43 @@ mod tests {
     use super::*;
     use serde_json::json;
     use sha2::{Digest, Sha256};
+
+    #[test]
+    fn self_echoed_handshake_frames_are_recognized_by_own_role_only() {
+        let commit = |role: &str| {
+            json!({
+                "v": 1,
+                "type": "finished_receipt_commit",
+                "sender_role": role,
+                "commitment": "00".repeat(32),
+            })
+        };
+        // relay 会把发送方的 commit 原样回投：本端角色 → 自帧；对端角色 → 对端帧。
+        assert!(is_self_echoed_handshake_frame(&commit("A"), ROLE_A));
+        assert!(!is_self_echoed_handshake_frame(&commit("B"), ROLE_A));
+        assert!(is_self_echoed_handshake_frame(&commit("B"), ROLE_B));
+        assert!(!is_self_echoed_handshake_frame(&commit("A"), ROLE_B));
+        // Finished 当前是单投，规则同样覆盖，避免路由改成广播后再次踩同类问题。
+        assert!(is_self_echoed_handshake_frame(
+            &json!({
+                "v": 1,
+                "type": "encrypted_handshake_finished",
+                "sender_role": "A",
+                "ciphertext_b64": "AQID",
+                "ciphertext_bytes": "3",
+            }),
+            ROLE_A
+        ));
+        // 非握手帧绝不按自帧吞掉：它们仍走各自的类型分派。
+        assert!(!is_self_echoed_handshake_frame(
+            &json!({ "v": 1, "type": "controller_joined", "sender_role": "A" }),
+            ROLE_A
+        ));
+        assert!(!is_self_echoed_handshake_frame(
+            &json!({ "v": 1, "type": "finished_receipt_commit" }),
+            ROLE_A
+        ));
+    }
 
     const FIXTURE: &str = include_str!(
         "../../../../../../remote-control-relay/test/fixtures/controller-protocol-v1.json"

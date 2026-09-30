@@ -32,11 +32,38 @@
       return typeof can === "function" && can("desktopRemoteControl") === true;
     }
 
+    // 域切片（bridge.js 的 STATE_SLICE_FIELDS.desktopRemoteControl）读的是**顶层键**
+    // （controlledDevice / controllerConnection / …），而本 feature 过去只把整份状态挂在
+    // 嵌套键 state.desktopRemoteControl 上，导致 UI 的 bs.controlledDevice 恒为
+    // undefined——后端已 waiting_connection 且带连接码，面板却显示未开启（2026-09-20 实测）。
+    var STATE_SLICES = [
+      "controlledDevice",
+      "controllerConnection",
+      "remoteCapabilities",
+      "remoteModels",
+      "remoteHistories",
+      "tasks",
+      "remotePermissions",
+    ];
+
+    function mirrorSlices(next) {
+      for (var i = 0; i < STATE_SLICES.length; i++) {
+        var key = STATE_SLICES[i];
+        if (next && Object.prototype.hasOwnProperty.call(next, key)) state[key] = next[key];
+      }
+    }
+
     function publish(next) {
       state.desktopRemoteControl = next;
+      mirrorSlices(next);
       if (typeof notify === "function") notify("desktopRemoteControl");
       return next;
     }
+
+    // 安装时先镜像一次初始状态，保证 UI 首次读取 bs.controlledDevice 就不是
+    // undefined。注意必须放在 STATE_SLICES 初始化之后：var 提升下提前调用会拿到
+    // undefined 并让整个 feature 安装失败（2026-09-20 实测：voice 域缺失）。
+    mirrorSlices(current());
 
     function current() {
       return state.desktopRemoteControl || logic.createState();
@@ -55,6 +82,11 @@
       subscribed = true;
       listen("desktop-remote-controlled-status", function (event) {
         var payload = event && event.payload ? event.payload : event || {};
+        clientLog(
+          "event status=" + String(payload.status || "") + " code=" + (payload.pairingCode ? "yes" : "no")
+          + " expires=" + String(payload.pairingExpiresAtMs || payload.expiresAtMs || "")
+          + " gen=" + String(payload.generation || ""),
+        );
         publish(logic.applyControlledStatus(current(), payload));
       }).then(function (off) {
         unlisten.push(off);
@@ -104,6 +136,11 @@
 
     function applyControlled(intent, result) {
       var payload = result && typeof result === "object" ? result : {};
+      clientLog(
+        "result status=" + String(payload.status || "") + " code=" + (payload.pairingCode ? "yes" : "no")
+        + " expires=" + String(payload.pairingExpiresAtMs || payload.expiresAtMs || "")
+        + " gen=" + String(payload.generation || ""),
+      );
       publish(logic.applyControlledStatus(current(), {
         intent: intent,
         status: payload.kind || payload.status || "idle",
@@ -140,7 +177,7 @@
         workspaces: Array.isArray(workspaces) ? workspaces : [],
       }).then(function (result) {
         return applyControlled(intent, result);
-      });
+      }).catch(function (failure) { throw asBoundedError(failure); });
     }
 
     function controlledRefresh() {
@@ -149,7 +186,7 @@
       var intent = controlledIntent();
       return invoke("desktop_remote_controlled_refresh", {}).then(function (result) {
         return applyControlled(intent, result);
-      });
+      }).catch(function (failure) { throw asBoundedError(failure); });
     }
 
     function controlledStop() {
@@ -157,7 +194,7 @@
       var intent = controlledIntent();
       return invoke("desktop_remote_controlled_stop", {}).then(function (result) {
         return applyControlled(intent, result);
-      });
+      }).catch(function (failure) { throw asBoundedError(failure); });
     }
 
     function controlledDisconnectNow() {
@@ -165,13 +202,36 @@
       var intent = controlledIntent();
       return invoke("desktop_remote_controlled_disconnect_now", {}).then(function (result) {
         return applyControlled(intent, result);
-      });
+      }).catch(function (failure) { throw asBoundedError(failure); });
     }
 
     function controlledStatus() {
       ensureAvailable();
       subscribe();
-      return invoke("desktop_remote_controlled_status", {});
+      return invoke("desktop_remote_controlled_status", {})
+        .catch(function (failure) { throw asBoundedError(failure); });
+    }
+
+    /**
+     * 主动拉取一次被控端状态并投影到本地状态：事件或命令回包一旦丢失，
+     * 面板仍能通过它拿回真实状态（例如后端已 waiting_connection 与连接码）。
+     */
+    function controlledSync() {
+      ensureAvailable();
+      subscribe();
+      var intent = controlledIntent();
+      return invoke("desktop_remote_controlled_status", {})
+        .then(function (result) {
+          return applyControlled(intent, result);
+        })
+        .catch(function (failure) { throw asBoundedError(failure); });
+    }
+
+    /// 前端排障日志：写入与 Rust 相同的日志文件，支持人员可直接读取。
+    function clientLog(message) {
+      if (!isAvailable()) return Promise.resolve();
+      return invoke("desktop_remote_client_log", { message: String(message || "") })
+        .catch(function () {});
     }
 
     /**
@@ -213,7 +273,11 @@
      * 这里把码恢复成 `error.code`，UI 才能给出对应的三语文案而不是笼统兜底。
      */
     function asBoundedError(failure) {
-      var raw = (failure && failure.code) || (failure && failure.message) || "";
+      // Tauri 对 `Err(String)` 直接抛**字符串**（既没有 code 也没有 message），
+      // 之前会被兜底成 desktop_remote_control_failed，真实原因就此丢失。
+      var raw = typeof failure === "string"
+        ? failure
+        : (failure && (failure.code || failure.message)) || "";
       var text = String(raw || "desktop_remote_control_failed");
       var error = new Error(text);
       error.code = text;
@@ -639,6 +703,7 @@
       controlledStop: controlledStop,
       controlledDisconnectNow: controlledDisconnectNow,
       controlledStatus: controlledStatus,
+      clientLog: clientLog,
       endpointProfiles: endpointProfiles,
       setEndpointProfile: setEndpointProfile,
       controlledListWorkspaces: controlledListWorkspaces,

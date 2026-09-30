@@ -1606,6 +1606,7 @@ pub fn run() {
             commands::desktop_remote_controlled::desktop_remote_controlled_stop,
             commands::desktop_remote_controlled::desktop_remote_controlled_disconnect_now,
             commands::desktop_remote_controlled::desktop_remote_controlled_status,
+            commands::desktop_remote_controlled::desktop_remote_client_log,
             commands::desktop_remote_controlled::desktop_remote_controlled_poll_watchdog,
             commands::desktop_remote_controlled::desktop_remote_controlled_authorize_workspace,
             commands::desktop_remote_controlled::desktop_remote_controlled_list_workspaces,
