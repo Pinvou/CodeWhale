@@ -699,6 +699,16 @@ impl SnapshotRepo {
                 String::from_utf8_lossy(&ls.stderr).trim()
             )));
         }
+        if capture_hit_the_cap(&ls.stdout) {
+            // A truncated listing would make restore compute a wrong
+            // deletion set (paths missing from the truncated target side
+            // are treated as "not in the snapshot" and removed), so fail
+            // before the checkout instead of deleting by a partial truth.
+            return Err(io_other(
+                "git ls-tree output exceeded the capture cap; refusing to \
+                 derive a restore diff from a truncated path listing",
+            ));
+        }
         Ok(parse_nul_paths(&ls.stdout))
     }
 
@@ -770,6 +780,15 @@ impl SnapshotRepo {
                     GIT_STDERR_TAIL_CHARS
                 )
             )));
+        }
+        if capture_hit_the_cap(&log.stdout) {
+            // A truncated history would end with a half-parsed pseudo
+            // entry; reporting a partial snapshot list as truth could send
+            // `/undo` to a fabricated cursor.
+            return Err(io_other(
+                "git log output exceeded the capture cap; refusing to \
+                 report a truncated snapshot history",
+            ));
         }
         let stdout = String::from_utf8_lossy(&log.stdout);
         let mut out = Vec::new();
@@ -1208,6 +1227,14 @@ const GIT_CAPTURE_CAP: usize = 16 * 1024 * 1024;
 /// reader sees the truncation instead of a silently cut output.
 const GIT_CAPTURE_CAP_NOTE: &[u8] =
     b"\n[codewhale] git output capture stopped at the size cap; later output was dropped\n";
+
+/// True when a bounded-git capture stopped at the size cap. Parsers that
+/// make decisions from a captured stdout (the restore diff's path
+/// listings, the snapshot history) must refuse a truncated capture
+/// instead of treating its missing tail as ground truth.
+fn capture_hit_the_cap(bytes: &[u8]) -> bool {
+    bytes.ends_with(GIT_CAPTURE_CAP_NOTE)
+}
 
 /// Number of bounded-git pipe readers currently running. The thread-leak
 /// regression uses this to prove a cancelled reader actually exits: a
@@ -1718,6 +1745,28 @@ mod bounded_git_tests {
             );
             std::thread::sleep(Duration::from_millis(20));
         }
+    }
+
+    #[test]
+    fn run_git_appends_the_cap_note_when_output_exceeds_the_capture_cap() {
+        let _serial = bounded_git_test_lock();
+        // 17 MiB through real pipes: the drain must keep reading to EOF
+        // (the child still exits promptly) while retaining only the cap,
+        // and the captured tail must say so — the restore-diff and history
+        // parsers key on exactly that note.
+        let mut cmd = std::process::Command::new("sh");
+        cmd.arg("-c").arg("head -c 17000000 /dev/zero");
+        let output = run_bounded_git(&mut cmd, "head").expect("bounded run");
+        assert!(output.status.success());
+        assert!(
+            capture_hit_the_cap(&output.stdout),
+            "a capped capture must end with the cap note"
+        );
+        assert!(
+            output.stdout.len() <= GIT_CAPTURE_CAP + GIT_CAPTURE_CAP_NOTE.len(),
+            "the capture must stop at the cap, got {} bytes",
+            output.stdout.len()
+        );
     }
 }
 
@@ -3096,5 +3145,19 @@ mod tests {
             "expected every file in the tree listing, got {}",
             paths.len()
         );
+    }
+
+    #[test]
+    fn capture_hit_the_cap_matches_only_a_truncating_tail() {
+        assert!(capture_hit_the_cap(GIT_CAPTURE_CAP_NOTE));
+        assert!(!capture_hit_the_cap(b""));
+        // A note-shaped fragment that is not the tail, or a tail that has
+        // data after the note, is content — not truncation evidence.
+        assert!(!capture_hit_the_cap(
+            b"head\ncodewhale git output capture stopped at the size cap"
+        ));
+        assert!(!capture_hit_the_cap(
+            b"\n[codewhale] git output capture stopped at the size cap; later output was dropped\nmore data"
+        ));
     }
 }
