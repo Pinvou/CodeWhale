@@ -1675,7 +1675,10 @@ async fn forkguard_custom_responses_capture_tolerates_missing_or_empty_encrypted
 /// table+endpoint+model match replays the encrypted item, while a model
 /// switch, a different table, a different provider, or an edited `base_url`
 /// must not — table A's encrypted reasoning never rides to table B or to
-/// whatever endpoint table A later points at.
+/// whatever endpoint table A later points at. A pre-fingerprint state (no
+/// endpoint field) carries no proof of origin, so on a Custom tag it fails
+/// closed too: it must not ride a table's wire even at the table's current
+/// URL, because the URL may not be the one that minted it.
 #[test]
 fn forkguard_custom_responses_replays_only_exact_model_opaque_reasoning_state() {
     const SENTINEL: &str = "readable private reasoning must not be replayed";
@@ -1740,8 +1743,12 @@ fn forkguard_custom_responses_replays_only_exact_model_opaque_reasoning_state() 
         "{switched_endpoint}"
     );
 
-    // States minted before endpoint fingerprints existed carry none; they
-    // keep replaying on the tagged table so old sessions survive the upgrade.
+    // States minted before endpoint fingerprints existed carry none and fail
+    // closed on Custom: with no proof of which endpoint minted the blob, a
+    // stable table tag proves nothing about the URL behind it, so the blob
+    // must not ride the wire even at the table's current URL. The upgrade
+    // cost is one turn of reasoning continuity; fresh captures carry
+    // fingerprints and replay resumes from the next turn.
     request.messages[0].content = vec![ContentBlock::Thinking {
         thinking: SENTINEL.to_string(),
         signature: None,
@@ -1760,14 +1767,59 @@ fn forkguard_custom_responses_replays_only_exact_model_opaque_reasoning_state() 
         MINTING_TABLE,
         MINTING_ENDPOINT_FP,
     );
-    assert_eq!(
-        legacy_state.pointer("/input/0/encrypted_content"),
-        Some(&json!("enc_legacy_payload")),
-        "fingerprint-less legacy state must keep replaying: {legacy_state}"
+    let legacy_wire = legacy_state.to_string();
+    assert!(!legacy_wire.contains(SENTINEL), "{legacy_state}");
+    assert!(
+        !legacy_wire.contains("enc_legacy_payload"),
+        "fingerprint-less Custom state must fail closed, not replay: {legacy_state}"
+    );
+    assert!(
+        legacy_state
+            .get("input")
+            .and_then(Value::as_array)
+            .is_some_and(|items| items.iter().all(|item| item["type"] != "reasoning")),
+        "{legacy_state}"
+    );
+
+    // The legacy-root custom table (identity "custom", tag "custom") is
+    // endpoint-scoped Custom identity too and fails closed the same way.
+    request.messages[0].content = vec![ContentBlock::Thinking {
+        thinking: SENTINEL.to_string(),
+        signature: None,
+        state: Some(OpaqueReasoningState {
+            provider: "custom".to_string(),
+            api: "openai-responses".to_string(),
+            model: "gpt-6-sol".to_string(),
+            id: Some("rs_legacy_root".to_string()),
+            encrypted_content: "enc_legacy_root_payload".to_string(),
+            endpoint: None,
+        }),
+    }];
+    let legacy_root = build_responses_body_for_provider(
+        &request,
+        ApiProvider::Custom,
+        "custom",
+        MINTING_ENDPOINT_FP,
+    );
+    assert!(
+        !legacy_root.to_string().contains("enc_legacy_root_payload"),
+        "fingerprint-less legacy-root Custom state must fail closed: {legacy_root}"
     );
 
     // Same model on a DIFFERENT named table: the shared `custom` slug must
     // not match, so table A's opaque state never rides table B's wire.
+    request.messages[0].content = vec![ContentBlock::Thinking {
+        thinking: SENTINEL.to_string(),
+        signature: None,
+        state: Some(OpaqueReasoningState {
+            provider: MINTING_TABLE.to_string(),
+            api: "openai-responses".to_string(),
+            model: "gpt-6-sol".to_string(),
+            id: Some("rs_custom".to_string()),
+            encrypted_content: "enc_custom_payload".to_string(),
+            endpoint: Some(MINTING_ENDPOINT_FP.to_string()),
+        }),
+    }];
     let switched_table = build_responses_body_for_provider(
         &request,
         ApiProvider::Custom,
@@ -1830,6 +1882,52 @@ fn forkguard_custom_responses_replays_only_exact_model_opaque_reasoning_state() 
             .and_then(Value::as_array)
             .is_some_and(|items| items.iter().all(|item| item["type"] != "reasoning")),
         "{switched_model}"
+    );
+}
+
+/// The legacy migration is fail-closed only where the endpoint can move. A
+/// fingerprint-less state from a fixed-endpoint provider predates the
+/// endpoint field entirely, and that provider's URL cannot change under its
+/// stable tag, so the state provably came from the only endpoint the tag
+/// ever had — it keeps replaying so pre-upgrade sessions on built-in
+/// providers keep their reasoning continuity.
+#[test]
+fn forkguard_fixed_endpoint_legacy_state_without_fingerprint_keeps_replaying() {
+    const SENTINEL: &str = "readable private reasoning must not be replayed";
+    const ENDPOINT_FP: &str = "fp-codex-endpoint";
+    let mut request = minimal_responses_request();
+    request.messages.insert(
+        0,
+        Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::Thinking {
+                thinking: SENTINEL.to_string(),
+                signature: None,
+                state: Some(OpaqueReasoningState {
+                    provider: ApiProvider::OpenaiCodex.as_str().to_string(),
+                    api: "openai-responses".to_string(),
+                    model: request.model.clone(),
+                    id: Some("rs_legacy_codex".to_string()),
+                    encrypted_content: "enc_legacy_codex_payload".to_string(),
+                    endpoint: None,
+                }),
+            }],
+        },
+    );
+    let body = build_responses_body_for_provider(
+        &request,
+        ApiProvider::OpenaiCodex,
+        ApiProvider::OpenaiCodex.as_str(),
+        ENDPOINT_FP,
+    );
+    assert_eq!(
+        body.pointer("/input/0/type"),
+        Some(&json!("reasoning")),
+        "fingerprint-less fixed-endpoint state must keep replaying: {body}"
+    );
+    assert_eq!(
+        body.pointer("/input/0/encrypted_content"),
+        Some(&json!("enc_legacy_codex_payload"))
     );
 }
 

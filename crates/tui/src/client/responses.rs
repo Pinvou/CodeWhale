@@ -55,6 +55,17 @@ fn responses_route_sends_encrypted_reasoning_include(provider: ApiProvider) -> b
     )
 }
 
+/// Whether a captured provider tag names endpoint-scoped Custom identity: the
+/// legacy root table (`custom`) or a named table (`custom/<name>`), exactly
+/// the tags `DeepSeekClient::reasoning_provider_tag` mints for Custom. These
+/// are the only tags whose endpoint can change while the tag stays put, so
+/// they are the only fingerprint-less (pre-fingerprint) states that fail
+/// closed instead of replaying; a built-in provider's URL is fixed, so its
+/// legacy states have nowhere else to have come from.
+fn is_custom_reasoning_tag(tag: &str) -> bool {
+    tag == "custom" || tag.starts_with("custom/")
+}
+
 /// Build a provider-aware Responses API request body.
 ///
 /// DeepSeek-V4-Flash-0731 implements the Responses wire shape but is stateless
@@ -71,7 +82,9 @@ fn responses_route_sends_encrypted_reasoning_include(provider: ApiProvider) -> b
 /// `DeepSeekClient::reasoning_endpoint_fingerprint`): the tag pins the table
 /// name, not the URL behind it, so a state captured before the table's
 /// `base_url` was edited stops replaying. States minted before fingerprints
-/// existed carry no endpoint and keep replaying.
+/// existed carry no proof of origin: Custom endpoints can move under a stable
+/// tag, so those fail closed, while a fixed-endpoint provider's URL cannot
+/// have changed and its old sessions keep replaying.
 pub(super) fn build_responses_body_for_provider(
     request: &MessageRequest,
     provider: ApiProvider,
@@ -874,11 +887,16 @@ pub(super) fn convert_messages_to_responses_input(
                                 // Custom), alongside api shape, exact model,
                                 // and the endpoint fingerprint — a table whose
                                 // base_url was edited stops replaying the
-                                // previous endpoint's blobs. States minted
-                                // before fingerprints existed carry none and
-                                // keep replaying.
+                                // previous endpoint's blobs. Legacy states
+                                // minted before fingerprints existed carry no
+                                // proof of which endpoint produced them:
+                                // Custom endpoints can move under a stable
+                                // tag, so those fail closed instead of riding
+                                // a re-pointed table's wire, while a
+                                // fixed-endpoint provider's URL cannot have
+                                // changed and its old sessions keep replaying.
                                 let endpoint_matches = match &state.endpoint {
-                                    None => true,
+                                    None => !is_custom_reasoning_tag(&state.provider),
                                     Some(captured) => captured == reasoning_endpoint_fingerprint,
                                 };
                                 if state.provider == reasoning_provider_tag
