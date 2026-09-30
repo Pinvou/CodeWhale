@@ -71,6 +71,15 @@ test('a stopped controlled device clears the pairing code', () => {
   assert.equal(state.controlledDevice.pairingCode, null);
 });
 
+test('controlled status preserves the bounded Rust error code for diagnostics', () => {
+  const state = logic.applyControlledStatus(logic.createState(), {
+    status: 'error',
+    errorCode: 'desktop_remote_watchdog_expired',
+  });
+  assert.equal(state.controlledDevice.status, 'error');
+  assert.equal(state.controlledDevice.lastError, 'desktop_remote_watchdog_expired');
+});
+
 test('controller status is gated by connection and lease epoch', () => {
   let state = logic.createState();
   state = logic.applyControllerStatus(state, {
@@ -134,6 +143,34 @@ test('capability snapshots are bound to connection, lease and revision', () => {
   assert.equal(newerRevision.remoteCapabilities.capabilityRevision, 5);
 });
 
+test('capability preparation exposes pending and bounded failure states', () => {
+  let state = logic.createState();
+  state = logic.applyControllerStatus(state, {
+    status: 'connected',
+    connectionId: 'connection-1',
+    leaseEpoch: '2',
+  });
+  state = logic.applyControllerSession(state, {
+    sessionRef: 'session-ref-1',
+    sessionId: 'session-1',
+    connectionId: 'connection-1',
+    leaseEpoch: '2',
+    mode: 'chat',
+  });
+  state = logic.applyCapabilityPending(state, { sessionRef: 'session-ref-1' });
+  assert.equal(state.controllerConnection.capabilityStatus, 'preparing');
+  assert.equal(state.controllerConnection.capabilityError, null);
+
+  state = logic.applyCapabilityFailure(state, {
+    sessionRef: 'session-ref-1',
+    requestId: 'request-1',
+    code: 'capability_snapshot_timeout',
+  });
+  assert.equal(state.controllerConnection.capabilityStatus, 'error');
+  assert.equal(state.controllerConnection.capabilityError, 'capability_snapshot_timeout');
+  assert.equal(state.controllerConnection.capabilityRevision, null);
+});
+
 test('model descriptors stay opaque and never carry credentials', () => {
   const models = logic.applyModels(logic.createState(), [
     {
@@ -170,6 +207,13 @@ test('task events deduplicate and never regress a terminal state', () => {
   let state = logic.createState();
   state = logic.applyTaskEvent(state, { taskId: 'task-1', status: 'admitted' });
   state = logic.applyTaskEvent(state, { taskId: 'task-1', status: 'running' });
+  state = logic.applyTaskEvent(state, {
+    taskId: 'task-1',
+    status: 'admitted',
+    text: 'late prompt projection',
+  });
+  assert.equal(state.tasks[0].status, 'running', 'late admitted must not regress running');
+  assert.equal(state.tasks[0].text, 'late prompt projection', 'late prompt text is still retained');
   state = logic.applyTaskEvent(state, { taskId: 'task-1', status: 'succeeded' });
   assert.equal(state.tasks[0].status, 'succeeded');
 
@@ -186,6 +230,162 @@ test('task events deduplicate and never regress a terminal state', () => {
   });
   assert.equal(resultUnknown.tasks.length, 2);
   assert.equal(resultUnknown.tasks[1].outcomeUnknown, true);
+});
+
+test('B-side task projection keeps locally visible prompt text across status changes', () => {
+  let state = logic.createState();
+  state = logic.applyControlledStatus(state, {
+    status: 'connected',
+    generation: 'generation-b',
+  });
+  state = logic.applyControlledSession(state, {
+    sessionId: 'session-b',
+    sessionRef: 'session-ref-a',
+    generation: 'generation-b',
+  });
+  state = logic.applyControlledTaskEvent(state, {
+    taskId: 'task-visible',
+    sessionId: 'session-b',
+    status: 'admitted',
+  });
+  state = logic.applyControlledTaskEvent(state, {
+    taskId: 'task-visible',
+    sessionId: 'session-b',
+    status: 'admitted',
+    text: 'inspect the repository',
+  });
+  assert.equal(state.controlledTasks[0].text, 'inspect the repository');
+
+  state = logic.applyControlledTaskEvent(state, {
+    task_id: 'task-visible',
+    session_id: 'session-b',
+    task_status: 'running',
+  });
+  assert.equal(state.controlledTasks[0].status, 'running');
+  assert.equal(state.controlledTasks[0].text, 'inspect the repository');
+});
+
+test('B-side projections reject stale sessions and reset with the controlled generation', () => {
+  let state = logic.createState();
+  state = logic.applyControlledStatus(state, {
+    status: 'connected',
+    generation: 'generation-1',
+  });
+  state = logic.applyControlledSession(state, {
+    sessionId: 'session-current',
+    sessionRef: 'session-ref-current',
+    generation: 'generation-1',
+  });
+
+  const staleTask = logic.applyControlledTaskEvent(state, {
+    taskId: 'task-stale',
+    sessionId: 'session-old',
+    status: 'running',
+  });
+  assert.equal(staleTask, state);
+
+  const staleJournal = logic.applyControlledJournalEvent(state, {
+    event: {
+      sessionId: 'session-old',
+      epoch: 'epoch-1',
+      sequence: 1,
+      kind: 'user_message',
+      payload: { text: 'stale' },
+    },
+  });
+  assert.equal(staleJournal, state);
+
+  state = logic.applyControlledTaskEvent(state, {
+    taskId: 'task-current',
+    sessionId: 'session-current',
+    status: 'running',
+  });
+  state = logic.applyControlledJournalEvent(state, {
+    event: {
+      sessionId: 'session-current',
+      epoch: 'epoch-1',
+      sequence: 1,
+      kind: 'user_message',
+      taskId: 'task-current',
+      payload: { text: 'current' },
+    },
+  });
+  assert.equal(state.controlledTasks.length, 1);
+  assert.equal(state.controlledTranscript.length, 1);
+
+  state = logic.applyControlledStatus(state, {
+    status: 'reserving',
+    generation: 'generation-2',
+  });
+  assert.equal(state.controlledSession.sessionId, null);
+  assert.equal(state.controlledTasks.length, 0);
+  assert.equal(state.controlledTranscript.length, 0);
+});
+
+test('B-side task content remains visible after a terminal failure', () => {
+  let state = logic.createState();
+  state = logic.applyControlledStatus(state, { status: 'connected', generation: 'generation-1' });
+  state = logic.applyControlledSession(state, {
+    sessionId: 'session-b',
+    sessionRef: 'remote-session-b',
+    generation: 'generation-1',
+  });
+  state = logic.applyControlledTaskEvent(state, {
+    taskId: 'task-visible',
+    sessionId: 'session-b',
+    status: 'admitted',
+    text: 'inspect the repository',
+  });
+  state = logic.applyControlledTaskEvent(state, {
+    taskId: 'task-visible',
+    sessionId: 'session-b',
+    status: 'failed',
+    terminalReason: 'task_engine_unavailable',
+  });
+  state = logic.applyTaskContent(state, {
+    eventId: 'journal-partial-1',
+    taskId: 'task-visible',
+    sessionId: 'session-b',
+    role: 'assistant',
+    text: 'partial response',
+  });
+  assert.equal(state.controlledTasks[0].status, 'failed');
+  assert.equal(state.controlledTasks[0].text, 'inspect the repository');
+  assert.equal(state.controlledTasks[0].terminalReason, 'task_engine_unavailable');
+  assert.equal(state.controlledTasks[0].assistantText, 'partial response');
+
+  const duplicate = logic.applyTaskContent(state, {
+    eventId: 'journal-partial-1',
+    taskId: 'task-visible',
+    sessionId: 'session-b',
+    role: 'assistant',
+    text: 'partial response',
+  });
+  assert.equal(duplicate, state);
+  assert.equal(duplicate.controlledTasks[0].assistantText, 'partial response');
+});
+
+test('a new controlled-device generation drops old task projections', () => {
+  let state = logic.createState();
+  state = logic.applyControlledStatus(state, { status: 'connected', generation: 'generation-1' });
+  state = logic.applyControlledSession(state, {
+    sessionId: 'old-session',
+    sessionRef: 'old-remote-session',
+    generation: 'generation-1',
+  });
+  state = logic.applyControlledTaskEvent(state, {
+    taskId: 'old-task',
+    sessionId: 'old-session',
+    status: 'failed',
+    text: 'old prompt',
+  });
+  state = logic.applyControlledStatus(state, { status: 'stopped' });
+  assert.equal(state.controlledTasks.length, 0);
+  state = logic.applyControlledStatus(state, {
+    status: 'waiting_connection',
+    generation: 'generation-2',
+  });
+  assert.equal(state.controlledTasks.length, 0);
 });
 
 test('live-context matching rejects foreign connections and leases', () => {
@@ -209,6 +409,7 @@ test('bridge feature gates every desktop call behind the Windows capability', ()
   );
   assert.match(feature, /desktop_remote_control_unsupported/);
   assert.match(feature, /can\("desktopRemoteControl"\)/);
+  assert.match(feature, /"transcript",/, 'authoritative remote journal must be mirrored into ChatView state');
   // The bridge must never forward raw credential fields.
   assert.ok(!/api_key|apiKey|credential_ref|credentialRef/.test(feature));
   // Every desktop command it forwards is a desktop_remote_* command.

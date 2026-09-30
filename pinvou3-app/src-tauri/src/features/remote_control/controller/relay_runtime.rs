@@ -53,6 +53,17 @@ const ENDPOINT_READY_RETRY_DELAY: std::time::Duration = std::time::Duration::fro
 /// 写失败一律忽略，绝不影响主流程。
 pub(crate) fn log_relay_event(scope: &str, stage: &str, detail: &str) {
     use std::io::Write as _;
+    static LOG_WRITE_LOCK: OnceLock<parking_lot::Mutex<()>> = OnceLock::new();
+
+    // Several transport/task callbacks can report transitions concurrently.
+    // Serialize the complete append so two records cannot be spliced together.
+    let _write_guard = LOG_WRITE_LOCK
+        .get_or_init(|| parking_lot::Mutex::new(()))
+        .lock();
+    let timestamp_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or(0);
     let dir = crate::platform::paths::pinvou3_home().join("logs");
     if std::fs::create_dir_all(&dir).is_err() {
         return;
@@ -66,7 +77,7 @@ pub(crate) fn log_relay_event(scope: &str, stage: &str, detail: &str) {
     };
     let _ = writeln!(
         file,
-        "[{scope}] stage={} detail={}",
+        "ts_ms={timestamp_ms} [{scope}] stage={} detail={}",
         bounded_log_token(stage),
         bounded_log_token(detail)
     );
@@ -120,6 +131,7 @@ const REGISTRATION_CAPABILITIES: &[&str] = &[
     // E2E-03：B 端的权威 session / 任务台账（DEV-12/DEV-13）已实现，注册时
     // 一并声明 task_v1，使 A 的能力快照请求与任务请求能通过协商。
     "task_v1",
+    "temporary_model_package_v1",
     // E2E-05：B 的权威 journal（DEV-19）已实现，声明 snapshot_journal_v1 使
     // journal_event / journal_replay 等正文事件能通过协商。
     "snapshot_journal_v1",
@@ -328,6 +340,19 @@ pub(crate) async fn next_registration_step<P: ControlledRelayPort>(
                         .and_then(Value::as_str)
                         .unwrap_or("relay_error");
                     log_controlled_event("registration_rejected", code);
+                    // The shared Relay uses v2 for its outer Web-access lane and
+                    // controller-v1 for desktop control. A v2 version rejection
+                    // for our v1 registration means the controller dispatcher is
+                    // not enabled on that Relay; surface the deployment fault
+                    // instead of collapsing it into a generic registration error.
+                    if message.get("v").and_then(Value::as_u64) == Some(2)
+                        && matches!(
+                            code,
+                            "unsupported_protocol_version" | "desktop_controller_unavailable"
+                        )
+                    {
+                        return Err("desktop_controller_relay_unavailable".to_owned());
+                    }
                 }
                 return registration_from_response(code_wrap, request, &message)
                     .map(|registration| RegistrationStep::Registered(Box::new(registration)));
@@ -529,6 +554,13 @@ impl ControlledRelayWorker {
                             Some("encrypted_controller_liveness_a") => {
                                 self.accept_direct_liveness(&message, &mut evidence);
                             }
+                            Some("error") => {
+                                let code = message
+                                    .get("code")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or("relay_error");
+                                log_controlled_event("runtime_relay_error", code);
+                            }
                             // E2E-06：A 端显式断开 → 终结租约并结束本代通道。
                             Some("controller_disconnect") => {
                                 if self.accept_remote_disconnect(&message) {
@@ -616,7 +648,7 @@ impl ControlledRelayWorker {
         match liveness_evidence_action(needs, evidence, now_b) {
             LivenessEvidenceAction::Idle => {}
             LivenessEvidenceAction::Challenge => {
-                let Ok((lease, _)) = manager.live_runtime_context() else {
+                let Ok((lease, _)) = manager.liveness_runtime_context() else {
                     return;
                 };
                 let Ok((challenge_id, challenge_b64)) = manager.begin_liveness_challenge(now_b)
@@ -630,15 +662,20 @@ impl ControlledRelayWorker {
                     &challenge_id,
                     &challenge_b64,
                 ) else {
+                    manager.cancel_liveness_challenge(&challenge_id);
                     return;
                 };
                 if self.channel.try_send(frame).is_ok() {
                     evidence.outstanding = Some((challenge_id, challenge_b64, now_b));
                     evidence.escalated = false;
+                    log_controlled_event("liveness_challenge", "sent");
+                } else {
+                    manager.cancel_liveness_challenge(&challenge_id);
+                    log_controlled_event("liveness_challenge", "send_failed");
                 }
             }
             LivenessEvidenceAction::Escalate => {
-                let Ok((lease, _)) = manager.live_runtime_context() else {
+                let Ok((lease, _)) = manager.liveness_runtime_context() else {
                     return;
                 };
                 let Some((challenge_id, challenge_b64, _)) = evidence.outstanding.clone() else {
@@ -655,11 +692,15 @@ impl ControlledRelayWorker {
                 };
                 if self.channel.try_send(frame).is_ok() {
                     evidence.escalated = true;
+                    log_controlled_event("liveness_attestation", "requested");
                 }
             }
             LivenessEvidenceAction::Reset => {
-                evidence.outstanding = None;
+                if let Some((challenge_id, _, _)) = evidence.outstanding.take() {
+                    manager.cancel_liveness_challenge(&challenge_id);
+                }
                 evidence.escalated = false;
+                log_controlled_event("liveness_challenge", "expired");
             }
         }
     }
@@ -719,12 +760,13 @@ impl ControlledRelayWorker {
             _ => return,
         }
         let now_b = controlled_monotonic_millis();
-        if manager
-            .accept_direct_liveness(&inner.to_string(), now_b)
-            .is_ok()
-        {
-            evidence.outstanding = None;
-            evidence.escalated = false;
+        match manager.accept_direct_liveness(&inner.to_string(), now_b) {
+            Ok(()) => {
+                evidence.outstanding = None;
+                evidence.escalated = false;
+                log_controlled_event("liveness_direct", "accepted");
+            }
+            Err(error) => log_controlled_event("liveness_direct", error.code),
         }
     }
 
@@ -743,12 +785,13 @@ impl ControlledRelayWorker {
         }
         let manager = self.app.state::<ControlledDeviceManager>();
         let now_b = controlled_monotonic_millis();
-        if manager
-            .accept_liveness_attestation(&message.to_string(), sent_at_b, now_b)
-            .is_ok()
-        {
-            evidence.outstanding = None;
-            evidence.escalated = false;
+        match manager.accept_liveness_attestation(&message.to_string(), sent_at_b, now_b) {
+            Ok(()) => {
+                evidence.outstanding = None;
+                evidence.escalated = false;
+                log_controlled_event("liveness_attestation", "accepted");
+            }
+            Err(error) => log_controlled_event("liveness_attestation", error.code),
         }
     }
 
@@ -838,27 +881,65 @@ impl ControlledRelayWorker {
     /// 解密/校验失败、业务拒绝）都不产生副作用；业务拒绝时回传有界错误的
     /// `task_status` 由命令层决定（这里只负责通道语义）。
     async fn dispatch_business_frame(&self, frame: &Value) {
+        let is_task_submit = frame.get("payload_kind").and_then(Value::as_str)
+            == Some("task_submit");
+        if is_task_submit {
+            log_controlled_event("task_submit_frame_received", "opening");
+        }
         let manager = self.app.state::<ControlledDeviceManager>();
         let Ok((lease, capabilities)) = manager.live_runtime_context() else {
+            log_controlled_event("business_frame_dropped", "no_live_lease");
             return;
         };
         let business = self.app.state::<ControlledLaneState>();
-        let Ok((payload_kind, payload)) = business.open(frame, &capabilities) else {
-            return;
+        let (payload_kind, payload) = match business.open(frame, &capabilities) {
+            Ok(opened) => opened,
+            Err(error) => {
+                log_controlled_event("business_frame_rejected", error.code());
+                return;
+            }
         };
-        let Ok(responses) =
-            dispatch_decrypted_payload(self.business.as_ref(), &lease, &payload_kind, &payload)
-                .await
-        else {
-            return;
+        if payload_kind == "task_submit" {
+            log_controlled_event("task_submit_decrypted", "dispatching");
+        }
+        let responses = match dispatch_decrypted_payload(
+            self.business.as_ref(),
+            &lease,
+            &payload_kind,
+            &payload,
+        )
+        .await
+        {
+            Ok(responses) => responses,
+            Err(error) => {
+                log_controlled_event("business_dispatch_failed", &error);
+                if is_task_submit {
+                    log_controlled_event("task_submit_dispatch_failed", &error);
+                }
+                return;
+            }
         };
+        if is_task_submit {
+            log_controlled_event("task_submit_dispatched", "accepted");
+        }
         // 一条请求可能产出多帧（journal 回放），逐帧加密回传；单帧失败即停止。
         for (response_kind, response) in responses {
-            let Ok(frame) = business.seal(response_kind, &response, &capabilities) else {
-                return;
+            let frame = match business.seal(response_kind, &response, &capabilities) {
+                Ok(frame) => frame,
+                Err(error) => {
+                    log_controlled_event("business_response_seal_failed", error.code());
+                    return;
+                }
             };
             if self.channel.try_send(frame).is_err() {
+                log_controlled_event("business_response_send_failed", response_kind);
                 return;
+            }
+            if is_task_submit && response_kind == "task_status" {
+                log_controlled_event("task_submit_status_sent", "accepted");
+            }
+            if matches!(response_kind, "capability_snapshot" | "capability_snapshot_error") {
+                log_controlled_event("capability_response_sent", response_kind);
             }
         }
     }
@@ -924,6 +1005,7 @@ pub(crate) trait ControlledBusinessPort: Send + Sync {
         &self,
         lease: &LeaseContext,
         request_id: &str,
+        session_id: Option<&str>,
         known_revision: u64,
     ) -> Result<Value, String>;
 
@@ -982,10 +1064,17 @@ pub(crate) async fn dispatch_decrypted_payload<P: ControlledBusinessPort + ?Size
                 .and_then(Value::as_str)
                 .and_then(|value| value.parse::<u64>().ok())
                 .ok_or_else(|| "task_request_invalid".to_owned())?;
-            let response = port
-                .capability_snapshot(lease, request_id, known_revision)
-                .await?;
-            Ok(vec![("capability_snapshot", response)])
+            let session_id = payload.get("session_id").and_then(Value::as_str);
+            match port
+                .capability_snapshot(lease, request_id, session_id, known_revision)
+                .await
+            {
+                Ok(response) => Ok(vec![("capability_snapshot", response)]),
+                Err(_) => Ok(vec![(
+                    "capability_snapshot_error",
+                    capability_snapshot_error(lease, request_id, session_id),
+                )]),
+            }
         }
         "task_submit" => {
             let session_ref = payload
@@ -1062,6 +1151,28 @@ pub(crate) async fn dispatch_decrypted_payload<P: ControlledBusinessPort + ?Size
     }
 }
 
+fn capability_snapshot_error(
+    lease: &LeaseContext,
+    request_id: &str,
+    session_id: Option<&str>,
+) -> Value {
+    let mut payload = json!({
+        "v": 1,
+        "type": "capability_snapshot_error",
+        "connection_id": lease.connection_id,
+        "controller_lease_id": lease.controller_lease_id,
+        "lease_epoch": lease.lease_epoch,
+        "relay_epoch": lease.relay_epoch,
+        "remote_control_generation": lease.remote_control_generation,
+        "request_id": request_id,
+        "code": "capability_snapshot_unavailable",
+    });
+    if let Some(session_id) = session_id {
+        payload["session_id"] = Value::String(session_id.to_owned());
+    }
+    payload
+}
+
 fn rewrite_session_id(mut payload: Value, session_ref: &str) -> Result<Value, String> {
     let object = payload
         .as_object_mut()
@@ -1087,7 +1198,11 @@ pub(crate) fn build_journal_event_payload(
     event: &super::journal::JournalEvent,
 ) -> Option<Value> {
     let wire_kind = wire_event_kind(event)?;
-    let raw = serde_json::to_vec(event).ok()?;
+    // B owns the local session id while the wire contract owns A's opaque
+    // session id. Envelope and authenticated body must use the same identity.
+    let mut wire_event = event.clone();
+    wire_event.session_id = session_ref.to_owned();
+    let raw = serde_json::to_vec(&wire_event).ok()?;
     if raw.len() > super::journal::MAX_EVENT_PAYLOAD_BYTES {
         return None;
     }
@@ -1100,8 +1215,8 @@ pub(crate) fn build_journal_event_payload(
         "relay_epoch": lease.relay_epoch,
         "remote_control_generation": lease.remote_control_generation,
         "session_id": session_ref,
-        "journal_epoch": event.epoch,
-        "event_sequence": event.sequence.to_string(),
+        "journal_epoch": wire_event.epoch,
+        "event_sequence": wire_event.sequence.to_string(),
         "event_kind": wire_kind,
         "event_b64": base64::engine::general_purpose::STANDARD.encode(&raw),
         "event_bytes": raw.len().to_string(),
@@ -1799,6 +1914,7 @@ mod tests {
             "role_liveness_v1",
             "resume_v1",
             "task_v1",
+            "temporary_model_package_v1",
             "snapshot_journal_v1",
         ] {
             assert!(claim.contains(&family), "A 端未声明 {family}");
@@ -1898,6 +2014,35 @@ mod tests {
             "relay failures must stay bounded: {error}"
         );
         assert!(!error.contains(' '));
+    }
+
+    #[test]
+    fn disabled_controller_lane_has_a_specific_bounded_error() {
+        let (request, receiver) = registration_request_fixture();
+        for relay_code in [
+            "unsupported_protocol_version",
+            "desktop_controller_unavailable",
+        ] {
+            let mut port = FakePort::new(
+                vec![json!({
+                    "v": 2,
+                    "type": "error",
+                    "code": relay_code,
+                    "message": "desktop controller is unavailable",
+                })],
+                false,
+            );
+            assert_eq!(
+                block_on(next_registration_step(
+                    &mut port,
+                    &request,
+                    &receiver,
+                    Duration::from_millis(500),
+                ))
+                .unwrap_err(),
+                "desktop_controller_relay_unavailable"
+            );
+        }
     }
 
     fn keys() -> (CodeWrapKeyPair, CodeWrapKeyPair) {
@@ -2189,8 +2334,12 @@ mod tests {
                 &self,
                 _lease: &LeaseContext,
                 request_id: &str,
+                _session_id: Option<&str>,
                 known_revision: u64,
             ) -> Result<Value, String> {
+                if known_revision == 999 {
+                    return Err("capability_source_unavailable".to_owned());
+                }
                 Ok(json!({
                     "v": 1,
                     "type": "capability_snapshot",
@@ -2271,6 +2420,24 @@ mod tests {
         assert_eq!(kind, "capability_snapshot");
         assert_eq!(response["request_id"], "request-1");
         assert_eq!(response["capability_revision"], "5");
+
+        let frames = dispatch_decrypted_payload(
+            &port,
+            &lease,
+            "capability_snapshot_request",
+            &json!({
+                "request_id": "request-failed",
+                "session_id": "session-a-ref",
+                "known_revision": "999",
+            }),
+        )
+        .await
+        .unwrap();
+        let (kind, response) = frames.into_iter().next().unwrap();
+        assert_eq!(kind, "capability_snapshot_error");
+        assert_eq!(response["request_id"], "request-failed");
+        assert_eq!(response["session_id"], "session-a-ref");
+        assert_eq!(response["code"], "capability_snapshot_unavailable");
 
         let frames = dispatch_decrypted_payload(
             &port,
@@ -2373,7 +2540,9 @@ mod tests {
                 .unwrap(),
         )
         .unwrap();
-        assert_eq!(decoded, event);
+        let mut expected = event.clone();
+        expected.session_id = "session-a-ref".to_owned();
+        assert_eq!(decoded, expected);
         // 进行中的任务状态与附件/快照不回传（由 task_status 帧或后续任务负责）。
         let mut running = event.clone();
         running.kind = "task_status".to_owned();

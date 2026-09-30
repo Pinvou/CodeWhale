@@ -365,8 +365,20 @@ impl RemoteJournal {
             "terminal_reason": event.terminal_reason,
             "result_digest": event.result_digest,
             "sequence": event.sequence,
+            "transition_sequence": event.transition_sequence,
         });
-        let event_id = format!("task-{}:{}", event.task_id, event.sequence);
+        // `RemoteTaskRecord::sequence` identifies task admission order and is
+        // intentionally stable across admitted/running/terminal transitions.
+        // Include status so those distinct events do not collapse into the
+        // first non-exportable admitted event in the journal.
+        let event_identity = format!(
+            "{}\0{}\0{}",
+            event.task_id, event.sequence, event.transition_sequence
+        );
+        let event_id = format!(
+            "task-{}",
+            crate::platform::encoding::hex_lower(&Sha256::digest(event_identity.as_bytes()))
+        );
         let terminal = matches!(
             event.status.as_str(),
             "succeeded" | "failed" | "cancelled" | "interrupted" | "result_unknown"
@@ -482,36 +494,147 @@ fn sanitize_value(key: &str, value: &Value) -> Value {
 }
 
 pub(crate) fn sanitize_text(text: &str) -> String {
-    let mut out = String::with_capacity(text.len().min(MAX_EVENT_TEXT_CHARS));
-    for token in text.split_whitespace() {
-        let lowered = token.to_ascii_lowercase();
-        let replacement = if lowered.starts_with("sk-")
-            || lowered.starts_with("bearer")
-            || lowered.starts_with("authorization:")
-            || lowered.starts_with("token=")
-            || lowered.starts_with("api_key")
-            || lowered.starts_with("cookie:")
-        {
-            Some("[REDACTED]")
-        } else if looks_like_path(token) {
-            Some("[PATH]")
-        } else {
-            None
-        };
-        let piece = replacement.unwrap_or(token);
-        if !out.is_empty() {
-            out.push(' ');
-        }
-        out.push_str(piece);
-        if out.chars().count() >= MAX_EVENT_TEXT_CHARS {
-            break;
-        }
-    }
+    let mut sanitizer = StreamingTextSanitizer::default();
+    let mut out = sanitizer.push(text);
+    out.push_str(&sanitizer.finish());
     out.chars().take(MAX_EVENT_TEXT_CHARS).collect()
+}
+
+/// Stateful sanitizer for streamed model output. An incomplete ASCII token is
+/// retained until a safe boundary, so splitting `sk-secret`, a host path, or a
+/// signed URL across provider deltas cannot bypass journal redaction.
+#[derive(Default)]
+pub(crate) struct StreamingTextSanitizer {
+    token: String,
+    redact_next: bool,
+    redact_line: bool,
+}
+
+impl StreamingTextSanitizer {
+    pub(crate) fn push(&mut self, text: &str) -> String {
+        let mut out = String::with_capacity(text.len());
+        for ch in text.chars() {
+            if ch.is_whitespace() {
+                self.flush_token(&mut out);
+                out.push(ch);
+                if matches!(ch, '\n' | '\r') {
+                    self.redact_next = false;
+                    self.redact_line = false;
+                }
+            } else if ch.is_ascii() {
+                self.token.push(ch);
+            } else {
+                // Credential/path syntax is ASCII. Treating a non-ASCII code
+                // point as a boundary keeps CJK reasoning visibly streaming
+                // without weakening protection for split ASCII secrets.
+                self.flush_token(&mut out);
+                out.push(ch);
+            }
+        }
+        out
+    }
+
+    pub(crate) fn finish(&mut self) -> String {
+        let mut out = String::new();
+        self.flush_token(&mut out);
+        self.redact_next = false;
+        self.redact_line = false;
+        out
+    }
+
+    fn flush_token(&mut self, out: &mut String) {
+        if self.token.is_empty() {
+            return;
+        }
+        let lowered = self.token.to_ascii_lowercase();
+        let authorization_marker = lowered
+            .trim_matches(|ch: char| !ch.is_ascii_alphanumeric() && ch != ':' && ch != '-')
+            .starts_with("authorization:");
+        let cookie_marker = lowered
+            .trim_matches(|ch: char| !ch.is_ascii_alphanumeric() && ch != ':' && ch != '-')
+            .starts_with("cookie:");
+        let bearer_marker = lowered
+            .trim_matches(|ch: char| !ch.is_ascii_alphanumeric() && ch != '-')
+            .eq("bearer");
+        let forced_redaction = self.redact_line || self.redact_next;
+        self.redact_next = bearer_marker;
+        self.redact_line |= authorization_marker || cookie_marker;
+
+        if forced_redaction
+            || authorization_marker
+            || cookie_marker
+            || bearer_marker
+            || looks_like_secret(&lowered)
+        {
+            out.push_str("[REDACTED]");
+        } else if let Some(url) = sanitize_url_token(&self.token) {
+            out.push_str(&url);
+        } else if looks_like_path(&self.token) {
+            out.push_str("[PATH]");
+        } else {
+            out.push_str(&self.token);
+        }
+        self.token.clear();
+    }
+}
+
+fn looks_like_secret(lowered: &str) -> bool {
+    [
+        "sk-",
+        "token=",
+        "access_token=",
+        "access-token=",
+        "api_key",
+        "api-key",
+        "secret=",
+        "signature=",
+        "x-amz-signature=",
+        "sig=",
+    ]
+    .iter()
+    .any(|marker| lowered.contains(marker))
+}
+
+/// Preserve a public link's Markdown shape while removing query/fragment data.
+/// User-info cannot be made safely presentational and therefore fails closed.
+fn sanitize_url_token(token: &str) -> Option<String> {
+    let lowered = token.to_ascii_lowercase();
+    let Some(start) = lowered.find("https://").or_else(|| lowered.find("http://")) else {
+        return None;
+    };
+    let url = &token[start..];
+    let lowered_url = &lowered[start..];
+    let scheme_bytes = if lowered_url.starts_with("https://") {
+        8
+    } else {
+        7
+    };
+    let after_scheme = &lowered_url[scheme_bytes..];
+    let authority_end = after_scheme
+        .find(['/', '?', '#', ')', ']'])
+        .unwrap_or(after_scheme.len());
+    if after_scheme[..authority_end].contains('@') {
+        return Some("[REDACTED]".to_owned());
+    }
+    let sensitive_start = url.find(['?', '#'])?;
+    let suffix_start = url[sensitive_start..]
+        .find([')', ']', '>', ',', ';'])
+        .map(|offset| sensitive_start + offset)
+        .unwrap_or(url.len());
+    Some(format!(
+        "{}{}{}",
+        &token[..start],
+        &url[..sensitive_start],
+        &url[suffix_start..]
+    ))
 }
 
 fn looks_like_path(value: &str) -> bool {
     let trimmed = value.trim_matches(|ch: char| matches!(ch, '\'' | '"' | ',' | ';' | '(' | ')'));
+    let lowered = trimmed.to_ascii_lowercase();
+    if lowered.contains("http://") || lowered.contains("https://") {
+        return false;
+    }
     let bytes = trimmed.as_bytes();
     if bytes.len() >= 3
         && bytes[0].is_ascii_alphabetic()
@@ -521,7 +644,10 @@ fn looks_like_path(value: &str) -> bool {
         return true;
     }
     let separators = trimmed.matches(['\\', '/']).count();
-    separators >= 2 || (separators == 1 && (trimmed.starts_with('/') || trimmed.contains('\\')))
+    separators >= 2
+        || (separators == 1
+            && trimmed.len() > 1
+            && (trimmed.starts_with('/') || trimmed.contains('\\')))
 }
 
 #[cfg(test)]
@@ -669,6 +795,48 @@ mod tests {
     }
 
     #[test]
+    fn sanitizing_text_preserves_markdown_layout_and_public_links() {
+        let markdown =
+            "# Title\n\n| A | B |\n|---|---|\n| 33℃ / 24℃ | [source](https://example.com/a/b) |";
+        assert_eq!(sanitize_text(markdown), markdown);
+
+        let redacted = sanitize_text("before\nC:\\Users\\me\\secret.txt\nafter sk-secret");
+        assert_eq!(redacted, "before\n[PATH]\nafter [REDACTED]");
+        assert_eq!(
+            sanitize_text("[private](https://example.com/a?token=secret)"),
+            "[REDACTED]"
+        );
+        assert_eq!(
+            sanitize_text("[signed](https://example.com/a?X-Amz-Signature=secret)"),
+            "[REDACTED]"
+        );
+        assert_eq!(
+            sanitize_text("https://user:secret@example.com/a"),
+            "[REDACTED]"
+        );
+        assert_eq!(
+            sanitize_text("[docs](https://example.com/a?page=1#top)"),
+            "[docs](https://example.com/a)"
+        );
+        assert_eq!(
+            sanitize_text("Bearer secret-value\nCookie: session=secret other=value"),
+            "[REDACTED] [REDACTED]\n[REDACTED] [REDACTED] [REDACTED]"
+        );
+    }
+
+    #[test]
+    fn streaming_sanitizer_keeps_sensitive_tokens_across_delta_boundaries() {
+        let mut sanitizer = StreamingTextSanitizer::default();
+        let mut output = sanitizer.push("prefix sk");
+        output.push_str(&sanitizer.push("-split-secret and C:\\Users"));
+        output.push_str(&sanitizer.push("\\me\\secret.txt then "));
+        output.push_str(&sanitizer.push("https://example.com/file?access_"));
+        output.push_str(&sanitizer.push("token=secret"));
+        output.push_str(&sanitizer.finish());
+        assert_eq!(output, "prefix [REDACTED] and [PATH] then [REDACTED]");
+    }
+
+    #[test]
     fn oversized_and_unknown_payload_shapes_fail_closed() {
         let journal = journal();
         // Even after sanitization an allowlisted array can exceed the payload
@@ -755,6 +923,7 @@ mod tests {
             session_id: "session-0001".into(),
             status: "running".into(),
             sequence: "1".into(),
+            transition_sequence: 2,
             outcome_unknown: false,
             terminal_reason: None,
             result_digest: Some("a".repeat(64)),
@@ -764,6 +933,7 @@ mod tests {
             session_id: "session-0001".into(),
             status: "succeeded".into(),
             sequence: "2".into(),
+            transition_sequence: 3,
             outcome_unknown: false,
             terminal_reason: Some("completed".into()),
             result_digest: Some("a".repeat(64)),
@@ -788,6 +958,7 @@ mod tests {
             session_id: "session-0001".into(),
             status: "running".into(),
             sequence: "1".into(),
+            transition_sequence: 2,
             outcome_unknown: false,
             terminal_reason: None,
             result_digest: None,
@@ -801,15 +972,38 @@ mod tests {
         let again = journal.record_task_event(&event).unwrap();
         assert_eq!(again, stored);
         assert_eq!(journal.len(), 1);
+        let waiting = RemoteTaskEvent {
+            status: "waiting_permission".into(),
+            transition_sequence: 3,
+            ..event.clone()
+        };
+        journal.record_task_event(&waiting).unwrap();
+        let resumed = RemoteTaskEvent {
+            transition_sequence: 4,
+            ..event.clone()
+        };
+        journal.record_task_event(&resumed).unwrap();
+        assert_eq!(journal.len(), 3);
         // 终态只落一次，冲突的终态不会改写已落库结果。
         let terminal = RemoteTaskEvent {
             status: "succeeded".into(),
-            sequence: "2".into(),
+            // Task sequence is the admission order, so transitions retain it.
+            sequence: "1".into(),
+            transition_sequence: 5,
             terminal_reason: Some("completed".into()),
             ..event.clone()
         };
         let stored = journal.record_task_event(&terminal).unwrap();
         assert_eq!(stored.terminal_status.as_deref(), Some("succeeded"));
-        assert_eq!(stored.sequence, 2);
+        assert_eq!(stored.sequence, 4);
+
+        let long_id_event = RemoteTaskEvent {
+            task_id: "t".repeat(MAX_TASK_ID_CHARS),
+            ..event
+        };
+        let long_id_journal = RemoteJournal::new("epoch-long-id");
+        let stored = long_id_journal.record_task_event(&long_id_event).unwrap();
+        assert!(stored.event_id.len() <= MAX_TASK_ID_CHARS);
+        assert!(stored.event_id.starts_with("task-"));
     }
 }

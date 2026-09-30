@@ -21,6 +21,7 @@ use crate::features::remote_control::controller::capabilities::{
 use crate::features::remote_control::controller::controlled::ControlledDeviceManager;
 
 const UNSUPPORTED: &str = "desktop_remote_control_unsupported";
+const ACP_STATUS_TIMEOUT_MS: u64 = 10_000;
 
 fn capability_error(error: CapabilityError) -> String {
     error.code.to_owned()
@@ -91,11 +92,17 @@ pub(crate) async fn build_capability_snapshot(app: &AppHandle) -> Result<Capabil
         .live_lease()
         .map_err(|error| error.code.to_owned())?;
     let acp_pool = app.state::<AcpPool>();
-    let code_agent_ready = acp_pool
-        .status_for_agent("codex")
-        .await
-        .map(|status| status.installed && status.bridge_ready)
-        .unwrap_or(false);
+    // This runs on the controlled Relay worker, so an unhealthy ACP bridge
+    // must not starve liveness and other control-plane frames indefinitely.
+    let code_agent_ready = tokio::time::timeout(
+        std::time::Duration::from_millis(ACP_STATUS_TIMEOUT_MS),
+        acp_pool.status_for_agent("codex"),
+    )
+    .await
+    .ok()
+    .and_then(Result::ok)
+    .map(|status| status.installed && status.bridge_ready)
+    .unwrap_or(false);
     let skill_display_names: HashMap<String, String> = SkillMarketplaceManager::new()
         .list_skills()
         .into_iter()

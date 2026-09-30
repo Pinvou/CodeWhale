@@ -59,6 +59,8 @@ import { VoiceShortcutRouter } from '../features/voice-composer/VoiceShortcutRou
 import { MODEL_PRESET_DEFS } from '../features/settings/model-catalog.js';
 import { createPetActivationGuard } from '../features/pet/activation-guard.js';
 import { SessionAttachmentTitle } from '../features/attachments/SessionAttachmentTitle.jsx';
+import { openControlledDeviceChatWithRetry } from '../features/remote-control/remote-control-logic.mjs';
+import { modelSourceForLease } from '../features/remote-control/remote-model-source.mjs';
 import {
   sessionTitlePlainText,
   sessionTitlePresentation,
@@ -1385,7 +1387,24 @@ const NAV_PREFETCH = {
       const [webAccessOpen, setWebAccessOpen] = useState(false);
       const [remoteConversationOpen, setRemoteConversationOpen] = useState(false);
       const [remoteModelSource, setRemoteModelSource] = useState('controlled_device');
+      const remoteModelLeaseKey = `${bs?.controllerConnection?.connectionId || ''}:${bs?.controllerConnection?.leaseEpoch || ''}`;
+      const remoteModelLeaseKeyRef = useRef(remoteModelLeaseKey);
+      const remoteTemporaryModelAvailable = bs?.controllerConnection?.temporaryModelAvailable === true;
       const [remoteConnectionReady, setRemoteConnectionReady] = useState(false);
+      const controlledDeviceAutoOpenRef = useRef(null);
+      const controlledDeviceAutoOpenInFlightRef = useRef(null);
+      const controlledSessionAutoOpenRef = useRef(null);
+      const controlledSessionAutoOpenInFlightRef = useRef(null);
+      const controlledDeviceStatus = bs?.controlledDevice?.status || null;
+      const controlledDeviceGeneration = bs?.controlledDevice?.generation || null;
+      const controlledTaskSessionId = (() => {
+        if (bs?.controlledSession?.sessionId) return String(bs.controlledSession.sessionId);
+        const tasks = Array.isArray(bs?.controlledTasks) ? bs.controlledTasks : [];
+        for (let index = tasks.length - 1; index >= 0; index -= 1) {
+          if (tasks[index]?.sessionId) return String(tasks[index].sessionId);
+        }
+        return null;
+      })();
       const remoteControllerConnected = !!(bs && bs.controllerConnection && bs.controllerConnection.status === 'connected');
       const remoteChatConnection = (remoteControllerConnected || remoteConnectionReady)
         ? (bs?.controllerConnection?.status === 'connected' ? bs.controllerConnection : { status: 'connected' })
@@ -1393,6 +1412,18 @@ const NAV_PREFETCH = {
       useEffect(() => {
         if (!remoteControllerConnected) setRemoteConnectionReady(false);
       }, [remoteControllerConnected]);
+      useEffect(() => {
+        const nextModelSource = modelSourceForLease(
+          remoteModelSource,
+          bs?.controllerConnection,
+          remoteModelLeaseKeyRef.current,
+          remoteModelLeaseKey,
+        );
+        remoteModelLeaseKeyRef.current = remoteModelLeaseKey;
+        if (nextModelSource !== remoteModelSource) {
+          setRemoteModelSource(nextModelSource);
+        }
+      }, [bs?.controllerConnection, remoteModelLeaseKey, remoteModelSource, remoteTemporaryModelAvailable]);
       const [publishedBrowserOverlayIntent, setPublishedBrowserOverlayIntent] = useState('');
       const [settingsUpdateFocusTick, setSettingsUpdateFocusTick] = useState(0);
       const [settingsInitialSection, setSettingsInitialSection] = useState('general');
@@ -2279,6 +2310,109 @@ const NAV_PREFETCH = {
             : keepsDesktopBrowserVisible ? 'none' : 'visible',
         });
       }, [closeMobileSidebar, runBrowserUiTransition, setCurrentView]);
+
+      // B 端建立连接后进入普通会话页，便于立即看到远程请求及执行过程。
+      // 以 remote-control generation 去重：liveness 更新和链路恢复不会反复抢走用户当前页面。
+      useEffect(() => {
+        if (controlledDeviceStatus !== 'connected') {
+          // 旧后端若没有 generation，只能在明确离开连接生命周期后允许下一次自动打开。
+          if (!controlledDeviceGeneration && controlledDeviceStatus !== 'reconnecting') {
+            controlledDeviceAutoOpenRef.current = null;
+          }
+          return;
+        }
+        const connectionKey = controlledDeviceGeneration || 'legacy-connected';
+        if (
+          controlledDeviceAutoOpenRef.current === connectionKey
+          || controlledDeviceAutoOpenInFlightRef.current === connectionKey
+        ) return;
+        const originView = currentViewRef.current;
+        let cancelled = false;
+        controlledDeviceAutoOpenInFlightRef.current = connectionKey;
+        setRemoteConversationOpen(false);
+        void openControlledDeviceChatWithRetry({
+          navigate: () => navigateFromScheduledRun('chat'),
+          isCurrent: () => {
+            if (cancelled) return false;
+            const latest = bsRef.current && bsRef.current.controlledDevice;
+            const latestKey = (latest && latest.generation) || 'legacy-connected';
+            const viewIsCurrent = currentViewRef.current === originView || currentViewRef.current === 'chat';
+            return !!(latest && latest.status === 'connected' && latestKey === connectionKey && viewIsCurrent);
+          },
+          onError: (error) => console.warn('[remote-control] B-side chat auto-open failed', error),
+        }).then((opened) => {
+          if (controlledDeviceAutoOpenInFlightRef.current === connectionKey) {
+            controlledDeviceAutoOpenInFlightRef.current = null;
+          }
+          if (opened) controlledDeviceAutoOpenRef.current = connectionKey;
+        });
+        return () => {
+          cancelled = true;
+          if (controlledDeviceAutoOpenInFlightRef.current === connectionKey) {
+            controlledDeviceAutoOpenInFlightRef.current = null;
+          }
+        };
+      }, [controlledDeviceGeneration, controlledDeviceStatus, navigateFromScheduledRun]);
+
+      // A remote session is provisioned only when B receives the first task.
+      // Connection-time navigation therefore cannot select it yet; once the
+      // admitted task publishes its authoritative session id, select that
+      // session exactly once so filtering never hides the received command.
+      useEffect(() => {
+        if (controlledDeviceStatus !== 'connected' || !controlledTaskSessionId) return undefined;
+        const sessionKey = `${controlledDeviceGeneration || 'legacy'}:${controlledTaskSessionId}`;
+        if (
+          controlledSessionAutoOpenRef.current === sessionKey
+          || controlledSessionAutoOpenInFlightRef.current === sessionKey
+        ) return undefined;
+        let cancelled = false;
+        controlledSessionAutoOpenInFlightRef.current = sessionKey;
+        void runBrowserUiTransition(async ({ isCurrent }) => {
+          const latest = bsRef.current;
+          if (latest?.scheduledRunContext && bridge.available && bridge.scheduled.exitScheduledRunChat) {
+            const exited = await bridge.scheduled.exitScheduledRunChat();
+            if (!exited || !isCurrent() || cancelled) return false;
+          }
+          if (!bridge.available || !bridge.sessions?.switchToSession || !isCurrent() || cancelled) {
+            return false;
+          }
+          setCodeModeOn(false);
+          setCurrentView('chat');
+          closeMobileSidebar();
+          const switched = await bridge.sessions.switchToSession(controlledTaskSessionId);
+          if (!switched || !isCurrent() || cancelled) return false;
+          setActiveChat(controlledTaskSessionId);
+          return true;
+        }, {
+          channel: 'session',
+          hideMode: 'workspace',
+          serialize: true,
+          sessionTarget: controlledTaskSessionId,
+        }).then((opened) => {
+          if (controlledSessionAutoOpenInFlightRef.current === sessionKey) {
+            controlledSessionAutoOpenInFlightRef.current = null;
+          }
+          if (opened) controlledSessionAutoOpenRef.current = sessionKey;
+        }).catch((error) => {
+          if (controlledSessionAutoOpenInFlightRef.current === sessionKey) {
+            controlledSessionAutoOpenInFlightRef.current = null;
+          }
+          console.warn('[remote-control] B-side session open failed', error);
+        });
+        return () => {
+          cancelled = true;
+          if (controlledSessionAutoOpenInFlightRef.current === sessionKey) {
+            controlledSessionAutoOpenInFlightRef.current = null;
+          }
+        };
+      }, [
+        controlledDeviceGeneration,
+        controlledDeviceStatus,
+        controlledTaskSessionId,
+        closeMobileSidebar,
+        runBrowserUiTransition,
+        setCurrentView,
+      ]);
 
       function openSettingsSection(section = 'general') {
         // 记录进入设置前的页面（代码页齿轮等深链入口），关闭设置时原路返回，

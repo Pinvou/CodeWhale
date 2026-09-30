@@ -14,6 +14,7 @@ import {
   parseSealedCodeV1,
   receiptCommitmentHex,
 } from "../protocol-controller.js";
+import { smokeControllerRoute } from "../scripts/controller-route-smoke.mjs";
 
 const X25519_SPKI_PREFIX = Buffer.from("302a300506032b656e032100", "hex");
 
@@ -360,6 +361,7 @@ test("healthz exposes aggregate endpoint counters and no identifiers", async () 
   const health = await response.json();
   assert.deepEqual(Object.keys(health).sort(), [
     "connected_endpoint_count",
+    "desktop_controller_enabled",
     "desktop_offline_count",
     "desktop_open_count",
     "endpoint_count",
@@ -369,7 +371,28 @@ test("healthz exposes aggregate endpoint counters and no identifiers", async () 
     "web_client_open_count",
     "ws_connection_count",
   ]);
+  assert.equal(health.desktop_controller_enabled, false);
   assert.equal(JSON.stringify(health).includes("token"), false);
+});
+
+test("controller v1 fails with a specific error when its runtime is disabled", async (t) => {
+  const socket = await openSocket();
+  t.after(() => closeSocket(socket));
+  const unavailable = nextMessage(socket, "error");
+  socket.send(JSON.stringify({
+    v: 1,
+    type: "desktop_pairing_register",
+    request_id: "request-controller-disabled",
+    registration_request_id: "registration-controller-disabled",
+    endpoint_id: "endpoint-controller-disabled",
+    remote_control_generation: "generation-controller-disabled",
+    code_wrap_public_key_b64: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+    handshake_public_key_b64: "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+    key_algorithm: "x25519",
+    capabilities: ["pairing_v1"],
+  }));
+  assert.equal((await unavailable).code, "desktop_controller_unavailable");
+  await waitForClose(socket);
 });
 
 test("stats and telemetry keep their dedicated top-level paths", async () => {
@@ -1138,6 +1161,9 @@ test("controller v1 completes a real three-party encrypted handshake beside lega
   });
   const sockets = [];
   try {
+    const controllerHealth = await (await fetch(`${isolated.httpUrl}/pinvou3/remote/healthz`)).json();
+    assert.equal(controllerHealth.desktop_controller_enabled, true);
+    await smokeControllerRoute(isolated.wsUrl);
     const endpointId = "endpoint-controller-e2e";
     const accessToken = "controller-access-token-0000000000000001";
     const desktopSecret = "controller-desktop-secret-000000000001";
@@ -1159,7 +1185,7 @@ test("controller v1 completes a real three-party encrypted handshake beside lega
       code_wrap_public_key_b64: rawX25519Public(codeWrap.publicKey).toString("base64"),
       handshake_public_key_b64: rawX25519Public(handshakeB.publicKey).toString("base64"),
       key_algorithm: "x25519",
-      capabilities: ["pairing_v1", "encrypted_frames_v1", "finished_receipt_v1"],
+      capabilities: ["pairing_v1", "encrypted_frames_v1", "finished_receipt_v1", "task_v1"],
     }));
     const registered = await registeredPromise;
     if (registered.type === "error") throw new Error(`pairing registration failed: ${registered.code}`);
@@ -1179,7 +1205,7 @@ test("controller v1 completes a real three-party encrypted handshake beside lega
       pairing_code: pairingCode,
       handshake_public_key_b64: rawX25519Public(handshakeA.publicKey).toString("base64"),
       key_algorithm: "x25519",
-      capabilities: ["pairing_v1", "encrypted_frames_v1", "finished_receipt_v1"],
+      capabilities: ["pairing_v1", "encrypted_frames_v1", "finished_receipt_v1", "task_v1"],
     }));
     const [reserved, controlledReserved] = await Promise.all([reservedA, reservedB]);
     assert.equal(controlledReserved.transcript_hash, reserved.transcript_hash);
@@ -1274,6 +1300,38 @@ test("controller v1 completes a real three-party encrypted handshake beside lega
     const [controllerJoined, desktopJoined] = await Promise.all([joinedA, joinedB]);
     assert.equal(controllerJoined.controller_lease_id, desktopJoined.controller_lease_id);
     assert.notEqual(controllerJoined.resume_token_b64, desktopJoined.resume_token_b64);
+
+    const leaseContext = {
+      connection_id: controllerJoined.connection_id,
+      controller_lease_id: controllerJoined.controller_lease_id,
+      lease_epoch: controllerJoined.lease_epoch,
+      relay_epoch: controllerJoined.relay_epoch,
+      remote_control_generation: controllerJoined.remote_control_generation,
+    };
+    const capabilityRequest = {
+      v: 1,
+      type: "encrypted_frame",
+      ...leaseContext,
+      frame_sequence: "1",
+      direction: "a_to_b",
+      payload_kind: "capability_snapshot_request",
+      ciphertext_b64: "AQID",
+      ciphertext_bytes: "3",
+    };
+    const requestAtDesktop = nextMessage(desktop.ws, "encrypted_frame", 10_000);
+    controller.send(JSON.stringify(capabilityRequest));
+    assert.deepEqual(await requestAtDesktop, capabilityRequest);
+
+    const capabilityResponse = {
+      ...capabilityRequest,
+      frame_sequence: "1",
+      direction: "b_to_a",
+      payload_kind: "capability_snapshot",
+      ciphertext_b64: "BAUG",
+    };
+    const responseAtController = nextMessage(controller, "encrypted_frame", 10_000);
+    desktop.ws.send(JSON.stringify(capabilityResponse));
+    assert.deepEqual(await responseAtController, capabilityResponse);
 
     const web = await openSocket(isolated.wsUrl);
     sockets.push(web);

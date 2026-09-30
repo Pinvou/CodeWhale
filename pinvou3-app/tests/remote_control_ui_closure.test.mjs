@@ -60,6 +60,21 @@ test('the A view opens the session, requests capabilities and renders the transc
   assert.ok(!/input_digest|client_request_id|capability_revision|controller_lease_id/.test(view));
 });
 
+test('the main chat tolerates an absent remote connection', () => {
+  const chat = read('features/chat/ChatView.jsx');
+  assert.ok(
+    chat.includes('remoteConnection?.sessionRef && remoteConnection.capabilityRevision != null'),
+    'local chat startup must not dereference a null remote connection',
+  );
+});
+
+test('the main chat cannot submit before the remote capability snapshot is ready', () => {
+  const chat = read('features/chat/ChatView.jsx');
+  assert.ok(chat.includes('if (!remoteLinkReady) return false'));
+  assert.ok(chat.includes('(remoteChatActive && !remoteLinkReady)'));
+  assert.ok(chat.includes('(!remoteChatActive || remoteLinkReady)'));
+});
+
 test('journal events project into a deduplicated transcript', () => {
   const frame = (kind, sequence, text) => ({
     event: {
@@ -109,6 +124,33 @@ test('journal events project into a deduplicated transcript', () => {
   assert.equal(snapshot.transcript[0].text, 'after snapshot');
 });
 
+test('reasoning journal events remain a distinct transcript lane', () => {
+  let state = logic.createState();
+  state = logic.applyJournalEvent(state, {
+    event: {
+      eventId: 'reasoning-1',
+      epoch: 'epoch-1',
+      sequence: 1,
+      kind: 'reasoning',
+      sessionId: 'session-a',
+      taskId: 'task-1',
+      terminalStatus: null,
+      payload: { text: 'checking context' },
+    },
+  });
+  assert.equal(state.transcript.length, 1);
+  assert.equal(state.transcript[0].role, 'reasoning');
+  assert.equal(state.transcript[0].taskId, 'task-1');
+});
+
+test('the controlled chat keeps the native session timeline when that session is active', () => {
+  const chat = read('features/chat/ChatView.jsx');
+  assert.match(
+    chat,
+    /activeSessionId && activeSessionId === controlledSession\.sessionId[\s\S]*?\? chatItems[\s\S]*?: projectedRemoteChatItems/,
+  );
+});
+
 test('the bridge subscribes the journal stream and exposes the A-side commands', () => {
   const bridge = read('platform/tauri/bridge/desktop-remote-control.js');
   assert.ok(bridge.includes('"desktop-remote-controller-journal"'));
@@ -117,6 +159,50 @@ test('the bridge subscribes the journal stream and exposes the A-side commands',
     assert.ok(bridge.includes(`${method}: ${method}`), `${method} must be exported`);
   }
   assert.ok(bridge.includes('desktop_remote_controller_capability_send'));
+});
+
+test('the controlled-side authoritative journal is projected locally before forwarding to A', () => {
+  const task = read('../src-tauri/src/app/commands/desktop_remote_task.rs');
+  const history = read('../src-tauri/src/app/commands/desktop_remote_history.rs');
+  const lib = read('../src-tauri/src/lib.rs');
+  assert.ok(task.includes('"journal_event_projected"'));
+  assert.ok(task.includes('CONTROLLED_JOURNAL_EVENT'));
+  assert.ok(task.indexOf('CONTROLLED_JOURNAL_EVENT') < task.indexOf('publish_authoritative_event(&self.app, &event)'));
+  assert.ok(history.includes('publish_authoritative_task_status(&self.app, event)'));
+  assert.ok(lib.includes('DesktopTaskEventSink::new('));
+  assert.ok(task.indexOf('app.emit(TASK_EVENT, &status)') < task.indexOf('tauri::async_runtime::spawn(async move'));
+  assert.ok(history.includes('lane.seal("task_status", &payload, &capabilities)'));
+});
+
+test('controlled-side send failures are visible in the shared remote transcript area', () => {
+  const chat = read('features/chat/ChatView.jsx');
+  assert.ok(chat.includes('data-testid="chat-remote-send-error"'));
+  assert.match(
+    chat,
+    /remoteTranscriptActive && remoteSendMessage[\s\S]*?data-testid="chat-remote-send-error"[\s\S]*?role="alert"/,
+  );
+  assert.ok(chat.includes("`controlled:${controlledDevice.generation || ''}:${controlledSession.sessionId || ''}`"));
+  assert.ok(chat.includes('identity: sendIdentity'));
+  assert.ok(chat.includes('remoteSendError?.identity === remoteSendIdentity'));
+  assert.match(chat, /current && current\.identity !== remoteSendIdentity \? null : current/);
+});
+
+test('temporary model capability mismatches have actionable localized feedback', () => {
+  const chat = read('features/chat/ChatView.jsx');
+  const legacyView = read('features/remote-control/RemoteConversationView.jsx');
+  const main = read('app/main.jsx');
+  assert.ok(chat.includes("currentRemoteSendError === 'temporary_model_capability_required'"));
+  assert.ok(chat.includes('t.remoteConversation.temporaryModelCapabilityRequired'));
+  assert.ok(chat.includes('remoteTemporaryModelAvailable &&'));
+  assert.ok(chat.includes('controllerTaskSend(sessionRef, outgoing, effectiveRemoteModelSource)'));
+  assert.ok(legacyView.includes('temporaryModelAvailable &&'));
+  assert.ok(legacyView.includes('controllerTaskSend(sessionRef, draft.trim(), effectiveModelSource)'));
+  assert.ok(main.includes('modelSourceForLease('));
+  assert.ok(main.includes('setRemoteModelSource(nextModelSource)'));
+  for (const locale of ['zh', 'en', 'ja']) {
+    const messages = read(`shared/i18n/${locale}.js`);
+    assert.ok(messages.includes('temporaryModelCapabilityRequired:'), `${locale} copy is required`);
+  }
 });
 
 test('bounded command failures keep their code for the UI copy', () => {

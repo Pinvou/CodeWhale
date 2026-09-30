@@ -35,7 +35,9 @@ use super::crypto::{
 };
 use super::encrypted_lane::ControllingLaneState;
 use super::journal::{JournalEvent, JournalSnapshot, MAX_EVENT_PAYLOAD_BYTES};
-use super::protocol::LeaseContext;
+use super::protocol::{
+    LeaseContext, RuntimeValidationContext, SenderRole, validate_controller_runtime_message_json,
+};
 use super::resume::{
     build_controller_resume_prepare, build_controller_resume_ready_ack, new_resume_challenge,
     resume_frame_matches_lease,
@@ -800,39 +802,99 @@ fn dispatch_inbound_frame(
     let Ok(frame) = serde_json::from_str::<Value>(json) else {
         return;
     };
-    if frame.get("type").and_then(Value::as_str) != Some("encrypted_frame") {
-        return;
-    }
     let Ok((lease, capabilities)) = manager.live_runtime_context() else {
         return;
     };
+    if frame.get("type").and_then(Value::as_str) == Some("error") {
+        let relay_code = frame
+            .get("code")
+            .and_then(Value::as_str)
+            .unwrap_or("invalid_message");
+        log_controller_event("runtime_relay_error", relay_code);
+        match sessions.fail_pending_capability_for_lease(
+            &lease,
+            "capability_snapshot_unavailable",
+        ) {
+            Ok(projection) => {
+                log_controller_event("capability_snapshot_failed", "relay_rejected");
+                (sinks.on_session)(&projection);
+            }
+            Err(error) => {
+                log_controller_event("capability_error_rejected", error.code);
+            }
+        }
+        return;
+    }
+    // Relay 按冻结协议把 B 的挑战作为顶层明文控制帧转发给 A。它不是业务
+    // `encrypted_frame`，但必须先通过角色、租约和能力绑定校验，随后才生成由
+    // A/B 会话密钥保护的直接存活证明。此前该分支位于 encrypted_frame 解密后，
+    // 导致真实挑战在到达应答逻辑之前被静默丢弃。
+    if frame.get("type").and_then(Value::as_str) == Some("controller_liveness_challenge_a") {
+        dispatch_liveness_challenge(
+            manager,
+            business,
+            liveness,
+            &frame,
+            &lease,
+            &capabilities,
+            sinks,
+        );
+        return;
+    }
+    if frame.get("type").and_then(Value::as_str) != Some("encrypted_frame") {
+        return;
+    }
     let Ok((payload_kind, payload)) = business.open(&frame, &capabilities) else {
         return;
     };
     match payload_kind.as_str() {
         "capability_snapshot" => {
-            if let Ok(projection) =
-                sessions.apply_capability_snapshot_for_lease(&lease, &payload)
-            {
-                (sinks.on_session)(&projection);
+            match sessions.apply_capability_snapshot_for_lease(&lease, &payload) {
+                Ok(projection) => {
+                    log_controller_event("capability_snapshot_applied", "ready");
+                    (sinks.on_session)(&projection);
+                }
+                Err(error) => {
+                    log_controller_event("capability_snapshot_rejected", error.code);
+                }
+            }
+        }
+        "capability_snapshot_error" => {
+            match sessions.apply_capability_error_for_lease(&lease, &payload) {
+                Ok(projection) => {
+                    log_controller_event("capability_snapshot_failed", "unavailable");
+                    (sinks.on_session)(&projection);
+                }
+                Err(error) => {
+                    log_controller_event("capability_error_rejected", error.code);
+                }
             }
         }
         "task_status" => {
             if let Some(event) = task_event_projection(&lease, &payload) {
+                log_controller_event(
+                    "task_status_received",
+                    event.get("status").and_then(Value::as_str).unwrap_or("unknown"),
+                );
                 (sinks.on_task)(event);
             }
         }
         "journal_event" => {
             let Some(event) = journal_event_from_wire(&payload) else {
+                log_controller_event("journal_event_rejected", "invalid_envelope_or_identity");
                 return;
             };
             match journal_admission(journal.expected(&event.session_id), &event) {
                 JournalAdmission::Apply => {
                     journal.mark_applied(&event);
+                    log_controller_event("journal_event_applied", &event.kind);
                     (sinks.on_journal)(&event);
                 }
-                JournalAdmission::Duplicate => {}
+                JournalAdmission::Duplicate => {
+                    log_controller_event("journal_event_ignored", "duplicate");
+                }
                 JournalAdmission::RequestReplay { epoch, after } => {
+                    log_controller_event("journal_event_gap", "replay_requested");
                     if let Some((epoch, after)) =
                         journal.begin_replay(&event.session_id, &epoch, after)
                     {
@@ -857,44 +919,65 @@ fn dispatch_inbound_frame(
             journal.mark_snapshot(&snapshot);
             (sinks.on_snapshot)(&snapshot);
         }
-        "controller_liveness_challenge_a" => {
-            // E2E-06：B 的存活挑战由 A 直接应答（AEAD 存活证明，域与业务帧分离）。
-            let Some(challenge_id) = payload.get("challenge_id").and_then(Value::as_str) else {
-                return;
-            };
-            let Some(challenge_b64) = payload.get("challenge_b64").and_then(Value::as_str) else {
-                return;
-            };
-            if !liveness.mark_answered(challenge_id) {
-                return;
-            }
-            let Some(sequence) = liveness.next_sequence() else {
-                return;
-            };
-            let Some(epoch) = manager.live_liveness_epoch() else {
-                return;
-            };
-            let inner = serde_json::json!({
-                "v": 1,
-                "type": "controller_liveness_a",
-                "connection_id": lease.connection_id,
-                "controller_lease_id": lease.controller_lease_id,
-                "lease_epoch": lease.lease_epoch,
-                "relay_epoch": lease.relay_epoch,
-                "remote_control_generation": lease.remote_control_generation,
-                "role": "A",
-                "liveness_epoch_a": epoch,
-                "heartbeat_sequence_a": sequence.to_string(),
-                "challenge_id": challenge_id,
-                "challenge_b64": challenge_b64,
-            });
-            let Ok(frame) = business.seal_liveness(&inner, &capabilities) else {
-                return;
-            };
-            let _ = manager.send_authenticated_control(&frame);
-        }
         _ => {}
     }
+}
+
+/// 严格校验并应答 B 的顶层存活挑战。Relay 只能转发挑战，不能构造这里返回的
+/// AEAD 证明；因此明文控制帧仍不会被直接当成 B 的有效存活证据。
+fn dispatch_liveness_challenge(
+    manager: &ControllingDeviceManager,
+    business: &ControllingLaneState,
+    liveness: &mut LivenessExpectations,
+    frame: &Value,
+    lease: &LeaseContext,
+    capabilities: &[String],
+    sinks: &mut ControllingLaneSinks<'_>,
+) {
+    let context = RuntimeValidationContext {
+        lease: Some(lease.clone()),
+        negotiated_capabilities: capabilities.to_vec(),
+    };
+    let Ok(challenge) = validate_controller_runtime_message_json(
+        &frame.to_string(),
+        SenderRole::ControlledB,
+        Some(&context),
+    ) else {
+        return;
+    };
+    let Some(challenge_id) = challenge.get("challenge_id").and_then(Value::as_str) else {
+        return;
+    };
+    let Some(challenge_b64) = challenge.get("challenge_b64").and_then(Value::as_str) else {
+        return;
+    };
+    if !liveness.mark_answered(challenge_id) {
+        return;
+    }
+    let Some(sequence) = liveness.next_sequence() else {
+        return;
+    };
+    let Some(epoch) = manager.live_liveness_epoch() else {
+        return;
+    };
+    let inner = serde_json::json!({
+        "v": 1,
+        "type": "controller_liveness_a",
+        "connection_id": lease.connection_id,
+        "controller_lease_id": lease.controller_lease_id,
+        "lease_epoch": lease.lease_epoch,
+        "relay_epoch": lease.relay_epoch,
+        "remote_control_generation": lease.remote_control_generation,
+        "role": "A",
+        "liveness_epoch_a": epoch,
+        "heartbeat_sequence_a": sequence.to_string(),
+        "challenge_id": challenge_id,
+        "challenge_b64": challenge_b64,
+    });
+    let Ok(response) = business.seal_liveness(&inner, capabilities) else {
+        return;
+    };
+    (sinks.on_liveness)(response);
 }
 
 /// wire `session_snapshot` → 权威快照。base64 体积与声明一致、摘要与快照本体
@@ -1251,7 +1334,6 @@ mod tests {
     use std::cell::RefCell;
     use std::collections::VecDeque;
 
-    use base64::Engine as _;
     use serde_json::json;
 
     use super::*;
@@ -1831,6 +1913,10 @@ mod tests {
         assert_eq!(payload["type"], "task_submit");
         assert_eq!(payload["input"]["text"], "hello from A");
 
+        let refresh = sessions
+            .capability_request(&session.session_ref, &lease)
+            .unwrap();
+
         // B → A：能力快照、终态与正文（journal_event）。
         let snapshot_frame = responder
             .seal(
@@ -1843,7 +1929,8 @@ mod tests {
                     "lease_epoch": lease.lease_epoch,
                     "relay_epoch": lease.relay_epoch,
                     "remote_control_generation": lease.remote_control_generation,
-                    "request_id": "request-snapshot-1",
+                    "request_id": refresh.request_id,
+                    "session_id": session.session_id,
                     "capability_revision": "4",
                     "expires_at_ms": "30000",
                     "modes": ["chat"],
@@ -2271,6 +2358,9 @@ mod tests {
         let session = sessions
             .open(None, "Session", "chat", &lease, &capabilities)
             .unwrap();
+        let capability_request = sessions
+            .capability_request(&session.session_ref, &lease)
+            .unwrap();
 
         // B 端用同一份会话密钥封帧（角色 B）。
         let mut responder = EncryptedLane::new(HandshakeRole::B, &lease, b_session).unwrap();
@@ -2282,7 +2372,8 @@ mod tests {
             "lease_epoch": lease.lease_epoch,
             "relay_epoch": lease.relay_epoch,
             "remote_control_generation": lease.remote_control_generation,
-            "request_id": "request-snapshot-1",
+            "request_id": capability_request.request_id,
+            "session_id": session.session_id,
             "capability_revision": "4",
             "expires_at_ms": "30000",
             "modes": ["chat"],
@@ -2369,6 +2460,167 @@ mod tests {
         assert!(journal_events.is_empty());
     }
 
+    /// 连接后的 Relay 错误必须立即结束唯一待处理的能力请求，不能退化成前端等待超时。
+    #[test]
+    fn connected_relay_error_fails_the_unique_pending_capability_request() {
+        let fixture = pairing_fixture(RELAY_KEY_ID);
+        let lease = lease_context(&fixture.reservation);
+        let capabilities = vec!["encrypted_frames_v1".to_owned(), "task_v1".to_owned()];
+        let manager = ControllingDeviceManager::default();
+        let operation = manager.connect("234-4567").unwrap();
+        manager.complete_reserved(operation.clone()).unwrap();
+        manager
+            .complete_connected(
+                operation,
+                ControllerLease {
+                    context: lease.clone(),
+                    device_display_name: DEVICE_DISPLAY_NAME_PLACEHOLDER.to_owned(),
+                    liveness_epoch_a: "live-a-1".into(),
+                    resume_deadline_b: 30_000,
+                    resume_token: [7_u8; 32],
+                    transport_key_fingerprint: [9_u8; 32],
+                    negotiated_capabilities: capabilities.clone(),
+                },
+            )
+            .unwrap();
+        let sessions = ControllingSessionManager::default();
+        let session = sessions
+            .open(None, "Session", "chat", &lease, &capabilities)
+            .unwrap();
+        let request = sessions
+            .capability_request(&session.session_ref, &lease)
+            .unwrap();
+        let business = ControllingLaneState::default();
+        let mut projections = Vec::new();
+        let mut on_status = |_: &ControllingStatus| {};
+        let mut on_session = |projection: &ControllingSessionProjection| {
+            projections.push(projection.clone())
+        };
+        let mut on_task = |_: Value| {};
+        let mut on_journal = |_: &JournalEvent| {};
+        let mut on_snapshot = |_: &JournalSnapshot| {};
+        let mut on_liveness = |_: Value| {};
+        let mut sinks = ControllingLaneSinks {
+            on_status: &mut on_status,
+            on_session: &mut on_session,
+            on_task: &mut on_task,
+            on_journal: &mut on_journal,
+            on_snapshot: &mut on_snapshot,
+            on_liveness: &mut on_liveness,
+        };
+        let mut journal = JournalExpectations::default();
+        let mut liveness = LivenessExpectations::default();
+        dispatch_inbound_frame(
+            &manager,
+            &sessions,
+            &business,
+            &mut journal,
+            &mut liveness,
+            &json!({
+                "v": 1,
+                "type": "error",
+                "request_id": "request-invalid",
+                "code": "invalid_message",
+                "message": "invalid message",
+            })
+            .to_string(),
+            &mut sinks,
+        );
+        drop(sinks);
+
+        assert_eq!(projections.len(), 1);
+        assert_eq!(
+            projections[0].capability_request_id.as_deref(),
+            Some(request.request_id.as_str())
+        );
+        assert_eq!(
+            projections[0].capability_error.as_deref(),
+            Some("capability_snapshot_unavailable")
+        );
+    }
+
+    /// E2E-06：Relay 顶层存活挑战必须经租约校验并由 A 返回加密证明。
+    #[tokio::test]
+    async fn top_level_liveness_challenge_produces_direct_encrypted_proof() {
+        let PairingFixture {
+            reservation,
+            a_keys,
+            b_keys,
+            ..
+        } = pairing_fixture(RELAY_KEY_ID);
+        let (a_session, b_session) = paired_session_keys(a_keys, b_keys, &reservation);
+        let lease = lease_context(&reservation);
+        let capabilities = vec![
+            "encrypted_frames_v1".to_owned(),
+            "pairing_v1".to_owned(),
+            "role_liveness_v1".to_owned(),
+        ];
+
+        let manager = ControllingDeviceManager::default();
+        let operation = manager.connect("234-4567").unwrap();
+        manager.complete_reserved(operation.clone()).unwrap();
+        manager
+            .complete_connected(
+                operation,
+                ControllerLease {
+                    context: lease.clone(),
+                    device_display_name: DEVICE_DISPLAY_NAME_PLACEHOLDER.to_owned(),
+                    liveness_epoch_a: "live-a-1".into(),
+                    resume_deadline_b: 30_000,
+                    resume_token: [7_u8; 32],
+                    transport_key_fingerprint: [9_u8; 32],
+                    negotiated_capabilities: capabilities.clone(),
+                },
+            )
+            .unwrap();
+        let business = ControllingLaneState::default();
+        business
+            .install(HandshakeRole::A, &lease, a_session)
+            .unwrap();
+
+        let challenge = super::super::liveness::build_liveness_challenge(
+            &lease,
+            "request-liveness-0001",
+            "challenge-0001",
+            "AAAAAAAAAAAAAAAAAAAAAA==",
+        )
+        .unwrap();
+        let mut stale = challenge.clone();
+        stale["remote_control_generation"] = json!("generation-stale");
+        let mut lane = TestLane::with_events(vec![
+            ControllerLaneEvent::Frame(stale.to_string()),
+            ControllerLaneEvent::Frame(challenge.to_string()),
+        ]);
+        let sessions = ControllingSessionManager::default();
+        let mut responses = Vec::new();
+        let mut on_status = |_: &ControllingStatus| {};
+        let mut on_session = |_: &ControllingSessionProjection| {};
+        let mut on_task = |_: Value| {};
+        let mut on_journal = |_: &JournalEvent| {};
+        let mut on_snapshot = |_: &JournalSnapshot| {};
+        let mut on_liveness = |frame: Value| responses.push(frame);
+        let mut sinks = ControllingLaneSinks {
+            on_status: &mut on_status,
+            on_session: &mut on_session,
+            on_task: &mut on_task,
+            on_journal: &mut on_journal,
+            on_snapshot: &mut on_snapshot,
+            on_liveness: &mut on_liveness,
+        };
+
+        serve_controlling_lane(&mut lane, &manager, &sessions, &business, &mut sinks).await;
+        drop(sinks);
+        assert_eq!(responses.len(), 1, "旧 generation 挑战必须被静默丢弃");
+        assert_eq!(responses[0]["type"], "encrypted_controller_liveness_a");
+
+        let responder = EncryptedLane::new(HandshakeRole::B, &lease, b_session).unwrap();
+        let proof = responder.open_liveness(&responses[0]).unwrap();
+        assert_eq!(proof["type"], "controller_liveness_a");
+        assert_eq!(proof["challenge_id"], "challenge-0001");
+        assert_eq!(proof["heartbeat_sequence_a"], "1");
+        assert_eq!(proof["liveness_epoch_a"], "live-a-1");
+    }
+
     /// 旧 generation 的响应方通道（同一会话密钥、另一份租约）。
     fn responder_session(
         _lease: &crate::features::remote_control::controller::protocol::LeaseContext,
@@ -2400,6 +2652,7 @@ mod tests {
                 &self,
                 _lease: &LeaseContext,
                 request_id: &str,
+                _session_id: Option<&str>,
                 known_revision: u64,
             ) -> Result<Value, String> {
                 Ok(serde_json::json!({

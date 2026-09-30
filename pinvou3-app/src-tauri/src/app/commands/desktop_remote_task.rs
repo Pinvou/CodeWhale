@@ -8,33 +8,39 @@
 use std::sync::Arc;
 use std::time::Instant;
 
+use deepseek_tui::models::{ContentBlock, Message, Role};
 use serde_json::Value;
 use tauri::{AppHandle, Emitter, Manager as _, State};
 use tokio_util::sync::CancellationToken;
 
 use crate::features::assistant::engine_pool::EnginePool;
-use crate::features::assistant::remote_turn::{
-    EnginePoolChatEngine, EnginePoolChatTurnPort, StoreChatTranscript,
-};
-use crate::features::codex_acp::remote_turn::{AcpPoolCodeTurnPort, RemoteWorkspaceAuthorizations};
+use crate::features::assistant::remote_turn::{EnginePoolChatEngine, EnginePoolChatTurnPort};
 use crate::features::codex_acp::AcpPool;
+use crate::features::codex_acp::remote_turn::{AcpPoolCodeTurnPort, RemoteWorkspaceAuthorizations};
 use crate::features::remote_control::controller::capabilities::CapabilitySnapshotManager;
 use crate::features::remote_control::controller::controlled::ControlledDeviceManager;
+use crate::features::remote_control::controller::controlling_session::task_input_digest;
 use crate::features::remote_control::controller::protocol::{
-    validate_controller_runtime_payload_json, LeaseContext, RuntimeValidationContext, SenderRole,
+    LeaseContext, RuntimeValidationContext, SenderRole, validate_controller_runtime_payload_json,
 };
+#[cfg(test)]
+use crate::features::remote_control::controller::task::RemoteTaskEvent;
 use crate::features::remote_control::controller::task::{
     AdmissionOutcome, CancelOutcome, ChatTurnExecutor, CodeTurnExecutor, ControllerTaskEventSink,
-    RemoteSessionProvisioner, RemoteTaskEvent, RemoteTaskEventSink, RemoteTaskHooks,
-    RemoteTaskLedger, RemoteTaskService, TASK_MODE_CHAT, TASK_MODE_CODE,
-    TASK_MODEL_SOURCE_TEMPORARY,
+    RemoteSessionProvisioner, RemoteTaskHooks, RemoteTaskLedger, RemoteTaskService, TASK_MODE_CHAT,
+    TASK_MODE_CODE, TASK_MODEL_SOURCE_CONTROLLED, TASK_MODEL_SOURCE_TEMPORARY,
 };
-use crate::features::remote_control::controller::temporary_model::SharedTemporaryModelStore;
-use crate::features::sessions::SessionStore;
+use crate::features::remote_control::controller::temporary_model::{
+    SharedTemporaryModelStore, TemporaryModelPackageV1,
+};
+use crate::features::sessions::{SessionStore, transcript_revision};
 
 const UNSUPPORTED: &str = "desktop_remote_control_unsupported";
 const TASK_EVENT: &str = "desktop-remote-task-status";
 const TASK_STATUS_EVENT: &str = "desktop-remote-task-event";
+pub(crate) const CONTROLLED_SESSION_EVENT: &str = "desktop-remote-controlled-session";
+const CONTROLLED_JOURNAL_EVENT: &str = "desktop-remote-controlled-journal";
+const TASK_CONTENT_EVENT: &str = "desktop-remote-task-content";
 fn monotonic_millis() -> u64 {
     use std::sync::OnceLock;
     static ORIGIN: OnceLock<Instant> = OnceLock::new();
@@ -105,20 +111,137 @@ impl ControllerTaskEventSink for TaskEventBridge {
         payload: Value,
     ) {
         use tauri::Manager as _;
+        // B owns this conversation too. Project accepted user/assistant/error
+        // text into B's local chat independently of encrypted B -> A delivery.
+        // The journal event id is also the frontend idempotency key.
+        let role = match kind {
+            crate::features::remote_control::controller::journal::JournalKind::UserMessage => {
+                Some("user")
+            }
+            crate::features::remote_control::controller::journal::JournalKind::AssistantDelta => {
+                Some("assistant")
+            }
+            crate::features::remote_control::controller::journal::JournalKind::Error => {
+                Some("error")
+            }
+            _ => None,
+        };
+        let local_content = role.zip(task_id).and_then(|(role, task_id)| {
+            payload
+                .get("text")
+                .or_else(|| payload.get("message"))
+                .and_then(Value::as_str)
+                .map(|text| (role, task_id.to_owned(), text.to_owned()))
+        });
         let history = self
             .app
             .state::<Arc<super::desktop_remote_history::DesktopRemoteHistoryRuntime>>();
         let event_id = format!("journal-{}", uuid::Uuid::new_v4().simple());
-        if let Ok(event) = history.journal().append(&event_id, kind, session_id, task_id, payload) {
-            super::desktop_remote_history::publish_authoritative_event(&self.app, &event);
+        match history
+            .journal()
+            .append(&event_id, kind, session_id, task_id, payload)
+        {
+            Ok(event) => {
+                // B owns the authoritative event, so project it to B's UI as
+                // well as forwarding the session-ref-rewritten copy to A.
+                let _ = self.app.emit(
+                    CONTROLLED_JOURNAL_EVENT,
+                    serde_json::json!({
+                        "historyId": Value::Null,
+                        "event": &event,
+                    }),
+                );
+                if let Some((role, task_id, text)) = local_content {
+                    let _ = self.app.emit(
+                        TASK_CONTENT_EVENT,
+                        serde_json::json!({
+                            "eventId": &event.event_id,
+                            "taskId": task_id,
+                            "sessionId": session_id,
+                            "role": role,
+                            "text": text,
+                        }),
+                    );
+                }
+                crate::features::remote_control::controller::relay_runtime::log_controlled_event(
+                    "journal_event_projected",
+                    &event.kind,
+                );
+                super::desktop_remote_history::publish_authoritative_event(&self.app, &event);
+            }
+            Err(error) => {
+                crate::features::remote_control::controller::relay_runtime::log_controlled_event(
+                    "journal_event_not_recorded",
+                    error.code,
+                );
+            }
         }
     }
 }
 
-impl RemoteTaskEventSink for TaskEventBridge {
-    fn publish_task_event(&self, event: &RemoteTaskEvent) {
-        let _ = self.app.emit(TASK_STATUS_EVENT, event);
+fn message_text(message: &Message) -> String {
+    message
+        .content
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::Text { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn text_message(role: Role, text: impl Into<String>) -> Message {
+    Message {
+        role,
+        content: vec![ContentBlock::Text {
+            text: text.into(),
+            cache_control: None,
+        }],
     }
+}
+
+fn append_remote_failure_messages(
+    messages: &mut Vec<Message>,
+    baseline_messages: usize,
+    prompt: &str,
+    reason: &str,
+) {
+    let tail = &messages[baseline_messages.min(messages.len())..];
+    let prompt_persisted = tail
+        .iter()
+        .any(|message| message.role == Role::User && message_text(message) == prompt);
+    if !prompt_persisted {
+        messages.push(text_message(Role::User, prompt.to_owned()));
+    }
+    messages.push(text_message(Role::Assistant, reason.to_owned()));
+}
+
+/// A failed remote turn must remain part of B's authoritative transcript.
+/// The engine normally persists the user turn itself; failures before engine
+/// admission do not, so use the pre-dispatch message count to fill only the
+/// missing prompt and then append the bounded failure reason.
+fn persist_remote_task_failure(
+    store: &SessionStore,
+    session_id: &str,
+    baseline_messages: usize,
+    prompt: &str,
+    reason: &str,
+) -> std::result::Result<(), String> {
+    for _ in 0..4 {
+        let session = store
+            .load(session_id)
+            .map_err(|_| "task_failure_persist_failed".to_owned())?;
+        let revision = transcript_revision(&session.messages)
+            .map_err(|_| "task_failure_persist_failed".to_owned())?;
+        let mut messages = session.messages;
+        append_remote_failure_messages(&mut messages, baseline_messages, prompt, reason);
+        match store.compare_and_swap_messages(session_id, &revision, messages) {
+            Ok(_) => return Ok(()),
+            Err(error) if error.to_string().contains("session_revision_conflict") => continue,
+            Err(_) => return Err("task_failure_persist_failed".to_owned()),
+        }
+    }
+    Err("task_failure_persist_conflict".to_owned())
 }
 
 /// Managed state for the remote task owner: ledger, session map, engine ports
@@ -134,8 +257,11 @@ impl DesktopRemoteTaskRuntime {
         store: SessionStore,
         pool: EnginePool,
         acp_pool: AcpPool,
+        temporary_models: SharedTemporaryModelStore,
     ) -> Arc<Self> {
-        let service = Arc::new(RemoteTaskService::new(Arc::new(RemoteTaskLedger::in_memory())));
+        let service = Arc::new(RemoteTaskService::new(Arc::new(
+            RemoteTaskLedger::in_memory(),
+        )));
         let authorizations = Arc::new(RemoteWorkspaceAuthorizations::default());
         service.set_session_provisioner(Arc::new(DesktopRemoteSessionProvisioner::new(
             store.clone(),
@@ -143,10 +269,13 @@ impl DesktopRemoteTaskRuntime {
         )));
         service.register_executor(
             TASK_MODE_CHAT,
-            Arc::new(ChatTurnExecutor::new(Arc::new(EnginePoolChatTurnPort::new(
-                Arc::new(EnginePoolChatEngine::new(Arc::new(pool))),
-                Arc::new(StoreChatTranscript::new(store)),
-            )))),
+            Arc::new(ChatTurnExecutor::new(Arc::new(
+                EnginePoolChatTurnPort::new(Arc::new(EnginePoolChatEngine::new(
+                    app,
+                    Arc::new(pool),
+                    temporary_models,
+                ))),
+            ))),
         );
         service.register_executor(
             TASK_MODE_CODE,
@@ -155,9 +284,8 @@ impl DesktopRemoteTaskRuntime {
                 Arc::clone(&authorizations),
             )))),
         );
-        service
-            .hooks()
-            .set_journal(Arc::new(TaskEventBridge { app }));
+        // The composition root installs DesktopTaskEventSink with the shared
+        // authoritative journal before recovery or task admission.
         Arc::new(Self {
             service,
             authorizations,
@@ -198,10 +326,10 @@ fn temporary_model_gate(
     if model_source != TASK_MODEL_SOURCE_TEMPORARY {
         return Ok(());
     }
-    match store.active_task() {
-        Some(active) if active == task_id => Ok(()),
-        _ => Err("model_package_missing".to_owned()),
-    }
+    store
+        .contains_task(task_id)
+        .then_some(())
+        .ok_or_else(|| "model_package_missing".to_owned())
 }
 
 fn ensure_supported(controlled: &ControlledDeviceManager) -> Result<(), String> {
@@ -250,19 +378,74 @@ fn validated_task_payload(
     Ok(validated)
 }
 
+/// Ensure the A-side session reference already owns a B-authoritative session
+/// during capability preparation. This lets either endpoint be first to type.
+pub(crate) fn ensure_controlled_session(
+    app: &AppHandle,
+    remote_session_ref: &str,
+    title: &str,
+    code_mode: bool,
+    generation: &str,
+) -> Result<String, String> {
+    let controlled = app.state::<ControlledDeviceManager>();
+    let is_current = controlled
+        .live_runtime_context()
+        .is_ok_and(|(lease, _)| lease.remote_control_generation == generation);
+    if !is_current {
+        return Err("task_session_generation_stale".to_owned());
+    }
+    let runtime = app.state::<Arc<DesktopRemoteTaskRuntime>>();
+    let session_id = runtime
+        .service()
+        .ensure_remote_session(remote_session_ref, title, code_mode, generation)
+        .map_err(|error| error.code.to_owned())?;
+    let remains_current = controlled
+        .live_runtime_context()
+        .is_ok_and(|(lease, _)| lease.remote_control_generation == generation);
+    if !remains_current {
+        runtime.service().clear_generation_sessions(generation);
+        return Err("task_session_generation_stale".to_owned());
+    }
+    Ok(session_id)
+}
+
+pub(crate) fn project_controlled_session(
+    app: &AppHandle,
+    remote_session_ref: &str,
+    session_id: &str,
+    lease: &LeaseContext,
+) -> Result<(), String> {
+    app.emit(
+        CONTROLLED_SESSION_EVENT,
+        serde_json::json!({
+            "sessionId": session_id,
+            "sessionRef": remote_session_ref,
+            "generation": lease.remote_control_generation,
+        }),
+    )
+    .map_err(|_| "controlled_session_projection_failed".to_owned())
+}
+
 #[tauri::command]
 pub fn desktop_remote_task_open_session(
+    app: AppHandle,
     remote_session_ref: String,
     title: String,
     code_mode: bool,
     controlled: State<'_, ControlledDeviceManager>,
-    runtime: RuntimeState<'_>,
+    _runtime: RuntimeState<'_>,
 ) -> Result<String, String> {
     ensure_supported(&controlled)?;
-    runtime
-        .service()
-        .open_remote_session(&remote_session_ref, &title, code_mode)
-        .map_err(|error| error.code.to_owned())
+    let (lease, _) = controlled
+        .live_runtime_context()
+        .map_err(|error| error.code.to_owned())?;
+    ensure_controlled_session(
+        &app,
+        &remote_session_ref,
+        &title,
+        code_mode,
+        &lease.remote_control_generation,
+    )
 }
 
 #[tauri::command]
@@ -273,10 +456,30 @@ pub fn desktop_remote_task_switch_session(
     runtime: RuntimeState<'_>,
 ) -> Result<String, String> {
     ensure_supported(&controlled)?;
+    let (lease, _) = controlled
+        .live_runtime_context()
+        .map_err(|error| error.code.to_owned())?;
     runtime
         .service()
-        .switch_remote_session(&remote_session_ref, &session_id)
+        .switch_remote_session(
+            &remote_session_ref,
+            &session_id,
+            &lease.remote_control_generation,
+        )
         .map_err(|error| error.code.to_owned())
+        .and_then(|session_id| {
+            let remains_current = controlled.live_runtime_context().is_ok_and(|(current, _)| {
+                current.remote_control_generation == lease.remote_control_generation
+            });
+            if remains_current {
+                Ok(session_id)
+            } else {
+                runtime
+                    .service()
+                    .clear_generation_sessions(&lease.remote_control_generation);
+                Err("task_session_generation_stale".to_owned())
+            }
+        })
 }
 
 #[tauri::command]
@@ -286,9 +489,12 @@ pub fn desktop_remote_task_close_session(
     runtime: RuntimeState<'_>,
 ) -> Result<Option<String>, String> {
     ensure_supported(&controlled)?;
+    let (lease, _) = controlled
+        .live_runtime_context()
+        .map_err(|error| error.code.to_owned())?;
     runtime
         .service()
-        .close_remote_session(&remote_session_ref)
+        .close_remote_session(&remote_session_ref, &lease.remote_control_generation)
         .map_err(|error| error.code.to_owned())
 }
 
@@ -311,8 +517,11 @@ pub fn desktop_remote_task_submit(
         .and_then(Value::as_str)
         .ok_or_else(|| "task_request_invalid".to_owned())?
         .to_owned();
-    // 命令入口只接受已经本地绑定过的远程会话（权威映射存在与否由服务判断）。
-    if !runtime.service().is_remote_session(&session_id) {
+    // 命令入口只接受当前远控 generation 已绑定的权威会话。
+    if !runtime
+        .service()
+        .is_remote_session_for(&session_id, &lease.remote_control_generation)
+    {
         return Err("task_session_not_found".to_owned());
     }
     admit_and_dispatch(
@@ -324,6 +533,77 @@ pub fn desktop_remote_task_submit(
         &models,
         runtime.service(),
         monotonic_millis(),
+    )
+}
+
+/// B-side composer submission. Rust constructs the frozen payload and routes
+/// it through the same admission, executor and journal as an A-originated task.
+#[tauri::command]
+pub fn desktop_remote_controlled_task_send(
+    app: AppHandle,
+    session_id: String,
+    text: String,
+    controlled: State<'_, ControlledDeviceManager>,
+    capabilities: State<'_, CapabilitySnapshotManager>,
+    models: State<'_, SharedTemporaryModelStore>,
+    runtime: RuntimeState<'_>,
+) -> Result<Value, String> {
+    ensure_supported(&controlled)?;
+    let text = text.trim();
+    if text.is_empty() {
+        return Err("task_input_invalid".to_owned());
+    }
+    let (lease, negotiated_capabilities) = controlled
+        .live_runtime_context()
+        .map_err(|error| error.code.to_owned())?;
+    if !runtime
+        .service()
+        .is_remote_session_for(&session_id, &lease.remote_control_generation)
+    {
+        return Err("task_session_not_found".to_owned());
+    }
+    let now_b = monotonic_millis();
+    let snapshot = capabilities
+        .current_for_context(&lease, now_b)
+        .map_err(|error| error.code.to_owned())?;
+    let revision_payload = capabilities.wire_capability_snapshot(&snapshot, "local-revision");
+    let revision = revision_payload
+        .get("capability_revision")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "capability_snapshot_missing".to_owned())?;
+    let unique = uuid::Uuid::new_v4().simple().to_string();
+    let payload = serde_json::json!({
+        "v": 1,
+        "type": "task_submit",
+        "connection_id": lease.connection_id,
+        "controller_lease_id": lease.controller_lease_id,
+        "lease_epoch": lease.lease_epoch,
+        "relay_epoch": lease.relay_epoch,
+        "remote_control_generation": lease.remote_control_generation,
+        "request_id": format!("local-request-{unique}"),
+        "task_id": format!("local-task-{unique}"),
+        "client_request_id": format!("local-client-{unique}"),
+        "session_id": session_id.clone(),
+        "capability_revision": revision,
+        "model_source": TASK_MODEL_SOURCE_CONTROLLED,
+        "mode": TASK_MODE_CHAT,
+        "input_digest": task_input_digest(text),
+        "input": {
+            "text": text,
+            "attachment_ids": Vec::<String>::new(),
+            "skill_ids": Vec::<String>::new(),
+        },
+    });
+    let validated = validated_task_payload(&payload, &lease, &negotiated_capabilities)?;
+    admit_and_dispatch(
+        &app,
+        &validated,
+        &lease,
+        &session_id,
+        &capabilities,
+        &models,
+        runtime.service(),
+        now_b,
     )
 }
 
@@ -347,13 +627,14 @@ pub(crate) fn submit_decrypted_task(
         .to_owned();
     let runtime = app.state::<Arc<DesktopRemoteTaskRuntime>>();
     let service = runtime.service();
-    let session_id = if service.is_remote_session(session_ref) {
-        session_ref.to_owned()
-    } else {
-        service
-            .open_remote_session(session_ref, "", mode == TASK_MODE_CODE)
-            .map_err(|error| error.code.to_owned())?
-    };
+    let session_id = ensure_controlled_session(
+        app,
+        session_ref,
+        "",
+        mode == TASK_MODE_CODE,
+        &lease.remote_control_generation,
+    )?;
+    project_controlled_session(app, session_ref, &session_id, &lease)?;
     let mut request = validated;
     if let Some(object) = request.as_object_mut() {
         object.insert("session_id".to_owned(), Value::String(session_id.clone()));
@@ -400,7 +681,26 @@ fn admit_and_dispatch(
         .and_then(Value::as_str)
         .ok_or_else(|| "task_request_invalid".to_owned())?
         .to_owned();
-    temporary_model_gate(&model_source, &task_id, models)?;
+    if mode == TASK_MODE_CODE && model_source == TASK_MODEL_SOURCE_TEMPORARY {
+        return Err("task_model_source_unsupported".to_owned());
+    }
+    crate::features::remote_control::controller::relay_runtime::log_controlled_event(
+        "task_model_source_received",
+        &model_source,
+    );
+    let temporary_package = if model_source == TASK_MODEL_SOURCE_TEMPORARY {
+        let package = validated
+            .get("temporary_model_package")
+            .ok_or_else(|| "model_package_missing".to_owned())?;
+        let package = TemporaryModelPackageV1::from_wire_value(package)
+            .map_err(|error| error.code.to_owned())?;
+        package
+            .validate_for_task(lease, &task_id)
+            .map_err(|error| error.code.to_owned())?;
+        Some(package)
+    } else {
+        None
+    };
     if mode == TASK_MODE_CODE {
         let workspace_id = validated
             .get("input")
@@ -426,7 +726,14 @@ fn admit_and_dispatch(
         }
     }
     let outcome = service
-        .submit(lease, validated, now_b)
+        .submit_bound_with_admission(lease, validated, now_b, |ticket| {
+            if let Some(package) = temporary_package {
+                models
+                    .install(package, lease, &ticket.record.task_id, now_b)
+                    .map_err(|error| error.code)?;
+            }
+            Ok(())
+        })
         .map_err(|error| error.code.to_owned())?;
     match outcome {
         AdmissionOutcome::Replay(record) => service
@@ -434,25 +741,108 @@ fn admit_and_dispatch(
             .map_err(|error| error.code.to_owned()),
         AdmissionOutcome::Admitted(ticket) => {
             let task_id = ticket.record.task_id.clone();
+            if model_source == TASK_MODEL_SOURCE_TEMPORARY {
+                temporary_model_gate(&model_source, &task_id, models)?;
+                crate::features::remote_control::controller::relay_runtime::log_controlled_event(
+                    "task_temporary_model_installed",
+                    "ready",
+                );
+            }
+            let task_session_id = ticket.record.session_id.clone();
+            let prompt = validated
+                .get("input")
+                .and_then(|input| input.get("text"))
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+            let session_store = app.state::<SessionStore>().inner().clone();
+            let baseline_messages = session_store
+                .load(&task_session_id)
+                .map(|session| session.messages.len())
+                .unwrap_or(0);
             let status = service
                 .status_payload(&task_id)
                 .map_err(|error| error.code.to_owned())?;
-            let events: Arc<dyn ControllerTaskEventSink> = Arc::new(TaskEventBridge {
-                app: app.clone(),
-            });
+            // The persisted ledger intentionally excludes prompt text. Project
+            // it once to B's local UI only after admission so the controlled
+            // device can visibly confirm what it is executing.
+            if !prompt.is_empty() {
+                let _ = app.emit(
+                    TASK_STATUS_EVENT,
+                    serde_json::json!({
+                        "taskId": &task_id,
+                        "sessionId": session_id,
+                        "status": "admitted",
+                        "text": &prompt,
+                        "messageIndex": baseline_messages,
+                    }),
+                );
+            }
+            let events: Arc<dyn ControllerTaskEventSink> =
+                Arc::new(TaskEventBridge { app: app.clone() });
             let dispatch_service = Arc::clone(&service);
+            crate::features::remote_control::controller::relay_runtime::log_controlled_event(
+                "task_execution_scheduled",
+                "admitted",
+            );
+            // Publish every admitted projection before dispatch can synchronously
+            // advance the ledger to running on the worker thread.
+            let _ = app.emit(TASK_EVENT, &status);
             tauri::async_runtime::spawn(async move {
-                if let Err(error) = dispatch_service
+                crate::features::remote_control::controller::relay_runtime::log_controlled_event(
+                    "task_execution_started",
+                    "running",
+                );
+                match dispatch_service
                     .dispatch(ticket, events, CancellationToken::new(), monotonic_millis())
                     .await
                 {
-                    eprintln!(
-                        "[remote-control] remote task dispatch rejected: {}",
-                        error.code
-                    );
+                    Ok(record) => {
+                        if record.wire_status() != "succeeded" {
+                            let reason = record
+                                .terminal_reason
+                                .as_deref()
+                                .unwrap_or_else(|| record.wire_status());
+                            if let Err(error) = persist_remote_task_failure(
+                                &session_store,
+                                &task_session_id,
+                                baseline_messages,
+                                &prompt,
+                                reason,
+                            ) {
+                                eprintln!(
+                                    "[remote-control] failed to persist terminal task content: {error}"
+                                );
+                            }
+                        }
+                        crate::features::remote_control::controller::relay_runtime::log_controlled_event(
+                            "task_execution_finished",
+                            record.wire_status(),
+                        );
+                    }
+                    Err(error) => {
+                        if let Err(persist_error) = persist_remote_task_failure(
+                            &session_store,
+                            &task_session_id,
+                            baseline_messages,
+                            &prompt,
+                            error.code,
+                        ) {
+                            eprintln!(
+                                "[remote-control] failed to persist rejected task content: {persist_error}"
+                            );
+                        }
+                        crate::features::remote_control::controller::relay_runtime::log_controlled_event(
+                            "task_execution_failed",
+                            error.code,
+                        );
+                        eprintln!(
+                            "[remote-control] remote task dispatch rejected: {}",
+                            error.code
+                        );
+                    }
                 }
             });
-            let _ = app.emit(TASK_EVENT, &status);
             Ok(status)
         }
     }
@@ -521,13 +911,8 @@ pub fn desktop_remote_task_interrupt_all(
 ) -> Result<Vec<String>, String> {
     ensure_supported(&controlled)?;
     let reason = sanitized_reason(&reason);
-    let records = runtime
-        .service()
-        .interrupt_all(&reason, monotonic_millis());
-    Ok(records
-        .into_iter()
-        .map(|record| record.task_id)
-        .collect())
+    let records = runtime.service().interrupt_all(&reason, monotonic_millis());
+    Ok(records.into_iter().map(|record| record.task_id).collect())
 }
 
 #[cfg(test)]
@@ -551,6 +936,7 @@ mod tests {
             session_id: "session-0001".into(),
             status: "succeeded".into(),
             sequence: "1".into(),
+            transition_sequence: 2,
             outcome_unknown: false,
             terminal_reason: Some("completed".into()),
             result_digest: None,
@@ -573,6 +959,31 @@ mod tests {
         let first = monotonic_millis();
         let second = monotonic_millis();
         assert!(second >= first);
+    }
+
+    #[test]
+    fn remote_failure_fills_a_missing_prompt_and_preserves_partial_output() {
+        let mut missing_prompt = Vec::new();
+        append_remote_failure_messages(
+            &mut missing_prompt,
+            0,
+            "today's weather",
+            "task_engine_unavailable",
+        );
+        assert_eq!(missing_prompt.len(), 2);
+        assert_eq!(missing_prompt[0].role, Role::User);
+        assert_eq!(message_text(&missing_prompt[0]), "today's weather");
+        assert_eq!(missing_prompt[1].role, Role::Assistant);
+        assert_eq!(message_text(&missing_prompt[1]), "task_engine_unavailable");
+
+        let mut partial = vec![
+            text_message(Role::User, "today's weather"),
+            text_message(Role::Assistant, "partly cloudy"),
+        ];
+        append_remote_failure_messages(&mut partial, 0, "today's weather", "task_turn_failed");
+        assert_eq!(partial.len(), 3);
+        assert_eq!(message_text(&partial[1]), "partly cloudy");
+        assert_eq!(message_text(&partial[2]), "task_turn_failed");
     }
 
     #[test]

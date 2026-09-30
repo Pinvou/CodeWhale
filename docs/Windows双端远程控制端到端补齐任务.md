@@ -554,3 +554,12 @@ jsdom 冒烟能复现（本次即由 `test:settings-ui` 的 ① 断言捕获）�
   `python scripts/architecture-guard.py` 通过。
 
 全量 `cargo test` 一次编译约 1.5–5 分钟：同一模块的多处改动应攒成一次编译，任务边界才跑全量回归。
+
+### 13.11 A/B 双向输入统一进入 B 权威 Session（2026-09-22）
+
+- **需求结论**：连接和能力准备完成后，A、B 两端输入框都必须向同一个 B 权威 Session 提交任务；B 端不得沿用普通本地聊天发送链路，否则会形成 UI 看似同屏、实际上下文分叉的第二条 Session。
+- **会话准备**：`capability_snapshot_request.session_id` 继续表示 A 的稳定会话引用。B 在生成或复用能力快照时先通过幂等临界区创建/查找权威 Session，再把 `sessionRef + sessionId + remote_control_generation` 投影给 B UI，因此 B 可以成为首个发言方，重试也不会重复建 Session。
+- **统一任务链路**：B composer 调用 `desktop_remote_controlled_task_send`；任务 ID、请求 ID 和输入摘要由 Rust 生成，并与 A 的 `task_submit` 共用 `validated_task_payload → admit_and_dispatch → RemoteTaskService → Engine`。同一 Session 继续复用既有 turn lock，忙碌时明确返回 `task_session_busy`，不另开会话或静默排队。
+- **双端投影**：B 独立维护 `controlledSession / controlledTasks / controlledTranscript`，只接受当前 generation 和精确权威 Session 的事件；A 保持 `tasks / transcript`，B 的任务状态和权威 journal 经加密通道把 session ID 改写为 A 的 session reference 后回传。两端按同一 `task_id` 去重，接纳成功时先展示有界 prompt fallback，收到权威 `user_message` 后由 journal 替代。
+- **生命周期**：会话映射显式绑定当前 generation；受控端停止、连接终态或 generation 更新会在同一生命周期临界区取消本代执行器并使旧映射失效，同时清空 B 的会话、任务和 transcript 投影。旧 generation/session 的迟到准备、任务或 journal 事件均被拒绝，避免后台副作用和重连后串消息。ChatView 的滚动、会话是否开始、发送可用性、错误提示和执行中提示均以当前远程投影为准，旧连接的发送错误不会带入新会话。
+- **回归重点**：覆盖 B 首次发送、A/B 消息同会话可见、任务状态不回退、旧 generation/session 事件丢弃、prompt fallback 被 journal 去重、受控端 composer 不调用普通 `chat.sendMessage`，以及 A/B 状态切片彼此隔离。

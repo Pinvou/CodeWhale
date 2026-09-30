@@ -9,6 +9,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { RefreshCw, Wrench } from '../../components/icons.jsx';
 import { Toggle } from '../../components/Toggle.jsx';
 import { bridge } from '../../hooks/useBridge.js';
+import { taskStatusKey } from './remote-control-logic.mjs';
 
 const CODE_TICK_MS = 1000;
 const COUNTDOWN_ANNOUNCE_EVERY = 30;
@@ -50,6 +51,12 @@ function statusKey(status) {
     case 'error': return 'statusError';
     default: return 'statusIdle';
   }
+}
+
+function controlledErrorKey(code) {
+  return code === 'desktop_controller_relay_unavailable'
+    ? 'errorRelayUnavailable'
+    : 'errorGeneric';
 }
 
 /** 进行中的状态：只有这些状态才允许刷新；开关负责开启或关闭被控。 */
@@ -140,8 +147,9 @@ export default function ControlledDevicePanel({ t, bs, supported }) {
   }
 
   const workspaces = Array.isArray(device.workspaces) ? device.workspaces : [];
-  const tasks = Array.isArray(bs && bs.tasks) ? bs.tasks.filter((task) => !['succeeded', 'failed', 'cancelled', 'interrupted'].includes(task.status)) : [];
+  const tasks = Array.isArray(bs && bs.controlledTasks) ? bs.controlledTasks.filter((task) => !['succeeded', 'failed', 'cancelled', 'interrupted', 'result_unknown'].includes(task.status)) : [];
   const permissions = Array.isArray(bs && bs.remotePermissions) ? bs.remotePermissions : [];
+  const visibleError = error || (status === 'error' ? device.lastError : null);
 
   return (
     <section className="settings-section" aria-labelledby="controlled-device-title">
@@ -177,7 +185,7 @@ export default function ControlledDevicePanel({ t, bs, supported }) {
         )}
 
         <div className="settings-actions">
-          <button className="inline-flex items-center gap-1.5 whitespace-nowrap" type="button" onClick={() => run('refresh', (remote) => remote.controlledRefresh())} disabled={!active || busy === 'refresh'}>
+          <button className="inline-flex items-center gap-1.5 whitespace-nowrap" type="button" onClick={() => run('refresh', (remote) => remote.controlledRefresh())} disabled={!active || status === 'connected' || busy === 'refresh'}>
             <RefreshCw aria-hidden="true" /> {busy === 'refresh' ? copy.refreshing : copy.refresh}
           </button>
         </div>
@@ -237,17 +245,25 @@ export default function ControlledDevicePanel({ t, bs, supported }) {
               <Wrench aria-hidden="true" /> {copy.stopTasks}
             </button>
           </div>
+          <ol className="space-y-2" aria-live="polite">
+            {tasks.map((task) => (
+              <li key={task.taskId} className="rounded-lg bg-black/[0.03] px-3 py-2 text-[12px] dark:bg-white/[0.05]">
+                <div className="font-medium">{(t.remoteConversation || {})[taskStatusKey(task.status)]}</div>
+                {task.text && <div className="mt-1 whitespace-pre-wrap break-words opacity-80">{task.text}</div>}
+              </li>
+            ))}
+          </ol>
         </div>
       )}
 
       <p className="settings-hint">{copy.readOnlyNotice}</p>
 
-      {(error || (status === 'error' && device.errorCode)) && (
+      {visibleError && (
         <p className="settings-error" role="alert">
-          {copy.errorGeneric}
+          {copy[controlledErrorKey(visibleError)] || copy.errorGeneric}
           {/* 有界错误码直接透出：面板只显示通用文案时，用户与支持两端都无法定位 */}
-          {(error || device.errorCode) && (
-            <span className="settings-error-code"> ({String(error || device.errorCode)})</span>
+          {(error || device.lastError) && (
+            <span className="settings-error-code"> ({String(error || device.lastError)})</span>
           )}
         </p>
       )}

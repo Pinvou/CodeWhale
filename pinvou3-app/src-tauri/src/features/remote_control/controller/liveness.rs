@@ -154,7 +154,13 @@ impl ControllerLivenessWatchdog {
         Ok(())
     }
 
-/// Accept AEAD-authenticated direct A liveness plaintext. The validator
+    /// 撤销一个未发出或已在本地超时的挑战。它没有成为有效证明，因此不能进入
+    /// used 集合；删除 pending 即可释放有界容量。
+    pub(crate) fn cancel_challenge(&mut self, challenge_id: &str) {
+        self.pending_challenges.remove(challenge_id);
+    }
+
+    /// Accept AEAD-authenticated direct A liveness plaintext. The validator
     /// binds the full lease context, epoch, role, sequence and challenge; this
     /// method additionally enforces the challenge's local RTT and deadline
     /// monotonicity.
@@ -252,6 +258,18 @@ impl ControllerLivenessWatchdog {
         }
         if let Some(last_advanced) = self.last_advanced_at_b {
             if now_b.saturating_sub(last_advanced) >= LIVENESS_BLACKHOLE_SUSPECT_MS {
+                // A locally issued challenge can still produce acceptable evidence while
+                // it is inside the frozen RTT budget. Do not flap the UI to reconnecting
+                // during that short response window. This never extends the cryptographic
+                // deadline, and an unanswered challenge becomes suspect after at most one
+                // MAX_LIVENESS_RTT_MS window.
+                let awaiting_timely_evidence = self.pending_challenges.values().any(|challenge| {
+                    now_b >= challenge.sent_at_b
+                        && now_b.saturating_sub(challenge.sent_at_b) <= MAX_LIVENESS_RTT_MS
+                });
+                if awaiting_timely_evidence {
+                    return LivenessWatchdogState::Healthy;
+                }
                 return LivenessWatchdogState::Suspect;
             }
         }
@@ -634,6 +652,18 @@ mod tests {
     }
 
     #[test]
+    fn cancelled_challenge_releases_pending_slot_without_marking_replay() {
+        let mut watchdog = ControllerLivenessWatchdog::new("live-a-1").unwrap();
+        watchdog
+            .register_challenge("challenge-0001", "AAAAAAAAAAAAAAAAAAAAAA==", 1_000)
+            .unwrap();
+        watchdog.cancel_challenge("challenge-0001");
+        watchdog
+            .register_challenge("challenge-0001", "AQEBAQEBAQEBAQEBAQEBAQ==", 2_000)
+            .unwrap();
+    }
+
+    #[test]
     fn direct_evidence_installs_advances_tightens_and_rejects_replay() {
         let mut watchdog = ControllerLivenessWatchdog::new("live-a-1").unwrap();
         watchdog
@@ -815,6 +845,31 @@ mod tests {
         assert_eq!(watchdog.state(17_000), LivenessWatchdogState::Expired);
         assert!(!watchdog.shorten_deadline(99_000));
         assert_eq!(watchdog.deadline_b(), Some(17_000));
+    }
+
+    #[test]
+    fn fresh_pending_challenge_prevents_false_suspect_without_extending_deadline() {
+        let mut watchdog = ControllerLivenessWatchdog::new("live-a-1").unwrap();
+        watchdog
+            .register_challenge("challenge-0001", "AAAAAAAAAAAAAAAAAAAAAA==", 0)
+            .unwrap();
+        watchdog
+            .accept_direct_json(
+                &direct_payload(1, "challenge-0001", "AAAAAAAAAAAAAAAAAAAAAA=="),
+                &lease(),
+                1_000,
+            )
+            .unwrap();
+        let original_deadline = watchdog.deadline_b();
+
+        watchdog
+            .register_challenge("challenge-0002", "AQEBAQEBAQEBAQEBAQEBAQ==", 16_000)
+            .unwrap();
+        assert_eq!(watchdog.state(16_000), LivenessWatchdogState::Healthy);
+        assert_eq!(watchdog.deadline_b(), original_deadline);
+        assert_eq!(watchdog.state(21_001), LivenessWatchdogState::Suspect);
+        assert_eq!(watchdog.deadline_b(), original_deadline);
+        assert_eq!(watchdog.state(30_000), LivenessWatchdogState::Expired);
     }
 
     #[test]

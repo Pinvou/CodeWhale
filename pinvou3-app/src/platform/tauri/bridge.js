@@ -1602,11 +1602,15 @@
     // Windows 双端远程控制（DEV-20）：与 Web 分享完全独立的状态域。
     desktopRemoteControl: [
       "controlledDevice",
+      "controlledSession",
       "controllerConnection",
       "remoteCapabilities",
       "remoteModels",
       "remoteHistories",
       "tasks",
+      "transcript",
+      "controlledTasks",
+      "controlledTranscript",
       "remotePermissions",
     ],
     updater: ["updateCancelling", "updateCheckError", "updateChecking", "updateDownloading", "updateError", "updateInfo", "updateProgress", "updateReady"],
@@ -2957,6 +2961,7 @@
       controllerTaskCancelIntent: desktopRemoteControlFeature.controllerTaskCancelIntent,
       controllerTaskSend: desktopRemoteControlFeature.controllerTaskSend,
       controllerTaskCancelSend: desktopRemoteControlFeature.controllerTaskCancelSend,
+      controlledTaskSend: desktopRemoteControlFeature.controlledTaskSend,
       controllerListHistory: desktopRemoteControlFeature.controllerListHistory,
       controllerCreateHistory: desktopRemoteControlFeature.controllerCreateHistory,
       capabilitiesSnapshot: desktopRemoteControlFeature.capabilitiesSnapshot,

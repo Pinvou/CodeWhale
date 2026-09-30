@@ -30,6 +30,7 @@ const CLAIM_CAPABILITIES: &[&str] = &[
     "role_liveness_v1",
     "resume_v1",
     "task_v1",
+    "temporary_model_package_v1",
     "snapshot_journal_v1",
 ];
 

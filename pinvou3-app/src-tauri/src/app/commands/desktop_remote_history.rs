@@ -53,10 +53,70 @@ impl DesktopTaskEventSink {
 
 const TASK_STATUS_EVENT: &str = "desktop-remote-task-event";
 
+/// Send every B-side lifecycle transition to A, including tasks submitted
+/// locally from B. The initial A-originated admitted response may duplicate
+/// this frame; A deduplicates by `(task_id, status)`.
+pub(crate) fn publish_authoritative_task_status(app: &tauri::AppHandle, event: &RemoteTaskEvent) {
+    use tauri::Manager as _;
+    let device = app.state::<ControlledDeviceManager>();
+    let Ok((_lease, capabilities)) = device.live_runtime_context() else {
+        crate::features::remote_control::controller::relay_runtime::log_controlled_event(
+            "task_status_not_sent",
+            "lease_unavailable",
+        );
+        return;
+    };
+    let runtime = app.state::<Arc<DesktopRemoteTaskRuntime>>();
+    let Some(session_ref) = runtime.service().remote_ref_for(&event.session_id) else {
+        crate::features::remote_control::controller::relay_runtime::log_controlled_event(
+            "task_status_not_sent",
+            "session_mapping_missing",
+        );
+        return;
+    };
+    let Ok(mut payload) = runtime.service().status_payload(&event.task_id) else {
+        crate::features::remote_control::controller::relay_runtime::log_controlled_event(
+            "task_status_not_sent",
+            "status_unavailable",
+        );
+        return;
+    };
+    let Some(object) = payload.as_object_mut() else {
+        return;
+    };
+    object.insert("session_id".to_owned(), Value::String(session_ref));
+    let outbound = app.state::<
+        crate::features::remote_control::controller::relay_runtime::ControlledOutboundState,
+    >();
+    let Some(sender) = outbound.sender() else {
+        crate::features::remote_control::controller::relay_runtime::log_controlled_event(
+            "task_status_not_sent",
+            "outbound_unavailable",
+        );
+        return;
+    };
+    let lane = app.state::<
+        crate::features::remote_control::controller::encrypted_lane::ControlledLaneState,
+    >();
+    let Ok(frame) = lane.seal("task_status", &payload, &capabilities) else {
+        crate::features::remote_control::controller::relay_runtime::log_controlled_event(
+            "task_status_not_sent",
+            "seal_failed",
+        );
+        return;
+    };
+    let result = sender.try_send(frame);
+    crate::features::remote_control::controller::relay_runtime::log_controlled_event(
+        if result.is_ok() { "task_status_sent" } else { "task_status_not_sent" },
+        if result.is_ok() { event.status.as_str() } else { "queue_failed" },
+    );
+}
+
 impl RemoteTaskEventSink for DesktopTaskEventSink {
     fn publish_task_event(&self, event: &RemoteTaskEvent) {
         use tauri::Emitter as _;
         let _ = self.app.emit(TASK_STATUS_EVENT, event);
+        publish_authoritative_task_status(&self.app, event);
         // E2E-05：先落权威 journal，再把落库后的事件经加密通道回传 A。
         if let Some(stored) = self.journal.record_task_event(event) {
             publish_authoritative_event(&self.app, &stored);
@@ -74,16 +134,28 @@ pub(crate) fn publish_authoritative_event(
     use tauri::Manager as _;
     let device = app.state::<ControlledDeviceManager>();
     let Ok((lease, capabilities)) = device.live_runtime_context() else {
+        crate::features::remote_control::controller::relay_runtime::log_controlled_event(
+            "journal_event_not_sent",
+            "lease_unavailable",
+        );
         return;
     };
     let runtime = app.state::<Arc<DesktopRemoteTaskRuntime>>();
     let Some(session_ref) = runtime.service().remote_ref_for(&event.session_id) else {
+        crate::features::remote_control::controller::relay_runtime::log_controlled_event(
+            "journal_event_not_sent",
+            "session_mapping_missing",
+        );
         return;
     };
     let outbound = app.state::<
         crate::features::remote_control::controller::relay_runtime::ControlledOutboundState,
     >();
     let Some(sender) = outbound.sender() else {
+        crate::features::remote_control::controller::relay_runtime::log_controlled_event(
+            "journal_event_not_sent",
+            "outbound_unavailable",
+        );
         return;
     };
     let Some(payload) =
@@ -93,15 +165,32 @@ pub(crate) fn publish_authoritative_event(
             event,
         )
     else {
+        crate::features::remote_control::controller::relay_runtime::log_controlled_event(
+            "journal_event_not_sent",
+            "payload_not_exportable",
+        );
         return;
     };
     let lane = app.state::<
         crate::features::remote_control::controller::encrypted_lane::ControlledLaneState,
     >();
     let Ok(frame) = lane.seal("journal_event", &payload, &capabilities) else {
+        crate::features::remote_control::controller::relay_runtime::log_controlled_event(
+            "journal_event_not_sent",
+            "seal_failed",
+        );
         return;
     };
-    let _ = sender.try_send(frame);
+    match sender.try_send(frame) {
+        Ok(()) => crate::features::remote_control::controller::relay_runtime::log_controlled_event(
+            "journal_event_sent",
+            &event.kind,
+        ),
+        Err(_) => crate::features::remote_control::controller::relay_runtime::log_controlled_event(
+            "journal_event_not_sent",
+            "queue_failed",
+        ),
+    }
 }
 
 impl DesktopRemoteHistoryRuntime {
