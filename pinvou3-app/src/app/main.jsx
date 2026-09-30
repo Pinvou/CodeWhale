@@ -54,7 +54,6 @@ import {
   settleBrowserOpen,
 } from '../features/browser/browser-pane-state.mjs';
 import { ViewErrorBoundary } from '../shared/ViewErrorBoundary.jsx';
-import { ChatView } from '../features/chat/ChatView.jsx';
 import { createPinvouModeScopeKey, savePinvouModeState } from '../features/chat/pinvou-mode-state.js';
 import { WebConnectionStatus } from '../features/web/WebConnectionStatus.jsx';
 import { VoiceShortcutRouter } from '../features/voice-composer/VoiceShortcutRouter.jsx';
@@ -107,7 +106,10 @@ import { VIEW_LOADERS, prefetchView } from './view-loaders.js';
 // codex is the exception: it renders through the LazyCodexAcpView wrapper,
 // which imports the same CodexAcpView module (sharing the prefetch cache) and
 // adds an in-place retry boundary for chunk fetch failures.
-// ChatView and Lanyard render at startup and stay statically imported.
+// Lanyard renders at startup and stays statically imported. ChatView is large
+// enough to remain its own view chunk and is covered by the persistent main
+// content Suspense/error boundary below.
+const ChatView = lazy(() => import('../features/chat/ChatView.jsx').then(m => ({ default: m.ChatView })));
 const LazySettingsView = lazy(() => VIEW_LOADERS.settings().then(m => ({ default: m.SettingsView })));
 const LazyToolStoreView = lazy(() => VIEW_LOADERS.toolStore().then(m => ({ default: m.ToolStoreView })));
 const LazyCardPoolView = lazy(() => VIEW_LOADERS.cardpool().then(m => ({ default: m.CardPoolView })));
