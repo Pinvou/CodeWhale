@@ -345,7 +345,6 @@ command_protocol!(
     [
         "begin_detach_drag",
         "set_pet_enabled",
-        "get_pet_scale",
         "set_pet_scale",
         "set_pet_activity_visible",
         "save_pet_position",
@@ -523,7 +522,6 @@ command_protocol!(
         "test_image_input_capability",
         "update_settings",
         "update_search_settings",
-        "save_settings_and_restart",
         "save_search_settings_and_restart"
     ]
 );

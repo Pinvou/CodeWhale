@@ -525,7 +525,7 @@ export const dictZh = {
           ima:{ title:'腾讯 ima', subtitle:'用 OpenAPI 操作 ima 笔记与知识库', latency:'云端', desc:'接入腾讯 ima OpenAPI Skill，可搜索、读取、创建和追加笔记，也可搜索、浏览知识库并导入网页或内容。凭据只保存在本机。', configTitle:'连接腾讯 ima', configDescription:'凭据只保存在本机，用于启用 IMA OpenAPI Skill。', configDocLabel:'获取 Client ID / API Key', welcomeQueries:['搜索我的 ima 知识库','列出我有哪些 ima 笔记','把这段内容新建为 ima 笔记','在 ima 知识库里查产品方案'] },
           tmeet:{ title:'腾讯会议', subtitle:'以本人身份管理会议、录制、纪要和参会报告', type:'CLI + 官方技能', latency:'云端', desc:'接入腾讯会议官方 CLI 和技能，可创建、查询、修改和取消会议，查询参会报告、录制、转写与智能纪要。连接时会打开授权页扫码登录。', welcomeQueries:['帮我创建一个腾讯会议','查一下我的腾讯会议录制','看看最近会议的智能纪要','查询这场腾讯会议的参会人'] },
         } },
-        uiPet: { waiting:'需要输入', failed:'遇到问题', review:'可以查看', running:'处理中', sendFailed:'发送失败', noMain:'无法连接主窗口', scheduledDone:'定时任务已完成', done:'已完成', reply:'回复', collapseReply:'收起回复', expandReply:'展开回复', collapse:'收起', expand:'展开', replyPlaceholder:'输入回复…', sendReply:'发送回复', back:'回到品悟', ready:n=>`${n}已就绪`, backHint:'点击回到品悟', drag:n=>`点击回到品悟，拖动${n}`, openScheduled:n=>`打开定时任务${n}的本次运行`, closeScheduled:'关闭定时任务完成提醒', openChat:n=>`打开${n}对话`, closeNotice:n=>`关闭${n}提醒`, replyTo:n=>`回复${n}`, expandActivities:n=>`展开 ${n} 条活动`, collapseActivities:'收起活动卡片', expandActivity:'展开活动', collapseActivity:'收起活动', loadFailed:'公仔加载失败', retry:'点击重试', resizeTitle:'拖动调整大小', hide:'隐藏公仔' },
+        uiPet: { waiting:'需要输入', failed:'遇到问题', review:'可以查看', running:'处理中', sendFailed:'发送失败', noMain:'无法连接主窗口', scheduledDone:'定时任务已完成', done:'已完成', reply:'回复', collapseReply:'收起回复', expandReply:'展开回复', collapse:'收起', expand:'展开', replyPlaceholder:'输入回复…', sendReply:'发送回复', back:'回到品悟', ready:n=>`${n}已就绪`, backHint:'点击回到品悟', drag:n=>`点击回到品悟，拖动${n}`, openScheduled:n=>`打开定时任务${n}的本次运行`, closeScheduled:'关闭定时任务完成提醒', openChat:n=>`打开${n}对话`, closeNotice:n=>`关闭${n}提醒`, replyTo:n=>`回复${n}`, expandActivities:n=>`展开 ${n} 条活动`, collapseActivities:'收起活动卡片', expandActivity:'展开活动', collapseActivity:'收起活动', loadFailed:'公仔加载失败', retry:'点击重试', hide:'隐藏公仔' },
         uiWebConnection: { idle:['正在准备远程控制','正在初始化浏览器连接…'], connecting:['正在连接桌面端','连接中断时会自动重试，尚未确认的操作不会重复执行。'], desktop_offline:['桌面端当前离线','保持此页面打开；桌面端恢复运行后会自动续接。'], credentials_missing:['链接不完整','请在桌面端启用远程控制，然后粘贴生成的完整链接。'], denied:['无法访问','链接无效或已被刷新，请从桌面端复制新链接。'], revoked:['访问已停止','桌面端已停止此远程控制链接。'], replaced:['已在另一浏览器接管','同一远程控制链接只保留一个活动浏览器；刷新本页可重新接管。'], incompatible_desktop:['桌面端版本不兼容','当前远程控制功能需要更新的桌面端，请先升级桌面端后再重新打开链接。'], error:['连接异常','远程控制会继续尝试恢复连接。'] },
         uiConversation: conversationZh,
         uiComputerUse: {
@@ -919,12 +919,6 @@ Object.assign(dictZh.uiScheduled, {
   chooseHour: '选择小时',
   chooseMinute: '选择分钟',
   daySeparator: '、',
-  previewTasks: {
-'preview-daily-brief': { name: '每日早报', scheduleLabel: '每天 08:00', prompt: '整理过去 24 小时的重要新闻和行业动态，注明来源和链接；补充公司公告和重点风险。' },
-'preview-follow-up': { name: '事项督办', scheduleLabel: '工作日 09:00', prompt: '整理逾期与临期事项，突出风险、负责人和建议下一步。' },
-'preview-weekly-report': { name: '销售线索周报', scheduleLabel: '星期五 16:00', prompt: '汇总本周线索新增、跟进状态、转化风险和下周重点客户。' },
-  },
-  previewRunError: '外部新闻源请求超时',
 });
 
 

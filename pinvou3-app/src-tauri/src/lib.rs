@@ -1109,9 +1109,9 @@ pub fn run() {
                             );
                             crate::features::memory::discard_turn_capture(session_id);
                             // Self-metrics accumulate per session key
-                            // (warmed_sessions inserts on every TurnComplete
-                            // and is never reclaimed); clear the keys on
-                            // deletion.
+                            // (inflight entries are inserted on TurnStarted
+                            // and only cleared on TurnComplete/abort); clear
+                            // the key on deletion.
                             if let Some(metrics) = app_for_purge_hook
                                 .try_state::<crate::features::monitor::MonitorState>()
                                 .map(|state| state.self_metrics())

@@ -495,7 +495,7 @@ const jaBase = {
           ima:{ title:'Tencent ima', subtitle:'OpenAPI で ima のノートとナレッジベースを操作', latency:'クラウド', desc:'Tencent ima OpenAPI Skill に接続し、ノートの検索、閲覧、作成、追記や、ナレッジベースの検索、閲覧、Web ページとコンテンツの追加ができます。認証情報はこの端末だけに保存されます。', configTitle:'Tencent ima に接続', configDescription:'認証情報はこの端末だけに保存され、IMA OpenAPI Skill の有効化にのみ使用されます。', configDocLabel:'Client ID / API Key を取得', welcomeQueries:['ima のナレッジベースを検索','ima のノート一覧を表示','この内容から ima ノートを作成','ima のナレッジベースで製品案を検索'] },
           tmeet:{ title:'Tencent Meeting', subtitle:'本人として会議、録画、議事録、参加レポートを管理', type:'CLI + 公式 Skill', latency:'クラウド', desc:'Tencent Meeting 公式 CLI と Skill に接続し、会議の作成、検索、変更、キャンセルや、参加レポート、録画、文字起こし、AI 議事録の取得ができます。接続すると認証ページが開き、QR コードでログインします。', welcomeQueries:['Tencent Meeting を作成','Tencent Meeting の録画を検索','最近の会議の AI 議事録を表示','Tencent Meeting の参加者を確認'] },
         } },
-        uiPet: { waiting:'入力が必要', failed:'問題が発生', review:'確認できます', running:'処理中', sendFailed:'送信失敗', noMain:'メインウィンドウに接続できません', scheduledDone:'定期タスク完了', done:'完了', reply:'返信', collapseReply:'返信を閉じる', expandReply:'返信を展開', collapse:'閉じる', expand:'展開', replyPlaceholder:'返信を入力…', sendReply:'返信を送信', back:'PINVOU に戻る', ready:n=>`${n} の準備ができました`, backHint:'クリックして PINVOU に戻る', drag:n=>`クリックして PINVOU に戻る、${n} をドラッグして移動`, openScheduled:n=>`定期タスク「${n}」の今回の実行を開く`, closeScheduled:'定期タスク完了通知を閉じる', openChat:n=>`${n} の会話を開く`, closeNotice:n=>`${n} の通知を閉じる`, replyTo:n=>`${n} に返信`, expandActivities:n=>`${n} 件のアクティビティを展開`, collapseActivities:'アクティビティカードを閉じる', expandActivity:'アクティビティを展開', collapseActivity:'アクティビティを閉じる', loadFailed:'コンパニオンの読み込みに失敗', retry:'クリックして再試行', resizeTitle:'ドラッグしてサイズ変更', hide:'コンパニオンを非表示' },
+        uiPet: { waiting:'入力が必要', failed:'問題が発生', review:'確認できます', running:'処理中', sendFailed:'送信失敗', noMain:'メインウィンドウに接続できません', scheduledDone:'定期タスク完了', done:'完了', reply:'返信', collapseReply:'返信を閉じる', expandReply:'返信を展開', collapse:'閉じる', expand:'展開', replyPlaceholder:'返信を入力…', sendReply:'返信を送信', back:'PINVOU に戻る', ready:n=>`${n} の準備ができました`, backHint:'クリックして PINVOU に戻る', drag:n=>`クリックして PINVOU に戻る、${n} をドラッグして移動`, openScheduled:n=>`定期タスク「${n}」の今回の実行を開く`, closeScheduled:'定期タスク完了通知を閉じる', openChat:n=>`${n} の会話を開く`, closeNotice:n=>`${n} の通知を閉じる`, replyTo:n=>`${n} に返信`, expandActivities:n=>`${n} 件のアクティビティを展開`, collapseActivities:'アクティビティカードを閉じる', expandActivity:'アクティビティを展開', collapseActivity:'アクティビティを閉じる', loadFailed:'コンパニオンの読み込みに失敗', retry:'クリックして再試行', hide:'コンパニオンを非表示' },
         uiWebConnection: { idle:['遠隔操作を準備中','ブラウザー接続を初期化中…'], connecting:['デスクトップに接続中','中断時は自動再接続し、未確認の操作は重複実行しません。'], desktop_offline:['デスクトップはオフラインです','このページを開いたままにすると、復帰後に自動再接続します。'], credentials_missing:['リンクが不完全です','デスクトップで遠隔操作を有効にし、完全なリンクを貼り付けてください。'], denied:['アクセスできません','リンクが無効または更新済みです。デスクトップから新しいリンクをコピーしてください。'], revoked:['アクセス停止','デスクトップがこの遠隔操作リンクを停止しました。'], replaced:['別のブラウザーが引き継ぎました','同時に利用できるブラウザーは 1 つです。再取得するにはページを更新してください。'], incompatible_desktop:['デスクトップのバージョンが非互換','デスクトップアプリを更新してからリンクを開き直してください。'], error:['接続エラー','遠隔操作は再接続を続けます。'] },
         uiConversation: conversationJa,
         uiComputerUse: {
@@ -872,12 +872,6 @@ Object.assign(dictJa.uiScheduled, {
   chooseHour: '時を選択',
   chooseMinute: '分を選択',
   daySeparator: '、',
-  previewTasks: {
-'preview-daily-brief': { name: 'デイリーブリーフ', scheduleLabel: '毎日 08:00', prompt: '過去24時間の重要ニュースと業界動向を出典・リンク付きでまとめ、社内通知と重点リスクも追加します。' },
-'preview-follow-up': { name: 'フォローアップ確認', scheduleLabel: '平日 09:00', prompt: '期限超過・期限間近の項目を整理し、リスク・担当者・推奨する次の対応を示します。' },
-'preview-weekly-report': { name: 'リード週報', scheduleLabel: '金曜日 16:00', prompt: '今週の新規リード、フォロー状況、成約リスク、来週の重点顧客をまとめます。' },
-  },
-  previewRunError: '外部ニュースソースのリクエストがタイムアウトしました',
 });
 
 dictJa.uiKnowledge = {
