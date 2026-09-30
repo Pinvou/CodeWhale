@@ -243,6 +243,7 @@ const jaBase = {
         kbModelItem1: 'bge-m3 多言語ベクトルモデル（int8 ONNX）', kbModelItem2: 'トークナイザーとモデル設定ファイル', kbModelItem3: 'CPU 推論・ネットワークと GPU 不要',
         kbModelDownloadBtn: 'ダウンロードしてセットアップ', kbModelFoot: '一度インストールすればオフラインで利用可 · ダウンロード中も他機能を利用可能',
         kbModelRetryBtn: '再読み込み', kbModelRepairBtn: '再ダウンロードして修復', kbModelLoading: 'モデルを読み込み中…',
+        kbModelNotLoadedTitle: 'モデルはインストール済み · 未読み込み', kbModelNotLoadedDesc: 'Embedding モデルはこの端末にありますが、まだメモリに読み込まれていません（意味検索の需要がまだなかったため。インストール途中の中断でもこの状態で止まります）。今すぐ読み込むか、ファイルを取り込むと自動的に読み込まれます。', kbModelLoadNowBtn: '今すぐ読み込む',
         kbModelStageDownload: 'モデルファイルをダウンロード中…', kbModelStageVerify: '検証中…', kbModelStagePrepare: 'モデルを準備中…', kbModelStageDone: '完了',
         kbStep1: 'ローカルファイル選択', kbStep2: 'AI 解析とインデックス', kbStep3: '会話で自動引用',
         kbMyColls: 'マイコレクション', kbNoColls: 'コレクションがありません。「新規コレクション」で開始。', kbNoCollsShort: 'コレクションがありません。まず作成してください。',
@@ -334,7 +335,7 @@ const jaBase = {
         uiMonitor: { bridgeNotReady:'ブリッジ未準備', readFailed:'読み込み失敗', reading:'読み込み中', configError:'設定エラー', unverified:'未確認', authFailed:'認証失敗', bridgeError:'モニターブリッジが未準備です。Tauri アプリのウィンドウで開いてください。', readError:e=>`モニターの読み込みに失敗: ${e}`, activity:'実行状況' },
 
         uiSettings: { common:'一般', system:'システム', general:'一般', model:'モデル', search:'検索', memory:'メモリ', community:'ユーザーコミュニティ', permissions:'権限と環境', data:'データ管理', update:'更新', help:'ヘルプとフィードバック', appearance:'外観', language:'表示言語', languageDesc:'アプリの表示言語を切り替えます', theme:'テーマ', themeDesc:'システムに従う、またはライト/ダークを選択', notifications:'通知', taskNotice:'タスク完了通知', taskNoticeDesc:'タスク完了時にシステム通知を表示', voiceShortcuts:'音声ショートカット', voiceShortcutEnable:'Alt 音声ショートカットを有効化', voiceShortcutEnableDesc:'Alt で音声入力を開始します。入力欄にテキストがある場合は、Alt で現在のテキストを音声編集します。既定ではオフです。', voiceShortcutHelp:'Alt 音声ショートカットの説明を表示', voiceShortcutUnsupportedDesc:'Alt グローバルショートカットは Windows のみ対応しています。このプラットフォームでは、アプリのウィンドウ内で Alt 音声入力を利用できます。', voicePostprocess:'スマート整形', voicePostprocessDesc:'認識テキスト（入力欄の既存下書きも含む）を設定済みのモデルサービスへ送り、誤りを修正して構造化入力に整理します。オフの場合は端末内のルール修正のみ行います。', voiceShortcutWebDesc:'ブラウザーではアプリウィンドウ内で Alt 音声入力を利用できます。グローバルショートカットは利用できず、転写のみでスマート整形と音声編集は行われません。', desktopAssistant:'デスクトップアシスタント', pet:'デスクトップコンパニオン', petDesc:'デスクトップに常駐コンパニオンを表示', version:'バージョン', currentVersion:'現在のバージョン', beta:'ベータ版', releaseNotes:'更新内容', noReleaseNotes:'更新内容はありません', downloading:p=>`更新をダウンロード中 ${p}%`, installingUpdate:'更新をインストール中…', installerStarted:'インストーラー起動済み', cancelDownload:'ダウンロードをキャンセル', providers:'ACP' },
-        uiSettingsDetail: { modelSection:'モデル', settingsLoadFailed:'設定ページの読み込みに失敗しました', addModel:'モデルを追加', envManaged:'環境変数で管理されるモデル設定はここに表示されますが、変更は環境変数側で行う必要があります。', localModel:'ローカルモデル', defaultTag:'デフォルト', edit:'編集', delete:'削除', noModels:'モデルがありません', localDefaultName:'ローカル Qwen3.6', searchList:'検索ソース一覧', setDefault:'デフォルトに設定', addSearch:'検索ソースを追加', searchDescriptions:{ bing:'内蔵検索', metaso:'中国語検索サービス', bocha:'検索サービス', baidu:'Qianfan AI 検索', tavily:'海外検索サービス' }, searchSourceHint:'内蔵検索はキー不要で利用できます。選択したサービスが失敗した場合は自動的に内蔵検索へフォールバックします。中国語の長い検索には中国語検索サービスの追加がおすすめです。', memoryTypes:{ preference:'長期の好み', work_context:'業務コンテキスト', current_focus:'現在の注目事項', recent_activity:'最近のアクティビティ' }, memoryDetail:'メモリ詳細', content:'内容', editTitle:label=>`${label}を編集`, userCallName:'ユーザーの呼び名', assistantNickname:'アシスタントの呼び名', callNameDesc:'アシスタントがあなたを呼ぶ名前', assistantNameDesc:'あなたがアシスタントを呼ぶ名前', unnamedMemory:'無題のメモリ', view:'表示', enableMemory:'メモリを有効化', enableMemoryDesc:'PINVOU が呼び名、好み、業務コンテキスト、最近の事項を記憶します', profile:'プロフィール', notSet:'未設定', longMemory:'長期メモリ', shortMemory:'短期メモリ', noLongMemory:'長期メモリはありません', noShortMemory:'短期メモリはありません', hiddenTasks:'非表示タスク', archivedAt:date=>`${date} に隠した`, restore:'復元', noHiddenTasks:'非表示タスクはありません', noHiddenTasksDesc:'隠したタスクがここに表示されます', system:'システム', advancedPermission:'高度な実行権限', advancedPermissionDesc:'環境設定などの高度なコマンド実行を許可します', missing:'不足', installMissing:'不足している依存関係をインストール', feedbackTitle:'問題または提案を送信', feedbackDesc:'画像と動画を添付できます。送信前にプライバシー通知を表示します', submitFeedback:'フィードバックを送信', editSearch:'検索ソースを編集', apiKeyPlaceholder:'API Key を入力', hide:'非表示', show:'表示', cancel:'キャンセル', save:'保存', restartSearchTitle:'検索設定を適用するため再起動しますか？', restartLanguageTitle:'言語設定を適用するため再起動しますか？', restartSearchDesc:'更新した検索ソースや認証情報を利用するにはアプリの再起動が必要です。', restartLanguageDesc:'表示言語を変更しました。再起動するとアシスタントの応答言語にも反映されます。', later:'後で', restartNow:'今すぐ再起動', deleteModelTitle:'モデルを削除しますか？', deleteModelDesc:'モデル設定と保存済み認証情報を削除します。', deleteModel:'モデルを削除', deleteSearchTitle:'検索ソースを削除しますか？', deleteSearchDesc:name=>`${name} と保存済み認証情報を削除します。`, deleteSearch:'検索ソースを削除', addSearchDesc:'検索ソースを選択して必要な認証情報を入力します', closeSettings:'設定を閉じる', chooseModelDesc:'モデルを選択して必要な認証情報を入力します', collapse:'閉じる', change:'変更', customModel:'カスタムモデル', localModelName:name=>name ? `ローカル ${name}` : 'ローカルモデル', apiKeyReadFailed:'API Key の読み込みに失敗しました', localModelId:'ローカルモデル ID', modelId:'モデル ID', modelIdPlaceholder:'モデル ID を入力', customModelTitle:provider=>`カスタム ${provider} モデル`, customModelDesc:'モデル ID を手動入力', customLocalDesc:'ローカルサービスが公開するモデル ID を入力', customCompatibleDesc:'モデル ID とサービス URL を手動入力', modelDescriptions:{ '本地服务默认模型':'ローカルサービスのデフォルトモデル', '高能力模型':'高性能モデル', '快速响应':'高速応答', '最新通用模型':'最新の汎用モデル', '代码场景':'コーディング向け', '高速代码场景':'高速コーディング向け', '稳定可用':'安定版', '高性价比':'コストパフォーマンス重視', '通用能力':'汎用', '兼容保留':'互換性オプション', '高速响应':'高速応答', '稳定通用':'安定した汎用モデル', '轻量模型':'軽量モデル' } },
+        uiSettingsDetail: { modelSection:'モデル', settingsLoadFailed:'設定ページの読み込みに失敗しました', addModel:'モデルを追加', envManaged:'環境変数で管理されるモデル設定はここに表示されますが、変更は環境変数側で行う必要があります。', localModel:'ローカルモデル', defaultTag:'デフォルト', edit:'編集', delete:'削除', noModels:'モデルがありません', localDefaultName:'ローカル Qwen3.6', searchList:'検索ソース一覧', setDefault:'デフォルトに設定', addSearch:'検索ソースを追加', searchDescriptions:{ bing:'内蔵検索', metaso:'中国語検索サービス', bocha:'検索サービス', baidu:'Qianfan AI 検索', tavily:'海外検索サービス' }, searchSourceHint:'内蔵検索はキー不要で利用できます。選択したサービスが失敗した場合は自動的に内蔵検索へフォールバックします。中国語の長い検索には中国語検索サービスの追加がおすすめです。', memoryTypes:{ preference:'長期の好み', work_context:'業務コンテキスト', current_focus:'現在の注目事項', recent_activity:'最近のアクティビティ' }, memoryDetail:'メモリ詳細', content:'内容', editTitle:label=>`${label}を編集`, userCallName:'ユーザーの呼び名', assistantNickname:'アシスタントの呼び名', callNameDesc:'アシスタントがあなたを呼ぶ名前', assistantNameDesc:'あなたがアシスタントを呼ぶ名前', unnamedMemory:'無題のメモリ', view:'表示', enableMemory:'メモリを有効化', enableMemoryDesc:'PINVOU が呼び名、好み、業務コンテキスト、最近の事項を記憶します', profile:'プロフィール', notSet:'未設定', longMemory:'長期メモリ', shortMemory:'短期メモリ', noLongMemory:'長期メモリはありません', noShortMemory:'短期メモリはありません', hiddenTasks:'非表示タスク', archivedAt:date=>`${date} に隠した`, restore:'復元', noHiddenTasks:'非表示タスクはありません', noHiddenTasksDesc:'隠したタスクがここに表示されます', system:'システム', advancedPermission:'高度な実行権限', advancedPermissionDesc:'環境設定などの高度なコマンド実行を許可します', missing:'不足', installMissing:'不足している依存関係をインストール', feedbackTitle:'問題または提案を送信', feedbackDesc:'画像と動画を添付できます。送信前にプライバシー通知を表示します', submitFeedback:'フィードバックを送信', editSearch:'検索ソースを編集', apiKeyPlaceholder:'API Key を入力', hide:'非表示', show:'表示', cancel:'キャンセル', save:'保存', restartSearchTitle:'検索設定を適用するため再起動しますか？', restartLanguageTitle:'言語設定を適用するため再起動しますか？', restartSearchDesc:'更新した検索ソースや認証情報を利用するにはアプリの再起動が必要です。', restartLanguageDesc:'表示言語を変更しました。再起動するとアシスタントの応答言語にも反映されます。', later:'後で', restartNow:'今すぐ再起動', deleteModelTitle:'モデルを削除しますか？', deleteModelDesc:'モデル設定と保存済み認証情報を削除します。', deleteModel:'モデルを削除', deleteSearchTitle:'検索ソースを削除しますか？', deleteSearchDesc:name=>`${name} と保存済み認証情報を削除します。`, deleteSearch:'検索ソースを削除', addSearchDesc:'検索ソースを選択して必要な認証情報を入力します', closeSettings:'設定を閉じる', chooseModelDesc:'モデルを選択して必要な認証情報を入力します', collapse:'閉じる', change:'変更', customModel:'カスタムモデル', localModelName:name=>name ? `ローカル ${name}` : 'ローカルモデル', apiKeyReadFailed:'API Key の読み込みに失敗しました', localModelId:'ローカルモデル ID', modelId:'モデル ID', modelIdPlaceholder:'モデル ID を入力', customModelTitle:provider=>`カスタム ${provider} モデル`, customModelDesc:'モデル ID を手動入力', customLocalDesc:'ローカルサービスが公開するモデル ID を入力', customCompatibleDesc:'モデル ID とサービス URL を手動入力', modelDescriptions:{ '本地服务默认模型':'ローカルサービスのデフォルトモデル', '高能力模型':'高性能モデル', '快速响应':'高速応答', '最新通用模型':'最新の汎用モデル', '代码场景':'コーディング向け', '高速代码场景':'高速コーディング向け', '稳定可用':'安定版', '高性价比':'コストパフォーマンス重視', '通用能力':'汎用', '兼容保留':'互換性オプション', '高速响应':'高速応答', '轻量模型':'軽量モデル' } },
         uiPetSettings: { choose:'コンパニオンを選択', placeholder:'開発中', preparing:'アニメーションを準備中', animationFailed:'アニメーションの読み込みに失敗', coverFailed:'カバーの読み込みに失敗', retry:'再試行', pets:{ lingling:{name:'リンリン',description:'星模様の巻き尾で、軽やかに寄り添います'}, langlang:{name:'ランラン',description:'黒い服と眼鏡で、落ち着いて寄り添います'}, 'ace-taffy':{name:'Ace Taffy',description:'ピンクの髪と王冠で元気に応援します'} } },
         uiScheduled: { title:'定期タスク', subtitle:'繰り返し作業を PINVOU に自動実行させます', newTask:'新規タスク', templates:'おすすめテンプレート', myTasks:'マイタスク', loading:'定期タスクを読み込み中…', empty:'一致する定期タスクはありません', view:n=>`定期タスクを表示: ${n}`, useTemplate:n=>`${n} テンプレートを使用`, running:'タスク実行中', unread:'未確認の実行会話', navUnreadAria:'定期タスクに未確認の実行会話があります', closeError:'エラーを閉じる', deleteTitle:'定期タスクを削除しますか？', deleteDescription:n=>`「${n}」の今後の実行を停止してタスクリストから削除します。これまでの実行履歴は保持されます。`, cancel:'キャンセル', delete:'削除', save:'保存', filterAll:'すべて', filterActive:'有効', filterPaused:'一時停止', active:'有効', paused:'一時停止', enabled:'有効', unknown:'不明', notScheduled:'未予定', noSchedule:'予定なし', waitingDispatch:'実行待ち', soon:'まもなく実行', nextRun:(time,remaining)=>`次回 ${time}（${remaining}）`, date:(month,day)=>`${month}月${day}日 `, daysAfter:(days,hours)=>`${days}日${hours ? `${hours}時間` : ''}後`, hoursAfter:(hours,minutes)=>`${hours}時間${minutes ? `${minutes}分` : ''}後`, minutesAfter:(minutes,seconds)=>`${minutes}分${seconds}秒後`, secondsAfter:seconds=>`${seconds}秒後`, runStatus:{ queued:'待機中', running:'実行中', completed:'完了', failed:'失敗', canceled:'キャンセル済み' }, weekdays:[['月曜日','月'],['火曜日','火'],['水曜日','水'],['木曜日','木'],['金曜日','金'],['土曜日','土'],['日曜日','日']], hourCount:n=>`${n} 時間`, choose:'選択してください', autoModel:'自動選択', currentModel:'現在のモデル', reselectModel:n=>`モデルを再選択 · ${n}`, repeatOptions:{ workdays:'平日', daily:'毎日', weekly:'毎週', hourly:'毎時', once:'一回のみ', custom:'カスタム' }, everyHours:n=>`${n} 時間ごと`, startsAt:time=>`${time} から`, repeat:'繰り返し', interval:'間隔', dateLabel:'曜日', startTime:'開始時刻', time:'時刻', chooseRepeat:'繰り返し頻度を選択', chooseInterval:'時間間隔を選択', chooseDate:'実行曜日を選択', chooseStartTime:'開始時刻を選択', chooseRunTime:'実行時刻を選択', setStart:'開始時刻を設定', createFromTemplate:'テンプレートから作成', closeCreate:'新規タスクを閉じる', taskName:'タスク名', taskNamePlaceholder:'例：毎日のデータバックアップ', taskPrompt:'実行内容', taskPromptPlaceholder:'実行ごとに行う作業を入力…', saveTask:'タスクを保存', editTask:'タスクを編集', closeDetail:'タスク詳細を閉じる', taskNameAria:'定期タスク名', taskPromptAria:'定期タスクの説明', aiModel:'AI モデル', chooseModel:'定期タスクのモデルを選択', runningStatus:'実行状態', nextExecution:'次回実行', enableTask:'タスクを有効化', runNow:'今すぐ実行', openFolder:'フォルダーを開く', runHistory:'実行履歴', records:n=>`${n} 件`, noRecords:'記録なし', openRun:'実行会話を開く', noOpenRun:'この実行には開ける会話がありません', openRunLabel:s=>`実行記録を開く：${s}`, runInProgress:'実行中', viewRunResult:'会話を開いて結果を確認', noRunSession:'開ける会話がありません', noRunHistory:'実行履歴はありません', saveState:{ saving:'保存中…', saved:'保存しました', invalid:'名前と実行内容を入力してください', error:'保存に失敗しました' }, pause:n=>`${n} を一時停止`, resume:n=>`${n} を再開`, templateMap:{ 'daily-brief':{name:'デイリーブリーフ',schedule:'毎日 8:00',description:'重要ニュース、業界動向、接続済み業務システムの社内通知をまとめます',prompt:'過去24時間の重要ニュースと業界動向を出典・リンク付きでまとめます。Lark または WeCom 接続時は社内通知も追加します。ユーザーのディレクトリはスキャンせず、結果はタスクのワークスペースに保存します。'}, 'follow-up-monitor':{name:'フォローアップ確認',schedule:'平日 9:00',description:'期限超過・期限間近の項目を整理し、リスクと次の対応を示します',prompt:'接続済みの Lark または WeCom から、期限超過・本日期限・今後3営業日以内の項目をまとめ、優先度別にリスクと次の対応を示します。確認と整理のみで、送信・承認・変更は行いません。ユーザーのディレクトリはスキャンしません。'}, 'weekly-review':{name:'週間レポート',schedule:'金曜日 16:00',description:'今週の業務記録から構造化された週間レポートを作成します',prompt:'接続済みの Lark または WeCom の今週の予定・ToDo・業務メッセージから週間レポートを作成し、進捗・残課題・リスク・来週の計画を含めます。ユーザーのディレクトリのスキャンや自動送信は行いません。'}, 'memory-organize':{name:'メモリ整理',schedule:'平日 9:30',description:'長期メモリを定期整理：重複の統合、不要項目の削除、表現の修正',prompt:'長期メモリを定期的に整理します：重複エントリを統合し、古いまたは無効な項目を削除し、曖昧な表現を修正して、メモリを簡潔で正確に保ちます。このタスクは会話を開かずに自動実行されます。メモリの整理のみを行い、メッセージの送信やその他の変更は行いません。'} } },
         uiChat: { ready:'準備完了', sceneModes:{ personalWorkbench:'パーソナルワークベンチ', documentWriting:'公文書作成', poster:'ポスター', dataVisualization:'データ可視化', pptDesign:'PPT デザイン', clear:label=>`${label}を解除` }, askMe:'質問してみて', naturalQuestion:'自然な言葉で質問できます。', backRuns:'定期タスクの実行履歴に戻る', scheduledRun:'定期タスクの実行', runRecords:'実行履歴', asrUnavailable:'音声認識がインストールされていません。デスクトップアプリでインストールしてから再試行してください。', gotIt:'了解', asrDownloadTitle:'音声認識モデルをダウンロード', asrEnableTitle:'ローカル音声認識を有効化', asrRuntimeMissing:'ローカル音声認識ランタイムがありません。アプリを修復または再インストールしてください。モデルのみ不足している場合はここからダウンロードできます。', asrReadyNotice:'音声モデルの準備ができました。マイクをクリックして録音を開始できます。', asrFirstUse:(size,ffmpeg)=>`初回利用時に音声認識モデル（${size}${ffmpeg ? ' + ffmpeg' : ''}）をダウンロードします。モデルと音声認識は端末内で動作し、音声が外部に送信されることはありません。スマート整形を有効にすると、認識テキスト（入力欄の既存下書きも含む）が設定済みのモデルサービスへ送られ、修正・整形されます。`, sizeModelOnly:'約 254 MB', sizeFull:'約 174～254 MB', asrStages:{ ffmpeg:'ffmpeg をインストール中（システムの認証画面が表示される場合があります）…', verify:'モデルの整合性を確認中…', cancelling:'ダウンロードをキャンセル中…', done:'完了', cancelled:'キャンセル済み', failed:'ダウンロードに失敗しました。再試行してください。', preparing:'準備中…' }, downloadingModel:p=>`モデルをダウンロード中 ${p}`, cancelling:'キャンセル中…', cancelDownload:'ダウンロードをキャンセル', cancel:'キャンセル', repairInstall:'インストールを修復', downloadModel:'モデルをダウンロード', install:'インストール', designingCard:'🃏 カードを設計中…', recordedRecent:'最近のアクティビティを記録しました', viewMemory:'メモリセンターで確認できます', memoryUpdated:'メモリを更新しました', processed:'処理済み', candidate:'メモリ候補', remember:'記憶する', ignoreOnce:'今回は無視', neverAsk:'今後表示しない', memoryMeta:{ current_focus:{label:'現在の注目事項',prompt:'この注目事項を記憶できます',hint:'現在進めている作業の理解に利用します。',notice:'今後の会話でこの最近の事項を参照します。'}, recent_activity:{label:'最近のアクティビティ',prompt:'このアクティビティを記憶できます',hint:'直前に完了した作業の理解に利用します。',notice:'今後の会話でこの完了内容を参照します。'}, work_context:{label:'業務コンテキスト',prompt:'この業務コンテキストを記憶できます',hint:'長期的な業務コンテキストの理解に利用します。',notice:'今後の会話でこの長期コンテキストを参照します。'}, profile:{label:'呼び名',prompt:'この呼び名を記憶できます',hint:'今後この呼び名で会話します。',notice:'今後の会話でこの呼び名を使用します。'}, preference:{label:'好み',prompt:'この好みを記憶できます',hint:'今後の応答をこの好みに合わせます。',notice:'今後の会話でこの好みを参照します。'} } },
@@ -1190,7 +1191,7 @@ Object.assign(dictJa.uiSettingsDetail, {
   autoDetectLocalModel:'ローカルモデルを自動検出',
   codingPlanTestUnavailable:'現在このプロバイダーの接続テストはできませんが、設定は保存できます',
   connectionMessages:{ ok:'接続に成功しました', auth_invalid:'API Key が無効です。確認して再入力してください', auth_forbidden:'この API Key にはアクセス権がありません', billing:'アカウント残高が不足しています。チャージするか、別のモデルに切り替えてください', rate_limited:'リクエストが多すぎるか、割り当てが不足しています。後でもう一度お試しください', redirect:'サービスアドレスがリダイレクトされ、可用性を確認できませんでした', request_invalid:'リクエスト形式が受け付けられませんでした。モデル設定を確認してください', timeout:'接続がタイムアウトしました。ネットワークまたはローカルサービスの起動を確認してください', tls_error:'セキュリティ証明書の検証に失敗しました。プロキシまたはネットワーク環境を確認してください', dns_failed:'サービスアドレスを解決できませんでした。ネットワークを確認してください', connection_refused:'サービスに接続できませんでした。ローカルのモデルサービスが起動しているか確認してください', server_unavailable:'サービスが一時的に利用できません。後でもう一度お試しください', endpoint_not_found:'エンドポイントを利用できません', method_not_allowed:'エンドポイントはテストリクエストに対応していません', http_error:'接続に失敗しました。設定を確認して再試行してください', unknown:'接続に失敗しました。後でもう一度お試しください' },
-  catalogSections:{ coding_plan:'Coding Plan', official_api:'公式 API', custom:'カスタム互換エンドポイント' },
+  catalogSections:{ coding_plan:'Coding Plan', official_api:'公式 API', aggregator:'集約プラットフォーム', custom:'カスタム互換エンドポイント' },
   providerCatalog:{
     local:{title:'ローカルモデル',desc:'ローカルサービスのデフォルトモデル'}, glm_coding_plan:{title:'Zhipu Coding Plan / GLM Coding Plan',configTitle:'Zhipu Coding Plan',desc:'コーディングと Agent 向けの専用エンドポイント'},
     tencent_coding_plan:{title:'Tencent Cloud Coding Plan',configTitle:'Tencent Cloud Coding Plan',desc:'Tencent Cloud のコーディングプラン用エンドポイント'},
@@ -1210,6 +1211,11 @@ Object.assign(dictJa.uiSettingsDetail, {
     anthropic:{title:'Anthropic Claude',configTitle:'Anthropic Claude',desc:'Anthropic 公式 API（Messages ネイティブプロトコル）'},
     gemini:{title:'Google Gemini',configTitle:'Google Gemini',desc:'Gemini API（OpenAI 互換エンドポイント）'},
     xai:{title:'xAI Grok',configTitle:'xAI Grok',desc:'xAI 公式 API'},
+    volcengine_coding_plan:{title:'Volcengine Ark Coding Plan',configTitle:'Volcengine Ark Coding Plan',desc:'Volcengine Ark のコーディングプラン用エンドポイント'},
+    qwen_coding_plan:{title:'Qwen Coding Plan',configTitle:'Qwen Coding Plan',desc:'Alibaba Cloud Model Studio のコーディングプラン専用エンドポイント'},
+    openrouter:{title:'OpenRouter',configTitle:'OpenRouter',desc:'OpenRouter アグリゲーター公式 API'},
+    siliconflow:{title:'SiliconFlow China',configTitle:'SiliconFlow',desc:'SiliconFlow 中国公式 API'},
+    siliconflow_global:{title:'SiliconFlow Global',configTitle:'SiliconFlow Global',desc:'SiliconFlow 国際 API（キーは地域別）'},
     openai_compatible:{title:'OpenAI Compatible',desc:'カスタム OpenAI 互換エンドポイント'},
   },
   imageCapability:'画像入力', imageCapabilityEnabled:'画像対応', imageCapabilityDisabled:'画像非対応', imageCapabilityPinvou:'自動処理',
@@ -1238,7 +1244,11 @@ Object.assign(dictJa.uiSettingsDetail.modelDescriptions, {
   'Coding Plan 自动模型':'Coding Plan 自動モデル',
   '自动模型，智能路由':'自動モデル（スマートルーティング）',
   'Hy 套餐专属模型':'Hy プラン専用モデル',
-  '标准编码模型':'標準コーディングモデル',
+  'K2.8 Preview，全档 1M 上下文':'K2.8 Preview、全ティア 1M コンテキスト',
+  '极速多模态，200 tokens/s':'高速マルチモーダル、200 tokens/s',
+  '新预览旗舰，仅订阅渠道':'新プレビューフラッグシップ、サブスクリプション専用',
+  '快速高性价比，夜间同样四折':'高速で高コストパフォーマンス、夜間も通常の 40%',
+  '官方将于 2026-10-21 下线':'2026-10-21 に提供終了予定',
   'K3 长上下文模型':'K3 長コンテキストモデル', '高速编码模型':'高速コーディングモデル',
   'K3 256K 上下文，价格更低':'K3 256K コンテキスト、より低価格',
   '官方已转 Legacy，兼容保留':'公式レガシー化済み。互換性のため保持',
@@ -1259,23 +1269,26 @@ Object.assign(dictJa.uiSettingsDetail.modelDescriptions, {
   '通用推理，官方将于 2026-10-09 下线':'汎用推論、2026-10-09 に提供終了予定',
   '多模态高性价比':'マルチモーダルで高コストパフォーマンス', '最新多模态高性价比':'最新マルチモーダル、高コストパフォーマンス',
   'Kimi 最新旗舰':'Kimi 最新フラッグシップ', 'Kimi 编码模型':'Kimi コーディングモデル', 'MiniMax 最新旗舰':'MiniMax 最新フラッグシップ',
-  'Hy4 预览，高峰期可能限频':'Hy4 プレビュー、混雑時はレート制限の可能性あり',
   'V4.1-Flash 主力，1M 上下文，支持图片输入':'V4.1-Flash の主力モデル。1M コンテキスト、画像入力対応', '在售；官方确认 2026-09-14 后继续提供且计费不变':'販売中。公式に 2026-09-14 以降も提供継続・課金は変更なし',
   '最新旗舰，强制思考':'最新フラッグシップ、思考は常時オン', '最新旗舰，1M 上下文多模态':'最新フラッグシップ、1M コンテキスト・マルチモーダル',
-  '最新旗舰，1M 上下文':'最新フラッグシップ、1M コンテキスト', '全模态理解（图片/视频）':'全モーダル理解（画像・動画）',
+  '最新旗舰，1M 上下文':'最新フラッグシップ、1M コンテキスト',
+  'Hy4 预览':'Hy4 プレビュー',
   '上代旗舰推理（纯文本）':'前世代フラッグシップ推論（テキストのみ）', '上代快速款':'前世代の高速モデル',
-  '正式旗舰，夜间 22:00-08:00 五折（个人版）':'正式フラッグシップ、22:00-08:00 は半額（個人版）',
-  '轻量兼容款，支持图像输入':'軽量互換モデル、画像入力対応', '快速响应，暂不支持 Responses API':'高速応答、Responses API は未対応',
-  '最新推荐，周级滚动升级':'最新の推奨モデル、週次ローリング更新', '低成本低时延，效果比肩 2-1-pro':'低コスト・低レイテンシ、2-1-pro に匹敵',
-  '编程特化（预览）':'コーディング特化（プレビュー）', '最强旗舰；仅 Responses 协议支持函数调用':'最強フラッグシップ。関数呼び出しは Responses API のみ',
+  '正式旗舰，夜间 22:00-08:00 四折（个人版）':'正式フラッグシップ、22:00-08:00 は通常の 40%（個人版）',
+  '轻量兼容款，支持图像输入':'軽量互換モデル、画像入力対応',
+  '最新推荐，统一模型 ID 自动升级':'最新の推奨モデル、統一モデル ID で自動更新', '低成本低时延，效果比肩 2-1-pro':'低コスト・低レイテンシ、2-1-pro に匹敵',
+  '编程特化（预览），官方即将下线':'コーディング特化（プレビュー）。公式によりまもなく提供終了予定', '稳定通用，官方即将下线':'安定した汎用モデル。公式によりまもなく提供終了予定', '最强旗舰；仅 Responses 协议支持函数调用':'最強フラッグシップ。関数呼び出しは Responses API のみ',
+  '编码与 Agent 新旗舰；Chat 协议仅 effort=none 支持函数调用':'コーディング/ Agent の新フラッグシップ。Chat プロトコルの関数呼び出しは effort=none のみ',
+  '低价高效；Chat 协议仅 effort=none 支持函数调用':'低価格かつ高速。Chat プロトコルの関数呼び出しは effort=none のみ',
   'GPT-5.6 家族旗舰，推理与编码':'GPT-5.6 ファミリーのフラッグシップ、推論とコーディング',
   '最强旗舰，高难推理与长程 Agent':'最強フラッグシップ、高難度推論と長時間エージェント',
-  '上代旗舰，兼容保留':'前世代フラッグシップ、互換性のため保持', '复杂 Agent 编码，默认推荐':'複雑なエージェントコーディング、デフォルト推奨',
+  '上代旗舰，兼容保留':'前世代フラッグシップ、互換性のため保持', '官方默认推荐，复杂 Agent 编码':'公式のデフォルト推奨、複雑なエージェントコーディング',
   '最快，200K 上下文':'最速、200K コンテキスト', '上一代 Flash':'前世代 Flash',
   '基线速度，兼容保留':'ベースライン速度、互換性のため保持',
   '旗舰，编码与 Agent 默认推荐':'フラッグシップ、コーディングと Agent のデフォルト推奨', '上代旗舰，编码与 Agent':'前世代フラッグシップ、コーディングと Agent',
   '4.20 推理，1M 上下文':'4.20 推論、1M コンテキスト', '4.20 非推理，1M 上下文':'4.20 非推論、1M コンテキスト',
   '快速可靠，强工具调用':'高速で安定、ツール呼び出しに強い', '代码 Agent，256K 上下文':'コーディングエージェント、256K コンテキスト',
+  '全模态，低成本':'フルモーダル、低コスト', '旗舰效果，极速输出':'フラッグシップ品質、超高速出力',
 });
 
 dictJa.uiSettingsDetail.customCodingPlanDesc = 'Coding Plan モデル ID を手動入力';
@@ -1287,6 +1300,8 @@ dictJa.uiSettingsDetail.customModelTitles = {
   glm:'カスタム GLM モデル', qwen:'カスタム Qwen モデル',
   openai_compatible:'カスタム互換モデル', glm_coding_plan:'カスタム GLM Coding Plan モデル',
   tencent_coding_plan:'カスタム Tencent Cloud Coding Plan モデル', tencent_token_plan:'カスタム Tencent Cloud Token Plan モデル', kimi_coding_plan:'カスタム Kimi Coding Plan モデル',
+  volcengine_coding_plan:'カスタム Volcengine Ark Coding Plan モデル', qwen_coding_plan:'カスタム Qwen Coding Plan モデル',
+  openrouter:'カスタム OpenRouter モデル', siliconflow:'カスタム SiliconFlow モデル', siliconflow_global:'カスタム SiliconFlow モデル',
 };
 
 // Official 主线在词典拆分基线之后新增或调整的文案。
@@ -2125,7 +2140,6 @@ Object.assign(dictJa.uiChat, {
   bgTasks: 'バックグラウンドタスク',
   bgTasksRunning: n => `${n} 件のバックグラウンドタスク実行中`,
 });
-
 Object.assign(dictJa.uiSettingsDetail, {
   platformModels:'Pinvou プラットフォームモデル',
   platformModelsDesc:'新しい空の会話で使うデフォルトモデルを選択します。既存の会話は変更されません。',
@@ -2188,3 +2202,9 @@ dictJa["uiAccount"] = {
 dictJa.uiAccountPlatform = accountPlatformCopy.ja;
 dictJa.uiModelReplacement = { title:'このモデルでは履歴を続行できません', lead:'元の会話とメッセージは変更されません。現在利用可能なモデルを選び、追跡可能な新しい分岐で続行してください。', create:'代替分岐を作成', creating:'作成中…' };
 dictJa.uiAdminPlatform = adminPlatformCopy.ja;
+// restored: baseline catalog descriptions (referenced by the model catalog data)
+Object.assign(dictJa.uiSettingsDetail.modelDescriptions, { '本地服务默认模型': 'ローカルサービスのデフォルトモデル'
+});
+// restored: inline catalog descriptions from jaBase (referenced by the model catalog)
+Object.assign(dictJa.uiSettingsDetail.modelDescriptions, { '高能力模型': '高性能モデル', '快速响应': '高速応答', '最新通用模型': '最新の汎用モデル', '代码场景': 'コーディング向け', '高速代码场景': '高速コーディング向け', '稳定可用': '安定版', '高性价比': 'コストパフォーマンス重視', '通用能力': '汎用', '兼容保留': '互換性オプション', '高速响应': '高速応答', '轻量模型': '軽量モデル'
+});
