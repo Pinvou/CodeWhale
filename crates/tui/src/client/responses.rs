@@ -42,6 +42,19 @@ pub(super) fn build_responses_body(request: &MessageRequest) -> Value {
     )
 }
 
+/// Whether a Responses route's request body carries
+/// `include: ["reasoning.encrypted_content"]`: every Responses-wire provider
+/// except DeepSeek (stateless, plain `reasoning_text`, no `include`) and
+/// Concentrate (documented fields only). The capture gate in
+/// `handle_responses_stream` derives from this same predicate, so include and
+/// capture cover the same route set by construction.
+fn responses_route_sends_encrypted_reasoning_include(provider: ApiProvider) -> bool {
+    !matches!(
+        provider,
+        ApiProvider::Deepseek | ApiProvider::DeepseekCN | ApiProvider::Concentrate
+    )
+}
+
 /// Build a provider-aware Responses API request body.
 ///
 /// DeepSeek-V4-Flash-0731 implements the Responses wire shape but is stateless
@@ -161,11 +174,11 @@ pub(super) fn build_responses_body_for_provider(
     }
 
     // Every Responses route that receives this builder can replay encrypted
-    // reasoning — OpenAI Codex, OpenCode Zen's Responses roster, and
-    // `wire = "responses"` Custom tables (mirrors the capture gate in
-    // `handle_responses_stream`, so include and capture stay in lockstep).
-    // DeepSeek exposes plain `reasoning_text` and does not support `include`.
-    if !is_deepseek && !is_concentrate {
+    // reasoning. The include predicate is the same one the capture gate in
+    // `handle_responses_stream` derives from, so include and capture cover
+    // the same route set by construction — a future Responses-wire provider
+    // cannot silently start sending `include` without capturing.
+    if responses_route_sends_encrypted_reasoning_include(provider) {
         body["include"] = json!(["reasoning.encrypted_content"]);
     }
 
@@ -191,15 +204,13 @@ impl DeepSeekClient {
         let wire_model = prepared.wire_model.clone();
         // Encrypted-reasoning capture applies to every Responses route whose
         // request carries `include: ["reasoning.encrypted_content"]` — the
-        // Codex OAuth backend, OpenCode Zen's Responses roster, and any
-        // wire = "responses" Custom table — and replays by the endpoint-scoped
-        // provider tag from `reasoning_provider_tag` plus the endpoint
-        // fingerprint from `reasoning_endpoint_fingerprint`. Chat-wire Custom
-        // tables and DeepSeek (plain reasoning_text) stay excluded.
-        let reasoning_origin = (self.api_provider == ApiProvider::OpenaiCodex
-            || self.api_provider == ApiProvider::OpencodeZen
-            || (self.api_provider == ApiProvider::Custom
-                && self.wire_format == WireFormat::Responses))
+        // same predicate the body builder uses to send the include — and
+        // replays by the endpoint-scoped provider tag from
+        // `reasoning_provider_tag` plus the endpoint fingerprint from
+        // `reasoning_endpoint_fingerprint`. The transport-wire half keeps
+        // Chat-wire Custom tables (and any other dialect) excluded.
+        let reasoning_origin = (self.wire_format == WireFormat::Responses
+            && responses_route_sends_encrypted_reasoning_include(self.api_provider))
             .then(|| {
                 (
                     self.reasoning_provider_tag(),
