@@ -1725,9 +1725,17 @@ fn external_allowlist_allows_known_targets_rejects_lookalikes() {
     assert!(url_in_external_allowlist(
         "https://work.weixin.qq.com/ai/qc/c?s=abc&for_native=true"
     ));
+    // WeCom developer docs site (the wecom-bot config dialog "view docs" button)
+    assert!(url_in_external_allowlist(
+        "https://developer.work.weixin.qq.com/document/path/91770"
+    ));
     // DingTalk device authorization login page (printed by `dws auth login --device`, carries user_code)
     assert!(url_in_external_allowlist(
         "https://login.dingtalk.com/device?user_code=ABCDEF"
+    ));
+    // H3C SSO login page (printed by `eip auth login` / `zhidao login`, carries sessionId)
+    assert!(url_in_external_allowlist(
+        "https://sso.h3c.com/login?sessionId=test-session"
     ));
     assert!(url_in_external_allowlist("http://localhost:8080/"));
     assert!(url_in_external_allowlist("https://127.0.0.1:8443/preview"));
@@ -1753,7 +1761,13 @@ fn external_allowlist_allows_known_targets_rejects_lookalikes() {
         "https://work.weixin.qq.com.evil.com/ai/qc/gen"
     ));
     assert!(!url_in_external_allowlist(
+        "https://developer.work.weixin.qq.com.evil.com/document/path/91770"
+    ));
+    assert!(!url_in_external_allowlist(
         "https://login.dingtalk.com.evil.com/device"
+    ));
+    assert!(!url_in_external_allowlist(
+        "https://sso.h3c.com.evil.com/login?sessionId=test-session"
     ));
     assert!(!url_in_external_allowlist(
         "https://dingtalk.com.evil.com/device"
