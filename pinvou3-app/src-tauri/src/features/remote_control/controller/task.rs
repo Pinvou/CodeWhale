@@ -1115,6 +1115,9 @@ pub(crate) struct RemoteTaskService {
     sessions: RemoteSessionMap,
     provisioner: Mutex<Option<Arc<dyn RemoteSessionProvisioner>>>,
     executors: Mutex<HashMap<String, Arc<dyn ControllerTaskExecutor>>>,
+    /// DEV-13 审核修复：取消必须真正中断执行器。dispatch 注册当前任务的取消令牌，
+    /// cancel() 命中 CancellationRequested 时取消该令牌，执行器据此收尾为终态。
+    cancel_tokens: Mutex<HashMap<String, CancellationToken>>,
     hooks: RemoteTaskHooks,
 }
 
@@ -1125,6 +1128,7 @@ impl RemoteTaskService {
             sessions: RemoteSessionMap::default(),
             provisioner: Mutex::new(None),
             executors: Mutex::new(HashMap::new()),
+            cancel_tokens: Mutex::new(HashMap::new()),
             hooks: RemoteTaskHooks::default(),
         }
     }
@@ -1225,8 +1229,10 @@ impl RemoteTaskService {
         let task_id = ticket.record.task_id.clone();
         let running = self.ledger.begin_dispatch(&task_id, now_b)?;
         self.publish(&running);
+        self.cancel_tokens.lock().insert(task_id.clone(), cancel.clone());
         let executor = self.executors.lock().get(&running.mode).cloned();
         let Some(executor) = executor else {
+            self.cancel_tokens.lock().remove(&task_id);
             return self.finish(
                 &task_id,
                 RemoteTaskTerminal::Failed,
@@ -1235,6 +1241,7 @@ impl RemoteTaskService {
             );
         };
         let result = executor.execute(ticket.input, events, cancel).await;
+        self.cancel_tokens.lock().remove(&task_id);
         let terminal = match result {
             Ok(()) => RemoteTaskTerminal::Succeeded,
             Err(code) if code == TASK_CANCELLED_CODE => RemoteTaskTerminal::Cancelled,
@@ -1292,6 +1299,11 @@ impl RemoteTaskService {
         }
         if let CancelOutcome::CancelledBeforeDispatch(record) = &outcome {
             self.cleanup(record, "cancelled".to_owned());
+        }
+        if let CancelOutcome::CancellationRequested(record) = &outcome {
+            if let Some(token) = self.cancel_tokens.lock().get(&record.task_id) {
+                token.cancel();
+            }
         }
         Ok(outcome)
     }
@@ -2085,6 +2097,66 @@ mod tests {
             other => panic!("unexpected {other:?}"),
         }
         assert_eq!(executor.calls.load(Ordering::SeqCst), 1);
+    }
+
+    struct HangingExecutor {
+        started: Arc<tokio::sync::Notify>,
+        observed_cancel: AtomicBool,
+    }
+
+    #[async_trait]
+    impl ControllerTaskExecutor for HangingExecutor {
+        async fn execute(
+            &self,
+            _request: Value,
+            _events: Arc<dyn ControllerTaskEventSink>,
+            cancel: CancellationToken,
+        ) -> std::result::Result<(), String> {
+            self.started.notify_one();
+            cancel.cancelled().await;
+            self.observed_cancel.store(true, Ordering::SeqCst);
+            Err(TASK_CANCELLED_CODE.to_owned())
+        }
+    }
+
+    #[test]
+    fn cancel_actually_interrupts_the_running_executor() {
+        let executor = Arc::new(HangingExecutor {
+            started: Arc::new(tokio::sync::Notify::new()),
+            observed_cancel: AtomicBool::new(false),
+        });
+        let service = RemoteTaskService::new(Arc::new(RemoteTaskLedger::in_memory()));
+        service.register_executor(TASK_MODE_CHAT, executor.clone());
+        let ticket = admitted(
+            &service,
+            &payload("session-0001", "task-0001", "client-0001", &digest(1)),
+            1_000,
+        );
+        let record = runtime().block_on(async {
+            let dispatch = service.dispatch(
+                ticket,
+                Arc::new(NoopSink),
+                CancellationToken::new(),
+                1_100,
+            );
+            tokio::pin!(dispatch);
+            tokio::select! {
+                _ = executor.started.notified() => {}
+                outcome = &mut dispatch => panic!("dispatch finished before cancellation: {outcome:?}"),
+            }
+            match service.cancel("task-0001", 1_200).unwrap() {
+                CancelOutcome::CancellationRequested(_) => {}
+                other => panic!("unexpected cancel outcome: {other:?}"),
+            }
+            dispatch.await.unwrap()
+        });
+        assert_eq!(record.state, RemoteTaskState::Cancelled);
+        assert!(executor.observed_cancel.load(Ordering::SeqCst));
+        assert_eq!(
+            record.terminal_reason.as_deref(),
+            Some("cancelled"),
+            "the executor-confirmed terminal must be recorded"
+        );
     }
 
     #[test]

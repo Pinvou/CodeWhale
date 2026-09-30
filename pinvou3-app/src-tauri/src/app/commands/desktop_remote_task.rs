@@ -25,7 +25,9 @@ use crate::features::remote_control::controller::task::{
     AdmissionOutcome, CancelOutcome, ChatTurnExecutor, CodeTurnExecutor, ControllerTaskEventSink,
     RemoteSessionProvisioner, RemoteTaskEvent, RemoteTaskEventSink, RemoteTaskHooks,
     RemoteTaskLedger, RemoteTaskService, TASK_MODE_CHAT, TASK_MODE_CODE,
+    TASK_MODEL_SOURCE_TEMPORARY,
 };
+use crate::features::remote_control::controller::temporary_model::SharedTemporaryModelStore;
 use crate::features::sessions::SessionStore;
 
 const UNSUPPORTED: &str = "desktop_remote_control_unsupported";
@@ -174,6 +176,22 @@ impl DesktopRemoteTaskRuntime {
 
 type RuntimeState<'a> = State<'a, Arc<DesktopRemoteTaskRuntime>>;
 
+/// DEV-15 审核修复：A 选择「我的模型」时，任务提交前必须存在与之绑定的
+/// 临时模型包；否则失败关闭，绝不回退到 B 的本机模型（RC-M-009）。
+fn temporary_model_gate(
+    model_source: &str,
+    task_id: &str,
+    store: &crate::features::remote_control::controller::temporary_model::TemporaryModelStore,
+) -> Result<(), String> {
+    if model_source != TASK_MODEL_SOURCE_TEMPORARY {
+        return Ok(());
+    }
+    match store.active_task() {
+        Some(active) if active == task_id => Ok(()),
+        _ => Err("model_package_missing".to_owned()),
+    }
+}
+
 fn ensure_supported(controlled: &ControlledDeviceManager) -> Result<(), String> {
     if controlled.is_supported() {
         Ok(())
@@ -270,6 +288,7 @@ pub fn desktop_remote_task_submit(
     payload: Value,
     controlled: State<'_, ControlledDeviceManager>,
     capabilities: State<'_, CapabilitySnapshotManager>,
+    models: State<'_, SharedTemporaryModelStore>,
     runtime: RuntimeState<'_>,
 ) -> Result<Value, String> {
     ensure_supported(&controlled)?;
@@ -292,6 +311,17 @@ pub fn desktop_remote_task_submit(
         .and_then(Value::as_str)
         .ok_or_else(|| "task_request_invalid".to_owned())?
         .to_owned();
+    let model_source = validated
+        .get("model_source")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "task_request_invalid".to_owned())?
+        .to_owned();
+    let task_id = validated
+        .get("task_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "task_request_invalid".to_owned())?
+        .to_owned();
+    temporary_model_gate(&model_source, &task_id, models.inner())?;
     if mode == TASK_MODE_CODE {
         let workspace_id = validated
             .get("input")
@@ -443,5 +473,63 @@ mod tests {
         let first = monotonic_millis();
         let second = monotonic_millis();
         assert!(second >= first);
+    }
+
+    #[test]
+    fn controller_temporary_tasks_require_an_installed_package() {
+        use crate::features::remote_control::controller::crypto::SensitiveString;
+        use crate::features::remote_control::controller::protocol::LeaseContext;
+        use crate::features::remote_control::controller::temporary_model::{
+            ExportRoute, TemporaryModelBinding, TemporaryModelPackageV1, TemporaryModelStore,
+        };
+
+        let store = TemporaryModelStore::default();
+        // B-side model tasks never need a package.
+        assert!(temporary_model_gate("controlled_device", "task-0001", &store).is_ok());
+        // A-side model tasks fail closed while no package is installed.
+        assert_eq!(
+            temporary_model_gate("controller_temporary", "task-0001", &store).unwrap_err(),
+            "model_package_missing"
+        );
+
+        let lease = LeaseContext {
+            connection_id: "connection-0001".into(),
+            controller_lease_id: "lease-0001".into(),
+            lease_epoch: "1".into(),
+            relay_epoch: "relay-epoch-0001".into(),
+            remote_control_generation: "generation-0001".into(),
+        };
+        let package = TemporaryModelPackageV1 {
+            package_id: "package-0001".into(),
+            binding: TemporaryModelBinding {
+                connection_id: lease.connection_id.clone(),
+                controller_lease_id: lease.controller_lease_id.clone(),
+                lease_epoch: 1,
+                task_id: "task-0001".into(),
+            },
+            primary: ExportRoute {
+                display_name: "My DeepSeek".into(),
+                preset: "deepseek".into(),
+                wire_api: "openai_chat_completions".into(),
+                base_url: "https://api.deepseek.com/v1".into(),
+                model: "deepseek-chat".into(),
+                provider_kind: Some("official_api".into()),
+                vendor: Some("deepseek".into()),
+                endpoint_mode: None,
+                context_window_tokens: None,
+                max_output_tokens: None,
+                reasoning_effort: None,
+                image_capability_override: "pinvou".into(),
+                secret: SensitiveString::new("sk-test-value").unwrap(),
+            },
+            vision_fallback: None,
+        };
+        store.install(package, &lease, "task-0001", 1_000).unwrap();
+        assert!(temporary_model_gate("controller_temporary", "task-0001", &store).is_ok());
+        // A package bound to one task never authorizes another task.
+        assert_eq!(
+            temporary_model_gate("controller_temporary", "task-0002", &store).unwrap_err(),
+            "model_package_missing"
+        );
     }
 }

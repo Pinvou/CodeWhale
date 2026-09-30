@@ -463,6 +463,11 @@ impl ArtifactDownloads {
     pub(crate) fn cleanup_for_connection(&self, connection_id: &str) -> usize {
         self.registry.cleanup_for_connection(connection_id)
     }
+
+    /// DEV-18 审核修复：未完成下载同样受 TTL 约束（RC-F-003 的下载侧）。
+    pub(crate) fn expire(&self, now_b: u64) -> usize {
+        self.registry.expire(now_b).len()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]

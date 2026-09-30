@@ -54,6 +54,10 @@ export class ControllerRouter {
     audit = () => {},
     livenessHooks = new ControllerLivenessHooks(),
     resumeHooks = new ControllerResumeHooks(),
+    // DEV-06 审核修复：hook 槽必须能在不修改 server.js/router 的前提下扩展。
+    // 后续任务（例如 liveness/resume 之外的 hook）通过该数组注入即可，
+    // router 与 server 的构造代码保持不变。
+    additionalHooks = [],
   } = {}) {
     if (!pairingRegistrationHandler || typeof pairingRegistrationHandler.register !== "function"
       || !leaseManager || typeof leaseManager.claim !== "function"
@@ -67,7 +71,9 @@ export class ControllerRouter {
       || typeof send !== "function" || typeof audit !== "function") {
       fail("controller_router_config_invalid");
     }
-    for (const hooks of [livenessHooks, resumeHooks]) {
+    if (!Array.isArray(additionalHooks)) fail("controller_router_config_invalid");
+    const hooksList = [livenessHooks, resumeHooks, ...additionalHooks];
+    for (const hooks of hooksList) {
       if (!hooks || typeof hooks.handles !== "function" || typeof hooks.handle !== "function"
         || typeof hooks.onLeaseCreated !== "function" || typeof hooks.onSocketClosed !== "function"
         || typeof hooks.onLeaseTerminated !== "function" || typeof hooks.expire !== "function") {
@@ -78,7 +84,7 @@ export class ControllerRouter {
     this.#leases = leaseManager;
     this.#send = send;
     this.#audit = audit;
-    this.#hooks = Object.freeze([livenessHooks, resumeHooks]);
+    this.#hooks = Object.freeze(hooksList);
   }
 
   #emit(event) {

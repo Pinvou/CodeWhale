@@ -213,13 +213,17 @@ impl DesktopRemoteAttachmentRuntime {
     }
 
     pub(crate) fn from_session_store(store: SessionStore, tasks: Arc<RemoteTaskService>) -> Arc<Self> {
-        Self::new(
+        let runtime = Self::new(
             AttachmentUploads::new(
                 Arc::new(TransferRegistry::default()),
                 Arc::new(SessionIsolationStaging::for_session_store(store)),
             ),
             tasks,
-        )
+        );
+        // DEV-17 审核修复：未完成上传必须由周期性回收清理，而不是等到下一次
+        // 命令调用（RC-F-003「有界时间内清理」）。
+        spawn_transfer_reaper(Arc::clone(&runtime));
+        runtime
     }
 
     pub(crate) fn uploads_cleanup_for_task(&self, task_id: &str) -> usize {
@@ -229,6 +233,20 @@ impl DesktopRemoteAttachmentRuntime {
     pub(crate) fn uploads_cleanup_for_connection(&self, connection_id: &str) -> usize {
         self.uploads.cleanup_for_connection(connection_id)
     }
+}
+
+const TRANSFER_REAPER_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+
+fn spawn_transfer_reaper(runtime: Arc<DesktopRemoteAttachmentRuntime>) {
+    tauri::async_runtime::spawn(async move {
+        loop {
+            tokio::time::sleep(TRANSFER_REAPER_INTERVAL).await;
+            let expired = runtime.uploads.expire(monotonic_millis());
+            if expired > 0 {
+                eprintln!("[remote-control] reaped {expired} stale attachment upload(s)");
+            }
+        }
+    });
 }
 
 type AttachmentState<'a> = State<'a, Arc<DesktopRemoteAttachmentRuntime>>;

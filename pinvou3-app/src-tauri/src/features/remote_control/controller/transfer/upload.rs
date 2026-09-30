@@ -166,6 +166,16 @@ impl AttachmentUploads {
         self.registry.cleanup_for_connection(connection_id)
     }
 
+    /// DEV-17 审核修复：未完成/断线遗留的上传必须在有界时间内清理
+    /// （RC-F-003）。过期句柄同时释放预算并删除 staging 目录。
+    pub(crate) fn expire(&self, now_b: u64) -> usize {
+        let expired = self.registry.expire(now_b);
+        for handle_id in &expired {
+            let _ = self.staging.abort(handle_id);
+        }
+        expired.len()
+    }
+
     fn handle(handle_id: &str) -> std::result::Result<super::core::TransferHandle, String> {
         TransferHandle::from_id(handle_id).ok_or_else(|| "transfer_unknown".to_owned())
     }
@@ -383,6 +393,44 @@ mod tests {
             "transfer_unknown"
         );
         assert!(uploads.registry.connection_bytes("connection-0001") == 0);
+    }
+
+    #[test]
+    fn stale_uploads_expire_and_release_their_staging_and_budget() {
+        let staging = Arc::new(RecordingStaging::default());
+        let uploads = uploads(
+            staging.clone(),
+            TransferLimits {
+                ttl: std::time::Duration::from_millis(500),
+                ..TransferLimits::default()
+            },
+        );
+        let data = b"abcdefgh".to_vec();
+        let begin = uploads
+            .begin(upload_context(), metadata_for(&data), 1_000)
+            .unwrap();
+        uploads
+            .accept_chunk(&begin.handle_id, 0, &data[..4], 1_100)
+            .unwrap();
+        assert_eq!(uploads.registry.connection_bytes("connection-0001"), data.len() as u64);
+        // Still inside the TTL.
+        assert_eq!(uploads.expire(1_400), 0);
+        // Past the TTL: accounting released and staging aborted, exactly once.
+        assert_eq!(uploads.expire(1_600), 1);
+        assert_eq!(uploads.registry.connection_bytes("connection-0001"), 0);
+        assert!(staging
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|call| call.starts_with("abort:")));
+        assert_eq!(uploads.expire(1_700), 0);
+        assert_eq!(
+            uploads
+                .accept_chunk(&begin.handle_id, 0, &data[..4], 1_800)
+                .unwrap_err(),
+            "transfer_unknown"
+        );
     }
 
     #[test]

@@ -18,6 +18,31 @@ use crate::features::remote_control::controller::controlled::{
 
 const STATUS_EVENT: &str = "desktop-remote-controlled-status";
 const UNSUPPORTED: &str = "desktop_remote_control_unsupported";
+/// DEV-10 审核修复：B 本地 watchdog 必须有真实调用方。该间隔决定本地终止的
+/// 检测粒度（预算本身由 DEV-08 的 30 秒单调时钟 deadline 决定）。
+const WATCHDOG_POLL_INTERVAL_MS: u64 = 1_000;
+
+/// 周期推进 B 端本地 watchdog。Tauri managed state 由 app 持有，这里只借用，
+/// 因此不改变 `ControlledDeviceManager` 的所有权与 Drop 语义。
+pub(crate) fn spawn_watchdog_reaper(app: AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        let mut last_projection = String::new();
+        loop {
+            tokio::time::sleep(std::time::Duration::from_millis(WATCHDOG_POLL_INTERVAL_MS)).await;
+            let status = {
+                use tauri::Manager as _;
+                app.state::<ControlledDeviceManager>()
+                    .poll_watchdog(monotonic_millis())
+            };
+            // 仅在状态投影变化时广播，避免空闲时每秒刷事件。
+            let projection = serde_json::to_string(&status).unwrap_or_default();
+            if projection != last_projection {
+                last_projection = projection;
+                emit_status(&app, &status);
+            }
+        }
+    });
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
