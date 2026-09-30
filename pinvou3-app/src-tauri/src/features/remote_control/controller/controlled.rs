@@ -467,6 +467,34 @@ impl ControlledDeviceManager {
             .map_err(|_| ControlledStateError::new("liveness_challenge_invalid"))
     }
 
+    /// E2E-06：是否需要向对端/Relay 索取存活证据（watchdog 政策）。
+    pub(crate) fn liveness_evidence_needed(&self, now_b: u64) -> bool {
+        let inner = self.inner.lock();
+        inner
+            .watchdog
+            .as_ref()
+            .is_some_and(|watchdog| watchdog.needs_evidence(now_b))
+    }
+
+    /// E2E-06：开启一次存活挑战（生成 + 登记）并返回 (challenge_id, challenge_b64)。
+    pub(crate) fn begin_liveness_challenge(
+        &self,
+        now_b: u64,
+    ) -> Result<(String, String)> {
+        let (challenge_id, challenge_b64) = super::liveness::new_liveness_challenge()
+            .map_err(|_| ControlledStateError::new("liveness_challenge_invalid"))?;
+        {
+            let mut inner = self.inner.lock();
+            let Some(watchdog) = inner.watchdog.as_mut() else {
+                return Err(ControlledStateError::new("watchdog_unavailable"));
+            };
+            watchdog
+                .register_challenge(challenge_id.clone(), challenge_b64.clone(), now_b)
+                .map_err(|_| ControlledStateError::new("liveness_challenge_invalid"))?;
+        }
+        Ok((challenge_id, challenge_b64))
+    }
+
     pub(crate) fn accept_direct_liveness(&self, json: &str, received_at_b: u64) -> Result<()> {
         let mut inner = self.inner.lock();
         let Some(context) = inner.lease_context.clone() else {
@@ -620,6 +648,28 @@ impl ControlledDeviceManager {
             ControlledStatusKind::Stopped,
             true,
         )
+    }
+
+    /// E2E-06：A 端显式断开（`controller_disconnect`）到达时终结当前租约：清空
+    /// 租约/会话密钥/远端任务与凭证，**保留**用户工作区授权，投影为停止态
+    /// （A 需要重新让对方刷新连接码后再连）。只有已连接的代际可以接受该帧。
+    pub(crate) fn accept_remote_disconnect(&self) -> Result<ControlledStatus> {
+        {
+            let inner = self.inner.lock();
+            if inner.lease_context.is_none()
+                || !matches!(
+                    inner.phase,
+                    ControlledStatusKind::Connected | ControlledStatusKind::Reconnecting
+                )
+            {
+                return Err(ControlledStateError::new("desktop_remote_phase_invalid"));
+            }
+        }
+        Ok(self.terminate_local(
+            "desktop_remote_controller_disconnected",
+            ControlledStatusKind::Stopped,
+            false,
+        ))
     }
 
     pub(crate) fn disconnect_now(&self) -> ControlledStatus {
@@ -1242,6 +1292,46 @@ mod tests {
             assert!(validate_pairing_code(code).is_err(), "{code}");
         }
         assert!(validate_pairing_code("2345678").is_ok());
+    }
+
+    /// E2E-06：A 端显式断开终结租约但保留用户工作区授权，且只有已连接的代际
+    /// 可以接受该帧；未连接重复断开失败关闭。
+    #[test]
+    fn remote_disconnect_terminates_the_lease_and_keeps_workspaces() {
+        let manager = ControlledDeviceManager::default();
+        let operation = manager
+            .start(
+                Some("Studio PC"),
+                vec![WorkspaceAuthorizationRequest {
+                    path: PathBuf::from(r"D:\projects"),
+                    display_name: "Projects".into(),
+                    code_allowed: true,
+                }],
+            )
+            .unwrap();
+        assert_eq!(
+            manager.accept_remote_disconnect().unwrap_err().code,
+            "desktop_remote_phase_invalid",
+            "尚未连接时不得接受远端断开"
+        );
+        register(&manager, &operation);
+        manager.mark_claimed(operation.clone()).unwrap();
+        manager
+            .complete_connected(operation.clone(), lease(&operation.generation))
+            .unwrap();
+        let status = manager.accept_remote_disconnect().unwrap();
+        assert_eq!(status.status, ControlledStatusKind::Stopped);
+        assert_eq!(status.workspace_count, 1, "用户工作区授权必须保留");
+        assert_eq!(status.controller_device_name, None);
+        assert_eq!(
+            status.pairing_code, None,
+            "远端断开后不得残留连接码"
+        );
+        assert_eq!(manager.live_lease().unwrap_err().code, "desktop_remote_not_connected");
+        assert_eq!(
+            manager.accept_remote_disconnect().unwrap_err().code,
+            "desktop_remote_phase_invalid"
+        );
     }
 
     /// E2E-02：只有注册/握手待决的代际才允许在途 worker 把状态收尾为 error；

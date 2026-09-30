@@ -390,6 +390,7 @@ impl HandshakeKeyPair {
             business_a_to_b: derive(b"business/A-to-B")?,
             business_b_to_a: derive(b"business/B-to-A")?,
             resume_secret: derive(b"resume")?,
+            liveness_root: derive(b"liveness")?,
         })
     }
 
@@ -525,6 +526,8 @@ pub(crate) struct SessionKeys {
     business_a_to_b: Zeroizing<[u8; 32]>,
     business_b_to_a: Zeroizing<[u8; 32]>,
     resume_secret: Zeroizing<[u8; 32]>,
+    /// E2E-06：与方向无关的存活证明根（A 与 B 派生同一把 liveness 密钥）。
+    liveness_root: Zeroizing<[u8; 32]>,
 }
 
 impl fmt::Debug for SessionKeys {
@@ -582,6 +585,7 @@ impl SessionKeys {
             business_a_to_b,
             business_b_to_a,
             resume_secret,
+            liveness_root,
         } = self;
         let (
             sender_role,
@@ -637,11 +641,15 @@ impl SessionKeys {
             },
             receive: ReceiveCipher {
                 key: receive_key,
-                binding,
+                binding: binding.clone(),
                 direction: receive_direction,
                 replay: ReplayWindow::default(),
             },
             resume_secret: ResumeSecret(resume_secret),
+            liveness_a: LivenessCipher {
+                key: liveness_key(&liveness_root, &transcript_hash, &binding)?,
+                binding,
+            },
         })
     }
 }
@@ -674,6 +682,92 @@ pub(crate) struct RoleCiphers {
     pub(crate) send: SendCipher,
     pub(crate) receive: ReceiveCipher,
     pub(crate) resume_secret: ResumeSecret,
+    /// E2E-06：A→B 存活证明的 AEAD（域与业务帧分离）。
+    pub(crate) liveness_a: LivenessCipher,
+}
+
+/// E2E-06：`encrypted_controller_liveness_a` 的 AEAD。协议只定义 A 的挑战应答，
+/// 因此密钥固定按 A 角色域派生；AAD 绑定租约五元组 + 角色，随机 nonce 前置在密文里
+/// （挑战应答没有业务帧那样的单调序号，重放由 B 的挑战一次性消费保证）。
+pub(crate) struct LivenessCipher {
+    key: Zeroizing<[u8; 32]>,
+    binding: LeaseBinding,
+}
+
+impl fmt::Debug for LivenessCipher {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("LivenessCipher([REDACTED])")
+    }
+}
+
+impl LivenessCipher {
+    pub(crate) fn seal(&self, plaintext: &[u8]) -> CryptoResult<Vec<u8>> {
+        if plaintext.len() > MAX_DECRYPTED_PAYLOAD_BYTES {
+            return Err(ControllerCryptoError::new("plaintext_too_large", "frame"));
+        }
+        let nonce = random_nonce()?;
+        let aad = liveness_aad(&self.binding)?;
+        let ciphertext = seal_aead(&self.key, nonce, &aad, plaintext, MAX_ENCRYPTED_FRAME_BYTES)?;
+        let mut output = nonce.to_vec();
+        output.extend_from_slice(&ciphertext);
+        Ok(output)
+    }
+
+    pub(crate) fn open(&self, sealed: &[u8]) -> CryptoResult<Vec<u8>> {
+        if sealed.len() < AEAD_NONCE_BYTES + AEAD_TAG_BYTES
+            || sealed.len() > MAX_ENCRYPTED_FRAME_BYTES
+        {
+            return Err(ControllerCryptoError::new("invalid_ciphertext", "frame"));
+        }
+        let (nonce, ciphertext) = sealed.split_at(AEAD_NONCE_BYTES);
+        let nonce: [u8; AEAD_NONCE_BYTES] = nonce
+            .try_into()
+            .map_err(|_| ControllerCryptoError::new("invalid_ciphertext", "frame"))?;
+        let aad = liveness_aad(&self.binding)?;
+        let plaintext = open_aead(&self.key, nonce, &aad, ciphertext, MAX_ENCRYPTED_FRAME_BYTES)?;
+        if plaintext.len() > MAX_DECRYPTED_PAYLOAD_BYTES {
+            return Err(ControllerCryptoError::new("plaintext_too_large", "frame"));
+        }
+        Ok(plaintext)
+    }
+}
+
+fn liveness_key(
+    root: &[u8; 32],
+    transcript_hash: &[u8; 32],
+    binding: &LeaseBinding,
+) -> CryptoResult<Zeroizing<[u8; 32]>> {
+    let epoch = binding.lease_epoch.to_string();
+    hkdf_expand(
+        root,
+        transcript_hash,
+        b"pinvou-controller-liveness-key-v1",
+        &[
+            binding.connection_id.as_bytes(),
+            binding.controller_lease_id.as_bytes(),
+            epoch.as_bytes(),
+            binding.relay_epoch.as_bytes(),
+            binding.remote_control_generation.as_bytes(),
+            ControllerRole::A.wire(),
+        ],
+    )
+}
+
+/// 存活证明的 AAD：冻结 fixture 的 `aad_binding` 字段顺序（租约五元组 + role）。
+fn liveness_aad(binding: &LeaseBinding) -> CryptoResult<Vec<u8>> {
+    let mut output = b"pinvou-controller-liveness-aad-v1".to_vec();
+    let epoch = binding.lease_epoch.to_string();
+    for value in [
+        binding.connection_id.as_bytes(),
+        binding.controller_lease_id.as_bytes(),
+        epoch.as_bytes(),
+        binding.relay_epoch.as_bytes(),
+        binding.remote_control_generation.as_bytes(),
+        ControllerRole::A.wire(),
+    ] {
+        lp(&mut output, value)?;
+    }
+    Ok(output)
 }
 
 pub(crate) struct ResumeSecret(Zeroizing<[u8; 32]>);
@@ -2328,5 +2422,45 @@ mod tests {
         );
         assert_ne!(a_first, [0_u8; 32]);
         assert_ne!(a_first, transcript, "the fingerprint is not the raw transcript");
+    }
+
+    /// E2E-06：A→B 存活证明的 AEAD——双方在同一租约上派生出可互通的密钥，
+    /// 篡改、跨租约与域分离都必须失败。
+    #[test]
+    fn liveness_proof_round_trips_and_is_domain_and_lease_bound() {
+        let (a_session, b_session) = super::super::test_support::paired_session_keys(
+            HandshakeKeyPair::generate().unwrap(),
+            HandshakeKeyPair::generate().unwrap(),
+            &super::super::test_support::pairing_fixture("relay-key-liveness").reservation,
+        );
+        let lease_binding = lease(1);
+        let a_ciphers = a_session
+            .into_role_ciphers(ControllerRole::A, lease_binding.clone())
+            .unwrap();
+        let b_ciphers = b_session
+            .into_role_ciphers(ControllerRole::B, lease_binding.clone())
+            .unwrap();
+        let plaintext = br#"{"v":1,"type":"controller_liveness_a"}"#;
+        let sealed = a_ciphers.liveness_a.seal(plaintext).unwrap();
+        assert_eq!(
+            b_ciphers.liveness_a.open(&sealed).unwrap(),
+            plaintext.to_vec()
+        );
+        // 篡改密文失败关闭。
+        let mut tampered = sealed.clone();
+        let last = tampered.len() - 1;
+        tampered[last] ^= 0x01;
+        assert!(b_ciphers.liveness_a.open(&tampered).is_err());
+        // 同一密钥配不同租约绑定（AAD 变化）必须失败关闭。
+        let foreign = LivenessCipher {
+            key: b_ciphers.liveness_a.key.clone(),
+            binding: lease(2),
+        };
+        assert!(
+            foreign.open(&sealed).is_err(),
+            "the AAD lease binding must stop cross-lease reuse"
+        );
+        // 存活密钥与业务密钥域分离：业务密文不能在存活通道解封。
+        assert!(b_ciphers.liveness_a.open(b"not-a-liveness-frame").is_err());
     }
 }

@@ -41,13 +41,29 @@ test('task statuses map to the frozen copy keys and terminals are detected', () 
 
 test('the view only uses the desktop bridge API', () => {
   const invokes = [...view.matchAll(/remote\.([A-Za-z]+)\(/g)].map((match) => match[1]);
+  // E2E-07：A 端正文/任务路径已切到主控端专用命令（E2E-03/04 的 session、
+  // capability 与加密发送入口），仍只能经 bridge 访问。
+  invokes.push(
+    ...[...view.matchAll(/remote\s*\.?\s*controller([A-Za-z]+)\(/g)].map((match) => `controller${match[1]}`),
+  );
   assert.ok(invokes.length >= 4);
   for (const method of invokes) {
     assert.ok(
-      ['submitRemoteTask', 'cancelRemoteTask', 'permissionDecide', 'artifactIndex', 'artifactDownloadBegin'].includes(method),
+      [
+        'permissionDecide',
+        'artifactIndex',
+        'artifactDownloadBegin',
+        'controllerSessionOpen',
+        'controllerCapabilitySend',
+        'controllerTaskSend',
+        'controllerTaskCancelSend',
+        'controllerProfile',
+      ].includes(method),
       `unexpected bridge method used by the remote view: ${method}`,
     );
   }
+  // 旧路径（前端自建 payload 的 submitRemoteTask / cancelRemoteTask）不得再出现。
+  assert.ok(!/submitRemoteTask|cancelRemoteTask/.test(view));
   assert.ok(!/window\.__TAURI__|invoke\(/.test(view));
 });
 

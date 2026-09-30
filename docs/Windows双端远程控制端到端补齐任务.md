@@ -4,7 +4,7 @@
 > 基线提交：`770a648ab4387f842dd53cee2787027c8949c31b`<br>
 > 核心目标：优先打通 **A 远程控制 B 的普通文本会话**。临时模型、代码模式、附件与成果首版继续由能力开关隐藏，不阻塞普通会话闭环。
 >
-> 进度：E2E-00～E2E-04 完成并审核通过（见第 3 节与第 5～7 节）；E2E-05 的正文链路（A 落库/投影 + B 用户消息/回复/终态回传）已落地待审核，剩余缺口恢复与 UI 渲染。当前位于 E2E-05 → E2E-06。
+> 进度：E2E-00～E2E-04 完成并审核通过；E2E-05 完成（正文链路 + 缺口恢复 + A 渲染，见第 8 节）；E2E-06 已落地 A 心跳、B 存活证据（直接应答 + Relay 兜底）与双端显式断开，剩余 resume 序列与 B 停止/刷新清理核对（见第 9 节）；E2E-07 已落地双端 UI 闭环与错误码回传，剩余浏览器冒烟与文案细化；E2E-08 待做。
 
 ## 1. 执行规则
 
@@ -224,9 +224,73 @@ E2E-04（加密业务帧双向派发）。开工前需先读第 4 节与本节�
 2. **缺口恢复**（剩余）：A 端发现 `event_sequence` 缺口时用 `journal_replay_request`/`session_snapshot_request`（DEV-19 已有 B 侧 API）补齐；当前只做增量事件，缺口时 A 端历史等待下一次 epoch 或 E2E-07 的显式重放。
 3. **E2E-07 渲染**（剩余）：前端订阅 `desktop-remote-controller-journal`，按 `historyId` 落库并渲染 transcript；未绑定历史时先创建/绑定。
 
-### 8.3 E2E-05 审核要点（轮次 1 待补）
+### 8.3 E2E-05 审核要点（轮次 1，结论 PASS）
 
-- 目标差异：A 端可得到用户输入与 B 的回复——`journal_event` 解密 → 历史落库 → `desktop-remote-controller-journal`；B 端由 `user_message`/`assistant_delta`/`terminal` 三类事件产出，同进程双端用例已覆盖 assistant_delta 往返。
-- 失败路径：`event_b64` 体积/声明不一致、epoch/序号/会话不符、未映射内部类型、非远程会话、通道未就位、未协商 `snapshot_journal_v1` 都静默丢弃（不产生半状态）。
-- 敏感信息：正文只进权威 journal 与 A 独立历史（本地），wire 明文只有 epoch/序号/类型；无凭证、无路径、无主机信息。
-- 待补证据：缺口恢复用例与前端渲染用例（分别在剩余步骤 2、3 完成）。
+- 已落地提交：`88832f0f3`（A 落库/投影）、`352997f15`（B 终态回传）、`9dc5f9e51`（B 正文产出）、`4b0b0283e`（缺口回放/快照双向）、`a8a56a490`（A 端快照恢复）、`a416ad41e`（A 视图渲染 transcript）。
+- 目标差异：A 端可得到用户输入与 B 的回复——`journal_event` 解密 → A 独立历史落库 → `desktop-remote-controller-journal` → transcript 渲染（本机/远程徽标）；B 端由 `user_message`/`assistant_delta`/`terminal` 三类事件产出，同进程双端用例覆盖 assistant_delta 往返，缺口恢复另有 3 条用例（判定、回放请求冻结形状、快照替换）。
+- 失败路径：`event_b64` 体积/声明不一致、epoch/序号/会话不符、未映射内部类型（进行中状态/附件/快照）、非远程会话、通道未就位、未协商 `snapshot_journal_v1` 都静默丢弃；缺口/换 epoch 时丢弃当前事件并请求回放（同会话只保留一个在途请求），快照摘要或基准不符同样丢弃。
+- 敏感信息：正文只进权威 journal 与 A 独立历史（本地），wire 明文只有 epoch/序号/类型；无凭证、无路径、无主机信息；transcript 只保留最近 200 条且按 session+epoch+sequence 去重。
+- 登记缺口：B 回复取轮次结束后的 SessionStore 文本（非流式）；A 端首次收到事件时直接从该事件起算（完整快照引导属可选优化）。
+
+## 9. E2E-06 实施进度（进行中，未审核）
+
+出口：有效 A 存活证据不超过 30 秒；停止/断开产生明确终态并清理远端任务。
+
+### 9.1 已落地
+
+| 提交 | 内容 |
+|---|---|
+| `50ed50244` | A 端心跳：`liveness::build_controller_liveness`（冻结形状 + 非法输入失败关闭）、`ControllingDeviceManager::{live_liveness_epoch, send_authenticated_control}`、保活任务按 10 秒间隔发送单调序号心跳（间隔可注入）、B 注册能力补 `role_liveness_v1`；2 条用例（帧通过冻结校验；保活任务按间隔产出心跳且不自行结束） |
+| `8d5ae57f2` | B 端证据需求与挑战构造：`ControllerLivenessWatchdog::needs_evidence`（无证据/suspect/余量不足为真）、`build_liveness_challenge` / `build_liveness_attestation_request`（冻结校验 + 畸形输入失败关闭）、`new_liveness_challenge`（16 字节随机挑战值）、`ControlledDeviceManager::{liveness_evidence_needed, begin_liveness_challenge}`；2 条用例 |
+| `e8fea59db` | B 端证据轮询与兜底：保活循环改为 `select`（2 秒轮询 + 收包），按 `liveness_evidence_action` 发起挑战 / 升级为 Relay 签名 attestation（同一挑战只升级一次）/ 超时作废；收到 attestation 后用本端记录的请求时间续期 watchdog；A 心跳间隔收紧到 3 秒以满足 Relay attestation 新鲜度；1 条策略用例 |
+| `8d372e8a9` | 双端显式断开：A 端 `build_controller_disconnect`（冻结形状 + 有界 reason）与 `send_disconnect`（仅 connected 且有 transport 时尽力发送，本地断开始终权威）；B 端 `accept_remote_disconnect`（只接受已连接/恢复中的代际，随后 `terminate_local(Stopped, 保留工作区)`）与 worker 的冻结校验 + 清理 + 广播；2 条用例 |
+| `4b0b0283e` | journal 缺口恢复双向：B 端 `replay_journal`/`session_snapshot` 与列表化派发（worker 逐帧加密回传、单次 ≤256 帧）；A 端 `journal_admission`/`JournalExpectations`（连续/重复/缺口/换 epoch）与 `journal_replay_request` 冻结构造 + 加密发送；4 条用例 |
+| `a8a56a490` | A 端权威快照恢复：解密校验快照（体积/摘要/epoch/基准）→ 推进期望值 → 经 `ControllingJournalSink::publish_snapshot` 交命令层 `apply_snapshot`；1 条用例 |
+| `94141a2e8` | A 端存活直接应答（liveness AEAD）：crypto 新增方向无关的 `liveness_root` 与 `LivenessCipher`（A 角色域 + 租约五元组派生，AAD 为冻结 `aad_binding`，nonce 前置）；EncryptedLane `seal_liveness`/`open_liveness`；A 保活任务应答 `controller_liveness_challenge_a`（共享单调序号、同一挑战只答一次）；B 解封后 `accept_direct_liveness` 续期并停止升级兜底；2 条用例 |
+
+### 9.2 剩余步骤
+
+1. ~~**B 侧存活证据链**~~ 已完成：兜底路径（`8d5ae57f2`、`e8fea59db`）+ 直接应答路径（`94141a2e8`）；A 心跳 3 秒一次，B 优先用直接证明续期，未及时到达才升级 Relay 签名兜底。
+2. **显式断开**：A 的 `disconnect` 在停止 worker 前发送 `controller_disconnect`；
+   B 收到后终结当前租约（清空租约/凭证/任务，保留用户工作区授权）并投影明确终态
+   （保守默认：`stopped`，因为 A 需要重新刷新取码）。
+3. **断线恢复门**：A/B 的 resume 序列（DEV-09 已有状态机与 Relay hooks）尚未接线；
+   需要 A/B 客户端把 `controller_resume_prepare`/`encrypted_resume_confirm`/
+   `controller_resume_activation_ack`/`controller_post_activation_liveness`/
+   `controller_resume_ready_ack` 接到各自的 `ControllerResumeGate`，并在
+   `controller_resumed` 后重新派生业务密钥（租约 epoch 变化）。
+4. **B 停止/刷新清理闭环**：把 `ControlledDeviceManager::register_cleanup_sink`
+   接到任务/权限/传输/临时模型注册表（`RemoteTaskHooks` 的清理入口），确保
+   stop/refresh/远端断开都会清空远端任务与凭证；当前 `fail_operation` 已触发
+   cleanup sinks，但 `stop`/`disconnect_now` 与远端断开路径需要逐一核对。
+
+### 9.3 已落地（补充）
+
+| 提交 | 内容 |
+|---|---|
+| `8d372e8a9` | 显式断开闭环（见 9.1 说明） |
+
+## 10. E2E-07 实施进度（进行中，未审核）
+
+出口：三个 UI 面有可执行行为测试；不可用能力不暴露半通路。
+
+### 10.1 已落地
+
+| 提交 | 内容 |
+|---|---|
+| `a416ad41e` | 双端 UI 最小闭环与能力降级：B 面板状态映射补齐后端枚举（连接码按状态显示、disabled 不再算 active、主控设备行改用 `controllerDeviceName` + 三语回落）；状态域新增 `controllerDeviceName` 与 `transcript`（去重/只收正文/快照替换/上限 200）；A 会话窗口连接后自动开远程会话并加密请求能力快照，发送/取消改走 `controllerTaskSend`/`controllerTaskCancelSend`，渲染 transcript，A 临时模型与模型导出列表按首版开关隐藏；新增 `desktop_remote_controller_capability_send` 命令与 bridge 入口；新增 `remote_control_ui_closure` 契约（4 条）并更新 `remote_conversation_contract`（禁止旧的自建 payload 路径） |
+| `582cba938` | A 端命令错误码回传：bridge `asBoundedError` 把 Tauri `Err(String)` 恢复成带 `.code` 的错误，连接/断开/会话/能力/任务/取消/快照路径统一套用；契约新增逐条断言 |
+
+### 10.2 剩余步骤
+
+1. **浏览器冒烟**（DEV-21 登记的缺口）：三个 UI 面（B 面板、A 连接壳、远程会话窗口）需要一次真实渲染/交互冒烟（键盘、焦点、aria-live、倒计时节流），当前证据仍为源码契约 + `vite build`。
+2. **文案细化**：`connectionErrorKey` 目前只映射 `pairing_code_invalid`/`controller_busy` 等少数码，A 端新的有界码（`endpoint_offline`、`invalid_message`）会回落到 `errorGeneric`；需要补齐到三语文案（`remote_control_ui_closure` 已锁定错误码必须先恢复）。
+3. **`ControllerStatusKind::Refreshing` 的 UI 文案**：B 面板把它映射为 `statusStopping`，需要独立词条或明确复用策略。
+
+## 11. E2E-08 待做清单（集成回归与发布审核）
+
+- 已执行证据（本轮）：Relay 契约套件 `node --test test/controller-protocol|controller-handshake|controller-reservation|controller-liveness|controller-resume|controller-router` 58 通过 / 0 失败，`test/relay.test.js` 25 通过 / 0 失败；Rust `cargo test remote_control::` 312 通过 / 0 失败；前端 6 个契约文件 36 通过 / 0 失败、`npm run build:ui` 通过、`npm run lint:ui|lint:node` 0 error；`python scripts/architecture-guard.py` 通过；敏感信息扫描（`sk-*` / `vault://` / `Bearer`）在新增的 controller 与前端文件中零命中。
+- 双端集成测试：在现有同进程双端用例（task_submit/task_status、journal_event、快照、心跳证据）基础上补一条完整旅程（连接 → 能力快照 → 普通文本任务 → 正文回传 → 显式断开），并断言旧 lease/generation 帧在各阶段都被丢弃。
+- 架构守卫与 UI 契约：`python scripts/architecture-guard.py`、`npm --prefix pinvou3-app run build:ui`、`npm --prefix pinvou3-app run lint:ui`、前端契约测试全套。
+- 安全扫描：仓库已有的 `controller-telemetry`/日志脱敏用例 + `remote-control-relay` 契约测试；再跑一次敏感信息扫描（密钥/路径/内部地址不得进入 wire 与投影）。
+- 发布缺口登记：把第 4 节的全部登记项按「本轮 blocker / 已隐藏 / 后续排期」分类，并更新 `docs/Windows双端远程控制发布与回滚.md` 的门禁清单。

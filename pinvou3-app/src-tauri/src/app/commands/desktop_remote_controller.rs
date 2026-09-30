@@ -76,6 +76,8 @@ pub fn desktop_remote_controller_disconnect(
     sessions: State<'_, ControllingSessionManager>,
 ) -> Result<ControllingStatus, String> {
     ensure_supported(&manager)?;
+    // E2E-06：先尽力把显式断开告诉 Relay/B（本地断开始终权威，发送失败不阻塞）。
+    let _ = manager.send_disconnect("user_disconnect");
     sessions.clear();
     let status = manager.disconnect();
     emit_status(&app, &status);

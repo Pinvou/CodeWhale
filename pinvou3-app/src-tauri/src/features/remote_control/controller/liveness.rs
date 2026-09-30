@@ -19,6 +19,8 @@ use super::protocol::{
 
 pub(crate) const LIVENESS_INTERVAL_MS: u64 = 5_000;
 pub(crate) const LIVENESS_BLACKHOLE_SUSPECT_MS: u64 = 15_000;
+/// 距 deadline 只剩这么多预算时就开始索取证据（留出一次往返 + relay 处理时间）。
+pub(crate) const LIVENESS_EVIDENCE_LEAD_MS: u64 = 10_000;
 pub(crate) const LIVENESS_TOTAL_BUDGET_MS: u64 = 30_000;
 pub(crate) const LIVENESS_SAFETY_MARGIN_MS: u64 = 1_000;
 pub(crate) const MAX_LIVENESS_RTT_MS: u64 = 5_000;
@@ -152,7 +154,7 @@ impl ControllerLivenessWatchdog {
         Ok(())
     }
 
-    /// Accept AEAD-authenticated direct A liveness plaintext. The validator
+/// Accept AEAD-authenticated direct A liveness plaintext. The validator
     /// binds the full lease context, epoch, role, sequence and challenge; this
     /// method additionally enforces the challenge's local RTT and deadline
     /// monotonicity.
@@ -260,6 +262,26 @@ impl ControllerLivenessWatchdog {
         self.deadline_b
     }
 
+    /// E2E-06：是否应当向 Relay/对端索取存活证据——从未拿到证据、已进入
+    /// suspect，或距 deadline 只剩续期提前量时；healthy 且余量充足时不打扰。
+    pub(crate) fn needs_evidence(&self, now_b: u64) -> bool {
+        match self.deadline_b {
+            None => true,
+            Some(deadline) => {
+                if now_b >= deadline {
+                    return true;
+                }
+                if self
+                    .last_advanced_at_b
+                    .is_some_and(|last| now_b.saturating_sub(last) >= LIVENESS_BLACKHOLE_SUSPECT_MS)
+                {
+                    return true;
+                }
+                deadline.saturating_sub(now_b) <= LIVENESS_EVIDENCE_LEAD_MS
+            }
+        }
+    }
+
     /// Explicit disconnect, Relay epoch change or other local failure may only
     /// shorten the installed deadline. It can never create a fresh budget.
     pub(crate) fn shorten_deadline(&mut self, now_b: u64) -> bool {
@@ -329,6 +351,96 @@ impl ControllerLivenessWatchdog {
         }
         Ok(())
     }
+}
+
+/// E2E-06：A 端心跳帧（`controller_liveness`）。这是控制帧（不加密），Relay 与
+/// B 都以它作为「A 仍存活」的证据。序号必须单调递增且不能为 0，epoch 来自
+/// `controller_joined` 下发的租约身份。
+pub(crate) fn build_controller_liveness(
+    lease: &LeaseContext,
+    liveness_epoch_a: &str,
+    heartbeat_sequence: u64,
+) -> Result<serde_json::Value> {
+    if heartbeat_sequence == 0 || !is_valid_liveness_epoch(liveness_epoch_a) {
+        return Err(LivenessError::new("invalid_field", "controller_liveness"));
+    }
+    Ok(serde_json::json!({
+        "v": 1,
+        "type": "controller_liveness",
+        "connection_id": lease.connection_id,
+        "controller_lease_id": lease.controller_lease_id,
+        "lease_epoch": lease.lease_epoch,
+        "relay_epoch": lease.relay_epoch,
+        "remote_control_generation": lease.remote_control_generation,
+        "sender_role": "A",
+        "liveness_epoch": liveness_epoch_a,
+        "heartbeat_sequence": heartbeat_sequence.to_string(),
+    }))
+}
+
+fn is_valid_liveness_epoch(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_LIVENESS_ID_BYTES
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':'))
+}
+
+/// E2E-06：B → Relay 的存活挑战（`controller_liveness_challenge_a`）。Relay 会把
+/// 它转给 A 直接应答，同时把它登记为「允许为该挑战签发 attestation」的凭据。
+pub(crate) fn build_liveness_challenge(
+    lease: &LeaseContext,
+    request_id: &str,
+    challenge_id: &str,
+    challenge_b64: &str,
+) -> Result<serde_json::Value> {
+    if !is_valid_liveness_epoch(request_id)
+        || !is_valid_liveness_epoch(challenge_id)
+        || challenge_b64.is_empty()
+        || challenge_b64.len() > MAX_LIVENESS_ID_BYTES
+    {
+        return Err(LivenessError::new("invalid_field", "controller_liveness_challenge_a"));
+    }
+    Ok(serde_json::json!({
+        "v": 1,
+        "type": "controller_liveness_challenge_a",
+        "request_id": request_id,
+        "connection_id": lease.connection_id,
+        "controller_lease_id": lease.controller_lease_id,
+        "lease_epoch": lease.lease_epoch,
+        "relay_epoch": lease.relay_epoch,
+        "remote_control_generation": lease.remote_control_generation,
+        "challenge_id": challenge_id,
+        "challenge_b64": challenge_b64,
+    }))
+}
+
+/// E2E-06：B → Relay 的 attestation 兜底请求。必须复用同一个 challenge（Relay
+/// 只对已登记的挑战签发签名证明）。
+pub(crate) fn build_liveness_attestation_request(
+    lease: &LeaseContext,
+    request_id: &str,
+    challenge_id: &str,
+    challenge_b64: &str,
+) -> Result<serde_json::Value> {
+    let mut value = build_liveness_challenge(lease, request_id, challenge_id, challenge_b64)?;
+    value["type"] = serde_json::json!("controller_liveness_attestation_request_a");
+    Ok(value)
+}
+
+/// E2E-06：生成一次挑战的标识与随机挑战值（16 字节标准 base64）。
+pub(crate) fn new_liveness_challenge() -> Result<(String, String)> {
+    use base64::Engine as _;
+    use ring::rand::{SecureRandom as _, SystemRandom};
+
+    let mut bytes = [0_u8; 16];
+    SystemRandom::new()
+        .fill(&mut bytes)
+        .map_err(|_| LivenessError::new("challenge_generation_failed", "challenge_b64"))?;
+    Ok((
+        format!("challenge-{}", uuid::Uuid::new_v4().simple()),
+        base64::engine::general_purpose::STANDARD.encode(bytes),
+    ))
 }
 
 pub(crate) fn direct_candidate_deadline(received_at_b: u64, measured_rtt_ms: u64) -> Result<u64> {
@@ -740,6 +852,128 @@ mod tests {
                 .unwrap_err()
                 .code,
             "stale_context"
+        );
+    }
+
+    /// E2E-06：A 端心跳帧必须通过冻结校验（角色 A + role_liveness_v1），序号单调
+    /// 且 epoch 合法；空 epoch 或 0 序号失败关闭。
+    #[test]
+    fn a_side_liveness_frame_matches_the_frozen_contract() {
+        use super::super::protocol::{
+            RuntimeValidationContext, SenderRole, validate_controller_message_json,
+            validate_controller_runtime_message_json,
+        };
+
+        let lease = lease();
+        let frame = build_controller_liveness(&lease, "live-a-1", 1).unwrap();
+        validate_controller_message_json(&frame.to_string(), SenderRole::ControllerA).unwrap();
+        validate_controller_runtime_message_json(
+            &frame.to_string(),
+            SenderRole::ControllerA,
+            Some(&RuntimeValidationContext {
+                lease: Some(lease.clone()),
+                negotiated_capabilities: vec![
+                    "encrypted_frames_v1".to_owned(),
+                    "pairing_v1".to_owned(),
+                    "role_liveness_v1".to_owned(),
+                    "task_v1".to_owned(),
+                ],
+            }),
+        )
+        .expect("心跳帧必须通过运行时校验");
+        assert_eq!(frame["sender_role"], "A");
+        assert_eq!(frame["heartbeat_sequence"], "1");
+        assert_eq!(frame["liveness_epoch"], "live-a-1");
+
+        assert!(build_controller_liveness(&lease, "live-a-1", 0).is_err());
+        assert!(build_controller_liveness(&lease, "", 1).is_err());
+        assert!(build_controller_liveness(&lease, "live a", 1).is_err());
+    }
+
+    /// E2E-06：B 端证据需求策略——没有证据、进入 suspect 或余量不足时为真；
+    /// healthy 且余量充足时为假。
+    #[test]
+    fn evidence_is_requested_only_when_the_budget_needs_it() {
+        let mut watchdog = ControllerLivenessWatchdog::new("live-a-1").unwrap();
+        assert!(watchdog.needs_evidence(0), "从未拿到证据时必须索取");
+
+        watchdog
+            .register_challenge("challenge-0001", "AAAAAAAAAAAAAAAAAAAAAA==", 0)
+            .unwrap();
+        watchdog
+            .accept_direct_json(
+                &direct_payload(1, "challenge-0001", "AAAAAAAAAAAAAAAAAAAAAA=="),
+                &lease(),
+                0,
+            )
+            .unwrap();
+        assert!(!watchdog.needs_evidence(0), "刚续期且余量充足时不必打扰对端");
+        assert!(!watchdog.needs_evidence(10_000));
+        assert!(
+            watchdog.needs_evidence(25_000),
+            "距 deadline 只剩提前量时必须索取"
+        );
+        // 黑洞（长时间没有推进）同样触发。
+        watchdog
+            .register_challenge("challenge-0002", "AQEBAQEBAQEBAQEBAQEBAQ==", 20_000)
+            .unwrap();
+        assert!(watchdog.needs_evidence(20_000));
+    }
+
+    /// E2E-06：挑战与 attestation 兜底请求必须通过冻结校验（角色 B +
+    /// role_liveness_v1），并拒绝畸形标识/挑战值。
+    #[test]
+    fn b_side_evidence_frames_match_the_frozen_contract() {
+        use base64::Engine as _;
+        use super::super::protocol::{
+            RuntimeValidationContext, SenderRole, validate_controller_message_json,
+            validate_controller_runtime_message_json,
+        };
+
+        let lease = lease();
+        let (challenge_id, challenge_b64) = new_liveness_challenge().unwrap();
+        assert!(challenge_id.starts_with("challenge-"));
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD
+                .decode(&challenge_b64)
+                .unwrap()
+                .len(),
+            16
+        );
+        let (other_id, other_b64) = new_liveness_challenge().unwrap();
+        assert_ne!((challenge_id.clone(), challenge_b64.clone()), (other_id, other_b64));
+
+        let context = RuntimeValidationContext {
+            lease: Some(lease.clone()),
+            negotiated_capabilities: vec![
+                "encrypted_frames_v1".to_owned(),
+                "pairing_v1".to_owned(),
+                "role_liveness_v1".to_owned(),
+                "task_v1".to_owned(),
+            ],
+        };
+        for frame in [
+            build_liveness_challenge(&lease, "request-live-1", &challenge_id, &challenge_b64)
+                .unwrap(),
+            build_liveness_attestation_request(
+                &lease,
+                "request-live-2",
+                &challenge_id,
+                &challenge_b64,
+            )
+            .unwrap(),
+        ] {
+            validate_controller_message_json(&frame.to_string(), SenderRole::ControlledB).unwrap();
+            validate_controller_runtime_message_json(
+                &frame.to_string(),
+                SenderRole::ControlledB,
+                Some(&context),
+            )
+            .expect("B 端存活证据帧必须通过运行时校验");
+        }
+        assert!(build_liveness_challenge(&lease, "request-live-3", "", &challenge_b64).is_err());
+        assert!(
+            build_liveness_attestation_request(&lease, "request-live-4", &challenge_id, "").is_err()
         );
     }
 }

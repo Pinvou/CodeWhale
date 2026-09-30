@@ -47,6 +47,7 @@ pub(crate) struct EncryptedLane {
     lease: super::protocol::LeaseContext,
     send: SendCipher,
     receive: ReceiveCipher,
+    liveness: super::crypto::LivenessCipher,
     sequence: u64,
 }
 
@@ -77,8 +78,91 @@ impl EncryptedLane {
             lease: lease.clone(),
             send: ciphers.send,
             receive: ciphers.receive,
+            liveness: ciphers.liveness_a,
             sequence: 0,
         })
+    }
+
+    /// E2E-06：A 端把 `controller_liveness_a` 明文封进
+    /// `encrypted_controller_liveness_a`（外层控制帧、明文只有租约与密文）。
+    pub(crate) fn seal_liveness(
+        &self,
+        inner: &Value,
+        negotiated_capabilities: &[String],
+    ) -> Result<Value, LaneFailure> {
+        if self.role != ControllerRole::A {
+            return Err(LaneFailure::Invalid);
+        }
+        if inner.get("type").and_then(Value::as_str) != Some("controller_liveness_a")
+            || inner.get("role").and_then(Value::as_str) != Some("A")
+        {
+            return Err(LaneFailure::Invalid);
+        }
+        let plaintext = serde_json::to_vec(inner).map_err(|_| LaneFailure::Invalid)?;
+        let sealed = self
+            .liveness
+            .seal(&plaintext)
+            .map_err(|_| LaneFailure::Invalid)?;
+        let frame = json!({
+            "v": 1,
+            "type": "encrypted_controller_liveness_a",
+            "connection_id": self.lease.connection_id,
+            "controller_lease_id": self.lease.controller_lease_id,
+            "lease_epoch": self.lease.lease_epoch,
+            "ciphertext_b64": base64::engine::general_purpose::STANDARD.encode(&sealed),
+            "ciphertext_bytes": sealed.len().to_string(),
+        });
+        validate_controller_runtime_message_json(
+            &frame.to_string(),
+            SenderRole::ControllerA,
+            Some(&self.runtime_context(negotiated_capabilities)),
+        )
+        .map_err(map_validation_failure)?;
+        Ok(frame)
+    }
+
+    /// E2E-06：B 端打开 A 的存活证明，返回 `controller_liveness_a` 明文。
+    pub(crate) fn open_liveness(&self, frame: &Value) -> Result<Value, LaneFailure> {
+        if self.role != ControllerRole::B {
+            return Err(LaneFailure::Invalid);
+        }
+        if frame.get("type").and_then(Value::as_str) != Some("encrypted_controller_liveness_a") {
+            return Err(LaneFailure::Invalid);
+        }
+        let sealed = base64::engine::general_purpose::STANDARD
+            .decode(
+                frame
+                    .get("ciphertext_b64")
+                    .and_then(Value::as_str)
+                    .ok_or(LaneFailure::Invalid)?,
+            )
+            .map_err(|_| LaneFailure::Invalid)?;
+        let declared = frame
+            .get("ciphertext_bytes")
+            .and_then(Value::as_str)
+            .and_then(|value| value.parse::<u64>().ok())
+            .ok_or(LaneFailure::Invalid)?;
+        if sealed.len() as u64 != declared {
+            return Err(LaneFailure::Invalid);
+        }
+        // 外层字段必须绑定当前租约（否则可能是旧 lease 的证明）。
+        for (field, expected) in [
+            ("connection_id", self.lease.connection_id.as_str()),
+            (
+                "controller_lease_id",
+                self.lease.controller_lease_id.as_str(),
+            ),
+            ("lease_epoch", self.lease.lease_epoch.as_str()),
+        ] {
+            if frame.get(field).and_then(Value::as_str) != Some(expected) {
+                return Err(LaneFailure::Invalid);
+            }
+        }
+        let plaintext = self
+            .liveness
+            .open(&sealed)
+            .map_err(|_| LaneFailure::Invalid)?;
+        serde_json::from_slice(&plaintext).map_err(|_| LaneFailure::Invalid)
     }
 
     pub(crate) fn lease(&self) -> &super::protocol::LeaseContext {
@@ -335,6 +419,23 @@ macro_rules! lane_state {
             ) -> Result<(String, Value), LaneFailure> {
                 self.store.open(frame, negotiated_capabilities)
             }
+
+            /// E2E-06：A 端封装存活证明 / B 端解封（角色不匹配失败关闭）。
+            pub(crate) fn seal_liveness(
+                &self,
+                inner: &Value,
+                negotiated_capabilities: &[String],
+            ) -> Result<Value, LaneFailure> {
+                let guard = self.store.lane.lock();
+                let lane = guard.as_ref().ok_or(LaneFailure::Invalid)?;
+                lane.seal_liveness(inner, negotiated_capabilities)
+            }
+
+            pub(crate) fn open_liveness(&self, frame: &Value) -> Result<Value, LaneFailure> {
+                let guard = self.store.lane.lock();
+                let lane = guard.as_ref().ok_or(LaneFailure::Invalid)?;
+                lane.open_liveness(frame)
+            }
         }
     };
 }
@@ -548,6 +649,56 @@ mod tests {
         let (_other_a, mut other_b, _) = paired_lanes();
         assert_eq!(
             other_b.open(&frame, &capabilities()).unwrap_err(),
+            LaneFailure::Invalid
+        );
+    }
+
+    /// E2E-06：A 端存活证明经通道封装后只有 B 能打开；角色不匹配、外层租约不符
+    /// 或内层不是 `controller_liveness_a` 都失败关闭。
+    #[test]
+    fn liveness_proof_round_trips_through_the_lane() {
+        let (a, b, lease) = paired_lanes();
+        let inner = json!({
+            "v": 1,
+            "type": "controller_liveness_a",
+            "connection_id": lease.connection_id,
+            "controller_lease_id": lease.controller_lease_id,
+            "lease_epoch": lease.lease_epoch,
+            "relay_epoch": lease.relay_epoch,
+            "remote_control_generation": lease.remote_control_generation,
+            "role": "A",
+            "liveness_epoch_a": "live-a-1",
+            "heartbeat_sequence_a": "1",
+            "challenge_id": "challenge-0001",
+            "challenge_b64": "AAAAAAAAAAAAAAAAAAAAAA==",
+        });
+        let frame = a
+            .seal_liveness(
+                &inner,
+                &[
+                    "encrypted_frames_v1".to_owned(),
+                    "pairing_v1".to_owned(),
+                    "role_liveness_v1".to_owned(),
+                ],
+            )
+            .unwrap();
+        assert_eq!(frame["type"], "encrypted_controller_liveness_a");
+        assert!(!frame.to_string().contains("live-a-1"));
+        assert_eq!(b.open_liveness(&frame).unwrap(), inner);
+        // 外层租约不符：旧 lease 的证明不得被接受。
+        let mut foreign = frame.clone();
+        foreign["lease_epoch"] = json!("2");
+        assert_eq!(b.open_liveness(&foreign).unwrap_err(), LaneFailure::Invalid);
+        // 角色不匹配：B 不能封装存活证明。
+        assert_eq!(
+            b.seal_liveness(&inner, &capabilities()).unwrap_err(),
+            LaneFailure::Invalid
+        );
+        // 内层类型不符失败关闭。
+        let mut wrong_inner = inner.clone();
+        wrong_inner["type"] = json!("controller_liveness");
+        assert_eq!(
+            a.seal_liveness(&wrong_inner, &capabilities()).unwrap_err(),
             LaneFailure::Invalid
         );
     }
