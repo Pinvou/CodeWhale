@@ -26,9 +26,11 @@ type RegistrationBonusEligibilityVerifier interface {
 }
 
 type RegistrationBonusEligibilityReadiness struct {
-	Status                         string `json:"status"`
-	RecoverableRegistrationCount   int64  `json:"recoverable_registration_count"`
-	UnrecoverableRegistrationCount int64  `json:"unrecoverable_registration_count"`
+	Status                         string     `json:"status"`
+	FingerprintKeyID               string     `json:"fingerprint_key_id,omitempty"`
+	RecoverableRegistrationCount   int64      `json:"recoverable_registration_count"`
+	UnrecoverableRegistrationCount int64      `json:"unrecoverable_registration_count"`
+	CompletedAt                    *time.Time `json:"completed_at,omitempty"`
 }
 
 type HTTPRegistrationBonusEligibilityVerifier struct {

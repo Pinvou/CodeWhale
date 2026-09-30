@@ -80,7 +80,7 @@ func TestHTTPRegistrationBonusEligibilityVerifierFailClosed(t *testing.T) {
 }
 
 func TestHTTPRegistrationBonusEligibilityVerifierStatesAndTimeout(t *testing.T) {
-	body := `{"status":"BLOCKED","recoverable_registration_count":12,"unrecoverable_registration_count":2}`
+	body := `{"status":"BLOCKED","fingerprint_key_id":"registration-bonus-v1","recoverable_registration_count":12,"unrecoverable_registration_count":2,"completed_at":"2026-09-29T18:31:58.775954Z"}`
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(body)) }))
 	defer server.Close()
 	verifier, err := NewHTTPRegistrationBonusEligibilityVerifier(server.URL, "readiness-token")
@@ -88,7 +88,7 @@ func TestHTTPRegistrationBonusEligibilityVerifierStatesAndTimeout(t *testing.T) 
 		t.Fatal(err)
 	}
 	readiness, err := verifier.Readiness(context.Background())
-	if err != nil || readiness.Status != "BLOCKED" || readiness.RecoverableRegistrationCount != 12 || readiness.UnrecoverableRegistrationCount != 2 {
+	if err != nil || readiness.Status != "BLOCKED" || readiness.FingerprintKeyID != "registration-bonus-v1" || readiness.RecoverableRegistrationCount != 12 || readiness.UnrecoverableRegistrationCount != 2 || readiness.CompletedAt == nil {
 		t.Fatalf("readiness=%+v err=%v", readiness, err)
 	}
 	if err = verifier.RequireReady(context.Background()); !errors.Is(err, ErrRegistrationBonusEligibilityNotReady) {
