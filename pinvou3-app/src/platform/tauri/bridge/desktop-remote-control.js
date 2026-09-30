@@ -244,8 +244,8 @@
       subscribe();
       // 复用当前连接上的会话引用：重复打开是幂等的，不会为同一连接不断创建
       // 新会话（Rust 侧按引用复用并重新校验 lease 绑定）。
-      var current = current();
-      var existing = current.controllerConnection && current.controllerConnection.sessionRef;
+      var snapshot = current();
+      var existing = snapshot.controllerConnection && snapshot.controllerConnection.sessionRef;
       return invoke("desktop_remote_controller_session_open", {
         remoteRef: existing || null,
         title: title || "",
