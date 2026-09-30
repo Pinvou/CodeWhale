@@ -987,14 +987,9 @@ mod tests {
         assert_eq!(activation_ack["type"], "controller_resume_activation_ack");
         assert_eq!(activation_ack["original_deadline_ms"], "30000");
         assert_eq!(
-            build_controller_resume_activation_ack(
-                &lease,
-                "request-resume-ack-1",
-                "",
-                30_000,
-            )
-            .unwrap_err()
-            .code,
+            build_controller_resume_activation_ack(&lease, "request-resume-ack-1", "", 30_000,)
+                .unwrap_err()
+                .code,
             "controller_resume_frame_invalid"
         );
         let post_liveness = build_controller_post_activation_liveness(
@@ -1004,10 +999,7 @@ mod tests {
             "live-b-2",
         )
         .unwrap();
-        assert_eq!(
-            post_liveness["type"],
-            "controller_post_activation_liveness"
-        );
+        assert_eq!(post_liveness["type"], "controller_post_activation_liveness");
         assert_eq!(post_liveness["heartbeat_sequence_b"], "1");
         assert_eq!(post_liveness["liveness_epoch_b"], "live-b-2");
         assert_eq!(

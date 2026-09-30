@@ -424,9 +424,7 @@ impl ControllingDeviceManager {
             .clone()
             .ok_or_else(|| ControllingStateError::new("lease_unavailable"))?;
         let prepared = match inner.resume_gate.as_mut() {
-            Some(gate) => gate
-                .prepare(now_b, Some(lease.resume_deadline_b))
-                .is_ok(),
+            Some(gate) => gate.prepare(now_b, Some(lease.resume_deadline_b)).is_ok(),
             None => false,
         };
         if !prepared {
@@ -457,9 +455,9 @@ impl ControllingDeviceManager {
         let deadline = inner.lease.as_ref().map(|lease| lease.resume_deadline_b);
         let advanced = match inner.resume_gate.as_mut() {
             Some(gate) => match step {
-                ResumeStep::Provisional { activation_id } => {
-                    gate.accept_provisional(activation_id, now_b, deadline).is_ok()
-                }
+                ResumeStep::Provisional { activation_id } => gate
+                    .accept_provisional(activation_id, now_b, deadline)
+                    .is_ok(),
                 ResumeStep::Confirmed { activation_id } => {
                     gate.confirm(activation_id, now_b, deadline).is_ok()
                 }
@@ -469,9 +467,9 @@ impl ControllingDeviceManager {
                 ResumeStep::LivenessConfirmed { activation_id } => gate
                     .accept_post_activation_liveness_confirmed(activation_id, now_b, deadline)
                     .is_ok(),
-                ResumeStep::ReadyAcknowledged { activation_id } => {
-                    gate.acknowledge_ready(activation_id, now_b, deadline).is_ok()
-                }
+                ResumeStep::ReadyAcknowledged { activation_id } => gate
+                    .acknowledge_ready(activation_id, now_b, deadline)
+                    .is_ok(),
             },
             None => false,
         };
@@ -487,10 +485,13 @@ impl ControllingDeviceManager {
     /// E2E-06：当前连接尝试的 operation（恢复流程在 service 层按帧推进时需要它）。
     pub(crate) fn current_operation(&self) -> Option<ControllerOperation> {
         let inner = self.inner.lock();
-        inner.claim_request_id.as_ref().map(|request| ControllerOperation {
-            intent: inner.intent,
-            claim_request_id: request.clone(),
-        })
+        inner
+            .claim_request_id
+            .as_ref()
+            .map(|request| ControllerOperation {
+                intent: inner.intent,
+                claim_request_id: request.clone(),
+            })
     }
 
     /// E2E-06：发送恢复族的敏感控制帧（prepare/confirm/ready_ack）。
@@ -1024,10 +1025,14 @@ mod tests {
                 6_000,
             ),
         ] {
-            manager.advance_resume(operation.clone(), step, now_b).unwrap();
+            manager
+                .advance_resume(operation.clone(), step, now_b)
+                .unwrap();
         }
         let resumed = manager
-            .complete_resumed(operation, activation, 7_000, "live-a-2", [3; 32], [4; 32], 30_000)
+            .complete_resumed(
+                operation, activation, 7_000, "live-a-2", [3; 32], [4; 32], 30_000,
+            )
             .unwrap();
         assert_eq!(resumed.status, ControllingStatusKind::Connected);
         assert_eq!(

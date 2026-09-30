@@ -10,7 +10,7 @@ use std::sync::OnceLock;
 use std::time::Instant;
 
 use base64::Engine as _;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tauri::{AppHandle, Emitter, Manager as _};
 use tokio::sync::oneshot;
 
@@ -23,14 +23,15 @@ use super::controlled::{
 use super::controlled_handshake::ControlledHandshake;
 use super::controlling_handshake::JoinedLease;
 use super::crypto::{
-    AuthenticatedRelayTrustConfig, CodeWrapBinding, CodeWrapKeyPair, ControllerRole as HandshakeRole,
-    HandshakeKeyPair, SessionKeys, load_relay_trust_config, transport_key_fingerprint,
+    AuthenticatedRelayTrustConfig, CodeWrapBinding, CodeWrapKeyPair,
+    ControllerRole as HandshakeRole, HandshakeKeyPair, SessionKeys, load_relay_trust_config,
+    transport_key_fingerprint,
 };
 use super::encrypted_lane::ControlledLaneState;
 use super::protocol::LeaseContext;
 use super::protocol::{
-    validate_controller_message_json, validate_controller_registration_message_json,
-    RegistrationValidationContext, SenderRole,
+    RegistrationValidationContext, SenderRole, validate_controller_message_json,
+    validate_controller_registration_message_json,
 };
 use super::resume::{
     build_controller_post_activation_liveness, build_controller_resume_activation_ack,
@@ -155,10 +156,7 @@ impl ControlledHandshakeDriver {
         if self.handshake.is_some() {
             return Err("controller_handshake_stage_invalid");
         }
-        let keys = self
-            .keys
-            .take()
-            .ok_or("controller_handshake_key_invalid")?;
+        let keys = self.keys.take().ok_or("controller_handshake_key_invalid")?;
         let handshake =
             ControlledHandshake::new(message, keys, trust).map_err(|error| error.code)?;
         let commit = handshake.commit().map_err(|error| error.code)?;
@@ -183,10 +181,7 @@ impl ControlledHandshakeDriver {
 
     /// `encrypted_handshake_finished`：打开对端 Finished 并核对 commitment 后
     /// 产出本端 `finished_receipt_ack`。
-    pub(crate) fn accept_peer_finished(
-        &mut self,
-        message: &Value,
-    ) -> Result<Value, &'static str> {
+    pub(crate) fn accept_peer_finished(&mut self, message: &Value) -> Result<Value, &'static str> {
         let handshake = self
             .handshake
             .as_mut()
@@ -206,7 +201,9 @@ impl ControlledHandshakeDriver {
             .handshake
             .as_mut()
             .ok_or("controller_handshake_stage_invalid")?;
-        let lease = handshake.accept_joined(message).map_err(|error| error.code)?;
+        let lease = handshake
+            .accept_joined(message)
+            .map_err(|error| error.code)?;
         Ok(ControlledHandshakeOutcome {
             lease,
             transcript_hash: handshake.transcript_hash(),
@@ -259,15 +256,10 @@ impl ControlledRelayWorker {
         relay: RemoteControlManager,
         operation: ControlledOperation,
         business: std::sync::Arc<dyn ControlledBusinessPort>,
-    ) -> Result<
-        oneshot::Receiver<Result<ControlledStatus, String>>,
-        String,
-    > {
+    ) -> Result<oneshot::Receiver<Result<ControlledStatus, String>>, String> {
         let code_wrap = CodeWrapKeyPair::generate().map_err(|_| "pairing_key_invalid")?;
         let handshake = HandshakeKeyPair::generate().map_err(|_| "handshake_key_invalid")?;
-        let channel = relay
-            .start_controller_relay(operation.generation())
-            .await?;
+        let channel = relay.start_controller_relay(operation.generation()).await?;
         let (done_tx, done_rx) = oneshot::channel();
         let mut worker = Self {
             app,
@@ -356,9 +348,8 @@ impl ControlledRelayWorker {
         let mut joined = false;
         let mut evidence = LivenessEvidenceState::default();
         let mut resume = ControlledResumeAttempt::default();
-        let mut poll = tokio::time::interval(std::time::Duration::from_millis(
-            LIVENESS_EVIDENCE_POLL_MS,
-        ));
+        let mut poll =
+            tokio::time::interval(std::time::Duration::from_millis(LIVENESS_EVIDENCE_POLL_MS));
         poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         poll.tick().await;
         'serve: loop {
@@ -540,10 +531,11 @@ impl ControlledRelayWorker {
         let Ok((lease, capabilities)) = manager.live_runtime_context() else {
             return false;
         };
-        let context = crate::features::remote_control::controller::protocol::RuntimeValidationContext {
-            lease: Some(lease),
-            negotiated_capabilities: capabilities,
-        };
+        let context =
+            crate::features::remote_control::controller::protocol::RuntimeValidationContext {
+                lease: Some(lease),
+                negotiated_capabilities: capabilities,
+            };
         let validated = crate::features::remote_control::controller::protocol::validate_controller_runtime_message_json(
             &message.to_string(),
             crate::features::remote_control::controller::protocol::SenderRole::ControllerA,
@@ -568,11 +560,7 @@ impl ControlledRelayWorker {
     /// E2E-06：A 的直接存活证明（`encrypted_controller_liveness_a`）：解密后用
     /// 明文走 `accept_direct_liveness`（挑战、RTT 与序号单调性由 watchdog 校验），
     /// 成功后清除未完成挑战，避免再走 Relay 兜底。
-    fn accept_direct_liveness(
-        &self,
-        frame: &Value,
-        evidence: &mut LivenessEvidenceState,
-    ) {
+    fn accept_direct_liveness(&self, frame: &Value, evidence: &mut LivenessEvidenceState) {
         let manager = self.app.state::<ControlledDeviceManager>();
         let business = self.app.state::<ControlledLaneState>();
         let Ok(inner) = business.open_liveness(frame) else {
@@ -598,11 +586,7 @@ impl ControlledRelayWorker {
 
     /// E2E-06：接受 Relay 签名 attestation 续期本端 watchdog（挑战与请求时间
     /// 由本端记录，跨机时间一律不用）。
-    fn accept_liveness_attestation(
-        &self,
-        message: &Value,
-        evidence: &mut LivenessEvidenceState,
-    ) {
+    fn accept_liveness_attestation(&self, message: &Value, evidence: &mut LivenessEvidenceState) {
         let Some((challenge_id, _, sent_at_b)) = evidence.outstanding.clone() else {
             return;
         };
@@ -680,15 +664,16 @@ impl ControlledRelayWorker {
     fn fail_completed_handshake(&self, manager: &ControlledDeviceManager) -> String {
         let business = self.app.state::<ControlledLaneState>();
         business.clear();
-        if let Ok(status) = manager.fail_operation(self.operation.clone(), HANDSHAKE_FAILED.to_owned())
+        if let Ok(status) =
+            manager.fail_operation(self.operation.clone(), HANDSHAKE_FAILED.to_owned())
         {
             let _ = self.app.emit(CONTROLLED_STATUS_EVENT, &status);
         }
         HANDSHAKE_FAILED.to_owned()
     }
 
-/// 握手失败收尾：投影为有界错误并结束本代通道（dropping the channel 会
-/// 清掉该 generation 的通道绑定，本地停止/刷新入口保持可用）。
+    /// 握手失败收尾：投影为有界错误并结束本代通道（dropping the channel 会
+    /// 清掉该 generation 的通道绑定，本地停止/刷新入口保持可用）。
     fn fail_handshake(&self, error: &str) {
         let manager = self.app.state::<ControlledDeviceManager>();
         if !manager.is_pending_handshake(self.operation.clone()) {
@@ -995,7 +980,8 @@ fn wire_event_kind(event: &super::journal::JournalEvent) -> Option<&'static str>
 /// 接收端由 worker 独占，因此这里只保存可克隆发送句柄（断开/结束时清空）。
 #[derive(Default)]
 pub(crate) struct ControlledOutboundState {
-    sender: parking_lot::Mutex<Option<crate::features::remote_control::manager::ControllerRelaySender>>,
+    sender:
+        parking_lot::Mutex<Option<crate::features::remote_control::manager::ControllerRelaySender>>,
 }
 
 impl ControlledOutboundState {
@@ -1010,7 +996,9 @@ impl ControlledOutboundState {
         *self.sender.lock() = None;
     }
 
-    pub(crate) fn sender(&self) -> Option<crate::features::remote_control::manager::ControllerRelaySender> {
+    pub(crate) fn sender(
+        &self,
+    ) -> Option<crate::features::remote_control::manager::ControllerRelaySender> {
         self.sender.lock().clone()
     }
 }
@@ -1280,7 +1268,8 @@ pub(crate) fn handle_controlled_resume_frame<P: ControlledRelayPort + ?Sized>(
             else {
                 return ControlledResumeOutcome::Ignored;
             };
-            let Some(new_token) = message.get("new_resume_token_b64").and_then(Value::as_str) else {
+            let Some(new_token) = message.get("new_resume_token_b64").and_then(Value::as_str)
+            else {
                 return ControlledResumeOutcome::Ignored;
             };
             let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(new_token) else {
@@ -1293,7 +1282,14 @@ pub(crate) fn handle_controlled_resume_frame<P: ControlledRelayPort + ?Sized>(
                 return ControlledResumeOutcome::Failed;
             };
             if manager
-                .complete_resumed(operation, activation_id, now_b, liveness_epoch_a, token, fingerprint)
+                .complete_resumed(
+                    operation,
+                    activation_id,
+                    now_b,
+                    liveness_epoch_a,
+                    token,
+                    fingerprint,
+                )
                 .is_err()
             {
                 return ControlledResumeOutcome::Failed;
@@ -1429,8 +1425,8 @@ fn sanitize_error(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::features::remote_control::controller::crypto::{CodeWrapKeyPair, HandshakeKeyPair};
     use crate::features::remote_control::controller::controlling_handshake::ControllingHandshake;
+    use crate::features::remote_control::controller::crypto::{CodeWrapKeyPair, HandshakeKeyPair};
     use crate::features::remote_control::controller::test_support::PairingFixture;
     use std::collections::VecDeque;
     use std::time::Duration;
@@ -1537,7 +1533,10 @@ mod tests {
         );
         claim.sort_unstable();
         registration.sort_unstable();
-        assert_eq!(claim, registration, "A claim 与 B 注册声明的能力集合必须一致");
+        assert_eq!(
+            claim, registration,
+            "A claim 与 B 注册声明的能力集合必须一致"
+        );
         for family in [
             "pairing_v1",
             "encrypted_frames_v1",
@@ -1647,7 +1646,10 @@ mod tests {
     }
 
     fn keys() -> (CodeWrapKeyPair, CodeWrapKeyPair) {
-        (CodeWrapKeyPair::generate().unwrap(), CodeWrapKeyPair::generate().unwrap())
+        (
+            CodeWrapKeyPair::generate().unwrap(),
+            CodeWrapKeyPair::generate().unwrap(),
+        )
     }
 
     #[test]
@@ -1807,7 +1809,9 @@ mod tests {
         assert_eq!(b_commit["sender_role"], "B");
         // 重复接管同一预留必须拒绝。
         assert_eq!(
-            driver.accept_reserved(&reservation, &relay.trust).unwrap_err(),
+            driver
+                .accept_reserved(&reservation, &relay.trust)
+                .unwrap_err(),
             "controller_handshake_stage_invalid"
         );
         // 收到 A 的 commitment 之前不能回送 Finished。
@@ -1860,8 +1864,7 @@ mod tests {
         } = crate::features::remote_control::controller::test_support::pairing_fixture(
             "relay-key-runtime",
         );
-        let (mut driver, _a) =
-            drive_through_receipts(&reservation, b_keys, a_keys, &relay.trust);
+        let (mut driver, _a) = drive_through_receipts(&reservation, b_keys, a_keys, &relay.trust);
         let mut foreign = joined;
         foreign["reservation_id"] = json!("reservation-other");
         assert_eq!(
@@ -1885,8 +1888,7 @@ mod tests {
         } = crate::features::remote_control::controller::test_support::pairing_fixture(
             "relay-key-runtime",
         );
-        let (mut driver, _a) =
-            drive_through_receipts(&reservation, b_keys, a_keys, &relay.trust);
+        let (mut driver, _a) = drive_through_receipts(&reservation, b_keys, a_keys, &relay.trust);
         let outcome = driver.accept_joined(&joined).unwrap();
         let expected =
             transport_key_fingerprint(outcome.transcript_hash, HandshakeRole::B).unwrap();
@@ -1894,10 +1896,7 @@ mod tests {
 
         assert_eq!(lease.context.controller_lease_id, "controller-lease-0001");
         assert_eq!(lease.context.lease_epoch, "1");
-        assert_eq!(
-            lease.context.remote_control_generation,
-            "generation-0001"
-        );
+        assert_eq!(lease.context.remote_control_generation, "generation-0001");
         assert_eq!(lease.liveness_epoch_a, "liveness-epoch-a-0001");
         assert_eq!(lease.resume_deadline_b, 30_000);
         assert_eq!(lease.resume_token, resume_token);
@@ -2052,10 +2051,12 @@ mod tests {
         assert_eq!(response["session_id"], "session-a-ref");
 
         // 未知类型丢弃；缺字段的载荷失败关闭。
-        assert!(dispatch_decrypted_payload(&port, &lease, "journal_event", &json!({}))
-            .await
-            .unwrap()
-            .is_empty());
+        assert!(
+            dispatch_decrypted_payload(&port, &lease, "journal_event", &json!({}))
+                .await
+                .unwrap()
+                .is_empty()
+        );
         assert_eq!(
             dispatch_decrypted_payload(&port, &lease, "task_submit", &json!({"task_id": "t"}))
                 .await
@@ -2173,10 +2174,7 @@ mod tests {
                     transport_key_fingerprint: [2; 32],
                     controller_device_name: "Controller PC".into(),
                     connected_at_b: 3_000,
-                    negotiated_capabilities: vec![
-                        "encrypted_frames_v1".into(),
-                        "resume_v1".into(),
-                    ],
+                    negotiated_capabilities: vec!["encrypted_frames_v1".into(), "resume_v1".into()],
                 },
             )
             .unwrap();

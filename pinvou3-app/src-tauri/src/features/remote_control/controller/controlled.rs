@@ -233,14 +233,22 @@ impl std::fmt::Debug for ControlledResumeMaterial {
 /// E2E-06：B 端恢复相位推进（worker 按 Relay/A 的帧顺序调用）。
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum ControlledResumeStep<'a> {
-    Provisional { activation_id: &'a str },
-    Confirmed { activation_id: &'a str },
-    ActivationAcknowledged { activation_id: &'a str },
+    Provisional {
+        activation_id: &'a str,
+    },
+    Confirmed {
+        activation_id: &'a str,
+    },
+    ActivationAcknowledged {
+        activation_id: &'a str,
+    },
     PostActivationLiveness {
         activation_id: &'a str,
         liveness_epoch_b: &'a str,
     },
-    ReadyAcknowledged { activation_id: &'a str },
+    ReadyAcknowledged {
+        activation_id: &'a str,
+    },
 }
 
 /// B 端恢复失败时投影的本地错误码（有界，UI 直接显示为失败终态）。
@@ -764,9 +772,9 @@ impl ControlledDeviceManager {
             .and_then(|watchdog| watchdog.deadline_b());
         let advanced = match inner.resume_gate.as_mut() {
             Some(gate) => match step {
-                ControlledResumeStep::Provisional { activation_id } => {
-                    gate.accept_provisional(activation_id, now_b, deadline).is_ok()
-                }
+                ControlledResumeStep::Provisional { activation_id } => gate
+                    .accept_provisional(activation_id, now_b, deadline)
+                    .is_ok(),
                 ControlledResumeStep::Confirmed { activation_id } => {
                     gate.confirm(activation_id, now_b, deadline).is_ok()
                 }
@@ -777,16 +785,11 @@ impl ControlledDeviceManager {
                     activation_id,
                     liveness_epoch_b,
                 } => gate
-                    .send_post_activation_liveness(
-                        activation_id,
-                        liveness_epoch_b,
-                        now_b,
-                        deadline,
-                    )
+                    .send_post_activation_liveness(activation_id, liveness_epoch_b, now_b, deadline)
                     .is_ok(),
-                ControlledResumeStep::ReadyAcknowledged { activation_id } => {
-                    gate.acknowledge_ready(activation_id, now_b, deadline).is_ok()
-                }
+                ControlledResumeStep::ReadyAcknowledged { activation_id } => gate
+                    .acknowledge_ready(activation_id, now_b, deadline)
+                    .is_ok(),
             },
             None => false,
         };
@@ -802,7 +805,6 @@ impl ControlledDeviceManager {
         }
         Ok(status_locked(&inner))
     }
-
 
     pub(crate) fn stop(&self) -> ControlledStatus {
         self.terminate_local(
@@ -1405,10 +1407,19 @@ mod tests {
                 11_000,
             ),
         ] {
-            manager.advance_resume(operation.clone(), step, now_b).unwrap();
+            manager
+                .advance_resume(operation.clone(), step, now_b)
+                .unwrap();
         }
         let resumed = manager
-            .complete_resumed(operation.clone(), activation, 12_000, "live-a-2", [3; 32], [4; 32])
+            .complete_resumed(
+                operation.clone(),
+                activation,
+                12_000,
+                "live-a-2",
+                [3; 32],
+                [4; 32],
+            )
             .unwrap();
         assert_eq!(resumed.status, ControlledStatusKind::Connected);
         assert_eq!(manager.live_liveness_epoch(), Some("live-a-2".to_owned()));

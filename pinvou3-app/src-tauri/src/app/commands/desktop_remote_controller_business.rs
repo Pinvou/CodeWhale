@@ -40,9 +40,9 @@ impl ControlledCleanupSink for DesktopControlledCleanup {
         if !(scope.remote_tasks || scope.pending_permissions || scope.temporary_models) {
             return;
         }
-        let Some(runtime) =
-            self.app
-                .try_state::<Arc<super::desktop_remote_task::DesktopRemoteTaskRuntime>>()
+        let Some(runtime) = self
+            .app
+            .try_state::<Arc<super::desktop_remote_task::DesktopRemoteTaskRuntime>>()
         else {
             // 任务运行时未装配（例如单元测试环境）：本代没有任何远端任务需要清理。
             return;

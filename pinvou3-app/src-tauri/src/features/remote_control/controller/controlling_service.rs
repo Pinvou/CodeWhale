@@ -18,8 +18,7 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use super::controlling::{
-    ControllerLease, ControllerOperation, ControllingDeviceManager, ControllingStatus,
-    ResumeStep,
+    ControllerLease, ControllerOperation, ControllingDeviceManager, ControllingStatus, ResumeStep,
 };
 use super::controlling_handshake::{ControllingHandshake, HandshakeError};
 use super::controlling_runtime::{
@@ -34,13 +33,13 @@ use super::crypto::{
 use super::encrypted_lane::ControllingLaneState;
 use super::journal::{JournalEvent, JournalSnapshot, MAX_EVENT_PAYLOAD_BYTES};
 use super::protocol::LeaseContext;
-use super::resume::{
-    build_controller_resume_prepare, build_controller_resume_ready_ack, new_resume_challenge,
-    resume_frame_matches_lease,
-};
 use super::relay_transport::{
     AuthenticatedLease, ControllerRole, ControllerTransportConfig, ControllerTransportEvent,
     ControllerTransportSender, spawn_controller_transport,
+};
+use super::resume::{
+    build_controller_resume_prepare, build_controller_resume_ready_ack, new_resume_challenge,
+    resume_frame_matches_lease,
 };
 use crate::features::remote_control::RemoteControlManager;
 
@@ -1195,8 +1194,8 @@ mod tests {
     use crate::features::remote_control::controller::encrypted_lane::EncryptedLane;
     use crate::features::remote_control::controller::relay_transport::transport_channels;
     use crate::features::remote_control::controller::test_support::{
-        PairingFixture, encode, lease_context, paired_session_keys, pairing_fixture, signed_relay,
-        role_session_keys, signed_reservation,
+        PairingFixture, encode, lease_context, paired_session_keys, pairing_fixture,
+        role_session_keys, signed_relay, signed_reservation,
     };
 
     const RELAY_KEY_ID: &str = "relay-key-service";
@@ -1874,7 +1873,11 @@ mod tests {
             on_liveness: &mut on_liveness,
         };
         serve_controlling_lane(&mut lane, &manager, &sessions, &business, &mut sinks).await;
-        assert_eq!(session_projections, vec![Some(4)], "能力快照必须落到会话状态");
+        assert_eq!(
+            session_projections,
+            vec![Some(4)],
+            "能力快照必须落到会话状态"
+        );
         assert_eq!(task_events.len(), 1);
         assert_eq!(task_events[0]["status"], "succeeded");
         assert_eq!(task_events[0]["sessionId"], session.session_id);
@@ -1941,7 +1944,11 @@ mod tests {
             &mut stale_sinks,
         )
         .await;
-        assert_eq!(task_events.len(), seen_before, "断开后的残留帧不得产生任务投影");
+        assert_eq!(
+            task_events.len(),
+            seen_before,
+            "断开后的残留帧不得产生任务投影"
+        );
         assert_eq!(journal_seen.len(), 1, "断开后的残留帧不得产生正文投影");
     }
 

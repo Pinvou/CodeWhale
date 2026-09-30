@@ -825,8 +825,13 @@ impl ResumeConfirmCipher {
         lp(&mut plaintext, self.role.wire())?;
         let aad = resume_confirm_aad(&self.binding, activation_id)?;
         let nonce = random_nonce()?;
-        let ciphertext =
-            seal_aead(&self.key, nonce, &aad, &plaintext[..], MAX_RESUME_CONFIRM_BYTES)?;
+        let ciphertext = seal_aead(
+            &self.key,
+            nonce,
+            &aad,
+            &plaintext[..],
+            MAX_RESUME_CONFIRM_BYTES,
+        )?;
         let mut output = nonce.to_vec();
         output.extend_from_slice(&ciphertext);
         Ok(output)
@@ -923,9 +928,7 @@ fn parse_resume_confirm(
     let mut cursor = DOMAIN.len();
     let activation = take_lp(plaintext, &mut cursor)?;
     let role = take_lp(plaintext, &mut cursor)?;
-    if cursor != plaintext.len()
-        || activation != activation_id.as_bytes()
-        || role != sender.wire()
+    if cursor != plaintext.len() || activation != activation_id.as_bytes() || role != sender.wire()
     {
         return Err(ControllerCryptoError::new(
             "invalid_resume_confirm",
@@ -2702,12 +2705,21 @@ mod tests {
                 .is_err()
         );
         // 两侧各自派生的轮换指纹互不相同，且都不等于握手期指纹。
-        let a_fingerprint = a_ciphers.resume_confirm.fingerprint("activation-0001").unwrap();
-        let b_fingerprint = b_ciphers.resume_confirm.fingerprint("activation-0001").unwrap();
+        let a_fingerprint = a_ciphers
+            .resume_confirm
+            .fingerprint("activation-0001")
+            .unwrap();
+        let b_fingerprint = b_ciphers
+            .resume_confirm
+            .fingerprint("activation-0001")
+            .unwrap();
         assert_ne!(a_fingerprint, b_fingerprint);
         assert_ne!(
             a_fingerprint,
-            a_ciphers.resume_confirm.fingerprint("activation-0002").unwrap()
+            a_ciphers
+                .resume_confirm
+                .fingerprint("activation-0002")
+                .unwrap()
         );
         assert!(!format!("{:?}", a_ciphers.resume_confirm).contains("activation"));
     }
