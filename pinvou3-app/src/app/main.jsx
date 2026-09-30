@@ -122,6 +122,9 @@ const LazyArchiveToast = lazy(() => VIEW_LOADERS.archiveConfirmDialog().then(m =
 const LazyPersonaEditorModal = lazy(() => VIEW_LOADERS.cardpool().then(m => ({ default: m.PersonaEditorModal })));
 const LazyWebAccessModal = lazy(() => VIEW_LOADERS.settings().then(m => ({ default: m.WebAccessModal })));
 const LazyDetachedShell = lazy(() => import('./DetachedShell.jsx').then(m => ({ default: m.DetachedShell })));
+// Windows 双端远程控制（DEV-22/23）：与 Web 分享 lazy chunk 分离。
+const LazyConnectRemoteDeviceDialog = lazy(() => import('../features/remote-control/ConnectRemoteDeviceDialog.jsx'));
+const LazyRemoteConnectionShell = lazy(() => import('../features/remote-control/RemoteConnectionShell.jsx'));
 
 // 视图 chunk 加载占位:沿用 DetachedShell 的「…」惯例,不引入新视觉语言。
 function ViewFallback() {
@@ -1435,6 +1438,8 @@ const NAV_PREFETCH = {
       const [savedConfirm, setSavedConfirm] = useState(null); // 存入成功 → iOS 确认窗 {name}
       const [poolMyOnly, setPoolMyOnly] = useState(false); // 跳卡池时是否直接落「我的卡牌」筛选(从确认窗"去查看"进来=true)
       const [webAccessOpen, setWebAccessOpen] = useState(false);
+      const [remoteConnectOpen, setRemoteConnectOpen] = useState(false);
+      const [remoteShellOpen, setRemoteShellOpen] = useState(false);
       const [publishedBrowserOverlayIntent, setPublishedBrowserOverlayIntent] = useState('');
       const [settingsUpdateFocusTick, setSettingsUpdateFocusTick] = useState(0);
       const [settingsInitialSection, setSettingsInitialSection] = useState('general');
@@ -4336,6 +4341,18 @@ const NAV_PREFETCH = {
                       <Smartphone size={18} />
                       {isWebAccessConnected && <span className="absolute top-1 right-1 w-2 h-2 rounded-full bg-[#34A853]" />}
                     </button>}
+                    {/* Windows 双端远程控制：A 主控端入口（DEV-22）。与 Web 分享入口
+                        完全独立，非 Windows 能力关闭时不渲染。 */}
+                    {can('desktopRemoteControl') && <button
+                      onClick={() => setRemoteConnectOpen(true)}
+                      title={t.controllerConnection.entry}
+                      className={`relative w-9 h-9 shrink-0 rounded-full flex items-center justify-center transition-colors ${activeTheme === 'dark' ? 'text-[#C4C7C5] hover:bg-[#333537]' : 'text-[#444746] hover:bg-[#E1E5EA]'}`}
+                    >
+                      <Monitor size={18} />
+                      {bs && bs.controllerConnection && bs.controllerConnection.status === 'connected' && (
+                        <span className="absolute top-1 right-1 w-2 h-2 rounded-full bg-[#34A853]" />
+                      )}
+                    </button>}
                     {can('pet') && <button
                       onClick={() => handleSetPetEnabled(!(bs && bs.settings && bs.settings.pet && bs.settings.pet.enabled))}
                       title={(bs && bs.settings && bs.settings.pet && bs.settings.pet.enabled) ? t.uiPet.hide : t.uiMainApp.petSummon}
@@ -4534,6 +4551,38 @@ const NAV_PREFETCH = {
               <LazyWebAccessModal theme={activeTheme} bs={bs} t={t} onClose={() => setWebAccessOpen(false)} />
             </Suspense>
             </ViewErrorBoundary>
+            )}
+
+            {/* Windows 双端远程控制（DEV-22）：连接入口与连接壳，与 Web 分享
+                弹窗互相独立；关闭连接壳只隐藏窗口，显式断开才结束连接。 */}
+            {can('desktopRemoteControl') && remoteConnectOpen && (
+              <ViewErrorBoundary t={t}>
+                <Suspense fallback={null}>
+                  <LazyConnectRemoteDeviceDialog
+                    t={t}
+                    open
+                    onClose={() => setRemoteConnectOpen(false)}
+                    onConnected={() => { setRemoteConnectOpen(false); setRemoteShellOpen(true); }}
+                  />
+                </Suspense>
+              </ViewErrorBoundary>
+            )}
+            {can('desktopRemoteControl') && remoteShellOpen && (
+              <ViewErrorBoundary t={t}>
+                <Suspense fallback={null}>
+                  <LazyRemoteConnectionShell
+                    t={t}
+                    bs={bs}
+                    onClose={() => setRemoteShellOpen(false)}
+                    onRequestDisconnect={async () => {
+                      if (bridge && bridge.available && bridge.desktopRemoteControl) {
+                        await bridge.desktopRemoteControl.controllerDisconnect();
+                      }
+                      setRemoteShellOpen(false);
+                    }}
+                  />
+                </Suspense>
+              </ViewErrorBoundary>
             )}
 
             {/* App 级自创卡编辑器: 聊天里「存入卡牌池」草稿走这条。错误边界与

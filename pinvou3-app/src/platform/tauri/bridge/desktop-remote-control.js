@@ -283,7 +283,24 @@
 
     function permissionList(taskId) {
       ensureAvailable();
-      return invoke("desktop_remote_permission_list", { taskId: taskId });
+      return invoke("desktop_remote_permission_list", { taskId: taskId }).then(function (permissions) {
+        var next = shallow(current());
+        next.remotePermissions = Array.isArray(permissions)
+          ? permissions.slice(0, 8).map(function (entry) {
+              return {
+                permissionRequestId: String(entry.permissionRequestId || ""),
+                taskId: String(entry.taskId || ""),
+                operationType: String(entry.operationType || ""),
+                riskLevel: String(entry.riskLevel || ""),
+                targetScope: String(entry.targetScope || ""),
+                preview: String(entry.preview || ""),
+                state: String(entry.state || "pending"),
+              };
+            })
+          : [];
+        publish(next);
+        return permissions;
+      });
     }
 
     function permissionDecide(taskId, permissionRequestId, decision) {
@@ -292,6 +309,13 @@
         taskId: taskId,
         permissionRequestId: permissionRequestId,
         decision: decision,
+      }).then(function (result) {
+        var next = shallow(current());
+        next.remotePermissions = (next.remotePermissions || []).filter(function (entry) {
+          return entry.permissionRequestId !== permissionRequestId;
+        });
+        publish(next);
+        return result;
       });
     }
 
