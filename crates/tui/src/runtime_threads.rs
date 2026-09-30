@@ -9309,20 +9309,29 @@ impl RuntimeThreadManager {
                         // can clear any pending approval UI.  Without this
                         // event the GUI would show a frozen approval dialog
                         // that never receives approval.decided.
-                        self.emit_event(
-                            &thread_id,
-                            Some(&turn_id),
-                            None,
-                            "approval.decided",
-                            json!({
-                                "approval_id": id,
-                                "decision": dec_str,
-                                "remember": false,
-                                "auto": true,
-                            }),
-                        )
-                        .await
-                        .ok();
+                        if let Err(err) = self
+                            .emit_event(
+                                &thread_id,
+                                Some(&turn_id),
+                                None,
+                                "approval.decided",
+                                json!({
+                                    "approval_id": id,
+                                    "decision": dec_str,
+                                    "remember": false,
+                                    "auto": true,
+                                }),
+                            )
+                            .await
+                        {
+                            // A dropped publish here would freeze the
+                            // client's pending approval UI on an approval
+                            // the runtime already resolved itself.
+                            tracing::error!(
+                                "Failed to emit auto approval resolution \
+                                 for {id}: {err}"
+                            );
+                        }
                         if approved {
                             let _ = engine.approve_tool_call(id).await;
                         } else {
@@ -9337,21 +9346,29 @@ impl RuntimeThreadManager {
                     // fail closed (the audit trail stays authoritative)
                     // instead of pausing the turn.
                     if approval_mode == crate::tui::approval::ApprovalMode::Auto {
-                        self.emit_event(
-                            &thread_id,
-                            Some(&turn_id),
-                            None,
-                            "approval.decided",
-                            json!({
-                                "approval_id": id,
-                                "decision": "deny",
-                                "remember": false,
-                                "auto": true,
-                                "posture": "auto_review",
-                            }),
-                        )
-                        .await
-                        .ok();
+                        if let Err(err) = self
+                            .emit_event(
+                                &thread_id,
+                                Some(&turn_id),
+                                None,
+                                "approval.decided",
+                                json!({
+                                    "approval_id": id,
+                                    "decision": "deny",
+                                    "remember": false,
+                                    "auto": true,
+                                    "posture": "auto_review",
+                                }),
+                            )
+                            .await
+                        {
+                            // A dropped publish would strand the pending UI
+                            // on the fail-closed deny below.
+                            tracing::error!(
+                                "Failed to emit auto-review deny \
+                                 for {id}: {err}"
+                            );
+                        }
                         let _ = engine.deny_tool_call(id).await;
                         continue;
                     }
@@ -9448,37 +9465,55 @@ impl RuntimeThreadManager {
                             if remember {
                                 self.remember_thread_auto_approve(&thread_id).await;
                             }
-                            self.emit_event(
-                                &thread_id,
-                                Some(&turn_id),
-                                None,
-                                "approval.decided",
-                                json!({
-                                    "approval_id": id,
-                                    "decision": "allow",
-                                    "remember": remember,
-                                }),
-                            )
-                            .await
-                            .ok();
+                            if let Err(err) = self
+                                .emit_event(
+                                    &thread_id,
+                                    Some(&turn_id),
+                                    None,
+                                    "approval.decided",
+                                    json!({
+                                        "approval_id": id,
+                                        "decision": "allow",
+                                        "remember": remember,
+                                    }),
+                                )
+                                .await
+                            {
+                                // The user acted on this host, but remote
+                                // clients still need the publish to clear
+                                // their pending UI.
+                                tracing::error!(
+                                    "Failed to emit user approval decision \
+                                     for {id}: {err}"
+                                );
+                            }
                             let _ = engine.approve_tool_call(id).await;
                         }
                         ApprovalWakeup::Decision(Ok(ExternalApprovalDecision::Deny {
                             remember,
                         })) => {
-                            self.emit_event(
-                                &thread_id,
-                                Some(&turn_id),
-                                None,
-                                "approval.decided",
-                                json!({
-                                    "approval_id": id,
-                                    "decision": "deny",
-                                    "remember": remember,
-                                }),
-                            )
-                            .await
-                            .ok();
+                            if let Err(err) = self
+                                .emit_event(
+                                    &thread_id,
+                                    Some(&turn_id),
+                                    None,
+                                    "approval.decided",
+                                    json!({
+                                        "approval_id": id,
+                                        "decision": "deny",
+                                        "remember": remember,
+                                    }),
+                                )
+                                .await
+                            {
+                                // The user acted on this host, but remote
+                                // clients still need the publish to clear
+                                // their pending UI.
+                                tracing::error!(
+                                    "Failed to emit user approval decision \
+                                     for {id}: {err}"
+                                );
+                            }
                             let _ = engine.deny_tool_call(id).await;
                         }
                         // Interrupt, runtime shutdown, engine exit, or the
