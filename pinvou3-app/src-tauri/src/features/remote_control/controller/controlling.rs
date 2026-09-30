@@ -35,6 +35,13 @@ pub(crate) struct ControllerOperation {
     claim_request_id: String,
 }
 
+impl ControllerOperation {
+    /// A 端 claim 的稳定 id：Relay 以它做预留幂等键（重连只能换 `request_id`）。
+    pub(crate) fn claim_request_id(&self) -> &str {
+        &self.claim_request_id
+    }
+}
+
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub(crate) struct ControllingStateError {
     pub(crate) code: &'static str,
@@ -373,6 +380,18 @@ impl ControllingDeviceManager {
             .ok_or_else(|| ControllingStateError::new("controller_not_connected"))
     }
 
+    /// 本次连接尝试是否仍然拥有待决状态（connecting / safety_handshake）。
+    /// 在途 worker 的失败收尾据此判断「该不该把状态投影为 error」：用户已经
+    /// 显式断开、或尝试已被新 intent 取代时不得覆盖既有状态。
+    pub(crate) fn is_connecting(&self, operation: ControllerOperation) -> bool {
+        let inner = self.inner.lock();
+        ensure_operation(&inner, &operation).is_ok()
+            && matches!(
+                inner.phase,
+                ControllingStatusKind::Connecting | ControllingStatusKind::SafetyHandshake
+            )
+    }
+
     pub(crate) fn create_history(
         &self,
         title: &str,
@@ -474,7 +493,10 @@ fn normalize_public_error(code: &'static str) -> Result<&'static str> {
         "pairing_code_invalid"
         | "controller_busy"
         | "endpoint_offline"
-        | "version_incompatible" => Ok(code),
+        | "version_incompatible"
+        // Relay 侧的兜底公共错误：握手/协议层失败统一收敛到这里，不新增
+        // 用户可见的错误码（见 CONTROLLER_ERROR_CODES）。
+        | "invalid_message" => Ok(code),
         _ => Err(ControllingStateError::new("controller_error_invalid")),
     }
 }
@@ -585,6 +607,21 @@ mod tests {
                 .code,
             "controller_error_invalid"
         );
+        // E2E-02：协议层失败收敛到的 Relay 兜底码必须可用，且失败路径必须
+        // 清空连接码与租约，不能停留在 connecting。
+        let status = manager
+            .fail_connection(operation.clone(), "invalid_message")
+            .unwrap();
+        assert_eq!(status.status, ControllingStatusKind::Error);
+        assert_eq!(status.error_code, Some("invalid_message"));
+        assert!(!status.has_pending_code);
+        assert_eq!(status.lease, None);
+        assert_eq!(
+            manager.pending_code(operation).unwrap_err().code,
+            "pairing_code_unavailable"
+        );
+
+        let operation = manager.connect("345-6789").unwrap();
         let status = manager
             .fail_connection(operation, "version_incompatible")
             .unwrap();
@@ -665,6 +702,36 @@ mod tests {
                 .unwrap_err()
                 .code,
             "controller_stale_result"
+        );
+    }
+
+    /// E2E-02：在途 worker 只能在自己的尝试仍然待决时收尾为 error。
+    #[test]
+    fn pending_attempt_is_the_only_owner_of_failure_projection() {
+        let manager = ControllingDeviceManager::default();
+        let operation = manager.connect("234-4567").unwrap();
+        assert!(manager.is_connecting(operation.clone()));
+        manager.complete_reserved(operation.clone()).unwrap();
+        assert!(manager.is_connecting(operation.clone()));
+        manager.complete_connected(operation.clone(), lease()).unwrap();
+        assert!(!manager.is_connecting(operation.clone()));
+        assert_eq!(
+            manager
+                .complete_reserved(operation.clone())
+                .unwrap_err()
+                .code,
+            "controller_phase_invalid",
+            "connected 之后不得再回到待决阶段"
+        );
+
+        // 已连接时必须先显式断开才能发起新的连接（connect 拒绝 connected 阶段）。
+        manager.disconnect();
+        let operation = manager.connect("345-6789").unwrap();
+        assert!(manager.is_connecting(operation.clone()));
+        manager.disconnect();
+        assert!(
+            !manager.is_connecting(operation),
+            "用户已断开时在途失败不得覆盖状态"
         );
     }
 }

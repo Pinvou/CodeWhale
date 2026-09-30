@@ -115,7 +115,7 @@
       status: status,
       generation: generation || (starting ? current.generation : null),
       pairingCode: payload.pairingCode || (status === "waiting_for_pairing" ? current.pairingCode : null),
-      expiresAtMs: payload.expiresAtMs || null,
+      expiresAtMs: payload.expiresAtMs || payload.pairingExpiresAtMs || null,
       deviceName: payload.deviceName || current.deviceName,
       workspaces: Array.isArray(payload.workspaces) ? payload.workspaces.slice(0, 32) : current.workspaces,
       lastError: payload.error || null,

@@ -4,9 +4,6 @@
 //! the feature state machine and emit only its allowlisted, generation-bearing
 //! projection; no pairing, lease, token, key, or host-path value is persisted.
 
-use std::sync::OnceLock;
-use std::time::Instant;
-
 use serde::Deserialize;
 use tauri::{AppHandle, Emitter, State};
 
@@ -15,6 +12,10 @@ use crate::features::remote_control::controller::controlled::{
     ControlledDeviceManager, ControlledStateError, ControlledStatus, ControlledWorkspaceInfo,
     WorkspaceAuthorizationRequest,
 };
+use crate::features::remote_control::controller::relay_runtime::{
+    ControlledRelayWorker, controlled_monotonic_millis,
+};
+use crate::features::remote_control::RemoteControlManager;
 
 const STATUS_EVENT: &str = "desktop-remote-controlled-status";
 const UNSUPPORTED: &str = "desktop_remote_control_unsupported";
@@ -32,7 +33,7 @@ pub(crate) fn spawn_watchdog_reaper(app: AppHandle) {
             let status = {
                 use tauri::Manager as _;
                 app.state::<ControlledDeviceManager>()
-                    .poll_watchdog(monotonic_millis())
+                    .poll_watchdog(controlled_monotonic_millis())
             };
             // 仅在状态投影变化时广播，避免空闲时每秒刷事件。
             let projection = serde_json::to_string(&status).unwrap_or_default();
@@ -64,12 +65,6 @@ fn ensure_supported(manager: &ControlledDeviceManager) -> Result<(), String> {
     }
 }
 
-fn monotonic_millis() -> u64 {
-    static ORIGIN: OnceLock<Instant> = OnceLock::new();
-    let origin = ORIGIN.get_or_init(Instant::now);
-    u64::try_from(origin.elapsed().as_millis()).unwrap_or(u64::MAX)
-}
-
 fn workspace_request(
     input: DesktopControlledWorkspaceInput,
 ) -> Result<WorkspaceAuthorizationRequest, String> {
@@ -96,9 +91,10 @@ fn emit_status(app: &AppHandle, status: &ControlledStatus) {
 }
 
 #[tauri::command]
-pub fn desktop_remote_controlled_start(
+pub async fn desktop_remote_controlled_start(
     app: AppHandle,
     manager: State<'_, ControlledDeviceManager>,
+    relay: State<'_, RemoteControlManager>,
     device_name: Option<String>,
     workspaces: Vec<DesktopControlledWorkspaceInput>,
 ) -> Result<ControlledStatus, String> {
@@ -107,17 +103,47 @@ pub fn desktop_remote_controlled_start(
     manager
         .start(device_name.as_deref(), workspaces)
         .map_err(controlled_error)?;
-    let status = manager.status();
-    emit_status(&app, &status);
-    Ok(status)
+    let operation = manager
+        .current_operation()
+        .ok_or_else(|| "desktop_remote_generation_unavailable".to_owned())?;
+    let done = match ControlledRelayWorker::start(
+        app.clone(),
+        relay.inner().clone(),
+        operation.clone(),
+    )
+    .await
+    {
+        Ok(done) => done,
+        Err(error) => {
+            let bounded = error
+                .chars()
+                .filter(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-'))
+                .take(64)
+                .collect::<String>();
+            let status = manager
+                .fail_operation(operation, bounded)
+                .map_err(controlled_error)?;
+            emit_status(&app, &status);
+            return Err(error);
+        }
+    };
+    match done.await {
+        Ok(Ok(status)) => Ok(status),
+        Ok(Err(error)) => Err(error),
+        Err(_) => Err("pairing_registration_failed".to_owned()),
+    }
 }
 
 #[tauri::command]
 pub fn desktop_remote_controlled_refresh(
     app: AppHandle,
     manager: State<'_, ControlledDeviceManager>,
+    relay: State<'_, RemoteControlManager>,
 ) -> Result<ControlledStatus, String> {
     ensure_supported(&manager)?;
+    if let Some(generation) = manager.current_generation() {
+        relay.stop_controller_relay(&generation);
+    }
     manager.begin_refresh().map_err(controlled_error)?;
     let status = manager.status();
     emit_status(&app, &status);
@@ -128,8 +154,12 @@ pub fn desktop_remote_controlled_refresh(
 pub fn desktop_remote_controlled_stop(
     app: AppHandle,
     manager: State<'_, ControlledDeviceManager>,
+    relay: State<'_, RemoteControlManager>,
 ) -> Result<ControlledStatus, String> {
     ensure_supported(&manager)?;
+    if let Some(generation) = manager.current_generation() {
+        relay.stop_controller_relay(&generation);
+    }
     let status = manager.stop();
     emit_status(&app, &status);
     Ok(status)
@@ -139,8 +169,12 @@ pub fn desktop_remote_controlled_stop(
 pub fn desktop_remote_controlled_disconnect_now(
     app: AppHandle,
     manager: State<'_, ControlledDeviceManager>,
+    relay: State<'_, RemoteControlManager>,
 ) -> Result<ControlledStatus, String> {
     ensure_supported(&manager)?;
+    if let Some(generation) = manager.current_generation() {
+        relay.stop_controller_relay(&generation);
+    }
     let status = manager.disconnect_now();
     emit_status(&app, &status);
     Ok(status)
@@ -160,7 +194,7 @@ pub fn desktop_remote_controlled_poll_watchdog(
     manager: State<'_, ControlledDeviceManager>,
 ) -> Result<ControlledStatus, String> {
     ensure_supported(&manager)?;
-    let status = manager.poll_watchdog(monotonic_millis());
+    let status = manager.poll_watchdog(controlled_monotonic_millis());
     emit_status(&app, &status);
     Ok(status)
 }
@@ -223,6 +257,6 @@ mod tests {
     fn command_surface_has_stable_events_and_monotonic_clock() {
         assert_eq!(STATUS_EVENT, "desktop-remote-controlled-status");
         assert_eq!(UNSUPPORTED, "desktop_remote_control_unsupported");
-        assert!(monotonic_millis() <= monotonic_millis());
+        assert!(controlled_monotonic_millis() <= controlled_monotonic_millis());
     }
 }

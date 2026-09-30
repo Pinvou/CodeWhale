@@ -19,7 +19,8 @@ use zeroize::Zeroizing;
 
 use super::protocol::{
     LeaseContext, MAX_CONTROL_MESSAGE_BYTES, MAX_ENCRYPTED_WIRE_BYTES, RuntimeValidationContext,
-    SenderRole, validate_controller_message_json, validate_controller_runtime_message_json,
+    SenderRole, is_valid_identifier, validate_controller_message_json,
+    validate_controller_runtime_message_json,
 };
 use crate::features::remote_control::relay_client::{
     MAX_RELAY_FRAME_BYTES, ReconnectBackoff, relay_websocket_config,
@@ -98,11 +99,16 @@ impl TransportClock for MonotonicTransportClock {
 pub(crate) struct ControllerTransportConfig {
     pub(crate) relay_url: String,
     pub(crate) role: ControllerRole,
-    pub(crate) remote_control_generation: String,
+    /// E2E-02：`remote_control_generation` 由 B 拥有，A 只能在验签 transcript
+    /// 之后才知道它。sender 与 transport 任务共享同一个单元格，因此受控的
+    /// `bind_generation` 绑定结果对两侧同时生效。
+    pub(crate) remote_control_generation: Arc<RwLock<String>>,
     pub(crate) clock: Arc<dyn TransportClock>,
 }
 
 impl ControllerTransportConfig {
+    /// `remote_control_generation` 为空表示「尚未绑定」：只有 A 端在验签
+    /// transcript 之后才允许通过 `bind_generation` 一次性补齐。
     pub(crate) fn new(
         relay_url: impl Into<String>,
         role: ControllerRole,
@@ -111,9 +117,14 @@ impl ControllerTransportConfig {
         Self {
             relay_url: relay_url.into(),
             role,
-            remote_control_generation: remote_control_generation.into(),
+            remote_control_generation: Arc::new(RwLock::new(remote_control_generation.into())),
             clock: Arc::new(MonotonicTransportClock::default()),
         }
+    }
+
+    /// 当前生效的 generation；未绑定时为空串。
+    pub(crate) fn generation(&self) -> String {
+        self.remote_control_generation.read().clone()
     }
 }
 
@@ -161,6 +172,9 @@ pub(crate) enum ControllerSendError {
     FrameTooLarge { bytes: usize, limit: usize },
     ByteBudgetExhausted,
     QueueFull(FramePriority),
+    /// E2E-02：transport 的 `remote_control_generation` 已经被绑定过，或已被
+    /// 已安装租约锁定，无法再次绑定。
+    GenerationAlreadyBound,
     Closed,
 }
 
@@ -180,6 +194,9 @@ impl fmt::Display for ControllerSendError {
                 formatter.write_str("controller outbound byte budget exhausted")
             }
             Self::QueueFull(priority) => write!(formatter, "controller {priority:?} queue is full"),
+            Self::GenerationAlreadyBound => {
+                formatter.write_str("controller transport generation is already bound")
+            }
             Self::Closed => formatter.write_str("controller transport is closed"),
         }
     }
@@ -236,7 +253,7 @@ impl QueuedFrame {
 #[derive(Clone)]
 pub(crate) struct ControllerTransportSender {
     role: ControllerRole,
-    remote_control_generation: String,
+    remote_control_generation: Arc<RwLock<String>>,
     control_tx: mpsc::Sender<QueuedFrame>,
     business_tx: mpsc::Sender<QueuedFrame>,
     total_budget: Arc<Semaphore>,
@@ -247,11 +264,37 @@ pub(crate) struct ControllerTransportSender {
 }
 
 impl ControllerTransportSender {
+    /// E2E-02 受控绑定：A 端在验签 transcript 之后才有权把 transport 的
+    /// generation 固定为 B 的 generation。只允许一次，且必须在安装租约之前；
+    /// 空值、非法 id、重复绑定或已安装租约都失败关闭，绝不覆盖既有绑定。
+    pub(crate) fn bind_generation(&self, generation: &str) -> Result<(), ControllerSendError> {
+        if !is_valid_identifier(generation) {
+            return Err(ControllerSendError::InvalidFrame(
+                "remote_control_generation".into(),
+            ));
+        }
+        if self.lease.read().is_some() {
+            return Err(ControllerSendError::GenerationAlreadyBound);
+        }
+        let mut current = self.remote_control_generation.write();
+        if !current.is_empty() {
+            return Err(ControllerSendError::GenerationAlreadyBound);
+        }
+        *current = generation.to_owned();
+        Ok(())
+    }
+
+    /// 当前生效的 generation；未绑定时为空串。
+    pub(crate) fn generation(&self) -> String {
+        self.remote_control_generation.read().clone()
+    }
+
     pub(crate) fn install_authenticated_lease(
         &self,
         lease: AuthenticatedLease,
     ) -> Result<(), ControllerSendError> {
-        if lease.context.remote_control_generation != self.remote_control_generation {
+        let bound = self.generation();
+        if bound.is_empty() || lease.context.remote_control_generation != bound {
             return Err(ControllerSendError::InvalidFrame(
                 "remote_control_generation".into(),
             ));
@@ -450,7 +493,7 @@ impl ControllerTransportSender {
     }
 }
 
-struct ControllerTransportReceiver {
+pub(crate) struct ControllerTransportReceiver {
     control_rx: mpsc::Receiver<QueuedFrame>,
     business_rx: mpsc::Receiver<QueuedFrame>,
 }
@@ -471,9 +514,30 @@ impl ControllerTransportReceiver {
     }
 }
 
-fn transport_channels(
+/// 测试用便捷构造：新建一个独立 generation 单元格。生产调用必须走
+/// `spawn_controller_transport`，否则 transport 任务与配置不会共享绑定结果。
+#[cfg(test)]
+pub(crate) fn transport_channels(
     role: ControllerRole,
     remote_control_generation: impl Into<String>,
+    control_capacity: usize,
+    business_capacity: usize,
+    total_byte_budget: usize,
+    control_reserved_bytes: usize,
+) -> (ControllerTransportSender, ControllerTransportReceiver) {
+    transport_channels_shared(
+        role,
+        Arc::new(RwLock::new(remote_control_generation.into())),
+        control_capacity,
+        business_capacity,
+        total_byte_budget,
+        control_reserved_bytes,
+    )
+}
+
+fn transport_channels_shared(
+    role: ControllerRole,
+    remote_control_generation: Arc<RwLock<String>>,
     control_capacity: usize,
     business_capacity: usize,
     total_byte_budget: usize,
@@ -488,7 +552,7 @@ fn transport_channels(
     (
         ControllerTransportSender {
             role,
-            remote_control_generation: remote_control_generation.into(),
+            remote_control_generation,
             control_tx,
             business_tx,
             total_budget,
@@ -508,7 +572,7 @@ pub(crate) fn spawn_controller_transport(
     config: ControllerTransportConfig,
     sink: Arc<dyn ControllerEventSink>,
 ) -> ControllerTransportSender {
-    let (sender, receiver) = transport_channels(
+    let (sender, receiver) = transport_channels_shared(
         config.role,
         config.remote_control_generation.clone(),
         CONTROL_QUEUE_CAPACITY,
@@ -548,7 +612,7 @@ async fn run_transport(
                 // Nothing was put on the wire. Keep queued pairing frames for
                 // the next attempt instead of invalidating their epoch.
                 sink.emit(ControllerTransportEvent::Disconnected {
-                    remote_control_generation: config.remote_control_generation.clone(),
+                    remote_control_generation: config.generation(),
                     lease_epoch: current_lease_epoch(&sender),
                     error: format!("connect Relay: {error}"),
                 });
@@ -561,7 +625,7 @@ async fn run_transport(
         let (mut write, mut read) = socket.split();
         reconnect.reset();
         sink.emit(ControllerTransportEvent::Connected {
-            remote_control_generation: config.remote_control_generation.clone(),
+            remote_control_generation: config.generation(),
             lease_epoch: current_lease_epoch(&sender),
         });
 
@@ -613,7 +677,7 @@ async fn run_transport(
                         Ok(Message::Pong(payload)) => {
                             if let Some(millis) = rtt_sample(config.clock.as_ref(), payload.as_ref()) {
                                 sink.emit(ControllerTransportEvent::RttSample {
-                                    remote_control_generation: config.remote_control_generation.clone(),
+                                    remote_control_generation: config.generation(),
                                     millis,
                                 });
                             }
@@ -666,7 +730,7 @@ fn emit_disconnected(
     error: String,
 ) {
     let event = ControllerTransportEvent::Disconnected {
-        remote_control_generation: config.remote_control_generation.clone(),
+        remote_control_generation: config.generation(),
         lease_epoch: current_lease_epoch(sender),
         error,
     };
@@ -693,11 +757,7 @@ fn dispatch_inbound(
     let Ok(shape) = serde_json::from_str::<Value>(text) else {
         return;
     };
-    if shape
-        .get("remote_control_generation")
-        .and_then(Value::as_str)
-        .is_some_and(|generation| generation != config.remote_control_generation)
-    {
+    if !generation_admits(&config.generation(), &shape) {
         return;
     }
     let kind = shape.get("type").and_then(Value::as_str);
@@ -726,12 +786,23 @@ fn dispatch_inbound(
     }
     sink.emit(ControllerTransportEvent::Frame {
         priority,
-        remote_control_generation: config.remote_control_generation.clone(),
+        remote_control_generation: config.generation(),
         lease_epoch: lease
             .as_ref()
             .map(|value| value.context.lease_epoch.clone()),
         json: text.to_owned(),
     });
+}
+
+/// 未绑定 generation 的 transport（A 端 claim 之前）只按类型准入，绑定之后
+/// 一律按 B 的 generation 硬门过滤；缺少 generation 字段的同生成期报文仍然
+/// 允许通过，最终由各状态机自行校验绑定。
+fn generation_admits(bound: &str, value: &Value) -> bool {
+    bound.is_empty()
+        || value
+            .get("remote_control_generation")
+            .and_then(Value::as_str)
+            .is_none_or(|generation| generation == bound)
 }
 
 fn inbound_context_matches(value: &Value, lease: Option<&AuthenticatedLease>) -> bool {
@@ -975,6 +1046,112 @@ mod tests {
             ))
         );
         assert!(sender.authenticated_lease().is_none());
+    }
+
+    /// E2E-02 第 1 步：A 端在验签 transcript 之前不知道 B 的 generation，
+    /// 因此未绑定的 transport 只能靠受控 `bind_generation` 一次性补齐；
+    /// 空值/非法 id/重复绑定/已安装租约都必须失败关闭。
+    #[test]
+    fn generation_binding_is_controlled_and_one_shot() {
+        let (sender, _receiver) = transport_channels_shared(
+            ControllerRole::ControllerA,
+            Arc::new(RwLock::new(String::new())),
+            1,
+            1,
+            8192,
+            1024,
+        );
+        assert_eq!(sender.generation(), "");
+        // 未绑定前不得安装租约。
+        assert_eq!(
+            sender.install_authenticated_lease(lease("7", "generation-0001")),
+            Err(ControllerSendError::InvalidFrame(
+                "remote_control_generation".into()
+            ))
+        );
+        for invalid in ["", " leading-space", "generation with space", "-dash-first"] {
+            assert_eq!(
+                sender.bind_generation(invalid),
+                Err(ControllerSendError::InvalidFrame(
+                    "remote_control_generation".into()
+                )),
+                "{invalid:?} must fail closed"
+            );
+        }
+        sender.bind_generation("generation-0001").unwrap();
+        assert_eq!(sender.generation(), "generation-0001");
+        // 只允许绑定一次：重复绑定（即使同值）也必须拒绝。
+        assert_eq!(
+            sender.bind_generation("generation-0001"),
+            Err(ControllerSendError::GenerationAlreadyBound)
+        );
+        assert_eq!(
+            sender.bind_generation("generation-0002"),
+            Err(ControllerSendError::GenerationAlreadyBound)
+        );
+        assert_eq!(sender.generation(), "generation-0001");
+
+        // 绑定后可以用同一 generation 安装租约，旧 generation 仍被拒绝。
+        sender
+            .install_authenticated_lease(lease("7", "generation-0001"))
+            .unwrap();
+        assert!(sender.authenticated_lease().is_some());
+        assert_eq!(
+            sender.bind_generation("generation-0003"),
+            Err(ControllerSendError::GenerationAlreadyBound)
+        );
+        assert_eq!(
+            sender.install_authenticated_lease(lease("7", "generation-old")),
+            Err(ControllerSendError::InvalidFrame(
+                "remote_control_generation".into()
+            ))
+        );
+        assert_eq!(
+            sender
+                .authenticated_lease()
+                .map(|value| value.context.remote_control_generation),
+            Some("generation-0001".to_owned())
+        );
+    }
+
+    /// 共享单元格：sender 的绑定立刻对 transport 任务可见（同一 Arc）。
+    #[test]
+    fn generation_binding_is_shared_with_the_transport_task() {
+        let config = ControllerTransportConfig::new(
+            "wss://example.test/ws",
+            ControllerRole::ControllerA,
+            String::new(),
+        );
+        let (sender, _receiver) = transport_channels_shared(
+            config.role,
+            config.remote_control_generation.clone(),
+            1,
+            1,
+            8192,
+            1024,
+        );
+        assert_eq!(config.generation(), "");
+        sender.bind_generation("generation-0001").unwrap();
+        assert_eq!(config.generation(), "generation-0001");
+    }
+
+    /// 未绑定 generation 的 transport 只按类型准入（否则 A 端连
+    /// `controller_pairing_reserved` 都收不到）；绑定后一律硬门过滤。
+    #[test]
+    fn unbound_transport_admits_frames_then_filters_by_bound_generation() {
+        let frame = json!({
+            "v": 1,
+            "type": "controller_joined",
+            "remote_control_generation": "generation-0001"
+        });
+        assert!(generation_admits("", &frame));
+        assert!(generation_admits("generation-0001", &frame));
+        assert!(!generation_admits("generation-0002", &frame));
+        // 不带 generation 的同生成期报文仍由各状态机自行校验绑定。
+        assert!(generation_admits(
+            "generation-0001",
+            &json!({ "v": 2, "type": "desktop_endpoint_registered" })
+        ));
     }
 
     #[test]

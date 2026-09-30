@@ -43,6 +43,12 @@ pub(crate) struct ControlledOperation {
     generation: String,
 }
 
+impl ControlledOperation {
+    pub(crate) fn generation(&self) -> &str {
+        &self.generation
+    }
+}
+
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub(crate) struct ControlledStateError {
     pub(crate) code: &'static str,
@@ -154,7 +160,7 @@ pub(crate) struct ControlledStatus {
     code_mode_allowed: bool,
     watchdog_deadline_b: Option<u64>,
     watchdog_suspect: bool,
-    error_code: Option<&'static str>,
+    error_code: Option<String>,
 }
 
 impl std::fmt::Debug for ControlledStatus {
@@ -220,7 +226,7 @@ struct Inner {
     last_observed_now_b: u64,
     transport: Option<ControllerTransportSender>,
     workspaces: Vec<WorkspaceAuthorization>,
-    error_code: Option<&'static str>,
+    error_code: Option<String>,
 }
 
 #[derive(Default)]
@@ -300,6 +306,14 @@ impl ControlledDeviceManager {
             .registration_request_id
             .clone()
             .ok_or_else(|| ControlledStateError::new("registration_request_unavailable"))
+    }
+
+    pub(crate) fn current_operation(&self) -> Option<ControlledOperation> {
+        current_operation(&self.inner.lock())
+    }
+
+    pub(crate) fn current_generation(&self) -> Option<String> {
+        self.inner.lock().generation.clone()
     }
 
     pub(crate) fn complete_registration(
@@ -422,7 +436,7 @@ impl ControlledDeviceManager {
             if let Some(gate) = inner.resume_gate.as_mut() {
                 if gate.disconnect(now_b, deadline).is_err() {
                     inner.phase = ControlledStatusKind::Error;
-                    inner.error_code = Some("desktop_remote_resume_invalid");
+                    inner.error_code = Some("desktop_remote_resume_invalid".to_owned());
                 } else {
                     inner.phase = ControlledStatusKind::Reconnecting;
                 }
@@ -536,7 +550,7 @@ impl ControlledDeviceManager {
         clear_sensitive(&mut inner, u64::MAX, true);
         inner.device_name = None;
         inner.phase = ControlledStatusKind::Error;
-        inner.error_code = Some("desktop_remote_refresh_failed");
+        inner.error_code = Some("desktop_remote_refresh_failed".to_owned());
         drop(inner);
         self.notify_cleanup(&generation);
         Ok(self.status())
@@ -545,7 +559,7 @@ impl ControlledDeviceManager {
     pub(crate) fn fail_operation(
         &self,
         operation: ControlledOperation,
-        error_code: &'static str,
+        error_code: String,
     ) -> Result<ControlledStatus> {
         let mut inner = self.inner.lock();
         ensure_operation(&inner, &operation)?;
@@ -625,7 +639,7 @@ impl ControlledDeviceManager {
             if watchdog_state == Some(LivenessWatchdogState::Expired) {
                 clear_sensitive(&mut inner, now_b, true);
                 inner.phase = ControlledStatusKind::Error;
-                inner.error_code = Some("desktop_remote_watchdog_expired");
+                inner.error_code = Some("desktop_remote_watchdog_expired".to_owned());
                 expired = true;
             } else {
                 expired = false;
@@ -719,6 +733,19 @@ impl ControlledDeviceManager {
             .ok_or_else(|| ControlledStateError::new("desktop_remote_not_connected"))
     }
 
+    /// 本次代际是否仍处于注册/握手的待决阶段。在途 worker 的失败收尾据此判断
+    /// 能否投影 error：用户已显式停止/断开、或本代已被刷新取代时不得覆盖。
+    pub(crate) fn is_pending_handshake(&self, operation: ControlledOperation) -> bool {
+        let inner = self.inner.lock();
+        ensure_operation(&inner, &operation).is_ok()
+            && matches!(
+                inner.phase,
+                ControlledStatusKind::Reserving
+                    | ControlledStatusKind::WaitingConnection
+                    | ControlledStatusKind::SafetyHandshake
+            )
+    }
+
     pub(crate) fn register_cleanup_sink(&self, sink: Arc<dyn ControlledCleanupSink>) {
         self.cleanup_sinks.lock().push(sink);
     }
@@ -736,7 +763,7 @@ impl ControlledDeviceManager {
             clear_sensitive(&mut inner, u64::MAX, clear_workspaces);
             inner.device_name = None;
             inner.phase = phase;
-            inner.error_code = (phase == ControlledStatusKind::Error).then_some(error_code);
+            inner.error_code = (phase == ControlledStatusKind::Error).then(|| error_code.to_owned());
         }
         self.notify_cleanup(&generation);
         self.status()
@@ -879,7 +906,7 @@ fn status_locked(inner: &Inner) -> ControlledStatus {
             .as_ref()
             .and_then(|watchdog| watchdog.deadline_b()),
         watchdog_suspect: watchdog_state == Some(LivenessWatchdogState::Suspect),
-        error_code: inner.error_code,
+        error_code: inner.error_code.clone(),
     }
 }
 
@@ -1111,7 +1138,7 @@ mod tests {
         );
         let status = manager.poll_watchdog(31_000);
         assert_eq!(status.status, ControlledStatusKind::Error);
-        assert_eq!(status.error_code, Some("desktop_remote_watchdog_expired"));
+        assert_eq!(status.error_code.as_deref(), Some("desktop_remote_watchdog_expired"));
         assert_eq!(status.workspace_count, 0);
         assert_eq!(cleanup.0.load(Ordering::SeqCst), 1);
     }
@@ -1168,7 +1195,7 @@ mod tests {
         let refresh = manager.begin_refresh().unwrap();
         let status = manager.fail_refresh(refresh).unwrap();
         assert_eq!(status.status, ControlledStatusKind::Error);
-        assert_eq!(status.error_code, Some("desktop_remote_refresh_failed"));
+        assert_eq!(status.error_code.as_deref(), Some("desktop_remote_refresh_failed"));
         assert_eq!(status.workspace_count, 0);
         assert_eq!(cleanup.0.load(Ordering::SeqCst), 1);
         assert_eq!(
@@ -1191,5 +1218,39 @@ mod tests {
             assert!(validate_pairing_code(code).is_err(), "{code}");
         }
         assert!(validate_pairing_code("2345678").is_ok());
+    }
+
+    /// E2E-02：只有注册/握手待决的代际才允许在途 worker 把状态收尾为 error；
+    /// 用户停止/断开（或已连接）之后不得覆盖既有投影。
+    #[test]
+    fn pending_handshake_is_the_only_owner_of_failure_projection() {
+        let manager = ControlledDeviceManager::default();
+        let operation = manager.start(Some("Studio PC"), Vec::new()).unwrap();
+        assert!(manager.is_pending_handshake(operation.clone()));
+        register(&manager, &operation);
+        assert!(manager.is_pending_handshake(operation.clone()));
+        manager.mark_claimed(operation.clone()).unwrap();
+        assert!(manager.is_pending_handshake(operation.clone()));
+        manager
+            .complete_connected(operation.clone(), lease(&operation.generation))
+            .unwrap();
+        assert!(
+            !manager.is_pending_handshake(operation.clone()),
+            "已连接后不得再投影握手失败"
+        );
+
+        manager.stop();
+        assert!(
+            !manager.is_pending_handshake(operation.clone()),
+            "用户已停止时在途失败不得覆盖状态"
+        );
+        assert_eq!(
+            manager
+                .fail_operation(operation, "invalid_message".to_owned())
+                .unwrap_err()
+                .code,
+            "desktop_remote_stale_result",
+            "停止会清空 generation，在途结果被状态机判定为陈旧"
+        );
     }
 }
