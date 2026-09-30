@@ -1508,9 +1508,7 @@ pub(crate) fn load_relay_trust_config(
     // 使用户不再需要手工配置这两个变量；两者都缺失才失败关闭。
     let profile = crate::features::remote_control::manager::active_endpoint_profile();
     let key_id = lookup("PINVOU_REMOTE_RELAY_SIGNING_KEY_ID")
-        .or_else(|| {
-            (!profile.signing_key_id.is_empty()).then(|| profile.signing_key_id.to_owned())
-        })
+        .or_else(|| (!profile.signing_key_id.is_empty()).then(|| profile.signing_key_id.to_owned()))
         .filter(|value| !value.trim().is_empty())
         .ok_or_else(|| {
             ControllerCryptoError::new("relay_trust_unconfigured", "relay_signing_key_id")
