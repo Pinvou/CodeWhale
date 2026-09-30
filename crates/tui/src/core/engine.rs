@@ -8196,6 +8196,16 @@ pub(super) fn file_tool_ask_rule_decision(
 /// Evaluate the persisted file ask/allow/deny rules without requiring a full
 /// [`EngineConfig`]. This keeps protocol adapters on the canonical path and
 /// preserves the all-targets-must-match rule for multi-file patches.
+///
+/// Disclosed residual (pre-existing at base, round-24 P3): the file lane
+/// judges the operand's RAW spelling against the declared workspace — it
+/// canonicalizes nothing — while execution canonicalizes. A `..`-spelled
+/// operand that execution lands outside the declared roots therefore keeps
+/// an ABSOLUTE-path deny rule inert here (the per-root relative
+/// normalization cannot spell it, and the absolute fallback compares the
+/// raw spelling). Fail-closed in practice through the other gate layers
+/// (sandbox boundary + repo law judge the landing path); pinned as known
+/// behavior, not silently shipped.
 pub(crate) fn file_tool_ask_rule_decision_for_policy(
     exec_policy_engine: &codewhale_execpolicy::ExecPolicyEngine,
     tool_name: &str,

@@ -1031,6 +1031,18 @@ fn map_session_err(id: &str, err: std::io::Error, action: &str) -> ApiError {
 }
 
 fn map_resume_thread_create_err(err: anyhow::Error) -> ApiError {
+    // Intake validation failures are client errors (round-24 P3): the
+    // resume lane forwards the SAVED session's workspace/roots into
+    // `create_thread`, whose validating intake can reject them — a
+    // hand-edited or migrated session row with a `/`-rooted or over-cap
+    // root set must answer 400 with the reason, exactly like the `/thread`
+    // and `/tool` lanes, not a server-fault 500.
+    if err
+        .downcast_ref::<codewhale_core::IntakeValidationError>()
+        .is_some()
+    {
+        return ApiError::bad_request(format!("Failed to create thread: {err}"));
+    }
     let reason = err.to_string();
     let message = format!("Failed to create thread: {reason}");
     if reason.starts_with("saved session has an empty provider identity")
@@ -1146,5 +1158,26 @@ mod resume_thread_error_tests {
             "Failed to save runtime thread: permission denied"
         ));
         assert_eq!(storage.status, StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[test]
+    fn intake_validation_errors_answer_400_like_the_thread_lane() {
+        // Round-24 P3: the resume lane forwards the saved session's root
+        // set into create_thread's validating intake; a rejected row (here
+        // a `/`-rooted set read back from a hand-edited session file) is a
+        // client-fixable record, not a server fault — the mapping must
+        // match the /thread and /tool lanes instead of the old 500.
+        let err = codewhale_core::validate_workspace_roots(
+            std::path::Path::new("/ws"),
+            &[std::path::PathBuf::from("/")],
+        )
+        .expect_err("a filesystem-root declaration is rejected at intake");
+        let mapped = map_resume_thread_create_err(err);
+        assert_eq!(mapped.status, StatusCode::BAD_REQUEST);
+        assert!(
+            mapped.message.contains("filesystem root"),
+            "the 400 body carries the intake reason: {}",
+            mapped.message
+        );
     }
 }

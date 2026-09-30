@@ -12417,6 +12417,23 @@ fn persist_exec_session(
     session_id: Option<&str>,
     total_tokens: u64,
 ) -> Result<String> {
+    // Round-24 P3 (behavior residual closed): a legacy relative-workspace
+    // row resumed through this lane used to be re-stamped verbatim, so the
+    // exec persist durably MINTED relative spellings a fresh `--workspace`
+    // could never declare (intake absolutizes). Absolutize against the
+    // process cwd here — the row converts to an absolute spelling on its
+    // next persist instead of propagating.
+    let workspace_abs;
+    let workspace: &Path = if workspace.is_absolute() {
+        workspace
+    } else {
+        workspace_abs = crate::mcp::normalize_path_components(
+            &std::env::current_dir()
+                .context("failed to resolve current directory for exec persist")?
+                .join(workspace),
+        );
+        workspace_abs.as_path()
+    };
     let manager =
         SessionManager::default_location().context("could not open session manager for save")?;
     let mut saved = if let Some(id) = session_id.filter(|id| !id.trim().is_empty()) {

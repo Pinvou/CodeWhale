@@ -5513,8 +5513,12 @@ impl RuntimeThreadManager {
         // super-root (`/`, `/..`), an ancestor of the primary, or a
         // non-absolute entry (`~/shared`) each widens — or silently shrinks —
         // the sandbox the caller thinks it declared. The primary slot was
-        // already guarded non-empty above; validation also requires it to be
-        // absolute, since every containment check resolves absolute paths.
+        // already guarded non-empty above; a RELATIVE primary is not errored
+        // here — the validator fail-closed collapses its set to empty (the
+        // round-17 decision: every boundary consumer then treats the row as
+        // single-root on the degenerate primary and admits no writes through
+        // it), recorded for accuracy because "requires it to be absolute"
+        // overclaimed (round-24 P3).
         let workspace_roots =
             codewhale_core::validate_workspace_roots(&workspace, &req.workspace_roots)?;
         let thread = ThreadRecord {
@@ -5937,9 +5941,13 @@ impl RuntimeThreadManager {
                 changes.insert("workspace".to_string(), json!(workspace));
                 if !changes.contains_key("workspace_roots") {
                     // A workspace-only change keeps the additional roots and
-                    // hands the primary slot to the new workspace. The moved
-                    // primary re-declares the set: an additional root that
-                    // would end up an ancestor of the new primary (or a
+                    // hands the primary slot to the new workspace — except a
+                    // degenerate relative OLD primary, whose stored set the
+                    // intake collapsed to empty: there are no additional
+                    // roots to keep, and the row stays single-root on the new
+                    // primary (recorded for accuracy, round-24 P3). The
+                    // moved primary re-declares the set: an additional root
+                    // that would end up an ancestor of the new primary (or a
                     // super-root inherited from a legacy row) is a widening
                     // decision and is rejected, not admitted silently.
                     let additional: Vec<PathBuf> = thread
@@ -6153,6 +6161,25 @@ impl RuntimeThreadManager {
         forked.updated_at = now;
         forked.latest_turn_id = None;
         forked.archived = false;
+        // A fork MINTS a new row, so the cloned set passes the same
+        // validating intake the create lane applies (round-24 P3, closing
+        // the "a bare fork fails loud" over-generalization): a poisoned
+        // source row (a super-root, a primary-ancestor, or an over-cap set
+        // hand-edited into the store) is rejected instead of duplicated
+        // into a fresh id. A degenerate relative primary collapses to the
+        // empty set fail-closed, exactly like create.
+        let carried: Vec<PathBuf> = source
+            .workspace_roots
+            .iter()
+            .filter(|root| **root != source.workspace)
+            .cloned()
+            .collect();
+        forked.workspace_roots =
+            codewhale_core::validate_workspace_roots(&source.workspace, &carried).map_err(
+                |reason| {
+                    anyhow::anyhow!("source thread root set no longer passes intake: {reason}")
+                },
+            )?;
 
         let source_turns = self.store.list_turns_for_thread(&source.id)?;
         let mut cloned_records = Vec::with_capacity(source_turns.len());

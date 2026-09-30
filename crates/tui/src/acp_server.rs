@@ -1502,15 +1502,22 @@ impl AcpServer {
     }
 
     fn new_session(&mut self, params: Value) -> std::result::Result<Value, AcpError> {
-        // An explicit empty cwd would build the tool registry over the
-        // vacuous containment root (`starts_with("")` accepts every path);
-        // reject it rather than falling back to the default, so a client
-        // typo cannot silently re-anchor the session.
+        // An explicit empty or RELATIVE cwd would build the tool registry
+        // over the vacuous containment root (`starts_with("")` accepts
+        // every path) or over a root no boundary consumer can resolve (a
+        // relative workspace cannot head a root set — the same intake rule
+        // as every other lane); reject both rather than falling back to the
+        // default, so a client typo cannot silently re-anchor or cripple
+        // the session (round-24 P3: the empty-string guard's own rationale
+        // always covered the relative spelling).
         let cwd = match params.get("cwd").and_then(Value::as_str) {
             Some("") => {
                 return Err(AcpError::invalid_params(
                     "session/new cwd must not be empty",
                 ));
+            }
+            Some(raw) if !std::path::Path::new(raw).is_absolute() => {
+                return Err(AcpError::invalid_params("session/new cwd must be absolute"));
             }
             Some(raw) => PathBuf::from(raw),
             None => self.default_cwd.clone(),
