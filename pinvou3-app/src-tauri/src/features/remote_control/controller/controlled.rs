@@ -233,14 +233,22 @@ impl std::fmt::Debug for ControlledResumeMaterial {
 /// E2E-06：B 端恢复相位推进（worker 按 Relay/A 的帧顺序调用）。
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum ControlledResumeStep<'a> {
-    Provisional { activation_id: &'a str },
-    Confirmed { activation_id: &'a str },
-    ActivationAcknowledged { activation_id: &'a str },
+    Provisional {
+        activation_id: &'a str,
+    },
+    Confirmed {
+        activation_id: &'a str,
+    },
+    ActivationAcknowledged {
+        activation_id: &'a str,
+    },
     PostActivationLiveness {
         activation_id: &'a str,
         liveness_epoch_b: &'a str,
     },
-    ReadyAcknowledged { activation_id: &'a str },
+    ReadyAcknowledged {
+        activation_id: &'a str,
+    },
 }
 
 /// B 端恢复失败时投影的本地错误码（有界，UI 直接显示为失败终态）。
@@ -537,10 +545,7 @@ impl ControlledDeviceManager {
     }
 
     /// E2E-06：开启一次存活挑战（生成 + 登记）并返回 (challenge_id, challenge_b64)。
-    pub(crate) fn begin_liveness_challenge(
-        &self,
-        now_b: u64,
-    ) -> Result<(String, String)> {
+    pub(crate) fn begin_liveness_challenge(&self, now_b: u64) -> Result<(String, String)> {
         let (challenge_id, challenge_b64) = super::liveness::new_liveness_challenge()
             .map_err(|_| ControlledStateError::new("liveness_challenge_invalid"))?;
         {
@@ -796,9 +801,9 @@ impl ControlledDeviceManager {
             .and_then(|watchdog| watchdog.deadline_b());
         let advanced = match inner.resume_gate.as_mut() {
             Some(gate) => match step {
-                ControlledResumeStep::Provisional { activation_id } => {
-                    gate.accept_provisional(activation_id, now_b, deadline).is_ok()
-                }
+                ControlledResumeStep::Provisional { activation_id } => gate
+                    .accept_provisional(activation_id, now_b, deadline)
+                    .is_ok(),
                 ControlledResumeStep::Confirmed { activation_id } => {
                     gate.confirm(activation_id, now_b, deadline).is_ok()
                 }
@@ -809,16 +814,11 @@ impl ControlledDeviceManager {
                     activation_id,
                     liveness_epoch_b,
                 } => gate
-                    .send_post_activation_liveness(
-                        activation_id,
-                        liveness_epoch_b,
-                        now_b,
-                        deadline,
-                    )
+                    .send_post_activation_liveness(activation_id, liveness_epoch_b, now_b, deadline)
                     .is_ok(),
-                ControlledResumeStep::ReadyAcknowledged { activation_id } => {
-                    gate.acknowledge_ready(activation_id, now_b, deadline).is_ok()
-                }
+                ControlledResumeStep::ReadyAcknowledged { activation_id } => gate
+                    .acknowledge_ready(activation_id, now_b, deadline)
+                    .is_ok(),
             },
             None => false,
         };
@@ -834,7 +834,6 @@ impl ControlledDeviceManager {
         }
         Ok(status_locked(&inner))
     }
-
 
     pub(crate) fn stop(&self) -> ControlledStatus {
         self.terminate_local(
@@ -1049,7 +1048,8 @@ impl ControlledDeviceManager {
             clear_sensitive(&mut inner, u64::MAX, clear_workspaces);
             inner.device_name = None;
             inner.phase = phase;
-            inner.error_code = (phase == ControlledStatusKind::Error).then(|| error_code.to_owned());
+            inner.error_code =
+                (phase == ControlledStatusKind::Error).then(|| error_code.to_owned());
         }
         self.notify_cleanup(&generation);
         self.status()
@@ -1461,10 +1461,19 @@ mod tests {
                 11_000,
             ),
         ] {
-            manager.advance_resume(operation.clone(), step, now_b).unwrap();
+            manager
+                .advance_resume(operation.clone(), step, now_b)
+                .unwrap();
         }
         let resumed = manager
-            .complete_resumed(operation.clone(), activation, 12_000, "live-a-2", [3; 32], [4; 32])
+            .complete_resumed(
+                operation.clone(),
+                activation,
+                12_000,
+                "live-a-2",
+                [3; 32],
+                [4; 32],
+            )
             .unwrap();
         assert_eq!(resumed.status, ControlledStatusKind::Connected);
         assert_eq!(manager.live_liveness_epoch(), Some("live-a-2".to_owned()));
@@ -1527,7 +1536,10 @@ mod tests {
         );
         let status = manager.poll_watchdog(31_000);
         assert_eq!(status.status, ControlledStatusKind::Error);
-        assert_eq!(status.error_code.as_deref(), Some("desktop_remote_watchdog_expired"));
+        assert_eq!(
+            status.error_code.as_deref(),
+            Some("desktop_remote_watchdog_expired")
+        );
         assert_eq!(status.workspace_count, 0);
         assert_eq!(cleanup.0.load(Ordering::SeqCst), 1);
     }
@@ -1633,7 +1645,10 @@ mod tests {
         let refresh = manager.begin_refresh().unwrap();
         let status = manager.fail_refresh(refresh).unwrap();
         assert_eq!(status.status, ControlledStatusKind::Error);
-        assert_eq!(status.error_code.as_deref(), Some("desktop_remote_refresh_failed"));
+        assert_eq!(
+            status.error_code.as_deref(),
+            Some("desktop_remote_refresh_failed")
+        );
         assert_eq!(status.workspace_count, 0);
         assert_eq!(cleanup.0.load(Ordering::SeqCst), 1);
         assert_eq!(
@@ -1687,11 +1702,11 @@ mod tests {
         assert_eq!(status.status, ControlledStatusKind::Stopped);
         assert_eq!(status.workspace_count, 1, "用户工作区授权必须保留");
         assert_eq!(status.controller_device_name, None);
+        assert_eq!(status.pairing_code, None, "远端断开后不得残留连接码");
         assert_eq!(
-            status.pairing_code, None,
-            "远端断开后不得残留连接码"
+            manager.live_lease().unwrap_err().code,
+            "desktop_remote_not_connected"
         );
-        assert_eq!(manager.live_lease().unwrap_err().code, "desktop_remote_not_connected");
         assert_eq!(
             manager.accept_remote_disconnect().unwrap_err().code,
             "desktop_remote_phase_invalid"
