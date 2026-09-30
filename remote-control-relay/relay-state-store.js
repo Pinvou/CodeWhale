@@ -1153,7 +1153,10 @@ export class RelayStateStore {
   async #loadCandidate(path) {
     try {
       const metadata = await this.#fs.lstat(path);
-      if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.size > this.#maxBytes) {
+      if (!metadata.isFile() || metadata.isSymbolicLink()) {
+        fail("relay_state_file_unsafe");
+      }
+      if (metadata.size > this.#maxBytes) {
         return { kind: "invalid" };
       }
       const contents = await this.#readBoundedFile(path, this.#maxBytes, "relay_state_file_unsafe");
