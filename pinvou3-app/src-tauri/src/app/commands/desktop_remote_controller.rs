@@ -11,8 +11,12 @@ use crate::features::remote_control::controller::controlling::{
     ControllingDeviceManager, ControllingLeaseInfo, ControllingStateError, ControllingStatus,
     RemoteHistoryEntry,
 };
+use crate::features::remote_control::controller::controlling_service::{
+    CONTROLLER_STATUS_EVENT, connect_controlling_device,
+};
+use crate::features::remote_control::RemoteControlManager;
 
-const STATUS_EVENT: &str = "desktop-remote-controller-status";
+const STATUS_EVENT: &str = CONTROLLER_STATUS_EVENT;
 const UNSUPPORTED: &str = "desktop_remote_control_unsupported";
 
 #[derive(Debug, Deserialize)]
@@ -39,16 +43,17 @@ fn emit_status(app: &AppHandle, status: &ControllingStatus) {
 }
 
 #[tauri::command]
-pub fn desktop_remote_controller_connect(
+pub async fn desktop_remote_controller_connect(
     app: AppHandle,
     manager: State<'_, ControllingDeviceManager>,
+    relay: State<'_, RemoteControlManager>,
     code: String,
 ) -> Result<ControllingStatus, String> {
     ensure_supported(&manager)?;
-    manager.connect(&code).map_err(controlling_error)?;
+    let operation = manager.connect(&code).map_err(controlling_error)?;
     let status = manager.status();
     emit_status(&app, &status);
-    Ok(status)
+    connect_controlling_device(&app, &manager, relay.inner(), operation).await
 }
 
 #[tauri::command]

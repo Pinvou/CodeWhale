@@ -1525,6 +1525,8 @@ pub(crate) struct LeaseInstallValidationContext {
     expected_controller_connection_identity: String,
     negotiated_capabilities: Vec<String>,
     capability_hash: String,
+    handshake_public_key_a_b64: String,
+    handshake_public_key_b_b64: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1542,6 +1544,8 @@ pub(crate) struct ParsedTranscript {
     signature_algorithm: String,
     signature_preimage: Vec<u8>,
     relay_signature: Vec<u8>,
+    handshake_public_key_a_b64: String,
+    handshake_public_key_b_b64: String,
 }
 
 pub(crate) struct ParsedTranscriptParts {
@@ -1558,6 +1562,8 @@ pub(crate) struct ParsedTranscriptParts {
     pub(crate) signature_algorithm: String,
     pub(crate) signature_preimage: Vec<u8>,
     pub(crate) relay_signature: Vec<u8>,
+    pub(crate) handshake_public_key_a_b64: String,
+    pub(crate) handshake_public_key_b_b64: String,
 }
 
 impl ParsedTranscript {
@@ -1576,6 +1582,8 @@ impl ParsedTranscript {
             signature_algorithm: self.signature_algorithm,
             signature_preimage: self.signature_preimage,
             relay_signature: self.relay_signature,
+            handshake_public_key_a_b64: self.handshake_public_key_a_b64,
+            handshake_public_key_b_b64: self.handshake_public_key_b_b64,
         }
     }
 }
@@ -1594,7 +1602,69 @@ impl LeaseInstallValidationContext {
                 .to_owned(),
             negotiated_capabilities: verified.negotiated_capabilities().to_vec(),
             capability_hash: verified.capability_hash().to_owned(),
+            handshake_public_key_a_b64: verified.local_handshake_public_key().to_owned(),
+            handshake_public_key_b_b64: verified.peer_handshake_public_key().to_owned(),
         }
+    }
+
+    // E2E-02 所需的冻结契约增量：A 端完成 transcript 验签后必须能读取被认证的
+    // 上下文来构造握手绑定。这里只暴露握手与协商所需的最小集合，不泄露签名材料。
+    pub(crate) fn request_id(&self) -> &str {
+        &self.request_id
+    }
+
+    pub(crate) fn pairing_id(&self) -> &str {
+        &self.expected_pairing_id
+    }
+
+    pub(crate) fn reservation_id(&self) -> &str {
+        &self.reservation_id
+    }
+
+    pub(crate) fn relay_epoch(&self) -> &str {
+        &self.relay_epoch
+    }
+
+    pub(crate) fn remote_control_generation(&self) -> &str {
+        &self.remote_control_generation
+    }
+
+    pub(crate) fn controller_connection_identity(&self) -> &str {
+        &self.expected_controller_connection_identity
+    }
+
+    pub(crate) fn negotiated_capabilities(&self) -> &[String] {
+        &self.negotiated_capabilities
+    }
+
+    /// E2E-02：A 端用本端公钥确认 transcript 覆盖了自己提交的密钥。
+    pub(crate) fn local_handshake_public_key(&self) -> &str {
+        &self.handshake_public_key_a_b64
+    }
+
+    /// E2E-02：对端（B）握手公钥，用于 ECDH 派生会话密钥。
+    pub(crate) fn peer_handshake_public_key_b64(&self) -> &str {
+        &self.handshake_public_key_b_b64
+    }
+
+    /// Transcript hash as raw bytes for the handshake KDF. Hex is validated on
+    /// the wire, so a malformed value can only come from a programming error.
+    pub(crate) fn transcript_hash_bytes(&self) -> Result<[u8; 32]> {
+        let mut output = [0_u8; 32];
+        let bytes = self.transcript_hash.as_bytes();
+        if bytes.len() != 64 {
+            return Err(ControllerProtocolError::new(
+                "invalid_field",
+                "transcript_hash",
+            ));
+        }
+        for (index, chunk) in bytes.chunks_exact(2).enumerate() {
+            let text = std::str::from_utf8(chunk)
+                .map_err(|_| ControllerProtocolError::new("invalid_field", "transcript_hash"))?;
+            output[index] = u8::from_str_radix(text, 16)
+                .map_err(|_| ControllerProtocolError::new("invalid_field", "transcript_hash"))?;
+        }
+        Ok(output)
     }
 }
 
@@ -2224,16 +2294,22 @@ fn validate_identifier(value: &Value, field: &str) -> Result<()> {
     let Some(text) = value.as_str() else {
         return Err(ControllerProtocolError::new("invalid_field", field));
     };
-    let valid = !text.is_empty()
+    if !is_valid_identifier(text) {
+        return Err(ControllerProtocolError::new("invalid_field", field));
+    }
+    Ok(())
+}
+
+/// 冻结协议标识符语法：首字符为 ASCII 字母数字，其后只允许字母数字与
+/// `._:-`，长度不超过 `MAX_ID_CHARS`。E2E-02 的 `bind_generation` 与运行时
+/// generation 门共用同一份规则，避免出现只在一侧收紧的语法。
+pub(crate) fn is_valid_identifier(text: &str) -> bool {
+    !text.is_empty()
         && text.len() <= MAX_ID_CHARS
         && text.as_bytes()[0].is_ascii_alphanumeric()
         && text
             .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || b"._:-".contains(&byte));
-    if !valid {
-        return Err(ControllerProtocolError::new("invalid_field", field));
-    }
-    Ok(())
+            .all(|byte| byte.is_ascii_alphanumeric() || b"._:-".contains(&byte))
 }
 
 fn validate_uint(value: &Value, field: &str, max: u64) -> Result<()> {
@@ -3282,6 +3358,18 @@ pub(crate) fn parse_controller_pairing_transcript(input: &str) -> Result<ParsedT
         .decode(object_string(message, "relay_signature_b64", "message")?)
         .map_err(|_| ControllerProtocolError::new("invalid_field", "relay_signature_b64"))?;
     let transcript = as_object(transcript, "transcript")?;
+    // E2E-02：签名覆盖整个 transcript，因此验签后这两个公钥字段可信；
+    // 这里先按 32 字节 base64 严格校验，畸形直接失败关闭。
+    let handshake_key = |field: &'static str| -> Result<String> {
+        let encoded = object_string(transcript, field, "transcript")?;
+        let raw = base64::engine::general_purpose::STANDARD
+            .decode(encoded.as_bytes())
+            .map_err(|_| ControllerProtocolError::new("invalid_field", field))?;
+        if raw.len() != 32 {
+            return Err(ControllerProtocolError::new("invalid_field", field));
+        }
+        Ok(encoded.to_owned())
+    };
     Ok(ParsedTranscript {
         request_id: object_string(message, "request_id", "message")?.to_owned(),
         expected_pairing_id: object_string(transcript, "pairing_id", "transcript")?.to_owned(),
@@ -3312,6 +3400,8 @@ pub(crate) fn parse_controller_pairing_transcript(input: &str) -> Result<ParsedT
         signature_algorithm: object_string(message, "signature_algorithm", "message")?.to_owned(),
         signature_preimage,
         relay_signature,
+        handshake_public_key_a_b64: handshake_key("handshake_public_key_a_b64")?,
+        handshake_public_key_b_b64: handshake_key("handshake_public_key_b_b64")?,
     })
 }
 

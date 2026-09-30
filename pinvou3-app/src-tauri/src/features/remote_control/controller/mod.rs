@@ -1,6 +1,10 @@
 pub(crate) mod capabilities;
 pub(crate) mod controlled;
+pub(crate) mod controlled_handshake;
 pub(crate) mod controlling;
+pub(crate) mod controlling_handshake;
+pub(crate) mod controlling_runtime;
+pub(crate) mod controlling_service;
 pub(crate) mod crypto;
 pub(crate) mod history;
 pub(crate) mod journal;
@@ -8,8 +12,11 @@ pub(crate) mod liveness;
 pub(crate) mod permission;
 pub(crate) mod protocol;
 pub(crate) mod relay_transport;
+pub(crate) mod relay_runtime;
 pub(crate) mod resume;
 pub(crate) mod task;
 pub(crate) mod telemetry;
 pub(crate) mod temporary_model;
+#[cfg(test)]
+pub(crate) mod test_support;
 pub(crate) mod transfer;

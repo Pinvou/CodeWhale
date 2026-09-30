@@ -612,6 +612,18 @@ pub(super) fn remote_relay_ws_url() -> String {
     super::DEFAULT_RELAY_WS_URL.to_string()
 }
 
+/// A 端控制通道的 Relay 地址（E2E-02）：与 WebUI v2 的 desktop endpoint 共用
+/// 同一份配置，并允许开发期用 `PINVOU_REMOTE_RUNTIME_RELAY_WS_URL` 临时覆盖
+/// 本条连接的地址（不写回持久配置，避免把普通链路指向测试 Relay）。
+pub(super) fn controller_relay_ws_url() -> String {
+    if let Ok(url) = std::env::var("PINVOU_REMOTE_RUNTIME_RELAY_WS_URL") {
+        if !url.trim().is_empty() {
+            return url;
+        }
+    }
+    remote_relay_ws_url()
+}
+
 /// Development/manual-test override for the active connection only. Unlike
 /// `PINVOU_REMOTE_RELAY_WS_URL`, this value is never written to the persistent
 /// Web access config, so testing a local relay cannot strand the normal link.

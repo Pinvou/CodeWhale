@@ -40,12 +40,23 @@ test('late controlled-device results never revive an older intent', () => {
   });
   assert.equal(fresh.controlledDevice.status, 'waiting_for_pairing');
   assert.equal(fresh.controlledDevice.pairingCode, '3456789');
+  assert.equal(fresh.controlledDevice.expiresAtMs, null);
 
   const oldGeneration = logic.applyControlledStatus(fresh, {
     status: 'connected',
     generation: 'gen-1',
   });
   assert.equal(oldGeneration, fresh, 'a replaced generation must not overwrite state');
+});
+
+test('a relay registration result carries the pairing expiry into the UI state', () => {
+  const state = logic.applyControlledStatus(logic.createState(), {
+    status: 'waiting_for_pairing',
+    pairingCode: '3456789',
+    pairingExpiresAtMs: 1_800_000_000_000,
+    generation: 'gen-1',
+  });
+  assert.equal(state.controlledDevice.expiresAtMs, 1_800_000_000_000);
 });
 
 test('a stopped controlled device clears the pairing code', () => {

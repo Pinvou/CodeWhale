@@ -97,7 +97,7 @@
         status: payload.kind || payload.status || "idle",
         generation: payload.remoteControlGeneration || payload.generation || null,
         pairingCode: payload.pairingCode || null,
-        expiresAtMs: payload.expiresAtMs || null,
+        expiresAtMs: payload.expiresAtMs || payload.pairingExpiresAtMs || null,
         deviceName: payload.deviceName || null,
         workspaces: payload.workspaces || null,
         error: payload.lastError || null,
