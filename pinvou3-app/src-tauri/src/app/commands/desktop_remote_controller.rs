@@ -7,16 +7,16 @@
 use serde::Deserialize;
 use tauri::{AppHandle, Emitter, State};
 
+use crate::features::remote_control::RemoteControlManager;
 use crate::features::remote_control::controller::controlling::{
     ControllingDeviceManager, ControllingLeaseInfo, ControllingStateError, ControllingStatus,
     RemoteHistoryEntry,
 };
-use crate::features::remote_control::controller::controlling_session::ControllingSessionManager;
 use crate::features::remote_control::controller::controlling_service::{
     CONTROLLER_STATUS_EVENT, connect_controlling_device,
 };
+use crate::features::remote_control::controller::controlling_session::ControllingSessionManager;
 use crate::features::remote_control::controller::relay_runtime::log_controller_event;
-use crate::features::remote_control::RemoteControlManager;
 use std::sync::Arc;
 
 const STATUS_EVENT: &str = CONTROLLER_STATUS_EVENT;
@@ -59,10 +59,7 @@ pub async fn desktop_remote_controller_connect(
     sessions.clear();
     // A 端排障日志：把「用户点了连接」和「本地状态机拒绝」都留痕。此前这两步
     // 没有任何落盘痕迹，失败只能从界面文案反推。
-    log_controller_event(
-        "connect_requested",
-        &relay.controller_endpoint_log_detail(),
-    );
+    log_controller_event("connect_requested", &relay.controller_endpoint_log_detail());
     let operation = match manager.connect(&code) {
         Ok(operation) => operation,
         Err(error) => {
