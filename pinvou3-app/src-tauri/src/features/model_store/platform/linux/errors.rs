@@ -638,13 +638,35 @@ mod tests {
     }
 
     /// 同分时取更靠后的那一行：越晚打出来的越接近退出点。
+    ///
+    /// 这里挑的两行必须是**真的同分**。`invalid gguf` 和 `manifest unknown` 都只命中
+    /// [`SCRIPT_ERROR_PATTERNS`]（各 +6），谁都不含 [`ERROR_TOKENS`] 里的通用错误词，
+    /// 所以 6 分平手、靠位置分胜负。
+    ///
+    /// 这条测试原来拿的是 `connection refused` 和 `manifest unknown`，而那两行**并不
+    /// 同分**：`refused` 同时在 `ERROR_TOKENS` 里，前者是 9 分、后者 6 分，选前者是
+    /// 对的。挑错样例的测试会反过来逼着实现去迎合一个错的预期——所以下面把"信号更强
+    /// 的行赢过更靠后的行"单独钉一条，两条一起才说清了优先级：**先比分，再比位置**。
     #[test]
     fn later_lines_win_on_a_tie() {
-        let lines: Vec<String> = ["connection refused", "manifest unknown"]
+        let lines: Vec<String> = ["invalid gguf", "manifest unknown"]
             .iter()
             .map(|s| s.to_string())
             .collect();
         assert_eq!(pick_failure_line(&lines), Some("manifest unknown"));
+    }
+
+    /// 位置只是**平手时**的裁判，压不过更强的错误信号。
+    ///
+    /// `connection refused` 既是已知原因（+6）又含通用错误词 `refused`（+3），
+    /// 而它后面那行只有 +6。更靠后的行输掉了——这正是这套打分想要的：先比分，再比位置。
+    #[test]
+    fn a_stronger_signal_beats_a_later_position() {
+        let lines: Vec<String> = ["connection refused", "manifest unknown"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(pick_failure_line(&lines), Some("connection refused"));
     }
 
     /// 🔴 报错句尾巴上的「请检查…」不算建议。
