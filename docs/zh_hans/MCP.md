@@ -346,8 +346,9 @@ codewhale-tui mcp tools codewhale
   `execute_timeout` 约束一次工具调用——工具结束前服务器不会回话，慢工具应调大它而不是
   `read_timeout`。`read_timeout` 约束快速请求（`resources/read`、发现流程等）的响应等待；
   `tools/call` 的内部读等待会自动放宽到至少其 `execute_timeout`。
-  该预算按阶段生效（发送、读取各计一次）：几乎耗尽预算才读完输入的服务器可能让总耗时接近
-  `execute_timeout` 的两倍。
+  对 stdio 服务器，该预算按阶段生效（发送、读取各计一次）：几乎耗尽预算才读完输入的服务器
+  可能让总耗时接近 `execute_timeout` 的两倍。HTTP 服务器则由单个总超时
+  `max(read_timeout, execute_timeout)` 约束整个交换。
 - `disabled`（布尔值，可选）
 - `enabled`（布尔值，可选，默认 `true`）
 - `required`（布尔值，可选）：如果该服务器无法初始化，启动/连接验证会失败。
