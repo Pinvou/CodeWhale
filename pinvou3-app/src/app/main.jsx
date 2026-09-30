@@ -2,7 +2,7 @@ import { lazy, startTransition as scheduleViewTransition, Suspense, useCallback,
 import { createPortal } from 'react-dom';
 import { createRoot } from 'react-dom/client';
 import '../styles/base.css';
-import { I, Plus, Edit2, Trash2, ClipboardList, BarChart2, Settings, Monitor, Smartphone, Brain, BrainCircuit, Clock, Sun, Moon, Zap, Package, RefreshCw, RotateCcw, Search, Upload, Lightbulb, Paperclip, Mic, Send, Store, Terminal, ChevronDown, IconGrid, ChevronRight, Copy, CheckCircle2, AlertTriangle, Menu, MoreHorizontal, Check, Filter, Database, Download, FolderPlus, Award, Feather, AppWindow, Radio, Palette, Briefcase, Sparkles, StopCircle, XCircle, Wrench, User, Layers, MessageSquare, X, ArrowLeft, ExternalLink, BookOpen, Code, FileText, Hexagon, Layout, Presentation, Mail, MessageCircle, Navigation, Video, Puzzle, LineChart, Building2, Cpu, Server, Globe, ChevronLeft, XIcon, CloudSun, TrendingUp, TrendingDown, GridIcon, TableIcon, PresentationIcon, ImageIcon, Archive, PetPawIcon, Users } from '../components/icons.jsx';
+import { I, Plus, Edit2, Trash2, ClipboardList, BarChart2, Settings, Smartphone, Brain, BrainCircuit, Clock, Sun, Moon, Zap, Package, RefreshCw, RotateCcw, Search, Upload, Lightbulb, Paperclip, Mic, Send, Store, Terminal, ChevronDown, IconGrid, ChevronRight, Copy, CheckCircle2, AlertTriangle, Menu, MoreHorizontal, Check, Filter, Database, Download, FolderPlus, Award, Feather, AppWindow, Radio, Palette, Briefcase, Sparkles, StopCircle, XCircle, Wrench, User, Layers, MessageSquare, X, ArrowLeft, ExternalLink, BookOpen, Code, FileText, Hexagon, Layout, Presentation, Mail, MessageCircle, Navigation, Video, Puzzle, LineChart, Building2, Cpu, Server, Globe, ChevronLeft, XIcon, CloudSun, TrendingUp, TrendingDown, GridIcon, TableIcon, PresentationIcon, ImageIcon, Archive, PetPawIcon, Users } from '../components/icons.jsx';
 import { ArchiveConfirmDialog, ArchiveToast, NavItem, RecentItem } from '../components/layout/NavigationComponents.jsx';
 import { SidePanelLayoutProvider } from '../components/layout/ResizableSidePanel.jsx';
 import {
@@ -113,8 +113,7 @@ const LazySearchView = lazy(() => VIEW_LOADERS.search().then(m => ({ default: m.
 const LazyPersonaEditorModal = lazy(() => VIEW_LOADERS.cardpool().then(m => ({ default: m.PersonaEditorModal })));
 const LazyWebAccessModal = lazy(() => VIEW_LOADERS.settings().then(m => ({ default: m.WebAccessModal })));
 const LazyDetachedShell = lazy(() => import('./DetachedShell.jsx').then(m => ({ default: m.DetachedShell })));
-// Windows 双端远程控制（DEV-22/23）：与 Web 分享 lazy chunk 分离。
-const LazyConnectRemoteDeviceDialog = lazy(() => import('../features/remote-control/ConnectRemoteDeviceDialog.jsx'));
+// Windows 双端远程控制：连接表单留在设置二级页，连接成功后打开独立对话层。
 const LazyRemoteConnectionShell = lazy(() => import('../features/remote-control/RemoteConnectionShell.jsx'));
 
 // 视图 chunk 加载占位:沿用 DetachedShell 的「…」惯例,不引入新视觉语言。
@@ -1384,8 +1383,16 @@ const NAV_PREFETCH = {
       const [savedConfirm, setSavedConfirm] = useState(null); // 存入成功 → iOS 确认窗 {name}
       const [poolMyOnly, setPoolMyOnly] = useState(false); // 跳卡池时是否直接落「我的卡牌」筛选(从确认窗"去查看"进来=true)
       const [webAccessOpen, setWebAccessOpen] = useState(false);
-      const [remoteConnectOpen, setRemoteConnectOpen] = useState(false);
-      const [remoteShellOpen, setRemoteShellOpen] = useState(false);
+      const [remoteConversationOpen, setRemoteConversationOpen] = useState(false);
+      const [remoteModelSource, setRemoteModelSource] = useState('controlled_device');
+      const [remoteConnectionReady, setRemoteConnectionReady] = useState(false);
+      const remoteControllerConnected = !!(bs && bs.controllerConnection && bs.controllerConnection.status === 'connected');
+      const remoteChatConnection = (remoteControllerConnected || remoteConnectionReady)
+        ? (bs?.controllerConnection?.status === 'connected' ? bs.controllerConnection : { status: 'connected' })
+        : null;
+      useEffect(() => {
+        if (!remoteControllerConnected) setRemoteConnectionReady(false);
+      }, [remoteControllerConnected]);
       const [publishedBrowserOverlayIntent, setPublishedBrowserOverlayIntent] = useState('');
       const [settingsUpdateFocusTick, setSettingsUpdateFocusTick] = useState(0);
       const [settingsInitialSection, setSettingsInitialSection] = useState('general');
@@ -3896,18 +3903,6 @@ const NAV_PREFETCH = {
                       <Smartphone size={18} />
                       {isWebAccessConnected && <span className="absolute top-1 right-1 w-2 h-2 rounded-full bg-[#34A853]" />}
                     </button>}
-                    {/* Windows 双端远程控制：A 主控端入口（DEV-22）。与 Web 分享入口
-                        完全独立，非 Windows 能力关闭时不渲染。 */}
-                    {can('desktopRemoteControl') && <button
-                      onClick={() => setRemoteConnectOpen(true)}
-                      title={t.controllerConnection.entry}
-                      className={`relative w-9 h-9 shrink-0 rounded-full flex items-center justify-center transition-colors ${activeTheme === 'dark' ? 'text-[#C4C7C5] hover:bg-[#333537]' : 'text-[#444746] hover:bg-[#E1E5EA]'}`}
-                    >
-                      <Monitor size={18} />
-                      {bs && bs.controllerConnection && bs.controllerConnection.status === 'connected' && (
-                        <span className="absolute top-1 right-1 w-2 h-2 rounded-full bg-[#34A853]" />
-                      )}
-                    </button>}
                     {can('pet') && <button
                       onClick={() => handleSetPetEnabled(!(bs && bs.settings && bs.settings.pet && bs.settings.pet.enabled))}
                       title={(bs && bs.settings && bs.settings.pet && bs.settings.pet.enabled) ? t.uiPet.hide : t.uiMainApp.petSummon}
@@ -4010,7 +4005,17 @@ const NAV_PREFETCH = {
                   onSidebarDateGroupingChange={handleSetSidebarDateGrouping}
                   updateFocusTick={settingsUpdateFocusTick}
                   initialSection={settingsInitialSection}
-                  onCloseSettings={() => navigateFromScheduledRun(settingsReturnViewRef.current || 'chat')}
+                  remoteConversationOpen={remoteConversationOpen}
+                  onRemoteConversationOpen={() => setRemoteConversationOpen(true)}
+                  onRemoteConnected={() => {
+                    setRemoteConnectionReady(true);
+                    setRemoteConversationOpen(false);
+                    navigateFromScheduledRun('chat');
+                  }}
+                  onRemoteConversationClose={() => setRemoteConversationOpen(false)}
+                  onCloseSettings={() => {
+                    navigateFromScheduledRun(settingsReturnViewRef.current || 'chat');
+                  }}
                 />
               </ViewErrorBoundary>
             )}
@@ -4036,9 +4041,12 @@ const NAV_PREFETCH = {
                 onBackScheduledRun={() => navigateFromScheduledRun('scheduled')}
                 codeModeAvailable={codexAcpSupported}
                 onSwitchHomeMode={handleSwitchHomeMode}
+                onRemoteModelSourceChange={setRemoteModelSource}
                 browserDockAvailable={browserDockAvailable}
                 rightDockActivePanelId={browserDockSelectedPanelId}
                 onRightDockPanelSelectionChange={selectRightDockPanel}
+                remoteConnection={remoteChatConnection}
+                remoteModelSource={remoteModelSource}
               />
             )}
             {codexAcpSupported && currentView === 'codex' && (
@@ -4106,34 +4114,27 @@ const NAV_PREFETCH = {
             </ViewErrorBoundary>
             )}
 
-            {/* Windows 双端远程控制（DEV-22）：连接入口与连接壳，与 Web 分享
-                弹窗互相独立；关闭连接壳只隐藏窗口，显式断开才结束连接。 */}
-            {can('desktopRemoteControl') && remoteConnectOpen && (
+            {/* A 端连接成功后直接进入对话层；关闭只隐藏会话，显式断开才结束连接。 */}
+            {can('desktopRemoteControl') && remoteConversationOpen && (
               <ViewErrorBoundary t={t}>
                 <Suspense fallback={null}>
-                  <LazyConnectRemoteDeviceDialog
-                    t={t}
-                    open
-                    onClose={() => setRemoteConnectOpen(false)}
-                    onConnected={() => { setRemoteConnectOpen(false); setRemoteShellOpen(true); }}
-                  />
-                </Suspense>
-              </ViewErrorBoundary>
-            )}
-            {can('desktopRemoteControl') && remoteShellOpen && (
-              <ViewErrorBoundary t={t}>
-                <Suspense fallback={null}>
-                  <LazyRemoteConnectionShell
-                    t={t}
-                    bs={bs}
-                    onClose={() => setRemoteShellOpen(false)}
-                    onRequestDisconnect={async () => {
-                      if (bridge && bridge.available && bridge.desktopRemoteControl) {
-                        await bridge.desktopRemoteControl.controllerDisconnect();
-                      }
-                      setRemoteShellOpen(false);
-                    }}
-                  />
+                  <div className="fixed inset-0 z-[120] flex items-start sm:items-center justify-center bg-black/50 p-3 sm:p-6">
+                    <div className="w-full max-w-[960px] max-h-full overflow-y-auto custom-scrollbar rounded-2xl bg-white shadow-2xl dark:bg-[#1F2023]">
+                      <LazyRemoteConnectionShell
+                        t={t}
+                        bs={bs}
+                        modelSource={remoteModelSource}
+                        onModelSourceChange={setRemoteModelSource}
+                        onClose={() => setRemoteConversationOpen(false)}
+                        onRequestDisconnect={async () => {
+                          if (bridge && bridge.available && bridge.desktopRemoteControl) {
+                            await bridge.desktopRemoteControl.controllerDisconnect();
+                          }
+                          setRemoteConversationOpen(false);
+                        }}
+                      />
+                    </div>
+                  </div>
                 </Suspense>
               </ViewErrorBoundary>
             )}

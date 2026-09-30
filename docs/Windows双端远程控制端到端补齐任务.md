@@ -537,4 +537,20 @@ jsdom 冒烟能复现（本次即由 `test:settings-ui` 的 ① 断言捕获）�
   所有值仍是协议枚举名，不含文案、连接码或凭据。
 - **验证**：`cargo test remote_control::` **331 通过 / 0 失败**；`python scripts/architecture-guard.py` 通过。
 
+### 13.10 设置页：桌面远程控制迁入独立二级页面（UX 调整）
+
+- **背景**：被控端面板（`ControlledDevicePanel`，含连接码、服务端点切换、工作区授权、只读提示）原先内联在
+  「通用」分区，与外观/通知/语音等常规偏好混排。
+- **改动**：被控端面板整块迁入「通用 → 桌面远程控制」的**二级菜单**（口径与「帮助反馈 → 行为分析」一致：
+  入口行 + 子页 + 返回按钮；子页 id `remote`，不占侧栏顶级项）。三语文案：中文「桌面远程控制」、
+  English「Desktop Remote Control」、日本語「デスクトップ遠隔操作」（中文命名依次经历
+  「双端控制」→「远程控制」→「桌面远程控制」，日文与既有「モバイル遠隔操作」成对）。
+  能力为假（Web 端 allowlist 关闭）时连入口行一起隐藏，避免出现点开即空的分区。
+- **边界（登记）**：本次只做「迁移」，不新增 A 端（控制端）入口——A 端连接入口仍在主界面侧边栏，
+  与设置页解耦；未来若需要从设置页发起连接，需要把主窗口回调下沉为 props。
+- **验证**：`node tests/settings_ui_smoke.js` **ALL 95 PASS**（新增 ①h：独立页面可打开、面板在其中、通用页不再包含面板）；
+  `node --test tests/controlled_device_panel_contract.test.mjs` 7 通过（新增「专属二级页面」契约）；
+  `node --test tests/ui_language_coverage.test.mjs` 通过；`npm run build:ui` 通过；`npm run lint:ui` 0 error；
+  `python scripts/architecture-guard.py` 通过。
+
 全量 `cargo test` 一次编译约 1.5–5 分钟：同一模块的多处改动应攒成一次编译，任务边界才跑全量回归。

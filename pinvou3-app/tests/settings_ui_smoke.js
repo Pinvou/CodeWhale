@@ -542,6 +542,42 @@ async function modalWidth(page, headingText) {
   await sleep(400);
   rec('① 设置页可打开且无错误边界', await page.evaluate(() => document.body.innerText.includes('通用') && !document.body.innerText.includes('设置页加载失败')));
 
+  // 桌面远程控制：作为「通用」下的二级菜单进入，通用页本身不再内联被控端面板。
+  const remoteEntry = await page.evaluate(() => {
+    const entry = document.querySelector('[data-testid="desktop-remote-control-entry"]');
+    return {
+      inGeneral: (document.querySelector('[data-testid="settings-content"] h1')?.textContent || '').trim() === '通用',
+      visible: !!entry,
+      label: (entry?.querySelector('div > div')?.textContent || '').trim(),
+      hasChevron: !!entry?.querySelector('svg'),
+      panelInlineInGeneral: !!document.querySelector('#controlled-device-title'),
+      topLevelNav: !!document.querySelector('[data-testid="settings-section-remote"]'),
+    };
+  });
+  await page.click('[data-testid="desktop-remote-control-entry"]');
+  await sleep(300);
+  const remotePage = await page.evaluate(() => {
+    const content = document.querySelector('[data-testid="settings-content"]');
+    return {
+      heading: (content?.querySelector('h1')?.textContent || '').trim(),
+      controllerTitle: (content?.querySelector('#remote-controller-connect-title')?.textContent || '').trim(),
+      panelTitle: (content?.querySelector('#controlled-device-title')?.textContent || '').trim(),
+      hasBack: !!content?.querySelector('[data-testid="desktop-remote-control-back"]'),
+      backLabel: (content?.querySelector('[data-testid="desktop-remote-control-back"]')?.textContent || '').trim(),
+      hasControllerPanel: !!content?.querySelector('[data-testid="remote-controller-panel"]'),
+      hasConnectForm: !!content?.querySelector('[data-testid="remote-controller-connect-form"]'),
+      hasCodeInput: !!content?.querySelector('[data-testid="remote-controller-code-input"]'),
+    };
+  });
+  await page.click('[data-testid="desktop-remote-control-back"]');
+  await sleep(250);
+  const backPage = await page.evaluate(() => ({
+    heading: (document.querySelector('[data-testid="settings-content"] h1')?.textContent || '').trim(),
+    hasPanel: !!document.querySelector('#controlled-device-title'),
+  }));
+  rec('①h 桌面远程控制是「通用」下的二级菜单且返回可达', remoteEntry.inGeneral && remoteEntry.visible && remoteEntry.label === '桌面远程控制' && remoteEntry.hasChevron && !remoteEntry.panelInlineInGeneral && !remoteEntry.topLevelNav && remotePage.heading === '桌面远程控制' && !!remotePage.panelTitle && remotePage.hasBack && remotePage.backLabel === '返回通用' && backPage.heading === '通用' && !backPage.hasPanel, JSON.stringify({ remoteEntry, remotePage, backPage }));
+  rec('①i 主控连接与被控面板分区且连接码内嵌在控制页', remotePage.heading === '桌面远程控制' && remotePage.controllerTitle === '连接远程设备' && remotePage.panelTitle === '允许他人连接本机' && remotePage.hasControllerPanel && remotePage.hasConnectForm && remotePage.hasCodeInput, JSON.stringify({ remotePage }));
+
   // Exercise the Official App -> SettingsView callback and actual bridge payload.
   await page.emulateMediaFeatures([{ name: 'prefers-color-scheme', value: 'dark' }]);
   rec('① 旧显式浅色偏好不随系统变深', await page.evaluate(() => !document.documentElement.classList.contains('dark')));

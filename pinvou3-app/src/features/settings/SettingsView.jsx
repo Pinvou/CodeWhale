@@ -7,6 +7,7 @@ import PetSettingsSection from '../pet/PetSettingsSection.jsx';
 import { DEFAULT_PET_ID } from '../pet/pet-registry.js';
 import { TeamRelayAccessSettings } from '../team-relay/TeamRelayAccessSettings.jsx';
 import ControlledDevicePanel from '../remote-control/ControlledDevicePanel.jsx';
+import RemoteControllerPanel from '../remote-control/RemoteControllerPanel.jsx';
 import { bridge, isLocalModel, useBridgeState } from '../../hooks/useBridge.js';
 import { formatSessionDate } from '../../shared/date-utils.js';
 import { isBuiltInLlmApiModel, selectableModels } from '../../shared/model-options.js';
@@ -1628,7 +1629,7 @@ const formatMemoryTime = (item, copy) => {
 
     /** @typedef {{ behaviorAnalyticsTitle: string, behaviorAnalyticsEntryTitle: string, behaviorAnalyticsEntryDesc: string, behaviorAnalyticsBack: string, behaviorAnalyticsLabel: string, behaviorAnalyticsDesc: string, behaviorAnalyticsNotConfigured: string, behaviorAnalyticsEnableConfirm: string, behaviorAnalyticsDisableConfirm: string, behaviorAnalyticsStatusEnabled: string, behaviorAnalyticsStatusDisabled: string, behaviorAnalyticsStatusWithdrawalPending: string, behaviorAnalyticsActionFailed: string }} BehaviorAnalyticsSettingsCopy */
     // eslint-disable-next-line no-unused-vars, sonarjs/cognitive-complexity -- contract slot parameters kept; the settings page aggregates many form branches, splitting needs a dedicated design
-    const SettingsView = ({ activeTheme, colorScheme, onColorSchemeChange, language, setLanguage, superPerm, setSuperPerm, taskCompletedNotif, setTaskCompletedNotif, searchProvider, setSearchProvider, enabledSearchProviders = DEFAULT_ENABLED_SEARCH_PROVIDERS, onAddSearchProvider, onDeleteSearchProvider, searchApiKey: _searchApiKey, setSearchApiKey, searchHasSavedKey: _searchHasSavedKey, savedModels, activeModelId, onSaveModel, onDeleteModel, onSetActiveModel, onSaveSearchConfig, onConfirmSearchConfig, onMemoryEnabledChange, onPetEnabledChange, teamRelayEnabled = false, onUnlockTeamRelay, onDisableTeamRelay, searchNeedsRestart: _searchNeedsRestart, languageNeedsRestart: _languageNeedsRestart, bs, t, onRestoreArchived, onDeleteArchived, sidebarDateGrouping = true, onSidebarDateGroupingChange, updateFocusTick, onCloseSettings, initialSection = 'general' }) => {
+    const SettingsView = ({ activeTheme, colorScheme, onColorSchemeChange, language, setLanguage, superPerm, setSuperPerm, taskCompletedNotif, setTaskCompletedNotif, searchProvider, setSearchProvider, enabledSearchProviders = DEFAULT_ENABLED_SEARCH_PROVIDERS, onAddSearchProvider, onDeleteSearchProvider, searchApiKey: _searchApiKey, setSearchApiKey, searchHasSavedKey: _searchHasSavedKey, savedModels, activeModelId, onSaveModel, onDeleteModel, onSetActiveModel, onSaveSearchConfig, onConfirmSearchConfig, onMemoryEnabledChange, onPetEnabledChange, teamRelayEnabled = false, onUnlockTeamRelay, onDisableTeamRelay, searchNeedsRestart: _searchNeedsRestart, languageNeedsRestart: _languageNeedsRestart, bs, t, onRestoreArchived, onDeleteArchived, sidebarDateGrouping = true, onSidebarDateGroupingChange, updateFocusTick, remoteConversationOpen, onRemoteConversationOpen, onRemoteConnected, onRemoteConversationClose, onCloseSettings, initialSection = 'general' }) => {
       const settingsCopy = /** @type {typeof t.uiSettingsDetail & BehaviorAnalyticsSettingsCopy} */ (t.uiSettingsDetail);
       const platformCapabilities = (bs && bs.platformCapabilities) || {};
       const showSuperPermissionSettings = !!platformCapabilities.showSuperPermissionSettings;
@@ -1644,6 +1645,9 @@ const formatMemoryTime = (item, copy) => {
       const canUpdateApp = can('appUpdate');
       const canInstallDependencies = can('dependencyInstall');
       const canConfigureDesktopNotifications = can('desktopNotifications');
+      // 双端远程控制（Windows 桌面互联）既需要平台能力，也在 Web 端被 allowlist 关闭：
+      // 能力为假时不注册该二级页面，避免出现点开即空的设置分区。
+      const canDesktopRemoteControl = can('desktopRemoteControl');
       const canManageModels = can('modelManagement');
       const acpProvidersTabVisible = !!platformCapabilities.codexAcpSupported;
       // The native hook for the global Alt voice shortcut only works on Windows; grey the
@@ -2270,14 +2274,56 @@ const formatMemoryTime = (item, copy) => {
               onDisable={onDisableTeamRelay}
             />
           )}
-          {/* Windows 双端远程控制：B 被控端面板（DEV-21）。与上方 Web 分享
-              卡片完全独立，非 Windows 或能力关闭时不渲染。 */}
-          {can('desktopRemoteControl') && (
-            <ControlledDevicePanel t={t} bs={bs} supported />
+          {/* 桌面远程控制是「通用」下的二级菜单（口径同「帮助 → 行为分析」）：
+              入口行只负责跳转，真正的业务面板在 renderRemote 的子页里。 */}
+          {canDesktopRemoteControl && (
+          <IOSSection>
+            <IOSRow
+              label={t.uiSettings.remoteControl}
+              desc={settingsCopy.desktopRemoteControlEntryDesc}
+              onClick={() => setActiveSection('remote')}
+              testId="desktop-remote-control-entry"
+            >
+              <ChevronRight size={17} className="shrink-0 text-[#C7C7CC] dark:text-[#636366]" />
+            </IOSRow>
+          </IOSSection>
           )}
         </>
         );
       };
+
+      // Windows 双端远程控制（DEV-21）：自「通用」以二级菜单进入，业务面板独占该子页，
+      // 不再与外观/通知/语音等常规偏好混排（E2E-08 后续 UX 调整）。
+      const renderRemote = () => (
+        <>
+          <button
+            type="button"
+            data-testid="desktop-remote-control-back"
+            onClick={() => setActiveSection('general')}
+            className="mb-4 inline-flex items-center gap-1 text-[13px] text-[#6E6E73] hover:text-[#1C1C1E] dark:text-[#98989D] dark:hover:text-[#F2F2F7]"
+          >
+            <ChevronLeft size={15} />
+            {settingsCopy.desktopRemoteControlBack}
+          </button>
+          <IOSSection title={t.controllerConnection.controllerSide}>
+            <div className="p-4">
+              <RemoteControllerPanel
+                t={t}
+                bs={bs}
+                conversationOpen={remoteConversationOpen}
+                onConversationOpen={onRemoteConversationOpen}
+                onConnected={onRemoteConnected}
+                onConversationClose={onRemoteConversationClose}
+              />
+            </div>
+          </IOSSection>
+          <IOSSection title={t.controllerConnection.controlledSide}>
+            <div className="p-4">
+              <ControlledDevicePanel t={t} bs={bs} supported />
+            </div>
+          </IOSSection>
+        </>
+      );
       const renderModels = () => (
         <>
           {acpProvidersTabVisible && (
@@ -2632,6 +2678,7 @@ const formatMemoryTime = (item, copy) => {
         if (activeSection === 'model') return renderModels();
         if (activeSection === 'search') return renderSearch();
         if (activeSection === 'memory') return renderMemory();
+        if (activeSection === 'remote') return renderRemote();
         if (activeSection === 'permissions') return renderPermissions();
         if (activeSection === 'data') return renderData();
         if (activeSection === 'update') return renderUpdate();
@@ -2646,6 +2693,7 @@ const formatMemoryTime = (item, copy) => {
             model: t.uiSettings.model,
             search: t.uiSettings.search,
             memory: t.uiSettings.memory,
+            remote: t.uiSettings.remoteControl,
             permissions: t.uiSettings.permissions,
             data: t.uiSettings.data,
             update: t.uiSettings.update,

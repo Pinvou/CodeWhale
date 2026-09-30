@@ -20,6 +20,10 @@ const bridge = fs.readFileSync(
   path.join(root, 'src', 'platform', 'tauri', 'bridge', 'desktop-remote-control.js'),
   'utf8',
 );
+const desktopFacade = fs.readFileSync(
+  path.join(root, 'src', 'platform', 'tauri', 'bridge.js'),
+  'utf8',
+);
 
 function connectedState() {
   return logic.applyControllerStatus(logic.createState(), {
@@ -133,6 +137,44 @@ test('the bridge forwards UI fields only and never builds protocol payloads', ()
   assert.ok(bridge.includes('applyControllerSession'));
 });
 
+test('controller command results map the nested Rust lease into UI state', () => {
+  const apply = bridge.slice(
+    bridge.indexOf('function applyController'),
+    bridge.indexOf('function controlledStart'),
+  );
+  assert.ok(apply.includes('controllerStatusPayload(result)'));
+  assert.ok(apply.includes('connectionId: payload.connectionId'));
+  assert.ok(apply.includes('leaseEpoch: payload.leaseEpoch'));
+  assert.ok(apply.includes('deviceName: payload.deviceName'));
+  const mapping = bridge.slice(
+    bridge.indexOf('function controllerStatusPayload'),
+    bridge.indexOf('function controllerSessionOpen'),
+  );
+  assert.ok(mapping.includes('wire.lease'));
+  assert.ok(mapping.includes('lease.connectionId'));
+  assert.ok(mapping.includes('lease.leaseEpoch'));
+});
+
+test('the desktop facade exposes the A-side session and task bridge methods', () => {
+  for (const method of [
+    'controllerSessionOpen',
+    'controllerSessionState',
+    'controllerSessionClose',
+    'controllerCapabilityRequest',
+    'controllerCapabilitySend',
+    'controllerApplyCapabilitySnapshot',
+    'controllerTaskIntent',
+    'controllerTaskCancelIntent',
+    'controllerTaskSend',
+    'controllerTaskCancelSend',
+  ]) {
+    assert.ok(
+      desktopFacade.includes(`${method}: desktopRemoteControlFeature.${method}`),
+      `${method} must be exposed by the public desktop bridge facade`,
+    );
+  }
+});
+
 test('capability snapshots cross the bridge without leaking wire field names', () => {
   // 快照从 wire 进来后先映射成 UI 字段，再进入能力域状态。
   assert.ok(bridge.includes('function capabilitySnapshotForUi'));
@@ -154,6 +196,8 @@ test('reopening a session reuses the connection session reference', () => {
   );
   assert.ok(open.includes('controllerConnection.sessionRef'));
   assert.ok(open.includes('remoteRef: existing || null'));
+  assert.ok(open.includes('var snapshot = current();'));
+  assert.ok(!open.includes('var current = current();'));
 });
 
 test('the encrypted send entry points only carry UI fields', () => {

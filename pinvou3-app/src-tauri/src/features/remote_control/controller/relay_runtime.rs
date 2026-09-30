@@ -494,6 +494,9 @@ impl ControlledRelayWorker {
                 }
                 message = self.channel.recv() => {
                     let Some(message) = message else { break 'serve };
+                    if message.get("type").and_then(Value::as_str) == Some("desktop_controller_stop") {
+                        break 'serve;
+                    }
                     if joined {
                         // E2E-06：恢复进行中时所有帧都由恢复状态机处理，业务帧与
                         // 存活证据一律不派发（Relay 侧同样禁止业务帧）。
@@ -602,7 +605,7 @@ impl ControlledRelayWorker {
             }
         }
         // 通道关闭（stop/refresh/断线）时丢弃出站旁路，避免旧 generation 继续回传。
-        self.app.state::<ControlledOutboundState>().clear();
+        self.app.state::<ControlledOutboundState>().clear_generation(self.channel.generation());
     }
 
     /// E2E-06：按 watchdog 需求发起挑战 / 升级到 Relay 签名兜底 / 作废超时挑战。
@@ -1129,6 +1132,12 @@ pub(crate) struct ControlledOutboundState {
 }
 
 impl ControlledOutboundState {
+    pub(crate) fn clear_generation(&self, generation: &str) {
+        let mut sender = self.sender.lock();
+        if sender.as_ref().is_some_and(|sender| sender.generation() == generation) {
+            *sender = None;
+        }
+    }
     pub(crate) fn install(
         &self,
         sender: crate::features::remote_control::manager::ControllerRelaySender,

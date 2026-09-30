@@ -1965,11 +1965,12 @@ Object.assign(dictJa.uiChat, {
 
 // Windows デスクトップ遠隔操作：被制御側パネル（DEV-21）。
 dictJa["controlledDevice"] = {
+  connectionTitle: "接続状態",
   section: "デスクトップ遠隔操作",
   title: "この端末への接続を許可する",
-  desc: "オンにすると 5 分間有効な接続コードを表示します。相手が入力すると、この端末のモデルでタスクを実行できます。いつでも確認し、すぐ切断できます。",
-  enable: "遠隔操作を有効にする",
-  disable: "遠隔操作を無効にする",
+  desc: "オンにすると 5 分間有効な接続コードを表示します。相手が入力すると、この端末のモデルでタスクを実行できます。いつでも確認し、遠隔操作を無効にできます。",
+  enable: "この端末が操作されることを許可",
+  disable: "この端末への操作を停止",
   starting: "有効化中…",
   stopping: "無効化中…",
   refreshing: "更新中…",
@@ -1987,7 +1988,7 @@ dictJa["controlledDevice"] = {
   codeExpires: seconds => `残り ${seconds} 秒`,
   codeExpired: "接続コードの有効期限が切れました。更新してください。",
   codeHint: "5 分間だけ有効な資格情報です。保存せず、期限切れや接続失敗の後は現在のコードを確認してください。",
-  refresh: "接続コードを更新",
+  refresh: "更新",
   deviceLabel: "操作元の端末",
   deviceUnknown: "不明な端末",
   connectedSince: startedAt => `接続済み（開始: ${startedAt}）`,
@@ -2002,8 +2003,7 @@ dictJa["controlledDevice"] = {
   workspacesEmpty: "ワークスペースが未許可のため、コードモードは表示されません。",
   workspacesHint: "ここに列挙したフォルダだけがコードタスクに使えます。相手が範囲を広げることはできません。",
   codeAllowed: "コードタスクを許可",
-  readOnlyNotice: "確認・停止・切断のみ可能です。承認は相手側が行います。",
-  disconnectNow: "すぐに切断",
+  readOnlyNotice: "確認と停止のみ可能です。承認は相手側が行います。",
   stopTasks: "遠隔タスクを停止",
   runningTasks: count => `${count} 件の遠隔タスクを実行中`,
   pendingPermissions: "相手の承認待ち",
@@ -2025,17 +2025,24 @@ dictJa["controllerConnection"] = {
   codePlaceholder: "例: 2345 678",
   connect: "接続",
   connecting: "接続中…",
-  disconnect: "切断",
+  disconnect: "相手の端末を切断",
   close: "閉じる",
+  controllerSide: "操作する側",
+  controlledSide: "操作される側",
+  remoteStatus: "遠隔操作中",
+  remoteSessionPreparing: "セッション準備中",
+  remoteSessionReady: "セッション準備完了",
   connected: "接続済み",
   connectedTo: device => `${device} に接続しました`,
-  backgroundHint: "ウィンドウを閉じても接続とタスクは継続します。切断するには「切断」を押してください。",
+  backgroundHint: "ウィンドウを閉じても接続とタスクは継続します。切断するには「相手の端末を切断」を押してください。",
   codeHint: "接続コードは短期間だけ有効です。保存せず、期限切れや失敗の後は現在のコードを確認してください。",
   errorInvalidCode: "コードが無効か期限切れです。相手の端末に表示されているコードを確認してください。",
   errorBusy: "相手の端末は別の端末から操作中です。しばらくしてからお試しください。",
   errorOffline: "相手の端末がオフラインか、遠隔操作が無効です。",
   errorVersion: "バージョンが互換ではありません。最新版に更新してください。",
   errorGeneric: "接続に失敗しました。もう一度お試しください。",
+  errorLocalBusy: "この端末にはすでに遠隔接続があります。先に切断してください。",
+  errorUnsupported: "このシステムではデスクトップ遠隔操作を利用できません。",
   errorProtocol: "相手から認識できないデータを受信しました。再試行し、続く場合は双方のバージョンをご確認ください。",
   errorLocalFormat: "7 桁の接続コード（英数字）を入力してください。",
   historyTitle: "リモート接続履歴",
@@ -2055,6 +2062,9 @@ dictJa["remoteConversation"] = {
   composerPlaceholder: "相手の端末で実行したいタスクを入力…",
   send: "送信",
   sending: "送信中…",
+  sessionInitializing: "リモートセッションを準備しています…",
+  sessionInitializeFailed: "リモートセッションを準備できませんでした。",
+  retry: "再試行",
   cancel: "タスクをキャンセル",
   statusAdmitted: "受付済み",
   statusRunning: "実行中",
@@ -2094,3 +2104,11 @@ dictJa["remoteConversation"] = {
   resultUnknownHint: "接続が切れたため、このタスクの完了有無を確認できません。",
   errorGeneric: "操作に失敗しました。もう一度お試しください。",
 };
+
+// 独立した「デスクトップ遠隔操作」設定サブページのサイドバーラベル
+// （既存の「モバイル遠隔操作」と対になる ja 表記に合わせる）。
+dictJa.uiSettings.remoteControl = 'デスクトップ遠隔操作';
+// 「一般 → デスクトップ遠隔操作」サブメニューの説明と戻るラベル
+// （「ヘルプとフィードバック → 行動分析」と同じパターン）。
+dictJa.uiSettingsDetail.desktopRemoteControlEntryDesc = '接続コードを入力して相手の端末から本機に接続し、本機のモデルでタスクを実行できます。いつでも確認して切断できます。';
+dictJa.uiSettingsDetail.desktopRemoteControlBack = '一般に戻る';

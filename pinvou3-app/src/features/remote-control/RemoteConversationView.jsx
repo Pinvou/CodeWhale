@@ -9,7 +9,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { bridge } from '../../hooks/useBridge.js';
 import { isTaskTerminal, taskStatusKey } from './remote-control-logic.mjs';
 
-export default function RemoteConversationView({ t, bs }) {
+export default function RemoteConversationView({ t, bs, modelSource = 'controlled_device', onModelSourceChange }) {
   const copy = (t && t.remoteConversation) || {};
   const connection = (bs && bs.controllerConnection) || {};
   const capabilities = (bs && bs.remoteCapabilities) || null;
@@ -18,7 +18,6 @@ export default function RemoteConversationView({ t, bs }) {
   const transcript = (bs && bs.transcript) || [];
   const permissions = (bs && bs.remotePermissions) || [];
   const histories = (bs && bs.remoteHistories) || [];
-  const [modelSource, setModelSource] = useState('controlled_device');
   const [selectedModelId, setSelectedModelId] = useState(null);
   const [mode, setMode] = useState('chat');
   const [draft, setDraft] = useState('');
@@ -48,10 +47,23 @@ export default function RemoteConversationView({ t, bs }) {
   // 构造任务）；两者都失败关闭，不暴露半通路。
   const sessionRef = connection.sessionRef || null;
   const connected = connection.status === 'connected';
+  const [sessionBusy, setSessionBusy] = useState(false);
+  const [sessionError, setSessionError] = useState(null);
+
+  const openSession = () => {
+    if (!remote || !connected || sessionRef || sessionBusy) return;
+    setSessionBusy(true);
+    setSessionError(null);
+    remote.controllerSessionOpen(copy.title || 'remote', 'chat')
+      .then(() => setSessionError(null))
+      .catch((failure) => setSessionError(failure && failure.code ? String(failure.code) : 'errorGeneric'))
+      .finally(() => setSessionBusy(false));
+  };
+
   useEffect(() => {
     if (!remote || !connected || sessionRef) return;
-    remote.controllerSessionOpen(copy.title || 'remote', 'chat').catch(function () {});
-  }, [remote, connected, sessionRef, copy.title]);
+    openSession();
+  }, [remote, connected, sessionRef]);
   useEffect(() => {
     if (!remote || !sessionRef || connection.capabilityRevision != null) return;
     remote.controllerCapabilitySend(sessionRef).catch(function () {});
@@ -63,7 +75,7 @@ export default function RemoteConversationView({ t, bs }) {
     setError(null);
     try {
       // E2E-04：只传会话引用与正文；协议字段与输入摘要全部由 Rust 构造并加密。
-      await remote.controllerTaskSend(sessionRef, draft.trim());
+      await remote.controllerTaskSend(sessionRef, draft.trim(), modelSource);
       setDraft('');
     } catch (failure) {
       setError((failure && failure.code) || 'errorGeneric');
@@ -123,14 +135,16 @@ export default function RemoteConversationView({ t, bs }) {
 
       {/* E2E-07 首版能力开关：A 临时模型（含模型导出列表）保持隐藏，模型来源固定为
           B 本机模型；能力开放后再恢复选择器。 */}
-      <p className="mb-3 text-[11px] opacity-70">
-        {copy.modelPickerTitle}: {copy.modelSourceDevice}
-      </p>
+      <fieldset className="mb-3 text-[11px]">
+        <legend className="mb-1 opacity-70">{copy.modelPickerTitle}</legend>
+        <label className="mr-3 inline-flex items-center gap-1"><input type="radio" name="remote-model-source" checked={modelSource === 'controlled_device'} onChange={() => onModelSourceChange?.('controlled_device')} />{copy.modelSourceDevice}</label>
+        <label className="inline-flex items-center gap-1"><input type="radio" name="remote-model-source" checked={modelSource === 'controller_temporary'} onChange={() => onModelSourceChange?.('controller_temporary')} />{copy.modelSourceMine}</label>
+      </fieldset>
+      {transcript.length === 0 && tasks.length === 0 && (
+        <p className="text-[12px] opacity-70">{copy.empty}</p>
+      )}
 
       <ol className="remote-transcript" aria-live="polite">
-        {transcript.length === 0 && (
-          <li className="text-[12px] opacity-70">{copy.transcriptEmpty || copy.empty}</li>
-        )}
         {transcript.map((entry) => (
           <li
             key={`${entry.sessionId}:${entry.epoch}:${entry.sequence}`}
@@ -145,7 +159,6 @@ export default function RemoteConversationView({ t, bs }) {
       </ol>
 
       <ol className="remote-tasks" aria-live="polite">
-        {tasks.length === 0 && <li className="text-[12px] opacity-70">{copy.empty}</li>}
         {tasks.map((task) => (
           <li key={task.taskId} className="mb-1 text-[12px]">
             <span className="mr-2">{copy[taskStatusKey(task.status)]}</span>
@@ -153,6 +166,50 @@ export default function RemoteConversationView({ t, bs }) {
           </li>
         ))}
       </ol>
+
+      <form
+        className="sticky bottom-0 mt-3 flex items-center gap-2 border-t border-black/10 bg-white pt-3 dark:border-white/10 dark:bg-[#1F2023]"
+        onSubmit={(event) => {
+          event.preventDefault();
+          send();
+        }}
+      >
+        <label className="sr-only" htmlFor="remote-conversation-composer">{copy.composerPlaceholder}</label>
+        <input
+          id="remote-conversation-composer"
+          data-testid="remote-conversation-composer"
+          value={draft}
+          onChange={(event) => setDraft(event.target.value)}
+          placeholder={copy.composerPlaceholder}
+          className="min-w-0 flex-1 rounded-full border border-black/10 px-4 py-2 text-[13px] outline-none dark:border-white/15 dark:bg-transparent"
+        />
+        <button
+          type="submit"
+          data-testid="remote-conversation-send"
+          disabled={busy || sessionBusy || !draft.trim() || !sessionRef}
+          className="shrink-0 rounded-full bg-[#1A73E8] px-4 py-2 text-[13px] text-white disabled:opacity-60"
+        >
+          {busy ? copy.sending : copy.send}
+        </button>
+      </form>
+      {!sessionRef && !sessionBusy && !sessionError && connected && (
+        <p className="mt-2 text-[11px] opacity-70">{copy.sessionInitializing}</p>
+      )}
+      {!sessionRef && sessionBusy && (
+        <p className="mt-2 text-[11px] opacity-70" role="status">{copy.sessionInitializing}</p>
+      )}
+      {!sessionRef && sessionError && (
+        <p className="mt-2 flex items-center gap-2 text-[11px] text-[#EA4335]" role="alert">
+          <span>{copy.sessionInitializeFailed} ({sessionError})</span>
+          <button
+            type="button"
+            onClick={openSession}
+            className="rounded-full border border-[#EA4335]/40 px-2 py-0.5"
+          >
+            {copy.retry}
+          </button>
+        </p>
+      )}
 
       {permissions.length > 0 && (
         <section aria-labelledby="remote-permission-title" className="mt-3">
@@ -218,30 +275,16 @@ export default function RemoteConversationView({ t, bs }) {
         </section>
       )}
 
-      <div className="mt-3 flex items-end gap-2">
-        <label className="sr-only" htmlFor="remote-composer">{copy.composerPlaceholder}</label>
-        <textarea
-          id="remote-composer"
-          value={draft}
-          onChange={(event) => setDraft(event.target.value)}
-          placeholder={copy.composerPlaceholder}
-          rows={2}
-          className="w-full rounded-lg border border-black/10 px-2 py-1 text-[13px] dark:border-white/15 dark:bg-transparent"
-        />
-        <button type="button" onClick={send} disabled={busy || !draft.trim()}>
-          {busy ? copy.sending : copy.send}
+      {activeTask && (
+        <button
+          type="button"
+          onClick={() => remote && sessionRef && remote
+            .controllerTaskCancelSend(sessionRef, activeTask.taskId)
+            .catch(function () {})}
+        >
+          {copy.cancel}
         </button>
-        {activeTask && (
-          <button
-            type="button"
-            onClick={() => remote && sessionRef && remote
-              .controllerTaskCancelSend(sessionRef, activeTask.taskId)
-              .catch(function () {})}
-          >
-            {copy.cancel}
-          </button>
-        )}
-      </div>
+      )}
       {error && <p role="alert" className="mt-1 text-[12px] text-[#EA4335]">{copy.errorGeneric}</p>}
     </div>
   );

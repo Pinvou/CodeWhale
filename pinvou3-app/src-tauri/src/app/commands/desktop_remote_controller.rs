@@ -83,14 +83,18 @@ pub async fn desktop_remote_controller_connect(
 }
 
 #[tauri::command]
-pub fn desktop_remote_controller_disconnect(
+pub async fn desktop_remote_controller_disconnect(
     app: AppHandle,
     manager: State<'_, ControllingDeviceManager>,
     sessions: State<'_, ControllingSessionManager>,
 ) -> Result<ControllingStatus, String> {
     ensure_supported(&manager)?;
     // E2E-06：先尽力把显式断开告诉 Relay/B（本地断开始终权威，发送失败不阻塞）。
-    let _ = manager.send_disconnect("user_disconnect");
+    if let Some(receipt) = manager.send_disconnect_with_receipt("user_disconnect") {
+        // Queue admission is not delivery. Let the socket flush the final frame
+        // before local cleanup cancels its transport; offline peers stay bounded.
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), receipt).await;
+    }
     sessions.clear();
     let status = manager.disconnect();
     emit_status(&app, &status);
