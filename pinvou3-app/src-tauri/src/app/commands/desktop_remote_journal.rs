@@ -575,6 +575,28 @@ fn display_kind(event: &JournalEvent) -> Result<DisplayKind, String> {
     }
 }
 
+const REMOTE_TOOL_DISPLAY_SCHEMA: &str = "remote_tool_display/v1";
+
+fn remote_tool_display_body(event: &JournalEvent) -> Option<String> {
+    if event.kind != "tool" {
+        return None;
+    }
+    let tool_id = event.payload.get("tool_id").and_then(Value::as_str)?;
+    let tool_name = event.payload.get("tool_name").and_then(Value::as_str)?;
+    let tool_state = event.payload.get("tool_state").and_then(Value::as_str)?;
+    let output = event.payload.get("text").and_then(Value::as_str);
+    Some(
+        serde_json::json!({
+            "schema": REMOTE_TOOL_DISPLAY_SCHEMA,
+            "toolId": tool_id,
+            "toolName": tool_name,
+            "toolState": tool_state,
+            "output": output,
+        })
+        .to_string(),
+    )
+}
+
 fn display_event(event: &JournalEvent) -> Result<JournalDisplay, String> {
     event
         .validate_exportable()
@@ -584,6 +606,11 @@ fn display_event(event: &JournalEvent) -> Result<JournalDisplay, String> {
             return Err("remote_projection_terminal_status_mismatch".into());
         }
         Some(status.to_owned())
+    } else if event.kind == "tool" {
+        // A malformed or legacy tool event must not fall through to the
+        // generic JSON/text body. Without the complete display identity the
+        // UI cannot safely join start/end events into a native tool card.
+        remote_tool_display_body(event)
     } else {
         event
             .payload
@@ -952,6 +979,51 @@ mod tests {
 
     fn runtime() -> Arc<DesktopRemoteJournalRuntime> {
         DesktopRemoteJournalRuntime::journal_only("epoch-1")
+    }
+
+    #[test]
+    fn tool_projection_preserves_only_the_safe_display_shape() {
+        let event = JournalEvent {
+            event_id: "event-tool-1".into(),
+            epoch: "epoch-1".into(),
+            sequence: 1,
+            kind: "tool".into(),
+            session_id: "session-1".into(),
+            task_id: Some("task-1".into()),
+            terminal_status: None,
+            payload: json!({
+                "tool_id": "call-1",
+                "tool_name": "weather",
+                "tool_state": "completed",
+                "text": "safe output",
+            }),
+        };
+        let display = display_event(&event).expect("safe tool display");
+        let body: Value = serde_json::from_str(display.body().expect("tool body")).unwrap();
+        assert_eq!(display.kind(), DisplayKind::Tool);
+        assert_eq!(body["schema"], REMOTE_TOOL_DISPLAY_SCHEMA);
+        assert_eq!(body["toolId"], "call-1");
+        assert_eq!(body["toolName"], "weather");
+        assert_eq!(body["toolState"], "completed");
+        assert_eq!(body["output"], "safe output");
+        assert!(body.get("args").is_none());
+    }
+
+    #[test]
+    fn incomplete_tool_projection_never_falls_back_to_a_raw_body() {
+        let event = JournalEvent {
+            event_id: "event-tool-legacy".into(),
+            epoch: "epoch-1".into(),
+            sequence: 1,
+            kind: "tool".into(),
+            session_id: "session-1".into(),
+            task_id: Some("task-1".into()),
+            terminal_status: None,
+            payload: json!({ "text": "legacy raw tool output" }),
+        };
+        let display = display_event(&event).expect("legacy tool display");
+        assert_eq!(display.kind(), DisplayKind::Tool);
+        assert_eq!(display.body(), None);
     }
 
     fn task_event(task_id: impl Into<String>, status: &str) -> RemoteTaskEvent {

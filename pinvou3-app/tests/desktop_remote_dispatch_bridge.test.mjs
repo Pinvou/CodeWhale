@@ -69,6 +69,42 @@ test('B status consumes only current Rust ControlledStatus fields', async () => 
   assert.equal('pairingExpiresAtMs' in state.desktopRemoteControl.controlledDevice, false);
 });
 
+test('B refresh opens and projects the replacement generation after retiring the old code', async () => {
+  const refresh = Promise.withResolvers();
+  const { feature, state, listeners, logic } = installFeature((command) => {
+    if (command === 'desktop_remote_controlled_refresh') {
+      return refresh.promise;
+    }
+    return undefined;
+  });
+  state.desktopRemoteControl = logic.applyControlledStatus(state.desktopRemoteControl, {
+    status: 'waiting_for_pairing', generation: 'generation-old',
+    pairingCode: '2345678', pairingRemainingMs: 0,
+  });
+
+  const pending = feature.controlledRefresh();
+  listeners.get('desktop-remote-controlled-status')({
+    payload: { status: 'retiring_generation', generation: 'generation-old' },
+  });
+  listeners.get('desktop-remote-controlled-status')({
+    payload: {
+      status: 'waiting_for_pairing', generation: 'generation-new',
+      pairingCode: '3456789', pairingRemainingMs: 300_000,
+    },
+  });
+  refresh.resolve({
+    status: 'waiting_for_pairing', generation: 'generation-new',
+    pairingCode: '3456789', pairingRemainingMs: 300_000,
+  });
+  await pending;
+
+  assert.equal(state.desktopRemoteControl.controlledDevice.status, 'waiting_for_pairing');
+  assert.equal(state.desktopRemoteControl.controlledDevice.generation, 'generation-new');
+  assert.equal(state.desktopRemoteControl.controlledDevice.pairingCode, '3456789');
+  assert.equal(state.desktopRemoteControl.controlledDevice.pairingRemainingMs, 300_000);
+  assert.deepEqual([...state.desktopRemoteControl.retiredControlledGenerations], ['generation-old']);
+});
+
 test('B workspace authorization exists only in the start transaction, never a live invoke', () => {
   const rustRoot = path.join(app, 'src-tauri', 'src');
   const rust = (...parts) => fs.readFileSync(path.join(rustRoot, ...parts), 'utf8');
