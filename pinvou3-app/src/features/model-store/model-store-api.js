@@ -243,6 +243,18 @@ function revealRunLogsDir() {
 }
 
 /**
+ * 导出一次运行的日志，生成一份**可外发**的副本。
+ *
+ * 跟落盘那份的区别是脱敏强度：落盘那份刻意留着路径和内网地址（不留就没法诊断），
+ * 导出那份会把它们一起抹掉——它是要离开这台机器的那一份。
+ * @param {string} runId - 运行 ID。
+ * @returns {Promise<{path:string}>} 导出文件路径。
+ */
+function exportRunLog(runId) {
+  return invokeTauri('model_store_export_run_log', { runId });
+}
+
+/**
  * 还在跑的长操作。给了 `cardId` 就只问那一张卡。
  *
  * 进入模型商店时用它把任务卡接回去。任务态在前端随视图销毁（模型商店是条件挂载
@@ -319,5 +331,6 @@ export {
   cancelRun,
   answerRun,
   revealRunLogsDir,
+  exportRunLog,
   fetchActiveRuns,
 };

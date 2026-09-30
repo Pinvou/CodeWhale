@@ -170,3 +170,12 @@ test('收起状态下不出「复制详情」——没有日志可看，多一�
   assert.doesNotMatch(render(task({ expanded: false })), /model-store-task-copy-log/);
 });
 
+test('「导出日志（可外发）」只在失败的卡片上给', () => {
+  // 它存在的理由是脱敏分了两道：落盘那份留着路径和内网地址（不留就没法诊断），
+  // 导出那份把它们一起抹掉。没有这个入口，更严的那一道就没有任何出口。
+  const failed = render(task({ expanded: true, status: 'error', error: '磁盘空间不足' }));
+  assert.match(failed, /model-store-task-export-log/);
+  // 正在跑的卡片不给：这会儿还没有"要反馈的失败"，多一个按钮只是噪声
+  assert.doesNotMatch(render(task({ expanded: true })), /model-store-task-export-log/);
+});
+

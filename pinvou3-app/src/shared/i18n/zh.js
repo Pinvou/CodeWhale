@@ -468,6 +468,9 @@ export const dictZh = {
           taskProgressEstimated:'估算', taskStep:(i,n)=>`第 ${i} 步 / 共 ${n} 步`,
           taskLayers:(done,total)=>`镜像层 ${done}/${total}`, taskCopyLog:'复制详情',
           taskOpenLogDir:'打开日志目录', taskOpenLogDirFailed:(m)=>`打不开日志目录：${m}`,
+          // 「可外发」不是修饰词：导出那份比落盘那份多抹掉内网地址和路径，就是为了能发出去。
+          taskExportLog:'导出日志（可外发）', taskExportLogDone:(p)=>`已导出到 ${p}`,
+          taskExportLogFailed:(m)=>`导出失败：${m}`,
           etaSec:n=>`${n} 秒`, etaMin:n=>`${n} 分钟`, etaHour:(h,m)=>`${h} 小时 ${m} 分`,
           promptTitle:'需要你补充几项信息', promptSubmit:'确定', promptCancel:'取消', promptYes:'是', promptNo:'否',
 

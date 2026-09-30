@@ -434,6 +434,8 @@ const jaBase = {
           taskProgressEstimated:'推定', taskStep:(i,n)=>`ステップ ${i} / ${n}`,
           taskLayers:(done,total)=>`イメージレイヤー ${done}/${total}`, taskCopyLog:'詳細をコピー',
           taskOpenLogDir:'ログフォルダーを開く', taskOpenLogDirFailed:(m)=>`ログフォルダーを開けません：${m}`,
+          taskExportLog:'ログを書き出す（共有可）', taskExportLogDone:(p)=>`${p} に書き出しました`,
+          taskExportLogFailed:(m)=>`書き出しに失敗しました：${m}`,
           etaSec:n=>`${n} 秒`, etaMin:n=>`${n} 分`, etaHour:(h,m)=>`${h} 時間 ${m} 分`,
           promptTitle:'いくつか入力が必要です', promptSubmit:'OK', promptCancel:'キャンセル', promptYes:'はい', promptNo:'いいえ',
 

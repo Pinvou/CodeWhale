@@ -352,6 +352,10 @@ test('parseStageLine / parseStepLine：阶段名与粗粒度步骤', () => {
   assert.deepEqual(parseStepLine('LMM_STEP=9/4'), { index: 4, total: 4 });
   assert.equal(parseStepLine('LMM_STEP=1/0'), null);
   assert.equal(parseStepLine('普通日志'), null);
+  // 同组的 progress / stage / docker 三个都有带前缀的回归测试，这个也要有：
+  // 这一组正则刻意都不锚定，好吃得下宿主加的 `[安装引擎] ` 前缀。加上 `^` 的话
+  // 失效是**静默的**——界面上不报错，只是步骤进度永远不出现。
+  assert.deepEqual(parseStepLine('[安装引擎] LMM_STEP=2/4'), { index: 2, total: 4 });
 });
 
 test('parseDockerSize：1000 进位的 GB 与 1024 进位的 GiB 是两回事', () => {

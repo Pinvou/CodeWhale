@@ -841,7 +841,6 @@ export {
   applyLayerUpdate,
   layerSummary,
   taskProgressView,
-  MAX_TRACKED_LAYERS,
   computeSpeed,
   trimSamples,
   reduceLogChunk,

@@ -7,7 +7,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { ChevronDown, ChevronRight } from '../../components/icons.jsx';
 import { Spinner } from '../../components/Spinner.jsx';
 import { copyClipboardText } from '../../shared/clipboard.js';
-import { revealRunLogsDir } from './model-store-api.js';
+import { exportRunLog, revealRunLogsDir } from './model-store-api.js';
 import {
   canForceRemove,
   formatBytes,
@@ -251,13 +251,28 @@ function ModelStoreTaskCard({ task, copy, onCancel, onDismiss, onToggle, onAnswe
   const copyLog = () => {
     copyClipboardText(logText || '').then((ok) => setCopied(ok ? 'ok' : 'fail'));
   };
+  // 日志相关操作的就地反馈（成功给路径、失败给原因）。失败静静地什么都不发生的话，
+  // 用户只会反复点那个按钮。
+  const [logNotice, setLogNotice] = useState(null);
   // 「打开日志目录」。面板上的日志被简化了、还只留最后 500 行，而磁盘上那份是完整的
-  // （`~/.pinvou3/model-store/logs/`）。失败要说出来——静静地什么都不发生，用户只会
-  // 反复点。
-  const [logDirError, setLogDirError] = useState(null);
+  // （`~/.pinvou3/model-store/logs/`）。
   const openLogDir = () => {
-    setLogDirError(null);
-    revealRunLogsDir().catch((e) => setLogDirError(String(e?.message || e)));
+    setLogNotice(null);
+    revealRunLogsDir().catch((e) =>
+      setLogNotice({ tone: 'error', text: copy.taskOpenLogDirFailed(String(e?.message || e)) })
+    );
+  };
+  // 「导出日志（可外发）」：只在失败的卡片上给。
+  //
+  // 它存在的理由是脱敏分了两道——落盘那份留着路径和内网地址（不留就没法诊断），
+  // 导出那份把它们一起抹掉。没有这个入口，"更严的那一道"就没有任何出口，用户要把
+  // 失败反馈给我们时只能直接发原始日志。
+  const exportLog = () => {
+    setLogNotice(null);
+    exportRunLog(task.runId).then(
+      (result) => setLogNotice({ tone: 'ok', text: copy.taskExportLogDone(result?.path || '') }),
+      (e) => setLogNotice({ tone: 'error', text: copy.taskExportLogFailed(String(e?.message || e)) })
+    );
   };
 
   return (
@@ -332,14 +347,16 @@ function ModelStoreTaskCard({ task, copy, onCancel, onDismiss, onToggle, onAnswe
               原来每层每次刷新都往日志里追加一行,一个镜像十几层同时下,展开日志
               就是一片滚动的乱码 —— 用户的原话是「不要滚动的闪日志,这样很乱」。
               逐层的原文在这里被 reduceLogChunk 拦掉了,不进 task.lines。 */}
-          {/* 打不开日志目录要说出来。静静地什么都不发生，用户只会反复点那个按钮。
-              报错原文可能很长（路径 + errno），所以放在这里而不是按钮标签里。 */}
-          {logDirError ? (
+          {/* 日志操作的结果。放在这里而不是按钮标签里：报错原文可能很长（路径 +
+              errno），塞进按钮会把整张卡撑变形。 */}
+          {logNotice ? (
             <div
-              data-testid="model-store-task-log-dir-error"
-              className={`mb-1 line-clamp-2 text-[10px] ${TEXT_DANGER}`}
+              data-testid="model-store-task-log-notice"
+              className={`mb-1 line-clamp-2 text-[10px] ${
+                logNotice.tone === 'error' ? TEXT_DANGER : TEXT_SECONDARY
+              }`}
             >
-              {copy.taskOpenLogDirFailed(logDirError)}
+              {logNotice.text}
             </div>
           ) : null}
           {layers ? (
@@ -368,6 +385,15 @@ function ModelStoreTaskCard({ task, copy, onCancel, onDismiss, onToggle, onAnswe
         {/* 「复制详情」。日志简化之后必须有它:面板上现在只剩阶段化的少量人话,
             用户要把排查信息交给别人时,不该靠在一个 160px 高的框里手选。
             展开才出现——收起状态下没有日志可看,多一个按钮只是噪声。 */}
+        {task.expanded && isError && task.runId ? (
+          <MsButton
+            tone="neutral"
+            onClick={exportLog}
+            data-testid="model-store-task-export-log"
+          >
+            {copy.taskExportLog}
+          </MsButton>
+        ) : null}
         {task.expanded ? (
           <MsButton
             tone="neutral"

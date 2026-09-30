@@ -436,6 +436,8 @@ export const dictEn = {
           taskProgressEstimated:'estimated', taskStep:(i,n)=>`Step ${i} of ${n}`,
           taskLayers:(done,total)=>`Image layers ${done}/${total}`, taskCopyLog:'Copy details',
           taskOpenLogDir:'Open log folder', taskOpenLogDirFailed:(m)=>`Cannot open the log folder: ${m}`,
+          taskExportLog:'Export log (safe to share)', taskExportLogDone:(p)=>`Exported to ${p}`,
+          taskExportLogFailed:(m)=>`Export failed: ${m}`,
           etaSec:n=>`${n}s`, etaMin:n=>`${n} min`, etaHour:(h,m)=>`${h} h ${m} min`,
           promptTitle:'A few details are needed', promptSubmit:'OK', promptCancel:'Cancel', promptYes:'Yes', promptNo:'No',
 
