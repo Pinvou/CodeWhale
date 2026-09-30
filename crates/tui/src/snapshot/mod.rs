@@ -73,27 +73,36 @@ pub const ATTACHED_ROOTS_NOT_REVERTED_NOTE: &str =
 /// with the primary — claiming they "were not rolled back" would tell the
 /// user the opposite of what happened.
 ///
-/// Round-23 B23-1: BOTH sides are lexically normalized before the
-/// containment comparison. Over the raw persisted spellings a `..`-spelled
-/// root (`/ws/../shared`) or an inward-symlink root (`/ws/link →
-/// /elsewhere`) component-wise "nests" under the primary while every
-/// consumer canonicalizes it outside — writes there persist through the
-/// primary-rooted restore, so withholding the note for those spellings was
-/// fail-unsafe (and the previous doc asserted the opposite of the code).
-/// Normalizing first fires the note for exactly the roots whose consumers
-/// see them outside the primary; over-disclosing the boundary is the safe
-/// side.
+/// Round-23 B23-1 + round-24 B24-1: BOTH spellings of every side are judged.
+/// The lexically normalized forms catch `..`-spelled roots (`/ws/../shared`
+/// collapses outside the primary); the canonical-or-raw forms (the
+/// `ToolContext::boundary_roots` idiom) catch inward-symlink roots
+/// (`/ws/link → /elsewhere`) that lexically nest under the primary while
+/// every consumer canonicalizes them outside — writes through such a root
+/// persist past the primary-rooted restore, so withholding the note for
+/// either class was fail-unsafe (and an earlier doc asserted the opposite
+/// of the code). The clause fires when EITHER form lands outside the
+/// primary; over-disclosing the boundary is the safe side.
 pub fn restore_covers_primary_only(
     workspace: &std::path::Path,
     workspace_roots: &[std::path::PathBuf],
 ) -> bool {
     let workspace_lexical = codewhale_core::normalize_path_lexically(workspace);
+    let workspace_canonical = codewhale_core::normalize_path_lexically(
+        &workspace
+            .canonicalize()
+            .unwrap_or_else(|_| workspace.to_path_buf()),
+    );
     codewhale_core::normalize_workspace_roots(workspace, workspace_roots)
         .iter()
         .skip(1)
         .any(|root| {
             let root_lexical = codewhale_core::normalize_path_lexically(root);
+            let root_canonical = codewhale_core::normalize_path_lexically(
+                &root.canonicalize().unwrap_or_else(|_| root.clone()),
+            );
             !root_lexical.starts_with(&workspace_lexical)
+                || !root_canonical.starts_with(&workspace_canonical)
         })
 }
 #[allow(unused_imports)]
@@ -139,5 +148,41 @@ mod tests {
             &[PathBuf::from("/ws")],
         ));
         assert!(!restore_covers_primary_only(&workspace, &[]));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inward_symlink_root_fires_the_boundary_note() {
+        // Round-24 B24-1: lexical normalization cannot see through an inward
+        // symlink — `/ws/link → /elsewhere` lexically nests under `/ws`
+        // while every consumer canonicalizes it outside, so the
+        // lexical-only predicate withheld the boundary note while writes
+        // through the root persisted past the primary-rooted restore. The
+        // canonical leg (raw fallback for roots that do not resolve) must
+        // fire it; a genuinely nested plain root must stay silent.
+        let base = tempfile::tempdir().expect("tempdir");
+        let workspace = base.path().join("ws");
+        std::fs::create_dir_all(&workspace).expect("mkdir ws");
+        let elsewhere = base.path().join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).expect("mkdir elsewhere");
+        let link = workspace.join("link");
+        std::os::unix::fs::symlink(&elsewhere, &link).expect("symlink");
+        assert!(
+            restore_covers_primary_only(&workspace, &[link.clone()]),
+            "an inward-symlink root must fire the boundary note"
+        );
+        // A plain root nested under the primary keeps the old behavior even
+        // though the primary itself now also canonicalizes.
+        assert!(!restore_covers_primary_only(
+            &workspace,
+            &[workspace.join("nested")]
+        ));
+        // A symlink INSIDE the primary pointing at a nested directory stays
+        // inside on both spellings — no note.
+        let nested = workspace.join("nested-real");
+        std::fs::create_dir_all(&nested).expect("mkdir nested");
+        let inner_link = workspace.join("inner-link");
+        std::os::unix::fs::symlink(&nested, &inner_link).expect("symlink");
+        assert!(!restore_covers_primary_only(&workspace, &[inner_link]));
     }
 }
