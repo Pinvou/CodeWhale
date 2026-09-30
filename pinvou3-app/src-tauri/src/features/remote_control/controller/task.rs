@@ -34,8 +34,8 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tokio_util::sync::CancellationToken;
 
-use super::protocol::LeaseContext;
 use super::journal::JournalKind;
+use super::protocol::LeaseContext;
 
 pub(crate) const TASK_MODE_CHAT: &str = "chat";
 pub(crate) const TASK_MODE_CODE: &str = "code";
@@ -1028,7 +1028,10 @@ impl ControllerTaskExecutor for ChatTurnExecutor {
             task_id,
             json!({ "text": content }),
         );
-        let reply = self.port.run_chat_turn(&session_id, content, cancel).await?;
+        let reply = self
+            .port
+            .run_chat_turn(&session_id, content, cancel)
+            .await?;
         if let Some(reply) = reply.filter(|text| !text.trim().is_empty()) {
             events.emit_journal(
                 JournalKind::AssistantDelta,
@@ -2250,11 +2253,9 @@ mod tests {
                 task_id: Option<&str>,
                 payload: Value,
             ) {
-                self.0.lock().push((
-                    kind.wire().to_owned(),
-                    task_id.map(str::to_owned),
-                    payload,
-                ));
+                self.0
+                    .lock()
+                    .push((kind.wire().to_owned(), task_id.map(str::to_owned), payload));
             }
         }
 

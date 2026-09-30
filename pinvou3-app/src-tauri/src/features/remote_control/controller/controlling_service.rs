@@ -20,14 +20,12 @@ use uuid::Uuid;
 use super::controlling::{
     ControllerLease, ControllerOperation, ControllingDeviceManager, ControllingStatus,
 };
-use super::controlling_session::{
-    ControllingSessionManager, ControllingSessionProjection,
-};
 use super::controlling_handshake::{ControllingHandshake, HandshakeError};
 use super::controlling_runtime::{
     ControllingHandshakeOutcome, ControllingRelayPort, ControllingStageEvent,
     drive_controlling_handshake,
 };
+use super::controlling_session::{ControllingSessionManager, ControllingSessionProjection};
 use super::crypto::{
     ControllerRole as HandshakeRole, HandshakeKeyPair, load_relay_trust_config,
     transport_key_fingerprint,
@@ -375,9 +373,7 @@ fn dispatch_inbound_frame(
     };
     match payload_kind.as_str() {
         "capability_snapshot" => {
-            if let Ok(projection) =
-                sessions.apply_capability_snapshot_for_lease(&lease, &payload)
-            {
+            if let Ok(projection) = sessions.apply_capability_snapshot_for_lease(&lease, &payload) {
                 (sinks.on_session)(&projection);
             }
         }
@@ -405,13 +401,16 @@ fn journal_event_from_wire(payload: &Value) -> Option<JournalEvent> {
         .get("event_bytes")
         .and_then(Value::as_str)
         .and_then(|value| value.parse::<usize>().ok())?;
-    let raw = base64::engine::general_purpose::STANDARD.decode(encoded).ok()?;
+    let raw = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .ok()?;
     if raw.len() != declared || raw.len() > MAX_EVENT_PAYLOAD_BYTES {
         return None;
     }
     let event: JournalEvent = serde_json::from_slice(&raw).ok()?;
     if payload.get("journal_epoch").and_then(Value::as_str) != Some(event.epoch.as_str())
-        || payload.get("event_sequence").and_then(Value::as_str) != Some(event.sequence.to_string().as_str())
+        || payload.get("event_sequence").and_then(Value::as_str)
+            != Some(event.sequence.to_string().as_str())
         || payload.get("session_id").and_then(Value::as_str) != Some(event.session_id.as_str())
     {
         return None;
@@ -524,12 +523,12 @@ mod tests {
     use super::*;
     use crate::features::remote_control::controller::controlled_handshake::ControlledHandshake;
     use crate::features::remote_control::controller::crypto::AuthenticatedRelayTrustConfig;
+    use crate::features::remote_control::controller::encrypted_lane::EncryptedLane;
     use crate::features::remote_control::controller::relay_transport::transport_channels;
     use crate::features::remote_control::controller::test_support::{
         PairingFixture, encode, lease_context, paired_session_keys, pairing_fixture, signed_relay,
         signed_reservation,
     };
-    use crate::features::remote_control::controller::encrypted_lane::EncryptedLane;
 
     const RELAY_KEY_ID: &str = "relay-key-service";
 
@@ -1112,9 +1111,12 @@ mod tests {
         // 绑定另一份租约（异 generation）的加密帧：必须在派发前被丢弃。
         let mut foreign_lease = lease.clone();
         foreign_lease.remote_control_generation = "generation-other".into();
-        let mut foreign_responder =
-            EncryptedLane::new(HandshakeRole::B, &foreign_lease, responder_session(&foreign_lease))
-                .unwrap();
+        let mut foreign_responder = EncryptedLane::new(
+            HandshakeRole::B,
+            &foreign_lease,
+            responder_session(&foreign_lease),
+        )
+        .unwrap();
         let mut foreign_status = status.clone();
         foreign_status["remote_control_generation"] = serde_json::json!("generation-other");
         let foreign = foreign_responder
@@ -1131,8 +1133,9 @@ mod tests {
         let mut statuses = Vec::new();
         let mut session_projections = Vec::new();
         let mut task_events = Vec::new();
-        let mut on_status =
-            |status: &ControllingStatus| statuses.push(projection(status)["status"].as_str().unwrap().to_owned());
+        let mut on_status = |status: &ControllingStatus| {
+            statuses.push(projection(status)["status"].as_str().unwrap().to_owned())
+        };
         let mut on_session = |projection: &ControllingSessionProjection| {
             session_projections.push(projection.capability_revision);
         };

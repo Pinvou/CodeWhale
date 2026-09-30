@@ -10,9 +10,7 @@ use uuid::Uuid;
 use zeroize::{Zeroize, Zeroizing};
 
 use super::protocol::LeaseContext;
-use super::relay_transport::{
-    ControllerRole, ControllerSendError, ControllerTransportSender,
-};
+use super::relay_transport::{ControllerRole, ControllerSendError, ControllerTransportSender};
 use super::resume::ControllerResumeGate;
 
 const MAX_HISTORY_ENTRIES: usize = 256;
@@ -406,10 +404,7 @@ impl ControllingDeviceManager {
             .lease
             .as_ref()
             .ok_or_else(|| ControllingStateError::new("controller_not_connected"))?;
-        Ok((
-            lease.context.clone(),
-            lease.negotiated_capabilities.clone(),
-        ))
+        Ok((lease.context.clone(), lease.negotiated_capabilities.clone()))
     }
 
     /// 发送一条已认证明文载荷对应的密文帧（E2E-04）。租约未安装或 transport

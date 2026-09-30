@@ -133,8 +133,7 @@ pub(crate) fn handshake_binding(reserved: &Value) -> HandshakeBinding {
         .expect("fixture carries a transcript hash");
     let mut bytes = [0_u8; 32];
     for (index, chunk) in transcript_hash.as_bytes().chunks_exact(2).enumerate() {
-        bytes[index] =
-            u8::from_str_radix(std::str::from_utf8(chunk).unwrap(), 16).unwrap();
+        bytes[index] = u8::from_str_radix(std::str::from_utf8(chunk).unwrap(), 16).unwrap();
     }
     HandshakeBinding::new(
         reserved["relay_epoch"].as_str().unwrap(),

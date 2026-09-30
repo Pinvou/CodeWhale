@@ -31,7 +31,8 @@ impl ControlledBusinessPort for DesktopControlledBusiness {
         if let Ok(current) = capabilities.validate(
             &known_revision.to_string(),
             lease,
-            crate::features::remote_control::controller::relay_runtime::controlled_monotonic_millis(),
+            crate::features::remote_control::controller::relay_runtime::controlled_monotonic_millis(
+            ),
         ) {
             if known_revision > 0 {
                 return Ok(capabilities.wire_capability_snapshot(&current, request_id));

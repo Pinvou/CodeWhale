@@ -10,6 +10,7 @@ use serde::Serialize;
 use serde_json::Value;
 use tauri::{Emitter as _, State};
 
+use crate::app::commands::desktop_remote_task::DesktopRemoteTaskRuntime;
 use crate::features::remote_control::controller::controlled::ControlledDeviceManager;
 use crate::features::remote_control::controller::history::{
     RemoteHistoryRecord, RemoteHistoryStore,
@@ -18,7 +19,6 @@ use crate::features::remote_control::controller::journal::{
     JournalEvent, JournalSnapshot, RemoteJournal, ReplayOutcome,
 };
 use crate::features::remote_control::controller::task::{RemoteTaskEvent, RemoteTaskEventSink};
-use crate::app::commands::desktop_remote_task::DesktopRemoteTaskRuntime;
 
 const UNSUPPORTED: &str = "desktop_remote_control_unsupported";
 
@@ -67,10 +67,7 @@ impl RemoteTaskEventSink for DesktopTaskEventSink {
 /// 把一条权威 journal 事件回传当前主控端（E2E-05）：会话身份改写回 A 的引用，
 /// 用 B 的加密通道封装，经同一代 endpoint lane 发送。未连接、未协商
 /// `snapshot_journal_v1`、非远程会话或通道未就位时静默跳过（本地 B 事件照常）。
-pub(crate) fn publish_authoritative_event(
-    app: &tauri::AppHandle,
-    event: &JournalEvent,
-) {
+pub(crate) fn publish_authoritative_event(app: &tauri::AppHandle, event: &JournalEvent) {
     use tauri::Manager as _;
     let device = app.state::<ControlledDeviceManager>();
     let Ok((lease, capabilities)) = device.live_runtime_context() else {
@@ -95,9 +92,9 @@ pub(crate) fn publish_authoritative_event(
     else {
         return;
     };
-    let lane = app.state::<
-        crate::features::remote_control::controller::encrypted_lane::ControlledLaneState,
-    >();
+    let lane = app
+        .state::<crate::features::remote_control::controller::encrypted_lane::ControlledLaneState>(
+        );
     let Ok(frame) = lane.seal("journal_event", &payload, &capabilities) else {
         return;
     };
@@ -138,10 +135,7 @@ pub(crate) struct DesktopControllerJournalSink {
 }
 
 impl DesktopControllerJournalSink {
-    pub(crate) fn new(
-        app: tauri::AppHandle,
-        runtime: Arc<DesktopRemoteHistoryRuntime>,
-    ) -> Self {
+    pub(crate) fn new(app: tauri::AppHandle, runtime: Arc<DesktopRemoteHistoryRuntime>) -> Self {
         Self { app, runtime }
     }
 }
@@ -155,11 +149,10 @@ impl crate::features::remote_control::controller::controlling_service::Controlli
             .store()
             .find_by_session_reference(&event.session_id);
         if let Some(history_id) = &history_id {
-            let _ = self.runtime.store().append_authenticated(
-                history_id,
-                event,
-                monotonic_millis(),
-            );
+            let _ =
+                self.runtime
+                    .store()
+                    .append_authenticated(history_id, event, monotonic_millis());
         }
         let _ = self.app.emit(
             crate::features::remote_control::controller::controlling_service::CONTROLLER_JOURNAL_EVENT,

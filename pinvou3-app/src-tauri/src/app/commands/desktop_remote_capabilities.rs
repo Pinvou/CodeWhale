@@ -82,7 +82,9 @@ pub async fn desktop_remote_capabilities_snapshot(
 
 /// 构造 B 端能力快照：命令入口（本地 UI）与 wire 派发入口（E2E-04 的
 /// `capability_snapshot_request`）共用同一份实现。
-pub(crate) async fn build_capability_snapshot(app: &AppHandle) -> Result<CapabilitySnapshot, String> {
+pub(crate) async fn build_capability_snapshot(
+    app: &AppHandle,
+) -> Result<CapabilitySnapshot, String> {
     let controlled = app.state::<ControlledDeviceManager>();
     if !controlled.is_supported() {
         return Err(UNSUPPORTED.to_owned());

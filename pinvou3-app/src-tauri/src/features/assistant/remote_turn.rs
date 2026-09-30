@@ -64,7 +64,10 @@ impl RemoteChatTranscriptPort for StoreChatTranscript {
             .find(|message| message.role == Role::Assistant)?;
         let mut text = String::new();
         for block in &message.content {
-            if let ContentBlock::Text { text: block_text, .. } = block {
+            if let ContentBlock::Text {
+                text: block_text, ..
+            } = block
+            {
                 text.push_str(block_text);
             }
         }
