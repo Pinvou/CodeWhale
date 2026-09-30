@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 
-use super::journal::{sanitize_event_payload, JournalEvent, JournalSnapshot};
+use super::journal::{JournalEvent, JournalSnapshot, sanitize_event_payload};
 
 pub(crate) const HISTORY_VERSION: u8 = 1;
 pub(crate) const MAX_HISTORIES: usize = 64;
@@ -328,8 +328,7 @@ impl RemoteHistoryStore {
             records: records.values().cloned().collect(),
         };
         let payload = serde_json::to_vec_pretty(&file).map_err(|_| error("history_serialize"))?;
-        deepseek_tui::utils::write_atomic(path, &payload)
-            .map_err(|_| error("history_write_failed"))
+        deepseek_tui::utils::write_atomic(path, &payload).map_err(|_| error("history_write_failed"))
     }
 
     pub(crate) fn path(&self) -> Option<&Path> {
@@ -343,9 +342,9 @@ fn validate_ref(value: &str, max_chars: usize) -> Result<()> {
         || value
             .bytes()
             .any(|byte| matches!(byte, b'/' | b'\\' | b':'))
-        || !value.bytes().all(|byte| {
-            byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.')
-        })
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
     {
         return Err(error("history_reference_invalid"));
     }
@@ -385,7 +384,10 @@ mod tests {
             store.load(&id).unwrap().state,
             RemoteHistoryState::OfflineCopy
         );
-        assert_eq!(store.load("remote-history-99999999").unwrap_err().code, "history_not_found");
+        assert_eq!(
+            store.load("remote-history-99999999").unwrap_err().code,
+            "history_not_found"
+        );
     }
 
     #[test]
@@ -408,7 +410,9 @@ mod tests {
             terminal_status: Some("failed".into()),
             ..journal_event(3, JournalKind::TaskStatus, json!({ "status": "failed" }))
         };
-        store.append_authenticated(&id, &conflicting, 1_400).unwrap();
+        store
+            .append_authenticated(&id, &conflicting, 1_400)
+            .unwrap();
         assert_eq!(
             store.load(&id).unwrap().last_terminal_status.as_deref(),
             Some("succeeded")
