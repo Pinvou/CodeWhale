@@ -266,7 +266,76 @@ jobs:
               - 'scripts/tests/test_release_cache_policy.py'
               - 'scripts/tests/test_release_linux_floor_policy.py'
               - 'scripts/tests/test_release_manifest_probe.py'
+              - 'scripts/run-windows-remote-control-e2e.ps1'
+              - 'scripts/windows-e2e-process-guard.ps1'
+              - 'scripts/windows-e2e-orchestrator-helpers.ps1'
+              - 'scripts/create-installer-spdx.mjs'
+              - 'scripts/check-enrollment-gated-v2-rollback.mjs'
+              - 'scripts/remote-control-release-path-policy.mjs'
+              - 'scripts/remote-control-*'
+              - 'scripts/remote-control-*/**'
+              - 'scripts/run-remote-control-*'
+              - 'scripts/run-remote-control-*/**'
+              - 'remote-control-relay/scripts/verify-github-workflow-run.cjs'
+              - 'remote-control-relay/test/github-workflow-run-identity.test.js'
+              - 'remote-control-relay/test/installer-spdx.test.js'
+              - 'remote-control-relay/test/release-path-policy.test.js'
+              - 'remote-control-relay/test/windows-e2e-*.test.js'
+              - 'remote-control-relay/docs/schemas/**'
+              - 'pinvou3-app/tests/nsis_resource_staging_contract.test.js'
+              - 'pinvou3-app/scripts/remote-control-*'
+              - 'pinvou3-app/scripts/remote-control-*/**'
+              - 'pinvou3-app/src/features/remote-control/**'
+              - 'pinvou3-app/src/features/chat/ChatView.jsx'
+              - 'pinvou3-app/src/components/Toggle.jsx'
+              - 'pinvou3-app/src/app/main.jsx'
+              - 'pinvou3-app/src/features/settings/SettingsView.jsx'
+              - 'pinvou3-app/src/hooks/useBridge.js'
+              - 'pinvou3-app/src/platform/tauri/bridge.js'
+              - 'pinvou3-app/src/shared/platform.js'
+              - 'pinvou3-app/src/platform/tauri/bridge/*remote-control*'
+              - 'pinvou3-app/src/platform/tauri/bridge/**/*remote-control*'
+              - 'pinvou3-app/src/platform/tauri/bridge/**/*remote-control*/**'
+              - 'pinvou3-app/src-tauri/src/features/remote_control/**'
+              - 'pinvou3-app/src-tauri/src/features/behavior_telemetry/remote_control.rs'
+              - 'pinvou3-app/src-tauri/src/features/sessions/remote_proxy/**'
+              - 'pinvou3-app/src-tauri/src/app/commands/desktop_remote_*.rs'
+              - 'pinvou3-app/src-tauri/src/app/commands/**'
+              - 'pinvou3-app/src-tauri/src/app/desktop_remote_composition.rs'
+              - 'pinvou3-app/src-tauri/src/app/remote_projection_adapter.rs'
+              - 'pinvou3-app/src-tauri/src/app/commands/remote_control.rs'
+              - 'pinvou3-app/src-tauri/src/platform/capabilities.rs'
+              - 'pinvou3-app/src-tauri/capabilities/default.json'
+              - 'pinvou3-app/tests/remote_*'
+              - 'pinvou3-app/tests/remote_*/**'
+              - 'pinvou3-app/tests/desktop_remote_*'
+              - 'pinvou3-app/tests/desktop_remote_*/**'
+              - 'pinvou3-app/tests/connect_remote_device_*'
+              - 'pinvou3-app/tests/connect_remote_device_*/**'
+              - 'pinvou3-app/tests/remote_control_feature_gate_contract.test.mjs'
+              - 'pinvou3-app/tests/remote_control_real_ui_smoke_contract.test.mjs'
+              - 'remote-control-relay/docs/schemas/**'
+              - 'remote-control-relay/**'
+              - 'remote-control-relay/package.json'
+              - 'remote-control-relay/package-lock.json'
+              - 'remote-control-relay/scripts/controller-release-gate.mjs'
+              - 'remote-control-relay/scripts/validate-controller-release-evidence.mjs'
+              - 'remote-control-relay/scripts/query-controller-release-telemetry.mjs'
+              - 'remote-control-relay/scripts/deploy-controller-preflight.mjs'
+              - 'remote-control-relay/scripts/prepare-legacy-gateway-route.mjs'
+              - 'remote-control-relay/scripts/verify-provider-attestation.mjs'
+              - 'remote-control-relay/scripts/verify-installer-supply-chain.mjs'
+              - 'remote-control-relay/controller-sensitive-scan.js'
+              - 'remote-control-relay/test/controller-sensitive-scan.test.js'
+              - 'remote-control-relay/test/controller-telemetry.test.js'
+              - 'remote-control-relay/test/controller-release-*.test.js'
+              - 'remote-control-relay/test/windows-e2e-*.test.js'
+              - 'remote-control-relay/test/installer-spdx.test.js'
+              - 'docs/Windows双端远程控制发布与回滚.md'
+              - 'docs/Windows双端远程控制双机演练清单.md'
               - '.github/workflows/release-packages.yml'
+              - '.github/workflows/windows-remote-control-evidence.yml'
+              - '.github/workflows/windows-remote-control-build-evidence.yml'
               - '.github/workflows/pr-check.yml'
               - '.github/workflows/mac-build.yml'
               - '.gitmodules'
@@ -282,6 +351,7 @@ jobs:
               - 'pinvou3-app/src-tauri/tauri.conf.json'
               - 'pinvou3-app/src-tauri/config/**'
               - 'pinvou3-app/src-tauri/packaging/**'
+              - 'pinvou3-app/src-tauri/packaging/windows/**'
               - 'pinvou3-app/src-tauri/resources/**'
               - 'pinvou3-app/tests/knowledge_host_packaging.test.mjs'
               - 'pinvou3-app/tests/macos_phase2_contract.test.js'
@@ -854,15 +924,19 @@ jobs:
     # Ready PR/Queue/main 仅在发布链路相关路径变化时验证版本同步、
     # Tauri overlay 与各平台打包契约，不生成 deb/dmg/nsis。
     if: ${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.release_contract == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
-    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, windows-latest]
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
 
       - name: Set up zram and swap
+        if: ${{ runner.os == 'Linux' }}
         # 内存扩容为尽力而为:超时/失败只告警不阻断(回退 runner 默认内存)。
         run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup 未完成,继续使用 runner 默认内存"
-
       - uses: actions/setup-node@v7
         with:
           node-version: "24"
@@ -872,15 +946,23 @@ jobs:
       - name: 安装前端依赖
         run: npm --prefix pinvou3-app ci --prefer-offline --no-audit
 
+      - name: 安装 Relay 发布门禁依赖
+        run: npm --prefix remote-control-relay ci --prefer-offline --no-audit --ignore-scripts
+
       # 版本一致性校验(--check)由 version-consistency job 无路径门全事件覆盖,
       # 此处不重复;仅跑 Tauri overlay、各平台打包与知识宿主契约。
-      - name: Tauri 打包与发布配置契约
+      - name: Tauri 打包、发布与远控安全契约
+        env:
+          PINVOU_DESKTOP_CONTROLLER_ENABLED: '0'
         run: |
           npm --prefix pinvou3-app run test:tauri-layout
           npm --prefix pinvou3-app run test:tauri-effective-config
           npm --prefix pinvou3-app run test:macos-phase2
           npm --prefix pinvou3-app run test:knowledge-host-packaging
           npm --prefix pinvou3-app run test:linux-asr-runtime
+          npm --prefix remote-control-relay run release:gate
+          node --test --test-concurrency=1 remote-control-relay/test/controller-release-evidence.test.js remote-control-relay/test/controller-release-gates.test.js remote-control-relay/test/controller-release-telemetry-query.test.js remote-control-relay/test/github-workflow-run-identity.test.js remote-control-relay/test/installer-spdx.test.js remote-control-relay/test/release-path-policy.test.js remote-control-relay/test/windows-e2e-orchestrator-contract.test.js remote-control-relay/test/windows-e2e-orchestrator-helpers.test.js remote-control-relay/test/windows-e2e-path-guard.test.js
+          node --test pinvou3-app/tests/remote_control_feature_gate_contract.test.mjs pinvou3-app/tests/remote_control_real_ui_smoke_contract.test.mjs pinvou3-app/tests/nsis_resource_staging_contract.test.js
 
   # pinvou-knowledge 是可单独部署的 crate，必须直接验证自己的默认 feature 图、
   # 测试与部署入口，而不只依赖 Tauri 作为 client-only path dependency 的间接编译。

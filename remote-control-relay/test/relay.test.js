@@ -408,6 +408,39 @@ test("controller v1 fails with a specific error when its runtime is disabled", a
   await waitForClose(socket);
 });
 
+test("disabled controller rejects v1 without opening or rewriting registry and tombstones", async () => {
+  const controllerStatePath = join(testRoot, `disabled-controller-state-${Date.now()}.json`);
+  const preserved = Buffer.from('{"opaque_registry_and_tombstones":"must-remain-byte-identical"}\n', "utf8");
+  await writeFile(controllerStatePath, preserved);
+  const isolated = await spawnRelay({
+    PINVOU_DESKTOP_CONTROLLER_ENABLED: "0",
+    PINVOU_REMOTE_CONTROLLER_STATE_PATH: controllerStatePath,
+  });
+  let socket;
+  try {
+    socket = await openControllerSocket(isolated.wsUrl);
+    const unavailable = nextMessage(socket, "error");
+    socket.send(JSON.stringify({
+      v: 1,
+      type: "desktop_pairing_register",
+      request_id: "request-disabled-preserve-state",
+      registration_request_id: "registration-disabled-preserve-state",
+      endpoint_id: "endpoint-disabled-preserve-state",
+      remote_control_generation: "generation-disabled-preserve-state",
+      code_wrap_public_key_b64: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+      handshake_public_key_b64: "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+      key_algorithm: "x25519",
+      capabilities: ["pairing_v1"],
+    }));
+    assert.equal((await unavailable).code, "desktop_controller_unavailable");
+    await waitForClose(socket);
+  } finally {
+    closeSocket(socket);
+    await stopRelay(isolated.child);
+  }
+  assert.deepEqual(await readFile(controllerStatePath), preserved);
+});
+
 test("stats and telemetry keep their dedicated top-level paths", async () => {
   const stats = await fetch(`${httpUrl}/pinvou3/stats`);
   assert.equal(stats.status, 200);

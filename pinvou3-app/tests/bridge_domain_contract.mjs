@@ -22,7 +22,7 @@ export const desktopBridgeApi = {
   desktopRemoteControl: [
     'artifactDownloadAbort', 'artifactDownloadBegin', 'artifactDownloadChunk', 'artifactIndex', 'artifactPreview',
     'attachmentAbort', 'attachmentBegin', 'attachmentChunk',
-    'capabilitiesSnapshot', 'clientLog', 'controlledDisconnectNow',
+    'capabilitiesSnapshot', 'clientEvent', 'controlledDisconnectNow',
     'controlledListWorkspaces', 'controlledRefresh', 'controlledStart', 'controlledStatus', 'controlledStop',
     'controlledSync', 'controlledTaskSend', 'controlledCapabilitiesSnapshot', 'controlledStopTask', 'controllerCapabilitySend',
     'controllerConnect', 'controllerDisconnect', 'controllerStatus',

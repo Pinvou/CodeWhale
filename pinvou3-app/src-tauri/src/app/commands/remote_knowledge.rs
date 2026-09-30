@@ -226,9 +226,13 @@ async fn sync_peer_installed_local_model(
     if !local_model::model_installed() {
         return;
     }
-    if let Err(error) = local_model::load_installed_embedder(local_knowledge, pool).await {
-        eprintln!(
-            "[knowledge] shared host model is installed, but desktop hot-load failed: {error}"
+    if local_model::load_installed_embedder(local_knowledge, pool)
+        .await
+        .is_err()
+    {
+        crate::features::remote_control::controller::relay_runtime::log_controlled_event(
+            "knowledge_model_load_failed",
+            "failed",
         );
     }
     let local_status = local_model::current_status(local_knowledge);
@@ -386,9 +390,13 @@ fn publish_remote_kb_mount_change(
         "revision": snapshot.revision,
         "remote_collections": remote_collections,
     });
-    if let Err(error) = app.emit("remote_control:kb_mount_changed", payload.clone()) {
-        log::warn!(
-            "[remote-knowledge] failed to emit mount change for session {session_id}: {error}"
+    if app
+        .emit("remote_control:kb_mount_changed", payload.clone())
+        .is_err()
+    {
+        crate::features::remote_control::controller::relay_runtime::log_controlled_event(
+            "knowledge_mount_emit_failed",
+            "failed",
         );
     }
     crate::features::remote_control::forward_app_event(

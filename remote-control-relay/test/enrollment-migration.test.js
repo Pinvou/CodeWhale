@@ -790,7 +790,11 @@ test("real legacy v2 Relay is safe only behind the enrollment gateway", async (t
     desktop_secret: DESKTOP_SECRET,
   }));
   assert.equal((await controllerRegistered).type, "desktop_endpoint_registered");
-  const controllerDisabled = nextMessage(controllerDesktop);
+  // Registering a replacement desktop can race with an ordinary v2 stream
+  // notification. Match the response to this v1 probe explicitly instead of
+  // treating an unrelated queued v2 frame as the probe result.
+  const controllerDisabled = nextMessageMatching(controllerDesktop,
+    (message) => message.code === "desktop_controller_unavailable");
   controllerDesktop.send(JSON.stringify({ v: 1, type: "controller_capabilities" }));
   assert.equal((await controllerDisabled).code, "desktop_controller_unavailable");
 

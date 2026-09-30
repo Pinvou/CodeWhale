@@ -1,0 +1,170 @@
+name: windows-remote-control-evidence
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  physical-dual-windows-evidence:
+    name: Physical dual-Windows release evidence
+    environment: windows-release
+    runs-on: ${{ vars.PINVOU_REMOTE_E2E_RUNNER || 'self-hosted' }}
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Reserve cleanup-owned paths
+        shell: pwsh
+        run: |
+          $credential = Join-Path $env:RUNNER_TEMP "pinvou-winrm-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT.clixml"
+          $evidence = Join-Path $env:RUNNER_TEMP "remote-control-evidence-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          "E2E_CREDENTIAL_FILE=$credential" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "EVIDENCE_DIRECTORY=$evidence" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Resolve protected build artifact identity
+        id: protected-build
+        uses: actions/github-script@v8
+        env:
+          BUILD_RUN_ID: ${{ vars.PINVOU_RELEASE_INSTALLER_BUILD_RUN_ID }}
+          BUILD_WORKFLOW_ID: ${{ vars.PINVOU_RELEASE_INSTALLER_BUILD_WORKFLOW_ID }}
+          BUILD_ARTIFACT_DIGEST: ${{ vars.PINVOU_RELEASE_INSTALLER_BUILD_ARTIFACT_DIGEST }}
+        with:
+          script: |
+            const { selectProtectedWorkflowArtifact } = require('./remote-control-relay/scripts/verify-github-workflow-run.cjs');
+            if (!/^\d+$/.test(process.env.BUILD_RUN_ID || '') || !/^\d+$/.test(process.env.BUILD_WORKFLOW_ID || '') || !/^sha256:[a-f0-9]{64}$/.test(process.env.BUILD_ARTIFACT_DIGEST || '')) return core.setFailed('protected_build_identity_missing');
+            const run = await github.rest.actions.getWorkflowRun({ owner: context.repo.owner, repo: context.repo.repo, run_id: Number(process.env.BUILD_RUN_ID) });
+            const workflow = await github.rest.actions.getWorkflow({ owner: context.repo.owner, repo: context.repo.repo, workflow_id: Number(process.env.BUILD_WORKFLOW_ID) });
+            const listing = await github.rest.actions.listWorkflowRunArtifacts({ owner: context.repo.owner, repo: context.repo.repo, run_id: Number(process.env.BUILD_RUN_ID), per_page: 100 });
+            try {
+              const artifact = selectProtectedWorkflowArtifact({ run: run.data, workflow: workflow.data, artifacts: listing.data.artifacts, expected: {
+                workflowId: Number(process.env.BUILD_WORKFLOW_ID), workflowPath: '.github/workflows/windows-remote-control-build-evidence.yml',
+                sha: context.sha, ref: context.ref, repository: `${context.repo.owner}/${context.repo.repo}`,
+                artifactName: 'windows-remote-control-protected-build', artifactDigest: process.env.BUILD_ARTIFACT_DIGEST,
+              }});
+              core.setOutput('artifact-id', String(artifact.id));
+            } catch (error) { core.setFailed(error.code || 'protected_build_identity_invalid'); }
+
+      - uses: actions/download-artifact@v8
+        with:
+          artifact-ids: ${{ steps.protected-build.outputs.artifact-id }}
+          github-token: ${{ github.token }}
+          run-id: ${{ vars.PINVOU_RELEASE_INSTALLER_BUILD_RUN_ID }}
+          path: protected-build
+
+      - name: Resolve protected build files
+        shell: pwsh
+        run: |
+          $installer = @(Get-ChildItem -LiteralPath protected-build -Filter '*.exe' -File -Recurse)
+          $installerBundle = @(Get-ChildItem -LiteralPath protected-build -Filter 'installer-attestation.sigstore.jsonl' -File -Recurse)
+          $sbom = @(Get-ChildItem -LiteralPath protected-build -Filter 'installer-sbom.spdx.json' -File -Recurse)
+          $sbomBundle = @(Get-ChildItem -LiteralPath protected-build -Filter 'installer-sbom-attestation.sigstore.jsonl' -File -Recurse)
+          if ($installer.Count -ne 1 -or $installerBundle.Count -ne 1 -or $sbom.Count -ne 1 -or $sbomBundle.Count -ne 1) { throw 'protected_build_file_set_invalid' }
+          "E2E_INSTALLER_PATH=$($installer[0].FullName)" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "E2E_INSTALLER_ATTESTATION_BUNDLE=$($installerBundle[0].FullName)" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "E2E_INSTALLER_SBOM=$($sbom[0].FullName)" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "E2E_INSTALLER_SBOM_ATTESTATION_BUNDLE=$($sbomBundle[0].FullName)" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Create runner-bound WinRM credential
+        shell: pwsh
+        env:
+          PINVOU_CREDENTIAL_USER_VALUE: ${{ secrets.PINVOU_REMOTE_E2E_USERNAME }}
+          PINVOU_CREDENTIAL_SECRET_VALUE: ${{ secrets.PINVOU_REMOTE_E2E_PASSWORD }}
+        run: |
+          if (-not $env:PINVOU_CREDENTIAL_USER_VALUE -or -not $env:PINVOU_CREDENTIAL_SECRET_VALUE) { throw 'e2e_credentials_missing' }
+          $secure = ConvertTo-SecureString $env:PINVOU_CREDENTIAL_SECRET_VALUE -AsPlainText -Force
+          [pscredential]::new($env:PINVOU_CREDENTIAL_USER_VALUE, $secure) | Export-Clixml -LiteralPath $env:E2E_CREDENTIAL_FILE
+          Remove-Item Env:PINVOU_CREDENTIAL_SECRET_VALUE, Env:PINVOU_CREDENTIAL_USER_VALUE -ErrorAction Stop
+          & icacls.exe $env:E2E_CREDENTIAL_FILE /inheritance:r /grant:r "${env:USERNAME}:(R,W)" | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw 'e2e_credential_acl_failed' }
+
+      - name: Run signed physical dual-Windows qualification
+        shell: pwsh
+        env:
+          E2E_A_COMPUTER: ${{ vars.PINVOU_REMOTE_E2E_A_COMPUTER }}
+          E2E_B_COMPUTER: ${{ vars.PINVOU_REMOTE_E2E_B_COMPUTER }}
+          E2E_DRIVER_PATH: ${{ vars.PINVOU_REMOTE_E2E_DRIVER_PATH }}
+          E2E_LEGACY_RELAY_PATH: ${{ vars.PINVOU_REMOTE_E2E_LEGACY_RELAY_PATH }}
+          E2E_ENDPOINT_INVENTORY: ${{ vars.PINVOU_REMOTE_LEGACY_ENDPOINT_INVENTORY }}
+          E2E_GATEWAY_CONFIG: ${{ vars.PINVOU_REMOTE_GATEWAY_CONFIG_PATH }}
+          E2E_INSTALLER_BUILD_REPOSITORY: ${{ github.repository }}
+          E2E_INSTALLER_BUILD_WORKFLOW: ${{ vars.PINVOU_RELEASE_INSTALLER_BUILD_WORKFLOW }}
+          E2E_INSTALLER_BUILD_RUN_ID: ${{ vars.PINVOU_RELEASE_INSTALLER_BUILD_RUN_ID }}
+          E2E_SIGNER_THUMBPRINT: ${{ vars.PINVOU_TRUSTED_WINDOWS_SIGNER_THUMBPRINT }}
+          E2E_SIGNER_PUBLISHER: ${{ vars.PINVOU_TRUSTED_WINDOWS_SIGNER_PUBLISHER }}
+          E2E_NODE_PATH: ${{ vars.PINVOU_TRUSTED_E2E_NODE_PATH }}
+          E2E_NODE_SHA256: ${{ vars.PINVOU_TRUSTED_E2E_NODE_SHA256 }}
+          E2E_NODE_SIGNER_THUMBPRINT: ${{ vars.PINVOU_TRUSTED_E2E_NODE_SIGNER_THUMBPRINT }}
+          E2E_NODE_SIGNER_PUBLISHER: ${{ vars.PINVOU_TRUSTED_E2E_NODE_SIGNER_PUBLISHER }}
+          E2E_GH_PATH: ${{ vars.PINVOU_TRUSTED_E2E_GH_PATH }}
+          E2E_SOURCE_COMMIT: ${{ github.sha }}
+          E2E_RELAY_URL: ${{ vars.PINVOU_REMOTE_E2E_RELAY_URL }}
+          E2E_DISABLED_RELAY_URL: ${{ vars.PINVOU_REMOTE_E2E_DISABLED_RELAY_URL }}
+          E2E_LEGACY_GATEWAY_URL: ${{ vars.PINVOU_REMOTE_E2E_LEGACY_GATEWAY_URL }}
+          E2E_ENROLLMENT_DEPLOYMENT: ${{ vars.PINVOU_REMOTE_ENROLLMENT_DEPLOYMENT }}
+          E2E_ATTESTATION_PROVIDER: ${{ vars.PINVOU_TRUSTED_E2E_ATTESTATION_PROVIDER }}
+          E2E_ATTESTATION_KEY_ID: ${{ vars.PINVOU_TRUSTED_E2E_ATTESTATION_KEY_ID }}
+          E2E_ATTESTATION_ACL_SHA256: ${{ vars.PINVOU_TRUSTED_E2E_ATTESTATION_ACL_SHA256 }}
+          E2E_ATTESTATION_PROVIDER_MEASUREMENT_SHA256: ${{ vars.PINVOU_TRUSTED_E2E_ATTESTATION_PROVIDER_MEASUREMENT_SHA256 }}
+          E2E_ORCHESTRATOR_ROLE_POLICY_SHA256: ${{ vars.PINVOU_TRUSTED_E2E_ORCHESTRATOR_ROLE_POLICY_SHA256 }}
+          E2E_A_ROLE_POLICY_SHA256: ${{ vars.PINVOU_TRUSTED_E2E_A_ROLE_POLICY_SHA256 }}
+          E2E_B_ROLE_POLICY_SHA256: ${{ vars.PINVOU_TRUSTED_E2E_B_ROLE_POLICY_SHA256 }}
+          E2E_PROVIDER_VERIFIER_PATH: ${{ vars.PINVOU_TRUSTED_E2E_PROVIDER_VERIFIER_PATH }}
+          E2E_PROVIDER_VENDOR: ${{ vars.PINVOU_TRUSTED_E2E_PROVIDER_VENDOR }}
+          E2E_PROVIDER_ROOT_CERTIFICATE_SHA256: ${{ vars.PINVOU_TRUSTED_E2E_PROVIDER_ROOT_CERTIFICATE_SHA256 }}
+          E2E_PROVIDER_VERIFIER_CERTIFICATE_SHA256: ${{ vars.PINVOU_TRUSTED_E2E_PROVIDER_VERIFIER_CERTIFICATE_SHA256 }}
+        run: |
+          & "$env:GITHUB_WORKSPACE\scripts\run-windows-remote-control-e2e.ps1" `
+            -AComputerName $env:E2E_A_COMPUTER -BComputerName $env:E2E_B_COMPUTER `
+            -CredentialFile $env:E2E_CREDENTIAL_FILE -InstallerPath $env:E2E_INSTALLER_PATH `
+            -JourneyDriverPath $env:E2E_DRIVER_PATH -LegacyRelayBinaryPath $env:E2E_LEGACY_RELAY_PATH `
+            -EndpointInventoryPath $env:E2E_ENDPOINT_INVENTORY -GatewayConfigPath $env:E2E_GATEWAY_CONFIG `
+            -InstallerAttestationBundlePath $env:E2E_INSTALLER_ATTESTATION_BUNDLE -InstallerSbomPath $env:E2E_INSTALLER_SBOM `
+            -InstallerSbomAttestationBundlePath $env:E2E_INSTALLER_SBOM_ATTESTATION_BUNDLE `
+            -InstallerBuildRepository $env:E2E_INSTALLER_BUILD_REPOSITORY -InstallerBuildWorkflow $env:E2E_INSTALLER_BUILD_WORKFLOW -InstallerBuildRunId $env:E2E_INSTALLER_BUILD_RUN_ID `
+            -TrustedSignerThumbprint $env:E2E_SIGNER_THUMBPRINT -TrustedSignerPublisher $env:E2E_SIGNER_PUBLISHER `
+            -TrustedNodePath $env:E2E_NODE_PATH -TrustedNodeSha256 $env:E2E_NODE_SHA256 -TrustedNodeSignerThumbprint $env:E2E_NODE_SIGNER_THUMBPRINT -TrustedNodeSignerPublisher $env:E2E_NODE_SIGNER_PUBLISHER `
+            -TrustedGhPath $env:E2E_GH_PATH -ExpectedSourceCommit $env:E2E_SOURCE_COMMIT -RepositoryRoot $env:GITHUB_WORKSPACE `
+            -RelayUrl $env:E2E_RELAY_URL -DisabledRelayUrl $env:E2E_DISABLED_RELAY_URL -LegacyGatewayUrl $env:E2E_LEGACY_GATEWAY_URL `
+            -EnrollmentDeployment $env:E2E_ENROLLMENT_DEPLOYMENT -AttestationProvider $env:E2E_ATTESTATION_PROVIDER -AttestationKeyId $env:E2E_ATTESTATION_KEY_ID `
+            -AttestationAclSha256 $env:E2E_ATTESTATION_ACL_SHA256 -AttestationProviderMeasurementSha256 $env:E2E_ATTESTATION_PROVIDER_MEASUREMENT_SHA256 `
+            -OrchestratorRolePolicySha256 $env:E2E_ORCHESTRATOR_ROLE_POLICY_SHA256 -ARolePolicySha256 $env:E2E_A_ROLE_POLICY_SHA256 -BRolePolicySha256 $env:E2E_B_ROLE_POLICY_SHA256 `
+            -ProviderVerifierPath $env:E2E_PROVIDER_VERIFIER_PATH -AttestationProviderVendor $env:E2E_PROVIDER_VENDOR `
+            -TrustedProviderRootCertificateSha256 $env:E2E_PROVIDER_ROOT_CERTIFICATE_SHA256 -TrustedProviderVerifierCertificateSha256 $env:E2E_PROVIDER_VERIFIER_CERTIFICATE_SHA256 `
+            -EvidenceDirectory $env:EVIDENCE_DIRECTORY
+
+      - name: Upload immutable evidence bundle
+        uses: actions/upload-artifact@v7
+        with:
+          name: remote-control-evidence
+          path: ${{ env.EVIDENCE_DIRECTORY }}
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
+
+      - name: Remove credentials and partial evidence
+        if: always()
+        shell: pwsh
+        run: |
+          $errors = [Collections.Generic.List[string]]::new()
+          foreach ($candidate in @($env:E2E_CREDENTIAL_FILE, $env:EVIDENCE_DIRECTORY)) {
+            try {
+              if (-not $candidate) { continue }
+              $root = [IO.Path]::GetFullPath($env:RUNNER_TEMP).TrimEnd([IO.Path]::DirectorySeparatorChar)
+              $full = [IO.Path]::GetFullPath($candidate)
+              $rootUri = [Uri]::new($root + [IO.Path]::DirectorySeparatorChar)
+              $relativeUri = $rootUri.MakeRelativeUri([Uri]::new($full))
+              $relative = [Uri]::UnescapeDataString($relativeUri.ToString()).Replace('/', [IO.Path]::DirectorySeparatorChar)
+              if ($relativeUri.IsAbsoluteUri -or [IO.Path]::IsPathRooted($relative) -or $relative -eq '..' -or $relative.StartsWith(('..' + [IO.Path]::DirectorySeparatorChar), [StringComparison]::Ordinal)) { throw 'cleanup_path_escape' }
+              if (Test-Path -LiteralPath $full) {
+                $item = Get-Item -LiteralPath $full -Force -ErrorAction Stop
+                if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'cleanup_reparse_point_forbidden' }
+                Remove-Item -LiteralPath $full -Recurse -Force -ErrorAction Stop
+              }
+            } catch { $errors.Add($_.Exception.Message) }
+          }
+          if ($errors.Count -gt 0) { throw ('e2e_runner_cleanup_failed:' + ($errors -join '|')) }

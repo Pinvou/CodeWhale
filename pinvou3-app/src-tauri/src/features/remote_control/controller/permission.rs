@@ -13,6 +13,7 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::sync::Arc;
 
 use parking_lot::Mutex;
 use serde::Serialize;
@@ -261,15 +262,65 @@ struct PendingPermission {
     dispatch_state: DispatchState,
     resolved_at_ms: Option<u64>,
     resolved_reason: Option<String>,
+    created_at_ms: u64,
 }
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(crate) enum PermissionTelemetryTransition {
+    Requested,
+    Allowed,
+    Denied,
+    Expired,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(crate) struct PermissionTelemetryEvent {
+    pub(crate) transition: PermissionTelemetryTransition,
+    pub(crate) latency_ms: u64,
+}
+
+type PermissionTelemetrySink = Arc<dyn Fn(PermissionTelemetryEvent) + Send + Sync>;
+type PermissionClock = Arc<dyn Fn() -> u64 + Send + Sync>;
+
 /// Shared permission authority for one B process.
-#[derive(Default)]
 pub(crate) struct PermissionAuthority {
     pending: Mutex<HashMap<String, PendingPermission>>,
+    telemetry_sink: Mutex<Option<PermissionTelemetrySink>>,
+    clock: PermissionClock,
+}
+
+impl Default for PermissionAuthority {
+    fn default() -> Self {
+        Self {
+            pending: Mutex::new(HashMap::new()),
+            telemetry_sink: Mutex::new(None),
+            clock: Arc::new(super::relay_runtime::controlled_monotonic_millis),
+        }
+    }
 }
 
 impl PermissionAuthority {
+    #[cfg(test)]
+    fn with_clock(clock: PermissionClock) -> Self {
+        Self {
+            clock,
+            ..Self::default()
+        }
+    }
+
+    pub(crate) fn set_telemetry_sink(&self, sink: PermissionTelemetrySink) {
+        *self.telemetry_sink.lock() = Some(sink);
+    }
+
+    fn emit_telemetry(&self, transition: PermissionTelemetryTransition, latency_ms: u64) {
+        if let Some(sink) = self.telemetry_sink.lock().clone() {
+            sink(PermissionTelemetryEvent {
+                transition,
+                latency_ms,
+            });
+        }
+    }
+
     /// Registers a pending permission. B may only have one pending request per
     /// task at a time.
     pub(crate) fn request(
@@ -296,6 +347,9 @@ impl PermissionAuthority {
             return Err(error("permission_capacity"));
         }
         let id = binding.permission_request_id.clone();
+        if pending.contains_key(&id) {
+            return Err(error("permission_duplicate"));
+        }
         pending.insert(
             id.clone(),
             PendingPermission {
@@ -306,9 +360,13 @@ impl PermissionAuthority {
                 dispatch_state: DispatchState::NotDispatched,
                 resolved_at_ms: None,
                 resolved_reason: None,
+                created_at_ms: now_b,
             },
         );
-        Ok(Self::view_locked(pending.get(&id).expect("just inserted")))
+        let view = Self::view_locked(pending.get(&id).expect("just inserted"));
+        drop(pending);
+        self.emit_telemetry(PermissionTelemetryTransition::Requested, 0);
+        Ok(view)
     }
 
     /// First effective A decision wins. B and local callers are rejected, and a
@@ -334,13 +392,17 @@ impl PermissionAuthority {
         }
         match entry.state {
             PermissionState::Pending if now_b >= entry.request.expires_at_ms => {
+                let latency = now_b.saturating_sub(entry.created_at_ms);
                 entry.state = PermissionState::Expired;
                 entry.decision = Some(PermissionDecision::Deny);
                 entry.resolved_at_ms = Some(now_b);
                 entry.resolved_reason = Some("expired".to_owned());
+                drop(pending);
+                self.emit_telemetry(PermissionTelemetryTransition::Expired, latency);
                 return Ok(DecisionOutcome::Expired);
             }
             PermissionState::Pending => {
+                let latency = now_b.saturating_sub(entry.created_at_ms);
                 entry.decision = Some(decision);
                 entry.state = match decision {
                     PermissionDecision::Allow => PermissionState::AllowedAwaitingDispatch,
@@ -354,10 +416,15 @@ impl PermissionAuthority {
                     }
                     .to_owned(),
                 );
-                return Ok(DecisionOutcome::Decided {
+                let outcome = DecisionOutcome::Decided {
                     decision,
                     dispatch_state: entry.dispatch_state,
-                });
+                };
+                drop(pending);
+                if decision == PermissionDecision::Deny {
+                    self.emit_telemetry(PermissionTelemetryTransition::Denied, latency);
+                }
+                return Ok(outcome);
             }
             PermissionState::Expired => return Ok(DecisionOutcome::Expired),
             PermissionState::AllowedAwaitingDispatch | PermissionState::Denied => {
@@ -380,18 +447,32 @@ impl PermissionAuthority {
         let entry = pending
             .get_mut(request_id)
             .ok_or_else(|| error("permission_unknown"))?;
-        if now_b >= entry.request.expires_at_ms {
+        if entry.dispatch_state == DispatchState::Dispatched {
+            return Ok(DispatchCommit::Committed);
+        }
+        if now_b >= entry.request.expires_at_ms
+            && matches!(
+                entry.state,
+                PermissionState::Pending | PermissionState::AllowedAwaitingDispatch
+            )
+        {
+            let latency = now_b.saturating_sub(entry.created_at_ms);
             entry.state = PermissionState::Expired;
             entry.decision = Some(PermissionDecision::Deny);
             entry.resolved_at_ms = Some(now_b);
             entry.resolved_reason = Some("expired".to_owned());
+            drop(pending);
+            self.emit_telemetry(PermissionTelemetryTransition::Expired, latency);
             return Ok(DispatchCommit::Rejected {
                 code: "permission_expired",
             });
         }
         match entry.state {
             PermissionState::AllowedAwaitingDispatch => {
+                let latency = now_b.saturating_sub(entry.created_at_ms);
                 entry.dispatch_state = DispatchState::Dispatched;
+                drop(pending);
+                self.emit_telemetry(PermissionTelemetryTransition::Allowed, latency);
                 Ok(DispatchCommit::Committed)
             }
             PermissionState::Denied => Ok(DispatchCommit::Rejected {
@@ -442,14 +523,25 @@ impl PermissionAuthority {
     pub(crate) fn sweep_expired(&self, now_b: u64) -> usize {
         let mut pending = self.pending.lock();
         let mut expired = 0;
+        let mut latencies = Vec::new();
         for entry in pending.values_mut() {
-            if entry.state == PermissionState::Pending && now_b >= entry.request.expires_at_ms {
+            if matches!(
+                entry.state,
+                PermissionState::Pending | PermissionState::AllowedAwaitingDispatch
+            ) && entry.dispatch_state != DispatchState::Dispatched
+                && now_b >= entry.request.expires_at_ms
+            {
                 entry.state = PermissionState::Expired;
                 entry.decision = Some(PermissionDecision::Deny);
                 entry.resolved_at_ms = Some(now_b);
                 entry.resolved_reason = Some("expired".to_owned());
                 expired += 1;
+                latencies.push(now_b.saturating_sub(entry.created_at_ms));
             }
+        }
+        drop(pending);
+        for latency in latencies {
+            self.emit_telemetry(PermissionTelemetryTransition::Expired, latency);
         }
         expired
     }
@@ -489,6 +581,7 @@ impl PermissionAuthority {
     ) -> usize {
         let mut pending = self.pending.lock();
         let mut changed = 0;
+        let mut latencies = Vec::new();
         for entry in pending.values_mut() {
             if !predicate(entry) {
                 continue;
@@ -506,9 +599,14 @@ impl PermissionAuthority {
                     entry.resolved_at_ms = Some(now_b);
                     entry.resolved_reason = Some(bounded_reason(reason));
                     changed += 1;
+                    latencies.push(now_b.saturating_sub(entry.created_at_ms));
                 }
                 PermissionState::Denied | PermissionState::Expired => {}
             }
+        }
+        drop(pending);
+        for latency in latencies {
+            self.emit_telemetry(PermissionTelemetryTransition::Denied, latency);
         }
         changed
     }
@@ -547,7 +645,7 @@ impl PermissionAuthority {
 
 impl RemoteTaskPermissionScope for PermissionAuthority {
     fn deny_pending_for_task(&self, task_id: &str) -> usize {
-        self.deny_all_for_task(task_id, "task_terminal", 0)
+        self.deny_all_for_task(task_id, "task_terminal", (self.clock)())
     }
 }
 
@@ -643,6 +741,125 @@ mod tests {
             .request(binding.clone(), request(now_b + 60_000), now_b)
             .unwrap();
         binding
+    }
+
+    #[test]
+    fn authoritative_permission_funnel_emits_one_request_and_one_terminal() {
+        let authority = PermissionAuthority::default();
+        let observed = Arc::new(Mutex::new(Vec::<PermissionTelemetryEvent>::new()));
+        let sink = Arc::clone(&observed);
+        authority.set_telemetry_sink(Arc::new(move |event| sink.lock().push(event)));
+
+        register(&authority, "permission-allow", 1_000);
+        assert_eq!(observed.lock().len(), 1);
+        authority
+            .decide(
+                DecisionAuthority::ControllerA,
+                &lease(),
+                "task-0001",
+                "permission-allow",
+                PermissionDecision::Allow,
+                1_100,
+            )
+            .unwrap();
+        assert_eq!(
+            observed.lock().len(),
+            1,
+            "allow is not terminal before dispatch"
+        );
+        authority
+            .commit_dispatch("permission-allow", 1_200)
+            .unwrap();
+        authority
+            .commit_dispatch("permission-allow", 1_300)
+            .unwrap();
+
+        register(&authority, "permission-deny", 2_000);
+        authority
+            .decide(
+                DecisionAuthority::ControllerA,
+                &lease(),
+                "task-0001",
+                "permission-deny",
+                PermissionDecision::Deny,
+                2_100,
+            )
+            .unwrap();
+        authority
+            .decide(
+                DecisionAuthority::ControllerA,
+                &lease(),
+                "task-0001",
+                "permission-deny",
+                PermissionDecision::Deny,
+                2_200,
+            )
+            .unwrap();
+
+        register(&authority, "permission-expire", 3_000);
+        assert_eq!(authority.sweep_expired(63_000), 1);
+        assert_eq!(authority.sweep_expired(64_000), 0);
+        assert_eq!(
+            authority
+                .decide(
+                    DecisionAuthority::ControllerA,
+                    &lease(),
+                    "task-0001",
+                    "permission-expire",
+                    PermissionDecision::Allow,
+                    64_100
+                )
+                .unwrap(),
+            DecisionOutcome::Expired
+        );
+
+        let events = observed.lock().clone();
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| event.transition)
+                .collect::<Vec<_>>(),
+            vec![
+                PermissionTelemetryTransition::Requested,
+                PermissionTelemetryTransition::Allowed,
+                PermissionTelemetryTransition::Requested,
+                PermissionTelemetryTransition::Denied,
+                PermissionTelemetryTransition::Requested,
+                PermissionTelemetryTransition::Expired,
+            ]
+        );
+        assert_eq!(events[1].latency_ms, 200);
+        assert_eq!(events[5].latency_ms, 60_000);
+    }
+
+    #[test]
+    fn stopped_permission_and_duplicate_id_do_not_repeat_the_funnel() {
+        let authority = PermissionAuthority::default();
+        let observed = Arc::new(Mutex::new(Vec::<PermissionTelemetryEvent>::new()));
+        let sink = Arc::clone(&observed);
+        authority.set_telemetry_sink(Arc::new(move |event| sink.lock().push(event)));
+        register(&authority, "permission-stop", 1_000);
+        assert_eq!(authority.deny_all_for_task("task-0001", "stop", 1_200), 1);
+        assert_eq!(authority.deny_all_for_task("task-0001", "stop", 1_300), 0);
+        let duplicate = PermissionBinding::new(&lease(), "task-0001", "permission-stop").unwrap();
+        assert_eq!(
+            authority
+                .request(duplicate, request(62_000), 2_000)
+                .unwrap_err()
+                .code,
+            "permission_duplicate"
+        );
+        assert_eq!(
+            observed
+                .lock()
+                .iter()
+                .map(|event| event.transition)
+                .collect::<Vec<_>>(),
+            vec![
+                PermissionTelemetryTransition::Requested,
+                PermissionTelemetryTransition::Denied,
+            ]
+        );
     }
 
     #[test]
@@ -1094,11 +1311,27 @@ mod tests {
 
     #[test]
     fn terminal_cleanup_hook_denies_pending_requests() {
-        let authority = PermissionAuthority::default();
+        let authority = PermissionAuthority::with_clock(Arc::new(|| 1_250));
+        let observed = Arc::new(Mutex::new(Vec::<PermissionTelemetryEvent>::new()));
+        let sink = Arc::clone(&observed);
+        authority.set_telemetry_sink(Arc::new(move |event| sink.lock().push(event)));
         register(&authority, "permission-0001", 1_000);
         let scope: &dyn RemoteTaskPermissionScope = &authority;
         assert_eq!(scope.deny_pending_for_task("task-0001"), 1);
         assert_eq!(scope.deny_pending_for_task("task-0001"), 0);
+        assert_eq!(
+            observed.lock().as_slice(),
+            [
+                PermissionTelemetryEvent {
+                    transition: PermissionTelemetryTransition::Requested,
+                    latency_ms: 0,
+                },
+                PermissionTelemetryEvent {
+                    transition: PermissionTelemetryTransition::Denied,
+                    latency_ms: 250,
+                },
+            ]
+        );
         assert_eq!(authority.view("permission-0001").unwrap().state, "denied");
         assert_eq!(
             authority.commit_dispatch("permission-0001", 1_200).unwrap(),

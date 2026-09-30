@@ -1054,6 +1054,12 @@ A 禁止持久化：
 17. 首次发布的安装和升级路径都以 `SessionStore.RemoteProxy` 为唯一远程正文数据源。功能开关回退只能关闭新入口，不得重新启用实验期旧历史源、旧写路径或第二套会话状态机。
 18. 统一 `ChatView` 上线前必须覆盖本地普通对话、本地 ACP 代码会话、远程 B 模型、远程 A 临时模型以及连接中断恢复；同一提交中删除第二套远程正文 UI、旧调用方和旧数据源注册，并以静态扫描和回归测试证明无残余消费者。
 19. 本节对未发布的 Windows 双端远程控制实验实现不设置数据或 API 兼容窗口；现有 WebUI v2 wire、分享链接、endpoint enrollment 与安全回滚要求仍按本节其他条款保持兼容。
+20. 首版生产 release evidence 的 Ed25519 attestor 只允许受保护远程签名服务中的不可导出 key，不声明任何本机硬件密钥提供者或其他签名算法能力。独立 provider verifier 必须在本次 run nonce 产生后出具由 allowlist vendor 证书链签名的新鲜证明，绑定 nonce、provider/key ID、角色策略、ACL、measurement 与 driver SHA；driver 只能消费远程 key handle 做 artifact 签名，不能自行生成 provider 证明。驱动安装包不得内嵌、读取文件形式或导出私钥；缺少真实服务证明时发布门禁必须 BLOCKED。
+21. 双机使用的安装包必须由受保护构建 workflow 从当前 commit 产生，并携带可由 GitHub artifact attestation/Sigstore 实际验签的 bundle 与 SPDX 2.3；门禁必须核对 repository、workflow、run、head、installer 原始 subject 名称与摘要。SBOM 必须从最终 NSIS staging manifest 生成，逐文件覆盖 package-lock、Cargo.lock、所有公开/私有 runtime 映射、最终 resources、生成配置/hooks、主 binary 和 installer，并验证 namespace/creation/source commit/package/file/relationship；不能接受人工 SHA-256、自报 `verified=true`、漏项或重复映射。
+22. 真实旧 Relay 回滚证据必须形成可复核因果链：受保护 inventory/config 使用拒绝额外字段的严格结构并各有且仅有一个启用 route；只将经敏感扫描的最小 route spec 传入 A，实际激活指定公网 gateway 到该进程拥有的 loopback listener。原状态摘要必须同时绑定完整规范化 inventory/config 与 driver 实际读取的 gateway control-plane 全状态，撤销后重新读取实际全状态并交叉验证；配置/探测还需绑定 run nonce、route ID、`no_bypass`、配置摘要和 route state。随机请求 nonce 的关联响应令独立读取的 traffic counter 增长，裸 v2 拒绝单独签名归档。启动后立即登记 PID，任何后续失败都必须在 `finally` 撤销 owned route、验证公网 route 消失并恢复原配置，再验证进程退出；任一清理失败阻断发布。
+23. 审批和附件自动化必须以真实 UI 状态的 exact coordination ID 驱动，零个或多个 pending 都失败；journey、UI artifact 和 manifest 交叉核对 coordination digest。附件接收必须由 B 独立生成并签名回执，绑定同一 coordination 与文件摘要。
+24. 双机自动化的远端 helper 必须使用本次随机 run nonce 的独占 staging，拒绝已有目录、普通路径越界和任一重解析点；复制前后核对安装包、driver、provider verifier、UI smoke、process guard、orchestrator helper 与回滚输入的逐文件摘要，Node 使用受保护环境配置的固定绝对可执行路径。清理只能删除带本次 nonce owner marker 的目录，且各清理动作独立执行、聚合失败阻断。
+25. 发布资格自动化运行在 GitHub 受保护 environment 的受控 self-hosted runner 上；runner OS、同一 SID 进程、受保护 secrets/vars 以及预配置 Git/GH/Node 工具链属于可信执行基座。本需求不要求抵御该基座上的管理员、同 SID 恶意常驻进程、运行中 junction/TOCTOU 替换或 PID 复用，也不为其自建第二套可信启动链。自动化仍必须抵御不可信网络/Relay、外部下载产物、用户或部署配置、伪造/过期/错 commit 证据、普通路径逃逸与敏感信息泄露，并在校验或清理失败时关闭；缺少真实双机、生产等价 Relay、旧 Relay 二进制或生产遥测等外部证据时，资格结论必须为 `BLOCKED`，不得以本地 fixture 或 mock 宣布通过。
 
 ## 16. 埋点与审计边界
 
@@ -1216,7 +1222,7 @@ A 禁止持久化：
 8. 上传附件并由 B 处理；
 9. B 生成成果，A 预览并下载；
 10. 任务运行中断网并由 A/B 独立 token 双端恢复，验证 pending-liveness 前无业务、首个 B liveness 被双方确认后才 connected；
-11. 隔离 B 网络超过 30 秒并持续制造重连流量，验证本地 watchdog 不被延长、B 取消任务、拒绝审批并清理临时模型，旧令牌无法恢复；
+11. 隔离 B 网络并持续制造重连流量，验证本地 watchdog 的候选 deadline 不晚于 `30000 - 实测 RTT - 1000`，终态不晚于该候选 deadline，重连不得延长预算；B 取消任务、拒绝审批并清理临时模型，旧令牌无法恢复；
 12. 第二个 A 尝试接入并收到设备忙；
 13. 分别以 WebUI 已连接和桌面已连接状态尝试交叉接入，验证不顶替；另验证 Web-to-Web 既有接管；
 14. 在 B 查看权限请求并确认没有 Allow，制造 A 决定/超时/B stop 竞态并验证唯一终态；

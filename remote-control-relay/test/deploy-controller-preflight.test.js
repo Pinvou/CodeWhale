@@ -8,10 +8,10 @@ import {
 import { validateControllerRouteSmokeResponse } from "../scripts/controller-route-smoke.mjs";
 
 const VALID_ENV = `
-NODE_ENV=development
+NODE_ENV=production
 PINVOU_DESKTOP_CONTROLLER_ENABLED=1
-PINVOU_REMOTE_ENROLLMENT_DEPLOYMENT=development
-PINVOU_REMOTE_ENROLLMENT_DEVELOPMENT_TOFU=true
+PINVOU_REMOTE_ENROLLMENT_DEPLOYMENT=official
+PINVOU_REMOTE_ENROLLMENT_DEVELOPMENT_TOFU=false
 PINVOU_REMOTE_ENROLLMENT_HMAC_KEY_ID=enrollment-key
 PINVOU_REMOTE_ENROLLMENT_HMAC_KEY=enrollment-secret-at-least-32-bytes
 PINVOU_REMOTE_PAIRING_HMAC_KEY_ID=pairing-key
@@ -22,14 +22,21 @@ PINVOU_REMOTE_CONTROLLER_STATE_PATH=/var/lib/pinvou-remote-relay/state/controlle
 PINVOU_REMOTE_STATE_PATH=/opt/pinvou-remote-relay/data/relay-state.json
 PINVOU_REMOTE_ALLOWED_PROXY_IPS=192.0.2.10
 PINVOU_REMOTE_TRUSTED_PROXY_IPS=192.0.2.10
+PINVOU_TELEMETRY_ENROLLMENT_TOKEN=telemetry-enrollment-secret-24
+PINVOU_TELEMETRY_DEVICE_PEPPER=telemetry-device-pepper-24
+PINVOU_STATS_ADMIN_PASSWORD=operations-admin-password
+PINVOU_TELEMETRY_DATA_DIR=/var/lib/pinvou-telemetry
 `;
 
-test("production controller environment requires the accepted deployment profile", () => {
+test("production controller environment supports explicit official and self-hosted enrollment with TOFU disabled", () => {
   assert.doesNotThrow(() => validateControllerEnvironment(parseControllerEnvironment(VALID_ENV)));
+  assert.doesNotThrow(() => validateControllerEnvironment(parseControllerEnvironment(
+    VALID_ENV.replace("PINVOU_REMOTE_ENROLLMENT_DEPLOYMENT=official", "PINVOU_REMOTE_ENROLLMENT_DEPLOYMENT=self_hosted"),
+  )));
   for (const replacement of [
-    ["NODE_ENV=development", "NODE_ENV=production"],
-    ["PINVOU_REMOTE_ENROLLMENT_DEPLOYMENT=development", "PINVOU_REMOTE_ENROLLMENT_DEPLOYMENT=official"],
-    ["PINVOU_REMOTE_ENROLLMENT_DEVELOPMENT_TOFU=true", "PINVOU_REMOTE_ENROLLMENT_DEVELOPMENT_TOFU=false"],
+    ["NODE_ENV=production", "NODE_ENV=development"],
+    ["PINVOU_REMOTE_ENROLLMENT_DEPLOYMENT=official", "PINVOU_REMOTE_ENROLLMENT_DEPLOYMENT=development"],
+    ["PINVOU_REMOTE_ENROLLMENT_DEVELOPMENT_TOFU=false", "PINVOU_REMOTE_ENROLLMENT_DEVELOPMENT_TOFU=true"],
     ["PINVOU_REMOTE_STATE_PATH=/opt/pinvou-remote-relay/data/relay-state.json", "PINVOU_REMOTE_STATE_PATH="],
   ]) {
     assert.throws(
@@ -38,8 +45,45 @@ test("production controller environment requires the accepted deployment profile
     );
   }
   assert.throws(
-    () => parseControllerEnvironment(`${VALID_ENV}\nNODE_ENV=development\n`),
+    () => parseControllerEnvironment(`${VALID_ENV}\nNODE_ENV=production\n`),
     /controller_env_duplicate_key/u,
+  );
+});
+
+test("production controller environment rejects undeclared keys", () => {
+  assert.throws(
+    () => validateControllerEnvironment(parseControllerEnvironment(`${VALID_ENV}\nPINVOU_UNREVIEWED_ESCAPE_HATCH=enabled\n`)),
+    /controller_env_unknown_key/u,
+  );
+});
+
+test("production preflight can verify the exact feature-off rollback configuration", () => {
+  const disabled = parseControllerEnvironment(
+    VALID_ENV.replace("PINVOU_DESKTOP_CONTROLLER_ENABLED=1", "PINVOU_DESKTOP_CONTROLLER_ENABLED=0"),
+  );
+  assert.doesNotThrow(() => validateControllerEnvironment(disabled, { expectedFeatureFlag: "0" }));
+  assert.throws(
+    () => validateControllerEnvironment(disabled),
+    /controller_env_required_value_invalid/u,
+  );
+});
+
+test("production controller environment requires an enabled protected telemetry service", () => {
+  for (const replacement of [
+    ["PINVOU_TELEMETRY_ENROLLMENT_TOKEN=telemetry-enrollment-secret-24", "PINVOU_TELEMETRY_ENROLLMENT_TOKEN=short"],
+    ["PINVOU_TELEMETRY_DEVICE_PEPPER=telemetry-device-pepper-24", "PINVOU_TELEMETRY_DEVICE_PEPPER=short"],
+    ["PINVOU_STATS_ADMIN_PASSWORD=operations-admin-password", "PINVOU_STATS_ADMIN_PASSWORD=short"],
+  ]) {
+    assert.throws(
+      () => validateControllerEnvironment(parseControllerEnvironment(VALID_ENV.replace(...replacement))),
+      /controller_env_telemetry_credentials_invalid/u,
+    );
+  }
+  assert.throws(
+    () => validateControllerEnvironment(parseControllerEnvironment(
+      VALID_ENV.replace("PINVOU_TELEMETRY_DATA_DIR=/var/lib/pinvou-telemetry", "PINVOU_TELEMETRY_DATA_DIR=relative/path"),
+    )),
+    /controller_env_telemetry_data_dir_invalid/u,
   );
 });
 

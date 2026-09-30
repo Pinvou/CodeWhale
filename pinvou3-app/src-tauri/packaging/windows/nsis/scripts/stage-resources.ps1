@@ -144,13 +144,17 @@ if ($ValidateOnly) {
 
   $manifestJson = [System.IO.File]::ReadAllText($manifestPath, [System.Text.Encoding]::UTF8)
   $manifest = ConvertFrom-Json -InputObject $manifestJson
-  if ([int]$manifest.schemaVersion -ne 2) {
+  if ([int]$manifest.schemaVersion -ne 3) {
     throw "NSIS staging manifest schema is outdated. Run 'npm run build:nsis:stage' again."
   }
   if ([string]$manifest.installerHooks -ne "target/release/nsis-stage/installer-hooks.nsh") {
     throw "NSIS staging manifest does not reference the generated installer hooks."
   }
   $expectedFiles = @($manifest.files | Sort-Object)
+  $mappedFiles = @($manifest.mappings | ForEach-Object { @($_.files) } | Sort-Object)
+  if (@($mappedFiles).Count -ne @($expectedFiles).Count -or @(Compare-Object -ReferenceObject $expectedFiles -DifferenceObject $mappedFiles).Count -ne 0) {
+    throw "NSIS staging mapping inventory does not exactly cover the staged file set."
+  }
   $actualFiles = @(Get-StagedRelativeFiles)
   $difference = @(Compare-Object -ReferenceObject $expectedFiles -DifferenceObject $actualFiles)
   if ($difference.Count -ne 0) {
@@ -222,8 +226,13 @@ foreach ($property in $resourceProperties) {
   Assert-ChildPath -Root $stagingResourcesRoot -Path $destinationPath
 
   if (Test-Path -LiteralPath $sourcePath -PathType Container) {
+    $sourcePrefix = $sourcePath.TrimEnd('\') + '\'
+    $mappingFiles = @(Get-ChildItem -LiteralPath $sourcePath -Recurse -File -Force | ForEach-Object {
+      [string]::Join('/', (@($destinationSpec.Trim('/'), $_.FullName.Substring($sourcePrefix.Length).Replace('\', '/')) | Where-Object { $_ }))
+    } | Sort-Object)
     Copy-DirectoryContents -Source $sourcePath -Destination $destinationPath
   } else {
+    $mappingFiles = @($destinationSpec.Replace('\', '/').Trim('/'))
     $destinationParent = Split-Path -Parent $destinationPath
     New-Item -ItemType Directory -Path $destinationParent -Force | Out-Null
     Copy-Item -LiteralPath $sourcePath -Destination $destinationPath -Force
@@ -235,6 +244,7 @@ foreach ($property in $resourceProperties) {
   $mappingManifest += [ordered]@{
     source = $sourceSpec
     destination = $destinationSpec
+    files = $mappingFiles
   }
 }
 
@@ -256,8 +266,13 @@ $stagingConfig = [ordered]@{
 }
 Write-Utf8WithoutBom -Path $stagingConfigPath -Content ($stagingConfig | ConvertTo-Json -Depth 8)
 
+$mappedStagedFiles = @($mappingManifest | ForEach-Object { @($_.files) } | Sort-Object)
+if ($mappedStagedFiles.Count -ne $stagedFiles.Count -or @(Compare-Object -ReferenceObject $stagedFiles -DifferenceObject $mappedStagedFiles).Count -ne 0) {
+  throw "NSIS resource mappings must exactly cover every staged file."
+}
+
 $manifest = [ordered]@{
-  schemaVersion = 2
+  schemaVersion = 3
   generatedAtUtc = [DateTime]::UtcNow.ToString("o")
   appVersion = [string]$config.version
   mainBinary = "target/release/pinvou3-tauri.exe"

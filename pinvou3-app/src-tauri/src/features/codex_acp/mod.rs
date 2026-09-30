@@ -5483,9 +5483,7 @@ fn remote_permission_projection(request: &RequestPermissionRequest) -> RemotePer
         .as_ref()
         .and_then(|locations| locations.first())
         .map(|location| location.path.to_string_lossy())
-        .map(|path| {
-            crate::features::remote_control::controller::permission::sanitize_scope(&path)
-        })
+        .map(|path| crate::features::remote_control::controller::permission::sanitize_scope(&path))
         .unwrap_or_else(|| "[REDACTED]".to_owned());
     let preview = request
         .tool_call
@@ -6401,6 +6399,7 @@ mod tests {
                         request: json!({ "form": { "secretPath": "C:/private/secret.txt" } }),
                     },
                     remote_owner,
+                    activity: stall::new_activity_clock(),
                     response_tx,
                 },
                 response_rx,
@@ -6665,6 +6664,10 @@ mod tests {
                     request: Value::Null,
                 },
                 option_ids: vec!["allow".to_string()],
+                option_kinds: HashMap::new(),
+                remote_owner: None,
+                remote_request_id: None,
+                remote_projection: None,
                 activity: activity.clone(),
                 response_tx,
             },

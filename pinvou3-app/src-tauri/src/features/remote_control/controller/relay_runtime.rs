@@ -17,11 +17,14 @@ use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Emitter, Manager as _};
 use tokio::sync::oneshot;
 
+use crate::features::behavior_telemetry::{
+    RemoteControlEvent, RemoteOutcome, RemoteReason, RemoteStage, track_remote_control,
+};
 use crate::features::remote_control::manager::RemoteControlManager;
 
 use super::controlled::{
     ControlledDeviceManager, ControlledLease, ControlledOperation, ControlledRegistration,
-    ControlledResumeStep, ControlledStatus,
+    ControlledResumeStep, ControlledStatus, ControlledStatusKind,
 };
 use super::controlled_handshake::ControlledHandshake;
 use super::controlling_handshake::JoinedLease;
@@ -159,7 +162,66 @@ fn wall_clock_millis() -> Result<u64, String> {
 // Keep the transport's existing host projection at one narrow callsite.
 // The controlled state owner constructs each status before it is published.
 fn emit_controlled_status(app: &AppHandle, status: &ControlledStatus) {
+    track_controlled_status_transition(app, status);
     let _ = app.emit(CONTROLLED_STATUS_EVENT, status);
+}
+
+/// Both worker and command projections pass through this transition gate.
+/// It retains only the fixed phase enum in memory; no generation or code is
+/// used for correlation or written to behavior telemetry.
+pub(crate) fn track_controlled_status_transition(app: &AppHandle, status: &ControlledStatus) {
+    static LAST: OnceLock<Mutex<Option<ControlledStatusKind>>> = OnceLock::new();
+    let mut last = LAST.get_or_init(|| Mutex::new(None)).lock();
+    let current = status.kind();
+    let previous = last.replace(current);
+    if previous == Some(current) {
+        return;
+    }
+    let event = match (previous, current) {
+        (Some(ControlledStatusKind::WaitingForPairing), ControlledStatusKind::PairingReserved) => {
+            Some(RemoteControlEvent::new(
+                RemoteStage::Claim,
+                RemoteOutcome::Ok,
+            ))
+        }
+        (Some(ControlledStatusKind::HandshakePending), ControlledStatusKind::Connected) => Some(
+            RemoteControlEvent::new(RemoteStage::Handshake, RemoteOutcome::Ok),
+        ),
+        (Some(ControlledStatusKind::Connected), ControlledStatusKind::Reconnecting) => Some(
+            RemoteControlEvent::new(RemoteStage::Disconnection, RemoteOutcome::Ok),
+        ),
+        (
+            Some(
+                ControlledStatusKind::Reconnecting
+                | ControlledStatusKind::ResumeProvisional
+                | ControlledStatusKind::ResumeActivatedPendingLiveness,
+            ),
+            ControlledStatusKind::Connected,
+        ) => Some(RemoteControlEvent::new(
+            RemoteStage::Resume,
+            RemoteOutcome::Ok,
+        )),
+        (
+            Some(
+                ControlledStatusKind::Reconnecting
+                | ControlledStatusKind::ResumeProvisional
+                | ControlledStatusKind::ResumeActivatedPendingLiveness,
+            ),
+            ControlledStatusKind::Error,
+        ) => Some(
+            RemoteControlEvent::new(RemoteStage::Resume, RemoteOutcome::Rejected)
+                .reason(RemoteReason::ResumeFailed),
+        ),
+        (Some(ControlledStatusKind::HandshakePending), ControlledStatusKind::Error) => Some(
+            RemoteControlEvent::new(RemoteStage::Handshake, RemoteOutcome::Rejected)
+                .reason(RemoteReason::HandshakeFailed),
+        ),
+        _ => None,
+    };
+    drop(last);
+    if let Some(event) = event {
+        track_remote_control(app, event);
+    }
 }
 /// 端点通道就绪等待：单次上限与重试间隔（整体最多 3 次尝试）。
 const ENDPOINT_READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
@@ -198,20 +260,168 @@ pub(crate) fn log_relay_event(scope: &str, stage: &str, detail: &str) {
     };
     let _ = writeln!(
         file,
-        "ts_ms={timestamp_ms} [{scope}] stage={} detail={}",
-        bounded_log_token(stage),
-        bounded_log_token(detail)
+        "ts_ms={timestamp_ms} [{}] stage={} detail={}",
+        log_scope(scope),
+        log_stage(stage),
+        log_detail(detail)
     );
 }
 
-/// 有界化按位洗白：只保留可以安全落盘的字符集并限制长度，
-/// 空白、`=`、`?`、`&` 等分隔符一律丢掉，避免把连接码或凭据片段带进日志。
-pub(crate) fn bounded_log_token(value: &str) -> String {
-    value
-        .chars()
-        .filter(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | ':' | '.' | '/'))
-        .take(160)
-        .collect()
+fn log_scope(value: &str) -> &'static str {
+    match value {
+        "controlled" => "controlled",
+        "controller" => "controller",
+        _ => "unknown",
+    }
+}
+
+/// Semantic allowlists also reject identifiers consisting only of letters or digits.
+fn log_stage(value: &str) -> &'static str {
+    const STAGES: &[&str] = &[
+        "controlled_status",
+        "controlled_result",
+        "capability_handshake",
+        "start_rejected",
+        "start_failed",
+        "connect_requested",
+        "connect_rejected",
+        "connect_started",
+        "connected",
+        "connect_failed",
+        "status",
+        "handshake_failed",
+        "registration_rejected",
+        "registration_sent",
+        "registration_failed",
+        "registered",
+        "worker_started",
+        "endpoint_ready",
+        "runtime_relay_error",
+        "liveness_challenge",
+        "liveness_attestation",
+        "liveness_direct",
+        "task_submit_frame_received",
+        "task_submit_decrypted",
+        "task_submit_dispatched",
+        "task_submit_dispatch_failed",
+        "task_submit_status_sent",
+        "business_frame_dropped",
+        "business_frame_rejected",
+        "business_dispatch_failed",
+        "business_response_seal_failed",
+        "business_response_send_failed",
+        "capability_response_sent",
+        "capability_snapshot_failed",
+        "capability_snapshot_applied",
+        "capability_snapshot_rejected",
+        "capability_error_rejected",
+        "journal_event_rejected",
+        "journal_event_ignored",
+        "journal_event_applied",
+        "journal_event_verified",
+        "journal_event_gap",
+        "journal_snapshot_rejected",
+        "task_status_sent",
+        "task_status_not_sent",
+        "journal_event_not_sent",
+        "journal_event_sent",
+        "journal_snapshot_sent",
+        "remote_action_received",
+        "remote_action_failed",
+        "remote_action_sent",
+        "relay_reset_enqueue_failed",
+        "relay_frame_oversized",
+        "relay_frame_rejected",
+        "relay_read_failed",
+        "relay_connect_failed",
+        "relay_send_failed",
+        "access_policy_load_failed",
+        "revocation_frame_rejected",
+        "revocation_ack_persist_failed",
+        "local_event_forward_failed",
+        "relay_message_rejected",
+        "revoked_config_remove_failed",
+        "revoked_ledger_remove_failed",
+        "session_id_rejected",
+        "session_scope_lookup_failed",
+        "stream_reset_enqueue_failed",
+        "attachment_digest_missing",
+        "attachment_uploads_expired",
+        "artifact_downloads_expired",
+        "task_terminal_persist_failed",
+        "task_rejected_persist_failed",
+        "task_dispatch_rejected",
+        "artifact_capture_failed",
+        "workspace_auth_restore_failed",
+        "attachment_release_failed",
+        "attachment_finalize_failed",
+        "attachment_cleanup_failed",
+        "journal_append_rejected",
+        "knowledge_model_load_failed",
+        "knowledge_mount_emit_failed",
+        "web_session_operation_failed",
+        "web_workspace_operation_failed",
+        "web_acp_operation_failed",
+    ];
+    STAGES
+        .iter()
+        .copied()
+        .find(|stage| *stage == value)
+        .unwrap_or("other")
+}
+
+fn log_detail(value: &str) -> &'static str {
+    const DETAILS: &[&str] = &[
+        "ok",
+        "failed",
+        "unknown",
+        "unavailable",
+        "accepted",
+        "rejected",
+        "sent",
+        "send_failed",
+        "requested",
+        "expired",
+        "ready",
+        "duplicate",
+        "connected",
+        "reconnecting",
+        "registering",
+        "waiting_for_pairing",
+        "pairing_reserved",
+        "handshake_pending",
+        "stopped",
+        "error",
+        "waiting_registered",
+        "channel_ready",
+        "opening",
+        "dispatching",
+        "no_live_lease",
+        "relay_rejected",
+        "projection_failed",
+        "retired_epoch",
+        "replay_requested",
+        "invalid_envelope_or_identity",
+        "lease_unavailable",
+        "session_mapping_missing",
+        "status_unavailable",
+        "outbound_unavailable",
+        "seal_failed",
+        "queue_failed",
+        "generation_or_binding_stale",
+        "permission_expired",
+        "permission_denied",
+        "task_conflict",
+        "missing",
+    ];
+    if let Some(value) = DETAILS.iter().copied().find(|detail| *detail == value) {
+        return value;
+    }
+    super::protocol::CONTROLLER_ERROR_CODES
+        .iter()
+        .copied()
+        .find(|code| *code == value)
+        .unwrap_or("other")
 }
 
 /// B 端预握手阶段的自帧回投过滤：Relay 会把发送方的 `finished_receipt_commit`
@@ -229,6 +439,31 @@ pub(crate) fn log_controlled_event(stage: &str, detail: &str) {
 /// 这类失败只能靠猜；这里补上与 B 端对称的阶段与结果码。
 pub(crate) fn log_controller_event(stage: &str, detail: &str) {
     log_relay_event("controller", stage, detail);
+}
+
+/// Production failure projections deliberately accept the raw source values
+/// only to prove that the boundary discards them before touching the sink.
+pub(crate) fn log_attachment_digest_omitted(_file_name: &str) {
+    log_controlled_event("attachment_digest_missing", "missing");
+}
+
+pub(crate) fn log_task_persist_failure<T: ?Sized>(rejected: bool, _raw_error: &T) {
+    log_controlled_event(
+        if rejected {
+            "task_rejected_persist_failed"
+        } else {
+            "task_terminal_persist_failed"
+        },
+        "failed",
+    );
+}
+
+pub(crate) fn log_artifact_capture_failure<T: ?Sized>(_raw_error: &T) {
+    log_controlled_event("artifact_capture_failed", "failed");
+}
+
+pub(crate) fn log_attachment_cleanup_failure(_path: &std::path::Path, _raw_error: &std::io::Error) {
+    log_controlled_event("attachment_cleanup_failed", "failed");
 }
 
 /// 测试/内联断言用：日志行格式（不含时间戳，便于跨平台断言）。
@@ -1979,12 +2214,76 @@ mod tests {
     }
 
     #[test]
-    fn bounded_log_token_drops_separators_so_credentials_cannot_be_pasted_in() {
-        assert_eq!(
-            bounded_log_token("code=AB12CD3 token=hunter2?x=1"),
-            "codeAB12CD3tokenhunter2x1"
-        );
-        assert_eq!(bounded_log_token(&"a".repeat(400)).len(), 160);
+    fn log_allowlist_rejects_identifier_shaped_values_and_secrets() {
+        for sentinel in [
+            "AB12CD3",
+            "generation123",
+            "deviceAlice",
+            "sklive12345678",
+            "C:/Users/Alice",
+        ] {
+            assert_eq!(log_scope(sentinel), "unknown");
+            assert_eq!(log_stage(sentinel), "other");
+            assert_eq!(log_detail(sentinel), "other");
+        }
+        assert_eq!(log_stage("controlled_status"), "controlled_status");
+        assert_eq!(log_detail("pairing_code_invalid"), "pairing_code_invalid");
+    }
+
+    #[test]
+    fn real_remote_failure_projections_do_not_persist_any_sensitive_category() {
+        struct RestoreHome(Option<std::ffi::OsString>);
+        impl Drop for RestoreHome {
+            fn drop(&mut self) {
+                match self.0.take() {
+                    Some(value) => unsafe { std::env::set_var("PINVOU3_HOME", value) },
+                    None => unsafe { std::env::remove_var("PINVOU3_HOME") },
+                }
+            }
+        }
+        let _guard = crate::platform::paths::tests::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let directory = tempfile::tempdir().unwrap();
+        let _restore = RestoreHome(std::env::var_os("PINVOU3_HOME"));
+        unsafe { std::env::set_var("PINVOU3_HOME", directory.path()) };
+        let sentinels = [
+            "2222222",
+            "endpointSentinelA1",
+            "leaseSentinelB2",
+            "tokenSentinelC3-credential-000001",
+            "keySentinelD4-credential-00000001",
+            "198.51.100.77",
+            "deviceSentinelE5",
+            "promptSentinelF6",
+            "replySentinelG7",
+            "toolArgsSentinelH8",
+            "fileSentinelI9.txt",
+            "C:/private/sentinel/J0",
+            "contentSentinelK1",
+        ];
+        let raw = sentinels.join("|");
+        log_attachment_digest_omitted(&raw);
+        log_task_persist_failure(false, &raw);
+        log_task_persist_failure(true, &raw);
+        log_artifact_capture_failure(&raw);
+        let raw_path = std::path::Path::new(&raw);
+        let raw_error = std::io::Error::other(raw.clone());
+        log_attachment_cleanup_failure(raw_path, &raw_error);
+        let written =
+            std::fs::read_to_string(directory.path().join("logs/remote-control.log")).unwrap();
+        for sentinel in sentinels {
+            assert!(!written.contains(sentinel));
+        }
+        for stage in [
+            "attachment_digest_missing",
+            "task_terminal_persist_failed",
+            "task_rejected_persist_failed",
+            "artifact_capture_failed",
+            "attachment_cleanup_failed",
+        ] {
+            assert!(written.contains(&format!("stage={stage}")));
+        }
     }
 
     /// Relay 会把发送方的 commit 原样回投（router 契约）：B 只吃 `sender_role == A`

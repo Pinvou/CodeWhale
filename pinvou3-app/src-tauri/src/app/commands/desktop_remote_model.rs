@@ -273,6 +273,7 @@ pub(crate) fn build_active_task_package(
 pub async fn desktop_remote_model_list_exportable(
     controlled: State<'_, ControlledDeviceManager>,
 ) -> Result<Vec<RemoteModelDescriptor>, String> {
+    crate::platform::capabilities::ensure_desktop_remote_control_enabled()?;
     if !controlled.is_supported() {
         return Err(UNSUPPORTED.to_owned());
     }
@@ -303,6 +304,7 @@ pub fn desktop_remote_model_install(
     controlled: State<'_, ControlledDeviceManager>,
     store: State<'_, SharedTemporaryModelStore>,
 ) -> Result<Value, String> {
+    crate::platform::capabilities::ensure_desktop_remote_control_enabled()?;
     if !controlled.is_supported() {
         return Err(UNSUPPORTED.to_owned());
     }
@@ -325,6 +327,7 @@ pub fn desktop_remote_model_release(
     controlled: State<'_, ControlledDeviceManager>,
     store: State<'_, SharedTemporaryModelStore>,
 ) -> Result<bool, String> {
+    crate::platform::capabilities::ensure_desktop_remote_control_enabled()?;
     if !controlled.is_supported() {
         return Err(UNSUPPORTED.to_owned());
     }
@@ -336,6 +339,7 @@ pub fn desktop_remote_model_active(
     controlled: State<'_, ControlledDeviceManager>,
     store: State<'_, SharedTemporaryModelStore>,
 ) -> Result<Option<String>, String> {
+    crate::platform::capabilities::ensure_desktop_remote_control_enabled()?;
     if !controlled.is_supported() {
         return Err(UNSUPPORTED.to_owned());
     }

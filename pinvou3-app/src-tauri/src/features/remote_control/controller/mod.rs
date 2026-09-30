@@ -18,7 +18,6 @@ pub(crate) mod relay_runtime;
 pub(crate) mod relay_transport;
 pub(crate) mod resume;
 pub(crate) mod task;
-pub(crate) mod telemetry;
 pub(crate) mod temporary_model;
 #[cfg(test)]
 pub(crate) mod test_support;

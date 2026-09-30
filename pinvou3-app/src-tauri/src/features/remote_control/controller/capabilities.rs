@@ -423,14 +423,7 @@ impl CapabilitySnapshotManager {
         now_b: u64,
     ) -> Result<CapabilityAdmissionGuard<'_>> {
         let guard = self.admission_gate.begin_admission()?;
-        self.validate_task_selection(
-            revision,
-            context,
-            mode,
-            skill_ids,
-            workspace_id,
-            now_b,
-        )?;
+        self.validate_task_selection(revision, context, mode, skill_ids, workspace_id, now_b)?;
         Ok(guard)
     }
 
@@ -465,12 +458,14 @@ impl CapabilitySnapshotManager {
         match (mode, workspace_id) {
             ("chat", None) => Ok(()),
             ("chat", Some(_)) => Err(CapabilityError::new("task_workspace_unexpected")),
-            ("code", Some(workspace_id)) if snapshot.workspaces.iter().any(|workspace| {
-                workspace.code_allowed && workspace.workspace_id == workspace_id
-            }) => Ok(()),
-            ("code", Some(_)) => Err(CapabilityError::new(
-                "capability_workspace_not_authorized",
-            )),
+            ("code", Some(workspace_id))
+                if snapshot.workspaces.iter().any(|workspace| {
+                    workspace.code_allowed && workspace.workspace_id == workspace_id
+                }) =>
+            {
+                Ok(())
+            }
+            ("code", Some(_)) => Err(CapabilityError::new("capability_workspace_not_authorized")),
             ("code", None) => Err(CapabilityError::new("task_workspace_required")),
             _ => Err(CapabilityError::new("task_mode_unsupported")),
         }
@@ -718,14 +713,7 @@ mod tests {
         );
         assert_eq!(
             manager
-                .pin_task_admission(
-                    "1",
-                    &context("generation-other"),
-                    "chat",
-                    &[],
-                    None,
-                    2_000,
-                )
+                .pin_task_admission("1", &context("generation-other"), "chat", &[], None, 2_000,)
                 .unwrap_err()
                 .code,
             "capability_snapshot_stale"
@@ -734,14 +722,7 @@ mod tests {
         // the 30 second snapshot: B rejects at commit/admission, not dispatch.
         assert_eq!(
             manager
-                .pin_task_admission(
-                    "1",
-                    &context("generation-0001"),
-                    "chat",
-                    &[],
-                    None,
-                    31_000,
-                )
+                .pin_task_admission("1", &context("generation-0001"), "chat", &[], None, 31_000,)
                 .unwrap_err()
                 .code,
             "capability_snapshot_expired"
@@ -764,14 +745,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             manager
-                .pin_task_admission(
-                    "1",
-                    &context("generation-0001"),
-                    "chat",
-                    &[],
-                    None,
-                    2_001,
-                )
+                .pin_task_admission("1", &context("generation-0001"), "chat", &[], None, 2_001,)
                 .unwrap_err()
                 .code,
             "capability_snapshot_stale"
@@ -991,9 +965,6 @@ mod tests {
         let text = payload.to_string();
         assert!(!text.contains("D:\\"));
         assert!(!text.contains("api_key"));
-        assert_eq!(
-            payload["skills"][0]["scopes"],
-            serde_json::json!(["code"])
-        );
+        assert_eq!(payload["skills"][0]["scopes"], serde_json::json!(["code"]));
     }
 }
