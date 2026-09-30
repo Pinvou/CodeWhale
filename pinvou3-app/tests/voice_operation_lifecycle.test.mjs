@@ -324,6 +324,7 @@ for (const navigation of ['none', 'session', 'new-draft', 'after-rollback']) {
     Object.assign(ctx, {
       voice: () => h.api, sessionStates: buffers, ensureSessionInFlight: null,
       ensureSessionDraftOutcome: null, sessionSwitchRequestToken: 0, pendingTaskDraftRecovery: null,
+      activeRemoteProxyId: null, isRemoteProxyView: () => false,
       freshBuffer: () => ({ composerDraft: '', messages: [], chatItems: [] }),
       getBuffer: sid => buffers[sid], saveWorkingSetTo() {},
       loadWorkingSetFrom: buffer => Object.assign(h.state, buffer),
@@ -424,8 +425,21 @@ for (const lane of ['desktop', 'web']) {
           pendingTaskDraftRecovery: null, sessionSwitchRequestToken: 0,
           findPersonalWorkbenchTemplateDraft: () => null, personalWorkbenchTemplateIdRef: { current: null },
           pendingModeScopeMigrationRef: { current: null }, pinvouModeStateRef: { current: null },
-          hasReadyAttachment: false, visualPosterSceneActive: false, documentWritingSceneActive: preparing,
+          attachments: h.state.attachments, hasReadyAttachment: false,
+          visualPosterSceneActive: false, documentWritingSceneActive: preparing,
           personalWorkbenchSceneActive: false, dataVisualizationSceneActive: false, pptDesignSceneActive: false,
+          controlledChatActive: false, controlledLinkReady: false,
+          controlledCapabilityBound: false, controlledCapabilityBusy: false, controlledSkillIds: [],
+          controlledSession: { sessionId: null },
+          remoteChatActive: false, remoteConnection: null, remoteLinkReady: false,
+          remoteSessionBusy: false,
+          remoteSendIdentity: null, effectiveRemoteModelSource: null, remoteBinding: null,
+          remoteFiles: [], remoteNewDispatchReady: false, remoteProxyHistory: null,
+          remoteModelError: null, remoteModelSource: 'controlled_device',
+          remoteMode: 'chat', remoteSkillIds: [], remoteWorkspaceId: '',
+          selectedRemoteModelId: null,
+          isRemoteProxyView: () => false,
+          isKnownRemoteProxy: () => false,
           createDocumentWritingMessageMeta: () => ({ pinvouScene: 'work:document-writing' }),
           requiredCapabilitiesForMeta, prepareSceneCapabilities, canPrepareSceneCapabilities: () => true,
           isWeb: lane === 'web', can: () => true, setSceneCapabilityStatus() {},
@@ -500,7 +514,8 @@ for (const lane of ['desktop', 'web']) {
         if (prefillPending) {
           ctx.prefill = h.state.composerPrefill.text;
           ctx.prefillAppend = h.state.composerPrefill.append;
-          const effectStart = chat.indexOf('      useEffect(() => {\n        if (prefill)');
+          const prefillCondition = chat.indexOf('        if (prefill)');
+          const effectStart = chat.lastIndexOf('      useEffect(() => {', prefillCondition);
           const effectEnd = chat.indexOf('}, [prefill, prefillAppend]);', effectStart) + '}, [prefill, prefillAppend]);'.length;
           vm.runInContext(chat.slice(effectStart, effectEnd), ctx);
         } else if (draftSyncPending) {
