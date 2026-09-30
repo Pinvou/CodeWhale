@@ -37,7 +37,7 @@ SESSION_APPLICATION_EXPORTS = (
 REMOTE_CONTROL_HOST_API_INITIAL_CEILING = {
     "pinvou3-app/src-tauri/src/features/remote_control/controller/controlling_service.rs:host_emit": 3,
     "pinvou3-app/src-tauri/src/features/remote_control/controller/controlling_service.rs:tauri_path": 2,
-    "pinvou3-app/src-tauri/src/features/remote_control/controller/relay_runtime.rs:host_emit": 7,
+    "pinvou3-app/src-tauri/src/features/remote_control/controller/relay_runtime.rs:host_emit": 1,
     "pinvou3-app/src-tauri/src/features/remote_control/controller/relay_runtime.rs:tauri_path": 2,
     "pinvou3-app/src-tauri/src/features/remote_control/controller/relay_transport.rs:tauri_path": 1,
     "pinvou3-app/src-tauri/src/features/remote_control/manager/mod.rs:host_emit": 4,
