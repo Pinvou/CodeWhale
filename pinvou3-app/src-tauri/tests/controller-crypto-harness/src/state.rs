@@ -7,3 +7,14 @@ mod controlled;
 
 #[path = "../../../src/features/remote_control/controller/controlling.rs"]
 mod controlling;
+
+#[path = "../../../src/features/remote_control/controller/permission.rs"]
+mod permission;
+
+// Only the narrow hook trait is doubled; permission authority and all its
+// tests are actual production code. This does not cover task-ledger wiring.
+mod task {
+    pub(crate) trait RemoteTaskPermissionScope: Send + Sync {
+        fn deny_pending_for_task(&self, task_id: &str) -> usize;
+    }
+}
