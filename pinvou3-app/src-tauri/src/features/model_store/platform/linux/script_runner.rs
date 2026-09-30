@@ -90,6 +90,73 @@ fn is_prompt_line(line: &str) -> bool {
     t.starts_with(PROMPT_MARKER) || t.starts_with(PROMPT_FORM_MARKER)
 }
 
+/// 进度标记：`LMM_PROGRESS_BYTES=<已下载字节>/<总字节>`。
+///
+/// 分母由脚本自己决定：下权重时是卡片元数据里的真实体积（宿主经
+/// `LMM_MODEL_SIZE_BYTES` 注进去），装引擎时是这一阶段的包总量。**宿主一个字节都
+/// 不解析**，它只把行原样中继给界面 —— docker / pip / curl 的输出格式各不相同而且
+/// 随版本变，把它们的进度条在宿主里反解出来，等于把一条会随外部工具升级而静默失效
+/// 的链路焊进应用。
+pub const PROGRESS_MARKER: &str = "LMM_PROGRESS_BYTES=";
+
+/// 阶段标记：`LMM_STAGE=<人话阶段名>`。
+///
+/// 界面把它当任务卡的副标题（「正在拉取引擎镜像…」「正在安装依赖…」）。在这之前
+/// 副标题退化成"最后一行日志"，于是用户看到的是 docker 自己的多层并行进度在原地
+/// 乱跳 —— 截图里那十几行 `ae5a106b6076: Pulling fs layer` 就是这么来的。
+pub const STAGE_MARKER: &str = "LMM_STAGE=";
+
+/// 步骤标记：`LMM_STEP=<第几步>/<共几步>`。
+///
+/// **给拿不到字节分母的阶段用**。`pip install` 的依赖总量要等依赖解析完才知道，
+/// 在那之前不存在任何可信的分母；宁可给一个诚实的"第 2 步 / 共 4 步"，也不要编一个
+/// 假分母让进度条先冲到 90% 再倒退。
+pub const STEP_MARKER: &str = "LMM_STEP=";
+
+/// 卡片脚本与界面之间的协议行命名空间。
+pub const CONTROL_PREFIX: &str = "LMM_";
+
+/// 这一行是不是**协议行**（给界面解析的控制信息），而不是给人看的日志。
+///
+/// 判据是 `LMM_<大写名字>=`，也就是脚本协议占用的整个命名空间（`LMM_PROMPT=`、
+/// `LMM_PROGRESS_BYTES=`、`LMM_STAGE=`、`LMM_ENGINE_IMAGE=`……）。按命名空间判而不是
+/// 逐个列举，是因为**漏掉一个的代价是静默的**：那一行会被当普通日志加上阶段前缀，
+/// 界面锚定的解析器再也认不出它，而界面上不会出现任何错误 —— 见 [`prefix_log_line`]。
+pub fn is_control_line(line: &str) -> bool {
+    let t = line.trim_start();
+    t.strip_prefix(CONTROL_PREFIX)
+        .and_then(|rest| rest.split_once('='))
+        .is_some_and(|(name, _)| {
+            !name.is_empty()
+                && name
+                    .chars()
+                    .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+        })
+}
+
+/// 给日志行加阶段前缀（`[安装引擎] ` 之类），**协议行原样透传**。
+///
+/// # 为什么必须有这个函数
+///
+/// `lifecycle` 原来直接 `format!("[安装引擎] {line}")`。于是 `install_engine` 里
+/// 脚本打出的 `LMM_PROMPT=password|请输入密码` 变成了
+/// `[安装引擎] LMM_PROMPT=password|请输入密码`，而**两边的解析器都是从行首匹配的**：
+/// 后端 `service::is_prompt_line` 用 `starts_with`，前端 `parsePromptLine` 用锚定的
+/// `^LMM_PROMPT=`。结果是 install_engine 里的提问永远弹不出输入框、`awaiting_input`
+/// 永远是 false，脚本阻塞在 `read` 上直到 `PROMPT_TIMEOUT`（600 秒）把整次运行判死。
+/// 双机卡看起来没事，只是因为 deploy 那条路径压根没加前缀。
+///
+/// 反过来，进度行的前端正则**刻意没有锚定**（`model-store-logic.js` 的
+/// `parseProgressLine`），正是为了吃得下历史上带前缀的进度行；那边不能"顺手"加 `^`。
+/// 两处注释互为对照，改任何一处都要看另一处。
+pub fn prefix_log_line(prefix: &str, line: &str) -> String {
+    if is_control_line(line) {
+        line.to_string()
+    } else {
+        format!("{prefix}{line}")
+    }
+}
+
 // Rust 侧到此为止：只需要知道"这一行在要输入"，好在这里阻塞去读 stdin。
 // 把 `<kind>|<提示语>` 真正拆开、决定弹什么控件，是**界面**的事——
 // LMM 自己的 TaskCenter.jsx 和宿主应用（品悟）的 model-store-logic.js 各有一份
@@ -646,6 +713,43 @@ fn decode_utf8_stream(pending: &mut Vec<u8>, chunk: &[u8]) -> String {
     }
 }
 
+/// `output_lines` 的上限。
+///
+/// 在这之前它是**无上限、非环形**的 `Vec`：一次 168GB 的下载能打出几万行，全程
+/// 常驻，而调用方（`lifecycle`）只用它做两件事——找 `LMM_*` 标记、出错时取末尾
+/// 二十行 tail。
+const MAX_OUTPUT_LINES: usize = 5_000;
+
+/// 失败时附在错误信息里给用户/给我们看的输出尾巴有多少行。
+const ERROR_TAIL_LINES: usize = 20;
+
+/// 挑"失败原因那一行"时往回看多少行。
+///
+/// 比 [`ERROR_TAIL_LINES`] 宽：原因行常常在脚本自己的收尾说明（清理、建议、变通办法）
+/// 之前，而收尾说明可以有十几行。窗口太窄的话挑不到原因，就又退回"最后一条非空行"
+/// 那个被日本客户实锤过的缺陷上了。
+const SUMMARY_SEARCH_LINES: usize = 60;
+
+/// 超上限时丢掉最老的一半，但**协议行一行都不丢**。
+///
+/// 不能简单丢最老的：`LMM_ENGINE_IMAGE=` 可能在第一百行就打出来了，而
+/// `lifecycle::extract_marker` 是在整个 Vec 上找它的。丢掉它的后果是"已安装引擎"
+/// 的删除功能再也精确 `docker rmi` 不了——盘上留下一个几 GB 的孤儿镜像，而且没有
+/// 任何界面管得到它。
+fn cap_output_lines(output_lines: &mut Vec<String>) {
+    if output_lines.len() <= MAX_OUTPUT_LINES {
+        return;
+    }
+    let drop_before = MAX_OUTPUT_LINES / 2;
+    let mut kept: Vec<String> = Vec::with_capacity(output_lines.len() - drop_before);
+    for (index, line) in output_lines.drain(..).enumerate() {
+        if index >= drop_before || is_control_line(&line) {
+            kept.push(line);
+        }
+    }
+    *output_lines = kept;
+}
+
 fn drain_lines(
     buf: String,
     output_lines: &mut Vec<String>,
@@ -674,6 +778,7 @@ fn drain_lines(
         rest = rest[idx + skip..].to_string();
         if !line.trim().is_empty() {
             output_lines.push(line.clone());
+            cap_output_lines(output_lines);
             if let Some(cb) = on_progress.as_deref_mut() {
                 cb(ScriptProgress::line(line));
             }
@@ -1089,11 +1194,20 @@ pub fn run_script(
 
     let code = status.code().unwrap_or(-1);
     if code != 0 {
-        let last_line = output_lines.iter().rev().find(|l| !l.trim().is_empty());
-        let summary = last_line
-            .map(|l| humanize_script_message(l))
+        // 摘要在**尾部窗口里挑最像错误的那一行**，不是取最后一条非空行。
+        //
+        // 取最后一条非空行的后果被日本客户的截图实锤过：他看到的"失败原因"是
+        // 「也可以在别的机器上拉好后用 docker save/load 拷进来」——那是脚本报完错好心
+        // 附上的一句变通办法，真正的原因（DNS 超时）被埋在它上面几行。于是"失败要说
+        // 人话"写得越认真的脚本，摘要越没用。选行规则见 `errors::pick_failure_line`。
+        //
+        // 选行窗口（60）比展示的 tail（20）宽：原因行常常在脚本自己的收尾说明之前，
+        // 而收尾说明可以有十几行。挑出来的行本身一定也在完整日志里，不会无处可查。
+        let search_start = output_lines.len().saturating_sub(SUMMARY_SEARCH_LINES);
+        let summary = super::errors::pick_failure_line(&output_lines[search_start..])
+            .map(humanize_script_message)
             .unwrap_or_else(|| "未知错误".to_string());
-        let tail_start = output_lines.len().saturating_sub(20);
+        let tail_start = output_lines.len().saturating_sub(ERROR_TAIL_LINES);
         let tail = output_lines[tail_start..].join("\n");
         return Err(ScriptError::new(format!(
             "脚本执行失败（退出码 {code}）：{summary}\n{tail}"
@@ -1858,6 +1972,73 @@ printf '[1A[2K7e1f8fb7d4ba: Pulling fs layer
         })
         .unwrap();
         assert_eq!(lines, vec!["7e1f8fb7d4ba: Pulling fs layer".to_string()]);
+    }
+
+    /// 阶段前缀绝不能落在协议行上。
+    ///
+    /// 这条测试守的是一个**静默**的真 bug：`lifecycle` 原来无条件
+    /// `format!("[安装引擎] {line}")`，于是 install_engine 里脚本的
+    /// `LMM_PROMPT=` 被改成了 `[安装引擎] LMM_PROMPT=`，而后端 `service::is_prompt_line`
+    /// 和前端 `parsePromptLine` 都是从行首匹配的 —— 输入框永远弹不出来，脚本阻塞在
+    /// `read` 上直到 600 秒超时把整次运行判死，界面上看不到任何错误。
+    /// 标记行的名字是**和前端的契约**：两边各有一份解析器，而且
+    /// 前端那份的正则是字面量。改名必须同时改 `model-store-logic.js` 的
+    /// `parseProgressLine` / `parseStageLine` / `parseStepLine` / `parsePromptLine`。
+    ///
+    /// 把它们铉在这里，是因为改错的后果是**静默的**：界面上不会出现任何错误，
+    /// 只是进度条永远不动、或者输入框永远不弹。
+    #[test]
+    fn marker_names_are_the_contract_with_the_frontend() {
+        assert_eq!(PROGRESS_MARKER, "LMM_PROGRESS_BYTES=");
+        assert_eq!(STAGE_MARKER, "LMM_STAGE=");
+        assert_eq!(STEP_MARKER, "LMM_STEP=");
+        assert_eq!(PROMPT_MARKER, "LMM_PROMPT=");
+        assert_eq!(PROMPT_FORM_MARKER, "LMM_PROMPT_FORM=");
+        for marker in [
+            PROGRESS_MARKER,
+            STAGE_MARKER,
+            STEP_MARKER,
+            PROMPT_MARKER,
+            PROMPT_FORM_MARKER,
+        ] {
+            assert!(
+                is_control_line(&format!("{marker}x")),
+                "{marker} 不被当成协议行，它会被套上阶段前缀而静默失效"
+            );
+        }
+    }
+
+    #[test]
+    fn control_lines_never_get_a_stage_prefix() {
+        for line in [
+            "LMM_PROMPT=password|请输入本机密码",
+            "LMM_PROMPT_FORM={\"fields\":[]}",
+            "LMM_PROGRESS_BYTES=1/2",
+            "LMM_STAGE=正在拉取引擎镜像",
+            "LMM_STEP=2/4",
+            "LMM_ENGINE_IMAGE=vllm/vllm-openai:v0.8.5",
+        ] {
+            assert!(is_control_line(line), "{line} 应当被认成协议行");
+            assert_eq!(prefix_log_line("[安装引擎] ", line), line);
+        }
+    }
+
+    #[test]
+    fn human_lines_still_get_the_stage_prefix() {
+        assert_eq!(
+            prefix_log_line("[安装引擎] ", "7e1f8fb7d4ba: Pulling fs layer"),
+            "[安装引擎] 7e1f8fb7d4ba: Pulling fs layer"
+        );
+        // 小写、缺等号、名字里有非法字符的都不是协议行 —— 判据宽一点会把普通日志
+        // 误当协议行吞掉前缀，那是无害的；判据窄一点才会让控制信息失效。
+        for line in [
+            "lmm_prompt=x",
+            "LMM_PROMPT",
+            "LMM-PROMPT=x",
+            "  提示：LMM_PROMPT=x",
+        ] {
+            assert!(!is_control_line(line), "{line} 不该被认成协议行");
+        }
     }
 
     #[test]
