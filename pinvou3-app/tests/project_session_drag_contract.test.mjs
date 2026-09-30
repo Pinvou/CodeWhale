@@ -86,7 +86,7 @@ test('dnd payload stays memo-stable and mirrors the menu-path availability gate'
   );
   assert.match(
     MAIN,
-    /dndPayload=\{projectMovesAvailable && sidebarCodeListActive\s*\? cachedItemCallback\(sidebarDndPayloads, chat, \(c\) => \(\{ sessionId: c\.id \}\)\)/,
+    /dndPayload=\{chat\.sessionKind !== 'RemoteProxy' && projectMovesAvailable && sidebarCodeListActive\s*\? cachedItemCallback\(sidebarDndPayloads, chat, \(c\) => \(\{ sessionId: c\.id \}\)\)/,
     'payload must come from the per-item cache, not a fresh object per render',
   );
   assert.doesNotMatch(
