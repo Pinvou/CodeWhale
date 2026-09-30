@@ -79,3 +79,48 @@ export function taskStatusKey(status) {
 export function isTaskTerminal(status) {
   return TASK_TERMINAL_STATUSES.includes(status);
 }
+
+/**
+ * The controlled-side badge remains visible while the transport is recovering.
+ * @param {{ status?: string } | null | undefined} controlledDevice
+ */
+export function isControlledDeviceChatActive(controlledDevice) {
+  const status = controlledDevice && controlledDevice.status;
+  return status === 'connected' || status === 'reconnecting';
+}
+
+/**
+ * Retries a B-side chat navigation only while the originating connection and
+ * view intent are still current. A failed attempt is never treated as opened.
+ * @param {{
+ *   navigate: () => boolean | Promise<boolean>,
+ *   isCurrent?: () => boolean,
+ *   wait?: (delayMs: number) => Promise<void>,
+ *   maxAttempts?: number,
+ *   retryDelayMs?: number,
+ *   onError?: (error: unknown) => void,
+ * }} options
+ * @returns {Promise<boolean>}
+ */
+export async function openControlledDeviceChatWithRetry({
+  navigate,
+  isCurrent = () => true,
+  wait = (delayMs) => new Promise((resolve) => setTimeout(resolve, delayMs)),
+  maxAttempts = 3,
+  retryDelayMs = 200,
+  onError = () => {},
+}) {
+  if (typeof navigate !== 'function') throw new TypeError('navigate must be a function');
+  const attempts = Math.max(1, Math.min(3, Number(maxAttempts) || 1));
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    if (!isCurrent()) return false;
+    try {
+      if (await navigate()) return true;
+    } catch (error) {
+      onError(error);
+    }
+    if (attempt + 1 >= attempts || !isCurrent()) return false;
+    await wait(retryDelayMs);
+  }
+  return false;
+}

@@ -16,11 +16,11 @@ const MAX_DESCRIPTORS = 256;
 const MAX_ARTIFACTS = 256;
 const MAX_SENSITIVE_STRING_BYTES = 8 * 1024;
 export const MAX_ENCRYPTED_WIRE_BYTES = Math.ceil(MAX_ENCRYPTED_FRAME_BYTES / 3) * 4 + MAX_CONTROL_MESSAGE_BYTES;
-export const CONTROLLER_CONTRACT_SHA256 = "ad4dd926f97c376419d33589e8147f533e7cbb55c3430a00d3b0c5e306349aac";
+export const CONTROLLER_CONTRACT_SHA256 = "a62f3125c1fa9559fcf9f28c4f1fb64598a1a23f1fc09a851011b3bd65563dcf";
 
 export const CONTROLLER_CAPABILITIES = Object.freeze([
   "pairing_v1", "encrypted_frames_v1", "finished_receipt_v1", "role_liveness_v1", "resume_v1",
-  "task_v1", "permission_v1", "attachment_v1", "artifact_v1", "snapshot_journal_v1",
+  "task_v1", "temporary_model_package_v1", "permission_v1", "attachment_v1", "artifact_v1", "snapshot_journal_v1",
 ]);
 
 export const CONTROLLER_MESSAGE_TYPES = Object.freeze([
@@ -35,7 +35,7 @@ export const CONTROLLER_MESSAGE_TYPES = Object.freeze([
 ]);
 
 export const CONTROLLER_PAYLOAD_TYPES = Object.freeze([
-  "capability_snapshot_request", "capability_snapshot", "task_submit", "task_cancel", "task_status", "permission_request", "permission_decision", "attachment_begin",
+  "capability_snapshot_request", "capability_snapshot", "capability_snapshot_error", "task_submit", "task_cancel", "task_status", "permission_request", "permission_decision", "attachment_begin",
   "attachment_chunk", "attachment_commit", "artifact_index_request", "artifact_index", "artifact_read_request",
   "artifact_chunk", "session_snapshot_request", "session_snapshot", "journal_replay_request", "journal_event",
 ]);
@@ -48,6 +48,7 @@ export const TASK_STATUSES = Object.freeze([
 export const CONTROLLER_ERROR_CODES = Object.freeze([
   "pairing_code_invalid", "pairing_code_generation_failed", "controller_busy", "version_incompatible", "endpoint_offline", "enrollment_required",
   "invalid_message", "unsupported_capability", "permission_already_decided", "permission_expired", "result_unknown",
+  "capability_snapshot_unavailable",
 ]);
 
 export const LEGACY_WEB_CONFLICT = Object.freeze({
@@ -113,8 +114,9 @@ const MESSAGE_SCHEMAS = Object.freeze({
 });
 
 const PAYLOAD_SCHEMAS = Object.freeze({
-  capability_snapshot_request: schema(["v", "type", ...LEASE_CONTEXT_FIELDS, "request_id", "known_revision"], [], ["A"]),
-  capability_snapshot: schema(["v", "type", ...LEASE_CONTEXT_FIELDS, "request_id", "capability_revision", "expires_at_ms", "modes", "tools", "skills", "workspaces"], [], ["B"]),
+  capability_snapshot_request: schema(["v", "type", ...LEASE_CONTEXT_FIELDS, "request_id", "known_revision"], ["session_id"], ["A"]),
+  capability_snapshot: schema(["v", "type", ...LEASE_CONTEXT_FIELDS, "request_id", "capability_revision", "expires_at_ms", "modes", "tools", "skills", "workspaces"], ["session_id", "valid_for_ms"], ["B"]),
+  capability_snapshot_error: schema(["v", "type", ...LEASE_CONTEXT_FIELDS, "request_id", "code"], ["session_id"], ["B"]),
   task_submit: schema(["v", "type", ...LEASE_CONTEXT_FIELDS, "request_id", "task_id", "client_request_id", "session_id", "capability_revision", "model_source", "mode", "input_digest", "input"], ["temporary_model_package"], ["A"]),
   task_cancel: schema(["v", "type", ...LEASE_CONTEXT_FIELDS, "request_id", "task_id", "session_id"], [], ["A"]),
   task_status: schema(["v", "type", ...LEASE_CONTEXT_FIELDS, "request_id", "task_id", "session_id", "task_status"], ["result_digest"], ["B"]),
@@ -163,7 +165,7 @@ const NESTED_SCHEMAS = Object.freeze({
 });
 
 const PAYLOAD_CAPABILITIES = Object.freeze({
-  capability_snapshot_request: "task_v1", capability_snapshot: "task_v1",
+  capability_snapshot_request: "task_v1", capability_snapshot: "task_v1", capability_snapshot_error: "task_v1",
   task_submit: "task_v1", task_cancel: "task_v1", task_status: "task_v1",
   permission_request: "permission_v1", permission_decision: "permission_v1",
   attachment_begin: "attachment_v1", attachment_chunk: "attachment_v1", attachment_commit: "attachment_v1",
@@ -579,6 +581,10 @@ export function validateControllerRuntimePayload(input, senderRole, runtimeConte
   enforceNegotiatedPayload(shape.type, runtimeContext);
   const lease = requireRuntimeLease(runtimeContext);
   const payload = validateControllerPayload(input, senderRole, lease);
+  if (payload.type === "task_submit" && payload.model_source === "controller_temporary"
+      && !runtimeContext.negotiated_capabilities.includes("temporary_model_package_v1")) {
+    fail("unsupported_capability", "temporary_model_package_v1");
+  }
   return payload;
 }
 
@@ -644,6 +650,7 @@ function validateTaskSubmit(payload) {
   if (input.workspace_id !== undefined) identifier(input.workspace_id, "input.workspace_id");
   if (input.text.length === 0 && input.attachment_ids.length === 0) fail("invalid_field", "payload.input");
   if (payload.model_source === "controller_temporary") {
+    if (payload.mode === "code") fail("invalid_field", "payload.model_source");
     if (!Object.hasOwn(payload, "temporary_model_package")) fail("missing_field", "payload.temporary_model_package");
     validateTemporaryModelPackage(payload.temporary_model_package, payload);
   } else if (Object.hasOwn(payload, "temporary_model_package")) {

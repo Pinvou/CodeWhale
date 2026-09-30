@@ -515,7 +515,12 @@ a fixture-supplied preimage.
 Every decrypted payload carries full lease context. A requests B's runtime
 allowlist with `capability_snapshot_request {request_id,known_revision}`; B
 returns `capability_snapshot {request_id,capability_revision,expires_at_ms,
-modes,tools,skills,workspaces}`. Tool/Skill entries contain only an opaque ID
+modes,tools,skills,workspaces}`. The echoed, globally unique `request_id` binds
+the response to the exact local session without adding fields that older v1
+peers reject; parsers also accept optional `session_id` and `valid_for_ms` from
+newer peers. If snapshot construction fails, B returns
+`capability_snapshot_error {request_id,session_id?,code}` with
+the bounded `capability_snapshot_unavailable` code. Tool/Skill entries contain only an opaque ID
 and display name. Workspace entries contain only opaque ID, display name and
 `code_allowed`; paths, configuration, source and credentials are forbidden.
 Lists are bounded to 256 unique entries, revisions are canonical decimal
@@ -688,13 +693,13 @@ JSON shape is valid. Pairing registration additionally uses the stable
 `request_id`, while refresh/stop must change generation and registration ID.
 
 The frozen decrypted `encrypted_frame` payload kinds are
-`capability_snapshot_request`, `capability_snapshot`, `task_submit`,
+`capability_snapshot_request`, `capability_snapshot`, `capability_snapshot_error`, `task_submit`,
 `task_cancel`, `task_status`, `permission_request`, `permission_decision`,
 `attachment_begin`, `attachment_chunk`, `attachment_commit`,
 `artifact_index_request`, `artifact_index`, `artifact_read_request`,
 `artifact_chunk`, `session_snapshot_request`, `session_snapshot`,
 `journal_replay_request` and `journal_event`. A sends capability, task, cancel,
-approval, upload, read and replay requests. B sends capability snapshots, task
+approval, upload, read and replay requests. B sends capability snapshots/errors, task
 states, permission requests, artifact indexes/chunks, snapshots and journal events. The parser
 rejects these payloads when presented by the opposite role. Every task,
 permission, attachment, artifact, snapshot and journal operation is bound to

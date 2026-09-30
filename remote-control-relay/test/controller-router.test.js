@@ -25,6 +25,7 @@ function fixture() {
     resume_token_a_sha256: "a".repeat(64),
     resume_token_b_sha256: "b".repeat(64),
     resume_deadline_ms: "30000",
+    negotiated_capabilities: Object.freeze(["encrypted_frames_v1", "task_v1"]),
     sockets: Object.freeze({ A: "socket-A", B: "socket-B" }),
   });
   const joined = {
@@ -67,6 +68,38 @@ function fixture() {
     authenticatedContext: Object.freeze({ endpointId: "endpoint-0001", credential: "secret" }),
   });
   return { router, sent, aborted, terminated };
+}
+
+async function connectController(router) {
+  await router.handle({
+    socketIdentity: "socket-A",
+    message: { v: 1, type: "controller_pairing_claim", request_id: "request-claim-0001" },
+  });
+  await router.handle({
+    socketIdentity: "socket-B",
+    message: { v: 1, type: "finished_receipt_ack", request_id: "request-receipt-A" },
+  });
+  await router.handle({
+    socketIdentity: "socket-A",
+    message: { v: 1, type: "finished_receipt_ack", request_id: "request-receipt-B" },
+  });
+}
+
+function encryptedFrame(role, payloadKind, sequence = "1") {
+  return {
+    v: 1,
+    type: "encrypted_frame",
+    connection_id: "connection-0001",
+    controller_lease_id: "controller-lease-0001",
+    lease_epoch: "1",
+    relay_epoch: "relay-epoch-0001",
+    remote_control_generation: "generation-0001",
+    frame_sequence: sequence,
+    direction: role === "A" ? "a_to_b" : "b_to_a",
+    payload_kind: payloadKind,
+    ciphertext_b64: "AQID",
+    ciphertext_bytes: "3",
+  };
 }
 
 test("router delivers reservation, handshake frames and role-specific joined results", async () => {
@@ -146,6 +179,44 @@ test("explicit controller disconnect forwards once and terminates the shared lea
   assert.deepEqual(terminated, [{
     controllerLeaseId: "controller-lease-0001", reason: "user_requested",
   }]);
+});
+
+test("authenticated encrypted business frames are validated and forwarded both ways", async () => {
+  const { router, sent } = fixture();
+  await connectController(router);
+  sent.get("socket-A").length = 0;
+  sent.get("socket-B").length = 0;
+
+  const request = encryptedFrame("A", "capability_snapshot_request");
+  assert.deepEqual(await router.handle({ socketIdentity: "socket-A", message: request }), request);
+  assert.deepEqual(sent.get("socket-B"), [request]);
+
+  const response = encryptedFrame("B", "capability_snapshot", "2");
+  assert.deepEqual(await router.handle({ socketIdentity: "socket-B", message: response }), response);
+  assert.deepEqual(sent.get("socket-A"), [response]);
+});
+
+test("encrypted business frames fail closed on role or lease mismatch", async () => {
+  const { router, sent } = fixture();
+  await connectController(router);
+  sent.get("socket-A").length = 0;
+  sent.get("socket-B").length = 0;
+
+  const wrongDirection = { ...encryptedFrame("A", "capability_snapshot_request"), direction: "b_to_a" };
+  await assert.rejects(
+    router.handle({ socketIdentity: "socket-A", message: wrongDirection }),
+    (error) => error?.code === "controller_business_invalid",
+  );
+  assert.equal(sent.get("socket-B").length, 0);
+  assert.equal(sent.get("socket-A").at(-1).type, "error");
+  assert.equal(sent.get("socket-A").at(-1).code, "invalid_message");
+
+  const staleLease = { ...encryptedFrame("A", "capability_snapshot_request", "2"), lease_epoch: "2" };
+  await assert.rejects(
+    router.handle({ socketIdentity: "socket-A", message: staleLease }),
+    (error) => error?.code === "controller_business_invalid",
+  );
+  assert.equal(sent.get("socket-B").length, 0);
 });
 
 test("router collapses internal claim failures to a bounded public error", async () => {

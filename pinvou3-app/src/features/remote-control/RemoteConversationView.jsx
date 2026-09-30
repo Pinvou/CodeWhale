@@ -8,9 +8,14 @@
 import { useEffect, useMemo, useState } from 'react';
 import { bridge } from '../../hooks/useBridge.js';
 import { isTaskTerminal, taskStatusKey } from './remote-control-logic.mjs';
+import {
+  canUseControllerTemporaryModel,
+  normalizeRemoteModelSource,
+} from './remote-model-source.mjs';
 
 export default function RemoteConversationView({ t, bs, modelSource = 'controlled_device', onModelSourceChange }) {
   const copy = (t && t.remoteConversation) || {};
+  const controllerCopy = (t && t.controllerConnection) || {};
   const connection = (bs && bs.controllerConnection) || {};
   const capabilities = (bs && bs.remoteCapabilities) || null;
   const models = (bs && bs.remoteModels) || [];
@@ -31,6 +36,8 @@ export default function RemoteConversationView({ t, bs, modelSource = 'controlle
   );
   const modes = (capabilities && Array.isArray(capabilities.modes)) ? capabilities.modes : ['chat'];
   const activeTask = tasks.find((task) => !isTaskTerminal(task.status)) || null;
+  const temporaryModelAvailable = canUseControllerTemporaryModel(connection);
+  const effectiveModelSource = normalizeRemoteModelSource(modelSource, connection);
 
   useEffect(() => {
     if (!bridge || !bridge.available || !bridge.desktopRemoteControl) return;
@@ -47,6 +54,7 @@ export default function RemoteConversationView({ t, bs, modelSource = 'controlle
   // 构造任务）；两者都失败关闭，不暴露半通路。
   const sessionRef = connection.sessionRef || null;
   const connected = connection.status === 'connected';
+  const capabilityReady = !!sessionRef && connection.capabilityRevision != null;
   const [sessionBusy, setSessionBusy] = useState(false);
   const [sessionError, setSessionError] = useState(null);
 
@@ -65,17 +73,27 @@ export default function RemoteConversationView({ t, bs, modelSource = 'controlle
     openSession();
   }, [remote, connected, sessionRef]);
   useEffect(() => {
-    if (!remote || !sessionRef || connection.capabilityRevision != null) return;
+    if (
+      !remote
+      || !sessionRef
+      || connection.capabilityRevision != null
+      || connection.capabilityStatus === 'error'
+    ) return;
     remote.controllerCapabilitySend(sessionRef).catch(function () {});
-  }, [remote, sessionRef, connection.capabilityRevision]);
+  }, [remote, sessionRef, connection.capabilityRevision, connection.capabilityStatus]);
+
+  const retryCapabilities = () => {
+    if (!remote || !sessionRef) return;
+    remote.controllerCapabilitySend(sessionRef).catch(function () {});
+  };
 
   const send = async () => {
-    if (!remote || !draft.trim() || !sessionRef) return;
+    if (!remote || !draft.trim() || !capabilityReady) return;
     setBusy(true);
     setError(null);
     try {
       // E2E-04：只传会话引用与正文；协议字段与输入摘要全部由 Rust 构造并加密。
-      await remote.controllerTaskSend(sessionRef, draft.trim(), modelSource);
+      await remote.controllerTaskSend(sessionRef, draft.trim(), effectiveModelSource);
       setDraft('');
     } catch (failure) {
       setError((failure && failure.code) || 'errorGeneric');
@@ -133,12 +151,14 @@ export default function RemoteConversationView({ t, bs, modelSource = 'controlle
         </section>
       )}
 
-      {/* E2E-07 首版能力开关：A 临时模型（含模型导出列表）保持隐藏，模型来源固定为
-          B 本机模型；能力开放后再恢复选择器。 */}
+      {/* The controller model is offered only when this exact lease negotiated
+          the encrypted temporary-model package family. */}
       <fieldset className="mb-3 text-[11px]">
         <legend className="mb-1 opacity-70">{copy.modelPickerTitle}</legend>
-        <label className="mr-3 inline-flex items-center gap-1"><input type="radio" name="remote-model-source" checked={modelSource === 'controlled_device'} onChange={() => onModelSourceChange?.('controlled_device')} />{copy.modelSourceDevice}</label>
-        <label className="inline-flex items-center gap-1"><input type="radio" name="remote-model-source" checked={modelSource === 'controller_temporary'} onChange={() => onModelSourceChange?.('controller_temporary')} />{copy.modelSourceMine}</label>
+        <label className="mr-3 inline-flex items-center gap-1"><input type="radio" name="remote-model-source" checked={effectiveModelSource === 'controlled_device'} onChange={() => onModelSourceChange?.('controlled_device')} />{copy.modelSourceDevice}</label>
+        {temporaryModelAvailable && (
+          <label className="inline-flex items-center gap-1"><input type="radio" name="remote-model-source" checked={effectiveModelSource === 'controller_temporary'} onChange={() => onModelSourceChange?.('controller_temporary')} />{copy.modelSourceMine}</label>
+        )}
       </fieldset>
       {transcript.length === 0 && tasks.length === 0 && (
         <p className="text-[12px] opacity-70">{copy.empty}</p>
@@ -186,7 +206,7 @@ export default function RemoteConversationView({ t, bs, modelSource = 'controlle
         <button
           type="submit"
           data-testid="remote-conversation-send"
-          disabled={busy || sessionBusy || !draft.trim() || !sessionRef}
+          disabled={busy || sessionBusy || !draft.trim() || !capabilityReady}
           className="shrink-0 rounded-full bg-[#1A73E8] px-4 py-2 text-[13px] text-white disabled:opacity-60"
         >
           {busy ? copy.sending : copy.send}
@@ -207,6 +227,22 @@ export default function RemoteConversationView({ t, bs, modelSource = 'controlle
             className="rounded-full border border-[#EA4335]/40 px-2 py-0.5"
           >
             {copy.retry}
+          </button>
+        </p>
+      )}
+      {sessionRef && connection.capabilityStatus === 'error' && (
+        <p className="mt-2 flex items-center gap-2 text-[11px] text-[#EA4335]" role="alert">
+          <span>
+            {connection.capabilityError === 'capability_snapshot_timeout'
+              ? controllerCopy.remoteCapabilityTimeout
+              : controllerCopy.remoteCapabilityFailed}
+          </span>
+          <button
+            type="button"
+            onClick={retryCapabilities}
+            className="rounded-full border border-[#EA4335]/40 px-2 py-0.5"
+          >
+            {controllerCopy.remoteCapabilityRetry || copy.retry}
           </button>
         </p>
       )}

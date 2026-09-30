@@ -25,7 +25,7 @@ const MAX_ARTIFACTS: usize = 256;
 pub(crate) const MAX_ENCRYPTED_WIRE_BYTES: usize =
     MAX_ENCRYPTED_FRAME_BYTES.div_ceil(3) * 4 + MAX_CONTROL_MESSAGE_BYTES;
 const CONTROLLER_CONTRACT_SHA256: &str =
-    "ad4dd926f97c376419d33589e8147f533e7cbb55c3430a00d3b0c5e306349aac";
+    "a62f3125c1fa9559fcf9f28c4f1fb64598a1a23f1fc09a851011b3bd65563dcf";
 
 pub(crate) const CONTROLLER_CAPABILITIES: &[&str] = &[
     "pairing_v1",
@@ -34,6 +34,7 @@ pub(crate) const CONTROLLER_CAPABILITIES: &[&str] = &[
     "role_liveness_v1",
     "resume_v1",
     "task_v1",
+    "temporary_model_package_v1",
     "permission_v1",
     "attachment_v1",
     "artifact_v1",
@@ -75,6 +76,7 @@ pub(crate) const LEASE_INSTALL_MESSAGE_TYPES: &[&str] = &["controller_joined"];
 pub(crate) const CONTROLLER_PAYLOAD_TYPES: &[&str] = &[
     "capability_snapshot_request",
     "capability_snapshot",
+    "capability_snapshot_error",
     "task_submit",
     "task_cancel",
     "task_status",
@@ -189,6 +191,7 @@ pub(crate) const CONTROLLER_ERROR_CODES: &[&str] = &[
     "permission_already_decided",
     "permission_expired",
     "result_unknown",
+    "capability_snapshot_unavailable",
 ];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -292,6 +295,10 @@ const PAYLOAD_CAPABILITY_BINDINGS: &[CapabilityBinding] = &[
     },
     CapabilityBinding {
         kind: "capability_snapshot",
+        capabilities: &["task_v1"],
+    },
+    CapabilityBinding {
+        kind: "capability_snapshot_error",
         capabilities: &["task_v1"],
     },
     CapabilityBinding {
@@ -1092,7 +1099,7 @@ fn payload_schema(kind: &str) -> Option<Schema> {
                 "request_id",
                 "known_revision",
             ],
-            optional: &[],
+            optional: &["session_id"],
             roles: &[A],
         },
         "capability_snapshot" => Schema {
@@ -1112,7 +1119,22 @@ fn payload_schema(kind: &str) -> Option<Schema> {
                 "skills",
                 "workspaces",
             ],
-            optional: &[],
+            optional: &["session_id", "valid_for_ms"],
+            roles: &[B],
+        },
+        "capability_snapshot_error" => Schema {
+            required: &[
+                "v",
+                "type",
+                "connection_id",
+                "controller_lease_id",
+                "lease_epoch",
+                "relay_epoch",
+                "remote_control_generation",
+                "request_id",
+                "code",
+            ],
+            optional: &["session_id"],
             roles: &[B],
         },
         "task_submit" => Schema {
@@ -2015,7 +2037,20 @@ pub(crate) fn validate_controller_runtime_payload_json(
         .expect("validated type");
     enforce_negotiated_payload(kind, &context.negotiated_capabilities)?;
     let lease = require_runtime_lease(context)?;
-    validate_controller_payload_json_in_context(input, sender_role, Some(lease))
+    let value = validate_controller_payload_json_in_context(input, sender_role, Some(lease))?;
+    if kind == "task_submit"
+        && value.get("model_source").and_then(Value::as_str) == Some("controller_temporary")
+        && !context
+            .negotiated_capabilities
+            .iter()
+            .any(|capability| capability == "temporary_model_package_v1")
+    {
+        return Err(ControllerProtocolError::new(
+            "unsupported_capability",
+            "temporary_model_package_v1",
+        ));
+    }
+    Ok(value)
 }
 
 fn requires_full_lease_context(kind: &str, label: &str) -> bool {
@@ -2579,6 +2614,14 @@ fn validate_task_submit(task: &Map<String, Value>) -> Result<()> {
         ));
     }
     let model_source = object_string(task, "model_source", "payload")?;
+    if model_source == "controller_temporary"
+        && task.get("mode").and_then(Value::as_str) == Some("code")
+    {
+        return Err(ControllerProtocolError::new(
+            "invalid_field",
+            "payload.model_source",
+        ));
+    }
     match (model_source, task.get("temporary_model_package")) {
         ("controller_temporary", Some(package)) => validate_temporary_model_package(package, task),
         ("controller_temporary", None) => Err(ControllerProtocolError::new(
@@ -4294,6 +4337,21 @@ mod tests {
             Some(&runtime(&["task_v1"])),
         )
         .unwrap();
+        let temporary = &fixture["task_submit_vectors"]["temporary"];
+        let error = validate_controller_runtime_payload_json(
+            &serde_json::to_string(temporary).unwrap(),
+            A,
+            Some(&runtime(&["task_v1"])),
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "unsupported_capability");
+        assert_eq!(error.field, "temporary_model_package_v1");
+        validate_controller_runtime_payload_json(
+            &serde_json::to_string(temporary).unwrap(),
+            A,
+            Some(&runtime(&["task_v1", "temporary_model_package_v1"])),
+        )
+        .unwrap();
         validate_controller_runtime_message_json(
             &serde_json::to_string(&capabilities_message).unwrap(),
             A,
@@ -4511,6 +4569,14 @@ mod tests {
         }
 
         let mut temporary = fixture["task_submit_vectors"]["temporary"].clone();
+        let mut temporary_code = temporary.clone();
+        temporary_code["mode"] = json!("code");
+        assert_eq!(
+            validate_controller_payload_json(&serde_json::to_string(&temporary_code).unwrap(), A)
+                .unwrap_err()
+                .code,
+            "invalid_field"
+        );
         temporary["temporary_model_package"]["binding"]["task_id"] = json!("task-other");
         assert_eq!(
             validate_controller_payload_json(&serde_json::to_string(&temporary).unwrap(), A)

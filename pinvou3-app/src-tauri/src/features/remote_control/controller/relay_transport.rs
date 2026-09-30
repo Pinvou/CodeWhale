@@ -688,11 +688,23 @@ async fn run_transport(
                     };
                     match result {
                         Ok(()) => {
+                            if frame_is_task_submit(frame.text()) {
+                                super::relay_runtime::log_controller_event(
+                                    "task_submit_socket_written",
+                                    "sent",
+                                );
+                            }
                             if let Some(flushed) = frame.flushed {
                                 let _ = flushed.send(());
                             }
                         }
                         Err(error) => {
+                            if frame_is_task_submit(frame.text()) {
+                                super::relay_runtime::log_controller_event(
+                                    "task_submit_socket_write_failed",
+                                    "transport_error",
+                                );
+                            }
                             break format!("send Relay frame: {error}");
                         }
                     }
@@ -741,6 +753,19 @@ async fn run_transport(
             return;
         }
     }
+}
+
+fn frame_is_task_submit(text: &str) -> bool {
+    serde_json::from_str::<Value>(text)
+        .ok()
+        .and_then(|frame| {
+            frame
+                .get("payload_kind")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .as_deref()
+        == Some("task_submit")
 }
 
 fn frame_is_current(sender: &ControllerTransportSender, frame: &QueuedFrame) -> bool {

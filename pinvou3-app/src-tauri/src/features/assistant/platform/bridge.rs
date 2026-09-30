@@ -235,6 +235,12 @@ pub struct Pinvou3Bridge {
     /// RuntimeModelProvider 为本次引擎准备的内存凭据。Some 时是最终值，不能再被
     /// 环境变量或本地凭据库覆盖；Debug 由包装类型强制脱敏。
     pub runtime_model_credential: Option<RuntimeModelCredential>,
+    /// The app has supplied a complete task-scoped route. Process-wide model
+    /// environment variables and discovery probes must not rewrite it.
+    pub runtime_route_locked: bool,
+    /// Optional task-scoped visual fallback and its isolated credential.
+    pub runtime_vision_model: Option<SavedModel>,
+    pub runtime_vision_credential: Option<RuntimeModelCredential>,
     /// `max_model_len` (context window) probed from the local vLLM
     /// `/v1/models` endpoint. Injected at
     /// EnginePool spawn by `resolve_served_model` (the matched entry's own
@@ -294,6 +300,12 @@ impl std::fmt::Debug for Pinvou3Bridge {
             .field("workspace", &self.workspace)
             .field("session_model", &self.session_model)
             .field("runtime_model_credential", &self.runtime_model_credential)
+            .field("runtime_route_locked", &self.runtime_route_locked)
+            .field(
+                "runtime_vision_model",
+                &self.runtime_vision_model.as_ref().map(|model| &model.id),
+            )
+            .field("runtime_vision_credential", &self.runtime_vision_credential)
             .field("probed_context_tokens", &self.probed_context_tokens)
             .field("probed_output_tokens", &self.probed_output_tokens)
             .field("probed_local_kind", &self.probed_local_kind)
@@ -432,6 +444,9 @@ impl Pinvou3Bridge {
             workspace: paths::user_home_dir(),
             session_model: None,
             runtime_model_credential: None,
+            runtime_route_locked: false,
+            runtime_vision_model: None,
+            runtime_vision_credential: None,
             probed_context_tokens: None,
             probed_output_tokens: None,
             probed_local_kind: None,
@@ -948,10 +963,18 @@ impl Pinvou3Bridge {
             .or_else(|| self.prefs.active_model())
     }
 
+    /// A host-supplied task route is authoritative. Process-wide model
+    /// overrides belong to normal local startup and must not rewrite it.
+    pub(crate) fn runtime_route_is_locked(&self) -> bool {
+        self.runtime_route_locked
+    }
+
     /// A copy of the currently effective model (session > active). After
     /// EnginePool probes the vLLM served name it clones this, renames the
     /// model, and puts it back into session_model, achieving "requests use
     /// vLLM's actual name".
+    /// 当前生效模型的副本(session > active)。EnginePool 探测 vLLM served name 后
+    /// 用它克隆→改 model 名→塞回 session_model,实现「请求用 vLLM 实际名字」。
     pub fn effective_model_owned(&self) -> Option<SavedModel> {
         self.effective_model().cloned()
     }
@@ -969,8 +992,10 @@ impl Pinvou3Bridge {
         if is_official_deepseek_base_url(&self.base_url()) {
             return "deepseek".to_string();
         }
-        if let Ok(v) = std::env::var("DEEPSEEK_PROVIDER") {
-            return v;
+        if !self.runtime_route_is_locked() {
+            if let Ok(v) = std::env::var("DEEPSEEK_PROVIDER") {
+                return v;
+            }
         }
         // `OpenAI compatible` is only a wire protocol; it does not mean the
         // real provider is OpenAI. reasoning_content parsing, replay, and the
@@ -1242,11 +1267,13 @@ impl Pinvou3Bridge {
     /// env var > settings.custom_model_name > vendor default.
     pub fn model(&self) -> String {
         let is_official_deepseek = is_official_deepseek_base_url(&self.base_url());
-        if let Ok(v) = std::env::var("DEEPSEEK_MODEL") {
-            if is_official_deepseek {
-                return official_deepseek_model_name(&v);
+        if !self.runtime_route_is_locked() {
+            if let Ok(v) = std::env::var("DEEPSEEK_MODEL") {
+                if is_official_deepseek {
+                    return official_deepseek_model_name(&v);
+                }
+                return v;
             }
-            return v;
         }
         if let Some(m) = self.effective_model() {
             if is_official_deepseek {
@@ -1277,8 +1304,10 @@ impl Pinvou3Bridge {
     /// `DtConfig.providers.*.base_url`).
     /// env var > settings.custom_base_url > vendor default.
     pub fn base_url(&self) -> String {
-        if let Ok(v) = std::env::var("DEEPSEEK_BASE_URL") {
-            return v;
+        if !self.runtime_route_is_locked() {
+            if let Ok(v) = std::env::var("DEEPSEEK_BASE_URL") {
+                return v;
+            }
         }
         if let Some(m) = self.effective_model() {
             return m.base_url.clone();
@@ -1401,7 +1430,11 @@ impl Pinvou3Bridge {
     fn resolve_vision_model_config(&self) -> Option<deepseek_tui::config::VisionModelConfig> {
         let effective = self.effective_model();
         if let Some(vision_id) = effective.and_then(|model| model.vision_model_id.as_deref()) {
-            let Some(vision) = self.prefs.model_by_id(vision_id) else {
+            let runtime_vision = self
+                .runtime_vision_model
+                .as_ref()
+                .filter(|model| model.id == vision_id);
+            let Some(vision) = runtime_vision.or_else(|| self.prefs.model_by_id(vision_id)) else {
                 eprintln!(
                     "[pinvou3-app] vision_model_id {vision_id} not found in saved_models; \
                      image_analyze disabled"
@@ -1416,7 +1449,14 @@ impl Pinvou3Bridge {
             // probe pipeline returned 400); at runtime it is used per the fact
             // that it was actually selected; a text model configured as a
             // vision model is blocked by the frontend probe gate.
-            let api_key = Self::api_key_for_saved_model(vision);
+            // 视觉模型自身能力不在此处拒绝:选择器已用识图探测验证(supported
+            // 才允许选中)。override 标记(disabled)可能是历史探测误判残留
+            // (如 kimi-for-coding 曾因探测链路 400 被回填),运行时按实际被
+            // 选中的事实使用;文本模型配成视觉模型由前端探测闸门挡住。
+            let api_key = runtime_vision
+                .and_then(|_| self.runtime_vision_credential.as_ref())
+                .map(|credential| credential.expose_api_key().to_owned())
+                .unwrap_or_else(|| Self::api_key_for_saved_model(vision));
             if api_key.trim().is_empty() {
                 eprintln!(
                     "[pinvou3-app] vision model {} has no usable credential; \
@@ -3340,6 +3380,9 @@ mod tests {
             workspace: std::env::temp_dir(),
             session_model: None,
             runtime_model_credential: None,
+            runtime_route_locked: false,
+            runtime_vision_model: None,
+            runtime_vision_credential: None,
             probed_context_tokens: None,
             probed_output_tokens: None,
             probed_local_kind: None,
@@ -4735,6 +4778,64 @@ mod tests {
                 .features
                 .enabled(deepseek_tui::features::Feature::VisionModel)
         );
+    }
+
+    #[test]
+    fn task_scoped_vision_route_uses_runtime_model_credential() {
+        let mut bridge = fixture_bridge();
+        set_active_model(
+            &mut bridge,
+            ModelPreset::Deepseek,
+            "deepseek-chat",
+            "https://api.deepseek.com/v1",
+            "",
+        );
+        let mut primary = bridge.prefs.advanced.saved_models[0].clone();
+        primary.id = "remote-task-primary".into();
+        primary.vision_model_id = Some("remote-task-vision".into());
+        bridge.session_model = Some(primary);
+        let mut vision = bridge.prefs.advanced.saved_models[0].clone();
+        vision.id = "remote-task-vision".into();
+        vision.model = "gpt-4o".into();
+        vision.base_url = "https://vision.example.invalid/v1".into();
+        vision.api_key.clear();
+        bridge.runtime_vision_model = Some(vision);
+        bridge.runtime_vision_credential =
+            Some(RuntimeModelCredential::api_key("sk-runtime-vision").unwrap());
+
+        let config = bridge.resolve_vision_model_config().unwrap();
+        assert_eq!(config.model, "gpt-4o");
+        assert_eq!(config.api_key.as_deref(), Some("sk-runtime-vision"));
+        assert_eq!(
+            config.base_url.as_deref(),
+            Some("https://vision.example.invalid/v1")
+        );
+    }
+
+    #[test]
+    fn locked_runtime_route_ignores_process_model_overrides() {
+        let (_lock, _env) =
+            locked_env(&["DEEPSEEK_PROVIDER", "DEEPSEEK_MODEL", "DEEPSEEK_BASE_URL"]);
+        // SAFETY: platform::paths::tests::ENV_LOCK held by locked_env.
+        unsafe { std::env::set_var("DEEPSEEK_PROVIDER", "anthropic") };
+        // SAFETY: platform::paths::tests::ENV_LOCK held by locked_env.
+        unsafe { std::env::set_var("DEEPSEEK_MODEL", "controlled-device-model") };
+        // SAFETY: platform::paths::tests::ENV_LOCK held by locked_env.
+        unsafe { std::env::set_var("DEEPSEEK_BASE_URL", "https://controlled.invalid/v1") };
+
+        let mut bridge = fixture_bridge();
+        let mut model = SavedModel::builtin_llmapi();
+        model.id = "runtime-route".into();
+        model.preset = ModelPreset::LocalVllm;
+        model.model = "controller-model".into();
+        model.base_url = "https://controller.example.invalid/v1".into();
+        bridge.session_model = Some(model);
+        bridge.runtime_route_locked = true;
+
+        assert!(bridge.runtime_route_is_locked());
+        assert_eq!(bridge.provider(), "vllm");
+        assert_eq!(bridge.model(), "controller-model");
+        assert_eq!(bridge.base_url(), "https://controller.example.invalid/v1");
     }
 
     #[test]

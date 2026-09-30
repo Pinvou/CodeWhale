@@ -49,18 +49,30 @@
       sessionId: null,
       sessionMode: null,
       capabilityRevision: null,
+      capabilityStatus: "idle",
+      capabilityError: null,
+      capabilityRequestId: null,
+      capabilityValidForMs: null,
+      temporaryModelAvailable: false,
     };
   }
 
   function createState() {
     return {
       controlledDevice: createControlledDevice(),
+      controlledSession: {
+        sessionId: null,
+        sessionRef: null,
+        generation: null,
+      },
       controllerConnection: createControllerConnection(),
       remoteCapabilities: null,
       remoteModels: [],
       remoteHistories: [],
       tasks: [],
       transcript: [],
+      controlledTasks: [],
+      controlledTranscript: [],
       intents: { controlled: 0, controller: 0 },
       revision: 0,
     };
@@ -127,6 +139,15 @@
       return state;
     }
     var next = shallowCopy(state);
+    var startsNewGeneration = starting
+      && generation
+      && current.generation
+      && generation !== current.generation;
+    if (startsNewGeneration) {
+      next.controlledSession = { sessionId: null, sessionRef: null, generation: generation };
+      next.controlledTasks = [];
+      next.controlledTranscript = [];
+    }
     next.controlledDevice = {
       status: status,
       generation: generation || (starting ? current.generation : null),
@@ -135,8 +156,43 @@
       deviceName: payload.deviceName || current.deviceName,
       controllerDeviceName: payload.controllerDeviceName || current.controllerDeviceName,
       workspaces: Array.isArray(payload.workspaces) ? payload.workspaces.slice(0, 32) : current.workspaces,
-      lastError: payload.error || null,
+      lastError: payload.error || payload.errorCode || null,
     };
+    if (CONTROLLED_TERMINAL[status]) {
+      next.controlledSession = { sessionId: null, sessionRef: null, generation: null };
+      next.controlledTasks = [];
+      next.controlledTranscript = [];
+    }
+    next.revision = state.revision + 1;
+    return next;
+  }
+
+  /** Bind B's visible composer and transcript to the authoritative session
+   * created for the current controlled generation. */
+  function applyControlledSession(state, envelope) {
+    var payload = envelope || {};
+    var sessionId = payload.sessionId ? String(payload.sessionId) : "";
+    var sessionRef = payload.sessionRef ? String(payload.sessionRef) : "";
+    var generation = payload.generation ? String(payload.generation) : "";
+    var currentGeneration = String((state.controlledDevice && state.controlledDevice.generation) || "");
+    var status = state.controlledDevice && state.controlledDevice.status;
+    if (!sessionId || !sessionRef || !generation) return state;
+    if (status !== "connected" && status !== "reconnecting") return state;
+    if (!currentGeneration || generation !== currentGeneration) return state;
+    var current = state.controlledSession || {};
+    if (
+      current.sessionId === sessionId
+      && current.sessionRef === sessionRef
+      && current.generation === generation
+    ) return state;
+    var next = shallowCopy(state);
+    next.controlledSession = {
+      sessionId: sessionId,
+      sessionRef: sessionRef,
+      generation: generation,
+    };
+    next.controlledTasks = [];
+    next.controlledTranscript = [];
     next.revision = state.revision + 1;
     return next;
   }
@@ -172,11 +228,16 @@
       connectionId: connectionId || current.connectionId,
       leaseEpoch: leaseEpoch || current.leaseEpoch,
       deviceName: payload.deviceName || current.deviceName,
-      lastError: payload.error || null,
+      lastError: payload.error || payload.errorCode || null,
       sessionRef: current.sessionRef,
       sessionId: current.sessionId,
       sessionMode: current.sessionMode,
       capabilityRevision: current.capabilityRevision,
+      capabilityStatus: current.capabilityStatus,
+      capabilityError: current.capabilityError,
+      capabilityRequestId: current.capabilityRequestId,
+      capabilityValidForMs: current.capabilityValidForMs,
+      temporaryModelAvailable: current.temporaryModelAvailable === true,
     };
     if (CONTROLLER_TERMINAL[status]) {
       next.remoteCapabilities = null;
@@ -186,6 +247,11 @@
       next.controllerConnection.sessionId = null;
       next.controllerConnection.sessionMode = null;
       next.controllerConnection.capabilityRevision = null;
+      next.controllerConnection.capabilityStatus = "idle";
+      next.controllerConnection.capabilityError = null;
+      next.controllerConnection.capabilityRequestId = null;
+      next.controllerConnection.capabilityValidForMs = null;
+      next.controllerConnection.temporaryModelAvailable = false;
     }
     next.revision = state.revision + 1;
     return next;
@@ -221,6 +287,47 @@
     next.controllerConnection.sessionId = sessionId;
     next.controllerConnection.sessionMode = payload.mode ? String(payload.mode) : current.sessionMode;
     next.controllerConnection.capabilityRevision = revision;
+    next.controllerConnection.capabilityError = payload.capabilityError
+      ? String(payload.capabilityError)
+      : null;
+    next.controllerConnection.capabilityRequestId = payload.capabilityRequestId
+      ? String(payload.capabilityRequestId)
+      : null;
+    next.controllerConnection.capabilityValidForMs = payload.capabilityValidForMs == null
+      ? null
+      : Number(payload.capabilityValidForMs);
+    next.controllerConnection.temporaryModelAvailable = payload.temporaryModelAvailable === true;
+    next.controllerConnection.capabilityStatus = next.controllerConnection.capabilityError
+      ? "error"
+      : (revision != null ? "ready" : "idle");
+    next.revision = state.revision + 1;
+    return next;
+  }
+
+  function applyCapabilityPending(state, envelope) {
+    var payload = envelope || {};
+    var current = state.controllerConnection;
+    if (!current.sessionRef || String(payload.sessionRef || "") !== String(current.sessionRef)) return state;
+    var next = shallowCopy(state);
+    next.controllerConnection = shallowCopy(current);
+    next.controllerConnection.capabilityStatus = "preparing";
+    next.controllerConnection.capabilityError = null;
+    next.revision = state.revision + 1;
+    return next;
+  }
+
+  function applyCapabilityFailure(state, envelope) {
+    var payload = envelope || {};
+    var current = state.controllerConnection;
+    if (!current.sessionRef || String(payload.sessionRef || "") !== String(current.sessionRef)) return state;
+    var next = shallowCopy(state);
+    next.controllerConnection = shallowCopy(current);
+    next.controllerConnection.capabilityRevision = null;
+    next.controllerConnection.capabilityStatus = "error";
+    next.controllerConnection.capabilityError = String(payload.code || "capability_snapshot_unavailable");
+    next.controllerConnection.capabilityRequestId = payload.requestId ? String(payload.requestId) : null;
+    next.controllerConnection.capabilityValidForMs = null;
+    next.remoteCapabilities = null;
     next.revision = state.revision + 1;
     return next;
   }
@@ -265,25 +372,26 @@
    * snapshot) into the A-side transcript. Entries are deduplicated by
    * session+epoch+sequence and every payload is treated as plain text.
    */
-  function applyJournalEvent(state, envelope) {
+  function applyJournalEventTo(state, envelope, transcriptField) {
     var payload = envelope || {};
+    var transcript = state[transcriptField] || [];
     if (payload.snapshot) {
       var snapshot = payload.snapshot;
       var events = Array.isArray(snapshot.events) ? snapshot.events : [];
       var sessionId = events.length ? String(events[0].sessionId || "") : "";
       if (!sessionId) return state;
       var entries = events.map(toTranscriptEntry).filter(Boolean);
-      var kept = (state.transcript || []).filter(function (entry) {
+      var kept = transcript.filter(function (entry) {
         return entry.sessionId !== sessionId;
       });
       var next = shallowCopy(state);
-      next.transcript = kept.concat(entries).slice(-MAX_TRANSCRIPT_ENTRIES);
+      next[transcriptField] = kept.concat(entries).slice(-MAX_TRANSCRIPT_ENTRIES);
       next.revision = state.revision + 1;
       return next;
     }
     var entry = toTranscriptEntry(payload.event);
     if (!entry) return state;
-    var current = state.transcript || [];
+    var current = transcript;
     for (var index = 0; index < current.length; index += 1) {
       if (
         current[index].sessionId === entry.sessionId &&
@@ -298,17 +406,32 @@
       list = list.slice(list.length - MAX_TRANSCRIPT_ENTRIES);
     }
     var updated = shallowCopy(state);
-    updated.transcript = list;
+    updated[transcriptField] = list;
     updated.revision = state.revision + 1;
     return updated;
   }
 
-  /** Only user/assistant text becomes a transcript entry; everything else
-   * keeps its existing task/status projection. */
+  function applyJournalEvent(state, envelope) {
+    return applyJournalEventTo(state, envelope, "transcript");
+  }
+
+  function applyControlledJournalEvent(state, envelope) {
+    var event = envelope && envelope.event;
+    var session = state.controlledSession || {};
+    if (!event || !session.sessionId || String(event.sessionId || "") !== String(session.sessionId)) {
+      return state;
+    }
+    return applyJournalEventTo(state, envelope, "controlledTranscript");
+  }
+
+  /** User, assistant and reasoning text become transcript entries; everything
+   * else keeps its existing task/status projection. */
   function toTranscriptEntry(event) {
     if (!event || typeof event !== "object") return null;
     var kind = event.kind ? String(event.kind) : "";
-    var role = kind === "user_message" ? "user" : (kind === "assistant_delta" ? "assistant" : "");
+    var role = kind === "user_message"
+      ? "user"
+      : (kind === "assistant_delta" ? "assistant" : (kind === "reasoning" ? "reasoning" : ""));
     if (!role) return null;
     var text = event.payload && event.payload.text ? String(event.payload.text) : "";
     if (!text) return null;
@@ -360,16 +483,19 @@
    * Task events are deduplicated by (taskId, status) and never regress a
    * committed terminal state.
    */
-  function applyTaskEvent(state, event) {
+  function applyTaskEventTo(state, event, tasksField) {
     var payload = event || {};
-    var taskId = payload.taskId ? String(payload.taskId) : "";
-    var status = payload.status ? String(payload.status) : "";
+    var taskIdValue = payload.taskId || payload.task_id;
+    var statusValue = payload.status || payload.taskStatus || payload.task_status;
+    var taskId = taskIdValue ? String(taskIdValue) : "";
+    var status = statusValue ? String(statusValue) : "";
     if (!taskId || !status) return state;
     var connection = state.controllerConnection;
-    if (connection.connectionId && payload.connectionId && String(payload.connectionId) !== String(connection.connectionId)) {
+    var connectionId = payload.connectionId || payload.connection_id;
+    if (connection.connectionId && connectionId && String(connectionId) !== String(connection.connectionId)) {
       return state;
     }
-    var tasks = (state.tasks || []).slice();
+    var tasks = (state[tasksField] || []).slice();
     var index = -1;
     for (var i = 0; i < tasks.length; i += 1) {
       if (tasks[i].taskId === taskId) {
@@ -378,23 +504,118 @@
       }
     }
     if (index >= 0 && TASK_TERMINAL[tasks[index].status]) return state;
+    // An admitted acknowledgement may arrive after the executor's running
+    // event on a multi-thread runtime. Keep the newer lifecycle state while
+    // still accepting prompt text that only the admitted projection carries.
+    if (index >= 0 && status === "admitted" && tasks[index].status !== "admitted") {
+      var lateText = payload.text ? String(payload.text).slice(0, 8192) : null;
+      if (!lateText || tasks[index].text) return state;
+      tasks[index] = Object.assign({}, tasks[index], { text: lateText });
+      var promptUpdated = shallowCopy(state);
+      promptUpdated[tasksField] = tasks;
+      promptUpdated.revision = state.revision + 1;
+      return promptUpdated;
+    }
     var entry = {
       taskId: taskId,
-      sessionId: payload.sessionId ? String(payload.sessionId) : (index >= 0 ? tasks[index].sessionId : null),
+      sessionId: (payload.sessionId || payload.session_id)
+        ? String(payload.sessionId || payload.session_id)
+        : (index >= 0 ? tasks[index].sessionId : null),
       status: status,
-      outcomeUnknown: !!payload.outcomeUnknown,
-      terminalReason: payload.terminalReason ? String(payload.terminalReason) : null,
-      resultDigest: payload.resultDigest ? String(payload.resultDigest) : null,
+      text: payload.text
+        ? String(payload.text).slice(0, 8192)
+        : (index >= 0 ? tasks[index].text || null : null),
+      messageIndex: Number.isInteger(payload.messageIndex)
+        ? payload.messageIndex
+        : (index >= 0 ? tasks[index].messageIndex : null),
+      assistantText: index >= 0 ? tasks[index].assistantText || null : null,
+      errorText: index >= 0 ? tasks[index].errorText || null : null,
+      contentEventIds: index >= 0 ? (tasks[index].contentEventIds || []).slice() : [],
+      outcomeUnknown: !!(payload.outcomeUnknown || payload.outcome_unknown),
+      terminalReason: (payload.terminalReason || payload.terminal_reason)
+        ? String(payload.terminalReason || payload.terminal_reason)
+        : null,
+      resultDigest: (payload.resultDigest || payload.result_digest)
+        ? String(payload.resultDigest || payload.result_digest)
+        : null,
     };
     if (index >= 0) {
-      if (tasks[index].status === status) return state;
+      if (
+        tasks[index].status === status
+        && tasks[index].text === entry.text
+        && tasks[index].messageIndex === entry.messageIndex
+        && tasks[index].assistantText === entry.assistantText
+        && tasks[index].errorText === entry.errorText
+        && tasks[index].outcomeUnknown === entry.outcomeUnknown
+        && tasks[index].terminalReason === entry.terminalReason
+        && tasks[index].resultDigest === entry.resultDigest
+      ) return state;
       tasks[index] = entry;
     } else {
       if (tasks.length >= 64) tasks.shift();
       tasks.push(entry);
     }
     var next = shallowCopy(state);
-    next.tasks = tasks;
+    next[tasksField] = tasks;
+    next.revision = state.revision + 1;
+    return next;
+  }
+
+  function applyTaskEvent(state, event) {
+    return applyTaskEventTo(state, event, "tasks");
+  }
+
+  function applyControlledTaskEvent(state, event) {
+    var payload = event || {};
+    var session = state.controlledSession || {};
+    var sessionId = payload.sessionId || payload.session_id;
+    if (!session.sessionId || String(sessionId || "") !== String(session.sessionId)) {
+      return state;
+    }
+    return applyTaskEventTo(state, payload, "controlledTasks");
+  }
+
+  /**
+   * Projects authoritative B-side task text into the same durable task entry
+   * used by status events. Admission text is visible immediately; assistant
+   * output remains visible after the task reaches a terminal state.
+   */
+  function applyTaskContent(state, event) {
+    var payload = event || {};
+    var taskId = payload.taskId ? String(payload.taskId) : "";
+    var role = payload.role ? String(payload.role) : "";
+    var text = payload.text ? String(payload.text).slice(0, 8192) : "";
+    var eventId = payload.eventId ? String(payload.eventId) : "";
+    if (!taskId || !eventId || !text || (role !== "user" && role !== "assistant" && role !== "error")) {
+      return state;
+    }
+    var session = state.controlledSession || {};
+    if (!session.sessionId || String(payload.sessionId || "") !== String(session.sessionId)) {
+      return state;
+    }
+    var tasks = (state.controlledTasks || []).slice();
+    var index = tasks.findIndex(function (task) { return task && task.taskId === taskId; });
+    if (index < 0) return state;
+    var current = tasks[index];
+    if (payload.sessionId && current.sessionId && String(payload.sessionId) !== current.sessionId) {
+      return state;
+    }
+    var nextEntry = shallowCopy(current);
+    var contentEventIds = (current.contentEventIds || []).slice();
+    if (contentEventIds.indexOf(eventId) >= 0) return state;
+    if (contentEventIds.length >= 32) contentEventIds.shift();
+    contentEventIds.push(eventId);
+    nextEntry.contentEventIds = contentEventIds;
+    if (role === "user") {
+      nextEntry.text = text;
+    } else if (role === "assistant") {
+      nextEntry.assistantText = String(current.assistantText || "") + text;
+    } else {
+      nextEntry.errorText = String(current.errorText || "") + text;
+    }
+    tasks[index] = nextEntry;
+    var next = shallowCopy(state);
+    next.controlledTasks = tasks;
     next.revision = state.revision + 1;
     return next;
   }
@@ -421,13 +642,19 @@
     beginControllerIntent: beginControllerIntent,
     isCurrentIntent: isCurrentIntent,
     applyControlledStatus: applyControlledStatus,
+    applyControlledSession: applyControlledSession,
     applyControllerStatus: applyControllerStatus,
     applyControllerSession: applyControllerSession,
+    applyCapabilityPending: applyCapabilityPending,
+    applyCapabilityFailure: applyCapabilityFailure,
     applyCapabilities: applyCapabilities,
     applyJournalEvent: applyJournalEvent,
+    applyControlledJournalEvent: applyControlledJournalEvent,
     applyModels: applyModels,
     applyHistories: applyHistories,
     applyTaskEvent: applyTaskEvent,
+    applyControlledTaskEvent: applyControlledTaskEvent,
+    applyTaskContent: applyTaskContent,
     matchesLiveContext: matchesLiveContext,
     isTaskTerminal: function (status) {
       return !!TASK_TERMINAL[status];

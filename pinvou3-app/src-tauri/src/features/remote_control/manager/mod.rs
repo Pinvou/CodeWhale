@@ -2186,6 +2186,14 @@ impl RemoteControlManager {
                 || value.get("type").and_then(Value::as_str)
                     != Some("desktop_endpoint_registered"))
         {
+            if value.get("type").and_then(Value::as_str) == Some("encrypted_frame")
+                && value.get("payload_kind").and_then(Value::as_str) == Some("task_submit")
+            {
+                crate::features::remote_control::controller::relay_runtime::log_controlled_event(
+                    "task_submit_endpoint_received",
+                    "forwarding_to_worker",
+                );
+            }
             self.forward_controller_relay_message(&value);
             return;
         }

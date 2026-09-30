@@ -1,4 +1,8 @@
-import { CONTROLLER_PROTOCOL_VERSION, validateControllerMessage } from "./protocol-controller.js";
+import {
+  CONTROLLER_PROTOCOL_VERSION,
+  validateControllerMessage,
+  validateControllerRuntimeMessage,
+} from "./protocol-controller.js";
 import { ControllerLivenessHooks } from "./controller-liveness.js";
 import { ControllerResumeHooks } from "./controller-resume.js";
 
@@ -219,6 +223,45 @@ export class ControllerRouter {
         counterpart.counterpart = null;
         this.#emit("controller_disconnected");
         return disconnect;
+      }
+      if (message?.type === "encrypted_frame") {
+        if (!new Set(["A", "B"]).has(peer.role) || !peer.controllerLeaseId) {
+          fail("controller_role_invalid");
+        }
+        const lease = this.#leases.lease(peer.controllerLeaseId);
+        if (!lease || lease.sockets?.[peer.role] !== socketIdentity) {
+          fail("controller_lease_not_found");
+        }
+        const resume = this.#hooks.find(
+          (candidate) => typeof candidate.isBusinessAllowed === "function",
+        );
+        if (resume && !resume.isBusinessAllowed(lease.controller_lease_id)) {
+          fail("controller_business_suspended");
+        }
+        let validated;
+        try {
+          validated = validateControllerRuntimeMessage(message, peer.role, {
+            lease: {
+              connection_id: lease.connection_id,
+              controller_lease_id: lease.controller_lease_id,
+              lease_epoch: lease.lease_epoch,
+              relay_epoch: lease.relay_epoch,
+              remote_control_generation: lease.remote_control_generation,
+            },
+            negotiated_capabilities: lease.negotiated_capabilities,
+          });
+        } catch (error) {
+          fail("controller_business_invalid", error);
+        }
+        const counterpart = this.#counterpart(peer);
+        const counterpartRole = peer.role === "A" ? "B" : "A";
+        if (lease.sockets?.[counterpartRole] !== counterpart.socketIdentity
+          || counterpart.controllerLeaseId !== lease.controller_lease_id) {
+          fail("controller_lease_not_found");
+        }
+        this.#deliver(counterpart, validated);
+        this.#emit("controller_business_forwarded");
+        return validated;
       }
       const hooks = this.#hooks.find((candidate) => candidate.handles(message?.type));
       if (hooks) {

@@ -30,12 +30,12 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tokio_util::sync::CancellationToken;
 
-use super::protocol::LeaseContext;
 use super::journal::JournalKind;
+use super::protocol::LeaseContext;
 
 pub(crate) const TASK_MODE_CHAT: &str = "chat";
 pub(crate) const TASK_MODE_CODE: &str = "code";
@@ -347,6 +347,8 @@ impl RemoteTaskRequest {
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub(crate) struct RemoteTaskRecord {
     pub(crate) sequence: u64,
+    #[serde(default)]
+    pub(crate) transition_sequence: u64,
     pub(crate) lease: TaskLeaseBinding,
     pub(crate) task_id: String,
     pub(crate) client_request_id: String,
@@ -436,7 +438,10 @@ impl JsonTaskLedgerStore {
         Ok(file.tasks)
     }
 
-    fn flush(&self, records: &BTreeMap<String, RemoteTaskRecord>) -> std::result::Result<(), String> {
+    fn flush(
+        &self,
+        records: &BTreeMap<String, RemoteTaskRecord>,
+    ) -> std::result::Result<(), String> {
         let file = LedgerFile {
             version: LEDGER_FILE_VERSION,
             tasks: records.values().cloned().collect(),
@@ -595,6 +600,7 @@ impl RemoteTaskLedger {
             .ok_or_else(|| error("task_ledger_capacity"))?;
         let record = RemoteTaskRecord {
             sequence: inner.sequence,
+            transition_sequence: 1,
             lease: request.lease.clone(),
             task_id: request.task_id.clone(),
             client_request_id: request.client_request_id.clone(),
@@ -673,6 +679,17 @@ impl RemoteTaskLedger {
         result_digest: Option<String>,
         now_b: u64,
     ) -> Result<RemoteTaskRecord> {
+        self.complete_with_reason(task_id, terminal, None, result_digest, now_b)
+    }
+
+    fn complete_with_reason(
+        &self,
+        task_id: &str,
+        terminal: RemoteTaskTerminal,
+        terminal_reason: Option<String>,
+        result_digest: Option<String>,
+        now_b: u64,
+    ) -> Result<RemoteTaskRecord> {
         if let Some(digest) = result_digest.as_deref() {
             if digest.len() > MAX_RESULT_DIGEST_CHARS || !is_lower_hex(digest) {
                 return Err(error("task_result_digest_invalid"));
@@ -687,7 +704,11 @@ impl RemoteTaskLedger {
         }
         let mut updated = previous.clone();
         updated.state = terminal.state();
-        updated.terminal_reason = Some(terminal.reason().to_owned());
+        updated.terminal_reason = Some(
+            terminal_reason
+                .map(bounded_reason_owned)
+                .unwrap_or_else(|| terminal.reason().to_owned()),
+        );
         updated.result_digest = result_digest;
         updated.outcome_unknown =
             terminal == RemoteTaskTerminal::Interrupted && previous.outcome_unknown;
@@ -844,8 +865,11 @@ impl RemoteTaskLedger {
     fn commit(
         &self,
         inner: &mut LedgerInner,
-        updated: RemoteTaskRecord,
+        mut updated: RemoteTaskRecord,
     ) -> Result<RemoteTaskRecord> {
+        if let Some(previous) = inner.tasks.get(&updated.task_id) {
+            updated.transition_sequence = previous.transition_sequence.saturating_add(1);
+        }
         self.store
             .persist(&updated)
             .map_err(|_| error("task_ledger_persist_failed"))?;
@@ -871,7 +895,11 @@ fn prune_terminal(inner: &mut LedgerInner) {
         if inner.tasks.len() - removed.len() < MAX_TRACKED_TASKS {
             break;
         }
-        if inner.tasks.get(id).is_some_and(RemoteTaskRecord::is_terminal) {
+        if inner
+            .tasks
+            .get(id)
+            .is_some_and(RemoteTaskRecord::is_terminal)
+        {
             removed.push(id.clone());
         }
     }
@@ -893,50 +921,84 @@ fn prune_terminal(inner: &mut LedgerInner) {
 /// session. The map is per connection and never persisted.
 #[derive(Default)]
 pub(crate) struct RemoteSessionMap {
-    forward: Mutex<HashMap<String, String>>,
-    reverse: Mutex<HashMap<String, String>>,
+    forward: Mutex<HashMap<String, (String, String)>>,
+    reverse: Mutex<HashMap<String, (String, String)>>,
 }
 
 impl RemoteSessionMap {
-    pub(crate) fn bind(&self, remote_ref: &str, session_id: &str) -> Result<String> {
+    pub(crate) fn bind(
+        &self,
+        remote_ref: &str,
+        session_id: &str,
+        generation: &str,
+    ) -> Result<String> {
         validate_identifier(remote_ref)?;
         validate_identifier(session_id)?;
+        validate_identifier(generation)?;
         let mut forward = self.forward.lock();
         let mut reverse = self.reverse.lock();
         if let Some(existing) = reverse.get(session_id) {
-            if existing != remote_ref {
+            if existing.0 != remote_ref || existing.1 != generation {
                 return Err(error("task_session_map_conflict"));
             }
         }
-        if let Some(previous) = forward.insert(remote_ref.to_owned(), session_id.to_owned()) {
-            if previous != session_id {
-                reverse.remove(&previous);
+        if forward
+            .get(remote_ref)
+            .is_some_and(|existing| existing.1 != generation)
+        {
+            return Err(error("task_session_generation_conflict"));
+        }
+        let binding = (session_id.to_owned(), generation.to_owned());
+        if let Some(previous) = forward.insert(remote_ref.to_owned(), binding) {
+            if previous.0 != session_id {
+                reverse.remove(&previous.0);
             }
         }
-        reverse.insert(session_id.to_owned(), remote_ref.to_owned());
+        reverse.insert(
+            session_id.to_owned(),
+            (remote_ref.to_owned(), generation.to_owned()),
+        );
         Ok(session_id.to_owned())
     }
 
-    pub(crate) fn session_for(&self, remote_ref: &str) -> Option<String> {
-        self.forward.lock().get(remote_ref).cloned()
+    pub(crate) fn session_for(&self, remote_ref: &str, generation: &str) -> Option<String> {
+        self.forward
+            .lock()
+            .get(remote_ref)
+            .filter(|binding| binding.1 == generation)
+            .map(|binding| binding.0.clone())
     }
 
     pub(crate) fn is_remote_session(&self, session_id: &str) -> bool {
         self.reverse.lock().contains_key(session_id)
     }
 
-    /// E2E-05：按 B 权威会话 id 反查 A 的会话引用（wire 回传统一用 A 的 ref）。
-    pub(crate) fn remote_ref_for(&self, session_id: &str) -> Option<String> {
-        self.reverse.lock().get(session_id).cloned()
+    pub(crate) fn is_remote_session_for(&self, session_id: &str, generation: &str) -> bool {
+        self.reverse
+            .lock()
+            .get(session_id)
+            .is_some_and(|binding| binding.1 == generation)
     }
 
-    pub(crate) fn unbind(&self, remote_ref: &str) -> Option<String> {
+    /// E2E-05：按 B 权威会话 id 反查 A 的会话引用（wire 回传统一用 A 的 ref）。
+    pub(crate) fn remote_ref_for(&self, session_id: &str) -> Option<String> {
+        self.reverse
+            .lock()
+            .get(session_id)
+            .map(|binding| binding.0.clone())
+    }
+
+    pub(crate) fn unbind(&self, remote_ref: &str, generation: &str) -> Option<String> {
         let mut forward = self.forward.lock();
-        let session_id = forward.remove(remote_ref)?;
+        let binding = forward.get(remote_ref)?;
+        if binding.1 != generation {
+            return None;
+        }
+        let (session_id, _) = forward.remove(remote_ref)?;
         let mut reverse = self.reverse.lock();
         if reverse
             .get(&session_id)
-            .is_some_and(|candidate| candidate == remote_ref)
+            .is_some_and(|candidate| candidate.0 == remote_ref && candidate.1 == generation)
         {
             reverse.remove(&session_id);
         }
@@ -946,6 +1008,20 @@ impl RemoteSessionMap {
     pub(crate) fn clear(&self) {
         self.forward.lock().clear();
         self.reverse.lock().clear();
+    }
+
+    pub(crate) fn clear_generation(&self, generation: &str) {
+        let mut forward = self.forward.lock();
+        let mut reverse = self.reverse.lock();
+        let stale: Vec<(String, String)> = forward
+            .iter()
+            .filter(|(_, binding)| binding.1 == generation)
+            .map(|(remote_ref, binding)| (remote_ref.clone(), binding.0.clone()))
+            .collect();
+        for (remote_ref, session_id) in stale {
+            forward.remove(&remote_ref);
+            reverse.remove(&session_id);
+        }
     }
 
     pub(crate) fn len(&self) -> usize {
@@ -974,7 +1050,11 @@ pub(crate) trait RemoteChatTurnPort: Send + Sync {
     async fn run_chat_turn(
         &self,
         session_id: &str,
+        task_id: &str,
+        model_source: &str,
+        lease: &LeaseContext,
         content: String,
+        events: Arc<dyn ControllerTaskEventSink>,
         cancel: CancellationToken,
     ) -> std::result::Result<Option<String>, String>;
 }
@@ -1013,20 +1093,57 @@ impl ControllerTaskExecutor for ChatTurnExecutor {
         let task_id = request
             .get("task_id")
             .and_then(Value::as_str)
-            .filter(|value| !value.is_empty());
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| "task_request_invalid".to_owned())?;
+        let model_source = request
+            .get("model_source")
+            .and_then(Value::as_str)
+            .filter(|value| {
+                matches!(
+                    *value,
+                    TASK_MODEL_SOURCE_CONTROLLED | TASK_MODEL_SOURCE_TEMPORARY
+                )
+            })
+            .ok_or_else(|| "task_model_source_invalid".to_owned())?;
+        let lease_text = |field: &str| {
+            request
+                .get(field)
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned)
+                .ok_or_else(|| "task_request_invalid".to_owned())
+        };
+        let lease = LeaseContext {
+            connection_id: lease_text("connection_id")?,
+            controller_lease_id: lease_text("controller_lease_id")?,
+            lease_epoch: lease_text("lease_epoch")?,
+            relay_epoch: lease_text("relay_epoch")?,
+            remote_control_generation: lease_text("remote_control_generation")?,
+        };
         // E2E-05：用户消息与回复正文都写进权威 journal（再经 wire 回传 A）。
         events.emit_journal(
             JournalKind::UserMessage,
             &session_id,
-            task_id,
+            Some(task_id),
             json!({ "text": content }),
         );
-        let reply = self.port.run_chat_turn(&session_id, content, cancel).await?;
+        let reply = self
+            .port
+            .run_chat_turn(
+                &session_id,
+                task_id,
+                model_source,
+                &lease,
+                content,
+                Arc::clone(&events),
+                cancel,
+            )
+            .await?;
         if let Some(reply) = reply.filter(|text| !text.trim().is_empty()) {
             events.emit_journal(
                 JournalKind::AssistantDelta,
                 &session_id,
-                task_id,
+                Some(task_id),
                 json!({ "text": reply }),
             );
         }
@@ -1115,6 +1232,7 @@ pub(crate) struct RemoteTaskEvent {
     pub(crate) session_id: String,
     pub(crate) status: String,
     pub(crate) sequence: String,
+    pub(crate) transition_sequence: u64,
     pub(crate) outcome_unknown: bool,
     pub(crate) terminal_reason: Option<String>,
     pub(crate) result_digest: Option<String>,
@@ -1151,6 +1269,9 @@ impl RemoteTaskHooks {
 pub(crate) struct RemoteTaskService {
     ledger: Arc<RemoteTaskLedger>,
     sessions: RemoteSessionMap,
+    /// A retried capability request and the first task can provision at once.
+    /// Serialize lookup/create/bind so one A reference owns one B session.
+    session_open_lock: Mutex<()>,
     provisioner: Mutex<Option<Arc<dyn RemoteSessionProvisioner>>>,
     executors: Mutex<HashMap<String, Arc<dyn ControllerTaskExecutor>>>,
     /// DEV-13 审核修复：取消必须真正中断执行器。dispatch 注册当前任务的取消令牌，
@@ -1164,6 +1285,7 @@ impl RemoteTaskService {
         Self {
             ledger,
             sessions: RemoteSessionMap::default(),
+            session_open_lock: Mutex::new(()),
             provisioner: Mutex::new(None),
             executors: Mutex::new(HashMap::new()),
             cancel_tokens: Mutex::new(HashMap::new()),
@@ -1192,6 +1314,7 @@ impl RemoteTaskService {
         remote_ref: &str,
         title: &str,
         code_mode: bool,
+        generation: &str,
     ) -> Result<String> {
         let provisioner = self
             .provisioner
@@ -1201,14 +1324,32 @@ impl RemoteTaskService {
         let session_id = provisioner
             .create_authoritative_session(title, code_mode)
             .map_err(|_| error("task_session_create_failed"))?;
-        self.sessions.bind(remote_ref, &session_id)
+        self.sessions.bind(remote_ref, &session_id, generation)
+    }
+
+    /// Return the B-authoritative session already bound to `remote_ref`, or
+    /// create it once before either endpoint is allowed to submit.
+    pub(crate) fn ensure_remote_session(
+        &self,
+        remote_ref: &str,
+        title: &str,
+        code_mode: bool,
+        generation: &str,
+    ) -> Result<String> {
+        let _guard = self.session_open_lock.lock();
+        if let Some(session_id) = self.sessions.session_for(remote_ref, generation) {
+            return Ok(session_id);
+        }
+        self.open_remote_session(remote_ref, title, code_mode, generation)
     }
 
     pub(crate) fn switch_remote_session(
         &self,
         remote_ref: &str,
         session_id: &str,
+        generation: &str,
     ) -> Result<String> {
+        let _guard = self.session_open_lock.lock();
         let provisioner = self
             .provisioner
             .lock()
@@ -1219,24 +1360,33 @@ impl RemoteTaskService {
             Ok(false) => return Err(error("task_session_not_found")),
             Err(_) => return Err(error("task_session_lookup_failed")),
         }
-        self.sessions.bind(remote_ref, session_id)
+        self.sessions.bind(remote_ref, session_id, generation)
     }
 
-    pub(crate) fn close_remote_session(&self, remote_ref: &str) -> Result<Option<String>> {
-        if let Some(session_id) = self.sessions.session_for(remote_ref) {
+    pub(crate) fn close_remote_session(
+        &self,
+        remote_ref: &str,
+        generation: &str,
+    ) -> Result<Option<String>> {
+        let _guard = self.session_open_lock.lock();
+        if let Some(session_id) = self.sessions.session_for(remote_ref, generation) {
             if self.ledger.active_for_session(&session_id).is_some() {
                 return Err(error("task_session_busy"));
             }
         }
-        Ok(self.sessions.unbind(remote_ref))
+        Ok(self.sessions.unbind(remote_ref, generation))
     }
 
-    pub(crate) fn session_for(&self, remote_ref: &str) -> Option<String> {
-        self.sessions.session_for(remote_ref)
+    pub(crate) fn session_for(&self, remote_ref: &str, generation: &str) -> Option<String> {
+        self.sessions.session_for(remote_ref, generation)
     }
 
     pub(crate) fn is_remote_session(&self, session_id: &str) -> bool {
         self.sessions.is_remote_session(session_id)
+    }
+
+    pub(crate) fn is_remote_session_for(&self, session_id: &str, generation: &str) -> bool {
+        self.sessions.is_remote_session_for(session_id, generation)
     }
 
     /// E2E-05：B 权威会话 id → A 的会话引用（未绑定或本地会话返回 None）。
@@ -1245,7 +1395,13 @@ impl RemoteTaskService {
     }
 
     pub(crate) fn clear_sessions(&self) {
+        let _guard = self.session_open_lock.lock();
         self.sessions.clear();
+    }
+
+    pub(crate) fn clear_generation_sessions(&self, generation: &str) {
+        let _guard = self.session_open_lock.lock();
+        self.sessions.clear_generation(generation);
     }
 
     pub(crate) fn submit(
@@ -1262,6 +1418,55 @@ impl RemoteTaskService {
         Ok(outcome)
     }
 
+    /// Admit only while the submitted B-authoritative session is still bound
+    /// to the live controlled-device lifecycle. Cleanup takes the same lock,
+    /// so a send racing stop/refresh is either admitted before cleanup (and
+    /// then interrupted) or rejected after the mapping is cleared.
+    pub(crate) fn submit_bound(
+        &self,
+        live: &LeaseContext,
+        payload: &Value,
+        now_b: u64,
+    ) -> Result<AdmissionOutcome> {
+        self.submit_bound_with_admission(live, payload, now_b, |_| Ok(()))
+    }
+
+    /// Admit a bound task and finish its task-scoped resource installation in
+    /// the same lifecycle transaction. Stop/refresh takes the same lock, so it
+    /// cannot run cleanup between ledger admission and resource installation.
+    /// If installation fails, the admitted record is made terminal before the
+    /// lock is released and the normal cleanup hooks run immediately.
+    pub(crate) fn submit_bound_with_admission(
+        &self,
+        live: &LeaseContext,
+        payload: &Value,
+        now_b: u64,
+        install: impl FnOnce(&RemoteTaskTicket) -> std::result::Result<(), &'static str>,
+    ) -> Result<AdmissionOutcome> {
+        let request = RemoteTaskRequest::from_payload(payload)?;
+        let _guard = self.session_open_lock.lock();
+        if !self
+            .sessions
+            .is_remote_session_for(&request.session_id, &live.remote_control_generation)
+        {
+            return Err(error("task_session_not_found"));
+        }
+        let outcome = self.ledger.admit(live, &request, now_b)?;
+        if let AdmissionOutcome::Admitted(ticket) = &outcome {
+            if let Err(code) = install(ticket) {
+                let _ = self.finish(
+                    &ticket.record.task_id,
+                    RemoteTaskTerminal::Failed,
+                    Some(code.to_owned()),
+                    now_b,
+                );
+                return Err(error(code));
+            }
+            self.publish(&ticket.record);
+        }
+        Ok(outcome)
+    }
+
     pub(crate) async fn dispatch(
         &self,
         ticket: RemoteTaskTicket,
@@ -1270,9 +1475,17 @@ impl RemoteTaskService {
         now_b: u64,
     ) -> Result<RemoteTaskRecord> {
         let task_id = ticket.record.task_id.clone();
-        let running = self.ledger.begin_dispatch(&task_id, now_b)?;
+        self.cancel_tokens
+            .lock()
+            .insert(task_id.clone(), cancel.clone());
+        let running = match self.ledger.begin_dispatch(&task_id, now_b) {
+            Ok(running) => running,
+            Err(error) => {
+                self.cancel_tokens.lock().remove(&task_id);
+                return Err(error);
+            }
+        };
         self.publish(&running);
-        self.cancel_tokens.lock().insert(task_id.clone(), cancel.clone());
         let executor = self.executors.lock().get(&running.mode).cloned();
         let Some(executor) = executor else {
             self.cancel_tokens.lock().remove(&task_id);
@@ -1283,14 +1496,31 @@ impl RemoteTaskService {
                 now_b,
             );
         };
-        let result = executor.execute(ticket.input, events, cancel).await;
+        // Executors consume the complete execution envelope. The ledger keeps
+        // prompt input separate from durable task metadata so secrets never
+        // enter the status record; rebuild the narrow envelope here instead
+        // of passing only `input` (which makes `extract_turn` fail before the
+        // engine ever sees the accepted prompt).
+        let execution_request = json!({
+            "task_id": running.task_id,
+            "session_id": running.session_id,
+            "mode": running.mode,
+            "model_source": running.model_source,
+            "connection_id": running.lease.connection_id,
+            "controller_lease_id": running.lease.controller_lease_id,
+            "lease_epoch": running.lease.lease_epoch,
+            "relay_epoch": running.lease.relay_epoch,
+            "remote_control_generation": running.lease.remote_control_generation,
+            "input": ticket.input,
+        });
+        let result = executor.execute(execution_request, events, cancel).await;
         self.cancel_tokens.lock().remove(&task_id);
-        let terminal = match result {
-            Ok(()) => RemoteTaskTerminal::Succeeded,
-            Err(code) if code == TASK_CANCELLED_CODE => RemoteTaskTerminal::Cancelled,
-            Err(_) => RemoteTaskTerminal::Failed,
+        let (terminal, reason) = match result {
+            Ok(()) => (RemoteTaskTerminal::Succeeded, None),
+            Err(code) if code == TASK_CANCELLED_CODE => (RemoteTaskTerminal::Cancelled, None),
+            Err(code) => (RemoteTaskTerminal::Failed, Some(code)),
         };
-        self.finish(&task_id, terminal, None, now_b)
+        self.finish(&task_id, terminal, reason, now_b)
     }
 
     pub(crate) fn complete(
@@ -1357,9 +1587,21 @@ impl RemoteTaskService {
         reason: &str,
         now_b: u64,
     ) -> Vec<RemoteTaskRecord> {
-        let records = self
-            .ledger
-            .interrupt_generation(generation, reason, now_b);
+        let records = self.ledger.interrupt_generation(generation, reason, now_b);
+        self.finish_interrupted(records)
+    }
+
+    /// End one controlled-device lifecycle and invalidate every ephemeral
+    /// A-ref/B-session mapping atomically with respect to bound admission.
+    pub(crate) fn interrupt_generation_and_clear_sessions(
+        &self,
+        generation: &str,
+        reason: &str,
+        now_b: u64,
+    ) -> Vec<RemoteTaskRecord> {
+        let _guard = self.session_open_lock.lock();
+        let records = self.ledger.interrupt_generation(generation, reason, now_b);
+        self.sessions.clear_generation(generation);
         self.finish_interrupted(records)
     }
 
@@ -1407,12 +1649,9 @@ impl RemoteTaskService {
         reason: Option<String>,
         now_b: u64,
     ) -> Result<RemoteTaskRecord> {
-        let mut record = self
+        let record = self
             .ledger
-            .complete(task_id, terminal, None, now_b)?;
-        if let Some(reason) = reason {
-            record.terminal_reason = Some(bounded_reason_owned(reason));
-        }
+            .complete_with_reason(task_id, terminal, reason, None, now_b)?;
         let cleanup_reason = record
             .terminal_reason
             .clone()
@@ -1423,6 +1662,9 @@ impl RemoteTaskService {
 
     fn finish_interrupted(&self, records: Vec<RemoteTaskRecord>) -> Vec<RemoteTaskRecord> {
         for record in &records {
+            if let Some(token) = self.cancel_tokens.lock().remove(&record.task_id) {
+                token.cancel();
+            }
             self.cleanup(
                 record,
                 record
@@ -1463,6 +1705,7 @@ impl RemoteTaskService {
                 session_id: record.session_id.clone(),
                 status: record.wire_status().to_owned(),
                 sequence: record.sequence.to_string(),
+                transition_sequence: record.transition_sequence,
                 outcome_unknown: record.outcome_unknown,
                 terminal_reason: Some(bounded_reason_owned(reason)),
                 result_digest: record.result_digest.clone(),
@@ -1589,6 +1832,7 @@ mod tests {
         calls: AtomicUsize,
         fail: AtomicBool,
         seen_mode: Mutex<Option<String>>,
+        seen_request: Mutex<Option<Value>>,
     }
 
     impl RecordingExecutor {
@@ -1597,6 +1841,7 @@ mod tests {
                 calls: AtomicUsize::new(0),
                 fail: AtomicBool::new(false),
                 seen_mode: Mutex::new(None),
+                seen_request: Mutex::new(None),
             })
         }
 
@@ -1605,6 +1850,7 @@ mod tests {
                 calls: AtomicUsize::new(0),
                 fail: AtomicBool::new(true),
                 seen_mode: Mutex::new(None),
+                seen_request: Mutex::new(None),
             })
         }
     }
@@ -1617,6 +1863,7 @@ mod tests {
             _events: Arc<dyn ControllerTaskEventSink>,
             _cancel: CancellationToken,
         ) -> std::result::Result<(), String> {
+            *self.seen_request.lock() = Some(request.clone());
             *self.seen_mode.lock() = request
                 .get("mode")
                 .and_then(Value::as_str)
@@ -1711,7 +1958,10 @@ mod tests {
     }
 
     fn admitted(service: &RemoteTaskService, body: &Value, now_b: u64) -> RemoteTaskTicket {
-        match service.submit(&context("generation-0001"), body, now_b).unwrap() {
+        match service
+            .submit(&context("generation-0001"), body, now_b)
+            .unwrap()
+        {
             AdmissionOutcome::Admitted(ticket) => ticket,
             other => panic!("expected admission, got {other:?}"),
         }
@@ -1728,9 +1978,11 @@ mod tests {
                 .code,
             "task_binding_stale"
         );
-        assert!(ledger
-            .admit(&context("generation-0001"), &request(&body), 1_000)
-            .is_ok());
+        assert!(
+            ledger
+                .admit(&context("generation-0001"), &request(&body), 1_000)
+                .is_ok()
+        );
     }
 
     #[test]
@@ -1751,7 +2003,9 @@ mod tests {
 
         let bad_digest = payload("session-0001", "task-0001", "client-0001", "not-a-digest");
         assert_eq!(
-            RemoteTaskRequest::from_payload(&bad_digest).unwrap_err().code,
+            RemoteTaskRequest::from_payload(&bad_digest)
+                .unwrap_err()
+                .code,
             "task_input_digest_invalid"
         );
 
@@ -1960,18 +2214,20 @@ mod tests {
             .unwrap();
         assert!(!not_dispatched.outcome_unknown);
         assert_eq!(not_dispatched.wire_status(), TASK_STATUS_INTERRUPTED);
-        assert!(ledger
-            .admit(
-                &live,
-                &request(&payload(
-                    "session-0001",
-                    "task-0003",
-                    "client-0003",
-                    &digest(3),
-                )),
-                1_300,
-            )
-            .is_ok());
+        assert!(
+            ledger
+                .admit(
+                    &live,
+                    &request(&payload(
+                        "session-0001",
+                        "task-0003",
+                        "client-0003",
+                        &digest(3),
+                    )),
+                    1_300,
+                )
+                .is_ok()
+        );
     }
 
     #[test]
@@ -2008,7 +2264,8 @@ mod tests {
     fn restart_recovery_terminates_every_persisted_non_terminal_task() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("task-ledger.json");
-        let store: Arc<dyn RemoteTaskLedgerStore> = Arc::new(JsonTaskLedgerStore::new(path.clone()));
+        let store: Arc<dyn RemoteTaskLedgerStore> =
+            Arc::new(JsonTaskLedgerStore::new(path.clone()));
         let ledger = RemoteTaskLedger::new(store.clone());
         ledger
             .admit(
@@ -2036,7 +2293,10 @@ mod tests {
         assert_eq!(recovered.len(), 1);
         assert_eq!(recovered[0].state, RemoteTaskState::Interrupted);
         assert_eq!(recovered[0].wire_status(), TASK_STATUS_RESULT_UNKNOWN);
-        assert_eq!(recovered[0].terminal_reason.as_deref(), Some("process_restart"));
+        assert_eq!(
+            recovered[0].terminal_reason.as_deref(),
+            Some("process_restart")
+        );
         assert!(restored.active_for_session("session-0001").is_none());
     }
 
@@ -2052,7 +2312,10 @@ mod tests {
         let live = context("generation-0001");
         let body = payload("session-0001", "task-0001", "client-0001", &digest(1));
         assert_eq!(
-            ledger.admit(&live, &request(&body), 1_000).unwrap_err().code,
+            ledger
+                .admit(&live, &request(&body), 1_000)
+                .unwrap_err()
+                .code,
             "task_ledger_persist_failed"
         );
         assert_eq!(ledger.live_task_count(), 0);
@@ -2077,6 +2340,15 @@ mod tests {
             .unwrap();
         assert_eq!(record.state, RemoteTaskState::Succeeded);
         assert_eq!(executor.calls.load(Ordering::SeqCst), 1);
+        let seen = executor.seen_request.lock();
+        let seen = seen.as_ref().expect("complete executor request");
+        assert_eq!(seen["task_id"], "task-0001");
+        assert_eq!(seen["session_id"], "session-0001");
+        assert_eq!(seen["mode"], TASK_MODE_CHAT);
+        assert_eq!(seen["model_source"], TASK_MODEL_SOURCE_CONTROLLED);
+        assert_eq!(seen["connection_id"], "connection-0001");
+        assert_eq!(seen["controller_lease_id"], "lease-0001");
+        assert_eq!(seen["input"]["text"], "run the report");
         assert_eq!(hooks.model.load(Ordering::SeqCst), 1);
         assert_eq!(hooks.permission.load(Ordering::SeqCst), 1);
         assert_eq!(hooks.transfer.load(Ordering::SeqCst), 1);
@@ -2095,7 +2367,9 @@ mod tests {
             ]
         );
 
-        // A failing executor still reaches a terminal state and a cleanup.
+        // A failing executor, including a temporary-model preparation/DNS
+        // failure before the first model call, still follows the observable
+        // admitted -> running -> failed sequence and reaches cleanup.
         let failing_executor = RecordingExecutor::failing();
         let (failing_service, failing_hooks) = service(failing_executor.clone());
         let ticket = admitted(
@@ -2113,6 +2387,29 @@ mod tests {
             .unwrap();
         assert_eq!(record.state, RemoteTaskState::Failed);
         assert_eq!(record.terminal_reason.as_deref(), Some("executor_error"));
+        let failing_statuses: Vec<String> = failing_hooks
+            .events
+            .lock()
+            .iter()
+            .map(|event| event.status.clone())
+            .collect();
+        assert_eq!(
+            failing_statuses,
+            vec![
+                TASK_STATUS_ADMITTED.to_owned(),
+                TASK_STATUS_RUNNING.to_owned(),
+                TASK_STATUS_FAILED.to_owned()
+            ]
+        );
+        assert_eq!(
+            failing_service
+                .ledger()
+                .record("task-0002")
+                .unwrap()
+                .terminal_reason
+                .as_deref(),
+            Some("executor_error")
+        );
         assert_eq!(failing_hooks.model.load(Ordering::SeqCst), 1);
     }
 
@@ -2123,12 +2420,7 @@ mod tests {
         let body = payload("session-0001", "task-0001", "client-0001", &digest(1));
         let ticket = admitted(&service, &body, 1_000);
         runtime()
-            .block_on(service.dispatch(
-                ticket,
-                Arc::new(NoopSink),
-                CancellationToken::new(),
-                1_100,
-            ))
+            .block_on(service.dispatch(ticket, Arc::new(NoopSink), CancellationToken::new(), 1_100))
             .unwrap();
         match service
             .submit(&context("generation-0001"), &body, 1_200)
@@ -2202,6 +2494,45 @@ mod tests {
         );
     }
 
+    #[test]
+    fn lifecycle_cleanup_cancels_the_running_executor() {
+        let executor = Arc::new(HangingExecutor {
+            started: Arc::new(tokio::sync::Notify::new()),
+            observed_cancel: AtomicBool::new(false),
+        });
+        let service = RemoteTaskService::new(Arc::new(RemoteTaskLedger::in_memory()));
+        service.register_executor(TASK_MODE_CHAT, executor.clone());
+        let ticket = admitted(
+            &service,
+            &payload("session-0001", "task-0001", "client-0001", &digest(1)),
+            1_000,
+        );
+
+        let record = runtime().block_on(async {
+            let dispatch =
+                service.dispatch(ticket, Arc::new(NoopSink), CancellationToken::new(), 1_100);
+            tokio::pin!(dispatch);
+            tokio::select! {
+                _ = executor.started.notified() => {}
+                outcome = &mut dispatch => panic!("dispatch finished before cleanup: {outcome:?}"),
+            }
+            let interrupted = service.interrupt_generation_and_clear_sessions(
+                "generation-0001",
+                "remote_control_stopped",
+                1_200,
+            );
+            assert_eq!(interrupted.len(), 1);
+            dispatch.await.unwrap()
+        });
+
+        assert_eq!(record.state, RemoteTaskState::Interrupted);
+        assert!(executor.observed_cancel.load(Ordering::SeqCst));
+        assert_eq!(
+            record.terminal_reason.as_deref(),
+            Some("remote_control_stopped")
+        );
+    }
+
     /// E2E-05：chat 执行器把用户消息与 assistant 回复都交给正文事件端口
     /// （命令层据此写权威 journal 并回传 A）。
     #[test]
@@ -2213,7 +2544,11 @@ mod tests {
             async fn run_chat_turn(
                 &self,
                 _session_id: &str,
+                _task_id: &str,
+                _model_source: &str,
+                _lease: &LeaseContext,
                 content: String,
+                _events: Arc<dyn ControllerTaskEventSink>,
                 _cancel: CancellationToken,
             ) -> std::result::Result<Option<String>, String> {
                 assert_eq!(content, "run the report");
@@ -2234,11 +2569,9 @@ mod tests {
                 task_id: Option<&str>,
                 payload: Value,
             ) {
-                self.0.lock().push((
-                    kind.wire().to_owned(),
-                    task_id.map(str::to_owned),
-                    payload,
-                ));
+                self.0
+                    .lock()
+                    .push((kind.wire().to_owned(), task_id.map(str::to_owned), payload));
             }
         }
 
@@ -2267,15 +2600,13 @@ mod tests {
         let code = code_payload("session-0001", "task-0001", "client-0001", "workspace-0001");
         let ticket = admitted(&service, &code, 1_000);
         let record = runtime()
-            .block_on(service.dispatch(
-                ticket,
-                Arc::new(NoopSink),
-                CancellationToken::new(),
-                1_100,
-            ))
+            .block_on(service.dispatch(ticket, Arc::new(NoopSink), CancellationToken::new(), 1_100))
             .unwrap();
         assert_eq!(record.state, RemoteTaskState::Failed);
-        assert_eq!(record.terminal_reason.as_deref(), Some("executor_unavailable"));
+        assert_eq!(
+            record.terminal_reason.as_deref(),
+            Some("executor_unavailable")
+        );
     }
 
     #[test]
@@ -2287,7 +2618,11 @@ mod tests {
             async fn run_chat_turn(
                 &self,
                 _session_id: &str,
+                _task_id: &str,
+                _model_source: &str,
+                _lease: &LeaseContext,
                 _content: String,
+                _events: Arc<dyn ControllerTaskEventSink>,
                 _cancel: CancellationToken,
             ) -> std::result::Result<Option<String>, String> {
                 panic!("the chat port must not be reached for a code payload");
@@ -2304,12 +2639,225 @@ mod tests {
     }
 
     #[test]
+    fn ensure_remote_session_is_idempotent_under_concurrent_preparation() {
+        let service = Arc::new(RemoteTaskService::new(Arc::new(
+            RemoteTaskLedger::in_memory(),
+        )));
+        let sessions = Arc::new(FakeSessions::default());
+        service.set_session_provisioner(sessions.clone());
+        let barrier = Arc::new(std::sync::Barrier::new(8));
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let service = service.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    service
+                        .ensure_remote_session(
+                            "remote-session-shared",
+                            "Remote",
+                            false,
+                            "generation-0001",
+                        )
+                        .unwrap()
+                })
+            })
+            .collect();
+        let ids: Vec<_> = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect();
+
+        assert!(ids.iter().all(|id| id == "session-0001"));
+        assert_eq!(sessions.created.lock().len(), 1);
+        assert_eq!(
+            service
+                .session_for("remote-session-shared", "generation-0001")
+                .as_deref(),
+            Some("session-0001")
+        );
+    }
+
+    #[test]
+    fn lifecycle_cleanup_invalidates_old_session_before_next_generation_can_submit() {
+        let service = RemoteTaskService::new(Arc::new(RemoteTaskLedger::in_memory()));
+        let sessions = Arc::new(FakeSessions::default());
+        service.set_session_provisioner(sessions.clone());
+        assert_eq!(
+            service
+                .ensure_remote_session("remote-session-shared", "Remote", false, "generation-0001",)
+                .unwrap(),
+            "session-0001"
+        );
+
+        service.interrupt_generation_and_clear_sessions(
+            "generation-0001",
+            "remote_control_stopped",
+            1_100,
+        );
+
+        assert_eq!(
+            service
+                .ensure_remote_session("remote-session-shared", "Remote", false, "generation-0001",)
+                .unwrap(),
+            "session-0002",
+            "a late old-generation prepare may create a session but must stay generation-bound"
+        );
+
+        let mut stale = payload(
+            "session-0002",
+            "task-generation-0002",
+            "client-generation-0002",
+            &digest(2),
+        );
+        stale["remote_control_generation"] = json!("generation-0002");
+        assert_eq!(
+            service
+                .submit_bound(&context("generation-0002"), &stale, 1_200)
+                .unwrap_err()
+                .code,
+            "task_session_not_found"
+        );
+        service.clear_generation_sessions("generation-0001");
+        assert_eq!(
+            service
+                .ensure_remote_session("remote-session-shared", "Remote", false, "generation-0002",)
+                .unwrap(),
+            "session-0003"
+        );
+        assert_eq!(sessions.created.lock().len(), 3);
+    }
+
+    #[test]
+    fn bound_admission_installs_resources_before_racing_lifecycle_cleanup() {
+        #[derive(Default)]
+        struct InstallationOrderScope {
+            installed: AtomicBool,
+            cleanup_saw_installed: AtomicBool,
+        }
+
+        impl RemoteTaskModelScope for InstallationOrderScope {
+            fn release_task_credentials(&self, _task_id: &str) {
+                self.cleanup_saw_installed
+                    .store(self.installed.load(Ordering::SeqCst), Ordering::SeqCst);
+            }
+        }
+
+        let service = Arc::new(RemoteTaskService::new(Arc::new(
+            RemoteTaskLedger::in_memory(),
+        )));
+        service.set_session_provisioner(Arc::new(FakeSessions::default()));
+        assert_eq!(
+            service
+                .ensure_remote_session("remote-session-race", "Remote", false, "generation-0001",)
+                .unwrap(),
+            "session-0001"
+        );
+        let scope = Arc::new(InstallationOrderScope::default());
+        service.hooks().set_model_scope(scope.clone());
+        let body = payload(
+            "session-0001",
+            "task-install-race",
+            "client-install-race",
+            &digest(9),
+        );
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let submit_service = service.clone();
+        let install_scope = scope.clone();
+        let submit = std::thread::spawn(move || {
+            submit_service.submit_bound_with_admission(
+                &context("generation-0001"),
+                &body,
+                1_000,
+                |_| {
+                    entered_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                    install_scope.installed.store(true, Ordering::SeqCst);
+                    Ok(())
+                },
+            )
+        });
+        entered_rx.recv().unwrap();
+
+        let (cleanup_started_tx, cleanup_started_rx) = std::sync::mpsc::channel();
+        let cleanup_service = service.clone();
+        let cleanup = std::thread::spawn(move || {
+            cleanup_started_tx.send(()).unwrap();
+            cleanup_service.interrupt_generation_and_clear_sessions(
+                "generation-0001",
+                "remote_control_stopped",
+                1_001,
+            )
+        });
+        cleanup_started_rx.recv().unwrap();
+        std::thread::yield_now();
+        release_tx.send(()).unwrap();
+
+        assert!(matches!(
+            submit.join().unwrap(),
+            Ok(AdmissionOutcome::Admitted(_))
+        ));
+        assert_eq!(cleanup.join().unwrap().len(), 1);
+        assert!(scope.cleanup_saw_installed.load(Ordering::SeqCst));
+        assert_eq!(
+            service.status("task-install-race").unwrap().state,
+            RemoteTaskState::Interrupted
+        );
+    }
+
+    #[test]
+    fn old_generation_cleanup_preserves_a_new_generation_mapping() {
+        let service = RemoteTaskService::new(Arc::new(RemoteTaskLedger::in_memory()));
+        service.set_session_provisioner(Arc::new(FakeSessions::default()));
+        assert_eq!(
+            service
+                .ensure_remote_session(
+                    "remote-session-generation-1",
+                    "Remote 1",
+                    false,
+                    "generation-0001",
+                )
+                .unwrap(),
+            "session-0001"
+        );
+        assert_eq!(
+            service
+                .ensure_remote_session(
+                    "remote-session-generation-2",
+                    "Remote 2",
+                    false,
+                    "generation-0002",
+                )
+                .unwrap(),
+            "session-0002"
+        );
+
+        service.interrupt_generation_and_clear_sessions(
+            "generation-0001",
+            "remote_control_stopped",
+            1_100,
+        );
+
+        assert_eq!(
+            service.session_for("remote-session-generation-1", "generation-0001"),
+            None
+        );
+        assert_eq!(
+            service
+                .session_for("remote-session-generation-2", "generation-0002")
+                .as_deref(),
+            Some("session-0002")
+        );
+    }
+
+    #[test]
     fn session_map_is_opaque_and_blocks_closing_a_busy_session() {
         let (service, _hooks) = service(RecordingExecutor::ok());
         service.set_session_provisioner(Arc::new(FakeSessions::default()));
         assert_eq!(
             service
-                .open_remote_session("remote-session-0001", "Remote", false)
+                .open_remote_session("remote-session-0001", "Remote", false, "generation-0001",)
                 .unwrap(),
             "session-0001"
         );
@@ -2322,7 +2870,7 @@ mod tests {
         );
         assert_eq!(
             service
-                .close_remote_session("remote-session-0001")
+                .close_remote_session("remote-session-0001", "generation-0001")
                 .unwrap_err()
                 .code,
             "task_session_busy"
@@ -2331,7 +2879,9 @@ mod tests {
             .complete("task-0001", RemoteTaskTerminal::Succeeded, None, 1_100)
             .unwrap();
         assert_eq!(
-            service.close_remote_session("remote-session-0001").unwrap(),
+            service
+                .close_remote_session("remote-session-0001", "generation-0001")
+                .unwrap(),
             Some("session-0001".to_owned())
         );
         assert!(!service.is_remote_session("session-0001"));
@@ -2400,18 +2950,20 @@ mod tests {
                 .complete(&task_id, RemoteTaskTerminal::Succeeded, None, 1_100)
                 .unwrap();
         }
-        assert!(ledger
-            .admit(
-                &live,
-                &request(&payload(
-                    "session-9999",
-                    "task-9999",
-                    "client-9999",
-                    &digest(2),
-                )),
-                1_200,
-            )
-            .is_ok());
+        assert!(
+            ledger
+                .admit(
+                    &live,
+                    &request(&payload(
+                        "session-9999",
+                        "task-9999",
+                        "client-9999",
+                        &digest(2),
+                    )),
+                    1_200,
+                )
+                .is_ok()
+        );
         assert!(ledger.records().len() <= MAX_TRACKED_TASKS);
     }
 }

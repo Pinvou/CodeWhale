@@ -66,7 +66,7 @@ verify_public() {
     VERIFY_ERROR="公网健康检查失败：$PUBLIC_URL/healthz"
     return 1
   fi
-  if ! node -e 'const h=JSON.parse(process.argv[1]); if(!h.ok || !("room_count" in h) || "rooms" in h) process.exit(1)' "$health"; then
+  if ! node -e 'const h=JSON.parse(process.argv[1]); const expected=process.argv[2]; if(!h.ok || !("room_count" in h) || "rooms" in h || (expected === "release" && h.desktop_controller_enabled !== true)) process.exit(1)' "$health" "$expected"; then
     VERIFY_ERROR="公网健康检查返回格式不符合预期"
     return 1
   fi
@@ -121,6 +121,8 @@ ensure_cached_db "$IPV6_DB_CACHE" "$IPV6_DB_URL" "$IPV6_DB_SHA256"
 
 tar -czf - -C "$RELAY_DIR" \
   $(cd "$RELAY_DIR" && ls *.js) \
+  scripts/deploy-controller-preflight.mjs \
+  scripts/controller-route-smoke.mjs \
   -C "$ROOT" \
   docs/schemas/behavior-telemetry-v1.schema.json \
   docs/schemas/behavior-telemetry-registries.json \
@@ -152,6 +154,10 @@ code_stage="$remote_dir/code.next-$stamp"
 web_stage="$remote_dir/web/dist.next-$stamp"
 dropin_dir="/etc/systemd/system/${service}.d"
 dropin="$dropin_dir/10-hardening.conf"
+controller_dropin="$dropin_dir/40-controller.conf"
+controller_env="/etc/pinvou-remote-relay-controller.env"
+controller_state_root="/var/lib/pinvou-remote-relay"
+controller_state_dir="$controller_state_root/state"
 telemetry_data_dir="/var/lib/pinvou-telemetry"
 ipv4_db="$telemetry_data_dir/ip2region_v4.xdb"
 ipv6_db="$telemetry_data_dir/ip2region_v6.xdb"
@@ -165,6 +171,16 @@ rm -f "$code_tmp"
 node --check "$code_stage/server.js"
 node --check "$code_stage/telemetry-service.js"
 node --check "$code_stage/behavior-telemetry-schema.js"
+node --check "$code_stage/scripts/deploy-controller-preflight.mjs"
+node --check "$code_stage/scripts/controller-route-smoke.mjs"
+# Production desktop control is a required lane. The secret-bearing environment
+# file is provisioned out of band and must never be generated or printed here.
+node "$code_stage/scripts/deploy-controller-preflight.mjs" "$controller_env"
+# The state store deliberately refuses to create missing ancestors. Provision
+# its dedicated root explicitly so a first deployment on a clean host can
+# start without weakening the store's symlink/ownership checks.
+install -d -o root -g root -m 700 "$controller_state_root"
+install -d -o root -g root -m 700 "$controller_state_dir"
 test -f "$code_stage/docs/schemas/behavior-telemetry-v1.schema.json"
 test -f "$code_stage/docs/schemas/behavior-telemetry-registries.json"
 mkdir -p "$remote_dir/web"
@@ -216,6 +232,11 @@ if [[ -f "$dropin" ]]; then
 else
   touch "$backup/no-hardening-dropin"
 fi
+if [[ -f "$controller_dropin" ]]; then
+  cp -a "$controller_dropin" "$backup/40-controller.conf"
+else
+  touch "$backup/no-controller-dropin"
+fi
 
 rollback() {
   if [[ -f "$backup/no-server" ]]; then rm -f "$remote_dir/server.js"; else cp -a "$backup/server.js" "$remote_dir/server.js"; fi
@@ -237,6 +258,12 @@ rollback() {
   else
     cp -a "$backup/10-hardening.conf" "$dropin"
   fi
+  if [[ -f "$backup/no-controller-dropin" ]]; then
+    rm -f "$controller_dropin"
+  else
+    cp -a "$backup/40-controller.conf" "$controller_dropin"
+  fi
+  rm -rf "$code_stage" "$web_stage"
   systemctl daemon-reload
   systemctl restart "$service"
 }
@@ -297,12 +324,16 @@ done
 mkdir -p "$remote_dir/docs"
 rm -rf "$remote_dir/docs/schemas"
 mv "$code_stage/docs/schemas" "$remote_dir/docs/schemas"
-rm -rf "$code_stage"
 (cd "$remote_dir" && node --input-type=module -e "await import('./telemetry-service.js')")
 rm -rf "$remote_dir/web/dist"
 mv "$web_stage" "$remote_dir/web/dist"
 mv "$stats_tmp" "$remote_dir/web/stats.html"
 mv "$hardening_tmp" "$dropin"
+controller_dropin_tmp="$dropin_dir/.40-controller.conf.${stamp}.tmp"
+printf '[Service]\nEnvironmentFile=%s\n' "$controller_env" > "$controller_dropin_tmp"
+chown root:root "$controller_dropin_tmp"
+chmod 644 "$controller_dropin_tmp"
+mv "$controller_dropin_tmp" "$controller_dropin"
 systemctl daemon-reload
 
 if ! systemctl restart "$service" || ! systemctl is-active --quiet "$service"; then
@@ -316,7 +347,8 @@ fi
 # 「启动稍慢」误判成失败并触发回滚（2026-09-19 实测踩坑）。
 healthy=0
 for _ in $(seq 1 30); do
-  if curl -fsS http://127.0.0.1:8787/pinvou3/remote/healthz >/dev/null \
+  health="$(curl -fsS http://127.0.0.1:8787/pinvou3/remote/healthz 2>/dev/null || true)"
+  if node -e 'const h=JSON.parse(process.argv[1]); if(!h.ok || h.desktop_controller_enabled !== true) process.exit(1)' "$health" 2>/dev/null \
     && curl -fsS http://127.0.0.1:8787/pinvou3/telemetry/healthz >/dev/null; then
     healthy=1
     break
@@ -329,6 +361,14 @@ if [ "$healthy" != "1" ]; then
   echo "健康检查失败，已从 $backup 回滚" >&2
   exit 1
 fi
+if ! (cd "$remote_dir" && node "$code_stage/scripts/controller-route-smoke.mjs" \
+  "ws://127.0.0.1:8787/pinvou3/remote/ws"); then
+  trap - ERR
+  rollback
+  echo "controller-v1 路由烟测失败，已从 $backup 回滚" >&2
+  exit 1
+fi
+rm -rf "$code_stage"
 trap - ERR
 echo "backup=$backup"
 REMOTE
@@ -363,6 +403,11 @@ if [[ -f "$backup/no-package-lock" ]]; then rm -f "$remote_dir/package-lock.json
 if [[ -f "$remote_dir/package.json" ]]; then (cd "$remote_dir" && npm ci --omit=dev); fi
 if [[ -f "$backup/no-telemetry-service" ]]; then rm -f "$remote_dir/telemetry-service.js"; else cp -a "$backup/telemetry-service.js" "$remote_dir/telemetry-service.js"; fi
 if [[ -f "$backup/no-behavior-telemetry-schema" ]]; then rm -f "$remote_dir/behavior-telemetry-schema.js"; else test -f "$backup/behavior-telemetry-schema.js"; cp -a "$backup/behavior-telemetry-schema.js" "$remote_dir/behavior-telemetry-schema.js"; fi
+# 与远程部署阶段的 rollback() 保持一致：根目录 JS 是一个发布单元，
+# 公网验证失败时也必须删除新版残留并整体恢复旧集合。
+test -d "$backup/code-js"
+rm -f "$remote_dir"/*.js
+if compgen -G "$backup/code-js/*.js" > /dev/null; then cp -a "$backup/code-js"/*.js "$remote_dir"/; fi
 rm -rf "$remote_dir/docs/schemas"
 if [[ ! -f "$backup/no-telemetry-schemas" ]]; then test -d "$backup/telemetry-schemas"; mkdir -p "$remote_dir/docs"; cp -a "$backup/telemetry-schemas" "$remote_dir/docs/schemas"; fi
 if [[ -f "$backup/no-stats-html" ]]; then rm -f "$remote_dir/web/stats.html"; else cp -a "$backup/stats.html" "$remote_dir/web/stats.html"; fi
@@ -372,10 +417,24 @@ else
   test -f "$backup/10-hardening.conf"
   cp -a "$backup/10-hardening.conf" "/etc/systemd/system/${service}.d/10-hardening.conf"
 fi
+if [[ -f "$backup/no-controller-dropin" ]]; then
+  rm -f "/etc/systemd/system/${service}.d/40-controller.conf"
+else
+  test -f "$backup/40-controller.conf"
+  cp -a "$backup/40-controller.conf" "/etc/systemd/system/${service}.d/40-controller.conf"
+fi
 systemctl daemon-reload
 systemctl restart "$service"
 systemctl is-active --quiet "$service"
-curl -fsS http://127.0.0.1:8787/pinvou3/remote/healthz >/dev/null
+healthy=0
+for _ in $(seq 1 30); do
+  if curl -fsS http://127.0.0.1:8787/pinvou3/remote/healthz >/dev/null 2>&1; then
+    healthy=1
+    break
+  fi
+  sleep 1
+done
+test "$healthy" = 1
 echo "已恢复备份：$backup"
 REMOTE
 }

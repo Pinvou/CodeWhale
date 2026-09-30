@@ -55,7 +55,11 @@ impl ControlledCleanupSink for DesktopControlledCleanup {
         let now_b = controlled_monotonic_millis();
         let _ = runtime
             .service()
-            .interrupt_generation(generation, "remote_control_stopped", now_b);
+            .interrupt_generation_and_clear_sessions(
+                generation,
+                "remote_control_stopped",
+                now_b,
+            );
     }
 }
 
@@ -70,21 +74,75 @@ impl ControlledBusinessPort for DesktopControlledBusiness {
         &self,
         lease: &LeaseContext,
         request_id: &str,
+        session_id: Option<&str>,
         known_revision: u64,
     ) -> Result<Value, String> {
+        let controlled_session = if let Some(session_ref) = session_id.filter(|value| !value.is_empty()) {
+            let authoritative_id = super::desktop_remote_task::ensure_controlled_session(
+                &self.app,
+                session_ref,
+                "",
+                false,
+                &lease.remote_control_generation,
+            )?;
+            Some((session_ref.to_owned(), authoritative_id))
+        } else {
+            None
+        };
         let capabilities = self.app.state::<CapabilitySnapshotManager>();
-        // 本地已持有同一 revision 且未过期时直接复用，避免每次请求都抬 revision。
-        if let Ok(current) = capabilities.validate(
-            &known_revision.to_string(),
-            lease,
-            crate::features::remote_control::controller::relay_runtime::controlled_monotonic_millis(),
-        ) {
-            if known_revision > 0 {
-                return Ok(capabilities.wire_capability_snapshot(&current, request_id));
+        let now_b =
+            crate::features::remote_control::controller::relay_runtime::controlled_monotonic_millis();
+        // 只复用刚生成、且比 A 已知 revision 更新的快照：这能吸收紧邻的重复
+        // 请求，又不会把临近过期的快照当作完整 30 秒租期返回给兼容旧报文的 A。
+        if let Ok(current) = capabilities.current_for_context(lease, now_b) {
+            let payload = capabilities.wire_capability_snapshot(&current, request_id);
+            let revision = payload["capability_revision"]
+                .as_str()
+                .and_then(|value| value.parse::<u64>().ok())
+                .unwrap_or(0);
+            let remaining_ms = payload["expires_at_ms"]
+                .as_str()
+                .and_then(|value| value.parse::<u64>().ok())
+                .unwrap_or(0)
+                .saturating_sub(now_b);
+            if revision > known_revision && remaining_ms >= 29_000 {
+                if let Some((session_ref, authoritative_id)) = controlled_session.as_ref() {
+                    super::desktop_remote_task::project_controlled_session(
+                        &self.app,
+                        session_ref,
+                        authoritative_id,
+                        lease,
+                    )?;
+                }
+                crate::features::remote_control::controller::relay_runtime::log_controlled_event(
+                    "capability_snapshot_ready",
+                    "cached",
+                );
+                return Ok(payload);
             }
         }
-        let snapshot =
-            super::desktop_remote_capabilities::build_capability_snapshot(&self.app).await?;
+        let snapshot = match super::desktop_remote_capabilities::build_capability_snapshot(&self.app).await {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                crate::features::remote_control::controller::relay_runtime::log_controlled_event(
+                    "capability_snapshot_failed",
+                    &error,
+                );
+                return Err(error);
+            }
+        };
+        crate::features::remote_control::controller::relay_runtime::log_controlled_event(
+            "capability_snapshot_ready",
+            "fresh",
+        );
+        if let Some((session_ref, authoritative_id)) = controlled_session.as_ref() {
+            super::desktop_remote_task::project_controlled_session(
+                &self.app,
+                session_ref,
+                authoritative_id,
+                lease,
+            )?;
+        }
         Ok(capabilities.wire_capability_snapshot(&snapshot, request_id))
     }
 
@@ -94,7 +152,26 @@ impl ControlledBusinessPort for DesktopControlledBusiness {
         session_ref: &str,
         payload: &Value,
     ) -> Result<Value, String> {
-        super::desktop_remote_task::submit_decrypted_task(&self.app, session_ref, payload)
+        crate::features::remote_control::controller::relay_runtime::log_controlled_event(
+            "task_submit_business_entered",
+            "validating",
+        );
+        let result = super::desktop_remote_task::submit_decrypted_task(
+            &self.app,
+            session_ref,
+            payload,
+        );
+        match &result {
+            Ok(_) => crate::features::remote_control::controller::relay_runtime::log_controlled_event(
+                "task_submit_business_accepted",
+                "admitted",
+            ),
+            Err(error) => crate::features::remote_control::controller::relay_runtime::log_controlled_event(
+                "task_submit_business_rejected",
+                error,
+            ),
+        }
+        result
     }
 
     async fn cancel_task(
@@ -165,8 +242,16 @@ fn build_session_snapshot_payload(
     request_id: &str,
     snapshot: &crate::features::remote_control::controller::journal::JournalSnapshot,
 ) -> Result<Value, String> {
-    let raw = serde_json::to_vec(snapshot).map_err(|_| "journal_snapshot_invalid".to_owned())?;
-    let digest = snapshot.digest.clone();
+    // Keep the authenticated snapshot body on the same A-generated session
+    // identity as incremental journal events. The snapshot digest does not
+    // include session ids, so the authoritative continuity proof is unchanged.
+    let mut wire_snapshot = snapshot.clone();
+    for event in &mut wire_snapshot.events {
+        event.session_id = session_ref.to_owned();
+    }
+    let raw = serde_json::to_vec(&wire_snapshot)
+        .map_err(|_| "journal_snapshot_invalid".to_owned())?;
+    let digest = wire_snapshot.digest.clone();
     if digest.len() != 64 {
         return Err("journal_snapshot_invalid".to_owned());
     }
@@ -180,8 +265,8 @@ fn build_session_snapshot_payload(
         "remote_control_generation": lease.remote_control_generation,
         "request_id": request_id,
         "session_id": session_ref,
-        "journal_epoch": snapshot.epoch,
-        "base_sequence": snapshot.sequence.to_string(),
+        "journal_epoch": wire_snapshot.epoch,
+        "base_sequence": wire_snapshot.sequence.to_string(),
         "snapshot_b64": base64::engine::general_purpose::STANDARD.encode(&raw),
         "snapshot_bytes": raw.len().to_string(),
         "sha256": digest,

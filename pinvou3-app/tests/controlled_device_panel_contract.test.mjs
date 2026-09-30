@@ -13,8 +13,10 @@ const settings = source('features/settings/SettingsView.jsx');
 
 const CONTROLLED_KEYS = [
   'section', 'title', 'desc', 'enable', 'disable', 'statusIdle', 'statusWaiting', 'statusConnected',
+  'controlledStatus',
   'codeLabel', 'codeHint', 'refresh', 'deviceLabel', 'modelSource', 'workspacesTitle',
   'readOnlyNotice', 'stopTasks', 'pendingPermissions', 'noAllowControl', 'unsupported',
+  'errorRelayUnavailable',
   // E2E-08 后的零配置体验：服务端点（生产/测试）内置在应用中，用户不需要环境变量。
   'endpointLabel', 'endpointProduction', 'endpointTest', 'endpointHint',
 ];
@@ -59,6 +61,15 @@ test('the panel uses the remote-control toggle as its only disconnect action', (
   assert.ok(!panelCode.includes('disconnectNow'));
 });
 
+test('refresh is unavailable while a controller is connected', () => {
+  const refresh = panel.slice(
+    panel.indexOf('remote.controlledRefresh()'),
+    panel.indexOf('</button>', panel.indexOf('remote.controlledRefresh()')),
+  );
+
+  assert.ok(refresh.includes("status === 'connected'"));
+});
+
 test('the pairing code appears in the controlled connection block', () => {
   const connectionStart = panel.indexOf('copy.connectionTitle');
   const deviceStart = panel.indexOf('copy.deviceLabel');
@@ -90,6 +101,11 @@ test('the panel reuses the shared i18n dictionary and the desktop bridge', () =>
   assert.ok(!/[\u4e00-\u9fff]/.test(panel.replace(/\/\/[^\n]*|\/\*[\s\S]*?\*\//g, '')));
   assert.ok(panel.includes("from '../../hooks/useBridge.js'"));
   assert.ok(panel.includes('controlledDevice'));
+});
+
+test('the panel explains when the relay controller lane is unavailable', () => {
+  assert.ok(panel.includes('desktop_controller_relay_unavailable'));
+  assert.ok(panel.includes('errorRelayUnavailable'));
 });
 
 test('settings keeps the Web share card and the desktop panel separate', () => {

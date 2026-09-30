@@ -31,16 +31,13 @@ use crate::features::{
     knowledge,
     monitor::MonitorState,
     pet::{pet_window, selected_pet},
+    remote_control::RemoteControlManager,
     remote_control::controller::{
-        capabilities::CapabilitySnapshotManager,
-        controlled::ControlledDeviceManager,
-        controlling::ControllingDeviceManager,
-        controlling_session::ControllingSessionManager,
-        encrypted_lane::ControllingLaneState,
-        encrypted_lane::ControlledLaneState,
+        capabilities::CapabilitySnapshotManager, controlled::ControlledDeviceManager,
+        controlling::ControllingDeviceManager, controlling_session::ControllingSessionManager,
+        encrypted_lane::ControlledLaneState, encrypted_lane::ControllingLaneState,
         permission::PermissionAuthority,
     },
-    remote_control::RemoteControlManager,
     remote_knowledge::RemoteKnowledgeService,
     scheduled::tasks as scheduled_tasks,
     sessions::SessionStore,
@@ -1175,6 +1172,7 @@ pub fn run() {
                         store_for_engine.clone(),
                         pool.clone(),
                         acp_pool_for_capabilities.clone(),
+                        temporary_models.clone(),
                     );
                     handle.manage(desktop_task_runtime.ledger());
                     let desktop_attachments =
@@ -1631,6 +1629,7 @@ pub fn run() {
             commands::desktop_remote_task::desktop_remote_task_switch_session,
             commands::desktop_remote_task::desktop_remote_task_close_session,
             commands::desktop_remote_task::desktop_remote_task_submit,
+            commands::desktop_remote_task::desktop_remote_controlled_task_send,
             commands::desktop_remote_task::desktop_remote_task_cancel,
             commands::desktop_remote_task::desktop_remote_task_status,
             commands::desktop_remote_task::desktop_remote_task_interrupt_all,
