@@ -21,14 +21,12 @@ use super::controlling::{
     ControllerLease, ControllerOperation, ControllingDeviceManager, ControllingStatus,
     ResumeStep,
 };
-use super::controlling_session::{
-    ControllingSessionManager, ControllingSessionProjection,
-};
 use super::controlling_handshake::{ControllingHandshake, HandshakeError};
 use super::controlling_runtime::{
     ControllingHandshakeOutcome, ControllingRelayPort, ControllingStageEvent,
     drive_controlling_handshake,
 };
+use super::controlling_session::{ControllingSessionManager, ControllingSessionProjection};
 use super::crypto::{
     ControllerRole as HandshakeRole, HandshakeKeyPair, load_relay_trust_config,
     transport_key_fingerprint,
@@ -777,9 +775,7 @@ fn dispatch_inbound_frame(
     };
     match payload_kind.as_str() {
         "capability_snapshot" => {
-            if let Ok(projection) =
-                sessions.apply_capability_snapshot_for_lease(&lease, &payload)
-            {
+            if let Ok(projection) = sessions.apply_capability_snapshot_for_lease(&lease, &payload) {
                 (sinks.on_session)(&projection);
             }
         }
@@ -871,7 +867,9 @@ fn journal_snapshot_from_wire(payload: &Value) -> Option<JournalSnapshot> {
         .get("snapshot_bytes")
         .and_then(Value::as_str)
         .and_then(|value| value.parse::<usize>().ok())?;
-    let raw = base64::engine::general_purpose::STANDARD.decode(encoded).ok()?;
+    let raw = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .ok()?;
     if raw.len() != declared || raw.len() > MAX_SNAPSHOT_BYTES {
         return None;
     }
@@ -899,13 +897,16 @@ fn journal_event_from_wire(payload: &Value) -> Option<JournalEvent> {
         .get("event_bytes")
         .and_then(Value::as_str)
         .and_then(|value| value.parse::<usize>().ok())?;
-    let raw = base64::engine::general_purpose::STANDARD.decode(encoded).ok()?;
+    let raw = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .ok()?;
     if raw.len() != declared || raw.len() > MAX_EVENT_PAYLOAD_BYTES {
         return None;
     }
     let event: JournalEvent = serde_json::from_slice(&raw).ok()?;
     if payload.get("journal_epoch").and_then(Value::as_str) != Some(event.epoch.as_str())
-        || payload.get("event_sequence").and_then(Value::as_str) != Some(event.sequence.to_string().as_str())
+        || payload.get("event_sequence").and_then(Value::as_str)
+            != Some(event.sequence.to_string().as_str())
         || payload.get("session_id").and_then(Value::as_str) != Some(event.session_id.as_str())
     {
         return None;
@@ -994,8 +995,10 @@ impl JournalExpectations {
             .map(|event| event.session_id.clone())
             .collect();
         for session_id in sessions {
-            self.applied
-                .insert(session_id.clone(), (snapshot.epoch.clone(), snapshot.sequence));
+            self.applied.insert(
+                session_id.clone(),
+                (snapshot.epoch.clone(), snapshot.sequence),
+            );
             self.awaiting_replay.remove(&session_id);
         }
     }
@@ -1189,12 +1192,12 @@ mod tests {
     use super::*;
     use crate::features::remote_control::controller::controlled_handshake::ControlledHandshake;
     use crate::features::remote_control::controller::crypto::AuthenticatedRelayTrustConfig;
+    use crate::features::remote_control::controller::encrypted_lane::EncryptedLane;
     use crate::features::remote_control::controller::relay_transport::transport_channels;
     use crate::features::remote_control::controller::test_support::{
         PairingFixture, encode, lease_context, paired_session_keys, pairing_fixture, signed_relay,
         role_session_keys, signed_reservation,
     };
-    use crate::features::remote_control::controller::encrypted_lane::EncryptedLane;
 
     const RELAY_KEY_ID: &str = "relay-key-service";
 
@@ -1457,7 +1460,11 @@ mod tests {
         assert_eq!(status["status"], "error");
         assert_eq!(status["errorCode"], "pairing_code_invalid");
         assert_eq!(status["hasPendingCode"], false);
-        assert!(statuses.last().is_some_and(|status| projection(status)["status"] == "error"));
+        assert!(
+            statuses
+                .last()
+                .is_some_and(|status| projection(status)["status"] == "error")
+        );
         // 失败路径不留半租约，也不再占用 transport。
         assert!(sender.authenticated_lease().is_none());
         assert!(sender.is_stopped());
@@ -1544,9 +1551,16 @@ mod tests {
         .await
         .unwrap_err();
         assert_eq!(error, "invalid_message");
-        assert_eq!(projection(&manager.status())["errorCode"], "invalid_message");
+        assert_eq!(
+            projection(&manager.status())["errorCode"],
+            "invalid_message"
+        );
         assert!(sender.authenticated_lease().is_none());
-        assert_eq!(sender.generation(), "", "untrusted transcript must not bind");
+        assert_eq!(
+            sender.generation(),
+            "",
+            "untrusted transcript must not bind"
+        );
 
         // 2) transport 已经绑定过 generation 时，Reserved 阶段必须中止。
         let PairingFixture {
@@ -1561,8 +1575,14 @@ mod tests {
         let mut handshake = a_handshake(&reservation, a_keys, relay.trust.clone());
         let manager = ControllingDeviceManager::default();
         let operation = manager.connect("234-4567").unwrap();
-        let (sender, _receiver) =
-            transport_channels(ControllerRole::ControllerA, "generation-0000", 2, 2, 8192, 1024);
+        let (sender, _receiver) = transport_channels(
+            ControllerRole::ControllerA,
+            "generation-0000",
+            2,
+            2,
+            8192,
+            1024,
+        );
         let error = run_controlling_connection(
             &manager,
             operation,
@@ -2235,9 +2255,12 @@ mod tests {
         // 绑定另一份租约（异 generation）的加密帧：必须在派发前被丢弃。
         let mut foreign_lease = lease.clone();
         foreign_lease.remote_control_generation = "generation-other".into();
-        let mut foreign_responder =
-            EncryptedLane::new(HandshakeRole::B, &foreign_lease, responder_session(&foreign_lease))
-                .unwrap();
+        let mut foreign_responder = EncryptedLane::new(
+            HandshakeRole::B,
+            &foreign_lease,
+            responder_session(&foreign_lease),
+        )
+        .unwrap();
         let mut foreign_status = status.clone();
         foreign_status["remote_control_generation"] = serde_json::json!("generation-other");
         let foreign = foreign_responder
@@ -2255,8 +2278,9 @@ mod tests {
         let mut statuses = Vec::new();
         let mut session_projections = Vec::new();
         let mut task_events = Vec::new();
-        let mut on_status =
-            |status: &ControllingStatus| statuses.push(projection(status)["status"].as_str().unwrap().to_owned());
+        let mut on_status = |status: &ControllingStatus| {
+            statuses.push(projection(status)["status"].as_str().unwrap().to_owned())
+        };
         let mut on_session = |projection: &ControllingSessionProjection| {
             session_projections.push(projection.capability_revision);
         };
@@ -2629,13 +2653,21 @@ mod tests {
         };
         let mut responder = EncryptedLane::new(HandshakeRole::B, &lease, b_session).unwrap();
         let good = responder
-            .seal("session_snapshot", &wire(&snapshot.digest, 7), &capabilities)
+            .seal(
+                "session_snapshot",
+                &wire(&snapshot.digest, 7),
+                &capabilities,
+            )
             .unwrap();
         let bad_digest = responder
             .seal("session_snapshot", &wire(&"b".repeat(64), 7), &capabilities)
             .unwrap();
         let bad_base = responder
-            .seal("session_snapshot", &wire(&snapshot.digest, 6), &capabilities)
+            .seal(
+                "session_snapshot",
+                &wire(&snapshot.digest, 6),
+                &capabilities,
+            )
             .unwrap();
 
         let mut lane = TestLane {
@@ -2726,7 +2758,11 @@ mod tests {
         // 回放落地后重新允许请求。
         expectations.mark_applied(&event("epoch-1", 2));
         assert_eq!(expectations.expected("session-a"), Some(("epoch-1", 2)));
-        assert!(expectations.begin_replay("session-a", "epoch-1", 2).is_some());
+        assert!(
+            expectations
+                .begin_replay("session-a", "epoch-1", 2)
+                .is_some()
+        );
     }
 
     /// E2E-05 缺口恢复：回放请求必须是冻结形状且通过运行时校验（角色 A +
@@ -2739,14 +2775,9 @@ mod tests {
 
         let PairingFixture { reservation, .. } = pairing_fixture(RELAY_KEY_ID);
         let lease = lease_context(&reservation);
-        let payload = build_journal_replay_request(
-            &lease,
-            "session-a-ref",
-            "epoch-1",
-            7,
-            "request-replay-1",
-        )
-        .unwrap();
+        let payload =
+            build_journal_replay_request(&lease, "session-a-ref", "epoch-1", 7, "request-replay-1")
+                .unwrap();
         validate_controller_runtime_payload_json(
             &payload.to_string(),
             SenderRole::ControllerA,

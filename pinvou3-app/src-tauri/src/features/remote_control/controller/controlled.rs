@@ -511,10 +511,7 @@ impl ControlledDeviceManager {
     }
 
     /// E2E-06：开启一次存活挑战（生成 + 登记）并返回 (challenge_id, challenge_b64)。
-    pub(crate) fn begin_liveness_challenge(
-        &self,
-        now_b: u64,
-    ) -> Result<(String, String)> {
+    pub(crate) fn begin_liveness_challenge(&self, now_b: u64) -> Result<(String, String)> {
         let (challenge_id, challenge_b64) = super::liveness::new_liveness_challenge()
             .map_err(|_| ControlledStateError::new("liveness_challenge_invalid"))?;
         {
@@ -1005,7 +1002,8 @@ impl ControlledDeviceManager {
             clear_sensitive(&mut inner, u64::MAX, clear_workspaces);
             inner.device_name = None;
             inner.phase = phase;
-            inner.error_code = (phase == ControlledStatusKind::Error).then(|| error_code.to_owned());
+            inner.error_code =
+                (phase == ControlledStatusKind::Error).then(|| error_code.to_owned());
         }
         self.notify_cleanup(&generation);
         self.status()
@@ -1473,7 +1471,10 @@ mod tests {
         );
         let status = manager.poll_watchdog(31_000);
         assert_eq!(status.status, ControlledStatusKind::Error);
-        assert_eq!(status.error_code.as_deref(), Some("desktop_remote_watchdog_expired"));
+        assert_eq!(
+            status.error_code.as_deref(),
+            Some("desktop_remote_watchdog_expired")
+        );
         assert_eq!(status.workspace_count, 0);
         assert_eq!(cleanup.0.load(Ordering::SeqCst), 1);
     }
@@ -1530,7 +1531,10 @@ mod tests {
         let refresh = manager.begin_refresh().unwrap();
         let status = manager.fail_refresh(refresh).unwrap();
         assert_eq!(status.status, ControlledStatusKind::Error);
-        assert_eq!(status.error_code.as_deref(), Some("desktop_remote_refresh_failed"));
+        assert_eq!(
+            status.error_code.as_deref(),
+            Some("desktop_remote_refresh_failed")
+        );
         assert_eq!(status.workspace_count, 0);
         assert_eq!(cleanup.0.load(Ordering::SeqCst), 1);
         assert_eq!(
@@ -1584,11 +1588,11 @@ mod tests {
         assert_eq!(status.status, ControlledStatusKind::Stopped);
         assert_eq!(status.workspace_count, 1, "用户工作区授权必须保留");
         assert_eq!(status.controller_device_name, None);
+        assert_eq!(status.pairing_code, None, "远端断开后不得残留连接码");
         assert_eq!(
-            status.pairing_code, None,
-            "远端断开后不得残留连接码"
+            manager.live_lease().unwrap_err().code,
+            "desktop_remote_not_connected"
         );
-        assert_eq!(manager.live_lease().unwrap_err().code, "desktop_remote_not_connected");
         assert_eq!(
             manager.accept_remote_disconnect().unwrap_err().code,
             "desktop_remote_phase_invalid"

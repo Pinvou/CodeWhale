@@ -12,9 +12,7 @@ use async_trait::async_trait;
 use deepseek_tui::AppMode;
 use tokio_util::sync::CancellationToken;
 
-use crate::features::remote_control::controller::task::{
-    RemoteChatTurnPort, TASK_CANCELLED_CODE,
-};
+use crate::features::remote_control::controller::task::{RemoteChatTurnPort, TASK_CANCELLED_CODE};
 
 use super::engine_pool::EnginePool;
 
@@ -66,7 +64,10 @@ impl RemoteChatTranscriptPort for StoreChatTranscript {
             .find(|message| message.role == Role::Assistant)?;
         let mut text = String::new();
         for block in &message.content {
-            if let ContentBlock::Text { text: block_text, .. } = block {
+            if let ContentBlock::Text {
+                text: block_text, ..
+            } = block
+            {
                 text.push_str(block_text);
             }
         }
@@ -175,8 +176,8 @@ impl RemoteChatTurnPort for EnginePoolChatTurnPort {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     #[derive(Default)]
     struct FakeEngine {

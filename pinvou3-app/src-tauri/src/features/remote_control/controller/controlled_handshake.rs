@@ -6,16 +6,16 @@
 //! `controller_pairing_reserved` 同时投递给 A 与 B（controller-router.js:161）。
 
 use base64::Engine as _;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
+use super::controlling_handshake::{JoinedLease, validate_joined_lease};
 use super::crypto::{
-    authenticate_relay_transcript, AuthenticatedRelayTrustConfig, ControllerRole, FinishedReceiver,
-    FinishedSender, HandshakeBinding, HandshakeKeyPair, HandshakePublicKey, ReceiptSecret,
-    SessionKeys,
+    AuthenticatedRelayTrustConfig, ControllerRole, FinishedReceiver, FinishedSender,
+    HandshakeBinding, HandshakeKeyPair, HandshakePublicKey, ReceiptSecret, SessionKeys,
+    authenticate_relay_transcript,
 };
-use super::controlling_handshake::{validate_joined_lease, JoinedLease};
 use super::protocol::{
-    parse_controller_pairing_transcript, validate_controller_message_json, SenderRole,
+    SenderRole, parse_controller_pairing_transcript, validate_controller_message_json,
 };
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -130,7 +130,9 @@ impl ControlledHandshake {
     /// 记录 A 的 commitment；只有它到达后才允许回送 B 的 Finished。
     pub(crate) fn accept_peer_commitment(&mut self, message: &Value) -> Result<()> {
         if self.stage != ControlledHandshakeStage::Committed {
-            return Err(ControlledHandshakeError::new("controller_handshake_stage_invalid"));
+            return Err(ControlledHandshakeError::new(
+                "controller_handshake_stage_invalid",
+            ));
         }
         self.assert_peer_envelope(message, "finished_receipt_commit", "A")?;
         let commitment = message
@@ -147,7 +149,9 @@ impl ControlledHandshake {
     /// B 的 `encrypted_handshake_finished`。
     pub(crate) fn finished(&mut self) -> Result<Value> {
         if self.stage != ControlledHandshakeStage::PeerCommitted {
-            return Err(ControlledHandshakeError::new("controller_handshake_stage_invalid"));
+            return Err(ControlledHandshakeError::new(
+                "controller_handshake_stage_invalid",
+            ));
         }
         let sender = self
             .finished_sender
@@ -171,7 +175,9 @@ impl ControlledHandshake {
     /// `finished_receipt_ack`（receiver_role = 回执方 B，sender_role = A）。
     pub(crate) fn accept_peer_finished(&mut self, message: &Value) -> Result<Value> {
         if self.stage != ControlledHandshakeStage::Finished {
-            return Err(ControlledHandshakeError::new("controller_handshake_stage_invalid"));
+            return Err(ControlledHandshakeError::new(
+                "controller_handshake_stage_invalid",
+            ));
         }
         self.assert_peer_envelope(message, "encrypted_handshake_finished", "A")?;
         let ciphertext = base64::engine::general_purpose::STANDARD
@@ -193,7 +199,9 @@ impl ControlledHandshake {
             .commitment(&self.binding, ControllerRole::A)
             .map_err(|_| ControlledHandshakeError::new("controller_commitment_failed"))?;
         if self.peer_commitment.as_deref() != Some(hex_lower(&commitment).as_str()) {
-            return Err(ControlledHandshakeError::new("controller_commitment_mismatch"));
+            return Err(ControlledHandshakeError::new(
+                "controller_commitment_mismatch",
+            ));
         }
         let ack = self.envelope(
             "finished_receipt_ack",
@@ -214,7 +222,9 @@ impl ControlledHandshake {
             self.stage,
             ControlledHandshakeStage::Acked | ControlledHandshakeStage::Joined
         ) {
-            return Err(ControlledHandshakeError::new("controller_handshake_stage_invalid"));
+            return Err(ControlledHandshakeError::new(
+                "controller_handshake_stage_invalid",
+            ));
         }
         self.session
             .take()
@@ -225,7 +235,9 @@ impl ControlledHandshake {
     /// 恢复材料（与 A 端共用同一份校验与解析）。
     pub(crate) fn accept_joined(&mut self, message: &Value) -> Result<JoinedLease> {
         if self.stage != ControlledHandshakeStage::Acked {
-            return Err(ControlledHandshakeError::new("controller_handshake_stage_invalid"));
+            return Err(ControlledHandshakeError::new(
+                "controller_handshake_stage_invalid",
+            ));
         }
         let lease = validate_joined_lease(
             message,
@@ -261,7 +273,9 @@ impl ControlledHandshake {
         if validated.get("type").and_then(Value::as_str) != Some(kind)
             || validated.get("sender_role").and_then(Value::as_str) != Some(role)
         {
-            return Err(ControlledHandshakeError::new("controller_handshake_rejected"));
+            return Err(ControlledHandshakeError::new(
+                "controller_handshake_rejected",
+            ));
         }
         for (field, expected) in [
             ("pairing_id", self.pairing_id.as_str()),
@@ -352,7 +366,8 @@ mod tests {
         let rng = SystemRandom::new();
         let pkcs8 = Ed25519KeyPair::generate_pkcs8(&rng).unwrap();
         let key_pair = Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).unwrap();
-        let encoded = base64::engine::general_purpose::STANDARD.encode(key_pair.public_key().as_ref());
+        let encoded =
+            base64::engine::general_purpose::STANDARD.encode(key_pair.public_key().as_ref());
         let key_id = "relay-key-pair".to_owned();
         let trust =
             AuthenticatedRelayTrustConfig::from_pinned_keys([(key_id.clone(), encoded)]).unwrap();
@@ -373,8 +388,10 @@ mod tests {
         message["transcript"] = transcript;
         message["transcript_hash"] = json!(hex_lower(&Sha256::digest(&preimage)));
         message["relay_signing_key_id"] = json!(relay.key_id);
-        message["relay_signature_b64"] = json!(base64::engine::general_purpose::STANDARD
-            .encode(relay.key_pair.sign(&preimage).as_ref()));
+        message["relay_signature_b64"] = json!(
+            base64::engine::general_purpose::STANDARD
+                .encode(relay.key_pair.sign(&preimage).as_ref())
+        );
         message
     }
 
@@ -417,7 +434,10 @@ mod tests {
         let b_finished = b.finished().unwrap();
 
         let a_ack = a.accept_peer_finished(&b_finished).unwrap();
-        assert_eq!(a.stage(), super::super::controlling_handshake::HandshakeStage::FinishedSent);
+        assert_eq!(
+            a.stage(),
+            super::super::controlling_handshake::HandshakeStage::FinishedSent
+        );
         // 双收据完成后 B 才交出会话密钥；A 仍缺 controller_joined。
         assert_eq!(
             a.take_session().unwrap_err().code,
