@@ -4077,7 +4077,6 @@ mod scheduled_model_tests {
         rebind_evict_with_gates, rebind_evictable, resolve_eval_model_selection_from,
         resolve_runtime_model_override, resolve_scheduled_model, resolve_spawn_model,
         retry_shutdown_sends, scheduled_profile_after_turn_gate, should_still_reap_after_snapshot,
-        should_sync_session,
         user_display_message, validate_prepared_runtime_route,
     };
     use crate::features::assistant::engine::TurnBoundCancelOps;
