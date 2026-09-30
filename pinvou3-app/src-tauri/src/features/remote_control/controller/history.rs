@@ -311,6 +311,16 @@ impl RemoteHistoryStore {
             .ok_or_else(|| error("history_not_found"))
     }
 
+    /// 按会话引用查找本地历史 id（E2E-05：入站 journal 事件按 session ref 落到
+    /// 对应的 A 端独立历史；未绑定历史时返回 None，由调用方决定是否创建）。
+    pub(crate) fn find_by_session_reference(&self, session_ref: &str) -> Option<String> {
+        self.records
+            .lock()
+            .values()
+            .find(|record| record.session_ref == session_ref)
+            .map(|record| record.history_id.clone())
+    }
+
     pub(crate) fn len(&self) -> usize {
         self.records.lock().len()
     }

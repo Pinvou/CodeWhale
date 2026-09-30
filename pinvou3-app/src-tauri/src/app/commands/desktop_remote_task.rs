@@ -9,11 +9,13 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use serde_json::Value;
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager as _, State};
 use tokio_util::sync::CancellationToken;
 
 use crate::features::assistant::engine_pool::EnginePool;
-use crate::features::assistant::remote_turn::{EnginePoolChatEngine, EnginePoolChatTurnPort};
+use crate::features::assistant::remote_turn::{
+    EnginePoolChatEngine, EnginePoolChatTurnPort, StoreChatTranscript,
+};
 use crate::features::codex_acp::remote_turn::{AcpPoolCodeTurnPort, RemoteWorkspaceAuthorizations};
 use crate::features::codex_acp::AcpPool;
 use crate::features::remote_control::controller::capabilities::CapabilitySnapshotManager;
@@ -33,15 +35,6 @@ use crate::features::sessions::SessionStore;
 const UNSUPPORTED: &str = "desktop_remote_control_unsupported";
 const TASK_EVENT: &str = "desktop-remote-task-status";
 const TASK_STATUS_EVENT: &str = "desktop-remote-task-event";
-const NEGOTIATED_CAPABILITIES: &[&str] = &[
-    "pairing_v1",
-    "encrypted_frames_v1",
-    "finished_receipt_v1",
-    "role_liveness_v1",
-    "resume_v1",
-    "task_v1",
-];
-
 fn monotonic_millis() -> u64 {
     use std::sync::OnceLock;
     static ORIGIN: OnceLock<Instant> = OnceLock::new();
@@ -102,6 +95,24 @@ impl ControllerTaskEventSink for TaskEventBridge {
     fn emit(&self, event: Value) {
         let _ = self.app.emit(TASK_STATUS_EVENT, event);
     }
+
+    /// E2E-05：执行器产出的正文事件先写权威 journal，再经加密通道回传 A。
+    fn emit_journal(
+        &self,
+        kind: crate::features::remote_control::controller::journal::JournalKind,
+        session_id: &str,
+        task_id: Option<&str>,
+        payload: Value,
+    ) {
+        use tauri::Manager as _;
+        let history = self
+            .app
+            .state::<Arc<super::desktop_remote_history::DesktopRemoteHistoryRuntime>>();
+        let event_id = format!("journal-{}", uuid::Uuid::new_v4().simple());
+        if let Ok(event) = history.journal().append(&event_id, kind, session_id, task_id, payload) {
+            super::desktop_remote_history::publish_authoritative_event(&self.app, &event);
+        }
+    }
 }
 
 impl RemoteTaskEventSink for TaskEventBridge {
@@ -127,13 +138,14 @@ impl DesktopRemoteTaskRuntime {
         let service = Arc::new(RemoteTaskService::new(Arc::new(RemoteTaskLedger::in_memory())));
         let authorizations = Arc::new(RemoteWorkspaceAuthorizations::default());
         service.set_session_provisioner(Arc::new(DesktopRemoteSessionProvisioner::new(
-            store,
+            store.clone(),
             pool.clone(),
         )));
         service.register_executor(
             TASK_MODE_CHAT,
             Arc::new(ChatTurnExecutor::new(Arc::new(EnginePoolChatTurnPort::new(
                 Arc::new(EnginePoolChatEngine::new(Arc::new(pool))),
+                Arc::new(StoreChatTranscript::new(store)),
             )))),
         );
         service.register_executor(
@@ -222,14 +234,12 @@ fn sanitized_reason(reason: &str) -> String {
 fn validated_task_payload(
     payload: &Value,
     lease: &LeaseContext,
+    negotiated_capabilities: &[String],
 ) -> Result<Value, String> {
     let encoded = serde_json::to_string(payload).map_err(|_| "task_request_invalid".to_owned())?;
     let context = RuntimeValidationContext {
         lease: Some(lease.clone()),
-        negotiated_capabilities: NEGOTIATED_CAPABILITIES
-            .iter()
-            .map(|value| (*value).to_owned())
-            .collect(),
+        negotiated_capabilities: negotiated_capabilities.to_vec(),
     };
     let validated =
         validate_controller_runtime_payload_json(&encoded, SenderRole::ControllerA, Some(&context))
@@ -292,20 +302,89 @@ pub fn desktop_remote_task_submit(
     runtime: RuntimeState<'_>,
 ) -> Result<Value, String> {
     ensure_supported(&controlled)?;
-    let lease = live_context(&controlled)?;
-    let validated = validated_task_payload(&payload, &lease)?;
-    let now_b = monotonic_millis();
+    let (lease, negotiated_capabilities) = controlled
+        .live_runtime_context()
+        .map_err(|error| error.code.to_owned())?;
+    let validated = validated_task_payload(&payload, &lease, &negotiated_capabilities)?;
     let session_id = validated
         .get("session_id")
         .and_then(Value::as_str)
         .ok_or_else(|| "task_request_invalid".to_owned())?
         .to_owned();
-    if runtime.service().is_remote_session(&session_id) {
-        // The remote session map is the only authority for "this B session is
-        // currently owned by a remote controller".
-    } else {
+    // 命令入口只接受已经本地绑定过的远程会话（权威映射存在与否由服务判断）。
+    if !runtime.service().is_remote_session(&session_id) {
         return Err("task_session_not_found".to_owned());
     }
+    admit_and_dispatch(
+        &app,
+        &validated,
+        &lease,
+        &session_id,
+        &capabilities,
+        &models,
+        runtime.service(),
+        monotonic_millis(),
+    )
+}
+
+/// wire 入口（E2E-04）：A 的会话引用首次出现时创建 B 权威会话并建立映射，
+/// 随后与命令入口共用同一套接纳/派发逻辑。
+pub(crate) fn submit_decrypted_task(
+    app: &AppHandle,
+    session_ref: &str,
+    payload: &Value,
+) -> Result<Value, String> {
+    let controlled = app.state::<ControlledDeviceManager>();
+    ensure_supported(&controlled)?;
+    let (lease, negotiated_capabilities) = controlled
+        .live_runtime_context()
+        .map_err(|error| error.code.to_owned())?;
+    let validated = validated_task_payload(payload, &lease, &negotiated_capabilities)?;
+    let mode = validated
+        .get("mode")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "task_request_invalid".to_owned())?
+        .to_owned();
+    let runtime = app.state::<Arc<DesktopRemoteTaskRuntime>>();
+    let service = runtime.service();
+    let session_id = if service.is_remote_session(session_ref) {
+        session_ref.to_owned()
+    } else {
+        service
+            .open_remote_session(session_ref, "", mode == TASK_MODE_CODE)
+            .map_err(|error| error.code.to_owned())?
+    };
+    let mut request = validated;
+    if let Some(object) = request.as_object_mut() {
+        object.insert("session_id".to_owned(), Value::String(session_id.clone()));
+    }
+    let capabilities = app.state::<CapabilitySnapshotManager>();
+    let models = app.state::<SharedTemporaryModelStore>();
+    admit_and_dispatch(
+        app,
+        &request,
+        &lease,
+        &session_id,
+        &capabilities,
+        &models,
+        service,
+        monotonic_millis(),
+    )
+}
+
+/// 接纳并派发一条已通过冻结校验、且会话已在远程映射中的 `task_submit`。
+/// 命令入口与 wire 入口共用，避免两条实现漂移。
+#[allow(clippy::too_many_arguments)]
+fn admit_and_dispatch(
+    app: &AppHandle,
+    validated: &Value,
+    lease: &LeaseContext,
+    session_id: &str,
+    capabilities: &CapabilitySnapshotManager,
+    models: &SharedTemporaryModelStore,
+    service: Arc<RemoteTaskService>,
+    now_b: u64,
+) -> Result<Value, String> {
     let mode = validated
         .get("mode")
         .and_then(Value::as_str)
@@ -321,7 +400,7 @@ pub fn desktop_remote_task_submit(
         .and_then(Value::as_str)
         .ok_or_else(|| "task_request_invalid".to_owned())?
         .to_owned();
-    temporary_model_gate(&model_source, &task_id, models.inner())?;
+    temporary_model_gate(&model_source, &task_id, models)?;
     if mode == TASK_MODE_CODE {
         let workspace_id = validated
             .get("input")
@@ -336,16 +415,18 @@ pub fn desktop_remote_task_submit(
         // The snapshot is a hint; admitting the task still rechecks the live B
         // policy through the bounded ACP authorization registry below.
         capabilities
-            .workspace_for_task(revision, &lease, &workspace_id, now_b)
+            .workspace_for_task(revision, lease, &workspace_id, now_b)
             .map_err(|error| error.code.to_owned())?;
-        if !runtime.authorizations().authorize(&session_id, &workspace_id) {
+        if !app
+            .state::<Arc<DesktopRemoteTaskRuntime>>()
+            .authorizations()
+            .authorize(session_id, &workspace_id)
+        {
             return Err("task_workspace_capacity".to_owned());
         }
     }
-
-    let service = runtime.service();
     let outcome = service
-        .submit(&lease, &validated, now_b)
+        .submit(lease, validated, now_b)
         .map_err(|error| error.code.to_owned())?;
     match outcome {
         AdmissionOutcome::Replay(record) => service
@@ -386,11 +467,28 @@ pub fn desktop_remote_task_cancel(
 ) -> Result<Value, String> {
     ensure_supported(&controlled)?;
     let service = runtime.service();
+    cancel_and_project(&app, &service, &task_id)
+}
+
+/// wire 入口（E2E-04）：取消一条任务并回传终态/请求态载荷。
+pub(crate) fn cancel_decrypted_task(app: &AppHandle, task_id: &str) -> Result<Value, String> {
+    let controlled = app.state::<ControlledDeviceManager>();
+    ensure_supported(&controlled)?;
+    let runtime = app.state::<Arc<DesktopRemoteTaskRuntime>>();
+    cancel_and_project(app, &runtime.service(), task_id)
+}
+
+/// 取消并产出回包（命令入口与 wire 入口共用）。
+fn cancel_and_project(
+    app: &AppHandle,
+    service: &Arc<RemoteTaskService>,
+    task_id: &str,
+) -> Result<Value, String> {
     let outcome = service
-        .cancel(&task_id, monotonic_millis())
+        .cancel(task_id, monotonic_millis())
         .map_err(|error| error.code.to_owned())?;
     let payload = service
-        .status_payload(&task_id)
+        .status_payload(task_id)
         .map_err(|error| error.code.to_owned())?;
     if let CancelOutcome::CancellationRequested(_) = outcome {
         let _ = app.emit(
@@ -441,7 +539,9 @@ mod tests {
         assert_eq!(UNSUPPORTED, "desktop_remote_control_unsupported");
         assert_eq!(TASK_EVENT, "desktop-remote-task-status");
         assert_eq!(TASK_STATUS_EVENT, "desktop-remote-task-event");
-        assert!(NEGOTIATED_CAPABILITIES.contains(&"task_v1"));
+        // 任务校验的能力集来自活租约的协商结果（live_runtime_context），
+        // 不再使用本文件内的常量表。
+        assert!(!TASK_MODE_CHAT.is_empty());
     }
 
     #[test]

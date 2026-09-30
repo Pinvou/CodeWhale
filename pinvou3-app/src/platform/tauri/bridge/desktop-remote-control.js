@@ -67,6 +67,12 @@
           unlisten.push(off);
         }).catch(function () {});
       });
+      listen("desktop-remote-controller-session", function (event) {
+        var payload = event && event.payload ? event.payload : event || {};
+        publish(logic.applyControllerSession(current(), payload));
+      }).then(function (off) {
+        unlisten.push(off);
+      }).catch(function () {});
     }
 
     function stop() {
@@ -190,6 +196,136 @@
     function controllerStatus() {
       ensureAvailable();
       return invoke("desktop_remote_controller_status", {});
+    }
+
+    /**
+     * E2E-03: the A-side remote session and task intent. The view passes only UI
+     * fields (title, mode, text); every protocol field, identifier and the input
+     * digest are built in Rust. The composed payload is returned for the
+     * encrypted dispatch task (E2E-04) and is never assembled here.
+     */
+    function controllerSessionOpen(title, mode) {
+      ensureAvailable();
+      subscribe();
+      // 复用当前连接上的会话引用：重复打开是幂等的，不会为同一连接不断创建
+      // 新会话（Rust 侧按引用复用并重新校验 lease 绑定）。
+      var current = current();
+      var existing = current.controllerConnection && current.controllerConnection.sessionRef;
+      return invoke("desktop_remote_controller_session_open", {
+        remoteRef: existing || null,
+        title: title || "",
+        mode: mode || "chat",
+      }).then(function (result) {
+        return applyControllerSession(result);
+      });
+    }
+
+    function controllerSessionState(remoteRef) {
+      ensureAvailable();
+      return invoke("desktop_remote_controller_session_state", { remoteRef: remoteRef });
+    }
+
+    function controllerSessionClose(remoteRef) {
+      ensureAvailable();
+      return invoke("desktop_remote_controller_session_close", { remoteRef: remoteRef });
+    }
+
+    function controllerCapabilityRequest(remoteRef) {
+      ensureAvailable();
+      return invoke("desktop_remote_controller_capability_request", { remoteRef: remoteRef });
+    }
+
+    function controllerApplyCapabilitySnapshot(remoteRef, payload) {
+      ensureAvailable();
+      var body = payload && typeof payload === "object" ? payload : {};
+      return invoke("desktop_remote_controller_apply_capability_snapshot", {
+        remoteRef: remoteRef,
+        payload: body,
+      }).then(function (result) {
+        // 同一个快照同时进入能力域（revision/modes/描述符），字段名按 UI 侧
+        // 约定映射；wire 字段名不会泄漏到状态。
+        publish(logic.applyCapabilities(current(), capabilitySnapshotForUi(body)));
+        return applyControllerSession(result);
+      });
+    }
+
+    function descriptorList(value, idKey) {
+      if (!Array.isArray(value)) return [];
+      return value.slice(0, 256).map(function (item) {
+        var entry = item && typeof item === "object" ? item : {};
+        return {
+          id: entry[idKey] || entry.id || "",
+          displayName: entry.display_name || entry.displayName || "",
+          codeAllowed: !!entry.code_allowed,
+        };
+      });
+    }
+
+    function capabilitySnapshotForUi(payload) {
+      var wire = payload && typeof payload === "object" ? payload : {};
+      var revision = Number(wire.capability_revision);
+      return {
+        connectionId: wire.connection_id || null,
+        leaseEpoch: wire.lease_epoch || null,
+        relayEpoch: wire.relay_epoch || null,
+        remoteControlGeneration: wire.remote_control_generation || null,
+        capabilityRevision: isFinite(revision) ? revision : 0,
+        modes: Array.isArray(wire.modes) ? wire.modes.slice(0, 2) : [],
+        tools: descriptorList(wire.tools, "tool_id"),
+        skills: descriptorList(wire.skills, "skill_id"),
+        workspaces: descriptorList(wire.workspaces, "workspace_id"),
+        expiresAtMs: wire.expires_at_ms || null,
+      };
+    }
+
+    function controllerTaskIntent(remoteRef, text) {
+      ensureAvailable();
+      return invoke("desktop_remote_controller_task_intent", {
+        remoteRef: remoteRef,
+        text: String(text || ""),
+      });
+    }
+
+    function controllerTaskCancelIntent(remoteRef, taskId) {
+      ensureAvailable();
+      return invoke("desktop_remote_controller_task_cancel_intent", {
+        remoteRef: remoteRef,
+        taskId: taskId,
+      });
+    }
+
+    /**
+     * E2E-04: compose and send one encrypted task / cancel frame. The protocol
+     * payload is built and sealed in Rust; the UI only supplies the session
+     * reference plus the text or task id.
+     */
+    function controllerTaskSend(remoteRef, text) {
+      ensureAvailable();
+      return invoke("desktop_remote_controller_task_send", {
+        remoteRef: remoteRef,
+        text: String(text || ""),
+      });
+    }
+
+    function controllerTaskCancelSend(remoteRef, taskId) {
+      ensureAvailable();
+      return invoke("desktop_remote_controller_task_cancel_send", {
+        remoteRef: remoteRef,
+        taskId: taskId,
+      });
+    }
+
+    function applyControllerSession(result) {
+      var payload = result && typeof result === "object" ? result : {};
+      publish(logic.applyControllerSession(current(), {
+        sessionRef: payload.sessionRef || null,
+        sessionId: payload.sessionId || null,
+        mode: payload.mode || null,
+        connectionId: payload.connectionId || null,
+        leaseEpoch: payload.leaseEpoch || null,
+        capabilityRevision: payload.capabilityRevision == null ? null : payload.capabilityRevision,
+      }));
+      return result;
     }
 
     function controllerListHistory() {
@@ -466,6 +602,15 @@
       controllerConnect: controllerConnect,
       controllerDisconnect: controllerDisconnect,
       controllerStatus: controllerStatus,
+      controllerSessionOpen: controllerSessionOpen,
+      controllerSessionState: controllerSessionState,
+      controllerSessionClose: controllerSessionClose,
+      controllerCapabilityRequest: controllerCapabilityRequest,
+      controllerApplyCapabilitySnapshot: controllerApplyCapabilitySnapshot,
+      controllerTaskIntent: controllerTaskIntent,
+      controllerTaskCancelIntent: controllerTaskCancelIntent,
+      controllerTaskSend: controllerTaskSend,
+      controllerTaskCancelSend: controllerTaskCancelSend,
       controllerListHistory: controllerListHistory,
       controllerCreateHistory: controllerCreateHistory,
       capabilitiesSnapshot: capabilitiesSnapshot,

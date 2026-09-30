@@ -35,6 +35,7 @@ use sha2::{Digest, Sha256};
 use tokio_util::sync::CancellationToken;
 
 use super::protocol::LeaseContext;
+use super::journal::JournalKind;
 
 pub(crate) const TASK_MODE_CHAT: &str = "chat";
 pub(crate) const TASK_MODE_CODE: &str = "code";
@@ -92,6 +93,17 @@ fn error(code: &'static str) -> RemoteTaskError {
 /// execution (declared by DEV-07, consumed by the DEV-13 adapters).
 pub(crate) trait ControllerTaskEventSink: Send + Sync {
     fn emit(&self, event: Value);
+
+    /// E2E-05：执行器产出的正文类事件（用户消息 / assistant 回复 / 推理等）。
+    /// 默认忽略；命令层实现为「写权威 journal + 经加密通道回传 A」。
+    fn emit_journal(
+        &self,
+        _kind: super::journal::JournalKind,
+        _session_id: &str,
+        _task_id: Option<&str>,
+        _payload: Value,
+    ) {
+    }
 }
 
 #[async_trait]
@@ -913,6 +925,11 @@ impl RemoteSessionMap {
         self.reverse.lock().contains_key(session_id)
     }
 
+    /// E2E-05：按 B 权威会话 id 反查 A 的会话引用（wire 回传统一用 A 的 ref）。
+    pub(crate) fn remote_ref_for(&self, session_id: &str) -> Option<String> {
+        self.reverse.lock().get(session_id).cloned()
+    }
+
     pub(crate) fn unbind(&self, remote_ref: &str) -> Option<String> {
         let mut forward = self.forward.lock();
         let session_id = forward.remove(remote_ref)?;
@@ -953,12 +970,13 @@ pub(crate) trait RemoteSessionProvisioner: Send + Sync {
 pub(crate) trait RemoteChatTurnPort: Send + Sync {
     /// Runs to the turn terminal state. `Err(TASK_CANCELLED_CODE)` marks an
     /// acknowledged cancellation; any other error is a bounded failure code.
+    /// `Ok(Some(text))` 是该轮次产出的 assistant 正文（E2E-05，用于权威 journal）。
     async fn run_chat_turn(
         &self,
         session_id: &str,
         content: String,
         cancel: CancellationToken,
-    ) -> std::result::Result<(), String>;
+    ) -> std::result::Result<Option<String>, String>;
 }
 
 /// Narrow engine port for code-mode turns.
@@ -988,11 +1006,31 @@ impl ControllerTaskExecutor for ChatTurnExecutor {
     async fn execute(
         &self,
         request: Value,
-        _events: Arc<dyn ControllerTaskEventSink>,
+        events: Arc<dyn ControllerTaskEventSink>,
         cancel: CancellationToken,
     ) -> std::result::Result<(), String> {
         let (session_id, content) = extract_turn(&request, TASK_MODE_CHAT)?;
-        self.port.run_chat_turn(&session_id, content, cancel).await
+        let task_id = request
+            .get("task_id")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty());
+        // E2E-05：用户消息与回复正文都写进权威 journal（再经 wire 回传 A）。
+        events.emit_journal(
+            JournalKind::UserMessage,
+            &session_id,
+            task_id,
+            json!({ "text": content }),
+        );
+        let reply = self.port.run_chat_turn(&session_id, content, cancel).await?;
+        if let Some(reply) = reply.filter(|text| !text.trim().is_empty()) {
+            events.emit_journal(
+                JournalKind::AssistantDelta,
+                &session_id,
+                task_id,
+                json!({ "text": reply }),
+            );
+        }
+        Ok(())
     }
 }
 
@@ -1199,6 +1237,11 @@ impl RemoteTaskService {
 
     pub(crate) fn is_remote_session(&self, session_id: &str) -> bool {
         self.sessions.is_remote_session(session_id)
+    }
+
+    /// E2E-05：B 权威会话 id → A 的会话引用（未绑定或本地会话返回 None）。
+    pub(crate) fn remote_ref_for(&self, session_id: &str) -> Option<String> {
+        self.sessions.remote_ref_for(session_id)
     }
 
     pub(crate) fn clear_sessions(&self) {
@@ -2159,6 +2202,65 @@ mod tests {
         );
     }
 
+    /// E2E-05：chat 执行器把用户消息与 assistant 回复都交给正文事件端口
+    /// （命令层据此写权威 journal 并回传 A）。
+    #[test]
+    fn chat_executor_journals_the_user_message_and_the_reply() {
+        struct Port;
+
+        #[async_trait]
+        impl RemoteChatTurnPort for Port {
+            async fn run_chat_turn(
+                &self,
+                _session_id: &str,
+                content: String,
+                _cancel: CancellationToken,
+            ) -> std::result::Result<Option<String>, String> {
+                assert_eq!(content, "run the report");
+                Ok(Some("hello from B".to_owned()))
+            }
+        }
+
+        #[derive(Default)]
+        struct Recording(Mutex<Vec<(String, Option<String>, Value)>>);
+
+        impl ControllerTaskEventSink for Recording {
+            fn emit(&self, _event: Value) {}
+
+            fn emit_journal(
+                &self,
+                kind: JournalKind,
+                _session_id: &str,
+                task_id: Option<&str>,
+                payload: Value,
+            ) {
+                self.0.lock().push((
+                    kind.wire().to_owned(),
+                    task_id.map(str::to_owned),
+                    payload,
+                ));
+            }
+        }
+
+        let sink = Arc::new(Recording::default());
+        let executor = ChatTurnExecutor::new(Arc::new(Port));
+        runtime()
+            .block_on(executor.execute(
+                payload("session-0001", "task-0001", "client-0001", &digest(1)),
+                sink.clone(),
+                CancellationToken::new(),
+            ))
+            .unwrap();
+        let events = sink.0.lock();
+        assert_eq!(events.len(), 2, "用户消息与回复各一条正文事件");
+        assert_eq!(events[0].0, "user_message");
+        assert_eq!(events[0].1.as_deref(), Some("task-0001"));
+        assert_eq!(events[0].2["text"], "run the report");
+        assert_eq!(events[1].0, "assistant_delta");
+        assert_eq!(events[1].1.as_deref(), Some("task-0001"));
+        assert_eq!(events[1].2["text"], "hello from B");
+    }
+
     #[test]
     fn missing_executor_for_a_mode_fails_the_task_instead_of_hanging() {
         let (service, _hooks) = service(RecordingExecutor::ok());
@@ -2187,7 +2289,7 @@ mod tests {
                 _session_id: &str,
                 _content: String,
                 _cancel: CancellationToken,
-            ) -> std::result::Result<(), String> {
+            ) -> std::result::Result<Option<String>, String> {
                 panic!("the chat port must not be reached for a code payload");
             }
         }

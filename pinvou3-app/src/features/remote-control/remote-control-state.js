@@ -42,6 +42,12 @@
       leaseEpoch: null,
       deviceName: null,
       lastError: null,
+      // E2E-03：A 端远程会话身份与能力版本由 Rust 构造后投影到这里，视图不再
+      // 自行拼装协议字段。
+      sessionRef: null,
+      sessionId: null,
+      sessionMode: null,
+      capabilityRevision: null,
     };
   }
 
@@ -156,11 +162,54 @@
       leaseEpoch: leaseEpoch || current.leaseEpoch,
       deviceName: payload.deviceName || current.deviceName,
       lastError: payload.error || null,
+      sessionRef: current.sessionRef,
+      sessionId: current.sessionId,
+      sessionMode: current.sessionMode,
+      capabilityRevision: current.capabilityRevision,
     };
     if (CONTROLLER_TERMINAL[status]) {
       next.remoteCapabilities = null;
       next.tasks = [];
+      // 终端状态清空会话身份：旧 sessionId 不得被下一次连接复用。
+      next.controllerConnection.sessionRef = null;
+      next.controllerConnection.sessionId = null;
+      next.controllerConnection.sessionMode = null;
+      next.controllerConnection.capabilityRevision = null;
     }
+    next.revision = state.revision + 1;
+    return next;
+  }
+
+  /**
+   * Applies the A-side remote session projection (E2E-03). The projection is
+   * produced by Rust and carries the session identity bound to the live lease;
+   * a projection from another connection or an older lease is dropped so a
+   * stale session can never be adopted by the current shell.
+   */
+  function applyControllerSession(state, envelope) {
+    var payload = envelope || {};
+    var sessionRef = payload.sessionRef ? String(payload.sessionRef) : "";
+    var sessionId = payload.sessionId ? String(payload.sessionId) : "";
+    if (!sessionRef || !sessionId) return state;
+    var connectionId = payload.connectionId ? String(payload.connectionId) : "";
+    var leaseEpoch = payload.leaseEpoch != null ? String(payload.leaseEpoch) : "";
+    var current = state.controllerConnection;
+    if (CONTROLLER_TERMINAL[current.status]) return state;
+    if (!current.connectionId || (connectionId && connectionId !== current.connectionId)) return state;
+    if (
+      current.leaseEpoch &&
+      leaseEpoch &&
+      Number(leaseEpoch) < Number(current.leaseEpoch)
+    ) {
+      return state;
+    }
+    var revision = payload.capabilityRevision == null ? null : Number(payload.capabilityRevision);
+    var next = shallowCopy(state);
+    next.controllerConnection = shallowCopy(current);
+    next.controllerConnection.sessionRef = sessionRef;
+    next.controllerConnection.sessionId = sessionId;
+    next.controllerConnection.sessionMode = payload.mode ? String(payload.mode) : current.sessionMode;
+    next.controllerConnection.capabilityRevision = revision;
     next.revision = state.revision + 1;
     return next;
   }
@@ -297,6 +346,7 @@
     isCurrentIntent: isCurrentIntent,
     applyControlledStatus: applyControlledStatus,
     applyControllerStatus: applyControllerStatus,
+    applyControllerSession: applyControllerSession,
     applyCapabilities: applyCapabilities,
     applyModels: applyModels,
     applyHistories: applyHistories,

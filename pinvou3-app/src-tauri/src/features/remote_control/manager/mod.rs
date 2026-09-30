@@ -315,6 +315,32 @@ impl ControllerRelayChannel {
     pub fn try_send(&self, message: Value) -> Result<(), String> {
         self.manager.send_controller_message(&self.generation, message)
     }
+
+    /// 可克隆的发送句柄（E2E-05）：B 端 worker 之外（例如权威 journal 的旁路）
+    /// 需要把消息投到同一代 endpoint lane，而接收端仍由 worker 独占。
+    pub fn sender(&self) -> ControllerRelaySender {
+        ControllerRelaySender {
+            manager: self.manager.clone(),
+            generation: self.generation.clone(),
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct ControllerRelaySender {
+    manager: RemoteControlManager,
+    generation: String,
+}
+
+impl ControllerRelaySender {
+    pub fn try_send(&self, message: Value) -> Result<(), String> {
+        self.manager
+            .send_controller_message(&self.generation, message)
+    }
+
+    pub fn generation(&self) -> &str {
+        &self.generation
+    }
 }
 
 impl Drop for ControllerRelayChannel {
