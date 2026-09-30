@@ -820,6 +820,22 @@ returns `{"restored": "<snapshot-id>"}`. The `id` must match a listed
 snapshot exactly (full id, case-sensitive); an unknown or malformed id
 returns `404` before any git command runs.
 
+When the snapshot's owning thread declares a root outside the primary
+workspace, the restore response grows a `boundary` object naming what the
+rollback does not cover: `attached_roots_not_reverted` (always `true`) and
+`note` (human-readable text). Single-root restores keep the legacy bare
+shape above — no `boundary` key.
+
+```json
+{
+  "restored": "<snapshot-id>",
+  "boundary": {
+    "attached_roots_not_reverted": true,
+    "note": "Only the primary workspace was reverted; attached workspace roots were not rolled back."
+  }
+}
+```
+
 ```json
 [
   {
@@ -1060,8 +1076,9 @@ The runtime uses a durable Thread/Turn/Item lifecycle.
   route), `workspace`, `workspace_roots` (the full accessible root set,
   primary first; normalization always prepends the workspace, so a thread
   created through `POST /v1/threads` serializes at least one element — a
-  single-root thread reads `"workspace_roots": ["<workspace>"]` — and only
-  rows persisted before the field existed omit the key entirely), `mode`,
+  single-root thread reads `"workspace_roots": ["<workspace>"]` — and any
+  row whose normalized set is empty — including every row persisted before
+  the field existed — omits the key entirely), `mode`,
   `task_id`, `system_prompt`, `latest_turn_id`,
   `latest_response_bookmark`, `archived`
 - **TurnRecord** — `id`, `thread_id`, `status` (`queued|in_progress|completed|
