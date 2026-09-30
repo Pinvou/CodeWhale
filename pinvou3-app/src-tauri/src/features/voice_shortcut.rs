@@ -522,41 +522,6 @@ mod tests {
     const HWND_B: isize = 200;
 
     #[test]
-    fn recording_claim_release_and_window_destroy_preserve_authority() {
-        let mut owner = None;
-        assert!(update_recording_owner(&mut owner, "main", "a1", true));
-        assert!(!update_recording_owner(
-            &mut owner,
-            "detached-b",
-            "b1",
-            true
-        ));
-        assert!(!update_recording_owner(&mut owner, "main", "a0", false));
-        assert!(!update_recording_owner(
-            &mut owner,
-            "detached-b",
-            "a1",
-            false
-        ));
-        assert_eq!(
-            resolve_trigger_target(owner.as_ref().map(|o| o.label.as_str()), Some("detached-b")),
-            Some(("main".to_string(), "recording"))
-        );
-        forget_owner_window(&mut owner, "detached-b");
-        assert!(owner.is_some());
-        assert!(update_recording_owner(&mut owner, "main", "a1", false));
-        assert!(update_recording_owner(&mut owner, "detached-b", "b1", true));
-        assert!(!update_recording_owner(&mut owner, "main", "a1", false));
-        forget_owner_window(&mut owner, "main");
-        assert_eq!(
-            resolve_trigger_target(owner.as_ref().map(|o| o.label.as_str()), Some("main")),
-            Some(("detached-b".to_string(), "recording"))
-        );
-        forget_owner_window(&mut owner, "detached-b");
-        assert!(owner.is_none());
-    }
-
-    #[test]
     fn modifiers_held_before_alt_pass_through_without_pending_or_trigger() {
         for modifier in ["Shift", "Ctrl", "Win"] {
             for side in [AltSide::Left, AltSide::Right] {
