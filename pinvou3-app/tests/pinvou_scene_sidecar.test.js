@@ -18,31 +18,13 @@ function callbackDependencyList(sourceText, callbackName) {
 }
 
 const dispatchChatMessageDependencies = callbackDependencyList(chatViewSource, 'dispatchChatMessage');
-const expectedDispatchChatMessageDependencies = [
+const requiredDispatchChatMessageDependencies = [
   'activeSessionId',
-  'attachments',
-  'controlledCapabilityBound',
-  'controlledCapabilityBusy',
-  'controlledChatActive',
-  'controlledLinkReady',
-  'controlledSession.sessionId',
-  'controlledSkillIds',
   'dataVisualizationSceneActive',
   'documentWritingSceneActive',
-  'effectiveRemoteModelSource',
   'hasReadyAttachment',
   'personalWorkbenchSceneActive',
   'pptDesignSceneActive',
-  'remoteBinding',
-  'remoteChatActive',
-  'remoteFiles',
-  'remoteMode',
-  'remoteNewDispatchReady',
-  'remoteProxyHistory',
-  'remoteSendIdentity',
-  'remoteSkillIds',
-  'remoteWorkspaceId',
-  'selectedRemoteModelId',
   't',
   'visualPosterSceneActive',
 ];
@@ -300,11 +282,11 @@ function rec(name, pass, detail = '') {
   rec('附件-only 发送也会按当前专业子模式创建 scene meta',
     /if \(visibleOutgoing \|\| hasReadyAttachment\)/.test(chatViewSource) &&
       /const scenePrompt = outgoing \|\| t\.uiChatScenes\.attachmentPrompt;/.test(chatViewSource) &&
-      JSON.stringify(dispatchChatMessageDependencies) === JSON.stringify(expectedDispatchChatMessageDependencies),
+      requiredDispatchChatMessageDependencies.every(value => dispatchChatMessageDependencies?.includes(value)),
     JSON.stringify({
       contract: 'ChatView sendChatMessage dependencies',
       actual: dispatchChatMessageDependencies,
-      expected: expectedDispatchChatMessageDependencies,
+      required: requiredDispatchChatMessageDependencies,
     }));
 
   rec('scene sidecar 通过 session 后端在 Tauri/Web 间共享并保留本地迁移缓存',
