@@ -15,9 +15,7 @@ use parking_lot::Mutex;
 use tokio_util::sync::CancellationToken;
 
 use super::AcpPool;
-use crate::features::remote_control::controller::task::{
-    RemoteCodeTurnPort, TASK_CANCELLED_CODE,
-};
+use crate::features::remote_control::controller::task::{RemoteCodeTurnPort, TASK_CANCELLED_CODE};
 
 const POLL_INTERVAL: Duration = Duration::from_millis(200);
 const BUSY_GRACE: Duration = Duration::from_secs(5);
@@ -33,10 +31,9 @@ pub(crate) struct RemoteWorkspaceAuthorizations {
 impl RemoteWorkspaceAuthorizations {
     pub(crate) fn authorize(&self, session_id: &str, workspace_id: &str) -> bool {
         let mut entries = self.entries.lock();
-        if entries.len() >= MAX_AUTHORIZED_REFS && !entries.contains(&(
-            session_id.to_owned(),
-            workspace_id.to_owned(),
-        )) {
+        if entries.len() >= MAX_AUTHORIZED_REFS
+            && !entries.contains(&(session_id.to_owned(), workspace_id.to_owned()))
+        {
             return false;
         }
         entries.insert((session_id.to_owned(), workspace_id.to_owned()));
