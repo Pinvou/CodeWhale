@@ -354,7 +354,7 @@ pub(crate) const NON_STREAMING_REQUEST_ENVELOPE: Duration = Duration::from_secs(
 static TEST_NON_STREAMING_ENVELOPE_MS: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 
-pub(crate) fn non_streaming_request_envelope() -> Duration {
+fn non_streaming_request_envelope() -> Duration {
     #[cfg(test)]
     {
         let ms = TEST_NON_STREAMING_ENVELOPE_MS.load(std::sync::atomic::Ordering::SeqCst);
