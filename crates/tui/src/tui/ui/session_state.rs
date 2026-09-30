@@ -613,6 +613,36 @@ pub(crate) async fn sync_runtime_workspace_state(
     task_manager.set_default_workspace(workspace).await;
 }
 
+/// Round-26 M26-2: the load/resume faces' root-set seed. The core resume
+/// lane's own rule, applied to the TUI faces that used to seed the
+/// tolerant normalizer even when the session MOVED onto a different
+/// primary — a carried entry that would widen past the new primary (an
+/// ancestor, a super-root) was kept alive in the materialized sandbox for
+/// the process lifetime and durably re-minted by the next autosave, the
+/// exact shape `/cd`, `/fork`, runtime PATCH and every intake refuse. A
+/// PURE load (primary unchanged) keeps the tolerant normalizer so legacy
+/// and hand-edited rows stay loadable; a MOVE validates and refuses
+/// honestly.
+pub(crate) fn seed_loaded_workspace_roots(
+    record_primary: &std::path::Path,
+    persisted_roots: &[std::path::PathBuf],
+    target_primary: &std::path::Path,
+) -> std::result::Result<Vec<std::path::PathBuf>, String> {
+    if record_primary == target_primary {
+        return Ok(codewhale_core::normalize_workspace_roots(
+            target_primary,
+            persisted_roots,
+        ));
+    }
+    codewhale_core::validate_workspace_roots(target_primary, persisted_roots).map_err(|reason| {
+        format!(
+            "the session's recorded root set would widen past {} ({reason}); \
+             load it in its own directory, or clear the widening roots from the saved record",
+            target_primary.display()
+        )
+    })
+}
+
 /// One-line human disclosure for a session that carries accessible roots
 /// beside its primary workspace, capped like the model-facing
 /// `Accessible folders:` line. The turn-meta envelope is model-facing only
@@ -833,12 +863,11 @@ pub(crate) async fn switch_workspace(
     // entries that already disclose the set — without this notice the
     // carried roots silently changed their anchor (or were dropped by the
     // re-normalization) with no in-band disclosure.
-    if carried_additional {
-        if let Some(notice) =
+    if carried_additional
+        && let Some(notice) =
             workspace_roots_notice(app.ui_locale, &workspace, &app.workspace_roots)
-        {
-            app.add_message(HistoryCell::System { content: notice });
-        }
+    {
+        app.add_message(HistoryCell::System { content: notice });
     }
     // The receipt rides the closing line instead of being assigned earlier:
     // an unconditional "Workspace: X" assignment after the persist block used
@@ -1758,5 +1787,60 @@ mod workspace_switch_persistence_tests {
             MessageId::WorkspaceSwitchSnapshotFailed,
         );
         assert!(!ja.contains("Failed to snapshot"), "{ja}");
+    }
+}
+
+#[cfg(test)]
+mod seed_loaded_workspace_roots_tests {
+    use super::seed_loaded_workspace_roots;
+
+    #[test]
+    fn validates_moves_and_tolerates_pure_loads() {
+        // Round-26 M26-2: the four TUI load/resume faces used to seed the
+        // tolerant normalizer even when the session MOVED onto a different
+        // primary, keeping a carried ancestor/super-root alive in the live
+        // sandbox — the shape /cd, /fork, runtime PATCH and every intake
+        // refuse. A move now validates (the refusal names the widening
+        // entry); a pure load in the session's own directory keeps the
+        // tolerant normalizer so legacy rows stay loadable.
+        let record_primary = std::path::PathBuf::from("/work/project");
+        let carried = vec![
+            std::path::PathBuf::from("/work/project"),
+            std::path::PathBuf::from("/home/alice"),
+        ];
+
+        // Pure load: tolerated (the set normalizes under the record primary).
+        let seeded = seed_loaded_workspace_roots(&record_primary, &carried, &record_primary)
+            .expect("a pure load keeps the tolerant normalizer");
+        assert_eq!(seeded, carried);
+
+        // Move: the ancestor entry is refused with the intake reason.
+        let moved_primary = std::path::PathBuf::from("/home/alice/elsewhere");
+        let err = seed_loaded_workspace_roots(&record_primary, &carried, &moved_primary)
+            .expect_err("a move must refuse a carried ancestor of the new primary");
+        assert!(
+            err.contains("widen") && err.contains("ancestor"),
+            "the refusal names the widening entry: {err}"
+        );
+
+        // Move onto a primary the carried set does not widen past stays fine.
+        let ok = seed_loaded_workspace_roots(
+            &record_primary,
+            &[
+                std::path::PathBuf::from("/work/project"),
+                std::path::PathBuf::from("/srv/data"),
+            ],
+            &moved_primary,
+        )
+        .expect("a carried sibling root survives a move");
+        assert_eq!(
+            ok,
+            vec![
+                moved_primary.clone(),
+                std::path::PathBuf::from("/work/project"),
+                std::path::PathBuf::from("/srv/data"),
+            ],
+            "the move seeds the new primary plus the carried set unchanged"
+        );
     }
 }

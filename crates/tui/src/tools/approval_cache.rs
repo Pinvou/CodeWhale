@@ -158,9 +158,30 @@ fn hash_patch_paths(input: &serde_json::Value) -> String {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
 
+    // Round-26 M26-3: fold the alias spellings and honor the top-level
+    // `path` override EXACTLY like execution does (a PathOverride wins and
+    // the payload headers become decoys) — the grouping key must cover the
+    // file the write actually lands on. The key used to hash only the
+    // headers, so the same patch body under two different `filePath`
+    // overrides shared one grant key and a session-approved family
+    // auto-approved a redirect to an arbitrary target (the B20-2 shell
+    // class, on the patch arm).
+    let mut folded = input.clone();
+    if super::file::apply_param_aliases(&mut folded, super::file::PATH_ALIASES, "apply_patch")
+        .is_err()
+    {
+        // Alias conflict: execution fails the call too; fall through and
+        // key on the raw header set rather than under-keying.
+    }
+    if let Some(override_path) = folded.get("path").and_then(Value::as_str) {
+        let mut hasher = DefaultHasher::new();
+        override_path.hash(&mut hasher);
+        return format!("override:{:x}", hasher.finish());
+    }
+
     let mut paths: Vec<&str> = Vec::new();
 
-    match normalize_apply_patch_input(input) {
+    match normalize_apply_patch_input(&folded) {
         Ok(NormalizedApplyPatchInput::Replacement { entries, .. }) => {
             for change in entries {
                 if let Some(path) = change.get("path").and_then(|v| v.as_str()) {
@@ -375,6 +396,43 @@ mod tests {
         assert_eq!(
             key_a, key_b,
             "approving a patch family must cover later edits to the same path"
+        );
+    }
+
+    #[test]
+    fn grouping_key_rekeys_on_the_top_level_path_override() {
+        // Round-26 M26-3: execution's PathOverride wins over the payload
+        // headers (they become decoys), so the grouping key must cover the
+        // override — the same patch body under two different targets used
+        // to share one grant key, letting a session-approved family
+        // auto-approve a redirect to an arbitrary file (the B20-2 shell
+        // class, on the patch arm). Alias spellings fold first, exactly
+        // like preflight/execute.
+        let patch = "@@ -1,2 +1,2 @@\n old\n-value\n+new-value\n";
+        let decoy = build_approval_grouping_key("apply_patch", &json!({"patch": patch}));
+        for alias in ["path", "file_path", "filePath"] {
+            let redirected = build_approval_grouping_key(
+                "apply_patch",
+                &json!({alias: ".git/hooks/pre-commit", "patch": patch}),
+            );
+            assert_ne!(
+                redirected, decoy,
+                "an {alias} override must re-key the grant family away from the header set"
+            );
+        }
+        // The same override target under different alias spellings is ONE
+        // family (the fold runs before hashing).
+        let canonical = build_approval_grouping_key(
+            "apply_patch",
+            &json!({"path": ".git/hooks/pre-commit", "patch": patch}),
+        );
+        let alias_spellings = build_approval_grouping_key(
+            "apply_patch",
+            &json!({"filePath": ".git/hooks/pre-commit", "patch": patch}),
+        );
+        assert_eq!(
+            canonical, alias_spellings,
+            "alias spellings of the same override collapse to one family"
         );
     }
 

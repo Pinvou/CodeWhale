@@ -6684,7 +6684,14 @@ impl Engine {
             self.session.auto_approve,
             self.session.approval_mode,
         );
-        context.workspace_roots = self.session.workspace_roots.clone();
+        // Round-26 B26-1 (latent site made safe): the per-turn live context
+        // re-assigns the pair on a clone that may share a memo Arc with an
+        // earlier turn's context — even a same-set assignment goes through
+        // `rebase_roots` so the memo can never outlive its pair.
+        context.rebase_roots(
+            self.session.workspace.clone(),
+            self.session.workspace_roots.clone(),
+        );
         context.trust_mode = authority.trust_mode;
         context.auto_approve = authority.auto_approve;
         context.set_shell_policy(self.effective_turn_shell_policy(authority.shell_policy()));

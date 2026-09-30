@@ -12210,6 +12210,49 @@ fn seed_turns_with_user_messages(
 }
 
 #[tokio::test]
+async fn both_fork_faces_reject_a_poisoned_source_root_set() -> Result<()> {
+    // Round-26 M26-1 + m26-6: every fork face MINTS a new row, so every one
+    // validates the cloned set — `fork_thread` (the round-25 fix, unpinned
+    // until now) and `fork_at_user_message` (the live /undo, /patch-undo,
+    // /retry routes, added this round). A hand-edited row carrying the
+    // filesystem root is rejected with the intake reason instead of being
+    // duplicated into a fresh id.
+    let manager = test_manager(test_runtime_dir())?;
+    let workspace = std::env::temp_dir().join("codewhale-runtime-fork-poison");
+    let thread = manager
+        .create_thread(CreateThreadRequest {
+            workspace: Some(workspace.clone()),
+            ..Default::default()
+        })
+        .await?;
+    seed_turns_with_user_messages(&manager, &thread.id, &["first", "second"])?;
+
+    // Poison the stored row directly (the load faces stay tolerant by
+    // design — this is exactly the input they exist to survive).
+    let mut poisoned = manager.get_thread(&thread.id).await?;
+    poisoned.workspace_roots = vec![workspace.clone(), std::path::PathBuf::from("/")];
+    manager.store.save_thread(&poisoned)?;
+
+    let bare = manager
+        .fork_thread(&thread.id)
+        .await
+        .expect_err("fork_thread must reject the poisoned source row");
+    assert!(
+        bare.to_string().contains("no longer passes intake"),
+        "fork_thread: {bare:#}"
+    );
+    let backtracked = manager
+        .fork_at_user_message(&thread.id, 0)
+        .await
+        .expect_err("fork_at_user_message must reject the poisoned source row too");
+    assert!(
+        backtracked.to_string().contains("no longer passes intake"),
+        "fork_at_user_message: {backtracked:#}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn fork_at_user_message_drops_tail_and_returns_user_text() -> Result<()> {
     // Seed three completed user/assistant turns. Backtracking with
     // depth=0 should drop only the most recent turn ("third") and
