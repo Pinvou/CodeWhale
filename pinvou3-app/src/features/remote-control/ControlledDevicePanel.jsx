@@ -7,9 +7,8 @@ import { controlledAuthorityKey, controlledDeviceUiState, createAsyncOperationGu
 
 const COUNTDOWN_ANNOUNCE_EVERY = 30;
 const ACTIVE_STATUSES = [
-  'reserving', 'registering', 'waiting_connection', 'waiting_for_pairing',
-  'safety_handshake', 'handshake_pending', 'connected',
-  'reconnecting', 'resume_provisional', 'resume_activated_pending_liveness',
+  'reserving', 'waiting_connection', 'safety_handshake', 'connected',
+  'reconnecting',
   'refreshing',
 ];
 
@@ -132,15 +131,15 @@ export default function ControlledDevicePanel({
   }, [authorityKey, onLocalStateChange]);
 
   useEffect(() => {
-    const wasWaiting = ['waiting_connection', 'waiting_for_pairing'].includes(previousStatus.current);
+    const wasWaiting = previousStatus.current === 'waiting_connection';
     let timer;
-    if (['safety_handshake', 'handshake_pending'].includes(status) && wasWaiting) {
+    if (status === 'safety_handshake' && wasWaiting) {
       onLocalStateChange?.('reserved');
       timer = setTimeout(() => {
         previousStatus.current = status;
         onLocalStateChange?.(null);
       }, 800);
-    } else if (!['safety_handshake', 'handshake_pending'].includes(status)) {
+    } else if (status !== 'safety_handshake') {
       previousStatus.current = status;
     }
     return () => clearTimeout(timer);

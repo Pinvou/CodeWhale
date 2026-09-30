@@ -584,34 +584,73 @@ impl ControlledExecutionPort for DesktopControlledExecutionAdapter {
     }
 }
 
+impl DesktopControlledBusiness {
+    /// Resolve the A reference only through the current authenticated B
+    /// generation's authoritative map. A caller cannot select an arbitrary
+    /// local journal by supplying a different reference.
+    fn authoritative_journal_session(
+        &self,
+        lease: &LeaseContext,
+        session_ref: &str,
+    ) -> Result<String, String> {
+        let (current, _) = self
+            .app
+            .state::<ControlledDeviceManager>()
+            .live_runtime_context()
+            .map_err(|_| "journal_lease_stale".to_owned())?;
+        if &current != lease {
+            return Err("journal_lease_stale".to_owned());
+        }
+        let runtime = self
+            .app
+            .state::<Arc<super::desktop_remote_task::DesktopRemoteTaskRuntime>>();
+        runtime
+            .service()
+            .session_for(session_ref, &lease.remote_control_generation)
+            .ok_or_else(|| "journal_session_mapping_missing".to_owned())
+    }
+}
+
+/// B sends its actual Session identity only inside the authenticated encrypted
+/// capability response; A's opaque wire ref remains a distinct field.
+fn bind_capability_session(
+    mut payload: Value,
+    remote_ref: &str,
+    controlled_session_id: &str,
+) -> Result<Value, String> {
+    let object = payload
+        .as_object_mut()
+        .ok_or_else(|| "capability_snapshot_invalid".to_owned())?;
+    object.insert("session_id".into(), Value::String(remote_ref.to_owned()));
+    object.insert(
+        "controlled_session_id".into(),
+        Value::String(controlled_session_id.to_owned()),
+    );
+    Ok(payload)
+}
+
 #[async_trait::async_trait]
 impl ControlledBusinessPort for DesktopControlledBusiness {
     async fn capability_snapshot(
         &self,
         lease: &LeaseContext,
         request_id: &str,
-        session_id: Option<&str>,
+        session_id: &str,
         known_revision: u64,
     ) -> Result<Value, String> {
-        let controlled_session =
-            if let Some(session_ref) = session_id.filter(|value| !value.is_empty()) {
-                let authoritative_id = super::desktop_remote_task::ensure_controlled_session(
-                    &self.app,
-                    session_ref,
-                    "",
-                    false,
-                    &lease.remote_control_generation,
-                )?;
-                Some((session_ref.to_owned(), authoritative_id))
-            } else {
-                None
-            };
+        let authoritative_id = super::desktop_remote_task::ensure_controlled_session(
+            &self.app,
+            session_id,
+            "",
+            false,
+            &lease.remote_control_generation,
+        )?;
         let capabilities = self.app.state::<CapabilitySnapshotManager>();
         let now_b =
             crate::features::remote_control::controller::relay_runtime::controlled_monotonic_millis(
             );
         // 只复用刚生成、且比 A 已知 revision 更新的快照：这能吸收紧邻的重复
-        // 请求，又不会把临近过期的快照当作完整 30 秒租期返回给兼容旧报文的 A。
+        // 请求，也不会把临近过期的快照误报成完整 30 秒有效期。
         if let Ok(current) = capabilities.current_for_context(lease, now_b) {
             let payload = capabilities.wire_capability_snapshot(&current, request_id);
             let revision = payload["capability_revision"]
@@ -624,19 +663,17 @@ impl ControlledBusinessPort for DesktopControlledBusiness {
                 .unwrap_or(0)
                 .saturating_sub(now_b);
             if revision > known_revision && remaining_ms >= 29_000 {
-                if let Some((session_ref, authoritative_id)) = controlled_session.as_ref() {
-                    super::desktop_remote_task::project_controlled_session(
-                        &self.app,
-                        session_ref,
-                        authoritative_id,
-                        lease,
-                    )?;
-                }
+                super::desktop_remote_task::project_controlled_session(
+                    &self.app,
+                    session_id,
+                    &authoritative_id,
+                    lease,
+                )?;
                 crate::features::remote_control::controller::relay_runtime::log_controlled_event(
                     "capability_snapshot_ready",
                     "cached",
                 );
-                return Ok(payload);
+                return bind_capability_session(payload, session_id, &authoritative_id);
             }
         }
         let snapshot = match super::desktop_remote_capabilities::build_capability_snapshot(
@@ -657,15 +694,17 @@ impl ControlledBusinessPort for DesktopControlledBusiness {
             "capability_snapshot_ready",
             "fresh",
         );
-        if let Some((session_ref, authoritative_id)) = controlled_session.as_ref() {
-            super::desktop_remote_task::project_controlled_session(
-                &self.app,
-                session_ref,
-                authoritative_id,
-                lease,
-            )?;
-        }
-        Ok(capabilities.wire_capability_snapshot(&snapshot, request_id))
+        super::desktop_remote_task::project_controlled_session(
+            &self.app,
+            session_id,
+            &authoritative_id,
+            lease,
+        )?;
+        bind_capability_session(
+            capabilities.wire_capability_snapshot(&snapshot, request_id),
+            session_id,
+            &authoritative_id,
+        )
     }
 
     async fn submit_task(
@@ -695,7 +734,9 @@ impl ControlledBusinessPort for DesktopControlledBusiness {
             input_digest: field("input_digest"),
             payload: payload.clone(),
         };
-        let port = DesktopControlledExecutionAdapter::new(self.app.clone());
+        let port = self
+            .app
+            .state::<crate::app::desktop_remote_composition::DesktopControlledExecutionPort>();
         let result = port
             .execute_controlled(request)
             .await
@@ -734,29 +775,39 @@ impl ControlledBusinessPort for DesktopControlledBusiness {
         journal_epoch: &str,
         after_sequence: u64,
     ) -> Result<Vec<(String, Value)>, String> {
+        let b_session_id = self.authoritative_journal_session(lease, session_ref)?;
         let history = self
             .app
-            .state::<std::sync::Arc<super::desktop_remote_history::DesktopRemoteHistoryRuntime>>();
+            .state::<std::sync::Arc<super::desktop_remote_journal::DesktopRemoteJournalRuntime>>();
+        history
+            .journal()
+            .bind_generation(&lease.remote_control_generation)
+            .map_err(|error| error.code.to_owned())?;
         Ok(
-            match history.journal().replay_after(journal_epoch, after_sequence) {
-                crate::features::remote_control::controller::journal::ReplayOutcome::Events(events) => {
-                    events
-                        .into_iter()
-                        .filter_map(|event| {
-                            crate::features::remote_control::controller::relay_runtime::build_journal_event_payload(
-                                lease,
-                                session_ref,
-                                &event,
-                            )
-                            .map(|payload| ("journal_event".to_owned(), payload))
-                        })
-                        .take(MAX_REPLAY_FRAMES)
-                        .collect()
-                }
-                crate::features::remote_control::controller::journal::ReplayOutcome::Gap(snapshot) => {
+            match history
+                .journal()
+                .replay_after_for_generation(
+                    &lease.remote_control_generation,
+                    &b_session_id,
+                    journal_epoch,
+                    after_sequence,
+                )
+                .map_err(|error| error.code.to_owned())?
+            {
+                crate::features::remote_control::controller::journal::ReplayOutcome::Events(
+                    events,
+                ) => build_replay_frames(lease, session_ref, &events)?,
+                crate::features::remote_control::controller::journal::ReplayOutcome::Gap(
+                    snapshot,
+                ) => {
                     vec![(
                         "session_snapshot".to_owned(),
-                        build_session_snapshot_payload(lease, session_ref, "request-replay-gap", &snapshot)?,
+                        build_session_snapshot_payload(
+                            lease,
+                            session_ref,
+                            "request-replay-gap",
+                            &snapshot,
+                        )?,
                     )]
                 }
             },
@@ -769,16 +820,41 @@ impl ControlledBusinessPort for DesktopControlledBusiness {
         session_ref: &str,
         request_id: &str,
     ) -> Result<Value, String> {
+        let b_session_id = self.authoritative_journal_session(lease, session_ref)?;
         let history = self
             .app
-            .state::<std::sync::Arc<super::desktop_remote_history::DesktopRemoteHistoryRuntime>>();
-        let snapshot = history.journal().snapshot();
+            .state::<std::sync::Arc<super::desktop_remote_journal::DesktopRemoteJournalRuntime>>();
+        history
+            .journal()
+            .bind_generation(&lease.remote_control_generation)
+            .map_err(|error| error.code.to_owned())?;
+        let snapshot = history
+            .journal()
+            .snapshot_for_generation(&lease.remote_control_generation, &b_session_id)
+            .map_err(|error| error.code.to_owned())?;
         build_session_snapshot_payload(lease, session_ref, request_id, &snapshot)
     }
 }
 
 /// 一次回放最多回传的帧数：journal 保留窗口有界，但仍给回放本身一个硬上限。
 const MAX_REPLAY_FRAMES: usize = 256;
+
+fn build_replay_frames(
+    lease: &LeaseContext,
+    session_ref: &str,
+    events: &[crate::features::remote_control::controller::journal::JournalEvent],
+) -> Result<Vec<(String, Value)>, String> {
+    let mut frames = Vec::with_capacity(events.len());
+    for page in events.chunks(MAX_REPLAY_FRAMES) {
+        for event in page {
+            let payload = crate::features::remote_control::controller::relay_runtime::build_journal_event_payload(
+                lease, session_ref, event,
+            ).ok_or_else(|| "journal_event_not_exportable".to_owned())?;
+            frames.push(("journal_event".to_owned(), payload));
+        }
+    }
+    Ok(frames)
+}
 
 /// 构造 wire `session_snapshot`（E2E-05 缺口恢复）：快照本体 base64 + 摘要，
 /// 会话身份使用 A 的引用。
@@ -788,20 +864,18 @@ fn build_session_snapshot_payload(
     request_id: &str,
     snapshot: &crate::features::remote_control::controller::journal::JournalSnapshot,
 ) -> Result<Value, String> {
-    // Keep the authenticated snapshot body on the same A-generated session
-    // identity as incremental journal events. The snapshot digest does not
-    // include session ids, so the authoritative continuity proof is unchanged.
-    let mut wire_snapshot = snapshot.clone();
-    for event in &mut wire_snapshot.events {
-        event.session_id = session_ref.to_owned();
-    }
+    // Remapping B's authoritative identity to A's opaque reference changes
+    // the committed bytes; the digest must be recomputed over that wire body.
+    let wire_snapshot = snapshot
+        .remap_session(session_ref)
+        .map_err(|error| error.code.to_owned())?;
     let raw =
         serde_json::to_vec(&wire_snapshot).map_err(|_| "journal_snapshot_invalid".to_owned())?;
     let digest = wire_snapshot.digest.clone();
     if digest.len() != 64 {
         return Err("journal_snapshot_invalid".to_owned());
     }
-    Ok(serde_json::json!({
+    let payload = serde_json::json!({
         "v": 1,
         "type": "session_snapshot",
         "connection_id": lease.connection_id,
@@ -816,7 +890,141 @@ fn build_session_snapshot_payload(
         "snapshot_b64": base64::engine::general_purpose::STANDARD.encode(&raw),
         "snapshot_bytes": raw.len().to_string(),
         "sha256": digest,
-    }))
+    });
+    // The encrypted lane validates plaintext JSON at 512 KiB. Check the
+    // complete envelope here, including base64 and all context fields, so a
+    // retained journal snapshot is never silently unsendable.
+    let wire_len = serde_json::to_vec(&payload)
+        .map_err(|_| "journal_snapshot_invalid".to_owned())?
+        .len();
+    if wire_len > crate::features::remote_control::controller::protocol::MAX_DECRYPTED_PAYLOAD_BYTES
+    {
+        return Err("journal_snapshot_too_large".to_owned());
+    }
+    Ok(payload)
+}
+
+#[cfg(test)]
+mod dev19_replay_tests {
+    use super::*;
+    use crate::features::remote_control::controller::journal::{
+        JournalKind, JournalSnapshot, RemoteJournal,
+    };
+    use serde_json::json;
+
+    fn lease() -> LeaseContext {
+        LeaseContext {
+            connection_id: "connection-1".into(),
+            controller_lease_id: "lease-1".into(),
+            lease_epoch: "1".into(),
+            relay_epoch: "relay-1".into(),
+            remote_control_generation: "generation-1".into(),
+        }
+    }
+
+    #[test]
+    fn replay_over_256_is_fully_paged_without_silent_truncation() {
+        let journal = RemoteJournal::new("epoch-1");
+        for sequence in 1..=300 {
+            journal
+                .append(
+                    &format!("event-{sequence}"),
+                    JournalKind::UserMessage,
+                    "b-session",
+                    None,
+                    json!({"text": "safe"}),
+                )
+                .unwrap();
+        }
+        let events = match journal.replay_after_for("b-session", "epoch-1", 0).unwrap() {
+            crate::features::remote_control::controller::journal::ReplayOutcome::Events(events) => {
+                events
+            }
+            _ => panic!("window should be replayable"),
+        };
+        let frames = build_replay_frames(&lease(), "remote-ref", &events).unwrap();
+        assert_eq!(frames.len(), 300);
+        assert_eq!(frames.first().unwrap().1["event_sequence"], "1");
+        assert_eq!(frames.last().unwrap().1["event_sequence"], "300");
+        assert!(
+            frames
+                .iter()
+                .all(|(_, frame)| frame["session_id"] == "remote-ref")
+        );
+    }
+
+    #[test]
+    fn wire_snapshot_rehashes_exact_remapped_content() {
+        let journal = RemoteJournal::new("epoch-1");
+        journal
+            .append(
+                "event-1",
+                JournalKind::UserMessage,
+                "b-session",
+                None,
+                json!({"text":"safe"}),
+            )
+            .unwrap();
+        let original = journal.snapshot_for("b-session").unwrap();
+        let wire =
+            build_session_snapshot_payload(&lease(), "remote-ref", "request-1", &original).unwrap();
+        let raw = base64::engine::general_purpose::STANDARD
+            .decode(wire["snapshot_b64"].as_str().unwrap())
+            .unwrap();
+        let mapped: JournalSnapshot = serde_json::from_slice(&raw).unwrap();
+        assert!(mapped.verify_digest());
+        assert_eq!(mapped.session_id, "remote-ref");
+        assert_eq!(mapped.events[0].session_id, "remote-ref");
+        assert_ne!(mapped.digest, original.digest);
+        assert_eq!(wire["sha256"], mapped.digest);
+    }
+
+    #[test]
+    fn retained_snapshot_fits_plaintext_budget_and_oversize_fails_closed() {
+        let journal = RemoteJournal::new("epoch-1");
+        for sequence in 1..=100 {
+            journal
+                .append(
+                    &format!("event-{sequence}"),
+                    JournalKind::UserMessage,
+                    "b-session",
+                    None,
+                    json!({"text":"x".repeat(4096)}),
+                )
+                .unwrap();
+        }
+        let retained = journal.snapshot_for("b-session").unwrap();
+        let near_wire =
+            build_session_snapshot_payload(&lease(), &"r".repeat(128), &"q".repeat(128), &retained)
+                .unwrap();
+        let near_bytes = serde_json::to_vec(&near_wire).unwrap().len();
+        assert!(
+            near_bytes > 300 * 1024,
+            "test must approach the wire ceiling"
+        );
+        assert!(
+            near_bytes
+                <= crate::features::remote_control::controller::protocol::MAX_DECRYPTED_PAYLOAD_BYTES
+        );
+
+        let mut too_large = retained.clone();
+        let template = too_large.events.last().unwrap().clone();
+        too_large.events.clear();
+        for sequence in 1..=150 {
+            let mut event = template.clone();
+            event.event_id = format!("oversized-{sequence}");
+            event.sequence = sequence;
+            too_large.events.push(event);
+        }
+        too_large.sequence = 150;
+        too_large.digest = too_large.compute_digest();
+        assert!(too_large.verify_digest());
+        assert_eq!(
+            build_session_snapshot_payload(&lease(), "remote-ref", "request-1", &too_large)
+                .unwrap_err(),
+            "journal_snapshot_too_large"
+        );
+    }
 }
 
 /// B 端是否仍持有活租约（供 worker 在派发前自检；当前由设备所有者状态判断）。

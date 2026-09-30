@@ -5,11 +5,10 @@
 
 import { useEffect, useState } from 'react';
 import { bridge } from '../../hooks/useBridge.js';
-import RemoteConversationView from './RemoteConversationView.jsx';
 
 const TERMINAL_STATUSES = ['idle', 'disconnected', 'error'];
 
-export default function RemoteConnectionShell({ t, bs, onClose, onRequestDisconnect, modelSource, onModelSourceChange }) {
+export default function RemoteConnectionShell({ t, bs, onClose, onOpenChat, onRequestDisconnect }) {
   const copy = (t && t.controllerConnection) || {};
   const connection = (bs && bs.controllerConnection) || {};
   const connected = connection.status === 'connected';
@@ -36,6 +35,18 @@ export default function RemoteConnectionShell({ t, bs, onClose, onRequestDisconn
     }
   };
 
+  const openChat = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      if (await onOpenChat?.() === false) throw new Error('remote_proxy_binding_mismatch');
+    } catch (failure) {
+      setError((failure && failure.code) || 'errorGeneric');
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
     <section className="remote-connection-shell p-4 sm:p-5" aria-labelledby="remote-connection-title">
       <header className="flex items-center justify-between gap-2">
@@ -53,13 +64,9 @@ export default function RemoteConnectionShell({ t, bs, onClose, onRequestDisconn
         </div>
       </header>
       <p className="mt-1 text-[11px] opacity-60">{copy.backgroundHint}</p>
+      {connected && <button type="button" onClick={openChat} disabled={!onOpenChat || busy}>{copy.openChat}</button>}
       {error && <p role="alert" className="text-[12px] text-[#EA4335]">{copy.errorGeneric}</p>}
-      {connected ? (
-        // 远程会话窗口：模型/能力/审批/附件/成果/历史全部经 DEV-20 bridge。
-        <RemoteConversationView t={t} bs={bs} modelSource={modelSource} onModelSourceChange={onModelSourceChange} />
-      ) : (
-        <p className="mt-3 text-[12px] opacity-70">{copy.codeHint}</p>
-      )}
+      {!connected && <p className="mt-3 text-[12px] opacity-70">{copy.codeHint}</p>}
     </section>
   );
 }

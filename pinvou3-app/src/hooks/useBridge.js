@@ -22,8 +22,11 @@ function useBridgeState(domains) {
 function usePlatformCapability(capability) {
   const [supported, setSupported] = useState(() => can(capability));
   useEffect(() => {
-    if (!isWeb) return undefined;
     const refresh = () => setSupported(can(capability));
+    if (!isWeb) {
+      if (capability !== 'desktopRemoteControl' || !bridge.available || !bridge.state) return undefined;
+      return bridge.state.subscribe('platform', refresh);
+    }
     window.addEventListener('pinvou:web-capabilities', refresh);
     window.addEventListener('pinvou:web-connection', refresh);
     refresh();

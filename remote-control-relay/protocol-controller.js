@@ -16,7 +16,7 @@ const MAX_DESCRIPTORS = 256;
 const MAX_ARTIFACTS = 256;
 const MAX_SENSITIVE_STRING_BYTES = 8 * 1024;
 export const MAX_ENCRYPTED_WIRE_BYTES = Math.ceil(MAX_ENCRYPTED_FRAME_BYTES / 3) * 4 + MAX_CONTROL_MESSAGE_BYTES;
-export const CONTROLLER_CONTRACT_SHA256 = "e01f4708dc61755146f335a74e6b2b6edec590cab691d3275e2d9bf68496cee7";
+export const CONTROLLER_CONTRACT_SHA256 = "b579a5b9b5c0ba237fd01d21223c8c8aa636f27668a3944d0f6fb8c055adafea";
 
 export const CONTROLLER_CAPABILITIES = Object.freeze([
   "pairing_v1", "encrypted_frames_v1", "finished_receipt_v1", "role_liveness_v1", "resume_v1",
@@ -114,9 +114,9 @@ const MESSAGE_SCHEMAS = Object.freeze({
 });
 
 const PAYLOAD_SCHEMAS = Object.freeze({
-  capability_snapshot_request: schema(["v", "type", ...LEASE_CONTEXT_FIELDS, "request_id", "known_revision"], ["session_id"], ["A"]),
-  capability_snapshot: schema(["v", "type", ...LEASE_CONTEXT_FIELDS, "request_id", "capability_revision", "expires_at_ms", "modes", "tools", "skills", "workspaces"], ["session_id", "valid_for_ms"], ["B"]),
-  capability_snapshot_error: schema(["v", "type", ...LEASE_CONTEXT_FIELDS, "request_id", "code"], ["session_id"], ["B"]),
+  capability_snapshot_request: schema(["v", "type", ...LEASE_CONTEXT_FIELDS, "request_id", "session_id", "known_revision"], [], ["A"]),
+  capability_snapshot: schema(["v", "type", ...LEASE_CONTEXT_FIELDS, "request_id", "session_id", "controlled_session_id", "capability_revision", "expires_at_ms", "modes", "tools", "skills", "workspaces"], ["valid_for_ms"], ["B"]),
+  capability_snapshot_error: schema(["v", "type", ...LEASE_CONTEXT_FIELDS, "request_id", "session_id", "code"], [], ["B"]),
   task_submit: schema(["v", "type", ...LEASE_CONTEXT_FIELDS, "request_id", "task_id", "client_request_id", "session_id", "capability_revision", "model_source", "mode", "input_digest", "input"], ["temporary_model_package"], ["A"]),
   task_cancel: schema(["v", "type", ...LEASE_CONTEXT_FIELDS, "request_id", "task_id", "session_id"], [], ["A"]),
   task_status: schema(["v", "type", ...LEASE_CONTEXT_FIELDS, "request_id", "task_id", "session_id", "task_status"], ["result_digest"], ["B"]),

@@ -18,8 +18,9 @@ use super::crypto::{
     SessionKeys,
 };
 use super::protocol::{
-    MAX_ENCRYPTED_WIRE_BYTES, RuntimeValidationContext, SenderRole, validate_controller_message_json,
-    validate_controller_runtime_message_json, validate_controller_runtime_payload_json,
+    MAX_ENCRYPTED_WIRE_BYTES, RuntimeValidationContext, SenderRole,
+    validate_controller_message_json, validate_controller_runtime_message_json,
+    validate_controller_runtime_payload_json,
 };
 
 /// 有界错误码：不区分「解密失败/校验失败/代不符」，避免给出可区分信息。
@@ -175,10 +176,7 @@ impl EncryptedLane {
     }
 
     /// E2E-06：恢复完成后轮换 resume gate 的传输指纹（两侧各自计算本端值）。
-    pub(crate) fn resume_fingerprint(
-        &self,
-        activation_id: &str,
-    ) -> Result<[u8; 32], LaneFailure> {
+    pub(crate) fn resume_fingerprint(&self, activation_id: &str) -> Result<[u8; 32], LaneFailure> {
         self.resume_confirm
             .fingerprint(activation_id)
             .map_err(|_| LaneFailure::Invalid)
@@ -279,8 +277,7 @@ impl EncryptedLane {
         negotiated_capabilities: &[String],
     ) -> Result<Value, LaneFailure> {
         let context = self.runtime_context(negotiated_capabilities);
-        let plaintext =
-            serde_json::to_vec(payload).map_err(|_| LaneFailure::Invalid)?;
+        let plaintext = serde_json::to_vec(payload).map_err(|_| LaneFailure::Invalid)?;
         if plaintext.len() > MAX_ENCRYPTED_WIRE_BYTES {
             return Err(LaneFailure::TooLarge);
         }
@@ -290,10 +287,7 @@ impl EncryptedLane {
             Some(&context),
         )
         .map_err(map_validation_failure)?;
-        let sequence = self
-            .sequence
-            .checked_add(1)
-            .ok_or(LaneFailure::Replay)?;
+        let sequence = self.sequence.checked_add(1).ok_or(LaneFailure::Replay)?;
         let epoch = self
             .lease
             .lease_epoch
@@ -460,13 +454,15 @@ impl LaneStore {
         session: SessionKeys,
     ) -> Result<(), LaneFailure> {
         let lane = EncryptedLane::new(role, lease, session)?;
-        *self.lane.lock() = Some(lane);
+        let mut current = self.lane.lock();
+        *current = Some(lane);
         self.suspended.store(false, Ordering::SeqCst);
         Ok(())
     }
 
     pub(crate) fn clear(&self) {
-        *self.lane.lock() = None;
+        let mut lane = self.lane.lock();
+        *lane = None;
         self.suspended.store(false, Ordering::SeqCst);
     }
 
@@ -476,14 +472,32 @@ impl LaneStore {
 
     /// 断线进入恢复流程：业务与存活帧失败关闭，但保留通道材料。
     pub(crate) fn suspend(&self) {
-        if self.is_installed() {
+        let lane = self.lane.lock();
+        if lane.is_some() {
             self.suspended.store(true, Ordering::SeqCst);
         }
     }
 
     /// `controller_resumed` 之后重新打开业务闸门。
     pub(crate) fn activate(&self) {
+        let _lane = self.lane.lock();
         self.suspended.store(false, Ordering::SeqCst);
+    }
+
+    /// Hold the channel owner while committing an operation tied to this exact lease.
+    /// Clear, suspend, and replacement install cannot pass this guard.
+    pub(crate) fn with_active<T>(
+        &self,
+        lease: &super::protocol::LeaseContext,
+        operation: impl FnOnce() -> Result<T, String>,
+    ) -> Result<T, String> {
+        let lane = self.lane.lock();
+        if self.suspended.load(Ordering::SeqCst)
+            || lane.as_ref().is_none_or(|active| active.lease != *lease)
+        {
+            return Err("remote_proxy_channel_unavailable".into());
+        }
+        operation()
     }
 
     pub(crate) fn is_suspended(&self) -> bool {
@@ -558,10 +572,7 @@ impl LaneStore {
         lane.open_resume_confirm(frame)
     }
 
-    pub(crate) fn resume_fingerprint(
-        &self,
-        activation_id: &str,
-    ) -> Result<[u8; 32], LaneFailure> {
+    pub(crate) fn resume_fingerprint(&self, activation_id: &str) -> Result<[u8; 32], LaneFailure> {
         let guard = self.lane.lock();
         let lane = guard.as_ref().ok_or(LaneFailure::Invalid)?;
         lane.resume_fingerprint(activation_id)
@@ -610,13 +621,22 @@ macro_rules! lane_state {
                 self.store.is_suspended()
             }
 
+            pub(crate) fn with_active<T>(
+                &self,
+                lease: &super::protocol::LeaseContext,
+                operation: impl FnOnce() -> Result<T, String>,
+            ) -> Result<T, String> {
+                self.store.with_active(lease, operation)
+            }
+
             pub(crate) fn seal(
                 &self,
                 payload_kind: &str,
                 payload: &Value,
                 negotiated_capabilities: &[String],
             ) -> Result<Value, LaneFailure> {
-                self.store.seal(payload_kind, payload, negotiated_capabilities)
+                self.store
+                    .seal(payload_kind, payload, negotiated_capabilities)
             }
 
             pub(crate) fn open(
@@ -669,10 +689,10 @@ lane_state!(ControlledLaneState, "B 端（被控）加密业务通道状态。")
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::features::remote_control::controller::protocol::LeaseContext;
     use crate::features::remote_control::controller::test_support::{
         PairingFixture, lease_context, paired_session_keys, pairing_fixture, role_session_keys,
     };
-    use crate::features::remote_control::controller::protocol::LeaseContext;
     use serde_json::json;
 
     fn capabilities() -> Vec<String> {
@@ -778,12 +798,18 @@ mod tests {
         // 同一帧重复投递同样被拒绝。
         let third = a.seal("task_submit", &payload, &capabilities()).unwrap();
         b.open(&third, &capabilities()).unwrap();
-        assert_eq!(b.open(&third, &capabilities()).unwrap_err(), LaneFailure::Replay);
+        assert_eq!(
+            b.open(&third, &capabilities()).unwrap_err(),
+            LaneFailure::Replay
+        );
 
         // 方向/载荷类型/密文任一被篡改都失败关闭。
         let mut flipped = a.seal("task_submit", &payload, &capabilities()).unwrap();
         flipped["direction"] = json!("b_to_a");
-        assert_eq!(b.open(&flipped, &capabilities()).unwrap_err(), LaneFailure::Invalid);
+        assert_eq!(
+            b.open(&flipped, &capabilities()).unwrap_err(),
+            LaneFailure::Invalid
+        );
         let mut wrong_kind = a.seal("task_submit", &payload, &capabilities()).unwrap();
         wrong_kind["payload_kind"] = json!("task_cancel");
         assert_eq!(
@@ -851,7 +877,9 @@ mod tests {
         state.install(ControllerRole::A, &lease, session).unwrap();
         assert!(state.is_installed());
         let payload = task_submit_payload(&lease);
-        let frame = state.seal("task_submit", &payload, &capabilities()).unwrap();
+        let frame = state
+            .seal("task_submit", &payload, &capabilities())
+            .unwrap();
         assert_eq!(frame["direction"], "a_to_b");
         state.clear();
         assert!(!state.is_installed());

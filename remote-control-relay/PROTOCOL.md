@@ -520,13 +520,15 @@ algorithm below; Rust constructs it from individual fields rather than hashing
 a fixture-supplied preimage.
 
 Every decrypted payload carries full lease context. A requests B's runtime
-allowlist with `capability_snapshot_request {request_id,known_revision}`; B
-returns `capability_snapshot {request_id,capability_revision,expires_at_ms,
-modes,tools,skills,workspaces}`. The echoed, globally unique `request_id` binds
-the response to the exact local session without adding fields that older v1
-peers reject; parsers also accept optional `session_id` and `valid_for_ms` from
-newer peers. If snapshot construction fails, B returns
-`capability_snapshot_error {request_id,session_id?,code}` with
+allowlist with `capability_snapshot_request {request_id,session_id,known_revision}`;
+`session_id` is A's Rust-generated RemoteProxy reference. B first resolves the
+current generation's authoritative local Session and returns
+`capability_snapshot {request_id,session_id,controlled_session_id,
+capability_revision,expires_at_ms,modes,tools,skills,workspaces}`. A accepts
+the B Session mapping only after encrypted authentication and exact request,
+reference and lease checks. `valid_for_ms` is optional TTL metadata, not a
+mapping fallback. If snapshot construction fails, B returns
+`capability_snapshot_error {request_id,session_id,code}` with
 the bounded `capability_snapshot_unavailable` code. Tool/Skill entries contain only an opaque ID
 and display name. Workspace entries contain only opaque ID, display name and
 `code_allowed`; paths, configuration, source and credentials are forbidden.
@@ -581,7 +583,7 @@ text “连接码无效或已失效”. A legacy conflict remains exactly
 plus close code `1008`.
 
 The contract digest is
-`e01f4708dc61755146f335a74e6b2b6edec590cab691d3275e2d9bf68496cee7`.
+`b579a5b9b5c0ba237fd01d21223c8c8aa636f27668a3944d0f6fb8c055adafea`.
 It is SHA-256 over canonical JSON (object keys recursively sorted, array order
 preserved, compact JSON scalars) of `{contract,fixture}`. `contract` is the
 executable manifest containing every schema required/optional field, role

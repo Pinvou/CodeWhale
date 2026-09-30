@@ -165,6 +165,17 @@ fn prepare_task_package_from_snapshot(
     let primary = prefs.active_model().cloned().ok_or(TemporaryModelError {
         code: "model_not_configured",
     })?;
+    prepare_model_package_from_snapshot(prefs, primary, credentials, live, task_id, package_id)
+}
+
+fn prepare_model_package_from_snapshot(
+    prefs: &UserPrefs,
+    primary: SavedModel,
+    credentials: &impl CredentialStore,
+    live: &LeaseContext,
+    task_id: &str,
+    package_id: &str,
+) -> Result<PreparedActiveTaskPackage, TemporaryModelError> {
     let model_profile_id = primary.id.clone();
     let (primary, vision) = prepare_export_models(prefs, primary, credentials)?;
     let package = build_task_package(live, &primary, vision.as_ref(), task_id, package_id)?;
@@ -172,6 +183,41 @@ fn prepare_task_package_from_snapshot(
         model_profile_id,
         package: package.to_wire_value(),
     })
+}
+
+/// Selects an opaque saved-model ID from exactly one read-only settings
+/// snapshot. The returned profile identity and exported package cannot come
+/// from different model selections, even if settings change during key reads.
+pub(crate) fn prepare_selected_task_package_snapshot(
+    live: &LeaseContext,
+    task_id: &str,
+    selected_model_id: &str,
+) -> Result<PreparedActiveTaskPackage, TemporaryModelError> {
+    prepare_selected_task_package_with_store(
+        live,
+        task_id,
+        selected_model_id,
+        &SystemCredentialStore::new(),
+        &format!("package-{}", uuid::Uuid::new_v4().simple()),
+    )
+}
+
+fn prepare_selected_task_package_with_store(
+    live: &LeaseContext,
+    task_id: &str,
+    selected_model_id: &str,
+    credentials: &impl CredentialStore,
+    package_id: &str,
+) -> Result<PreparedActiveTaskPackage, TemporaryModelError> {
+    let prefs =
+        UserPrefs::load_read_only_model_snapshot().map_err(|code| TemporaryModelError { code })?;
+    let primary = prefs
+        .model_by_id(selected_model_id)
+        .cloned()
+        .ok_or(TemporaryModelError {
+            code: "model_not_configured",
+        })?;
+    prepare_model_package_from_snapshot(&prefs, primary, credentials, live, task_id, package_id)
 }
 
 /// Fail closed on legacy plaintext credentials; run the normal settings
@@ -517,6 +563,55 @@ mod tests {
         assert_eq!(prepared.model_profile_id, "first");
         assert_eq!(prepared.package["primary"]["model"], "first-model");
         assert_eq!(std::fs::read(&path).unwrap(), switched);
+    }
+
+    #[test]
+    fn selected_prepare_uses_exact_id_from_one_read_only_snapshot() {
+        let _guard = crate::platform::paths::tests::ENV_LOCK.lock().unwrap();
+        let _restore = EnvRestore::capture(&["PINVOU3_HOME"]);
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("PINVOU3_HOME", home.path()) };
+        let path = crate::platform::paths::settings_path();
+        let mut active = model("active");
+        active.model = "active-model".into();
+        active.credential_ref = Some(active.credential_reference());
+        active.api_key.clear();
+        let mut selected = model("selected");
+        selected.model = "selected-model".into();
+        selected.credential_ref = Some(selected.credential_reference());
+        selected.api_key.clear();
+        let mut prefs = UserPrefs::default();
+        prefs.advanced.active_model_id = Some(active.id.clone());
+        prefs.advanced.saved_models = vec![active, selected];
+        let original = serde_json::to_vec(&prefs).unwrap();
+        std::fs::write(&path, &original).unwrap();
+        let credentials = ReadOnlyCredentials::new();
+        let prepared = prepare_selected_task_package_with_store(
+            &lease(),
+            "task-1",
+            "selected",
+            &credentials,
+            "package-1",
+        )
+        .unwrap();
+        assert_eq!(prepared.model_profile_id, "selected");
+        assert_eq!(prepared.package["primary"]["model"], "selected-model");
+        assert_eq!(credentials.reads.load(Ordering::SeqCst), 1);
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        assert_eq!(
+            prepare_selected_task_package_with_store(
+                &lease(),
+                "task-2",
+                "missing",
+                &credentials,
+                "package-2",
+            )
+            .err()
+            .unwrap()
+            .code,
+            "model_not_configured"
+        );
+        assert_eq!(credentials.reads.load(Ordering::SeqCst), 1);
     }
 
     #[test]

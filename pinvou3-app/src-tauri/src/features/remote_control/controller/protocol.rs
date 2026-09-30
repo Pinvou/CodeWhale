@@ -1177,8 +1177,9 @@ fn payload_schema(kind: &str) -> Option<Schema> {
                 "remote_control_generation",
                 "request_id",
                 "known_revision",
+                "session_id",
             ],
-            optional: &["session_id"],
+            optional: &[],
             roles: &[A],
         },
         "capability_snapshot" => Schema {
@@ -1191,6 +1192,8 @@ fn payload_schema(kind: &str) -> Option<Schema> {
                 "relay_epoch",
                 "remote_control_generation",
                 "request_id",
+                "session_id",
+                "controlled_session_id",
                 "capability_revision",
                 "expires_at_ms",
                 "modes",
@@ -1198,7 +1201,7 @@ fn payload_schema(kind: &str) -> Option<Schema> {
                 "skills",
                 "workspaces",
             ],
-            optional: &["session_id", "valid_for_ms"],
+            optional: &["valid_for_ms"],
             roles: &[B],
         },
         "capability_snapshot_error" => Schema {
@@ -1211,9 +1214,10 @@ fn payload_schema(kind: &str) -> Option<Schema> {
                 "relay_epoch",
                 "remote_control_generation",
                 "request_id",
+                "session_id",
                 "code",
             ],
-            optional: &["session_id"],
+            optional: &[],
             roles: &[B],
         },
         "task_submit" => Schema {
@@ -1637,6 +1641,7 @@ pub(crate) struct RuntimeValidationContext {
 pub(crate) struct LeaseInstallValidationContext {
     request_id: String,
     expected_pairing_id: String,
+    peer_endpoint_id: String,
     reservation_id: String,
     remote_control_generation: String,
     relay_epoch: String,
@@ -1652,6 +1657,7 @@ pub(crate) struct LeaseInstallValidationContext {
 pub(crate) struct ParsedTranscript {
     request_id: String,
     expected_pairing_id: String,
+    peer_endpoint_id: String,
     reservation_id: String,
     remote_control_generation: String,
     relay_epoch: String,
@@ -1670,6 +1676,7 @@ pub(crate) struct ParsedTranscript {
 pub(crate) struct ParsedTranscriptParts {
     pub(crate) request_id: String,
     pub(crate) expected_pairing_id: String,
+    pub(crate) peer_endpoint_id: String,
     pub(crate) reservation_id: String,
     pub(crate) remote_control_generation: String,
     pub(crate) relay_epoch: String,
@@ -1690,6 +1697,7 @@ impl ParsedTranscript {
         ParsedTranscriptParts {
             request_id: self.request_id,
             expected_pairing_id: self.expected_pairing_id,
+            peer_endpoint_id: self.peer_endpoint_id,
             reservation_id: self.reservation_id,
             remote_control_generation: self.remote_control_generation,
             relay_epoch: self.relay_epoch,
@@ -1712,6 +1720,7 @@ impl LeaseInstallValidationContext {
         Self {
             request_id: verified.request_id().to_owned(),
             expected_pairing_id: verified.expected_pairing_id().to_owned(),
+            peer_endpoint_id: verified.peer_endpoint_id().to_owned(),
             reservation_id: verified.reservation_id().to_owned(),
             remote_control_generation: verified.remote_control_generation().to_owned(),
             relay_epoch: verified.relay_epoch().to_owned(),
@@ -1734,6 +1743,10 @@ impl LeaseInstallValidationContext {
 
     pub(crate) fn pairing_id(&self) -> &str {
         &self.expected_pairing_id
+    }
+
+    pub(crate) fn peer_endpoint_id(&self) -> &str {
+        &self.peer_endpoint_id
     }
 
     pub(crate) fn reservation_id(&self) -> &str {
@@ -3548,6 +3561,7 @@ pub(crate) fn parse_controller_pairing_transcript(input: &str) -> Result<ParsedT
     Ok(ParsedTranscript {
         request_id: object_string(message, "request_id", "message")?.to_owned(),
         expected_pairing_id: object_string(transcript, "pairing_id", "transcript")?.to_owned(),
+        peer_endpoint_id: object_string(transcript, "endpoint_id", "transcript")?.to_owned(),
         reservation_id: object_string(transcript, "reservation_id", "transcript")?.to_owned(),
         remote_control_generation: object_string(
             transcript,

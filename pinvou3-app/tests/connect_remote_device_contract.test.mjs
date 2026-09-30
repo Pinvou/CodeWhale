@@ -137,7 +137,7 @@ test('cancelled or disposed connection attempts ignore late promise completion',
   guard.dispose();
   assert.equal(guard.isCurrent(disposedAttempt), false, 'unmounted form rejects late completion');
   assert.ok(form.includes('return () => guard.dispose()'));
-  assert.match(form, /isAttemptCurrent\(\)[\s\S]{0,120}onConnected\?\.\(result\)/);
+  assert.match(form, /controllerConnect\(code\)[\s\S]*?openLiveRemoteProxy\(null\)[\s\S]*?onConnected\?\.\(opened, isAttemptCurrent\)/);
   assert.ok(panel.includes('key={cancelEpoch}'), 'cancel remounts the form and disposes its attempt guard');
   assert.ok(panel.includes('connectCancellation.current += 1'), 'cancel invalidates in-flight completion synchronously');
 });
@@ -237,13 +237,13 @@ test('connection is integrated into the remote-control page instead of a detache
   assert.ok(!panel.includes('<RemoteConnectionShell'));
   assert.ok(main.includes('LazyRemoteConnectionShell'));
   assert.ok(main.includes('remoteConversationOpen && ('));
-  assert.ok(main.includes('remoteControllerConnected = !!(bs && bs.controllerConnection && bs.controllerConnection.status === \'connected\')'));
-  assert.ok(main.includes('remoteChatConnection = (remoteControllerConnected || remoteConnectionReady)'));
+  assert.ok(main.includes('remoteChatConnection = bs?.controllerConnection || REMOTE_DISCONNECTED_CONNECTION'));
   assert.ok(main.includes('remoteConnection={remoteChatConnection}'));
-  assert.ok(main.includes('onRemoteConversationOpen={() => setRemoteConversationOpen(true)}'));
-  assert.ok(main.includes('onRemoteConnected={() => {'));
+  assert.ok(main.includes('onRemoteConnected={activateRemoteProxy}'));
+  assert.ok(main.includes('openLiveRemoteProxy(existing)'));
+  assert.ok(main.includes('listRemoteProxyHistory()'));
+  assert.ok(main.includes('handleSwitchSession(localSessionId)'));
   assert.ok(main.includes('setRemoteConversationOpen(false);'));
-  assert.ok(main.includes("navigateFromScheduledRun('chat');"));
   assert.ok(!main.includes('LazyConnectRemoteDeviceDialog'));
   assert.ok(!main.includes('remoteConnectOpen'));
   assert.ok(!settings.includes('connect-remote-device-entry'));
@@ -260,7 +260,8 @@ test('connected remote output renders in the ordinary ChatView timeline', () => 
   assert.ok(chatView.includes('data-testid="chat-remote-status"'));
   assert.ok(chatView.includes('data-testid="chat-remote-status-banner"'));
   assert.ok(chatView.includes('remoteSessionReady'));
-  assert.ok(chatView.includes('controllerSessionOpen(t.remoteConversation.title || \'remote\', \'chat\')'));
+  assert.ok(chatView.includes('remoteProxyChatItems(activeSessionId, remoteProxyHistory)'));
+  assert.ok(!chatView.includes('controllerSessionOpen('));
 });
 
 test('the controlled side opens chat once per connection and shows its own status', () => {
@@ -273,7 +274,10 @@ test('the controlled side opens chat once per connection and shows its own statu
   assert.ok(main.includes('controlledDeviceAutoOpenRef'));
   assert.ok(main.includes('controlledDeviceAutoOpenInFlightRef'));
   assert.ok(main.includes("if (controlledDeviceStatus !== 'connected')"));
-  assert.ok(main.includes("const connectionKey = controlledDeviceGeneration || 'legacy-connected';"));
+  assert.ok(main.includes('if (!controlledDeviceGeneration) return;'));
+  assert.ok(main.includes('const connectionKey = controlledDeviceGeneration;'));
+  assert.ok(main.includes('if (controlledDeviceStatus !== \'connected\' || !controlledDeviceGeneration || !controlledTaskSessionId) return undefined;'));
+  assert.ok(!main.includes('legacy-connected'));
   assert.ok(main.includes('openControlledDeviceChatWithRetry({'));
   assert.ok(main.includes('if (opened) controlledDeviceAutoOpenRef.current = connectionKey;'));
   assert.ok(main.includes('bridge.sessions.switchToSession(controlledTaskSessionId)'));

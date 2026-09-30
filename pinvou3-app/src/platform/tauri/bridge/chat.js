@@ -9,6 +9,9 @@
     var notify = context.notify;
     var TAURI = context.TAURI;
     var sessionStates = context.sessionStates;
+    var remoteProxyDrafts = context.remoteProxyDrafts;
+    var isKnownRemoteProxy = context.isKnownRemoteProxy || function () { return false; };
+    var isRemoteProxyView = context.isRemoteProxyView || function () { return false; };
     var turnUsageDirty = context.turnUsageDirty;
     var personaPlaceholderTitles = context.personaPlaceholderTitles;
     var renderMarkdown = context.renderMarkdown;
@@ -54,6 +57,16 @@
   function setComposerDraft(value) {
     var text = value == null ? "" : String(value);
     state.composerDraft = text;
+    if (isRemoteProxyView(state.activeSessionId) && remoteProxyDrafts) {
+      if (!remoteProxyDrafts.set(state.activeSessionId, text)) {
+        state.remoteProxyDraftError = state.activeSessionId;
+        notify();
+      } else if (state.remoteProxyDraftError === state.activeSessionId) {
+        state.remoteProxyDraftError = null;
+        notify();
+      }
+      return text;
+    }
     var activeBuffer = state.activeSessionId && sessionStates[state.activeSessionId];
     if (activeBuffer) activeBuffer.composerDraft = text;
     return text;
@@ -74,18 +87,36 @@
   // state.activeSessionId is temporarily sid even for background sessions.
   function restoreSteerText(sid, text) {
     const value = String(text || "");
-    if (!sid || !value) return;
+    if (!sid || !value) return false;
     if (sid === state.activeSessionId) {
+      if (isRemoteProxyView(sid) && remoteProxyDrafts) {
+        const current = remoteProxyDrafts.get(sid);
+        if (!remoteProxyDrafts.set(sid, current ? current + "\n" + value : value)) {
+          state.remoteProxyDraftError = sid;
+          notify();
+          return false;
+        }
+      }
       const current = String(state.composerDraft || "");
       setComposerDraft(current ? current + "\n" + value : value);
       state.draftEpoch = (state.draftEpoch || 0) + 1;
       notify();
-      return;
+      return true;
+    }
+    if (isKnownRemoteProxy(sid) && remoteProxyDrafts) {
+      const current = remoteProxyDrafts.get(sid);
+      const saved = remoteProxyDrafts.set(sid, current ? current + "\n" + value : value);
+      if (!saved) {
+        state.remoteProxyDraftError = sid;
+        notify();
+      }
+      return saved;
     }
     const buffer = sessionStates[sid];
-    if (!buffer) return;
+    if (!buffer) return false;
     const current = String(buffer.composerDraft || "");
     buffer.composerDraft = current ? current + "\n" + value : value;
+    return true;
   }
 
   // Per-session in-flight interrupt flag: while an interrupt is in flight,
@@ -988,7 +1019,7 @@
       || (owner.operationId && voice().voiceOperationSessionId(owner.operationId));
     if (sid) {
       if (owner.operationId) voice().completeVoiceSubmission(owner.operationId, sid, false);
-      restoreSteerText(sid, text);
+      if (!restoreSteerText(sid, text)) return false;
     } else if (!state.activeSessionId && Number(state.draftEpoch || 0) === owner.draftEpoch) {
       prefillComposer(text, true);
     } else if (Number(state.draftEpoch || 0) === owner.draftEpoch) {

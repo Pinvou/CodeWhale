@@ -61,6 +61,7 @@ import { createPetActivationGuard } from '../features/pet/activation-guard.js';
 import { SessionAttachmentTitle } from '../features/attachments/SessionAttachmentTitle.jsx';
 import { openControlledDeviceChatWithRetry } from '../features/remote-control/remote-control-logic.mjs';
 import { modelSourceForLease } from '../features/remote-control/remote-model-source.mjs';
+import { mergeSessionStoreHistory } from '../features/remote-control/remote-session-adapter.mjs';
 import {
   sessionTitlePlainText,
   sessionTitlePresentation,
@@ -76,6 +77,7 @@ import { revealStartupWindow } from '../platform/tauri/startup-window.js';
 
 // 定时任务创建与运行链路已恢复，展示入口并允许自动跳转。
 const SCHEDULED_TASKS_ENTRY_ENABLED = true;
+const REMOTE_DISCONNECTED_CONNECTION = Object.freeze({ status: 'disconnected' });
 
 // 后端默认会话标题哨兵集合(bridge 按当前语言生成三语兜底标题,并据此判断是否自动改名)——
 // 显示层把任意一种哨兵标题映射成当前语言的「新对话」文案。哨兵是跨语言的后端
@@ -1390,7 +1392,6 @@ const NAV_PREFETCH = {
       const remoteModelLeaseKey = `${bs?.controllerConnection?.connectionId || ''}:${bs?.controllerConnection?.leaseEpoch || ''}`;
       const remoteModelLeaseKeyRef = useRef(remoteModelLeaseKey);
       const remoteTemporaryModelAvailable = bs?.controllerConnection?.temporaryModelAvailable === true;
-      const [remoteConnectionReady, setRemoteConnectionReady] = useState(false);
       const controlledDeviceAutoOpenRef = useRef(null);
       const controlledDeviceAutoOpenInFlightRef = useRef(null);
       const controlledSessionAutoOpenRef = useRef(null);
@@ -1405,13 +1406,14 @@ const NAV_PREFETCH = {
         }
         return null;
       })();
-      const remoteControllerConnected = !!(bs && bs.controllerConnection && bs.controllerConnection.status === 'connected');
-      const remoteChatConnection = (remoteControllerConnected || remoteConnectionReady)
-        ? (bs?.controllerConnection?.status === 'connected' ? bs.controllerConnection : { status: 'connected' })
-        : null;
+      const remoteChatConnection = bs?.controllerConnection || REMOTE_DISCONNECTED_CONNECTION;
+      const remoteProxyHistoryAvailable = bs?.platformCapabilities?.loaded === true
+        && bs?.platformCapabilities?.os === 'windows'
+        && bs?.platformCapabilities?.desktopRemoteControl === true;
       useEffect(() => {
-        if (!remoteControllerConnected) setRemoteConnectionReady(false);
-      }, [remoteControllerConnected]);
+        if (!bridge.available || !remoteProxyHistoryAvailable) return;
+        bridge.desktopRemoteControl.listRemoteProxyHistory().catch(() => {});
+      }, [remoteProxyHistoryAvailable]);
       useEffect(() => {
         const nextModelSource = modelSourceForLease(
           remoteModelSource,
@@ -1814,10 +1816,11 @@ const NAV_PREFETCH = {
 
       // Build chat history from sessions
       const bridgeSessions = bs && bs.sessions;
+      const remoteProxyHistories = bs && bs.remoteProxyHistories;
       const bridgeSessionBusy = bs && bs.sessionBusy;
       const chatHistory = useMemo(() => {
         const sessionBusy = bridgeSessionBusy || {};
-        return bridgeSessions ? bridgeSessions.map(s => {
+        return mergeSessionStoreHistory(bridgeSessions, remoteProxyHistories).map(s => {
           const isPlaceholder = !s.title || isDefaultChatTitle(s.title);
           const titlePresentation = isPlaceholder
             ? { text: t.newChat, attachments: [] }
@@ -1835,13 +1838,14 @@ const NAV_PREFETCH = {
             updatedAt: s.updated_at || s.created_at || '',
             pinned: !!s.pinned,
             pinnedAt: s.pinned_at || '',
+            sessionKind: s.kind,
             working: !!sessionBusy[s.id], // concurrent sessions: is this session generating in the background
             leadingIcon: <PinvouLogo className="h-[18px] w-[18px]" />,
             testId: 'regular-sidebar-item',
             menuTestId: 'regular-sidebar-menu',
           };
-        }) : [];
-      }, [bridgeSessions, bridgeSessionBusy, t, language]);
+        });
+      }, [bridgeSessions, remoteProxyHistories, bridgeSessionBusy, t, language]);
       const codexHistory = useMemo(() => codexSessions.map(session => ({
         id: session.id,
         title: (!session.title || isDefaultChatTitle(session.title))
@@ -2315,13 +2319,10 @@ const NAV_PREFETCH = {
       // 以 remote-control generation 去重：liveness 更新和链路恢复不会反复抢走用户当前页面。
       useEffect(() => {
         if (controlledDeviceStatus !== 'connected') {
-          // 旧后端若没有 generation，只能在明确离开连接生命周期后允许下一次自动打开。
-          if (!controlledDeviceGeneration && controlledDeviceStatus !== 'reconnecting') {
-            controlledDeviceAutoOpenRef.current = null;
-          }
           return;
         }
-        const connectionKey = controlledDeviceGeneration || 'legacy-connected';
+        if (!controlledDeviceGeneration) return;
+        const connectionKey = controlledDeviceGeneration;
         if (
           controlledDeviceAutoOpenRef.current === connectionKey
           || controlledDeviceAutoOpenInFlightRef.current === connectionKey
@@ -2335,7 +2336,7 @@ const NAV_PREFETCH = {
           isCurrent: () => {
             if (cancelled) return false;
             const latest = bsRef.current && bsRef.current.controlledDevice;
-            const latestKey = (latest && latest.generation) || 'legacy-connected';
+            const latestKey = latest && latest.generation;
             const viewIsCurrent = currentViewRef.current === originView || currentViewRef.current === 'chat';
             return !!(latest && latest.status === 'connected' && latestKey === connectionKey && viewIsCurrent);
           },
@@ -2359,8 +2360,8 @@ const NAV_PREFETCH = {
       // admitted task publishes its authoritative session id, select that
       // session exactly once so filtering never hides the received command.
       useEffect(() => {
-        if (controlledDeviceStatus !== 'connected' || !controlledTaskSessionId) return undefined;
-        const sessionKey = `${controlledDeviceGeneration || 'legacy'}:${controlledTaskSessionId}`;
+        if (controlledDeviceStatus !== 'connected' || !controlledDeviceGeneration || !controlledTaskSessionId) return undefined;
+        const sessionKey = `${controlledDeviceGeneration}:${controlledTaskSessionId}`;
         if (
           controlledSessionAutoOpenRef.current === sessionKey
           || controlledSessionAutoOpenInFlightRef.current === sessionKey
@@ -2647,6 +2648,26 @@ const NAV_PREFETCH = {
         });
       }, [closeMobileSidebar, runBrowserUiTransition, setCurrentView]);
 
+      const activateRemoteProxy = useCallback(async (opened, isCurrent = () => true) => {
+        const localSessionId = opened?.localSessionId;
+        if (!localSessionId || !isCurrent() || !bridge.desktopRemoteControl) return false;
+        // The list and read are SessionStore-gated. Never navigate using only
+        // the connection command's optimistic WebView projection.
+        await bridge.desktopRemoteControl.listRemoteProxyHistory();
+        if (!isCurrent()) return false;
+        const switched = await handleSwitchSession(localSessionId);
+        if (!switched || !isCurrent()) return false;
+        setRemoteConversationOpen(false);
+        return true;
+      }, [handleSwitchSession]);
+
+      const openCurrentRemoteProxy = useCallback(async () => {
+        if (!bridge.desktopRemoteControl) return false;
+        const existing = bsRef.current?.controllerConnection?.localSessionId || null;
+        const opened = await bridge.desktopRemoteControl.openLiveRemoteProxy(existing);
+        return activateRemoteProxy(opened);
+      }, [activateRemoteProxy]);
+
       async function handleSearchSelect(id) {
         await handleSwitchSession(id);
         setSearchOverlayOpen(false);
@@ -2896,12 +2917,16 @@ const NAV_PREFETCH = {
       // their dependency arrays list exactly the state they read.
       const handleDeleteSession = useCallback(async (id) => {
         const isCodexSession = codexSessions.some(session => session.id === id);
-        if (bridge.available) await bridge.sessions.deleteSession(id);
+        if (bridge.available) await bridge.sessions.deleteSession(id, (code) => {
+          if (code === 'remote_unattempted_pending_exists') {
+            setSettingsToast(t.remoteConversation.deletePreparedBlocked);
+          }
+        });
         if (isCodexSession) {
           if (activeCodexId === id) updateActiveCodexSession(null);
           await refreshCodexSessions().catch(() => {});
         }
-      }, [codexSessions, activeCodexId, updateActiveCodexSession, refreshCodexSessions]);
+      }, [codexSessions, activeCodexId, updateActiveCodexSession, refreshCodexSessions, t]);
 
       const handleRenameSession = useCallback(async (id, title) => {
         const isCodexSession = codexSessions.some(session => session.id === id);
@@ -3311,14 +3336,14 @@ const NAV_PREFETCH = {
               : chat.scheduledRun
                 ? cachedItemCallback(sidebarScheduledSelectCallbacks, chat, (c) => () => handleOpenScheduledRunShortcut(c.scheduledRun))
                 : handleSwitchSession}
-            onRename={handleRenameSession}
+            onRename={chat.sessionKind === 'RemoteProxy' ? undefined : handleRenameSession}
             onDelete={handleDeleteSession}
-            onTogglePinned={handleToggleSessionPinned}
-            onOpenFolder={can('externalSystemOpen') ? handleRevealSessionFolder : undefined}
-            onArchive={handleArchiveSession}
+            onTogglePinned={chat.sessionKind === 'RemoteProxy' ? undefined : handleToggleSessionPinned}
+            onOpenFolder={chat.sessionKind !== 'RemoteProxy' && can('externalSystemOpen') ? handleRevealSessionFolder : undefined}
+            onArchive={chat.sessionKind === 'RemoteProxy' ? undefined : handleArchiveSession}
             dragKind={detachKind}
             dragging={canDetachWindows && !!dragAvatar && dragAvatar.key === `${detachKind}:${chat.id}`}
-            onPickUp={canDetachWindows
+            onPickUp={chat.sessionKind !== 'RemoteProxy' && canDetachWindows
               ? cachedItemCallback(sidebarPickUpCallbacks, chat, (c) => (geom) => beginTearOff(detachKind, c.id, c.title, geom))
               : undefined}
           />
@@ -4140,12 +4165,10 @@ const NAV_PREFETCH = {
                   updateFocusTick={settingsUpdateFocusTick}
                   initialSection={settingsInitialSection}
                   remoteConversationOpen={remoteConversationOpen}
-                  onRemoteConversationOpen={() => setRemoteConversationOpen(true)}
-                  onRemoteConnected={() => {
-                    setRemoteConnectionReady(true);
-                    setRemoteConversationOpen(false);
-                    navigateFromScheduledRun('chat');
+                  onRemoteConversationOpen={() => {
+                    openCurrentRemoteProxy().catch(() => setRemoteConversationOpen(true));
                   }}
+                  onRemoteConnected={activateRemoteProxy}
                   onRemoteConversationClose={() => setRemoteConversationOpen(false)}
                   onCloseSettings={() => {
                     navigateFromScheduledRun(settingsReturnViewRef.current || 'chat');
@@ -4257,9 +4280,8 @@ const NAV_PREFETCH = {
                       <LazyRemoteConnectionShell
                         t={t}
                         bs={bs}
-                        modelSource={remoteModelSource}
-                        onModelSourceChange={setRemoteModelSource}
                         onClose={() => setRemoteConversationOpen(false)}
+                        onOpenChat={openCurrentRemoteProxy}
                         onRequestDisconnect={async () => {
                           if (bridge && bridge.available && bridge.desktopRemoteControl) {
                             await bridge.desktopRemoteControl.controllerDisconnect();

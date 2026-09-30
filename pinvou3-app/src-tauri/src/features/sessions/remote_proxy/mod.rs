@@ -1,8 +1,10 @@
 //! SessionStore-owned remote session records. No transport or Tauri dependency.
 
 pub(crate) mod binding;
-mod migration;
+pub(crate) mod history;
 pub(crate) mod outbox;
+mod persistence;
+pub(crate) mod projection;
 pub(crate) mod routing;
 pub(crate) mod schema;
 

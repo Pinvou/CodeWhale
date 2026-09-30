@@ -31,12 +31,11 @@ SESSION_APPLICATION_EXPORTS = (
     "pub(crate) mod ports;",
     "pub(crate) mod project_remote;",
     "pub(crate) mod submit_controlled;",
-    "pub(crate) mod sync_remote_journal;",
 )
 # One-time ceiling for introducing the per-callsite legacy rule. After this
 # change lands, the target branch baseline is the only ratchet authority.
 REMOTE_CONTROL_HOST_API_INITIAL_CEILING = {
-    "pinvou3-app/src-tauri/src/features/remote_control/controller/controlling_service.rs:host_emit": 4,
+    "pinvou3-app/src-tauri/src/features/remote_control/controller/controlling_service.rs:host_emit": 3,
     "pinvou3-app/src-tauri/src/features/remote_control/controller/controlling_service.rs:tauri_path": 2,
     "pinvou3-app/src-tauri/src/features/remote_control/controller/relay_runtime.rs:host_emit": 7,
     "pinvou3-app/src-tauri/src/features/remote_control/controller/relay_runtime.rs:tauri_path": 2,
