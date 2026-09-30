@@ -6897,8 +6897,9 @@ impl RuntimeThreadManager {
                 .collect()
         };
         for (approval_id, entry) in stranded_approvals {
-            // The receiver died with the monitor, so the send cannot
-            // deliver; the removal and the event below are the contract.
+            // A live receiver resolves through this deny on the decision
+            // channel; a dead one just drops the send. Either way the
+            // removal and the event below are the contract.
             let _ = entry
                 .sender
                 .send(ExternalApprovalDecision::Deny { remember: false });
