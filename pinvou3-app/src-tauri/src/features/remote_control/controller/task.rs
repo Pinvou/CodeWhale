@@ -30,12 +30,12 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tokio_util::sync::CancellationToken;
 
-use super::protocol::LeaseContext;
 use super::journal::JournalKind;
+use super::protocol::LeaseContext;
 
 pub(crate) const TASK_MODE_CHAT: &str = "chat";
 pub(crate) const TASK_MODE_CODE: &str = "code";
@@ -436,7 +436,10 @@ impl JsonTaskLedgerStore {
         Ok(file.tasks)
     }
 
-    fn flush(&self, records: &BTreeMap<String, RemoteTaskRecord>) -> std::result::Result<(), String> {
+    fn flush(
+        &self,
+        records: &BTreeMap<String, RemoteTaskRecord>,
+    ) -> std::result::Result<(), String> {
         let file = LedgerFile {
             version: LEDGER_FILE_VERSION,
             tasks: records.values().cloned().collect(),
@@ -871,7 +874,11 @@ fn prune_terminal(inner: &mut LedgerInner) {
         if inner.tasks.len() - removed.len() < MAX_TRACKED_TASKS {
             break;
         }
-        if inner.tasks.get(id).is_some_and(RemoteTaskRecord::is_terminal) {
+        if inner
+            .tasks
+            .get(id)
+            .is_some_and(RemoteTaskRecord::is_terminal)
+        {
             removed.push(id.clone());
         }
     }
@@ -1021,7 +1028,10 @@ impl ControllerTaskExecutor for ChatTurnExecutor {
             task_id,
             json!({ "text": content }),
         );
-        let reply = self.port.run_chat_turn(&session_id, content, cancel).await?;
+        let reply = self
+            .port
+            .run_chat_turn(&session_id, content, cancel)
+            .await?;
         if let Some(reply) = reply.filter(|text| !text.trim().is_empty()) {
             events.emit_journal(
                 JournalKind::AssistantDelta,
@@ -1272,7 +1282,9 @@ impl RemoteTaskService {
         let task_id = ticket.record.task_id.clone();
         let running = self.ledger.begin_dispatch(&task_id, now_b)?;
         self.publish(&running);
-        self.cancel_tokens.lock().insert(task_id.clone(), cancel.clone());
+        self.cancel_tokens
+            .lock()
+            .insert(task_id.clone(), cancel.clone());
         let executor = self.executors.lock().get(&running.mode).cloned();
         let Some(executor) = executor else {
             self.cancel_tokens.lock().remove(&task_id);
@@ -1357,9 +1369,7 @@ impl RemoteTaskService {
         reason: &str,
         now_b: u64,
     ) -> Vec<RemoteTaskRecord> {
-        let records = self
-            .ledger
-            .interrupt_generation(generation, reason, now_b);
+        let records = self.ledger.interrupt_generation(generation, reason, now_b);
         self.finish_interrupted(records)
     }
 
@@ -1407,9 +1417,7 @@ impl RemoteTaskService {
         reason: Option<String>,
         now_b: u64,
     ) -> Result<RemoteTaskRecord> {
-        let mut record = self
-            .ledger
-            .complete(task_id, terminal, None, now_b)?;
+        let mut record = self.ledger.complete(task_id, terminal, None, now_b)?;
         if let Some(reason) = reason {
             record.terminal_reason = Some(bounded_reason_owned(reason));
         }
@@ -1711,7 +1719,10 @@ mod tests {
     }
 
     fn admitted(service: &RemoteTaskService, body: &Value, now_b: u64) -> RemoteTaskTicket {
-        match service.submit(&context("generation-0001"), body, now_b).unwrap() {
+        match service
+            .submit(&context("generation-0001"), body, now_b)
+            .unwrap()
+        {
             AdmissionOutcome::Admitted(ticket) => ticket,
             other => panic!("expected admission, got {other:?}"),
         }
@@ -1728,9 +1739,11 @@ mod tests {
                 .code,
             "task_binding_stale"
         );
-        assert!(ledger
-            .admit(&context("generation-0001"), &request(&body), 1_000)
-            .is_ok());
+        assert!(
+            ledger
+                .admit(&context("generation-0001"), &request(&body), 1_000)
+                .is_ok()
+        );
     }
 
     #[test]
@@ -1751,7 +1764,9 @@ mod tests {
 
         let bad_digest = payload("session-0001", "task-0001", "client-0001", "not-a-digest");
         assert_eq!(
-            RemoteTaskRequest::from_payload(&bad_digest).unwrap_err().code,
+            RemoteTaskRequest::from_payload(&bad_digest)
+                .unwrap_err()
+                .code,
             "task_input_digest_invalid"
         );
 
@@ -1960,18 +1975,20 @@ mod tests {
             .unwrap();
         assert!(!not_dispatched.outcome_unknown);
         assert_eq!(not_dispatched.wire_status(), TASK_STATUS_INTERRUPTED);
-        assert!(ledger
-            .admit(
-                &live,
-                &request(&payload(
-                    "session-0001",
-                    "task-0003",
-                    "client-0003",
-                    &digest(3),
-                )),
-                1_300,
-            )
-            .is_ok());
+        assert!(
+            ledger
+                .admit(
+                    &live,
+                    &request(&payload(
+                        "session-0001",
+                        "task-0003",
+                        "client-0003",
+                        &digest(3),
+                    )),
+                    1_300,
+                )
+                .is_ok()
+        );
     }
 
     #[test]
@@ -2008,7 +2025,8 @@ mod tests {
     fn restart_recovery_terminates_every_persisted_non_terminal_task() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("task-ledger.json");
-        let store: Arc<dyn RemoteTaskLedgerStore> = Arc::new(JsonTaskLedgerStore::new(path.clone()));
+        let store: Arc<dyn RemoteTaskLedgerStore> =
+            Arc::new(JsonTaskLedgerStore::new(path.clone()));
         let ledger = RemoteTaskLedger::new(store.clone());
         ledger
             .admit(
@@ -2036,7 +2054,10 @@ mod tests {
         assert_eq!(recovered.len(), 1);
         assert_eq!(recovered[0].state, RemoteTaskState::Interrupted);
         assert_eq!(recovered[0].wire_status(), TASK_STATUS_RESULT_UNKNOWN);
-        assert_eq!(recovered[0].terminal_reason.as_deref(), Some("process_restart"));
+        assert_eq!(
+            recovered[0].terminal_reason.as_deref(),
+            Some("process_restart")
+        );
         assert!(restored.active_for_session("session-0001").is_none());
     }
 
@@ -2052,7 +2073,10 @@ mod tests {
         let live = context("generation-0001");
         let body = payload("session-0001", "task-0001", "client-0001", &digest(1));
         assert_eq!(
-            ledger.admit(&live, &request(&body), 1_000).unwrap_err().code,
+            ledger
+                .admit(&live, &request(&body), 1_000)
+                .unwrap_err()
+                .code,
             "task_ledger_persist_failed"
         );
         assert_eq!(ledger.live_task_count(), 0);
@@ -2123,12 +2147,7 @@ mod tests {
         let body = payload("session-0001", "task-0001", "client-0001", &digest(1));
         let ticket = admitted(&service, &body, 1_000);
         runtime()
-            .block_on(service.dispatch(
-                ticket,
-                Arc::new(NoopSink),
-                CancellationToken::new(),
-                1_100,
-            ))
+            .block_on(service.dispatch(ticket, Arc::new(NoopSink), CancellationToken::new(), 1_100))
             .unwrap();
         match service
             .submit(&context("generation-0001"), &body, 1_200)
@@ -2234,11 +2253,9 @@ mod tests {
                 task_id: Option<&str>,
                 payload: Value,
             ) {
-                self.0.lock().push((
-                    kind.wire().to_owned(),
-                    task_id.map(str::to_owned),
-                    payload,
-                ));
+                self.0
+                    .lock()
+                    .push((kind.wire().to_owned(), task_id.map(str::to_owned), payload));
             }
         }
 
@@ -2267,15 +2284,13 @@ mod tests {
         let code = code_payload("session-0001", "task-0001", "client-0001", "workspace-0001");
         let ticket = admitted(&service, &code, 1_000);
         let record = runtime()
-            .block_on(service.dispatch(
-                ticket,
-                Arc::new(NoopSink),
-                CancellationToken::new(),
-                1_100,
-            ))
+            .block_on(service.dispatch(ticket, Arc::new(NoopSink), CancellationToken::new(), 1_100))
             .unwrap();
         assert_eq!(record.state, RemoteTaskState::Failed);
-        assert_eq!(record.terminal_reason.as_deref(), Some("executor_unavailable"));
+        assert_eq!(
+            record.terminal_reason.as_deref(),
+            Some("executor_unavailable")
+        );
     }
 
     #[test]
@@ -2400,18 +2415,20 @@ mod tests {
                 .complete(&task_id, RemoteTaskTerminal::Succeeded, None, 1_100)
                 .unwrap();
         }
-        assert!(ledger
-            .admit(
-                &live,
-                &request(&payload(
-                    "session-9999",
-                    "task-9999",
-                    "client-9999",
-                    &digest(2),
-                )),
-                1_200,
-            )
-            .is_ok());
+        assert!(
+            ledger
+                .admit(
+                    &live,
+                    &request(&payload(
+                        "session-9999",
+                        "task-9999",
+                        "client-9999",
+                        &digest(2),
+                    )),
+                    1_200,
+                )
+                .is_ok()
+        );
         assert!(ledger.records().len() <= MAX_TRACKED_TASKS);
     }
 }

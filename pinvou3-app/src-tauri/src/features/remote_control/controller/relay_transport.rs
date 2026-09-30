@@ -169,7 +169,10 @@ pub(crate) enum ControllerSendError {
     Serialization,
     Unauthenticated,
     InvalidFrame(String),
-    FrameTooLarge { bytes: usize, limit: usize },
+    FrameTooLarge {
+        bytes: usize,
+        limit: usize,
+    },
     ByteBudgetExhausted,
     QueueFull(FramePriority),
     /// E2E-02：transport 的 `remote_control_generation` 已经被绑定过，或已被

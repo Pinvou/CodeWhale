@@ -205,7 +205,10 @@ mod tests {
                 1_000,
             )
             .unwrap();
-        for authority_kind in [DecisionAuthority::ControlledB, DecisionAuthority::LocalOperator] {
+        for authority_kind in [
+            DecisionAuthority::ControlledB,
+            DecisionAuthority::LocalOperator,
+        ] {
             assert_eq!(
                 authority
                     .decide(
