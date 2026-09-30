@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { dict } from '../src/shared/i18n-all.js';
+import { dict } from './helpers/i18n-all.js';
 import {
   countdownAnnouncement, countdownSeconds, currentControlledTasks, normalizeSelectedWorkspaces,
   permissionOperationCopyKey, permissionRedactionCopyKey,

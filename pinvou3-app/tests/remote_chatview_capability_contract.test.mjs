@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
-import { dict } from '../src/shared/i18n-all.js';
+import { dict } from './helpers/i18n-all.js';
 import { remoteProjectionLabelKey } from '../src/features/remote-control/remote-session-adapter.mjs';
 
 const chat = readFileSync(new URL('../src/features/chat/ChatView.jsx', import.meta.url), 'utf8');
