@@ -118,8 +118,10 @@ fn resolve_endpoint(
         saved_provider_model: None,
         base_url_override: Some(base_url.clone()),
         limit_overrides: Vec::new(),
-        // The wire dialect rides the same provider_cfg that supplied the
-        // endpoint and key, so a `wire = "responses"` table cannot be silently
+        // The wire dialect rides the same literal `[providers.custom]` table
+        // that supplied the endpoint and key above (this ingress reads the
+        // legacy field, not the named-table map the tui route layer
+        // resolves), so a `wire = "responses"` table cannot be silently
         // served as chat here: the resolver mints a Responses candidate and
         // the handler's ChatCompletions-only guard rejects it (fail closed)
         // instead of forwarding to `{base}/chat/completions`.

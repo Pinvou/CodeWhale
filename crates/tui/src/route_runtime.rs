@@ -379,6 +379,10 @@ pub(crate) fn resolve_route_candidate(
         base_url_override,
         context_window_override,
         None,
+        // Config-free by contract: this wrapper's callers (unpinned child
+        // admission) consume only the wire model id and limits, never
+        // `candidate.protocol()`, so the static policy applies.
+        None,
     )
     .map(|resolution| resolution.candidate)
 }
@@ -428,6 +432,13 @@ pub(crate) fn resolve_unpinned_model_candidate(
 /// Code bare-K3 endpoint, only at the documented 1M entitlement, and only
 /// while fresh; this prevents generic Moonshot or stale metadata from being
 /// inherited by a membership-plan route.
+///
+/// `custom_wire_override` must carry the dialect of the same table that
+/// supplied `base_url_override` when `provider` is
+/// [`ApiProvider::Custom`] — pass [`custom_wire_override_for`] on the config
+/// the base URL came from. A `None` here resolves a Custom route under the
+/// static Chat policy, which is only correct for callers that never consume
+/// `candidate.protocol()`.
 pub(crate) fn resolve_route_candidate_with_context_metadata(
     provider: ApiProvider,
     model_selector: Option<&str>,
@@ -435,6 +446,7 @@ pub(crate) fn resolve_route_candidate_with_context_metadata(
     base_url_override: Option<String>,
     context_window_override: Option<u32>,
     provider_reported_context: Option<ProviderReportedKimiCodeContext>,
+    custom_wire_override: Option<WireFormat>,
 ) -> Result<RouteCandidateResolution, String> {
     resolve_route_candidate_with_context_metadata_and_host_limits(
         provider,
@@ -444,9 +456,7 @@ pub(crate) fn resolve_route_candidate_with_context_metadata(
         context_window_override,
         provider_reported_context,
         None,
-        // Config-free convenience wrapper: callers here resolve non-Custom
-        // routes (or want the static policy), so no wire override.
-        None,
+        custom_wire_override,
     )
 }
 
@@ -495,8 +505,10 @@ fn resolve_route_candidate_with_context_metadata_and_host_limits(
         limit_overrides: Vec::new(),
         wire_override: custom_wire_override,
     };
-    // First pass: resolve the route without overrides to learn the effective
-    // endpoint, wire model id, and catalog limits. Candidates are immutable, so
+    // First pass: resolve the route without limit overrides to learn the
+    // effective endpoint, wire model id, and catalog limits (the wire
+    // override rides both passes, so both mint the same protocol and
+    // endpoint key). Candidates are immutable, so
     // limit adjustments are planned from this read-only resolution and then
     // requested through `RouteRequest::limit_overrides` on a second pass; the
     // resolver applies them BEFORE minting the final candidate and records
@@ -1303,6 +1315,7 @@ mod tests {
             base.clone(),
             None,
             None,
+            None,
         )
         .expect("Kimi Code route");
         assert_eq!(static_floor.context_window.tokens, 262_144);
@@ -1321,6 +1334,7 @@ mod tests {
                 context_tokens: 1_048_576,
                 observed_at: Utc::now(),
             }),
+            None,
         )
         .expect("configured route");
         assert_eq!(configured.context_window.tokens, 1_048_576);
@@ -1339,6 +1353,7 @@ mod tests {
                 context_tokens: 1_048_576,
                 observed_at: Utc::now(),
             }),
+            None,
         )
         .expect("fresh documented provider metadata");
         assert_eq!(reported.context_window.tokens, 1_048_576);
@@ -1357,6 +1372,7 @@ mod tests {
                 context_tokens: 1_048_576,
                 observed_at: Utc::now() - Duration::hours(25),
             }),
+            None,
         )
         .expect("stale metadata falls back safely");
         assert_eq!(
@@ -1374,6 +1390,7 @@ mod tests {
                 context_tokens: 1_048_576,
                 observed_at: Utc::now(),
             }),
+            None,
         )
         .expect_err("bare k3 is rejected on the direct Moonshot endpoint (#4687)");
         assert!(

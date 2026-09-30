@@ -399,7 +399,13 @@ pub(crate) fn route_is_valid_for_model(
         limit_overrides: Vec::new(),
 
         // Validate the same wire the per-turn route would mint: read the
-        // validated provider's own table dialect, not the global selection.
+        // dialect of the same table `provider_config_for` resolves above (the
+        // ambient selection, which also supplies the base URL in every arm),
+        // so preflight cannot disagree with the client this readiness
+        // describes. Identity-pinned tables are validated by the route
+        // layer's identity-scoped resolution instead. Outcome-identical
+        // today (Custom validation is protocol-independent), pinned against
+        // future drift.
         wire_override: (kind == codewhale_config::ProviderKind::Custom)
             .then(|| {
                 configured.and_then(|entry| {

@@ -402,6 +402,11 @@ impl App {
                     Some(configured_route_base_url.clone()),
                     active_context_window_override,
                     None,
+                    // The ambient table's dialect — the same table
+                    // `configured_route_base_url` above resolves.
+                    (provider == ApiProvider::Custom)
+                        .then(|| crate::route_runtime::custom_wire_override_for(config))
+                        .flatten(),
                 )
                 .map(|resolution| {
                     (

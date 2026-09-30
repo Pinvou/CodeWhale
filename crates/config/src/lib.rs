@@ -159,9 +159,13 @@ pub struct ProviderConfigToml {
     pub context_window: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode: Option<String>,
-    /// Wire dialect preference for dual-protocol vendors (DeepSeek, MiniMax,
-    /// Model Studio): `openai` (Chat Completions, default) or `anthropic`
-    /// (Messages). Not a separate catalog provider — a power-user toggle.
+    /// Wire dialect override. Named custom-provider tables accept
+    /// `responses`, `anthropic` (or `messages`/`claude`), and `chat` or
+    /// `openai` (the Chat Completions default); dual-protocol built-in
+    /// vendors (DeepSeek, MiniMax, Model Studio) accept `openai` (default)
+    /// or `anthropic` (Messages). Unrecognized values fall back to the
+    /// default Chat Completions policy with a warning. Not a separate
+    /// catalog provider — a power-user toggle.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
