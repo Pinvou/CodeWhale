@@ -10,7 +10,7 @@ import { localizeTool, mergeConfigFields, TsActionBtn, tsCategories, tsSkillIcon
 import { MAX_SKILL_ZIP_BYTES, pickSkillDrop, fileToBase64 } from './skill-import-logic.js';
 import { invokeTauri, isTauriAvailable, tauriEvents } from '../../platform/tauri/client.js';
 import { can, isWeb } from '../../shared/platform.js';
-import { applyConnectorFailure, connectorFailure, connectorUiStep, localizeConnectorAlert, releaseBusy } from './connector-ui-state.js';
+import { applyConnectorFailure, connectorErrorCopy, connectorFailure, connectorUiStep, localizeConnectorAlert, releaseBusy } from './connector-ui-state.js';
 import { ConnectorSsoDialog } from './ConnectorSsoDialog.jsx';
 import { isImeComposing } from '../../shared/ime-guard.mjs';
 import { pathBasename } from '../../shared/path-utils.js';
@@ -50,7 +50,8 @@ const toolPositionBucket = (index) => {
   if (index < 10) return '4_10';
   return '11_plus';
 };
-
+// Log connector failures by code and step only: raw backend errors can carry
+// URLs, device codes or account details that do not belong in the console.
 const reportConnectorFailure = (connector, value, phase) => {
   const failure = connectorFailure(value, phase);
   console.error('connector failed:', {
@@ -272,7 +273,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
               <div className="rounded-xl border border-rose-200 dark:border-rose-500/30 bg-rose-50 dark:bg-rose-500/10 p-3">
                 <div className="text-[13px] font-medium text-rose-700 dark:text-rose-300 mb-1.5">{copy.connectionIncomplete}</div>
                 <div className="text-[12px] leading-relaxed text-rose-800/80 dark:text-rose-200/70">
-                  {errors[flow.errorCode] || errors.unknown || copy.connectionIncomplete}
+                  {connectorErrorCopy(errors, flow.errorCode) || errors.unknown || copy.connectionIncomplete}
                 </div>
                 <div className="flex gap-2 mt-3 justify-end">
                   <button onClick={onCancel} className="px-3 py-1.5 rounded-lg bg-slate-200 dark:bg-white/10 text-slate-700 dark:text-slate-100 text-[13px]">{copy.close}</button>
@@ -340,6 +341,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
     const createConnectorFlow = (cfg) => {
       const conn = cfg.conn;
       // Backend connection events register only once (idempotent; no duplicate registration across repeated ToolStoreView mounts).
+      // Failures are stored as error codes and localized at render time, so a language switch after the first install still applies.
       const ensureListeners = () => {
         if (conn.listenersReady) return;
         const ev = isTauriAvailable() ? tauriEvents : null;
@@ -349,12 +351,18 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
           const p = e.payload || {};
           conn.stopTick();
           if (cfg.openAuthUrl && p.url) {
-            invokeTauri('open_external_url', { url: p.url }).catch(err => {
-              console.error('open tmeet auth url failed:', err);
+            // Log without the error: the rejection carries the full auth URL (device-code-bearing),
+            // which must not land in the console; reopening stays available via the card's button.
+            invokeTauri('open_external_url', { url: p.url }).catch(() => {
+              console.error('open tmeet auth url failed');
             });
           }
+          // Flow null = the card was closed (cancel/close) before the event landed;
+          // a late QR would fabricate a fresh card (and re-open wecom's modal) that
+          // the backend generation guards cannot cover across a reconnect.
           conn.setFlow(f => {
-            const prev = (f && f.steps) || {};
+            if (!f) return f;
+            const prev = f.steps || {};
             return {
               ...f, phase: 'qr', active: 'qr',
               steps: { ...prev, runtime: prev.runtime || 'done', cli: prev.cli === 'active' ? 'done' : (prev.cli || 'done'), ...(cfg.qrStepsExtra), qr: 'active' },
@@ -364,11 +372,16 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
         });
         ev.listen(cfg.events.connected, cfg.connectedMode === 'apply' ? () => {
           conn.stopTick();
-          conn.setFlow(f => ({ ...f, phase: 'done', steps: { ...(f && f.steps), qr: 'done' } }));
+          // Flow null = the card was closed (cancel) before the event landed;
+          // writing would resurrect a zombie "done" card.
+          conn.setFlow(f => (f ? { ...f, phase: 'done', steps: { ...f.steps, qr: 'done' } } : f));
           // Connected → write skills per the rules (enabled by default) + broadcast refresh; view-independent, so it lives in the global listener.
           invokeTauri(cfg.commands.applySkills).catch(() => {});
-          // Auto-collapse the flow card later (the detail dialog's "Connected" state is now driven by derived connection state)
-          setTimeout(() => conn.setFlow(null), 1800);
+          // Auto-collapse the flow card later (the detail dialog's "Connected" state is now driven by derived connection state).
+          // The collapse must only close a card that already reached 'done': a
+          // stale timer from the previous round must not destroy a card the
+          // user re-opened within the window (and strand the busy slot with it).
+          setTimeout(() => conn.setFlow(f => (f && f.phase === 'done' ? null : f)), 1800);
         } : async () => {
           conn.stopTick();
           try {
@@ -382,20 +395,29 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
               }
             }
             await invokeTauri(cfg.commands.applySkills);
-            conn.setFlow(f => ({ ...f, phase: 'done', steps: { ...(f && f.steps), qr: 'done' } }));
-            setTimeout(() => conn.setFlow(null), 1800);
+            // Same null guard as above: the awaited apply gives cancel a wide window.
+            conn.setFlow(f => (f ? { ...f, phase: 'done', steps: { ...f.steps, qr: 'done' } } : f));
+            // Same done-only collapse guard as the apply-mode listener above: a
+            // stale timer must not close a freshly re-opened card.
+            setTimeout(() => conn.setFlow(f => (f && f.phase === 'done' ? null : f)), 1800);
           } catch (e) {
-            // dingtalk (applyAwait) reports a fixed skills_enable_failed; tmeet (readinessAwait) passes the original error (auth_failed included) — both go through the errorCode-driven localized connector errors
-            const failure = cfg.connectedMode === 'applyAwait' ? { code: 'skills_enable_failed' } : e;
+            // readinessAwait (tmeet) passes the readiness re-check's auth_failed through; every other failure
+            // after authorization completed (dingtalk's awaited apply, tmeet's own skill write) reports
+            // skills_enable_failed — the sign-in demonstrably succeeded on those paths.
+            const authIncomplete = cfg.connectedMode !== 'applyAwait' && e && e.code === 'auth_failed';
+            const failure = authIncomplete ? e : { code: 'skills_enable_failed' };
             reportConnectorFailure(cfg.key, failure, 'qr');
-            conn.setFlow(f => applyConnectorFailure(f, failure, 'qr'));
+            // Same null guard: a failure landing after the card was closed must not fabricate one.
+            conn.setFlow(f => (f ? applyConnectorFailure(f, failure, 'qr') : f));
           }
         });
         ev.listen(cfg.events.error, (e) => {
           const p = e.payload || {};
           reportConnectorFailure(cfg.key, p, p.phase);
           conn.stopTick();
-          conn.setFlow(f => applyConnectorFailure(f, p, p.phase));
+          // Flow null = the card was closed (cancel/close) before the event landed;
+          // applyConnectorFailure would resurrect a fresh error card from nothing.
+          conn.setFlow(f => (f ? applyConnectorFailure(f, p, p.phase) : f));
         });
       };
       // Component-side quartet handlers: deps are injected from the component closure at call time (same semantics
@@ -417,6 +439,11 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
           // ① Ensure CLI (installed online on first use)
           conn.setFlow(f => ({ ...f, active: 'cli', pct: 0, log: detailCopy.flow.installStarting, steps: { ...(f && f.steps), runtime: 'done', cli: 'active' } }));
           await invokeTauri(cfg.commands.ensureCli);
+          // A cancel/close during the (potentially long) CLI install closed the
+          // card; resetFlow already stopped the tick and released the busy slot.
+          // Starting a backend round now would run invisibly and emit onto
+          // nothing — stop instead of connecting for a dismissed card.
+          if (!conn.flow) return;
           conn.setFlow(cfg.twoStep
             // ② Connection orchestration (two-stage: advance the connect step; the backend emits qr / connected / error)
             ? f => ({ ...f, active: 'connect', pct: 100, steps: { ...(f && f.steps), cli: 'done', connect: 'active' } })
@@ -430,6 +457,9 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
           // 失败收尾只释放自己的槽位:异步期间 busyId 可能已易主(同 releaseBusy 纪律)。
           setBusyId(busy => releaseBusy(busy, cfg.key));
           conn.setFlow(f => applyConnectorFailure(f, e, stage));
+          // Same null guard as the listeners: a rejection landing after the card
+          // was closed (cancel during ensureCli/begin) must not fabricate one.
+          conn.setFlow(f => (f ? applyConnectorFailure(f, e, stage) : f));
         }
       };
       // Cancel/close the flow card: mark cancelled + kill child processes + clear state.
@@ -465,46 +495,42 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
     };
 
     const feishuFlowApi = createConnectorFlow({
-      key: 'feishu', conn: feishuConn, twoStep: true,
+      key: 'feishu', conn: feishuConn, twoStep: true, beginStage: 'register',
       events: { qr: 'feishu:qr', connected: 'feishu:connected', error: 'feishu:error' },
       commands: { ensureCli: 'feishu_ensure_cli', begin: 'feishu_connect_begin', cancel: 'feishu_cancel', logout: 'feishu_logout', applySkills: 'feishu_apply_skills' },
       qrStepsExtra: { connect: 'done' },
       connectedMode: 'apply',
-      beginStage: 'register',
       disconnectedTitle: ({ storeCopy }) => storeCopy.disconnectedTool(storeCopy.toolNames.feishu),
     });
     const ensureFeishuListeners = feishuFlowApi.ensureListeners;
 
     const wecomFlowApi = createConnectorFlow({
-      key: 'wecom', conn: wecomConn, twoStep: false,
+      key: 'wecom', conn: wecomConn, twoStep: false, beginStage: 'authorize',
       events: { qr: 'wecom:qr', connected: 'wecom:connected', error: 'wecom:error' },
       commands: { ensureCli: 'wecom_ensure_cli', begin: 'wecom_connect_begin', cancel: 'wecom_cancel', logout: 'wecom_logout', applySkills: 'wecom_apply_skills' },
       connectedMode: 'apply',
-      beginStage: 'authorize',
       disconnectedTitle: ({ storeCopy }) => storeCopy.disconnectedTool(storeCopy.toolNames.wecom),
     });
     const ensureWecomListeners = wecomFlowApi.ensureListeners;
 
     const dingtalkFlowApi = createConnectorFlow({
-      key: 'dingtalk', conn: dingtalkConn, twoStep: false,
+      key: 'dingtalk', conn: dingtalkConn, twoStep: false, beginStage: 'authorize',
       events: { qr: 'dingtalk:qr', connected: 'dingtalk:connected', error: 'dingtalk:error' },
       commands: { ensureCli: 'dingtalk_ensure_cli', begin: 'dingtalk_connect_begin', cancel: 'dingtalk_cancel', logout: 'dingtalk_logout', applySkills: 'dingtalk_apply_skills' },
       qrPayloadExtra: p => ({ userCode: p.user_code }),
       connectedMode: 'applyAwait',
-      beginStage: 'authorize',
       disconnectedTitle: ({ storeCopy }) => storeCopy.disconnectedTool(storeCopy.toolNames.dingtalk),
     });
     const ensureDingtalkListeners = dingtalkFlowApi.ensureListeners;
 
     const tmeetFlowApi = createConnectorFlow({
-      key: 'tmeet', conn: tmeetConn, twoStep: false,
+      key: 'tmeet', conn: tmeetConn, twoStep: false, beginStage: 'authorize',
       events: { qr: 'tmeet:qr', connected: 'tmeet:connected', error: 'tmeet:error' },
       commands: { ensureCli: 'tmeet_ensure_cli', begin: 'tmeet_connect_begin', cancel: 'tmeet_cancel', logout: 'tmeet_logout', applySkills: 'tmeet_apply_skills' },
       qrPayloadExtra: () => ({ browserAuth: true }),
       openAuthUrl: true,
       connectedMode: 'readinessAwait',
       readiness: { bundleId: 'tmeet' },
-      beginStage: 'authorize',
       disconnectedTitle: ({ detailCopy }) => detailCopy.actions.disconnectedTmeet,
     });
     const ensureTmeetListeners = tmeetFlowApi.ensureListeners;
@@ -517,6 +543,13 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
     // refresh). The real listeners/stopwatch live in the module-level conn singleton, surviving view switches.
     // tmeet's done toast uses a detailCopy phrase via doneTitle; others pass evaluated storeCopy.connectedTool(...).
     const useConnectorFlowSubscription = ({ enabled, conn, ensureListeners, setFlow, detailCopy, setBusyId, loadBackendState, setAlert, doneTitle, toolId, finishToolConfiguration: finishCfg }) => {
+      // The subscription effect runs once per enabled state; the toast copy goes
+      // through a latest-ref so a "connected" toast raised after a mid-flow
+      // language switch uses the current language, like the failure card does.
+      const toastCopyRef = useRef(null);
+      useEffect(() => {
+        toastCopyRef.current = { doneTitle, enabledSubtitle: detailCopy.actions.enabled };
+      });
       useEffect(() => {
         if (!enabled) return;
         ensureListeners();
@@ -530,7 +563,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
               // 只释放自己的槽位(见 releaseBusy):完成事件可能晚到,彼时 busyId 已易主。
               setBusyId(busy => releaseBusy(busy, toolId));
               loadBackendState();
-              setAlert({ visible: true, loading: false, title: doneTitle, subtitle: detailCopy.actions.enabled, isInstall: true, isError: false, toolId });
+              setAlert({ visible: true, loading: false, title: toastCopyRef.current && toastCopyRef.current.doneTitle, subtitle: toastCopyRef.current && toastCopyRef.current.enabledSubtitle, isInstall: true, isError: false, toolId });
               notifyComposerToolsChanged();
             } else if (ph === 'error') {
               if (finishCfg) finishCfg(toolId, false);
@@ -541,7 +574,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
         });
         setFlow(conn.flow); // hydrate the current progress on (re)mount
         return unsub;
-      // eslint-disable-next-line react-hooks/exhaustive-deps -- subscription mounts/unmounts only with externalAuthAvailable; the closure reads current deps on demand, so resubscribing is unnecessary
+      // eslint-disable-next-line react-hooks/exhaustive-deps -- subscription mounts/unmounts only with externalAuthAvailable; failures are stored as error codes and localized at render time, so resubscribing on copy changes is unnecessary
       }, [enabled]);
     };
 
@@ -2970,7 +3003,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
                     <FeishuFlowCard flow={dingtalkFlow} steps={storeCopy.dingtalkSteps} name={storeCopy.toolNames.dingtalk} copy={detailCopy.flow} errors={storeCopy.connectorErrors} twoStep={false} onRetry={() => retryConnector('dingtalk')} onCancel={() => resetConnectorFlow('dingtalk')} onBrowserOpenError={browserOpenFailed} />
                   )}
                   {externalAuthAvailable && selectedTool.tmeetCli && tmeetFlow && (
-                    <FeishuFlowCard flow={tmeetFlow.phase === 'error' && !detailCopy.showRawErrors ? { ...tmeetFlow, err: detailCopy.actions.operationFailed } : tmeetFlow} steps={detailCopy.tmeetSteps} name={detailCopy.tools.tmeet.title} copy={detailCopy.flow} errors={storeCopy.connectorErrors} twoStep={false} browserAuth={!!tmeetFlow.browserAuth} onRetry={() => retryConnector('tmeet')} onCancel={() => resetConnectorFlow('tmeet')} onBrowserOpenError={browserOpenFailed} />
+                    <FeishuFlowCard flow={tmeetFlow} steps={detailCopy.tmeetSteps} name={detailCopy.tools.tmeet.title} copy={detailCopy.flow} errors={storeCopy.connectorErrors} twoStep={false} browserAuth={!!tmeetFlow.browserAuth} onRetry={() => retryConnector('tmeet')} onCancel={() => resetConnectorFlow('tmeet')} onBrowserOpenError={browserOpenFailed} />
                   )}
                   {connectedBanners.filter(b => b.show).map((banner, i) => (
                     <div key={`connected-banner-${i}`} className="mb-8 flex items-center gap-3 p-4 rounded-2xl bg-emerald-50 dark:bg-emerald-500/10 border border-emerald-200 dark:border-emerald-500/30">

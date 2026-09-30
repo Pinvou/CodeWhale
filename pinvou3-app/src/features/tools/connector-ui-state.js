@@ -19,6 +19,17 @@ function connectorFailure(value, step) {
   };
 }
 
+// Own-key lookup for the flow card's copy. A bare `errors[code]` would resolve
+// Object.prototype members (`constructor`, `toString`, `valueOf` all pass the
+// snake_case pattern) to inherited functions — truthy, and crashing React when
+// rendered. Codes only ever come from this repo's emitters today; this keeps
+// the render safe if a future source ever forwards an outside string.
+function connectorErrorCopy(errors, code) {
+  if (!errors || typeof code !== 'string' || !Object.prototype.hasOwnProperty.call(errors, code)) return '';
+  const copy = errors[code];
+  return typeof copy === 'string' ? copy : '';
+}
+
 function connectorUiStep(flow, phase) {
   const active = String((flow && flow.active) || '').trim().toLowerCase();
   const normalizedPhase = String(phase || '').trim().toLowerCase();
@@ -35,8 +46,7 @@ function applyConnectorFailure(flow, value, phase) {
     ...current,
     phase: 'error',
     ...connectorFailure(value, phase || step),
-    errStep: step,
-    steps: { ...(current.steps || {}), [step]: 'error' },
+    steps: { ...current.steps, [step]: 'error' },
   };
 }
 
@@ -92,4 +102,4 @@ function localizeConnectorAlert(alert, storeCopy, detailCopy) {
   };
 }
 
-export { applyConnectorFailure, connectorErrorCodeForStep, connectorFailure, connectorUiStep, localizeConnectorAlert, releaseBusy };
+export { applyConnectorFailure, connectorErrorCopy, connectorErrorCodeForStep, connectorFailure, connectorUiStep, localizeConnectorAlert, releaseBusy };
