@@ -153,6 +153,10 @@ export class AdminPlatformClient {
     return payload;
   }
 
+  reauthenticate(returnTo = '/admin.html') {
+    globalThis.location.assign(`${this.baseURL}/auth/login?reauthenticate=1&return_to=${encodeURIComponent(returnTo)}`);
+  }
+
   async request(area, resource, signal) {
     if (signal?.aborted) throw abortRequestError();
     const url = `${this.baseURL}/api/admin/${area}${resource}`;

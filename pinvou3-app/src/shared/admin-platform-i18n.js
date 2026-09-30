@@ -1598,7 +1598,7 @@ const registrationBonusOperationsCopy = {
     revision: '策略版本', updatedAt: '更新时间', enabled: '启用注册赠送', amount: '赠送积分（整数）', validityDays: '有效期（天）',
     reason: '变更原因', reasonPlaceholder: '至少 10 个字符，说明本次策略变更原因', save: '保存赠送策略', saving: '保存中…', saved: '注册赠送策略已更新。', readOnly: '当前账号只有注册赠送策略查看权限。',
     lifetimeWarning: '资格按手机号终身计算：首次注册即使策略关闭或赠送为 0，也会永久消耗资格，后续不会补赠。',
-    loadFailed: '无法加载注册赠送策略，请稍后重试。', saveFailed: '注册赠送策略保存失败，请核对输入后重试。', conflict: '策略已被其他管理员更新，请刷新后重新提交。', recentAuthenticationRequired: '该操作要求近期认证，请重新登录后再试。',
+    loadFailed: '无法加载注册赠送策略，请稍后重试。', saveFailed: '注册赠送策略保存失败，请核对输入后重试。', conflict: '策略已被其他管理员更新，请刷新后重新提交。', recentAuthenticationRequired: '该操作要求近期认证，请重新登录后再试。', reauthenticate: '重新登录',
   },
   en: {
     nav: 'Operations',
@@ -1607,7 +1607,7 @@ const registrationBonusOperationsCopy = {
     revision: 'Policy revision', updatedAt: 'Updated at', enabled: 'Enable registration bonus', amount: 'Bonus points (whole)', validityDays: 'Validity (days)',
     reason: 'Change reason', reasonPlaceholder: 'At least 10 characters describing why this policy is changing', save: 'Save bonus policy', saving: 'Saving…', saved: 'Registration bonus policy updated.', readOnly: 'This account has read-only access to the registration bonus policy.',
     lifetimeWarning: 'Eligibility is lifetime per mobile number. A first registration permanently consumes eligibility even while disabled or set to zero; no bonus is granted later.',
-    loadFailed: 'Could not load the registration bonus policy.', saveFailed: 'Could not save the registration bonus policy. Check the input and retry.', conflict: 'Another administrator updated this policy. Reload and submit again.', recentAuthenticationRequired: 'Recent authentication is required. Sign in again and retry.',
+    loadFailed: 'Could not load the registration bonus policy.', saveFailed: 'Could not save the registration bonus policy. Check the input and retry.', conflict: 'Another administrator updated this policy. Reload and submit again.', recentAuthenticationRequired: 'Recent authentication is required. Sign in again and retry.', reauthenticate: 'Sign in again',
   },
   ja: {
     nav: '運用設定',
@@ -1616,7 +1616,7 @@ const registrationBonusOperationsCopy = {
     revision: 'ポリシー版', updatedAt: '更新日時', enabled: '登録特典を有効化', amount: '特典ポイント（整数）', validityDays: '有効日数',
     reason: '変更理由', reasonPlaceholder: '変更理由を10文字以上で入力してください', save: '特典ポリシーを保存', saving: '保存中…', saved: '登録特典ポリシーを更新しました。', readOnly: 'このアカウントは登録特典ポリシーを閲覧のみできます。',
     lifetimeWarning: '資格は携帯番号ごとに生涯1回です。無効または0ポイントの期間でも初回登録で資格を消費し、後から付与されません。',
-    loadFailed: '登録特典ポリシーを読み込めませんでした。', saveFailed: '登録特典ポリシーを保存できませんでした。入力を確認して再試行してください。', conflict: '別の管理者がポリシーを更新しました。再読み込みして送信してください。', recentAuthenticationRequired: '再認証が必要です。再ログインしてから再試行してください。',
+    loadFailed: '登録特典ポリシーを読み込めませんでした。', saveFailed: '登録特典ポリシーを保存できませんでした。入力を確認して再試行してください。', conflict: '別の管理者がポリシーを更新しました。再読み込みして送信してください。', recentAuthenticationRequired: '再認証が必要です。再ログインしてから再試行してください。', reauthenticate: '再ログイン',
   },
 };
 Object.assign(registrationBonusOperationsCopy.zh, {

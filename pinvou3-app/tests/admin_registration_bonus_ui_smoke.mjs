@@ -10,6 +10,7 @@ assert.ok(browserPath, 'Chromium or Edge is required');
 const staticRoot = path.resolve(import.meta.dirname, '../../account-platform/internal/portal/static');
 let permissions = ['platform.registration-bonus.read', 'platform.registration-bonus.manage'];
 let policy = { revision: 2, enabled: false, amount_microcredits: 0, validity_days: 30, updated_at: new Date().toISOString(), eligibility_status: 'READY', recoverable_registration_count: 4, unrecoverable_registration_count: 0 };
+let recentAuthenticationRequired = false;
 const writes = [];
 
 function json(response, payload, status = 200) {
@@ -20,11 +21,16 @@ const server = createServer(async (request, response) => {
   const url = new URL(request.url, 'http://127.0.0.1');
   if (url.pathname === '/__test__/readonly') { permissions = ['platform.registration-bonus.read']; return json(response, {}); }
   if (url.pathname === '/__test__/blocked') { policy = { ...policy, eligibility_status: 'BLOCKED', unrecoverable_registration_count: 2 }; return json(response, {}); }
+  if (url.pathname === '/__test__/recent-auth') { recentAuthenticationRequired = true; return json(response, {}); }
   if (url.pathname === '/__test__/writes') return json(response, writes);
   if (url.pathname === '/api/session') return json(response, { authenticated: true, csrf_token: 'csrf-test' });
   if (url.pathname === '/api/account/v1/account/bootstrap') return json(response, { user_id: '0199a100-0001-7000-8000-000000000101', platform_permissions: permissions });
   if (url.pathname === '/api/admin/billing/admin/v1/registration-bonus-policy' && request.method === 'GET') return json(response, policy);
   if (url.pathname === '/api/admin/billing/admin/v1/registration-bonus-policy' && request.method === 'PUT') {
+    if (recentAuthenticationRequired) {
+      recentAuthenticationRequired = false;
+      return json(response, { code: 'RECENT_AUTHENTICATION_REQUIRED', message: 'recent authentication required' }, 401);
+    }
     const chunks = [];
     for await (const chunk of request) chunks.push(chunk);
     const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
@@ -52,6 +58,22 @@ try {
   const text = await page.$eval('[data-testid="registration-bonus-policy"]', (node) => node.textContent);
   assert.match(text, /permanently consumes eligibility/i);
   assert.match(await page.$eval('[data-testid="registration-bonus-readiness"]', (node) => node.textContent), /backfill is complete/i);
+  const desktopLayout = await page.$eval('[data-testid="registration-bonus-policy"]', (node) => {
+    const editor = node.querySelector('.adm-registration-bonus-editor').getBoundingClientRect();
+    const reason = node.querySelector('.adm-sms-reason').getBoundingClientRect();
+    const textarea = node.querySelector('textarea').getBoundingClientRect();
+    const actions = node.querySelector('.adm-registration-bonus-actions').getBoundingClientRect();
+    const submit = node.querySelector('button[type="submit"]').getBoundingClientRect();
+    return {
+      reasonWidth: reason.width,
+      editorWidth: editor.width,
+      textareaHeight: textarea.height,
+      submitRightGap: Math.abs(actions.right - submit.right),
+    };
+  });
+  assert.ok(desktopLayout.reasonWidth >= desktopLayout.editorWidth - 40, 'change reason must use the editor width');
+  assert.ok(desktopLayout.textareaHeight >= 110, 'change reason must provide a usable writing area');
+  assert.ok(desktopLayout.submitRightGap <= 1, 'the primary action must align to the editor edge');
   const inputs = await page.$$('[data-testid="registration-bonus-policy"] input[type="number"]');
   await inputs[0].evaluate((node) => { node.focus(); node.select(); }); await inputs[0].type('25');
   await inputs[1].evaluate((node) => { node.focus(); node.select(); }); await inputs[1].type('90');
@@ -59,12 +81,19 @@ try {
   await textareas[0].type('Enable the controlled launch bonus');
   await page.click('[data-testid="registration-bonus-policy"] input[type="checkbox"]');
   await page.click('[data-testid="registration-bonus-policy"] button[type="submit"]');
-  await page.waitForFunction(() => document.querySelector('[data-testid="registration-bonus-policy"] .adm-sms-summary strong')?.textContent.trim() === '3');
+  await page.waitForFunction(() => document.querySelector('[data-testid="registration-bonus-policy"] .adm-registration-bonus-summary dd')?.textContent.trim() === '3');
   assert.equal(writes.length, 1);
   assert.equal(writes[0].body.expected_revision, 2);
   assert.equal(writes[0].body.amount_points, 25);
   assert.equal(writes[0].csrf, 'csrf-test');
   assert.match(writes[0].idempotencyKey, /^registration-bonus-/);
+
+  await fetch(`http://127.0.0.1:${port}/__test__/recent-auth`);
+  await page.type('[data-testid="registration-bonus-policy"] textarea', 'Confirm recent authentication flow');
+  await page.click('[data-testid="registration-bonus-policy"] button[type="submit"]');
+  await page.waitForSelector('[data-testid="registration-bonus-policy"] [role="alert"]');
+  assert.match(await page.$eval('[data-testid="registration-bonus-policy"] [role="alert"]', (node) => node.textContent), /sign in again/i);
+  assert.match(await page.$eval('[data-testid="registration-bonus-policy"] [role="alert"] button', (node) => node.textContent), /sign in again/i);
 
   await fetch(`http://127.0.0.1:${port}/__test__/blocked`);
   await page.reload({ waitUntil: 'networkidle0' });
@@ -77,7 +106,7 @@ try {
   await blockedTextarea.type('Disable while eligibility is blocked');
   assert.equal(await page.$eval('[data-testid="registration-bonus-policy"] button[type="submit"]', (node) => node.disabled), false, 'disabling must remain available while blocked');
   await page.click('[data-testid="registration-bonus-policy"] button[type="submit"]');
-  await page.waitForFunction(() => document.querySelector('[data-testid="registration-bonus-policy"] .adm-sms-summary strong')?.textContent.trim() === '4');
+  await page.waitForFunction(() => document.querySelector('[data-testid="registration-bonus-policy"] .adm-registration-bonus-summary dd')?.textContent.trim() === '4');
   assert.equal(writes.at(-1).body.enabled, false);
   assert.equal(await page.$eval('[data-testid="registration-bonus-policy"] input[type="checkbox"]', (node) => node.disabled), true, 'blocked readiness must prevent re-enabling');
 
@@ -86,6 +115,24 @@ try {
   await page.waitForSelector('[data-testid="registration-bonus-policy"] form');
   assert.equal(await page.$('[data-testid="registration-bonus-policy"] button[type="submit"]'), null);
   assert.equal(await page.$eval('[data-testid="registration-bonus-policy"] input[type="number"]', (node) => node.disabled), true);
+
+  permissions = ['platform.registration-bonus.read', 'platform.registration-bonus.manage'];
+  policy = { ...policy, eligibility_status: 'READY', unrecoverable_registration_count: 0 };
+  await page.setViewport({ width: 390, height: 844, deviceScaleFactor: 1 });
+  await page.reload({ waitUntil: 'networkidle0' });
+  await page.waitForSelector('[data-testid="registration-bonus-policy"] form');
+  const mobileLayout = await page.$eval('[data-testid="registration-bonus-policy"]', (node) => {
+    const fields = [...node.querySelectorAll('input[type="number"]')].map((input) => input.getBoundingClientRect());
+    const editor = node.querySelector('.adm-registration-bonus-editor').getBoundingClientRect();
+    const submit = node.querySelector('button[type="submit"]').getBoundingClientRect();
+    return {
+      fieldsStacked: fields[1].top > fields[0].bottom,
+      submitWidth: submit.width,
+      editorInnerWidth: editor.width - 30,
+    };
+  });
+  assert.equal(mobileLayout.fieldsStacked, true, 'numeric fields must stack on narrow screens');
+  assert.ok(Math.abs(mobileLayout.submitWidth - mobileLayout.editorInnerWidth) <= 2, 'primary action must fill the narrow editor');
   console.log('Admin registration bonus UI smoke passed');
 } finally {
   await browser.close();

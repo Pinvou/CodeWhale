@@ -18,17 +18,17 @@ export function AdminOperationsWorkspace({ client, copy, permissions = EMPTY_PER
   const canManage = permissionSet.has('platform.registration-bonus.manage');
   const [policy, setPolicy] = useState(null);
   const [form, setForm] = useState(() => policyForm());
-  const [state, setState] = useState({ loading: true, saving: false, error: '', notice: '' });
+  const [state, setState] = useState({ loading: true, saving: false, error: '', errorCode: '', notice: '' });
 
   const load = useCallback(async (signal) => {
-    setState((value) => ({ ...value, loading: true, error: '', notice: '' }));
+    setState((value) => ({ ...value, loading: true, error: '', errorCode: '', notice: '' }));
     try {
       const result = await client.registrationBonusPolicy(signal);
       setPolicy(result);
       setForm(policyForm(result));
-      setState({ loading: false, saving: false, error: '', notice: '' });
+      setState({ loading: false, saving: false, error: '', errorCode: '', notice: '' });
     } catch (error) {
-      if (error?.name !== 'AbortError') setState({ loading: false, saving: false, error: labels.loadFailed, notice: '' });
+      if (error?.name !== 'AbortError') setState({ loading: false, saving: false, error: labels.loadFailed, errorCode: error?.code || '', notice: '' });
     }
   }, [client, labels.loadFailed]);
 
@@ -41,7 +41,7 @@ export function AdminOperationsWorkspace({ client, copy, permissions = EMPTY_PER
   const save = async (event) => {
     event.preventDefault();
     if (!canManage || !policy) return;
-    setState((value) => ({ ...value, saving: true, error: '', notice: '' }));
+    setState((value) => ({ ...value, saving: true, error: '', errorCode: '', notice: '' }));
     try {
       const updated = await client.updateRegistrationBonusPolicy({
         enabled: form.enabled,
@@ -52,7 +52,7 @@ export function AdminOperationsWorkspace({ client, copy, permissions = EMPTY_PER
       });
       setPolicy(updated);
       setForm(policyForm(updated));
-      setState({ loading: false, saving: false, error: '', notice: labels.saved });
+      setState({ loading: false, saving: false, error: '', errorCode: '', notice: labels.saved });
     } catch (error) {
       const message = error?.code === 'REGISTRATION_BONUS_CONFLICT'
         ? labels.conflict
@@ -61,7 +61,7 @@ export function AdminOperationsWorkspace({ client, copy, permissions = EMPTY_PER
         : error?.code === 'RECENT_AUTHENTICATION_REQUIRED'
           ? labels.recentAuthenticationRequired
           : labels.saveFailed;
-      setState({ loading: false, saving: false, error: message, notice: '' });
+      setState({ loading: false, saving: false, error: message, errorCode: error?.code || '', notice: '' });
     }
   };
 
@@ -74,21 +74,26 @@ export function AdminOperationsWorkspace({ client, copy, permissions = EMPTY_PER
     <section className="adm-panel adm-settings-panel adm-registration-bonus" data-testid="registration-bonus-policy">
       <header className="adm-section-head"><div><h2>{labels.title}</h2><p>{labels.lead}</p></div></header>
       <div className="adm-inline-message warn" role="note">{labels.lifetimeWarning}</div>
-      {state.error && <div className="adm-inline-message error" role="alert"><span>{state.error}</span><button type="button" onClick={() => void load()} disabled={state.loading || state.saving}>{copy.retry}</button></div>}
+      {state.error && <div className="adm-inline-message error" role="alert"><span>{state.error}</span><button type="button" onClick={() => state.errorCode === 'RECENT_AUTHENTICATION_REQUIRED' ? client.reauthenticate('/admin.html?section=operations') : void load()} disabled={state.loading || state.saving}>{state.errorCode === 'RECENT_AUTHENTICATION_REQUIRED' ? labels.reauthenticate : copy.retry}</button></div>}
       {state.notice && <div className="adm-inline-message ok" role="status">{state.notice}</div>}
       {state.loading && <p className="adm-muted">{copy.loading}</p>}
       {!state.loading && policy && (
         <form className="adm-sms-form" onSubmit={save}>
-          <div className="adm-sms-summary"><div><small>{labels.revision}</small><strong>{policy.revision}</strong></div><div><small>{labels.updatedAt}</small><strong>{new Date(policy.updated_at).toLocaleString()}</strong></div></div>
+          <dl className="adm-registration-bonus-summary">
+            <div><dt>{labels.revision}</dt><dd>{policy.revision}</dd></div>
+            <div><dt>{labels.updatedAt}</dt><dd>{new Date(policy.updated_at).toLocaleString()}</dd></div>
+          </dl>
           <div className={`adm-inline-message ${eligibilityReady ? 'ok' : 'warn'}`} role="status" data-testid="registration-bonus-readiness">{eligibilityReady ? labels.eligibilityReady : labels.eligibilityBlocked.replace('{count}', String(policy.unrecoverable_registration_count || 0))}</div>
-          <label className="adm-sms-switch"><input type="checkbox" checked={form.enabled} disabled={!canManage || state.saving || (!eligibilityReady && !form.enabled)} onChange={(event) => setForm((value) => ({ ...value, enabled: event.target.checked }))} /><span>{labels.enabled}</span></label>
-          <div className="adm-sms-fields">
-            <label><span>{labels.amount}</span><input required type="number" min="0" step="1" value={form.amount_points} disabled={!canManage || state.saving} onChange={(event) => setForm((value) => ({ ...value, amount_points: event.target.value }))} /></label>
-            <label><span>{labels.validityDays}</span><input required type="number" min="1" max="3650" step="1" value={form.validity_days} disabled={!canManage || state.saving} onChange={(event) => setForm((value) => ({ ...value, validity_days: event.target.value }))} /></label>
+          <div className="adm-registration-bonus-editor">
+            <label className="adm-sms-switch"><input type="checkbox" checked={form.enabled} disabled={!canManage || state.saving || (!eligibilityReady && !form.enabled)} onChange={(event) => setForm((value) => ({ ...value, enabled: event.target.checked }))} /><span>{labels.enabled}</span></label>
+            <div className="adm-sms-fields">
+              <label><span>{labels.amount}</span><input required type="number" min="0" step="1" value={form.amount_points} disabled={!canManage || state.saving} onChange={(event) => setForm((value) => ({ ...value, amount_points: event.target.value }))} /></label>
+              <label><span>{labels.validityDays}</span><input required type="number" min="1" max="3650" step="1" value={form.validity_days} disabled={!canManage || state.saving} onChange={(event) => setForm((value) => ({ ...value, validity_days: event.target.value }))} /></label>
+            </div>
+            {canManage && <label className="adm-sms-reason"><span>{labels.reason}</span><textarea required minLength="10" maxLength="500" rows="4" value={form.reason} disabled={state.saving} onChange={(event) => setForm((value) => ({ ...value, reason: event.target.value }))} placeholder={labels.reasonPlaceholder} /></label>}
+            {!canManage && <div className="adm-inline-message info" role="status">{labels.readOnly}</div>}
+            {canManage && <div className="adm-registration-bonus-actions"><button type="submit" className="adm-primary-button" disabled={state.saving || !valid || (form.enabled && !eligibilityReady)}>{state.saving ? labels.saving : labels.save}</button></div>}
           </div>
-          {canManage && <label className="adm-sms-reason"><span>{labels.reason}</span><textarea required minLength="10" maxLength="500" rows="3" value={form.reason} disabled={state.saving} onChange={(event) => setForm((value) => ({ ...value, reason: event.target.value }))} placeholder={labels.reasonPlaceholder} /></label>}
-          {!canManage && <div className="adm-inline-message info" role="status">{labels.readOnly}</div>}
-          {canManage && <button type="submit" className="adm-primary-button" disabled={state.saving || !valid || (form.enabled && !eligibilityReady)}>{state.saving ? labels.saving : labels.save}</button>}
         </form>
       )}
     </section>
