@@ -178,6 +178,29 @@ pub fn desktop_remote_controller_task_cancel_intent(
         .map_err(session_error)
 }
 
+/// 发送能力快照请求：构造 → 加密 → 经认证 transport 发出（E2E-04 补链）。
+/// A 端必须先拿到 capability revision，任务意图才被允许构造。
+#[tauri::command]
+pub fn desktop_remote_controller_capability_send(
+    manager: State<'_, ControllingDeviceManager>,
+    sessions: State<'_, ControllingSessionManager>,
+    business: State<'_, ControllingLaneState>,
+    remote_ref: String,
+) -> Result<ControllingIntentProjection, String> {
+    ensure_supported(&manager)?;
+    let (lease, capabilities) = live_context(&manager)?;
+    let intent = sessions
+        .capability_request(&remote_ref, &lease)
+        .map_err(session_error)?;
+    let frame = business
+        .seal("capability_snapshot_request", &intent.payload, &capabilities)
+        .map_err(|error| error.code().to_owned())?;
+    manager
+        .send_authenticated_business(&frame)
+        .map_err(send_error_code)?;
+    Ok(intent)
+}
+
 /// 发送任务：构造意图 → 加密 → 经认证 transport 发出（E2E-04）。
 #[tauri::command]
 pub fn desktop_remote_controller_task_send(

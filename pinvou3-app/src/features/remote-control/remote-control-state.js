@@ -30,6 +30,7 @@
       pairingCode: null,
       expiresAtMs: null,
       deviceName: null,
+      controllerDeviceName: null,
       workspaces: [],
       lastError: null,
     };
@@ -59,6 +60,7 @@
       remoteModels: [],
       remoteHistories: [],
       tasks: [],
+      transcript: [],
       intents: { controlled: 0, controller: 0 },
       revision: 0,
     };
@@ -123,6 +125,7 @@
       pairingCode: payload.pairingCode || (status === "waiting_for_pairing" ? current.pairingCode : null),
       expiresAtMs: payload.expiresAtMs || payload.pairingExpiresAtMs || null,
       deviceName: payload.deviceName || current.deviceName,
+      controllerDeviceName: payload.controllerDeviceName || current.controllerDeviceName,
       workspaces: Array.isArray(payload.workspaces) ? payload.workspaces.slice(0, 32) : current.workspaces,
       lastError: payload.error || null,
     };
@@ -246,6 +249,71 @@
     return next;
   }
 
+  /** transcript 条目上限：只保留最近正文，避免无限增长。 */
+  var MAX_TRANSCRIPT_ENTRIES = 200;
+
+  /**
+   * E2E-05/E2E-07: projects one authoritative journal envelope (event or
+   * snapshot) into the A-side transcript. Entries are deduplicated by
+   * session+epoch+sequence and every payload is treated as plain text.
+   */
+  function applyJournalEvent(state, envelope) {
+    var payload = envelope || {};
+    if (payload.snapshot) {
+      var snapshot = payload.snapshot;
+      var events = Array.isArray(snapshot.events) ? snapshot.events : [];
+      var sessionId = events.length ? String(events[0].sessionId || "") : "";
+      if (!sessionId) return state;
+      var entries = events.map(toTranscriptEntry).filter(Boolean);
+      var kept = (state.transcript || []).filter(function (entry) {
+        return entry.sessionId !== sessionId;
+      });
+      var next = shallowCopy(state);
+      next.transcript = kept.concat(entries).slice(-MAX_TRANSCRIPT_ENTRIES);
+      next.revision = state.revision + 1;
+      return next;
+    }
+    var entry = toTranscriptEntry(payload.event);
+    if (!entry) return state;
+    var current = state.transcript || [];
+    for (var index = 0; index < current.length; index += 1) {
+      if (
+        current[index].sessionId === entry.sessionId &&
+        current[index].epoch === entry.epoch &&
+        current[index].sequence === entry.sequence
+      ) {
+        return state;
+      }
+    }
+    var list = current.concat([entry]);
+    if (list.length > MAX_TRANSCRIPT_ENTRIES) {
+      list = list.slice(list.length - MAX_TRANSCRIPT_ENTRIES);
+    }
+    var updated = shallowCopy(state);
+    updated.transcript = list;
+    updated.revision = state.revision + 1;
+    return updated;
+  }
+
+  /** Only user/assistant text becomes a transcript entry; everything else
+   * keeps its existing task/status projection. */
+  function toTranscriptEntry(event) {
+    if (!event || typeof event !== "object") return null;
+    var kind = event.kind ? String(event.kind) : "";
+    var role = kind === "user_message" ? "user" : (kind === "assistant_delta" ? "assistant" : "");
+    if (!role) return null;
+    var text = event.payload && event.payload.text ? String(event.payload.text) : "";
+    if (!text) return null;
+    return {
+      sessionId: String(event.sessionId || ""),
+      epoch: String(event.epoch || ""),
+      sequence: Number(event.sequence || 0),
+      taskId: event.taskId ? String(event.taskId) : null,
+      role: role,
+      text: text.slice(0, 8192),
+    };
+  }
+
   /** Model descriptors are opaque: only IDs, names and reasons reach JS. */
   function applyModels(state, models) {
     if (!Array.isArray(models)) return state;
@@ -348,6 +416,7 @@
     applyControllerStatus: applyControllerStatus,
     applyControllerSession: applyControllerSession,
     applyCapabilities: applyCapabilities,
+    applyJournalEvent: applyJournalEvent,
     applyModels: applyModels,
     applyHistories: applyHistories,
     applyTaskEvent: applyTaskEvent,

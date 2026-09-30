@@ -169,6 +169,34 @@ impl crate::features::remote_control::controller::controlling_service::Controlli
             }),
         );
     }
+
+    /// E2E-05 缺口恢复：把权威快照原子应用到对应历史（未绑定历史时只广播）。
+    fn publish_snapshot(
+        &self,
+        snapshot: &crate::features::remote_control::controller::journal::JournalSnapshot,
+    ) {
+        let session_ref = snapshot
+            .events
+            .first()
+            .map(|event| event.session_id.clone());
+        let history_id = session_ref
+            .as_deref()
+            .and_then(|session| self.runtime.store().find_by_session_reference(session));
+        if let Some(history_id) = &history_id {
+            let _ = self.runtime.store().apply_snapshot(
+                history_id,
+                snapshot,
+                monotonic_millis(),
+            );
+        }
+        let _ = self.app.emit(
+            crate::features::remote_control::controller::controlling_service::CONTROLLER_JOURNAL_EVENT,
+            serde_json::json!({
+                "historyId": history_id,
+                "snapshot": snapshot,
+            }),
+        );
+    }
 }
 
 fn ensure_supported(controlled: &ControlledDeviceManager) -> Result<(), String> {

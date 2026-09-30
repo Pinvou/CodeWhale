@@ -44,7 +44,19 @@ const REGISTRATION_CAPABILITIES: &[&str] = &[
     // E2E-05：B 的权威 journal（DEV-19）已实现，声明 snapshot_journal_v1 使
     // journal_event / journal_replay 等正文事件能通过协商。
     "snapshot_journal_v1",
+    // E2E-06：B 的 liveness watchdog（DEV-08）已实现，声明 role_liveness_v1 让
+    // A 端心跳帧与后续 challenge/attestation 能通过协商。
+    "role_liveness_v1",
+    // E2E-06：B 的 resume 状态机（Relay controller-resume hooks 与本地
+    // ControllerResumeGate）已可运行，声明 resume_v1 让双端协商交集包含恢复族；
+    // 否则 A 端声明的 resume_v1 会被交集运算静默剔除。
+    "resume_v1",
 ];
+
+/// 注册声明的能力集合（供「A claim 与 B 注册同族」的一致性测试使用）。
+pub(crate) fn registration_capabilities() -> &'static [&'static str] {
+    REGISTRATION_CAPABILITIES
+}
 const CONTROLLED_STATUS_EVENT: &str = "desktop-remote-controlled-status";
 /// 握手/协议层失败的本地错误码（有界，绝不透传对端文本）。
 const HANDSHAKE_FAILED: &str = "invalid_message";
@@ -337,48 +349,231 @@ impl ControlledRelayWorker {
         };
         let mut driver = ControlledHandshakeDriver::new(keys);
         let mut joined = false;
-        while let Some(message) = self.channel.recv().await {
-            if joined {
-                if message.get("type").and_then(Value::as_str) == Some("encrypted_frame") {
-                    self.dispatch_business_frame(&message).await;
-                }
-                continue;
-            }
-            let result = match message.get("type").and_then(Value::as_str) {
-                Some("controller_pairing_reserved") => self.begin_handshake(&message, &mut driver),
-                Some("finished_receipt_commit") => driver
-                    .accept_peer_commitment(&message)
-                    .map(Some)
-                    .map_err(str::to_owned),
-                Some("encrypted_handshake_finished") => driver
-                    .accept_peer_finished(&message)
-                    .map(Some)
-                    .map_err(str::to_owned),
-                Some("controller_joined") => match self.complete_handshake(&message, &mut driver) {
-                    Ok(()) => {
-                        joined = true;
-                        Ok(None)
+        let mut evidence = LivenessEvidenceState::default();
+        let mut poll = tokio::time::interval(std::time::Duration::from_millis(
+            LIVENESS_EVIDENCE_POLL_MS,
+        ));
+        poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        poll.tick().await;
+        'serve: loop {
+            tokio::select! {
+                biased;
+                _ = poll.tick() => {
+                    if joined {
+                        self.pump_liveness_evidence(&mut evidence);
                     }
-                    Err(code) => Err(code),
-                },
-                _ => Ok(None),
-            };
-            match result {
-                Ok(Some(frame)) => {
-                    if let Err(error) = self.channel.try_send(frame) {
-                        self.fail_handshake(&error);
-                        return;
-                    }
+                    continue 'serve;
                 }
-                Ok(None) => {}
-                Err(code) => {
-                    self.fail_handshake(&code);
-                    return;
+                message = self.channel.recv() => {
+                    let Some(message) = message else { break 'serve };
+                    if joined {
+                        match message.get("type").and_then(Value::as_str) {
+                            Some("encrypted_frame") => {
+                                self.dispatch_business_frame(&message).await;
+                            }
+                            // E2E-06：Relay 签名兜底证明 → 续期 B 的 watchdog。
+                            Some("controller_liveness_attestation_a") => {
+                                self.accept_liveness_attestation(&message, &mut evidence);
+                            }
+                            // E2E-06：A 的直接存活证明 → 优先于兜底，续期后不再升级。
+                            Some("encrypted_controller_liveness_a") => {
+                                self.accept_direct_liveness(&message, &mut evidence);
+                            }
+                            // E2E-06：A 端显式断开 → 终结租约并结束本代通道。
+                            Some("controller_disconnect") => {
+                                if self.accept_remote_disconnect(&message) {
+                                    break 'serve;
+                                }
+                            }
+                            _ => {}
+                        }
+                        continue 'serve;
+                    }
+                    let result = match message.get("type").and_then(Value::as_str) {
+                        Some("controller_pairing_reserved") => {
+                            self.begin_handshake(&message, &mut driver)
+                        }
+                        Some("finished_receipt_commit") => driver
+                            .accept_peer_commitment(&message)
+                            .map(Some)
+                            .map_err(str::to_owned),
+                        Some("encrypted_handshake_finished") => driver
+                            .accept_peer_finished(&message)
+                            .map(Some)
+                            .map_err(str::to_owned),
+                        Some("controller_joined") => {
+                            match self.complete_handshake(&message, &mut driver) {
+                                Ok(()) => {
+                                    joined = true;
+                                    Ok(None)
+                                }
+                                Err(code) => Err(code),
+                            }
+                        }
+                        _ => Ok(None),
+                    };
+                    match result {
+                        Ok(Some(frame)) => {
+                            if let Err(error) = self.channel.try_send(frame) {
+                                self.fail_handshake(&error);
+                                return;
+                            }
+                        }
+                        Ok(None) => {}
+                        Err(code) => {
+                            self.fail_handshake(&code);
+                            return;
+                        }
+                    }
                 }
             }
         }
         // 通道关闭（stop/refresh/断线）时丢弃出站旁路，避免旧 generation 继续回传。
         self.app.state::<ControlledOutboundState>().clear();
+    }
+
+    /// E2E-06：按 watchdog 需求发起挑战 / 升级到 Relay 签名兜底 / 作废超时挑战。
+    fn pump_liveness_evidence(&self, evidence: &mut LivenessEvidenceState) {
+        let manager = self.app.state::<ControlledDeviceManager>();
+        let now_b = controlled_monotonic_millis();
+        let needs = manager.liveness_evidence_needed(now_b);
+        match liveness_evidence_action(needs, evidence, now_b) {
+            LivenessEvidenceAction::Idle => {}
+            LivenessEvidenceAction::Challenge => {
+                let Ok((lease, _)) = manager.live_runtime_context() else {
+                    return;
+                };
+                let Ok((challenge_id, challenge_b64)) = manager.begin_liveness_challenge(now_b)
+                else {
+                    return;
+                };
+                let request_id = format!("request-liveness-{}", uuid::Uuid::new_v4().simple());
+                let Ok(frame) = super::liveness::build_liveness_challenge(
+                    &lease,
+                    &request_id,
+                    &challenge_id,
+                    &challenge_b64,
+                ) else {
+                    return;
+                };
+                if self.channel.try_send(frame).is_ok() {
+                    evidence.outstanding = Some((challenge_id, challenge_b64, now_b));
+                    evidence.escalated = false;
+                }
+            }
+            LivenessEvidenceAction::Escalate => {
+                let Ok((lease, _)) = manager.live_runtime_context() else {
+                    return;
+                };
+                let Some((challenge_id, challenge_b64, _)) = evidence.outstanding.clone() else {
+                    return;
+                };
+                let request_id = format!("request-attest-{}", uuid::Uuid::new_v4().simple());
+                let Ok(frame) = super::liveness::build_liveness_attestation_request(
+                    &lease,
+                    &request_id,
+                    &challenge_id,
+                    &challenge_b64,
+                ) else {
+                    return;
+                };
+                if self.channel.try_send(frame).is_ok() {
+                    evidence.escalated = true;
+                }
+            }
+            LivenessEvidenceAction::Reset => {
+                evidence.outstanding = None;
+                evidence.escalated = false;
+            }
+        }
+    }
+
+    /// E2E-06：A 端显式断开（`controller_disconnect`）。返回 true 表示已被接受，
+    /// 本代通道应当结束（租约、会话密钥与远端任务都已清理）。
+    fn accept_remote_disconnect(&self, message: &Value) -> bool {
+        // 先做冻结校验（角色 A + 租约 + 能力），再交给状态所有者终结租约。
+        let manager = self.app.state::<ControlledDeviceManager>();
+        let Ok((lease, capabilities)) = manager.live_runtime_context() else {
+            return false;
+        };
+        let context = crate::features::remote_control::controller::protocol::RuntimeValidationContext {
+            lease: Some(lease),
+            negotiated_capabilities: capabilities,
+        };
+        let validated = crate::features::remote_control::controller::protocol::validate_controller_runtime_message_json(
+            &message.to_string(),
+            crate::features::remote_control::controller::protocol::SenderRole::ControllerA,
+            Some(&context),
+        );
+        if validated.is_err() {
+            return false;
+        }
+        match manager.accept_remote_disconnect() {
+            Ok(status) => {
+                self.app.state::<ControlledLaneState>().clear();
+                self.app.state::<ControlledOutboundState>().clear();
+                let _ = self.app.emit(CONTROLLED_STATUS_EVENT, &status);
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
+    /// E2E-06：接受 Relay 签名 attestation 续期本端 watchdog（挑战与请求时间
+    /// 由本端记录，跨机时间一律不用）。
+    /// E2E-06：A 的直接存活证明（`encrypted_controller_liveness_a`）：解密后用
+    /// 明文走 `accept_direct_liveness`（挑战、RTT 与序号单调性由 watchdog 校验），
+    /// 成功后清除未完成挑战，避免再走 Relay 兜底。
+    fn accept_direct_liveness(
+        &self,
+        frame: &Value,
+        evidence: &mut LivenessEvidenceState,
+    ) {
+        let manager = self.app.state::<ControlledDeviceManager>();
+        let business = self.app.state::<ControlledLaneState>();
+        let Ok(inner) = business.open_liveness(frame) else {
+            return;
+        };
+        let Some(challenge_id) = inner.get("challenge_id").and_then(Value::as_str) else {
+            return;
+        };
+        match &evidence.outstanding {
+            Some((outstanding, _, _)) if outstanding == challenge_id => {}
+            // 不是当前挑战的证明（重放或过期）一律忽略。
+            _ => return,
+        }
+        let now_b = controlled_monotonic_millis();
+        if manager
+            .accept_direct_liveness(&inner.to_string(), now_b)
+            .is_ok()
+        {
+            evidence.outstanding = None;
+            evidence.escalated = false;
+        }
+    }
+
+    /// E2E-06：接受 Relay 签名 attestation 续期本端 watchdog（挑战与请求时间
+    /// 由本端记录，跨机时间一律不用）。
+    fn accept_liveness_attestation(
+        &self,
+        message: &Value,
+        evidence: &mut LivenessEvidenceState,
+    ) {
+        let Some((challenge_id, _, sent_at_b)) = evidence.outstanding.clone() else {
+            return;
+        };
+        if message.get("challenge_id").and_then(Value::as_str) != Some(challenge_id.as_str()) {
+            return;
+        }
+        let manager = self.app.state::<ControlledDeviceManager>();
+        let now_b = controlled_monotonic_millis();
+        if manager
+            .accept_liveness_attestation(&message.to_string(), sent_at_b, now_b)
+            .is_ok()
+        {
+            evidence.outstanding = None;
+            evidence.escalated = false;
+        }
     }
 
     /// 接管握手：本地进入安全握手阶段并产出本端 commit。信任根缺失或非法时
@@ -474,16 +669,72 @@ impl ControlledRelayWorker {
         let Ok((payload_kind, payload)) = business.open(frame, &capabilities) else {
             return;
         };
-        let Ok(Some((response_kind, response))) =
+        let Ok(responses) =
             dispatch_decrypted_payload(self.business.as_ref(), &lease, &payload_kind, &payload)
                 .await
         else {
             return;
         };
-        let Ok(frame) = business.seal(response_kind, &response, &capabilities) else {
-            return;
-        };
-        let _ = self.channel.try_send(frame);
+        // 一条请求可能产出多帧（journal 回放），逐帧加密回传；单帧失败即停止。
+        for (response_kind, response) in responses {
+            let Ok(frame) = business.seal(response_kind, &response, &capabilities) else {
+                return;
+            };
+            if self.channel.try_send(frame).is_err() {
+                return;
+            }
+        }
+    }
+}
+
+/// E2E-06：证据轮询间隔（远小于 30 秒预算）。
+pub(crate) const LIVENESS_EVIDENCE_POLL_MS: u64 = 2_000;
+/// 挑战发出后多久升级到 Relay 签名 attestation 兜底（直接应答尚未接线）。
+pub(crate) const LIVENESS_ATTESTATION_ESCALATION_MS: u64 = 2_500;
+/// 挑战的最长等待：超过后作废并重新发起。
+pub(crate) const LIVENESS_CHALLENGE_TIMEOUT_MS: u64 = 8_000;
+
+/// 本轮应当采取的证据动作（纯函数判定，worker 只负责发帧）。
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(crate) enum LivenessEvidenceAction {
+    /// 余量充足，不打扰对端。
+    Idle,
+    /// 发起新的存活挑战。
+    Challenge,
+    /// 用同一挑战索取 Relay 签名 attestation。
+    Escalate,
+    /// 旧挑战超时作废，等待下一轮重新发起。
+    Reset,
+}
+
+/// 证据状态：当前未完成的挑战（id、挑战值、发出时刻）与是否已升级过。
+#[derive(Debug, Default, Clone, Eq, PartialEq)]
+pub(crate) struct LivenessEvidenceState {
+    pub(crate) outstanding: Option<(String, String, u64)>,
+    pub(crate) escalated: bool,
+}
+
+/// 依据 watchdog 的需求与当前未完成挑战推导本轮动作。
+pub(crate) fn liveness_evidence_action(
+    needs_evidence: bool,
+    state: &LivenessEvidenceState,
+    now_b: u64,
+) -> LivenessEvidenceAction {
+    if !needs_evidence {
+        return LivenessEvidenceAction::Idle;
+    }
+    match &state.outstanding {
+        None => LivenessEvidenceAction::Challenge,
+        Some((_, _, sent_at)) => {
+            let age = now_b.saturating_sub(*sent_at);
+            if age >= LIVENESS_CHALLENGE_TIMEOUT_MS {
+                return LivenessEvidenceAction::Reset;
+            }
+            if !state.escalated && age >= LIVENESS_ATTESTATION_ESCALATION_MS {
+                return LivenessEvidenceAction::Escalate;
+            }
+            LivenessEvidenceAction::Idle
+        }
     }
 }
 
@@ -515,6 +766,24 @@ pub(crate) trait ControlledBusinessPort: Send + Sync {
         session_ref: &str,
         task_id: &str,
     ) -> Result<Option<Value>, String>;
+
+    /// E2E-05 缺口恢复：按 `after_sequence` 回放权威事件；缺口太旧时返回一份
+    /// `session_snapshot`，因此返回的是 (wire payload_kind, payload) 列表。
+    async fn replay_journal(
+        &self,
+        lease: &LeaseContext,
+        session_ref: &str,
+        journal_epoch: &str,
+        after_sequence: u64,
+    ) -> Result<Vec<(String, Value)>, String>;
+
+    /// E2E-05 缺口恢复：给出一份权威快照（`session_snapshot` wire 载荷）。
+    async fn session_snapshot(
+        &self,
+        lease: &LeaseContext,
+        session_ref: &str,
+        request_id: &str,
+    ) -> Result<Value, String>;
 }
 
 /// 解密后的业务帧派发（纯函数，便于测试）：按 payload_kind 调用业务端口，
@@ -524,7 +793,7 @@ pub(crate) async fn dispatch_decrypted_payload<P: ControlledBusinessPort + ?Size
     lease: &LeaseContext,
     payload_kind: &str,
     payload: &Value,
-) -> Result<Option<(&'static str, Value)>, String> {
+) -> Result<Vec<(&'static str, Value)>, String> {
     match payload_kind {
         "capability_snapshot_request" => {
             let request_id = payload
@@ -539,7 +808,7 @@ pub(crate) async fn dispatch_decrypted_payload<P: ControlledBusinessPort + ?Size
             let response = port
                 .capability_snapshot(lease, request_id, known_revision)
                 .await?;
-            Ok(Some(("capability_snapshot", response)))
+            Ok(vec![("capability_snapshot", response)])
         }
         "task_submit" => {
             let session_ref = payload
@@ -548,10 +817,10 @@ pub(crate) async fn dispatch_decrypted_payload<P: ControlledBusinessPort + ?Size
                 .ok_or_else(|| "task_request_invalid".to_owned())?
                 .to_owned();
             let response = port.submit_task(lease, &session_ref, payload).await?;
-            Ok(Some((
+            Ok(vec![(
                 "task_status",
                 rewrite_session_id(response, &session_ref)?,
-            )))
+            )])
         }
         "task_cancel" => {
             let session_ref = payload
@@ -564,15 +833,55 @@ pub(crate) async fn dispatch_decrypted_payload<P: ControlledBusinessPort + ?Size
                 .and_then(Value::as_str)
                 .ok_or_else(|| "task_request_invalid".to_owned())?;
             match port.cancel_task(lease, &session_ref, task_id).await? {
-                Some(response) => Ok(Some((
+                Some(response) => Ok(vec![(
                     "task_status",
                     rewrite_session_id(response, &session_ref)?,
-                ))),
-                None => Ok(None),
+                )]),
+                None => Ok(Vec::new()),
             }
         }
+        "journal_replay_request" => {
+            let session_ref = payload
+                .get("session_id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "task_request_invalid".to_owned())?;
+            let journal_epoch = payload
+                .get("journal_epoch")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "task_request_invalid".to_owned())?;
+            let after_sequence = payload
+                .get("after_sequence")
+                .and_then(Value::as_str)
+                .and_then(|value| value.parse::<u64>().ok())
+                .ok_or_else(|| "task_request_invalid".to_owned())?;
+            let frames = port
+                .replay_journal(lease, session_ref, journal_epoch, after_sequence)
+                .await?;
+            Ok(frames
+                .into_iter()
+                .filter_map(|(kind, payload)| match kind.as_str() {
+                    "journal_event" => Some(("journal_event", payload)),
+                    "session_snapshot" => Some(("session_snapshot", payload)),
+                    _ => None,
+                })
+                .collect())
+        }
+        "session_snapshot_request" => {
+            let session_ref = payload
+                .get("session_id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "task_request_invalid".to_owned())?;
+            let request_id = payload
+                .get("request_id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "task_request_invalid".to_owned())?;
+            let snapshot = port
+                .session_snapshot(lease, session_ref, request_id)
+                .await?;
+            Ok(vec![("session_snapshot", snapshot)])
+        }
         // liveness / 审批 / 附件 / 成果等能力属后续任务：未知类型一律丢弃。
-        _ => Ok(None),
+        _ => Ok(Vec::new()),
     }
 }
 
@@ -879,6 +1188,33 @@ mod tests {
             .build()
             .unwrap()
             .block_on(future)
+    }
+
+    /// E2E-06：双方声明的能力族必须一致——Relay 的协商是「A claim ∩ B 注册」，
+    /// 任一侧漏声明都会让整族能力静默失效（resume_v1 是本轮新增的族）。
+    #[test]
+    fn both_roles_declare_the_same_frozen_capability_families() {
+        let mut claim = super::super::controlling_handshake::claim_capabilities().to_vec();
+        let mut registration = super::registration_capabilities().to_vec();
+        assert_eq!(
+            claim.len(),
+            registration.len(),
+            "A claim 与 B 注册声明的能力族数量必须一致"
+        );
+        claim.sort_unstable();
+        registration.sort_unstable();
+        assert_eq!(claim, registration, "A claim 与 B 注册声明的能力集合必须一致");
+        for family in [
+            "pairing_v1",
+            "encrypted_frames_v1",
+            "finished_receipt_v1",
+            "role_liveness_v1",
+            "resume_v1",
+            "task_v1",
+            "snapshot_journal_v1",
+        ] {
+            assert!(claim.contains(&family), "A 端未声明 {family}");
+        }
     }
 
     #[test]
@@ -1305,6 +1641,25 @@ mod tests {
                     "task_status": "cancelled",
                 })))
             }
+
+            async fn replay_journal(
+                &self,
+                _lease: &LeaseContext,
+                _session_ref: &str,
+                _journal_epoch: &str,
+                _after_sequence: u64,
+            ) -> Result<Vec<(String, Value)>, String> {
+                Ok(Vec::new())
+            }
+
+            async fn session_snapshot(
+                &self,
+                _lease: &LeaseContext,
+                _session_ref: &str,
+                _request_id: &str,
+            ) -> Result<Value, String> {
+                Ok(json!({"v": 1, "type": "session_snapshot"}))
+            }
         }
 
         let PairingFixture { reservation, .. } =
@@ -1315,20 +1670,21 @@ mod tests {
             crate::features::remote_control::controller::test_support::lease_context(&reservation);
         let port = StubPort;
 
-        let (kind, response) = dispatch_decrypted_payload(
+        let frames = dispatch_decrypted_payload(
             &port,
             &lease,
             "capability_snapshot_request",
             &json!({"request_id": "request-1", "known_revision": "4"}),
         )
         .await
-        .unwrap()
         .unwrap();
+        assert_eq!(frames.len(), 1);
+        let (kind, response) = frames.into_iter().next().unwrap();
         assert_eq!(kind, "capability_snapshot");
         assert_eq!(response["request_id"], "request-1");
         assert_eq!(response["capability_revision"], "5");
 
-        let (kind, response) = dispatch_decrypted_payload(
+        let frames = dispatch_decrypted_payload(
             &port,
             &lease,
             "task_submit",
@@ -1338,8 +1694,9 @@ mod tests {
             }),
         )
         .await
-        .unwrap()
         .unwrap();
+        assert_eq!(frames.len(), 1);
+        let (kind, response) = frames.into_iter().next().unwrap();
         assert_eq!(kind, "task_status");
         assert_eq!(response["task_id"], "task-0001");
         assert_eq!(
@@ -1347,15 +1704,16 @@ mod tests {
             "回包必须改写成 A 端的会话引用"
         );
 
-        let (kind, response) = dispatch_decrypted_payload(
+        let frames = dispatch_decrypted_payload(
             &port,
             &lease,
             "task_cancel",
             &json!({"task_id": "task-0001", "session_id": "session-a-ref"}),
         )
         .await
-        .unwrap()
         .unwrap();
+        assert_eq!(frames.len(), 1);
+        let (kind, response) = frames.into_iter().next().unwrap();
         assert_eq!(kind, "task_status");
         assert_eq!(response["session_id"], "session-a-ref");
 
@@ -1363,7 +1721,7 @@ mod tests {
         assert!(dispatch_decrypted_payload(&port, &lease, "journal_event", &json!({}))
             .await
             .unwrap()
-            .is_none());
+            .is_empty());
         assert_eq!(
             dispatch_decrypted_payload(&port, &lease, "task_submit", &json!({"task_id": "t"}))
                 .await
@@ -1445,5 +1803,51 @@ mod tests {
         assert!(state.sender().is_none());
         state.clear();
         assert!(state.sender().is_none());
+    }
+
+    /// E2E-06：证据动作遵循 watchdog 策略——余量充足不打扰；需要证据且无挑战时
+    /// 发起；挑战过久升级为 Relay 签名兜底；再超时作废重来。
+    #[test]
+    fn liveness_evidence_actions_follow_the_watchdog_policy() {
+        let idle = LivenessEvidenceState::default();
+        assert_eq!(
+            liveness_evidence_action(false, &idle, 0),
+            LivenessEvidenceAction::Idle
+        );
+        assert_eq!(
+            liveness_evidence_action(true, &idle, 0),
+            LivenessEvidenceAction::Challenge
+        );
+        let outstanding = LivenessEvidenceState {
+            outstanding: Some(("challenge-1".to_owned(), "AAAA".to_owned(), 1_000)),
+            escalated: false,
+        };
+        assert_eq!(
+            liveness_evidence_action(true, &outstanding, 2_000),
+            LivenessEvidenceAction::Idle,
+            "刚发出的挑战应等待直接应答"
+        );
+        assert_eq!(
+            liveness_evidence_action(true, &outstanding, 3_500),
+            LivenessEvidenceAction::Escalate
+        );
+        let escalated = LivenessEvidenceState {
+            escalated: true,
+            ..outstanding.clone()
+        };
+        assert_eq!(
+            liveness_evidence_action(true, &escalated, 3_500),
+            LivenessEvidenceAction::Idle,
+            "同一挑战只升级一次"
+        );
+        assert_eq!(
+            liveness_evidence_action(true, &escalated, 12_000),
+            LivenessEvidenceAction::Reset,
+            "挑战超时后作废重来"
+        );
+        assert_eq!(
+            liveness_evidence_action(false, &outstanding, 12_000),
+            LivenessEvidenceAction::Idle
+        );
     }
 }
