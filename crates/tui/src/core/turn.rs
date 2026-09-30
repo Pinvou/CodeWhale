@@ -530,7 +530,7 @@ fn snapshot_failure_hint(message: &str, size_gated: bool) -> &'static str {
         // concurrently) only has to age out. Manual removal is the
         // fallback for a persistent failure, not the first move: deleting
         // the directory discards the workspace's whole undo history.
-        "  the snapshot side repo under `~/.codewhale/snapshots` is half-initialized; snapshots sweep a leftover lock and re-init automatically once it ages out (about an hour) — remove that workspace's directory only if the error persists past that."
+        "  the snapshot side repo under `~/.codewhale/snapshots` is half-initialized; snapshots sweep a leftover lock and re-init automatically once it ages out (about an hour) — remove that workspace's directory (discarding its snapshot history) only if the error persists past that."
     } else {
         "  the timed-out git likely left a stale index.lock in the snapshot side repo; snapshots retry once it ages out (about an hour)."
     }
@@ -589,8 +589,15 @@ mod snapshot_failure_hint_tests {
         assert!(hint.contains("half-initialized"), "{hint}");
         assert!(hint.contains("about an hour"), "{hint}");
         // Manual removal is the fallback for a persistent failure, not the
-        // first move.
+        // first move, and the hint names what removal costs.
         assert!(hint.contains("only if the error persists"), "{hint}");
+        assert!(hint.contains("discarding its snapshot history"), "{hint}");
+        // The sweep must lead the remedy: a regression that puts removal
+        // first would point at discarding undo history for a state that
+        // heals itself within the hour.
+        let sweep = hint.find("sweep").expect("hint must mention the sweep");
+        let remove = hint.find("remove").expect("hint must mention removal");
+        assert!(sweep < remove, "the self-healing sweep must lead: {hint}");
     }
 }
 
