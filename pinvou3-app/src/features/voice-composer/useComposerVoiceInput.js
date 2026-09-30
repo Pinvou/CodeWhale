@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { isImeComposing } from '../../shared/ime-guard.mjs';
+import { isVoiceActive } from './voice-ui-policy.mjs';
 import { voicePostprocessEnabled } from '../chat/voice-shortcut-settings.mjs';
 import {
   getActiveVoiceTarget,
@@ -362,9 +363,6 @@ function useComposerVoiceInput(adapter) {
       (text, draftBeforeStart, context) => handleVoiceResult(sessionId, text, draftBeforeStart, context),
       {
         mode: nextMode,
-        sessionId: current.sessionId || null,
-        ownerKind: current.ownerKind || 'chat',
-        modelId: current.modelId || null,
         beforePermission: typeof current.beforePermission === 'function'
           ? current.beforePermission
           : undefined,
@@ -375,6 +373,7 @@ function useComposerVoiceInput(adapter) {
         // own session binding (first-turn rebind) depend on these values.
         ownerKind: current.ownerKind || 'chat',
         sessionId: current.sessionId || null,
+        modelId: current.modelId || null,
       },
     );
     return true;
