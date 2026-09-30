@@ -352,6 +352,11 @@
       last_error: null,
       starting: false,
     },
+    // Windows 桌面双端远程控制（B 被控端 / A 主控端），与 Web 分享独立。
+    desktopRemoteControl: (function () {
+      var logic = window.__PINVOU_REMOTE_CONTROL_STATE__;
+      return logic ? logic.createState() : null;
+    })(),
     updateChecking: false,
     updateCheckError: null,   // 手动检查的错误/「已是最新」提示文案
     updateDownloading: false,
@@ -1640,6 +1645,15 @@
     personas: ["activePersona", "personaEvents", "personaPool"],
     memory: ["memory"],
     remoteControl: ["webAccess"],
+    // Windows 双端远程控制（DEV-20）：与 Web 分享完全独立的状态域。
+    desktopRemoteControl: [
+      "controlledDevice",
+      "controllerConnection",
+      "remoteCapabilities",
+      "remoteModels",
+      "remoteHistories",
+      "tasks",
+    ],
     updater: ["updateCancelling", "updateCheckError", "updateChecking", "updateDownloading", "updateError", "updateInfo", "updateProgress", "updateReady"],
     dependencies: ["deps", "depsChecking", "depsInstallError", "depsInstallProgress", "depsInstalling"],
     teamRelay: ["teamRelay"],
@@ -2644,6 +2658,16 @@
   var startRemoteControl = remoteControlFeature.startRemoteControl;
   var stopRemoteControl = remoteControlFeature.stopRemoteControl;
   var refreshRemoteControlQr = remoteControlFeature.refreshRemoteControlQr;
+  var desktopRemoteControlFeature = installBridgeFeature("desktop-remote-control", {
+    state: state,
+    notify: notify,
+    invoke: invoke,
+    listen: listen,
+    bt: bt,
+    can: function (capability) {
+      return !!(state.platformCapabilities && state.platformCapabilities[capability] === true);
+    },
+  });
   var dependenciesFeature = installBridgeFeature("dependencies", { state: state, notify: notify, invoke: invoke, listen: listen, bt: bt });
   var checkDependencies = dependenciesFeature.checkDependencies;
   var installDependencies = dependenciesFeature.installDependencies;
@@ -3047,6 +3071,46 @@
       getWebRelaySettings: remoteControlFeature.getWebRelaySettings,
       setWebRelayAddress: remoteControlFeature.setWebRelayAddress,
       resetWebRelayAddress: remoteControlFeature.resetWebRelayAddress,
+    },
+    desktopRemoteControl: {
+      controlledStart: desktopRemoteControlFeature.controlledStart,
+      controlledRefresh: desktopRemoteControlFeature.controlledRefresh,
+      controlledStop: desktopRemoteControlFeature.controlledStop,
+      controlledDisconnectNow: desktopRemoteControlFeature.controlledDisconnectNow,
+      controlledStatus: desktopRemoteControlFeature.controlledStatus,
+      controlledListWorkspaces: desktopRemoteControlFeature.controlledListWorkspaces,
+      controlledAuthorizeWorkspace: desktopRemoteControlFeature.controlledAuthorizeWorkspace,
+      controllerConnect: desktopRemoteControlFeature.controllerConnect,
+      controllerDisconnect: desktopRemoteControlFeature.controllerDisconnect,
+      controllerStatus: desktopRemoteControlFeature.controllerStatus,
+      controllerListHistory: desktopRemoteControlFeature.controllerListHistory,
+      controllerCreateHistory: desktopRemoteControlFeature.controllerCreateHistory,
+      capabilitiesSnapshot: desktopRemoteControlFeature.capabilitiesSnapshot,
+      listExportableModels: desktopRemoteControlFeature.listExportableModels,
+      openRemoteSession: desktopRemoteControlFeature.openRemoteSession,
+      switchRemoteSession: desktopRemoteControlFeature.switchRemoteSession,
+      submitRemoteTask: desktopRemoteControlFeature.submitRemoteTask,
+      cancelRemoteTask: desktopRemoteControlFeature.cancelRemoteTask,
+      remoteTaskStatus: desktopRemoteControlFeature.remoteTaskStatus,
+      permissionList: desktopRemoteControlFeature.permissionList,
+      permissionDecide: desktopRemoteControlFeature.permissionDecide,
+      permissionDenyTask: desktopRemoteControlFeature.permissionDenyTask,
+      attachmentBegin: desktopRemoteControlFeature.attachmentBegin,
+      attachmentChunk: desktopRemoteControlFeature.attachmentChunk,
+      attachmentAbort: desktopRemoteControlFeature.attachmentAbort,
+      artifactIndex: desktopRemoteControlFeature.artifactIndex,
+      artifactPreview: desktopRemoteControlFeature.artifactPreview,
+      artifactDownloadBegin: desktopRemoteControlFeature.artifactDownloadBegin,
+      artifactDownloadChunk: desktopRemoteControlFeature.artifactDownloadChunk,
+      artifactDownloadAbort: desktopRemoteControlFeature.artifactDownloadAbort,
+      historyList: desktopRemoteControlFeature.historyList,
+      historyLoad: desktopRemoteControlFeature.historyLoad,
+      historyDelete: desktopRemoteControlFeature.historyDelete,
+      historyMarkOffline: desktopRemoteControlFeature.historyMarkOffline,
+      journalReplay: desktopRemoteControlFeature.journalReplay,
+      journalSnapshot: desktopRemoteControlFeature.journalSnapshot,
+      journalAcknowledge: desktopRemoteControlFeature.journalAcknowledge,
+      isAvailable: desktopRemoteControlFeature.isAvailable,
     },
     artifacts: {
       artifactInfo: artifactInfo,
