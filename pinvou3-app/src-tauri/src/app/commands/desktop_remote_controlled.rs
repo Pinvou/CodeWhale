@@ -96,8 +96,7 @@ fn emit_status(app: &AppHandle, status: &ControlledStatus) {
 #[tauri::command]
 pub fn desktop_remote_client_log(message: String) -> Result<(), String> {
     super::super::super::features::remote_control::controller::relay_runtime::log_controlled_event(
-        "client",
-        &message,
+        "client", &message,
     );
     Ok(())
 }
