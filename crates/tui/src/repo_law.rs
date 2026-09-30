@@ -75,6 +75,16 @@ pub(crate) fn repo_law_plan_decision(
     // Strongest action wins across all (root, rule, target) matches. The
     // reason is built where the match is found so the borrow does not have to
     // outlive the per-root rule set.
+    // Root-independent input work happens ONCE (review #484/CodeWhale
+    // round-24 B24-5): the landing candidates and their deepest-existing
+    // resolutions are byte-identical for every root, and the patch parse
+    // does not depend on the root set at all — re-deriving them inside the
+    // loop made a 64-root session re-walk symlink chains and re-resolve
+    // constitutions on every write-tool call.
+    let candidates = collect_write_candidates(workspace, tool_input);
+    if candidates.is_empty() {
+        return None;
+    }
     let mut hold: Option<(bool, String)> = None;
     for root in codewhale_core::normalize_workspace_roots(workspace, workspace_roots) {
         // Canonicalize once per root with a raw fallback (the
@@ -82,12 +92,12 @@ pub(crate) fn repo_law_plan_decision(
         // still judges raw spellings, so its constitution is never silently
         // dropped.
         let root_canonical = root.canonicalize().unwrap_or_else(|_| root.clone());
-        let targets = write_target_paths(workspace, &root, &root_canonical, tool_input);
+        let targets = write_target_paths(&candidates, &root, &root_canonical);
         if targets.is_empty() {
             continue;
         }
         let rules = load_repo_law_rules(&root);
-        for rule in &rules {
+        for rule in rules.iter() {
             for target in &targets {
                 if !rule.globs.is_match(target) {
                     continue;
@@ -115,7 +125,28 @@ pub(crate) fn repo_law_plan_decision(
     })
 }
 
-/// Extract workspace-relative write targets from a tool input. Covers the
+/// One collected write target from the tool input, prepared once per call.
+/// Every field is root-independent, so the per-root loop only does
+/// containment strips (review #484/CodeWhale round-24 B24-5 — the old shape
+/// re-derived the landing candidate and re-resolved it through
+/// `resolve_deepest_existing` once per root, over byte-identical inputs).
+struct WriteCandidate {
+    /// The trimmed, backslash-normalized spelling the tool supplied.
+    trimmed: String,
+    /// `raw_joined` lexically collapsed exactly like the landing normalizer:
+    /// the raw spelling joined onto the primary (relative targets) or
+    /// as-given (absolute), before any collapse.
+    candidate: PathBuf,
+    /// `candidate` resolved through its deepest existing ancestor, once.
+    candidate_resolved: Option<PathBuf>,
+    /// The PRE-normalization raw candidate resolved through its deepest
+    /// existing ancestor, once — the symlink-expanded reality execution
+    /// walks (round-22 B22-1 leg).
+    raw_resolved: Option<PathBuf>,
+}
+
+/// Collect every write spelling a tool input carries, with the
+/// root-independent resolution work done once. Covers the
 /// `path`/`filePath`/`target`/`destination`/`file_path` params, canonical
 /// `replace[].path`, legacy `changes[].path`, and
 /// every unified-diff / codex-envelope header shape the patch tools accept —
@@ -123,17 +154,8 @@ pub(crate) fn repo_law_plan_decision(
 /// tab-timestamp suffixes stripped, and `/dev/null` (deletion) falling back
 /// to the counterpart path. Missing any shape the tool honors is a hold
 /// bypass, so this deliberately over-collects candidate paths.
-///
-/// `workspace` is the primary root (what execution resolves relative targets
-/// against); `root` is the root whose law is being judged, with
-/// `root_canonical` its resolved spelling.
-fn write_target_paths(
-    workspace: &Path,
-    root: &Path,
-    root_canonical: &Path,
-    input: &Value,
-) -> Vec<String> {
-    let mut targets = Vec::new();
+fn collect_write_candidates(workspace: &Path, input: &Value) -> Vec<WriteCandidate> {
+    let mut spellings: Vec<String> = Vec::new();
     // `filePath`/`file_path` are the spellings `PATH_ALIASES` folds onto
     // `path` at execute time (`tools/file.rs`); the default `ToolSpec::
     // prepare` passes input through unchanged, so plan-time judgment must
@@ -153,14 +175,14 @@ fn write_target_paths(
     keys.extend(alias_keys);
     for key in &keys {
         if let Some(path) = input.get(key).and_then(Value::as_str) {
-            push_normalized(&mut targets, workspace, root, root_canonical, path);
+            spellings.push(path.to_string());
         }
     }
     match normalize_apply_patch_input(input) {
         Ok(NormalizedApplyPatchInput::Replacement { entries, .. }) => {
             for change in entries {
                 if let Some(path) = change.get("path").and_then(Value::as_str) {
-                    push_normalized(&mut targets, workspace, root, root_canonical, path);
+                    spellings.push(path.to_string());
                 }
             }
         }
@@ -168,37 +190,25 @@ fn write_target_paths(
             let mut pending_old: Option<String> = None;
             for line in patch.lines() {
                 if let Some(rest) = line.strip_prefix("*** Update File: ") {
-                    push_normalized(&mut targets, workspace, root, root_canonical, rest.trim());
+                    spellings.push(rest.trim().to_string());
                 } else if let Some(rest) = line.strip_prefix("*** Add File: ") {
-                    push_normalized(&mut targets, workspace, root, root_canonical, rest.trim());
+                    spellings.push(rest.trim().to_string());
                 } else if let Some(rest) = line.strip_prefix("*** Delete File: ") {
-                    push_normalized(&mut targets, workspace, root, root_canonical, rest.trim());
+                    spellings.push(rest.trim().to_string());
                 } else if let Some(rest) = line.strip_prefix("--- ") {
                     // Old path: remember it so a `+++ /dev/null` deletion still
                     // holds the file being removed.
                     pending_old = diff_header_path(rest);
                     if let Some(ref p) = pending_old {
-                        push_normalized(&mut targets, workspace, root, root_canonical, p);
+                        spellings.push(p.clone());
                     }
                 } else if let Some(rest) = line.strip_prefix("+++ ") {
                     match diff_header_path(rest) {
-                        Some(new_path) => push_normalized(
-                            &mut targets,
-                            workspace,
-                            root,
-                            root_canonical,
-                            &new_path,
-                        ),
+                        Some(new_path) => spellings.push(new_path),
                         // `+++ /dev/null` → deletion; the target is the old path.
                         None => {
                             if let Some(old) = pending_old.take() {
-                                push_normalized(
-                                    &mut targets,
-                                    workspace,
-                                    root,
-                                    root_canonical,
-                                    &old,
-                                );
+                                spellings.push(old);
                             }
                         }
                     }
@@ -206,6 +216,46 @@ fn write_target_paths(
             }
         }
         Err(_) => {}
+    }
+    spellings.sort();
+    spellings.dedup();
+    spellings
+        .into_iter()
+        .filter_map(|raw| {
+            let trimmed = raw.trim().replace('\\', "/");
+            if trimmed.is_empty() {
+                return None;
+            }
+            let raw_path = Path::new(&raw);
+            let raw_joined = if raw_path.is_absolute() {
+                raw_path.to_path_buf()
+            } else {
+                workspace.join(raw_path)
+            };
+            let candidate = normalize_lexical_components(&raw_joined);
+            let candidate_resolved = crate::core::authority::resolve_deepest_existing(&candidate);
+            let raw_resolved = crate::core::authority::resolve_deepest_existing(&raw_joined);
+            Some(WriteCandidate {
+                trimmed,
+                candidate,
+                candidate_resolved,
+                raw_resolved,
+            })
+        })
+        .collect()
+}
+
+/// Root-relative glob targets for one root, from the pre-resolved
+/// candidates. Sorted and deduped: the rule loop below matches a set, and
+/// the hold reason cites a match, not an order.
+fn write_target_paths(
+    candidates: &[WriteCandidate],
+    root: &Path,
+    root_canonical: &Path,
+) -> Vec<String> {
+    let mut targets = Vec::new();
+    for candidate in candidates {
+        push_normalized(&mut targets, candidate, root, root_canonical);
     }
     targets.sort();
     targets.dedup();
@@ -234,11 +284,15 @@ fn diff_header_path(rest: &str) -> Option<String> {
 /// `x/../crates/protocol/x` cannot spell its way past a glob (a confirmed
 /// bypass before this).
 ///
-/// `workspace` (primary) and `root` (the law being judged) differ for
-/// multi-root sessions. A relative spelling is judged against every root —
-/// keep the raw collapsed tail per root, so an attached root's law can hold
-/// a write that execution would place under the primary (fail-closed: an
-/// extra prompt or block at worst).
+/// `root` is the root whose law is being judged, with `root_canonical` its
+/// resolved spelling; the candidate's root-independent resolution work was
+/// already done once in [`collect_write_candidates`]
+/// (review #484/CodeWhale round-24 B24-5).
+///
+/// A relative spelling is judged against every root — keep the raw collapsed
+/// tail per root, so an attached root's law can hold a write that execution
+/// would place under the primary (fail-closed: an extra prompt or block at
+/// worst).
 ///
 /// Spelling alone is not enough, because execution resolves writes
 /// canonically: `ToolContext::resolve_path` joins a relative spelling onto
@@ -253,19 +307,14 @@ fn diff_header_path(rest: &str) -> Option<String> {
 /// never fired — a block-class law bypass.
 fn push_normalized(
     targets: &mut Vec<String>,
-    workspace: &Path,
+    candidate: &WriteCandidate,
     root: &Path,
     root_canonical: &Path,
-    raw: &str,
 ) {
-    let trimmed = raw.trim().replace('\\', "/");
-    if trimmed.is_empty() {
-        return;
-    }
     // Make root-relative when the tool gave an absolute path inside the root,
     // under either its raw or its canonical spelling (a root reached through
     // a symlink still carries its law).
-    let path = Path::new(&trimmed);
+    let path = Path::new(&candidate.trimmed);
     let relative = path
         .strip_prefix(root)
         .or_else(|_| path.strip_prefix(root_canonical))
@@ -293,23 +342,14 @@ fn push_normalized(
     }
     // Judge the execution-landing path against this root, under both its raw
     // and its canonical spelling. Execution joins the *raw* spelling onto the
-    // primary (`ToolContext::resolve_path`), so derive the candidate from the
-    // raw string with component operations — splitting display strings is not
-    // a path operation and silently misparses Windows separators.
-    let raw_path = Path::new(raw);
-    let raw_joined = if raw_path.is_absolute() {
-        raw_path.to_path_buf()
-    } else {
-        workspace.join(raw_path)
-    };
-    // The normalizer clamps a `..` at the filesystem root exactly like
-    // execution, so an overshoot spelling still yields the landing path the
-    // write tools would admit — judging it is what closes the overshoot
-    // bypass into an attached root.
-    let candidate = normalize_lexical_components(&raw_joined);
+    // primary (`ToolContext::resolve_path`), so the candidate was derived
+    // from the raw string with component operations — splitting display
+    // strings is not a path operation and silently misparses Windows
+    // separators.
     if let Ok(tail) = candidate
+        .candidate
         .strip_prefix(root)
-        .or_else(|_| candidate.strip_prefix(root_canonical))
+        .or_else(|_| candidate.candidate.strip_prefix(root_canonical))
     {
         let tail = tail.to_string_lossy().replace('\\', "/");
         if !tail.is_empty() {
@@ -320,7 +360,7 @@ fn push_normalized(
     // judge the resolved path against the canonical root, so an interior
     // symlink hop into this root (or a root reached through one) cannot
     // spell its way past the law.
-    if let Some(resolved) = crate::core::authority::resolve_deepest_existing(&candidate)
+    if let Some(resolved) = &candidate.candidate_resolved
         && let Ok(tail) = resolved.strip_prefix(root_canonical)
     {
         let tail = tail.to_string_lossy().replace('\\', "/");
@@ -337,7 +377,7 @@ fn push_normalized(
     // Resolving the raw joined candidate walks the same symlink-expanded
     // reality execution walks; the already-normalized leg above stays so
     // the overshoot-clamp behavior is judged both ways.
-    if let Some(resolved) = crate::core::authority::resolve_deepest_existing(&raw_joined)
+    if let Some(resolved) = &candidate.raw_resolved
         && let Ok(tail) = resolved.strip_prefix(root_canonical)
     {
         let tail = tail.to_string_lossy().replace('\\', "/");

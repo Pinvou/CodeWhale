@@ -97,10 +97,65 @@ pub(crate) struct RepoLawRule {
 /// degrades to fewer (or zero) rules: enforcement can silently do less,
 /// never more, and never poisons the tool gate. Parse warnings still reach
 /// the user through the prompt-side load path, which reads the same file.
-pub(crate) fn load_repo_law_rules(workspace: &Path) -> Vec<RepoLawRule> {
-    let Some((_, constitution)) = discover_repo_constitution(workspace) else {
-        return Vec::new();
+///
+/// The read+parse+globset compile is cached per constitution file and
+/// revalidated by (mtime, size) on every call (review #484/CodeWhale
+/// round-24 B24-5): the repo-law gate runs on every write-tool call, and a
+/// 64-root session re-walking git roots and recompiling the same
+/// constitution once per root per call converted the gate into a hot loop.
+/// The upward discovery walk itself stays uncached so a constitution
+/// created at a nearer directory is found on the next call; only the
+/// compile of an already-resolved file is memoized.
+pub(crate) fn load_repo_law_rules(workspace: &Path) -> std::sync::Arc<Vec<RepoLawRule>> {
+    static CACHE: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<PathBuf, CachedRepoLawRules>>,
+    > = std::sync::OnceLock::new();
+    let Some(path) = discover_repo_constitution_path(workspace) else {
+        return std::sync::Arc::new(Vec::new());
     };
+    let Ok(metadata) = std::fs::metadata(&path) else {
+        return std::sync::Arc::new(Vec::new());
+    };
+    let modified = metadata
+        .modified()
+        .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+    let len = metadata.len();
+    let cache = CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    let mut guard = cache
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(hit) = guard.get(&path)
+        && hit.modified == modified
+        && hit.len == len
+    {
+        return std::sync::Arc::clone(&hit.rules);
+    }
+    let rules = std::sync::Arc::new(
+        read_repo_constitution(&path)
+            .map(compile_repo_law_rules)
+            .unwrap_or_default(),
+    );
+    guard.insert(
+        path,
+        CachedRepoLawRules {
+            modified,
+            len,
+            rules: std::sync::Arc::clone(&rules),
+        },
+    );
+    rules
+}
+
+struct CachedRepoLawRules {
+    modified: std::time::SystemTime,
+    len: u64,
+    rules: std::sync::Arc<Vec<RepoLawRule>>,
+}
+
+/// Compile the enforceable rules from an already-parsed constitution: text
+/// and path globs are trimmed, empty or uncompilable entries degrade to
+/// fewer rules, and only entries carrying usable globs become holds.
+fn compile_repo_law_rules(constitution: RepoConstitution) -> Vec<RepoLawRule> {
     let mut rules = Vec::new();
     for invariant in constitution.protected_invariants.into_iter().flatten() {
         let ProtectedInvariant::Enforced(enforced) = invariant else {
@@ -138,9 +193,9 @@ pub(crate) fn load_repo_law_rules(workspace: &Path) -> Vec<RepoLawRule> {
 }
 
 /// Walk from `workspace` toward the git root looking for the repo
-/// constitution; parse best-effort. Shared by the enforcement loader; the
-/// prompt-side loader keeps its richer warning handling.
-fn discover_repo_constitution(workspace: &Path) -> Option<(PathBuf, RepoConstitution)> {
+/// constitution; existence-only, no read. The enforcement loader caches the
+/// compile behind the returned path.
+fn discover_repo_constitution_path(workspace: &Path) -> Option<PathBuf> {
     let git_root = find_git_root(workspace);
     let mut current = workspace.to_path_buf();
     loop {
@@ -149,10 +204,7 @@ fn discover_repo_constitution(workspace: &Path) -> Option<(PathBuf, RepoConstitu
             path.push(component);
         }
         if context_candidate_exists(&path) {
-            let constitution = load_context_file(&path)
-                .ok()
-                .and_then(|raw| serde_json::from_str::<RepoConstitution>(&raw).ok())?;
-            return Some((path, constitution));
+            return Some(path);
         }
         if let Some(ref root) = git_root
             && current == *root
@@ -165,6 +217,14 @@ fn discover_repo_constitution(workspace: &Path) -> Option<(PathBuf, RepoConstitu
         }
     }
     None
+}
+
+/// Read and parse the repo constitution at `path`, best-effort: any read or
+/// parse failure degrades to None, exactly like the old inline walk.
+fn read_repo_constitution(path: &Path) -> Option<RepoConstitution> {
+    load_context_file(path)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<RepoConstitution>(&raw).ok())
 }
 
 impl RepoConstitution {
