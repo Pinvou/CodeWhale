@@ -162,6 +162,7 @@ function generateCode(randomBytes) {
 
 export class PairingStore {
   #store; #keyring; #clock; #randomBytes; #active = new Map();
+  #reservationPairings = new Set();
 
   constructor({ stateStore, digestKeyring, clock = Date.now, randomBytes = crypto.randomBytes } = {}, token) {
     if (token !== OPEN_TOKEN) fail("pairing_store_open_required");
@@ -199,8 +200,13 @@ export class PairingStore {
       const retainedPairings = new Set(registrations.map((row) => row.pairing_id).filter(Boolean));
       const tombstones = snapshot.state.tombstones.filter((row) => (
         Number(row.reuse_after_ms) > now || retainedPairings.has(row.pairing_id)
+          || this.#reservationPairings.has(row.pairing_id)
       ));
+      for (const [pairingId, active] of this.#active) {
+        if (Number(active.expires_at_ms) <= now) this.#active.delete(pairingId);
+      }
       if (registrations.length === snapshot.state.registrations.length
+        && tombstones.length === snapshot.state.tombstones.length
         && tombstones.every((row, index) => row === snapshot.state.tombstones[index])) return;
       try {
         await this.#store.compareAndSwap(PAIRING_NAMESPACE, snapshot.revision, {
@@ -241,6 +247,14 @@ export class PairingStore {
       }
     }
     fail("pairing_revision_conflict");
+  }
+
+  retainForReservation(pairingId) {
+    this.#reservationPairings.add(id(pairingId, "pairing_id"));
+  }
+
+  releaseReservation(pairingId) {
+    this.#reservationPairings.delete(pairingId);
   }
 
   #rehydrate() {
@@ -426,6 +440,7 @@ export class PairingStore {
     id(request.endpoint_id, "endpoint_id");
     id(request.remote_control_generation, "remote_control_generation");
     id(relayEpoch, "relay_epoch");
+    await this.#compact();
     const parameters = { ...request };
     delete parameters.request_id;
     for (let casAttempt = 0; casAttempt < 8; casAttempt += 1) {
@@ -496,7 +511,11 @@ export class PairingStore {
       for (let attempt = 0; attempt < MAX_GENERATION_ATTEMPTS; attempt += 1) {
         const pairingEntropy = this.#randomBytes(18);
         if (!Buffer.isBuffer(pairingEntropy) || pairingEntropy.length !== 18) fail("pairing_entropy_invalid");
-        const candidate = `pairing-${pairingEntropy.toString("base64url")}`;
+        // Namespace revisions never roll back during normal operation. Including
+        // the revision prevents a retired ID from being reissued after GC even
+        // if CSPRNG output repeats. The longer form cannot collide with legacy
+        // IDs, whose random suffix was exactly 24 characters.
+        const candidate = `pairing-${snapshot.revision.padStart(20, "0")}-${pairingEntropy.toString("base64url")}`;
         if (!snapshot.state.tombstones.some((row) => row.pairing_id === candidate)) {
           pairingId = candidate;
           break;

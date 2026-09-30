@@ -190,11 +190,12 @@ async function stopRelay(child) {
   await waitForExit(child);
 }
 
-async function spawnRelay(env = {}) {
+async function spawnRelay(env = {}, { preload } = {}) {
   const isolatedPort = await getFreePort();
   const statePath = env.PINVOU_REMOTE_STATE_PATH
     || join(testRoot, `relay-state-${isolatedPort}-${Date.now()}-${Math.random().toString(16).slice(2)}.json`);
-  const child = spawn(process.execPath, [join(relayDir, "server.js")], {
+  const args = preload ? ["--import", preload, join(relayDir, "server.js")] : [join(relayDir, "server.js")];
+  const child = spawn(process.execPath, args, {
     cwd: relayDir,
     env: {
       ...process.env,
@@ -1116,7 +1117,7 @@ test("proxy allowlist keeps local health checks available", async () => {
   }
 });
 
-test("controller reservation timeout is driven by the real Relay heartbeat", async () => {
+test("real Relay heartbeat retries failed reservation invalidation and releases the slot", async () => {
   const statePath = join(testRoot, `controller-timeout-${Date.now()}.json`);
   const controllerStatePath = join(testRoot, `controller-timeout-state-${Date.now()}`, "state.json");
   const signing = crypto.generateKeyPairSync("ed25519");
@@ -1135,8 +1136,10 @@ test("controller reservation timeout is driven by the real Relay heartbeat", asy
     PINVOU_REMOTE_RELAY_SIGNING_PRIVATE_KEY_B64: signing.privateKey.export({
       type: "pkcs8", format: "der",
     }).toString("base64"),
-  });
+  }, { preload: new URL("./fixtures/reservation-invalidation-failure.js", import.meta.url).href });
   const sockets = [];
+  let failureTrace = "";
+  isolated.child.stdout.on("data", (chunk) => { failureTrace += String(chunk); });
   try {
     const endpointId = "endpoint-controller-timeout";
     const accessToken = "controller-timeout-access-token-00000001";
@@ -1183,6 +1186,8 @@ test("controller reservation timeout is driven by the real Relay heartbeat", asy
     }));
     await Promise.all([reservedA, reservedB]);
     assert.equal((await invalidated).code, "pairing_code_invalid");
+    assert.match(failureTrace, /reservation-invalidation-probe: failed/u);
+    assert.match(failureTrace, /reservation-invalidation-probe: retried/u);
 
     const web = await joinWeb(endpointId, accessToken, {}, isolated.wsUrl);
     sockets.push(web.ws);

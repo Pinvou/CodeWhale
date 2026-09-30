@@ -105,6 +105,15 @@ snapshot exists, keep the service failed closed and rebuild authorization with
 the administrator enrollment/migration flow; never adopt one mismatched copy
 automatically.
 
+Pairing registration compacts expired idempotency records and quarantine rows
+before allocating new state, including during long-running processes. A row is
+retained while its quarantine is live, an idempotency record references it, or
+a reservation still needs durable invalidation/notification retries. Reservation
+promotion or successful invalidation releases that final retention reference.
+New opaque pairing IDs include the monotonically committed namespace revision
+and fresh random entropy, so GC cannot reissue an ID even if entropy repeats
+within the same store history. Their longer form is disjoint from legacy IDs.
+
 Every atomic state write snapshots the legacy file and every existing managed
 file identity before replacement. Its transaction ledger also records each
 temporary and retired target inode, then compares the final legacy identity
