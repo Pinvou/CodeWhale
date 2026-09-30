@@ -36,7 +36,10 @@ impl DesktopControlledCleanup {
 impl ControlledCleanupSink for DesktopControlledCleanup {
     fn cleanup(&self, generation: &str, scope: ControlledCleanupScope) {
         if scope.session_keys {
-            if let Some(relay) = self.app.try_state::<crate::features::remote_control::RemoteControlManager>() {
+            if let Some(relay) = self
+                .app
+                .try_state::<crate::features::remote_control::RemoteControlManager>()
+            {
                 relay.stop_controller_relay(generation);
             }
         }
@@ -45,21 +48,19 @@ impl ControlledCleanupSink for DesktopControlledCleanup {
         if !(scope.remote_tasks || scope.pending_permissions || scope.temporary_models) {
             return;
         }
-        let Some(runtime) =
-            self.app
-                .try_state::<Arc<super::desktop_remote_task::DesktopRemoteTaskRuntime>>()
+        let Some(runtime) = self
+            .app
+            .try_state::<Arc<super::desktop_remote_task::DesktopRemoteTaskRuntime>>()
         else {
             // 任务运行时未装配（例如单元测试环境）：本代没有任何远端任务需要清理。
             return;
         };
         let now_b = controlled_monotonic_millis();
-        let _ = runtime
-            .service()
-            .interrupt_generation_and_clear_sessions(
-                generation,
-                "remote_control_stopped",
-                now_b,
-            );
+        let _ = runtime.service().interrupt_generation_and_clear_sessions(
+            generation,
+            "remote_control_stopped",
+            now_b,
+        );
     }
 }
 
@@ -77,21 +78,23 @@ impl ControlledBusinessPort for DesktopControlledBusiness {
         session_id: Option<&str>,
         known_revision: u64,
     ) -> Result<Value, String> {
-        let controlled_session = if let Some(session_ref) = session_id.filter(|value| !value.is_empty()) {
-            let authoritative_id = super::desktop_remote_task::ensure_controlled_session(
-                &self.app,
-                session_ref,
-                "",
-                false,
-                &lease.remote_control_generation,
-            )?;
-            Some((session_ref.to_owned(), authoritative_id))
-        } else {
-            None
-        };
+        let controlled_session =
+            if let Some(session_ref) = session_id.filter(|value| !value.is_empty()) {
+                let authoritative_id = super::desktop_remote_task::ensure_controlled_session(
+                    &self.app,
+                    session_ref,
+                    "",
+                    false,
+                    &lease.remote_control_generation,
+                )?;
+                Some((session_ref.to_owned(), authoritative_id))
+            } else {
+                None
+            };
         let capabilities = self.app.state::<CapabilitySnapshotManager>();
         let now_b =
-            crate::features::remote_control::controller::relay_runtime::controlled_monotonic_millis();
+            crate::features::remote_control::controller::relay_runtime::controlled_monotonic_millis(
+            );
         // 只复用刚生成、且比 A 已知 revision 更新的快照：这能吸收紧邻的重复
         // 请求，又不会把临近过期的快照当作完整 30 秒租期返回给兼容旧报文的 A。
         if let Ok(current) = capabilities.current_for_context(lease, now_b) {
@@ -121,7 +124,11 @@ impl ControlledBusinessPort for DesktopControlledBusiness {
                 return Ok(payload);
             }
         }
-        let snapshot = match super::desktop_remote_capabilities::build_capability_snapshot(&self.app).await {
+        let snapshot = match super::desktop_remote_capabilities::build_capability_snapshot(
+            &self.app,
+        )
+        .await
+        {
             Ok(snapshot) => snapshot,
             Err(error) => {
                 crate::features::remote_control::controller::relay_runtime::log_controlled_event(
@@ -156,20 +163,21 @@ impl ControlledBusinessPort for DesktopControlledBusiness {
             "task_submit_business_entered",
             "validating",
         );
-        let result = super::desktop_remote_task::submit_decrypted_task(
-            &self.app,
-            session_ref,
-            payload,
-        );
+        let result =
+            super::desktop_remote_task::submit_decrypted_task(&self.app, session_ref, payload);
         match &result {
-            Ok(_) => crate::features::remote_control::controller::relay_runtime::log_controlled_event(
-                "task_submit_business_accepted",
-                "admitted",
-            ),
-            Err(error) => crate::features::remote_control::controller::relay_runtime::log_controlled_event(
-                "task_submit_business_rejected",
-                error,
-            ),
+            Ok(_) => {
+                crate::features::remote_control::controller::relay_runtime::log_controlled_event(
+                    "task_submit_business_accepted",
+                    "admitted",
+                )
+            }
+            Err(error) => {
+                crate::features::remote_control::controller::relay_runtime::log_controlled_event(
+                    "task_submit_business_rejected",
+                    error,
+                )
+            }
         }
         result
     }
@@ -190,8 +198,9 @@ impl ControlledBusinessPort for DesktopControlledBusiness {
         journal_epoch: &str,
         after_sequence: u64,
     ) -> Result<Vec<(String, Value)>, String> {
-        let history =
-            self.app.state::<std::sync::Arc<super::desktop_remote_history::DesktopRemoteHistoryRuntime>>();
+        let history = self
+            .app
+            .state::<std::sync::Arc<super::desktop_remote_history::DesktopRemoteHistoryRuntime>>();
         Ok(
             match history.journal().replay_after(journal_epoch, after_sequence) {
                 crate::features::remote_control::controller::journal::ReplayOutcome::Events(events) => {
@@ -224,8 +233,9 @@ impl ControlledBusinessPort for DesktopControlledBusiness {
         session_ref: &str,
         request_id: &str,
     ) -> Result<Value, String> {
-        let history =
-            self.app.state::<std::sync::Arc<super::desktop_remote_history::DesktopRemoteHistoryRuntime>>();
+        let history = self
+            .app
+            .state::<std::sync::Arc<super::desktop_remote_history::DesktopRemoteHistoryRuntime>>();
         let snapshot = history.journal().snapshot();
         build_session_snapshot_payload(lease, session_ref, request_id, &snapshot)
     }
@@ -249,8 +259,8 @@ fn build_session_snapshot_payload(
     for event in &mut wire_snapshot.events {
         event.session_id = session_ref.to_owned();
     }
-    let raw = serde_json::to_vec(&wire_snapshot)
-        .map_err(|_| "journal_snapshot_invalid".to_owned())?;
+    let raw =
+        serde_json::to_vec(&wire_snapshot).map_err(|_| "journal_snapshot_invalid".to_owned())?;
     let digest = wire_snapshot.digest.clone();
     if digest.len() != 64 {
         return Err("journal_snapshot_invalid".to_owned());

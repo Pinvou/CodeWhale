@@ -95,9 +95,9 @@ pub(crate) fn publish_authoritative_task_status(app: &tauri::AppHandle, event: &
         );
         return;
     };
-    let lane = app.state::<
-        crate::features::remote_control::controller::encrypted_lane::ControlledLaneState,
-    >();
+    let lane = app
+        .state::<crate::features::remote_control::controller::encrypted_lane::ControlledLaneState>(
+        );
     let Ok(frame) = lane.seal("task_status", &payload, &capabilities) else {
         crate::features::remote_control::controller::relay_runtime::log_controlled_event(
             "task_status_not_sent",
@@ -107,8 +107,16 @@ pub(crate) fn publish_authoritative_task_status(app: &tauri::AppHandle, event: &
     };
     let result = sender.try_send(frame);
     crate::features::remote_control::controller::relay_runtime::log_controlled_event(
-        if result.is_ok() { "task_status_sent" } else { "task_status_not_sent" },
-        if result.is_ok() { event.status.as_str() } else { "queue_failed" },
+        if result.is_ok() {
+            "task_status_sent"
+        } else {
+            "task_status_not_sent"
+        },
+        if result.is_ok() {
+            event.status.as_str()
+        } else {
+            "queue_failed"
+        },
     );
 }
 

@@ -863,8 +863,8 @@ impl ControlledRelayWorker {
     /// 解密/校验失败、业务拒绝）都不产生副作用；业务拒绝时回传有界错误的
     /// `task_status` 由命令层决定（这里只负责通道语义）。
     async fn dispatch_business_frame(&self, frame: &Value) {
-        let is_task_submit = frame.get("payload_kind").and_then(Value::as_str)
-            == Some("task_submit");
+        let is_task_submit =
+            frame.get("payload_kind").and_then(Value::as_str) == Some("task_submit");
         if is_task_submit {
             log_controlled_event("task_submit_frame_received", "opening");
         }
@@ -920,7 +920,10 @@ impl ControlledRelayWorker {
             if is_task_submit && response_kind == "task_status" {
                 log_controlled_event("task_submit_status_sent", "accepted");
             }
-            if matches!(response_kind, "capability_snapshot" | "capability_snapshot_error") {
+            if matches!(
+                response_kind,
+                "capability_snapshot" | "capability_snapshot_error"
+            ) {
                 log_controlled_event("capability_response_sent", response_kind);
             }
         }
