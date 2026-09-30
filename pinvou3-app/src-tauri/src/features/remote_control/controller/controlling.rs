@@ -158,6 +158,37 @@ impl std::fmt::Debug for ControllerLease {
     }
 }
 
+/// E2E-06：A 端断线恢复所需的本地材料（令牌只以内存数组存在，Debug 脱敏）。
+pub(crate) struct ControllingResumeMaterial {
+    pub(crate) lease: LeaseContext,
+    pub(crate) resume_token: [u8; 32],
+    pub(crate) original_deadline_b: u64,
+}
+
+impl std::fmt::Debug for ControllingResumeMaterial {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ControllingResumeMaterial")
+            .field("lease", &self.lease)
+            .field("resume_token", &"[REDACTED]")
+            .field("original_deadline_b", &self.original_deadline_b)
+            .finish()
+    }
+}
+
+/// E2E-06：恢复流程的本地相位推进（service 层按 Relay/B 的帧顺序调用）。
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum ResumeStep<'a> {
+    Provisional { activation_id: &'a str },
+    Confirmed { activation_id: &'a str },
+    ActivationPending { activation_id: &'a str },
+    LivenessConfirmed { activation_id: &'a str },
+    ReadyAcknowledged { activation_id: &'a str },
+}
+
+/// 恢复失败的统一公共错误码（保守默认：A 需要重新取码连接）。
+const RESUME_FAILED_ERROR: &str = "endpoint_offline";
+
 struct PendingCode {
     claim_request_id: String,
     value: Zeroizing<String>,
@@ -322,6 +353,8 @@ impl ControllingDeviceManager {
     pub(crate) fn complete_resumed(
         &self,
         operation: ControllerOperation,
+        activation_id: &str,
+        now_b: u64,
         liveness_epoch_a: impl Into<String>,
         resume_token: [u8; 32],
         transport_key_fingerprint: [u8; 32],
@@ -335,6 +368,32 @@ impl ControllingDeviceManager {
         let Some(lease) = inner.lease.clone() else {
             return Err(ControllingStateError::new("lease_unavailable"));
         };
+        // 先让旧 gate 用完整的 `controller_resumed`（同一 activation + 轮换后的
+        // 令牌/指纹）消费旧材料；任何不符都终止候选。
+        let accepted = match inner.resume_gate.as_mut() {
+            Some(gate) => gate
+                .accept_resumed(
+                    activation_id,
+                    liveness_epoch_a.into(),
+                    resume_token,
+                    transport_key_fingerprint,
+                    now_b,
+                    Some(lease.resume_deadline_b),
+                )
+                .is_ok(),
+            None => false,
+        };
+        if !accepted {
+            clear_live_context(&mut inner);
+            inner.phase = ControllingStatusKind::Error;
+            inner.error_code = Some(RESUME_FAILED_ERROR);
+            return Err(ControllingStateError::new("controller_resume_failed"));
+        }
+        let liveness_epoch_a = inner
+            .resume_gate
+            .as_ref()
+            .and_then(|gate| gate.resumed_liveness_epoch().map(str::to_owned))
+            .unwrap_or_default();
         inner.resume_gate = Some(ControllerResumeGate::new(
             ControllerRole::ControllerA,
             lease.context.clone(),
@@ -343,11 +402,110 @@ impl ControllingDeviceManager {
             new_deadline_b,
         ));
         if let Some(lease) = inner.lease.as_mut() {
-            lease.liveness_epoch_a = liveness_epoch_a.into();
+            lease.liveness_epoch_a = liveness_epoch_a;
             lease.resume_deadline_b = new_deadline_b;
         }
         inner.phase = ControllingStatusKind::Connected;
         Ok(status_locked(&inner))
+    }
+
+    /// E2E-06：断线后取恢复材料并让本地 gate 进入 `Prepared`。相位不符、没有活
+    /// 租约或 gate 已终止时失败关闭（并把连接投影为有界错误的终态）。
+    pub(crate) fn begin_resume(
+        &self,
+        operation: ControllerOperation,
+        now_b: u64,
+    ) -> Result<ControllingResumeMaterial> {
+        let mut inner = self.inner.lock();
+        ensure_operation(&inner, &operation)?;
+        if inner.phase != ControllingStatusKind::Reconnecting {
+            return Err(ControllingStateError::new("controller_phase_invalid"));
+        }
+        let lease = inner
+            .lease
+            .clone()
+            .ok_or_else(|| ControllingStateError::new("lease_unavailable"))?;
+        let prepared = match inner.resume_gate.as_mut() {
+            Some(gate) => gate
+                .prepare(now_b, Some(lease.resume_deadline_b))
+                .is_ok(),
+            None => false,
+        };
+        if !prepared {
+            clear_live_context(&mut inner);
+            inner.phase = ControllingStatusKind::Error;
+            inner.error_code = Some(RESUME_FAILED_ERROR);
+            return Err(ControllingStateError::new("controller_resume_failed"));
+        }
+        Ok(ControllingResumeMaterial {
+            lease: lease.context,
+            resume_token: lease.resume_token,
+            original_deadline_b: lease.resume_deadline_b,
+        })
+    }
+
+    /// E2E-06：按帧顺序推进本地恢复相位；任一步失败即终止候选并投影有界错误。
+    pub(crate) fn advance_resume(
+        &self,
+        operation: ControllerOperation,
+        step: ResumeStep<'_>,
+        now_b: u64,
+    ) -> Result<ControllingStatus> {
+        let mut inner = self.inner.lock();
+        ensure_operation(&inner, &operation)?;
+        if inner.phase != ControllingStatusKind::Reconnecting {
+            return Err(ControllingStateError::new("controller_phase_invalid"));
+        }
+        let deadline = inner.lease.as_ref().map(|lease| lease.resume_deadline_b);
+        let advanced = match inner.resume_gate.as_mut() {
+            Some(gate) => match step {
+                ResumeStep::Provisional { activation_id } => {
+                    gate.accept_provisional(activation_id, now_b, deadline).is_ok()
+                }
+                ResumeStep::Confirmed { activation_id } => {
+                    gate.confirm(activation_id, now_b, deadline).is_ok()
+                }
+                ResumeStep::ActivationPending { activation_id } => gate
+                    .accept_activation_pending(activation_id, now_b, deadline)
+                    .is_ok(),
+                ResumeStep::LivenessConfirmed { activation_id } => gate
+                    .accept_post_activation_liveness_confirmed(activation_id, now_b, deadline)
+                    .is_ok(),
+                ResumeStep::ReadyAcknowledged { activation_id } => {
+                    gate.acknowledge_ready(activation_id, now_b, deadline).is_ok()
+                }
+            },
+            None => false,
+        };
+        if !advanced {
+            clear_live_context(&mut inner);
+            inner.phase = ControllingStatusKind::Error;
+            inner.error_code = Some(RESUME_FAILED_ERROR);
+            return Err(ControllingStateError::new("controller_resume_failed"));
+        }
+        Ok(status_locked(&inner))
+    }
+
+    /// E2E-06：当前连接尝试的 operation（恢复流程在 service 层按帧推进时需要它）。
+    pub(crate) fn current_operation(&self) -> Option<ControllerOperation> {
+        let inner = self.inner.lock();
+        inner.claim_request_id.as_ref().map(|request| ControllerOperation {
+            intent: inner.intent,
+            claim_request_id: request.clone(),
+        })
+    }
+
+    /// E2E-06：发送恢复族的敏感控制帧（prepare/confirm/ready_ack）。
+    pub(crate) fn send_resume_control(
+        &self,
+        frame: &serde_json::Value,
+    ) -> std::result::Result<(), ControllerSendError> {
+        let inner = self.inner.lock();
+        let transport = inner
+            .transport
+            .as_ref()
+            .ok_or(ControllerSendError::Unauthenticated)?;
+        transport.try_send_sensitive_resume_control(frame)
     }
 
     pub(crate) fn fail_connection(
@@ -786,8 +944,95 @@ mod tests {
             manager.mark_transport_disconnected().status,
             ControllingStatusKind::Reconnecting
         );
+        // 恢复材料可取（旧令牌只在内存里），Debug 输出不得含令牌字节。
+        let material = manager.begin_resume(operation.clone(), 1_000).unwrap();
+        assert_eq!(material.original_deadline_b, 30_000);
+        assert!(format!("{material:?}").contains("[REDACTED]"));
+        let activation = "activation-0001";
+        manager
+            .advance_resume(
+                operation.clone(),
+                ResumeStep::Provisional {
+                    activation_id: activation,
+                },
+                2_000,
+            )
+            .unwrap();
+        // 相位顺序错乱必须终止候选（此处先确认，再重复 provisional）。
+        manager
+            .advance_resume(
+                operation.clone(),
+                ResumeStep::Confirmed {
+                    activation_id: activation,
+                },
+                3_000,
+            )
+            .unwrap();
+        assert_eq!(
+            manager
+                .advance_resume(
+                    operation.clone(),
+                    ResumeStep::Provisional {
+                        activation_id: activation,
+                    },
+                    4_000,
+                )
+                .unwrap_err()
+                .code,
+            "controller_resume_failed"
+        );
+        assert_eq!(
+            manager.status().error_code,
+            Some("endpoint_offline"),
+            "恢复失败必须投影有界公共错误"
+        );
+        assert!(manager.live_lease().is_err());
+
+        // 重新开始一次完整恢复：相位全序列后进入 connected。
+        let manager = ControllingDeviceManager::default();
+        let operation = manager.connect("234-4567").unwrap();
+        manager.complete_reserved(operation.clone()).unwrap();
+        manager
+            .complete_connected(operation.clone(), lease())
+            .unwrap();
+        manager.mark_transport_disconnected();
+        manager.begin_resume(operation.clone(), 1_000).unwrap();
+        for (step, now_b) in [
+            (
+                ResumeStep::Provisional {
+                    activation_id: activation,
+                },
+                2_000,
+            ),
+            (
+                ResumeStep::Confirmed {
+                    activation_id: activation,
+                },
+                3_000,
+            ),
+            (
+                ResumeStep::ActivationPending {
+                    activation_id: activation,
+                },
+                4_000,
+            ),
+            (
+                ResumeStep::LivenessConfirmed {
+                    activation_id: activation,
+                },
+                5_000,
+            ),
+            (
+                ResumeStep::ReadyAcknowledged {
+                    activation_id: activation,
+                },
+                6_000,
+            ),
+        ] {
+            manager.advance_resume(operation.clone(), step, now_b).unwrap();
+        }
         let resumed = manager
-            .complete_resumed(operation, "live-a-2", [3; 32], [4; 32], 60_000)
+            .complete_resumed(operation, activation, 7_000, "live-a-2", [3; 32], [4; 32], 30_000)
             .unwrap();
         assert_eq!(resumed.status, ControllingStatusKind::Connected);
         assert_eq!(

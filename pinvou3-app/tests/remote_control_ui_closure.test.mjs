@@ -39,6 +39,11 @@ test('the B panel maps the backend status enum and shows the pairing code', () =
     panel.includes('controllerDeviceName'),
     'the 主控设备 row must use the controller device name',
   );
+  // E2E-07：刷新状态不得借用「正在停止」的文案。
+  assert.ok(
+    /case 'refreshing':\s*return 'refreshing';/.test(panel),
+    'Refreshing must keep its own copy instead of statusStopping',
+  );
   assert.ok(panel.includes('deviceUnknown'), 'unknown names fall back to i18n copy');
   assert.ok(!/device\.deviceName \|\| copy\.deviceUnknown/.test(panel));
 });

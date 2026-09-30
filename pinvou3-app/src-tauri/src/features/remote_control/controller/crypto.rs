@@ -621,6 +621,11 @@ impl SessionKeys {
         let send_key = derive_business_key(&send_root, &transcript_hash, &binding, send_direction)?;
         let receive_key =
             derive_business_key(&receive_root, &transcript_hash, &binding, receive_direction)?;
+        let resume_confirm = ResumeConfirmCipher {
+            key: resume_secret.clone(),
+            binding: binding.clone(),
+            role: local_role,
+        };
         Ok(RoleCiphers {
             finished_sender: FinishedSender {
                 key: sender_finished,
@@ -646,6 +651,7 @@ impl SessionKeys {
                 replay: ReplayWindow::default(),
             },
             resume_secret: ResumeSecret(resume_secret),
+            resume_confirm,
             liveness_a: LivenessCipher {
                 key: liveness_key(&liveness_root, &transcript_hash, &binding)?,
                 binding,
@@ -682,6 +688,8 @@ pub(crate) struct RoleCiphers {
     pub(crate) send: SendCipher,
     pub(crate) receive: ReceiveCipher,
     pub(crate) resume_secret: ResumeSecret,
+    /// E2E-06：旧上下文里的恢复确认 AEAD（方向无关，角色写在 AAD/明文里）。
+    pub(crate) resume_confirm: ResumeConfirmCipher,
     /// E2E-06：A→B 存活证明的 AEAD（域与业务帧分离）。
     pub(crate) liveness_a: LivenessCipher,
 }
@@ -776,6 +784,149 @@ impl fmt::Debug for ResumeSecret {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("ResumeSecret([REDACTED])")
     }
+}
+
+/// E2E-06：`encrypted_resume_confirm` 的 AEAD（跨角色确认旧 E2E 上下文）。
+///
+/// 恢复握手发生在旧的会话密钥上下文里，因此密钥固定取握手派生的 `resume`
+/// 秘密（两侧同值，与业务/存活密钥域分离），AAD 绑定租约五元组与
+/// `activation_id`；明文另带域标签、`activation_id` 与发送角色，接收侧要求
+/// 发送角色等于期望的对端角色，避免把一端的确认重放成另一端的确认。
+pub(crate) struct ResumeConfirmCipher {
+    key: Zeroizing<[u8; 32]>,
+    binding: LeaseBinding,
+    role: ControllerRole,
+}
+
+impl fmt::Debug for ResumeConfirmCipher {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("ResumeConfirmCipher([REDACTED])")
+    }
+}
+
+const MAX_RESUME_CONFIRM_BYTES: usize = 1024;
+
+impl ResumeConfirmCipher {
+    pub(crate) fn seal(&self, activation_id: &str) -> CryptoResult<Vec<u8>> {
+        if activation_id.is_empty() || activation_id.len() > MAX_BINDING_BYTES {
+            return Err(ControllerCryptoError::new(
+                "invalid_binding",
+                "activation_id",
+            ));
+        }
+        let mut plaintext = Zeroizing::new(b"pinvou-controller-resume-confirm-v1".to_vec());
+        lp(&mut plaintext, activation_id.as_bytes())?;
+        lp(&mut plaintext, self.role.wire())?;
+        let aad = resume_confirm_aad(&self.binding, activation_id)?;
+        let nonce = random_nonce()?;
+        let ciphertext =
+            seal_aead(&self.key, nonce, &aad, &plaintext[..], MAX_RESUME_CONFIRM_BYTES)?;
+        let mut output = nonce.to_vec();
+        output.extend_from_slice(&ciphertext);
+        Ok(output)
+    }
+
+    /// 只做「来源与绑定确认」：成功不返回任何可复用材料。
+    pub(crate) fn open(
+        &self,
+        sender: ControllerRole,
+        activation_id: &str,
+        sealed: &[u8],
+    ) -> CryptoResult<()> {
+        if activation_id.is_empty()
+            || activation_id.len() > MAX_BINDING_BYTES
+            || sealed.len() < AEAD_NONCE_BYTES + AEAD_TAG_BYTES
+            || sealed.len() > MAX_RESUME_CONFIRM_BYTES
+        {
+            return Err(ControllerCryptoError::new(
+                "invalid_ciphertext",
+                "resume_confirm",
+            ));
+        }
+        let mut nonce = [0_u8; AEAD_NONCE_BYTES];
+        nonce.copy_from_slice(&sealed[..AEAD_NONCE_BYTES]);
+        let aad = resume_confirm_aad(&self.binding, activation_id)?;
+        let mut plaintext = open_aead(
+            &self.key,
+            nonce,
+            &aad,
+            &sealed[AEAD_NONCE_BYTES..],
+            MAX_RESUME_CONFIRM_BYTES,
+        )?;
+        let verified = parse_resume_confirm(&plaintext, sender, activation_id);
+        plaintext.zeroize();
+        verified
+    }
+
+    /// 恢复完成后轮换 resume gate 传输指纹的来源：由 resume 密钥、租约五元组、
+    /// `activation_id` 与本端角色派生。两侧各自可算，且与握手期指纹不同。
+    pub(crate) fn fingerprint(&self, activation_id: &str) -> CryptoResult<[u8; 32]> {
+        if activation_id.is_empty() || activation_id.len() > MAX_BINDING_BYTES {
+            return Err(ControllerCryptoError::new(
+                "invalid_binding",
+                "activation_id",
+            ));
+        }
+        let epoch = self.binding.lease_epoch.to_string();
+        let fingerprint = hkdf_expand(
+            &self.key[..],
+            b"pinvou-controller-resume-salt-v1",
+            b"pinvou-controller-resume-fingerprint-v1",
+            &[
+                self.binding.connection_id.as_bytes(),
+                self.binding.controller_lease_id.as_bytes(),
+                epoch.as_bytes(),
+                self.binding.relay_epoch.as_bytes(),
+                self.binding.remote_control_generation.as_bytes(),
+                activation_id.as_bytes(),
+                self.role.wire(),
+            ],
+        )?;
+        Ok(*fingerprint)
+    }
+}
+
+fn resume_confirm_aad(binding: &LeaseBinding, activation_id: &str) -> CryptoResult<Vec<u8>> {
+    let mut output = b"pinvou-controller-resume-confirm-aad-v1".to_vec();
+    let epoch = binding.lease_epoch.to_string();
+    for value in [
+        binding.connection_id.as_bytes(),
+        binding.controller_lease_id.as_bytes(),
+        epoch.as_bytes(),
+        binding.relay_epoch.as_bytes(),
+        binding.remote_control_generation.as_bytes(),
+        activation_id.as_bytes(),
+    ] {
+        lp(&mut output, value)?;
+    }
+    Ok(output)
+}
+
+fn parse_resume_confirm(
+    plaintext: &[u8],
+    sender: ControllerRole,
+    activation_id: &str,
+) -> CryptoResult<()> {
+    const DOMAIN: &[u8] = b"pinvou-controller-resume-confirm-v1";
+    if !plaintext.starts_with(DOMAIN) {
+        return Err(ControllerCryptoError::new(
+            "invalid_resume_confirm",
+            "domain",
+        ));
+    }
+    let mut cursor = DOMAIN.len();
+    let activation = take_lp(plaintext, &mut cursor)?;
+    let role = take_lp(plaintext, &mut cursor)?;
+    if cursor != plaintext.len()
+        || activation != activation_id.as_bytes()
+        || role != sender.wire()
+    {
+        return Err(ControllerCryptoError::new(
+            "invalid_resume_confirm",
+            "binding",
+        ));
+    }
+    Ok(())
 }
 
 pub(crate) struct FinishedSender {
@@ -2462,5 +2613,77 @@ mod tests {
         );
         // 存活密钥与业务密钥域分离：业务密文不能在存活通道解封。
         assert!(b_ciphers.liveness_a.open(b"not-a-liveness-frame").is_err());
+    }
+
+    /// E2E-06：恢复确认必须在旧 E2E 上下文的同一租约里跨角色往返，且对
+    /// activation_id、角色、租约与密文篡改全部失败关闭。
+    #[test]
+    fn resume_confirm_round_trips_and_is_activation_role_and_lease_bound() {
+        let (a_session, b_session) = super::super::test_support::paired_session_keys(
+            HandshakeKeyPair::generate().unwrap(),
+            HandshakeKeyPair::generate().unwrap(),
+            &super::super::test_support::pairing_fixture("relay-key-resume").reservation,
+        );
+        let lease_binding = lease(1);
+        let a_ciphers = a_session
+            .into_role_ciphers(ControllerRole::A, lease_binding.clone())
+            .unwrap();
+        let b_ciphers = b_session
+            .into_role_ciphers(ControllerRole::B, lease_binding)
+            .unwrap();
+
+        let sealed = a_ciphers.resume_confirm.seal("activation-0001").unwrap();
+        b_ciphers
+            .resume_confirm
+            .open(ControllerRole::A, "activation-0001", &sealed)
+            .unwrap();
+        // activation_id 不符失败关闭（另一个恢复候选不能复用同一份确认）。
+        assert!(
+            b_ciphers
+                .resume_confirm
+                .open(ControllerRole::A, "activation-0002", &sealed)
+                .is_err()
+        );
+        // 角色不符失败关闭：B 的确认不能被当成 A 的确认。
+        assert!(
+            b_ciphers
+                .resume_confirm
+                .open(ControllerRole::B, "activation-0001", &sealed)
+                .is_err()
+        );
+        // 密文篡改失败关闭。
+        let mut tampered = sealed.clone();
+        let last = tampered.len() - 1;
+        tampered[last] ^= 0x01;
+        assert!(
+            b_ciphers
+                .resume_confirm
+                .open(ControllerRole::A, "activation-0001", &tampered)
+                .is_err()
+        );
+        // 跨租约失败关闭（AAD 绑定租约五元组）。
+        let (_, foreign_session) = super::super::test_support::paired_session_keys(
+            HandshakeKeyPair::generate().unwrap(),
+            HandshakeKeyPair::generate().unwrap(),
+            &super::super::test_support::pairing_fixture("relay-key-resume-2").reservation,
+        );
+        let foreign = foreign_session
+            .into_role_ciphers(ControllerRole::B, lease(2))
+            .unwrap();
+        assert!(
+            foreign
+                .resume_confirm
+                .open(ControllerRole::A, "activation-0001", &sealed)
+                .is_err()
+        );
+        // 两侧各自派生的轮换指纹互不相同，且都不等于握手期指纹。
+        let a_fingerprint = a_ciphers.resume_confirm.fingerprint("activation-0001").unwrap();
+        let b_fingerprint = b_ciphers.resume_confirm.fingerprint("activation-0001").unwrap();
+        assert_ne!(a_fingerprint, b_fingerprint);
+        assert_ne!(
+            a_fingerprint,
+            a_ciphers.resume_confirm.fingerprint("activation-0002").unwrap()
+        );
+        assert!(!format!("{:?}", a_ciphers.resume_confirm).contains("activation"));
     }
 }
