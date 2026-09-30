@@ -1996,6 +1996,17 @@ impl TaskManager {
                         _ = self.cancel_token.cancelled(), if !self.cancel_token.is_cancelled() => {
                             cancel.cancel();
                         }
+                        // Known starvation shape (deliberate, disclosed
+                        // debt): `biased` polls the event arm before this
+                        // flush arm, and the debounce sleep restarts on
+                        // every loop iteration, so an event stream denser
+                        // than the debounce interval defers persistence
+                        // until the stream pauses or the loop exits (the
+                        // trailing flush below still lands it). Heartbeats
+                        // never arm `dirty`, so the silent-tool tick stream
+                        // cannot starve this; a dense run of unpersisted
+                        // deltas can. Fixing it needs a deadline that
+                        // survives across iterations.
                         _ = sleep(persist_debounce), if dirty => {
                             if let Err(err) = self.flush_task(&task_id).await {
                                 tracing::error!("Failed to debounce-persist task {task_id}: {err}");
