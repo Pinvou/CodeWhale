@@ -532,32 +532,45 @@ pub(crate) fn paths_within_workspace_write_carve_out(
         return false;
     }
     let roots = codewhale_core::normalize_workspace_roots(workspace, workspace_roots);
+    // Round-24 P3 perf: the per-root `.git` stat and canonicalize are
+    // hoisted out of the per-target loop — the old shape re-canonicalized
+    // every root for every absolute target (roots × targets realpath
+    // chains on one judgment). Eligibility (a git work tree that
+    // canonicalizes) is per call, not per target; the allowed-check per
+    // target is untouched.
+    let eligible_git_roots: Vec<(&Path, PathBuf)> = roots
+        .iter()
+        // `.git` may be a directory (normal checkout) or a file (worktree
+        // or submodule); either marks a git work tree.
+        .filter(|root| root.join(".git").symlink_metadata().is_ok())
+        .filter_map(|root| {
+            root.canonicalize()
+                .ok()
+                .map(|canonical| (root.as_path(), canonical))
+        })
+        .collect();
+    let primary_git_canonical = if workspace.join(".git").symlink_metadata().is_ok() {
+        workspace.canonicalize().ok()
+    } else {
+        None
+    };
     paths.iter().all(|raw| {
         if Path::new(raw).is_absolute() {
-            roots
+            eligible_git_roots
                 .iter()
-                .any(|root| carve_out_target_within_root(root, raw))
+                .any(|(root, canonical)| carve_out_target_allowed(root, canonical, raw))
         } else {
             // A relative target is joined onto the primary workspace at
             // execution time, so approval must judge it there: qualifying it
             // through an attached git root would let the write land in the
             // non-git primary tree modal-free and defeat the carve-out's own
             // reviewability rationale.
-            carve_out_target_within_root(workspace, raw)
+            match &primary_git_canonical {
+                Some(canonical) => carve_out_target_allowed(workspace, canonical, raw),
+                None => false,
+            }
         }
     })
-}
-
-fn carve_out_target_within_root(root: &Path, raw: &str) -> bool {
-    // `.git` may be a directory (normal checkout) or a file (worktree or
-    // submodule); either marks a git work tree.
-    if root.join(".git").symlink_metadata().is_err() {
-        return false;
-    }
-    let Ok(root_canonical) = root.canonicalize() else {
-        return false;
-    };
-    carve_out_target_allowed(root, &root_canonical, raw)
 }
 
 fn carve_out_target_allowed(workspace: &Path, workspace_canonical: &Path, raw: &str) -> bool {

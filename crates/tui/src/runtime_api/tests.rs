@@ -5177,10 +5177,9 @@ fn restore_snapshot_endpoint_helper_restores_workspace_files() -> Result<()> {
     let snapshot_id = repo.snapshot("pre-turn:1")?;
     fs::write(workspace.join("a.txt"), "v2")?;
 
-    // The maintenance base moved the membership lookup inside the helper
-    // (id: &str) — call it the base's way.
-    restore_snapshot_for_workspace(&workspace, snapshot_id.as_str())
-        .expect("snapshot restore should succeed");
+    let snapshot =
+        snapshot_for_workspace(&workspace, snapshot_id.as_str()).expect("membership lookup");
+    restore_snapshot_for_workspace(&workspace, &snapshot).expect("snapshot restore should succeed");
     assert_eq!(fs::read_to_string(workspace.join("a.txt"))?, "v1");
     Ok(())
 }
