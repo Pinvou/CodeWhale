@@ -572,6 +572,7 @@ fn concentrate_responses_body_sends_only_documented_fields() {
         &request,
         ApiProvider::Concentrate,
         ApiProvider::Concentrate.as_str(),
+        "fp-concentrate-endpoint",
     );
     let documented = [
         "model",
@@ -625,6 +626,7 @@ fn concentrate_responses_body_sends_only_documented_fields() {
         &request,
         ApiProvider::Openai,
         ApiProvider::Openai.as_str(),
+        "fp-generic-endpoint",
     );
     assert!(
         generic.get("store").is_some()
@@ -656,6 +658,7 @@ fn deepseek_flash_responses_body_uses_stateless_0731_contract() {
         &request,
         ApiProvider::Deepseek,
         ApiProvider::Deepseek.as_str(),
+        "fp-deepseek-endpoint",
     );
 
     assert_eq!(body["model"], "deepseek-v4-flash");
@@ -693,6 +696,7 @@ fn codex_responses_body_omits_the_output_cap_the_backend_rejects() {
         &request,
         ApiProvider::OpenaiCodex,
         ApiProvider::OpenaiCodex.as_str(),
+        "fp-codex-endpoint",
     );
     assert!(
         codex.get("max_output_tokens").is_none(),
@@ -707,6 +711,7 @@ fn codex_responses_body_omits_the_output_cap_the_backend_rejects() {
         &request,
         ApiProvider::Deepseek,
         ApiProvider::Deepseek.as_str(),
+        "fp-deepseek-endpoint",
     );
     assert_eq!(deepseek["max_output_tokens"], json!(4_096));
 }
@@ -714,12 +719,14 @@ fn codex_responses_body_omits_the_output_cap_the_backend_rejects() {
 #[test]
 fn codex_replays_only_exact_model_opaque_reasoning_state() {
     const SENTINEL: &str = "readable private reasoning must not be replayed";
+    const ENDPOINT_FP: &str = "fp-codex-endpoint";
     let state = OpaqueReasoningState {
         provider: ApiProvider::OpenaiCodex.as_str().to_string(),
         api: "openai-responses".to_string(),
         model: "gpt-5.5".to_string(),
         id: Some("rs_opaque".to_string()),
         encrypted_content: "enc_opaque_payload".to_string(),
+        endpoint: Some(ENDPOINT_FP.to_string()),
     };
     let mut request = minimal_responses_request();
     request.messages.insert(
@@ -738,6 +745,7 @@ fn codex_replays_only_exact_model_opaque_reasoning_state() {
         &request,
         ApiProvider::OpenaiCodex,
         ApiProvider::OpenaiCodex.as_str(),
+        ENDPOINT_FP,
     );
     let exact_wire = exact.to_string();
     assert!(!exact_wire.contains(SENTINEL), "{exact}");
@@ -754,6 +762,7 @@ fn codex_replays_only_exact_model_opaque_reasoning_state() {
         &request,
         ApiProvider::OpenaiCodex,
         ApiProvider::OpenaiCodex.as_str(),
+        ENDPOINT_FP,
     );
     assert!(!switched_model.to_string().contains(SENTINEL));
     assert!(
@@ -768,6 +777,7 @@ fn codex_replays_only_exact_model_opaque_reasoning_state() {
         &request,
         ApiProvider::Deepseek,
         ApiProvider::Deepseek.as_str(),
+        ENDPOINT_FP,
     );
     let switched_wire = switched_provider.to_string();
     assert!(!switched_wire.contains(SENTINEL), "{switched_provider}");
@@ -828,6 +838,11 @@ async fn codex_stream_captures_encrypted_reasoning_as_opaque_state() {
     assert_eq!(state.model, "gpt-5.5");
     assert_eq!(state.id.as_deref(), Some("rs_1"));
     assert_eq!(state.encrypted_content, "enc_state");
+    assert_eq!(
+        state.endpoint,
+        Some(codewhale_config::catalog::base_url_fingerprint(&client.base_url)),
+        "the captured state is bound to the capturing endpoint"
+    );
 }
 
 #[test]
@@ -1126,6 +1141,7 @@ fn responses_input_includes_user_role_tool_results() {
         &request,
         ApiProvider::OpenaiCodex,
         ApiProvider::OpenaiCodex.as_str(),
+        "fp-codex-endpoint",
     );
 
     assert_eq!(input[0]["type"], "function_call");
@@ -1166,6 +1182,7 @@ fn responses_input_encodes_tool_call_names() {
         &request,
         ApiProvider::OpenaiCodex,
         ApiProvider::OpenaiCodex.as_str(),
+        "fp-codex-endpoint",
     );
 
     assert_eq!(input[0]["type"], "function_call");
@@ -1297,6 +1314,7 @@ fn user_image_becomes_an_input_image_item() {
         &request,
         ApiProvider::OpenaiCodex,
         ApiProvider::OpenaiCodex.as_str(),
+        "fp-codex-endpoint",
     );
 
     let user = items
@@ -1353,6 +1371,7 @@ fn tool_result_image_becomes_native_function_output_content() {
         &request,
         ApiProvider::OpenaiCodex,
         ApiProvider::OpenaiCodex.as_str(),
+        "fp-codex-endpoint",
     );
     let output = items
         .iter()
@@ -1395,6 +1414,7 @@ fn responses_input_keeps_system_role_history_messages() {
         &request,
         ApiProvider::OpenaiCodex,
         ApiProvider::OpenaiCodex.as_str(),
+        "fp-codex-endpoint",
     );
 
     let system = items
@@ -1493,6 +1513,11 @@ async fn forkguard_custom_responses_stream_captures_encrypted_reasoning_as_opaqu
     assert_eq!(
         state.model, "gpt-5.5",
         "the captured wire model is the replay gate's other key"
+    );
+    assert_eq!(
+        state.endpoint,
+        Some(codewhale_config::catalog::base_url_fingerprint(&client.base_url)),
+        "the captured state is bound to the minting table's endpoint"
     );
 }
 
@@ -1642,19 +1667,23 @@ async fn forkguard_custom_responses_capture_tolerates_missing_or_empty_encrypted
 }
 
 /// The replay gate matches Custom-tagged reasoning state by endpoint-scoped
-/// provider tag and exact model: an exact table+model match replays the
-/// encrypted item, while a model switch, a different table, or a different
-/// provider must not — table A's encrypted reasoning never rides to table B.
+/// provider tag, endpoint fingerprint, and exact model: an exact
+/// table+endpoint+model match replays the encrypted item, while a model
+/// switch, a different table, a different provider, or an edited `base_url`
+/// must not — table A's encrypted reasoning never rides to table B or to
+/// whatever endpoint table A later points at.
 #[test]
 fn forkguard_custom_responses_replays_only_exact_model_opaque_reasoning_state() {
     const SENTINEL: &str = "readable private reasoning must not be replayed";
     const MINTING_TABLE: &str = "custom/pinvou_responses";
+    const MINTING_ENDPOINT_FP: &str = "fp-pinvou-responses-endpoint";
     let state = OpaqueReasoningState {
         provider: MINTING_TABLE.to_string(),
         api: "openai-responses".to_string(),
         model: "gpt-6-sol".to_string(),
         id: Some("rs_custom".to_string()),
         encrypted_content: "enc_custom_payload".to_string(),
+        endpoint: Some(MINTING_ENDPOINT_FP.to_string()),
     };
     let mut request = minimal_responses_request();
     request.model = "gpt-6-sol".to_string();
@@ -1670,7 +1699,12 @@ fn forkguard_custom_responses_replays_only_exact_model_opaque_reasoning_state() 
         },
     );
 
-    let exact = build_responses_body_for_provider(&request, ApiProvider::Custom, MINTING_TABLE);
+    let exact = build_responses_body_for_provider(
+        &request,
+        ApiProvider::Custom,
+        MINTING_TABLE,
+        MINTING_ENDPOINT_FP,
+    );
     let exact_wire = exact.to_string();
     assert!(!exact_wire.contains(SENTINEL), "{exact}");
     assert_eq!(exact.pointer("/input/0/type"), Some(&json!("reasoning")));
@@ -1681,14 +1715,66 @@ fn forkguard_custom_responses_replays_only_exact_model_opaque_reasoning_state() 
         Some(&json!("enc_custom_payload"))
     );
 
+    // Same table and model, but the table's base_url was edited: the tag
+    // alone pins the table NAME, so the endpoint fingerprint must stop the
+    // old endpoint's opaque blobs from riding to the new one.
+    let switched_endpoint = build_responses_body_for_provider(
+        &request,
+        ApiProvider::Custom,
+        MINTING_TABLE,
+        "fp-new-endpoint-after-base-url-edit",
+    );
+    assert!(
+        !switched_endpoint.to_string().contains("enc_custom_payload"),
+        "state must not replay onto a re-pointed endpoint: {switched_endpoint}"
+    );
+    assert!(
+        switched_endpoint
+            .get("input")
+            .and_then(Value::as_array)
+            .is_some_and(|items| items.iter().all(|item| item["type"] != "reasoning")),
+        "{switched_endpoint}"
+    );
+
+    // States minted before endpoint fingerprints existed carry none; they
+    // keep replaying on the tagged table so old sessions survive the upgrade.
+    request.messages[0].content = vec![ContentBlock::Thinking {
+        thinking: SENTINEL.to_string(),
+        signature: None,
+        state: Some(OpaqueReasoningState {
+            provider: MINTING_TABLE.to_string(),
+            api: "openai-responses".to_string(),
+            model: "gpt-6-sol".to_string(),
+            id: Some("rs_legacy".to_string()),
+            encrypted_content: "enc_legacy_payload".to_string(),
+            endpoint: None,
+        }),
+    }];
+    let legacy_state = build_responses_body_for_provider(
+        &request,
+        ApiProvider::Custom,
+        MINTING_TABLE,
+        MINTING_ENDPOINT_FP,
+    );
+    assert_eq!(
+        legacy_state.pointer("/input/0/encrypted_content"),
+        Some(&json!("enc_legacy_payload")),
+        "fingerprint-less legacy state must keep replaying: {legacy_state}"
+    );
+
     // Same model on a DIFFERENT named table: the shared `custom` slug must
     // not match, so table A's opaque state never rides table B's wire.
-    let switched_table =
-        build_responses_body_for_provider(&request, ApiProvider::Custom, "custom/other_relay");
+    let switched_table = build_responses_body_for_provider(
+        &request,
+        ApiProvider::Custom,
+        "custom/other_relay",
+        MINTING_ENDPOINT_FP,
+    );
     let switched_table_wire = switched_table.to_string();
     assert!(!switched_table_wire.contains(SENTINEL));
     assert!(
-        !switched_table_wire.contains("enc_custom_payload"),
+        !switched_table_wire.contains("enc_custom_payload")
+            && !switched_table_wire.contains("enc_legacy_payload"),
         "cross-table replay must drop the foreign encrypted item: {switched_table}"
     );
     assert!(
@@ -1701,7 +1787,6 @@ fn forkguard_custom_responses_replays_only_exact_model_opaque_reasoning_state() 
 
     // State minted by a DIFFERENT provider (Codex) must not replay on a
     // Custom route even with the same model and api shape: the tag is exact.
-    request.model = "gpt-6-sol".to_string();
     request.messages[0].content = vec![ContentBlock::Thinking {
         thinking: SENTINEL.to_string(),
         signature: None,
@@ -1711,10 +1796,15 @@ fn forkguard_custom_responses_replays_only_exact_model_opaque_reasoning_state() 
             model: "gpt-6-sol".to_string(),
             id: Some("rs_codex".to_string()),
             encrypted_content: "enc_codex_payload".to_string(),
+            endpoint: Some(MINTING_ENDPOINT_FP.to_string()),
         }),
     }];
-    let codex_state_on_custom =
-        build_responses_body_for_provider(&request, ApiProvider::Custom, MINTING_TABLE);
+    let codex_state_on_custom = build_responses_body_for_provider(
+        &request,
+        ApiProvider::Custom,
+        MINTING_TABLE,
+        MINTING_ENDPOINT_FP,
+    );
     let codex_state_wire = codex_state_on_custom.to_string();
     assert!(!codex_state_wire.contains(SENTINEL));
     assert!(
@@ -1723,8 +1813,12 @@ fn forkguard_custom_responses_replays_only_exact_model_opaque_reasoning_state() 
     );
 
     request.model = "gpt-6-luna".to_string();
-    let switched_model =
-        build_responses_body_for_provider(&request, ApiProvider::Custom, MINTING_TABLE);
+    let switched_model = build_responses_body_for_provider(
+        &request,
+        ApiProvider::Custom,
+        MINTING_TABLE,
+        MINTING_ENDPOINT_FP,
+    );
     assert!(!switched_model.to_string().contains(SENTINEL));
     assert!(
         switched_model

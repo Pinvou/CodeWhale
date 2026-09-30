@@ -130,6 +130,14 @@ pub struct OpaqueReasoningState {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
     pub encrypted_content: String,
+    /// Fingerprint of the endpoint URL the state was captured from. Fixed
+    /// endpoint providers and states minted before this field existed carry
+    /// `None` (which keeps replaying); a present fingerprint must equal the
+    /// requesting client's, so editing a named Custom table's `base_url`
+    /// stops replaying the previous endpoint's opaque blobs — the provider
+    /// tag alone pins the table name, not the URL behind it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
 }
 
 /// A single content block inside a message.

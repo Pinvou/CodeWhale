@@ -378,6 +378,7 @@ mod adapter_agreement_tests {
             &request(transcript()),
             ApiProvider::Openai,
             ApiProvider::Openai.as_str(),
+            "fp-openai-endpoint",
         );
         assert_eq!(
             roles(&items),

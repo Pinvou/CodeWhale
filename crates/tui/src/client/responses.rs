@@ -38,6 +38,7 @@ pub(super) fn build_responses_body(request: &MessageRequest) -> Value {
         request,
         ApiProvider::OpenaiCodex,
         ApiProvider::OpenaiCodex.as_str(),
+        "fp-codex-endpoint",
     )
 }
 
@@ -52,11 +53,17 @@ pub(super) fn build_responses_body(request: &MessageRequest) -> Value {
 /// [`OpaqueReasoningState`] (see `DeepSeekClient::reasoning_provider_tag`);
 /// the replay gate below only reattaches reasoning items whose state carries
 /// that exact tag, so encrypted reasoning minted by one endpoint — a named
-/// Custom table — is never replayed to another.
+/// Custom table — is never replayed to another. `reasoning_endpoint_fingerprint`
+/// is the same client's endpoint fingerprint (see
+/// `DeepSeekClient::reasoning_endpoint_fingerprint`): the tag pins the table
+/// name, not the URL behind it, so a state captured before the table's
+/// `base_url` was edited stops replaying. States minted before fingerprints
+/// existed carry no endpoint and keep replaying.
 pub(super) fn build_responses_body_for_provider(
     request: &MessageRequest,
     provider: ApiProvider,
     reasoning_provider_tag: &str,
+    reasoning_endpoint_fingerprint: &str,
 ) -> Value {
     let is_deepseek = matches!(provider, ApiProvider::Deepseek | ApiProvider::DeepseekCN);
     // Concentrate documents `model`, `input`, `stream`, `max_output_tokens`,
@@ -103,7 +110,12 @@ pub(super) fn build_responses_body_for_provider(
         .unwrap_or_else(|| "You are a helpful assistant.".to_string());
 
     // Convert messages to Responses input items.
-    let mut input = convert_messages_to_responses_input(request, provider, reasoning_provider_tag);
+    let mut input = convert_messages_to_responses_input(
+        request,
+        provider,
+        reasoning_provider_tag,
+        reasoning_endpoint_fingerprint,
+    );
     if is_concentrate {
         input.insert(
             0,
@@ -181,13 +193,20 @@ impl DeepSeekClient {
         // request carries `include: ["reasoning.encrypted_content"]` — the
         // Codex OAuth backend, OpenCode Zen's Responses roster, and any
         // wire = "responses" Custom table — and replays by the endpoint-scoped
-        // provider tag from `reasoning_provider_tag`. Chat-wire Custom tables
-        // and DeepSeek (plain reasoning_text) stay excluded.
+        // provider tag from `reasoning_provider_tag` plus the endpoint
+        // fingerprint from `reasoning_endpoint_fingerprint`. Chat-wire Custom
+        // tables and DeepSeek (plain reasoning_text) stay excluded.
         let reasoning_origin = (self.api_provider == ApiProvider::OpenaiCodex
             || self.api_provider == ApiProvider::OpencodeZen
             || (self.api_provider == ApiProvider::Custom
                 && self.wire_format == WireFormat::Responses))
-            .then(|| (self.reasoning_provider_tag(), wire_model.clone()));
+            .then(|| {
+                (
+                    self.reasoning_provider_tag(),
+                    self.reasoning_endpoint_fingerprint(),
+                    wire_model.clone(),
+                )
+            });
 
         // The bearer Authorization header is already installed as a default
         // header on both the dual and the HTTP/1.1 twin client (resolved from
@@ -509,7 +528,7 @@ impl DeepSeekClient {
                             }
                             "response.output_item.done" => {
                                 if let Some(idx) = current_block_index {
-                                    if let (Some((provider, model)), Some(item)) =
+                                    if let (Some((provider, endpoint, model)), Some(item)) =
                                         (reasoning_origin.as_ref(), event.get("item"))
                                         && item.get("type").and_then(Value::as_str)
                                             == Some("reasoning")
@@ -530,6 +549,7 @@ impl DeepSeekClient {
                                                         .and_then(Value::as_str)
                                                         .map(str::to_string),
                                                     encrypted_content: encrypted_content.to_string(),
+                                                    endpoint: Some(endpoint.clone()),
                                                 },
                                             },
                                         });
@@ -742,6 +762,7 @@ pub(super) fn convert_messages_to_responses_input(
     request: &MessageRequest,
     provider: ApiProvider,
     reasoning_provider_tag: &str,
+    reasoning_endpoint_fingerprint: &str,
 ) -> Vec<Value> {
     let is_deepseek = matches!(provider, ApiProvider::Deepseek | ApiProvider::DeepseekCN);
     let mut items = Vec::new();
@@ -839,10 +860,22 @@ pub(super) fn convert_messages_to_responses_input(
                                 // Endpoint-scoped replay: the tag must match
                                 // the endpoint this request is bound to
                                 // (provider slug, plus the table identity for
-                                // Custom), alongside api shape and exact model.
+                                // Custom), alongside api shape, exact model,
+                                // and the endpoint fingerprint — a table whose
+                                // base_url was edited stops replaying the
+                                // previous endpoint's blobs. States minted
+                                // before fingerprints existed carry none and
+                                // keep replaying.
+                                let endpoint_matches = match &state.endpoint {
+                                    None => true,
+                                    Some(captured) => {
+                                        captured == reasoning_endpoint_fingerprint
+                                    }
+                                };
                                 if state.provider == reasoning_provider_tag
                                     && state.api == "openai-responses"
                                     && state.model == request.model
+                                    && endpoint_matches
                                 {
                                     let mut item = json!({
                                         "type": "reasoning",

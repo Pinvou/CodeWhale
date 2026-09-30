@@ -1447,6 +1447,16 @@ impl DeepSeekClient {
         }
     }
 
+    /// Endpoint fingerprint minted into captured [`OpaqueReasoningState`] and
+    /// required by the replay gate: the tag pins the table name, not the URL
+    /// behind it, so a table whose `base_url` is edited between sessions must
+    /// stop replaying the previous endpoint's opaque blobs. Both capture and
+    /// replay derive this from the same frozen `base_url`, so an unchanged
+    /// endpoint always matches itself.
+    pub(super) fn reasoning_endpoint_fingerprint(&self) -> String {
+        base_url_fingerprint(&self.base_url)
+    }
+
     /// Resolve `model` through the central route resolver and rebuild this
     /// client whenever its exact wire identity, limits, or protocol differs
     /// from the route bound at construction (#5042). `Ok(None)` means the
@@ -2155,6 +2165,7 @@ impl DeepSeekClient {
                     &request,
                     self.api_provider,
                     &self.reasoning_provider_tag(),
+                    &self.reasoning_endpoint_fingerprint(),
                 );
                 let is_codex = self.api_provider == ApiProvider::OpenaiCodex;
                 let url = if is_codex {
@@ -6852,6 +6863,11 @@ mod tests {
         assert_eq!(state.id.as_deref(), Some("rs_zen"));
         assert_eq!(state.encrypted_content, "enc_zen_state");
         assert_eq!(state.model, "gpt-5.5");
+        assert_eq!(
+            state.endpoint,
+            Some(base_url_fingerprint(&client.base_url)),
+            "the captured state is bound to the Zen endpoint"
+        );
     }
 
     #[tokio::test]
