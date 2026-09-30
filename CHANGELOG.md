@@ -84,7 +84,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   re-based root set with the same intake rules as a replacement, instead of
   re-anchoring it tolerantly (a persisted entry that becomes an ancestor of
   the new primary errors rather than widening the row).
-- The `/cd` receipt for a moved-away directory changed severity from a
+- The `/workspace` receipt for a moved-away directory changed severity from a
   passive notice to a typed warning, and its guard widened to every
   workspace swap lane.
 - The cached-resume path no longer bumps `archived_at` (the preserve arm
@@ -101,9 +101,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A worktree child session's exec lane no longer inherits the parent
   session's writable roots: the lane is re-derived at spawn and at resume
   from the child's own workspace.
-- Session failure diagnostics collect candidate string fields verbatim: the
-  classifier no longer trims surrounding whitespace before matching (this
-  PR's change; base v0.9.12 carries the trim).
+- Deny rules now match raw (untrimmed) collected values, narrowing what
+  they deny: the plan-time file-tool operand collector is
+  `path_param_value` (`tools/file.rs`; the round-22 replacement for
+  `engine.rs::string_field`), which returns the `path` parameter verbatim —
+  alias spellings included, surrounding whitespace never trimmed — and both
+  the ask/deny-rule matcher (`file_tool_permission_paths`) and Auto-Review
+  (`file_write_target_paths`) feed that operand to the policy checks.
 
 ### Removed
 
