@@ -1,0 +1,136 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pinvou.com/schemas/remote-control-release-evidence-v1.json",
+  "title": "Pinvou Windows dual-device remote-control release evidence",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "version", "commit_sha", "provenance", "attestations", "relay", "legacy_relay", "driver", "installers", "machines", "started_at", "finished_at", "monotonic_start_ms", "monotonic_end_ms", "journeys", "artifacts", "gates"],
+  "properties": {
+    "schema": { "const": "pinvou-remote-control-release-evidence" },
+    "version": { "const": 1 },
+    "commit_sha": { "$ref": "#/$defs/sha1" },
+    "provenance": {
+      "type": "object", "additionalProperties": false,
+      "required": ["kind", "orchestrator", "source_commit_sha", "synthetic", "node_version", "node_sha256", "node_artifact_path", "node_authenticode_thumbprint", "node_publisher"],
+      "properties": { "kind": { "const": "physical-dual-windows" }, "orchestrator": { "const": "pinvou-windows-e2e-v1" }, "source_commit_sha": { "$ref": "#/$defs/sha1" }, "synthetic": { "const": false }, "node_version": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:\\.[0-9]+)?$" }, "node_sha256": { "$ref": "#/$defs/sha256" }, "node_artifact_path": { "$ref": "#/$defs/artifactPath" }, "node_authenticode_thumbprint": { "type": "string", "pattern": "^[A-F0-9]{40,64}$" }, "node_publisher": { "$ref": "#/$defs/publisher" } }
+    },
+    "attestations": {
+      "type": "array", "minItems": 3, "maxItems": 3,
+      "items": { "type": "object", "additionalProperties": false,
+      "required": ["role", "role_policy_sha256", "identity", "algorithm", "public_key_spki_pem", "public_key_sha256", "run_nonce", "provider", "key_id", "non_exportable", "acl_attestation_sha256", "provider_measurement_sha256", "provider_vendor", "provider_root_certificate_sha256", "provider_verifier_certificate_sha256", "provider_attestation_artifact_sha256"],
+      "properties": {
+        "role": { "enum": ["orchestrator", "A", "B"] }, "role_policy_sha256": { "$ref": "#/$defs/sha256" },
+        "identity": { "enum": ["production", "test"] }, "algorithm": { "const": "ed25519" },
+        "public_key_spki_pem": { "type": "string", "pattern": "^-----BEGIN PUBLIC KEY-----[\\s\\S]+-----END PUBLIC KEY-----\\n?$" },
+        "public_key_sha256": { "$ref": "#/$defs/sha256" }, "run_nonce": { "$ref": "#/$defs/sha256" },
+        "provider": { "const": "remote_signing_service" },
+        "key_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]{2,127}$" },
+        "non_exportable": { "const": true },
+        "acl_attestation_sha256": { "$ref": "#/$defs/sha256" },
+        "provider_measurement_sha256": { "$ref": "#/$defs/sha256" },
+        "provider_vendor": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9 ._-]{1,63}$" },
+        "provider_root_certificate_sha256": { "$ref": "#/$defs/sha256" },
+        "provider_verifier_certificate_sha256": { "$ref": "#/$defs/sha256" },
+        "provider_attestation_artifact_sha256": { "$ref": "#/$defs/sha256" }
+      }}
+    },
+    "relay": {
+      "type": "object", "additionalProperties": false,
+      "required": ["version", "config_fingerprint", "public_origin_digest", "registry_coverage_percent", "production_equivalent", "enrollment_deployment"],
+      "properties": {
+        "version": { "type": "string", "pattern": "^[A-Za-z0-9._+-]{1,64}$" },
+        "config_fingerprint": { "$ref": "#/$defs/sha256" },
+        "public_origin_digest": { "$ref": "#/$defs/sha256" },
+        "registry_coverage_percent": { "const": 100 },
+        "production_equivalent": { "const": true },
+        "enrollment_deployment": { "enum": ["official", "self_hosted"] }
+      }
+    },
+    "legacy_relay": { "$ref": "#/$defs/legacyRelay" },
+    "driver": { "$ref": "#/$defs/driver" },
+    "installers": { "type": "array", "minItems": 2, "maxItems": 2, "items": { "$ref": "#/$defs/installer" } },
+    "machines": { "type": "array", "minItems": 2, "maxItems": 2, "items": { "$ref": "#/$defs/machine" } },
+    "started_at": { "$ref": "#/$defs/timestamp" },
+    "finished_at": { "$ref": "#/$defs/timestamp" },
+    "monotonic_start_ms": { "$ref": "#/$defs/monotonic" },
+    "monotonic_end_ms": { "$ref": "#/$defs/monotonic" },
+    "journeys": { "type": "array", "minItems": 27, "maxItems": 27, "items": { "$ref": "#/$defs/journey" } },
+    "artifacts": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/artifact" } },
+    "gates": {
+      "type": "object", "additionalProperties": false,
+      "required": ["feature_flag_off", "sensitive_scan", "telemetry_thresholds", "registry_coverage", "rollback_preflight", "ui_smoke"],
+      "properties": {
+        "feature_flag_off": { "$ref": "#/$defs/gate" }, "sensitive_scan": { "$ref": "#/$defs/gate" },
+        "telemetry_thresholds": { "$ref": "#/$defs/gate" }, "registry_coverage": { "$ref": "#/$defs/gate" },
+        "rollback_preflight": { "$ref": "#/$defs/gate" }, "ui_smoke": { "$ref": "#/$defs/gate" }
+      }
+    }
+  },
+  "$defs": {
+    "sha1": { "type": "string", "pattern": "^[a-f0-9]{40}$" },
+    "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "timestamp": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$" },
+    "monotonic": { "type": "integer", "minimum": 0 },
+    "role": { "enum": ["A", "B"] },
+    "installer": {
+      "type": "object", "additionalProperties": false,
+      "required": ["role", "version", "sha256", "authenticode_thumbprint", "publisher", "artifact_path", "attested_subject_name", "sbom_attested_subject_name", "source_commit_sha", "build_provenance_artifact_sha256", "build_attestation_bundle_artifact_sha256", "sbom_artifact_sha256", "sbom_attestation_bundle_artifact_sha256"],
+      "properties": {
+        "role": { "$ref": "#/$defs/role" }, "version": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:\\.[0-9]+)?$" },
+        "sha256": { "$ref": "#/$defs/sha256" }, "authenticode_thumbprint": { "type": "string", "pattern": "^[A-F0-9]{40,64}$" }, "publisher": { "$ref": "#/$defs/publisher" }, "artifact_path": { "$ref": "#/$defs/artifactPath" }, "attested_subject_name": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{1,127}\\.exe$" }, "sbom_attested_subject_name": { "const": "installer-sbom.spdx.json" },
+        "source_commit_sha": { "$ref": "#/$defs/sha1" }, "build_provenance_artifact_sha256": { "$ref": "#/$defs/sha256" }, "build_attestation_bundle_artifact_sha256": { "$ref": "#/$defs/sha256" }, "sbom_artifact_sha256": { "$ref": "#/$defs/sha256" }, "sbom_attestation_bundle_artifact_sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "driver": {
+      "type": "object", "additionalProperties": false,
+      "required": ["version", "sha256", "authenticode_thumbprint", "publisher", "artifact_path", "source_commit_sha", "attestation_public_key_sha256", "attestation_provider", "attestation_key_id", "private_key_embedded"],
+      "properties": { "version": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:\\.[0-9]+)?$" }, "sha256": { "$ref": "#/$defs/sha256" }, "authenticode_thumbprint": { "type": "string", "pattern": "^[A-F0-9]{40,64}$" }, "publisher": { "$ref": "#/$defs/publisher" }, "artifact_path": { "$ref": "#/$defs/artifactPath" }, "source_commit_sha": { "$ref": "#/$defs/sha1" }, "attestation_public_key_sha256": { "$ref": "#/$defs/sha256" }, "attestation_provider": { "const": "remote_signing_service" }, "attestation_key_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]{2,127}$" }, "private_key_embedded": { "const": false } }
+    },
+    "legacyRelay": {
+      "type": "object", "additionalProperties": false,
+      "required": ["version", "sha256", "artifact_path", "endpoint_inventory_sha256", "gateway_config_sha256", "pid", "listener_host", "listener_port", "route_id", "route_spec_artifact_sha256", "runtime_artifact_sha256", "configuration_artifact_sha256", "probe_artifact_sha256", "bare_v2_artifact_sha256", "restoration_artifact_sha256", "gateway_url_sha256", "request_nonce", "traffic_counter_before", "traffic_counter_after", "gateway_traffic_observed", "response_correlated", "bare_v2_rejected", "route_restored"],
+      "properties": { "version": { "type": "string", "pattern": "^[A-Za-z0-9._+-]{1,64}$" }, "sha256": { "$ref": "#/$defs/sha256" }, "artifact_path": { "$ref": "#/$defs/artifactPath" }, "endpoint_inventory_sha256": { "$ref": "#/$defs/sha256" }, "gateway_config_sha256": { "$ref": "#/$defs/sha256" }, "pid": { "type": "integer", "minimum": 1 }, "listener_host": { "enum": ["127.0.0.1", "::1"] }, "listener_port": { "type": "integer", "minimum": 1, "maximum": 65535 }, "route_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{2,63}$" }, "route_spec_artifact_sha256": { "$ref": "#/$defs/sha256" }, "runtime_artifact_sha256": { "$ref": "#/$defs/sha256" }, "configuration_artifact_sha256": { "$ref": "#/$defs/sha256" }, "probe_artifact_sha256": { "$ref": "#/$defs/sha256" }, "bare_v2_artifact_sha256": { "$ref": "#/$defs/sha256" }, "restoration_artifact_sha256": { "$ref": "#/$defs/sha256" }, "gateway_url_sha256": { "$ref": "#/$defs/sha256" }, "request_nonce": { "$ref": "#/$defs/sha256" }, "traffic_counter_before": { "type": "integer", "minimum": 0 }, "traffic_counter_after": { "type": "integer", "minimum": 1 }, "gateway_traffic_observed": { "const": true }, "response_correlated": { "const": true }, "bare_v2_rejected": { "const": true }, "route_restored": { "const": true } }
+    },
+    "publisher": { "type": "string", "pattern": "^[^\\r\\n]{3,256}$" },
+    "artifactPath": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._/-]{0,255}$" },
+    "machine": {
+      "type": "object", "additionalProperties": false,
+      "required": ["role", "identity_digest", "windows_build"],
+      "properties": { "role": { "$ref": "#/$defs/role" }, "identity_digest": { "$ref": "#/$defs/sha256" }, "windows_build": { "type": "string", "pattern": "^[0-9]{4,6}$" } }
+    },
+    "artifact": {
+      "type": "object", "additionalProperties": false,
+      "required": ["path", "sha256", "kind", "machine_role", "signature"],
+      "properties": { "path": { "$ref": "#/$defs/artifactPath" }, "sha256": { "$ref": "#/$defs/sha256" }, "kind": { "enum": ["trace", "check", "log", "ui-smoke", "rollback", "installer", "driver", "legacy-relay", "toolchain"] }, "machine_role": { "enum": ["A", "B", "orchestrator"] }, "signature": { "type": "string", "pattern": "^[A-Za-z0-9+/]{80,128}={0,2}$" } }
+    },
+    "gate": {
+      "type": "object", "additionalProperties": false,
+      "required": ["result", "artifact_sha256"],
+      "properties": { "result": { "const": "pass" }, "artifact_sha256": { "$ref": "#/$defs/sha256" } }
+    },
+    "journey": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "result", "started_at", "finished_at", "monotonic_start_ms", "monotonic_end_ms", "trace_sha256", "coordination_digest", "deadline_observation", "checks"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^RC-E2E-0(?:0[1-9]|1[0-9]|2[0-7])$" }, "result": { "const": "pass" },
+        "started_at": { "$ref": "#/$defs/timestamp" }, "finished_at": { "$ref": "#/$defs/timestamp" },
+        "monotonic_start_ms": { "$ref": "#/$defs/monotonic" }, "monotonic_end_ms": { "$ref": "#/$defs/monotonic" },
+        "trace_sha256": { "$ref": "#/$defs/sha256" },
+        "coordination_digest": { "type": ["string", "null"], "pattern": "^[a-f0-9]{64}$" },
+        "deadline_observation": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/deadlineObservation" }] },
+        "checks": { "type": "array", "minItems": 1, "items": { "type": "object", "additionalProperties": false, "required": ["id", "result", "artifact_sha256"], "properties": { "id": { "type": "string", "pattern": "^[a-z][a-z0-9_]{2,63}$" }, "result": { "const": "pass" }, "artifact_sha256": { "$ref": "#/$defs/sha256" } } } }
+      }
+    },
+    "deadlineObservation": {
+      "type": "object", "additionalProperties": false,
+      "required": ["clock", "rtt_ms", "deadline_ms", "terminal_elapsed_ms", "reconnect_extended_deadline", "terminal_state", "watchdog_fired", "task_cancelled", "pending_approvals_rejected", "credentials_revoked", "temp_model_cleaned"],
+      "properties": {
+        "clock": { "const": "monotonic" }, "rtt_ms": { "type": "integer", "minimum": 0, "maximum": 28999 },
+        "deadline_ms": { "type": "integer", "minimum": 1, "maximum": 29000 }, "terminal_elapsed_ms": { "type": "integer", "minimum": 1, "maximum": 29000 },
+        "reconnect_extended_deadline": { "const": false }, "terminal_state": { "const": "peer_unavailable" },
+        "watchdog_fired": { "const": true }, "task_cancelled": { "const": true }, "pending_approvals_rejected": { "const": true },
+        "credentials_revoked": { "const": true }, "temp_model_cleaned": { "const": true }
+      }
+    }
+  }
+}

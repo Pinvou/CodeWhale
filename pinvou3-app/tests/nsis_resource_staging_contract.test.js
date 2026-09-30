@@ -81,7 +81,8 @@ assert.match(stageScript, /Delete \/REBOOTOK/u);
 assert.match(stageScript, /RMDir \/REBOOTOK/u);
 assert.doesNotMatch(stageScript, /RMDir \/r/u);
 assert.match(stageScript, /NSIS staging installer hooks changed after collection/u);
-assert.match(stageScript, /schemaVersion = 2/u);
+assert.match(stageScript, /schemaVersion = 3/u);
+assert.match(stageScript, /files = \$mappingFiles/u);
 assert.match(
   stageScript,
   /NSIS staging config must only remove the original Tauri resource mappings/u,

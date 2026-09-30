@@ -294,12 +294,15 @@ impl RelaySender {
             let Some(frame) = next else {
                 return;
             };
-            if let Err(error) = self.send_serialized(frame).await {
+            if self.send_serialized(frame).await.is_err() {
                 let mut state = self.coalesced_control.lock();
                 state.latest = None;
                 state.worker_running = false;
                 if !self.shutdown.is_cancelled() {
-                    eprintln!("[web-access] coalesced stream reset enqueue failed: {error}");
+                    super::controller::relay_runtime::log_controlled_event(
+                        "relay_reset_enqueue_failed",
+                        "queue_failed",
+                    );
                 }
                 return;
             }
@@ -453,9 +456,9 @@ async fn run_revocation_loop(
                     match message {
                         Ok(Message::Text(text)) => {
                             if inbound_text_too_large(text.len()) {
-                                eprintln!(
-                                    "[web-access] oversized relay revocation frame rejected: {} bytes",
-                                    text.len()
+                                super::controller::relay_runtime::log_controlled_event(
+                                    "relay_frame_oversized",
+                                    "rejected",
                                 );
                                 let _ = write.send(Message::Close(None)).await;
                                 break;
@@ -472,8 +475,11 @@ async fn run_revocation_loop(
                                         return;
                                     }
                                 }
-                                Err(error) => {
-                                    eprintln!("[web-access] relay revocation JSON ignored: {error}")
+                                Err(_) => {
+                                    super::controller::relay_runtime::log_controlled_event(
+                                        "revocation_frame_rejected",
+                                        "rejected",
+                                    )
                                 }
                             }
                         }
@@ -484,8 +490,11 @@ async fn run_revocation_loop(
                         }
                         Ok(Message::Close(_)) => break,
                         Ok(_) => {}
-                        Err(error) => {
-                            eprintln!("[web-access] relay revocation read failed: {error}");
+                        Err(_) => {
+                            super::controller::relay_runtime::log_controlled_event(
+                                "relay_read_failed",
+                                "failed",
+                            );
                             break;
                         }
                     }
@@ -627,7 +636,10 @@ async fn run_loop(
             Err(error) => {
                 request_controller_protocol = true;
                 let message = format!("connect relay failed: {error}");
-                eprintln!("[web-access] {} ({})", message, config.relay_url);
+                super::controller::relay_runtime::log_controlled_event(
+                    "relay_connect_failed",
+                    "failed",
+                );
                 if !send_inbound_until_shutdown(
                     &tx_in,
                     RelayInbound::Connection {
@@ -762,9 +774,12 @@ async fn run_loop(
                                 _ = shutdown.cancelled() => return,
                                 result = write.send(Message::Text(frame.text.clone().into())) => result,
                             };
-                            if let Err(error) = send_result {
+                            if send_result.is_err() {
                                 push_pending_front(&mut pending, frame);
-                                eprintln!("[web-access] relay send failed: {error}");
+                                super::controller::relay_runtime::log_controlled_event(
+                                    "relay_send_failed",
+                                    "send_failed",
+                                );
                                 break;
                             }
                         }
@@ -779,9 +794,9 @@ async fn run_loop(
                     match message {
                         Ok(Message::Text(text)) => {
                             if inbound_text_too_large(text.len()) {
-                                eprintln!(
-                                    "[web-access] oversized relay frame rejected: {} bytes",
-                                    text.len()
+                                super::controller::relay_runtime::log_controlled_event(
+                                    "relay_frame_oversized",
+                                    "rejected",
                                 );
                                 let _ = write.send(Message::Close(None)).await;
                                 break;
@@ -805,7 +820,10 @@ async fn run_loop(
                                         return;
                                     }
                                 }
-                                Err(error) => eprintln!("[web-access] relay JSON ignored: {error}"),
+                                Err(_) => super::controller::relay_runtime::log_controlled_event(
+                                    "relay_frame_rejected",
+                                    "rejected",
+                                ),
                             }
                         }
                         Ok(Message::Ping(bytes)) => {
@@ -818,8 +836,11 @@ async fn run_loop(
                         }
                         Ok(Message::Close(_)) => break,
                         Ok(_) => {}
-                        Err(error) => {
-                            eprintln!("[web-access] relay read failed: {error}");
+                        Err(_) => {
+                            super::controller::relay_runtime::log_controlled_event(
+                                "relay_read_failed",
+                                "failed",
+                            );
                             break;
                         }
                     }

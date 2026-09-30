@@ -32,14 +32,14 @@ pub use persistence::RelaySettingsInfo;
 // Persistent config / RPC ledger / pending revocation / relay settings helpers
 // are pure and stateless; the facade calls them by name.
 use persistence::{
-    acknowledge_pending_revocation, acquire_process_lock, apply_runtime_relay_override,
-    atomic_write_private_json, eligible_pending_revocations, fresh_config, load_config,
-    load_or_initialize_rpc_ledger, load_pending_revocations, load_relay_settings, new_stream_epoch,
-    normalize_relay_address, pairing_info, pending_revocation_ack, pending_revocation_key,
-    persist_config, persist_rpc_ledger, process_lock_path, public_url, queue_pending_revocation,
-    relay_settings_path, remote_public_base_url, remote_relay_ws_url, remove_config,
-    remove_private_file, remove_rpc_ledger, validate_config,
-    RelaySettings, validate_relay_settings,
+    RelaySettings, acknowledge_pending_revocation, acquire_process_lock,
+    apply_runtime_relay_override, atomic_write_private_json, eligible_pending_revocations,
+    fresh_config, load_config, load_or_initialize_rpc_ledger, load_pending_revocations,
+    load_relay_settings, new_stream_epoch, normalize_relay_address, pairing_info,
+    pending_revocation_ack, pending_revocation_key, persist_config, persist_rpc_ledger,
+    process_lock_path, public_url, queue_pending_revocation, relay_settings_path,
+    remote_public_base_url, remote_relay_ws_url, remove_config, remove_private_file,
+    remove_rpc_ledger, validate_config, validate_relay_settings,
 };
 
 // RPC admission, response shaping, scope validation, and the stream/event
@@ -273,7 +273,10 @@ const RUST_FORWARDED_EVENTS: &[&str] = &[
 pub type CodeSessionPredicate = Arc<dyn Fn(&str) -> bool + Send + Sync>;
 
 fn controller_relay_message(value: &Value) -> bool {
-    let kind = value.get("type").and_then(Value::as_str).unwrap_or_default();
+    let kind = value
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
     matches!(
         kind,
         // `desktop_pairing_registered` 是 controller-v1 注册的结果帧：它既不叫
@@ -386,7 +389,8 @@ impl ControllerRelayChannel {
     }
 
     pub fn try_send(&self, message: Value) -> Result<(), String> {
-        self.manager.send_controller_message(&self.generation, message)
+        self.manager
+            .send_controller_message(&self.generation, message)
     }
 
     /// 可克隆的发送句柄（E2E-05）：B 端 worker 之外（例如权威 journal 的旁路）
@@ -895,7 +899,10 @@ impl RemoteControlManager {
         let (policy, policy_error) = match AccessPolicy::load() {
             Ok(policy) => (policy, None),
             Err(error) => {
-                eprintln!("[web-access] {error}");
+                crate::features::remote_control::controller::relay_runtime::log_controlled_event(
+                    "access_policy_load_failed",
+                    "failed",
+                );
                 (AccessPolicy::default(), Some(error))
             }
         };
@@ -933,7 +940,10 @@ impl RemoteControlManager {
     /// endpoint. The endpoint remains the same socket used by WebUI v2; the
     /// Relay's interaction slot, not a second socket, enforces client mutual
     /// exclusion. A controller generation owns exactly one inbound channel.
-    pub async fn start_controller_relay(&self, generation: &str) -> Result<ControllerRelayChannel, String> {
+    pub async fn start_controller_relay(
+        &self,
+        generation: &str,
+    ) -> Result<ControllerRelayChannel, String> {
         let (sender, receiver) = tokio::sync::mpsc::channel::<Value>(128);
         let synthetic_registration;
         {
@@ -1364,8 +1374,11 @@ impl RemoteControlManager {
                                 break;
                             }
                             Ok(_) => {}
-                            Err(error) => {
-                                eprintln!("[web-access] queued revocation JSON ignored: {error}")
+                            Err(_) => {
+                                crate::features::remote_control::controller::relay_runtime::log_controlled_event(
+                                    "revocation_frame_rejected",
+                                    "rejected",
+                                )
                             }
                         }
                     }
@@ -1384,12 +1397,12 @@ impl RemoteControlManager {
     ) {
         let _lifecycle = self.lifecycle.lock();
         if acknowledged {
-            if let Err(error) = acknowledge_pending_revocation(&pending) {
+            if acknowledge_pending_revocation(&pending).is_err() {
                 // Leave the durable entry in place. The next lifecycle replay
                 // will prove the endpoint absent and retry cleanup.
-                eprintln!(
-                    "[web-access] persist revocation acknowledgement for {} failed: {error}",
-                    pending.endpoint_id
+                crate::features::remote_control::controller::relay_runtime::log_controlled_event(
+                    "revocation_ack_persist_failed",
+                    "failed",
                 );
             }
         }
@@ -2014,8 +2027,14 @@ impl RemoteControlManager {
     }
 
     pub fn forward_local_event(&self, event: &str, payload: Value) {
-        if let Err(error) = self.publish_event_inner(event, payload, EventSource::Rust) {
-            eprintln!("[web-access] forward {event} failed: {error}");
+        if self
+            .publish_event_inner(event, payload, EventSource::Rust)
+            .is_err()
+        {
+            crate::features::remote_control::controller::relay_runtime::log_controlled_event(
+                "local_event_forward_failed",
+                "failed",
+            );
         }
     }
 
@@ -2237,8 +2256,11 @@ impl RemoteControlManager {
                 match inbound {
                     RelayInbound::Message(text) => match serde_json::from_str::<Value>(&text) {
                         Ok(value) => manager.handle_relay_message(value),
-                        Err(error) => {
-                            eprintln!("[web-access] queued relay JSON ignored: {error}")
+                        Err(_) => {
+                            crate::features::remote_control::controller::relay_runtime::log_controlled_event(
+                                "relay_message_rejected",
+                                "rejected",
+                            )
                         }
                     },
                     RelayInbound::Connection {
@@ -2302,8 +2324,7 @@ impl RemoteControlManager {
         // misclassifying them as legacy broadcast messages.
         if controller_relay_message(&value)
             && (endpoint_id.is_empty()
-                || value.get("type").and_then(Value::as_str)
-                    != Some("desktop_endpoint_registered"))
+                || value.get("type").and_then(Value::as_str) != Some("desktop_endpoint_registered"))
         {
             if value.get("type").and_then(Value::as_str) == Some("encrypted_frame")
                 && value.get("payload_kind").and_then(Value::as_str) == Some("task_submit")
@@ -2484,11 +2505,17 @@ impl RemoteControlManager {
         if let Some(endpoint) = revoked {
             let _ = endpoint.sender.try_send(RelayOutbound::Shutdown);
         }
-        if let Err(error) = remove_config() {
-            eprintln!("[web-access] remove revoked config failed: {error}");
+        if remove_config().is_err() {
+            crate::features::remote_control::controller::relay_runtime::log_controlled_event(
+                "revoked_config_remove_failed",
+                "failed",
+            );
         }
-        if let Err(error) = remove_rpc_ledger() {
-            eprintln!("[web-access] remove revoked RPC ledger failed: {error}");
+        if remove_rpc_ledger().is_err() {
+            crate::features::remote_control::controller::relay_runtime::log_controlled_event(
+                "revoked_ledger_remove_failed",
+                "failed",
+            );
         }
         self.emit_status();
     }

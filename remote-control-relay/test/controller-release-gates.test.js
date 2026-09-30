@@ -1,77 +1,100 @@
 "use strict";
 
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { fileURLToPath } from "node:url";
 import test from "node:test";
-
-// DEV-25：把发布/回滚门禁固化成可执行断言，避免 runbook 与代码漂移。
-// 这里只做静态事实校验 + 关键约束存在性检查，真实双机旅程仍需人工执行。
+import { buildReleaseSubprocessEnvironment, validateTrustedGh } from "../scripts/controller-release-gate.mjs";
 
 const read = (relative) => readFileSync(new URL(`../${relative}`, import.meta.url), "utf8");
 const runbook = read("../docs/Windows双端远程控制发布与回滚.md");
-const migrationHandler = read("enrollment-migration-handler.js");
-const registry = read("enrollment-registry.js");
-const gateway = read("enrollment-gateway.js");
-const nginxGateway = read("nginx-enrollment-gateway.conf");
+const checklist = read("../docs/Windows双端远程控制双机演练清单.md");
 
-test("runbook enumerates every required section", () => {
-  for (const heading of [
-    "## 1. 发布前置门禁",
-    "## 2. 灰度步骤",
-    "## 3. 真实双机 E2E 旅程",
-    "## 4. 监控与阈值",
-    "## 5. 回滚",
-    "## 6. 残余风险与声明",
-  ]) {
-    assert.ok(runbook.includes(heading), `runbook must keep "${heading}"`);
+test("runbook and checklist bind all 27 stable journeys without hidden capabilities", () => {
+  for (let index = 1; index <= 27; index += 1) {
+    const id = `RC-E2E-${String(index).padStart(3, "0")}`;
+    assert.ok(checklist.includes(`\`${id}\``), `checklist must contain ${id}`);
   }
+  assert.match(runbook, /RC-E2E-001.*RC-E2E-027/su);
+  assert.doesNotMatch(checklist, /首版隐藏|blocked\(首版隐藏\)/u);
+  assert.match(runbook, /不声称抵御恶意 Relay 的主动 MITM/u);
+  assert.match(runbook, /受信认证控制面/u);
 });
 
-test("runbook keeps the release gates and evidence commands", () => {
-  for (const command of [
-    "npm --prefix remote-control-relay test",
-    "cargo test --manifest-path pinvou3-app/src-tauri/Cargo.toml remote_control::",
-    "npm --prefix pinvou3-app run build:ui",
-    "npm --prefix pinvou3-app run test:webui",
-    "python scripts/architecture-guard.py",
-    "controller-release-gates.test.js",
-  ]) {
-    assert.ok(runbook.includes(command), `runbook must keep the gate: ${command}`);
-  }
+test("release gate command executes and accepts only the disabled exact flag", () => {
+  const script = fileURLToPath(new URL("../scripts/controller-release-gate.mjs", import.meta.url));
+  const disabled = spawnSync(process.execPath, [script], {
+    encoding: "utf8", env: { ...process.env, PINVOU_DESKTOP_CONTROLLER_ENABLED: "0" },
+  });
+  assert.equal(disabled.status, 0, disabled.stderr);
+  assert.deepEqual(JSON.parse(disabled.stdout), { ok: true, enabled: false, evidence_required: false });
+  const malformed = spawnSync(process.execPath, [script], {
+    encoding: "utf8", env: { ...process.env, PINVOU_DESKTOP_CONTROLLER_ENABLED: "true" },
+  });
+  assert.equal(malformed.status, 1);
+  assert.equal(JSON.parse(malformed.stderr).code, "release_feature_flag_invalid");
+  const missingEvidence = spawnSync(process.execPath, [script], {
+    encoding: "utf8", env: { ...process.env, PINVOU_DESKTOP_CONTROLLER_ENABLED: "1", PINVOU_REMOTE_RELEASE_EVIDENCE: "" },
+  });
+  assert.equal(missingEvidence.status, 1);
+  assert.equal(JSON.parse(missingEvidence.stderr).code, "release_evidence_configuration_missing");
 });
 
-test("rollback never deletes durable enrollment or tombstone state", () => {
-  // The runbook states the invariant; the code must not contain a destructive
-  // rollback path either.
-  assert.ok(runbook.includes("不回退 state schema"));
-  assert.ok(runbook.includes("不删除 registry"));
-  for (const source of [migrationHandler, registry]) {
-    assert.ok(!/deleteAll|clearRegistry|dropRegistry|wipeState/i.test(source));
-  }
-  // A bare v2 rollback (no gateway) must remain impossible.
-  assert.ok(runbook.includes("裸 v2 回滚"));
-  assert.ok(nginxGateway.includes("proxy_pass"), "gateway config must remain a real proxy");
-  assert.ok(gateway.includes("preflight") || gateway.includes("verify"), "gateway must expose a verification path");
+test("release gate executes the real lifecycle sensitive-surface scan", () => {
+  const result = spawnSync(process.execPath, [
+    "--test", "--test-concurrency=1",
+    fileURLToPath(new URL("./controller-sensitive-scan.test.js", import.meta.url)),
+  ], { encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr);
 });
 
-test("the trusted-Relay residual risk stays declared", () => {
-  assert.ok(runbook.includes("不声称抵御恶意 Relay 的主动 MITM"));
-  assert.ok(runbook.includes("受信 Relay"));
+test("release gate passes a purpose-specific environment and never forwards secret material", () => {
+  const source = {
+    PATH: "safe-path",
+    PINVOU_RELEASE_COMMIT_SHA: "a".repeat(40),
+    PINVOU_REMOTE_TELEMETRY_SNAPSHOT_URL: "https://telemetry.example.invalid/snapshot",
+    PINVOU_REMOTE_TELEMETRY_ADMIN_TOKEN_FILE: "/protected/token-file",
+    PINVOU_REMOTE_ENROLLMENT_HMAC_KEY: "must-not-leak",
+    PINVOU_REMOTE_RELAY_SIGNING_PRIVATE_KEY_B64: "must-not-leak",
+    PINVOU_STATS_ADMIN_PASSWORD: "must-not-leak",
+    PINVOU_E2E_ATTESTATION_PRIVATE_KEY: "must-not-leak",
+  };
+  const telemetry = buildReleaseSubprocessEnvironment(source, "telemetry");
+  assert.deepEqual(Object.keys(telemetry).sort(), [
+    "PATH", "PINVOU_RELEASE_COMMIT_SHA", "PINVOU_REMOTE_TELEMETRY_ADMIN_TOKEN_FILE", "PINVOU_REMOTE_TELEMETRY_SNAPSHOT_URL",
+  ]);
+  for (const key of Object.keys(telemetry)) assert.doesNotMatch(key, /(?:PRIVATE_KEY|HMAC_KEY|PASSWORD)$/u);
+  assert.deepEqual(buildReleaseSubprocessEnvironment(source, "test"), { PATH: "safe-path" });
+  assert.throws(() => buildReleaseSubprocessEnvironment(source, "unknown"), /release_subprocess_environment_purpose_invalid/u);
 });
 
-test("the runbook keeps the 18.3 journeys and the risky ones are called out", () => {
-  for (const marker of ["旅程 9～10、19、21", "旅程 13", "旅程 16", "旅程 20"]) {
-    assert.ok(runbook.includes(marker), `runbook must keep ${marker}`);
-  }
-  assert.ok(runbook.includes("24000ms / 19000ms"));
+test("release gate ignores PATH injection and requires the configured absolute gh path", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pinvou-fake-gh-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const fake = join(root, process.platform === "win32" ? "gh.cmd" : "gh");
+  await writeFile(fake, process.platform === "win32" ? "@exit /b 0\r\n" : "#!/bin/sh\nexit 0\n");
+  await assert.rejects(() => validateTrustedGh({ PATH: root, Path: root }), /release_gh_tool_configuration_invalid/u);
+  const fixed = join(root, "protected-gh.exe");
+  await writeFile(fixed, "configured-gh-fixture");
+  assert.equal(await validateTrustedGh({ PATH: root, PINVOU_TRUSTED_GH_PATH: fixed }), fixed);
+  const gateSource = read("scripts/controller-release-gate.mjs");
+  const supplyChainSource = read("scripts/verify-installer-supply-chain.mjs");
+  assert.doesNotMatch(gateSource, /run\(["']gh["']/u);
+  assert.doesNotMatch(supplyChainSource, /spawn\(["']gh["']/u);
+  assert.doesNotMatch(gateSource, /PINVOU_TRUSTED_GH_(?:SHA256|PROVENANCE|SIGNER)/u);
+  assert.match(supplyChainSource, /isAbsolute\(ghBinary/u);
 });
 
-test("telemetry thresholds stay inside the DEV-24 enum", () => {
-  const telemetry = read("controller-telemetry.js");
-  for (const stage of ["claim", "handshake", "liveness", "resume", "task", "attachment"]) {
-    assert.ok(telemetry.includes(`"${stage}"`), `telemetry must keep the ${stage} stage`);
-  }
-  // The runbook may only reference aggregate counters, never identity fields.
-  assert.ok(!/pairing_code\s*[:=]/.test(runbook));
-  assert.ok(!/lease_id\s*[:=]/.test(runbook));
+test("production preflight supports official/self-hosted, feature rollback, TOFU-off and telemetry protection", () => {
+  const preflight = read("scripts/deploy-controller-preflight.mjs");
+  assert.match(preflight, /NODE_ENV: "production"/u);
+  assert.match(preflight, /\["official", "self_hosted"\]/u);
+  assert.match(preflight, /--expect-feature-off/u);
+  assert.match(preflight, /PINVOU_REMOTE_ENROLLMENT_DEVELOPMENT_TOFU: "false"/u);
+  assert.match(preflight, /PINVOU_TELEMETRY_ENROLLMENT_TOKEN/u);
+  assert.match(preflight, /PINVOU_STATS_ADMIN_PASSWORD/u);
 });

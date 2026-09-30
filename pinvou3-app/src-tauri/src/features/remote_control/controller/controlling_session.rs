@@ -1286,7 +1286,8 @@ mod tests {
         response["session_id"] = json!(first.session_id);
         response["controlled_session_id"] = json!("b-session-1");
         response["tools"] = json!([{"tool_id":"tool-1","display_name":"Tool"}]);
-        response["skills"] = json!([{"skill_id":"skill-1","display_name":"Skill","scopes":["chat"]}]);
+        response["skills"] =
+            json!([{"skill_id":"skill-1","display_name":"Skill","scopes":["chat"]}]);
         response["valid_for_ms"] = json!("30000");
         sessions
             .apply_capability_snapshot_for_lease_with_mapping(

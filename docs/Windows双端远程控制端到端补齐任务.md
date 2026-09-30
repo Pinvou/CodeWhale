@@ -2,11 +2,11 @@
 
 > 任务状态：执行中<br>
 > 基线提交：`770a648ab4387f842dd53cee2787027c8949c31b`<br>
-> 核心目标：优先打通 **A 远程控制 B 的普通文本会话**。临时模型、代码模式、附件与成果首版继续由能力开关隐藏，不阻塞普通会话闭环。
+> 核心目标：本文记录早期普通文本闭环过程；当前发布基线已扩展为需求 18.3 的 27 条完整旅程，临时模型、代码模式、权限、附件与成果均是发布必验能力，不能以隐藏或 blocked 代替通过。
 >
 > 进度：E2E-00～E2E-04 完成并审核通过；E2E-05 完成（正文链路 + 缺口恢复 + A 渲染，见第 8 节）；E2E-06 已落地 A 心跳、B 存活证据（直接应答 + Relay 兜底）与双端显式断开，剩余 resume 序列与 B 停止/刷新清理核对（见第 9 节）；E2E-07 已落地双端 UI 闭环与错误码回传，剩余浏览器冒烟与文案细化；E2E-08 待做。
 >
-> **DEV-31 后续收口说明**：本文第 5～11 节保留早期 E2E 提交与审核记录，其中 `RemoteConversationView`、`RemoteHistoryStore`、A 端独立 `tasks/transcript` 和旧 desktop Command/Event 只是历史实现证据，不是当前契约。这些未发布路径不迁移、不兼容；当前契约以需求文档、代码架构和 DEV-31 任务描述为准。
+> **DEV-31/DEV-25 收口说明**：本文第 5～11 节保留早期 E2E 提交与审核记录，其中 `RemoteConversationView`、`RemoteHistoryStore`、A 端独立 `tasks/transcript`、旧 desktop Command/Event 及“隐藏能力”决策只是历史实现证据，不是当前契约。这些未发布路径不迁移、不兼容；当前发布契约以需求文档、代码架构、27 条稳定 journey catalog、发布与回滚文档及双机演练清单为准。
 
 ## 1. 执行规则
 
@@ -18,11 +18,7 @@
    - 定向测试；
    - 架构守卫；
    - 敏感信息与跨generation/lease边界检查。
-4. 本轮遇到产品取舍时采用保守默认值并登记，不中断执行：
-   - 首版普通会话仅开放 B 模型与 `chat` 模式；
-   - 远程普通会话工具审批未闭环前禁用工具；
-   - A 临时模型、代码模式、附件与成果继续隐藏；
-   - 不修改 legacy WebUI v2 wire。
+4. 历史阶段的保守降级只用于分步开发，不构成发布豁免；DEV-25 必须对 B/A 模型、工具审批、附件、成果及 legacy WebUI v2 回归提供真实证据。
 
 ## 2. 任务拆分
 
@@ -85,7 +81,7 @@
 | E2E-05 | 1 | PASS | 普通会话正文 journal 与 A 端 transcript 渲染完成（A 落库/投影、B 终态与正文产出、缺口回放与快照恢复、A 视图渲染）。细节见第 8.3 节。 |
 | E2E-06 | 1 | PASS | liveness / 恢复 / 清理闭环完成：A 心跳与 B watchdog（直接应答优先 + Relay 签名兜底）、双端显式断开、双端 resume 序列接线（A `22929522`，B `5b42e1d8`/`4bfa63e3`/`a345b6a0`）、B 停止/刷新/远端断开的任务与凭证清理端口（`1987dd2e`）。审核发现 2 处 minor 已修复（恢复帧租约绑定、清理 scope 语义，`6e84a097`）。验证：`cargo test remote_control::` 322 通过 / 0 失败；`cargo test remote_control::controller::` 229 通过 / 0 失败；architecture-guard 通过。细节见第 9.5 节。 |
 | E2E-07 | 1 | PASS | 双端 UI 闭环与能力降级完成：B 面板状态映射/连接码/主控设备名三语回落、A 会话窗口自动开会话与加密请求能力快照、发送取消走加密派发、transcript 渲染、A 端命令错误码回传、错误码与刷新状态三语文案（`8510525b`）。验证：6 个前端契约 36 通过 / 0 失败；`build:ui` 通过；`lint:ui` 0 error。发布 blocker：三面 UI 浏览器冒烟未执行（环境受限，已登记）。细节见第 10.3 节。 |
-| E2E-08 | 1 | PASS | 集成回归与发布审核完成：完整旅程集成测试（`5a246985`）、门禁全套复跑与敏感信息扫描、发布缺口按「本轮 blocker / 已隐藏 / 后续排期」分类落进 `Windows双端远程控制发布与回滚.md` 第 7 节（`be913049`）。验证：Relay 58+25、前端 36、Rust `remote_control::` 323 / `controller::` 229、`build:ui`、`lint:ui`、architecture-guard、release-gates 6 条全部通过。发布 blocker：真实双机 21 条旅程与真机断线恢复演练未执行（环境受限，已登记）。细节见第 11.1 节。 |
+| E2E-08 | 1 | 历史 PASS | 当时仅完成普通文本集成回归；不能作为当前发布通过证据。DEV-25 现要求真实双 Windows 27 条旅程、真实 UI smoke、registry/回滚/监控组合门禁全部通过。细节见发布与回滚文档。 |
 
 ## 4. 已登记决策与本轮已知限制
 
@@ -336,7 +332,7 @@ E2E-04（加密业务帧双向派发）。开工前需先读第 4 节与本节�
 
 ### 10.3 E2E-07 审核记录（轮次 1，结论 PASS，含 1 项发布 blocker）
 
-- 出口核对：「三个 UI 面有可执行行为测试」由 6 个前端契约文件 36 条用例覆盖（`desktop_remote_state`、`connect_remote_device_contract`、`controlled_device_panel_contract`、`remote_control_ui_closure`、`controller_session_intent_contract`、`remote_conversation_contract`），`npm run build:ui` 与 `npm run lint:ui`（0 error）通过；「不可用能力不暴露半通路」由 A 临时模型/代码模式/附件与成果导出按首版开关隐藏、工具审批未闭环前禁用体现，且契约禁止 UI 出现协议字段名。
+- 历史出口核对仅由前端源码契约与构建覆盖；DEV-25 已将真实 Tauri WebView2 CDP 冒烟和完整模型/权限/附件/成果链路提升为发布硬门禁。
 - 本轮修复：`8510525b`（A 端有界错误码与刷新状态的三语文案）。
 - 发布 blocker（环境受限，未执行）：三个 UI 面的**浏览器冒烟**（真实渲染/交互、键盘与焦点、aria-live、倒计时节流）。当前证据是源码契约 + vite 构建；已登记到 `Windows双端远程控制发布与回滚.md` 第 7.1 节，未取得冒烟证据前不得进入灰度。
 - 结论：**REVIEW: PASS**（代码与契约侧）；浏览器冒烟作为发布 blocker 单独登记。
@@ -351,7 +347,7 @@ E2E-04（加密业务帧双向派发）。开工前需先读第 4 节与本节�
 - 已落地提交：`be913049`（门禁证据复跑 + 发布缺口分类）、`5a246985`（完整旅程集成测试）。
 - 目标差异核对：出口「普通文本会话端到端测试通过」由 `full_journey_connect_snapshot_task_text_and_disconnect_drops_stale_frames` 覆盖——连接 → 能力快照（revision 4 落进会话状态）→ A 构造并封帧的普通文本任务（B 解封校验 payload 与正文 `hello from A`）→ B 的 `task_status` 与 `journal_event` 回流并投影为任务/正文事件（`succeeded` + `hello from B`）→ 显式断开（`disconnected` + 业务通道清空）→ 断开后旧 generation 的残留帧不再产生任何投影。分段用例另覆盖 A↔B 真实端口派发（`dual_end_task_round_trip_lands_in_a_side_state`）、缺口回放与快照替换、恢复序列与显式断开。
 - 门禁与安全：Relay 契约 58 + `relay.test.js` 25、前端契约 36、Rust `remote_control::` 323 / `controller::` 229、`build:ui`、`lint:ui`（0 error）、`architecture-guard`、`controller-release-gates` 6 条全部通过；敏感信息扫描仅命中刻意脱敏的测试夹具/哨兵，无真实凭证。
-- 出口「所有剩余缺口明确非本轮 blocker 或已隐藏」：已按 `Windows双端远程控制发布与回滚.md` 第 7 节分类——3 项发布 blocker（真实双机 21 条旅程、三面 UI 浏览器冒烟、真机断线恢复演练，均环境受限未执行）、3 类已隐藏能力、7 项后续排期。
+- 该历史“已隐藏/后续排期”分类已被 DEV-25 废止；当前 27 条稳定旅程和组合门禁缺一项即阻断发布。
 - 审核发现：无 blocker；本轮新增测试未发现缺陷。唯一非阻塞观察：旅程测试中 B 侧的接纳/执行用冻结形状的直接产出替代（真实路径由 DEV-13 用例覆盖），已在测试文档注释中写明。
 - 结论：**REVIEW: PASS**（自动化门禁与集成回归侧）；发布 blocker 以 `Windows双端远程控制发布与回滚.md` 第 7.1 节为准，未取得证据前不得进入灰度。
 - 双端集成测试：在现有同进程双端用例（task_submit/task_status、journal_event、快照、心跳证据）基础上补一条完整旅程（连接 → 能力快照 → 普通文本任务 → 正文回传 → 显式断开），并断言旧 lease/generation 帧在各阶段都被丢弃。
@@ -430,10 +426,11 @@ jsdom 冒烟能复现（本次即由 `test:settings-ui` 的 ① 断言捕获）�
 
 ## 13. 生产打通与端上排障记录（2026-09-20）
 
-### 13.1 生产 controller lane 已启用
+### 13.1 历史试验部署（已废止，禁止作为生产配置）
 
-生产 relay（8787）已部署含 controller-v1 的版本并启用 `PINVOU_DESKTOP_CONTROLLER_ENABLED=1`（`development + TOFU`，安全降级经用户确认），
-配置、密钥、验收与回滚见 `Windows双端远程控制发布与回滚.md` 第 8 节。
+当时曾为端上排障临时启用未迁移 registry 的开发注册模式。DEV-25 已明确废止该安全降级：生产必须使用
+`NODE_ENV=production`、正式 enrollment（官方认领或自托管 allowlist）并关闭 TOFU；覆盖率未达 100%、
+27 条真实双机旅程或 release evidence gate 未通过时，controller lane 必须保持关闭。
 
 ### 13.2 排障中修复的 6 个端上缺陷（全部为客户端，均有提交与回归证据）
 

@@ -5,13 +5,20 @@
   "type": "module",
   "scripts": {
     "start": "node server.js",
-    "test": "node --test --test-concurrency=1 test/*.test.js"
+    "test": "node --test --test-concurrency=1 test/*.test.js",
+    "release:gate": "node scripts/controller-release-gate.mjs",
+    "release:evidence": "node scripts/validate-controller-release-evidence.mjs",
+    "schema:generate": "node scripts/generate-evidence-schema-validator.mjs",
+    "schema:check": "node scripts/generate-evidence-schema-validator.mjs --check"
   },
   "dependencies": {
     "ip2region.js": "3.1.8",
     "ws": "^8.18.0"
   },
   "devDependencies": {
-    "jsdom": "26.1.0"
+    "ajv": "8.20.0",
+    "jsdom": "26.1.0",
+    "minimatch": "^10.0.3",
+    "yaml": "^2.9.0"
   }
 }

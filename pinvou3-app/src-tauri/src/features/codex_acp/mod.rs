@@ -3120,7 +3120,11 @@ impl AcpPool {
         let session_id = session_id.to_string();
         tokio::spawn(async move {
             if runtime
-                .prompt(display_content, prepared.blocks, prepared.display_attachments)
+                .prompt(
+                    display_content,
+                    prepared.blocks,
+                    prepared.display_attachments,
+                )
                 .await
             {
                 pool.handle_outdated_codex_runtime(&session_id).await;
@@ -4066,17 +4070,14 @@ impl AcpPool {
                             request: request_value.clone(),
                         };
                         let (response_tx, response_rx) = oneshot::channel();
-                        pending_for_elicitation
-                            .lock()
-                            .await
-                            .insert(
-                                key.clone(),
-                                PendingElicitation {
-                                    view,
-                                    remote_owner,
-                                    response_tx,
-                                },
-                            );
+                        pending_for_elicitation.lock().await.insert(
+                            key.clone(),
+                            PendingElicitation {
+                                view,
+                                remote_owner,
+                                response_tx,
+                            },
+                        );
                         bridge_for_elicitation.emit(
                             "elicitation_requested",
                             json!({
@@ -4668,9 +4669,7 @@ fn remote_permission_projection(request: &RequestPermissionRequest) -> RemotePer
         .as_ref()
         .and_then(|locations| locations.first())
         .map(|location| location.path.to_string_lossy())
-        .map(|path| {
-            crate::features::remote_control::controller::permission::sanitize_scope(&path)
-        })
+        .map(|path| crate::features::remote_control::controller::permission::sanitize_scope(&path))
         .unwrap_or_else(|| "[REDACTED]".to_owned());
     let preview = request
         .tool_call

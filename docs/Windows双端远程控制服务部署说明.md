@@ -28,7 +28,7 @@ PINVOU_REMOTE_RUNTIME_RELAY_WS_URL = ws://127.0.0.1:8787/pinvou3/remote/ws
 | 项 | 值 |
 |---|---|
 | 监听 | `127.0.0.1:8787`（`PINVOU_REMOTE_HOST=127.0.0.1`），WebSocket 路径 `/pinvou3/remote/ws` |
-| 验证 | `GET /pinvou3/remote/ws` → HTTP 200；Relay 日志出现 `pinvou remote relay listening on http://127.0.0.1:8787 ...` |
+| 验证 | `GET /pinvou3/remote/ws` → HTTP 200；Relay 日志出现不含监听地址的固定事件 `pinvou remote relay listening (protocol=...)` |
 | 进程 | 包装进程 PID 91988，node 服务进程 PID 62020（`-Action Status` 可查） |
 | 日志 | `%LOCALAPPDATA%\Pinvou3\remote-control-selftest\relay.log` |
 | 密钥/状态 | `%LOCALAPPDATA%\Pinvou3\remote-control-selftest\`（Ed25519 签名密钥 + HMAC 材料 + `relay-state\`，禁止提交） |
@@ -57,7 +57,7 @@ PINVOU_REMOTE_RUNTIME_RELAY_WS_URL = ws://127.0.0.1:8787/pinvou3/remote/ws
 | `PINVOU_REMOTE_RELAY_SIGNING_KEY_ID` / `PINVOU_REMOTE_RELAY_SIGNING_PRIVATE_KEY_B64` | Ed25519 PKCS#8 DER base64，签名 pairing transcript |
 | `PINVOU_REMOTE_CONTROLLER_STATE_PATH` / `PINVOU_REMOTE_STATE_PATH` | 新旧状态文件绝对路径，必须不同 |
 | `PINVOU_REMOTE_ALLOWED_PROXY_IPS` / `PINVOU_REMOTE_TRUSTED_PROXY_IPS` | 实际反向代理的 IPv4/IPv6 地址列表；两者必须显式配置且集合完全一致 |
-| 遥测（可选） | enrollment token / device pepper / admin password；未配置即禁用遥测（本机部署即此状态） |
+| 遥测（controller 生产必需） | `PINVOU_TELEMETRY_ENROLLMENT_TOKEN`（至少 24 字符）、`PINVOU_TELEMETRY_DEVICE_PEPPER`（至少 24 字符）、`PINVOU_STATS_ADMIN_PASSWORD`（至少 12 字符）及绝对路径 `PINVOU_TELEMETRY_DATA_DIR`；任一缺失或无效时 controller 部署预检失败，本机仅开发验证可保持禁用 |
 
 客户端侧必须 pin 同一份公钥（原始 32 字节 base64）：`PINVOU_REMOTE_RELAY_SIGNING_KEY_ID` + `PINVOU_REMOTE_RELAY_SIGNING_PUBLIC_KEY_B64`；缺失会以 `relay_trust_unconfigured` 失败关闭。
 
@@ -72,6 +72,8 @@ PINVOU_REMOTE_RUNTIME_RELAY_WS_URL = ws://127.0.0.1:8787/pinvou3/remote/ws
 - [ ] Relay 仅 loopback 监听，且 OS 监听检查无通配/非 loopback 绑定
 - [ ] 匿名 `web_client_join` / `desktop_endpoint_register` 被 gateway 拒绝
 - [ ] 发布文档第 4 节的监控阈值已接入告警（claim/busy、handshake rejected、liveness timeout、resume failed、task conflict、transfer budget）
+- [ ] `operations_admin` 可读取 `/pinvou3/stats/api/overview.desktop_controller`，匿名请求和 `behavior_analyst` 均被拒绝
+- [ ] 合成哨兵对日志、controller 持久文件、抓包/密文和崩溃诊断扫描零命中；失败报告不回显哨兵值
 - [ ] 回滚演练证据：gateway 预检结果、旧 Web 分享链接可用性、关闭 `desktop_remote_control` 后的行为
 
 ## 3. 我需要哪些输入才能代为执行生产部署
@@ -82,7 +84,7 @@ PINVOU_REMOTE_RUNTIME_RELAY_WS_URL = ws://127.0.0.1:8787/pinvou3/remote/ws
 2. 域名与 TLS 证书（或 ACME 签发方式）以及 nginx 落点；
 3. secret 注入方式（secret manager / 环境文件路径），以及上面 2.2 的密钥材料由谁生成（我可以生成候选并只把私钥交给运维）；
 4. registry 状态文件路径与现有 v2 endpoint 清单（迁移输入）；
-5. 是否启用遥测及其凭据。
+5. 生产遥测凭据及其持久目录；controller 生产部署不提供关闭遥测的选项。
 
 拿到上述输入后，我会按 2.1 的顺序执行并逐项产出 2.3 的验收证据。
 
@@ -97,7 +99,7 @@ Windows 双端远控的 controller-v1 lane 部署到云端测试端点。生产 
 |---|---|
 | 实例 | `pinvou-remote-relay-test.service`，`/opt/pinvou-remote-relay-test`，端口 8788 |
 | 状态 | `active`；`curl http://127.0.0.1:8788/pinvou3/remote-test/healthz` → **200** |
-| 协议 | 启动日志：`pinvou remote relay listening on http://0.0.0.0:8788 (protocol=v2+controller-v1, …)` |
+| 协议 | 启动日志：`pinvou remote relay listening (protocol=v2+controller-v1, …)`；监听地址不得写入生产日志 |
 | controller 环境 | `/opt/pinvou-remote-relay-test/controller.env`（0600，`EnvironmentFile=-` 加载）：`development` + `TOFU`、enrollment/pairing HMAC、`PINVOU_REMOTE_RELAY_SIGNING_KEY_ID=relay-test-key-1` |
 | 状态目录 | `/var/lib/pinvou-remote-relay-test/state`（0700，位于代码目录之外，重新部署不丢 tombstone/keyring） |
 | 客户端信任根 | `PINVOU_REMOTE_RELAY_SIGNING_KEY_ID=relay-test-key-1`、`PINVOU_REMOTE_RELAY_SIGNING_PUBLIC_KEY_B64=otRocTSuXfkyfUKA6Gx71zvxII60UdxGK5h/dJ8aOIg=` |
