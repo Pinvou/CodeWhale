@@ -34,6 +34,9 @@ pub(super) fn ensure_chat_session(
         SessionKind::ScheduledRun => Err(format!(
             "{action}({id}): scheduled-run sessions are managed from Scheduled"
         )),
+        SessionKind::RemoteProxy => Err(format!(
+            "{action}({id}): remote sessions require the authenticated remote route"
+        )),
     }
 }
 
@@ -468,6 +471,9 @@ pub async fn delete_session(
                 .ok_or_else(|| "Scheduled task runtime is unavailable".to_string())?;
             scheduled.delete_run_for_session(&id).await
         }
+        SessionKind::RemoteProxy => Err(format!(
+            "delete_session({id}): remote sessions cannot enter local Engine/ACP deletion"
+        )),
     };
     if result.is_ok() {
         pool.forget_session(&id);
