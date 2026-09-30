@@ -94,6 +94,17 @@ Operators must back up the primary and `.bak`
 together while the Relay is stopped or through a later coordinated snapshot
 facility.
 
+If startup reports `relay_state_unavailable`, stop the Relay before touching
+either copy and preserve the complete dedicated controller-state directory for
+audit. Do not start by deleting `.bak` or by choosing the file with the larger
+revision: a newer backup can be only the staged half of a commit that was never
+reported successful. Restore the primary and `.bak` together from the same
+known-good coordinated snapshot, reapply their documented private permissions,
+and validate enrollment before reopening the public route. When no such
+snapshot exists, keep the service failed closed and rebuild authorization with
+the administrator enrollment/migration flow; never adopt one mismatched copy
+automatically.
+
 Every atomic state write snapshots the legacy file and every existing managed
 file identity before replacement. Its transaction ledger also records each
 temporary and retired target inode, then compares the final legacy identity

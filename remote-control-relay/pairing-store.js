@@ -197,10 +197,8 @@ export class PairingStore {
       if (!Number.isSafeInteger(now) || now < 0) fail("pairing_clock_invalid");
       const registrations = snapshot.state.registrations.filter((row) => Number(row.retain_until_ms) > now);
       const retainedPairings = new Set(registrations.map((row) => row.pairing_id).filter(Boolean));
-      const tombstones = snapshot.state.tombstones.map((row) => (
-        Number(row.reuse_after_ms) <= now && !retainedPairings.has(row.pairing_id) && row.code_digests.length > 0
-          ? { ...row, code_digests: [] }
-          : row
+      const tombstones = snapshot.state.tombstones.filter((row) => (
+        Number(row.reuse_after_ms) > now || retainedPairings.has(row.pairing_id)
       ));
       if (registrations.length === snapshot.state.registrations.length
         && tombstones.every((row, index) => row === snapshot.state.tombstones[index])) return;

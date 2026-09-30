@@ -213,14 +213,14 @@ test("pairing store seals collision exhaustion and checks every retained digest 
   await assert.rejects(PairingStore.open({
     stateStore, digestKeyring: keyring("digest-key-2", false), clock: () => 2000,
   }), (error) => error?.code === "pairing_digest_key_unavailable");
+  const oldPairingId = stateStore.value.tombstones[0].pairing_id;
   const compacted = await PairingStore.open({
     stateStore, digestKeyring: keyring("digest-key-2", false), clock: () => 700_000,
     randomBytes: (size) => Buffer.alloc(size, size === 16 ? 0 : 1),
   });
-  const oldPairingId = stateStore.value.tombstones[0].pairing_id;
   assert.equal(compacted.activePairing(oldPairingId), null);
   assert.equal(compacted.findActiveByCode("2222222"), null);
-  assert.equal(stateStore.value.tombstones[0].code_digests.length, 0);
+  assert.equal(stateStore.value.tombstones.length, 0);
   assert.equal(stateStore.value.registrations.length, 0);
   const reused = await compacted.register({
     request: registration({
@@ -233,7 +233,7 @@ test("pairing store seals collision exhaustion and checks every retained digest 
   });
   assert.notEqual(reused.result.pairing_id, oldPairingId);
   assert.equal(compacted.findActiveByCode("2222222").pairing_id, reused.result.pairing_id);
-  assert.equal(stateStore.value.tombstones.length, 2);
+  assert.equal(stateStore.value.tombstones.length, 1);
 });
 
 test("pairing store never returns a code when the durable CAS fails", async () => {
