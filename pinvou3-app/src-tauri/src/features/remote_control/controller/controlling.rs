@@ -1,0 +1,670 @@
+//! Windows controller-device (A) connection owner.
+//!
+//! A keeps the short pairing code and resume token only in memory. Closing the
+//! remote message window is invisible here; only an explicit disconnect or
+//! transport failure clears the live lease context.
+
+use parking_lot::Mutex;
+use serde::Serialize;
+use uuid::Uuid;
+use zeroize::{Zeroize, Zeroizing};
+
+use super::protocol::LeaseContext;
+use super::relay_transport::{ControllerRole, ControllerTransportSender};
+use super::resume::ControllerResumeGate;
+
+const MAX_HISTORY_ENTRIES: usize = 256;
+const MAX_TITLE_CHARS: usize = 120;
+const MAX_DEVICE_NAME_CHARS: usize = 80;
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ControllingStatusKind {
+    Idle,
+    Connecting,
+    SafetyHandshake,
+    Connected,
+    Reconnecting,
+    Disconnected,
+    Error,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(crate) struct ControllerOperation {
+    intent: u64,
+    claim_request_id: String,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(crate) struct ControllingStateError {
+    pub(crate) code: &'static str,
+}
+
+impl ControllingStateError {
+    const fn new(code: &'static str) -> Self {
+        Self { code }
+    }
+}
+
+impl std::fmt::Display for ControllingStateError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.code)
+    }
+}
+
+impl std::error::Error for ControllingStateError {}
+
+type Result<T> = std::result::Result<T, ControllingStateError>;
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum RemoteHistoryStatus {
+    Active,
+    Completed,
+    Failed,
+    Cancelled,
+    Interrupted,
+}
+
+#[derive(Debug, Clone, Serialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RemoteHistoryEntry {
+    history_id: String,
+    title: String,
+    device_display_name: String,
+    status: RemoteHistoryStatus,
+    b_session_reference: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ControllingLeaseInfo {
+    connection_id: String,
+    controller_lease_id: String,
+    lease_epoch: String,
+    relay_epoch: String,
+    remote_control_generation: String,
+}
+
+impl From<LeaseContext> for ControllingLeaseInfo {
+    fn from(value: LeaseContext) -> Self {
+        Self {
+            connection_id: value.connection_id,
+            controller_lease_id: value.controller_lease_id,
+            lease_epoch: value.lease_epoch,
+            relay_epoch: value.relay_epoch,
+            remote_control_generation: value.remote_control_generation,
+        }
+    }
+}
+
+#[derive(Clone, Serialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ControllingStatus {
+    status: ControllingStatusKind,
+    claim_request_id: Option<String>,
+    has_pending_code: bool,
+    device_display_name: Option<String>,
+    lease: Option<ControllingLeaseInfo>,
+    error_code: Option<&'static str>,
+}
+
+impl std::fmt::Debug for ControllingStatus {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ControllingStatus")
+            .field("status", &self.status)
+            .field("claim_request_id", &self.claim_request_id)
+            .field("has_pending_code", &self.has_pending_code)
+            .field("device_display_name", &self.device_display_name)
+            .field("lease", &self.lease)
+            .field("error_code", &self.error_code)
+            .finish()
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct ControllerLease {
+    pub(crate) context: LeaseContext,
+    pub(crate) device_display_name: String,
+    pub(crate) liveness_epoch_a: String,
+    pub(crate) resume_deadline_b: u64,
+    pub(crate) resume_token: [u8; 32],
+    pub(crate) transport_key_fingerprint: [u8; 32],
+}
+
+impl std::fmt::Debug for ControllerLease {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ControllerLease")
+            .field("context", &self.context)
+            .field("device_display_name", &self.device_display_name)
+            .field("liveness_epoch_a", &self.liveness_epoch_a)
+            .field("resume_deadline_b", &self.resume_deadline_b)
+            .field("resume_token", &"[REDACTED]")
+            .field("transport_key_fingerprint", &"[REDACTED]")
+            .finish()
+    }
+}
+
+struct PendingCode {
+    claim_request_id: String,
+    value: Zeroizing<String>,
+}
+
+impl Drop for PendingCode {
+    fn drop(&mut self) {
+        self.value.zeroize();
+    }
+}
+
+struct Inner {
+    phase: ControllingStatusKind,
+    intent: u64,
+    claim_request_id: Option<String>,
+    pending_code: Option<PendingCode>,
+    lease: Option<ControllerLease>,
+    resume_gate: Option<ControllerResumeGate>,
+    transport: Option<ControllerTransportSender>,
+    history: Vec<RemoteHistoryEntry>,
+    error_code: Option<&'static str>,
+}
+
+impl Default for Inner {
+    fn default() -> Self {
+        Self {
+            phase: ControllingStatusKind::Idle,
+            intent: 0,
+            claim_request_id: None,
+            pending_code: None,
+            lease: None,
+            resume_gate: None,
+            transport: None,
+            history: Vec::new(),
+            error_code: None,
+        }
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct ControllingDeviceManager {
+    inner: Mutex<Inner>,
+}
+
+impl ControllingDeviceManager {
+    pub(crate) fn is_supported(&self) -> bool {
+        super::super::platform::desktop_control_supported()
+    }
+
+    pub(crate) fn replace_transport(&self, transport: ControllerTransportSender) {
+        let mut inner = self.inner.lock();
+        if let Some(previous) = inner.transport.replace(transport) {
+            previous.stop();
+        }
+    }
+
+    pub(crate) fn stop(&self) {
+        let mut inner = self.inner.lock();
+        clear_live_context(&mut inner);
+    }
+
+    pub(crate) fn is_running(&self) -> bool {
+        self.inner
+            .lock()
+            .transport
+            .as_ref()
+            .is_some_and(|transport| !transport.is_stopped())
+    }
+
+    pub(crate) fn connect(&self, raw_code: &str) -> Result<ControllerOperation> {
+        let code = normalize_pairing_code(raw_code)?;
+        let mut inner = self.inner.lock();
+        if !matches!(
+            inner.phase,
+            ControllingStatusKind::Idle
+                | ControllingStatusKind::Connecting
+                | ControllingStatusKind::Disconnected
+                | ControllingStatusKind::Error
+        ) {
+            return Err(ControllingStateError::new("controller_already_connecting"));
+        }
+        clear_live_context(&mut inner);
+        inner.intent += 1;
+        let claim_request_id = format!("claim_{}", Uuid::new_v4().simple());
+        inner.claim_request_id = Some(claim_request_id.clone());
+        inner.pending_code = Some(PendingCode {
+            claim_request_id: claim_request_id.clone(),
+            value: Zeroizing::new(code),
+        });
+        inner.phase = ControllingStatusKind::Connecting;
+        inner.error_code = None;
+        Ok(ControllerOperation {
+            intent: inner.intent,
+            claim_request_id,
+        })
+    }
+
+    pub(crate) fn pending_code(&self, operation: ControllerOperation) -> Result<String> {
+        let inner = self.inner.lock();
+        ensure_operation(&inner, &operation)?;
+        inner
+            .pending_code
+            .as_ref()
+            .map(|pending| pending.value.to_string())
+            .ok_or_else(|| ControllingStateError::new("pairing_code_unavailable"))
+    }
+
+    pub(crate) fn complete_reserved(
+        &self,
+        operation: ControllerOperation,
+    ) -> Result<ControllingStatus> {
+        let mut inner = self.inner.lock();
+        ensure_operation(&inner, &operation)?;
+        if inner.phase != ControllingStatusKind::Connecting {
+            return Err(ControllingStateError::new("controller_phase_invalid"));
+        }
+        inner.pending_code = None;
+        inner.phase = ControllingStatusKind::SafetyHandshake;
+        Ok(status_locked(&inner))
+    }
+
+    pub(crate) fn complete_connected(
+        &self,
+        operation: ControllerOperation,
+        lease: ControllerLease,
+    ) -> Result<ControllingStatus> {
+        let device_name = normalize_device_name(&lease.device_display_name)?;
+        let mut inner = self.inner.lock();
+        ensure_operation(&inner, &operation)?;
+        if inner.phase != ControllingStatusKind::SafetyHandshake {
+            return Err(ControllingStateError::new("controller_phase_invalid"));
+        }
+        let gate = ControllerResumeGate::new(
+            ControllerRole::ControllerA,
+            lease.context.clone(),
+            lease.resume_token,
+            lease.transport_key_fingerprint,
+            lease.resume_deadline_b,
+        );
+        inner.resume_gate = Some(gate);
+        inner.lease = Some(ControllerLease {
+            device_display_name: device_name,
+            ..lease
+        });
+        inner.pending_code = None;
+        inner.phase = ControllingStatusKind::Connected;
+        Ok(status_locked(&inner))
+    }
+
+    pub(crate) fn mark_transport_disconnected(&self) -> ControllingStatus {
+        let mut inner = self.inner.lock();
+        if inner.phase == ControllingStatusKind::Connected {
+            let deadline = inner.lease.as_ref().map(|lease| lease.resume_deadline_b);
+            if let Some(gate) = inner.resume_gate.as_mut() {
+                let _ = gate.disconnect(0, deadline);
+            }
+            inner.phase = ControllingStatusKind::Reconnecting;
+        }
+        status_locked(&inner)
+    }
+
+    pub(crate) fn complete_resumed(
+        &self,
+        operation: ControllerOperation,
+        liveness_epoch_a: impl Into<String>,
+        resume_token: [u8; 32],
+        transport_key_fingerprint: [u8; 32],
+        new_deadline_b: u64,
+    ) -> Result<ControllingStatus> {
+        let mut inner = self.inner.lock();
+        ensure_operation(&inner, &operation)?;
+        if inner.phase != ControllingStatusKind::Reconnecting {
+            return Err(ControllingStateError::new("controller_phase_invalid"));
+        }
+        let Some(lease) = inner.lease.clone() else {
+            return Err(ControllingStateError::new("lease_unavailable"));
+        };
+        inner.resume_gate = Some(ControllerResumeGate::new(
+            ControllerRole::ControllerA,
+            lease.context.clone(),
+            resume_token,
+            transport_key_fingerprint,
+            new_deadline_b,
+        ));
+        if let Some(lease) = inner.lease.as_mut() {
+            lease.liveness_epoch_a = liveness_epoch_a.into();
+            lease.resume_deadline_b = new_deadline_b;
+        }
+        inner.phase = ControllingStatusKind::Connected;
+        Ok(status_locked(&inner))
+    }
+
+    pub(crate) fn fail_connection(
+        &self,
+        operation: ControllerOperation,
+        public_error_code: &'static str,
+    ) -> Result<ControllingStatus> {
+        let code = normalize_public_error(public_error_code)?;
+        let mut inner = self.inner.lock();
+        ensure_operation(&inner, &operation)?;
+        clear_live_context(&mut inner);
+        inner.phase = ControllingStatusKind::Error;
+        inner.error_code = Some(code);
+        Ok(status_locked(&inner))
+    }
+
+    pub(crate) fn disconnect(&self) -> ControllingStatus {
+        let mut inner = self.inner.lock();
+        clear_live_context(&mut inner);
+        inner.phase = ControllingStatusKind::Disconnected;
+        inner.error_code = None;
+        status_locked(&inner)
+    }
+
+    pub(crate) fn live_lease(&self) -> Result<LeaseContext> {
+        let inner = self.inner.lock();
+        if inner.phase != ControllingStatusKind::Connected {
+            return Err(ControllingStateError::new("controller_not_connected"));
+        }
+        inner
+            .lease
+            .as_ref()
+            .map(|lease| lease.context.clone())
+            .ok_or_else(|| ControllingStateError::new("controller_not_connected"))
+    }
+
+    pub(crate) fn create_history(
+        &self,
+        title: &str,
+        b_session_reference: Option<&str>,
+    ) -> Result<RemoteHistoryEntry> {
+        let title = title.trim();
+        if title.is_empty() || title.chars().count() > MAX_TITLE_CHARS {
+            return Err(ControllingStateError::new("history_title_invalid"));
+        }
+        if let Some(reference) = b_session_reference {
+            if reference.is_empty() || reference.len() > 128 {
+                return Err(ControllingStateError::new("history_reference_invalid"));
+            }
+        }
+        let mut inner = self.inner.lock();
+        let device_name = inner
+            .lease
+            .as_ref()
+            .map(|lease| lease.device_display_name.clone())
+            .ok_or_else(|| ControllingStateError::new("controller_not_connected"))?;
+        if inner.phase != ControllingStatusKind::Connected {
+            return Err(ControllingStateError::new("controller_not_connected"));
+        }
+        let entry = RemoteHistoryEntry {
+            history_id: format!("history_{}", Uuid::new_v4().simple()),
+            title: title.to_owned(),
+            device_display_name: device_name,
+            status: RemoteHistoryStatus::Active,
+            b_session_reference: b_session_reference.map(str::to_owned),
+        };
+        if inner.history.len() >= MAX_HISTORY_ENTRIES {
+            inner.history.remove(0);
+        }
+        inner.history.push(entry.clone());
+        Ok(entry)
+    }
+
+    pub(crate) fn finish_history(
+        &self,
+        history_id: &str,
+        status: RemoteHistoryStatus,
+    ) -> Result<RemoteHistoryEntry> {
+        let mut inner = self.inner.lock();
+        let entry = inner
+            .history
+            .iter_mut()
+            .find(|entry| entry.history_id == history_id)
+            .ok_or_else(|| ControllingStateError::new("history_not_found"))?;
+        entry.status = status;
+        Ok(entry.clone())
+    }
+
+    pub(crate) fn history(&self) -> Vec<RemoteHistoryEntry> {
+        self.inner.lock().history.clone()
+    }
+
+    pub(crate) fn status(&self) -> ControllingStatus {
+        status_locked(&self.inner.lock())
+    }
+}
+
+impl Drop for ControllingDeviceManager {
+    fn drop(&mut self) {
+        let mut inner = self.inner.lock();
+        clear_live_context(&mut inner);
+    }
+}
+
+pub(crate) fn normalize_pairing_code(raw: &str) -> Result<String> {
+    let mut code = String::with_capacity(7);
+    for character in raw.chars() {
+        match character {
+            ' ' | '-' | '\t' | '\r' | '\n' => continue,
+            'a'..='z' => code.push(character.to_ascii_uppercase()),
+            _ => code.push(character),
+        }
+    }
+    if code.len() != 7
+        || !code.bytes().all(|byte| {
+            (byte.is_ascii_digit() && !matches!(byte, b'0' | b'1'))
+                || matches!(byte, b'A'..=b'H' | b'J'..=b'N' | b'P'..=b'Z')
+        })
+    {
+        return Err(ControllingStateError::new("pairing_code_invalid"));
+    }
+    Ok(code)
+}
+
+fn normalize_device_name(raw: &str) -> Result<String> {
+    let name = raw.trim();
+    if name.is_empty() || name.chars().count() > MAX_DEVICE_NAME_CHARS {
+        return Err(ControllingStateError::new("device_name_invalid"));
+    }
+    Ok(name.to_owned())
+}
+
+fn normalize_public_error(code: &'static str) -> Result<&'static str> {
+    match code {
+        "pairing_code_invalid"
+        | "controller_busy"
+        | "endpoint_offline"
+        | "version_incompatible" => Ok(code),
+        _ => Err(ControllingStateError::new("controller_error_invalid")),
+    }
+}
+
+fn ensure_operation(inner: &Inner, operation: &ControllerOperation) -> Result<()> {
+    if inner.intent != operation.intent
+        || inner.claim_request_id.as_deref() != Some(operation.claim_request_id.as_str())
+    {
+        return Err(ControllingStateError::new("controller_stale_result"));
+    }
+    Ok(())
+}
+
+fn clear_live_context(inner: &mut Inner) {
+    if let Some(transport) = inner.transport.take() {
+        transport.stop();
+    }
+    inner.pending_code = None;
+    inner.lease = None;
+    if let Some(gate) = inner.resume_gate.as_mut() {
+        let _ = gate.terminate("controller_cleanup");
+    }
+    inner.resume_gate = None;
+}
+
+fn status_locked(inner: &Inner) -> ControllingStatus {
+    ControllingStatus {
+        status: inner.phase,
+        claim_request_id: inner.claim_request_id.clone(),
+        has_pending_code: inner.pending_code.is_some(),
+        device_display_name: inner
+            .lease
+            .as_ref()
+            .map(|lease| lease.device_display_name.clone()),
+        lease: inner
+            .lease
+            .as_ref()
+            .filter(|_| inner.phase == ControllingStatusKind::Connected)
+            .map(|lease| lease.context.clone().into()),
+        error_code: inner.error_code,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn lease() -> ControllerLease {
+        ControllerLease {
+            context: LeaseContext {
+                connection_id: "connection-0001".into(),
+                controller_lease_id: "lease-0001".into(),
+                lease_epoch: "1".into(),
+                relay_epoch: "relay-epoch-0001".into(),
+                remote_control_generation: "generation-0001".into(),
+            },
+            device_display_name: " Studio PC ".into(),
+            liveness_epoch_a: "live-a-1".into(),
+            resume_deadline_b: 30_000,
+            resume_token: [1; 32],
+            transport_key_fingerprint: [2; 32],
+        }
+    }
+
+    #[test]
+    fn pairing_code_normalization_and_invalid_characters_fail_closed() {
+        assert_eq!(normalize_pairing_code(" 234-567 8 \t").unwrap(), "2345678");
+        assert_eq!(normalize_pairing_code("abc-defg").unwrap(), "ABCDEFG");
+        for code in [
+            "0123456", "1234567", "234567", "234567I", "234567O", "234/567",
+        ] {
+            assert_eq!(
+                normalize_pairing_code(code).unwrap_err().code,
+                "pairing_code_invalid",
+                "{code}"
+            );
+        }
+    }
+
+    #[test]
+    fn connection_result_is_generation_and_intent_gated() {
+        let manager = ControllingDeviceManager::default();
+        let first = manager.connect("234-4567").unwrap();
+        assert_eq!(manager.pending_code(first.clone()).unwrap(), "2344567");
+        let second = manager.connect("345-6789").unwrap();
+        assert_eq!(
+            manager.complete_reserved(first.clone()).unwrap_err().code,
+            "controller_stale_result"
+        );
+        assert_eq!(
+            manager.complete_reserved(second.clone()).unwrap().status,
+            ControllingStatusKind::SafetyHandshake
+        );
+        let connected = manager.complete_connected(second, lease()).unwrap();
+        assert_eq!(connected.status, ControllingStatusKind::Connected);
+        assert_eq!(connected.device_display_name.as_deref(), Some("Studio PC"));
+        assert_eq!(manager.live_lease().unwrap(), lease().context);
+    }
+
+    #[test]
+    fn public_connection_errors_are_bounded_and_old_code_is_not_retried() {
+        let manager = ControllingDeviceManager::default();
+        let operation = manager.connect("234-4567").unwrap();
+        assert_eq!(
+            manager
+                .fail_connection(operation.clone(), "pairing_code_not_found")
+                .unwrap_err()
+                .code,
+            "controller_error_invalid"
+        );
+        let status = manager
+            .fail_connection(operation, "version_incompatible")
+            .unwrap();
+        assert_eq!(status.status, ControllingStatusKind::Error);
+        assert_eq!(status.error_code, Some("version_incompatible"));
+        assert_eq!(status.has_pending_code, false);
+    }
+
+    #[test]
+    fn explicit_disconnect_closes_live_api_but_history_remains_offline() {
+        let manager = ControllingDeviceManager::default();
+        let operation = manager.connect("234-4567").unwrap();
+        manager.complete_reserved(operation.clone()).unwrap();
+        manager.complete_connected(operation, lease()).unwrap();
+        let history = manager
+            .create_history("Weekly report", Some("session-ref-1"))
+            .unwrap();
+        assert_eq!(history.status, RemoteHistoryStatus::Active);
+
+        let disconnected = manager.disconnect();
+        assert_eq!(disconnected.status, ControllingStatusKind::Disconnected);
+        assert_eq!(disconnected.lease, None);
+        assert_eq!(
+            manager.live_lease().unwrap_err().code,
+            "controller_not_connected"
+        );
+        assert_eq!(
+            manager.create_history("Late", None).unwrap_err().code,
+            "controller_not_connected"
+        );
+        let stored = manager.history();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].title, "Weekly report");
+        assert!(!format!("{stored:?}").contains("2344567"));
+        let finished = manager
+            .finish_history(&history.history_id, RemoteHistoryStatus::Interrupted)
+            .unwrap();
+        assert_eq!(finished.status, RemoteHistoryStatus::Interrupted);
+    }
+
+    #[test]
+    fn transport_disconnect_and_resume_do_not_expose_the_old_token() {
+        let manager = ControllingDeviceManager::default();
+        let operation = manager.connect("234-4567").unwrap();
+        manager.complete_reserved(operation.clone()).unwrap();
+        manager
+            .complete_connected(operation.clone(), lease())
+            .unwrap();
+        assert_eq!(
+            manager.mark_transport_disconnected().status,
+            ControllingStatusKind::Reconnecting
+        );
+        let resumed = manager
+            .complete_resumed(operation, "live-a-2", [3; 32], [4; 32], 60_000)
+            .unwrap();
+        assert_eq!(resumed.status, ControllingStatusKind::Connected);
+        assert_eq!(
+            manager.live_lease().unwrap().controller_lease_id,
+            "lease-0001"
+        );
+    }
+
+    #[test]
+    fn process_restart_uses_an_empty_manager_and_no_stale_operations() {
+        let old = ControllingDeviceManager::default();
+        let operation = old.connect("234-4567").unwrap();
+        old.complete_reserved(operation).unwrap();
+        drop(old);
+        let manager = ControllingDeviceManager::default();
+        assert_eq!(manager.status().status, ControllingStatusKind::Idle);
+        assert_eq!(manager.history(), Vec::new());
+        assert_eq!(
+            manager
+                .complete_reserved(ControllerOperation {
+                    intent: 1,
+                    claim_request_id: "claim_old".into(),
+                })
+                .unwrap_err()
+                .code,
+            "controller_stale_result"
+        );
+    }
+}

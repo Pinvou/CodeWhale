@@ -221,11 +221,27 @@ export class ControllerRouter {
         const result = await hooks.handle(Object.freeze({
           message, socket_identity: socketIdentity, role: peer.role, lease,
         }));
-        for (const delivery of result?.deliveries || []) {
-          const target = delivery.role === peer.role ? peer : this.#counterpart(peer);
-          this.#deliver(target, delivery.message);
+        let committed = null;
+        try {
+          this.#applyPeerUpdates(result?.peer_updates, lease);
+          for (const delivery of result?.deliveries || []) {
+            const target = delivery.role === peer.role ? peer : this.#counterpart(peer);
+            this.#deliver(target, delivery.message);
+          }
+          if (result?.commit) committed = await result.commit();
+          if (committed?.lease) {
+            await Promise.all(this.#hooks.map((candidate) => candidate.onLeaseCreated(committed.lease)));
+          }
+          return result ?? null;
+        } catch (error) {
+          try {
+            await result?.abort?.();
+            await Promise.all(this.#hooks.map((candidate) => candidate.onLeaseTerminated({
+              controller_lease_id: lease.controller_lease_id,
+            })));
+          } catch { /* cleanup failure cannot resurrect an uncertain resume */ }
+          throw error;
         }
-        return result ?? null;
       }
       fail("controller_message_unsupported");
     } catch (error) {
@@ -249,6 +265,32 @@ export class ControllerRouter {
     const counterpart = this.#peers.get(peer.counterpart);
     if (!counterpart || counterpart.counterpart !== peer.socketIdentity) fail("endpoint_offline");
     return counterpart;
+  }
+
+  #applyPeerUpdates(updates, lease) {
+    if (!updates) return;
+    if (!Array.isArray(updates)) fail("controller_peer_updates_invalid");
+    for (const update of updates) {
+      if (!update || !new Set(["A", "B"]).has(update.role)
+        || update.controller_lease_id !== lease.controller_lease_id
+        || typeof update.socket_identity !== "string" || !ID.test(update.socket_identity)) {
+        fail("controller_peer_updates_invalid");
+      }
+      const peer = this.#peers.get(update.socket_identity);
+      if (!peer) fail("endpoint_offline");
+      if (peer.role !== "unknown" && peer.role !== update.role) fail("controller_role_invalid");
+      peer.role = update.role;
+      peer.controllerLeaseId = lease.controller_lease_id;
+      peer.counterpart = update.counterpart ?? null;
+    }
+    for (const update of updates) {
+      if (!update.counterpart) continue;
+      const peer = this.#peers.get(update.socket_identity);
+      const counterpart = this.#peers.get(update.counterpart);
+      if (!peer || !counterpart || counterpart.counterpart !== peer.socketIdentity) {
+        fail("controller_peer_updates_invalid");
+      }
+    }
   }
 
   async removeSocket(socketIdentity) {

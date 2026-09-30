@@ -68,6 +68,10 @@ pub(super) fn host_file_roots() -> Vec<(String, PathBuf)> {
     logical_drive_roots(unsafe { GetLogicalDrives() })
 }
 
+pub(super) fn desktop_control_supported() -> bool {
+    true
+}
+
 pub(super) fn workspace_identity(path: &Path) -> std::io::Result<WorkspaceIdentity> {
     let directory = OpenOptions::new()
         .access_mode(FILE_GENERIC_READ)
@@ -111,6 +115,11 @@ pub(super) fn private_file_is_restricted(path: &Path) -> std::io::Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn windows_declares_desktop_control_supported() {
+        assert!(desktop_control_supported());
+    }
 
     #[test]
     fn logical_drive_mask_maps_to_ordered_roots() {
