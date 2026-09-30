@@ -1492,6 +1492,10 @@ impl CommandSkillGroupContext for FakeSkillGroup {
         }
     }
 
+    fn restore_covers_primary_only(&self) -> bool {
+        false
+    }
+
     fn approval_state(&self) -> CommandApprovalState {
         self.approval
     }

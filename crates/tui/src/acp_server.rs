@@ -700,6 +700,7 @@ fn prepare_acp_tool_admission(
         &call.name,
         &prepared.input,
         workspace,
+        &registry.context().workspace_roots,
         approval_mode,
     )
     .or_else(|| {
@@ -708,6 +709,7 @@ fn prepare_acp_tool_admission(
             &call.name,
             &prepared.input,
             workspace,
+            &registry.context().workspace_roots,
             approval_mode,
         )
     });
@@ -732,6 +734,7 @@ fn prepare_acp_tool_admission(
         approval_mode,
         crate::config::is_workspace_trusted(workspace),
         Some(workspace),
+        &registry.context().workspace_roots,
     );
     let (auto_review, _audit) =
         auto_review_plan_decision_for_context(&config.auto_review_policy(), &review_context);
@@ -746,9 +749,12 @@ fn prepare_acp_tool_admission(
         }
     }
 
-    if let Some(repo_law) =
-        crate::repo_law::repo_law_plan_decision(workspace, &call.name, &prepared.input)
-    {
+    if let Some(repo_law) = crate::repo_law::repo_law_plan_decision(
+        workspace,
+        &registry.context().workspace_roots,
+        &call.name,
+        &prepared.input,
+    ) {
         match repo_law {
             crate::repo_law::RepoLawPlanDecision::ForcePrompt(reason) => {
                 permission_reason = Some(reason);
@@ -1395,6 +1401,11 @@ struct AcpServer {
 
 struct AcpSession {
     cwd: PathBuf,
+    /// Accessible roots carried beside the session's primary `cwd`. ACP shares
+    /// the durable session store, so a session created by the TUI or the
+    /// Runtime API can arrive multi-root; the registry built over it must see
+    /// the same set or writes the session legitimately held fail here.
+    workspace_roots: Vec<PathBuf>,
     messages: Vec<Message>,
     config: Config,
     model: String,
@@ -1491,15 +1502,24 @@ impl AcpServer {
     }
 
     fn new_session(&mut self, params: Value) -> std::result::Result<Value, AcpError> {
-        let cwd = params
-            .get("cwd")
-            .and_then(Value::as_str)
-            .map(PathBuf::from)
-            .unwrap_or_else(|| self.default_cwd.clone());
+        // An explicit empty cwd would build the tool registry over the
+        // vacuous containment root (`starts_with("")` accepts every path);
+        // reject it rather than falling back to the default, so a client
+        // typo cannot silently re-anchor the session.
+        let cwd = match params.get("cwd").and_then(Value::as_str) {
+            Some("") => {
+                return Err(AcpError::invalid_params(
+                    "session/new cwd must not be empty",
+                ));
+            }
+            Some(raw) => PathBuf::from(raw),
+            None => self.default_cwd.clone(),
+        };
         let session_id = format!("codewhale-{}", uuid::Uuid::new_v4());
         let tool_registry = Arc::new(build_acp_tool_registry(
             &self.config,
             &cwd,
+            &[],
             self.client_supports_terminal,
         ));
 
@@ -1518,6 +1538,8 @@ impl AcpServer {
             session_id.clone(),
             AcpSession {
                 cwd,
+                // A fresh ACP session has no durable record to inherit from.
+                workspace_roots: Vec::new(),
                 messages: Vec::new(),
                 config: self.config.clone(),
                 model: self.model.clone(),
@@ -1574,9 +1596,19 @@ impl AcpServer {
             })?;
 
         let cwd = saved.metadata.workspace.clone();
+        if cwd.as_os_str().is_empty() {
+            // A legacy or hand-edited record with an empty workspace would
+            // arm the vacuous containment root for every tool call in the
+            // rehydrated session; refuse to load it.
+            return Err(AcpError::invalid_params(format!(
+                "session {session_id} has an empty workspace"
+            )));
+        }
+        let workspace_roots = saved.metadata.workspace_roots.clone();
         let tool_registry = Arc::new(build_acp_tool_registry(
             &self.config,
             &cwd,
+            &workspace_roots,
             self.client_supports_terminal,
         ));
         let resolved_id = saved.metadata.id.clone();
@@ -1590,6 +1622,7 @@ impl AcpServer {
             resolved_id.clone(),
             AcpSession {
                 cwd,
+                workspace_roots,
                 messages: saved.messages,
                 config: self.config.clone(),
                 model: self.model.clone(),
@@ -1691,6 +1724,7 @@ impl AcpServer {
                 session.tool_registry = Arc::new(build_acp_tool_registry(
                     &session.config,
                     &session.cwd,
+                    &session.workspace_roots,
                     self.client_supports_terminal,
                 ));
             }
@@ -2069,6 +2103,7 @@ fn acp_mode(config: &Config) -> crate::tui::app::AppMode {
 fn build_acp_tool_registry(
     config: &Config,
     workspace: &std::path::Path,
+    workspace_roots: &[std::path::PathBuf],
     client_supports_terminal: bool,
 ) -> ToolRegistry {
     let features = config.features();
@@ -2097,14 +2132,19 @@ fn build_acp_tool_registry(
     } else {
         ShellPolicy::None
     };
+    // The turn environment is materialized over the session's whole root set,
+    // mirroring the engine lane: a resumed multi-root session keeps its
+    // attached roots instead of silently running single-root here.
     let sandbox_policy = crate::core::authority::sandbox_policy_for_turn(
         acp_mode(config),
         crate::tui::approval::ApprovalMode::Suggest,
         config.sandbox_mode.as_deref(),
         workspace,
+        workspace_roots,
         crate::core::authority::SandboxNetworkAccess::from_config(config.sandbox_network_access),
     );
     let mut context = ToolContext::new(workspace)
+        .with_workspace_roots(workspace_roots.to_vec())
         .with_shell_policy(shell_policy)
         .with_elevated_sandbox_policy(sandbox_policy);
     if acp_mode(config) == crate::tui::app::AppMode::Plan {
@@ -2594,8 +2634,22 @@ mod tests {
     /// nothing else, so ACP clients that offer session history could not
     /// enumerate or resume anything. ACP sessions are in-memory and capped;
     /// the durable Codewhale sessions are what "resume" means.
-    #[tokio::test]
-    async fn session_list_and_load_reach_the_durable_codewhale_sessions() {
+    // session/load's first tr() initializes the i18n backend; that serde
+    // load is deeper than the default 2 MiB libtest thread stack. The
+    // product path runs on the 8 MiB main thread, so run the body on an
+    // equivalently sized stack (same pattern as
+    // setup_confirm_toast_names_secret_store_and_global_scope).
+    #[test]
+    fn session_list_and_load_reach_the_durable_codewhale_sessions() {
+        std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(session_list_and_load_reach_the_durable_codewhale_sessions_body)
+            .expect("spawn test thread")
+            .join()
+            .expect("test thread");
+    }
+
+    fn session_list_and_load_reach_the_durable_codewhale_sessions_body() {
         let _guard = crate::test_support::lock_test_env();
         let home = tempfile::TempDir::new().expect("isolated codewhale home");
         let _home_guard =
@@ -2666,6 +2720,166 @@ mod tests {
         assert_eq!(missing.expect_err("unknown session").code, -32602);
         let no_id = server.load_session(json!({}));
         assert_eq!(no_id.expect_err("missing sessionId").code, -32602);
+    }
+
+    // Same big-stack wrapper as
+    // session_list_and_load_reach_the_durable_codewhale_sessions: this load
+    // also reaches session_configuration's first tr().
+    #[test]
+    fn session_load_carries_the_persisted_workspace_roots() {
+        std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(session_load_carries_the_persisted_workspace_roots_body)
+            .expect("spawn test thread")
+            .join()
+            .expect("test thread");
+    }
+
+    fn session_load_carries_the_persisted_workspace_roots_body() {
+        let _guard = crate::test_support::lock_test_env();
+        let home = tempfile::TempDir::new().expect("isolated codewhale home");
+        let _home_guard =
+            crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", home.path().as_os_str());
+
+        let workspace = home.path().join("workspace");
+        let attached = home.path().join("shared");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        std::fs::create_dir_all(&attached).expect("attached root");
+        let mut saved = crate::session_manager::create_saved_session(
+            &[Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text {
+                    text: "multi-root session".to_string(),
+                    cache_control: None,
+                }],
+            }],
+            "deepseek-v4-flash",
+            &workspace,
+            0,
+            None,
+        );
+        saved.metadata.workspace_roots = vec![workspace.clone(), attached.clone()];
+        let saved_id = saved.metadata.id.clone();
+        let manager = crate::session_manager::SessionManager::new(
+            crate::session_manager::default_sessions_dir().expect("sessions dir"),
+        )
+        .expect("session manager");
+        manager.save_session(&saved).expect("save fixture session");
+
+        let mut server = AcpServer::new(
+            Config::default(),
+            "deepseek-v4-flash".to_string(),
+            workspace.clone(),
+        );
+        server
+            .load_session(json!({ "sessionId": saved_id }))
+            .expect("session/load");
+
+        let session = server.sessions.get(&saved_id).expect("loaded session");
+        assert_eq!(
+            session.workspace_roots,
+            vec![workspace.clone(), attached.clone()],
+            "session/load must keep the persisted set on the ACP session"
+        );
+        // The registry the ask/deny checks, repo law, and the auto-review gate
+        // all read is built over that same set; an empty context here is the
+        // silent single-root degradation this lane must not have.
+        assert_eq!(
+            session.tool_registry.context().workspace_roots,
+            vec![workspace.clone(), attached.clone()],
+            "the ACP tool registry must be built over the session's roots"
+        );
+        // The materialized turn environment spans the attached root.
+        let policy = session
+            .tool_registry
+            .context()
+            .elevated_sandbox_policy
+            .as_ref()
+            .expect("sandbox policy materialized at registry build");
+        let writable: Vec<PathBuf> = policy
+            .get_writable_roots(&workspace)
+            .into_iter()
+            .map(|root| root.root)
+            .collect();
+        let attached_canonical = attached.canonicalize().expect("canonical attached");
+        assert!(
+            writable.contains(&attached_canonical),
+            "the attached root must be writable in the ACP turn environment: {writable:?}"
+        );
+    }
+
+    #[test]
+    fn session_new_rejects_empty_cwd() {
+        // Regression pin: `session/new` with `cwd: ""` used to build the
+        // tool registry over the vacuous containment root
+        // (`starts_with("")` accepts every path).
+        let workspace = tempfile::tempdir().unwrap();
+        let mut server = AcpServer::new(
+            Config::default(),
+            "deepseek-v4-flash".into(),
+            workspace.path().into(),
+        );
+        let err = server
+            .new_session(json!({"cwd": ""}))
+            .expect_err("empty cwd must be rejected");
+        assert_eq!(err.code, -32602);
+    }
+
+    // Same big-stack wrapper as
+    // session_list_and_load_reach_the_durable_codewhale_sessions.
+    #[test]
+    fn session_load_rejects_empty_workspace() {
+        std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(session_load_rejects_empty_workspace_body)
+            .expect("spawn test thread")
+            .join()
+            .expect("test thread");
+    }
+
+    fn session_load_rejects_empty_workspace_body() {
+        let _guard = crate::test_support::lock_test_env();
+        let home = tempfile::TempDir::new().expect("isolated codewhale home");
+        let _home_guard =
+            crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", home.path().as_os_str());
+
+        // A legacy or hand-edited record with an empty workspace must not be
+        // rehydrated: its tool registry would arm the vacuous containment
+        // root for every tool call.
+        let saved = crate::session_manager::create_saved_session(
+            &[Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text {
+                    text: "corrupt record".to_string(),
+                    cache_control: None,
+                }],
+            }],
+            "deepseek-v4-flash",
+            &PathBuf::new(),
+            0,
+            None,
+        );
+        let saved_id = saved.metadata.id.clone();
+        let manager = crate::session_manager::SessionManager::new(
+            crate::session_manager::default_sessions_dir().expect("sessions dir"),
+        )
+        .expect("session manager");
+        manager.save_session(&saved).expect("save fixture session");
+
+        let workspace = home.path().join("workspace");
+        let mut server = AcpServer::new(
+            Config::default(),
+            "deepseek-v4-flash".to_string(),
+            workspace.clone(),
+        );
+        let err = server
+            .load_session(json!({ "sessionId": saved_id }))
+            .expect_err("empty saved workspace must be rejected");
+        assert_eq!(err.code, -32602);
+        assert!(
+            !server.sessions.contains_key(&saved_id),
+            "a rejected load must not register the session"
+        );
     }
 
     #[tokio::test]
@@ -3647,7 +3861,7 @@ mod tests {
             allow_shell: Some(true),
             ..Config::default()
         };
-        let registry = build_acp_tool_registry(&config, &workspace, false);
+        let registry = build_acp_tool_registry(&config, &workspace, &[], false);
         assert!(!registry.contains("Bash"));
         assert!(registry.contains("File"));
     }
@@ -3655,7 +3869,7 @@ mod tests {
     #[test]
     fn shell_tool_omitted_without_headless_config_opt_in() {
         let workspace = std::env::temp_dir();
-        let registry = build_acp_tool_registry(&Config::default(), &workspace, true);
+        let registry = build_acp_tool_registry(&Config::default(), &workspace, &[], true);
         assert!(!registry.contains("Bash"));
         assert_eq!(registry.context().shell_policy, ShellPolicy::None);
         assert!(!registry.context().auto_approve);
@@ -3670,7 +3884,7 @@ mod tests {
             sandbox_url: Some("http://127.0.0.1:8080".to_string()),
             ..Config::default()
         };
-        let registry = build_acp_tool_registry(&configured, &workspace, true);
+        let registry = build_acp_tool_registry(&configured, &workspace, &[], true);
         assert!(registry.contains("bash"));
         assert!(registry.context().sandbox_backend.is_some());
 
@@ -3679,7 +3893,7 @@ mod tests {
             sandbox_backend: Some("unsupported-backend".to_string()),
             ..Config::default()
         };
-        let registry = build_acp_tool_registry(&unsupported, &workspace, true);
+        let registry = build_acp_tool_registry(&unsupported, &workspace, &[], true);
         assert!(!registry.contains("bash"));
         assert!(!registry.contains("Bash"));
         assert!(registry.context().sandbox_backend.is_none());
@@ -3697,7 +3911,7 @@ mod tests {
             }),
             ..Config::default()
         };
-        let registry = build_acp_tool_registry(&config, &std::env::temp_dir(), true);
+        let registry = build_acp_tool_registry(&config, &std::env::temp_dir(), &[], true);
         assert!(!registry.contains("bash"));
         assert!(!registry.contains("Bash"));
         assert!(
@@ -3796,7 +4010,7 @@ mod tests {
             allow_shell: Some(true),
             ..Config::default()
         };
-        let registry = build_acp_tool_registry(&config, dir.path(), true);
+        let registry = build_acp_tool_registry(&config, dir.path(), &[], true);
         (dir, registry)
     }
 
@@ -3849,7 +4063,7 @@ mod tests {
             json!({"decision": "deny", "reason": "release gate"}),
             true,
         );
-        let registry = build_acp_tool_registry(&config, dir.path(), false);
+        let registry = build_acp_tool_registry(&config, dir.path(), &[], false);
         let error = prepare_acp_tool_with_hooks(
             &config,
             "test-model",
@@ -3880,7 +4094,7 @@ mod tests {
             }),
             true,
         );
-        let registry = build_acp_tool_registry(&config, dir.path(), false);
+        let registry = build_acp_tool_registry(&config, dir.path(), &[], false);
         let raw = pending_call("File", json!({"action": "read", "path": "safe.txt"}));
         let (_, raw_admission) = prepare_acp_tool_admission(&config, &registry, &raw).unwrap();
         assert_eq!(raw_admission, AcpToolAdmission::Auto);
@@ -4051,6 +4265,45 @@ mod tests {
                 ));
             }
         }
+    }
+
+    #[test]
+    fn acp_admission_repo_law_judges_attached_roots() {
+        // Round-15 pin at the ACP admission layer:
+        // `prepare_acp_tool_admission` must forward the registry's root set
+        // to `repo_law_plan_decision`. A `&[]` mutation at that call site
+        // unloads the attached root's constitution, so the hold below
+        // vanishes with every repo-law unit test (one layer down) still
+        // green.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let attached = tempfile::tempdir().expect("attached root");
+        let law_dir = attached.path().join(".codewhale");
+        std::fs::create_dir_all(&law_dir).unwrap();
+        std::fs::write(
+            law_dir.join("constitution.json"),
+            r#"{
+                "protected_invariants": [
+                    { "text": "Never rewrite the shared wire", "paths": ["wire.rs"], "action": "block" }
+                ]
+            }"#,
+        )
+        .unwrap();
+        let config = Config {
+            allow_shell: Some(true),
+            ..Config::default()
+        };
+        let registry =
+            build_acp_tool_registry(&config, dir.path(), &[attached.path().to_path_buf()], true);
+        let target = attached.path().join("wire.rs");
+        let call = pending_call(
+            "File",
+            json!({"action": "write", "path": target.to_string_lossy(), "content": "new"}),
+        );
+        let (_, admission) = prepare_acp_tool_admission(&config, &registry, &call).unwrap();
+        assert!(matches!(
+            admission,
+            AcpToolAdmission::Block(reason) if reason.contains("Never rewrite the shared wire")
+        ));
     }
 
     #[tokio::test]

@@ -4649,7 +4649,7 @@ mod tests {
             locale: crate::tools::web::contract::CapabilityState::Supported,
             published_date: crate::tools::web::contract::CapabilityState::Unknown,
         };
-        let response = finalize_search_response(query, capabilities.clone(), raw, Instant::now());
+        let response = finalize_search_response(query, capabilities, raw, Instant::now());
         assert!(
             !response.receipt.honored.locale,
             "an ignored locale must not be reported as honored"

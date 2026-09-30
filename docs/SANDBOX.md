@@ -77,8 +77,10 @@ read-only, applied last so they can narrow a policy-writable path) and
 directories are never honored). Missing paths are skipped silently.
 
 That gives the child a read-only root view. For `workspace-write`, every safe,
-existing policy root is mounted read-write: the working directory, configured
-additional roots, `/tmp` and `TMPDIR` unless excluded, and verified Git
+existing policy root is mounted read-write: the working directory, the
+session's configured additional roots (for a multi-root thread this is the
+attached `workspace_roots` beside the primary workspace; for a single-root
+thread none), `/tmp` and `TMPDIR` unless excluded, and verified Git
 worktree metadata roots. Existing `.codewhale` and `.deepseek` descendants are
 remounted read-only after their writable parent. Missing paths, non-directory
 paths, and `/` are not promoted to writable mounts.
