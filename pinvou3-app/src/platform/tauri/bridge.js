@@ -2894,6 +2894,7 @@
       syncVoiceShortcutRecording: syncVoiceShortcutRecording,
       abandonVoiceResult: abandonVoiceResult,
       getVoiceOperationId: voiceFeature.getVoiceOperationId,
+      hasVoiceSubmissionPending: voiceFeature.hasVoiceSubmissionPending,
       beginVoiceSubmission: voiceFeature.beginVoiceSubmission,
       completeVoiceSubmission: voiceFeature.completeVoiceSubmission,
       dismissVoiceInput: voiceFeature.dismissVoiceInput,

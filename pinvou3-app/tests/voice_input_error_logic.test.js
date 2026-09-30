@@ -332,11 +332,11 @@ assert.match(
   /let other_modifier_down = matches!\(key, VoiceShortcutKey::Alt\(_\)\)\s*&& key_down/,
   "the modifier probe must stay gated to Alt key-down events",
 );
-// Cross-window recording mutual exclusion: the trigger target resolves to the recording window first.
+// Cross-window recording mutual exclusion: the trigger target resolves to the recording owner's window first.
 assert.match(
   rustShortcutPlatformSource,
   /resolve_trigger_target\(\s*owner\.as_ref\(\)\.map\(\|owner\| owner\.label\.as_str\(\)\)/,
-  "native voice shortcut trigger must route to the recording window first",
+  "native voice shortcut trigger must route to the recording owner's window first",
 );
 assert.match(
   routerSource,
@@ -358,8 +358,8 @@ assert.match(
 // triggers are unaffected.
 assert.match(
   routerSource,
-  /payload\.route === 'recording' && !recording[\s\S]*?syncVoiceShortcutRecording\(null, payload\.recording_token\)[\s\S]*?return;/,
-  "voice shortcut router must clear a stale native recording registration instead of ghost-starting a recording in a background window",
+  /payload\.route === 'recording'[\s\S]*?voiceInput\.ownershipToken && voiceInput\.ownershipToken !== payload\.recording_token\) return;[\s\S]*?payload\.route === 'recording' && !recording[\s\S]*?syncVoiceShortcutRecording\(null, payload\.recording_token\)[\s\S]*?return;/,
+  "voice shortcut router must reject stale-claim recording events and clear a stale native registration instead of ghost-starting a recording in a background window",
 );
 // Native events are only emitted when the Rust-side toggle is on (the hook
 // entry short-circuits on !shortcut_enabled()), so the authoritative gate has
@@ -575,11 +575,12 @@ assert.doesNotMatch(
   /mode === "edit" \? bt\("voiceEditApplied"\)/,
   "edit writeback only opens a preview, so the applied notice must not fire at writeback time",
 );
-// After the preview apply/cancel finishes, clear the completed notice so a leftover "pending review" message cannot mislead the user.
+// After the preview apply finishes, dismiss the completed notice so a leftover "pending review" message cannot mislead the user —
+// dismissing (not closeVoice: that would abandon the unsent operation before its own send).
 assert.match(
   voiceHookSource,
-  /const applyVoiceEditPreview[\s\S]*?setEditPreview\(null\);[\s\S]*?dismissVoiceInput\(\);[\s\S]*?if \(!options\.send\) return true;/,
-  "applying or canceling the voice edit preview must clear the stale voice notice",
+  /const applyVoiceEditPreview[\s\S]*?editPreviewRef\.current = null;[\s\S]*?setEditPreview\(null\);[\s\S]*?dismissVoice\(\);[\s\S]*?if \(!options\.send\) return true;/,
+  "applying the voice edit preview must dismiss the stale voice notice without ending the operation",
 );
 // Windows low-level hook callbacks are bound by LowLevelHooksTimeout; synchronous stderr printing is forbidden.
 assert.doesNotMatch(
@@ -1009,7 +1010,9 @@ assert.doesNotMatch(
   "voice audio must not cross IPC as a JSON number array",
 );
 
-// Cross-window ownership is authoritative and fails closed before opening the mic.
+// Cross-window recording ownership is authoritative in Rust and fails closed
+// before opening the mic: the claim IPC carries the operation token and the
+// claim must succeed ahead of any microphone acquisition.
 assert.match(
   source,
   /invoke\("set_voice_shortcut_recording", \{ label: label \|\| null, token: token \}\)/,
@@ -1017,13 +1020,28 @@ assert.match(
 );
 assert.match(
   source,
-  /const claimed = await syncVoiceShortcutRecording\(currentVoiceWindowLabel\(\), session\.id\);[\s\S]*?if \(!claimed\)[\s\S]*?session\.stream = await requestVoiceMedia/,
-  "claim must succeed before microphone acquisition",
+  /const claimed = await syncVoiceShortcutRecording\(currentVoiceWindowLabel\(\), session\.id\);[\s\S]*?if \(claimed !== true\)[\s\S]*?throw voiceFlowError\("device_unavailable"/,
+  "claim must succeed before microphone acquisition (an IPC failure reports \"error\" and still fails closed)",
+);
+assert.match(
+  source,
+  /function syncVoiceShortcutRecording\(label, token\) \{[\s\S]*?return Promise\.resolve\(invoke\("set_voice_shortcut_recording", \{ label: label \|\| null, token: token \}\)\)/,
+  "the ownership claim result must be awaited and returned",
 );
 assert.match(
   source,
   /async function finishVoiceInput\(cancelled, timedOut\) \{[\s\S]*?if \(!session\) return;[\s\S]*?syncVoiceShortcutRecording\(null, session\.id\)/,
-  "finishVoiceInput must clear the recording label (token-guarded) on every exit path",
+  "finishVoiceInput must release the ownership claim (token-bound) on every exit path",
+);
+assert.match(
+  source,
+  /const claimed = await syncVoiceShortcutRecording\(currentVoiceWindowLabel\(\), session\.id\);[\s\S]*?probeVoiceAudioInput\([\s\S]*?requestVoiceMedia\(/,
+  "the ownership claim must strictly precede the device probe and the microphone request",
+);
+assert.match(
+  source,
+  /} catch \(err\) \{[\s\S]*?activeVoiceInput = null;[\s\S]*?syncVoiceShortcutRecording\(null, session\.id\);/,
+  "a start that fails after claiming must release the ownership claim",
 );
 // Storage listeners filter by exact key (three places): a null key
 // (localStorage.clear()) and unrelated keys say nothing about the
@@ -1045,11 +1063,12 @@ assert.match(
   "settings voice storage mirror must ignore null-key and unrelated-key storage events",
 );
 
-// Token guard: registration carries a token and the clear is only sent when the token matches — a late finish must not erase a newer session's registration.
+// Tokenless clears are rejected in Rust, not papered over client-side: a
+// stale teardown can never release the claim a newer session just registered.
 assert.match(
   source,
-  /if \(!token\) return Promise\.resolve\(false\);/,
-  "tokenless clears must be rejected rather than clearing another WebView",
+  /function syncVoiceShortcutRecording\(label, token\) \{[\s\S]*?if \(!token\) return false;/,
+  "tokenless ownership syncs must be rejected rather than clearing another WebView's claim",
 );
 
 // ===== Error codes end to end: desktop→web RPC passthrough + both-lane mapping guards =====
