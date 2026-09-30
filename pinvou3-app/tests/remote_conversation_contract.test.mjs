@@ -3,7 +3,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
-import { dict } from '../src/shared/i18n-all.js';
+import { dict } from './helpers/i18n-all.js';
 import { isTaskTerminal, taskStatusKey } from '../src/features/remote-control/remote-control-logic.mjs';
 
 const shell = readFileSync(new URL('../src/features/remote-control/RemoteConnectionShell.jsx', import.meta.url), 'utf8');
