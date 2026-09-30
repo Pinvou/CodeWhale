@@ -2009,6 +2009,12 @@ impl TaskManager {
         };
 
         while let Ok(event) = event_rx.try_recv() {
+            // Same invariant as the main loop's heartbeat short-circuit:
+            // liveness-only ticks are a no-op and must not take the
+            // manager-wide state lock, even while draining the tail.
+            if matches!(event, TaskExecutionEvent::ToolHeartbeat { .. }) {
+                continue;
+            }
             append_message_delta(&mut accumulated_result_text, &event);
             if let Err(err) = self.apply_execution_event(&task_id, event).await {
                 tracing::error!("Failed to apply trailing task event for {task_id}: {err}");
