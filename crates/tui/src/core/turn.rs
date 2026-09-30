@@ -523,10 +523,14 @@ fn snapshot_failure_hint(message: &str, size_gated: bool) -> &'static str {
         // fresh and blocks that until the stale-lock sweep may clear it.
         "  the timed-out init left the snapshot side repo incomplete; snapshots re-init automatically once the filesystem responds (a lock the killed init left behind can delay that by up to an hour)."
     } else if message.contains(GIT_INIT_FAILED_MARKER) {
-        // Unlike every other arm this one does not clear itself: git never
-        // ages a `config.lock` out, and the sweep only removes one that is
-        // already stale. Name the directory so the user can act.
-        "  the snapshot side repo under `~/.codewhale/snapshots` is half-initialized; remove that workspace's directory there to let snapshots re-init."
+        // git never ages a `config.lock` out itself, but the open-path
+        // sweep clears one that has been stale for an hour, so this state
+        // does clear itself given time — a fresh lock left by a killed
+        // init (or by a second host initializing the same workspace
+        // concurrently) only has to age out. Manual removal is the
+        // fallback for a persistent failure, not the first move: deleting
+        // the directory discards the workspace's whole undo history.
+        "  the snapshot side repo under `~/.codewhale/snapshots` is half-initialized; snapshots sweep a leftover lock and re-init automatically once it ages out (about an hour) — remove that workspace's directory only if the error persists past that."
     } else {
         "  the timed-out git likely left a stale index.lock in the snapshot side repo; snapshots retry once it ages out (about an hour)."
     }
@@ -573,14 +577,20 @@ mod snapshot_failure_hint_tests {
 
     // A non-zero-status `git init` repeats forever and carries
     // `ErrorKind::Other`, so it needs both its own hint and its own arm in
-    // the notify gate — a stale-index.lock "retry in an hour" would be a lie.
+    // the notify gate. The lock behind it is swept once it ages out, so
+    // the hint leads with waiting — pointing straight at directory removal
+    // would discard the workspace's undo history for a state that heals
+    // itself within the hour.
     #[test]
     fn failed_git_init_gets_the_half_initialized_repo_hint() {
         let message =
             format!("{GIT_INIT_FAILED_MARKER}: error: could not lock config file .git/config");
         let hint = snapshot_failure_hint(&message, false);
         assert!(hint.contains("half-initialized"), "{hint}");
-        assert!(!hint.contains("ages out"), "{hint}");
+        assert!(hint.contains("about an hour"), "{hint}");
+        // Manual removal is the fallback for a persistent failure, not the
+        // first move.
+        assert!(hint.contains("only if the error persists"), "{hint}");
     }
 }
 
