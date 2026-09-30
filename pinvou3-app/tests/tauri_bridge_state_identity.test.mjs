@@ -79,6 +79,11 @@ for (const relative of bridgeScripts) {
 const api = windowObject.TauriBridge;
 assert.ok(api.available, 'desktop bridge must expose the real surface under a stubbed __TAURI__');
 
+// Desktop remote control restores its controller status in a microtask during
+// bridge installation. Settle that startup publication before measuring the
+// identity behavior of the subscriptions created below.
+await new Promise(resolve => setTimeout(resolve, 0));
+
 const combinedSnapshots = [];
 const unsubscribeCombined = api.state.subscribeMany(['settings', 'models'], snapshot => {
   combinedSnapshots.push(snapshot);
