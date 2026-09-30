@@ -32,6 +32,7 @@ use zeroize::{Zeroize, Zeroizing};
 use super::protocol::{
     ControllerProtocolError, LeaseInstallValidationContext, MAX_DECRYPTED_PAYLOAD_BYTES,
     MAX_ENCRYPTED_FRAME_BYTES, ParsedTranscript, Result, build_receipt_commitment_preimage,
+    parse_liveness_attestation,
 };
 
 const AEAD_NONCE_BYTES: usize = 12;
@@ -1161,6 +1162,28 @@ impl fmt::Debug for AuthenticatedRelayTrustConfig {
 }
 
 impl AuthenticatedRelayTrustConfig {
+    fn verify_relay_signature(
+        &self,
+        key_id: &str,
+        algorithm: &str,
+        preimage: &[u8],
+        signature_bytes: &[u8],
+    ) -> Result<()> {
+        if algorithm != "ed25519" {
+            return Err(ControllerProtocolError::new(
+                "invalid_field",
+                "signature_algorithm",
+            ));
+        }
+        let public_key = self
+            .keys
+            .get(key_id)
+            .ok_or_else(|| ControllerProtocolError::new("invalid_field", "relay_signing_key_id"))?;
+        UnparsedPublicKey::new(&signature::ED25519, public_key)
+            .verify(preimage, signature_bytes)
+            .map_err(|_| ControllerProtocolError::new("invalid_field", "relay_signature_b64"))
+    }
+
     #[cfg(test)]
     pub(super) fn from_test_enrollment(
         entries: impl IntoIterator<Item = (String, [u8; 32])>,
@@ -1169,6 +1192,19 @@ impl AuthenticatedRelayTrustConfig {
             keys: entries.into_iter().collect(),
         }
     }
+}
+
+pub(crate) fn authenticate_relay_liveness_attestation(
+    input: &str,
+    trust: &AuthenticatedRelayTrustConfig,
+) -> Result<()> {
+    let parsed = parse_liveness_attestation(input)?;
+    trust.verify_relay_signature(
+        &parsed.relay_signing_key_id,
+        &parsed.signature_algorithm,
+        &parsed.signature_preimage,
+        &parsed.relay_signature,
+    )
 }
 
 pub(crate) struct TranscriptAuthenticator {
@@ -1185,20 +1221,12 @@ impl TranscriptAuthenticator {
         parsed: ParsedTranscript,
     ) -> Result<LeaseInstallValidationContext> {
         let parts = parsed.into_parts();
-        if parts.signature_algorithm != "ed25519" {
-            return Err(ControllerProtocolError::new(
-                "invalid_field",
-                "signature_algorithm",
-            ));
-        }
-        let public_key = self
-            .trust
-            .keys
-            .get(&parts.relay_signing_key_id)
-            .ok_or_else(|| ControllerProtocolError::new("invalid_field", "relay_signing_key_id"))?;
-        UnparsedPublicKey::new(&signature::ED25519, public_key)
-            .verify(&parts.signature_preimage, &parts.relay_signature)
-            .map_err(|_| ControllerProtocolError::new("invalid_field", "relay_signature_b64"))?;
+        self.trust.verify_relay_signature(
+            &parts.relay_signing_key_id,
+            &parts.signature_algorithm,
+            &parts.signature_preimage,
+            &parts.relay_signature,
+        )?;
         Ok(LeaseInstallValidationContext::new(VerifiedTranscript {
             request_id: parts.request_id,
             expected_pairing_id: parts.expected_pairing_id,
@@ -1723,6 +1751,37 @@ mod tests {
         require_zeroizing_array(&a.resume_secret);
         let ciphers = a.into_role_ciphers(ControllerRole::A, lease(1)).unwrap();
         require_zeroizing_array(&ciphers.resume_secret.0);
+    }
+
+    #[test]
+    fn enrolled_key_authenticates_attestation_and_rejects_untrusted_signing_material() {
+        let fixture = fixture();
+        let vector = &fixture["attestation_vector"];
+        let key: [u8; 32] = base64::engine::general_purpose::STANDARD
+            .decode(vector["public_key_b64"].as_str().unwrap())
+            .unwrap()
+            .try_into()
+            .unwrap();
+        let trust =
+            AuthenticatedRelayTrustConfig::from_test_enrollment([("relay-key-test-1".into(), key)]);
+        let message = vector["message"].clone();
+        authenticate_relay_liveness_attestation(&message.to_string(), &trust).unwrap();
+        for (field, replacement) in [
+            ("relay_signature_b64", format!("{}==", "A".repeat(86))),
+            ("relay_signing_key_id", "unknown-key".to_owned()),
+            ("remaining_ttl_ms", "24999".to_owned()),
+        ] {
+            let mut changed = message.clone();
+            changed[field] = replacement.into();
+            assert!(authenticate_relay_liveness_attestation(&changed.to_string(), &trust).is_err());
+        }
+        let wrong_trust = AuthenticatedRelayTrustConfig::from_test_enrollment([(
+            "relay-key-test-1".into(),
+            [0; 32],
+        )]);
+        assert!(
+            authenticate_relay_liveness_attestation(&message.to_string(), &wrong_trust).is_err()
+        );
     }
 
     #[test]
