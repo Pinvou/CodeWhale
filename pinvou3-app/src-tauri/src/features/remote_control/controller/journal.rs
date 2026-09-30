@@ -14,7 +14,7 @@ use std::fmt;
 
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
 use super::task::{RemoteTaskEvent, RemoteTaskEventSink};
@@ -225,7 +225,8 @@ impl RemoteJournal {
             validate_id(task_id, MAX_TASK_ID_CHARS)?;
         }
         let sanitized = sanitize_event_payload(&payload);
-        let encoded = serde_json::to_vec(&sanitized).map_err(|_| error("journal_payload_invalid"))?;
+        let encoded =
+            serde_json::to_vec(&sanitized).map_err(|_| error("journal_payload_invalid"))?;
         if encoded.len() > MAX_EVENT_PAYLOAD_BYTES {
             return Err(error("journal_payload_too_large"));
         }
@@ -253,9 +254,7 @@ impl RemoteJournal {
                     payload: Value::Null,
                 });
             }
-            inner
-                .terminals
-                .insert(task_id.to_owned(), status.clone());
+            inner.terminals.insert(task_id.to_owned(), status.clone());
         }
         inner.sequence = inner
             .sequence
@@ -341,9 +340,11 @@ impl RemoteJournal {
             let Some(dropped) = inner.events.pop_front() else {
                 break;
             };
-            inner.bytes = inner
-                .bytes
-                .saturating_sub(serde_json::to_vec(&dropped.payload).map(|bytes| bytes.len()).unwrap_or(0));
+            inner.bytes = inner.bytes.saturating_sub(
+                serde_json::to_vec(&dropped.payload)
+                    .map(|bytes| bytes.len())
+                    .unwrap_or(0),
+            );
             inner.event_ids.remove(&dropped.event_id);
         }
     }
