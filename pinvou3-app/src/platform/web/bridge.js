@@ -1808,11 +1808,15 @@
     try {
       try { await invoke("save_session_artifacts", { id: sid, paths: arts.map(function (a) { return a.path; }) }); } catch (_) {}
       if (isDefaultChatTitle(meta.title) || personaPlaceholderTitles[sid]) {
-        var firstUser = msgs.find(function (m) { return m.role === "user"; });
         // 自动标题复用展示层过滤：内部信封/子智能体交接不参与命名，避免 XML 痕迹进
         // sidebar。hideInternalEnvelope=true 剥离 turn_meta/system-reminder 元数据块，
         // 否则普通消息的标题会拼入尾随 turn_meta（引擎持久化为独立 text block）。
-        var titleText = firstUser ? userMessageDisplayText(firstUser.content || [], true) : "";
+        var titleText = "";
+        msgs.some(function (message) {
+          if (!message || message.role !== "user") return false;
+          titleText = userMessageDisplayText(message.content || [], true);
+          return !!titleText;
+        });
         if (titleText) {
           var newTitle = titleText.slice(0, 20);
           await invoke("rename_session", { id: sid, title: newTitle });
@@ -4148,12 +4152,12 @@
     };
   }
 
-  function userMessageInputProvenance(blocks) {
-    return window.PinvouBridgeMessages.userMessageInputProvenance(blocks);
+  function isInternalUserMessage(blocks) {
+    return window.PinvouBridgeMessages.isInternalUserMessage(blocks);
   }
 
-  function isInternalUserMessageProvenance(provenance) {
-    return window.PinvouBridgeMessages.isInternalUserMessageProvenance(provenance);
+  function isKnownInternalMetadataBlock(value) {
+    return window.PinvouBridgeMessages.isKnownInternalMetadataBlock(value);
   }
   // isInternalRuntimeUserMessage（下方 live 路径同一判定）与本函数等价：
   // 历史重载与实时事件两条展示路径共用同一信封判定，避免两处实现漂移。
@@ -4166,8 +4170,8 @@
     var textParts = (Array.isArray(blocks) ? blocks : [])
       .filter(function (block) { return block && block.type === "text"; })
       .map(function (block) { return String(block.text || ""); });
-    if (textParts.some(isInternalRuntimeUserMessage)) return "";
-    if (isInternalUserMessageProvenance(userMessageInputProvenance(blocks))) return "";
+    if (isInternalUserMessage(blocks)) return "";
+    textParts = textParts.filter(function (text) { return !isKnownInternalMetadataBlock(text); });
     if (!hideInternalEnvelope) return textParts.join("");
 
     return textParts.filter(function (text) {
