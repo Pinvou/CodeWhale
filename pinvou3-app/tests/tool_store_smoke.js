@@ -562,15 +562,22 @@ async function visibilityBox(page, cardText, modeLabel, click) {
       await clickExact(page, '关闭'); await sleep(150);
       // A late backend error after the card was closed must not fabricate a
       // fresh error card (the flow store is null; the listener drops the event).
+      // Official 并存口径:主视图 wecom:error 监听对每条失败事件弹本地化 toast(「知道了」
+      // 才消),迟到的重发事件会再次弹 toast——这是 Official 既有 UX,不属于卡片复活。
+      // 因此卡片复活的断言以卡片自身标记为准(「连接未完成」标题与关闭/重试按钮),
+      // toast 的本地化文案不算复活;原始负载在卡片与 toast 两个界面上都不得出现。
       await page.evaluate(() => window.__emitTauri('wecom:error', {
         phase: 'authorize',
         code: 'auth_failed',
         message: 'RAW后端诊断 payload secret_token=abcdef 授权流程中断',
       }));
       await sleep(150);
-      rec('WeCom late backend error after close does not resurrect the card', await page.evaluate((authFailedCopy) => (
-        !document.body.innerText.includes(authFailedCopy)
-      ), wecomAuthFailedCopy));
+      rec('WeCom late backend error after close does not resurrect the card', await page.evaluate(() => (
+        !document.body.innerText.includes('连接未完成')
+        && ![...document.querySelectorAll('button')].some(b => ['关闭', '重试'].includes((b.textContent || '').trim()))
+        && !document.body.innerText.includes('secret_token')
+        && !document.body.innerText.includes('RAW后端诊断')
+      )));
       // Re-open the flow card through the real connect path first: a late QR
       // event must not fabricate a card from a closed flow (the listener drops
       // it), so the QR restore below only works on a card opened by a connect.
