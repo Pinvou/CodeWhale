@@ -11944,7 +11944,11 @@ mod tests {
             Some("gpt-6-sol"),
         )
         .expect("named table resolves");
-        let client = DeepSeekClient::from_candidate(&config, &route.candidate)
+        // The production turn path builds from the resolved route's
+        // identity-scoped config, not the ambient config — mirror it here so
+        // the pin would catch an ambient/identity divergence (in a two-table
+        // setup the ambient table would freeze the wrong identity).
+        let client = DeepSeekClient::from_candidate(&route.config, &route.candidate)
             .expect("per-turn client builds");
         assert_eq!(
             client.wire_format,
@@ -11997,5 +12001,98 @@ mod tests {
             body.get("messages").is_none(),
             "Responses body, not Chat: {body}"
         );
+    }
+
+    /// A `wire = "anthropic"` Custom table must reach a real
+    /// Messages-protocol transport: the per-turn client
+    /// (resolve_runtime_route → from_candidate) POSTs `{base}/v1/messages`
+    /// with the Anthropic credential and version headers. The Responses
+    /// wire has the full transport pin above; this closes the same gap for
+    /// the Messages wire.
+    #[tokio::test]
+    async fn forkguard_custom_anthropic_route_turn_client_posts_to_the_messages_endpoint() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "msg_custom",
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "text", "text": "ok from stub"}],
+                "model": "custom-claude",
+                "stop_reason": "end_turn",
+                "stop_sequence": null,
+                "usage": {"input_tokens": 1, "output_tokens": 1}
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let _env_lock = crate::test_support::lock_test_env();
+        let config = Config {
+            provider: Some("pinvou_messages".to_string()),
+            providers: Some(ProvidersConfig {
+                custom: [(
+                    "pinvou_messages".to_string(),
+                    ProviderConfig {
+                        kind: Some("openai-compatible".to_string()),
+                        wire: Some("anthropic".to_string()),
+                        base_url: Some(format!("{}/v1", server.uri())),
+                        api_key: Some("custom-anthropic-key".to_string()),
+                        model: Some("custom-claude".to_string()),
+                        ..ProviderConfig::default()
+                    },
+                )]
+                .into_iter()
+                .collect(),
+                ..ProvidersConfig::default()
+            }),
+            ..Config::default()
+        };
+        let route = crate::route_runtime::resolve_runtime_route(
+            &config,
+            ApiProvider::Custom,
+            Some("custom-claude"),
+        )
+        .expect("named table resolves");
+        assert_eq!(
+            route.candidate.protocol(),
+            WireFormat::AnthropicMessages,
+            "the minted candidate speaks Messages"
+        );
+        assert_eq!(route.candidate.endpoint().endpoint_key, "messages");
+        let client = DeepSeekClient::from_candidate(&route.config, &route.candidate)
+            .expect("per-turn client builds");
+        assert_eq!(client.wire_format, WireFormat::AnthropicMessages);
+
+        client
+            .create_message(minimal_zen_request("custom-claude"))
+            .await
+            .expect("Custom Messages request should succeed");
+
+        let requests = server.received_requests().await.expect("recorded request");
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0].url.path(),
+            "/v1/messages",
+            "the turn must hit the Messages endpoint, not /chat/completions"
+        );
+        assert_eq!(
+            requests[0]
+                .headers
+                .get("x-api-key")
+                .and_then(|value| value.to_str().ok()),
+            Some("custom-anthropic-key"),
+            "the Messages transport authenticates via x-api-key"
+        );
+        assert_eq!(
+            requests[0]
+                .headers
+                .get("anthropic-version")
+                .and_then(|value| value.to_str().ok()),
+            Some("2023-06-01")
+        );
+        let body: Value = serde_json::from_slice(&requests[0].body).expect("Messages JSON body");
+        assert_eq!(body["model"], "custom-claude", "model id verbatim: {body}");
     }
 }

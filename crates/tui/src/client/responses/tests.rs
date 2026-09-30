@@ -1828,3 +1828,117 @@ fn forkguard_custom_responses_replays_only_exact_model_opaque_reasoning_state() 
         "{switched_model}"
     );
 }
+
+/// Capture and replay must agree through the real per-turn client: the state
+/// captured off turn 1's stream, placed back into history the way the turn
+/// loop commits it (a Thinking block ahead of any tool call), reaches turn
+/// 2's prepared request body as the paired reasoning item. The pure replay
+/// test above pins the gate in isolation; this pins the seam where the
+/// capture side's tag and endpoint fingerprint must equal the replay side's.
+#[tokio::test]
+async fn forkguard_custom_responses_captured_state_replays_on_the_next_turn() {
+    let server = MockServer::start().await;
+    let sse_body = concat!(
+        "data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"reasoning\",\"id\":\"rs_custom\"}}\n\n",
+        "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"reasoning\",\"id\":\"rs_custom\",\"summary\":[],\"encrypted_content\":\"enc_custom_state\"}}\n\n",
+        "data: [DONE]\n\n",
+    );
+    Mock::given(method("POST"))
+        .and(path("/v1/responses"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("Content-Type", "text/event-stream")
+                .set_body_string(sse_body),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let _env_lock = crate::test_support::lock_test_env();
+    let config = Config {
+        provider: Some("pinvou_responses".to_string()),
+        providers: Some(ProvidersConfig {
+            custom: [(
+                "pinvou_responses".to_string(),
+                ProviderConfig {
+                    kind: Some("openai-compatible".to_string()),
+                    wire: Some("responses".to_string()),
+                    base_url: Some(format!("{}/v1", server.uri())),
+                    api_key: Some("custom-responses-key".to_string()),
+                    model: Some("gpt-6-sol".to_string()),
+                    ..ProviderConfig::default()
+                },
+            )]
+            .into_iter()
+            .collect(),
+            ..ProvidersConfig::default()
+        }),
+        ..Config::default()
+    };
+    let route = crate::route_runtime::resolve_runtime_route(
+        &config,
+        ApiProvider::Custom,
+        Some("gpt-6-sol"),
+    )
+    .expect("named table resolves");
+    let client = DeepSeekClient::from_candidate(&route.config, &route.candidate)
+        .expect("per-turn client builds");
+
+    let mut first = minimal_responses_request();
+    first.model = "gpt-6-sol".to_string();
+    let mut stream = client
+        .handle_responses_stream(
+            &client
+                .prepare_outbound_request(first, true)
+                .expect("first request prepares"),
+        )
+        .await
+        .unwrap();
+    let mut captured = None;
+    while let Some(event) = stream.next().await {
+        if let StreamEvent::ContentBlockDelta {
+            delta: Delta::ReasoningStateDelta { state },
+            ..
+        } = event.expect("first-turn stream event")
+        {
+            captured = Some(state);
+        }
+    }
+    let state = captured.expect("state captured on turn 1");
+    assert_eq!(state.provider, "custom/pinvou_responses");
+    assert_eq!(state.encrypted_content, "enc_custom_state");
+
+    // Turn loop placement: the Thinking block (state included) precedes any
+    // tool call in the committed history.
+    let mut follow_up = minimal_responses_request();
+    follow_up.model = "gpt-6-sol".to_string();
+    follow_up.messages.insert(
+        0,
+        Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::Thinking {
+                thinking: String::new(),
+                signature: None,
+                state: Some(state),
+            }],
+        },
+    );
+    let prepared = client
+        .prepare_outbound_request(follow_up, true)
+        .expect("second request prepares");
+    let second = &prepared.body;
+    assert_eq!(
+        second.pointer("/input/0/type"),
+        Some(&serde_json::json!("reasoning")),
+        "the reasoning item must lead the replayed input: {second}"
+    );
+    assert_eq!(
+        second.pointer("/input/0/encrypted_content"),
+        Some(&serde_json::json!("enc_custom_state")),
+        "turn 2's wire carries the state captured on turn 1: {second}"
+    );
+    assert_eq!(
+        second.pointer("/input/0/id"),
+        Some(&serde_json::json!("rs_custom"))
+    );
+}
