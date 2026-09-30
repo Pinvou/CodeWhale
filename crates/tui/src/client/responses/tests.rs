@@ -840,7 +840,9 @@ async fn codex_stream_captures_encrypted_reasoning_as_opaque_state() {
     assert_eq!(state.encrypted_content, "enc_state");
     assert_eq!(
         state.endpoint,
-        Some(codewhale_config::catalog::base_url_fingerprint(&client.base_url)),
+        Some(codewhale_config::catalog::base_url_fingerprint(
+            &client.base_url
+        )),
         "the captured state is bound to the capturing endpoint"
     );
 }
@@ -1516,7 +1518,9 @@ async fn forkguard_custom_responses_stream_captures_encrypted_reasoning_as_opaqu
     );
     assert_eq!(
         state.endpoint,
-        Some(codewhale_config::catalog::base_url_fingerprint(&client.base_url)),
+        Some(codewhale_config::catalog::base_url_fingerprint(
+            &client.base_url
+        )),
         "the captured state is bound to the minting table's endpoint"
     );
 }

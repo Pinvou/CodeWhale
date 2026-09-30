@@ -211,13 +211,13 @@ impl DeepSeekClient {
         // Chat-wire Custom tables (and any other dialect) excluded.
         let reasoning_origin = (self.wire_format == WireFormat::Responses
             && responses_route_sends_encrypted_reasoning_include(self.api_provider))
-            .then(|| {
-                (
-                    self.reasoning_provider_tag(),
-                    self.reasoning_endpoint_fingerprint(),
-                    wire_model.clone(),
-                )
-            });
+        .then(|| {
+            (
+                self.reasoning_provider_tag(),
+                self.reasoning_endpoint_fingerprint(),
+                wire_model.clone(),
+            )
+        });
 
         // The bearer Authorization header is already installed as a default
         // header on both the dual and the HTTP/1.1 twin client (resolved from
@@ -879,9 +879,7 @@ pub(super) fn convert_messages_to_responses_input(
                                 // keep replaying.
                                 let endpoint_matches = match &state.endpoint {
                                     None => true,
-                                    Some(captured) => {
-                                        captured == reasoning_endpoint_fingerprint
-                                    }
+                                    Some(captured) => captured == reasoning_endpoint_fingerprint,
                                 };
                                 if state.provider == reasoning_provider_tag
                                     && state.api == "openai-responses"

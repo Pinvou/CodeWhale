@@ -8805,12 +8805,18 @@ model = "gpt-6-sol"
     assert_eq!(responses.endpoint().base_url, "https://relay.example/v1");
 
     let anthropic = resolved("anthropic");
-    assert_eq!(anthropic.protocol(), crate::provider::WireFormat::AnthropicMessages);
+    assert_eq!(
+        anthropic.protocol(),
+        crate::provider::WireFormat::AnthropicMessages
+    );
     assert_eq!(anthropic.endpoint().endpoint_key, "messages");
 
     // Explicit chat (and unset) stay on the static Chat policy.
     let chat = resolved("chat");
-    assert_eq!(chat.protocol(), crate::provider::WireFormat::ChatCompletions);
+    assert_eq!(
+        chat.protocol(),
+        crate::provider::WireFormat::ChatCompletions
+    );
     assert_eq!(chat.endpoint().endpoint_key, "chat");
 }
 
