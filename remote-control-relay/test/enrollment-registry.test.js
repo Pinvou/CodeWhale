@@ -416,7 +416,7 @@ test("registry rejects a store opened for different configured paths", async (t)
   }), (error) => error?.code === "enrollment_state_store_path_mismatch");
 });
 
-test("junction or symlink ancestors and final state links are rejected", async (t) => {
+test("junction or symlink ancestors are rejected", async (t) => {
   const statePath = await temporaryState(t);
   const root = path.dirname(path.dirname(statePath));
   const actualParent = path.join(root, "actual-parent");
@@ -433,19 +433,69 @@ test("junction or symlink ancestors and final state links are rejected", async (
   }
   await rejectsCode(openStateStore(path.join(aliasParent, "controller", "state.json")),
     "relay_state_path_component_unsafe");
+});
 
-  let store = await openStateStore(statePath);
+test("final state symlinks are rejected without restoring the backup", async (t) => {
+  const statePath = await temporaryState(t);
+  const store = await openStateStore(statePath);
   await store.close();
   await fs.rm(statePath);
   try {
     await fs.symlink(`${statePath}.bak`, statePath, "file");
   } catch (error) {
-    if (["EPERM", "EACCES", "ENOTSUP"].includes(error?.code)) return;
+    if (["EPERM", "EACCES", "ENOTSUP"].includes(error?.code)) {
+      t.skip(`final state symlink creation unavailable: ${error.code}`);
+      return;
+    }
     throw error;
   }
-  await assert.rejects(openStateStore(statePath), (error) => [
-    "relay_state_file_unsafe", "relay_state_unavailable",
-  ].includes(error?.code));
+  await rejectsCode(openStateStore(statePath), "relay_state_file_unsafe");
+  assert.equal((await fs.lstat(statePath)).isSymbolicLink(), true);
+});
+
+test("unsafe state file types fail closed before any backup recovery", async (t) => {
+  for (const suffix of ["", ".bak"]) {
+    for (const kind of ["symlink", "non-regular"]) {
+      await t.test(`${suffix || "primary"}: ${kind}`, async (t) => {
+        const statePath = await temporaryState(t);
+        const store = await openStateStore(statePath);
+        await store.close();
+        const primaryBefore = await fs.readFile(statePath);
+        const backupBefore = await fs.readFile(`${statePath}.bak`);
+        let lockPublished = false;
+        let classified = false;
+        let stateReplacements = 0;
+        const injectedFs = {
+          ...fs,
+          async link(source, target) {
+            await fs.link(source, target);
+            if (target === lockPath(statePath)) lockPublished = true;
+          },
+          async lstat(target, ...args) {
+            const metadata = await fs.lstat(target, ...args);
+            if (lockPublished && target === `${statePath}${suffix}`) {
+              classified = true;
+              return {
+                ...metadata,
+                isFile: () => kind === "symlink",
+                isSymbolicLink: () => kind === "symlink",
+              };
+            }
+            return metadata;
+          },
+          async rename(source, target) {
+            if (target === statePath || target === `${statePath}.bak`) stateReplacements += 1;
+            return fs.rename(source, target);
+          },
+        };
+        await rejectsCode(openStateStore(statePath, { fs: injectedFs }), "relay_state_file_unsafe");
+        assert.equal(classified, true);
+        assert.equal(stateReplacements, 0);
+        assert.deepEqual(await fs.readFile(statePath), primaryBefore);
+        assert.deepEqual(await fs.readFile(`${statePath}.bak`), backupBefore);
+      });
+    }
+  }
 });
 
 test("open-handle identity checks detect final-file exchange", async (t) => {
@@ -997,7 +1047,11 @@ test("PID reuse cannot make an old lock look live", async (t) => {
   const statePath = await temporaryState(t);
   let store = await openStateStore(statePath);
   await store.close();
-  await fs.writeFile(lockPath(statePath), `${JSON.stringify(lockRecord({ identity: "old-boot:old-start" }))}\n`, "utf8");
+  await fs.writeFile(
+    lockPath(statePath),
+    `${JSON.stringify(lockRecord({ identity: "old-boot:old-start" }))}\n`,
+    { encoding: "utf8", mode: 0o600 },
+  );
   store = await openStateStore(statePath, {
     processIdentity: async (pid) => pid === process.pid ? "new-boot:new-start" : null,
     sleep: async () => {},

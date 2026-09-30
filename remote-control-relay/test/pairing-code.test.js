@@ -5,6 +5,7 @@ import test from "node:test";
 import { sealPairingCode } from "../pairing-code-sealer.js";
 import { PairingStore } from "../pairing-store.js";
 import { PairingRegistrationHandler } from "../pairing-registration-handler.js";
+import { ControllerReservationManager, EndpointInteractionSlots } from "../controller-reservation.js";
 import { buildSealedCodeAad, parseSealedCodeV1 } from "../protocol-controller.js";
 
 const X25519_SPKI_PREFIX = Buffer.from("302a300506032b656e032100", "hex");
@@ -213,14 +214,14 @@ test("pairing store seals collision exhaustion and checks every retained digest 
   await assert.rejects(PairingStore.open({
     stateStore, digestKeyring: keyring("digest-key-2", false), clock: () => 2000,
   }), (error) => error?.code === "pairing_digest_key_unavailable");
+  const oldPairingId = stateStore.value.tombstones[0].pairing_id;
   const compacted = await PairingStore.open({
     stateStore, digestKeyring: keyring("digest-key-2", false), clock: () => 700_000,
     randomBytes: (size) => Buffer.alloc(size, size === 16 ? 0 : 1),
   });
-  const oldPairingId = stateStore.value.tombstones[0].pairing_id;
   assert.equal(compacted.activePairing(oldPairingId), null);
   assert.equal(compacted.findActiveByCode("2222222"), null);
-  assert.equal(stateStore.value.tombstones[0].code_digests.length, 0);
+  assert.equal(stateStore.value.tombstones.length, 0);
   assert.equal(stateStore.value.registrations.length, 0);
   const reused = await compacted.register({
     request: registration({
@@ -233,7 +234,7 @@ test("pairing store seals collision exhaustion and checks every retained digest 
   });
   assert.notEqual(reused.result.pairing_id, oldPairingId);
   assert.equal(compacted.findActiveByCode("2222222").pairing_id, reused.result.pairing_id);
-  assert.equal(stateStore.value.tombstones.length, 2);
+  assert.equal(stateStore.value.tombstones.length, 1);
 });
 
 test("pairing store never returns a code when the durable CAS fails", async () => {
@@ -246,6 +247,83 @@ test("pairing store never returns a code when the durable CAS fails", async () =
     request: registration(), relayEpoch: "relay-epoch-0001", sealCode: sealPairingCode,
   }), (error) => error?.code === "pairing_persist_failed");
   assert.equal(store.activePairing("pairing-anything"), null);
+});
+
+test("a running store collects expired records and never reissues an ID when entropy repeats", async () => {
+  let now = 1000;
+  const stateStore = new MemoryStateStore();
+  const store = await PairingStore.open({
+    stateStore, digestKeyring: keyring(), clock: () => now, randomBytes: deterministicEntropy(0),
+  });
+  const pairingIds = new Set();
+  for (let cycle = 0; cycle < 5; cycle += 1) {
+    const result = await store.register({
+      request: registration({
+        request_id: `transport-cycle-${cycle}`,
+        registration_request_id: `registration-cycle-${cycle}`,
+        remote_control_generation: `generation-cycle-${cycle}`,
+      }),
+      relayEpoch: "relay-epoch-0001", sealCode: sealPairingCode,
+    });
+    assert.equal(pairingIds.has(result.result.pairing_id), false);
+    pairingIds.add(result.result.pairing_id);
+    assert.equal(stateStore.value.tombstones.length, 1);
+    assert.equal(stateStore.value.registrations.length, 1);
+    assert.equal(store.findActiveByCode("2222222").pairing_id, result.result.pairing_id);
+    now += 700_000;
+  }
+});
+
+test("GC retains an invalidating reservation until failed notification is retried", async () => {
+  let now = 1000;
+  let entropyByte = 0;
+  let notifications = 0;
+  const stateStore = new MemoryStateStore();
+  const store = await PairingStore.open({
+    stateStore, digestKeyring: keyring(), clock: () => now,
+    randomBytes: (size) => Buffer.alloc(size, entropyByte),
+  });
+  const first = await store.register({
+    request: registration(), relayEpoch: "relay-epoch-0001", sealCode: sealPairingCode,
+  });
+  const slots = new EndpointInteractionSlots();
+  const manager = new ControllerReservationManager({
+    pairingStore: store, interactionSlots: slots, clock: () => now,
+    onPairingInvalidated: async () => {
+      notifications += 1;
+      if (notifications === 1) throw new Error("notification unavailable");
+    },
+  });
+  const reservation = manager.claim({
+    pairingCode: "2222222", requestId: "claim-gc-0001", socketIdentity: "socket-gc-0001",
+    source: "source-gc-0001",
+    handshakePublicKeyB64: rawPublic(crypto.generateKeyPairSync("x25519").publicKey).toString("base64"),
+  });
+  await assert.rejects(manager.release({
+    reservationId: reservation.reservation_id, socketIdentity: "socket-gc-0001",
+  }), /notification unavailable/u);
+  now = 700_000;
+  entropyByte = 1;
+  await store.register({
+    request: registration({
+      request_id: "transport-gc-0002", registration_request_id: "registration-gc-0002",
+      endpoint_id: "endpoint-gc-0002", remote_control_generation: "generation-gc-0002",
+    }),
+    relayEpoch: "relay-epoch-0001", sealCode: sealPairingCode,
+  });
+  assert.equal(stateStore.value.tombstones.some((row) => row.pairing_id === first.result.pairing_id), true);
+  assert.equal(await manager.expire(), 1);
+  assert.equal(slots.read("endpoint-0001").owner, null);
+  entropyByte = 2;
+  await store.register({
+    request: registration({
+      request_id: "transport-gc-0003", registration_request_id: "registration-gc-0003",
+      endpoint_id: "endpoint-gc-0003", remote_control_generation: "generation-gc-0003",
+    }),
+    relayEpoch: "relay-epoch-0001", sealCode: sealPairingCode,
+  });
+  assert.equal(stateStore.value.tombstones.some((row) => row.pairing_id === first.result.pairing_id), false);
+  assert.equal(notifications, 2);
 });
 
 test("concurrent registration handlers converge through the global namespace CAS", async () => {
