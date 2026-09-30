@@ -776,10 +776,25 @@ async fn tool_handler(
         .await
     {
         Ok(value) => (StatusCode::OK, Json(value)),
-        Err(err) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "ok": false, "error": err.to_string() })),
-        ),
+        Err(err) => {
+            // The /tool face is a roots intake since round-24 B24-3, so an
+            // over-cap, filesystem-root, primary-ancestor, non-absolute, or
+            // empty/relative-cwd declaration is the caller's mistake: answer
+            // 400 with the reason, matching the sibling lane above, instead
+            // of misclassifying it as a server fault.
+            let status = if err
+                .downcast_ref::<codewhale_core::IntakeValidationError>()
+                .is_some()
+            {
+                StatusCode::BAD_REQUEST
+            } else {
+                StatusCode::INTERNAL_SERVER_ERROR
+            };
+            (
+                status,
+                Json(json!({ "ok": false, "error": err.to_string() })),
+            )
+        }
     }
 }
 
