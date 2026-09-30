@@ -1082,6 +1082,20 @@ pub fn run() {
                             let acp_pool = acp_pool_for_capabilities.clone();
                             move |session_id: &str| acp_pool.is_acp(session_id)
                         }));
+                    // Route ordinary Sessions using the same trusted ACP
+                    // binding (including its durable metadata fallback).
+                    // RemoteProxy is classified by SessionStore first and
+                    // never invokes this local-backend resolver.
+                    store_for_engine.set_local_backend_resolver(std::sync::Arc::new({
+                        let acp_pool = acp_pool_for_capabilities.clone();
+                        move |session_id: &str| {
+                            Ok(if acp_pool.is_acp(session_id) {
+                                crate::features::sessions::remote_proxy::routing::LocalBackendBinding::Acp
+                            } else {
+                                crate::features::sessions::remote_proxy::routing::LocalBackendBinding::Engine
+                            })
+                        }
+                    }));
                     // sessions feature 自己的 code 判定（mode 默认值解析 + 仅 code
                     // 持久化），与 bridge 共用同一份 SessionAgentStore 闭包。
                     store_for_engine.set_code_session_predicate(std::sync::Arc::new({
