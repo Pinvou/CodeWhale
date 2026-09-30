@@ -10615,6 +10615,7 @@
     clearVoiceInput: clearVoiceInput,
     abandonVoiceResult: abandonVoiceResult,
     getVoiceOperationId: getVoiceOperationId,
+    hasVoiceSubmissionPending: hasVoiceSubmissionPending,
     beginVoiceSubmission: beginVoiceSubmission,
     completeVoiceSubmission: completeVoiceSubmission,
     dismissVoiceInput: dismissVoiceInput,
