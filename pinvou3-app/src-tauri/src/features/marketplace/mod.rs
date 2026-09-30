@@ -4438,11 +4438,11 @@ mod tests {
         });
     }
 
-    /// Windows 内置解释器使用隔离环境，普通商店重装不能把上传 manifest 的任意
-    /// `pip_dependencies` 当作可信下载指令。首次上传仍只告警并完成供给；卸载后从
-    /// 卡片普通重装时必须明确拒绝，避免再次产生“安装成功但 import 必然失败”。
+    /// Windows 内置解释器使用隔离环境，普通安装不能把磁盘上来源未验证 manifest
+    /// 的任意 `pip_dependencies` 当作可信下载指令，避免产生“安装成功但 import 必然
+    /// 失败”，也避免绕过上传入口的依赖锁校验。
     #[test]
-    fn reinstall_upload_with_unlocked_pip_dependencies_is_rejected() {
+    fn ordinary_install_with_unlocked_pip_dependencies_is_rejected() {
         if std::env::consts::OS != "windows" {
             return;
         }
@@ -4456,13 +4456,6 @@ mod tests {
                 }"#,
             );
             let mgr = MarketplaceManager::new();
-            mgr.install_upload(
-                "up-pip-reinstall",
-                store::BundleSource::Upload("up-pip.zip".to_string()),
-            )
-            .unwrap();
-            mgr.uninstall("up-pip-reinstall").unwrap();
-
             let error = mgr
                 .install("up-pip-reinstall", &std::collections::HashMap::new())
                 .unwrap_err();

@@ -770,7 +770,7 @@ test('开关 UI 挂在模型列表下方，经 interaction 桥调后端', () => 
   );
   assert.match(
     chatViewSource,
-    /editable=\{!busy && !isMultiAgentReadOnly && item\.id === lastUserId\}/,
+    /editable=\{!busy && !isMultiAgentReadOnly && !item\.remote && item\.id === lastUserId\}/,
     'Web 只读会话不得经"编辑最后一条"绕过发送',
   );
   assert.match(

@@ -1,6 +1,7 @@
 use std::collections::VecDeque;
 use std::fmt;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
@@ -10,7 +11,13 @@ use serde_json::{Value, json};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
 use tokio_tungstenite::{
     connect_async_with_config,
-    tungstenite::{Message, protocol::WebSocketConfig},
+    tungstenite::{
+        Error as WebSocketError, Message,
+        client::IntoClientRequest,
+        error::{ProtocolError, SubProtocolError},
+        http::{HeaderValue, Request, header::SEC_WEBSOCKET_PROTOCOL},
+        protocol::WebSocketConfig,
+    },
 };
 use tokio_util::sync::CancellationToken;
 
@@ -82,6 +89,7 @@ pub enum RelayInbound {
 
 struct OutboundFrame {
     text: String,
+    controller_v1: bool,
     // The permit follows the serialized frame from the channel into the
     // reconnect queue and is released only after send or intentional discard.
     _byte_permit: OwnedSemaphorePermit,
@@ -90,7 +98,12 @@ struct OutboundFrame {
 struct SerializedFrame {
     text: String,
     permits: u32,
+    controller_v1: bool,
 }
+
+const SOCKET_MODE_NEGOTIATING: u8 = 0;
+const SOCKET_MODE_CONTROLLER: u8 = 1;
+const SOCKET_MODE_LEGACY_V2: u8 = 2;
 
 #[derive(Default)]
 struct CoalescedControlState {
@@ -110,6 +123,7 @@ pub enum RelayTrySendError {
     ByteBudgetExhausted,
     ChannelFull,
     ChannelClosed,
+    ControllerProtocolUnavailable,
 }
 
 impl fmt::Display for RelayTrySendError {
@@ -124,6 +138,9 @@ impl fmt::Display for RelayTrySendError {
             }
             Self::ChannelFull => formatter.write_str("relay outbound channel is full"),
             Self::ChannelClosed => formatter.write_str("relay outbound channel is closed"),
+            Self::ControllerProtocolUnavailable => {
+                formatter.write_str("desktop_controller_relay_unavailable")
+            }
         }
     }
 }
@@ -137,10 +154,15 @@ pub struct RelaySender {
     max_frame_bytes: usize,
     shutdown: CancellationToken,
     coalesced_control: Arc<Mutex<CoalescedControlState>>,
+    socket_mode: Arc<AtomicU8>,
 }
 
 impl RelaySender {
     fn serialize_message(&self, value: Value) -> Result<SerializedFrame, RelayTrySendError> {
+        let controller_v1 = value.get("v").and_then(Value::as_u64) == Some(1);
+        if controller_v1 && self.socket_mode.load(Ordering::Acquire) == SOCKET_MODE_LEGACY_V2 {
+            return Err(RelayTrySendError::ControllerProtocolUnavailable);
+        }
         let text = serde_json::to_string(&value)
             .map_err(|error| RelayTrySendError::Serialization(error.to_string()))?;
         let bytes = text.len();
@@ -154,7 +176,11 @@ impl RelaySender {
             bytes,
             limit: self.max_frame_bytes,
         })?;
-        Ok(SerializedFrame { text, permits })
+        Ok(SerializedFrame {
+            text,
+            permits,
+            controller_v1,
+        })
     }
 
     fn cancel(&self) {
@@ -170,6 +196,7 @@ impl RelaySender {
             .map_err(|_| RelayTrySendError::ByteBudgetExhausted)?;
         let queued = QueuedOutbound::Message(OutboundFrame {
             text: frame.text,
+            controller_v1: frame.controller_v1,
             _byte_permit: byte_permit,
         });
         self.tx.try_send(queued).map_err(|error| match error {
@@ -188,6 +215,7 @@ impl RelaySender {
         };
         let queued = QueuedOutbound::Message(OutboundFrame {
             text: frame.text,
+            controller_v1: frame.controller_v1,
             _byte_permit: byte_permit,
         });
         tokio::select! {
@@ -294,6 +322,7 @@ fn outbound_channel(
             max_frame_bytes,
             shutdown: CancellationToken::new(),
             coalesced_control: Arc::new(Mutex::new(CoalescedControlState::default())),
+            socket_mode: Arc::new(AtomicU8::new(SOCKET_MODE_NEGOTIATING)),
         },
         rx,
     )
@@ -306,9 +335,10 @@ pub fn spawn(config: WebAccessConfig) -> (RelaySender, RelayReceiver) {
         MAX_RELAY_FRAME_BYTES,
     );
     let shutdown = tx_out.shutdown.clone();
+    let socket_mode = tx_out.socket_mode.clone();
     let (tx_in, rx_in) = mpsc::channel::<RelayInbound>(INBOUND_CHANNEL_CAPACITY);
     tauri::async_runtime::spawn(async move {
-        run_loop(config, tx_in, rx_out, shutdown).await;
+        run_loop(config, tx_in, rx_out, shutdown, socket_mode).await;
     });
     (tx_out, rx_in)
 }
@@ -336,6 +366,19 @@ pub(crate) fn relay_websocket_config(max_inbound_text_bytes: usize) -> WebSocket
     config.max_message_size = Some(max_inbound_text_bytes);
     config.max_frame_size = Some(max_inbound_text_bytes);
     config
+}
+
+/// The desktop endpoint carries both its existing v2 WebUI traffic and the
+/// controlled-device v1 lane. The controller transport uses the same upgrade.
+pub(crate) fn controller_websocket_request(
+    relay_url: &str,
+) -> Result<Request<()>, tokio_tungstenite::tungstenite::Error> {
+    let mut request = relay_url.into_client_request()?;
+    request.headers_mut().insert(
+        SEC_WEBSOCKET_PROTOCOL,
+        HeaderValue::from_static(super::controller::protocol::CONTROLLER_SUBPROTOCOL),
+    );
+    Ok(request)
 }
 
 async fn run_revocation_loop(
@@ -490,6 +533,26 @@ async fn send_inbound_until_shutdown(
     }
 }
 
+async fn notify_controller_unavailable(
+    tx_in: &mpsc::Sender<RelayInbound>,
+    shutdown: &CancellationToken,
+) -> bool {
+    send_inbound_until_shutdown(
+        tx_in,
+        RelayInbound::Message(
+            json!({
+                "v": 2,
+                "type": "error",
+                "code": "desktop_controller_unavailable",
+                "message": "desktop controller is unavailable",
+            })
+            .to_string(),
+        ),
+        shutdown,
+    )
+    .await
+}
+
 async fn wait_reconnect_delay(
     shutdown: &CancellationToken,
     reconnect_backoff: &mut ReconnectBackoff,
@@ -507,16 +570,27 @@ async fn run_loop(
     tx_in: mpsc::Sender<RelayInbound>,
     mut rx_out: mpsc::Receiver<QueuedOutbound>,
     shutdown: CancellationToken,
+    socket_mode: Arc<AtomicU8>,
 ) {
     let mut pending = VecDeque::<OutboundFrame>::new();
     let mut reconnect_backoff = ReconnectBackoff::default();
+    let mut request_controller_protocol = true;
 
     'reconnect: loop {
-        let connection = connect_async_with_config(
-            &config.relay_url,
-            Some(relay_websocket_config(MAX_INBOUND_TEXT_BYTES)),
-            false,
-        );
+        let offer_controller_protocol = request_controller_protocol;
+        let connection = async {
+            let request = if offer_controller_protocol {
+                controller_websocket_request(&config.relay_url)?
+            } else {
+                config.relay_url.as_str().into_client_request()?
+            };
+            connect_async_with_config(
+                request,
+                Some(relay_websocket_config(MAX_INBOUND_TEXT_BYTES)),
+                false,
+            )
+            .await
+        };
         tokio::pin!(connection);
 
         // Remain responsive to disable/rotate while the network connection is
@@ -540,7 +614,18 @@ async fn run_loop(
 
         let (ws, _) = match connected {
             Ok(pair) => pair,
+            Err(WebSocketError::Protocol(ProtocolError::SecWebSocketSubProtocolError(
+                SubProtocolError::NoSubProtocol,
+            ))) if request_controller_protocol => {
+                // An older Relay/proxy may not negotiate controller v1. Open a
+                // new v2-only desktop connection, preserving existing WebUI
+                // access; the Relay will reject controller frames on that socket.
+                request_controller_protocol = false;
+                socket_mode.store(SOCKET_MODE_LEGACY_V2, Ordering::Release);
+                continue 'reconnect;
+            }
             Err(error) => {
+                request_controller_protocol = true;
                 let message = format!("connect relay failed: {error}");
                 eprintln!("[web-access] {} ({})", message, config.relay_url);
                 if !send_inbound_until_shutdown(
@@ -562,6 +647,16 @@ async fn run_loop(
                 continue;
             }
         };
+        let legacy_v2_only = !offer_controller_protocol;
+        socket_mode.store(
+            if legacy_v2_only {
+                SOCKET_MODE_LEGACY_V2
+            } else {
+                SOCKET_MODE_CONTROLLER
+            },
+            Ordering::Release,
+        );
+        request_controller_protocol = true;
 
         let (mut write, mut read) = ws.split();
         let register = register_message(&config);
@@ -603,7 +698,17 @@ async fn run_loop(
             return;
         }
 
+        let mut controller_unavailable_reported = false;
         while let Some(frame) = pending.pop_front() {
+            if legacy_v2_only && frame.controller_v1 {
+                if !controller_unavailable_reported {
+                    controller_unavailable_reported = true;
+                    if !notify_controller_unavailable(&tx_in, &shutdown).await {
+                        return;
+                    }
+                }
+                continue;
+            }
             let send_result = tokio::select! {
                 biased;
                 _ = shutdown.cancelled() => return,
@@ -645,6 +750,13 @@ async fn run_loop(
                 outbound = rx_out.recv() => {
                     match outbound {
                         Some(QueuedOutbound::Message(frame)) => {
+                            if legacy_v2_only && frame.controller_v1 {
+                                if !controller_unavailable_reported {
+                                    controller_unavailable_reported = true;
+                                    if !notify_controller_unavailable(&tx_in, &shutdown).await { return; }
+                                }
+                                continue;
+                            }
                             let send_result = tokio::select! {
                                 biased;
                                 _ = shutdown.cancelled() => return,
@@ -818,6 +930,9 @@ fn revoke_message_parts(endpoint_id: &str, desktop_secret: &str) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::net::TcpListener;
+    use tokio::sync::oneshot;
+    use tokio_tungstenite::accept_async;
 
     fn config() -> WebAccessConfig {
         WebAccessConfig {
@@ -841,6 +956,87 @@ mod tests {
                 "desktop_secret": "desktop",
             })
         );
+    }
+
+    #[test]
+    fn desktop_endpoint_requests_controller_subprotocol_for_shared_lane() {
+        let request = controller_websocket_request(&config().relay_url).unwrap();
+        assert_eq!(
+            request.headers().get(SEC_WEBSOCKET_PROTOCOL).unwrap(),
+            super::super::controller::protocol::CONTROLLER_SUBPROTOCOL
+        );
+    }
+
+    #[tokio::test]
+    async fn legacy_handshake_never_sends_queued_or_new_controller_frames() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let relay_url = format!("ws://{}", listener.local_addr().unwrap());
+        let (seen_tx, seen_rx) = oneshot::channel();
+        let (release_tx, release_rx) = oneshot::channel::<()>();
+        let server = tokio::spawn(async move {
+            // The first handshake deliberately omits the requested protocol.
+            let (first, _) = listener.accept().await.unwrap();
+            drop(accept_async(first).await.unwrap());
+            let (second, _) = listener.accept().await.unwrap();
+            let mut legacy = accept_async(second).await.unwrap();
+            let register = legacy.next().await.unwrap().unwrap();
+            let forwarded = legacy.next().await.unwrap().unwrap();
+            seen_tx.send((register, forwarded)).unwrap();
+            let _ = release_rx.await;
+        });
+        let (sender, rx_out) = outbound_channel(8, 8192, 4096);
+        let controller_frame = json!({ "v": 1, "type": "desktop_pairing_register" });
+        sender
+            .try_send(RelayOutbound::Message(controller_frame.clone()))
+            .unwrap();
+        sender
+            .try_send(RelayOutbound::Message(
+                json!({ "v": 2, "type": "rpc_response" }),
+            ))
+            .unwrap();
+        let (tx_in, mut rx_in) = mpsc::channel(8);
+        let mut config = config();
+        config.relay_url = relay_url;
+        let worker = tokio::spawn(run_loop(
+            config,
+            tx_in,
+            rx_out,
+            sender.shutdown.clone(),
+            sender.socket_mode.clone(),
+        ));
+        let (register, forwarded) = tokio::time::timeout(Duration::from_secs(4), seen_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        let Message::Text(register) = register else {
+            panic!("expected registration");
+        };
+        let Message::Text(forwarded) = forwarded else {
+            panic!("expected v2 frame");
+        };
+        assert_eq!(serde_json::from_str::<Value>(&register).unwrap()["v"], 2);
+        assert_eq!(serde_json::from_str::<Value>(&forwarded).unwrap()["v"], 2);
+        assert_eq!(
+            sender.try_send(RelayOutbound::Message(controller_frame)),
+            Err(RelayTrySendError::ControllerProtocolUnavailable)
+        );
+        let unavailable = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let Some(RelayInbound::Message(text)) = rx_in.recv().await {
+                    let message: Value = serde_json::from_str(&text).unwrap();
+                    if message["code"] == "desktop_controller_unavailable" {
+                        break message;
+                    }
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(unavailable["v"], 2);
+        sender.cancel();
+        let _ = release_tx.send(());
+        worker.await.unwrap();
+        server.await.unwrap();
     }
 
     #[test]

@@ -12,7 +12,10 @@ import { ControllerRouter } from "./controller-router.js";
 import { EnrollmentRegistry, loadEnrollmentRegistryConfig } from "./enrollment-registry.js";
 import { PairingRegistrationHandler } from "./pairing-registration-handler.js";
 import { PairingStore } from "./pairing-store.js";
-import { CONTROLLER_MESSAGE_TYPES } from "./protocol-controller.js";
+import {
+  CONTROLLER_MESSAGE_TYPES, CONTROLLER_SUBPROTOCOL,
+  parseControllerWireJson, parseLegacyWebWireJson,
+} from "./protocol-controller.js";
 import { RelayStateStore } from "./relay-state-store.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -865,7 +868,12 @@ const server = http.createServer(async (req, res) => {
   res.end("not found");
 });
 
-const wss = new WebSocketServer({ noServer: true, maxPayload: MAX_PAYLOAD_BYTES });
+const wss = new WebSocketServer({
+  noServer: true,
+  maxPayload: MAX_PAYLOAD_BYTES,
+  handleProtocols: (protocols) => protocols.has(CONTROLLER_SUBPROTOCOL)
+    ? CONTROLLER_SUBPROTOCOL : false,
+});
 
 server.on("upgrade", (req, socket, head) => {
   if (!sourceAllowed(req)) {
@@ -970,7 +978,7 @@ async function registerDesktop(ws, msg) {
   endpoint.desktop = ws;
   endpoint.desktop_offline_since = null;
   authenticateSocket(ws, "desktop", endpointId);
-  if (controllerRuntime) {
+  if (controllerRuntime && ws.protocol === CONTROLLER_SUBPROTOCOL) {
     ws.controllerEnrollmentCredential = desktopSecret;
     controllerRuntime.router.authenticateControlled({
       socketIdentity: ws.controllerSocketIdentity,
@@ -1166,11 +1174,13 @@ wss.on("connection", (ws, req) => {
   ws.controllerAuthenticated = false;
   ws.controllerEnrollmentCredential = null;
   ws.controllerSocketIdentity = `socket-${crypto.randomBytes(18).toString("base64url")}`;
-  controllerRuntime?.router.addSocket({
-    socketIdentity: ws.controllerSocketIdentity,
-    source: clientIp(req),
-    socket: ws,
-  });
+  if (ws.protocol === CONTROLLER_SUBPROTOCOL) {
+    controllerRuntime?.router.addSocket({
+      socketIdentity: ws.controllerSocketIdentity,
+      source: clientIp(req),
+      socket: ws,
+    });
+  }
   ws.ingressBucket = { started_at: Date.now(), messages: 0, bytes: 0 };
   ws.authTimer = setTimeout(() => {
     if (ws.role === "unknown" && !ws.controllerAuthenticated) {
@@ -1191,14 +1201,24 @@ wss.on("connection", (ws, req) => {
       return;
     }
     let msg;
+    const rawText = String(raw);
     try {
-      msg = JSON.parse(String(raw));
+      // The negotiated controller lane sees strict JSON at every depth. A
+      // WebUI v2 socket preserves legacy duplicate-field handling except for
+      // duplicate version keys, which could cross the protocol boundary.
+      msg = ws.protocol === CONTROLLER_SUBPROTOCOL
+        ? parseControllerWireJson(rawText)
+        : parseLegacyWebWireJson(rawText);
     } catch {
       send(ws, { v: 2, type: "error", code: "bad_json", message: "bad json" });
       return;
     }
     if (!msg || typeof msg !== "object" || Array.isArray(msg)) {
       send(ws, { v: 2, type: "error", code: "bad_message", message: "bad message" });
+      return;
+    }
+    if (msg.v === 1 && ws.protocol !== CONTROLLER_SUBPROTOCOL) {
+      rejectSocket(ws, "unsupported_protocol_version", "protocol version 2 is required");
       return;
     }
     if (msg.v === 1 && CONTROLLER_TYPES.has(msg.type) && !controllerRuntime) {
@@ -1209,7 +1229,8 @@ wss.on("connection", (ws, req) => {
       );
       return;
     }
-    if (msg.v === 1 && controllerRuntime && CONTROLLER_TYPES.has(msg.type)) {
+    if (msg.v === 1 && ws.protocol === CONTROLLER_SUBPROTOCOL
+      && controllerRuntime && CONTROLLER_TYPES.has(msg.type)) {
       void controllerRuntime.router.handle({
         socketIdentity: ws.controllerSocketIdentity,
         message: msg,
@@ -1232,6 +1253,13 @@ wss.on("connection", (ws, req) => {
         "unsupported_protocol_version",
         "protocol version 2 is required",
       );
+      return;
+    }
+    if (ws.protocol === CONTROLLER_SUBPROTOCOL
+      && msg.type !== "desktop_endpoint_register"
+      && msg.type !== "desktop_endpoint_revoke"
+      && ws.role !== "desktop") {
+      rejectSocket(ws, "authentication_required", "authenticate desktop endpoint first");
       return;
     }
     if (hasLegacyTokenAlias(msg)) {
@@ -1271,7 +1299,7 @@ wss.on("connection", (ws, req) => {
     clearTimeout(ws.authTimer);
     ws.authTimer = null;
     ws.controllerEnrollmentCredential = null;
-    if (controllerRuntime) {
+    if (controllerRuntime && ws.protocol === CONTROLLER_SUBPROTOCOL) {
       void controllerRuntime.router.removeSocket(ws.controllerSocketIdentity).catch(() => {});
     }
     const endpoint = endpoints.get(ws.endpointId);

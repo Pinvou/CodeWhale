@@ -6,6 +6,8 @@ use std::time::{Duration, Instant};
 
 const MAX_CAPTURE_BYTES: u64 = 4 * 1024 * 1024;
 const CAPTURE_TRUNCATED_MARKER: &[u8] = b"\n[pinvou: subprocess output truncated]\n";
+#[cfg(windows)]
+const WINDOWS_TASKKILL_TIMEOUT: Duration = Duration::from_secs(2);
 
 pub(crate) struct HiddenCommand;
 
@@ -186,14 +188,13 @@ fn output_with_timeout_inner(
         .stdin(Stdio::null())
         .stdout(Stdio::from(stdout_target))
         .stderr(Stdio::from(stderr_target));
-    let mut child = command
-        .spawn()
-        .map_err(|error| format!("spawn {program} failed: {error}"))?;
+    let (mut child, managed_tree) =
+        spawn_managed_std(command).map_err(|error| format!("spawn {program} failed: {error}"))?;
 
     let started = Instant::now();
     let status = loop {
         if capture_limit_exceeded(&stdout_file) || capture_limit_exceeded(&stderr_file) {
-            let _ = kill_process_tree(child.id());
+            let _ = managed_tree.terminate();
             let _ = child.kill();
             let _ = child.wait();
             let stdout = read_capture(&mut stdout_file);
@@ -210,7 +211,7 @@ fn output_with_timeout_inner(
             }
             Ok(None) => {
                 if kill_tree_on_timeout {
-                    let _ = kill_process_tree(child.id());
+                    let _ = managed_tree.terminate();
                 }
                 let _ = child.kill();
                 let _ = child.wait();
@@ -224,7 +225,7 @@ fn output_with_timeout_inner(
             }
             Err(error) => {
                 if kill_tree_on_timeout {
-                    let _ = kill_process_tree(child.id());
+                    let _ = managed_tree.terminate();
                 }
                 let _ = child.kill();
                 let _ = child.wait();
@@ -237,7 +238,7 @@ fn output_with_timeout_inner(
     // and `try_wait()`. Re-check after completion so overflow is never reported
     // as a silently truncated success.
     if capture_limit_exceeded(&stdout_file) || capture_limit_exceeded(&stderr_file) {
-        let _ = kill_process_tree(child.id());
+        let _ = managed_tree.terminate();
         let stdout = read_capture(&mut stdout_file);
         let stderr = read_capture(&mut stderr_file);
         let detail = subprocess_output_detail(&stdout, &stderr);
@@ -360,18 +361,278 @@ pub(crate) fn std_process_group_leader(command: &mut Command) {
     }
 }
 
-/// 按 pid 杀进程树：Windows 用 taskkill 杀整棵树（脚本会再起子 shell，单杀
-/// 父进程会留下继续运行的子进程）；其他平台按进程组杀（负 pid）——安装进程
-/// 以 `process_group(0)` 独立成组，组杀连 curl | bash / npm 派生的子进程一起
-/// 终止，不孤儿化（评审中危项）。Unix 直接调用 kill(2)，不得 spawn 外部 kill
-/// 可执行文件；pid <= 1 或超出 i32 正数范围时拒绝执行，避免触发 kill(0/-1)
-/// 的进程组或用户级特殊语义。ESRCH 表示目标已退出，按成功处理。
+/// Kernel-owned membership for a subprocess tree created by this module.
+///
+/// On Windows the job intentionally does not use KILL_ON_JOB_CLOSE: successful
+/// launchers may return while a descendant continues. Explicit termination is
+/// reserved for timeout, output overflow, or user cancellation. On Unix the
+/// existing process-group id remains the ownership token.
+#[derive(Clone)]
+pub(crate) struct ManagedProcessTree {
+    #[cfg(windows)]
+    job: std::sync::Arc<WindowsJobObject>,
+    #[cfg(not(windows))]
+    pid: u32,
+}
+
+impl ManagedProcessTree {
+    pub(crate) fn terminate(&self) -> std::io::Result<()> {
+        #[cfg(windows)]
+        {
+            self.job.terminate()
+        }
+        #[cfg(not(windows))]
+        {
+            kill_process_tree(self.pid)
+        }
+    }
+}
+
+pub(crate) fn spawn_managed_std(
+    mut command: Command,
+) -> std::io::Result<(std::process::Child, ManagedProcessTree)> {
+    #[cfg(windows)]
+    {
+        prepare_windows_managed_std_command(&mut command);
+        let job = std::sync::Arc::new(WindowsJobObject::create()?);
+        let mut child = command.spawn()?;
+        if let Err(error) = job.assign_and_resume(child.id()) {
+            let _ = job.terminate();
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error);
+        }
+        Ok((child, ManagedProcessTree { job }))
+    }
+    #[cfg(not(windows))]
+    {
+        std_process_group_leader(&mut command);
+        let child = command.spawn()?;
+        let pid = child.id();
+        Ok((child, ManagedProcessTree { pid }))
+    }
+}
+
+pub(crate) fn spawn_managed_tokio(
+    mut command: tokio::process::Command,
+) -> std::io::Result<(tokio::process::Child, ManagedProcessTree)> {
+    #[cfg(windows)]
+    {
+        prepare_windows_managed_tokio_command(&mut command);
+        let job = std::sync::Arc::new(WindowsJobObject::create()?);
+        let mut child = command.spawn()?;
+        let pid = child.id().ok_or_else(|| {
+            std::io::Error::other("spawned Windows child did not expose a process id")
+        })?;
+        if let Err(error) = job.assign_and_resume(pid) {
+            let _ = job.terminate();
+            let _ = child.start_kill();
+            return Err(error);
+        }
+        Ok((child, ManagedProcessTree { job }))
+    }
+    #[cfg(not(windows))]
+    {
+        tokio_process_group_leader(&mut command);
+        let child = command.spawn()?;
+        let pid = child
+            .id()
+            .ok_or_else(|| std::io::Error::other("spawned child did not expose a process id"))?;
+        Ok((child, ManagedProcessTree { pid }))
+    }
+}
+
+#[cfg(windows)]
+struct WindowsJobObject {
+    // Store the opaque HANDLE value as usize so this guard can be shared with
+    // cancellation tasks. Kernel object handles are valid across threads.
+    handle: usize,
+}
+
+#[cfg(windows)]
+impl WindowsJobObject {
+    fn create() -> std::io::Result<Self> {
+        use windows_sys::Win32::System::JobObjects::CreateJobObjectW;
+
+        // SAFETY: null security/name pointers request an unnamed job with
+        // default security. The returned owned handle is closed by Drop.
+        let handle = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+        if handle.is_null() {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(Self {
+            handle: handle as usize,
+        })
+    }
+
+    fn raw(&self) -> windows_sys::Win32::Foundation::HANDLE {
+        self.handle as windows_sys::Win32::Foundation::HANDLE
+    }
+
+    fn assign_and_resume(&self, pid: u32) -> std::io::Result<()> {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::JobObjects::AssignProcessToJobObject;
+        use windows_sys::Win32::System::Threading::{
+            OpenProcess, PROCESS_SET_QUOTA, PROCESS_TERMINATE,
+        };
+
+        // CREATE_SUSPENDED prevents the root from spawning before assignment.
+        // SAFETY: OpenProcess has no pointer arguments; the returned handle is
+        // closed exactly once below.
+        let process = unsafe { OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, 0, pid) };
+        if process.is_null() {
+            return Err(std::io::Error::last_os_error());
+        }
+        // SAFETY: both job and process handles are valid for this call.
+        let assigned = unsafe { AssignProcessToJobObject(self.raw(), process) };
+        let assign_error = (assigned == 0).then(std::io::Error::last_os_error);
+        // SAFETY: close the owned process handle once assignment is complete.
+        unsafe { CloseHandle(process) };
+        if let Some(error) = assign_error {
+            return Err(error);
+        }
+        resume_windows_process(pid)
+    }
+
+    fn terminate(&self) -> std::io::Result<()> {
+        use windows_sys::Win32::System::JobObjects::TerminateJobObject;
+
+        // SAFETY: self retains a valid job handle. Job membership is tracked
+        // by the kernel, including descendants whose intermediary has exited.
+        if unsafe { TerminateJobObject(self.raw(), 1) } == 0 {
+            Err(std::io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for WindowsJobObject {
+    fn drop(&mut self) {
+        use windows_sys::Win32::Foundation::CloseHandle;
+
+        // No KILL_ON_JOB_CLOSE flag is set: normal completion deliberately
+        // leaves descendants alive. Explicit terminate() is the only kill.
+        // SAFETY: this type exclusively owns the non-null handle.
+        unsafe { CloseHandle(self.raw()) };
+    }
+}
+
+#[cfg(windows)]
+fn prepare_windows_managed_std_command(command: &mut Command) {
+    use std::os::windows::process::CommandExt as _;
+    use windows_sys::Win32::System::Threading::{CREATE_NEW_PROCESS_GROUP, CREATE_SUSPENDED};
+
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    command.creation_flags(CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP | CREATE_SUSPENDED);
+}
+
+#[cfg(windows)]
+fn prepare_windows_managed_tokio_command(command: &mut tokio::process::Command) {
+    use windows_sys::Win32::System::Threading::{CREATE_NEW_PROCESS_GROUP, CREATE_SUSPENDED};
+
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    command.creation_flags(CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP | CREATE_SUSPENDED);
+}
+
+#[cfg(windows)]
+fn resume_windows_process(pid: u32) -> std::io::Result<()> {
+    use windows_sys::Win32::Foundation::{CloseHandle, ERROR_NO_MORE_FILES, GetLastError};
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First, Thread32Next,
+    };
+    use windows_sys::Win32::System::Threading::{OpenThread, ResumeThread, THREAD_SUSPEND_RESUME};
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        // SAFETY: the snapshot handle is checked and closed exactly once.
+        let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) };
+        if snapshot == windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE {
+            return Err(std::io::Error::last_os_error());
+        }
+        let mut entry: THREADENTRY32 = unsafe { std::mem::zeroed() };
+        entry.dwSize = std::mem::size_of::<THREADENTRY32>() as u32;
+        // SAFETY: entry is correctly sized and valid while snapshot is open.
+        let mut has_entry = unsafe { Thread32First(snapshot, &mut entry) } != 0;
+        while has_entry {
+            if entry.th32OwnerProcessID == pid {
+                // SAFETY: OpenThread has no pointer arguments; handle is
+                // closed below after the single ResumeThread call.
+                let thread = unsafe { OpenThread(THREAD_SUSPEND_RESUME, 0, entry.th32ThreadID) };
+                if thread.is_null() {
+                    let error = std::io::Error::last_os_error();
+                    // SAFETY: close the owned snapshot before returning.
+                    unsafe { CloseHandle(snapshot) };
+                    return Err(error);
+                }
+                // SAFETY: thread grants THREAD_SUSPEND_RESUME.
+                let previous = unsafe { ResumeThread(thread) };
+                // SAFETY: close the owned thread handle once.
+                unsafe { CloseHandle(thread) };
+                let result = if previous == u32::MAX {
+                    Err(std::io::Error::last_os_error())
+                } else {
+                    Ok(())
+                };
+                // Resume immediately lets the process create and retire
+                // threads. Do not continue enumerating a now-live process.
+                // SAFETY: close the owned snapshot before returning.
+                unsafe { CloseHandle(snapshot) };
+                return result;
+            }
+            // SAFETY: snapshot and initialized entry remain valid.
+            has_entry = unsafe { Thread32Next(snapshot, &mut entry) } != 0;
+        }
+        let terminal_error = if !has_entry {
+            // SAFETY: read before CloseHandle.
+            let error = unsafe { GetLastError() };
+            (error != ERROR_NO_MORE_FILES).then(|| std::io::Error::from_raw_os_error(error as i32))
+        } else {
+            None
+        };
+        // SAFETY: close the owned snapshot handle once.
+        unsafe { CloseHandle(snapshot) };
+        if let Some(error) = terminal_error {
+            return Err(error);
+        }
+        if Instant::now() >= deadline {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!("suspended process {pid} exposed no resumable thread"),
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// Compatibility termination for a process not created through a managed
+/// spawn helper. Windows pins the root identity and runs bounded `taskkill`,
+/// but this best-effort snapshot cannot prove coverage of double-fork races.
+/// Unix terminates the independently configured process group directly.
+/// Security-sensitive launch/cancel paths must retain [`ManagedProcessTree`].
 pub(crate) fn kill_process_tree(pid: u32) -> std::io::Result<()> {
     if crate::platform::capabilities::is_windows() {
-        external_command(Path::new("taskkill"))
-            .args(["/PID", &pid.to_string(), "/T", "/F"])
-            .output()?;
-        return Ok(());
+        #[cfg(windows)]
+        {
+            // This compatibility path is only for a process not created with
+            // ManagedProcessTree. Holding the root handle pins its identity,
+            // but taskkill's user-space snapshot cannot close double-fork
+            // races. Safety-critical callers must retain and terminate the
+            // managed job returned by spawn_managed_{std,tokio} instead.
+            let Some(_root_identity) = WindowsProcessHandle::open(pid)? else {
+                return Ok(());
+            };
+            let mut taskkill = external_command(Path::new("taskkill"));
+            taskkill.args(["/PID", &pid.to_string(), "/T", "/F"]);
+            let status = run_termination_command_with_timeout(taskkill, WINDOWS_TASKKILL_TIMEOUT)?;
+            return status
+                .success()
+                .then_some(())
+                .ok_or_else(|| std::io::Error::other(format!("taskkill exited with {status}")));
+        }
+        #[cfg(not(windows))]
+        unreachable!("runtime Windows capability cannot be true in a non-Windows build");
     }
     #[cfg(unix)]
     {
@@ -396,6 +657,100 @@ pub(crate) fn kill_process_tree(pid: u32) -> std::io::Result<()> {
         let _ = pid;
     }
     Ok(())
+}
+
+#[cfg(windows)]
+fn run_termination_command_with_timeout(
+    mut command: Command,
+    timeout: Duration,
+) -> std::io::Result<std::process::ExitStatus> {
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let mut child = command.spawn()?;
+    let started = Instant::now();
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(status);
+        }
+        if started.elapsed() >= timeout {
+            // `Child::kill` maps to TerminateProcess on Windows and does not
+            // wait for the helper. Do not call wait() here: the whole point of
+            // this boundary is that a wedged taskkill can never extend the
+            // caller's wall-clock timeout without bound.
+            let kill_error = child.kill().err();
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                match kill_error {
+                    Some(error) => format!(
+                        "process-tree termination helper timed out after {}ms and could not be stopped: {error}",
+                        timeout.as_millis()
+                    ),
+                    None => format!(
+                        "process-tree termination helper timed out after {}ms",
+                        timeout.as_millis()
+                    ),
+                },
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
+#[cfg(windows)]
+struct WindowsProcessHandle {
+    pid: u32,
+    handle: windows_sys::Win32::Foundation::HANDLE,
+}
+
+#[cfg(windows)]
+impl WindowsProcessHandle {
+    fn open(pid: u32) -> std::io::Result<Option<Self>> {
+        use windows_sys::Win32::Foundation::{ERROR_INVALID_PARAMETER, GetLastError};
+        use windows_sys::Win32::System::Threading::{
+            OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
+        };
+
+        if pid <= 1 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("refusing process-tree termination for pid {pid}"),
+            ));
+        }
+        // Holding this handle keeps the process object (and therefore its PID)
+        // alive even after exit. The compatibility taskkill path and tests can
+        // therefore refer to one stable root identity rather than a reused PID.
+        // SAFETY: OpenProcess has no pointer arguments and the owned handle is
+        // closed exactly once by Drop.
+        let handle = unsafe {
+            OpenProcess(
+                PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
+                0,
+                pid,
+            )
+        };
+        if handle.is_null() {
+            // SAFETY: GetLastError is read immediately after OpenProcess.
+            let error = unsafe { GetLastError() };
+            return if error == ERROR_INVALID_PARAMETER {
+                Ok(None)
+            } else {
+                Err(std::io::Error::from_raw_os_error(error as i32))
+            };
+        }
+        Ok(Some(Self { pid, handle }))
+    }
+}
+
+#[cfg(windows)]
+impl Drop for WindowsProcessHandle {
+    fn drop(&mut self) {
+        use windows_sys::Win32::Foundation::CloseHandle;
+
+        // SAFETY: this type exclusively owns the non-null handle.
+        unsafe { CloseHandle(self.handle) };
+    }
 }
 
 pub(crate) struct HiddenTokioCommand;
@@ -437,6 +792,15 @@ mod tests {
     const OUTPUT_FIXTURE_ENV: &str = "PINVOU_PROCESS_OUTPUT_FIXTURE";
     const OUTPUT_FIXTURE_MARKER_ENV: &str = "PINVOU_PROCESS_OUTPUT_FIXTURE_MARKER";
     const OUTPUT_FIXTURE_TEST: &str = "platform::process::tests::command_output_fixture";
+    const DESCENDANT_STARTUP_HANDSHAKE: Duration = Duration::from_secs(20);
+    const DESCENDANT_TIMEOUT_AFTER_STARTUP: Duration = Duration::from_secs(3);
+    static PROCESS_FIXTURE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn lock_process_fixture() -> std::sync::MutexGuard<'static, ()> {
+        PROCESS_FIXTURE_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
 
     fn output_fixture_command(mode: &str) -> Command {
         let mut command = Command::new(std::env::current_exe().unwrap());
@@ -484,28 +848,104 @@ mod tests {
                 std::io::stderr().write_all(&payload).unwrap();
             }
             Ok("descendant") => {
-                let _child = output_fixture_command("descendant_success")
-                    .stdout(Stdio::inherit())
-                    .stderr(Stdio::inherit())
-                    .spawn()
-                    .unwrap();
-                assert!(wait_for_fixture_marker("running", Duration::from_secs(3)));
+                let mut descendant = output_fixture_command("descendant_success");
+                descendant.stdout(Stdio::inherit()).stderr(Stdio::inherit());
+                #[cfg(windows)]
+                {
+                    use std::os::windows::process::CommandExt as _;
+
+                    // Give the successful descendant an independent console
+                    // lifecycle so this fixture models a real helper that
+                    // outlives its completed launcher while retaining the
+                    // launcher's capture handles.
+                    const DETACHED_PROCESS: u32 = 0x0000_0008;
+                    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+                    descendant.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
+                }
+                let _child = descendant.spawn().unwrap();
+                assert!(wait_for_fixture_marker(
+                    "running",
+                    DESCENDANT_STARTUP_HANDSHAKE
+                ));
                 println!("descendant-started");
             }
             Ok("descendant_wait") => {
-                let mut child = output_fixture_command("descendant_timeout")
+                #[cfg(windows)]
+                {
+                    // The intermediary exits after creating the long-lived
+                    // grandchild. A later ToolHelp-only walk cannot recover
+                    // G -> vanished C -> root, while Job Object membership
+                    // remains authoritative.
+                    let status = output_fixture_command("descendant_intermediary")
+                        .stdout(Stdio::inherit())
+                        .stderr(Stdio::inherit())
+                        .spawn()
+                        .unwrap()
+                        .wait()
+                        .unwrap();
+                    assert!(status.success());
+                    if let Some(intermediary_exited) = fixture_marker("intermediary-exited") {
+                        std::fs::write(intermediary_exited, b"exited").unwrap();
+                    }
+                    assert!(wait_for_fixture_marker(
+                        "identity-bound",
+                        DESCENDANT_STARTUP_HANDSHAKE
+                    ));
+                    std::thread::sleep(Duration::from_secs(60));
+                }
+                #[cfg(not(windows))]
+                {
+                    let mut child = output_fixture_command("descendant_timeout")
+                        .stdout(Stdio::inherit())
+                        .stderr(Stdio::inherit())
+                        .spawn()
+                        .unwrap();
+                    assert!(wait_for_fixture_marker(
+                        "running",
+                        DESCENDANT_STARTUP_HANDSHAKE
+                    ));
+                    child.wait().unwrap();
+                }
+            }
+            #[cfg(windows)]
+            Ok("descendant_intermediary") => {
+                let _grandchild = output_fixture_command("descendant_timeout")
                     .stdout(Stdio::inherit())
                     .stderr(Stdio::inherit())
                     .spawn()
                     .unwrap();
-                assert!(wait_for_fixture_marker("running", Duration::from_secs(3)));
-                child.wait().unwrap();
+                assert!(wait_for_fixture_marker(
+                    "running",
+                    DESCENDANT_STARTUP_HANDSHAKE
+                ));
             }
-            Ok("descendant_success") | Ok("descendant_timeout") => {
+            Ok("descendant_success") => {
+                if let Some(pid) = fixture_marker("pid") {
+                    std::fs::write(pid, std::process::id().to_string()).unwrap();
+                }
                 if let Some(running) = fixture_marker("running") {
                     std::fs::write(running, b"running").unwrap();
                 }
                 std::thread::sleep(Duration::from_secs(5));
+                if let Some(finished) = fixture_marker("finished") {
+                    std::fs::write(finished, b"finished").unwrap();
+                }
+            }
+            Ok("descendant_timeout") => {
+                if let Some(pid) = fixture_marker("pid") {
+                    std::fs::write(pid, std::process::id().to_string()).unwrap();
+                }
+                if let Some(running) = fixture_marker("running") {
+                    std::fs::write(running, b"running").unwrap();
+                }
+                // Stay alive beyond the launcher's full cold-start allowance
+                // so the outer timeout always exercises process-tree cleanup.
+                #[cfg(windows)]
+                std::thread::sleep(Duration::from_secs(60));
+                #[cfg(not(windows))]
+                std::thread::sleep(
+                    DESCENDANT_STARTUP_HANDSHAKE + DESCENDANT_TIMEOUT_AFTER_STARTUP * 2,
+                );
                 if let Some(finished) = fixture_marker("finished") {
                     std::fs::write(finished, b"finished").unwrap();
                 }
@@ -607,20 +1047,107 @@ mod tests {
         assert!(command.get_args().next().is_none());
     }
 
+    #[cfg(windows)]
     #[test]
-    fn timeout_kills_self_contained_process_tree() {
+    fn termination_helper_timeout_is_bounded() {
+        let _fixture_lock = lock_process_fixture();
+        let mut wedged_helper = HiddenCommand::new("ping");
+        wedged_helper.args(["-t", "127.0.0.1"]);
+        let started = Instant::now();
+
+        let error = run_termination_command_with_timeout(wedged_helper, Duration::from_millis(250))
+            .expect_err("a wedged termination helper should hit its deadline");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "a wedged taskkill helper exceeded its fixed deadline"
+        );
+    }
+
+    #[cfg(windows)]
+    fn assert_windows_process_exited(process: &WindowsProcessHandle, timeout: Duration) {
+        use windows_sys::Win32::Foundation::WAIT_OBJECT_0;
+        use windows_sys::Win32::System::Threading::{GetExitCodeProcess, WaitForSingleObject};
+
+        let timeout_ms = u32::try_from(timeout.as_millis()).unwrap_or(u32::MAX);
+        // SAFETY: the test owns a valid process handle for both calls.
+        assert_eq!(
+            unsafe { WaitForSingleObject(process.handle, timeout_ms) },
+            WAIT_OBJECT_0,
+            "process {} did not signal",
+            process.pid
+        );
+        let mut exit_code = 259_u32; // STILL_ACTIVE
+        // SAFETY: exit_code is writable and the process handle remains valid.
+        assert_ne!(
+            unsafe { GetExitCodeProcess(process.handle, &mut exit_code) },
+            0,
+            "GetExitCodeProcess failed for {}: {}",
+            process.pid,
+            std::io::Error::last_os_error()
+        );
+        assert_ne!(exit_code, 259, "process {} is still active", process.pid);
+    }
+
+    #[cfg(windows)]
+    fn wait_for_path(path: &Path, timeout: Duration) -> bool {
+        let started = Instant::now();
+        while !path.exists() && started.elapsed() < timeout {
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        path.exists()
+    }
+
+    #[test]
+    fn timeout_kills_managed_process_tree() {
+        let _fixture_lock = lock_process_fixture();
         let temporary = tempfile::tempdir().unwrap();
         let marker = temporary.path().join("descendant-marker");
         let running = marker.with_extension("running");
+        #[cfg(windows)]
+        let descendant_pid = marker.with_extension("pid");
+        #[cfg(windows)]
+        let identity_bound = marker.with_extension("identity-bound");
+        #[cfg(windows)]
+        let intermediary_exited = marker.with_extension("intermediary-exited");
         let finished = marker.with_extension("finished");
         let mut command = output_fixture_command("descendant_wait");
         command.env(OUTPUT_FIXTURE_MARKER_ENV, &marker);
-        let started = Instant::now();
-        let error = output_with_timeout_and_kill_tree(command, Duration::from_secs(3)).unwrap_err();
+        #[cfg(windows)]
+        let identity_waiter = std::thread::spawn(move || {
+            assert!(
+                wait_for_path(&descendant_pid, DESCENDANT_STARTUP_HANDSHAKE),
+                "descendant pid was not published before timeout"
+            );
+            let pid = std::fs::read_to_string(&descendant_pid)
+                .expect("read timeout descendant pid")
+                .trim()
+                .parse::<u32>()
+                .expect("parse timeout descendant pid");
+            let identity = WindowsProcessHandle::open(pid)
+                .expect("open timeout descendant identity")
+                .expect("timeout descendant exited before identity binding");
+            std::fs::write(&identity_bound, b"bound").expect("publish bound identity marker");
+            assert_windows_process_exited(&identity, Duration::from_secs(35));
+        });
+        // Starting two nested copies of the large test binary can exceed a
+        // short timeout on a cold Windows machine. The fixture has an explicit
+        // startup handshake; give that setup its full budget, then exercise a
+        // real timeout while the confirmed descendant remains alive.
+        let timeout = DESCENDANT_STARTUP_HANDSHAKE + DESCENDANT_TIMEOUT_AFTER_STARTUP;
+        let error = output_with_timeout_and_kill_tree(command, timeout).unwrap_err();
 
         assert!(error.contains("timed out after"));
-        assert!(started.elapsed() < Duration::from_secs(5));
         assert!(running.exists(), "descendant did not start before timeout");
+        #[cfg(windows)]
+        assert!(
+            intermediary_exited.exists(),
+            "short-lived intermediary had not exited before job termination"
+        );
+        #[cfg(windows)]
+        identity_waiter.join().expect("identity waiter panicked");
+        #[cfg(not(windows))]
         std::thread::sleep(Duration::from_secs(6));
         assert!(
             !finished.exists(),
@@ -727,6 +1254,7 @@ mod tests {
 
     #[test]
     fn output_capture_does_not_deadlock_when_buffers_are_large() {
+        let _fixture_lock = lock_process_fixture();
         let output = output_with_timeout_and_kill_tree(
             output_fixture_command("flood"),
             Duration::from_secs(5),
@@ -740,7 +1268,7 @@ mod tests {
 
     #[test]
     fn output_capture_limit_terminates_process_tree() {
-        let started = Instant::now();
+        let _fixture_lock = lock_process_fixture();
         let error = output_with_timeout_and_kill_tree(
             output_fixture_command("overflow"),
             Duration::from_secs(5),
@@ -748,11 +1276,11 @@ mod tests {
         .unwrap_err();
 
         assert!(error.contains("output exceeded"), "{error}");
-        assert!(started.elapsed() < Duration::from_secs(5));
     }
 
     #[test]
     fn completed_process_cannot_bypass_output_capture_limit() {
+        let _fixture_lock = lock_process_fixture();
         let error = output_with_timeout_and_kill_tree(
             output_fixture_command("overflow_exit"),
             Duration::from_secs(5),
@@ -764,17 +1292,45 @@ mod tests {
 
     #[test]
     fn completed_parent_does_not_wait_for_descendant_capture_handles() {
+        let _fixture_lock = lock_process_fixture();
         let temporary = tempfile::tempdir().unwrap();
         let marker = temporary.path().join("descendant-marker");
+        let running = marker.with_extension("running");
         let finished = marker.with_extension("finished");
         let mut command = output_fixture_command("descendant");
         command.env(OUTPUT_FIXTURE_MARKER_ENV, &marker);
-        let started = Instant::now();
-        let output = output_with_timeout_and_kill_tree(command, Duration::from_secs(5)).unwrap();
+        // Starting another copy of the large test binary can take several
+        // seconds on a cold Windows machine. Measure from the descendant's
+        // own running marker so startup time cannot masquerade as waiting for
+        // the inherited capture handles to close.
+        let (marker_sender, marker_receiver) = std::sync::mpsc::sync_channel(1);
+        let marker_waiter = std::thread::spawn(move || {
+            let started = Instant::now();
+            while !running.exists() && started.elapsed() < DESCENDANT_STARTUP_HANDSHAKE {
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            let _ = marker_sender.send(running.exists().then(Instant::now));
+        });
+        // The outer launcher and the descendant are separate copies of the
+        // large test binary. Give their explicit startup handshake enough
+        // room, while the assertion below still measures the real contract
+        // strictly from the descendant's running marker.
+        let output = output_with_timeout_and_kill_tree(command, Duration::from_secs(30)).unwrap();
+        let marker_seen_at = marker_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap()
+            .expect("descendant did not start before launcher exit");
+        marker_waiter.join().unwrap();
 
-        assert!(output.status.success());
+        assert!(
+            output.status.success(),
+            "fixture failed with {:?}: stdout={} stderr={}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
         assert!(String::from_utf8_lossy(&output.stdout).contains("descendant-started"));
-        assert!(started.elapsed() < Duration::from_secs(3));
+        assert!(marker_seen_at.elapsed() < Duration::from_secs(3));
         let wait_started = Instant::now();
         while !finished.exists() && wait_started.elapsed() < Duration::from_secs(7) {
             std::thread::sleep(Duration::from_millis(50));

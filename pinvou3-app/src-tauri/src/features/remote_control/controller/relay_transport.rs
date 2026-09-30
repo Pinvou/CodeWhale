@@ -23,7 +23,7 @@ use super::protocol::{
     validate_controller_runtime_message_json,
 };
 use crate::features::remote_control::relay_client::{
-    MAX_RELAY_FRAME_BYTES, ReconnectBackoff, relay_websocket_config,
+    MAX_RELAY_FRAME_BYTES, ReconnectBackoff, controller_websocket_request, relay_websocket_config,
 };
 
 const CONTROL_QUEUE_CAPACITY: usize = 64;
@@ -169,7 +169,10 @@ pub(crate) enum ControllerSendError {
     Serialization,
     Unauthenticated,
     InvalidFrame(String),
-    FrameTooLarge { bytes: usize, limit: usize },
+    FrameTooLarge {
+        bytes: usize,
+        limit: usize,
+    },
     ByteBudgetExhausted,
     QueueFull(FramePriority),
     /// E2E-02：transport 的 `remote_control_generation` 已经被绑定过，或已被
@@ -632,11 +635,15 @@ async fn run_transport(
 ) {
     let mut reconnect = ReconnectBackoff::default();
     loop {
-        let connection = connect_async_with_config(
-            &config.relay_url,
-            Some(relay_websocket_config(MAX_CONTROLLER_INBOUND_TEXT_BYTES)),
-            false,
-        );
+        let connection = async {
+            let request = controller_websocket_request(&config.relay_url)?;
+            connect_async_with_config(
+                request,
+                Some(relay_websocket_config(MAX_CONTROLLER_INBOUND_TEXT_BYTES)),
+                false,
+            )
+            .await
+        };
         tokio::pin!(connection);
         let connected = tokio::select! {
             biased;
@@ -917,7 +924,8 @@ mod tests {
     use futures_util::{SinkExt, StreamExt};
     use serde_json::json;
     use tokio::net::TcpListener;
-    use tokio_tungstenite::accept_async;
+    use tokio_tungstenite::accept_hdr_async;
+    use tokio_tungstenite::tungstenite::http::{HeaderValue, header::SEC_WEBSOCKET_PROTOCOL};
 
     use super::*;
     use crate::features::remote_control::controller::{
@@ -1385,7 +1393,14 @@ mod tests {
             let mut requests = Vec::new();
             for _ in 0..2 {
                 let (stream, _) = listener.accept().await.unwrap();
-                let mut socket = accept_async(stream).await.unwrap();
+                let mut socket = accept_hdr_async(stream, |request: &tokio_tungstenite::tungstenite::handshake::server::Request,
+                    mut response: tokio_tungstenite::tungstenite::handshake::server::Response| {
+                    assert_eq!(request.headers().get(SEC_WEBSOCKET_PROTOCOL).unwrap(),
+                        super::super::protocol::CONTROLLER_SUBPROTOCOL);
+                    response.headers_mut().insert(SEC_WEBSOCKET_PROTOCOL,
+                        HeaderValue::from_static(super::super::protocol::CONTROLLER_SUBPROTOCOL));
+                    Ok(response)
+                }).await.unwrap();
                 let message = socket.next().await.unwrap().unwrap();
                 let Message::Text(text) = message else {
                     panic!("expected controller text frame");
