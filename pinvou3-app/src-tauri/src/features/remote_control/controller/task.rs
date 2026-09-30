@@ -1329,12 +1329,38 @@ pub(crate) trait RemoteTaskEventSink: Send + Sync {
 pub(crate) struct RemoteTaskEvent {
     pub(crate) task_id: String,
     pub(crate) session_id: String,
+    pub(crate) generation: String,
+    pub(crate) model_source: RemoteTaskModelSource,
     pub(crate) status: String,
     pub(crate) sequence: String,
     pub(crate) transition_sequence: u64,
     pub(crate) outcome_unknown: bool,
     pub(crate) terminal_reason: Option<String>,
     pub(crate) result_digest: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum RemoteTaskModelSource {
+    ControlledDevice,
+    ControllerTemporary,
+}
+
+impl RemoteTaskModelSource {
+    pub(crate) fn from_record(record: &RemoteTaskRecord) -> Option<Self> {
+        match record.model_source.as_str() {
+            TASK_MODEL_SOURCE_CONTROLLED => Some(Self::ControlledDevice),
+            TASK_MODEL_SOURCE_TEMPORARY => Some(Self::ControllerTemporary),
+            _ => None,
+        }
+    }
+
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::ControlledDevice => TASK_MODEL_SOURCE_CONTROLLED,
+            Self::ControllerTemporary => TASK_MODEL_SOURCE_TEMPORARY,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -1770,20 +1796,52 @@ impl RemoteTaskService {
 
     pub(crate) fn cancel(&self, task_id: &str, now_b: u64) -> Result<CancelOutcome> {
         let outcome = self.ledger.request_cancel(task_id, now_b)?;
-        match &outcome {
+        self.finish_cancel_outcome(&outcome);
+        Ok(outcome)
+    }
+
+    /// B-local stop admission. The caller holds the controlled-device owner
+    /// lock; this method only mutates the authoritative ledger and must not
+    /// publish until the owner lock is released.
+    pub(crate) fn prepare_local_cancel(
+        &self,
+        lease: &LeaseContext,
+        task_id: &str,
+        now_b: u64,
+    ) -> Result<CancelOutcome> {
+        let _guard = self.session_open_lock.lock();
+        let record = self.ledger.record(task_id)?;
+        if record.lease != TaskLeaseBinding::from_context(lease) {
+            return Err(error("task_binding_stale"));
+        }
+        let Some(remote_ref) = self.sessions.remote_ref_for(&record.session_id) else {
+            return Err(error("task_binding_stale"));
+        };
+        if self
+            .sessions
+            .session_for(&remote_ref, &lease.remote_control_generation)
+            .as_deref()
+            != Some(record.session_id.as_str())
+        {
+            return Err(error("task_binding_stale"));
+        }
+        self.ledger.request_cancel(task_id, now_b)
+    }
+
+    pub(crate) fn finish_cancel_outcome(&self, outcome: &CancelOutcome) {
+        match outcome {
             CancelOutcome::CancelledBeforeDispatch(record)
             | CancelOutcome::CancellationRequested(record)
             | CancelOutcome::AlreadyTerminal(record) => self.publish(record),
         }
-        if let CancelOutcome::CancelledBeforeDispatch(record) = &outcome {
+        if let CancelOutcome::CancelledBeforeDispatch(record) = outcome {
             self.cleanup(record, "cancelled".to_owned());
         }
-        if let CancelOutcome::CancellationRequested(record) = &outcome {
+        if let CancelOutcome::CancellationRequested(record) = outcome {
             if let Some(token) = self.cancel_tokens.lock().get(&record.task_id) {
                 token.cancel();
             }
         }
-        Ok(outcome)
     }
 
     pub(crate) fn interrupt_generation(
@@ -1904,10 +1962,14 @@ impl RemoteTaskService {
 
     fn publish_with_reason(&self, record: &RemoteTaskRecord, reason: String) {
         let journal = self.hooks.journal.lock().clone();
-        if let Some(journal) = journal {
+        if let (Some(journal), Some(model_source)) =
+            (journal, RemoteTaskModelSource::from_record(record))
+        {
             journal.publish_task_event(&RemoteTaskEvent {
                 task_id: record.task_id.clone(),
                 session_id: record.session_id.clone(),
+                generation: record.lease.remote_control_generation.clone(),
+                model_source,
                 status: record.wire_status().to_owned(),
                 sequence: record.sequence.to_string(),
                 transition_sequence: record.transition_sequence,
@@ -2696,6 +2758,55 @@ mod tests {
             record.terminal_reason.as_deref(),
             Some("cancelled"),
             "the executor-confirmed terminal must be recorded"
+        );
+    }
+
+    #[test]
+    fn local_stop_requires_current_lease_and_bound_b_session() {
+        let (service, hooks) = service(RecordingExecutor::ok());
+        service.set_session_provisioner(Arc::new(FakeSessions::default()));
+        let session_id = service
+            .ensure_remote_session("ref-chat", "Chat", false, "generation-0001")
+            .unwrap();
+        assert_eq!(session_id, "session-0001");
+        let body = payload(&session_id, "task-0001", "client-0001", &digest(1));
+        admitted(&service, &body, 1_000);
+        assert_eq!(
+            service
+                .prepare_local_cancel(&context("generation-0002"), "task-0001", 1_100)
+                .unwrap_err()
+                .code,
+            "task_binding_stale"
+        );
+        assert_eq!(
+            service.status("task-0001").unwrap().wire_status(),
+            "admitted"
+        );
+        let outcome = service
+            .prepare_local_cancel(&context("generation-0001"), "task-0001", 1_200)
+            .unwrap();
+        assert!(matches!(outcome, CancelOutcome::CancelledBeforeDispatch(_)));
+        service.finish_cancel_outcome(&outcome);
+        assert_eq!(
+            service.status("task-0001").unwrap().wire_status(),
+            "cancelled"
+        );
+        let projected = hooks.events.lock();
+        let event = projected.last().unwrap();
+        assert_eq!(event.generation, "generation-0001");
+        assert_eq!(event.model_source, RemoteTaskModelSource::ControlledDevice);
+        assert_eq!(
+            serde_json::to_value(event).unwrap()["modelSource"],
+            "controlled_device"
+        );
+        drop(projected);
+        service.clear_generation_sessions("generation-0001");
+        assert_eq!(
+            service
+                .prepare_local_cancel(&context("generation-0001"), "task-0001", 1_300)
+                .unwrap_err()
+                .code,
+            "task_binding_stale"
         );
     }
 

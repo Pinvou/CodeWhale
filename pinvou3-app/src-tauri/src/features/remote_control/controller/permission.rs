@@ -286,12 +286,10 @@ impl PermissionAuthority {
             ..request
         };
         let mut pending = self.pending.lock();
-        if pending
-            .values()
-            .any(|existing| {
-                existing.binding.task_id == binding.task_id && existing.state == PermissionState::Pending
-            })
-        {
+        if pending.values().any(|existing| {
+            existing.binding.task_id == binding.task_id
+                && existing.state == PermissionState::Pending
+        }) {
             return Err(error("permission_task_busy"));
         }
         if pending.len() >= MAX_PENDING_PERMISSIONS {
@@ -387,19 +385,21 @@ impl PermissionAuthority {
             entry.decision = Some(PermissionDecision::Deny);
             entry.resolved_at_ms = Some(now_b);
             entry.resolved_reason = Some("expired".to_owned());
-            return Ok(DispatchCommit::Rejected { code: "permission_expired" });
+            return Ok(DispatchCommit::Rejected {
+                code: "permission_expired",
+            });
         }
         match entry.state {
             PermissionState::AllowedAwaitingDispatch => {
                 entry.dispatch_state = DispatchState::Dispatched;
                 Ok(DispatchCommit::Committed)
             }
-            PermissionState::Denied => {
-                Ok(DispatchCommit::Rejected { code: "permission_denied" })
-            }
-            PermissionState::Expired => {
-                Ok(DispatchCommit::Rejected { code: "permission_expired" })
-            }
+            PermissionState::Denied => Ok(DispatchCommit::Rejected {
+                code: "permission_denied",
+            }),
+            PermissionState::Expired => Ok(DispatchCommit::Rejected {
+                code: "permission_expired",
+            }),
             PermissionState::Pending => Ok(DispatchCommit::Rejected {
                 code: "permission_not_decided",
             }),
@@ -422,17 +422,8 @@ impl PermissionAuthority {
 
     /// B stop / refresh / disconnect / task cancel: deny everything pending for
     /// the task. Returns how many requests changed state.
-    pub(crate) fn deny_all_for_task(
-        &self,
-        task_id: &str,
-        reason: &str,
-        now_b: u64,
-    ) -> usize {
-        self.deny_where(
-            |entry| entry.binding.task_id == task_id,
-            reason,
-            now_b,
-        )
+    pub(crate) fn deny_all_for_task(&self, task_id: &str, reason: &str, now_b: u64) -> usize {
+        self.deny_where(|entry| entry.binding.task_id == task_id, reason, now_b)
     }
 
     pub(crate) fn deny_all_for_connection(
@@ -478,10 +469,7 @@ impl PermissionAuthority {
             .filter(|entry| entry.binding.task_id == task_id)
             .map(Self::view_locked)
             .collect();
-        views.sort_by(|left, right| {
-            left.permission_request_id
-                .cmp(&right.permission_request_id)
-        });
+        views.sort_by(|left, right| left.permission_request_id.cmp(&right.permission_request_id));
         views
     }
 
@@ -531,8 +519,8 @@ impl PermissionAuthority {
             task_id: entry.binding.task_id.clone(),
             operation_type: entry.request.operation_type.clone(),
             risk_level: entry.request.risk_level.clone(),
-            target_scope: entry.request.target_scope.clone(),
-            preview: entry.request.preview.clone(),
+            target_scope: sanitize_scope(&entry.request.target_scope),
+            preview: sanitize_preview(&entry.request.preview),
             expires_at_ms: entry.request.expires_at_ms,
             state: match entry.state {
                 PermissionState::Pending => "pending",
@@ -563,48 +551,35 @@ impl RemoteTaskPermissionScope for PermissionAuthority {
     }
 }
 
-/// Strips credentials, absolute host paths and header values from anything the
-/// B UI or the wire preview may show.
+/// A preview is unrestricted caller text, so no nonempty source text is safe
+/// to project. The fixed sentinel is stable across request storage and UI
+/// projection; the empty preview remains empty.
 pub(crate) fn sanitize_preview(preview: &str) -> String {
-    let mut out = String::with_capacity(preview.len().min(MAX_PREVIEW_CHARS));
-    for (index, token) in preview.split_whitespace().enumerate() {
-        if index > 0 {
-            out.push(' ');
-        }
-        out.push_str(&sanitize_token(token));
-        if out.chars().count() >= MAX_PREVIEW_CHARS {
-            break;
-        }
+    if preview.is_empty() {
+        return String::new();
     }
-    out.chars().take(MAX_PREVIEW_CHARS).collect()
+    if matches!(preview, "[PATH]" | "[REDACTED]") {
+        return preview.to_owned();
+    }
+    "[REDACTED]".to_owned()
 }
 
 fn sanitize_scope(scope: &str) -> String {
-    scope
-        .chars()
-        .filter(|ch| !ch.is_control())
-        .take(MAX_SCOPE_CHARS)
-        .collect()
-}
-
-fn sanitize_token(token: &str) -> String {
-    let trimmed = token.trim_matches(|ch: char| {
-        matches!(ch, '\'' | '"' | '`' | ',' | ';' | '(' | ')' | '[' | ']' | '@')
-    });
-    let lowered = trimmed.to_ascii_lowercase();
-    if lowered.starts_with("sk-")
-        || lowered.starts_with("bearer")
-        || lowered.starts_with("authorization:")
-        || lowered.starts_with("api_key")
-        || lowered.starts_with("token=")
-        || lowered.starts_with("cookie:")
-    {
-        return "[REDACTED]".to_owned();
+    let scope = scope.trim();
+    // request() stores this value and view_locked() projects it again. Keep
+    // both redaction sentinels stable instead of changing their meaning on a
+    // second pass.
+    if matches!(scope, "[PATH]" | "[REDACTED]") {
+        return scope.to_owned();
     }
-    if looks_like_path(trimmed) {
+    // This value comes from a free-form Tauri input, not an authenticated
+    // workspace registry. Even a plausible workspace prefix is not proof of
+    // authorization, so never echo any caller-controlled scope verbatim.
+    if looks_like_path(scope) || scope.contains('/') || scope.contains('\\') || scope.contains(':')
+    {
         return "[PATH]".to_owned();
     }
-    token.to_owned()
+    "[REDACTED]".to_owned()
 }
 
 fn looks_like_path(value: &str) -> bool {
@@ -702,10 +677,7 @@ mod tests {
                 .code,
             "permission_authority_invalid"
         );
-        assert_eq!(
-            authority.view("permission-0001").unwrap().state,
-            "pending"
-        );
+        assert_eq!(authority.view("permission-0001").unwrap().state, "pending");
     }
 
     #[test]
@@ -790,9 +762,7 @@ mod tests {
         let authority = PermissionAuthority::default();
         register(&authority, "permission-0001", 1_000);
         assert_eq!(
-            authority
-                .commit_dispatch("permission-0001", 1_100)
-                .unwrap(),
+            authority.commit_dispatch("permission-0001", 1_100).unwrap(),
             DispatchCommit::Rejected {
                 code: "permission_not_decided"
             }
@@ -808,9 +778,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(
-            authority
-                .commit_dispatch("permission-0001", 1_300)
-                .unwrap(),
+            authority.commit_dispatch("permission-0001", 1_300).unwrap(),
             DispatchCommit::Committed
         );
         assert_eq!(
@@ -834,9 +802,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(
-            authority
-                .commit_dispatch("permission-0001", 1_200)
-                .unwrap(),
+            authority.commit_dispatch("permission-0001", 1_200).unwrap(),
             DispatchCommit::Rejected {
                 code: "permission_denied"
             }
@@ -947,11 +913,99 @@ mod tests {
                 1_000,
             )
             .unwrap();
-        assert!(!view.preview.contains("sk-live-123"));
-        assert!(!view.preview.to_ascii_lowercase().contains("bearer"));
-        assert!(!view.preview.contains("secret.txt"));
-        assert!(view.preview.contains("[REDACTED]"));
-        assert!(view.preview.contains("[PATH]"));
+        assert_eq!(view.preview, "[REDACTED]");
+        assert_eq!(view.target_scope, "[REDACTED]");
+    }
+
+    #[test]
+    fn preview_request_view_and_serde_never_echo_free_text() {
+        const OPAQUE_KEY: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        for (raw, expected) in [
+            ("", ""),
+            ("ordinary request description", "[REDACTED]"),
+            ("sk_live_ABC123", "[REDACTED]"),
+            (OPAQUE_KEY, "[REDACTED]"),
+            ("apiKey=private-value", "[REDACTED]"),
+            (r"C:\Users\me\private.txt", "[REDACTED]"),
+            ("[PATH]", "[PATH]"),
+            ("[REDACTED]", "[REDACTED]"),
+        ] {
+            assert_eq!(sanitize_preview(raw), expected);
+            assert_eq!(sanitize_preview(expected), expected);
+            let authority = PermissionAuthority::default();
+            let mut input = request(61_000);
+            input.preview = raw.to_owned();
+            let initial = authority
+                .request(
+                    PermissionBinding::new(&lease(), "task-0001", "permission-0001").unwrap(),
+                    input,
+                    1_000,
+                )
+                .unwrap();
+            assert_eq!(initial.preview, expected);
+            let read = authority.view("permission-0001").unwrap();
+            assert_eq!(read.preview, expected);
+            let dto = serde_json::to_value(&read).unwrap();
+            assert_eq!(dto["preview"], expected);
+            let serialized = dto.to_string();
+            if raw != expected {
+                assert!(!serialized.contains(raw));
+            }
+        }
+    }
+
+    #[test]
+    fn target_scope_projection_never_echoes_unverified_caller_input() {
+        const OPAQUE_KEY: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        for (raw, expected) in [
+            ("workspace-0001/docs/report.md", "[PATH]"),
+            ("workspace_abc/report.md", "[PATH]"),
+            ("workspace-0001", "[REDACTED]"),
+            (r"C:\Users\me\private.txt", "[PATH]"),
+            ("workspace-0001/../../C:/private.txt", "[PATH]"),
+            ("workspace-0001/credentials.json", "[PATH]"),
+            ("token=private-value", "[REDACTED]"),
+            ("sk-live-private-value", "[REDACTED]"),
+            ("sk_live_ABC123", "[REDACTED]"),
+            (OPAQUE_KEY, "[REDACTED]"),
+            ("arbitrary-opaque-id", "[REDACTED]"),
+            ("workspace-0001/sk_live_ABC123", "[PATH]"),
+            ("workspace-0001/0123456789abcdef0123456789abcdef", "[PATH]"),
+            ("[PATH]", "[PATH]"),
+            ("[REDACTED]", "[REDACTED]"),
+        ] {
+            assert_eq!(sanitize_scope(raw), expected, "first pass scope={raw}");
+            assert_eq!(
+                sanitize_scope(expected),
+                expected,
+                "second pass scope={raw}"
+            );
+            let authority = PermissionAuthority::default();
+            let mut input = request(61_000);
+            input.target_scope = raw.to_owned();
+            let view = authority
+                .request(
+                    PermissionBinding::new(&lease(), "task-0001", "permission-0001").unwrap(),
+                    input,
+                    1_000,
+                )
+                .unwrap();
+            assert_eq!(view.target_scope, expected, "scope={raw}");
+            assert_eq!(
+                authority.view("permission-0001").unwrap().target_scope,
+                expected
+            );
+            let dto = serde_json::to_string(&view).unwrap();
+            assert_eq!(
+                serde_json::to_value(&view).unwrap()["targetScope"],
+                expected,
+                "serialized scope={raw}"
+            );
+            assert!(!dto.contains("private-value"));
+            assert!(!dto.contains("private.txt"));
+            assert!(!dto.contains("ABC123"));
+            assert!(!dto.contains(OPAQUE_KEY));
+        }
     }
 
     #[test]
@@ -1047,9 +1101,7 @@ mod tests {
         assert_eq!(scope.deny_pending_for_task("task-0001"), 0);
         assert_eq!(authority.view("permission-0001").unwrap().state, "denied");
         assert_eq!(
-            authority
-                .commit_dispatch("permission-0001", 1_200)
-                .unwrap(),
+            authority.commit_dispatch("permission-0001", 1_200).unwrap(),
             DispatchCommit::Rejected {
                 code: "permission_denied"
             }

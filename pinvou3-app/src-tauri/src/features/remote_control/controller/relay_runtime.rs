@@ -40,6 +40,35 @@ use super::resume::{
 };
 
 const REGISTRATION_TIMEOUT_MS: u64 = 30_000;
+const MAX_PAIRING_CODE_TTL_MS: u64 = 5 * 60_000;
+
+// Relay signs a wall-clock expiry, whereas the B lifecycle owner and UI
+// countdown use one local monotonic clock. Convert once at receipt; never
+// expose either absolute clock origin to the WebView.
+fn pairing_deadline_b(wire_expiry_ms: u64, wall_now_ms: u64, now_b: u64) -> Result<u64, String> {
+    let remaining = wire_expiry_ms
+        .checked_sub(wall_now_ms)
+        .filter(|remaining| *remaining > 0)
+        .ok_or_else(|| "pairing_code_expired".to_owned())?
+        .min(MAX_PAIRING_CODE_TTL_MS);
+    now_b
+        .checked_add(remaining)
+        .ok_or_else(|| "pairing_registration_invalid".to_owned())
+}
+
+fn wall_clock_millis() -> Result<u64, String> {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|elapsed| u64::try_from(elapsed.as_millis()).ok())
+        .ok_or_else(|| "pairing_clock_invalid".to_owned())
+}
+
+// Keep the transport's existing host projection at one narrow callsite.
+// The controlled state owner constructs each status before it is published.
+fn emit_controlled_status(app: &AppHandle, status: &ControlledStatus) {
+    let _ = app.emit(CONTROLLED_STATUS_EVENT, status);
+}
 /// 端点通道就绪等待：单次上限与重试间隔（整体最多 3 次尝试）。
 const ENDPOINT_READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 const ENDPOINT_READY_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
@@ -443,12 +472,18 @@ impl ControlledRelayWorker {
             )
             .await
             {
-                Ok(registration) => {
+                Ok(mut registration) => {
+                    let now_b = controlled_monotonic_millis();
+                    registration.expires_at_ms = pairing_deadline_b(
+                        registration.expires_at_ms,
+                        wall_clock_millis()?,
+                        now_b,
+                    )?;
                     let status = manager
-                        .complete_registration(self.operation.clone(), registration, 0)
+                        .complete_registration(self.operation.clone(), registration, now_b)
                         .map_err(|error| error.code.to_owned())?;
-                    log_controlled_event("registered", "waiting_connection");
-                    let _ = self.app.emit(CONTROLLED_STATUS_EVENT, &status);
+                    log_controlled_event("registered", "waiting_for_pairing");
+                    emit_controlled_status(&self.app, &status);
                     return Ok(status);
                 }
                 Err(error) => {
@@ -477,7 +512,7 @@ impl ControlledRelayWorker {
         }
         let bounded = sanitize_error(error);
         if let Ok(status) = manager.fail_operation(self.operation.clone(), bounded) {
-            let _ = self.app.emit(CONTROLLED_STATUS_EVENT, &status);
+            emit_controlled_status(&self.app, &status);
         }
     }
 
@@ -529,9 +564,12 @@ impl ControlledRelayWorker {
                                 &message,
                             ) {
                                 ControlledResumeOutcome::Failed => break 'serve,
-                                ControlledResumeOutcome::Completed => {}
-                                ControlledResumeOutcome::Ignored
-                                | ControlledResumeOutcome::Progressed => {}
+                                ControlledResumeOutcome::Completed
+                                | ControlledResumeOutcome::Progressed => {
+                                    let status = manager.poll_watchdog(controlled_monotonic_millis());
+                                    emit_controlled_status(&self.app, &status);
+                                }
+                                ControlledResumeOutcome::Ignored => {}
                             }
                             continue 'serve;
                         }
@@ -618,6 +656,20 @@ impl ControlledRelayWorker {
                             if let Err(error) = self.channel.try_send(frame) {
                                 self.fail_handshake(&error);
                                 return;
+                            }
+                            if message.get("type").and_then(Value::as_str)
+                                == Some("controller_pairing_reserved")
+                            {
+                                let manager = self.app.state::<ControlledDeviceManager>();
+                                match manager.mark_handshake_pending(self.operation.clone()) {
+                                    Ok(status) => {
+                                        emit_controlled_status(&self.app, &status);
+                                    }
+                                    Err(error) => {
+                                        self.fail_handshake(error.code);
+                                        return;
+                                    }
+                                }
                             }
                         }
                         Ok(None) => {}
@@ -725,7 +777,7 @@ impl ControlledRelayWorker {
             Ok(status) => {
                 self.app.state::<ControlledLaneState>().clear();
                 self.app.state::<ControlledOutboundState>().clear();
-                let _ = self.app.emit(CONTROLLED_STATUS_EVENT, &status);
+                emit_controlled_status(&self.app, &status);
                 true
             }
             Err(_) => false,
@@ -793,14 +845,14 @@ impl ControlledRelayWorker {
         let trust = load_relay_trust_config(|name| std::env::var(name).ok())
             .map_err(|_| RELAY_TRUST_UNCONFIGURED.to_owned())?;
         let manager = self.app.state::<ControlledDeviceManager>();
-        let status = manager
-            .mark_claimed(self.operation.clone())
-            .map_err(|error| error.code.to_owned())?;
-        let _ = self.app.emit(CONTROLLED_STATUS_EVENT, &status);
-        driver
+        let commit = driver
             .accept_reserved(message, &trust)
-            .map(Some)
-            .map_err(|code| code.to_owned())
+            .map_err(str::to_owned)?;
+        let status = manager
+            .mark_pairing_reserved(self.operation.clone())
+            .map_err(|error| error.code.to_owned())?;
+        emit_controlled_status(&self.app, &status);
+        Ok(Some(commit))
     }
 
     /// 应用 `controller_joined`：构造 B 端租约（含双方一致的传输指纹）并进入
@@ -834,7 +886,7 @@ impl ControlledRelayWorker {
         let status = manager
             .complete_connected(self.operation.clone(), lease)
             .map_err(|error| error.code.to_owned())?;
-        let _ = self.app.emit(CONTROLLED_STATUS_EVENT, &status);
+        emit_controlled_status(&self.app, &status);
         Ok(())
     }
 
@@ -846,7 +898,7 @@ impl ControlledRelayWorker {
         if let Ok(status) =
             manager.fail_operation(self.operation.clone(), HANDSHAKE_FAILED.to_owned())
         {
-            let _ = self.app.emit(CONTROLLED_STATUS_EVENT, &status);
+            emit_controlled_status(&self.app, &status);
         }
         HANDSHAKE_FAILED.to_owned()
     }
@@ -862,7 +914,7 @@ impl ControlledRelayWorker {
         }
         let bounded = sanitize_error(error);
         if let Ok(status) = manager.fail_operation(self.operation.clone(), bounded) {
-            let _ = self.app.emit(CONTROLLED_STATUS_EVENT, &status);
+            emit_controlled_status(&self.app, &status);
         }
     }
 
@@ -1671,6 +1723,26 @@ fn sanitize_error(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn relay_wall_expiry_becomes_a_bounded_local_monotonic_deadline() {
+        assert_eq!(
+            pairing_deadline_b(1_030_000, 1_000_000, 70).unwrap(),
+            30_070
+        );
+        assert_eq!(
+            pairing_deadline_b(2_000_000, 1_000_000, 70).unwrap(),
+            70 + MAX_PAIRING_CODE_TTL_MS
+        );
+        assert_eq!(
+            pairing_deadline_b(1_000_000, 1_000_000, 70).unwrap_err(),
+            "pairing_code_expired"
+        );
+        assert_eq!(
+            pairing_deadline_b(999_999, 1_000_000, 70).unwrap_err(),
+            "pairing_code_expired"
+        );
+    }
     use crate::features::remote_control::controller::controlling_handshake::ControllingHandshake;
     use crate::features::remote_control::controller::crypto::{CodeWrapKeyPair, HandshakeKeyPair};
     use crate::features::remote_control::controller::test_support::PairingFixture;
@@ -1680,8 +1752,8 @@ mod tests {
     #[test]
     fn relay_log_lines_are_scoped_and_keep_the_legacy_controlled_prefix() {
         assert_eq!(
-            controlled_log_line("registered", "waiting_connection"),
-            "[controlled] stage=registered detail=waiting_connection"
+            controlled_log_line("registered", "waiting_for_pairing"),
+            "[controlled] stage=registered detail=waiting_for_pairing"
         );
         assert_eq!(
             controller_log_line("connect_failed", "pairing_code_invalid"),
@@ -2707,7 +2779,8 @@ mod tests {
                 now_b,
             )
             .unwrap();
-        manager.mark_claimed(operation.clone()).unwrap();
+        manager.mark_pairing_reserved(operation.clone()).unwrap();
+        manager.mark_handshake_pending(operation.clone()).unwrap();
         manager
             .complete_connected(
                 operation.clone(),

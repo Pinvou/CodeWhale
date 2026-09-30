@@ -52,16 +52,40 @@ function bindProxy(logic, state, remoteRef, sessionId) {
 test('B status consumes only current Rust ControlledStatus fields', async () => {
   const { feature, state } = installFeature((command) => {
     if (command === 'desktop_remote_controlled_start') return Promise.resolve({
-      status: 'waiting_connection', generation: 'generation-current',
-      pairingCode: '2345678', pairingExpiresAtMs: 1800000000000,
+      status: 'waiting_for_pairing', generation: 'generation-current',
+      pairingCode: '2345678', pairingRemainingMs: 30_000,
       kind: 'connected', remoteControlGeneration: 'generation-old', expiresAtMs: 1,
     });
     return undefined;
   });
   await feature.controlledStart('Device', []);
-  assert.equal(state.desktopRemoteControl.controlledDevice.status, 'waiting_connection');
+  assert.equal(state.desktopRemoteControl.controlledDevice.status, 'waiting_for_pairing');
   assert.equal(state.desktopRemoteControl.controlledDevice.generation, 'generation-current');
-  assert.equal(state.desktopRemoteControl.controlledDevice.expiresAtMs, 1800000000000);
+  assert.equal(state.desktopRemoteControl.controlledDevice.pairingRemainingMs, 30_000);
+  assert.equal('pairingExpiresAtMs' in state.desktopRemoteControl.controlledDevice, false);
+});
+
+test('B workspace authorization exists only in the start transaction, never a live invoke', () => {
+  const rustRoot = path.join(app, 'src-tauri', 'src');
+  const rust = (...parts) => fs.readFileSync(path.join(rustRoot, ...parts), 'utf8');
+  const command = rust('app', 'commands', 'desktop_remote_controlled.rs');
+  const owner = rust('features', 'remote_control', 'controller', 'controlled.rs');
+  const lib = rust('lib.rs');
+  const feature = read('platform/tauri/bridge/desktop-remote-control.js');
+  const domain = read('platform/tauri/bridge.js');
+  for (const source of [command, owner, lib, feature, domain]) {
+    assert.equal(source.includes('desktop_remote_controlled_authorize_workspace'), false);
+    assert.equal(source.includes('controlledAuthorizeWorkspace'), false);
+  }
+  assert.match(command, /desktop_remote_controlled_start[\s\S]*?workspace_requests\(workspaces\)\?[\s\S]*?manager\.start\(device_name\.as_deref\(\), workspaces\)/);
+});
+
+test('permission scope is redacted by the Rust authority before the UI projection', () => {
+  const permission = fs.readFileSync(path.join(app, 'src-tauri', 'src',
+    'features', 'remote_control', 'controller', 'permission.rs'), 'utf8');
+  assert.match(permission, /fn view_locked\(entry: &PendingPermission\) -> PermissionView \{[\s\S]*?target_scope: sanitize_scope\(&entry\.request\.target_scope\)/);
+  assert.match(permission, /fn sanitize_scope\(scope: &str\) -> String/);
+  assert.doesNotMatch(permission, /target_scope: entry\.request\.target_scope\.clone\(\)/);
 });
 
 test('B local send projects only the current snake_case task_status receipt', async () => {
@@ -81,6 +105,39 @@ test('B local send projects only the current snake_case task_status receipt', as
   await feature.controlledTaskSend('session-1', 'hello');
   assert.equal(state.desktopRemoteControl.controlledTasks[0].taskId, 'task-1');
   assert.equal(state.desktopRemoteControl.controlledTasks[0].status, 'admitted');
+});
+
+test('B local stop is a task-only command during reconnect and rejects a replaced generation', async () => {
+  let finishStop;
+  const pending = new Promise((resolve) => { finishStop = resolve; });
+  const { feature, calls, state, logic } = installFeature((command) => {
+    if (command === 'desktop_remote_controlled_task_stop') return pending;
+    return undefined;
+  });
+  state.desktopRemoteControl = logic.applyControlledStatus(state.desktopRemoteControl, {
+    status: 'reconnecting', generation: 'generation-1', connectedDurationMs: 1_000,
+  });
+  state.desktopRemoteControl = logic.applyControlledSession(state.desktopRemoteControl, {
+    sessionId: 'session-1', sessionRef: 'ref-1', generation: 'generation-1',
+  });
+  state.desktopRemoteControl = logic.applyControlledTaskEvent(state.desktopRemoteControl, {
+    taskId: 'task-1', sessionId: 'session-1', generation: 'generation-1',
+    modelSource: 'controller_temporary', status: 'running',
+  });
+  assert.equal(state.desktopRemoteControl.controlledTasks[0].modelSource, 'controller_temporary');
+  const stopping = feature.controlledStopTask('task-1');
+  assert.deepEqual(JSON.parse(JSON.stringify(calls.at(-1))), {
+    command: 'desktop_remote_controlled_task_stop', args: { taskId: 'task-1' },
+  });
+  state.desktopRemoteControl = logic.beginControlledIntent(state.desktopRemoteControl, true);
+  state.desktopRemoteControl = logic.applyControlledStatus(state.desktopRemoteControl, {
+    intent: state.desktopRemoteControl.intents.controlled,
+    status: 'registering', generation: 'generation-2',
+  });
+  finishStop({ taskId: 'task-1', sessionId: 'session-1', generation: 'generation-1',
+    modelSource: 'controller_temporary', status: 'cancel_requested' });
+  await stopping;
+  assert.equal(state.desktopRemoteControl.controlledTasks.length, 0);
 });
 
 test('new A task forwards only explicit local binding and non-sensitive intent', async () => {
@@ -402,7 +459,7 @@ test('A capability read drops changed bindings and non-increasing revisions', as
 
 test('B start reconciles an identity-less terminal only from current authoritative status', async () => {
   let finishStart;
-  let authoritative = { status: 'waiting_connection', generation: 'generation-new', pairingCode: '1234567' };
+  let authoritative = { status: 'waiting_for_pairing', generation: 'generation-new', pairingCode: '1234567' };
   const { feature, state, listeners, logic } = installFeature((command) => {
     if (command === 'desktop_remote_controlled_start') return new Promise((resolve) => { finishStart = resolve; });
     if (command === 'desktop_remote_controlled_status') return Promise.resolve(authoritative);
@@ -411,7 +468,7 @@ test('B start reconciles an identity-less terminal only from current authoritati
   state.desktopRemoteControl = logic.applyControlledStatus(state.desktopRemoteControl, { status: 'stopped' });
   const pending = feature.controlledStart('Device', []);
   listeners.get('desktop-remote-controlled-status')({ payload: { status: 'stopped' } });
-  finishStart({ status: 'waiting_connection', generation: 'generation-new', pairingCode: '1234567' });
+  finishStart({ status: 'waiting_for_pairing', generation: 'generation-new', pairingCode: '1234567' });
   await pending;
   assert.equal(state.desktopRemoteControl.controlledFenced, false);
   assert.equal(state.desktopRemoteControl.controlledDevice.pairingCode, '1234567');
@@ -425,7 +482,7 @@ test('B start reconciles an identity-less terminal only from current authoritati
   assert.equal(state.desktopRemoteControl.controlledOpenIntent, state.desktopRemoteControl.intents.controlled);
   listeners.get('desktop-remote-controlled-status')({ payload: { status: 'stopped' } });
   assert.equal(state.desktopRemoteControl.controlledTerminatedOpenIntent, state.desktopRemoteControl.intents.controlled);
-  finishStart({ status: 'waiting_connection', generation: 'generation-dead', pairingCode: '7654321' });
+  finishStart({ status: 'waiting_for_pairing', generation: 'generation-dead', pairingCode: '7654321' });
   await dead;
   assert.equal(state.desktopRemoteControl.controlledFenced, true);
   assert.notEqual(state.desktopRemoteControl.controlledDevice.pairingCode, '7654321');
@@ -483,10 +540,10 @@ test('a terminal event during authoritative status query blocks stale live recov
   b.state.desktopRemoteControl = b.logic.applyControlledStatus(b.state.desktopRemoteControl, { status: 'stopped' });
   const bPending = b.feature.controlledStart('Device', []);
   b.listeners.get('desktop-remote-controlled-status')({ payload: { status: 'stopped' } });
-  finishB({ status: 'waiting_connection', generation: 'generation-new' });
+  finishB({ status: 'waiting_for_pairing', generation: 'generation-new' });
   await Promise.resolve();
   b.listeners.get('desktop-remote-controlled-status')({ payload: { status: 'stopped' } });
-  finishBStatus({ status: 'waiting_connection', generation: 'generation-new', pairingCode: '1234567' });
+  finishBStatus({ status: 'waiting_for_pairing', generation: 'generation-new', pairingCode: '1234567' });
   await bPending;
   assert.equal(b.state.desktopRemoteControl.controlledFenced, true);
 

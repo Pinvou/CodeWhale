@@ -33,7 +33,7 @@ use crate::features::remote_control::controller::protocol::{
 use crate::features::remote_control::controller::task::{
     AdmissionOutcome, CancelOutcome, ChatTurnExecutor, CodeTurnExecutor, ControllerTaskEventSink,
     RemoteSessionLane, RemoteSessionProvisioner, RemoteTaskHooks, RemoteTaskLedger,
-    RemoteTaskService, RemoteTaskTicket, TASK_MODE_CHAT, TASK_MODE_CODE,
+    RemoteTaskModelSource, RemoteTaskService, RemoteTaskTicket, TASK_MODE_CHAT, TASK_MODE_CODE,
     TASK_MODEL_SOURCE_CONTROLLED, TASK_MODEL_SOURCE_TEMPORARY,
 };
 #[cfg(test)]
@@ -157,9 +157,12 @@ impl ControllerTaskEventSink for TaskEventBridge {
         let history = self
             .app
             .state::<Arc<super::desktop_remote_journal::DesktopRemoteJournalRuntime>>();
-        let Ok((lease, _)) = self.app.state::<
+        // B may finish or cancel an already admitted local task while the
+        // encrypted lane is reconnecting. Keep the authoritative B journal;
+        // forwarding to A remains gated by the connected transport below.
+        let Ok(lease) = self.app.state::<
             crate::features::remote_control::controller::controlled::ControlledDeviceManager,
-        >().live_runtime_context() else { return; };
+        >().with_local_cancel_lease(Clone::clone) else { return; };
         let runtime = self.app.state::<Arc<DesktopRemoteTaskRuntime>>();
         let Some(remote_ref) = runtime.service().remote_ref_for(session_id) else {
             return;
@@ -594,15 +597,79 @@ pub async fn desktop_remote_controlled_task_send(
     let service = runtime.service();
     let input = resolve_local_controlled_input(
         &service,
-        session_id,
+        session_id.clone(),
         text,
-        lease.remote_control_generation,
+        lease.remote_control_generation.clone(),
     )?;
-    app.state::<crate::app::desktop_remote_composition::DesktopLocalExecutionPort>()
+    let result = app
+        .state::<crate::app::desktop_remote_composition::DesktopLocalExecutionPort>()
         .submit_local(input)
         .await
-        .map(|result| result.status)
-        .map_err(|error| error.code().to_owned())
+        .map_err(|error| error.code().to_owned())?;
+    let mut status = result.status;
+    let task_id = status
+        .get("task_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "task_status_invalid".to_owned())?;
+    let record = service
+        .status(task_id)
+        .map_err(|error| error.code.to_owned())?;
+    if record.session_id != session_id
+        || record.lease.remote_control_generation != lease.remote_control_generation
+        || controlled
+            .live_runtime_context()
+            .map(|(current, _)| current != lease)
+            .unwrap_or(true)
+    {
+        return Err("task_generation_stale".to_owned());
+    }
+    let model_source = RemoteTaskModelSource::from_record(&record)
+        .ok_or_else(|| "task_model_source_invalid".to_owned())?;
+    status["modelSource"] = serde_json::json!(model_source.as_str());
+    status["generation"] = serde_json::json!(lease.remote_control_generation);
+    Ok(status)
+}
+
+/// B-local task stop. The WebView chooses only a task ID; the current lease,
+/// generation and B-authoritative session are verified under the lifecycle
+/// owner lock before the ledger accepts cancellation. This never substitutes
+/// permission denial for task cancellation.
+#[tauri::command]
+pub fn desktop_remote_controlled_task_stop(
+    app: AppHandle,
+    task_id: String,
+    controlled: State<'_, ControlledDeviceManager>,
+    runtime: RuntimeState<'_>,
+) -> Result<Value, String> {
+    ensure_supported(&controlled)?;
+    let service = runtime.service();
+    let outcome = controlled
+        .with_local_cancel_lease(|lease| {
+            service.prepare_local_cancel(lease, &task_id, monotonic_millis())
+        })
+        .map_err(|error| error.code.to_owned())?
+        .map_err(|error| error.code.to_owned())?;
+    service.finish_cancel_outcome(&outcome);
+    let (record, status) = match &outcome {
+        CancelOutcome::CancelledBeforeDispatch(record) | CancelOutcome::AlreadyTerminal(record) => {
+            (record, record.wire_status())
+        }
+        CancelOutcome::CancellationRequested(record) => (record, "cancel_requested"),
+    };
+    let model_source = RemoteTaskModelSource::from_record(record)
+        .ok_or_else(|| "task_model_source_invalid".to_owned())?;
+    let projection = serde_json::json!({
+        "taskId": record.task_id,
+        "sessionId": record.session_id,
+        "generation": record.lease.remote_control_generation,
+        "modelSource": model_source.as_str(),
+        "status": status,
+        "cancelRequested": record.cancel_requested,
+    });
+    if matches!(outcome, CancelOutcome::CancellationRequested(_)) {
+        let _ = app.emit(TASK_STATUS_EVENT, &projection);
+    }
+    Ok(projection)
 }
 
 /// A/B 已完成各自可信映射与请求准备后共同进入的最终准入门禁。
@@ -763,6 +830,8 @@ fn admit_and_dispatch(
             .map_err(|error| error.code.to_owned()),
         AdmissionOutcome::Admitted(ticket) => {
             let task_id = ticket.record.task_id.clone();
+            let projected_model_source = RemoteTaskModelSource::from_record(&ticket.record)
+                .ok_or_else(|| "task_model_source_invalid".to_owned())?;
             if model_source == TASK_MODEL_SOURCE_TEMPORARY {
                 temporary_model_gate(&model_source, &task_id, models)?;
                 crate::features::remote_control::controller::relay_runtime::log_controlled_event(
@@ -794,6 +863,8 @@ fn admit_and_dispatch(
                     serde_json::json!({
                         "taskId": &task_id,
                         "sessionId": session_id,
+                        "generation": &lease.remote_control_generation,
+                        "modelSource": projected_model_source.as_str(),
                         "status": "admitted",
                         "text": &prompt,
                         "messageIndex": baseline_messages,
@@ -1637,6 +1708,8 @@ mod tests {
         let event = RemoteTaskEvent {
             task_id: "task-0001".into(),
             session_id: "session-0001".into(),
+            generation: "generation-0001".into(),
+            model_source: RemoteTaskModelSource::ControllerTemporary,
             status: "succeeded".into(),
             sequence: "1".into(),
             transition_sequence: 2,
@@ -1648,6 +1721,7 @@ mod tests {
         assert!(!encoded.contains(r"C:\"));
         assert!(!encoded.contains("api_key"));
         assert!(encoded.contains("task-0001"));
+        assert!(encoded.contains("controller_temporary"));
     }
 
     #[test]
