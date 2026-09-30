@@ -31,13 +31,11 @@ use crate::features::{
     knowledge,
     monitor::MonitorState,
     pet::{pet_window, selected_pet},
-    remote_control::controller::{
-        capabilities::CapabilitySnapshotManager,
-        controlled::ControlledDeviceManager,
-        controlling::ControllingDeviceManager,
-        permission::PermissionAuthority,
-    },
     remote_control::RemoteControlManager,
+    remote_control::controller::{
+        capabilities::CapabilitySnapshotManager, controlled::ControlledDeviceManager,
+        controlling::ControllingDeviceManager, permission::PermissionAuthority,
+    },
     remote_knowledge::RemoteKnowledgeService,
     scheduled::tasks as scheduled_tasks,
     sessions::SessionStore,

@@ -14,8 +14,8 @@ use tauri::State;
 use crate::features::remote_control::controller::controlled::ControlledDeviceManager;
 use crate::features::remote_control::controller::protocol::LeaseContext;
 use crate::features::remote_control::controller::temporary_model::{
-    export_decision, project_saved_model, SharedTemporaryModelStore, TemporaryModelBinding,
-    TemporaryModelError, TemporaryModelPackageV1, TemporaryModelStore,
+    SharedTemporaryModelStore, TemporaryModelBinding, TemporaryModelError, TemporaryModelPackageV1,
+    TemporaryModelStore, export_decision, project_saved_model,
 };
 use crate::platform::prefs::{SavedModel, UserPrefs};
 
@@ -71,9 +71,12 @@ pub(crate) fn build_task_package(
     task_id: &str,
     package_id: &str,
 ) -> Result<TemporaryModelPackageV1, TemporaryModelError> {
-    let epoch = live.lease_epoch.parse::<u64>().map_err(|_| TemporaryModelError {
-        code: "model_binding_invalid",
-    })?;
+    let epoch = live
+        .lease_epoch
+        .parse::<u64>()
+        .map_err(|_| TemporaryModelError {
+            code: "model_binding_invalid",
+        })?;
     let package = TemporaryModelPackageV1 {
         package_id: package_id.to_owned(),
         binding: TemporaryModelBinding {
@@ -118,8 +121,8 @@ pub fn desktop_remote_model_install(
     let live = controlled
         .live_lease()
         .map_err(|error| error.code.to_owned())?;
-    let package =
-        TemporaryModelPackageV1::from_wire_value(&package).map_err(|error| error.code.to_owned())?;
+    let package = TemporaryModelPackageV1::from_wire_value(&package)
+        .map_err(|error| error.code.to_owned())?;
     store
         .install(package, &live, &task_id, monotonic_millis())
         .map_err(|error| error.code.to_owned())?;
@@ -169,7 +172,7 @@ pub(crate) fn shared_model_store() -> SharedTemporaryModelStore {
 mod tests {
     use super::*;
     use crate::platform::prefs::{
-        ImageCapabilityOverride, ModelPreset, MODEL_PROVIDER_KIND_CODING_PLAN,
+        ImageCapabilityOverride, MODEL_PROVIDER_KIND_CODING_PLAN, ModelPreset,
     };
 
     fn model(id: &str) -> SavedModel {
