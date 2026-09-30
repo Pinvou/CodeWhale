@@ -1139,8 +1139,8 @@ exercised by tests until a host wires it into its exit path.) Every
 resolution of an approval whose `approval.required` event was published is
 itself published as `approval.decided` so clients can clear pending UI. (If
 the `approval.required` event itself fails to publish, the pending
-registration is rolled back, the tool call is denied, and the turn ends in
-error with no `approval.decided` — no client ever saw the request.) A
+registration is rolled back, the tool call never executes, and the turn ends
+in error with no `approval.decided` — no client ever saw the request.) A
 resolution forced by an
 interrupt, shutdown, or engine exit carries `decision: "deny"` plus
 `interrupted: true` (and no user selection was made); a decision the user
