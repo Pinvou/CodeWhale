@@ -96,12 +96,26 @@ pub enum InitialHistory {
 /// rather than failing the whole load. Intake surfaces that receive a
 /// caller-declared set route through [`validate_workspace_roots`] instead,
 /// which rejects rather than drops.
+///
+/// The additional entries are capped at [`MAX_WORKSPACE_ROOTS`], earliest
+/// declared wins (review #484/CodeWhale round-24 B24-4). Validating intakes
+/// reject an over-cap declaration with an error, but the load faces (the
+/// state reader's resume resolution, engine init, `Op::SyncSession`,
+/// `exec --resume`, ACP `session/load`) consume sets that never passed one —
+/// an unbounded hand-edited row turned every write-tool call into O(n²) dedup
+/// plus per-root canonicalization, a permanent stall the cap exists to bound.
+/// A declaration that passed intake can never be truncated here: the intake
+/// cap counts declared roots and this cap counts the same entries, so a
+/// full 64-root declaration survives whole behind the primary.
 pub fn normalize_workspace_roots(cwd: &Path, roots: &[PathBuf]) -> Vec<PathBuf> {
     if cwd.as_os_str().is_empty() || !cwd.is_absolute() {
         return Vec::new();
     }
     let mut normalized = vec![cwd.to_path_buf()];
     for root in roots {
+        if normalized.len() > MAX_WORKSPACE_ROOTS {
+            break;
+        }
         if root.as_os_str().is_empty() || !root.is_absolute() {
             continue;
         }
@@ -1736,6 +1750,15 @@ impl Runtime {
     }
 
     /// Evaluates execution policy and dispatches a tool call.
+    ///
+    /// This lane is a roots intake like any other (review #484/CodeWhale
+    /// round-24 B24-3): a caller-declared set is admitted whole or rejected
+    /// with an error, never silently reshaped — the old `take(64)`
+    /// truncated the tail, and `/` or a primary-ancestor root reached the
+    /// policy context unvalidated. The cwd slot gets the same doctrine: the
+    /// `null → current_dir() → "."` fallback chain upstream can hand a
+    /// relative or empty spelling here, and a relative workspace cannot
+    /// head a root set.
     pub async fn invoke_tool(
         &self,
         call: ToolCall,
@@ -1743,6 +1766,13 @@ impl Runtime {
         cwd: &Path,
         workspace_roots: &[PathBuf],
     ) -> Result<Value> {
+        if cwd.as_os_str().is_empty() || !cwd.is_absolute() {
+            return Err(anyhow::anyhow!(
+                "invoke_tool workspace slot must be an absolute directory; \
+                 got an empty or relative cwd"
+            ));
+        }
+        let workspace_roots = validate_workspace_roots(cwd, workspace_roots)?;
         let fallback_cwd = cwd.display().to_string();
         let (command, raw_policy_cwd, execution_kind) = call.execution_subject(&fallback_cwd);
         // Judge the same effective cwd execution resolves (review
@@ -1767,25 +1797,13 @@ impl Runtime {
             path: policy_path.as_deref(),
             ask_for_approval: approval_mode,
             sandbox_mode: None,
-            // The caller supplies the session's root set (hint map on the
-            // app-server bridge); an empty slice keeps the byte-identical
-            // single-root posture for callers that have none. The declared
-            // set is the only roots intake with no validator in front of it,
-            // so it at least goes through the shape normalizer the engine
-            // lane applies — empty/relative entries dropped, primary
-            // prepended, deduped — instead of reaching the policy raw, and
-            // is capped like a validating intake: an unbounded declaration
-            // here is an O(n²) dedup per tool call, client-repeatable
-            // (round-23 SF23-2).
-            workspace_roots: normalize_workspace_roots(
-                cwd,
-                workspace_roots
-                    .iter()
-                    .take(MAX_WORKSPACE_ROOTS)
-                    .cloned()
-                    .collect::<Vec<_>>()
-                    .as_slice(),
-            ),
+            // Validated intake (round-24 B24-3): over-cap, filesystem-root,
+            // primary-ancestor, and non-absolute declarations are rejected
+            // with an error before any policy work; the surviving set comes
+            // back normalized — primary prepended, deduped, capped exactly
+            // like every other consumer. An empty slice still keeps the
+            // byte-identical single-root posture for callers that have none.
+            workspace_roots,
         })?;
         let precheck = policy_precheck_payload(&decision, &command, &policy_cwd, execution_kind);
         let response_id = format!("tool-{}", Uuid::new_v4());
@@ -3866,6 +3884,50 @@ mod tests {
     }
 
     #[test]
+    fn normalize_workspace_roots_caps_additional_entries_earliest_declared_wins() {
+        // Round-24 B24-4: the load faces consume sets that never passed an
+        // intake, so the shape normalizer itself must bound them — an
+        // unbounded hand-edited row made every write-tool call an O(n²)
+        // dedup plus per-root canonicalization.
+        let cwd = Path::new("/repo/main");
+        let roots: Vec<PathBuf> = (0..MAX_WORKSPACE_ROOTS + 10)
+            .map(|index| PathBuf::from(format!("/repo/r{index}")))
+            .collect();
+        let normalized = normalize_workspace_roots(cwd, &roots);
+        assert_eq!(
+            normalized.len(),
+            MAX_WORKSPACE_ROOTS + 1,
+            "the primary plus at most MAX_WORKSPACE_ROOTS additional entries survive"
+        );
+        assert_eq!(normalized[0], cwd.to_path_buf());
+        assert_eq!(normalized[1], PathBuf::from("/repo/r0"));
+        assert_eq!(
+            normalized[MAX_WORKSPACE_ROOTS],
+            PathBuf::from(format!("/repo/r{}", MAX_WORKSPACE_ROOTS - 1)),
+            "earliest declared wins; the tail past the cap is dropped"
+        );
+    }
+
+    #[test]
+    fn a_full_validated_declaration_is_never_truncated_by_the_normalizer() {
+        // Round-24 B24-4: the intake cap counts declared roots, the
+        // normalizer cap counts the same entries — a declaration that
+        // passed intake must survive the shape normalizer byte-identical.
+        let cwd = Path::new("/repo/main");
+        let roots: Vec<PathBuf> = (0..MAX_WORKSPACE_ROOTS)
+            .map(|index| PathBuf::from(format!("/repo/r{index}")))
+            .collect();
+        let validated = validate_workspace_roots(cwd, &roots)
+            .expect("a full MAX_WORKSPACE_ROOTS declaration is admitted whole");
+        assert_eq!(validated.len(), MAX_WORKSPACE_ROOTS + 1);
+        assert_eq!(
+            normalize_workspace_roots(cwd, &roots),
+            validated,
+            "the intake's returned set and the raw normalizer must agree at the cap"
+        );
+    }
+
+    #[test]
     fn spawn_thread_rejects_a_non_absolute_root_instead_of_dropping_it() {
         // Regression pin, round-17: an empty-string root accepted at intake
         // used to reach the persisted set and then boundary_roots(), where
@@ -4730,6 +4792,81 @@ mod tests {
             )
             .await
             .expect("invoke tool");
+        assert_eq!(result["status"], "approval_required", "{result}");
+    }
+
+    #[tokio::test]
+    async fn invoke_tool_rejects_degenerate_root_intake_declarations() {
+        // Round-24 B24-3: this face was the one roots intake with no
+        // validator in front of it — an over-cap declaration was silently
+        // truncated and `/` (or a primary ancestor) reached the policy
+        // context; a relative cwd slot fell back to the process directory
+        // spelling. All three classes now fail loud before any policy work.
+        let runtime = runtime_with_exec_rules(vec![]);
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let cwd = workspace.path().join("ws");
+        std::fs::create_dir_all(&cwd).expect("workspace dir");
+        let cwd = cwd.canonicalize().expect("canonical cwd");
+
+        let err = runtime
+            .invoke_tool(
+                local_shell_call("echo hi", None),
+                AskForApproval::Never,
+                Path::new("."),
+                &[],
+            )
+            .await
+            .expect_err("a relative cwd slot must be rejected");
+        assert!(
+            err.to_string().contains("absolute"),
+            "the rejection names the absolute-cwd requirement: {err}"
+        );
+
+        let err = runtime
+            .invoke_tool(
+                local_shell_call("echo hi", None),
+                AskForApproval::Never,
+                &cwd,
+                &[PathBuf::from("/")],
+            )
+            .await
+            .expect_err("a filesystem-root declaration must be rejected");
+        assert!(
+            err.to_string().contains("filesystem"),
+            "the rejection names the filesystem-root hazard: {err}"
+        );
+
+        let over_cap: Vec<PathBuf> = (0..MAX_WORKSPACE_ROOTS + 1)
+            .map(|index| cwd.join(format!("r{index}")))
+            .collect();
+        let err = runtime
+            .invoke_tool(
+                local_shell_call("echo hi", None),
+                AskForApproval::Never,
+                &cwd,
+                &over_cap,
+            )
+            .await
+            .expect_err("an over-cap declaration must be rejected");
+        assert!(
+            err.to_string().contains("cap"),
+            "the rejection names the intake cap: {err}"
+        );
+
+        // A full validated declaration survives: the same set at exactly
+        // the cap goes through and reaches the ordinary approval gate.
+        let at_cap: Vec<PathBuf> = (0..MAX_WORKSPACE_ROOTS)
+            .map(|index| cwd.join(format!("r{index}")))
+            .collect();
+        let result = runtime
+            .invoke_tool(
+                local_shell_call("echo hi", None),
+                AskForApproval::OnRequest,
+                &cwd,
+                &at_cap,
+            )
+            .await
+            .expect("a full validated declaration is admitted whole");
         assert_eq!(result["status"], "approval_required", "{result}");
     }
 
