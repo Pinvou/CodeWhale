@@ -443,9 +443,7 @@ test("junction or symlink ancestors and final state links are rejected", async (
     if (["EPERM", "EACCES", "ENOTSUP"].includes(error?.code)) return;
     throw error;
   }
-  await assert.rejects(openStateStore(statePath), (error) => [
-    "relay_state_file_unsafe", "relay_state_unavailable",
-  ].includes(error?.code));
+  await rejectsCode(openStateStore(statePath), "relay_state_file_unsafe");
 });
 
 test("open-handle identity checks detect final-file exchange", async (t) => {
@@ -997,7 +995,11 @@ test("PID reuse cannot make an old lock look live", async (t) => {
   const statePath = await temporaryState(t);
   let store = await openStateStore(statePath);
   await store.close();
-  await fs.writeFile(lockPath(statePath), `${JSON.stringify(lockRecord({ identity: "old-boot:old-start" }))}\n`, "utf8");
+  await fs.writeFile(
+    lockPath(statePath),
+    `${JSON.stringify(lockRecord({ identity: "old-boot:old-start" }))}\n`,
+    { encoding: "utf8", mode: 0o600 },
+  );
   store = await openStateStore(statePath, {
     processIdentity: async (pid) => pid === process.pid ? "new-boot:new-start" : null,
     sleep: async () => {},
