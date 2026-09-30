@@ -107,17 +107,15 @@ impl UploadStaging for SessionIsolationStaging {
         }
         sessions.insert(
             handle_id.to_owned(),
-            (context.binding.session_id.clone(), metadata.file_name.clone()),
+            (
+                context.binding.session_id.clone(),
+                metadata.file_name.clone(),
+            ),
         );
         Ok(())
     }
 
-    fn accept_chunk(
-        &self,
-        handle_id: &str,
-        _chunk_index: u64,
-        bytes: &[u8],
-    ) -> Result<(), String> {
+    fn accept_chunk(&self, handle_id: &str, _chunk_index: u64, bytes: &[u8]) -> Result<(), String> {
         use std::io::Write as _;
         let directory = self.staging_dir(handle_id)?;
         let target = directory.join(STAGING_PART);
@@ -205,14 +203,14 @@ pub(crate) struct DesktopRemoteAttachmentRuntime {
 }
 
 impl DesktopRemoteAttachmentRuntime {
-    pub(crate) fn new(
-        uploads: AttachmentUploads,
-        tasks: Arc<RemoteTaskService>,
-    ) -> Arc<Self> {
+    pub(crate) fn new(uploads: AttachmentUploads, tasks: Arc<RemoteTaskService>) -> Arc<Self> {
         Arc::new(Self { uploads, tasks })
     }
 
-    pub(crate) fn from_session_store(store: SessionStore, tasks: Arc<RemoteTaskService>) -> Arc<Self> {
+    pub(crate) fn from_session_store(
+        store: SessionStore,
+        tasks: Arc<RemoteTaskService>,
+    ) -> Arc<Self> {
         Self::new(
             AttachmentUploads::new(
                 Arc::new(TransferRegistry::default()),
@@ -330,13 +328,12 @@ pub fn desktop_remote_attachment_chunk(
     if bytes.len() as u64 != chunk_bytes {
         return Err("transfer_chunk_invalid".to_owned());
     }
-    let progress = runtime
-        .uploads
-        .accept_chunk(&transfer_id, chunk_index, &bytes, monotonic_millis())?;
+    let progress =
+        runtime
+            .uploads
+            .accept_chunk(&transfer_id, chunk_index, &bytes, monotonic_millis())?;
     Ok(match progress {
-        UploadProgress::Accepted {
-            received_bytes, ..
-        } => DesktopRemoteAttachmentProgress {
+        UploadProgress::Accepted { received_bytes, .. } => DesktopRemoteAttachmentProgress {
             state: "accepted".into(),
             received_bytes,
             sha256: None,
@@ -386,7 +383,9 @@ mod tests {
         )));
         DesktopRemoteAttachmentRuntime::new(
             AttachmentUploads::new(Arc::new(TransferRegistry::default()), stager),
-            Arc::new(RemoteTaskService::new(Arc::new(RemoteTaskLedger::in_memory()))),
+            Arc::new(RemoteTaskService::new(Arc::new(
+                RemoteTaskLedger::in_memory(),
+            ))),
         )
     }
 
