@@ -211,6 +211,10 @@ age = { version = "=0.12.1", default-features = false }
 # construct/use/drop them on computer_use's dedicated worker thread.
 xcap = "0.9.8"
 enigo = "0.6"
+# ACP resource ledger: aggregate RSS + process-tree ownership on Linux/macOS/Windows.
+# Pin 0.36.x for the project's Rust 1.89 toolchain; 0.39 requires Rust 1.95.
+# Disable disk/network/user/component probes because the ledger only samples processes.
+sysinfo = { version = "=0.36.1", default-features = false, features = ["system"] }
 
 # keyring 不再直接依赖 —— 凭证走底座 codewhale-secrets(它内部按平台引 keyring)。
 # 这条曾有过一处漏网:模型商店的 HF Token 自建 keyring::Entry,与本注释矛盾。

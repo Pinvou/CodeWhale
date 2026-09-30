@@ -18,6 +18,7 @@ mod operation_gate;
 mod platform;
 mod providers;
 pub(crate) mod reader_window;
+mod resource_ledger;
 mod runtime;
 mod stall;
 mod store;
@@ -84,6 +85,7 @@ use operation_gate::admit_prompt_turn;
 pub use providers::{
     AcpProvidersView, ImportResult, ProviderManager, ProviderRecord, ProviderWireApi,
 };
+use resource_ledger::{AcpResourceLedger, RuntimeResourceRoot};
 use runtime::{
     MIN_CODEX_VERSION, ResolvedCodex, codex_version, probe_codex_runtime, version_at_least,
 };
@@ -139,6 +141,10 @@ const IDLE_EVICT_AFTER_SECS: u64 = 30 * 60;
 /// 空闲回收巡检间隔：5 分钟一轮，及时性与巡检开销的折中（与 EnginePool
 /// 空闲回收、embedder 空闲卸载的巡检节奏保持一致）。
 const REAP_INTERVAL_SECS: u64 = 5 * 60;
+/// Resource sampling is intentionally low-frequency and independent from the
+/// monitor page. It observes aggregate ACP process-tree cost without changing
+/// admission or eviction behavior.
+const RESOURCE_SAMPLE_INTERVAL_SECS: u64 = 60;
 
 /// 空闲回收判定（纯函数，便于单测）：busy（prompt 在途，含等待权限/问询的
 /// turn）、configuring（配置同步中）与当前 active 会话一律不回收。
@@ -839,6 +845,9 @@ struct AcpSession {
     kimi_session_id: Option<String>,
     shutdown_tx: Mutex<Option<oneshot::Sender<()>>>,
     child: Mutex<Child>,
+    /// PID of the process directly spawned by Pinvou. Resource sampling walks
+    /// descendants from this stable ownership anchor and never records argv.
+    root_pid: u32,
     lifecycle: Arc<RuntimeLifecycle>,
     /// 最近一次请求/响应时刻（空闲回收巡检用）。任何直接到达该会话的请求
     /// （发消息、改配置、状态查询复用）与 prompt 响应返回都会刷新。
@@ -1222,6 +1231,7 @@ pub struct AcpPool {
     runtime_probe_generation: Arc<AtomicU64>,
     runtime_generation: Arc<AtomicU64>,
     runtime_crash_budgets: Arc<parking_lot::Mutex<HashMap<String, RuntimeCrashBudget>>>,
+    resource_ledger: Arc<parking_lot::Mutex<AcpResourceLedger>>,
     cli_probe: Arc<parking_lot::RwLock<CliProbeCache>>,
     latest_version_probe: LatestVersionProbe,
     cli_probe_gates: Arc<CliProbeGates>,
@@ -1519,6 +1529,7 @@ impl AcpPool {
             runtime_probe_generation: Arc::new(AtomicU64::new(0)),
             runtime_generation: Arc::new(AtomicU64::new(0)),
             runtime_crash_budgets: Arc::new(parking_lot::Mutex::new(HashMap::new())),
+            resource_ledger: Arc::new(parking_lot::Mutex::new(AcpResourceLedger::default())),
             cli_probe: Arc::new(parking_lot::RwLock::new(CliProbeCache::default())),
             latest_version_probe: LatestVersionProbe::new()?,
             cli_probe_gates: Arc::new(CliProbeGates::default()),
@@ -3744,7 +3755,8 @@ impl AcpPool {
         true
     }
 
-    /// 启动空闲回收巡检（幂等）：每 REAP_INTERVAL_SECS 秒扫描一次，回收
+    /// 启动运行时维护任务（幂等）：每 RESOURCE_SAMPLE_INTERVAL_SECS 秒采样
+    /// 一次 ACP 进程树资源；每 REAP_INTERVAL_SECS 扫描一次并回收
     /// 「空闲超过 IDLE_EVICT_AFTER_SECS 且无在途 prompt/配置同步且非 active」
     /// 的会话进程。active 判定取 `SessionStore::active_id`——它由 create/
     /// load session 命令维护，是前端当前打开会话的最可靠信号；不过前端也可能
@@ -3766,13 +3778,22 @@ impl AcpPool {
         let task_cancel = cancel.clone();
         let pool = self.clone();
         let handle = tauri::async_runtime::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(REAP_INTERVAL_SECS));
+            let mut interval =
+                tokio::time::interval(Duration::from_secs(RESOURCE_SAMPLE_INTERVAL_SECS));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             // tokio::interval 首个 tick 立即到期：跳过它，统一走周期节奏。
             interval.tick().await;
+            let reaper_every = (REAP_INTERVAL_SECS / RESOURCE_SAMPLE_INTERVAL_SECS).max(1);
+            let mut maintenance_tick = 0_u64;
             loop {
                 tokio::select! {
                     _ = task_cancel.cancelled() => break,
                     _ = interval.tick() => {}
+                }
+                maintenance_tick = maintenance_tick.wrapping_add(1);
+                pool.sample_runtime_resources().await;
+                if !maintenance_tick.is_multiple_of(reaper_every) {
+                    continue;
                 }
                 // 单轮 panic 隔离（与 EnginePool 巡检同款）：回收逻辑 panic 只
                 // 终止当轮 task，外层循环下轮照常继续，ACP 会话回收不停摆。
@@ -3787,6 +3808,35 @@ impl AcpPool {
             }
         });
         *slot = Some(IdleReaperGuard { cancel, handle });
+    }
+
+    async fn sample_runtime_resources(&self) {
+        let roots = {
+            let sessions = self.sessions.lock().await;
+            sessions
+                .values()
+                .filter(|runtime| runtime.lifecycle.is_running())
+                .map(|runtime| RuntimeResourceRoot {
+                    pid: runtime.root_pid,
+                    role: runtime.backend.agent_id().unwrap_or("acp"),
+                })
+                .collect::<Vec<_>>()
+        };
+        let ledger = self.resource_ledger.clone();
+        let result =
+            tauri::async_runtime::spawn_blocking(move || ledger.lock().sample_and_record(&roots))
+                .await;
+        match result {
+            Ok(Some(summary)) => diagnostics::write(
+                &diagnostics::operation_id("resources"),
+                "resource:acp_sample",
+                summary,
+            ),
+            Ok(None) => {}
+            Err(error) => {
+                eprintln!("[codex_acp] ACP 资源采样失败（已降级，下轮重试）: {error}")
+            }
+        }
     }
 
     /// 单轮空闲回收。busy/configuring 会话（含 turn 等待权限/问询期间）与
@@ -4376,6 +4426,7 @@ impl AcpPool {
         let mut child = command
             .spawn()
             .with_context(|| format!("启动 {} 失败", backend.display_name()))?;
+        let root_pid = child.id().context("ACP 子进程启动后未返回进程标识")?;
         let stdin = child.stdin.take().context("ACP stdin 不可用")?;
         let stdout = child.stdout.take().context("ACP stdout 不可用")?;
         let event_bridge = EventBridge::new(self.app.clone(), pinvou_session_id.to_string());
@@ -4759,6 +4810,7 @@ impl AcpPool {
             prompt_capabilities,
             shutdown_tx: Mutex::new(Some(shutdown_tx)),
             child: Mutex::new(child),
+            root_pid,
             lifecycle,
             last_activity: parking_lot::Mutex::new(Instant::now()),
             activity,
