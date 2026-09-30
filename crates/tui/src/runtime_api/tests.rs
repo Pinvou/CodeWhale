@@ -4525,6 +4525,49 @@ async fn saved_sessions_carry_thread_workspace_roots_through_save_and_resave() -
 }
 
 #[tokio::test]
+async fn put_empty_session_id_and_patch_invalid_path_id_answer_400() -> Result<()> {
+    // Round-24 P3 pin: the two boundary-validation 400 arms whose pins were
+    // lost with the 409-guard removal — an explicit-but-empty `session_id`
+    // on PUT /v1/sessions is a client error (not "create new"), and a
+    // session PATCH addressed at an invalid id shape answers 400, not 500.
+    let root = std::env::temp_dir().join(format!("deepseek-put-400-{}", Uuid::new_v4()));
+    let sessions_dir = root.join("sessions");
+    let Some((addr, _runtime_threads, handle)) =
+        spawn_test_server_with_root(root.clone(), sessions_dir.clone()).await?
+    else {
+        return Ok(());
+    };
+    let client = crate::tls::reqwest_client();
+
+    // PUT with an explicit empty session_id: rejected at the boundary.
+    let rejected = client
+        .put(format!("http://{addr}/v1/sessions"))
+        .json(&json!({ "session_id": "" }))
+        .send()
+        .await?;
+    assert_eq!(
+        rejected.status(),
+        StatusCode::BAD_REQUEST,
+        "an explicit empty session_id must be a 400, not a silent create"
+    );
+
+    // Session PATCH addressed at an invalid id shape: 400 with the reason.
+    let invalid = client
+        .patch(format!("http://{addr}/v1/sessions/not a valid id!"))
+        .json(&json!({ "title": "x" }))
+        .send()
+        .await?;
+    assert_eq!(
+        invalid.status(),
+        StatusCode::BAD_REQUEST,
+        "an invalid session id in the path must answer 400, not 500"
+    );
+
+    handle.abort();
+    Ok(())
+}
+
+#[tokio::test]
 async fn session_resave_after_workspace_move_keeps_workspace_and_roots_paired() -> Result<()> {
     let root = std::env::temp_dir().join(format!("deepseek-session-move-{}", Uuid::new_v4()));
     let sessions_dir = root.join("sessions");
@@ -5092,8 +5135,9 @@ fn restore_snapshot_endpoint_helper_restores_workspace_files() -> Result<()> {
     let snapshot_id = repo.snapshot("pre-turn:1")?;
     fs::write(workspace.join("a.txt"), "v2")?;
 
-    restore_snapshot_for_workspace(&workspace, snapshot_id.as_str())
-        .expect("snapshot restore should succeed");
+    let snapshot =
+        snapshot_for_workspace(&workspace, snapshot_id.as_str()).expect("membership lookup");
+    restore_snapshot_for_workspace(&workspace, &snapshot).expect("snapshot restore should succeed");
     assert_eq!(fs::read_to_string(workspace.join("a.txt"))?, "v1");
     Ok(())
 }
@@ -5113,10 +5157,11 @@ fn restore_snapshot_endpoint_helper_rejects_unknown_snapshot_id() -> Result<()> 
     repo.snapshot("pre-turn:1")?;
 
     // An id the side repo does not know must 404 without reaching git,
-    // instead of being handed over as an arbitrary treeish.
-    let err =
-        restore_snapshot_for_workspace(&workspace, "0123456789abcdef0123456789abcdef01234567")
-            .expect_err("an unknown snapshot id must be rejected");
+    // instead of being handed over as an arbitrary treeish. (Round-24 P3:
+    // the membership gate lives in the read half — the restore half now
+    // takes the fetched snapshot — so this pins the read half's 404.)
+    let err = snapshot_for_workspace(&workspace, "0123456789abcdef0123456789abcdef01234567")
+        .expect_err("an unknown snapshot id must be rejected");
     assert_eq!(err.status, StatusCode::NOT_FOUND);
     assert!(
         err.message.contains("no such snapshot"),

@@ -369,7 +369,7 @@ pub(crate) async fn run_exec_agent(
     let mut loaded_session_id = None;
     if let Some(saved) = resume_session {
         let saved_id = saved.metadata.id.clone();
-        if saved.metadata.workspace != workspace && output_format == ExecOutputFormat::Text {
+        if saved.metadata.workspace != workspace {
             // The engine runs the SAVED workspace/root pair (the
             // `Op::SyncSession` below re-normalizes it against itself), so
             // the CLI `--workspace` does not re-anchor a resumed session and
@@ -379,6 +379,10 @@ pub(crate) async fn run_exec_agent(
             // hard block, which refused legitimate resumes against a
             // workspace the lane never adopts and named a
             // `--workspace-roots` flag that does not exist).
+            // Round-24 P3: the old Text-format gate dropped this warning
+            // for JSON consumers entirely — it goes to stderr and never
+            // touches the stdout JSON stream, so the gate suppressed
+            // safety-relevant information for no compatibility gain.
             eprintln!(
                 "Warning: session {} was created in a different workspace ({}). \
                  Resuming in the session's own workspace.",

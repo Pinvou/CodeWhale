@@ -314,9 +314,16 @@ pub struct ExecPolicyContext<'a> {
     /// The sandbox mode in effect, if any (e.g. `"workspace-write"`).
     pub sandbox_mode: Option<&'a str>,
     /// Additional workspace roots for ask/deny path and scope matching;
-    /// `cwd` remains the primary root. Allow rules keep matching the primary
-    /// root only, so an attached root never widens auto-approval. Empty
-    /// preserves the historical single-root matching.
+    /// `cwd` remains the primary root. Ask/deny rules may span every root
+    /// (they only add prompts or blocks), while Allow rules narrow to the
+    /// judged-cwd slot only, so an attached root never widens
+    /// auto-approval. Caveat recorded for accuracy (round-24 P3): the
+    /// judged-cwd slot is `cwd` — where the call RUNS — so a `cwd:`/
+    /// working-dir redirect that lands the call inside an attached root
+    /// judges an unscoped Allow there ("judged where it runs", the opposite
+    /// policy of the session-grant re-key, which keeps grants pinned to the
+    /// spelling the user approved). Empty preserves the historical
+    /// single-root matching.
     pub workspace_roots: Vec<std::path::PathBuf>,
 }
 
@@ -470,7 +477,13 @@ impl ExecPolicyEngine {
                 // may never reach into an attached root - exec is judged
                 // where it runs: the session cwd, or the resolved
                 // cwd:/working_dir: operand when the call redirects).
-                let candidate_idx: Vec<usize> = if rule.action == PermissionAction::Allow {
+                // Round-24 P3 perf: the dominant shapes (every Allow rule,
+                // and unscoped ask/deny on the single-root sessions that
+                // are the norm) borrow a static candidate slice instead of
+                // allocating a Vec per rule per call; only scoped
+                // ask/deny over a multi-root set allocates.
+                let scoped_candidates: Vec<usize>;
+                let candidate_idx: &[usize] = if rule.action == PermissionAction::Allow {
                     // An Allow rule keeps the primary-only narrowing on
                     // every filter regardless of whether it carries a
                     // workspace: its rooted path and scope may never reach
@@ -480,12 +493,14 @@ impl ExecPolicyEngine {
                         .as_deref()
                         .is_none_or(|workspace| workspace_scope_matches(workspace, ctx.cwd))
                     {
-                        vec![0]
+                        &[0]
                     } else {
-                        Vec::new()
+                        &[]
                     }
+                } else if rule.workspace.is_none() && roots.len() == 1 {
+                    &[0]
                 } else {
-                    match rule.workspace.as_deref() {
+                    scoped_candidates = match rule.workspace.as_deref() {
                         None => (0..roots.len()).collect(),
                         Some(workspace) => roots
                             .iter()
@@ -493,7 +508,8 @@ impl ExecPolicyEngine {
                             .filter(|(_, root)| workspace_scope_matches(workspace, root))
                             .map(|(idx, _)| idx)
                             .collect(),
-                    }
+                    };
+                    &scoped_candidates
                 };
                 if candidate_idx.is_empty() {
                     return false;
@@ -2449,6 +2465,45 @@ mod tests {
             })
             .unwrap();
         assert_eq!(decision.matched_rule, None);
+    }
+
+    #[test]
+    fn typed_ask_absolute_path_rule_matches_a_call_outside_every_root() {
+        // Round-24 P3 pin bounding the absolute-path fallback: a rule
+        // spelling an ABSOLUTE location no root can normalize (`/root`,
+        // a real home) stays matchable for a call whose path sits outside
+        // every candidate root — the fallback compares the original call
+        // spelling regardless of the per-root outcome. The sibling test
+        // above pins the other side (a RELATIVE rule never reaches an
+        // absolute call through the same fallback).
+        let engine =
+            ExecPolicyEngine::with_rulesets(vec![Ruleset::user(vec![], vec![]).with_ask_rules(
+                vec![ToolAskRule {
+                    tool: "edit_file".into(),
+                    command: None,
+                    command_exact: false,
+                    path: Some("/root/.ssh/authorized_keys".into()),
+                    workspace: None,
+                    action: PermissionAction::Deny,
+                }],
+            )]);
+
+        let decision = engine
+            .check(ExecPolicyContext {
+                command: "",
+                cwd: "/workspace",
+                tool: Some("edit_file"),
+                path: Some("/root/.ssh/authorized_keys"),
+                ask_for_approval: AskForApproval::OnFailure,
+                sandbox_mode: Some("workspace-write"),
+                workspace_roots: vec![std::path::PathBuf::from("/other/root")],
+            })
+            .unwrap();
+        assert!(
+            decision.matched_rule.is_some(),
+            "the deny on the pinned absolute location must fire even though the \
+             call path normalizes under no candidate root"
+        );
     }
 
     #[test]

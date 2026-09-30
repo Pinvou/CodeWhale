@@ -209,9 +209,10 @@ fn is_not_archived(archived: &bool) -> bool {
 /// the whole document, so the directory `reclaim_orphaned_session_dirs`
 /// sweeps must never treat a live owner's session as an orphan. (The
 /// write-conflict guard this registry used to feed was retired — round-20
-/// B20-3: the process-local External lane never coexists with the
-/// interactive surface in a shipped topology, so external writes converge
-/// by last-write-wins at the store layer.)
+/// B20-3: the registry and the runtime HTTP server never share a process
+/// in a shipped topology, so the conflict path could never engage;
+/// same-process writers converge by last-write-wins at the store layer.
+/// Stale coexistence wording corrected round-24 P3.)
 ///
 /// A static registry rather than a field on `RuntimeApiState` because the
 /// embedded Runtime API runs inside the TUI process; a standalone
@@ -5032,8 +5033,11 @@ mod tests {
     }
 
     /// A poisoned claim lock means ownership cannot be determined, so the
-    /// answer fails closed: the session counts as live and external writers
-    /// take the conflict instead of racing an autosave nobody can see.
+    /// answer fails closed: the session counts as live, so the orphan
+    /// reclamation keep-chain skips it rather than deleting a directory a
+    /// maybe-running surface still owns. (The write-conflict guard that
+    /// used to be the other fail-closed consumer was retired in round-20
+    /// B20-3; stale wording corrected round-24 P3.)
     #[test]
     fn live_session_claim_fails_closed_on_a_poisoned_lock() {
         let _lock = crate::shell_dispatcher::test_env_lock::lock_test_env();

@@ -5793,6 +5793,75 @@ async fn update_thread_workspace_persists_event_and_evicts_idle_engine() -> Resu
 }
 
 #[tokio::test]
+async fn update_thread_combined_patch_validates_roots_against_the_new_primary() -> Result<()> {
+    // Round-24 P3 pin (manager-level combined PATCH): when workspace and
+    // roots arrive in ONE PATCH, the declared set is validated against the
+    // NEW primary — an ancestor of the incoming workspace is rejected and
+    // the whole PATCH fails without moving the thread; a valid combined
+    // PATCH persists the re-normalized set under the new primary.
+    let manager = test_manager(test_runtime_dir())?;
+    let workspace = std::env::temp_dir().join("codewhale-runtime-combined-patch");
+    let thread = manager
+        .create_thread(CreateThreadRequest {
+            workspace: Some(workspace.clone()),
+            ..Default::default()
+        })
+        .await?;
+
+    let new_workspace = std::env::temp_dir().join("codewhale-runtime-combined-patch-next");
+    let err = manager
+        .update_thread(
+            &thread.id,
+            UpdateThreadRequest {
+                workspace: Some(new_workspace.clone()),
+                workspace_roots: Some(vec![std::env::temp_dir()]),
+                ..UpdateThreadRequest::default()
+            },
+        )
+        .await
+        .expect_err("an ancestor of the new primary must be rejected in the combined PATCH");
+    assert!(
+        err.to_string().contains("ancestor of the primary"),
+        "unexpected error: {err:#}"
+    );
+    let unchanged = manager.get_thread(&thread.id).await?;
+    assert!(
+        unchanged.workspace == workspace,
+        "a rejected combined PATCH must not move the workspace either"
+    );
+    assert_ne!(
+        unchanged.workspace_roots,
+        vec![workspace.clone(), std::env::temp_dir()],
+        "a rejected combined PATCH must not persist the wide set"
+    );
+    assert_eq!(
+        unchanged.workspace_roots,
+        vec![workspace],
+        "the set stays the create-time single-root form"
+    );
+
+    let shared = std::env::temp_dir().join("codewhale-runtime-combined-patch-shared");
+    manager
+        .update_thread(
+            &thread.id,
+            UpdateThreadRequest {
+                workspace: Some(new_workspace.clone()),
+                workspace_roots: Some(vec![shared.clone()]),
+                ..UpdateThreadRequest::default()
+            },
+        )
+        .await?;
+    let updated = manager.get_thread(&thread.id).await?;
+    assert_eq!(updated.workspace, new_workspace);
+    assert_eq!(
+        updated.workspace_roots,
+        vec![new_workspace.clone(), shared],
+        "the valid combined PATCH persists the set normalized under the new primary"
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn update_thread_roots_evicts_idle_engine() -> Result<()> {
     // Eviction fires under `workspace_changed || roots_changed`; the workspace
     // leg is pinned above, this pins the roots leg — regressing the

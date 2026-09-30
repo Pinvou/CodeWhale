@@ -1774,7 +1774,9 @@ impl Runtime {
         }
         let workspace_roots = validate_workspace_roots(cwd, workspace_roots)?;
         let fallback_cwd = cwd.display().to_string();
-        let (command, raw_policy_cwd, execution_kind) = call.execution_subject(&fallback_cwd);
+        // `raw_policy_cwd` is superseded by the operand-aware resolution
+        // below; `command` and the kind label still come from the subject.
+        let (command, _raw_policy_cwd, execution_kind) = call.execution_subject(&fallback_cwd);
         // Judge the same effective cwd execution resolves (review
         // #484/CodeWhale round-22 B22-5): this lane used to hand the RAW
         // `params.cwd` operand to the policy check while execution resolved
@@ -1782,9 +1784,23 @@ impl Runtime {
         // operand evaded a deny scoped to the canonical target, and any
         // relative/`..` operand made `normalize_workspace_scope` reject the
         // judgment side, silently disarming every scoped rule for the call.
-        let policy_cwd = resolve_operand_cwd(cwd, &raw_policy_cwd)
-            .to_string_lossy()
-            .into_owned();
+        // Round-24 P3 accuracy fix: canonical resolution applies ONLY to
+        // operand-carrying calls, matching the engine lane — a no-operand
+        // call executes at the declared workspace spelling, so judging its
+        // canonical form (the old unconditional resolve) made every
+        // declared-spelling scoped rule inert lane-wide on symlinked
+        // systems (macOS `/tmp` sessions), the opposite divergence from the
+        // one B22-5 fixed.
+        let operand_cwd = match &call.payload {
+            ToolPayload::LocalShell { params } => params.cwd.clone(),
+            _ => None,
+        };
+        let policy_cwd = match operand_cwd {
+            Some(dir) => resolve_operand_cwd(cwd, &dir)
+                .to_string_lossy()
+                .into_owned(),
+            None => fallback_cwd.clone(),
+        };
         let policy_tool = match &call.payload {
             ToolPayload::LocalShell { .. } => "exec_shell",
             _ => call.name.as_str(),
@@ -4793,6 +4809,75 @@ mod tests {
             .await
             .expect("invoke tool");
         assert_eq!(result["status"], "approval_required", "{result}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn invoke_tool_judges_a_no_operand_call_at_the_declared_spelling() {
+        // Round-24 P3 accuracy fix: canonical resolution used to apply to
+        // EVERY call on this lane, so a symlink-spelled session workspace
+        // (macOS `/tmp`) judged its canonical form and a deny scoped to the
+        // DECLARED spelling went inert lane-wide — the opposite divergence
+        // from the operand one B22-5 fixed, and wider (every call, not just
+        // redirected ones). A no-operand call executes at the declared
+        // spelling, so it must judge there; an operand-carrying call keeps
+        // the canonical resolution (the B22-5 pin above covers that leg).
+        let temp = tempfile::tempdir().expect("tempdir");
+        let real = temp.path().join("real");
+        std::fs::create_dir_all(&real).expect("real dir");
+        let link = temp.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).expect("symlink");
+        let declared = link.to_string_lossy().into_owned();
+        let canonical = real.canonicalize().expect("canonical real");
+
+        // Deny scoped to the DECLARED spelling fires for a no-operand call.
+        let runtime = runtime_with_exec_rules(vec![exec_deny_scoped_to(Path::new(&declared))]);
+        let result = runtime
+            .invoke_tool(
+                local_shell_call("git push origin main", None),
+                AskForApproval::OnRequest,
+                &link,
+                &[],
+            )
+            .await
+            .expect("invoke tool");
+        assert_eq!(
+            result["status"], "denied",
+            "a no-operand call judges at the declared spelling, so the declared-scoped \
+             deny must fire: {result}"
+        );
+
+        // The canonical-spelling scope no longer matches a no-operand call
+        // (judgment sits at the declared spelling); it keeps firing for an
+        // operand-carrying call that resolves there.
+        let runtime = runtime_with_exec_rules(vec![exec_deny_scoped_to(&canonical)]);
+        let result = runtime
+            .invoke_tool(
+                local_shell_call("git push origin main", None),
+                AskForApproval::OnRequest,
+                &link,
+                &[],
+            )
+            .await
+            .expect("invoke tool");
+        assert_eq!(
+            result["status"], "approval_required",
+            "the canonical-spelling scope stays inert for a no-operand call judged at \
+             the declared spelling: {result}"
+        );
+        let result = runtime
+            .invoke_tool(
+                local_shell_call("git push origin main", Some(&declared)),
+                AskForApproval::OnRequest,
+                &link,
+                &[],
+            )
+            .await
+            .expect("invoke tool");
+        assert_eq!(
+            result["status"], "denied",
+            "an operand-carrying call still judges canonically (B22-5): {result}"
+        );
     }
 
     #[tokio::test]
