@@ -831,7 +831,8 @@ impl ControlledDeviceManager {
             clear_sensitive(&mut inner, u64::MAX, clear_workspaces);
             inner.device_name = None;
             inner.phase = phase;
-            inner.error_code = (phase == ControlledStatusKind::Error).then(|| error_code.to_owned());
+            inner.error_code =
+                (phase == ControlledStatusKind::Error).then(|| error_code.to_owned());
         }
         self.notify_cleanup(&generation);
         self.status()
@@ -1212,7 +1213,10 @@ mod tests {
         );
         let status = manager.poll_watchdog(31_000);
         assert_eq!(status.status, ControlledStatusKind::Error);
-        assert_eq!(status.error_code.as_deref(), Some("desktop_remote_watchdog_expired"));
+        assert_eq!(
+            status.error_code.as_deref(),
+            Some("desktop_remote_watchdog_expired")
+        );
         assert_eq!(status.workspace_count, 0);
         assert_eq!(cleanup.0.load(Ordering::SeqCst), 1);
     }
@@ -1269,7 +1273,10 @@ mod tests {
         let refresh = manager.begin_refresh().unwrap();
         let status = manager.fail_refresh(refresh).unwrap();
         assert_eq!(status.status, ControlledStatusKind::Error);
-        assert_eq!(status.error_code.as_deref(), Some("desktop_remote_refresh_failed"));
+        assert_eq!(
+            status.error_code.as_deref(),
+            Some("desktop_remote_refresh_failed")
+        );
         assert_eq!(status.workspace_count, 0);
         assert_eq!(cleanup.0.load(Ordering::SeqCst), 1);
         assert_eq!(

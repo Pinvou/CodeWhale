@@ -8,7 +8,7 @@
 use base64::Engine as _;
 use ring::rand::SystemRandom;
 use ring::signature::{Ed25519KeyPair, KeyPair};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use super::crypto::{
@@ -30,11 +30,8 @@ pub(crate) fn signed_relay(key_id: &str) -> SignedRelay {
     let key_pair = Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).unwrap();
     let public_key =
         base64::engine::general_purpose::STANDARD.encode(key_pair.public_key().as_ref());
-    let trust = AuthenticatedRelayTrustConfig::from_pinned_keys([(
-        key_id.to_owned(),
-        public_key,
-    )])
-    .unwrap();
+    let trust =
+        AuthenticatedRelayTrustConfig::from_pinned_keys([(key_id.to_owned(), public_key)]).unwrap();
     SignedRelay {
         trust,
         key_id: key_id.to_owned(),
@@ -69,8 +66,9 @@ pub(crate) fn signed_reservation(
     message["transcript"] = transcript;
     message["transcript_hash"] = json!(hex_lower(&Sha256::digest(&preimage)));
     message["relay_signing_key_id"] = json!(relay.key_id);
-    message["relay_signature_b64"] = json!(base64::engine::general_purpose::STANDARD
-        .encode(relay.key_pair.sign(&preimage).as_ref()));
+    message["relay_signature_b64"] = json!(
+        base64::engine::general_purpose::STANDARD.encode(relay.key_pair.sign(&preimage).as_ref())
+    );
     message
 }
 
@@ -135,8 +133,7 @@ pub(crate) fn handshake_binding(reserved: &Value) -> HandshakeBinding {
         .expect("fixture carries a transcript hash");
     let mut bytes = [0_u8; 32];
     for (index, chunk) in transcript_hash.as_bytes().chunks_exact(2).enumerate() {
-        bytes[index] =
-            u8::from_str_radix(std::str::from_utf8(chunk).unwrap(), 16).unwrap();
+        bytes[index] = u8::from_str_radix(std::str::from_utf8(chunk).unwrap(), 16).unwrap();
     }
     HandshakeBinding::new(
         reserved["relay_epoch"].as_str().unwrap(),

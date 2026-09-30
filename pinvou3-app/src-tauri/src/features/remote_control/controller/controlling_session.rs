@@ -168,7 +168,10 @@ impl ControllingSessionManager {
             None => format!("session-ref-{}", Uuid::new_v4().simple()),
         };
         let mut intents = self.intents.lock();
-        if let Some(existing) = intents.iter_mut().find(|intent| intent.session_ref == session_ref) {
+        if let Some(existing) = intents
+            .iter_mut()
+            .find(|intent| intent.session_ref == session_ref)
+        {
             ensure_context(existing, lease)?;
             return Ok(existing.projection());
         }
@@ -505,8 +508,8 @@ fn validate_outbound_payload(intent: &SessionIntent, payload: &Value) -> Result<
 }
 
 fn validate_inbound_payload(intent: &SessionIntent, payload: &Value, kind: &str) -> Result<Value> {
-    let encoded =
-        serde_json::to_string(payload).map_err(|_| SessionError::new("capability_snapshot_invalid"))?;
+    let encoded = serde_json::to_string(payload)
+        .map_err(|_| SessionError::new("capability_snapshot_invalid"))?;
     let validated = validate_controller_runtime_payload_json(
         &encoded,
         SenderRole::ControlledB,
@@ -832,10 +835,7 @@ mod tests {
         );
         sessions.clear();
         assert_eq!(
-            sessions
-                .state("session-ref-0", &lease())
-                .unwrap_err()
-                .code,
+            sessions.state("session-ref-0", &lease()).unwrap_err().code,
             "session_not_found"
         );
     }

@@ -101,9 +101,7 @@ pub fn desktop_remote_controller_session_state(
 ) -> Result<ControllingSessionProjection, String> {
     ensure_supported(&manager)?;
     let (lease, _) = live_context(&manager)?;
-    sessions
-        .state(&remote_ref, &lease)
-        .map_err(session_error)
+    sessions.state(&remote_ref, &lease).map_err(session_error)
 }
 
 #[tauri::command]

@@ -12,7 +12,9 @@ use base64::Engine as _;
 use parking_lot::Mutex;
 use serde_json::{Value, json};
 
-use super::crypto::{ControllerRole, FrameDirection, LeaseBinding, SendCipher, ReceiveCipher, SessionKeys};
+use super::crypto::{
+    ControllerRole, FrameDirection, LeaseBinding, ReceiveCipher, SendCipher, SessionKeys,
+};
 use super::protocol::{
     MAX_ENCRYPTED_WIRE_BYTES, RuntimeValidationContext, SenderRole,
     validate_controller_runtime_message_json, validate_controller_runtime_payload_json,
@@ -178,8 +180,7 @@ impl EncryptedLane {
         negotiated_capabilities: &[String],
     ) -> Result<Value, LaneFailure> {
         let context = self.runtime_context(negotiated_capabilities);
-        let plaintext =
-            serde_json::to_vec(payload).map_err(|_| LaneFailure::Invalid)?;
+        let plaintext = serde_json::to_vec(payload).map_err(|_| LaneFailure::Invalid)?;
         if plaintext.len() > MAX_ENCRYPTED_WIRE_BYTES {
             return Err(LaneFailure::TooLarge);
         }
@@ -189,10 +190,7 @@ impl EncryptedLane {
             Some(&context),
         )
         .map_err(map_validation_failure)?;
-        let sequence = self
-            .sequence
-            .checked_add(1)
-            .ok_or(LaneFailure::Replay)?;
+        let sequence = self.sequence.checked_add(1).ok_or(LaneFailure::Replay)?;
         let epoch = self
             .lease
             .lease_epoch
@@ -409,7 +407,8 @@ macro_rules! lane_state {
                 payload: &Value,
                 negotiated_capabilities: &[String],
             ) -> Result<Value, LaneFailure> {
-                self.store.seal(payload_kind, payload, negotiated_capabilities)
+                self.store
+                    .seal(payload_kind, payload, negotiated_capabilities)
             }
 
             pub(crate) fn open(
@@ -446,10 +445,10 @@ lane_state!(ControlledLaneState, "B 端（被控）加密业务通道状态。")
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::features::remote_control::controller::protocol::LeaseContext;
     use crate::features::remote_control::controller::test_support::{
         PairingFixture, lease_context, paired_session_keys, pairing_fixture, role_session_keys,
     };
-    use crate::features::remote_control::controller::protocol::LeaseContext;
     use serde_json::json;
 
     fn capabilities() -> Vec<String> {
@@ -555,12 +554,18 @@ mod tests {
         // 同一帧重复投递同样被拒绝。
         let third = a.seal("task_submit", &payload, &capabilities()).unwrap();
         b.open(&third, &capabilities()).unwrap();
-        assert_eq!(b.open(&third, &capabilities()).unwrap_err(), LaneFailure::Replay);
+        assert_eq!(
+            b.open(&third, &capabilities()).unwrap_err(),
+            LaneFailure::Replay
+        );
 
         // 方向/载荷类型/密文任一被篡改都失败关闭。
         let mut flipped = a.seal("task_submit", &payload, &capabilities()).unwrap();
         flipped["direction"] = json!("b_to_a");
-        assert_eq!(b.open(&flipped, &capabilities()).unwrap_err(), LaneFailure::Invalid);
+        assert_eq!(
+            b.open(&flipped, &capabilities()).unwrap_err(),
+            LaneFailure::Invalid
+        );
         let mut wrong_kind = a.seal("task_submit", &payload, &capabilities()).unwrap();
         wrong_kind["payload_kind"] = json!("task_cancel");
         assert_eq!(
@@ -628,7 +633,9 @@ mod tests {
         state.install(ControllerRole::A, &lease, session).unwrap();
         assert!(state.is_installed());
         let payload = task_submit_payload(&lease);
-        let frame = state.seal("task_submit", &payload, &capabilities()).unwrap();
+        let frame = state
+            .seal("task_submit", &payload, &capabilities())
+            .unwrap();
         assert_eq!(frame["direction"], "a_to_b");
         state.clear();
         assert!(!state.is_installed());
