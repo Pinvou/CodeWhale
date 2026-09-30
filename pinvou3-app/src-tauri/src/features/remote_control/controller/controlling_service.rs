@@ -538,7 +538,9 @@ fn journal_snapshot_from_wire(payload: &Value) -> Option<JournalSnapshot> {
         .get("snapshot_bytes")
         .and_then(Value::as_str)
         .and_then(|value| value.parse::<usize>().ok())?;
-    let raw = base64::engine::general_purpose::STANDARD.decode(encoded).ok()?;
+    let raw = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .ok()?;
     if raw.len() != declared || raw.len() > MAX_SNAPSHOT_BYTES {
         return None;
     }
@@ -664,8 +666,10 @@ impl JournalExpectations {
             .map(|event| event.session_id.clone())
             .collect();
         for session_id in sessions {
-            self.applied
-                .insert(session_id.clone(), (snapshot.epoch.clone(), snapshot.sequence));
+            self.applied.insert(
+                session_id.clone(),
+                (snapshot.epoch.clone(), snapshot.sequence),
+            );
             self.awaiting_replay.remove(&session_id);
         }
     }
@@ -1845,13 +1849,21 @@ mod tests {
         };
         let mut responder = EncryptedLane::new(HandshakeRole::B, &lease, b_session).unwrap();
         let good = responder
-            .seal("session_snapshot", &wire(&snapshot.digest, 7), &capabilities)
+            .seal(
+                "session_snapshot",
+                &wire(&snapshot.digest, 7),
+                &capabilities,
+            )
             .unwrap();
         let bad_digest = responder
             .seal("session_snapshot", &wire(&"b".repeat(64), 7), &capabilities)
             .unwrap();
         let bad_base = responder
-            .seal("session_snapshot", &wire(&snapshot.digest, 6), &capabilities)
+            .seal(
+                "session_snapshot",
+                &wire(&snapshot.digest, 6),
+                &capabilities,
+            )
             .unwrap();
 
         let mut lane = TestLane {
@@ -1941,7 +1953,11 @@ mod tests {
         // 回放落地后重新允许请求。
         expectations.mark_applied(&event("epoch-1", 2));
         assert_eq!(expectations.expected("session-a"), Some(("epoch-1", 2)));
-        assert!(expectations.begin_replay("session-a", "epoch-1", 2).is_some());
+        assert!(
+            expectations
+                .begin_replay("session-a", "epoch-1", 2)
+                .is_some()
+        );
     }
 
     /// E2E-05 缺口恢复：回放请求必须是冻结形状且通过运行时校验（角色 A +
@@ -1954,14 +1970,9 @@ mod tests {
 
         let PairingFixture { reservation, .. } = pairing_fixture(RELAY_KEY_ID);
         let lease = lease_context(&reservation);
-        let payload = build_journal_replay_request(
-            &lease,
-            "session-a-ref",
-            "epoch-1",
-            7,
-            "request-replay-1",
-        )
-        .unwrap();
+        let payload =
+            build_journal_replay_request(&lease, "session-a-ref", "epoch-1", 7, "request-replay-1")
+                .unwrap();
         validate_controller_runtime_payload_json(
             &payload.to_string(),
             SenderRole::ControllerA,

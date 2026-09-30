@@ -477,10 +477,7 @@ impl ControlledDeviceManager {
     }
 
     /// E2E-06：开启一次存活挑战（生成 + 登记）并返回 (challenge_id, challenge_b64)。
-    pub(crate) fn begin_liveness_challenge(
-        &self,
-        now_b: u64,
-    ) -> Result<(String, String)> {
+    pub(crate) fn begin_liveness_challenge(&self, now_b: u64) -> Result<(String, String)> {
         let (challenge_id, challenge_b64) = super::liveness::new_liveness_challenge()
             .map_err(|_| ControlledStateError::new("liveness_challenge_invalid"))?;
         {
@@ -1330,11 +1327,11 @@ mod tests {
         assert_eq!(status.status, ControlledStatusKind::Stopped);
         assert_eq!(status.workspace_count, 1, "用户工作区授权必须保留");
         assert_eq!(status.controller_device_name, None);
+        assert_eq!(status.pairing_code, None, "远端断开后不得残留连接码");
         assert_eq!(
-            status.pairing_code, None,
-            "远端断开后不得残留连接码"
+            manager.live_lease().unwrap_err().code,
+            "desktop_remote_not_connected"
         );
-        assert_eq!(manager.live_lease().unwrap_err().code, "desktop_remote_not_connected");
         assert_eq!(
             manager.accept_remote_disconnect().unwrap_err().code,
             "desktop_remote_phase_invalid"

@@ -69,8 +69,9 @@ impl ControlledBusinessPort for DesktopControlledBusiness {
         journal_epoch: &str,
         after_sequence: u64,
     ) -> Result<Vec<(String, Value)>, String> {
-        let history =
-            self.app.state::<std::sync::Arc<super::desktop_remote_history::DesktopRemoteHistoryRuntime>>();
+        let history = self
+            .app
+            .state::<std::sync::Arc<super::desktop_remote_history::DesktopRemoteHistoryRuntime>>();
         Ok(
             match history.journal().replay_after(journal_epoch, after_sequence) {
                 crate::features::remote_control::controller::journal::ReplayOutcome::Events(events) => {
@@ -103,8 +104,9 @@ impl ControlledBusinessPort for DesktopControlledBusiness {
         session_ref: &str,
         request_id: &str,
     ) -> Result<Value, String> {
-        let history =
-            self.app.state::<std::sync::Arc<super::desktop_remote_history::DesktopRemoteHistoryRuntime>>();
+        let history = self
+            .app
+            .state::<std::sync::Arc<super::desktop_remote_history::DesktopRemoteHistoryRuntime>>();
         let snapshot = history.journal().snapshot();
         build_session_snapshot_payload(lease, session_ref, request_id, &snapshot)
     }

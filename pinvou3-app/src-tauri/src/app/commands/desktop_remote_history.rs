@@ -176,11 +176,10 @@ impl crate::features::remote_control::controller::controlling_service::Controlli
             .as_deref()
             .and_then(|session| self.runtime.store().find_by_session_reference(session));
         if let Some(history_id) = &history_id {
-            let _ = self.runtime.store().apply_snapshot(
-                history_id,
-                snapshot,
-                monotonic_millis(),
-            );
+            let _ = self
+                .runtime
+                .store()
+                .apply_snapshot(history_id, snapshot, monotonic_millis());
         }
         let _ = self.app.emit(
             crate::features::remote_control::controller::controlling_service::CONTROLLER_JOURNAL_EVENT,

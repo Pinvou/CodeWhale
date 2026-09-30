@@ -724,7 +724,13 @@ impl LivenessCipher {
             .try_into()
             .map_err(|_| ControllerCryptoError::new("invalid_ciphertext", "frame"))?;
         let aad = liveness_aad(&self.binding)?;
-        let plaintext = open_aead(&self.key, nonce, &aad, ciphertext, MAX_ENCRYPTED_FRAME_BYTES)?;
+        let plaintext = open_aead(
+            &self.key,
+            nonce,
+            &aad,
+            ciphertext,
+            MAX_ENCRYPTED_FRAME_BYTES,
+        )?;
         if plaintext.len() > MAX_DECRYPTED_PAYLOAD_BYTES {
             return Err(ControllerCryptoError::new("plaintext_too_large", "frame"));
         }

@@ -845,11 +845,9 @@ mod tests {
         assert_eq!(frame["sender_role"], "A");
         assert_eq!(frame["reason"], "user_disconnect");
         // reason 只保留有界标识符字符：全部被过滤时失败关闭，否则截断到有界长度。
-        assert!(
-            build_controller_disconnect(&fixture.context, "request-1", " 用户 断开 ").is_err()
-        );
-        let sanitized = build_controller_disconnect(&fixture.context, "request-1", "user disconnect!")
-            .unwrap();
+        assert!(build_controller_disconnect(&fixture.context, "request-1", " 用户 断开 ").is_err());
+        let sanitized =
+            build_controller_disconnect(&fixture.context, "request-1", "user disconnect!").unwrap();
         assert_eq!(sanitized["reason"], "userdisconnect");
 
         // 未连接时没有可发送的断开帧。
@@ -859,15 +857,14 @@ mod tests {
         manager.complete_reserved(operation.clone()).unwrap();
         manager.complete_connected(operation, fixture).unwrap();
         // 测试用 transport_channels 不启动网络任务，入队即视为送出成功。
-        let (sender, _receiver) =
-            super::super::relay_transport::transport_channels(
-                ControllerRole::ControllerA,
-                "generation-0001",
-                2,
-                2,
-                8192,
-                1024,
-            );
+        let (sender, _receiver) = super::super::relay_transport::transport_channels(
+            ControllerRole::ControllerA,
+            "generation-0001",
+            2,
+            2,
+            8192,
+            1024,
+        );
         // 断开帧是租约控制帧：transport 必须先装上同一租约。
         sender
             .install_authenticated_lease(super::super::relay_transport::AuthenticatedLease {
