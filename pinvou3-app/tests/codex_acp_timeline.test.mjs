@@ -1059,7 +1059,7 @@ try {
     && codexView.includes('busy || working || activeRuntimeBusy || workspaceUnavailable || sessionSyncing')
     && codexView.includes('if (!activeId && !draftWorkspacePath) return false;')
     && codexView.includes("attachments.some(attachment => attachment.status === 'parsing')")
-    && codexView.includes('sendTask: async (outgoing, context) => send(outgoing, context)'),
+    && codexView.includes('sendTask: async (outgoing, context) => send(outgoing, { voiceOperationId: context?.operationId })'),
   'Codex voice task mode must go through the shared hook, code-lane risk gate, and real send result before reporting success');
   // plain（非 native）车道仍走自绘 CodexComposerConfigSelect 配置组，不随 native 车道
   // 迁移到共享组件；共享 config select 保留 ACP testid 契约。

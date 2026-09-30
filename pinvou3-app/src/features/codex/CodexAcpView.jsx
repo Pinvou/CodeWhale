@@ -2312,7 +2312,7 @@ export function CodexAcpView({
     },
     canStart: () => !busy && !working && !activeRuntimeBusy,
     canSendTask: canSendNativeVoiceTask,
-    sendTask: async (outgoing, context) => send(outgoing, context),
+    sendTask: async (outgoing, context) => send(outgoing, { voiceOperationId: context?.operationId }),
   });
   const handleNativeVoiceTrigger = nativeVoice.triggerVoice;
 
@@ -2827,7 +2827,12 @@ export function CodexAcpView({
           shouldActivate: () => canApplyAcpSendOperation(operation),
         });
         targetId = created.id;
-        if (voiceOperationId) bridge.voice.beginVoiceSubmission(voiceOperationId, targetId);
+        // First-turn materialization: the voice operation's submission gate
+        // binds to the really created session (shared voice bookkeeping; ACP
+        // itself never reports a chat task attempt).
+        if (voiceOperationId && bridge.voice && typeof bridge.voice.beginVoiceSubmission === 'function') {
+          bridge.voice.beginVoiceSubmission(voiceOperationId, targetId);
+        }
         if (created.activated && activeIdRef.current === targetId) {
           acpSendOperationTracker.switchSession(targetId);
           operation = beginAcpSendOperation(targetId);
@@ -2884,7 +2889,9 @@ export function CodexAcpView({
       // Voice sendTask treats === false as failure: a real acceptance must explicitly report success.
       return true;
     } catch (err) {
-      if (voiceOperationId) bridge.voice.completeVoiceSubmission(voiceOperationId, targetId, false);
+      if (voiceOperationId && bridge.voice?.completeVoiceSubmission) {
+        bridge.voice.completeVoiceSubmission(voiceOperationId, targetId || null, false);
+      }
       if (canApplyAcpSendOperation(operation)) {
         showError(err);
         setDraft(message);
