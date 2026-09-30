@@ -3079,6 +3079,8 @@
       controlledStop: desktopRemoteControlFeature.controlledStop,
       controlledDisconnectNow: desktopRemoteControlFeature.controlledDisconnectNow,
       controlledStatus: desktopRemoteControlFeature.controlledStatus,
+      endpointProfiles: desktopRemoteControlFeature.endpointProfiles,
+      setEndpointProfile: desktopRemoteControlFeature.setEndpointProfile,
       controlledListWorkspaces: desktopRemoteControlFeature.controlledListWorkspaces,
       controlledAuthorizeWorkspace: desktopRemoteControlFeature.controlledAuthorizeWorkspace,
       controllerConnect: desktopRemoteControlFeature.controllerConnect,
