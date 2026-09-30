@@ -2745,7 +2745,9 @@ fn validate_descriptor_list(
             let scopes = descriptor
                 .get("scopes")
                 .and_then(Value::as_array)
-                .ok_or_else(|| ControllerProtocolError::new("invalid_field", format!("{label}.scopes")))?;
+                .ok_or_else(|| {
+                    ControllerProtocolError::new("invalid_field", format!("{label}.scopes"))
+                })?;
             if scopes.is_empty() || scopes.len() > MODES.len() {
                 return Err(ControllerProtocolError::new(
                     "invalid_field",

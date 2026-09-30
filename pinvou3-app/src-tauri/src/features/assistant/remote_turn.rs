@@ -1102,7 +1102,10 @@ mod tests {
             ..TurnEventRelayState::default()
         };
         assert_eq!(state.push_assistant("before sk-"), Some("before ".into()));
-        assert_eq!(state.push_assistant("secret-value after "), Some("[REDACTED] after ".into()));
+        assert_eq!(
+            state.push_assistant("secret-value after "),
+            Some("[REDACTED] after ".into())
+        );
         assert_eq!(state.finish_assistant_token(), None);
     }
 

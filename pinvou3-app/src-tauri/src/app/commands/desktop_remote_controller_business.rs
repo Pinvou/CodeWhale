@@ -171,9 +171,7 @@ fn submit_error(code: &str) -> UseCaseError {
         "capability_revision_exhausted" => {
             UseCaseError::new("capability_revision_exhausted", false)
         }
-        "capability_admission_capacity" => {
-            UseCaseError::new("capability_admission_capacity", true)
-        }
+        "capability_admission_capacity" => UseCaseError::new("capability_admission_capacity", true),
         "capability_expiry_overflow" => UseCaseError::new("capability_expiry_overflow", false),
         "capability_workspace_capacity" => UseCaseError::new("capability_workspace_capacity", true),
         "capability_workspace_duplicate" => {

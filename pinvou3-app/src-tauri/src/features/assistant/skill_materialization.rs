@@ -290,12 +290,10 @@ pub(crate) fn remote_turn_skill_prompt(
             .get(skill_id)
             .ok_or_else(|| "task_skill_not_authorized".to_owned())?
             .join("SKILL.md");
-        let document = std::fs::read_to_string(path)
-            .map_err(|_| "task_skill_unavailable".to_owned())?;
+        let document =
+            std::fs::read_to_string(path).map_err(|_| "task_skill_unavailable".to_owned())?;
         let body = strip_skill_frontmatter(&document);
-        let section = format!(
-            "<selected_skill id=\"{skill_id}\">\n{body}\n</selected_skill>\n"
-        );
+        let section = format!("<selected_skill id=\"{skill_id}\">\n{body}\n</selected_skill>\n");
         if prompt.len().saturating_add(section.len()) > MAX_REMOTE_SKILL_PROMPT_BYTES {
             return Err("task_skills_too_large".to_owned());
         }
@@ -310,7 +308,9 @@ pub(crate) fn remote_turn_skill_prompt(
 }
 
 fn strip_skill_frontmatter(document: &str) -> &str {
-    let normalized = document.strip_prefix("---\n").or_else(|| document.strip_prefix("---\r\n"));
+    let normalized = document
+        .strip_prefix("---\n")
+        .or_else(|| document.strip_prefix("---\r\n"));
     let Some(rest) = normalized else {
         return document;
     };
@@ -925,16 +925,16 @@ mod tests {
         with_temp_home(|| {
             seed_sources();
             save_disabled_skills_for(ConnectorScope::Code, &[]);
-            let prompt = remote_turn_skill_prompt(
-                ConnectorScope::Code,
-                None,
-                &["visualizer".to_owned()],
-            )
-            .unwrap();
+            let prompt =
+                remote_turn_skill_prompt(ConnectorScope::Code, None, &["visualizer".to_owned()])
+                    .unwrap();
             assert!(prompt.contains("Only the selected B-authorized skills"));
             assert!(prompt.contains("user version"));
             assert!(!prompt.contains("user-custom"));
-            assert!(!prompt.contains("name: visualizer"), "frontmatter is not injected");
+            assert!(
+                !prompt.contains("name: visualizer"),
+                "frontmatter is not injected"
+            );
             assert_eq!(
                 remote_turn_skill_prompt(
                     ConnectorScope::Code,

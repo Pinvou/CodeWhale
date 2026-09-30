@@ -35,9 +35,8 @@ use crate::features::remote_control::controller::protocol::{
 use crate::features::remote_control::controller::task::{
     AdmissionOutcome, CancelOutcome, ChatTurnExecutor, CodeTurnExecutor, ControllerTaskEventSink,
     RemoteSessionLane, RemoteSessionProvisioner, RemoteTaskHooks, RemoteTaskLedger,
-    RemoteTaskRequest,
-    RemoteTaskModelSource, RemoteTaskService, RemoteTaskTicket, TASK_MODE_CHAT, TASK_MODE_CODE,
-    TASK_MODEL_SOURCE_CONTROLLED, TASK_MODEL_SOURCE_TEMPORARY,
+    RemoteTaskModelSource, RemoteTaskRequest, RemoteTaskService, RemoteTaskTicket, TASK_MODE_CHAT,
+    TASK_MODE_CODE, TASK_MODEL_SOURCE_CONTROLLED, TASK_MODEL_SOURCE_TEMPORARY,
 };
 #[cfg(test)]
 use crate::features::remote_control::controller::task::{RemoteTaskEvent, RemoteTaskRequest};
@@ -1015,11 +1014,9 @@ fn admit_and_dispatch(
     local_attachments: Option<Vec<PublishedAttachment>>,
     local_attachment_cleanup: LocalAttachmentCleanup,
 ) -> Result<Value, String> {
-    let request = RemoteTaskRequest::from_payload(validated)
-        .map_err(|error| error.code.to_owned())?;
-    let skill_ids = request
-        .skill_ids()
-        .map_err(|error| error.code.to_owned())?;
+    let request =
+        RemoteTaskRequest::from_payload(validated).map_err(|error| error.code.to_owned())?;
+    let skill_ids = request.skill_ids().map_err(|error| error.code.to_owned())?;
     let mode = request.mode.clone();
     let model_source = validated
         .get("model_source")

@@ -5483,9 +5483,7 @@ fn remote_permission_projection(request: &RequestPermissionRequest) -> RemotePer
         .as_ref()
         .and_then(|locations| locations.first())
         .map(|location| location.path.to_string_lossy())
-        .map(|path| {
-            crate::features::remote_control::controller::permission::sanitize_scope(&path)
-        })
+        .map(|path| crate::features::remote_control::controller::permission::sanitize_scope(&path))
         .unwrap_or_else(|| "[REDACTED]".to_owned());
     let preview = request
         .tool_call

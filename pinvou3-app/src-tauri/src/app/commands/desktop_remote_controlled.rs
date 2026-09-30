@@ -87,12 +87,8 @@ fn workspace_request(
     if !path.is_dir() {
         return Err("workspace_path_invalid".to_owned());
     }
-    WorkspaceAuthorizationRequest::new(
-        path,
-        input.display_name,
-        input.code_allowed,
-    )
-    .map_err(controlled_error)
+    WorkspaceAuthorizationRequest::new(path, input.display_name, input.code_allowed)
+        .map_err(controlled_error)
 }
 
 fn workspace_requests(
