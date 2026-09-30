@@ -77,6 +77,8 @@ export default function ControlledDevicePanel({ t, bs, supported }) {
   const [now, setNow] = useState(() => Date.now());
   const [busy, setBusy] = useState(null);
   const [error, setError] = useState(null);
+  const [endpointProfiles, setEndpointProfiles] = useState([]);
+  const [endpointId, setEndpointId] = useState(null);
   const liveRef = useRef(null);
 
   const active = ACTIVE_STATUSES.includes(status);
@@ -92,6 +94,40 @@ export default function ControlledDevicePanel({ t, bs, supported }) {
     const timer = setInterval(() => setNow(Date.now()), CODE_TICK_MS);
     return () => clearInterval(timer);
   }, [device.expiresAtMs]);
+
+  // 随包内置的「服务端点」列表：生产/测试 profile 都自带地址与信任根，
+  // 用户不需要配置环境变量即可切换。
+  useEffect(() => {
+    const remote = bridge && bridge.available && bridge.desktopRemoteControl;
+    // 必须按能力探测：bridge 是宿主注入对象，实现可能早于本面板（例如旧宿主、
+    // jsdom 冒烟的桩）。直接调用不存在的方法会**同步抛错**并让整个设置页被
+    // 错误边界接住（2026-09-20 实测：settings_ui_smoke 的 ① 断言失败）。
+    if (!remote || typeof remote.endpointProfiles !== 'function') return undefined;
+    let cancelled = false;
+    let pending;
+    try {
+      pending = remote.endpointProfiles();
+    } catch (failure) {
+      return undefined;
+    }
+    Promise.resolve(pending)
+      .then((profiles) => {
+        if (cancelled || !Array.isArray(profiles)) return;
+        setEndpointProfiles(profiles);
+        const active = profiles.find((profile) => profile && profile.active);
+        setEndpointId((current) => current || (active && active.id) || (profiles[0] && profiles[0].id) || null);
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, []);
+
+  const endpointLabelKey = (id) => `endpoint${String(id || '').charAt(0).toUpperCase()}${String(id || '').slice(1)}`;
+  const canSwitchEndpoint = !!(
+    bridge
+    && bridge.available
+    && bridge.desktopRemoteControl
+    && typeof bridge.desktopRemoteControl.setEndpointProfile === 'function'
+  );
 
   const run = async (name, action) => {
     if (!bridge || !bridge.available || !bridge.desktopRemoteControl) return;
@@ -191,6 +227,40 @@ export default function ControlledDevicePanel({ t, bs, supported }) {
         <span>{copy.modelSource}</span>
         <span>{copy.modelSourceDevice}</span>
       </div>
+
+      {canSwitchEndpoint && endpointProfiles.length > 0 && (
+        <div className="settings-row">
+          <label htmlFor="controlled-device-endpoint">{copy.endpointLabel}</label>
+          <select
+            id="controlled-device-endpoint"
+            value={endpointId || ''}
+            disabled={busy === 'endpoint'}
+            onChange={(event) => {
+              const next = event.target.value;
+              const previous = endpointId;
+              setEndpointId(next);
+              run('endpoint', async (remote) => {
+                try {
+                  await remote.setEndpointProfile(next);
+                } catch (failure) {
+                  // 写入失败时把选择回滚到原值，避免 UI 与持久设置不一致。
+                  setEndpointId(previous);
+                  throw failure;
+                }
+              });
+            }}
+          >
+            {endpointProfiles.map((profile) => (
+              <option key={profile.id} value={profile.id}>
+                {copy[endpointLabelKey(profile.id)] || profile.id}
+              </option>
+            ))}
+          </select>
+        </div>
+      )}
+      {canSwitchEndpoint && endpointProfiles.length > 0 && (
+        <p className="settings-hint">{copy.endpointHint}</p>
+      )}
 
       <h4>{copy.workspacesTitle}</h4>
       {workspaces.length === 0 ? (

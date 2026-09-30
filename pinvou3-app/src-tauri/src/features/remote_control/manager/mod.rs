@@ -39,6 +39,7 @@ use persistence::{
     persist_config, persist_rpc_ledger, process_lock_path, public_url, queue_pending_revocation,
     relay_settings_path, remote_public_base_url, remote_relay_ws_url, remove_config,
     remove_private_file, remove_rpc_ledger, validate_config,
+    RelaySettings, validate_relay_settings,
 };
 
 // RPC admission, response shaping, scope validation, and the stream/event
@@ -1164,6 +1165,41 @@ impl RemoteControlManager {
 
     pub fn set_relay_address(&self, input: &str) -> Result<RelaySettingsInfo, String> {
         let settings = normalize_relay_address(input)?;
+        atomic_write_private_json(&relay_settings_path(), &settings, "Web relay settings")?;
+        let has_endpoint = self.inner.lock().endpoint.is_some();
+        if has_endpoint || load_config()?.is_some() {
+            self.refresh()?;
+        }
+        Ok(self.relay_settings())
+    }
+
+    /// 可选的随包内置端点 profile（供设置页「服务端点」下拉使用）。
+    pub fn endpoint_profile_options(&self) -> Vec<serde_json::Value> {
+        ENDPOINT_PROFILES
+            .iter()
+            .map(|profile| {
+                serde_json::json!({
+                    "id": profile.id,
+                    "publicBaseUrl": profile.public_base_url,
+                    "relayWsUrl": profile.relay_ws_url,
+                    "signingKeyId": profile.signing_key_id,
+                    "active": profile.id == active_endpoint_profile().id,
+                })
+            })
+            .collect()
+    }
+
+    /// 切换随包内置端点 profile（production / test）。写入持久设置后，若当前已有
+    /// 连接则走一次完整 refresh，使地址变更立即生效；用户无需再配置环境变量。
+    pub fn set_endpoint_profile(&self, profile_id: &str) -> Result<RelaySettingsInfo, String> {
+        let profile = endpoint_profile_by_id(profile_id.trim())
+            .ok_or_else(|| "endpoint_profile_invalid".to_string())?;
+        let settings = RelaySettings {
+            relay_url: profile.relay_ws_url.to_string(),
+            public_base_url: profile.public_base_url.to_string(),
+            profile: Some(profile.id.to_string()),
+        };
+        validate_relay_settings(&settings)?;
         atomic_write_private_json(&relay_settings_path(), &settings, "Web relay settings")?;
         let has_endpoint = self.inner.lock().endpoint.is_some();
         if has_endpoint || load_config()?.is_some() {

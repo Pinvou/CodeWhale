@@ -213,6 +213,23 @@ pub fn web_access_relay_settings(manager: State<'_, RemoteControlManager>) -> Re
     manager.relay_settings()
 }
 
+/// 随包内置的端点 profile 列表（设置页「服务端点」下拉使用）。
+#[tauri::command]
+pub fn desktop_remote_endpoint_profiles(
+    manager: State<'_, RemoteControlManager>,
+) -> Vec<serde_json::Value> {
+    manager.endpoint_profile_options()
+}
+
+/// 切换内置端点 profile（production / test）：用户不再需要配置环境变量。
+#[tauri::command]
+pub fn desktop_remote_set_endpoint_profile(
+    manager: State<'_, RemoteControlManager>,
+    profile: String,
+) -> Result<RelaySettingsInfo, String> {
+    manager.set_endpoint_profile(&profile)
+}
+
 #[tauri::command]
 pub fn web_access_set_relay(
     address: String,

@@ -15,7 +15,19 @@ const CONTROLLED_KEYS = [
   'section', 'title', 'desc', 'enable', 'disable', 'statusIdle', 'statusWaiting', 'statusConnected',
   'codeLabel', 'codeHint', 'refresh', 'deviceLabel', 'modelSource', 'workspacesTitle',
   'readOnlyNotice', 'disconnectNow', 'stopTasks', 'pendingPermissions', 'noAllowControl', 'unsupported',
+  // E2E-08 后的零配置体验：服务端点（生产/测试）内置在应用中，用户不需要环境变量。
+  'endpointLabel', 'endpointProduction', 'endpointTest', 'endpointHint',
 ];
+
+test('the B panel switches the built-in service endpoint through the bridge', () => {
+  const bridge = source('platform/tauri/bridge/desktop-remote-control.js');
+  assert.ok(panel.includes('endpointProfiles'), 'panel loads the built-in endpoint list');
+  assert.ok(panel.includes('setEndpointProfile'), 'panel switches endpoint through the bridge');
+  assert.ok(panel.includes('endpointLabel'), 'endpoint control uses shared i18n copy');
+  assert.ok(/id="controlled-device-endpoint"/.test(panel), 'endpoint control is addressable');
+  assert.ok(bridge.includes('desktop_remote_endpoint_profiles'));
+  assert.ok(bridge.includes('desktop_remote_set_endpoint_profile'));
+});
 
 test('controlled-device copy exists in all three languages', () => {
   for (const language of ['zh', 'en', 'ja']) {
