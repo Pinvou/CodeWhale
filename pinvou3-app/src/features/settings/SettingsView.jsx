@@ -1588,10 +1588,9 @@ const formatMemoryTime = (item, copy) => {
       </div>
     );
     // iOS-style confirm dialog (stacked buttons: red confirm on top, blue cancel below; backdrop click does not close).
-    // Four isomorphic sites: model delete / search source delete / memory delete / feedback close; RestartDialog (two-column grid, wider) is not one of them.
-    // Optional testid/confirmTestId mount the test pins the memory-delete and feedback-close dialogs need; desc is omitted where the dialog carries no description row.
-    const SheetConfirmDialog = ({ title, desc, confirmLabel, cancelLabel, onConfirm, onCancel, testid, confirmTestId }) => (
-      <div data-testid={testid} className="fixed inset-0 z-[110] flex items-center justify-center bg-black/35 backdrop-blur-md px-4">
+    // Two isomorphic sites: model delete / search source delete; RestartDialog (two-column grid, wider) is not one of them.
+    const SheetConfirmDialog = ({ title, desc, confirmLabel, cancelLabel, onConfirm, onCancel }) => (
+      <div className="fixed inset-0 z-[110] flex items-center justify-center bg-black/35 backdrop-blur-md px-4">
         <div className={`w-[270px] overflow-hidden rounded-[14px] shadow-2xl bg-white text-[#1C1C1E] dark:bg-[#2C2C2E] dark:text-[#F2F2F7]`}>
           <div className="px-5 pt-5 pb-4 text-center">
             <h3 className="text-[17px] leading-6 font-semibold">{title}</h3>
@@ -3007,15 +3006,17 @@ const formatMemoryTime = (item, copy) => {
           )}
           {/* Feedback-close confirm layer: sits above the feedback panel (z-[100]), same recipe as MemoryDeleteDialog (backdrop click does not close) */}
           {feedbackOpen && feedbackCloseConfirm && (
-            <SheetConfirmDialog
-              testid="feedback-close-confirm"
-              confirmTestId="feedback-close-confirm-ok"
-              title={t.feedbackCloseConfirm}
-              confirmLabel={t.feedbackCloseAnyway}
-              cancelLabel={t.cancel}
-              onConfirm={() => { setFeedbackCloseConfirm(false); closeFeedback(); }}
-              onCancel={() => setFeedbackCloseConfirm(false)}
-            />
+            <div data-testid="feedback-close-confirm" className="fixed inset-0 z-[110] flex items-center justify-center bg-black/35 backdrop-blur-md px-4">
+              <div className={`w-[270px] overflow-hidden rounded-[14px] shadow-2xl bg-white text-[#1C1C1E] dark:bg-[#2C2C2E] dark:text-[#F2F2F7]`}>
+                <div className="px-5 pt-5 pb-4 text-center">
+                  <h3 className="text-[17px] leading-6 font-semibold">{t.feedbackCloseConfirm}</h3>
+                </div>
+                <div className={`border-t border-black/[0.12] dark:border-white/[0.12]`}>
+                  <button type="button" data-testid="feedback-close-confirm-ok" onClick={() => { setFeedbackCloseConfirm(false); closeFeedback(); }} className={`w-full h-12 text-[17px] font-semibold text-[#FF3B30] border-b border-black/[0.12] dark:border-white/[0.12]`}>{t.feedbackCloseAnyway}</button>
+                  <button type="button" onClick={() => setFeedbackCloseConfirm(false)} className="w-full h-12 text-[17px] font-semibold text-[#007AFF]">{t.cancel}</button>
+                </div>
+              </div>
+            </div>
           )}
           {feedbackNotice && (
             <div className="fixed left-1/2 bottom-8 z-[130] -translate-x-1/2 px-4 py-2.5 rounded-full bg-black/80 text-white text-[14px] shadow-xl backdrop-blur-md">
