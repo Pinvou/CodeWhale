@@ -194,14 +194,6 @@ impl ControlledRelayPort for crate::features::remote_control::manager::Controlle
     }
 }
 
-#[derive(Debug)]
-pub(crate) enum RegistrationStep {
-    /// Relay traffic that belongs to another phase (e.g. the synthetic
-    /// `desktop_endpoint_registered` acknowledgement) is ignored here.
-    Ignore,
-    Registered(Box<ControlledRegistration>),
-}
-
 /// `controller_joined` 之后的租约材料：租约身份来自 Relay，传输指纹由双方
 /// 认证过的 transcript 派生。
 #[derive(Debug)]
@@ -310,36 +302,48 @@ impl ControlledHandshakeDriver {
     }
 }
 
-/// Waits for the registration response for `request`. Extracted from the worker
-/// so timeout / disconnect / ignore-unknown branches are covered by tests.
-pub(crate) async fn next_registration_step<P: ControlledRelayPort>(
+/// Waits for the registration response for `request`. Unrelated controller
+/// frames are consumed without extending the attempt's absolute deadline.
+pub(crate) async fn wait_for_registration<P: ControlledRelayPort>(
     port: &mut P,
     request: &Value,
     code_wrap: &CodeWrapKeyPair,
     timeout: std::time::Duration,
-) -> Result<RegistrationStep, String> {
+) -> Result<ControlledRegistration, String> {
     let deadline = tokio::time::sleep(timeout);
     tokio::pin!(deadline);
     loop {
         tokio::select! {
+            biased;
             _ = &mut deadline => return Err("pairing_registration_timeout".to_owned()),
             message = port.recv() => {
                 let Some(message) = message else {
                     return Err("desktop_relay_disconnected".to_owned());
                 };
-                if message.get("type").and_then(Value::as_str)
-                    == Some("desktop_endpoint_registered")
-                {
-                    return Ok(RegistrationStep::Ignore);
+                let kind = message.get("type").and_then(Value::as_str);
+                match kind {
+                    Some("desktop_relay_connection") => {
+                        if message.get("connected").and_then(Value::as_bool) == Some(false) {
+                            return Err("desktop_relay_disconnected".to_owned());
+                        }
+                        continue;
+                    }
+                    Some("desktop_endpoint_registered") => {
+                        continue;
+                    }
+                    Some("desktop_pairing_registered") | Some("error") => {}
+                    // The controller lane also carries transport and later-phase
+                    // control frames. They are not registration responses and
+                    // must never be fed to the registration validator.
+                    _ => continue,
                 }
                 // relay 的拒绝必须保留原始有界码，便于定位（此前被映射成
                 // pairing_registration_rejected 后丢失了原因）。
-                if message.get("type").and_then(Value::as_str) == Some("error") {
+                if kind == Some("error") {
                     let code = message
                         .get("code")
                         .and_then(Value::as_str)
                         .unwrap_or("relay_error");
-                    log_controlled_event("registration_rejected", code);
                     // The shared Relay uses v2 for its outer Web-access lane and
                     // controller-v1 for desktop control. A v2 version rejection
                     // for our v1 registration means the controller dispatcher is
@@ -351,11 +355,17 @@ pub(crate) async fn next_registration_step<P: ControlledRelayPort>(
                             "unsupported_protocol_version" | "desktop_controller_unavailable"
                         )
                     {
+                        log_controlled_event("registration_rejected", code);
                         return Err("desktop_controller_relay_unavailable".to_owned());
                     }
+                    // Errors from connection setup or another in-flight request
+                    // share this lane but are not replies to this registration.
+                    if message.get("request_id") != request.get("request_id") {
+                        continue;
+                    }
+                    log_controlled_event("registration_rejected", code);
                 }
-                return registration_from_response(code_wrap, request, &message)
-                    .map(|registration| RegistrationStep::Registered(Box::new(registration)));
+                return registration_from_response(code_wrap, request, &message);
             }
         }
     }
@@ -438,36 +448,33 @@ impl ControlledRelayWorker {
             self.channel.try_send(request.clone())?;
             // 区分「连注册帧都没发出去」与「发出后等待/被拒」这两类失败。
             log_controlled_event("registration_sent", "waiting_registered");
-            loop {
-                match next_registration_step(
-                    &mut self.channel,
-                    &request,
-                    &self.code_wrap,
-                    std::time::Duration::from_millis(REGISTRATION_TIMEOUT_MS),
-                )
-                .await
-                {
-                    Ok(RegistrationStep::Ignore) => continue,
-                    Ok(RegistrationStep::Registered(registration)) => {
-                        let status = manager
-                            .complete_registration(self.operation.clone(), *registration, 0)
-                            .map_err(|error| error.code.to_owned())?;
-                        log_controlled_event("registered", "waiting_connection");
-                        let _ = self.app.emit(CONTROLLED_STATUS_EVENT, &status);
-                        return Ok(status);
+            match wait_for_registration(
+                &mut self.channel,
+                &request,
+                &self.code_wrap,
+                std::time::Duration::from_millis(REGISTRATION_TIMEOUT_MS),
+            )
+            .await
+            {
+                Ok(registration) => {
+                    let status = manager
+                        .complete_registration(self.operation.clone(), registration, 0)
+                        .map_err(|error| error.code.to_owned())?;
+                    log_controlled_event("registered", "waiting_connection");
+                    let _ = self.app.emit(CONTROLLED_STATUS_EVENT, &status);
+                    return Ok(status);
+                }
+                Err(error) => {
+                    log_controlled_event("registration_failed", &error);
+                    let retryable = matches!(
+                        error.as_str(),
+                        "pairing_registration_timeout" | "desktop_relay_disconnected"
+                    );
+                    if retryable && attempt < MAX_ATTEMPTS {
+                        tokio::time::sleep(ENDPOINT_READY_RETRY_DELAY).await;
+                        continue;
                     }
-                    Err(error) => {
-                        log_controlled_event("registration_failed", &error);
-                        let retryable = matches!(
-                            error.as_str(),
-                            "pairing_registration_timeout" | "desktop_relay_disconnected"
-                        );
-                        if retryable && attempt < MAX_ATTEMPTS {
-                            tokio::time::sleep(ENDPOINT_READY_RETRY_DELAY).await;
-                            break;
-                        }
-                        return Err(error);
-                    }
+                    return Err(error);
                 }
             }
         }
@@ -1809,6 +1816,7 @@ mod tests {
         queued: VecDeque<Value>,
         sent: std::sync::Mutex<Vec<Value>>,
         hang: bool,
+        recv_delay: Duration,
     }
 
     impl FakePort {
@@ -1817,6 +1825,16 @@ mod tests {
                 queued: messages.into(),
                 sent: std::sync::Mutex::new(Vec::new()),
                 hang,
+                recv_delay: Duration::ZERO,
+            }
+        }
+
+        fn delayed(messages: Vec<Value>, hang: bool, recv_delay: Duration) -> Self {
+            Self {
+                queued: messages.into(),
+                sent: std::sync::Mutex::new(Vec::new()),
+                hang,
+                recv_delay,
             }
         }
     }
@@ -1829,6 +1847,9 @@ mod tests {
         }
 
         async fn recv(&mut self) -> Option<Value> {
+            if !self.recv_delay.is_zero() {
+                tokio::time::sleep(self.recv_delay).await;
+            }
             if let Some(message) = self.queued.pop_front() {
                 return Some(message);
             }
@@ -1931,28 +1952,63 @@ mod tests {
             ],
             false,
         );
-        let first = block_on(next_registration_step(
+        let registration = block_on(wait_for_registration(
             &mut port,
             &request,
             &receiver,
             Duration::from_millis(500),
         ))
         .unwrap();
-        assert!(matches!(first, RegistrationStep::Ignore));
-        let second = block_on(next_registration_step(
+        assert_eq!(registration.pairing_code, "2345678");
+        assert!(!format!("{registration:?}").contains("2345678"));
+    }
+
+    #[test]
+    fn registration_ignores_relay_connection_frame_before_the_sealed_result() {
+        let (request, receiver) = registration_request_fixture();
+        let mut port = FakePort::new(
+            vec![
+                json!({
+                    "type": "desktop_relay_connection",
+                    "endpoint_id": "endpoint-0001",
+                    "connected": true,
+                    "error": null,
+                }),
+                registered_response(&receiver),
+            ],
+            false,
+        );
+        block_on(wait_for_registration(
             &mut port,
             &request,
             &receiver,
             Duration::from_millis(500),
         ))
         .unwrap();
-        match second {
-            RegistrationStep::Registered(registration) => {
-                assert_eq!(registration.pairing_code, "2345678");
-                assert!(!format!("{registration:?}").contains("2345678"));
-            }
-            RegistrationStep::Ignore => panic!("sealed result must not be ignored"),
-        }
+    }
+
+    #[test]
+    fn registration_treats_relay_disconnect_frame_as_retryable_disconnect() {
+        let (request, receiver) = registration_request_fixture();
+        let mut port = FakePort::new(
+            vec![json!({
+                "type": "desktop_relay_connection",
+                "endpoint_id": "endpoint-0001",
+                "connected": false,
+                "error": "transport_closed",
+            })],
+            false,
+        );
+        assert_eq!(
+            block_on(wait_for_registration(
+                &mut port,
+                &request,
+                &receiver,
+                Duration::from_millis(500),
+            ))
+            .unwrap_err(),
+            "desktop_relay_disconnected"
+        );
     }
 
     #[test]
@@ -1960,7 +2016,7 @@ mod tests {
         let (request, receiver) = registration_request_fixture();
         let mut port = FakePort::new(Vec::new(), true);
         assert_eq!(
-            block_on(next_registration_step(
+            block_on(wait_for_registration(
                 &mut port,
                 &request,
                 &receiver,
@@ -1972,11 +2028,48 @@ mod tests {
     }
 
     #[test]
+    fn ignored_frames_do_not_extend_the_registration_deadline() {
+        let (request, receiver) = registration_request_fixture();
+        let ignored = vec![
+            json!({ "v": 2, "type": "desktop_endpoint_registered", "endpoint_id": "endpoint-0001" }),
+            json!({
+                "type": "desktop_relay_connection",
+                "endpoint_id": "endpoint-0001",
+                "connected": true,
+                "error": null,
+            }),
+            json!({
+                "v": 1,
+                "type": "error",
+                "request_id": "request-from-another-phase",
+                "code": "enrollment_required",
+                "message": "not this registration",
+            }),
+        ];
+        let mut port = FakePort::delayed(ignored, true, Duration::from_millis(50));
+        let started = std::time::Instant::now();
+        assert_eq!(
+            block_on(wait_for_registration(
+                &mut port,
+                &request,
+                &receiver,
+                Duration::from_millis(130),
+            ))
+            .unwrap_err(),
+            "pairing_registration_timeout"
+        );
+        assert!(
+            started.elapsed() < Duration::from_millis(220),
+            "ignored frames must not restart the attempt timeout"
+        );
+    }
+
+    #[test]
     fn closed_relay_lane_fails_closed() {
         let (request, receiver) = registration_request_fixture();
         let mut port = FakePort::new(Vec::new(), false);
         assert_eq!(
-            block_on(next_registration_step(
+            block_on(wait_for_registration(
                 &mut port,
                 &request,
                 &receiver,
@@ -1995,18 +2088,19 @@ mod tests {
                 "v": 1,
                 "type": "error",
                 "request_id": "request-registration-0001",
-                "code": "endpoint_not_enrolled",
+                "code": "enrollment_required",
                 "message": "pairing registration rejected",
             })],
             false,
         );
-        let error = block_on(next_registration_step(
+        let error = block_on(wait_for_registration(
             &mut port,
             &request,
             &receiver,
             Duration::from_millis(500),
         ))
         .unwrap_err();
+        assert_eq!(error, "enrollment_required");
         assert!(
             error
                 .chars()
@@ -2014,6 +2108,31 @@ mod tests {
             "relay failures must stay bounded: {error}"
         );
         assert!(!error.contains(' '));
+    }
+
+    #[test]
+    fn registration_ignores_an_error_for_another_request() {
+        let (request, receiver) = registration_request_fixture();
+        let mut port = FakePort::new(
+            vec![
+                json!({
+                    "v": 1,
+                    "type": "error",
+                    "request_id": "request-from-another-phase",
+                    "code": "enrollment_required",
+                    "message": "pairing registration rejected",
+                }),
+                registered_response(&receiver),
+            ],
+            false,
+        );
+        block_on(wait_for_registration(
+            &mut port,
+            &request,
+            &receiver,
+            Duration::from_millis(500),
+        ))
+        .unwrap();
     }
 
     #[test]
@@ -2033,7 +2152,7 @@ mod tests {
                 false,
             );
             assert_eq!(
-                block_on(next_registration_step(
+                block_on(wait_for_registration(
                     &mut port,
                     &request,
                     &receiver,

@@ -1987,6 +1987,27 @@ dictZh["controlledDevice"] = {
 };
 
 // Windows 双端远程控制：A 主控端连接壳（DEV-22）。
+Object.assign(dictZh.controlledDevice, {
+  stateOff: "未开启", stateReserving: "正在生成连接码", stateWaiting: "等待连接",
+  stateExpiring: "即将过期", stateExpired: "连接码已过期", stateReserved: "已被预留",
+  stateHandshake: "安全握手中", stateConnected: "已连接", stateReconnecting: "正在重连",
+  stateRefreshing: "正在刷新", stateStopping: "正在关闭", stateError: "服务异常",
+  detailOff: "开启后会生成一个 5 分钟有效的临时连接码。",
+  detailReserving: "正在向安全服务申请临时连接码，请稍候。",
+  detailWaiting: "将下方连接码提供给可信任的控制方。",
+  detailExpiring: "此连接码即将失效，建议刷新后再分享。",
+  detailExpired: "此连接码已失效，请生成新的连接码。",
+  detailReserved: "对方已提交连接码，正在锁定本次连接。",
+  detailHandshake: "正在校验双方身份并建立加密通道。",
+  detailConnected: "远程控制通道已建立，可随时在这里关闭。",
+  detailReconnecting: "连接暂时中断，正在安全恢复。",
+  detailRefreshing: "旧连接码正在失效，正在生成新连接码。",
+  detailStopping: "正在撤销连接码并关闭远程控制通道。",
+  detailError: "无法连接到远程控制服务，请稍后重试。",
+  copyCode: "复制", copied: "已复制", regenerate: "重新生成", codeExpiredShort: "已过期",
+  securityNotice: "连接码仅用于一次短期配对。只有已授权的工作区可用于代码任务，关闭开关会立即终止远程控制。",
+});
+
 dictZh["controllerConnection"] = {
   entry: "连接远程设备",
   title: "连接远程设备",
@@ -2027,6 +2048,32 @@ dictZh["controllerConnection"] = {
 };
 
 // Windows 双端远程控制：A 远程会话窗口（DEV-23）。
+Object.assign(dictZh.controllerConnection, {
+  controllerTitle: "控制另一台设备", controllerDesc: "输入另一台设备显示的连接码，建立安全的远程会话。",
+  controlledSideHint: "让他人连接本机", controllerSideHint: "连接另一台设备", roleSelectorLabel: "选择远程控制角色", roleStatusLabel: "当前状态",
+  stateEmpty: "等待输入", stateTyping: "正在输入", stateReady: "可以连接", stateFormatInvalid: "格式不正确",
+  stateInvalid: "连接码无效", stateConnecting: "正在连接", stateSafetyHandshake: "安全握手中",
+  stateConnected: "已连接", stateReconnecting: "正在重连", stateDisconnected: "连接已断开",
+  stateBusy: "对方设备忙碌", stateOffline: "对方设备离线", stateVersion: "版本不兼容",
+  stateProtocol: "协议异常", stateUnsupported: "当前设备不支持", stateLocalBusy: "本机已有连接", stateFailed: "连接失败",
+  detailConnecting: "正在查找对方设备并建立连接。",
+  detailSafety_handshake: "正在校验双方身份并建立加密通道。",
+  detailConnected: "安全通道已建立，可以进入远程会话。",
+  detailReconnecting: "连接暂时中断，正在自动恢复。",
+  detailDisconnected: "上一次远程连接已结束，可输入连接码重新连接。",
+  detailInvalid: "请向对方确认当前显示的连接码。",
+  detailBusy: "对方正在被其他设备控制，请稍后再试。",
+  detailOffline: "请确认对方设备在线且已开启远程控制。",
+  detailVersion: "请将双方应用升级到兼容版本后重试。",
+  detailProtocol: "收到无法识别的数据，请重试并检查双方版本。",
+  detailUnsupported: "此系统暂时无法使用桌面远程控制。",
+  detailLocal_busy: "请先断开本机当前的远程连接。",
+  detailFailed: "连接没有建立，请检查网络后重试。",
+  paste: "粘贴", inputEmpty: "输入 7 位连接码", inputTyping: "继续输入剩余字符", inputReady: "连接码格式正确",
+  disconnecting: "正在断开…", cancelConnection: "取消连接", conversationOpen: "远程会话已在会话页打开",
+  securityNotice: "连接码经过短期验证，传输通道全程加密。仅连接你信任的设备。",
+});
+
 dictZh["remoteConversation"] = {
   title: "远程会话",
   remoteBadge: "远程",

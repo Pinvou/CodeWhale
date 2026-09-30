@@ -8,6 +8,7 @@ import path from 'node:path';
 import test from 'node:test';
 import vm from 'node:vm';
 import { fileURLToPath } from 'node:url';
+import { controlledDeviceUiState } from '../src/features/remote-control/remote-control-logic.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const logicPath = path.join(root, 'src', 'features', 'remote-control', 'remote-control-state.js');
@@ -20,30 +21,29 @@ const read = (relative) => fs.readFileSync(path.join(root, 'src', relative), 'ut
 
 test('the B panel maps the backend status enum and shows the pairing code', () => {
   const panel = read('features/remote-control/ControlledDevicePanel.jsx');
-  for (const status of [
-    'reserving',
-    'waiting_connection',
-    'safety_handshake',
-    'connected',
-    'reconnecting',
-    'refreshing',
-    'stopped',
-    'error',
-    'disabled',
-  ]) {
-    assert.ok(panel.includes(`'${status}'`), `panel must map backend status ${status}`);
+  const cases = [
+    ['reserving', 'reserving'],
+    ['waiting_connection', 'waiting'],
+    ['safety_handshake', 'handshake'],
+    ['connected', 'connected'],
+    ['reconnecting', 'reconnecting'],
+    ['refreshing', 'refreshing'],
+    ['stopped', 'off'],
+    ['error', 'error'],
+    ['disabled', 'off'],
+  ];
+  for (const [status, expected] of cases) {
+    const device = status === 'waiting_connection' ? { status, pairingCode: '2345678' } : { status };
+    assert.equal(controlledDeviceUiState(device, 120), expected, `backend status ${status}`);
   }
-  assert.ok(panel.includes('CODE_STATUSES'), 'pairing code must be status-driven');
-  assert.ok(panel.includes("'waiting_connection'"), 'pairing code shows while waiting');
+  assert.ok(panel.includes('codeVisible'), 'pairing code must be state-driven');
+  assert.ok(panel.includes("['waiting', 'expiring', 'expired']"), 'pairing code shows across its lifecycle');
   assert.ok(
     panel.includes('controllerDeviceName'),
     'the 主控设备 row must use the controller device name',
   );
   // E2E-07：刷新状态不得借用「正在停止」的文案。
-  assert.ok(
-    /case 'refreshing':\s*return 'refreshing';/.test(panel),
-    'Refreshing must keep its own copy instead of statusStopping',
-  );
+  assert.equal(controlledDeviceUiState({ status: 'refreshing' }), 'refreshing');
   assert.ok(panel.includes('deviceUnknown'), 'unknown names fall back to i18n copy');
   assert.ok(!/device\.deviceName \|\| copy\.deviceUnknown/.test(panel));
 });

@@ -2019,6 +2019,27 @@ dictJa["controlledDevice"] = {
 };
 
 // Windows デスクトップ遠隔操作：A 操作側の接続シェル（DEV-22）。
+Object.assign(dictJa.controlledDevice, {
+  stateOff: "オフ", stateReserving: "コードを生成中", stateWaiting: "接続待ち",
+  stateExpiring: "まもなく期限切れ", stateExpired: "コード期限切れ", stateReserved: "接続予約済み",
+  stateHandshake: "安全確認中", stateConnected: "接続済み", stateReconnecting: "再接続中",
+  stateRefreshing: "更新中", stateStopping: "停止中", stateError: "サービスエラー",
+  detailOff: "オンにすると、5 分間有効な一時接続コードを生成します。",
+  detailReserving: "安全なサービスに一時接続コードを要求しています。",
+  detailWaiting: "下のコードは信頼できる相手とのみ共有してください。",
+  detailExpiring: "このコードはまもなく失効します。共有前に更新してください。",
+  detailExpired: "このコードは失効しました。新しいコードを生成してください。",
+  detailReserved: "相手がコードを送信し、この接続を予約しました。",
+  detailHandshake: "双方を確認し、暗号化チャネルを確立しています。",
+  detailConnected: "遠隔操作チャネルが有効です。ここからいつでも停止できます。",
+  detailReconnecting: "接続が中断され、安全に復旧しています。",
+  detailRefreshing: "古いコードを無効にし、新しいコードを生成しています。",
+  detailStopping: "コードを取り消し、遠隔操作チャネルを閉じています。",
+  detailError: "遠隔操作サービスに接続できません。後でもう一度お試しください。",
+  copyCode: "コピー", copied: "コピー済み", regenerate: "新しいコードを生成", codeExpiredShort: "期限切れ",
+  securityNotice: "コードは短時間の 1 回限りのペアリング用です。コードタスクは許可済みワークスペースのみ利用でき、オフにすると遠隔操作は直ちに終了します。",
+});
+
 dictJa["controllerConnection"] = {
   entry: "リモート端末に接続",
   title: "リモート端末に接続",
@@ -2059,6 +2080,32 @@ dictJa["controllerConnection"] = {
 };
 
 // Windows デスクトップ遠隔操作：A の遠隔会話（DEV-23）。
+Object.assign(dictJa.controllerConnection, {
+  controllerTitle: "別の端末を操作", controllerDesc: "相手の端末に表示されたコードを入力して、安全なリモートセッションを開始します。",
+  controlledSideHint: "この端末への接続を許可", controllerSideHint: "別の端末に接続", roleSelectorLabel: "遠隔操作の役割を選択", roleStatusLabel: "現在の状態",
+  stateEmpty: "コード入力待ち", stateTyping: "入力中", stateReady: "接続可能", stateFormatInvalid: "形式が正しくありません",
+  stateInvalid: "無効なコード", stateConnecting: "接続中", stateSafetyHandshake: "安全確認中",
+  stateConnected: "接続済み", stateReconnecting: "再接続中", stateDisconnected: "切断済み",
+  stateBusy: "相手の端末は使用中", stateOffline: "相手の端末はオフライン", stateVersion: "バージョン非互換",
+  stateProtocol: "プロトコルエラー", stateUnsupported: "未対応", stateLocalBusy: "この端末は接続中", stateFailed: "接続失敗",
+  detailConnecting: "相手の端末を探して接続を開始しています。",
+  detailSafety_handshake: "双方を確認し、暗号化チャネルを確立しています。",
+  detailConnected: "安全なチャネルが準備できました。リモート会話を開けます。",
+  detailReconnecting: "接続が中断され、自動的に復旧しています。",
+  detailDisconnected: "前回の接続は終了しました。コードを入力して再接続できます。",
+  detailInvalid: "相手の画面に現在表示されているコードを確認してください。",
+  detailBusy: "別の端末が操作中です。後でもう一度お試しください。",
+  detailOffline: "相手がオンラインで遠隔操作を有効にしているか確認してください。",
+  detailVersion: "双方を互換性のあるバージョンに更新してください。",
+  detailProtocol: "認識できないデータを受信しました。再試行し、双方のバージョンを確認してください。",
+  detailUnsupported: "このシステムではデスクトップ遠隔操作を利用できません。",
+  detailLocal_busy: "この端末の現在のリモート接続を先に切断してください。",
+  detailFailed: "接続できませんでした。ネットワークを確認して再試行してください。",
+  paste: "貼り付け", inputEmpty: "7 文字のコードを入力", inputTyping: "残りの文字を入力してください", inputReady: "コード形式は正しいです",
+  disconnecting: "切断中…", cancelConnection: "接続をキャンセル", conversationOpen: "リモート会話はチャット画面で開いています",
+  securityNotice: "コードは短時間のみ有効で、通信はエンドツーエンドで暗号化されます。信頼できる端末だけに接続してください。",
+});
+
 dictJa["remoteConversation"] = {
   title: "リモート会話",
   remoteBadge: "リモート",
