@@ -140,6 +140,7 @@ pub(crate) struct ControlledWorkspaceInfo {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ControlledStatus {
     status: ControlledStatusKind,
+    status_intent: String,
     generation: Option<String>,
     registration_request_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -209,6 +210,8 @@ struct Inner {
     phase: ControlledStatusKind,
     intent: u64,
     generation: Option<String>,
+    // Non-secret correlation only; never used by current_operation/ensure_operation.
+    status_generation: Option<String>,
     registration_request_id: Option<String>,
     device_name: Option<String>,
     pairing: Option<PairingState>,
@@ -236,6 +239,7 @@ impl Default for Inner {
             phase: ControlledStatusKind::Disabled,
             intent: 0,
             generation: None,
+            status_generation: None,
             registration_request_id: None,
             device_name: None,
             pairing: None,
@@ -799,6 +803,7 @@ fn prepare_generation(inner: &mut Inner) -> ControlledOperation {
     let generation = format!("generation_{}", Uuid::new_v4().simple());
     let registration = format!("registration_{}", Uuid::new_v4().simple());
     inner.generation = Some(generation.clone());
+    inner.status_generation = Some(generation.clone());
     inner.registration_request_id = Some(registration);
     ControlledOperation {
         intent: inner.intent,
@@ -911,7 +916,8 @@ fn status_locked(inner: &Inner) -> ControlledStatus {
         .map(|watchdog| watchdog.state(inner.last_observed_now_b));
     ControlledStatus {
         status: inner.phase,
-        generation: inner.generation.clone(),
+        status_intent: inner.intent.to_string(),
+        generation: inner.status_generation.clone(),
         registration_request_id: inner.registration_request_id.clone(),
         pairing_code: inner
             .pairing
@@ -957,6 +963,72 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
+
+    #[test]
+    fn serialized_status_matches_the_shared_bridge_fixture() {
+        let fixtures: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../../tests/fixtures/desktop_remote_status.json"
+        ))
+        .unwrap();
+        let manager = ControlledDeviceManager::default();
+        let operation = manager
+            .start(
+                Some("Studio PC"),
+                vec![WorkspaceAuthorizationRequest {
+                    path: PathBuf::from("workspace-fixture"),
+                    display_name: "Project".into(),
+                    code_allowed: true,
+                }],
+            )
+            .unwrap();
+        let mut waiting = manager
+            .complete_registration(
+                operation.clone(),
+                ControlledRegistration {
+                    pairing_code: "2345678".into(),
+                    sealed_code_b64: "sealed".into(),
+                    expires_at_ms: 600_000,
+                },
+                1_000,
+            )
+            .unwrap();
+        // Normalize only random correlation IDs; every other field comes from
+        // the production transition rather than a hand-constructed DTO.
+        waiting.generation = Some("generation-0001".into());
+        waiting.registration_request_id = Some("registration-0001".into());
+        assert_eq!(
+            serde_json::to_value(&waiting).unwrap(),
+            fixtures["controlledWaiting"]
+        );
+        let mut failed = manager
+            .fail_operation(operation.clone(), "endpoint_offline")
+            .unwrap();
+        assert_eq!(
+            failed.generation.as_deref(),
+            Some(operation.generation.as_str())
+        );
+        assert!(manager.inner.lock().generation.is_none());
+        assert_eq!(
+            manager
+                .complete_registration(
+                    operation,
+                    ControlledRegistration {
+                        pairing_code: "2345678".into(),
+                        sealed_code_b64: "sealed".into(),
+                        expires_at_ms: 600_000,
+                    },
+                    1_000
+                )
+                .unwrap_err()
+                .code,
+            "desktop_remote_stale_result"
+        );
+        failed.generation = Some("generation-0001".into());
+        assert_eq!(
+            serde_json::to_value(failed).unwrap(),
+            fixtures["controlledError"]
+        );
+    }
 
     #[derive(Default)]
     struct CleanupCounter(AtomicUsize);
@@ -1384,6 +1456,11 @@ mod tests {
             ControlledStatusKind::Reconnecting
         );
         let status = manager.poll_watchdog(31_000);
+        assert_eq!(
+            status.generation.as_deref(),
+            Some(operation.generation.as_str())
+        );
+        assert!(manager.inner.lock().generation.is_none());
         assert_eq!(status.status, ControlledStatusKind::Error);
         assert_eq!(status.error_code, Some("desktop_remote_watchdog_expired"));
         assert_eq!(status.workspace_count, 0);
@@ -1398,7 +1475,7 @@ mod tests {
         let operation = manager.start(Some("B"), Vec::new()).unwrap();
         manager
             .complete_registration(
-                operation,
+                operation.clone(),
                 ControlledRegistration {
                     pairing_code: "2345678".into(),
                     sealed_code_b64: "sealed".into(),
@@ -1410,7 +1487,11 @@ mod tests {
         let stopped = manager.stop();
         assert_eq!(stopped.status, ControlledStatusKind::Stopped);
         assert_eq!(stopped.pairing_code, None);
-        assert_eq!(stopped.generation, None);
+        assert_eq!(
+            stopped.generation.as_deref(),
+            Some(operation.generation.as_str())
+        );
+        assert!(manager.inner.lock().generation.is_none());
         assert_eq!(cleanup.0.load(Ordering::SeqCst), 1);
 
         let second = manager.start(Some("B"), Vec::new()).unwrap();
@@ -1441,6 +1522,11 @@ mod tests {
             .unwrap();
         let refresh = manager.begin_refresh().unwrap();
         let status = manager.fail_refresh(refresh).unwrap();
+        assert_eq!(
+            status.generation.as_deref(),
+            Some(operation.generation.as_str())
+        );
+        assert!(manager.inner.lock().generation.is_none());
         assert_eq!(status.status, ControlledStatusKind::Error);
         assert_eq!(status.error_code, Some("desktop_remote_refresh_failed"));
         assert_eq!(status.workspace_count, 0);

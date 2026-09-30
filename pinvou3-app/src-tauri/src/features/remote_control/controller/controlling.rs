@@ -540,6 +540,33 @@ fn status_locked(inner: &Inner) -> ControllingStatus {
 mod tests {
     use super::*;
 
+    #[test]
+    fn serialized_status_matches_the_shared_bridge_fixture() {
+        let fixtures: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../../tests/fixtures/desktop_remote_status.json"
+        ))
+        .unwrap();
+        let manager = ControllingDeviceManager::default();
+        let operation = manager.connect("2345678").unwrap();
+        manager.complete_reserved(operation.clone()).unwrap();
+        let mut connected = manager
+            .complete_connected(operation.clone(), lease())
+            .unwrap();
+        connected.claim_request_id = Some("claim-0001".into());
+        assert_eq!(
+            serde_json::to_value(&connected).unwrap(),
+            fixtures["controllerConnected"]
+        );
+        let mut failed = manager
+            .fail_connection(operation, "endpoint_offline")
+            .unwrap();
+        failed.claim_request_id = Some("claim-0001".into());
+        assert_eq!(
+            serde_json::to_value(failed).unwrap(),
+            fixtures["controllerError"]
+        );
+    }
+
     fn lease() -> ControllerLease {
         ControllerLease {
             context: LeaseContext {

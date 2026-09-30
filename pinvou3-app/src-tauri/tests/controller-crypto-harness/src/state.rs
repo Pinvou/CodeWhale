@@ -7,3 +7,14 @@ pub(crate) mod controlled;
 
 #[path = "../../../src/features/remote_control/controller/controlling.rs"]
 pub(crate) mod controlling;
+
+#[path = "../../../src/features/remote_control/controller/permission.rs"]
+mod permission;
+
+// Compile the real task producer and journal consumer together: a fabricated
+// event sequence cannot prove that production transitions reach the journal.
+#[path = "../../../src/features/remote_control/controller/task.rs"]
+pub(crate) mod task;
+
+#[path = "../../../src/features/remote_control/controller/journal.rs"]
+pub(crate) mod journal;
