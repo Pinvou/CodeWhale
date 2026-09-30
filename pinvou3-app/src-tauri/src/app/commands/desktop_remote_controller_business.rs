@@ -36,7 +36,10 @@ impl DesktopControlledCleanup {
 impl ControlledCleanupSink for DesktopControlledCleanup {
     fn cleanup(&self, generation: &str, scope: ControlledCleanupScope) {
         if scope.session_keys {
-            if let Some(relay) = self.app.try_state::<crate::features::remote_control::RemoteControlManager>() {
+            if let Some(relay) = self
+                .app
+                .try_state::<crate::features::remote_control::RemoteControlManager>()
+            {
                 relay.stop_controller_relay(generation);
             }
         }

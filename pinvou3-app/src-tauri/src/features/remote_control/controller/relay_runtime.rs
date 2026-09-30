@@ -591,7 +591,9 @@ impl ControlledRelayWorker {
             }
         }
         // 通道关闭（stop/refresh/断线）时丢弃出站旁路，避免旧 generation 继续回传。
-        self.app.state::<ControlledOutboundState>().clear_generation(self.channel.generation());
+        self.app
+            .state::<ControlledOutboundState>()
+            .clear_generation(self.channel.generation());
     }
 
     /// E2E-06：按 watchdog 需求发起挑战 / 升级到 Relay 签名兜底 / 作废超时挑战。
@@ -1115,7 +1117,10 @@ pub(crate) struct ControlledOutboundState {
 impl ControlledOutboundState {
     pub(crate) fn clear_generation(&self, generation: &str) {
         let mut sender = self.sender.lock();
-        if sender.as_ref().is_some_and(|sender| sender.generation() == generation) {
+        if sender
+            .as_ref()
+            .is_some_and(|sender| sender.generation() == generation)
+        {
             *sender = None;
         }
     }
