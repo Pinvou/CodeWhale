@@ -122,6 +122,212 @@ pub fn humanize_script_message(raw: &str) -> String {
     format!("脚本返回错误（{short}）")
 }
 
+/// 一眼就是"错误本身"的通用词。命中一条就说明这一行在陈述**发生了什么坏事**。
+///
+/// 跟 [`SCRIPT_ERROR_PATTERNS`] 分开：那张表是"能翻成人话的已知原因"，命中它的行
+/// 价值更高（下面给的分更高）；这张表管的是"翻不出人话、但确实是报错"的行。
+const ERROR_TOKENS: &[&str] = &[
+    "error",
+    "fatal",
+    "failed",
+    "failure",
+    "cannot",
+    "can't",
+    "unable",
+    "no such",
+    "not found",
+    "denied",
+    "refused",
+    "timed out",
+    "timeout",
+    "traceback",
+    "panic",
+    "aborted",
+    "exceeded",
+    "unreachable",
+    "错误",
+    "失败",
+    "无法",
+    "不能",
+    "超时",
+    "不足",
+    "拒绝",
+    "找不到",
+    "不存在",
+    "异常",
+];
+
+/// 这一行是**建议**，不是原因。
+///
+/// # 为什么必须有这一档
+///
+/// 日本客户的截图实锤过：他看到的"失败原因"是
+/// 「也可以在别的机器上拉好后用 docker save/load 拷进来」——那是脚本在报错之后好心
+/// 附上的一句变通办法，而真正的原因（DNS 超时）被埋在它上面几行。摘要原来取的是
+/// **最后一条非空行**，于是越是"失败要说人话"写得认真的脚本（报完错还给建议），
+/// 摘要就越没用。用户照着那句建议排查，永远修不到 DNS。
+///
+/// # 🔴 判据看的是**位置**，不是"含不含"
+///
+/// 这张表里的 `请检查` / `请确认` / `please` 在真正的报错句子**尾部**极其常见：
+/// 「拉取引擎镜像失败，请检查网络或配置镜像加速器」是一句合格的失败原因，只是顺手
+/// 带了下一步。按"含不含"判会把这一整类好句子扣成负分，摘要反而退回去挑那些什么都
+/// 没说的中性行。所以判据是 **marker 落在行首那一小段里**（见 [`ADVICE_LEAD_CHARS`]）：
+/// 通篇是建议的行才从建议词开头。
+const ADVICE_MARKERS: &[&str] = &[
+    "也可以",
+    "你可以",
+    "您可以",
+    "可以尝试",
+    "可尝试",
+    "请尝试",
+    "试试",
+    "建议",
+    "提示：",
+    "提示:",
+    "参考",
+    "或者",
+    "解决办法",
+    "解决方法",
+    "处理办法",
+    "如需",
+    "若需",
+    "请先",
+    "请检查",
+    "请确认",
+    "workaround",
+    "hint:",
+    "note:",
+    "tip:",
+    "see also",
+    "you can",
+    "try ",
+    "please ",
+];
+
+/// 纯装饰/纯噪声行：分隔线、进度条残渣、协议行。
+fn is_noise_line(lowered: &str) -> bool {
+    let t = lowered.trim();
+    if t.is_empty() {
+        return true;
+    }
+    // `====`、`----`、`****` 这类分隔线：没有一个字是信息
+    if t.chars()
+        .all(|c| matches!(c, '=' | '-' | '*' | '#' | '~' | '_' | ' ' | '.'))
+    {
+        return true;
+    }
+    // docker/pip 的逐层进度残渣
+    t.contains("pulling fs layer")
+        || t.contains("verifying checksum")
+        || t.contains("already exists")
+        || t.contains("download complete")
+        || t.contains("pull complete")
+        || t.contains("waiting")
+        || t.contains("extracting")
+}
+
+/// 扒掉 `[安装引擎] ` / `[下载模型] ` 这类阶段前缀。
+///
+/// 手写而不是上正则：这个 crate 没有 `regex` 依赖，而判据本身只有三条（行首是 `[`、
+/// 有配对的 `]`、方括号里不超过 12 个字符）。上限是为了不把日志里真正以 `[` 开头的
+/// 长句子（比如 `[====>] 1.2GB/4.1GB`）当成前缀切掉半截。
+fn strip_stage_prefix(line: &str) -> &str {
+    let t = line.trim_start();
+    if !t.starts_with('[') {
+        return t;
+    }
+    match t.find(']') {
+        Some(close) if t[1..close].chars().count() <= 12 => t[close + 1..].trim_start(),
+        _ => t,
+    }
+}
+
+/// 判"这一整行是建议"时只看行首这么多个字符。
+///
+/// 8 个字的依据：中文建议句的引导词都很短（`也可以` / `建议` / `提示：` / `请先`），
+/// 而合格的报错句在把话说到 `请检查` 之前一定先说了发生什么
+/// （`拉取引擎镜像失败，` 就已经 9 个字）。窗口再宽就会开始吃掉好句子。
+const ADVICE_LEAD_CHARS: usize = 8;
+
+/// 这一行是不是**通篇建议**。判据看位置，理由见 [`ADVICE_MARKERS`]。
+///
+/// `has_error_signal` 是"这行含错误词吗"。两条判据：
+/// 1. 建议词落在行首那一小段里 —— 整句话从建议开头，它不是原因；
+/// 2. 整行一个错误词都没有、却有建议词 —— 那也只是一句好心的下一步。
+fn is_advice_line(lowered: &str, has_error_signal: bool) -> bool {
+    // 先扒掉 `[安装引擎] ` 这类阶段前缀和 `ERROR:` / `错误：` 这类错误前缀，否则
+    // 「[安装引擎] 也可以……」的建议词会被前缀顶出行首窗口，判据静默失效。
+    //
+    // 现在的唯一调用点（`script_runner` 里脚本非零退出那一支）拿到的是**没加前缀**的
+    // 原始行——前缀是 `lifecycle` 在 `on_progress` 回调里才加的。这里仍然剥一道，是
+    // 因为"输入没有前缀"这个前提写在另一个文件里，而它一旦变了，失效是静默的。
+    let stripped = strip_error_prefix(&strip_stage_prefix(lowered));
+    let lead: String = stripped.chars().take(ADVICE_LEAD_CHARS).collect();
+    if ADVICE_MARKERS.iter().any(|marker| lead.contains(marker)) {
+        return true;
+    }
+    !has_error_signal
+        && ADVICE_MARKERS
+            .iter()
+            .any(|marker| stripped.contains(marker))
+}
+
+/// 给一行打分：越大越像"失败的真正原因"。
+fn failure_line_score(line: &str) -> i32 {
+    let lowered = line.to_lowercase();
+    if is_noise_line(&lowered) {
+        return -12;
+    }
+    let mut score = 0;
+    // 能翻成人话的已知原因，价值最高
+    let known_cause = SCRIPT_ERROR_PATTERNS
+        .iter()
+        .any(|(keyword, _)| contains_as_word(&lowered, keyword));
+    if known_cause {
+        score += 6;
+    }
+    let has_error_token = ERROR_TOKENS
+        .iter()
+        .any(|token| contains_as_word(&lowered, token));
+    if has_error_token {
+        score += 3;
+    }
+    // 建议不是原因。**减得比上面两档加起来还多**：一句建议里完全可能把错误词重复一遍
+    // （「下载失败也可以在别的机器上拉好」），不减过头就还是会被选中。
+    if is_advice_line(&lowered, known_cause || has_error_token) {
+        score -= 12;
+    }
+    score
+}
+
+/// 从失败运行的输出尾部挑出**最像失败原因**的那一行。
+///
+/// # 选行规则
+///
+/// 按 [`failure_line_score`] 取最高分；同分取**更靠后**的那一行（越晚打出来的越接近
+/// 退出点）。全都同分（典型情况：一行都不含错误词，比如脚本静默 `exit 1`）时，
+/// 这条规则自然退化成"最后一条非空行"，也就是原来的行为——**不会比原来更差**。
+///
+/// # 为什么不是"最后一条非空行"
+///
+/// 见 [`ADVICE_MARKERS`]：那正是日本客户那次误导的来源。
+pub fn pick_failure_line<'a>(lines: &'a [String]) -> Option<&'a str> {
+    let mut best: Option<(i32, &str)> = None;
+    for line in lines {
+        let text = line.trim();
+        if text.is_empty() {
+            continue;
+        }
+        let score = failure_line_score(text);
+        // `>=` 而不是 `>`：同分时让更靠后的行赢。
+        if best.is_none_or(|(best_score, _)| score >= best_score) {
+            best = Some((score, text));
+        }
+    }
+    best.map(|(_, text)| text)
+}
+
 /// 关键词必须作为**独立的词**出现，不能是别的单词的一部分。
 ///
 /// 真实踩过的坑：双机卡卸载失败时脚本打出的是
@@ -375,5 +581,131 @@ mod tests {
             humanize_script_message("ERROR: something odd happened"),
             "脚本返回错误（something odd happened）"
         );
+    }
+
+    /// 🔴 日本客户那张截图的回归测试。
+    ///
+    /// 他看到的"失败原因"是最后那句**建议**（docker save/load 变通办法），真正的原因
+    /// （DNS 解析超时）在它上面。摘要原来取"最后一条非空行"，所以越是报完错还附带
+    /// 变通办法的脚本，摘要越没用。
+    #[test]
+    fn the_summary_is_the_cause_not_the_workaround() {
+        let lines: Vec<String> = [
+            "[安装引擎] + docker pull vllm/vllm-openai:v0.8.5",
+            "[安装引擎] Error response from daemon: Get \"https://registry-1.docker.io/v2/\": dial tcp: lookup registry-1.docker.io: i/o timeout",
+            "[安装引擎] ERROR: 拉取引擎镜像失败，请检查网络或配置镜像加速器",
+            "[安装引擎] 也可以在别的机器上拉好后用 docker save/load 拷进来",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+
+        let picked = pick_failure_line(&lines).expect("有非空行就该挑出一行");
+        assert!(
+            !picked.contains("docker save/load"),
+            "又挑中了那句建议：{picked}"
+        );
+        assert!(
+            picked.contains("timeout") || picked.contains("拉取引擎镜像失败"),
+            "挑出来的不是原因：{picked}"
+        );
+    }
+
+    /// 一行都不含错误词时，退化成"最后一条非空行"——也就是原来的行为，不会更差。
+    #[test]
+    fn picking_falls_back_to_the_last_nonempty_line() {
+        let lines: Vec<String> = ["第一行", "", "最后一行", "   "]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(pick_failure_line(&lines), Some("最后一行"));
+        assert_eq!(pick_failure_line(&[]), None);
+    }
+
+    /// docker 的逐层刷屏绝不能当成失败原因：它往往正好是退出前的最后几行。
+    #[test]
+    fn layer_noise_never_wins_over_a_real_error() {
+        let lines: Vec<String> = [
+            "no space left on device",
+            "7e1f8fb7d4ba: Verifying Checksum",
+            "7e1f8fb7d4ba: Download complete",
+            "==========================",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        assert_eq!(pick_failure_line(&lines), Some("no space left on device"));
+    }
+
+    /// 同分时取更靠后的那一行：越晚打出来的越接近退出点。
+    #[test]
+    fn later_lines_win_on_a_tie() {
+        let lines: Vec<String> = ["connection refused", "manifest unknown"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(pick_failure_line(&lines), Some("manifest unknown"));
+    }
+
+    /// 🔴 报错句尾巴上的「请检查…」不算建议。
+    ///
+    /// 这条钉的是 [`is_advice_line`] 看**位置**而不是"含不含"。
+    /// 「拉取引擎镜像失败，请检查网络或配置镜像加速器」是一句合格的失败原因，只是顺手
+    /// 带了下一步；按"含不含建议词"判会把这一整类好句子扣成负分，摘要反而退回去挑那些
+    /// 什么都没说的中性行（`+ docker pull …`）——那比原来的缺陷更糟。
+    #[test]
+    fn a_next_step_at_the_end_of_a_real_error_is_not_advice() {
+        let lines: Vec<String> = [
+            "+ docker pull vllm/vllm-openai:v0.8.5",
+            "ERROR: 拉取引擎镜像失败，请检查网络或配置镜像加速器",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        assert_eq!(
+            pick_failure_line(&lines),
+            Some("ERROR: 拉取引擎镜像失败，请检查网络或配置镜像加速器")
+        );
+    }
+
+    /// 阶段前缀不能让"通篇是建议"的判据失效。
+    ///
+    /// 当前调用点拿到的是没加前缀的原始行（前缀是 `lifecycle` 在 `on_progress` 里才加
+    /// 的），但那个前提写在另一个文件里；它一旦变了，失效是静默的。
+    #[test]
+    fn a_stage_prefix_does_not_hide_the_advice_marker() {
+        assert_eq!(
+            strip_stage_prefix("[安装引擎] 也可以换个镜像源"),
+            "也可以换个镜像源"
+        );
+        // 方括号里太长的不当前缀切——日志里真以 `[` 开头的长句子不该被砍半截
+        let long = "[这是一段很长的不是阶段名的东西] 正文";
+        assert_eq!(strip_stage_prefix(long), long);
+
+        let lines: Vec<String> = [
+            "[安装引擎] connection refused",
+            "[安装引擎] 也可以在别的机器上拉好后用 docker save/load 拷进来",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        assert_eq!(
+            pick_failure_line(&lines),
+            Some("[安装引擎] connection refused")
+        );
+    }
+
+    /// 挑完还要过 `humanize_script_message`：用户看到的是那句中文。
+    #[test]
+    fn the_picked_line_still_goes_through_humanize() {
+        let lines: Vec<String> = [
+            "Error response from daemon: no space left on device",
+            "请检查磁盘剩余空间后重试",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let picked = pick_failure_line(&lines).unwrap();
+        assert_eq!(humanize_script_message(picked), "磁盘空间不足");
     }
 }
