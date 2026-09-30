@@ -328,6 +328,67 @@ must match it. This independent registration context is not a lease context.
 Reusing a stable registration ID with a different generation, endpoint,
 identity, public key, algorithm or capability list is `invalid_message`.
 
+DEV-04 provides a disconnected claim/reservation authority; `server.js` does
+not route live traffic through it until DEV-06 composes the handshake. A claim
+normalizes ASCII case and removes whitespace/hyphen separators before applying
+the seven-character alphabet. Source, socket and global fixed-window limits run
+before code lookup, and their bounded source/socket maps fail closed when full.
+Invalid syntax, absent, expired, consumed, revoked, stale-generation and
+rate-limited claims all expose only `pairing_code_invalid`.
+
+Each endpoint has one revisioned interaction slot. Its owner is exactly one of
+`web_lease`, `desktop_reservation`, or `controller_lease`; mutation requires a
+matching canonical uint64 revision. A free slot may be claimed by either Web or
+desktop, a Web owner may be replaced only by the existing Web-to-Web takeover,
+and a desktop owner maps a legacy Web join to the existing
+`endpoint_not_found` compatibility response. An existing Web/controller owner
+makes a new desktop claim `controller_busy`; a losing claim for the same
+pairing collapses to `pairing_code_invalid`. Neither failure consumes the code.
+
+A desktop reservation binds the stable claim `request_id`, claim-socket
+identity, pairing/endpoint/generation and SHA-256 of A's canonical 32-byte
+handshake public key. An exact request retry returns the same reservation;
+reusing its request ID with different bindings fails closed. Reserved state has
+a 10-second deadline; entering `handshake_pending` starts its separate
+20-second deadline. Owner disconnect, timeout, refresh or handshake failure first durably
+terminates the one-shot pairing and requests B's replacement-code notification,
+then releases the slot. If either durable invalidation or notification fails,
+the slot remains closed in retryable `invalidating` state. The module stores no
+raw pairing code and emits only fixed audit event names. The notification
+receives the pairing, endpoint and generation bindings needed to reject a stale
+refresh result.
+
+DEV-06 composes this authority into the live dispatcher only when
+`PINVOU_DESKTOP_CONTROLLER_ENABLED=1`. Startup then fails closed unless the
+independent pairing digest key and a canonical Ed25519 PKCS#8 signing key are
+present alongside the enrollment configuration. Controller v1 and legacy Web
+v2 share the same endpoint interaction slot, while their wire versions remain
+strictly separate; disabling the controller leaves the v2 rejection and
+takeover behavior unchanged.
+
+The Relay signs the canonical transcript after resolving an online enrolled B
+socket and immediately moves the reservation into its separate 20-second
+handshake window. It forwards commitments and encrypted Finished frames without
+decrypting them. Because v1 intentionally defines no second commitment-ACK
+shape, Relay confirmation is the byte-equivalent validated commitment echoed to
+its sender while the same envelope is forwarded to the peer. A receipt is accepted only from the opposite authenticated
+socket after that sender's commitment and Finished; the decoded 32-byte secret
+is zeroed immediately after constant-time commitment verification. Only both
+opposite receipts invoke PairingStore's revision-CAS consumption. Exactly one
+consumer durably terminates the pairing before the in-process lease is exposed;
+a crash or injected failure can therefore lose an unannounced lease but can
+never revive its one-shot pairing or expose a half-created lease.
+
+The resulting lease binds the connection, lease ID/epoch, Relay epoch,
+endpoint/generation, claim identity, transcript hash, exact negotiated
+capabilities and both authenticated sockets. A and B receive different random
+resume tokens and liveness epochs; Relay retains only role-separated token
+digests bound to role, Relay epoch, connection, lease ID/epoch and generation.
+Any ordering, binding, role, socket, receipt, persistence or delivery
+failure terminates the pairing, releases the shared slot and asks the still
+connected B to register a replacement code. Business frames and resume remain
+closed until their owning tasks install the frozen router hooks.
+
 `controller_joined` is the sole `lease_install_messages` entry and never
 requires a pre-existing lease. It is not accepted by the general runtime
 validator. DEV-00 parses the complete raw `controller_pairing_reserved`
@@ -707,11 +768,26 @@ AES-256-GCM, Ed25519 verification, an OS CSPRNG, and zeroizing secret owners.
 These primitives are not registered with the live Relay or Tauri command path
 in DEV-05. Production Relay JavaScript receives no A/B handshake private key,
 HKDF output, Finished key, business key, resume secret, or business plaintext.
-At this stage its helpers recompute and constant-time compare the receipt
-commitment and validate the frozen sealed-code structure/vector. The actual
-one-shot Relay sealed-code encryptor and its connection-code state integration
-are owned by DEV-03; the Node vector test is independent interoperability
-verification, not a live sealer.
+Its helpers recompute and constant-time compare the receipt commitment and
+validate the frozen sealed-code structure/vector. DEV-03 now provides the
+disconnected one-shot Relay sealed-code encryptor, persistent pairing store and
+registration handler. They remain outside the live dispatcher until DEV-06.
+The handler first runs the injected authenticated-endpoint gate. A successful
+allocation atomically persists the stable registration result and a code-digest
+tombstone before returning the code to the handler; persistence failure returns
+no code. Stable registration retries echo the new transport request ID while
+reusing the byte-identical sealed-code value and terminal fields. Collision
+exhaustion is also a durable terminal result.
+
+The pairing store uses exactly
+`23456789ABCDEFGHJKMNPQRSTUVWXYZ`, rejection sampling from the OS CSPRNG and at
+most 32 collision retries. It compares a candidate under every retained digest
+key. A code is quarantined for ten minutes after issue and at least two minutes
+after a terminal transition. Pairing IDs remain tombstoned permanently; expired
+code digests and registration results are compacted so an old digest key may be
+removed only after its last reference expires. Active claim records are memory
+only and are reconstructed from still-valid sealed registration rows after a
+Relay restart.
 
 `code_wrap_keypair` and `handshake_keypair` are distinct Rust types and are
 generated independently; their public-key wrapper types are also distinct, and

@@ -1,0 +1,36 @@
+import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { test } from "node:test";
+
+const relayDir = dirname(dirname(fileURLToPath(import.meta.url)));
+const repoRoot = dirname(relayDir);
+
+test("legacy rollback deployment has one guarded public websocket route", async () => {
+  const nginx = await readFile(join(relayDir, "nginx-enrollment-gateway.conf"), "utf8");
+  assert.match(nginx, /location = \/pinvou3\/remote\/ws/u);
+  assert.match(nginx, /proxy_pass http:\/\/127\.0\.0\.1:8790/u);
+  assert.doesNotMatch(nginx, /proxy_pass\s+[^;]*8787/u);
+  assert.match(nginx, /location = \/pinvou3\/remote\/healthz/u);
+});
+
+test("rollback gate composes coverage and every-entrypoint gateway preflight without a shell", async () => {
+  const gate = await readFile(join(repoRoot, "scripts", "check-enrollment-gated-v2-rollback.mjs"), "utf8");
+  const gatewayPreflight = await readFile(join(relayDir, "scripts", "enrollment-gateway-preflight.js"), "utf8");
+  assert.match(gate, /--coverage/u);
+  assert.match(gate, /enrollment-gateway-preflight\.js/u);
+  assert.match(gate, /safe_to_run_legacy_v2/u);
+  assert.match(gate, /not_migrated/u);
+  assert.match(gate, /shell: false/u);
+  assert.match(gatewayPreflight, /PINVOU_REMOTE_PUBLIC_ENTRYPOINTS_JSON/u);
+  assert.match(gatewayPreflight, /PINVOU_REMOTE_LEGACY_RELAY_BIND_HOST/u);
+});
+
+test("gateway sample is loopback-only and identifies all explicit rollback inputs", async () => {
+  const sample = await readFile(join(relayDir, "enrollment-gateway.env.example"), "utf8");
+  assert.match(sample, /PINVOU_REMOTE_GATEWAY_HOST=127\.0\.0\.1/u);
+  assert.match(sample, /PINVOU_REMOTE_LEGACY_RELAY_BIND_HOST=127\.0\.0\.1/u);
+  assert.match(sample, /PINVOU_REMOTE_HOST=127\.0\.0\.1/u);
+  assert.match(sample, /PINVOU_REMOTE_PUBLIC_ENTRYPOINTS_JSON=/u);
+});

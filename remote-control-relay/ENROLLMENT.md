@@ -13,6 +13,9 @@ Set these variables before opening the registry:
 | `PINVOU_REMOTE_ENROLLMENT_DEPLOYMENT` | Required: `official`, `self_hosted`, or `development`. |
 | `PINVOU_REMOTE_CONTROLLER_STATE_PATH` | Absolute path for the new controller state file. It must not equal the existing `PINVOU_REMOTE_STATE_PATH`. The caller passes this value to `RelayStateStore.open`. |
 | `PINVOU_REMOTE_STATE_PATH` | Required absolute path of the legacy Web v2 state. It is used only for alias detection; this module never reads or changes it. |
+| `PINVOU_DESKTOP_CONTROLLER_ENABLED` | Set to `1` only when enabling the controller-v1 dispatcher. Any other value preserves legacy Web v2-only behavior. |
+| `PINVOU_REMOTE_PAIRING_HMAC_KEY_ID` / `PINVOU_REMOTE_PAIRING_HMAC_KEY` | Stable independent HMAC key used for pairing-code digests and quarantine lookup. Do not reuse the enrollment key. |
+| `PINVOU_REMOTE_RELAY_SIGNING_KEY_ID` / `PINVOU_REMOTE_RELAY_SIGNING_PRIVATE_KEY_B64` | Pinned key ID and canonical base64 Ed25519 PKCS#8 DER private key used to sign pairing transcripts. The private value is deployment-only and must never enter logs or repository files. |
 | `PINVOU_REMOTE_ENROLLMENT_HMAC_KEY_ID` | Stable identifier for the active credential-digest key. |
 | `PINVOU_REMOTE_ENROLLMENT_HMAC_KEY` | Secret HMAC key, 32–4096 UTF-8 bytes. Supply it through the deployment secret manager, never source control or logs. |
 | `PINVOU_REMOTE_ENROLLMENT_DEVELOPMENT_TOFU` | Optional `1`/`true`; accepted only with `deployment=development` and `NODE_ENV=development` or `test`. |
@@ -118,11 +121,19 @@ it.
 
 ## Enrollment data and API
 
-The `endpoint_enrollment` namespace stores sorted endpoint records with status
-(`active` or terminal `revoked`), endpoint revision, timestamps, a keyed
-HMAC-SHA-256 digest, and only the audit source/last action. Raw credentials and
-the HMAC key are never persisted or returned. Credential checks use a constant-
-time digest comparison.
+The `endpoint_enrollment` namespace schema is version 2. It stores sorted
+endpoint records with status (`active` or terminal `revoked`), endpoint
+revision, ordered timestamps, a keyed HMAC-SHA-256 digest, and only the audit
+source/last action. It also stores a sorted migration request ledger. Version 1
+snapshots are strictly validated and normalized to version 2 with an empty
+ledger on read; the next successful mutation persists the upgrade. Unknown or
+malformed versions fail closed.
+
+Raw credentials, migration parameters, and the HMAC key are never persisted or
+returned. Credential and request-parameter checks use constant-time digest
+comparison. A ledger row contains only the stable request ID, operation class,
+sorted endpoint IDs, keyed parameter digest, timestamps, state, and a bounded
+secret-free outcome.
 
 Callers use:
 
@@ -131,9 +142,92 @@ Callers use:
   `desktop_pairing_register` before accepting a registration;
 - `rotateCredential` with the current credential and expected endpoint revision;
 - `revoke` with the expected endpoint revision.
+- `exportSnapshot`, public `validateEnrollmentRegistrySnapshot`, and
+  `importSnapshot` for strict backup validation and one-CAS restoration.
+  Restoring endpoint records always preserves the current migration ledger;
+  snapshot data can never erase or roll back stable request IDs;
+- `applyAtomicBatch` for a fully prevalidated allowlist/re-enroll batch or an
+  exclusive restore operation. It makes at most one namespace CAS, so no prefix
+  of a failed batch becomes durable;
+- `beginMigrationRequest` and `completeMigrationRequest` for explicit crash
+  boundaries, or `executeMigrationRequest` for the normal composed path.
+
+Migration begin durably creates `pending`. Completion recomputes and verifies
+the keyed parameter digest, builds the entire new registry in memory, then
+persists endpoint changes and the terminal sealed outcome in the same namespace
+CAS. A crash before that CAS leaves only `pending`; a crash after it leaves both
+the full endpoint result and terminal outcome. A retry after restart resumes a
+matching pending row or returns the original terminal result. The same request
+ID with another operation, endpoint set, credential, revision, or snapshot is a
+conflict. Concurrent handlers converge through namespace CAS; a storage error
+never reports an unpersisted success.
 
 State CAS conflicts and endpoint revision conflicts are explicit. Registry,
 storage, digest-key, corruption, and persistence failures reject authorization;
 no in-memory success is returned after a failed durable commit. DEV-02 supplies
-authenticated migration/admin tooling, and DEV-06 supplies protocol routing,
-rate limits, origin checks, and production startup wiring.
+the migration and rollback perimeter around this authority; DEV-06 still owns
+the new desktop protocol routing and production startup wiring.
+
+## DEV-02 migration and legacy rollback
+
+Official migration is accepted only through `EnrollmentMigrationHandler` after
+DEV-06 binds an already authenticated legacy desktop socket and verifies an
+official device identity. The Relay first issues a random 256-bit, socket-bound
+challenge. The client returns an Ed25519-signed, canonical proof containing the
+pinned signing-key ID, device/endpoint ID, hashes of the legacy access token and
+desktop secret, challenge, issue time and expiry. A challenge is consumed by
+the first verification attempt, proofs live for at most five minutes, and a
+proof from another socket, endpoint, credential, device key or time window is
+rejected. Deployment code constructs the verifier from official public keys;
+an authenticated legacy TOFU socket alone is never sufficient to enroll.
+
+The claim request contains only a stable request ID: endpoint ID and the
+existing `access_token` come from the opaque socket proof. Claim outcomes use
+the durable migration-request ledger, so a retry after response loss or process
+restart returns the original terminal result. Repeating a claim preserves
+endpoint ID, token, timestamps and old Web links; a request ID used by another
+endpoint or parameter set is rejected. No credential is returned or logged.
+
+Self-hosted operators use `scripts/enrollment-migrate.js`. Credentials must be
+provided in a private input file and are never accepted as command-line values.
+`--dry-run` validates the whole batch without mutation. Each version-1 batch
+document contains a stable `request_id`; `--apply` records it in the durable
+migration ledger and commits all endpoint changes plus the terminal result with
+one namespace CAS. A retry returns that sealed result and a different batch
+under the same ID conflicts. A failed request may persist a secret-free failed
+ledger row, but no endpoint-operation prefix can persist. Backup restore accepts strict
+version 1 or version 2 registry snapshots, normalizes them through the same
+validator, and executes as a stable migration request while preserving the
+monotonic request ledger.
+`re_enroll` rotates the access token and therefore explicitly invalidates old
+Web links. Backup files contain keyed digests, not credentials, and still need
+mode 0600/private ACL storage. The CLI rejects symlink/reparse-point ancestors,
+requires input and pre-existing output files to have private ownership/ACLs,
+creates backup output as mode 0600 on POSIX, and applies a protected Windows
+DACL before writing any bytes.
+
+An old v2 Relay may be used for rollback only on a literal IPv4 or IPv6 loopback
+listener behind `enrollment-gateway.js`; `localhost` is not accepted as proof of
+loopback binding. The gateway validates the first
+`desktop_endpoint_register` or `web_client_join` frame against the registry
+before forwarding it. The first authentication frame is independently capped
+at 16 KiB, while later valid business frames retain the legacy Relay's 4 MiB
+default payload range. The gateway also enforces browser Origin policy,
+connection/ingress limits, a bounded source bucket table and a strict trusted
+proxy allowlist; untrusted forwarding headers are rejected. Use
+`nginx-enrollment-gateway.conf` for the public route and run
+`scripts/enrollment-gateway-preflight.js` with every public entrypoint. The
+preflight fails if a route lacks the gateway marker, is unavailable, the
+anonymous active-denial probe is not rejected, the Relay URL is not literal
+loopback, or OS listener inspection finds a wildcard/non-loopback bind. A bare
+v2 rollback is never a safe fallback.
+`scripts/check-enrollment-gated-v2-rollback.mjs` combines the private endpoint
+inventory coverage report and gateway check; deployment automation must require
+its zero exit status before starting an old v2 binary.
+The preflight checks the health marker, WebSocket upgrade marker and an
+anonymous registration denial on every declared public route. The declared
+bind host remains a required assertion, but does not replace OS listener
+inspection. `scripts/enrollment-gateway-server.js` is the standalone gateway
+entry point; it also refuses a non-loopback listener. The example deployment
+forwards a single nginx-derived client address instead of accepting a caller's
+incoming forwarding chain.
