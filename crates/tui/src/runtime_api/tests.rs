@@ -5300,6 +5300,44 @@ async fn restore_route_names_the_attached_roots_boundary_for_multi_root_threads(
         "a ..-spelled attached root must still fire the boundary: {body}"
     );
 
+    // Round-24 B24-1: the symlink leg the round-23 commit message claimed
+    // but never built — an inward-symlink root (`ws3/link → elsewhere3`)
+    // lexically nests under `ws3` while the predicate's consumers resolve
+    // it outside, so the clause must fire through the canonical spelling.
+    #[cfg(unix)]
+    {
+        let symlink_workspace = workspace.join("ws3");
+        fs::create_dir_all(&symlink_workspace)?;
+        let outside = workspace.join("elsewhere3");
+        fs::create_dir_all(&outside)?;
+        std::os::unix::fs::symlink(&outside, symlink_workspace.join("link"))?;
+        let symlink_thread = runtime_threads
+            .create_thread(CreateThreadRequest {
+                workspace: Some(symlink_workspace.clone()),
+                workspace_roots: vec![symlink_workspace.join("link")],
+                ..CreateThreadRequest::default()
+            })
+            .await?;
+        runtime_threads
+            .set_thread_session_id(&symlink_thread.id, "sess-symlink")
+            .await?;
+        let symlink_snap = repo.snapshot_with_session("pre-turn:4", Some("sess-symlink"))?;
+        let response = client
+            .post(format!(
+                "http://{addr}/v1/snapshots/{}/restore",
+                symlink_snap.0
+            ))
+            .send()
+            .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value = response.json().await?;
+        assert_eq!(
+            body["boundary"]["attached_roots_not_reverted"],
+            json!(true),
+            "an inward-symlink attached root must fire the boundary: {body}"
+        );
+    }
+
     handle.abort();
     Ok(())
 }
