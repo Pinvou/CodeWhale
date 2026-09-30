@@ -575,6 +575,14 @@ export default defineConfig(({ mode }) => {
                   name: 'markdown-vendor',
                   test: /node_modules[\\/](marked|dompurify|highlight\.js)[\\/]/,
                 },
+                {
+                  // Keep ChatView statically imported so the desktop/web shell
+                  // and source-contract tests retain the same startup semantics,
+                  // while preventing the large component module from inflating
+                  // the Web entry chunk beyond its per-chunk budget.
+                  name: 'chat-view',
+                  test: /[\\/]features[\\/]chat[\\/]ChatView\.jsx$/,
+                },
               ],
             },
           }
