@@ -2202,11 +2202,12 @@ Object.assign(dictEn.uiSettingsDetail.modelDescriptions, { '本地服务默认�
 
 // Windows desktop remote control: controlled-device panel (DEV-21).
 dictEn["controlledDevice"] = {
+  connectionTitle: "Connection status",
   section: "Desktop remote control",
   title: "Let someone connect to this device",
-  desc: "Turning this on shows a short-lived 5-minute connection code. The other side types it to run tasks with this device's models; you can always watch and disconnect immediately.",
-  enable: "Enable remote control",
-  disable: "Disable remote control",
+  desc: "Turning this on shows a short-lived 5-minute connection code. The other side types it to run tasks with this device's models; you can always watch and disable remote control.",
+  enable: "Allow this device to be controlled",
+  disable: "Stop allowing control",
   starting: "Enabling…",
   stopping: "Disabling…",
   refreshing: "Refreshing…",
@@ -2224,7 +2225,7 @@ dictEn["controlledDevice"] = {
   codeExpires: seconds => `${seconds}s left`,
   codeExpired: "The code expired. Refresh to show a new one.",
   codeHint: "This is a 5-minute credential. Do not keep it; ask for the current code again after it expires or a connection fails.",
-  refresh: "Refresh code",
+  refresh: "Refresh",
   deviceLabel: "Controlling device",
   deviceUnknown: "Unknown device",
   connectedSince: startedAt => `Connected since ${startedAt}`,
@@ -2239,8 +2240,7 @@ dictEn["controlledDevice"] = {
   workspacesEmpty: "No workspace is authorized, so code mode stays hidden.",
   workspacesHint: "Only the folders listed here can be used for code tasks; the other side cannot widen the scope.",
   codeAllowed: "Code tasks allowed",
-  readOnlyNotice: "You can review requests, stop tasks or disconnect immediately. Approval stays with the other side.",
-  disconnectNow: "Disconnect now",
+  readOnlyNotice: "You can review requests or stop tasks. Approval stays with the other side.",
   stopTasks: "Stop remote tasks",
   runningTasks: count => `${count} remote task(s) running`,
   pendingPermissions: "Waiting for the other side's approval",
@@ -2262,17 +2262,24 @@ dictEn["controllerConnection"] = {
   codePlaceholder: "e.g. 2345 678",
   connect: "Connect",
   connecting: "Connecting…",
-  disconnect: "Disconnect",
+  disconnect: "Disconnect device",
   close: "Close",
+  controllerSide: "Controller",
+  controlledSide: "Controlled device",
+  remoteStatus: "Remote control active",
+  remoteSessionPreparing: "Preparing session",
+  remoteSessionReady: "Session ready",
   connected: "Connected",
   connectedTo: device => `Connected to ${device}`,
-  backgroundHint: "Closing the window keeps the connection and the task running. Use Disconnect to end it.",
+  backgroundHint: "Closing the window keeps the connection and the task running. Use Disconnect device to end it.",
   codeHint: "The code is short-lived. Do not keep it; ask for the current code again after it expires or a connection fails.",
   errorInvalidCode: "That code is invalid or expired. Check the code shown on the other device.",
   errorBusy: "The other device is controlled by someone else right now. Try again later.",
   errorOffline: "The other device is offline or remote control is off.",
   errorVersion: "The two versions are incompatible. Please update to the latest release.",
   errorGeneric: "The connection failed. Please try again.",
+  errorLocalBusy: "This device already has a remote connection. Disconnect it before connecting again.",
+  errorUnsupported: "Desktop remote control is not supported on this system.",
   errorProtocol: "The other device sent something unrecognized. Retry, and check both versions if it keeps happening.",
   errorLocalFormat: "Enter the 7-character code (letters and digits).",
   historyTitle: "Remote connections",
@@ -2292,6 +2299,9 @@ dictEn["remoteConversation"] = {
   composerPlaceholder: "Describe the task to run on that device…",
   send: "Send",
   sending: "Sending…",
+  sessionInitializing: "Preparing the remote session…",
+  sessionInitializeFailed: "Could not prepare the remote session.",
+  retry: "Retry",
   cancel: "Cancel task",
   statusAdmitted: "Accepted",
   statusRunning: "Running",
@@ -2331,3 +2341,10 @@ dictEn["remoteConversation"] = {
   resultUnknownHint: "The connection dropped, so this task's outcome cannot be confirmed.",
   errorGeneric: "The operation failed. Please try again.",
 };
+
+// Sidebar label of the dedicated "Desktop Remote Control" settings sub-page.
+dictEn.uiSettings.remoteControl = 'Desktop Remote Control';
+// Entry copy and back label of the "General → Desktop Remote Control" sub-menu
+// (same pattern as "Help & Feedback → Behavior analytics").
+dictEn.uiSettingsDetail.desktopRemoteControlEntryDesc = "Let someone connect with a pairing code and run tasks with this machine's model; you can review and disconnect at any time.";
+dictEn.uiSettingsDetail.desktopRemoteControlBack = 'Back to General';

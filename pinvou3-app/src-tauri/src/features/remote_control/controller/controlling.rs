@@ -611,21 +611,28 @@ impl ControllingDeviceManager {
 
     /// E2E-06：尽力发送显式断开帧（失败不影响本地断开，本地状态始终权威）。
     pub(crate) fn send_disconnect(&self, reason: &str) -> bool {
+        self.send_disconnect_with_receipt(reason).is_some()
+    }
+
+    pub(crate) fn send_disconnect_with_receipt(
+        &self,
+        reason: &str,
+    ) -> Option<tokio::sync::oneshot::Receiver<()>> {
         let inner = self.inner.lock();
         if inner.phase != ControllingStatusKind::Connected {
-            return false;
+            return None;
         }
         let Some(lease) = inner.lease.as_ref() else {
-            return false;
+            return None;
         };
         let request_id = format!("request-disconnect-{}", Uuid::new_v4().simple());
         let Ok(frame) = build_controller_disconnect(&lease.context, &request_id, reason) else {
-            return false;
+            return None;
         };
         let Some(transport) = inner.transport.as_ref() else {
-            return false;
+            return None;
         };
-        transport.try_send_authenticated_control(&frame).is_ok()
+        transport.send_control_with_receipt(&frame).ok()
     }
 
     pub(crate) fn create_history(

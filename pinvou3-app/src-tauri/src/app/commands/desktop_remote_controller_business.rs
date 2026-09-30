@@ -35,6 +35,11 @@ impl DesktopControlledCleanup {
 
 impl ControlledCleanupSink for DesktopControlledCleanup {
     fn cleanup(&self, generation: &str, scope: ControlledCleanupScope) {
+        if scope.session_keys {
+            if let Some(relay) = self.app.try_state::<crate::features::remote_control::RemoteControlManager>() {
+                relay.stop_controller_relay(generation);
+            }
+        }
         // 审核修复：只有涉及远端任务/待决权限/临时模型的清理才需要中断任务；
         // 纯凭证（session_keys/workspace_grants）清理不得顺带打断任务。
         if !(scope.remote_tasks || scope.pending_permissions || scope.temporary_models) {
