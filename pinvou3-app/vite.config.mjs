@@ -579,14 +579,24 @@ export default defineConfig(({ mode }) => {
                   // Keep ChatView statically imported so the desktop/web shell
                   // and source-contract tests retain the same startup semantics,
                   // while preventing the large component module from inflating
-                  // the Web entry chunk beyond its per-chunk budget.
+                  // the entry chunk beyond its per-chunk budget.
                   name: 'chat-view',
                   test: /[\\/]features[\\/]chat[\\/]ChatView\.jsx$/,
                 },
               ],
             },
           }
-        : undefined,
+        : {
+            codeSplitting: {
+              groups: [{
+                // The desktop multi-entry build shares dependencies
+                // automatically, but ChatView itself still needs an explicit
+                // static group to keep the main entry within budget.
+                name: 'chat-view',
+                test: /[\\/]features[\\/]chat[\\/]ChatView\.jsx$/,
+              }],
+            },
+          },
     },
   },
   };
