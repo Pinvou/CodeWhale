@@ -2141,7 +2141,7 @@ impl ShellManager {
         origin_tool_call_id: Option<String>,
         origin_turn_id: Option<String>,
         work_lifecycle: Option<ShellWorkLifecycle>,
-        readonly_workspace: Option<&std::path::Path>,
+        readonly_roots: Option<&[PathBuf]>,
         persist_pending: bool,
         timeout_bounds_ms: (u64, u64),
     ) -> Result<ShellResult> {
@@ -2157,7 +2157,7 @@ impl ShellManager {
         let policy = policy_override.unwrap_or_else(|| self.sandbox_policy.clone());
 
         // Create command spec and prepare sandboxed environment
-        let spec = if let Some(workspace) = readonly_workspace {
+        let spec = if let Some(roots) = readonly_roots {
             if command.contains('|') {
                 // An agent read-only pipeline: every segment was admitted by
                 // `is_agent_readonly_shell_command` (no separators, redirects,
@@ -2168,7 +2168,7 @@ impl ShellManager {
                 CommandSpec::shell(&piped, work_dir.clone(), Duration::from_millis(timeout_ms))
             } else {
                 let (program, args) = hardened_readonly_argv(command)?;
-                let program = resolve_readonly_program(&program, workspace)?;
+                let program = resolve_readonly_program(&program, roots)?;
                 CommandSpec::program(
                     program
                         .to_str()
@@ -4020,9 +4020,35 @@ fn hardened_readonly_argv(command: &str) -> Result<(String, Vec<String>)> {
     Ok((program, argv))
 }
 
+/// Canonical boundary set for the read-only Scout shell: every declared
+/// workspace root (primary first), canonicalized. Attached roots carry the
+/// same trust weight as the primary — they are agent-writable, so a program
+/// or PATH entry under any of them is untrusted, while operands under them
+/// were already admitted by the roots-aware `resolve_path`. Roots that do not
+/// resolve on disk cannot contain anything and drop out: fail-closed for
+/// operand admission, and a non-existent root can shadow neither a PATH entry
+/// nor an executable.
+fn canonical_readonly_roots(roots: &[PathBuf]) -> std::io::Result<Vec<PathBuf>> {
+    let Some((primary, extra)) = roots.split_first() else {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "read-only boundary requires at least the primary root",
+        ));
+    };
+    let mut canonical = vec![primary.canonicalize()?];
+    for root in extra {
+        if let Ok(resolved) = root.canonicalize()
+            && !canonical.contains(&resolved)
+        {
+            canonical.push(resolved);
+        }
+    }
+    Ok(canonical)
+}
+
 fn enforce_readonly_workspace_operands(
     command: &str,
-    workspace: &std::path::Path,
+    roots: &[PathBuf],
     effective_cwd: &std::path::Path,
 ) -> Result<(), ToolError> {
     let argv = shell_words::split(&normalize_windows_command_paths(command)).map_err(|error| {
@@ -4035,7 +4061,7 @@ fn enforce_readonly_workspace_operands(
         // is pinned and evaluated separately by the network-policy guard.
         return Ok(());
     }
-    let workspace = workspace.canonicalize().map_err(|error| {
+    let roots = canonical_readonly_roots(roots).map_err(|error| {
         ToolError::execution_failed(format!(
             "Could not resolve the Scout workspace before shell dispatch: {error}"
         ))
@@ -4045,7 +4071,7 @@ fn enforce_readonly_workspace_operands(
             "Could not prove the read-only shell working directory stays in the workspace: {error}"
         ))
     })?;
-    if !effective_cwd.starts_with(&workspace) {
+    if !roots.iter().any(|root| effective_cwd.starts_with(root)) {
         return Err(ToolError::permission_denied(
             "[shell.readonly.cwd.outside_workspace] Read-only Scout shell working directory resolves outside the workspace.",
         ));
@@ -4093,7 +4119,7 @@ fn enforce_readonly_workspace_operands(
                     "[shell.readonly.operand.unresolved] Could not prove absolute read-only operand {value:?} stays inside the workspace because it could not be resolved: {error}"
                 ))
             })?;
-            if !resolved.starts_with(&workspace) {
+            if !roots.iter().any(|root| resolved.starts_with(root)) {
                 return Err(ToolError::permission_denied(format!(
                     "[shell.readonly.operand.outside_workspace] Read-only Scout shell operand {value:?} resolves outside the workspace. Use the bounded File read/search actions for project evidence."
                 )));
@@ -4121,7 +4147,7 @@ fn enforce_readonly_workspace_operands(
                     "[shell.readonly.operand.unresolved] Could not prove read-only operand {value:?} stays in the workspace: {error}"
                 ))
             })?;
-            if !resolved.starts_with(&workspace) {
+            if !roots.iter().any(|root| resolved.starts_with(root)) {
                 return Err(ToolError::permission_denied(format!(
                     "[shell.readonly.operand.outside_workspace] Read-only Scout shell operand {value:?} resolves outside the workspace. Use the bounded File read/search actions for project evidence."
                 )));
@@ -4132,43 +4158,43 @@ fn enforce_readonly_workspace_operands(
 }
 
 fn readonly_sanitized_path_from(
-    workspace: &std::path::Path,
+    roots: &[PathBuf],
     path: &std::ffi::OsStr,
 ) -> Option<std::ffi::OsString> {
-    let workspace = workspace.canonicalize().ok()?;
+    let roots = canonical_readonly_roots(roots).ok()?;
     let safe = std::env::split_paths(path).filter_map(|entry| {
         if !entry.is_absolute() {
             return None;
         }
         let resolved = entry.canonicalize().ok()?;
-        (!resolved.starts_with(&workspace)).then_some(resolved)
+        (!roots.iter().any(|root| resolved.starts_with(root))).then_some(resolved)
     });
     std::env::join_paths(safe).ok()
 }
 
-fn readonly_sanitized_path(workspace: &std::path::Path) -> Option<String> {
+fn readonly_sanitized_path(roots: &[PathBuf]) -> Option<String> {
     let path = std::env::var_os("PATH")?;
-    readonly_sanitized_path_from(workspace, &path).map(|value| value.to_string_lossy().into_owned())
+    readonly_sanitized_path_from(roots, &path).map(|value| value.to_string_lossy().into_owned())
 }
 
-fn resolve_readonly_program(program: &str, workspace: &std::path::Path) -> Result<PathBuf> {
+fn resolve_readonly_program(program: &str, roots: &[PathBuf]) -> Result<PathBuf> {
     let path = std::env::var_os("PATH")
         .ok_or_else(|| anyhow!("no executable search path is configured"))?;
-    resolve_readonly_program_from_path(program, workspace, &path)
+    resolve_readonly_program_from_path(program, roots, &path)
 }
 
 fn resolve_readonly_program_from_path(
     program: &str,
-    workspace: &std::path::Path,
+    roots: &[PathBuf],
     path: &std::ffi::OsStr,
 ) -> Result<PathBuf> {
-    let workspace = workspace.canonicalize()?;
+    let roots = canonical_readonly_roots(roots)?;
     if std::path::Path::new(program).components().count() != 1 {
         return Err(anyhow!(
             "read-only command must name a bare allowlisted executable"
         ));
     }
-    let safe_path = readonly_sanitized_path_from(&workspace, path).ok_or_else(|| {
+    let safe_path = readonly_sanitized_path_from(&roots, path).ok_or_else(|| {
         anyhow!("no trusted executable search path remains outside the workspace")
     })?;
     let names = if cfg!(windows) {
@@ -4190,7 +4216,7 @@ fn resolve_readonly_program_from_path(
                 }
             }
             let resolved = candidate.canonicalize()?;
-            if resolved.is_absolute() && !resolved.starts_with(&workspace) {
+            if resolved.is_absolute() && !roots.iter().any(|root| resolved.starts_with(root)) {
                 return Ok(resolved);
             }
         }
@@ -4288,6 +4314,12 @@ async fn execute_foreground_via_background(
     let timeout_ms =
         timeout_ms.map(|timeout| timeout.clamp(timeout_bounds_ms.0, timeout_bounds_ms.1));
     let spawn_timeout_ms = timeout_ms.unwrap_or(timeout_bounds_ms.1);
+    // The read-only launch boundary is the full declared root set (primary
+    // first), so program resolution and PATH sanitization distrust every
+    // agent-writable root, not just the primary.
+    let readonly_roots = direct_argv.then(|| {
+        codewhale_core::normalize_workspace_roots(&context.workspace, &context.workspace_roots)
+    });
     let spawned = {
         let mut manager = context
             .shell_manager
@@ -4310,7 +4342,7 @@ async fn execute_foreground_via_background(
             context.origin_tool_call_id.clone(),
             context.origin_turn_id.clone(),
             lifecycle,
-            direct_argv.then_some(context.workspace.as_path()),
+            readonly_roots.as_deref(),
             false,
             timeout_bounds_ms,
         )?
@@ -5057,19 +5089,25 @@ impl ToolSpec for BashTool {
             // shared ShellManager's parent-workspace default_workspace.
             None => Some(context.workspace.display().to_string()),
         };
-        if matches!(context.shell_policy, ShellPolicy::ReadOnly) {
+        let read_only_shell = matches!(context.shell_policy, ShellPolicy::ReadOnly);
+        // The read-only boundary is the full declared root set, not just the
+        // primary: attached roots are agent-writable (untrusted for programs
+        // and PATH) yet legitimate operand/cwd targets.
+        let readonly_roots = read_only_shell.then(|| {
+            codewhale_core::normalize_workspace_roots(&context.workspace, &context.workspace_roots)
+        });
+        if let Some(roots) = readonly_roots.as_deref() {
             let effective_cwd = working_dir
                 .as_deref()
                 .map(std::path::Path::new)
                 .unwrap_or(&context.workspace);
-            enforce_readonly_workspace_operands(command, &context.workspace, effective_cwd)?;
+            enforce_readonly_workspace_operands(command, roots, effective_cwd)?;
         }
 
         // #456 — collect env from any configured `shell_env` hooks. Runs
         // synchronously, captures stdout, parses `KEY=VAL` lines, audit-logs
         // the keys (never the values). Empty / no-op when no hook is
         // configured.
-        let read_only_shell = matches!(context.shell_policy, ShellPolicy::ReadOnly);
         let mut extra_env = if read_only_shell {
             // shell_env hooks are arbitrary operator-configured processes.
             // They cannot run inside the evidence-only execution boundary.
@@ -5124,7 +5162,7 @@ impl ToolSpec for BashTool {
                 inert_git_helper.to_string(),
             );
             extra_env.insert("GIT_ATTR_NOSYSTEM".to_string(), "1".to_string());
-            if let Some(path) = readonly_sanitized_path(&context.workspace) {
+            if let Some(path) = readonly_sanitized_path(readonly_roots.as_deref().unwrap_or(&[])) {
                 extra_env.insert("PATH".to_string(), path);
             }
             extra_env.insert("GIT_CONFIG_COUNT".to_string(), "3".to_string());

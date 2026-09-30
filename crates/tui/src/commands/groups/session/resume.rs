@@ -113,6 +113,14 @@ fn import_container(
     app.current_session_id = Some(new_id.clone());
     app.current_session_metadata = Some(imported.metadata.clone());
     app.api_messages = imported.messages.clone();
+    // The import is a fresh session in the current workspace, so the live
+    // root set is re-pointed with it. Leaving the previous session's set in
+    // place would let the next autosave stamp it onto the imported record —
+    // durable roots bleed across sessions that never shared a directory.
+    app.workspace_roots = codewhale_core::normalize_workspace_roots(
+        &imported.metadata.workspace,
+        &imported.metadata.workspace_roots,
+    );
     app.view_stack.push(SessionPickerView::new_selecting(
         &app.workspace,
         app.ui_locale,

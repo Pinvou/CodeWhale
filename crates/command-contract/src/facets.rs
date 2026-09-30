@@ -937,6 +937,11 @@ pub trait CommandSkillGroupContext {
     /// `/restore <N>`: host restores by snapshot id; handler composes the
     /// exact success message from its list entry.
     fn restore_snapshot(&mut self, id: &str) -> Result<(), String>;
+    /// `/restore` rollback scope: true when the session root set has entries
+    /// beyond the primary workspace. Snapshots are primary-bound, so the
+    /// handler must name the boundary instead of implying every accessible
+    /// root was reverted.
+    fn restore_covers_primary_only(&self) -> bool;
     /// `/restore` trust gate posture (yolo / trust_mode).
     fn approval_state(&self) -> CommandApprovalState;
 }

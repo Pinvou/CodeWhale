@@ -35,7 +35,8 @@ impl ToolSpec for RevertTurnTool {
          Use when the user explicitly asks to undo, revert, or roll back the most recent edits. \
          `turn_offset` is 1-based: 1 reverts the most recent turn, 2 reverts the previous one, \
          and so on (max 50). Conversation history is NOT modified — only working-tree files are \
-         restored from the side-git snapshot repo."
+         restored from the side-git snapshot repo. Snapshots cover the primary workspace root \
+         only; writes under attached workspace roots are not rolled back."
     }
 
     fn input_schema(&self) -> Value {
@@ -73,6 +74,8 @@ impl ToolSpec for RevertTurnTool {
         }
 
         let workspace = context.workspace.clone();
+        let primary_only =
+            crate::snapshot::restore_covers_primary_only(&workspace, &context.workspace_roots);
         let label = format!("revert_turn(offset={offset})");
         let session = context.state_namespace.clone();
         let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
@@ -115,11 +118,20 @@ impl ToolSpec for RevertTurnTool {
             }
             repo.restore(&target.id)
                 .map_err(|e| format!("Restore failed: {e}"))?;
-            Ok(format!(
-                "{label}: restored '{}' ({}). Workspace files reverted; conversation unchanged.",
-                target.label,
-                short_sha(target.id.as_str()),
-            ))
+            Ok(if primary_only {
+                format!(
+                    "{label}: restored '{}' ({}). {} Conversation unchanged.",
+                    target.label,
+                    short_sha(target.id.as_str()),
+                    crate::snapshot::ATTACHED_ROOTS_NOT_REVERTED_NOTE,
+                )
+            } else {
+                format!(
+                    "{label}: restored '{}' ({}). Workspace files reverted; conversation unchanged.",
+                    target.label,
+                    short_sha(target.id.as_str()),
+                )
+            })
         })
         .await
         .map_err(|e| ToolError::execution_failed(format!("revert_turn join failed: {e}")))?;
@@ -191,6 +203,59 @@ mod tests {
 
         let content = std::fs::read_to_string(workspace.join("a.txt")).unwrap();
         assert_eq!(content, "original");
+
+        // Single-root report stays byte-identical: no boundary clause.
+        assert!(
+            r.content
+                .contains("Workspace files reverted; conversation unchanged."),
+            "{}",
+            r.content
+        );
+        assert!(
+            !r.content
+                .contains(crate::snapshot::ATTACHED_ROOTS_NOT_REVERTED_NOTE),
+            "{}",
+            r.content
+        );
+    }
+
+    #[tokio::test]
+    async fn revert_turn_with_attached_roots_names_rollback_boundary() {
+        // Snapshots are primary-bound (M15-3): with attached roots in the
+        // session set the report must not claim a full rollback — attached
+        // root writes persist after the revert.
+        let tmp = tempdir().unwrap();
+        let workspace = tmp.path().join("ws");
+        let attached = tmp.path().join("attached");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(&attached).unwrap();
+        let _guard = scoped_home(tmp.path());
+
+        let repo = SnapshotRepo::open_or_init(&workspace).unwrap();
+        std::fs::write(workspace.join("a.txt"), b"original").unwrap();
+        repo.snapshot_with_session("pre-turn:1", Some("workspace"))
+            .unwrap();
+        std::fs::write(workspace.join("a.txt"), b"modified").unwrap();
+
+        let tool = RevertTurnTool;
+        let ctx = ToolContext::new(workspace.clone()).with_workspace_roots(vec![attached.clone()]);
+        let r = tool.execute(json!({}), &ctx).await.expect("execute");
+        assert!(r.success, "expected success: {r:?}");
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("a.txt")).unwrap(),
+            "original"
+        );
+        assert!(
+            r.content
+                .contains(crate::snapshot::ATTACHED_ROOTS_NOT_REVERTED_NOTE),
+            "{}",
+            r.content
+        );
+        assert!(
+            !r.content.contains("Workspace files reverted"),
+            "{}",
+            r.content
+        );
     }
 
     #[tokio::test]

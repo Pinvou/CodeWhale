@@ -82,6 +82,12 @@ fn mcp_request_model(arguments: &Value, default_model: &str) -> String {
 }
 
 pub fn run_mcp_server(workspace: PathBuf) -> Result<()> {
+    // The tool registry treats an empty workspace as the vacuous containment
+    // root (`starts_with("")` accepts every path); fail fast instead of
+    // serving an uncontained session.
+    if workspace.as_os_str().is_empty() {
+        anyhow::bail!("workspace must not be empty");
+    }
     let settings = McpServerSettings::load()?;
     let mut server = McpServer::new(workspace, settings)?;
     server.run()

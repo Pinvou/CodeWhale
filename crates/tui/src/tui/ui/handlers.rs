@@ -1088,21 +1088,21 @@ pub(crate) async fn handle_view_events(
                         app.add_message(HistoryCell::System {
                             content: format!("Retrying {tool_name} with network access enabled"),
                         });
-                        let policy = option.to_policy(&app.workspace);
+                        let policy = option.to_policy(&app.workspace, &app.workspace_roots);
                         let _ = engine_handle.retry_tool_with_policy(tool_id, policy).await;
                     }
                     ElevationOption::WithWriteAccess(_) => {
                         app.add_message(HistoryCell::System {
                             content: format!("Retrying {tool_name} with write access enabled"),
                         });
-                        let policy = option.to_policy(&app.workspace);
+                        let policy = option.to_policy(&app.workspace, &app.workspace_roots);
                         let _ = engine_handle.retry_tool_with_policy(tool_id, policy).await;
                     }
                     ElevationOption::FullAccess => {
                         app.add_message(HistoryCell::System {
                             content: format!("Retrying {tool_name} with full access (no sandbox)"),
                         });
-                        let policy = option.to_policy(&app.workspace);
+                        let policy = option.to_policy(&app.workspace, &app.workspace_roots);
                         let _ = engine_handle.retry_tool_with_policy(tool_id, policy).await;
                     }
                 }
@@ -1163,6 +1163,19 @@ pub(crate) async fn handle_view_events(
                                 continue;
                             }
                         };
+                        // Seed only after the fallible restore succeeded: the
+                        // persisted metadata is the target session's roots,
+                        // and the respawned engine plus every re-sync read
+                        // this field. Without it, switching sessions either
+                        // leaks the previous session's set into this one or
+                        // silently strips this session's persisted set. The
+                        // seed routes through the same normalize the writers
+                        // use, so a legacy or hand-edited record cannot seed
+                        // an entry the intake filter would have dropped.
+                        app.workspace_roots = codewhale_core::normalize_workspace_roots(
+                            &app.workspace,
+                            &session.metadata.workspace_roots,
+                        );
                         sync_runtime_workspace_state(task_manager, app.workspace.clone()).await;
                         if respawn {
                             let _ = engine_handle.send(Op::Shutdown).await;
@@ -1185,6 +1198,7 @@ pub(crate) async fn handle_view_events(
                                 system_prompt_override: false,
                                 model: app.model.clone(),
                                 workspace: app.workspace.clone(),
+                                workspace_roots: app.workspace_roots.clone(),
                                 mode: app.mode,
                             })
                             .await;
@@ -1205,6 +1219,17 @@ pub(crate) async fn handle_view_events(
                             content: loaded_message.clone(),
                         });
                         app.status_message = Some(loaded_message);
+                        // The picker can cross workspaces and the loaded
+                        // session may carry roots the header never showed;
+                        // name them in the transcript (durable, like the
+                        // receipt above) rather than a transient toast.
+                        if let Some(notice) = workspace_roots_notice(
+                            app.ui_locale,
+                            &app.workspace,
+                            &app.workspace_roots,
+                        ) {
+                            app.add_message(HistoryCell::System { content: notice });
+                        }
                         app.launch.visible = false;
                         app.launch.status = None;
                     }
@@ -2216,6 +2241,7 @@ pub(crate) async fn handle_view_events(
                             system_prompt_override: false,
                             model: app.model.clone(),
                             workspace: app.workspace.clone(),
+                            workspace_roots: app.workspace_roots.clone(),
                             mode: app.mode,
                         })
                         .await;

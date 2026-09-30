@@ -95,6 +95,7 @@ async fn invoke_fixture(
             },
             AskForApproval::Never,
             Path::new("/tmp/codewhale"),
+            &[],
         )
         .await
         .expect("application failure remains a transport-successful tool result");
