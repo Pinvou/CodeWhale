@@ -10,12 +10,11 @@ import { localizeTool, mergeConfigFields, TsActionBtn, tsCategories, tsSkillIcon
 import { MAX_SKILL_ZIP_BYTES, pickSkillDrop, fileToBase64 } from './skill-import-logic.js';
 import { invokeTauri, isTauriAvailable, tauriEvents } from '../../platform/tauri/client.js';
 import { can, isWeb } from '../../shared/platform.js';
-import { applyConnectorFailure, connectorFailure, connectorUiStep, localizeConnectorAlert, releaseBusy } from './connector-ui-state.js';
+import { applyConnectorFailure, connectorErrorCopy, connectorFailure, connectorUiStep, localizeConnectorAlert, releaseBusy } from './connector-ui-state.js';
 import { ConnectorSsoDialog } from './ConnectorSsoDialog.jsx';
 import { isImeComposing } from '../../shared/ime-guard.mjs';
 import { pathBasename } from '../../shared/path-utils.js';
 import { companionPackageMap } from '../../shared/companion-packages.js';
-import { applyConnectorFailure, connectorErrorCopy, connectorFailure, connectorUiStep } from './connector-ui-state.js';
 
 // 10 分钟:等待的是人完成浏览器 OAuth(2FA、慢邮箱登录、跨设备取码都可能
 // 超过旧值 90s)。后端本地回调等待自身有 300s 上限,到时后端先显式失败;
