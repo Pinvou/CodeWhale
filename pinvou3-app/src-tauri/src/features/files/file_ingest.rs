@@ -53,6 +53,18 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+/// B-local managed attachment descriptor. The path is process-private and
+/// must never be serialized into task payloads, journals, or controller wire.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(crate) struct PublishedAttachment {
+    pub(crate) handle_id: String,
+    pub(crate) path: PathBuf,
+    pub(crate) display_name: String,
+    pub(crate) mime_type: String,
+    pub(crate) bytes: u64,
+    pub(crate) sha256: String,
+}
+
 /// 单文件硬上限 20 MB —— 超大文件就算转 md 后 token 数也炸上下文。
 /// `pub` 供 remote_control 上传链路对齐硬上限(PR #213 审查 #5:mobile upload cap 必须
 /// ≤ 此值,否则 20-64MiB 文件会被 mobile 接受但 file_ingest 静默降级为 oversize 兜底)。
@@ -250,6 +262,152 @@ pub fn ingest(path: &Path) -> IngestResult {
 /// with stable wire codes that the three UI languages can render locally.
 pub fn ingest_attachment(path: &Path) -> Result<IngestResult, String> {
     ingest_checked(path).map_err(|violation| violation.wire_code().to_string())
+}
+
+/// Accept one B-local, already authenticated upload receipt for the existing
+/// chat/ACP attachment pipeline. No remote-control type or A-supplied path is
+/// admitted here: callers supply the authoritative session's private root and
+/// the path returned by the B staging owner.
+pub(crate) fn ingest_staged_attachment(
+    session_root: &Path,
+    staged_path: &Path,
+    display_name: &str,
+    expected_bytes: u64,
+    expected_sha256: &str,
+) -> Result<IngestResult, String> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read as _;
+
+    let mut components = Path::new(display_name).components();
+    if display_name.is_empty()
+        || display_name.contains(['/', '\\'])
+        || display_name.chars().any(char::is_control)
+        || display_name.as_bytes().get(1) == Some(&b':')
+        || !matches!(components.next(), Some(std::path::Component::Normal(_)))
+        || components.next().is_some()
+        || expected_bytes > MAX_FILE_BYTES
+        || expected_sha256.len() != 64
+        || !expected_sha256
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err("task_attachment_invalid".to_owned());
+    }
+    let canonical_session = std::fs::canonicalize(session_root)
+        .map_err(|_| "task_attachment_unavailable".to_owned())?;
+    let upload_root = canonical_session.join("remote_uploads");
+    if !std::fs::symlink_metadata(&upload_root)
+        .map_err(|_| "task_attachment_unavailable".to_owned())?
+        .file_type()
+        .is_dir()
+    {
+        return Err("task_attachment_invalid".to_owned());
+    }
+    let canonical_upload_root =
+        std::fs::canonicalize(upload_root).map_err(|_| "task_attachment_unavailable".to_owned())?;
+    if !canonical_upload_root.starts_with(&canonical_session) {
+        return Err("task_attachment_invalid".to_owned());
+    }
+    let canonical_path =
+        std::fs::canonicalize(staged_path).map_err(|_| "task_attachment_unavailable".to_owned())?;
+    if !canonical_path.starts_with(&canonical_upload_root)
+        || !std::fs::symlink_metadata(staged_path)
+            .map_err(|_| "task_attachment_unavailable".to_owned())?
+            .file_type()
+            .is_file()
+    {
+        return Err("task_attachment_invalid".to_owned());
+    }
+    let mut file = std::fs::File::open(&canonical_path)
+        .map_err(|_| "task_attachment_unavailable".to_owned())?;
+    if file
+        .metadata()
+        .map_err(|_| "task_attachment_unavailable".to_owned())?
+        .len()
+        != expected_bytes
+    {
+        return Err("task_attachment_invalid".to_owned());
+    }
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .map_err(|_| "task_attachment_unavailable".to_owned())?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    let actual_sha256 = hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    if actual_sha256 != expected_sha256 {
+        return Err("task_attachment_invalid".to_owned());
+    }
+    let mut result =
+        ingest_attachment(&canonical_path).map_err(|_| "task_attachment_invalid".to_owned())?;
+    if result.kind == "missing" {
+        return Err("task_attachment_unavailable".to_owned());
+    }
+    result.basename = display_name.to_owned();
+    Ok(result)
+}
+
+#[cfg(test)]
+mod staged_attachment_tests {
+    use super::*;
+    use sha2::{Digest, Sha256};
+
+    #[test]
+    fn trusted_b_staging_requires_root_name_size_and_digest() {
+        let root = tempfile::tempdir().unwrap();
+        let folder = root.path().join("remote_uploads").join("ctr-up-0001");
+        std::fs::create_dir_all(&folder).unwrap();
+        let path = folder.join("report.txt");
+        let body = b"native attachment content";
+        std::fs::write(&path, body).unwrap();
+        let digest = Sha256::digest(body)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let accepted =
+            ingest_staged_attachment(root.path(), &path, "report.txt", body.len() as u64, &digest)
+                .unwrap();
+        assert_eq!(accepted.basename, "report.txt");
+        assert!(
+            accepted
+                .markdown
+                .as_deref()
+                .unwrap()
+                .contains("native attachment content")
+        );
+        for (name, size, sha) in [
+            ("../report.txt", body.len() as u64, digest.as_str()),
+            ("report.txt", body.len() as u64 + 1, digest.as_str()),
+            ("report.txt", body.len() as u64, "bad"),
+        ] {
+            assert_eq!(
+                ingest_staged_attachment(root.path(), &path, name, size, sha).unwrap_err(),
+                "task_attachment_invalid"
+            );
+        }
+        let outside = root.path().join("outside.txt");
+        std::fs::write(&outside, body).unwrap();
+        assert_eq!(
+            ingest_staged_attachment(
+                root.path(),
+                &outside,
+                "report.txt",
+                body.len() as u64,
+                &digest
+            )
+            .unwrap_err(),
+            "task_attachment_invalid"
+        );
+    }
 }
 
 fn ingest_checked(path: &Path) -> Result<IngestResult, AttachmentLimitViolation> {

@@ -559,8 +559,8 @@ assert.match(remoteControlCommands,
 assert.match(hostFilePicker, /initialPathPending[\s\S]*?path === initialPath[\s\S]*?load\(null\)/,
   'a stale recent workspace must fall back to the normal host-file root instead of trapping the picker');
 // HTML5 拖放由当前可见输入框认领，再复用对应平台的上传通道。
-assert.match(chatView, /enabled=\{bridge\.available && \(!isWeb \|\| can\('deviceFileUpload'\)\)\}/,
-  'browser drop must gate on the negotiated device upload capability');
+assert.match(chatView, /enabled=\{!remoteChatActive && bridge\.available && \(!isWeb \|\| can\('deviceFileUpload'\)\)\}/,
+  'normal-chat browser drop must be hidden for RemoteProxy and gate on the negotiated device upload capability');
 assert.match(chatView, /onFiles=\{files => bridge\.attachments\.uploadDeviceFiles\(files\)\}/,
   'normal chat drop must reuse the device upload pipeline');
 assert.match(codexView, /onFiles=\{files => uploadDeviceFiles\(files, attachmentKey\)\}/,

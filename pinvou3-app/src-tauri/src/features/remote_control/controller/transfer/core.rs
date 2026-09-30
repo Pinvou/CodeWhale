@@ -11,9 +11,7 @@ use parking_lot::Mutex;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
-use super::limits::{
-    TransferLimits, MAX_FILE_NAME_CHARS, MAX_MIME_CHARS, MAX_TRANSFER_ID_CHARS,
-};
+use super::limits::{MAX_FILE_NAME_CHARS, MAX_MIME_CHARS, MAX_TRANSFER_ID_CHARS, TransferLimits};
 use crate::features::remote_control::controller::protocol::LeaseContext;
 
 /// Controller handles are namespaced so a Web handle can never be replayed
@@ -76,6 +74,7 @@ pub(crate) struct TransferBinding {
     pub(crate) connection_id: String,
     pub(crate) controller_lease_id: String,
     pub(crate) lease_epoch: String,
+    pub(crate) relay_epoch: String,
     pub(crate) remote_control_generation: String,
     pub(crate) session_id: String,
     pub(crate) task_id: String,
@@ -91,6 +90,7 @@ impl TransferBinding {
             connection_id: context.connection_id.clone(),
             controller_lease_id: context.controller_lease_id.clone(),
             lease_epoch: context.lease_epoch.clone(),
+            relay_epoch: context.relay_epoch.clone(),
             remote_control_generation: context.remote_control_generation.clone(),
             session_id: session_id.to_owned(),
             task_id: task_id.to_owned(),
@@ -104,6 +104,7 @@ impl TransferBinding {
             &self.connection_id,
             &self.controller_lease_id,
             &self.lease_epoch,
+            &self.relay_epoch,
             &self.remote_control_generation,
             &self.session_id,
             &self.task_id,
@@ -124,6 +125,7 @@ impl TransferBinding {
         self.connection_id == live.connection_id
             && self.controller_lease_id == live.controller_lease_id
             && self.lease_epoch == live.lease_epoch
+            && self.relay_epoch == live.relay_epoch
             && self.remote_control_generation == live.remote_control_generation
     }
 }
@@ -231,6 +233,7 @@ pub(crate) fn is_controller_handle_id(value: &str) -> bool {
 pub(crate) struct CompletedTransfer {
     pub(crate) handle_id: String,
     pub(crate) context: TransferContext,
+    pub(crate) metadata: TransferMetadata,
     pub(crate) sha256: String,
     pub(crate) bytes: u64,
 }
@@ -284,7 +287,9 @@ impl Default for TransferRegistry {
 
 impl TransferRegistry {
     pub(crate) fn new(limits: TransferLimits) -> Result<Self> {
-        let limits = limits.narrow().ok_or_else(|| error("transfer_limits_invalid"))?;
+        let limits = limits
+            .narrow()
+            .ok_or_else(|| error("transfer_limits_invalid"))?;
         Ok(Self {
             limits,
             inner: Mutex::new(RegistryInner::default()),
@@ -307,7 +312,11 @@ impl TransferRegistry {
             return Err(error("transfer_capacity"));
         }
         let connection = context.binding.connection_id.clone();
-        let reserved = inner.connection_bytes.get(&connection).copied().unwrap_or(0);
+        let reserved = inner
+            .connection_bytes
+            .get(&connection)
+            .copied()
+            .unwrap_or(0);
         let next_total = reserved
             .checked_add(metadata.total_bytes)
             .ok_or_else(|| error("transfer_budget_overflow"))?;
@@ -349,9 +358,7 @@ impl TransferRegistry {
             next_chunk: 0,
         };
         inner.transfers.insert(handle.id.clone(), state);
-        inner
-            .connection_bytes
-            .insert(connection, next_total);
+        inner.connection_bytes.insert(connection, next_total);
         inner.task_transfers.insert(task, task_count + 1);
         Ok((handle, progress))
     }
@@ -372,9 +379,7 @@ impl TransferRegistry {
             .transfers
             .get_mut(&handle.id)
             .ok_or_else(|| error("transfer_unknown"))?;
-        if state.context.direction != expected_direction
-            || handle.direction != expected_direction
-        {
+        if state.context.direction != expected_direction || handle.direction != expected_direction {
             return Err(error("transfer_direction_mismatch"));
         }
         let chunk_digest = hex_lower(&Sha256::digest(bytes));
@@ -430,6 +435,7 @@ impl TransferRegistry {
         let completed = CompletedTransfer {
             handle_id: handle.id.clone(),
             context,
+            metadata: state.metadata.clone(),
             sha256: digest,
             bytes: total,
         };
@@ -473,13 +479,42 @@ impl TransferRegistry {
 
     /// Rejects any handle that was created for another connection, lease epoch
     /// or generation.
-    pub(crate) fn verify_binding(&self, handle: &TransferHandle, live: &LeaseContext) -> Result<()> {
+    pub(crate) fn verify_binding(
+        &self,
+        handle: &TransferHandle,
+        live: &LeaseContext,
+    ) -> Result<()> {
         let inner = self.inner.lock();
         let state = inner
             .transfers
             .get(&handle.id)
             .ok_or_else(|| error("transfer_unknown"))?;
         if !state.context.binding.matches(live) {
+            return Err(error("transfer_binding_stale"));
+        }
+        Ok(())
+    }
+
+    /// A handle is not authority by itself. The B action receiver must bind
+    /// it to the authenticated lease, B session and task before chunk/abort.
+    pub(crate) fn require_upload_binding(
+        &self,
+        handle: &TransferHandle,
+        live: &LeaseContext,
+        session_id: &str,
+        task_id: &str,
+    ) -> Result<()> {
+        let inner = self.inner.lock();
+        let state = inner
+            .transfers
+            .get(&handle.id)
+            .ok_or_else(|| error("transfer_unknown"))?;
+        if handle.direction != TransferDirection::Upload
+            || state.context.direction != TransferDirection::Upload
+            || !state.context.binding.matches(live)
+            || state.context.binding.session_id != session_id
+            || state.context.binding.task_id != task_id
+        {
             return Err(error("transfer_binding_stale"));
         }
         Ok(())
@@ -549,12 +584,7 @@ impl TransferRegistry {
     }
 }
 
-fn release_budget(
-    inner: &mut RegistryInner,
-    connection_id: &str,
-    bytes: u64,
-    task_id: &str,
-) {
+fn release_budget(inner: &mut RegistryInner, connection_id: &str, bytes: u64, task_id: &str) {
     if let Some(reserved) = inner.connection_bytes.get_mut(connection_id) {
         *reserved = reserved.saturating_sub(bytes);
         if *reserved == 0 {
@@ -632,9 +662,13 @@ mod tests {
     fn upload_and_download_share_one_connection_budget() {
         let registry = TransferRegistry::default();
         let lease = context("generation-0001");
-        let upload_context =
-            TransferContext::new(&lease, "session-0001", "task-0001", TransferDirection::Upload)
-                .unwrap();
+        let upload_context = TransferContext::new(
+            &lease,
+            "session-0001",
+            "task-0001",
+            TransferDirection::Upload,
+        )
+        .unwrap();
         let download_context = TransferContext::new(
             &lease,
             "session-0001",
@@ -720,13 +754,7 @@ mod tests {
         assert!(!upload_handle.id().starts_with("webup_"));
         assert_eq!(
             registry
-                .accept_chunk(
-                    &upload_handle,
-                    TransferDirection::Download,
-                    0,
-                    &data,
-                    1_100
-                )
+                .accept_chunk(&upload_handle, TransferDirection::Download, 0, &data, 1_100)
                 .unwrap_err()
                 .code,
             "transfer_direction_mismatch"
@@ -839,9 +867,11 @@ mod tests {
                 .code,
             "transfer_binding_stale"
         );
-        assert!(registry
-            .verify_binding(&handle, &context("generation-0001"))
-            .is_ok());
+        assert!(
+            registry
+                .verify_binding(&handle, &context("generation-0001"))
+                .is_ok()
+        );
         assert!(registry.expire(1_400).is_empty());
         assert_eq!(registry.expire(1_600), vec![handle.id().to_owned()]);
         assert_eq!(registry.connection_bytes("connection-0001"), 0);
@@ -902,10 +932,7 @@ mod tests {
             ..metadata("notes.txt", &data)
         };
         assert_eq!(
-            registry
-                .begin(context, bad_name, 1_200)
-                .unwrap_err()
-                .code,
+            registry.begin(context, bad_name, 1_200).unwrap_err().code,
             "transfer_file_name_invalid"
         );
     }

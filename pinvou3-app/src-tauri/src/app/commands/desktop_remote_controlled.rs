@@ -5,6 +5,7 @@
 //! projection; no pairing, lease, token, key, or host-path value is persisted.
 
 use serde::Deserialize;
+use std::sync::Arc;
 use tauri::{AppHandle, Emitter, State};
 
 use crate::features::files::file_ingest::validate_browsable_path;
@@ -32,8 +33,21 @@ pub(crate) fn spawn_watchdog_reaper(app: AppHandle) {
             tokio::time::sleep(std::time::Duration::from_millis(WATCHDOG_POLL_INTERVAL_MS)).await;
             let status = {
                 use tauri::Manager as _;
-                app.state::<ControlledDeviceManager>()
-                    .poll_watchdog(controlled_monotonic_millis())
+                let manager = app.state::<ControlledDeviceManager>();
+                let connection_id = manager
+                    .live_runtime_context()
+                    .ok()
+                    .map(|(lease, _)| lease.connection_id);
+                let status = manager.poll_watchdog(controlled_monotonic_millis());
+                if manager.live_runtime_context().is_err() {
+                    if let Some(connection_id) = connection_id {
+                        app.state::<Arc<super::desktop_remote_attachment::DesktopRemoteAttachmentRuntime>>()
+                            .uploads_cleanup_for_connection(&connection_id);
+                        app.state::<Arc<super::desktop_remote_artifact::DesktopRemoteArtifactRuntime>>()
+                            .clear_connection(&connection_id);
+                    }
+                }
+                status
             };
             // 仅在状态投影变化时广播，避免空闲时每秒刷事件。
             let projection = serde_json::to_string(&status).unwrap_or_default();
@@ -73,11 +87,12 @@ fn workspace_request(
     if !path.is_dir() {
         return Err("workspace_path_invalid".to_owned());
     }
-    Ok(WorkspaceAuthorizationRequest {
+    WorkspaceAuthorizationRequest::new(
         path,
-        display_name: input.display_name,
-        code_allowed: input.code_allowed,
-    })
+        input.display_name,
+        input.code_allowed,
+    )
+    .map_err(controlled_error)
 }
 
 fn workspace_requests(
@@ -177,10 +192,20 @@ pub async fn desktop_remote_controlled_refresh(
     app: AppHandle,
     manager: State<'_, ControlledDeviceManager>,
     relay: State<'_, RemoteControlManager>,
+    attachments: State<'_, Arc<super::desktop_remote_attachment::DesktopRemoteAttachmentRuntime>>,
+    artifacts: State<'_, Arc<super::desktop_remote_artifact::DesktopRemoteArtifactRuntime>>,
 ) -> Result<ControlledStatus, String> {
     ensure_supported(&manager)?;
     let old_generation = manager.current_generation();
+    let old_connection_id = manager
+        .live_runtime_context()
+        .ok()
+        .map(|(lease, _)| lease.connection_id);
     let refresh = manager.begin_refresh().map_err(controlled_error)?;
+    if let Some(connection_id) = old_connection_id {
+        attachments.uploads_cleanup_for_connection(&connection_id);
+        artifacts.clear_connection(&connection_id);
+    }
     emit_status(&app, &manager.status());
     if let Some(generation) = old_generation {
         relay.stop_controller_relay(&generation);
@@ -215,15 +240,25 @@ pub fn desktop_remote_controlled_stop(
     app: AppHandle,
     manager: State<'_, ControlledDeviceManager>,
     relay: State<'_, RemoteControlManager>,
+    attachments: State<'_, Arc<super::desktop_remote_attachment::DesktopRemoteAttachmentRuntime>>,
+    artifacts: State<'_, Arc<super::desktop_remote_artifact::DesktopRemoteArtifactRuntime>>,
 ) -> Result<ControlledStatus, String> {
     ensure_supported(&manager)?;
     let generation = manager.current_generation();
+    let connection_id = manager
+        .live_runtime_context()
+        .ok()
+        .map(|(lease, _)| lease.connection_id);
     let stopping = manager.begin_stop();
     emit_status(&app, &stopping);
     if let Some(generation) = generation {
         relay.stop_controller_relay(&generation);
     }
     let stopped = manager.finish_stop();
+    if let Some(connection_id) = connection_id {
+        attachments.uploads_cleanup_for_connection(&connection_id);
+        artifacts.clear_connection(&connection_id);
+    }
     emit_status(&app, &stopped);
     Ok(stopped)
 }
@@ -233,12 +268,22 @@ pub fn desktop_remote_controlled_disconnect_now(
     app: AppHandle,
     manager: State<'_, ControlledDeviceManager>,
     relay: State<'_, RemoteControlManager>,
+    attachments: State<'_, Arc<super::desktop_remote_attachment::DesktopRemoteAttachmentRuntime>>,
+    artifacts: State<'_, Arc<super::desktop_remote_artifact::DesktopRemoteArtifactRuntime>>,
 ) -> Result<ControlledStatus, String> {
     ensure_supported(&manager)?;
+    let connection_id = manager
+        .live_runtime_context()
+        .ok()
+        .map(|(lease, _)| lease.connection_id);
     if let Some(generation) = manager.current_generation() {
         relay.stop_controller_relay(&generation);
     }
     let status = manager.disconnect_now();
+    if let Some(connection_id) = connection_id {
+        attachments.uploads_cleanup_for_connection(&connection_id);
+        artifacts.clear_connection(&connection_id);
+    }
     emit_status(&app, &status);
     Ok(status)
 }

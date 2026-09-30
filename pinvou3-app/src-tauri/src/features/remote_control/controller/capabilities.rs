@@ -5,9 +5,9 @@
 //! admitting work. No source path, Skill body, environment variable, credential,
 //! or package content crosses this boundary.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 
-use parking_lot::Mutex;
+use parking_lot::{Condvar, Mutex};
 use serde::Serialize;
 use serde_json::Value;
 
@@ -67,6 +67,7 @@ pub(crate) struct RemoteCapabilityTool {
 pub(crate) struct RemoteCapabilitySkill {
     skill_id: String,
     display_name: String,
+    scopes: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Eq, PartialEq)]
@@ -97,6 +98,81 @@ pub(crate) struct CapabilitySnapshot {
 pub(crate) struct CapabilitySnapshotManager {
     current: Mutex<Option<CapabilitySnapshot>>,
     revision: Mutex<u64>,
+    admission_gate: CapabilityAdmissionGate,
+}
+
+#[derive(Default)]
+struct CapabilityAdmissionGate {
+    state: Mutex<CapabilityAdmissionGateState>,
+    changed: Condvar,
+}
+
+#[derive(Default)]
+struct CapabilityAdmissionGateState {
+    active_admissions: usize,
+    refreshing: bool,
+}
+
+/// A short-lived consistency token. It does not hold a mutex while the ledger
+/// persists its record, but it makes snapshot replacement linearize after the
+/// admission finishes. This closes the validate/refresh/admit TOCTOU without
+/// carrying a capability mutex across filesystem I/O.
+pub(crate) struct CapabilityAdmissionGuard<'a> {
+    gate: &'a CapabilityAdmissionGate,
+}
+
+impl std::fmt::Debug for CapabilityAdmissionGuard<'_> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("CapabilityAdmissionGuard(..)")
+    }
+}
+
+struct CapabilityRefreshGuard<'a> {
+    gate: &'a CapabilityAdmissionGate,
+}
+
+impl CapabilityAdmissionGate {
+    fn begin_admission(&self) -> Result<CapabilityAdmissionGuard<'_>> {
+        let mut state = self.state.lock();
+        while state.refreshing {
+            self.changed.wait(&mut state);
+        }
+        state.active_admissions = state
+            .active_admissions
+            .checked_add(1)
+            .ok_or_else(|| CapabilityError::new("capability_admission_capacity"))?;
+        Ok(CapabilityAdmissionGuard { gate: self })
+    }
+
+    fn begin_refresh(&self) -> CapabilityRefreshGuard<'_> {
+        let mut state = self.state.lock();
+        while state.refreshing || state.active_admissions != 0 {
+            self.changed.wait(&mut state);
+        }
+        state.refreshing = true;
+        CapabilityRefreshGuard { gate: self }
+    }
+}
+
+impl Drop for CapabilityAdmissionGuard<'_> {
+    fn drop(&mut self) {
+        let mut state = self.gate.state.lock();
+        state.active_admissions = state
+            .active_admissions
+            .checked_sub(1)
+            .expect("capability admission guard underflow");
+        if state.active_admissions == 0 {
+            self.gate.changed.notify_all();
+        }
+    }
+}
+
+impl Drop for CapabilityRefreshGuard<'_> {
+    fn drop(&mut self) {
+        let mut state = self.gate.state.lock();
+        state.refreshing = false;
+        self.gate.changed.notify_all();
+    }
 }
 
 impl CapabilitySnapshotManager {
@@ -128,17 +204,28 @@ impl CapabilitySnapshotManager {
             .cloned()
             .collect();
         let code_mode_allowed = source.code_agent_ready && !code_workspaces.is_empty();
-        let mut skills = source.plain_skills.clone();
-        if code_mode_allowed {
-            skills.extend(source.code_skills.iter().cloned());
+        let mut skills = BTreeMap::<String, (String, Vec<String>)>::new();
+        for skill in source.plain_skills {
+            skills.insert(skill.id, (skill.display_name, vec!["chat".to_owned()]));
         }
-        skills.sort_by(|left, right| {
-            left.id
-                .cmp(&right.id)
-                .then(left.display_name.cmp(&right.display_name))
-        });
-        skills.dedup_by(|left, right| left.id == right.id);
+        if code_mode_allowed {
+            for skill in source.code_skills {
+                let entry = skills
+                    .entry(skill.id)
+                    .or_insert_with(|| (skill.display_name.clone(), Vec::new()));
+                if entry.0 != skill.display_name {
+                    return Err(CapabilityError::new("capability_skill_display_conflict"));
+                }
+                entry.1.push("code".to_owned());
+            }
+        }
+        if skills.len() > MAX_DESCRIPTORS {
+            return Err(CapabilityError::new("capability_descriptor_capacity"));
+        }
 
+        // Snapshot publication is serialized with final ledger admission by a
+        // consistency token rather than a mutex held across ledger persistence.
+        let _refresh = self.admission_gate.begin_refresh();
         let mut revision = self.revision.lock();
         *revision = revision
             .checked_add(1)
@@ -169,9 +256,10 @@ impl CapabilitySnapshotManager {
                 .collect(),
             skills: skills
                 .into_iter()
-                .map(|skill| RemoteCapabilitySkill {
-                    skill_id: skill.id,
-                    display_name: skill.display_name,
+                .map(|(skill_id, (display_name, scopes))| RemoteCapabilitySkill {
+                    skill_id,
+                    display_name,
+                    scopes,
                 })
                 .collect(),
             workspaces: code_workspaces
@@ -262,6 +350,7 @@ impl CapabilitySnapshotManager {
                 .map(|skill| serde_json::json!({
                     "skill_id": skill.skill_id,
                     "display_name": skill.display_name,
+                    "scopes": skill.scopes,
                 }))
                 .collect::<Vec<_>>(),
             "workspaces": snapshot
@@ -292,6 +381,126 @@ impl CapabilitySnapshotManager {
             .find(|workspace| workspace.workspace_id == workspace_id)
             .map(|workspace| workspace.workspace_id.clone())
             .ok_or_else(|| CapabilityError::new("capability_workspace_not_authorized"))
+    }
+
+    /// Validate a B-local selection against the exact unexpired snapshot and
+    /// the lane that will execute it. The runtime still re-resolves every
+    /// selected skill from the live marketplace before reading its body.
+    pub(crate) fn validate_skills_for_mode(
+        &self,
+        context: &LeaseContext,
+        mode: &str,
+        skill_ids: &[String],
+        now_b: u64,
+    ) -> Result<()> {
+        if !matches!(mode, "chat" | "code") || skill_ids.len() > 32 {
+            return Err(CapabilityError::new("task_skill_invalid"));
+        }
+        let snapshot = self.current_for_context(context, now_b)?;
+        let mut seen = HashSet::new();
+        if skill_ids.iter().any(|skill_id| {
+            !seen.insert(skill_id.as_str())
+                || !snapshot.skills.iter().any(|skill| {
+                    skill.skill_id == *skill_id && skill.scopes.iter().any(|scope| scope == mode)
+                })
+        }) {
+            return Err(CapabilityError::new("task_skill_invalid"));
+        }
+        Ok(())
+    }
+
+    /// Validate every capability-dependent task field against one exact,
+    /// unexpired snapshot. The returned token must be kept alive until the
+    /// ledger admission call returns; while it is alive a policy refresh may
+    /// be prepared, but cannot publish a replacement snapshot.
+    pub(crate) fn pin_task_admission(
+        &self,
+        revision: &str,
+        context: &LeaseContext,
+        mode: &str,
+        skill_ids: &[String],
+        workspace_id: Option<&str>,
+        now_b: u64,
+    ) -> Result<CapabilityAdmissionGuard<'_>> {
+        let guard = self.admission_gate.begin_admission()?;
+        self.validate_task_selection(
+            revision,
+            context,
+            mode,
+            skill_ids,
+            workspace_id,
+            now_b,
+        )?;
+        Ok(guard)
+    }
+
+    /// Read-only preflight used before mapping/preparation. Final admission
+    /// must still use `pin_task_admission` because this call intentionally does
+    /// not keep a consistency token alive.
+    pub(crate) fn validate_task_selection(
+        &self,
+        revision: &str,
+        context: &LeaseContext,
+        mode: &str,
+        skill_ids: &[String],
+        workspace_id: Option<&str>,
+        now_b: u64,
+    ) -> Result<()> {
+        if !matches!(mode, "chat" | "code") || skill_ids.len() > 32 {
+            return Err(CapabilityError::new("task_skill_invalid"));
+        }
+        let snapshot = self.validate(revision, context, now_b)?;
+        if !snapshot.modes.iter().any(|available| available == mode) {
+            return Err(CapabilityError::new("task_mode_unsupported"));
+        }
+        let mut seen = HashSet::new();
+        if skill_ids.iter().any(|skill_id| {
+            !seen.insert(skill_id.as_str())
+                || !snapshot.skills.iter().any(|skill| {
+                    skill.skill_id == *skill_id && skill.scopes.iter().any(|scope| scope == mode)
+                })
+        }) {
+            return Err(CapabilityError::new("task_skill_invalid"));
+        }
+        match (mode, workspace_id) {
+            ("chat", None) => Ok(()),
+            ("chat", Some(_)) => Err(CapabilityError::new("task_workspace_unexpected")),
+            ("code", Some(workspace_id)) if snapshot.workspaces.iter().any(|workspace| {
+                workspace.code_allowed && workspace.workspace_id == workspace_id
+            }) => Ok(()),
+            ("code", Some(_)) => Err(CapabilityError::new(
+                "capability_workspace_not_authorized",
+            )),
+            ("code", None) => Err(CapabilityError::new("task_workspace_required")),
+            _ => Err(CapabilityError::new("task_mode_unsupported")),
+        }
+    }
+
+    /// Convert B's monotonic expiry into an absolute UI deadline without
+    /// changing the wire snapshot or minting another capability revision.
+    pub(crate) fn controlled_ui_projection(
+        &self,
+        snapshot: &CapabilitySnapshot,
+        now_b: u64,
+        now_wall_ms: u64,
+    ) -> Result<Value> {
+        let deadline_b = snapshot
+            .expires_at_ms
+            .parse::<u64>()
+            .map_err(|_| CapabilityError::new("capability_snapshot_invalid"))?;
+        let remaining = deadline_b.saturating_sub(now_b);
+        if remaining == 0 {
+            return Err(CapabilityError::new("capability_snapshot_expired"));
+        }
+        let mut projection = serde_json::to_value(snapshot)
+            .map_err(|_| CapabilityError::new("capability_snapshot_invalid"))?;
+        projection["expiresAtMs"] = Value::String(
+            now_wall_ms
+                .checked_add(remaining)
+                .ok_or_else(|| CapabilityError::new("capability_expiry_overflow"))?
+                .to_string(),
+        );
+        Ok(projection)
     }
 }
 
@@ -401,6 +610,8 @@ mod tests {
         assert_eq!(snapshot.modes, vec!["chat".to_owned(), "code".to_owned()]);
         assert_eq!(snapshot.tools.len(), 1);
         assert_eq!(snapshot.skills.len(), 2);
+        assert_eq!(snapshot.skills[0].scopes, vec!["code".to_owned()]);
+        assert_eq!(snapshot.skills[1].scopes, vec!["chat".to_owned()]);
         assert_eq!(snapshot.workspaces.len(), 1);
         assert_eq!(
             manager
@@ -440,6 +651,255 @@ mod tests {
                 .code,
             "capability_snapshot_stale"
         );
+    }
+
+    #[test]
+    fn one_skill_can_preserve_both_execution_scopes() {
+        let manager = CapabilitySnapshotManager::default();
+        let mut source = fixture_source();
+        source.plain_skills = vec![CapabilityDescriptor {
+            id: "skill-shared".into(),
+            display_name: "Shared Skill".into(),
+        }];
+        source.code_skills = source.plain_skills.clone();
+        let snapshot = manager
+            .build(context("generation-0001"), source, 1_000)
+            .unwrap();
+        assert_eq!(snapshot.skills.len(), 1);
+        assert_eq!(snapshot.skills[0].skill_id, "skill-shared");
+        assert_eq!(snapshot.skills[0].scopes, vec!["chat", "code"]);
+        manager
+            .validate_skills_for_mode(
+                &context("generation-0001"),
+                "chat",
+                &["skill-shared".into()],
+                2_000,
+            )
+            .unwrap();
+        manager
+            .validate_skills_for_mode(
+                &context("generation-0001"),
+                "code",
+                &["skill-shared".into()],
+                2_000,
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn final_chat_admission_rechecks_expiry_revision_mode_and_skill_scope() {
+        let manager = CapabilitySnapshotManager::default();
+        manager
+            .build(context("generation-0001"), fixture_source(), 1_000)
+            .unwrap();
+        manager
+            .pin_task_admission(
+                "1",
+                &context("generation-0001"),
+                "chat",
+                &["skill-plain".into()],
+                None,
+                30_999,
+            )
+            .unwrap();
+        assert_eq!(
+            manager
+                .pin_task_admission(
+                    "1",
+                    &context("generation-0001"),
+                    "chat",
+                    &["skill-code".into()],
+                    None,
+                    2_000,
+                )
+                .unwrap_err()
+                .code,
+            "task_skill_invalid"
+        );
+        assert_eq!(
+            manager
+                .pin_task_admission(
+                    "1",
+                    &context("generation-other"),
+                    "chat",
+                    &[],
+                    None,
+                    2_000,
+                )
+                .unwrap_err()
+                .code,
+            "capability_snapshot_stale"
+        );
+        // Models an A reserve followed by an attachment upload that outlives
+        // the 30 second snapshot: B rejects at commit/admission, not dispatch.
+        assert_eq!(
+            manager
+                .pin_task_admission(
+                    "1",
+                    &context("generation-0001"),
+                    "chat",
+                    &[],
+                    None,
+                    31_000,
+                )
+                .unwrap_err()
+                .code,
+            "capability_snapshot_expired"
+        );
+    }
+
+    #[test]
+    fn policy_refresh_invalidates_old_revision_and_removed_chat_skill() {
+        let manager = CapabilitySnapshotManager::default();
+        manager
+            .build(context("generation-0001"), fixture_source(), 1_000)
+            .unwrap();
+        let mut refreshed = fixture_source();
+        refreshed.plain_skills = vec![CapabilityDescriptor {
+            id: "skill-new".into(),
+            display_name: "New Skill".into(),
+        }];
+        manager
+            .build(context("generation-0001"), refreshed, 2_000)
+            .unwrap();
+        assert_eq!(
+            manager
+                .pin_task_admission(
+                    "1",
+                    &context("generation-0001"),
+                    "chat",
+                    &[],
+                    None,
+                    2_001,
+                )
+                .unwrap_err()
+                .code,
+            "capability_snapshot_stale"
+        );
+        assert_eq!(
+            manager
+                .pin_task_admission(
+                    "2",
+                    &context("generation-0001"),
+                    "chat",
+                    &["skill-plain".into()],
+                    None,
+                    2_001,
+                )
+                .unwrap_err()
+                .code,
+            "task_skill_invalid"
+        );
+    }
+
+    #[test]
+    fn code_admission_keeps_workspace_and_scope_checks() {
+        let manager = CapabilitySnapshotManager::default();
+        manager
+            .build(context("generation-0001"), fixture_source(), 1_000)
+            .unwrap();
+        manager
+            .pin_task_admission(
+                "1",
+                &context("generation-0001"),
+                "code",
+                &["skill-code".into()],
+                Some("workspace-0001"),
+                2_000,
+            )
+            .unwrap();
+        assert_eq!(
+            manager
+                .pin_task_admission(
+                    "1",
+                    &context("generation-0001"),
+                    "code",
+                    &["skill-plain".into()],
+                    Some("workspace-0001"),
+                    2_000,
+                )
+                .unwrap_err()
+                .code,
+            "task_skill_invalid"
+        );
+        assert_eq!(
+            manager
+                .pin_task_admission(
+                    "1",
+                    &context("generation-0001"),
+                    "code",
+                    &["skill-code".into()],
+                    Some("workspace-other"),
+                    2_000,
+                )
+                .unwrap_err()
+                .code,
+            "capability_workspace_not_authorized"
+        );
+
+        let unavailable = CapabilitySnapshotManager::default();
+        let mut chat_only = fixture_source();
+        chat_only.code_agent_ready = false;
+        unavailable
+            .build(context("generation-0001"), chat_only, 1_000)
+            .unwrap();
+        assert_eq!(
+            unavailable
+                .pin_task_admission(
+                    "1",
+                    &context("generation-0001"),
+                    "code",
+                    &[],
+                    Some("workspace-0001"),
+                    2_000,
+                )
+                .unwrap_err()
+                .code,
+            "task_mode_unsupported"
+        );
+    }
+
+    #[test]
+    fn concurrent_refresh_cannot_replace_snapshot_during_admission() {
+        use std::sync::{Arc, mpsc};
+        use std::time::Duration;
+
+        let manager = Arc::new(CapabilitySnapshotManager::default());
+        manager
+            .build(context("generation-0001"), fixture_source(), 1_000)
+            .unwrap();
+        let admission = manager
+            .pin_task_admission(
+                "1",
+                &context("generation-0001"),
+                "chat",
+                &["skill-plain".into()],
+                None,
+                2_000,
+            )
+            .unwrap();
+        let refreshing = Arc::clone(&manager);
+        let (started_tx, started_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            let refreshed = refreshing
+                .build(context("generation-0001"), fixture_source(), 2_100)
+                .unwrap();
+            done_tx.send(refreshed.capability_revision).unwrap();
+        });
+        started_rx.recv().unwrap();
+        assert!(done_rx.recv_timeout(Duration::from_millis(50)).is_err());
+        assert_eq!(
+            manager
+                .current_for_context(&context("generation-0001"), 2_100)
+                .unwrap()
+                .capability_revision,
+            "1"
+        );
+        drop(admission);
+        assert_eq!(done_rx.recv_timeout(Duration::from_secs(1)).unwrap(), "2");
+        worker.join().unwrap();
     }
 
     #[test]
@@ -531,5 +991,9 @@ mod tests {
         let text = payload.to_string();
         assert!(!text.contains("D:\\"));
         assert!(!text.contains("api_key"));
+        assert_eq!(
+            payload["skills"][0]["scopes"],
+            serde_json::json!(["code"])
+        );
     }
 }

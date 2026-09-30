@@ -564,7 +564,7 @@ pub(crate) fn sanitize_preview(preview: &str) -> String {
     "[REDACTED]".to_owned()
 }
 
-fn sanitize_scope(scope: &str) -> String {
+pub(crate) fn sanitize_scope(scope: &str) -> String {
     let scope = scope.trim();
     // request() stores this value and view_locked() projects it again. Keep
     // both redaction sentinels stable instead of changing their meaning on a

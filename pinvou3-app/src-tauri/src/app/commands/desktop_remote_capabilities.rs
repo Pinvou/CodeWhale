@@ -6,7 +6,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use tauri::{AppHandle, Manager as _};
 
@@ -19,6 +19,7 @@ use crate::features::remote_control::controller::capabilities::{
     CapabilitySource,
 };
 use crate::features::remote_control::controller::controlled::ControlledDeviceManager;
+use crate::features::remote_control::controller::task::RemoteSessionLane;
 
 const UNSUPPORTED: &str = "desktop_remote_control_unsupported";
 const ACP_STATUS_TIMEOUT_MS: u64 = 10_000;
@@ -31,6 +32,16 @@ fn monotonic_millis() -> u64 {
     static ORIGIN: OnceLock<Instant> = OnceLock::new();
     let origin = ORIGIN.get_or_init(Instant::now);
     u64::try_from(origin.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
+fn unix_millis() -> Result<u64, String> {
+    u64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| "capability_snapshot_invalid".to_owned())?
+            .as_millis(),
+    )
+    .map_err(|_| "capability_snapshot_invalid".to_owned())
 }
 
 fn descriptor(id: impl Into<String>, display_name: impl Into<String>) -> CapabilityDescriptor {
@@ -81,9 +92,61 @@ pub async fn desktop_remote_capabilities_snapshot(
     build_capability_snapshot(&app).await
 }
 
+/// Read the already-negotiated B snapshot for B's own composer. This must not
+/// mint a new revision: doing so would invalidate the revision A is currently
+/// using for the same controlled session.
+#[tauri::command]
+pub async fn desktop_remote_controlled_capabilities_snapshot(
+    app: AppHandle,
+    session_id: String,
+) -> Result<serde_json::Value, String> {
+    let controlled = app.state::<ControlledDeviceManager>();
+    if !controlled.is_supported() {
+        return Err(UNSUPPORTED.to_owned());
+    }
+    let context = controlled
+        .live_lease()
+        .map_err(|error| error.code.to_owned())?;
+    let manager = app.state::<CapabilitySnapshotManager>();
+    let now_b = monotonic_millis();
+    // B observes but never mints a replacement revision here. A's authenticated
+    // renewal request is the single writer, preventing two near-expiry readers
+    // from racing revisions and invalidating an already returned A snapshot.
+    let snapshot = manager
+        .current_for_context(&context, now_b)
+        .map_err(capability_error)?;
+    let (still_live, _) = controlled
+        .live_runtime_context()
+        .map_err(|error| error.code.to_owned())?;
+    if still_live != context {
+        return Err("session_context_stale".to_owned());
+    }
+    let runtime = app.state::<
+        std::sync::Arc<super::desktop_remote_task::DesktopRemoteTaskRuntime>,
+    >();
+    let lane = runtime
+        .service()
+        .lane_for_session(&session_id, &context.remote_control_generation)
+        .ok_or_else(|| "task_session_not_found".to_owned())?;
+    let session_lane = match lane {
+        RemoteSessionLane::Code => "code",
+        // A switched-but-unclaimed session is claimed as chat by B-local
+        // input, so its composer must expose only the chat capability lane.
+        RemoteSessionLane::Chat | RemoteSessionLane::Unknown => "chat",
+    };
+    let mut projection = manager
+        .controlled_ui_projection(&snapshot, monotonic_millis(), unix_millis()?)
+        .map_err(capability_error)?;
+    projection["sessionId"] = serde_json::Value::String(session_id);
+    projection["sessionLane"] = serde_json::Value::String(session_lane.to_owned());
+    Ok(projection)
+}
+
 /// 构造 B 端能力快照：命令入口（本地 UI）与 wire 派发入口（E2E-04 的
 /// `capability_snapshot_request`）共用同一份实现。
-pub(crate) async fn build_capability_snapshot(app: &AppHandle) -> Result<CapabilitySnapshot, String> {
+pub(crate) async fn build_capability_snapshot(
+    app: &AppHandle,
+) -> Result<CapabilitySnapshot, String> {
     let controlled = app.state::<ControlledDeviceManager>();
     if !controlled.is_supported() {
         return Err(UNSUPPORTED.to_owned());

@@ -424,8 +424,10 @@ test('the controlled device projects an admitted task into its main chat view', 
   assert.ok(chatView.includes('taskStatusKey(controlledActiveTasks[0].status)'));
   assert.ok(chatView.includes('const remoteTranscriptActive = remoteChatActive || controlledChatActive'));
   assert.ok(chatView.includes('bs ? bs.controlledTasks : []'));
-  assert.ok(chatView.includes('bridge.desktopRemoteControl.controlledTaskSend(controlledSession.sessionId, outgoing)'));
-  assert.ok(bridge.includes('function controlledTaskSend(sessionId, text)'));
+  assert.ok(chatView.includes('bridge.desktopRemoteControl.controlledTaskSend('));
+  assert.ok(chatView.includes('controlledSkillIds'));
+  assert.ok(chatView.includes('readyAttachments'));
+  assert.ok(bridge.includes('async function controlledTaskSend(sessionId, text, readyAttachments, skillIds)'));
   assert.ok(bridge.includes('logic.applyControlledTaskEvent(current()'));
   assert.ok(chatView.includes('projectControlledTaskChatItems'));
   assert.ok(chatView.includes('projectedControlledTaskItems'));

@@ -104,7 +104,7 @@ const MAX_ARTIFACTS: usize = 256;
 pub(crate) const MAX_ENCRYPTED_WIRE_BYTES: usize =
     MAX_ENCRYPTED_FRAME_BYTES.div_ceil(3) * 4 + MAX_CONTROL_MESSAGE_BYTES;
 const CONTROLLER_CONTRACT_SHA256: &str =
-    "e01f4708dc61755146f335a74e6b2b6edec590cab691d3275e2d9bf68496cee7";
+    "eb276cfea1ee9f76603753994312aa9551c8d530839c716958ae60fbae53d31a";
 
 pub(crate) const CONTROLLER_CAPABILITIES: &[&str] = &[
     "pairing_v1",
@@ -159,19 +159,28 @@ pub(crate) const CONTROLLER_PAYLOAD_TYPES: &[&str] = &[
     "task_submit",
     "task_cancel",
     "task_status",
-    "permission_request",
-    "permission_decision",
-    "attachment_begin",
-    "attachment_chunk",
-    "attachment_commit",
-    "artifact_index_request",
-    "artifact_index",
-    "artifact_read_request",
-    "artifact_chunk",
+    "remote_action_request",
+    "remote_action_result",
     "session_snapshot_request",
     "session_snapshot",
     "journal_replay_request",
     "journal_event",
+];
+
+/// The desktop action protocol is a closed RPC surface, not an arbitrary
+/// Command name transported over the controller lane. The unshipped legacy
+/// permission/transfer/artifact payloads were replaced by this single pair.
+pub(crate) const REMOTE_ACTION_OPERATIONS: &[&str] = &[
+    "permission_list",
+    "permission_decide",
+    "attachment_begin",
+    "attachment_chunk",
+    "attachment_abort",
+    "artifact_index",
+    "artifact_preview",
+    "artifact_download_begin",
+    "artifact_download_chunk",
+    "artifact_download_abort",
 ];
 
 pub(crate) const TASK_STATUSES: &[&str] = &[
@@ -393,40 +402,12 @@ const PAYLOAD_CAPABILITY_BINDINGS: &[CapabilityBinding] = &[
         capabilities: &["task_v1"],
     },
     CapabilityBinding {
-        kind: "permission_request",
-        capabilities: &["permission_v1"],
+        kind: "remote_action_request",
+        capabilities: &["task_v1"],
     },
     CapabilityBinding {
-        kind: "permission_decision",
-        capabilities: &["permission_v1"],
-    },
-    CapabilityBinding {
-        kind: "attachment_begin",
-        capabilities: &["attachment_v1"],
-    },
-    CapabilityBinding {
-        kind: "attachment_chunk",
-        capabilities: &["attachment_v1"],
-    },
-    CapabilityBinding {
-        kind: "attachment_commit",
-        capabilities: &["attachment_v1"],
-    },
-    CapabilityBinding {
-        kind: "artifact_index_request",
-        capabilities: &["artifact_v1"],
-    },
-    CapabilityBinding {
-        kind: "artifact_index",
-        capabilities: &["artifact_v1"],
-    },
-    CapabilityBinding {
-        kind: "artifact_read_request",
-        capabilities: &["artifact_v1"],
-    },
-    CapabilityBinding {
-        kind: "artifact_chunk",
-        capabilities: &["artifact_v1"],
+        kind: "remote_action_result",
+        capabilities: &["task_v1"],
     },
     CapabilityBinding {
         kind: "session_snapshot_request",
@@ -641,7 +622,7 @@ const NESTED_SCHEMAS: &[(&str, Schema)] = &[
     (
         "skill_descriptor",
         Schema {
-            required: &["skill_id", "display_name"],
+            required: &["skill_id", "display_name", "scopes"],
             optional: &[],
             roles: &[],
         },
@@ -1275,100 +1256,7 @@ fn payload_schema(kind: &str) -> Option<Schema> {
             optional: &["result_digest"],
             roles: &[B],
         },
-        "permission_request" => Schema {
-            required: &[
-                "v",
-                "type",
-                "connection_id",
-                "controller_lease_id",
-                "lease_epoch",
-                "relay_epoch",
-                "remote_control_generation",
-                "task_id",
-                "permission_request_id",
-                "expires_at_ms",
-                "operation_type",
-                "risk_level",
-                "target_scope",
-                "preview",
-            ],
-            optional: &[],
-            roles: &[B],
-        },
-        "permission_decision" => Schema {
-            required: &[
-                "v",
-                "type",
-                "connection_id",
-                "controller_lease_id",
-                "lease_epoch",
-                "relay_epoch",
-                "remote_control_generation",
-                "task_id",
-                "permission_request_id",
-                "request_id",
-                "decision",
-            ],
-            optional: &[],
-            roles: &[A],
-        },
-        "attachment_begin" => Schema {
-            required: &[
-                "v",
-                "type",
-                "connection_id",
-                "controller_lease_id",
-                "lease_epoch",
-                "relay_epoch",
-                "remote_control_generation",
-                "task_id",
-                "session_id",
-                "transfer_id",
-                "file_name",
-                "mime_type",
-                "total_bytes",
-                "sha256",
-            ],
-            optional: &[],
-            roles: &[A],
-        },
-        "attachment_chunk" => Schema {
-            required: &[
-                "v",
-                "type",
-                "connection_id",
-                "controller_lease_id",
-                "lease_epoch",
-                "relay_epoch",
-                "remote_control_generation",
-                "task_id",
-                "session_id",
-                "transfer_id",
-                "chunk_index",
-                "chunk_b64",
-                "chunk_bytes",
-            ],
-            optional: &[],
-            roles: &[A],
-        },
-        "attachment_commit" => Schema {
-            required: &[
-                "v",
-                "type",
-                "connection_id",
-                "controller_lease_id",
-                "lease_epoch",
-                "relay_epoch",
-                "remote_control_generation",
-                "task_id",
-                "session_id",
-                "transfer_id",
-                "sha256",
-            ],
-            optional: &[],
-            roles: &[A],
-        },
-        "artifact_index_request" => Schema {
+        "remote_action_request" => Schema {
             required: &[
                 "v",
                 "type",
@@ -1379,11 +1267,13 @@ fn payload_schema(kind: &str) -> Option<Schema> {
                 "remote_control_generation",
                 "request_id",
                 "session_id",
+                "operation",
+                "body",
             ],
             optional: &[],
             roles: &[A],
         },
-        "artifact_index" => Schema {
+        "remote_action_result" => Schema {
             required: &[
                 "v",
                 "type",
@@ -1394,47 +1284,11 @@ fn payload_schema(kind: &str) -> Option<Schema> {
                 "remote_control_generation",
                 "request_id",
                 "session_id",
-                "artifacts",
+                "operation",
+                "ok",
+                "body",
             ],
-            optional: &[],
-            roles: &[B],
-        },
-        "artifact_read_request" => Schema {
-            required: &[
-                "v",
-                "type",
-                "connection_id",
-                "controller_lease_id",
-                "lease_epoch",
-                "relay_epoch",
-                "remote_control_generation",
-                "request_id",
-                "session_id",
-                "artifact_id",
-                "offset",
-                "max_bytes",
-            ],
-            optional: &[],
-            roles: &[A],
-        },
-        "artifact_chunk" => Schema {
-            required: &[
-                "v",
-                "type",
-                "connection_id",
-                "controller_lease_id",
-                "lease_epoch",
-                "relay_epoch",
-                "remote_control_generation",
-                "request_id",
-                "session_id",
-                "artifact_id",
-                "offset",
-                "chunk_b64",
-                "chunk_bytes",
-                "eof",
-            ],
-            optional: &["sha256"],
+            optional: &["error_code"],
             roles: &[B],
         },
         "session_snapshot_request" => Schema {
@@ -1615,8 +1469,8 @@ pub(crate) fn validate_controller_payload_json_in_context(
     if kind == "capability_snapshot" {
         validate_capability_snapshot(object)?;
     }
-    if kind == "artifact_index" {
-        validate_artifact_index(object)?;
+    if kind == "remote_action_request" || kind == "remote_action_result" {
+        validate_remote_action(object, kind == "remote_action_result")?;
     }
     enforce_expected_context(object, expected_context)?;
     Ok(value)
@@ -2163,6 +2017,29 @@ pub(crate) fn validate_controller_runtime_payload_json(
     enforce_negotiated_payload(kind, &context.negotiated_capabilities)?;
     let lease = require_runtime_lease(context)?;
     let value = validate_controller_payload_json_in_context(input, sender_role, Some(lease))?;
+    if matches!(kind, "remote_action_request" | "remote_action_result") {
+        let operation = value
+            .get("operation")
+            .and_then(Value::as_str)
+            .expect("validated action");
+        let required = if operation.starts_with("permission_") {
+            "permission_v1"
+        } else if operation.starts_with("attachment_") {
+            "attachment_v1"
+        } else {
+            "artifact_v1"
+        };
+        if !context
+            .negotiated_capabilities
+            .iter()
+            .any(|capability| capability == required)
+        {
+            return Err(ControllerProtocolError::new(
+                "unsupported_capability",
+                required,
+            ));
+        }
+    }
     if kind == "task_submit"
         && value.get("model_source").and_then(Value::as_str) == Some("controller_temporary")
         && !context
@@ -2380,6 +2257,12 @@ fn validate_named_field(object: &Map<String, Value>, field: &str, value: &Value)
         validate_enum(value, field, DIRECTIONS)?;
     } else if field == "payload_kind" {
         validate_enum(value, field, CONTROLLER_PAYLOAD_TYPES)?;
+    } else if field == "operation" {
+        validate_enum(value, field, REMOTE_ACTION_OPERATIONS)?;
+    } else if field == "ok" {
+        if !value.is_boolean() {
+            return Err(ControllerProtocolError::new("invalid_field", field));
+        }
     } else if field == "model_source" {
         validate_enum(value, field, MODEL_SOURCES)?;
     } else if field == "mode" {
@@ -2460,6 +2343,7 @@ fn validate_named_field(object: &Map<String, Value>, field: &str, value: &Value)
         "skills",
         "workspaces",
         "artifacts",
+        "body",
     ]
     .contains(&field)
     {
@@ -2857,6 +2741,28 @@ fn validate_descriptor_list(
                 format!("{label}.code_allowed"),
             ));
         }
+        if id_field == "skill_id" {
+            let scopes = descriptor
+                .get("scopes")
+                .and_then(Value::as_array)
+                .ok_or_else(|| ControllerProtocolError::new("invalid_field", format!("{label}.scopes")))?;
+            if scopes.is_empty() || scopes.len() > MODES.len() {
+                return Err(ControllerProtocolError::new(
+                    "invalid_field",
+                    format!("{label}.scopes"),
+                ));
+            }
+            let mut seen_scopes = HashSet::new();
+            for scope in scopes {
+                validate_enum(scope, &format!("{label}.scopes"), MODES)?;
+                if !seen_scopes.insert(scope.as_str().expect("scope enum validated")) {
+                    return Err(ControllerProtocolError::new(
+                        "invalid_field",
+                        format!("{label}.scopes"),
+                    ));
+                }
+            }
+        }
     }
     Ok(())
 }
@@ -2917,6 +2823,190 @@ fn validate_artifact_index(payload: &Map<String, Value>) -> Result<()> {
             &format!("{label}.preview_mode"),
             ARTIFACT_PREVIEW_MODES,
         )?;
+    }
+    Ok(())
+}
+
+fn validate_remote_action(payload: &Map<String, Value>, result: bool) -> Result<()> {
+    let operation = object_string(payload, "operation", "payload")?;
+    let (required, optional): (&[&str], &[&str]) = match (result, operation) {
+        (false, "permission_list") => (&["task_id"], &[]),
+        (false, "permission_decide") => (&["task_id", "permission_request_id", "decision"], &[]),
+        (false, "attachment_begin") => (
+            &["task_id", "file_name", "mime_type", "total_bytes", "sha256"],
+            &[],
+        ),
+        (false, "attachment_chunk") => (
+            &[
+                "task_id",
+                "transfer_id",
+                "chunk_index",
+                "chunk_b64",
+                "chunk_bytes",
+            ],
+            &[],
+        ),
+        (false, "attachment_abort") => (&["task_id", "transfer_id"], &[]),
+        (false, "artifact_index") => (&[], &[]),
+        (false, "artifact_preview") => (&["artifact_id"], &[]),
+        (false, "artifact_download_begin") => (&["task_id", "artifact_id"], &[]),
+        (false, "artifact_download_chunk") => (
+            &["task_id", "artifact_id", "transfer_id", "chunk_index"],
+            &[],
+        ),
+        (false, "artifact_download_abort") => (&["task_id", "artifact_id", "transfer_id"], &[]),
+        (true, _) if payload.get("ok").and_then(Value::as_bool) == Some(false) => {
+            if !payload
+                .get("error_code")
+                .and_then(Value::as_str)
+                .is_some_and(|code| {
+                    !code.is_empty()
+                        && code.len() <= 64
+                        && code
+                            .bytes()
+                            .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
+                })
+            {
+                return Err(ControllerProtocolError::new("invalid_field", "error_code"));
+            }
+            (&[], &[])
+        }
+        (true, "permission_list") => (&["permissions"], &[]),
+        (true, "permission_decide") => (&["state"], &[]),
+        (true, "attachment_begin") => (&["transfer_id", "chunk_bytes", "total_bytes"], &[]),
+        (true, "attachment_chunk") => (&["state", "received_bytes"], &["sha256"]),
+        (true, "attachment_abort") => (&["aborted"], &[]),
+        (true, "artifact_index") => (&["artifacts"], &[]),
+        (true, "artifact_preview") => (&["artifact_id", "preview_kind", "truncated"], &["text"]),
+        (true, "artifact_download_begin") => (&["transfer_id", "chunk_bytes", "total_bytes"], &[]),
+        (true, "artifact_download_chunk") => (
+            &[
+                "chunk_index",
+                "chunk_b64",
+                "chunk_bytes",
+                "received_bytes",
+                "next_chunk",
+                "completed",
+            ],
+            &[],
+        ),
+        (true, "artifact_download_abort") => (&["aborted"], &[]),
+        _ => return Err(ControllerProtocolError::new("invalid_field", "operation")),
+    };
+    if result
+        && payload.get("ok").and_then(Value::as_bool) == Some(true)
+        && payload.contains_key("error_code")
+    {
+        return Err(ControllerProtocolError::new("invalid_field", "error_code"));
+    }
+    let body = exact_nested(
+        payload.get("body").expect("action body required"),
+        required,
+        optional,
+        "body",
+    )?;
+    for field in required.iter().chain(optional.iter()) {
+        if let Some(value) = body.get(*field) {
+            match *field {
+                "aborted" | "completed" | "truncated" => {
+                    if !value.is_boolean() {
+                        return Err(ControllerProtocolError::new(
+                            "invalid_field",
+                            format!("body.{field}"),
+                        ));
+                    }
+                }
+                "permissions" => validate_remote_action_permissions(value)?,
+                "artifacts" => validate_remote_action_artifacts(value)?,
+                "preview_kind" => validate_enum(
+                    value,
+                    "body.preview_kind",
+                    &["text", "download_only", "unsupported"],
+                )?,
+                "text" => {
+                    bounded_text(value, "body.text", 16 * 1024)?;
+                }
+                "state" => {
+                    bounded_text(value, "body.state", 64)?;
+                }
+                _ => validate_named_field(body, field, value)?,
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_remote_action_permissions(value: &Value) -> Result<()> {
+    let permissions = value
+        .as_array()
+        .filter(|items| items.len() <= 8)
+        .ok_or_else(|| ControllerProtocolError::new("invalid_field", "body.permissions"))?;
+    for permission in permissions {
+        let fields = [
+            "permission_request_id",
+            "task_id",
+            "operation_type",
+            "risk_level",
+            "target_scope",
+            "preview",
+            "expires_at_ms",
+            "state",
+            "dispatch_state",
+        ];
+        let object = exact_nested(permission, &fields, &["decision"], "body.permissions[]")?;
+        for field in fields.iter().chain(["decision"].iter()) {
+            if let Some(value) = object.get(*field) {
+                match *field {
+                    "state" | "dispatch_state" => {
+                        bounded_text(value, field, 64)?;
+                    }
+                    "decision" if value.is_null() => {}
+                    _ => validate_named_field(object, field, value)?,
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_remote_action_artifacts(value: &Value) -> Result<()> {
+    let artifacts = value
+        .as_array()
+        .filter(|items| items.len() <= MAX_ARTIFACTS)
+        .ok_or_else(|| ControllerProtocolError::new("invalid_field", "body.artifacts"))?;
+    let mut ids = std::collections::HashSet::new();
+    for item in artifacts {
+        let fields = [
+            "artifact_id",
+            "task_id",
+            "display_name",
+            "mime_type",
+            "total_bytes",
+            "sha256",
+            "preview_kind",
+        ];
+        let artifact = exact_nested(item, &fields, &[], "body.artifacts[]")?;
+        for field in fields {
+            let entry = artifact.get(field).expect("required descriptor field");
+            match field {
+                "artifact_id" | "task_id" => validate_identifier(entry, "body.artifacts[].id")?,
+                "display_name" => {
+                    bounded_text(entry, "body.artifacts[].display_name", 255)?;
+                }
+                "preview_kind" => validate_enum(
+                    entry,
+                    "body.artifacts[].preview_kind",
+                    &["text", "download_only", "unsupported"],
+                )?,
+                _ => validate_named_field(artifact, field, entry)?,
+            }
+        }
+        if !ids.insert(object_string(artifact, "artifact_id", "body.artifacts[]")?) {
+            return Err(ControllerProtocolError::new(
+                "invalid_field",
+                "body.artifacts",
+            ));
+        }
     }
     Ok(())
 }
@@ -5051,6 +5141,61 @@ mod tests {
                 .code,
             "message_too_large"
         );
+    }
+
+    #[test]
+    fn remote_actions_require_operation_capability_in_both_directions() {
+        let lease = context();
+        for (operation, request_body, response_body, fine) in [
+            (
+                "permission_list",
+                json!({"task_id":"task-1"}),
+                json!({"permissions":[]}),
+                "permission_v1",
+            ),
+            (
+                "attachment_abort",
+                json!({"task_id":"task-1","transfer_id":"ctr-up-1"}),
+                json!({"aborted":true}),
+                "attachment_v1",
+            ),
+            (
+                "artifact_index",
+                json!({}),
+                json!({"artifacts":[]}),
+                "artifact_v1",
+            ),
+        ] {
+            for (kind, role, body, ok) in [
+                ("remote_action_request", A, request_body, None),
+                ("remote_action_result", B, response_body, Some(true)),
+            ] {
+                let mut payload = json!({"v":1,"type":kind,
+                    "connection_id":lease.connection_id,"controller_lease_id":lease.controller_lease_id,
+                    "lease_epoch":lease.lease_epoch,"relay_epoch":lease.relay_epoch,
+                    "remote_control_generation":lease.remote_control_generation,
+                    "request_id":"request-action-1","session_id":"session-ref-1",
+                    "operation":operation,"body":body});
+                if let Some(ok) = ok {
+                    payload["ok"] = json!(ok);
+                }
+                let raw = payload.to_string();
+                assert_eq!(
+                    validate_controller_runtime_payload_json(
+                        &raw,
+                        role,
+                        Some(&runtime(&["task_v1"]))
+                    )
+                    .unwrap_err()
+                    .code,
+                    "unsupported_capability"
+                );
+                let mut capabilities = vec!["task_v1", fine];
+                capabilities.sort_unstable();
+                validate_controller_runtime_payload_json(&raw, role, Some(&runtime(&capabilities)))
+                    .unwrap();
+            }
+        }
     }
 
     fn hex(bytes: &[u8]) -> String {

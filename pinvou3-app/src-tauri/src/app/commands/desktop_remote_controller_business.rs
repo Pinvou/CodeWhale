@@ -5,13 +5,16 @@
 //! `desktop_remote_task` / `desktop_remote_capabilities` 的同一套逻辑，避免
 //! 「命令入口」与「wire 入口」两份实现漂移。
 
-use serde_json::Value;
+use crate::features::codex_acp::{AcpPool, RemotePermissionOwner};
+use serde_json::{Value, json};
 
 use crate::features::remote_control::controller::capabilities::CapabilitySnapshotManager;
 use crate::features::remote_control::controller::controlled::{
     ControlledCleanupScope, ControlledCleanupSink, ControlledDeviceManager,
 };
-use crate::features::remote_control::controller::controlling_session::task_input_digest;
+use crate::features::remote_control::controller::permission::{
+    DecisionAuthority, DecisionOutcome, DispatchCommit, PermissionAuthority, PermissionDecision,
+};
 use crate::features::remote_control::controller::ports::{
     ControlledExecutionPort, RemotePortError, RemotePortFuture,
 };
@@ -24,15 +27,24 @@ use crate::features::remote_control::controller::relay_runtime::{
     ControlledBusinessPort, controlled_monotonic_millis,
 };
 use crate::features::remote_control::controller::task::{
+    RemoteTaskLedger, RemoteTaskState, TaskLeaseBinding,
+};
+use crate::features::remote_control::controller::task::{
     RemoteTaskRequest, TASK_MODE_CHAT, TASK_MODE_CODE, TASK_MODEL_SOURCE_CONTROLLED,
 };
+use crate::features::remote_control::controller::transfer::core::{
+    TransferContext, TransferDirection, TransferMetadata,
+};
+use crate::features::remote_control::controller::transfer::upload::UploadProgress;
 use crate::features::sessions::application::ports::{UseCaseError, UseCaseFuture};
 use crate::features::sessions::application::submit_controlled::{
     ControlledInput, ControlledSubmission, ControlledSubmissionPort, ControlledSubmissionResult,
     LocalControlledInput, PreparedControlledTask, RemoteControlledInput, SubmitControlledUseCase,
 };
+use crate::features::sessions::remote_proxy::outbox::remote_task_input_digest;
 use crate::features::sessions::remote_proxy::schema::valid_remote_identifier;
 use base64::Engine as _;
+use std::collections::HashSet;
 use std::sync::Arc;
 use tauri::{AppHandle, Manager as _};
 
@@ -153,10 +165,14 @@ fn submit_error(code: &str) -> UseCaseError {
         "task_result_digest_invalid" => UseCaseError::new("task_result_digest_invalid", false),
         "task_input_digest_invalid" => UseCaseError::new("task_input_digest_invalid", false),
         "task_input_invalid" => UseCaseError::new("task_input_invalid", false),
+        "task_skill_invalid" => UseCaseError::new("task_skill_invalid", false),
         "task_mode_unsupported" => UseCaseError::new("task_mode_unsupported", false),
         "capability_snapshot_missing" => UseCaseError::new("capability_snapshot_missing", true),
         "capability_revision_exhausted" => {
             UseCaseError::new("capability_revision_exhausted", false)
+        }
+        "capability_admission_capacity" => {
+            UseCaseError::new("capability_admission_capacity", true)
         }
         "capability_expiry_overflow" => UseCaseError::new("capability_expiry_overflow", false),
         "capability_workspace_capacity" => UseCaseError::new("capability_workspace_capacity", true),
@@ -327,6 +343,28 @@ impl DesktopControlledSubmitBackend {
         }
         Ok(validated)
     }
+
+    fn validate_task_capability(
+        &self,
+        request: &RemoteTaskRequest,
+        lease: &LeaseContext,
+        now_b: u64,
+    ) -> Result<(), UseCaseError> {
+        let skill_ids = request
+            .skill_ids()
+            .map_err(|error| submit_error(error.code))?;
+        self.app
+            .state::<CapabilitySnapshotManager>()
+            .validate_task_selection(
+                &request.capability_revision,
+                lease,
+                &request.mode,
+                &skill_ids,
+                request.workspace_id.as_deref(),
+                now_b,
+            )
+            .map_err(|error| submit_error(error.code))
+    }
 }
 
 impl ControlledSubmissionPort for DesktopControlledSubmitBackend {
@@ -336,10 +374,36 @@ impl ControlledSubmissionPort for DesktopControlledSubmitBackend {
         {
             return Err(UseCaseError::new("task_session_not_found", false));
         }
-        if input.code_mode {
-            return Err(UseCaseError::new("task_mode_unsupported", false));
+        if input.code_mode != input.workspace_id.is_some() {
+            return Err(UseCaseError::new("task_workspace_required", false));
         }
         let text = validated_local_text(&input.text)?;
+        if input.attachments.len() > 8
+            || input.skill_ids.len() > 32
+            || input
+                .attachments
+                .iter()
+                .any(|attachment| !valid_remote_identifier(&attachment.handle_id))
+        {
+            return Err(UseCaseError::new("task_request_invalid", false));
+        }
+        let mut unique_attachments = HashSet::new();
+        let mut unique_skills = HashSet::new();
+        if input
+            .attachments
+            .iter()
+            .any(|attachment| !unique_attachments.insert(attachment.handle_id.as_str()))
+            || input.skill_ids.iter().any(|skill_id| {
+                !valid_remote_identifier(skill_id) || !unique_skills.insert(skill_id.as_str())
+            })
+        {
+            return Err(UseCaseError::new("task_request_invalid", false));
+        }
+        let attachment_ids = input
+            .attachments
+            .iter()
+            .map(|attachment| attachment.handle_id.clone())
+            .collect::<Vec<_>>();
         let (lease, caps) = self.live_context()?;
         if lease.remote_control_generation != input.generation {
             return Err(UseCaseError::new("task_session_generation_stale", true));
@@ -360,26 +424,36 @@ impl ControlledSubmissionPort for DesktopControlledSubmitBackend {
             "session_id": input.expected_session_id,
             "capability_revision": "1",
             "model_source": TASK_MODEL_SOURCE_CONTROLLED,
-            "mode": TASK_MODE_CHAT,
-            "input_digest": task_input_digest(text),
+            "mode": if input.code_mode { TASK_MODE_CODE } else { TASK_MODE_CHAT },
+            "input_digest": remote_task_input_digest(text, &attachment_ids, &input.skill_ids),
             "input": {
                 "text": text,
-                "attachment_ids": Vec::<String>::new(),
-                "skill_ids": Vec::<String>::new(),
+                "attachment_ids": attachment_ids,
+                "skill_ids": input.skill_ids,
             },
         });
+        let mut preflight = preflight;
+        if let Some(workspace_id) = input.workspace_id.as_deref() {
+            preflight["input"]["workspace_id"] = serde_json::json!(workspace_id);
+        }
         self.validate_payload(&preflight, &lease, &caps)?;
         let runtime = self
             .app
             .state::<Arc<super::desktop_remote_task::DesktopRemoteTaskRuntime>>();
         let service = runtime.service();
-        let trusted_ref = super::desktop_remote_task::trusted_chat_remote_ref(
-            &service,
-            &input.expected_session_id,
-            &input.generation,
-        )
-        .map_err(|code| submit_error(&code))?;
-        if trusted_ref != input.remote_ref {
+        let (trusted_ref, lane, workspace_id) =
+            super::desktop_remote_task::trusted_local_remote_binding(
+                &service,
+                &runtime.authorizations(),
+                &input.expected_session_id,
+                &input.generation,
+            )
+            .map_err(|code| submit_error(&code))?;
+        if trusted_ref != input.remote_ref
+            || (lane == crate::features::remote_control::controller::task::RemoteSessionLane::Code)
+                != input.code_mode
+            || workspace_id != input.workspace_id
+        {
             return Err(UseCaseError::new("task_session_not_found", false));
         }
         Ok(())
@@ -395,6 +469,10 @@ impl ControlledSubmissionPort for DesktopControlledSubmitBackend {
         if task.session_id != input.remote_ref {
             return Err(UseCaseError::new("task_request_invalid", false));
         }
+        // Reject an expired or policy-replaced snapshot before allocating or
+        // claiming a B Session. Final admission repeats this under a snapshot
+        // consistency token; this preflight is only the cheap early boundary.
+        self.validate_task_capability(&task, &lease, controlled_monotonic_millis())?;
         let service = self
             .app
             .state::<Arc<super::desktop_remote_task::DesktopRemoteTaskRuntime>>()
@@ -427,13 +505,22 @@ impl ControlledSubmissionPort for DesktopControlledSubmitBackend {
             .app
             .state::<Arc<super::desktop_remote_task::DesktopRemoteTaskRuntime>>()
             .service();
-        let trusted_ref = super::desktop_remote_task::trusted_chat_remote_ref(
-            &service,
-            &input.expected_session_id,
-            &input.generation,
-        )
-        .map_err(|code| submit_error(&code))?;
-        if trusted_ref == input.remote_ref {
+        let (trusted_ref, lane, workspace_id) =
+            super::desktop_remote_task::trusted_local_remote_binding(
+                &service,
+                &self
+                    .app
+                    .state::<Arc<super::desktop_remote_task::DesktopRemoteTaskRuntime>>()
+                    .authorizations(),
+                &input.expected_session_id,
+                &input.generation,
+            )
+            .map_err(|code| submit_error(&code))?;
+        if trusted_ref == input.remote_ref
+            && (lane == crate::features::remote_control::controller::task::RemoteSessionLane::Code)
+                == input.code_mode
+            && workspace_id == input.workspace_id
+        {
             Ok(input.expected_session_id.clone())
         } else {
             Err(UseCaseError::new("task_session_not_found", false))
@@ -453,6 +540,7 @@ impl ControlledSubmissionPort for DesktopControlledSubmitBackend {
         validated["session_id"] = Value::String(b_session_id.to_owned());
         let request = RemoteTaskRequest::from_payload(&validated)
             .map_err(|error| submit_error(error.code))?;
+        self.validate_task_capability(&request, &lease, controlled_monotonic_millis())?;
         Ok(PreparedControlledTask {
             remote_ref: input.remote_ref,
             b_session_id: b_session_id.to_owned(),
@@ -460,6 +548,7 @@ impl ControlledSubmissionPort for DesktopControlledSubmitBackend {
             client_request_id: request.client_request_id,
             input_digest: request.input_digest,
             payload: validated,
+            local_attachments: None,
         })
     }
 
@@ -484,6 +573,19 @@ impl ControlledSubmissionPort for DesktopControlledSubmitBackend {
             .ok_or_else(|| UseCaseError::new("capability_snapshot_missing", true))?;
         let unique = uuid::Uuid::new_v4().simple().to_string();
         let text = input.text.trim();
+        let attachment_ids = input
+            .attachments
+            .iter()
+            .map(|attachment| attachment.handle_id.clone())
+            .collect::<Vec<_>>();
+        let mode = if input.code_mode {
+            TASK_MODE_CODE
+        } else {
+            TASK_MODE_CHAT
+        };
+        capabilities
+            .validate_skills_for_mode(&lease, mode, &input.skill_ids, now_b)
+            .map_err(|error| submit_error(error.code))?;
         let payload = serde_json::json!({
             "v": 1,
             "type": "task_submit",
@@ -498,14 +600,21 @@ impl ControlledSubmissionPort for DesktopControlledSubmitBackend {
             "session_id": b_session_id,
             "capability_revision": revision,
             "model_source": TASK_MODEL_SOURCE_CONTROLLED,
-            "mode": TASK_MODE_CHAT,
-            "input_digest": task_input_digest(text),
+            "mode": mode,
+            "input_digest": remote_task_input_digest(text, &attachment_ids, &input.skill_ids),
             "input": {
                 "text": text,
-                "attachment_ids": Vec::<String>::new(),
-                "skill_ids": Vec::<String>::new(),
+                "attachment_ids": attachment_ids,
+                "skill_ids": input.skill_ids,
             },
         });
+        let mut payload = payload;
+        if let Some(workspace_id) = input.workspace_id.as_deref() {
+            capabilities
+                .workspace_for_task(revision, &lease, workspace_id, now_b)
+                .map_err(|error| submit_error(error.code))?;
+            payload["input"]["workspace_id"] = serde_json::json!(workspace_id);
+        }
         let validated = self.validate_payload(&payload, &lease, &caps)?;
         let request = RemoteTaskRequest::from_payload(&validated)
             .map_err(|error| submit_error(error.code))?;
@@ -516,16 +625,18 @@ impl ControlledSubmissionPort for DesktopControlledSubmitBackend {
             client_request_id: request.client_request_id,
             input_digest: request.input_digest,
             payload: validated,
+            local_attachments: Some(input.attachments),
         })
     }
 
     fn admit_and_dispatch(&self, prepared: PreparedControlledTask) -> UseCaseFuture<'_, Value> {
         Box::pin(async move {
-            super::desktop_remote_task::submit_prepared_bound_task(
+            super::desktop_remote_task::submit_prepared_local_bound_task(
                 &self.app,
                 &prepared.b_session_id,
                 &prepared.remote_ref,
                 &prepared.payload,
+                prepared.local_attachments.unwrap_or_default(),
             )
             .map_err(|code| submit_error(&code))
         })
@@ -585,6 +696,122 @@ impl ControlledExecutionPort for DesktopControlledExecutionAdapter {
 }
 
 impl DesktopControlledBusiness {
+    async fn handle_remote_permission_decision(
+        &self,
+        lease: &LeaseContext,
+        session_ref: &str,
+        body: &Value,
+    ) -> Result<Value, String> {
+        let controlled = self.app.state::<ControlledDeviceManager>();
+        let (owner, request_id, decision) = controlled
+            .with_current_business_lease(lease, || {
+                let field = |key: &str| -> Result<&str, String> {
+                    body.get(key)
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| "remote_action_invalid".to_owned())
+                };
+                let task_id = field("task_id")?;
+                let request_id = field("permission_request_id")?;
+                let decision = PermissionDecision::parse(field("decision")?)
+                    .ok_or_else(|| "permission_decision_invalid".to_owned())?;
+                let tasks = self
+                    .app
+                    .state::<Arc<super::desktop_remote_task::DesktopRemoteTaskRuntime>>();
+                let session_id = tasks
+                    .service()
+                    .session_for(session_ref, &lease.remote_control_generation)
+                    .ok_or_else(|| "task_session_binding_mismatch".to_owned())?;
+                let record = self
+                    .app
+                    .state::<Arc<RemoteTaskLedger>>()
+                    .record(task_id)
+                    .map_err(|error| error.code.to_owned())?;
+                if record.session_id != session_id
+                    || record.lease != TaskLeaseBinding::from_context(lease)
+                    || record.is_terminal()
+                {
+                    return Err("task_session_binding_mismatch".to_owned());
+                }
+                let authority = self.app.state::<Arc<PermissionAuthority>>();
+                let outcome = authority
+                    .decide(
+                        DecisionAuthority::ControllerA,
+                        lease,
+                        task_id,
+                        request_id,
+                        decision,
+                        controlled_monotonic_millis(),
+                    )
+                    .map_err(|error| error.code.to_owned())?;
+                let effective_allow = matches!(
+                    &outcome,
+                    DecisionOutcome::Decided {
+                        decision: PermissionDecision::Allow,
+                        ..
+                    } | DecisionOutcome::Replayed {
+                        decision: PermissionDecision::Allow,
+                        ..
+                    }
+                );
+                if effective_allow {
+                    match authority
+                        .commit_dispatch(request_id, controlled_monotonic_millis())
+                        .map_err(|error| error.code.to_owned())?
+                    {
+                        DispatchCommit::Committed => {}
+                        DispatchCommit::Rejected { code } => return Err(code.to_owned()),
+                    }
+                }
+                Ok((
+                    RemotePermissionOwner {
+                        session_id,
+                        task_id: task_id.to_owned(),
+                        lease: lease.clone(),
+                    },
+                    request_id.to_owned(),
+                    if matches!(outcome, DecisionOutcome::Expired) {
+                        PermissionDecision::Deny
+                    } else {
+                        decision
+                    },
+                ))
+            })
+            .map_err(|error| error.code.to_owned())??;
+
+        super::desktop_remote_permission::respond_remote_permission_via_acp(
+            &self.app.state::<AcpPool>(),
+            &owner,
+            &request_id,
+            decision,
+        )
+        .await?;
+        controlled
+            .with_current_business_lease(lease, || {
+                let record = self
+                    .app
+                    .state::<Arc<RemoteTaskLedger>>()
+                    .record(&owner.task_id)
+                    .map_err(|error| error.code.to_owned())?;
+                if record.session_id != owner.session_id
+                    || record.lease != TaskLeaseBinding::from_context(lease)
+                    || !matches!(
+                        record.state,
+                        RemoteTaskState::Running | RemoteTaskState::WaitingPermission
+                    )
+                {
+                    return Err("task_session_binding_mismatch".to_owned());
+                }
+                Ok(())
+            })
+            .map_err(|error| error.code.to_owned())??;
+        let view = self
+            .app
+            .state::<Arc<PermissionAuthority>>()
+            .view(&request_id)
+            .map_err(|error| error.code.to_owned())?;
+        Ok(json!({"state": view.state}))
+    }
+
     /// Resolve the A reference only through the current authenticated B
     /// generation's authoritative map. A caller cannot select an arbitrary
     /// local journal by supplying a different reference.
@@ -609,6 +836,149 @@ impl DesktopControlledBusiness {
             .session_for(session_ref, &lease.remote_control_generation)
             .ok_or_else(|| "journal_session_mapping_missing".to_owned())
     }
+
+    fn handle_remote_action(
+        &self,
+        lease: &LeaseContext,
+        session_ref: &str,
+        operation: &str,
+        body: &Value,
+    ) -> Result<Value, String> {
+        let controlled = self.app.state::<ControlledDeviceManager>();
+        controlled
+            .with_current_business_lease(lease, || {
+                let tasks = self
+                    .app
+                    .state::<Arc<super::desktop_remote_task::DesktopRemoteTaskRuntime>>();
+                let session_id = tasks
+                    .service()
+                    .session_for(session_ref, &lease.remote_control_generation)
+                    .ok_or_else(|| "task_session_binding_mismatch".to_owned())?;
+                let field = |key: &str| -> Result<&str, String> {
+                    body.get(key)
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| "remote_action_invalid".to_owned())
+                };
+                let number = |key: &str| -> Result<u64, String> {
+                    field(key)?.parse::<u64>().map_err(|_| "remote_action_invalid".to_owned())
+                };
+                let task_id = body.get("task_id").and_then(Value::as_str);
+                let require_task = |allow_terminal: bool| -> Result<(), String> {
+                    let record = self
+                        .app
+                        .state::<Arc<RemoteTaskLedger>>()
+                        .record(task_id.ok_or_else(|| "remote_action_invalid".to_owned())?)
+                        .map_err(|error| error.code.to_owned())?;
+                    if record.session_id != session_id
+                        || record.lease != TaskLeaseBinding::from_context(lease)
+                        || (!allow_terminal && record.is_terminal())
+                    {
+                        return Err("task_session_binding_mismatch".to_owned());
+                    }
+                    Ok(())
+                };
+                let now = controlled_monotonic_millis();
+                match operation {
+                    "permission_list" => {
+                        require_task(false)?;
+                        let views = self.app.state::<Arc<PermissionAuthority>>()
+                            .pending_for_task(field("task_id")?);
+                        if views.len() > 8 { return Err("permission_capacity".to_owned()); }
+                        let permissions: Vec<Value> = views.into_iter().map(|view| json!({
+                            "permission_request_id":view.permission_request_id,"task_id":view.task_id,
+                            "operation_type":view.operation_type,"risk_level":view.risk_level,
+                            "target_scope":view.target_scope,"preview":view.preview,
+                            "expires_at_ms":view.expires_at_ms.to_string(),"state":view.state,
+                            "decision":view.decision,"dispatch_state":view.dispatch_state,
+                        })).collect();
+                        Ok(json!({"permissions": permissions}))
+                    }
+                    "permission_decide" => {
+                        Err("remote_action_async_required".to_owned())
+                    }
+                    "attachment_begin" => {
+                        let runtime = self.app.state::<Arc<super::desktop_remote_attachment::DesktopRemoteAttachmentRuntime>>();
+                        let context = TransferContext::new(lease, &session_id, field("task_id")?, TransferDirection::Upload)
+                            .map_err(|error| error.code.to_owned())?;
+                        let metadata = TransferMetadata {
+                            file_name: field("file_name")?.to_owned(), mime_type: field("mime_type")?.to_owned(),
+                            total_bytes: number("total_bytes")?,
+                            sha256: field("sha256")?.to_owned(),
+                        };
+                        let begun = runtime.uploads().begin(context, metadata, now)?;
+                        Ok(json!({"transfer_id": begun.handle_id, "chunk_bytes": begun.chunk_bytes.to_string(),
+                            "total_bytes": begun.total_bytes.to_string()}))
+                    }
+                    "attachment_chunk" | "attachment_abort" => {
+                        let runtime = self.app.state::<Arc<super::desktop_remote_attachment::DesktopRemoteAttachmentRuntime>>();
+                        runtime.uploads().require_upload_binding(
+                            field("transfer_id")?, lease, &session_id, field("task_id")?,
+                        )?;
+                        if operation == "attachment_abort" {
+                            return Ok(json!({"aborted": runtime.uploads().abort(field("transfer_id")?)}));
+                        }
+                        let bytes = base64::engine::general_purpose::STANDARD
+                            .decode(field("chunk_b64")?)
+                            .map_err(|_| "transfer_chunk_invalid".to_owned())?;
+                        if bytes.len() as u64 != number("chunk_bytes")? {
+                            return Err("transfer_chunk_invalid".to_owned());
+                        }
+                        let progress = runtime.uploads().accept_chunk(
+                            field("transfer_id")?, number("chunk_index")?,
+                            &bytes, now,
+                        )?;
+                        Ok(match progress {
+                            UploadProgress::Accepted { received_bytes, .. } => json!({"state":"accepted","received_bytes":received_bytes.to_string()}),
+                            UploadProgress::Duplicate { received_bytes } => json!({"state":"duplicate","received_bytes":received_bytes.to_string()}),
+                            UploadProgress::Completed { sha256, bytes } => json!({"state":"completed","received_bytes":bytes.to_string(),"sha256":sha256}),
+                        })
+                    }
+                    "artifact_index" | "artifact_preview" | "artifact_download_begin"
+                    | "artifact_download_chunk" | "artifact_download_abort" => {
+                        let runtime = self.app.state::<Arc<super::desktop_remote_artifact::DesktopRemoteArtifactRuntime>>();
+                        match operation {
+                            "artifact_index" => {
+                                let artifacts: Vec<Value> = runtime.artifact_index(lease, &session_id)?.into_iter()
+                                    .map(|item| json!({"artifact_id":item.artifact_id,
+                                        "task_id":item.task_id,
+                                        "display_name":item.display_name,"mime_type":item.mime_type,
+                                        "total_bytes":item.total_bytes.to_string(),"sha256":item.sha256,
+                                        "preview_kind":item.preview_kind})).collect();
+                                Ok(json!({"artifacts":artifacts}))
+                            }
+                            "artifact_preview" => {
+                                let preview = runtime.artifact_preview(lease, &session_id, field("artifact_id")?)?;
+                                let mut body = json!({"artifact_id":preview.artifact_id,
+                                    "preview_kind":preview.preview_kind,"truncated":preview.truncated});
+                                if let Some(text) = preview.text { body["text"] = json!(text); }
+                                Ok(body)
+                            }
+                            "artifact_download_begin" => {
+                                let begun = runtime.artifact_download_begin(lease, &session_id,
+                                    field("task_id")?, field("artifact_id")?, now)?;
+                                Ok(json!({"transfer_id":begun.handle_id,"chunk_bytes":begun.chunk_bytes.to_string(),
+                                    "total_bytes":begun.total_bytes.to_string()}))
+                            }
+                            "artifact_download_chunk" => {
+                                let chunk = runtime.artifact_download_chunk(lease, &session_id, field("task_id")?,
+                                    field("artifact_id")?, field("transfer_id")?, number("chunk_index")?, now)?
+                                    .ok_or_else(|| "artifact_unavailable".to_owned())?;
+                                Ok(json!({"chunk_index":chunk.chunk_index.to_string(),
+                                    "chunk_b64":base64::engine::general_purpose::STANDARD.encode(&chunk.bytes),
+                                    "chunk_bytes":chunk.bytes.len().to_string(), "received_bytes":chunk.received_bytes.to_string(),
+                                    "next_chunk":chunk.next_chunk.to_string(),"completed":chunk.completed.is_some()}))
+                            }
+                            _ => {
+                                Ok(json!({"aborted":runtime.artifact_download_abort(lease, &session_id,
+                                    field("task_id")?, field("artifact_id")?, field("transfer_id")?)?}))
+                            }
+                        }
+                    }
+                    _ => Err("remote_action_invalid".to_owned()),
+                }
+            })
+            .map_err(|error| error.code.to_owned())?
+    }
 }
 
 /// B sends its actual Session identity only inside the authenticated encrypted
@@ -631,6 +1001,20 @@ fn bind_capability_session(
 
 #[async_trait::async_trait]
 impl ControlledBusinessPort for DesktopControlledBusiness {
+    async fn remote_action(
+        &self,
+        lease: &LeaseContext,
+        session_ref: &str,
+        operation: &str,
+        body: &Value,
+    ) -> Result<Value, String> {
+        if operation == "permission_decide" {
+            self.handle_remote_permission_decision(lease, session_ref, body)
+                .await
+        } else {
+            self.handle_remote_action(lease, session_ref, operation, body)
+        }
+    }
     async fn capability_snapshot(
         &self,
         lease: &LeaseContext,
@@ -638,11 +1022,10 @@ impl ControlledBusinessPort for DesktopControlledBusiness {
         session_id: &str,
         known_revision: u64,
     ) -> Result<Value, String> {
-        let authoritative_id = super::desktop_remote_task::ensure_controlled_session(
+        let authoritative_id = super::desktop_remote_task::ensure_unclaimed_controlled_session(
             &self.app,
             session_id,
             "",
-            false,
             &lease.remote_control_generation,
         )?;
         let capabilities = self.app.state::<CapabilitySnapshotManager>();
@@ -1088,6 +1471,7 @@ mod submit_boundary_tests {
                 client_request_id: input.client_request_id,
                 input_digest: input.input_digest,
                 payload,
+                local_attachments: None,
             })
         }
 
