@@ -2736,16 +2736,8 @@ mod tests {
                     resume_token: [1; 32],
                     transport_key_fingerprint: [2; 32],
                     controller_device_name: "Controller PC".into(),
-<<<<<<< HEAD
                     connected_at_b: now_b,
-                    negotiated_capabilities: vec![
-                        "encrypted_frames_v1".into(),
-                        "resume_v1".into(),
-                    ],
-=======
-                    connected_at_b: 3_000,
                     negotiated_capabilities: vec!["encrypted_frames_v1".into(), "resume_v1".into()],
->>>>>>> review/remote-control-a19
                 },
             )
             .unwrap();
