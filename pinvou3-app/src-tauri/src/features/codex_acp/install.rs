@@ -1270,13 +1270,13 @@ mod tests {
 
     #[test]
     pub(super) fn installing_state_is_isolated_per_agent() {
-        let installing_agents = Arc::new(parking_lot::RwLock::new(HashSet::new()));
+        let installing_agents = Arc::new(parking_lot::Mutex::new(InstallOperationState::default()));
         let claude = AgentInstallGuard::try_start(&installing_agents, AgentBackend::ClaudeAcp)
             .expect("Claude install should start");
 
-        assert!(installing_agents.read().contains(&AgentBackend::ClaudeAcp));
-        assert!(!installing_agents.read().contains(&AgentBackend::CodexAcp));
-        assert!(!installing_agents.read().contains(&AgentBackend::KimiAcp));
+        assert!(installing_agents.lock().is_active(AgentBackend::ClaudeAcp));
+        assert!(!installing_agents.lock().is_active(AgentBackend::CodexAcp));
+        assert!(!installing_agents.lock().is_active(AgentBackend::KimiAcp));
         assert!(
             AgentInstallGuard::try_start(&installing_agents, AgentBackend::ClaudeAcp).is_none(),
             "the same Agent must remain mutually exclusive"
@@ -1284,13 +1284,13 @@ mod tests {
 
         let codex = AgentInstallGuard::try_start(&installing_agents, AgentBackend::CodexAcp)
             .expect("a different Agent should not share Claude's install lock");
-        assert!(installing_agents.read().contains(&AgentBackend::CodexAcp));
+        assert!(installing_agents.lock().is_active(AgentBackend::CodexAcp));
 
         drop(claude);
-        assert!(!installing_agents.read().contains(&AgentBackend::ClaudeAcp));
-        assert!(installing_agents.read().contains(&AgentBackend::CodexAcp));
+        assert!(!installing_agents.lock().is_active(AgentBackend::ClaudeAcp));
+        assert!(installing_agents.lock().is_active(AgentBackend::CodexAcp));
         drop(codex);
-        assert!(installing_agents.read().is_empty());
+        assert!(installing_agents.lock().active.is_empty());
     }
 
     #[test]
