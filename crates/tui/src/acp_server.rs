@@ -2832,6 +2832,29 @@ mod tests {
         assert_eq!(err.code, -32602);
     }
 
+    #[test]
+    fn session_new_rejects_relative_cwd() {
+        // Round-26 m26-6 pin for the round-25 guard: a relative cwd cannot
+        // head a root set (the empty-string guard's own rationale always
+        // covered this spelling — it built a registry no boundary consumer
+        // could resolve, failing per-call instead of at intake).
+        let workspace = tempfile::tempdir().unwrap();
+        let mut server = AcpServer::new(
+            Config::default(),
+            "deepseek-v4-flash".into(),
+            workspace.path().into(),
+        );
+        let err = server
+            .new_session(json!({"cwd": "some/relative/dir"}))
+            .expect_err("a relative cwd must be rejected");
+        assert_eq!(err.code, -32602);
+        assert!(
+            err.message.contains("absolute"),
+            "the rejection must say why: {}",
+            err.message
+        );
+    }
+
     // Same big-stack wrapper as
     // session_list_and_load_reach_the_durable_codewhale_sessions.
     #[test]

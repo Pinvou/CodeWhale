@@ -664,3 +664,74 @@ fn test_approval_requirement_default() {
     let level = ApprovalRequirement::default();
     assert_eq!(level, ApprovalRequirement::Auto);
 }
+
+#[test]
+fn rebased_roots_drop_the_parent_filled_boundary_memo() {
+    // Round-26 B26-1: a cloned context shares the parent's boundary memo
+    // Arc. The worktree spawn/resume sites used to clear/replace the root
+    // pair IN PLACE, so a parent that had already called resolve_path
+    // (filling the memo with the PARENT's boundary) left the child judging
+    // file-tool containment against the parent workspace plus its attached
+    // roots — the child could read the whole parent checkout through the
+    // exact isolation the worktree contract promises. `rebase_roots` swaps
+    // the pair AND the memo; this pin fills the parent memo first, exactly
+    // the shape the production probes showed was falsely covered before.
+    let base = tempfile::tempdir().expect("base tempdir");
+    let parent_ws = base.path().join("parent-ws");
+    std::fs::create_dir_all(&parent_ws).expect("parent dir");
+    let attached = base.path().join("attached");
+    std::fs::create_dir_all(&attached).expect("attached dir");
+    let secret = attached.join("secret.txt");
+    std::fs::write(&secret, "x").expect("secret");
+
+    // Parent: primary + attached root; one resolve_path FILLS the memo.
+    let parent = ToolContext::new(parent_ws.clone()).with_workspace_roots(vec![attached.clone()]);
+    let ok = parent
+        .resolve_path(secret.to_string_lossy().as_ref())
+        .expect("the attached root admits the path for the parent");
+    assert!(ok.starts_with(&attached));
+
+    // Child: a clone of the parent runtime's context, rebased onto a fresh
+    // worktree (the production spawn/resume shape).
+    let worktree = base.path().join("wt");
+    std::fs::create_dir_all(&worktree).expect("worktree dir");
+    let mut child = parent.clone();
+    child.rebase_roots(worktree.clone(), Vec::new());
+
+    let inside = worktree.join("file.txt");
+    std::fs::write(&inside, "x").expect("inside file");
+    assert!(
+        child
+            .resolve_path(inside.to_string_lossy().as_ref())
+            .is_ok(),
+        "the rebased child still resolves inside its own worktree"
+    );
+    assert!(
+        matches!(
+            child.resolve_path(secret.to_string_lossy().as_ref()),
+            Err(ToolError::PathEscape { .. })
+        ),
+        "the parent-filled memo must NOT survive the rebase: the parent's attached root is outside the child boundary"
+    );
+    assert!(
+        matches!(
+            child.resolve_path(
+                parent_ws
+                    .join("src")
+                    .join("lib.rs")
+                    .to_string_lossy()
+                    .as_ref()
+            ),
+            Err(ToolError::PathEscape { .. })
+        ),
+        "the parent's own workspace is outside the worktree child's boundary"
+    );
+
+    // Control: the untouched parent still admits the attached root (the
+    // rebase did not mutate the shared-clone parent's judgment).
+    assert!(
+        parent
+            .resolve_path(secret.to_string_lossy().as_ref())
+            .is_ok()
+    );
+}
