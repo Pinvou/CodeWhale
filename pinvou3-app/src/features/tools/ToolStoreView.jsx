@@ -500,7 +500,6 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
       commands: { ensureCli: 'feishu_ensure_cli', begin: 'feishu_connect_begin', cancel: 'feishu_cancel', logout: 'feishu_logout', applySkills: 'feishu_apply_skills' },
       qrStepsExtra: { connect: 'done' },
       connectedMode: 'apply',
-      beginStage: 'register',
       disconnectedTitle: ({ storeCopy }) => storeCopy.disconnectedTool(storeCopy.toolNames.feishu),
     });
     const ensureFeishuListeners = feishuFlowApi.ensureListeners;
@@ -510,7 +509,6 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
       events: { qr: 'wecom:qr', connected: 'wecom:connected', error: 'wecom:error' },
       commands: { ensureCli: 'wecom_ensure_cli', begin: 'wecom_connect_begin', cancel: 'wecom_cancel', logout: 'wecom_logout', applySkills: 'wecom_apply_skills' },
       connectedMode: 'apply',
-      beginStage: 'authorize',
       disconnectedTitle: ({ storeCopy }) => storeCopy.disconnectedTool(storeCopy.toolNames.wecom),
     });
     const ensureWecomListeners = wecomFlowApi.ensureListeners;
@@ -521,7 +519,6 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
       commands: { ensureCli: 'dingtalk_ensure_cli', begin: 'dingtalk_connect_begin', cancel: 'dingtalk_cancel', logout: 'dingtalk_logout', applySkills: 'dingtalk_apply_skills' },
       qrPayloadExtra: p => ({ userCode: p.user_code }),
       connectedMode: 'applyAwait',
-      beginStage: 'authorize',
       disconnectedTitle: ({ storeCopy }) => storeCopy.disconnectedTool(storeCopy.toolNames.dingtalk),
     });
     const ensureDingtalkListeners = dingtalkFlowApi.ensureListeners;
@@ -534,7 +531,6 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
       openAuthUrl: true,
       connectedMode: 'readinessAwait',
       readiness: { bundleId: 'tmeet' },
-      beginStage: 'authorize',
       disconnectedTitle: ({ detailCopy }) => detailCopy.actions.disconnectedTmeet,
     });
     const ensureTmeetListeners = tmeetFlowApi.ensureListeners;
@@ -547,7 +543,6 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
     // refresh). The real listeners/stopwatch live in the module-level conn singleton, surviving view switches.
     // tmeet's done toast uses a detailCopy phrase via doneTitle; others pass evaluated storeCopy.connectedTool(...).
     const useConnectorFlowSubscription = ({ enabled, conn, ensureListeners, setFlow, detailCopy, setBusyId, loadBackendState, setAlert, doneTitle, toolId, finishToolConfiguration: finishCfg }) => {
-    const useConnectorFlowSubscription = ({ enabled, conn, ensureListeners, setFlow, detailCopy, setBusyId, loadBackendState, setAlert, doneTitle, toolId }) => {
       // The subscription effect runs once per enabled state; the toast copy goes
       // through a latest-ref so a "connected" toast raised after a mid-flow
       // language switch uses the current language, like the failure card does.
@@ -3005,6 +3000,8 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
                   )}
                   {externalAuthAvailable && selectedTool.dingtalkCli && dingtalkFlow && (
                     <FeishuFlowCard flow={dingtalkFlow} steps={storeCopy.dingtalkSteps} name={storeCopy.toolNames.dingtalk} copy={detailCopy.flow} errors={storeCopy.connectorErrors} twoStep={false} onRetry={() => retryConnector('dingtalk')} onCancel={() => resetConnectorFlow('dingtalk')} onBrowserOpenError={browserOpenFailed} />
+                  )}
+                  {externalAuthAvailable && selectedTool.tmeetCli && tmeetFlow && (
                     <FeishuFlowCard flow={tmeetFlow} steps={detailCopy.tmeetSteps} name={detailCopy.tools.tmeet.title} copy={detailCopy.flow} errors={storeCopy.connectorErrors} twoStep={false} browserAuth={!!tmeetFlow.browserAuth} onRetry={() => retryConnector('tmeet')} onCancel={() => resetConnectorFlow('tmeet')} onBrowserOpenError={browserOpenFailed} />
                   )}
                   {connectedBanners.filter(b => b.show).map((banner, i) => (
