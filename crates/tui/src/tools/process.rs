@@ -80,18 +80,19 @@ const DRAIN_CAPTURE_CAP: usize = 16 * 1024 * 1024;
 const DRAIN_CAP_TRUNCATED_NOTE: &[u8] =
     b"\n[codewhale] output capture stopped at the size cap; later output was dropped\n";
 
-/// True when `output` carries a truncation note: the drain-grace note
-/// (appended to stderr when the pipes stayed open past the grace) or the
-/// size-cap note (appended to whichever stream hit the cap). A caller that
-/// parses a single stream as its result can thereby detect a cut output
-/// instead of reporting it as a success.
+/// True when `output` carries a truncation note in its tail: the
+/// drain-grace note (appended to stderr when the pipes stayed open past
+/// the grace) or the size-cap note (appended to whichever stream hit the
+/// cap). Both writers append their note as the buffer's last bytes and
+/// stop retaining past it, so the match is tail-anchored — the same
+/// contract as the snapshot capture's `capture_hit_the_cap` — and output
+/// that merely quotes a note mid-body is not truncation evidence. A
+/// caller that parses a single stream as its result can thereby detect a
+/// cut output instead of reporting it as a success.
 pub(crate) fn drain_truncated(output: &std::process::Output) -> bool {
-    fn carries(buf: &[u8], note: &[u8]) -> bool {
-        buf.windows(note.len()).any(|window| window == note)
-    }
     for buf in [&output.stdout, &output.stderr] {
         for note in [DRAIN_TRUNCATED_NOTE, DRAIN_CAP_TRUNCATED_NOTE] {
-            if carries(buf, note) {
+            if buf.ends_with(note) {
                 return true;
             }
         }
@@ -501,6 +502,16 @@ mod tests {
         )));
         assert!(!drain_truncated(&output(b"clean", b"clean")));
         assert!(!drain_truncated(&output(b"", b"")));
+        // The writers append their note as the buffer's last bytes, so the
+        // match is tail-anchored: a stream that quotes a note mid-body and
+        // keeps writing is not truncation evidence (the same negatives the
+        // snapshot capture's `capture_hit_the_cap` pins).
+        let mut quoted = DRAIN_CAP_TRUNCATED_NOTE.to_vec();
+        quoted.extend_from_slice(b"trailing data after the quoted note\n");
+        assert!(!drain_truncated(&output(&quoted, b"")));
+        let mut quoted_grace = DRAIN_TRUNCATED_NOTE.to_vec();
+        quoted_grace.extend_from_slice(b"still writing\n");
+        assert!(!drain_truncated(&output(b"", &quoted_grace)));
     }
 
     #[cfg(unix)]

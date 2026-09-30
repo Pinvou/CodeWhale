@@ -751,6 +751,36 @@ echo hello
         }
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn capped_plugin_stdout_is_refused_instead_of_passing_as_success() {
+        let dir = TempDir::new().unwrap();
+        let script = dir.path().join("flood.sh");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\n# name: flood\nhead -c 17000000 /dev/zero\n",
+        )
+        .unwrap();
+
+        // 17 MiB of NUL bytes trips the drain capture cap and cannot parse
+        // as a tool result: this surface must refuse the output as truncated
+        // instead of reporting the cut capture as a silent success.
+        let (interpreter, args) = script_command_parts(&script, &[]);
+        let err = run_plugin_child(&interpreter, &args, "flood", serde_json::json!({}))
+            .await
+            .expect_err("a capped, unparseable stdout must not pass as a success");
+        match err {
+            ToolError::ExecutionFailed { message } => {
+                assert!(
+                    message.contains("truncated") && message.contains("size cap"),
+                    "the error must name the truncation evidence: {}",
+                    &message[..message.len().min(400)]
+                );
+            }
+            other => panic!("expected an execution failure; got {other:?}"),
+        }
+    }
+
     #[test]
     fn plugin_deadlock_child_process() {
         if std::env::var_os(DEADLOCK_CHILD_ENV).is_none() {
