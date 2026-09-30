@@ -52,6 +52,9 @@ func TestRedisStoreProductionTLS(t *testing.T) {
 	if got, err := s.GetSession(ctx, session.ID); err != nil || got.AccessToken != session.AccessToken {
 		t.Fatal("get session failed")
 	}
+	if root, err := s.ResolveSessionLineageRoot(ctx, session.ID); err != nil || root != session.ID {
+		t.Fatal("resolve session lineage root failed")
+	}
 	if wire, err := s.LockApprovalWireVersion(ctx, session, 2); err != nil || wire != 1 {
 		t.Fatal("pre-upgrade session did not lock to v1")
 	}
@@ -99,13 +102,16 @@ func TestRedisStoreProductionTLS(t *testing.T) {
 	if err := s.ReleaseRefreshLock(ctx, session.ID); err != nil {
 		t.Fatal("final unlock failed")
 	}
-	if err := s.DeleteSession(ctx, session.ID); err != nil {
-		t.Fatal("delete failed")
+	if err := s.LogoutSession(ctx, session.ID, session.ID, time.Now().Add(time.Minute)); err != nil {
+		t.Fatal("lineage logout failed")
 	}
 	if _, err := s.GetSession(ctx, session.ID); !errors.Is(err, ErrSessionNotFound) {
-		t.Fatal("deleted session retained")
+		t.Fatal("logged-out session retained")
 	}
-	for _, cmd := range [][]any{{"GET", "pinvou:auth-alias:fixture"}, {"SET", "pinvou:auth-failure:fixture", "1"}, {"SCAN", "0"}, {"KEYS", "*"}, {"CONFIG", "GET", "*"}, {"ACL", "LIST"}, {"FLUSHALL"}, {"EVAL", "return 1", "0"}} {
+	if err := s.SaveSession(ctx, session); !errors.Is(err, ErrLoginFlowInvalidated) {
+		t.Fatal("logout tombstone did not reject session recreation")
+	}
+	for _, cmd := range [][]any{{"GET", "pinvou:auth-alias:fixture"}, {"SET", "pinvou:auth-failure:fixture", "1"}, {"SCAN", "0"}, {"KEYS", "*"}, {"CONFIG", "GET", "*"}, {"ACL", "LIST"}, {"FLUSHALL"}, {"EVAL", "return redis.call('GET', KEYS[1])", "1", "pinvou:auth-alias:fixture"}} {
 		if err := s.client.Do(ctx, cmd...).Err(); err == nil || !strings.HasPrefix(err.Error(), "NOPERM") {
 			t.Fatal("forbidden Portal command not explicitly denied")
 		}

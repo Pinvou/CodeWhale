@@ -171,9 +171,10 @@ Portal 的浏览器授权地址使用公开 issuer；服务端授权码交换使
 
 Portal 会话 lineage 退出协议必须分两次部署，禁止在同一次滚动中直接启用：
 
-1. 能力阶段保持 `PORTAL_SESSION_LINEAGE_LOGOUT_ENABLED=false`，先滚动全部 Portal 副本。该版本会兼容地写入 `portal:session-root:*` / `portal:lineage-members:*`，并阻止 refresh 覆盖已经存在的退出墓碑，但显式退出仍沿用旧删除语义。
-2. 通过部署清单确认所有 Portal Pod 均已运行能力版本且第一轮 rollout 完成后，单独把 `PORTAL_SESSION_LINEAGE_LOGOUT_ENABLED=true` 发起第二次 rollout。此时任一代会话退出和桌面账号交接才会写 lineage 墓碑并清理整个 lineage。
-3. 回滚功能时只关闭开关，不先回滚二进制；待所有副本都关闭新语义且现有墓碑自然过期后，才允许回滚到不具备 lineage 能力的版本。不得让旧进程与已启用新语义的进程并存，否则旧进程可能在退出后写回会话。
+1. 先将 Portal Redis ACL 更新为受控模板：键空间必须精确包含 `portal:session-root:*`、`portal:lineage-members:*`、`portal:logout:*`，命令必须包含 `EXISTS`、`SADD`、`SMEMBERS`、`PEXPIRE`和 `EVAL`。重载 ACL 后用 Portal 身份执行会话 lineage 读写探针；任一步出现 `NOPERM` 时禁止部署新 Portal 二进制。不得为了通过探针授予 `~*`、命令类别或 `EVALSHA`。
+2. 能力阶段保持 `PORTAL_SESSION_LINEAGE_LOGOUT_ENABLED=false`，先滚动全部 Portal 副本。该版本会兼容地写入 `portal:session-root:*` / `portal:lineage-members:*`，并阻止 refresh 覆盖已经存在的退出墓碑，但显式退出仍沿用旧删除语义。
+3. 通过部署清单确认所有 Portal Pod 均已运行能力版本且第一轮 rollout 完成后，单独把 `PORTAL_SESSION_LINEAGE_LOGOUT_ENABLED=true` 发起第二次 rollout。此时任一代会话退出和桌面账号交接才会写 lineage 墓碑并清理整个 lineage。
+4. 回滚功能时只关闭开关，不先回滚二进制；待所有副本都关闭新语义且现有墓碑自然过期后，才允许回滚到不具备 lineage 能力的版本。不得让旧进程与已启用新语义的进程并存，否则旧进程可能在退出后写回会话。
 
 Compose 与 Helm 默认值均固定为 `false`，生产配置也不得预置为 `true`。墓碑保留期使用 Portal 最大会话期，长于 OIDC flow 的 10 分钟自然 TTL。
 

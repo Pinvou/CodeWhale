@@ -38,8 +38,17 @@ test('Redis ACL is closed by default and never grants shared-cache enumeration o
     assert.doesNotMatch(acl, /(?:^| )>\S/m);
   }
   assert.doesNotMatch(accounts, /\+scan|\+keys|~\*/);
-  assert.match(accounts, /user portal .*~portal:approval-wire:\*/);
-  assert.match(accounts, /user portal .*~portal:session-handoff:\*/);
+  const portalAcl = accounts.split(/\r?\n/).find(line => line.startsWith('user portal '));
+  assert.ok(portalAcl, 'portal ACL entry');
+  assert.match(portalAcl, /~portal:approval-wire:\*/);
+  assert.match(portalAcl, /~portal:session-handoff:\*/);
+  for (const prefix of ['session-root', 'lineage-members', 'logout']) {
+    assert.match(portalAcl, new RegExp(`~portal:${prefix}:\\*`));
+  }
+  for (const command of ['exists', 'sadd', 'smembers', 'pexpire', 'eval']) {
+    assert.match(portalAcl, new RegExp(`\\+${command}(?: |$)`));
+  }
+  assert.doesNotMatch(portalAcl, /\+evalsha(?: |$)/);
   assert.match(accounts, /~portal:flow:\*/);
   assert.match(accounts, /~pinvou:auth-admission:\*/);
   assert.match(model, /\+scan/);

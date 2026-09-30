@@ -1,3 +1,3 @@
 user default reset off
-user portal reset on #PORTAL_PASSWORD_SHA256 ~portal:flow:* ~portal:session:* ~portal:session-handoff:* ~portal:approval-wire:* ~portal:approval-classification:* ~portal:refresh:* +ping +hello +client|setname +client|setinfo +get +getdel +set +del
+user portal reset on #PORTAL_PASSWORD_SHA256 ~portal:flow:* ~portal:session:* ~portal:session-root:* ~portal:lineage-members:* ~portal:logout:* ~portal:session-handoff:* ~portal:approval-wire:* ~portal:approval-classification:* ~portal:refresh:* +ping +hello +client|setname +client|setinfo +get +getdel +set +del +exists +sadd +smembers +pexpire +eval
 user identity reset on #IDENTITY_PASSWORD_SHA256 ~pinvou:auth-admission:* ~pinvou:auth-failure:* ~pinvou:auth-alias:* +ping +hello +client|setname +client|setinfo +get +set +incr +expire +ttl +eval +evalsha
