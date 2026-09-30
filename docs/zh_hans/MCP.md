@@ -347,7 +347,8 @@ codewhale-tui mcp tools codewhale
   `read_timeout`。`read_timeout` 约束快速请求（`resources/read`、发现流程等）的响应等待；
   `tools/call` 的内部读等待会自动放宽到至少其 `execute_timeout`。
   对 stdio 服务器，该预算按阶段生效（发送、读取各计一次）：几乎耗尽预算才读完输入的服务器
-  可能让总耗时接近 `execute_timeout` 的两倍。HTTP 服务器则由单个总超时
+  可能让总耗时接近 `execute_timeout` 的两倍。发送腿本身没有超时约束（已披露的债务）：不再
+  读取 stdin 的 stdio 服务器可以让写入阻塞超过任何预算。HTTP 服务器则由单个总超时
   `max(read_timeout, execute_timeout)` 约束整个交换。
 - `disabled`（布尔值，可选）
 - `enabled`（布尔值，可选，默认 `true`）
