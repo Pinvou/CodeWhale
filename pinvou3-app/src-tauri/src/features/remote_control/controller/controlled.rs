@@ -12,6 +12,7 @@ use serde::Serialize;
 use uuid::Uuid;
 use zeroize::{Zeroize, Zeroizing};
 
+use super::crypto::{AuthenticatedRelayTrustConfig, authenticate_relay_liveness_attestation};
 use super::liveness::{
     ControllerLivenessWatchdog, LivenessWatchdogState, MAX_LIVENESS_ATTESTATION_AGE_MS,
 };
@@ -466,9 +467,12 @@ impl ControlledDeviceManager {
     pub(crate) fn accept_liveness_attestation(
         &self,
         json: &str,
+        trust: &AuthenticatedRelayTrustConfig,
         request_sent_at_b: u64,
         received_at_b: u64,
     ) -> Result<()> {
+        authenticate_relay_liveness_attestation(json, trust)
+            .map_err(|_| ControlledStateError::new("liveness_evidence_invalid"))?;
         let mut inner = self.inner.lock();
         let Some(context) = inner.lease_context.clone() else {
             return Err(ControlledStateError::new("lease_unavailable"));
@@ -959,6 +963,74 @@ mod tests {
                 1_000,
             )
             .unwrap();
+    }
+
+    #[test]
+    fn attestation_authentication_precedes_every_watchdog_state_change() {
+        use super::super::protocol::build_liveness_attestation_preimage;
+        use base64::Engine as _;
+        use ring::signature::{Ed25519KeyPair, KeyPair};
+
+        let manager = ControlledDeviceManager::default();
+        let operation = manager.start(None, Vec::new()).unwrap();
+        register(&manager, &operation);
+        manager.mark_claimed(operation.clone()).unwrap();
+        manager
+            .complete_connected(operation.clone(), lease(&operation.generation))
+            .unwrap();
+        let nonce = "AAAAAAAAAAAAAAAAAAAAAA==";
+        manager
+            .register_liveness_challenge("challenge-0001", nonce, 4_000)
+            .unwrap();
+        let prior_observed = manager.inner.lock().last_observed_now_b;
+
+        let key = Ed25519KeyPair::from_seed_unchecked(&[7; 32]).unwrap();
+        let public_key: [u8; 32] = key.public_key().as_ref().try_into().unwrap();
+        let trust = AuthenticatedRelayTrustConfig::from_test_enrollment([(
+            "relay-key-test-1".into(),
+            public_key,
+        )]);
+        let mut proof = serde_json::json!({
+            "v": 1, "type": "controller_liveness_attestation_a", "request_id": "request-0001",
+            "connection_id": "connection-0001", "controller_lease_id": "lease-0001",
+            "lease_epoch": "1", "relay_epoch": "relay-epoch-0001",
+            "remote_control_generation": operation.generation, "liveness_epoch_a": "live-a-1",
+            "heartbeat_sequence_a": "1", "attestation_sequence": "1",
+            "challenge_id": "challenge-0001", "challenge_b64": nonce,
+            "observed_age_ms": "1000", "remaining_ttl_ms": "29000", "issued_at_relay": "5000",
+            "relay_signing_key_id": "relay-key-test-1", "signature_algorithm": "ed25519"
+        });
+        proof["relay_signature_b64"] = base64::engine::general_purpose::STANDARD
+            .encode(
+                key.sign(&build_liveness_attestation_preimage(&proof).unwrap())
+                    .as_ref(),
+            )
+            .into();
+        for (field, replacement) in [
+            ("relay_signature_b64", format!("{}==", "A".repeat(86))),
+            ("relay_signing_key_id", "unknown-key".to_owned()),
+            ("remaining_ttl_ms", "28000".to_owned()),
+            ("signature_algorithm", "unsupported".to_owned()),
+        ] {
+            let mut changed = proof.clone();
+            changed[field] = replacement.into();
+            assert_eq!(
+                manager
+                    .accept_liveness_attestation(&changed.to_string(), &trust, 4_000, 5_000)
+                    .unwrap_err()
+                    .code,
+                "liveness_evidence_invalid"
+            );
+            assert_eq!(manager.status().watchdog_deadline_b, None);
+            let inner = manager.inner.lock();
+            assert_eq!(inner.last_observed_now_b, prior_observed);
+        }
+        // The same valid proof must still install evidence: failed signatures
+        // neither consumed its challenge nor advanced the attestation sequence.
+        manager
+            .accept_liveness_attestation(&proof.to_string(), &trust, 4_000, 5_000)
+            .unwrap();
+        assert!(manager.status().watchdog_deadline_b.is_some());
     }
 
     #[test]
