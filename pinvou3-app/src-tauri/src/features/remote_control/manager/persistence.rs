@@ -178,6 +178,10 @@ const RELAY_DEFAULT_BASE_PATH: &str = "/pinvou3/remote";
 pub struct RelaySettings {
     pub relay_url: String,
     pub public_base_url: String,
+    /// 内置端点 profile 选择（production / test）。缺省或未知时回退 production，
+    /// 保证旧版本写下的 web-relay.json 仍可加载。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -187,6 +191,13 @@ pub struct RelaySettingsInfo {
     pub custom: bool,
     pub default_relay_url: String,
     pub default_public_base_url: String,
+    /// 当前生效的内置 profile id（供 UI 显示"服务端点"）。
+    pub profile: String,
+}
+
+/// 持久化的端点 profile 选择（`~/.pinvou3/web-relay.json` 的 `profile` 字段）。
+pub(super) fn selected_endpoint_profile() -> Option<String> {
+    load_relay_settings().and_then(|settings| settings.profile)
 }
 
 pub(super) fn relay_settings_path() -> PathBuf {
@@ -257,6 +268,7 @@ pub(super) fn normalize_relay_address(input: &str) -> Result<RelaySettings, Stri
     let settings = RelaySettings {
         relay_url: format!("{ws_scheme}://{host}{base_path}/ws"),
         public_base_url: format!("{http_scheme}://{host}{base_path}"),
+        profile: None,
     };
     validate_relay_settings(&settings)?;
     Ok(settings)
@@ -602,7 +614,7 @@ pub(super) fn remote_public_base_url() -> String {
     if let Some(settings) = load_relay_settings() {
         return settings.public_base_url;
     }
-    super::DEFAULT_PUBLIC_BASE_URL.to_string()
+    super::active_endpoint_profile().public_base_url.to_string()
 }
 
 pub(super) fn remote_relay_ws_url() -> String {
@@ -612,7 +624,7 @@ pub(super) fn remote_relay_ws_url() -> String {
     if let Some(settings) = load_relay_settings() {
         return settings.relay_url;
     }
-    super::DEFAULT_RELAY_WS_URL.to_string()
+    super::active_endpoint_profile().relay_ws_url.to_string()
 }
 
 /// A 端控制通道的 Relay 地址（E2E-02）：与 WebUI v2 的 desktop endpoint 共用
