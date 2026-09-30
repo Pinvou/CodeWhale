@@ -10,9 +10,7 @@ use uuid::Uuid;
 use zeroize::{Zeroize, Zeroizing};
 
 use super::protocol::LeaseContext;
-use super::relay_transport::{
-    ControllerRole, ControllerSendError, ControllerTransportSender,
-};
+use super::relay_transport::{ControllerRole, ControllerSendError, ControllerTransportSender};
 use super::resume::ControllerResumeGate;
 
 const MAX_HISTORY_ENTRIES: usize = 256;
@@ -426,9 +424,7 @@ impl ControllingDeviceManager {
             .clone()
             .ok_or_else(|| ControllingStateError::new("lease_unavailable"))?;
         let prepared = match inner.resume_gate.as_mut() {
-            Some(gate) => gate
-                .prepare(now_b, Some(lease.resume_deadline_b))
-                .is_ok(),
+            Some(gate) => gate.prepare(now_b, Some(lease.resume_deadline_b)).is_ok(),
             None => false,
         };
         if !prepared {
@@ -459,9 +455,9 @@ impl ControllingDeviceManager {
         let deadline = inner.lease.as_ref().map(|lease| lease.resume_deadline_b);
         let advanced = match inner.resume_gate.as_mut() {
             Some(gate) => match step {
-                ResumeStep::Provisional { activation_id } => {
-                    gate.accept_provisional(activation_id, now_b, deadline).is_ok()
-                }
+                ResumeStep::Provisional { activation_id } => gate
+                    .accept_provisional(activation_id, now_b, deadline)
+                    .is_ok(),
                 ResumeStep::Confirmed { activation_id } => {
                     gate.confirm(activation_id, now_b, deadline).is_ok()
                 }
@@ -471,9 +467,9 @@ impl ControllingDeviceManager {
                 ResumeStep::LivenessConfirmed { activation_id } => gate
                     .accept_post_activation_liveness_confirmed(activation_id, now_b, deadline)
                     .is_ok(),
-                ResumeStep::ReadyAcknowledged { activation_id } => {
-                    gate.acknowledge_ready(activation_id, now_b, deadline).is_ok()
-                }
+                ResumeStep::ReadyAcknowledged { activation_id } => gate
+                    .acknowledge_ready(activation_id, now_b, deadline)
+                    .is_ok(),
             },
             None => false,
         };
@@ -489,10 +485,13 @@ impl ControllingDeviceManager {
     /// E2E-06：当前连接尝试的 operation（恢复流程在 service 层按帧推进时需要它）。
     pub(crate) fn current_operation(&self) -> Option<ControllerOperation> {
         let inner = self.inner.lock();
-        inner.claim_request_id.as_ref().map(|request| ControllerOperation {
-            intent: inner.intent,
-            claim_request_id: request.clone(),
-        })
+        inner
+            .claim_request_id
+            .as_ref()
+            .map(|request| ControllerOperation {
+                intent: inner.intent,
+                claim_request_id: request.clone(),
+            })
     }
 
     /// E2E-06：发送恢复族的敏感控制帧（prepare/confirm/ready_ack）。
@@ -564,10 +563,7 @@ impl ControllingDeviceManager {
             .lease
             .as_ref()
             .ok_or_else(|| ControllingStateError::new("controller_not_connected"))?;
-        Ok((
-            lease.context.clone(),
-            lease.negotiated_capabilities.clone(),
-        ))
+        Ok((lease.context.clone(), lease.negotiated_capabilities.clone()))
     }
 
     /// 发送一条已认证明文载荷对应的密文帧（E2E-04）。租约未安装或 transport
@@ -1036,10 +1032,14 @@ mod tests {
                 6_000,
             ),
         ] {
-            manager.advance_resume(operation.clone(), step, now_b).unwrap();
+            manager
+                .advance_resume(operation.clone(), step, now_b)
+                .unwrap();
         }
         let resumed = manager
-            .complete_resumed(operation, activation, 7_000, "live-a-2", [3; 32], [4; 32], 30_000)
+            .complete_resumed(
+                operation, activation, 7_000, "live-a-2", [3; 32], [4; 32], 30_000,
+            )
             .unwrap();
         assert_eq!(resumed.status, ControllingStatusKind::Connected);
         assert_eq!(
@@ -1102,11 +1102,9 @@ mod tests {
         assert_eq!(frame["sender_role"], "A");
         assert_eq!(frame["reason"], "user_disconnect");
         // reason 只保留有界标识符字符：全部被过滤时失败关闭，否则截断到有界长度。
-        assert!(
-            build_controller_disconnect(&fixture.context, "request-1", " 用户 断开 ").is_err()
-        );
-        let sanitized = build_controller_disconnect(&fixture.context, "request-1", "user disconnect!")
-            .unwrap();
+        assert!(build_controller_disconnect(&fixture.context, "request-1", " 用户 断开 ").is_err());
+        let sanitized =
+            build_controller_disconnect(&fixture.context, "request-1", "user disconnect!").unwrap();
         assert_eq!(sanitized["reason"], "userdisconnect");
 
         // 未连接时没有可发送的断开帧。
@@ -1116,15 +1114,14 @@ mod tests {
         manager.complete_reserved(operation.clone()).unwrap();
         manager.complete_connected(operation, fixture).unwrap();
         // 测试用 transport_channels 不启动网络任务，入队即视为送出成功。
-        let (sender, _receiver) =
-            super::super::relay_transport::transport_channels(
-                ControllerRole::ControllerA,
-                "generation-0001",
-                2,
-                2,
-                8192,
-                1024,
-            );
+        let (sender, _receiver) = super::super::relay_transport::transport_channels(
+            ControllerRole::ControllerA,
+            "generation-0001",
+            2,
+            2,
+            8192,
+            1024,
+        );
         // 断开帧是租约控制帧：transport 必须先装上同一租约。
         sender
             .install_authenticated_lease(super::super::relay_transport::AuthenticatedLease {
@@ -1154,7 +1151,9 @@ mod tests {
         assert!(manager.is_connecting(operation.clone()));
         manager.complete_reserved(operation.clone()).unwrap();
         assert!(manager.is_connecting(operation.clone()));
-        manager.complete_connected(operation.clone(), lease()).unwrap();
+        manager
+            .complete_connected(operation.clone(), lease())
+            .unwrap();
         assert!(!manager.is_connecting(operation.clone()));
         assert_eq!(
             manager

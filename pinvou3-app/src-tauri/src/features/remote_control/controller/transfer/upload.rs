@@ -125,10 +125,7 @@ impl AttachmentUploads {
                 received_bytes: outcome.received_bytes,
             });
         }
-        if let Err(error) = self
-            .staging
-            .accept_chunk(handle_id, chunk_index, bytes)
-        {
+        if let Err(error) = self.staging.accept_chunk(handle_id, chunk_index, bytes) {
             let _ = self.staging.abort(handle_id);
             self.registry.abort(&handle);
             return Err(error);
@@ -237,7 +234,10 @@ mod tests {
         }
 
         fn abort(&self, handle_id: &str) -> std::result::Result<(), String> {
-            self.calls.lock().unwrap().push(format!("abort:{handle_id}"));
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("abort:{handle_id}"));
             Ok(())
         }
     }
@@ -265,14 +265,8 @@ mod tests {
         }
     }
 
-    fn uploads(
-        staging: Arc<RecordingStaging>,
-        limits: TransferLimits,
-    ) -> AttachmentUploads {
-        AttachmentUploads::new(
-            Arc::new(TransferRegistry::new(limits).unwrap()),
-            staging,
-        )
+    fn uploads(staging: Arc<RecordingStaging>, limits: TransferLimits) -> AttachmentUploads {
+        AttachmentUploads::new(Arc::new(TransferRegistry::new(limits).unwrap()), staging)
     }
 
     fn upload_context() -> TransferContext {
@@ -348,7 +342,10 @@ mod tests {
         // The duplicate chunk was not written twice.
         let calls: Vec<String> = staging.calls.lock().unwrap().clone();
         assert_eq!(
-            calls.iter().filter(|call| call.starts_with("chunk:0")).count(),
+            calls
+                .iter()
+                .filter(|call| call.starts_with("chunk:0"))
+                .count(),
             1
         );
         // An over-sized chunk is rejected and its staging target is dropped.
@@ -359,8 +356,11 @@ mod tests {
             "transfer_chunk_size_invalid"
         );
         let calls: Vec<String> = staging.calls.lock().unwrap().clone();
-        assert!(calls.iter().any(|call| call == "abort:ctr-up-00000001-1"
-            || call.starts_with("abort:")));
+        assert!(
+            calls
+                .iter()
+                .any(|call| call == "abort:ctr-up-00000001-1" || call.starts_with("abort:"))
+        );
         assert_eq!(
             uploads
                 .accept_chunk(&begin.handle_id, 1, &data[4..], 1_400)
@@ -412,18 +412,23 @@ mod tests {
         uploads
             .accept_chunk(&begin.handle_id, 0, &data[..4], 1_100)
             .unwrap();
-        assert_eq!(uploads.registry.connection_bytes("connection-0001"), data.len() as u64);
+        assert_eq!(
+            uploads.registry.connection_bytes("connection-0001"),
+            data.len() as u64
+        );
         // Still inside the TTL.
         assert_eq!(uploads.expire(1_400), 0);
         // Past the TTL: accounting released and staging aborted, exactly once.
         assert_eq!(uploads.expire(1_600), 1);
         assert_eq!(uploads.registry.connection_bytes("connection-0001"), 0);
-        assert!(staging
-            .calls
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|call| call.starts_with("abort:")));
+        assert!(
+            staging
+                .calls
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|call| call.starts_with("abort:"))
+        );
         assert_eq!(uploads.expire(1_700), 0);
         assert_eq!(
             uploads

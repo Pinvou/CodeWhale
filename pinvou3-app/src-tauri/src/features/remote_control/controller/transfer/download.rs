@@ -93,7 +93,9 @@ impl FileArtifactSource {
 
 impl DownloadSource for FileArtifactSource {
     fn total_bytes(&self) -> u64 {
-        std::fs::metadata(&self.path).map(|meta| meta.len()).unwrap_or(0)
+        std::fs::metadata(&self.path)
+            .map(|meta| meta.len())
+            .unwrap_or(0)
     }
 
     fn read_chunk(
@@ -102,8 +104,8 @@ impl DownloadSource for FileArtifactSource {
         max_bytes: usize,
     ) -> std::result::Result<Option<Vec<u8>>, String> {
         use std::io::{Read, Seek, SeekFrom};
-        let mut file = std::fs::File::open(&self.path)
-            .map_err(|_| "artifact_unavailable".to_owned())?;
+        let mut file =
+            std::fs::File::open(&self.path).map_err(|_| "artifact_unavailable".to_owned())?;
         let offset = chunk_offset(chunk_index, max_bytes);
         let total = file
             .metadata()
@@ -429,10 +431,13 @@ impl ArtifactDownloads {
             .read_chunk(chunk_index, chunk_bytes)
             .map_err(|_| "artifact_unavailable".to_owned())?
             .ok_or_else(|| "artifact_unavailable".to_owned())?;
-        match self
-            .registry
-            .accept_chunk(&handle, TransferDirection::Download, chunk_index, &bytes, now_b)
-        {
+        match self.registry.accept_chunk(
+            &handle,
+            TransferDirection::Download,
+            chunk_index,
+            &bytes,
+            now_b,
+        ) {
             Ok(outcome) => Ok(Some(DownloadChunk {
                 chunk_index,
                 bytes,
@@ -584,7 +589,13 @@ mod tests {
         assert_eq!(preview.preview_kind, PreviewKind::DownloadOnly);
         assert!(preview.text.is_none());
 
-        register(&index, "artifact-image", "photo.png", "image/png", b"\x89PNG");
+        register(
+            &index,
+            "artifact-image",
+            "photo.png",
+            "image/png",
+            b"\x89PNG",
+        );
         let preview = index.preview("session-0001", "artifact-image").unwrap();
         assert_eq!(preview.preview_kind, PreviewKind::Unsupported);
         assert!(preview.text.is_none());
@@ -595,15 +606,29 @@ mod tests {
         let (_unused, index) = downloads();
         let bytes: Vec<u8> = (0..5000u32).map(|value| value as u8).collect();
         // Force multi-chunk transfers with a narrow chunk budget.
-        let registry = Arc::new(TransferRegistry::new(super::super::TransferLimits {
-            chunk_bytes: 1024,
-            ..super::super::TransferLimits::default()
-        })
-        .unwrap());
+        let registry = Arc::new(
+            TransferRegistry::new(super::super::TransferLimits {
+                chunk_bytes: 1024,
+                ..super::super::TransferLimits::default()
+            })
+            .unwrap(),
+        );
         let downloads = ArtifactDownloads::new(registry, Arc::clone(&index));
-        register(&index, "artifact-0001", "data.bin", "application/octet-stream", &bytes);
+        register(
+            &index,
+            "artifact-0001",
+            "data.bin",
+            "application/octet-stream",
+            &bytes,
+        );
         let begin = downloads
-            .begin(&lease(), "session-0001", "task-0001", "artifact-0001", 1_000)
+            .begin(
+                &lease(),
+                "session-0001",
+                "task-0001",
+                "artifact-0001",
+                1_000,
+            )
             .unwrap();
         assert_eq!(begin.chunk_bytes, 1024);
         let mut collected = Vec::new();
@@ -640,20 +665,38 @@ mod tests {
         register(&index, "artifact-0001", "notes.txt", "text/plain", &bytes);
         assert_eq!(
             downloads
-                .begin(&lease(), "session-0002", "task-0001", "artifact-0001", 1_000)
+                .begin(
+                    &lease(),
+                    "session-0002",
+                    "task-0001",
+                    "artifact-0001",
+                    1_000
+                )
                 .unwrap_err(),
             "artifact_not_found"
         );
         assert_eq!(
             downloads
-                .begin(&lease(), "session-0001", "task-0001", "artifact-9999", 1_000)
+                .begin(
+                    &lease(),
+                    "session-0001",
+                    "task-0001",
+                    "artifact-9999",
+                    1_000
+                )
                 .unwrap_err(),
             "artifact_not_found"
         );
         assert!(index.remove("artifact-0001"));
         assert_eq!(
             downloads
-                .begin(&lease(), "session-0001", "task-0001", "artifact-0001", 1_100)
+                .begin(
+                    &lease(),
+                    "session-0001",
+                    "task-0001",
+                    "artifact-0001",
+                    1_100
+                )
                 .unwrap_err(),
             "artifact_not_found"
         );
@@ -700,7 +743,13 @@ mod tests {
         source.len.store(4, Ordering::SeqCst);
         assert_eq!(
             downloads
-                .begin(&lease(), "session-0001", "task-0001", "artifact-0001", 1_000)
+                .begin(
+                    &lease(),
+                    "session-0001",
+                    "task-0001",
+                    "artifact-0001",
+                    1_000
+                )
                 .unwrap_err(),
             "artifact_unavailable"
         );
@@ -714,7 +763,13 @@ mod tests {
         let bytes = b"artifact".to_vec();
         register(&index, "artifact-0001", "notes.txt", "text/plain", &bytes);
         downloads
-            .begin(&lease(), "session-0001", "task-0001", "artifact-0001", 1_000)
+            .begin(
+                &lease(),
+                "session-0001",
+                "task-0001",
+                "artifact-0001",
+                1_000,
+            )
             .unwrap();
         assert_eq!(downloads.cleanup_for_task("task-0001"), 1);
         assert_eq!(downloads.cleanup_for_task("task-0001"), 0);
