@@ -610,11 +610,14 @@ pub struct ToolExecutionState {
     /// each root's canonical spelling, canonicalizing once per context
     /// lifetime instead of once per `resolve_path` call (several judgments
     /// ride every tool call). Invariant: `workspace` and `workspace_roots`
-    /// are immutable for the context's lifetime — the constructors install a
-    /// fresh cache and `with_workspace_roots` replaces it; clones share it,
-    /// which is sound because clones carry identical roots. No code path
-    /// mutates the roots in place (surveyed; if one ever must, it must swap
-    /// this Arc first or the boundary would judge stale spellings).
+    /// change ONLY through [`ToolContext::rebase_roots`] (which swaps this
+    /// Arc for a fresh one) or at construction — clones share the Arc, which
+    /// is sound only while the pair stays identical. Round-26 B26-1 closed
+    /// the regression this comment's earlier "no in-place mutation" survey
+    /// missed: the worktree spawn/resume sites and the per-turn live context
+    /// used to assign the fields in place on a clone, so a parent-filled
+    /// memo kept judging the CHILD's file-tool containment against the
+    /// PARENT boundary (fail-open for worktree isolation).
     pub(crate) boundary_roots_cache: std::sync::Arc<std::sync::OnceLock<Vec<(PathBuf, PathBuf)>>>,
     /// Current sandbox policy
     #[allow(dead_code)]
@@ -859,6 +862,25 @@ impl ToolContext {
         // canonical spellings (see the field's invariant note).
         self.boundary_roots_cache = std::sync::Arc::new(std::sync::OnceLock::new());
         self
+    }
+
+    /// Replace the (primary workspace, attached roots) pair on a LIVE
+    /// context and refresh the boundary memo atomically (round-26 B26-1).
+    ///
+    /// Cloned contexts share the parent's memo `Arc`; assigning the two
+    /// fields in place used to leave that shared memo filled with the
+    /// PARENT's boundary, so the child's file-tool containment judged
+    /// against the parent workspace plus its attached roots — for a
+    /// worktree child (whose boundary is the worktree alone) that passed
+    /// containment for the entire parent checkout: fail-open for exactly
+    /// the isolation the worktree contract names. Every site that moves a
+    /// context onto a different primary or root set MUST go through here;
+    /// the memo swap is not optional. Callers that change the roots derive
+    /// them into the sandbox policy separately (`rederive_sandbox_policy_roots`).
+    pub(crate) fn rebase_roots(&mut self, workspace: PathBuf, workspace_roots: Vec<PathBuf>) {
+        self.workspace = workspace;
+        self.workspace_roots = workspace_roots;
+        self.boundary_roots_cache = std::sync::Arc::new(std::sync::OnceLock::new());
     }
 
     /// Attach durable runtime services to tools.

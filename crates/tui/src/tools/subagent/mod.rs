@@ -5945,7 +5945,6 @@ impl SubAgentManager {
         // Resume in the interrupted child's workspace, not the caller's
         // (worktree/cwd children must not resume in the parent directory).
         let mut runtime = runtime;
-        runtime.context.workspace = workspace;
         if isolated_worktree {
             // Same isolation rule as a fresh worktree spawn: a worktree
             // child's boundary is the worktree alone, so the parent's
@@ -5953,8 +5952,16 @@ impl SubAgentManager {
             // (neither `boundary_roots` nor the gate's sandbox policy may
             // resolve or write outside the worktree). Re-derive the cloned
             // sandbox policy as well — the exec lane consumes it verbatim.
-            runtime.context.workspace_roots = Vec::new();
+            // `rebase_roots` (round-26 B26-1) also drops the parent-shared
+            // boundary memo with the pair swap.
+            runtime.context.rebase_roots(workspace, Vec::new());
             rederive_sandbox_policy_roots(&mut runtime.context);
+        } else {
+            // A cwd-resumed child keeps the carried root set; the memo still
+            // refreshes because the primary moved (the boundary normalizes
+            // the set against the new primary).
+            let carried = runtime.context.workspace_roots.clone();
+            runtime.context.rebase_roots(workspace, carried);
         }
         let options = SubAgentSpawnOptions {
             name: None, // the old session name stays owned by the terminal record
@@ -9474,7 +9481,6 @@ async fn spawn_subagent_from_input(
         spawn_request.max_depth,
     );
     if let Some(workspace) = child_workspace {
-        child_runtime.context.workspace = workspace.clone();
         if spawn_request.worktree.is_some() {
             // A worktree child is an isolation boundary, not a wider
             // session: its boundary is the worktree alone, so the parent's
@@ -9482,11 +9488,23 @@ async fn spawn_subagent_from_input(
             // could only resolve inside its worktree). The cloned sandbox
             // policy must be re-derived too — it was built over the parent's
             // full root set, and the exec lane consumes it verbatim.
-            child_runtime.context.workspace_roots = Vec::new();
+            // `rebase_roots` (round-26 B26-1): the pair swap MUST also drop
+            // the parent-shared boundary memo, or the child's file-tool
+            // containment keeps judging against the parent's boundary.
+            child_runtime
+                .context
+                .rebase_roots(workspace.clone(), Vec::new());
             rederive_sandbox_policy_roots(&mut child_runtime.context);
+        } else {
+            // An explicit `cwd:` swap without a worktree is non-isolating and
+            // keeps the parent's root set (disclosed in the PR description) —
+            // but the memo still refreshes: the boundary normalizes the
+            // carried set against the NEW primary.
+            let carried = child_runtime.context.workspace_roots.clone();
+            child_runtime
+                .context
+                .rebase_roots(workspace.clone(), carried);
         }
-        // An explicit `cwd:` swap without a worktree is non-isolating and
-        // keeps the parent's root set (disclosed in the PR description).
         // A worktree child gets a distinct workspace-scoped plugin catalog.
         // Reusing the parent's registry here would leak workspace plugins (and
         // their authority receipts) across the exact isolation boundary the

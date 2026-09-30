@@ -179,7 +179,7 @@ pub fn fork_from_session(app: &mut App, session_id_or_prefix: &str) -> CommandRe
         Ok(roots) => roots,
         Err(err) => {
             return CommandResult::error(format!(
-                "Cannot fork: the source root set re-based onto {} would widen past it ({err:#}). Re-declare the roots on the fork.",
+                "Cannot fork: the source root set re-based onto {} would widen past it ({err:#}). The fork is refused; start it from a directory the set does not widen past, or clear the widening roots from the saved record outside the TUI.",
                 app.workspace.display()
             ));
         }

@@ -6243,6 +6243,23 @@ impl RuntimeThreadManager {
         forked.updated_at = now;
         forked.latest_turn_id = None;
         forked.archived = false;
+        // Round-26 M26-1: this fork face (the live /undo, /patch-undo, and
+        // /retry routes) MINTS a new row exactly like `fork_thread` and now
+        // runs the same validating intake on the cloned set — a poisoned
+        // source row (super-root, primary-ancestor, over-cap) is rejected
+        // instead of duplicated into a fresh id.
+        let carried: Vec<PathBuf> = source
+            .workspace_roots
+            .iter()
+            .filter(|root| **root != source.workspace)
+            .cloned()
+            .collect();
+        forked.workspace_roots =
+            codewhale_core::validate_workspace_roots(&source.workspace, &carried).map_err(
+                |reason| {
+                    anyhow::anyhow!("source thread root set no longer passes intake: {reason}")
+                },
+            )?;
 
         let mut cloned_records = Vec::with_capacity(target_turn_idx);
         for source_turn in source_turns.iter().take(target_turn_idx) {
