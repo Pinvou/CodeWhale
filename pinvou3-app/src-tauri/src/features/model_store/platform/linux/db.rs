@@ -117,9 +117,11 @@ const MIGRATION_COLUMNS: &[(&str, &[(&str, &str)])] = &[
             ("deploy_topology", "TEXT"),
             // 附属文件的本地固化副本（相对路径 -> 正文+哈希），见 assets_content
             ("assets_content_json", "TEXT"),
-            // 卡片来自哪里："builtin" = 测试商店（脚本打包在应用二进制里）、
-            // "store" = 真实商店。见 refresh_builtin_card_scripts 的说明。
-            ("card_source", "TEXT"),
+            // 这里原来有一列 `card_source`（"builtin" = 内置测试商店 / "store" =
+            // 真实商店）。2026-09-30 内置测试商店整体拿掉之后，卡片只可能来自生产
+            // 商店，这一列没有任何读者，连同 `refresh_builtin_card_scripts` 和回填
+            // 一起删了。存量设备上的这一列会留在表里不再被写——`ensure_columns` 只
+            // 补列不删列，而 INSERT 显式列名、列本身可空，留着不影响任何语句。
             // enable 脚本报上来的容器名（LMM_CONTAINER_NAME 标记行）。
             // 这是判断"某个容器是不是本应用起的"唯一可靠的依据——镜像不是身份，
             // 别人用同一个镜像起的容器跟我们的长得一模一样。
@@ -324,25 +326,6 @@ fn migrate_engine_primary_key(conn: &Connection) -> rusqlite::Result<()> {
     Ok(())
 }
 
-/// 给 card_source 还是 NULL 的存量记录补上来源。
-///
-/// 判据是脚本地址的形态，不是卡片 id——**真实商店里存在跟内置测试卡同名的
-/// 卡片**（测试卡本来就是照着真实卡做的，ornith15-bf16 两边都有）。只按 id 猜
-/// 会把用户从真实商店下的卡片标成 builtin，然后用内置副本把它的脚本覆盖掉。
-///
-/// 而地址形态是确定的：测试商店存的是本地文件路径（test_store_scripts 目录下），
-/// 真实商店存的是 http(s) URL。
-fn backfill_card_source(conn: &Connection) -> rusqlite::Result<()> {
-    conn.execute(
-        "UPDATE store_models SET card_source =
-             CASE WHEN COALESCE(script_deploy, '') LIKE '%/test_store_scripts/%'
-                  THEN 'builtin' ELSE 'store' END
-         WHERE card_source IS NULL",
-        [],
-    )?;
-    Ok(())
-}
-
 pub fn init_db() -> rusqlite::Result<()> {
     let conn = connect()?;
     conn.execute_batch(SCHEMA)?;
@@ -350,7 +333,6 @@ pub fn init_db() -> rusqlite::Result<()> {
     // 顺序要紧：先把缺的列补齐（老表可能还没有 docker_image），再重建主键，
     // 否则搬数据那句 SELECT 会因为列不存在而失败。
     migrate_engine_primary_key(&conn)?;
-    backfill_card_source(&conn)?;
     Ok(())
 }
 
@@ -655,8 +637,6 @@ pub struct AddStoreModelParams<'a> {
     pub status: &'a str,
     pub profiles: &'a [DeployProfile],
     pub deploy_topology: DeployTopology,
-    /// "builtin"（测试商店，脚本随应用发布）或 "store"（真实商店）
-    pub card_source: &'a str,
 }
 
 pub fn add_store_model(p: AddStoreModelParams<'_>) -> rusqlite::Result<StoreModelRecord> {
@@ -695,8 +675,7 @@ pub fn add_store_model(p: AddStoreModelParams<'_>) -> rusqlite::Result<StoreMode
               weights_ready_at=excluded.weights_ready_at,
               deployed_at=COALESCE(excluded.deployed_at, store_models.deployed_at),
              profiles_json=excluded.profiles_json,
-             deploy_topology=excluded.deploy_topology,
-             card_source=excluded.card_source",
+             deploy_topology=excluded.deploy_topology",
         params![
             p.card_id,
             p.model_name,
@@ -726,7 +705,6 @@ pub fn add_store_model(p: AddStoreModelParams<'_>) -> rusqlite::Result<StoreMode
             serde_json::to_value(p.deploy_topology)
                 .ok()
                 .and_then(|v| v.as_str().map(str::to_string)),
-            p.card_source,
         ],
     )?;
     conn.query_row(
@@ -734,38 +712,6 @@ pub fn add_store_model(p: AddStoreModelParams<'_>) -> rusqlite::Result<StoreMode
         params![p.card_id],
         StoreModelRecord::from_row,
     )
-}
-
-/// 把测试商店（内置）卡片的固化脚本副本刷新成应用里的当前版本。
-///
-/// **为什么必须有这个。** 卡片脚本在下载时被固化进数据库，之后所有操作都用那份
-/// 本地副本——这个设计对真实商店是对的（商店改脚本不该打断用户正在进行的流程，
-/// 更新由用户点「更新脚本」显式触发）。但对测试商店是错的：它的脚本就打包在应用
-/// 二进制里，压根没有"服务器"这个概念，应用升级就等于脚本升级。
-///
-/// 不刷新的后果在真机上撞到过：推了新版应用、脚本改动一个都没生效，卡片还在跑
-/// 下载那天固化的旧脚本，而报错完全看不出是这个原因——查了半天才发现落地的
-/// common.sh 是 6425 字节而应用里那份是 19405 字节。
-///
-/// 只动 `card_source = 'builtin'` 的记录。测试卡的 id 跟真实商店卡片可能重名
-/// （测试卡本来就是照着真实卡做的），只按 id 匹配会把用户从真实商店下的卡片
-/// 用内置副本覆盖掉。
-pub fn refresh_builtin_card_scripts(
-    card_id: &str,
-    blobs: &std::collections::BTreeMap<String, ScriptBlob>,
-    assets: &std::collections::BTreeMap<String, ScriptBlob>,
-) -> rusqlite::Result<bool> {
-    let json = serde_json::to_string(blobs).unwrap_or_default();
-    let assets_json = serde_json::to_string(assets).unwrap_or_default();
-    let conn = connect()?;
-    let changed = conn.execute(
-        "UPDATE store_models
-            SET scripts_content_json = ?1, assets_content_json = ?2, scripts_fetched_at = ?3
-          WHERE card_id = ?4 AND card_source = 'builtin'
-            AND (scripts_content_json IS NOT ?1 OR assets_content_json IS NOT ?2)",
-        params![json, assets_json, now_iso(), card_id],
-    )?;
-    Ok(changed > 0)
 }
 
 /// `deploy_script_sha256` 只在部署成功时传：记下这次部署用的是哪个版本的
@@ -1260,105 +1206,6 @@ mod tests {
         assert!(is_engine_installed("sglang", Some("v0.5.16")).unwrap());
     }
 
-    /// 内置（测试商店）卡片的固化脚本要跟着应用升级刷新；真实商店的不能碰。
-    ///
-    /// 这是真机上撞过的坑：推了新版应用、脚本改动一个都没生效，卡片还在跑下载
-    /// 那天固化的旧脚本，报错完全看不出是这个原因——查了半天才发现落地的
-    /// common.sh 是 6425 字节而应用里那份是 19405 字节。
-    #[test]
-    fn only_builtin_cards_get_their_scripts_refreshed() {
-        let _ctx = setup_temp_db();
-        let blob = |c: &str| ScriptBlob {
-            content: c.to_string(),
-            sha256: c.to_string(),
-        };
-        let old_pkg = std::collections::BTreeMap::from([("deploy".to_string(), blob("旧脚本"))]);
-        let new_pkg = std::collections::BTreeMap::from([("deploy".to_string(), blob("新脚本"))]);
-        let empty = std::collections::BTreeMap::new();
-
-        for (card_id, source) in [("builtin-card", "builtin"), ("store-card", "store")] {
-            let scripts = std::collections::BTreeMap::from([(
-                "deploy".to_string(),
-                format!("/tmp/{card_id}/deploy.sh"),
-            )]);
-            add_store_model(AddStoreModelParams {
-                card_id,
-                model_name: "m",
-                card_name: "M",
-                org: None,
-                description: None,
-                engine_name: "e",
-                engine_version: None,
-                size_bytes: 0,
-                quantization: None,
-                source_repo_id: None,
-                source_filename: None,
-                scripts: &scripts,
-                status: "downloaded",
-                profiles: &[],
-                deploy_topology: DeployTopology::default(),
-                card_source: source,
-            })
-            .unwrap();
-            set_scripts_content(card_id, &old_pkg, &empty).unwrap();
-        }
-
-        assert!(
-            refresh_builtin_card_scripts("builtin-card", &new_pkg, &empty).unwrap(),
-            "内置卡片没被刷新"
-        );
-        assert!(
-            !refresh_builtin_card_scripts("store-card", &new_pkg, &empty).unwrap(),
-            "真实商店的卡片不该被内置副本覆盖"
-        );
-
-        let builtin = get_store_model("builtin-card").unwrap().unwrap();
-        assert!(builtin.scripts_content["deploy"].content.contains("新脚本"));
-        let store = get_store_model("store-card").unwrap().unwrap();
-        assert!(store.scripts_content["deploy"].content.contains("旧脚本"));
-
-        // 内容没变时不该白写一遍（会把 scripts_fetched_at 刷掉、界面上凭空出现"更新过"）
-        assert!(
-            !refresh_builtin_card_scripts("builtin-card", &new_pkg, &empty).unwrap(),
-            "内容没变还报告刷新过"
-        );
-    }
-
-    /// 存量记录（card_source 为 NULL）按脚本地址形态回填，而不是按卡片 id 猜。
-    ///
-    /// 真实商店里存在跟内置测试卡同名的卡片（ornith15-bf16 两边都有），按 id 猜
-    /// 会把用户从真实商店下的卡片标成 builtin，然后用内置副本覆盖掉它的脚本。
-    #[test]
-    fn legacy_records_get_their_source_backfilled_by_script_location() {
-        let _ctx = setup_temp_db();
-        let conn = connect().unwrap();
-        conn.execute_batch(
-            "INSERT INTO store_models
-                 (card_id, model_name, card_name, engine_name, status, downloaded_at, script_deploy)
-             VALUES
-                 ('same-id-from-test', 'm', 'M', 'e', 'downloaded', '2026-01-01',
-                  '/home/user/.local/share/local-model-manager/test_store_scripts/x/deploy.sh'),
-                 ('same-id-from-store', 'm', 'M', 'e', 'downloaded', '2026-01-01',
-                  'http://47.120.8.237/model-store/api/v1/cards/x/deploy.sh');",
-        )
-        .unwrap();
-        drop(conn);
-
-        init_db().unwrap();
-
-        let conn = connect().unwrap();
-        let src = |id: &str| -> String {
-            conn.query_row(
-                "SELECT card_source FROM store_models WHERE card_id = ?1",
-                params![id],
-                |r| r.get(0),
-            )
-            .unwrap()
-        };
-        assert_eq!(src("same-id-from-test"), "builtin");
-        assert_eq!(src("same-id-from-store"), "store");
-    }
-
     #[test]
     fn store_model_lifecycle() {
         let _ctx = setup_temp_db();
@@ -1382,7 +1229,6 @@ mod tests {
             status: "downloaded",
             profiles: &[],
             deploy_topology: DeployTopology::default(),
-            card_source: "store",
         })
         .unwrap();
         assert_eq!(rec.status, "downloaded");

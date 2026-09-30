@@ -283,14 +283,6 @@ fn new_run_id() -> String {
     )
 }
 
-fn manager(test_mode: bool) -> ModelManager {
-    if test_mode {
-        ModelManager::new_test_store()
-    } else {
-        ModelManager::new(None, None)
-    }
-}
-
 /// 把 panic 的 payload 抠成一句能给人看的话。`panic!("……")` 的 payload 是
 /// `String`，`panic!("字面量")` 是 `&str`，其余（比如 `panic_any`）只能认栽。
 fn panic_text(payload: &(dyn std::any::Any + Send)) -> String {
@@ -485,9 +477,9 @@ where
 
 // ---------------------------------------------------------------- 只读查询
 
-pub async fn list_cards(test_mode: bool) -> Result<Value, String> {
-    tokio::task::spawn_blocking(move || {
-        manager(test_mode)
+pub async fn list_cards() -> Result<Value, String> {
+    tokio::task::spawn_blocking(|| {
+        ModelManager::new(None, None)
             .list_store_cards()
             .map_err(|e| e.to_string())
             .and_then(|cards| serde_json::to_value(cards).map_err(|e| e.to_string()))
@@ -602,11 +594,7 @@ pub async fn delete_engine(
 
 // ---------------------------------------------------------------- 长操作
 
-pub fn start_download(
-    service: &Arc<ModelStoreService>,
-    card_id: String,
-    test_mode: bool,
-) -> Result<Value, String> {
+pub fn start_download(service: &Arc<ModelStoreService>, card_id: String) -> Result<Value, String> {
     let card_for_job = card_id.clone();
     let queue = Arc::clone(&service.queue);
 
@@ -644,7 +632,7 @@ pub fn start_download(
             };
             let log_cb = Arc::clone(log);
             let mut cb = move |line: &str| log_cb.push(line);
-            manager(test_mode)
+            ModelManager::new(None, None)
                 .download_from_store(&card_for_job, &mut cb, control, Some(&mut gate))
                 .map(|r| serde_json::to_value(r).unwrap_or(Value::Null))
                 .map_err(|e| e.to_string())
@@ -891,52 +879,13 @@ pub fn create_api_key(card_id: String, label: Option<String>) -> Result<Value, S
         .and_then(|key| serde_json::to_value(key).map_err(|e| e.to_string()))
 }
 
-// ---------------------------------------------------------------- 测试商店开关
-
-/// 测试商店口令的 sha256。
-///
-/// 只存哈希、且校验放在后端：明文写进前端的话，打开开发者工具就看见了。
-/// 但要说清楚——**这是防呆，不是防攻击**。拿到 deb 逆向出这个哈希、再爆破一个
-/// 简单口令是分分钟的事。它挡的是「客户误点进来」，挡不住「有人存心要开」。
-const TEST_STORE_PASSWORD_SHA256: &str =
-    "b1462f7b2997b606480c26ab059074104a27bf667f406f9b4d8af38132ba5772";
-
-/// 首尾空白要 trim 掉：从别处复制口令时经常带着换行，那不该被当成输错。
-fn test_store_password_matches(input: &str) -> bool {
-    use sha2::{Digest, Sha256};
-    crate::platform::encoding::hex_lower(&Sha256::digest(input.trim().as_bytes()))
-        == TEST_STORE_PASSWORD_SHA256
-}
-
-pub fn test_store_state() -> Result<Value, String> {
-    Ok(json!({ "enabled": config::load_settings().test_mode_enabled }))
-}
-
-/// **口令错也算成功返回**，body 是 `{"ok": false}`。
-///
-/// 口令不对不是错误：调用方要能区分「口令输错了」和「配置没写进去」——前者提示
-/// 用户重输，后者得让用户去看磁盘/权限。都压成 Err 的话这两件事在界面上长得
-/// 一模一样。真的写不进配置文件才返回 Err。
-pub fn unlock_test_store(password: String) -> Result<Value, String> {
-    if !test_store_password_matches(&password) {
-        return Ok(json!({ "ok": false }));
-    }
-    set_test_store_enabled(true)?;
-    Ok(json!({ "ok": true }))
-}
-
-pub fn disable_test_store() -> Result<Value, String> {
-    set_test_store_enabled(false)?;
-    Ok(json!({ "enabled": false }))
-}
-
-fn set_test_store_enabled(enabled: bool) -> Result<(), String> {
-    // 先读再改再整体写回：配置里还有 store_url / models_dir 等一堆字段，
-    // 只写自己关心的那个会把其余的全清掉。
-    let mut settings = config::load_settings();
-    settings.test_mode_enabled = enabled;
-    config::save_settings(&settings).map_err(|e| format!("保存设置失败：{e}"))
-}
+// 这里原来是**测试商店开关**：一个口令哈希、`test_store_state` /
+// `unlock_test_store` / `disable_test_store` 三个操作，以及把开关写进
+// `config.json` 的 `set_test_store_enabled`。整组连同内置测试卡片一起在
+// 2026-09-30 拿掉了，前端那个「连点标题 7 次弹口令框」的隐藏入口也一起没了。
+//
+// 那个口令从来只是防呆（哈希编译在二进制里，逆向拿得到），真正的边界是**卡片
+// 根本不进发布包**——现在是这样了。
 
 // ------------------------------------------------------ 启动时回收残留进程
 
@@ -960,27 +909,6 @@ pub fn run_startup_cleanup(service: &Arc<ModelStoreService>) {
         report.skipped_root.len()
     );
     service.startup_cleanup.set(report);
-}
-
-/// 启动时把内置（测试商店）卡片的固化脚本刷新成应用当前版本。
-///
-/// **必须在启动阶段真的被调用**——`refresh_builtin_cards` 的文档一直写着「应用
-/// 启动时跑一次」，但在此之前全仓零调用点。它要防的事故在真机上发生过：推了新
-/// 应用、脚本改动一个都没生效，卡片跑的还是下载那天固化的旧脚本，白查了一轮。
-///
-/// 内置卡的脚本正文编译在二进制里，所以应用升级就等于脚本升级，不该还要用户
-/// 手动点一次「检查卡片更新」。
-///
-/// 失败不影响启动：它只碰 `card_source = 'builtin'` 的记录，刷不动就维持原样。
-pub fn run_startup_refresh() {
-    let refreshed = ModelManager::refresh_builtin_cards();
-    if !refreshed.is_empty() {
-        eprintln!(
-            "[model-store] 启动刷新：{} 张内置卡片的脚本已更新到当前应用版本（{}）",
-            refreshed.len(),
-            refreshed.join("、")
-        );
-    }
 }
 
 /// 取走启动清理的报告。**取一次就没了**——否则用户每切一次视图就被同一条提示弹一遍。
@@ -1035,7 +963,8 @@ pub fn set_storage_settings(
     models_dir: Option<String>,
     import_scan_dirs: Option<Vec<String>>,
 ) -> Result<Value, String> {
-    // 先读再改再整体写回，理由同 set_test_store_enabled
+    // 先读再改再整体写回：配置里还有 hf_endpoint / staging_dir 等一堆字段，
+    // 只写自己关心的那个会把其余的全清掉。
     let mut settings = config::load_settings();
     if let Some(dir) = models_dir {
         let dir = dir.trim().to_string();

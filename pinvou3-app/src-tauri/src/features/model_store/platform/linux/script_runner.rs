@@ -527,14 +527,17 @@ pub struct FetchPolicy {
     pub may_run_as_root: bool,
     /// 允许把 `url` 当本地文件路径读。
     ///
-    /// 只有内置测试商店会这样：它没有服务器，卡片详情里的"URL"就是应用自己
-    /// 刚写到 `data_dir()/test_store_scripts/` 下的那个文件路径。真实商店一律
-    /// 不给这个开关——否则一张被改过的卡片只要把 URL 写成任意一个本地路径，
-    /// 就能让应用去读它、再把读到的内容当脚本执行。
+    /// **生产上永远是 false。** 内置测试商店（没有服务器，卡片详情里的"URL"就是
+    /// 应用自己写到 `data_dir()/test_store_scripts/` 下的文件路径）2026-09-30 拿掉
+    /// 之后，唯一还会把它置真的地方是 lifecycle 的下载编排测试——那一位怎么来的、
+    /// 为什么生产代码碰不到它，见 `lifecycle::ModelManager::local_script_paths`。
+    ///
+    /// 它挡的事从来没变：一张被改过的卡片只要把 URL 写成任意一个本地路径，就能
+    /// 让应用去读它、再把读到的内容当脚本执行（install_engine 还经 pkexec 提权）。
     pub allow_local_path: bool,
 }
 
-/// 从 URL（或测试商店的本地路径）取正文，先按 `policy` 校验来源、再校验哈希。
+/// 从 URL 取正文，先按 `policy` 校验来源、再校验哈希。
 /// 调用方拿到正文可以直接固化进数据库，不用再重复下载。
 ///
 /// 这三道来源校验不是各自独立的洁癖，是一条链上的三个环节：任何一环放行，
@@ -548,10 +551,9 @@ pub fn fetch_script_content(
     // ① 要以 root 跑的脚本，没有登记哈希就不跑。
     //
     // 这个参数以前是纯 Option：商店不下发就跳过校验、"保持兼容"。兼容的是
-    // 一个并不存在的老后台——生产商店的 card_scripts 表每一行都带 sha256，
-    // 内置测试商店的哈希是应用自己算的，两边都给。而代价是：真有一天哪张卡片
-    // 少了这个字段（或者有人把它删了），install_engine 会**不声不响**地以 root
-    // 执行一份没人校验过的内容。
+    // 一个并不存在的老后台——生产商店的 card_scripts 表每一行都带 sha256。而代价
+    // 是：真有一天哪张卡片少了这个字段（或者有人把它删了），install_engine 会
+    // **不声不响**地以 root 执行一份没人校验过的内容。
     if policy.may_run_as_root && expected_sha256.is_none() {
         return Err(ScriptError::new(format!(
             "{UNTRUSTED_SOURCE_PREFIX}：这一步要以管理员权限执行，但商店没有下发该脚本的 \
@@ -569,8 +571,7 @@ pub fn fetch_script_content(
         // install_engine 紧接着就是 pkexec。
         return Err(ScriptError::new(format!(
             "{UNTRUSTED_SOURCE_PREFIX}：脚本地址不是 https（{url}）。明文链路上内容和\
-             校验值会被一起篡改，而这些脚本要在本机执行，已中止；请把设置里的模型商店\
-             地址改成 https 开头的地址"
+             校验值会被一起篡改，而这些脚本要在本机执行，已中止"
         )));
     } else if policy.allow_local_path {
         std::fs::read_to_string(url)
@@ -583,7 +584,7 @@ pub fn fetch_script_content(
         // 的能力交了出去。
         return Err(ScriptError::new(format!(
             "{UNTRUSTED_SOURCE_PREFIX}：商店给的脚本地址不是 https 链接（{url}）。\
-             只有打包在应用里的测试商店才允许用本地文件路径，已中止"
+             本地文件路径一律不收，已中止"
         )));
     };
 
@@ -606,8 +607,8 @@ pub fn fetch_script_content(
 /// **目前零调用点**：lifecycle 走的是 `ScriptsSource::prepare`——它还要处理多
 /// 文件卡片的整棵文件树和持久工作目录，不能只落一个临时文件。
 ///
-/// `url` 是商店服务器下发的 https 地址；测试模型商店没有服务器，直接给的是本地
-/// 脚本文件路径——哪一种算合法由 `policy` 决定，见 [`FetchPolicy`]。
+/// `url` 是商店服务器下发的 https 地址——什么算合法由 `policy` 决定，
+/// 见 [`FetchPolicy`]。
 ///
 /// `expected_sha256` 是商店卡片详情里登记的脚本哈希，下发了就必须匹配；
 /// `policy.may_run_as_root` 为真时它还是**必填**的。

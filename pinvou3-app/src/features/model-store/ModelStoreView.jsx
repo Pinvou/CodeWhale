@@ -17,11 +17,9 @@ import { EmptyState } from '../../components/EmptyState.jsx';
 import { Spinner } from '../../components/Spinner.jsx';
 import { IosSearchField } from '../../components/IosControls.jsx';
 import {
-  disableTestStore,
   fetchLibrary,
   fetchMemoryAdmission,
   fetchStoreCards,
-  fetchTestStoreState,
   forceRemoveModel,
   startDeploy,
   startDownload,
@@ -30,10 +28,8 @@ import {
   startUninstall,
   storeAvailability,
   takeStartupCleanup,
-  unlockTestStore,
 } from './model-store-api.js';
 import {
-  advanceUnlockClicks,
   cardIdFromLifecycleKey,
   downloadTaskKey,
   filterModels,
@@ -71,7 +67,6 @@ import { LocalResourcesDialog } from './LocalResourcesDialog.jsx';
 import {
   BTN_NEUTRAL,
   HOVER_SURFACE,
-  INPUT_CLASS,
   MsButton,
   MsDialog,
   MsDialogTitle,
@@ -82,9 +77,11 @@ import {
 
 const TOAST_MS = 3200;
 
-// 顶部那一行胶囊按钮的规格。筛选和数据源切换共用 —— 它们在同一行里并排出现,
-// 差一档字重或一像素高度都会被看出来。
-// 口令框刻意不给关闭回调:见下面用到它的地方。提到模块级是为了保持引用稳定,
+// 顶部那一行筛选胶囊的规格。
+//
+// 这一行原来还并排着一组「数据源」胶囊(正式商店 / 测试商店),内置测试商店
+// 2026-09-30 拿掉之后只剩筛选了。
+// 强制移除那个框刻意不给关闭回调(忙的时候不许关):提到模块级是为了保持引用稳定,
 // 否则 MsDialog 里那个按 Escape 的监听会跟着每次重渲染反复装卸。
 const NOOP = () => {};
 
@@ -144,18 +141,8 @@ const ModelStoreView = ({ theme, t, bs }) => {
   // 二次内存确认只在“已有模型运行且风险/预算未知”时出现。首个模型不拦截。
   const [memoryConfirm, setMemoryConfirm] = useState(null);
 
-  // 测试模型商店:卡片和脚本打包在 LMM 内、不依赖商店服务器,只给开发验证脚本
-  // 本身用。所以它默认关着,而且开关是**隐藏**的 —— 见下面 handleSecretUnlockClick。
-  const [testStoreEnabled, setTestStoreEnabled] = useState(false);
-  // 数据源。开启测试商店只是多一个数据源,界面还是同一套。
-  const [source, setSource] = useState('official');
-  const [unlockOpen, setUnlockOpen] = useState(false);
-  const [unlockInput, setUnlockInput] = useState('');
-  // 连点计数放 ref 不放 state:它不该触发重渲染,而且必须能在同一次事件序列里
-  // 立刻读到最新值 —— 用 state 的话闭包里拿到的是上一次的旧值。
-  const unlockClicksRef = useRef(null);
-
-  const testMode = source === 'test';
+  // 这里原来有一整套「测试模型商店」的状态:开关、数据源胶囊、口令框、以及连点
+  // 计数的 ref。内置测试商店 2026-09-30 整体拿掉,数据源只剩生产商店一个。
 
   const { tasks, runningTask } = useLmmTasks();
   const toastTimerRef = useRef(null);
@@ -188,27 +175,26 @@ const ModelStoreView = ({ theme, t, bs }) => {
   // 加载商店在架卡片。
   //
   // 序号那道闸门:慢的旧响应落地时能认出自己已经过期,直接丢掉。没有它的话,
-  // 切数据源胶囊(testMode 变化 → effect 重跑)、加载中点刷新、后台任务完成触发的
-  // 刷新跟用户操作撞在一起,都会产生并发请求;先发的那个若后回来,就会把新数据
-  // 覆盖成旧数据——界面显示的卡片跟当前数据源对不上,而转圈早被先落地的那个关掉了。
+  // 加载中点刷新、后台任务完成触发的刷新跟用户操作撞在一起,都会产生并发请求;
+  // 先发的那个若后回来,就会把新数据覆盖成旧数据,而转圈早被先落地的那个关掉了。
   // 同 PR 的 ModelDetailDialog 用的是同一个套路。
   const loadCards = useCallback(async () => {
     const token = (cardsTokenRef.current += 1);
     const stale = () => token !== cardsTokenRef.current;
     setStoreLoading(true);
     try {
-      const cardList = await fetchStoreCards(testMode);
+      const cardList = await fetchStoreCards();
       if (stale()) return;
       setCards(Array.isArray(cardList) ? cardList : []);
       setStoreError(null);
     } catch (error) {
-      // 过期请求的失败也要丢掉:否则切到测试商店之后,正式商店那次的超时
-      // 会把已经加载好的测试商店列表打成错误态。
+      // 过期请求的失败也要丢掉:否则一次已经被取代的超时会把后来加载好的列表
+      // 打成错误态。
       if (!stale()) setStoreError(String(error?.message || error));
     } finally {
       if (!stale()) setStoreLoading(false);
     }
-  }, [testMode]);
+  }, []);
 
   /** 加载本地模型库。纯本进程查询,不该跟着远端商店一起失败,所以单独一条路。 */
   const loadLibrary = useCallback(async () => {
@@ -277,68 +263,6 @@ const ModelStoreView = ({ theme, t, bs }) => {
       alive = false;
     };
   }, [copy, guide, showToast]);
-
-  // 进页面读一次测试商店开关。sidecar 没起来时不问 —— 那只会拿到一个连接错误。
-  //
-  // 拿不到就当它关着:老版本 LMM 没有这条接口,而"问不出来"和"没开"在界面上
-  // 应该是同一个样子 —— 一点痕迹都不留。
-  useEffect(() => {
-    if (guide !== 'ready') return undefined;
-    let cancelled = false;
-    fetchTestStoreState()
-      .then((state) => {
-        // eslint-disable-next-line react-hooks/set-state-in-effect -- 开关存在 LMM 那边(另一个进程),只能这样同步进来
-        if (!cancelled) setTestStoreEnabled(!!state?.enabled);
-      })
-      .catch(() => {});
-    return () => {
-      cancelled = true;
-    };
-  }, [guide]);
-
-  // 隐藏入口:连点页面标题 7 次(间隔不超过 1.5 秒)才弹口令框,见 advanceUnlockClicks。
-  //
-  // 全程不给任何提示 —— 提示等于把入口告诉了所有人,那这个入口就白藏了。
-  const handleSecretUnlockClick = useCallback(() => {
-    if (testStoreEnabled) return; // 已经开着,不用再点
-    const next = advanceUnlockClicks(unlockClicksRef.current, Date.now());
-    unlockClicksRef.current = next;
-    if (next.reached) setUnlockOpen(true);
-  }, [testStoreEnabled]);
-
-  const closeUnlock = useCallback(() => {
-    setUnlockOpen(false);
-    setUnlockInput('');
-  }, []);
-
-  const submitUnlock = useCallback(async () => {
-    try {
-      const result = await unlockTestStore(unlockInput);
-      // 口令错回的是 ok:false 而不是 HTTP 错误,所以走的是这条正常路径:只提示
-      // 一句、把框留着让用户重输,而不是当成故障把框关掉。
-      if (!result?.ok) {
-        showToast(copy.testStoreWrongPassword);
-        return;
-      }
-      closeUnlock();
-      setTestStoreEnabled(true);
-      showToast(copy.testStoreUnlocked);
-    } catch (error) {
-      showToast(String(error?.message || error));
-    }
-  }, [closeUnlock, copy, showToast, unlockInput]);
-
-  const handleDisableTestStore = useCallback(async () => {
-    try {
-      await disableTestStore();
-      setTestStoreEnabled(false);
-      // 数据源切回正式商店:测试卡片这时已经拉不到了,留在测试源上只会得到一片空。
-      setSource('official');
-      showToast(copy.testStoreDisabled);
-    } catch (error) {
-      showToast(String(error?.message || error));
-    }
-  }, [copy, showToast]);
 
   // 这里原来有一整套「拉起 sidecar」的流程：handleStart、starting/startError 两个
   // 状态、一个"只自动试一次"的 autoStartedRef，以及引导区那个「启动」按钮。
@@ -479,7 +403,7 @@ const ModelStoreView = ({ theme, t, bs }) => {
         title: copy.taskDownload(card.name),
         kind: 'download',
         key: downloadTaskKey(card.id),
-        start: () => startDownload(card.id, testMode),
+        start: () => startDownload(card.id),
       });
       if (result.duplicate || result.aborted) return;
       if (result.ok) showToast(copy.downloadDone(card.name));
@@ -487,7 +411,7 @@ const ModelStoreView = ({ theme, t, bs }) => {
       // 中断的下载可能已经改变了本地状态。
       loadAll();
     },
-    [copy, loadAll, showToast, testMode]
+    [copy, loadAll, showToast]
   );
 
   // `doneText` 可以是一句现成的话，也可以是 `(outcome) => string`：卸载要按服务端
@@ -723,12 +647,6 @@ const ModelStoreView = ({ theme, t, bs }) => {
     { key: 'running', label: copy.filterRunning },
   ];
 
-  /** 数据源切换。只在测试商店开着时出现;界面是同一套,换的只是卡片从哪来。 */
-  const SOURCES = [
-    { key: 'official', label: copy.sourceOfficial },
-    { key: 'test', label: copy.sourceTest },
-  ];
-
   /**
    * 打开详情。已下载的走库详情（有运行态、日志、Key），没下载的走商店卡片详情。
    * 两个弹窗承载的信息不一样，不能合并——库详情要的字段商店卡片根本没有。
@@ -898,21 +816,13 @@ const ModelStoreView = ({ theme, t, bs }) => {
           商店放在一起看，这里差一点都显眼。 */}
       <header className="z-30 bg-white/80 backdrop-blur-2xl dark:bg-[#131314]/80">
         <div className="mx-auto flex max-w-[1400px] flex-wrap items-center gap-3 border-b border-slate-200/50 pb-6 dark:border-white/10">
-          {/* 标题就是测试商店的隐藏入口：连点 7 次（间隔不超过 1.5 秒）才弹口令框。
-              原来挂在列表底部那行「本地模型管理 vX.Y.Z」上，但模型商店并入品悟之后
-              不该再有自己的版本号——它是品悟的一部分，不是一个搭在里面的独立应用。
-              标题是页面上唯一一直都在、又不承担任何点击语义的元素，挪到这儿最合适。
-              全程不给任何提示：提示等于把入口告诉所有人，那藏它就没意义了。
-              cursor-default + select-none：连点时既不像按钮，也不会把标题选成高亮。 */}
-          {/* 两条规则都要压:仓库里所有「只响应指针、不进 tab 序」的元素都是这么写的
-              （见 components/ComposerPopover.jsx、features/chat/ChatView.jsx）。
-              只写一条的话另一条照样会报。 */}
-          {/* biome-ignore lint/a11y/useKeyWithClickEvents: 隐藏入口，刻意不给键盘路径 */}
-          {/* biome-ignore lint/a11y/noStaticElementInteractions: 隐藏入口，刻意不进 tab 序、不暴露为按钮 */}
+          {/* 标题上原来挂着测试商店的隐藏入口（连点 7 次弹口令框），随内置测试商店
+              一起去掉了，所以这里不再有任何点击语义、也不用压 a11y 规则。
+              cursor-default + select-none 留着：它就是一行标题，不该看着像按钮、
+              也不该被拖选成一片高亮。 */}
           <h1
             data-testid="model-store-title"
             className="shrink-0 cursor-default select-none text-[26px] font-normal tracking-tight"
-            onClick={handleSecretUnlockClick}
           >
             {copy.title}
           </h1>
@@ -971,19 +881,8 @@ const ModelStoreView = ({ theme, t, bs }) => {
 
       <main className="flex-1">
         <div className="mx-auto max-w-[1400px] pb-8 pt-5">
-          {/* 测试商店开着时必须一直说出来:它的卡片和脚本都是打包在应用内的假数据,
-              用户要是忘了自己开过,会把测试卡片当成正式上架的模型。 */}
-          {guide === 'ready' && testStoreEnabled ? (
-            <div
-              data-testid="model-store-test-banner"
-              className="mb-4 mx-3 flex flex-wrap items-center justify-between gap-2 rounded-[14px] bg-amber-50 px-3 py-2 dark:bg-amber-500/10"
-            >
-              <span className="text-[12px] text-amber-800 dark:text-amber-300">{copy.testStoreBanner}</span>
-              <MsButton tone="ghost" onClick={handleDisableTestStore} data-testid="model-store-test-disable">
-                {copy.testStoreDisable}
-              </MsButton>
-            </div>
-          ) : null}
+          {/* 这里原来有一条「测试模型商店已开启」的琥珀色提示条,以及一个关闭按钮。
+              内置测试商店拿掉之后不存在这个状态了,也就不需要再提醒用户。 */}
           {guide === 'ready' ? (
             <div className="mb-5 flex flex-wrap items-center gap-2 px-3" data-testid="model-store-filters">
               {FILTERS.map((item) => (
@@ -998,22 +897,6 @@ const ModelStoreView = ({ theme, t, bs }) => {
                   {item.label}
                 </button>
               ))}
-              {testStoreEnabled ? (
-                <div className="ml-auto flex items-center gap-2" data-testid="model-store-source">
-                  {SOURCES.map((item) => (
-                    <button
-                      key={item.key}
-                      type="button"
-                      data-testid={`model-store-source-${item.key}`}
-                      aria-pressed={source === item.key}
-                      className={`${PILL_BASE} ${source === item.key ? PILL_ON : PILL_OFF}`}
-                      onClick={() => setSource(item.key)}
-                    >
-                      {item.label}
-                    </button>
-                  ))}
-                </div>
-              ) : null}
             </div>
           ) : null}
           {renderBody()}
@@ -1279,39 +1162,6 @@ const ModelStoreView = ({ theme, t, bs }) => {
             </div>
           </>
         ) : null}
-      </MsDialog>
-
-      {/* 测试商店口令框。
-          onClose 给一个空函数 = 点遮罩和按 Escape 都不关闭,只能点「取消」:
-          误触把已经输了一半的口令清掉体验很糟,而这个框本来就是刻意难打开的。 */}
-      <MsDialog
-        open={unlockOpen}
-        onClose={NOOP}
-        theme={theme}
-        labelledBy="model-store-unlock-title"
-        testId="model-store-unlock-dialog"
-      >
-        <MsDialogTitle id="model-store-unlock-title">{copy.testStoreUnlockTitle}</MsDialogTitle>
-        <p className={`mb-3 text-[13px] leading-6 ${TEXT_SECONDARY}`}>{copy.testStoreUnlockHint}</p>
-        <input
-          type="password"
-          // biome-ignore lint/a11y/noAutofocus: 这个框是连点七次专门叫出来的,焦点不给它就得让用户再点一下才能输
-          autoFocus
-          className={INPUT_CLASS}
-          placeholder={copy.testStorePasswordPlaceholder}
-          data-testid="model-store-unlock-input"
-          value={unlockInput}
-          onChange={(event) => setUnlockInput(event.target.value)}
-          onKeyDown={(event) => {
-            if (event.key === 'Enter' && unlockInput) submitUnlock();
-          }}
-        />
-        <div className="mt-5 flex justify-end gap-2">
-          <MsButton tone="ghost" onClick={closeUnlock}>{copy.testStoreUnlockCancel}</MsButton>
-          <MsButton disabled={!unlockInput} onClick={submitUnlock} data-testid="model-store-unlock-confirm">
-            {copy.testStoreUnlockConfirm}
-          </MsButton>
-        </div>
       </MsDialog>
 
       <ModelStoreTaskPanel

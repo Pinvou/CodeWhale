@@ -502,22 +502,22 @@ export const dictZh = {
           //
           // 分工是：宿主答「去哪找」（扫描根通过 LMM_IMPORT_DIRS 下发、结果通过
           // LMM_IMPORT_CANDIDATES 交给脚本，并写进运行日志），卡片脚本答「这份
-          // 对不对、要不要用」。于是**两套卡片行为不同**：
-          //   - 正式商店的远端卡片：已消费 LMM_IMPORT_DIRS（2026-09-21 上架生产，
-          //     在架 7 张里 7 张都接了），会复用完整的本机副本，不再重复下载。
-          //   - 内置测试商店的卡片（打进二进制的 data/test-store/）：没接，仍会
-          //     联网下载。仓库里那份是旧副本，跟正式商店不同步。
+          // 对不对、要不要用」。而卡片脚本不在这个仓库里，只在商店服务器上：
+          // 2026-09-21 在架那 7 张都消费了 LMM_IMPORT_DIRS，但那是**当时那一批**的
+          // 情况，不是对将来每一张卡的承诺。
           //
-          // 所以早先两版文案都是假话，只是方向相反：一版承诺「会被自动找到并复用」
-          // （对测试卡片是假的），一版改成「当前版本不会自动复用」（对正式商店的
-          // 用户是假的）。现在按「宿主做了什么 + 复用取决于卡片」写，两边都不撒谎，
-          // 测试卡片接上之后也不用再改。
+          // 早先两版文案都是假话，只是方向相反：一版承诺「会被自动找到并复用」，
+          // 一版改成「当前版本不会自动复用」。现在按「宿主做了什么 + 复用取决于
+          // 卡片」写，不替任何一张卡下断言。
+          //
+          // （这里原来还要点名「内置测试商店的卡片没接」，内置测试商店 2026-09-30
+          // 拿掉之后不再有第二个数据源要区分。）
           storageModelsDirHint: '改目录不会搬运已下载的权重。旧目录里的模型仍在本机，但不会自动进入下面的查找范围——想继续复用，请把旧目录填到「额外的查找目录」里。',
           storageFree: (size) => `可用 ${size}`,
           storageImportLabel: '额外的查找目录',
           storageImportHint: '一行一个绝对路径。如果你把模型放在我们猜不到的地方（比如另一块数据盘），填在这里。',
           storageScanLabel: '下载前实际查找的位置',
-          storageScanHint: '按这个顺序找；扫到的结果写进运行日志，并交给模型卡片核对。是否复用由卡片脚本决定：正式商店的卡片会直接复用完整的本机副本，内置测试商店的卡片尚未接入、仍会联网下载。U 盘和移动硬盘会自动加入。',
+          storageScanHint: '按这个顺序找；扫到的结果写进运行日志，并交给模型卡片核对。是否复用由卡片脚本决定，不由品悟决定：卡片认下本机副本就跳过下载，认不下就照常下载。U 盘和移动硬盘会自动加入。',
           storageRemovable: '可移动介质',
           storageSave: '保存',
           storageCancel: '取消',
@@ -525,19 +525,9 @@ export const dictZh = {
           // 读取设置失败时，保存按钮会被禁用——空的「额外的查找目录」一旦提交
           // 会被解析成空列表，把用户已存的几条目录静默清空。这句话解释按钮为什么灰着。
           storageLoadFailedHint: '没能读到当前的存储设置，已暂时禁用保存，以免把已保存的查找目录覆盖掉。请关闭后重新打开。',
-          // —— 测试模型商店(隐藏入口:连点页面标题 7 次,间隔不超过 1.5 秒) ——
-          testStoreUnlockTitle: '开启测试模型商店',
-          testStoreUnlockHint: '测试商店的卡片和脚本打包在应用内、不依赖商店服务器，仅供开发验证脚本本身。',
-          testStorePasswordPlaceholder: '口令',
-          testStoreUnlockConfirm: '开启',
-          testStoreUnlockCancel: '取消',
-          testStoreWrongPassword: '口令不对',
-          testStoreUnlocked: '测试模型商店已开启，可在上方切换数据源',
-          testStoreBanner: '测试模型商店已开启（仅供开发验证，卡片打包在应用内）',
-          testStoreDisable: '关闭',
-          testStoreDisabled: '测试模型商店已关闭。再次开启需重新输入口令',
-          sourceOfficial: '正式商店',
-          sourceTest: '测试商店',
+          // 这里原来有一组 testStore* 文案和 sourceOfficial / sourceTest 两个数据源
+          // 标签，服务的是「测试模型商店」那个隐藏开关（连点页面标题 7 次弹口令框）。
+          // 内置测试商店 2026-09-30 整体拿掉，三语一起删（en/ja 有 parity 断言）。
         },
         uiToolStore: { title:'插件中心', search:'搜索连接器、技能、插件等', myTools:'我的插件', installedOnly:'仅显示已安装', results:'检索结果', back:'返回插件中心', internal:'集团内部 · 员工专属', internalTitle:'H3C 办公生态\n一键接入', internalDesc:'以你本人 SSO 身份直连集团内部系统，全程不填 key', internalTools:'H3C 集团内部插件', internalCount:n=>`${n} 个插件 · 需内网`, view:'查看', modePlain:'普通会话', modeCode:'代码会话', modeVisibilityHint:'按会话模式配置插件可见性', manageVisibility:'管理可见性', doneManagingVisibility:'完成', guide:{ title:'插件指南', close:'关闭', dragTitle:'拖入即装', dragDesc:'把标准 Skill、单个 .md、MCP 服务或 Pinvou 插件包 .zip 直接拖进本窗口即可导入；也可点右上角「上传」选择文件。', typesTitle:'支持的形式', types:['标准 Skill（SKILL.md 目录）','单个 .md 技能文件','MCP 服务','Pinvou 插件包（推荐）'], formatsNote:'标准 Skill、.md、MCP 和 Pinvou 插件包都可导入；Pinvou 插件包只是推荐的一种标准形态，其余形式会被自动规范化。', dragHintShort:'拖入插件包可上传自定义插件', introTitle:'什么是 Pinvou 插件包', introDesc:'一个插件包 = 一张卡 = 一个开关。把技能、MCP 服务（或它们的组合）打成一个 zip，导入后按内容自动识别类型、安全校验、落盘注册，并在商店与运行时统一开关、卸载。', specTitle:'插件包规范', specDesc:'完整规范见《插件包设计规范》：zip 布局、plugin.json（schema v1）、mcp manifest.json、SKILL.md、图标与命名安全。', downloadSpec:'下载规范文档（Markdown）', downloadHint:'下载后可直接分发给第三方包作者；桌面端会打开保存对话框。' } },
         artifactPreview: { download:'↓ 下载', openExternal:'↗ 外部打开', loading:'加载中…', fileMissing:'文件不存在或已被删除', readFailed:e=>`读取失败: ${e}`, imageReadFailed:e=>`图片读取失败: ${e}`, previewUnsupported:'此类型暂不支持预览', visualWarningTruncatedPages:'页数较多，仅渲染前 30 页', visualWarningConvertFailed:'该文件暂无法可视化预览（转换失败或缺少渲染组件）', downloadArtifact:'↓ 下载产物', openExternalArtifact:'↗ 外部打开' },

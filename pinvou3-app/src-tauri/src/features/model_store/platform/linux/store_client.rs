@@ -1,9 +1,12 @@
 //! 模型商店后台 API 客户端。
 //!
-//! `StoreClient` 连真正的商店服务器（按设置里的 store_url）；测试模型商店
-//! （`LocalStoreClient`，阶段 7 移植 test_store_data 时补）没有服务器、卡片和
-//! 脚本直接打包在应用本地，接口保持一致，业务逻辑层（model_manager）不感知
-//! 数据源差异。
+//! `StoreClient` 连真正的商店服务器（地址是固定常量 `config::STORE_URL`）。
+//!
+//! 数据源做成 `StoreSource` trait 而不是直接调 `StoreClient`，现在只剩测试里
+//! 的假实现在用——**内置测试商店（`LocalStoreClient` + 打包在二进制里的卡片）
+//! 2026-09-30 整体拿掉了**：生产在架卡片和内置副本已经分叉（同名
+//! `install_engine.sh` 两边 diff 不一致、下架的卡还编在应用里），而改内置脚本
+//! 又不触发 CI 的 rust-test，是一块没人守的区域。口径从此只有一个：以生产为准。
 
 use std::time::Duration;
 
@@ -171,7 +174,7 @@ pub struct StoreCardDetail {
     pub source_repo_id: Option<String>,
     #[serde(default)]
     pub source_filename: Option<String>,
-    /// script_type -> 下载 URL（或测试商店里的本地文件路径）
+    /// script_type -> 下载 URL
     #[serde(default)]
     pub scripts: std::collections::BTreeMap<String, String>,
     /// 后台下发的脚本内容哈希（script_type -> sha256 hex），客户端执行前校验；
@@ -292,12 +295,15 @@ impl StoreClient {
         // 下游那套"取回后逐字节校验"就只剩防传输损坏的作用，防不了伪造——而
         // install_engine 是经 pkexec 以 root 执行的。
         //
-        // 代价说清楚：内网自建的 http 商店会被这条拒掉，用户得给自己的商店配上
-        // https。放行 http 等于让哈希校验变成摆设，不值得。
+        // 商店地址现在是编译期常量（`config::STORE_URL`，2026-09-30 起不再可配），
+        // 所以这条在生产路径上是**恒成立的**。留着不是冗余：`new` 仍然收字符串，
+        // 测试和将来任何新调用方都可能传别的东西进来，而这条判据一旦失守，下游
+        // 「取回后逐字节校验」就只剩防传输损坏的作用，防不了伪造——而
+        // install_engine 是经 pkexec 以 root 执行的。
         if !self.base_url.starts_with("https://") {
             return Err(StoreError::new(
                 "模型商店地址必须是 https——卡片里的脚本哈希要靠这条链路本身保真，\
-                 明文传输时校验挡不住伪造。请在设置里把商店地址改成 https。",
+                 明文传输时校验挡不住伪造。",
             ));
         }
         // 上面那道 https 门只管得住**首跳**。reqwest 默认会跟随最多 10 次重定向，
@@ -388,10 +394,8 @@ impl StoreClient {
                             .unwrap_or_else(|| e.to_string());
                         return Err(StoreError::new(cause));
                     }
-                    last_err = format!(
-                        "{}（请检查设置里的模型商店地址是否正确、设备是否能访问外网）",
-                        humanize_reqwest_error(&e)
-                    );
+                    last_err =
+                        format!("{}（请检查设备能不能访问外网）", humanize_reqwest_error(&e));
                     if e.is_timeout() || attempt == STORE_API_ATTEMPTS {
                         break;
                     }
@@ -419,115 +423,6 @@ impl StoreSource for StoreClient {
         let safe = super::config::safe_path_component(card_id)
             .map_err(|e| StoreError::new(format!("卡片 id 不合法：{e}")))?;
         self.get_json(&format!("/api/v1/cards/{safe}"))
-    }
-}
-
-/// 测试模型商店：卡片和六类脚本都打包在应用里，不发任何网络请求。脚本内容
-/// 落到本地一个固定目录下，供 script_runner 像对待"下载下来的脚本"一样读取
-/// 执行；哈希也自己算，让"下载即验签"这条代码路径在调试期就被反复执行，而
-/// 不是只在连真实后台时才第一次跑。
-pub struct LocalStoreClient {
-    scripts_dir: std::path::PathBuf,
-}
-
-impl LocalStoreClient {
-    pub fn new() -> Self {
-        let scripts_dir = super::config::data_dir().join("test_store_scripts");
-        let client = Self { scripts_dir };
-        client.materialize();
-        client
-    }
-
-    /// 把内置脚本写到磁盘（每次构造都重写一遍：应用升级后脚本可能改过，
-    /// 不能让上一版留下的旧文件继续被执行）。
-    ///
-    /// 附属文件（整包交付的卡片才有）落到同一张卡的 `assets/` 子目录下，跟
-    /// 六个入口脚本分开放，免得包里恰好也有个叫 `deploy.sh` 的文件被覆盖。
-    /// 真正执行时 ModelManager 会把它们再展开到卡片工作目录，这里只是把
-    /// "商店提供的文件"这一层如实模拟出来。
-    fn materialize(&self) {
-        for card in super::test_store_data::test_cards() {
-            let dir = self.scripts_dir.join(&card.summary.id);
-            if std::fs::create_dir_all(&dir).is_err() {
-                continue;
-            }
-            for script_type in card.scripts.keys() {
-                if let Some(content) = super::test_store_data::script_content(&card, script_type) {
-                    let _ = std::fs::write(dir.join(format!("{script_type}.sh")), content);
-                }
-            }
-            if !card.assets.is_empty() {
-                let files = card
-                    .assets
-                    .iter()
-                    .map(|(k, v)| (k.to_string(), v.to_string()))
-                    .collect();
-                let _ = super::script_runner::materialize_assets(&dir.join("assets"), &files);
-            }
-        }
-    }
-
-    fn find_card(&self, card_id: &str) -> Result<super::test_store_data::TestCard, StoreError> {
-        super::test_store_data::test_cards()
-            .into_iter()
-            .find(|c| c.summary.id == card_id)
-            .ok_or_else(|| StoreError::new(format!("未找到测试商店卡片：{card_id}")))
-    }
-}
-
-impl Default for LocalStoreClient {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl StoreSource for LocalStoreClient {
-    fn list_cards(&self) -> Result<Vec<StoreCardSummary>, StoreError> {
-        Ok(super::test_store_data::test_cards()
-            .into_iter()
-            .map(|c| c.summary)
-            .collect())
-    }
-
-    fn get_card(&self, card_id: &str) -> Result<StoreCardDetail, StoreError> {
-        use sha2::{Digest, Sha256};
-        let card = self.find_card(card_id)?;
-        let dir = self.scripts_dir.join(card_id);
-        let mut scripts = std::collections::BTreeMap::new();
-        let mut hashes = std::collections::BTreeMap::new();
-        for script_type in card.scripts.keys() {
-            let content = super::test_store_data::script_content(&card, script_type)
-                .ok_or_else(|| StoreError::new(format!("测试卡片缺少 {script_type} 脚本")))?;
-            scripts.insert(
-                script_type.to_string(),
-                dir.join(format!("{script_type}.sh"))
-                    .to_string_lossy()
-                    .to_string(),
-            );
-            hashes.insert(
-                script_type.to_string(),
-                crate::platform::encoding::hex_lower(&Sha256::digest(content.as_bytes())),
-            );
-        }
-        let mut assets = std::collections::BTreeMap::new();
-        let mut asset_hashes = std::collections::BTreeMap::new();
-        for (rel, content) in &card.assets {
-            assets.insert(
-                rel.to_string(),
-                dir.join("assets").join(rel).to_string_lossy().to_string(),
-            );
-            asset_hashes.insert(
-                rel.to_string(),
-                crate::platform::encoding::hex_lower(&Sha256::digest(content.as_bytes())),
-            );
-        }
-        Ok(super::test_store_data::to_detail(
-            &card,
-            scripts,
-            hashes,
-            assets,
-            asset_hashes,
-        ))
     }
 }
 

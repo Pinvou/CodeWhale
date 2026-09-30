@@ -10,7 +10,7 @@
 //!
 //! | 模块 | 职责 |
 //! |---|---|
-//! | `config` | 设置与路径（权重目录、暂存目录、商店地址） |
+//! | `config` | 设置与路径（权重目录、暂存目录；商店地址是固定常量） |
 //! | `db` | sqlite 卡片库：模型记录、状态机、脚本本地固化副本、API Key |
 //! | `store_client` | 商店 API 客户端，按 sha256 内容寻址取脚本和附属文件 |
 //! | `script_runner` | **最核心**：pty 执行卡片脚本，解析进度/交互提示，静默超时，取消 |
@@ -21,7 +21,6 @@
 //! | `errors` | 把技术错误翻译成用户看得懂的话 |
 //! | `disk` | 字节格式化与目录体积统计 |
 //! | `import_scan` | 下载前去哪找已在本机的权重（可配的搜索根目录） |
-//! | `test_store_data` | 内置测试商店的卡片数据（脚本正文编进二进制） |
 //!
 //! 相对 LMM **刻意没有搬**的：`admin.rs`（上游 919 行，本地 HTTP 管理接口——那是 sidecar
 //! 形态的产物，原生实现后前端直接走 Tauri 命令）、`updater.rs`（LMM 自己的 OTA，
@@ -41,16 +40,15 @@ pub mod run_state;
 pub mod script_runner;
 pub mod service;
 pub mod store_client;
-pub mod test_store_data;
 
 // 服务层的操作直接对外，签名与 `platform/unsupported.rs` 里的桩一一对应。
 // 命令层因此不必分平台分支。
 pub use service::{
     ModelStoreService, active_runs, answer_run, api_keys, cancel_run, create_api_key,
-    delete_engine, disable_test_store, export_run_log, force_remove, installed_engines, library,
-    list_cards, local_resources, memory_admission, model_detail, reveal_run_logs_dir, run_log,
-    run_startup_cleanup, run_startup_refresh, set_storage_settings, start_deploy, start_download,
-    start_lifecycle, storage_settings, take_startup_cleanup, test_store_state, unlock_test_store,
+    delete_engine, export_run_log, force_remove, installed_engines, library, list_cards,
+    local_resources, memory_admission, model_detail, reveal_run_logs_dir, run_log,
+    run_startup_cleanup, set_storage_settings, start_deploy, start_download, start_lifecycle,
+    storage_settings, take_startup_cleanup,
 };
 
 /// Linux 上模型商店总是可用的。

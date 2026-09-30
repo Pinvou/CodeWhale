@@ -472,22 +472,22 @@ export const dictEn = {
           //
           // The split is: the host answers "where to look" (roots go out via
           // LMM_IMPORT_DIRS, hits via LMM_IMPORT_CANDIDATES, and both land in the run
-          // log); the card script answers "is this copy good, and do I use it". So the
-          // two sets of cards behave differently:
-          //   - Official store cards: already consume LMM_IMPORT_DIRS (shipped to
-          //     production 2026-09-21; 7 of the 7 listed cards). They reuse a complete
-          //     local copy instead of downloading again.
-          //   - Built-in test store cards (data/test-store/ compiled into the binary):
-          //     not wired up, still download. That copy is stale w.r.t. production.
+          // log); the card script answers "is this copy good, and do I use it". Those
+          // scripts do not live in this repository, only on the store server: all 7
+          // cards listed on 2026-09-21 consumed LMM_IMPORT_DIRS, but that describes
+          // that batch, not a promise about every future card.
           //
           // Both earlier versions of this copy lied, in opposite directions. Describe
           // what the host does and leave reuse to the card, and neither side lies.
+          //
+          // (This used to also name the built-in test store cards as the set that does
+          // not reuse; the built-in test store was removed on 2026-09-30.)
           storageModelsDirHint: 'Changing this does not move weights you already downloaded. Models in the old directory stay on this machine, but it is no longer searched automatically — add the old path under "Additional search directories" to keep reusing them.',
           storageFree: (size) => `${size} free`,
           storageImportLabel: 'Additional search directories',
           storageImportHint: 'One absolute path per line. Add the places we cannot guess, such as a second data drive.',
           storageScanLabel: 'Where downloads look first',
-          storageScanHint: 'Searched in this order. Results are written to the run log and handed to the model card to verify. Reuse is up to the card script: official store cards reuse a complete local copy, while the built-in test store cards do not support this yet and still download over the network. USB and external drives are included automatically.',
+          storageScanHint: 'Searched in this order. Results are written to the run log and handed to the model card to verify. Reuse is up to the card script, not up to Pinvou: a card that accepts the local copy skips the download; otherwise it downloads as usual. USB and external drives are included automatically.',
           storageRemovable: 'removable',
           storageSave: 'Save',
           storageCancel: 'Cancel',
@@ -496,19 +496,10 @@ export const dictEn = {
           // empty "additional search directories" box would submit as an empty list
           // and silently wipe the directories the user had saved.
           storageLoadFailedHint: 'Could not read your current storage settings, so saving is disabled to avoid overwriting the search directories you already saved. Close this dialog and open it again.',
-          // —— Test model store (hidden entry: tap the version line 7 times) ——
-          testStoreUnlockTitle: 'Enable the test model store',
-          testStoreUnlockHint: 'Test store cards and scripts ship inside the app and do not depend on the store server. They exist only to verify the scripts themselves.',
-          testStorePasswordPlaceholder: 'Passphrase',
-          testStoreUnlockConfirm: 'Enable',
-          testStoreUnlockCancel: 'Cancel',
-          testStoreWrongPassword: 'Wrong passphrase',
-          testStoreUnlocked: 'Test model store enabled. Switch the data source above.',
-          testStoreBanner: 'Test model store is on (for development checks only; cards ship inside the app)',
-          testStoreDisable: 'Turn off',
-          testStoreDisabled: 'Test model store turned off. Enabling it again needs the passphrase.',
-          sourceOfficial: 'Official store',
-          sourceTest: 'Test store',
+          // A group of testStore* strings plus the sourceOfficial / sourceTest data
+          // source labels used to live here, serving the hidden "test model store"
+          // switch. The built-in test store was removed on 2026-09-30; all three
+          // languages drop them together (there is a parity assertion).
         },
         uiToolStore: { title:'Plugin Center', search:'Search connectors, skills, and plugins', myTools:'My Plugins', installedOnly:'Installed only', results:'Search Results', back:'Back to Plugin Center', internal:'Internal · Employees only', internalTitle:'H3C Workplace\nOne-click Access', internalDesc:'Connect to internal systems with your SSO identity—no key required', internalTools:'H3C Internal Plugins', internalCount:n=>`${n} plugins · Intranet required`, view:'View', modePlain:'Plain', modeCode:'Code', modeVisibilityHint:'Configure plugin visibility per session mode', manageVisibility:'Manage Visibility', doneManagingVisibility:'Done', guide:{ title:'Plugin Guide', close:'Close', dragTitle:'Drag to install', dragDesc:'Drag a standard skill, a single .md, an MCP server, or a Pinvou plugin .zip directly into this window to import it, or click "Upload" in the top-right to choose a file.', typesTitle:'Supported forms', types:['Standard skill (SKILL.md folder)','Single .md skill file','MCP server','Pinvou plugin package (recommended)'], formatsNote:'Standard skills, .md, MCP, and Pinvou plugin packages are all importable; the Pinvou plugin package is just the recommended standard form, and the rest are auto-normalized.', dragHintShort:'Drag in a package to add a custom plugin', introTitle:'What is a Pinvou plugin package', introDesc:'One package = one card = one switch. Pack skills, MCP servers (or their combinations) into a zip; on import the type is auto-detected from content, validated, and registered, then toggled and uninstalled uniformly in the store and at runtime.', specTitle:'Plugin package spec', specDesc:'See the "Plugin Package Spec" for the full rules: zip layout, plugin.json (schema v1), mcp manifest.json, SKILL.md, icons, and naming safety.', downloadSpec:'Download spec (Markdown)', downloadHint:'Download and share with third-party package authors; the desktop app opens a save dialog.' } },
         artifactPreview: { download:'↓ Download', openExternal:'↗ Open externally', loading:'Loading…', fileMissing:'File does not exist or has been deleted', readFailed:e=>`Read failed: ${e}`, imageReadFailed:e=>`Image read failed: ${e}`, previewUnsupported:'Preview is not supported for this type', visualWarningTruncatedPages:'Long document: only the first 30 pages are rendered', visualWarningConvertFailed:'This file cannot be previewed visually (conversion failed or a renderer component is missing)', downloadArtifact:'↓ Download artifact', openExternalArtifact:'↗ Open externally' },

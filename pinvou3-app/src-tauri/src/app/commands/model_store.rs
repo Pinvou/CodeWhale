@@ -35,8 +35,8 @@ pub async fn model_store_availability() -> Result<StoreAvailability, String> {
 // ---------------------------------------------------------------- 只读查询
 
 #[tauri::command]
-pub async fn model_store_cards(test_mode: Option<bool>) -> Result<Value, String> {
-    model_store::list_cards(test_mode.unwrap_or(false)).await
+pub async fn model_store_cards() -> Result<Value, String> {
+    model_store::list_cards().await
 }
 
 #[tauri::command]
@@ -78,9 +78,8 @@ pub async fn model_store_delete_engine(
 pub fn model_store_start_download(
     service: State<'_, Arc<ModelStoreService>>,
     card_id: String,
-    test_mode: Option<bool>,
 ) -> Result<Value, String> {
-    model_store::start_download(&service, card_id, test_mode.unwrap_or(false))
+    model_store::start_download(&service, card_id)
 }
 
 #[tauri::command]
@@ -200,24 +199,11 @@ pub fn model_store_create_api_key(card_id: String, label: Option<String>) -> Res
     model_store::create_api_key(card_id, label)
 }
 
-// ---------------------------------------------------------------- 测试商店
-
-#[tauri::command]
-pub fn model_store_test_store_state() -> Result<Value, String> {
-    model_store::test_store_state()
-}
-
-/// 口令错**不是**错误：回 `{"ok": false}`，让前端能区分「输错了」和「保存失败」。
-/// 都压成 Err 的话这两件事在界面上长得一模一样。
-#[tauri::command]
-pub fn model_store_unlock_test_store(password: String) -> Result<Value, String> {
-    model_store::unlock_test_store(password)
-}
-
-#[tauri::command]
-pub fn model_store_disable_test_store() -> Result<Value, String> {
-    model_store::disable_test_store()
-}
+// 这里原来有 `model_store_test_store_state` / `model_store_unlock_test_store` /
+// `model_store_disable_test_store` 三个命令，服务的是内置测试商店那个隐藏开关。
+// 内置测试商店 2026-09-30 整体拿掉，三个命令连同 lib.rs 里的注册、前端
+// `model-store-api.js` 里的调用方一起删干净了（非 Linux 那边的同名桩也删了，
+// 不留孤儿）。
 
 // ------------------------------------------------------ 启动时回收残留进程
 

@@ -767,33 +767,9 @@ function missingFormFields(fields, values) {
   );
 }
 
-// 测试商店隐藏入口:连点版本号多少次才算数。
-const UNLOCK_CLICKS = 7;
-
-// 两次点击的最大间隔。没有这个窗口的话,零散的误点会跨越几分钟慢慢攒够次数,
-// 然后凭空弹出一个口令框 —— 而且这个入口刻意不给任何提示,用户完全不知道自己
-// 碰了什么。连点是个明确的动作,1.5 秒足够宽松了。
-const UNLOCK_CLICK_GAP_MS = 1500;
-
-/**
- * 推进一次隐藏入口的连点计数。
- *
- * 做成纯函数是因为这段判断有分支(超时重新计数 / 达标后归零),而组件里它藏在
- * 一个 ref 后面根本测不到。调用方只负责把返回的 state 存回 ref。
- * @param {{count:number, lastAt:number}|null} state - 上一次的计数状态。
- * @param {number} now - 本次点击的时间戳(毫秒)。
- * @returns {{count:number, lastAt:number, reached:boolean}} 新状态;reached 为真表示这一下点够了。
- */
-function advanceUnlockClicks(state, now) {
-  const last = Number(state?.lastAt) || 0;
-  const previous = Number(state?.count) || 0;
-  // 间隔超窗就当成新一轮的第一下,而不是把这一下丢掉 —— 丢掉的话用户得慢一拍
-  // 再点第八下才触发,手感上像是漏了一次。
-  const count = now - last > UNLOCK_CLICK_GAP_MS ? 1 : previous + 1;
-  const reached = count >= UNLOCK_CLICKS;
-  // 达标后归零:口令框关掉(或者输错)之后再连点七次应该还能再弹一次。
-  return { count: reached ? 0 : count, lastAt: now, reached };
-}
+// 这里原来有 UNLOCK_CLICKS / UNLOCK_CLICK_GAP_MS / advanceUnlockClicks:模型商店
+// 页面标题上那个「连点 7 次弹口令框」的隐藏入口,用来打开内置测试商店。内置测试
+// 商店 2026-09-30 整体拿掉,这个入口和它背后的三个 Tauri 命令一起没了。
 
 /**
  * 卸载完成那句话,按服务端回的**实际结果**选,而不是按用户点了哪个按钮。
@@ -860,7 +836,4 @@ export {
   cardIdFromLifecycleKey,
   canForceRemove,
   missingFormFields,
-  UNLOCK_CLICKS,
-  UNLOCK_CLICK_GAP_MS,
-  advanceUnlockClicks,
 };

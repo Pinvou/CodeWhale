@@ -1199,10 +1199,9 @@ pub fn run() {
             // 下一次下载会一直卡住且没有任何提示——真机上这么僵持过 16 小时。
             // 报告攒在服务里，等界面起来后由 model_store_take_startup_cleanup 取走。
             features::model_store::run_startup_cleanup(&model_store);
-            // 内置卡片的脚本编译在二进制里：应用升级就等于脚本升级，这里把已下载的
-            // 内置卡刷到当前版本。不刷的话，卡片会一直跑下载那天固化的旧脚本——
-            // 真机上因此白查过一轮：推了新应用、脚本改动一个都没生效。
-            features::model_store::run_startup_refresh();
+            // 这里原来还有一句 `run_startup_refresh()`：把已下载的**内置测试卡片**
+            // 的固化脚本刷到当前应用版本（它们的正文编译在二进制里，应用升级就等于
+            // 脚本升级）。内置测试商店 2026-09-30 整体拿掉，这一步也就没有对象了。
             app.handle().manage(model_store);
             let remote_control_manager = RemoteControlManager::new(app.handle().clone());
             let remote_event_transport = remote_control_manager.clone();
@@ -2021,9 +2020,6 @@ pub fn run() {
             commands::model_store::model_store_active_runs,
             commands::model_store::model_store_api_keys,
             commands::model_store::model_store_create_api_key,
-            commands::model_store::model_store_test_store_state,
-            commands::model_store::model_store_unlock_test_store,
-            commands::model_store::model_store_disable_test_store,
             commands::model_store::model_store_take_startup_cleanup,
             commands::model_store::model_store_storage_settings,
             commands::model_store::model_store_set_storage_settings,

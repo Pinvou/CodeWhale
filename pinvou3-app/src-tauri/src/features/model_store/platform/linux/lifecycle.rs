@@ -279,9 +279,9 @@ enum ScriptsSource {
         assets: BTreeMap<String, String>,
         asset_sha256: Option<BTreeMap<String, String>>,
         profiles: Vec<DeployProfile>,
-        /// 这些"URL"其实是本地文件路径（内置测试商店：它没有服务器，路径是应用
-        /// 自己刚写到 data_dir 下的）。真实商店一律为 false，`fetch_script_content`
-        /// 会据此拒绝一切非 https 的地址——见 `script_runner::FetchPolicy`。
+        /// 这些"URL"其实是本地文件路径。生产上**恒为 false**——见
+        /// `ModelManager::local_script_paths` 的说明，那里讲了为什么它不再是一个
+        /// 生产开关。`fetch_script_content` 据此拒绝一切非 https 的地址。
         local_paths: bool,
     },
 }
@@ -314,8 +314,7 @@ struct PreparedScript {
 }
 
 impl ScriptsSource {
-    /// `local_paths` 来自 `ModelManager::builtin_store`：只有内置测试商店的
-    /// scripts/assets 值是本地文件路径，真实商店必须是 https 链接。
+    /// `local_paths` 来自 `ModelManager::local_script_paths`，生产上恒为 false。
     fn from_card(card: &StoreCardDetail, local_paths: bool) -> Self {
         Self::Remote {
             scripts: card.scripts.clone(),
@@ -493,9 +492,23 @@ pub type ProgressFn<'a> = dyn FnMut(&str) + Send + 'a;
 pub struct ModelManager {
     pub settings: Settings,
     store: Box<dyn StoreSource>,
-    /// 数据源是不是"打包在应用里"的测试商店。决定了固化脚本要不要跟着应用升级
-    /// 自动刷新——测试商店没有服务器，应用升级就等于脚本升级。
-    builtin_store: bool,
+    /// 卡片给的 scripts/assets 值是**本地文件路径**而不是 https 链接。
+    ///
+    /// **生产上恒为 false，而且没有任何生产代码能把它置真**——唯一的写入口是下面
+    /// 那个 `#[cfg(test)]` 的 `with_local_script_paths`。
+    ///
+    /// 它原来叫 `builtin_store`，是一位真正的生产开关：内置测试商店没有服务器，
+    /// 卡片详情里的"URL"就是应用自己刚写到 `data_dir()/test_store_scripts/` 下的
+    /// 文件路径。内置测试商店 2026-09-30 整体拿掉之后，这条能力在生产上再无合法
+    /// 用途，而它的危险没变——一张被改过的卡片只要把 URL 写成任意一个本地路径，
+    /// 就能让应用去读它、再把读到的内容当脚本执行，install_engine 那条还经 pkexec
+    /// 提权。
+    ///
+    /// 那为什么不干脆删掉这一位：下载编排那四条集成测试（`local_script_card` 起
+    /// 头的那一组）靠它在不起服务器的前提下把整段真跑一遍，包括"登记哈希对不上
+    /// 就中止"这条只在 fetch 路径上才成立的判据。留一位只有测试能置真的字段，比
+    /// 让这几条测试消失、或者为它们另造一套 https 假服务器都更诚实。
+    local_script_paths: bool,
 }
 
 /// 长时间不出声也属正常的脚本，允许多久没有输出。
@@ -581,28 +594,29 @@ const DOCKER_RMI_TIMEOUT: Duration = Duration::from_secs(600);
 const DOWNLOAD_RESUME_LIMIT: u32 = 30;
 
 impl ModelManager {
-    /// 连接**测试模型商店**（卡片和脚本都打包在应用本地，不发网络请求）的
-    /// 管理器。业务逻辑与真实商店完全一致，只是换了数据来源。
-    pub fn new_test_store() -> Self {
-        let mut mgr = Self::new(
-            None,
-            Some(Box::new(super::store_client::LocalStoreClient::new())),
-        );
-        mgr.builtin_store = true;
-        mgr
-    }
-
-    /// `store` 用于注入自定义的商店数据源（比如测试模型商店），不传则按设置里
-    /// 的 store_url 连接真正的商店服务器，业务逻辑完全一致。
+    /// `store` 用于在测试里注入假的商店数据源；不传则连生产商店
+    /// （`config::STORE_URL`，固定地址，见那里的说明）。
+    ///
+    /// 这里原来还有一个 `new_test_store()`——连**内置测试商店**（6 张卡片的脚本
+    /// 用 `include_str!` 编进二进制）。2026-09-30 整体拿掉了：内置副本和生产在架
+    /// 卡片已经分叉，而改内置脚本又不触发 CI 的 rust-test。生产商店是唯一数据源。
     pub fn new(settings: Option<Settings>, store: Option<Box<dyn StoreSource>>) -> Self {
         let settings = settings.unwrap_or_else(config::load_settings);
-        let store = store.unwrap_or_else(|| Box::new(StoreClient::new(&settings.store_url)));
+        let store = store.unwrap_or_else(|| Box::new(StoreClient::new(config::STORE_URL)));
         let _ = db::init_db();
         Self {
             settings,
             store,
-            builtin_store: false,
+            local_script_paths: false,
         }
+    }
+
+    /// 放行"脚本地址是本地文件路径"。**只有测试能调**，见
+    /// [`ModelManager::local_script_paths`]。
+    #[cfg(test)]
+    fn with_local_script_paths(mut self) -> Self {
+        self.local_script_paths = true;
+        self
     }
 
     // ---------------- 模型商店 ----------------
@@ -1027,7 +1041,10 @@ impl ModelManager {
                 on_progress(
                     "提示：未能一次性取到完整脚本，改为按需获取（商店不稳定时下载可能中断）",
                 );
-                (ScriptsSource::from_card(&card, self.builtin_store), None)
+                (
+                    ScriptsSource::from_card(&card, self.local_script_paths),
+                    None,
+                )
             }
         };
 
@@ -1148,9 +1165,8 @@ impl ModelManager {
             // 宿主这一层的职责只有三件：扫描、把结果通过 LMM_IMPORT_DIRS /
             // LMM_IMPORT_CANDIDATES 交给卡片脚本、把找到了什么写进日志。
             // **复用与否完全取决于卡片脚本自己**，而卡片脚本不归这个仓库管：
-            // - 正式商店的远端卡片会复用（2026-09-21 起在架的 7 张全部消费
-            //   LMM_IMPORT_DIRS，拿不到才回落到脚本自带的硬编码清单）；
-            // - 内置测试商店那批卡片没接（`data/test-store/` 下零命中）。
+            // 2026-09-21 起在架的 7 张全部消费 LMM_IMPORT_DIRS，拿不到才回落到
+            // 脚本自带的硬编码清单——但这是**当时在架那一批**的情况，不是保证。
             //
             // 这里原来写的是"当前没有任何一张卡这么做"——那句话是**在本仓库里
             // grep 之后得出的**，而这正是它错的原因：正式卡片的脚本源在商店
@@ -1223,11 +1239,6 @@ impl ModelManager {
             status: &status,
             profiles: &card.profiles,
             deploy_topology: card.summary.deploy_topology,
-            card_source: if self.builtin_store {
-                "builtin"
-            } else {
-                "store"
-            },
         })
         .map_err(|e| ModelManagerError::new(format!("记录模型下载状态失败：{e}")))?;
         // 内存档位随这次成功下载的卡片一起固化；启用时不再依赖商店网络，也不会把
@@ -1572,43 +1583,13 @@ impl ModelManager {
             assets: BTreeMap::new(),
             asset_sha256: None,
             profiles: rec.profiles.clone(),
-            local_paths: self.builtin_store,
+            local_paths: self.local_script_paths,
         }
     }
 
     /// 抓取卡片六类脚本的正文并固化到本地。只在两个时刻调用：下载模型成功后、
     /// 用户主动点「检查卡片更新」时。抓取过程中任何一个脚本失败都整体放弃，
     /// 不留下半套新半套旧的副本。
-    /// 把内置（测试商店）卡片的固化脚本刷新成应用当前版本，返回刷新过的卡片名。
-    ///
-    /// 应用启动时跑一次。测试商店的脚本打包在二进制里，应用升级就等于脚本升级，
-    /// 不该还要用户手动点一次「更新脚本」——真机上就因为这个白查过一轮：推了新
-    /// 应用、脚本改动一个都没生效，卡片跑的还是下载那天固化的旧脚本。
-    ///
-    /// 只碰 `card_source = 'builtin'` 的记录（判断在 db 层），失败不影响启动。
-    pub fn refresh_builtin_cards() -> Vec<String> {
-        let mut refreshed = Vec::new();
-        let store = super::store_client::LocalStoreClient::new();
-        for card in super::test_store_data::test_cards() {
-            let Ok(detail) = store.get_card(&card.summary.id) else {
-                continue;
-            };
-            // 内置卡的 scripts/assets 值是本地文件路径，fetch 就是读文件，不联网
-            let mgr = Self::new_test_store();
-            let Ok(pkg) = mgr.fetch_and_store_scripts(&detail) else {
-                continue;
-            };
-            // 只在"确实刷新了"时记一笔；Ok(false)（没变化）和 Err（这张卡刷不动）
-            // 都不该打断其余卡片。
-            if let Ok(true) =
-                db::refresh_builtin_card_scripts(&card.summary.id, &pkg.scripts, &pkg.assets)
-            {
-                refreshed.push(card.summary.name.clone());
-            }
-        }
-        refreshed
-    }
-
     fn fetch_and_store_scripts(
         &self,
         card: &StoreCardDetail,
@@ -1616,7 +1597,7 @@ impl ModelManager {
         // 来源校验必须在**抓取的这一刻**做：抓完就固化成 Local 副本，之后
         // install_engine 直接跑副本、不再有任何 fetch 可校验。副本里的 sha256
         // 是按内容自算的，证明不了"内容是对的"，只能证明"内容没再变过"。
-        let local_paths = self.builtin_store;
+        let local_paths = self.local_script_paths;
         let fetch = |url: &str,
                      expected: Option<&str>,
                      root_capable: bool|
@@ -1670,9 +1651,10 @@ impl ModelManager {
     /// 没有成立过，而它会让读代码的人以为这个能力已经在跑。
     ///
     /// 因此要如实交代当前的实际后果：**远端商店卡片的固化脚本副本永远不会
-    /// 过期刷新**。内置（测试商店）卡片有 `refresh_builtin_cards` 在启动时兜底
-    /// （lib.rs 里的 `run_startup_refresh` 真的调它），远端卡片没有对应物——
-    /// 商店那边修好的脚本只有在用户重新下载这个模型时才会下来。连带地，
+    /// 过期刷新**——商店那边修好的脚本只有在用户重新下载这个模型时才会下来。
+    /// （内置测试商店那边原来有 `refresh_builtin_cards` 在启动时兜底刷新，
+    /// 2026-09-30 随整个测试商店一起拿掉了，所以现在一个数据源都没有兜底。）
+    /// 连带地，
     /// `OutdatedCard`、`StoreSyncResult` 以及 `refresh_card_scripts` 目前都到
     /// 不了；`needs_redeploy`（service.rs）虽然活着，但对远端卡片实际上恒为
     /// false，因为它比的那份 `scripts_content` 不会变。
@@ -3036,24 +3018,27 @@ mod tests {
         }
     }
 
-    /// 只有打包在应用里的测试商店才允许把"URL"写成本地文件路径。真实商店的
-    /// 卡片来自网络，放开这个开关就等于让卡片指定"读本机哪个文件再当脚本跑"。
+    /// **生产上没有任何一条路能把"脚本地址是本地文件路径"放行。**
+    ///
+    /// 这一位原来是内置测试商店的生产开关（`builtin_store`）。测试商店 2026-09-30
+    /// 拿掉之后它只剩测试一个用处，所以这条测试从"谁可以用"改成盯"生产拿不到它"
+    /// ——`ModelManager::new` 出来的管理器必须是关着的，而唯一的开法是那个
+    /// `#[cfg(test)]` 的 `with_local_script_paths`。它一旦松掉，一张被改过的卡片
+    /// 就能指定"读本机哪个文件再当脚本跑"，install_engine 那条还经 pkexec。
     #[test]
-    fn only_the_bundled_store_may_use_local_paths() {
+    fn nothing_in_production_may_turn_on_local_script_paths() {
         let card = make_card("x", None);
         let remote = ScriptsSource::from_card(&card, false);
-        let bundled = ScriptsSource::from_card(&card, true);
 
         assert!(
             !remote.fetch_policy("install_engine").allow_local_path,
-            "真实商店不能读本地路径"
+            "商店卡片不能读本地路径"
         );
         assert!(
             remote.fetch_policy("install_engine").may_run_as_root,
             "install_engine 必须按提权那一档取（强制要求哈希）"
         );
         assert!(!remote.fetch_policy("deploy").may_run_as_root);
-        assert!(bundled.fetch_policy("install_engine").allow_local_path);
 
         // Local 来源（已固化的本地副本）压根不 fetch，策略也必须是最严的一档，
         // 免得哪天有人把它接进 fetch 路径时意外放行。
@@ -3063,6 +3048,13 @@ mod tests {
             profiles: Vec::new(),
         };
         assert!(!local.fetch_policy("install_engine").allow_local_path);
+
+        // 生产构造出来的管理器：这一位必须是关着的。
+        let _ctx = setup_temp_db();
+        assert!(
+            !ModelManager::new(None, None).local_script_paths,
+            "生产构造函数把本地路径放行了"
+        );
     }
 
     /// 引擎没装时探针以非 0 退出码结束，run_script 返回的是 Err。这个测试盯的
@@ -3070,7 +3062,8 @@ mod tests {
     /// 而不是用 on_progress 收集输出，这里就会挂。
     #[test]
     fn probe_reads_need_root_even_when_engine_is_missing() {
-        let mgr = ModelManager::new_test_store();
+        let _ctx = setup_temp_db();
+        let mgr = ModelManager::new(None, None);
         let source = ScriptsSource::Local {
             assets: Default::default(),
             blobs: [(
@@ -3098,7 +3091,8 @@ exit 1
     /// 安装会先以普通用户身份尝试（失败再自动提权），而不是无条件弹密码框。
     #[test]
     fn probe_defaults_to_no_root_for_scripts_without_the_marker() {
-        let mgr = ModelManager::new_test_store();
+        let _ctx = setup_temp_db();
+        let mgr = ModelManager::new(None, None);
         let source = ScriptsSource::Local {
             assets: Default::default(),
             blobs: [(
@@ -3121,27 +3115,16 @@ exit 0
         assert!(!probe.need_root, "没有约定标记就不该擅自提权");
     }
 
-    /// 内置测试商店的每张卡都要实现 LMM_NEED_ROOT 约定，否则新加的卡片会悄悄
-    /// 退回「先普通用户跑一次、失败再提权」的兜底路径，用户平白多等一轮。
-    #[test]
-    fn bundled_cards_implement_the_probe_convention() {
-        // 每张卡的 install_engine 都必须实现只读探针：LMM 在每次下载前先跑一次，
-        // 命中就整段跳过安装。没有它，用户每下一个模型都要重装一遍引擎。
-        //
-        // 但**不是每张卡都要声明 LMM_NEED_ROOT**：整包交付的那两张卡，包的
-        // preflight 明确 `require(os.geteuid() != 0)`，整个脚本以 root 跑会被
-        // 当场拒绝。它们需要提权的动作（注册 nvidia runtime、配直连网卡）由
-        // 脚本自己在内部处理——所以这里只钉住探针约定，不强求 root 声明。
-        for card in super::super::test_store_data::test_cards() {
-            let script = super::super::test_store_data::script_content(&card, "install_engine")
-                .expect("每张卡都该有 install_engine");
-            assert!(
-                script.contains("LMM_PROBE_ONLY"),
-                "卡片 {} 的 install_engine 没有实现只读探针约定",
-                card.summary.id
-            );
-        }
-    }
+    // 这里原来有一条 `bundled_cards_implement_the_probe_convention`：遍历内置测试
+    // 商店那 6 张卡，断言每张卡的 install_engine 都实现了只读探针约定
+    // （`LMM_PROBE_ONLY`）。内置卡片 2026-09-30 整体从仓库里拿掉之后，它没有可遍历
+    // 的对象了。
+    //
+    // **这条约定并没有跟着消失，只是守它的位置变了**：卡片脚本现在只存在于生产
+    // 商店，仓库里没有任何副本，所以"每张在架卡片都实现了探针约定"只能在上架流程
+    // 里查（见 pinvou3-ops 的上架检查单），代码这边查不了也不该假装能查。宿主侧的
+    // 那一半仍然有测试守着：探针怎么跑、读不到标记时按 need_root=false 处理，见上面
+    // 两条 `probe_*`。
 
     #[test]
     fn extracts_markers() {
@@ -3249,7 +3232,6 @@ exit 0
             status: "deployed",
             profiles: &[],
             deploy_topology: DeployTopology::Single,
-            card_source: "builtin",
         })
         .unwrap();
     }
@@ -3609,10 +3591,14 @@ echo '权重就绪'
             .unwrap_or(0)
     }
 
-    /// 造一张「脚本正文是本地文件」的卡片。内置测试商店在生产里就是这么下发的
-    /// （scripts 的值是本地路径而不是 https URL），所以这条路不用起服务器也能把
-    /// 整段编排真跑一遍，而且用的是 `builtin_store` 这一位生产开关，没有为测试
-    /// 另开后门。
+    /// 造一张「脚本正文是本地文件」的卡片：scripts 的值是本地路径而不是 https URL，
+    /// 于是整段下载编排能在不起服务器的前提下真跑一遍——包括"登记哈希对不上就中止"
+    /// 这条只在 fetch 路径上才成立的判据。
+    ///
+    /// 放行这种地址的那一位（`ModelManager::local_script_paths`）**只有测试能置真**，
+    /// 生产构造函数出来的管理器一律是关着的（那里有为什么，
+    /// `nothing_in_production_may_turn_on_local_script_paths` 钉着）。它以前是内置
+    /// 测试商店的生产开关，测试商店拿掉之后就只剩这一个用处了。
     ///
     /// `tampered` 指定哪个脚本的**登记哈希**故意写错：内容没动，动的是商店说
     /// 它应该是什么——正是"传输被篡改/后台数据被改"到达客户端时的样子。
@@ -3660,10 +3646,8 @@ echo '权重就绪'
     }
 
     fn manager_with_card(settings: Settings, card: StoreCardDetail) -> ModelManager {
-        let mut mgr = ModelManager::new(Some(settings), Some(Box::new(OneCardStore { card })));
-        // 卡片里的"URL"是本地文件路径，只有内置测试商店这一位放行它。
-        mgr.builtin_store = true;
-        mgr
+        ModelManager::new(Some(settings), Some(Box::new(OneCardStore { card })))
+            .with_local_script_paths()
     }
 
     /// 防的是「下载中途失败，库里却留下一条说它已经好了的记录」。

@@ -123,7 +123,6 @@ pub struct Settings {
     pub min_free_space_gb: f64,
     pub storage_quota_gb: Option<f64>,
     pub hf_endpoint: String,
-    pub store_url: String,
     pub update_url: Option<String>,
     pub gateway_enabled: bool,
     pub gateway_port: u16,
@@ -141,17 +140,6 @@ pub struct Settings {
     /// 出口带宽只有几百 KB/s——找不到本地副本就意味着几十个小时的重下。
     #[serde(default)]
     pub import_scan_dirs: Vec<String>,
-
-    /// 测试模型商店是否开着。
-    ///
-    /// 入口是隐藏的：在模型商店页面连点标题 7 次（相邻两次间隔不超过 1.5 秒）弹出
-    /// 口令框，输对口令才开。前端见 `src/features/model-store/ModelStoreView.jsx`
-    /// 的 `handleSecretUnlockClick`，命令是
-    /// `app::commands::model_store::model_store_unlock_test_store`。
-    ///
-    /// 这不是安全边界，只是防止普通用户误入——口令哈希编译在二进制里，逆向拿得到。
-    /// 真要挡住有心人，得让测试卡片根本不进发布包。
-    pub test_mode_enabled: bool,
 }
 
 impl Default for Settings {
@@ -164,18 +152,32 @@ impl Default for Settings {
             storage_quota_gb: None,
             // 国内网络访问 huggingface.co 经常不通，默认用镜像站 hf-mirror.com
             hf_endpoint: "https://hf-mirror.com".to_string(),
-            // 商店入口：account-platform 反向隧道的公网入口。2026-09-10 起商店所在的
-            // 那台服务器改成了只收隧道流量的私有源站，直连 IP 一律 403。
-            store_url: "https://account.pinvou.com/model-store".to_string(),
             update_url: Some("https://pinvou.com/model-cube-update".to_string()),
             gateway_enabled: false,
             gateway_port: 8090,
             max_concurrent_downloads: 1,
             import_scan_dirs: Vec::new(),
-            test_mode_enabled: false,
         }
     }
 }
+
+/// 模型商店的地址。**固定的，不可配**。
+///
+/// account-platform 反向隧道的公网入口：2026-09-10 起商店所在的那台服务器改成了
+/// 只收隧道流量的私有源站，直连 IP 一律 403。
+///
+/// 为什么钉成常量而不是留一个设置项（2026-09-30）：「指向自定义商店地址」这个
+/// 能力从来没有界面入口，只有手改 `config.json` 一条路，而它换来的是两件坏事
+/// ——排障时得先确认用户到底连的是哪个后台；以及一张被改过的卡片配合一个被改过
+/// 的地址就是一条「任意内容以 root 执行」的路（脚本经 pkexec 跑）。钉死之后
+/// 「以生产为准」成为唯一口径。
+///
+/// 顺带把旧地址的迁移问题一次解决掉：以前 `load_settings` 要认出配置文件里那个
+/// 已经 403 的历史默认值 `http://47.120.8.237/model-store` 并换成新地址，否则
+/// 老用户的商店永远"连不上"。现在这个值根本不再被读取，**任何**存量取值（历史
+/// 默认值、用户手填的、将来又换一次域名后遗留的）都自动失效，比逐个列进迁移
+/// 名单更彻底。配置文件里残留的那个 `store_url` 键会在下一次保存设置时被丢掉。
+pub const STORE_URL: &str = "https://account.pinvou.com/model-store";
 
 pub const HF_ENDPOINT_PRESETS: &[&str] = &["https://huggingface.co", "https://hf-mirror.com"];
 
@@ -198,22 +200,13 @@ impl Settings {
     }
 }
 
-/// 出现在配置文件里、又恰好等于某个**历史默认值**的商店地址——说明用户从没改过
-/// 它，是当年写配置时顺手存进去的，跟着新默认走。用户自己填的别的地址一律不动。
-///
-/// 为什么要迁：配置文件把 store_url 原样存下来了，只改代码里的默认值，老用户读到
-/// 的永远是旧值。旧地址 http://47.120.8.237/model-store 自 2026-09-10 起一律 403
-/// （那台服务器改成了只收反向隧道流量的私有源站），不迁的话老用户的模型商店就
-/// 一直"连不上"——而且报错里看不出任何线索。
-const LEGACY_DEFAULT_STORE_URLS: &[&str] = &["http://47.120.8.237/model-store"];
-
 /// 解析不了的配置文件改名留存成 `config.json.bad`，再回退默认值。
 ///
 /// **不能静默**，理由跟 `write_token_fallback` 那条一样，后果还更重：
 /// `load_settings` 回退到全默认值之后，界面上看不出任何异常，而下一次**任意**保存
-/// ——哪怕只是切一下测试商店开关（service.rs 里每个 `set_*` 都是"先读再改再整体
-/// 写回"）——就会把这堆默认值原样写回盘上。用户自配的权重目录、商店地址、导入扫描
-/// 目录到这一刻才真正**不可恢复**。而 `Settings` 是整体反序列化的，任一字段类型不符
+/// ——哪怕只是在「存储与导入」里动一下权重目录（service.rs 里每个 `set_*` 都是
+/// "先读再改再整体写回"）——就会把这堆默认值原样写回盘上。用户自配的权重目录、
+/// 导入扫描目录到这一刻才真正**不可恢复**。而 `Settings` 是整体反序列化的，任一字段类型不符
 /// （手改坏、旧版本遗留、磁盘损坏）就足以让整个文件作废，门槛并不高。
 ///
 /// 所以坏文件先改名留在原地：至少还能手工把值抄回来，排查的人在日志里也看得见。
@@ -262,9 +255,6 @@ pub fn load_settings() -> Settings {
         // 这个值可配：几十上百 GB 的权重，用户很可能想放到别的盘。
         settings.models_dir = data_dir().join("models").to_string_lossy().to_string();
     }
-    if LEGACY_DEFAULT_STORE_URLS.contains(&settings.store_url.trim().trim_end_matches('/')) {
-        settings.store_url = Settings::default().store_url;
-    }
     settings
 }
 
@@ -273,14 +263,14 @@ pub fn load_settings() -> Settings {
 /// 两件事都不是讲究：
 ///
 /// 1. 直接 `fs::write` 覆盖不是原子的。保存那一瞬断电或被杀，留下的是半截 JSON，
-///    而 `load_settings` 解析失败就回退到全部默认值——用户自己配的权重目录、商店
-///    地址、导入扫描目录、测试商店开关一起消失，界面上没有任何异常，他只会觉得
+///    而 `load_settings` 解析失败就回退到全部默认值——用户自己配的权重目录、
+///    导入扫描目录、HF 镜像地址一起消失，界面上没有任何异常，他只会觉得
 ///    "设置怎么自己变回去了"。坏文件现在至少会被 `quarantine_broken_config` 留成
 ///    `config.json.bad` 并打一行日志，但那只是事后能抄回来，**不是**可以不做原子
 ///    写的理由。同模块 orphans.rs 的 `store_unlocked` 早就是这么写的，照搬即可。
-/// 2. 先写后 `set_permissions` 之间有一个 0644 的窗口，而这个文件里有商店地址
-///    这类不该给同机其他用户看的东西。用 `OpenOptions::mode` 直接按 0600 建，
-///    窗口就不存在了。
+/// 2. 先写后 `set_permissions` 之间有一个 0644 的窗口，而这个文件里有权重目录、
+///    导入扫描目录这类不该给同机其他用户看的东西。用 `OpenOptions::mode` 直接按
+///    0600 建，窗口就不存在了。
 pub fn save_settings(settings: &Settings) -> std::io::Result<()> {
     use std::io::Write as _;
 
@@ -546,9 +536,17 @@ impl Drop for TempHome {
 mod tests {
     use super::*;
 
-    /// 配置文件里存着旧默认商店地址的，读出来要换成新地址；用户自己改过的不动。
+    /// 商店地址是钉死的常量，配置文件里写什么都不生效。
+    ///
+    /// 这条盯的是 2026-09-30 那次改动的**全部价值**：只要还有任何一条路能让磁盘上
+    /// 的一个值决定商店连去哪，「以生产为准」就不成立，而那条路上跑的是经 pkexec
+    /// 以 root 执行的卡片脚本。用历史默认值（已 403）和一个自定义地址各试一遍——
+    /// 前者代表存量配置，后者代表有人手改过。
+    ///
+    /// 顺带也是"旧地址迁移"那件事的归宿：以前靠 `LEGACY_DEFAULT_STORE_URLS` 逐个
+    /// 认；现在整个字段不再被读，存量取值自动全部失效。
     #[test]
-    fn legacy_default_store_url_is_migrated_but_custom_one_is_kept() {
+    fn the_store_url_is_a_constant_that_no_config_file_can_override() {
         // 把整个数据目录切到临时目录：store_root() 是 $HOME/.pinvou3/model-store，
         // 只认 HOME 和 PINVOU3_HOME（TempHome 两个都管了）。
         // 这里**不能**改成设 XDG_*——那是 LMM 独立应用时期的路径，
@@ -563,22 +561,29 @@ mod tests {
         let path = config_file();
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
 
-        // 带不带结尾斜杠都算旧默认值
-        std::fs::write(
-            &path,
-            r#"{"store_url": "http://47.120.8.237/model-store/"}"#,
-        )
-        .unwrap();
-        assert_eq!(load_settings().store_url, Settings::default().store_url);
-
         // 192.0.2.x 是 RFC5737 的文档保留段（TEST-NET-1），跟任何真实环境无关。
-        // 这条断言只关心"不在 LEGACY_DEFAULT_STORE_URLS 名单里的地址一律不动"，
-        // 与地址是公网还是私网无关，所以换成文档段不影响语义。
-        std::fs::write(&path, r#"{"store_url": "http://192.0.2.10:8088"}"#).unwrap();
+        for leftover in [
+            r#"{"store_url": "http://47.120.8.237/model-store/"}"#,
+            r#"{"store_url": "http://192.0.2.10:8088"}"#,
+            r#"{"store_url": "https://192.0.2.10/model-store"}"#,
+        ] {
+            std::fs::write(&path, leftover).unwrap();
+            // 文件本身仍然是能解析的（多出来的键被 serde 忽略），不该被隔离。
+            assert!(
+                path.exists(),
+                "多一个不认识的键不该让整份配置作废：{leftover}"
+            );
+            let _ = load_settings();
+        }
+
         assert_eq!(
-            load_settings().store_url,
-            "http://192.0.2.10:8088",
-            "用户自定义的地址被改掉了"
+            STORE_URL, "https://account.pinvou.com/model-store",
+            "生产商店地址被改动了。改它意味着所有设备下一次升级后连去另一个后台，\
+             不能顺手改"
+        );
+        assert!(
+            STORE_URL.starts_with("https://"),
+            "商店地址必须是 https：卡片 JSON 就是脚本哈希的载体，明文链路上校验挡不住伪造"
         );
     }
 
@@ -598,8 +603,8 @@ mod tests {
 
     /// 坏掉的配置文件不能无声重置：回退默认值之前要先把它改名留存。
     ///
-    /// 不留存的话，下一次任意保存（切一下测试商店开关就够）会把重置后的默认值
-    /// 整体写回盘上，用户自配的权重目录/商店地址/扫描目录从此不可恢复。
+    /// 不留存的话，下一次任意保存（在「存储与导入」里动一下权重目录就够）会把重置
+    /// 后的默认值整体写回盘上，用户自配的权重目录/扫描目录从此不可恢复。
     #[test]
     fn a_broken_config_is_kept_aside_instead_of_being_silently_reset() {
         let _home = TempHome::new();
@@ -609,13 +614,13 @@ mod tests {
         // 就足以让整个文件作废，正是"门槛并不高"的那种坏法。
         std::fs::write(
             &path,
-            r#"{"store_url": "http://192.0.2.10:8088", "gateway_port": "不是数字"}"#,
+            r#"{"models_dir": "/mnt/192.0.2.10", "gateway_port": "不是数字"}"#,
         )
         .unwrap();
 
         assert_eq!(
-            load_settings().store_url,
-            Settings::default().store_url,
+            load_settings().gateway_port,
+            Settings::default().gateway_port,
             "坏文件应当回退到默认值"
         );
         assert!(

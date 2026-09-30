@@ -30,7 +30,7 @@ fn nope<T>() -> Result<T, String> {
     Err(UNSUPPORTED_REASON.to_string())
 }
 
-pub async fn list_cards(_test_mode: bool) -> Result<Value, String> {
+pub async fn list_cards() -> Result<Value, String> {
     nope()
 }
 
@@ -73,7 +73,6 @@ pub async fn delete_engine(
 pub fn start_download(
     _service: &Arc<ModelStoreService>,
     _card_id: String,
-    _test_mode: bool,
 ) -> Result<Value, String> {
     nope()
 }
@@ -132,18 +131,6 @@ pub fn create_api_key(_card_id: String, _label: Option<String>) -> Result<Value,
     nope()
 }
 
-pub fn test_store_state() -> Result<Value, String> {
-    nope()
-}
-
-pub fn unlock_test_store(_password: String) -> Result<Value, String> {
-    nope()
-}
-
-pub fn disable_test_store() -> Result<Value, String> {
-    nope()
-}
-
 pub fn force_remove(
     _service: &Arc<ModelStoreService>,
     _card_id: String,
@@ -166,9 +153,6 @@ pub fn set_storage_settings(
 /// 非 Linux 上没有脚本进程可收，直接返回。**不报错**：这是启动路径，
 /// 一个平台不支持的功能不该让应用启动时冒出一句错误。
 pub fn run_startup_cleanup(_service: &Arc<ModelStoreService>) {}
-
-/// 非 Linux 上没有内置卡片库可刷，直接返回。同样不报错——这是启动路径。
-pub fn run_startup_refresh() {}
 
 pub fn take_startup_cleanup(_service: &Arc<ModelStoreService>) -> Result<Value, String> {
     nope()

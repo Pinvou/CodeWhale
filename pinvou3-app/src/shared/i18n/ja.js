@@ -468,21 +468,22 @@ const jaBase = {
           //
           // 分担：ホストは「どこを探すか」に答える（探索ルートを LMM_IMPORT_DIRS で、
           // 検出結果を LMM_IMPORT_CANDIDATES で渡し、実行ログにも記録する）。カードの
-          // スクリプトが「そのコピーは正しいか、使うか」に答える。よって 2 種類の
-          // カードで挙動が異なる：
-          //   - 正式ストアのリモートカード：LMM_IMPORT_DIRS を消費済み（2026-09-21 に
-          //     本番公開、掲載 7 枚中 7 枚）。完全なローカルコピーを再利用する。
-          //   - 内蔵テストストアのカード（バイナリ同梱の data/test-store/）：未対応で
-          //     ダウンロードする。リポジトリ内のものは本番と同期していない古い複製。
+          // スクリプトが「そのコピーは正しいか、使うか」に答える。そのスクリプトは
+          // このリポジトリではなくストアサーバー側にある：2026-09-21 時点の掲載 7 枚は
+          // すべて LMM_IMPORT_DIRS を消費していたが、それはそのときの一群の話で、
+          // 今後のすべてのカードに対する約束ではない。
           //
           // 以前の 2 版はどちらも逆方向の嘘だった。ホストの動作を述べ、再利用の可否は
           // カード次第と書けば、どちらの側にも嘘をつかない。
+          //
+          //（以前はここで「内蔵テストストアのカードは未対応」とも名指ししていたが、
+          // 内蔵テストストアは 2026-09-30 に撤去した。）
           storageModelsDirHint: '変更してもダウンロード済みの重みは移動しません。旧ディレクトリのモデルは本機に残りますが、自動では検索対象に入りません。引き続き再利用するには、旧パスを「追加の検索ディレクトリ」に追加してください。',
           storageFree: (size) => `空き ${size}`,
           storageImportLabel: '追加の検索ディレクトリ',
           storageImportHint: '1行に1つ、絶対パスで。別のデータドライブなど、こちらで推測できない場所を指定してください。',
           storageScanLabel: 'ダウンロード前に実際に探す場所',
-          storageScanHint: 'この順で探します。結果は実行ログに記録され、モデルカードが照合します。再利用するかはカードのスクリプト次第です。正式ストアのカードは完全なローカルコピーを再利用しますが、内蔵テストストアのカードは未対応で、ネットワークからダウンロードします。USBや外付けドライブは自動で含まれます。',
+          storageScanHint: 'この順で探します。結果は実行ログに記録され、モデルカードが照合します。再利用するかは品悟ではなくカードのスクリプトが決めます。カードがローカルコピーを認めればダウンロードを省き、認めなければ通常どおりダウンロードします。USBや外付けドライブは自動で含まれます。',
           storageRemovable: 'リムーバブル',
           storageSave: '保存',
           storageCancel: 'キャンセル',
@@ -491,19 +492,9 @@ const jaBase = {
           // そのまま送ると空リストとして保存され、保存済みのディレクトリが黙って
           // 消えるため、保存ボタンを無効化している。
           storageLoadFailedHint: '現在のストレージ設定を読み込めませんでした。保存済みの検索ディレクトリを上書きしないよう、保存を一時的に無効にしています。いったん閉じてから開き直してください。',
-          // —— テストモデルストア（隠し入口：バージョン表示を 7 回連打） ——
-          testStoreUnlockTitle: 'テストモデルストアを有効にする',
-          testStoreUnlockHint: 'テストストアのカードとスクリプトはアプリ内に同梱されており、ストアサーバーに依存しません。スクリプト自体の開発検証専用です。',
-          testStorePasswordPlaceholder: '合言葉',
-          testStoreUnlockConfirm: '有効にする',
-          testStoreUnlockCancel: 'キャンセル',
-          testStoreWrongPassword: '合言葉が違います',
-          testStoreUnlocked: 'テストモデルストアを有効にしました。上でデータソースを切り替えられます',
-          testStoreBanner: 'テストモデルストアが有効です（開発検証専用。カードはアプリ内に同梱）',
-          testStoreDisable: '無効にする',
-          testStoreDisabled: 'テストモデルストアを無効にしました。再度有効にするには合言葉が必要です',
-          sourceOfficial: '正式ストア',
-          sourceTest: 'テストストア',
+          // ここには testStore* 一式と sourceOfficial / sourceTest（データソース
+          // ラベル）があった。「テストモデルストア」の隠しスイッチ用だが、内蔵
+          // テストストアは 2026-09-30 に撤去。3 言語まとめて削除する（parity 検証あり）。
         },
         uiToolStore: { title:'プラグインセンター', search:'コネクター、スキル、プラグインを検索', myTools:'マイプラグイン', installedOnly:'インストール済みのみ', results:'検索結果', back:'プラグインセンターに戻る', internal:'社内限定 · 従業員向け', internalTitle:'H3C オフィス連携\nワンクリック接続', internalDesc:'本人の SSO ID で社内システムに接続。キー入力は不要です', internalTools:'H3C 社内プラグイン', internalCount:n=>`${n} 個のプラグイン · 社内ネットワーク必須`, view:'表示', modePlain:'通常セッション', modeCode:'コードセッション', modeVisibilityHint:'セッションモードごとにプラグインの表示を設定', manageVisibility:'表示を管理', doneManagingVisibility:'完了', guide:{ title:'プラグインガイド', close:'閉じる', dragTitle:'ドラッグでインストール', dragDesc:'標準スキル、単一の .md、MCP サービス、または Pinvou プラグインの .zip をこのウィンドウに直接ドラッグするとインポートできます。右上の「アップロード」でファイルを選ぶこともできます。', typesTitle:'対応形式', types:['標準スキル（SKILL.md フォルダ）','単一の .md スキルファイル','MCP サービス','Pinvou プラグインパッケージ（推奨）'], formatsNote:'標準スキル、.md、MCP、Pinvou プラグインパッケージはすべてインポート可能です。Pinvou プラグインパッケージは推奨の標準形式であり、それ以外は自動で正規化されます。', dragHintShort:'パッケージをドラッグしてカスタムプラグインを追加', introTitle:'Pinvou プラグインパッケージとは', introDesc:'1 パッケージ = 1 カード = 1 スイッチ。スキル、MCP サービス（またはその組み合わせ）を zip にまとめ、インポート時に内容から型を自動判定・検証して登録し、ストアとランタイムで統一してオン/オフ・アンインストールします。', specTitle:'プラグインパッケージ仕様', specDesc:'完全な仕様は「プラグインパッケージ仕様」を参照：zip レイアウト、plugin.json（schema v1）、mcp manifest.json、SKILL.md、アイコン、命名の安全性。', downloadSpec:'仕様書をダウンロード（Markdown）', downloadHint:'ダウンロードしてサードパーティの作者に配布できます。デスクトップ版では保存ダイアログが開きます。' } },
         artifactPreview: { download:'↓ ダウンロード', openExternal:'↗ 外部で開く', loading:'読み込み中…', fileMissing:'ファイルが存在しないか削除されました', readFailed:e=>`読み取りに失敗: ${e}`, imageReadFailed:e=>`画像の読み取りに失敗: ${e}`, previewUnsupported:'このタイプはプレビューに対応していません', visualWarningTruncatedPages:'ページ数が多いため、先頭30ページのみを描画します', visualWarningConvertFailed:'このファイルはプレビューできません（変換に失敗したか、描画コンポーネントがありません）', downloadArtifact:'↓ 成果物をダウンロード', openExternalArtifact:'↗ 外部で開く' },

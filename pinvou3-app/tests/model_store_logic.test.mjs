@@ -8,9 +8,6 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   MAX_LOG_LINES,
-  UNLOCK_CLICKS,
-  UNLOCK_CLICK_GAP_MS,
-  advanceUnlockClicks,
   computeSpeed,
   etaSeconds,
   filterStoreCards,
@@ -171,34 +168,6 @@ test('missingFormFields：required 默认为真，空白串不算填了', () => 
   const missing = missingFormFields(fields, { ip: '10.0.0.2', pw: '   ' });
   assert.deepEqual(missing.map((field) => field.id), ['pw']);
   assert.equal(missingFormFields([], {}).length, 0);
-});
-
-test('advanceUnlockClicks：连点够 7 次才算数，计数随即归零', () => {
-  let state = null;
-  for (let i = 1; i < UNLOCK_CLICKS; i += 1) {
-    state = advanceUnlockClicks(state, i * 100);
-    assert.equal(state.reached, false, `第 ${i} 下不该触发`);
-    assert.equal(state.count, i);
-  }
-  state = advanceUnlockClicks(state, UNLOCK_CLICKS * 100);
-  assert.equal(state.reached, true);
-  // 归零：口令框关掉或输错之后，再连点七次应该还能再叫出来一次
-  assert.equal(state.count, 0);
-});
-
-test('advanceUnlockClicks：间隔超过时间窗就重新计数，这一下算新一轮的第一下', () => {
-  let state = { count: 6, lastAt: 1000 };
-  state = advanceUnlockClicks(state, 1000 + UNLOCK_CLICK_GAP_MS + 1);
-  assert.equal(state.reached, false);
-  assert.equal(state.count, 1);
-  // 卡在窗口边界上的那一下仍然算连点（> 才重置，不是 >=）
-  state = { count: 6, lastAt: 1000 };
-  assert.equal(advanceUnlockClicks(state, 1000 + UNLOCK_CLICK_GAP_MS).reached, true);
-});
-
-test('advanceUnlockClicks：第一次点击没有历史状态，也不会把 NaN 带进计数', () => {
-  assert.deepEqual(advanceUnlockClicks(null, 0), { count: 1, lastAt: 0, reached: false });
-  assert.deepEqual(advanceUnlockClicks(undefined, 500), { count: 1, lastAt: 500, reached: false });
 });
 
 // —— 卸载完成文案：必须按服务端回的实际结果说话 ——

@@ -24,43 +24,16 @@ function storeAvailability() {
 }
 
 /**
- * 商店在架卡片。`testMode` 走的是打包在应用内的测试卡片——只有开启了测试商店
- * 并把数据源切过去时才传 true，默认永远是正式商店。
- * @param {boolean} [testMode] - 是否测试模式。
+ * 商店在架卡片。数据源只有一个：生产商店（地址是后端的编译期常量，不可配）。
+ *
+ * 这里原来有一个 `testMode` 形参，走的是打包在应用内的 6 张测试卡片，另外还有
+ * `fetchTestStoreState` / `unlockTestStore` / `disableTestStore` 三个开关调用。
+ * 内置测试商店 2026-09-30 整体拿掉了——内置副本跟生产在架卡片已经分叉，排障时
+ * 看错文件是常事。
  * @returns {Promise<Array<object>>} 卡片摘要列表。
  */
-function fetchStoreCards(testMode = false) {
-  return invokeTauri('model_store_cards', { testMode });
-}
-
-/**
- * 测试商店的开关状态。测试商店的卡片和脚本打包在应用内、不依赖商店服务器，
- * 只给开发验证脚本本身用，所以它默认是关的、且必须凭口令才能打开。
- * @returns {Promise<{enabled:boolean}>} 当前是否已开启。
- */
-function fetchTestStoreState() {
-  return invokeTauri('model_store_test_store_state');
-}
-
-/**
- * 用口令开启测试商店。
- *
- * 口令不对回的是 `{ok:false}` 而**不是**异常——这条路径上「口令错」是一个正常
- * 结果，不该和「配置写不进去」混成同一个 catch 分支，那样界面只能给出一句含糊的
- * 「失败」。
- * @param {string} password - 口令。
- * @returns {Promise<{ok:boolean}>} ok 为假表示口令不对。
- */
-function unlockTestStore(password) {
-  return invokeTauri('model_store_unlock_test_store', { password });
-}
-
-/**
- * 关闭测试商店。关掉之后连入口都不再提示，重开要再输一次口令。
- * @returns {Promise<{enabled:boolean}>} 关闭后的状态。
- */
-function disableTestStore() {
-  return invokeTauri('model_store_disable_test_store');
+function fetchStoreCards() {
+  return invokeTauri('model_store_cards');
 }
 
 /**
@@ -122,11 +95,10 @@ function createApiKey(cardId, label = null) {
 /**
  * 发起下载。长操作：立刻返回 run_id，进度靠 `pollRunLog` 读。
  * @param {string} cardId - 卡片 ID。
- * @param {boolean} [testMode] - 是否测试模式。
  * @returns {Promise<{run_id:string}>} 运行句柄。
  */
-function startDownload(cardId, testMode = false) {
-  return invokeTauri('model_store_start_download', { cardId, testMode });
+function startDownload(cardId) {
+  return invokeTauri('model_store_start_download', { cardId });
 }
 
 /**
@@ -310,9 +282,6 @@ export {
   fetchStorageSettings,
   saveStorageSettings,
   fetchStoreCards,
-  fetchTestStoreState,
-  unlockTestStore,
-  disableTestStore,
   fetchLibrary,
   fetchModelDetail,
   fetchInstalledEngines,
