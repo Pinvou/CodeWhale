@@ -752,7 +752,9 @@ mod tests {
         assert!(manager.is_connecting(operation.clone()));
         manager.complete_reserved(operation.clone()).unwrap();
         assert!(manager.is_connecting(operation.clone()));
-        manager.complete_connected(operation.clone(), lease()).unwrap();
+        manager
+            .complete_connected(operation.clone(), lease())
+            .unwrap();
         assert!(!manager.is_connecting(operation.clone()));
         assert_eq!(
             manager

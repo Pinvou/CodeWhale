@@ -771,7 +771,11 @@ mod tests {
         assert_eq!(status["status"], "error");
         assert_eq!(status["errorCode"], "pairing_code_invalid");
         assert_eq!(status["hasPendingCode"], false);
-        assert!(statuses.last().is_some_and(|status| projection(status)["status"] == "error"));
+        assert!(
+            statuses
+                .last()
+                .is_some_and(|status| projection(status)["status"] == "error")
+        );
         // 失败路径不留半租约，也不再占用 transport。
         assert!(sender.authenticated_lease().is_none());
         assert!(sender.is_stopped());
@@ -858,9 +862,16 @@ mod tests {
         .await
         .unwrap_err();
         assert_eq!(error, "invalid_message");
-        assert_eq!(projection(&manager.status())["errorCode"], "invalid_message");
+        assert_eq!(
+            projection(&manager.status())["errorCode"],
+            "invalid_message"
+        );
         assert!(sender.authenticated_lease().is_none());
-        assert_eq!(sender.generation(), "", "untrusted transcript must not bind");
+        assert_eq!(
+            sender.generation(),
+            "",
+            "untrusted transcript must not bind"
+        );
 
         // 2) transport 已经绑定过 generation 时，Reserved 阶段必须中止。
         let PairingFixture {
@@ -875,8 +886,14 @@ mod tests {
         let mut handshake = a_handshake(&reservation, a_keys, relay.trust.clone());
         let manager = ControllingDeviceManager::default();
         let operation = manager.connect("234-4567").unwrap();
-        let (sender, _receiver) =
-            transport_channels(ControllerRole::ControllerA, "generation-0000", 2, 2, 8192, 1024);
+        let (sender, _receiver) = transport_channels(
+            ControllerRole::ControllerA,
+            "generation-0000",
+            2,
+            2,
+            8192,
+            1024,
+        );
         let error = run_controlling_connection(
             &manager,
             operation,

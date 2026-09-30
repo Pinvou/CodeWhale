@@ -233,7 +233,12 @@ pub fn desktop_remote_history_create(
     ensure_supported(&controlled)?;
     runtime
         .store()
-        .create(&title, &device_display_name, &session_ref, monotonic_millis())
+        .create(
+            &title,
+            &device_display_name,
+            &session_ref,
+            monotonic_millis(),
+        )
         .map_err(|error| error.code.to_owned())
 }
 
@@ -363,11 +368,7 @@ mod tests {
             .unwrap();
         runtime
             .store()
-            .append_authenticated(
-                &id,
-                &runtime.journal().snapshot().events[0],
-                1_100,
-            )
+            .append_authenticated(&id, &runtime.journal().snapshot().events[0], 1_100)
             .unwrap();
         runtime.store().mark_offline(&id, 1_200).unwrap();
         let listed = runtime.store().list();

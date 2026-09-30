@@ -12,9 +12,7 @@ use async_trait::async_trait;
 use deepseek_tui::AppMode;
 use tokio_util::sync::CancellationToken;
 
-use crate::features::remote_control::controller::task::{
-    RemoteChatTurnPort, TASK_CANCELLED_CODE,
-};
+use crate::features::remote_control::controller::task::{RemoteChatTurnPort, TASK_CANCELLED_CODE};
 
 use super::engine_pool::EnginePool;
 
@@ -175,8 +173,8 @@ impl RemoteChatTurnPort for EnginePoolChatTurnPort {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     #[derive(Default)]
     struct FakeEngine {
