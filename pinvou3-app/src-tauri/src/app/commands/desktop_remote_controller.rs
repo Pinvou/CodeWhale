@@ -7,6 +7,7 @@
 use serde::Deserialize;
 use tauri::{AppHandle, Emitter, State};
 
+use crate::features::remote_control::RemoteControlManager;
 use crate::features::remote_control::controller::controlling::{
     ControllingDeviceManager, ControllingLeaseInfo, ControllingStateError, ControllingStatus,
     RemoteHistoryEntry,
@@ -14,7 +15,6 @@ use crate::features::remote_control::controller::controlling::{
 use crate::features::remote_control::controller::controlling_service::{
     CONTROLLER_STATUS_EVENT, connect_controlling_device,
 };
-use crate::features::remote_control::RemoteControlManager;
 
 const STATUS_EVENT: &str = CONTROLLER_STATUS_EVENT;
 const UNSUPPORTED: &str = "desktop_remote_control_unsupported";

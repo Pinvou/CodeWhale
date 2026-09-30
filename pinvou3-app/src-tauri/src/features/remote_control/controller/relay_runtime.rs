@@ -10,7 +10,7 @@ use std::sync::OnceLock;
 use std::time::Instant;
 
 use base64::Engine as _;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tauri::{AppHandle, Emitter, Manager as _};
 use tokio::sync::oneshot;
 
@@ -23,21 +23,19 @@ use super::controlled::{
 use super::controlled_handshake::ControlledHandshake;
 use super::controlling_handshake::JoinedLease;
 use super::crypto::{
-    AuthenticatedRelayTrustConfig, CodeWrapBinding, CodeWrapKeyPair, ControllerRole as HandshakeRole,
-    HandshakeKeyPair, load_relay_trust_config, transport_key_fingerprint,
+    AuthenticatedRelayTrustConfig, CodeWrapBinding, CodeWrapKeyPair,
+    ControllerRole as HandshakeRole, HandshakeKeyPair, load_relay_trust_config,
+    transport_key_fingerprint,
 };
 use super::protocol::LeaseContext;
 use super::protocol::{
-    validate_controller_message_json, validate_controller_registration_message_json,
-    RegistrationValidationContext, SenderRole,
+    RegistrationValidationContext, SenderRole, validate_controller_message_json,
+    validate_controller_registration_message_json,
 };
 
 const REGISTRATION_TIMEOUT_MS: u64 = 30_000;
-const REGISTRATION_CAPABILITIES: &[&str] = &[
-    "pairing_v1",
-    "encrypted_frames_v1",
-    "finished_receipt_v1",
-];
+const REGISTRATION_CAPABILITIES: &[&str] =
+    &["pairing_v1", "encrypted_frames_v1", "finished_receipt_v1"];
 const CONTROLLED_STATUS_EVENT: &str = "desktop-remote-controlled-status";
 /// 握手/协议层失败的本地错误码（有界，绝不透传对端文本）。
 const HANDSHAKE_FAILED: &str = "invalid_message";
@@ -128,10 +126,7 @@ impl ControlledHandshakeDriver {
         if self.handshake.is_some() {
             return Err("controller_handshake_stage_invalid");
         }
-        let keys = self
-            .keys
-            .take()
-            .ok_or("controller_handshake_key_invalid")?;
+        let keys = self.keys.take().ok_or("controller_handshake_key_invalid")?;
         let handshake =
             ControlledHandshake::new(message, keys, trust).map_err(|error| error.code)?;
         let commit = handshake.commit().map_err(|error| error.code)?;
@@ -156,10 +151,7 @@ impl ControlledHandshakeDriver {
 
     /// `encrypted_handshake_finished`：打开对端 Finished 并核对 commitment 后
     /// 产出本端 `finished_receipt_ack`。
-    pub(crate) fn accept_peer_finished(
-        &mut self,
-        message: &Value,
-    ) -> Result<Value, &'static str> {
+    pub(crate) fn accept_peer_finished(&mut self, message: &Value) -> Result<Value, &'static str> {
         let handshake = self
             .handshake
             .as_mut()
@@ -179,7 +171,9 @@ impl ControlledHandshakeDriver {
             .handshake
             .as_mut()
             .ok_or("controller_handshake_stage_invalid")?;
-        let lease = handshake.accept_joined(message).map_err(|error| error.code)?;
+        let lease = handshake
+            .accept_joined(message)
+            .map_err(|error| error.code)?;
         Ok(ControlledHandshakeOutcome {
             lease,
             transcript_hash: handshake.transcript_hash(),
@@ -221,15 +215,10 @@ impl ControlledRelayWorker {
         app: AppHandle,
         relay: RemoteControlManager,
         operation: ControlledOperation,
-    ) -> Result<
-        oneshot::Receiver<Result<ControlledStatus, String>>,
-        String,
-    > {
+    ) -> Result<oneshot::Receiver<Result<ControlledStatus, String>>, String> {
         let code_wrap = CodeWrapKeyPair::generate().map_err(|_| "pairing_key_invalid")?;
         let handshake = HandshakeKeyPair::generate().map_err(|_| "handshake_key_invalid")?;
-        let channel = relay
-            .start_controller_relay(operation.generation())
-            .await?;
+        let channel = relay.start_controller_relay(operation.generation()).await?;
         let (done_tx, done_rx) = oneshot::channel();
         let mut worker = Self {
             app,
@@ -531,8 +520,8 @@ fn sanitize_error(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::features::remote_control::controller::crypto::{CodeWrapKeyPair, HandshakeKeyPair};
     use crate::features::remote_control::controller::controlling_handshake::ControllingHandshake;
+    use crate::features::remote_control::controller::crypto::{CodeWrapKeyPair, HandshakeKeyPair};
     use crate::features::remote_control::controller::test_support::PairingFixture;
     use std::collections::VecDeque;
     use std::time::Duration;
@@ -722,7 +711,10 @@ mod tests {
     }
 
     fn keys() -> (CodeWrapKeyPair, CodeWrapKeyPair) {
-        (CodeWrapKeyPair::generate().unwrap(), CodeWrapKeyPair::generate().unwrap())
+        (
+            CodeWrapKeyPair::generate().unwrap(),
+            CodeWrapKeyPair::generate().unwrap(),
+        )
     }
 
     #[test]
@@ -882,7 +874,9 @@ mod tests {
         assert_eq!(b_commit["sender_role"], "B");
         // 重复接管同一预留必须拒绝。
         assert_eq!(
-            driver.accept_reserved(&reservation, &relay.trust).unwrap_err(),
+            driver
+                .accept_reserved(&reservation, &relay.trust)
+                .unwrap_err(),
             "controller_handshake_stage_invalid"
         );
         // 收到 A 的 commitment 之前不能回送 Finished。
@@ -935,8 +929,7 @@ mod tests {
         } = crate::features::remote_control::controller::test_support::pairing_fixture(
             "relay-key-runtime",
         );
-        let (mut driver, _a) =
-            drive_through_receipts(&reservation, b_keys, a_keys, &relay.trust);
+        let (mut driver, _a) = drive_through_receipts(&reservation, b_keys, a_keys, &relay.trust);
         let mut foreign = joined;
         foreign["reservation_id"] = json!("reservation-other");
         assert_eq!(
@@ -960,8 +953,7 @@ mod tests {
         } = crate::features::remote_control::controller::test_support::pairing_fixture(
             "relay-key-runtime",
         );
-        let (mut driver, _a) =
-            drive_through_receipts(&reservation, b_keys, a_keys, &relay.trust);
+        let (mut driver, _a) = drive_through_receipts(&reservation, b_keys, a_keys, &relay.trust);
         let outcome = driver.accept_joined(&joined).unwrap();
         let expected =
             transport_key_fingerprint(outcome.transcript_hash, HandshakeRole::B).unwrap();
@@ -969,10 +961,7 @@ mod tests {
 
         assert_eq!(lease.context.controller_lease_id, "controller-lease-0001");
         assert_eq!(lease.context.lease_epoch, "1");
-        assert_eq!(
-            lease.context.remote_control_generation,
-            "generation-0001"
-        );
+        assert_eq!(lease.context.remote_control_generation, "generation-0001");
         assert_eq!(lease.liveness_epoch_a, "liveness-epoch-a-0001");
         assert_eq!(lease.resume_deadline_b, 30_000);
         assert_eq!(lease.resume_token, resume_token);

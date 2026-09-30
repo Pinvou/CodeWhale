@@ -211,7 +211,10 @@ const RUST_FORWARDED_EVENTS: &[&str] = &[
 pub type CodeSessionPredicate = Arc<dyn Fn(&str) -> bool + Send + Sync>;
 
 fn controller_relay_message(value: &Value) -> bool {
-    let kind = value.get("type").and_then(Value::as_str).unwrap_or_default();
+    let kind = value
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
     matches!(
         kind,
         "desktop_endpoint_registered" | "desktop_relay_connection" | "error"
@@ -313,7 +316,8 @@ impl ControllerRelayChannel {
     }
 
     pub fn try_send(&self, message: Value) -> Result<(), String> {
-        self.manager.send_controller_message(&self.generation, message)
+        self.manager
+            .send_controller_message(&self.generation, message)
     }
 }
 
@@ -845,7 +849,10 @@ impl RemoteControlManager {
     /// endpoint. The endpoint remains the same socket used by WebUI v2; the
     /// Relay's interaction slot, not a second socket, enforces client mutual
     /// exclusion. A controller generation owns exactly one inbound channel.
-    pub async fn start_controller_relay(&self, generation: &str) -> Result<ControllerRelayChannel, String> {
+    pub async fn start_controller_relay(
+        &self,
+        generation: &str,
+    ) -> Result<ControllerRelayChannel, String> {
         let (sender, receiver) = tokio::sync::mpsc::channel::<Value>(128);
         let synthetic_registration;
         {
@@ -2021,8 +2028,7 @@ impl RemoteControlManager {
         // misclassifying them as legacy broadcast messages.
         if controller_relay_message(&value)
             && (endpoint_id.is_empty()
-                || value.get("type").and_then(Value::as_str)
-                    != Some("desktop_endpoint_registered"))
+                || value.get("type").and_then(Value::as_str) != Some("desktop_endpoint_registered"))
         {
             self.forward_controller_relay_message(&value);
             return;

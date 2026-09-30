@@ -8,6 +8,7 @@ use serde::Deserialize;
 use tauri::{AppHandle, Emitter, State};
 
 use crate::features::files::file_ingest::validate_browsable_path;
+use crate::features::remote_control::RemoteControlManager;
 use crate::features::remote_control::controller::controlled::{
     ControlledDeviceManager, ControlledStateError, ControlledStatus, ControlledWorkspaceInfo,
     WorkspaceAuthorizationRequest,
@@ -15,7 +16,6 @@ use crate::features::remote_control::controller::controlled::{
 use crate::features::remote_control::controller::relay_runtime::{
     ControlledRelayWorker, controlled_monotonic_millis,
 };
-use crate::features::remote_control::RemoteControlManager;
 
 const STATUS_EVENT: &str = "desktop-remote-controlled-status";
 const UNSUPPORTED: &str = "desktop_remote_control_unsupported";
@@ -106,27 +106,24 @@ pub async fn desktop_remote_controlled_start(
     let operation = manager
         .current_operation()
         .ok_or_else(|| "desktop_remote_generation_unavailable".to_owned())?;
-    let done = match ControlledRelayWorker::start(
-        app.clone(),
-        relay.inner().clone(),
-        operation.clone(),
-    )
-    .await
-    {
-        Ok(done) => done,
-        Err(error) => {
-            let bounded = error
-                .chars()
-                .filter(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-'))
-                .take(64)
-                .collect::<String>();
-            let status = manager
-                .fail_operation(operation, bounded)
-                .map_err(controlled_error)?;
-            emit_status(&app, &status);
-            return Err(error);
-        }
-    };
+    let done =
+        match ControlledRelayWorker::start(app.clone(), relay.inner().clone(), operation.clone())
+            .await
+        {
+            Ok(done) => done,
+            Err(error) => {
+                let bounded = error
+                    .chars()
+                    .filter(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-'))
+                    .take(64)
+                    .collect::<String>();
+                let status = manager
+                    .fail_operation(operation, bounded)
+                    .map_err(controlled_error)?;
+                emit_status(&app, &status);
+                return Err(error);
+            }
+        };
     match done.await {
         Ok(Ok(status)) => Ok(status),
         Ok(Err(error)) => Err(error),

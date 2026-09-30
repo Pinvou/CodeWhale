@@ -1260,7 +1260,10 @@ pub(crate) fn load_relay_trust_config(
         .ok_or_else(|| {
             ControllerCryptoError::new("relay_trust_unconfigured", "relay_signing_public_key")
         })?;
-    AuthenticatedRelayTrustConfig::from_pinned_keys([(key_id.trim().to_owned(), public_key.trim().to_owned())])
+    AuthenticatedRelayTrustConfig::from_pinned_keys([(
+        key_id.trim().to_owned(),
+        public_key.trim().to_owned(),
+    )])
 }
 
 /// Verifies a parsed `controller_pairing_reserved` transcript against the
@@ -1483,9 +1486,7 @@ mod tests {
         //    `into_role_ciphers` 产出的那一份逐字节一致。
         let (via_pair_keys, peer_keys) = session_pair();
         let (via_pair_sender, _) = via_pair_keys.finished_pair(ControllerRole::A);
-        let sealed_without_lease = via_pair_sender
-            .seal_with_nonce(&receipt, nonce)
-            .unwrap();
+        let sealed_without_lease = via_pair_sender.seal_with_nonce(&receipt, nonce).unwrap();
 
         let (via_ciphers_keys, _) = session_pair();
         let via_ciphers = via_ciphers_keys
@@ -1517,7 +1518,10 @@ mod tests {
             derive_business_key(&root, &transcript_hash, &lease(2), FrameDirection::AToB)
                 .unwrap()
                 .to_vec();
-        assert_eq!(first, same, "the same lease identity must derive the same key");
+        assert_eq!(
+            first, same,
+            "the same lease identity must derive the same key"
+        );
         assert_ne!(
             first, other_epoch,
             "business keys must be bound to the issued lease epoch"
@@ -1904,12 +1908,14 @@ mod tests {
             "relay_trust_unconfigured"
         );
         let public_key = base64::engine::general_purpose::STANDARD.encode([7_u8; 32]);
-        assert!(load_relay_trust_config(|name| match name {
-            "PINVOU_REMOTE_RELAY_SIGNING_KEY_ID" => Some("relay-key-1".to_owned()),
-            "PINVOU_REMOTE_RELAY_SIGNING_PUBLIC_KEY_B64" => Some(public_key.clone()),
-            _ => None,
-        })
-        .is_ok());
+        assert!(
+            load_relay_trust_config(|name| match name {
+                "PINVOU_REMOTE_RELAY_SIGNING_KEY_ID" => Some("relay-key-1".to_owned()),
+                "PINVOU_REMOTE_RELAY_SIGNING_PUBLIC_KEY_B64" => Some(public_key.clone()),
+                _ => None,
+            })
+            .is_ok()
+        );
     }
 
     #[test]
@@ -1917,19 +1923,21 @@ mod tests {
         let fixture = fixture();
         let vector = &fixture["lease_install_vector"]["verification_input"];
         let message = serde_json::to_string(&vector["reserved_message"]).unwrap();
-        let trusted_key = fixture["untrusted_authentication_inputs"][1]["value"]["keys"][0]
-            ["public_key_b64"]
-            .as_str()
-            .unwrap()
-            .to_owned();
+        let trusted_key =
+            fixture["untrusted_authentication_inputs"][1]["value"]["keys"][0]["public_key_b64"]
+                .as_str()
+                .unwrap()
+                .to_owned();
         let trust = AuthenticatedRelayTrustConfig::from_pinned_keys([(
             "relay-key-test-1".to_owned(),
             trusted_key,
         )])
         .unwrap();
-        let context =
-            authenticate_relay_transcript(&trust, parse_controller_pairing_transcript(&message).unwrap())
-                .unwrap();
+        let context = authenticate_relay_transcript(
+            &trust,
+            parse_controller_pairing_transcript(&message).unwrap(),
+        )
+        .unwrap();
         assert!(format!("{context:?}").contains("pairing-0001"));
         // E2E-02 需要读取被认证的上下文来构造握手绑定。
         assert_eq!(context.pairing_id(), "pairing-0001");
@@ -1943,7 +1951,13 @@ mod tests {
             context.local_handshake_public_key(),
             context.peer_handshake_public_key_b64(),
         ] {
-            assert_eq!(base64::engine::general_purpose::STANDARD.decode(key).unwrap().len(), 32);
+            assert_eq!(
+                base64::engine::general_purpose::STANDARD
+                    .decode(key)
+                    .unwrap()
+                    .len(),
+                32
+            );
         }
 
         let attacker_key = fixture["untrusted_authentication_inputs"][2]["value"]["public_key_b64"]
@@ -2318,15 +2332,20 @@ mod tests {
         let a_first = transport_key_fingerprint(transcript, ControllerRole::A).unwrap();
         let a_second = transport_key_fingerprint(transcript, ControllerRole::A).unwrap();
         let b_role = transport_key_fingerprint(transcript, ControllerRole::B).unwrap();
-        let other_transcript =
-            transport_key_fingerprint([0x5b_u8; 32], ControllerRole::A).unwrap();
-        assert_eq!(a_first, a_second, "the same binding must derive the same value");
+        let other_transcript = transport_key_fingerprint([0x5b_u8; 32], ControllerRole::A).unwrap();
+        assert_eq!(
+            a_first, a_second,
+            "the same binding must derive the same value"
+        );
         assert_ne!(a_first, b_role, "roles must be domain separated");
         assert_ne!(
             a_first, other_transcript,
             "a different transcript must not share a fingerprint"
         );
         assert_ne!(a_first, [0_u8; 32]);
-        assert_ne!(a_first, transcript, "the fingerprint is not the raw transcript");
+        assert_ne!(
+            a_first, transcript,
+            "the fingerprint is not the raw transcript"
+        );
     }
 }
