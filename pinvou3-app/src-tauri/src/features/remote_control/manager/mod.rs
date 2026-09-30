@@ -32,14 +32,14 @@ pub use persistence::RelaySettingsInfo;
 // Persistent config / RPC ledger / pending revocation / relay settings helpers
 // are pure and stateless; the facade calls them by name.
 use persistence::{
-    acknowledge_pending_revocation, acquire_process_lock, apply_runtime_relay_override,
-    atomic_write_private_json, eligible_pending_revocations, fresh_config, load_config,
-    load_or_initialize_rpc_ledger, load_pending_revocations, load_relay_settings, new_stream_epoch,
-    normalize_relay_address, pairing_info, pending_revocation_ack, pending_revocation_key,
-    persist_config, persist_rpc_ledger, process_lock_path, public_url, queue_pending_revocation,
-    relay_settings_path, remote_public_base_url, remote_relay_ws_url, remove_config,
-    remove_private_file, remove_rpc_ledger, validate_config,
-    RelaySettings, validate_relay_settings,
+    RelaySettings, acknowledge_pending_revocation, acquire_process_lock,
+    apply_runtime_relay_override, atomic_write_private_json, eligible_pending_revocations,
+    fresh_config, load_config, load_or_initialize_rpc_ledger, load_pending_revocations,
+    load_relay_settings, new_stream_epoch, normalize_relay_address, pairing_info,
+    pending_revocation_ack, pending_revocation_key, persist_config, persist_rpc_ledger,
+    process_lock_path, public_url, queue_pending_revocation, relay_settings_path,
+    remote_public_base_url, remote_relay_ws_url, remove_config, remove_private_file,
+    remove_rpc_ledger, validate_config, validate_relay_settings,
 };
 
 // RPC admission, response shaping, scope validation, and the stream/event
