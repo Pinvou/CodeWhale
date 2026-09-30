@@ -1721,6 +1721,11 @@ impl RuntimeBridge {
             {
                 Ok(result) => break Ok(result),
                 Err(drop) => {
+                    // Track the last consumed seq on every exit path: a
+                    // resume reconnects from it, and a terminal failure
+                    // writes it back so the thread's next message does not
+                    // replay what this turn consumed.
+                    resume_from = drop.last_seq;
                     if drop.writer_gone || resumes_left == 0 {
                         break Err(drop.source);
                     }
@@ -1731,7 +1736,6 @@ impl RuntimeBridge {
                     // arrived. A repeated event can only come from a
                     // runtime that reuses seqs, which the API contract
                     // disallows.
-                    resume_from = drop.last_seq;
                     tracing::warn!(
                         "runtime event stream dropped mid-turn; resuming \
                          from seq {resume_from} ({resumes_left} resume(s) left)"
@@ -1752,6 +1756,16 @@ impl RuntimeBridge {
         let stream_result = match stream_result {
             Ok(result) => Ok(result),
             Err(stream_err) => {
+                // Terminal failure, but the live connection and any
+                // resumes consumed events along the way: persist the last
+                // consumed seq so the thread's next message streams from
+                // there instead of replaying this turn's events from the
+                // store (they would only be turn_id-filtered). Writing back
+                // a seq whose events a dead writer never received is safe:
+                // those events belong to this interrupted turn, not to the
+                // next one.
+                self.last_seq_by_thread
+                    .insert(thread_id.to_string(), resume_from);
                 if let Err(interrupt_err) = interrupt_in_flight_turn(&live_turn).await {
                     tracing::warn!("best-effort interrupt after stream failure: {interrupt_err:?}");
                 }
@@ -3824,6 +3838,14 @@ mod tests {
             interrupts.load(std::sync::atomic::Ordering::SeqCst),
             1,
             "the orphaned turn must be interrupted exactly once"
+        );
+        // The resumes consumed seq 1 before the budget ran out, so the
+        // cursor must survive the error path: the thread's next message
+        // must stream from seq 1 instead of replaying them from the store.
+        assert_eq!(
+            bridge.last_seq_by_thread.get("thr_drop"),
+            Some(&1),
+            "the last consumed seq must be written back on the error path"
         );
     }
 
