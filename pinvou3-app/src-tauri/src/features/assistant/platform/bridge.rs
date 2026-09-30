@@ -4048,10 +4048,27 @@ mod tests {
         );
         // MarketplaceManager::list_tools still reads installed.json for MCP
         // installation state; bundles.json supplies source and display metadata.
+        // Builtin plugins (§3.1) surface in the inventory regardless of
+        // installed.json, so the assertions count non-builtin entries only.
+        // §3.2 truth-source inversion: the store record keeps weather listed
+        // even with installed.json rewritten, so remove it there too.
+        store.remove("weather").unwrap();
         std::fs::write(&installed, r#"["qcc"]"#).unwrap();
-        assert_eq!(inventory("plain").as_array().unwrap().len(), 1);
+        let plain_now = inventory("plain").as_array().unwrap().clone();
+        assert_eq!(
+            plain_now.iter().filter(|e| e["builtin"] != true).count(),
+            1,
+            "exactly qcc beyond the builtin session-reader"
+        );
+        // The store record keeps qcc listed too, so delist it there as well
+        // before asserting the empty inventory.
+        store.remove("qcc").unwrap();
         std::fs::write(&installed, "[]").unwrap();
-        assert!(inventory("plain").as_array().unwrap().is_empty());
+        let plain_now = inventory("plain").as_array().unwrap().clone();
+        assert!(
+            plain_now.iter().all(|e| e["builtin"] == true),
+            "non-builtin entries must all be gone; got {plain_now:?}"
+        );
         let Op::SendMessage { content, .. } = bridge
             .build_send_message_op(
                 "plain",
