@@ -563,10 +563,19 @@ export default defineConfig(({ mode }) => {
             // chunk from rolldown's automatic splitting, so this only applies
             // to the web mode.
             codeSplitting: {
-              groups: [{
-                name: 'vendor',
-                test: /node_modules[\\/](react|react-dom|scheduler)[\\/]/,
-              }],
+              groups: [
+                {
+                  name: 'vendor',
+                  test: /node_modules[\\/](react|react-dom|scheduler)[\\/]/,
+                },
+                {
+                  // Markdown rendering is only needed after a conversation view
+                  // loads. Keep its parser, sanitizer, and syntax highlighter out
+                  // of the Web shell's startup chunk.
+                  name: 'markdown-vendor',
+                  test: /node_modules[\\/](marked|dompurify|highlight\.js)[\\/]/,
+                },
+              ],
             },
           }
         : undefined,
