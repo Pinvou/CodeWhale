@@ -2445,7 +2445,7 @@ fn validate_digest(value: &str) -> Result<()> {
 /// actual text and the ordered attachment/skill references; accepting only a
 /// well-shaped caller-provided digest would let idempotency describe different
 /// execution input than the executor receives.
-fn task_input_digest_for_value(input: &Value) -> Result<String> {
+pub(crate) fn task_input_digest_for_value(input: &Value) -> Result<String> {
     let object = input
         .as_object()
         .ok_or_else(|| error("task_input_digest_invalid"))?;

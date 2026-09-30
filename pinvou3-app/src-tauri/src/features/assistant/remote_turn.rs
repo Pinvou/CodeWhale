@@ -294,6 +294,22 @@ impl EnginePoolChatEngine {
     }
 }
 
+pub(super) fn remote_engine_error_code(error: &anyhow::Error) -> &'static str {
+    if error
+        .chain()
+        .any(|cause| cause.to_string() == "model_credential_unavailable")
+    {
+        "model_credential_unavailable"
+    } else if error
+        .chain()
+        .any(|cause| cause.to_string() == "model_runtime_unavailable")
+    {
+        "model_runtime_unavailable"
+    } else {
+        "task_engine_unavailable"
+    }
+}
+
 fn ingest_published_attachments(
     session_root: &std::path::Path,
     attachments: Vec<PublishedAttachment>,
@@ -353,7 +369,7 @@ impl RemoteChatEnginePort for EnginePoolChatEngine {
                 },
             )
             .await
-            .map_err(|_| "task_engine_unavailable".to_owned())
+            .map_err(|error| remote_engine_error_code(&error).to_owned())
     }
 
     async fn send_user_message_with_attachments(
@@ -417,7 +433,7 @@ impl RemoteChatEnginePort for EnginePoolChatEngine {
                 },
             )
             .await
-            .map_err(|_| "task_engine_unavailable".to_owned())
+            .map_err(|error| remote_engine_error_code(&error).to_owned())
     }
 
     fn is_turn_active(&self, session_id: &str) -> bool {
@@ -790,8 +806,250 @@ impl RemoteChatTurnPort for EnginePoolChatTurnPort {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::features::assistant::engine::TurnLifecycle;
+    use crate::features::assistant::engine_pool::prepare_selected_runtime_model;
+    use crate::features::assistant::platform::bridge::Pinvou3Bridge;
+    use crate::features::assistant::runtime_model::{
+        ModelCredentialMode, PreparedRuntimeModel, RuntimeModelProvider, RuntimeModelRequest,
+    };
+    use crate::features::remote_control::controller::task;
+    use crate::platform::credential_store::{
+        CredentialEditAction, CredentialReference, CredentialState, CredentialStore,
+        MemoryCredentialStore,
+    };
+    use crate::platform::prefs::{ImageCapabilityOverride, ModelPreset, SavedModel};
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    struct EnvRestore(Vec<(&'static str, Option<std::ffi::OsString>)>);
+
+    impl EnvRestore {
+        fn capture(names: &[&'static str]) -> Self {
+            Self(
+                names
+                    .iter()
+                    .map(|name| (*name, std::env::var_os(name)))
+                    .collect(),
+            )
+        }
+    }
+
+    impl Drop for EnvRestore {
+        fn drop(&mut self) {
+            for (name, value) in self.0.drain(..) {
+                match value {
+                    // SAFETY: callers hold platform::paths::tests::ENV_LOCK while mutating process env.
+                    Some(value) => unsafe { std::env::set_var(name, value) },
+                    // SAFETY: callers hold platform::paths::tests::ENV_LOCK while mutating process env.
+                    None => unsafe { std::env::remove_var(name) },
+                }
+            }
+        }
+    }
+
+    fn isolated_remote_bridge() -> (Pinvou3Bridge, std::path::PathBuf, EnvRestore) {
+        let restore = EnvRestore::capture(&[
+            "PINVOU3_HOME",
+            "DEEPSEEK_MODEL",
+            "DEEPSEEK_PROVIDER",
+            "DEEPSEEK_BASE_URL",
+            "DEEPSEEK_API_KEY",
+            "DEEPSEEK_MAX_OUTPUT_TOKENS",
+            "PINVOU3_SESSION_ARTIFACTS",
+        ]);
+        let home = std::env::temp_dir().join(format!(
+            "pinvou-remote-runtime-{}-{}",
+            std::process::id(),
+            crate::platform::paths::tests::unique_suffix()
+        ));
+        // SAFETY: the caller holds platform::paths::tests::ENV_LOCK.
+        unsafe { std::env::set_var("PINVOU3_HOME", &home) };
+        for name in [
+            "DEEPSEEK_MODEL",
+            "DEEPSEEK_PROVIDER",
+            "DEEPSEEK_BASE_URL",
+            "DEEPSEEK_API_KEY",
+        ] {
+            // SAFETY: the caller holds platform::paths::tests::ENV_LOCK.
+            unsafe { std::env::remove_var(name) };
+        }
+        let bridge = Pinvou3Bridge::boot().expect("boot isolated remote bridge");
+        (bridge, home, restore)
+    }
+
+    fn runtime_model(id: &str, wire_name: &str) -> SavedModel {
+        SavedModel {
+            id: id.to_string(),
+            name: id.to_string(),
+            alias: None,
+            preset: ModelPreset::OpenaiCompatible,
+            context_window_tokens: None,
+            max_output_tokens: None,
+            reasoning_effort: None,
+            model: wire_name.to_string(),
+            base_url: "https://example.invalid/v1".to_string(),
+            provider_kind: None,
+            vendor: None,
+            endpoint_mode: None,
+            image_capability_override: ImageCapabilityOverride::default(),
+            vision_model_id: None,
+            api_key: String::new(),
+            credential_ref: None,
+            credential_state: CredentialState::Missing,
+            has_secret: false,
+            credential_action: None::<CredentialEditAction>,
+        }
+    }
+
+    struct PipelineRuntimeProvider {
+        calls: AtomicUsize,
+        fail: AtomicBool,
+    }
+
+    #[async_trait]
+    impl RuntimeModelProvider for PipelineRuntimeProvider {
+        fn credential_mode(
+            &self,
+            _model: &SavedModel,
+            _user_api_key_required: bool,
+        ) -> ModelCredentialMode {
+            ModelCredentialMode::UserManaged
+        }
+
+        async fn prepare(
+            &self,
+            request: RuntimeModelRequest,
+        ) -> anyhow::Result<PreparedRuntimeModel> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            if self.fail.load(Ordering::SeqCst) {
+                anyhow::bail!("private provider preparation detail");
+            }
+            Ok(PreparedRuntimeModel::unchanged(request.model))
+        }
+    }
+
+    struct SnapshotBoundaryEngine {
+        provider: Arc<PipelineRuntimeProvider>,
+        credential_store: Arc<MemoryCredentialStore>,
+        credential_ref: CredentialReference,
+        bridge: Pinvou3Bridge,
+        selected_model: Mutex<SavedModel>,
+        mutate_after_freeze: Mutex<Option<(String, String)>>,
+        configured_routes: Mutex<Vec<(String, String)>>,
+        lifecycle: Arc<TurnLifecycle>,
+        active: AtomicBool,
+    }
+
+    #[async_trait]
+    impl RemoteChatEnginePort for SnapshotBoundaryEngine {
+        async fn send_user_message(
+            &self,
+            session_id: &str,
+            _task_id: &str,
+            _model_source: &str,
+            _lease: &LeaseContext,
+            _content: String,
+            _skill_ids: Vec<String>,
+            _relay: Option<&TurnEventRelayHandle>,
+        ) -> std::result::Result<(), String> {
+            let reservation = self
+                .lifecycle
+                .reserve()
+                .map_err(|_| "task_engine_unavailable".to_owned())?;
+            let selected = self
+                .selected_model
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone();
+            let mut bridge = self.bridge.clone();
+            bridge.session_model = Some(selected.clone());
+            prepare_selected_runtime_model(
+                self.provider.as_ref(),
+                self.credential_store.as_ref(),
+                &mut bridge,
+                RuntimeModelRequest {
+                    session_id: session_id.to_owned(),
+                    model: selected,
+                    scheduled_unattended: false,
+                },
+                None,
+                false,
+                true,
+            )
+            .await
+            .map_err(|error| remote_engine_error_code(&error).to_owned())?;
+
+            if let Some((next_key, next_model)) = self
+                .mutate_after_freeze
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .take()
+            {
+                self.credential_store
+                    .set(&self.credential_ref, &next_key)
+                    .expect("rotate memory credential after the snapshot");
+                self.selected_model
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .model = next_model;
+            }
+
+            let config = bridge.build_dt_config();
+            self.configured_routes
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push((
+                    config.api_key.unwrap_or_default(),
+                    config.default_text_model.unwrap_or_default(),
+                ));
+            assert!(reservation.ensure_active().is_ok());
+            drop(reservation);
+            self.active.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn is_turn_active(&self, _session_id: &str) -> bool {
+            self.active.swap(false, Ordering::SeqCst)
+        }
+
+        async fn cancel_turn(&self, _session_id: &str) {}
+
+        async fn release_task_model(&self, _session_id: &str, _model_source: &str) {}
+
+        async fn restore_session_skills(
+            &self,
+            _session_id: &str,
+        ) -> std::result::Result<(), String> {
+            Ok(())
+        }
+    }
+
+    fn remote_task_payload(task_id: &str, client_request_id: &str) -> Value {
+        let input = json!({
+            "text": "run the report",
+            "attachment_ids": [],
+            "skill_ids": [],
+        });
+        let input_digest = task::task_input_digest_for_value(&input).expect("task digest");
+        json!({
+            "v": 1,
+            "type": "task_submit",
+            "connection_id": "connection-0001",
+            "controller_lease_id": "lease-0001",
+            "lease_epoch": "1",
+            "relay_epoch": "relay-0001",
+            "remote_control_generation": "generation-0001",
+            "request_id": client_request_id,
+            "task_id": task_id,
+            "client_request_id": client_request_id,
+            "session_id": "session-0001",
+            "capability_revision": "7",
+            "model_source": "controlled_device",
+            "mode": "chat",
+            "input_digest": input_digest,
+            "input": input,
+        })
+    }
 
     #[test]
     fn completed_b_upload_is_ingested_as_content_not_only_a_path() {
@@ -952,6 +1210,164 @@ mod tests {
 
     fn events() -> Arc<dyn ControllerTaskEventSink> {
         Arc::new(NoopEvents)
+    }
+
+    #[test]
+    fn runtime_preparation_errors_are_bounded_before_relay() {
+        let missing = anyhow::anyhow!("model_credential_unavailable")
+            .context("failed to construct provider client");
+        assert_eq!(
+            super::remote_engine_error_code(&missing),
+            "model_credential_unavailable"
+        );
+
+        let provider = anyhow::anyhow!("private provider detail")
+            .context("model_runtime_unavailable")
+            .context("runtime preparation failed");
+        assert_eq!(
+            super::remote_engine_error_code(&provider),
+            "model_runtime_unavailable"
+        );
+        assert!(!super::remote_engine_error_code(&provider).contains("private"));
+        assert_eq!(
+            super::remote_engine_error_code(&anyhow::anyhow!("session missing")),
+            "task_engine_unavailable"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn remote_task_pipeline_freezes_runtime_snapshot_and_releases_both_turn_gates() {
+        let _guard = crate::platform::paths::tests::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let (bridge, home, _env) = isolated_remote_bridge();
+        let provider = Arc::new(PipelineRuntimeProvider {
+            calls: AtomicUsize::new(0),
+            fail: AtomicBool::new(false),
+        });
+        let credential_store = Arc::new(MemoryCredentialStore::default());
+        let credential_ref = CredentialReference::for_model("controlled");
+        let mut selected = runtime_model("controlled", "wire-v1");
+        selected.credential_ref = Some(credential_ref.clone());
+        let engine = Arc::new(SnapshotBoundaryEngine {
+            provider: provider.clone(),
+            credential_store: credential_store.clone(),
+            credential_ref: credential_ref.clone(),
+            bridge,
+            selected_model: Mutex::new(selected),
+            mutate_after_freeze: Mutex::new(None),
+            configured_routes: Mutex::new(Vec::new()),
+            lifecycle: Arc::new(TurnLifecycle::default()),
+            active: AtomicBool::new(false),
+        });
+        let turn_port = Arc::new(EnginePoolChatTurnPort::new(engine.clone()));
+        let service = task::RemoteTaskService::new(Arc::new(task::RemoteTaskLedger::in_memory()));
+        service.register_executor(
+            task::TASK_MODE_CHAT,
+            Arc::new(task::ChatTurnExecutor::new(turn_port)),
+        );
+        let lease = lease();
+
+        let first_payload = remote_task_payload("task-0001", "client-0001");
+        let first = match service.submit(&lease, &first_payload, 1_000).unwrap() {
+            task::AdmissionOutcome::Admitted(ticket) => ticket,
+            other => panic!("expected first admission, got {other:?}"),
+        };
+        let missing = service
+            .dispatch(first, events(), CancellationToken::new(), 1_100)
+            .await
+            .unwrap();
+        assert_eq!(missing.state, task::RemoteTaskState::Failed);
+        assert_eq!(
+            missing.terminal_reason.as_deref(),
+            Some("model_credential_unavailable")
+        );
+        assert!(!engine.lifecycle.is_active());
+        assert_eq!(service.ledger().live_task_count(), 0);
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+
+        match service.submit(&lease, &first_payload, 1_200).unwrap() {
+            task::AdmissionOutcome::Replay(record) => {
+                assert_eq!(record.state, task::RemoteTaskState::Failed)
+            }
+            other => panic!("expected durable replay, got {other:?}"),
+        }
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+
+        credential_store
+            .set(&credential_ref, "frozen-key")
+            .expect("seed memory credential");
+        *engine
+            .mutate_after_freeze
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+            Some(("rotated-key".to_owned(), "wire-v2".to_owned()));
+        let second_payload = remote_task_payload("task-0002", "client-0002");
+        let second = match service.submit(&lease, &second_payload, 1_300).unwrap() {
+            task::AdmissionOutcome::Admitted(ticket) => ticket,
+            other => panic!("expected second admission, got {other:?}"),
+        };
+        let succeeded = service
+            .dispatch(second, events(), CancellationToken::new(), 1_400)
+            .await
+            .unwrap();
+        assert_eq!(succeeded.state, task::RemoteTaskState::Succeeded);
+        assert_eq!(
+            engine
+                .configured_routes
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .as_slice(),
+            &[("frozen-key".to_owned(), "wire-v1".to_owned())]
+        );
+        assert_eq!(
+            credential_store.get(&credential_ref).unwrap().as_deref(),
+            Some("rotated-key")
+        );
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
+        assert!(!engine.lifecycle.is_active());
+
+        provider.fail.store(true, Ordering::SeqCst);
+        let third_payload = remote_task_payload("task-0003", "client-0003");
+        let third = match service.submit(&lease, &third_payload, 1_500).unwrap() {
+            task::AdmissionOutcome::Admitted(ticket) => ticket,
+            other => panic!("expected third admission, got {other:?}"),
+        };
+        let provider_failed = service
+            .dispatch(third, events(), CancellationToken::new(), 1_600)
+            .await
+            .unwrap();
+        assert_eq!(provider_failed.state, task::RemoteTaskState::Failed);
+        assert_eq!(
+            provider_failed.terminal_reason.as_deref(),
+            Some("model_runtime_unavailable")
+        );
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 3);
+        assert!(!engine.lifecycle.is_active());
+
+        provider.fail.store(false, Ordering::SeqCst);
+        let fourth_payload = remote_task_payload("task-0004", "client-0004");
+        let fourth = match service.submit(&lease, &fourth_payload, 1_700).unwrap() {
+            task::AdmissionOutcome::Admitted(ticket) => ticket,
+            other => panic!("expected fourth admission, got {other:?}"),
+        };
+        let recovered = service
+            .dispatch(fourth, events(), CancellationToken::new(), 1_800)
+            .await
+            .unwrap();
+        assert_eq!(recovered.state, task::RemoteTaskState::Succeeded);
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 4);
+        assert_eq!(
+            engine
+                .configured_routes
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .last(),
+            Some(&("rotated-key".to_owned(), "wire-v2".to_owned()))
+        );
+        assert!(!engine.lifecycle.is_active());
+        assert_eq!(service.ledger().live_task_count(), 0);
+        let _ = std::fs::remove_dir_all(home);
     }
 
     #[test]

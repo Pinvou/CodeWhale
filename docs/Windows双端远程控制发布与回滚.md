@@ -4,7 +4,7 @@
 
 ## 1. 发布前置门禁
 
-只有以下门禁全部通过且证据属于待发布 commit，才允许把 `PINVOU_DESKTOP_CONTROLLER_ENABLED` 设为精确值 `1`：
+Windows 客户端默认展示桌面远程控制入口；显式设置 `PINVOU_DESKTOP_CONTROLLER_ENABLED=0` 可紧急隐藏入口并拒绝全部远控 Command。Relay 的 controller runtime 仍保持部署侧失败关闭：只有以下门禁全部通过且证据属于待发布 commit，才允许在 Relay 环境把 `PINVOU_DESKTOP_CONTROLLER_ENABLED` 设为精确值 `1`：
 
 | 门禁 | 可执行入口 |
 |---|---|

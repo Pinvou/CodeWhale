@@ -266,7 +266,7 @@ impl std::fmt::Display for CredentialError {
 
 impl std::error::Error for CredentialError {}
 
-pub trait CredentialStore {
+pub trait CredentialStore: Send + Sync {
     fn get(&self, reference: &CredentialReference) -> Result<Option<String>, CredentialError>;
     fn set(&self, reference: &CredentialReference, value: &str) -> Result<(), CredentialError>;
     fn delete(&self, reference: &CredentialReference) -> Result<(), CredentialError>;

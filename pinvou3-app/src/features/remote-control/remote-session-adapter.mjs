@@ -36,14 +36,85 @@ const PROJECTION_TYPES = Object.freeze({
   user_message: 'user',
   assistant_message: 'assistant',
   reasoning: 'reasoning',
-  tool: 'system',
   approval: 'system',
-  status: 'system',
   error: 'system',
   attachment: 'system',
   artifact: 'system',
-  snapshot_marker: 'system',
 });
+
+const REMOTE_TOOL_DISPLAY_SCHEMA = 'remote_tool_display/v1';
+const TERMINAL_TASK_STATES = new Set(['succeeded', 'failed', 'cancelled', 'interrupted', 'result_unknown']);
+const TASK_ACTIVITY_KINDS = new Set([
+  'user_message', 'assistant_message', 'reasoning', 'tool', 'approval', 'error',
+  'attachment', 'artifact',
+]);
+
+function remoteToolState(value) {
+  const state = String(value || '').toLowerCase();
+  if (['completed', 'complete', 'done', 'success', 'succeeded'].includes(state)) return 'done';
+  if (['failed', 'failure', 'error'].includes(state)) return 'failed';
+  return 'running';
+}
+
+function remoteToolDisplay(body) {
+  if (typeof body !== 'string' || !body.trim().startsWith('{')) return null;
+  try {
+    const value = JSON.parse(body);
+    const schema = value?.schema;
+    const toolId = value?.toolId ?? value?.tool_id;
+    const toolName = value?.toolName ?? value?.tool_name;
+    const toolState = value?.toolState ?? value?.tool_state;
+    if (schema != null && schema !== REMOTE_TOOL_DISPLAY_SCHEMA) return null;
+    if (typeof toolId !== 'string' || !toolId
+      || typeof toolName !== 'string' || !toolName
+      || typeof toolState !== 'string' || !toolState) return null;
+    const output = value?.output ?? value?.text;
+    return {
+      toolId,
+      toolName,
+      state: remoteToolState(toolState),
+      output: typeof output === 'string' ? output : null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function remoteTaskProjectionState(entries) {
+  const tasks = new Map();
+  for (let index = 0; index < entries.length; index += 1) {
+    const entry = entries[index];
+    if (!entry || typeof entry.journalEpoch !== 'string'
+      || !Number.isSafeInteger(entry.sequence) || entry.sequence < 0
+      || typeof entry.eventId !== 'string') continue;
+    const taskId = typeof entry?.taskId === 'string' && entry.taskId ? entry.taskId : null;
+    if (!taskId) continue;
+    const key = remoteTaskMapKey(entry.journalEpoch, taskId);
+    const task = tasks.get(key) || {
+      taskId,
+      journalEpoch: entry.journalEpoch,
+      state: 'running',
+      lastActivity: index,
+    };
+    if (entry.kind === 'status') {
+      task.state = String(entry.body || '').toLowerCase();
+      task.lastActivity = index;
+      tasks.set(key, task);
+    } else if (TASK_ACTIVITY_KINDS.has(entry.kind)) {
+      task.lastActivity = index;
+      tasks.set(key, task);
+    }
+  }
+  return tasks;
+}
+
+function remoteTaskMapKey(journalEpoch, taskId) {
+  return JSON.stringify([journalEpoch, taskId]);
+}
+
+function remoteToolMapKey(journalEpoch, taskId, toolId) {
+  return JSON.stringify([journalEpoch, taskId, toolId]);
+}
 
 const PROJECTION_LABEL_KEYS = Object.freeze({
   user_message: 'projectionUser',
@@ -64,25 +135,61 @@ export function remoteProjectionLabelKey(kind) {
 export function remoteProxyChatItems(localSessionId, history) {
   const record = remoteProxyForSession(localSessionId, history);
   if (!record) return [];
-  const latestTaskStates = new Map();
-  for (const entry of record.entries) {
-    if (entry?.kind === 'status' && typeof entry.taskId === 'string' && entry.taskId) {
-      latestTaskStates.set(entry.taskId, String(entry.body || ''));
-    }
-  }
+  const tasks = remoteTaskProjectionState(record.entries);
   const items = [];
+  const tools = new Map();
   for (const entry of record.entries) {
     if (!entry || typeof entry.journalEpoch !== 'string'
       || !Number.isSafeInteger(entry.sequence) || entry.sequence < 0
       || typeof entry.eventId !== 'string') continue;
+    const attachments = Array.isArray(entry.attachments) ? entry.attachments : [];
+    const taskId = typeof entry.taskId === 'string' && entry.taskId ? entry.taskId : null;
+    if (entry.kind === 'tool') {
+      const display = remoteToolDisplay(entry.body);
+      if (!display) continue;
+      const key = remoteToolMapKey(entry.journalEpoch, taskId, display.toolId);
+      const previousTool = tools.get(key);
+      if (previousTool) {
+        previousTool.name = display.toolName;
+        previousTool.state = display.state;
+        previousTool.success = display.state === 'done' ? true
+          : (display.state === 'failed' ? false : undefined);
+        if (display.output !== null) previousTool.output = display.output;
+        continue;
+      }
+      const tool = {
+        id: `remote-proxy:${localSessionId}:${entry.journalEpoch}:${entry.sequence}:${entry.eventId}`,
+        type: 'tool',
+        name: display.toolName,
+        args: null,
+        output: display.output,
+        state: display.state,
+        success: display.state === 'done' ? true : (display.state === 'failed' ? false : undefined),
+        remote: true,
+        remoteProxy: true,
+        remoteKind: entry.kind,
+        remoteToolId: display.toolId,
+        remoteTaskId: taskId,
+        remoteJournalEpoch: entry.journalEpoch,
+        remoteAttachments: attachments.slice(),
+        createdAt: entry.sequence,
+      };
+      tools.set(key, tool);
+      items.push(tool);
+      continue;
+    }
+    // Task lifecycle and snapshot markers drive projection state, not visible
+    // transcript rows. Showing each one as a message produced raw protocol
+    // blocks and split one remote turn into multiple visual fragments.
+    if (entry.kind === 'status' || entry.kind === 'snapshot_marker') continue;
     const type = PROJECTION_TYPES[entry.kind];
     if (!type) continue;
-    const attachments = Array.isArray(entry.attachments) ? entry.attachments : [];
     const text = (typeof entry.body === 'string' && entry.body)
       || attachments.map(item => item?.displayName || '').filter(Boolean).join('\n');
     if (!text && !attachments.length && type !== 'system') continue;
-    const taskId = typeof entry.taskId === 'string' && entry.taskId ? entry.taskId : null;
-    const taskState = taskId ? latestTaskStates.get(taskId) : null;
+    const taskState = taskId
+      ? tasks.get(remoteTaskMapKey(entry.journalEpoch, taskId))?.state
+      : null;
     const streaming = (type === 'assistant' || type === 'reasoning')
       && !!taskId && !TERMINAL_TASK_STATES.has(taskState);
     const previous = items[items.length - 1];
@@ -93,11 +200,14 @@ export function remoteProxyChatItems(localSessionId, history) {
       && previous.remoteKind === entry.kind
       && previous.remoteTaskId === taskId
       && previous.remoteJournalEpoch === entry.journalEpoch
+      && 'text' in previous
+      && 'streaming' in previous
     ) {
       // The journal stores streamed deltas as independent durable events.
       // Coalesce only the uninterrupted lane of one authenticated task: a
-      // reasoning, tool, status, approval or error event remains an ordering
-      // boundary and therefore starts a new bubble after it.
+      // reasoning, tool, approval or error event remains an ordering boundary
+      // and therefore starts a new bubble after it. Hidden lifecycle entries
+      // do not create a visual boundary.
       previous.text += text;
       previous.remoteAttachments.push(...attachments);
       previous.streaming = streaming;
@@ -117,21 +227,38 @@ export function remoteProxyChatItems(localSessionId, history) {
       createdAt: entry.sequence,
     });
   }
-  return items;
+  // Old persisted history may contain a structured tool start followed by a
+  // raw legacy tool end that cannot be safely correlated. A terminal task
+  // proves the tool is no longer running, but not whether that tool succeeded
+  // or failed. The native ToolCard has no neutral terminal state, so hide the
+  // unrecoverable card instead of leaking its raw body or inventing an outcome.
+  const hiddenLegacyTools = new Set();
+  for (const tool of tools.values()) {
+    if (tool.state !== 'running') continue;
+    const taskState = tool.remoteTaskId
+      ? tasks.get(remoteTaskMapKey(tool.remoteJournalEpoch, tool.remoteTaskId))?.state
+      : null;
+    if (!TERMINAL_TASK_STATES.has(taskState)) continue;
+    hiddenLegacyTools.add(tool);
+  }
+  return hiddenLegacyTools.size
+    ? items.filter(item => !hiddenLegacyTools.has(item))
+    : items;
 }
-
-const TERMINAL_TASK_STATES = new Set(['succeeded', 'failed', 'cancelled', 'interrupted', 'result_unknown']);
 
 export function activeRemoteTaskId(localSessionId, history) {
   const record = remoteProxyForSession(localSessionId, history);
   if (!record) return null;
-  const states = new Map();
-  for (const entry of record.entries) {
-    if (entry?.kind === 'status' && typeof entry.taskId === 'string' && entry.taskId) {
-      states.set(entry.taskId, String(entry.body || ''));
+  const tasks = remoteTaskProjectionState(record.entries);
+  let activeTaskId = null;
+  let activeIndex = -1;
+  for (const task of tasks.values()) {
+    if (!TERMINAL_TASK_STATES.has(task.state) && task.lastActivity >= activeIndex) {
+      activeTaskId = task.taskId;
+      activeIndex = task.lastActivity;
     }
   }
-  return [...states].reverse().find(([, state]) => !TERMINAL_TASK_STATES.has(state))?.[0] || null;
+  return activeTaskId;
 }
 
 export function remoteProxyHandshakeBinding(localSessionId, history, connection) {
@@ -145,6 +272,12 @@ export function remoteProxyHandshakeBinding(localSessionId, history, connection)
   // remote ref alone. Dispatch still performs the authoritative Rust check.
   if (connection.localSessionId !== localSessionId) return null;
   return { localSessionId, remoteRef: connection.sessionRef };
+}
+
+export function activeLiveRemoteTaskId(localSessionId, history, connection) {
+  return remoteProxyHandshakeBinding(localSessionId, history, connection)
+    ? activeRemoteTaskId(localSessionId, history)
+    : null;
 }
 
 export function liveRemoteProxyBinding(localSessionId, history, connection) {
@@ -162,8 +295,8 @@ export function remoteProxyPresentationState(localSessionId, history, connection
   return liveRemoteProxyBinding(localSessionId, history, connection) ? 'ready' : 'preparing';
 }
 
-// The same complete lease identity scopes model selection, send errors and
-// composer recovery. An old async completion cannot write into a new lease.
+// Dispatch state includes the exact capability revision. An old async
+// completion therefore cannot write into a renewed snapshot or lease.
 export function remoteProxyLeaseIdentity(localSessionId, connection) {
   if (!localSessionId) return '';
   return JSON.stringify([
@@ -178,14 +311,35 @@ export function remoteProxyLeaseIdentity(localSessionId, connection) {
   ]);
 }
 
+// A model choice belongs to the authenticated connection/lease, not to one
+// short-lived capability snapshot. Snapshot renewal must preserve both an
+// explicit model and an explicit empty selection.
+/**
+ * @param {string | null | undefined} localSessionId
+ * @param {{sessionRef?: string, connectionId?: string, controllerLeaseId?: string,
+ *   leaseEpoch?: string | number, relayEpoch?: string, generation?: string} | null | undefined} connection
+ */
+export function remoteProxyModelSelectionIdentity(localSessionId, connection) {
+  if (!localSessionId) return '';
+  return JSON.stringify([
+    localSessionId,
+    connection?.sessionRef || '',
+    connection?.connectionId || '',
+    connection?.controllerLeaseId || '',
+    connection?.leaseEpoch || '',
+    connection?.relayEpoch || '',
+    connection?.generation || '',
+  ]);
+}
+
 export function sameRemoteComposerOwner(sentSessionId, sentIdentity, currentSessionId, currentIdentity) {
   return !!sentSessionId && sentSessionId === currentSessionId
     && !!sentIdentity && sentIdentity === currentIdentity;
 }
 
-export function selectedExportableRemoteModelId(bindingKey, listing, selection) {
-  if (!bindingKey || listing?.key !== bindingKey || selection?.key !== bindingKey) return null;
-  const modelId = selection.modelId;
+export function selectedExportableRemoteModelId(bindingKey, listing, selection, defaultModelId = null) {
+  if (!bindingKey || listing?.key !== bindingKey) return null;
+  const modelId = selection?.key === bindingKey ? selection.modelId : defaultModelId;
   return Array.isArray(listing.models) && listing.models.some(model => (
     model?.exportable === true && model.modelId === modelId
   )) ? modelId : null;
