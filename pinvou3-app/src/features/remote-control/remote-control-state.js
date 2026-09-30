@@ -108,7 +108,15 @@
     if (!status) return state;
     var generation = payload.generation ? String(payload.generation) : null;
     var current = state.controlledDevice;
-    var starting = status === "registering" || status === "waiting_for_pairing";
+    // 后端枚举是 reserving / waiting_connection（DEV-21 早期拼写是 registering /
+    // waiting_for_pairing，两者都要认）。若不把新拼写算作"进行中"，新 generation
+    // 的 waiting_connection 更新会被下面的代际门丢弃——表现为后端已生成连接码、
+    // 界面却一直显示旧状态且拿不到码（2026-09-20 实测）。
+    var starting = status === "reserving"
+      || status === "registering"
+      || status === "waiting_connection"
+      || status === "waiting_for_pairing";
+    var waiting = status === "waiting_connection" || status === "waiting_for_pairing";
     if (
       generation &&
       current.generation &&
@@ -122,8 +130,8 @@
     next.controlledDevice = {
       status: status,
       generation: generation || (starting ? current.generation : null),
-      pairingCode: payload.pairingCode || (status === "waiting_for_pairing" ? current.pairingCode : null),
-      expiresAtMs: payload.expiresAtMs || payload.pairingExpiresAtMs || null,
+      pairingCode: payload.pairingCode || (waiting ? current.pairingCode : null),
+      expiresAtMs: payload.expiresAtMs || payload.pairingExpiresAtMs || (waiting ? current.expiresAtMs : null),
       deviceName: payload.deviceName || current.deviceName,
       controllerDeviceName: payload.controllerDeviceName || current.controllerDeviceName,
       workspaces: Array.isArray(payload.workspaces) ? payload.workspaces.slice(0, 32) : current.workspaces,

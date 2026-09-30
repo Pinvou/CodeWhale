@@ -15,6 +15,7 @@ use crate::features::remote_control::controller::controlling_session::Controllin
 use crate::features::remote_control::controller::controlling_service::{
     CONTROLLER_STATUS_EVENT, connect_controlling_device,
 };
+use crate::features::remote_control::controller::relay_runtime::log_controller_event;
 use crate::features::remote_control::RemoteControlManager;
 use std::sync::Arc;
 
@@ -56,7 +57,19 @@ pub async fn desktop_remote_controller_connect(
     ensure_supported(&manager)?;
     // 新连接不得复用上一代租赁的会话意图（它们的 lease 绑定必然失效）。
     sessions.clear();
-    let operation = manager.connect(&code).map_err(controlling_error)?;
+    // A 端排障日志：把「用户点了连接」和「本地状态机拒绝」都留痕。此前这两步
+    // 没有任何落盘痕迹，失败只能从界面文案反推。
+    log_controller_event(
+        "connect_requested",
+        &relay.controller_endpoint_log_detail(),
+    );
+    let operation = match manager.connect(&code) {
+        Ok(operation) => operation,
+        Err(error) => {
+            log_controller_event("connect_rejected", error.code);
+            return Err(controlling_error(error));
+        }
+    };
     let status = manager.status();
     emit_status(&app, &status);
     let journal: Arc<dyn crate::features::remote_control::controller::controlling_service::ControllingJournalSink> =

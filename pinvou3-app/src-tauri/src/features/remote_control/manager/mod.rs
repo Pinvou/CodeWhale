@@ -73,8 +73,9 @@ use workspace_grants::{
     require_host_workspace_authorization,
 };
 
-// 正式安装包默认连接生产 Relay；本地联调由 run-dev.sh 显式覆盖到隔离的
-// remote-test 端点。用户保存的自定义 Relay 设置仍具有最高优先级。
+// 正式安装包默认连接生产 Relay；本地联调由 run-dev.sh 选中内置的隔离
+// remote-test profile（地址与信任根同源）。用户保存的自定义 Relay 设置与
+// PINVOU_REMOTE_* 环境变量仍具有更高优先级。
 const DEFAULT_PUBLIC_BASE_URL: &str = "https://pinvou.com/pinvou3/remote";
 const DEFAULT_RELAY_WS_URL: &str = "wss://pinvou.com/pinvou3/remote/ws";
 
@@ -275,7 +276,14 @@ fn controller_relay_message(value: &Value) -> bool {
     let kind = value.get("type").and_then(Value::as_str).unwrap_or_default();
     matches!(
         kind,
-        "desktop_endpoint_registered" | "desktop_relay_connection" | "error"
+        // `desktop_pairing_registered` 是 controller-v1 注册的结果帧：它既不叫
+        // `controller_*` 也不在握手/业务列表里，之前被这条过滤挡在控制通道之外，
+        // 导致 B worker 永远等不到回包（30 秒超时），而 relay 其实已生成连接码
+        // （2026-09-20 实测：relay registrations=2 而客户端报 pairing_registration_timeout）。
+        "desktop_endpoint_registered"
+            | "desktop_pairing_registered"
+            | "desktop_relay_connection"
+            | "error"
     ) || kind.starts_with("controller_")
         || matches!(
             kind,
@@ -992,6 +1000,12 @@ impl RemoteControlManager {
         persistence::controller_relay_ws_url()
     }
 
+    /// A 端排障日志用的一行端点标记（内置 profile / 来源 / 路径）。
+    /// 只含公开信息，绝不含 endpoint_id、token 或查询串。
+    pub fn controller_endpoint_log_detail(&self) -> String {
+        persistence::controller_endpoint_log_detail()
+    }
+
     /// Close the generation-bound controller lane without touching the legacy
     /// desktop endpoint. The synthetic message lets the worker leave its recv
     /// loop deterministically; dropping the stored sender then closes it.
@@ -1206,6 +1220,33 @@ impl RemoteControlManager {
             self.refresh()?;
         }
         Ok(self.relay_settings())
+    }
+
+    /// 等待 desktop endpoint 在 Relay 侧完成注册（socket 认证为 B）。
+    ///
+    /// 控制通道的 `desktop_pairing_register` 必须在**同一 socket 已认证**之后才能
+    /// 通过 router 的角色校验，否则会被以 role invalid 拒绝（2026-09-20 实测：
+    /// worker 启动后立即注册 → relay 拒绝，客户端只看到 pairing_registration_rejected）。
+    pub async fn wait_endpoint_ready(&self, timeout: std::time::Duration) -> Result<(), String> {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let ready = {
+                let inner = self.inner.lock();
+                inner.endpoint.as_ref().is_some_and(|endpoint| {
+                    !matches!(
+                        endpoint.status,
+                        WebAccessStatusKind::ConnectingRelay | WebAccessStatusKind::Error
+                    )
+                })
+            };
+            if ready {
+                return Ok(());
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err("desktop_relay_inactive".to_owned());
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
     }
 
     /// 恢复内置默认 Relay。语义与 `set_relay_address` 对称。
@@ -3309,6 +3350,31 @@ mod tests {
     fn packaged_defaults_target_the_production_remote_endpoint() {
         assert_eq!(DEFAULT_PUBLIC_BASE_URL, "https://pinvou.com/pinvou3/remote");
         assert_eq!(DEFAULT_RELAY_WS_URL, "wss://pinvou.com/pinvou3/remote/ws");
+    }
+
+    /// controller-v1 的注册结果帧必须进入控制通道：少了它 B 端永远收不到连接码
+    /// （relay 已生成、客户端超时，2026-09-20 实测）。
+    #[test]
+    fn controller_lane_filter_forwards_the_pairing_registration_result() {
+        for kind in [
+            "desktop_pairing_registered",
+            "desktop_endpoint_registered",
+            "desktop_relay_connection",
+            "error",
+            "controller_joined",
+            "encrypted_frame",
+        ] {
+            assert!(
+                controller_relay_message(&serde_json::json!({ "type": kind })),
+                "{kind} 必须转发给控制通道"
+            );
+        }
+        for kind in ["web_client_joined", "desktop_endpoint_replaced"] {
+            assert!(
+                !controller_relay_message(&serde_json::json!({ "type": kind })),
+                "{kind} 不得进入控制通道"
+            );
+        }
     }
 
     /// 内置端点 profile：地址与信任根随包分发，用户不需要再配置环境变量。

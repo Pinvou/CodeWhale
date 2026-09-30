@@ -9,6 +9,7 @@ use serde_json::Value;
 
 use super::controlling_handshake::{ControllingHandshake, HandshakeError, JoinedLease};
 use super::crypto::SessionKeys;
+use super::protocol::{ROLE_A, is_self_echoed_handshake_frame};
 
 /// 端口抽象：`send` 交给传输层出站，`recv` 返回下一条入站报文。
 #[async_trait::async_trait]
@@ -20,6 +21,13 @@ pub(crate) trait ControllingRelayPort: Send {
     /// 公共错误闭集，状态所有者据此向用户给出有限错误。
     fn relay_error_code(&self) -> Option<&'static str> {
         None
+    }
+
+    /// 是否收到过 Relay 的 `error` 帧（**无论其码是否在闭集内**）。只用于把
+    /// 失败归因到 Relay 还是本地校验：闭集外的码会被 `relay_error_code` 丢弃，
+    /// 单看公共码无法区分「Relay 拒绝」与「本地握手校验拒绝」。
+    fn relay_error_seen(&self) -> bool {
+        false
     }
 
     /// 通道是否已断开。用于把失败映射为「对端不可达」而不是协议错误。
@@ -115,10 +123,19 @@ async fn next_of_type<P: ControllingRelayPort>(
     port: &mut P,
     expected: &'static str,
 ) -> Result<Value, HandshakeError> {
-    match port.recv().await {
-        Some(message) if kind(&message) == Some(expected) => Ok(message),
-        // 端口断开或消息类型不符都失败关闭：迟到/错序报文不得被当作下一步。
-        _ => Err(HandshakeError::new("controller_handshake_rejected")),
+    loop {
+        match port.recv().await {
+            Some(message) if kind(&message) == Some(expected) => {
+                // Relay 会把本端 commit 原样回投（router 契约）：自帧不是对端输入，
+                // 跳过继续等待，否则会被误判成 sender_role 不符而失败关闭。
+                if is_self_echoed_handshake_frame(&message, ROLE_A) {
+                    continue;
+                }
+                return Ok(message);
+            }
+            // 端口断开或消息类型不符都失败关闭：迟到/错序报文不得被当作下一步。
+            _ => return Err(HandshakeError::new("controller_handshake_rejected")),
+        }
     }
 }
 

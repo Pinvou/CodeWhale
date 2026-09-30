@@ -366,10 +366,6 @@ impl ControllingHandshake {
         if self.peer_commitment.as_deref() != Some(hex_lower(&commitment).as_str()) {
             return Err(HandshakeError::new("controller_commitment_mismatch"));
         }
-        let receipt = self
-            .receipt
-            .as_ref()
-            .ok_or_else(|| HandshakeError::new("controller_handshake_stage_invalid"))?;
         let ack = self.envelope(
             "finished_receipt_ack",
             json!({
@@ -377,7 +373,10 @@ impl ControllingHandshake {
                 // sender_role = 产出被回执 Finished 的一侧。
                 "sender_role": "B",
                 "receiver_role": "A",
-                "receipt_secret_b64": receipt.to_base64(),
+                // Relay 的收据校验契约（`controller-lease.js` 的 `acceptReceipt`）：
+                // 帧里带的必须是 `sender_role`（B）的 receipt secret —— 也就是本端
+                // 刚从对端 Finished 里解开的 `peer_receipt`，而不是本端自己的 receipt。
+                "receipt_secret_b64": peer_receipt.to_base64(),
             }),
         )?;
         self.stage = HandshakeStage::FinishedSent;

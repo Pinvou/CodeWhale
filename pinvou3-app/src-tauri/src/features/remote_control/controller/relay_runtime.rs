@@ -29,8 +29,9 @@ use super::crypto::{
 use super::encrypted_lane::ControlledLaneState;
 use super::protocol::LeaseContext;
 use super::protocol::{
-    validate_controller_message_json, validate_controller_registration_message_json,
-    RegistrationValidationContext, SenderRole,
+    is_self_echoed_handshake_frame, validate_controller_message_json,
+    validate_controller_registration_message_json, RegistrationValidationContext, SenderRole,
+    ROLE_B,
 };
 use super::resume::{
     build_controller_post_activation_liveness, build_controller_resume_activation_ack,
@@ -39,6 +40,79 @@ use super::resume::{
 };
 
 const REGISTRATION_TIMEOUT_MS: u64 = 30_000;
+/// 端点通道就绪等待：单次上限与重试间隔（整体最多 3 次尝试）。
+const ENDPOINT_READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+const ENDPOINT_READY_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// 双端共用的排障日志写入器（追加写入 `~/.pinvou3/logs/remote-control.log`）。
+///
+/// `scope` 只区分端别：`controlled`（B 端）与 `controller`（A 端），便于同一台机器
+/// 或同一份日志里对照同一次连接的阶段。只在「启停/注册/握手/连接结果」这些用户可
+/// 感知的失败与成功节点写一行有界文本：不含占位符之外的任何标识（不写
+/// endpoint_id/lease/token/连接码），便于用户把文件直接发给支持而不担心泄漏。
+/// 写失败一律忽略，绝不影响主流程。
+pub(crate) fn log_relay_event(scope: &str, stage: &str, detail: &str) {
+    use std::io::Write as _;
+    let dir = crate::platform::paths::pinvou3_home().join("logs");
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join("remote-control.log"))
+    else {
+        return;
+    };
+    let _ = writeln!(
+        file,
+        "[{scope}] stage={} detail={}",
+        bounded_log_token(stage),
+        bounded_log_token(detail)
+    );
+}
+
+/// 有界化按位洗白：只保留可以安全落盘的字符集并限制长度，
+/// 空白、`=`、`?`、`&` 等分隔符一律丢掉，避免把连接码或凭据片段带进日志。
+pub(crate) fn bounded_log_token(value: &str) -> String {
+    value
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | ':' | '.' | '/'))
+        .take(160)
+        .collect()
+}
+
+/// B 端预握手阶段的自帧回投过滤：Relay 会把发送方的 `finished_receipt_commit`
+/// 原样回投，B 只处理 `sender_role == A` 的对端帧，自己的回投必须跳过。
+pub(crate) fn skip_self_echoed_frame(message: &Value) -> bool {
+    is_self_echoed_handshake_frame(message, ROLE_B)
+}
+
+/// B 端（被控端）排障日志。
+pub(crate) fn log_controlled_event(stage: &str, detail: &str) {
+    log_relay_event("controlled", stage, detail);
+}
+
+/// A 端（控制端）排障日志。A 端此前没有任何落盘痕迹，导致「连接码无效或已过期」
+/// 这类失败只能靠猜；这里补上与 B 端对称的阶段与结果码。
+pub(crate) fn log_controller_event(stage: &str, detail: &str) {
+    log_relay_event("controller", stage, detail);
+}
+
+/// 测试/内联断言用：日志行格式（不含时间戳，便于跨平台断言）。
+pub(crate) fn relay_log_line(scope: &str, stage: &str, detail: &str) -> String {
+    format!("[{scope}] stage={stage} detail={detail}")
+}
+
+/// 测试/内联断言用：B 端日志行格式。
+pub(crate) fn controlled_log_line(stage: &str, detail: &str) -> String {
+    relay_log_line("controlled", stage, detail)
+}
+
+/// 测试/内联断言用：A 端日志行格式。
+pub(crate) fn controller_log_line(stage: &str, detail: &str) -> String {
+    relay_log_line("controller", stage, detail)
+}
 const REGISTRATION_CAPABILITIES: &[&str] = &[
     "pairing_v1",
     "encrypted_frames_v1",
@@ -246,6 +320,15 @@ pub(crate) async fn next_registration_step<P: ControlledRelayPort>(
                 {
                     return Ok(RegistrationStep::Ignore);
                 }
+                // relay 的拒绝必须保留原始有界码，便于定位（此前被映射成
+                // pairing_registration_rejected 后丢失了原因）。
+                if message.get("type").and_then(Value::as_str) == Some("error") {
+                    let code = message
+                        .get("code")
+                        .and_then(Value::as_str)
+                        .unwrap_or("relay_error");
+                    log_controlled_event("registration_rejected", code);
+                }
                 return registration_from_response(code_wrap, request, &message)
                     .map(|registration| RegistrationStep::Registered(Box::new(registration)));
             }
@@ -268,6 +351,7 @@ impl ControlledRelayWorker {
         let channel = relay
             .start_controller_relay(operation.generation())
             .await?;
+        log_controlled_event("worker_started", "channel_ready");
         let (done_tx, done_rx) = oneshot::channel();
         let mut worker = Self {
             app,
@@ -296,39 +380,77 @@ impl ControlledRelayWorker {
         let registration_request_id = manager
             .registration_request_id(self.operation.clone())
             .map_err(|error| error.code.to_owned())?;
-        let endpoint_id = self.relay.controller_endpoint_id()?;
-        let request = registration_request(
-            &registration_request_id,
-            &endpoint_id,
-            self.operation.generation(),
-            &self.code_wrap,
-            self.handshake
-                .as_ref()
-                .ok_or_else(|| "handshake_key_invalid".to_owned())?,
-        )?;
-        self.channel.try_send(request.clone())?;
-        loop {
-            match next_registration_step(
-                &mut self.channel,
-                &request,
-                &self.code_wrap,
-                std::time::Duration::from_millis(REGISTRATION_TIMEOUT_MS),
-            )
-            .await?
+        // 注册帧必须在端点 socket 已认证为 B 之后发出，否则会被 relay 以角色无效
+        // 拒绝；同时网络抖动可能让端点通道 20 秒内都没就绪，因此整体**有界重试**：
+        // 每次重试复用同一个 registration_request_id，relay 侧按幂等键返回同一结果。
+        const MAX_ATTEMPTS: u32 = 3;
+        for attempt in 1..=MAX_ATTEMPTS {
+            match self
+                .relay
+                .wait_endpoint_ready(ENDPOINT_READY_TIMEOUT)
+                .await
             {
-                RegistrationStep::Ignore => continue,
-                RegistrationStep::Registered(registration) => {
-                    let status = manager
-                        .complete_registration(self.operation.clone(), *registration, 0)
-                        .map_err(|error| error.code.to_owned())?;
-                    let _ = self.app.emit(CONTROLLED_STATUS_EVENT, &status);
-                    return Ok(status);
+                Ok(()) => log_controlled_event("endpoint_ready", "ok"),
+                Err(error) => {
+                    log_controlled_event("endpoint_ready", &error);
+                    if attempt < MAX_ATTEMPTS {
+                        tokio::time::sleep(ENDPOINT_READY_RETRY_DELAY).await;
+                        continue;
+                    }
+                    return Err(error);
+                }
+            }
+            let endpoint_id = self.relay.controller_endpoint_id()?;
+            let request = registration_request(
+                &registration_request_id,
+                &endpoint_id,
+                self.operation.generation(),
+                &self.code_wrap,
+                self.handshake
+                    .as_ref()
+                    .ok_or_else(|| "handshake_key_invalid".to_owned())?,
+            )?;
+            self.channel.try_send(request.clone())?;
+            // 区分「连注册帧都没发出去」与「发出后等待/被拒」这两类失败。
+            log_controlled_event("registration_sent", "waiting_registered");
+            loop {
+                match next_registration_step(
+                    &mut self.channel,
+                    &request,
+                    &self.code_wrap,
+                    std::time::Duration::from_millis(REGISTRATION_TIMEOUT_MS),
+                )
+                .await
+                {
+                    Ok(RegistrationStep::Ignore) => continue,
+                    Ok(RegistrationStep::Registered(registration)) => {
+                        let status = manager
+                            .complete_registration(self.operation.clone(), *registration, 0)
+                            .map_err(|error| error.code.to_owned())?;
+                        log_controlled_event("registered", "waiting_connection");
+                        let _ = self.app.emit(CONTROLLED_STATUS_EVENT, &status);
+                        return Ok(status);
+                    }
+                    Err(error) => {
+                        log_controlled_event("registration_failed", &error);
+                        let retryable = matches!(
+                            error.as_str(),
+                            "pairing_registration_timeout" | "desktop_relay_disconnected"
+                        );
+                        if retryable && attempt < MAX_ATTEMPTS {
+                            tokio::time::sleep(ENDPOINT_READY_RETRY_DELAY).await;
+                            break;
+                        }
+                        return Err(error);
+                    }
                 }
             }
         }
+        Err("pairing_registration_failed".to_owned())
     }
 
     fn fail_registration(&self, error: &str) {
+        log_controlled_event("registration_failed", &sanitize_error(error));
         let manager = self.app.state::<ControlledDeviceManager>();
         if !manager.is_pending_handshake(self.operation.clone()) {
             // 用户已停止/断开，或本代已被刷新取代：不覆盖既有投影。
@@ -431,6 +553,13 @@ impl ControlledRelayWorker {
                             }
                             _ => {}
                         }
+                        continue 'serve;
+                    }
+                    // Relay 会把本端 commit 原样回投（router 契约，见
+                    // `controller-router.test.js`）。自帧回投不是对端输入，跳过而不是
+                    // 失败关闭：否则 B 会在收到自己 commitment 的瞬间以
+                    // `controller_handshake_rejected` 结束整条通道（2026-09-20 真机）。
+                    if skip_self_echoed_frame(&message) {
                         continue 'serve;
                     }
                     let result = match message.get("type").and_then(Value::as_str) {
@@ -690,6 +819,7 @@ impl ControlledRelayWorker {
 /// 握手失败收尾：投影为有界错误并结束本代通道（dropping the channel 会
 /// 清掉该 generation 的通道绑定，本地停止/刷新入口保持可用）。
     fn fail_handshake(&self, error: &str) {
+        log_controlled_event("handshake_failed", &sanitize_error(error));
         let manager = self.app.state::<ControlledDeviceManager>();
         if !manager.is_pending_handshake(self.operation.clone()) {
             // 用户已停止/断开，或本代已被刷新取代：不覆盖既有投影。
@@ -1434,6 +1564,121 @@ mod tests {
     use crate::features::remote_control::controller::test_support::PairingFixture;
     use std::collections::VecDeque;
     use std::time::Duration;
+
+    #[test]
+    fn relay_log_lines_are_scoped_and_keep_the_legacy_controlled_prefix() {
+        assert_eq!(
+            controlled_log_line("registered", "waiting_connection"),
+            "[controlled] stage=registered detail=waiting_connection"
+        );
+        assert_eq!(
+            controller_log_line("connect_failed", "pairing_code_invalid"),
+            "[controller] stage=connect_failed detail=pairing_code_invalid"
+        );
+    }
+
+    #[test]
+    fn bounded_log_token_drops_separators_so_credentials_cannot_be_pasted_in() {
+        assert_eq!(
+            bounded_log_token("code=AB12CD3 token=hunter2?x=1"),
+            "codeAB12CD3tokenhunter2x1"
+        );
+        assert_eq!(bounded_log_token(&"a".repeat(400)).len(), 160);
+    }
+
+    /// Relay 会把发送方的 commit 原样回投（router 契约）：B 只吃 `sender_role == A`
+    /// 的对端帧，自己的回投必须被跳过，否则真机上会在拿到预留的下一帧直接
+    /// `controller_handshake_rejected`（2026-09-20 实测）。
+    /// Relay 的收据校验契约（`controller-lease.js` 的 `acceptReceipt`）：
+    /// `finished_receipt_ack` 里带的必须是 `sender_role` 那一方（对端）的 receipt
+    /// secret，且能重算出对端先前的 commitment。这里在客户端侧做同构校验——真机
+    /// 首次暴露的 `finished_receipt_invalid`（端上兜底成 `invalid_message`）就是
+    /// 两端各自误传了自己的 receipt。
+    #[test]
+    fn receipt_ack_carries_the_peer_receipt_matching_its_commitment() {
+        use crate::features::remote_control::controller::crypto::{
+            ControllerRole as HandshakeRole, ReceiptSecret,
+        };
+        use crate::features::remote_control::controller::test_support::{
+            handshake_binding, hex_lower, pairing_fixture,
+        };
+
+        let PairingFixture {
+            relay,
+            reservation,
+            a_keys,
+            b_keys,
+            ..
+        } = pairing_fixture("relay-key-runtime");
+        let binding = handshake_binding(&reservation);
+        let mut driver = ControlledHandshakeDriver::new(b_keys);
+        let mut a = ControllingHandshake::new(
+            reservation["request_id"].as_str().unwrap(),
+            "claim-0001",
+            "2345678",
+            a_keys,
+            relay.trust.clone(),
+        );
+        let b_commit = driver.accept_reserved(&reservation, &relay.trust).unwrap();
+        let a_commit = a.accept_reserved(&reservation).unwrap();
+        let b_finished = driver.accept_peer_commitment(&a_commit).unwrap();
+        let a_finished = a.accept_peer_commitment(&b_commit).unwrap();
+        let b_ack = driver.accept_peer_finished(&a_finished).unwrap();
+        let a_ack = a.accept_peer_finished(&b_finished).unwrap();
+
+        // A 提交的 ack 声明 sender_role=B：必须携带 B 的 receipt（对得上 B 的 commitment）。
+        let from_a_ack = ReceiptSecret::from_base64_for_test(
+            a_ack["receipt_secret_b64"].as_str().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            hex_lower(&from_a_ack.commitment(&binding, HandshakeRole::B).unwrap()),
+            b_commit["commitment"].as_str().unwrap()
+        );
+        // B 提交的 ack 声明 sender_role=A：必须携带 A 的 receipt。
+        let from_b_ack = ReceiptSecret::from_base64_for_test(
+            b_ack["receipt_secret_b64"].as_str().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            hex_lower(&from_b_ack.commitment(&binding, HandshakeRole::A).unwrap()),
+            a_commit["commitment"].as_str().unwrap()
+        );
+        // 反向核对：把 A 的 receipt 当成 B 的 receipt 去算，必然对不上 B 的 commitment
+        //（这正是修复前两端实际发出的内容）。
+        assert_ne!(
+            hex_lower(&from_b_ack.commitment(&binding, HandshakeRole::B).unwrap()),
+            b_commit["commitment"].as_str().unwrap()
+        );
+    }
+
+    #[test]
+    fn only_peer_handshake_frames_are_dispatched_on_the_controlled_lane() {
+        let frame = |kind: &str, role: &str| {
+            json!({
+                "v": 1,
+                "type": kind,
+                "request_id": "request-0001",
+                "pairing_id": "pairing-0001",
+                "reservation_id": "reservation-0001",
+                "remote_control_generation": "generation-0001",
+                "relay_epoch": "relay-epoch-0001",
+                "transcript_hash": "00".repeat(32),
+                "sender_role": role,
+                "commitment": "11".repeat(32),
+                "ciphertext_b64": "AQID",
+                "ciphertext_bytes": "3",
+            })
+        };
+        assert!(skip_self_echoed_frame(&frame("finished_receipt_commit", "B")));
+        assert!(!skip_self_echoed_frame(&frame("finished_receipt_commit", "A")));
+        assert!(skip_self_echoed_frame(&frame("encrypted_handshake_finished", "B")));
+        assert!(!skip_self_echoed_frame(&frame("encrypted_handshake_finished", "A")));
+        // 其它帧（预留、joined、加密业务帧）绝不按自帧吞掉。
+        assert!(!skip_self_echoed_frame(&frame("controller_pairing_reserved", "B")));
+        assert!(!skip_self_echoed_frame(&frame("controller_joined", "B")));
+        assert!(!skip_self_echoed_frame(&frame("encrypted_frame", "B")));
+    }
 
     /// Deterministic fake lane: queued messages, then either hang or close.
     struct FakePort {
