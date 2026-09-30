@@ -982,8 +982,6 @@ impl Pinvou3Bridge {
     /// EnginePool probes the vLLM served name it clones this, renames the
     /// model, and puts it back into session_model, achieving "requests use
     /// vLLM's actual name".
-    /// 当前生效模型的副本(session > active)。EnginePool 探测 vLLM served name 后
-    /// 用它克隆→改 model 名→塞回 session_model,实现「请求用 vLLM 实际名字」。
     pub fn effective_model_owned(&self) -> Option<SavedModel> {
         self.effective_model().cloned()
     }
@@ -1476,14 +1474,8 @@ impl Pinvou3Bridge {
             // selector already verified it with the image-recognition probe
             // (only supported models can be selected). The override mark
             // (disabled) may be a leftover from a historical probe
-            // misjudgment (e.g. kimi-for-coding was once backfilled after the
-            // probe pipeline returned 400); at runtime it is used per the fact
-            // that it was actually selected; a text model configured as a
-            // vision model is blocked by the frontend probe gate.
-            // 视觉模型自身能力不在此处拒绝:选择器已用识图探测验证(supported
-            // 才允许选中)。override 标记(disabled)可能是历史探测误判残留
-            // (如 kimi-for-coding 曾因探测链路 400 被回填),运行时按实际被
-            // 选中的事实使用;文本模型配成视觉模型由前端探测闸门挡住。
+            // misjudgment; at runtime it is used per the fact that it was
+            // actually selected.
             let api_key = runtime_vision
                 .and_then(|_| self.runtime_vision_credential.as_ref())
                 .map(|credential| credential.expose_api_key().to_owned())

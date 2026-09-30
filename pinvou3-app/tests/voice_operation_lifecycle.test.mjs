@@ -434,6 +434,7 @@ for (const lane of ['desktop', 'web']) {
           remoteChatActive: false, remoteConnection: null, remoteLinkReady: false,
           remoteSendIdentity: null, effectiveRemoteModelSource: null, remoteBinding: null,
           remoteFiles: [], remoteNewDispatchReady: false, remoteProxyHistory: null,
+          remoteModelError: null,
           remoteMode: 'chat', remoteSkillIds: [], remoteWorkspaceId: '',
           selectedRemoteModelId: null,
           isRemoteProxyView: () => false,

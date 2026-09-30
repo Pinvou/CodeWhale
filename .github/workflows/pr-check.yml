@@ -947,19 +947,25 @@ jobs:
         run: npm --prefix pinvou3-app ci --prefer-offline --no-audit
 
       - name: 安装 Relay 发布门禁依赖
+        if: ${{ runner.os == 'Windows' }}
         run: npm --prefix remote-control-relay ci --prefer-offline --no-audit --ignore-scripts
 
       # 版本一致性校验(--check)由 version-consistency job 无路径门全事件覆盖,
       # 此处不重复;仅跑 Tauri overlay、各平台打包与知识宿主契约。
-      - name: Tauri 打包、发布与远控安全契约
-        env:
-          PINVOU_DESKTOP_CONTROLLER_ENABLED: '0'
+      - name: Tauri 打包与发布配置契约
+        if: ${{ runner.os == 'Linux' }}
         run: |
           npm --prefix pinvou3-app run test:tauri-layout
           npm --prefix pinvou3-app run test:tauri-effective-config
           npm --prefix pinvou3-app run test:macos-phase2
           npm --prefix pinvou3-app run test:knowledge-host-packaging
           npm --prefix pinvou3-app run test:linux-asr-runtime
+
+      - name: Windows 远控发布与安全契约
+        if: ${{ runner.os == 'Windows' }}
+        env:
+          PINVOU_DESKTOP_CONTROLLER_ENABLED: '0'
+        run: |
           npm --prefix remote-control-relay run release:gate
           node --test --test-concurrency=1 remote-control-relay/test/controller-release-evidence.test.js remote-control-relay/test/controller-release-gates.test.js remote-control-relay/test/controller-release-telemetry-query.test.js remote-control-relay/test/github-workflow-run-identity.test.js remote-control-relay/test/installer-spdx.test.js remote-control-relay/test/release-path-policy.test.js remote-control-relay/test/windows-e2e-orchestrator-contract.test.js remote-control-relay/test/windows-e2e-orchestrator-helpers.test.js remote-control-relay/test/windows-e2e-path-guard.test.js
           node --test pinvou3-app/tests/remote_control_feature_gate_contract.test.mjs pinvou3-app/tests/remote_control_real_ui_smoke_contract.test.mjs pinvou3-app/tests/nsis_resource_staging_contract.test.js

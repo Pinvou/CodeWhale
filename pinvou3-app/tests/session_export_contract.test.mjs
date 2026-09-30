@@ -29,7 +29,7 @@ const searchView = readFileSync(new URL('../src/features/search/SearchView.jsx',
 // 2. Sidebar menu: codex sessions excluded, in-flight session's item hidden.
 assert.match(
   main,
-  /onExportArchive=\{chat\.taskKind !== 'codex' && !exportingSessionIds\.has\(chat\.id\) && bridge\.sessions\.exportSessionArchive \? handleExportSessionArchive : undefined\}/,
+  /onExportArchive=\{chat\.sessionKind !== 'RemoteProxy' && chat\.taskKind !== 'codex' && !exportingSessionIds\.has\(chat\.id\) && bridge\.sessions\.exportSessionArchive \? handleExportSessionArchive : undefined\}/,
   'sidebar must hide the export item for codex sessions and while exporting',
 );
 

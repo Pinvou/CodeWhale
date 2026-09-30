@@ -2196,10 +2196,6 @@ Object.assign(dictEn.uiChat, {
   bgTasks: 'Background Tasks',
   bgTasksRunning: n => `${n} background task${n === 1 ? '' : 's'} running`,
 });
-// restored: baseline catalog descriptions (referenced by the model catalog data)
-Object.assign(dictEn.uiSettingsDetail.modelDescriptions, { '本地服务默认模型': 'Default model for the local service', '高能力模型': 'High-capability model', '快速响应': 'Fast responses', '最新通用模型': 'Latest general-purpose model', '代码场景': 'Coding tasks', '高速代码场景': 'High-speed coding tasks', '稳定可用': 'Stable release', '高性价比': 'Cost-effective', '通用能力': 'General-purpose', '兼容保留': 'Compatibility option', '高速响应': 'High-speed responses', '轻量模型': 'Lightweight model'
-});
-
 // Windows desktop remote control: controlled-device panel (DEV-21).
 dictEn["controlledDevice"] = {
   connectionTitle: "Connection status",
@@ -2480,3 +2476,6 @@ dictEn.uiSettings.remoteControl = 'Desktop Remote Control';
 // (same pattern as "Help & Feedback → Behavior analytics").
 dictEn.uiSettingsDetail.desktopRemoteControlEntryDesc = "Let someone connect with a pairing code and run tasks with this machine's model; you can review and disconnect at any time.";
 dictEn.uiSettingsDetail.desktopRemoteControlBack = 'Back to General';
+// restored: baseline catalog descriptions (referenced by the model catalog data)
+Object.assign(dictEn.uiSettingsDetail.modelDescriptions, { '本地服务默认模型': 'Default model for the local service', '高能力模型': 'High-capability model', '快速响应': 'Fast responses', '最新通用模型': 'Latest general-purpose model', '代码场景': 'Coding tasks', '高速代码场景': 'High-speed coding tasks', '稳定可用': 'Stable release', '高性价比': 'Cost-effective', '通用能力': 'General-purpose', '兼容保留': 'Compatibility option', '高速响应': 'High-speed responses', '轻量模型': 'Lightweight model'
+});

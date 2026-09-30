@@ -37,6 +37,7 @@ const expectedDispatchChatMessageDependencies = [
   'remoteChatActive',
   'remoteFiles',
   'remoteMode',
+  'remoteModelError',
   'remoteNewDispatchReady',
   'remoteProxyHistory',
   'remoteSendIdentity',

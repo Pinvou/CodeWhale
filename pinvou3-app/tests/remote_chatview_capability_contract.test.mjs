@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
-import { dict } from '../src/shared/i18n-all.js';
+import { dict } from './helpers/i18n-all.js';
 import { remoteProjectionLabelKey } from '../src/features/remote-control/remote-session-adapter.mjs';
 
 const chat = readFileSync(new URL('../src/features/chat/ChatView.jsx', import.meta.url), 'utf8');
@@ -197,7 +197,7 @@ test('only the Rust-verified remote projection renders the single ChatView timel
     'remote Markdown cannot manufacture local persona or question actions');
   assert.match(chat, /item\.remoteProxy\s*\? \{ text: item\.text, attachments: \[\] \}\s*: splitAttachmentLine\(item\.text\)/,
     'remote user text cannot be interpreted as a local attachment action');
-  assert.match(chat, /<ToolCard item=\{item\.legacyItem\} sessionId=\{activeSessionId\} t=\{t\} variant="timeline" \/>/,
+  assert.match(chat, /<ToolCard\s+item=\{item\.legacyItem\}\s+sessionId=\{activeSessionId\}\s+t=\{t\}\s+variant="timeline"\s*\/>/,
     'remote tool items must reuse the ordinary B-side timeline tool renderer');
   assert.match(chat, /const conversationBusy = remoteChatActive\s*\? !!currentRemoteTaskId/,
     'hidden remote task status must still drive the ordinary turn lifecycle');
