@@ -5,17 +5,28 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import { dict } from '../src/shared/i18n-all.js';
+import {
+  CONTROLLED_UI_STATES,
+  controlledAuthorityKey,
+  controlledDeviceUiState,
+  createAsyncOperationGuard,
+  remoteControlTabTone,
+} from '../src/features/remote-control/remote-control-logic.mjs';
 
 const source = (relative) => readFileSync(new URL(`../src/${relative}`, import.meta.url), 'utf8');
 const panel = source('features/remote-control/ControlledDevicePanel.jsx');
 const panelCode = panel.replace(/\/\/[^\n]*|\/\*[\s\S]*?\*\//g, '');
 const settings = source('features/settings/SettingsView.jsx');
+const settingsPage = source('features/remote-control/RemoteControlSettingsPage.jsx');
+const rustControlled = readFileSync(new URL('../src-tauri/src/features/remote_control/controller/controlled.rs', import.meta.url), 'utf8');
 
 const CONTROLLED_KEYS = [
   'section', 'title', 'desc', 'enable', 'disable', 'statusIdle', 'statusWaiting', 'statusConnected',
   'controlledStatus',
-  'codeLabel', 'codeHint', 'refresh', 'deviceLabel', 'modelSource', 'workspacesTitle',
-  'readOnlyNotice', 'stopTasks', 'pendingPermissions', 'noAllowControl', 'unsupported',
+  'codeLabel', 'codeHint', 'refresh', 'deviceLabel', 'workspacesTitle',
+  'stateOff', 'stateReserving', 'stateWaiting', 'stateExpiring', 'stateExpired',
+  'stateReserved', 'stateHandshake', 'stateConnected', 'stateReconnecting',
+  'stateRefreshing', 'stateStopping', 'stateError', 'securityNotice', 'unsupported',
   'errorRelayUnavailable',
   // E2E-08 后的零配置体验：服务端点（生产/测试）内置在应用中，用户不需要环境变量。
   'endpointLabel', 'endpointProduction', 'endpointTest', 'endpointHint',
@@ -50,7 +61,82 @@ test('controlled-device copy exists in all three languages', () => {
 
 test('the panel never exposes an approval control', () => {
   assert.ok(!/\bAllow\b|\bApprove\b|allowButton|approveButton/.test(panelCode));
-  assert.ok(panelCode.includes('readOnlyNotice'));
+  assert.ok(!panelCode.includes('remotePermissions'));
+  assert.ok(!panelCode.includes('controlledTasks'));
+  assert.ok(panelCode.includes('securityNotice'));
+});
+
+test('the controlled side exposes all twelve designed UI states', () => {
+  assert.equal(CONTROLLED_UI_STATES.length, 12);
+  assert.deepEqual(CONTROLLED_UI_STATES, [
+    'off', 'reserving', 'waiting', 'expiring', 'expired', 'reserved',
+    'handshake', 'connected', 'reconnecting', 'refreshing', 'stopping', 'error',
+  ]);
+  assert.equal(controlledDeviceUiState({ status: 'idle' }), 'off');
+  assert.equal(controlledDeviceUiState({ status: 'waiting_connection', pairingCode: '2345678' }, 61), 'waiting');
+  assert.equal(controlledDeviceUiState({ status: 'waiting_connection', pairingCode: '2345678' }, 60), 'expiring');
+  assert.equal(controlledDeviceUiState({ status: 'waiting_connection' }, 0), 'expired');
+  assert.equal(controlledDeviceUiState({ status: 'safety_handshake' }), 'handshake');
+  assert.equal(controlledDeviceUiState({ status: 'connected' }), 'connected');
+  assert.equal(controlledDeviceUiState({ status: 'reconnecting' }), 'reconnecting');
+  assert.equal(controlledDeviceUiState({ status: 'refreshing' }), 'refreshing');
+  assert.equal(controlledDeviceUiState({ status: 'error' }), 'error');
+  // B6 is a short projection of the real waiting -> safety-handshake claim;
+  // B11 is the pending controlledStop operation, not an invented Rust enum.
+  assert.equal(controlledDeviceUiState({ status: 'safety_handshake' }, 0, 'reserved'), 'reserved');
+  assert.equal(controlledDeviceUiState({ status: 'connected' }, 0, 'stopping'), 'stopping');
+  assert.equal(controlledDeviceUiState({ status: 'idle' }, 0, 'reserving'), 'reserving');
+  assert.equal(controlledDeviceUiState({ status: 'waiting_connection' }, 0, 'refreshing'), 'refreshing');
+  assert.equal(controlledDeviceUiState({ status: 'idle' }, 0, 'error'), 'error');
+  assert.ok(panel.includes('previousStatus'));
+  assert.ok(panel.includes("remote.controlledStop()"));
+  assert.ok(panel.includes("active ? 'stopping' : 'reserving'"));
+  assert.ok(panel.includes("remote.controlledRefresh(), 'refreshing'"));
+  assert.match(rustControlled, /WaitingConnection[\s\S]*SafetyHandshake/);
+  assert.ok(!/enum ControlledStatusKind[\s\S]{0,500}\bStopping\b/.test(rustControlled));
+  assert.ok(!/enum ControlledStatusKind[\s\S]{0,500}\bPairingReserved\b/.test(rustControlled));
+});
+
+test('pending code operations render a skeleton and local failures use the error alert', () => {
+  assert.ok(panel.includes('codePending'));
+  assert.ok(panel.includes("['reserving', 'refreshing']"));
+  assert.ok(panel.includes('animate-pulse'));
+  assert.ok(panel.includes("localError ? 'error'"));
+  assert.ok(panel.includes("setLocalError('desktop_remote_control_unsupported')"));
+});
+
+test('authoritative status or generation changes invalidate stale local completion', () => {
+  const guard = createAsyncOperationGuard();
+  const attempt = guard.start();
+  const before = controlledAuthorityKey({ generation: 7, status: 'waiting_connection' });
+  const statusChanged = controlledAuthorityKey({ generation: 7, status: 'safety_handshake' });
+  const generationChanged = controlledAuthorityKey({ generation: 8, status: 'waiting_connection' });
+  assert.notEqual(before, statusChanged);
+  assert.notEqual(before, generationChanged);
+  guard.invalidate();
+  assert.equal(guard.isCurrent(attempt), false);
+  assert.ok(panel.includes('previousAuthority.current === authorityKey'));
+  assert.ok(panel.includes('operationGuard.current.invalidate()'));
+  assert.ok(panel.includes('setLocalError(null)'));
+  assert.ok(panel.includes('authority.current === startingAuthority'));
+});
+
+test('folder picker failures share the operation guard and busy state', () => {
+  const pickerIndex = panel.indexOf('bridge?.files?.pickFolders');
+  const runIndex = panel.lastIndexOf("run('workspace'", pickerIndex);
+  assert.ok(runIndex !== -1 && runIndex < pickerIndex, 'picker is inside the guarded workspace operation');
+  assert.ok(panel.includes('if (busyOperation.current) return'));
+  assert.ok(panel.includes("disabled={busy === 'workspace'}"));
+  assert.ok(panel.includes("onLocalStateChange?.('error')"));
+});
+
+test('tab tones distinguish waiting, failure and off states', () => {
+  assert.equal(remoteControlTabTone('waiting'), 'waiting');
+  assert.equal(remoteControlTabTone('expiring'), 'waiting');
+  assert.equal(remoteControlTabTone('expired'), 'off');
+  assert.equal(remoteControlTabTone('off'), 'off');
+  assert.equal(remoteControlTabTone('error'), 'error');
+  assert.equal(remoteControlTabTone('connected'), 'success');
 });
 
 test('the panel uses the remote-control toggle as its only disconnect action', () => {
@@ -71,25 +157,22 @@ test('refresh is unavailable while a controller is connected', () => {
 });
 
 test('the pairing code appears in the controlled connection block', () => {
-  const connectionStart = panel.indexOf('copy.connectionTitle');
+  const connectionStart = panel.indexOf('StatusBanner');
   const deviceStart = panel.indexOf('copy.deviceLabel');
   const connectionCard = panel.slice(connectionStart, deviceStart);
-  const outerCardStart = panel.lastIndexOf('<div className="mb-4 rounded-xl border', connectionStart);
-  const nextCardStart = panel.indexOf('<div className="mb-4 grid gap-3 sm:grid-cols-2"', connectionStart);
-  const codeStart = panel.indexOf('controlled-device-code', connectionStart);
+  const codeStart = panel.indexOf('controlled-device-code-label', connectionStart);
   const codeEnd = panel.indexOf('copy.codeExpires(seconds)', codeStart);
 
-  assert.ok(connectionCard.includes('controlled-device-code'));
+  assert.ok(connectionCard.includes('controlled-device-code-label'));
   assert.ok(connectionCard.includes('formatPairingCode(device.pairingCode)'));
   assert.ok(connectionCard.includes('copy.codeExpires(seconds)'));
-  assert.ok(outerCardStart !== -1 && nextCardStart !== -1);
-  assert.ok(outerCardStart < codeStart && codeStart < codeEnd && codeEnd < nextCardStart);
+  assert.ok(connectionStart < codeStart && codeStart < codeEnd && codeEnd < deviceStart);
 });
 
 test('the panel is keyboard reachable and screen-reader friendly', () => {
   assert.ok(panel.includes('aria-live'));
   assert.ok(panel.includes('role="group"'));
-  assert.ok(panel.includes('role="alert"'));
+  assert.ok(panel.includes("role={state === 'error' || state === 'expired' ? 'alert' : 'status'}"));
   assert.ok(panel.includes('<button'));
   assert.ok(panel.includes('type="button"'));
   // The countdown is announced on a throttled schedule, not every second.
@@ -109,7 +192,8 @@ test('the panel explains when the relay controller lane is unavailable', () => {
 });
 
 test('settings keeps the Web share card and the desktop panel separate', () => {
-  assert.ok(settings.includes('ControlledDevicePanel'));
+  assert.ok(settings.includes('RemoteControlSettingsPage'));
+  assert.ok(settingsPage.includes('ControlledDevicePanel'));
   assert.ok(settings.includes("can('desktopRemoteControl')"));
   assert.ok(settings.includes('WebAccessModal'));
 });

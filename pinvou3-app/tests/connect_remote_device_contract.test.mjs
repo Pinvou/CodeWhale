@@ -5,8 +5,13 @@ import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import { dict } from '../src/shared/i18n-all.js';
 import {
+  CONTROLLER_UI_STATES,
   connectionErrorKey,
+  connectionErrorState,
+  createAsyncOperationGuard,
+  controllerConnectionUiState,
   groupPairingCode,
+  pairingCodeInputState,
   isControlledDeviceChatActive,
   normalizePairingCode,
   openControlledDeviceChatWithRetry,
@@ -18,6 +23,7 @@ const panel = source('features/remote-control/RemoteControllerPanel.jsx');
 const shell = source('features/remote-control/RemoteConnectionShell.jsx');
 const main = source('app/main.jsx');
 const settings = source('features/settings/SettingsView.jsx');
+const settingsPage = source('features/remote-control/RemoteControlSettingsPage.jsx');
 const bridge = source('platform/tauri/bridge/desktop-remote-control.js');
 const chatView = source('features/chat/ChatView.jsx');
 
@@ -71,8 +77,104 @@ test('the inline form never persists or replays a code', () => {
 });
 
 test('connecting state keeps its own copy instead of claiming failure', () => {
-  assert.ok(panel.includes("connection.status === 'connecting'"));
-  assert.ok(panel.includes('? copy.connecting'));
+  assert.equal(controllerConnectionUiState({ status: 'connecting' }), 'connecting');
+  assert.ok(panel.includes("stateConnecting"));
+  assert.ok(panel.includes('const detailKey ='));
+});
+
+test('a new local attempt supersedes stale disconnected and error projections', () => {
+  for (const connection of [
+    { status: 'disconnected' },
+    { status: 'error', lastError: 'endpoint_offline' },
+  ]) {
+    assert.equal(controllerConnectionUiState(connection, 'typing'), 'typing');
+    assert.equal(controllerConnectionUiState(connection, 'ready'), 'ready');
+    assert.equal(controllerConnectionUiState(connection, 'connecting'), 'connecting');
+  }
+  assert.equal(controllerConnectionUiState({ status: 'disconnected' }, 'empty'), 'disconnected');
+  assert.equal(controllerConnectionUiState({ status: 'error', lastError: 'endpoint_offline' }, 'empty'), 'offline');
+  assert.ok(panel.includes("onFormValueChange?.('')"));
+  assert.ok(panel.includes("onFormStateChange?.('empty')"));
+  assert.ok(form.includes("onUiStateChange?.('empty')"));
+});
+
+test('every new-attempt failure supersedes a stale terminal projection', () => {
+  const failures = [
+    'invalid', 'busy', 'offline', 'version', 'protocol', 'unsupported', 'local_busy', 'failed',
+  ];
+  for (const connection of [
+    { status: 'disconnected' },
+    { status: 'error', lastError: 'endpoint_offline' },
+  ]) {
+    assert.equal(controllerConnectionUiState(connection, 'connecting'), 'connecting');
+    for (const failure of failures) {
+      assert.equal(
+        controllerConnectionUiState(connection, failure),
+        failure,
+        `${connection.status} -> connecting -> ${failure}`,
+      );
+    }
+  }
+  assert.equal(controllerConnectionUiState({ status: 'disconnected' }, 'empty'), 'disconnected');
+  assert.equal(controllerConnectionUiState({ status: 'error', lastError: 'endpoint_offline' }, 'empty'), 'offline');
+});
+
+test('cancelled or disposed connection attempts ignore late promise completion', async () => {
+  const guard = createAsyncOperationGuard();
+  let resolve;
+  let connected = 0;
+  const pending = new Promise((done) => { resolve = done; });
+  const attempt = guard.start();
+  const completion = pending.then(() => {
+    if (guard.isCurrent(attempt)) connected += 1;
+  });
+  guard.invalidate();
+  resolve({ status: 'connected' });
+  await completion;
+  assert.equal(connected, 0, 'cancelled attempt must not publish onConnected');
+
+  const disposedAttempt = guard.start();
+  guard.dispose();
+  assert.equal(guard.isCurrent(disposedAttempt), false, 'unmounted form rejects late completion');
+  assert.ok(form.includes('return () => guard.dispose()'));
+  assert.match(form, /isAttemptCurrent\(\)[\s\S]{0,120}onConnected\?\.\(result\)/);
+  assert.ok(panel.includes('key={cancelEpoch}'), 'cancel remounts the form and disposes its attempt guard');
+  assert.ok(panel.includes('connectCancellation.current += 1'), 'cancel invalidates in-flight completion synchronously');
+});
+
+test('the controller exposes all seventeen designed UI states', () => {
+  assert.equal(CONTROLLER_UI_STATES.length, 17);
+  assert.deepEqual(CONTROLLER_UI_STATES, [
+    'empty', 'typing', 'ready', 'format_invalid', 'invalid', 'connecting',
+    'safety_handshake', 'connected', 'reconnecting', 'disconnected', 'busy',
+    'offline', 'version', 'protocol', 'unsupported', 'local_busy', 'failed',
+  ]);
+  assert.equal(pairingCodeInputState(''), 'empty');
+  assert.equal(pairingCodeInputState('234'), 'typing');
+  assert.equal(pairingCodeInputState('2345678'), 'ready');
+  assert.equal(pairingCodeInputState('23456O8'), 'format_invalid');
+  const statusCases = {
+    connecting: 'connecting', safety_handshake: 'safety_handshake', connected: 'connected',
+    reconnecting: 'reconnecting', disconnected: 'disconnected',
+  };
+  for (const [status, expected] of Object.entries(statusCases)) {
+    assert.equal(controllerConnectionUiState({ status }), expected);
+  }
+  const errorCases = {
+    pairing_expired: 'invalid', controller_busy: 'busy', endpoint_offline: 'offline',
+    protocol_version_unsupported: 'version', invalid_message: 'protocol',
+    desktop_remote_control_unsupported: 'unsupported', controller_already_connecting: 'local_busy',
+    anything_else: 'failed',
+  };
+  for (const [code, expected] of Object.entries(errorCases)) {
+    assert.equal(connectionErrorState(code), expected);
+  }
+  for (const language of ['zh', 'en', 'ja']) {
+    for (const state of CONTROLLER_UI_STATES) {
+      const key = `state${state.split('_').map(part => part.charAt(0).toUpperCase() + part.slice(1)).join('')}`;
+      assert.ok(dict[language].controllerConnection[key], `${language}.controllerConnection.${key}`);
+    }
+  }
 });
 
 test('A-side connection status is restored from the backend state machine', () => {
@@ -96,23 +198,17 @@ test('the controlled operation zone precedes the controller zone in settings', (
     assert.ok(dict[language].controllerConnection.controllerSide);
     assert.ok(dict[language].controllerConnection.controlledSide);
   }
-  const remoteStart = settings.indexOf('const renderRemote');
-  const modelsStart = settings.indexOf('const renderModels', remoteStart);
-  const remoteBody = settings.slice(remoteStart, modelsStart);
-  const controllerIndex = remoteBody.indexOf('controllerSide');
-  const panelIndex = remoteBody.indexOf('<RemoteControllerPanel');
-  const controlledIndex = remoteBody.indexOf('controlledSide');
-  const controlledPanelIndex = remoteBody.indexOf('<ControlledDevicePanel');
+  const controllerIndex = settingsPage.indexOf("id: 'controller'");
+  const panelIndex = settingsPage.indexOf('<RemoteControllerPanel');
+  const controlledIndex = settingsPage.indexOf("id: 'controlled'");
+  const controlledPanelIndex = settingsPage.indexOf('<ControlledDevicePanel');
 
-  assert.notEqual(remoteStart, -1);
-  assert.notEqual(modelsStart, -1);
   assert.notEqual(controllerIndex, -1);
   assert.notEqual(panelIndex, -1);
   assert.notEqual(controlledIndex, -1);
   assert.notEqual(controlledPanelIndex, -1);
-  assert.ok(controlledIndex < controlledPanelIndex);
-  assert.ok(controlledPanelIndex < controllerIndex);
-  assert.ok(controllerIndex < panelIndex);
+  assert.ok(controlledIndex < controllerIndex);
+  assert.ok(controlledPanelIndex < panelIndex);
 });
 
 test('entering remote-control settings resets the shared content scroller to the top', () => {
@@ -125,7 +221,18 @@ test('entering remote-control settings resets the shared content scroller to the
 });
 
 test('connection is integrated into the remote-control page instead of a detached dialog', () => {
-  assert.ok(settings.includes('RemoteControllerPanel'));
+  assert.ok(settings.includes('RemoteControlSettingsPage'));
+  assert.ok(settingsPage.includes('RemoteControllerPanel'));
+  assert.ok(settingsPage.includes('role="tablist"'));
+  assert.ok(settingsPage.includes('controllerFormValue'));
+  assert.ok(settingsPage.includes('controllerFormState'));
+  assert.ok(settingsPage.includes('tabIndex={selected ? 0 : -1}'));
+  assert.ok(settingsPage.includes("event.key === 'ArrowRight'"));
+  assert.ok(settingsPage.includes('aria-labelledby="remote-control-tab-controller"'));
+  assert.ok(settingsPage.includes('roleStatusLabel'));
+  assert.ok(settingsPage.includes('controlledLocalState'));
+  assert.ok(settingsPage.includes('controlledSeconds'));
+  assert.ok(settingsPage.includes('onLocalStateChange={setControlledLocalState}'));
   assert.ok(panel.includes('<RemoteConnectForm'));
   assert.ok(!panel.includes('<RemoteConnectionShell'));
   assert.ok(main.includes('LazyRemoteConnectionShell'));

@@ -2256,6 +2256,27 @@ dictEn["controlledDevice"] = {
 };
 
 // Windows desktop remote control: A-side connection shell (DEV-22).
+Object.assign(dictEn.controlledDevice, {
+  stateOff: "Off", stateReserving: "Generating code", stateWaiting: "Waiting for connection",
+  stateExpiring: "Expiring soon", stateExpired: "Code expired", stateReserved: "Connection reserved",
+  stateHandshake: "Safety handshake", stateConnected: "Connected", stateReconnecting: "Reconnecting",
+  stateRefreshing: "Refreshing", stateStopping: "Turning off", stateError: "Service error",
+  detailOff: "Turn this on to create a temporary code valid for five minutes.",
+  detailReserving: "Requesting a temporary code from the secure service.",
+  detailWaiting: "Share the code below only with a controller you trust.",
+  detailExpiring: "This code will expire soon. Refresh it before sharing.",
+  detailExpired: "This code is no longer valid. Generate a new one.",
+  detailReserved: "The other device submitted the code and reserved this connection.",
+  detailHandshake: "Verifying both devices and creating an encrypted channel.",
+  detailConnected: "The remote-control channel is active. You can stop it here anytime.",
+  detailReconnecting: "The connection was interrupted and is recovering securely.",
+  detailRefreshing: "Invalidating the old code and creating a new one.",
+  detailStopping: "Revoking the code and closing the remote-control channel.",
+  detailError: "The remote-control service could not be reached. Try again later.",
+  copyCode: "Copy", copied: "Copied", regenerate: "Generate new code", codeExpiredShort: "Expired",
+  securityNotice: "Codes are for one short pairing session. Code tasks can use only authorized workspaces, and turning this off ends remote control immediately.",
+});
+
 dictEn["controllerConnection"] = {
   entry: "Connect a remote device",
   title: "Connect a remote device",
@@ -2296,6 +2317,32 @@ dictEn["controllerConnection"] = {
 };
 
 // Windows desktop remote control: A remote conversation (DEV-23).
+Object.assign(dictEn.controllerConnection, {
+  controllerTitle: "Control another device", controllerDesc: "Enter the code shown on the other device to create a secure remote session.",
+  controlledSideHint: "Let others connect here", controllerSideHint: "Connect to another device", roleSelectorLabel: "Choose a remote-control role", roleStatusLabel: "Current status",
+  stateEmpty: "Waiting for code", stateTyping: "Entering code", stateReady: "Ready to connect", stateFormatInvalid: "Incorrect format",
+  stateInvalid: "Invalid code", stateConnecting: "Connecting", stateSafetyHandshake: "Safety handshake",
+  stateConnected: "Connected", stateReconnecting: "Reconnecting", stateDisconnected: "Disconnected",
+  stateBusy: "Remote device busy", stateOffline: "Remote device offline", stateVersion: "Incompatible versions",
+  stateProtocol: "Protocol error", stateUnsupported: "Not supported", stateLocalBusy: "This device is busy", stateFailed: "Connection failed",
+  detailConnecting: "Finding the other device and starting the connection.",
+  detailSafety_handshake: "Verifying both devices and creating an encrypted channel.",
+  detailConnected: "The secure channel is ready. You can open the remote conversation.",
+  detailReconnecting: "The connection was interrupted and is recovering automatically.",
+  detailDisconnected: "The previous remote connection ended. Enter a code to reconnect.",
+  detailInvalid: "Ask the other device for the code currently on screen.",
+  detailBusy: "Another controller is using that device. Try again later.",
+  detailOffline: "Check that the other device is online and remote control is on.",
+  detailVersion: "Update both apps to compatible versions, then try again.",
+  detailProtocol: "Unrecognized data was received. Retry and check both app versions.",
+  detailUnsupported: "Desktop remote control is not available on this system.",
+  detailLocal_busy: "Disconnect this device's current remote connection first.",
+  detailFailed: "The connection could not be created. Check the network and retry.",
+  paste: "Paste", inputEmpty: "Enter the 7-character code", inputTyping: "Keep entering the remaining characters", inputReady: "The code format is valid",
+  disconnecting: "Disconnecting…", cancelConnection: "Cancel connection", conversationOpen: "The remote conversation is open in Chat",
+  securityNotice: "Codes are short-lived and the channel is encrypted end to end. Connect only to devices you trust.",
+});
+
 dictEn["remoteConversation"] = {
   title: "Remote conversation",
   remoteBadge: "Remote",

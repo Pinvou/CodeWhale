@@ -6,8 +6,7 @@ import { Toggle } from '../../components/Toggle.jsx';
 import PetSettingsSection from '../pet/PetSettingsSection.jsx';
 import { DEFAULT_PET_ID } from '../pet/pet-registry.js';
 import { TeamRelayAccessSettings } from '../team-relay/TeamRelayAccessSettings.jsx';
-import ControlledDevicePanel from '../remote-control/ControlledDevicePanel.jsx';
-import RemoteControllerPanel from '../remote-control/RemoteControllerPanel.jsx';
+import RemoteControlSettingsPage from '../remote-control/RemoteControlSettingsPage.jsx';
 import { bridge, isLocalModel, useBridgeState } from '../../hooks/useBridge.js';
 import { formatSessionDate } from '../../shared/date-utils.js';
 import { isBuiltInLlmApiModel, selectableModels } from '../../shared/model-options.js';
@@ -2409,23 +2408,15 @@ const formatMemoryTime = (item, copy) => {
             <ChevronLeft size={15} />
             {settingsCopy.desktopRemoteControlBack}
           </button>
-          <IOSSection title={t.controllerConnection.controlledSide}>
-            <div className="p-4">
-              <ControlledDevicePanel t={t} bs={bs} supported />
-            </div>
-          </IOSSection>
-          <IOSSection title={t.controllerConnection.controllerSide}>
-            <div className="p-4">
-              <RemoteControllerPanel
-                t={t}
-                bs={bs}
-                conversationOpen={remoteConversationOpen}
-                onConversationOpen={onRemoteConversationOpen}
-                onConnected={onRemoteConnected}
-                onConversationClose={onRemoteConversationClose}
-              />
-            </div>
-          </IOSSection>
+          <RemoteControlSettingsPage
+            t={t}
+            bs={bs}
+            supported={canDesktopRemoteControl}
+            conversationOpen={remoteConversationOpen}
+            onConversationOpen={onRemoteConversationOpen}
+            onConnected={onRemoteConnected}
+            onConversationClose={onRemoteConversationClose}
+          />
         </>
       );
       const renderModels = () => (
