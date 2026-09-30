@@ -913,10 +913,15 @@ impl ModelManager {
         // huggingface_hub 的开关，用原名才能对**所有**卡片生效——包括厂商自带的、
         // 我们不改也改不动的那些下载脚本。
         env.insert("HF_HUB_DISABLE_XET".into(), "1".into());
-        env.insert(
-            "LMM_HF_TOKEN".into(),
-            config::get_hf_token().unwrap_or_default(),
-        );
+        // 🔴 把 token 按**确切值**登记给落盘脱敏。
+        //
+        // 这一条注给**所有卡片的所有操作**，而卡片来自网络、可能被投毒：脚本里一句
+        // `set -x` 就会把它原样打进输出。输出在落盘之前是看过就没了，落盘之后同一句
+        // `set -x` 就是一个持久的凭证泄漏。按前缀（`hf_`）匹配只是当前约定、不是
+        // 规范；而这里恰好知道确切值，按确切值匹配是能给出的最强保证。
+        let hf_token = config::get_hf_token().unwrap_or_default();
+        super::run_log_store::register_secret(&hf_token);
+        env.insert("LMM_HF_TOKEN".into(), hf_token);
         env.insert(
             "LMM_STAGING_DIR".into(),
             self.settings.staging_path().to_string_lossy().to_string(),
@@ -1092,7 +1097,7 @@ impl ModelManager {
             let install_lines = self.install_engine(
                 &source,
                 &env,
-                &mut |line| on_progress(&format!("[安装引擎] {line}")),
+                &mut |line| on_progress(&script_runner::prefix_log_line("[安装引擎] ", line)),
                 control.clone(),
                 probe.need_root,
             )?;
@@ -1190,7 +1195,7 @@ impl ModelManager {
             &source,
             "download_model",
             &env,
-            &mut |line| on_progress(&format!("[下载模型] {line}")),
+            &mut |line| on_progress(&script_runner::prefix_log_line("[下载模型] ", line)),
             control,
             false,
         )?;

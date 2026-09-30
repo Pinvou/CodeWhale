@@ -16,6 +16,7 @@
 //! | `script_runner` | **最核心**：pty 执行卡片脚本，解析进度/交互提示，静默超时，取消 |
 //! | `lifecycle` | 六个入口脚本的编排（下载/装引擎/部署/启用/停用/卸载） |
 //! | `run_state` | 运行中任务注册表、日志缓冲、卡片级并发互斥、下载队列 |
+//! | `run_log_store` | 运行日志落盘（`~/.pinvou3/model-store/logs/`）+ 脱敏 + 轮转 |
 //! | `orphans` | 启动时回收上次没收干净的**脚本进程**（权重一个字节都不动） |
 //! | `errors` | 把技术错误翻译成用户看得懂的话 |
 //! | `disk` | 字节格式化与目录体积统计 |
@@ -35,6 +36,7 @@ pub mod import_scan;
 pub mod lifecycle;
 pub mod orphans;
 pub mod proc_timeout;
+pub mod run_log_store;
 pub mod run_state;
 pub mod script_runner;
 pub mod service;
@@ -45,10 +47,10 @@ pub mod test_store_data;
 // 命令层因此不必分平台分支。
 pub use service::{
     ModelStoreService, active_runs, answer_run, api_keys, cancel_run, create_api_key,
-    delete_engine, disable_test_store, force_remove, installed_engines, library, list_cards,
-    local_resources, memory_admission, model_detail, run_log, run_startup_cleanup,
-    run_startup_refresh, set_storage_settings, start_deploy, start_download, start_lifecycle,
-    storage_settings, take_startup_cleanup, test_store_state, unlock_test_store,
+    delete_engine, disable_test_store, export_run_log, force_remove, installed_engines, library,
+    list_cards, local_resources, memory_admission, model_detail, reveal_run_logs_dir, run_log,
+    run_startup_cleanup, run_startup_refresh, set_storage_settings, start_deploy, start_download,
+    start_lifecycle, storage_settings, take_startup_cleanup, test_store_state, unlock_test_store,
 };
 
 /// Linux 上模型商店总是可用的。

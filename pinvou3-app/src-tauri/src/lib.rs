@@ -2014,6 +2014,8 @@ pub fn run() {
             commands::model_store::model_store_start_lifecycle,
             commands::model_store::model_store_force_remove,
             commands::model_store::model_store_run_log,
+            commands::model_store::model_store_reveal_run_logs_dir,
+            commands::model_store::model_store_export_run_log,
             commands::model_store::model_store_cancel_run,
             commands::model_store::model_store_answer_run,
             commands::model_store::model_store_active_runs,

@@ -34,6 +34,15 @@ pub async fn list_cards(_test_mode: bool) -> Result<Value, String> {
     nope()
 }
 
+/// 打开运行日志目录。非 Linux 上压根没有运行过任何卡片脚本，所以也没有这个目录。
+pub fn reveal_run_logs_dir() -> Result<Value, String> {
+    nope()
+}
+
+pub fn export_run_log(_run_id: String) -> Result<Value, String> {
+    nope()
+}
+
 pub async fn library() -> Result<Value, String> {
     nope()
 }

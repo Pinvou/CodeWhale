@@ -24,6 +24,7 @@ use parking_lot::Mutex;
 use serde_json::{Value, json};
 
 use super::lifecycle::ModelManager;
+use super::run_log_store::{self, RunLogFile};
 use super::run_state::{
     ActiveCardOps, CancelRegistry, CardOp, DownloadQueue, OP_DEPLOY, OP_DOWNLOAD, OP_ENABLE,
     OP_FORCE_REMOVE, OP_STOP, OP_UNINSTALL, StartupCleanup,
@@ -31,7 +32,18 @@ use super::run_state::{
 use super::{config, db, disk, import_scan, script_runner};
 
 /// 运行记录保留多久。一次下载的日志能有几万行，不清会一直涨。
+///
+/// 到点之后**内存里**这条运行整个消失（`sweep_old_runs`）。日志本身不会跟着没——
+/// 它已经由 `run_log_store` 落在 `~/.pinvou3/model-store/logs/` 下了，这正是加那个
+/// 模块的原因：在它之前，600 秒一过「昨天那次下载为什么失败」在设备上无法回答。
 const RUN_RETENTION: Duration = Duration::from_secs(600);
+
+/// 内存里最多留多少行。
+///
+/// 在这之前 `RunLog::lines` 是**无上限**的 `Vec`：一次 168GB 的下载能打出几万行，
+/// 连同 `script_runner` 那份 `output_lines` 一起常驻，而它们在 600 秒的保留期里
+/// 一直不释放。封顶之后丢掉的是最老的行，完整的一份在磁盘上。
+const MAX_MEMORY_LINES: usize = 5_000;
 /// 长轮询最多挂多久。跟前端的 `LOG_WAIT_SECONDS` 对齐。
 const LOG_WAIT: Duration = Duration::from_secs(25);
 
@@ -47,12 +59,61 @@ fn is_prompt_line(line: &str) -> bool {
 
 // ---------------------------------------------------------------- 运行记录
 
+/// 有上限的行缓冲，**同时保住长轮询的绝对游标语义**。
+///
+/// 封顶不能简单地 `lines.drain(..n)`：前端握着的 `from` 是**绝对序号**，重排之后
+/// 同一个游标会指到别的行上——界面会把一段日志重收一遍，而在有 `LMM_PROMPT=` 的
+/// 路径上"重收一遍"等于把答过的提示再弹一次。所以丢掉的行数记在 `base` 里，
+/// 序号只增不减；游标落在已丢掉的区间时，从现存最老的那一行开始给。
+struct LineRing {
+    /// `items[0]` 在整条运行里的绝对序号。
+    base: usize,
+    items: std::collections::VecDeque<String>,
+}
+
+impl LineRing {
+    fn new() -> Self {
+        Self {
+            base: 0,
+            items: std::collections::VecDeque::new(),
+        }
+    }
+
+    fn push(&mut self, line: &str) {
+        self.items.push_back(line.to_string());
+        while self.items.len() > MAX_MEMORY_LINES {
+            self.items.pop_front();
+            self.base += 1;
+        }
+    }
+
+    /// 整条运行到目前为止一共有过多少行（= 下一个游标）。
+    fn total(&self) -> usize {
+        self.base + self.items.len()
+    }
+
+    fn slice_from(&self, from: usize) -> Vec<String> {
+        let offset = from.saturating_sub(self.base);
+        if offset >= self.items.len() {
+            return Vec::new();
+        }
+        self.items.iter().skip(offset).cloned().collect()
+    }
+}
+
 /// 一次长操作的输出与结局。
 ///
-/// 行存在 `Vec` 里而不是只往外推：调用方可能晚到（界面切走再切回来、应用重启），
+/// 行存在内存里而不是只往外推：调用方可能晚到（界面切走再切回来、应用重启），
 /// 没有回放就会丢掉前半段日志，而前半段往往正是出错的地方。
+///
+/// 内存那份有上限（`MAX_MEMORY_LINES`）且 600 秒后整条消失；**完整的一份落在磁盘
+/// 上**（`disk`）。两份的分工：内存那份服务于"现在正在看的界面"，磁盘那份服务于
+/// "明天再来问为什么失败的人"。
 struct RunLog {
-    lines: Mutex<Vec<String>>,
+    lines: Mutex<LineRing>,
+    /// 落盘句柄。**开不出来就是 `None`，操作照常跑**——日志是诊断手段，不是功能，
+    /// 为了记日志而让用户下不了模型是本末倒置。
+    disk: Option<RunLogFile>,
     /// `None` = 还在跑；`Some(Ok(v))` = 成功及其返回值；`Some(Err(msg))` = 失败
     outcome: Mutex<Option<Result<Value, String>>>,
     /// 用户主动取消。取消在底层也是一个 Err，但对用户是两回事——"你点了取消"
@@ -72,9 +133,10 @@ struct RunLog {
 }
 
 impl RunLog {
-    fn new() -> Self {
+    fn new(run_id: &str, label: &str) -> Self {
         Self {
-            lines: Mutex::new(Vec::new()),
+            lines: Mutex::new(LineRing::new()),
+            disk: RunLogFile::open(run_id, label),
             outcome: Mutex::new(None),
             cancelled: Mutex::new(false),
             awaiting_prompt: Mutex::new(false),
@@ -87,8 +149,31 @@ impl RunLog {
         // 提示行之后脚本就阻塞在 read 上，再出现任何一行输出就说明它已经拿到
         // 答案往下走了——这是日志流里唯一能看出"还在不在等"的地方。
         *self.awaiting_prompt.lock() = is_prompt_line(line);
-        self.lines.lock().push(line.to_string());
+        // 落盘挂在这里、而不是在 pty 读取循环里另开一个出口：这一条是「已经
+        // strip_ansi 过、已经切好行、已经加过阶段前缀」的唯一汇聚点，挂在它后面
+        // 就自动继承了那些处理。落盘前还要过一道定向脱敏，见 run_log_store。
+        if let Some(disk) = self.disk.as_ref() {
+            disk.append(line);
+        }
+        self.lines.lock().push(line);
         self.notify.notify_waiters();
+    }
+
+    /// 只在内存里的 RunLog，给测试用。
+    ///
+    /// 不让测试走 `new()`：那会在开发机/CI 的**真实** `~/.pinvou3/model-store/logs/`
+    /// 下留文件。落盘本身有专门的文件级测试（`run_log_store`），用 `TempHome` 隔离。
+    #[cfg(test)]
+    fn new_memory_only() -> Self {
+        Self {
+            lines: Mutex::new(LineRing::new()),
+            disk: None,
+            outcome: Mutex::new(None),
+            cancelled: Mutex::new(false),
+            awaiting_prompt: Mutex::new(false),
+            finished_at: Mutex::new(None),
+            notify: Arc::new(tokio::sync::Notify::new()),
+        }
     }
 
     /// 界面答完了。不等脚本打出下一行就落下标志：用户完全可能答完立刻切走，
@@ -98,6 +183,17 @@ impl RunLog {
     }
 
     fn finish(&self, outcome: Result<Value, String>, cancelled: bool) {
+        if let Some(disk) = self.disk.as_ref() {
+            let text = if cancelled {
+                "已取消".to_string()
+            } else {
+                match &outcome {
+                    Ok(_) => "成功".to_string(),
+                    Err(e) => format!("失败：{e}"),
+                }
+            };
+            disk.finish(&text);
+        }
         *self.cancelled.lock() = cancelled;
         *self.awaiting_prompt.lock() = false;
         *self.outcome.lock() = Some(outcome);
@@ -107,13 +203,11 @@ impl RunLog {
 
     fn snapshot(&self, from: usize) -> (Vec<String>, usize, Option<Result<Value, String>>) {
         let lines = self.lines.lock();
-        let total = lines.len();
-        let slice = if from < total {
-            lines[from..].to_vec()
-        } else {
-            Vec::new()
-        };
-        (slice, total, self.outcome.lock().clone())
+        (
+            lines.slice_from(from),
+            lines.total(),
+            self.outcome.lock().clone(),
+        )
     }
 }
 
@@ -149,9 +243,9 @@ impl ModelStoreService {
         }
     }
 
-    fn new_run(&self, run_id: &str) -> Arc<RunLog> {
+    fn new_run(&self, run_id: &str, label: &str) -> Arc<RunLog> {
         self.sweep_old_runs();
-        let log = Arc::new(RunLog::new());
+        let log = Arc::new(RunLog::new(run_id, label));
         self.runs
             .lock()
             .insert(run_id.to_string(), Arc::clone(&log));
@@ -344,7 +438,7 @@ where
     // 卡片级互斥：同一张卡不许被两处同时操作。
     service.active.try_begin(card_id, op, Some(&run_id))?;
 
-    let log = service.new_run(&run_id);
+    let log = service.new_run(&run_id, op.label);
     let control = service.registry.register(&run_id);
 
     let svc = Arc::clone(service);
@@ -722,6 +816,23 @@ pub async fn run_log(
     }
 }
 
+/// 在文件管理器里打开运行日志目录。
+///
+/// 只给"打开目录"，不给"把日志读回前端"：那几 MB 文本走 IPC 再塞进一个浮动任务卡
+/// 没有任何意义，而用户真正要做的是把文件发给别人。
+pub fn reveal_run_logs_dir() -> Result<Value, String> {
+    let dir = run_log_store::logs_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| format!("创建日志目录失败：{e}"))?;
+    crate::platform::os::reveal_target(&dir)?;
+    Ok(json!({ "path": dir.to_string_lossy() }))
+}
+
+/// 导出一次运行的日志（比落盘那份多过一道脱敏，见 `run_log_store`）。
+pub fn export_run_log(run_id: String) -> Result<Value, String> {
+    let path = run_log_store::export_run_log(&run_id)?;
+    Ok(json!({ "path": path.to_string_lossy() }))
+}
+
 pub fn cancel_run(service: &Arc<ModelStoreService>, run_id: String) -> Result<Value, String> {
     service.registry.cancel(&run_id);
     Ok(json!({ "ok": true }))
@@ -997,7 +1108,7 @@ mod tests {
     /// 那就是拿着上一轮的 IP 去连从机。
     #[test]
     fn a_prompt_stops_awaiting_once_anything_else_comes_out() {
-        let log = RunLog::new();
+        let log = RunLog::new_memory_only();
         assert!(!*log.awaiting_prompt.lock(), "还没问就不该在等");
 
         log.push("LMM_PROMPT=text|请输入从机 IP");
@@ -1018,7 +1129,7 @@ mod tests {
     /// 的话，回放会把这条已经答过的提示又弹一次。
     #[test]
     fn answering_clears_awaiting_before_the_script_says_anything() {
-        let log = RunLog::new();
+        let log = RunLog::new_memory_only();
         log.push("LMM_PROMPT=password|输入本机密码");
         log.answered();
         assert!(!*log.awaiting_prompt.lock());
@@ -1028,10 +1139,42 @@ mod tests {
     /// 一个永远送不出去的输入框。
     #[test]
     fn finishing_clears_awaiting() {
-        let log = RunLog::new();
+        let log = RunLog::new_memory_only();
         log.push("LMM_PROMPT=confirm|继续吗");
         log.finish(Err("脚本非零退出".to_string()), false);
         assert!(!*log.awaiting_prompt.lock());
+    }
+
+    /// 行数封顶之后，长轮询的**绝对游标**语义不能变。
+    ///
+    /// 前端握着的 `from` 是绝对序号。丢掉最老的行时若把序号重算成 0，同一个游标会
+    /// 指到别的行上——界面会把一段日志重收一遍，而在有 `LMM_PROMPT=` 的路径上
+    /// "重收一遍"就等于把答过的提示再弹一次（那条路的后果见
+    /// `a_prompt_stops_awaiting_once_anything_else_comes_out`）。
+    #[test]
+    fn capping_lines_keeps_absolute_cursors_monotonic() {
+        let mut ring = LineRing::new();
+        for index in 0..(MAX_MEMORY_LINES + 10) {
+            ring.push(&format!("line-{index}"));
+        }
+        // 总行数照实数，不因为丢了行就缩回去
+        assert_eq!(ring.total(), MAX_MEMORY_LINES + 10);
+        assert_eq!(ring.base, 10);
+        // 游标落在还留着的区间：从那一行开始给
+        let tail = ring.slice_from(MAX_MEMORY_LINES + 8);
+        assert_eq!(
+            tail,
+            vec![
+                format!("line-{}", MAX_MEMORY_LINES + 8),
+                format!("line-{}", MAX_MEMORY_LINES + 9)
+            ]
+        );
+        // 游标落在已经丢掉的区间：从现存最老的那一行开始给，**不是**从 0
+        let from_stale = ring.slice_from(0);
+        assert_eq!(from_stale.len(), MAX_MEMORY_LINES);
+        assert_eq!(from_stale[0], "line-10");
+        // 游标已经追到头：给空，别让轮询以为有新行
+        assert!(ring.slice_from(ring.total()).is_empty());
     }
 
     #[test]
@@ -1053,7 +1196,7 @@ mod tests {
     /// 一个被唤醒，是另一个更难查的错。唤醒的安全性必须来自登记顺序，不是许可。
     #[tokio::test(start_paused = true)]
     async fn notify_waiters_drops_the_wakeup_when_nobody_is_waiting_yet() {
-        let log = RunLog::new();
+        let log = RunLog::new_memory_only();
 
         // 此刻没有任何等待者，这一次唤醒被丢弃
         log.push("先推一行");

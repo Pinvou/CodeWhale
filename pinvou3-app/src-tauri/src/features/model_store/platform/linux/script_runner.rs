@@ -1595,9 +1595,24 @@ mod tests {
             timeout: Some(Duration::from_secs(1)),
             ..Default::default()
         };
-        let started = Instant::now();
-        let err = with_isolated_data_dir(|| run_script(&path, &HashMap::new(), opts)).unwrap_err();
-        let elapsed = started.elapsed();
+        // 🔴 秒表必须在**锁里面**起，不能在外面。
+        //
+        // `with_isolated_data_dir` 建的是 `config::TempHome`，而它自带一把**进程级**的
+        // `ENV_TEST_LOCK`（要改 HOME / PINVOU3_HOME，同进程里只能一个测试进这段）。
+        // 在外面起表的话，`elapsed` 量到的是「等别的测试放锁 + run_script 真正花的时间」
+        // 两段之和——而前一段跟本条要测的东西（宽限读循环有没有总上限）毫无关系。
+        //
+        // 后果不是抽象的：本条的上限是 12 秒，而同模块里凡是用 TempHome 的测试一多、
+        // 或者其中某一条的临界区一长（`run_log_store` 那几条要建几十个日志文件），
+        // 排在后面的这一条就会**因为排队而变红**，红得还很稳定（每次都是 14.5 秒左右，
+        // 看着特别像真的缺陷）。于是排查会一头扎进宽限循环，而那里根本没问题。
+        // 表挪进锁里之后量到的是 run_script 自己的耗时，也就是断言那句话真正的主语。
+        let (result, elapsed) = with_isolated_data_dir(|| {
+            let started = Instant::now();
+            let result = run_script(&path, &HashMap::new(), opts);
+            (result, started.elapsed())
+        });
+        let err = result.unwrap_err();
 
         assert!(
             err.to_string().contains("超过安全上限"),

@@ -137,6 +137,22 @@ pub async fn model_store_run_log(
     model_store::run_log(service, run_id, from, wait).await
 }
 
+/// 在文件管理器里打开模型商店的运行日志目录（`~/.pinvou3/model-store/logs/`）。
+///
+/// 只"打开目录"、不"把日志读回前端"：那几 MB 文本走 IPC 再塞进一个浮动任务卡没有
+/// 任何意义，用户真正要做的是把文件发给别人。
+#[tauri::command]
+pub fn model_store_reveal_run_logs_dir() -> Result<Value, String> {
+    model_store::reveal_run_logs_dir()
+}
+
+/// 导出一次运行的日志。导出那份比落盘那份多过一道脱敏（内网地址 + 全仓通用的
+/// 凭证尺子）——它会离开这台机器。
+#[tauri::command]
+pub fn model_store_export_run_log(run_id: String) -> Result<Value, String> {
+    model_store::export_run_log(run_id)
+}
+
 #[tauri::command]
 pub fn model_store_cancel_run(
     service: State<'_, Arc<ModelStoreService>>,
