@@ -6880,7 +6880,11 @@ impl RuntimeThreadManager {
             // Collect and remove under one lock hold. By the time this runs
             // the monitor has unwound and its receivers are closed, so
             // `deliver_external_approval` leaves these entries alone and
-            // every one of them is published here exactly once.
+            // every one of them is published here exactly once. Entries
+            // whose receiver is still live are settled too (the deny is
+            // then also pushed through the decision channel): the waiter
+            // for this turn was the monitor itself, so nothing else can
+            // ever resolve them.
             let mut map = self.pending_approvals.lock();
             map.iter()
                 .filter(|(_, entry)| {
@@ -9484,20 +9488,30 @@ impl RuntimeThreadManager {
                         // clear the pending UI. The deny also unblocks the
                         // engine if cancellation raced it.
                         ApprovalWakeup::Decision(Err(_)) | ApprovalWakeup::Interrupted => {
-                            self.emit_event(
-                                &thread_id,
-                                Some(&turn_id),
-                                None,
-                                "approval.decided",
-                                json!({
-                                    "approval_id": id,
-                                    "decision": "deny",
-                                    "remember": false,
-                                    "interrupted": true,
-                                }),
-                            )
-                            .await
-                            .ok();
+                            if let Err(err) = self
+                                .emit_event(
+                                    &thread_id,
+                                    Some(&turn_id),
+                                    None,
+                                    "approval.decided",
+                                    json!({
+                                        "approval_id": id,
+                                        "decision": "deny",
+                                        "remember": false,
+                                        "interrupted": true,
+                                    }),
+                                )
+                                .await
+                            {
+                                // A dropped publish here would strand the
+                                // client's pending UI on a resolution that
+                                // already happened; the settle path logs the
+                                // same failure loudly.
+                                tracing::error!(
+                                    "Failed to emit forced approval resolution \
+                                     for {id}: {err}"
+                                );
+                            }
                             let _ = engine.deny_tool_call(id).await;
                         }
                     }
