@@ -1547,6 +1547,8 @@ pub fn run() {
             commands::remote_control::web_access_status,
             commands::remote_control::web_access_rotate,
             commands::remote_control::web_access_relay_settings,
+            commands::remote_control::desktop_remote_endpoint_profiles,
+            commands::remote_control::desktop_remote_set_endpoint_profile,
             commands::remote_control::web_access_set_relay,
             commands::remote_control::web_access_reset_relay,
             commands::remote_control::web_access_bridge_ready,
