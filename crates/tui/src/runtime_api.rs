@@ -5925,7 +5925,7 @@ async fn restore_snapshot(
             "note": crate::snapshot::ATTACHED_ROOTS_NOT_REVERTED_NOTE,
         });
     }
-    restore_snapshot_for_workspace(&state.workspace, &id)?;
+    restore_snapshot_for_workspace(&state.workspace, &snapshot)?;
     Ok(Json(payload))
 }
 
@@ -5950,22 +5950,25 @@ fn snapshot_for_workspace(
 
 fn restore_snapshot_for_workspace(
     workspace: &FsPath,
-    id: &str,
-) -> Result<crate::snapshot::Snapshot, ApiError> {
-    let snapshot = snapshot_for_workspace(workspace, id)?;
+    snapshot: &crate::snapshot::Snapshot,
+) -> Result<(), ApiError> {
+    // Round-24 P3 perf: the already-fetched membership-checked snapshot is
+    // threaded through instead of re-listing the store a second time per
+    // restore request (the read half above already proved the id belongs to
+    // this repo).
     let repo = crate::snapshot::SnapshotRepo::open_or_init(workspace)
         .map_err(|e| ApiError::internal(format!("Snapshot repo init failed: {e}")))?;
-    // The id arrives from the request path and is handed to git as a
-    // treeish, so it is accepted only if the side repo actually knows it —
-    // anything else is a 404 rather than an arbitrary string on a git
-    // command line. The membership check also marks the id as validated
-    // for command-line-injection scanners (an allowlist `contains` is
-    // their modeled trust boundary), so the pre-existing, accepted flow
-    // stops re-flagging when call sites are refactored.
-    let snapshot_id = crate::snapshot::SnapshotId(id.to_string());
-    repo.restore(&snapshot_id)
+    // The id arrived from the request path and is handed to git as a
+    // treeish; it reached this fn only through the side repo's own
+    // membership list, so anything else was already answered 404 rather
+    // than an arbitrary string on a git command line. The membership check
+    // also marks the id as validated for command-line-injection scanners
+    // (an allowlist `contains` is their modeled trust boundary), so the
+    // pre-existing, accepted flow stops re-flagging when call sites are
+    // refactored.
+    repo.restore(&snapshot.id)
         .map_err(|e| ApiError::internal(format!("Snapshot restore failed: {e}")))?;
-    Ok(snapshot)
+    Ok(())
 }
 
 fn snapshot_entries_for_workspace(

@@ -4036,9 +4036,13 @@ fn canonical_readonly_roots(roots: &[PathBuf]) -> std::io::Result<Vec<PathBuf>> 
         ));
     };
     let mut canonical = vec![primary.canonicalize()?];
+    // Round-24 P3 perf: the Vec `contains` made the dedup O(N²) in the
+    // root-set size — a set keeps the order-preserving first-wins dedup
+    // linear. Behavior identical (first canonical spelling wins).
+    let mut seen: std::collections::HashSet<PathBuf> = canonical.iter().cloned().collect();
     for root in extra {
         if let Ok(resolved) = root.canonicalize()
-            && !canonical.contains(&resolved)
+            && seen.insert(resolved.clone())
         {
             canonical.push(resolved);
         }

@@ -606,6 +606,16 @@ pub struct ToolExecutionState {
     /// Additional workspace roots tools may touch; `workspace` is always the
     /// primary root. Empty means the historical single-root boundary.
     pub workspace_roots: Vec<PathBuf>,
+    /// Round-24 P3 perf memo for `boundary_roots()`: the normalized set plus
+    /// each root's canonical spelling, canonicalizing once per context
+    /// lifetime instead of once per `resolve_path` call (several judgments
+    /// ride every tool call). Invariant: `workspace` and `workspace_roots`
+    /// are immutable for the context's lifetime — the constructors install a
+    /// fresh cache and `with_workspace_roots` replaces it; clones share it,
+    /// which is sound because clones carry identical roots. No code path
+    /// mutates the roots in place (surveyed; if one ever must, it must swap
+    /// this Arc first or the boundary would judge stale spellings).
+    pub(crate) boundary_roots_cache: std::sync::Arc<std::sync::OnceLock<Vec<(PathBuf, PathBuf)>>>,
     /// Current sandbox policy
     #[allow(dead_code)]
     pub sandbox_policy: SandboxPolicy,
@@ -783,6 +793,7 @@ impl ToolContext {
                 tool_authority,
                 trust_mode,
                 workspace_roots: Vec::new(),
+                boundary_roots_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
                 sandbox_policy: SandboxPolicy::None,
                 notes_path: notes_path.into(),
                 mcp_config_path: mcp_config_path.into(),
@@ -844,6 +855,9 @@ impl ToolContext {
     #[must_use]
     pub fn with_workspace_roots(mut self, workspace_roots: Vec<PathBuf>) -> Self {
         self.workspace_roots = workspace_roots;
+        // Fresh memo: the boundary must never judge the previous set's
+        // canonical spellings (see the field's invariant note).
+        self.boundary_roots_cache = std::sync::Arc::new(std::sync::OnceLock::new());
         self
     }
 
@@ -1075,14 +1089,21 @@ impl ToolContext {
     /// any additional roots, each paired with its canonical (or raw fallback)
     /// form. With no additional roots configured this is exactly the primary
     /// root, so single-root sessions take the historical code path.
-    fn boundary_roots(&self) -> Vec<(PathBuf, PathBuf)> {
-        codewhale_core::normalize_workspace_roots(&self.workspace, &self.workspace_roots)
-            .into_iter()
-            .map(|root| {
-                let canonical = root.canonicalize().unwrap_or_else(|_| root.clone());
-                (root, canonical)
-            })
-            .collect()
+    fn boundary_roots(&self) -> &[(PathBuf, PathBuf)] {
+        // Round-24 P3 perf: memoized per context (roots are lifetime-
+        // immutable, see the cache field's invariant note). The canonicalize
+        // chain per root used to run on every resolve_path call — several
+        // per tool turn — which on a 64-root session was hundreds of
+        // realpath syscalls per turn for an unchanged set.
+        self.boundary_roots_cache.get_or_init(|| {
+            codewhale_core::normalize_workspace_roots(&self.workspace, &self.workspace_roots)
+                .into_iter()
+                .map(|root| {
+                    let canonical = root.canonicalize().unwrap_or_else(|_| root.clone());
+                    (root, canonical)
+                })
+                .collect()
+        })
     }
 
     pub fn resolve_path(&self, raw: &str) -> Result<PathBuf, ToolError> {
@@ -1105,7 +1126,7 @@ impl ToolContext {
         // path against each root first. A symlink inside a root that resolves
         // outside is allowed — the symlink itself is the gate.
         if self.follow_symlinks {
-            for (root, root_canonical) in &boundary_roots {
+            for (root, root_canonical) in boundary_roots {
                 let root_normalized = normalize_path(root);
                 let root_canonical_normalized = normalize_path(root_canonical);
                 if candidate_normalized.starts_with(&root_normalized)
