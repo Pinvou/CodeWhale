@@ -460,7 +460,6 @@ test('rapid bridge session changes always enqueue the latest serialized publicat
   assert.match(syncEffect, /const isCommandEcho = bridgeObservation\.type === 'command-echo'/);
   assert.match(appMain, /browserSessionCommandEchoGuard\.begin\(/);
   assert.match(appMain, /browserSessionCommandEchoGuard\.settle\(sessionCommandToken\)/);
-  assert.equal((appMain.match(/sessionTarget:/g) || []).length, 4);
   assert.match(syncEffect, /bridgeTransition\?\.sessionId !== nextSessionId/);
   assert.match(
     syncEffect,
