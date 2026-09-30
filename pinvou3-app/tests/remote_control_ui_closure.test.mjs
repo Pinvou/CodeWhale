@@ -22,28 +22,31 @@ const read = (relative) => fs.readFileSync(path.join(root, 'src', relative), 'ut
 test('the B panel maps the backend status enum and shows the pairing code', () => {
   const panel = read('features/remote-control/ControlledDevicePanel.jsx');
   const cases = [
-    ['reserving', 'reserving'],
-    ['waiting_connection', 'waiting'],
-    ['safety_handshake', 'handshake'],
+    ['registering', 'registering'],
+    ['waiting_for_pairing', 'waiting_for_pairing'],
+    ['pairing_reserved', 'pairing_reserved'],
+    ['handshake_pending', 'handshake_pending'],
     ['connected', 'connected'],
     ['reconnecting', 'reconnecting'],
-    ['refreshing', 'refreshing'],
-    ['stopped', 'off'],
+    ['resume_provisional', 'resume_provisional'],
+    ['resume_activated_pending_liveness', 'resume_activated_pending_liveness'],
+    ['retiring_generation', 'retiring_generation'],
+    ['stopping', 'stopping'],
+    ['stopped', 'stopped'],
     ['error', 'error'],
     ['disabled', 'off'],
   ];
   for (const [status, expected] of cases) {
-    const device = status === 'waiting_connection' ? { status, pairingCode: '2345678' } : { status };
+    const device = status === 'waiting_for_pairing' ? { status, pairingCode: '2345678' } : { status };
     assert.equal(controlledDeviceUiState(device, 120), expected, `backend status ${status}`);
   }
   assert.ok(panel.includes('codeVisible'), 'pairing code must be state-driven');
-  assert.ok(panel.includes("['waiting', 'expiring', 'expired']"), 'pairing code shows across its lifecycle');
+  assert.ok(panel.includes("['waiting_for_pairing', 'expiring']"), 'expired pairing codes must not remain visible');
   assert.ok(
     panel.includes('controllerDeviceName'),
     'the 主控设备 row must use the controller device name',
   );
-  // E2E-07：刷新状态不得借用「正在停止」的文案。
-  assert.equal(controlledDeviceUiState({ status: 'refreshing' }), 'refreshing');
+  assert.ok(!panel.includes("onLocalStateChange?.('reserved')"), 'reservation cannot be invented by a UI timer');
   assert.ok(panel.includes('deviceUnknown'), 'unknown names fall back to i18n copy');
   assert.ok(!/device\.deviceName \|\| copy\.deviceUnknown/.test(panel));
 });

@@ -61,6 +61,9 @@ pub(crate) fn publish_authoritative_task_status(app: &tauri::AppHandle, event: &
         );
         return;
     };
+    if event.generation != lease.remote_control_generation {
+        return;
+    }
     let runtime = app.state::<Arc<DesktopRemoteTaskRuntime>>();
     let Some(session_ref) = runtime.service().remote_ref_for(&event.session_id) else {
         crate::features::remote_control::controller::relay_runtime::log_controlled_event(
@@ -84,6 +87,17 @@ pub(crate) fn publish_authoritative_task_status(app: &tauri::AppHandle, event: &
         );
         return;
     };
+    if runtime
+        .service()
+        .status(&event.task_id)
+        .map(|record| {
+            record.session_id != event.session_id
+                || record.lease.remote_control_generation != event.generation
+        })
+        .unwrap_or(true)
+    {
+        return;
+    }
     let Some(object) = payload.as_object_mut() else {
         return;
     };
@@ -126,19 +140,22 @@ pub(crate) fn publish_authoritative_task_status(app: &tauri::AppHandle, event: &
 impl RemoteTaskEventSink for DesktopTaskEventSink {
     fn publish_task_event(&self, event: &RemoteTaskEvent) {
         use tauri::Emitter as _;
-        let _ = self.app.emit(TASK_STATUS_EVENT, event);
-        publish_authoritative_task_status(&self.app, event);
-        // Only the current authenticated B session/generation can allocate a
-        // visible journal sequence. Ordinary local sessions remain local.
         use tauri::Manager as _;
-        let Some((lease, _)) = self
+        let Some(lease) = self
             .app
             .state::<ControlledDeviceManager>()
-            .live_runtime_context()
+            .with_local_cancel_lease(Clone::clone)
             .ok()
         else {
             return;
         };
+        if event.generation != lease.remote_control_generation {
+            return;
+        }
+        let _ = self.app.emit(TASK_STATUS_EVENT, event);
+        publish_authoritative_task_status(&self.app, event);
+        // Only the current authenticated B session/generation can allocate a
+        // visible journal sequence. Ordinary local sessions remain local.
         let runtime = self.app.state::<Arc<DesktopRemoteTaskRuntime>>();
         let Some(remote_ref) = runtime.service().remote_ref_for(&event.session_id) else {
             return;
