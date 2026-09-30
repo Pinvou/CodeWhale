@@ -48,6 +48,7 @@ pub(crate) struct ControlledHandshake {
     generation: String,
     transcript_hash_hex: String,
     transcript_hash: [u8; 32],
+    negotiated_capabilities: Vec<String>,
     binding: HandshakeBinding,
     finished_sender: Option<FinishedSender>,
     finished_receiver: Option<FinishedReceiver>,
@@ -99,6 +100,7 @@ impl ControlledHandshake {
             generation: context.remote_control_generation().to_owned(),
             transcript_hash_hex: hex_lower(&transcript_hash),
             transcript_hash,
+            negotiated_capabilities: context.negotiated_capabilities().to_vec(),
             binding,
             finished_sender: Some(finished_sender),
             finished_receiver: Some(finished_receiver),
@@ -207,7 +209,11 @@ impl ControlledHandshake {
 
     /// 双收据完成后交出会话密钥，供调用方用真实 `LeaseBinding` 派生业务密钥。
     pub(crate) fn take_session(&mut self) -> Result<SessionKeys> {
-        if self.stage != ControlledHandshakeStage::Acked {
+        // `controller_joined` 之后 stage 前进为 Joined，密钥仍只交出一次。
+        if !matches!(
+            self.stage,
+            ControlledHandshakeStage::Acked | ControlledHandshakeStage::Joined
+        ) {
             return Err(ControlledHandshakeError::new("controller_handshake_stage_invalid"));
         }
         self.session
@@ -236,6 +242,11 @@ impl ControlledHandshake {
     /// 验签 transcript 的哈希原始字节（B 端派生传输指纹用）。
     pub(crate) fn transcript_hash(&self) -> [u8; 32] {
         self.transcript_hash
+    }
+
+    /// Relay 在 transcript 中协商出的能力集合（业务帧与回包的准入上下文）。
+    pub(crate) fn negotiated_capabilities(&self) -> &[String] {
+        &self.negotiated_capabilities
     }
 
     fn assert_peer_envelope(

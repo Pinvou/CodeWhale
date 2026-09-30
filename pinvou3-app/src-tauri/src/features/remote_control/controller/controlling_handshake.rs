@@ -19,12 +19,18 @@ use super::protocol::{
 };
 
 /// A 端 claim 声明的能力集合（与冻结协议常量保持一致的最小集）。
+/// E2E-03 起声明 `task_v1`：A 端已能按冻结 schema 构造 capability/task 请求，
+/// 且 B 端（DEV-12/DEV-13）已实现快照与任务服务；E2E-05 起声明
+/// `snapshot_journal_v1`（A 独立历史 + B 权威 journal 已由 DEV-19 实现）。
+/// `role_liveness_v1` / `resume_v1` 的实现接线属 E2E-06。
 const CLAIM_CAPABILITIES: &[&str] = &[
     "pairing_v1",
     "encrypted_frames_v1",
     "finished_receipt_v1",
     "role_liveness_v1",
     "resume_v1",
+    "task_v1",
+    "snapshot_journal_v1",
 ];
 const RESERVATION_TIMEOUT_MS: u64 = 30_000;
 

@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use serde::Serialize;
 use serde_json::Value;
-use tauri::State;
+use tauri::{Emitter as _, State};
 
 use crate::features::remote_control::controller::controlled::ControlledDeviceManager;
 use crate::features::remote_control::controller::history::{
@@ -18,6 +18,7 @@ use crate::features::remote_control::controller::journal::{
     JournalEvent, JournalSnapshot, RemoteJournal, ReplayOutcome,
 };
 use crate::features::remote_control::controller::task::{RemoteTaskEvent, RemoteTaskEventSink};
+use crate::app::commands::desktop_remote_task::DesktopRemoteTaskRuntime;
 
 const UNSUPPORTED: &str = "desktop_remote_control_unsupported";
 
@@ -56,8 +57,51 @@ impl RemoteTaskEventSink for DesktopTaskEventSink {
     fn publish_task_event(&self, event: &RemoteTaskEvent) {
         use tauri::Emitter as _;
         let _ = self.app.emit(TASK_STATUS_EVENT, event);
-        RemoteTaskEventSink::publish_task_event(self.journal.as_ref(), event);
+        // E2E-05：先落权威 journal，再把落库后的事件经加密通道回传 A。
+        if let Some(stored) = self.journal.record_task_event(event) {
+            publish_authoritative_event(&self.app, &stored);
+        }
     }
+}
+
+/// 把一条权威 journal 事件回传当前主控端（E2E-05）：会话身份改写回 A 的引用，
+/// 用 B 的加密通道封装，经同一代 endpoint lane 发送。未连接、未协商
+/// `snapshot_journal_v1`、非远程会话或通道未就位时静默跳过（本地 B 事件照常）。
+pub(crate) fn publish_authoritative_event(
+    app: &tauri::AppHandle,
+    event: &JournalEvent,
+) {
+    use tauri::Manager as _;
+    let device = app.state::<ControlledDeviceManager>();
+    let Ok((lease, capabilities)) = device.live_runtime_context() else {
+        return;
+    };
+    let runtime = app.state::<Arc<DesktopRemoteTaskRuntime>>();
+    let Some(session_ref) = runtime.service().remote_ref_for(&event.session_id) else {
+        return;
+    };
+    let outbound = app.state::<
+        crate::features::remote_control::controller::relay_runtime::ControlledOutboundState,
+    >();
+    let Some(sender) = outbound.sender() else {
+        return;
+    };
+    let Some(payload) =
+        crate::features::remote_control::controller::relay_runtime::build_journal_event_payload(
+            &lease,
+            &session_ref,
+            event,
+        )
+    else {
+        return;
+    };
+    let lane = app.state::<
+        crate::features::remote_control::controller::encrypted_lane::ControlledLaneState,
+    >();
+    let Ok(frame) = lane.seal("journal_event", &payload, &capabilities) else {
+        return;
+    };
+    let _ = sender.try_send(frame);
 }
 
 impl DesktopRemoteHistoryRuntime {
@@ -85,6 +129,47 @@ impl DesktopRemoteHistoryRuntime {
 }
 
 type HistoryState<'a> = State<'a, Arc<DesktopRemoteHistoryRuntime>>;
+
+/// E2E-05：A 端 journal 落库端口。把解密校验后的权威事件写进对应的本地历史
+/// （按会话引用定位；未绑定时只投影事件），并广播给前端渲染正文。
+pub(crate) struct DesktopControllerJournalSink {
+    app: tauri::AppHandle,
+    runtime: Arc<DesktopRemoteHistoryRuntime>,
+}
+
+impl DesktopControllerJournalSink {
+    pub(crate) fn new(
+        app: tauri::AppHandle,
+        runtime: Arc<DesktopRemoteHistoryRuntime>,
+    ) -> Self {
+        Self { app, runtime }
+    }
+}
+
+impl crate::features::remote_control::controller::controlling_service::ControllingJournalSink
+    for DesktopControllerJournalSink
+{
+    fn publish(&self, event: &JournalEvent) {
+        let history_id = self
+            .runtime
+            .store()
+            .find_by_session_reference(&event.session_id);
+        if let Some(history_id) = &history_id {
+            let _ = self.runtime.store().append_authenticated(
+                history_id,
+                event,
+                monotonic_millis(),
+            );
+        }
+        let _ = self.app.emit(
+            crate::features::remote_control::controller::controlling_service::CONTROLLER_JOURNAL_EVENT,
+            serde_json::json!({
+                "historyId": history_id,
+                "event": event,
+            }),
+        );
+    }
+}
 
 fn ensure_supported(controlled: &ControlledDeviceManager) -> Result<(), String> {
     if controlled.is_supported() {

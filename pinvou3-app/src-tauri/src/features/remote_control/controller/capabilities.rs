@@ -9,6 +9,7 @@ use std::collections::HashSet;
 
 use parking_lot::Mutex;
 use serde::Serialize;
+use serde_json::Value;
 
 use super::controlled::ControlledWorkspaceInfo;
 use super::protocol::LeaseContext;
@@ -210,6 +211,54 @@ impl CapabilitySnapshotManager {
             return Err(CapabilityError::new("capability_snapshot_expired"));
         }
         Ok(snapshot)
+    }
+
+    /// 冻结 wire 形状的 `capability_snapshot`（B → A）。字段名与 PROTOCOL.md 的
+    /// exact-object schema 一致，只含 opaque id、显示名、模式、revision 与有效期；
+    /// 调用方（B 端派发层）负责再用运行时校验器自检。
+    pub(crate) fn wire_capability_snapshot(
+        &self,
+        snapshot: &CapabilitySnapshot,
+        request_id: &str,
+    ) -> Value {
+        serde_json::json!({
+            "v": 1,
+            "type": "capability_snapshot",
+            "connection_id": snapshot.connection_id,
+            "controller_lease_id": snapshot.controller_lease_id,
+            "lease_epoch": snapshot.lease_epoch,
+            "relay_epoch": snapshot.relay_epoch,
+            "remote_control_generation": snapshot.remote_control_generation,
+            "request_id": request_id,
+            "capability_revision": snapshot.capability_revision,
+            "expires_at_ms": snapshot.expires_at_ms,
+            "modes": snapshot.modes,
+            "tools": snapshot
+                .tools
+                .iter()
+                .map(|tool| serde_json::json!({
+                    "tool_id": tool.tool_id,
+                    "display_name": tool.display_name,
+                }))
+                .collect::<Vec<_>>(),
+            "skills": snapshot
+                .skills
+                .iter()
+                .map(|skill| serde_json::json!({
+                    "skill_id": skill.skill_id,
+                    "display_name": skill.display_name,
+                }))
+                .collect::<Vec<_>>(),
+            "workspaces": snapshot
+                .workspaces
+                .iter()
+                .map(|workspace| serde_json::json!({
+                    "workspace_id": workspace.workspace_id,
+                    "display_name": workspace.display_name,
+                    "code_allowed": workspace.code_allowed,
+                }))
+                .collect::<Vec<_>>(),
+        })
     }
 
     /// Resolve only the opaque workspace ID. Task admission must still ask the
@@ -427,5 +476,39 @@ mod tests {
                 .code,
             "capability_id_invalid"
         );
+    }
+
+    /// E2E-04：wire 投影必须是冻结形状，且通过运行时校验器（角色 B + 租约 +
+    /// 协商能力），否则 A 端会在解密后再被拒。
+    #[test]
+    fn wire_capability_snapshot_matches_the_frozen_protocol_shape() {
+        let manager = CapabilitySnapshotManager::default();
+        let lease = context("generation-0001");
+        let snapshot = manager
+            .build(lease.clone(), fixture_source(), 1_000)
+            .unwrap();
+        let payload = manager.wire_capability_snapshot(&snapshot, "request-snapshot-1");
+        let capabilities = vec![
+            "encrypted_frames_v1".to_owned(),
+            "pairing_v1".to_owned(),
+            "task_v1".to_owned(),
+        ];
+        let encoded = payload.to_string();
+        super::super::protocol::validate_controller_runtime_payload_json(
+            &encoded,
+            super::super::protocol::SenderRole::ControlledB,
+            Some(&super::super::protocol::RuntimeValidationContext {
+                lease: Some(lease),
+                negotiated_capabilities: capabilities,
+            }),
+        )
+        .expect("wire capability snapshot must satisfy the frozen runtime contract");
+        assert_eq!(payload["type"], "capability_snapshot");
+        assert_eq!(payload["request_id"], "request-snapshot-1");
+        assert_eq!(payload["capability_revision"], "1");
+        // 序列化文本不得包含宿主路径或凭证关键字。
+        let text = payload.to_string();
+        assert!(!text.contains("D:\\"));
+        assert!(!text.contains("api_key"));
     }
 }

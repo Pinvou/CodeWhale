@@ -11,10 +11,12 @@ use crate::features::remote_control::controller::controlling::{
     ControllingDeviceManager, ControllingLeaseInfo, ControllingStateError, ControllingStatus,
     RemoteHistoryEntry,
 };
+use crate::features::remote_control::controller::controlling_session::ControllingSessionManager;
 use crate::features::remote_control::controller::controlling_service::{
     CONTROLLER_STATUS_EVENT, connect_controlling_device,
 };
 use crate::features::remote_control::RemoteControlManager;
+use std::sync::Arc;
 
 const STATUS_EVENT: &str = CONTROLLER_STATUS_EVENT;
 const UNSUPPORTED: &str = "desktop_remote_control_unsupported";
@@ -47,21 +49,34 @@ pub async fn desktop_remote_controller_connect(
     app: AppHandle,
     manager: State<'_, ControllingDeviceManager>,
     relay: State<'_, RemoteControlManager>,
+    sessions: State<'_, ControllingSessionManager>,
+    history: State<'_, Arc<super::desktop_remote_history::DesktopRemoteHistoryRuntime>>,
     code: String,
 ) -> Result<ControllingStatus, String> {
     ensure_supported(&manager)?;
+    // 新连接不得复用上一代租赁的会话意图（它们的 lease 绑定必然失效）。
+    sessions.clear();
     let operation = manager.connect(&code).map_err(controlling_error)?;
     let status = manager.status();
     emit_status(&app, &status);
-    connect_controlling_device(&app, &manager, relay.inner(), operation).await
+    let journal: Arc<dyn crate::features::remote_control::controller::controlling_service::ControllingJournalSink> =
+        Arc::new(
+            super::desktop_remote_history::DesktopControllerJournalSink::new(
+                app.clone(),
+                history.inner().clone(),
+            ),
+        );
+    connect_controlling_device(&app, &manager, relay.inner(), operation, journal).await
 }
 
 #[tauri::command]
 pub fn desktop_remote_controller_disconnect(
     app: AppHandle,
     manager: State<'_, ControllingDeviceManager>,
+    sessions: State<'_, ControllingSessionManager>,
 ) -> Result<ControllingStatus, String> {
     ensure_supported(&manager)?;
+    sessions.clear();
     let status = manager.disconnect();
     emit_status(&app, &status);
     Ok(status)

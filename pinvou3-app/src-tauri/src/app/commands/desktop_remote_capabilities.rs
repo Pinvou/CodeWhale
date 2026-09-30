@@ -8,7 +8,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 use std::time::Instant;
 
-use tauri::State;
+use tauri::{AppHandle, Manager as _};
 
 use crate::features::assistant::skill_materialization::enabled_skills_for;
 use crate::features::codex_acp::AcpPool;
@@ -75,23 +75,27 @@ fn enabled_skill_projection(
 
 #[tauri::command]
 pub async fn desktop_remote_capabilities_snapshot(
-    controlled: State<'_, ControlledDeviceManager>,
-    capabilities: State<'_, CapabilitySnapshotManager>,
-    acp_pool: State<'_, AcpPool>,
+    app: AppHandle,
 ) -> Result<CapabilitySnapshot, String> {
+    build_capability_snapshot(&app).await
+}
+
+/// 构造 B 端能力快照：命令入口（本地 UI）与 wire 派发入口（E2E-04 的
+/// `capability_snapshot_request`）共用同一份实现。
+pub(crate) async fn build_capability_snapshot(app: &AppHandle) -> Result<CapabilitySnapshot, String> {
+    let controlled = app.state::<ControlledDeviceManager>();
     if !controlled.is_supported() {
         return Err(UNSUPPORTED.to_owned());
     }
     let context = controlled
         .live_lease()
         .map_err(|error| error.code.to_owned())?;
-
+    let acp_pool = app.state::<AcpPool>();
     let code_agent_ready = acp_pool
         .status_for_agent("codex")
         .await
         .map(|status| status.installed && status.bridge_ready)
         .unwrap_or(false);
-
     let skill_display_names: HashMap<String, String> = SkillMarketplaceManager::new()
         .list_skills()
         .into_iter()
@@ -105,7 +109,7 @@ pub async fn desktop_remote_capabilities_snapshot(
         code_skills: enabled_skill_projection(ConnectorScope::Code, &skill_display_names),
         workspaces: controlled.workspaces(),
     };
-    capabilities
+    app.state::<CapabilitySnapshotManager>()
         .build(context, source, monotonic_millis())
         .map_err(capability_error)
 }

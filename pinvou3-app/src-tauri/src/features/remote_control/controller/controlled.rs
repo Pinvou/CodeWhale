@@ -96,6 +96,8 @@ pub(crate) struct ControlledLease {
     pub(crate) transport_key_fingerprint: [u8; 32],
     pub(crate) controller_device_name: String,
     pub(crate) connected_at_b: u64,
+    /// 验签 transcript 协商出的能力集合（E2E-04 解密业务帧的准入上下文）。
+    pub(crate) negotiated_capabilities: Vec<String>,
 }
 
 impl std::fmt::Debug for ControlledLease {
@@ -218,6 +220,7 @@ struct Inner {
     device_name: Option<String>,
     pairing: Option<PairingState>,
     lease_context: Option<LeaseContext>,
+    negotiated_capabilities: Vec<String>,
     liveness_epoch_a: Option<String>,
     controller_device_name: Option<String>,
     connected_at_b: Option<u64>,
@@ -245,6 +248,7 @@ impl Default for Inner {
             device_name: None,
             pairing: None,
             lease_context: None,
+            negotiated_capabilities: Vec::new(),
             liveness_epoch_a: None,
             controller_device_name: None,
             connected_at_b: None,
@@ -387,6 +391,7 @@ impl ControlledDeviceManager {
             lease.resume_deadline_b,
         );
         inner.lease_context = Some(lease.context);
+        inner.negotiated_capabilities = lease.negotiated_capabilities;
         inner.liveness_epoch_a = Some(lease.liveness_epoch_a);
         inner.controller_device_name = Some(lease.controller_device_name);
         inner.connected_at_b = Some(lease.connected_at_b);
@@ -746,6 +751,19 @@ impl ControlledDeviceManager {
             )
     }
 
+    /// 活租约上下文 + 协商能力：B 端解密/校验业务帧与构造回包的准入依据。
+    pub(crate) fn live_runtime_context(&self) -> Result<(LeaseContext, Vec<String>)> {
+        let inner = self.inner.lock();
+        if inner.phase != ControlledStatusKind::Connected {
+            return Err(ControlledStateError::new("desktop_remote_not_connected"));
+        }
+        let context = inner
+            .lease_context
+            .clone()
+            .ok_or_else(|| ControlledStateError::new("desktop_remote_not_connected"))?;
+        Ok((context, inner.negotiated_capabilities.clone()))
+    }
+
     pub(crate) fn register_cleanup_sink(&self, sink: Arc<dyn ControlledCleanupSink>) {
         self.cleanup_sinks.lock().push(sink);
     }
@@ -864,6 +882,7 @@ fn clear_sensitive(inner: &mut Inner, now_b: u64, clear_workspaces: bool) {
     inner.resume_gate = None;
     inner.pairing = None;
     inner.lease_context = None;
+    inner.negotiated_capabilities.clear();
     inner.liveness_epoch_a = None;
     inner.controller_device_name = None;
     inner.connected_at_b = None;
@@ -953,6 +972,11 @@ mod tests {
             transport_key_fingerprint: [2; 32],
             controller_device_name: "Controller PC".into(),
             connected_at_b: 3_000,
+            negotiated_capabilities: vec![
+                "encrypted_frames_v1".into(),
+                "pairing_v1".into(),
+                "task_v1".into(),
+            ],
         }
     }
 

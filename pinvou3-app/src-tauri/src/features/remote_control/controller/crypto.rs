@@ -464,7 +464,7 @@ pub(crate) enum FrameDirection {
 }
 
 impl FrameDirection {
-    fn wire(self) -> &'static [u8] {
+    pub(crate) fn wire(self) -> &'static [u8] {
         match self {
             Self::AToB => b"a_to_b",
             Self::BToA => b"b_to_a",
