@@ -216,6 +216,10 @@ const MAX_STORE_RESPONSE_BYTES: u64 = 64 * 1024 * 1024;
 /// 断了」恰恰是这条链路上最常见的瞬时故障（见 script_runner 的
 /// `SCRIPT_FETCH_ATTEMPTS`：真机上就是被一句 `error decoding response body`
 /// 打断过），必须能重试。只返回一个 `AppError` 的话调用方分不出来。
+///
+/// `Debug` 只为测试里的 `expect` / `unwrap` 而派生：生产路径上这两支都被显式
+/// `match` 成用户看得懂的中文，没有谁会把 `{:?}` 打给用户看。
+#[derive(Debug)]
 pub(super) enum CappedReadError {
     /// 超过上限，带上当时用的上限（调用方拼错误文案要用）。
     TooLarge(u64),
