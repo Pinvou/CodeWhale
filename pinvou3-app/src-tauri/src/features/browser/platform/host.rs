@@ -462,10 +462,9 @@ impl<P: PlatformWebviewConfig> DesktopBrowserSurface<P> {
         let mut entries = entries.into_iter();
         // restore.urls was validated non-empty at the top of this function and
         // entries was built one-to-one from it, so the first entry exists.
-        #[allow(clippy::expect_used)]
         let first = entries
             .next()
-            .expect("restore manifest contains at least one tab");
+            .ok_or_else(|| "Browser restore manifest produced no tabs".to_string())?;
         let mut tabs = TabRegistry::from_entry(first);
         for entry in entries {
             tabs.insert(entry)?;
@@ -1086,11 +1085,10 @@ impl<P: PlatformWebviewConfig> DesktopBrowserSurface<P> {
         self.ensure_tab_capacity(session_id)?;
         // The workspace lookup above returned Some under the same &mut self,
         // and nothing since could have removed it.
-        #[allow(clippy::expect_used)]
         let workspace = self
             .workspaces
             .get(session_id)
-            .expect("workspace existence was checked before capacity");
+            .ok_or_else(|| "Browser workspace disappeared during tab creation".to_string())?;
         if !self.platform.is_initialized() {
             return Err("Browser system WebView is not ready".to_string());
         }
@@ -1131,11 +1129,10 @@ impl<P: PlatformWebviewConfig> DesktopBrowserSurface<P> {
 
         // The workspace lookup above returned Some under the same &mut self,
         // and nothing since could have removed it.
-        #[allow(clippy::expect_used)]
         let workspace = self
             .workspaces
             .get_mut(session_id)
-            .expect("workspace was checked above");
+            .ok_or_else(|| "Browser workspace disappeared before tab commit".to_string())?;
         if let Err(error) = workspace.tabs.insert(entry) {
             if let Some(webview) = app.get_webview(&created_label) {
                 let _ = webview.close();
@@ -1289,19 +1286,17 @@ impl<P: PlatformWebviewConfig> DesktopBrowserSurface<P> {
         {
             // The is_some_and check above confirmed the workspace exists, and
             // this method holds &mut self throughout.
-            #[allow(clippy::expect_used)]
             let workspace = self
                 .workspaces
                 .get_mut(session_id)
-                .expect("workspace was checked above");
+                .ok_or_else(|| "Browser workspace disappeared before display".to_string())?;
             workspace.bounds = Some(bounds);
         }
         // Same checked-existence invariant as the block directly above.
-        #[allow(clippy::expect_used)]
         let workspace = self
             .workspaces
             .get(session_id)
-            .expect("workspace was checked above");
+            .ok_or_else(|| "Browser workspace disappeared before display".to_string())?;
         let show_result = show_active_workspace(window.app_handle(), workspace);
         if let Err(error) = show_result {
             if let Some(workspace) = self.workspaces.get_mut(session_id) {
@@ -1877,11 +1872,10 @@ impl<P: PlatformWebviewConfig> DesktopBrowserSurface<P> {
         let control = Arc::clone(&workspace.control);
         // The workspace lookup above returned Some under the same &mut self,
         // and nothing since could have removed it.
-        #[allow(clippy::expect_used)]
         let workspace = self
             .workspaces
             .get_mut(session_id)
-            .expect("workspace was checked above");
+            .ok_or_else(|| "Browser workspace disappeared during tab rollback".to_string())?;
         let committed = control.commit_agent_generation_rollback(expected_revision, || {
             if let Some(webview) = app.and_then(|app| app.get_webview(&entry.label)) {
                 webview
@@ -1912,11 +1906,9 @@ impl<P: PlatformWebviewConfig> DesktopBrowserSurface<P> {
             }
             // The workspace lookup above returned Some under the same &mut
             // self, and the compensation path never removes it.
-            #[allow(clippy::expect_used)]
-            let workspace = self
-                .workspaces
-                .get(session_id)
-                .expect("workspace still exists after compensation commit");
+            let workspace = self.workspaces.get(session_id).ok_or_else(|| {
+                "Browser workspace disappeared after tab rollback commit".to_string()
+            })?;
             emit_control_changed(app, session_id, &workspace.active_tab, control.snapshot());
         }
         Ok(true)
@@ -2200,11 +2192,10 @@ impl<P: PlatformWebviewConfig> DesktopBrowserSurface<P> {
         if workspace_empty {
             // workspace_empty above proved the key exists; this method holds
             // &mut self, so the entry cannot disappear before removal.
-            #[allow(clippy::expect_used)]
             let workspace = self
                 .workspaces
                 .remove(session_id)
-                .expect("empty workspace remains protected by the same mutex during close");
+                .ok_or_else(|| "Browser workspace disappeared during close".to_string())?;
             if let Err(error) = remove_workspace_state_file(&workspace.session_token) {
                 errors.push(error);
             }
