@@ -757,6 +757,12 @@ struct Connection {
 
 impl Connection {
     fn send(&mut self, message: &Value) -> Result<()> {
+        // Known unbounded leg (deliberate, disclosed debt): the write below
+        // is blocking std I/O while the connection mutex is held, so a
+        // server that never drains its stdin can park this leg past every
+        // budget — unlike the read leg, which `request_with_timeout`
+        // bounds. Fixing it needs an async or threaded writer and is
+        // tracked as follow-up scale, not silently assumed safe.
         let stdin = self
             .stdin
             .as_ref()
