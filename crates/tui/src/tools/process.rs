@@ -76,16 +76,27 @@ const DRAIN_CAPTURE_CAP: usize = 16 * 1024 * 1024;
 
 /// Appended in place when the cap stops the capture mid-stream. Reads like
 /// the drain note so a reader looking for truncation evidence finds it in
-/// the tail either way.
+/// the tail either way, and [`drain_truncated`] detects it like one too.
 const DRAIN_CAP_TRUNCATED_NOTE: &[u8] =
     b"\n[codewhale] output capture stopped at the size cap; later output was dropped\n";
 
-/// True when `output` carries the drain-truncation note.
+/// True when `output` carries a truncation note: the drain-grace note
+/// (appended to stderr when the pipes stayed open past the grace) or the
+/// size-cap note (appended to whichever stream hit the cap). A caller that
+/// parses a single stream as its result can thereby detect a cut output
+/// instead of reporting it as a success.
 pub(crate) fn drain_truncated(output: &std::process::Output) -> bool {
-    output
-        .stderr
-        .windows(DRAIN_TRUNCATED_NOTE.len())
-        .any(|window| window == DRAIN_TRUNCATED_NOTE)
+    fn carries(buf: &[u8], note: &[u8]) -> bool {
+        buf.windows(note.len()).any(|window| window == note)
+    }
+    for buf in [&output.stdout, &output.stderr] {
+        for note in [DRAIN_TRUNCATED_NOTE, DRAIN_CAP_TRUNCATED_NOTE] {
+            if carries(buf, note) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// How a bounded run ended. `timed_out` carries the same `output` shape as
@@ -463,6 +474,33 @@ mod tests {
             &vec![b'x'; cap][..],
             "the first cap bytes are retained unchanged"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn drain_truncated_sees_both_notes_on_both_streams() {
+        use std::os::unix::process::ExitStatusExt;
+
+        let output = |stdout: &[u8], stderr: &[u8]| std::process::Output {
+            status: std::process::ExitStatus::from_raw(0),
+            stdout: stdout.to_vec(),
+            stderr: stderr.to_vec(),
+        };
+        // The drain-grace note lands on stderr; the size-cap note lands on
+        // whichever stream hit the cap. A stdout-as-result caller (the
+        // plugin tools) must see truncation evidence in every combination.
+        assert!(drain_truncated(&output(
+            b"partial result",
+            DRAIN_TRUNCATED_NOTE
+        )));
+        assert!(drain_truncated(&output(DRAIN_CAP_TRUNCATED_NOTE, b"")));
+        assert!(drain_truncated(&output(b"", DRAIN_CAP_TRUNCATED_NOTE)));
+        assert!(drain_truncated(&output(
+            b"partial",
+            DRAIN_CAP_TRUNCATED_NOTE
+        )));
+        assert!(!drain_truncated(&output(b"clean", b"clean")));
+        assert!(!drain_truncated(&output(b"", b"")));
     }
 
     #[cfg(unix)]

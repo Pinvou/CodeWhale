@@ -304,14 +304,16 @@ async fn run_plugin_child_raw(
         if let Ok(parsed) = serde_json::from_str::<ToolResult>(&stdout) {
             Ok(parsed)
         } else if super::process::drain_truncated(&output) {
-            // This surface reports stdout only, so the runner's
-            // truncation note on stderr would otherwise vanish: an
+            // This surface reports stdout only, so a truncation note in
+            // the captured tail (a drain that outlived the grace, or the
+            // size cap stopping the capture) would otherwise vanish: an
             // unparseable, possibly cut-off output must not pass as a
             // silent success.
             Err(ToolError::execution_failed(format!(
-                "plugin script stdout did not parse as a tool result and the output \
-                 pipes did not close after the interpreter exited (the captured \
-                 output may be truncated): {stdout}"
+                "plugin script stdout did not parse as a tool result and the \
+                 captured output is truncated (the pipes did not close after \
+                 the interpreter exited, or the size cap stopped the capture): \
+                 {stdout}"
             )))
         } else {
             Ok(ToolResult::success(stdout))
