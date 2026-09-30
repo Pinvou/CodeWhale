@@ -69,7 +69,8 @@ pub(crate) async fn drive_controlling_handshake<P: ControllingRelayPort>(
     mut on_stage: impl FnMut(ControllingStageEvent) -> Result<(), HandshakeError>,
 ) -> Result<ControllingHandshakeOutcome, HandshakeError> {
     let claim = handshake.claim()?;
-    port.send(claim).map_err(|_| HandshakeError::new("controller_claim_failed"))?;
+    port.send(claim)
+        .map_err(|_| HandshakeError::new("controller_claim_failed"))?;
     on_stage(ControllingStageEvent::ClaimSent)?;
 
     // 1) 等 controller_pairing_reserved，产出本端 commit。
@@ -248,13 +249,11 @@ mod tests {
             inbound: VecDeque::from(vec![reserved]),
             outbound: Vec::new(),
         };
-        let error = drive_controlling_handshake(&mut port, &mut handshake, |event| {
-            match event {
-                ControllingStageEvent::Reserved { .. } => {
-                    Err(HandshakeError::new("controller_generation_bind_failed"))
-                }
-                _ => Ok(()),
+        let error = drive_controlling_handshake(&mut port, &mut handshake, |event| match event {
+            ControllingStageEvent::Reserved { .. } => {
+                Err(HandshakeError::new("controller_generation_bind_failed"))
             }
+            _ => Ok(()),
         })
         .await
         .unwrap_err();
@@ -335,12 +334,9 @@ mod tests {
             "resume_token_b64": base64::engine::general_purpose::STANDARD.encode([7_u8; 32]),
             "resume_deadline_ms": "30000",
         });
-        let peer = super::super::controlled_handshake::ControlledHandshake::new(
-            &reserved,
-            b_keys,
-            &trust,
-        )
-        .unwrap();
+        let peer =
+            super::super::controlled_handshake::ControlledHandshake::new(&reserved, b_keys, &trust)
+                .unwrap();
         let mut a = ControllingHandshake::new(
             reserved["request_id"].as_str().unwrap(),
             "claim-0001",

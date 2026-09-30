@@ -12,11 +12,11 @@ use tauri::State;
 
 use crate::features::remote_control::controller::controlled::ControlledDeviceManager;
 use crate::features::remote_control::controller::task::RemoteTaskService;
+use crate::features::remote_control::controller::transfer::TransferRegistry;
 use crate::features::remote_control::controller::transfer::download::{
     ArtifactDescriptor, ArtifactDownloadBegin, ArtifactDownloads, ArtifactIndex, ArtifactPreview,
     DownloadChunk, FileArtifactSource,
 };
-use crate::features::remote_control::controller::transfer::TransferRegistry;
 
 const UNSUPPORTED: &str = "desktop_remote_control_unsupported";
 
@@ -38,10 +38,7 @@ pub(crate) struct DesktopRemoteArtifactRuntime {
 }
 
 impl DesktopRemoteArtifactRuntime {
-    pub(crate) fn new(
-        downloads: ArtifactDownloads,
-        tasks: Arc<RemoteTaskService>,
-    ) -> Arc<Self> {
+    pub(crate) fn new(downloads: ArtifactDownloads, tasks: Arc<RemoteTaskService>) -> Arc<Self> {
         Arc::new(Self { downloads, tasks })
     }
 
@@ -109,17 +106,14 @@ pub(crate) fn index_artifact(
     sha256: &str,
     path: std::path::PathBuf,
 ) -> Result<ArtifactDescriptor, String> {
-    runtime
-        .downloads
-        .index()
-        .register(
-            session_id,
-            artifact_id,
-            display_name,
-            mime_type,
-            sha256,
-            Arc::new(FileArtifactSource::new(path)),
-        )
+    runtime.downloads.index().register(
+        session_id,
+        artifact_id,
+        display_name,
+        mime_type,
+        sha256,
+        Arc::new(FileArtifactSource::new(path)),
+    )
 }
 
 #[tauri::command]
@@ -142,10 +136,7 @@ pub fn desktop_remote_artifact_preview(
 ) -> Result<ArtifactPreview, String> {
     ensure_supported(&controlled)?;
     runtime.ensure_session(&session_id)?;
-    runtime
-        .downloads
-        .index()
-        .preview(&session_id, &artifact_id)
+    runtime.downloads.index().preview(&session_id, &artifact_id)
 }
 
 #[tauri::command]
@@ -161,9 +152,13 @@ pub fn desktop_remote_artifact_download_begin(
     let live = controlled
         .live_lease()
         .map_err(|error| error.code.to_owned())?;
-    runtime
-        .downloads
-        .begin(&live, &session_id, &task_id, &artifact_id, monotonic_millis())
+    runtime.downloads.begin(
+        &live,
+        &session_id,
+        &task_id,
+        &artifact_id,
+        monotonic_millis(),
+    )
 }
 
 #[tauri::command]

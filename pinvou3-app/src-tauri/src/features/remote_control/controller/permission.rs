@@ -286,12 +286,10 @@ impl PermissionAuthority {
             ..request
         };
         let mut pending = self.pending.lock();
-        if pending
-            .values()
-            .any(|existing| {
-                existing.binding.task_id == binding.task_id && existing.state == PermissionState::Pending
-            })
-        {
+        if pending.values().any(|existing| {
+            existing.binding.task_id == binding.task_id
+                && existing.state == PermissionState::Pending
+        }) {
             return Err(error("permission_task_busy"));
         }
         if pending.len() >= MAX_PENDING_PERMISSIONS {
@@ -387,19 +385,21 @@ impl PermissionAuthority {
             entry.decision = Some(PermissionDecision::Deny);
             entry.resolved_at_ms = Some(now_b);
             entry.resolved_reason = Some("expired".to_owned());
-            return Ok(DispatchCommit::Rejected { code: "permission_expired" });
+            return Ok(DispatchCommit::Rejected {
+                code: "permission_expired",
+            });
         }
         match entry.state {
             PermissionState::AllowedAwaitingDispatch => {
                 entry.dispatch_state = DispatchState::Dispatched;
                 Ok(DispatchCommit::Committed)
             }
-            PermissionState::Denied => {
-                Ok(DispatchCommit::Rejected { code: "permission_denied" })
-            }
-            PermissionState::Expired => {
-                Ok(DispatchCommit::Rejected { code: "permission_expired" })
-            }
+            PermissionState::Denied => Ok(DispatchCommit::Rejected {
+                code: "permission_denied",
+            }),
+            PermissionState::Expired => Ok(DispatchCommit::Rejected {
+                code: "permission_expired",
+            }),
             PermissionState::Pending => Ok(DispatchCommit::Rejected {
                 code: "permission_not_decided",
             }),
@@ -422,17 +422,8 @@ impl PermissionAuthority {
 
     /// B stop / refresh / disconnect / task cancel: deny everything pending for
     /// the task. Returns how many requests changed state.
-    pub(crate) fn deny_all_for_task(
-        &self,
-        task_id: &str,
-        reason: &str,
-        now_b: u64,
-    ) -> usize {
-        self.deny_where(
-            |entry| entry.binding.task_id == task_id,
-            reason,
-            now_b,
-        )
+    pub(crate) fn deny_all_for_task(&self, task_id: &str, reason: &str, now_b: u64) -> usize {
+        self.deny_where(|entry| entry.binding.task_id == task_id, reason, now_b)
     }
 
     pub(crate) fn deny_all_for_connection(
@@ -478,10 +469,7 @@ impl PermissionAuthority {
             .filter(|entry| entry.binding.task_id == task_id)
             .map(Self::view_locked)
             .collect();
-        views.sort_by(|left, right| {
-            left.permission_request_id
-                .cmp(&right.permission_request_id)
-        });
+        views.sort_by(|left, right| left.permission_request_id.cmp(&right.permission_request_id));
         views
     }
 
@@ -589,7 +577,10 @@ fn sanitize_scope(scope: &str) -> String {
 
 fn sanitize_token(token: &str) -> String {
     let trimmed = token.trim_matches(|ch: char| {
-        matches!(ch, '\'' | '"' | '`' | ',' | ';' | '(' | ')' | '[' | ']' | '@')
+        matches!(
+            ch,
+            '\'' | '"' | '`' | ',' | ';' | '(' | ')' | '[' | ']' | '@'
+        )
     });
     let lowered = trimmed.to_ascii_lowercase();
     if lowered.starts_with("sk-")
@@ -702,10 +693,7 @@ mod tests {
                 .code,
             "permission_authority_invalid"
         );
-        assert_eq!(
-            authority.view("permission-0001").unwrap().state,
-            "pending"
-        );
+        assert_eq!(authority.view("permission-0001").unwrap().state, "pending");
     }
 
     #[test]
@@ -790,9 +778,7 @@ mod tests {
         let authority = PermissionAuthority::default();
         register(&authority, "permission-0001", 1_000);
         assert_eq!(
-            authority
-                .commit_dispatch("permission-0001", 1_100)
-                .unwrap(),
+            authority.commit_dispatch("permission-0001", 1_100).unwrap(),
             DispatchCommit::Rejected {
                 code: "permission_not_decided"
             }
@@ -808,9 +794,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(
-            authority
-                .commit_dispatch("permission-0001", 1_300)
-                .unwrap(),
+            authority.commit_dispatch("permission-0001", 1_300).unwrap(),
             DispatchCommit::Committed
         );
         assert_eq!(
@@ -834,9 +818,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(
-            authority
-                .commit_dispatch("permission-0001", 1_200)
-                .unwrap(),
+            authority.commit_dispatch("permission-0001", 1_200).unwrap(),
             DispatchCommit::Rejected {
                 code: "permission_denied"
             }
@@ -1047,9 +1029,7 @@ mod tests {
         assert_eq!(scope.deny_pending_for_task("task-0001"), 0);
         assert_eq!(authority.view("permission-0001").unwrap().state, "denied");
         assert_eq!(
-            authority
-                .commit_dispatch("permission-0001", 1_200)
-                .unwrap(),
+            authority.commit_dispatch("permission-0001", 1_200).unwrap(),
             DispatchCommit::Rejected {
                 code: "permission_denied"
             }

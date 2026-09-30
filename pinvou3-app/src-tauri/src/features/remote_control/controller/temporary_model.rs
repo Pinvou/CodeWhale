@@ -11,13 +11,13 @@ use std::net::IpAddr;
 use std::sync::Arc;
 
 use parking_lot::Mutex;
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 
 use super::crypto::SensitiveString;
-use super::protocol::{validate_controller_base_url, LeaseContext};
+use super::protocol::{LeaseContext, validate_controller_base_url};
 use super::task::RemoteTaskModelScope;
 use crate::platform::prefs::{
-    ImageCapabilityOverride, ModelPreset, SavedModel, MODEL_PROVIDER_KIND_CODING_PLAN,
+    ImageCapabilityOverride, MODEL_PROVIDER_KIND_CODING_PLAN, ModelPreset, SavedModel,
 };
 
 pub(crate) const PACKAGE_SCHEMA: &str = "temporary_model_package/v1";
@@ -814,7 +814,10 @@ impl TemporaryModelStore {
             .filter(|package| package.binding.task_id == task_id)
             .ok_or_else(|| error("model_package_missing"))?;
         package.validate_for_task(live, task_id)?;
-        Ok(use_route(&package.primary, package.vision_fallback.as_ref()))
+        Ok(use_route(
+            &package.primary,
+            package.vision_fallback.as_ref(),
+        ))
     }
 
     pub(crate) fn installed_at_ms(&self) -> Option<u64> {
@@ -1082,7 +1085,9 @@ mod tests {
     fn package_size_guard_rejects_oversized_payloads() {
         assert!(enforce_package_size(MAX_PACKAGE_BYTES).is_ok());
         assert_eq!(
-            enforce_package_size(MAX_PACKAGE_BYTES + 1).unwrap_err().code,
+            enforce_package_size(MAX_PACKAGE_BYTES + 1)
+                .unwrap_err()
+                .code,
             "model_package_too_large"
         );
     }
@@ -1135,11 +1140,7 @@ mod tests {
     #[test]
     fn vision_fallback_is_one_layer_with_its_own_credential() {
         let mut package = package("sk-primary");
-        package.vision_fallback = Some(route(
-            "https://api.openai.com/v1",
-            "openai",
-            "sk-vision",
-        ));
+        package.vision_fallback = Some(route("https://api.openai.com/v1", "openai", "sk-vision"));
         package.validate().unwrap();
         let wire = package.to_wire_value();
         assert_eq!(wire["primary_credential"]["secret"], json!("sk-primary"));
@@ -1185,7 +1186,10 @@ mod tests {
         assert_eq!(store.active_task().as_deref(), Some("task-0001"));
         assert!(store.redacted_route("task-0001", &lease()).is_ok());
         assert_eq!(
-            store.redacted_route("task-0002", &lease()).unwrap_err().code,
+            store
+                .redacted_route("task-0002", &lease())
+                .unwrap_err()
+                .code,
             "model_package_missing"
         );
         let copied = store
@@ -1209,7 +1213,10 @@ mod tests {
         assert!(!store.clear_task("task-0001"));
         assert!(store.is_empty());
         assert_eq!(
-            store.redacted_route("task-0001", &lease()).unwrap_err().code,
+            store
+                .redacted_route("task-0001", &lease())
+                .unwrap_err()
+                .code,
             "model_package_missing"
         );
     }
