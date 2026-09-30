@@ -40,9 +40,9 @@ impl ControlledCleanupSink for DesktopControlledCleanup {
         if !(scope.remote_tasks || scope.pending_permissions || scope.temporary_models) {
             return;
         }
-        let Some(runtime) =
-            self.app
-                .try_state::<Arc<super::desktop_remote_task::DesktopRemoteTaskRuntime>>()
+        let Some(runtime) = self
+            .app
+            .try_state::<Arc<super::desktop_remote_task::DesktopRemoteTaskRuntime>>()
         else {
             // 任务运行时未装配（例如单元测试环境）：本代没有任何远端任务需要清理。
             return;
@@ -72,7 +72,8 @@ impl ControlledBusinessPort for DesktopControlledBusiness {
         if let Ok(current) = capabilities.validate(
             &known_revision.to_string(),
             lease,
-            crate::features::remote_control::controller::relay_runtime::controlled_monotonic_millis(),
+            crate::features::remote_control::controller::relay_runtime::controlled_monotonic_millis(
+            ),
         ) {
             if known_revision > 0 {
                 return Ok(capabilities.wire_capability_snapshot(&current, request_id));
@@ -108,8 +109,9 @@ impl ControlledBusinessPort for DesktopControlledBusiness {
         journal_epoch: &str,
         after_sequence: u64,
     ) -> Result<Vec<(String, Value)>, String> {
-        let history =
-            self.app.state::<std::sync::Arc<super::desktop_remote_history::DesktopRemoteHistoryRuntime>>();
+        let history = self
+            .app
+            .state::<std::sync::Arc<super::desktop_remote_history::DesktopRemoteHistoryRuntime>>();
         Ok(
             match history.journal().replay_after(journal_epoch, after_sequence) {
                 crate::features::remote_control::controller::journal::ReplayOutcome::Events(events) => {
@@ -142,8 +144,9 @@ impl ControlledBusinessPort for DesktopControlledBusiness {
         session_ref: &str,
         request_id: &str,
     ) -> Result<Value, String> {
-        let history =
-            self.app.state::<std::sync::Arc<super::desktop_remote_history::DesktopRemoteHistoryRuntime>>();
+        let history = self
+            .app
+            .state::<std::sync::Arc<super::desktop_remote_history::DesktopRemoteHistoryRuntime>>();
         let snapshot = history.journal().snapshot();
         build_session_snapshot_payload(lease, session_ref, request_id, &snapshot)
     }

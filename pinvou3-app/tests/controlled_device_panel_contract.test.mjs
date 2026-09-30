@@ -4,7 +4,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
-import { dict } from '../src/shared/i18n-all.js';
+import { dict } from './helpers/i18n-all.js';
 
 const source = (relative) => readFileSync(new URL(`../src/${relative}`, import.meta.url), 'utf8');
 const panel = source('features/remote-control/ControlledDevicePanel.jsx');

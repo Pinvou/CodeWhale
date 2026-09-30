@@ -6,16 +6,16 @@
 //! 且半握手不会产生任何可安装的租约材料。
 
 use base64::Engine as _;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use zeroize::Zeroize;
 
 use super::crypto::{
-    authenticate_relay_transcript, AuthenticatedRelayTrustConfig, ControllerRole, FinishedReceiver,
-    FinishedSender, HandshakeBinding, HandshakeKeyPair, HandshakePublicKey, ReceiptSecret,
-    SessionKeys,
+    AuthenticatedRelayTrustConfig, ControllerRole, FinishedReceiver, FinishedSender,
+    HandshakeBinding, HandshakeKeyPair, HandshakePublicKey, ReceiptSecret, SessionKeys,
+    authenticate_relay_transcript,
 };
 use super::protocol::{
-    parse_controller_pairing_transcript, validate_controller_message_json, SenderRole,
+    SenderRole, parse_controller_pairing_transcript, validate_controller_message_json,
 };
 
 /// A 端 claim 声明的能力集合（与冻结协议常量保持一致的最小集）。
@@ -85,10 +85,7 @@ impl std::fmt::Debug for JoinedLease {
             .field("controller_lease_id", &self.controller_lease_id)
             .field("lease_epoch", &self.lease_epoch)
             .field("relay_epoch", &self.relay_epoch)
-            .field(
-                "remote_control_generation",
-                &self.remote_control_generation,
-            )
+            .field("remote_control_generation", &self.remote_control_generation)
             .field("liveness_epoch_a", &self.liveness_epoch_a)
             .field("resume_deadline_ms", &self.resume_deadline_ms)
             .field("resume_token", &"[REDACTED]")
@@ -437,8 +434,9 @@ impl ControllingHandshake {
         kind: &'static str,
         role: &'static str,
     ) -> Result<()> {
-        let validated = validate_controller_message_json(&message.to_string(), SenderRole::ControlledB)
-            .map_err(|_| HandshakeError::new("controller_handshake_rejected"))?;
+        let validated =
+            validate_controller_message_json(&message.to_string(), SenderRole::ControlledB)
+                .map_err(|_| HandshakeError::new("controller_handshake_rejected"))?;
         if validated.get("type").and_then(Value::as_str) != Some(kind)
             || validated.get("sender_role").and_then(Value::as_str) != Some(role)
         {
@@ -479,7 +477,9 @@ impl ControllingHandshake {
 }
 
 fn decode_public_key(encoded: &str) -> Option<HandshakePublicKey> {
-    let raw = base64::engine::general_purpose::STANDARD.decode(encoded.as_bytes()).ok()?;
+    let raw = base64::engine::general_purpose::STANDARD
+        .decode(encoded.as_bytes())
+        .ok()?;
     let bytes: [u8; 32] = raw.try_into().ok()?;
     Some(HandshakePublicKey::from_bytes(bytes))
 }
@@ -531,9 +531,8 @@ mod tests {
         let public_key =
             base64::engine::general_purpose::STANDARD.encode(key_pair.public_key().as_ref());
         let key_id = "relay-key-e2e".to_owned();
-        let trust =
-            AuthenticatedRelayTrustConfig::from_pinned_keys([(key_id.clone(), public_key)])
-                .unwrap();
+        let trust = AuthenticatedRelayTrustConfig::from_pinned_keys([(key_id.clone(), public_key)])
+            .unwrap();
         SignedRelay {
             trust,
             key_id,
@@ -543,11 +542,7 @@ mod tests {
 
     /// 以冻结 fixture 的 transcript 为模板，替换双方握手公钥并用真实
     /// Ed25519 密钥重新签名，使测试能扮演 B 完成后续收据阶段。
-    fn signed_reservation(
-        relay: &SignedRelay,
-        a_public_b64: &str,
-        b_public_b64: &str,
-    ) -> Value {
+    fn signed_reservation(relay: &SignedRelay, a_public_b64: &str, b_public_b64: &str) -> Value {
         let fixture = fixture();
         let mut message =
             fixture["lease_install_vector"]["verification_input"]["reserved_message"].clone();
@@ -559,8 +554,10 @@ mod tests {
         message["transcript"] = transcript;
         message["transcript_hash"] = json!(transcript_hash);
         message["relay_signing_key_id"] = json!(relay.key_id);
-        message["relay_signature_b64"] = json!(base64::engine::general_purpose::STANDARD
-            .encode(relay.key_pair.sign(&preimage).as_ref()));
+        message["relay_signature_b64"] = json!(
+            base64::engine::general_purpose::STANDARD
+                .encode(relay.key_pair.sign(&preimage).as_ref())
+        );
         message
     }
 
@@ -581,16 +578,14 @@ mod tests {
             "../../../../../../remote-control-relay/test/fixtures/controller-protocol-v1.json"
         ))
         .unwrap();
-        let key = fixture["untrusted_authentication_inputs"][1]["value"]["keys"][0]
-            ["public_key_b64"]
-            .as_str()
-            .unwrap()
-            .to_owned();
-        let trust = AuthenticatedRelayTrustConfig::from_pinned_keys([(
-            "relay-key-test-1".to_owned(),
-            key,
-        )])
-        .unwrap();
+        let key =
+            fixture["untrusted_authentication_inputs"][1]["value"]["keys"][0]["public_key_b64"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+        let trust =
+            AuthenticatedRelayTrustConfig::from_pinned_keys([("relay-key-test-1".to_owned(), key)])
+                .unwrap();
         (
             trust,
             fixture["lease_install_vector"]["verification_input"]["reserved_message"].clone(),
@@ -637,7 +632,10 @@ mod tests {
         let (trust, reserved) = trust_fixture();
         let mut handshake = new_handshake(trust);
         assert_eq!(
-            handshake.accept_peer_commitment(&reserved).unwrap_err().code,
+            handshake
+                .accept_peer_commitment(&reserved)
+                .unwrap_err()
+                .code,
             "controller_handshake_stage_invalid"
         );
         assert_eq!(
@@ -710,10 +708,9 @@ mod tests {
         let b_keys = HandshakeKeyPair::generate().unwrap();
         let a_public_bytes = a_keys.public_key().to_bytes();
         let b_public_bytes = b_keys.public_key().to_bytes();
-        let encoded = |bytes: [u8; 32]| {
-            base64::engine::general_purpose::STANDARD.encode(bytes)
-        };
-        let reserved = signed_reservation(&relay, &encoded(a_public_bytes), &encoded(b_public_bytes));
+        let encoded = |bytes: [u8; 32]| base64::engine::general_purpose::STANDARD.encode(bytes);
+        let reserved =
+            signed_reservation(&relay, &encoded(a_public_bytes), &encoded(b_public_bytes));
         let request_id = field(&reserved, "request_id");
 
         let mut a = ControllingHandshake::new(
@@ -739,8 +736,7 @@ mod tests {
             .unwrap();
         let (b_sender, b_receiver) = b_session.finished_pair(ControllerRole::B);
         let b_receipt = ReceiptSecret::generate().unwrap();
-        let b_commitment =
-            hex_lower(&b_receipt.commitment(&binding, ControllerRole::B).unwrap());
+        let b_commitment = hex_lower(&b_receipt.commitment(&binding, ControllerRole::B).unwrap());
         let envelope = |kind: &str, extra: Value| {
             let mut value = json!({
                 "v": 1,

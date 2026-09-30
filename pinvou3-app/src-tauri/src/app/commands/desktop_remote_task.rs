@@ -16,12 +16,12 @@ use crate::features::assistant::engine_pool::EnginePool;
 use crate::features::assistant::remote_turn::{
     EnginePoolChatEngine, EnginePoolChatTurnPort, StoreChatTranscript,
 };
-use crate::features::codex_acp::remote_turn::{AcpPoolCodeTurnPort, RemoteWorkspaceAuthorizations};
 use crate::features::codex_acp::AcpPool;
+use crate::features::codex_acp::remote_turn::{AcpPoolCodeTurnPort, RemoteWorkspaceAuthorizations};
 use crate::features::remote_control::controller::capabilities::CapabilitySnapshotManager;
 use crate::features::remote_control::controller::controlled::ControlledDeviceManager;
 use crate::features::remote_control::controller::protocol::{
-    validate_controller_runtime_payload_json, LeaseContext, RuntimeValidationContext, SenderRole,
+    LeaseContext, RuntimeValidationContext, SenderRole, validate_controller_runtime_payload_json,
 };
 use crate::features::remote_control::controller::task::{
     AdmissionOutcome, CancelOutcome, ChatTurnExecutor, CodeTurnExecutor, ControllerTaskEventSink,
@@ -109,7 +109,10 @@ impl ControllerTaskEventSink for TaskEventBridge {
             .app
             .state::<Arc<super::desktop_remote_history::DesktopRemoteHistoryRuntime>>();
         let event_id = format!("journal-{}", uuid::Uuid::new_v4().simple());
-        if let Ok(event) = history.journal().append(&event_id, kind, session_id, task_id, payload) {
+        if let Ok(event) = history
+            .journal()
+            .append(&event_id, kind, session_id, task_id, payload)
+        {
             super::desktop_remote_history::publish_authoritative_event(&self.app, &event);
         }
     }
@@ -135,7 +138,9 @@ impl DesktopRemoteTaskRuntime {
         pool: EnginePool,
         acp_pool: AcpPool,
     ) -> Arc<Self> {
-        let service = Arc::new(RemoteTaskService::new(Arc::new(RemoteTaskLedger::in_memory())));
+        let service = Arc::new(RemoteTaskService::new(Arc::new(
+            RemoteTaskLedger::in_memory(),
+        )));
         let authorizations = Arc::new(RemoteWorkspaceAuthorizations::default());
         service.set_session_provisioner(Arc::new(DesktopRemoteSessionProvisioner::new(
             store.clone(),
@@ -143,10 +148,12 @@ impl DesktopRemoteTaskRuntime {
         )));
         service.register_executor(
             TASK_MODE_CHAT,
-            Arc::new(ChatTurnExecutor::new(Arc::new(EnginePoolChatTurnPort::new(
-                Arc::new(EnginePoolChatEngine::new(Arc::new(pool))),
-                Arc::new(StoreChatTranscript::new(store)),
-            )))),
+            Arc::new(ChatTurnExecutor::new(Arc::new(
+                EnginePoolChatTurnPort::new(
+                    Arc::new(EnginePoolChatEngine::new(Arc::new(pool))),
+                    Arc::new(StoreChatTranscript::new(store)),
+                ),
+            ))),
         );
         service.register_executor(
             TASK_MODE_CODE,
@@ -437,9 +444,8 @@ fn admit_and_dispatch(
             let status = service
                 .status_payload(&task_id)
                 .map_err(|error| error.code.to_owned())?;
-            let events: Arc<dyn ControllerTaskEventSink> = Arc::new(TaskEventBridge {
-                app: app.clone(),
-            });
+            let events: Arc<dyn ControllerTaskEventSink> =
+                Arc::new(TaskEventBridge { app: app.clone() });
             let dispatch_service = Arc::clone(&service);
             tauri::async_runtime::spawn(async move {
                 if let Err(error) = dispatch_service
@@ -521,13 +527,8 @@ pub fn desktop_remote_task_interrupt_all(
 ) -> Result<Vec<String>, String> {
     ensure_supported(&controlled)?;
     let reason = sanitized_reason(&reason);
-    let records = runtime
-        .service()
-        .interrupt_all(&reason, monotonic_millis());
-    Ok(records
-        .into_iter()
-        .map(|record| record.task_id)
-        .collect())
+    let records = runtime.service().interrupt_all(&reason, monotonic_millis());
+    Ok(records.into_iter().map(|record| record.task_id).collect())
 }
 
 #[cfg(test)]

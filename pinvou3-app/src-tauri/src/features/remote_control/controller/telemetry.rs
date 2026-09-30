@@ -9,7 +9,7 @@
 use std::collections::HashMap;
 
 use parking_lot::Mutex;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 pub(crate) const STAGES: &[&str] = &[
     "register",
@@ -395,7 +395,10 @@ mod tests {
             .unwrap();
         assert_eq!(
             telemetry
-                .record(&json!({ "stage": "task", "outcome": "ok" }), Some("event-1"))
+                .record(
+                    &json!({ "stage": "task", "outcome": "ok" }),
+                    Some("event-1")
+                )
                 .unwrap_err()
                 .code,
             "controller_telemetry_duplicate"
@@ -412,11 +415,15 @@ mod tests {
     #[test]
     fn sentinel_scanner_catches_keys_tokens_and_envelopes() {
         assert!(find_sensitive_sentinels("api key sk-live-1234567890 leaked").len() >= 2);
-        assert!(find_sensitive_sentinels("Authorization: Bearer abc")
-            .contains(&"Authorization:".to_owned()));
+        assert!(
+            find_sensitive_sentinels("Authorization: Bearer abc")
+                .contains(&"Authorization:".to_owned())
+        );
         assert!(find_sensitive_sentinels("vault://secret").contains(&"vault://".to_owned()));
-        assert!(find_sensitive_sentinels("-----BEGIN PRIVATE KEY-----")
-            .contains(&"-----BEGIN".to_owned()));
+        assert!(
+            find_sensitive_sentinels("-----BEGIN PRIVATE KEY-----")
+                .contains(&"-----BEGIN".to_owned())
+        );
         assert!(find_sensitive_sentinels("harmless").is_empty());
         assert!(find_sensitive_sentinels("sk-short").is_empty());
     }
