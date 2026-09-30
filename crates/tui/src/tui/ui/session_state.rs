@@ -669,6 +669,12 @@ enum WorkspaceSwitchReceipt {
     Degraded(String),
     /// The swap is not durably recorded (save failed, or the snapshot itself
     /// could not be built). The user must see this as a failure.
+    /// Accuracy caveat (round-24 P3): the save-failed/actor-QUEUED arm also
+    /// lands here, and that arm DOES durably converge — the actor holds the
+    /// post-switch snapshot and its latest-wins coalescing drops any stale
+    /// pre-switch write; it is classified as Failure (not Degraded) because
+    /// the direct disk authority missed, so the restart-order guarantee
+    /// depends on the actor alone until the next persist.
     Failure(String),
 }
 
@@ -771,15 +777,23 @@ pub(crate) async fn switch_workspace(
     let re_based = match codewhale_core::validate_workspace_roots(&workspace, &carried) {
         Ok(roots) => roots,
         Err(err) => {
+            // Round-24 P3 copy fix: the old guidance ("re-declare the roots
+            // after switching") named a producer the TUI does not have —
+            // no command attaches or detaches roots — and the switch was
+            // refused, so there is nothing to re-declare "after". The
+            // actionable exits are a new session in that directory or
+            // editing the session's root set outside the TUI.
             let message = format!(
-                "Cannot switch workspace to {}: the carried root set would widen past the new directory ({err:#}). Re-declare the roots after switching.",
-                workspace.display()
+                "Cannot switch workspace to {}: the carried root set would widen past the new directory ({}). The switch is refused; start a new session in that directory, or remove the widening roots from this session's saved root set outside the TUI.",
+                workspace.display(),
+                err
             );
             app.status_message = Some(message.clone());
             app.add_message(HistoryCell::System { content: message });
             return;
         }
     };
+    let carried_additional = re_based.len() > 1;
     app.workspace = workspace.clone();
     app.workspace_roots = re_based;
 
@@ -814,6 +828,18 @@ pub(crate) async fn switch_workspace(
     app.add_message(HistoryCell::System {
         content: format!("Switched workspace to {}", workspace.display()),
     });
+    // Round-24 P3 display fix: a switch that RE-BASED surviving roots
+    // changes what the sandbox governs, exactly like the /resume and /load
+    // entries that already disclose the set — without this notice the
+    // carried roots silently changed their anchor (or were dropped by the
+    // re-normalization) with no in-band disclosure.
+    if carried_additional {
+        if let Some(notice) =
+            workspace_roots_notice(app.ui_locale, &workspace, &app.workspace_roots)
+        {
+            app.add_message(HistoryCell::System { content: notice });
+        }
+    }
     // The receipt rides the closing line instead of being assigned earlier:
     // an unconditional "Workspace: X" assignment after the persist block used
     // to clobber every failure receipt it exists to disclose (round-14 M-1).

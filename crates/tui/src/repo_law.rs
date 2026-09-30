@@ -331,8 +331,12 @@ fn push_normalized(
             ".." => {
                 // A `..` that pops above the root escapes the workspace; keep
                 // an explicit marker so this spelling tail can never match a
-                // workspace-relative glob. Where the write actually lands is
-                // judged separately below from the clamped execution candidate.
+                // workspace-ANCHORED glob (one whose first segment is
+                // literal). A `**`-leading glob can still match the marker
+                // tail — recorded for accuracy (round-24 P3); those globs
+                // stay fail-closed through the landing-path leg below.
+                // Where the write actually lands is judged separately below
+                // from the clamped execution candidate.
                 if parts.pop().is_none() {
                     parts.push("..".to_string());
                 }

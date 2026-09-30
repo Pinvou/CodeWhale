@@ -831,6 +831,15 @@ impl StateStore {
     /// and `rollout_path` are plain `excluded.*` passthrough (a stale cache
     /// could even resurrect a concurrently archived thread). A narrow UPDATE
     /// writes exactly the columns the override owns and nothing else.
+    ///
+    /// Scope caveat (recorded for accuracy, round-24 P3): "the columns the
+    /// override owns" is over-broad for the roots-only leg in one direction
+    /// — `cwd` is written UNCONDITIONALLY, including when the caller only
+    /// meant to refresh the root set, so a concurrently moved cwd the cache
+    /// never saw is still reverted by that spelling. The typed caller API
+    /// always passes the pair. A row deleted concurrently with this UPDATE
+    /// fails loud instead of a silent no-op success (round-24 P3): the
+    /// writeback's ownership claim only holds while the row exists.
     pub fn update_thread_root_set(
         &self,
         id: &str,
@@ -839,16 +848,22 @@ impl StateStore {
         updated_at: i64,
     ) -> Result<()> {
         let conn = self.conn()?;
-        conn.execute(
-            "UPDATE threads SET cwd = ?2, workspace_roots = ?3, updated_at = ?4 WHERE id = ?1",
-            params![
-                id,
-                cwd.display().to_string(),
-                workspace_roots_to_json(workspace_roots),
-                updated_at,
-            ],
-        )
-        .context("failed to update thread root set")?;
+        let rows = conn
+            .execute(
+                "UPDATE threads SET cwd = ?2, workspace_roots = ?3, updated_at = ?4 WHERE id = ?1",
+                params![
+                    id,
+                    cwd.display().to_string(),
+                    workspace_roots_to_json(workspace_roots),
+                    updated_at,
+                ],
+            )
+            .context("failed to update thread root set")?;
+        if rows == 0 {
+            return Err(anyhow::anyhow!(
+                "thread '{id}' vanished before the root-set writeback landed"
+            ));
+        }
         Ok(())
     }
 
@@ -2555,6 +2570,27 @@ mod tests {
         assert_eq!(row.preview, "concurrent preview");
         assert_eq!(row.status, seeded.status);
         assert_eq!(row.created_at, seeded.created_at);
+    }
+
+    #[test]
+    fn update_thread_root_set_fails_loud_when_the_row_vanished() {
+        // Round-24 P3 (behavior residual closed): a concurrently deleted row
+        // used to turn the cached-resume writeback into a silent no-op
+        // success — the caller claimed ownership of columns it never wrote.
+        // Zero rows affected must surface as an error instead.
+        let store = temp_state_store("root-set-vanished");
+        let err = store
+            .update_thread_root_set(
+                "ghost-thread",
+                Path::new("/repo/main"),
+                &[PathBuf::from("/repo/main")],
+                9_999,
+            )
+            .expect_err("an absent row must not report success");
+        assert!(
+            err.to_string().contains("vanished"),
+            "unexpected error: {err:#}"
+        );
     }
 
     #[test]
