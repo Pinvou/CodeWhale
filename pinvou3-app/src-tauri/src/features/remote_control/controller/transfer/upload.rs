@@ -412,18 +412,23 @@ mod tests {
         uploads
             .accept_chunk(&begin.handle_id, 0, &data[..4], 1_100)
             .unwrap();
-        assert_eq!(uploads.registry.connection_bytes("connection-0001"), data.len() as u64);
+        assert_eq!(
+            uploads.registry.connection_bytes("connection-0001"),
+            data.len() as u64
+        );
         // Still inside the TTL.
         assert_eq!(uploads.expire(1_400), 0);
         // Past the TTL: accounting released and staging aborted, exactly once.
         assert_eq!(uploads.expire(1_600), 1);
         assert_eq!(uploads.registry.connection_bytes("connection-0001"), 0);
-        assert!(staging
-            .calls
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|call| call.starts_with("abort:")));
+        assert!(
+            staging
+                .calls
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|call| call.starts_with("abort:"))
+        );
         assert_eq!(uploads.expire(1_700), 0);
         assert_eq!(
             uploads

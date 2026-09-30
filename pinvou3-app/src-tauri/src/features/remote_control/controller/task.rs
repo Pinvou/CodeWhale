@@ -1236,7 +1236,9 @@ impl RemoteTaskService {
         let task_id = ticket.record.task_id.clone();
         let running = self.ledger.begin_dispatch(&task_id, now_b)?;
         self.publish(&running);
-        self.cancel_tokens.lock().insert(task_id.clone(), cancel.clone());
+        self.cancel_tokens
+            .lock()
+            .insert(task_id.clone(), cancel.clone());
         let executor = self.executors.lock().get(&running.mode).cloned();
         let Some(executor) = executor else {
             self.cancel_tokens.lock().remove(&task_id);
