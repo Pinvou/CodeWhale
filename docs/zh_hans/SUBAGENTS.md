@@ -220,8 +220,9 @@ max_admitted = 12
 2. 操作者默认 `[subagents] default_max_steps` 和 `[subagents] default_wall_time_secs`，
 3. Fleet 角色默认：所有角色的模型回合数**不设上限**（`WorkerRuntimeProfile::default_max_steps` 返回零），墙钟默认 **1800 秒**。
 
-操作者默认已配置 `default_max_steps` 时，省略或为零的 `max_steps` 仍不设上限；正值钳制到
-2000 回合的硬上限。墙钟值钳制到 1..=86400 秒。
+显式为零的 `max_steps` 即使在操作者默认已配置时仍不设上限；省略 `max_steps`
+时落到操作者默认（未配置则为角色默认），正值钳制到 2000 回合的硬上限。
+墙钟值钳制到 1..=86400 秒。
 
 ## Token 预算调节器
 

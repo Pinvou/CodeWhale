@@ -434,8 +434,10 @@ from, in order:
    (`WorkerRuntimeProfile::default_max_steps` returns zero), plus a **1800 s**
    wall-clock default.
 
-Omitted or zero `max_steps` remains unbounded even when an operator default is
-configured; positive step values clamp to the 2000-turn hard ceiling.
+An explicit zero `max_steps` stays unbounded even when an operator default is
+configured; an omitted `max_steps` falls back to that operator default (the
+fleet role default otherwise), and positive step values clamp to the
+2000-turn hard ceiling.
 Wall-time values clamp to 1..=86400 s.
 
 ## Token budget governor
