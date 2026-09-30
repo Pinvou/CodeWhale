@@ -19,8 +19,10 @@ use crate::features::remote_control::controller::journal::{
 };
 use crate::features::remote_control::controller::protocol::LeaseContext;
 use crate::features::remote_control::controller::task::{
-    ControllerTaskEventSink, PublishedAttachment, RemoteChatTurnPort, TASK_CANCELLED_CODE,
-    TASK_MODEL_SOURCE_CONTROLLED, TASK_MODEL_SOURCE_TEMPORARY,
+    AdmissionOutcome, ChatTurnExecutor, ControllerTaskEventSink, PublishedAttachment,
+    RemoteChatTurnPort, RemoteTaskLedger, RemoteTaskService, RemoteTaskState, TASK_CANCELLED_CODE,
+    TASK_MODE_CHAT, TASK_MODEL_SOURCE_CONTROLLED, TASK_MODEL_SOURCE_TEMPORARY,
+    task_input_digest_for_value,
 };
 use crate::features::remote_control::controller::temporary_model::SharedTemporaryModelStore;
 
@@ -812,7 +814,6 @@ mod tests {
     use crate::features::assistant::runtime_model::{
         ModelCredentialMode, PreparedRuntimeModel, RuntimeModelProvider, RuntimeModelRequest,
     };
-    use crate::features::remote_control::controller::task;
     use crate::platform::credential_store::{
         CredentialEditAction, CredentialReference, CredentialState, CredentialStore,
         MemoryCredentialStore,
@@ -1030,7 +1031,7 @@ mod tests {
             "attachment_ids": [],
             "skill_ids": [],
         });
-        let input_digest = task::task_input_digest_for_value(&input).expect("task digest");
+        let input_digest = task_input_digest_for_value(&input).expect("task digest");
         json!({
             "v": 1,
             "type": "task_submit",
@@ -1261,23 +1262,20 @@ mod tests {
             active: AtomicBool::new(false),
         });
         let turn_port = Arc::new(EnginePoolChatTurnPort::new(engine.clone()));
-        let service = task::RemoteTaskService::new(Arc::new(task::RemoteTaskLedger::in_memory()));
-        service.register_executor(
-            task::TASK_MODE_CHAT,
-            Arc::new(task::ChatTurnExecutor::new(turn_port)),
-        );
+        let service = RemoteTaskService::new(Arc::new(RemoteTaskLedger::in_memory()));
+        service.register_executor(TASK_MODE_CHAT, Arc::new(ChatTurnExecutor::new(turn_port)));
         let lease = lease();
 
         let first_payload = remote_task_payload("task-0001", "client-0001");
         let first = match service.submit(&lease, &first_payload, 1_000).unwrap() {
-            task::AdmissionOutcome::Admitted(ticket) => ticket,
+            AdmissionOutcome::Admitted(ticket) => ticket,
             other => panic!("expected first admission, got {other:?}"),
         };
         let missing = service
             .dispatch(first, events(), CancellationToken::new(), 1_100)
             .await
             .unwrap();
-        assert_eq!(missing.state, task::RemoteTaskState::Failed);
+        assert_eq!(missing.state, RemoteTaskState::Failed);
         assert_eq!(
             missing.terminal_reason.as_deref(),
             Some("model_credential_unavailable")
@@ -1287,8 +1285,8 @@ mod tests {
         assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
 
         match service.submit(&lease, &first_payload, 1_200).unwrap() {
-            task::AdmissionOutcome::Replay(record) => {
-                assert_eq!(record.state, task::RemoteTaskState::Failed)
+            AdmissionOutcome::Replay(record) => {
+                assert_eq!(record.state, RemoteTaskState::Failed)
             }
             other => panic!("expected durable replay, got {other:?}"),
         }
@@ -1304,14 +1302,14 @@ mod tests {
             Some(("rotated-key".to_owned(), "wire-v2".to_owned()));
         let second_payload = remote_task_payload("task-0002", "client-0002");
         let second = match service.submit(&lease, &second_payload, 1_300).unwrap() {
-            task::AdmissionOutcome::Admitted(ticket) => ticket,
+            AdmissionOutcome::Admitted(ticket) => ticket,
             other => panic!("expected second admission, got {other:?}"),
         };
         let succeeded = service
             .dispatch(second, events(), CancellationToken::new(), 1_400)
             .await
             .unwrap();
-        assert_eq!(succeeded.state, task::RemoteTaskState::Succeeded);
+        assert_eq!(succeeded.state, RemoteTaskState::Succeeded);
         assert_eq!(
             engine
                 .configured_routes
@@ -1330,14 +1328,14 @@ mod tests {
         provider.fail.store(true, Ordering::SeqCst);
         let third_payload = remote_task_payload("task-0003", "client-0003");
         let third = match service.submit(&lease, &third_payload, 1_500).unwrap() {
-            task::AdmissionOutcome::Admitted(ticket) => ticket,
+            AdmissionOutcome::Admitted(ticket) => ticket,
             other => panic!("expected third admission, got {other:?}"),
         };
         let provider_failed = service
             .dispatch(third, events(), CancellationToken::new(), 1_600)
             .await
             .unwrap();
-        assert_eq!(provider_failed.state, task::RemoteTaskState::Failed);
+        assert_eq!(provider_failed.state, RemoteTaskState::Failed);
         assert_eq!(
             provider_failed.terminal_reason.as_deref(),
             Some("model_runtime_unavailable")
@@ -1348,14 +1346,14 @@ mod tests {
         provider.fail.store(false, Ordering::SeqCst);
         let fourth_payload = remote_task_payload("task-0004", "client-0004");
         let fourth = match service.submit(&lease, &fourth_payload, 1_700).unwrap() {
-            task::AdmissionOutcome::Admitted(ticket) => ticket,
+            AdmissionOutcome::Admitted(ticket) => ticket,
             other => panic!("expected fourth admission, got {other:?}"),
         };
         let recovered = service
             .dispatch(fourth, events(), CancellationToken::new(), 1_800)
             .await
             .unwrap();
-        assert_eq!(recovered.state, task::RemoteTaskState::Succeeded);
+        assert_eq!(recovered.state, RemoteTaskState::Succeeded);
         assert_eq!(provider.calls.load(Ordering::SeqCst), 4);
         assert_eq!(
             engine
