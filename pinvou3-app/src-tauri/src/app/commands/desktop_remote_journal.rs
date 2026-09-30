@@ -579,6 +579,48 @@ impl ProxyEventVerificationPort for SnapshotFrameProof<'_, '_> {
 impl crate::features::remote_control::controller::controlling_service::ControllingJournalSink
     for DesktopControllerJournalSink
 {
+    fn publish_action_result(&self, lease: &LeaseContext, payload: &Value) -> Result<(), String> {
+        use tauri::Manager as _;
+        let manager = self.app.state::<
+            crate::features::remote_control::controller::controlling::ControllingDeviceManager,
+        >();
+        let lane = self.app.state::<
+            crate::features::remote_control::controller::encrypted_lane::ControllingLaneState,
+        >();
+        let store = self.app.state::<SessionStore>();
+        let actions = self
+            .app
+            .state::<Arc<super::desktop_remote_action::DesktopRemoteActionState>>();
+        let request_id = payload
+            .get("request_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "remote_action_result_invalid".to_owned())?;
+        let (local_session_id, remote_ref, expected_live) = actions
+            .pending_binding(request_id)
+            .ok_or_else(|| "remote_action_unknown".to_owned())?;
+        let identity = manager
+            .authenticated_remote_proxy_identity()
+            .map_err(|_| "remote_action_binding_stale".to_owned())?;
+        if &identity.0 != lease
+            || !super::desktop_remote_task::lease_matches_remote_binding(lease, &expected_live)
+            || identity.1 != expected_live.peer_id
+            || identity.2 != expected_live.resume_boundary_id
+        {
+            return Err("remote_action_binding_stale".to_owned());
+        }
+        manager.with_current_authenticated_remote_proxy_identity(&lane, &identity, || {
+            let current_live = store
+                .remote_dispatch_live_context(&local_session_id, &remote_ref)
+                .map_err(|_| "remote_action_binding_stale".to_owned())?;
+            store
+                .require_live_remote_mutation(&local_session_id, &remote_ref, &current_live)
+                .map_err(|_| "remote_action_binding_stale".to_owned())?;
+            if !actions.settle_authenticated(lease, &current_live, payload) {
+                return Err("remote_action_result_mismatch".to_owned());
+            }
+            Ok(())
+        })
+    }
     fn publish_capability(
         &self,
         projection: &crate::features::remote_control::controller::controlling_session::ControllingSessionProjection,

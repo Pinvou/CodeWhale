@@ -212,15 +212,120 @@ pub fn materialize_session_skills(
     scope: ConnectorScope,
     project_workspace: Option<&Path>,
 ) -> Result<(), String> {
-    let target = paths::session_skills_dir(session_id);
     let enabled = enabled_skills_for(scope, project_workspace);
+    materialize_skill_set(session_id, &enabled)
+}
+
+/// Freeze a remote turn to exactly the skills selected in its authenticated
+/// input. An empty selection deliberately produces an empty discovery root;
+/// unselected B skills are therefore unavailable to `load_skill` for this
+/// turn instead of merely being omitted from an audit field.
+pub(crate) fn materialize_remote_turn_skills(
+    session_id: &str,
+    scope: ConnectorScope,
+    project_workspace: Option<&Path>,
+    skill_ids: &[String],
+) -> Result<(), String> {
+    if skill_ids.len() > 32 {
+        return Err("task_skills_invalid".to_owned());
+    }
+    let enabled: HashMap<String, PathBuf> = enabled_skills_for(scope, project_workspace)
+        .into_iter()
+        .collect();
+    let mut seen = HashSet::new();
+    let mut selected = Vec::with_capacity(skill_ids.len());
+    for skill_id in skill_ids {
+        if !seen.insert(skill_id.as_str()) {
+            return Err("task_skills_invalid".to_owned());
+        }
+        let path = enabled
+            .get(skill_id)
+            .cloned()
+            .ok_or_else(|| "task_skill_not_authorized".to_owned())?;
+        selected.push((skill_id.clone(), path));
+    }
+    materialize_skill_set(session_id, &selected)
+}
+
+/// Plain-chat wrappers keep the assistant runtime independent of the
+/// marketplace scope type. Scope selection remains owned by this adapter.
+pub(crate) fn materialize_plain_remote_turn_skills(
+    session_id: &str,
+    skill_ids: &[String],
+) -> Result<(), String> {
+    materialize_remote_turn_skills(session_id, ConnectorScope::Plain, None, skill_ids)
+}
+
+pub(crate) fn restore_plain_session_skills(session_id: &str) -> Result<(), String> {
+    materialize_session_skills(session_id, ConnectorScope::Plain, None)
+}
+
+/// Build the private prompt prefix used by ACP, whose protocol has no
+/// `skills_dir` parameter. Resolution uses the same authoritative enabled set
+/// as chat and reads only the explicitly selected skill bodies.
+pub(crate) fn remote_turn_skill_prompt(
+    scope: ConnectorScope,
+    project_workspace: Option<&Path>,
+    skill_ids: &[String],
+) -> Result<String, String> {
+    const MAX_REMOTE_SKILL_PROMPT_BYTES: usize = 512 * 1024;
+    if skill_ids.len() > 32 {
+        return Err("task_skills_invalid".to_owned());
+    }
+    let enabled: HashMap<String, PathBuf> = enabled_skills_for(scope, project_workspace)
+        .into_iter()
+        .collect();
+    let mut seen = HashSet::new();
+    let mut prompt = String::new();
+    for skill_id in skill_ids {
+        if !seen.insert(skill_id.as_str()) {
+            return Err("task_skills_invalid".to_owned());
+        }
+        let path = enabled
+            .get(skill_id)
+            .ok_or_else(|| "task_skill_not_authorized".to_owned())?
+            .join("SKILL.md");
+        let document = std::fs::read_to_string(path)
+            .map_err(|_| "task_skill_unavailable".to_owned())?;
+        let body = strip_skill_frontmatter(&document);
+        let section = format!(
+            "<selected_skill id=\"{skill_id}\">\n{body}\n</selected_skill>\n"
+        );
+        if prompt.len().saturating_add(section.len()) > MAX_REMOTE_SKILL_PROMPT_BYTES {
+            return Err("task_skills_too_large".to_owned());
+        }
+        prompt.push_str(&section);
+    }
+    if prompt.is_empty() {
+        return Ok(prompt);
+    }
+    Ok(format!(
+        "<remote_skill_policy>Only the selected B-authorized skills below are enabled for this turn. Do not load or use unlisted skills.</remote_skill_policy>\n{prompt}"
+    ))
+}
+
+fn strip_skill_frontmatter(document: &str) -> &str {
+    let normalized = document.strip_prefix("---\n").or_else(|| document.strip_prefix("---\r\n"));
+    let Some(rest) = normalized else {
+        return document;
+    };
+    for marker in ["\n---\n", "\r\n---\r\n"] {
+        if let Some(end) = rest.find(marker) {
+            return rest[end + marker.len()..].trim_start();
+        }
+    }
+    document
+}
+
+fn materialize_skill_set(session_id: &str, enabled: &[(String, PathBuf)]) -> Result<(), String> {
+    let target = paths::session_skills_dir(session_id);
     let parent = target
         .parent()
         .ok_or_else(|| format!("组合目录无父级: {}", target.display()))?;
     std::fs::create_dir_all(parent).map_err(|e| format!("创建会话目录: {e}"))?;
     let staged = staging_dir(&target);
     let _ = std::fs::remove_dir_all(&staged);
-    for (name, src) in &enabled {
+    for (name, src) in enabled {
         let dest = staged.join(name);
         copy_skill_dir(src, &dest).map_err(|e| {
             format!(
@@ -747,6 +852,90 @@ mod tests {
             let enabled = enabled_skills_for(ConnectorScope::Plain, Some(&project));
             assert!(!enabled.iter().any(|(n, _)| n == "project-skill"));
             let _ = std::fs::remove_dir_all(&project);
+        });
+    }
+
+    #[test]
+    fn remote_turn_materializes_only_the_frozen_authorized_selection() {
+        with_temp_home(|| {
+            seed_sources();
+            let sid = "remote-session-skills";
+            materialize_remote_turn_skills(
+                sid,
+                ConnectorScope::Plain,
+                None,
+                &["user-custom".to_owned(), "visualizer".to_owned()],
+            )
+            .unwrap();
+            let dir = paths::session_skills_dir(sid);
+            let names: HashSet<String> = std::fs::read_dir(&dir)
+                .unwrap()
+                .flatten()
+                .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                .collect();
+            assert_eq!(
+                names,
+                HashSet::from(["user-custom".to_owned(), "visualizer".to_owned()])
+            );
+            assert!(
+                std::fs::read_to_string(dir.join("visualizer").join("SKILL.md"))
+                    .unwrap()
+                    .contains("user version"),
+                "the exact authoritative source wins when a skill id is frozen"
+            );
+
+            assert_eq!(
+                materialize_remote_turn_skills(
+                    sid,
+                    ConnectorScope::Plain,
+                    None,
+                    &["not-authorized".to_owned()],
+                )
+                .unwrap_err(),
+                "task_skill_not_authorized"
+            );
+            assert!(dir.join("user-custom").is_dir());
+            assert!(dir.join("visualizer").is_dir());
+
+            materialize_remote_turn_skills(sid, ConnectorScope::Plain, None, &[]).unwrap();
+            assert!(std::fs::read_dir(&dir).unwrap().next().is_none());
+            materialize_session_skills(sid, ConnectorScope::Plain, None).unwrap();
+            assert_eq!(
+                std::fs::read_dir(dir).unwrap().flatten().count(),
+                4,
+                "the next B-local turn regains B's full authoritative enabled set"
+            );
+        });
+    }
+
+    #[test]
+    fn code_remote_prompt_contains_only_selected_authorized_skill_bodies() {
+        with_temp_home(|| {
+            seed_sources();
+            save_disabled_skills_for(ConnectorScope::Code, &[]);
+            let prompt = remote_turn_skill_prompt(
+                ConnectorScope::Code,
+                None,
+                &["visualizer".to_owned()],
+            )
+            .unwrap();
+            assert!(prompt.contains("Only the selected B-authorized skills"));
+            assert!(prompt.contains("user version"));
+            assert!(!prompt.contains("user-custom"));
+            assert!(!prompt.contains("name: visualizer"), "frontmatter is not injected");
+            assert_eq!(
+                remote_turn_skill_prompt(
+                    ConnectorScope::Code,
+                    None,
+                    &["not-authorized".to_owned()],
+                )
+                .unwrap_err(),
+                "task_skill_not_authorized"
+            );
+            assert_eq!(
+                remote_turn_skill_prompt(ConnectorScope::Code, None, &[]).unwrap(),
+                ""
+            );
         });
     }
 

@@ -9,23 +9,17 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use base64::Engine as _;
 use parking_lot::Mutex;
-use serde::Serialize;
-use tauri::State;
 
-use crate::features::remote_control::controller::controlled::ControlledDeviceManager;
-use crate::features::remote_control::controller::task::RemoteTaskService;
 use crate::features::remote_control::controller::task::RemoteTaskTransferScope;
 use crate::features::remote_control::controller::transfer::core::{
     CompletedTransfer, TransferContext, TransferDirection, TransferMetadata, TransferRegistry,
 };
 use crate::features::remote_control::controller::transfer::upload::{
-    AttachmentUploads, UploadBegin, UploadProgress, UploadStaging,
+    AttachmentUploads, UploadStaging,
 };
 use crate::features::sessions::SessionStore;
 
-const UNSUPPORTED: &str = "desktop_remote_control_unsupported";
 const STAGING_DIR: &str = "remote_uploads";
 const STAGING_PART: &str = "part.bin";
 
@@ -107,17 +101,15 @@ impl UploadStaging for SessionIsolationStaging {
         }
         sessions.insert(
             handle_id.to_owned(),
-            (context.binding.session_id.clone(), metadata.file_name.clone()),
+            (
+                context.binding.session_id.clone(),
+                metadata.file_name.clone(),
+            ),
         );
         Ok(())
     }
 
-    fn accept_chunk(
-        &self,
-        handle_id: &str,
-        _chunk_index: u64,
-        bytes: &[u8],
-    ) -> Result<(), String> {
+    fn accept_chunk(&self, handle_id: &str, _chunk_index: u64, bytes: &[u8]) -> Result<(), String> {
         use std::io::Write as _;
         let directory = self.staging_dir(handle_id)?;
         let target = directory.join(STAGING_PART);
@@ -129,7 +121,7 @@ impl UploadStaging for SessionIsolationStaging {
             .map_err(|_| "transfer_staging_failed".to_owned())
     }
 
-    fn commit(&self, transfer: &CompletedTransfer) -> Result<(), String> {
+    fn commit(&self, transfer: &CompletedTransfer) -> Result<PathBuf, String> {
         let directory = self.staging_dir(&transfer.handle_id)?;
         let (_, file_name) = self
             .sessions
@@ -140,8 +132,9 @@ impl UploadStaging for SessionIsolationStaging {
         let staged = directory.join(STAGING_PART);
         let published = directory.join(safe_file_name(&file_name));
         std::fs::rename(&staged, &published).map_err(|_| "transfer_staging_failed".to_owned())?;
-        self.sessions.lock().remove(&transfer.handle_id);
-        Ok(())
+        // Keep the handle index until task/connection cleanup so completed
+        // uploads remain revocable and their B-local files can be removed.
+        Ok(published)
     }
 
     fn abort(&self, handle_id: &str) -> Result<(), String> {
@@ -181,45 +174,21 @@ pub(crate) fn safe_file_name(file_name: &str) -> String {
     }
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct DesktopRemoteAttachmentBegin {
-    transfer_id: String,
-    chunk_bytes: usize,
-    total_bytes: u64,
-}
-
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct DesktopRemoteAttachmentProgress {
-    state: String,
-    received_bytes: u64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    sha256: Option<String>,
-}
-
 /// Managed state for the upload path (DEV-20 registers it).
 pub(crate) struct DesktopRemoteAttachmentRuntime {
     uploads: AttachmentUploads,
-    tasks: Arc<RemoteTaskService>,
 }
 
 impl DesktopRemoteAttachmentRuntime {
-    pub(crate) fn new(
-        uploads: AttachmentUploads,
-        tasks: Arc<RemoteTaskService>,
-    ) -> Arc<Self> {
-        Arc::new(Self { uploads, tasks })
+    pub(crate) fn new(uploads: AttachmentUploads) -> Arc<Self> {
+        Arc::new(Self { uploads })
     }
 
-    pub(crate) fn from_session_store(store: SessionStore, tasks: Arc<RemoteTaskService>) -> Arc<Self> {
-        let runtime = Self::new(
-            AttachmentUploads::new(
-                Arc::new(TransferRegistry::default()),
-                Arc::new(SessionIsolationStaging::for_session_store(store)),
-            ),
-            tasks,
-        );
+    pub(crate) fn from_session_store(store: SessionStore) -> Arc<Self> {
+        let runtime = Self::new(AttachmentUploads::new(
+            Arc::new(TransferRegistry::default()),
+            Arc::new(SessionIsolationStaging::for_session_store(store)),
+        ));
         // DEV-17 审核修复：未完成上传必须由周期性回收清理，而不是等到下一次
         // 命令调用（RC-F-003「有界时间内清理」）。
         spawn_transfer_reaper(Arc::clone(&runtime));
@@ -228,6 +197,10 @@ impl DesktopRemoteAttachmentRuntime {
 
     pub(crate) fn uploads_cleanup_for_task(&self, task_id: &str) -> usize {
         self.uploads.cleanup_for_task(task_id)
+    }
+
+    pub(crate) fn uploads(&self) -> &AttachmentUploads {
+        &self.uploads
     }
 
     pub(crate) fn uploads_cleanup_for_connection(&self, connection_id: &str) -> usize {
@@ -248,8 +221,6 @@ fn spawn_transfer_reaper(runtime: Arc<DesktopRemoteAttachmentRuntime>) {
         }
     });
 }
-
-type AttachmentState<'a> = State<'a, Arc<DesktopRemoteAttachmentRuntime>>;
 
 /// Terminal cleanup for both transfer directions: the task owner calls this on
 /// every terminal path so no half-finished attachment or artifact survives.
@@ -277,14 +248,6 @@ impl RemoteTaskTransferScope for DesktopRemoteTransferScope {
     }
 }
 
-fn ensure_supported(controlled: &ControlledDeviceManager) -> Result<(), String> {
-    if controlled.is_supported() {
-        Ok(())
-    } else {
-        Err(UNSUPPORTED.to_owned())
-    }
-}
-
 fn monotonic_millis() -> u64 {
     use std::sync::OnceLock;
     use std::time::Instant;
@@ -293,100 +256,10 @@ fn monotonic_millis() -> u64 {
     u64::try_from(origin.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
-#[tauri::command]
-#[allow(clippy::too_many_arguments)]
-pub fn desktop_remote_attachment_begin(
-    task_id: String,
-    session_id: String,
-    transfer_id: String,
-    file_name: String,
-    mime_type: String,
-    total_bytes: u64,
-    sha256: String,
-    controlled: State<'_, ControlledDeviceManager>,
-    runtime: AttachmentState<'_>,
-) -> Result<DesktopRemoteAttachmentBegin, String> {
-    ensure_supported(&controlled)?;
-    let live = controlled
-        .live_lease()
-        .map_err(|error| error.code.to_owned())?;
-    if !runtime.tasks.is_remote_session(&session_id) {
-        return Err("task_session_not_found".to_owned());
-    }
-    let context = TransferContext::new(&live, &session_id, &task_id, TransferDirection::Upload)
-        .map_err(|error| error.code.to_owned())?;
-    let metadata = TransferMetadata {
-        file_name,
-        mime_type,
-        total_bytes,
-        sha256,
-    };
-    let begin: UploadBegin = runtime
-        .uploads
-        .begin(context, metadata, monotonic_millis())?;
-    let _ = transfer_id;
-    Ok(DesktopRemoteAttachmentBegin {
-        transfer_id: begin.handle_id,
-        chunk_bytes: begin.chunk_bytes,
-        total_bytes: begin.total_bytes,
-    })
-}
-
-#[tauri::command]
-pub fn desktop_remote_attachment_chunk(
-    transfer_id: String,
-    chunk_index: u64,
-    chunk_b64: String,
-    chunk_bytes: u64,
-    controlled: State<'_, ControlledDeviceManager>,
-    runtime: AttachmentState<'_>,
-) -> Result<DesktopRemoteAttachmentProgress, String> {
-    ensure_supported(&controlled)?;
-    let bytes = base64::engine::general_purpose::STANDARD
-        .decode(chunk_b64.as_bytes())
-        .map_err(|_| "transfer_chunk_invalid".to_owned())?;
-    if bytes.len() as u64 != chunk_bytes {
-        return Err("transfer_chunk_invalid".to_owned());
-    }
-    let progress = runtime
-        .uploads
-        .accept_chunk(&transfer_id, chunk_index, &bytes, monotonic_millis())?;
-    Ok(match progress {
-        UploadProgress::Accepted {
-            received_bytes, ..
-        } => DesktopRemoteAttachmentProgress {
-            state: "accepted".into(),
-            received_bytes,
-            sha256: None,
-        },
-        UploadProgress::Duplicate { received_bytes } => DesktopRemoteAttachmentProgress {
-            state: "duplicate".into(),
-            received_bytes,
-            sha256: None,
-        },
-        UploadProgress::Completed { sha256, bytes } => DesktopRemoteAttachmentProgress {
-            state: "completed".into(),
-            received_bytes: bytes,
-            sha256: Some(sha256),
-        },
-    })
-}
-
-#[tauri::command]
-pub fn desktop_remote_attachment_abort(
-    transfer_id: String,
-    controlled: State<'_, ControlledDeviceManager>,
-    runtime: AttachmentState<'_>,
-) -> Result<bool, String> {
-    ensure_supported(&controlled)?;
-    Ok(runtime.uploads.abort(&transfer_id))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::features::remote_control::controller::protocol::LeaseContext;
-    use crate::features::remote_control::controller::task::RemoteTaskLedger;
 
     fn lease() -> LeaseContext {
         LeaseContext {
@@ -402,10 +275,10 @@ mod tests {
         let stager = Arc::new(SessionIsolationStaging::new(Arc::new(
             move |_session_id: &str| Ok(root.clone()),
         )));
-        DesktopRemoteAttachmentRuntime::new(
-            AttachmentUploads::new(Arc::new(TransferRegistry::default()), stager),
-            Arc::new(RemoteTaskService::new(Arc::new(RemoteTaskLedger::in_memory()))),
-        )
+        DesktopRemoteAttachmentRuntime::new(AttachmentUploads::new(
+            Arc::new(TransferRegistry::default()),
+            stager,
+        ))
     }
 
     fn metadata(bytes: &[u8]) -> TransferMetadata {

@@ -43,11 +43,15 @@ pub async fn desktop_remote_controller_connect(
     relay: State<'_, RemoteControlManager>,
     sessions: State<'_, ControllingSessionManager>,
     history: State<'_, Arc<super::desktop_remote_journal::DesktopRemoteJournalRuntime>>,
+    actions: State<'_, Arc<super::desktop_remote_action::DesktopRemoteActionState>>,
+    artifacts: State<'_, Arc<super::desktop_remote_artifact::DesktopRemoteArtifactRuntime>>,
     code: String,
 ) -> Result<ControllingStatus, String> {
     ensure_supported(&manager)?;
-    // 新连接不得复用上一代租赁的会话意图（它们的 lease 绑定必然失效）。
-    sessions.clear();
+    let previous_connection_id = manager
+        .live_runtime_context()
+        .ok()
+        .map(|(lease, _)| lease.connection_id);
     // A 端排障日志：把「用户点了连接」和「本地状态机拒绝」都留痕。此前这两步
     // 没有任何落盘痕迹，失败只能从界面文案反推。
     log_controller_event("connect_requested", &relay.controller_endpoint_log_detail());
@@ -58,6 +62,13 @@ pub async fn desktop_remote_controller_connect(
             return Err(controlling_error(error));
         }
     };
+    // 只有成功进入新连接尝试才淘汰上一代状态；busy/非法连接码不得
+    // 破坏仍然有效的会话、回执或成果索引。
+    if let Some(connection_id) = previous_connection_id {
+        artifacts.clear_connection(&connection_id);
+    }
+    actions.clear_all();
+    sessions.clear();
     let status = manager.status();
     emit_status(&app, &status);
     let journal: Arc<dyn crate::features::remote_control::controller::controlling_service::ControllingJournalSink> =
@@ -75,6 +86,8 @@ pub async fn desktop_remote_controller_disconnect(
     app: AppHandle,
     manager: State<'_, ControllingDeviceManager>,
     sessions: State<'_, ControllingSessionManager>,
+    actions: State<'_, Arc<super::desktop_remote_action::DesktopRemoteActionState>>,
+    artifacts: State<'_, Arc<super::desktop_remote_artifact::DesktopRemoteArtifactRuntime>>,
 ) -> Result<ControllingStatus, String> {
     ensure_supported(&manager)?;
     // E2E-06：先尽力把显式断开告诉 Relay/B（本地断开始终权威，发送失败不阻塞）。
@@ -84,6 +97,10 @@ pub async fn desktop_remote_controller_disconnect(
         let _ = tokio::time::timeout(std::time::Duration::from_secs(2), receipt).await;
     }
     sessions.clear();
+    actions.clear_all();
+    if let Ok((lease, _)) = manager.live_runtime_context() {
+        artifacts.clear_connection(&lease.connection_id);
+    }
     let status = manager.disconnect();
     emit_status(&app, &status);
     Ok(status)

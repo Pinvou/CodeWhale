@@ -529,8 +529,10 @@ the B Session mapping only after encrypted authentication and exact request,
 reference and lease checks. `valid_for_ms` is optional TTL metadata, not a
 mapping fallback. If snapshot construction fails, B returns
 `capability_snapshot_error {request_id,session_id,code}` with
-the bounded `capability_snapshot_unavailable` code. Tool/Skill entries contain only an opaque ID
-and display name. Workspace entries contain only opaque ID, display name and
+the bounded `capability_snapshot_unavailable` code. Tool entries contain only an opaque ID and
+display name. Skill entries additionally contain a non-empty, duplicate-free `scopes` array whose
+values are `chat` and/or `code`; one opaque skill ID can therefore be advertised for both lanes
+without collapsing their authorization scopes. Workspace entries contain only opaque ID, display name and
 `code_allowed`; paths, configuration, source and credentials are forbidden.
 Lists are bounded to 256 unique entries, revisions are canonical decimal
 strings, and a task binds the exact `capability_revision` it consumed.
@@ -583,7 +585,7 @@ text “连接码无效或已失效”. A legacy conflict remains exactly
 plus close code `1008`.
 
 The contract digest is
-`b579a5b9b5c0ba237fd01d21223c8c8aa636f27668a3944d0f6fb8c055adafea`.
+`eb276cfea1ee9f76603753994312aa9551c8d530839c716958ae60fbae53d31a`.
 It is SHA-256 over canonical JSON (object keys recursively sorted, array order
 preserved, compact JSON scalars) of `{contract,fixture}`. `contract` is the
 executable manifest containing every schema required/optional field, role
@@ -728,17 +730,17 @@ JSON shape is valid. Pairing registration additionally uses the stable
 
 The frozen decrypted `encrypted_frame` payload kinds are
 `capability_snapshot_request`, `capability_snapshot`, `capability_snapshot_error`, `task_submit`,
-`task_cancel`, `task_status`, `permission_request`, `permission_decision`,
-`attachment_begin`, `attachment_chunk`, `attachment_commit`,
-`artifact_index_request`, `artifact_index`, `artifact_read_request`,
-`artifact_chunk`, `session_snapshot_request`, `session_snapshot`,
-`journal_replay_request` and `journal_event`. A sends capability, task, cancel,
-approval, upload, read and replay requests. B sends capability snapshots/errors, task
-states, permission requests, artifact indexes/chunks, snapshots and journal events. The parser
+`task_cancel`, `task_status`, `remote_action_request`, `remote_action_result`,
+`session_snapshot_request`, `session_snapshot`, `journal_replay_request` and
+`journal_event`. A sends capability, task, cancel, closed operation-specific
+actions and replay requests. B sends capability snapshots/errors, task states,
+correlated action results, snapshots and journal events. The parser
 rejects these payloads when presented by the opposite role. Every task,
 permission, attachment, artifact, snapshot and journal operation is bound to
 the same `connection_id + controller_lease_id + lease_epoch`; task and transfer
-messages additionally carry their exact task/session/request identifiers.
+messages additionally carry their exact task/session/request identifiers. The
+action envelope requires `task_v1`; after decryption, permission, attachment
+and artifact operations also require their own negotiated capability.
 The outer gate maps pairing messages to `pairing_v1`, receipt/Finished messages
 to `finished_receipt_v1`, liveness messages to `role_liveness_v1`, resume
 messages to `resume_v1`, and encrypted frames/disconnect to

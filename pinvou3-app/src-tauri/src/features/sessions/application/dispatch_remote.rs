@@ -12,7 +12,8 @@ use super::ports::{UseCaseError, UseCaseFuture};
 use crate::features::sessions::SessionStore;
 use crate::features::sessions::remote_proxy::binding::LiveRemoteContext;
 use crate::features::sessions::remote_proxy::outbox::{
-    PreparedOutboxEntry, RemoteRequestSemantics, model_execution_digest, request_fingerprint,
+    PreparedOutboxEntry, RemoteRequestSemantics, model_execution_digest, remote_task_input_digest,
+    request_fingerprint,
 };
 use crate::features::sessions::remote_proxy::schema::{
     PendingDispatchState, PendingRemoteRequest, PendingReservation, valid_remote_identifier,
@@ -20,11 +21,11 @@ use crate::features::sessions::remote_proxy::schema::{
 
 const MAX_EPHEMERAL_PACKAGES: usize = 256;
 
-pub(crate) trait DispatchRemoteUseCase: Send + Sync {
+pub(crate) trait ReserveRemoteUseCase: Send + Sync {
     type Request: Send + 'static;
     type Response: Send + 'static;
 
-    fn dispatch(&self, request: Self::Request) -> UseCaseFuture<'_, Self::Response>;
+    fn reserve(&self, request: Self::Request) -> UseCaseFuture<'_, Self::Response>;
 }
 
 /// The host prepares the sensitive DEV-15 wire payload and sends it only
@@ -49,8 +50,30 @@ pub(crate) trait RemoteTaskDispatchPort: Send + Sync {
         remote_ref: &str,
         live: &LiveRemoteContext,
         handle: &RemoteRetryHandle,
+        attachment_ids: &[String],
     ) -> Result<(), UseCaseError>;
-    fn send_encrypted(&self, payload: &Value) -> Result<(), UseCaseError>;
+    /// The host verifies B-authenticated completed uploads while holding its
+    /// manager/lane gate, then CASes only the still-prepared durable fingerprint.
+    fn replace_prepared_fingerprint(
+        &self,
+        store: &SessionStore,
+        local_session_id: &str,
+        remote_ref: &str,
+        live: &LiveRemoteContext,
+        handle: &RemoteRetryHandle,
+        attachment_ids: &[String],
+        new_fingerprint: &str,
+    ) -> Result<(), UseCaseError>;
+    fn send_bound_cancel(
+        &self,
+        store: &SessionStore,
+        local_session_id: &str,
+        remote_ref: &str,
+        live: &LiveRemoteContext,
+        task_id: &str,
+    ) -> Result<String, UseCaseError>;
+    fn send_encrypted(&self, payload: &Value, live: &LiveRemoteContext)
+    -> Result<(), UseCaseError>;
 
     /// Fault-injection seam; the production adapter uses the no-op default.
     fn after_persist(&self) -> Result<(), UseCaseError> {
@@ -86,6 +109,20 @@ pub(crate) enum RemoteDispatchState {
 pub(crate) struct RemoteDispatchReport {
     pub(crate) retry_handle: RemoteRetryHandle,
     pub(crate) state: RemoteDispatchState,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RemoteCancelReport {
+    pub(crate) request_id: String,
+    pub(crate) task_id: String,
+    pub(crate) state: RemoteCancelState,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum RemoteCancelState {
+    Queued,
 }
 
 /// Opaque correlation handle for replaying only the original in-process
@@ -174,7 +211,7 @@ impl RemoteDispatchService {
         }
     }
 
-    pub(crate) fn dispatch_new(
+    pub(crate) fn reserve_new(
         &self,
         mut request: RemoteDispatchRequest,
     ) -> Result<RemoteDispatchReport, UseCaseError> {
@@ -290,28 +327,24 @@ impl RemoteDispatchService {
                     PreparedOutboxEntry {
                         fingerprint,
                         context: request.live.clone(),
+                        semantics: request.semantics.clone(),
                         wire_payload: payload,
                     },
                 );
             }
             PendingReservation::Existing(_) => return Err(error("remote_request_id_exists")),
         }
-        self.advance_prepared(
-            &semantics.local_session_id,
-            &semantics.remote_session_ref,
-            &request.live,
-            &handle,
-            &mut ephemeral,
-        )
+        Ok(handle.report(RemoteDispatchState::PreparedNotSent))
     }
 
     /// Retry has no task semantics. It can only replay the original cached
     /// bytes, after matching a durable pending fingerprint and current binding.
-    pub(crate) fn dispatch_retry(
+    pub(crate) fn commit_prepared(
         &self,
         local_session_id: &str,
         remote_session_ref: &str,
         handle: RemoteRetryHandle,
+        attachment_ids: &[String],
     ) -> Result<RemoteDispatchReport, UseCaseError> {
         if !valid_remote_identifier(&handle.task_id)
             || !valid_remote_identifier(&handle.client_request_id)
@@ -367,6 +400,59 @@ impl RemoteDispatchService {
         }) {
             return Err(error("remote_payload_unavailable"));
         }
+        let mut handle = handle;
+        if !attachment_ids.is_empty() {
+            if attachment_ids.len() > 32
+                || attachment_ids.iter().any(|id| !valid_remote_identifier(id))
+                || {
+                    let mut unique = std::collections::HashSet::new();
+                    attachment_ids.iter().any(|id| !unique.insert(id))
+                }
+            {
+                return Err(error("remote_attachment_ids_invalid"));
+            }
+            let cached = ephemeral.get(&key).expect("checked prepared entry");
+            if !cached.semantics.attachment_ids.is_empty()
+                && cached.semantics.attachment_ids != attachment_ids
+            {
+                return Err(error("remote_request_id_conflict"));
+            }
+            if cached.semantics.attachment_ids.is_empty() {
+                let mut next_semantics = cached.semantics.clone();
+                next_semantics.attachment_ids = attachment_ids.to_vec();
+                next_semantics.input_digest = remote_task_input_digest(
+                    &next_semantics.text,
+                    attachment_ids,
+                    &next_semantics.skill_ids,
+                );
+                let mut next_payload = cached.wire_payload.clone();
+                next_payload["input"]["attachment_ids"] = serde_json::json!(attachment_ids);
+                next_payload["input_digest"] = serde_json::json!(&next_semantics.input_digest);
+                let candidate = RemoteDispatchRequest {
+                    task_id: handle.task_id.clone(),
+                    client_request_id: handle.client_request_id.clone(),
+                    live: live.clone(),
+                    semantics: next_semantics.clone(),
+                };
+                validate_prepared_payload(&next_payload, &candidate)?;
+                let next_fingerprint = request_fingerprint(&next_semantics, &live)
+                    .map_err(|_| error("remote_fingerprint_failed"))?;
+                self.port.replace_prepared_fingerprint(
+                    &self.store,
+                    local_session_id,
+                    remote_session_ref,
+                    &live,
+                    &handle,
+                    attachment_ids,
+                    &next_fingerprint,
+                )?;
+                let cached = ephemeral.get_mut(&key).expect("checked prepared entry");
+                cached.fingerprint = next_fingerprint.clone();
+                cached.semantics = next_semantics;
+                cached.wire_payload = next_payload;
+                handle.request_fingerprint = next_fingerprint;
+            }
+        }
         self.advance_prepared(
             local_session_id,
             remote_session_ref,
@@ -374,6 +460,40 @@ impl RemoteDispatchService {
             &handle,
             &mut ephemeral,
         )
+    }
+
+    /// Cancellation is a distinct current-binding action, never a new task
+    /// submission. Only an attempted durable task may be cancelled; a merely
+    /// prepared request must instead use explicit abandon.
+    pub(crate) fn cancel_task(
+        &self,
+        local_session_id: &str,
+        remote_ref: &str,
+        task_id: &str,
+    ) -> Result<RemoteCancelReport, UseCaseError> {
+        if !valid_remote_identifier(task_id) {
+            return Err(error("remote_task_id_invalid"));
+        }
+        let _ephemeral = self.ephemeral.lock();
+        let live = self
+            .store
+            .remote_dispatch_live_context(local_session_id, remote_ref)
+            .map_err(|_| error("remote_binding_mismatch"))?;
+        self.store
+            .require_attempted_remote_task(local_session_id, remote_ref, &live, task_id)
+            .map_err(|_| error("remote_task_not_cancellable"))?;
+        let request_id = self.port.send_bound_cancel(
+            &self.store,
+            local_session_id,
+            remote_ref,
+            &live,
+            task_id,
+        )?;
+        Ok(RemoteCancelReport {
+            request_id,
+            task_id: task_id.to_owned(),
+            state: RemoteCancelState::Queued,
+        })
     }
 
     fn advance_prepared(
@@ -395,6 +515,15 @@ impl RemoteDispatchService {
                 remote_session_ref,
                 live,
                 handle,
+                &ephemeral
+                    .get(&(
+                        local_session_id.to_owned(),
+                        handle.client_request_id.clone(),
+                        handle.task_id.clone(),
+                    ))
+                    .expect("prepared entry before barrier")
+                    .semantics
+                    .attachment_ids,
             )
             .is_err()
         {
@@ -410,7 +539,7 @@ impl RemoteDispatchService {
             ))
             .expect("prepared entry after barrier")
             .wire_payload;
-        let result = self.port.send_encrypted(&payload);
+        let result = self.port.send_encrypted(&payload, live);
         drop(payload);
         Ok(handle.report(if result.is_ok() {
             RemoteDispatchState::Queued
@@ -551,17 +680,18 @@ fn validate_prepared_payload(
     Ok(())
 }
 
-impl DispatchRemoteUseCase for RemoteDispatchService {
+impl ReserveRemoteUseCase for RemoteDispatchService {
     type Request = RemoteDispatchRequest;
     type Response = RemoteDispatchReport;
 
-    fn dispatch(&self, request: Self::Request) -> UseCaseFuture<'_, Self::Response> {
-        Box::pin(async move { self.dispatch_new(request) })
+    fn reserve(&self, request: Self::Request) -> UseCaseFuture<'_, Self::Response> {
+        Box::pin(async move { self.reserve_new(request) })
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     use super::*;
@@ -573,6 +703,8 @@ mod tests {
         prepare_count: AtomicUsize,
         package_build_count: AtomicUsize,
         send_count: AtomicUsize,
+        cancel_count: AtomicUsize,
+        confirmed_attachments: Mutex<HashSet<String>>,
         credential_available: AtomicBool,
         fail_prepare: AtomicBool,
         fail_after_persist: AtomicBool,
@@ -592,6 +724,8 @@ mod tests {
                 prepare_count: AtomicUsize::new(0),
                 package_build_count: AtomicUsize::new(0),
                 send_count: AtomicUsize::new(0),
+                cancel_count: AtomicUsize::new(0),
+                confirmed_attachments: Mutex::new(HashSet::new()),
                 credential_available: AtomicBool::new(true),
                 fail_prepare: AtomicBool::new(false),
                 fail_after_persist: AtomicBool::new(false),
@@ -626,6 +760,21 @@ mod tests {
     }
 
     impl RemoteTaskDispatchPort for FakePort {
+        fn send_bound_cancel(
+            &self,
+            store: &SessionStore,
+            local_session_id: &str,
+            remote_ref: &str,
+            live: &LiveRemoteContext,
+            task_id: &str,
+        ) -> Result<String, UseCaseError> {
+            store
+                .require_attempted_remote_task(local_session_id, remote_ref, live, task_id)
+                .map_err(|_| error("remote_task_not_cancellable"))?;
+            self.cancel_count.fetch_add(1, Ordering::SeqCst);
+            Ok("cancel-request-1".into())
+        }
+
         fn reserve_pending(
             &self,
             store: &SessionStore,
@@ -646,7 +795,14 @@ mod tests {
             remote_ref: &str,
             live: &LiveRemoteContext,
             handle: &RemoteRetryHandle,
+            attachment_ids: &[String],
         ) -> Result<(), UseCaseError> {
+            if attachment_ids
+                .iter()
+                .any(|id| !self.confirmed_attachments.lock().contains(id))
+            {
+                return Err(error("remote_attachment_unconfirmed"));
+            }
             store
                 .mark_remote_dispatch_attempt(
                     local_session_id,
@@ -657,6 +813,35 @@ mod tests {
                     &handle.request_fingerprint,
                 )
                 .map_err(|_| error("remote_attempt_persist_failed"))
+        }
+
+        fn replace_prepared_fingerprint(
+            &self,
+            store: &SessionStore,
+            local_session_id: &str,
+            remote_ref: &str,
+            live: &LiveRemoteContext,
+            handle: &RemoteRetryHandle,
+            attachment_ids: &[String],
+            new_fingerprint: &str,
+        ) -> Result<(), UseCaseError> {
+            if attachment_ids
+                .iter()
+                .any(|id| !self.confirmed_attachments.lock().contains(id))
+            {
+                return Err(error("remote_attachment_unconfirmed"));
+            }
+            store
+                .replace_prepared_remote_fingerprint(
+                    local_session_id,
+                    remote_ref,
+                    live,
+                    &handle.client_request_id,
+                    &handle.task_id,
+                    &handle.request_fingerprint,
+                    new_fingerprint,
+                )
+                .map_err(|_| error("remote_pending_persist_failed"))
         }
 
         fn prepare(
@@ -710,7 +895,11 @@ mod tests {
             })
         }
 
-        fn send_encrypted(&self, payload: &Value) -> Result<(), UseCaseError> {
+        fn send_encrypted(
+            &self,
+            payload: &Value,
+            _live: &LiveRemoteContext,
+        ) -> Result<(), UseCaseError> {
             let record = self.store.remote_proxy_snapshot(&self.local_id).unwrap();
             let pending = &record.pending[0];
             assert_eq!(
@@ -788,7 +977,7 @@ mod tests {
                 model_profile_id: Some("model-1".into()),
                 model_execution_digest: String::new(),
                 text: "hello".into(),
-                input_digest: "a".repeat(64),
+                input_digest: remote_task_input_digest("hello", &[], &[]),
                 attachment_ids: Vec::new(),
                 skill_ids: Vec::new(),
                 workspace_ids: Vec::new(),
@@ -813,7 +1002,7 @@ mod tests {
         let port = Arc::new(FakePort::new(store.clone(), local_id.clone()));
         let service = RemoteDispatchService::new(store.clone(), port.clone());
         request.semantics.model_profile_id = Some("different-model".into());
-        let error = service.dispatch_new(request).err().unwrap();
+        let error = service.reserve_new(request).err().unwrap();
         assert_eq!(error.code(), "remote_model_profile_mismatch");
         assert!(
             store
@@ -845,15 +1034,16 @@ mod tests {
         }
     }
 
-    fn retry(
+    fn commit(
         service: &RemoteDispatchService,
         store: &SessionStore,
         request: &RemoteDispatchRequest,
     ) -> Result<RemoteDispatchReport, UseCaseError> {
-        service.dispatch_retry(
+        service.commit_prepared(
             &request.semantics.local_session_id,
             &request.semantics.remote_session_ref,
             handle(store, request),
+            &[],
         )
     }
 
@@ -868,7 +1058,7 @@ mod tests {
         port.fail_prepare.store(true, Ordering::SeqCst);
         assert_eq!(
             service
-                .dispatch_new(same_request(&request))
+                .reserve_new(same_request(&request))
                 .unwrap_err()
                 .code(),
             "prepare_failed"
@@ -890,7 +1080,7 @@ mod tests {
         };
         assert_eq!(
             service
-                .dispatch_new(same_request(&request))
+                .reserve_new(same_request(&request))
                 .unwrap_err()
                 .code(),
             "remote_pending_persist_failed"
@@ -915,7 +1105,7 @@ mod tests {
         let service = RemoteDispatchService::new(store.clone(), port.clone());
 
         assert_eq!(
-            service.dispatch_new(request).unwrap_err().code(),
+            service.reserve_new(request).unwrap_err().code(),
             "remote_pending_persist_failed"
         );
         assert!(
@@ -936,9 +1126,20 @@ mod tests {
         port.disconnect_after_persist.store(true, Ordering::SeqCst);
         let service = RemoteDispatchService::new(store.clone(), port.clone());
 
+        let prepared = service.reserve_new(same_request(&request)).unwrap();
+        assert_eq!(prepared.state, RemoteDispatchState::PreparedNotSent);
+        assert_eq!(port.send_count.load(Ordering::SeqCst), 0);
         assert_eq!(
-            service.dispatch_new(request).unwrap().state,
-            RemoteDispatchState::PreparedNotSent
+            service
+                .commit_prepared(
+                    &local_id,
+                    &request.semantics.remote_session_ref,
+                    prepared.retry_handle,
+                    &[]
+                )
+                .unwrap()
+                .state,
+            RemoteDispatchState::PreparedNotSent,
         );
         let record = store.remote_proxy_snapshot(&local_id).unwrap();
         assert_eq!(record.pending.len(), 1);
@@ -958,7 +1159,12 @@ mod tests {
         ));
         let service = RemoteDispatchService::new(store.clone(), port.clone());
         port.fail_after_persist.store(true, Ordering::SeqCst);
-        let first = service.dispatch_new(same_request(&request)).unwrap();
+        let first = service.reserve_new(same_request(&request)).unwrap();
+        assert_eq!(port.send_count.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            commit(&service, &store, &request).unwrap().state,
+            RemoteDispatchState::PreparedNotSent
+        );
         assert_eq!(first.state, RemoteDispatchState::PreparedNotSent);
         assert_eq!(first.retry_handle, handle(&store, &request));
         let actual_digest = {
@@ -990,10 +1196,11 @@ mod tests {
         wrong.request_fingerprint = "0".repeat(64);
         assert_eq!(
             service
-                .dispatch_retry(
+                .commit_prepared(
                     &request.semantics.local_session_id,
                     &request.semantics.remote_session_ref,
                     wrong,
+                    &[],
                 )
                 .unwrap_err()
                 .code(),
@@ -1004,7 +1211,7 @@ mod tests {
         // is gone. A retry must not build another DEV-15 package.
         port.credential_available.store(false, Ordering::SeqCst);
         assert_eq!(
-            retry(&service, &store, &request).unwrap().state,
+            commit(&service, &store, &request).unwrap().state,
             RemoteDispatchState::Queued
         );
         assert_eq!(port.prepare_count.load(Ordering::SeqCst), 1);
@@ -1016,7 +1223,7 @@ mod tests {
             "display_name": "Model B", "image_capability_override": "enabled"
         });
         assert_eq!(
-            retry(&service, &store, &request).unwrap().state,
+            commit(&service, &store, &request).unwrap().state,
             RemoteDispatchState::OutcomeUnknown
         );
         assert_eq!(port.send_count.load(Ordering::SeqCst), 1);
@@ -1025,10 +1232,11 @@ mod tests {
         wrong_after_attempt.request_fingerprint = "f".repeat(64);
         assert_eq!(
             service
-                .dispatch_retry(
+                .commit_prepared(
                     &request.semantics.local_session_id,
                     &request.semantics.remote_session_ref,
                     wrong_after_attempt,
+                    &[],
                 )
                 .unwrap_err()
                 .code(),
@@ -1047,7 +1255,7 @@ mod tests {
         ));
         let service = RemoteDispatchService::new(store.clone(), port.clone());
         port.fail_after_persist.store(true, Ordering::SeqCst);
-        let report = service.dispatch_new(same_request(&request)).unwrap();
+        let report = service.reserve_new(same_request(&request)).unwrap();
         assert_eq!(report.state, RemoteDispatchState::PreparedNotSent);
         assert_eq!(port.package_build_count.load(Ordering::SeqCst), 0);
         let cached = service.ephemeral.lock();
@@ -1078,7 +1286,10 @@ mod tests {
         ));
         let service = RemoteDispatchService::new(store.clone(), port.clone());
         port.lose_ack.store(true, Ordering::SeqCst);
-        let first = service.dispatch_new(same_request(&request)).unwrap();
+        let reserved = service.reserve_new(same_request(&request)).unwrap();
+        assert_eq!(reserved.state, RemoteDispatchState::PreparedNotSent);
+        assert_eq!(port.send_count.load(Ordering::SeqCst), 0);
+        let first = commit(&service, &store, &request).unwrap();
         assert_eq!(first.state, RemoteDispatchState::OutcomeUnknown);
         assert_eq!(port.send_count.load(Ordering::SeqCst), 1);
         assert!(
@@ -1101,10 +1312,11 @@ mod tests {
         assert_eq!(restarted_port.send_count.load(Ordering::SeqCst), 0);
         assert_eq!(
             service
-                .dispatch_retry(
+                .commit_prepared(
                     &request.semantics.local_session_id,
                     &request.semantics.remote_session_ref,
                     first.retry_handle,
+                    &[],
                 )
                 .unwrap()
                 .state,
@@ -1146,9 +1358,8 @@ mod tests {
             request.semantics.local_session_id.clone(),
         ));
         let service = RemoteDispatchService::new(store.clone(), port.clone());
-        port.fail_after_persist.store(true, Ordering::SeqCst);
         assert_eq!(
-            service.dispatch_new(same_request(&request)).unwrap().state,
+            service.reserve_new(same_request(&request)).unwrap().state,
             RemoteDispatchState::PreparedNotSent
         );
         service
@@ -1162,12 +1373,12 @@ mod tests {
         drop(service);
         let fresh_service = RemoteDispatchService::new(store.clone(), port.clone());
         assert_eq!(
-            retry(&fresh_service, &store, &request).unwrap_err().code(),
+            commit(&fresh_service, &store, &request).unwrap_err().code(),
             "remote_request_id_retired"
         );
         assert_eq!(
             fresh_service
-                .dispatch_new(same_request(&request))
+                .reserve_new(same_request(&request))
                 .unwrap_err()
                 .code(),
             "remote_request_id_retired"
@@ -1175,15 +1386,26 @@ mod tests {
         let mut one_old_id = same_request(&request);
         one_old_id.task_id = "task-2".into();
         assert_eq!(
-            fresh_service.dispatch_new(one_old_id).unwrap_err().code(),
+            fresh_service.reserve_new(one_old_id).unwrap_err().code(),
             "remote_request_id_retired"
         );
         let mut fresh = same_request(&request);
         fresh.task_id = "task-2".into();
         fresh.client_request_id = "request-2".into();
         port.fail_after_persist.store(false, Ordering::SeqCst);
+        let prepared = fresh_service.reserve_new(fresh).unwrap();
+        assert_eq!(prepared.state, RemoteDispatchState::PreparedNotSent);
+        assert_eq!(port.send_count.load(Ordering::SeqCst), 0);
         assert_eq!(
-            fresh_service.dispatch_new(fresh).unwrap().state,
+            fresh_service
+                .commit_prepared(
+                    &request.semantics.local_session_id,
+                    &request.semantics.remote_session_ref,
+                    prepared.retry_handle,
+                    &[],
+                )
+                .unwrap()
+                .state,
             RemoteDispatchState::Queued
         );
         assert_eq!(port.send_count.load(Ordering::SeqCst), 1);
@@ -1194,10 +1416,9 @@ mod tests {
         let (temp, store, request) = setup();
         let local_id = request.semantics.local_session_id.clone();
         let port = Arc::new(FakePort::new(store.clone(), local_id.clone()));
-        port.fail_after_persist.store(true, Ordering::SeqCst);
         let service = RemoteDispatchService::new(store.clone(), port.clone());
         assert_eq!(
-            service.dispatch_new(same_request(&request)).unwrap().state,
+            service.reserve_new(same_request(&request)).unwrap().state,
             RemoteDispatchState::PreparedNotSent
         );
         let original_path = {
@@ -1223,7 +1444,7 @@ mod tests {
         assert_eq!(record.pending.len(), 1);
         assert!(record.retired_requests.is_empty());
         assert_eq!(
-            retry(&service, &store, &request).unwrap_err().code(),
+            commit(&service, &store, &request).unwrap_err().code(),
             "remote_payload_unavailable"
         );
         service
@@ -1244,10 +1465,9 @@ mod tests {
         let (temp, store, request) = setup();
         let local_id = request.semantics.local_session_id.clone();
         let port = Arc::new(FakePort::new(store.clone(), local_id.clone()));
-        port.fail_after_persist.store(true, Ordering::SeqCst);
         let service = RemoteDispatchService::new(store.clone(), port);
         assert_eq!(
-            service.dispatch_new(same_request(&request)).unwrap().state,
+            service.reserve_new(same_request(&request)).unwrap().state,
             RemoteDispatchState::PreparedNotSent
         );
         drop(service);
@@ -1283,7 +1503,7 @@ mod tests {
             let service = RemoteDispatchService::new(store.clone(), port.clone());
             assert_eq!(
                 service
-                    .dispatch_new(same_request(&request))
+                    .reserve_new(same_request(&request))
                     .unwrap_err()
                     .code(),
                 "remote_prepare_mismatch",
@@ -1309,16 +1529,15 @@ mod tests {
             request.semantics.local_session_id.clone(),
         ));
         let service = RemoteDispatchService::new(store.clone(), port.clone());
-        port.fail_after_persist.store(true, Ordering::SeqCst);
         assert_eq!(
-            service.dispatch_new(same_request(&request)).unwrap().state,
+            service.reserve_new(same_request(&request)).unwrap().state,
             RemoteDispatchState::PreparedNotSent
         );
         port.model_route.lock()["base_url"] = "https://changed.example/v1".into();
         port.credential_available.store(false, Ordering::SeqCst);
         port.fail_after_persist.store(false, Ordering::SeqCst);
         assert_eq!(
-            retry(&service, &store, &request).unwrap().state,
+            commit(&service, &store, &request).unwrap().state,
             RemoteDispatchState::Queued
         );
         assert_eq!(port.send_count.load(Ordering::SeqCst), 1);
@@ -1327,6 +1546,205 @@ mod tests {
             port.sent_route.lock().as_ref().unwrap()["base_url"],
             "https://example.test/v1"
         );
+    }
+
+    #[test]
+    fn attachment_receipts_are_bound_before_the_attempt_barrier() {
+        let (_temp, store, request) = setup();
+        let port = Arc::new(FakePort::new(
+            store.clone(),
+            request.semantics.local_session_id.clone(),
+        ));
+        let service = RemoteDispatchService::new(store.clone(), port.clone());
+        let prepared = service.reserve_new(same_request(&request)).unwrap();
+        let attachments = vec!["attachment-1".to_owned()];
+        assert_eq!(
+            service
+                .commit_prepared(
+                    &request.semantics.local_session_id,
+                    &request.semantics.remote_session_ref,
+                    prepared.retry_handle.clone(),
+                    &attachments,
+                )
+                .unwrap_err()
+                .code(),
+            "remote_attachment_unconfirmed",
+        );
+        assert_eq!(port.send_count.load(Ordering::SeqCst), 0);
+        assert_eq!(handle(&store, &request), prepared.retry_handle);
+        port.confirmed_attachments
+            .lock()
+            .insert(attachments[0].clone());
+        port.fail_after_persist.store(true, Ordering::SeqCst);
+        let bound = service
+            .commit_prepared(
+                &request.semantics.local_session_id,
+                &request.semantics.remote_session_ref,
+                prepared.retry_handle.clone(),
+                &attachments,
+            )
+            .unwrap();
+        assert_eq!(bound.state, RemoteDispatchState::PreparedNotSent);
+        assert_ne!(bound.retry_handle, prepared.retry_handle);
+        assert_eq!(handle(&store, &request), bound.retry_handle);
+        assert_eq!(port.send_count.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            service
+                .commit_prepared(
+                    &request.semantics.local_session_id,
+                    &request.semantics.remote_session_ref,
+                    prepared.retry_handle,
+                    &attachments,
+                )
+                .unwrap_err()
+                .code(),
+            "remote_request_id_conflict",
+        );
+        assert_eq!(
+            service
+                .commit_prepared(
+                    &request.semantics.local_session_id,
+                    &request.semantics.remote_session_ref,
+                    bound.retry_handle.clone(),
+                    &["attachment-2".to_owned()],
+                )
+                .unwrap_err()
+                .code(),
+            "remote_request_id_conflict",
+        );
+        port.fail_after_persist.store(false, Ordering::SeqCst);
+        assert_eq!(
+            service
+                .commit_prepared(
+                    &request.semantics.local_session_id,
+                    &request.semantics.remote_session_ref,
+                    bound.retry_handle.clone(),
+                    &attachments,
+                )
+                .unwrap()
+                .state,
+            RemoteDispatchState::Queued
+        );
+        assert_eq!(port.send_count.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            service
+                .commit_prepared(
+                    &request.semantics.local_session_id,
+                    &request.semantics.remote_session_ref,
+                    bound.retry_handle,
+                    &attachments,
+                )
+                .unwrap()
+                .state,
+            RemoteDispatchState::OutcomeUnknown
+        );
+        assert_eq!(port.send_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn failed_attachment_fingerprint_cas_rolls_back_without_send() {
+        let (temp, store, request) = setup();
+        let port = Arc::new(FakePort::new(
+            store.clone(),
+            request.semantics.local_session_id.clone(),
+        ));
+        let service = RemoteDispatchService::new(store.clone(), port.clone());
+        let prepared = service.reserve_new(same_request(&request)).unwrap();
+        let attachments = vec!["attachment-1".to_owned()];
+        port.confirmed_attachments
+            .lock()
+            .insert(attachments[0].clone());
+        let old_path = {
+            let mut state = store.remote_proxies.lock();
+            std::mem::replace(
+                &mut state.path,
+                temp.path().join("missing-parent/remote.json"),
+            )
+        };
+        assert_eq!(
+            service
+                .commit_prepared(
+                    &request.semantics.local_session_id,
+                    &request.semantics.remote_session_ref,
+                    prepared.retry_handle.clone(),
+                    &attachments,
+                )
+                .unwrap_err()
+                .code(),
+            "remote_pending_persist_failed"
+        );
+        store.remote_proxies.lock().path = old_path;
+        assert_eq!(handle(&store, &request), prepared.retry_handle);
+        assert_eq!(port.send_count.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn cancel_requires_an_attempted_task_in_the_current_remote_binding() {
+        let (_temp, store, request) = setup();
+        let port = Arc::new(FakePort::new(
+            store.clone(),
+            request.semantics.local_session_id.clone(),
+        ));
+        let service = RemoteDispatchService::new(store.clone(), port.clone());
+        let prepared = service.reserve_new(same_request(&request)).unwrap();
+        assert_eq!(
+            service
+                .cancel_task(
+                    &request.semantics.local_session_id,
+                    &request.semantics.remote_session_ref,
+                    &request.task_id,
+                )
+                .unwrap_err()
+                .code(),
+            "remote_task_not_cancellable"
+        );
+        assert_eq!(port.cancel_count.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            service
+                .commit_prepared(
+                    &request.semantics.local_session_id,
+                    &request.semantics.remote_session_ref,
+                    prepared.retry_handle,
+                    &[],
+                )
+                .unwrap()
+                .state,
+            RemoteDispatchState::Queued
+        );
+        assert_eq!(
+            service
+                .cancel_task(
+                    &request.semantics.local_session_id,
+                    &request.semantics.remote_session_ref,
+                    "other-task",
+                )
+                .unwrap_err()
+                .code(),
+            "remote_task_not_cancellable"
+        );
+        let cancel = service
+            .cancel_task(
+                &request.semantics.local_session_id,
+                &request.semantics.remote_session_ref,
+                &request.task_id,
+            )
+            .unwrap();
+        assert_eq!(cancel.request_id, "cancel-request-1");
+        assert_eq!(cancel.state, RemoteCancelState::Queued);
+        assert_eq!(port.cancel_count.load(Ordering::SeqCst), 1);
+        store.remote_proxies.lock().current_context = None;
+        assert_eq!(
+            service
+                .cancel_task(
+                    &request.semantics.local_session_id,
+                    &request.semantics.remote_session_ref,
+                    &request.task_id,
+                )
+                .unwrap_err()
+                .code(),
+            "remote_binding_mismatch"
+        );
+        assert_eq!(port.cancel_count.load(Ordering::SeqCst), 1);
     }
 
     fn terminal_candidate(

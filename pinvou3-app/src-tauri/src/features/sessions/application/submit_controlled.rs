@@ -6,6 +6,7 @@
 use serde_json::Value;
 
 use super::ports::{UseCaseError, UseCaseFuture};
+use crate::features::files::file_ingest::PublishedAttachment;
 use crate::features::sessions::remote_proxy::schema::valid_remote_identifier;
 
 pub(crate) trait SubmitControlledUseCase: Send + Sync {
@@ -34,15 +35,38 @@ pub(crate) struct RemoteControlledInput {
     pub(crate) payload: Value,
 }
 
-#[derive(Debug)]
 pub(crate) struct LocalControlledInput {
     pub(crate) remote_ref: String,
     pub(crate) generation: String,
     pub(crate) expected_session_id: String,
     pub(crate) title: String,
     pub(crate) code_mode: bool,
-    /// UI supplies content only. IDs, digest and lease fields come from Rust.
+    /// Present only for a code lane and resolved from B-owned state, never
+    /// accepted from the local WebView command.
+    pub(crate) workspace_id: Option<String>,
+    /// The WebView supplies text and local selections only. Rust has already
+    /// resolved attachment paths into B-local, non-serializable descriptors;
+    /// task/request IDs, attachment handles, digest and lease fields all come
+    /// from Rust.
     pub(crate) text: String,
+    pub(crate) skill_ids: Vec<String>,
+    pub(crate) attachments: Vec<PublishedAttachment>,
+}
+
+impl std::fmt::Debug for LocalControlledInput {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("LocalControlledInput")
+            .field("remote_ref", &self.remote_ref)
+            .field("generation", &self.generation)
+            .field("expected_session_id", &self.expected_session_id)
+            .field("code_mode", &self.code_mode)
+            .field("workspace_id", &self.workspace_id)
+            .field("text_bytes", &self.text.len())
+            .field("skill_ids", &self.skill_ids)
+            .field("attachment_count", &self.attachments.len())
+            .finish()
+    }
 }
 
 impl ControlledInput {
@@ -68,6 +92,10 @@ pub(crate) struct PreparedControlledTask {
     pub(crate) client_request_id: String,
     pub(crate) input_digest: String,
     pub(crate) payload: Value,
+    /// Non-serializable B-local descriptors paired with the opaque IDs in
+    /// `payload.input.attachment_ids`. Remote input uses the upload owner and
+    /// therefore leaves this as `None`; B-local input always sets it.
+    pub(crate) local_attachments: Option<Vec<PublishedAttachment>>,
 }
 
 fn payload_matches_identity(
@@ -163,9 +191,6 @@ impl<P: ControlledSubmissionPort> SubmitControlledUseCase for ControlledSubmissi
                 }
                 ControlledInput::Local(input) if input.text.trim().is_empty() => {
                     return Err(UseCaseError::new("task_input_invalid", false));
-                }
-                ControlledInput::Local(input) if input.code_mode => {
-                    return Err(UseCaseError::new("task_mode_unsupported", false));
                 }
                 _ => {}
             }
@@ -324,6 +349,7 @@ mod tests {
                 client_request_id: input.client_request_id,
                 input_digest: input.input_digest,
                 payload,
+                local_attachments: None,
             })
         }
 
@@ -351,6 +377,7 @@ mod tests {
                 client_request_id,
                 input_digest,
                 payload,
+                local_attachments: None,
             })
         }
 
@@ -404,7 +431,10 @@ mod tests {
             expected_session_id: "b-session-1".into(),
             title: String::new(),
             code_mode: false,
+            workspace_id: None,
             text: "B first turn".into(),
+            skill_ids: Vec::new(),
+            attachments: Vec::new(),
         })
     }
 
@@ -566,13 +596,12 @@ mod tests {
             use_case.port.trace.lock().as_slice(),
             &["validate_local_context", "validate_local_context"]
         );
-        for mutate in ["remote_ref", "generation", "mode", "oversized"] {
+        for mutate in ["remote_ref", "generation", "oversized"] {
             let mut input = local();
             if let ControlledInput::Local(local) = &mut input {
                 match mutate {
                     "remote_ref" => local.remote_ref = "bad/slash".into(),
                     "generation" => local.generation = "bad/slash".into(),
-                    "mode" => local.code_mode = true,
                     _ => local.text = "é".repeat(32 * 1024 + 1),
                 }
             }
@@ -602,7 +631,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn oversized_or_unsupported_b_input_never_reaches_mapping_even_when_bound() {
+    async fn oversized_b_input_never_reaches_mapping_even_when_bound() {
         let use_case = ControlledSubmission::new(FakeDev13Adapter::default());
         use_case.port.mapped.store(true, Ordering::SeqCst);
         use_case.port.created.store(1, Ordering::SeqCst);
@@ -617,14 +646,6 @@ mod tests {
         assert_eq!(
             use_case.port.trace.lock().as_slice(),
             &["validate_local_context"]
-        );
-        let mut code = local();
-        if let ControlledInput::Local(input) = &mut code {
-            input.code_mode = true;
-        }
-        assert_eq!(
-            use_case.submit(code).await.unwrap_err().code(),
-            "task_mode_unsupported"
         );
         assert_eq!(use_case.port.created.load(Ordering::SeqCst), 1);
         assert_eq!(

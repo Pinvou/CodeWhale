@@ -119,16 +119,18 @@ test('capability snapshots are bound to connection, lease and revision', () => {
   state = logic.applyControllerStatus(state, {
     ...liveController('connection-1', '2'),
   });
+  state.controllerConnection.sessionRef = 'session-ref-1';
   const snapshot = {
     connectionId: 'connection-1',
     controllerLeaseId: 'lease-connection-1',
     leaseEpoch: '2',
     relayEpoch: 'relay-connection-1',
     remoteControlGeneration: 'generation-connection-1',
+    remoteSessionRef: 'session-ref-1',
     capabilityRevision: 4,
     modes: ['chat', 'code'],
     tools: [{ toolId: 'browser', displayName: 'Browser' }],
-    skills: [{ skillId: 'visual-design', displayName: 'Visual' }],
+    skills: [{ skillId: 'visual-design', displayName: 'Visual', scopes: ['chat'] }],
     workspaces: [{ workspaceId: 'workspace-1', displayName: 'Project', codeAllowed: true }],
   };
   const applied = logic.applyCapabilities(state, snapshot);
@@ -215,6 +217,7 @@ test('B-side task projection keeps locally visible prompt text across status cha
     sessionId: 'session-b',
     sessionRef: 'session-ref-a',
     generation: 'generation-b',
+    lane: 'chat',
   });
   state = logic.applyControlledTaskEvent(state, {
     taskId: 'task-visible',
@@ -248,6 +251,7 @@ test('B-side projections reject stale sessions and reset with the controlled gen
     sessionId: 'session-current',
     sessionRef: 'session-ref-current',
     generation: 'generation-1',
+    lane: 'chat',
   });
 
   const staleTask = logic.applyControlledTaskEvent(state, {
@@ -304,6 +308,7 @@ test('B-side task content remains visible after a terminal failure', () => {
     sessionId: 'session-b',
     sessionRef: 'remote-session-b',
     generation: 'generation-1',
+    lane: 'chat',
   });
   state = logic.applyControlledTaskEvent(state, {
     taskId: 'task-visible',
@@ -347,6 +352,7 @@ test('a new controlled-device generation drops old task projections', () => {
     sessionId: 'old-session',
     sessionRef: 'old-remote-session',
     generation: 'generation-1',
+    lane: 'chat',
   });
   state = logic.applyControlledTaskEvent(state, {
     taskId: 'old-task',
@@ -388,15 +394,33 @@ test('bridge feature gates every desktop call behind the Windows capability', ()
   assert.match(feature, /"controlledTranscript",/, 'B local session projection remains available');
   // The bridge must never forward raw credential fields.
   assert.ok(!/api_key|apiKey|credential_ref|credentialRef/.test(feature));
-  // Every desktop command it forwards is a desktop_remote_* command.
+  // Remote operations stay in the desktop namespace. B-local input may first
+  // adopt an existing managed draft attachment after the same feature gate.
   const invokes = [...feature.matchAll(/invoke\("([^"]+)"/g)].map((match) => match[1]);
   assert.ok(invokes.length > 20);
   for (const command of invokes) {
     assert.ok(
-      command.startsWith('desktop_remote_'),
+      command.startsWith('desktop_remote_') || command === 'adopt_draft_attachment',
       `unexpected command forwarded from the desktop bridge: ${command}`,
     );
   }
+});
+
+test('B capability UI follows an authoritative lane projection for the same session', () => {
+  let state = logic.createState();
+  state = logic.applyControlledStatus(state, { status: 'connected', generation: 'generation-1' });
+  state = logic.applyControlledSession(state, {
+    sessionId: 'session-1', sessionRef: 'remote-1', generation: 'generation-1', lane: 'chat',
+  });
+  assert.equal(state.controlledSession.lane, 'chat');
+  const code = logic.applyControlledSession(state, {
+    sessionId: 'session-1', sessionRef: 'remote-1', generation: 'generation-1', lane: 'code',
+  });
+  assert.equal(code.controlledSession.lane, 'code');
+  const invalid = logic.applyControlledSession(code, {
+    sessionId: 'session-1', sessionRef: 'remote-1', generation: 'generation-1', lane: 'future',
+  });
+  assert.equal(invalid, code);
 });
 
 test('B live status without a generation cannot open the controlled chat', () => {
