@@ -13,6 +13,8 @@ fi
 
 RELAY_DIR="$ROOT/remote-control-relay"
 SERVER="${PINVOU_REMOTE_DEPLOY_SERVER:-root@47.120.8.237}"
+# 与测试端点部署脚本保持同一约定：默认使用本机部署私钥，且全程 BatchMode。
+SSH_KEY="${SSH_KEY:-$HOME/.ssh/id_ed25519_pinvou8}"
 REMOTE_DIR="${PINVOU_REMOTE_DEPLOY_DIR:-/opt/pinvou-remote-relay}"
 SERVICE="${PINVOU_REMOTE_DEPLOY_SERVICE:-pinvou-remote-relay.service}"
 PUBLIC_URL="${PINVOU_REMOTE_PUBLIC_URL:-https://pinvou.com/pinvou3/remote}"
@@ -75,7 +77,7 @@ verify_public() {
   if [[ "$expected" == "release" ]]; then
     if [[ "$page" != *'<title>PINVOU 智能助手'* \
       || "$page" != *'<base href="/pinvou3/remote/">'* \
-      || "$page" != *'/pinvou3/remote/platform/tauri/bridge.js'* ]]; then
+      || "$page" != *'/pinvou3/remote/assets/'* ]]; then
       VERIFY_ERROR="公网页面未命中完整 WebUI v2 或生产 base path"
       return 1
     fi
@@ -108,7 +110,9 @@ fi
 test -f "$RELAY_DIR/web/dist/index.html"
 test -f "$RELAY_DIR/web/dist/platform/tauri/bridge.js"
 grep -Fq '<base href="/pinvou3/remote/">' "$RELAY_DIR/web/dist/index.html"
-grep -Fq '/pinvou3/remote/platform/tauri/bridge.js' "$RELAY_DIR/web/dist/index.html"
+# 当前 WebUI 由入口 JS 动态加载 bridge，index.html 不再内联该路径；改为校验
+# 「入口引用生产 base path 且 bridge 资源随包存在」，避免把构建方式变化误判成部署失败。
+grep -Fq '/pinvou3/remote/assets/' "$RELAY_DIR/web/dist/index.html"
 if [[ "${SKIP_LOCAL_TESTS:-0}" != "1" ]]; then
   (cd "$RELAY_DIR" && npm test)
 fi
@@ -116,21 +120,21 @@ ensure_cached_db "$IPV4_DB_CACHE" "$IPV4_DB_URL" "$IPV4_DB_SHA256"
 ensure_cached_db "$IPV6_DB_CACHE" "$IPV6_DB_URL" "$IPV6_DB_SHA256"
 
 tar -czf - -C "$RELAY_DIR" \
-  server.js telemetry-service.js behavior-telemetry-schema.js \
+  $(cd "$RELAY_DIR" && ls *.js) \
   -C "$ROOT" \
   docs/schemas/behavior-telemetry-v1.schema.json \
   docs/schemas/behavior-telemetry-registries.json \
-  | ssh "$SERVER" "cat > '$REMOTE_CODE_TMP'"
+  | ssh -i "$SSH_KEY" -o BatchMode=yes "$SERVER" "cat > '$REMOTE_CODE_TMP'"
 # dist 内包含带哈希的 JS/CSS、桥接脚本和本地 vendor，必须作为一个版本整体上传。
-tar -czf - -C "$RELAY_DIR/web/dist" . | ssh "$SERVER" "cat > '$REMOTE_WEB_TMP'"
-scp "$RELAY_DIR/web/stats.html" "$SERVER:$REMOTE_STATS_TMP"
-scp "$RELAY_DIR/10-hardening.conf" "$SERVER:$REMOTE_HARDENING_TMP"
-scp "$RELAY_DIR/package.json" "$SERVER:$REMOTE_PACKAGE_TMP"
-scp "$RELAY_DIR/package-lock.json" "$SERVER:$REMOTE_LOCK_TMP"
-scp "$IPV4_DB_CACHE" "$SERVER:$REMOTE_IPV4_DB_TMP"
-scp "$IPV6_DB_CACHE" "$SERVER:$REMOTE_IPV6_DB_TMP"
+tar -czf - -C "$RELAY_DIR/web/dist" . | ssh -i "$SSH_KEY" -o BatchMode=yes "$SERVER" "cat > '$REMOTE_WEB_TMP'"
+scp -i "$SSH_KEY" -o BatchMode=yes "$RELAY_DIR/web/stats.html" "$SERVER:$REMOTE_STATS_TMP"
+scp -i "$SSH_KEY" -o BatchMode=yes "$RELAY_DIR/10-hardening.conf" "$SERVER:$REMOTE_HARDENING_TMP"
+scp -i "$SSH_KEY" -o BatchMode=yes "$RELAY_DIR/package.json" "$SERVER:$REMOTE_PACKAGE_TMP"
+scp -i "$SSH_KEY" -o BatchMode=yes "$RELAY_DIR/package-lock.json" "$SERVER:$REMOTE_LOCK_TMP"
+scp -i "$SSH_KEY" -o BatchMode=yes "$IPV4_DB_CACHE" "$SERVER:$REMOTE_IPV4_DB_TMP"
+scp -i "$SSH_KEY" -o BatchMode=yes "$IPV6_DB_CACHE" "$SERVER:$REMOTE_IPV6_DB_TMP"
 
-deploy_output="$(ssh "$SERVER" bash -s -- "$REMOTE_DIR" "$SERVICE" "$STAMP" "$REMOTE_CODE_TMP" "$REMOTE_WEB_TMP" "$REMOTE_STATS_TMP" "$REMOTE_HARDENING_TMP" "$REMOTE_PACKAGE_TMP" "$REMOTE_LOCK_TMP" "$REMOTE_IPV4_DB_TMP" "$REMOTE_IPV6_DB_TMP" <<'REMOTE'
+deploy_output="$(ssh -i "$SSH_KEY" -o BatchMode=yes "$SERVER" bash -s -- "$REMOTE_DIR" "$SERVICE" "$STAMP" "$REMOTE_CODE_TMP" "$REMOTE_WEB_TMP" "$REMOTE_STATS_TMP" "$REMOTE_HARDENING_TMP" "$REMOTE_PACKAGE_TMP" "$REMOTE_LOCK_TMP" "$REMOTE_IPV4_DB_TMP" "$REMOTE_IPV6_DB_TMP" <<'REMOTE'
 set -Eeuo pipefail
 remote_dir="$1"
 service="$2"
@@ -174,7 +178,9 @@ rm -f "$web_tmp"
 test -f "$web_stage/index.html"
 test -f "$web_stage/platform/tauri/bridge.js"
 grep -Fq '<base href="/pinvou3/remote/">' "$web_stage/index.html"
-grep -Fq '/pinvou3/remote/platform/tauri/bridge.js' "$web_stage/index.html"
+# 当前 WebUI 由入口 JS 动态加载 bridge，index.html 不再内联该路径（2026-09-19 实测）；
+# 校验「入口引用生产 base path 且 bridge 资源随包存在」即可保持本意。
+grep -Fq '/pinvou3/remote/assets/' "$web_stage/index.html"
 mkdir -p "$backup"
 if [[ -f "$remote_dir/server.js" ]]; then cp -a "$remote_dir/server.js" "$backup/server.js"; else touch "$backup/no-server"; fi
 if [[ -d "$remote_dir/web/dist" ]]; then cp -a "$remote_dir/web/dist" "$backup/web-dist"; else touch "$backup/no-web-dist"; fi
@@ -185,11 +191,15 @@ if [[ -f "$remote_dir/telemetry-service.js" ]]; then
 else
   touch "$backup/no-telemetry-service"
 fi
-if [[ -f "$remote_dir/behavior-telemetry-schema.js" ]]; then
-  cp -a "$remote_dir/behavior-telemetry-schema.js" "$backup/behavior-telemetry-schema.js"
-else
-  touch "$backup/no-behavior-telemetry-schema"
-fi
+  if [[ -f "$remote_dir/behavior-telemetry-schema.js" ]]; then
+    cp -a "$remote_dir/behavior-telemetry-schema.js" "$backup/behavior-telemetry-schema.js"
+  else
+    touch "$backup/no-behavior-telemetry-schema"
+  fi
+  # 备份全部根目录 JS 模块：新版本可能引入 controller-*.js / enrollment-*.js 等文件，
+  # 回滚时必须整体还原（含"删除新引入文件"），否则旧 server.js 会与残留模块混装。
+  mkdir -p "$backup/code-js"
+  compgen -G "$remote_dir/*.js" > /dev/null && cp -a "$remote_dir"/*.js "$backup/code-js/" || true
 if [[ -d "$remote_dir/docs/schemas" ]]; then
   cp -a "$remote_dir/docs/schemas" "$backup/telemetry-schemas"
 else
@@ -216,6 +226,9 @@ rollback() {
   if [[ -f "$remote_dir/package.json" ]]; then (cd "$remote_dir" && npm ci --omit=dev); fi
   if [[ -f "$backup/no-telemetry-service" ]]; then rm -f "$remote_dir/telemetry-service.js"; else cp -a "$backup/telemetry-service.js" "$remote_dir/telemetry-service.js"; fi
   if [[ -f "$backup/no-behavior-telemetry-schema" ]]; then rm -f "$remote_dir/behavior-telemetry-schema.js"; else cp -a "$backup/behavior-telemetry-schema.js" "$remote_dir/behavior-telemetry-schema.js"; fi
+  # 整体还原根目录 JS 模块集合（deploy 前存在哪些就恢复哪些）。
+  rm -f "$remote_dir"/*.js
+  if compgen -G "$backup/code-js/*.js" > /dev/null; then cp -a "$backup/code-js"/*.js "$remote_dir"/; fi
   rm -rf "$remote_dir/docs/schemas"
   if [[ ! -f "$backup/no-telemetry-schemas" ]]; then mkdir -p "$remote_dir/docs"; cp -a "$backup/telemetry-schemas" "$remote_dir/docs/schemas"; fi
   if [[ -f "$backup/no-stats-html" ]]; then rm -f "$remote_dir/web/stats.html"; else cp -a "$backup/stats.html" "$remote_dir/web/stats.html"; fi
@@ -270,6 +283,17 @@ mv "$lock_tmp" "$remote_dir/package-lock.json"
 mv "$code_stage/server.js" "$remote_dir/server.js"
 mv "$code_stage/telemetry-service.js" "$remote_dir/telemetry-service.js"
 mv "$code_stage/behavior-telemetry-schema.js" "$remote_dir/behavior-telemetry-schema.js"
+# 其余根目录 JS 模块（controller-router/lease/resume/liveness/telemetry、
+# enrollment-registry、pairing-*、protocol-controller、relay-state-store 等）整体安装，
+# 与 server.js 同属一个发布单元；遗漏会让启用 controller lane 时 ERR_MODULE_NOT_FOUND。
+for extra in "$code_stage"/*.js; do
+  [ -e "$extra" ] || continue
+  name="$(basename "$extra")"
+  case "$name" in
+    server.js|telemetry-service.js|behavior-telemetry-schema.js) continue ;;
+  esac
+  cp -a "$extra" "$remote_dir/$name"
+done
 mkdir -p "$remote_dir/docs"
 rm -rf "$remote_dir/docs/schemas"
 mv "$code_stage/docs/schemas" "$remote_dir/docs/schemas"
@@ -288,9 +312,18 @@ if ! systemctl restart "$service" || ! systemctl is-active --quiet "$service"; t
   exit 1
 fi
 
-sleep 1
-if ! curl -fsS http://127.0.0.1:8787/pinvou3/remote/healthz >/dev/null \
-  || ! curl -fsS http://127.0.0.1:8787/pinvou3/telemetry/healthz >/dev/null; then
+# 有界重试：新版启动（含 controller runtime 初始化）可能超过 1 秒，固定 sleep 会把
+# 「启动稍慢」误判成失败并触发回滚（2026-09-19 实测踩坑）。
+healthy=0
+for _ in $(seq 1 30); do
+  if curl -fsS http://127.0.0.1:8787/pinvou3/remote/healthz >/dev/null \
+    && curl -fsS http://127.0.0.1:8787/pinvou3/telemetry/healthz >/dev/null; then
+    healthy=1
+    break
+  fi
+  sleep 1
+done
+if [ "$healthy" != "1" ]; then
   trap - ERR
   rollback
   echo "健康检查失败，已从 $backup 回滚" >&2
@@ -299,13 +332,19 @@ fi
 trap - ERR
 echo "backup=$backup"
 REMOTE
-)"
+) " || {
+  # 远程步骤失败时把它的 stdout 一并回显，否则 set -e 会在赋值处静默退出，
+  # 现场只剩一个 exit code（2026-09-19 实测踩坑）。
+  printf '%s\n' "$deploy_output" >&2
+  echo "远程部署步骤失败，请检查上方输出" >&2
+  exit 1
+}
 echo "$deploy_output"
 
 backup="$REMOTE_DIR/backups/$STAMP"
 
 rollback_remote() {
-  ssh "$SERVER" bash -s -- "$REMOTE_DIR" "$SERVICE" "$backup" <<'REMOTE'
+  ssh -i "$SSH_KEY" -o BatchMode=yes "$SERVER" bash -s -- "$REMOTE_DIR" "$SERVICE" "$backup" <<'REMOTE'
 set -euo pipefail
 remote_dir="$1"
 service="$2"
