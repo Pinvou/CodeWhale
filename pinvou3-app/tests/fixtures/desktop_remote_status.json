@@ -1,0 +1,54 @@
+{
+  "controllerConnected": {
+    "status": "connected",
+    "claimRequestId": "claim-0001",
+    "hasPendingCode": false,
+    "deviceDisplayName": "Studio PC",
+    "lease": {
+      "connectionId": "connection-0001",
+      "controllerLeaseId": "lease-0001",
+      "leaseEpoch": "1",
+      "relayEpoch": "relay-epoch-0001",
+      "remoteControlGeneration": "generation-0001"
+    },
+    "errorCode": null
+  },
+  "controllerError": {
+    "status": "error",
+    "claimRequestId": "claim-0001",
+    "hasPendingCode": false,
+    "deviceDisplayName": null,
+    "lease": {
+      "connectionId": "connection-0001",
+      "controllerLeaseId": "lease-0001",
+      "leaseEpoch": "1",
+      "relayEpoch": "relay-epoch-0001",
+      "remoteControlGeneration": "generation-0001"
+    },
+    "errorCode": "endpoint_offline"
+  },
+  "controlledWaiting": {
+    "status": "waiting_for_pairing",
+    "statusIntent": "1",
+    "generation": "generation-0001",
+    "registrationRequestId": "registration-0001",
+    "pairingCode": "2345678",
+    "pairingRemainingMs": 599000,
+    "deviceName": "Studio PC",
+    "workspaceCount": 1,
+    "codeModeAllowed": true,
+    "watchdogSuspect": false,
+    "errorCode": null
+  },
+  "controlledError": {
+    "status": "error",
+    "statusIntent": "1",
+    "generation": "generation-0001",
+    "registrationRequestId": null,
+    "deviceName": null,
+    "workspaceCount": 0,
+    "codeModeAllowed": false,
+    "watchdogSuspect": false,
+    "errorCode": "endpoint_offline"
+  }
+}

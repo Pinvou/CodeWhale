@@ -161,17 +161,25 @@ impl ClientRemoteDetail {
     }
 }
 
+fn validate_client_remote_event(
+    event: ClientRemoteEvent,
+    detail: ClientRemoteDetail,
+) -> Result<(), String> {
+    if matches!(event, ClientRemoteEvent::CapabilityHandshake)
+        && !matches!(detail, ClientRemoteDetail::Failed)
+    {
+        return Err("remote_client_event_invalid".into());
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub fn desktop_remote_client_event(
     event: ClientRemoteEvent,
     detail: ClientRemoteDetail,
 ) -> Result<(), String> {
     crate::platform::capabilities::ensure_desktop_remote_control_enabled()?;
-    if matches!(event, ClientRemoteEvent::CapabilityHandshake)
-        && !matches!(detail, ClientRemoteDetail::Failed)
-    {
-        return Err("remote_client_event_invalid".into());
-    }
+    validate_client_remote_event(event, detail)?;
     super::super::super::features::remote_control::controller::relay_runtime::log_controlled_event(
         event.as_str(),
         detail.as_str(),
@@ -504,12 +512,24 @@ mod tests {
             assert!(serde_json::from_str::<ClientRemoteDetail>(value).is_err());
         }
         assert_eq!(
-            desktop_remote_client_event(
+            validate_client_remote_event(
                 ClientRemoteEvent::CapabilityHandshake,
                 ClientRemoteDetail::Connected
             )
             .unwrap_err(),
             "remote_client_event_invalid"
+        );
+        assert_eq!(
+            desktop_remote_client_event(
+                ClientRemoteEvent::CapabilityHandshake,
+                ClientRemoteDetail::Connected
+            )
+            .unwrap_err(),
+            if crate::platform::capabilities::ensure_desktop_remote_control_enabled().is_ok() {
+                "remote_client_event_invalid"
+            } else {
+                UNSUPPORTED
+            }
         );
     }
 

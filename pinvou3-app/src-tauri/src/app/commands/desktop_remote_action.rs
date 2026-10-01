@@ -931,10 +931,43 @@ mod tests {
                 "local-0001",
                 "remote-0001",
                 &live(),
+                "foreign-task",
+                &["transfer-1".into()]
+            ),
+            Err("remote_attachment_binding_mismatch")
+        );
+        assert_eq!(
+            state.validate_completed_uploads(
+                "local-0001",
+                "remote-0001",
+                &live(),
                 "task-1",
                 &["transfer-1".into()],
             ),
-            Err("remote_attachment_unconfirmed")
+            Err("remote_attachment_binding_mismatch")
+        );
+        let mut retry = register(
+            &state,
+            "request-2",
+            "attachment_chunk",
+            Some("task-1"),
+            Some("transfer-1"),
+        );
+        settle(
+            &state,
+            json!({"request_id":"request-2", "session_id":"remote-0001", "operation":"attachment_chunk", "ok":true, "body":{"state":"completed"}}),
+        );
+        assert!(retry.try_recv().unwrap().is_ok());
+        assert!(
+            state
+                .validate_completed_uploads(
+                    "local-0001",
+                    "remote-0001",
+                    &live(),
+                    "task-1",
+                    &["transfer-1".into()]
+                )
+                .is_ok()
         );
     }
 

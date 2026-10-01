@@ -1294,6 +1294,52 @@ mod tests {
     }
 
     #[test]
+    pub(super) fn cancellation_between_start_and_tree_registration_is_not_lost() {
+        let operations = Arc::new(parking_lot::Mutex::new(InstallOperationState::default()));
+        let backend = AgentBackend::ClaudeAcp;
+        // Model a marker left by an already-finished operation. Starting the
+        // next operation must clear it as part of the same state transition
+        // that makes the operation visible to cancellation.
+        operations.lock().cancelled.insert(backend);
+
+        let (started_tx, started_rx) = std::sync::mpsc::sync_channel(0);
+        let (continue_tx, continue_rx) = std::sync::mpsc::sync_channel(0);
+        let worker_operations = operations.clone();
+        let worker = std::thread::spawn(move || {
+            let guard = AgentInstallGuard::try_start(&worker_operations, backend)
+                .expect("operation should start");
+            assert!(worker_operations.lock().is_active(backend));
+            assert!(
+                !worker_operations.lock().is_cancelled(backend),
+                "a stale marker must not contaminate the new operation"
+            );
+            started_tx.send(()).expect("publish start checkpoint");
+
+            // This checkpoint represents the gap before spawn/register. The
+            // cancelling thread must be able to mark this active operation
+            // even though there is not yet a managed process tree to kill.
+            continue_rx.recv().expect("resume installer");
+            assert!(
+                worker_operations.lock().is_cancelled(backend),
+                "a cancellation observed after start must never be cleared"
+            );
+            drop(guard);
+        });
+
+        started_rx
+            .recv()
+            .expect("installer reached start checkpoint");
+        assert!(operations.lock().request_cancel(backend));
+        continue_tx
+            .send(())
+            .expect("resume installer after cancellation");
+        worker.join().expect("installer thread should finish");
+
+        assert!(!operations.lock().is_active(backend));
+        assert!(!operations.lock().is_cancelled(backend));
+    }
+
+    #[test]
     pub(super) fn runtime_errors_are_isolated_per_agent() {
         let errors = AgentRuntimeErrors::default();
         errors.set(AgentBackend::ClaudeAcp, "Claude install failed".to_string());
