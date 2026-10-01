@@ -36,6 +36,7 @@ use super::journal::{JournalEvent, JournalSnapshot, MAX_EVENT_PAYLOAD_BYTES};
 use super::protocol::{
     LeaseContext, RuntimeValidationContext, SenderRole, validate_controller_runtime_message_json,
 };
+use super::recovery_budget::LivenessBudget;
 use super::relay_runtime::log_controller_event;
 use super::relay_transport::{
     AuthenticatedLease, ControllerRole, ControllerTransportConfig, ControllerTransportEvent,
@@ -43,7 +44,7 @@ use super::relay_transport::{
 };
 use super::resume::{
     build_controller_resume_prepare, build_controller_resume_ready_ack, new_resume_challenge,
-    resume_frame_matches_lease,
+    relay_resume_deadline_ms, resume_frame_matches_lease,
 };
 use crate::features::behavior_telemetry::{
     RemoteControlEvent, RemoteOutcome, RemoteReason, RemoteStage, track_remote_control,
@@ -446,7 +447,8 @@ pub(crate) struct ControllingLaneSinks<'a> {
     pub(crate) on_snapshot:
         &'a mut (dyn FnMut(&AuthenticatedSnapshotFrame<'_>) -> Result<(), String> + Send),
     /// E2E-06：待发送的 A 端心跳帧（明文控制帧，绑定当前租约）。
-    pub(crate) on_liveness: &'a mut (dyn FnMut(Value) + Send),
+    // True means authenticated transport admission succeeded, not remote receipt.
+    pub(crate) on_liveness: &'a mut (dyn FnMut(Value) -> bool + Send),
 }
 
 /// 握手完成后的通道保活与业务帧派发：断线投影为 reconnecting 并清空业务通道
@@ -489,8 +491,8 @@ pub(crate) async fn serve_controlling_lane_with_interval(
     let mut liveness = LivenessExpectations::default();
     let mut journal = JournalExpectations::default();
     let mut resume = ResumeAttempt::default();
-    let mut resume_baseline = lane_monotonic_millis();
-    let mut resume_deadline = tokio::time::Instant::now();
+    let mut budget = LivenessBudget::authenticated_cycle(lane_monotonic_millis());
+    let mut resume_deadline = budget.timer();
     loop {
         tokio::select! {
             biased;
@@ -498,7 +500,9 @@ pub(crate) async fn serve_controlling_lane_with_interval(
                 // 恢复期间不发心跳：业务与存活闸门都已挂起。
                 if !resume.is_active() {
                     if let Some(frame) = next_liveness_frame(manager, &mut liveness) {
-                        (sinks.on_liveness)(frame);
+                        let admitted = (sinks.on_liveness)(frame);
+                        budget.submitted(lane_monotonic_millis(), admitted);
+                        resume_deadline = budget.timer();
                     }
                     if let Ok((lease, capabilities)) = manager.live_runtime_context() {
                         for (session_ref, pending) in journal.due_replays(
@@ -514,7 +518,7 @@ pub(crate) async fn serve_controlling_lane_with_interval(
             }
             // 本地恢复预算耗尽：清空通道并按有界错误结束本次连接（Relay 侧
             // 自己的 deadline 是权威，本地只保证不会无限等待）。
-            _ = tokio::time::sleep_until(resume_deadline), if resume.is_active() => {
+            _ = tokio::time::sleep_until(resume_deadline) => {
                 business.clear();
                 fail_resume(manager, sinks);
                 return;
@@ -528,12 +532,12 @@ pub(crate) async fn serve_controlling_lane_with_interval(
                         }
                         // 断线：保留密钥材料并挂起业务/存活帧，随后启动恢复流程。
                         business.suspend();
-                        let status = manager.mark_transport_disconnected();
+                        let now_b = lane_monotonic_millis();
+                        let cutoff = budget.freeze(now_b);
+                        let status = manager.mark_transport_disconnected(now_b, cutoff);
                         (sinks.on_status)(&status);
-                        let now_b = lane_monotonic_millis().saturating_sub(resume_baseline);
                         if begin_resume(lane, manager, &mut resume, now_b) {
-                            resume_deadline =
-                                tokio::time::Instant::now() + RESUME_BUDGET;
+                            resume_deadline = budget.timer();
                         } else {
                             business.clear();
                             fail_resume(manager, sinks);
@@ -542,7 +546,7 @@ pub(crate) async fn serve_controlling_lane_with_interval(
                     }
                     ControllerLaneEvent::Frame(json) => {
                         if resume.is_active() {
-                            let now_b = lane_monotonic_millis().saturating_sub(resume_baseline);
+                            let now_b = lane_monotonic_millis();
                             match handle_resume_frame(lane, manager, business, &mut resume, now_b, &json) {
                                 ResumeOutcome::Progressed | ResumeOutcome::Ignored => {}
                                 ResumeOutcome::Completed => {
@@ -552,8 +556,10 @@ pub(crate) async fn serve_controlling_lane_with_interval(
                                     // response. Preserve stable pending replay
                                     // IDs and retry them on the next heartbeat.
                                     journal.rearm_pending(tokio::time::Instant::now());
-                                    // 恢复后重新计时（Relay 会重置 30 秒预算）。
-                                    resume_baseline = lane_monotonic_millis();
+                                    // Only the complete authenticated final result
+                                    // can establish the next finite local cycle.
+                                    budget = LivenessBudget::authenticated_cycle(now_b);
+                                    resume_deadline = budget.timer();
                                 }
                                 ResumeOutcome::Failed => {
                                     business.clear();
@@ -578,9 +584,6 @@ pub(crate) async fn serve_controlling_lane_with_interval(
         }
     }
 }
-
-/// 恢复尝试的本地预算（与 Relay 的 `RESUME_BUDGET_MS` 同量级，不放大对端预算）。
-const RESUME_BUDGET: Duration = Duration::from_secs(30);
 
 /// 恢复尝试的本地状态：`challenge_b64` 非空即代表一次进行中的恢复。
 #[derive(Default)]
@@ -647,7 +650,7 @@ fn begin_resume(
         &request_id,
         &material.resume_token,
         &challenge,
-        material.original_deadline_b,
+        material.relay_deadline_identity_ms,
     ) else {
         return false;
     };
@@ -816,6 +819,9 @@ fn handle_resume_frame(
             let Some(new_token) = frame.get("new_resume_token_b64").and_then(Value::as_str) else {
                 return ResumeOutcome::Ignored;
             };
+            let Some(relay_deadline) = relay_resume_deadline_ms(&frame) else {
+                return ResumeOutcome::Failed;
+            };
             let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(new_token) else {
                 return ResumeOutcome::Ignored;
             };
@@ -833,7 +839,7 @@ fn handle_resume_frame(
                     liveness_epoch_a,
                     token,
                     fingerprint,
-                    RESUME_BUDGET.as_millis() as u64,
+                    relay_deadline,
                 )
                 .is_err()
             {
@@ -1649,7 +1655,7 @@ pub(crate) async fn connect_controlling_device(
         };
         let mut on_liveness = |frame: Value| {
             // E2E-06 心跳：经当前认证 transport 的租约控制队列发送。
-            let _ = device.send_authenticated_control(&frame);
+            device.send_authenticated_control(&frame).is_ok()
         };
         let mut sinks = ControllingLaneSinks {
             on_status: &mut on_status,
@@ -2203,7 +2209,7 @@ mod tests {
             snapshots_seen.push(frame.snapshot().clone());
             Ok(())
         };
-        let mut on_liveness = |_frame: Value| {};
+        let mut on_liveness = |_frame: Value| true;
         let mut sinks = ControllingLaneSinks {
             on_status: &mut on_status,
             on_session: &mut on_session,
@@ -2426,7 +2432,7 @@ mod tests {
             Ok(())
         };
         let mut on_snapshot = |_: &AuthenticatedSnapshotFrame<'_>| Ok(());
-        let mut on_liveness = |_: Value| {};
+        let mut on_liveness = |_: Value| true;
         let mut sinks = ControllingLaneSinks {
             on_status: &mut on_status,
             on_session: &mut on_session,
@@ -2491,7 +2497,7 @@ mod tests {
         let mut stale_task = |_: &LeaseContext, event: Value| task_events.push(event);
         let mut stale_journal = |_: &AuthenticatedJournalFrame<'_>| Ok(());
         let mut stale_snapshot = |_: &AuthenticatedSnapshotFrame<'_>| Ok(());
-        let mut stale_liveness = |_: Value| {};
+        let mut stale_liveness = |_: Value| true;
         let mut stale_sinks = ControllingLaneSinks {
             on_status: &mut stale_status,
             on_session: &mut stale_session,
@@ -2631,6 +2637,7 @@ mod tests {
                     "activation_id": "activation-0001",
                     "liveness_epoch_a": "live-a-2",
                     "liveness_epoch_b": "live-b-2",
+                    "resume_deadline_ms": "1700000030000",
                     "new_resume_token_b64": base64::engine::general_purpose::STANDARD.encode([3_u8; 32]),
                     "connection_id": lane_lease.connection_id,
                     "controller_lease_id": lane_lease.controller_lease_id,
@@ -2649,7 +2656,7 @@ mod tests {
         let mut on_task = |_: &LeaseContext, _: Value| {};
         let mut on_journal = |_: &AuthenticatedJournalFrame<'_>| Ok(());
         let mut on_snapshot = |_: &AuthenticatedSnapshotFrame<'_>| Ok(());
-        let mut on_liveness = |_: Value| {};
+        let mut on_liveness = |_: Value| true;
         let mut sinks = ControllingLaneSinks {
             on_status: &mut on_status,
             on_session: &mut on_session,
@@ -2692,6 +2699,12 @@ mod tests {
             "恢复必须采用 Relay 下发的 A 端 liveness epoch"
         );
         assert!(!business.is_suspended(), "恢复后业务通道必须重新打开");
+        let now_a = lane_monotonic_millis();
+        manager.mark_transport_disconnected(now_a, Some(now_a + 30_000));
+        let second = manager
+            .begin_resume(manager.current_operation().unwrap(), now_a)
+            .unwrap();
+        assert_eq!(second.relay_deadline_identity_ms, 1_700_000_030_000);
         assert!(
             manager.send_resume_control(&json!({})).is_err(),
             "非恢复族的帧不得走恢复敏感队列"
@@ -2878,7 +2891,7 @@ mod tests {
             snapshots_seen.push(frame.snapshot().clone());
             Ok(())
         };
-        let mut on_liveness = |_frame: Value| {};
+        let mut on_liveness = |_frame: Value| true;
         let mut sinks = ControllingLaneSinks {
             on_status: &mut on_status,
             on_session: &mut on_session,
@@ -2946,7 +2959,7 @@ mod tests {
         let mut on_task = |_: &LeaseContext, _: Value| {};
         let mut on_journal = |_: &AuthenticatedJournalFrame<'_>| Ok(());
         let mut on_snapshot = |_: &AuthenticatedSnapshotFrame<'_>| Ok(());
-        let mut on_liveness = |_: Value| {};
+        let mut on_liveness = |_: Value| false;
         let mut sinks = ControllingLaneSinks {
             on_status: &mut on_status,
             on_session: &mut on_session,
@@ -3048,7 +3061,10 @@ mod tests {
         let mut on_task = |_: &LeaseContext, _: Value| {};
         let mut on_journal = |_: &AuthenticatedJournalFrame<'_>| Ok(());
         let mut on_snapshot = |_: &AuthenticatedSnapshotFrame<'_>| Ok(());
-        let mut on_liveness = |frame: Value| responses.push(frame);
+        let mut on_liveness = |frame: Value| {
+            responses.push(frame);
+            true
+        };
         let mut sinks = ControllingLaneSinks {
             on_status: &mut on_status,
             on_session: &mut on_session,
@@ -3323,7 +3339,7 @@ mod tests {
             snapshots_seen.push(frame.snapshot().clone());
             Ok(())
         };
-        let mut on_liveness = |_frame: Value| {};
+        let mut on_liveness = |_frame: Value| true;
         let mut sinks = ControllingLaneSinks {
             on_status: &mut on_status,
             on_session: &mut on_session,
@@ -3472,7 +3488,7 @@ mod tests {
             snapshots_seen.push(frame.snapshot().clone());
             Ok(())
         };
-        let mut on_liveness = |_: Value| {};
+        let mut on_liveness = |_: Value| true;
         let mut sinks = ControllingLaneSinks {
             on_status: &mut on_status,
             on_session: &mut on_session,
@@ -3646,7 +3662,10 @@ mod tests {
         let mut on_task = |_: &LeaseContext, _: Value| {};
         let mut on_journal = |_: &AuthenticatedJournalFrame<'_>| Ok(());
         let mut on_snapshot = |_: &AuthenticatedSnapshotFrame<'_>| Ok(());
-        let mut on_liveness = |frame: Value| frames.push(frame);
+        let mut on_liveness = |frame: Value| {
+            frames.push(frame);
+            true
+        };
         let mut sinks = ControllingLaneSinks {
             on_status: &mut on_status,
             on_session: &mut on_session,

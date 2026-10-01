@@ -780,6 +780,7 @@ struct PendingPermission {
     option_kinds: HashMap<String, String>,
     remote_owner: Option<RemotePermissionOwner>,
     remote_request_id: Option<String>,
+    remote_approval_id: Option<String>,
     remote_projection: Option<RemotePermissionProjection>,
     activity: stall::ActivityClock,
     response_tx: oneshot::Sender<RequestPermissionResponse>,
@@ -800,7 +801,8 @@ pub(crate) struct RemotePermissionOwner {
 
 #[derive(Debug, Clone)]
 pub(crate) struct RemoteOwnedPermission {
-    pub(crate) permission_request_id: String,
+    pub(crate) callback_id: String,
+    pub(crate) approval_id: Option<String>,
     pub(crate) owner: RemotePermissionOwner,
     pub(crate) projection: RemotePermissionProjection,
 }
@@ -845,6 +847,26 @@ async fn take_pending_permission(
     }
     stall::mark_activity(&request.activity);
     Ok(request)
+}
+
+/// Recheck the captured owner only after acquiring the pending-map lock.
+/// Owner release removes the owner before acquiring this lock, so a callback
+/// either participates in that cleanup or is immediately cancelled here.
+async fn insert_pending_permission(
+    pending: &Mutex<HashMap<String, PendingPermission>>,
+    owners: &parking_lot::Mutex<HashMap<String, RemotePermissionOwner>>,
+    key: String,
+    request: PendingPermission,
+) -> bool {
+    let mut pending = pending.lock().await;
+    if owners.lock().get(&request.view.session_id) != request.remote_owner.as_ref() {
+        let _ = request.response_tx.send(RequestPermissionResponse::new(
+            RequestPermissionOutcome::Cancelled,
+        ));
+        return false;
+    }
+    pending.insert(key, request);
+    true
 }
 
 async fn take_pending_elicitation(
@@ -4112,12 +4134,37 @@ impl AcpPool {
                     return None;
                 }
                 Some(RemoteOwnedPermission {
-                    permission_request_id: pending.remote_request_id.clone()?,
+                    callback_id: pending.remote_request_id.clone()?,
+                    approval_id: pending.remote_approval_id.clone(),
                     owner: owner.clone(),
                     projection: pending.remote_projection.clone()?,
                 })
             })
             .collect()
+    }
+
+    /// Mint and bind the B approval ID while the exact ACP callback and owner
+    /// are held. An A decision cannot observe an unbound approval callback.
+    pub(crate) async fn mint_remote_permission(
+        &self,
+        owner: &RemotePermissionOwner,
+        callback_id: &str,
+        authority: &crate::features::remote_control::controller::permission::PermissionAuthority,
+        ttl_ms: u64,
+    ) -> Result<crate::features::remote_control::controller::permission::PermissionView> {
+        let mut pending = self.pending_permissions.lock().await;
+        let owners = self.remote_permission_owners.lock();
+        if owners.get(&owner.session_id) != Some(owner) {
+            bail!("remote_permission_binding_stale");
+        }
+        let request = pending
+            .values_mut()
+            .find(|request| {
+                remote_request_owned_by(request.remote_owner.as_ref(), owner)
+                    && request.remote_request_id.as_deref() == Some(callback_id)
+            })
+            .context("remote_permission_binding_stale")?;
+        mint_pending_remote_permission(request, owner, callback_id, authority, ttl_ms)
     }
 
     /// Terminal/cancel/disconnect cleanup. Removing the owner first closes the
@@ -4230,14 +4277,14 @@ impl AcpPool {
         allow: bool,
     ) -> Result<()> {
         let mut pending = self.pending_permissions.lock().await;
-        let key = pending
-            .iter()
-            .find_map(|(key, request)| {
-                (remote_request_owned_by(request.remote_owner.as_ref(), owner)
-                    && request.remote_request_id.as_deref() == Some(permission_request_id))
-                .then(|| key.clone())
-            })
-            .context("remote_permission_binding_stale")?;
+        let key = {
+            let owners = self.remote_permission_owners.lock();
+            if owners.get(&owner.session_id) != Some(owner) {
+                bail!("remote_permission_binding_stale");
+            }
+            remote_permission_response_key(&pending, owner, permission_request_id)
+                .context("remote_permission_binding_stale")?
+        };
         let request = pending.remove(&key).expect("matched remote permission");
         let selected = remote_permission_option_id(&request.option_kinds, allow);
         let (response, option_id, outcome) = if let Some(option_id) = selected {
@@ -4768,7 +4815,9 @@ impl AcpPool {
                             request: request_value.clone(),
                         };
                         let (response_tx, response_rx) = oneshot::channel();
-                        pending_for_permission.lock().await.insert(
+                        if !insert_pending_permission(
+                            &pending_for_permission,
+                            &remote_owners_for_permission,
                             key.clone(),
                             PendingPermission {
                                 view,
@@ -4776,11 +4825,18 @@ impl AcpPool {
                                 option_kinds,
                                 remote_owner,
                                 remote_request_id,
+                                remote_approval_id: None,
                                 remote_projection,
                                 activity: bridge_for_permission.activity(),
                                 response_tx,
                             },
-                        );
+                        )
+                        .await
+                        {
+                            return responder.respond(RequestPermissionResponse::new(
+                                RequestPermissionOutcome::Cancelled,
+                            ));
+                        }
                         bridge_for_permission.emit(
                             "permission_requested",
                             json!({
@@ -5509,6 +5565,60 @@ fn remote_request_owned_by(
     expected: &RemotePermissionOwner,
 ) -> bool {
     candidate == Some(expected)
+}
+
+fn remote_permission_response_key(
+    pending: &HashMap<String, PendingPermission>,
+    owner: &RemotePermissionOwner,
+    approval_id: &str,
+) -> Option<String> {
+    pending.iter().find_map(|(key, request)| {
+        (remote_request_owned_by(request.remote_owner.as_ref(), owner)
+            && request.remote_approval_id.as_deref() == Some(approval_id))
+        .then(|| key.clone())
+    })
+}
+
+fn mint_pending_remote_permission(
+    request: &mut PendingPermission,
+    owner: &RemotePermissionOwner,
+    callback_id: &str,
+    authority: &crate::features::remote_control::controller::permission::PermissionAuthority,
+    ttl_ms: u64,
+) -> Result<crate::features::remote_control::controller::permission::PermissionView> {
+    use crate::features::remote_control::controller::permission::PermissionRequest;
+    if !remote_request_owned_by(request.remote_owner.as_ref(), owner)
+        || request.remote_request_id.as_deref() != Some(callback_id)
+    {
+        bail!("remote_permission_binding_stale");
+    }
+    if let Some(approval_id) = request.remote_approval_id.as_deref() {
+        return authority
+            .view(approval_id)
+            .map_err(|error| anyhow::anyhow!(error.code));
+    }
+    let projection = request
+        .remote_projection
+        .as_ref()
+        .context("remote_permission_binding_stale")?;
+    // Approval deadlines belong to the authority's epoch, never the task clock.
+    let now_ms = authority.now_ms();
+    let view = authority
+        .request(
+            &owner.lease,
+            &owner.task_id,
+            PermissionRequest {
+                operation_type: projection.operation_type.clone(),
+                risk_level: projection.risk_level.clone(),
+                target_scope: projection.target_scope.clone(),
+                preview: projection.preview.clone(),
+                expires_at_ms: now_ms.saturating_add(ttl_ms),
+            },
+            now_ms,
+        )
+        .map_err(|error| anyhow::anyhow!(error.code))?;
+    request.remote_approval_id = Some(view.permission_request_id.clone());
+    Ok(view)
 }
 
 fn local_elicitation_response_allowed(owner: Option<&RemotePermissionOwner>) -> bool {
@@ -6252,6 +6362,137 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn remote_approval_mints_once_and_resolves_only_the_exact_callback_owner() {
+        use crate::features::remote_control::controller::permission::{
+            DecisionAuthority, PermissionAuthority, PermissionDecision,
+        };
+        let owner = RemotePermissionOwner {
+            session_id: "session-remote".into(),
+            task_id: "task-remote".into(),
+            lease: crate::features::remote_control::controller::protocol::LeaseContext {
+                connection_id: "connection-1".into(),
+                controller_lease_id: "lease-1".into(),
+                lease_epoch: "1".into(),
+                relay_epoch: "relay-1".into(),
+                remote_control_generation: "generation-1".into(),
+            },
+        };
+        let (response_tx, response_rx) = oneshot::channel();
+        let mut request = PendingPermission {
+            view: CodexAcpPendingPermission {
+                session_id: owner.session_id.clone(),
+                tool_call_id: "tool-1".into(),
+                request: Value::Null,
+            },
+            option_ids: vec!["allow-once".into()],
+            option_kinds: HashMap::from([("allow-once".into(), "allow_once".into())]),
+            remote_owner: Some(owner.clone()),
+            remote_request_id: Some("private-callback".into()),
+            remote_approval_id: None,
+            remote_projection: Some(RemotePermissionProjection {
+                operation_type: "shell_command".into(),
+                risk_level: "high".into(),
+                target_scope: "workspace-1".into(),
+                preview: "secret command".into(),
+            }),
+            activity: stall::new_activity_clock(),
+            response_tx,
+        };
+        let permission_clock = Arc::new(std::sync::atomic::AtomicU64::new(9_001_000));
+        let observed = Arc::clone(&permission_clock);
+        let authority = PermissionAuthority::with_clock(Arc::new(move || {
+            observed.load(std::sync::atomic::Ordering::SeqCst)
+        }));
+        let mut foreign = owner.clone();
+        foreign.lease.controller_lease_id = "foreign-lease".into();
+        assert!(
+            mint_pending_remote_permission(
+                &mut request,
+                &foreign,
+                "private-callback",
+                &authority,
+                60_000
+            )
+            .is_err()
+        );
+        assert!(authority.pending_for_task(&owner.task_id).is_empty());
+        assert!(
+            mint_pending_remote_permission(
+                &mut request,
+                &owner,
+                "wrong-callback",
+                &authority,
+                60_000
+            )
+            .is_err()
+        );
+        let view = mint_pending_remote_permission(
+            &mut request,
+            &owner,
+            "private-callback",
+            &authority,
+            60_000,
+        )
+        .unwrap();
+        assert_ne!(view.permission_request_id, "private-callback");
+        assert_eq!(view.expires_at_ms, 9_061_000);
+        assert_eq!(view.preview, "[REDACTED]");
+        assert_eq!(
+            request.remote_approval_id.as_deref(),
+            Some(view.permission_request_id.as_str())
+        );
+        permission_clock.store(9_001_100, std::sync::atomic::Ordering::SeqCst);
+        let repeated = mint_pending_remote_permission(
+            &mut request,
+            &owner,
+            "private-callback",
+            &authority,
+            600_000,
+        )
+        .unwrap();
+        assert_eq!(repeated.permission_request_id, view.permission_request_id);
+        assert_eq!(repeated.expires_at_ms, view.expires_at_ms);
+        assert_eq!(authority.pending_for_task(&owner.task_id).len(), 1);
+        assert!(authority.view("private-callback").is_err());
+        let mut pending = HashMap::from([("original-callback-key".into(), request)]);
+        for id in ["private-callback", "forged-approval"] {
+            assert!(remote_permission_response_key(&pending, &owner, id).is_none());
+        }
+        assert!(
+            remote_permission_response_key(&pending, &foreign, &view.permission_request_id)
+                .is_none()
+        );
+        authority
+            .decide(
+                DecisionAuthority::ControllerA,
+                &owner.lease,
+                &owner.task_id,
+                &view.permission_request_id,
+                PermissionDecision::Allow,
+                authority.now_ms(),
+            )
+            .unwrap();
+        let key =
+            remote_permission_response_key(&pending, &owner, &view.permission_request_id).unwrap();
+        assert_eq!(key, "original-callback-key");
+        let request = pending.remove(&key).unwrap();
+        let option_id = remote_permission_option_id(&request.option_kinds, true).unwrap();
+        request
+            .response_tx
+            .send(RequestPermissionResponse::new(
+                RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(option_id)),
+            ))
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(response_rx.await.unwrap()).unwrap()["outcome"]["optionId"],
+            "allow-once"
+        );
+        assert!(
+            remote_permission_response_key(&pending, &owner, &view.permission_request_id).is_none()
+        );
+    }
+
     #[test]
     fn remote_permission_projection_maps_acp_metadata_without_leaking_payloads() {
         let request: RequestPermissionRequest = serde_json::from_value(json!({
@@ -6398,8 +6639,8 @@ mod tests {
                         elicitation_id: id.to_owned(),
                         request: json!({ "form": { "secretPath": "C:/private/secret.txt" } }),
                     },
-                    remote_owner,
                     activity: stall::new_activity_clock(),
+                    remote_owner,
                     response_tx,
                 },
                 response_rx,
@@ -6667,6 +6908,7 @@ mod tests {
                 option_kinds: HashMap::new(),
                 remote_owner: None,
                 remote_request_id: None,
+                remote_approval_id: None,
                 remote_projection: None,
                 activity: activity.clone(),
                 response_tx,
@@ -6696,6 +6938,64 @@ mod tests {
             "removing a user decision must reset the stall clock immediately"
         );
         drop(request);
+    }
+
+    #[tokio::test]
+    async fn remote_owner_release_before_callback_insert_cancels_without_orphaning() {
+        let owner = RemotePermissionOwner {
+            session_id: "session-remote".into(),
+            task_id: "task-remote".into(),
+            lease: crate::features::remote_control::controller::protocol::LeaseContext {
+                connection_id: "connection-1".into(),
+                controller_lease_id: "lease-1".into(),
+                lease_epoch: "1".into(),
+                relay_epoch: "relay-1".into(),
+                remote_control_generation: "generation-1".into(),
+            },
+        };
+        let pending = Arc::new(Mutex::new(HashMap::new()));
+        let owners = Arc::new(parking_lot::Mutex::new(HashMap::from([(
+            owner.session_id.clone(),
+            owner.clone(),
+        )])));
+        let (response_tx, response_rx) = oneshot::channel();
+        let request = PendingPermission {
+            view: CodexAcpPendingPermission {
+                session_id: owner.session_id.clone(),
+                tool_call_id: "tool-1".into(),
+                request: Value::Null,
+            },
+            option_ids: Vec::new(),
+            option_kinds: HashMap::new(),
+            remote_owner: Some(owner.clone()),
+            remote_request_id: Some("callback-1".into()),
+            remote_approval_id: None,
+            remote_projection: None,
+            activity: stall::new_activity_clock(),
+            response_tx,
+        };
+        // Deterministic barrier: the callback has captured its remote owner,
+        // but cannot insert until terminal cleanup has removed that owner.
+        let guard = pending.lock().await;
+        let (started_tx, started_rx) = oneshot::channel();
+        let insert = tokio::spawn({
+            let pending = pending.clone();
+            let owners = owners.clone();
+            async move {
+                started_tx.send(()).unwrap();
+                insert_pending_permission(&pending, &owners, "key-1".into(), request).await
+            }
+        });
+        started_rx.await.unwrap();
+        owners.lock().remove(&owner.session_id);
+        assert!(guard.is_empty());
+        drop(guard);
+        assert!(!insert.await.unwrap());
+        assert!(pending.lock().await.is_empty());
+        assert_eq!(
+            serde_json::to_value(response_rx.await.unwrap()).unwrap()["outcome"]["outcome"],
+            "cancelled"
+        );
     }
 
     /// A late closer must not close another turn.
