@@ -18,7 +18,7 @@ use super::liveness::{
 };
 use super::protocol::LeaseContext;
 use super::relay_transport::ControllerTransportSender;
-use super::resume::ControllerResumeGate;
+use super::resume::{ControllerResumeGate, ResumePhase};
 
 const MAX_DEVICE_NAME_CHARS: usize = 80;
 const MAX_WORKSPACES: usize = 16;
@@ -382,8 +382,11 @@ impl ControlledDeviceManager {
                 "desktop_remote_generation_mismatch",
             ));
         }
-        let watchdog = ControllerLivenessWatchdog::new(lease.liveness_epoch_a.clone())
-            .map_err(|_| ControlledStateError::new("liveness_epoch_invalid"))?;
+        let watchdog = ControllerLivenessWatchdog::authenticated_cycle(
+            lease.liveness_epoch_a.clone(),
+            lease.connected_at_b,
+        )
+        .map_err(|_| ControlledStateError::new("liveness_epoch_invalid"))?;
         let resume_gate = ControllerResumeGate::new(
             super::relay_transport::ControllerRole::ControlledB,
             lease.context.clone(),
@@ -433,20 +436,33 @@ impl ControlledDeviceManager {
     pub(crate) fn mark_transport_disconnected(&self, now_b: u64) -> ControlledStatus {
         let mut inner = self.inner.lock();
         inner.last_observed_now_b = inner.last_observed_now_b.max(now_b);
-        if inner.phase == ControlledStatusKind::Connected {
+        if matches!(
+            inner.phase,
+            ControlledStatusKind::Connected | ControlledStatusKind::Reconnecting
+        ) && inner
+            .resume_gate
+            .as_ref()
+            .is_none_or(|gate| gate.phase() == ResumePhase::Connected)
+        {
             let deadline = inner
                 .watchdog
-                .as_ref()
-                .and_then(|watchdog| watchdog.deadline_b());
-            if let Some(gate) = inner.resume_gate.as_mut() {
-                if gate.disconnect(now_b, deadline).is_err() {
-                    inner.phase = ControlledStatusKind::Error;
-                    inner.error_code = Some("desktop_remote_resume_invalid".to_owned());
-                } else {
-                    inner.phase = ControlledStatusKind::Reconnecting;
-                }
-            } else {
+                .as_mut()
+                .and_then(|watchdog| watchdog.freeze_deadline(now_b));
+            if inner
+                .resume_gate
+                .as_mut()
+                .is_some_and(|gate| gate.disconnect(now_b, deadline).is_ok())
+            {
                 inner.phase = ControlledStatusKind::Reconnecting;
+            } else {
+                let generation = inner.generation.clone().unwrap_or_default();
+                clear_sensitive(&mut inner, now_b, true);
+                inner.device_name = None;
+                inner.phase = ControlledStatusKind::Error;
+                inner.error_code = Some("desktop_remote_resume_invalid".to_owned());
+                drop(inner);
+                self.notify_cleanup(&generation);
+                return self.status();
             }
         }
         status_locked(&inner)
@@ -459,6 +475,7 @@ impl ControlledDeviceManager {
         sent_at_b: u64,
     ) -> Result<()> {
         let mut inner = self.inner.lock();
+        ensure_connected_evidence(&inner)?;
         let Some(watchdog) = inner.watchdog.as_mut() else {
             return Err(ControlledStateError::new("watchdog_unavailable"));
         };
@@ -469,6 +486,7 @@ impl ControlledDeviceManager {
 
     pub(crate) fn accept_direct_liveness(&self, json: &str, received_at_b: u64) -> Result<()> {
         let mut inner = self.inner.lock();
+        ensure_connected_evidence(&inner)?;
         let Some(context) = inner.lease_context.clone() else {
             return Err(ControlledStateError::new("lease_unavailable"));
         };
@@ -479,6 +497,7 @@ impl ControlledDeviceManager {
             .accept_direct_json(json, &context, received_at_b)
             .map_err(|_| ControlledStateError::new("liveness_evidence_invalid"))?;
         inner.last_observed_now_b = inner.last_observed_now_b.max(received_at_b);
+        recover_liveness_suspect(&mut inner, received_at_b);
         Ok(())
     }
 
@@ -492,6 +511,7 @@ impl ControlledDeviceManager {
         authenticate_relay_liveness_attestation(json, trust)
             .map_err(|_| ControlledStateError::new("liveness_evidence_invalid"))?;
         let mut inner = self.inner.lock();
+        ensure_connected_evidence(&inner)?;
         let Some(context) = inner.lease_context.clone() else {
             return Err(ControlledStateError::new("lease_unavailable"));
         };
@@ -505,6 +525,7 @@ impl ControlledDeviceManager {
             .accept_attestation_json(json, &context, request_sent_at_b, received_at_b)
             .map_err(|_| ControlledStateError::new("liveness_evidence_invalid"))?;
         inner.last_observed_now_b = inner.last_observed_now_b.max(received_at_b);
+        recover_liveness_suspect(&mut inner, received_at_b);
         Ok(())
     }
 
@@ -588,6 +609,7 @@ impl ControlledDeviceManager {
         resume_token: [u8; 32],
         transport_key_fingerprint: [u8; 32],
         now_b: u64,
+        relay_resume_deadline_ms: u64,
     ) -> Result<ControlledStatus> {
         let mut inner = self.inner.lock();
         ensure_operation(&inner, &operation)?;
@@ -598,7 +620,18 @@ impl ControlledDeviceManager {
             return Err(ControlledStateError::new("lease_unavailable"));
         };
         let epoch = liveness_epoch_a.into();
-        let deadline = now_b.saturating_add(30_000);
+        let next_watchdog =
+            ControllerLivenessWatchdog::authenticated_cycle(epoch.clone(), now_b).ok();
+        if relay_resume_deadline_ms == 0 || next_watchdog.is_none() {
+            let generation = inner.generation.clone().unwrap_or_default();
+            clear_sensitive(&mut inner, u64::MAX, true);
+            inner.device_name = None;
+            inner.phase = ControlledStatusKind::Error;
+            inner.error_code = Some("endpoint_offline".to_owned());
+            drop(inner);
+            self.notify_cleanup(&generation);
+            return Err(ControlledStateError::new("desktop_remote_resume_failed"));
+        }
         // Replacing the gate with the already-authenticated final material is
         // the single transition that cancels the old watchdog.
         inner.resume_gate = Some(ControllerResumeGate::new(
@@ -606,12 +639,9 @@ impl ControlledDeviceManager {
             context,
             resume_token,
             transport_key_fingerprint,
-            deadline,
+            relay_resume_deadline_ms,
         ));
-        inner.watchdog = Some(
-            ControllerLivenessWatchdog::new(epoch.clone())
-                .map_err(|_| ControlledStateError::new("liveness_epoch_invalid"))?,
-        );
+        inner.watchdog = next_watchdog;
         inner.liveness_epoch_a = Some(epoch);
         inner.phase = ControlledStatusKind::Connected;
         Ok(status_locked(&inner))
@@ -654,13 +684,6 @@ impl ControlledDeviceManager {
                 if inner.phase == ControlledStatusKind::Connected
                     && watchdog_state == Some(LivenessWatchdogState::Suspect)
                 {
-                    let deadline = inner
-                        .watchdog
-                        .as_ref()
-                        .and_then(|watchdog| watchdog.deadline_b());
-                    if let Some(gate) = inner.resume_gate.as_mut() {
-                        let _ = gate.disconnect(now_b, deadline);
-                    }
                     inner.phase = ControlledStatusKind::Reconnecting;
                 }
             }
@@ -859,6 +882,36 @@ fn normalize_workspaces(
         });
     }
     Ok(output)
+}
+
+fn ensure_connected_evidence(inner: &Inner) -> Result<()> {
+    if matches!(
+        inner.phase,
+        ControlledStatusKind::Connected | ControlledStatusKind::Reconnecting
+    ) && inner
+        .resume_gate
+        .as_ref()
+        .is_some_and(|gate| gate.phase() == ResumePhase::Connected)
+    {
+        Ok(())
+    } else {
+        Err(ControlledStateError::new("liveness_evidence_invalid"))
+    }
+}
+
+fn recover_liveness_suspect(inner: &mut Inner, now_b: u64) {
+    if inner.phase == ControlledStatusKind::Reconnecting
+        && inner
+            .resume_gate
+            .as_ref()
+            .is_some_and(|gate| gate.phase() == ResumePhase::Connected)
+        && inner
+            .watchdog
+            .as_ref()
+            .is_some_and(|watchdog| watchdog.state(now_b) == LivenessWatchdogState::Healthy)
+    {
+        inner.phase = ControlledStatusKind::Connected;
+    }
 }
 
 fn clear_sensitive(inner: &mut Inner, now_b: u64, clear_workspaces: bool) {
@@ -1121,7 +1174,7 @@ mod tests {
                     .code,
                 "liveness_evidence_invalid"
             );
-            assert_eq!(manager.status().watchdog_deadline_b, None);
+            assert_eq!(manager.status().watchdog_deadline_b, Some(33_000));
             let inner = manager.inner.lock();
             assert_eq!(inner.last_observed_now_b, prior_observed);
         }
@@ -1181,7 +1234,7 @@ mod tests {
             Some("Controller PC")
         );
         assert_eq!(connected.connected_at_b, Some(3_000));
-        assert_eq!(connected.watchdog_deadline_b, None);
+        assert_eq!(connected.watchdog_deadline_b, Some(33_000));
         let projected = manager.workspaces();
         assert_eq!(projected.len(), 1);
         assert_eq!(projected[0].display_name, "Projects");
@@ -1247,6 +1300,130 @@ mod tests {
         assert_eq!(manager.status().status, ControlledStatusKind::Reserving);
         assert_eq!(manager.status().workspace_count, 1);
         assert!(!manager.status().code_mode_allowed);
+    }
+
+    #[test]
+    fn late_valid_evidence_recovers_suspect_then_real_close_freezes_without_extension() {
+        let manager = ControlledDeviceManager::default();
+        let operation = manager.start(None, Vec::new()).unwrap();
+        register(&manager, &operation);
+        manager.mark_claimed(operation.clone()).unwrap();
+        manager
+            .complete_connected(operation.clone(), lease(&operation.generation))
+            .unwrap();
+        manager
+            .register_liveness_challenge("challenge-0001", "AAAAAAAAAAAAAAAAAAAAAA==", 1_000)
+            .unwrap();
+        manager
+            .accept_direct_liveness(&direct_liveness(&operation.generation), 2_000)
+            .unwrap();
+        assert_eq!(
+            manager.poll_watchdog(17_000).status,
+            ControlledStatusKind::Reconnecting
+        );
+        let mut proof: serde_json::Value =
+            serde_json::from_str(&direct_liveness(&operation.generation)).unwrap();
+        proof["challenge_id"] = "challenge-0002".into();
+        proof["challenge_b64"] = "AQEBAQEBAQEBAQEBAQEBAQ==".into();
+        proof["heartbeat_sequence_a"] = "2".into();
+        manager
+            .register_liveness_challenge("challenge-0002", "AQEBAQEBAQEBAQEBAQEBAQ==", 17_000)
+            .unwrap();
+        manager
+            .accept_direct_liveness(&proof.to_string(), 18_000)
+            .unwrap();
+        assert_eq!(manager.status().status, ControlledStatusKind::Connected);
+        assert_eq!(manager.status().watchdog_deadline_b, Some(46_000));
+        assert_eq!(
+            manager.mark_transport_disconnected(19_000).status,
+            ControlledStatusKind::Reconnecting
+        );
+        assert_eq!(
+            manager
+                .inner
+                .lock()
+                .resume_gate
+                .as_ref()
+                .unwrap()
+                .frozen_deadline_b(),
+            Some(46_000)
+        );
+        assert!(
+            manager
+                .register_liveness_challenge("challenge-0003", "AgICAgICAgICAgICAgICAg==", 20_000)
+                .is_err()
+        );
+        assert!(
+            manager
+                .accept_direct_liveness(&proof.to_string(), 20_000)
+                .is_err()
+        );
+        manager.mark_transport_disconnected(25_000);
+        assert_eq!(manager.status().watchdog_deadline_b, Some(46_000));
+        assert_eq!(
+            manager.poll_watchdog(46_000).status,
+            ControlledStatusKind::Error
+        );
+    }
+
+    #[test]
+    fn missing_or_expired_evidence_on_close_cleans_sensitive_state_immediately() {
+        for missing in [false, true] {
+            let cleanup = Arc::new(CleanupCounter::default());
+            let manager = ControlledDeviceManager::default();
+            manager.register_cleanup_sink(cleanup.clone());
+            let operation = manager.start(None, Vec::new()).unwrap();
+            register(&manager, &operation);
+            manager.mark_claimed(operation.clone()).unwrap();
+            manager
+                .complete_connected(operation.clone(), lease(&operation.generation))
+                .unwrap();
+            if missing {
+                manager.inner.lock().watchdog = None;
+            }
+            assert_eq!(
+                manager.mark_transport_disconnected(33_000).status,
+                ControlledStatusKind::Error
+            );
+            assert!(manager.inner.lock().lease_context.is_none());
+            assert!(manager.inner.lock().resume_gate.is_none());
+            assert_eq!(cleanup.0.load(Ordering::SeqCst), 1);
+        }
+    }
+
+    #[test]
+    fn invalid_resumed_cycle_metadata_cleans_generation_and_notifies_once() {
+        for (deadline, epoch, now) in [
+            (0, "live-a-2", 7_000),
+            (60_000, "", 7_000),
+            (60_000, "invalid epoch", 7_000),
+            (60_000, "live~a-2", 7_000),
+            (60_000, "live-a-2", u64::MAX),
+        ] {
+            let cleanup = Arc::new(CleanupCounter::default());
+            let manager = ControlledDeviceManager::default();
+            manager.register_cleanup_sink(cleanup.clone());
+            let operation = manager.start(None, Vec::new()).unwrap();
+            register(&manager, &operation);
+            manager.mark_claimed(operation.clone()).unwrap();
+            manager
+                .complete_connected(operation.clone(), lease(&operation.generation))
+                .unwrap();
+            manager.mark_transport_disconnected(5_000);
+            assert_eq!(
+                manager
+                    .complete_resumed(operation, epoch, [3; 32], [4; 32], now, deadline)
+                    .unwrap_err()
+                    .code,
+                "desktop_remote_resume_failed"
+            );
+            assert_eq!(manager.status().status, ControlledStatusKind::Error);
+            let inner = manager.inner.lock();
+            assert!(inner.lease_context.is_none());
+            assert!(inner.resume_gate.is_none());
+            assert!(inner.watchdog.is_none());
+            assert_eq!(cleanup.0.load(Ordering::SeqCst), 1);
+        }
     }
 
     #[test]

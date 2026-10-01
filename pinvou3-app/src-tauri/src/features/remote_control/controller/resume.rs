@@ -3,7 +3,8 @@
 //! Relay owns the two-role activation transition. This type owns the local
 //! role's one-shot token and transport-key fingerprint, refuses every business
 //! gate until the final authenticated result, and never extends the deadline
-//! installed by DEV-08.
+//! frozen from DEV-08 evidence at the first transport interruption. Relay's
+//! wire deadline is a separate clock-domain value and is never a B clock.
 
 use zeroize::{Zeroize, Zeroizing};
 
@@ -58,7 +59,8 @@ struct ResumeMaterial {
 pub(crate) struct ControllerResumeGate {
     role: ControllerRole,
     lease: LeaseContext,
-    original_deadline_b: u64,
+    relay_deadline_identity_ms: u64,
+    frozen_deadline_b: Option<u64>,
     phase: ResumePhase,
     activation_id: Option<String>,
     current: ResumeMaterial,
@@ -72,12 +74,13 @@ impl ControllerResumeGate {
         lease: LeaseContext,
         resume_token: [u8; RESUME_TOKEN_BYTES],
         transport_key_fingerprint: [u8; FINGERPRINT_BYTES],
-        original_deadline_b: u64,
+        relay_deadline_identity_ms: u64,
     ) -> Self {
         Self {
             role,
             lease,
-            original_deadline_b,
+            relay_deadline_identity_ms,
+            frozen_deadline_b: None,
             phase: ResumePhase::Connected,
             activation_id: None,
             current: ResumeMaterial {
@@ -97,18 +100,29 @@ impl ControllerResumeGate {
         matches!(self.phase, ResumePhase::Connected | ResumePhase::Resumed)
     }
 
-    pub(crate) fn original_deadline_b(&self) -> u64 {
-        self.original_deadline_b
+    pub(crate) fn relay_deadline_identity_ms(&self) -> u64 {
+        self.relay_deadline_identity_ms
     }
 
-    /// A transport interruption starts resume without changing B's local A
-    /// watchdog deadline. The caller supplies that DEV-08 deadline on every
-    /// transition so a stale gate cannot accidentally manufacture more budget.
+    pub(crate) fn frozen_deadline_b(&self) -> Option<u64> {
+        self.frozen_deadline_b
+    }
+
+    /// Freeze authenticated local evidence independently of the opaque Relay
+    /// wire deadline identity:
+    /// neither the Relay wall clock nor a later proof can grant local budget.
     pub(crate) fn disconnect(
         &mut self,
         now_b: u64,
         watchdog_deadline_b: Option<u64>,
     ) -> Result<()> {
+        if self.phase != ResumePhase::Connected {
+            return self.terminate("controller_resume_phase_invalid");
+        }
+        let Some(deadline) = watchdog_deadline_b.filter(|deadline| now_b < *deadline) else {
+            return self.terminate("controller_resume_phase_invalid");
+        };
+        self.frozen_deadline_b = Some(deadline);
         self.transition(ResumePhase::Disconnected, now_b, watchdog_deadline_b)
     }
 
@@ -310,9 +324,9 @@ impl ControllerResumeGate {
     }
 
     fn deadline_is_current(&self, now_b: u64, watchdog_deadline_b: Option<u64>) -> bool {
-        now_b < self.original_deadline_b
-            && watchdog_deadline_b
-                .is_none_or(|deadline| deadline <= self.original_deadline_b && now_b < deadline)
+        self.frozen_deadline_b
+            .is_some_and(|deadline| now_b < deadline)
+            && watchdog_deadline_b.is_none_or(|deadline| now_b < deadline)
     }
 
     fn ensure_activation(&self, activation_id: &str) -> std::result::Result<(), ResumeStateError> {
@@ -433,7 +447,7 @@ mod tests {
         .unwrap();
         assert!(gate.is_business_allowed());
         assert_eq!(gate.resumed_liveness_epoch(), Some("live-a-2"));
-        assert_eq!(gate.original_deadline_b(), 30_000);
+        assert_eq!(gate.relay_deadline_identity_ms(), 30_000);
         assert!(
             gate.token_matches(ControllerRole::ControlledB, &[3; 32])
                 .unwrap()
@@ -551,6 +565,69 @@ mod tests {
             "controller_resume_material_reused"
         );
         assert_eq!(b.phase(), ResumePhase::Terminated);
+    }
+
+    #[test]
+    fn every_resume_phase_obeys_one_frozen_local_cutoff_not_the_relay_clock() {
+        fn step(gate: &mut ControllerResumeGate, step: usize, now_b: u64) -> Result<()> {
+            let later_evidence = Some(u64::MAX);
+            match step {
+                1 => gate.prepare(now_b, later_evidence),
+                2 => gate.accept_provisional("activation-0001", now_b, later_evidence),
+                3 => gate.confirm("activation-0001", now_b, later_evidence),
+                4 => gate.acknowledge_activation("activation-0001", now_b, later_evidence),
+                5 => gate
+                    .send_post_activation_liveness(
+                        "activation-0001",
+                        "live-b-2",
+                        now_b,
+                        later_evidence,
+                    )
+                    .map(|_| ()),
+                6 => gate.acknowledge_ready("activation-0001", now_b, later_evidence),
+                7 => gate.accept_resumed(
+                    "activation-0001",
+                    "live-a-2",
+                    [3; 32],
+                    [4; 32],
+                    now_b,
+                    later_evidence,
+                ),
+                _ => unreachable!(),
+            }
+        }
+        for boundary_step in 1..=7 {
+            let mut gate = ControllerResumeGate::new(
+                ControllerRole::ControlledB,
+                lease(),
+                [1; 32],
+                [2; 32],
+                30_000,
+            );
+            // A healthy long session can outlive its opaque Relay identity.
+            gate.disconnect(50_000, Some(72_000)).unwrap();
+            assert_eq!(gate.relay_deadline_identity_ms(), 30_000);
+            assert_eq!(gate.frozen_deadline_b(), Some(72_000));
+            for prior in 1..boundary_step {
+                step(&mut gate, prior, 51_000 + prior as u64).unwrap();
+                assert!(!gate.is_business_allowed());
+                assert_eq!(gate.frozen_deadline_b(), Some(72_000));
+            }
+            assert!(step(&mut gate, boundary_step, 72_000).is_err());
+            assert_eq!(gate.phase(), ResumePhase::Terminated);
+            assert!(
+                !gate
+                    .token_matches(ControllerRole::ControlledB, &[1; 32])
+                    .unwrap()
+            );
+        }
+        for role in [ControllerRole::ControllerA, ControllerRole::ControlledB] {
+            for evidence in [None, Some(50_000), Some(49_999)] {
+                let mut gate = ControllerResumeGate::new(role, lease(), [1; 32], [2; 32], u64::MAX);
+                assert!(gate.disconnect(50_000, evidence).is_err());
+                assert_eq!(gate.phase(), ResumePhase::Terminated);
+            }
+        }
     }
 
     #[test]
