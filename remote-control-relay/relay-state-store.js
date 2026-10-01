@@ -538,14 +538,14 @@ export class RelayStateStore {
         return;
       }
       if (primary.kind === "valid") {
+        if (backup.kind !== "valid" || (!primary.migrated && backup.migrated)
+          || canonicalJson(primary.state) !== canonicalJson(backup.state)) {
+          fail("relay_state_unavailable");
+        }
         this.#state = primary.state;
         if (primary.migrated) {
           await this.#persist(primary.state);
           return;
-        }
-        if (backup.kind !== "valid" || backup.migrated
-          || canonicalJson(primary.state) !== canonicalJson(backup.state)) {
-          fail("relay_state_unavailable");
         }
         return;
       }
