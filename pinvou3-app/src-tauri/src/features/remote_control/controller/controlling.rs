@@ -296,14 +296,24 @@ impl ControllingDeviceManager {
         Ok(status_locked(&inner))
     }
 
-    pub(crate) fn mark_transport_disconnected(&self) -> ControllingStatus {
+    pub(crate) fn mark_transport_disconnected(
+        &self,
+        now_a: u64,
+        evidence_deadline_a: Option<u64>,
+    ) -> ControllingStatus {
         let mut inner = self.inner.lock();
         if inner.phase == ControllingStatusKind::Connected {
-            let deadline = inner.lease.as_ref().map(|lease| lease.resume_deadline_b);
-            if let Some(gate) = inner.resume_gate.as_mut() {
-                let _ = gate.disconnect(0, deadline);
+            if inner
+                .resume_gate
+                .as_mut()
+                .is_some_and(|gate| gate.disconnect(now_a, evidence_deadline_a).is_ok())
+            {
+                inner.phase = ControllingStatusKind::Reconnecting;
+            } else {
+                clear_live_context(&mut inner);
+                inner.phase = ControllingStatusKind::Error;
+                inner.error_code = Some("endpoint_offline");
             }
-            inner.phase = ControllingStatusKind::Reconnecting;
         }
         status_locked(&inner)
     }
@@ -634,7 +644,9 @@ mod tests {
             .complete_connected(operation.clone(), lease())
             .unwrap();
         assert_eq!(
-            manager.mark_transport_disconnected().status,
+            manager
+                .mark_transport_disconnected(5_000, Some(30_000))
+                .status,
             ControllingStatusKind::Reconnecting
         );
         let resumed = manager

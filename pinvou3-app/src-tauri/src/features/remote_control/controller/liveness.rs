@@ -76,6 +76,7 @@ pub(crate) struct ControllerLivenessWatchdog {
     heartbeat_sequence_a: u64,
     last_attestation_sequence: u64,
     deadline_b: Option<u64>,
+    frozen_deadline_b: Option<u64>,
     last_advanced_at_b: Option<u64>,
     pending_challenges: HashMap<String, PendingChallenge>,
     used_challenges: HashMap<(String, String), u64>,
@@ -90,6 +91,7 @@ impl ControllerLivenessWatchdog {
             heartbeat_sequence_a: 0,
             last_attestation_sequence: 0,
             deadline_b: None,
+            frozen_deadline_b: None,
             last_advanced_at_b: None,
             pending_challenges: HashMap::new(),
             used_challenges: HashMap::new(),
@@ -109,6 +111,7 @@ impl ControllerLivenessWatchdog {
         self.heartbeat_sequence_a = 0;
         self.last_attestation_sequence = 0;
         self.deadline_b = None;
+        self.frozen_deadline_b = None;
         self.last_advanced_at_b = None;
         self.pending_challenges.clear();
         self.used_challenges.clear();
@@ -273,12 +276,48 @@ impl ControllerLivenessWatchdog {
         }
     }
 
+    /// A complete authenticated join/final activation starts one finite cycle.
+    /// Ordinary transport activity and intermediate resume frames cannot call
+    /// this constructor or reset the frozen cutoff of an existing watchdog.
+    pub(crate) fn authenticated_cycle(
+        liveness_epoch_a: impl Into<String>,
+        now_b: u64,
+    ) -> Result<Self> {
+        let mut watchdog = Self::new(liveness_epoch_a)?;
+        watchdog.deadline_b = Some(
+            now_b
+                .checked_add(30_000)
+                .ok_or_else(|| LivenessError::new("deadline_overflow", "candidate_deadline"))?,
+        );
+        watchdog.last_advanced_at_b = Some(now_b);
+        Ok(watchdog)
+    }
+
+    /// Called only at the first real transport interruption. A missing or
+    /// expired authenticated proof grants no recovery budget. Repeated calls
+    /// and later authenticated proofs may never extend this cycle's cutoff.
+    pub(crate) fn freeze_deadline(&mut self, now_b: u64) -> Option<u64> {
+        let deadline = self.deadline_b.filter(|deadline| now_b < *deadline)?;
+        let frozen = self.frozen_deadline_b.get_or_insert(deadline);
+        *frozen = (*frozen).min(deadline);
+        Some(*frozen)
+    }
+
     fn apply_evidence(
         &mut self,
         sequence: u64,
         candidate_deadline: u64,
         received_at_b: u64,
     ) -> Result<LivenessDeadlineUpdate> {
+        if self
+            .deadline_b
+            .is_some_and(|deadline| received_at_b >= deadline)
+            || self
+                .frozen_deadline_b
+                .is_some_and(|deadline| received_at_b >= deadline)
+        {
+            return Err(LivenessError::new("expired", "candidate_deadline"));
+        }
         let (policy, update) = if sequence < self.heartbeat_sequence_a {
             return Err(LivenessError::new("replay", "heartbeat_sequence_a"));
         } else if sequence == self.heartbeat_sequence_a {
@@ -297,11 +336,11 @@ impl ControllerLivenessWatchdog {
             )
         };
         let previous = self.deadline_b.unwrap_or(candidate_deadline);
-        self.deadline_b = Some(apply_liveness_deadline(
-            previous,
-            candidate_deadline,
-            policy,
-        ));
+        let deadline = apply_liveness_deadline(previous, candidate_deadline, policy);
+        self.deadline_b = Some(
+            self.frozen_deadline_b
+                .map_or(deadline, |cutoff| deadline.min(cutoff)),
+        );
         if sequence > self.heartbeat_sequence_a {
             self.heartbeat_sequence_a = sequence;
             self.last_advanced_at_b = Some(received_at_b);
@@ -700,6 +739,52 @@ mod tests {
             "replay"
         );
         assert_eq!(watchdog.deadline_b(), Some(25_000));
+    }
+
+    #[test]
+    fn first_disconnect_freezes_authenticated_evidence_until_a_complete_new_cycle() {
+        let mut watchdog = ControllerLivenessWatchdog::new("live-a-1").unwrap();
+        assert_eq!(watchdog.freeze_deadline(1_000), None);
+        watchdog
+            .register_challenge("challenge-0001", "AAAAAAAAAAAAAAAAAAAAAA==", 6_000)
+            .unwrap();
+        watchdog
+            .accept_direct_json(
+                &direct_payload(1, "challenge-0001", "AAAAAAAAAAAAAAAAAAAAAA=="),
+                &lease(),
+                8_000,
+            )
+            .unwrap();
+        assert_eq!(watchdog.freeze_deadline(20_000), Some(35_000));
+        watchdog
+            .register_challenge("challenge-0002", "AQEBAQEBAQEBAQEBAQEBAQ==", 21_000)
+            .unwrap();
+        watchdog
+            .accept_direct_json(
+                &direct_payload(2, "challenge-0002", "AQEBAQEBAQEBAQEBAQEBAQ=="),
+                &lease(),
+                22_000,
+            )
+            .unwrap();
+        assert_eq!(watchdog.deadline_b(), Some(35_000));
+        assert_eq!(watchdog.freeze_deadline(23_000), Some(35_000));
+        watchdog
+            .register_challenge("challenge-0003", "AgICAgICAgICAgICAgICAg==", 34_000)
+            .unwrap();
+        assert!(
+            watchdog
+                .accept_direct_json(
+                    &direct_payload(3, "challenge-0003", "AgICAgICAgICAgICAgICAg=="),
+                    &lease(),
+                    35_000
+                )
+                .is_err()
+        );
+        assert_eq!(watchdog.deadline_b(), Some(35_000));
+        assert_eq!(watchdog.state(35_000), LivenessWatchdogState::Expired);
+        let next = ControllerLivenessWatchdog::authenticated_cycle("live-a-2", 36_000).unwrap();
+        assert_eq!(next.deadline_b(), Some(66_000));
+        assert!(ControllerLivenessWatchdog::authenticated_cycle("live-a-2", u64::MAX).is_err());
     }
 
     #[test]

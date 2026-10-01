@@ -16,7 +16,7 @@ const MAX_DESCRIPTORS = 256;
 const MAX_ARTIFACTS = 256;
 const MAX_SENSITIVE_STRING_BYTES = 8 * 1024;
 export const MAX_ENCRYPTED_WIRE_BYTES = Math.ceil(MAX_ENCRYPTED_FRAME_BYTES / 3) * 4 + MAX_CONTROL_MESSAGE_BYTES;
-export const CONTROLLER_CONTRACT_SHA256 = "ad4dd926f97c376419d33589e8147f533e7cbb55c3430a00d3b0c5e306349aac";
+export const CONTROLLER_CONTRACT_SHA256 = "d844a4f207645c4d40d443529b9c982492898c7ae30a810448e3ae46e894df5b";
 
 export const CONTROLLER_CAPABILITIES = Object.freeze([
   "pairing_v1", "encrypted_frames_v1", "finished_receipt_v1", "role_liveness_v1", "resume_v1",
@@ -106,7 +106,7 @@ const MESSAGE_SCHEMAS = Object.freeze({
   controller_post_activation_liveness: schema(["v", "type", "request_id", ...LEASE_CONTEXT_FIELDS, "activation_id", "liveness_epoch_b", "heartbeat_sequence_b"], [], ["B"]),
   controller_post_activation_liveness_confirmed: schema(["v", "type", "request_id", ...LEASE_CONTEXT_FIELDS, "activation_id", "liveness_epoch_b", "heartbeat_sequence_b"], [], ["relay"]),
   controller_resume_ready_ack: schema(["v", "type", "request_id", ...LEASE_CONTEXT_FIELDS, "activation_id", "sender_role", "liveness_epoch_b", "heartbeat_sequence_b"], [], ["A", "B"]),
-  controller_resumed: schema(["v", "type", "request_id", ...LEASE_CONTEXT_FIELDS, "activation_id", "liveness_epoch_a", "liveness_epoch_b", "new_resume_token_b64"], [], ["relay"]),
+  controller_resumed: schema(["v", "type", "request_id", ...LEASE_CONTEXT_FIELDS, "activation_id", "liveness_epoch_a", "liveness_epoch_b", "new_resume_token_b64", "resume_deadline_ms"], [], ["relay"]),
   encrypted_frame: schema(["v", "type", ...LEASE_CONTEXT_FIELDS, "frame_sequence", "direction", "payload_kind", "ciphertext_b64", "ciphertext_bytes"], [], ["A", "B"]),
   controller_disconnect: schema(["v", "type", "request_id", ...LEASE_CONTEXT_FIELDS, "sender_role", "reason"], [], ["A", "B"]),
   error: schema(["v", "type", "request_id", "code", "message"], [...LEASE_CONTEXT_FIELDS, "registration_request_id"], ["relay"]),

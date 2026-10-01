@@ -387,6 +387,8 @@ export class ControllerResumeHooks {
       });
     }
 
+    const resumeDeadline = now(this.#clock) + RESUME_BUDGET_MS;
+    if (!Number.isSafeInteger(resumeDeadline)) fail("controller_resume_clock_invalid");
     const resumedA = validateControllerMessage(commonMessage(
       "controller_resumed",
       state.ready.A.requestId,
@@ -396,6 +398,7 @@ export class ControllerResumeHooks {
         liveness_epoch_a: state.candidate.livenessEpochA,
         liveness_epoch_b: state.candidate.livenessEpochB,
         new_resume_token_b64: state.candidate.tokenA.toString("base64"),
+        resume_deadline_ms: String(resumeDeadline),
       },
     ), "relay", lease);
     const resumedB = validateControllerMessage(commonMessage(
@@ -407,6 +410,7 @@ export class ControllerResumeHooks {
         liveness_epoch_a: state.candidate.livenessEpochA,
         liveness_epoch_b: state.candidate.livenessEpochB,
         new_resume_token_b64: state.candidate.tokenB.toString("base64"),
+        resume_deadline_ms: String(resumeDeadline),
       },
     ), "relay", lease);
     state.phase = "committing";
@@ -414,6 +418,7 @@ export class ControllerResumeHooks {
       deliveries: Object.freeze([delivery("A", resumedA), delivery("B", resumedB)]),
       commit: async () => {
         if (state.phase !== "committing") fail("controller_resume_phase_invalid");
+        if (now(this.#clock) >= state.deadline) fail("controller_resume_deadline_expired");
         if (!this.#leaseManager) fail("controller_resume_manager_unavailable");
         const updated = this.#leaseManager.completeResume({
           controllerLeaseId: lease.controller_lease_id,
@@ -426,11 +431,12 @@ export class ControllerResumeHooks {
           livenessEpochB: state.candidate.livenessEpochB,
           tokenA: state.candidate.tokenA,
           tokenB: state.candidate.tokenB,
+          resumeDeadlineMs: String(resumeDeadline),
         });
-        state.phase = "connected";
-        state.lease = { ...updated };
-        state.deadline = Number(updated.resume_deadline_ms);
         zeroCandidate(state);
+        // Retire all old per-attempt request IDs/ACKs, not just the tokens.
+        // Otherwise a valid second cycle conflicts with the previous prepare.
+        await this.onLeaseCreated(updated);
         return Object.freeze({ lease: updated });
       },
       abort: () => this.#terminate(state, lease, "controller_resume_failed"),
@@ -451,7 +457,9 @@ export class ControllerResumeHooks {
     this.#states.set(lease.controller_lease_id, {
       lease: { ...lease },
       phase: "connected",
-      deadline,
+      // The wire deadline is a cycle identity, not a connected-phase timer.
+      // Freeze the actual authenticated role evidence only on the first close.
+      deadline: null,
       disconnected: new Set(),
       prepared: {},
       confirmed: {},
@@ -464,7 +472,7 @@ export class ControllerResumeHooks {
     return Object.freeze({ deliveries: Object.freeze([]) });
   }
 
-  async onSocketClosed({ socket_identity: socketIdentity, role, lease } = {}) {
+  async onSocketClosed({ socket_identity: socketIdentity, role, lease, evidence_deadline_ms: evidenceDeadline } = {}) {
     if (!lease || !this.#states.has(lease.controller_lease_id)) {
       return Object.freeze({ retain_lease: false });
     }
@@ -472,12 +480,18 @@ export class ControllerResumeHooks {
     if (!ROLES.includes(role) || lease.sockets?.[role] !== socketIdentity) {
       return Object.freeze({ retain_lease: false });
     }
-    const timestamp = now(this.#clock);
+    let timestamp;
+    try { timestamp = now(this.#clock); } catch {
+      zeroCandidate(state);
+      this.#states.delete(lease.controller_lease_id);
+      return Object.freeze({ retain_lease: false });
+    }
     if (state.phase === "connected") {
-      if (timestamp >= state.deadline) {
+      if (!Number.isSafeInteger(evidenceDeadline) || timestamp >= evidenceDeadline) {
         this.#states.delete(lease.controller_lease_id);
         return Object.freeze({ retain_lease: false });
       }
+      state.deadline = evidenceDeadline;
       state.phase = "awaiting_prepare";
     }
     state.disconnected.add(role);
