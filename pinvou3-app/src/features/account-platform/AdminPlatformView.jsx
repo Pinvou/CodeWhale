@@ -413,7 +413,7 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
   const [modelTokenRouteNotice, setModelTokenRouteNotice] = useState('');
   const [breadcrumbDetail, setBreadcrumbDetail] = useState({ routeKey: '', label: '' });
   const authorizationRef = useRef(null);
-  const authorizationRefreshRef = useRef({ active: false, generation: 0 });
+  const authorizationRefreshRef = useRef({ active: false, generation: 0, settled: Promise.resolve() });
   const financeRequestTrackerRef = useRef(null);
   if (!financeRequestTrackerRef.current) financeRequestTrackerRef.current = createFinanceTabRequestTracker();
   const updateBreadcrumbDetail = useCallback((routeKey, label) => {
@@ -617,9 +617,13 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
     let retryTimer = null;
     const refreshAuthorization = async (isRetry = false) => {
       if (authorizationRefreshRef.current.active) return;
+      let settleRefresh = () => {};
+      const settled = new Promise((resolve) => { settleRefresh = resolve; });
+      const refreshGeneration = authorizationRefreshRef.current.generation + 1;
       authorizationRefreshRef.current = {
         active: true,
-        generation: authorizationRefreshRef.current.generation + 1,
+        generation: refreshGeneration,
+        settled,
       };
       setAuthorizationRefreshing(true);
       try {
@@ -692,10 +696,10 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
           }
         }
       } finally {
-        authorizationRefreshRef.current = {
-          active: false,
-          generation: authorizationRefreshRef.current.generation,
-        };
+        if (authorizationRefreshRef.current.generation === refreshGeneration) {
+          authorizationRefreshRef.current = { active: false, generation: refreshGeneration, settled: Promise.resolve() };
+        }
+        settleRefresh();
         if (!disposed) setAuthorizationRefreshing(false);
       }
     };

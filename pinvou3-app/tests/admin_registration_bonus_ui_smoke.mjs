@@ -18,6 +18,8 @@ let nextPolicyReadDelayMs = 0;
 let nextAuthorizationReadDelayMs = 0;
 let delayNextSaveAuthorizationRead = false;
 let delayedSaveAuthorizationStarted = false;
+let delayNextPolicyWrite = false;
+let delayedPolicyWriteStarted = false;
 const reauthenticationRequests = [];
 const writes = [];
 
@@ -36,6 +38,11 @@ const server = createServer(async (request, response) => {
   if (url.pathname === '/__test__/delay-next-save-authorization') {
     delayNextSaveAuthorizationRead = true;
     delayedSaveAuthorizationStarted = false;
+    return json(response, {});
+  }
+  if (url.pathname === '/__test__/delay-next-policy-write') {
+    delayNextPolicyWrite = true;
+    delayedPolicyWriteStarted = false;
     return json(response, {});
   }
   if (url.pathname === '/__test__/switch-current-user') {
@@ -90,6 +97,11 @@ const server = createServer(async (request, response) => {
   }
   if (url.pathname === '/api/admin/billing/admin/v1/registration-bonus-policy' && request.method === 'PUT') {
     if (request.headers['x-csrf-token'] !== csrfToken) return json(response, { code: 'CSRF_REJECTED' }, 403);
+    if (delayNextPolicyWrite) {
+      delayNextPolicyWrite = false;
+      delayedPolicyWriteStarted = true;
+      await new Promise((resolve) => { setTimeout(resolve, 500); });
+    }
     if (recentAuthenticationRequired) {
       recentAuthenticationRequired = false;
       return json(response, { code: 'RECENT_AUTHENTICATION_REQUIRED', message: 'recent authentication required' }, 401);
@@ -251,6 +263,21 @@ try {
   assert.equal(writes.length, writesBeforeInterruptedSave, 'a save preflight started by the old identity must be cancelled when a newer authorization refresh begins');
   assert.equal(currentUserID, '0199a100-0001-7000-8000-000000000101');
 
+  await page.type('[data-testid="registration-bonus-policy"] textarea', 'Reconcile a save completed during identity refresh');
+  await fetch(`http://127.0.0.1:${port}/__test__/delay-next-policy-write`);
+  const writesBeforeReconciliation = writes.length;
+  const revisionBeforeReconciliation = policy.revision;
+  await page.click('[data-testid="registration-bonus-policy"] button[type="submit"]');
+  for (let attempt = 0; attempt < 50 && !delayedPolicyWriteStarted; attempt += 1) {
+    await new Promise((resolve) => { setTimeout(resolve, 10); });
+  }
+  assert.equal(delayedPolicyWriteStarted, true, 'the policy write must be in flight before the same-identity refresh starts');
+  await page.evaluate(() => globalThis.dispatchEvent(new Event('focus')));
+  await page.waitForFunction((revision) => document.querySelector('[data-testid="registration-bonus-policy"] .adm-registration-bonus-summary dd')?.textContent.trim() === String(revision), {}, revisionBeforeReconciliation + 1);
+  assert.equal(writes.length, writesBeforeReconciliation + 1, 'a successful in-flight write must remain committed');
+  assert.equal(await page.$eval('[data-testid="registration-bonus-policy"] textarea', (node) => node.value), '', 'the authoritative policy reload must replace the submitted form');
+  assert.match(await page.$eval('[data-testid="registration-bonus-policy"] [role="status"]', (node) => node.textContent), /save completed.*latest server policy/i);
+
   await page.reload({ waitUntil: 'networkidle0' });
   await page.waitForSelector('[data-testid="registration-bonus-policy"] form');
   assert.equal(await page.$('.adm-registration-bonus-draft-prompt'), null);
@@ -329,8 +356,9 @@ try {
   const blockedTextarea = await page.$('[data-testid="registration-bonus-policy"] textarea');
   await blockedTextarea.type('Disable while eligibility is blocked');
   assert.equal(await page.$eval('[data-testid="registration-bonus-policy"] button[type="submit"]', (node) => node.disabled), false, 'disabling must remain available while blocked');
+  const expectedBlockedRevision = policy.revision + 1;
   await page.click('[data-testid="registration-bonus-policy"] button[type="submit"]');
-  await page.waitForFunction(() => document.querySelector('[data-testid="registration-bonus-policy"] .adm-registration-bonus-summary dd')?.textContent.trim() === '5');
+  await page.waitForFunction((revision) => document.querySelector('[data-testid="registration-bonus-policy"] .adm-registration-bonus-summary dd')?.textContent.trim() === String(revision), {}, expectedBlockedRevision);
   assert.equal(writes.at(-1).body.enabled, false);
   assert.equal(await page.$eval('[data-testid="registration-bonus-policy"] input[type="checkbox"]', (node) => node.disabled), true, 'blocked readiness must prevent re-enabling');
 

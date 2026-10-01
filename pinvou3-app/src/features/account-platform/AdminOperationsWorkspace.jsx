@@ -96,7 +96,10 @@ export function AdminOperationsWorkspace({ client, copy, permissions = EMPTY_PER
   const returnAttemptID = useRef(reauthenticationAttemptID());
   const initialStoredDraft = useRef(storedReauthenticationDraft());
   const workspaceUserID = useRef(currentUserID);
+  const currentUserIDRef = useRef(currentUserID);
   const formOwnerUserID = useRef(currentUserID);
+  const mountedRef = useRef(true);
+  currentUserIDRef.current = currentUserID;
   const trustedStoredDraft = initialStoredDraft.current?.userID === currentUserID && canManage ? initialStoredDraft.current : null;
   const returnedDraft = useRef(returnAttemptID.current && trustedStoredDraft?.attemptID === returnAttemptID.current ? trustedStoredDraft : null);
   const [pendingDraft, setPendingDraft] = useState(() => !returnAttemptID.current ? trustedStoredDraft : null);
@@ -115,7 +118,7 @@ export function AdminOperationsWorkspace({ client, copy, permissions = EMPTY_PER
       const draftConflict = Boolean(usableDraft && usableDraft.expectedRevision !== Number(result.revision));
       setPolicy(result);
       setForm(usableDraft?.form || policyForm(result));
-      formOwnerUserID.current = usableDraft?.userID || currentUserID;
+      formOwnerUserID.current = usableDraft?.userID || currentUserIDRef.current;
       if (returnAttemptID.current) {
         returnAttemptID.current = '';
         returnedDraft.current = null;
@@ -127,10 +130,17 @@ export function AdminOperationsWorkspace({ client, copy, permissions = EMPTY_PER
         errorCode: !draftCleared ? 'REGISTRATION_BONUS_DRAFT_CLEANUP_FAILED' : draftConflict ? 'REGISTRATION_BONUS_DRAFT_CONFLICT' : '',
         notice: draftCleared && draftExpired ? labels.reauthenticationDraftExpired : '',
       });
+      return true;
     } catch (error) {
       if (error?.name !== 'AbortError') setState({ loading: false, saving: false, error: labels.loadFailed, errorCode: error?.code || '', notice: '' });
+      return false;
     }
   }, [client, currentUserID, labels.loadFailed, labels.reauthenticationDraftCleanupFailed, labels.reauthenticationDraftConflict, labels.reauthenticationDraftExpired]);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -163,6 +173,19 @@ export function AdminOperationsWorkspace({ client, copy, permissions = EMPTY_PER
     const refreshGeneration = Number(authorizationRefreshGuard?.current?.generation || 0);
     const refreshInterrupted = () => Boolean(authorizationRefreshGuard?.current?.active) || Number(authorizationRefreshGuard?.current?.generation || 0) !== refreshGeneration;
     const stopForAuthorizationRefresh = () => setState((value) => ({ ...value, saving: false }));
+    const reconcileAfterAuthorizationRefresh = async () => {
+      let loaded = false;
+      while (mountedRef.current) {
+        while (authorizationRefreshGuard?.current?.active) {
+          await authorizationRefreshGuard.current.settled;
+        }
+        if (!mountedRef.current) return;
+        const reconciliationGeneration = Number(authorizationRefreshGuard?.current?.generation || 0);
+        loaded = await load();
+        if (!authorizationRefreshGuard?.current?.active && Number(authorizationRefreshGuard?.current?.generation || 0) === reconciliationGeneration) break;
+      }
+      if (loaded && mountedRef.current) setState((value) => ({ ...value, notice: labels.saveReconciled }));
+    };
     if (!canManage || !policy || authorizationRefreshing || refreshInterrupted() || state.errorCode === 'REGISTRATION_BONUS_DRAFT_CONFLICT' || state.errorCode === 'REGISTRATION_BONUS_DRAFT_CLEANUP_FAILED' || state.errorCode === 'REGISTRATION_BONUS_DRAFT_IDENTITY_CHANGED') return;
     if (formOwnerUserID.current !== currentUserID) {
       formOwnerUserID.current = '';
@@ -192,7 +215,7 @@ export function AdminOperationsWorkspace({ client, copy, permissions = EMPTY_PER
         expected_revision: Number(policy.revision),
         reason: form.reason.trim(),
       });
-      if (refreshInterrupted()) { stopForAuthorizationRefresh(); return; }
+      if (refreshInterrupted()) { await reconcileAfterAuthorizationRefresh(); return; }
       setPolicy(updated);
       setForm(policyForm(updated));
       setState({ loading: false, saving: false, error: '', errorCode: '', notice: labels.saved });
