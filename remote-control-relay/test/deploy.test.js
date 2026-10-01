@@ -126,6 +126,61 @@ async function ensureMinimalWebDist(t) {
   });
 }
 
+function mockedSshScript(log) {
+  return `#!/usr/bin/env bash
+cat >/dev/null
+command="$*"
+# Inspect the remote positional arguments after bash -s --, not stdout's fake backup.
+while (( $# > 0 )) && [[ "$1" != "--" ]]; do shift; done
+if (( $# > 0 )); then shift; fi
+if [[ "$command" == *"cat > '/tmp/pinvou-remote-code-"* ]]; then
+  echo upload_code >> "${log}"
+elif [[ "$command" == *"cat > '/tmp/pinvou-remote-web-"* ]]; then
+  echo upload_web >> "${log}"
+elif [[ "$command" == *"bash -s --"* && $# -eq 3 && "$3" == "$1/backups/"* ]]; then
+  echo rollback >> "${log}"
+  echo '已恢复备份'
+elif [[ "$command" == *"bash -s --"* && $# -eq 11 ]]; then
+  echo deploy >> "${log}"
+  echo 'backup=/opt/pinvou-remote-relay/backups/fake'
+else
+  echo 'unexpected mocked SSH command' >&2
+  exit 97
+fi
+`;
+}
+
+test("deployment SSH mock recognizes timestamped rollback and rejects unknown calls", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pinvou-deploy-ssh-mock-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const log = join(root, "calls.log");
+  const shellLog = process.platform === "win32"
+    ? log.replaceAll("\\\\", "/").replace(/^([A-Za-z]):/, (_, drive) => `/${drive.toLowerCase()}`)
+    : log;
+  const bash = process.platform === "win32" ? "C:/Program Files/Git/bin/bash.exe" : "bash";
+  const remoteDir = "/opt/fixture-relay";
+  const remoteCommand = (...args) => spawnSync(bash, [
+    "-c", mockedSshScript(shellLog), "mock-ssh", "-i", "fixture-key",
+    "-o", "BatchMode=yes", "fixture.invalid", "bash", "-s", "--", ...args,
+  ], { input: "", encoding: "utf8" });
+  const deployed = remoteCommand(remoteDir, "fixture.service", "20261001-123456", ...Array(8).fill("/tmp/fixture"));
+  assert.equal(deployed.status, 0, deployed.stderr);
+  for (const stamp of ["20261001-123456", "20261102-234567"]) {
+    const rolledBack = remoteCommand(remoteDir, "fixture.service", `${remoteDir}/backups/${stamp}`);
+    assert.equal(rolledBack.status, 0, rolledBack.stderr);
+  }
+  for (const args of [
+    [remoteDir, "fixture.service", "/opt/other-relay/backups/20261001-123456"],
+    [remoteDir, "fixture.service", `${remoteDir}/backups/20261001-123456`, "unexpected"],
+    ["unknown"],
+  ]) {
+    const rejected = remoteCommand(...args);
+    assert.equal(rejected.status, 97, rejected.stdout + rejected.stderr);
+    assert.match(rejected.stderr, /unexpected mocked SSH command/);
+  }
+  assert.deepEqual((await readFile(log, "utf8")).trim().split(/\r?\n/), ["deploy", "rollback", "rollback"]);
+});
+
 test("deploy script rolls back when post-deploy public verification fails", {
   skip: process.platform === "win32" ? "deployment script targets a POSIX host" : false,
 }, async (t) => {
@@ -140,23 +195,7 @@ test("deploy script rolls back when post-deploy public verification fails", {
   await executable(join(bin, "npm"), "#!/usr/bin/env bash\nexit 0\n");
   await executable(join(bin, "sha256sum"), "#!/usr/bin/env bash\nexit 0\n");
   await executable(join(bin, "scp"), `#!/usr/bin/env bash\necho scp >> "${log}"\n`);
-  await executable(join(bin, "ssh"), `#!/usr/bin/env bash
-cat >/dev/null
-if [[ "$*" == *"cat > '/tmp/pinvou-remote-code-"* ]]; then
-  echo upload_code >> "${log}"
-elif [[ "$*" == *"cat > '/tmp/pinvou-remote-web-"* ]]; then
-  echo upload_web >> "${log}"
-elif [[ "$*" == *"/backups/fake"* ]]; then
-  echo rollback >> "${log}"
-  echo '已恢复备份'
-elif [[ "$*" == *"bash -s --"* ]]; then
-  echo deploy >> "${log}"
-  echo 'backup=/opt/pinvou-remote-relay/backups/fake'
-else
-  echo 'unexpected mocked SSH command' >&2
-  exit 97
-fi
-`);
+  await executable(join(bin, "ssh"), mockedSshScript(log));
   await executable(join(bin, "curl"), `#!/usr/bin/env bash
 output=""
 previous=""
