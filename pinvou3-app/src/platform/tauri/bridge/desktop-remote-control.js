@@ -10,6 +10,13 @@
  * No API key, credential reference or `SavedModel` body ever crosses this file:
  * model listing returns opaque descriptors and task submission only passes the
  * selected model ID plus the task binding.
+ *
+ * Status DTOs are projected unchanged through the same state functions for
+ * invoke responses and events. A07 is an adapter/state-machine stage, not an
+ * end-to-end task delivery: ACP approval dispatch, temporary model credentials,
+ * artifact indexing and task/model/permission wire integration remain A08's
+ * responsibility. In particular selectedModelId/permissionRequest forwarding
+ * alone does not mean the current Rust submit command consumes those fields.
  */
 (function (root) {
   "use strict";
@@ -91,6 +98,12 @@
       }).then(function (off) {
         unlisten.push(off);
       }).catch(function () {});
+      listen("desktop-remote-controller-status", function (event) {
+        var payload = event && event.payload ? event.payload : event || {};
+        publish(logic.applyControllerStatus(current(), payload));
+      }).then(function (off) {
+        unlisten.push(off);
+      }).catch(function () {});
       ["desktop-remote-task-status", "desktop-remote-task-event"].forEach(function (name) {
         listen(name, function (event) {
           var payload = event && event.payload ? event.payload : event || {};
@@ -102,15 +115,6 @@
       listen("desktop-remote-controller-session", function (event) {
         var payload = event && event.payload ? event.payload : event || {};
         publish(logic.applyControllerSession(current(), payload));
-      }).then(function (off) {
-        unlisten.push(off);
-      }).catch(function () {});
-      // A 端状态事件：后台 keeper 会在 connecting / safety_handshake /
-      // connected / reconnecting / error 之间推进。没有这条监听时，前端只能
-      // 看到一次性命令返回值，窗口重载后会误以为 A 端仍然空闲。
-      listen("desktop-remote-controller-status", function (event) {
-        var payload = event && event.payload ? event.payload : event || {};
-        publish(logic.applyControllerStatus(current(), controllerStatusPayload(payload)));
       }).then(function (off) {
         unlisten.push(off);
       }).catch(function () {});
@@ -143,37 +147,24 @@
       return next.intents.controller;
     }
 
-    function applyControlled(intent, result) {
-      var payload = result && typeof result === "object" ? result : {};
+    function applyControlled(intent, result, replaceBinding) {
+      var payload = shallow(result);
       clientLog(
         "result status=" + String(payload.status || "") + " code=" + (payload.pairingCode ? "yes" : "no")
         + " expires=" + String(payload.pairingExpiresAtMs || payload.expiresAtMs || "")
         + " gen=" + String(payload.generation || ""),
       );
-      publish(logic.applyControlledStatus(current(), {
-        intent: intent,
-        status: payload.kind || payload.status || "idle",
-        generation: payload.remoteControlGeneration || payload.generation || null,
-        pairingCode: payload.pairingCode || null,
-        expiresAtMs: payload.expiresAtMs || payload.pairingExpiresAtMs || null,
-        deviceName: payload.deviceName || null,
-        controllerDeviceName: payload.controllerDeviceName || null,
-        workspaces: payload.workspaces || null,
-        error: payload.lastError || null,
-      }));
+      payload.intent = intent;
+      payload.replaceBinding = replaceBinding === true;
+      publish(logic.applyControlledStatus(current(), payload));
       return result;
     }
 
-    function applyController(intent, result) {
-      var payload = controllerStatusPayload(result);
-      publish(logic.applyControllerStatus(current(), {
-        intent: intent,
-        status: payload.status,
-        connectionId: payload.connectionId,
-        leaseEpoch: payload.leaseEpoch,
-        deviceName: payload.deviceName,
-        error: payload.error,
-      }));
+    function applyController(intent, result, replaceBinding) {
+      var payload = shallow(result);
+      payload.intent = intent;
+      payload.replaceBinding = replaceBinding === true;
+      publish(logic.applyControllerStatus(current(), payload));
       return result;
     }
 
@@ -185,7 +176,7 @@
         deviceName: deviceName || null,
         workspaces: Array.isArray(workspaces) ? workspaces : [],
       }).then(function (result) {
-        return applyControlled(intent, result);
+        return applyControlled(intent, result, true);
       }).catch(function (failure) { throw asBoundedError(failure); });
     }
 
@@ -194,7 +185,7 @@
       subscribe();
       var intent = controlledIntent();
       return invoke("desktop_remote_controlled_refresh", {}).then(function (result) {
-        return applyControlled(intent, result);
+        return applyControlled(intent, result, true);
       }).catch(function (failure) { throw asBoundedError(failure); });
     }
 
@@ -217,8 +208,12 @@
     function controlledStatus() {
       ensureAvailable();
       subscribe();
-      return invoke("desktop_remote_controlled_status", {})
-        .catch(function (failure) { throw asBoundedError(failure); });
+      var intent = current().intents.controlled;
+      var revision = current().revision;
+      return invoke("desktop_remote_controlled_status", {}).then(function (result) {
+        if (current().revision !== revision) return result;
+        return applyControlled(intent, result);
+      }).catch(function (failure) { throw asBoundedError(failure); });
     }
 
     /**
@@ -226,14 +221,8 @@
      * 面板仍能通过它拿回真实状态（例如后端已 waiting_connection 与连接码）。
      */
     function controlledSync() {
-      ensureAvailable();
-      subscribe();
-      var intent = controlledIntent();
-      return invoke("desktop_remote_controlled_status", {})
-        .then(function (result) {
-          return applyControlled(intent, result);
-        })
-        .catch(function (failure) { throw asBoundedError(failure); });
+      // A read must not supersede an in-flight start/refresh command intent.
+      return controlledStatus();
     }
 
     /// 前端排障日志：写入与 Rust 相同的日志文件，支持人员可直接读取。
@@ -274,7 +263,7 @@
       subscribe();
       var intent = controllerIntent();
       return invoke("desktop_remote_controller_connect", { code: code }).then(function (result) {
-        return applyController(intent, result);
+        return applyController(intent, result, true);
       }).catch(function (failure) { throw asBoundedError(failure); });
     }
 
@@ -306,24 +295,12 @@
     function controllerStatus() {
       ensureAvailable();
       subscribe();
+      var intent = current().intents.controller;
+      var revision = current().revision;
       return invoke("desktop_remote_controller_status", {}).then(function (result) {
-        var payload = controllerStatusPayload(result);
-        publish(logic.applyControllerStatus(current(), payload));
-        return result;
+        if (current().revision !== revision) return result;
+        return applyController(intent, result);
       }).catch(function (failure) { throw asBoundedError(failure); });
-    }
-
-    /** Rust ControllingStatus -> pure-state controller envelope. */
-    function controllerStatusPayload(result) {
-      var wire = result && typeof result === "object" ? result : {};
-      var lease = wire.lease && typeof wire.lease === "object" ? wire.lease : {};
-      return {
-        status: wire.status || "idle",
-        connectionId: lease.connectionId || null,
-        leaseEpoch: lease.leaseEpoch || null,
-        deviceName: wire.deviceDisplayName || null,
-        error: wire.errorCode || null,
-      };
     }
 
     /**
@@ -401,6 +378,7 @@
       var revision = Number(wire.capability_revision);
       return {
         connectionId: wire.connection_id || null,
+        controllerLeaseId: wire.controller_lease_id || null,
         leaseEpoch: wire.lease_epoch || null,
         relayEpoch: wire.relay_epoch || null,
         remoteControlGeneration: wire.remote_control_generation || null,
@@ -458,7 +436,10 @@
         sessionId: payload.sessionId || null,
         mode: payload.mode || null,
         connectionId: payload.connectionId || null,
+        controllerLeaseId: payload.controllerLeaseId || null,
         leaseEpoch: payload.leaseEpoch || null,
+        relayEpoch: payload.relayEpoch || null,
+        remoteControlGeneration: payload.remoteControlGeneration || null,
         capabilityRevision: payload.capabilityRevision == null ? null : payload.capabilityRevision,
       }));
       return result;
@@ -737,6 +718,7 @@
       controlledStop: controlledStop,
       controlledDisconnectNow: controlledDisconnectNow,
       controlledStatus: controlledStatus,
+      controlledSync: controlledSync,
       clientLog: clientLog,
       endpointProfiles: endpointProfiles,
       setEndpointProfile: setEndpointProfile,
