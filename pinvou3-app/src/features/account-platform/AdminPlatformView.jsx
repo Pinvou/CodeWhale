@@ -394,6 +394,7 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
   const [auth, setAuth] = useState('loading');
   const [section, setSection] = useState('overview');
   const [authorization, setAuthorization] = useState(null);
+  const [authorizationRefreshing, setAuthorizationRefreshing] = useState(false);
   const [data, setData] = useState({});
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
@@ -617,10 +618,13 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
     const refreshAuthorization = async (isRetry = false) => {
       if (authorizationRefreshRef.current) return;
       authorizationRefreshRef.current = true;
+      setAuthorizationRefreshing(true);
       try {
-        const [next, nextSession] = await Promise.all([client.authorization(), client.session()]);
+        const nextSession = await client.session();
         if (disposed) return;
         if (!nextSession.authenticated) { setAuth('guest'); return; }
+        const next = await client.authorization();
+        if (disposed) return;
         if (retryTimer !== null) {
           globalThis.clearTimeout?.(retryTimer);
           retryTimer = null;
@@ -686,6 +690,7 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
         }
       } finally {
         authorizationRefreshRef.current = false;
+        if (!disposed) setAuthorizationRefreshing(false);
       }
     };
     const unsubscribe = client.onAuthorizationVersion?.(() => {
@@ -930,7 +935,7 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
           )}
           {section === 'audit' && <Audit copy={copy} data={data} client={client} setData={setData} permissions={platformPermissions} />}
           {section === 'approvals' && <AdminApprovalWorkspace key={JSON.stringify(authorizationVersions(authorization))} client={client} copy={copy} language={language} currentUserID={authorization?.user_id || ''} routeVersion={routeVersion} onNavigate={navigate} visibleSections={visibleSections} modelDetailsEnabled={modelDetailsEnabled} tokenDetailsEnabled={tokenDetailsEnabled} />}
-          {section === 'operations' && <AdminOperationsWorkspace client={client} copy={copy} permissions={platformPermissions} currentUserID={authorization?.user_id || ''} />}
+          {section === 'operations' && <AdminOperationsWorkspace client={client} copy={copy} permissions={platformPermissions} currentUserID={authorization?.user_id || ''} authorizationRefreshing={authorizationRefreshing} />}
           {section === 'settings' && <SettingsWorkspace copy={copy} language={language} onLanguageChange={onLanguageChange} client={client} permissions={platformPermissions} />}
           <AdminExtensionSlot section={section} financeTab={financeTab} authorization={authorization} />
         </div>

@@ -10,10 +10,12 @@ assert.ok(browserPath, 'Chromium or Edge is required');
 const staticRoot = path.resolve(import.meta.dirname, '../../account-platform/internal/portal/static');
 let permissions = ['platform.registration-bonus.read', 'platform.registration-bonus.manage'];
 let currentUserID = '0199a100-0001-7000-8000-000000000101';
+let csrfToken = 'csrf-user-a';
 let policy = { revision: 2, enabled: false, amount_microcredits: 0, validity_days: 30, updated_at: new Date().toISOString(), eligibility_status: 'READY', recoverable_registration_count: 4, unrecoverable_registration_count: 0 };
 let recentAuthenticationRequired = false;
 let authenticationBehavior = 'concurrent-update';
 let delayNextPolicyRead = false;
+let delayNextAuthorizationRead = false;
 const reauthenticationRequests = [];
 const writes = [];
 
@@ -28,8 +30,11 @@ const server = createServer(async (request, response) => {
   if (url.pathname === '/__test__/recent-auth') { recentAuthenticationRequired = true; return json(response, {}); }
   if (url.pathname === '/__test__/auth-cancel') { authenticationBehavior = 'cancel'; delayNextPolicyRead = true; return json(response, {}); }
   if (url.pathname === '/__test__/auth-switch-user') { authenticationBehavior = 'switch-user'; return json(response, {}); }
+  if (url.pathname === '/__test__/auth-expire-return') { authenticationBehavior = 'expire-return'; return json(response, {}); }
   if (url.pathname === '/__test__/switch-current-user') {
     currentUserID = currentUserID.endsWith('0101') ? '0199a100-0001-7000-8000-000000000202' : '0199a100-0001-7000-8000-000000000101';
+    csrfToken = currentUserID.endsWith('0101') ? 'csrf-user-a' : 'csrf-user-b';
+    delayNextAuthorizationRead = true;
     return json(response, {});
   }
   if (url.pathname === '/__test__/writes') return json(response, writes);
@@ -38,13 +43,29 @@ const server = createServer(async (request, response) => {
     let returnTo = url.searchParams.get('return_to') || '/admin.html?section=operations';
     if (authenticationBehavior === 'concurrent-update') policy = { ...policy, revision: policy.revision + 1, amount_microcredits: 400_000, validity_days: 45, updated_at: new Date().toISOString() };
     if (authenticationBehavior === 'cancel') returnTo = '/admin.html?section=operations';
-    if (authenticationBehavior === 'switch-user') currentUserID = currentUserID.endsWith('0101') ? '0199a100-0001-7000-8000-000000000202' : '0199a100-0001-7000-8000-000000000101';
+    if (authenticationBehavior === 'switch-user') {
+      currentUserID = currentUserID.endsWith('0101') ? '0199a100-0001-7000-8000-000000000202' : '0199a100-0001-7000-8000-000000000101';
+      csrfToken = currentUserID.endsWith('0101') ? 'csrf-user-a' : 'csrf-user-b';
+    }
+    if (authenticationBehavior === 'expire-return') {
+      authenticationBehavior = 'success';
+      delayNextPolicyRead = true;
+      response.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      return response.end(`<script>const key='pinvou.admin.registration-bonus.reauthentication-draft';const draft=JSON.parse(sessionStorage.getItem(key));draft.expires_at=Date.now()+100;sessionStorage.setItem(key,JSON.stringify(draft));location.replace(${JSON.stringify(returnTo)});</script>`);
+    }
     authenticationBehavior = 'success';
     response.writeHead(302, { Location: returnTo });
     return response.end();
   }
-  if (url.pathname === '/api/session') return json(response, { authenticated: true, csrf_token: 'csrf-test' });
-  if (url.pathname === '/api/account/v1/account/bootstrap') return json(response, { user_id: currentUserID, platform_permissions: permissions });
+  if (url.pathname === '/api/session') return json(response, { authenticated: true, csrf_token: csrfToken });
+  if (url.pathname === '/api/account/v1/account/bootstrap') {
+    if (delayNextAuthorizationRead) {
+      delayNextAuthorizationRead = false;
+      await new Promise((resolve) => { setTimeout(resolve, 300); });
+    }
+    if (request.headers['x-csrf-token'] !== csrfToken) return json(response, { code: 'CSRF_REJECTED' }, 403);
+    return json(response, { user_id: currentUserID, platform_permissions: permissions });
+  }
   if (url.pathname === '/api/admin/billing/admin/v1/registration-bonus-policy' && request.method === 'GET') {
     if (delayNextPolicyRead) {
       delayNextPolicyRead = false;
@@ -53,6 +74,7 @@ const server = createServer(async (request, response) => {
     return json(response, policy);
   }
   if (url.pathname === '/api/admin/billing/admin/v1/registration-bonus-policy' && request.method === 'PUT') {
+    if (request.headers['x-csrf-token'] !== csrfToken) return json(response, { code: 'CSRF_REJECTED' }, 403);
     if (recentAuthenticationRequired) {
       recentAuthenticationRequired = false;
       return json(response, { code: 'RECENT_AUTHENTICATION_REQUIRED', message: 'recent authentication required' }, 401);
@@ -111,7 +133,7 @@ try {
   assert.equal(writes.length, 1);
   assert.equal(writes[0].body.expected_revision, 2);
   assert.equal(writes[0].body.amount_points, 25);
-  assert.equal(writes[0].csrf, 'csrf-test');
+  assert.equal(writes[0].csrf, 'csrf-user-a');
   assert.match(writes[0].idempotencyKey, /^registration-bonus-/);
 
   await fetch(`http://127.0.0.1:${port}/__test__/recent-auth`);
@@ -190,8 +212,13 @@ try {
     delete view.__pinvouOriginalSessionStorageRemoveItem;
   });
 
+  const writesBeforeIdentityRefresh = writes.length;
   await fetch(`http://127.0.0.1:${port}/__test__/switch-current-user`);
   await page.evaluate(() => globalThis.dispatchEvent(new Event('focus')));
+  await page.waitForFunction(() => document.querySelector('[data-testid="registration-bonus-policy"] button[type="submit"]')?.disabled === true);
+  await page.$eval('[data-testid="registration-bonus-policy"] form', (form) => form.requestSubmit());
+  await new Promise((resolve) => { setTimeout(resolve, 75); });
+  assert.equal(writes.length, writesBeforeIdentityRefresh, 'a mutation must be blocked while a rotated session identity is being refreshed');
   await page.waitForFunction(() => document.querySelector('[data-testid="registration-bonus-policy"] textarea')?.value === '');
   assert.deepEqual(await page.$$eval('[data-testid="registration-bonus-policy"] input[type="number"]', (nodes) => nodes.map((node) => node.value)), ['40', '45'], 'a live identity change must reset the previous administrator draft');
   await page.reload({ waitUntil: 'networkidle0' });
@@ -213,6 +240,53 @@ try {
   assert.equal(await page.$('.adm-registration-bonus-draft-prompt'), null);
   assert.deepEqual(await page.$$eval('[data-testid="registration-bonus-policy"] input[type="number"]', (nodes) => nodes.map((node) => node.value)), ['40', '45']);
   assert.equal(await page.$eval('[data-testid="registration-bonus-policy"] textarea', (node) => node.value), '', 'a different administrator must never receive the originating administrator draft');
+  assert.equal(await page.$eval('html', (node) => node.ownerDocument.defaultView.sessionStorage.getItem('pinvou.admin.registration-bonus.reauthentication-draft')), null);
+
+  await page.type('[data-testid="registration-bonus-policy"] textarea', 'Discard an expired automatic return draft');
+  await fetch(`http://127.0.0.1:${port}/__test__/recent-auth`);
+  await page.click('[data-testid="registration-bonus-policy"] button[type="submit"]');
+  await page.waitForSelector('[data-testid="registration-bonus-policy"] [role="alert"]');
+  await fetch(`http://127.0.0.1:${port}/__test__/auth-expire-return`);
+  await Promise.all([
+    page.waitForNavigation({ waitUntil: 'networkidle0' }),
+    page.click('[data-testid="registration-bonus-policy"] [role="alert"] button'),
+  ]);
+  await page.waitForSelector('[data-testid="registration-bonus-policy"] form');
+  assert.equal(await page.$eval('[data-testid="registration-bonus-policy"] textarea', (node) => node.value), '', 'an automatic return must not restore a draft that expired while policy data loaded');
+  assert.match(await page.$eval('[data-testid="registration-bonus-policy"] [role="status"]', (node) => node.textContent), /draft expired/i);
+  assert.equal(await page.$eval('html', (node) => node.ownerDocument.defaultView.sessionStorage.getItem('pinvou.admin.registration-bonus.reauthentication-draft')), null);
+
+  await page.$eval('html', (node, { userID, revision }) => {
+    const view = node.ownerDocument.defaultView;
+    const now = view.Date.now();
+    view.sessionStorage.setItem('pinvou.admin.registration-bonus.reauthentication-draft', JSON.stringify({
+      version: 1,
+      attempt_id: '11111111-1111-4111-8111-111111111111',
+      user_id: userID,
+      created_at: now,
+      expires_at: now + 10 * 60 * 1000,
+      expected_revision: revision,
+      enabled: false,
+      amount_points: 40,
+      validity_days: 45,
+      reason: 'Discard an expired pending draft',
+    }));
+  }, { userID: currentUserID, revision: policy.revision });
+  await page.reload({ waitUntil: 'networkidle0' });
+  await page.waitForSelector('.adm-registration-bonus-draft-prompt');
+  await page.evaluate(() => {
+    globalThis.__pinvouOriginalDateNow = Date.now;
+    const expiredNow = Date.now() + 11 * 60 * 1000;
+    Date.now = () => expiredNow;
+  });
+  await page.click('.adm-registration-bonus-draft-prompt button:first-child');
+  await page.evaluate(() => {
+    Date.now = globalThis.__pinvouOriginalDateNow;
+    delete globalThis.__pinvouOriginalDateNow;
+  });
+  assert.equal(await page.$('.adm-registration-bonus-draft-prompt'), null);
+  assert.equal(await page.$eval('[data-testid="registration-bonus-policy"] textarea', (node) => node.value), '', 'a pending draft must be checked for expiry when recovery is requested');
+  assert.match(await page.$eval('[data-testid="registration-bonus-policy"] [role="status"]', (node) => node.textContent), /draft expired/i);
   assert.equal(await page.$eval('html', (node) => node.ownerDocument.defaultView.sessionStorage.getItem('pinvou.admin.registration-bonus.reauthentication-draft')), null);
 
   await fetch(`http://127.0.0.1:${port}/__test__/blocked`);
