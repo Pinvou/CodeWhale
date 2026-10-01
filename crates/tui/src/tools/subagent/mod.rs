@@ -1675,6 +1675,10 @@ impl SubAgentInput {
     /// Mark this input as consumed by the child loop.
     fn mark_taken(&self) {
         if let Some(pending) = self.pending.as_ref() {
+            // std renamed `fetch_update` to `try_update` and deprecated the
+            // old name in Rust 1.99. The workspace MSRV (1.88) predates the
+            // new name, so keep the old call until the MSRV passes 1.99.
+            #[allow(deprecated)]
             let _ = pending.fetch_update(
                 std::sync::atomic::Ordering::AcqRel,
                 std::sync::atomic::Ordering::Acquire,
