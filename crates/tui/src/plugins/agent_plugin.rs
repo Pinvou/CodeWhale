@@ -1182,16 +1182,14 @@ fn validate_mcp_server_json(id: &str, server: &serde_json::Value) -> Result<(), 
     for key in ["command", "cwd", "url"] {
         optional_string(object, key).map_err(|error| format!("mcp.json server `{id}`: {error}"))?;
     }
-    for key in ["args"] {
-        if let Some(values) = object.get(key) {
-            let values = values.as_array().ok_or_else(|| {
-                format!("mcp.json server `{id}` {key} must be an array of strings")
-            })?;
-            if values.iter().any(|value| !value.is_string()) {
-                return Err(format!(
-                    "mcp.json server `{id}` {key} must be an array of strings"
-                ));
-            }
+    if let Some(values) = object.get("args") {
+        let values = values
+            .as_array()
+            .ok_or_else(|| format!("mcp.json server `{id}` args must be an array of strings"))?;
+        if values.iter().any(|value| !value.is_string()) {
+            return Err(format!(
+                "mcp.json server `{id}` args must be an array of strings"
+            ));
         }
     }
     for key in ["env", "headers"] {
