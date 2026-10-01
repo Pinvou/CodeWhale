@@ -10,6 +10,13 @@
  * No API key, credential reference or `SavedModel` body ever crosses this file:
  * model listing returns opaque descriptors and task submission only passes the
  * selected model ID plus the task binding.
+ *
+ * Status DTOs are projected unchanged through the same state functions for
+ * invoke responses and events. A07 is an adapter/state-machine stage, not an
+ * end-to-end task delivery: ACP approval dispatch, temporary model credentials,
+ * artifact indexing and task/model/permission wire integration remain A08's
+ * responsibility. In particular selectedModelId/permissionRequest forwarding
+ * alone does not mean the current Rust submit command consumes those fields.
  */
 (function (root) {
   "use strict";
@@ -59,6 +66,12 @@
       }).then(function (off) {
         unlisten.push(off);
       }).catch(function () {});
+      listen("desktop-remote-controller-status", function (event) {
+        var payload = event && event.payload ? event.payload : event || {};
+        publish(logic.applyControllerStatus(current(), payload));
+      }).then(function (off) {
+        unlisten.push(off);
+      }).catch(function () {});
       ["desktop-remote-task-status", "desktop-remote-task-event"].forEach(function (name) {
         listen(name, function (event) {
           var payload = event && event.payload ? event.payload : event || {};
@@ -102,32 +115,19 @@
       return next.intents.controller;
     }
 
-    function applyControlled(intent, result) {
-      var payload = result && typeof result === "object" ? result : {};
-      publish(logic.applyControlledStatus(current(), {
-        intent: intent,
-        status: payload.kind || payload.status || "idle",
-        generation: payload.remoteControlGeneration || payload.generation || null,
-        pairingCode: payload.pairingCode || null,
-        expiresAtMs: payload.expiresAtMs || payload.pairingExpiresAtMs || null,
-        deviceName: payload.deviceName || null,
-        controllerDeviceName: payload.controllerDeviceName || null,
-        workspaces: payload.workspaces || null,
-        error: payload.lastError || null,
-      }));
+    function applyControlled(intent, result, replaceBinding) {
+      var payload = shallow(result);
+      payload.intent = intent;
+      payload.replaceBinding = replaceBinding === true;
+      publish(logic.applyControlledStatus(current(), payload));
       return result;
     }
 
-    function applyController(intent, result) {
-      var payload = result && typeof result === "object" ? result : {};
-      publish(logic.applyControllerStatus(current(), {
-        intent: intent,
-        status: payload.kind || payload.status || "idle",
-        connectionId: payload.connectionId || null,
-        leaseEpoch: payload.leaseEpoch || null,
-        deviceName: payload.deviceName || null,
-        error: payload.lastError || null,
-      }));
+    function applyController(intent, result, replaceBinding) {
+      var payload = shallow(result);
+      payload.intent = intent;
+      payload.replaceBinding = replaceBinding === true;
+      publish(logic.applyControllerStatus(current(), payload));
       return result;
     }
 
@@ -139,7 +139,7 @@
         deviceName: deviceName || null,
         workspaces: Array.isArray(workspaces) ? workspaces : [],
       }).then(function (result) {
-        return applyControlled(intent, result);
+        return applyControlled(intent, result, true);
       });
     }
 
@@ -148,7 +148,7 @@
       subscribe();
       var intent = controlledIntent();
       return invoke("desktop_remote_controlled_refresh", {}).then(function (result) {
-        return applyControlled(intent, result);
+        return applyControlled(intent, result, true);
       });
     }
 
@@ -171,7 +171,12 @@
     function controlledStatus() {
       ensureAvailable();
       subscribe();
-      return invoke("desktop_remote_controlled_status", {});
+      var intent = current().intents.controlled;
+      var revision = current().revision;
+      return invoke("desktop_remote_controlled_status", {}).then(function (result) {
+        if (current().revision !== revision) return result;
+        return applyControlled(intent, result);
+      });
     }
 
     /**
@@ -202,9 +207,10 @@
 
     function controllerConnect(code) {
       ensureAvailable();
+      subscribe();
       var intent = controllerIntent();
       return invoke("desktop_remote_controller_connect", { code: code }).then(function (result) {
-        return applyController(intent, result);
+        return applyController(intent, result, true);
       }).catch(function (failure) { throw asBoundedError(failure); });
     }
 
@@ -230,7 +236,13 @@
 
     function controllerStatus() {
       ensureAvailable();
-      return invoke("desktop_remote_controller_status", {});
+      subscribe();
+      var intent = current().intents.controller;
+      var revision = current().revision;
+      return invoke("desktop_remote_controller_status", {}).then(function (result) {
+        if (current().revision !== revision) return result;
+        return applyController(intent, result);
+      });
     }
 
     /**
@@ -308,6 +320,7 @@
       var revision = Number(wire.capability_revision);
       return {
         connectionId: wire.connection_id || null,
+        controllerLeaseId: wire.controller_lease_id || null,
         leaseEpoch: wire.lease_epoch || null,
         relayEpoch: wire.relay_epoch || null,
         remoteControlGeneration: wire.remote_control_generation || null,
@@ -364,7 +377,10 @@
         sessionId: payload.sessionId || null,
         mode: payload.mode || null,
         connectionId: payload.connectionId || null,
+        controllerLeaseId: payload.controllerLeaseId || null,
         leaseEpoch: payload.leaseEpoch || null,
+        relayEpoch: payload.relayEpoch || null,
+        remoteControlGeneration: payload.remoteControlGeneration || null,
         capabilityRevision: payload.capabilityRevision == null ? null : payload.capabilityRevision,
       }));
       return result;
