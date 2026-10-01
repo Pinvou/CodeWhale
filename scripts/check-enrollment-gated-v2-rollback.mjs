@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -36,19 +36,34 @@ function run(script, args = []) {
   });
 }
 
-try {
+export function requireCompleteCoverage(coverage) {
+  if (!coverage || !Number.isSafeInteger(coverage.total) || coverage.total <= 0
+    || coverage.migrated !== coverage.total || coverage.not_migrated !== 0
+    || coverage.coverage_percent !== 100) {
+    throw Object.assign(new Error("legacy_endpoint_coverage_incomplete"), { code: "legacy_endpoint_coverage_incomplete" });
+  }
+}
+
+async function main() {
   if (!inventory) throw Object.assign(new Error("legacy_endpoint_inventory_required"), { code: "legacy_endpoint_inventory_required" });
   const coverage = await run("enrollment-migrate.js", ["--coverage", "--input", inventory]);
+  requireCompleteCoverage(coverage);
   const gateway = await run("enrollment-gateway-preflight.js");
-  process.stdout.write(`${JSON.stringify({
+  return {
     ok: true,
     safe_to_run_legacy_v2: true,
     migrated: coverage.migrated,
     not_migrated: coverage.not_migrated,
     coverage_percent: coverage.coverage_percent,
     checked_public_entrypoints: gateway.checked_public_entrypoints,
-  })}\n`);
-} catch (error) {
-  process.stderr.write(`${JSON.stringify({ ok: false, safe_to_run_legacy_v2: false, code: error?.code || "rollback_check_failed" })}\n`);
-  process.exitCode = 1;
+  };
+}
+
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main()
+    .then((result) => process.stdout.write(`${JSON.stringify(result)}\n`))
+    .catch((error) => {
+      process.stderr.write(`${JSON.stringify({ ok: false, safe_to_run_legacy_v2: false, code: error?.code || "rollback_check_failed" })}\n`);
+      process.exitCode = 1;
+    });
 }
