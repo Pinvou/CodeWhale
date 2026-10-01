@@ -1060,7 +1060,7 @@ mod submit_boundary_tests {
             let payload = serde_json::json!({
                 "v": 1, "type": "task_submit",
                 "connection_id": "connection-1", "controller_lease_id": "lease-1",
-                "lease_epoch": "epoch-1", "relay_epoch": "relay-1",
+                "lease_epoch": "1", "relay_epoch": "relay-1",
                 "remote_control_generation": "generation-1",
                 "request_id": "request-1", "task_id": "task-1",
                 "client_request_id": "client-1", "session_id": "b-session-1",
