@@ -513,6 +513,7 @@ mod tests {
                     task_id: "task-1".into(),
                     request_fingerprint: fingerprint.clone(),
                     dispatch_state: PendingDispatchState::PreparedNeverAttempted,
+                    reservation_fingerprint: None,
                 },
             )
             .unwrap();

@@ -30,3 +30,6 @@ pinvou3-app/src-tauri/src/features/model_store/data/test-store/** text eol=lf
 # test_ci_gate_policy.py 等):core.autocrlf=true 的 Windows checkout 转成 CRLF 后
 # 正则失配、守卫空转,与上方钩子/Shell 脚本同理钉 LF。
 .github/workflows/*.yml text eol=lf
+# The generated evidence validator is compared byte-for-byte with Ajv output.
+# Keep its final newline LF on Windows as well as POSIX checkouts.
+remote-control-relay/docs/schemas/remote-control-release-evidence.v1.validator.mjs text eol=lf

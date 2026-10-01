@@ -326,6 +326,7 @@ impl RemoteDispatchService {
             task_id: handle.task_id.clone(),
             request_fingerprint: fingerprint.clone(),
             dispatch_state: PendingDispatchState::PreparedNeverAttempted,
+            reservation_fingerprint: None,
         };
         match self
             .port
@@ -357,8 +358,9 @@ impl RemoteDispatchService {
         ))
     }
 
-    /// Retry has no task semantics. It can only replay the original cached
-    /// bytes, after matching a durable pending fingerprint and current binding.
+    /// Retry has no task semantics. An attempted request only reports its
+    /// durable unknown outcome, even offline. Replaying a never-attempted
+    /// request also requires the original cached bytes and current binding.
     pub(crate) fn commit_prepared(
         &self,
         local_session_id: &str,
@@ -378,13 +380,6 @@ impl RemoteDispatchService {
             .remote_proxy_snapshot(local_session_id)
             .ok_or_else(|| error("remote_proxy_not_found"))?;
         if record.remote_session_ref != remote_session_ref {
-            return Err(error("remote_binding_mismatch"));
-        }
-        let live = self
-            .store
-            .remote_dispatch_live_context(local_session_id, remote_session_ref)
-            .map_err(|_| error("remote_binding_mismatch"))?;
-        if record.peer_id != live.peer_id {
             return Err(error("remote_binding_mismatch"));
         }
         let key = (
@@ -407,7 +402,10 @@ impl RemoteDispatchService {
             .ok_or_else(|| error("remote_retry_not_pending"))?;
         if pending.client_request_id != handle.client_request_id
             || pending.task_id != handle.task_id
-            || pending.request_fingerprint != handle.request_fingerprint
+            || (pending.request_fingerprint != handle.request_fingerprint
+                && !(pending.dispatch_state == PendingDispatchState::AttemptMayHaveOccurred
+                    && pending.reservation_fingerprint.as_deref()
+                        == Some(&handle.request_fingerprint)))
         {
             return Err(error("remote_request_id_conflict"));
         }
@@ -417,6 +415,13 @@ impl RemoteDispatchService {
                 RemoteDispatchState::OutcomeUnknown,
                 RemoteDispatchAttempt::Reconciled,
             ));
+        }
+        let live = self
+            .store
+            .remote_dispatch_live_context(local_session_id, remote_session_ref)
+            .map_err(|_| error("remote_binding_mismatch"))?;
+        if record.peer_id != live.peer_id {
+            return Err(error("remote_binding_mismatch"));
         }
         if !ephemeral.get(&key).is_some_and(|cached| {
             cached.context == live && cached.fingerprint == handle.request_fingerprint
@@ -1345,6 +1350,60 @@ mod tests {
             request.semantics.local_session_id.clone(),
         ));
         let service = RemoteDispatchService::new(restarted.clone(), restarted_port.clone());
+        assert!(
+            restarted
+                .remote_dispatch_live_context(
+                    &request.semantics.local_session_id,
+                    &request.semantics.remote_session_ref,
+                )
+                .is_err()
+        );
+        let durable_path = restarted.remote_proxies.lock().path.clone();
+        let durable_before = std::fs::read(&durable_path).unwrap();
+        for (remote_ref, retry_handle, expected_error) in [
+            (
+                "wrong-ref".to_owned(),
+                first.retry_handle.clone(),
+                "remote_binding_mismatch",
+            ),
+            (
+                request.semantics.remote_session_ref.clone(),
+                RemoteRetryHandle {
+                    task_id: "wrong-task".into(),
+                    ..first.retry_handle.clone()
+                },
+                "remote_request_id_conflict",
+            ),
+            (
+                request.semantics.remote_session_ref.clone(),
+                RemoteRetryHandle {
+                    client_request_id: "wrong-request".into(),
+                    ..first.retry_handle.clone()
+                },
+                "remote_request_id_conflict",
+            ),
+            (
+                request.semantics.remote_session_ref.clone(),
+                RemoteRetryHandle {
+                    request_fingerprint: "0".repeat(64),
+                    ..first.retry_handle.clone()
+                },
+                "remote_request_id_conflict",
+            ),
+        ] {
+            assert_eq!(
+                service
+                    .commit_prepared(
+                        &request.semantics.local_session_id,
+                        &remote_ref,
+                        retry_handle,
+                        &[],
+                    )
+                    .unwrap_err()
+                    .code(),
+                expected_error
+            );
+        }
         assert_eq!(restarted_port.send_count.load(Ordering::SeqCst), 0);
         let reconciled = service
             .commit_prepared(
@@ -1382,6 +1441,56 @@ mod tests {
                 )
                 .is_err()
         );
+        assert_eq!(std::fs::read(&durable_path).unwrap(), durable_before);
+        assert_eq!(restarted_port.prepare_count.load(Ordering::SeqCst), 0);
+        assert!(service.ephemeral.lock().is_empty());
+    }
+
+    #[test]
+    fn restarted_never_attempted_request_requires_live_binding_and_original_payload() {
+        let (temp, store, request) = setup();
+        let port = Arc::new(FakePort::new(
+            store.clone(),
+            request.semantics.local_session_id.clone(),
+        ));
+        let service = RemoteDispatchService::new(store.clone(), port.clone());
+        port.fail_after_persist.store(true, Ordering::SeqCst);
+        let first = service.reserve_new(same_request(&request)).unwrap();
+        assert_eq!(first.state, RemoteDispatchState::PreparedNotSent);
+        drop(service);
+        drop(store);
+        drop(port);
+        let restarted = SessionStore::boot_at_test_dir(temp.path()).unwrap();
+        let restarted_port = Arc::new(FakePort::new(
+            restarted.clone(),
+            request.semantics.local_session_id.clone(),
+        ));
+        let service = RemoteDispatchService::new(restarted.clone(), restarted_port.clone());
+        let durable_path = restarted.remote_proxies.lock().path.clone();
+        let durable_before = std::fs::read(&durable_path).unwrap();
+        assert_eq!(
+            service
+                .commit_prepared(
+                    &request.semantics.local_session_id,
+                    &request.semantics.remote_session_ref,
+                    first.retry_handle,
+                    &[],
+                )
+                .unwrap_err()
+                .code(),
+            "remote_binding_mismatch"
+        );
+        assert_eq!(restarted_port.send_count.load(Ordering::SeqCst), 0);
+        assert_eq!(restarted_port.prepare_count.load(Ordering::SeqCst), 0);
+        assert_eq!(std::fs::read(&durable_path).unwrap(), durable_before);
+        assert_eq!(
+            restarted
+                .remote_proxy_snapshot(&request.semantics.local_session_id)
+                .unwrap()
+                .pending[0]
+                .dispatch_state,
+            PendingDispatchState::PreparedNeverAttempted
+        );
     }
 
     #[test]
@@ -1392,10 +1501,8 @@ mod tests {
             request.semantics.local_session_id.clone(),
         ));
         let service = RemoteDispatchService::new(store.clone(), port.clone());
-        assert_eq!(
-            service.reserve_new(same_request(&request)).unwrap().state,
-            RemoteDispatchState::PreparedNotSent
-        );
+        let prepared = service.reserve_new(same_request(&request)).unwrap();
+        assert_eq!(prepared.state, RemoteDispatchState::PreparedNotSent);
         service
             .abandon_prepared_remote_task(
                 &request.semantics.local_session_id,
@@ -1407,7 +1514,15 @@ mod tests {
         drop(service);
         let fresh_service = RemoteDispatchService::new(store.clone(), port.clone());
         assert_eq!(
-            commit(&fresh_service, &store, &request).unwrap_err().code(),
+            fresh_service
+                .commit_prepared(
+                    &request.semantics.local_session_id,
+                    &request.semantics.remote_session_ref,
+                    prepared.retry_handle,
+                    &[],
+                )
+                .unwrap_err()
+                .code(),
             "remote_request_id_retired"
         );
         assert_eq!(
@@ -1713,6 +1828,130 @@ mod tests {
     }
 
     #[test]
+    fn lost_attachment_commit_response_keeps_reserve_handle_read_only_after_restart() {
+        let (temp, store, request) = setup();
+        let port = Arc::new(FakePort::new(
+            store.clone(),
+            request.semantics.local_session_id.clone(),
+        ));
+        let service = RemoteDispatchService::new(store.clone(), port.clone());
+        let reserved = service.reserve_new(same_request(&request)).unwrap();
+        port.confirmed_attachments
+            .lock()
+            .insert("attachment-1".into());
+        let committed = service
+            .commit_prepared(
+                &request.semantics.local_session_id,
+                &request.semantics.remote_session_ref,
+                reserved.retry_handle.clone(),
+                &["attachment-1".into()],
+            )
+            .unwrap();
+        assert_eq!(committed.state, RemoteDispatchState::Queued);
+        assert_ne!(
+            committed.retry_handle.request_fingerprint,
+            reserved.retry_handle.request_fingerprint
+        );
+        assert_eq!(port.send_count.load(Ordering::SeqCst), 1);
+        // The commit response (including its final handle) never reaches A.
+        drop(service);
+        drop(port);
+        drop(store);
+        let restarted = SessionStore::boot_at_test_dir(temp.path()).unwrap();
+        assert!(
+            restarted
+                .remote_dispatch_live_context(
+                    &request.semantics.local_session_id,
+                    &request.semantics.remote_session_ref
+                )
+                .is_err()
+        );
+        let port = Arc::new(FakePort::new(
+            restarted.clone(),
+            request.semantics.local_session_id.clone(),
+        ));
+        let service = RemoteDispatchService::new(restarted.clone(), port.clone());
+        let path = restarted.remote_proxies.lock().path.clone();
+        let before = std::fs::read(&path).unwrap();
+        for (handle, expected) in [
+            (
+                RemoteRetryHandle {
+                    task_id: "foreign-task".into(),
+                    ..reserved.retry_handle.clone()
+                },
+                "remote_request_id_conflict",
+            ),
+            (
+                RemoteRetryHandle {
+                    client_request_id: "foreign-request".into(),
+                    ..reserved.retry_handle.clone()
+                },
+                "remote_request_id_conflict",
+            ),
+            (
+                RemoteRetryHandle {
+                    request_fingerprint: "0".repeat(64),
+                    ..reserved.retry_handle.clone()
+                },
+                "remote_request_id_conflict",
+            ),
+        ] {
+            assert_eq!(
+                service
+                    .commit_prepared(
+                        &request.semantics.local_session_id,
+                        &request.semantics.remote_session_ref,
+                        handle,
+                        &[]
+                    )
+                    .unwrap_err()
+                    .code(),
+                expected
+            );
+        }
+        assert_eq!(
+            service
+                .commit_prepared(
+                    &request.semantics.local_session_id,
+                    "foreign-ref",
+                    reserved.retry_handle.clone(),
+                    &[]
+                )
+                .unwrap_err()
+                .code(),
+            "remote_binding_mismatch"
+        );
+        for handle in [reserved.retry_handle, committed.retry_handle] {
+            // Invalid/unconfirmed receipt input is deliberately irrelevant to
+            // an already-attempted outcome query: it cannot change semantics.
+            assert_eq!(
+                service
+                    .commit_prepared(
+                        &request.semantics.local_session_id,
+                        &request.semantics.remote_session_ref,
+                        handle,
+                        &["invalid/receipt".into()]
+                    )
+                    .unwrap()
+                    .state,
+                RemoteDispatchState::OutcomeUnknown
+            );
+        }
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert_eq!(port.prepare_count.load(Ordering::SeqCst), 0);
+        assert_eq!(port.send_count.load(Ordering::SeqCst), 0);
+        assert!(service.ephemeral.lock().is_empty());
+        let record = restarted
+            .remote_proxy_snapshot(&request.semantics.local_session_id)
+            .unwrap();
+        assert_eq!(
+            record.pending[0].dispatch_state,
+            PendingDispatchState::AttemptMayHaveOccurred
+        );
+        assert!(record.projection.entries.is_empty());
+    }
+
+    #[test]
     fn cancel_requires_an_attempted_task_in_the_current_remote_binding() {
         let (_temp, store, request) = setup();
         let port = Arc::new(FakePort::new(
@@ -1795,6 +2034,80 @@ mod tests {
             authenticated_event_id: "authenticated-event-1".into(),
             live: request.live.clone(),
         }
+    }
+
+    #[test]
+    fn authenticated_terminal_retirement_rejects_retry_after_restart_without_writes() {
+        use crate::features::sessions::remote_proxy::schema::{ProjectionEntry, ProjectionKind};
+
+        let (temp, store, request) = setup();
+        let port = Arc::new(FakePort::new(
+            store.clone(),
+            request.semantics.local_session_id.clone(),
+        ));
+        let service = RemoteDispatchService::new(store.clone(), port);
+        let prepared = service.reserve_new(same_request(&request)).unwrap();
+        assert_eq!(prepared.state, RemoteDispatchState::PreparedNotSent);
+        let first = service
+            .commit_prepared(
+                &request.semantics.local_session_id,
+                &request.semantics.remote_session_ref,
+                prepared.retry_handle,
+                &[],
+            )
+            .unwrap();
+        assert_eq!(first.state, RemoteDispatchState::Queued);
+        store
+            .project_authenticated_remote_terminal(
+                &request.semantics.local_session_id,
+                &request.semantics.remote_session_ref,
+                &request.live,
+                &request.semantics.controlled_session_id,
+                &request.client_request_id,
+                &request.task_id,
+                &first.retry_handle.request_fingerprint,
+                ProjectionEntry {
+                    journal_epoch: "journal-1".into(),
+                    sequence: 1,
+                    event_id: "authenticated-event-1".into(),
+                    kind: ProjectionKind::Status,
+                    task_id: Some(request.task_id.clone()),
+                    body: Some("succeeded".into()),
+                    attachments: Vec::new(),
+                },
+            )
+            .unwrap();
+        let record = store
+            .remote_proxy_snapshot(&request.semantics.local_session_id)
+            .unwrap();
+        assert!(record.pending.is_empty());
+        assert_eq!(record.retired_requests.len(), 1);
+        assert_eq!(record.projection.entries.len(), 1);
+        drop(service);
+        drop(store);
+        let restarted = SessionStore::boot_at_test_dir(temp.path()).unwrap();
+        let restarted_port = Arc::new(FakePort::new(
+            restarted.clone(),
+            request.semantics.local_session_id.clone(),
+        ));
+        let service = RemoteDispatchService::new(restarted.clone(), restarted_port.clone());
+        let durable_path = restarted.remote_proxies.lock().path.clone();
+        let durable_before = std::fs::read(&durable_path).unwrap();
+        assert_eq!(
+            service
+                .commit_prepared(
+                    &request.semantics.local_session_id,
+                    &request.semantics.remote_session_ref,
+                    first.retry_handle,
+                    &[],
+                )
+                .unwrap_err()
+                .code(),
+            "remote_request_id_retired"
+        );
+        assert_eq!(restarted_port.send_count.load(Ordering::SeqCst), 0);
+        assert_eq!(restarted_port.prepare_count.load(Ordering::SeqCst), 0);
+        assert_eq!(std::fs::read(&durable_path).unwrap(), durable_before);
     }
 
     #[test]
