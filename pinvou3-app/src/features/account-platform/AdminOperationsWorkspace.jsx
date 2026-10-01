@@ -1,9 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { secureRequestID } from './request-id.js';
 
 const MICROCREDITS_PER_POINT = 10_000;
 const EMPTY_PERMISSIONS = Object.freeze([]);
 const REGISTRATION_BONUS_DRAFT_KEY = 'pinvou.admin.registration-bonus.reauthentication-draft';
 const REGISTRATION_BONUS_STEPUP_QUERY = 'registration_bonus_stepup';
+const REGISTRATION_BONUS_DRAFT_TTL_MS = 10 * 60 * 1000;
+const REQUEST_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
 function policyForm(policy = {}) {
   return {
@@ -14,27 +17,39 @@ function policyForm(policy = {}) {
   };
 }
 
-function isReauthenticationReturn() {
+function reauthenticationAttemptID() {
   try {
-    return new URLSearchParams(globalThis.location.search).get(REGISTRATION_BONUS_STEPUP_QUERY) === '1';
+    return new URLSearchParams(globalThis.location.search).get(REGISTRATION_BONUS_STEPUP_QUERY) || '';
   } catch {
-    return false;
+    return '';
   }
 }
 
-function reauthenticationDraft() {
+function storedReauthenticationDraft() {
   try {
-    if (!isReauthenticationReturn()) return null;
     const value = JSON.parse(globalThis.sessionStorage.getItem(REGISTRATION_BONUS_DRAFT_KEY) || 'null');
+    const attemptID = typeof value?.attempt_id === 'string' ? value.attempt_id : '';
+    const userID = typeof value?.user_id === 'string' ? value.user_id : '';
+    const createdAt = Number(value?.created_at);
+    const expiresAt = Number(value?.expires_at);
     const expectedRevision = Number(value?.expected_revision);
     const amount = Number(value?.amount_points);
     const validity = Number(value?.validity_days);
     const reason = typeof value?.reason === 'string' ? value.reason : '';
-    if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 1
+    if (value?.version !== 1 || !REQUEST_ID_PATTERN.test(attemptID) || !userID
+      || !Number.isSafeInteger(createdAt) || !Number.isSafeInteger(expiresAt)
+      || expiresAt <= createdAt || expiresAt - createdAt > REGISTRATION_BONUS_DRAFT_TTL_MS || expiresAt <= Date.now()
+      || !Number.isSafeInteger(expectedRevision) || expectedRevision < 1
       || typeof value?.enabled !== 'boolean' || !Number.isSafeInteger(amount) || amount < 0
       || !Number.isInteger(validity) || validity < 1 || validity > 3650
-      || reason.trim().length < 10 || reason.length > 500) return null;
+      || reason.trim().length < 10 || reason.length > 500) {
+      globalThis.sessionStorage.removeItem(REGISTRATION_BONUS_DRAFT_KEY);
+      return null;
+    }
     return {
+      attemptID,
+      userID,
+      expiresAt,
       expectedRevision,
       form: { enabled: value.enabled, amount_points: String(amount), validity_days: String(validity), reason },
     };
@@ -46,20 +61,27 @@ function reauthenticationDraft() {
 function clearReauthenticationDraft() {
   try {
     globalThis.sessionStorage.removeItem(REGISTRATION_BONUS_DRAFT_KEY);
+  } catch {
+    // Storage can be unavailable in hardened browsers.
+  }
+  try {
     const url = new URL(globalThis.location.href);
     url.searchParams.delete(REGISTRATION_BONUS_STEPUP_QUERY);
     globalThis.history.replaceState(globalThis.history.state, '', `${url.pathname}${url.search}${url.hash}`);
   } catch {
-    // Storage and history can be unavailable in hardened browsers; the server policy remains authoritative.
+    // History can be unavailable in embedded browsers; the server policy remains authoritative.
   }
 }
 
-export function AdminOperationsWorkspace({ client, copy, permissions = EMPTY_PERMISSIONS }) {
+export function AdminOperationsWorkspace({ client, copy, permissions = EMPTY_PERMISSIONS, currentUserID = '' }) {
   const labels = copy.operations;
   const permissionSet = new Set(permissions);
   const canManage = permissionSet.has('platform.registration-bonus.manage');
-  const returningFromReauthentication = useRef(isReauthenticationReturn());
-  const restoredDraft = useRef(reauthenticationDraft());
+  const returnAttemptID = useRef(reauthenticationAttemptID());
+  const initialStoredDraft = useRef(storedReauthenticationDraft());
+  const trustedStoredDraft = initialStoredDraft.current?.userID === currentUserID && canManage ? initialStoredDraft.current : null;
+  const returnedDraft = useRef(returnAttemptID.current && trustedStoredDraft?.attemptID === returnAttemptID.current ? trustedStoredDraft : null);
+  const [pendingDraft, setPendingDraft] = useState(() => !returnAttemptID.current ? trustedStoredDraft : null);
   const [policy, setPolicy] = useState(null);
   const [form, setForm] = useState(() => policyForm());
   const [state, setState] = useState({ loading: true, saving: false, error: '', errorCode: '', notice: '' });
@@ -68,13 +90,13 @@ export function AdminOperationsWorkspace({ client, copy, permissions = EMPTY_PER
     setState((value) => ({ ...value, loading: true, error: '', errorCode: '', notice: '' }));
     try {
       const result = await client.registrationBonusPolicy(signal);
-      const draft = restoredDraft.current;
+      const draft = returnedDraft.current;
       const draftConflict = Boolean(draft && draft.expectedRevision !== Number(result.revision));
       setPolicy(result);
       setForm(draft?.form || policyForm(result));
-      if (returningFromReauthentication.current) {
-        returningFromReauthentication.current = false;
-        restoredDraft.current = null;
+      if (returnAttemptID.current) {
+        returnAttemptID.current = '';
+        returnedDraft.current = null;
         clearReauthenticationDraft();
       }
       setState({
@@ -94,6 +116,16 @@ export function AdminOperationsWorkspace({ client, copy, permissions = EMPTY_PER
     void load(controller.signal);
     return () => controller.abort();
   }, [load]);
+
+  useEffect(() => {
+    const draft = initialStoredDraft.current;
+    if (draft && (draft.userID !== currentUserID || !canManage)) {
+      initialStoredDraft.current = null;
+      returnedDraft.current = null;
+      setPendingDraft(null);
+      clearReauthenticationDraft();
+    }
+  }, [canManage, currentUserID]);
 
   const save = async (event) => {
     event.preventDefault();
@@ -127,8 +159,19 @@ export function AdminOperationsWorkspace({ client, copy, permissions = EMPTY_PER
     && form.reason.trim().length >= 10 && form.reason.trim().length <= 500;
   const eligibilityReady = policy?.eligibility_status === 'READY';
   const reauthenticate = () => {
-    const draft = JSON.stringify({ ...form, expected_revision: Number(policy?.revision) });
+    const attemptID = secureRequestID();
+    const createdAt = Date.now();
+    const draft = JSON.stringify({
+      version: 1,
+      attempt_id: attemptID,
+      user_id: currentUserID,
+      created_at: createdAt,
+      expires_at: createdAt + REGISTRATION_BONUS_DRAFT_TTL_MS,
+      ...form,
+      expected_revision: Number(policy?.revision),
+    });
     try {
+      if (!currentUserID || !canManage) throw new Error('registration bonus draft identity is unavailable');
       globalThis.sessionStorage.setItem(REGISTRATION_BONUS_DRAFT_KEY, draft);
       if (globalThis.sessionStorage.getItem(REGISTRATION_BONUS_DRAFT_KEY) !== draft) throw new Error('registration bonus draft verification failed');
     } catch {
@@ -140,7 +183,31 @@ export function AdminOperationsWorkspace({ client, copy, permissions = EMPTY_PER
       }));
       return;
     }
-    client.reauthenticate(`/admin.html?section=operations&${REGISTRATION_BONUS_STEPUP_QUERY}=1`);
+    client.reauthenticate(`/admin.html?section=operations&${REGISTRATION_BONUS_STEPUP_QUERY}=${encodeURIComponent(attemptID)}`);
+  };
+  const recoverPendingDraft = () => {
+    if (!pendingDraft || pendingDraft.userID !== currentUserID || !canManage || !policy) {
+      setPendingDraft(null);
+      clearReauthenticationDraft();
+      return;
+    }
+    const draftConflict = pendingDraft.expectedRevision !== Number(policy.revision);
+    setForm(pendingDraft.form);
+    setPendingDraft(null);
+    clearReauthenticationDraft();
+    setState({
+      loading: false,
+      saving: false,
+      error: draftConflict ? labels.reauthenticationDraftConflict : '',
+      errorCode: draftConflict ? 'REGISTRATION_BONUS_DRAFT_CONFLICT' : '',
+      notice: draftConflict ? '' : labels.reauthenticationDraftRecovered,
+    });
+  };
+  const discardPendingDraft = () => {
+    setPendingDraft(null);
+    clearReauthenticationDraft();
+    setForm(policyForm(policy));
+    setState((value) => ({ ...value, error: '', errorCode: '', notice: labels.reauthenticationDraftDiscarded }));
   };
   const errorAction = state.errorCode === 'REGISTRATION_BONUS_DRAFT_CONFLICT'
     ? { label: labels.loadLatestPolicy, run: () => void load() }
@@ -152,6 +219,7 @@ export function AdminOperationsWorkspace({ client, copy, permissions = EMPTY_PER
     <section className="adm-panel adm-settings-panel adm-registration-bonus" data-testid="registration-bonus-policy">
       <header className="adm-section-head"><div><h2>{labels.title}</h2><p>{labels.lead}</p></div></header>
       <div className="adm-inline-message warn" role="note">{labels.lifetimeWarning}</div>
+      {pendingDraft && <div className="adm-inline-message warn adm-registration-bonus-draft-prompt" role="status"><span>{labels.unfinishedReauthenticationDraft}</span><div><button type="button" onClick={recoverPendingDraft}>{labels.recoverDraft}</button><button type="button" onClick={discardPendingDraft}>{labels.discardDraft}</button></div></div>}
       {state.error && <div className="adm-inline-message error" role="alert"><span>{state.error}</span><button type="button" onClick={errorAction.run} disabled={state.loading || state.saving}>{errorAction.label}</button></div>}
       {state.notice && <div className="adm-inline-message ok" role="status">{state.notice}</div>}
       {state.loading && <p className="adm-muted">{copy.loading}</p>}

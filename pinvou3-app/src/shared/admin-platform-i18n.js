@@ -1600,6 +1600,7 @@ const registrationBonusOperationsCopy = {
     lifetimeWarning: '资格按手机号终身计算：首次注册即使策略关闭或赠送为 0，也会永久消耗资格，后续不会补赠。',
     loadFailed: '无法加载注册赠送策略，请稍后重试。', saveFailed: '注册赠送策略保存失败，请核对输入后重试。', conflict: '策略已被其他管理员更新，请刷新后重新提交。', recentAuthenticationRequired: '该操作要求近期认证，请重新登录后再试。', reauthenticate: '重新登录',
     reauthenticationDraftConflict: '再认证期间策略已被更新。当前草稿已保留，但不能直接提交；请加载最新策略后重新核对。', loadLatestPolicy: '加载最新策略', reauthenticationDraftStorageFailed: '无法在当前标签页安全保存草稿，已取消跳转。请允许站点会话存储后重试。', retryReauthentication: '重试并重新登录',
+    unfinishedReauthenticationDraft: '检测到一次未完成再认证留下的策略草稿。确认恢复后再继续编辑，或放弃草稿并使用服务端最新策略。', recoverDraft: '恢复草稿', discardDraft: '放弃草稿', reauthenticationDraftRecovered: '已恢复未完成再认证的策略草稿。', reauthenticationDraftDiscarded: '已放弃草稿，并恢复服务端最新策略。',
   },
   en: {
     nav: 'Operations',
@@ -1610,6 +1611,7 @@ const registrationBonusOperationsCopy = {
     lifetimeWarning: 'Eligibility is lifetime per mobile number. A first registration permanently consumes eligibility even while disabled or set to zero; no bonus is granted later.',
     loadFailed: 'Could not load the registration bonus policy.', saveFailed: 'Could not save the registration bonus policy. Check the input and retry.', conflict: 'Another administrator updated this policy. Reload and submit again.', recentAuthenticationRequired: 'Recent authentication is required. Sign in again and retry.', reauthenticate: 'Sign in again',
     reauthenticationDraftConflict: 'The policy changed during reauthentication. Your draft is preserved but cannot be submitted; load the latest policy and review it first.', loadLatestPolicy: 'Load latest policy', reauthenticationDraftStorageFailed: 'The draft could not be stored safely in this tab, so reauthentication was cancelled. Allow session storage and retry.', retryReauthentication: 'Retry and sign in again',
+    unfinishedReauthenticationDraft: 'A policy draft from an unfinished reauthentication attempt was found. Recover it to continue editing, or discard it and use the latest server policy.', recoverDraft: 'Recover draft', discardDraft: 'Discard draft', reauthenticationDraftRecovered: 'The unfinished reauthentication draft was restored.', reauthenticationDraftDiscarded: 'The draft was discarded and the latest server policy was restored.',
   },
   ja: {
     nav: '運用設定',
@@ -1620,6 +1622,7 @@ const registrationBonusOperationsCopy = {
     lifetimeWarning: '資格は携帯番号ごとに生涯1回です。無効または0ポイントの期間でも初回登録で資格を消費し、後から付与されません。',
     loadFailed: '登録特典ポリシーを読み込めませんでした。', saveFailed: '登録特典ポリシーを保存できませんでした。入力を確認して再試行してください。', conflict: '別の管理者がポリシーを更新しました。再読み込みして送信してください。', recentAuthenticationRequired: '再認証が必要です。再ログインしてから再試行してください。', reauthenticate: '再ログイン',
     reauthenticationDraftConflict: '再認証中にポリシーが更新されました。草稿は保持されていますが、そのまま送信できません。最新ポリシーを読み込み、再確認してください。', loadLatestPolicy: '最新ポリシーを読み込む', reauthenticationDraftStorageFailed: 'このタブで草稿を安全に保存できないため、再認証を中止しました。セッションストレージを許可して再試行してください。', retryReauthentication: '再試行して再ログイン',
+    unfinishedReauthenticationDraft: '未完了の再認証で残ったポリシー草稿があります。復元して編集を続けるか、破棄してサーバーの最新ポリシーを使用してください。', recoverDraft: '草稿を復元', discardDraft: '草稿を破棄', reauthenticationDraftRecovered: '未完了の再認証の草稿を復元しました。', reauthenticationDraftDiscarded: '草稿を破棄し、サーバーの最新ポリシーを復元しました。',
   },
 };
 Object.assign(registrationBonusOperationsCopy.zh, {
