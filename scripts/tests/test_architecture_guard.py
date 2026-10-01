@@ -25,6 +25,20 @@ class ArchitectureGuardUnitTests(unittest.TestCase):
     def setUpClass(cls):
         cls.guard = load_guard_module()
 
+    def _migration_fixture_reference(self):
+        # Immutable pre-1360 main snapshot whose three-way limits match the
+        # registered migration baseline. generated_from tracks older resources.
+        reference = "d6a89486073e6a40fa037f60a92a7a6c046bc495"
+        self.assertEqual(
+            reference,
+            subprocess.check_output(
+                ["git", "rev-parse", "--verify", f"{reference}^{{commit}}"],
+                cwd=REPO_ROOT,
+                text=True,
+            ).strip(),
+        )
+        return reference
+
     def test_count_baseline_detects_both_reduction_and_increase(self):
         failures, progress = self.guard.compare_counts(
             "sample", {"legacy": 2}, {"legacy": 3}
@@ -337,6 +351,7 @@ class ArchitectureGuardUnitTests(unittest.TestCase):
         baseline = json.loads(
             (REPO_ROOT / "scripts/architecture-baseline.json").read_text(encoding="utf-8")
         )
+        reference = self._migration_fixture_reference()
         self.assertNotIn("rust_grouped_feature_import_sites", baseline["rules"])
         self.assertEqual(
             self.guard.RUST_DEPENDENCY_MIGRATION_ANCHOR,
@@ -414,7 +429,7 @@ class ArchitectureGuardUnitTests(unittest.TestCase):
 
         previous = json.loads(
             subprocess.check_output(
-                ["git", "show", "origin/main:scripts/architecture-baseline.json"],
+                ["git", "show", f"{reference}:scripts/architecture-baseline.json"],
                 cwd=REPO_ROOT,
                 text=True,
             )
@@ -422,7 +437,7 @@ class ArchitectureGuardUnitTests(unittest.TestCase):
         anchor = self.guard.RUST_DEPENDENCY_MIGRATION_ANCHOR
         self.assertTrue(self.guard.migration_anchor_is_ancestor(REPO_ROOT, anchor))
         merge_state, anchor_state, target_state = (
-            self.guard.migration_semantic_states_from_git(REPO_ROOT, anchor, "origin/main")
+            self.guard.migration_semantic_states_from_git(REPO_ROOT, anchor, reference)
         )
         migration_limits, migration_cycles = self.guard.merged_migration_limits(
             merge_state, anchor_state, target_state
@@ -455,6 +470,9 @@ class ArchitectureGuardUnitTests(unittest.TestCase):
         current = json.loads(
             (REPO_ROOT / "scripts/architecture-baseline.json").read_text(encoding="utf-8")
         )
+        # Freeze the same calibration fixture; future-main behavior is covered
+        # by test_migration_history_uses_three_way_feature_edge_counts.
+        reference = self._migration_fixture_reference()
         host_rule = "rust_remote_control_host_api"
         cycle_rule = "rust_cyclic_feature_dependencies"
 
@@ -485,7 +503,7 @@ class ArchitectureGuardUnitTests(unittest.TestCase):
         self.assertTrue(self.guard.compare_baseline_ratchet(current, unmarked_empty))
         merge_state, anchor_state, target_state = (
             self.guard.migration_semantic_states_from_git(
-                REPO_ROOT, self.guard.RUST_DEPENDENCY_MIGRATION_ANCHOR, "origin/main"
+                REPO_ROOT, self.guard.RUST_DEPENDENCY_MIGRATION_ANCHOR, reference
             )
         )
         self.assertTrue(self.guard.compare_baseline_ratchet(

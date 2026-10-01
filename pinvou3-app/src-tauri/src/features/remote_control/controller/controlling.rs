@@ -9,6 +9,7 @@ use serde::Serialize;
 use uuid::Uuid;
 use zeroize::{Zeroize, Zeroizing};
 
+use super::liveness::validate_liveness_epoch;
 use super::protocol::LeaseContext;
 use super::relay_transport::{ControllerRole, ControllerSendError, ControllerTransportSender};
 use super::resume::ControllerResumeGate;
@@ -160,7 +161,7 @@ impl std::fmt::Debug for ControllerLease {
 pub(crate) struct ControllingResumeMaterial {
     pub(crate) lease: LeaseContext,
     pub(crate) resume_token: [u8; 32],
-    pub(crate) original_deadline_b: u64,
+    pub(crate) relay_deadline_identity_ms: u64,
 }
 
 impl std::fmt::Debug for ControllingResumeMaterial {
@@ -169,7 +170,10 @@ impl std::fmt::Debug for ControllingResumeMaterial {
             .debug_struct("ControllingResumeMaterial")
             .field("lease", &self.lease)
             .field("resume_token", &"[REDACTED]")
-            .field("original_deadline_b", &self.original_deadline_b)
+            .field(
+                "relay_deadline_identity_ms",
+                &self.relay_deadline_identity_ms,
+            )
             .finish()
     }
 }
@@ -336,14 +340,24 @@ impl ControllingDeviceManager {
         Ok(status_locked(&inner))
     }
 
-    pub(crate) fn mark_transport_disconnected(&self) -> ControllingStatus {
+    pub(crate) fn mark_transport_disconnected(
+        &self,
+        now_a: u64,
+        evidence_deadline_a: Option<u64>,
+    ) -> ControllingStatus {
         let mut inner = self.inner.lock();
         if inner.phase == ControllingStatusKind::Connected {
-            let deadline = inner.lease.as_ref().map(|lease| lease.resume_deadline_b);
-            if let Some(gate) = inner.resume_gate.as_mut() {
-                let _ = gate.disconnect(0, deadline);
+            if inner
+                .resume_gate
+                .as_mut()
+                .is_some_and(|gate| gate.disconnect(now_a, evidence_deadline_a).is_ok())
+            {
+                inner.phase = ControllingStatusKind::Reconnecting;
+            } else {
+                clear_live_context(&mut inner);
+                inner.phase = ControllingStatusKind::Error;
+                inner.error_code = Some("endpoint_offline");
             }
-            inner.phase = ControllingStatusKind::Reconnecting;
         }
         status_locked(&inner)
     }
@@ -368,19 +382,22 @@ impl ControllingDeviceManager {
         };
         // 先让旧 gate 用完整的 `controller_resumed`（同一 activation + 轮换后的
         // 令牌/指纹）消费旧材料；任何不符都终止候选。
-        let accepted = match inner.resume_gate.as_mut() {
-            Some(gate) => gate
-                .accept_resumed(
-                    activation_id,
-                    liveness_epoch_a.into(),
-                    resume_token,
-                    transport_key_fingerprint,
-                    now_b,
-                    Some(lease.resume_deadline_b),
-                )
-                .is_ok(),
-            None => false,
-        };
+        let liveness_epoch_a = liveness_epoch_a.into();
+        let accepted = new_deadline_b > 0
+            && validate_liveness_epoch(&liveness_epoch_a).is_ok()
+            && match inner.resume_gate.as_mut() {
+                Some(gate) => gate
+                    .accept_resumed(
+                        activation_id,
+                        liveness_epoch_a,
+                        resume_token,
+                        transport_key_fingerprint,
+                        now_b,
+                        None,
+                    )
+                    .is_ok(),
+                None => false,
+            };
         if !accepted {
             clear_live_context(&mut inner);
             inner.phase = ControllingStatusKind::Error;
@@ -424,7 +441,7 @@ impl ControllingDeviceManager {
             .clone()
             .ok_or_else(|| ControllingStateError::new("lease_unavailable"))?;
         let prepared = match inner.resume_gate.as_mut() {
-            Some(gate) => gate.prepare(now_b, Some(lease.resume_deadline_b)).is_ok(),
+            Some(gate) => gate.prepare(now_b, None).is_ok(),
             None => false,
         };
         if !prepared {
@@ -436,7 +453,7 @@ impl ControllingDeviceManager {
         Ok(ControllingResumeMaterial {
             lease: lease.context,
             resume_token: lease.resume_token,
-            original_deadline_b: lease.resume_deadline_b,
+            relay_deadline_identity_ms: lease.resume_deadline_b,
         })
     }
 
@@ -452,7 +469,7 @@ impl ControllingDeviceManager {
         if inner.phase != ControllingStatusKind::Reconnecting {
             return Err(ControllingStateError::new("controller_phase_invalid"));
         }
-        let deadline = inner.lease.as_ref().map(|lease| lease.resume_deadline_b);
+        let deadline = None;
         let advanced = match inner.resume_gate.as_mut() {
             Some(gate) => match step {
                 ResumeStep::Provisional { activation_id } => gate
@@ -812,6 +829,33 @@ fn status_locked(inner: &Inner) -> ControllingStatus {
 mod tests {
     use super::*;
 
+    #[test]
+    fn serialized_status_matches_the_shared_bridge_fixture() {
+        let fixtures: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../../tests/fixtures/desktop_remote_status.json"
+        ))
+        .unwrap();
+        let manager = ControllingDeviceManager::default();
+        let operation = manager.connect("2345678").unwrap();
+        manager.complete_reserved(operation.clone()).unwrap();
+        let mut connected = manager
+            .complete_connected(operation.clone(), lease())
+            .unwrap();
+        connected.claim_request_id = Some("claim-0001".into());
+        assert_eq!(
+            serde_json::to_value(&connected).unwrap(),
+            fixtures["controllerConnected"]
+        );
+        let mut failed = manager
+            .fail_connection(operation, "endpoint_offline")
+            .unwrap();
+        failed.claim_request_id = Some("claim-0001".into());
+        assert_eq!(
+            serde_json::to_value(failed).unwrap(),
+            fixtures["controllerError"]
+        );
+    }
+
     fn lease() -> ControllerLease {
         ControllerLease {
             context: LeaseContext {
@@ -944,12 +988,14 @@ mod tests {
             .complete_connected(operation.clone(), lease())
             .unwrap();
         assert_eq!(
-            manager.mark_transport_disconnected().status,
+            manager
+                .mark_transport_disconnected(5_000, Some(30_000))
+                .status,
             ControllingStatusKind::Reconnecting
         );
         // 恢复材料可取（旧令牌只在内存里），Debug 输出不得含令牌字节。
         let material = manager.begin_resume(operation.clone(), 1_000).unwrap();
-        assert_eq!(material.original_deadline_b, 30_000);
+        assert_eq!(material.relay_deadline_identity_ms, 30_000);
         assert!(format!("{material:?}").contains("[REDACTED]"));
         let activation = "activation-0001";
         manager
@@ -998,7 +1044,7 @@ mod tests {
         manager
             .complete_connected(operation.clone(), lease())
             .unwrap();
-        manager.mark_transport_disconnected();
+        manager.mark_transport_disconnected(5_000, Some(30_000));
         manager.begin_resume(operation.clone(), 1_000).unwrap();
         for (step, now_b) in [
             (
@@ -1038,7 +1084,7 @@ mod tests {
         }
         let resumed = manager
             .complete_resumed(
-                operation, activation, 7_000, "live-a-2", [3; 32], [4; 32], 30_000,
+                operation, activation, 7_000, "live:a-2", [3; 32], [4; 32], 30_000,
             )
             .unwrap();
         assert_eq!(resumed.status, ControllingStatusKind::Connected);
@@ -1046,6 +1092,76 @@ mod tests {
             manager.live_lease().unwrap().controller_lease_id,
             "lease-0001"
         );
+    }
+
+    #[test]
+    fn invalid_resumed_cycle_metadata_fails_closed_before_installation() {
+        for (deadline, epoch) in [
+            (0, "live-a-2"),
+            (60_000, ""),
+            (60_000, "invalid epoch"),
+            (60_000, "live~a-2"),
+        ] {
+            let manager = ControllingDeviceManager::default();
+            let operation = manager.connect("234-4567").unwrap();
+            manager.complete_reserved(operation.clone()).unwrap();
+            manager
+                .complete_connected(operation.clone(), lease())
+                .unwrap();
+            manager.mark_transport_disconnected(5_000, Some(30_000));
+            manager.begin_resume(operation.clone(), 6_000).unwrap();
+            let activation = "activation-0001";
+            for (step, now_b) in [
+                (
+                    ResumeStep::Provisional {
+                        activation_id: activation,
+                    },
+                    7_000,
+                ),
+                (
+                    ResumeStep::Confirmed {
+                        activation_id: activation,
+                    },
+                    8_000,
+                ),
+                (
+                    ResumeStep::ActivationPending {
+                        activation_id: activation,
+                    },
+                    9_000,
+                ),
+                (
+                    ResumeStep::LivenessConfirmed {
+                        activation_id: activation,
+                    },
+                    10_000,
+                ),
+                (
+                    ResumeStep::ReadyAcknowledged {
+                        activation_id: activation,
+                    },
+                    11_000,
+                ),
+            ] {
+                manager
+                    .advance_resume(operation.clone(), step, now_b)
+                    .unwrap();
+            }
+            assert_eq!(
+                manager
+                    .complete_resumed(
+                        operation, activation, 12_000, epoch, [3; 32], [4; 32], deadline
+                    )
+                    .unwrap_err()
+                    .code,
+                "controller_resume_failed"
+            );
+            assert_eq!(manager.status().status, ControllingStatusKind::Error);
+            assert!(manager.live_lease().is_err());
+            let inner = manager.inner.lock();
+            assert!(inner.lease.is_none());
+            assert!(inner.resume_gate.is_none());
+        }
     }
 
     #[test]
