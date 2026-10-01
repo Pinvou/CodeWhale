@@ -191,11 +191,12 @@ async function stopRelay(child) {
   await waitForExit(child);
 }
 
-async function spawnRelay(env = {}) {
+async function spawnRelay(env = {}, { preload } = {}) {
   const isolatedPort = await getFreePort();
   const statePath = env.PINVOU_REMOTE_STATE_PATH
     || join(testRoot, `relay-state-${isolatedPort}-${Date.now()}-${Math.random().toString(16).slice(2)}.json`);
-  const child = spawn(process.execPath, [join(relayDir, "server.js")], {
+  const args = preload ? ["--import", preload, join(relayDir, "server.js")] : [join(relayDir, "server.js")];
+  const child = spawn(process.execPath, args, {
     cwd: relayDir,
     env: {
       ...process.env,
@@ -1135,6 +1136,87 @@ test("proxy allowlist keeps local health checks available", async () => {
     const response = await fetch(`${isolated.httpUrl}/pinvou3/remote/healthz`);
     assert.equal(response.status, 200);
   } finally {
+    await stopRelay(isolated.child);
+  }
+});
+
+test("real Relay heartbeat retries failed reservation invalidation and releases the slot", async () => {
+  const statePath = join(testRoot, `controller-timeout-${Date.now()}.json`);
+  const controllerStatePath = join(testRoot, `controller-timeout-state-${Date.now()}`, "state.json");
+  const signing = crypto.generateKeyPairSync("ed25519");
+  const isolated = await spawnRelay({
+    NODE_ENV: "development",
+    PINVOU_DESKTOP_CONTROLLER_ENABLED: "1",
+    PINVOU_REMOTE_ENROLLMENT_DEPLOYMENT: "development",
+    PINVOU_REMOTE_ENROLLMENT_DEVELOPMENT_TOFU: "1",
+    PINVOU_REMOTE_CONTROLLER_STATE_PATH: controllerStatePath,
+    PINVOU_REMOTE_STATE_PATH: statePath,
+    PINVOU_REMOTE_ENROLLMENT_HMAC_KEY_ID: "enrollment-key-timeout-1",
+    PINVOU_REMOTE_ENROLLMENT_HMAC_KEY: "enrollment-key-material-at-least-32-bytes",
+    PINVOU_REMOTE_PAIRING_HMAC_KEY_ID: "pairing-key-timeout-1",
+    PINVOU_REMOTE_PAIRING_HMAC_KEY: "pairing-key-material-independent-at-least-32-bytes",
+    PINVOU_REMOTE_RELAY_SIGNING_KEY_ID: "relay-signing-key-timeout-1",
+    PINVOU_REMOTE_RELAY_SIGNING_PRIVATE_KEY_B64: signing.privateKey.export({
+      type: "pkcs8", format: "der",
+    }).toString("base64"),
+  }, { preload: new URL("./fixtures/reservation-invalidation-failure.js", import.meta.url).href });
+  const sockets = [];
+  let failureTrace = "";
+  isolated.child.stdout.on("data", (chunk) => { failureTrace += String(chunk); });
+  try {
+    const endpointId = "endpoint-controller-timeout";
+    const accessToken = "controller-timeout-access-token-00000001";
+    const desktopSecret = "controller-timeout-desktop-secret-000001";
+    const desktop = await registerDesktop(endpointId, accessToken, desktopSecret, isolated.wsUrl, 15_000);
+    sockets.push(desktop.ws);
+
+    const codeWrap = crypto.generateKeyPairSync("x25519");
+    const handshakeB = crypto.generateKeyPairSync("x25519");
+    const registeredPromise = nextMessageOneOf(
+      desktop.ws, ["desktop_pairing_registered", "error"], 15_000,
+    );
+    desktop.ws.send(JSON.stringify({
+      v: 1,
+      type: "desktop_pairing_register",
+      request_id: "request-register-timeout",
+      registration_request_id: "registration-timeout-0001",
+      endpoint_id: endpointId,
+      remote_control_generation: "generation-timeout-0001",
+      code_wrap_public_key_b64: rawX25519Public(codeWrap.publicKey).toString("base64"),
+      handshake_public_key_b64: rawX25519Public(handshakeB.publicKey).toString("base64"),
+      key_algorithm: "x25519",
+      capabilities: ["pairing_v1", "encrypted_frames_v1", "finished_receipt_v1"],
+    }));
+    const registered = await registeredPromise;
+    if (registered.type === "error") throw new Error(`pairing registration failed: ${registered.code}`);
+    const pairingCode = openPairingCode(codeWrap.privateKey, registered);
+
+    const controller = await openSocket(isolated.wsUrl);
+    sockets.push(controller);
+    const reservedA = nextMessage(controller, "controller_pairing_reserved", 10_000);
+    const reservedB = nextMessage(desktop.ws, "controller_pairing_reserved", 10_000);
+    const invalidated = nextMessage(desktop.ws, "error", 40_000);
+    const handshakeA = crypto.generateKeyPairSync("x25519");
+    controller.send(JSON.stringify({
+      v: 1,
+      type: "controller_pairing_claim",
+      request_id: "request-claim-timeout",
+      claim_request_id: "claim-timeout-0001",
+      pairing_code: pairingCode,
+      handshake_public_key_b64: rawX25519Public(handshakeA.publicKey).toString("base64"),
+      key_algorithm: "x25519",
+      capabilities: ["pairing_v1", "encrypted_frames_v1", "finished_receipt_v1"],
+    }));
+    await Promise.all([reservedA, reservedB]);
+    assert.equal((await invalidated).code, "pairing_code_invalid");
+    assert.match(failureTrace, /reservation-invalidation-probe: failed/u);
+    assert.match(failureTrace, /reservation-invalidation-probe: retried/u);
+
+    const web = await joinWeb(endpointId, accessToken, {}, isolated.wsUrl);
+    sockets.push(web.ws);
+    assert.equal(web.joined.lease_id.length > 0, true);
+  } finally {
+    sockets.forEach(closeSocket);
     await stopRelay(isolated.child);
   }
 });

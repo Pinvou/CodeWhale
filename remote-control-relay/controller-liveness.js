@@ -89,13 +89,18 @@ function newState(lease, now) {
     last_liveness_b: { epoch: lease.liveness_epoch_b, sequence: 0n, at: now },
     attestation_sequence: 0n,
     pending_challenges: new Map(),
-    used_challenges: new Set(),
+    used_challenges: new Map(),
   };
 }
 
 function pruneChallenges(state, now) {
   for (const [challengeId, challenge] of state.pending_challenges) {
     if (now - challenge.sent_at > TOTAL_BUDGET_MS) state.pending_challenges.delete(challengeId);
+  }
+  // Retain replay history for the full challenge validity window. Strict
+  // heartbeat/attestation sequences remain the epoch-wide replay barrier.
+  for (const [key, consumedAt] of state.used_challenges) {
+    if (now - consumedAt > TOTAL_BUDGET_MS) state.used_challenges.delete(key);
   }
 }
 
@@ -114,12 +119,13 @@ function registerChallenge(state, message, now) {
   });
 }
 
-function consumeChallenge(state, message) {
+function consumeChallenge(state, message, now) {
+  pruneChallenges(state, now);
   if (state.used_challenges.size >= MAX_USED_CHALLENGES) {
     fail("controller_liveness_challenge_capacity");
   }
   state.pending_challenges.delete(message.challenge_id);
-  state.used_challenges.add(`${message.challenge_id}\u0000${message.challenge_b64}`);
+  state.used_challenges.set(`${message.challenge_id}\u0000${message.challenge_b64}`, now);
 }
 
 export class ControllerLivenessHooks {
@@ -186,6 +192,7 @@ export class ControllerLivenessHooks {
   #issueAttestation({ message, context, state, now }) {
     const validated = validateControllerMessage(message, "B", context);
     if (!this.#signing.signAttestation) fail("controller_liveness_attestation_unavailable");
+    pruneChallenges(state, now);
     const pending = state.pending_challenges.get(validated.challenge_id);
     if (!pending || pending.challenge_b64 !== validated.challenge_b64) {
       fail("controller_liveness_challenge_not_found");
@@ -230,7 +237,7 @@ export class ControllerLivenessHooks {
       last_heartbeat_sequence_a: state.last_liveness_a.sequence.toString(),
       last_attestation_sequence: (state.attestation_sequence - 1n).toString(),
     });
-    consumeChallenge(state, validated);
+    consumeChallenge(state, validated, now);
     return Object.freeze({ deliveries: Object.freeze([delivery("B", attestation)]) });
   }
 
@@ -249,6 +256,19 @@ export class ControllerLivenessHooks {
   async onSocketClosed({ lease } = {}) {
     if (lease?.controller_lease_id) this.#states.delete(lease.controller_lease_id);
     return Object.freeze({ retain_lease: false });
+  }
+
+  // Snapshot synchronously before onSocketClosed removes evidence. The
+  // authenticated join/resume seeds a finite cycle; subsequent role heartbeats
+  // can advance it only while connected. B activity never renews A's cutoff.
+  resumeDeadline(lease) {
+    const state = this.#states.get(lease?.controller_lease_id);
+    if (!state || state.last_liveness_a.epoch !== lease.liveness_epoch_a
+      || state.last_liveness_b.epoch !== lease.liveness_epoch_b) return null;
+    const timestamp = integer(this.#clock(), "now");
+    const deadline = Math.min(state.last_liveness_a.at, state.last_liveness_b.at) + TOTAL_BUDGET_MS;
+    if (!Number.isSafeInteger(deadline) || timestamp >= deadline) return null;
+    return deadline;
   }
 
   async onLeaseTerminated({ controller_lease_id: controllerLeaseId } = {}) {
