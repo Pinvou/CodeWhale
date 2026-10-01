@@ -2,11 +2,11 @@
 
 > 状态：待开发
 >
-> 需求基线：[`Windows双端远程控制需求文档.md`](./Windows双端远程控制需求文档.md) v1.5
+> 需求基线：[`Windows双端远程控制需求文档.md`](./Windows双端远程控制需求文档.md) v1.6
 >
 > 适用范围：Windows 双端桌面远控；现有 WebUI v2 必须保持兼容
 >
-> 更新日期：2026-09-15
+> 更新日期：2026-10-01
 
 ## 1. 目的与执行规则
 
@@ -18,7 +18,7 @@
 2. 现有 WebUI v2 不是桌面双端协议的试验接口。新增桌面消息族、状态和持久数据必须显式版本化，旧 Web 客户端只接收既有 wire shape。
 3. 每个任务单独提交，建议提交信息见任务条目；需要同时修改 Relay、Rust 和前端的任务，也应以一个可验收的纵向行为为边界，不能按文件类型拆出半成品。
 4. 每项实现都要运行该任务列出的定向测试，并在合入前运行第 8 节公共门禁；测试通过不能替代密钥生命周期、迟到回包、重复副作用和日志泄露自检。
-5. 新增代码遵循 `app → features → platform/core` 依赖方向。桌面双端业务放在 `pinvou3-app/src-tauri/src/features/remote_control/` 与 `pinvou3-app/src/features/remote-control/`；Windows 专属原语才放 `platform/windows.rs`。
+5. 新增代码遵循 `app → features → platform/core` 依赖方向。桌面双端业务放在 `pinvou3-app/src-tauri/src/features/remote_control/` 与 `pinvou3-app/src/features/remote-control/`；远控功能专属的 Windows 原语放在 `pinvou3-app/src-tauri/src/features/remote_control/platform/windows.rs`，不是全局 `src-tauri/src/platform/`。
 6. 首版仅 Windows 声明能力。macOS/Linux 不实现替代行为，只返回稳定的 `unsupported` 并隐藏入口。
 
 ## 2. 已核对的仓库现状
