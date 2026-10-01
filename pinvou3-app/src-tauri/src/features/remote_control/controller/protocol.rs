@@ -2195,16 +2195,22 @@ fn validate_identifier(value: &Value, field: &str) -> Result<()> {
     let Some(text) = value.as_str() else {
         return Err(ControllerProtocolError::new("invalid_field", field));
     };
-    let valid = !text.is_empty()
+    if !is_valid_identifier(text) {
+        return Err(ControllerProtocolError::new("invalid_field", field));
+    }
+    Ok(())
+}
+
+/// 冻结协议标识符语法：首字符为 ASCII 字母数字，其后只允许字母数字与
+/// `._:-`，长度不超过 `MAX_ID_CHARS`。E2E-02 的 `bind_generation` 与运行时
+/// generation 门共用同一份规则，避免出现只在一侧收紧的语法。
+pub(crate) fn is_valid_identifier(text: &str) -> bool {
+    !text.is_empty()
         && text.len() <= MAX_ID_CHARS
         && text.as_bytes()[0].is_ascii_alphanumeric()
         && text
             .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || b"._:-".contains(&byte));
-    if !valid {
-        return Err(ControllerProtocolError::new("invalid_field", field));
-    }
-    Ok(())
+            .all(|byte| byte.is_ascii_alphanumeric() || b"._:-".contains(&byte))
 }
 
 fn validate_uint(value: &Value, field: &str, max: u64) -> Result<()> {

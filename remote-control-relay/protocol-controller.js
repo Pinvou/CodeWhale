@@ -244,7 +244,11 @@ function text(value, field, maxCharacters, maxBytes = maxCharacters * 4, min = 1
   return value;
 }
 
-function identifier(value, field) { if (typeof value !== "string" || !ID.test(value)) fail("invalid_field", field); }
+export function isValidControllerIdentifier(value) {
+  return typeof value === "string" && ID.exec(value)?.[0] === value;
+}
+
+function identifier(value, field) { if (!isValidControllerIdentifier(value)) fail("invalid_field", field); }
 
 function decimal(value, field, max = U64_MAX) {
   if (typeof value !== "string" || !DECIMAL_U64.test(value)) fail("invalid_field", field);

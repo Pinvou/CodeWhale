@@ -5,6 +5,7 @@ import {
   buildPairingTranscriptPreimage,
   controllerCapabilityHash,
   negotiateControllerCapabilities,
+  isValidControllerIdentifier,
   validateControllerMessage,
   verifyReceiptCommitment,
 } from "./protocol-controller.js";
@@ -83,7 +84,7 @@ function resumeToken(value) {
 }
 
 function resumeEpoch(value, label) {
-  if (typeof value !== "string" || !ID.test(value)) fail(`${label}_invalid`);
+  if (!isValidControllerIdentifier(value)) fail(`${label}_invalid`);
   return value;
 }
 

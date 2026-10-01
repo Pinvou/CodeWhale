@@ -602,8 +602,18 @@ impl ControlledDeviceManager {
             return Err(ControlledStateError::new("lease_unavailable"));
         };
         let epoch = liveness_epoch_a.into();
-        let watchdog = ControllerLivenessWatchdog::authenticated_cycle(epoch.clone(), now_b)
-            .map_err(|_| ControlledStateError::new("liveness_epoch_invalid"))?;
+        let next_watchdog =
+            ControllerLivenessWatchdog::authenticated_cycle(epoch.clone(), now_b).ok();
+        if relay_resume_deadline_ms == 0 || next_watchdog.is_none() {
+            let generation = inner.generation.clone().unwrap_or_default();
+            clear_sensitive(&mut inner, u64::MAX, true);
+            inner.device_name = None;
+            inner.phase = ControlledStatusKind::Error;
+            inner.error_code = Some("endpoint_offline");
+            drop(inner);
+            self.notify_cleanup(&generation);
+            return Err(ControlledStateError::new("desktop_remote_resume_failed"));
+        }
         // Replacing the gate with the already-authenticated final material is
         // the single transition that cancels the old watchdog.
         inner.resume_gate = Some(ControllerResumeGate::new(
@@ -613,7 +623,7 @@ impl ControlledDeviceManager {
             transport_key_fingerprint,
             relay_resume_deadline_ms,
         ));
-        inner.watchdog = Some(watchdog);
+        inner.watchdog = next_watchdog;
         inner.liveness_epoch_a = Some(epoch);
         inner.phase = ControlledStatusKind::Connected;
         Ok(status_locked(&inner))
@@ -1277,6 +1287,41 @@ mod tests {
             );
             assert!(manager.inner.lock().lease_context.is_none());
             assert!(manager.inner.lock().resume_gate.is_none());
+            assert_eq!(cleanup.0.load(Ordering::SeqCst), 1);
+        }
+    }
+
+    #[test]
+    fn invalid_resumed_cycle_metadata_cleans_generation_and_notifies_once() {
+        for (deadline, epoch, now) in [
+            (0, "live-a-2", 7_000),
+            (60_000, "", 7_000),
+            (60_000, "invalid epoch", 7_000),
+            (60_000, "live~a-2", 7_000),
+            (60_000, "live-a-2", u64::MAX),
+        ] {
+            let cleanup = Arc::new(CleanupCounter::default());
+            let manager = ControlledDeviceManager::default();
+            manager.register_cleanup_sink(cleanup.clone());
+            let operation = manager.start(None, Vec::new()).unwrap();
+            register(&manager, &operation);
+            manager.mark_claimed(operation.clone()).unwrap();
+            manager
+                .complete_connected(operation.clone(), lease(&operation.generation))
+                .unwrap();
+            manager.mark_transport_disconnected(5_000);
+            assert_eq!(
+                manager
+                    .complete_resumed(operation, epoch, [3; 32], [4; 32], now, deadline)
+                    .unwrap_err()
+                    .code,
+                "desktop_remote_resume_failed"
+            );
+            assert_eq!(manager.status().status, ControlledStatusKind::Error);
+            let inner = manager.inner.lock();
+            assert!(inner.lease_context.is_none());
+            assert!(inner.resume_gate.is_none());
+            assert!(inner.watchdog.is_none());
             assert_eq!(cleanup.0.load(Ordering::SeqCst), 1);
         }
     }
