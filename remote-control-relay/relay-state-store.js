@@ -1287,6 +1287,15 @@ export class RelayStateStore {
     });
   }
 
+  readNamespaceRevision(name) {
+    this.#assertReady();
+    if (!NAMESPACE.test(name)) fail("namespace_name_invalid");
+    return Object.freeze({
+      store_revision: this.#state.revision,
+      namespace_revision: this.#state.namespaces[name]?.revision ?? "0",
+    });
+  }
+
   compareAndSwap(name, expectedNamespaceRevision, nextValue) {
     const operation = this.#mutation.then(async () => {
       this.#assertReady();

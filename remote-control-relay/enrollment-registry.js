@@ -3,7 +3,7 @@ import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path
 
 export const ENROLLMENT_NAMESPACE = "endpoint_enrollment";
 export const ENROLLMENT_REGISTRY_SCHEMA = "pinvou-endpoint-enrollment-registry";
-export const ENROLLMENT_REGISTRY_VERSION = 2;
+export const ENROLLMENT_REGISTRY_VERSION = 3;
 
 const CONFIG = new WeakMap();
 const ENDPOINT_ID = /^[A-Za-z0-9][A-Za-z0-9._~-]{0,127}$/u;
@@ -18,7 +18,6 @@ const MAX_MIGRATION_REQUESTS = 100_000;
 const MAX_BATCH_OPERATIONS = 10_000;
 const MIGRATION_REQUEST_ID = /^[A-Za-z0-9][A-Za-z0-9._~-]{7,127}$/u;
 const MIGRATION_ERROR_CODE = /^[a-z][a-z0-9_]{0,127}$/u;
-const PURPOSES = new Set(["web_v2_reregister", "desktop_pairing_register"]);
 const DEPLOYMENTS = new Set(["official", "self_hosted", "development"]);
 
 export class EnrollmentRegistryError extends Error {
@@ -76,14 +75,30 @@ function incrementRevision(value) {
   return next.toString();
 }
 
-function digestCredential(key, endpointId, credential) {
+function digestCredential(key, endpointId, credential, role) {
   const input = validateCredential(credential);
   return crypto.createHmac("sha256", key)
-    .update("pinvou-enrollment-credential-v1\0", "utf8")
+    .update(`pinvou-enrollment-credential-role-v1\0${role}\0`, "utf8")
     .update(endpointId, "utf8")
     .update("\0", "utf8")
     .update(input)
     .digest("hex");
+}
+
+function roleDigest(config, endpointId, credential, role) {
+  return {
+    algorithm: "hmac-sha256-role-v1",
+    key_id: config.keyId,
+    digest_hex: digestCredential(config.hmacKey, endpointId, credential, role),
+  };
+}
+
+function credentialMatches(config, entry, credential, role) {
+  const digest = role === "access" ? entry.access_credential : entry.desktop_credential;
+  return digest !== null && digest.key_id === config.keyId && safeEqualHex(
+    digest.digest_hex,
+    digestCredential(config.hmacKey, entry.endpoint_id, credential, role),
+  );
 }
 
 function digestMigrationParameters(key, keyId, requestId, canonicalParameters) {
@@ -128,15 +143,21 @@ export function compareEnrollmentIdentifiers(left, right) {
 }
 
 function validateEntry(raw) {
-  const entry = exactObject(raw, [
-    "endpoint_id", "status", "revision", "credential", "enrolled_at", "rotated_at", "revoked_at", "audit",
-  ], "enrollment_entry");
+  const keys = [
+    "endpoint_id", "status", "revision", "access_credential", "desktop_credential", "enrolled_at", "rotated_at", "revoked_at", "audit",
+  ];
+  const entry = exactObject(raw, keys, "enrollment_entry");
   validateEndpointId(entry.endpoint_id);
   if (entry.status !== "active" && entry.status !== "revoked") fail("enrollment_entry_malformed");
   validateRevision(entry.revision, "endpoint_revision");
-  const credential = exactObject(entry.credential, ["algorithm", "key_id", "digest_hex"], "credential_digest");
-  if (credential.algorithm !== "hmac-sha256-v1" || !KEY_ID.test(credential.key_id)
+  const credential = exactObject(entry.access_credential, ["algorithm", "key_id", "digest_hex"], "credential_digest");
+  if (credential.algorithm !== "hmac-sha256-role-v1" || !KEY_ID.test(credential.key_id)
     || !HEX_64.test(credential.digest_hex)) fail("credential_digest_malformed");
+  if (entry.desktop_credential !== null) {
+    const desktop = exactObject(entry.desktop_credential, ["algorithm", "key_id", "digest_hex"], "desktop_credential_digest");
+    if (desktop.algorithm !== "hmac-sha256-role-v1" || !KEY_ID.test(desktop.key_id)
+      || !HEX_64.test(desktop.digest_hex)) fail("desktop_credential_digest_malformed");
+  }
   validateTimestamp(entry.enrolled_at, false, "enrolled_at");
   validateTimestamp(entry.rotated_at, true, "rotated_at");
   validateTimestamp(entry.revoked_at, true, "revoked_at");
@@ -164,7 +185,7 @@ function validateMigrationResult(raw) {
   const result = exactObject(raw, ["endpoint_id", "revision", "action", "legacy_web_link"], "migration_result");
   validateEndpointId(result.endpoint_id);
   validateRevision(result.revision, "endpoint_revision");
-  if (!["allowlisted", "already_enrolled", "re_enrolled"].includes(result.action)
+  if (!["allowlisted", "already_enrolled", "re_enrolled", "desktop_credential_set"].includes(result.action)
     || !["preserved", "invalidated"].includes(result.legacy_web_link)
     || (result.action === "re_enrolled") !== (result.legacy_web_link === "invalidated")) {
     fail("migration_result_malformed");
@@ -246,16 +267,15 @@ function validateRegistry(raw) {
     || !Object.hasOwn(raw, "schema") || !Object.hasOwn(raw, "version") || !Object.hasOwn(raw, "entries")) {
     fail("enrollment_registry_malformed");
   }
-  if (raw.schema !== ENROLLMENT_REGISTRY_SCHEMA || (raw.version !== 1 && raw.version !== 2)) {
+  if (raw.schema !== ENROLLMENT_REGISTRY_SCHEMA || raw.version !== ENROLLMENT_REGISTRY_VERSION) {
     fail("enrollment_registry_unsupported");
   }
-  const legacy = raw.version === 1;
   const registry = exactObject(
     raw,
-    legacy ? ["schema", "version", "entries"] : ["schema", "version", "entries", "migration_requests"],
+    ["schema", "version", "entries", "migration_requests"],
     "enrollment_registry",
   );
-  if (!Array.isArray(registry.entries) || registry.entries.length > MAX_ENTRIES) {
+  if (!Array.isArray(registry.entries)) {
     fail("enrollment_registry_malformed");
   }
   if (registry.entries.length > MAX_ENTRIES) fail("enrollment_registry_capacity_reached");
@@ -266,7 +286,7 @@ function validateRegistry(raw) {
       fail("enrollment_registry_malformed");
     }
   }
-  const migrationRequests = legacy ? [] : registry.migration_requests;
+  const migrationRequests = registry.migration_requests;
   if (!Array.isArray(migrationRequests) || migrationRequests.length > MAX_MIGRATION_REQUESTS) {
     fail("enrollment_registry_malformed");
   }
@@ -330,13 +350,20 @@ function prepareAtomicOperations(operations) {
   }
   const prepared = operations.map((raw) => {
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) fail("enrollment_batch_operation_invalid");
-    if (raw.operation === "allowlist") {
-      exactObject(raw, ["operation", "endpoint_id", "credential"], "enrollment_batch_operation");
+    if (raw.operation === "allowlist" || raw.operation === "claim_roles") {
+      const dual = Object.hasOwn(raw, "desktop_credential");
+      const claim = raw.operation === "claim_roles";
+      exactObject(raw, claim ? ["operation", "endpoint_id", "credential", "desktop_credential"] : dual
+        ? ["operation", "endpoint_id", "credential", "desktop_credential", "expected_revision"]
+        : ["operation", "endpoint_id", "credential"], "enrollment_batch_operation");
       validateCredential(raw.credential);
+      if (dual) validateCredential(raw.desktop_credential, "desktop_credential");
       return {
-        operation: "allowlist",
+        operation: raw.operation,
         endpointId: validateEndpointId(raw.endpoint_id),
         credential: raw.credential,
+        ...(dual ? { desktopCredential: raw.desktop_credential,
+          ...(claim ? {} : { expectedRevision: validateRevision(raw.expected_revision, "expected_endpoint_revision") }) } : {}),
       };
     }
     if (raw.operation === "re_enroll") {
@@ -352,6 +379,13 @@ function prepareAtomicOperations(operations) {
         newCredential: raw.new_credential,
         expectedRevision: validateRevision(raw.expected_revision, "expected_endpoint_revision"),
       };
+    }
+    if (raw.operation === "set_desktop_credential") {
+      exactObject(raw, ["operation", "endpoint_id", "desktop_credential", "expected_revision"], "enrollment_batch_operation");
+      validateCredential(raw.desktop_credential, "desktop_credential");
+      return { operation: raw.operation, endpointId: validateEndpointId(raw.endpoint_id),
+        desktopCredential: raw.desktop_credential,
+        expectedRevision: validateRevision(raw.expected_revision, "expected_endpoint_revision") };
     }
     if (raw.operation === "restore") {
       exactObject(raw, ["operation", "snapshot"], "enrollment_batch_operation");
@@ -370,8 +404,12 @@ function prepareAtomicOperations(operations) {
 
 function canonicalMigrationParameters(prepared) {
   return JSON.stringify(prepared.map((operation) => {
-    if (operation.operation === "allowlist") {
-      return { operation: "allowlist", endpoint_id: operation.endpointId, credential: operation.credential };
+    if (operation.operation === "allowlist" || operation.operation === "claim_roles") {
+      return { operation: operation.operation, endpoint_id: operation.endpointId, credential: operation.credential,
+        ...(operation.desktopCredential === undefined ? {} : {
+          desktop_credential: operation.desktopCredential,
+          ...(operation.operation === "claim_roles" ? {} : { expected_revision: operation.expectedRevision }),
+        }) };
     }
     if (operation.operation === "re_enroll") {
       return {
@@ -381,6 +419,10 @@ function canonicalMigrationParameters(prepared) {
         new_credential: operation.newCredential,
         expected_revision: operation.expectedRevision,
       };
+    }
+    if (operation.operation === "set_desktop_credential") {
+      return { operation: operation.operation, endpoint_id: operation.endpointId,
+        desktop_credential: operation.desktopCredential, expected_revision: operation.expectedRevision };
     }
     return { operation: "restore", snapshot: operation.snapshot };
   }));
@@ -421,16 +463,21 @@ function applyPreparedOperations(registry, prepared, config, clock) {
   for (const operation of prepared) {
     const existingIndex = entries.findIndex((entry) => entry.endpoint_id === operation.endpointId);
     const existing = existingIndex < 0 ? null : entries[existingIndex];
-    if (operation.operation === "allowlist") {
+    if (operation.operation === "allowlist" || operation.operation === "claim_roles") {
       if (existing) {
-        if (existing.status === "active" && existing.credential.key_id === config.keyId
-          && safeEqualHex(
-            existing.credential.digest_hex,
-            digestCredential(config.hmacKey, operation.endpointId, operation.credential),
-          )) {
+        if (operation.operation !== "claim_roles") fail("endpoint_already_enrolled");
+        if (existing.status === "active" && credentialMatches(config, existing, operation.credential, "access")) {
+          if (existing.desktop_credential !== null
+            && !credentialMatches(config, existing, operation.desktopCredential, "desktop")) fail("endpoint_already_enrolled");
+          if (existing.desktop_credential === null) {
+            entries[existingIndex] = { ...existing, revision: incrementRevision(existing.revision),
+              desktop_credential: roleDigest(config, operation.endpointId, operation.desktopCredential, "desktop"),
+              rotated_at: now(), audit: { ...existing.audit, last_action: "rotated" } };
+            changed = true;
+          }
           results.push({
             endpoint_id: existing.endpoint_id,
-            revision: existing.revision,
+            revision: entries[existingIndex].revision,
             action: "already_enrolled",
             legacy_web_link: "preserved",
           });
@@ -438,16 +485,16 @@ function applyPreparedOperations(registry, prepared, config, clock) {
         }
         fail(existing.status === "revoked" ? "endpoint_revoked" : "endpoint_already_enrolled");
       }
+      if (operation.operation === "allowlist" && operation.expectedRevision !== undefined
+        && operation.expectedRevision !== "0") fail("endpoint_revision_conflict");
       if (entries.length >= MAX_ENTRIES) fail("enrollment_capacity_reached");
       const entry = {
         endpoint_id: operation.endpointId,
         status: "active",
         revision: "1",
-        credential: {
-          algorithm: "hmac-sha256-v1",
-          key_id: config.keyId,
-          digest_hex: digestCredential(config.hmacKey, operation.endpointId, operation.credential),
-        },
+        access_credential: roleDigest(config, operation.endpointId, operation.credential, "access"),
+        desktop_credential: operation.desktopCredential === undefined ? null
+          : roleDigest(config, operation.endpointId, operation.desktopCredential, "desktop"),
         enrolled_at: now(),
         rotated_at: null,
         revoked_at: null,
@@ -466,19 +513,23 @@ function applyPreparedOperations(registry, prepared, config, clock) {
     if (!existing) fail("enrollment_required");
     if (existing.status !== "active") fail("endpoint_revoked");
     if (existing.revision !== operation.expectedRevision) fail("endpoint_revision_conflict");
-    if (existing.credential.key_id !== config.keyId) fail("credential_key_unavailable");
-    if (!safeEqualHex(
-      existing.credential.digest_hex,
-      digestCredential(config.hmacKey, operation.endpointId, operation.currentCredential),
-    )) fail("invalid_enrollment_credential");
+    if (operation.operation === "set_desktop_credential") {
+      if (existing.desktop_credential !== null) fail("desktop_credential_already_set");
+      const next = { ...existing, revision: incrementRevision(existing.revision),
+        desktop_credential: roleDigest(config, operation.endpointId, operation.desktopCredential, "desktop"),
+        rotated_at: now(), audit: { ...existing.audit, last_action: "rotated" } };
+      entries[existingIndex] = next;
+      changed = true;
+      results.push({ endpoint_id: next.endpoint_id, revision: next.revision,
+        action: "desktop_credential_set", legacy_web_link: "preserved" });
+      continue;
+    }
+    if (existing.access_credential.key_id !== config.keyId) fail("credential_key_unavailable");
+    if (!credentialMatches(config, existing, operation.currentCredential, "access")) fail("invalid_enrollment_credential");
     const next = {
       ...existing,
       revision: incrementRevision(existing.revision),
-      credential: {
-        algorithm: "hmac-sha256-v1",
-        key_id: config.keyId,
-        digest_hex: digestCredential(config.hmacKey, operation.endpointId, operation.newCredential),
-      },
+      access_credential: roleDigest(config, operation.endpointId, operation.newCredential, "access"),
       rotated_at: now(),
       audit: { ...existing.audit, last_action: "rotated" },
     };
@@ -500,7 +551,7 @@ function applyPreparedOperations(registry, prepared, config, clock) {
   };
 }
 
-function sourceForDeployment(deployment) {
+function sourceForDeployment(deployment, tofu) {
   if (deployment === "official") return "official";
   if (deployment === "self_hosted") return "self_hosted";
   return tofu ? "development_tofu" : "development";
@@ -584,6 +635,7 @@ function configDetails(config) {
 export class EnrollmentRegistry {
   static open({ stateStore, config, clock = Date.now } = {}) {
     if (!stateStore || typeof stateStore.readNamespace !== "function"
+      || typeof stateStore.readNamespaceRevision !== "function"
       || typeof stateStore.compareAndSwap !== "function"
       || typeof stateStore.getPathPolicy !== "function") fail("enrollment_state_store_invalid");
     const details = configDetails(config);
@@ -600,6 +652,8 @@ export class EnrollmentRegistry {
   #store;
   #config;
   #clock;
+  #cache = null;
+  #endpointIndex = new WeakMap();
 
   constructor(store, config, clock) {
     this.#store = store;
@@ -609,24 +663,30 @@ export class EnrollmentRegistry {
 
   #read() {
     try {
+      // This metadata read must check store liveness even on a cache hit.
+      const metadata = this.#store.readNamespaceRevision(ENROLLMENT_NAMESPACE);
+      if (this.#cache?.namespace_revision === metadata.namespace_revision) {
+        return { ...this.#cache, store_revision: metadata.store_revision };
+      }
       const snapshot = this.#store.readNamespace(ENROLLMENT_NAMESPACE);
-      return { ...snapshot, registry: validateRegistry(snapshot.value) };
+      const registry = deepFreeze(validateRegistry(snapshot.value));
+      this.#endpointIndex.set(registry, new Map(registry.entries.map((entry) => [entry.endpoint_id, entry])));
+      const result = { store_revision: snapshot.store_revision, namespace_revision: snapshot.namespace_revision, registry };
+      this.#cache = result;
+      return result;
     } catch (error) {
+      this.#cache = null;
       if (error instanceof EnrollmentRegistryError) throw error;
       fail("enrollment_registry_unavailable", error);
     }
   }
 
-  #credentialDigest(endpointId, credential) {
-    return {
-      algorithm: "hmac-sha256-v1",
-      key_id: this.#config.keyId,
-      digest_hex: digestCredential(this.#config.hmacKey, endpointId, credential),
-    };
+  #credentialDigest(endpointId, credential, role = "access") {
+    return roleDigest(this.#config, endpointId, credential, role);
   }
 
   #find(registry, endpointId) {
-    return registry.entries.find((entry) => entry.endpoint_id === endpointId);
+    return this.#endpointIndex.get(registry)?.get(endpointId);
   }
 
   #findMigrationRequest(registry, requestId) {
@@ -662,13 +722,15 @@ export class EnrollmentRegistry {
     }
   }
 
-  #migrationResponse(request) {
+  #migrationResponse(request, replayed) {
     if (request.status === "failed") fail(request.outcome.code);
-    return publicMigrationRequest(request);
+    const result = publicMigrationRequest(request);
+    return replayed === undefined ? result : deepFreeze({ ...result, replayed });
   }
 
   async #write(snapshot, registry) {
     try {
+      this.#cache = null;
       const result = await this.#store.compareAndSwap(
         ENROLLMENT_NAMESPACE,
         snapshot.namespace_revision,
@@ -676,6 +738,7 @@ export class EnrollmentRegistry {
       );
       return { ...result, registry: validateRegistry(result.value) };
     } catch (error) {
+      this.#cache = null;
       if (error instanceof EnrollmentRegistryError) throw error;
       if (error?.code === "namespace_revision_conflict") fail("enrollment_revision_conflict", error);
       if (error?.code === "relay_state_capacity_reached") fail("enrollment_registry_capacity_reached", error);
@@ -782,14 +845,14 @@ export class EnrollmentRegistry {
     fail("enrollment_revision_conflict");
   }
 
-  async completeMigrationRequest({ requestId, operations } = {}) {
+  async completeMigrationRequest({ requestId, operations, reportReplay = false } = {}) {
     const context = this.#migrationContext(requestId, operations);
     for (let attempt = 0; attempt < 8; attempt += 1) {
       const snapshot = this.#read();
       const existing = this.#findMigrationRequest(snapshot.registry, context.requestId);
       if (!existing) fail("migration_request_not_found");
       this.#assertMigrationRequestMatches(existing, context);
-      if (existing.status !== "pending") return this.#migrationResponse(existing);
+      if (existing.status !== "pending") return this.#migrationResponse(existing, reportReplay ? true : undefined);
 
       let applied;
       let failure = null;
@@ -826,7 +889,7 @@ export class EnrollmentRegistry {
       };
       try {
         await this.#write(snapshot, registry);
-        return this.#migrationResponse(terminal);
+        return this.#migrationResponse(terminal, reportReplay ? false : undefined);
       } catch (error) {
         if (error?.code === "enrollment_revision_conflict") continue;
         throw error;
@@ -837,7 +900,7 @@ export class EnrollmentRegistry {
 
   async executeMigrationRequest(input = {}) {
     const pending = await this.beginMigrationRequest(input);
-    if (pending.status !== "pending") return this.#migrationResponse(pending);
+    if (pending.status !== "pending") return this.#migrationResponse(pending, input.reportReplay ? true : undefined);
     return this.completeMigrationRequest(input);
   }
 
@@ -850,9 +913,10 @@ export class EnrollmentRegistry {
     return this.#enroll(options, false);
   }
 
-  async #enroll({ endpointId, credential, expectedNamespaceRevision }, tofu) {
+  async #enroll({ endpointId, credential, desktopCredential, expectedNamespaceRevision }, tofu) {
     endpointId = validateEndpointId(endpointId);
     validateCredential(credential);
+    if (desktopCredential !== undefined) validateCredential(desktopCredential, "desktop_credential");
     const snapshot = this.#read();
     if (expectedNamespaceRevision !== undefined
       && validateRevision(expectedNamespaceRevision, "expected_namespace_revision") !== snapshot.namespace_revision) {
@@ -860,10 +924,6 @@ export class EnrollmentRegistry {
     }
     const existing = this.#find(snapshot.registry, endpointId);
     if (existing) {
-      if (existing.status === "active" && existing.credential.key_id === this.#config.keyId
-        && safeEqualHex(existing.credential.digest_hex, digestCredential(this.#config.hmacKey, endpointId, credential))) {
-        return publicEntry(existing);
-      }
       fail(existing.status === "revoked" ? "endpoint_revoked" : "endpoint_already_enrolled");
     }
     const timestamp = isoTimestamp(this.#clock);
@@ -871,7 +931,8 @@ export class EnrollmentRegistry {
       endpoint_id: endpointId,
       status: "active",
       revision: "1",
-      credential: this.#credentialDigest(endpointId, credential),
+      access_credential: this.#credentialDigest(endpointId, credential),
+      desktop_credential: desktopCredential === undefined ? null : this.#credentialDigest(endpointId, desktopCredential, "desktop"),
       enrolled_at: timestamp,
       rotated_at: null,
       revoked_at: null,
@@ -886,14 +947,63 @@ export class EnrollmentRegistry {
     return publicEntry(entry);
   }
 
-  async authorizeRegistration({ endpointId, credential, purpose } = {}) {
+  #authorizeEntry(entry, credential, role) {
+    if (!entry) fail("enrollment_required");
+    if (entry.status !== "active") fail("endpoint_revoked");
+    const digest = role === "access" ? entry.access_credential : entry.desktop_credential;
+    if (digest === null) fail("desktop_credential_required");
+    if (digest.key_id !== this.#config.keyId) fail("credential_key_unavailable");
+    if (!credentialMatches(this.#config, entry, credential, role)) fail("invalid_enrollment_credential");
+  }
+
+  getControllerReadiness(endpointId) {
+    endpointId = validateEndpointId(endpointId);
+    const entry = this.#find(this.#read().registry, endpointId);
+    return Object.freeze({ endpoint_id: endpointId,
+      web_ready: Boolean(entry?.status === "active" && entry.access_credential.key_id === this.#config.keyId),
+      desktop_ready: Boolean(entry?.status === "active" && entry.access_credential.key_id === this.#config.keyId
+        && entry.desktop_credential?.key_id === this.#config.keyId) });
+  }
+
+  async authorizeWebRegistration({ endpointId, accessToken } = {}) {
+    return this.#authorize({ endpointId, credential: accessToken, role: "access" });
+  }
+
+  async authorizePairingRegistration({ endpointId, desktopSecret } = {}) {
+    return this.#authorize({ endpointId, credential: desktopSecret, role: "desktop" });
+  }
+
+  async authorizeDesktopRegistration({ endpointId, accessToken, desktopSecret } = {}) {
+    endpointId = validateEndpointId(endpointId);
+    validateCredential(accessToken);
+    validateCredential(desktopSecret, "desktop_credential");
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      const snapshot = this.#read();
+      const entry = this.#find(snapshot.registry, endpointId);
+      if (!entry && this.#config.development_tofu) {
+        try {
+          await this.#enroll({ endpointId, credential: accessToken, desktopCredential: desktopSecret,
+            expectedNamespaceRevision: snapshot.namespace_revision }, true);
+          continue;
+        } catch (error) {
+          if (error?.code === "enrollment_revision_conflict") continue;
+          throw error;
+        }
+      }
+      this.#authorizeEntry(entry, accessToken, "access");
+      this.#authorizeEntry(entry, desktopSecret, "desktop");
+      return Object.freeze({ endpoint_id: endpointId, status: entry.status, revision: entry.revision });
+    }
+    fail("enrollment_revision_conflict");
+  }
+
+  async #authorize({ endpointId, credential, role }) {
     endpointId = validateEndpointId(endpointId);
     validateCredential(credential);
-    if (!PURPOSES.has(purpose)) fail("registration_purpose_invalid");
     for (let attempt = 0; attempt < 4; attempt += 1) {
       const snapshot = this.#read();
       let entry = this.#find(snapshot.registry, endpointId);
-      if (!entry && this.#config.development_tofu) {
+      if (!entry && this.#config.development_tofu && role === "access") {
         try {
           await this.#enroll({ endpointId, credential, expectedNamespaceRevision: snapshot.namespace_revision }, true);
           continue;
@@ -902,22 +1012,25 @@ export class EnrollmentRegistry {
           throw error;
         }
       }
-      if (!entry) fail("enrollment_required");
-      if (entry.status !== "active") fail("endpoint_revoked");
-      if (entry.credential.key_id !== this.#config.keyId) fail("credential_key_unavailable");
-      const actual = digestCredential(this.#config.hmacKey, endpointId, credential);
-      if (!safeEqualHex(entry.credential.digest_hex, actual)) fail("invalid_enrollment_credential");
+      this.#authorizeEntry(entry, credential, role);
       return Object.freeze({
         endpoint_id: endpointId,
         status: entry.status,
         revision: entry.revision,
-        purpose,
       });
     }
     fail("enrollment_revision_conflict");
   }
 
-  async rotateCredential({ endpointId, currentCredential, newCredential, expectedEndpointRevision } = {}) {
+  async rotateAccessCredential({ endpointId, currentCredential, newCredential, expectedEndpointRevision } = {}) {
+    return this.#rotateRole({ endpointId, currentCredential, newCredential, expectedEndpointRevision, role: "access" });
+  }
+
+  async rotateDesktopCredential({ endpointId, currentCredential, newCredential, expectedEndpointRevision } = {}) {
+    return this.#rotateRole({ endpointId, currentCredential, newCredential, expectedEndpointRevision, role: "desktop" });
+  }
+
+  async #rotateRole({ endpointId, currentCredential, newCredential, expectedEndpointRevision, role }) {
     endpointId = validateEndpointId(endpointId);
     validateCredential(currentCredential, "current_credential");
     validateCredential(newCredential, "new_credential");
@@ -927,14 +1040,12 @@ export class EnrollmentRegistry {
     if (!entry) fail("enrollment_required");
     if (entry.status !== "active") fail("endpoint_revoked");
     if (entry.revision !== expectedEndpointRevision) fail("endpoint_revision_conflict");
-    if (entry.credential.key_id !== this.#config.keyId) fail("credential_key_unavailable");
-    const currentDigest = digestCredential(this.#config.hmacKey, endpointId, currentCredential);
-    if (!safeEqualHex(entry.credential.digest_hex, currentDigest)) fail("invalid_enrollment_credential");
+    this.#authorizeEntry(entry, currentCredential, role);
     const timestamp = isoTimestamp(this.#clock);
     const next = {
       ...entry,
       revision: incrementRevision(entry.revision),
-      credential: this.#credentialDigest(endpointId, newCredential),
+      [role === "access" ? "access_credential" : "desktop_credential"]: this.#credentialDigest(endpointId, newCredential, role),
       rotated_at: timestamp,
       audit: { ...entry.audit, last_action: "rotated" },
     };

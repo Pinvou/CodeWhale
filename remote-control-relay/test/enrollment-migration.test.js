@@ -19,6 +19,7 @@ import {
 } from "../enrollment-migration-handler.js";
 import { protectWindowsPath, RelayStateStore, verifyWindowsPath } from "../relay-state-store.js";
 import { main as migrationCli } from "../scripts/enrollment-migrate.js";
+import { requireCompleteCoverage } from "../../scripts/check-enrollment-gated-v2-rollback.mjs";
 
 const relayDir = dirname(dirname(fileURLToPath(import.meta.url)));
 const ACCESS_A = "legacy-access-token-a-0000000000000000000001";
@@ -125,10 +126,13 @@ test("official claim is socket-bound, stable, conflicting-safe and keeps the Web
   const retry = await handler.claim({ socket, proof, requestId: "request-0001" });
   assert.deepEqual(retry, first);
   assert.equal(first.legacy_web_link, "preserved");
-  await registry.authorizeRegistration({
+  assert.equal(first.desktop_ready, true);
+  await registry.authorizeDesktopRegistration({ endpointId: "official-endpoint-1", accessToken: ACCESS_A, desktopSecret: DESKTOP_SECRET });
+  await registry.authorizePairingRegistration({ endpointId: "official-endpoint-1", desktopSecret: DESKTOP_SECRET });
+  await rejectsCode(registry.authorizePairingRegistration({ endpointId: "official-endpoint-1", desktopSecret: ACCESS_A }), "invalid_enrollment_credential");
+  await registry.authorizeWebRegistration({
     endpointId: "official-endpoint-1",
-    credential: ACCESS_A,
-    purpose: "web_v2_reregister",
+    accessToken: ACCESS_A,
   });
 
   const restartedHandler = new EnrollmentMigrationHandler({ registry, identityVerifier: identity.verifier });
@@ -183,11 +187,12 @@ test("official claim is socket-bound, stable, conflicting-safe and keeps the Web
   assert.deepEqual(handler.coverage(["official-endpoint-2", "official-endpoint-1"]), {
     total: 2,
     migrated: 1,
+    web_migrated: 1,
     not_migrated: 1,
     coverage_percent: 50,
     endpoints: [
-      { endpoint_id: "official-endpoint-1", enrollment_status: "active" },
-      { endpoint_id: "official-endpoint-2", enrollment_status: "not_migrated" },
+      { endpoint_id: "official-endpoint-1", enrollment_status: "active", web_ready: true, desktop_ready: true },
+      { endpoint_id: "official-endpoint-2", enrollment_status: "not_migrated", web_ready: false, desktop_ready: false },
     ],
   });
   assert.doesNotMatch(JSON.stringify(store.readNamespace("endpoint_enrollment")), new RegExp(ACCESS_A, "u"));
@@ -312,11 +317,11 @@ test("self-hosted batch dry-run, apply, re-enroll and backup restore are explici
     requestId: "batch-reenroll-0001",
   });
   assert.equal(reenrolled.results[0].legacy_web_link, "invalidated");
-  await rejectsCode(registry.authorizeRegistration({
-    endpointId: "self-hosted-1", credential: ACCESS_A, purpose: "web_v2_reregister",
+  await rejectsCode(registry.authorizeWebRegistration({
+    endpointId: "self-hosted-1", accessToken: ACCESS_A,
   }), "invalid_enrollment_credential");
-  await registry.authorizeRegistration({
-    endpointId: "self-hosted-1", credential: ACCESS_B, purpose: "web_v2_reregister",
+  await registry.authorizeWebRegistration({
+    endpointId: "self-hosted-1", accessToken: ACCESS_B,
   });
   await rejectsCode(runEnrollmentBatch({
     registry,
@@ -367,7 +372,7 @@ test("a failing batch performs no prefix write", async (t) => {
   }]);
 });
 
-test("backup restore accepts canonical v1 and rejects malformed v2", async (t) => {
+test("backup restore rejects unreleased registry formats and malformed current data", async (t) => {
   const { registry } = await fixture(t, "self_hosted");
   await registry.enroll({ endpointId: "backup-endpoint", credential: ACCESS_A });
   const current = createEnrollmentBackup(registry);
@@ -382,9 +387,9 @@ test("backup restore accepts canonical v1 and rejects malformed v2", async (t) =
     registry_sha256: crypto.createHash("sha256").update(JSON.stringify(v1Registry), "utf8").digest("hex"),
   };
   await registry.enroll({ endpointId: "temporary-v1-endpoint", credential: ACCESS_B });
-  await restoreEnrollmentBackup({ registry, backup: v1Backup, requestId: "restore-v1-backup-0001" });
+  await rejectsCode(restoreEnrollmentBackup({ registry, backup: v1Backup, requestId: "restore-v1-backup-0001" }), "migration_backup_invalid");
   assert.equal(registry.getStatus("backup-endpoint").status, "active");
-  assert.equal(registry.getStatus("temporary-v1-endpoint"), null);
+  assert.equal(registry.getStatus("temporary-v1-endpoint").status, "active");
 
   const malformed = structuredClone(createEnrollmentBackup(registry));
   malformed.registry.entries = [{}];
@@ -396,6 +401,108 @@ test("backup restore accepts canonical v1 and rejects malformed v2", async (t) =
     requestId: "restore-malformed-0001",
   }), "migration_backup_invalid");
   assert.equal(registry.getStatus("backup-endpoint").status, "active");
+});
+
+test("restore requires a stable ID and reports replay rather than pretending to reapply", async (t) => {
+  const { registry } = await fixture(t, "self_hosted");
+  await registry.enroll({ endpointId: "restore-original", credential: ACCESS_A });
+  const backup = createEnrollmentBackup(registry);
+  await rejectsCode(restoreEnrollmentBackup({ registry, backup }), "migration_request_id_invalid");
+  const first = await restoreEnrollmentBackup({ registry, backup, requestId: "restore-operation-0001" });
+  assert.equal(first.restored, true);
+  assert.equal(first.applied, true);
+  assert.equal(first.replayed, false);
+  await registry.enroll({ endpointId: "restore-drift", credential: ACCESS_B });
+  const beforeReplay = registry.exportSnapshot();
+  const replay = await restoreEnrollmentBackup({ registry, backup, requestId: "restore-operation-0001" });
+  assert.equal(replay.restored, false);
+  assert.equal(replay.applied, false);
+  assert.equal(replay.replayed, true);
+  assert.equal(replay.restored_entry_count, 0);
+  assert.deepEqual(registry.exportSnapshot(), beforeReplay);
+  assert.equal(registry.getStatus("restore-drift").status, "active");
+  const appliedAgain = await restoreEnrollmentBackup({ registry, backup, requestId: "restore-operation-0002" });
+  assert.equal(appliedAgain.applied, true);
+  assert.equal(registry.getStatus("restore-drift"), null);
+  assert.equal(registry.getMigrationRequest("restore-operation-0001").status, "succeeded");
+  const changedBackup = createEnrollmentBackup(registry);
+  await rejectsCode(restoreEnrollmentBackup({ registry, backup: changedBackup, requestId: "restore-operation-0001" }), "migration_restore_failed");
+});
+
+test("concurrent restore reports exactly one applied CAS and one replay", async (t) => {
+  const { registry } = await fixture(t, "self_hosted");
+  const backup = createEnrollmentBackup(registry);
+  const results = await Promise.all([1, 2].map(() => restoreEnrollmentBackup({ registry, backup, requestId: "restore-concurrent-0001" })));
+  assert.equal(results.filter((result) => result.applied).length, 1);
+  assert.equal(results.filter((result) => result.replayed).length, 1);
+  assert.equal(registry.exportSnapshot().namespace_revision, "2");
+});
+
+test("rollback coverage requires both role digests and the current key, not just active status", async (t) => {
+  const { registry, store, env } = await fixture(t, "self_hosted");
+  await registry.enroll({ endpointId: "web-only-coverage", credential: ACCESS_A });
+  const handler = new EnrollmentMigrationHandler({ registry });
+  const webOnly = handler.coverage(["web-only-coverage"]);
+  assert.equal(webOnly.web_migrated, 1);
+  assert.equal(webOnly.migrated, 0);
+  assert.throws(() => requireCompleteCoverage(webOnly), { code: "legacy_endpoint_coverage_incomplete" });
+  await registry.executeMigrationRequest({ requestId: "coverage-backfill-0001", operations: [{
+    operation: "set_desktop_credential", endpoint_id: "web-only-coverage", desktop_credential: DESKTOP_SECRET, expected_revision: "1",
+  }] });
+  assert.doesNotThrow(() => requireCompleteCoverage(handler.coverage(["web-only-coverage"])));
+  const unavailable = EnrollmentRegistry.open({ stateStore: store, config: loadEnrollmentRegistryConfig({
+    ...env, PINVOU_REMOTE_ENROLLMENT_HMAC_KEY_ID: "missing-key",
+  }) });
+  const coverage = new EnrollmentMigrationHandler({ registry: unavailable }).coverage(["web-only-coverage"]);
+  assert.equal(coverage.migrated, 0);
+  assert.equal(coverage.web_migrated, 0);
+  assert.throws(() => requireCompleteCoverage(coverage), { code: "legacy_endpoint_coverage_incomplete" });
+});
+
+test("desktop backfill dry-run describes the actual change and performs no write", async (t) => {
+  const { registry } = await fixture(t, "self_hosted");
+  await registry.enroll({ endpointId: "dry-backfill", credential: ACCESS_A });
+  const before = registry.exportSnapshot();
+  const operations = [{ operation: "set_desktop_credential", endpoint_id: "dry-backfill",
+    desktop_credential: DESKTOP_SECRET, expected_revision: "1" }];
+  const preview = await runEnrollmentBatch({ registry, operations, requestId: "dry-backfill-request-0001", dryRun: true });
+  assert.deepEqual(preview.results, [{ endpoint_id: "dry-backfill", action: "would_set_desktop_credential" }]);
+  assert.deepEqual(registry.exportSnapshot(), before);
+  await rejectsCode(runEnrollmentBatch({ registry, operations: [{ ...operations[0], expected_revision: "0" }],
+    requestId: "dry-backfill-stale-0001", dryRun: true }), "migration_batch_failed");
+  assert.deepEqual(registry.exportSnapshot(), before);
+});
+
+test("migration handler refuses a registry missing readiness before any mutation", () => {
+  let writes = 0;
+  const registry = { executeMigrationRequest: async () => { writes += 1; }, getStatus: () => ({ status: "active" }) };
+  assert.throws(() => new EnrollmentMigrationHandler({ registry }), { code: "migration_registry_invalid" });
+  assert.equal(writes, 0);
+});
+
+test("signed role claim backfills once, replays across handlers and rejects changed credentials", async (t) => {
+  const { registry } = await fixture(t);
+  await registry.enroll({ endpointId: "claim-backfill", credential: ACCESS_A });
+  const identity = officialIdentity();
+  const claim = async (accessToken, desktopSecret, requestId) => {
+    const handler = new EnrollmentMigrationHandler({ registry, identityVerifier: identity.verifier });
+    const socket = {};
+    const challenge = handler.issueClaimChallenge({ socket, endpointId: "claim-backfill" });
+    const signed = signedEnrollmentProof({ privateKey: identity.privateKey, endpointId: "claim-backfill",
+      accessToken, desktopSecret, challenge: challenge.socket_challenge_b64 });
+    const proof = handler.bindAuthenticatedLegacySocket({ socket, endpointId: "claim-backfill", accessToken, desktopSecret,
+      challenge: challenge.socket_challenge_b64, enrollmentProof: signed.proof, signatureB64: signed.signatureB64 });
+    return handler.claim({ socket, proof, requestId });
+  };
+  const first = await claim(ACCESS_A, DESKTOP_SECRET, "claim-backfill-request-0001");
+  assert.equal(first.revision, "2");
+  assert.equal(first.desktop_ready, true);
+  const beforeReplay = registry.exportSnapshot();
+  assert.deepEqual(await claim(ACCESS_A, DESKTOP_SECRET, "claim-backfill-request-0001"), first);
+  assert.deepEqual(registry.exportSnapshot(), beforeReplay);
+  await rejectsCode(claim(ACCESS_A, ACCESS_B, "claim-backfill-request-0001"), "migration_request_conflict");
+  await rejectsCode(claim(ACCESS_A, ACCESS_B, "claim-backfill-request-0002"), "migration_claim_conflict");
+  await registry.authorizeDesktopRegistration({ endpointId: "claim-backfill", accessToken: ACCESS_A, desktopSecret: DESKTOP_SECRET });
 });
 
 test("self-hosted CLI is machine-readable, private-file only, and never prints credentials", async (t) => {
@@ -432,6 +539,13 @@ test("self-hosted CLI is machine-readable, private-file only, and never prints c
   assert.equal(await migrationCli(["--backup", "--output", backup], environment(root, "self_hosted"), io), 0);
   if (process.platform === "win32") await verifyWindowsPath(backup, "file");
   else assert.equal((await lstat(backup)).mode & 0o077, 0);
+  assert.equal(await migrationCli(["--restore", "--input", backup], environment(root, "self_hosted"), io), 1);
+  assert.equal(JSON.parse(errors.at(-1)).code, "restore_arguments_invalid");
+  assert.equal(await migrationCli(["--restore", "--input", backup, "--request-id", "cli-restore-operation-0001"], environment(root, "self_hosted"), io), 0);
+  assert.equal(JSON.parse(output.at(-1)).applied, true);
+  assert.equal(await migrationCli(["--restore", "--input", backup, "--request-id", "cli-restore-operation-0001"], environment(root, "self_hosted"), io), 0);
+  assert.equal(JSON.parse(output.at(-1)).replayed, true);
+  assert.equal(JSON.parse(output.at(-1)).applied, false);
 });
 
 function freePort() {
@@ -531,7 +645,7 @@ test("real legacy v2 Relay is safe only behind the enrollment gateway", async (t
   }));
   assert.equal((await bootstrapReply).type, "desktop_endpoint_registered");
   bootstrap.close();
-  await registry.enroll({ endpointId: "legacy-preserved-endpoint", credential: ACCESS_A });
+  await registry.enroll({ endpointId: "legacy-preserved-endpoint", credential: ACCESS_A, desktopCredential: DESKTOP_SECRET });
 
   const gateway = createEnrollmentGateway({
     registry,
@@ -546,6 +660,15 @@ test("real legacy v2 Relay is safe only behind the enrollment gateway", async (t
   t.after(() => gateway.close());
   const gatewayHttp = `http://127.0.0.1:${address.port}/pinvou3/remote`;
   const gatewayWs = `ws://127.0.0.1:${address.port}/pinvou3/remote/ws`;
+
+  for (const desktopSecret of [ACCESS_A, ACCESS_B]) {
+    const denied = await openSocket(gatewayWs);
+    const response = nextMessage(denied);
+    denied.send(JSON.stringify({ v: 2, type: "desktop_endpoint_register", endpoint_id: "legacy-preserved-endpoint",
+      access_token: ACCESS_A, desktop_secret: desktopSecret }));
+    assert.equal((await response).code, "endpoint_not_found");
+    denied.terminate();
+  }
 
   await assert.rejects(openSocket(gatewayWs, { origin: "https://evil.example" }));
   await assert.rejects(openSocket(gatewayWs, { origin: new URL(gatewayHttp).origin }));

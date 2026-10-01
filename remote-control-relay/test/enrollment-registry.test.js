@@ -129,7 +129,7 @@ function lockRecord({ pid = process.pid, identity = `test-process:${pid}`, owner
 
 test("official registry enrolls explicitly and authorizes both registration paths", async (t) => {
   const { statePath, registry } = await openRegistry(t, { clock: () => Date.UTC(2026, 8, 16, 1, 2, 3) });
-  const enrolled = await registry.enroll({ endpointId: "endpoint-0001", credential: FIRST_CREDENTIAL });
+  const enrolled = await registry.enroll({ endpointId: "endpoint-0001", credential: FIRST_CREDENTIAL, desktopCredential: SECOND_CREDENTIAL });
   assert.deepEqual(enrolled, {
     endpoint_id: "endpoint-0001",
     status: "active",
@@ -138,21 +138,19 @@ test("official registry enrolls explicitly and authorizes both registration path
     rotated_at: null,
     revoked_at: null,
   });
-  assert.equal((await registry.authorizeRegistration({
+  assert.equal((await registry.authorizeWebRegistration({
     endpointId: "endpoint-0001",
-    credential: FIRST_CREDENTIAL,
-    purpose: "web_v2_reregister",
-  })).purpose, "web_v2_reregister");
-  assert.equal((await registry.authorizeRegistration({
+    accessToken: FIRST_CREDENTIAL,
+  })).status, "active");
+  assert.equal((await registry.authorizePairingRegistration({
     endpointId: "endpoint-0001",
-    credential: FIRST_CREDENTIAL,
-    purpose: "desktop_pairing_register",
-  })).purpose, "desktop_pairing_register");
+    desktopSecret: SECOND_CREDENTIAL,
+  })).status, "active");
 
   const persisted = await fs.readFile(statePath, "utf8");
   assert.doesNotMatch(persisted, /endpoint-credential-one/u);
   assert.doesNotMatch(persisted, new RegExp(FIRST_CREDENTIAL, "u"));
-  assert.match(persisted, /hmac-sha256-v1/u);
+  assert.match(persisted, /hmac-sha256-role-v1/u);
 });
 
 test("production modes reject anonymous registration and development TOFU", async (t) => {
@@ -160,10 +158,9 @@ test("production modes reject anonymous registration and development TOFU", asyn
     const { registry } = await openRegistry(t, {
       env: environment({ NODE_ENV: "production", PINVOU_REMOTE_ENROLLMENT_DEPLOYMENT: deployment }),
     });
-    await rejectsCode(registry.authorizeRegistration({
+    await rejectsCode(registry.authorizePairingRegistration({
       endpointId: `missing-${deployment}`,
-      credential: FIRST_CREDENTIAL,
-      purpose: "desktop_pairing_register",
+      desktopSecret: FIRST_CREDENTIAL,
     }), "enrollment_required");
   }
   assert.throws(() => loadEnrollmentRegistryConfig(environment({
@@ -177,6 +174,98 @@ test("production modes reject anonymous registration and development TOFU", asyn
   })), (error) => error?.code === "development_tofu_forbidden");
 });
 
+test("role digests, dual registration and Web-only readiness cannot be confused", async (t) => {
+  const { registry } = await openRegistry(t);
+  await registry.enroll({ endpointId: "roles", credential: FIRST_CREDENTIAL, desktopCredential: SECOND_CREDENTIAL });
+  await registry.authorizeDesktopRegistration({ endpointId: "roles", accessToken: FIRST_CREDENTIAL, desktopSecret: SECOND_CREDENTIAL });
+  for (const credentials of [
+    { accessToken: SECOND_CREDENTIAL, desktopSecret: FIRST_CREDENTIAL },
+    { accessToken: FIRST_CREDENTIAL, desktopSecret: FIRST_CREDENTIAL },
+    { accessToken: SECOND_CREDENTIAL, desktopSecret: SECOND_CREDENTIAL },
+  ]) await rejectsCode(registry.authorizeDesktopRegistration({ endpointId: "roles", ...credentials }), "invalid_enrollment_credential");
+  await registry.enroll({ endpointId: "same-plaintext", credential: FIRST_CREDENTIAL, desktopCredential: FIRST_CREDENTIAL });
+  const entry = registry.exportSnapshot().registry.entries.find((row) => row.endpoint_id === "same-plaintext");
+  assert.notEqual(entry.access_credential.digest_hex, entry.desktop_credential.digest_hex);
+  await registry.enroll({ endpointId: "web-only", credential: FIRST_CREDENTIAL });
+  assert.equal(registry.getControllerReadiness("web-only").desktop_ready, false);
+  await registry.authorizeWebRegistration({ endpointId: "web-only", accessToken: FIRST_CREDENTIAL });
+  await rejectsCode(registry.authorizeDesktopRegistration({ endpointId: "web-only", accessToken: FIRST_CREDENTIAL,
+    desktopSecret: FIRST_CREDENTIAL }), "desktop_credential_required");
+  const malformed = structuredClone(registry.exportSnapshot().registry);
+  malformed.entries[0].access_credential.algorithm = "hmac-sha256-v1";
+  assert.throws(() => validateEnrollmentRegistrySnapshot(malformed), { code: "credential_digest_malformed" });
+});
+
+test("desktop backfill is explicit, revision-bound and cannot overwrite; rotations stay role-local", async (t) => {
+  const { registry } = await openRegistry(t);
+  await registry.enroll({ endpointId: "backfill", credential: FIRST_CREDENTIAL });
+  const accessDigest = registry.exportSnapshot().registry.entries[0].access_credential;
+  const operation = { operation: "set_desktop_credential", endpoint_id: "backfill",
+    desktop_credential: SECOND_CREDENTIAL, expected_revision: "1" };
+  await rejectsCode(registry.executeMigrationRequest({ requestId: "backfill-stale-0001", operations: [{ ...operation, expected_revision: "0" }] }), "endpoint_revision_conflict");
+  await registry.executeMigrationRequest({ requestId: "backfill-valid-0001", operations: [operation] });
+  const beforeReplay = registry.exportSnapshot();
+  await registry.executeMigrationRequest({ requestId: "backfill-valid-0001", operations: [operation] });
+  assert.deepEqual(registry.exportSnapshot(), beforeReplay);
+  assert.deepEqual(registry.exportSnapshot().registry.entries[0].access_credential, accessDigest);
+  await rejectsCode(registry.executeMigrationRequest({ requestId: "backfill-overwrite-0001",
+    operations: [{ ...operation, expected_revision: "2", desktop_credential: THIRD_CREDENTIAL }] }), "desktop_credential_already_set");
+  await registry.rotateAccessCredential({ endpointId: "backfill", currentCredential: FIRST_CREDENTIAL,
+    newCredential: THIRD_CREDENTIAL, expectedEndpointRevision: "2" });
+  await registry.authorizePairingRegistration({ endpointId: "backfill", desktopSecret: SECOND_CREDENTIAL });
+  await registry.rotateDesktopCredential({ endpointId: "backfill", currentCredential: SECOND_CREDENTIAL,
+    newCredential: FIRST_CREDENTIAL, expectedEndpointRevision: "3" });
+  await registry.authorizeDesktopRegistration({ endpointId: "backfill", accessToken: THIRD_CREDENTIAL, desktopSecret: FIRST_CREDENTIAL });
+  await rejectsCode(registry.authorizePairingRegistration({ endpointId: "backfill", desktopSecret: SECOND_CREDENTIAL }), "invalid_enrollment_credential");
+});
+
+test("authorization hot path reads only live revisions and invalidates after changes and close", async (t) => {
+  const { registry, store } = await openRegistry(t);
+  await registry.enroll({ endpointId: "cached", credential: FIRST_CREDENTIAL, desktopCredential: SECOND_CREDENTIAL });
+  let reads = 0;
+  const read = store.readNamespace.bind(store);
+  store.readNamespace = (...args) => { reads += 1; return read(...args); };
+  await registry.authorizeWebRegistration({ endpointId: "cached", accessToken: FIRST_CREDENTIAL });
+  assert.equal(reads, 1);
+  for (let index = 0; index < 30; index += 1) {
+    await registry.authorizeDesktopRegistration({ endpointId: "cached", accessToken: FIRST_CREDENTIAL, desktopSecret: SECOND_CREDENTIAL });
+    await rejectsCode(registry.authorizeWebRegistration({ endpointId: "unknown", accessToken: FIRST_CREDENTIAL }), "enrollment_required");
+  }
+  assert.equal(reads, 1, "anonymous requests do not clone a warm registry");
+  await store.compareAndSwap("unrelated", "0", { value: true });
+  await registry.authorizeWebRegistration({ endpointId: "cached", accessToken: FIRST_CREDENTIAL });
+  assert.equal(reads, 1);
+  const original = registry.exportSnapshot().registry;
+  await registry.rotateAccessCredential({ endpointId: "cached", currentCredential: FIRST_CREDENTIAL,
+    newCredential: THIRD_CREDENTIAL, expectedEndpointRevision: "1" });
+  await rejectsCode(registry.authorizeWebRegistration({ endpointId: "cached", accessToken: FIRST_CREDENTIAL }), "invalid_enrollment_credential");
+  await registry.importSnapshot({ snapshot: original, expectedNamespaceRevision: registry.exportSnapshot().namespace_revision });
+  await registry.authorizeDesktopRegistration({ endpointId: "cached", accessToken: FIRST_CREDENTIAL, desktopSecret: SECOND_CREDENTIAL });
+  await registry.revoke({ endpointId: "cached", expectedEndpointRevision: "1" });
+  await rejectsCode(registry.authorizeWebRegistration({ endpointId: "cached", accessToken: FIRST_CREDENTIAL }), "endpoint_revoked");
+  await store.close();
+  await rejectsCode(registry.authorizeWebRegistration({ endpointId: "cached", accessToken: FIRST_CREDENTIAL }), "enrollment_registry_unavailable");
+});
+
+test("a warm authorization cache fails closed after persistence degradation", async (t) => {
+  const statePath = await temporaryState(t);
+  let failWrites = false;
+  const injectedFs = { ...fs, async open(target, flags, mode) {
+    if (failWrites && flags === "wx" && String(target).endsWith(".tmp")) {
+      throw Object.assign(new Error("injected persistence failure"), { code: "EIO" });
+    }
+    return fs.open(target, flags, mode);
+  } };
+  const store = await openStateStore(statePath, { fs: injectedFs });
+  resourcesFor(t).stores.push(store);
+  const registry = EnrollmentRegistry.open({ stateStore: store, config: configForState(statePath) });
+  await registry.enroll({ endpointId: "warm-degraded", credential: FIRST_CREDENTIAL });
+  await registry.authorizeWebRegistration({ endpointId: "warm-degraded", accessToken: FIRST_CREDENTIAL });
+  failWrites = true;
+  await rejectsCode(store.compareAndSwap("unrelated", "0", { value: true }), "relay_state_persist_failed");
+  await rejectsCode(registry.authorizeWebRegistration({ endpointId: "warm-degraded", accessToken: FIRST_CREDENTIAL }), "enrollment_registry_unavailable");
+});
+
 test("manual development enrollment never claims TOFU admission", async (t) => {
   for (const tofu of ["false", "true"]) {
     const { registry, store } = await openRegistry(t, {
@@ -187,17 +276,17 @@ test("manual development enrollment never claims TOFU admission", async (t) => {
     });
     await registry.enroll({ endpointId: "manual-development", credential: FIRST_CREDENTIAL });
     assert.equal(store.readNamespace(ENROLLMENT_NAMESPACE).value.entries[0].audit.source, "development");
-    await registry.rotateCredential({ endpointId: "manual-development", currentCredential: FIRST_CREDENTIAL,
+    await registry.rotateAccessCredential({ endpointId: "manual-development", currentCredential: FIRST_CREDENTIAL,
       newCredential: SECOND_CREDENTIAL, expectedEndpointRevision: "1" });
     await registry.revoke({ endpointId: "manual-development", expectedEndpointRevision: "2" });
     assert.equal(store.readNamespace(ENROLLMENT_NAMESPACE).value.entries[0].audit.source, "development");
   }
 });
 
-test("public enrollment bounds and idempotence reject without mutating state", async (t) => {
+test("public enrollment bounds and repeated enrollment reject without mutating state", async (t) => {
   let now = 0;
   const { registry, store, statePath } = await openRegistry(t, { clock: () => now });
-  const enrolled = await registry.enroll({ endpointId: "bounds", credential: "x".repeat(32) });
+  await registry.enroll({ endpointId: "bounds", credential: "x".repeat(32) });
   const before = store.readNamespace(ENROLLMENT_NAMESPACE);
   const primary = await fs.readFile(statePath);
   for (const endpointId of ["", "_bad", "a".repeat(129), "a/b", "端点"]) {
@@ -206,10 +295,8 @@ test("public enrollment bounds and idempotence reject without mutating state", a
   for (const credential of [null, "x".repeat(31), "x".repeat(4097), "x".repeat(32) + "\ud800"]) {
     await rejectsCode(registry.enroll({ endpointId: "new-bounds", credential }), "enrollment_credential_invalid");
   }
-  await rejectsCode(registry.authorizeRegistration({ endpointId: "bounds", credential: "x".repeat(32),
-    purpose: "unknown" }), "registration_purpose_invalid");
   await rejectsCode(registry.enroll({ endpointId: "bounds", credential: SECOND_CREDENTIAL }), "endpoint_already_enrolled");
-  assert.deepEqual(await registry.enroll({ endpointId: "bounds", credential: "x".repeat(32) }), enrolled);
+  await rejectsCode(registry.enroll({ endpointId: "bounds", credential: "x".repeat(32) }), "endpoint_already_enrolled");
   for (now of [-1, NaN, 0.5, 8_640_000_000_000_001]) {
     await rejectsCode(registry.enroll({ endpointId: "clock-bounds", credential: FIRST_CREDENTIAL }), "enrollment_clock_invalid");
   }
@@ -256,8 +343,9 @@ test("registry write retains typed validation and capacity failures", async (t) 
   let writes = 0;
   const boundedStore = {
     getPathPolicy: () => store.getPathPolicy(),
+    readNamespaceRevision: () => ({ namespace_revision: "1", store_revision: "1" }),
     readNamespace: () => ({ namespace_revision: "1", value: {
-      schema: "pinvou-endpoint-enrollment-registry", version: 1, entries,
+      ...registry.exportSnapshot().registry, entries,
     } }),
     compareAndSwap: async () => { writes += 1; throw new Error("must not write"); },
   };
@@ -291,6 +379,23 @@ test("unsupported lock versions are never stolen even with future fields or a de
   }
 });
 
+test("development dual-role automatic admission alone records TOFU source", async (t) => {
+  const { registry } = await openRegistry(t, { env: environment({
+    PINVOU_REMOTE_ENROLLMENT_DEPLOYMENT: "development",
+    PINVOU_REMOTE_ENROLLMENT_DEVELOPMENT_TOFU: "true",
+  }) });
+  await registry.authorizeDesktopRegistration({ endpointId: "automatic-dual", accessToken: FIRST_CREDENTIAL,
+    desktopSecret: SECOND_CREDENTIAL });
+  const entry = registry.exportSnapshot().registry.entries[0];
+  assert.equal(entry.audit.source, "development_tofu");
+  assert.ok(entry.access_credential);
+  assert.ok(entry.desktop_credential);
+  await registry.executeMigrationRequest({ requestId: "manual-source-0001", operations: [{ operation: "allowlist",
+    endpoint_id: "manual-migration", credential: FIRST_CREDENTIAL }] });
+  assert.equal(registry.exportSnapshot().registry.entries.find((row) => row.endpoint_id === "manual-migration").audit.source,
+    "development");
+});
+
 test("explicit non-production mode can opt into temporary TOFU", async (t) => {
   const { registry, store } = await openRegistry(t, {
     env: environment({
@@ -299,10 +404,10 @@ test("explicit non-production mode can opt into temporary TOFU", async (t) => {
       PINVOU_REMOTE_ENROLLMENT_DEVELOPMENT_TOFU: "true",
     }),
   });
-  const authorized = await registry.authorizeRegistration({
+  const authorized = await registry.authorizeDesktopRegistration({
     endpointId: "development-endpoint",
-    credential: FIRST_CREDENTIAL,
-    purpose: "desktop_pairing_register",
+    accessToken: FIRST_CREDENTIAL,
+    desktopSecret: SECOND_CREDENTIAL,
   });
   assert.equal(authorized.status, "active");
   const stored = store.readNamespace(ENROLLMENT_NAMESPACE).value;
@@ -325,10 +430,10 @@ test("development TOFU exhausts bounded CAS retries without authorizing or persi
     error.code = "namespace_revision_conflict";
     throw error;
   };
-  await rejectsCode(registry.authorizeRegistration({
+  await rejectsCode(registry.authorizeDesktopRegistration({
     endpointId: "development-conflict",
-    credential: FIRST_CREDENTIAL,
-    purpose: "desktop_pairing_register",
+    accessToken: FIRST_CREDENTIAL,
+    desktopSecret: SECOND_CREDENTIAL,
   }), "enrollment_revision_conflict");
   assert.equal(attempts, 4);
   assert.equal(registry.getStatus("development-conflict"), null);
@@ -341,7 +446,7 @@ test("credential rotation invalidates old credential and revocation is terminal"
   const { registry, store, statePath } = await openRegistry(t, { clock: () => now });
   await registry.enroll({ endpointId: "endpoint-rotate", credential: FIRST_CREDENTIAL });
   now += 1000;
-  const rotated = await registry.rotateCredential({
+  const rotated = await registry.rotateAccessCredential({
     endpointId: "endpoint-rotate",
     currentCredential: FIRST_CREDENTIAL,
     newCredential: SECOND_CREDENTIAL,
@@ -349,15 +454,13 @@ test("credential rotation invalidates old credential and revocation is terminal"
   });
   assert.equal(rotated.revision, "2");
   assert.equal(rotated.rotated_at, "2026-09-16T01:00:01.000Z");
-  await rejectsCode(registry.authorizeRegistration({
+  await rejectsCode(registry.authorizeWebRegistration({
     endpointId: "endpoint-rotate",
-    credential: FIRST_CREDENTIAL,
-    purpose: "web_v2_reregister",
+    accessToken: FIRST_CREDENTIAL,
   }), "invalid_enrollment_credential");
-  await registry.authorizeRegistration({
+  await registry.authorizeWebRegistration({
     endpointId: "endpoint-rotate",
-    credential: SECOND_CREDENTIAL,
-    purpose: "web_v2_reregister",
+    accessToken: SECOND_CREDENTIAL,
   });
   now += 1000;
   const revoked = await registry.revoke({ endpointId: "endpoint-rotate", expectedEndpointRevision: "2" });
@@ -375,10 +478,9 @@ test("credential rotation invalidates old credential and revocation is terminal"
   await rejectsCode(registry.revoke({
     endpointId: "endpoint-rotate", expectedEndpointRevision: "not-a-revision",
   }), "expected_endpoint_revision_invalid");
-  await rejectsCode(registry.authorizeRegistration({
+  await rejectsCode(registry.authorizePairingRegistration({
     endpointId: "endpoint-rotate",
-    credential: SECOND_CREDENTIAL,
-    purpose: "desktop_pairing_register",
+    desktopSecret: SECOND_CREDENTIAL,
   }), "endpoint_revoked");
   await rejectsCode(registry.enroll({
     endpointId: "endpoint-rotate",
@@ -402,10 +504,9 @@ test("a registry opened without the persisted digest key fails closed", async (t
       PINVOU_REMOTE_ENROLLMENT_HMAC_KEY: "replacement-hmac-key-material-at-least-32-bytes",
     }),
   });
-  await rejectsCode(registry.authorizeRegistration({
+  await rejectsCode(registry.authorizeWebRegistration({
     endpointId: "endpoint-keyring",
-    credential: FIRST_CREDENTIAL,
-    purpose: "web_v2_reregister",
+    accessToken: FIRST_CREDENTIAL,
   }), "credential_key_unavailable");
 });
 
@@ -413,7 +514,9 @@ test("HMAC replacement requires fresh endpoint IDs, while key rollback alone pre
   for (const keyId of ["replacement-key", "test-key-1"]) {
     await t.test(keyId, async () => {
       const { statePath, store, registry: original } = await openRegistry(t);
-      await original.enroll({ endpointId: "endpoint-old-key", credential: FIRST_CREDENTIAL });
+      await original.enroll({
+        endpointId: "endpoint-old-key", credential: FIRST_CREDENTIAL, desktopCredential: SECOND_CREDENTIAL,
+      });
       const primary = await fs.readFile(statePath);
       const backup = await fs.readFile(`${statePath}.bak`);
       const replacement = EnrollmentRegistry.open({
@@ -423,28 +526,33 @@ test("HMAC replacement requires fresh endpoint IDs, while key rollback alone pre
           PINVOU_REMOTE_ENROLLMENT_HMAC_KEY: "replacement-hmac-key-material-at-least-32-bytes",
         }),
       });
-      await rejectsCode(replacement.authorizeRegistration({
-        endpointId: "endpoint-old-key", credential: FIRST_CREDENTIAL, purpose: "web_v2_reregister",
+      await rejectsCode(replacement.authorizeWebRegistration({
+        endpointId: "endpoint-old-key", accessToken: FIRST_CREDENTIAL,
+      }), keyId === "test-key-1" ? "invalid_enrollment_credential" : "credential_key_unavailable");
+      await rejectsCode(replacement.authorizeDesktopRegistration({
+        endpointId: "endpoint-old-key", accessToken: FIRST_CREDENTIAL, desktopSecret: SECOND_CREDENTIAL,
       }), keyId === "test-key-1" ? "invalid_enrollment_credential" : "credential_key_unavailable");
       await rejectsCode(replacement.enroll({
         endpointId: "endpoint-old-key", credential: SECOND_CREDENTIAL,
       }), "endpoint_already_enrolled");
-      await rejectsCode(replacement.rotateCredential({
+      await rejectsCode(replacement.rotateAccessCredential({
         endpointId: "endpoint-old-key", currentCredential: FIRST_CREDENTIAL,
         newCredential: SECOND_CREDENTIAL, expectedEndpointRevision: "1",
       }), keyId === "test-key-1" ? "invalid_enrollment_credential" : "credential_key_unavailable");
       assert.deepEqual(await fs.readFile(statePath), primary);
       assert.deepEqual(await fs.readFile(`${statePath}.bak`), backup);
-      assert.equal((await original.authorizeRegistration({
-        endpointId: "endpoint-old-key", credential: FIRST_CREDENTIAL, purpose: "web_v2_reregister",
+      assert.equal((await original.authorizeWebRegistration({
+        endpointId: "endpoint-old-key", accessToken: FIRST_CREDENTIAL,
       })).status, "active");
       await replacement.revoke({ endpointId: "endpoint-old-key", expectedEndpointRevision: "1" });
       await rejectsCode(replacement.enroll({
         endpointId: "endpoint-old-key", credential: SECOND_CREDENTIAL,
       }), "endpoint_revoked");
-      await replacement.enroll({ endpointId: "endpoint-new-key", credential: SECOND_CREDENTIAL });
-      assert.equal((await replacement.authorizeRegistration({
-        endpointId: "endpoint-new-key", credential: SECOND_CREDENTIAL, purpose: "desktop_pairing_register",
+      await replacement.enroll({
+        endpointId: "endpoint-new-key", credential: SECOND_CREDENTIAL, desktopCredential: FIRST_CREDENTIAL,
+      });
+      assert.equal((await replacement.authorizeDesktopRegistration({
+        endpointId: "endpoint-new-key", accessToken: SECOND_CREDENTIAL, desktopSecret: FIRST_CREDENTIAL,
       })).status, "active");
     });
   }
@@ -454,7 +562,7 @@ test("endpoint and namespace revisions reject stale concurrent mutations", async
   const { registry } = await openRegistry(t);
   await registry.enroll({ endpointId: "endpoint-cas", credential: FIRST_CREDENTIAL });
   const results = await Promise.allSettled([
-    registry.rotateCredential({
+    registry.rotateAccessCredential({
       endpointId: "endpoint-cas",
       currentCredential: FIRST_CREDENTIAL,
       newCredential: SECOND_CREDENTIAL,
@@ -478,10 +586,9 @@ test("restart reloads committed registry and valid backup restores a corrupted p
 
   store = await openStateStore(statePath);
   registry = EnrollmentRegistry.open({ stateStore: store, config: configForState(statePath) });
-  await registry.authorizeRegistration({
+  await registry.authorizeWebRegistration({
     endpointId: "endpoint-restart",
-    credential: FIRST_CREDENTIAL,
-    purpose: "web_v2_reregister",
+    accessToken: FIRST_CREDENTIAL,
   });
   await store.close();
 
@@ -489,10 +596,9 @@ test("restart reloads committed registry and valid backup restores a corrupted p
   store = await openStateStore(statePath);
   resourcesFor(t).stores.push(store);
   registry = EnrollmentRegistry.open({ stateStore: store, config: configForState(statePath) });
-  await registry.authorizeRegistration({
+  await registry.authorizeWebRegistration({
     endpointId: "endpoint-restart",
-    credential: FIRST_CREDENTIAL,
-    purpose: "desktop_pairing_register",
+    accessToken: FIRST_CREDENTIAL,
   });
   assert.doesNotMatch(await fs.readFile(statePath, "utf8"), /corrupt/u);
 });
@@ -1596,11 +1702,11 @@ test("persisted registry contains only digest and minimal non-secret audit field
   await registry.enroll({ endpointId: "endpoint-audit", credential: FIRST_CREDENTIAL });
   const value = store.readNamespace(ENROLLMENT_NAMESPACE).value;
   assert.deepEqual(Object.keys(value.entries[0]).sort(), [
-    "audit", "credential", "endpoint_id", "enrolled_at", "revision", "revoked_at", "rotated_at", "status",
+    "access_credential", "audit", "desktop_credential", "endpoint_id", "enrolled_at", "revision", "revoked_at", "rotated_at", "status",
   ]);
   assert.deepEqual(Object.keys(value.entries[0].audit).sort(), ["last_action", "source"]);
-  assert.equal(value.entries[0].credential.digest_hex.length, 64);
-  assert.notEqual(value.entries[0].credential.digest_hex, FIRST_CREDENTIAL);
+  assert.equal(value.entries[0].access_credential.digest_hex.length, 64);
+  assert.notEqual(value.entries[0].access_credential.digest_hex, FIRST_CREDENTIAL);
 });
 
 test("atomic batch validates everything before one namespace CAS", async (t) => {
@@ -1609,6 +1715,7 @@ test("atomic batch validates everything before one namespace CAS", async (t) => 
   const countingStore = {
     getPathPolicy: () => store.getPathPolicy(),
     readNamespace: (name) => store.readNamespace(name),
+    readNamespaceRevision: (name) => store.readNamespaceRevision(name),
     compareAndSwap: async (...args) => {
       writes += 1;
       return store.compareAndSwap(...args);
@@ -1706,7 +1813,7 @@ test("public snapshot validation and import are strict, versioned, and one-CAS",
   for (const mutate of [
     (snapshot) => { snapshot.entries[0].revision = "01"; },
     (snapshot) => { snapshot.entries[0].status = "unknown"; },
-    (snapshot) => { snapshot.entries[0].credential.digest_hex = "bad"; },
+    (snapshot) => { snapshot.entries[0].access_credential.digest_hex = "bad"; },
     (snapshot) => { snapshot.entries[0].enrolled_at = "yesterday"; },
     (snapshot) => { snapshot.entries[0].enrolled_at = "2023-02-29T00:00:00.000Z"; },
     (snapshot) => { snapshot.entries[0].enrolled_at = "2024-02-30T00:00:00.000Z"; },
@@ -1722,14 +1829,15 @@ test("public snapshot validation and import are strict, versioned, and one-CAS",
     version: 1,
     entries: structuredClone(exported.registry.entries),
   };
-  const migrated = validateEnrollmentRegistrySnapshot(legacy);
-  assert.equal(migrated.version, 2);
-  assert.deepEqual(migrated.migration_requests, []);
+  assert.throws(() => validateEnrollmentRegistrySnapshot(legacy), { code: "enrollment_registry_unsupported" });
+  assert.throws(() => validateEnrollmentRegistrySnapshot({ ...legacy, version: 2, migration_requests: [] }),
+    { code: "enrollment_registry_unsupported" });
 
   let writes = 0;
   const countingStore = {
     getPathPolicy: () => store.getPathPolicy(),
     readNamespace: (name) => store.readNamespace(name),
+    readNamespaceRevision: (name) => store.readNamespaceRevision(name),
     compareAndSwap: async (...args) => {
       writes += 1;
       return store.compareAndSwap(...args);
@@ -1738,15 +1846,16 @@ test("public snapshot validation and import are strict, versioned, and one-CAS",
   const importing = EnrollmentRegistry.open({ stateStore: countingStore, config: configForState(statePath) });
   const replacement = {
     schema: ENROLLMENT_REGISTRY_SCHEMA,
-    version: 1,
+    version: ENROLLMENT_REGISTRY_VERSION,
     entries: structuredClone(exported.registry.entries.slice(1)),
+    migration_requests: [],
   };
   const imported = await importing.importSnapshot({
     snapshot: replacement,
     expectedNamespaceRevision: importing.exportSnapshot().namespace_revision,
   });
   assert.equal(writes, 1);
-  assert.equal(imported.registry.version, 2);
+  assert.equal(imported.registry.version, ENROLLMENT_REGISTRY_VERSION);
   assert.equal(imported.registry.entries.length, 1);
   assert.equal(importing.getStatus("snapshot-b"), null);
 
@@ -1760,7 +1869,7 @@ test("public snapshot validation and import are strict, versioned, and one-CAS",
   assert.equal(importing.getStatus("snapshot-b").status, "active");
 });
 
-test("a persisted v1 enrollment registry upgrades lazily on its next mutation", async (t) => {
+test("unreleased registry formats fail closed without lazy upgrades", async (t) => {
   const { statePath, store, registry } = await openRegistry(t);
   await registry.enroll({ endpointId: "legacy-registry-a", credential: FIRST_CREDENTIAL });
   const current = store.readNamespace(ENROLLMENT_NAMESPACE);
@@ -1769,17 +1878,11 @@ test("a persisted v1 enrollment registry upgrades lazily on its next mutation", 
     version: 1,
     entries: current.value.entries,
   });
-  const reopened = EnrollmentRegistry.open({ stateStore: store, config: configForState(statePath) });
-  assert.equal(reopened.exportSnapshot().registry.version, 2);
+  assert.throws(() => EnrollmentRegistry.open({ stateStore: store, config: configForState(statePath) }),
+    { code: "enrollment_registry_unsupported" });
   assert.equal(store.readNamespace(ENROLLMENT_NAMESPACE).value.version, 1, "read-only open must not rewrite state");
-  const beforeMutation = reopened.exportSnapshot();
-  await reopened.applyAtomicBatch({
-    expectedNamespaceRevision: beforeMutation.namespace_revision,
-    operations: [{ operation: "allowlist", endpoint_id: "legacy-registry-b", credential: SECOND_CREDENTIAL }],
-  });
-  const persisted = store.readNamespace(ENROLLMENT_NAMESPACE).value;
-  assert.equal(persisted.version, 2);
-  assert.deepEqual(persisted.migration_requests, []);
+  await assert.rejects(registry.authorizeWebRegistration({ endpointId: "legacy-registry-a", accessToken: FIRST_CREDENTIAL }),
+    { code: "enrollment_registry_unsupported" });
 });
 
 test("migration ledger survives a crash after pending and seals a secret-free terminal outcome", async (t) => {
@@ -1791,7 +1894,7 @@ test("migration ledger survives a crash after pending and seals a secret-free te
   const pending = await registry.beginMigrationRequest(input);
   assert.equal(pending.status, "pending");
   const persistedPending = store.readNamespace(ENROLLMENT_NAMESPACE).value;
-  assert.equal(persistedPending.version, 2);
+  assert.equal(persistedPending.version, ENROLLMENT_REGISTRY_VERSION);
   assert.equal(persistedPending.migration_requests[0].status, "pending");
   assert.doesNotMatch(JSON.stringify(persistedPending), new RegExp(FIRST_CREDENTIAL, "u"));
 
@@ -1870,6 +1973,7 @@ test("post-commit response loss is recovered for pending and terminal writes", a
   const lossyStore = {
     getPathPolicy: () => store.getPathPolicy(),
     readNamespace: (name) => store.readNamespace(name),
+    readNamespaceRevision: (name) => store.readNamespaceRevision(name),
     async compareAndSwap(...args) {
       const committed = await store.compareAndSwap(...args);
       if (commitsBeforeThrow > 0) {
