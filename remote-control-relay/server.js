@@ -1,5 +1,6 @@
 import http from "node:http";
 import crypto from "node:crypto";
+import { isIP } from "node:net";
 import { chmod, mkdir, open, readFile, rename, rm, stat } from "node:fs/promises";
 import { dirname, extname, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -181,6 +182,9 @@ const controllerRuntime = DESKTOP_CONTROLLER_ENABLED ? await createControllerRun
 
 async function createControllerRuntime() {
   const config = loadEnrollmentRegistryConfig(process.env);
+  // Official proof issuance and the live claim dispatcher are not installed in
+  // this wave. Never advertise an enabled production controller without them.
+  if (config.deployment === "official") throw new Error("official_controller_claim_dispatcher_unavailable");
   controllerStateStore = await RelayStateStore.open({
     statePath: config.controller_state_path,
     legacyStatePath: config.legacy_web_state_path,
@@ -236,10 +240,9 @@ async function createControllerRuntime() {
         if (context?.endpointId !== endpointId || typeof context?.credential !== "string") {
           throw new Error("pairing_endpoint_unauthorized");
         }
-        await registry.authorizeRegistration({
+        await registry.authorizePairingRegistration({
           endpointId,
-          credential: context.credential,
-          purpose: "desktop_pairing_register",
+          desktopSecret: context.credential,
         });
       },
     });
@@ -328,15 +331,21 @@ function boundedInteger(raw, fallback, min, max) {
 }
 
 function normalizeIp(value) {
+  if (typeof value !== "string" || value.length > 128) return "";
   const ip = String(value || "").trim();
-  return ip.startsWith("::ffff:") ? ip.slice(7) : ip;
+  if (!isIP(ip)) return "";
+  return ip.startsWith("::ffff:") && isIP(ip.slice(7)) === 4 ? ip.slice(7) : ip;
 }
 
 function parseIpSet(value) {
-  return new Set(String(value || "")
-    .split(",")
-    .map(normalizeIp)
-    .filter(Boolean));
+  const result = new Set();
+  for (const item of String(value || "").split(",")) {
+    if (!item.trim()) continue;
+    const ip = normalizeIp(item);
+    if (!ip) throw new Error("proxy_ip_configuration_invalid");
+    result.add(ip);
+  }
+  return result;
 }
 
 function parseOriginSet(value) {
@@ -386,11 +395,13 @@ function sourceAllowed(req) {
 function clientIp(req) {
   const peer = peerIp(req);
   if (!TRUSTED_PROXY_IPS.has(peer)) return peer || "unknown";
-  const forwarded = String(req.headers["x-forwarded-for"] || "")
-    .split(",")
-    .map(normalizeIp)
-    .filter(Boolean);
-  return forwarded.at(-1) || normalizeIp(req.headers["x-real-ip"]) || peer || "unknown";
+  const header = req.headers["x-forwarded-for"];
+  // Only the rightmost proxy-appended address is authoritative. Never skip a
+  // malformed final item and fall back to an attacker-controlled earlier item.
+  if (typeof header === "string" && header.length <= 4096) {
+    return normalizeIp(header.split(",").at(-1)) || peer || "unknown";
+  }
+  return (header === undefined ? normalizeIp(req.headers["x-real-ip"]) : "") || peer || "unknown";
 }
 
 function consumeRateLimit(buckets, ip, limit, windowMs, now = Date.now()) {
@@ -695,6 +706,7 @@ function notifyDesktopOfWeb(endpoint) {
 
 function revokeEndpoint(endpoint, reason = "revoked", requester = null) {
   if (!endpoint || endpoints.get(endpoint.endpoint_id) !== endpoint) return;
+  controllerRuntime?.reservations.releaseWeb({ endpointId: endpoint.endpoint_id, leaseId: endpoint.lease_id });
   endpoints.delete(endpoint.endpoint_id);
   audit(endpoint, "endpoint_revoked", { reason });
   send(requester, {
@@ -726,6 +738,7 @@ function revokeEndpoint(endpoint, reason = "revoked", requester = null) {
 
 function expireEndpoint(endpoint, reason = "desktop_offline_ttl_expired") {
   if (!endpoint || endpoint.revoking || endpoints.get(endpoint.endpoint_id) !== endpoint) return;
+  controllerRuntime?.reservations.releaseWeb({ endpointId: endpoint.endpoint_id, leaseId: endpoint.lease_id });
   endpoints.delete(endpoint.endpoint_id);
   audit(endpoint, "endpoint_expired", { reason });
   send(endpoint.web, {
@@ -915,10 +928,10 @@ async function registerDesktop(ws, msg) {
 
   if (controllerRuntime) {
     try {
-      await controllerRuntime.registry.authorizeRegistration({
+      await controllerRuntime.registry.authorizeDesktopRegistration({
         endpointId,
-        credential: desktopSecret,
-        purpose: "web_v2_reregister",
+        accessToken,
+        desktopSecret,
       });
     } catch (error) {
       rejectSocket(ws, error?.code || "enrollment_required", "desktop endpoint enrollment required");
@@ -1175,11 +1188,16 @@ wss.on("connection", (ws, req) => {
   ws.controllerEnrollmentCredential = null;
   ws.controllerSocketIdentity = `socket-${crypto.randomBytes(18).toString("base64url")}`;
   if (ws.protocol === CONTROLLER_SUBPROTOCOL) {
-    controllerRuntime?.router.addSocket({
-      socketIdentity: ws.controllerSocketIdentity,
-      source: clientIp(req),
-      socket: ws,
-    });
+    try {
+      controllerRuntime?.router.addSocket({
+        socketIdentity: ws.controllerSocketIdentity,
+        source: ws.clientIp,
+        socket: ws,
+      });
+    } catch {
+      rejectSocket(ws, "connection_initialization_failed", "websocket initialization failed");
+      return;
+    }
   }
   ws.ingressBucket = { started_at: Date.now(), messages: 0, bytes: 0 };
   ws.authTimer = setTimeout(() => {

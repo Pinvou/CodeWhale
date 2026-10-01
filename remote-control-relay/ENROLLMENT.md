@@ -1,8 +1,11 @@
 # Desktop endpoint enrollment registry
 
 DEV-01 adds the persistent authorization authority consumed later by the Web v2
-re-registration and `desktop_pairing_register` handlers. It is intentionally not
-wired into `server.js` yet; DEV-06 owns the single dispatcher integration point.
+re-registration and `desktop_pairing_register` handlers. The gated self-hosted
+and development dispatcher consumes it in `server.js`. Official live claim
+wiring is not installed in this wave: enabling the controller with deployment
+`official` fails startup before a listener opens. A tested proof handler alone
+is not a production enrollment flow and must not be advertised as one.
 
 ## Deployment configuration
 
@@ -181,13 +184,17 @@ it.
 
 ## Enrollment data and API
 
-The `endpoint_enrollment` namespace schema is version 2. It stores sorted
+The `endpoint_enrollment` namespace schema is version 3. It stores sorted
 endpoint records with status (`active` or terminal `revoked`), endpoint
-revision, ordered timestamps, a keyed HMAC-SHA-256 digest, and only the audit
-source/last action. It also stores a sorted migration request ledger. Version 1
-snapshots are strictly validated and normalized to version 2 with an empty
-ledger on read; the next successful mutation persists the upgrade. Unknown or
-malformed versions fail closed.
+revision, ordered timestamps, role-domain-separated HMAC-SHA-256 digests in
+`access_credential` and `desktop_credential`, and only the audit source/last
+action. The desktop digest may be null for an explicitly Web-only enrollment.
+Identical plaintext in both roles still produces different digests. The access
+digest never authorizes desktop pairing. A sorted migration request ledger
+seals stable operations. Earlier development-only namespace versions and old
+digest algorithms are rejected; no lazy upgrades or fallback validators exist.
+This format is unreleased. Operators testing an earlier format must preserve
+their evidence and explicitly rebuild enrollment, not reinterpret old digests.
 
 Raw credentials, migration parameters, and the HMAC key are never persisted or
 returned. Credential and request-parameter checks use constant-time digest
@@ -198,16 +205,23 @@ secret-free outcome.
 Callers use:
 
 - `EnrollmentRegistry.enroll` for an already authenticated official/admin flow;
-- `authorizeRegistration` with purpose `web_v2_reregister` or
-  `desktop_pairing_register` before accepting a registration;
-- `rotateCredential` with the current credential and expected endpoint revision;
+- `authorizeWebRegistration` with `accessToken` for Web joins;
+- `authorizeDesktopRegistration` verifies `accessToken` and `desktopSecret`
+  together against one registry snapshot before a desktop becomes trusted;
+- `authorizePairingRegistration` with `desktopSecret`, only from that trusted
+  desktop socket context;
+- `rotateAccessCredential` or `rotateDesktopCredential` with the current
+  role credential and expected endpoint revision; neither changes the other role;
 - `revoke` with the expected endpoint revision.
 - `exportSnapshot`, public `validateEnrollmentRegistrySnapshot`, and
   `importSnapshot` for strict backup validation and one-CAS restoration.
   Restoring endpoint records always preserves the current migration ledger;
   snapshot data can never erase or roll back stable request IDs;
 - `applyAtomicBatch` for a fully prevalidated allowlist/re-enroll batch or an
-  exclusive restore operation. It makes at most one namespace CAS, so no prefix
+  exclusive restore operation. `allowlist` creates a new record only; an optional
+  `desktop_credential` requires `expected_revision: "0"`. For an existing active
+  Web-only record, `set_desktop_credential` requires the exact endpoint revision,
+  increments it, and refuses to overwrite a populated desktop slot. It makes at most one namespace CAS, so no prefix
   of a failed batch becomes durable;
 - `beginMigrationRequest` and `completeMigrationRequest` for explicit crash
   boundaries, or `executeMigrationRequest` for the normal composed path.
@@ -223,6 +237,22 @@ conflict. Concurrent handlers converge through namespace CAS; a storage error
 never reports an unpersisted success.
 
 State CAS conflicts and endpoint revision conflicts are explicit.
+
+Authorization caches only a frozen validated registry and its private endpoint
+index, not successful credentials. Every request calls the store's lightweight
+`readNamespaceRevision`, which checks ready/closing/degraded state. A namespace
+revision change reloads the registry; a closed or failed store rejects even a
+warm-cache request. Anonymous warm-cache authorization does not clone or scan
+the full registry. The lightweight metadata API is part of the required store
+contract; a store lacking it is rejected at registry open.
+
+`getControllerReadiness` reports both `web_ready` and dual-role `desktop_ready`.
+Rollback inventory coverage counts `migrated` only when both roles are ready
+with the configured digest key; `web_migrated` separately counts access readiness.
+Active Web-only records remain valid for Web joins but
+cannot register a desktop or pair. Development TOFU may create an access-only
+record for a Web request, or both roles atomically for a desktop request; a
+pairing request can never invent a desktop digest from a single credential.
 
 For `revoke`, the expected endpoint revision is syntax-checked for every call
 and compared before an active-to-revoked transition. An already revoked entry
@@ -254,7 +284,10 @@ rejected. Deployment code constructs the verifier from official public keys;
 an authenticated legacy TOFU socket alone is never sufficient to enroll.
 
 The claim request contains only a stable request ID: endpoint ID and the
-existing `access_token` come from the opaque socket proof. Claim outcomes use
+existing `access_token` and `desktop_secret` come from the opaque socket proof.
+The `claim_roles` operation atomically creates both digests, or fills a null
+desktop slot only while the access digest still matches. An identical desktop
+digest is idempotent; a different digest or revoked record is rejected. Claim outcomes use
 the durable migration-request ledger, so a retry after response loss or process
 restart returns the original terminal result. Repeating a claim preserves
 endpoint ID, token, timestamps and old Web links; a request ID used by another
@@ -262,15 +295,24 @@ endpoint or parameter set is rejected. No credential is returned or logged.
 
 Self-hosted operators use `scripts/enrollment-migrate.js`. Credentials must be
 provided in a private input file and are never accepted as command-line values.
-`--dry-run` validates the whole batch without mutation. Each version-1 batch
+`--dry-run` validates the whole batch without mutation. Desktop credential
+backfill is explicitly reported as `would_set_desktop_credential`, not as an
+already enrolled no-op. Each version-1 batch
 document contains a stable `request_id`; `--apply` records it in the durable
 migration ledger and commits all endpoint changes plus the terminal result with
 one namespace CAS. A retry returns that sealed result and a different batch
 under the same ID conflicts. A failed request may persist a secret-free failed
-ledger row, but no endpoint-operation prefix can persist. Backup restore accepts strict
-version 1 or version 2 registry snapshots, normalizes them through the same
-validator, and executes as a stable migration request while preserving the
-monotonic request ledger.
+ledger row, but no endpoint-operation prefix can persist. Backup restore accepts
+only the current strict registry format and executes as a stable migration
+request while preserving the monotonic request ledger.
+`--restore --input PRIVATE_BACKUP --request-id RESTORE_OPERATION_ID` requires an
+explicit operation ID. A first applied restore returns `applied: true`,
+`restored: true`, `replayed: false`; response-loss retries with the same ID return
+`applied: false`, `restored: false`, `replayed: true` without writing anything.
+If records subsequently change, the old ID still only replays its sealed outcome
+and does not restore those changed records. Use a new explicit operation ID to
+intentionally apply the same backup again. Reusing an ID with another backup is
+a conflict. Do not generate a fresh ID automatically on each retry.
 `re_enroll` rotates the access token and therefore explicitly invalidates old
 Web links. Backup files contain keyed digests, not credentials, and still need
 mode 0600/private ACL storage. The CLI rejects symlink/reparse-point ancestors,
@@ -281,7 +323,8 @@ DACL before writing any bytes.
 An old v2 Relay may be used for rollback only on a literal IPv4 or IPv6 loopback
 listener behind `enrollment-gateway.js`; `localhost` is not accepted as proof of
 loopback binding. The gateway validates the first
-`desktop_endpoint_register` or `web_client_join` frame against the registry
+`desktop_endpoint_register` (both credential roles) or `web_client_join` (access
+role only) frame against the registry
 before forwarding it. The first authentication frame is independently capped
 at 16 KiB, while later valid business frames retain the legacy Relay's 4 MiB
 default payload range. The gateway also enforces browser Origin policy,
@@ -295,7 +338,12 @@ loopback, or OS listener inspection finds a wildcard/non-loopback bind. A bare
 v2 rollback is never a safe fallback.
 `scripts/check-enrollment-gated-v2-rollback.mjs` combines the private endpoint
 inventory coverage report and gateway check; deployment automation must require
-its zero exit status before starting an old v2 binary.
+its zero exit status before starting an old v2 binary. Coverage must have a
+positive integer total, all entries migrated, no unmigrated entries and exactly
+100 percent coverage; an empty inventory is not evidence of safe rollback.
+The gateway holds the controller-state writer lock. During rollback, stop the
+controller dispatcher before opening that gateway; two independent processes
+must not open the same store as concurrent writers.
 The preflight checks the health marker, WebSocket upgrade marker and an
 anonymous registration denial on every declared public route. The declared
 bind host remains a required assertion, but does not replace OS listener
