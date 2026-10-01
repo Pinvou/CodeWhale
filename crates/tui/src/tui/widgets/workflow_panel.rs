@@ -393,8 +393,8 @@ impl WorkflowPanelDispatchFailure {
                 .collect::<Vec<_>>()
                 .join(" ")
         };
-        let label = label.map(&bounded).filter(|value| !value.is_empty());
-        let phase = phase.map(&bounded).filter(|value| !value.is_empty());
+        let label = label.map(bounded).filter(|value| !value.is_empty());
+        let phase = phase.map(bounded).filter(|value| !value.is_empty());
         let message = bounded(message);
         Self {
             label,
