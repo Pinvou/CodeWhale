@@ -1,3 +1,4 @@
+pub(crate) mod controller;
 pub(crate) mod file_access;
 pub(crate) mod manager;
 mod platform;
