@@ -258,6 +258,19 @@ export class ControllerLivenessHooks {
     return Object.freeze({ retain_lease: false });
   }
 
+  // Snapshot synchronously before onSocketClosed removes evidence. The
+  // authenticated join/resume seeds a finite cycle; subsequent role heartbeats
+  // can advance it only while connected. B activity never renews A's cutoff.
+  resumeDeadline(lease) {
+    const state = this.#states.get(lease?.controller_lease_id);
+    if (!state || state.last_liveness_a.epoch !== lease.liveness_epoch_a
+      || state.last_liveness_b.epoch !== lease.liveness_epoch_b) return null;
+    const timestamp = integer(this.#clock(), "now");
+    const deadline = Math.min(state.last_liveness_a.at, state.last_liveness_b.at) + TOTAL_BUDGET_MS;
+    if (!Number.isSafeInteger(deadline) || timestamp >= deadline) return null;
+    return deadline;
+  }
+
   async onLeaseTerminated({ controller_lease_id: controllerLeaseId } = {}) {
     if (controllerLeaseId) this.#states.delete(controllerLeaseId);
   }
