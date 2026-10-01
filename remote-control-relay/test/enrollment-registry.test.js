@@ -191,9 +191,36 @@ test("explicit non-production mode can opt into temporary TOFU", async (t) => {
   assert.equal(stored.entries[0].audit.source, "development_tofu");
 });
 
+test("development TOFU exhausts bounded CAS retries without authorizing or persisting", async (t) => {
+  const { registry, store, statePath } = await openRegistry(t, {
+    env: environment({
+      NODE_ENV: "development",
+      PINVOU_REMOTE_ENROLLMENT_DEPLOYMENT: "development",
+      PINVOU_REMOTE_ENROLLMENT_DEVELOPMENT_TOFU: "true",
+    }),
+  });
+  const before = await fs.readFile(statePath);
+  let attempts = 0;
+  store.compareAndSwap = async () => {
+    attempts += 1;
+    const error = new Error("injected CAS conflict");
+    error.code = "namespace_revision_conflict";
+    throw error;
+  };
+  await rejectsCode(registry.authorizeRegistration({
+    endpointId: "development-conflict",
+    credential: FIRST_CREDENTIAL,
+    purpose: "desktop_pairing_register",
+  }), "enrollment_revision_conflict");
+  assert.equal(attempts, 4);
+  assert.equal(registry.getStatus("development-conflict"), null);
+  assert.deepEqual(await fs.readFile(statePath), before);
+  assert.deepEqual(await fs.readFile(`${statePath}.bak`), before);
+});
+
 test("credential rotation invalidates old credential and revocation is terminal", async (t) => {
   let now = Date.UTC(2026, 8, 16, 1, 0, 0);
-  const { registry } = await openRegistry(t, { clock: () => now });
+  const { registry, store, statePath } = await openRegistry(t, { clock: () => now });
   await registry.enroll({ endpointId: "endpoint-rotate", credential: FIRST_CREDENTIAL });
   now += 1000;
   const rotated = await registry.rotateCredential({
@@ -218,6 +245,18 @@ test("credential rotation invalidates old credential and revocation is terminal"
   const revoked = await registry.revoke({ endpointId: "endpoint-rotate", expectedEndpointRevision: "2" });
   assert.equal(revoked.status, "revoked");
   assert.equal(revoked.revision, "3");
+  const terminalSnapshot = store.readNamespace(ENROLLMENT_NAMESPACE);
+  const terminalPrimary = await fs.readFile(statePath);
+  const terminalBackup = await fs.readFile(`${statePath}.bak`);
+  for (const expectedEndpointRevision of ["2", "999"]) {
+    assert.deepEqual(await registry.revoke({ endpointId: "endpoint-rotate", expectedEndpointRevision }), revoked);
+    assert.deepEqual(store.readNamespace(ENROLLMENT_NAMESPACE), terminalSnapshot);
+    assert.deepEqual(await fs.readFile(statePath), terminalPrimary);
+    assert.deepEqual(await fs.readFile(`${statePath}.bak`), terminalBackup);
+  }
+  await rejectsCode(registry.revoke({
+    endpointId: "endpoint-rotate", expectedEndpointRevision: "not-a-revision",
+  }), "expected_endpoint_revision_invalid");
   await rejectsCode(registry.authorizeRegistration({
     endpointId: "endpoint-rotate",
     credential: SECOND_CREDENTIAL,
@@ -314,6 +353,7 @@ test("legacy controller state migrates once without touching the existing v2 rel
     }],
   };
   await fs.writeFile(statePath, JSON.stringify(legacy), "utf8");
+  await fs.copyFile(statePath, `${statePath}.bak`);
   const store = await openStateStore(statePath);
   resourcesFor(t).stores.push(store);
   assert.equal(store.readNamespace("future_pairing_tombstones").namespace_revision, "2");
@@ -321,6 +361,85 @@ test("legacy controller state migrates once without touching the existing v2 rel
   assert.equal(current.version, 1);
   assert.equal(current.revision, "4");
   assert.deepEqual(current.namespaces.future_pairing_tombstones.value, { tombstones: [] });
+  assert.deepEqual(await fs.readFile(`${statePath}.bak`), await fs.readFile(statePath));
+});
+
+test("legacy migration resumes with a normalized equivalent v1 backup", async (t) => {
+  const statePath = await temporaryState(t);
+  const initialized = await openStateStore(statePath);
+  await initialized.compareAndSwap("migration_probe", "0", { value: 7 });
+  await initialized.close();
+  const current = JSON.parse(await fs.readFile(statePath, "utf8"));
+  const legacy = {
+    ...current,
+    version: 0,
+    revision: Number(current.revision),
+    namespaces: Object.entries(current.namespaces).map(([name, record]) => ({
+      name, revision: Number(record.revision), value: record.value,
+    })),
+  };
+  await fs.writeFile(statePath, JSON.stringify(legacy), "utf8");
+  const store = await openStateStore(statePath);
+  resourcesFor(t).stores.push(store);
+  assert.deepEqual(store.readNamespace("migration_probe"), {
+    store_revision: "1", namespace_revision: "1", value: { value: 7 },
+  });
+  assert.deepEqual(JSON.parse(await fs.readFile(statePath, "utf8")), current);
+  assert.deepEqual(await fs.readFile(`${statePath}.bak`), await fs.readFile(statePath));
+});
+
+test("legacy migration rejects inconsistent backup without rewriting either candidate", async (t) => {
+  const primary = {
+    schema: RELAY_CONTROLLER_STATE_SCHEMA,
+    version: 0,
+    revision: 5,
+    namespaces: [{ name: "ns_a", revision: 2, value: { source: "primary" } }],
+  };
+  const matching = {
+    schema: RELAY_CONTROLLER_STATE_SCHEMA,
+    version: 1,
+    revision: "5",
+    namespaces: { ns_a: { revision: "2", value: { source: "primary" } } },
+  };
+  for (const [label, backup] of [
+    ["newer v1 with another namespace", JSON.stringify({
+      ...matching, revision: "9", namespaces: { ns_b: { revision: "1", value: { source: "backup" } } },
+    })],
+    ["another v1 revision", JSON.stringify({ ...matching, revision: "9" })],
+    ["another v1 namespace", JSON.stringify({
+      ...matching, namespaces: { ns_b: { revision: "2", value: { source: "primary" } } },
+    })],
+    ["same revision with another value", JSON.stringify({
+      ...matching, namespaces: { ns_a: { revision: "2", value: { source: "backup" } } },
+    })],
+    ["another v0 revision", JSON.stringify({ ...primary, revision: 6 })],
+    ["another v0 namespace", JSON.stringify({
+      ...primary, namespaces: [{ ...primary.namespaces[0], name: "ns_b" }],
+    })],
+    ["another v0 value", JSON.stringify({
+      ...primary, namespaces: [{ ...primary.namespaces[0], value: { source: "backup" } }],
+    })],
+    ["damaged backup", "{corrupt"],
+    ["unsupported backup", JSON.stringify({ ...matching, version: 2 })],
+    ["missing backup", null],
+  ]) {
+    await t.test(label, async (subtest) => {
+      const statePath = await temporaryState(subtest);
+      const initialized = await openStateStore(statePath);
+      await initialized.close();
+      const primaryBefore = JSON.stringify(primary);
+      await fs.writeFile(statePath, primaryBefore, "utf8");
+      if (backup === null) await fs.rm(`${statePath}.bak`);
+      else await fs.writeFile(`${statePath}.bak`, backup, "utf8");
+      await rejectsCode(openStateStore(statePath).then((store) => {
+        resourcesFor(subtest).stores.push(store);
+        return store;
+      }), "relay_state_unavailable");
+      assert.deepEqual(await fs.readFile(statePath), Buffer.from(primaryBefore, "utf8"));
+      if (backup === null) await assert.rejects(fs.stat(`${statePath}.bak`), { code: "ENOENT" });
+      else assert.deepEqual(await fs.readFile(`${statePath}.bak`), Buffer.from(backup, "utf8"));
+    });
+  }
 });
 
 test("strict state validation rejects unknown fields, oversized input and unsafe paths", async (t) => {
@@ -348,6 +467,27 @@ test("strict state validation rejects unknown fields, oversized input and unsafe
     statePath: "relative.json",
     legacyStatePath: path.resolve("legacy.json"),
   }), "relay_state_path_invalid");
+});
+
+test("unsafe JSON keys and depth fail before a namespace write", async (t) => {
+  const statePath = await temporaryState(t);
+  const store = await openStateStore(statePath);
+  resourcesFor(t).stores.push(store);
+  const before = await fs.readFile(statePath);
+  let boundary = null;
+  for (let depth = 0; depth < 32; depth += 1) boundary = [boundary];
+  for (const value of [
+    JSON.parse('{"__proto__":{"polluted":true}}'),
+    JSON.parse('{"constructor":{"prototype":{"polluted":true}}}'),
+    [boundary],
+  ]) {
+    await rejectsCode(store.compareAndSwap("json_probe", "0", value), "namespace_value_malformed");
+    assert.deepEqual(await fs.readFile(statePath), before);
+    assert.deepEqual(await fs.readFile(`${statePath}.bak`), before);
+  }
+  assert.equal({}.polluted, undefined);
+  await store.compareAndSwap("json_probe", "0", boundary);
+  assert.equal(store.readNamespace("json_probe").namespace_revision, "1");
 });
 
 test("configuration and store reject lexical and hardlink aliases of legacy Web state", async (t) => {
@@ -1151,7 +1291,20 @@ test("a failure after staging backup cannot silently authorize after restart", a
   const store = await openStateStore(statePath, { fs: injectedFs });
   await rejectsCode(store.compareAndSwap("test", "0", { grants_access: true }), "relay_state_persist_failed");
   await store.close();
+  const committedPrimary = await fs.readFile(statePath);
+  assert.equal(JSON.parse(await fs.readFile(`${statePath}.bak`, "utf8")).namespaces.test.value.grants_access, true);
   await rejectsCode(openStateStore(statePath), "relay_state_unavailable");
+  assert.deepEqual(await fs.readFile(statePath), committedPrimary);
+
+  // The injected failure proves that only the primary was committed. Emulate
+  // the documented offline, evidence-backed recovery; never promote the staged backup.
+  await fs.copyFile(statePath, `${statePath}.bak`);
+  const recovered = await openStateStore(statePath);
+  resourcesFor(t).stores.push(recovered);
+  assert.deepEqual(recovered.readNamespace("test"), {
+    store_revision: "0", namespace_revision: "0", value: null,
+  });
+  assert.deepEqual(await fs.readFile(statePath), committedPrimary);
 });
 
 test("a damaged or mismatched backup prevents authorization", async (t) => {
