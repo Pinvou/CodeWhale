@@ -45,7 +45,7 @@ function errorMessage(code) {
 }
 
 export class ControllerRouter {
-  #registration; #leases; #send; #peers = new Map(); #controlled = new Map(); #audit; #hooks;
+  #registration; #leases; #send; #peers = new Map(); #controlled = new Map(); #audit; #hooks; #livenessHooks;
 
   constructor({
     pairingRegistrationHandler,
@@ -84,6 +84,7 @@ export class ControllerRouter {
     this.#leases = leaseManager;
     this.#send = send;
     this.#audit = audit;
+    this.#livenessHooks = livenessHooks;
     this.#hooks = Object.freeze(hooksList);
   }
 
@@ -304,8 +305,11 @@ export class ControllerRouter {
     const peer = this.#peers.get(socketIdentity);
     if (!peer) return Object.freeze({ handshakes: 0, leases: 0 });
     const lease = peer.controllerLeaseId ? this.#leases.lease(peer.controllerLeaseId) : null;
+    let evidenceDeadline = null;
+    try { evidenceDeadline = this.#livenessHooks.resumeDeadline?.(lease) ?? null; }
+    catch { /* Missing/invalid evidence must not prevent disconnect cleanup. */ }
     const hookOutcomes = await Promise.allSettled(this.#hooks.map((hooks) => hooks.onSocketClosed(Object.freeze({
-      socket_identity: socketIdentity, role: peer.role, lease,
+      socket_identity: socketIdentity, role: peer.role, lease, evidence_deadline_ms: evidenceDeadline,
     }))));
     const hookResults = hookOutcomes
       .filter((result) => result.status === "fulfilled")
