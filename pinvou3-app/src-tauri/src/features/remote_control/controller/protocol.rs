@@ -104,7 +104,7 @@ const MAX_ARTIFACTS: usize = 256;
 pub(crate) const MAX_ENCRYPTED_WIRE_BYTES: usize =
     MAX_ENCRYPTED_FRAME_BYTES.div_ceil(3) * 4 + MAX_CONTROL_MESSAGE_BYTES;
 const CONTROLLER_CONTRACT_SHA256: &str =
-    "eb276cfea1ee9f76603753994312aa9551c8d530839c716958ae60fbae53d31a";
+    "f98dc9475965ad51f72e22872774bbeb3729fb53e55405a4390b6b09079bebef";
 
 pub(crate) const CONTROLLER_CAPABILITIES: &[&str] = &[
     "pairing_v1",
@@ -1097,6 +1097,7 @@ fn message_schema(kind: &str) -> Option<Schema> {
                 "liveness_epoch_a",
                 "liveness_epoch_b",
                 "new_resume_token_b64",
+                "resume_deadline_ms",
             ],
             optional: &[],
             roles: &[RELAY],
@@ -1157,8 +1158,8 @@ fn payload_schema(kind: &str) -> Option<Schema> {
                 "relay_epoch",
                 "remote_control_generation",
                 "request_id",
-                "known_revision",
                 "session_id",
+                "known_revision",
             ],
             optional: &[],
             roles: &[A],
@@ -3827,6 +3828,36 @@ pub(crate) fn build_liveness_attestation_preimage(message: &Value) -> Result<Vec
     Ok(output)
 }
 
+/// Parsed signing material is not authenticated evidence. Only the enrolled
+/// Relay trust verifier may authorize it before a watchdog state transition.
+pub(crate) struct ParsedLivenessAttestation {
+    pub(crate) relay_signing_key_id: String,
+    pub(crate) signature_algorithm: String,
+    pub(crate) signature_preimage: Vec<u8>,
+    pub(crate) relay_signature: Vec<u8>,
+}
+
+pub(crate) fn parse_liveness_attestation(input: &str) -> Result<ParsedLivenessAttestation> {
+    let value = validate_controller_message_json(input, RELAY)?;
+    let message = as_object(&value, "attestation")?;
+    let signature_preimage = build_liveness_attestation_preimage(&value)?;
+    let relay_signature = base64::engine::general_purpose::STANDARD
+        .decode(object_string(
+            message,
+            "relay_signature_b64",
+            "attestation",
+        )?)
+        .map_err(|_| ControllerProtocolError::new("invalid_field", "relay_signature_b64"))?;
+    Ok(ParsedLivenessAttestation {
+        relay_signing_key_id: object_string(message, "relay_signing_key_id", "attestation")?
+            .to_owned(),
+        signature_algorithm: object_string(message, "signature_algorithm", "attestation")?
+            .to_owned(),
+        signature_preimage,
+        relay_signature,
+    })
+}
+
 pub(crate) fn validate_liveness_attestation_message_json(
     input: &str,
     context: &LeaseContext,
@@ -4746,13 +4777,33 @@ mod tests {
     #[test]
     fn strict_task_inputs_package_binding_and_statuses_match_fixture() {
         let fixture = fixture();
-        for (field, role) in [
-            ("capability_snapshot_vector", B),
-            ("artifact_index_vector", B),
-        ] {
+        let legacy_artifact = &fixture["artifact_index_vector"];
+        assert_eq!(
+            validate_controller_payload_json(&serde_json::to_string(legacy_artifact).unwrap(), B)
+                .unwrap_err()
+                .code,
+            "unknown_message_type"
+        );
+        let mut artifacts = legacy_artifact["artifacts"].clone();
+        for artifact in artifacts.as_array_mut().unwrap() {
+            let object = artifact.as_object_mut().unwrap();
+            let size = object.remove("size_bytes").unwrap();
+            let preview = object.remove("preview_mode").unwrap();
+            assert_eq!(preview, json!("inline_text"));
+            object.insert("total_bytes".into(), size);
+            object.insert("preview_kind".into(), json!("text"));
+        }
+        let mut artifact_action = legacy_artifact.clone();
+        let envelope = artifact_action.as_object_mut().unwrap();
+        envelope.remove("artifacts");
+        envelope.insert("type".into(), json!("remote_action_result"));
+        envelope.insert("operation".into(), json!("artifact_index"));
+        envelope.insert("ok".into(), json!(true));
+        envelope.insert("body".into(), json!({"artifacts": artifacts}));
+        for payload in [&fixture["capability_snapshot_vector"], &artifact_action] {
             validate_controller_payload_json_in_context(
-                &serde_json::to_string(&fixture[field]).unwrap(),
-                role,
+                &serde_json::to_string(payload).unwrap(),
+                B,
                 Some(&context()),
             )
             .unwrap();
@@ -4768,8 +4819,8 @@ mod tests {
             .code,
             "unknown_field"
         );
-        let mut leaked_artifact = fixture["artifact_index_vector"].clone();
-        leaked_artifact["artifacts"][0]["absolute_path"] = json!("C:\\private\\report.md");
+        let mut leaked_artifact = artifact_action;
+        leaked_artifact["body"]["artifacts"][0]["absolute_path"] = json!("C:\\private\\report.md");
         assert_eq!(
             validate_controller_payload_json(&serde_json::to_string(&leaked_artifact).unwrap(), B)
                 .unwrap_err()

@@ -360,6 +360,7 @@ mod tests {
                         task_id: task.into(),
                         request_fingerprint: "a".repeat(64),
                         dispatch_state: PendingDispatchState::PreparedNeverAttempted,
+                        reservation_fingerprint: None,
                     },
                 )
                 .unwrap();

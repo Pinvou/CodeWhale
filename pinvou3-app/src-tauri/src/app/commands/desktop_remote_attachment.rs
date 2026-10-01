@@ -260,6 +260,7 @@ fn monotonic_millis() -> u64 {
 mod tests {
     use super::*;
     use crate::features::remote_control::controller::protocol::LeaseContext;
+    use crate::features::remote_control::controller::transfer::TransferDirection;
 
     fn lease() -> LeaseContext {
         LeaseContext {
