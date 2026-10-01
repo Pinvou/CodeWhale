@@ -2,9 +2,9 @@
 
 > 文档状态：需求确认稿
 >
-> 文档版本：1.9
+> 文档版本：1.10
 >
-> 更新日期：2026-09-26
+> 更新日期：2026-10-01
 >
 > 适用范围：Pinvou Agent Windows 桌面端、Remote Control Relay、模型与任务执行链路
 >
@@ -22,6 +22,7 @@
 | 1.7 | 2026-09-23 | 固化临时模型规范数字编码、视觉兜底注入、任务接纳与凭据安装原子性、HTTPS/DNS 预校验、客户端能力兼容及最终出站目标未固定的已知风险 |
 | 1.8 | 2026-09-26 | 引入统一 ConversationRuntime，会话 UI 与应用层通过同一运行时端口选择本地或远程执行；明确远程运行时是加密代理、B 端保持 Session 与执行权威，并补充迁移、测试和完成定义 |
 | 1.9 | 2026-09-26 | 取消 ConversationRuntime/LocalRuntime/RemoteRuntime 分层，改为薄 Tauri Command/用例编排直接协调并列的 SessionStore、EnginePool、AcpPool 与 RemoteControl；明确 A 以 SessionStore 保存 RemoteProxy 会话和已认证投影，B 保持唯一权威 Session |
+| 1.10 | 2026-10-01 | 记录 Finished receipt 固定向量勘误，澄清 reservation 原子提升、模块落位与模型路由判别符，并登记生产容量定标门禁 |
 
 ## 1. 背景
 
@@ -164,7 +165,7 @@ A 还可以选择将自己已经配置的 API-Key 模型作为单次任务的临
 
 ### 5.2 依赖方向
 
-业务逻辑必须遵循项目既有模块边界：
+业务逻辑必须遵循项目既有模块边界。下图仅为 Tauri 宿主的模块落位与调用方向示意，不表示每个节点都是独立模块，也不替代跨模块的窄接口：
 
 ```text
 React UI / ChatView
@@ -178,8 +179,10 @@ React UI / ChatView
            → B 薄本地用例 → SessionStore + EnginePool/AcpPool
 ```
 
+图中的远控 UI、platform bridge、远控 Command 和 RemoteControl 领域实现分别落于 `pinvou3-app/src/features/remote-control/`、`pinvou3-app/src/platform/tauri/bridge/desktop-remote-control.js`、`pinvou3-app/src-tauri/src/app/commands/desktop_remote*.rs` 和 `pinvou3-app/src-tauri/src/features/remote_control/`；这些路径说明不改变图中的薄用例编排和 B 唯一执行权威。
+
 - 远控业务状态不得继续堆入全局 `main.jsx`。
-- Windows 专属网络或凭证内存保护放入远控功能内的 `platform/windows` 适配。
+- Windows 专属网络或凭证内存保护放入远控功能内的 `pinvou3-app/src-tauri/src/features/remote_control/platform/windows.rs` 适配，不放入全局 `src-tauri/src/platform/`。
 - Engine、Session、工具和 Skill 不得反向依赖远控 UI。
 - Relay 只承载连接和密文，不引入 Pinvou 业务执行逻辑。
 - Command 只负责 IPC 适配；复杂但可共享的校验、准入、附件准备、任务提交和失败收口应提取为普通 Rust 用例函数，不得形成新的有状态 Runtime。
@@ -500,6 +503,8 @@ RouteV1 = {
 | `credential_state`、`has_secret` | 只用于 A 本地判断是否可导出，不传输 |
 | `credential_action` | 编辑态字段，禁止传输；非空时不得构包 |
 
+`wire_api` 是 `temporary_model_package/v1` 导出与校验使用的规范化判别符，不是直接传给 CodeWhale 的内部端点模式。B 必须先根据 `preset` 独立推导期望的 `wire_api` 并校验；通过后再重建 `SavedModel`，并由既有路由解析接口独立选择底座协议；不得将包内枚举字面量直接透传给底座。底座的 `chat`、`chat_completions`、`chat-completions` 等内部别名不扩展本包的合法枚举。
+
 `builtin_llmapi`、`provider_kind=coding_plan` 以及任何依赖 OAuth、Cookie、订阅账号、设备绑定或企业登录态的模型必须从“我的模型”隐藏；不得把这些凭证包装成 `api_key` 绕过限制。使用 B 模型时不发送该包。主模型原生支持图片时不发送 `vision_fallback`；需要视觉兜底时，主模型与兜底模型各自携带独立的 API Key，均遵守同一任务绑定和清理周期。
 
 ### 7.7 工具、Skill 与权限
@@ -622,7 +627,7 @@ Relay 是配对记录、reservation 和交互租约状态的唯一权威写入�
 | `registering → waiting_for_pairing` | Relay | B endpoint 已正式 enrolled、认证且在线，generation/稳定注册请求 ID 匹配，且无未撤销配对记录 | 最多 32 次 CSPRNG 采样；用当前及所有被引用旧 digest key 原子查重并占用，创建内存记录，向 B 返回密封展示码与 5 分钟有效期 | 不展示码；碰撞耗尽或 keyring 不完整时失败关闭，未 enrolled 返回受控认证错误 |
 | `waiting_for_pairing → pairing_reserved` | Relay | 码有效、B 在线、无 Web/controller lease 或其他 reservation，claim ID 幂等参数一致 | CAS 写入唯一 reservation owner，启动 10 秒计时 | claim 统一失败；原记录不被非 owner 修改 |
 | `pairing_reserved → handshake_pending` | Relay | owner、`remote_control_generation` 和签名 transcript 均匹配 | 冻结 transcript 哈希，启动 20 秒计时并转发双方加密 Finished | 废弃原码和预留；通知 B 以同 generation、新注册请求 ID 自动申请新码 |
-| `handshake_pending → connected` | Relay | 两个 sender commitment 已先提交，A/B 各自验证对端 Finished，并从相反角色 socket 恰好一次回传通过 9.3 节校验的 receipt secret；交互槽位仍空闲 | 在一次事务/CAS 中终结 pairing、创建 controller lease 并提升 lease epoch | 单方/损坏/重放/超时 receipt 均不得提交；不得出现“pairing 已消费但无租约”或“有租约但 pairing 可复用” |
+| `handshake_pending → connected` | Relay | 两个 sender commitment 已先提交，A/B 各自验证对端 Finished，并从相反角色 socket 恰好一次回传通过 9.3 节校验的 receipt secret；当前 reservation 是交互槽位的唯一占有者，owner 与本次握手一致，且不存在其他 Web/controller lease 或竞争 reservation | 在一次事务/CAS 中终结 pairing、将当前 reservation 原子提升为 controller lease 并提升 lease epoch，不先释放槽位 | 单方/损坏/重放/超时 receipt 均不得提交；不得出现“pairing 已消费但无租约”或“有租约但 pairing 可复用” |
 | 任意活动态 → `retiring_generation` | B 为发起权威，Relay 执行撤销 | B 先在本地关闭旧 generation 回包门 | 撤销旧配对、reservation、租约和令牌，取消任务并清理密钥/凭证；确认后才创建新 generation | 撤销无法确认则失败关闭，不申请或展示新码 |
 | 任意活动态 → `stopping/stopped` | B 为发起权威，Relay 执行撤销 | B 先使当前 generation 本地失效 | 撤销配对、reservation、租约、令牌和密钥，取消远程任务 | 本地清理不依赖 A/Relay；迟到回包丢弃，绝不自动生成新 generation |
 
@@ -1295,6 +1300,7 @@ python scripts/architecture-guard.py
 ### 阶段 4：生产加固与灰度
 
 - 容量、限流、爆破和异常网络测试；
+- 灰度前根据目标部署实例内存、业务负载与安全余量开展压测，记录 pairing/reservation/lease 并发目标、持久记录与 RSS 预算、告警阈值及测量条件，并由部署负责人确认；现有硬上限不等同于容量承诺，未完成定标不得进入生产灰度；
 - 两台真实 Windows 设备的公网端到端验收；
 - 运维指标、告警、部署和回滚演练；
 - 官方 endpoint 认领覆盖率灰度、自托管 dry-run/批量 allowlist、未迁移恢复入口和既有 Web 分享链接回归；
