@@ -4,6 +4,8 @@
 //! Tauri/CodeWhale graph. Transport is deliberately out of scope: its test
 //! double panics on use so this harness cannot claim network/runtime coverage.
 //! The platform capability projection is also a test double, not OS coverage.
+//! Transfer tests compile the actual byte-budget and retry-evidence core; they
+//! do not cover staging files, command admission or production transfer wiring.
 //! The full product compile and native transport tests remain separate gates.
 
 #![allow(dead_code)]
@@ -20,13 +22,16 @@ pub(crate) mod liveness;
 #[path = "../../../src/features/remote_control/controller/resume.rs"]
 mod resume;
 
+#[cfg(test)]
+mod transfer;
+
 mod state;
 
 #[cfg(test)]
 mod features {
     pub(crate) mod remote_control {
         pub(crate) mod controller {
-            pub(crate) use crate::liveness;
+            pub(crate) use crate::{liveness, protocol};
         }
     }
 }
