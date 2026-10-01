@@ -37,7 +37,9 @@ function run(script, args = []) {
 }
 
 export function requireCompleteCoverage(coverage) {
-  if (!coverage || coverage.coverage_percent !== 100 || coverage.not_migrated !== 0) {
+  if (!coverage || !Number.isSafeInteger(coverage.total) || coverage.total <= 0
+    || coverage.migrated !== coverage.total || coverage.not_migrated !== 0
+    || coverage.coverage_percent !== 100) {
     const error = new Error("legacy_endpoint_coverage_incomplete");
     error.code = "legacy_endpoint_coverage_incomplete";
     throw error;

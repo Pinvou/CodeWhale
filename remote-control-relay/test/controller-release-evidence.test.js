@@ -497,8 +497,11 @@ test("release gate is fail-closed when enabled and evidence configuration is abs
 });
 
 test("legacy rollback is safe only at exactly 100 percent coverage with zero misses", () => {
-  assert.doesNotThrow(() => requireCompleteCoverage({ coverage_percent: 100, not_migrated: 0 }));
+  assert.doesNotThrow(() => requireCompleteCoverage({ total: 1, migrated: 1, coverage_percent: 100, not_migrated: 0 }));
   for (const result of [
+    { coverage_percent: 100, not_migrated: 0 },
+    { total: 0, migrated: 0, coverage_percent: 100, not_migrated: 0 },
+    { total: 2, migrated: 1, coverage_percent: 100, not_migrated: 0 },
     { coverage_percent: 99, not_migrated: 1 },
     { coverage_percent: 100, not_migrated: 1 },
     { coverage_percent: "100", not_migrated: 0 },
