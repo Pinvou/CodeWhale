@@ -4,6 +4,9 @@
 //! authenticated `remote_action_request` handler; no legacy Tauri decision or
 //! request command remains. Local/Web ACP responders fail closed for requests
 //! owned by a remote task.
+//!
+//! B mints opaque, non-reusable approval IDs. ACP callback IDs stay private;
+//! remote decisions must echo the B-authoritative ID.
 
 use std::sync::Arc;
 
@@ -13,7 +16,7 @@ use crate::features::codex_acp::{AcpPool, RemotePermissionOwner};
 use crate::features::remote_control::controller::controlled::ControlledDeviceManager;
 #[cfg(test)]
 use crate::features::remote_control::controller::permission::{
-    DecisionAuthority, PermissionBinding, PermissionRequest,
+    DecisionAuthority, PermissionRequest,
 };
 use crate::features::remote_control::controller::permission::{
     PermissionAuthority, PermissionDecision,
@@ -21,13 +24,8 @@ use crate::features::remote_control::controller::permission::{
 
 const UNSUPPORTED: &str = "desktop_remote_control_unsupported";
 
-fn monotonic_millis() -> u64 {
-    use std::sync::OnceLock;
-    use std::time::Instant;
-    static ORIGIN: OnceLock<Instant> = OnceLock::new();
-    let origin = ORIGIN.get_or_init(Instant::now);
-    u64::try_from(origin.elapsed().as_millis()).unwrap_or(u64::MAX)
-}
+#[cfg(test)]
+pub use crate::features::remote_control::controller::permission::PermissionRequestInput as DesktopRemotePermissionRequestInput;
 
 fn ensure_supported(controlled: &ControlledDeviceManager) -> Result<(), String> {
     crate::platform::capabilities::ensure_desktop_remote_control_enabled()?;
@@ -46,7 +44,7 @@ pub fn desktop_remote_permission_deny_task(
     authority: State<'_, Arc<PermissionAuthority>>,
 ) -> Result<usize, String> {
     ensure_supported(&controlled)?;
-    Ok(authority.deny_all_for_task(&task_id, &reason, monotonic_millis()))
+    Ok(authority.deny_all_for_task(&task_id, &reason, authority.now_ms()))
 }
 
 /// Narrow ACP adapter: the remote permission authority is the only responder
@@ -76,7 +74,7 @@ pub(crate) async fn respond_remote_permission_via_acp(
             .pending_remote_permissions(owner)
             .await
             .iter()
-            .any(|pending| pending.permission_request_id == permission_request_id)
+            .any(|pending| pending.approval_id.as_deref() == Some(permission_request_id))
     {
         return Ok(());
     }
@@ -87,6 +85,20 @@ pub(crate) async fn respond_remote_permission_via_acp(
 mod tests {
     use super::*;
     use crate::features::remote_control::controller::permission::sanitize_preview;
+
+    #[test]
+    fn request_input_cannot_supply_or_reuse_an_approval_id() {
+        let input = serde_json::json!({
+            "taskId": "task-0001", "operationType": "file_write", "riskLevel": "medium",
+            "targetScope": "workspace-0001", "preview": "write", "expiresAtMs": 60_000
+        });
+        assert!(
+            serde_json::from_value::<DesktopRemotePermissionRequestInput>(input.clone()).is_ok()
+        );
+        let mut injected = input;
+        injected["permissionRequestId"] = serde_json::json!("old-request-id");
+        assert!(serde_json::from_value::<DesktopRemotePermissionRequestInput>(injected).is_err());
+    }
 
     #[test]
     fn command_surface_has_no_b_side_allow_entry() {
@@ -102,10 +114,10 @@ mod tests {
             relay_epoch: "relay-epoch-0001".into(),
             remote_control_generation: "generation-0001".into(),
         };
-        let binding = PermissionBinding::new(&live, "task-0001", "permission-0001").unwrap();
-        authority
+        let view = authority
             .request(
-                binding,
+                &live,
+                "task-0001",
                 PermissionRequest {
                     operation_type: "shell_command".into(),
                     risk_level: "high".into(),
@@ -126,7 +138,7 @@ mod tests {
                         authority_kind,
                         &live,
                         "task-0001",
-                        "permission-0001",
+                        &view.permission_request_id,
                         PermissionDecision::Allow,
                         1_100,
                     )
@@ -135,19 +147,28 @@ mod tests {
                 "permission_authority_invalid"
             );
         }
-        assert_eq!(authority.view("permission-0001").unwrap().state, "pending");
+        assert_eq!(
+            authority.view(&view.permission_request_id).unwrap().state,
+            "pending"
+        );
     }
 
     #[test]
     fn preview_sanitizer_is_reused_for_every_projection() {
         assert_eq!(sanitize_preview("token=abc"), "[REDACTED]");
-        assert_eq!(sanitize_preview(r"C:\tmp\x.txt"), "[PATH]");
+        let raw_path = r"C:\tmp\x.txt";
+        let sanitized = sanitize_preview(raw_path);
+        assert_eq!(sanitized, "[REDACTED]");
+        assert!(!sanitized.contains(raw_path));
+        assert_eq!(sanitize_preview(&sanitized), sanitized);
+        assert_eq!(sanitize_preview("[PATH]"), "[PATH]");
     }
 
     #[test]
     fn monotonic_clock_never_moves_backwards() {
-        let first = monotonic_millis();
-        let second = monotonic_millis();
+        let authority = PermissionAuthority::default();
+        let first = authority.now_ms();
+        let second = authority.now_ms();
         assert!(second >= first);
     }
 }

@@ -18,6 +18,16 @@ use crate::features::remote_control::controller::journal::{
     JournalKind, MAX_EVENT_TEXT_CHARS, StreamingTextSanitizer, sanitize_text,
 };
 use crate::features::remote_control::controller::protocol::LeaseContext;
+// Production and cfg(test) pipeline regressions share this existing task boundary.
+// Rust cannot cfg-gate individual grouped-use items. Expect unused test types only
+// in non-test builds; test builds retain the strict import check.
+#[cfg_attr(
+    not(test),
+    expect(
+        unused_imports,
+        reason = "task pipeline regression types are test-only"
+    )
+)]
 use crate::features::remote_control::controller::task::{
     AdmissionOutcome, ChatTurnExecutor, ControllerTaskEventSink, PublishedAttachment,
     RemoteChatTurnPort, RemoteTaskLedger, RemoteTaskService, RemoteTaskState, TASK_CANCELLED_CODE,

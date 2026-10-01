@@ -25,13 +25,16 @@
 
   function createControlledDevice() {
     return {
-      status: "idle",
+      status: "disabled",
       generation: null,
+      statusIntent: null,
       pairingCode: null,
       pairingRemainingMs: null,
       deviceName: null,
       controllerDeviceName: null,
       connectedDurationMs: null,
+      workspaceCount: 0,
+      codeModeAllowed: false,
       workspaces: [],
       lastError: null,
     };
@@ -45,6 +48,7 @@
       leaseEpoch: null,
       relayEpoch: null,
       generation: null,
+      claimRequestId: null,
       deviceName: null,
       lastError: null,
       // E2E-03：A 端远程会话身份与能力版本由 Rust 构造后投影到这里，视图不再
@@ -152,6 +156,10 @@
     var payload = envelope || {};
     if (!isCurrentIntent(state, "controlled", payload.intent)) return state;
     var status = payload.status ? String(payload.status) : null;
+    if (status === "reserving") status = "registering";
+    if (status === "waiting_connection") status = "waiting_for_pairing";
+    if (status === "safety_handshake") status = "handshake_pending";
+    if (status === "refreshing") status = "retiring_generation";
     if (!["disabled", "registering", "waiting_for_pairing", "pairing_reserved",
       "handshake_pending", "connected", "reconnecting", "resume_provisional",
       "resume_activated_pending_liveness", "retiring_generation", "stopping",
@@ -159,6 +167,13 @@
     var generation = payload.generation ? String(payload.generation) : null;
     if (!CONTROLLED_TERMINAL[status] && !generation) return state;
     var current = state.controlledDevice;
+    var statusIntent = payload.statusIntent === undefined ? null : String(payload.statusIntent);
+    if (statusIntent && !/^(0|[1-9][0-9]*)$/.test(statusIntent)) return state;
+    if (statusIntent && current.statusIntent && BigInt(statusIntent) < BigInt(current.statusIntent)) return state;
+    var authorizedOpen = payload.intent != null && payload.intent === state.controlledOpenIntent;
+    var replaceBinding = payload.replaceBinding === true && authorizedOpen;
+    var refreshTransition = current.status === "retiring_generation" && status === "registering" &&
+      statusIntent && current.statusIntent && BigInt(statusIntent) > BigInt(current.statusIntent);
     // Only the current Rust ControlledStatus enum may open a generation.
     var starting = status === "registering" || status === "waiting_for_pairing";
     var waiting = status === "waiting_for_pairing";
@@ -173,8 +188,16 @@
         || payload.intent !== state.controlledOpenIntent) return state;
     }
     if (generation && current.generation && generation !== current.generation) {
-      if (!starting || payload.intent == null || payload.intent !== state.controlledOpenIntent) return state;
+      if (!starting || (!authorizedOpen && !refreshTransition)) return state;
     }
+    if (!authorizedOpen && CONTROLLED_TERMINAL[current.status] && current.generation &&
+        !CONTROLLED_TERMINAL[status]) return state;
+    if (generation === current.generation && current.status === "waiting_for_pairing" && status === "registering") return state;
+    if (generation === current.generation &&
+        (current.status === "connected" || current.status === "reconnecting" ||
+         current.status === "handshake_pending" || current.status === "retiring_generation" ||
+         current.status === "resume_provisional" || current.status === "resume_activated_pending_liveness" ||
+         current.status === "pairing_reserved" || current.status === "stopping") && starting) return state;
     var next = shallowCopy(state);
     var startsNewGeneration = starting
       && generation
@@ -186,21 +209,28 @@
       next.controlledTasks = [];
       next.controlledTranscript = [];
     }
+    // Partial waiting updates may retain a code only within the same binding.
+    // Explicit null, a new status intent or a terminal status clears it.
+    var retainPairing = status === "waiting_for_pairing" && current.status === status &&
+      generation === current.generation && statusIntent === current.statusIntent && !replaceBinding;
     next.controlledDevice = {
       status: status,
       generation: generation || (starting ? current.generation : null),
-      pairingCode: payload.pairingCode || (waiting ? current.pairingCode : null),
-      pairingRemainingMs: Number.isSafeInteger(payload.pairingRemainingMs)
-        && payload.pairingRemainingMs >= 0 ? payload.pairingRemainingMs : null,
-      deviceName: payload.deviceName || current.deviceName,
-      controllerDeviceName: ["connected", "reconnecting", "resume_provisional",
-        "resume_activated_pending_liveness"].includes(status)
-        ? (payload.controllerDeviceName || (startsNewGeneration ? null : current.controllerDeviceName))
-        : null,
+      statusIntent: statusIntent || current.statusIntent,
+      pairingCode: CONTROLLED_TERMINAL[status] ? null :
+        (payload.pairingCode === undefined && retainPairing ? current.pairingCode : payload.pairingCode || null),
+      deviceName: payload.deviceName || null,
+      controllerDeviceName: CONTROLLED_TERMINAL[status] ? null : payload.controllerDeviceName || null,
+      workspaceCount: Number(payload.workspaceCount) || 0,
+      codeModeAllowed: payload.codeModeAllowed === true,
+      pairingRemainingMs: CONTROLLED_TERMINAL[status] ? null :
+        (payload.pairingRemainingMs === undefined && retainPairing ? current.pairingRemainingMs :
+          Number.isSafeInteger(payload.pairingRemainingMs) && payload.pairingRemainingMs >= 0
+            ? payload.pairingRemainingMs : null),
       connectedDurationMs: Number.isSafeInteger(payload.connectedDurationMs)
         && payload.connectedDurationMs >= 0 ? payload.connectedDurationMs : null,
       workspaces: Array.isArray(payload.workspaces) ? payload.workspaces.slice(0, 32) : current.workspaces,
-      lastError: payload.error || null,
+      lastError: payload.errorCode || payload.error || null,
     };
     if (generation && !CONTROLLED_TERMINAL[status]) {
       next.controlledFenced = false;
@@ -277,19 +307,55 @@
 
   function applyControllerStatus(state, envelope) {
     var payload = envelope || {};
+    // The Rust status DTO carries its lease as one nested authenticated tuple.
+    // Normalize it once to A22's internal RemoteProxy/fence state shape.
+    if (Object.prototype.hasOwnProperty.call(payload, "lease")) {
+      var lease = payload.lease || {};
+      var prior = state.controllerConnection;
+      if (payload.status === "reconnecting" && payload.lease == null &&
+          payload.claimRequestId && payload.claimRequestId === prior.claimRequestId &&
+          (prior.status === "connected" || prior.status === "reconnecting")) {
+        lease = {
+          connectionId: prior.connectionId, controllerLeaseId: prior.controllerLeaseId,
+          leaseEpoch: prior.leaseEpoch, relayEpoch: prior.relayEpoch,
+          remoteControlGeneration: prior.generation,
+        };
+      }
+      payload = Object.assign({}, payload, {
+        connectionId: lease.connectionId || null,
+        controllerLeaseId: lease.controllerLeaseId || null,
+        leaseEpoch: lease.leaseEpoch == null ? null : String(lease.leaseEpoch),
+        relayEpoch: lease.relayEpoch || null,
+        generation: lease.remoteControlGeneration || null,
+        deviceName: payload.deviceDisplayName || null,
+        error: payload.errorCode || null,
+      });
+    }
     if (!isCurrentIntent(state, "controller", payload.intent)) return state;
     var status = payload.status ? String(payload.status) : null;
     if (!status) return state;
     var connectionId = payload.connectionId ? String(payload.connectionId) : null;
     var leaseEpoch = payload.leaseEpoch === 0 || payload.leaseEpoch ? String(payload.leaseEpoch) : null;
+    if (leaseEpoch && !/^(0|[1-9][0-9]*)$/.test(leaseEpoch)) return state;
     var controllerLeaseId = payload.controllerLeaseId ? String(payload.controllerLeaseId) : null;
     var relayEpoch = payload.relayEpoch ? String(payload.relayEpoch) : null;
     var generation = payload.generation ? String(payload.generation) : null;
     var current = state.controllerConnection;
+    var claimRequestId = payload.claimRequestId || null;
+    var sameClaim = claimRequestId && claimRequestId === current.claimRequestId;
+    var renewedLease = sameClaim && Object.prototype.hasOwnProperty.call(payload, "lease") &&
+      connectionId === current.connectionId && leaseEpoch && current.leaseEpoch &&
+      BigInt(leaseEpoch) > BigInt(current.leaseEpoch);
+    var replaceBinding = claimRequestId && !sameClaim && payload.replaceBinding === true &&
+      payload.intent != null && payload.intent === state.controllerOpenIntent;
+    if (claimRequestId && current.claimRequestId && !sameClaim &&
+        !replaceBinding) return state;
+    if (sameClaim && current.status === "safety_handshake" && status === "connecting") return state;
     var identity = leaseIdentity(connectionId, leaseEpoch);
     var pendingOpen = state.controllerOpenIntent === state.intents.controller;
     if (CONTROLLER_TERMINAL[status] && current.connectionId && payload.intent == null
       && payload.authoritativeRead !== true
+      && !sameClaim
       && (!connectionId || !controllerLeaseId || !leaseEpoch || !relayEpoch || !generation)) return state;
     if (state.controllerFenced && CONTROLLER_TERMINAL[status] && payload.intent == null && !pendingOpen) return state;
     if (payload.intent != null && payload.intent === state.controllerTerminatedOpenIntent) return state;
@@ -302,11 +368,11 @@
     if (liveStatus && (!connectionId || !controllerLeaseId || !leaseEpoch || !relayEpoch || !generation)) {
       return state;
     }
-    if (!CONTROLLER_TERMINAL[status] && !liveStatus && current.connectionId) return state;
+    if (!CONTROLLER_TERMINAL[status] && !liveStatus && current.connectionId && !replaceBinding) return state;
     if (
       connectionId &&
       current.connectionId &&
-      connectionId !== current.connectionId
+      connectionId !== current.connectionId && !replaceBinding
     ) {
       return state;
     }
@@ -314,14 +380,17 @@
       leaseEpoch &&
       current.leaseEpoch &&
       connectionId === current.connectionId &&
-      leaseEpoch !== current.leaseEpoch
+      leaseEpoch !== current.leaseEpoch && !replaceBinding && !renewedLease
     ) {
       return state;
     }
-    if (controllerLeaseId && current.controllerLeaseId && controllerLeaseId !== current.controllerLeaseId) return state;
-    if (relayEpoch && current.relayEpoch && relayEpoch !== current.relayEpoch) return state;
+    if (controllerLeaseId && current.controllerLeaseId && controllerLeaseId !== current.controllerLeaseId && !replaceBinding && !renewedLease) return state;
+    if (relayEpoch && current.relayEpoch && relayEpoch !== current.relayEpoch && !replaceBinding && !renewedLease) return state;
     if (connectionId && connectionId === current.connectionId && leaseEpoch === current.leaseEpoch
-      && current.generation && generation && generation !== current.generation) return state;
+      && current.generation && generation && generation !== current.generation && !replaceBinding) return state;
+    if (replaceBinding || renewedLease) {
+      current = createControllerConnection();
+    }
     var next = shallowCopy(state);
     next.controllerConnection = {
       status: status,
@@ -330,6 +399,7 @@
       leaseEpoch: leaseEpoch || current.leaseEpoch,
       relayEpoch: relayEpoch || current.relayEpoch,
       generation: generation || current.generation,
+      claimRequestId: claimRequestId || current.claimRequestId,
       deviceName: payload.deviceName || current.deviceName,
       lastError: payload.error || null,
       sessionRef: current.sessionRef,
@@ -344,6 +414,11 @@
       capabilityValidForMs: current.capabilityValidForMs,
       temporaryModelAvailable: current.temporaryModelAvailable === true,
     };
+    if (replaceBinding || renewedLease) {
+      next.remoteCapabilities = null;
+      next.remoteProxyNotice = null;
+      next.remoteProxyCapabilityRevisions = {};
+    }
     if (identity && !CONTROLLER_TERMINAL[status]) {
       next.controllerFenced = false;
       if (payload.intent != null && payload.intent === state.controllerOpenIntent) {
@@ -847,7 +922,11 @@
     if (!taskId || !status) return state;
     var connection = state.controllerConnection;
     var connectionId = payload.connectionId || payload.connection_id;
-    if (connection.connectionId && connectionId && String(connectionId) !== String(connection.connectionId)) {
+    // A08/A11 must add the full lease tuple to RemoteTaskEvent. Until then,
+    // this local projection cannot identify old unbound events delivered after
+    // reconnect; it can reject the offline window, not claim wire isolation.
+    if (tasksField === "tasks" && connection.status !== "connected") return state;
+    if (tasksField === "tasks" && connection.connectionId && connectionId && String(connectionId) !== String(connection.connectionId)) {
       return state;
     }
     var tasks = (state[tasksField] || []).slice();
@@ -993,7 +1072,7 @@
   function matchesLiveContext(state, envelope) {
     var payload = envelope || {};
     var connection = state.controllerConnection;
-    if (!connection.connectionId) return false;
+    if (!connection.connectionId || connection.status !== "connected") return false;
     if (payload.connectionId && String(payload.connectionId) !== String(connection.connectionId)) return false;
     if (
       payload.leaseEpoch !== undefined &&

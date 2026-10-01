@@ -333,6 +333,7 @@ fn pending_is_bounded_and_durable_without_a_second_projection_writer() {
         task_id: "task-1".into(),
         request_fingerprint: "a".repeat(64),
         dispatch_state: PendingDispatchState::PreparedNeverAttempted,
+        reservation_fingerprint: None,
     };
     store
         .insert_remote_pending(
@@ -361,6 +362,7 @@ fn pending_is_bounded_and_durable_without_a_second_projection_writer() {
                     task_id: format!("task-{index}"),
                     request_fingerprint: format!("{index:064x}"),
                     dispatch_state: PendingDispatchState::PreparedNeverAttempted,
+                    reservation_fingerprint: None,
                 },
             )
             .unwrap();
@@ -376,6 +378,7 @@ fn pending_is_bounded_and_durable_without_a_second_projection_writer() {
                     task_id: "task-65".into(),
                     request_fingerprint: "b".repeat(64),
                     dispatch_state: PendingDispatchState::PreparedNeverAttempted,
+                    reservation_fingerprint: None,
                 },
             )
             .is_err()
@@ -617,6 +620,7 @@ fn pending_write_uses_protocol_field_rules_and_keeps_recovered_uncertainty() {
         task_id: "task-1".into(),
         request_fingerprint: "a".repeat(64),
         dispatch_state: PendingDispatchState::PreparedNeverAttempted,
+        reservation_fingerprint: None,
     };
     let mut invalid = valid.clone();
     invalid.client_request_id = "bad/slash".into();
@@ -631,6 +635,17 @@ fn pending_write_uses_protocol_field_rules_and_keeps_recovered_uncertainty() {
     let mut invalid = valid.clone();
     invalid.request_fingerprint = "A".repeat(64);
     assert!(write(invalid).is_err());
+    let encoded = serde_json::to_value(&valid).unwrap();
+    assert!(encoded.get("reservation_fingerprint").is_none());
+    assert_eq!(
+        serde_json::from_value::<PendingRemoteRequest>(encoded).unwrap(),
+        valid
+    );
+    for alias in ["short".to_owned(), "A".repeat(64)] {
+        let mut invalid = valid.clone();
+        invalid.reservation_fingerprint = Some(alias);
+        assert!(write(invalid).is_err());
+    }
     write(valid.clone()).unwrap();
     write(valid.clone()).unwrap();
     assert!(
@@ -701,6 +716,7 @@ fn pending_request(client: &str, task: &str) -> PendingRemoteRequest {
         task_id: task.into(),
         request_fingerprint: "a".repeat(64),
         dispatch_state: PendingDispatchState::PreparedNeverAttempted,
+        reservation_fingerprint: None,
     }
 }
 
