@@ -664,11 +664,18 @@ impl ConnectorConn {
 
 #[derive(Debug, Serialize)]
 pub struct ConnectorAuthGateRefresh {
-    feishu_visible: bool,
-    wecom_visible: bool,
-    dingtalk_visible: bool,
-    tmeet_visible: bool,
     elapsed_ms: u64,
+}
+
+/// 每个门控的静态描述表项：id（结果标记 / consent-sync 的包 id）、停用标志
+/// 文件名（经 [`skill_gate::ConnectorSkillGate`] 的默认实现落 `~/.pinvou3/`）、
+/// 展示名（错误文案）、连接探测与技能目录落盘（各自连接器模块的实现）。
+/// Official 的 trait 设计下以静态表驱动启动刷新（上游 `skill_gate::GATES`
+/// 的同构等价物，review #455 round-32 minor 9 的归因循环按本表运行）。
+struct GateEntry {
+    id: &'static str,
+    display_name: &'static str,
+    probe_and_apply: fn() -> Result<bool, String>,
 }
 
 /// 首屏提交后刷新飞书 / 企微 / 钉钉 / 腾讯会议鉴权门控。外部 CLI 在 blocking 线程池并行执行，
@@ -677,56 +684,88 @@ pub async fn refresh_connector_auth_gates() -> Result<ConnectorAuthGateRefresh, 
     let started = Instant::now();
     crate::platform::startup::mark("connector_auth_refresh:start");
 
-    let feishu = tokio::task::spawn_blocking(|| {
-        let show = crate::features::connectors::feishu::feishu_skills_should_show();
-        crate::features::runtime_bundle::platform::Pinvou3Bundle::paths()
-            .apply_feishu_skills(show)
-            .map_err(|e| format!("刷新飞书技能门控失败: {e}"))?;
-        Ok::<bool, String>(show)
-    });
-    let wecom = tokio::task::spawn_blocking(|| {
-        let show = crate::features::connectors::wecom::wecom_skills_should_show();
-        crate::features::runtime_bundle::platform::Pinvou3Bundle::paths()
-            .apply_wecom_skills(show)
-            .map_err(|e| format!("刷新企微技能门控失败: {e}"))?;
-        Ok::<bool, String>(show)
-    });
-    let dingtalk = tokio::task::spawn_blocking(|| {
-        let show = crate::features::connectors::dingtalk::dingtalk_skills_should_show();
-        crate::features::runtime_bundle::platform::Pinvou3Bundle::paths()
-            .apply_dingtalk_skills(show)
-            .map_err(|e| format!("刷新钉钉技能门控失败: {e}"))?;
-        Ok::<bool, String>(show)
-    });
-    let tmeet = tokio::task::spawn_blocking(|| {
-        let show = crate::features::connectors::tmeet::tmeet_skills_should_show();
-        crate::features::runtime_bundle::platform::Pinvou3Bundle::paths()
-            .apply_tmeet_skills(show)
-            .map_err(|e| format!("刷新腾讯会议技能门控失败: {e}"))?;
-        Ok::<bool, String>(show)
-    });
+    let gates: &[GateEntry] = &[
+        GateEntry {
+            id: "feishu",
+            display_name: "飞书",
+            probe_and_apply: crate::features::connectors::feishu::feishu_gate_step,
+        },
+        GateEntry {
+            id: "wecom",
+            display_name: "企业微信",
+            probe_and_apply: crate::features::connectors::wecom::wecom_gate_step,
+        },
+        GateEntry {
+            id: "dingtalk",
+            display_name: "钉钉",
+            probe_and_apply: crate::features::connectors::dingtalk::dingtalk_gate_step,
+        },
+        GateEntry {
+            id: "tmeet",
+            display_name: "腾讯会议",
+            probe_and_apply: crate::features::connectors::tmeet::tmeet_gate_step,
+        },
+    ];
 
-    let (feishu_result, wecom_result, dingtalk_result, tmeet_result) =
-        tokio::join!(feishu, wecom, dingtalk, tmeet);
-    let feishu_visible = feishu_result.map_err(|e| format!("飞书鉴权探测任务失败: {e}"))??;
-    let wecom_visible = wecom_result.map_err(|e| format!("企微鉴权探测任务失败: {e}"))??;
-    let dingtalk_visible = dingtalk_result.map_err(|e| format!("钉钉鉴权探测任务失败: {e}"))??;
-    let tmeet_visible = tmeet_result.map_err(|e| format!("腾讯会议鉴权探测任务失败: {e}"))??;
+    let tasks: Vec<_> = gates
+        .iter()
+        .map(|gate| {
+            let step = gate.probe_and_apply;
+            tokio::task::spawn_blocking(move || step())
+        })
+        .collect();
+
+    // Round-32 minor 9 (review #455): the loop must attribute EVERY gate —
+    // the old zip-`??` short-circuited on the first failure, dropping the
+    // remaining gates' `visible=` marks and the whole `done` mark, so one
+    // broken gate blinded startup observability for the other three (this
+    // PR's ledger-gated refresh supplies the loop's first realistic error
+    // source). All four tasks always run to completion; the marks record
+    // every outcome, the `done` mark is always emitted, and the first gate
+    // error is returned after the bookkeeping.
+    let mut outcomes = Vec::with_capacity(tasks.len());
+    for (gate, task) in gates.iter().zip(tasks) {
+        let result = task
+            .await
+            .map_err(|e| format!("{}鉴权探测任务失败: {e}", gate.display_name));
+        outcomes.push((gate.id.to_string(), result));
+    }
+    let (visible_marks, first_error) = collect_refresh_outcomes(outcomes);
     let elapsed_ms = started.elapsed().as_millis() as u64;
     crate::platform::startup::mark_with_detail(
         "rust",
         "connector_auth_refresh:done",
-        &format!(
-            "elapsed_ms={elapsed_ms} feishu_visible={feishu_visible} wecom_visible={wecom_visible} dingtalk_visible={dingtalk_visible} tmeet_visible={tmeet_visible}"
-        ),
+        &format!("elapsed_ms={elapsed_ms} {}", visible_marks.join(" ")),
     );
-    Ok(ConnectorAuthGateRefresh {
-        feishu_visible,
-        wecom_visible,
-        dingtalk_visible,
-        tmeet_visible,
-        elapsed_ms,
-    })
+    match first_error {
+        Some(error) => Err(error),
+        None => Ok(ConnectorAuthGateRefresh { elapsed_ms }),
+    }
+}
+
+/// Round-32 minor 9 (review #455): pure attribution builder for
+/// [`refresh_connector_auth_gates`] — one `visible=` mark per gate (in gate
+/// order, `error` for a failed gate) plus the first gate error, so a broken
+/// gate no longer blinds the rest. Testable without real CLI probes.
+fn collect_refresh_outcomes(
+    outcomes: Vec<(String, Result<Result<bool, String>, String>)>,
+) -> (Vec<String>, Option<String>) {
+    let mut marks = Vec::with_capacity(outcomes.len());
+    let mut first_error: Option<String> = None;
+    for (id, result) in outcomes {
+        match result {
+            Ok(Ok(visible)) => marks.push(format!("{id}_visible={visible}")),
+            Ok(Err(e)) => {
+                marks.push(format!("{id}_visible=error"));
+                first_error.get_or_insert(e);
+            }
+            Err(e) => {
+                marks.push(format!("{id}_visible=error"));
+                first_error.get_or_insert(e);
+            }
+        }
+    }
+    (marks, first_error)
 }
 
 // ─────────────── BundleStore 镜像（marketplace-unification Phase 2）───────────────
@@ -775,6 +814,41 @@ pub fn bundle_store_on_disconnected(id: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Round-32 minor 9 (review #455): the attribution builder records every
+    /// gate even when one fails — a broken gate must not blind the rest, and
+    /// the first error is only returned after the bookkeeping.
+    #[test]
+    fn refresh_outcomes_attribute_every_gate_on_partial_failure() {
+        let outcomes = vec![
+            ("feishu".to_string(), Ok(Ok(true))),
+            (
+                "wecom".to_string(),
+                Ok(Err("刷新企微技能门控失败: boom".to_string())),
+            ),
+            (
+                "dingtalk".to_string(),
+                Err("钉钉鉴权探测任务失败: join".to_string()),
+            ),
+            ("tmeet".to_string(), Ok(Ok(false))),
+        ];
+        let (marks, first_error) = collect_refresh_outcomes(outcomes);
+        assert_eq!(
+            marks,
+            vec![
+                "feishu_visible=true".to_string(),
+                "wecom_visible=error".to_string(),
+                "dingtalk_visible=error".to_string(),
+                "tmeet_visible=false".to_string(),
+            ],
+            "every gate keeps its attribution mark, failed or not"
+        );
+        assert_eq!(
+            first_error.as_deref(),
+            Some("刷新企微技能门控失败: boom"),
+            "the first gate error wins, after the marks are recorded"
+        );
+    }
 
     const TEST_CTX: CliCtx = CliCtx {
         cli_bin: "test-cli",
