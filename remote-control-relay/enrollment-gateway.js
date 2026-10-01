@@ -122,6 +122,7 @@ function firstFrame(message) {
     || typeof parsed.endpoint_id !== "string" || typeof parsed.access_token !== "string") {
     fail("gateway_frame_invalid");
   }
+  if (parsed.type === "desktop_endpoint_register" && typeof parsed.desktop_secret !== "string") fail("gateway_frame_invalid");
   return parsed;
 }
 
@@ -146,7 +147,8 @@ export function createEnrollmentGateway({
   trustedProxyIps = [],
   logger = null,
 } = {}) {
-  if (!registry || typeof registry.authorizeRegistration !== "function") fail("gateway_registry_invalid");
+  if (!registry || typeof registry.authorizeWebRegistration !== "function"
+    || typeof registry.authorizeDesktopRegistration !== "function") fail("gateway_registry_invalid");
   upstreamUrl = safeUpstream(upstreamUrl);
   if (!/^\/[A-Za-z0-9/_-]*[A-Za-z0-9_-]$/u.test(basePath)) fail("gateway_base_path_invalid");
   if (!Number.isSafeInteger(authTimeoutMs) || authTimeoutMs < 100 || authTimeoutMs > 60_000) {
@@ -349,11 +351,12 @@ export function createEnrollmentGateway({
         if (!consumeIngress(Buffer.byteLength(raw, "utf8"))) fail("gateway_ingress_rate_limited");
         parsed = firstFrame(raw);
         firstRequestId = parsed.request_id;
-        await registry.authorizeRegistration({
-          endpointId: parsed.endpoint_id,
-          credential: parsed.access_token,
-          purpose: "web_v2_reregister",
-        });
+        if (parsed.type === "desktop_endpoint_register") {
+          await registry.authorizeDesktopRegistration({ endpointId: parsed.endpoint_id,
+            accessToken: parsed.access_token, desktopSecret: parsed.desktop_secret });
+        } else {
+          await registry.authorizeWebRegistration({ endpointId: parsed.endpoint_id, accessToken: parsed.access_token });
+        }
       } catch (error) {
         clearTimeout(timer);
         logger?.warn?.("enrollment gateway rejected connection", { code: error?.code || "authorization_failed" });
