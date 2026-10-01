@@ -2548,7 +2548,7 @@ mod tests {
         let mut on_task = |_: Value| {};
         let mut on_journal = |_: &JournalEvent| {};
         let mut on_snapshot = |_: &JournalSnapshot| {};
-        let mut on_liveness = |_: Value| {};
+        let mut on_liveness = |_: Value| false;
         let mut sinks = ControllingLaneSinks {
             on_status: &mut on_status,
             on_session: &mut on_session,
@@ -2647,7 +2647,10 @@ mod tests {
         let mut on_task = |_: Value| {};
         let mut on_journal = |_: &JournalEvent| {};
         let mut on_snapshot = |_: &JournalSnapshot| {};
-        let mut on_liveness = |frame: Value| responses.push(frame);
+        let mut on_liveness = |frame: Value| {
+            responses.push(frame);
+            true
+        };
         let mut sinks = ControllingLaneSinks {
             on_status: &mut on_status,
             on_session: &mut on_session,
