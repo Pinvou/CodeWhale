@@ -5,6 +5,7 @@ import {
   buildPairingTranscriptPreimage,
   controllerCapabilityHash,
   negotiateControllerCapabilities,
+  isValidControllerIdentifier,
   validateControllerMessage,
   verifyReceiptCommitment,
 } from "./protocol-controller.js";
@@ -84,7 +85,7 @@ function resumeToken(value) {
 }
 
 function resumeEpoch(value, label) {
-  if (typeof value !== "string" || !ID.test(value)) fail(`${label}_invalid`);
+  if (!isValidControllerIdentifier(value)) fail(`${label}_invalid`);
   return value;
 }
 
@@ -493,6 +494,7 @@ export class ControllerLeaseManager {
     livenessEpochB,
     tokenA,
     tokenB,
+    resumeDeadlineMs,
   } = {}) {
     controllerLeaseId = id(controllerLeaseId, "controller_lease_id");
     activationId = id(activationId, "activation_id");
@@ -511,7 +513,12 @@ export class ControllerLeaseManager {
     const nextTokenB = resumeToken(tokenB?.toString("base64"));
     try {
       if (nextTokenA.equals(nextTokenB)) fail("resume_token_invalid");
-      const resumeDeadline = String(this.#now(RESUME_BUDGET_MS));
+      const timestamp = this.#now(RESUME_BUDGET_MS);
+      const resumeDeadline = resumeDeadlineMs ?? String(timestamp + RESUME_BUDGET_MS);
+      if (!/^(0|[1-9][0-9]*)$/u.test(resumeDeadline)
+        || !Number.isSafeInteger(Number(resumeDeadline))
+        || Number(resumeDeadline) <= timestamp
+        || Number(resumeDeadline) > timestamp + RESUME_BUDGET_MS) fail("controller_resume_deadline_invalid");
       const tokenADigest = tokenDigest({
         role: "A", relay_epoch: lease.relay_epoch, connection_id: lease.connection_id,
         controller_lease_id: lease.controller_lease_id, lease_epoch: lease.lease_epoch,
