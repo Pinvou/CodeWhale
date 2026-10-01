@@ -9,6 +9,7 @@ use serde::Serialize;
 use uuid::Uuid;
 use zeroize::{Zeroize, Zeroizing};
 
+use super::liveness::validate_liveness_epoch;
 use super::protocol::LeaseContext;
 use super::relay_transport::{ControllerRole, ControllerSendError, ControllerTransportSender};
 use super::resume::ControllerResumeGate;
@@ -305,14 +306,24 @@ impl ControllingDeviceManager {
         Ok(status_locked(&inner))
     }
 
-    pub(crate) fn mark_transport_disconnected(&self) -> ControllingStatus {
+    pub(crate) fn mark_transport_disconnected(
+        &self,
+        now_a: u64,
+        evidence_deadline_a: Option<u64>,
+    ) -> ControllingStatus {
         let mut inner = self.inner.lock();
         if inner.phase == ControllingStatusKind::Connected {
-            let deadline = inner.lease.as_ref().map(|lease| lease.resume_deadline_b);
-            if let Some(gate) = inner.resume_gate.as_mut() {
-                let _ = gate.disconnect(0, deadline);
+            if inner
+                .resume_gate
+                .as_mut()
+                .is_some_and(|gate| gate.disconnect(now_a, evidence_deadline_a).is_ok())
+            {
+                inner.phase = ControllingStatusKind::Reconnecting;
+            } else {
+                clear_live_context(&mut inner);
+                inner.phase = ControllingStatusKind::Error;
+                inner.error_code = Some("endpoint_offline");
             }
-            inner.phase = ControllingStatusKind::Reconnecting;
         }
         status_locked(&inner)
     }
@@ -333,6 +344,13 @@ impl ControllingDeviceManager {
         let Some(lease) = inner.lease.clone() else {
             return Err(ControllingStateError::new("lease_unavailable"));
         };
+        let liveness_epoch_a = liveness_epoch_a.into();
+        if new_deadline_b == 0 || validate_liveness_epoch(&liveness_epoch_a).is_err() {
+            clear_live_context(&mut inner);
+            inner.phase = ControllingStatusKind::Error;
+            inner.error_code = Some("endpoint_offline");
+            return Err(ControllingStateError::new("controller_resume_failed"));
+        }
         inner.resume_gate = Some(ControllerResumeGate::new(
             ControllerRole::ControllerA,
             lease.context.clone(),
@@ -341,7 +359,7 @@ impl ControllingDeviceManager {
             new_deadline_b,
         ));
         if let Some(lease) = inner.lease.as_mut() {
-            lease.liveness_epoch_a = liveness_epoch_a.into();
+            lease.liveness_epoch_a = liveness_epoch_a;
             lease.resume_deadline_b = new_deadline_b;
         }
         inner.phase = ControllingStatusKind::Connected;
@@ -805,17 +823,49 @@ mod tests {
             .complete_connected(operation.clone(), lease())
             .unwrap();
         assert_eq!(
-            manager.mark_transport_disconnected().status,
+            manager
+                .mark_transport_disconnected(5_000, Some(30_000))
+                .status,
             ControllingStatusKind::Reconnecting
         );
         let resumed = manager
-            .complete_resumed(operation, "live-a-2", [3; 32], [4; 32], 60_000)
+            .complete_resumed(operation, "live:a-2", [3; 32], [4; 32], 60_000)
             .unwrap();
         assert_eq!(resumed.status, ControllingStatusKind::Connected);
         assert_eq!(
             manager.live_lease().unwrap().controller_lease_id,
             "lease-0001"
         );
+    }
+
+    #[test]
+    fn invalid_resumed_cycle_metadata_fails_closed_before_installation() {
+        for (deadline, epoch) in [
+            (0, "live-a-2"),
+            (60_000, ""),
+            (60_000, "invalid epoch"),
+            (60_000, "live~a-2"),
+        ] {
+            let manager = ControllingDeviceManager::default();
+            let operation = manager.connect("234-4567").unwrap();
+            manager.complete_reserved(operation.clone()).unwrap();
+            manager
+                .complete_connected(operation.clone(), lease())
+                .unwrap();
+            manager.mark_transport_disconnected(5_000, Some(30_000));
+            assert_eq!(
+                manager
+                    .complete_resumed(operation, epoch, [3; 32], [4; 32], deadline)
+                    .unwrap_err()
+                    .code,
+                "controller_resume_failed"
+            );
+            assert_eq!(manager.status().status, ControllingStatusKind::Error);
+            assert!(manager.live_lease().is_err());
+            let inner = manager.inner.lock();
+            assert!(inner.lease.is_none());
+            assert!(inner.resume_gate.is_none());
+        }
     }
 
     #[test]
