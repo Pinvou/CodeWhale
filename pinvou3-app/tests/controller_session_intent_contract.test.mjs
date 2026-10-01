@@ -15,6 +15,7 @@ context.globalThis = context;
 vm.createContext(context);
 vm.runInContext(fs.readFileSync(logicPath, 'utf8'), context, { filename: logicPath });
 const logic = context.window.__PINVOU_REMOTE_CONTROL_STATE__;
+const statusFixtures = JSON.parse(fs.readFileSync(path.join(root, 'tests/fixtures/desktop_remote_status.json'), 'utf8'));
 
 const bridge = fs.readFileSync(
   path.join(root, 'src', 'platform', 'tauri', 'bridge', 'desktop-remote-control.js'),
@@ -88,9 +89,30 @@ test('an absent temporary-model projection fails closed for mixed client version
   assert.equal(state.controllerConnection.temporaryModelAvailable, false);
 });
 
+test('session projection requires the exact full tuple including large epochs and an online connection', () => {
+  const live = { ...statusFixtures.controllerConnected.lease, leaseEpoch: '9007199254740993' };
+  const connected = { ...statusFixtures.controllerConnected, lease: live };
+  const base = logic.applyControllerStatus(logic.createState(), connected);
+  const projection = { ...live, localSessionId: 'remote-large-epoch', remoteSessionRef: 'session-ref-1', sessionId: 'session-abc', mode: 'chat', capabilityRevision: 7 };
+  const withSession = logic.applyRemoteProxyBinding(base, projection);
+  assert.equal(withSession.controllerConnection.sessionId, 'session-abc');
+  for (const key of ['connectionId', 'controllerLeaseId', 'leaseEpoch', 'relayEpoch', 'remoteControlGeneration']) {
+    const stale = { ...projection, sessionId: 'stale-session', [key]: key === 'leaseEpoch' ? '9007199254740992' : 'foreign-binding' };
+    assert.equal(logic.applyRemoteProxyBinding(withSession, stale), withSession, `${key} must match exactly`);
+    assert.equal(logic.applyRemoteProxyBinding(withSession, { ...projection, [key]: null }), withSession, `${key} must not be omitted`);
+  }
+  const reconnecting = logic.applyControllerStatus(withSession, { ...connected, status: 'reconnecting', lease: null });
+  assert.equal(reconnecting.controllerConnection.sessionId, 'session-abc');
+  assert.equal(logic.applyRemoteProxyBinding(reconnecting, { ...projection, sessionId: 'late-session' }), reconnecting);
+  const renewed = logic.applyControllerStatus(reconnecting, { ...connected, lease: { ...live, leaseEpoch: '9007199254740994' } });
+  assert.equal(renewed.controllerConnection.sessionId, null);
+  assert.equal(renewed.controllerConnection.capabilityRevision, null);
+});
+
 test('capability snapshots keep the revision and the negotiated modes', () => {
   let state = bind();
   state = logic.applyCapabilities(state, {
+    ...statusFixtures.controllerConnected.lease,
     connectionId: 'connection-1',
     controllerLeaseId: 'controller-lease-1',
     leaseEpoch: '2',
@@ -139,7 +161,7 @@ test('the bridge forwards UI fields only and never builds protocol payloads', ()
   assert.ok(bridge.includes('settleCapabilityResponse(payload)'));
 });
 
-test('controller command results map the nested Rust lease into UI state', () => {
+test('controller command results preserve the complete Rust DTO for shared state projection', () => {
   const apply = bridge.slice(
     bridge.indexOf('function applyController'),
     bridge.indexOf('function controlledStart'),

@@ -1135,7 +1135,8 @@ pub fn desktop_remote_task_dispatch_a(
     }
     // Retry cannot carry task text, model choice, mode or any other mutable
     // semantics. The service authenticates this handle against durable pending
-    // state and the live binding before replaying the original cached bytes.
+    // state. Attempted requests only report an unknown outcome, including
+    // offline; replaying never-attempted bytes also requires the live binding.
     let (text, model_source, selected_model_id) = match intent {
         RemoteTaskSubmitIntent::New {
             text,

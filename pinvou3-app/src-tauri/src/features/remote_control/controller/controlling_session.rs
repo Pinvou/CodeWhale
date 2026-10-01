@@ -77,7 +77,9 @@ pub(crate) struct ControllingSessionProjection {
     pub(crate) mode: String,
     pub(crate) model_source: String,
     pub(crate) connection_id: String,
+    pub(crate) controller_lease_id: String,
     pub(crate) lease_epoch: String,
+    pub(crate) relay_epoch: String,
     pub(crate) remote_control_generation: String,
     pub(crate) capability_revision: Option<u64>,
     pub(crate) capability_valid_for_ms: Option<u64>,
@@ -189,7 +191,9 @@ impl SessionIntent {
             mode: self.mode.clone(),
             model_source: self.model_source.clone(),
             connection_id: self.lease.connection_id.clone(),
+            controller_lease_id: self.lease.controller_lease_id.clone(),
             lease_epoch: self.lease.lease_epoch.clone(),
+            relay_epoch: self.lease.relay_epoch.clone(),
             remote_control_generation: self.lease.remote_control_generation.clone(),
             capability_revision: self.capability_revision,
             capability_valid_for_ms: self.capability_valid_for_ms,
@@ -1049,8 +1053,14 @@ mod tests {
         assert_eq!(projection.mode, "chat");
         assert_eq!(projection.model_source, "controlled_device");
         assert_eq!(projection.connection_id, "connection-0001");
+        assert_eq!(projection.controller_lease_id, "lease-0001");
         assert_eq!(projection.lease_epoch, "1");
         assert_eq!(projection.session_id, projection.session_ref);
+        assert_eq!(projection.relay_epoch, "relay-epoch-0001");
+        assert_eq!(projection.remote_control_generation, "generation-0001");
+        let serialized = serde_json::to_value(&projection).unwrap();
+        assert_eq!(serialized["controllerLeaseId"], "lease-0001");
+        assert_eq!(serialized["relayEpoch"], "relay-epoch-0001");
         assert!(is_valid_identifier(&projection.session_id));
         assert_eq!(projection.capability_revision, None);
         assert!(projection.temporary_model_available);
@@ -1221,6 +1231,7 @@ mod tests {
             "relay_epoch": "relay-epoch-0001",
             "remote_control_generation": "generation-0001",
             "request_id": retry.request_id,
+            "session_id": first.session_ref,
             "code": "capability_snapshot_unavailable",
         });
         let failed = sessions

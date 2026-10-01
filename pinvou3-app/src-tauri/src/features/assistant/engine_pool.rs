@@ -2733,7 +2733,8 @@ impl EnginePool {
     }
 
     /// Send a user message to a session's engine (lazy spawn if absent).
-    #[cfg(any(feature = "benchmark-hooks", test))]
+    /// The product remote-turn adapter uses this same admitted append path;
+    /// it must be available without benchmark/test features too.
     pub async fn send_user_message(
         &self,
         session_id: &str,
@@ -7245,6 +7246,9 @@ mod probed_facts_wiring_tests {
             workspace: std::env::temp_dir(),
             session_model: Some(model),
             runtime_model_credential: None,
+            runtime_route_locked: false,
+            runtime_vision_model: None,
+            runtime_vision_credential: None,
             probed_context_tokens: None,
             probed_output_tokens: None,
             probed_local_kind: None,

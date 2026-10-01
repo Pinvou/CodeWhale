@@ -1434,7 +1434,9 @@ mod tests {
     #[test]
     fn byte_budget_produces_valid_shorter_snapshot_at_same_cursor() {
         let journal = RemoteJournal::new("epoch-1");
-        let body = "x".repeat(8 * 1024);
+        // Exercise the byte window after the 4096-character sanitizer, not a
+        // raw ASCII input that is truncated below the window before append.
+        let body = "界".repeat(MAX_EVENT_TEXT_CHARS);
         for sequence in 1..=40 {
             journal
                 .append(
@@ -1448,6 +1450,9 @@ mod tests {
         }
         let snapshot = journal.snapshot_for("session-a").unwrap();
         assert!(snapshot.events.len() < 40);
+        assert!(snapshot.events.iter().all(|event| {
+            event.payload["text"].as_str().unwrap().chars().count() == MAX_EVENT_TEXT_CHARS
+        }));
         assert_eq!(snapshot.sequence, 40);
         assert_eq!(snapshot.events.last().unwrap().sequence, 40);
         assert!(snapshot.verify_digest());

@@ -11,6 +11,13 @@
  * No API key, credential reference or `SavedModel` body ever crosses this file:
  * model listing returns opaque descriptors and task submission only passes the
  * selected model ID plus the task binding.
+ *
+ * Status DTOs are projected unchanged through the same state functions for
+ * invoke responses and events. A07 is an adapter/state-machine stage, not an
+ * end-to-end task delivery: ACP approval dispatch, temporary model credentials,
+ * artifact indexing and task/model/permission wire integration remain A08's
+ * responsibility. In particular selectedModelId/permissionRequest forwarding
+ * alone does not mean the current Rust submit command consumes those fields.
  */
 (function (root) {
   "use strict";
@@ -114,6 +121,13 @@
       }).then(function (off) {
         unlisten.push(off);
       }).catch(function () {});
+      listen("desktop-remote-controller-status", function (event) {
+        var payload = event && event.payload ? event.payload : event || {};
+        noteControllerTerminal(payload);
+        publish(logic.applyControllerStatus(current(), payload));
+      }).then(function (off) {
+        unlisten.push(off);
+      }).catch(function () {});
       listen("desktop-remote-task-status", function (event) {
         var payload = event && event.payload ? event.payload : event || {};
         var state = current();
@@ -159,14 +173,6 @@
       listen("desktop-remote-proxy-capability", function (event) {
         var payload = event && event.payload ? event.payload : event || {};
         settleCapabilityResponse(payload);
-      }).then(function (off) {
-        unlisten.push(off);
-      }).catch(function () {});
-      listen("desktop-remote-controller-status", function (event) {
-        var payload = event && event.payload ? event.payload : event || {};
-        var projection = controllerStatusPayload(payload);
-        noteControllerTerminal(projection);
-        publish(logic.applyControllerStatus(current(), projection));
       }).then(function (off) {
         unlisten.push(off);
       }).catch(function () {});
@@ -217,7 +223,7 @@
       return next.intents.controller;
     }
 
-    function applyControlled(intent, result) {
+    function applyControlled(intent, result, replaceBinding) {
       var payload = result && typeof result === "object" ? result : {};
       noteControlledTerminal(payload);
       clientLog(
@@ -226,7 +232,7 @@
         + " gen=" + String(payload.generation || ""),
       );
       publish(logic.applyControlledStatus(current(), Object.assign(
-        controlledStatusPayload(payload), { intent: intent },
+        controlledStatusPayload(payload), { intent: intent, replaceBinding: replaceBinding === true },
       )));
       return result;
     }
@@ -234,18 +240,10 @@
     /** The sole Rust ControlledStatus DTO has camelCase fields. */
     function controlledStatusPayload(result) {
       var wire = result && typeof result === "object" ? result : {};
-      return {
-        status: wire.status || "idle",
-        generation: wire.generation || null,
-        pairingCode: wire.pairingCode || null,
-        expiresAtMs: wire.pairingExpiresAtMs || null,
-        deviceName: wire.deviceName || null,
-        controllerDeviceName: wire.controllerDeviceName || null,
-        error: wire.errorCode || null,
-      };
+      return shallow(wire);
     }
 
-    function applyController(intent, result) {
+    function applyController(intent, result, replaceBinding) {
       var payload = controllerStatusPayload(result);
       noteControllerTerminal(payload);
       publish(logic.applyControllerStatus(current(), {
@@ -256,6 +254,11 @@
         leaseEpoch: payload.leaseEpoch,
         relayEpoch: payload.relayEpoch,
         generation: payload.generation,
+        claimRequestId: payload.claimRequestId,
+        lease: payload.lease,
+        deviceDisplayName: payload.deviceDisplayName,
+        errorCode: payload.errorCode,
+        replaceBinding: replaceBinding === true,
         deviceName: payload.deviceName,
         error: payload.error,
       }));
@@ -280,16 +283,16 @@
             return result;
           });
         }
-        return applyControlled(intent, result);
+        return applyControlled(intent, result, true);
       }).catch(function (failure) { throw asBoundedError(failure); });
     }
 
     function controlledRefresh() {
       ensureAvailable();
       subscribe();
-      var intent = controlledIntent();
+      var intent = controlledIntent(true);
       return invoke("desktop_remote_controlled_refresh", {}).then(function (result) {
-        return applyControlled(intent, result);
+        return applyControlled(intent, result, true);
       }).catch(function (failure) { throw asBoundedError(failure); });
     }
 
@@ -312,8 +315,12 @@
     function controlledStatus() {
       ensureAvailable();
       subscribe();
-      return invoke("desktop_remote_controlled_status", {})
-        .catch(function (failure) { throw asBoundedError(failure); });
+      var intent = current().intents.controlled;
+      var revision = current().revision;
+      return invoke("desktop_remote_controlled_status", {}).then(function (result) {
+        if (current().revision !== revision) return result;
+        return applyControlled(intent, result);
+      }).catch(function (failure) { throw asBoundedError(failure); });
     }
 
     /**
@@ -321,14 +328,8 @@
      * 面板仍能通过它拿回真实状态（例如后端已 waiting_connection 与连接码）。
      */
     function controlledSync() {
-      ensureAvailable();
-      subscribe();
-      var intent = controlledIntent();
-      return invoke("desktop_remote_controlled_status", {})
-        .then(function (result) {
-          return applyControlled(intent, result);
-        })
-        .catch(function (failure) { throw asBoundedError(failure); });
+      // A read must not supersede an in-flight start/refresh command intent.
+      return controlledStatus();
     }
 
     /// 前端排障日志：写入与 Rust 相同的日志文件，支持人员可直接读取。
@@ -379,7 +380,7 @@
             return result;
           });
         }
-        return applyController(intent, result);
+        return applyController(intent, result, true);
       }).catch(function (failure) { throw asBoundedError(failure); });
     }
 
@@ -425,16 +426,17 @@
     function controllerStatusPayload(result) {
       var wire = result && typeof result === "object" ? result : {};
       var lease = wire.lease && typeof wire.lease === "object" ? wire.lease : {};
-      return {
+      return Object.assign({}, wire, {
         status: wire.status || "idle",
         connectionId: lease.connectionId || null,
         controllerLeaseId: lease.controllerLeaseId || null,
         leaseEpoch: lease.leaseEpoch || null,
         relayEpoch: lease.relayEpoch || null,
         generation: lease.remoteControlGeneration || null,
+        claimRequestId: wire.claimRequestId || null,
         deviceName: wire.deviceDisplayName || null,
         error: wire.errorCode || null,
-      };
+      });
     }
 
     function rememberCapabilityOutcome(requestId, outcome) {
@@ -956,6 +958,7 @@
       controlledStop: controlledStop,
       controlledDisconnectNow: controlledDisconnectNow,
       controlledStatus: controlledStatus,
+      controlledSync: controlledSync,
       clientLog: clientLog,
       endpointProfiles: endpointProfiles,
       setEndpointProfile: setEndpointProfile,

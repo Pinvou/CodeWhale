@@ -16,6 +16,270 @@ context.globalThis = context;
 vm.createContext(context);
 vm.runInContext(fs.readFileSync(logicPath, 'utf8'), context, { filename: logicPath });
 const logic = context.window.__PINVOU_REMOTE_CONTROL_STATE__;
+const fixtures = JSON.parse(fs.readFileSync(path.join(root, 'tests/fixtures/desktop_remote_status.json'), 'utf8'));
+
+function connected(connectionId = 'connection-1', leaseEpoch = '2') {
+  return {
+    ...fixtures.controllerConnected,
+    lease: { ...fixtures.controllerConnected.lease, connectionId, leaseEpoch },
+  };
+}
+
+function makeBridge(responses = {}) {
+  const callbacks = new Map();
+  const host = { window: {} };
+  vm.createContext(host);
+  vm.runInContext(fs.readFileSync(logicPath, 'utf8'), host);
+  vm.runInContext(fs.readFileSync(path.join(root, 'src/platform/tauri/bridge/desktop-remote-control.js'), 'utf8'), host);
+  const state = {};
+  const bridge = host.window.__PINVOU_TAURI_BRIDGE_FEATURES__['desktop-remote-control']({
+    state,
+    can: () => true,
+    notify() {},
+    listen(name, callback) {
+      callbacks.set(name, callback);
+      return Promise.resolve(() => callbacks.delete(name));
+    },
+    invoke(name) {
+      return Promise.resolve(typeof responses[name] === 'function' ? responses[name]() : responses[name]);
+    },
+  });
+  return {
+    bridge,
+    get state() { return state.desktopRemoteControl; },
+    emit(name, payload) {
+      assert.ok(callbacks.has(name), `missing subscription: ${name}`);
+      callbacks.get(name)({ payload });
+    },
+  };
+}
+
+test('legacy waiting aliases retain only absent pairing fields on the same status binding', () => {
+  let state = logic.applyControlledStatus(logic.createState(), { ...fixtures.controlledWaiting, status: 'waiting_for_pairing' });
+  assert.equal(state.controlledDevice.status, 'waiting_connection');
+  const partial = { status: 'waiting_for_pairing', generation: fixtures.controlledWaiting.generation, statusIntent: fixtures.controlledWaiting.statusIntent };
+  state = logic.applyControlledStatus(state, partial);
+  assert.equal(state.controlledDevice.pairingCode, fixtures.controlledWaiting.pairingCode);
+  assert.equal(state.controlledDevice.expiresAtMs, fixtures.controlledWaiting.pairingExpiresAtMs);
+  assert.equal(logic.applyControlledStatus(state, { ...partial, status: 'registering' }), state);
+  const cleared = logic.applyControlledStatus(state, { ...partial, pairingCode: null, pairingExpiresAtMs: null });
+  assert.equal(cleared.controlledDevice.pairingCode, null);
+  assert.equal(cleared.controlledDevice.expiresAtMs, null);
+  const changed = logic.applyControlledStatus(state, { ...partial, statusIntent: String(BigInt(partial.statusIntent) + 1n) });
+  assert.equal(changed.controlledDevice.pairingCode, null);
+  assert.equal(changed.controlledDevice.expiresAtMs, null);
+  const stopped = logic.applyControlledStatus(state, { ...partial, status: 'stopped', pairingCode: '2345678', pairingExpiresAtMs: 999 });
+  assert.equal(stopped.controlledDevice.pairingCode, null);
+  assert.equal(stopped.controlledDevice.expiresAtMs, null);
+});
+
+test('controlled sync rejects late polling and does not replace a command intent', async () => {
+  let resolvePoll;
+  let resolveStart;
+  const host = makeBridge({
+    desktop_remote_controlled_start: () => new Promise((resolve) => { resolveStart = resolve; }),
+    desktop_remote_controlled_status: () => new Promise((resolve) => { resolvePoll = resolve; }),
+  });
+  const start = host.bridge.controlledStart('Studio PC', []);
+  const intent = host.state.intents.controlled;
+  const poll = host.bridge.controlledSync();
+  assert.equal(host.state.intents.controlled, intent);
+  resolveStart(fixtures.controlledWaiting);
+  await start;
+  resolvePoll({ status: 'disabled', statusIntent: '0' });
+  await poll;
+  assert.equal(host.state.controlledDevice.status, 'waiting_connection');
+  const late = host.bridge.controlledSync();
+  host.emit('desktop-remote-controlled-status', fixtures.controlledError);
+  resolvePoll(fixtures.controlledWaiting);
+  await late;
+  assert.equal(host.state.controlledDevice.status, 'error');
+  host.bridge.stop();
+});
+
+test('real session bridge keeps the full capability binding and session across status updates', async () => {
+  const projection = { ...fixtures.controllerConnected.lease, localSessionId: 'remote-session-1', remoteSessionRef: 'session-ref-1', sessionId: 'session-abc', mode: 'chat', capabilityRevision: 7 };
+  let snapshot = { ...fixtures.controllerConnected.lease, capabilityRevision: 7, modes: ['chat'], tools: [], skills: [], workspaces: [] };
+  const host = makeBridge({
+    desktop_remote_controller_connect: fixtures.controllerConnected,
+    desktop_remote_proxy_open_live: projection,
+    desktop_remote_controller_capability_snapshot: () => snapshot,
+  });
+  await host.bridge.controllerConnect('2345678');
+  await host.bridge.openLiveRemoteProxy(null);
+  await host.bridge.capabilitiesSnapshot('session-ref-1');
+  assert.equal(host.state.remoteCapabilities.controllerLeaseId, 'lease-0001');
+  assert.equal(host.state.controllerConnection.sessionId, 'session-abc');
+  const capabilities = host.state.remoteCapabilities;
+  snapshot = { ...snapshot, controllerLeaseId: 'foreign-lease', capabilityRevision: 8 };
+  await host.bridge.capabilitiesSnapshot('session-ref-1');
+  assert.equal(host.state.remoteCapabilities, capabilities, 'foreign lease snapshot must not replace capabilities');
+  host.emit('desktop-remote-controller-status', fixtures.controllerConnected);
+  assert.equal(host.state.controllerConnection.sessionId, 'session-abc');
+  host.emit('desktop-remote-controller-status', { ...fixtures.controllerConnected, status: 'reconnecting', lease: null });
+  assert.equal(host.state.controllerConnection.sessionId, 'session-abc');
+  assert.equal(host.state.controllerConnection.controllerLeaseId, 'lease-0001');
+  host.emit('desktop-remote-controller-status', { ...fixtures.controllerError, status: 'disconnected' });
+  assert.equal(host.state.controllerConnection.sessionId, null);
+});
+
+test('real controlled bridge projects and clears the controller device name', async () => {
+  const host = makeBridge({ desktop_remote_controlled_start: fixtures.controlledWaiting });
+  await host.bridge.controlledStart('Studio PC', []);
+  host.emit('desktop-remote-controlled-status', { ...fixtures.controlledWaiting, status: 'connected', controllerDeviceName: 'Controller PC' });
+  assert.equal(host.state.controlledDevice.controllerDeviceName, 'Controller PC');
+  host.emit('desktop-remote-controlled-status', fixtures.controlledError);
+  assert.equal(host.state.controlledDevice.controllerDeviceName, null);
+  assert.equal(host.state.controlledDevice.pairingCode, null);
+});
+
+test('shared Rust fixtures project device names, errors, lease and pairing expiry', () => {
+  let state = logic.applyControllerStatus(logic.createState(), fixtures.controllerConnected);
+  assert.equal(state.controllerConnection.connectionId, 'connection-0001');
+  assert.equal(state.controllerConnection.controllerLeaseId, 'lease-0001');
+  assert.equal(state.controllerConnection.generation, 'generation-0001');
+  assert.equal(state.controllerConnection.deviceName, 'Studio PC');
+  state = logic.applyControlledStatus(state, fixtures.controlledWaiting);
+  assert.equal(state.controlledDevice.expiresAtMs, 600000);
+  assert.equal(state.controlledDevice.workspaceCount, 1);
+  assert.equal(state.controlledDevice.codeModeAllowed, true);
+  state = logic.applyControlledStatus(state, fixtures.controlledError);
+  assert.equal(state.controlledDevice.lastError, 'endpoint_offline');
+  assert.equal(state.controlledDevice.pairingCode, null);
+  state = logic.applyControllerStatus(state, fixtures.controllerError);
+  assert.equal(state.controllerConnection.lastError, 'endpoint_offline');
+  assert.equal(state.controllerConnection.connectionId, null);
+  assert.equal(logic.matchesLiveContext(state, {}), false);
+});
+
+test('same-claim terminal null lease clears live state and fences late events', () => {
+  for (const phase of ['connecting', 'connected']) {
+    for (const terminal of ['error', 'disconnected']) {
+      const initial = { ...fixtures.controllerConnected, status: phase,
+        lease: phase === 'connected' ? fixtures.controllerConnected.lease : null };
+      let state = logic.applyControllerStatus(logic.createState(), initial);
+      if (phase === 'connected') {
+        state = logic.applyCapabilities(state, { ...fixtures.controllerConnected.lease, capabilityRevision: '1' });
+        state = logic.applyRemoteProxyBinding(state, { ...fixtures.controllerConnected.lease,
+          localSessionId: 'remote-local', remoteSessionRef: 'remote-ref', sessionId: 'b-session' });
+      }
+      state = logic.applyControllerStatus(state, { ...fixtures.controllerError, status: terminal, lease: null });
+      assert.equal(state.controllerConnection.status, terminal);
+      assert.equal(state.controllerConnection.sessionId, null);
+      assert.equal(state.remoteCapabilities, null);
+      assert.equal(state.controllerConnection.connectionId, null);
+      assert.equal(logic.matchesLiveContext(state, {}), false);
+      assert.equal(logic.applyControllerStatus(state, fixtures.controllerConnected), state);
+    }
+  }
+});
+
+test('real bridge subscribes during A connect and applies handshake, connected and error events', async () => {
+  const connecting = { ...fixtures.controllerConnected, status: 'connecting', lease: null, deviceDisplayName: null, hasPendingCode: true };
+  const host = makeBridge({ desktop_remote_controller_connect: connecting });
+  await host.bridge.controllerConnect('2345678');
+  host.emit('desktop-remote-controller-status', { ...connecting, status: 'safety_handshake', hasPendingCode: false });
+  assert.equal(host.state.controllerConnection.status, 'safety_handshake');
+  host.emit('desktop-remote-controller-status', connecting);
+  assert.equal(host.state.controllerConnection.status, 'safety_handshake');
+  host.emit('desktop-remote-controller-status', fixtures.controllerConnected);
+  assert.equal(host.state.controllerConnection.connectionId, 'connection-0001');
+  host.emit('desktop-remote-controller-status', connecting);
+  assert.equal(host.state.controllerConnection.status, 'connected', 'late results must not regress handshake');
+  host.emit('desktop-remote-controller-status', fixtures.controllerError);
+  assert.equal(host.state.controllerConnection.lastError, 'endpoint_offline');
+  assert.equal(host.state.controllerConnection.connectionId, null);
+  host.emit('desktop-remote-controller-status', fixtures.controllerConnected);
+  assert.equal(host.state.controllerConnection.status, 'error', 'old connected event cannot revive a terminal claim');
+  host.bridge.stop();
+});
+
+test('command responses and B events share the Rust projection and reject replaced generations', async () => {
+  const host = makeBridge({ desktop_remote_controlled_start: fixtures.controlledWaiting });
+  await host.bridge.controlledStart('Studio PC', []);
+  assert.equal(host.state.controlledDevice.expiresAtMs, 600000);
+  host.emit('desktop-remote-controlled-status', { ...fixtures.controlledWaiting, status: 'reserving' });
+  assert.equal(host.state.controlledDevice.pairingCode, '2345678');
+  host.emit('desktop-remote-controlled-status', fixtures.controlledError);
+  assert.equal(host.state.controlledDevice.lastError, 'endpoint_offline');
+  host.emit('desktop-remote-controlled-status', fixtures.controlledWaiting);
+  assert.equal(host.state.controlledDevice.status, 'error', 'old waiting event cannot revive a terminal generation');
+  host.emit('desktop-remote-controlled-status', { ...fixtures.controlledWaiting, generation: 'generation-old' });
+  assert.equal(host.state.controlledDevice.status, 'error');
+  host.bridge.stop();
+});
+
+test('new explicit A connect replaces the binding but queued old events do not', async () => {
+  let result = fixtures.controllerConnected;
+  const host = makeBridge({ desktop_remote_controller_connect: () => result });
+  await host.bridge.controllerConnect('2345678');
+  host.emit('desktop-remote-controller-status', fixtures.controllerError);
+  result = { ...fixtures.controllerConnected, claimRequestId: 'claim-0002', lease: { ...fixtures.controllerConnected.lease, connectionId: 'connection-0002' } };
+  await host.bridge.controllerConnect('3456789');
+  assert.equal(host.state.controllerConnection.connectionId, 'connection-0002');
+  host.emit('desktop-remote-controller-status', fixtures.controllerError);
+  host.emit('desktop-remote-controller-status', fixtures.controllerConnected);
+  assert.equal(host.state.controllerConnection.connectionId, 'connection-0002');
+  host.bridge.stop();
+});
+
+test('status polling cannot overwrite a newer event with an obsolete binding', async () => {
+  let resolvePoll;
+  const host = makeBridge({
+    desktop_remote_controller_connect: fixtures.controllerConnected,
+    desktop_remote_controller_status: () => new Promise((resolve) => { resolvePoll = resolve; }),
+  });
+  await host.bridge.controllerConnect('2345678');
+  const pending = host.bridge.controllerStatus();
+  host.emit('desktop-remote-controller-status', fixtures.controllerError);
+  resolvePoll(fixtures.controllerConnected);
+  await pending;
+  assert.equal(host.state.controllerConnection.status, 'error');
+  assert.equal(host.state.controllerConnection.connectionId, null);
+  host.bridge.stop();
+});
+
+test('B old terminal and reserving events cannot replace a refreshed generation', () => {
+  let state = logic.applyControlledStatus(logic.createState(), fixtures.controlledWaiting);
+  state = logic.beginControlledIntent(state, true);
+  state = logic.applyControlledStatus(state, { ...fixtures.controlledWaiting, generation: 'generation-0002', statusIntent: '2', intent: state.intents.controlled, replaceBinding: true });
+  assert.equal(logic.applyControlledStatus(state, fixtures.controlledError), state);
+  assert.equal(logic.applyControlledStatus(state, { ...fixtures.controlledError, generation: null }), state);
+  state = logic.applyControlledStatus(state, { ...fixtures.controlledWaiting, generation: 'generation-0002', statusIntent: '2', status: 'refreshing' });
+  assert.equal(logic.applyControlledStatus(state, { ...fixtures.controlledWaiting, status: 'reserving' }), state);
+  state = logic.applyControlledStatus(state, { ...fixtures.controlledWaiting, status: 'reserving', generation: 'generation-0003', statusIntent: '3' });
+  assert.equal(state.controlledDevice.generation, 'generation-0003');
+});
+
+test('same-epoch full lease tuple and capabilities cannot be substituted', () => {
+  const state = logic.applyControllerStatus(logic.createState(), fixtures.controllerConnected);
+  for (const key of ['controllerLeaseId', 'relayEpoch', 'remoteControlGeneration']) {
+    assert.equal(logic.applyControllerStatus(state, { ...fixtures.controllerConnected, lease: { ...fixtures.controllerConnected.lease, [key]: 'foreign' } }), state);
+    assert.equal(logic.applyCapabilities(state, { ...fixtures.controllerConnected.lease, capabilityRevision: '1', [key]: 'foreign' }), state);
+  }
+});
+
+test('reconnect preserves durable task history and binding without exposing direct A task events', () => {
+  let state = logic.applyControllerStatus(logic.createState(), fixtures.controllerConnected);
+  state = logic.applyCapabilities(state, { ...fixtures.controllerConnected.lease, capabilityRevision: '1' });
+  state = logic.projectRemoteProxyRead(state, {
+    localSessionId: 'remote-existing', pendingUnknownCount: 0, unattemptedPending: [],
+    entries: [{ journalEpoch: 'journal-1', sequence: 1, eventId: 'event-1',
+      kind: 'status', taskId: 'existing', body: 'running', attachments: [] }],
+  });
+  const history = state.remoteProxyHistory;
+  assert.ok(history, 'the durable SessionStore read is the A-side display source');
+  const capabilities = state.remoteCapabilities;
+  state = logic.applyControllerStatus(state, { ...fixtures.controllerConnected, status: 'reconnecting', lease: null });
+  assert.equal(state.controllerConnection.connectionId, 'connection-0001');
+  assert.equal(state.remoteCapabilities, capabilities);
+  assert.equal(logic.matchesLiveContext(state, {}), false);
+  assert.equal(logic.applyTaskEvent, undefined, 'direct A task events cannot bypass authenticated persistence');
+  assert.equal(state.remoteProxyHistory, history);
+  state = logic.applyControllerStatus(state, fixtures.controllerConnected);
+  assert.equal(state.remoteProxyHistory.entries.length, 1);
+  assert.equal(state.remoteProxyHistory.entries[0].taskId, 'existing');
+});
 
 function liveController(connectionId, leaseEpoch) {
   return {
@@ -119,6 +383,7 @@ test('capability snapshots are bound to connection, lease and revision', () => {
     ...liveController('connection-1', '2'),
   });
   const snapshot = {
+    ...fixtures.controllerConnected.lease,
     connectionId: 'connection-1',
     controllerLeaseId: 'lease-connection-1',
     leaseEpoch: '2',
@@ -290,6 +555,7 @@ test('B-side projections reject stale sessions and reset with the controlled gen
     intent: state.intents.controlled,
     status: 'reserving',
     generation: 'generation-2',
+    replaceBinding: true,
   });
   assert.equal(state.controlledSession.sessionId, null);
   assert.equal(state.controlledTasks.length, 0);
@@ -360,6 +626,7 @@ test('a new controlled-device generation drops old task projections', () => {
     intent: state.intents.controlled,
     status: 'waiting_connection',
     generation: 'generation-2',
+    replaceBinding: true,
   });
   assert.equal(state.controlledTasks.length, 0);
 });
