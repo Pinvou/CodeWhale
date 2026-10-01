@@ -781,6 +781,11 @@ test("real legacy v2 Relay is safe only behind the enrollment gateway", async (t
     { protocol: "pinvou-desktop-controller-v1" });
   t.after(() => controllerDesktop.terminate());
   assert.equal(controllerDesktop.protocol, "pinvou-desktop-controller-v1");
+  // Replacing B while Web stays connected also emits a v2 presence notice.
+  // Subscribe before registration and consume it before expecting the v1
+  // rejection; otherwise packet timing can make nextMessage read the notice.
+  const controllerWebConnected = nextMessageMatching(controllerDesktop,
+    (message) => message.v === 2 && message.type === "web_client_connected");
   const controllerRegistered = nextMessage(controllerDesktop);
   controllerDesktop.send(JSON.stringify({
     v: 2,
@@ -789,10 +794,17 @@ test("real legacy v2 Relay is safe only behind the enrollment gateway", async (t
     access_token: ACCESS_A,
     desktop_secret: DESKTOP_SECRET,
   }));
-  assert.equal((await controllerRegistered).type, "desktop_endpoint_registered");
+  const controllerRegistration = await controllerRegistered;
+  assert.equal(controllerRegistration.type, "desktop_endpoint_registered");
+  assert.equal(controllerRegistration.web_client_connected, true);
+  const controllerWebNotice = await controllerWebConnected;
+  assert.equal(controllerWebNotice.endpoint_id, "legacy-preserved-endpoint");
+  assert.equal(controllerWebNotice.lease_id, controllerRegistration.lease_id);
   const controllerDisabled = nextMessage(controllerDesktop);
+  const controllerClosed = socketClosed(controllerDesktop);
   controllerDesktop.send(JSON.stringify({ v: 1, type: "controller_capabilities" }));
   assert.equal((await controllerDisabled).code, "desktop_controller_unavailable");
+  assert.equal(await controllerClosed, 1008);
 
   const constrained = createEnrollmentGateway({
     registry,
