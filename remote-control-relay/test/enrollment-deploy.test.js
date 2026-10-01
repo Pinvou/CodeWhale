@@ -3,9 +3,23 @@ import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
+import { requireCompleteCoverage } from "../../scripts/check-enrollment-gated-v2-rollback.mjs";
 
 const relayDir = dirname(dirname(fileURLToPath(import.meta.url)));
 const repoRoot = dirname(relayDir);
+
+test("rollback gate fails closed for empty, incomplete and inconsistent inventories", () => {
+  const complete = { total: 2, migrated: 2, not_migrated: 0, coverage_percent: 100 };
+  assert.doesNotThrow(() => requireCompleteCoverage(complete));
+  for (const candidate of [null, {},
+    { ...complete, total: 0, migrated: 0 },
+    { ...complete, migrated: 1, not_migrated: 1, coverage_percent: 50 },
+    { ...complete, total: 1.5 }, { ...complete, migrated: 1 },
+    { ...complete, total: "2" }, { ...complete, coverage_percent: 99 },
+    { ...complete, not_migrated: -1 }]) {
+    assert.throws(() => requireCompleteCoverage(candidate), { code: "legacy_endpoint_coverage_incomplete" });
+  }
+});
 
 test("legacy rollback deployment has one guarded public websocket route", async () => {
   const nginx = await readFile(join(relayDir, "nginx-enrollment-gateway.conf"), "utf8");
