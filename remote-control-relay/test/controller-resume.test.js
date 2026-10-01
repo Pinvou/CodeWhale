@@ -7,7 +7,7 @@ import { ControllerResumeHooks } from "../controller-resume.js";
 import { ControllerLivenessHooks } from "../controller-liveness.js";
 import { ControllerReservationManager, EndpointInteractionSlots } from "../controller-reservation.js";
 import { ControllerRouter } from "../controller-router.js";
-import { receiptCommitmentHex } from "../protocol-controller.js";
+import { isValidControllerIdentifier, receiptCommitmentHex } from "../protocol-controller.js";
 
 const CAPABILITIES = Object.freeze([
   "pairing_v1", "encrypted_frames_v1", "finished_receipt_v1", "role_liveness_v1", "resume_v1",
@@ -404,6 +404,32 @@ test("complete activation atomically rotates role tokens, epochs and sockets", a
       resumeTokenB64: oldToken,
     }), /resume_token_invalid/u);
   }
+});
+
+test("resume epoch grammar follows wire identifiers and rejects invalid finals before mutation", async () => {
+  assert.equal(isValidControllerIdentifier("live:a-2"), true);
+  assert.equal(isValidControllerIdentifier("live~a-2"), false);
+  assert.equal(isValidControllerIdentifier(":live-a-2"), false);
+  assert.equal(isValidControllerIdentifier("live:a-2\n"), false);
+  const value = fixture();
+  const committed = await createLease(value);
+  const args = {
+    controllerLeaseId: committed.lease.controller_lease_id,
+    activationId: "activation-grammar-1",
+    sockets: { A: "grammar-socket-A", B: "grammar-socket-B" },
+    livenessEpochA: "live:a-2",
+    livenessEpochB: "live:b-2",
+    tokenA: Buffer.alloc(32, 3),
+    tokenB: Buffer.alloc(32, 4),
+  };
+  for (const [field, label] of [["livenessEpochA", "liveness_epoch_a"], ["livenessEpochB", "liveness_epoch_b"]]) {
+    assert.throws(() => value.manager.completeResume({ ...args, [field]: "live~bad-2" }), new RegExp(label + "_invalid", "u"));
+    assert.deepEqual(value.manager.lease(committed.lease.controller_lease_id), committed.lease);
+  }
+  const updated = value.manager.completeResume(args);
+  assert.equal(updated.liveness_epoch_a, "live:a-2");
+  assert.equal(updated.liveness_epoch_b, "live:b-2");
+  assert.equal(updated.resume_deadline_ms, String(value.clock + 30_000));
 });
 
 test("cross-role, invalid or stale tokens terminate the original lease", async () => {

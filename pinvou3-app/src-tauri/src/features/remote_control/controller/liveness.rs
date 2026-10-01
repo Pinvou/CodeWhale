@@ -461,17 +461,12 @@ fn elapsed(from: u64, to: u64, field: &'static str) -> Result<u64> {
         .ok_or_else(|| LivenessError::new("invalid_clock", field))
 }
 
+pub(crate) fn validate_liveness_epoch(value: &str) -> Result<()> {
+    validate_identifier(value, "liveness_epoch_a")
+}
+
 fn validate_identifier(value: &str, field: &'static str) -> Result<()> {
-    if value.is_empty()
-        || value.len() > MAX_LIVENESS_ID_BYTES
-        || !value
-            .as_bytes()
-            .first()
-            .is_some_and(u8::is_ascii_alphanumeric)
-        || !value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'~' | b'-'))
-    {
+    if !super::protocol::is_valid_identifier(value) {
         return Err(LivenessError::new("invalid_field", field));
     }
     Ok(())
@@ -901,6 +896,30 @@ mod tests {
             "unknown_challenge"
         );
         assert_eq!(watchdog.deadline_b(), None);
+    }
+
+    #[test]
+    fn liveness_identifiers_follow_the_frozen_wire_grammar() {
+        for value in ["live:a-2", "live.a_2-3", "A"] {
+            assert!(super::super::protocol::is_valid_identifier(value));
+            assert!(validate_liveness_epoch(value).is_ok());
+            assert!(ControllerLivenessWatchdog::authenticated_cycle(value, 1_000).is_ok());
+        }
+        for value in ["live~a-2", ":live-a-2", "live a-2", ""] {
+            assert!(!super::super::protocol::is_valid_identifier(value));
+            assert!(validate_liveness_epoch(value).is_err());
+            assert!(ControllerLivenessWatchdog::authenticated_cycle(value, 1_000).is_err());
+        }
+        let mut watchdog = ControllerLivenessWatchdog::new("live:a-1").unwrap();
+        watchdog.install_epoch("live:a-2").unwrap();
+        watchdog
+            .register_challenge("challenge:b-1", "AAAAAAAAAAAAAAAAAAAAAA==", 1_000)
+            .unwrap();
+        assert!(
+            watchdog
+                .register_challenge("challenge~b-2", "AQEBAQEBAQEBAQEBAQEBAQ==", 2_000)
+                .is_err()
+        );
     }
 
     #[test]

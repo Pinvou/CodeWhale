@@ -4,3 +4,6 @@ pub(crate) use crate::{crypto, liveness, protocol, relay_transport, resume};
 
 #[path = "../../../src/features/remote_control/controller/controlled.rs"]
 mod controlled;
+
+#[path = "../../../src/features/remote_control/controller/controlling.rs"]
+mod controlling;
