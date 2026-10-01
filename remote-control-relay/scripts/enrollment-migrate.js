@@ -35,7 +35,7 @@ function exactDocument(value, keys, code) {
 }
 
 function parseArguments(argv) {
-  const result = { mode: null, input: null, output: null };
+  const result = { mode: null, input: null, output: null, requestId: undefined };
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
     if (["--dry-run", "--apply", "--backup", "--restore", "--coverage"].includes(argument)) {
@@ -45,6 +45,10 @@ function parseArguments(argv) {
       const value = argv[++index];
       if (!value || value.startsWith("--")) throw cliError("argument_invalid");
       result[argument.slice(2)] = resolve(value);
+    } else if (argument === "--request-id") {
+      const value = argv[++index];
+      if (!value || value.startsWith("--") || result.requestId !== undefined) throw cliError("argument_invalid");
+      result.requestId = value;
     } else if (argument === "--help") {
       result.mode = "help";
     } else {
@@ -144,12 +148,13 @@ export async function main(argv = process.argv.slice(2), env = process.env, io =
     const args = parseArguments(argv);
     if (args.mode === "help") {
       io.log(JSON.stringify({
-        usage: "enrollment-migrate.js (--dry-run|--apply|--backup|--restore|--coverage) [--input FILE] [--output FILE]",
+        usage: "enrollment-migrate.js (--dry-run|--apply|--backup|--restore|--coverage) [--input FILE] [--output FILE] [--request-id RESTORE_OPERATION_ID]",
         note: "credentials are accepted only in a mode-0600 input file, never as command arguments",
       }));
       return 0;
     }
     if (!args.mode) throw cliError("mode_required");
+    if (args.requestId !== undefined && args.mode !== "restore") throw cliError("restore_request_id_only");
     const config = loadEnrollmentRegistryConfig(env);
     if (["dry-run", "apply"].includes(args.mode) && config.deployment !== "self_hosted") {
       throw cliError("self_hosted_mode_required");
@@ -175,13 +180,14 @@ export async function main(argv = process.argv.slice(2), env = process.env, io =
       await atomicWriteJson(args.output, result);
       result = { ok: true, backup_written: true, namespace_revision: result.namespace_revision };
     } else if (args.mode === "restore") {
-      if (!args.input || args.output) throw cliError("restore_arguments_invalid");
+      if (!args.input || args.output || args.requestId === undefined) throw cliError("restore_arguments_invalid");
       const backup = await secureReadJson(args.input);
       result = {
         ok: true,
         ...(await restoreEnrollmentBackup({
           registry,
           backup,
+          requestId: args.requestId,
         })),
       };
     } else {

@@ -219,6 +219,25 @@ async function spawnRelay(env = {}, { preload } = {}) {
   };
 }
 
+function controllerEnvironment(name, overrides = {}) {
+  const signing = crypto.generateKeyPairSync("ed25519");
+  return {
+    NODE_ENV: "development",
+    PINVOU_DESKTOP_CONTROLLER_ENABLED: "1",
+    PINVOU_REMOTE_ENROLLMENT_DEPLOYMENT: "development",
+    PINVOU_REMOTE_ENROLLMENT_DEVELOPMENT_TOFU: "1",
+    PINVOU_REMOTE_CONTROLLER_STATE_PATH: join(testRoot, `controller-${name}-${Date.now()}`, "state.json"),
+    PINVOU_REMOTE_STATE_PATH: join(testRoot, `legacy-${name}-${Date.now()}.json`),
+    PINVOU_REMOTE_ENROLLMENT_HMAC_KEY_ID: "enrollment-regression-key",
+    PINVOU_REMOTE_ENROLLMENT_HMAC_KEY: "enrollment-regression-material-at-least-32-bytes",
+    PINVOU_REMOTE_PAIRING_HMAC_KEY_ID: "pairing-regression-key",
+    PINVOU_REMOTE_PAIRING_HMAC_KEY: "pairing-regression-independent-material-at-least-32-bytes",
+    PINVOU_REMOTE_RELAY_SIGNING_KEY_ID: "signing-regression-key",
+    PINVOU_REMOTE_RELAY_SIGNING_PRIVATE_KEY_B64: signing.privateKey.export({ type: "pkcs8", format: "der" }).toString("base64"),
+    ...overrides,
+  };
+}
+
 function nextMessageOneOf(ws, types, timeoutMs = 3000) {
   const accepted = new Set(types);
   return new Promise((resolve, reject) => {
@@ -1114,6 +1133,119 @@ test("proxy allowlist keeps local health checks available", async () => {
     assert.equal(response.status, 200);
   } finally {
     await stopRelay(isolated.child);
+  }
+});
+
+test("trusted proxy malformed sources never crash the enabled controller or bypass its peer limit", async () => {
+  const isolated = await spawnRelay(controllerEnvironment("xff", {
+    PINVOU_REMOTE_TRUSTED_PROXY_IPS: "127.0.0.1", WS_CONNECT_LIMIT: "3", WS_CONNECT_WINDOW_MS: "60000",
+  }));
+  const sockets = [];
+  try {
+    for (const forwarded of ["x".repeat(200), "198.51.100.5, invalid", "x".repeat(4097)]) {
+      const socket = await openSocket(isolated.wsUrl, { headers: { "x-forwarded-for": forwarded } });
+      sockets.push(socket);
+    }
+    assert.equal(await rejectedUpgrade(isolated.wsUrl, { headers: { "x-forwarded-for": "another-invalid" } }), 429);
+    const ipv4 = await openSocket(isolated.wsUrl, { headers: { "x-forwarded-for": "invalid, 198.51.100.5" } });
+    const ipv6 = await openSocket(isolated.wsUrl, { headers: { "x-forwarded-for": "2001:db8::1" } });
+    sockets.push(ipv4, ipv6);
+    const response = nextMessage(ipv6, "error");
+    ipv6.send(JSON.stringify({ v: 2, type: "not_authenticated" }));
+    assert.equal((await response).code, "authentication_required");
+    assert.equal(isolated.child.exitCode, null);
+    assert.equal((await fetch(`${isolated.httpUrl}/pinvou3/remote/healthz`)).status, 200);
+  } finally {
+    sockets.forEach(closeSocket);
+    await stopRelay(isolated.child);
+  }
+});
+
+test("expired Web endpoint releases its exact interaction slot before deletion", async () => {
+  const isolated = await spawnRelay(controllerEnvironment("expired-slot", { ENDPOINT_OFFLINE_TTL_MS: "1000" }));
+  const sockets = [];
+  try {
+    const endpointId = "endpoint-expired-slot";
+    const accessToken = "expired-slot-access-token-at-least-32";
+    const desktopSecret = "expired-slot-desktop-secret-at-least-32";
+    const desktop = await registerDesktop(endpointId, accessToken, desktopSecret, isolated.wsUrl, 15000);
+    const web = await joinWeb(endpointId, accessToken, {}, isolated.wsUrl);
+    sockets.push(desktop.ws, web.ws);
+    desktop.ws.terminate();
+    await waitForClose(desktop.ws);
+    // The real heartbeat performs TTL expiry; wait on the observable Web close,
+    // not a timing assumption or direct call into the cleanup implementation.
+    await waitForClose(web.ws, 10000);
+    const reconnect = await registerDesktop(endpointId, accessToken, desktopSecret, isolated.wsUrl, 15000);
+    sockets.push(reconnect.ws);
+    const codeWrap = crypto.generateKeyPairSync("x25519");
+    const handshakeB = crypto.generateKeyPairSync("x25519");
+    const registered = nextMessageOneOf(reconnect.ws, ["desktop_pairing_registered", "error"], 15000);
+    reconnect.ws.send(JSON.stringify({ v: 1, type: "desktop_pairing_register",
+      request_id: "request-expired-register", registration_request_id: "expired-register-0001",
+      endpoint_id: endpointId, remote_control_generation: "expired-generation-0001",
+      code_wrap_public_key_b64: rawX25519Public(codeWrap.publicKey).toString("base64"),
+      handshake_public_key_b64: rawX25519Public(handshakeB.publicKey).toString("base64"), key_algorithm: "x25519",
+      capabilities: ["pairing_v1", "encrypted_frames_v1", "finished_receipt_v1"] }));
+    const registration = await registered;
+    assert.equal(registration.type, "desktop_pairing_registered", registration.code);
+    const controller = await openSocket(isolated.wsUrl);
+    sockets.push(controller);
+    const reserved = nextMessageOneOf(controller, ["controller_pairing_reserved", "error"], 10000);
+    const handshakeA = crypto.generateKeyPairSync("x25519");
+    controller.send(JSON.stringify({ v: 1, type: "controller_pairing_claim",
+      request_id: "request-expired-claim", claim_request_id: "expired-claim-0001",
+      pairing_code: openPairingCode(codeWrap.privateKey, registration),
+      handshake_public_key_b64: rawX25519Public(handshakeA.publicKey).toString("base64"), key_algorithm: "x25519",
+      capabilities: ["pairing_v1", "encrypted_frames_v1", "finished_receipt_v1"] }));
+    const claimed = await reserved;
+    assert.equal(claimed.type, "controller_pairing_reserved", claimed.code);
+  } finally {
+    sockets.forEach(closeSocket);
+    await stopRelay(isolated.child);
+  }
+});
+
+test("official controller fails startup until trusted live claim wiring exists", async () => {
+  const isolatedPort = await getFreePort();
+  const child = spawn(process.execPath, [join(relayDir, "server.js")], {
+    cwd: relayDir, env: { ...process.env, PORT: String(isolatedPort), ...controllerEnvironment("official-disabled", {
+      NODE_ENV: "production", PINVOU_REMOTE_ENROLLMENT_DEPLOYMENT: "official", PINVOU_REMOTE_ENROLLMENT_DEVELOPMENT_TOFU: "0",
+    }) }, stdio: ["ignore", "pipe", "pipe"], windowsHide: true,
+  });
+  let output = "";
+  let errors = "";
+  child.stdout.on("data", (chunk) => { output += String(chunk); });
+  child.stderr.on("data", (chunk) => { errors += String(chunk); });
+  try {
+    await waitForExit(child, 10000);
+    assert.notEqual(child.exitCode, 0);
+    assert.match(errors, /official_controller_claim_dispatcher_unavailable/u);
+    assert.doesNotMatch(output, /pinvou remote relay listening/u);
+  } finally {
+    await stopRelay(child);
+  }
+});
+
+test("invalid or partially invalid proxy IP configuration fails startup instead of opening the allowlist", async () => {
+  for (const variable of ["PINVOU_REMOTE_ALLOWED_PROXY_IPS", "PINVOU_REMOTE_TRUSTED_PROXY_IPS"]) {
+    for (const value of ["not-an-ip", "127.0.0.1,not-an-ip"]) {
+      const child = spawn(process.execPath, [join(relayDir, "server.js")], {
+        cwd: relayDir, env: { ...process.env, PORT: String(await getFreePort()),
+          PINVOU_REMOTE_STATE_PATH: join(testRoot, `proxy-invalid-${variable}-${Date.now()}.json`), [variable]: value },
+        stdio: ["ignore", "pipe", "pipe"], windowsHide: true,
+      });
+      let output = "";
+      let errors = "";
+      child.stdout.on("data", (chunk) => { output += String(chunk); });
+      child.stderr.on("data", (chunk) => { errors += String(chunk); });
+      try {
+        await waitForExit(child, 10000);
+        assert.notEqual(child.exitCode, 0);
+        assert.match(errors, /proxy_ip_configuration_invalid/u);
+        assert.doesNotMatch(output, /pinvou remote relay listening/u);
+      } finally { await stopRelay(child); }
+    }
   }
 });
 
