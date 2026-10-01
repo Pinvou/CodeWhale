@@ -1180,7 +1180,8 @@ test("real Relay heartbeat retries failed reservation invalidation and releases 
     const endpointId = "endpoint-controller-timeout";
     const accessToken = "controller-timeout-access-token-00000001";
     const desktopSecret = "controller-timeout-desktop-secret-000001";
-    const desktop = await registerDesktop(endpointId, accessToken, desktopSecret, isolated.wsUrl, 15_000);
+    const desktop = await registerDesktop(endpointId, accessToken, desktopSecret,
+      isolated.wsUrl, 15_000, true);
     sockets.push(desktop.ws);
 
     const codeWrap = crypto.generateKeyPairSync("x25519");
@@ -1204,7 +1205,7 @@ test("real Relay heartbeat retries failed reservation invalidation and releases 
     if (registered.type === "error") throw new Error(`pairing registration failed: ${registered.code}`);
     const pairingCode = openPairingCode(codeWrap.privateKey, registered);
 
-    const controller = await openSocket(isolated.wsUrl);
+    const controller = await openControllerSocket(isolated.wsUrl);
     sockets.push(controller);
     const reservedA = nextMessage(controller, "controller_pairing_reserved", 10_000);
     const reservedB = nextMessage(desktop.ws, "controller_pairing_reserved", 10_000);
