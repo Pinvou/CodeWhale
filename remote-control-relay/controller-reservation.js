@@ -282,6 +282,7 @@ export class ControllerReservationManager {
         this.#requests.set(requestId, Object.freeze({
           reservation_id: reservationId, code_proof: this.#codeProof(code),
         }));
+        this.#pairings.retainForReservation?.(pairing.pairing_id);
         this.#emit("claim_reserved");
         return reservation;
       } catch (error) {
@@ -343,6 +344,7 @@ export class ControllerReservationManager {
     });
     this.#reservations.delete(reservation.reservation_id);
     this.#requests.delete(reservation.request_id);
+    this.#pairings.releaseReservation?.(reservation.pairing_id);
     this.#emit("reservation_promoted");
     return Object.freeze({
       ...reservation, state: "controller_connected", controller_lease_id: controllerLeaseId,
@@ -369,6 +371,7 @@ export class ControllerReservationManager {
     }
     this.#reservations.delete(reservation.reservation_id);
     this.#requests.delete(reservation.request_id);
+    this.#pairings.releaseReservation?.(reservation.pairing_id);
     this.#emit("reservation_released");
     return true;
   }
