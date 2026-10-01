@@ -15,6 +15,7 @@ let policy = { revision: 2, enabled: false, amount_microcredits: 0, validity_day
 let recentAuthenticationRequired = false;
 let authenticationBehavior = 'concurrent-update';
 let nextPolicyReadDelayMs = 0;
+let delayedPolicyReadStarted = false;
 let nextAuthorizationReadDelayMs = 0;
 let delayNextSaveAuthorizationRead = false;
 let delayedSaveAuthorizationStarted = false;
@@ -49,6 +50,14 @@ const server = createServer(async (request, response) => {
     currentUserID = currentUserID.endsWith('0101') ? '0199a100-0001-7000-8000-000000000202' : '0199a100-0001-7000-8000-000000000101';
     csrfToken = currentUserID.endsWith('0101') ? 'csrf-user-a' : 'csrf-user-b';
     nextAuthorizationReadDelayMs = 500;
+    return json(response, {});
+  }
+  if (url.pathname === '/__test__/switch-current-user-with-stale-policy-read') {
+    currentUserID = currentUserID.endsWith('0101') ? '0199a100-0001-7000-8000-000000000202' : '0199a100-0001-7000-8000-000000000101';
+    csrfToken = currentUserID.endsWith('0101') ? 'csrf-user-a' : 'csrf-user-b';
+    nextAuthorizationReadDelayMs = 100;
+    nextPolicyReadDelayMs = 800;
+    delayedPolicyReadStarted = false;
     return json(response, {});
   }
   if (url.pathname === '/__test__/writes') return json(response, writes);
@@ -88,12 +97,14 @@ const server = createServer(async (request, response) => {
     return json(response, { user_id: requestedUserID, platform_permissions: requestedPermissions });
   }
   if (url.pathname === '/api/admin/billing/admin/v1/registration-bonus-policy' && request.method === 'GET') {
+    const responsePolicy = { ...policy };
     if (nextPolicyReadDelayMs > 0) {
       const delay = nextPolicyReadDelayMs;
       nextPolicyReadDelayMs = 0;
+      delayedPolicyReadStarted = true;
       await new Promise((resolve) => { setTimeout(resolve, delay); });
     }
-    return json(response, policy);
+    return json(response, responsePolicy);
   }
   if (url.pathname === '/api/admin/billing/admin/v1/registration-bonus-policy' && request.method === 'PUT') {
     if (request.headers['x-csrf-token'] !== csrfToken) return json(response, { code: 'CSRF_REJECTED' }, 403);
@@ -278,6 +289,27 @@ try {
   assert.equal(await page.$eval('[data-testid="registration-bonus-policy"] textarea', (node) => node.value), '', 'the authoritative policy reload must replace the submitted form');
   assert.match(await page.$eval('[data-testid="registration-bonus-policy"] [role="status"]', (node) => node.textContent), /save completed.*latest server policy/i);
 
+  await page.type('[data-testid="registration-bonus-policy"] textarea', 'Bypass a stale read after cross identity refresh');
+  await fetch(`http://127.0.0.1:${port}/__test__/delay-next-policy-write`);
+  const writesBeforeCrossIdentityReconciliation = writes.length;
+  const revisionBeforeCrossIdentityReconciliation = policy.revision;
+  await page.click('[data-testid="registration-bonus-policy"] button[type="submit"]');
+  for (let attempt = 0; attempt < 50 && !delayedPolicyWriteStarted; attempt += 1) {
+    await new Promise((resolve) => { setTimeout(resolve, 10); });
+  }
+  assert.equal(delayedPolicyWriteStarted, true, 'the cross-identity scenario must begin with an in-flight policy write');
+  await fetch(`http://127.0.0.1:${port}/__test__/switch-current-user-with-stale-policy-read`);
+  await page.evaluate(() => globalThis.dispatchEvent(new Event('focus')));
+  for (let attempt = 0; attempt < 100 && !delayedPolicyReadStarted; attempt += 1) {
+    await new Promise((resolve) => { setTimeout(resolve, 10); });
+  }
+  assert.equal(delayedPolicyReadStarted, true, 'the new identity must start a policy read that snapshots the pre-write revision');
+  await page.waitForFunction((revision) => document.querySelector('[data-testid="registration-bonus-policy"] .adm-registration-bonus-summary dd')?.textContent.trim() === String(revision), {}, revisionBeforeCrossIdentityReconciliation + 1);
+  assert.equal(writes.length, writesBeforeCrossIdentityReconciliation + 1);
+  assert.equal(currentUserID, '0199a100-0001-7000-8000-000000000202');
+  assert.equal(await page.$eval('[data-testid="registration-bonus-policy"] textarea', (node) => node.value), '', 'reconciliation must bypass the stale shared read and show the committed policy');
+  assert.match(await page.$eval('[data-testid="registration-bonus-policy"] [role="status"]', (node) => node.textContent), /save completed.*latest server policy/i);
+
   await page.reload({ waitUntil: 'networkidle0' });
   await page.waitForSelector('[data-testid="registration-bonus-policy"] form');
   assert.equal(await page.$('.adm-registration-bonus-draft-prompt'), null);
@@ -293,7 +325,7 @@ try {
     page.click('[data-testid="registration-bonus-policy"] [role="alert"] button'),
   ]);
   await page.waitForSelector('[data-testid="registration-bonus-policy"] form');
-  assert.equal(currentUserID, '0199a100-0001-7000-8000-000000000202');
+  assert.equal(currentUserID, '0199a100-0001-7000-8000-000000000101');
   assert.equal(await page.$('.adm-registration-bonus-draft-prompt'), null);
   assert.deepEqual(await page.$$eval('[data-testid="registration-bonus-policy"] input[type="number"]', (nodes) => nodes.map((node) => node.value)), ['40', '45']);
   assert.equal(await page.$eval('[data-testid="registration-bonus-policy"] textarea', (node) => node.value), '', 'a different administrator must never receive the originating administrator draft');

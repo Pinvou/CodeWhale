@@ -188,6 +188,14 @@ export class AdminPlatformClient {
     return waitForSharedRead(entry, signal);
   }
 
+  invalidateRead(area, resource) {
+    const url = `${this.baseURL}/api/admin/${area}${resource}`;
+    const entry = this.inflightReads.get(url);
+    if (!entry) return;
+    entry.abandon();
+    entry.controller.abort();
+  }
+
   async mutate(area, resource, method, body, idempotencyKey = '', signal) {
     const headers = {
       Accept: 'application/json',
@@ -237,7 +245,8 @@ export class AdminPlatformClient {
   updateSMSConfiguration(input, idempotencyKey = `sms-configuration-${secureRequestID()}`, signal) {
     return this.mutate('account', '/admin/v1/sms-configuration', 'PUT', input, idempotencyKey, signal);
   }
-  registrationBonusPolicy(signal) {
+  registrationBonusPolicy(signal, { fresh = false } = {}) {
+    if (fresh) this.invalidateRead('billing', '/admin/v1/registration-bonus-policy');
     return this.request('billing', '/admin/v1/registration-bonus-policy', signal);
   }
   updateRegistrationBonusPolicy(input, idempotencyKey = `registration-bonus-${secureRequestID()}`, signal) {

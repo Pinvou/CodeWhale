@@ -107,10 +107,10 @@ export function AdminOperationsWorkspace({ client, copy, permissions = EMPTY_PER
   const [form, setForm] = useState(() => policyForm());
   const [state, setState] = useState({ loading: true, saving: false, error: '', errorCode: '', notice: '' });
 
-  const load = useCallback(async (signal) => {
+  const load = useCallback(async (signal, { fresh = false } = {}) => {
     setState((value) => ({ ...value, loading: true, error: '', errorCode: '', notice: '' }));
     try {
-      const result = await client.registrationBonusPolicy(signal);
+      const result = await client.registrationBonusPolicy(signal, { fresh });
       const draft = returnedDraft.current;
       const draftExpired = Boolean(draft && !reauthenticationDraftIsFresh(draft));
       const draftCleared = !returnAttemptID.current || clearReauthenticationDraft();
@@ -181,7 +181,7 @@ export function AdminOperationsWorkspace({ client, copy, permissions = EMPTY_PER
         }
         if (!mountedRef.current) return;
         const reconciliationGeneration = Number(authorizationRefreshGuard?.current?.generation || 0);
-        loaded = await load();
+        loaded = await load(undefined, { fresh: true });
         if (!authorizationRefreshGuard?.current?.active && Number(authorizationRefreshGuard?.current?.generation || 0) === reconciliationGeneration) break;
       }
       if (loaded && mountedRef.current) setState((value) => ({ ...value, notice: labels.saveReconciled }));
