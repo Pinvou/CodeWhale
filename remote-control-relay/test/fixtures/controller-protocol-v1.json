@@ -3,7 +3,7 @@
   "contract": {
     "id": "pinvou-desktop-controller/v1",
     "integer_wire_format": "canonical-u64-decimal-string",
-    "sha256": "e01f4708dc61755146f335a74e6b2b6edec590cab691d3275e2d9bf68496cee7"
+    "sha256": "04c9f3721bbf38afbe6f51550bdba773a9225d318fe7977249f3f9bed1974d47"
   },
   "expected_capabilities": ["pairing_v1", "encrypted_frames_v1", "finished_receipt_v1", "role_liveness_v1", "resume_v1", "task_v1", "temporary_model_package_v1", "permission_v1", "attachment_v1", "artifact_v1", "snapshot_journal_v1"],
   "expected_error_codes": ["pairing_code_invalid", "pairing_code_generation_failed", "controller_busy", "version_incompatible", "endpoint_offline", "enrollment_required", "invalid_message", "unsupported_capability", "permission_already_decided", "permission_expired", "result_unknown", "capability_snapshot_unavailable"],

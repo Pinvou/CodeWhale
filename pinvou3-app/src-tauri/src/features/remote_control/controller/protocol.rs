@@ -104,7 +104,7 @@ const MAX_ARTIFACTS: usize = 256;
 pub(crate) const MAX_ENCRYPTED_WIRE_BYTES: usize =
     MAX_ENCRYPTED_FRAME_BYTES.div_ceil(3) * 4 + MAX_CONTROL_MESSAGE_BYTES;
 const CONTROLLER_CONTRACT_SHA256: &str =
-    "e01f4708dc61755146f335a74e6b2b6edec590cab691d3275e2d9bf68496cee7";
+    "04c9f3721bbf38afbe6f51550bdba773a9225d318fe7977249f3f9bed1974d47";
 
 pub(crate) const CONTROLLER_CAPABILITIES: &[&str] = &[
     "pairing_v1",
@@ -1116,6 +1116,7 @@ fn message_schema(kind: &str) -> Option<Schema> {
                 "liveness_epoch_a",
                 "liveness_epoch_b",
                 "new_resume_token_b64",
+                "resume_deadline_ms",
             ],
             optional: &[],
             roles: &[RELAY],
@@ -3719,6 +3720,36 @@ pub(crate) fn build_liveness_attestation_preimage(message: &Value) -> Result<Vec
         length_prefix_text(&mut output, object_string(object, field, "attestation")?);
     }
     Ok(output)
+}
+
+/// Parsed signing material is not authenticated evidence. Only the enrolled
+/// Relay trust verifier may authorize it before a watchdog state transition.
+pub(crate) struct ParsedLivenessAttestation {
+    pub(crate) relay_signing_key_id: String,
+    pub(crate) signature_algorithm: String,
+    pub(crate) signature_preimage: Vec<u8>,
+    pub(crate) relay_signature: Vec<u8>,
+}
+
+pub(crate) fn parse_liveness_attestation(input: &str) -> Result<ParsedLivenessAttestation> {
+    let value = validate_controller_message_json(input, RELAY)?;
+    let message = as_object(&value, "attestation")?;
+    let signature_preimage = build_liveness_attestation_preimage(&value)?;
+    let relay_signature = base64::engine::general_purpose::STANDARD
+        .decode(object_string(
+            message,
+            "relay_signature_b64",
+            "attestation",
+        )?)
+        .map_err(|_| ControllerProtocolError::new("invalid_field", "relay_signature_b64"))?;
+    Ok(ParsedLivenessAttestation {
+        relay_signing_key_id: object_string(message, "relay_signing_key_id", "attestation")?
+            .to_owned(),
+        signature_algorithm: object_string(message, "signature_algorithm", "attestation")?
+            .to_owned(),
+        signature_preimage,
+        relay_signature,
+    })
 }
 
 pub(crate) fn validate_liveness_attestation_message_json(

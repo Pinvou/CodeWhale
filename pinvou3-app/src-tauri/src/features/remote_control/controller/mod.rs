@@ -14,6 +14,7 @@ pub(crate) mod liveness;
 pub(crate) mod permission;
 pub(crate) mod ports;
 pub(crate) mod protocol;
+pub(crate) mod recovery_budget;
 pub(crate) mod relay_runtime;
 pub(crate) mod relay_transport;
 pub(crate) mod resume;

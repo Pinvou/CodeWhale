@@ -179,10 +179,10 @@ test('the controller exposes all seventeen designed UI states', () => {
 
 test('A-side connection status is restored from the backend state machine', () => {
   assert.ok(bridge.includes('listen("desktop-remote-controller-status"'));
-  assert.ok(bridge.includes('controllerStatusPayload(payload)'));
+  assert.ok(bridge.includes('logic.applyControllerStatus(current(), payload)'));
   assert.ok(bridge.includes('controllerStatus().catch(function () {})'));
-  assert.ok(bridge.includes('controllerStatusPayload(result)'));
-  assert.ok(bridge.includes('deviceName: wire.deviceDisplayName || null'));
+  assert.ok(bridge.includes('var payload = shallow(result)'));
+  assert.ok(bridge.includes('if (current().revision !== revision) return result'));
 });
 
 test('the shell separates hiding the page section from disconnecting', () => {

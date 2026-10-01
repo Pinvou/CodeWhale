@@ -12,12 +12,13 @@ use serde::Serialize;
 use uuid::Uuid;
 use zeroize::{Zeroize, Zeroizing};
 
+use super::crypto::{AuthenticatedRelayTrustConfig, authenticate_relay_liveness_attestation};
 use super::liveness::{
     ControllerLivenessWatchdog, LivenessWatchdogState, MAX_LIVENESS_ATTESTATION_AGE_MS,
 };
 use super::protocol::LeaseContext;
 use super::relay_transport::ControllerTransportSender;
-use super::resume::ControllerResumeGate;
+use super::resume::{ControllerResumeGate, ResumePhase};
 
 const MAX_DEVICE_NAME_CHARS: usize = 80;
 const MAX_WORKSPACES: usize = 16;
@@ -147,6 +148,7 @@ pub(crate) struct ControlledWorkspaceInfo {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ControlledStatus {
     status: ControlledStatusKind,
+    status_intent: String,
     generation: Option<String>,
     registration_request_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -216,7 +218,7 @@ pub(crate) trait ControlledCleanupSink: Send + Sync {
 pub(crate) struct ControlledResumeMaterial {
     pub(crate) lease: LeaseContext,
     pub(crate) resume_token: [u8; 32],
-    pub(crate) original_deadline_b: u64,
+    pub(crate) relay_deadline_identity_ms: u64,
 }
 
 impl std::fmt::Debug for ControlledResumeMaterial {
@@ -225,7 +227,10 @@ impl std::fmt::Debug for ControlledResumeMaterial {
             .debug_struct("ControlledResumeMaterial")
             .field("lease", &self.lease)
             .field("resume_token", &"[REDACTED]")
-            .field("original_deadline_b", &self.original_deadline_b)
+            .field(
+                "relay_deadline_identity_ms",
+                &self.relay_deadline_identity_ms,
+            )
             .finish()
     }
 }
@@ -266,6 +271,8 @@ struct Inner {
     phase: ControlledStatusKind,
     intent: u64,
     generation: Option<String>,
+    // Non-secret correlation only; never used by current_operation/ensure_operation.
+    status_generation: Option<String>,
     registration_request_id: Option<String>,
     device_name: Option<String>,
     pairing: Option<PairingState>,
@@ -295,6 +302,7 @@ impl Default for Inner {
             phase: ControlledStatusKind::Disabled,
             intent: 0,
             generation: None,
+            status_generation: None,
             registration_request_id: None,
             device_name: None,
             pairing: None,
@@ -433,8 +441,11 @@ impl ControlledDeviceManager {
                 "desktop_remote_generation_mismatch",
             ));
         }
-        let watchdog = ControllerLivenessWatchdog::new(lease.liveness_epoch_a.clone())
-            .map_err(|_| ControlledStateError::new("liveness_epoch_invalid"))?;
+        let watchdog = ControllerLivenessWatchdog::authenticated_cycle(
+            lease.liveness_epoch_a.clone(),
+            lease.connected_at_b,
+        )
+        .map_err(|_| ControlledStateError::new("liveness_epoch_invalid"))?;
         let resume_gate = ControllerResumeGate::new(
             super::relay_transport::ControllerRole::ControlledB,
             lease.context.clone(),
@@ -486,26 +497,34 @@ impl ControlledDeviceManager {
     pub(crate) fn mark_transport_disconnected(&self, now_b: u64) -> ControlledStatus {
         let mut inner = self.inner.lock();
         inner.last_observed_now_b = inner.last_observed_now_b.max(now_b);
-        if inner.phase == ControlledStatusKind::Connected
+        if (inner.phase == ControlledStatusKind::Connected
             || (inner.phase == ControlledStatusKind::Reconnecting
-                && inner.reconnect_reason == Some(ReconnectReason::LivenessSuspect))
+                && inner.reconnect_reason == Some(ReconnectReason::LivenessSuspect)))
+            && inner
+                .resume_gate
+                .as_ref()
+                .is_none_or(|gate| gate.phase() == ResumePhase::Connected)
         {
             let deadline = inner
                 .watchdog
-                .as_ref()
-                .and_then(|watchdog| watchdog.deadline_b());
-            if let Some(gate) = inner.resume_gate.as_mut() {
-                if gate.disconnect(now_b, deadline).is_err() {
-                    inner.phase = ControlledStatusKind::Error;
-                    inner.error_code = Some("desktop_remote_resume_invalid".to_owned());
-                    inner.reconnect_reason = None;
-                } else {
-                    inner.phase = ControlledStatusKind::Reconnecting;
-                    inner.reconnect_reason = Some(ReconnectReason::Transport);
-                }
-            } else {
+                .as_mut()
+                .and_then(|watchdog| watchdog.freeze_deadline(now_b));
+            if inner
+                .resume_gate
+                .as_mut()
+                .is_some_and(|gate| gate.disconnect(now_b, deadline).is_ok())
+            {
                 inner.phase = ControlledStatusKind::Reconnecting;
                 inner.reconnect_reason = Some(ReconnectReason::Transport);
+            } else {
+                let generation = inner.generation.clone().unwrap_or_default();
+                clear_sensitive(&mut inner, now_b, true);
+                inner.device_name = None;
+                inner.phase = ControlledStatusKind::Error;
+                inner.error_code = Some(RESUME_FAILED_CODE.to_owned());
+                drop(inner);
+                self.notify_cleanup(&generation);
+                return self.status();
             }
         }
         status_locked(&inner)
@@ -518,6 +537,7 @@ impl ControlledDeviceManager {
         sent_at_b: u64,
     ) -> Result<()> {
         let mut inner = self.inner.lock();
+        ensure_connected_evidence(&inner)?;
         let Some(watchdog) = inner.watchdog.as_mut() else {
             return Err(ControlledStateError::new("watchdog_unavailable"));
         };
@@ -550,6 +570,7 @@ impl ControlledDeviceManager {
             .map_err(|_| ControlledStateError::new("liveness_challenge_invalid"))?;
         {
             let mut inner = self.inner.lock();
+            ensure_connected_evidence(&inner)?;
             let Some(watchdog) = inner.watchdog.as_mut() else {
                 return Err(ControlledStateError::new("watchdog_unavailable"));
             };
@@ -562,6 +583,7 @@ impl ControlledDeviceManager {
 
     pub(crate) fn accept_direct_liveness(&self, json: &str, received_at_b: u64) -> Result<()> {
         let mut inner = self.inner.lock();
+        ensure_connected_evidence(&inner)?;
         let Some(context) = inner.lease_context.clone() else {
             return Err(ControlledStateError::new("lease_unavailable"));
         };
@@ -572,17 +594,21 @@ impl ControlledDeviceManager {
             .accept_direct_json(json, &context, received_at_b)
             .map_err(|_| ControlledStateError::new("liveness_evidence_invalid"))?;
         inner.last_observed_now_b = inner.last_observed_now_b.max(received_at_b);
-        recover_liveness_suspect(&mut inner);
+        recover_liveness_suspect(&mut inner, received_at_b);
         Ok(())
     }
 
     pub(crate) fn accept_liveness_attestation(
         &self,
         json: &str,
+        trust: &AuthenticatedRelayTrustConfig,
         request_sent_at_b: u64,
         received_at_b: u64,
     ) -> Result<()> {
+        authenticate_relay_liveness_attestation(json, trust)
+            .map_err(|_| ControlledStateError::new("liveness_evidence_invalid"))?;
         let mut inner = self.inner.lock();
+        ensure_connected_evidence(&inner)?;
         let Some(context) = inner.lease_context.clone() else {
             return Err(ControlledStateError::new("lease_unavailable"));
         };
@@ -596,7 +622,7 @@ impl ControlledDeviceManager {
             .accept_attestation_json(json, &context, request_sent_at_b, received_at_b)
             .map_err(|_| ControlledStateError::new("liveness_evidence_invalid"))?;
         inner.last_observed_now_b = inner.last_observed_now_b.max(received_at_b);
-        recover_liveness_suspect(&mut inner);
+        recover_liveness_suspect(&mut inner, received_at_b);
         Ok(())
     }
 
@@ -681,6 +707,7 @@ impl ControlledDeviceManager {
         liveness_epoch_a: impl Into<String>,
         resume_token: [u8; 32],
         transport_key_fingerprint: [u8; 32],
+        relay_resume_deadline_ms: u64,
     ) -> Result<ControlledStatus> {
         let mut inner = self.inner.lock();
         ensure_operation(&inner, &operation)?;
@@ -691,25 +718,29 @@ impl ControlledDeviceManager {
             return Err(ControlledStateError::new("lease_unavailable"));
         };
         let epoch = liveness_epoch_a.into();
+        let next_watchdog =
+            ControllerLivenessWatchdog::authenticated_cycle(epoch.clone(), now_b).ok();
         // E2E-06：先用完整的 `controller_resumed` 让旧 gate 消费旧材料；任何
         // 相位、activation 或轮换材料不符都必须终止候选，绝不产生半恢复状态。
         let watchdog_deadline = inner
             .watchdog
             .as_ref()
             .and_then(|watchdog| watchdog.deadline_b());
-        let accepted = match inner.resume_gate.as_mut() {
-            Some(gate) => gate
-                .accept_resumed(
-                    activation_id,
-                    epoch.clone(),
-                    resume_token,
-                    transport_key_fingerprint,
-                    now_b,
-                    watchdog_deadline,
-                )
-                .is_ok(),
-            None => false,
-        };
+        let accepted = relay_resume_deadline_ms > 0
+            && next_watchdog.is_some()
+            && match inner.resume_gate.as_mut() {
+                Some(gate) => gate
+                    .accept_resumed(
+                        activation_id,
+                        epoch.clone(),
+                        resume_token,
+                        transport_key_fingerprint,
+                        now_b,
+                        watchdog_deadline,
+                    )
+                    .is_ok(),
+                None => false,
+            };
         if !accepted {
             let generation = inner.generation.clone().unwrap_or_default();
             clear_sensitive(&mut inner, u64::MAX, true);
@@ -720,7 +751,6 @@ impl ControlledDeviceManager {
             self.notify_cleanup(&generation);
             return Err(ControlledStateError::new("desktop_remote_resume_failed"));
         }
-        let deadline = now_b.saturating_add(30_000);
         // Replacing the gate with the already-authenticated final material is
         // the single transition that cancels the old watchdog.
         inner.resume_gate = Some(ControllerResumeGate::new(
@@ -728,12 +758,9 @@ impl ControlledDeviceManager {
             context,
             resume_token,
             transport_key_fingerprint,
-            deadline,
+            relay_resume_deadline_ms,
         ));
-        inner.watchdog = Some(
-            ControllerLivenessWatchdog::new(epoch.clone())
-                .map_err(|_| ControlledStateError::new("liveness_epoch_invalid"))?,
-        );
+        inner.watchdog = next_watchdog;
         inner.liveness_epoch_a = Some(epoch);
         inner.phase = ControlledStatusKind::Connected;
         inner.reconnect_reason = None;
@@ -759,10 +786,15 @@ impl ControlledDeviceManager {
             .watchdog
             .as_ref()
             .and_then(|watchdog| watchdog.deadline_b());
-        let (prepared, original_deadline_b, resume_token) = match inner.resume_gate.as_mut() {
+        let (prepared, relay_deadline_identity_ms, resume_token) = match inner.resume_gate.as_mut()
+        {
             Some(gate) => {
                 let prepared = gate.prepare(now_b, deadline).is_ok();
-                (prepared, gate.original_deadline_b(), gate.current_token())
+                (
+                    prepared,
+                    gate.relay_deadline_identity_ms(),
+                    gate.current_token(),
+                )
             }
             None => (false, 0, [0_u8; 32]),
         };
@@ -779,7 +811,7 @@ impl ControlledDeviceManager {
         Ok(ControlledResumeMaterial {
             lease: context,
             resume_token,
-            original_deadline_b,
+            relay_deadline_identity_ms,
         })
     }
 
@@ -1085,6 +1117,7 @@ fn prepare_generation(inner: &mut Inner) -> ControlledOperation {
     let generation = format!("generation_{}", Uuid::new_v4().simple());
     let registration = format!("registration_{}", Uuid::new_v4().simple());
     inner.generation = Some(generation.clone());
+    inner.status_generation = Some(generation.clone());
     inner.registration_request_id = Some(registration);
     ControlledOperation {
         intent: inner.intent,
@@ -1137,6 +1170,38 @@ fn normalize_workspaces(
     Ok(output)
 }
 
+fn ensure_connected_evidence(inner: &Inner) -> Result<()> {
+    if (inner.phase == ControlledStatusKind::Connected
+        || (inner.phase == ControlledStatusKind::Reconnecting
+            && inner.reconnect_reason == Some(ReconnectReason::LivenessSuspect)))
+        && inner
+            .resume_gate
+            .as_ref()
+            .is_some_and(|gate| gate.phase() == ResumePhase::Connected)
+    {
+        Ok(())
+    } else {
+        Err(ControlledStateError::new("liveness_evidence_invalid"))
+    }
+}
+
+fn recover_liveness_suspect(inner: &mut Inner, now_b: u64) {
+    if inner.phase == ControlledStatusKind::Reconnecting
+        && inner.reconnect_reason == Some(ReconnectReason::LivenessSuspect)
+        && inner
+            .resume_gate
+            .as_ref()
+            .is_some_and(|gate| gate.phase() == ResumePhase::Connected)
+        && inner
+            .watchdog
+            .as_ref()
+            .is_some_and(|watchdog| watchdog.state(now_b) == LivenessWatchdogState::Healthy)
+    {
+        inner.phase = ControlledStatusKind::Connected;
+        inner.reconnect_reason = None;
+    }
+}
+
 fn clear_sensitive(inner: &mut Inner, now_b: u64, clear_workspaces: bool) {
     if let Some(transport) = inner.transport.take() {
         transport.stop();
@@ -1162,15 +1227,6 @@ fn clear_sensitive(inner: &mut Inner, now_b: u64, clear_workspaces: bool) {
     }
 }
 
-fn recover_liveness_suspect(inner: &mut Inner) {
-    if inner.phase == ControlledStatusKind::Reconnecting
-        && inner.reconnect_reason == Some(ReconnectReason::LivenessSuspect)
-    {
-        inner.phase = ControlledStatusKind::Connected;
-        inner.reconnect_reason = None;
-    }
-}
-
 fn status_locked(inner: &Inner) -> ControlledStatus {
     let watchdog_state = inner
         .watchdog
@@ -1178,7 +1234,8 @@ fn status_locked(inner: &Inner) -> ControlledStatus {
         .map(|watchdog| watchdog.state(inner.last_observed_now_b));
     ControlledStatus {
         status: inner.phase,
-        generation: inner.generation.clone(),
+        status_intent: inner.intent.to_string(),
+        generation: inner.status_generation.clone(),
         registration_request_id: inner.registration_request_id.clone(),
         pairing_code: inner
             .pairing
@@ -1224,6 +1281,72 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
+
+    #[test]
+    fn serialized_status_matches_the_shared_bridge_fixture() {
+        let fixtures: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../../tests/fixtures/desktop_remote_status.json"
+        ))
+        .unwrap();
+        let manager = ControlledDeviceManager::default();
+        let operation = manager
+            .start(
+                Some("Studio PC"),
+                vec![WorkspaceAuthorizationRequest {
+                    path: PathBuf::from("workspace-fixture"),
+                    display_name: "Project".into(),
+                    code_allowed: true,
+                }],
+            )
+            .unwrap();
+        let mut waiting = manager
+            .complete_registration(
+                operation.clone(),
+                ControlledRegistration {
+                    pairing_code: "2345678".into(),
+                    sealed_code_b64: "sealed".into(),
+                    expires_at_ms: 600_000,
+                },
+                1_000,
+            )
+            .unwrap();
+        // Normalize only random correlation IDs; every other field comes from
+        // the production transition rather than a hand-constructed DTO.
+        waiting.generation = Some("generation-0001".into());
+        waiting.registration_request_id = Some("registration-0001".into());
+        assert_eq!(
+            serde_json::to_value(&waiting).unwrap(),
+            fixtures["controlledWaiting"]
+        );
+        let mut failed = manager
+            .fail_operation(operation.clone(), "endpoint_offline".into())
+            .unwrap();
+        assert_eq!(
+            failed.generation.as_deref(),
+            Some(operation.generation.as_str())
+        );
+        assert!(manager.inner.lock().generation.is_none());
+        assert_eq!(
+            manager
+                .complete_registration(
+                    operation,
+                    ControlledRegistration {
+                        pairing_code: "2345678".into(),
+                        sealed_code_b64: "sealed".into(),
+                        expires_at_ms: 600_000,
+                    },
+                    1_000
+                )
+                .unwrap_err()
+                .code,
+            "desktop_remote_stale_result"
+        );
+        failed.generation = Some("generation-0001".into());
+        assert_eq!(
+            serde_json::to_value(failed).unwrap(),
+            fixtures["controlledError"]
+        );
+    }
 
     #[derive(Default)]
     struct CleanupCounter(AtomicUsize);
@@ -1291,6 +1414,74 @@ mod tests {
     }
 
     #[test]
+    fn attestation_authentication_precedes_every_watchdog_state_change() {
+        use super::super::protocol::build_liveness_attestation_preimage;
+        use base64::Engine as _;
+        use ring::signature::{Ed25519KeyPair, KeyPair};
+
+        let manager = ControlledDeviceManager::default();
+        let operation = manager.start(None, Vec::new()).unwrap();
+        register(&manager, &operation);
+        manager.mark_claimed(operation.clone()).unwrap();
+        manager
+            .complete_connected(operation.clone(), lease(&operation.generation))
+            .unwrap();
+        let nonce = "AAAAAAAAAAAAAAAAAAAAAA==";
+        manager
+            .register_liveness_challenge("challenge-0001", nonce, 4_000)
+            .unwrap();
+        let prior_observed = manager.inner.lock().last_observed_now_b;
+
+        let key = Ed25519KeyPair::from_seed_unchecked(&[7; 32]).unwrap();
+        let public_key: [u8; 32] = key.public_key().as_ref().try_into().unwrap();
+        let trust = AuthenticatedRelayTrustConfig::from_test_enrollment([(
+            "relay-key-test-1".into(),
+            public_key,
+        )]);
+        let mut proof = serde_json::json!({
+            "v": 1, "type": "controller_liveness_attestation_a", "request_id": "request-0001",
+            "connection_id": "connection-0001", "controller_lease_id": "lease-0001",
+            "lease_epoch": "1", "relay_epoch": "relay-epoch-0001",
+            "remote_control_generation": operation.generation, "liveness_epoch_a": "live-a-1",
+            "heartbeat_sequence_a": "1", "attestation_sequence": "1",
+            "challenge_id": "challenge-0001", "challenge_b64": nonce,
+            "observed_age_ms": "1000", "remaining_ttl_ms": "29000", "issued_at_relay": "5000",
+            "relay_signing_key_id": "relay-key-test-1", "signature_algorithm": "ed25519"
+        });
+        proof["relay_signature_b64"] = base64::engine::general_purpose::STANDARD
+            .encode(
+                key.sign(&build_liveness_attestation_preimage(&proof).unwrap())
+                    .as_ref(),
+            )
+            .into();
+        for (field, replacement) in [
+            ("relay_signature_b64", format!("{}==", "A".repeat(86))),
+            ("relay_signing_key_id", "unknown-key".to_owned()),
+            ("remaining_ttl_ms", "28000".to_owned()),
+            ("signature_algorithm", "unsupported".to_owned()),
+        ] {
+            let mut changed = proof.clone();
+            changed[field] = replacement.into();
+            assert_eq!(
+                manager
+                    .accept_liveness_attestation(&changed.to_string(), &trust, 4_000, 5_000)
+                    .unwrap_err()
+                    .code,
+                "liveness_evidence_invalid"
+            );
+            assert_eq!(manager.status().watchdog_deadline_b, Some(33_000));
+            let inner = manager.inner.lock();
+            assert_eq!(inner.last_observed_now_b, prior_observed);
+        }
+        // The same valid proof must still install evidence: failed signatures
+        // neither consumed its challenge nor advanced the attestation sequence.
+        manager
+            .accept_liveness_attestation(&proof.to_string(), &trust, 4_000, 5_000)
+            .unwrap();
+        assert!(manager.status().watchdog_deadline_b.is_some());
+    }
+
+    #[test]
     fn start_registration_claim_and_connection_form_one_generation() {
         let manager = ControlledDeviceManager::default();
         let operation = manager
@@ -1338,7 +1529,11 @@ mod tests {
             Some("Controller PC")
         );
         assert_eq!(connected.connected_at_b, Some(3_000));
-        assert_eq!(connected.watchdog_deadline_b, None);
+        assert_eq!(
+            serde_json::to_value(&connected).unwrap()["controllerDeviceName"],
+            "Controller PC"
+        );
+        assert_eq!(connected.watchdog_deadline_b, Some(33_000));
         let projected = manager.workspaces();
         assert_eq!(projected.len(), 1);
         assert_eq!(projected[0].display_name, "Projects");
@@ -1423,7 +1618,7 @@ mod tests {
             ControlledStatusKind::Reconnecting
         );
         let material = manager.begin_resume(operation.clone(), 6_000).unwrap();
-        assert_eq!(material.original_deadline_b, 30_000);
+        assert_eq!(material.relay_deadline_identity_ms, 30_000);
         assert!(format!("{material:?}").contains("[REDACTED]"));
         assert_eq!(material.resume_token, [1; 32]);
 
@@ -1470,13 +1665,14 @@ mod tests {
                 operation.clone(),
                 activation,
                 12_000,
-                "live-a-2",
+                "live:a-2",
                 [3; 32],
                 [4; 32],
+                1_700_000_030_000,
             )
             .unwrap();
         assert_eq!(resumed.status, ControlledStatusKind::Connected);
-        assert_eq!(manager.live_liveness_epoch(), Some("live-a-2".to_owned()));
+        assert_eq!(manager.live_liveness_epoch(), Some("live:a-2".to_owned()));
 
         // 第二次断线后相位错乱（未 provisional 就 confirm）必须失败关闭。
         manager.mark_transport_disconnected(13_000);
@@ -1500,6 +1696,172 @@ mod tests {
             Some("desktop_remote_resume_invalid")
         );
         assert!(manager.live_lease().is_err());
+    }
+
+    #[test]
+    fn late_valid_evidence_recovers_suspect_then_real_close_freezes_without_extension() {
+        let manager = ControlledDeviceManager::default();
+        let operation = manager.start(None, Vec::new()).unwrap();
+        register(&manager, &operation);
+        manager.mark_claimed(operation.clone()).unwrap();
+        manager
+            .complete_connected(operation.clone(), lease(&operation.generation))
+            .unwrap();
+        manager
+            .register_liveness_challenge("challenge-0001", "AAAAAAAAAAAAAAAAAAAAAA==", 1_000)
+            .unwrap();
+        manager
+            .accept_direct_liveness(&direct_liveness(&operation.generation), 2_000)
+            .unwrap();
+        assert_eq!(
+            manager.poll_watchdog(17_000).status,
+            ControlledStatusKind::Reconnecting
+        );
+        let mut proof: serde_json::Value =
+            serde_json::from_str(&direct_liveness(&operation.generation)).unwrap();
+        proof["challenge_id"] = "challenge-0002".into();
+        proof["challenge_b64"] = "AQEBAQEBAQEBAQEBAQEBAQ==".into();
+        proof["heartbeat_sequence_a"] = "2".into();
+        manager
+            .register_liveness_challenge("challenge-0002", "AQEBAQEBAQEBAQEBAQEBAQ==", 17_000)
+            .unwrap();
+        manager
+            .accept_direct_liveness(&proof.to_string(), 18_000)
+            .unwrap();
+        assert_eq!(manager.status().status, ControlledStatusKind::Connected);
+        assert_eq!(manager.status().watchdog_deadline_b, Some(46_000));
+        assert_eq!(
+            manager.mark_transport_disconnected(19_000).status,
+            ControlledStatusKind::Reconnecting
+        );
+        assert_eq!(
+            manager
+                .inner
+                .lock()
+                .resume_gate
+                .as_ref()
+                .unwrap()
+                .frozen_deadline_b(),
+            Some(46_000)
+        );
+        assert!(
+            manager
+                .register_liveness_challenge("challenge-0003", "AgICAgICAgICAgICAgICAg==", 20_000)
+                .is_err()
+        );
+        assert!(
+            manager
+                .accept_direct_liveness(&proof.to_string(), 20_000)
+                .is_err()
+        );
+        assert!(manager.begin_liveness_challenge(20_000).is_err());
+        manager.mark_transport_disconnected(25_000);
+        assert_eq!(manager.status().watchdog_deadline_b, Some(46_000));
+        assert_eq!(
+            manager.poll_watchdog(46_000).status,
+            ControlledStatusKind::Error
+        );
+    }
+
+    #[test]
+    fn missing_or_expired_evidence_on_close_cleans_sensitive_state_immediately() {
+        for missing in [false, true] {
+            let cleanup = Arc::new(CleanupCounter::default());
+            let manager = ControlledDeviceManager::default();
+            manager.register_cleanup_sink(cleanup.clone());
+            let operation = manager.start(None, Vec::new()).unwrap();
+            register(&manager, &operation);
+            manager.mark_claimed(operation.clone()).unwrap();
+            manager
+                .complete_connected(operation.clone(), lease(&operation.generation))
+                .unwrap();
+            if missing {
+                manager.inner.lock().watchdog = None;
+            }
+            assert_eq!(
+                manager.mark_transport_disconnected(33_000).status,
+                ControlledStatusKind::Error
+            );
+            assert!(manager.inner.lock().lease_context.is_none());
+            assert!(manager.inner.lock().resume_gate.is_none());
+            assert_eq!(cleanup.0.load(Ordering::SeqCst), 1);
+        }
+    }
+
+    #[test]
+    fn invalid_resumed_cycle_metadata_cleans_generation_and_notifies_once() {
+        for (deadline, epoch, now) in [
+            (0, "live-a-2", 12_000),
+            (60_000, "", 12_000),
+            (60_000, "invalid epoch", 12_000),
+            (60_000, "live~a-2", 12_000),
+            (60_000, "live-a-2", u64::MAX),
+        ] {
+            let cleanup = Arc::new(CleanupCounter::default());
+            let manager = ControlledDeviceManager::default();
+            manager.register_cleanup_sink(cleanup.clone());
+            let operation = manager.start(None, Vec::new()).unwrap();
+            register(&manager, &operation);
+            manager.mark_claimed(operation.clone()).unwrap();
+            manager
+                .complete_connected(operation.clone(), lease(&operation.generation))
+                .unwrap();
+            manager.mark_transport_disconnected(5_000);
+            manager.begin_resume(operation.clone(), 6_000).unwrap();
+            let activation = "activation-0001";
+            for (step, timestamp) in [
+                (
+                    ControlledResumeStep::Provisional {
+                        activation_id: activation,
+                    },
+                    7_000,
+                ),
+                (
+                    ControlledResumeStep::Confirmed {
+                        activation_id: activation,
+                    },
+                    8_000,
+                ),
+                (
+                    ControlledResumeStep::ActivationAcknowledged {
+                        activation_id: activation,
+                    },
+                    9_000,
+                ),
+                (
+                    ControlledResumeStep::PostActivationLiveness {
+                        activation_id: activation,
+                        liveness_epoch_b: "live-b-2",
+                    },
+                    10_000,
+                ),
+                (
+                    ControlledResumeStep::ReadyAcknowledged {
+                        activation_id: activation,
+                    },
+                    11_000,
+                ),
+            ] {
+                manager
+                    .advance_resume(operation.clone(), step, timestamp)
+                    .unwrap();
+            }
+            assert_eq!(
+                manager
+                    .complete_resumed(
+                        operation, activation, now, epoch, [3; 32], [4; 32], deadline
+                    )
+                    .unwrap_err()
+                    .code,
+                "desktop_remote_resume_failed"
+            );
+            assert_eq!(manager.status().status, ControlledStatusKind::Error);
+            let inner = manager.inner.lock();
+            assert!(inner.lease_context.is_none());
+            assert!(inner.resume_gate.is_none());
+            assert!(inner.watchdog.is_none());
+            assert_eq!(cleanup.0.load(Ordering::SeqCst), 1);
+        }
     }
 
     #[test]
@@ -1535,6 +1897,11 @@ mod tests {
             ControlledStatusKind::Reconnecting
         );
         let status = manager.poll_watchdog(31_000);
+        assert_eq!(
+            status.generation.as_deref(),
+            Some(operation.generation.as_str())
+        );
+        assert!(manager.inner.lock().generation.is_none());
         assert_eq!(status.status, ControlledStatusKind::Error);
         assert_eq!(
             status.error_code.as_deref(),
@@ -1601,7 +1968,7 @@ mod tests {
         let operation = manager.start(Some("B"), Vec::new()).unwrap();
         manager
             .complete_registration(
-                operation,
+                operation.clone(),
                 ControlledRegistration {
                     pairing_code: "2345678".into(),
                     sealed_code_b64: "sealed".into(),
@@ -1613,7 +1980,11 @@ mod tests {
         let stopped = manager.stop();
         assert_eq!(stopped.status, ControlledStatusKind::Stopped);
         assert_eq!(stopped.pairing_code, None);
-        assert_eq!(stopped.generation, None);
+        assert_eq!(
+            stopped.generation.as_deref(),
+            Some(operation.generation.as_str())
+        );
+        assert!(manager.inner.lock().generation.is_none());
         assert_eq!(cleanup.0.load(Ordering::SeqCst), 1);
 
         let second = manager.start(Some("B"), Vec::new()).unwrap();
@@ -1644,6 +2015,11 @@ mod tests {
             .unwrap();
         let refresh = manager.begin_refresh().unwrap();
         let status = manager.fail_refresh(refresh).unwrap();
+        assert_eq!(
+            status.generation.as_deref(),
+            Some(operation.generation.as_str())
+        );
+        assert!(manager.inner.lock().generation.is_none());
         assert_eq!(status.status, ControlledStatusKind::Error);
         assert_eq!(
             status.error_code.as_deref(),

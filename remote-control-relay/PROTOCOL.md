@@ -581,7 +581,7 @@ text “连接码无效或已失效”. A legacy conflict remains exactly
 plus close code `1008`.
 
 The contract digest is
-`e01f4708dc61755146f335a74e6b2b6edec590cab691d3275e2d9bf68496cee7`.
+`04c9f3721bbf38afbe6f51550bdba773a9225d318fe7977249f3f9bed1974d47`.
 It is SHA-256 over canonical JSON (object keys recursively sorted, array order
 preserved, compact JSON scalars) of `{contract,fixture}`. `contract` is the
 executable manifest containing every schema required/optional field, role
@@ -710,7 +710,17 @@ transitions.
 | B | `controller_post_activation_liveness` | Supply the first new B liveness for the activation. |
 | Relay | `controller_post_activation_liveness_confirmed` | Cross-notify the exact accepted B liveness. |
 | A/B | `controller_resume_ready_ack` | Each role independently acknowledges the same activation and liveness. |
-| Relay | `controller_resumed` | Atomically rotate the recipient's role token and open the business gate. |
+| Relay | `controller_resumed` | Atomically rotate the recipient's role token, return the next cycle's `resume_deadline_ms`, and open the business gate. |
+
+`resume_deadline_ms` and echoed `original_deadline_ms` are opaque Relay-clock
+cycle identities. Endpoints must never compare them with local monotonic time.
+At the first actual transport interruption, each endpoint freezes the cutoff
+from its last valid authenticated role-liveness evidence; Relay synchronously
+snapshots both role cutoffs before close hooks remove that evidence. All resume
+phases share that remaining budget: retries, B-only activity, and intermediate
+resume frames cannot extend it. A complete authenticated join or final resumed
+activation establishes a finite new cycle (at most 30 seconds); the final frame
+and persisted lease use exactly the same next-cycle identity.
 | A/B | `encrypted_frame` | Carry one encrypted typed payload in the direction fixed by socket role. |
 | A/B | `controller_disconnect` | End the current lease; B local stop remains authoritative. |
 | Relay | `error` | Return a bounded generic error from the controller error registry. |
