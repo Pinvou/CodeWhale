@@ -24,6 +24,7 @@ use crate::features::remote_control::controller::permission::{
 
 const UNSUPPORTED: &str = "desktop_remote_control_unsupported";
 
+#[cfg(test)]
 pub use crate::features::remote_control::controller::permission::PermissionRequestInput as DesktopRemotePermissionRequestInput;
 
 fn ensure_supported(controlled: &ControlledDeviceManager) -> Result<(), String> {
