@@ -3182,8 +3182,8 @@ mod tests {
         let mut subscriptions = HashSet::new();
         subscriptions.insert("session:deleted".to_string());
 
-        assert!(is_event_subscribed(&subscriptions, "session:deleted"));
-        assert!(!is_event_subscribed(&subscriptions, "session:list_changed"));
+        assert!(subscriptions.contains("session:deleted"));
+        assert!(!subscriptions.contains("session:list_changed"));
     }
 
     #[test]

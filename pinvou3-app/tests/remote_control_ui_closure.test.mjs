@@ -167,7 +167,11 @@ test('bounded command failures keep their code for the UI copy', () => {
   ]) {
     const index = bridge.indexOf(`"${command}"`);
     assert.ok(index >= 0, `${command} must be invoked`);
-    const chain = bridge.slice(index, index + 700);
+    // Bound the assertion to this function, not its incidental byte length.
+    // The connect path also reconciles a terminal race via an authoritative read.
+    const end = bridge.indexOf('\n    function ', index);
+    assert.ok(end > index, `${command} must have a complete function boundary`);
+    const chain = bridge.slice(index, end);
     assert.ok(
       chain.includes('asBoundedError'),
       `${command} must map failures to a bounded error code`,
