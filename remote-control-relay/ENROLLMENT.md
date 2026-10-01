@@ -115,6 +115,46 @@ flight therefore cannot turn a successful controller write into a legacy Web
 state overwrite: the legacy path is never removed or written, the operation
 fails, and a live store becomes unavailable.
 
+### Offline recovery after an interrupted commit
+
+There is no supported automatic repair CLI. A failed open must not be bypassed
+by deleting a candidate, editing JSON, resetting the registry, or enabling TOFU.
+Stop the Relay and confirm no process still owns or writes the store before any
+recovery. First archive the entire dedicated directory unchanged, including the
+primary, `.bak`, lock, marker, temporary/stale files and their owner/permission
+metadata. Keep the archive access-restricted; never publish its contents.
+Orphaned crash `.tmp` and `.stale` artifacts are not automatically garbage
+collected. Monitor disk usage and preserve recovery evidence; do not remove
+live-owned artifacts as a shortcut to opening the store.
+
+Commit order is `.bak` replacement first, then primary replacement. If the
+process dies between them, the new backup may contain an **uncommitted**
+authorization change. It must not automatically become authoritative. A valid
+v0 primary and a v0 or v1 backup that normalize to the same complete state can
+resume migration automatically; missing, damaged, unsupported or inconsistent
+migration peers fail closed before either candidate is rewritten. A single v0
+copy is not sufficient for automatic migration.
+
+For non-equivalent copies, a damaged peer or uncertain provenance, restore a
+verified pair from the same coordinated offline snapshot. Do not combine
+different snapshots or choose a copy solely because its revision is higher.
+Alternatively, an administrator may undertake an **offline, audited manual
+recovery** only after external commit/incident evidence establishes that the
+valid primary is the last committed state and the newer backup was merely
+staged. After archiving and validating that decision, reconstruct the backup
+from that confirmed primary through a same-directory temporary file, file sync,
+atomic replacement and directory sync; preserve and re-verify restrictive
+owner/permissions. Leave the primary unchanged. Do not promote the staged
+backup or apply this recipe to an unexplained mismatch. Without sufficient
+evidence, keep the service stopped and escalate rather than guessing.
+
+Before restarting, verify that both candidates are valid, canonically equivalent
+and have the correct owner/protection. Retain the archive and recovery decision
+for audit, then verify expected enrollment/revocation records after startup.
+Failed commits must not be reported as successful during recovery. Do not
+remove a live owner's lock; normal stale-owner handling remains the store's
+responsibility. This procedure never touches the legacy Web v2 state file.
+
 On Windows the module disables DACL inheritance on the dedicated directory and
 every marker, primary, backup, temporary and lock file. It grants Full Control
 only to the Relay process identity, `SYSTEM`, and built-in Administrators, then
@@ -182,8 +222,20 @@ ID with another operation, endpoint set, credential, revision, or snapshot is a
 conflict. Concurrent handlers converge through namespace CAS; a storage error
 never reports an unpersisted success.
 
-State CAS conflicts and endpoint revision conflicts are explicit. Registry,
-storage, digest-key, corruption, and persistence failures reject authorization;
+State CAS conflicts and endpoint revision conflicts are explicit.
+
+For `revoke`, the expected endpoint revision is syntax-checked for every call
+and compared before an active-to-revoked transition. An already revoked entry
+is a read-only idempotent result even if a retry supplies an old or future
+well-formed revision: no endpoint/namespace revision or persisted bytes change.
+
+The registry's 100,000-entry ceiling and the store's default 16 MiB serialized
+size ceiling are independent safety limits, not a promise to store 100,000
+entries. Other namespaces and record sizes consume the same byte budget; the
+first applicable limit bounds effective capacity. Set production capacity
+targets from deployment-specific load tests, not these hard ceilings.
+
+Registry, storage, digest-key, corruption, and persistence failures reject authorization;
 no in-memory success is returned after a failed durable commit. DEV-02 supplies
 the migration and rollback perimeter around this authority; DEV-06 still owns
 the new desktop protocol routing and production startup wiring.
