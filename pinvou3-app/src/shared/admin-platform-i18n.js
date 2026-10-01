@@ -1599,6 +1599,7 @@ const registrationBonusOperationsCopy = {
     reason: '变更原因', reasonPlaceholder: '至少 10 个字符，说明本次策略变更原因', save: '保存赠送策略', saving: '保存中…', saved: '注册赠送策略已更新。', readOnly: '当前账号只有注册赠送策略查看权限。',
     lifetimeWarning: '资格按手机号终身计算：首次注册即使策略关闭或赠送为 0，也会永久消耗资格，后续不会补赠。',
     loadFailed: '无法加载注册赠送策略，请稍后重试。', saveFailed: '注册赠送策略保存失败，请核对输入后重试。', conflict: '策略已被其他管理员更新，请刷新后重新提交。', recentAuthenticationRequired: '该操作要求近期认证，请重新登录后再试。', reauthenticate: '重新登录',
+    reauthenticationDraftConflict: '再认证期间策略已被更新。当前草稿已保留，但不能直接提交；请加载最新策略后重新核对。', loadLatestPolicy: '加载最新策略', reauthenticationDraftStorageFailed: '无法在当前标签页安全保存草稿，已取消跳转。请允许站点会话存储后重试。', retryReauthentication: '重试并重新登录',
   },
   en: {
     nav: 'Operations',
@@ -1608,6 +1609,7 @@ const registrationBonusOperationsCopy = {
     reason: 'Change reason', reasonPlaceholder: 'At least 10 characters describing why this policy is changing', save: 'Save bonus policy', saving: 'Saving…', saved: 'Registration bonus policy updated.', readOnly: 'This account has read-only access to the registration bonus policy.',
     lifetimeWarning: 'Eligibility is lifetime per mobile number. A first registration permanently consumes eligibility even while disabled or set to zero; no bonus is granted later.',
     loadFailed: 'Could not load the registration bonus policy.', saveFailed: 'Could not save the registration bonus policy. Check the input and retry.', conflict: 'Another administrator updated this policy. Reload and submit again.', recentAuthenticationRequired: 'Recent authentication is required. Sign in again and retry.', reauthenticate: 'Sign in again',
+    reauthenticationDraftConflict: 'The policy changed during reauthentication. Your draft is preserved but cannot be submitted; load the latest policy and review it first.', loadLatestPolicy: 'Load latest policy', reauthenticationDraftStorageFailed: 'The draft could not be stored safely in this tab, so reauthentication was cancelled. Allow session storage and retry.', retryReauthentication: 'Retry and sign in again',
   },
   ja: {
     nav: '運用設定',
@@ -1617,6 +1619,7 @@ const registrationBonusOperationsCopy = {
     reason: '変更理由', reasonPlaceholder: '変更理由を10文字以上で入力してください', save: '特典ポリシーを保存', saving: '保存中…', saved: '登録特典ポリシーを更新しました。', readOnly: 'このアカウントは登録特典ポリシーを閲覧のみできます。',
     lifetimeWarning: '資格は携帯番号ごとに生涯1回です。無効または0ポイントの期間でも初回登録で資格を消費し、後から付与されません。',
     loadFailed: '登録特典ポリシーを読み込めませんでした。', saveFailed: '登録特典ポリシーを保存できませんでした。入力を確認して再試行してください。', conflict: '別の管理者がポリシーを更新しました。再読み込みして送信してください。', recentAuthenticationRequired: '再認証が必要です。再ログインしてから再試行してください。', reauthenticate: '再ログイン',
+    reauthenticationDraftConflict: '再認証中にポリシーが更新されました。草稿は保持されていますが、そのまま送信できません。最新ポリシーを読み込み、再確認してください。', loadLatestPolicy: '最新ポリシーを読み込む', reauthenticationDraftStorageFailed: 'このタブで草稿を安全に保存できないため、再認証を中止しました。セッションストレージを許可して再試行してください。', retryReauthentication: '再試行して再ログイン',
   },
 };
 Object.assign(registrationBonusOperationsCopy.zh, {

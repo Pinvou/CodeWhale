@@ -26,13 +26,18 @@ function reauthenticationDraft() {
   try {
     if (!isReauthenticationReturn()) return null;
     const value = JSON.parse(globalThis.sessionStorage.getItem(REGISTRATION_BONUS_DRAFT_KEY) || 'null');
+    const expectedRevision = Number(value?.expected_revision);
     const amount = Number(value?.amount_points);
     const validity = Number(value?.validity_days);
     const reason = typeof value?.reason === 'string' ? value.reason : '';
-    if (typeof value?.enabled !== 'boolean' || !Number.isSafeInteger(amount) || amount < 0
+    if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 1
+      || typeof value?.enabled !== 'boolean' || !Number.isSafeInteger(amount) || amount < 0
       || !Number.isInteger(validity) || validity < 1 || validity > 3650
       || reason.trim().length < 10 || reason.length > 500) return null;
-    return { enabled: value.enabled, amount_points: String(amount), validity_days: String(validity), reason };
+    return {
+      expectedRevision,
+      form: { enabled: value.enabled, amount_points: String(amount), validity_days: String(validity), reason },
+    };
   } catch {
     return null;
   }
@@ -63,18 +68,26 @@ export function AdminOperationsWorkspace({ client, copy, permissions = EMPTY_PER
     setState((value) => ({ ...value, loading: true, error: '', errorCode: '', notice: '' }));
     try {
       const result = await client.registrationBonusPolicy(signal);
+      const draft = restoredDraft.current;
+      const draftConflict = Boolean(draft && draft.expectedRevision !== Number(result.revision));
       setPolicy(result);
-      setForm(restoredDraft.current || policyForm(result));
+      setForm(draft?.form || policyForm(result));
       if (returningFromReauthentication.current) {
         returningFromReauthentication.current = false;
         restoredDraft.current = null;
         clearReauthenticationDraft();
       }
-      setState({ loading: false, saving: false, error: '', errorCode: '', notice: '' });
+      setState({
+        loading: false,
+        saving: false,
+        error: draftConflict ? labels.reauthenticationDraftConflict : '',
+        errorCode: draftConflict ? 'REGISTRATION_BONUS_DRAFT_CONFLICT' : '',
+        notice: '',
+      });
     } catch (error) {
       if (error?.name !== 'AbortError') setState({ loading: false, saving: false, error: labels.loadFailed, errorCode: error?.code || '', notice: '' });
     }
-  }, [client, labels.loadFailed]);
+  }, [client, labels.loadFailed, labels.reauthenticationDraftConflict]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -84,7 +97,7 @@ export function AdminOperationsWorkspace({ client, copy, permissions = EMPTY_PER
 
   const save = async (event) => {
     event.preventDefault();
-    if (!canManage || !policy) return;
+    if (!canManage || !policy || state.errorCode === 'REGISTRATION_BONUS_DRAFT_CONFLICT') return;
     setState((value) => ({ ...value, saving: true, error: '', errorCode: '', notice: '' }));
     try {
       const updated = await client.updateRegistrationBonusPolicy({
@@ -114,19 +127,32 @@ export function AdminOperationsWorkspace({ client, copy, permissions = EMPTY_PER
     && form.reason.trim().length >= 10 && form.reason.trim().length <= 500;
   const eligibilityReady = policy?.eligibility_status === 'READY';
   const reauthenticate = () => {
+    const draft = JSON.stringify({ ...form, expected_revision: Number(policy?.revision) });
     try {
-      globalThis.sessionStorage.setItem(REGISTRATION_BONUS_DRAFT_KEY, JSON.stringify(form));
+      globalThis.sessionStorage.setItem(REGISTRATION_BONUS_DRAFT_KEY, draft);
+      if (globalThis.sessionStorage.getItem(REGISTRATION_BONUS_DRAFT_KEY) !== draft) throw new Error('registration bonus draft verification failed');
     } catch {
-      // Reauthentication is still possible when session storage is unavailable.
+      setState((value) => ({
+        ...value,
+        error: labels.reauthenticationDraftStorageFailed,
+        errorCode: 'REGISTRATION_BONUS_DRAFT_STORAGE_UNAVAILABLE',
+        notice: '',
+      }));
+      return;
     }
     client.reauthenticate(`/admin.html?section=operations&${REGISTRATION_BONUS_STEPUP_QUERY}=1`);
   };
+  const errorAction = state.errorCode === 'REGISTRATION_BONUS_DRAFT_CONFLICT'
+    ? { label: labels.loadLatestPolicy, run: () => void load() }
+    : state.errorCode === 'RECENT_AUTHENTICATION_REQUIRED' || state.errorCode === 'REGISTRATION_BONUS_DRAFT_STORAGE_UNAVAILABLE'
+      ? { label: state.errorCode === 'RECENT_AUTHENTICATION_REQUIRED' ? labels.reauthenticate : labels.retryReauthentication, run: reauthenticate }
+      : { label: copy.retry, run: () => void load() };
 
   return (
     <section className="adm-panel adm-settings-panel adm-registration-bonus" data-testid="registration-bonus-policy">
       <header className="adm-section-head"><div><h2>{labels.title}</h2><p>{labels.lead}</p></div></header>
       <div className="adm-inline-message warn" role="note">{labels.lifetimeWarning}</div>
-      {state.error && <div className="adm-inline-message error" role="alert"><span>{state.error}</span><button type="button" onClick={() => state.errorCode === 'RECENT_AUTHENTICATION_REQUIRED' ? reauthenticate() : void load()} disabled={state.loading || state.saving}>{state.errorCode === 'RECENT_AUTHENTICATION_REQUIRED' ? labels.reauthenticate : copy.retry}</button></div>}
+      {state.error && <div className="adm-inline-message error" role="alert"><span>{state.error}</span><button type="button" onClick={errorAction.run} disabled={state.loading || state.saving}>{errorAction.label}</button></div>}
       {state.notice && <div className="adm-inline-message ok" role="status">{state.notice}</div>}
       {state.loading && <p className="adm-muted">{copy.loading}</p>}
       {!state.loading && policy && (
@@ -144,7 +170,7 @@ export function AdminOperationsWorkspace({ client, copy, permissions = EMPTY_PER
             </div>
             {canManage && <label className="adm-sms-reason"><span>{labels.reason}</span><textarea required minLength="10" maxLength="500" rows="4" value={form.reason} disabled={state.saving} onChange={(event) => setForm((value) => ({ ...value, reason: event.target.value }))} placeholder={labels.reasonPlaceholder} /></label>}
             {!canManage && <div className="adm-inline-message info" role="status">{labels.readOnly}</div>}
-            {canManage && <div className="adm-registration-bonus-actions"><button type="submit" className="adm-primary-button" disabled={state.saving || !valid || (form.enabled && !eligibilityReady)}>{state.saving ? labels.saving : labels.save}</button></div>}
+            {canManage && <div className="adm-registration-bonus-actions"><button type="submit" className="adm-primary-button" disabled={state.saving || !valid || state.errorCode === 'REGISTRATION_BONUS_DRAFT_CONFLICT' || (form.enabled && !eligibilityReady)}>{state.saving ? labels.saving : labels.save}</button></div>}
           </div>
         </form>
       )}

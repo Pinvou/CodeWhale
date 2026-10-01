@@ -26,6 +26,7 @@ const server = createServer(async (request, response) => {
   if (url.pathname === '/__test__/writes') return json(response, writes);
   if (url.pathname === '/auth/login') {
     reauthenticationRequests.push(url);
+    policy = { ...policy, revision: policy.revision + 1, amount_microcredits: 400_000, validity_days: 45, updated_at: new Date().toISOString() };
     response.writeHead(302, { Location: url.searchParams.get('return_to') || '/admin.html?section=operations' });
     return response.end();
   }
@@ -113,6 +114,34 @@ try {
   assert.equal(await page.$eval('[data-testid="registration-bonus-policy"] textarea', (node) => node.value), 'Confirm recent authentication flow');
   assert.equal(await page.$eval('html', (node) => node.ownerDocument.defaultView.sessionStorage.getItem('pinvou.admin.registration-bonus.reauthentication-draft')), null);
   assert.equal(new URL(page.url()).searchParams.has('registration_bonus_stepup'), false);
+  assert.match(await page.$eval('[data-testid="registration-bonus-policy"] [role="alert"]', (node) => node.textContent), /policy changed during reauthentication/i);
+  assert.equal(await page.$eval('[data-testid="registration-bonus-policy"] button[type="submit"]', (node) => node.disabled), true, 'a stale restored draft must not be submitted against the latest revision');
+  assert.equal(writes.length, 1, 'restoring a stale draft must not create a write');
+  await page.click('[data-testid="registration-bonus-policy"] [role="alert"] button');
+  await page.waitForFunction(() => document.querySelector('[data-testid="registration-bonus-policy"] input[type="number"]')?.value === '40');
+  assert.deepEqual(await page.$$eval('[data-testid="registration-bonus-policy"] input[type="number"]', (nodes) => nodes.map((node) => node.value)), ['40', '45']);
+  assert.equal(await page.$eval('[data-testid="registration-bonus-policy"] textarea', (node) => node.value), '');
+
+  await page.type('[data-testid="registration-bonus-policy"] textarea', 'Verify unavailable session storage');
+  await fetch(`http://127.0.0.1:${port}/__test__/recent-auth`);
+  await page.click('[data-testid="registration-bonus-policy"] button[type="submit"]');
+  await page.waitForSelector('[data-testid="registration-bonus-policy"] [role="alert"]');
+  await page.$eval('html', (node) => {
+    const view = node.ownerDocument.defaultView;
+    view.__pinvouOriginalSessionStorageSetItem = view.Storage.prototype.setItem;
+    view.Storage.prototype.setItem = () => { throw new Error('session storage unavailable'); };
+  });
+  const urlBeforeStorageFailure = page.url();
+  await page.click('[data-testid="registration-bonus-policy"] [role="alert"] button');
+  await page.waitForFunction(() => /draft could not be stored safely/i.test(document.querySelector('[data-testid="registration-bonus-policy"] [role="alert"]')?.textContent || ''));
+  assert.equal(page.url(), urlBeforeStorageFailure, 'storage failure must cancel the reauthentication navigation');
+  assert.equal(reauthenticationRequests.length, 1, 'storage failure must not reach the authentication endpoint');
+  assert.equal(await page.$eval('[data-testid="registration-bonus-policy"] textarea', (node) => node.value), 'Verify unavailable session storage');
+  await page.$eval('html', (node) => {
+    const view = node.ownerDocument.defaultView;
+    view.Storage.prototype.setItem = view.__pinvouOriginalSessionStorageSetItem;
+    delete view.__pinvouOriginalSessionStorageSetItem;
+  });
 
   await fetch(`http://127.0.0.1:${port}/__test__/blocked`);
   await page.reload({ waitUntil: 'networkidle0' });
@@ -125,7 +154,7 @@ try {
   await blockedTextarea.type('Disable while eligibility is blocked');
   assert.equal(await page.$eval('[data-testid="registration-bonus-policy"] button[type="submit"]', (node) => node.disabled), false, 'disabling must remain available while blocked');
   await page.click('[data-testid="registration-bonus-policy"] button[type="submit"]');
-  await page.waitForFunction(() => document.querySelector('[data-testid="registration-bonus-policy"] .adm-registration-bonus-summary dd')?.textContent.trim() === '4');
+  await page.waitForFunction(() => document.querySelector('[data-testid="registration-bonus-policy"] .adm-registration-bonus-summary dd')?.textContent.trim() === '5');
   assert.equal(writes.at(-1).body.enabled, false);
   assert.equal(await page.$eval('[data-testid="registration-bonus-policy"] input[type="checkbox"]', (node) => node.disabled), true, 'blocked readiness must prevent re-enabling');
 
