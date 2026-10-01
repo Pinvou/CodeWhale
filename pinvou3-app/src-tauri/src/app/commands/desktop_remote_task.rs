@@ -30,8 +30,6 @@ use crate::features::remote_control::controller::controlled::ControlledDeviceMan
 use crate::features::remote_control::controller::controlling::ControllingDeviceManager;
 use crate::features::remote_control::controller::controlling_session::ControllingSessionManager;
 use crate::features::remote_control::controller::controlling_session::build_bound_task_cancel_payload;
-#[cfg(test)]
-use crate::features::remote_control::controller::controlling_session::task_input_digest;
 use crate::features::remote_control::controller::encrypted_lane::ControllingLaneState;
 use crate::features::remote_control::controller::protocol::MAX_TASK_INPUT_TEXT_BYTES;
 use crate::features::remote_control::controller::protocol::{
@@ -2075,7 +2073,7 @@ mod tests {
             let payload = json!({
                 "connection_id": "connection-1",
                 "controller_lease_id": "lease-1",
-                "lease_epoch": "epoch-1",
+                "lease_epoch": "1",
                 "relay_epoch": "relay-1",
                 "remote_control_generation": "generation-1",
                 "task_id": format!("task-{mode}"),
@@ -2323,28 +2321,45 @@ mod tests {
                 .unwrap(),
             "code-session"
         );
+        // This test-only helper verifies binding/lane, not workspace authority.
+        let code = resolve_local_controlled_input(
+            &service,
+            "code-session".to_owned(),
+            "hello".to_owned(),
+            "generation-1".to_owned(),
+        )
+        .unwrap();
+        assert!(code.code_mode);
+        assert_eq!(code.remote_ref, "code-ref");
+        assert_eq!(code.expected_session_id, "code-session");
+        assert_eq!(code.generation, "generation-1");
         assert_eq!(
-            resolve_local_controlled_input(
+            trusted_local_remote_binding(
                 &service,
-                "code-session".to_owned(),
-                "hello".to_owned(),
-                "generation-1".to_owned(),
+                &RemoteWorkspaceAuthorizations::default(),
+                "code-session",
+                "generation-1"
             )
             .unwrap_err(),
-            "task_mode_unsupported"
+            "task_workspace_not_authorized"
         );
         service
             .switch_remote_session("unknown-ref", "unknown-session", "generation-1")
             .unwrap();
+        let claimed = resolve_local_controlled_input(
+            &service,
+            "unknown-session".to_owned(),
+            "hello".to_owned(),
+            "generation-1".to_owned(),
+        )
+        .unwrap();
+        assert_eq!(claimed.remote_ref, "unknown-ref");
+        assert_eq!(claimed.expected_session_id, "unknown-session");
+        assert_eq!(claimed.generation, "generation-1");
+        assert!(!claimed.code_mode);
         assert_eq!(
-            resolve_local_controlled_input(
-                &service,
-                "unknown-session".to_owned(),
-                "hello".to_owned(),
-                "generation-1".to_owned(),
-            )
-            .unwrap_err(),
-            "task_mode_unsupported"
+            service.lane_for_session("unknown-session", "generation-1"),
+            Some(RemoteSessionLane::Chat)
         );
         assert_eq!(provisioner.0.load(Ordering::SeqCst), 2);
         assert_eq!(service.ledger().live_task_count(), 0);
@@ -2373,7 +2388,7 @@ mod tests {
         let lease = LeaseContext {
             connection_id: "connection-1".into(),
             controller_lease_id: "lease-1".into(),
-            lease_epoch: "epoch-1".into(),
+            lease_epoch: "1".into(),
             relay_epoch: "relay-1".into(),
             remote_control_generation: "generation-1".into(),
         };
@@ -2390,8 +2405,8 @@ mod tests {
                 "capability_revision": "1",
                 "mode": TASK_MODE_CHAT,
                 "model_source": TASK_MODEL_SOURCE_CONTROLLED,
-                "input_digest": task_input_digest("hello"),
-                "input": { "text": "hello" },
+                "input_digest": remote_task_input_digest("hello", &[], &[]),
+                "input": { "text": "hello", "attachment_ids": [], "skill_ids": [] },
             })
         };
         let provisioner = Arc::new(Provisioner(AtomicUsize::new(0)));
@@ -2472,7 +2487,7 @@ mod tests {
         let lease = LeaseContext {
             connection_id: "connection-1".into(),
             controller_lease_id: "lease-1".into(),
-            lease_epoch: "epoch-1".into(),
+            lease_epoch: "1".into(),
             relay_epoch: "relay-1".into(),
             remote_control_generation: "generation-1".into(),
         };
@@ -2489,8 +2504,8 @@ mod tests {
                 "capability_revision": "1",
                 "mode": mode,
                 "model_source": TASK_MODEL_SOURCE_CONTROLLED,
-                "input_digest": task_input_digest("hello"),
-                "input": { "text": "hello" },
+                "input_digest": remote_task_input_digest("hello", &[], &[]),
+                "input": { "text": "hello", "attachment_ids": [], "skill_ids": [] },
             });
             if mode == TASK_MODE_CODE {
                 payload["input"]["workspace_id"] = json!("workspace-1");

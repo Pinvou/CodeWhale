@@ -942,7 +942,10 @@ mod tests {
         let snapshot = manager
             .build(lease.clone(), fixture_source(), 1_000)
             .unwrap();
-        let payload = manager.wire_capability_snapshot(&snapshot, "request-snapshot-1");
+        let mut payload = manager.wire_capability_snapshot(&snapshot, "request-snapshot-1");
+        // The business adapter binds both session identities before encryption.
+        payload["session_id"] = serde_json::json!("remote-ref-1");
+        payload["controlled_session_id"] = serde_json::json!("b-session-1");
         let capabilities = vec![
             "encrypted_frames_v1".to_owned(),
             "pairing_v1".to_owned(),
@@ -960,6 +963,8 @@ mod tests {
         .expect("wire capability snapshot must satisfy the frozen runtime contract");
         assert_eq!(payload["type"], "capability_snapshot");
         assert_eq!(payload["request_id"], "request-snapshot-1");
+        assert_eq!(payload["session_id"], "remote-ref-1");
+        assert_eq!(payload["controlled_session_id"], "b-session-1");
         assert_eq!(payload["capability_revision"], "1");
         // 序列化文本不得包含宿主路径或凭证关键字。
         let text = payload.to_string();

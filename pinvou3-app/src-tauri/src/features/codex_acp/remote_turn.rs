@@ -20,9 +20,7 @@ use super::{AcpPool, RemotePermissionOwner};
 use crate::features::remote_control::controller::journal::{
     JournalKind, StreamingTextSanitizer, sanitize_text,
 };
-use crate::features::remote_control::controller::permission::{
-    PermissionAuthority, PermissionBinding, PermissionRequest,
-};
+use crate::features::remote_control::controller::permission::PermissionAuthority;
 use crate::features::remote_control::controller::protocol::LeaseContext;
 use crate::features::remote_control::controller::task::{
     ControllerTaskEventSink, PublishedAttachment, RemoteCodeTurnPort, RemoteTaskService,
@@ -431,24 +429,28 @@ impl AcpPoolCodeTurnPort {
     async fn sync_remote_permissions(
         &self,
         owner: &RemotePermissionOwner,
-        registered: &mut HashSet<String>,
+        registered: &mut HashMap<String, String>,
         resolved: &mut HashSet<String>,
         events: &Arc<dyn ControllerTaskEventSink>,
     ) -> std::result::Result<(), String> {
         let pending = self.pool.pending_remote_permissions(owner).await;
         let current = pending
             .iter()
-            .map(|request| request.permission_request_id.clone())
+            .map(|request| request.callback_id.clone())
             .collect::<HashSet<_>>();
         let now =
             crate::features::remote_control::controller::relay_runtime::controlled_monotonic_millis(
             );
-        self.permission_authority.sweep_expired(now);
+        self.permission_authority
+            .sweep_expired(self.permission_authority.now_ms());
         for request in pending {
-            if !registered.insert(request.permission_request_id.clone()) {
+            if let Some(approval_id) = registered.get(&request.callback_id) {
+                if request.approval_id.as_deref() != Some(approval_id) {
+                    return Err("permission_binding_stale".to_owned());
+                }
                 let view = self
                     .permission_authority
-                    .view(&request.permission_request_id)
+                    .view(approval_id)
                     .map_err(|error| error.code.to_owned())?;
                 let decision = match view.state.as_str() {
                     "allowed" => Some(true),
@@ -458,7 +460,7 @@ impl AcpPoolCodeTurnPort {
                 if let Some(allow) = decision {
                     let resolution = self
                         .pool
-                        .respond_remote_permission(owner, &request.permission_request_id, allow)
+                        .respond_remote_permission(owner, approval_id, allow)
                         .await;
                     if resolution.is_err()
                         && self
@@ -466,9 +468,7 @@ impl AcpPoolCodeTurnPort {
                             .pending_remote_permissions(owner)
                             .await
                             .iter()
-                            .any(|pending| {
-                                pending.permission_request_id == request.permission_request_id
-                            })
+                            .any(|pending| pending.approval_id.as_deref() == Some(approval_id))
                     {
                         return Err("permission_dispatch_failed".to_owned());
                     }
@@ -476,24 +476,19 @@ impl AcpPoolCodeTurnPort {
                 continue;
             }
             let view = self
-                .permission_authority
-                .request(
-                    PermissionBinding::new(
-                        &request.owner.lease,
-                        &request.owner.task_id,
-                        &request.permission_request_id,
-                    )
-                    .map_err(|error| error.code.to_owned())?,
-                    PermissionRequest {
-                        operation_type: request.projection.operation_type,
-                        risk_level: request.projection.risk_level,
-                        target_scope: request.projection.target_scope,
-                        preview: request.projection.preview,
-                        expires_at_ms: now.saturating_add(REMOTE_PERMISSION_TTL_MS),
-                    },
-                    now,
+                .pool
+                .mint_remote_permission(
+                    owner,
+                    &request.callback_id,
+                    &self.permission_authority,
+                    REMOTE_PERMISSION_TTL_MS,
                 )
-                .map_err(|error| error.code.to_owned())?;
+                .await
+                .map_err(|_| "permission_binding_stale".to_owned())?;
+            registered.insert(
+                request.callback_id.clone(),
+                view.permission_request_id.clone(),
+            );
             let record = self
                 .tasks
                 .status(&owner.task_id)
@@ -523,8 +518,9 @@ impl AcpPoolCodeTurnPort {
             );
         }
 
-        for request_id in registered.iter().filter(|id| !current.contains(*id)) {
-            if !resolved.insert(request_id.clone()) {
+        for (callback_id, request_id) in registered.iter().filter(|(id, _)| !current.contains(*id))
+        {
+            if !resolved.insert(callback_id.clone()) {
                 continue;
             }
             let view = self
@@ -675,7 +671,7 @@ impl RemoteCodeTurnPort for AcpPoolCodeTurnPort {
             // The ACP prompt is submitted in the background, so wait for the busy
             // transition before trusting a "not busy" observation.
             let mut observed_busy = false;
-            let mut registered = HashSet::new();
+            let mut registered = HashMap::new();
             let mut resolved = HashSet::new();
             let started = Instant::now();
             loop {
@@ -721,7 +717,7 @@ impl RemoteCodeTurnPort for AcpPoolCodeTurnPort {
             self.permission_authority.deny_all_for_task(
                 &owner.task_id,
                 "task_terminal",
-                crate::features::remote_control::controller::relay_runtime::controlled_monotonic_millis(),
+                self.permission_authority.now_ms(),
             );
             for request in dangling {
                 events.emit_journal(

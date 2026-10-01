@@ -3447,6 +3447,9 @@ mod tests {
 
         let port = Arc::new(AttachmentPort(Mutex::new(Vec::new())));
         let executor = ChatTurnExecutor::new(port.clone());
+        let mut request = payload("session-0001", "task-0001", "client-0001", &digest(1));
+        request["input"]["skill_ids"] = json!(["skill-1"]);
+        request["input_digest"] = json!(task_input_digest_for_value(&request["input"]).unwrap());
         let descriptor = super::super::transfer::upload::PublishedAttachment {
             handle_id: "ctr-up-00000001-1".into(),
             path: std::env::temp_dir().join("remote-attachment.txt"),
@@ -3457,7 +3460,7 @@ mod tests {
         };
         runtime()
             .block_on(executor.execute_with_attachments(
-                payload("session-0001", "task-0001", "client-0001", &digest(1)),
+                request,
                 vec![descriptor.clone()],
                 Arc::new(NoopSink),
                 CancellationToken::new(),

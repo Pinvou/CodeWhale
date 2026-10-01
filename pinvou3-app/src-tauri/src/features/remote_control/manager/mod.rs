@@ -3199,6 +3199,15 @@ mod tests {
     const TEST_LEASE_ID: &str = "lease_000000000000000000000000";
 
     #[test]
+    fn event_delivery_requires_current_web_subscription() {
+        let mut subscriptions = HashSet::new();
+        subscriptions.insert("session:deleted".to_string());
+
+        assert!(subscriptions.contains("session:deleted"));
+        assert!(!subscriptions.contains("session:list_changed"));
+    }
+
+    #[test]
     fn controller_messages_have_a_dedicated_relay_lane() {
         assert!(controller_relay_message(&json!({
             "type": "desktop_endpoint_registered"

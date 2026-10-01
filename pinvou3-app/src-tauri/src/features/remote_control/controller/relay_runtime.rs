@@ -1159,9 +1159,14 @@ impl ControlledRelayWorker {
         if message.get("challenge_id").and_then(Value::as_str) != Some(challenge_id.as_str()) {
             return;
         }
+        let Ok(trust) = load_relay_trust_config(|name| std::env::var(name).ok()) else {
+            // Missing/invalid administrator pins cannot authorize liveness or
+            // consume the outstanding challenge. The watchdog remains closed.
+            return;
+        };
         let manager = self.app.state::<ControlledDeviceManager>();
         let now_b = controlled_monotonic_millis();
-        match manager.accept_liveness_attestation(&message.to_string(), sent_at_b, now_b) {
+        match manager.accept_liveness_attestation(&message.to_string(), &trust, sent_at_b, now_b) {
             Ok(()) => {
                 evidence.outstanding = None;
                 evidence.escalated = false;
@@ -1761,7 +1766,7 @@ pub(crate) struct ControlledResumeAttempt {
     lease: Option<LeaseContext>,
     activation_id: Option<String>,
     challenge_b64: String,
-    original_deadline_b: u64,
+    relay_deadline_identity_ms: u64,
     liveness_epoch_b: String,
     peer_confirmed: bool,
     confirmed: bool,
@@ -1815,7 +1820,7 @@ pub(crate) fn begin_controlled_resume<P: ControlledRelayPort + ?Sized>(
         &request_id,
         &material.resume_token,
         &challenge,
-        material.original_deadline_b,
+        material.relay_deadline_identity_ms,
     ) else {
         return false;
     };
@@ -1824,7 +1829,7 @@ pub(crate) fn begin_controlled_resume<P: ControlledRelayPort + ?Sized>(
     }
     resume.lease = Some(material.lease);
     resume.challenge_b64 = challenge;
-    resume.original_deadline_b = material.original_deadline_b;
+    resume.relay_deadline_identity_ms = material.relay_deadline_identity_ms;
     // 激活后的 liveness epoch 必须与旧值不同（Relay 会据此拒绝复用）。
     resume.liveness_epoch_b = format!("live-b-{}", uuid::Uuid::new_v4().simple());
     resume.activation_id = None;
@@ -1920,7 +1925,7 @@ pub(crate) fn handle_controlled_resume_frame<P: ControlledRelayPort + ?Sized>(
                 &lease,
                 &request_id(),
                 activation_id,
-                resume.original_deadline_b,
+                resume.relay_deadline_identity_ms,
             ) else {
                 return ControlledResumeOutcome::Failed;
             };
@@ -2022,6 +2027,9 @@ pub(crate) fn handle_controlled_resume_frame<P: ControlledRelayPort + ?Sized>(
             else {
                 return ControlledResumeOutcome::Ignored;
             };
+            let Some(relay_deadline) = super::resume::relay_resume_deadline_ms(message) else {
+                return ControlledResumeOutcome::Failed;
+            };
             let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(new_token) else {
                 return ControlledResumeOutcome::Ignored;
             };
@@ -2039,6 +2047,7 @@ pub(crate) fn handle_controlled_resume_frame<P: ControlledRelayPort + ?Sized>(
                     liveness_epoch_a,
                     token,
                     fingerprint,
+                    relay_deadline,
                 )
                 .is_err()
             {
@@ -3180,7 +3189,7 @@ mod tests {
             &port,
             &lease,
             "capability_snapshot_request",
-            &json!({"request_id": "request-1", "known_revision": "4"}),
+            &json!({"request_id": "request-1", "session_id": "session-a-ref", "known_revision": "4"}),
         )
         .await
         .unwrap();
@@ -3487,6 +3496,7 @@ mod tests {
                     "activation_id": activation,
                     "liveness_epoch_a": "live-a-2",
                     "liveness_epoch_b": epoch_b,
+                    "resume_deadline_ms": "1700000030000",
                     "new_resume_token_b64": base64::engine::general_purpose::STANDARD
                         .encode([3_u8; 32]),
                     "connection_id": lease_context.connection_id,
@@ -3502,6 +3512,12 @@ mod tests {
         assert!(manager.live_lease().is_ok(), "恢复完成后必须回到 connected");
         assert_eq!(manager.live_liveness_epoch().as_deref(), Some("live-a-2"));
         assert!(!lane.is_suspended(), "恢复完成后业务通道必须重新打开");
+        let now_b = controlled_monotonic_millis();
+        manager.mark_transport_disconnected(now_b);
+        let second = manager
+            .begin_resume(manager.current_operation().unwrap(), now_b)
+            .unwrap();
+        assert_eq!(second.relay_deadline_identity_ms, 1_700_000_030_000);
         let sent = port.sent.lock().unwrap();
         let kinds: Vec<&str> = sent
             .iter()

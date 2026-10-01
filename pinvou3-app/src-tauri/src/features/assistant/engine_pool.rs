@@ -2743,7 +2743,8 @@ impl EnginePool {
     }
 
     /// Send a user message to a session's engine (lazy spawn if absent).
-    #[cfg(any(feature = "benchmark-hooks", test))]
+    /// The product remote-turn adapter uses this same admitted append path;
+    /// it must be available without benchmark/test features too.
     pub async fn send_user_message(
         &self,
         session_id: &str,
