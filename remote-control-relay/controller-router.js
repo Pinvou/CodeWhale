@@ -305,6 +305,8 @@ export class ControllerRouter {
     const peer = this.#peers.get(socketIdentity);
     if (!peer) return Object.freeze({ handshakes: 0, leases: 0 });
     const lease = peer.controllerLeaseId ? this.#leases.lease(peer.controllerLeaseId) : null;
+    // Both hooks run asynchronously and liveness removes its state on close.
+    // Capture authenticated evidence once, before dispatching either hook.
     let evidenceDeadline = null;
     try { evidenceDeadline = this.#livenessHooks.resumeDeadline?.(lease) ?? null; }
     catch { /* Missing/invalid evidence must not prevent disconnect cleanup. */ }

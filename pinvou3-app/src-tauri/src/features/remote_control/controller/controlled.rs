@@ -1707,6 +1707,7 @@ mod tests {
                 .accept_direct_liveness(&proof.to_string(), 20_000)
                 .is_err()
         );
+        assert!(manager.begin_liveness_challenge(20_000).is_err());
         manager.mark_transport_disconnected(25_000);
         assert_eq!(manager.status().watchdog_deadline_b, Some(46_000));
         assert_eq!(
