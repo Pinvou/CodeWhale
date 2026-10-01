@@ -33,8 +33,8 @@ use super::crypto::{
 use super::encrypted_lane::ControllingLaneState;
 use super::journal::{JournalEvent, JournalSnapshot, MAX_EVENT_PAYLOAD_BYTES};
 use super::protocol::LeaseContext;
-use super::relay_runtime::log_controller_event;
 use super::recovery_budget::LivenessBudget;
+use super::relay_runtime::log_controller_event;
 use super::relay_transport::{
     AuthenticatedLease, ControllerRole, ControllerTransportConfig, ControllerTransportEvent,
     ControllerTransportSender, spawn_controller_transport,
