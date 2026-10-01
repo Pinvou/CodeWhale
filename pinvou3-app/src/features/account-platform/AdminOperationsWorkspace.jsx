@@ -7,6 +7,7 @@ const REGISTRATION_BONUS_DRAFT_KEY = 'pinvou.admin.registration-bonus.reauthenti
 const REGISTRATION_BONUS_STEPUP_QUERY = 'registration_bonus_stepup';
 const REGISTRATION_BONUS_DRAFT_TTL_MS = 10 * 60 * 1000;
 const REQUEST_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const REGISTRATION_BONUS_DRAFT_TOMBSTONE = '{"version":0}';
 
 function policyForm(policy = {}) {
   return {
@@ -59,10 +60,20 @@ function storedReauthenticationDraft() {
 }
 
 function clearReauthenticationDraft() {
+  let storageCleared = false;
   try {
     globalThis.sessionStorage.removeItem(REGISTRATION_BONUS_DRAFT_KEY);
+    storageCleared = globalThis.sessionStorage.getItem(REGISTRATION_BONUS_DRAFT_KEY) === null;
   } catch {
-    // Storage can be unavailable in hardened browsers.
+    // Fall through to an invalid tombstone when deletion alone is unavailable.
+  }
+  if (!storageCleared) {
+    try {
+      globalThis.sessionStorage.setItem(REGISTRATION_BONUS_DRAFT_KEY, REGISTRATION_BONUS_DRAFT_TOMBSTONE);
+      storageCleared = globalThis.sessionStorage.getItem(REGISTRATION_BONUS_DRAFT_KEY) === REGISTRATION_BONUS_DRAFT_TOMBSTONE;
+    } catch {
+      storageCleared = false;
+    }
   }
   try {
     const url = new URL(globalThis.location.href);
@@ -71,6 +82,7 @@ function clearReauthenticationDraft() {
   } catch {
     // History can be unavailable in embedded browsers; the server policy remains authoritative.
   }
+  return storageCleared;
 }
 
 export function AdminOperationsWorkspace({ client, copy, permissions = EMPTY_PERMISSIONS, currentUserID = '' }) {
@@ -79,6 +91,8 @@ export function AdminOperationsWorkspace({ client, copy, permissions = EMPTY_PER
   const canManage = permissionSet.has('platform.registration-bonus.manage');
   const returnAttemptID = useRef(reauthenticationAttemptID());
   const initialStoredDraft = useRef(storedReauthenticationDraft());
+  const workspaceUserID = useRef(currentUserID);
+  const formOwnerUserID = useRef(currentUserID);
   const trustedStoredDraft = initialStoredDraft.current?.userID === currentUserID && canManage ? initialStoredDraft.current : null;
   const returnedDraft = useRef(returnAttemptID.current && trustedStoredDraft?.attemptID === returnAttemptID.current ? trustedStoredDraft : null);
   const [pendingDraft, setPendingDraft] = useState(() => !returnAttemptID.current ? trustedStoredDraft : null);
@@ -91,25 +105,27 @@ export function AdminOperationsWorkspace({ client, copy, permissions = EMPTY_PER
     try {
       const result = await client.registrationBonusPolicy(signal);
       const draft = returnedDraft.current;
-      const draftConflict = Boolean(draft && draft.expectedRevision !== Number(result.revision));
+      const draftCleared = !returnAttemptID.current || clearReauthenticationDraft();
+      const usableDraft = draftCleared ? draft : null;
+      const draftConflict = Boolean(usableDraft && usableDraft.expectedRevision !== Number(result.revision));
       setPolicy(result);
-      setForm(draft?.form || policyForm(result));
+      setForm(usableDraft?.form || policyForm(result));
+      formOwnerUserID.current = usableDraft?.userID || currentUserID;
       if (returnAttemptID.current) {
         returnAttemptID.current = '';
         returnedDraft.current = null;
-        clearReauthenticationDraft();
       }
       setState({
         loading: false,
         saving: false,
-        error: draftConflict ? labels.reauthenticationDraftConflict : '',
-        errorCode: draftConflict ? 'REGISTRATION_BONUS_DRAFT_CONFLICT' : '',
+        error: !draftCleared ? labels.reauthenticationDraftCleanupFailed : draftConflict ? labels.reauthenticationDraftConflict : '',
+        errorCode: !draftCleared ? 'REGISTRATION_BONUS_DRAFT_CLEANUP_FAILED' : draftConflict ? 'REGISTRATION_BONUS_DRAFT_CONFLICT' : '',
         notice: '',
       });
     } catch (error) {
       if (error?.name !== 'AbortError') setState({ loading: false, saving: false, error: labels.loadFailed, errorCode: error?.code || '', notice: '' });
     }
-  }, [client, labels.loadFailed, labels.reauthenticationDraftConflict]);
+  }, [client, currentUserID, labels.loadFailed, labels.reauthenticationDraftCleanupFailed, labels.reauthenticationDraftConflict]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -119,17 +135,33 @@ export function AdminOperationsWorkspace({ client, copy, permissions = EMPTY_PER
 
   useEffect(() => {
     const draft = initialStoredDraft.current;
-    if (draft && (draft.userID !== currentUserID || !canManage)) {
+    const identityChanged = workspaceUserID.current !== currentUserID;
+    if (identityChanged || !canManage || draft && draft.userID !== currentUserID) {
+      workspaceUserID.current = currentUserID;
       initialStoredDraft.current = null;
       returnedDraft.current = null;
       setPendingDraft(null);
-      clearReauthenticationDraft();
+      const draftCleared = clearReauthenticationDraft();
+      formOwnerUserID.current = currentUserID;
+      if (policy) setForm(policyForm(policy));
+      setState((value) => ({
+        ...value,
+        error: draftCleared ? '' : labels.reauthenticationDraftCleanupFailed,
+        errorCode: draftCleared ? '' : 'REGISTRATION_BONUS_DRAFT_CLEANUP_FAILED',
+        notice: draftCleared && identityChanged ? labels.reauthenticationDraftIdentityChanged : '',
+      }));
     }
-  }, [canManage, currentUserID]);
+  }, [canManage, currentUserID, labels.reauthenticationDraftCleanupFailed, labels.reauthenticationDraftIdentityChanged, policy]);
 
   const save = async (event) => {
     event.preventDefault();
-    if (!canManage || !policy || state.errorCode === 'REGISTRATION_BONUS_DRAFT_CONFLICT') return;
+    if (!canManage || !policy || state.errorCode === 'REGISTRATION_BONUS_DRAFT_CONFLICT' || state.errorCode === 'REGISTRATION_BONUS_DRAFT_CLEANUP_FAILED') return;
+    if (formOwnerUserID.current !== currentUserID) {
+      formOwnerUserID.current = currentUserID;
+      setForm(policyForm(policy));
+      setState((value) => ({ ...value, error: labels.reauthenticationDraftIdentityChanged, errorCode: 'REGISTRATION_BONUS_DRAFT_IDENTITY_CHANGED', notice: '' }));
+      return;
+    }
     setState((value) => ({ ...value, saving: true, error: '', errorCode: '', notice: '' }));
     try {
       const updated = await client.updateRegistrationBonusPolicy({
@@ -186,15 +218,20 @@ export function AdminOperationsWorkspace({ client, copy, permissions = EMPTY_PER
     client.reauthenticate(`/admin.html?section=operations&${REGISTRATION_BONUS_STEPUP_QUERY}=${encodeURIComponent(attemptID)}`);
   };
   const recoverPendingDraft = () => {
-    if (!pendingDraft || pendingDraft.userID !== currentUserID || !canManage || !policy) {
+    if (!policy) return;
+    if (!pendingDraft || pendingDraft.userID !== currentUserID || !canManage) {
       setPendingDraft(null);
       clearReauthenticationDraft();
       return;
     }
+    if (!clearReauthenticationDraft()) {
+      setState((value) => ({ ...value, error: labels.reauthenticationDraftCleanupFailed, errorCode: 'REGISTRATION_BONUS_DRAFT_CLEANUP_FAILED', notice: '' }));
+      return;
+    }
     const draftConflict = pendingDraft.expectedRevision !== Number(policy.revision);
     setForm(pendingDraft.form);
+    formOwnerUserID.current = pendingDraft.userID;
     setPendingDraft(null);
-    clearReauthenticationDraft();
     setState({
       loading: false,
       saving: false,
@@ -204,13 +241,29 @@ export function AdminOperationsWorkspace({ client, copy, permissions = EMPTY_PER
     });
   };
   const discardPendingDraft = () => {
+    if (!clearReauthenticationDraft()) {
+      setState((value) => ({ ...value, error: labels.reauthenticationDraftCleanupFailed, errorCode: 'REGISTRATION_BONUS_DRAFT_CLEANUP_FAILED', notice: '' }));
+      return;
+    }
     setPendingDraft(null);
-    clearReauthenticationDraft();
     setForm(policyForm(policy));
+    formOwnerUserID.current = currentUserID;
+    setState((value) => ({ ...value, error: '', errorCode: '', notice: labels.reauthenticationDraftDiscarded }));
+  };
+  const retryDraftCleanup = () => {
+    if (!clearReauthenticationDraft()) {
+      setState((value) => ({ ...value, error: labels.reauthenticationDraftCleanupFailed, errorCode: 'REGISTRATION_BONUS_DRAFT_CLEANUP_FAILED', notice: '' }));
+      return;
+    }
+    setPendingDraft(null);
+    setForm(policyForm(policy));
+    formOwnerUserID.current = currentUserID;
     setState((value) => ({ ...value, error: '', errorCode: '', notice: labels.reauthenticationDraftDiscarded }));
   };
   const errorAction = state.errorCode === 'REGISTRATION_BONUS_DRAFT_CONFLICT'
     ? { label: labels.loadLatestPolicy, run: () => void load() }
+    : state.errorCode === 'REGISTRATION_BONUS_DRAFT_CLEANUP_FAILED'
+      ? { label: labels.retryDraftCleanup, run: retryDraftCleanup }
     : state.errorCode === 'RECENT_AUTHENTICATION_REQUIRED' || state.errorCode === 'REGISTRATION_BONUS_DRAFT_STORAGE_UNAVAILABLE'
       ? { label: state.errorCode === 'RECENT_AUTHENTICATION_REQUIRED' ? labels.reauthenticate : labels.retryReauthentication, run: reauthenticate }
       : { label: copy.retry, run: () => void load() };
@@ -219,7 +272,7 @@ export function AdminOperationsWorkspace({ client, copy, permissions = EMPTY_PER
     <section className="adm-panel adm-settings-panel adm-registration-bonus" data-testid="registration-bonus-policy">
       <header className="adm-section-head"><div><h2>{labels.title}</h2><p>{labels.lead}</p></div></header>
       <div className="adm-inline-message warn" role="note">{labels.lifetimeWarning}</div>
-      {pendingDraft && <div className="adm-inline-message warn adm-registration-bonus-draft-prompt" role="status"><span>{labels.unfinishedReauthenticationDraft}</span><div><button type="button" onClick={recoverPendingDraft}>{labels.recoverDraft}</button><button type="button" onClick={discardPendingDraft}>{labels.discardDraft}</button></div></div>}
+      {pendingDraft && <div className="adm-inline-message warn adm-registration-bonus-draft-prompt" role="status"><span>{labels.unfinishedReauthenticationDraft}</span><div><button type="button" onClick={recoverPendingDraft} disabled={state.loading || !policy}>{labels.recoverDraft}</button><button type="button" onClick={discardPendingDraft}>{labels.discardDraft}</button></div></div>}
       {state.error && <div className="adm-inline-message error" role="alert"><span>{state.error}</span><button type="button" onClick={errorAction.run} disabled={state.loading || state.saving}>{errorAction.label}</button></div>}
       {state.notice && <div className="adm-inline-message ok" role="status">{state.notice}</div>}
       {state.loading && <p className="adm-muted">{copy.loading}</p>}
@@ -238,7 +291,7 @@ export function AdminOperationsWorkspace({ client, copy, permissions = EMPTY_PER
             </div>
             {canManage && <label className="adm-sms-reason"><span>{labels.reason}</span><textarea required minLength="10" maxLength="500" rows="4" value={form.reason} disabled={state.saving} onChange={(event) => setForm((value) => ({ ...value, reason: event.target.value }))} placeholder={labels.reasonPlaceholder} /></label>}
             {!canManage && <div className="adm-inline-message info" role="status">{labels.readOnly}</div>}
-            {canManage && <div className="adm-registration-bonus-actions"><button type="submit" className="adm-primary-button" disabled={state.saving || !valid || state.errorCode === 'REGISTRATION_BONUS_DRAFT_CONFLICT' || (form.enabled && !eligibilityReady)}>{state.saving ? labels.saving : labels.save}</button></div>}
+            {canManage && <div className="adm-registration-bonus-actions"><button type="submit" className="adm-primary-button" disabled={state.saving || !valid || state.errorCode === 'REGISTRATION_BONUS_DRAFT_CONFLICT' || state.errorCode === 'REGISTRATION_BONUS_DRAFT_CLEANUP_FAILED' || (form.enabled && !eligibilityReady)}>{state.saving ? labels.saving : labels.save}</button></div>}
           </div>
         </form>
       )}

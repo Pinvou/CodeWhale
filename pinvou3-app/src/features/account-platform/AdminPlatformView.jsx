@@ -626,6 +626,7 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
           retryTimer = null;
         }
         const current = authorizationRef.current;
+        const identityChanged = String(current?.user_id || '') !== String(next?.user_id || '');
         const permissionsChanged = JSON.stringify(current?.platform_permissions || []) !== JSON.stringify(next?.platform_permissions || []);
         const nextIAEnabled = adminModelTokenIAGateEnabled(nextSession);
         const nextResourceFormsEnabled = adminTokenResourceFormsGateEnabled(nextSession);
@@ -634,10 +635,10 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
         const nextPageOverviewsEnabled = adminModelTokenPageOverviewsGateEnabled(nextSession);
         const nextDetailsEnabled = adminModelDetailsGateEnabled(nextSession);
 				const nextPricingEditEnabled = adminModelPricingEditGateEnabled(nextSession);
-				const nextTokenDetailsEnabled = adminTokenDetailsGateEnabled(nextSession);
+        const nextTokenDetailsEnabled = adminTokenDetailsGateEnabled(nextSession);
         const nextActionsEnabled = adminModelTokenActionsGateEnabled(nextSession);
-				const gatesChanged = nextIAEnabled !== modelTokenIAEnabled || nextResourceFormsEnabled !== tokenResourceFormsEnabled || nextOperationsDetailsEnabled !== modelOperationsDetailsEnabled || nextOperationsOverviewEnabled !== modelOperationsOverviewEnabled || nextPageOverviewsEnabled !== modelTokenPageOverviewsEnabled || nextDetailsEnabled !== modelDetailsEnabled || nextPricingEditEnabled !== modelPricingEditEnabled || nextTokenDetailsEnabled !== tokenDetailsEnabled || nextActionsEnabled !== modelTokenActionsEnabled;
-        if (permissionsChanged || authorizationVersionChanged(authorizationVersions(current), authorizationVersions(next)) || gatesChanged) {
+        const gatesChanged = nextIAEnabled !== modelTokenIAEnabled || nextResourceFormsEnabled !== tokenResourceFormsEnabled || nextOperationsDetailsEnabled !== modelOperationsDetailsEnabled || nextOperationsOverviewEnabled !== modelOperationsOverviewEnabled || nextPageOverviewsEnabled !== modelTokenPageOverviewsEnabled || nextDetailsEnabled !== modelDetailsEnabled || nextPricingEditEnabled !== modelPricingEditEnabled || nextTokenDetailsEnabled !== tokenDetailsEnabled || nextActionsEnabled !== modelTokenActionsEnabled;
+        if (identityChanged || permissionsChanged || authorizationVersionChanged(authorizationVersions(current), authorizationVersions(next)) || gatesChanged) {
           const visible = adminVisibleSections(next, { modelTokenIAEnabled: nextIAEnabled });
           authorizationRef.current = next;
           setAuthorization(next);
