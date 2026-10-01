@@ -764,9 +764,14 @@ impl ControlledRelayWorker {
         if message.get("challenge_id").and_then(Value::as_str) != Some(challenge_id.as_str()) {
             return;
         }
+        let Ok(trust) = load_relay_trust_config(|name| std::env::var(name).ok()) else {
+            // Missing/invalid administrator pins cannot authorize liveness or
+            // consume the outstanding challenge. The watchdog remains closed.
+            return;
+        };
         let manager = self.app.state::<ControlledDeviceManager>();
         let now_b = controlled_monotonic_millis();
-        match manager.accept_liveness_attestation(&message.to_string(), sent_at_b, now_b) {
+        match manager.accept_liveness_attestation(&message.to_string(), &trust, sent_at_b, now_b) {
             Ok(()) => {
                 evidence.outstanding = None;
                 evidence.escalated = false;
