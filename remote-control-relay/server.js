@@ -1267,6 +1267,7 @@ wss.on("connection", (ws, req) => {
 
 const heartbeatTimer = setInterval(() => {
   pruneExpiredEndpoints();
+  if (controllerRuntime) void controllerRuntime.reservations.expire().catch(() => {});
   if (controllerRuntime) void controllerRuntime.leases.expire().catch(() => {});
   if (controllerRuntime) void controllerRuntime.router.expire().catch(() => {});
   const endpointBucketExpiry = Date.now() - ENDPOINT_CREATE_WINDOW_MS;

@@ -13,7 +13,7 @@
 (function (root) {
   "use strict";
 
-  var CONTROLLED_TERMINAL = { stopped: true, error: true };
+  var CONTROLLED_TERMINAL = { disabled: true, stopped: true, error: true };
   var CONTROLLER_TERMINAL = { idle: true, disconnected: true, error: true };
   var TASK_TERMINAL = {
     succeeded: true,
@@ -25,11 +25,14 @@
 
   function createControlledDevice() {
     return {
-      status: "idle",
+      status: "disabled",
       generation: null,
+      statusIntent: null,
       pairingCode: null,
       expiresAtMs: null,
       deviceName: null,
+      workspaceCount: 0,
+      codeModeAllowed: false,
       workspaces: [],
       lastError: null,
     };
@@ -40,6 +43,10 @@
       status: "idle",
       connectionId: null,
       leaseEpoch: null,
+      claimRequestId: null,
+      controllerLeaseId: null,
+      relayEpoch: null,
+      remoteControlGeneration: null,
       deviceName: null,
       lastError: null,
     };
@@ -100,25 +107,39 @@
     if (!status) return state;
     var generation = payload.generation ? String(payload.generation) : null;
     var current = state.controlledDevice;
-    var starting = status === "registering" || status === "waiting_for_pairing";
+    var replaceBinding = payload.replaceBinding === true && payload.intent !== undefined;
+    var statusIntent = payload.statusIntent === undefined ? null : String(payload.statusIntent);
+    if (statusIntent && !/^(0|[1-9][0-9]*)$/.test(statusIntent)) return state;
+    if (statusIntent && current.statusIntent && BigInt(statusIntent) < BigInt(current.statusIntent)) return state;
+    if (current.generation && !generation && !replaceBinding) return state;
+    var starting = status === "reserving" || status === "waiting_connection";
     if (
       generation &&
       current.generation &&
       generation !== current.generation &&
-      !starting &&
-      !CONTROLLED_TERMINAL[status]
+      !replaceBinding &&
+      !(current.status === "refreshing" && status === "reserving")
     ) {
       return state;
     }
+    if (!replaceBinding && CONTROLLED_TERMINAL[current.status] && current.generation &&
+        !CONTROLLED_TERMINAL[status]) return state;
+    if (generation === current.generation && current.status === "waiting_connection" && status === "reserving") return state;
+    if (generation === current.generation &&
+        (current.status === "connected" || current.status === "reconnecting" ||
+         current.status === "safety_handshake" || current.status === "refreshing") && starting) return state;
     var next = shallowCopy(state);
     next.controlledDevice = {
       status: status,
       generation: generation || (starting ? current.generation : null),
-      pairingCode: payload.pairingCode || (status === "waiting_for_pairing" ? current.pairingCode : null),
-      expiresAtMs: payload.expiresAtMs || null,
-      deviceName: payload.deviceName || current.deviceName,
+      statusIntent: statusIntent || current.statusIntent,
+      pairingCode: CONTROLLED_TERMINAL[status] ? null : payload.pairingCode || null,
+      expiresAtMs: CONTROLLED_TERMINAL[status] ? null : payload.pairingExpiresAtMs || null,
+      deviceName: payload.deviceName || null,
+      workspaceCount: Number(payload.workspaceCount) || 0,
+      codeModeAllowed: payload.codeModeAllowed === true,
       workspaces: Array.isArray(payload.workspaces) ? payload.workspaces.slice(0, 32) : current.workspaces,
-      lastError: payload.error || null,
+      lastError: payload.errorCode || null,
     };
     next.revision = state.revision + 1;
     return next;
@@ -129,14 +150,23 @@
     if (!isCurrentIntent(state, "controller", payload.intent)) return state;
     var status = payload.status ? String(payload.status) : null;
     if (!status) return state;
-    var connectionId = payload.connectionId ? String(payload.connectionId) : null;
-    var leaseEpoch = payload.leaseEpoch === 0 || payload.leaseEpoch ? String(payload.leaseEpoch) : null;
+    var lease = payload.lease || {};
+    var connectionId = lease.connectionId ? String(lease.connectionId) : null;
+    var leaseEpoch = lease.leaseEpoch === 0 || lease.leaseEpoch ? String(lease.leaseEpoch) : null;
+    if (leaseEpoch && !/^(0|[1-9][0-9]*)$/.test(leaseEpoch)) return state;
+    var claimRequestId = payload.claimRequestId || null;
     var current = state.controllerConnection;
+    var newClaim = claimRequestId && claimRequestId !== current.claimRequestId;
+    var replaceBinding = payload.replaceBinding === true && payload.intent !== undefined;
+    if (newClaim && current.claimRequestId && !replaceBinding) return state;
+    if (!newClaim && CONTROLLER_TERMINAL[current.status] && current.claimRequestId &&
+        !CONTROLLER_TERMINAL[status]) return state;
+    // Only a fresh explicit connect intent can replace the previous binding.
     if (
       connectionId &&
       current.connectionId &&
       connectionId !== current.connectionId &&
-      !CONTROLLER_TERMINAL[status]
+      !(newClaim && replaceBinding)
     ) {
       return state;
     }
@@ -144,21 +174,35 @@
       leaseEpoch &&
       current.leaseEpoch &&
       connectionId === current.connectionId &&
-      Number(leaseEpoch) < Number(current.leaseEpoch) &&
-      !CONTROLLER_TERMINAL[status]
+      BigInt(leaseEpoch) < BigInt(current.leaseEpoch)
     ) {
       return state;
     }
+    if (!newClaim && (current.status === "connected" || current.status === "reconnecting") &&
+        (status === "connecting" || status === "safety_handshake")) return state;
+    if (!newClaim && current.status === "safety_handshake" && status === "connecting") return state;
+    if (!newClaim && connectionId && current.connectionId &&
+        ["controllerLeaseId", "relayEpoch", "remoteControlGeneration"].some(function (key) {
+          return String(lease[key] || "") !== String(current[key] || "");
+        })) return state;
+    var retained = status === "reconnecting" && !newClaim ? current : {};
     var next = shallowCopy(state);
     next.controllerConnection = {
       status: status,
-      connectionId: connectionId || current.connectionId,
-      leaseEpoch: leaseEpoch || current.leaseEpoch,
-      deviceName: payload.deviceName || current.deviceName,
-      lastError: payload.error || null,
+      connectionId: connectionId || retained.connectionId || null,
+      leaseEpoch: leaseEpoch || retained.leaseEpoch || null,
+      claimRequestId: claimRequestId,
+      controllerLeaseId: lease.controllerLeaseId || retained.controllerLeaseId || null,
+      relayEpoch: lease.relayEpoch || retained.relayEpoch || null,
+      remoteControlGeneration: lease.remoteControlGeneration || retained.remoteControlGeneration || null,
+      deviceName: payload.deviceDisplayName || null,
+      lastError: payload.errorCode || null,
     };
-    if (CONTROLLER_TERMINAL[status]) {
+    if (CONTROLLER_TERMINAL[status] || newClaim ||
+        (leaseEpoch && current.leaseEpoch && leaseEpoch !== current.leaseEpoch)) {
       next.remoteCapabilities = null;
+    }
+    if (CONTROLLER_TERMINAL[status] || newClaim) {
       next.tasks = [];
     }
     next.revision = state.revision + 1;
@@ -175,6 +219,9 @@
     if (!connection.connectionId || connection.status !== "connected") return state;
     if (String(payload.connectionId || "") !== String(connection.connectionId)) return state;
     if (String(payload.leaseEpoch || "") !== String(connection.leaseEpoch)) return state;
+    if (["controllerLeaseId", "relayEpoch", "remoteControlGeneration"].some(function (key) {
+      return String(payload[key] || "") !== String(connection[key] || "");
+    })) return state;
     var revision = Number(payload.capabilityRevision);
     if (!isFinite(revision) || revision <= 0) return state;
     if (state.remoteCapabilities && revision <= Number(state.remoteCapabilities.capabilityRevision)) {
@@ -183,6 +230,7 @@
     var next = shallowCopy(state);
     next.remoteCapabilities = {
       connectionId: payload.connectionId,
+      controllerLeaseId: payload.controllerLeaseId,
       leaseEpoch: payload.leaseEpoch,
       relayEpoch: payload.relayEpoch || null,
       remoteControlGeneration: payload.remoteControlGeneration || null,
@@ -241,6 +289,10 @@
     var status = payload.status ? String(payload.status) : "";
     if (!taskId || !status) return state;
     var connection = state.controllerConnection;
+    // A08/A11 must add the full lease tuple to RemoteTaskEvent. Until then,
+    // this local projection cannot identify old unbound events delivered after
+    // reconnect; it can reject the offline window, not claim wire isolation.
+    if (connection.status !== "connected") return state;
     if (connection.connectionId && payload.connectionId && String(payload.connectionId) !== String(connection.connectionId)) {
       return state;
     }
@@ -278,7 +330,7 @@
   function matchesLiveContext(state, envelope) {
     var payload = envelope || {};
     var connection = state.controllerConnection;
-    if (!connection.connectionId) return false;
+    if (!connection.connectionId || connection.status !== "connected") return false;
     if (payload.connectionId && String(payload.connectionId) !== String(connection.connectionId)) return false;
     if (
       payload.leaseEpoch !== undefined &&
