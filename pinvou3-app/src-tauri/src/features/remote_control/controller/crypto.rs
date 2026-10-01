@@ -1512,7 +1512,7 @@ mod tests {
                 .code,
             "invalid_ciphertext"
         );
-        let source = include_str!("crypto.rs");
+        let source = include_str!("crypto.rs").replace("\r\n", "\n");
         assert!(source.contains("pub(crate) fn seal_pairing_code(\n        self,"));
         let forbidden = ["pub(crate) fn seal_pairing_code_with", "_nonce"].concat();
         assert!(!source.contains(&forbidden));
@@ -1892,7 +1892,7 @@ mod tests {
         assert_ne!(&first_sender.key[..], &replacement.key[..]);
         assert!(replacement.seal(8, 1, "task_submit", b"new").is_ok());
 
-        let source = include_str!("crypto.rs");
+        let source = include_str!("crypto.rs").replace("\r\n", "\n");
         assert!(source.contains("pub(crate) fn into_role_ciphers(\n        self,"));
         let reusable_factory = ["fn business_", "cipher(&self"].concat();
         assert!(!source.contains(&reusable_factory));
