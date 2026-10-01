@@ -11,6 +11,7 @@ const staticRoot = path.resolve(import.meta.dirname, '../../account-platform/int
 let permissions = ['platform.registration-bonus.read', 'platform.registration-bonus.manage'];
 let policy = { revision: 2, enabled: false, amount_microcredits: 0, validity_days: 30, updated_at: new Date().toISOString(), eligibility_status: 'READY', recoverable_registration_count: 4, unrecoverable_registration_count: 0 };
 let recentAuthenticationRequired = false;
+const reauthenticationRequests = [];
 const writes = [];
 
 function json(response, payload, status = 200) {
@@ -23,6 +24,11 @@ const server = createServer(async (request, response) => {
   if (url.pathname === '/__test__/blocked') { policy = { ...policy, eligibility_status: 'BLOCKED', unrecoverable_registration_count: 2 }; return json(response, {}); }
   if (url.pathname === '/__test__/recent-auth') { recentAuthenticationRequired = true; return json(response, {}); }
   if (url.pathname === '/__test__/writes') return json(response, writes);
+  if (url.pathname === '/auth/login') {
+    reauthenticationRequests.push(url);
+    response.writeHead(302, { Location: url.searchParams.get('return_to') || '/admin.html?section=operations' });
+    return response.end();
+  }
   if (url.pathname === '/api/session') return json(response, { authenticated: true, csrf_token: 'csrf-test' });
   if (url.pathname === '/api/account/v1/account/bootstrap') return json(response, { user_id: '0199a100-0001-7000-8000-000000000101', platform_permissions: permissions });
   if (url.pathname === '/api/admin/billing/admin/v1/registration-bonus-policy' && request.method === 'GET') return json(response, policy);
@@ -94,6 +100,19 @@ try {
   await page.waitForSelector('[data-testid="registration-bonus-policy"] [role="alert"]');
   assert.match(await page.$eval('[data-testid="registration-bonus-policy"] [role="alert"]', (node) => node.textContent), /sign in again/i);
   assert.match(await page.$eval('[data-testid="registration-bonus-policy"] [role="alert"] button', (node) => node.textContent), /sign in again/i);
+  await Promise.all([
+    page.waitForNavigation({ waitUntil: 'networkidle0' }),
+    page.click('[data-testid="registration-bonus-policy"] [role="alert"] button'),
+  ]);
+  await page.waitForSelector('[data-testid="registration-bonus-policy"] form');
+  assert.equal(reauthenticationRequests.length, 1);
+  assert.equal(reauthenticationRequests[0].searchParams.get('reauthenticate'), '1');
+  assert.equal(reauthenticationRequests[0].searchParams.get('return_to'), '/admin.html?section=operations&registration_bonus_stepup=1');
+  assert.deepEqual(await page.$$eval('[data-testid="registration-bonus-policy"] input[type="number"]', (nodes) => nodes.map((node) => node.value)), ['25', '90']);
+  assert.equal(await page.$eval('[data-testid="registration-bonus-policy"] input[type="checkbox"]', (node) => node.checked), true);
+  assert.equal(await page.$eval('[data-testid="registration-bonus-policy"] textarea', (node) => node.value), 'Confirm recent authentication flow');
+  assert.equal(await page.$eval('html', (node) => node.ownerDocument.defaultView.sessionStorage.getItem('pinvou.admin.registration-bonus.reauthentication-draft')), null);
+  assert.equal(new URL(page.url()).searchParams.has('registration_bonus_stepup'), false);
 
   await fetch(`http://127.0.0.1:${port}/__test__/blocked`);
   await page.reload({ waitUntil: 'networkidle0' });
