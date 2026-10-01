@@ -151,7 +151,8 @@ export class EnrollmentMigrationHandler {
   #identityVerifier;
 
   constructor({ registry, identityVerifier } = {}) {
-    if (!registry || typeof registry.executeMigrationRequest !== "function" || typeof registry.getStatus !== "function") {
+    if (!registry || typeof registry.executeMigrationRequest !== "function" || typeof registry.getStatus !== "function"
+      || typeof registry.getControllerReadiness !== "function") {
       fail("migration_registry_invalid");
     }
     if (identityVerifier !== undefined && !OFFICIAL_VERIFIERS.has(identityVerifier)) {
@@ -191,7 +192,7 @@ export class EnrollmentMigrationHandler {
       expected: { endpointId: id, accessToken, desktopSecret, challenge },
     });
     const proof = Object.freeze(Object.create(null));
-    SOCKET_PROOFS.set(proof, { owner: this, socket, endpointId: id, accessToken, active: true });
+    SOCKET_PROOFS.set(proof, { owner: this, socket, endpointId: id, accessToken, desktopSecret, active: true });
     return proof;
   }
 
@@ -210,9 +211,10 @@ export class EnrollmentMigrationHandler {
       const request = await this.#registry.executeMigrationRequest({
         requestId: id,
         operations: [{
-          operation: "allowlist",
+          operation: "claim_roles",
           endpoint_id: record.endpointId,
           credential: record.accessToken,
+          desktop_credential: record.desktopSecret,
         }],
       });
       if (request.status !== "succeeded") fail("migration_claim_failed");
@@ -220,7 +222,8 @@ export class EnrollmentMigrationHandler {
       if (!operationResult || operationResult.endpoint_id !== record.endpointId) {
         fail("migration_claim_failed");
       }
-      return publicResult({ ...operationResult, status: "active" }, id, "claimed");
+      return Object.freeze({ ...publicResult({ ...operationResult, status: "active" }, id, "claimed"),
+        desktop_ready: this.#registry.getControllerReadiness(record.endpointId).desktop_ready });
     } catch (error) {
       if (error?.code === "migration_request_conflict") fail("migration_request_conflict", error);
       fail(["endpoint_already_enrolled", "endpoint_revoked"].includes(error?.code)
@@ -236,11 +239,13 @@ export class EnrollmentMigrationHandler {
     const endpoints = unique.map((id) => ({
       endpoint_id: id,
       enrollment_status: this.#registry.getStatus(id)?.status ?? "not_migrated",
+      ...this.#registry.getControllerReadiness(id),
     }));
-    const migrated = endpoints.filter((entry) => entry.enrollment_status === "active").length;
+    const migrated = endpoints.filter((entry) => entry.desktop_ready).length;
     return Object.freeze({
       total: endpoints.length,
       migrated,
+      web_migrated: endpoints.filter((entry) => entry.web_ready).length,
       not_migrated: endpoints.length - migrated,
       coverage_percent: endpoints.length === 0 ? 100 : Number(((migrated / endpoints.length) * 100).toFixed(2)),
       endpoints: Object.freeze(endpoints.map(Object.freeze)),
@@ -287,19 +292,20 @@ export function createEnrollmentBackup(registry) {
 export async function restoreEnrollmentBackup({ registry, backup, requestId: stableRequestId } = {}) {
   if (!registry || typeof registry.executeMigrationRequest !== "function") fail("migration_registry_invalid");
   const parsed = validateBackup(backup);
-  const restoreRequestId = stableRequestId === undefined
-    ? `restore-${parsed.registry_sha256}`
-    : requestId(stableRequestId);
+  const restoreRequestId = requestId(stableRequestId);
   try {
     const restored = await registry.executeMigrationRequest({
       requestId: restoreRequestId,
       operations: [{ operation: "restore", snapshot: parsed.registry }],
+      reportReplay: true,
     });
     return Object.freeze({
-      restored: true,
+      restored: restored.replayed === false,
+      applied: restored.replayed === false,
+      replayed: restored.replayed === true,
       request_id: restoreRequestId,
       status: restored.status,
-      restored_entry_count: restored.outcome.restored_entry_count,
+      restored_entry_count: restored.replayed ? 0 : restored.outcome.restored_entry_count,
     });
   } catch (error) {
     fail("migration_restore_failed", error);
@@ -310,8 +316,16 @@ function validateOperation(raw) {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) fail("migration_operation_invalid");
   const operation = raw.operation;
   if (operation === "allowlist") {
-    exactObject(raw, ["operation", "endpoint_id", "credential"], "migration_operation_invalid");
-    return { operation, endpointId: endpointId(raw.endpoint_id), credential: credential(raw.credential) };
+    const dual = Object.hasOwn(raw, "desktop_credential");
+    exactObject(raw, dual ? ["operation", "endpoint_id", "credential", "desktop_credential", "expected_revision"]
+      : ["operation", "endpoint_id", "credential"], "migration_operation_invalid");
+    return { operation, endpointId: endpointId(raw.endpoint_id), credential: credential(raw.credential),
+      ...(dual ? { desktopCredential: credential(raw.desktop_credential, "desktop_credential"), expectedRevision: raw.expected_revision } : {}) };
+  }
+  if (operation === "set_desktop_credential") {
+    exactObject(raw, ["operation", "endpoint_id", "desktop_credential", "expected_revision"], "migration_operation_invalid");
+    return { operation, endpointId: endpointId(raw.endpoint_id),
+      desktopCredential: credential(raw.desktop_credential, "desktop_credential"), expectedRevision: raw.expected_revision };
   }
   if (operation === "re_enroll") {
     exactObject(raw, [
@@ -330,7 +344,14 @@ function validateOperation(raw) {
 
 function registryOperation(operation) {
   if (operation.operation === "allowlist") {
-    return { operation: "allowlist", endpoint_id: operation.endpointId, credential: operation.credential };
+    return { operation: "allowlist", endpoint_id: operation.endpointId, credential: operation.credential,
+      ...(operation.desktopCredential === undefined ? {} : {
+        desktop_credential: operation.desktopCredential, expected_revision: operation.expectedRevision,
+      }) };
+  }
+  if (operation.operation === "set_desktop_credential") {
+    return { operation: operation.operation, endpoint_id: operation.endpointId,
+      desktop_credential: operation.desktopCredential, expected_revision: operation.expectedRevision };
   }
   return {
     operation: "re_enroll",
@@ -366,7 +387,8 @@ export async function runEnrollmentBatch({ registry, operations, dryRun = true, 
           endpoint_id: result.endpoint_id,
           action: result.action === "allowlisted"
             ? "would_allowlist"
-            : result.action === "re_enrolled" ? "would_re_enroll" : "already_enrolled",
+            : result.action === "re_enrolled" ? "would_re_enroll"
+              : result.action === "desktop_credential_set" ? "would_set_desktop_credential" : "already_enrolled",
         })),
       });
     }
