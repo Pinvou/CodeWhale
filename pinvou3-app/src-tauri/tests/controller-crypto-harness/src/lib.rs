@@ -1,7 +1,11 @@
-//! Resource-bounded test harness for the disconnected controller modules.
+//! Resource-bounded tests for controller authentication and local safety state.
 //!
-//! This avoids linking the full Tauri/CodeWhale lib-test binary while DEV-05
-//! remains deliberately outside all application routing.
+//! Actual production modules are compiled below without linking the full
+//! Tauri/CodeWhale graph. Transport is deliberately out of scope: its test
+//! double models only installed/closed admission for local manager tests; it
+//! cannot claim protocol queue, network, or runtime transport coverage.
+//! The platform capability projection is also a test double, not OS coverage.
+//! The full product compile and native transport tests remain separate gates.
 
 #![allow(dead_code)]
 
@@ -10,3 +14,111 @@ mod protocol;
 
 #[path = "../../../src/features/remote_control/controller/crypto.rs"]
 mod crypto;
+
+#[path = "../../../src/features/remote_control/controller/liveness.rs"]
+pub(crate) mod liveness;
+
+#[path = "../../../src/features/remote_control/controller/resume.rs"]
+mod resume;
+
+mod state;
+
+#[cfg(test)]
+#[path = "../../../src/features/remote_control/controller/test_support.rs"]
+mod test_support;
+
+#[cfg(test)]
+mod features {
+    pub(crate) mod remote_control {
+        pub(crate) mod controller {
+            pub(crate) use crate::liveness;
+        }
+    }
+}
+
+mod platform {
+    pub(crate) fn desktop_control_supported() -> bool {
+        cfg!(target_os = "windows")
+    }
+}
+
+mod relay_transport {
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub(crate) enum ControllerRole {
+        ControllerA,
+        ControlledB,
+    }
+
+    // Admission-only test double for manager lifecycle tests. It does not
+    // validate frames, enqueue bytes, start workers or communicate over a socket.
+    pub(crate) struct ControllerTransportSender {
+        authenticated: std::sync::atomic::AtomicBool,
+        stopped: std::sync::atomic::AtomicBool,
+    }
+
+    pub(crate) struct AuthenticatedLease {
+        pub(crate) context: crate::protocol::LeaseContext,
+        pub(crate) negotiated_capabilities: Vec<String>,
+    }
+
+    #[cfg(test)]
+    pub(crate) fn transport_channels(
+        _role: ControllerRole,
+        _generation: &str,
+        _control_capacity: usize,
+        _business_capacity: usize,
+        _total_byte_budget: usize,
+        _reserved_control_bytes: usize,
+    ) -> (ControllerTransportSender, ()) {
+        (
+            ControllerTransportSender {
+                authenticated: std::sync::atomic::AtomicBool::new(false),
+                stopped: std::sync::atomic::AtomicBool::new(false),
+            },
+            (),
+        )
+    }
+
+    #[derive(Debug)]
+    pub(crate) enum ControllerSendError {
+        Unauthenticated,
+    }
+
+    impl ControllerTransportSender {
+        #[cfg(test)]
+        pub(crate) fn install_authenticated_lease(
+            &self,
+            _lease: AuthenticatedLease,
+        ) -> Result<(), ControllerSendError> {
+            self.authenticated
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+
+        pub(crate) fn try_send_authenticated_control(
+            &self,
+            _frame: &serde_json::Value,
+        ) -> Result<(), ControllerSendError> {
+            if self.is_stopped() || !self.authenticated.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(ControllerSendError::Unauthenticated);
+            }
+            Ok(())
+        }
+
+        pub(crate) fn try_send_business(
+            &self,
+            _frame: &serde_json::Value,
+        ) -> Result<(), ControllerSendError> {
+            panic!("transport is outside this local-state harness");
+        }
+
+        pub(crate) fn stop(&self) {
+            self.stopped
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+
+        pub(crate) fn is_stopped(&self) -> bool {
+            self.stopped.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+}
