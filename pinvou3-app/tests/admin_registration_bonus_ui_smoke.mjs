@@ -14,8 +14,10 @@ let csrfToken = 'csrf-user-a';
 let policy = { revision: 2, enabled: false, amount_microcredits: 0, validity_days: 30, updated_at: new Date().toISOString(), eligibility_status: 'READY', recoverable_registration_count: 4, unrecoverable_registration_count: 0 };
 let recentAuthenticationRequired = false;
 let authenticationBehavior = 'concurrent-update';
-let delayNextPolicyRead = false;
-let delayNextAuthorizationRead = false;
+let nextPolicyReadDelayMs = 0;
+let nextAuthorizationReadDelayMs = 0;
+let delayNextSaveAuthorizationRead = false;
+let delayedSaveAuthorizationStarted = false;
 const reauthenticationRequests = [];
 const writes = [];
 
@@ -28,13 +30,18 @@ const server = createServer(async (request, response) => {
   if (url.pathname === '/__test__/readonly') { permissions = ['platform.registration-bonus.read']; return json(response, {}); }
   if (url.pathname === '/__test__/blocked') { policy = { ...policy, eligibility_status: 'BLOCKED', unrecoverable_registration_count: 2 }; return json(response, {}); }
   if (url.pathname === '/__test__/recent-auth') { recentAuthenticationRequired = true; return json(response, {}); }
-  if (url.pathname === '/__test__/auth-cancel') { authenticationBehavior = 'cancel'; delayNextPolicyRead = true; return json(response, {}); }
+  if (url.pathname === '/__test__/auth-cancel') { authenticationBehavior = 'cancel'; nextPolicyReadDelayMs = 300; return json(response, {}); }
   if (url.pathname === '/__test__/auth-switch-user') { authenticationBehavior = 'switch-user'; return json(response, {}); }
   if (url.pathname === '/__test__/auth-expire-return') { authenticationBehavior = 'expire-return'; return json(response, {}); }
+  if (url.pathname === '/__test__/delay-next-save-authorization') {
+    delayNextSaveAuthorizationRead = true;
+    delayedSaveAuthorizationStarted = false;
+    return json(response, {});
+  }
   if (url.pathname === '/__test__/switch-current-user') {
     currentUserID = currentUserID.endsWith('0101') ? '0199a100-0001-7000-8000-000000000202' : '0199a100-0001-7000-8000-000000000101';
     csrfToken = currentUserID.endsWith('0101') ? 'csrf-user-a' : 'csrf-user-b';
-    delayNextAuthorizationRead = true;
+    nextAuthorizationReadDelayMs = 500;
     return json(response, {});
   }
   if (url.pathname === '/__test__/writes') return json(response, writes);
@@ -49,9 +56,9 @@ const server = createServer(async (request, response) => {
     }
     if (authenticationBehavior === 'expire-return') {
       authenticationBehavior = 'success';
-      delayNextPolicyRead = true;
+      nextPolicyReadDelayMs = 1500;
       response.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
-      return response.end(`<script>const key='pinvou.admin.registration-bonus.reauthentication-draft';const draft=JSON.parse(sessionStorage.getItem(key));draft.expires_at=Date.now()+100;sessionStorage.setItem(key,JSON.stringify(draft));location.replace(${JSON.stringify(returnTo)});</script>`);
+      return response.end(`<script>const key='pinvou.admin.registration-bonus.reauthentication-draft';const draft=JSON.parse(sessionStorage.getItem(key));draft.expires_at=Date.now()+1000;sessionStorage.setItem(key,JSON.stringify(draft));location.replace(${JSON.stringify(returnTo)});</script>`);
     }
     authenticationBehavior = 'success';
     response.writeHead(302, { Location: returnTo });
@@ -59,17 +66,25 @@ const server = createServer(async (request, response) => {
   }
   if (url.pathname === '/api/session') return json(response, { authenticated: true, csrf_token: csrfToken });
   if (url.pathname === '/api/account/v1/account/bootstrap') {
-    if (delayNextAuthorizationRead) {
-      delayNextAuthorizationRead = false;
-      await new Promise((resolve) => { setTimeout(resolve, 300); });
-    }
     if (request.headers['x-csrf-token'] !== csrfToken) return json(response, { code: 'CSRF_REJECTED' }, 403);
-    return json(response, { user_id: currentUserID, platform_permissions: permissions });
+    const requestedUserID = currentUserID;
+    const requestedPermissions = [...permissions];
+    if (delayNextSaveAuthorizationRead) {
+      delayNextSaveAuthorizationRead = false;
+      delayedSaveAuthorizationStarted = true;
+      await new Promise((resolve) => { setTimeout(resolve, 250); });
+    } else if (nextAuthorizationReadDelayMs > 0) {
+      const delay = nextAuthorizationReadDelayMs;
+      nextAuthorizationReadDelayMs = 0;
+      await new Promise((resolve) => { setTimeout(resolve, delay); });
+    }
+    return json(response, { user_id: requestedUserID, platform_permissions: requestedPermissions });
   }
   if (url.pathname === '/api/admin/billing/admin/v1/registration-bonus-policy' && request.method === 'GET') {
-    if (delayNextPolicyRead) {
-      delayNextPolicyRead = false;
-      await new Promise((resolve) => { setTimeout(resolve, 300); });
+    if (nextPolicyReadDelayMs > 0) {
+      const delay = nextPolicyReadDelayMs;
+      nextPolicyReadDelayMs = 0;
+      await new Promise((resolve) => { setTimeout(resolve, delay); });
     }
     return json(response, policy);
   }
@@ -96,7 +111,7 @@ const server = createServer(async (request, response) => {
 
 await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
 const { port } = server.address();
-const browser = await puppeteer.launch({ executablePath: browserPath, headless: 'new', args: ['--no-sandbox', '--disable-gpu', '--no-first-run'] });
+const browser = await puppeteer.launch({ executablePath: browserPath, headless: 'new', args: ['--no-sandbox', '--disable-gpu', '--no-first-run', `--explicitly-allowed-ports=${port}`] });
 try {
   const page = await browser.newPage();
   await page.setViewport({ width: 1280, height: 900, deviceScaleFactor: 1 });
@@ -221,6 +236,21 @@ try {
   assert.equal(writes.length, writesBeforeIdentityRefresh, 'a mutation must be blocked while a rotated session identity is being refreshed');
   await page.waitForFunction(() => document.querySelector('[data-testid="registration-bonus-policy"] textarea')?.value === '');
   assert.deepEqual(await page.$$eval('[data-testid="registration-bonus-policy"] input[type="number"]', (nodes) => nodes.map((node) => node.value)), ['40', '45'], 'a live identity change must reset the previous administrator draft');
+
+  await page.type('[data-testid="registration-bonus-policy"] textarea', 'Cancel a save interrupted by identity refresh');
+  await fetch(`http://127.0.0.1:${port}/__test__/delay-next-save-authorization`);
+  await page.click('[data-testid="registration-bonus-policy"] button[type="submit"]');
+  for (let attempt = 0; attempt < 50 && !delayedSaveAuthorizationStarted; attempt += 1) {
+    await new Promise((resolve) => { setTimeout(resolve, 10); });
+  }
+  assert.equal(delayedSaveAuthorizationStarted, true, 'the save authorization preflight must be in flight before the identity refresh starts');
+  const writesBeforeInterruptedSave = writes.length;
+  await fetch(`http://127.0.0.1:${port}/__test__/switch-current-user`);
+  await page.evaluate(() => globalThis.dispatchEvent(new Event('focus')));
+  await page.waitForFunction(() => document.querySelector('[data-testid="registration-bonus-policy"] textarea')?.value === '');
+  assert.equal(writes.length, writesBeforeInterruptedSave, 'a save preflight started by the old identity must be cancelled when a newer authorization refresh begins');
+  assert.equal(currentUserID, '0199a100-0001-7000-8000-000000000101');
+
   await page.reload({ waitUntil: 'networkidle0' });
   await page.waitForSelector('[data-testid="registration-bonus-policy"] form');
   assert.equal(await page.$('.adm-registration-bonus-draft-prompt'), null);
@@ -236,7 +266,7 @@ try {
     page.click('[data-testid="registration-bonus-policy"] [role="alert"] button'),
   ]);
   await page.waitForSelector('[data-testid="registration-bonus-policy"] form');
-  assert.equal(currentUserID, '0199a100-0001-7000-8000-000000000101');
+  assert.equal(currentUserID, '0199a100-0001-7000-8000-000000000202');
   assert.equal(await page.$('.adm-registration-bonus-draft-prompt'), null);
   assert.deepEqual(await page.$$eval('[data-testid="registration-bonus-policy"] input[type="number"]', (nodes) => nodes.map((node) => node.value)), ['40', '45']);
   assert.equal(await page.$eval('[data-testid="registration-bonus-policy"] textarea', (node) => node.value), '', 'a different administrator must never receive the originating administrator draft');

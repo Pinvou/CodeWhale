@@ -89,7 +89,7 @@ function clearReauthenticationDraft() {
   return storageCleared;
 }
 
-export function AdminOperationsWorkspace({ client, copy, permissions = EMPTY_PERMISSIONS, currentUserID = '', authorizationRefreshing = false }) {
+export function AdminOperationsWorkspace({ client, copy, permissions = EMPTY_PERMISSIONS, currentUserID = '', authorizationRefreshing = false, authorizationRefreshGuard = null }) {
   const labels = copy.operations;
   const permissionSet = new Set(permissions);
   const canManage = permissionSet.has('platform.registration-bonus.manage');
@@ -160,7 +160,10 @@ export function AdminOperationsWorkspace({ client, copy, permissions = EMPTY_PER
 
   const save = async (event) => {
     event.preventDefault();
-    if (!canManage || !policy || authorizationRefreshing || state.errorCode === 'REGISTRATION_BONUS_DRAFT_CONFLICT' || state.errorCode === 'REGISTRATION_BONUS_DRAFT_CLEANUP_FAILED' || state.errorCode === 'REGISTRATION_BONUS_DRAFT_IDENTITY_CHANGED') return;
+    const refreshGeneration = Number(authorizationRefreshGuard?.current?.generation || 0);
+    const refreshInterrupted = () => Boolean(authorizationRefreshGuard?.current?.active) || Number(authorizationRefreshGuard?.current?.generation || 0) !== refreshGeneration;
+    const stopForAuthorizationRefresh = () => setState((value) => ({ ...value, saving: false }));
+    if (!canManage || !policy || authorizationRefreshing || refreshInterrupted() || state.errorCode === 'REGISTRATION_BONUS_DRAFT_CONFLICT' || state.errorCode === 'REGISTRATION_BONUS_DRAFT_CLEANUP_FAILED' || state.errorCode === 'REGISTRATION_BONUS_DRAFT_IDENTITY_CHANGED') return;
     if (formOwnerUserID.current !== currentUserID) {
       formOwnerUserID.current = '';
       setForm(policyForm(policy));
@@ -170,7 +173,9 @@ export function AdminOperationsWorkspace({ client, copy, permissions = EMPTY_PER
     setState((value) => ({ ...value, saving: true, error: '', errorCode: '', notice: '' }));
     try {
       const freshSession = await client.session();
+      if (refreshInterrupted()) { stopForAuthorizationRefresh(); return; }
       const freshAuthorization = freshSession.authenticated ? await client.authorization() : null;
+      if (refreshInterrupted()) { stopForAuthorizationRefresh(); return; }
       const freshUserID = String(freshAuthorization?.user_id || '');
       const freshPermissions = new Set(freshAuthorization?.platform_permissions || []);
       if (!freshSession.authenticated || freshUserID !== currentUserID || freshUserID !== formOwnerUserID.current || !freshPermissions.has('platform.registration-bonus.manage')) {
@@ -179,6 +184,7 @@ export function AdminOperationsWorkspace({ client, copy, permissions = EMPTY_PER
         setState({ loading: false, saving: false, error: labels.reauthenticationDraftIdentityChanged, errorCode: 'REGISTRATION_BONUS_DRAFT_IDENTITY_CHANGED', notice: '' });
         return;
       }
+      if (refreshInterrupted()) { stopForAuthorizationRefresh(); return; }
       const updated = await client.updateRegistrationBonusPolicy({
         enabled: form.enabled,
         amount_points: Number(form.amount_points),
@@ -186,6 +192,7 @@ export function AdminOperationsWorkspace({ client, copy, permissions = EMPTY_PER
         expected_revision: Number(policy.revision),
         reason: form.reason.trim(),
       });
+      if (refreshInterrupted()) { stopForAuthorizationRefresh(); return; }
       setPolicy(updated);
       setForm(policyForm(updated));
       setState({ loading: false, saving: false, error: '', errorCode: '', notice: labels.saved });

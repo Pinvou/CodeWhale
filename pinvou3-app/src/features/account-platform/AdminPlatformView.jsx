@@ -413,7 +413,7 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
   const [modelTokenRouteNotice, setModelTokenRouteNotice] = useState('');
   const [breadcrumbDetail, setBreadcrumbDetail] = useState({ routeKey: '', label: '' });
   const authorizationRef = useRef(null);
-  const authorizationRefreshRef = useRef(false);
+  const authorizationRefreshRef = useRef({ active: false, generation: 0 });
   const financeRequestTrackerRef = useRef(null);
   if (!financeRequestTrackerRef.current) financeRequestTrackerRef.current = createFinanceTabRequestTracker();
   const updateBreadcrumbDetail = useCallback((routeKey, label) => {
@@ -616,8 +616,11 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
     let disposed = false;
     let retryTimer = null;
     const refreshAuthorization = async (isRetry = false) => {
-      if (authorizationRefreshRef.current) return;
-      authorizationRefreshRef.current = true;
+      if (authorizationRefreshRef.current.active) return;
+      authorizationRefreshRef.current = {
+        active: true,
+        generation: authorizationRefreshRef.current.generation + 1,
+      };
       setAuthorizationRefreshing(true);
       try {
         const nextSession = await client.session();
@@ -689,7 +692,10 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
           }
         }
       } finally {
-        authorizationRefreshRef.current = false;
+        authorizationRefreshRef.current = {
+          active: false,
+          generation: authorizationRefreshRef.current.generation,
+        };
         if (!disposed) setAuthorizationRefreshing(false);
       }
     };
@@ -935,7 +941,7 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
           )}
           {section === 'audit' && <Audit copy={copy} data={data} client={client} setData={setData} permissions={platformPermissions} />}
           {section === 'approvals' && <AdminApprovalWorkspace key={JSON.stringify(authorizationVersions(authorization))} client={client} copy={copy} language={language} currentUserID={authorization?.user_id || ''} routeVersion={routeVersion} onNavigate={navigate} visibleSections={visibleSections} modelDetailsEnabled={modelDetailsEnabled} tokenDetailsEnabled={tokenDetailsEnabled} />}
-          {section === 'operations' && <AdminOperationsWorkspace client={client} copy={copy} permissions={platformPermissions} currentUserID={authorization?.user_id || ''} authorizationRefreshing={authorizationRefreshing} />}
+          {section === 'operations' && <AdminOperationsWorkspace client={client} copy={copy} permissions={platformPermissions} currentUserID={authorization?.user_id || ''} authorizationRefreshing={authorizationRefreshing} authorizationRefreshGuard={authorizationRefreshRef} />}
           {section === 'settings' && <SettingsWorkspace copy={copy} language={language} onLanguageChange={onLanguageChange} client={client} permissions={platformPermissions} />}
           <AdminExtensionSlot section={section} financeTab={financeTab} authorization={authorization} />
         </div>
