@@ -4,9 +4,10 @@ import test from "node:test";
 
 import { ControllerLeaseManager } from "../controller-lease.js";
 import { ControllerResumeHooks } from "../controller-resume.js";
+import { ControllerLivenessHooks } from "../controller-liveness.js";
 import { ControllerReservationManager, EndpointInteractionSlots } from "../controller-reservation.js";
 import { ControllerRouter } from "../controller-router.js";
-import { receiptCommitmentHex } from "../protocol-controller.js";
+import { isValidControllerIdentifier, receiptCommitmentHex } from "../protocol-controller.js";
 
 const CAPABILITIES = Object.freeze([
   "pairing_v1", "encrypted_frames_v1", "finished_receipt_v1", "role_liveness_v1", "resume_v1",
@@ -51,9 +52,11 @@ function fixture({ startClock = 1_000 } = {}) {
     clock: () => clock,
     randomBytes: crypto.randomBytes,
   });
+  const liveness = new ControllerLivenessHooks({ clock: () => clock });
   return {
     manager,
     hooks,
+    liveness,
     pairing,
     get clock() { return clock; },
     set clock(value) { clock = value; },
@@ -136,6 +139,7 @@ async function createLease(value) {
     message: receipt("B", "A", secretA), role: "B", socketIdentity: "old-socket-B",
   });
   await value.hooks.onLeaseCreated(committed.lease);
+  await value.liveness.onLeaseCreated(committed.lease);
   return committed;
 }
 
@@ -165,11 +169,93 @@ function prepare(role, lease, token, requestId, challenge = ZERO_NONCE) {
 async function detached(value, committed) {
   assert.equal((await value.hooks.onSocketClosed({
     socket_identity: "old-socket-A", role: "A", lease: committed.lease,
+    evidence_deadline_ms: value.liveness.resumeDeadline(committed.lease),
   })).retain_lease, true);
   assert.equal((await value.hooks.onSocketClosed({
     socket_identity: "old-socket-B", role: "B", lease: committed.lease,
+    evidence_deadline_ms: value.liveness.resumeDeadline(committed.lease),
   })).retain_lease, true);
 }
+
+async function heartbeat(value, lease, role, sequence) {
+  return value.liveness.handle({
+    message: { v: 1, type: "controller_liveness", ...context(lease), sender_role: role,
+      liveness_epoch: role === "A" ? lease.liveness_epoch_a : lease.liveness_epoch_b,
+      heartbeat_sequence: String(sequence) },
+    socket_identity: lease.sockets[role], role, lease,
+  });
+}
+
+test("long healthy connection freezes latest authenticated role cutoffs, not the wire identity", async () => {
+  const value = fixture();
+  const committed = await createLease(value);
+  value.clock = 34_000;
+  await heartbeat(value, committed.lease, "A", 1);
+  await heartbeat(value, committed.lease, "B", 1);
+  value.clock = 35_000;
+  const provisionalResult = await provisional(value, committed);
+  assert.equal(provisionalResult.deliveries.length, 2);
+  assert.equal(provisionalResult.deliveries[0].message.original_deadline_ms, "31000");
+  // Even later authenticated heartbeats on either role cannot reset a frozen
+  // recovery cycle. Repeated close and prepare retry share the same cutoff.
+  value.clock = 50_000;
+  await heartbeat(value, committed.lease, "A", 2);
+  await heartbeat(value, committed.lease, "B", 2);
+  await detached(value, committed);
+  value.clock = 64_000;
+  assert.equal(await value.hooks.expire(), 1);
+  assert.equal(value.manager.lease(committed.lease.controller_lease_id), null);
+});
+
+test("missing or expired A evidence fails closed and B activity cannot create resume budget", async () => {
+  for (const missing of [false, true]) {
+    const value = fixture();
+    const committed = await createLease(value);
+    value.clock = 31_000;
+    await heartbeat(value, committed.lease, "B", 1);
+    if (missing) await value.liveness.onSocketClosed({ lease: committed.lease });
+    const evidenceDeadline = value.liveness.resumeDeadline(committed.lease);
+    assert.equal(evidenceDeadline, null);
+    const result = await value.hooks.onSocketClosed({ socket_identity: "old-socket-A", role: "A",
+      lease: committed.lease, evidence_deadline_ms: evidenceDeadline });
+    assert.equal(result.retain_lease, false);
+    assert.equal(value.hooks.phase(committed.lease.controller_lease_id), null);
+  }
+});
+
+test("a second resume uses exactly the next identity delivered to both roles", async () => {
+  const value = fixture();
+  const committed = await createLease(value);
+  const first = await provisional(value, committed);
+  await pending(value, committed, first);
+  value.clock = 5_000;
+  const result = await readyResult(value, committed, first);
+  const updated = (await result.commit()).lease;
+  assert.equal(updated.resume_deadline_ms, "35000");
+  assert(result.deliveries.every(({ message }) => message.resume_deadline_ms === "35000"));
+  await value.liveness.onLeaseCreated(updated);
+  value.clock = 6_000;
+  assert.equal((await value.hooks.onSocketClosed({ socket_identity: "new-socket-A", role: "A",
+    lease: updated, evidence_deadline_ms: value.liveness.resumeDeadline(updated) })).retain_lease, true);
+  const token = result.deliveries.find(({ role }) => role === "A").message.new_resume_token_b64;
+  const second = await value.hooks.handle({ message: prepare("A", updated, token, "second-prepare-A"),
+    socket_identity: "third-socket-A", role: "A", lease: updated });
+  assert.deepEqual(second.deliveries, []);
+  value.clock = 35_000;
+  assert.equal(await value.hooks.expire(), 1);
+});
+
+test("final delivery delay cannot commit after the frozen recovery cutoff", async () => {
+  const value = fixture();
+  const committed = await createLease(value);
+  const first = await provisional(value, committed);
+  await pending(value, committed, first);
+  const result = await readyResult(value, committed, first);
+  value.clock = 31_000;
+  await assert.rejects(result.commit(), /controller_resume_deadline_expired/u);
+  await result.abort();
+  assert.equal(value.manager.lease(committed.lease.controller_lease_id), null);
+});
 
 async function provisional(value, committed) {
   await detached(value, committed);
@@ -290,6 +376,9 @@ test("complete activation atomically rotates role tokens, epochs and sockets", a
   const resumedA = result.deliveries.find((item) => item.role === "A").message;
   const resumedB = result.deliveries.find((item) => item.role === "B").message;
   assert.notEqual(resumedA.new_resume_token_b64, resumedB.new_resume_token_b64);
+  assert.equal(resumedA.resume_deadline_ms, String(value.clock + 30_000));
+  assert.equal(resumedB.resume_deadline_ms, resumedA.resume_deadline_ms);
+  assert.equal(updated.resume_deadline_ms, resumedA.resume_deadline_ms);
   value.manager.verifyResumeToken({
     controllerLeaseId: updated.controller_lease_id,
     role: "A",
@@ -315,6 +404,32 @@ test("complete activation atomically rotates role tokens, epochs and sockets", a
       resumeTokenB64: oldToken,
     }), /resume_token_invalid/u);
   }
+});
+
+test("resume epoch grammar follows wire identifiers and rejects invalid finals before mutation", async () => {
+  assert.equal(isValidControllerIdentifier("live:a-2"), true);
+  assert.equal(isValidControllerIdentifier("live~a-2"), false);
+  assert.equal(isValidControllerIdentifier(":live-a-2"), false);
+  assert.equal(isValidControllerIdentifier("live:a-2\n"), false);
+  const value = fixture();
+  const committed = await createLease(value);
+  const args = {
+    controllerLeaseId: committed.lease.controller_lease_id,
+    activationId: "activation-grammar-1",
+    sockets: { A: "grammar-socket-A", B: "grammar-socket-B" },
+    livenessEpochA: "live:a-2",
+    livenessEpochB: "live:b-2",
+    tokenA: Buffer.alloc(32, 3),
+    tokenB: Buffer.alloc(32, 4),
+  };
+  for (const [field, label] of [["livenessEpochA", "liveness_epoch_a"], ["livenessEpochB", "liveness_epoch_b"]]) {
+    assert.throws(() => value.manager.completeResume({ ...args, [field]: "live~bad-2" }), new RegExp(label + "_invalid", "u"));
+    assert.deepEqual(value.manager.lease(committed.lease.controller_lease_id), committed.lease);
+  }
+  const updated = value.manager.completeResume(args);
+  assert.equal(updated.liveness_epoch_a, "live:a-2");
+  assert.equal(updated.liveness_epoch_b, "live:b-2");
+  assert.equal(updated.resume_deadline_ms, String(value.clock + 30_000));
 });
 
 test("cross-role, invalid or stale tokens terminate the original lease", async () => {
