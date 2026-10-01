@@ -25,7 +25,7 @@ const MAX_ARTIFACTS: usize = 256;
 pub(crate) const MAX_ENCRYPTED_WIRE_BYTES: usize =
     MAX_ENCRYPTED_FRAME_BYTES.div_ceil(3) * 4 + MAX_CONTROL_MESSAGE_BYTES;
 const CONTROLLER_CONTRACT_SHA256: &str =
-    "a62f3125c1fa9559fcf9f28c4f1fb64598a1a23f1fc09a851011b3bd65563dcf";
+    "668ce1c7c31d519982e951f0f55abf2efe764c9cd3bc90bed0dff5d6d223a117";
 
 pub(crate) const CONTROLLER_CAPABILITIES: &[&str] = &[
     "pairing_v1",
@@ -1037,6 +1037,7 @@ fn message_schema(kind: &str) -> Option<Schema> {
                 "liveness_epoch_a",
                 "liveness_epoch_b",
                 "new_resume_token_b64",
+                "resume_deadline_ms",
             ],
             optional: &[],
             roles: &[RELAY],

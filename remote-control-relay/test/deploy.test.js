@@ -107,7 +107,7 @@ async function ensureMinimalWebDist(t) {
     await writeFile(index, [
       "<!doctype html>",
       '<base href="/pinvou3/remote/">',
-      '<script src="/pinvou3/remote/platform/tauri/bridge.js"></script>',
+      '<script type="module" src="/pinvou3/remote/assets/app.js"></script>',
     ].join("\n"));
     createdFiles.push(index);
   }
@@ -146,12 +146,15 @@ if [[ "$*" == *"cat > '/tmp/pinvou-remote-code-"* ]]; then
   echo upload_code >> "${log}"
 elif [[ "$*" == *"cat > '/tmp/pinvou-remote-web-"* ]]; then
   echo upload_web >> "${log}"
-elif (( $# >= 10 )); then
+elif [[ "$*" == *"/backups/fake"* ]]; then
+  echo rollback >> "${log}"
+  echo '已恢复备份'
+elif [[ "$*" == *"bash -s --"* ]]; then
   echo deploy >> "${log}"
   echo 'backup=/opt/pinvou-remote-relay/backups/fake'
 else
-  echo rollback >> "${log}"
-  echo '已恢复备份'
+  echo 'unexpected mocked SSH command' >&2
+  exit 97
 fi
 `);
   await executable(join(bin, "curl"), `#!/usr/bin/env bash
@@ -189,11 +192,10 @@ esac
     encoding: "utf8",
   });
   const output = `${result.stdout}\n${result.stderr}`;
-  const calls = await readFile(log, "utf8");
-
-  assert.equal(result.status, 1);
+  assert.equal(result.status, 1, output);
   assert.match(output, /部署后检查失败，开始回滚/);
   assert.match(output, /部署失败，已恢复并验证上一线上版本/);
+  const calls = await readFile(log, "utf8");
   assert.match(calls, /deploy/);
   assert.match(calls, /rollback/);
   assert.deepEqual(

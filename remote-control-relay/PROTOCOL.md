@@ -678,7 +678,17 @@ transitions.
 | B | `controller_post_activation_liveness` | Supply the first new B liveness for the activation. |
 | Relay | `controller_post_activation_liveness_confirmed` | Cross-notify the exact accepted B liveness. |
 | A/B | `controller_resume_ready_ack` | Each role independently acknowledges the same activation and liveness. |
-| Relay | `controller_resumed` | Atomically rotate the recipient's role token and open the business gate. |
+| Relay | `controller_resumed` | Atomically rotate the recipient's role token, return the next cycle's `resume_deadline_ms`, and open the business gate. |
+
+`resume_deadline_ms` and echoed `original_deadline_ms` are opaque Relay-clock
+cycle identities. Endpoints must never compare them with local monotonic time.
+At the first actual transport interruption, each endpoint freezes the cutoff
+from its last valid authenticated role-liveness evidence; Relay synchronously
+snapshots both role cutoffs before close hooks remove that evidence. All resume
+phases share that remaining budget: retries, B-only activity, and intermediate
+resume frames cannot extend it. A complete authenticated join or final resumed
+activation establishes a finite new cycle (at most 30 seconds); the final frame
+and persisted lease use exactly the same next-cycle identity.
 | A/B | `encrypted_frame` | Carry one encrypted typed payload in the direction fixed by socket role. |
 | A/B | `controller_disconnect` | End the current lease; B local stop remains authoritative. |
 | Relay | `error` | Return a bounded generic error from the controller error registry. |

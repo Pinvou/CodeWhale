@@ -16,7 +16,7 @@ const MAX_DESCRIPTORS = 256;
 const MAX_ARTIFACTS = 256;
 const MAX_SENSITIVE_STRING_BYTES = 8 * 1024;
 export const MAX_ENCRYPTED_WIRE_BYTES = Math.ceil(MAX_ENCRYPTED_FRAME_BYTES / 3) * 4 + MAX_CONTROL_MESSAGE_BYTES;
-export const CONTROLLER_CONTRACT_SHA256 = "a62f3125c1fa9559fcf9f28c4f1fb64598a1a23f1fc09a851011b3bd65563dcf";
+export const CONTROLLER_CONTRACT_SHA256 = "668ce1c7c31d519982e951f0f55abf2efe764c9cd3bc90bed0dff5d6d223a117";
 
 export const CONTROLLER_CAPABILITIES = Object.freeze([
   "pairing_v1", "encrypted_frames_v1", "finished_receipt_v1", "role_liveness_v1", "resume_v1",
@@ -107,7 +107,7 @@ const MESSAGE_SCHEMAS = Object.freeze({
   controller_post_activation_liveness: schema(["v", "type", "request_id", ...LEASE_CONTEXT_FIELDS, "activation_id", "liveness_epoch_b", "heartbeat_sequence_b"], [], ["B"]),
   controller_post_activation_liveness_confirmed: schema(["v", "type", "request_id", ...LEASE_CONTEXT_FIELDS, "activation_id", "liveness_epoch_b", "heartbeat_sequence_b"], [], ["relay"]),
   controller_resume_ready_ack: schema(["v", "type", "request_id", ...LEASE_CONTEXT_FIELDS, "activation_id", "sender_role", "liveness_epoch_b", "heartbeat_sequence_b"], [], ["A", "B"]),
-  controller_resumed: schema(["v", "type", "request_id", ...LEASE_CONTEXT_FIELDS, "activation_id", "liveness_epoch_a", "liveness_epoch_b", "new_resume_token_b64"], [], ["relay"]),
+  controller_resumed: schema(["v", "type", "request_id", ...LEASE_CONTEXT_FIELDS, "activation_id", "liveness_epoch_a", "liveness_epoch_b", "new_resume_token_b64", "resume_deadline_ms"], [], ["relay"]),
   encrypted_frame: schema(["v", "type", ...LEASE_CONTEXT_FIELDS, "frame_sequence", "direction", "payload_kind", "ciphertext_b64", "ciphertext_bytes"], [], ["A", "B"]),
   controller_disconnect: schema(["v", "type", "request_id", ...LEASE_CONTEXT_FIELDS, "sender_role", "reason"], [], ["A", "B"]),
   error: schema(["v", "type", "request_id", "code", "message"], [...LEASE_CONTEXT_FIELDS, "registration_request_id"], ["relay"]),
@@ -246,7 +246,11 @@ function text(value, field, maxCharacters, maxBytes = maxCharacters * 4, min = 1
   return value;
 }
 
-function identifier(value, field) { if (typeof value !== "string" || !ID.test(value)) fail("invalid_field", field); }
+export function isValidControllerIdentifier(value) {
+  return typeof value === "string" && ID.exec(value)?.[0] === value;
+}
+
+function identifier(value, field) { if (!isValidControllerIdentifier(value)) fail("invalid_field", field); }
 
 function decimal(value, field, max = U64_MAX) {
   if (typeof value !== "string" || !DECIMAL_U64.test(value)) fail("invalid_field", field);
