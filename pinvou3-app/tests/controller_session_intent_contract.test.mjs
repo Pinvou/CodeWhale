@@ -15,6 +15,7 @@ context.globalThis = context;
 vm.createContext(context);
 vm.runInContext(fs.readFileSync(logicPath, 'utf8'), context, { filename: logicPath });
 const logic = context.window.__PINVOU_REMOTE_CONTROL_STATE__;
+const statusFixtures = JSON.parse(fs.readFileSync(path.join(root, 'tests/fixtures/desktop_remote_status.json'), 'utf8'));
 
 const bridge = fs.readFileSync(
   path.join(root, 'src', 'platform', 'tauri', 'bridge', 'desktop-remote-control.js'),
@@ -23,14 +24,14 @@ const bridge = fs.readFileSync(
 
 function connectedState() {
   return logic.applyControllerStatus(logic.createState(), {
-    status: 'connected',
-    connectionId: 'connection-1',
-    leaseEpoch: '2',
+    ...statusFixtures.controllerConnected,
+    lease: { ...statusFixtures.controllerConnected.lease, connectionId: 'connection-1', leaseEpoch: '2' },
   });
 }
 
 test('the session projection carries the real remote session id into UI state', () => {
   const state = logic.applyControllerSession(connectedState(), {
+    ...statusFixtures.controllerConnected.lease,
     sessionRef: 'session-ref-1',
     sessionId: 'session-abc',
     mode: 'chat',
@@ -47,6 +48,7 @@ test('the session projection carries the real remote session id into UI state', 
 test('foreign connections, older leases and terminal states never adopt a session', () => {
   const base = connectedState();
   const projection = {
+    ...statusFixtures.controllerConnected.lease,
     sessionRef: 'session-ref-1',
     sessionId: 'session-abc',
     connectionId: 'connection-1',
@@ -63,20 +65,44 @@ test('foreign connections, older leases and terminal states never adopt a sessio
 
   const withSession = logic.applyControllerSession(base, projection);
   assert.equal(withSession.controllerConnection.sessionId, 'session-abc');
-  const disconnected = logic.applyControllerStatus(withSession, { status: 'disconnected' });
+  const disconnected = logic.applyControllerStatus(withSession, {
+    status: 'disconnected', claimRequestId: statusFixtures.controllerConnected.claimRequestId,
+  });
   assert.equal(disconnected.controllerConnection.sessionId, null);
   assert.equal(disconnected.controllerConnection.sessionRef, null);
   assert.equal(disconnected.controllerConnection.capabilityRevision, null);
 });
 
+test('session projection requires the exact full tuple including large epochs and an online connection', () => {
+  const live = { ...statusFixtures.controllerConnected.lease, leaseEpoch: '9007199254740993' };
+  const connected = { ...statusFixtures.controllerConnected, lease: live };
+  const base = logic.applyControllerStatus(logic.createState(), connected);
+  const projection = { ...live, sessionRef: 'session-ref-1', sessionId: 'session-abc', mode: 'chat', capabilityRevision: 7 };
+  const withSession = logic.applyControllerSession(base, projection);
+  assert.equal(withSession.controllerConnection.sessionId, 'session-abc');
+  for (const key of ['connectionId', 'controllerLeaseId', 'leaseEpoch', 'relayEpoch', 'remoteControlGeneration']) {
+    const stale = { ...projection, sessionId: 'stale-session', [key]: key === 'leaseEpoch' ? '9007199254740992' : 'foreign-binding' };
+    assert.equal(logic.applyControllerSession(withSession, stale), withSession, `${key} must match exactly`);
+    assert.equal(logic.applyControllerSession(withSession, { ...projection, [key]: null }), withSession, `${key} must not be omitted`);
+  }
+  const reconnecting = logic.applyControllerStatus(withSession, { ...connected, status: 'reconnecting', lease: null });
+  assert.equal(reconnecting.controllerConnection.sessionId, 'session-abc');
+  assert.equal(logic.applyControllerSession(reconnecting, { ...projection, sessionId: 'late-session' }), reconnecting);
+  const renewed = logic.applyControllerStatus(reconnecting, { ...connected, lease: { ...live, leaseEpoch: '9007199254740994' } });
+  assert.equal(renewed.controllerConnection.sessionId, null);
+  assert.equal(renewed.controllerConnection.capabilityRevision, null);
+});
+
 test('capability snapshots keep the revision and the negotiated modes', () => {
   let state = logic.applyControllerSession(connectedState(), {
+    ...statusFixtures.controllerConnected.lease,
     sessionRef: 'session-ref-1',
     sessionId: 'session-abc',
     connectionId: 'connection-1',
     leaseEpoch: '2',
   });
   state = logic.applyCapabilities(state, {
+    ...statusFixtures.controllerConnected.lease,
     connectionId: 'connection-1',
     leaseEpoch: '2',
     capabilityRevision: 7,

@@ -3547,6 +3547,36 @@ pub(crate) fn build_liveness_attestation_preimage(message: &Value) -> Result<Vec
     Ok(output)
 }
 
+/// Parsed signing material is not authenticated evidence. Only the enrolled
+/// Relay trust verifier may authorize it before a watchdog state transition.
+pub(crate) struct ParsedLivenessAttestation {
+    pub(crate) relay_signing_key_id: String,
+    pub(crate) signature_algorithm: String,
+    pub(crate) signature_preimage: Vec<u8>,
+    pub(crate) relay_signature: Vec<u8>,
+}
+
+pub(crate) fn parse_liveness_attestation(input: &str) -> Result<ParsedLivenessAttestation> {
+    let value = validate_controller_message_json(input, RELAY)?;
+    let message = as_object(&value, "attestation")?;
+    let signature_preimage = build_liveness_attestation_preimage(&value)?;
+    let relay_signature = base64::engine::general_purpose::STANDARD
+        .decode(object_string(
+            message,
+            "relay_signature_b64",
+            "attestation",
+        )?)
+        .map_err(|_| ControllerProtocolError::new("invalid_field", "relay_signature_b64"))?;
+    Ok(ParsedLivenessAttestation {
+        relay_signing_key_id: object_string(message, "relay_signing_key_id", "attestation")?
+            .to_owned(),
+        signature_algorithm: object_string(message, "signature_algorithm", "attestation")?
+            .to_owned(),
+        signature_preimage,
+        relay_signature,
+    })
+}
+
 pub(crate) fn validate_liveness_attestation_message_json(
     input: &str,
     context: &LeaseContext,

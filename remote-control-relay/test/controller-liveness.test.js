@@ -164,6 +164,60 @@ test("B activity never refreshes the A observation used by attestation", async (
   }), /controller_liveness_attestation_stale/u);
 });
 
+test("long-lived attestation survives more than 64 cycles without forgetting recent replays", async () => {
+  const value = await started();
+  for (let sequence = 1; sequence <= 128; sequence += 1) {
+    value.now = sequence * 5_000;
+    await value.hooks.handle({
+      message: heartbeat("A", sequence), socket_identity: "socket-A", role: "A", lease,
+    });
+    const message = {
+      ...challenge(`request-${sequence}`), challenge_id: `challenge-${sequence}`,
+    };
+    await value.hooks.handle({ message, socket_identity: "socket-B", role: "B", lease });
+    const result = await value.hooks.handle({
+      message: { ...message, type: "controller_liveness_attestation_request_a" },
+      socket_identity: "socket-B", role: "B", lease,
+    });
+    const proof = result.deliveries[0].message;
+    assert.equal(proof.attestation_sequence, String(sequence));
+    assert.equal(crypto.verify(null, buildLivenessAttestationPreimage(proof), value.publicKey,
+      Buffer.from(proof.relay_signature_b64, "base64")), true);
+    await assert.rejects(() => value.hooks.handle({
+      message: { ...message, request_id: `replay-${sequence}` },
+      socket_identity: "socket-B", role: "B", lease,
+    }), /controller_liveness_challenge_replay/u);
+    assert.equal(await value.hooks.expire(), 0);
+  }
+  await assert.rejects(() => value.hooks.handle({
+    message: heartbeat("A", 1), socket_identity: "socket-A", role: "A", lease,
+  }), /controller_liveness_sequence_replay/u);
+  value.now = 129 * 5_000;
+  await value.hooks.handle({
+    message: heartbeat("A", 129), socket_identity: "socket-A", role: "A", lease,
+  });
+  const reusedPair = { ...challenge("fresh-request"), challenge_id: "challenge-1" };
+  await value.hooks.handle({ message: reusedPair, socket_identity: "socket-B", role: "B", lease });
+  const freshProof = await value.hooks.handle({
+    message: { ...reusedPair, type: "controller_liveness_attestation_request_a" },
+    socket_identity: "socket-B", role: "B", lease,
+  });
+  assert.equal(freshProof.deliveries[0].message.attestation_sequence, "129");
+});
+
+test("expired pending challenges cannot be attested even without a heartbeat cleanup tick", async () => {
+  const value = await started();
+  await value.hooks.handle({ message: challenge(), socket_identity: "socket-B", role: "B", lease });
+  value.now = 30_001;
+  await value.hooks.handle({
+    message: heartbeat("A", 1), socket_identity: "socket-A", role: "A", lease,
+  });
+  await assert.rejects(() => value.hooks.handle({
+    message: { ...challenge("request-expired"), type: "controller_liveness_attestation_request_a" },
+    socket_identity: "socket-B", role: "B", lease,
+  }), /controller_liveness_challenge_not_found/u);
+});
+
 test("attestation fails closed without a configured signing key", async () => {
   let now = 0;
   const hooks = new ControllerLivenessHooks({ clock: () => now });

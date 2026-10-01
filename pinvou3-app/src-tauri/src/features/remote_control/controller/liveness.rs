@@ -8,7 +8,7 @@
 //! additionally pass the authenticated Relay-signature path installed by the
 //! transport owner.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use serde_json::Value;
 
@@ -80,7 +80,7 @@ pub(crate) struct ControllerLivenessWatchdog {
     deadline_b: Option<u64>,
     last_advanced_at_b: Option<u64>,
     pending_challenges: HashMap<String, PendingChallenge>,
-    used_challenges: HashSet<(String, String)>,
+    used_challenges: HashMap<(String, String), u64>,
 }
 
 impl ControllerLivenessWatchdog {
@@ -94,7 +94,7 @@ impl ControllerLivenessWatchdog {
             deadline_b: None,
             last_advanced_at_b: None,
             pending_challenges: HashMap::new(),
-            used_challenges: HashSet::new(),
+            used_challenges: HashMap::new(),
         })
     }
 
@@ -129,9 +129,10 @@ impl ControllerLivenessWatchdog {
         if challenge_b64.is_empty() || challenge_b64.len() > MAX_LIVENESS_ID_BYTES {
             return Err(LivenessError::new("invalid_field", "challenge_b64"));
         }
+        self.prune_challenges(sent_at_b);
         if self
             .used_challenges
-            .contains(&(challenge_id.clone(), challenge_b64.clone()))
+            .contains_key(&(challenge_id.clone(), challenge_b64.clone()))
         {
             return Err(LivenessError::new("replay", "challenge_id"));
         }
@@ -164,7 +165,7 @@ impl ControllerLivenessWatchdog {
         lease: &LeaseContext,
         received_at_b: u64,
     ) -> Result<LivenessDeadlineUpdate> {
-        self.ensure_challenge_capacity()?;
+        self.ensure_challenge_capacity(received_at_b)?;
         let challenge_id = direct_field(input, "challenge_id")?;
         let Some(pending) = self.pending_challenges.get(&challenge_id) else {
             return Err(LivenessError::new("unknown_challenge", "challenge_id"));
@@ -187,7 +188,7 @@ impl ControllerLivenessWatchdog {
         }
         let candidate = direct_candidate_deadline(received_at_b, measured_rtt_ms)?;
         let update = self.apply_evidence(sequence, candidate, received_at_b)?;
-        self.consume_challenge(challenge_id, challenge_b64)?;
+        self.consume_challenge(challenge_id, challenge_b64, received_at_b)?;
         Ok(update)
     }
 
@@ -201,7 +202,7 @@ impl ControllerLivenessWatchdog {
         request_sent_at_b: u64,
         received_at_b: u64,
     ) -> Result<LivenessDeadlineUpdate> {
-        self.ensure_challenge_capacity()?;
+        self.ensure_challenge_capacity(received_at_b)?;
         let challenge_id = direct_field(input, "challenge_id")?;
         let Some(pending) = self.pending_challenges.get(&challenge_id) else {
             return Err(LivenessError::new("unknown_challenge", "challenge_id"));
@@ -239,7 +240,7 @@ impl ControllerLivenessWatchdog {
         }
         let update = self.apply_evidence(sequence, candidate, received_at_b)?;
         self.last_attestation_sequence = attestation_sequence;
-        self.consume_challenge(challenge_id, challenge_b64)?;
+        self.consume_challenge(challenge_id, challenge_b64, received_at_b)?;
         Ok(update)
     }
 
@@ -330,7 +331,12 @@ impl ControllerLivenessWatchdog {
         Ok(update)
     }
 
-    fn consume_challenge(&mut self, challenge_id: String, challenge_b64: String) -> Result<()> {
+    fn consume_challenge(
+        &mut self,
+        challenge_id: String,
+        challenge_b64: String,
+        received_at_b: u64,
+    ) -> Result<()> {
         self.pending_challenges.remove(&challenge_id);
         if self.used_challenges.len() >= MAX_USED_CHALLENGES {
             return Err(LivenessError::new(
@@ -338,11 +344,24 @@ impl ControllerLivenessWatchdog {
                 "challenge_id",
             ));
         }
-        self.used_challenges.insert((challenge_id, challenge_b64));
+        self.used_challenges
+            .insert((challenge_id, challenge_b64), received_at_b);
         Ok(())
     }
 
-    fn ensure_challenge_capacity(&self) -> Result<()> {
+    fn prune_challenges(&mut self, now_b: u64) {
+        self.pending_challenges.retain(|_, challenge| {
+            now_b.saturating_sub(challenge.sent_at_b) <= LIVENESS_TOTAL_BUDGET_MS
+        });
+        // The sequence floors survive history GC for the whole epoch. Retain
+        // consumed nonces for the full validity window, not the whole session.
+        self.used_challenges.retain(|_, consumed_at_b| {
+            now_b.saturating_sub(*consumed_at_b) <= LIVENESS_TOTAL_BUDGET_MS
+        });
+    }
+
+    fn ensure_challenge_capacity(&mut self, received_at_b: u64) -> Result<()> {
+        self.prune_challenges(received_at_b);
         if self.used_challenges.len() >= MAX_USED_CHALLENGES {
             return Err(LivenessError::new(
                 "challenge_capacity_exhausted",
@@ -818,6 +837,100 @@ mod tests {
         assert_eq!(watchdog.state(17_000), LivenessWatchdogState::Expired);
         assert!(!watchdog.shorten_deadline(99_000));
         assert_eq!(watchdog.deadline_b(), Some(17_000));
+    }
+
+    #[test]
+    fn long_session_reclaims_history_but_keeps_epoch_sequence_floors() {
+        let nonce = "AAAAAAAAAAAAAAAAAAAAAA==";
+        for attested in [false, true] {
+            let mut watchdog = ControllerLivenessWatchdog::new("live-a-1").unwrap();
+            for sequence in 1..=128 {
+                let sent = sequence * LIVENESS_INTERVAL_MS;
+                let received = sent + 1_000;
+                let challenge = format!("challenge-{sequence}");
+                watchdog
+                    .register_challenge(&challenge, nonce, sent)
+                    .unwrap();
+                if attested {
+                    watchdog
+                        .accept_attestation_json(
+                            &attestation_payload(sequence, sequence, &challenge, nonce),
+                            &lease(),
+                            sent,
+                            received,
+                        )
+                        .unwrap();
+                } else {
+                    watchdog
+                        .accept_direct_json(
+                            &direct_payload(sequence, &challenge, nonce),
+                            &lease(),
+                            received,
+                        )
+                        .unwrap();
+                }
+                assert_eq!(watchdog.state(received), LivenessWatchdogState::Healthy);
+                assert!(watchdog.pending_challenges.is_empty());
+                assert!(watchdog.used_challenges.len() <= 7);
+                assert_eq!(
+                    watchdog
+                        .register_challenge(&challenge, nonce, received)
+                        .unwrap_err()
+                        .code,
+                    "replay"
+                );
+            }
+            let now = 129 * LIVENESS_INTERVAL_MS;
+            watchdog
+                .register_challenge("challenge-1", nonce, now)
+                .unwrap();
+            let deadline = watchdog.deadline_b();
+            let error = if attested {
+                watchdog.accept_attestation_json(
+                    &attestation_payload(1, 1, "challenge-1", nonce),
+                    &lease(),
+                    now,
+                    now + 1_000,
+                )
+            } else {
+                watchdog.accept_direct_json(
+                    &direct_payload(1, "challenge-1", nonce),
+                    &lease(),
+                    now + 1_000,
+                )
+            }
+            .unwrap_err();
+            assert_eq!(error.code, "replay");
+            assert_eq!(watchdog.deadline_b(), deadline);
+        }
+    }
+
+    #[test]
+    fn expired_pending_challenges_do_not_exhaust_capacity_or_accept_late_proofs() {
+        let nonce = "AAAAAAAAAAAAAAAAAAAAAA==";
+        let mut watchdog = ControllerLivenessWatchdog::new("live-a-1").unwrap();
+        for index in 0..MAX_PENDING_CHALLENGES {
+            watchdog
+                .register_challenge(format!("challenge-{index}"), nonce, 0)
+                .unwrap();
+        }
+        watchdog
+            .register_challenge("fresh", nonce, LIVENESS_TOTAL_BUDGET_MS + 1)
+            .unwrap();
+        assert_eq!(watchdog.pending_challenges.len(), 1);
+        assert_eq!(
+            watchdog
+                .accept_attestation_json(
+                    &attestation_payload(1, 1, "challenge-0", nonce),
+                    &lease(),
+                    LIVENESS_TOTAL_BUDGET_MS + 1,
+                    LIVENESS_TOTAL_BUDGET_MS + 2,
+                )
+                .unwrap_err()
+                .code,
+            "unknown_challenge"
+        );
+        assert_eq!(watchdog.deadline_b(), None);
     }
 
     #[test]
