@@ -2,8 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { ControllerRouter } from "../controller-router.js";
+import { ControllerLivenessHooks } from "../controller-liveness.js";
+import { ControllerResumeHooks } from "../controller-resume.js";
 
-function fixture() {
+function fixture({ clock = Date.now } = {}) {
   const sent = new Map([["socket-A", []], ["socket-B", []]]);
   const aborted = [];
   const terminated = [];
@@ -34,19 +36,23 @@ function fixture() {
       B: Object.freeze({ v: 1, type: "controller_joined", request_id: "request-claim-0001" }),
     }),
   };
+  let leaseAlive = true;
   const leases = {
     claim: async () => reserved,
     acceptCommitment: ({ message, role }) => ({ message, target_role: role === "A" ? "B" : "A" }),
     forwardFinished: ({ message, role }) => ({ message, target_role: role === "A" ? "B" : "A" }),
     acceptReceipt: async ({ role }) => role === "A" ? joined : null,
-    lease: (leaseId) => leaseId === activeLease.controller_lease_id ? activeLease : null,
-    terminateLease: async (input) => { terminated.push(input); return true; },
+    lease: (leaseId) => leaseAlive && leaseId === activeLease.controller_lease_id ? activeLease : null,
+    terminateLease: async (input) => { leaseAlive = false; terminated.push(input); return true; },
     abortHandshakesBySocket: async () => 0,
     abortBySocket: async (input) => {
+      leaseAlive = false;
       aborted.push(input);
       return { handshakes: 1, leases: 0 };
     },
   };
+  const liveness = new ControllerLivenessHooks({ clock });
+  const resume = new ControllerResumeHooks({ clock });
   const router = new ControllerRouter({
     pairingRegistrationHandler: {
       register: async (message) => ({
@@ -54,6 +60,8 @@ function fixture() {
       }),
     },
     leaseManager: leases,
+    livenessHooks: liveness,
+    resumeHooks: resume,
     send: (socket, message) => {
       sent.get(socket).push(message);
       return true;
@@ -66,8 +74,62 @@ function fixture() {
     endpointId: "endpoint-0001",
     authenticatedContext: Object.freeze({ endpointId: "endpoint-0001", credential: "secret" }),
   });
-  return { router, sent, aborted, terminated };
+  return { router, sent, aborted, terminated, leases, activeLease, liveness, resume };
 }
+
+async function joined(value) {
+  for (const [socketIdentity, type] of [["socket-A", "controller_pairing_claim"],
+    ["socket-B", "finished_receipt_ack"], ["socket-A", "finished_receipt_ack"]]) {
+    await value.router.handle({ socketIdentity, message: { v: 1, type, request_id: `request-${type}-${socketIdentity}` } });
+  }
+}
+
+test("real close hooks snapshot evidence before deleting it and freeze only the first close", async () => {
+  let clock = 1_000;
+  const value = fixture({ clock: () => clock });
+  await joined(value);
+  clock = 34_000;
+  for (const role of ["A", "B"]) {
+    const lease = value.activeLease;
+    await value.router.handle({ socketIdentity: `socket-${role}`, message: {
+      v: 1, type: "controller_liveness", connection_id: lease.connection_id,
+      controller_lease_id: lease.controller_lease_id, lease_epoch: lease.lease_epoch,
+      relay_epoch: lease.relay_epoch, remote_control_generation: lease.remote_control_generation,
+      sender_role: role, liveness_epoch: role === "A" ? lease.liveness_epoch_a : lease.liveness_epoch_b,
+      heartbeat_sequence: "1",
+    } });
+  }
+  clock = 35_000;
+  assert.equal((await value.router.removeSocket("socket-A")).leases, 0);
+  assert.equal(value.liveness.resumeDeadline(value.activeLease), null);
+  assert.equal(value.resume.phase(value.activeLease.controller_lease_id), "awaiting_prepare");
+  clock = 50_000;
+  await value.router.removeSocket("socket-B");
+  assert.equal(value.router.resolveControlledEndpoint("endpoint-0001"), null);
+  assert.equal(value.aborted.length, 0);
+  clock = 63_999;
+  assert.equal(await value.resume.expire(), 0);
+  clock = 64_000;
+  assert.equal(await value.resume.expire(), 1);
+});
+
+test("snapshot exceptions and invalid clocks cannot skip peer, hook or lease cleanup", async () => {
+  for (const invalidClock of [false, true]) {
+    let clock = 1_000;
+    const value = fixture({ clock: () => clock });
+    await joined(value);
+    if (invalidClock) clock = Number.NaN;
+    else value.liveness.resumeDeadline = () => { throw new Error("snapshot unavailable"); };
+    await value.router.removeSocket("socket-B");
+    assert.equal(value.router.resolveControlledEndpoint("endpoint-0001"), null);
+    assert.equal(value.aborted.length, 1);
+    assert.equal(value.leases.lease(value.activeLease.controller_lease_id), null);
+    assert.equal(value.resume.phase(value.activeLease.controller_lease_id), null);
+    clock = 1_000;
+    assert.equal(ControllerLivenessHooks.prototype.resumeDeadline.call(value.liveness, value.activeLease), null);
+    assert.deepEqual(await value.router.removeSocket("socket-B"), { handshakes: 0, leases: 0 });
+  }
+});
 
 test("router delivers reservation, handshake frames and role-specific joined results", async () => {
   const { router, sent } = fixture();

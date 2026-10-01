@@ -23,6 +23,9 @@ pub(crate) mod liveness;
 #[path = "../../../src/features/remote_control/controller/resume.rs"]
 mod resume;
 
+#[path = "../../../src/features/remote_control/controller/recovery_budget.rs"]
+mod recovery_budget;
+
 mod state;
 
 #[cfg(test)]
