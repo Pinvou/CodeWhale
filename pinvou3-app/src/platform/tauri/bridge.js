@@ -2720,15 +2720,7 @@
         var detected = state.platformCapabilities || {};
         return detected.loaded === true && detected.os === "windows" && detected.desktopRemoteControl === true;
       }
-      // 与 UI 侧（shared/platform.js 的 can）保持同一语义：桌面端「能力表里没有
-      // 明确 false 就允许」，只有显式 false 才拒绝。此前这里要求「必须显式为
-      // true」，与面板可见性判定不一致：面板显示可用、bridge 却抛
-      // desktop_remote_control_unsupported（2026-09-20 实测）。
-      var runtime = state.platformCapabilities || {};
-      if (typeof runtime[capability] === "boolean") return runtime[capability];
-      // 本文件只在桌面宿主加载（Web 分支在上面提前 return），因此这里的兜底与
-      // shared/platform.js 的桌面分支一致：能力表没有明确 false 即视为允许。
-      return true;
+      return !!(state.platformCapabilities && state.platformCapabilities[capability] === true);
     },
   });
   var dependenciesFeature = installBridgeFeature("dependencies", { state: state, notify: notify, invoke: invoke, listen: listen, bt: bt });
