@@ -1730,8 +1730,8 @@ impl Provider for Custom {
 
 /// Whether a per-config `wire` dialect string names the Anthropic Messages
 /// endpoint. Canonical parse shared by the tui wire-format/capability readers,
-/// the route resolver, and the app-server pass-through, so one alias list
-/// cannot drift from another.
+/// the route resolver, the app-server pass-through, and the built-in
+/// dual-wire base-URL resolvers, so one alias list cannot drift from another.
 #[must_use]
 pub fn wire_dialect_prefers_anthropic(wire: Option<&str>) -> bool {
     let Some(raw) = wire.map(str::trim).filter(|value| !value.is_empty()) else {
@@ -1773,10 +1773,12 @@ pub fn wire_dialect_prefers_responses(wire: Option<&str>) -> bool {
 /// The wire override a per-config `wire` dialect asks for: `Some(Responses)` /
 /// `Some(AnthropicMessages)` when the string names that endpoint, `None` for
 /// `chat` / absent / unrecognized values (the static descriptor policy
-/// applies). The resolver honors the override only for `ProviderKind::Custom`.
-/// A non-empty unrecognized value is most likely a typo of the one string
-/// that switches the endpoint's protocol, so it is logged before degrading to
-/// the default policy — the parse stays total and forward-compatible.
+/// applies). The resolver honors the override only for `ProviderKind::Custom`,
+/// and every other consumer gates the same way, so the warning below can only
+/// fire for a custom table. A non-empty unrecognized value is most likely a
+/// typo of the one string that switches the endpoint's protocol, so it is
+/// logged before degrading to the default policy — the parse stays total and
+/// forward-compatible.
 #[must_use]
 pub fn wire_dialect_override(wire: Option<&str>) -> Option<WireFormat> {
     if wire_dialect_prefers_responses(wire) {
@@ -1792,7 +1794,7 @@ pub fn wire_dialect_override(wire: Option<&str>) -> Option<WireFormat> {
             ) {
                 tracing::warn!(
                     dialect = %raw,
-                    "unrecognized provider wire dialect; using the default Chat Completions policy"
+                    "unrecognized custom-provider wire dialect; using the default Chat Completions policy"
                 );
             }
         }

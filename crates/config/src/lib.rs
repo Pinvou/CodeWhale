@@ -163,9 +163,10 @@ pub struct ProviderConfigToml {
     /// `responses`, `anthropic` (or `messages`/`claude`), and `chat` or
     /// `openai` (the Chat Completions default); dual-protocol built-in
     /// vendors (DeepSeek, MiniMax, Model Studio) accept `openai` (default)
-    /// or `anthropic` (Messages). Unrecognized values fall back to the
-    /// default Chat Completions policy with a warning. Not a separate
-    /// catalog provider — a power-user toggle.
+    /// or `anthropic` (Messages). An unrecognized value falls back to the
+    /// default policy — custom tables log a warning as they degrade, while
+    /// a built-in vendor's dialect space is silently `openai`/`anthropic`.
+    /// Not a separate catalog provider — a power-user toggle.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -4589,6 +4590,10 @@ fn moonshot_base_url_uses_kimi_code(base_url: &str) -> bool {
 }
 
 /// Dual-wire vendors: dialect is config (`wire`), not a separate ProviderKind.
+/// The `anthropic` alias tail is the canonical parse in
+/// [`provider::wire_dialect_prefers_anthropic`] — the built-in dialect space
+/// only ever branches openai/anthropic, so it shares that alias list rather
+/// than keeping a second one that can drift.
 fn wire_prefers_anthropic(kind: ProviderKind, wire: Option<&str>) -> bool {
     if matches!(
         kind,
@@ -4599,19 +4604,7 @@ fn wire_prefers_anthropic(kind: ProviderKind, wire: Option<&str>) -> bool {
     ) {
         return true;
     }
-    let Some(raw) = wire.map(str::trim).filter(|value| !value.is_empty()) else {
-        return false;
-    };
-    let normalized = raw.to_ascii_lowercase().replace(['_', ' '], "-");
-    matches!(
-        normalized.as_str(),
-        "anthropic"
-            | "anthropic-messages"
-            | "messages"
-            | "claude"
-            | "anthropic-compatible"
-            | "anthropic-compat"
-    )
+    provider::wire_dialect_prefers_anthropic(wire)
 }
 
 fn modelstudio_mode_is_coding_plan(kind: ProviderKind, mode: Option<&str>) -> bool {
