@@ -8,6 +8,8 @@
 //! end-to-end filesystem or packaged application coverage.
 //! Endpoint profile lookup supplies a non-production public-key fixture; actual
 //! persisted/environment-selected deployment profiles are outside this harness.
+//! Transfer tests compile the actual byte-budget and retry-evidence core; they
+//! do not cover staging files, command admission or production transfer wiring.
 //! The full product compile and native transport tests remain separate gates.
 
 #![allow(dead_code)]
@@ -29,6 +31,9 @@ mod resume;
 
 #[path = "../../../src/features/remote_control/controller/recovery_budget.rs"]
 mod recovery_budget;
+
+#[cfg(test)]
+mod transfer;
 
 mod state;
 
