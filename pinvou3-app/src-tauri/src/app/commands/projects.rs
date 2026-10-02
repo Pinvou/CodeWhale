@@ -38,7 +38,8 @@ use crate::features::codex_acp::{
 /// waiting) and far below a user-visible hang.
 const REBIND_EVICT_TAIL_BUDGET: Duration = Duration::from_secs(10);
 use crate::features::projects::{
-    MoveSessionOutcome, Project, ProjectStore, RebindRootsError, SessionAssignments,
+    DeleteProjectReport, MoveSessionOutcome, Project, ProjectStore, RebindRootsError,
+    SessionAssignments,
 };
 use crate::features::sessions::{RebindBindingsOutcome, SessionStore};
 
@@ -183,12 +184,12 @@ pub async fn delete_project(
     project_id: String,
     app: AppHandle,
     store: State<'_, ProjectStore>,
-) -> Result<(), String> {
-    store
+) -> Result<DeleteProjectReport, String> {
+    let report = store
         .delete_project(&project_id)
         .map_err(|e| format!("delete_project({project_id}): {e:#}"))?;
     emit_project_event(&app, "projects:list_changed", "deleted");
-    Ok(())
+    Ok(report)
 }
 
 /// 移动会话归属(纯归档操作,运行中的会话同样允许)。
@@ -1987,16 +1988,30 @@ mod tests {
         let _ = std::fs::remove_dir_all(&existing);
     }
 
-    /// Wire-shape lock: the move outcome's `added_root` crosses the bridge
-    /// verbatim; a serde rename or a dropped field would silently change that
-    /// cross-process contract. (Official 适配：`delete_project` 在 Official
-    /// 无 DeleteProjectReport 返回值，对应 wire 锁定测试随之省略；
-    /// `MoveSessionOutcome` 亦无 `project_id` 字段，仅锁定 `added_root`。)
+    /// Wire-shape locks: the CLI consumes `delete_project`'s return value
+    /// and the move outcome's `project_id` verbatim; a serde rename or a
+    /// dropped field would silently change that cross-process contract.
+    /// (#463 曾按「Official 无 DeleteProjectReport/project_id」适配省略，
+    /// #1370 合入后 Official 已有两者，回归主线形状。)
+    #[test]
+    fn delete_project_report_wire_keys_are_stable() {
+        let value = serde_json::to_value(DeleteProjectReport {
+            affected_session_ids: vec!["s1".to_string()],
+        })
+        .expect("serialize DeleteProjectReport");
+        let object = value.as_object().expect("report serializes as an object");
+        assert!(object.contains_key("affected_session_ids"));
+    }
+
     #[test]
     fn move_session_outcome_wire_keys_are_stable() {
-        let value = serde_json::to_value(MoveSessionOutcome { added_root: None })
-            .expect("serialize MoveSessionOutcome");
+        let value = serde_json::to_value(MoveSessionOutcome {
+            project_id: Some("p1".to_string()),
+            added_root: None,
+        })
+        .expect("serialize MoveSessionOutcome");
         let object = value.as_object().expect("outcome serializes as an object");
+        assert!(object.contains_key("project_id"));
         assert!(object.contains_key("added_root"));
     }
 
