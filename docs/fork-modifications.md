@@ -29,16 +29,16 @@
 - All shell-specific guidance now lives in named constants, including cmd, fish, and the shared fallback. A before/after comparison across 14 shell cases confirmed identical output after constant extraction.
 - Following the 40-call curl ablation, remove the tool-level curl alias reminder only. Preserve the other PowerShell guidance and application instructions used in that experiment; both arms achieved 19/20 correct executions with no shell mismatch errors.
 
-## 0. 当前状态（2026-09-23 · r3 已收口：tag `pinvou-v0.9.12-r3` 切在 `61cb769be`，三方相等；r1 基线之上 34 个登记提交，过渡期语义由 Community PR #453/#482 接入）
+## 0. 当前状态（2026-10-02 · r3 收口后过渡期：tag `pinvou-v0.9.12-r3` 仍钉在其收口 `61cb769be`，登记头随 #80 前进至 `44921cf02`；r1 基线之上 35 个登记提交，过渡期语义由 Community PR #453/#482 接入）
 
 | 项 | 当前值 |
 |---|---|
 | 上游基线 | tag `v0.9.12`，commit `dcd4c200f72f0c1ffd60d8e7f6850313db879fc5` |
-| 维护分支 | `pinvou3-clean` = `61cb769be5b33abc64f64da4272f5b39a8b6c1fd`（r1 基线 `1fafee7e2` 之上 34 个 squash 合入：#41/#47/#49 与 2026-09-10/11 遗留 PR 清理批次 #31/#37/#38/#39/#43/#48/#50/#51/#52/#53、2026-09-17 批次 #56/#58/#59/#60/#61、2026-09-18 批次 #62/#57/#55、2026-09-20 批次 #66、2026-09-21 批次 #64/#67、2026-09-22/23 批次 #63/#65/#68/#69/#70/#71/#72/#73 与收口追加 #77/#76（替换原 #74）） |
-| 发布状态 | r3 已收口（2026-09-23）：不可变 tag `pinvou-v0.9.12-r3` 切在合并头 `61cb769be`，父仓 gitlink、维护分支与 tag 三方相等；r2 tag `pinvou-v0.9.12-r2` 仍钉在其收口 `6f780290f`（24 个提交）作为回退点；历史上父仓 gitlink 由 Official PR #1037 首次对齐，其后 #1141/#1209 与各批次 gitlink 对齐 PR 随批次前移，本次由 gitlink bump PR 随 r3 收口对齐。r3 tag 曾短暂钉在 `ba2a07768f`，在父仓引用前因 #77 Windows 编译修复重切至 `61cb769be`（同日完成，未被任何父仓提交引用） |
+| 维护分支 | `pinvou3-clean` = `44921cf028f12ffed33beb4760621a8598de48fc`（r1 基线 `1fafee7e2` 之上 35 个 squash 合入：#41/#47/#49 与 2026-09-10/11 遗留 PR 清理批次 #31/#37/#38/#39/#43/#48/#50/#51/#52/#53、2026-09-17 批次 #56/#58/#59/#60/#61、2026-09-18 批次 #62/#57/#55、2026-09-20 批次 #66、2026-09-21 批次 #64/#67、2026-09-22/23 批次 #63/#65/#68/#69/#70/#71/#72/#73、收口追加 #77/#76（替换原 #74）与 2026-10-02 批次 #80） |
+| 发布状态 | r3 已收口（2026-09-23）：不可变 tag `pinvou-v0.9.12-r3` 切在合并头 `61cb769be`；2026-10-02 起 #80 使登记头领先 tag，进入过渡期，`scripts/verify-public-submodule.sh` 以 `TRANSITION_BASELINE` 断言 tag 仍钉在 `61cb769be` 且 gitlink = 维护分支头并领先 tag。r2 tag `pinvou-v0.9.12-r2` 仍钉在其收口 `6f780290f`（24 个提交）作为回退点；历史上父仓 gitlink 由 Official PR #1037 首次对齐，其后 #1141/#1209 与各批次 gitlink 对齐 PR 随批次前移，本次由 gitlink bump PR 随 CodeWhale#80 对齐。r3 tag 曾短暂钉在 `ba2a07768f`，在父仓引用前因 #77 Windows 编译修复重切至 `61cb769be`（同日完成，未被任何父仓提交引用） |
 | 升级前回退点 | 公开不可变 tag `pinvou-v0.9.5-r13` → `f853f8f1566c57e6be40d5439a222a932aa79ef5`；同 SHA 的本地 `backup/pre-v0.9.12-sync` 仅作便利引用 |
-| 历史组织 | 上游之上 49 个带 DCO sign-off 的提交，归属 4 个长期主题（T1–T4）+ 3 个追加减量主题（T5 会话归档导出、T6 蜂群限流治理、T8 roster 宿主 profiles 呈现，即 Pinvou/CodeWhale#65 提交主题里的 T7，按 #365 先例在父仓登记时重编号）+ 1 个已合入维护分支的主题（T7 压缩检查点角色兼容）；r1 之后 34 个提交全部经 PR squash 合入并过五项必需门禁。T8 主题经 Pinvou/CodeWhale#65 落位：原以五个提交随父仓蜂群二期 PR 走保持提交合入以保全钉定 SHA，实际经 squash 合入（`c5fadb86d`）——登记随之改为钉定公开维护分支头（现 `61cb769be`），不再钉定合入前的波次 SHA（详见第 13 节教训登记） |
-| drift | `229 files, +29272/-5352`，净增 23920 行（实测于 `61cb769be` vs 上游 `dcd4c200f`）；r2 为 `190 files, +19135/-2628`（净增 16507），旧 r13 为 `110 files, +10895/-1195` |
+| 历史组织 | 上游之上 50 个带 DCO sign-off 的提交，归属 4 个长期主题（T1–T4）+ 3 个追加减量主题（T5 会话归档导出、T6 蜂群限流治理、T8 roster 宿主 profiles 呈现，即 Pinvou/CodeWhale#65 提交主题里的 T7，按 #365 先例在父仓登记时重编号）+ 1 个已合入维护分支的主题（T7 压缩检查点角色兼容）；r1 之后 35 个提交全部经 PR squash 合入并过必需门禁。T8 主题经 Pinvou/CodeWhale#65 落位：原以五个提交随父仓蜂群二期 PR 走保持提交合入以保全钉定 SHA，实际经 squash 合入（`c5fadb86d`）——登记随之改为钉定公开维护分支头（现 `44921cf02`），不再钉定合入前的波次 SHA（详见第 13 节教训登记） |
+| drift | `231 files, +29286/-5364`，净增 23922 行（实测于 `44921cf02` vs 上游 `dcd4c200f`）；r3 收口点 `61cb769be` 为 `229 files, +29272/-5352`（净增 23920），r2 为 `190 files, +19135/-2628`（净增 16507），旧 r13 为 `110 files, +10895/-1195` |
 | 守护 | 141 条独立 CodeWhale `forkguard_*` 行为名（guard 下限 64）+ 父仓指纹与行为测试 |
 | 父仓适配 | v0.9.12 EngineConfig、Agent/Plan 模式、逐轮 reasoning/安全、ExtraTools、owner 事件隔离、Automation v3/v4 数据兼容、rusqlite 0.40.2、Shell 任务来源对账；消费方 PR #396（execpolicy）、#408（轮次取消）、#444（蜂群）、#468（computer-use）、#472（一键导出）依赖本批底座能力 |
 
@@ -129,6 +129,7 @@
 | `ba2a07768f` | T7 重构 | 压缩检查点识别族（摘要标记、provenance 常量、header 谓词、checkpoint 识别）原样迁至 `history_recognition` 叶模块，解除 `compaction`⇄`runtime_handoff` 依赖环，`compaction` re-export 保持路径兼容（#73） |
 | `684a93101c` | T2 修复 | Windows cfg(test) 门控：`tools/process.rs` 的 unix 专属测试 helper（`use super::*` 与 `shell_command`）随唯一 `#[cfg(unix)]` 测试一起门控，修复父仓 windows-rust-test 的 `-D warnings` 编译失败（#77） |
 | `61cb769be` | T7 修复 | restore 载体 provenance 锚定：带戳载体存在时仅锚定/删除真实载体，无戳遗留历史保留松散替换，粘贴摘要不再被误删或窃锚；镜像 wire 侧双序回归测试（#76，替换因服务端分支丢失事故无法合并的 #74） |
+| `44921cf02` | T2 修复 | 浮动 stable 工具链（1.99.0，2026-10-01 滚出）编译与 lint 复绿：`mark_taken` 的 `Atomic::fetch_update` 已更名 `try_update` 并弃用，MSRV 1.88 无新名，唯一调用点 `#[allow(deprecated)]` 并注明缘由（对旧工具链惰性）；顺带清掉 1.99 clippy 对存量代码的三处新发现（`agent_plugin` 单元素 `for key in ["args"]` 循环展开、错误串逐字节不变；`workflow_panel` 两处非捕获 Copy 闭包的多余 `&bounded` 借用）；首证于父仓 windows-rust-test `codewhale-tui` 编译红（#80） |
 
 所有提交都含 DCO `Signed-off-by`。`b4c02616b` 包含大部分跨主题收口，历史粒度确实不利于 bisect；分支公开进入评审后没有为历史美化 force-push，而是追加带 sign-off 的提交修复评审和发布门禁问题，并用本表、指纹和行为测试弥补审计粒度。不可变 tag 已创建，后续不得重写。
 
