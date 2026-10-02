@@ -454,13 +454,15 @@ impl LaneStore {
         session: SessionKeys,
     ) -> Result<(), LaneFailure> {
         let lane = EncryptedLane::new(role, lease, session)?;
-        *self.lane.lock() = Some(lane);
+        let mut current = self.lane.lock();
+        *current = Some(lane);
         self.suspended.store(false, Ordering::SeqCst);
         Ok(())
     }
 
     pub(crate) fn clear(&self) {
-        *self.lane.lock() = None;
+        let mut lane = self.lane.lock();
+        *lane = None;
         self.suspended.store(false, Ordering::SeqCst);
     }
 
@@ -470,14 +472,32 @@ impl LaneStore {
 
     /// 断线进入恢复流程：业务与存活帧失败关闭，但保留通道材料。
     pub(crate) fn suspend(&self) {
-        if self.is_installed() {
+        let lane = self.lane.lock();
+        if lane.is_some() {
             self.suspended.store(true, Ordering::SeqCst);
         }
     }
 
     /// `controller_resumed` 之后重新打开业务闸门。
     pub(crate) fn activate(&self) {
+        let _lane = self.lane.lock();
         self.suspended.store(false, Ordering::SeqCst);
+    }
+
+    /// Hold the channel owner while committing an operation tied to this exact lease.
+    /// Clear, suspend, and replacement install cannot pass this guard.
+    pub(crate) fn with_active<T>(
+        &self,
+        lease: &super::protocol::LeaseContext,
+        operation: impl FnOnce() -> Result<T, String>,
+    ) -> Result<T, String> {
+        let lane = self.lane.lock();
+        if self.suspended.load(Ordering::SeqCst)
+            || lane.as_ref().is_none_or(|active| active.lease != *lease)
+        {
+            return Err("remote_proxy_channel_unavailable".into());
+        }
+        operation()
     }
 
     pub(crate) fn is_suspended(&self) -> bool {
@@ -599,6 +619,14 @@ macro_rules! lane_state {
 
             pub(crate) fn is_suspended(&self) -> bool {
                 self.store.is_suspended()
+            }
+
+            pub(crate) fn with_active<T>(
+                &self,
+                lease: &super::protocol::LeaseContext,
+                operation: impl FnOnce() -> Result<T, String>,
+            ) -> Result<T, String> {
+                self.store.with_active(lease, operation)
             }
 
             pub(crate) fn seal(

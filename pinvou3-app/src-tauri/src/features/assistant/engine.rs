@@ -263,6 +263,7 @@ struct TranscriptFallback {
 pub(crate) struct TurnReservation {
     lifecycle: Arc<TurnLifecycle>,
     reservation_id: u64,
+    generation: u64,
     base_transcript_revision: Option<String>,
     transcript: Option<ReservedTranscript>,
     admission_metadata: Option<TurnAdmissionMetadata>,
@@ -270,10 +271,11 @@ pub(crate) struct TurnReservation {
 }
 
 impl TurnReservation {
-    fn new(lifecycle: Arc<TurnLifecycle>, reservation_id: u64) -> Self {
+    fn new(lifecycle: Arc<TurnLifecycle>, reservation_id: u64, generation: u64) -> Self {
         Self {
             lifecycle,
             reservation_id,
+            generation,
             base_transcript_revision: None,
             transcript: None,
             admission_metadata: None,
@@ -287,6 +289,12 @@ impl TurnReservation {
 
     pub(crate) fn base_transcript_revision(&self) -> Option<&str> {
         self.base_transcript_revision.as_deref()
+    }
+
+    /// Stable identity of the reserved session turn. Unlike transcript indices,
+    /// this survives persistence compaction and is unique for the session.
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation
     }
 
     pub(crate) fn set_transcript(
@@ -695,7 +703,7 @@ impl TurnLifecycle {
     }
 
     pub(crate) fn reserve(self: &Arc<Self>) -> Result<TurnReservation> {
-        let reservation_id = {
+        let (reservation_id, generation) = {
             let mut state = self.state.lock();
             if state.active || state.terminal_closing {
                 anyhow::bail!("session_turn_in_progress");
@@ -713,10 +721,14 @@ impl TurnLifecycle {
             state.active_reservation_id = Some(reservation_id);
             state.pending_cancel = None;
             state.submission_id = None;
-            reservation_id
+            (reservation_id, state.turn_epoch)
         };
         crate::features::connectors::visibility::turn_submitted();
-        Ok(TurnReservation::new(self.clone(), reservation_id))
+        Ok(TurnReservation::new(
+            self.clone(),
+            reservation_id,
+            generation,
+        ))
     }
 
     fn install_transcript_rule(

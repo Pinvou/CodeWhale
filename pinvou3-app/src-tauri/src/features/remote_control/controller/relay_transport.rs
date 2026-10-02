@@ -23,7 +23,7 @@ use super::protocol::{
     validate_controller_runtime_message_json,
 };
 use crate::features::remote_control::relay_client::{
-    MAX_RELAY_FRAME_BYTES, ReconnectBackoff, relay_websocket_config,
+    MAX_RELAY_FRAME_BYTES, ReconnectBackoff, controller_websocket_request, relay_websocket_config,
 };
 
 const CONTROL_QUEUE_CAPACITY: usize = 64;
@@ -239,6 +239,7 @@ impl WirePayload {
 
 #[derive(Debug)]
 struct QueuedFrame {
+    flushed: Option<tokio::sync::oneshot::Sender<()>>,
     priority: FramePriority,
     transport_epoch: u64,
     lease_context: Option<LeaseContext>,
@@ -331,6 +332,23 @@ impl ControllerTransportSender {
         &self,
         value: &T,
     ) -> Result<(), ControllerSendError> {
+        self.enqueue_authenticated_control(value, None)
+    }
+
+    pub(crate) fn send_control_with_receipt<T: Serialize>(
+        &self,
+        value: &T,
+    ) -> Result<tokio::sync::oneshot::Receiver<()>, ControllerSendError> {
+        let (sent, receipt) = tokio::sync::oneshot::channel();
+        self.enqueue_authenticated_control(value, Some(sent))?;
+        Ok(receipt)
+    }
+
+    fn enqueue_authenticated_control<T: Serialize>(
+        &self,
+        value: &T,
+        flushed: Option<tokio::sync::oneshot::Sender<()>>,
+    ) -> Result<(), ControllerSendError> {
         let text = serde_json::to_string(value).map_err(|_| ControllerSendError::Serialization)?;
         enforce_frame_limit(text.len(), MAX_CONTROL_MESSAGE_BYTES)?;
         let lease = self
@@ -352,10 +370,11 @@ impl ControllerTransportSender {
         if validated.get("type").and_then(Value::as_str) == Some("encrypted_frame") {
             return Err(ControllerSendError::InvalidFrame("message.type".into()));
         }
-        self.try_enqueue(
+        self.try_enqueue_with_receipt(
             FramePriority::Control,
             WirePayload::Plain(text),
             Some(lease_context),
+            flushed,
         )
     }
 
@@ -456,6 +475,16 @@ impl ControllerTransportSender {
         payload: WirePayload,
         lease_context: Option<LeaseContext>,
     ) -> Result<(), ControllerSendError> {
+        self.try_enqueue_with_receipt(priority, payload, lease_context, None)
+    }
+
+    fn try_enqueue_with_receipt(
+        &self,
+        priority: FramePriority,
+        payload: WirePayload,
+        lease_context: Option<LeaseContext>,
+        flushed: Option<tokio::sync::oneshot::Sender<()>>,
+    ) -> Result<(), ControllerSendError> {
         if self.shutdown.is_cancelled() {
             return Err(ControllerSendError::Closed);
         }
@@ -485,6 +514,7 @@ impl ControllerTransportSender {
             None
         };
         let frame = QueuedFrame {
+            flushed,
             priority,
             transport_epoch: self.transport_epoch.load(Ordering::Acquire),
             lease_context,
@@ -605,11 +635,15 @@ async fn run_transport(
 ) {
     let mut reconnect = ReconnectBackoff::default();
     loop {
-        let connection = connect_async_with_config(
-            &config.relay_url,
-            Some(relay_websocket_config(MAX_CONTROLLER_INBOUND_TEXT_BYTES)),
-            false,
-        );
+        let connection = async {
+            let request = controller_websocket_request(&config.relay_url)?;
+            connect_async_with_config(
+                request,
+                Some(relay_websocket_config(MAX_CONTROLLER_INBOUND_TEXT_BYTES)),
+                false,
+            )
+            .await
+        };
         tokio::pin!(connection);
         let connected = tokio::select! {
             biased;
@@ -660,8 +694,24 @@ async fn run_transport(
                         result = write.send(Message::Text(frame.text().to_owned().into())) => result,
                     };
                     match result {
-                        Ok(()) => {}
+                        Ok(()) => {
+                            if frame_is_task_submit(frame.text()) {
+                                super::relay_runtime::log_controller_event(
+                                    "task_submit_socket_written",
+                                    "sent",
+                                );
+                            }
+                            if let Some(flushed) = frame.flushed {
+                                let _ = flushed.send(());
+                            }
+                        }
                         Err(error) => {
+                            if frame_is_task_submit(frame.text()) {
+                                super::relay_runtime::log_controller_event(
+                                    "task_submit_socket_write_failed",
+                                    "transport_error",
+                                );
+                            }
                             break format!("send Relay frame: {error}");
                         }
                     }
@@ -710,6 +760,19 @@ async fn run_transport(
             return;
         }
     }
+}
+
+fn frame_is_task_submit(text: &str) -> bool {
+    serde_json::from_str::<Value>(text)
+        .ok()
+        .and_then(|frame| {
+            frame
+                .get("payload_kind")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .as_deref()
+        == Some("task_submit")
 }
 
 fn frame_is_current(sender: &ControllerTransportSender, frame: &QueuedFrame) -> bool {
@@ -861,7 +924,8 @@ mod tests {
     use futures_util::{SinkExt, StreamExt};
     use serde_json::json;
     use tokio::net::TcpListener;
-    use tokio_tungstenite::accept_async;
+    use tokio_tungstenite::accept_hdr_async;
+    use tokio_tungstenite::tungstenite::http::{HeaderValue, header::SEC_WEBSOCKET_PROTOCOL};
 
     use super::*;
     use crate::features::remote_control::controller::{
@@ -1329,7 +1393,14 @@ mod tests {
             let mut requests = Vec::new();
             for _ in 0..2 {
                 let (stream, _) = listener.accept().await.unwrap();
-                let mut socket = accept_async(stream).await.unwrap();
+                let mut socket = accept_hdr_async(stream, |request: &tokio_tungstenite::tungstenite::handshake::server::Request,
+                    mut response: tokio_tungstenite::tungstenite::handshake::server::Response| {
+                    assert_eq!(request.headers().get(SEC_WEBSOCKET_PROTOCOL).unwrap(),
+                        super::super::protocol::CONTROLLER_SUBPROTOCOL);
+                    response.headers_mut().insert(SEC_WEBSOCKET_PROTOCOL,
+                        HeaderValue::from_static(super::super::protocol::CONTROLLER_SUBPROTOCOL));
+                    Ok(response)
+                }).await.unwrap();
                 let message = socket.next().await.unwrap().unwrap();
                 let Message::Text(text) = message else {
                     panic!("expected controller text frame");

@@ -507,11 +507,26 @@ impl ReceiptSecret {
         Ok(commitment)
     }
 
-    /// E2E-02 所需的冻结契约增量：`finished_receipt_ack` 必须把本端 receipt
-    /// secret 只经已认证角色 socket 回传给 Relay（用于校验它与此前 commitment
-    /// 一致）。明文只在此显式路径出 Rust，Debug/Display/普通序列化仍全部脱敏。
+    /// E2E-02 所需的冻结契约增量：`finished_receipt_ack` 必须把 `sender_role`
+    /// 那一方（即刚收到对端 Finished 的一侧解开的**对端** receipt secret）经已认证
+    /// 角色 socket 回传给 Relay，供它核对对端此前的 commitment
+    /// （`remote-control-relay/controller-lease.js` 的 `acceptReceipt`：按
+    /// `sender_role` 取 commitment 后重算比对）。明文只在此显式路径出 Rust，
+    /// Debug/Display/普通序列化仍全部脱敏。
     pub(crate) fn to_base64(&self) -> String {
         base64::engine::general_purpose::STANDARD.encode(&self.0[..])
+    }
+
+    /// 测试用：按 Relay 的校验路径复原 receipt secret（重算 commitment 做同构核对）。
+    #[cfg(test)]
+    pub(crate) fn from_base64_for_test(value: &str) -> CryptoResult<Self> {
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(value)
+            .map_err(|_| ControllerCryptoError::new("invalid_receipt", "receipt"))?;
+        let secret: [u8; RECEIPT_SECRET_BYTES] = bytes
+            .try_into()
+            .map_err(|_| ControllerCryptoError::new("invalid_receipt", "receipt"))?;
+        Ok(Self(Zeroizing::new(secret)))
     }
 
     #[cfg(test)]
@@ -1628,6 +1643,7 @@ impl TranscriptAuthenticator {
         Ok(LeaseInstallValidationContext::new(VerifiedTranscript {
             request_id: parts.request_id,
             expected_pairing_id: parts.expected_pairing_id,
+            peer_endpoint_id: parts.peer_endpoint_id,
             reservation_id: parts.reservation_id,
             remote_control_generation: parts.remote_control_generation,
             relay_epoch: parts.relay_epoch,
@@ -1666,6 +1682,7 @@ impl fmt::Debug for TranscriptAuthenticator {
 pub(crate) struct VerifiedTranscript {
     request_id: String,
     expected_pairing_id: String,
+    peer_endpoint_id: String,
     reservation_id: String,
     remote_control_generation: String,
     relay_epoch: String,
@@ -1683,6 +1700,9 @@ impl VerifiedTranscript {
     }
     pub(crate) fn expected_pairing_id(&self) -> &str {
         &self.expected_pairing_id
+    }
+    pub(crate) fn peer_endpoint_id(&self) -> &str {
+        &self.peer_endpoint_id
     }
     pub(crate) fn reservation_id(&self) -> &str {
         &self.reservation_id

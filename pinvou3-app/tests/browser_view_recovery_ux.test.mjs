@@ -460,7 +460,13 @@ test('rapid bridge session changes always enqueue the latest serialized publicat
   assert.match(syncEffect, /const isCommandEcho = bridgeObservation\.type === 'command-echo'/);
   assert.match(appMain, /browserSessionCommandEchoGuard\.begin\(/);
   assert.match(appMain, /browserSessionCommandEchoGuard\.settle\(sessionCommandToken\)/);
-  assert.equal((appMain.match(/sessionTarget:/g) || []).length, 4);
+  const serializedTargets = [...appMain.matchAll(
+    /channel: 'session',\s*hideMode: 'workspace',\s*serialize: true,\s*sessionTarget: ([^,\n]+),/g,
+  )].map(match => match[1]);
+  assert.deepEqual(serializedTargets, ['controlledTaskSessionId', 'run.sessionId', 'null', 'id', 'sessionId'],
+    'controlled auto-open and all existing session transitions must retain serialized browser ownership');
+  assert.equal((appMain.match(/sessionTarget:/g) || []).length, serializedTargets.length,
+    'no session target may bypass the serialized session/workspace channel');
   assert.match(syncEffect, /bridgeTransition\?\.sessionId !== nextSessionId/);
   assert.match(
     syncEffect,

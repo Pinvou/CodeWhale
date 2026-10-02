@@ -201,6 +201,11 @@ impl SessionStore {
         }
         let store = Self {
             manager: Arc::new(manager),
+            remote_proxies: Arc::new(Mutex::new(super::remote_proxy::RemoteProxyState::load(
+                sessions_dir.join("_remote_proxies.json"),
+                &sessions_dir,
+            )?)),
+            local_backend_resolver: Arc::new(RwLock::new(None)),
             scheduled_profiles: Arc::new(RwLock::new(HashMap::new())),
             scheduled_profiles_path: Arc::new(scheduled_profiles_path),
             scheduled_root: Arc::new(scheduled_root),
@@ -347,10 +352,24 @@ impl SessionStore {
 
     pub fn save(&self, session: &SavedSession) -> Result<PathBuf> {
         let _mutation = self.scheduled_mutation.lock();
+        if self
+            .remote_proxies
+            .lock()
+            .records
+            .contains_key(&session.metadata.id)
+        {
+            bail!("RemoteProxy cannot be saved as a local Engine/ACP Session");
+        }
+        if self.is_scheduled_session(&session.metadata.id)? {
+            return self.persist_then_reconcile(session, "committed save");
+        }
         self.persist_then_reconcile(session, "session save")
     }
 
     pub fn delete(&self, id: &str) -> Result<()> {
+        if self.remote_proxies.lock().records.contains_key(id) {
+            bail!("RemoteProxy cannot be deleted through local Engine/ACP lifecycle");
+        }
         if self.is_scheduled_session(id)? {
             bail!("Scheduled-run sessions are deleted through their automation");
         }
@@ -464,9 +483,21 @@ impl SessionStore {
     }
 
     pub fn session_kind(&self, id: &str) -> Result<SessionKind> {
-        if self.is_scheduled_session(id)? {
+        validate_session_id(id)?;
+        if self.remote_proxies.lock().records.contains_key(id) {
+            Ok(SessionKind::RemoteProxy)
+        } else if id.starts_with("remote-") {
+            bail!("RemoteProxy record is unavailable");
+        } else if self.is_scheduled_session(id)? {
             Ok(SessionKind::ScheduledRun)
         } else {
+            let path = self.manager.sessions_dir().join(format!("{id}.json"));
+            if !std::fs::metadata(&path)
+                .with_context(|| format!("classify local Session {id}"))?
+                .is_file()
+            {
+                bail!("local Session record is not a file");
+            }
             Ok(SessionKind::Chat)
         }
     }
