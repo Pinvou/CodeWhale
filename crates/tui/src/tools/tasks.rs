@@ -644,14 +644,14 @@ impl TasksTool {
             .await
             {
                 Ok(outcome) => {
-                    let (exit_code, timed_out) = if outcome.timed_out {
-                        // On Unix a group-killed child has no exit code;
-                        // report the conventional 128+SIGKILL so the record
-                        // schema always carries an integer.
-                        (outcome.output.status.code().or(Some(128 + 9)), true)
-                    } else {
-                        (outcome.output.status.code(), false)
-                    };
+                    // A timed-out gate is SIGKILLed and never reported a
+                    // code, so keep the exit code absent: hook `exit_code`
+                    // conditions must not match on a fabricated one (the
+                    // conventional 128+SIGKILL doubles as the OOM-kill
+                    // code), and `timed_out` beside it is the timeout
+                    // signal.
+                    let exit_code = outcome.output.status.code();
+                    let timed_out = outcome.timed_out;
                     (
                         exit_code,
                         String::from_utf8_lossy(&outcome.output.stdout).to_string(),
@@ -1423,9 +1423,36 @@ mod tests {
             .await
             .expect("gate evidence, not a raise");
         let meta = result.metadata.expect("gate metadata");
-        assert_eq!(meta["spawn_error"].is_string(), false, "{meta}");
+        assert!(!meta["spawn_error"].is_string(), "{meta}");
         assert_eq!(meta["exit_code"].as_i64(), Some(127), "{meta}");
         assert!(meta["timed_out"].as_bool() == Some(false), "{meta}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn gate_timeout_records_no_exit_code() {
+        // A timed-out gate is SIGKILLed: the child never reported an exit
+        // code, and hook `exit_code` conditions must not match on a
+        // fabricated one (`128+SIGKILL` doubles as the OOM-kill code). The
+        // record carries `timed_out: true` as the timeout signal instead,
+        // and the hook surface must read the absence as "no exit code".
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let gate = TasksTool::alias("task_gate_run", "gate_run");
+        let context = ToolContext::new(tmp.path().to_path_buf());
+        let result = gate
+            .execute(
+                json!({
+                    "gate": "test",
+                    "command": "sleep 30",
+                    "timeout_ms": 500,
+                }),
+                &context,
+            )
+            .await
+            .expect("gate evidence, not a raise");
+        let meta = result.metadata.as_ref().expect("gate metadata");
+        assert!(meta["exit_code"].is_null(), "{meta}");
+        assert_eq!(meta["timed_out"].as_bool(), Some(true), "{meta}");
     }
 
     #[test]
