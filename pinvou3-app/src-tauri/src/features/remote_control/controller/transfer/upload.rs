@@ -595,6 +595,95 @@ mod tests {
     }
 
     #[test]
+    fn chunk_budget_rejection_aborts_staging_and_releases_accounting() {
+        let staging = Arc::new(RecordingStaging::default());
+        let uploads = uploads(staging.clone(), TransferLimits::default());
+        let chunk_count = super::super::limits::MAX_TRANSFER_CHUNKS;
+        let data = vec![1_u8; chunk_count + 1];
+        let begin = uploads
+            .begin(upload_context(), metadata_for(&data), 1_000)
+            .unwrap();
+        for index in 0..chunk_count {
+            assert_eq!(
+                uploads
+                    .accept_chunk(&begin.handle_id, index as u64, &[1], 1_100)
+                    .unwrap(),
+                UploadProgress::Accepted {
+                    received_bytes: (index + 1) as u64,
+                    next_chunk: (index + 1) as u64,
+                }
+            );
+        }
+        assert_eq!(uploads.registry.active_count(), 1);
+        assert_eq!(uploads.state.lock().active.len(), 1);
+        assert_eq!(
+            uploads.registry.connection_bytes("connection-0001"),
+            data.len() as u64
+        );
+        assert_eq!(
+            uploads
+                .accept_chunk(&begin.handle_id, chunk_count as u64, &[1], 1_200)
+                .unwrap_err(),
+            "transfer_chunk_budget"
+        );
+        assert_eq!(uploads.registry.active_count(), 0);
+        assert_eq!(uploads.registry.connection_bytes("connection-0001"), 0);
+        {
+            let state = uploads.state.lock();
+            assert!(state.active.is_empty());
+            assert!(state.completed.is_empty());
+            assert!(state.pending_cleanup.is_empty());
+        }
+        {
+            let calls = staging.calls.lock().unwrap();
+            assert_eq!(calls.len(), chunk_count + 2); // begin, accepted chunks, abort
+            assert_eq!(
+                calls
+                    .iter()
+                    .filter(|call| call.starts_with("chunk:"))
+                    .count(),
+                chunk_count
+            );
+            assert_eq!(calls.last(), Some(&format!("abort:{}", begin.handle_id)));
+            assert!(!calls.iter().any(|call| call.starts_with("commit:")));
+        }
+        assert_eq!(
+            uploads
+                .accept_chunk(&begin.handle_id, 0, &[1], 1_300)
+                .unwrap_err(),
+            "transfer_unknown"
+        );
+    }
+
+    #[test]
+    fn impossible_chunk_budget_is_refused_before_staging_allocation() {
+        let staging = Arc::new(RecordingStaging::default());
+        let uploads = uploads(
+            staging.clone(),
+            TransferLimits {
+                chunk_bytes: 1,
+                ..TransferLimits::default()
+            },
+        );
+        let data = vec![1_u8; super::super::limits::MAX_TRANSFER_CHUNKS + 1];
+        assert_eq!(
+            uploads
+                .begin(upload_context(), metadata_for(&data), 1_000)
+                .unwrap_err(),
+            "transfer_chunk_budget"
+        );
+        assert!(staging.calls.lock().unwrap().is_empty());
+        assert_eq!(uploads.registry.active_count(), 0);
+        assert_eq!(uploads.registry.connection_bytes("connection-0001"), 0);
+        {
+            let state = uploads.state.lock();
+            assert!(state.active.is_empty());
+            assert!(state.completed.is_empty());
+            assert!(state.pending_cleanup.is_empty());
+        }
+    }
+
+    #[test]
     fn staging_failure_never_leaves_a_live_transfer() {
         let staging = Arc::new(RecordingStaging {
             calls: Mutex::new(Vec::new()),
