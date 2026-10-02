@@ -111,6 +111,7 @@ mod relay_transport {
     // Admission-only test double for manager lifecycle tests. It does not
     // validate frames, enqueue bytes, start workers or communicate over a socket.
     pub(crate) struct ControllerTransportSender {
+        generation: String,
         authenticated: std::sync::atomic::AtomicBool,
         stopped: std::sync::atomic::AtomicBool,
     }
@@ -123,7 +124,7 @@ mod relay_transport {
     #[cfg(test)]
     pub(crate) fn transport_channels(
         _role: ControllerRole,
-        _generation: &str,
+        generation: &str,
         _control_capacity: usize,
         _business_capacity: usize,
         _total_byte_budget: usize,
@@ -131,6 +132,7 @@ mod relay_transport {
     ) -> (ControllerTransportSender, ()) {
         (
             ControllerTransportSender {
+                generation: generation.to_owned(),
                 authenticated: std::sync::atomic::AtomicBool::new(false),
                 stopped: std::sync::atomic::AtomicBool::new(false),
             },
@@ -164,11 +166,17 @@ mod relay_transport {
             panic!("resume transport is outside this local-state harness");
         }
 
-        #[cfg(test)]
         pub(crate) fn install_authenticated_lease(
             &self,
-            _lease: AuthenticatedLease,
+            lease: AuthenticatedLease,
         ) -> Result<(), ControllerSendError> {
+            if self.generation.is_empty()
+                || lease.context.remote_control_generation != self.generation
+            {
+                return Err(ControllerSendError::InvalidFrame(
+                    "remote_control_generation",
+                ));
+            }
             self.authenticated
                 .store(true, std::sync::atomic::Ordering::SeqCst);
             Ok(())
@@ -206,6 +214,45 @@ mod relay_transport {
 
         pub(crate) fn is_stopped(&self) -> bool {
             self.stopped.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn admission_double_rejects_replaced_generation_without_installing_a_lease() {
+            let (sender, _) =
+                transport_channels(ControllerRole::ControllerA, "generation-1", 1, 1, 4096, 512);
+            for (generation, expected) in [
+                (
+                    "generation-old",
+                    Err(ControllerSendError::InvalidFrame(
+                        "remote_control_generation",
+                    )),
+                ),
+                ("generation-1", Ok(())),
+            ] {
+                let lease = AuthenticatedLease {
+                    context: crate::protocol::LeaseContext {
+                        connection_id: "connection-1".into(),
+                        controller_lease_id: "lease-1".into(),
+                        lease_epoch: "1".into(),
+                        relay_epoch: "relay-1".into(),
+                        remote_control_generation: generation.into(),
+                    },
+                    negotiated_capabilities: Vec::new(),
+                };
+                let installed = expected.is_ok();
+                assert_eq!(sender.install_authenticated_lease(lease), expected);
+                assert_eq!(
+                    sender
+                        .authenticated
+                        .load(std::sync::atomic::Ordering::SeqCst),
+                    installed
+                );
+            }
         }
     }
 }
