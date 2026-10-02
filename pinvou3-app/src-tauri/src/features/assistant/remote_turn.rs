@@ -381,8 +381,8 @@ impl RemoteChatEnginePort for EnginePoolChatEngine {
             .pool
             .session_state_root(session_id)
             .map_err(|_| "task_session_not_found".to_owned())?;
-        // Retain the process-only publication owners through the complete
-        // engine turn, including later image/tool path reads and cancellation.
+        // Protect input preparation and submission. The outer turn port also
+        // retains these owners through terminal wait and cancellation teardown.
         let _attachment_read_owners: Vec<_> = attachments
             .iter()
             .filter_map(|attachment| attachment.read_owner.clone())
@@ -743,6 +743,12 @@ impl RemoteChatTurnPort for EnginePoolChatTurnPort {
         events: Arc<dyn ControllerTaskEventSink>,
         cancel: CancellationToken,
     ) -> std::result::Result<Option<String>, String> {
+        // Submission only queues the engine turn. Receipt revocation during
+        // disconnect must not release paths still used by later tool reads.
+        let _attachment_read_owners: Vec<_> = attachments
+            .iter()
+            .filter_map(|attachment| attachment.read_owner.clone())
+            .collect();
         let mut turn_relay = self.engine.start_turn_relay(session_id, task_id, events);
         let result = async {
             tokio::select! {
@@ -870,9 +876,21 @@ mod tests {
         completes_after_first_poll: bool,
         send_started: Option<Arc<tokio::sync::Notify>>,
         send_release: Option<Arc<tokio::sync::Notify>>,
+        protected_attachment: Option<std::path::PathBuf>,
+        fail_submission: bool,
+        cancel_after_submission: Option<CancellationToken>,
+        lease_checks: AtomicUsize,
     }
 
     impl FakeEngine {
+        fn assert_attachment_lease(&self) {
+            if let Some(path) = self.protected_attachment.as_ref() {
+                assert_eq!(std::fs::read(path).unwrap(), b"delayed tool input");
+                assert!(std::fs::write(path, b"replacement").is_err());
+                self.lease_checks.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
         fn immediate() -> Arc<Self> {
             Arc::new(Self {
                 completes_after_first_poll: true,
@@ -915,6 +933,7 @@ mod tests {
         }
 
         fn is_turn_active(&self, _session_id: &str) -> bool {
+            self.assert_attachment_lease();
             // The first observation reports busy, the second one completes the
             // turn so the adapter can prove it waits for a real transition.
             if !self.completes_after_first_poll {
@@ -927,10 +946,12 @@ mod tests {
         }
 
         async fn cancel_turn(&self, session_id: &str) {
+            self.assert_attachment_lease();
             self.cancelled.lock().unwrap().push(session_id.to_owned());
         }
 
         async fn release_task_model(&self, session_id: &str, model_source: &str) {
+            self.assert_attachment_lease();
             if model_source == TASK_MODEL_SOURCE_TEMPORARY {
                 self.released.lock().unwrap().push(session_id.to_owned());
             }
@@ -940,7 +961,125 @@ mod tests {
             &self,
             _session_id: &str,
         ) -> std::result::Result<(), String> {
+            self.assert_attachment_lease();
             Ok(())
+        }
+
+        async fn send_user_message_with_attachments(
+            &self,
+            session_id: &str,
+            task_id: &str,
+            model_source: &str,
+            lease: &LeaseContext,
+            content: String,
+            skill_ids: Vec<String>,
+            attachments: Vec<PublishedAttachment>,
+            relay: Option<&TurnEventRelayHandle>,
+        ) -> std::result::Result<(), String> {
+            if self.protected_attachment.is_none() && !attachments.is_empty() {
+                return Err("task_attachments_unavailable".to_owned());
+            }
+            let result = self
+                .send_user_message(
+                    session_id,
+                    task_id,
+                    model_source,
+                    lease,
+                    content,
+                    skill_ids,
+                    relay,
+                )
+                .await;
+            // Simulate all receipt/submission owners disappearing on return.
+            for attachment in &attachments {
+                if let Some(owner) = attachment.read_owner.as_ref() {
+                    owner.request_cleanup();
+                }
+            }
+            drop(attachments);
+            if let Some(cancel) = self.cancel_after_submission.as_ref() {
+                cancel.cancel();
+            }
+            if self.fail_submission {
+                return Err("task_engine_unavailable".to_owned());
+            }
+            result
+        }
+    }
+
+    #[test]
+    fn attachment_lease_survives_receipt_revocation_until_terminal_and_teardown() {
+        use sha2::{Digest as _, Sha256};
+        for outcome in [
+            "completed",
+            "submission_failed",
+            "cancel_wait",
+            "cancel_before_send",
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let folder = temp.path().join("owned");
+            let publication = crate::platform::filesystem::publish_private_read_path(
+                crate::platform::filesystem::open_private_file_directory(&folder).unwrap(),
+                std::ffi::OsStr::new("report.txt"),
+                b"delayed tool input",
+            );
+            if !crate::platform::filesystem::supports_private_read_path_publication() {
+                assert_eq!(
+                    publication.unwrap_err().kind(),
+                    std::io::ErrorKind::Unsupported
+                );
+                assert!(!folder.join("report.txt").exists());
+                return;
+            }
+            let owner = Arc::new(publication.unwrap());
+            let path = owner.path().to_owned();
+            owner.request_cleanup();
+            let descriptor = PublishedAttachment {
+                handle_id: "ctr-up-0001".to_owned(),
+                path: path.clone(),
+                display_name: "report.txt".to_owned(),
+                mime_type: "text/plain".to_owned(),
+                bytes: 18,
+                sha256: Sha256::digest(b"delayed tool input")
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect(),
+                read_owner: Some(owner),
+            };
+            let cancel = CancellationToken::new();
+            if outcome == "cancel_before_send" {
+                cancel.cancel();
+            }
+            let fake = Arc::new(FakeEngine {
+                completes_after_first_poll: true,
+                protected_attachment: Some(path.clone()),
+                fail_submission: outcome == "submission_failed",
+                cancel_after_submission: (outcome == "cancel_wait").then(|| cancel.clone()),
+                ..FakeEngine::default()
+            });
+            let port = EnginePoolChatTurnPort::new(fake.clone());
+            let result = runtime().block_on(port.run_chat_turn_with_attachments(
+                "session-0001",
+                "task-0001",
+                TASK_MODEL_SOURCE_TEMPORARY,
+                &lease(),
+                "read the attachment".to_owned(),
+                Vec::new(),
+                vec![descriptor],
+                events(),
+                cancel,
+            ));
+            match outcome {
+                "completed" => assert_eq!(result.unwrap(), None),
+                "submission_failed" => assert_eq!(result.unwrap_err(), "task_engine_unavailable"),
+                _ => assert_eq!(result.unwrap_err(), TASK_CANCELLED_CODE),
+            }
+            assert!(fake.lease_checks.load(Ordering::SeqCst) >= 2);
+            assert!(
+                !path.exists(),
+                "cleanup waits for the turn port's last owner"
+            );
+            assert!(!folder.exists());
         }
     }
 
