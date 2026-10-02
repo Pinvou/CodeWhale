@@ -25,10 +25,12 @@ pub(crate) const LIVENESS_EVIDENCE_LEAD_MS: u64 = 10_000;
 pub(crate) const LIVENESS_TOTAL_BUDGET_MS: u64 = 30_000;
 pub(crate) const LIVENESS_SAFETY_MARGIN_MS: u64 = 1_000;
 pub(crate) const MAX_LIVENESS_RTT_MS: u64 = 5_000;
+pub(crate) const LIVENESS_EVIDENCE_POLL_MS: u64 = 2_000;
+pub(crate) const LIVENESS_ATTESTATION_ESCALATION_MS: u64 = 2_500;
 /// Allow the first poll, escalation wait, next poll and full fallback RTT
 /// before the existing suspect boundary. Round conservatively to seconds.
-const SUSPECT_EVIDENCE_LEAD_MS: u64 = (2 * super::relay_runtime::LIVENESS_EVIDENCE_POLL_MS
-    + super::relay_runtime::LIVENESS_ATTESTATION_ESCALATION_MS
+const SUSPECT_EVIDENCE_LEAD_MS: u64 = (2 * LIVENESS_EVIDENCE_POLL_MS
+    + LIVENESS_ATTESTATION_ESCALATION_MS
     + MAX_LIVENESS_RTT_MS
     + 999)
     / 1_000

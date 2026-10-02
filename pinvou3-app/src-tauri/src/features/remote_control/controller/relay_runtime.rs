@@ -1612,10 +1612,7 @@ impl ControlledRelayWorker {
     }
 }
 
-/// E2E-06：证据轮询间隔（远小于 30 秒预算）。
-pub(crate) const LIVENESS_EVIDENCE_POLL_MS: u64 = 2_000;
-/// 直接应答在此窗口内缺失时，升级到 Relay 签名 attestation 兜底。
-pub(crate) const LIVENESS_ATTESTATION_ESCALATION_MS: u64 = 2_500;
+pub(crate) use super::liveness::{LIVENESS_ATTESTATION_ESCALATION_MS, LIVENESS_EVIDENCE_POLL_MS};
 /// 挑战的最长等待：超过后作废并重新发起。
 pub(crate) const LIVENESS_CHALLENGE_TIMEOUT_MS: u64 = 8_000;
 
