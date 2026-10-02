@@ -8677,6 +8677,86 @@ mod tests {
         server.verify().await;
     }
 
+    #[tokio::test]
+    async fn anthropic_isolated_requests_keep_shared_health_untouched() {
+        // The isolated Auto-classifier request runs with
+        // `isolated_request_state` so a read-only inspection never writes
+        // the shared connection health. The Anthropic transport marks and
+        // probes on its own transport errors, so without the gate an
+        // isolated stall would degrade shared health and fire a /models
+        // probe from the classifier path. Two stalls are needed for the
+        // leak to show: one alone stays under the degradation threshold.
+        let _env_lock = crate::test_support::lock_test_env();
+        let _envelope = NonStreamingEnvelopeGuard::millis(1000);
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/anthropic/v1/messages"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({
+                        "id": "msg_slow",
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "text", "text": "late"}],
+                        "model": "MiniMax-M3",
+                        "stop_reason": "end_turn",
+                        "stop_sequence": null,
+                        "usage": {"input_tokens": 1, "output_tokens": 1}
+                    }))
+                    .set_delay(Duration::from_millis(4000)),
+            )
+            .expect(2)
+            .mount(&server)
+            .await;
+        // No probe may fire from the isolated path: expect(0) fails
+        // server.verify() if the transport arm leaks a health write.
+        Mock::given(method("GET"))
+            .and(path("/anthropic/v1/models"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "data": [] })))
+            .expect(0)
+            .mount(&server)
+            .await;
+
+        let mut client =
+            minimax_anthropic_client_with_base_url(format!("{}/anthropic", server.uri()));
+        client.test_messages_transport_base_url = Some(format!("{}/anthropic", server.uri()));
+        client.isolated_request_state = true;
+        let request = MessageRequest {
+            model: "MiniMax-M3".to_string(),
+            messages: vec![Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text {
+                    text: "hello".to_string(),
+                    cache_control: None,
+                }],
+            }],
+            max_tokens: 32,
+            system: None,
+            tools: None,
+            tool_choice: None,
+            metadata: None,
+            thinking: None,
+            reasoning_effort: Some("off".to_string()),
+            stream: Some(false),
+            temperature: None,
+            top_p: None,
+        };
+        for _ in 0..2 {
+            client
+                .create_message(request.clone())
+                .await
+                .expect_err("a provider that answers past the envelope must be cut off");
+        }
+        let health = client.connection_health.lock().await;
+        assert_eq!(
+            health.consecutive_failures, 0,
+            "an isolated request must not write the shared connection health"
+        );
+        assert_eq!(health.state, ConnectionState::Healthy);
+        drop(health);
+        server.verify().await;
+    }
+
     #[test]
     fn custom_api_key_header_is_allowed_without_primary_provider_key() {
         let mut extra = HashMap::new();

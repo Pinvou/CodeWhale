@@ -238,8 +238,14 @@ impl DeepSeekClient {
                 // below, so it must mark health and probe on its own —
                 // otherwise a provider that stalls past the envelope leaves
                 // connection health stale until the next request retries.
-                self.mark_request_failure(&rendered).await;
-                self.maybe_probe_recovery().await;
+                // The isolated classifier request is the exception: a
+                // read-only inspection must not write the shared connection
+                // health (or fire a /models probe), matching the isolated
+                // dispatch contract of the generic send paths.
+                if !self.isolated_request_state {
+                    self.mark_request_failure(&rendered).await;
+                    self.maybe_probe_recovery().await;
+                }
                 return Err(
                     anyhow::Error::new(error).context("Anthropic Messages API request failed")
                 );
