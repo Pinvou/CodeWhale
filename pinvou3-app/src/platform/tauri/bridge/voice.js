@@ -75,6 +75,17 @@
     return operation ? operation.operationId : null;
   }
 
+  // Whether the composer's current voice operation is parked on an in-flight
+  // send admission. The composer hook skips its identity-change auto-cancel
+  // for a parked operation: first-turn materialization flips the adapter
+  // identity mid-send, and cancelling here would only kill the completion
+  // notice of a message that still lands. A context switch before the park
+  // still cancels — that is the wrong-session auto-send protection.
+  function hasVoiceSubmissionPending() {
+    var operation = voiceOperations.get((state.voiceInput || {}).operationId);
+    return !!(operation && operation.pendingSubmission);
+  }
+
   function beginVoiceSubmission(operationId, sessionId) {
     var operation = voiceOperations.get(operationId);
     if (!operation || operation.telemetryTerminal) return;
@@ -1178,8 +1189,8 @@
         cleanupVoiceInputSession(session);
         return;
       }
-      if (!claimed) {
-        throw { category: "device_unavailable", stage: "device", message: bt("voiceMicUnavailable") };
+      if (claimed !== true) {
+        throw voiceFlowError("device_unavailable", "device", bt("voiceMicUnavailable"));
       }
       var hasAudioInput = await probeVoiceAudioInput(VOICE_DEVICE_PROBE_TIMEOUT_MS);
       if (activeVoiceInput !== session) return;
@@ -1231,6 +1242,10 @@
       cleanupVoiceInputSession(session);
       if (activeVoiceInput !== session) return;
       activeVoiceInput = null;
+      // A start that fails after claiming must release the ownership claim:
+      // the claim precedes the microphone, so any failure past it would
+      // otherwise leave the global Alt gesture routed to this window.
+      syncVoiceShortcutRecording(null, session.id);
       var normalized = normalizeVoiceError(err, "recording");
       if (!session.permissionRecorded && normalized.category !== "cancelled") {
         session.permissionRecorded = true;
@@ -1320,7 +1335,7 @@
   // Rust atomically owns (caller window, token). Claim must succeed before opening
   // a microphone; stale teardown and another WebView can never overwrite ownership.
   function syncVoiceShortcutRecording(label, token) {
-    if (!token) return Promise.resolve(false);
+    if (!token) return false;
     return Promise.resolve(invoke("set_voice_shortcut_recording", { label: label || null, token: token }))
       .then(function (claimed) { return claimed === true; }, function () { return false; });
   }
@@ -1352,6 +1367,7 @@
       clearVoiceInput: clearVoiceInput,
       abandonVoiceResult: abandonVoiceResult,
       getVoiceOperationId: getVoiceOperationId,
+      hasVoiceSubmissionPending: hasVoiceSubmissionPending,
       voiceOperationSessionId: voiceOperationSessionId,
       rebindVoiceDraftAfterRollback: rebindVoiceDraftAfterRollback,
       beginVoiceSubmission: beginVoiceSubmission,
