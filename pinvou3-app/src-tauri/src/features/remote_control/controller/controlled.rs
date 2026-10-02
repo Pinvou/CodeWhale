@@ -28,12 +28,16 @@ const MAX_DISPLAY_NAME_CHARS: usize = 120;
 #[serde(rename_all = "snake_case")]
 pub(crate) enum ControlledStatusKind {
     Disabled,
-    Reserving,
-    WaitingConnection,
-    SafetyHandshake,
+    Registering,
+    WaitingForPairing,
+    PairingReserved,
+    HandshakePending,
     Connected,
     Reconnecting,
-    Refreshing,
+    ResumeProvisional,
+    ResumeActivatedPendingLiveness,
+    RetiringGeneration,
+    Stopping,
     Stopped,
     Error,
 }
@@ -133,6 +137,7 @@ struct WorkspaceAuthorization {
     id: String,
     display_name: String,
     path: PathBuf,
+    identity: super::super::platform::WorkspaceIdentity,
     code_allowed: bool,
 }
 
@@ -154,17 +159,24 @@ pub(crate) struct ControlledStatus {
     #[serde(skip_serializing_if = "Option::is_none")]
     pairing_code: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pairing_expires_at_ms: Option<u64>,
+    pairing_remaining_ms: Option<u64>,
     device_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     controller_device_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    connected_at_b: Option<u64>,
+    connected_duration_ms: Option<u64>,
     workspace_count: usize,
     code_mode_allowed: bool,
+    #[serde(skip_serializing)]
     watchdog_deadline_b: Option<u64>,
     watchdog_suspect: bool,
     error_code: Option<String>,
+}
+
+impl ControlledStatus {
+    pub(crate) fn kind(&self) -> ControlledStatusKind {
+        self.status
+    }
 }
 
 impl std::fmt::Debug for ControlledStatus {
@@ -178,10 +190,10 @@ impl std::fmt::Debug for ControlledStatus {
                 "pairing_code",
                 &self.pairing_code.as_ref().map(|_| "[REDACTED]"),
             )
-            .field("pairing_expires_at_ms", &self.pairing_expires_at_ms)
+            .field("pairing_remaining_ms", &self.pairing_remaining_ms)
             .field("device_name", &self.device_name)
             .field("controller_device_name", &self.controller_device_name)
-            .field("connected_at_b", &self.connected_at_b)
+            .field("connected_duration_ms", &self.connected_duration_ms)
             .field("workspace_count", &self.workspace_count)
             .field("code_mode_allowed", &self.code_mode_allowed)
             .field("watchdog_deadline_b", &self.watchdog_deadline_b)
@@ -271,8 +283,8 @@ struct Inner {
     phase: ControlledStatusKind,
     intent: u64,
     generation: Option<String>,
-    // Non-secret correlation only; never used by current_operation/ensure_operation.
-    status_generation: Option<String>,
+    /// Terminal projection only; live admission reads `generation` instead.
+    retired_generation: Option<String>,
     registration_request_id: Option<String>,
     device_name: Option<String>,
     pairing: Option<PairingState>,
@@ -302,7 +314,7 @@ impl Default for Inner {
             phase: ControlledStatusKind::Disabled,
             intent: 0,
             generation: None,
-            status_generation: None,
+            retired_generation: None,
             registration_request_id: None,
             device_name: None,
             pairing: None,
@@ -326,6 +338,27 @@ pub(crate) struct WorkspaceAuthorizationRequest {
     pub(crate) path: PathBuf,
     pub(crate) display_name: String,
     pub(crate) code_allowed: bool,
+    identity: super::super::platform::WorkspaceIdentity,
+}
+
+impl WorkspaceAuthorizationRequest {
+    pub(crate) fn new(path: PathBuf, display_name: String, code_allowed: bool) -> Result<Self> {
+        if !path.is_dir() {
+            return Err(ControlledStateError::new("workspace_path_invalid"));
+        }
+        // Keep the directory identity next to the authorization. Resolving an
+        // opaque workspace id for a code turn must prove that the path still
+        // names the directory that B approved, not a replacement at the same
+        // textual path.
+        let identity = super::super::platform::workspace_identity(&path)
+            .map_err(|_| ControlledStateError::new("workspace_identity_unavailable"))?;
+        Ok(Self {
+            path,
+            display_name,
+            code_allowed,
+            identity,
+        })
+    }
 }
 
 impl ControlledDeviceManager {
@@ -354,11 +387,12 @@ impl ControlledDeviceManager {
             }
         }
         clear_sensitive(&mut inner, 0, true);
+        inner.retired_generation = None;
         let authorization = normalize_workspaces(workspaces)?;
         let operation = prepare_generation(&mut inner);
         inner.device_name = device_name.map(str::to_owned);
         inner.workspaces = authorization;
-        inner.phase = ControlledStatusKind::Reserving;
+        inner.phase = ControlledStatusKind::Registering;
         inner.error_code = None;
         Ok(operation)
     }
@@ -395,7 +429,7 @@ impl ControlledDeviceManager {
         }
         let mut inner = self.inner.lock();
         ensure_operation(&inner, &operation)?;
-        if inner.phase != ControlledStatusKind::Reserving {
+        if inner.phase != ControlledStatusKind::Registering {
             return Err(ControlledStateError::new("desktop_remote_phase_invalid"));
         }
         inner.pairing = Some(PairingState {
@@ -407,23 +441,49 @@ impl ControlledDeviceManager {
             pairing_code: Zeroizing::new(registration.pairing_code),
             expires_at_ms: registration.expires_at_ms,
         });
-        inner.phase = ControlledStatusKind::WaitingConnection;
+        inner.phase = ControlledStatusKind::WaitingForPairing;
         inner.last_observed_now_b = inner.last_observed_now_b.max(now_b);
         Ok(status_locked(&inner))
     }
 
-    pub(crate) fn mark_claimed(&self, operation: ControlledOperation) -> Result<ControlledStatus> {
+    /// Only after the Relay-signed reservation transcript was verified.
+    pub(crate) fn mark_pairing_reserved(
+        &self,
+        operation: ControlledOperation,
+    ) -> Result<ControlledStatus> {
         let mut inner = self.inner.lock();
         ensure_operation(&inner, &operation)?;
-        if inner.phase != ControlledStatusKind::WaitingConnection {
+        if inner.phase != ControlledStatusKind::WaitingForPairing {
             return Err(ControlledStateError::new("desktop_remote_phase_invalid"));
         }
         if let Some(pairing) = inner.pairing.as_mut() {
             pairing.pairing_code.zeroize();
         }
         inner.pairing = None;
-        inner.phase = ControlledStatusKind::SafetyHandshake;
+        inner.phase = ControlledStatusKind::PairingReserved;
         Ok(status_locked(&inner))
+    }
+
+    /// The authenticated receipt commitment has been queued to Relay.
+    pub(crate) fn mark_handshake_pending(
+        &self,
+        operation: ControlledOperation,
+    ) -> Result<ControlledStatus> {
+        let mut inner = self.inner.lock();
+        ensure_operation(&inner, &operation)?;
+        if inner.phase != ControlledStatusKind::PairingReserved {
+            return Err(ControlledStateError::new("desktop_remote_phase_invalid"));
+        }
+        inner.phase = ControlledStatusKind::HandshakePending;
+        Ok(status_locked(&inner))
+    }
+
+    // Preserve the original late-liveness red regression's fixture setup.
+    // Production uses the two independently checked lifecycle transitions.
+    #[cfg(test)]
+    fn mark_claimed(&self, operation: ControlledOperation) -> Result<ControlledStatus> {
+        self.mark_pairing_reserved(operation.clone())?;
+        self.mark_handshake_pending(operation)
     }
 
     pub(crate) fn complete_connected(
@@ -433,7 +493,7 @@ impl ControlledDeviceManager {
     ) -> Result<ControlledStatus> {
         let mut inner = self.inner.lock();
         ensure_operation(&inner, &operation)?;
-        if inner.phase != ControlledStatusKind::SafetyHandshake {
+        if inner.phase != ControlledStatusKind::HandshakePending {
             return Err(ControlledStateError::new("desktop_remote_phase_invalid"));
         }
         if lease.context.remote_control_generation != operation.generation {
@@ -458,6 +518,7 @@ impl ControlledDeviceManager {
         inner.liveness_epoch_a = Some(lease.liveness_epoch_a);
         inner.controller_device_name = Some(lease.controller_device_name);
         inner.connected_at_b = Some(lease.connected_at_b);
+        inner.last_observed_now_b = inner.last_observed_now_b.max(lease.connected_at_b);
         inner.watchdog = Some(watchdog);
         inner.resume_gate = Some(resume_gate);
         inner.reconnect_reason = None;
@@ -526,8 +587,24 @@ impl ControlledDeviceManager {
                 self.notify_cleanup(&generation);
                 return self.status();
             }
+        } else if matches!(
+            inner.phase,
+            ControlledStatusKind::ResumeProvisional
+                | ControlledStatusKind::ResumeActivatedPendingLiveness
+        ) {
+            let generation = inner.generation.clone().unwrap_or_default();
+            clear_sensitive(&mut inner, now_b, true);
+            inner.device_name = None;
+            inner.phase = ControlledStatusKind::Error;
+            inner.error_code = Some("desktop_remote_resume_invalid".to_owned());
+            inner.reconnect_reason = None;
+            drop(inner);
+            self.notify_cleanup(&generation);
+            return self.status();
         }
-        status_locked(&inner)
+        let status = status_locked(&inner);
+        drop(inner);
+        status
     }
 
     pub(crate) fn register_liveness_challenge(
@@ -630,11 +707,14 @@ impl ControlledDeviceManager {
         let mut inner = self.inner.lock();
         if !matches!(
             inner.phase,
-            ControlledStatusKind::Reserving
-                | ControlledStatusKind::WaitingConnection
-                | ControlledStatusKind::SafetyHandshake
+            ControlledStatusKind::Registering
+                | ControlledStatusKind::WaitingForPairing
+                | ControlledStatusKind::PairingReserved
+                | ControlledStatusKind::HandshakePending
                 | ControlledStatusKind::Connected
                 | ControlledStatusKind::Reconnecting
+                | ControlledStatusKind::ResumeProvisional
+                | ControlledStatusKind::ResumeActivatedPendingLiveness
         ) {
             return Err(ControlledStateError::new("desktop_remote_refresh_invalid"));
         }
@@ -643,7 +723,7 @@ impl ControlledDeviceManager {
             pairing.pairing_code.zeroize();
         }
         inner.pairing = None;
-        inner.phase = ControlledStatusKind::Refreshing;
+        inner.phase = ControlledStatusKind::RetiringGeneration;
         inner.error_code = None;
         current_operation(&inner).ok_or_else(|| ControlledStateError::new("generation_unavailable"))
     }
@@ -654,13 +734,13 @@ impl ControlledDeviceManager {
     ) -> Result<ControlledOperation> {
         let mut inner = self.inner.lock();
         ensure_operation(&inner, &operation)?;
-        if inner.phase != ControlledStatusKind::Refreshing {
+        if inner.phase != ControlledStatusKind::RetiringGeneration {
             return Err(ControlledStateError::new("desktop_remote_refresh_invalid"));
         }
         let retired_generation = inner.generation.clone().unwrap_or_default();
         clear_sensitive(&mut inner, 0, false);
         let next = prepare_generation(&mut inner);
-        inner.phase = ControlledStatusKind::Reserving;
+        inner.phase = ControlledStatusKind::Registering;
         drop(inner);
         self.notify_cleanup(&retired_generation);
         Ok(next)
@@ -669,17 +749,19 @@ impl ControlledDeviceManager {
     pub(crate) fn fail_refresh(&self, operation: ControlledOperation) -> Result<ControlledStatus> {
         let mut inner = self.inner.lock();
         ensure_operation(&inner, &operation)?;
-        if inner.phase != ControlledStatusKind::Refreshing {
+        if inner.phase != ControlledStatusKind::RetiringGeneration {
             return Err(ControlledStateError::new("desktop_remote_refresh_invalid"));
         }
-        let generation = inner.generation.clone().unwrap_or_default();
+        let retired_generation = inner.generation.clone();
+        let generation = retired_generation.clone().unwrap_or_default();
         clear_sensitive(&mut inner, u64::MAX, true);
         inner.device_name = None;
         inner.phase = ControlledStatusKind::Error;
         inner.error_code = Some("desktop_remote_refresh_failed".to_owned());
+        let status = terminal_status_with_retired_generation(&inner, retired_generation);
         drop(inner);
         self.notify_cleanup(&generation);
-        Ok(self.status())
+        Ok(status)
     }
 
     pub(crate) fn fail_operation(
@@ -689,14 +771,16 @@ impl ControlledDeviceManager {
     ) -> Result<ControlledStatus> {
         let mut inner = self.inner.lock();
         ensure_operation(&inner, &operation)?;
-        let generation = inner.generation.clone().unwrap_or_default();
+        let retired_generation = inner.generation.clone();
+        let generation = retired_generation.clone().unwrap_or_default();
         clear_sensitive(&mut inner, u64::MAX, true);
         inner.device_name = None;
         inner.phase = ControlledStatusKind::Error;
         inner.error_code = Some(error_code);
+        let status = terminal_status_with_retired_generation(&inner, retired_generation);
         drop(inner);
         self.notify_cleanup(&generation);
-        Ok(self.status())
+        Ok(status)
     }
 
     pub(crate) fn complete_resumed(
@@ -711,7 +795,7 @@ impl ControlledDeviceManager {
     ) -> Result<ControlledStatus> {
         let mut inner = self.inner.lock();
         ensure_operation(&inner, &operation)?;
-        if inner.phase != ControlledStatusKind::Reconnecting {
+        if inner.phase != ControlledStatusKind::ResumeActivatedPendingLiveness {
             return Err(ControlledStateError::new("desktop_remote_phase_invalid"));
         }
         let Some(context) = inner.lease_context.clone() else {
@@ -764,6 +848,7 @@ impl ControlledDeviceManager {
         inner.liveness_epoch_a = Some(epoch);
         inner.phase = ControlledStatusKind::Connected;
         inner.reconnect_reason = None;
+        inner.last_observed_now_b = inner.last_observed_now_b.max(now_b);
         Ok(status_locked(&inner))
     }
 
@@ -824,7 +909,12 @@ impl ControlledDeviceManager {
     ) -> Result<ControlledStatus> {
         let mut inner = self.inner.lock();
         ensure_operation(&inner, &operation)?;
-        if inner.phase != ControlledStatusKind::Reconnecting {
+        if !matches!(
+            inner.phase,
+            ControlledStatusKind::Reconnecting
+                | ControlledStatusKind::ResumeProvisional
+                | ControlledStatusKind::ResumeActivatedPendingLiveness
+        ) {
             return Err(ControlledStateError::new("desktop_remote_phase_invalid"));
         }
         let deadline = inner
@@ -864,15 +954,37 @@ impl ControlledDeviceManager {
             self.notify_cleanup(&generation);
             return Err(ControlledStateError::new("desktop_remote_resume_failed"));
         }
+        inner.last_observed_now_b = inner.last_observed_now_b.max(now_b);
+        inner.phase = match step {
+            ControlledResumeStep::Provisional { .. } => ControlledStatusKind::ResumeProvisional,
+            ControlledResumeStep::PostActivationLiveness { .. } => {
+                ControlledStatusKind::ResumeActivatedPendingLiveness
+            }
+            _ => inner.phase,
+        };
         Ok(status_locked(&inner))
     }
 
     pub(crate) fn stop(&self) -> ControlledStatus {
+        let _ = self.begin_stop();
+        self.finish_stop()
+    }
+
+    /// Invalidate local admission and credentials before Relay revocation.
+    pub(crate) fn begin_stop(&self) -> ControlledStatus {
         self.terminate_local(
             "desktop_remote_stopped",
-            ControlledStatusKind::Stopped,
+            ControlledStatusKind::Stopping,
             true,
         )
+    }
+
+    pub(crate) fn finish_stop(&self) -> ControlledStatus {
+        let mut inner = self.inner.lock();
+        if inner.phase == ControlledStatusKind::Stopping {
+            inner.phase = ControlledStatusKind::Stopped;
+        }
+        status_locked(&inner)
     }
 
     /// E2E-06：A 端显式断开（`controller_disconnect`）到达时终结当前租约：清空
@@ -917,9 +1029,11 @@ impl ControlledDeviceManager {
     pub(crate) fn poll_watchdog(&self, now_b: u64) -> ControlledStatus {
         let generation;
         let expired;
+        let status;
         {
             let mut inner = self.inner.lock();
-            generation = inner.generation.clone().unwrap_or_default();
+            let retired_generation = inner.generation.clone();
+            generation = retired_generation.clone().unwrap_or_default();
             inner.last_observed_now_b = inner.last_observed_now_b.max(now_b);
             let watchdog_state = inner
                 .watchdog
@@ -943,53 +1057,16 @@ impl ControlledDeviceManager {
                     inner.reconnect_reason = Some(ReconnectReason::LivenessSuspect);
                 }
             }
+            status = if expired {
+                terminal_status_with_retired_generation(&inner, retired_generation)
+            } else {
+                status_locked(&inner)
+            };
         }
         if expired {
             self.notify_cleanup(&generation);
         }
-        self.status()
-    }
-
-    pub(crate) fn authorize_workspace(
-        &self,
-        request: WorkspaceAuthorizationRequest,
-    ) -> Result<ControlledWorkspaceInfo> {
-        let display_name = request.display_name.trim();
-        if display_name.is_empty() || display_name.chars().count() > MAX_DISPLAY_NAME_CHARS {
-            return Err(ControlledStateError::new("workspace_display_name_invalid"));
-        }
-        let mut inner = self.inner.lock();
-        if matches!(
-            inner.phase,
-            ControlledStatusKind::Disabled
-                | ControlledStatusKind::Stopped
-                | ControlledStatusKind::Error
-        ) {
-            return Err(ControlledStateError::new("desktop_remote_not_running"));
-        }
-        if inner.workspaces.len() >= MAX_WORKSPACES {
-            return Err(ControlledStateError::new("workspace_capacity_exhausted"));
-        }
-        if inner
-            .workspaces
-            .iter()
-            .any(|workspace: &WorkspaceAuthorization| workspace.path == request.path)
-        {
-            return Err(ControlledStateError::new("workspace_already_authorized"));
-        }
-        let workspace = WorkspaceAuthorization {
-            id: format!("workspace_{}", Uuid::new_v4().simple()),
-            display_name: display_name.to_owned(),
-            path: request.path,
-            code_allowed: request.code_allowed,
-        };
-        let projected = ControlledWorkspaceInfo {
-            workspace_id: workspace.id.clone(),
-            display_name: workspace.display_name.clone(),
-            code_allowed: workspace.code_allowed,
-        };
-        inner.workspaces.push(workspace);
-        Ok(projected)
+        status
     }
 
     pub(crate) fn workspaces(&self) -> Vec<ControlledWorkspaceInfo> {
@@ -1003,6 +1080,28 @@ impl ControlledDeviceManager {
                 code_allowed: workspace.code_allowed,
             })
             .collect()
+    }
+
+    /// Resolve an opaque capability back to the B-local directory while the
+    /// controlled lease is live. The path never leaves this process.
+    pub(crate) fn resolve_code_workspace(&self, workspace_id: &str) -> Result<PathBuf> {
+        let inner = self.inner.lock();
+        if inner.phase != ControlledStatusKind::Connected {
+            return Err(ControlledStateError::new("desktop_remote_not_connected"));
+        }
+        let workspace = inner
+            .workspaces
+            .iter()
+            .find(|workspace| workspace.id == workspace_id && workspace.code_allowed)
+            .ok_or_else(|| ControlledStateError::new("workspace_not_authorized"))?;
+        if !workspace.path.is_dir()
+            || super::super::platform::workspace_identity(&workspace.path)
+                .map(|identity| identity != workspace.identity)
+                .unwrap_or(true)
+        {
+            return Err(ControlledStateError::new("workspace_authorization_stale"));
+        }
+        Ok(workspace.path.clone())
     }
 
     pub(crate) fn status(&self) -> ControlledStatus {
@@ -1027,9 +1126,10 @@ impl ControlledDeviceManager {
         ensure_operation(&inner, &operation).is_ok()
             && matches!(
                 inner.phase,
-                ControlledStatusKind::Reserving
-                    | ControlledStatusKind::WaitingConnection
-                    | ControlledStatusKind::SafetyHandshake
+                ControlledStatusKind::Registering
+                    | ControlledStatusKind::WaitingForPairing
+                    | ControlledStatusKind::PairingReserved
+                    | ControlledStatusKind::HandshakePending
             )
     }
 
@@ -1044,6 +1144,45 @@ impl ControlledDeviceManager {
             .clone()
             .ok_or_else(|| ControlledStateError::new("desktop_remote_not_connected"))?;
         Ok((context, inner.negotiated_capabilities.clone()))
+    }
+
+    /// B business actions are admitted only while this exact authenticated
+    /// generation remains connected. Stop/refresh cannot race the mutation.
+    pub(crate) fn with_current_business_lease<T>(
+        &self,
+        expected: &LeaseContext,
+        action: impl FnOnce() -> T,
+    ) -> Result<T> {
+        let inner = self.inner.lock();
+        if inner.phase != ControlledStatusKind::Connected
+            || inner.lease_context.as_ref() != Some(expected)
+        {
+            return Err(ControlledStateError::new("desktop_remote_not_connected"));
+        }
+        Ok(action())
+    }
+
+    /// Hold the B lifecycle lock through a narrow ledger admission. The
+    /// closure must not emit callbacks that re-enter this manager.
+    pub(crate) fn with_local_cancel_lease<T>(
+        &self,
+        admit: impl FnOnce(&LeaseContext) -> T,
+    ) -> Result<T> {
+        let inner = self.inner.lock();
+        if !matches!(
+            inner.phase,
+            ControlledStatusKind::Connected
+                | ControlledStatusKind::Reconnecting
+                | ControlledStatusKind::ResumeProvisional
+                | ControlledStatusKind::ResumeActivatedPendingLiveness
+        ) {
+            return Err(ControlledStateError::new("desktop_remote_not_connected"));
+        }
+        let lease = inner
+            .lease_context
+            .as_ref()
+            .ok_or_else(|| ControlledStateError::new("desktop_remote_not_connected"))?;
+        Ok(admit(lease))
     }
 
     /// 存活证据专用上下文：活性可疑时业务仍关闭，但允许当前认证通道继续完成
@@ -1074,17 +1213,20 @@ impl ControlledDeviceManager {
         clear_workspaces: bool,
     ) -> ControlledStatus {
         let generation;
+        let status;
         {
             let mut inner = self.inner.lock();
-            generation = inner.generation.clone().unwrap_or_default();
+            let retired_generation = inner.generation.clone();
+            generation = retired_generation.clone().unwrap_or_default();
             clear_sensitive(&mut inner, u64::MAX, clear_workspaces);
             inner.device_name = None;
             inner.phase = phase;
             inner.error_code =
                 (phase == ControlledStatusKind::Error).then(|| error_code.to_owned());
+            status = terminal_status_with_retired_generation(&inner, retired_generation);
         }
         self.notify_cleanup(&generation);
-        self.status()
+        status
     }
 
     fn notify_cleanup(&self, generation: &str) {
@@ -1117,7 +1259,6 @@ fn prepare_generation(inner: &mut Inner) -> ControlledOperation {
     let generation = format!("generation_{}", Uuid::new_v4().simple());
     let registration = format!("registration_{}", Uuid::new_v4().simple());
     inner.generation = Some(generation.clone());
-    inner.status_generation = Some(generation.clone());
     inner.registration_request_id = Some(registration);
     ControlledOperation {
         intent: inner.intent,
@@ -1163,6 +1304,7 @@ fn normalize_workspaces(
         output.push(WorkspaceAuthorization {
             id: format!("workspace_{}", Uuid::new_v4().simple()),
             display_name: display_name.to_owned(),
+            identity: request.identity,
             path: request.path,
             code_allowed: request.code_allowed,
         });
@@ -1203,6 +1345,9 @@ fn recover_liveness_suspect(inner: &mut Inner, now_b: u64) {
 }
 
 fn clear_sensitive(inner: &mut Inner, now_b: u64, clear_workspaces: bool) {
+    if let Some(generation) = inner.generation.as_ref() {
+        inner.retired_generation = Some(generation.clone());
+    }
     if let Some(transport) = inner.transport.take() {
         transport.stop();
     }
@@ -1235,21 +1380,46 @@ fn status_locked(inner: &Inner) -> ControlledStatus {
     ControlledStatus {
         status: inner.phase,
         status_intent: inner.intent.to_string(),
-        generation: inner.status_generation.clone(),
+        generation: inner.generation.clone().or_else(|| {
+            matches!(
+                inner.phase,
+                ControlledStatusKind::Stopping
+                    | ControlledStatusKind::Stopped
+                    | ControlledStatusKind::Error
+            )
+            .then(|| inner.retired_generation.clone())
+            .flatten()
+        }),
         registration_request_id: inner.registration_request_id.clone(),
         pairing_code: inner
             .pairing
             .as_ref()
-            .filter(|_| inner.phase == ControlledStatusKind::WaitingConnection)
+            .filter(|_| inner.phase == ControlledStatusKind::WaitingForPairing)
             .map(|pairing| pairing.pairing_code.to_string()),
-        pairing_expires_at_ms: inner
+        pairing_remaining_ms: inner
             .pairing
             .as_ref()
-            .filter(|_| inner.phase == ControlledStatusKind::WaitingConnection)
-            .map(|pairing| pairing.expires_at_ms),
+            .filter(|_| inner.phase == ControlledStatusKind::WaitingForPairing)
+            .map(|pairing| {
+                pairing
+                    .expires_at_ms
+                    .saturating_sub(inner.last_observed_now_b)
+            }),
         device_name: inner.device_name.clone(),
         controller_device_name: inner.controller_device_name.clone(),
-        connected_at_b: inner.connected_at_b,
+        connected_duration_ms: matches!(
+            inner.phase,
+            ControlledStatusKind::Connected
+                | ControlledStatusKind::Reconnecting
+                | ControlledStatusKind::ResumeProvisional
+                | ControlledStatusKind::ResumeActivatedPendingLiveness
+        )
+        .then(|| {
+            inner
+                .connected_at_b
+                .map(|connected_at_b| inner.last_observed_now_b.saturating_sub(connected_at_b))
+        })
+        .flatten(),
         workspace_count: inner.workspaces.len(),
         code_mode_allowed: inner
             .workspaces
@@ -1262,6 +1432,24 @@ fn status_locked(inner: &Inner) -> ControlledStatus {
         watchdog_suspect: watchdog_state == Some(LivenessWatchdogState::Suspect),
         error_code: inner.error_code.clone(),
     }
+}
+
+/// Terminal status may retain the retired generation for late-event filtering;
+/// live admission reads only the cleared active generation and lease.
+fn terminal_status_with_retired_generation(
+    inner: &Inner,
+    retired_generation: Option<String>,
+) -> ControlledStatus {
+    let mut status = status_locked(inner);
+    if matches!(
+        status.status,
+        ControlledStatusKind::Stopping
+            | ControlledStatusKind::Stopped
+            | ControlledStatusKind::Error
+    ) {
+        status.generation = retired_generation.or_else(|| inner.retired_generation.clone());
+    }
+    status
 }
 
 fn validate_pairing_code(code: &str) -> Result<()> {
@@ -1296,6 +1484,7 @@ mod tests {
                     path: PathBuf::from("workspace-fixture"),
                     display_name: "Project".into(),
                     code_allowed: true,
+                    identity: super::super::super::platform::test_workspace_identity(6),
                 }],
             )
             .unwrap();
@@ -1413,6 +1602,11 @@ mod tests {
             .unwrap();
     }
 
+    fn enter_handshake(manager: &ControlledDeviceManager, operation: &ControlledOperation) {
+        manager.mark_pairing_reserved(operation.clone()).unwrap();
+        manager.mark_handshake_pending(operation.clone()).unwrap();
+    }
+
     #[test]
     fn attestation_authentication_precedes_every_watchdog_state_change() {
         use super::super::protocol::build_liveness_attestation_preimage;
@@ -1491,6 +1685,7 @@ mod tests {
                     path: PathBuf::from(r"D:\projects"),
                     display_name: "Projects".into(),
                     code_allowed: true,
+                    identity: super::super::super::platform::test_workspace_identity(1),
                 }],
             )
             .unwrap();
@@ -1498,7 +1693,7 @@ mod tests {
             manager.registration_request_id(operation.clone()).unwrap(),
             manager.registration_request_id(operation.clone()).unwrap()
         );
-        assert_eq!(manager.status().status, ControlledStatusKind::Reserving);
+        assert_eq!(manager.status().status, ControlledStatusKind::Registering);
         let status = manager
             .complete_registration(
                 operation.clone(),
@@ -1510,15 +1705,17 @@ mod tests {
                 1_000,
             )
             .unwrap();
-        assert_eq!(status.status, ControlledStatusKind::WaitingConnection);
+        assert_eq!(status.status, ControlledStatusKind::WaitingForPairing);
         assert_eq!(status.pairing_code.as_deref(), Some("2345678"));
-        assert_eq!(status.pairing_expires_at_ms, Some(30_000));
+        assert_eq!(status.pairing_remaining_ms, Some(29_000));
         assert_eq!(status.workspace_count, 1);
         assert!(status.code_mode_allowed);
         assert_eq!(status.device_name.as_deref(), Some("Studio PC"));
 
-        let claimed = manager.mark_claimed(operation.clone()).unwrap();
-        assert_eq!(claimed.status, ControlledStatusKind::SafetyHandshake);
+        let claimed = manager.mark_pairing_reserved(operation.clone()).unwrap();
+        assert_eq!(claimed.status, ControlledStatusKind::PairingReserved);
+        let handshake = manager.mark_handshake_pending(operation.clone()).unwrap();
+        assert_eq!(handshake.status, ControlledStatusKind::HandshakePending);
         assert_eq!(claimed.pairing_code, None);
         let connected = manager
             .complete_connected(operation.clone(), lease(&operation.generation))
@@ -1528,7 +1725,7 @@ mod tests {
             connected.controller_device_name.as_deref(),
             Some("Controller PC")
         );
-        assert_eq!(connected.connected_at_b, Some(3_000));
+        assert_eq!(connected.connected_duration_ms, Some(0));
         assert_eq!(
             serde_json::to_value(&connected).unwrap()["controllerDeviceName"],
             "Controller PC"
@@ -1541,16 +1738,75 @@ mod tests {
     }
 
     #[test]
+    fn opaque_workspace_resolves_only_while_the_b_authorized_directory_identity_is_live() {
+        let workspace = tempfile::tempdir().unwrap();
+        let authorized_path = workspace.path().to_path_buf();
+        let manager = ControlledDeviceManager::default();
+        let operation = manager
+            .start(
+                Some("Studio PC"),
+                vec![
+                    WorkspaceAuthorizationRequest::new(
+                        authorized_path.clone(),
+                        "Projects".into(),
+                        true,
+                    )
+                    .unwrap(),
+                ],
+            )
+            .unwrap();
+        register(&manager, &operation);
+        enter_handshake(&manager, &operation);
+        manager
+            .complete_connected(operation.clone(), lease(operation.generation()))
+            .unwrap();
+        let workspace_id = manager.workspaces().remove(0).workspace_id;
+        assert_eq!(
+            manager.resolve_code_workspace(&workspace_id).unwrap(),
+            authorized_path
+        );
+        std::fs::remove_dir_all(&authorized_path).unwrap();
+        assert_eq!(
+            manager
+                .resolve_code_workspace(&workspace_id)
+                .unwrap_err()
+                .code,
+            "workspace_authorization_stale"
+        );
+    }
+
+    #[test]
+    fn connected_duration_is_a_monotonic_snapshot_without_exposing_clock_origin() {
+        let manager = ControlledDeviceManager::default();
+        let operation = manager.start(Some("Device"), Vec::new()).unwrap();
+        register(&manager, &operation);
+        enter_handshake(&manager, &operation);
+        manager
+            .complete_connected(operation.clone(), lease(operation.generation()))
+            .unwrap();
+        manager.inner.lock().last_observed_now_b = 4_500;
+        let projected = serde_json::to_value(manager.status()).unwrap();
+        assert_eq!(projected["connectedDurationMs"], 1_500);
+        assert!(projected.get("connectedAtB").is_none());
+        assert!(projected.get("watchdogDeadlineB").is_none());
+        let stopped = serde_json::to_value(manager.stop()).unwrap();
+        assert!(stopped.get("connectedDurationMs").is_none());
+    }
+
+    #[test]
     fn stale_results_cannot_replace_a_new_generation() {
         let manager = ControlledDeviceManager::default();
         let old = manager.start(Some("B"), Vec::new()).unwrap();
         let next = manager.begin_refresh().unwrap();
         assert_eq!(old.generation, next.generation);
         assert_eq!(next.intent, old.intent + 1);
-        assert_eq!(manager.status().status, ControlledStatusKind::Refreshing);
+        assert_eq!(
+            manager.status().status,
+            ControlledStatusKind::RetiringGeneration
+        );
         let new_operation = manager.complete_refresh_revoked(next).unwrap();
         assert_ne!(new_operation.generation, old.generation);
-        assert_eq!(manager.status().status, ControlledStatusKind::Reserving);
+        assert_eq!(manager.status().status, ControlledStatusKind::Registering);
         assert_eq!(
             manager
                 .complete_registration(
@@ -1578,6 +1834,7 @@ mod tests {
                     path: PathBuf::from(r"D:\reports"),
                     display_name: "Reports".into(),
                     code_allowed: false,
+                    identity: super::super::super::platform::test_workspace_identity(2),
                 }],
             )
             .unwrap();
@@ -1594,9 +1851,12 @@ mod tests {
             .unwrap();
         let refresh = manager.begin_refresh().unwrap();
         assert_eq!(manager.status().pairing_code, None);
-        assert_eq!(manager.status().status, ControlledStatusKind::Refreshing);
+        assert_eq!(
+            manager.status().status,
+            ControlledStatusKind::RetiringGeneration
+        );
         manager.complete_refresh_revoked(refresh).unwrap();
-        assert_eq!(manager.status().status, ControlledStatusKind::Reserving);
+        assert_eq!(manager.status().status, ControlledStatusKind::Registering);
         assert_eq!(manager.status().workspace_count, 1);
         assert!(!manager.status().code_mode_allowed);
     }
@@ -1609,7 +1869,7 @@ mod tests {
         let manager = ControlledDeviceManager::default();
         let operation = manager.start(None, Vec::new()).unwrap();
         register(&manager, &operation);
-        manager.mark_claimed(operation.clone()).unwrap();
+        enter_handshake(&manager, &operation);
         manager
             .complete_connected(operation.clone(), lease(&operation.generation))
             .unwrap();
@@ -1623,24 +1883,27 @@ mod tests {
         assert_eq!(material.resume_token, [1; 32]);
 
         let activation = "activation-0001";
-        for (step, now_b) in [
+        for (step, now_b, expected) in [
             (
                 ControlledResumeStep::Provisional {
                     activation_id: activation,
                 },
                 7_000,
+                ControlledStatusKind::ResumeProvisional,
             ),
             (
                 ControlledResumeStep::Confirmed {
                     activation_id: activation,
                 },
                 8_000,
+                ControlledStatusKind::ResumeProvisional,
             ),
             (
                 ControlledResumeStep::ActivationAcknowledged {
                     activation_id: activation,
                 },
                 9_000,
+                ControlledStatusKind::ResumeProvisional,
             ),
             (
                 ControlledResumeStep::PostActivationLiveness {
@@ -1648,17 +1911,27 @@ mod tests {
                     liveness_epoch_b: "live-b-2",
                 },
                 10_000,
+                ControlledStatusKind::ResumeActivatedPendingLiveness,
             ),
             (
                 ControlledResumeStep::ReadyAcknowledged {
                     activation_id: activation,
                 },
                 11_000,
+                ControlledStatusKind::ResumeActivatedPendingLiveness,
             ),
         ] {
-            manager
+            let status = manager
                 .advance_resume(operation.clone(), step, now_b)
                 .unwrap();
+            assert_eq!(status.status, expected);
+            assert_eq!(manager.status().status, expected);
+            assert_eq!(
+                manager
+                    .with_local_cancel_lease(|lease| lease.remote_control_generation.clone())
+                    .unwrap(),
+                operation.generation
+            );
         }
         let resumed = manager
             .complete_resumed(
@@ -1680,7 +1953,7 @@ mod tests {
         assert_eq!(
             manager
                 .advance_resume(
-                    operation,
+                    operation.clone(),
                     ControlledResumeStep::Confirmed {
                         activation_id: "activation-0002",
                     },
@@ -1691,6 +1964,10 @@ mod tests {
             "desktop_remote_resume_failed"
         );
         assert_eq!(manager.status().status, ControlledStatusKind::Error);
+        assert_eq!(
+            manager.status().generation.as_deref(),
+            Some(operation.generation.as_str())
+        );
         assert_eq!(
             manager.status().error_code.as_deref(),
             Some("desktop_remote_resume_invalid")
@@ -1865,6 +2142,102 @@ mod tests {
     }
 
     #[test]
+    fn second_transport_loss_in_resume_phases_cleans_once_without_refreezing() {
+        for activated in [false, true] {
+            let cleanup = Arc::new(CleanupCounter::default());
+            let manager = ControlledDeviceManager::default();
+            manager.register_cleanup_sink(cleanup.clone());
+            let operation = manager.start(None, Vec::new()).unwrap();
+            register(&manager, &operation);
+            enter_handshake(&manager, &operation);
+            manager
+                .complete_connected(operation.clone(), lease(&operation.generation))
+                .unwrap();
+            assert_eq!(
+                manager.mark_transport_disconnected(5_000).status,
+                ControlledStatusKind::Reconnecting
+            );
+            manager.begin_resume(operation.clone(), 6_000).unwrap();
+            let activation = "activation-second-close";
+            manager
+                .advance_resume(
+                    operation.clone(),
+                    ControlledResumeStep::Provisional {
+                        activation_id: activation,
+                    },
+                    7_000,
+                )
+                .unwrap();
+            if activated {
+                for (step, now) in [
+                    (
+                        ControlledResumeStep::Confirmed {
+                            activation_id: activation,
+                        },
+                        8_000,
+                    ),
+                    (
+                        ControlledResumeStep::ActivationAcknowledged {
+                            activation_id: activation,
+                        },
+                        9_000,
+                    ),
+                    (
+                        ControlledResumeStep::PostActivationLiveness {
+                            activation_id: activation,
+                            liveness_epoch_b: "live-b-2",
+                        },
+                        10_000,
+                    ),
+                ] {
+                    manager
+                        .advance_resume(operation.clone(), step, now)
+                        .unwrap();
+                }
+            }
+            assert_eq!(
+                manager.status().status,
+                if activated {
+                    ControlledStatusKind::ResumeActivatedPendingLiveness
+                } else {
+                    ControlledStatusKind::ResumeProvisional
+                }
+            );
+            assert_eq!(manager.status().watchdog_deadline_b, Some(33_000));
+            assert_eq!(cleanup.0.load(Ordering::SeqCst), 0);
+            let failed = manager.mark_transport_disconnected(12_000);
+            assert_eq!(failed.status, ControlledStatusKind::Error);
+            assert_eq!(
+                failed.error_code.as_deref(),
+                Some("desktop_remote_resume_invalid")
+            );
+            assert!(manager.live_lease().is_err());
+            assert!(manager.live_runtime_context().is_err());
+            assert!(manager.with_local_cancel_lease(|_| ()).is_err());
+            assert_eq!(manager.live_liveness_epoch(), None);
+            {
+                let inner = manager.inner.lock();
+                assert!(inner.generation.is_none());
+                assert!(inner.lease_context.is_none());
+                assert!(inner.resume_gate.is_none());
+                assert!(inner.watchdog.is_none());
+                assert!(inner.liveness_epoch_a.is_none());
+            }
+            assert_eq!(cleanup.0.load(Ordering::SeqCst), 1);
+            for now in [13_000, 34_000] {
+                assert_eq!(
+                    manager.mark_transport_disconnected(now).status,
+                    ControlledStatusKind::Error
+                );
+                assert_eq!(manager.status().watchdog_deadline_b, None);
+                assert_eq!(cleanup.0.load(Ordering::SeqCst), 1);
+            }
+            assert!(manager.begin_resume(operation, 35_000).is_err());
+            assert_eq!(cleanup.0.load(Ordering::SeqCst), 1);
+        }
+    }
+
+    #[test]
     fn watchdog_blackhole_reconnects_then_fails_locally_without_relay() {
         let cleanup = Arc::new(CleanupCounter::default());
         let manager = ControlledDeviceManager::default();
@@ -1876,11 +2249,12 @@ mod tests {
                     path: PathBuf::from(r"D:\private"),
                     display_name: "Private".into(),
                     code_allowed: true,
+                    identity: super::super::super::platform::test_workspace_identity(3),
                 }],
             )
             .unwrap();
         register(&manager, &operation);
-        manager.mark_claimed(operation.clone()).unwrap();
+        enter_handshake(&manager, &operation);
         manager
             .complete_connected(operation.clone(), lease(&operation.generation))
             .unwrap();
@@ -1980,22 +2354,43 @@ mod tests {
         let stopped = manager.stop();
         assert_eq!(stopped.status, ControlledStatusKind::Stopped);
         assert_eq!(stopped.pairing_code, None);
-        assert_eq!(
-            stopped.generation.as_deref(),
-            Some(operation.generation.as_str())
-        );
+        assert_eq!(stopped.generation, Some(operation.generation.clone()));
+        assert_eq!(manager.status().generation, stopped.generation);
         assert!(manager.inner.lock().generation.is_none());
         assert_eq!(cleanup.0.load(Ordering::SeqCst), 1);
 
         let second = manager.start(Some("B"), Vec::new()).unwrap();
         register(&manager, &second);
-        manager.mark_claimed(second.clone()).unwrap();
+        enter_handshake(&manager, &second);
         manager
             .complete_connected(second.clone(), lease(&second.generation))
             .unwrap();
         let disconnected = manager.disconnect_now();
         assert_eq!(disconnected.status, ControlledStatusKind::Stopped);
+        assert_eq!(disconnected.generation, Some(second.generation));
         assert_eq!(cleanup.0.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn terminal_errors_keep_only_retired_identity_and_new_start_clears_it() {
+        let manager = ControlledDeviceManager::default();
+        let operation = manager.start(None, Vec::new()).unwrap();
+        let failed = manager
+            .fail_operation(operation.clone(), "desktop_remote_test_error".into())
+            .unwrap();
+        assert_eq!(failed.status, ControlledStatusKind::Error);
+        assert_eq!(
+            failed.generation.as_deref(),
+            Some(operation.generation.as_str())
+        );
+        assert_eq!(manager.status().generation, failed.generation);
+        assert!(manager.live_lease().is_err());
+        let next = manager.start(None, Vec::new()).unwrap();
+        assert_ne!(next.generation, operation.generation);
+        assert_eq!(
+            manager.status().generation.as_deref(),
+            Some(next.generation.as_str())
+        );
     }
 
     #[test]
@@ -2010,6 +2405,7 @@ mod tests {
                     path: PathBuf::from(r"D:\secret"),
                     display_name: "Secret".into(),
                     code_allowed: true,
+                    identity: super::super::super::platform::test_workspace_identity(4),
                 }],
             )
             .unwrap();
@@ -2027,17 +2423,7 @@ mod tests {
         );
         assert_eq!(status.workspace_count, 0);
         assert_eq!(cleanup.0.load(Ordering::SeqCst), 1);
-        assert_eq!(
-            manager
-                .authorize_workspace(WorkspaceAuthorizationRequest {
-                    path: PathBuf::from(r"D:\other"),
-                    display_name: "Other".into(),
-                    code_allowed: false,
-                })
-                .unwrap_err()
-                .code,
-            "desktop_remote_not_running"
-        );
+        assert!(manager.workspaces().is_empty());
         assert_eq!(operation.intent, 1);
     }
 
@@ -2061,6 +2447,7 @@ mod tests {
                     path: PathBuf::from(r"D:\projects"),
                     display_name: "Projects".into(),
                     code_allowed: true,
+                    identity: super::super::super::platform::test_workspace_identity(5),
                 }],
             )
             .unwrap();
@@ -2070,7 +2457,7 @@ mod tests {
             "尚未连接时不得接受远端断开"
         );
         register(&manager, &operation);
-        manager.mark_claimed(operation.clone()).unwrap();
+        enter_handshake(&manager, &operation);
         manager
             .complete_connected(operation.clone(), lease(&operation.generation))
             .unwrap();
@@ -2098,7 +2485,7 @@ mod tests {
         assert!(manager.is_pending_handshake(operation.clone()));
         register(&manager, &operation);
         assert!(manager.is_pending_handshake(operation.clone()));
-        manager.mark_claimed(operation.clone()).unwrap();
+        enter_handshake(&manager, &operation);
         assert!(manager.is_pending_handshake(operation.clone()));
         manager
             .complete_connected(operation.clone(), lease(&operation.generation))

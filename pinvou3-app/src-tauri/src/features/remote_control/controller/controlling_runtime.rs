@@ -56,6 +56,8 @@ pub(crate) enum ControllingStageEvent {
 #[derive(Debug)]
 pub(crate) struct ControllingHandshakeOutcome {
     pub(crate) lease: JoinedLease,
+    pub(crate) peer_endpoint_id: String,
+    pub(crate) reservation_id: String,
     pub(crate) negotiated_capabilities: Vec<String>,
     pub(crate) transcript_hash: [u8; 32],
     /// 会话密钥：握手的最终产物，只在调用方导入加密业务通道时使用一次。
@@ -114,6 +116,8 @@ pub(crate) async fn drive_controlling_handshake<P: ControllingRelayPort>(
         .ok_or_else(|| HandshakeError::new("controller_handshake_stage_invalid"))?;
     Ok(ControllingHandshakeOutcome {
         lease,
+        peer_endpoint_id: handshake.peer_endpoint_id().to_owned(),
+        reservation_id: handshake.reservation_id().to_owned(),
         negotiated_capabilities: handshake.negotiated_capabilities().to_vec(),
         transcript_hash,
         session,

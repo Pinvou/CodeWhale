@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { AlertTriangle, CheckCircle2, Clock, Lock, RefreshCw } from '../../components/icons.jsx';
 import { bridge } from '../../hooks/useBridge.js';
-import { controllerConnectionUiState } from './remote-control-logic.mjs';
+import { connectionErrorKey, controllerConnectionUiState } from './remote-control-logic.mjs';
 import RemoteConnectForm from './RemoteConnectForm.jsx';
 
 const ACTIVE_STATES = ['connecting', 'safety_handshake', 'connected', 'reconnecting'];
@@ -44,26 +44,30 @@ function ConnectionCard({ copy, state, deviceName, busy, onDisconnect, onOpen })
   return (
     <div className="rounded-2xl border border-black/[0.08] bg-white p-5 shadow-[0_1px_2px_rgba(0,0,0,0.03)] dark:border-white/[0.1] dark:bg-white/[0.035]">
       <div className={`flex gap-3 rounded-xl p-4 ${TONES[meta.tone]}`} role={ERROR_STATES.includes(state) ? 'alert' : 'status'} aria-live="polite">
-        <Icon size={19} className={`mt-0.5 shrink-0 ${spinning && state !== 'safety_handshake' ? 'animate-spin' : ''}`} aria-hidden="true" />
+        <Icon size={19} className={`mt-0.5 shrink-0 ${spinning && state !== 'safety_handshake' ? 'animate-spin motion-reduce:animate-none' : ''}`} aria-hidden="true" />
         <div className="min-w-0">
           <div className="text-[13px] font-semibold">{copy[meta.key]}</div>
           <div className="mt-1 text-[12px] leading-5 opacity-80">
-            {state === 'connected' && deviceName ? copy.connectedTo(deviceName) : copy[detailKey]}
+            {state === 'invalid' ? copy.errorInvalidCode : copy[detailKey]}
           </div>
+          {['connected', 'reconnecting'].includes(state) && (
+            <div className="mt-2 text-[12px] font-medium">{copy.deviceLabel}: {deviceName || copy.deviceUnknown}</div>
+          )}
         </div>
       </div>
       {ACTIVE_STATES.includes(state) && (
         <div className="mt-4 flex justify-end gap-2 border-t border-black/[0.06] pt-4 dark:border-white/[0.08]">
           {state === 'connected' && (
-            <button type="button" data-testid="remote-conversation-open" onClick={onOpen} className="rounded-lg bg-[#007AFF] px-4 py-2 text-[12px] font-semibold text-white hover:bg-[#006FE6]">
+            <button type="button" data-testid="remote-conversation-open" onClick={onOpen} disabled={busy || !onOpen} className="rounded-lg bg-[#007AFF] px-4 py-2 text-[12px] font-semibold text-white hover:bg-[#006FE6] disabled:opacity-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#007AFF] forced-colors:border forced-colors:border-[ButtonText]">
               {copy.open}
             </button>
           )}
-          <button type="button" onClick={onDisconnect} disabled={busy} className="rounded-lg border border-black/10 px-4 py-2 text-[12px] font-medium hover:bg-black/[0.03] disabled:opacity-50 dark:border-white/10 dark:hover:bg-white/[0.06]">
+          <button type="button" onClick={onDisconnect} disabled={busy} className="rounded-lg border border-black/10 px-4 py-2 text-[12px] font-medium hover:bg-black/[0.03] disabled:opacity-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#007AFF] forced-colors:border forced-colors:border-[ButtonText] dark:border-white/10 dark:hover:bg-white/[0.06]">
             {busy ? copy.disconnecting : state === 'connected' ? copy.disconnect : copy.cancelConnection}
           </button>
         </div>
       )}
+      {ACTIVE_STATES.includes(state) && <p className="mt-2 text-[11px] leading-4 text-[#6E6E73] dark:text-[#AEAEB2]">{copy.disconnectSafetyHint}</p>}
     </div>
   );
 }
@@ -108,12 +112,14 @@ export default function RemoteControllerPanel({
     setBusy(true);
     setDisconnectError(null);
     try {
-      if (bridge.available && bridge.desktopRemoteControl) {
-        await bridge.desktopRemoteControl.controllerDisconnect();
+      if (!bridge.available || !bridge.desktopRemoteControl) {
+        setDisconnectError('errorUnsupported');
+        return;
       }
+      await bridge.desktopRemoteControl.controllerDisconnect();
       onConversationClose?.();
     } catch (failure) {
-      setDisconnectError(failure?.code || 'desktop_remote_control_failed');
+      setDisconnectError(connectionErrorKey(failure?.code));
     } finally {
       setBusy(false);
     }
@@ -152,7 +158,7 @@ export default function RemoteControllerPanel({
       {disconnectError && (
         <div role="alert" className="flex gap-2 rounded-xl bg-[#FF3B30]/10 px-3 py-2.5 text-[11px] leading-4 text-[#C9342C] dark:text-[#FF6961]">
           <AlertTriangle size={14} className="mt-0.5 shrink-0" aria-hidden="true" />
-          <span>{copy.errorGeneric} <span className="font-mono opacity-70">({String(disconnectError)})</span></span>
+          <span>{copy[disconnectError] || copy.errorGeneric}</span>
         </div>
       )}
 

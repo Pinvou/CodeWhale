@@ -427,7 +427,6 @@ struct WebSessionUpload {
     data: Vec<u8>,
     last_touched: Instant,
 }
-
 /// 浏览器本机文件分块上传的内存累积缓冲。落盘与 ingest 只发生在最后一块提交时。
 #[derive(Debug)]
 struct WebAttachmentUpload {
@@ -903,7 +902,10 @@ impl RemoteControlManager {
         let (policy, policy_error) = match AccessPolicy::load() {
             Ok(policy) => (policy, None),
             Err(error) => {
-                eprintln!("[web-access] {error}");
+                crate::features::remote_control::controller::relay_runtime::log_controlled_event(
+                    "access_policy_load_failed",
+                    "failed",
+                );
                 (AccessPolicy::default(), Some(error))
             }
         };
@@ -1367,8 +1369,11 @@ impl RemoteControlManager {
                                 break;
                             }
                             Ok(_) => {}
-                            Err(error) => {
-                                eprintln!("[web-access] queued revocation JSON ignored: {error}")
+                            Err(_) => {
+                                crate::features::remote_control::controller::relay_runtime::log_controlled_event(
+                                    "revocation_frame_rejected",
+                                    "rejected",
+                                )
                             }
                         }
                     }
@@ -1387,12 +1392,12 @@ impl RemoteControlManager {
     ) {
         let _lifecycle = self.lifecycle.lock();
         if acknowledged {
-            if let Err(error) = acknowledge_pending_revocation(&pending) {
+            if acknowledge_pending_revocation(&pending).is_err() {
                 // Leave the durable entry in place. The next lifecycle replay
                 // will prove the endpoint absent and retry cleanup.
-                eprintln!(
-                    "[web-access] persist revocation acknowledgement for {} failed: {error}",
-                    pending.endpoint_id
+                crate::features::remote_control::controller::relay_runtime::log_controlled_event(
+                    "revocation_ack_persist_failed",
+                    "failed",
                 );
             }
         }
@@ -1908,8 +1913,14 @@ impl RemoteControlManager {
     }
 
     pub fn forward_local_event(&self, event: &str, payload: Value) {
-        if let Err(error) = self.publish_event_inner(event, payload, EventSource::Rust) {
-            eprintln!("[web-access] forward {event} failed: {error}");
+        if self
+            .publish_event_inner(event, payload, EventSource::Rust)
+            .is_err()
+        {
+            crate::features::remote_control::controller::relay_runtime::log_controlled_event(
+                "local_event_forward_failed",
+                "failed",
+            );
         }
     }
 
@@ -2131,8 +2142,11 @@ impl RemoteControlManager {
                 match inbound {
                     RelayInbound::Message(text) => match serde_json::from_str::<Value>(&text) {
                         Ok(value) => manager.handle_relay_message(value),
-                        Err(error) => {
-                            eprintln!("[web-access] queued relay JSON ignored: {error}")
+                        Err(_) => {
+                            crate::features::remote_control::controller::relay_runtime::log_controlled_event(
+                                "relay_message_rejected",
+                                "rejected",
+                            )
                         }
                     },
                     RelayInbound::Connection {
@@ -2372,11 +2386,17 @@ impl RemoteControlManager {
         if let Some(endpoint) = revoked {
             let _ = endpoint.sender.try_send(RelayOutbound::Shutdown);
         }
-        if let Err(error) = remove_config() {
-            eprintln!("[web-access] remove revoked config failed: {error}");
+        if remove_config().is_err() {
+            crate::features::remote_control::controller::relay_runtime::log_controlled_event(
+                "revoked_config_remove_failed",
+                "failed",
+            );
         }
-        if let Err(error) = remove_rpc_ledger() {
-            eprintln!("[web-access] remove revoked RPC ledger failed: {error}");
+        if remove_rpc_ledger().is_err() {
+            crate::features::remote_control::controller::relay_runtime::log_controlled_event(
+                "revoked_ledger_remove_failed",
+                "failed",
+            );
         }
         self.emit_status();
     }

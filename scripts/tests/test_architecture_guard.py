@@ -1397,6 +1397,7 @@ class ArchitectureGuardUnitTests(unittest.TestCase):
 
             for addition in [
                 "pub\n(crate)\nmod extra;\n",
+                "pub(crate) mod sync_remote_journal;\n",
                 "#[cfg(test)]\n// comment before export\n"
                 "pub(crate)\nuse admission::{AdmissionUseCase};\n",
             ]:

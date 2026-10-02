@@ -17,7 +17,32 @@ export function normalizeRemoteModelSource(modelSource, connection) {
 
 export function modelSourceForLease(modelSource, connection, previousLeaseKey, nextLeaseKey) {
   if (String(previousLeaseKey || '') !== String(nextLeaseKey || '')) {
-    return CONTROLLED_DEVICE_MODEL_SOURCE;
+    return canUseControllerTemporaryModel(connection)
+      ? CONTROLLER_TEMPORARY_MODEL_SOURCE
+      : CONTROLLED_DEVICE_MODEL_SOURCE;
   }
   return normalizeRemoteModelSource(modelSource, connection);
+}
+
+/**
+ * @param {string} modelSource
+ * @param {string | null | undefined} selectedModelId
+ */
+export function remoteModelSelectionError(modelSource, selectedModelId) {
+  return modelSource === CONTROLLER_TEMPORARY_MODEL_SOURCE && !selectedModelId
+    ? 'remote_model_required'
+    : null;
+}
+
+/**
+ * @param {{identity?: string, code?: string} | null | undefined} currentError
+ * @param {string} identity
+ * @param {string | null | undefined} modelError
+ */
+export function clearResolvedRemoteModelRequiredError(currentError, identity, modelError) {
+  return !modelError
+    && currentError?.identity === identity
+    && currentError?.code === 'remote_model_required'
+    ? null
+    : currentError;
 }
