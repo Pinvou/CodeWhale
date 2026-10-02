@@ -419,6 +419,15 @@ pub async fn set_session_model(
     app: AppHandle,
     pool: State<'_, EnginePool>,
 ) -> Result<(), String> {
+    // Aux sessions inherit their parent's binding at creation and a
+    // reset drops any per-aux binding silently (round-34 minor 6) — the
+    // sibling metadata commands reject aux ids, and this one does too.
+    if crate::features::sessions::is_aux_session_id(&session_id) {
+        return Err(
+            "set_session_model: auxiliary conversations inherit the main session's model"
+                .to_string(),
+        );
+    }
     let prefs = UserPrefs::load();
     if let Some(mid) = &model_id {
         if prefs.model_by_id(mid).is_none() {

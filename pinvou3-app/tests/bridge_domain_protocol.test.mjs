@@ -64,6 +64,7 @@ function extractCalls(source, callee, normalize = true) {
 const protocolSources = {
   orchestration: ['bridge.js'],
   artifacts: ['bridge/artifact-tracker.js', 'bridge/artifacts.js'],
+  auxChat: ['bridge/aux-chat.js'],
   chat: ['bridge/chat.js', 'bridge/chat-events.js', 'bridge/terminal.js'],
   dependencies: ['bridge/dependencies.js'],
   interaction: ['bridge/interaction.js'],
@@ -84,6 +85,16 @@ const protocolSources = {
 };
 
 const expectedProtocolHashes = {
+  // Aux-chat domain debut (community #433 backflow): three commands —
+  // get_or_create_aux_session / discard_aux_session / reset_aux_session —
+  // plus the desktop send dispatch chat(restrictTools:true); buffer loading
+  // reuses the ensureSessionBufferLoaded injected by the sessions domain (the
+  // load_session hash is accounted in the sessions domain).
+  // Upstream's hash covered the M7 thin wrapper over the shared
+  // PinvouBridgeShared cluster; Official has no shared-cluster mechanism, so
+  // the domain bodies live in this module and the hash was recomputed for the
+  // self-contained Official-lane file.
+  auxChat: '822fb84758b20d045f2fc34673e88c0f9e7aa2acb48e420c0a8b0cdafd93c37a',
   multiAgent: '6896409bb406f1ba54ca496dd78c04549cc78ff5490ae771d9cf60586368a8a8',
   orchestration: '3dfae00b063d45f76e93c4fb8770c746c2b49e8a25a1e37f80767f08c7051724',
   // Recomputed for artifact export telemetry after a successful external open;

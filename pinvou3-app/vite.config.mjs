@@ -489,7 +489,15 @@ function enforceLazyChunks() {
 //   desktop: 498,510 B → 500,570 B (+2,060 B, same feature).
 // Both stay inside the boundary with ~1 kB web headroom; the next entry
 // feature again needs a deliberate bump with fresh measurements.
-export const MAIN_ENTRY_BUDGET_BYTES = 504_000;
+// 2026-10-02 504_000 → 514_000 (community backflow #433/#455/#463, measured):
+//   web:     502,958 B → 511,662 B (+8,704 B, #433 aux side chat UI; #455
+//            marketplace tool switches and #463 folder rebinding land at
+//            505,451 B and 504,236 B on the same boundary).
+//   desktop: 500,570 B → 509,305 B (+8,735 B, same #433 feature; #455 and
+//            #463 stay at 503,063 B and 501,866 B).
+// 514_000 keeps ~2.3 kB web headroom over the largest measured entry; the
+// next entry feature again needs a deliberate bump with fresh measurements.
+export const MAIN_ENTRY_BUDGET_BYTES = 514_000;
 
 export function assertMainEntryBudget(bundle, budgetBytes = MAIN_ENTRY_BUDGET_BYTES) {
   const mainEntry = Object.values(bundle).find(output => (
