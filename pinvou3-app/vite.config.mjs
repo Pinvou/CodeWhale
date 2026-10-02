@@ -482,7 +482,14 @@ function enforceLazyChunks() {
 // of wiring any new lazy view, so the next view feature could not merge
 // without a deliberate bump. 502_000 restores ~1.1 kB of headroom; further
 // growth should still be justified with fresh measurements.
-export const MAIN_ENTRY_BUDGET_BYTES = 502_000;
+// 2026-09-30 502_000 → 504_000 (builtin plugin framework #585, measured):
+//   web:     500,863 B (main @ 039c77941) → 502,958 B (+2,095 B, builtin
+//            plugin framework: BuiltinPluginCard + shared builtin-plugin-logic
+//            + uiBuiltinPlugins copy riding the tool-store entry work).
+//   desktop: 498,510 B → 500,570 B (+2,060 B, same feature).
+// Both stay inside the boundary with ~1 kB web headroom; the next entry
+// feature again needs a deliberate bump with fresh measurements.
+export const MAIN_ENTRY_BUDGET_BYTES = 504_000;
 
 export function assertMainEntryBudget(bundle, budgetBytes = MAIN_ENTRY_BUDGET_BYTES) {
   const mainEntry = Object.values(bundle).find(output => (

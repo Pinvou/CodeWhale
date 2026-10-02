@@ -219,7 +219,7 @@ test('composer adapters preserve explicit metadata and authoritative native owne
   const native = read('src/features/codex/CodexAcpView.jsx');
   assert.match(hook, /deliverVoiceTask\(current, next, \{ \.\.\.preview\.context, mode: 'edit'/);
   assert.match(chat, /sendChatMessage\(constrained\.text, \{ \.\.\.context, draftOwner: owner \}\)/);
-  assert.match(native, /sendTask: async \(outgoing, context\) => send\(outgoing, context\)/);
+  assert.match(native, /sendTask: async \(outgoing, context\) => send\(outgoing, \{ voiceOperationId: context\?\.operationId \}\)/);
   assert.match(native, /nativeControlsSessionRef\.current === activeId \? nativeControls\.modelId : null/);
   assert.match(native, /completeVoiceSubmission\(voiceOperationId, targetId, true\)/);
   assert.match(native, /ownerKind: isNativeAgent \? 'native' : 'acp'/);
@@ -261,6 +261,10 @@ test('stale edit preview is abandoned, while applying a valid edit retains prove
           abandonVoiceResult: () => h.api.trackVoiceTerminal('voice_cancelled', operation, {}),
         } },
       } },
+      // applyVoiceEditPreview ends the unsent operation through the shared
+      // dismiss helper; route it to the same dismiss bookkeeping the adapter
+      // stub above exposes so the assertions observe one terminal path.
+      dismissVoice: () => h.api.dismissVoiceInput(),
     });
     const discard = hook.slice(hook.indexOf('  const discardVoiceResult ='), hook.indexOf('  const cancelVoiceEditPreview ='));
     const apply = hook.slice(hook.indexOf('  const applyVoiceEditPreview ='), hook.indexOf('  const clearStaleVoiceState ='));
