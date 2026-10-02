@@ -246,10 +246,10 @@ async fn kill_the_run(child: &mut tokio::process::Child) {
                 return;
             }
             // ESRCH usually means the group is already gone with the child
-            // dead, but a direct child that moved itself out of its own
-            // group with `setpgid` empties it while staying alive — fall
-            // through to the child-only kill either way: a no-op on a dead
-            // child, the last chance to stop an escaped one. Any other
+            // dead (the child led its own group and cannot have left it, so
+            // an escaped live member is not expected here). Fall through to
+            // the child-only kill on any kill error anyway — a no-op on a
+            // dead child, the last chance to stop an escaped one. Any other
             // failure (e.g. EPERM racing a setuid exec) takes the same
             // fallback.
         }
