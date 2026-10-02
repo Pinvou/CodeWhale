@@ -924,7 +924,7 @@ mod tests {
     fn code_remote_prompt_contains_only_selected_authorized_skill_bodies() {
         with_temp_home(|| {
             seed_sources();
-            save_disabled_skills_for(ConnectorScope::Code, &[]);
+            save_disabled_skills_for(ConnectorScope::Code, &[]).unwrap();
             let prompt =
                 remote_turn_skill_prompt(ConnectorScope::Code, None, &["visualizer".to_owned()])
                     .unwrap();

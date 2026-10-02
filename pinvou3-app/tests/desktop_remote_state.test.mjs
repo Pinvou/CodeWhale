@@ -54,7 +54,7 @@ function makeBridge(responses = {}) {
   };
 }
 
-test('legacy waiting aliases retain only absent pairing fields on the same status binding', () => {
+test('canonical waiting updates retain only absent pairing fields on the same status binding', () => {
   let state = logic.applyControlledStatus(logic.createState(), { ...fixtures.controlledWaiting, status: 'waiting_for_pairing' });
   assert.equal(state.controlledDevice.status, 'waiting_for_pairing');
   const partial = { status: 'waiting_for_pairing', generation: fixtures.controlledWaiting.generation, statusIntent: fixtures.controlledWaiting.statusIntent };
@@ -71,6 +71,15 @@ test('legacy waiting aliases retain only absent pairing fields on the same statu
   const stopped = logic.applyControlledStatus(state, { ...partial, status: 'stopped', pairingCode: '2345678', pairingRemainingMs: 999 });
   assert.equal(stopped.controlledDevice.pairingCode, null);
   assert.equal(stopped.controlledDevice.pairingRemainingMs, null);
+});
+
+test('unreleased B status aliases are rejected instead of becoming a second DTO contract', () => {
+  const state = logic.createState();
+  for (const status of ['reserving', 'waiting_connection', 'safety_handshake', 'refreshing']) {
+    assert.equal(logic.applyControlledStatus(state, {
+      ...fixtures.controlledWaiting, status,
+    }), state, status);
+  }
 });
 
 test('controlled sync rejects late polling and does not replace a command intent', async () => {
@@ -239,15 +248,15 @@ test('status polling cannot overwrite a newer event with an obsolete binding', a
   host.bridge.stop();
 });
 
-test('B old terminal and reserving events cannot replace a refreshed generation', () => {
+test('B old terminal and registering events cannot replace a refreshed generation', () => {
   let state = logic.applyControlledStatus(logic.createState(), fixtures.controlledWaiting);
   state = logic.beginControlledIntent(state, true);
   state = logic.applyControlledStatus(state, { ...fixtures.controlledWaiting, generation: 'generation-0002', statusIntent: '2', intent: state.intents.controlled, replaceBinding: true });
   assert.equal(logic.applyControlledStatus(state, fixtures.controlledError), state);
   assert.equal(logic.applyControlledStatus(state, { ...fixtures.controlledError, generation: null }), state);
-  state = logic.applyControlledStatus(state, { ...fixtures.controlledWaiting, generation: 'generation-0002', statusIntent: '2', status: 'refreshing' });
-  assert.equal(logic.applyControlledStatus(state, { ...fixtures.controlledWaiting, status: 'reserving' }), state);
-  state = logic.applyControlledStatus(state, { ...fixtures.controlledWaiting, status: 'reserving', generation: 'generation-0003', statusIntent: '3' });
+  state = logic.applyControlledStatus(state, { ...fixtures.controlledWaiting, generation: 'generation-0002', statusIntent: '2', status: 'retiring_generation' });
+  assert.equal(logic.applyControlledStatus(state, { ...fixtures.controlledWaiting, status: 'registering' }), state);
+  state = logic.applyControlledStatus(state, { ...fixtures.controlledWaiting, status: 'registering', generation: 'generation-0003', statusIntent: '3' });
   assert.equal(state.controlledDevice.generation, 'generation-0003');
 });
 
