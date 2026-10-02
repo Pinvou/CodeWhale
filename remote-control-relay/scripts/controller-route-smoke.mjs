@@ -1,6 +1,7 @@
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import WebSocket from "ws";
+import { CONTROLLER_SUBPROTOCOL } from "../protocol-controller.js";
 
 function fail(code) {
   const error = new Error(code);
@@ -16,7 +17,7 @@ export function validateControllerRouteSmokeResponse(message) {
 
 export async function smokeControllerRoute(url) {
   await new Promise((resolveSmoke, rejectSmoke) => {
-    const socket = new WebSocket(url);
+    const socket = new WebSocket(url, CONTROLLER_SUBPROTOCOL);
     let settled = false;
     let timer;
     const finish = (error) => {
@@ -34,6 +35,10 @@ export async function smokeControllerRoute(url) {
     };
     timer = setTimeout(() => finish(new Error("controller_route_smoke_timeout")), 5000);
     socket.once("open", () => {
+      if (socket.protocol !== CONTROLLER_SUBPROTOCOL) {
+        finish(new Error("controller_route_subprotocol_missing"));
+        return;
+      }
       // This deliberately malformed registration is non-mutating. A live controller-v1
       // router returns its bounded v1 invalid_message; a disabled/legacy lane returns v2.
       socket.send(JSON.stringify({

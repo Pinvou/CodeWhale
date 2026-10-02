@@ -8,6 +8,7 @@ import path from 'node:path';
 import test from 'node:test';
 import vm from 'node:vm';
 import { fileURLToPath } from 'node:url';
+import { controlledDeviceUiState } from '../src/features/remote-control/remote-control-logic.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const logicPath = path.join(root, 'src', 'features', 'remote-control', 'remote-control-state.js');
@@ -20,50 +21,51 @@ const read = (relative) => fs.readFileSync(path.join(root, 'src', relative), 'ut
 
 test('the B panel maps the backend status enum and shows the pairing code', () => {
   const panel = read('features/remote-control/ControlledDevicePanel.jsx');
-  for (const status of [
-    'reserving',
-    'waiting_connection',
-    'safety_handshake',
-    'connected',
-    'reconnecting',
-    'refreshing',
-    'stopped',
-    'error',
-    'disabled',
-  ]) {
-    assert.ok(panel.includes(`'${status}'`), `panel must map backend status ${status}`);
+  const cases = [
+    ['registering', 'registering'],
+    ['waiting_for_pairing', 'waiting_for_pairing'],
+    ['pairing_reserved', 'pairing_reserved'],
+    ['handshake_pending', 'handshake_pending'],
+    ['connected', 'connected'],
+    ['reconnecting', 'reconnecting'],
+    ['resume_provisional', 'resume_provisional'],
+    ['resume_activated_pending_liveness', 'resume_activated_pending_liveness'],
+    ['retiring_generation', 'retiring_generation'],
+    ['stopping', 'stopping'],
+    ['stopped', 'stopped'],
+    ['error', 'error'],
+    ['disabled', 'off'],
+  ];
+  for (const [status, expected] of cases) {
+    const device = status === 'waiting_for_pairing' ? { status, pairingCode: '2345678' } : { status };
+    assert.equal(controlledDeviceUiState(device, 120), expected, `backend status ${status}`);
   }
-  assert.ok(panel.includes('CODE_STATUSES'), 'pairing code must be status-driven');
-  assert.ok(panel.includes("'waiting_connection'"), 'pairing code shows while waiting');
+  assert.ok(panel.includes('codeVisible'), 'pairing code must be state-driven');
+  assert.ok(panel.includes("['waiting_for_pairing', 'expiring']"), 'expired pairing codes must not remain visible');
   assert.ok(
     panel.includes('controllerDeviceName'),
     'the 主控设备 row must use the controller device name',
   );
-  // E2E-07：刷新状态不得借用「正在停止」的文案。
-  assert.ok(
-    /case 'refreshing':\s*return 'refreshing';/.test(panel),
-    'Refreshing must keep its own copy instead of statusStopping',
-  );
+  assert.ok(!panel.includes("onLocalStateChange?.('reserved')"), 'reservation cannot be invented by a UI timer');
   assert.ok(panel.includes('deviceUnknown'), 'unknown names fall back to i18n copy');
   assert.ok(!/device\.deviceName \|\| copy\.deviceUnknown/.test(panel));
 });
 
-test('the A view opens the session, requests capabilities and renders the transcript', () => {
-  const view = read('features/remote-control/RemoteConversationView.jsx');
-  assert.ok(view.includes('controllerSessionOpen'));
-  assert.ok(view.includes('controllerCapabilitySend'));
-  assert.ok(view.includes('controllerTaskSend'));
-  assert.ok(view.includes('controllerTaskCancelSend'));
-  assert.ok(view.includes('transcript'), 'the view renders the authoritative transcript');
-  assert.ok(view.includes('localBadge') && view.includes('remoteBadge'));
-  // No wire field names may appear in the view.
-  assert.ok(!/input_digest|client_request_id|capability_revision|controller_lease_id/.test(view));
+test('the A shell is connection-only; ChatView consumes the RemoteProxy projection', () => {
+  const shell = read('features/remote-control/RemoteConnectionShell.jsx');
+  const chat = read('features/chat/ChatView.jsx');
+  assert.ok(!shell.includes('RemoteConversationView'));
+  assert.ok(!/transcript|remoteHistories|composer/.test(shell));
+  assert.ok(chat.includes('remoteProxyChatItems(activeSessionId, remoteProxyHistory)'));
+  assert.ok(chat.includes('controllerCapabilitySend'));
+  assert.ok(!chat.includes('controllerTaskSend('));
+  assert.ok(!/input_digest|client_request_id|capability_revision|controller_lease_id/.test(chat));
 });
 
 test('the main chat tolerates an absent remote connection', () => {
   const chat = read('features/chat/ChatView.jsx');
   assert.ok(
-    chat.includes('remoteConnection?.sessionRef && remoteConnection.capabilityRevision != null'),
+    chat.includes('liveRemoteProxyBinding(activeSessionId, remoteProxyHistory, remoteConnection)'),
     'local chat startup must not dereference a null remote connection',
   );
 });
@@ -71,76 +73,18 @@ test('the main chat tolerates an absent remote connection', () => {
 test('the main chat cannot submit before the remote capability snapshot is ready', () => {
   const chat = read('features/chat/ChatView.jsx');
   assert.ok(chat.includes('if (!remoteLinkReady) return false'));
-  assert.ok(chat.includes('(remoteChatActive && !remoteLinkReady)'));
-  assert.ok(chat.includes('(!remoteChatActive || remoteLinkReady)'));
+  assert.ok(chat.includes('(remoteChatActive && !remoteNewDispatchReady)'));
+  assert.ok(chat.includes("!pendingRemoteDispatches.some(item => item.state === 'prepared_not_sent')"));
+  assert.ok(chat.includes('(!remoteChatActive || remoteNewDispatchReady)'));
 });
 
-test('journal events project into a deduplicated transcript', () => {
-  const frame = (kind, sequence, text) => ({
-    event: {
-      eventId: `event-${sequence}`,
-      epoch: 'epoch-1',
-      sequence,
-      kind,
-      sessionId: 'session-a',
-      taskId: null,
-      terminalStatus: null,
-      payload: { text },
-    },
-  });
-  let state = logic.createState();
-  state = logic.applyJournalEvent(state, frame('user_message', 1, 'hello from A'));
-  state = logic.applyJournalEvent(state, frame('assistant_delta', 2, 'hello from B'));
-  assert.equal(state.transcript.length, 2);
-  assert.equal(state.transcript[0].role, 'user');
-  assert.equal(state.transcript[1].role, 'assistant');
-  assert.equal(state.transcript[1].text, 'hello from B');
-  // 重复投递不得产生第二条；非正文事件（任务状态）不进 transcript。
-  const duplicate = logic.applyJournalEvent(state, frame('assistant_delta', 2, 'hello from B'));
-  assert.equal(duplicate, state);
-  const statusOnly = logic.applyJournalEvent(state, frame('task_status', 3, 'succeeded'));
-  assert.equal(statusOnly, state);
-  // 快照替换该会话的全部条目。
-  const snapshot = logic.applyJournalEvent(state, {
-    snapshot: {
-      epoch: 'epoch-2',
-      sequence: 5,
-      digest: 'a'.repeat(64),
-      events: [
-        {
-          eventId: 'event-9',
-          epoch: 'epoch-2',
-          sequence: 5,
-          kind: 'assistant_delta',
-          sessionId: 'session-a',
-          taskId: null,
-          terminalStatus: null,
-          payload: { text: 'after snapshot' },
-        },
-      ],
-    },
-  });
-  assert.equal(snapshot.transcript.length, 1);
-  assert.equal(snapshot.transcript[0].text, 'after snapshot');
-});
-
-test('reasoning journal events remain a distinct transcript lane', () => {
-  let state = logic.createState();
-  state = logic.applyJournalEvent(state, {
-    event: {
-      eventId: 'reasoning-1',
-      epoch: 'epoch-1',
-      sequence: 1,
-      kind: 'reasoning',
-      sessionId: 'session-a',
-      taskId: 'task-1',
-      terminalStatus: null,
-      payload: { text: 'checking context' },
-    },
-  });
-  assert.equal(state.transcript.length, 1);
-  assert.equal(state.transcript[0].role, 'reasoning');
-  assert.equal(state.transcript[0].taskId, 'task-1');
+test('A events cannot populate an in-memory second transcript', () => {
+  const state = logic.createState();
+  const feature = read('platform/tauri/bridge/desktop-remote-control.js');
+  assert.equal(Object.hasOwn(state, 'transcript'), false);
+  assert.equal(typeof logic.applyJournalEvent, 'undefined');
+  assert.ok(!feature.includes('desktop-remote-controller-journal'));
+  assert.ok(feature.includes('desktop_remote_proxy'));
 });
 
 test('the controlled chat keeps the native session timeline when that session is active', () => {
@@ -151,23 +95,27 @@ test('the controlled chat keeps the native session timeline when that session is
   );
 });
 
-test('the bridge subscribes the journal stream and exposes the A-side commands', () => {
+test('the A bridge exposes intent commands without a second journal subscriber', () => {
   const bridge = read('platform/tauri/bridge/desktop-remote-control.js');
-  assert.ok(bridge.includes('"desktop-remote-controller-journal"'));
-  assert.ok(bridge.includes('applyJournalEvent'));
-  for (const method of ['controllerCapabilitySend', 'controllerTaskSend', 'controllerTaskCancelSend']) {
+  assert.ok(!bridge.includes('"desktop-remote-controller-journal"'));
+  assert.ok(!bridge.includes('applyJournalEvent'));
+  assert.ok(bridge.includes('"desktop_remote_proxy"'));
+  for (const method of ['controllerCapabilitySend', 'reserveRemoteTask', 'commitRemoteTask',
+    'cancelRemoteTask', 'abandonRemoteTask']) {
     assert.ok(bridge.includes(`${method}: ${method}`), `${method} must be exported`);
   }
   assert.ok(bridge.includes('desktop_remote_controller_capability_send'));
+  assert.ok(!bridge.includes('desktop_remote_controller_task_cancel_send'));
+  assert.ok(!bridge.includes('controllerTaskCancelSend:'));
 });
 
 test('the controlled-side authoritative journal is projected locally before forwarding to A', () => {
   const task = read('../src-tauri/src/app/commands/desktop_remote_task.rs');
-  const history = read('../src-tauri/src/app/commands/desktop_remote_history.rs');
+  const history = read('../src-tauri/src/app/commands/desktop_remote_journal.rs');
   const lib = read('../src-tauri/src/lib.rs');
   assert.ok(task.includes('"journal_event_projected"'));
   assert.ok(task.includes('CONTROLLED_JOURNAL_EVENT'));
-  assert.ok(task.indexOf('CONTROLLED_JOURNAL_EVENT') < task.indexOf('publish_authoritative_event(&self.app, &event)'));
+  assert.ok(task.indexOf('CONTROLLED_JOURNAL_EVENT') < task.indexOf('publish_authoritative_event('));
   assert.ok(history.includes('publish_authoritative_task_status(&self.app, event)'));
   assert.ok(lib.includes('DesktopTaskEventSink::new('));
   assert.ok(task.indexOf('app.emit(TASK_EVENT, &status)') < task.indexOf('tauri::async_runtime::spawn(async move'));
@@ -185,18 +133,21 @@ test('controlled-side send failures are visible in the shared remote transcript 
   assert.ok(chat.includes('identity: sendIdentity'));
   assert.ok(chat.includes('remoteSendError?.identity === remoteSendIdentity'));
   assert.match(chat, /current && current\.identity !== remoteSendIdentity \? null : current/);
+  assert.ok(chat.includes('remoteProxyLeaseIdentity(activeSessionId, remoteConnection)'));
+  assert.ok(chat.includes('remoteSendIdentityRef.current === sendIdentity'));
+  assert.ok(chat.includes('sameRemoteComposerOwner('));
+  assert.ok(chat.includes('if (!accepted && mayRestore())'));
+  assert.ok(chat.includes('if (mayRestore()) {'));
 });
 
 test('temporary model capability mismatches have actionable localized feedback', () => {
   const chat = read('features/chat/ChatView.jsx');
-  const legacyView = read('features/remote-control/RemoteConversationView.jsx');
   const main = read('app/main.jsx');
   assert.ok(chat.includes("currentRemoteSendError === 'temporary_model_capability_required'"));
   assert.ok(chat.includes('t.remoteConversation.temporaryModelCapabilityRequired'));
   assert.ok(chat.includes('remoteTemporaryModelAvailable &&'));
-  assert.ok(chat.includes('controllerTaskSend(sessionRef, outgoing, effectiveRemoteModelSource)'));
-  assert.ok(legacyView.includes('temporaryModelAvailable &&'));
-  assert.ok(legacyView.includes('controllerTaskSend(sessionRef, draft.trim(), effectiveModelSource)'));
+  assert.ok(chat.includes("code: 'remote_task_intent_invalid'"));
+  assert.ok(!chat.includes('controllerTaskSend('));
   assert.ok(main.includes('modelSourceForLease('));
   assert.ok(main.includes('setRemoteModelSource(nextModelSource)'));
   for (const locale of ['zh', 'en', 'ja']) {
@@ -213,15 +164,15 @@ test('bounded command failures keep their code for the UI copy', () => {
   for (const command of [
     'desktop_remote_controller_connect',
     'desktop_remote_controller_disconnect',
-    'desktop_remote_controller_session_open',
     'desktop_remote_controller_capability_send',
-    'desktop_remote_controller_task_send',
-    'desktop_remote_controller_task_cancel_send',
-    'desktop_remote_controller_apply_capability_snapshot',
   ]) {
     const index = bridge.indexOf(`"${command}"`);
     assert.ok(index >= 0, `${command} must be invoked`);
-    const chain = bridge.slice(index, index + 700);
+    // Bound the assertion to this function, not its incidental byte length.
+    // The connect path also reconciles a terminal race via an authoritative read.
+    const end = bridge.indexOf('\n    function ', index);
+    assert.ok(end > index, `${command} must have a complete function boundary`);
+    const chain = bridge.slice(index, end);
     assert.ok(
       chain.includes('asBoundedError'),
       `${command} must map failures to a bounded error code`,

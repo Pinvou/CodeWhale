@@ -148,6 +148,104 @@ fn prepare_export_models(
     Ok((primary, vision))
 }
 
+/// One immutable settings snapshot determines both the opaque active model ID
+/// and the exact task-bound package. No settings/keychain write occurs here.
+pub(crate) struct PreparedActiveTaskPackage {
+    pub(crate) model_profile_id: String,
+    pub(crate) package: Value,
+}
+
+fn prepare_task_package_from_snapshot(
+    prefs: &UserPrefs,
+    credentials: &impl CredentialStore,
+    live: &LeaseContext,
+    task_id: &str,
+    package_id: &str,
+) -> Result<PreparedActiveTaskPackage, TemporaryModelError> {
+    let primary = prefs.active_model().cloned().ok_or(TemporaryModelError {
+        code: "model_not_configured",
+    })?;
+    prepare_model_package_from_snapshot(prefs, primary, credentials, live, task_id, package_id)
+}
+
+fn prepare_model_package_from_snapshot(
+    prefs: &UserPrefs,
+    primary: SavedModel,
+    credentials: &impl CredentialStore,
+    live: &LeaseContext,
+    task_id: &str,
+    package_id: &str,
+) -> Result<PreparedActiveTaskPackage, TemporaryModelError> {
+    let model_profile_id = primary.id.clone();
+    let (primary, vision) = prepare_export_models(prefs, primary, credentials)?;
+    let package = build_task_package(live, &primary, vision.as_ref(), task_id, package_id)?;
+    Ok(PreparedActiveTaskPackage {
+        model_profile_id,
+        package: package.to_wire_value(),
+    })
+}
+
+/// Selects an opaque saved-model ID from exactly one read-only settings
+/// snapshot. The returned profile identity and exported package cannot come
+/// from different model selections, even if settings change during key reads.
+pub(crate) fn prepare_selected_task_package_snapshot(
+    live: &LeaseContext,
+    task_id: &str,
+    selected_model_id: &str,
+) -> Result<PreparedActiveTaskPackage, TemporaryModelError> {
+    prepare_selected_task_package_with_store(
+        live,
+        task_id,
+        selected_model_id,
+        &SystemCredentialStore::new(),
+        &format!("package-{}", uuid::Uuid::new_v4().simple()),
+    )
+}
+
+fn prepare_selected_task_package_with_store(
+    live: &LeaseContext,
+    task_id: &str,
+    selected_model_id: &str,
+    credentials: &impl CredentialStore,
+    package_id: &str,
+) -> Result<PreparedActiveTaskPackage, TemporaryModelError> {
+    let prefs =
+        UserPrefs::load_read_only_model_snapshot().map_err(|code| TemporaryModelError { code })?;
+    let primary = prefs
+        .model_by_id(selected_model_id)
+        .cloned()
+        .ok_or(TemporaryModelError {
+            code: "model_not_configured",
+        })?;
+    prepare_model_package_from_snapshot(&prefs, primary, credentials, live, task_id, package_id)
+}
+
+/// Fail closed on legacy plaintext credentials; run the normal settings
+/// migration separately before retrying. Preparing a remote task must not
+/// write settings or keychain before DEV-29's durable pending reservation.
+pub(crate) fn prepare_active_task_package_snapshot(
+    live: &LeaseContext,
+    task_id: &str,
+) -> Result<PreparedActiveTaskPackage, TemporaryModelError> {
+    prepare_active_task_package_with_store(
+        live,
+        task_id,
+        &SystemCredentialStore::new(),
+        &format!("package-{}", uuid::Uuid::new_v4().simple()),
+    )
+}
+
+fn prepare_active_task_package_with_store(
+    live: &LeaseContext,
+    task_id: &str,
+    credentials: &impl CredentialStore,
+    package_id: &str,
+) -> Result<PreparedActiveTaskPackage, TemporaryModelError> {
+    let prefs =
+        UserPrefs::load_read_only_model_snapshot().map_err(|code| TemporaryModelError { code })?;
+    prepare_task_package_from_snapshot(&prefs, credentials, live, task_id, package_id)
+}
+
 /// Resolve A's current active model and build the task-bound package entirely
 /// in Rust. The returned value goes straight into the encrypted business
 /// payload; it is never projected through the WebView.
@@ -175,6 +273,7 @@ pub(crate) fn build_active_task_package(
 pub async fn desktop_remote_model_list_exportable(
     controlled: State<'_, ControlledDeviceManager>,
 ) -> Result<Vec<RemoteModelDescriptor>, String> {
+    crate::platform::capabilities::ensure_desktop_remote_control_enabled()?;
     if !controlled.is_supported() {
         return Err(UNSUPPORTED.to_owned());
     }
@@ -205,6 +304,7 @@ pub fn desktop_remote_model_install(
     controlled: State<'_, ControlledDeviceManager>,
     store: State<'_, SharedTemporaryModelStore>,
 ) -> Result<Value, String> {
+    crate::platform::capabilities::ensure_desktop_remote_control_enabled()?;
     if !controlled.is_supported() {
         return Err(UNSUPPORTED.to_owned());
     }
@@ -227,6 +327,7 @@ pub fn desktop_remote_model_release(
     controlled: State<'_, ControlledDeviceManager>,
     store: State<'_, SharedTemporaryModelStore>,
 ) -> Result<bool, String> {
+    crate::platform::capabilities::ensure_desktop_remote_control_enabled()?;
     if !controlled.is_supported() {
         return Err(UNSUPPORTED.to_owned());
     }
@@ -238,6 +339,7 @@ pub fn desktop_remote_model_active(
     controlled: State<'_, ControlledDeviceManager>,
     store: State<'_, SharedTemporaryModelStore>,
 ) -> Result<Option<String>, String> {
+    crate::platform::capabilities::ensure_desktop_remote_control_enabled()?;
     if !controlled.is_supported() {
         return Err(UNSUPPORTED.to_owned());
     }
@@ -260,6 +362,9 @@ pub(crate) fn shared_model_store() -> SharedTemporaryModelStore {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use super::*;
     use crate::platform::credential_store::{CredentialError, CredentialReference};
     use crate::platform::prefs::{
@@ -302,6 +407,42 @@ mod tests {
 
     struct NoCredentials;
 
+    struct ReadOnlyCredentials {
+        reads: AtomicUsize,
+        switch_settings_on_read: Mutex<Option<(std::path::PathBuf, Vec<u8>)>>,
+    }
+
+    impl ReadOnlyCredentials {
+        fn new() -> Self {
+            Self {
+                reads: AtomicUsize::new(0),
+                switch_settings_on_read: Mutex::new(None),
+            }
+        }
+    }
+
+    impl CredentialStore for ReadOnlyCredentials {
+        fn get(&self, _reference: &CredentialReference) -> Result<Option<String>, CredentialError> {
+            self.reads.fetch_add(1, Ordering::SeqCst);
+            if let Some((path, bytes)) = self.switch_settings_on_read.lock().unwrap().take() {
+                std::fs::write(path, bytes).unwrap();
+            }
+            Ok(Some("sk-test-only".into()))
+        }
+
+        fn set(
+            &self,
+            _reference: &CredentialReference,
+            _value: &str,
+        ) -> Result<(), CredentialError> {
+            panic!("remote preparation must not write keychain")
+        }
+
+        fn delete(&self, _reference: &CredentialReference) -> Result<(), CredentialError> {
+            panic!("remote preparation must not delete keychain")
+        }
+    }
+
     struct EnvRestore(Vec<(&'static str, Option<std::ffi::OsString>)>);
 
     impl EnvRestore {
@@ -339,12 +480,171 @@ mod tests {
             _reference: &CredentialReference,
             _value: &str,
         ) -> Result<(), CredentialError> {
-            Ok(())
+            panic!("package preparation must never write a credential")
         }
 
         fn delete(&self, _reference: &CredentialReference) -> Result<(), CredentialError> {
-            Ok(())
+            panic!("package preparation must never delete a credential")
         }
+    }
+
+    #[test]
+    fn prepared_profile_and_package_use_the_same_immutable_snapshot() {
+        let mut first = model("first");
+        first.model = "first-model".into();
+        let mut second = model("second");
+        second.model = "second-model".into();
+        let mut prefs = UserPrefs::default();
+        prefs.advanced.active_model_id = Some(first.id.clone());
+        prefs.advanced.saved_models = vec![first, second];
+        let captured = prefs.clone();
+        // A settings switch after capture cannot make a profile from one
+        // snapshot label a package built from another snapshot.
+        prefs.advanced.active_model_id = Some("second".into());
+        let prepared = prepare_task_package_from_snapshot(
+            &captured,
+            &NoCredentials,
+            &lease(),
+            "task-0001",
+            "package-0001",
+        )
+        .unwrap();
+        assert_eq!(prepared.model_profile_id, "first");
+        assert_eq!(prepared.package["primary"]["model"], "first-model");
+        assert_eq!(prepared.package["binding"]["task_id"], "task-0001");
+        assert_eq!(prefs.active_model().unwrap().id, "second");
+    }
+
+    #[test]
+    fn active_prepare_is_read_only_and_uses_one_snapshot_across_external_switch() {
+        let _guard = crate::platform::paths::tests::ENV_LOCK.lock().unwrap();
+        let _restore = EnvRestore::capture(&["PINVOU3_HOME"]);
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("PINVOU3_HOME", home.path()) };
+        let path = crate::platform::paths::settings_path();
+        let mut first = model("first");
+        first.model = "first-model".into();
+        first.credential_ref = Some(first.credential_reference());
+        first.api_key.clear();
+        let mut second = model("second");
+        second.model = "second-model".into();
+        second.credential_ref = Some(second.credential_reference());
+        second.api_key.clear();
+        let mut prefs = UserPrefs::default();
+        prefs.advanced.active_model_id = Some("first".into());
+        prefs.advanced.saved_models = vec![first, second];
+        let original = serde_json::to_vec(&prefs).unwrap();
+        std::fs::write(&path, &original).unwrap();
+        let credentials = ReadOnlyCredentials::new();
+        let prepared = prepare_active_task_package_with_store(
+            &lease(),
+            "task-0001",
+            &credentials,
+            "package-0001",
+        )
+        .unwrap();
+        assert_eq!(prepared.model_profile_id, "first");
+        assert_eq!(prepared.package["primary"]["model"], "first-model");
+        assert_eq!(credentials.reads.load(Ordering::SeqCst), 1);
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+
+        prefs.advanced.active_model_id = Some("second".into());
+        let switched = serde_json::to_vec(&prefs).unwrap();
+        let switching_credentials = ReadOnlyCredentials::new();
+        // Fault injection: an external settings edit occurs during keychain
+        // read. The preparation itself still performs no settings write.
+        *switching_credentials
+            .switch_settings_on_read
+            .lock()
+            .unwrap() = Some((path.clone(), switched.clone()));
+        let prepared = prepare_active_task_package_with_store(
+            &lease(),
+            "task-0002",
+            &switching_credentials,
+            "package-0002",
+        )
+        .unwrap();
+        assert_eq!(prepared.model_profile_id, "first");
+        assert_eq!(prepared.package["primary"]["model"], "first-model");
+        assert_eq!(std::fs::read(&path).unwrap(), switched);
+    }
+
+    #[test]
+    fn selected_prepare_uses_exact_id_from_one_read_only_snapshot() {
+        let _guard = crate::platform::paths::tests::ENV_LOCK.lock().unwrap();
+        let _restore = EnvRestore::capture(&["PINVOU3_HOME"]);
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("PINVOU3_HOME", home.path()) };
+        let path = crate::platform::paths::settings_path();
+        let mut active = model("active");
+        active.model = "active-model".into();
+        active.credential_ref = Some(active.credential_reference());
+        active.api_key.clear();
+        let mut selected = model("selected");
+        selected.model = "selected-model".into();
+        selected.credential_ref = Some(selected.credential_reference());
+        selected.api_key.clear();
+        let mut prefs = UserPrefs::default();
+        prefs.advanced.active_model_id = Some(active.id.clone());
+        prefs.advanced.saved_models = vec![active, selected];
+        let original = serde_json::to_vec(&prefs).unwrap();
+        std::fs::write(&path, &original).unwrap();
+        let credentials = ReadOnlyCredentials::new();
+        let prepared = prepare_selected_task_package_with_store(
+            &lease(),
+            "task-1",
+            "selected",
+            &credentials,
+            "package-1",
+        )
+        .unwrap();
+        assert_eq!(prepared.model_profile_id, "selected");
+        assert_eq!(prepared.package["primary"]["model"], "selected-model");
+        assert_eq!(credentials.reads.load(Ordering::SeqCst), 1);
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        assert_eq!(
+            prepare_selected_task_package_with_store(
+                &lease(),
+                "task-2",
+                "missing",
+                &credentials,
+                "package-2",
+            )
+            .err()
+            .unwrap()
+            .code,
+            "model_not_configured"
+        );
+        assert_eq!(credentials.reads.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn active_prepare_rejects_legacy_plaintext_before_credential_access() {
+        let _guard = crate::platform::paths::tests::ENV_LOCK.lock().unwrap();
+        let _restore = EnvRestore::capture(&["PINVOU3_HOME"]);
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("PINVOU3_HOME", home.path()) };
+        let path = crate::platform::paths::settings_path();
+        let mut prefs = UserPrefs::default();
+        prefs.advanced.saved_models = vec![model("first")];
+        prefs.advanced.active_model_id = Some("first".into());
+        let mut settings = serde_json::to_value(&prefs).unwrap();
+        settings["advanced"]["saved_models"][0]["api_key"] =
+            serde_json::json!("legacy-example-not-real");
+        let original = serde_json::to_vec(&settings).unwrap();
+        std::fs::write(&path, &original).unwrap();
+        let credentials = ReadOnlyCredentials::new();
+        let error = prepare_active_task_package_with_store(
+            &lease(),
+            "task-0001",
+            &credentials,
+            "package-0001",
+        )
+        .err()
+        .unwrap();
+        assert_eq!(error.code, "model_credential_migration_required");
+        assert_eq!(credentials.reads.load(Ordering::SeqCst), 0);
+        assert_eq!(std::fs::read(&path).unwrap(), original);
     }
 
     #[test]
