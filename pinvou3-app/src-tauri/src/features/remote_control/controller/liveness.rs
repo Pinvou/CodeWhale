@@ -17,13 +17,24 @@ use super::protocol::{
     validate_controller_liveness_payload_json, validate_liveness_attestation_message_json,
 };
 
-pub(crate) const LIVENESS_INTERVAL_MS: u64 = 5_000;
+#[cfg(test)]
+const TEST_EVIDENCE_INTERVAL_MS: u64 = 5_000;
 pub(crate) const LIVENESS_BLACKHOLE_SUSPECT_MS: u64 = 15_000;
 /// 距 deadline 只剩这么多预算时就开始索取证据（留出一次往返 + relay 处理时间）。
 pub(crate) const LIVENESS_EVIDENCE_LEAD_MS: u64 = 10_000;
 pub(crate) const LIVENESS_TOTAL_BUDGET_MS: u64 = 30_000;
 pub(crate) const LIVENESS_SAFETY_MARGIN_MS: u64 = 1_000;
 pub(crate) const MAX_LIVENESS_RTT_MS: u64 = 5_000;
+pub(crate) const LIVENESS_EVIDENCE_POLL_MS: u64 = 2_000;
+pub(crate) const LIVENESS_ATTESTATION_ESCALATION_MS: u64 = 2_500;
+/// Allow the first poll, escalation wait, next poll and full fallback RTT
+/// before the existing suspect boundary. Round conservatively to seconds.
+const SUSPECT_EVIDENCE_LEAD_MS: u64 = (2 * LIVENESS_EVIDENCE_POLL_MS
+    + LIVENESS_ATTESTATION_ESCALATION_MS
+    + MAX_LIVENESS_RTT_MS
+    + 999)
+    / 1_000
+    * 1_000;
 pub(crate) const MAX_LIVENESS_ATTESTATION_AGE_MS: u64 = 5_000;
 const MAX_PENDING_CHALLENGES: usize = 8;
 const MAX_USED_CHALLENGES: usize = 64;
@@ -293,10 +304,10 @@ impl ControllerLivenessWatchdog {
                 if now_b >= deadline {
                     return true;
                 }
-                if self
-                    .last_advanced_at_b
-                    .is_some_and(|last| now_b.saturating_sub(last) >= LIVENESS_BLACKHOLE_SUSPECT_MS)
-                {
+                if self.last_advanced_at_b.is_some_and(|last| {
+                    now_b.saturating_sub(last)
+                        >= LIVENESS_BLACKHOLE_SUSPECT_MS.saturating_sub(SUSPECT_EVIDENCE_LEAD_MS)
+                }) {
                     return true;
                 }
                 deadline.saturating_sub(now_b) <= LIVENESS_EVIDENCE_LEAD_MS
@@ -429,15 +440,21 @@ impl ControllerLivenessWatchdog {
     }
 }
 
-/// E2E-06：A 端心跳帧（`controller_liveness`）。这是控制帧（不加密），Relay 与
-/// B 都以它作为「A 仍存活」的证据。序号必须单调递增且不能为 0，epoch 来自
+/// A/B 角色心跳只更新 Relay 对相应 socket 的存活记录，不能替代 B 验证的
+/// A 端直接证明或签名 attestation。序号必须单调递增且不能为 0，epoch 来自
 /// `controller_joined` 下发的租约身份。
 pub(crate) fn build_controller_liveness(
     lease: &LeaseContext,
-    liveness_epoch_a: &str,
+    role: super::protocol::SenderRole,
+    liveness_epoch: &str,
     heartbeat_sequence: u64,
 ) -> Result<serde_json::Value> {
-    if heartbeat_sequence == 0 || !is_valid_liveness_epoch(liveness_epoch_a) {
+    let sender_role = match role {
+        super::protocol::SenderRole::ControllerA => "A",
+        super::protocol::SenderRole::ControlledB => "B",
+        _ => return Err(LivenessError::new("invalid_role", "controller_liveness")),
+    };
+    if heartbeat_sequence == 0 || !is_valid_liveness_epoch(liveness_epoch) {
         return Err(LivenessError::new("invalid_field", "controller_liveness"));
     }
     Ok(serde_json::json!({
@@ -448,8 +465,8 @@ pub(crate) fn build_controller_liveness(
         "lease_epoch": lease.lease_epoch,
         "relay_epoch": lease.relay_epoch,
         "remote_control_generation": lease.remote_control_generation,
-        "sender_role": "A",
-        "liveness_epoch": liveness_epoch_a,
+        "sender_role": sender_role,
+        "liveness_epoch": liveness_epoch,
         "heartbeat_sequence": heartbeat_sequence.to_string(),
     }))
 }
@@ -976,7 +993,7 @@ mod tests {
         for attested in [false, true] {
             let mut watchdog = ControllerLivenessWatchdog::new("live-a-1").unwrap();
             for sequence in 1..=128 {
-                let sent = sequence * LIVENESS_INTERVAL_MS;
+                let sent = sequence * TEST_EVIDENCE_INTERVAL_MS;
                 let received = sent + 1_000;
                 let challenge = format!("challenge-{sequence}");
                 watchdog
@@ -1011,7 +1028,7 @@ mod tests {
                     "replay"
                 );
             }
-            let now = 129 * LIVENESS_INTERVAL_MS;
+            let now = 129 * TEST_EVIDENCE_INTERVAL_MS;
             watchdog
                 .register_challenge("challenge-1", nonce, now)
                 .unwrap();
@@ -1136,7 +1153,8 @@ mod tests {
         };
 
         let lease = lease();
-        let frame = build_controller_liveness(&lease, "live-a-1", 1).unwrap();
+        let frame =
+            build_controller_liveness(&lease, SenderRole::ControllerA, "live-a-1", 1).unwrap();
         validate_controller_message_json(&frame.to_string(), SenderRole::ControllerA).unwrap();
         validate_controller_runtime_message_json(
             &frame.to_string(),
@@ -1155,10 +1173,23 @@ mod tests {
         assert_eq!(frame["sender_role"], "A");
         assert_eq!(frame["heartbeat_sequence"], "1");
         assert_eq!(frame["liveness_epoch"], "live-a-1");
+        let b_frame =
+            build_controller_liveness(&lease, SenderRole::ControlledB, "live-b-1", 1).unwrap();
+        validate_controller_runtime_message_json(
+            &b_frame.to_string(),
+            SenderRole::ControlledB,
+            Some(&RuntimeValidationContext {
+                lease: Some(lease.clone()),
+                negotiated_capabilities: vec!["role_liveness_v1".into()],
+            }),
+        )
+        .unwrap();
+        assert_eq!(b_frame["sender_role"], "B");
+        assert!(build_controller_liveness(&lease, SenderRole::Relay, "live-a-1", 1).is_err());
 
-        assert!(build_controller_liveness(&lease, "live-a-1", 0).is_err());
-        assert!(build_controller_liveness(&lease, "", 1).is_err());
-        assert!(build_controller_liveness(&lease, "live a", 1).is_err());
+        assert!(build_controller_liveness(&lease, SenderRole::ControllerA, "live-a-1", 0).is_err());
+        assert!(build_controller_liveness(&lease, SenderRole::ControllerA, "", 1).is_err());
+        assert!(build_controller_liveness(&lease, SenderRole::ControllerA, "live a", 1).is_err());
     }
 
     /// E2E-06：B 端证据需求策略——没有证据、进入 suspect 或余量不足时为真；
@@ -1182,7 +1213,15 @@ mod tests {
             !watchdog.needs_evidence(0),
             "刚续期且余量充足时不必打扰对端"
         );
-        assert!(!watchdog.needs_evidence(10_000));
+        assert!(!watchdog.needs_evidence(2_999));
+        assert!(watchdog.needs_evidence(3_000));
+        assert_eq!(SUSPECT_EVIDENCE_LEAD_MS, 12_000);
+        assert_eq!(watchdog.state(3_000), LivenessWatchdogState::Healthy);
+        assert_eq!(
+            watchdog.deadline_b(),
+            Some(29_000),
+            "earlier requests cannot renew the deadline"
+        );
         assert!(
             watchdog.needs_evidence(25_000),
             "距 deadline 只剩提前量时必须索取"
@@ -1192,6 +1231,27 @@ mod tests {
             .register_challenge("challenge-0002", "AQEBAQEBAQEBAQEBAQEBAQ==", 20_000)
             .unwrap();
         assert!(watchdog.needs_evidence(20_000));
+    }
+
+    #[test]
+    fn fallback_accepts_full_request_rtt_after_direct_wait_without_retimestamping_challenge() {
+        let mut watchdog = ControllerLivenessWatchdog::new("live-a-1").unwrap();
+        let nonce = "AAAAAAAAAAAAAAAAAAAAAA==";
+        watchdog
+            .register_challenge("challenge-0001", nonce, 0)
+            .unwrap();
+        let payload = attestation_payload(1, 1, "challenge-0001", nonce);
+        assert_eq!(
+            watchdog
+                .accept_attestation_json(&payload, &lease(), 0, 8_000)
+                .unwrap_err()
+                .code,
+            "rtt_exceeded"
+        );
+        watchdog
+            .accept_attestation_json(&payload, &lease(), 4_000, 9_000)
+            .unwrap();
+        assert_eq!(watchdog.deadline_b(), Some(28_000));
     }
 
     /// E2E-06：挑战与 attestation 兜底请求必须通过冻结校验（角色 B +
