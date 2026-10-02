@@ -119,8 +119,9 @@ fi
 ensure_cached_db "$IPV4_DB_CACHE" "$IPV4_DB_URL" "$IPV4_DB_SHA256"
 ensure_cached_db "$IPV6_DB_CACHE" "$IPV6_DB_URL" "$IPV6_DB_SHA256"
 
+mapfile -t relay_modules < <(cd "$RELAY_DIR" && printf '%s\n' ./*.js)
 tar -czf - -C "$RELAY_DIR" \
-  $(cd "$RELAY_DIR" && ls *.js) \
+  "${relay_modules[@]}" \
   scripts/deploy-controller-preflight.mjs \
   scripts/controller-route-smoke.mjs \
   -C "$ROOT" \
@@ -207,15 +208,16 @@ if [[ -f "$remote_dir/telemetry-service.js" ]]; then
 else
   touch "$backup/no-telemetry-service"
 fi
-  if [[ -f "$remote_dir/behavior-telemetry-schema.js" ]]; then
-    cp -a "$remote_dir/behavior-telemetry-schema.js" "$backup/behavior-telemetry-schema.js"
-  else
-    touch "$backup/no-behavior-telemetry-schema"
-  fi
-  # 备份全部根目录 JS 模块：新版本可能引入 controller-*.js / enrollment-*.js 等文件，
-  # 回滚时必须整体还原（含"删除新引入文件"），否则旧 server.js 会与残留模块混装。
-  mkdir -p "$backup/code-js"
-  compgen -G "$remote_dir/*.js" > /dev/null && cp -a "$remote_dir"/*.js "$backup/code-js/" || true
+if [[ -f "$remote_dir/behavior-telemetry-schema.js" ]]; then
+  cp -a "$remote_dir/behavior-telemetry-schema.js" "$backup/behavior-telemetry-schema.js"
+else
+  touch "$backup/no-behavior-telemetry-schema"
+fi
+mkdir -p "$backup/code-js"
+for module in "$remote_dir"/*.js; do
+  [[ -f "$module" ]] || continue
+  cp -a "$module" "$backup/code-js/"
+done
 if [[ -d "$remote_dir/docs/schemas" ]]; then
   cp -a "$remote_dir/docs/schemas" "$backup/telemetry-schemas"
 else
@@ -247,9 +249,11 @@ rollback() {
   if [[ -f "$remote_dir/package.json" ]]; then (cd "$remote_dir" && npm ci --omit=dev); fi
   if [[ -f "$backup/no-telemetry-service" ]]; then rm -f "$remote_dir/telemetry-service.js"; else cp -a "$backup/telemetry-service.js" "$remote_dir/telemetry-service.js"; fi
   if [[ -f "$backup/no-behavior-telemetry-schema" ]]; then rm -f "$remote_dir/behavior-telemetry-schema.js"; else cp -a "$backup/behavior-telemetry-schema.js" "$remote_dir/behavior-telemetry-schema.js"; fi
-  # 整体还原根目录 JS 模块集合（deploy 前存在哪些就恢复哪些）。
   rm -f "$remote_dir"/*.js
-  if compgen -G "$backup/code-js/*.js" > /dev/null; then cp -a "$backup/code-js"/*.js "$remote_dir"/; fi
+  for module in "$backup/code-js"/*.js; do
+    [[ -f "$module" ]] || continue
+    cp -a "$module" "$remote_dir/"
+  done
   rm -rf "$remote_dir/docs/schemas"
   if [[ ! -f "$backup/no-telemetry-schemas" ]]; then mkdir -p "$remote_dir/docs"; cp -a "$backup/telemetry-schemas" "$remote_dir/docs/schemas"; fi
   if [[ -f "$backup/no-stats-html" ]]; then rm -f "$remote_dir/web/stats.html"; else cp -a "$backup/stats.html" "$remote_dir/web/stats.html"; fi
@@ -310,16 +314,11 @@ mv "$lock_tmp" "$remote_dir/package-lock.json"
 mv "$code_stage/server.js" "$remote_dir/server.js"
 mv "$code_stage/telemetry-service.js" "$remote_dir/telemetry-service.js"
 mv "$code_stage/behavior-telemetry-schema.js" "$remote_dir/behavior-telemetry-schema.js"
-# 其余根目录 JS 模块（controller-router/lease/resume/liveness/telemetry、
-# enrollment-registry、pairing-*、protocol-controller、relay-state-store 等）整体安装，
-# 与 server.js 同属一个发布单元；遗漏会让启用 controller lane 时 ERR_MODULE_NOT_FOUND。
-for extra in "$code_stage"/*.js; do
-  [ -e "$extra" ] || continue
-  name="$(basename "$extra")"
-  case "$name" in
-    server.js|telemetry-service.js|behavior-telemetry-schema.js) continue ;;
-  esac
-  cp -a "$extra" "$remote_dir/$name"
+for module in "$code_stage"/*.js; do
+  [[ -f "$module" ]] || continue
+  # The staged route smoke imports these modules relative to its own directory.
+  # Retain the complete staging tree until that smoke succeeds.
+  cp -a "$module" "$remote_dir/"
 done
 mkdir -p "$remote_dir/docs"
 rm -rf "$remote_dir/docs/schemas"
@@ -407,7 +406,10 @@ if [[ -f "$backup/no-behavior-telemetry-schema" ]]; then rm -f "$remote_dir/beha
 # 公网验证失败时也必须删除新版残留并整体恢复旧集合。
 test -d "$backup/code-js"
 rm -f "$remote_dir"/*.js
-if compgen -G "$backup/code-js/*.js" > /dev/null; then cp -a "$backup/code-js"/*.js "$remote_dir"/; fi
+for module in "$backup/code-js"/*.js; do
+  [[ -f "$module" ]] || continue
+  cp -a "$module" "$remote_dir/"
+done
 rm -rf "$remote_dir/docs/schemas"
 if [[ ! -f "$backup/no-telemetry-schemas" ]]; then test -d "$backup/telemetry-schemas"; mkdir -p "$remote_dir/docs"; cp -a "$backup/telemetry-schemas" "$remote_dir/docs/schemas"; fi
 if [[ -f "$backup/no-stats-html" ]]; then rm -f "$remote_dir/web/stats.html"; else cp -a "$backup/stats.html" "$remote_dir/web/stats.html"; fi

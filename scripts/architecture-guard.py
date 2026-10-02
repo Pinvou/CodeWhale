@@ -883,7 +883,7 @@ def session_application_exports(text: str) -> tuple[tuple[str, ...], ...]:
 
 
 def session_application_export_surface_is_frozen(text: str) -> bool:
-    """Keep the six declarations unconditional and forbid top-level expansion.
+    """Keep the five declarations unconditional and forbid top-level expansion.
 
     Inspect only top-level items so the ordinary test module can still contain
     attributes and local macros. A macro at the root could add exports which a

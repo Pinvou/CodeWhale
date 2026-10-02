@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
+import vm from 'node:vm';
 import { fileURLToPath } from 'node:url';
 
 // Source-regex assertions use bounded character gaps (e.g. [\s\S]{0,200});
@@ -559,8 +560,25 @@ assert.match(remoteControlCommands,
 assert.match(hostFilePicker, /initialPathPending[\s\S]*?path === initialPath[\s\S]*?load\(null\)/,
   'a stale recent workspace must fall back to the normal host-file root instead of trapping the picker');
 // HTML5 拖放由当前可见输入框认领，再复用对应平台的上传通道。
-assert.match(chatView, /enabled=\{!remoteChatActive && bridge\.available && \(!isWeb \|\| can\('deviceFileUpload'\)\)\}/,
-  'normal-chat browser drop must be hidden for RemoteProxy and gate on the negotiated device upload capability');
+const normalChatDropGate = chatView.match(/enabled=\{(!remoteChatActive && bridge\.available && \(!isWeb \|\| can\('deviceFileUpload'\)\))\}/);
+assert.ok(normalChatDropGate,
+  'normal chat keeps the negotiated Web upload gate and never owns RemoteProxy drops');
+for (const remoteChatActive of [false, true]) {
+  for (const available of [false, true]) {
+    for (const isWeb of [false, true]) {
+      for (const uploadAllowed of [false, true]) {
+        const enabled = vm.runInNewContext(normalChatDropGate[1], {
+          remoteChatActive,
+          bridge: { available },
+          isWeb,
+          can: capability => capability === 'deviceFileUpload' && uploadAllowed,
+        });
+        assert.equal(enabled, !remoteChatActive && available && (!isWeb || uploadAllowed),
+          `drop gate: remote=${remoteChatActive}, bridge=${available}, web=${isWeb}, upload=${uploadAllowed}`);
+      }
+    }
+  }
+}
 assert.match(chatView, /onFiles=\{files => bridge\.attachments\.uploadDeviceFiles\(files\)\}/,
   'normal chat drop must reuse the device upload pipeline');
 assert.match(codexView, /onFiles=\{files => uploadDeviceFiles\(files, attachmentKey\)\}/,
