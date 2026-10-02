@@ -1248,6 +1248,7 @@
   var archiveSession = sessionsFeature.archiveSession;
   var restoreArchivedSession = sessionsFeature.restoreArchivedSession;
   var exportSessionArchive = sessionsFeature.exportSessionArchive;
+  var onSessionDeleted = sessionsFeature.onSessionDeleted;
   function runSyncOnSession(sid, fn) {
     if (!sid || sid === state.activeSessionId) { fn(); return; }
     var bg = sessionStates[sid]; if (!bg) return;
@@ -1272,6 +1273,16 @@
       loadWorkingSetFrom(restoreBuffer);
     }
   }
+  // Aux chat domain: reuses the injected pieces from chat/sessions (isBusyFor,
+  // the getBuffer family, ensureSessionBufferLoaded, purgeSessionBuffer,
+  // touchSessionBuffer); it does not build its own state or event listeners.
+  var auxChatFeature = installBridgeFeature("auxChat", {
+    state: state, invoke: invoke, bt: bt, sessionStates: sessionStates,
+    ensureSessionBufferLoaded: ensureSessionBufferLoaded,
+    purgeSessionBuffer: purgeSessionBuffer,
+    touchSessionBuffer: touchSessionBuffer,
+    isBusyFor: isBusyFor,
+  });
   // ── modeState 权威写回收敛点（评审 P1）────────────────────────────
   // 任何「invoke 返回 / 事件负载」带来的权威 modeState 更新都必须走
   // applyAuthoritativeModeState：内部统一 bump per-session epoch（作废
@@ -2885,6 +2896,13 @@
       cancelGeneration: cancelGeneration,
       cancelShellTask: cancelShellTask,
     },
+    auxChat: {
+      ensure: auxChatFeature.ensure,
+      send: auxChatFeature.send,
+      snapshot: auxChatFeature.snapshot,
+      discard: auxChatFeature.discard,
+      reset: auxChatFeature.reset,
+    },
     voice: {
       startVoiceInput: startVoiceInput,
       installVoiceAsr: installVoiceAsr,
@@ -2949,6 +2967,10 @@
       archiveSession: archiveSession,
       restoreArchivedSession: restoreArchivedSession,
       exportSessionArchive: exportSessionArchive,
+      // session:deleted subscription (see applyDeletedSession): the one
+      // deletion path feature code can observe per id — list_sessions
+      // excludes code-mode sessions, so slice-diffing alone misses them.
+      onSessionDeleted: onSessionDeleted,
       // Draft-state working directory selection (desktop only: system directory
       // dialog + the create_session workspacePath parameter; the web side has no
       // such channel, the UI guards on method existence).

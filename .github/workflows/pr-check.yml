@@ -967,7 +967,13 @@ jobs:
     # 否则 deny.toml 策略改动会静默漏检 cargo-deny。
     if: ${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.pure_release_backflow != 'true' && (needs.changes.outputs.rust_code == 'true' || needs.changes.outputs.rust_dependencies == 'true') }}
     runs-on: ubuntu-22.04
-    timeout-minutes: 30
+    # 30m 上限在缓存冷启动下不够:Cargo cache 是 save-if main-only(PR 永不保存),
+    # 且本 job 在 main 上遇到非 rust 合并(如纯前端依赖 bump)时被整体跳过、不产存档,
+    # 加上 actions 缓存池被高频小体积 npm 缓存挤占淘汰,PR 端经常 "No cache found"
+    # 冷跑(2026-10-02 回流批次 5/6 在 ~30m 整点被 cancel,证据 job 110876653922)。
+    # 冷跑全流程(fmt+两遍 clippy+doc+check+shear)实测需 35-50m,60m 留出余量;
+    # 缓存命中时(如 community-603 19m35s / community-602 25m36s)不受影响。
+    timeout-minutes: 60
     env:
       # Draft 只跑无系统依赖的 fmt 快检；Ready PR、Queue 与 main 跑 clippy。
       RUN_HEAVY_RUST_CHECKS: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
@@ -1983,6 +1989,7 @@ jobs:
             'features::memory::tests::topic_migration_' \
             'connector_introspection_guard_matches_complete_names_only' \
             'features::projects::tests::' \
+            'features::sessions::' \
             'run_with_timeout_reaps_and_stays_bounded' \
             'reap_killed_child_' \
             'features::browser::platform::windows::tests::' \
