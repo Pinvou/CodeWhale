@@ -432,6 +432,8 @@ React UI / ChatView
 | RC-T-025 | Windows 双端远程控制首次发布前必须删除或停止注册实验期旧远程 Command、Bridge API、独立历史存储和第二套正文 UI；不提供旧数据迁移或兼容代理。`SessionStore` 中的 `RemoteProxy` 是唯一历史与会话投影源，`ChatView` 是唯一正文界面 | P0 |
 | RC-T-026 | A 发送远程任务必须执行 `prepare → persist → dispatch`：可信 Rust 先生成稳定 `client_request_id`、`task_id`、输入摘要和覆盖所有非敏感语义参数的规范请求指纹，再将同一组标识与不含凭证的有界 pending/outbox 原子写入 `SessionStore.RemoteProxy`，持久化成功后才允许 `RemoteControl` 发送。只有 A 原进程存活、仍在原 resume 边界且恢复同一 live binding 时，才允许使用原 ID 和完全相同的规范请求向 B 幂等账本重试或通过 Journal/快照对账；同 ID 任一语义参数不同必须明确冲突。A 进程重启后只能从本地恢复 `outcome_unknown`，在 controller v1 未定义“新配对重新附着旧 B Session/账本”协议前，禁止自动发送、查询或对账旧请求。临时模型 Key 等不可持久负载在 dispatch 前丢失时，只有后端可证明从未尝试 dispatch 才能放弃原 pending，并由用户以新 ID 发起新请求；若是否发送不可确定，则必须保持 `outcome_unknown` | P0 |
 
+任务幂等与终态证明使用独立、有界、原子持久化的 B 台账，不代替 `SessionStore` 会话正文。B 启动必须先验证台账并原子关闭全部重启遗留任务，之后才能公开远控运行时；已派发且无法确认结果时只报告 `result_unknown`，不得重派。坏文件或恢复写入失败必须禁用该远控域并明确诊断，不得以空内存台账继续执行，也不得阻止已发布的 Legacy Web 恢复。旧租约标识只用于终态审计，不恢复配对、有效租约、密钥或令牌。
+
 ### 7.6 模型选择与临时凭证
 
 | 编号 | 需求 | 优先级 |

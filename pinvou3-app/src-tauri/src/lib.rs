@@ -1163,118 +1163,133 @@ pub fn run() {
                     pool.start_idle_reaper();
                     eprintln!("[pinvou3-app] engine pool ready (lazy spawn per session)");
                     // ── Windows 桌面双端远程控制（DEV-20 单一注册点） ──
-                    // E2E-06：B 端清理端口必须在任何终态（stop/refresh/远端断开/
-                    // 恢复失败）都能中断本代远端任务并回收其凭证。
-                    let controlled_device_manager = ControlledDeviceManager::default();
-                    controlled_device_manager.register_cleanup_sink(std::sync::Arc::new(
-                        commands::desktop_remote_controller_business::DesktopControlledCleanup::new(
+                    let desktop_boot = (|| -> Result<(), String> {
+                        // A corrupt/unwritable remote ledger disables this domain;
+                        // it must not prevent the released Legacy Web from resuming.
+                        let ledger = std::sync::Arc::new(
+                            crate::features::remote_control::controller::task::RemoteTaskLedger::open_recovered(
+                                crate::platform::paths::sessions_root().join("_remote_control_tasks.json"),
+                                0,
+                            ).map_err(|error| error.code.to_owned())?,
+                        );
+                        // E2E-06：B 端清理端口必须在任何终态（stop/refresh/远端断开/
+                        // 恢复失败）都能中断本代远端任务并回收其凭证。
+                        let controlled_device_manager = ControlledDeviceManager::default();
+                        controlled_device_manager.register_cleanup_sink(std::sync::Arc::new(
+                            commands::desktop_remote_controller_business::DesktopControlledCleanup::new(
+                                handle.clone(),
+                            ),
+                        ));
+                        handle.manage(controlled_device_manager);
+                        commands::desktop_remote_controlled::spawn_watchdog_reaper(handle.clone());
+                        handle.manage(ControllingDeviceManager::default());
+                        handle.manage(ControllingSessionManager::default());
+                        handle.manage(ControllingLaneState::default());
+                        handle.manage(ControlledLaneState::default());
+                        handle.manage(
+                            features::remote_control::controller::relay_runtime::ControlledOutboundState::default(),
+                        );
+                        handle.manage(CapabilitySnapshotManager::default());
+                        let temporary_models = commands::desktop_remote_model::shared_model_store();
+                        handle.manage(temporary_models.clone());
+                        let permission_authority = std::sync::Arc::new(PermissionAuthority::default());
+                        handle.manage(permission_authority.clone());
+                        let desktop_task_runtime = commands::desktop_remote_task::DesktopRemoteTaskRuntime::new(
                             handle.clone(),
-                        ),
-                    ));
-                    handle.manage(controlled_device_manager);
-                    commands::desktop_remote_controlled::spawn_watchdog_reaper(handle.clone());
-                    handle.manage(ControllingDeviceManager::default());
-                    handle.manage(ControllingSessionManager::default());
-                    handle.manage(ControllingLaneState::default());
-                    handle.manage(ControlledLaneState::default());
-                    handle.manage(
-                        features::remote_control::controller::relay_runtime::ControlledOutboundState::default(),
-                    );
-                    handle.manage(CapabilitySnapshotManager::default());
-                    let temporary_models = commands::desktop_remote_model::shared_model_store();
-                    handle.manage(temporary_models.clone());
-                    let permission_authority = std::sync::Arc::new(PermissionAuthority::default());
-                    handle.manage(permission_authority.clone());
-                    let desktop_task_runtime = commands::desktop_remote_task::DesktopRemoteTaskRuntime::new(
-                        handle.clone(),
-                        store_for_engine.clone(),
-                        pool.clone(),
-                        acp_pool_for_capabilities.clone(),
-                        temporary_models.clone(),
-                    );
-                    handle.manage(desktop_task_runtime.ledger());
-                    let desktop_attachments =
-                        commands::desktop_remote_attachment::DesktopRemoteAttachmentRuntime::from_session_store(
                             store_for_engine.clone(),
-                            desktop_task_runtime.service(),
+                            pool.clone(),
+                            acp_pool_for_capabilities.clone(),
+                            temporary_models.clone(),
+                            ledger,
                         );
-                    let desktop_artifacts =
-                        commands::desktop_remote_artifact::DesktopRemoteArtifactRuntime::with_default_registry(
-                            desktop_task_runtime.service(),
+                        handle.manage(desktop_task_runtime.ledger());
+                        let desktop_attachments =
+                            commands::desktop_remote_attachment::DesktopRemoteAttachmentRuntime::from_session_store(
+                                store_for_engine.clone(),
+                                desktop_task_runtime.service(),
+                            );
+                        let desktop_artifacts =
+                            commands::desktop_remote_artifact::DesktopRemoteArtifactRuntime::with_default_registry(
+                                desktop_task_runtime.service(),
+                            );
+                        let desktop_history =
+                            commands::desktop_remote_journal::DesktopRemoteJournalRuntime::journal_only(
+                                format!("boot-{}", std::process::id()),
+                            );
+                        desktop_task_runtime
+                            .hooks()
+                            .set_model_scope(temporary_models);
+                        desktop_task_runtime
+                            .hooks()
+                            .set_permission_scope(permission_authority);
+                        desktop_task_runtime.hooks().set_transfer_scope(std::sync::Arc::new(
+                            commands::desktop_remote_attachment::DesktopRemoteTransferScope::new(
+                                desktop_attachments.clone(),
+                                desktop_artifacts.clone(),
+                            ),
+                        ));
+                        desktop_task_runtime.hooks().set_journal(std::sync::Arc::new(
+                            commands::desktop_remote_journal::DesktopTaskEventSink::new(
+                                handle.clone(),
+                                desktop_history.journal().clone(),
+                            ),
+                        ));
+                        let recovered = desktop_task_runtime.recover_after_restart();
+                        if recovered > 0 {
+                            eprintln!(
+                                "[pinvou3-app] remote control: {recovered} in-flight task(s) closed after restart"
+                            );
+                        }
+                        handle.manage(desktop_task_runtime);
+                        handle.manage(desktop_attachments);
+                        handle.manage(desktop_artifacts);
+                        handle.manage(desktop_history);
+                        // DEV-20 composition: one B execution port for both
+                        // authenticated network ingress and B-local ChatView.
+                        let controlled_owner = std::sync::Arc::new(
+                            commands::desktop_remote_controller_business::DesktopControlledExecutionAdapter::new(
+                                handle.clone(),
+                            ),
                         );
-                    let desktop_history =
-                        commands::desktop_remote_journal::DesktopRemoteJournalRuntime::journal_only(
-                            format!("boot-{}", std::process::id()),
+                        let controlled_execution: DesktopControlledExecutionPort = controlled_owner.clone();
+                        let local_execution: DesktopLocalExecutionPort = controlled_owner;
+                        handle.manage(controlled_execution);
+                        handle.manage(local_execution);
+                        // The typed A projection port and the host event adapter
+                        // share the existing SessionStore and live role owners.
+                        // Verified encrypted ingress feeds the single typed
+                        // RemoteProxy projection path.
+                        let host_events: std::sync::Arc<
+                            dyn features::sessions::application::ports::ApplicationEventPort,
+                        > = std::sync::Arc::new(DesktopRemoteApplicationEvents(handle.clone()));
+                        let projector = std::sync::Arc::new(
+                            features::sessions::application::project_remote::RemoteProjectionService::new(
+                                store_for_engine.clone(),
+                                host_events,
+                            ),
                         );
-                    desktop_task_runtime
-                        .hooks()
-                        .set_model_scope(temporary_models);
-                    desktop_task_runtime
-                        .hooks()
-                        .set_permission_scope(permission_authority);
-                    desktop_task_runtime.hooks().set_transfer_scope(std::sync::Arc::new(
-                        commands::desktop_remote_attachment::DesktopRemoteTransferScope::new(
-                            desktop_attachments.clone(),
-                            desktop_artifacts.clone(),
-                        ),
-                    ));
-                    desktop_task_runtime.hooks().set_journal(std::sync::Arc::new(
-                        commands::desktop_remote_journal::DesktopTaskEventSink::new(
-                            handle.clone(),
-                            desktop_history.journal().clone(),
-                        ),
-                    ));
-                    let recovered = desktop_task_runtime.recover_after_restart();
-                    if recovered > 0 {
-                        eprintln!(
-                            "[pinvou3-app] remote control: {recovered} in-flight task(s) closed after restart"
+                        let projection = std::sync::Arc::new(
+                            app::remote_projection_adapter::RemoteProjectionAdapter::new(projector),
                         );
-                    }
-                    handle.manage(desktop_task_runtime);
-                    handle.manage(desktop_attachments);
-                    handle.manage(desktop_artifacts);
-                    handle.manage(desktop_history);
-                    // DEV-20 composition: one B execution port for both
-                    // authenticated network ingress and B-local ChatView.
-                    let controlled_owner = std::sync::Arc::new(
-                        commands::desktop_remote_controller_business::DesktopControlledExecutionAdapter::new(
-                            handle.clone(),
-                        ),
-                    );
-                    let controlled_execution: DesktopControlledExecutionPort = controlled_owner.clone();
-                    let local_execution: DesktopLocalExecutionPort = controlled_owner;
-                    handle.manage(controlled_execution);
-                    handle.manage(local_execution);
-                    // The typed A projection port and the host event adapter
-                    // share the existing SessionStore and live role owners.
-                    // Verified encrypted ingress feeds the single typed
-                    // RemoteProxy projection path.
-                    let host_events: std::sync::Arc<
-                        dyn features::sessions::application::ports::ApplicationEventPort,
-                    > = std::sync::Arc::new(DesktopRemoteApplicationEvents(handle.clone()));
-                    let projector = std::sync::Arc::new(
-                        features::sessions::application::project_remote::RemoteProjectionService::new(
-                            store_for_engine.clone(),
-                            host_events,
-                        ),
-                    );
-                    let projection = std::sync::Arc::new(
-                        app::remote_projection_adapter::RemoteProjectionAdapter::new(projector),
-                    );
-                    let projection_port: DesktopRemoteProjectionPort = projection.clone();
-                    handle.manage(projection);
-                    handle.manage(projection_port);
-                    handle.manage(
-                        features::sessions::application::dispatch_remote::RemoteDispatchService::new(
-                            store_for_engine.clone(),
-                            std::sync::Arc::new(
-                                commands::desktop_remote_task::DesktopRemoteTaskDispatchPort::new(
-                                    handle.clone(),
+                        let projection_port: DesktopRemoteProjectionPort = projection.clone();
+                        handle.manage(projection);
+                        handle.manage(projection_port);
+                        handle.manage(
+                            features::sessions::application::dispatch_remote::RemoteDispatchService::new(
+                                store_for_engine.clone(),
+                                std::sync::Arc::new(
+                                    commands::desktop_remote_task::DesktopRemoteTaskDispatchPort::new(
+                                        handle.clone(),
+                                    ),
                                 ),
                             ),
-                        ),
-                    );
-                    eprintln!("[pinvou3-app] Windows desktop remote control ready");
+                        );
+                        eprintln!("[pinvou3-app] Windows desktop remote control ready");
+                        Ok(())
+                    })();
+                    if let Err(error) = desktop_boot {
+                        eprintln!("[pinvou3-app] desktop remote control disabled: {error}");
+                    }
                     match remote_control_manager.resume() {
                         Ok(true) => eprintln!("[pinvou3-app] persistent Web access resumed"),
                         Ok(false) => {}
