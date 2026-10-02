@@ -28,6 +28,10 @@ const WATCHDOG_POLL_INTERVAL_MS: u64 = 1_000;
 /// 周期推进 B 端本地 watchdog。Tauri managed state 由 app 持有，这里只借用，
 /// 因此不改变 `ControlledDeviceManager` 的所有权与 Drop 语义。
 pub(crate) fn spawn_watchdog_reaper(app: AppHandle) {
+    crate::features::remote_control::controller::relay_runtime::log_controlled_event(
+        "lifecycle_checkpoint",
+        "runtime_started",
+    );
     tauri::async_runtime::spawn(async move {
         let mut last_projection = String::new();
         loop {
@@ -191,6 +195,10 @@ pub async fn desktop_remote_controlled_start(
     device_name: Option<String>,
     workspaces: Vec<DesktopControlledWorkspaceInput>,
 ) -> Result<ControlledStatus, String> {
+    crate::features::remote_control::controller::relay_runtime::log_controlled_event(
+        "lifecycle_checkpoint",
+        "start_requested",
+    );
     let started = std::time::Instant::now();
     let result = async {
     ensure_supported(&manager)?;
@@ -274,6 +282,13 @@ pub async fn desktop_remote_controlled_refresh(
     attachments: State<'_, Arc<super::desktop_remote_attachment::DesktopRemoteAttachmentRuntime>>,
     artifacts: State<'_, Arc<super::desktop_remote_artifact::DesktopRemoteArtifactRuntime>>,
 ) -> Result<ControlledStatus, String> {
+    let checkpoint = |detail| {
+        crate::features::remote_control::controller::relay_runtime::log_controlled_event(
+            "lifecycle_checkpoint",
+            detail,
+        );
+    };
+    checkpoint("refresh_requested");
     let started = std::time::Instant::now();
     let result = async {
         ensure_supported(&manager)?;
@@ -283,17 +298,25 @@ pub async fn desktop_remote_controlled_refresh(
             .ok()
             .map(|(lease, _)| lease.connection_id);
         let refresh = manager.begin_refresh().map_err(controlled_error)?;
+        checkpoint("refresh_retiring");
         if let Some(connection_id) = old_connection_id {
+            checkpoint("refresh_connection_cleanup_begin");
             attachments.uploads_cleanup_for_connection(&connection_id);
             artifacts.clear_connection(&connection_id);
+            checkpoint("refresh_connection_cleanup_done");
         }
         emit_status(&app, &manager.status());
         if let Some(generation) = old_generation {
+            checkpoint("refresh_relay_stop_begin");
             relay.stop_controller_relay(&generation);
+            checkpoint("refresh_relay_stop_done");
         }
+        checkpoint("refresh_state_rotation_begin");
         let operation = manager
             .complete_refresh_revoked(refresh)
             .map_err(controlled_error)?;
+        checkpoint("refresh_state_rotation_done");
+        checkpoint("refresh_worker_start_begin");
         let done = ControlledRelayWorker::start(
             app.clone(),
             relay.inner().clone(),
@@ -306,16 +329,30 @@ pub async fn desktop_remote_controlled_refresh(
         )
         .await
         .map_err(|error| error.to_string())?;
+        checkpoint("refresh_worker_start_done");
+        checkpoint("refresh_registration_wait_begin");
         match done.await {
             Ok(Ok(status)) => {
+                checkpoint("refresh_registration_wait_done");
                 emit_status(&app, &status);
                 Ok(status)
             }
-            Ok(Err(error)) => Err(error),
-            Err(_) => Err("pairing_registration_failed".to_owned()),
+            Ok(Err(error)) => {
+                checkpoint("refresh_registration_wait_failed");
+                Err(error)
+            }
+            Err(_) => {
+                checkpoint("refresh_registration_wait_failed");
+                Err("pairing_registration_failed".to_owned())
+            }
         }
     }
     .await;
+    checkpoint(if result.is_ok() {
+        "refresh_completed"
+    } else {
+        "refresh_failed"
+    });
     track_remote_control(
         &app,
         RemoteControlEvent::from_result(
@@ -335,6 +372,10 @@ pub fn desktop_remote_controlled_stop(
     attachments: State<'_, Arc<super::desktop_remote_attachment::DesktopRemoteAttachmentRuntime>>,
     artifacts: State<'_, Arc<super::desktop_remote_artifact::DesktopRemoteArtifactRuntime>>,
 ) -> Result<ControlledStatus, String> {
+    crate::features::remote_control::controller::relay_runtime::log_controlled_event(
+        "lifecycle_checkpoint",
+        "stop_requested",
+    );
     let started = std::time::Instant::now();
     let result = (|| {
         ensure_supported(&manager)?;
@@ -354,6 +395,10 @@ pub fn desktop_remote_controlled_stop(
             artifacts.clear_connection(&connection_id);
         }
         emit_status(&app, &stopped);
+        crate::features::remote_control::controller::relay_runtime::log_controlled_event(
+            "lifecycle_checkpoint",
+            "stop_completed",
+        );
         Ok(stopped)
     })();
     track_remote_control(
@@ -375,6 +420,10 @@ pub fn desktop_remote_controlled_disconnect_now(
     attachments: State<'_, Arc<super::desktop_remote_attachment::DesktopRemoteAttachmentRuntime>>,
     artifacts: State<'_, Arc<super::desktop_remote_artifact::DesktopRemoteArtifactRuntime>>,
 ) -> Result<ControlledStatus, String> {
+    crate::features::remote_control::controller::relay_runtime::log_controlled_event(
+        "lifecycle_checkpoint",
+        "disconnect_requested",
+    );
     ensure_supported(&manager)?;
     let connection_id = manager
         .live_runtime_context()
@@ -389,6 +438,10 @@ pub fn desktop_remote_controlled_disconnect_now(
         artifacts.clear_connection(&connection_id);
     }
     emit_status(&app, &status);
+    crate::features::remote_control::controller::relay_runtime::log_controlled_event(
+        "lifecycle_checkpoint",
+        "disconnect_completed",
+    );
     Ok(status)
 }
 

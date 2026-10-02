@@ -235,6 +235,10 @@ pub struct Pinvou3Bridge {
     /// RuntimeModelProvider 为本次引擎准备的内存凭据。Some 时是最终值，不能再被
     /// 环境变量或本地凭据库覆盖；Debug 由包装类型强制脱敏。
     pub runtime_model_credential: Option<RuntimeModelCredential>,
+    /// The remote-send boundary captured the final credential result. This
+    /// also records an intentional absence, preventing engine construction
+    /// from consulting mutable process or credential-store state again.
+    pub(crate) runtime_model_credential_frozen: bool,
     /// The app has supplied a complete task-scoped route. Process-wide model
     /// environment variables and discovery probes must not rewrite it.
     pub runtime_route_locked: bool,
@@ -300,6 +304,10 @@ impl std::fmt::Debug for Pinvou3Bridge {
             .field("workspace", &self.workspace)
             .field("session_model", &self.session_model)
             .field("runtime_model_credential", &self.runtime_model_credential)
+            .field(
+                "runtime_model_credential_frozen",
+                &self.runtime_model_credential_frozen,
+            )
             .field("runtime_route_locked", &self.runtime_route_locked)
             .field(
                 "runtime_vision_model",
@@ -444,6 +452,7 @@ impl Pinvou3Bridge {
             workspace: paths::user_home_dir(),
             session_model: None,
             runtime_model_credential: None,
+            runtime_model_credential_frozen: false,
             runtime_route_locked: false,
             runtime_vision_model: None,
             runtime_vision_credential: None,
@@ -973,8 +982,6 @@ impl Pinvou3Bridge {
     /// EnginePool probes the vLLM served name it clones this, renames the
     /// model, and puts it back into session_model, achieving "requests use
     /// vLLM's actual name".
-    /// 当前生效模型的副本(session > active)。EnginePool 探测 vLLM served name 后
-    /// 用它克隆→改 model 名→塞回 session_model,实现「请求用 vLLM 实际名字」。
     pub fn effective_model_owned(&self) -> Option<SavedModel> {
         self.effective_model().cloned()
     }
@@ -1340,8 +1347,15 @@ impl Pinvou3Bridge {
     /// Current active api_key (passed to the foundation's
     /// `DtConfig.api_key`).
     pub fn api_key(&self) -> String {
+        self.api_key_with_store(shared_credential_store())
+    }
+
+    pub(crate) fn api_key_with_store(&self, store: &dyn CredentialStore) -> String {
         if let Some(credential) = &self.runtime_model_credential {
             return credential.expose_api_key().to_string();
+        }
+        if self.runtime_model_credential_frozen {
+            return String::new();
         }
         if let Ok(v) = std::env::var("DEEPSEEK_API_KEY") {
             if !v.trim().is_empty() {
@@ -1349,10 +1363,25 @@ impl Pinvou3Bridge {
             }
         }
         if let Some(m) = self.effective_model() {
+            if let Some(reference) = &m.credential_ref {
+                match store.get(reference) {
+                    Ok(Some(key)) if !key.trim().is_empty() => return key,
+                    Ok(_) => {}
+                    Err(err) => {
+                        eprintln!(
+                            "[pinvou3-app] credential read failed for model {}: {}",
+                            m.id,
+                            err.user_message()
+                        );
+                    }
+                }
+            }
             // Local vLLM needs no auth: when the user leaves the key empty,
             // fall back to local-no-auth (the base requires a non-empty value).
-            let local_endpoint = m.preset == ModelPreset::LocalVllm && self.provider() == "vllm";
-            return Self::credential_for_model(m, local_endpoint, "model");
+            if m.preset == ModelPreset::LocalVllm && self.provider() == "vllm" {
+                return LOCAL_VLLM_API_KEY.to_string();
+            }
+            return m.api_key.clone();
         }
         match (
             self.prefs.advanced.model_preset.unwrap_or_default(),
@@ -1445,14 +1474,8 @@ impl Pinvou3Bridge {
             // selector already verified it with the image-recognition probe
             // (only supported models can be selected). The override mark
             // (disabled) may be a leftover from a historical probe
-            // misjudgment (e.g. kimi-for-coding was once backfilled after the
-            // probe pipeline returned 400); at runtime it is used per the fact
-            // that it was actually selected; a text model configured as a
-            // vision model is blocked by the frontend probe gate.
-            // 视觉模型自身能力不在此处拒绝:选择器已用识图探测验证(supported
-            // 才允许选中)。override 标记(disabled)可能是历史探测误判残留
-            // (如 kimi-for-coding 曾因探测链路 400 被回填),运行时按实际被
-            // 选中的事实使用;文本模型配成视觉模型由前端探测闸门挡住。
+            // misjudgment; at runtime it is used per the fact that it was
+            // actually selected.
             let api_key = runtime_vision
                 .and_then(|_| self.runtime_vision_credential.as_ref())
                 .map(|credential| credential.expose_api_key().to_owned())
@@ -3380,6 +3403,7 @@ mod tests {
             workspace: std::env::temp_dir(),
             session_model: None,
             runtime_model_credential: None,
+            runtime_model_credential_frozen: false,
             runtime_route_locked: false,
             runtime_vision_model: None,
             runtime_vision_credential: None,

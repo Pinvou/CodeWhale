@@ -2192,13 +2192,6 @@ Object.assign(dictJa.uiChat, {
   bgTasks: 'バックグラウンドタスク',
   bgTasksRunning: n => `${n} 件のバックグラウンドタスク実行中`,
 });
-// restored: baseline catalog descriptions (referenced by the model catalog data)
-Object.assign(dictJa.uiSettingsDetail.modelDescriptions, { '本地服务默认模型': 'ローカルサービスのデフォルトモデル'
-});
-// restored: inline catalog descriptions from jaBase (referenced by the model catalog)
-Object.assign(dictJa.uiSettingsDetail.modelDescriptions, { '高能力模型': '高性能モデル', '快速响应': '高速応答', '最新通用模型': '最新の汎用モデル', '代码场景': 'コーディング向け', '高速代码场景': '高速コーディング向け', '稳定可用': '安定版', '高性价比': 'コストパフォーマンス重視', '通用能力': '汎用', '兼容保留': '互換性オプション', '高速响应': '高速応答', '轻量模型': '軽量モデル'
-});
-
 // Windows デスクトップ遠隔操作：被制御側パネル（DEV-21）。
 dictJa["controlledDevice"] = {
   connectionTitle: "接続状態",
@@ -2414,6 +2407,7 @@ dictJa["remoteConversation"] = {
   modelSourceDevice: "相手のモデル",
   modelSourceMine: "自分のモデル",
   modelPickerTitle: "モデル",
+  modelRequired: "モデルを選択してください",
   modelNotExportable: "このモデルは遠隔では使用できません",
   modeChat: "通常モード",
   modeCode: "コードモード",
@@ -2453,6 +2447,7 @@ dictJa["remoteConversation"] = {
   draftCapacityExceeded: "一時下書きの上限に達したため、会話を切り替えるとこの下書きを保持できません。先に本文をコピーしてください。",
   sessionBusy: "このリモートセッションではタスクを実行中です。メッセージは保持されているため、しばらくしてから再試行してください。",
   temporaryModelCapabilityRequired: "相手側のバージョンは、あなたのモデルの使用にまだ対応していません。双方のクライアントを更新して再接続するか、被操作端末のモデルを使用してください。",
+  controlledModelCredentialUnavailable: "被操作端末の現在のモデルには認証情報が設定されていません。被操作端末でモデルを設定するか、あなたのモデルを使用して再試行してください。",
   errorGeneric: "操作に失敗しました。もう一度お試しください。",
   attachmentOnlyPrompt: "このタスクと一緒に送信された添付ファイルを処理してください。",
   addAttachment: "リモート添付を追加",
@@ -2478,3 +2473,9 @@ dictJa.uiSettings.remoteControl = 'デスクトップ遠隔操作';
 // （「ヘルプとフィードバック → 行動分析」と同じパターン）。
 dictJa.uiSettingsDetail.desktopRemoteControlEntryDesc = '接続コードを入力して相手の端末から本機に接続し、本機のモデルでタスクを実行できます。いつでも確認して切断できます。';
 dictJa.uiSettingsDetail.desktopRemoteControlBack = '一般に戻る';
+// restored: baseline catalog descriptions (referenced by the model catalog data)
+Object.assign(dictJa.uiSettingsDetail.modelDescriptions, { '本地服务默认模型': 'ローカルサービスのデフォルトモデル'
+});
+// restored: inline catalog descriptions from jaBase (referenced by the model catalog)
+Object.assign(dictJa.uiSettingsDetail.modelDescriptions, { '高能力模型': '高性能モデル', '快速响应': '高速応答', '最新通用模型': '最新の汎用モデル', '代码场景': 'コーディング向け', '高速代码场景': '高速コーディング向け', '稳定可用': '安定版', '高性价比': 'コストパフォーマンス重視', '通用能力': '汎用', '兼容保留': '互換性オプション', '高速响应': '高速応答', '轻量模型': '軽量モデル'
+});

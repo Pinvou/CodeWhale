@@ -139,6 +139,21 @@ fn authenticated_mapping_and_full_live_context_gate_mutations() {
     store
         .confirm_remote_mapping(&opened.local_session_id, &live, &mapping)
         .unwrap();
+    assert_ne!(
+        opened.remote_session_ref, mapping.controlled_session_id,
+        "A's remote reference and B's Session id are different namespaces"
+    );
+    let dispatch_context = store
+        .remote_dispatch_live_context(&opened.local_session_id, &opened.remote_session_ref)
+        .unwrap();
+    assert_eq!(dispatch_context, live);
+    store
+        .require_live_remote_mutation(
+            &opened.local_session_id,
+            &opened.remote_session_ref,
+            &dispatch_context,
+        )
+        .unwrap();
     store
         .confirm_remote_mapping(&opened.local_session_id, &live, &mapping)
         .unwrap();

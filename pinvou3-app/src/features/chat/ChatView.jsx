@@ -64,9 +64,10 @@ import {
 } from '../remote-control/chat-transcript-projection.mjs';
 import {
   liveRemoteProxyBinding,
-  activeRemoteTaskId,
+  activeLiveRemoteTaskId,
   remoteProxyHandshakeBinding,
   remoteProxyLeaseIdentity,
+  remoteProxyModelSelectionIdentity,
   remoteProxyPresentationState,
   remoteProjectionLabelKey,
   newRemoteTaskIntent,
@@ -95,7 +96,9 @@ import {
 import { createCapabilityRequestLoop } from '../remote-control/capability-request-loop.mjs';
 import {
   canUseControllerTemporaryModel,
+  clearResolvedRemoteModelRequiredError,
   normalizeRemoteModelSource,
+  remoteModelSelectionError,
 } from '../remote-control/remote-model-source.mjs';
 import { deriveRunningShellTasks, formatElapsedMs, tailOutputLines } from './background-tasks.js';
 import { useShellTaskCancel } from './shell-task-cancel.js';
@@ -130,13 +133,10 @@ const prefetchChatPanel = (key) => {
 // allowlist aligned with system projection kinds and render only that string;
 // never serialize the source entry, whose non-display fields are not UI data.
 const REMOTE_PROXY_SYSTEM_BODY_KINDS = new Set([
-  'tool',
   'approval',
-  'status',
   'error',
   'attachment',
   'artifact',
-  'snapshot_marker',
 ]);
 
 function remoteProxySystemBody(item) {
@@ -763,7 +763,7 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
     };
 
     // eslint-disable-next-line sonarjs/cognitive-complexity -- legacy main view: session/mode/artifact/browser state is highly cohesive; split refactor tracked separately
-    const ChatView = ({ theme, t, bs, prefill, prefillAppend = false, focusComposerTick = 0, onPrefillConsumed, onOpenEditor, justInstalledTool, setJustInstalledTool, onGotoSettings, onGotoModelSettings, onGotoTools, onBackScheduledRun, codeModeAvailable = false, onSwitchHomeMode, onRemoteModelSourceChange, browserDockAvailable = false, browserDockOpen = false, rightDockActivePanelId = null, onRightDockPanelSelectionChange, onOpenBrowserDock, remoteConnection = null, remoteModelSource = 'controlled_device' }) => {
+    const ChatView = ({ theme, t, bs, prefill, prefillAppend = false, focusComposerTick = 0, onPrefillConsumed, onOpenEditor, justInstalledTool, setJustInstalledTool, onGotoSettings, onGotoModelSettings, onGotoTools, onBackScheduledRun, codeModeAvailable = false, onSwitchHomeMode, onRemoteModelSourceChange, browserDockAvailable = false, browserDockOpen = false, rightDockActivePanelId = null, onRightDockPanelSelectionChange, onOpenBrowserDock, remoteConnection = null, remoteModelSource = 'controller_temporary' }) => {
       const chatCopy = t.uiChat;
       const chatViewCopy = t.uiChatView;
       const sceneCopy = chatCopy.sceneModes;
@@ -1009,42 +1009,6 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
       const showControlledTask = controlledDevice.status === 'connected' && controlledActiveTasks.length > 0;
       const activeSessionIdRef = useRef(activeSessionId);
       activeSessionIdRef.current = activeSessionId;
-      const computerUseCopy = t.uiComputerUse;
-      const computerUseSlice = (bs && bs.computerUse) || null;
-      // Fetch the authoritative computer-use state on session mount/switch: the banner and
-      // consent dialogs apply only to the active session; pending requests of background
-      // sessions are parked per session on the bridge side and resurface with this refresh
-      // when switching back. Before issuing the IPC, refreshStatus synchronously calls
-      // clearSessionRequests to drop pending dialogs left by the previous session (a pure
-      // state operation), so during the async refresh window the old session's consent
-      // dialogs are no longer clickable.
-      useEffect(() => {
-        if (!COMPUTER_USE_ENABLED || !bridge.available || !bridge.computerUse || !activeSessionId) return;
-        bridge.computerUse.refreshStatus(activeSessionId).catch(() => {});
-        // Missed-event fallback: if grant/stop events were missed by the frontend (e.g. a
-        // refresh or a backgrounded window), the banner would drift from the real
-        // authorization state — this periodic refreshStatus reconciles with the backend,
-        // recovering missed grant/stop events so the banner realigns (a pure recovery
-        // mechanism; it does not change the authorization's own lifecycle).
-        // Skip polling while there is no last-known state yet (nothing has
-        // published a slice) or the last known state is disabled: a null
-        // slice used to still fire an empty round-trip every 30s, and a
-        // disabled feature has nothing to reconcile (the mount refresh above
-        // covers cold start; re-enabling goes through setEnabled, which
-        // re-reads the authoritative state directly and cannot miss the
-        // state flip).
-        const reconciler = setInterval(() => {
-          try {
-            const snapshot = bridge.state.get("computerUse");
-            const slice = snapshot && snapshot.computerUse;
-            if (!slice || slice.enabled === false) return;
-          } catch {
-            /* state.get unavailable: keep polling */
-          }
-          bridge.computerUse.refreshStatus(activeSessionId).catch(() => {});
-        }, 30_000);
-        return () => clearInterval(reconciler);
-      }, [activeSessionId]);
       const localBusy = bs ? bs.busy : false;
       const remoteBinding = useMemo(
         () => liveRemoteProxyBinding(activeSessionId, remoteProxyHistory, remoteConnection),
@@ -1067,7 +1031,9 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
       const effectiveRemoteModelSource = remoteMode === 'code'
         ? 'controlled_device'
         : normalizeRemoteModelSource(remoteModelSource, scopedRemoteConnection);
-      const remoteModelBindingKey = remoteBinding ? remoteSendIdentity : '';
+      const remoteModelBindingKey = remoteBinding
+        ? remoteProxyModelSelectionIdentity(activeSessionId, scopedRemoteConnection)
+        : '';
       const remoteCapabilities = bs?.remoteCapabilities
         && bs.remoteCapabilities.connectionId === scopedRemoteConnection?.connectionId
         && bs.remoteCapabilities.controllerLeaseId === scopedRemoteConnection?.controllerLeaseId
@@ -1099,26 +1065,31 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
         ? pendingPermissionCoordinationIds[0]
         : (attachmentCoordinationIds.length === 1 ? attachmentCoordinationIds[0] : '');
       const currentRemoteTaskId = useMemo(
-        () => remoteChatActive ? activeRemoteTaskId(activeSessionId, remoteProxyHistory) : null,
-        [activeSessionId, remoteChatActive, remoteProxyHistory],
+        () => remoteChatActive
+          ? activeLiveRemoteTaskId(activeSessionId, remoteProxyHistory, scopedRemoteConnection)
+          : null,
+        [activeSessionId, remoteChatActive, remoteProxyHistory, scopedRemoteConnection],
       );
+      const remoteModelListingRequestIdentity = remoteBinding ? remoteSendIdentity : '';
       const [remoteModelsForBinding, setRemoteModelsForBinding] = useState({ key: '', models: [] });
       const [remoteModelSelection, setRemoteModelSelection] = useState({ key: '', modelId: '' });
       useEffect(() => {
         let cancelled = false;
-        if (!remoteModelBindingKey || !remoteTemporaryModelAvailable || !bridge.available) return undefined;
+        if (!remoteModelBindingKey || !remoteModelListingRequestIdentity
+          || !remoteTemporaryModelAvailable || !bridge.available) return undefined;
+        const listingKey = remoteModelBindingKey;
         bridge.desktopRemoteControl.listExportableModels()
           .then(models => {
             if (!cancelled) setRemoteModelsForBinding({
-              key: remoteModelBindingKey,
+              key: listingKey,
               models: (Array.isArray(models) ? models : []).filter(model => model?.exportable === true),
             });
           })
           .catch(() => {
-            if (!cancelled) setRemoteModelsForBinding({ key: remoteModelBindingKey, models: [] });
+            if (!cancelled) setRemoteModelsForBinding({ key: listingKey, models: [] });
           });
         return () => { cancelled = true; };
-      }, [remoteModelBindingKey, remoteTemporaryModelAvailable]);
+      }, [remoteModelBindingKey, remoteModelListingRequestIdentity, remoteTemporaryModelAvailable]);
       useEffect(() => {
         if (!remoteBinding || !scopedRemoteConnection?.sessionRef || !bridge.available) return undefined;
         let cancelled = false;
@@ -1170,13 +1141,21 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
       const exportableRemoteModels = remoteModelsForBinding.key === remoteModelBindingKey
         ? remoteModelsForBinding.models : [];
       const selectedRemoteModelId = selectedExportableRemoteModelId(
-        remoteModelBindingKey, remoteModelsForBinding, remoteModelSelection,
+        remoteModelBindingKey, remoteModelsForBinding, remoteModelSelection, bs?.activeModelId,
       );
       const remoteModeReady = remoteModes.includes(remoteMode)
         && (remoteMode !== 'code' || remoteWorkspaces.some(item => item.workspaceId === remoteWorkspaceId));
-      const remoteDispatchReady = remoteLinkReady && remoteCapabilityFresh && remoteModeReady
-        && (effectiveRemoteModelSource === 'controlled_device' || !!selectedRemoteModelId);
-      const remoteNewDispatchReady = remoteDispatchReady
+      const remoteTaskContextReady = remoteLinkReady && remoteCapabilityFresh && remoteModeReady;
+      const remoteModelError = remoteModelSelectionError(
+        effectiveRemoteModelSource, selectedRemoteModelId,
+      );
+      useEffect(() => {
+        setRemoteSendError(current => clearResolvedRemoteModelRequiredError(
+          current, remoteSendIdentity, remoteModelError,
+        ));
+      }, [remoteModelError, remoteSendIdentity]);
+      const remoteDispatchReady = remoteTaskContextReady && !remoteModelError;
+      const remoteNewDispatchReady = remoteTaskContextReady
         && !pendingRemoteDispatches.some(item => item.state === 'prepared_not_sent');
       useEffect(() => {
         setRemoteFiles([]);
@@ -1319,6 +1298,48 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
         : (controlledChatActive
           ? (localBusy || controlledCapabilityBusy || !controlledCapabilityBound)
           : localBusy);
+      // Capability refresh/readiness may block sending without representing an
+      // active turn. A follows its authenticated remote task; B follows only
+      // the actual local generation state so completed turns stay done.
+      const conversationBusy = remoteChatActive
+        ? !!currentRemoteTaskId
+        : (controlledChatActive ? localBusy : busy);
+      const computerUseCopy = t.uiComputerUse;
+      const computerUseSlice = (bs && bs.computerUse) || null;
+      // Fetch the authoritative computer-use state on session mount/switch: the banner and
+      // consent dialogs apply only to the active session; pending requests of background
+      // sessions are parked per session on the bridge side and resurface with this refresh
+      // when switching back. Before issuing the IPC, refreshStatus synchronously calls
+      // clearSessionRequests to drop pending dialogs left by the previous session (a pure
+      // state operation), so during the async refresh window the old session's consent
+      // dialogs are no longer clickable.
+      useEffect(() => {
+        if (!COMPUTER_USE_ENABLED || !bridge.available || !bridge.computerUse || !activeSessionId) return;
+        bridge.computerUse.refreshStatus(activeSessionId).catch(() => {});
+        // Missed-event fallback: if grant/stop events were missed by the frontend (e.g. a
+        // refresh or a backgrounded window), the banner would drift from the real
+        // authorization state — this periodic refreshStatus reconciles with the backend,
+        // recovering missed grant/stop events so the banner realigns (a pure recovery
+        // mechanism; it does not change the authorization's own lifecycle).
+        // Skip polling while there is no last-known state yet (nothing has
+        // published a slice) or the last known state is disabled: a null
+        // slice used to still fire an empty round-trip every 30s, and a
+        // disabled feature has nothing to reconcile (the mount refresh above
+        // covers cold start; re-enabling goes through setEnabled, which
+        // re-reads the authoritative state directly and cannot miss the
+        // state flip).
+        const reconciler = setInterval(() => {
+          try {
+            const snapshot = bridge.state.get("computerUse");
+            const slice = snapshot && snapshot.computerUse;
+            if (!slice || slice.enabled === false) return;
+          } catch {
+            /* state.get unavailable: keep polling */
+          }
+          bridge.computerUse.refreshStatus(activeSessionId).catch(() => {});
+        }, 30_000);
+        return () => clearInterval(reconciler);
+      }, [activeSessionId]);
       // 停止按钮 single-flight:busy 在首次 cancel_generation 返回前就复位,
       // 双击会发第二个并发取消请求。cancellingSessionIds 在 invoke 完成前禁用
       // **对应 session** 的按钮（按 session 集合记录而非全局布尔或单个 sid：
@@ -1703,7 +1724,7 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
         const spawnAnnotatedItems = annotateAgentSpawnGroups(visibleChatItems);
         const conversationProjection = projectDeepSeekConversation({
           chatItems: conversationItemsForMode(spawnAnnotatedItems),
-          busy,
+          busy: conversationBusy,
           thinking: chatThinking,
           tokens: ctxTokens,
           sessionId: activeSessionId,
@@ -1720,7 +1741,7 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
           if (turns[i].status === 'running') { activeConversationTurn = turns[i]; break; }
         }
         return { latestArtifactIds, latestArtifactIdsKey, lastUserId, conversationProjection, activeConversationTurn };
-      }, [displayChatItems, busy, ctxTokens, isScheduledTaskCreationChat, chatThinking, turnTimeline, activeSessionId, modelServiceLanguage, chatModelServiceState]);
+      }, [displayChatItems, conversationBusy, ctxTokens, isScheduledTaskCreationChat, chatThinking, turnTimeline, activeSessionId, modelServiceLanguage, chatModelServiceState]);
       const { latestArtifactIds, latestArtifactIdsKey, lastUserId, conversationProjection, activeConversationTurn } = derivedConversation;
 
       // External entries can prefill the composer and focus its end.
@@ -2146,6 +2167,10 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
             setRemoteSendError({ identity: sendIdentity, code: 'remote_task_intent_invalid' });
             return false;
           }
+          if (remoteModelError) {
+            setRemoteSendError({ identity: sendIdentity, code: remoteModelError });
+            return false;
+          }
           try {
             const taskText = outgoing || t.remoteConversation.attachmentOnlyPrompt;
             const intent = newRemoteTaskIntent(
@@ -2279,7 +2304,7 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
         // composer (first-turn materialization abort, session switch);
         // restoring again would duplicate it.
         return dispatchResult;
-      }, [activeSessionId, attachments, controlledCapabilityBound, controlledCapabilityBusy, controlledChatActive, controlledLinkReady, controlledSession.sessionId, controlledSkillIds, dataVisualizationSceneActive, documentWritingSceneActive, effectiveRemoteModelSource, hasReadyAttachment, personalWorkbenchSceneActive, pptDesignSceneActive, remoteBinding, remoteChatActive, remoteFiles, remoteMode, remoteNewDispatchReady, remoteProxyHistory, remoteSendIdentity, remoteSkillIds, remoteWorkspaceId, selectedRemoteModelId, t, visualPosterSceneActive]);
+      }, [activeSessionId, attachments, controlledCapabilityBound, controlledCapabilityBusy, controlledChatActive, controlledLinkReady, controlledSession.sessionId, controlledSkillIds, dataVisualizationSceneActive, documentWritingSceneActive, effectiveRemoteModelSource, hasReadyAttachment, personalWorkbenchSceneActive, pptDesignSceneActive, remoteBinding, remoteChatActive, remoteFiles, remoteMode, remoteModelError, remoteNewDispatchReady, remoteProxyHistory, remoteSendIdentity, remoteSkillIds, remoteWorkspaceId, selectedRemoteModelId, t, visualPosterSceneActive]);
 
       // SessionStore mapping/lease establishment is owned by the A-side
       // authenticated ensure/bind command, never by an implicit ChatView open.
@@ -2497,7 +2522,11 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
         ? t.remoteConversation.sessionBusy
         : (currentRemoteSendError === 'temporary_model_capability_required'
           ? t.remoteConversation.temporaryModelCapabilityRequired
-          : (currentRemoteSendError ? t.remoteConversation.errorGeneric : null));
+          : (currentRemoteSendError === 'remote_model_required'
+            ? t.remoteConversation.modelRequired
+            : (currentRemoteSendError === 'model_credential_unavailable'
+              ? t.remoteConversation.controlledModelCredentialUnavailable
+              : (currentRemoteSendError ? t.remoteConversation.errorGeneric : null))));
       const sendChatMessage = useCallback(async (text, voiceContext) => {
         const operationId = voiceContext?.operationId
           || bridge.voice.getVoiceOperationId(activeSessionId || null, 'chat');
@@ -4239,13 +4268,13 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
                       <span className="truncate">{workspaceName(sessionWorkspaceBinding, t.uiChatWorkspace.unknownDirectory)}</span>
                     </span>
                   )}
-                    <ComposerModeChip t={t} bs={bs} compact={composerCompact} onSwitch={handleModeChipSwitch} />
+                  <ComposerModeChip t={t} bs={bs} compact={composerCompact} onSwitch={handleModeChipSwitch} />
                   {/* Scheduled run conversations expose no swarm toggle:
                       the backend's swarm_mode_available excludes them (the
                       engine always assembles plain config there), so the
                       entry hides up front instead of erroring on click. */}
-                    <ComposerModelSelector t={t} bs={bs} onGotoSettings={onGotoModelSettings || onGotoSettings} compact={composerCompact} multiAgentAvailable={!scheduledRunContext} />
-                    <ComposerToolMenu t={t} onGotoTools={onGotoTools} sessionId={bs && bs.activeSessionId} compact={composerCompact} activeSkill={bs && bs.activeSkill} />
+                  <ComposerModelSelector t={t} bs={bs} onGotoSettings={onGotoModelSettings || onGotoSettings} compact={composerCompact} multiAgentAvailable={!scheduledRunContext} />
+                  <ComposerToolMenu t={t} onGotoTools={onGotoTools} sessionId={bs && bs.activeSessionId} compact={composerCompact} activeSkill={bs && bs.activeSkill} />
                     <ComposerKbSelector t={t} bs={bs} compact={composerCompact} />
                   </>}
                   {controlledChatActive && !remoteChatActive && (

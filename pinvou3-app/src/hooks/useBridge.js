@@ -72,16 +72,20 @@ function activeModelIsLocal(bs) {
 
 // API Key gate 只覆盖正在交互的聊天页。设置页必须始终可达，否则首次启动时
 // “去配置”按钮会把用户送到仍被 gate 盖住的设置页，形成无法录入 Key 的死锁。
-function shouldShowApiKeyGate(bs, currentView, bridgeAvailable) {
+function shouldShowApiKeyGate(bs, currentView, bridgeAvailable, isControlledChatActive = false) {
   const inChat = currentView === 'chat'
     || (currentView === 'scheduled' && !!(bs && bs.scheduledRunContext));
+  // 被控端连接后，聊天页承载的是远端任务和稍后创建的权威 Session，不能再用
+  // 当前本机普通会话的模型配置弹出 API Key 门控。重连期间也保持这一语义，避免
+  // 链路短暂抖动时弹窗盖住仍在恢复的被控对话；连接终止后则自然恢复本机门控。
   const config = bs && bs.effectiveModelConfig;
   const missingCredential = config
     && (config.credential_state === 'missing' || config.credential_state === 'unavailable');
   // 旧后端没有返回 requires_user_api_key 时保持原有安全门控；显式 false 表示凭据由
   // 运行时或无鉴权端点负责，前端不能要求用户手工填写 API Key。
   const requiresUserApiKey = config && config.requires_user_api_key !== false;
-  return !!(bridgeAvailable && inChat && missingCredential && requiresUserApiKey && !isLocalModel(config));
+  return !!(bridgeAvailable && inChat && !isControlledChatActive
+    && missingCredential && requiresUserApiKey && !isLocalModel(config));
 }
 
 export {

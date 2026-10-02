@@ -17,13 +17,13 @@ pub(crate) struct DesktopCapabilities {
     /// hook is required); on other platforms the native layer is a no-op and
     /// only the in-window Alt fallback is available.
     pub(crate) voice_shortcut_native: bool,
+    /// Windows-only desktop dual-end remote control backend.
+    pub(crate) desktop_remote_control_supported: bool,
     /// The Linux WebView (WebKitGTK) carries no image data to the page in
     /// paste events (an image clipboard surfaces an empty clipboardData), so
     /// composer pastes fall back to a native clipboard read; the macOS/Windows
     /// WebViews carry image items natively and need no fallback.
     pub(crate) paste_image_clipboard_read: bool,
-    /// Windows-only desktop dual-end remote control backend.
-    pub(crate) desktop_remote_control_supported: bool,
 }
 
 /// Sole production-release switch for macOS BrowserCore. Keep it `false` until physical
@@ -87,12 +87,11 @@ pub(crate) fn supports_desktop_remote_control(os: &str) -> bool {
 
 /// One client-side release switch shared with the Relay deployment contract.
 ///
-/// The feature is not released yet, so absence, malformed values, and every
-/// value other than the exact string `1` fail closed.  Operators use the same
-/// variable on the Relay and both Windows clients; disabling it hides the UI
-/// capability and prevents the two network entry commands from opening a
-/// remote-control lane.  Durable registry/tombstone data is not coupled to
-/// this switch.
+/// Windows clients expose the feature by default. Operators can still set the
+/// variable to the exact string `0` to hide the UI and reject every command;
+/// malformed values fail closed. The Relay keeps its separate deployment gate
+/// because enabling its controller runtime also requires enrollment secrets.
+/// Durable registry/tombstone data is not coupled to this switch.
 pub(crate) fn desktop_remote_control_enabled() -> bool {
     desktop_remote_control_enabled_for(
         std::env::consts::OS,
@@ -111,7 +110,7 @@ pub(crate) fn ensure_desktop_remote_control_enabled() -> Result<(), String> {
 }
 
 fn desktop_remote_control_enabled_for(os: &str, flag: Option<&str>) -> bool {
-    supports_desktop_remote_control(os) && flag == Some("1")
+    supports_desktop_remote_control(os) && matches!(flag, None | Some("1"))
 }
 
 pub(crate) const fn is_windows() -> bool {
@@ -162,12 +161,12 @@ mod tests {
         assert_eq!(capabilities.browser_cdp, is_windows());
         assert_eq!(capabilities.voice_shortcut_native, is_windows());
         assert_eq!(
-            capabilities.paste_image_clipboard_read,
-            cfg!(target_os = "linux")
-        );
-        assert_eq!(
             capabilities.desktop_remote_control_supported,
             desktop_remote_control_enabled()
+        );
+        assert_eq!(
+            capabilities.paste_image_clipboard_read,
+            cfg!(target_os = "linux")
         );
     }
 
@@ -192,11 +191,14 @@ mod tests {
     }
 
     #[test]
-    fn desktop_remote_control_release_switch_is_exact_and_windows_only() {
+    fn desktop_remote_control_is_default_on_and_windows_only() {
+        assert!(desktop_remote_control_enabled_for("windows", None));
         assert!(desktop_remote_control_enabled_for("windows", Some("1")));
-        for flag in [None, Some(""), Some("0"), Some("true"), Some("01")] {
+        for flag in [Some(""), Some("0"), Some("true"), Some("01")] {
             assert!(!desktop_remote_control_enabled_for("windows", flag));
         }
+        assert!(!desktop_remote_control_enabled_for("linux", None));
+        assert!(!desktop_remote_control_enabled_for("macos", None));
         assert!(!desktop_remote_control_enabled_for("linux", Some("1")));
         assert!(!desktop_remote_control_enabled_for("macos", Some("1")));
         if !desktop_remote_control_enabled() {
