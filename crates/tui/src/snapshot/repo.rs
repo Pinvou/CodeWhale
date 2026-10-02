@@ -438,6 +438,19 @@ impl SnapshotRepo {
                 "failed to clean a stale snapshot index.lock: {err}"
             ),
         }
+        match clear_stale_ref_locks(&git_dir, STALE_INDEX_LOCK_AGE) {
+            Ok(0) => {}
+            Ok(n) => tracing::warn!(
+                target: "snapshot",
+                "removed {n} stale ref-update lock(s) from the snapshot side repo; a \
+                 previous git update-ref was interrupted and snapshots were silently \
+                 failing since then"
+            ),
+            Err(err) => tracing::debug!(
+                target: "snapshot",
+                "failed to clean stale snapshot ref locks: {err}"
+            ),
+        }
         Ok(Self { git_dir, work_tree })
     }
 
@@ -1152,6 +1165,49 @@ fn clear_stale_lock_in(lock_path: &Path, stale_age: Duration, now: SystemTime) -
         Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(false),
         Err(err) => Err(err),
     }
+}
+
+/// Sweep stale ref-update locks (`refs/heads/**.lock`, `packed-refs.lock`).
+/// `update-ref HEAD` at commit time and `pack-refs` take them; a git killed
+/// mid-update leaves one behind and, like every git lockfile, nothing but
+/// this sweep ages it out — every later snapshot would then fail at the ref
+/// update with the loss surfacing nowhere. Returns how many stale locks
+/// were removed.
+fn clear_stale_ref_locks(git_dir: &Path, stale_age: Duration) -> io::Result<usize> {
+    let mut swept = 0;
+    if clear_stale_lock(&git_dir.join("packed-refs.lock"), stale_age)? {
+        swept += 1;
+    }
+    swept += clear_stale_ref_locks_in(&git_dir.join("refs").join("heads"), stale_age, 0)?;
+    Ok(swept)
+}
+
+/// Branch ref locks live one directory level per path segment
+/// (`refs/heads/feature/foo.lock`); the walk is depth-capped so a corrupt
+/// refs tree cannot turn the snapshot-open sweep into an unbounded
+/// traversal.
+fn clear_stale_ref_locks_in(dir: &Path, stale_age: Duration, depth: u8) -> io::Result<usize> {
+    const MAX_REF_LOCK_DEPTH: u8 = 16;
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(0),
+        Err(err) => return Err(err),
+    };
+    let mut swept = 0;
+    for entry in entries {
+        let entry = entry?;
+        let path = entry.path();
+        if entry.file_type()?.is_dir() {
+            if depth < MAX_REF_LOCK_DEPTH {
+                swept += clear_stale_ref_locks_in(&path, stale_age, depth + 1)?;
+            }
+        } else if path.extension().is_some_and(|ext| ext == "lock")
+            && clear_stale_lock(&path, stale_age)?
+        {
+            swept += 1;
+        }
+    }
+    Ok(swept)
 }
 
 fn cleanup_stale_pack_temps_in(
@@ -2666,6 +2722,44 @@ mod tests {
         let after = repo.list(usize::MAX).unwrap();
         assert_eq!(after.len(), 3);
         assert_eq!(after[0].label, "turn:new");
+    }
+
+    #[test]
+    fn open_or_init_sweeps_a_stale_ref_lock_but_keeps_a_fresh_one() {
+        let tmp = tempdir().unwrap();
+        let (repo, _home) = make_repo(tmp.path());
+        let workspace = repo.work_tree().to_path_buf();
+
+        // `update-ref HEAD` at commit time takes `refs/heads/<branch>.lock`;
+        // a git killed mid-update leaves it behind and every later snapshot
+        // then fails at the ref update, with nothing but this sweep to age
+        // it out. Exactly the stale lock goes, like index.lock; a fresh one
+        // may belong to a live git and must survive.
+        let refs_heads = repo.git_dir().join("refs").join("heads");
+        std::fs::create_dir_all(&refs_heads).unwrap();
+        let stale = refs_heads.join("main.lock");
+        std::fs::write(&stale, b"stale").unwrap();
+        let nested = refs_heads.join("feature").join("topic.lock");
+        std::fs::create_dir_all(nested.parent().unwrap()).unwrap();
+        std::fs::write(&nested, b"stale").unwrap();
+        for lock in [&stale, &nested] {
+            let old_time = SystemTime::now() - STALE_INDEX_LOCK_AGE - Duration::from_secs(60);
+            let file = File::options().write(true).open(lock).unwrap();
+            file.set_times(FileTimes::new().set_modified(old_time))
+                .unwrap();
+        }
+        let fresh = repo.git_dir().join("packed-refs.lock");
+        std::fs::write(&fresh, b"fresh").unwrap();
+
+        SnapshotRepo::open_or_init(&workspace).unwrap();
+
+        assert!(!stale.exists(), "stale ref lock should be removed");
+        assert!(!nested.exists(), "stale nested ref lock should be removed");
+        assert!(
+            fresh.exists(),
+            "a fresh ref lock may belong to a live git and must be kept"
+        );
+        let _ = std::fs::remove_file(&fresh);
     }
 
     #[test]
