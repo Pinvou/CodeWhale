@@ -53,6 +53,33 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+/// A narrow, process-only publication authority. Production uses the OS lease;
+/// deterministic transfer tests can inject an owner without filesystem effects.
+pub(crate) trait AttachmentReadOwner: std::fmt::Debug + Send + Sync {
+    fn path(&self) -> &Path;
+    fn read_bounded(&self, maximum_bytes: u64) -> std::io::Result<Vec<u8>>;
+    fn request_cleanup(&self);
+}
+
+impl PartialEq for dyn AttachmentReadOwner {
+    fn eq(&self, other: &Self) -> bool {
+        std::ptr::eq(self, other)
+    }
+}
+impl Eq for dyn AttachmentReadOwner {}
+
+impl AttachmentReadOwner for crate::platform::filesystem::PublishedPrivateFile {
+    fn path(&self) -> &Path {
+        self.path()
+    }
+    fn read_bounded(&self, maximum_bytes: u64) -> std::io::Result<Vec<u8>> {
+        self.read_bounded(maximum_bytes)
+    }
+    fn request_cleanup(&self) {
+        self.request_cleanup();
+    }
+}
+
 /// B-local managed attachment descriptor. The path is process-private and
 /// must never be serialized into task payloads, journals, or controller wire.
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -63,6 +90,8 @@ pub(crate) struct PublishedAttachment {
     pub(crate) mime_type: String,
     pub(crate) bytes: u64,
     pub(crate) sha256: String,
+    /// Process-only authority; never serialized or copied into a journal.
+    pub(crate) read_owner: Option<std::sync::Arc<dyn AttachmentReadOwner>>,
 }
 
 /// 单文件硬上限 20 MB —— 超大文件就算转 md 后 token 数也炸上下文。
@@ -270,13 +299,14 @@ pub fn ingest_attachment(path: &Path) -> Result<IngestResult, String> {
 /// the path returned by the B staging owner.
 pub(crate) fn ingest_staged_attachment(
     session_root: &Path,
-    staged_path: &Path,
-    display_name: &str,
-    expected_bytes: u64,
-    expected_sha256: &str,
+    attachment: &PublishedAttachment,
 ) -> Result<IngestResult, String> {
     use sha2::{Digest, Sha256};
-    use std::io::Read as _;
+
+    let staged_path = &attachment.path;
+    let display_name = attachment.display_name.as_str();
+    let expected_bytes = attachment.bytes;
+    let expected_sha256 = attachment.sha256.as_str();
 
     let mut components = Path::new(display_name).components();
     if display_name.is_empty()
@@ -293,6 +323,10 @@ pub(crate) fn ingest_staged_attachment(
     {
         return Err("task_attachment_invalid".to_owned());
     }
+    let owner = attachment
+        .read_owner
+        .as_ref()
+        .ok_or_else(|| "task_attachment_unavailable".to_owned())?;
     let canonical_session = std::fs::canonicalize(session_root)
         .map_err(|_| "task_attachment_unavailable".to_owned())?;
     let upload_root = canonical_session.join("remote_uploads");
@@ -310,7 +344,8 @@ pub(crate) fn ingest_staged_attachment(
     }
     let canonical_path =
         std::fs::canonicalize(staged_path).map_err(|_| "task_attachment_unavailable".to_owned())?;
-    if !canonical_path.starts_with(&canonical_upload_root)
+    if canonical_path != owner.path()
+        || !canonical_path.starts_with(&canonical_upload_root)
         || !std::fs::symlink_metadata(staged_path)
             .map_err(|_| "task_attachment_unavailable".to_owned())?
             .file_type()
@@ -318,35 +353,22 @@ pub(crate) fn ingest_staged_attachment(
     {
         return Err("task_attachment_invalid".to_owned());
     }
-    let mut file = std::fs::File::open(&canonical_path)
-        .map_err(|_| "task_attachment_unavailable".to_owned())?;
-    if file
-        .metadata()
-        .map_err(|_| "task_attachment_unavailable".to_owned())?
-        .len()
-        != expected_bytes
-    {
+    let bytes = owner
+        .read_bounded(expected_bytes)
+        .map_err(|_| "task_attachment_invalid".to_owned())?;
+    if bytes.len() as u64 != expected_bytes {
         return Err("task_attachment_invalid".to_owned());
     }
-    let mut hasher = Sha256::new();
-    let mut buffer = [0u8; 64 * 1024];
-    loop {
-        let read = file
-            .read(&mut buffer)
-            .map_err(|_| "task_attachment_unavailable".to_owned())?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-    }
-    let actual_sha256 = hasher
-        .finalize()
+    let actual_sha256 = Sha256::digest(&bytes)
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
     if actual_sha256 != expected_sha256 {
         return Err("task_attachment_invalid".to_owned());
     }
+    // All reopening by existing format parsers is protected by the SAME
+    // publication owner: neither the leaf nor any ancestor can be replaced,
+    // and no new writer can change bytes between verification and parsing.
     let mut result =
         ingest_attachment(&canonical_path).map_err(|_| "task_attachment_invalid".to_owned())?;
     if result.kind == "missing" {
@@ -368,14 +390,35 @@ mod staged_attachment_tests {
         std::fs::create_dir_all(&folder).unwrap();
         let path = folder.join("report.txt");
         let body = b"native attachment content";
-        std::fs::write(&path, body).unwrap();
+        let directory = crate::platform::filesystem::open_private_file_directory(&folder).unwrap();
+        let publication = crate::platform::filesystem::publish_private_read_path(
+            directory,
+            std::ffi::OsStr::new("report.txt"),
+            body,
+        );
+        if !crate::platform::filesystem::supports_private_read_path_publication() {
+            assert_eq!(
+                publication.unwrap_err().kind(),
+                std::io::ErrorKind::Unsupported
+            );
+            assert!(!path.exists());
+            return;
+        }
+        let owner = std::sync::Arc::new(publication.unwrap());
         let digest = Sha256::digest(body)
             .iter()
             .map(|byte| format!("{byte:02x}"))
             .collect::<String>();
-        let accepted =
-            ingest_staged_attachment(root.path(), &path, "report.txt", body.len() as u64, &digest)
-                .unwrap();
+        let descriptor = PublishedAttachment {
+            handle_id: "ctr-up-0001".into(),
+            path: owner.path().to_owned(),
+            display_name: "report.txt".into(),
+            mime_type: "text/plain".into(),
+            bytes: body.len() as u64,
+            sha256: digest.clone(),
+            read_owner: Some(owner),
+        };
+        let accepted = ingest_staged_attachment(root.path(), &descriptor).unwrap();
         assert_eq!(accepted.basename, "report.txt");
         assert!(
             accepted
@@ -389,22 +432,21 @@ mod staged_attachment_tests {
             ("report.txt", body.len() as u64 + 1, digest.as_str()),
             ("report.txt", body.len() as u64, "bad"),
         ] {
+            let mut invalid = descriptor.clone();
+            invalid.display_name = name.into();
+            invalid.bytes = size;
+            invalid.sha256 = sha.into();
             assert_eq!(
-                ingest_staged_attachment(root.path(), &path, name, size, sha).unwrap_err(),
+                ingest_staged_attachment(root.path(), &invalid).unwrap_err(),
                 "task_attachment_invalid"
             );
         }
         let outside = root.path().join("outside.txt");
         std::fs::write(&outside, body).unwrap();
+        let mut escaped = descriptor.clone();
+        escaped.path = outside;
         assert_eq!(
-            ingest_staged_attachment(
-                root.path(),
-                &outside,
-                "report.txt",
-                body.len() as u64,
-                &digest
-            )
-            .unwrap_err(),
+            ingest_staged_attachment(root.path(), &escaped).unwrap_err(),
             "task_attachment_invalid"
         );
     }

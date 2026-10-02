@@ -303,10 +303,7 @@ fn ingest_published_attachments(
         result.push(
             crate::features::files::file_ingest::ingest_staged_attachment(
                 session_root,
-                &attachment.path,
-                &attachment.display_name,
-                attachment.bytes,
-                &attachment.sha256,
+                &attachment,
             )?,
         );
     }
@@ -384,6 +381,12 @@ impl RemoteChatEnginePort for EnginePoolChatEngine {
             .pool
             .session_state_root(session_id)
             .map_err(|_| "task_session_not_found".to_owned())?;
+        // Retain the process-only publication owners through the complete
+        // engine turn, including later image/tool path reads and cancellation.
+        let _attachment_read_owners: Vec<_> = attachments
+            .iter()
+            .filter_map(|attachment| attachment.read_owner.clone())
+            .collect();
         let ingested =
             tokio::task::spawn_blocking(move || ingest_published_attachments(&root, attachments))
                 .await
@@ -802,18 +805,32 @@ mod tests {
         std::fs::create_dir_all(&staged).unwrap();
         let path = staged.join("report.txt");
         let body = b"attachment evidence reaches the model";
-        std::fs::write(&path, body).unwrap();
+        let publication = crate::platform::filesystem::publish_private_read_path(
+            crate::platform::filesystem::open_private_file_directory(&staged).unwrap(),
+            std::ffi::OsStr::new("report.txt"),
+            body,
+        );
+        if !crate::platform::filesystem::supports_private_read_path_publication() {
+            assert_eq!(
+                publication.unwrap_err().kind(),
+                std::io::ErrorKind::Unsupported
+            );
+            assert!(!path.exists());
+            return;
+        }
+        let owner = Arc::new(publication.unwrap());
         let digest = Sha256::digest(body)
             .iter()
             .map(|byte| format!("{byte:02x}"))
             .collect();
         let descriptor = PublishedAttachment {
             handle_id: "ctr-up-0001".to_owned(),
-            path: path.clone(),
+            path: owner.path().to_owned(),
             display_name: "report.txt".to_owned(),
             mime_type: "text/plain".to_owned(),
             bytes: body.len() as u64,
             sha256: digest,
+            read_owner: Some(owner),
         };
         let ingested = ingest_published_attachments(root.path(), vec![descriptor.clone()]).unwrap();
         assert_eq!(ingested.len(), 1);

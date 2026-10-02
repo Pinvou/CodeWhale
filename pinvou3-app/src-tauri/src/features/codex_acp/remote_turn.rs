@@ -600,6 +600,10 @@ impl RemoteCodeTurnPort for AcpPoolCodeTurnPort {
         } else {
             format!("{private_skill_prompt}\n<user_request>\n{content}\n</user_request>")
         };
+        let _attachment_read_owners: Vec<_> = attachments
+            .iter()
+            .filter_map(|attachment| attachment.read_owner.clone())
+            .collect();
         let attachments = if attachments.is_empty() {
             Vec::new()
         } else {
@@ -615,10 +619,7 @@ impl RemoteCodeTurnPort for AcpPoolCodeTurnPort {
                     .map(|attachment| {
                         crate::features::files::file_ingest::ingest_staged_attachment(
                             &ledger_root,
-                            &attachment.path,
-                            &attachment.display_name,
-                            attachment.bytes,
-                            &attachment.sha256,
+                            &attachment,
                         )
                     })
                     .collect::<Result<Vec<_>, _>>()
