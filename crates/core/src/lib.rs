@@ -402,10 +402,17 @@ fn resolve_resume_roots(
     params_cwd: Option<&PathBuf>,
     params_roots: Option<&[PathBuf]>,
 ) -> Result<(PathBuf, Vec<PathBuf>)> {
+    // A28-1: a RELATIVE cwd is rejected like the empty spelling — the
+    // validator's degenerate collapse would otherwise silently destroy the
+    // whole declared root set AND persist the relative primary, bricking
+    // every later resume of the row (the empty guard's own rationale,
+    // verbatim, covers this spelling).
     if let Some(cwd) = params_cwd
-        && cwd.as_os_str().is_empty()
+        && (cwd.as_os_str().is_empty() || !cwd.is_absolute())
     {
-        return Err(IntakeValidationError::err("cwd must not be empty"));
+        return Err(IntakeValidationError::err(
+            "cwd must be a non-empty absolute path",
+        ));
     }
     if let Some(roots) = params_roots {
         let cwd = params_cwd
@@ -1108,11 +1115,15 @@ impl ThreadManager {
     pub fn fork_thread(&mut self, params: &ThreadForkParams) -> Result<Option<NewThread>> {
         // An explicit empty cwd would persist a vacuous primary root
         // (`starts_with("")` is true for every path); reject it like the
-        // resume lane does instead of poisoning the fork durably.
+        // resume lane does instead of poisoning the fork durably. A28-1: a
+        // relative cwd is rejected for the same reason — the collapse would
+        // destroy the carried root set and persist the broken primary.
         if let Some(cwd) = params.cwd.as_ref()
-            && cwd.as_os_str().is_empty()
+            && (cwd.as_os_str().is_empty() || !cwd.is_absolute())
         {
-            return Err(IntakeValidationError::err("cwd must not be empty"));
+            return Err(IntakeValidationError::err(
+                "cwd must be a non-empty absolute path",
+            ));
         }
         let parent = self.store.get_thread(&params.thread_id)?;
         let Some(parent) = parent else {
@@ -1487,11 +1498,15 @@ impl Runtime {
             }
             ThreadRequest::Start(params) => {
                 // Same empty-cwd rejection as resume/fork: an explicit `""`
-                // would otherwise persist a vacuous primary root.
+                // would otherwise persist a vacuous primary root. A28-1: a
+                // relative cwd is the same destruction class (the collapse
+                // drops the declared roots and persists the broken primary).
                 if let Some(cwd) = params.cwd.as_ref()
-                    && cwd.as_os_str().is_empty()
+                    && (cwd.as_os_str().is_empty() || !cwd.is_absolute())
                 {
-                    return Err(IntakeValidationError::err("cwd must not be empty"));
+                    return Err(IntakeValidationError::err(
+                        "cwd must be a non-empty absolute path",
+                    ));
                 }
                 let cwd = params.cwd.clone().unwrap_or_else(|| {
                     std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
@@ -1779,9 +1794,12 @@ impl Runtime {
         workspace_roots: &[PathBuf],
     ) -> Result<Value> {
         if cwd.as_os_str().is_empty() || !cwd.is_absolute() {
-            return Err(anyhow::anyhow!(
+            // M27-4: typed as an intake error so the app-server maps it to
+            // HTTP 400 like every other IntakeValidationError (the bare
+            // anyhow made it a 500, contradicting the lane's own comment).
+            return Err(IntakeValidationError::err(
                 "invoke_tool workspace slot must be an absolute directory; \
-                 got an empty or relative cwd"
+                 got an empty or relative cwd",
             ));
         }
         let workspace_roots = validate_workspace_roots(cwd, workspace_roots)?;
@@ -4546,7 +4564,7 @@ mod tests {
             .resume_thread_with_history(&params, "deepseek".to_string())
             .expect_err("empty cwd must be rejected");
         assert!(
-            format!("{err:#}").contains("cwd must not be empty"),
+            format!("{err:#}").contains("non-empty absolute"),
             "unexpected error: {err:#}"
         );
         let persisted = manager
@@ -4571,8 +4589,41 @@ mod tests {
             .fork_thread(&params)
             .expect_err("empty cwd must be rejected");
         assert!(
-            format!("{err:#}").contains("cwd must not be empty"),
+            format!("{err:#}").contains("non-empty absolute"),
             "unexpected error: {err:#}"
+        );
+    }
+
+    #[test]
+    fn resume_with_a_relative_cwd_is_rejected_like_the_empty_spelling() {
+        // A28-1: a relative cwd used to pass the guard and hit the
+        // validator's degenerate collapse — the declared root set was
+        // silently destroyed, the relative primary persisted, and every
+        // later resume of the row failed (invoke_tool hard-rejects a
+        // relative workspace). The empty guard's own rationale applies
+        // verbatim; both spellings are now refused at the same gate.
+        let mut manager = seed_multi_root_parent("resume-relative-cwd");
+        let mut params = resume_params("thread-parent");
+        params.cwd = Some(PathBuf::from("."));
+        params.workspace_roots = Some(vec![PathBuf::from("/a"), PathBuf::from("/b")]);
+        let err = manager
+            .resume_thread_with_history(&params, "deepseek".to_string())
+            .expect_err("a relative cwd must be rejected");
+        assert!(
+            format!("{err:#}").contains("non-empty absolute"),
+            "unexpected error: {err:#}"
+        );
+        // The persisted row is untouched — no destroyed root set, no
+        // relative primary minted.
+        let persisted = manager
+            .state_store()
+            .get_thread("thread-parent")
+            .expect("read thread")
+            .expect("thread persisted");
+        assert_eq!(
+            persisted.cwd,
+            PathBuf::from("/repo/main"),
+            "a rejected resume must not mint the relative primary"
         );
     }
 
