@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import crypto, { createHash } from "node:crypto";
 import test from "node:test";
+import { readFileSync } from "node:fs";
 
 import { ControllerLivenessHooks } from "../controller-liveness.js";
 import { buildLivenessAttestationPreimage } from "../protocol-controller.js";
@@ -30,6 +31,28 @@ function heartbeat(role, sequence) {
     heartbeat_sequence: String(sequence),
   };
 }
+
+test("Rust B heartbeat contract keeps an older-than-30s lease resumable without B renewing A", async () => {
+  const rustFrame = JSON.parse(readFileSync(new URL(
+    "../../pinvou3-app/tests/fixtures/controller_role_b_heartbeat.json", import.meta.url,
+  ), "utf8"));
+  const value = await started();
+  value.now = 29_000;
+  await value.hooks.handle({
+    message: rustFrame, socket_identity: "socket-B", role: "B", lease,
+  });
+  value.now = 31_000;
+  assert.equal(value.hooks.resumeDeadline(lease), null, "B alone cannot extend A's cutoff");
+  await value.hooks.handle({
+    message: heartbeat("A", 1), socket_identity: "socket-A", role: "A", lease,
+  });
+  assert.equal(value.hooks.resumeDeadline(lease), 59_000, "both roles keep the established lease eligible");
+  await assert.rejects(() => value.hooks.handle({
+    message: rustFrame, socket_identity: "socket-B", role: "B", lease,
+  }), /controller_liveness_sequence_replay/u);
+  value.now = 59_000;
+  assert.equal(value.hooks.resumeDeadline(lease), null, "deadline remains finite");
+});
 
 function challenge(requestId = "request-0001") {
   return {
