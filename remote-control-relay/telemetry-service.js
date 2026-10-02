@@ -24,6 +24,7 @@ import {
   BEHAVIOR_STORED_FIELDS,
   validateBehaviorEventShape,
 } from "./behavior-telemetry-schema.js";
+import { normalizeSnapshot as normalizeControllerTelemetrySnapshot } from "./controller-telemetry.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const TELEMETRY_PREFIX = "/pinvou3/telemetry";
@@ -199,7 +200,7 @@ export function createIpRegionResolver(options = {}) {
       const vectorIndex = loadVectorIndexFromFile(path);
       searchers.set(versionNumber, newWithVectorIndex(version, path, vectorIndex));
     } catch (error) {
-      console.error(`[telemetry] failed to initialize IPv${versionNumber} region database:`, error);
+      console.error(`[telemetry-error] region_database_init_failed_ipv${versionNumber}`);
     }
   }
   return {
@@ -212,7 +213,7 @@ export function createIpRegionResolver(options = {}) {
       try {
         return parseIp2Region(await searcher.search(ip));
       } catch (error) {
-        console.error(`[telemetry] failed to resolve IPv${version} region:`, error);
+        console.error(`[telemetry-error] region_lookup_failed_ipv${version}`);
         return null;
       }
     },
@@ -1095,6 +1096,47 @@ export function buildBehaviorOverview(devices, usageEvents, behaviorEvents, rang
   const voiceFunnel = buildVoiceFunnel(windowEvents, taskFinished);
   const activationFunnel = buildActivationFunnel(behaviorEvents, window, now);
   const versionQuality = buildVersionQuality(windowEvents);
+  const remoteEvents = windowEvents.filter((event) => event.event_name === "remote_control_event");
+  const remoteGroups = new Map();
+  const remoteLatencyBuckets = new Map();
+  const remoteModelSources = new Map();
+  const remoteSizeBuckets = new Map();
+  const remotePermissionSteps = new Map([
+    ["request", 0], ["allowed", 0], ["denied", 0], ["expired", 0],
+  ]);
+  for (const event of remoteEvents) {
+    const key = [event.remote_stage, event.remote_outcome, event.remote_reason].join("|");
+    const row = remoteGroups.get(key) || {
+      stage: event.remote_stage,
+      outcome: event.remote_outcome,
+      reason: event.remote_reason,
+      count: 0,
+    };
+    row.count += 1;
+    remoteGroups.set(key, row);
+    remoteLatencyBuckets.set(
+      event.remote_latency_bucket,
+      (remoteLatencyBuckets.get(event.remote_latency_bucket) || 0) + 1,
+    );
+    if (event.remote_model_source) {
+      remoteModelSources.set(
+        event.remote_model_source,
+        (remoteModelSources.get(event.remote_model_source) || 0) + 1,
+      );
+    }
+    if (event.remote_size_bucket) {
+      remoteSizeBuckets.set(
+        event.remote_size_bucket,
+        (remoteSizeBuckets.get(event.remote_size_bucket) || 0) + 1,
+      );
+    }
+    if (event.remote_permission_step) {
+      remotePermissionSteps.set(
+        event.remote_permission_step,
+        (remotePermissionSteps.get(event.remote_permission_step) || 0) + 1,
+      );
+    }
+  }
   const latestReceivedAt = Math.max(0, ...behaviorEvents.map(event => Number(event.received_at || event.occurred_at) || 0));
   const activeCollectionPresent = devices.some(device => isBehaviorInstallationDevice(device)
     && device.behavior_collection?.status === "active");
@@ -1179,6 +1221,22 @@ export function buildBehaviorOverview(devices, usageEvents, behaviorEvents, rang
     funnels: { activation: activationFunnel, voice: voiceFunnel },
     version_quality: versionQuality,
     error_categories: taskErrors,
+    remote_control: {
+      event_count: remoteEvents.length,
+      rows: [...remoteGroups.values()].sort((left, right) => (
+        left.stage.localeCompare(right.stage)
+          || left.outcome.localeCompare(right.outcome)
+          || left.reason.localeCompare(right.reason)
+      )),
+      latency_buckets: Object.fromEntries([...remoteLatencyBuckets.entries()].sort()),
+      model_sources: Object.fromEntries([...remoteModelSources.entries()].sort()),
+      size_buckets: Object.fromEntries([...remoteSizeBuckets.entries()].sort()),
+      permission_funnel: Object.fromEntries(remotePermissionSteps),
+      success_rate: reliableRate(
+        remoteEvents.filter((event) => event.remote_outcome === "ok").length,
+        remoteEvents.length,
+      ),
+    },
     data_quality: {
       minimum_reliable_sample: MIN_RELIABLE_SAMPLE,
       minimum_group_subjects: MIN_PRIVACY_GROUP_SUBJECTS,
@@ -1612,7 +1670,7 @@ function loadJson(path, fallback) {
   try {
     return JSON.parse(readFileSync(path, "utf8"));
   } catch (error) {
-    console.error(`[telemetry] failed to read ${path}:`, error);
+    console.error("[telemetry-error] persistence_read_failed");
     return fallback;
   }
 }
@@ -1637,7 +1695,7 @@ function atomicWriteJsonLines(path, values) {
 function enforcePrivateFile(path) {
   const metadata = lstatSync(path);
   if (metadata.isSymbolicLink() || !metadata.isFile()) {
-    throw new Error(`unsafe telemetry storage file: ${path}`);
+    throw new Error("unsafe telemetry storage file");
   }
   chmodSync(path, 0o600);
 }
@@ -1654,7 +1712,7 @@ export class TelemetryStore {
     mkdirSync(dataDir, { recursive: true, mode: 0o700 });
     const dataDirectory = lstatSync(dataDir);
     if (dataDirectory.isSymbolicLink() || !dataDirectory.isDirectory()) {
-      throw new Error(`unsafe telemetry data directory: ${dataDir}`);
+      throw new Error("unsafe telemetry data directory");
     }
     chmodSync(dataDir, 0o700);
     this.devices = new Map();
@@ -1925,7 +1983,7 @@ export class TelemetryStore {
         this.events.push(event);
       } catch (error) {
         rewriteNeeded = true;
-        console.error("[telemetry] skipped malformed usage event:", error);
+        console.error("[telemetry-error] malformed_usage_event_rejected");
       }
     }
     this.compactEvents(now, rewriteNeeded);
@@ -1967,7 +2025,7 @@ export class TelemetryStore {
         this.behaviorEvents.push(event);
       } catch (error) {
         rewriteNeeded = true;
-        console.error("[telemetry] skipped malformed behavior event:", error);
+        console.error("[telemetry-error] malformed_behavior_event_rejected");
       }
     }
     this.compactBehaviorEvents(now, rewriteNeeded);
@@ -2339,7 +2397,7 @@ export class TelemetryStore {
         );
         enforcePrivateFile(this.behaviorEventsPath);
       } catch (error) {
-        console.error("[telemetry] failed to persist behavior events:", error);
+        console.error("[telemetry-error] behavior_event_persist_failed");
         for (const index of acceptedResultIndexes) {
           response.results[index] = {
             event_id: response.results[index].event_id,
@@ -2415,7 +2473,7 @@ export class TelemetryStore {
       appendFileSync(this.behaviorPipelinePath, `${JSON.stringify(entry)}\n`, { mode: 0o600 });
       enforcePrivateFile(this.behaviorPipelinePath);
     } catch (error) {
-      console.error("[telemetry] failed to persist behavior pipeline counters:", error);
+      console.error("[telemetry-error] behavior_counter_persist_failed");
       return;
     }
     this.behaviorPipelineEvents.push(entry);
@@ -2635,7 +2693,7 @@ export function createTelemetryService(options = {}) {
     try {
       store.compactExpiredData(Date.now());
     } catch (error) {
-      console.error("[telemetry] scheduled retention compaction failed:", error);
+      console.error("[telemetry-error] retention_compaction_failed");
     }
   }, Math.max(60_000, Number(options.compactionIntervalMs) || 60 * 60_000)) : null;
   compactionTimer?.unref?.();
@@ -2651,6 +2709,9 @@ export function createTelemetryService(options = {}) {
     1,
     100_000,
   );
+  const controllerMetrics = typeof options.controllerMetrics === "function"
+    ? options.controllerMetrics
+    : () => ({ schema_version: 1, counters: {}, alerts: [], total: 0 });
 
   function bearer(req) {
     const value = String(req.headers.authorization || "");
@@ -2878,7 +2939,10 @@ export function createTelemetryService(options = {}) {
         }
       }
       if (req.method === "GET" && routePath === `${STATS_PREFIX}/api/overview`) {
-        json(res, 200, store.overview());
+        json(res, 200, {
+          ...store.overview(),
+          desktop_controller: normalizeControllerTelemetrySnapshot(controllerMetrics()),
+        });
         return true;
       }
       if (req.method === "GET" && routePath === `${STATS_PREFIX}/api/devices`) {
@@ -2912,7 +2976,7 @@ export function createTelemetryService(options = {}) {
       const code = Number(error?.status)
         || (error?.message === "payload_too_large" ? 413 : 400);
       if (!(error instanceof TelemetryHttpError)) {
-        console.error("[telemetry] request failed:", error);
+        console.error("[telemetry-error] request_failed");
       }
       json(res, code, { error: error?.message || "bad_request" });
       return true;
@@ -2922,7 +2986,7 @@ export function createTelemetryService(options = {}) {
   if (!enabled) {
     console.warn("[telemetry] disabled: configure enrollment token, device pepper and admin password");
   } else {
-    console.log(`[telemetry] ready data_dir=${dataDir} region_lookup=${regionResolver.enabled ? "enabled" : "disabled"}`);
+    console.log(`[telemetry] ready region_lookup=${regionResolver.enabled ? "enabled" : "disabled"}`);
   }
   return {
     enabled,

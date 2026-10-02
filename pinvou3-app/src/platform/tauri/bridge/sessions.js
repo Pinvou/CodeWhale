@@ -12,11 +12,15 @@
     // data (e.g. the scene cache key) on eviction. No return value.
     var onSessionBufferPurged = context.onSessionBufferPurged || null;
     var invoke = context.invoke;
+    var readRemoteProxyHistory = context.readRemoteProxyHistory;
+    var selectRemoteProxyHistory = context.selectRemoteProxyHistory;
+    var deleteRemoteProxyHistory = context.deleteRemoteProxyHistory;
     var listen = context.listen;
     var notify = context.notify;
     // System directory picker dialog injected by bridge.js.
     var dialogOpen = context.dialogOpen || null;
     var sessionStates = context.sessionStates;
+    var remoteProxyDrafts = context.remoteProxyDrafts;
     var scheduledRunSessionOwners = context.scheduledRunSessionOwners;
     var personaPlaceholderTitles = context.personaPlaceholderTitles;
     var runSyncOnSession = context.runSyncOnSession;
@@ -81,6 +85,9 @@
   var scheduledRunOwnerTouchClock = 0;
   var scheduledRunOpenInFlight = Object.create(null);
   var sessionSwitchRequestToken = 0;
+  // Navigation marker only: the record and transcript remain owned by
+  // SessionStore. This prevents local working-set persistence for a proxy.
+  var activeRemoteProxyId = null;
   var evictedSessionDrafts = Object.create(null);
   // Returns true when the buffer's non-rehydratable state is safely retained
   // (or empty) and the caller may drop the buffer; false means eviction must
@@ -500,8 +507,10 @@
     // that happens to be oldest, and the subsequent freshBuffer()
     // replacement would silently show an empty session.
     var previousActiveId = state.activeSessionId;
+    var previousWasRemoteProxy = isRemoteProxyView(previousActiveId);
     state.activeSessionId = id;
-    if (previousActiveId) saveWorkingSetTo(getBuffer(previousActiveId));
+    activeRemoteProxyId = null;
+    if (previousActiveId && !previousWasRemoteProxy) saveWorkingSetTo(getBuffer(previousActiveId));
     var buf = sessionStates[id];
     if (!buf || (opts && opts.fresh)) {
       buf = sessionStates[id] = freshBuffer();
@@ -527,6 +536,19 @@
   // 乱序返回时旧列表会覆盖新列表（如刚删除的会话复活、改名被回退）。用请求序号
   // 做后发者胜（审计）。
   var historyListSeq = 0;
+  function isRemoteProxyView(id) {
+    return !!(id && activeRemoteProxyId === id);
+  }
+
+  function isListedRemoteProxy(id) {
+    return !!(id && (state.remoteProxyHistories || []).some(function (record) {
+      return record && record.localSessionId === id;
+    }));
+  }
+
+  function isKnownRemoteProxy(id) {
+    return isRemoteProxyView(id) || isListedRemoteProxy(id);
+  }
   async function refreshHistoryList() {
     var seq = ++historyListSeq;
     try {
@@ -575,8 +597,11 @@
       notify();
       return;
     }
-    if (state.activeSessionId) saveWorkingSetTo(getBuffer(state.activeSessionId));
+    if (state.activeSessionId && !isRemoteProxyView(state.activeSessionId)) {
+      saveWorkingSetTo(getBuffer(state.activeSessionId));
+    }
     state.activeSessionId = null;
+    activeRemoteProxyId = null;
     loadWorkingSetFrom(freshBuffer());
     // freshBuffer 的 modeState 是通用缺省（yolo）；草稿显示须覆盖为本 lane
     // 全局默认（work lane 的 last_mode）。
@@ -1072,6 +1097,34 @@
       reportSessionSwitchFailure(new Error(bt("runHasNoSession")), errorScope);
       return false;
     }
+    if (isKnownRemoteProxy(id)) {
+      // Membership is only a routing hint. A successful, gated Rust read is
+      // required before adopting the ID; neither its prefix nor an old list
+      // entry is a proof that it is a visible RemoteProxy.
+      try {
+        if (typeof readRemoteProxyHistory !== "function") throw new Error("remote_proxy_not_found");
+        var remoteRecord = await readRemoteProxyHistory(id);
+        if (requestToken !== sessionSwitchRequestToken) return false;
+        if (!remoteRecord || remoteRecord.localSessionId !== id) throw new Error("remote_proxy_not_found");
+        if (state.activeSessionId && !isRemoteProxyView(state.activeSessionId)) {
+          saveWorkingSetTo(getBuffer(state.activeSessionId));
+        }
+        if (!preserveScheduledRunContext) state.scheduledRunContext = null;
+        state.scheduledTaskPendingGuide = null;
+        state.activeSessionId = id;
+        activeRemoteProxyId = id;
+        // No local Engine/ACP working set is created or hydrated for a proxy.
+        // ChatView reads the authenticated projection independently.
+        loadWorkingSetFrom(freshBuffer());
+        state.composerDraft = remoteProxyDrafts ? remoteProxyDrafts.get(id) : "";
+        if (typeof selectRemoteProxyHistory === "function") selectRemoteProxyHistory(remoteRecord);
+        notify();
+        return true;
+      } catch (error) {
+        if (requestToken === sessionSwitchRequestToken) reportSessionSwitchFailure(error, errorScope);
+        return false;
+      }
+    }
     if (hydrateLiveSession && !sessionStates[id]) {
       sessionStates[id] = freshBuffer();
       restoreEvictedSessionDraft(id, sessionStates[id]);
@@ -1138,10 +1191,13 @@
     if (requestToken !== sessionSwitchRequestToken) return false;
 
     // load_session 与必要的直接会话数据均成功后，才一次性提交 active/context。
-    if (state.activeSessionId) saveWorkingSetTo(getBuffer(state.activeSessionId));
+    if (state.activeSessionId && !isRemoteProxyView(state.activeSessionId)) {
+      saveWorkingSetTo(getBuffer(state.activeSessionId));
+    }
     if (!preserveScheduledRunContext) state.scheduledRunContext = null;
     state.scheduledTaskPendingGuide = null;
     state.activeSessionId = saved.metadata.id;
+    activeRemoteProxyId = null;
     if (hydrateLiveSession) {
       var liveBuffer = sessionStates[id] || freshBuffer();
       loadWorkingSetFrom(liveBuffer);
@@ -1324,6 +1380,7 @@
     }
     if (state.activeSessionId !== id) return;
     state.activeSessionId = null;
+    activeRemoteProxyId = null;
     loadWorkingSetFrom(freshBuffer());
   }
 
@@ -1379,7 +1436,21 @@
     });
   }
 
-  async function deleteSession(id) {
+  async function deleteSession(id, onRemoteProxyError) {
+    if (isKnownRemoteProxy(id)) {
+      try {
+        if (typeof deleteRemoteProxyHistory !== "function") return false;
+        await deleteRemoteProxyHistory(id);
+        if (remoteProxyDrafts) remoteProxyDrafts.delete(id);
+        leaveSessionView(id);
+        notify();
+        return true;
+      } catch (error) {
+        if (error && error.code === "remote_unattempted_pending_exists"
+          && typeof onRemoteProxyError === "function") onRemoteProxyError(error.code);
+        return false;
+      }
+    }
     try {
       // 后端按 SessionKind 分发:定时运行会话在 delete_session 里联动删除
       // 该次 Session、Run 与底座 Task,任务定义与共享工作间保留。
@@ -1393,6 +1464,7 @@
   }
 
   async function renameSession(id, title) {
+    if (isKnownRemoteProxy(id)) return false;
     invalidateScheduledRecentRunsForSession(id);
     try {
       await invoke("rename_session", { id: id, title: title });
@@ -1409,6 +1481,7 @@
   }
 
   async function toggleSessionPinned(id, pinned) {
+    if (isKnownRemoteProxy(id)) return false;
     invalidateScheduledRecentRunsForSession(id);
     var s = state.sessions.find(function (s) { return s.id === id; });
     var scheduledRun = recentScheduledRunForSession(id);
@@ -1454,6 +1527,7 @@
   }
 
   async function archiveSession(id) {
+    if (isKnownRemoteProxy(id)) return false;
     invalidateScheduledRecentRunsForSession(id);
     var idx = state.sessions.findIndex(function (s) { return s.id === id; });
     if (idx < 0) {
@@ -1602,6 +1676,8 @@
       hydratedChatItemKey: hydratedChatItemKey,
       mergeHydratedChatItems: mergeHydratedChatItems,
       switchToSessionInternal: switchToSessionInternal,
+      isRemoteProxyView: isRemoteProxyView,
+      isKnownRemoteProxy: isKnownRemoteProxy,
       switchToSession: switchToSession,
       openScheduledRunChatOnce: openScheduledRunChatOnce,
       openScheduledRunChat: openScheduledRunChat,

@@ -76,6 +76,7 @@ pub(crate) struct TransferBinding {
     pub(crate) connection_id: String,
     pub(crate) controller_lease_id: String,
     pub(crate) lease_epoch: String,
+    pub(crate) relay_epoch: String,
     pub(crate) remote_control_generation: String,
     pub(crate) session_id: String,
     pub(crate) task_id: String,
@@ -91,6 +92,7 @@ impl TransferBinding {
             connection_id: context.connection_id.clone(),
             controller_lease_id: context.controller_lease_id.clone(),
             lease_epoch: context.lease_epoch.clone(),
+            relay_epoch: context.relay_epoch.clone(),
             remote_control_generation: context.remote_control_generation.clone(),
             session_id: session_id.to_owned(),
             task_id: task_id.to_owned(),
@@ -104,6 +106,7 @@ impl TransferBinding {
             &self.connection_id,
             &self.controller_lease_id,
             &self.lease_epoch,
+            &self.relay_epoch,
             &self.remote_control_generation,
             &self.session_id,
             &self.task_id,
@@ -124,6 +127,7 @@ impl TransferBinding {
         self.connection_id == live.connection_id
             && self.controller_lease_id == live.controller_lease_id
             && self.lease_epoch == live.lease_epoch
+            && self.relay_epoch == live.relay_epoch
             && self.remote_control_generation == live.remote_control_generation
     }
 }
@@ -238,6 +242,7 @@ pub(crate) fn is_controller_handle_id(value: &str) -> bool {
 pub(crate) struct CompletedTransfer {
     pub(crate) handle_id: String,
     pub(crate) context: TransferContext,
+    pub(crate) metadata: TransferMetadata,
     pub(crate) sha256: String,
     pub(crate) bytes: u64,
 }
@@ -458,6 +463,7 @@ impl TransferRegistry {
         let completed = CompletedTransfer {
             handle_id: handle.id.clone(),
             context,
+            metadata: state.metadata.clone(),
             sha256: digest,
             bytes: total,
         };
@@ -512,6 +518,31 @@ impl TransferRegistry {
             .get(&handle.id)
             .ok_or_else(|| error("transfer_unknown"))?;
         if !state.context.binding.matches(live) {
+            return Err(error("transfer_binding_stale"));
+        }
+        Ok(())
+    }
+
+    /// A handle is not authority by itself. The B action receiver must bind
+    /// it to the authenticated lease, B session and task before chunk/abort.
+    pub(crate) fn require_upload_binding(
+        &self,
+        handle: &TransferHandle,
+        live: &LeaseContext,
+        session_id: &str,
+        task_id: &str,
+    ) -> Result<()> {
+        let inner = self.inner.lock();
+        let state = inner
+            .transfers
+            .get(&handle.id)
+            .ok_or_else(|| error("transfer_unknown"))?;
+        if handle.direction != TransferDirection::Upload
+            || state.context.direction != TransferDirection::Upload
+            || !state.context.binding.matches(live)
+            || state.context.binding.session_id != session_id
+            || state.context.binding.task_id != task_id
+        {
             return Err(error("transfer_binding_stale"));
         }
         Ok(())

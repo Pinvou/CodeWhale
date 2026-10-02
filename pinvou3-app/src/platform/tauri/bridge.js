@@ -73,16 +73,21 @@
 
   async function loadPlatformCapabilities() {
     try {
+      var detected = await invoke("get_platform_capabilities");
       state.platformCapabilities = Object.assign(
         {},
         state.platformCapabilities,
-        await invoke("get_platform_capabilities"),
-        { loaded: true }
+        detected,
+        { loaded: true, desktopRemoteControl: detected && detected.os === "windows" && detected.desktopRemoteControlSupported === true }
       );
     } catch (error) {
       console.warn("[platform] capability detection failed", error);
+      state.platformCapabilities = Object.assign({}, state.platformCapabilities, { loaded: false, desktopRemoteControl: false });
     }
-    notify();
+    notify("platform");
+    if (state.platformCapabilities.desktopRemoteControl === true && desktopRemoteControlFeature) {
+      desktopRemoteControlFeature.controllerStatus().catch(function () {});
+    }
     return state.platformCapabilities;
   }
 
@@ -204,6 +209,7 @@
     // 当前会话未发送的输入草稿。只存内存，随 session working set 切换；
     // 不落盘，避免把敏感的未发送内容带到下次启动。
     composerDraft: "",
+    remoteProxyDraftError: null,
     messages: [],      // Anthropic Messages schema
     chatItems: [],     // display items for React
     // DeepSeek Turn 生命周期(user_start / assistant_done)，来自 timing_events.jsonl；
@@ -233,6 +239,7 @@
     platformCapabilities: {
       loaded: false,
       os: "unknown",
+      desktopRemoteControl: false,
       showMegacubeSite: false,
       showSuperPermissionSettings: false,
       usesBundledDependencyInstaller: false,
@@ -818,6 +825,28 @@
   // buffer 跑同步逻辑再切回(saveWorkingSetTo/loadWorkingSetFrom),期间 suppressNotify
   // 避免把后台渲染成 active。异步收尾(落盘)按显式 session_id 路由,不依赖工作集。
   var sessionStates = {};
+  // Composer-only, in-memory RemoteProxy drafts. Never placed in a local
+  // Engine/ACP working set or written to the RemoteProxy history DTO.
+  var remoteProxyDraftValues = Object.create(null);
+  var remoteProxyDraftOrder = [];
+  var remoteProxyDrafts = {
+    get: function (id) { return remoteProxyDraftValues[id] || ""; },
+    has: function (id) { return Object.prototype.hasOwnProperty.call(remoteProxyDraftValues, id); },
+    set: function (id, value) {
+      var text = String(value || "");
+      if (!id || text.length > 1000000) return false;
+      if (!this.has(id)) {
+        if (remoteProxyDraftOrder.length >= 256) return false;
+        remoteProxyDraftOrder.push(id);
+      }
+      remoteProxyDraftValues[id] = text;
+      return true;
+    },
+    delete: function (id) {
+      delete remoteProxyDraftValues[id];
+      remoteProxyDraftOrder = remoteProxyDraftOrder.filter(function (entry) { return entry !== id; });
+    },
+  };
   var authoritativeTranscriptSyncs = Object.create(null);
   var authoritySyncTraceSequence = 0;
   var scheduledRunSessionOwners = Object.create(null);
@@ -1037,7 +1066,10 @@
   var chatFeature = installBridgeFeature("chat", {
     voice: function () { return voiceFeature; },
     state: state, invoke: invoke, TAURI: TAURI,
-    sessionStates: sessionStates, turnUsageDirty: turnUsageDirty,
+    sessionStates: sessionStates, remoteProxyDrafts: remoteProxyDrafts,
+    isKnownRemoteProxy: function (id) { return sessionsFeature && sessionsFeature.isKnownRemoteProxy(id); },
+    isRemoteProxyView: function (id) { return sessionsFeature && sessionsFeature.isRemoteProxyView(id); },
+    turnUsageDirty: turnUsageDirty,
     personaPlaceholderTitles: personaPlaceholderTitles,
     renderMarkdown: renderMarkdown, safeConsoleInfo: safeConsoleInfo,
     recordAuthoritySyncDiagnostic: recordAuthoritySyncDiagnostic,
@@ -1118,10 +1150,20 @@
 
   var sessionsFeature = installBridgeFeature("sessions", {
     state: state, invoke: invoke, listen: listen, notify: notify,
+    readRemoteProxyHistory: function (id) {
+      return desktopRemoteControlFeature.readRemoteProxyHistory(id, { navigation: true });
+    },
+    selectRemoteProxyHistory: function (record) {
+      return desktopRemoteControlFeature.selectRemoteProxyHistory(record);
+    },
+    deleteRemoteProxyHistory: function (id) {
+      return desktopRemoteControlFeature.deleteRemoteProxyHistory(id);
+    },
+    sessionStates: sessionStates, remoteProxyDrafts: remoteProxyDrafts,
     // The draft workspace picker uses the system directory dialog through the
     // bridge; React never touches Tauri globals directly.
     dialogOpen: dialogOpen,
-    sessionStates: sessionStates, scheduledRunSessionOwners: scheduledRunSessionOwners,
+    scheduledRunSessionOwners: scheduledRunSessionOwners,
     personaPlaceholderTitles: personaPlaceholderTitles, turnUsageDirty: turnUsageDirty,
     // Clean host-side per-session side tables when a session buffer is
     // deleted/evicted (modeStateEpochs is defined later in this file, so
@@ -1631,7 +1673,7 @@
   const STATE_SLICE_FIELDS = {
     platform: ["appVersion", "backendOnline", "platformCapabilities"],
     sessions: ["sessions", "archivedSessions", "activeSessionId", "sessionBusy", "draftEpoch", "draftWorkspacePath"],
-    chat: ["activeSkill", "artifacts", "artifactChange", "attachments", "busy", "chatItems", "composerDraft", "composerPrefill", "messages", "modeState", "planSnapshot", "queued", "thinking", "tokens", "turnDirtyArtifacts", "turnPresentedArtifacts", "turnTimeline"],
+    chat: ["activeSkill", "artifacts", "artifactChange", "attachments", "busy", "chatItems", "composerDraft", "composerPrefill", "messages", "modeState", "planSnapshot", "queued", "remoteProxyDraftError", "thinking", "tokens", "turnDirtyArtifacts", "turnPresentedArtifacts", "turnTimeline"],
     voice: ["voiceInput", "voiceAsrSetup"],
     knowledge: ["kbModelSetup", "mountedCollection", "mountedCollections", "mountedRemoteCollections", "mountedCollectionsRevision"],
     scheduled: ["scheduledRunContext", "scheduledTaskAutoOpenId", "scheduledTaskBusyAction", "scheduledTaskCreationSessionId", "scheduledTaskDetail", "scheduledTaskDraft", "scheduledTaskError", "scheduledTaskErrorKind", "scheduledTaskLoading", "scheduledTaskPendingGuide", "scheduledTaskRecentRuns", "scheduledTaskRuns", "scheduledTasks", "scheduledTaskSelectionGeneration", "selectedScheduledTaskId"],
@@ -1648,11 +1690,15 @@
     // Windows 双端远程控制（DEV-20）：与 Web 分享完全独立的状态域。
     desktopRemoteControl: [
       "controlledDevice",
+      "controlledSession",
       "controllerConnection",
       "remoteCapabilities",
       "remoteModels",
-      "remoteHistories",
-      "tasks",
+      "remoteProxyHistories",
+      "remoteProxyHistory",
+      "remoteProxyNotice",
+      "controlledTasks",
+      "controlledTranscript",
       "remotePermissions",
     ],
     updater: ["updateCancelling", "updateCheckError", "updateChecking", "updateDownloading", "updateError", "updateInfo", "updateProgress", "updateReady"],
@@ -2666,6 +2712,10 @@
     listen: listen,
     bt: bt,
     can: function (capability) {
+      if (capability === "desktopRemoteControl") {
+        var detected = state.platformCapabilities || {};
+        return detected.loaded === true && detected.os === "windows" && detected.desktopRemoteControl === true;
+      }
       return !!(state.platformCapabilities && state.platformCapabilities[capability] === true);
     },
   });
@@ -3079,20 +3129,28 @@
       controlledStop: desktopRemoteControlFeature.controlledStop,
       controlledDisconnectNow: desktopRemoteControlFeature.controlledDisconnectNow,
       controlledStatus: desktopRemoteControlFeature.controlledStatus,
+      controlledSync: desktopRemoteControlFeature.controlledSync,
+      clientEvent: desktopRemoteControlFeature.clientEvent,
+      endpointProfiles: desktopRemoteControlFeature.endpointProfiles,
+      setEndpointProfile: desktopRemoteControlFeature.setEndpointProfile,
       controlledListWorkspaces: desktopRemoteControlFeature.controlledListWorkspaces,
-      controlledAuthorizeWorkspace: desktopRemoteControlFeature.controlledAuthorizeWorkspace,
       controllerConnect: desktopRemoteControlFeature.controllerConnect,
       controllerDisconnect: desktopRemoteControlFeature.controllerDisconnect,
       controllerStatus: desktopRemoteControlFeature.controllerStatus,
-      controllerListHistory: desktopRemoteControlFeature.controllerListHistory,
-      controllerCreateHistory: desktopRemoteControlFeature.controllerCreateHistory,
+      controllerCapabilitySend: desktopRemoteControlFeature.controllerCapabilitySend,
+      controlledTaskSend: desktopRemoteControlFeature.controlledTaskSend,
+      controlledCapabilitiesSnapshot: desktopRemoteControlFeature.controlledCapabilitiesSnapshot,
+      controlledStopTask: desktopRemoteControlFeature.controlledStopTask,
       capabilitiesSnapshot: desktopRemoteControlFeature.capabilitiesSnapshot,
       listExportableModels: desktopRemoteControlFeature.listExportableModels,
-      openRemoteSession: desktopRemoteControlFeature.openRemoteSession,
-      switchRemoteSession: desktopRemoteControlFeature.switchRemoteSession,
-      submitRemoteTask: desktopRemoteControlFeature.submitRemoteTask,
+      listRemoteProxyHistory: desktopRemoteControlFeature.listRemoteProxyHistory,
+      openLiveRemoteProxy: desktopRemoteControlFeature.openLiveRemoteProxy,
+      readRemoteProxyHistory: desktopRemoteControlFeature.readRemoteProxyHistory,
+      deleteRemoteProxyHistory: desktopRemoteControlFeature.deleteRemoteProxyHistory,
+      reserveRemoteTask: desktopRemoteControlFeature.reserveRemoteTask,
+      commitRemoteTask: desktopRemoteControlFeature.commitRemoteTask,
       cancelRemoteTask: desktopRemoteControlFeature.cancelRemoteTask,
-      remoteTaskStatus: desktopRemoteControlFeature.remoteTaskStatus,
+      abandonRemoteTask: desktopRemoteControlFeature.abandonRemoteTask,
       permissionList: desktopRemoteControlFeature.permissionList,
       permissionDecide: desktopRemoteControlFeature.permissionDecide,
       permissionDenyTask: desktopRemoteControlFeature.permissionDenyTask,
@@ -3104,13 +3162,6 @@
       artifactDownloadBegin: desktopRemoteControlFeature.artifactDownloadBegin,
       artifactDownloadChunk: desktopRemoteControlFeature.artifactDownloadChunk,
       artifactDownloadAbort: desktopRemoteControlFeature.artifactDownloadAbort,
-      historyList: desktopRemoteControlFeature.historyList,
-      historyLoad: desktopRemoteControlFeature.historyLoad,
-      historyDelete: desktopRemoteControlFeature.historyDelete,
-      historyMarkOffline: desktopRemoteControlFeature.historyMarkOffline,
-      journalReplay: desktopRemoteControlFeature.journalReplay,
-      journalSnapshot: desktopRemoteControlFeature.journalSnapshot,
-      journalAcknowledge: desktopRemoteControlFeature.journalAcknowledge,
       isAvailable: desktopRemoteControlFeature.isAvailable,
     },
     artifacts: {
