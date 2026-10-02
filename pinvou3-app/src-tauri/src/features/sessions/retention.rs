@@ -69,6 +69,15 @@ pub(super) fn fabricated_tool_output_record(
 impl SessionStore {
     pub(crate) fn save_session_atomic(&self, session: &SavedSession) -> Result<PathBuf> {
         validate_session_id(&session.metadata.id)?;
+        if self
+            .remote_proxies
+            .lock()
+            .records
+            .contains_key(&session.metadata.id)
+            || session.metadata.id.starts_with("remote-")
+        {
+            bail!("RemoteProxy cannot be persisted as a local Engine/ACP Session");
+        }
         let path = self
             .manager
             .sessions_dir()

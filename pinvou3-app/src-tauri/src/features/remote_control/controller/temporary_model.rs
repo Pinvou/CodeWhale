@@ -6,9 +6,11 @@
 //! OAuth/cookie/subscription state or a host path, and a missing package is a
 //! hard failure — the task never falls back to a B model.
 
+use std::collections::BTreeMap;
 use std::fmt;
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
+use std::time::Duration;
 
 use parking_lot::Mutex;
 use serde_json::{Map, Value, json};
@@ -16,6 +18,7 @@ use serde_json::{Map, Value, json};
 use super::crypto::SensitiveString;
 use super::protocol::{LeaseContext, validate_controller_base_url};
 use super::task::RemoteTaskModelScope;
+use crate::platform::credential_store::CredentialState;
 use crate::platform::prefs::{
     ImageCapabilityOverride, MODEL_PROVIDER_KIND_CODING_PLAN, ModelPreset, SavedModel,
 };
@@ -27,6 +30,8 @@ pub(crate) const MAX_DISPLAY_CHARS: usize = 128;
 pub(crate) const MAX_MODEL_CHARS: usize = 256;
 pub(crate) const MAX_URL_CHARS: usize = 2048;
 pub(crate) const MAX_SECRET_BYTES: usize = 4096;
+const MAX_LIVE_MODEL_PACKAGES: usize = 64;
+const RUNTIME_DNS_TIMEOUT: Duration = Duration::from_secs(5);
 
 const PRESETS: &[&str] = &[
     "local_vllm",
@@ -169,6 +174,52 @@ impl fmt::Debug for ExportRoute {
 }
 
 impl ExportRoute {
+    fn to_runtime_model(&self, runtime_id: String) -> Result<SavedModel> {
+        let preset = match self.preset.as_str() {
+            "local_vllm" => ModelPreset::LocalVllm,
+            "deepseek" => ModelPreset::Deepseek,
+            "kimi" => ModelPreset::Kimi,
+            "openai_compatible" => ModelPreset::OpenaiCompatible,
+            "qwen" => ModelPreset::Qwen,
+            "doubao" => ModelPreset::Doubao,
+            "minimax" => ModelPreset::Minimax,
+            "glm" => ModelPreset::Glm,
+            "mimo" => ModelPreset::Mimo,
+            "openai" => ModelPreset::Openai,
+            "anthropic" => ModelPreset::Anthropic,
+            "gemini" => ModelPreset::Gemini,
+            "xai" => ModelPreset::Xai,
+            _ => return Err(error("model_preset_unsupported")),
+        };
+        let image_capability_override = match self.image_capability_override.as_str() {
+            "pinvou" => ImageCapabilityOverride::Pinvou,
+            "enabled" => ImageCapabilityOverride::Enabled,
+            "disabled" => ImageCapabilityOverride::Disabled,
+            _ => return Err(error("model_image_override_unsupported")),
+        };
+        Ok(SavedModel {
+            id: runtime_id,
+            name: self.display_name.clone(),
+            alias: None,
+            preset,
+            context_window_tokens: self.context_window_tokens,
+            max_output_tokens: self.max_output_tokens,
+            reasoning_effort: self.reasoning_effort.clone(),
+            model: self.model.clone(),
+            base_url: self.base_url.clone(),
+            provider_kind: self.provider_kind.clone(),
+            vendor: self.vendor.clone(),
+            endpoint_mode: self.endpoint_mode.clone(),
+            image_capability_override,
+            vision_model_id: None,
+            api_key: self.secret.expose().to_owned(),
+            credential_ref: None,
+            credential_state: CredentialState::Configured,
+            has_secret: true,
+            credential_action: None,
+        })
+    }
+
     fn validate(&self) -> Result<()> {
         if self.display_name.trim().is_empty()
             || self.display_name.chars().count() > MAX_DISPLAY_CHARS
@@ -238,10 +289,10 @@ impl ExportRoute {
             object.insert("endpoint_mode".into(), json!(mode));
         }
         if let Some(tokens) = self.context_window_tokens {
-            object.insert("context_window_tokens".into(), json!(tokens));
+            object.insert("context_window_tokens".into(), json!(tokens.to_string()));
         }
         if let Some(tokens) = self.max_output_tokens {
-            object.insert("max_output_tokens".into(), json!(tokens));
+            object.insert("max_output_tokens".into(), json!(tokens.to_string()));
         }
         if let Some(effort) = &self.reasoning_effort {
             object.insert("reasoning_effort".into(), json!(effort));
@@ -356,7 +407,7 @@ impl TemporaryModelPackageV1 {
             json!({
                 "connection_id": self.binding.connection_id,
                 "controller_lease_id": self.binding.controller_lease_id,
-                "lease_epoch": self.binding.lease_epoch,
+                "lease_epoch": self.binding.lease_epoch.to_string(),
                 "task_id": self.binding.task_id,
             }),
         );
@@ -428,10 +479,8 @@ impl TemporaryModelPackageV1 {
             &[],
             "temporary_model_package.binding",
         )?;
-        let lease_epoch = binding
-            .get("lease_epoch")
-            .and_then(Value::as_u64)
-            .ok_or_else(|| error("model_binding_invalid"))?;
+        let lease_epoch = required_uint_string(binding, "lease_epoch", u64::MAX)
+            .map_err(|_| error("model_binding_invalid"))?;
         let binding = TemporaryModelBinding {
             connection_id: required_string(binding, "connection_id", MAX_ID_CHARS)?,
             controller_lease_id: required_string(binding, "controller_lease_id", MAX_ID_CHARS)?,
@@ -553,14 +602,24 @@ fn optional_string(
 fn optional_u32(object: &Map<String, Value>, field: &'static str) -> Result<Option<u32>> {
     match object.get(field) {
         None | Some(Value::Null) => Ok(None),
-        Some(value) => {
-            let number = value
-                .as_u64()
-                .filter(|number| *number <= u32::MAX as u64)
-                .ok_or_else(|| error("model_package_field_invalid"))?;
-            Ok(Some(number as u32))
-        }
+        Some(_) => Ok(Some(
+            required_uint_string(object, field, u32::MAX as u64)? as u32
+        )),
     }
+}
+
+fn required_uint_string(object: &Map<String, Value>, field: &'static str, max: u64) -> Result<u64> {
+    let text = required_string(object, field, 20)?;
+    if text.is_empty()
+        || (text.len() > 1 && text.starts_with('0'))
+        || !text.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return Err(error("model_package_field_invalid"));
+    }
+    text.parse::<u64>()
+        .ok()
+        .filter(|number| *number <= max)
+        .ok_or_else(|| error("model_package_field_invalid"))
 }
 
 fn credential_secret(value: &Value, label: &'static str) -> Result<SensitiveString> {
@@ -574,14 +633,16 @@ fn credential_secret(value: &Value, label: &'static str) -> Result<SensitiveStri
 
 /// Rejects endpoints B must never call on behalf of A: loopback, private,
 /// link-local (including the cloud metadata address) and unresolved local
-/// names. Redirects are handled by the transport, which must not follow them
-/// across hosts.
+/// names. The app cannot bind this validation to CodeWhale's final transport;
+/// DNS rebinding, process proxies and redirect target drift remain documented
+/// residual risks for the first release.
 pub(crate) fn validate_export_target(base_url: &str) -> Result<()> {
     if base_url.len() > MAX_URL_CHARS {
         return Err(error("model_endpoint_invalid"));
     }
     validate_controller_base_url(base_url, "temporary_model_package.base_url")
         .map_err(|_| error("model_endpoint_invalid"))?;
+    let is_https = base_url.starts_with("https://");
     let rest = base_url
         .strip_prefix("https://")
         .or_else(|| base_url.strip_prefix("http://"))
@@ -612,29 +673,100 @@ pub(crate) fn validate_export_target(base_url: &str) -> Result<()> {
             return Err(error("model_endpoint_private"));
         }
     }
+    if !is_https {
+        return Err(error("model_endpoint_insecure"));
+    }
     Ok(())
 }
 
 fn is_globally_routable(address: IpAddr) -> bool {
     match address {
         IpAddr::V4(address) => {
-            let octets = address.octets();
+            let [a, b, c, _] = address.octets();
             !(address.is_loopback()
                 || address.is_private()
                 || address.is_link_local()
                 || address.is_broadcast()
                 || address.is_documentation()
+                || address.is_multicast()
                 || address.is_unspecified()
-                || octets[0] == 0
-                || octets[0] >= 224)
+                || a == 0
+                || a >= 224
+                || (a == 100 && (64..=127).contains(&b))
+                || (a == 198 && (b == 18 || b == 19))
+                || (a == 192 && b == 0 && c == 0)
+                || (a == 192 && b == 88 && c == 99))
         }
         IpAddr::V6(address) => {
-            !(address.is_loopback()
-                || address.is_unspecified()
-                || address.is_unique_local()
-                || address.is_unicast_link_local())
+            if let Some(mapped) = address.to_ipv4_mapped() {
+                return is_globally_routable(IpAddr::V4(mapped));
+            }
+            let segments = address.segments();
+            // Fail closed to the currently allocated global-unicast space.
+            // This rejects loopback/unspecified/ULA/link-local/multicast as
+            // well as site-local, NAT64 and IPv4-translated special ranges.
+            if segments[0] & 0xe000 != 0x2000 {
+                return false;
+            }
+            // IANA special-purpose blocks inside 2000::/3: protocol
+            // assignments (including Teredo/ORCHID/benchmark), documentation,
+            // 6to4 and the former 6bone/documentation allocations.
+            !((segments[0] == 0x2001 && segments[1] <= 0x01ff)
+                || (segments[0] == 0x2001 && segments[1] == 0x0db8)
+                || segments[0] == 0x2002
+                || segments[0] == 0x3ffe
+                || segments[0] == 0x3fff)
         }
     }
+}
+
+fn validate_runtime_addresses(mut addresses: Vec<SocketAddr>) -> Result<Vec<SocketAddr>> {
+    if addresses.is_empty()
+        || addresses
+            .iter()
+            .any(|address| !is_globally_routable(address.ip()))
+    {
+        return Err(error("model_endpoint_private"));
+    }
+    addresses.sort_unstable();
+    addresses.dedup();
+    Ok(addresses)
+}
+
+/// Fully prepared in-memory route bundle for one remote task. Both routes and
+/// both credentials remain task-scoped and are never persisted.
+pub(crate) struct TemporaryRuntimeModels {
+    pub(crate) primary: SavedModel,
+    pub(crate) vision: Option<SavedModel>,
+}
+
+/// Performs the app-owned execution-preparation check for a temporary endpoint. The
+/// validated address snapshot is intentionally not injected into CodeWhale:
+/// the accepted residual risk is that the HTTP client may resolve the host
+/// again, honor a process proxy, or follow a redirect before inference.
+async fn validate_runtime_endpoint(base_url: &str) -> Result<()> {
+    let url = reqwest::Url::parse(base_url).map_err(|_| error("model_endpoint_invalid"))?;
+    if url.scheme() != "https" {
+        return Err(error("model_endpoint_insecure"));
+    }
+    let host = url
+        .host_str()
+        .ok_or_else(|| error("model_endpoint_invalid"))?
+        .trim_end_matches('.')
+        .to_ascii_lowercase();
+    let port = url
+        .port_or_known_default()
+        .ok_or_else(|| error("model_endpoint_invalid"))?;
+    let addresses = tokio::time::timeout(
+        RUNTIME_DNS_TIMEOUT,
+        tokio::net::lookup_host((host.as_str(), port)),
+    )
+    .await
+    .map_err(|_| error("model_endpoint_unresolved"))?
+    .map_err(|_| error("model_endpoint_unresolved"))?
+    .collect::<Vec<_>>();
+    validate_runtime_addresses(addresses)?;
+    Ok(())
 }
 
 /// A-side export decision for one saved model.
@@ -752,7 +884,7 @@ fn image_override_str(value: ImageCapabilityOverride) -> &'static str {
 /// releases it on every task terminal path.
 #[derive(Default)]
 pub(crate) struct TemporaryModelStore {
-    installed: Mutex<Option<InstalledPackage>>,
+    installed: Mutex<BTreeMap<String, InstalledPackage>>,
 }
 
 struct InstalledPackage {
@@ -770,30 +902,24 @@ impl TemporaryModelStore {
     ) -> Result<()> {
         package.validate_for_task(live, task_id)?;
         let mut installed = self.installed.lock();
-        if let Some(existing) = installed.as_ref() {
-            if existing.package.binding.task_id == task_id {
-                // A retry of the same task replaces its own package.
-                *installed = Some(InstalledPackage {
-                    package,
-                    installed_at_ms: now_b,
-                });
-                return Ok(());
-            }
-            return Err(error("model_task_already_active"));
+        if !installed.contains_key(task_id) && installed.len() >= MAX_LIVE_MODEL_PACKAGES {
+            return Err(error("model_package_capacity"));
         }
-        *installed = Some(InstalledPackage {
-            package,
-            installed_at_ms: now_b,
-        });
+        installed.insert(
+            task_id.to_owned(),
+            InstalledPackage {
+                package,
+                installed_at_ms: now_b,
+            },
+        );
         Ok(())
     }
 
     pub(crate) fn redacted_route(&self, task_id: &str, live: &LeaseContext) -> Result<Value> {
         let installed = self.installed.lock();
         let package = installed
-            .as_ref()
+            .get(task_id)
             .map(|installed| &installed.package)
-            .filter(|package| package.binding.task_id == task_id)
             .ok_or_else(|| error("model_package_missing"))?;
         package.validate_for_task(live, task_id)?;
         Ok(package.to_redacted_value())
@@ -809,9 +935,8 @@ impl TemporaryModelStore {
     ) -> Result<R> {
         let installed = self.installed.lock();
         let package = installed
-            .as_ref()
+            .get(task_id)
             .map(|installed| &installed.package)
-            .filter(|package| package.binding.task_id == task_id)
             .ok_or_else(|| error("model_package_missing"))?;
         package.validate_for_task(live, task_id)?;
         Ok(use_route(
@@ -820,51 +945,66 @@ impl TemporaryModelStore {
         ))
     }
 
+    /// Materializes the task-scoped route for an EnginePool turn. The model is
+    /// returned only to the in-process executor and is never persisted.
+    pub(crate) async fn runtime_models_for_task(
+        &self,
+        task_id: &str,
+        live: &LeaseContext,
+    ) -> Result<TemporaryRuntimeModels> {
+        let primary_id = format!("remote-temporary-{task_id}-primary");
+        let vision_id = format!("remote-temporary-{task_id}-vision");
+        let (mut primary, vision) =
+            self.with_credentials(task_id, live, |primary, vision| {
+                Ok::<_, TemporaryModelError>((
+                    primary.to_runtime_model(primary_id)?,
+                    vision
+                        .map(|route| route.to_runtime_model(vision_id.clone()))
+                        .transpose()?,
+                ))
+            })??;
+        primary.vision_model_id = vision.as_ref().map(|model| model.id.clone());
+        validate_runtime_endpoint(&primary.base_url).await?;
+        if let Some(model) = vision.as_ref() {
+            validate_runtime_endpoint(&model.base_url).await?;
+        }
+        Ok(TemporaryRuntimeModels { primary, vision })
+    }
+
     pub(crate) fn installed_at_ms(&self) -> Option<u64> {
         self.installed
             .lock()
-            .as_ref()
+            .values()
+            .next()
             .map(|installed| installed.installed_at_ms)
     }
 
     pub(crate) fn active_task(&self) -> Option<String> {
-        self.installed
-            .lock()
-            .as_ref()
-            .map(|installed| installed.package.binding.task_id.clone())
+        self.installed.lock().keys().next().cloned()
+    }
+
+    pub(crate) fn contains_task(&self, task_id: &str) -> bool {
+        self.installed.lock().contains_key(task_id)
     }
 
     /// Idempotent release; returns `true` when a package was actually dropped.
     pub(crate) fn clear_task(&self, task_id: &str) -> bool {
-        let mut installed = self.installed.lock();
-        if installed
-            .as_ref()
-            .is_some_and(|existing| existing.package.binding.task_id == task_id)
-        {
-            *installed = None;
-            return true;
-        }
-        false
+        self.installed.lock().remove(task_id).is_some()
     }
 
     pub(crate) fn clear_for_connection(&self, connection_id: &str) -> bool {
         let mut installed = self.installed.lock();
-        if installed
-            .as_ref()
-            .is_some_and(|existing| existing.package.binding.connection_id == connection_id)
-        {
-            *installed = None;
-            return true;
-        }
-        false
+        let before = installed.len();
+        installed.retain(|_, existing| existing.package.binding.connection_id != connection_id);
+        installed.len() != before
     }
 
     pub(crate) fn clear_all(&self) {
-        *self.installed.lock() = None;
+        self.installed.lock().clear();
     }
 
     pub(crate) fn is_empty(&self) -> bool {
-        self.installed.lock().is_none()
+        self.installed.lock().is_empty()
     }
 }
 
@@ -880,6 +1020,9 @@ pub(crate) type SharedTemporaryModelStore = Arc<TemporaryModelStore>;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::features::remote_control::controller::protocol::{
+        SenderRole, validate_controller_payload_json,
+    };
     use crate::platform::credential_store::CredentialEditAction;
 
     fn lease() -> LeaseContext {
@@ -955,7 +1098,14 @@ mod tests {
     #[test]
     fn wire_serialization_carries_the_key_but_logs_and_debug_never_do() {
         let package = package("sk-a-secret-value");
-        let wire = serde_json::to_string(&package.to_wire_value()).unwrap();
+        let wire_value = package.to_wire_value();
+        assert_eq!(wire_value["binding"]["lease_epoch"], json!("7"));
+        assert_eq!(
+            wire_value["primary"]["context_window_tokens"],
+            json!("131072")
+        );
+        assert_eq!(wire_value["primary"]["max_output_tokens"], json!("8192"));
+        let wire = serde_json::to_string(&wire_value).unwrap();
         assert!(wire.contains("sk-a-secret-value"));
         let redacted = serde_json::to_string(&package.to_redacted_value()).unwrap();
         assert!(!redacted.contains("sk-a-secret-value"));
@@ -968,6 +1118,53 @@ mod tests {
             "SensitiveString([REDACTED])"
         );
         assert_eq!(format!("{}", package.primary.secret), "[REDACTED]");
+    }
+
+    #[test]
+    fn generated_package_uses_the_frozen_protocol_integer_encoding() {
+        let payload = json!({
+            "v": 1,
+            "type": "task_submit",
+            "connection_id": "connection-0001",
+            "controller_lease_id": "lease-0001",
+            "lease_epoch": "7",
+            "relay_epoch": "relay-epoch-0001",
+            "remote_control_generation": "generation-0001",
+            "request_id": "request-0001",
+            "task_id": "task-0001",
+            "client_request_id": "client-request-0001",
+            "session_id": "session-0001",
+            "capability_revision": "1",
+            "model_source": "controller_temporary",
+            "mode": "chat",
+            "input_digest": "0".repeat(64),
+            "input": {
+                "text": "hello",
+                "attachment_ids": [],
+                "skill_ids": [],
+            },
+            "temporary_model_package": package("sk-value").to_wire_value(),
+        });
+        validate_controller_payload_json(
+            &serde_json::to_string(&payload).unwrap(),
+            SenderRole::ControllerA,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn controlled_parser_accepts_the_frozen_protocol_fixture() {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../../../../../remote-control-relay/test/fixtures/controller-protocol-v1.json"
+        ))
+        .unwrap();
+        let package = TemporaryModelPackageV1::from_wire_value(
+            &fixture["task_submit_vectors"]["temporary"]["temporary_model_package"],
+        )
+        .unwrap();
+        assert_eq!(package.binding.lease_epoch, 1);
+        assert_eq!(package.primary.context_window_tokens, Some(128_000));
+        assert_eq!(package.primary.max_output_tokens, Some(4_096));
     }
 
     #[test]
@@ -1069,6 +1266,12 @@ mod tests {
             "http://172.16.5.5/v1",
             "http://169.254.169.254/latest/meta-data",
             "http://[::1]:8000/v1",
+            "https://[fec0::1]/v1",
+            "https://[64:ff9b::c000:0201]/v1",
+            "https://[::ffff:192.0.2.1]/v1",
+            "https://[2001::1]/v1",
+            "https://[2002:c000:0201::1]/v1",
+            "https://[3fff::1]/v1",
             "http://vllm.internal/v1",
             "https://user:pass@api.deepseek.com/v1",
         ] {
@@ -1079,6 +1282,30 @@ mod tests {
         }
         assert!(validate_export_target("https://api.deepseek.com/v1").is_ok());
         assert!(validate_export_target("https://8.8.8.8/v1").is_ok());
+    }
+
+    #[test]
+    fn resolved_dns_addresses_reject_any_special_purpose_ipv6_result() {
+        let public: SocketAddr = "[2606:4700:4700::1111]:443".parse().unwrap();
+        let site_local: SocketAddr = "[fec0::1]:443".parse().unwrap();
+        let nat64: SocketAddr = "[64:ff9b::c000:0201]:443".parse().unwrap();
+
+        assert_eq!(
+            validate_runtime_addresses(vec![public, site_local])
+                .unwrap_err()
+                .code,
+            "model_endpoint_private"
+        );
+        assert_eq!(
+            validate_runtime_addresses(vec![nat64]).unwrap_err().code,
+            "model_endpoint_private"
+        );
+        assert_eq!(
+            validate_runtime_addresses(vec![public, public])
+                .unwrap()
+                .as_slice(),
+            [public]
+        );
     }
 
     #[test]
@@ -1177,14 +1404,23 @@ mod tests {
         );
     }
 
-    #[test]
-    fn store_is_task_scoped_and_releases_idempotently() {
+    #[tokio::test]
+    async fn store_is_task_scoped_and_releases_idempotently() {
         let store = TemporaryModelStore::default();
+        let mut first_package = package("sk-value");
+        first_package.primary.base_url = "https://8.8.8.8/v1".into();
         store
-            .install(package("sk-value"), &lease(), "task-0001", 1_000)
+            .install(first_package, &lease(), "task-0001", 1_000)
             .unwrap();
         assert_eq!(store.active_task().as_deref(), Some("task-0001"));
         assert!(store.redacted_route("task-0001", &lease()).is_ok());
+        let runtime_models = store
+            .runtime_models_for_task("task-0001", &lease())
+            .await
+            .unwrap();
+        assert_eq!(runtime_models.primary.model, "deepseek-chat");
+        assert_eq!(runtime_models.primary.api_key, "sk-value");
+        assert!(runtime_models.primary.id.contains("task-0001"));
         assert_eq!(
             store
                 .redacted_route("task-0002", &lease())
@@ -1201,17 +1437,13 @@ mod tests {
 
         let mut other = package("sk-other");
         other.binding.task_id = "task-0002".into();
-        assert_eq!(
-            store
-                .install(other, &lease(), "task-0002", 1_100)
-                .unwrap_err()
-                .code,
-            "model_task_already_active"
-        );
+        store.install(other, &lease(), "task-0002", 1_100).unwrap();
+        assert!(store.contains_task("task-0001"));
+        assert!(store.contains_task("task-0002"));
 
         assert!(store.clear_task("task-0001"));
         assert!(!store.clear_task("task-0001"));
-        assert!(store.is_empty());
+        assert!(!store.is_empty());
         assert_eq!(
             store
                 .redacted_route("task-0001", &lease())
@@ -1219,6 +1451,8 @@ mod tests {
                 .code,
             "model_package_missing"
         );
+        assert!(store.clear_task("task-0002"));
+        assert!(store.is_empty());
     }
 
     #[test]
