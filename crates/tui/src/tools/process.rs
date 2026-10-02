@@ -245,13 +245,13 @@ async fn kill_the_run(child: &mut tokio::process::Child) {
             if killed == 0 {
                 return;
             }
-            // ESRCH: no live process in the group, so the child is dead
-            // too (a live child would be in the group). Nothing to kill.
-            // Any other failure (e.g. EPERM racing a setuid exec) falls
-            // through to the child-only kill as the safe fallback.
-            if std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
-                return;
-            }
+            // ESRCH usually means the group is already gone with the child
+            // dead, but a direct child that moved itself out of its own
+            // group with `setpgid` empties it while staying alive — fall
+            // through to the child-only kill either way: a no-op on a dead
+            // child, the last chance to stop an escaped one. Any other
+            // failure (e.g. EPERM racing a setuid exec) takes the same
+            // fallback.
         }
     }
     let _ = child.kill().await;
