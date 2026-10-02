@@ -130,13 +130,13 @@ test('prepared reports reconcile against exact durable handle, not a pending cou
   }).map(item => item.origin), ['history']);
 });
 
-test('ChatView uses handle-only retry, explicit abandon and never restores unknown as fresh text', () => {
+test('ChatView uses handle-only commit, explicit abandon and never restores unknown as fresh text', () => {
   const chat = read('features/chat/ChatView.jsx');
   assert.match(chat, /outcome\.state !== 'queued'\) return 'held'/);
-  assert.match(chat, /\{ kind: 'retry', handle: item\.handle \}/);
+  assert.match(chat, /commitRemoteTask\([\s\S]*?item\.localSessionId, item\.remoteRef, item\.handle, attachmentIds/);
   assert.match(chat, /sameHandle \? report : \{ state: 'outcome_unknown'/);
-  assert.match(chat, /abandonPreparedRemoteTask\([\s\S]*?item\.handle\.clientRequestId, item\.handle\.taskId/);
-  assert.match(chat, /await bridge\.desktopRemoteControl\.abandonPreparedRemoteTask\([\s\S]*?forgetRemoteDispatch/);
+  assert.match(chat, /abandonRemoteTask\([\s\S]*?item\.handle\.clientRequestId, item\.handle\.taskId/);
+  assert.match(chat, /await bridge\.desktopRemoteControl\.abandonRemoteTask\([\s\S]*?forgetRemoteDispatch/);
   assert.match(chat, /markRemoteDispatchPayloadLost\(item\.localSessionId, item\.taskId\);[\s\S]*?readRemoteProxyHistory/);
   assert.match(chat, /if \(item\.text\) \{[\s\S]*?restoreTaskDraft\(item\.text, \{ sessionId: item\.localSessionId/);
   assert.match(chat, /else if \(remoteTranscriptActive && sentSessionId\) \{[\s\S]*?restoreTaskDraft\(text, \{ sessionId: sentSessionId/);
@@ -146,7 +146,7 @@ test('ChatView uses handle-only retry, explicit abandon and never restores unkno
   for (const locale of ['zh', 'en', 'ja']) {
     const copy = read(`shared/i18n/${locale}.js`);
     for (const key of ['preparedNotSent', 'preparedPayloadLost', 'outcomeUnknownNoResend',
-      'retrySameTask', 'abandonPreparedTask', 'pendingActionFailed', 'deletePreparedBlocked']) {
+      'commitPreparedTask', 'abandonPreparedTask', 'pendingActionFailed', 'deletePreparedBlocked']) {
       assert.ok(copy.includes(`${key}:`), `${locale} ${key}`);
     }
   }

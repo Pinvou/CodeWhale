@@ -5,9 +5,33 @@
 //! isolation directory. It receives no host path and no file name from A beyond
 //! the bounded, slash-free metadata name.
 
+use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::Arc;
 
-use super::core::{CompletedTransfer, TransferContext, TransferHandle, TransferMetadata};
+use parking_lot::Mutex;
+
+use super::core::{
+    CompletedTransfer, TransferBinding, TransferContext, TransferHandle, TransferMetadata,
+};
+pub(crate) use crate::features::files::file_ingest::PublishedAttachment;
+use crate::features::remote_control::controller::protocol::LeaseContext;
+
+struct CompletedReceipt {
+    binding: TransferBinding,
+    descriptor: PublishedAttachment,
+    completed_at_ms: u64,
+    consumed: bool,
+}
+
+#[derive(Default)]
+struct UploadState {
+    active: HashMap<String, TransferContext>,
+    completed: HashMap<String, CompletedReceipt>,
+    pending_cleanup: HashSet<String>,
+}
+
+const MAX_COMPLETED_RECEIPTS: usize = 64;
 
 pub(crate) trait UploadStaging: Send + Sync {
     /// Allocates the staging target for one transfer.
@@ -27,7 +51,13 @@ pub(crate) trait UploadStaging: Send + Sync {
     ) -> std::result::Result<(), String>;
 
     /// Publishes the staged file once the core verified the digest.
-    fn commit(&self, transfer: &CompletedTransfer) -> std::result::Result<(), String>;
+    /// Return the absolute B-local published path; only this host port knows it.
+    fn commit(&self, transfer: &CompletedTransfer) -> std::result::Result<PathBuf, String>;
+
+    fn published_read_owner(
+        &self,
+        handle_id: &str,
+    ) -> Option<Arc<dyn crate::features::files::file_ingest::AttachmentReadOwner>>;
 
     /// Drops the staging target. Must be idempotent.
     fn abort(&self, handle_id: &str) -> std::result::Result<(), String>;
@@ -39,6 +69,7 @@ pub(crate) trait UploadStaging: Send + Sync {
 pub(crate) struct AttachmentUploads {
     registry: Arc<super::core::TransferRegistry>,
     staging: Arc<dyn UploadStaging>,
+    state: Mutex<UploadState>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -68,7 +99,11 @@ impl AttachmentUploads {
         registry: Arc<super::core::TransferRegistry>,
         staging: Arc<dyn UploadStaging>,
     ) -> Self {
-        Self { registry, staging }
+        Self {
+            registry,
+            staging,
+            state: Mutex::new(UploadState::default()),
+        }
     }
 
     pub(crate) fn begin(
@@ -77,15 +112,49 @@ impl AttachmentUploads {
         metadata: TransferMetadata,
         now_b: u64,
     ) -> std::result::Result<UploadBegin, String> {
+        let mut state = self.state.lock();
         if context.direction != super::core::TransferDirection::Upload {
             return Err("transfer_direction_mismatch".to_owned());
+        }
+        let limits = self.registry.limits();
+        let completed_bytes: u64 = state
+            .completed
+            .values()
+            .filter(|receipt| receipt.binding.connection_id == context.binding.connection_id)
+            .map(|receipt| receipt.descriptor.bytes)
+            .sum();
+        if state.completed.len() >= MAX_COMPLETED_RECEIPTS
+            || completed_bytes
+                .saturating_add(
+                    self.registry
+                        .connection_bytes(&context.binding.connection_id),
+                )
+                .saturating_add(metadata.total_bytes)
+                > limits.max_connection_bytes
+        {
+            return Err("transfer_capacity".to_owned());
+        }
+        let task_count = state
+            .active
+            .values()
+            .filter(|active| active.binding.task_id == context.binding.task_id)
+            .count()
+            + state
+                .completed
+                .values()
+                .filter(|receipt| receipt.binding.task_id == context.binding.task_id)
+                .count();
+        if task_count >= limits.max_transfers_per_task {
+            return Err("transfer_task_capacity".to_owned());
         }
         let (handle, progress) = self
             .registry
             .begin(context.clone(), metadata.clone(), now_b)
             .map_err(|error| error.code.to_owned())?;
+        state.active.insert(handle.id().to_owned(), context.clone());
         if let Err(error) = self.staging.begin(handle.id(), &context, &metadata) {
             self.registry.abort(&handle);
+            self.release_staging(&mut state, handle.id());
             return Err(error);
         }
         Ok(UploadBegin {
@@ -103,6 +172,10 @@ impl AttachmentUploads {
         now_b: u64,
     ) -> std::result::Result<UploadProgress, String> {
         let handle = Self::handle(handle_id)?;
+        let mut state = self.state.lock();
+        if state.completed.contains_key(handle_id) {
+            return Err("transfer_unknown".to_owned());
+        }
         let outcome = match self.registry.accept_chunk(
             &handle,
             super::core::TransferDirection::Upload,
@@ -115,8 +188,10 @@ impl AttachmentUploads {
                 // A rejected chunk is a protocol violation for this transfer
                 // (size, order, conflict or digest). Fail closed: drop both the
                 // staging target and the accounting entry so nothing lingers.
-                let _ = self.staging.abort(handle_id);
                 self.registry.abort(&handle);
+                if state.active.contains_key(handle_id) {
+                    self.release_staging(&mut state, handle_id);
+                }
                 return Err(error.code.to_owned());
             }
         };
@@ -126,8 +201,8 @@ impl AttachmentUploads {
             });
         }
         if let Err(error) = self.staging.accept_chunk(handle_id, chunk_index, bytes) {
-            let _ = self.staging.abort(handle_id);
             self.registry.abort(&handle);
+            self.release_staging(&mut state, handle_id);
             return Err(error);
         }
         match outcome.completed {
@@ -138,44 +213,210 @@ impl AttachmentUploads {
             Some(completed) => {
                 let sha256 = completed.sha256.clone();
                 let bytes = completed.bytes;
-                if let Err(error) = self.staging.commit(&completed) {
-                    let _ = self.staging.abort(handle_id);
-                    return Err(error);
-                }
+                let path = match self.staging.commit(&completed) {
+                    Ok(path) if path.is_absolute() => path,
+                    Ok(_) => {
+                        self.release_staging(&mut state, handle_id);
+                        return Err("transfer_staging_failed".to_owned());
+                    }
+                    Err(error) => {
+                        self.release_staging(&mut state, handle_id);
+                        return Err(error);
+                    }
+                };
+                let Some(read_owner) = self
+                    .staging
+                    .published_read_owner(handle_id)
+                    .filter(|owner| owner.path() == path)
+                else {
+                    self.release_staging(&mut state, handle_id);
+                    return Err("transfer_staging_failed".to_owned());
+                };
+                state.active.remove(handle_id);
+                state.completed.insert(
+                    handle_id.to_owned(),
+                    CompletedReceipt {
+                        binding: completed.context.binding,
+                        descriptor: PublishedAttachment {
+                            handle_id: handle_id.to_owned(),
+                            path,
+                            display_name: completed.metadata.file_name,
+                            mime_type: completed.metadata.mime_type,
+                            bytes,
+                            sha256: sha256.clone(),
+                            read_owner: Some(read_owner),
+                        },
+                        completed_at_ms: now_b,
+                        consumed: false,
+                    },
+                );
                 Ok(UploadProgress::Completed { sha256, bytes })
             }
         }
+    }
+
+    /// Validate a bearer handle against the *current* authenticated B lease,
+    /// authoritative B session and task. The caller holds its lifecycle gate
+    /// across this check and the action so a lease switch cannot intervene.
+    pub(crate) fn require_upload_binding(
+        &self,
+        handle_id: &str,
+        live: &LeaseContext,
+        session_id: &str,
+        task_id: &str,
+    ) -> std::result::Result<(), String> {
+        let handle = Self::handle(handle_id)?;
+        let state = self.state.lock();
+        if let Some(receipt) = state.completed.get(handle_id) {
+            if receipt.consumed || !binding_matches(&receipt.binding, live, session_id, task_id) {
+                return Err("transfer_binding_stale".to_owned());
+            }
+            return Ok(());
+        }
+        self.registry
+            .require_upload_binding(&handle, live, session_id, task_id)
+            .map_err(|error| error.code.to_owned())
+    }
+
+    /// Single-use admission receipt. All IDs are checked before any are
+    /// consumed; on failure the caller cannot partially install attachments.
+    /// The published files remain owned here until task/connection cleanup.
+    pub(crate) fn consume_completed(
+        &self,
+        handle_ids: &[String],
+        live: &LeaseContext,
+        session_id: &str,
+        task_id: &str,
+    ) -> std::result::Result<Vec<PublishedAttachment>, String> {
+        let mut state = self.state.lock();
+        if handle_ids.len() > self.registry.limits().max_transfers_per_task
+            || handle_ids.iter().collect::<HashSet<_>>().len() != handle_ids.len()
+        {
+            return Err("transfer_attachment_ids_invalid".to_owned());
+        }
+        for handle_id in handle_ids {
+            let receipt = state
+                .completed
+                .get(handle_id)
+                .ok_or_else(|| "transfer_unknown".to_owned())?;
+            if receipt.consumed || !binding_matches(&receipt.binding, live, session_id, task_id) {
+                return Err("transfer_binding_stale".to_owned());
+            }
+        }
+        let mut descriptors = Vec::with_capacity(handle_ids.len());
+        for handle_id in handle_ids {
+            let receipt = state.completed.get_mut(handle_id).expect("checked above");
+            receipt.consumed = true;
+            descriptors.push(receipt.descriptor.clone());
+        }
+        Ok(descriptors)
     }
 
     pub(crate) fn abort(&self, handle_id: &str) -> bool {
         let Ok(handle) = Self::handle(handle_id) else {
             return false;
         };
-        let _ = self.staging.abort(handle_id);
-        self.registry.abort(&handle)
+        let mut state = self.state.lock();
+        let known = state.completed.contains_key(handle_id) || state.active.contains_key(handle_id);
+        let live = self.registry.abort(&handle);
+        if known {
+            self.release_staging(&mut state, handle_id);
+        }
+        known || live
     }
 
     pub(crate) fn cleanup_for_task(&self, task_id: &str) -> usize {
-        self.registry.cleanup_for_task(task_id)
+        self.cleanup_where(|binding| binding.task_id == task_id)
     }
 
     pub(crate) fn cleanup_for_connection(&self, connection_id: &str) -> usize {
-        self.registry.cleanup_for_connection(connection_id)
+        self.cleanup_where(|binding| binding.connection_id == connection_id)
     }
 
     /// DEV-17 审核修复：未完成/断线遗留的上传必须在有界时间内清理
     /// （RC-F-003）。过期句柄同时释放预算并删除 staging 目录。
     pub(crate) fn expire(&self, now_b: u64) -> usize {
+        let mut state = self.state.lock();
         let expired = self.registry.expire(now_b);
         for handle_id in &expired {
-            let _ = self.staging.abort(handle_id);
+            self.release_staging(&mut state, handle_id);
         }
-        expired.len()
+        let ttl = self.registry.limits().ttl.as_millis() as u64;
+        let completed: Vec<String> = state
+            .completed
+            .iter()
+            .filter(|(_, receipt)| {
+                !receipt.consumed && now_b.saturating_sub(receipt.completed_at_ms) >= ttl
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        for handle_id in &completed {
+            self.release_staging(&mut state, handle_id);
+        }
+        let retry: Vec<String> = state.pending_cleanup.iter().cloned().collect();
+        for handle_id in retry {
+            self.release_staging(&mut state, &handle_id);
+        }
+        expired.len() + completed.len()
+    }
+
+    fn cleanup_where(&self, predicate: impl Fn(&TransferBinding) -> bool) -> usize {
+        let mut state = self.state.lock();
+        let active: Vec<String> = state
+            .active
+            .iter()
+            .filter(|(_, context)| predicate(&context.binding))
+            .map(|(id, _)| id.clone())
+            .collect();
+        let completed: Vec<String> = state
+            .completed
+            .iter()
+            .filter(|(_, receipt)| predicate(&receipt.binding))
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in &active {
+            if let Ok(handle) = Self::handle(id) {
+                self.registry.abort(&handle);
+            }
+            self.release_staging(&mut state, id);
+        }
+        for id in &completed {
+            self.release_staging(&mut state, id);
+        }
+        active.len() + completed.len()
+    }
+
+    fn release_staging(&self, state: &mut UploadState, handle_id: &str) {
+        // Drop the receipt's own Arc before checking for executing owners.
+        // Failed cleanup retains the stager authority and retry index only;
+        // a revoked receipt must not remain consumable.
+        state.active.remove(handle_id);
+        state.completed.remove(handle_id);
+        if self.staging.abort(handle_id).is_ok() {
+            state.pending_cleanup.remove(handle_id);
+        } else {
+            state.pending_cleanup.insert(handle_id.to_owned());
+        }
     }
 
     fn handle(handle_id: &str) -> std::result::Result<super::core::TransferHandle, String> {
         TransferHandle::from_id(handle_id).ok_or_else(|| "transfer_unknown".to_owned())
     }
+}
+
+fn binding_matches(
+    binding: &TransferBinding,
+    live: &LeaseContext,
+    session_id: &str,
+    task_id: &str,
+) -> bool {
+    binding.connection_id == live.connection_id
+        && binding.controller_lease_id == live.controller_lease_id
+        && binding.lease_epoch == live.lease_epoch
+        && binding.relay_epoch == live.relay_epoch
+        && binding.remote_control_generation == live.remote_control_generation
+        && binding.session_id == session_id
+        && binding.task_id == task_id
 }
 
 #[cfg(test)]
@@ -191,6 +432,22 @@ mod tests {
     struct RecordingStaging {
         calls: Mutex<Vec<String>>,
         fail_on_chunk: bool,
+    }
+
+    #[derive(Debug)]
+    struct RecordingReadOwner(PathBuf);
+
+    impl crate::features::files::file_ingest::AttachmentReadOwner for RecordingReadOwner {
+        fn path(&self) -> &std::path::Path {
+            &self.0
+        }
+        fn read_bounded(&self, _maximum_bytes: u64) -> std::io::Result<Vec<u8>> {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "recording port has no payload",
+            ))
+        }
+        fn request_cleanup(&self) {}
     }
 
     impl UploadStaging for RecordingStaging {
@@ -225,12 +482,21 @@ mod tests {
             }
         }
 
-        fn commit(&self, transfer: &CompletedTransfer) -> std::result::Result<(), String> {
+        fn commit(&self, transfer: &CompletedTransfer) -> std::result::Result<PathBuf, String> {
             self.calls
                 .lock()
                 .unwrap()
                 .push(format!("commit:{}", transfer.sha256));
-            Ok(())
+            Ok(std::env::temp_dir().join(&transfer.handle_id))
+        }
+
+        fn published_read_owner(
+            &self,
+            handle_id: &str,
+        ) -> Option<Arc<dyn crate::features::files::file_ingest::AttachmentReadOwner>> {
+            Some(Arc::new(RecordingReadOwner(
+                std::env::temp_dir().join(handle_id),
+            )))
         }
 
         fn abort(&self, handle_id: &str) -> std::result::Result<(), String> {
@@ -313,6 +579,7 @@ mod tests {
                 .unwrap_err(),
             "transfer_unknown"
         );
+        assert!(uploads.abort(&begin.handle_id));
         assert!(!uploads.abort(&begin.handle_id));
     }
 
@@ -390,6 +657,7 @@ mod tests {
             );
         }
         assert_eq!(uploads.registry.active_count(), 1);
+        assert_eq!(uploads.state.lock().active.len(), 1);
         assert_eq!(
             uploads.registry.connection_bytes("connection-0001"),
             data.len() as u64
@@ -402,6 +670,12 @@ mod tests {
         );
         assert_eq!(uploads.registry.active_count(), 0);
         assert_eq!(uploads.registry.connection_bytes("connection-0001"), 0);
+        {
+            let state = uploads.state.lock();
+            assert!(state.active.is_empty());
+            assert!(state.completed.is_empty());
+            assert!(state.pending_cleanup.is_empty());
+        }
         {
             let calls = staging.calls.lock().unwrap();
             assert_eq!(calls.len(), chunk_count + 2); // begin, accepted chunks, abort
@@ -443,6 +717,12 @@ mod tests {
         assert!(staging.calls.lock().unwrap().is_empty());
         assert_eq!(uploads.registry.active_count(), 0);
         assert_eq!(uploads.registry.connection_bytes("connection-0001"), 0);
+        {
+            let state = uploads.state.lock();
+            assert!(state.active.is_empty());
+            assert!(state.completed.is_empty());
+            assert!(state.pending_cleanup.is_empty());
+        }
     }
 
     #[test]
@@ -554,5 +834,163 @@ mod tests {
                 .unwrap_err(),
             "transfer_unknown"
         );
+    }
+
+    #[test]
+    fn handle_requires_exact_live_lease_session_and_task_before_and_after_completion() {
+        let staging = Arc::new(RecordingStaging::default());
+        let uploads = uploads(staging, TransferLimits::default());
+        let data = b"hello";
+        let begin = uploads
+            .begin(upload_context(), metadata_for(data), 1_000)
+            .unwrap();
+        let valid = || {
+            uploads.require_upload_binding(&begin.handle_id, &lease(), "session-0001", "task-0001")
+        };
+        assert!(valid().is_ok());
+        assert_eq!(
+            uploads
+                .require_upload_binding(&begin.handle_id, &lease(), "other-session", "task-0001")
+                .unwrap_err(),
+            "transfer_binding_stale"
+        );
+        assert_eq!(
+            uploads
+                .require_upload_binding(&begin.handle_id, &lease(), "session-0001", "other-task")
+                .unwrap_err(),
+            "transfer_binding_stale"
+        );
+        let mut stale = lease();
+        stale.relay_epoch = "relay-epoch-0002".into();
+        assert_eq!(
+            uploads
+                .require_upload_binding(&begin.handle_id, &stale, "session-0001", "task-0001")
+                .unwrap_err(),
+            "transfer_binding_stale"
+        );
+        uploads
+            .accept_chunk(&begin.handle_id, 0, data, 1_100)
+            .unwrap();
+        assert!(valid().is_ok());
+        assert_eq!(
+            uploads
+                .require_upload_binding(&begin.handle_id, &stale, "session-0001", "task-0001")
+                .unwrap_err(),
+            "transfer_binding_stale"
+        );
+        assert_eq!(
+            uploads
+                .accept_chunk(&begin.handle_id, 1, data, 1_200)
+                .unwrap_err(),
+            "transfer_unknown"
+        );
+        assert!(
+            valid().is_ok(),
+            "a duplicate completion cannot delete the published receipt"
+        );
+    }
+
+    #[test]
+    fn complete_receipt_is_single_use_atomic_and_cleanup_owns_published_file() {
+        let staging = Arc::new(RecordingStaging::default());
+        let uploads = uploads(staging.clone(), TransferLimits::default());
+        let data = b"one";
+        let first = uploads
+            .begin(upload_context(), metadata_for(data), 1_000)
+            .unwrap();
+        uploads
+            .accept_chunk(&first.handle_id, 0, data, 1_100)
+            .unwrap();
+        let second = uploads
+            .begin(upload_context(), metadata_for(data), 1_200)
+            .unwrap();
+        let ids = vec![first.handle_id.clone(), second.handle_id.clone()];
+        assert_eq!(
+            uploads
+                .consume_completed(&ids, &lease(), "session-0001", "task-0001")
+                .unwrap_err(),
+            "transfer_unknown"
+        );
+        uploads
+            .accept_chunk(&second.handle_id, 0, data, 1_300)
+            .unwrap();
+        assert_eq!(
+            uploads
+                .consume_completed(&ids, &lease(), "session-0001", "wrong-task")
+                .unwrap_err(),
+            "transfer_binding_stale"
+        );
+        let descriptors = uploads
+            .consume_completed(&ids, &lease(), "session-0001", "task-0001")
+            .unwrap();
+        assert_eq!(
+            descriptors
+                .iter()
+                .map(|item| item.handle_id.as_str())
+                .collect::<Vec<_>>(),
+            ids.iter().map(String::as_str).collect::<Vec<_>>()
+        );
+        assert_eq!(descriptors[0].display_name, "report.txt");
+        assert_eq!(descriptors[0].mime_type, "text/plain");
+        assert_eq!(descriptors[0].bytes, data.len() as u64);
+        assert!(descriptors[0].path.is_absolute());
+        assert_eq!(
+            uploads
+                .consume_completed(&ids, &lease(), "session-0001", "task-0001")
+                .unwrap_err(),
+            "transfer_binding_stale"
+        );
+        assert_eq!(uploads.cleanup_for_task("task-0001"), 2);
+        assert_eq!(uploads.cleanup_for_task("task-0001"), 0);
+        let calls = staging.calls.lock().unwrap();
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|call| call.as_str().starts_with("abort:"))
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn completed_receipt_expires_if_unconsumed_but_not_during_execution() {
+        let staging = Arc::new(RecordingStaging::default());
+        let uploads = uploads(
+            staging,
+            TransferLimits {
+                ttl: std::time::Duration::from_millis(500),
+                ..TransferLimits::default()
+            },
+        );
+        let data = b"one";
+        let first = uploads
+            .begin(upload_context(), metadata_for(data), 1_000)
+            .unwrap();
+        uploads
+            .accept_chunk(&first.handle_id, 0, data, 1_100)
+            .unwrap();
+        assert_eq!(uploads.expire(1_601), 1);
+        assert_eq!(
+            uploads
+                .consume_completed(&[first.handle_id], &lease(), "session-0001", "task-0001")
+                .unwrap_err(),
+            "transfer_unknown"
+        );
+        let second = uploads
+            .begin(upload_context(), metadata_for(data), 2_000)
+            .unwrap();
+        uploads
+            .accept_chunk(&second.handle_id, 0, data, 2_100)
+            .unwrap();
+        uploads
+            .consume_completed(
+                &[second.handle_id.clone()],
+                &lease(),
+                "session-0001",
+                "task-0001",
+            )
+            .unwrap();
+        assert_eq!(uploads.expire(3_000), 0);
+        assert_eq!(uploads.cleanup_for_connection("connection-0001"), 1);
     }
 }

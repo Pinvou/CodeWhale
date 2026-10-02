@@ -74,6 +74,7 @@
         sessionId: null,
         sessionRef: null,
         generation: null,
+        lane: null,
       },
       controllerConnection: createControllerConnection(),
       remoteCapabilities: null,
@@ -155,10 +156,6 @@
     var payload = envelope || {};
     if (!isCurrentIntent(state, "controlled", payload.intent)) return state;
     var status = payload.status ? String(payload.status) : null;
-    if (status === "reserving") status = "registering";
-    if (status === "waiting_connection") status = "waiting_for_pairing";
-    if (status === "safety_handshake") status = "handshake_pending";
-    if (status === "refreshing") status = "retiring_generation";
     if (!["disabled", "registering", "waiting_for_pairing", "pairing_reserved",
       "handshake_pending", "connected", "reconnecting", "resume_provisional",
       "resume_activated_pending_liveness", "retiring_generation", "stopping",
@@ -204,7 +201,7 @@
       && generation !== current.generation;
     if (startsNewGeneration) {
       next.retiredControlledGenerations = retireIdentity(state.retiredControlledGenerations, current.generation);
-      next.controlledSession = { sessionId: null, sessionRef: null, generation: generation };
+      next.controlledSession = { sessionId: null, sessionRef: null, generation: generation, lane: null };
       next.controlledTasks = [];
       next.controlledTranscript = [];
     }
@@ -244,7 +241,7 @@
       );
       next.controlledFenced = true;
       next.controlledOpenIntent = null;
-      next.controlledSession = { sessionId: null, sessionRef: null, generation: null };
+      next.controlledSession = { sessionId: null, sessionRef: null, generation: null, lane: null };
       next.controlledTasks = [];
       next.controlledTranscript = [];
     }
@@ -278,9 +275,10 @@
     var sessionId = payload.sessionId ? String(payload.sessionId) : "";
     var sessionRef = payload.sessionRef ? String(payload.sessionRef) : "";
     var generation = payload.generation ? String(payload.generation) : "";
+    var lane = payload.lane === "code" ? "code" : payload.lane === "chat" ? "chat" : "";
     var currentGeneration = String((state.controlledDevice && state.controlledDevice.generation) || "");
     var status = state.controlledDevice && state.controlledDevice.status;
-    if (!sessionId || !sessionRef || !generation) return state;
+    if (!sessionId || !sessionRef || !generation || !lane) return state;
     if (status !== "connected" && status !== "reconnecting") return state;
     if (!currentGeneration || generation !== currentGeneration) return state;
     var current = state.controlledSession || {};
@@ -288,12 +286,14 @@
       current.sessionId === sessionId
       && current.sessionRef === sessionRef
       && current.generation === generation
+      && current.lane === lane
     ) return state;
     var next = shallowCopy(state);
     next.controlledSession = {
       sessionId: sessionId,
       sessionRef: sessionRef,
       generation: generation,
+      lane: lane,
     };
     next.controlledTasks = [];
     next.controlledTranscript = [];
@@ -561,6 +561,7 @@
     if (String(payload.leaseEpoch || "") !== String(connection.leaseEpoch)) return state;
     if (connection.relayEpoch && String(payload.relayEpoch || "") !== connection.relayEpoch) return state;
     if (connection.generation && String(payload.remoteControlGeneration || "") !== connection.generation) return state;
+    if (!connection.sessionRef || String(payload.remoteSessionRef || "") !== String(connection.sessionRef)) return state;
     var revision = Number(payload.capabilityRevision);
     if (!Number.isSafeInteger(revision) || revision <= 0) return state;
     if (state.remoteCapabilities && revision <= Number(state.remoteCapabilities.capabilityRevision)) {
@@ -569,6 +570,7 @@
     var next = shallowCopy(state);
     next.remoteCapabilities = {
       connectionId: payload.connectionId,
+      remoteSessionRef: payload.remoteSessionRef,
       controllerLeaseId: payload.controllerLeaseId || null,
       leaseEpoch: payload.leaseEpoch,
       relayEpoch: payload.relayEpoch || null,
@@ -578,7 +580,7 @@
         return mode === "chat" || mode === "code";
       }).slice(0, 2) : [],
       tools: capabilityDescriptors(payload.tools, "toolId", 256),
-      skills: capabilityDescriptors(payload.skills, "skillId", 256),
+      skills: capabilityDescriptors(payload.skills, "skillId", 256, false, true),
       workspaces: capabilityDescriptors(payload.workspaces, "workspaceId", 16, true),
       expiresAtMs: typeof payload.expiresAtMs === "string" || Number.isSafeInteger(payload.expiresAtMs)
         ? payload.expiresAtMs : null,
@@ -681,7 +683,7 @@
     return next;
   }
 
-  function capabilityDescriptors(entries, idField, limit, workspace) {
+  function capabilityDescriptors(entries, idField, limit, workspace, skill) {
     if (!Array.isArray(entries)) return [];
     return entries.slice(0, limit).filter(function (entry) {
       return entry && typeof entry === "object"
@@ -691,6 +693,11 @@
       var safe = { displayName: entry.displayName.slice(0, 256) };
       safe[idField] = entry[idField].slice(0, 128);
       if (workspace) safe.codeAllowed = entry.codeAllowed === true;
+      if (skill) safe.scopes = Array.isArray(entry.scopes)
+        ? entry.scopes.filter(function (scope, index, scopes) {
+          return (scope === "chat" || scope === "code") && scopes.indexOf(scope) === index;
+        }).slice(0, 2)
+        : [];
       return safe;
     });
   }

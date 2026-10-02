@@ -118,6 +118,7 @@ test('capability snapshots keep the revision and the negotiated modes', () => {
     leaseEpoch: '2',
     relayEpoch: 'relay-1',
     remoteControlGeneration: 'generation-1',
+    remoteSessionRef: 'session-ref-1',
     capabilityRevision: 7,
     modes: ['chat'],
     tools: [],
@@ -135,16 +136,22 @@ test('the bridge forwards UI fields only and never builds protocol payloads', ()
   for (const method of [
     'openLiveRemoteProxy',
     'controllerCapabilitySend',
-    'submitRemoteTask',
+    'reserveRemoteTask',
+    'commitRemoteTask',
+    'cancelRemoteTask',
+    'abandonRemoteTask',
   ]) {
     assert.ok(bridge.includes(`${method}: ${method}`), `${method} must be exported`);
   }
   // The dispatch bridge forwards bounded UI intent; Rust owns wire construction.
   const dispatch = bridge.slice(
-    bridge.indexOf('function submitRemoteTask'),
-    bridge.indexOf('function abandonPreparedRemoteTask'),
+    bridge.indexOf('function reserveRemoteTask'),
+    bridge.indexOf('function invokeRemoteAction'),
   );
-  assert.ok(dispatch.includes('invoke("desktop_remote_task_dispatch_a"'));
+  for (const command of ['desktop_remote_task_reserve_a', 'desktop_remote_task_commit_a',
+    'desktop_remote_task_cancel_a', 'desktop_remote_task_abandon_prepared_a']) {
+    assert.ok(dispatch.includes(`invoke("${command}"`));
+  }
   assert.ok(!/input_digest|inputDigest|connection_id|controller_lease_id|relay_epoch/.test(dispatch));
   const uiPaths = [
     bridge.slice(
@@ -183,7 +190,10 @@ test('the desktop facade exposes the A-side session and task bridge methods', ()
   for (const method of [
     'openLiveRemoteProxy',
     'controllerCapabilitySend',
-    'submitRemoteTask',
+    'reserveRemoteTask',
+    'commitRemoteTask',
+    'cancelRemoteTask',
+    'abandonRemoteTask',
   ]) {
     assert.ok(
       desktopFacade.includes(`${method}: desktopRemoteControlFeature.${method}`),
@@ -242,10 +252,12 @@ test('opening a live RemoteProxy reuses only an explicitly selected local ID', (
 
 test('durable A dispatch carries only a local SessionStore identity and intent', () => {
   const send = bridge.slice(
-    bridge.indexOf('function submitRemoteTask'),
-    bridge.indexOf('function abandonPreparedRemoteTask'),
+    bridge.indexOf('function reserveRemoteTask'),
+    bridge.indexOf('function invokeRemoteAction'),
   );
-  assert.ok(send.includes('desktop_remote_task_dispatch_a'));
+  assert.ok(send.includes('desktop_remote_task_reserve_a'));
+  assert.ok(send.includes('desktop_remote_task_commit_a'));
+  assert.ok(send.includes('desktop_remote_task_cancel_a'));
   assert.ok(send.includes('localSessionId: localSessionId'));
   assert.ok(send.includes('remoteRef: remoteRef'));
   assert.ok(!/input_digest|connection_id|controller_lease_id|credential_ref/.test(send));

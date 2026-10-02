@@ -95,6 +95,12 @@ pub(crate) struct ControllingStatus {
     error_code: Option<&'static str>,
 }
 
+impl ControllingStatus {
+    pub(crate) fn kind(&self) -> ControllingStatusKind {
+        self.status
+    }
+}
+
 impl std::fmt::Debug for ControllingStatus {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -631,6 +637,33 @@ impl ControllingDeviceManager {
         transport.try_send_business(frame)
     }
 
+    /// The A task/cancel path may enqueue only on the exact authenticated
+    /// lease for which it sealed the frame. Identity comparison and enqueue
+    /// share the manager lock, so disconnect/rebind cannot interleave there.
+    pub(crate) fn send_authenticated_business_for_identity(
+        &self,
+        expected: &(LeaseContext, String, String),
+        frame: &serde_json::Value,
+    ) -> std::result::Result<(), ControllerSendError> {
+        let inner = self.inner.lock();
+        let lease = inner
+            .lease
+            .as_ref()
+            .ok_or(ControllerSendError::Unauthenticated)?;
+        if inner.phase != ControllingStatusKind::Connected
+            || lease.context != expected.0
+            || lease.peer_endpoint_id != expected.1
+            || lease.reservation_id != expected.2
+        {
+            return Err(ControllerSendError::Unauthenticated);
+        }
+        let transport = inner
+            .transport
+            .as_ref()
+            .ok_or(ControllerSendError::Unauthenticated)?;
+        transport.try_send_business(frame)
+    }
+
     /// 发送一条租约内的控制帧（E2E-06 心跳等，明文但绑定当前租约）。
     pub(crate) fn send_authenticated_control(
         &self,
@@ -840,6 +873,58 @@ fn terminal_status_with_retired_identity(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn identity_bound_business_send_rejects_rebind_before_transport_enqueue() {
+        let manager = ControllingDeviceManager::default();
+        let operation = manager.connect("234-4567").unwrap();
+        manager.complete_reserved(operation.clone()).unwrap();
+        manager.complete_connected(operation, lease()).unwrap();
+        let (sender, _receiver) = super::super::relay_transport::transport_channels(
+            ControllerRole::ControllerA,
+            "generation-0001",
+            2,
+            2,
+            8192,
+            1024,
+        );
+        sender
+            .install_authenticated_lease(super::super::relay_transport::AuthenticatedLease {
+                context: lease().context,
+                negotiated_capabilities: vec!["encrypted_frames_v1".into(), "task_v1".into()],
+            })
+            .unwrap();
+        manager.replace_transport(sender);
+        let identity = manager.authenticated_remote_proxy_identity().unwrap();
+        let mut wrong_peer = identity.clone();
+        wrong_peer.1 = "different-peer".into();
+        assert_eq!(
+            manager.send_authenticated_business_for_identity(&wrong_peer, &serde_json::json!({})),
+            Err(ControllerSendError::Unauthenticated),
+        );
+        let mut wrong_lease = identity.clone();
+        wrong_lease.0.lease_epoch = "different-epoch".into();
+        assert_eq!(
+            manager.send_authenticated_business_for_identity(&wrong_lease, &serde_json::json!({})),
+            Err(ControllerSendError::Unauthenticated),
+        );
+        let mut wrong_boundary = identity.clone();
+        wrong_boundary.2 = "different-boundary".into();
+        assert_eq!(
+            manager
+                .send_authenticated_business_for_identity(&wrong_boundary, &serde_json::json!({})),
+            Err(ControllerSendError::Unauthenticated),
+        );
+        assert!(matches!(
+            manager.send_authenticated_business_for_identity(&identity, &serde_json::json!({})),
+            Err(ControllerSendError::InvalidFrame(_)),
+        ));
+        manager.disconnect();
+        assert_eq!(
+            manager.send_authenticated_business_for_identity(&identity, &serde_json::json!({})),
+            Err(ControllerSendError::Unauthenticated),
+        );
+    }
 
     #[test]
     fn remote_proxy_commit_requires_current_manager_and_active_exact_lane() {

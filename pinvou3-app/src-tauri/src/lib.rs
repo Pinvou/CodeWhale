@@ -1193,6 +1193,29 @@ pub fn run() {
                         let temporary_models = commands::desktop_remote_model::shared_model_store();
                         handle.manage(temporary_models.clone());
                         let permission_authority = std::sync::Arc::new(PermissionAuthority::default());
+                        let permission_telemetry_app = handle.clone();
+                        permission_authority.set_telemetry_sink(std::sync::Arc::new(move |metric| {
+                            use features::behavior_telemetry::{
+                                RemoteControlEvent, RemoteOutcome, RemotePermissionStep, RemoteReason,
+                                RemoteStage, track_remote_control,
+                            };
+                            use features::remote_control::controller::permission::PermissionTelemetryTransition;
+                            let (outcome, reason, step) = match metric.transition {
+                                PermissionTelemetryTransition::Requested =>
+                                    (RemoteOutcome::Ok, RemoteReason::None, RemotePermissionStep::Request),
+                                PermissionTelemetryTransition::Allowed =>
+                                    (RemoteOutcome::Ok, RemoteReason::None, RemotePermissionStep::Allowed),
+                                PermissionTelemetryTransition::Denied =>
+                                    (RemoteOutcome::Rejected, RemoteReason::PermissionDenied, RemotePermissionStep::Denied),
+                                PermissionTelemetryTransition::Expired =>
+                                    (RemoteOutcome::Expired, RemoteReason::PermissionTimeout, RemotePermissionStep::Expired),
+                            };
+                            track_remote_control(&permission_telemetry_app,
+                                RemoteControlEvent::new(RemoteStage::Permission, outcome)
+                                    .reason(reason)
+                                    .permission_step(step)
+                                    .latency_ms(metric.latency_ms));
+                        }));
                         handle.manage(permission_authority.clone());
                         let desktop_task_runtime = commands::desktop_remote_task::DesktopRemoteTaskRuntime::new(
                             handle.clone(),
@@ -1206,12 +1229,15 @@ pub fn run() {
                         let desktop_attachments =
                             commands::desktop_remote_attachment::DesktopRemoteAttachmentRuntime::from_session_store(
                                 store_for_engine.clone(),
-                                desktop_task_runtime.service(),
                             );
                         let desktop_artifacts =
                             commands::desktop_remote_artifact::DesktopRemoteArtifactRuntime::with_default_registry(
                                 desktop_task_runtime.service(),
                             );
+                        desktop_task_runtime.set_code_artifact_port(desktop_artifacts.clone());
+                        desktop_task_runtime
+                            .hooks()
+                            .set_artifact_scope(desktop_artifacts.clone());
                         let desktop_history =
                             commands::desktop_remote_journal::DesktopRemoteJournalRuntime::journal_only(
                                 format!("boot-{}", std::process::id()),
@@ -1274,6 +1300,9 @@ pub fn run() {
                         let projection_port: DesktopRemoteProjectionPort = projection.clone();
                         handle.manage(projection);
                         handle.manage(projection_port);
+                        handle.manage(std::sync::Arc::new(
+                            commands::desktop_remote_action::DesktopRemoteActionState::default(),
+                        ));
                         handle.manage(
                             features::sessions::application::dispatch_remote::RemoteDispatchService::new(
                                 store_for_engine.clone(),
@@ -1674,7 +1703,7 @@ pub fn run() {
             commands::desktop_remote_controlled::desktop_remote_controlled_stop,
             commands::desktop_remote_controlled::desktop_remote_controlled_disconnect_now,
             commands::desktop_remote_controlled::desktop_remote_controlled_status,
-            commands::desktop_remote_controlled::desktop_remote_client_log,
+            commands::desktop_remote_controlled::desktop_remote_client_event,
             commands::desktop_remote_controlled::desktop_remote_controlled_poll_watchdog,
             commands::desktop_remote_controlled::desktop_remote_controlled_list_workspaces,
             commands::desktop_remote_controller::desktop_remote_controller_connect,
@@ -1683,9 +1712,13 @@ pub fn run() {
             commands::desktop_remote_capability::desktop_remote_controller_capability_snapshot,
             commands::desktop_remote_capability::desktop_remote_controller_capability_send,
             commands::desktop_remote_capabilities::desktop_remote_capabilities_snapshot,
+            commands::desktop_remote_capabilities::desktop_remote_controlled_capabilities_snapshot,
             commands::desktop_remote_task::desktop_remote_controlled_task_send,
             commands::desktop_remote_task::desktop_remote_controlled_task_stop,
-            commands::desktop_remote_task::desktop_remote_task_dispatch_a,
+            commands::desktop_remote_task::desktop_remote_task_reserve_a,
+            commands::desktop_remote_action::desktop_remote_action_a,
+            commands::desktop_remote_task::desktop_remote_task_commit_a,
+            commands::desktop_remote_task::desktop_remote_task_cancel_a,
             commands::desktop_remote_task::desktop_remote_task_abandon_prepared_a,
             commands::desktop_remote_proxy::desktop_remote_proxy_history_list,
             commands::desktop_remote_proxy::desktop_remote_proxy_history_read,
@@ -1695,18 +1728,7 @@ pub fn run() {
             commands::desktop_remote_model::desktop_remote_model_install,
             commands::desktop_remote_model::desktop_remote_model_release,
             commands::desktop_remote_model::desktop_remote_model_active,
-            commands::desktop_remote_permission::desktop_remote_permission_request,
-            commands::desktop_remote_permission::desktop_remote_permission_decide,
-            commands::desktop_remote_permission::desktop_remote_permission_list,
             commands::desktop_remote_permission::desktop_remote_permission_deny_task,
-            commands::desktop_remote_attachment::desktop_remote_attachment_begin,
-            commands::desktop_remote_attachment::desktop_remote_attachment_chunk,
-            commands::desktop_remote_attachment::desktop_remote_attachment_abort,
-            commands::desktop_remote_artifact::desktop_remote_artifact_index,
-            commands::desktop_remote_artifact::desktop_remote_artifact_preview,
-            commands::desktop_remote_artifact::desktop_remote_artifact_download_begin,
-            commands::desktop_remote_artifact::desktop_remote_artifact_download_chunk,
-            commands::desktop_remote_artifact::desktop_remote_artifact_download_abort,
             commands::remote_control::web_access_enable,
             commands::remote_control::web_access_disable,
             commands::remote_control::web_access_status,

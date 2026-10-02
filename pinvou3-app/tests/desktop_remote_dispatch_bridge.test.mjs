@@ -7,6 +7,10 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const app = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const read = (relative) => fs.readFileSync(path.join(app, 'src', relative), 'utf8');
+const remoteTaskCommandSource = fs.readFileSync(
+  path.join(app, 'src-tauri', 'src', 'app', 'commands', 'desktop_remote_task.rs'),
+  'utf8',
+);
 
 function installFeature(onInvoke) {
   const root = { __PINVOU_TAURI_BRIDGE_FEATURES__: {} };
@@ -65,6 +69,42 @@ test('B status consumes only current Rust ControlledStatus fields', async () => 
   assert.equal('pairingExpiresAtMs' in state.desktopRemoteControl.controlledDevice, false);
 });
 
+test('B refresh opens and projects the replacement generation after retiring the old code', async () => {
+  const refresh = Promise.withResolvers();
+  const { feature, state, listeners, logic } = installFeature((command) => {
+    if (command === 'desktop_remote_controlled_refresh') {
+      return refresh.promise;
+    }
+    return undefined;
+  });
+  state.desktopRemoteControl = logic.applyControlledStatus(state.desktopRemoteControl, {
+    status: 'waiting_for_pairing', generation: 'generation-old',
+    pairingCode: '2345678', pairingRemainingMs: 0,
+  });
+
+  const pending = feature.controlledRefresh();
+  listeners.get('desktop-remote-controlled-status')({
+    payload: { status: 'retiring_generation', generation: 'generation-old' },
+  });
+  listeners.get('desktop-remote-controlled-status')({
+    payload: {
+      status: 'waiting_for_pairing', generation: 'generation-new',
+      pairingCode: '3456789', pairingRemainingMs: 300_000,
+    },
+  });
+  refresh.resolve({
+    status: 'waiting_for_pairing', generation: 'generation-new',
+    pairingCode: '3456789', pairingRemainingMs: 300_000,
+  });
+  await pending;
+
+  assert.equal(state.desktopRemoteControl.controlledDevice.status, 'waiting_for_pairing');
+  assert.equal(state.desktopRemoteControl.controlledDevice.generation, 'generation-new');
+  assert.equal(state.desktopRemoteControl.controlledDevice.pairingCode, '3456789');
+  assert.equal(state.desktopRemoteControl.controlledDevice.pairingRemainingMs, 300_000);
+  assert.deepEqual([...state.desktopRemoteControl.retiredControlledGenerations], ['generation-old']);
+});
+
 test('B workspace authorization exists only in the start transaction, never a live invoke', () => {
   const rustRoot = path.join(app, 'src-tauri', 'src');
   const rust = (...parts) => fs.readFileSync(path.join(rustRoot, ...parts), 'utf8');
@@ -88,8 +128,13 @@ test('permission scope is redacted by the Rust authority before the UI projectio
   assert.doesNotMatch(permission, /target_scope: entry\.request\.target_scope\.clone\(\)/);
 });
 
-test('B local send projects only the current snake_case task_status receipt', async () => {
-  const { feature, state, logic } = installFeature((command) => {
+test('B local send preserves local attachments and skills without leaking parsed fields into task input', async () => {
+  const { feature, calls, state, logic } = installFeature((command) => {
+    if (command === 'adopt_draft_attachment') return Promise.resolve({
+      path: 'C:\\managed\\session-1\\report.txt',
+      basename: 'report.txt',
+      markdown: 'must-not-be-forwarded',
+    });
     if (command === 'desktop_remote_controlled_task_send') return Promise.resolve({
       task_id: 'task-1', session_id: 'session-1', task_status: 'admitted',
       taskId: 'old-task', sessionId: 'old-session', taskStatus: 'failed',
@@ -100,11 +145,74 @@ test('B local send projects only the current snake_case task_status receipt', as
     status: 'connected', generation: 'generation-1',
   });
   state.desktopRemoteControl = logic.applyControlledSession(state.desktopRemoteControl, {
-    sessionId: 'session-1', sessionRef: 'ref-1', generation: 'generation-1',
+    sessionId: 'session-1', sessionRef: 'ref-1', generation: 'generation-1', lane: 'chat',
   });
-  await feature.controlledTaskSend('session-1', 'hello');
+  const managed = { path: 'C:\\draft\\secret.txt', markdown: 'secret body' };
+  Object.defineProperty(managed, '__pinvouManagedDraftAttachmentId', {
+    value: 'desktop_attach_opaque', enumerable: false,
+  });
+  const attachment = { id: 7, basename: 'report.txt', status: 'ready', result: managed };
+  state.attachments = [attachment];
+  await feature.controlledTaskSend('session-1', 'hello', [attachment], ['skill-1']);
+  assert.deepEqual(JSON.parse(JSON.stringify(calls.at(-1))), {
+    command: 'desktop_remote_controlled_task_send',
+    args: {
+      sessionId: 'session-1', text: 'hello', skillIds: ['skill-1'],
+      attachments: [{ path: 'C:\\managed\\session-1\\report.txt' }],
+    },
+  });
+  assert.equal(JSON.stringify(calls.at(-1)).includes('secret body'), false);
+  assert.equal(state.attachments.length, 0);
   assert.equal(state.desktopRemoteControl.controlledTasks[0].taskId, 'task-1');
   assert.equal(state.desktopRemoteControl.controlledTasks[0].status, 'admitted');
+});
+
+test('B local capability read reuses the negotiated snapshot command', async () => {
+  const snapshot = {
+    capabilityRevision: '7', connectionId: 'connection-1', controllerLeaseId: 'lease-1',
+    leaseEpoch: '1', relayEpoch: 'relay-1', remoteControlGeneration: 'generation-1',
+    sessionId: 'session-1', sessionLane: 'chat', expiresAtMs: Date.now() + 30_000,
+    modes: ['chat'],
+    skills: [{ skillId: 'skill-1', displayName: 'Skill 1', scopes: ['chat'], path: 'C:\\secret' }],
+  };
+  const { feature, calls } = installFeature((command) => {
+    if (command === 'desktop_remote_controlled_capabilities_snapshot') return Promise.resolve(snapshot);
+    return undefined;
+  });
+  const projected = await feature.controlledCapabilitiesSnapshot('session-1');
+  assert.deepEqual(JSON.parse(JSON.stringify({ ...projected, expiresAtMs: 1 })), {
+    connectionId: 'connection-1', controllerLeaseId: 'lease-1', leaseEpoch: '1',
+    relayEpoch: 'relay-1', remoteControlGeneration: 'generation-1',
+    sessionId: 'session-1', sessionLane: 'chat', capabilityRevision: '7', expiresAtMs: 1,
+    modes: ['chat'], tools: [],
+    skills: [{ skillId: 'skill-1', displayName: 'Skill 1', scopes: ['chat'] }], workspaces: [],
+  });
+  assert.equal(calls.at(-1).command, 'desktop_remote_controlled_capabilities_snapshot');
+  assert.deepEqual(JSON.parse(JSON.stringify(calls.at(-1).args)), { sessionId: 'session-1' });
+});
+
+test('B local text-only chat forwards an explicit empty skill selection', async () => {
+  const { feature, calls } = installFeature((command) => {
+    if (command === 'desktop_remote_controlled_task_send') return Promise.resolve({});
+    return undefined;
+  });
+  await feature.controlledTaskSend('session-1', 'plain chat', [], []);
+  assert.deepEqual(JSON.parse(JSON.stringify(calls.at(-1))), {
+    command: 'desktop_remote_controlled_task_send',
+    args: { sessionId: 'session-1', text: 'plain chat', skillIds: [], attachments: [] },
+  });
+});
+
+test('B local Rust input derives chat/code lane and keeps attachment paths outside task payload', () => {
+  const business = fs.readFileSync(path.join(app, 'src-tauri', 'src', 'app', 'commands',
+    'desktop_remote_controller_business.rs'), 'utf8');
+  assert.match(remoteTaskCommandSource, /code_mode: lane == RemoteSessionLane::Code/);
+  assert.match(remoteTaskCommandSource, /local_controlled_attachments\(&session_root, attachments\)/);
+  assert.match(business, /"mode": mode/);
+  assert.match(business, /validate_skills_for_mode\(&lease, mode, &input\.skill_ids, now_b\)/);
+  assert.match(business, /remote_task_input_digest\(text, &attachment_ids, &input\.skill_ids\)/);
+  assert.match(business, /local_attachments: Some\(input\.attachments\)/);
+  assert.doesNotMatch(business, /"path":\s*attachment\.path/);
 });
 
 test('B local stop is a task-only command during reconnect and rejects a replaced generation', async () => {
@@ -118,7 +226,7 @@ test('B local stop is a task-only command during reconnect and rejects a replace
     status: 'reconnecting', generation: 'generation-1', connectedDurationMs: 1_000,
   });
   state.desktopRemoteControl = logic.applyControlledSession(state.desktopRemoteControl, {
-    sessionId: 'session-1', sessionRef: 'ref-1', generation: 'generation-1',
+    sessionId: 'session-1', sessionRef: 'ref-1', generation: 'generation-1', lane: 'chat',
   });
   state.desktopRemoteControl = logic.applyControlledTaskEvent(state.desktopRemoteControl, {
     taskId: 'task-1', sessionId: 'session-1', generation: 'generation-1',
@@ -142,16 +250,23 @@ test('B local stop is a task-only command during reconnect and rejects a replace
 
 test('new A task forwards only explicit local binding and non-sensitive intent', async () => {
   const { feature, calls } = installFeature();
-  await feature.submitRemoteTask('remote-local-1', 'opaque-ref-1', {
-    kind: 'new', text: 'hello', modelSource: 'controlled_device',
+  await feature.reserveRemoteTask('remote-local-1', 'opaque-ref-1', {
+    kind: 'new', text: 'hello', mode: 'chat', workspaceId: null, skillIds: [],
+    modelSource: 'controlled_device',
   });
   assert.deepEqual(JSON.parse(JSON.stringify(calls.at(-1))), {
-    command: 'desktop_remote_task_dispatch_a',
+    command: 'desktop_remote_task_reserve_a',
     args: { localSessionId: 'remote-local-1', remoteRef: 'opaque-ref-1', intent: {
-      kind: 'new', text: 'hello', modelSource: 'controlled_device', selectedModelId: null,
+      kind: 'new', text: 'hello', mode: 'chat', workspaceId: null, skillIds: [],
+      modelSource: 'controlled_device', selectedModelId: null,
     } },
   });
   assert.equal(calls.some(({ command }) => command === 'desktop_remote_task_submit'), false);
+});
+
+test('unreleased direct-submit and close-session Tauri commands are removed', () => {
+  assert.doesNotMatch(remoteTaskCommandSource, /pub fn desktop_remote_task_submit\s*\(/);
+  assert.doesNotMatch(remoteTaskCommandSource, /pub fn desktop_remote_task_close_session\s*\(/);
 });
 
 test('Rust live-open DTO is lease-matched before a local RemoteProxy ID becomes dispatchable', async () => {
@@ -273,33 +388,90 @@ test('a matching capability failure fails closed without another request claimin
 
 test('temporary model ID is an opaque selection, not a credential or wire package', async () => {
   const { feature, calls } = installFeature();
-  await feature.submitRemoteTask('remote-local-1', 'opaque-ref-1', {
-    kind: 'new', text: 'hello', modelSource: 'controller_temporary', selectedModelId: 'model-42',
+  await feature.reserveRemoteTask('remote-local-1', 'opaque-ref-1', {
+    kind: 'new', text: 'hello', mode: 'chat', workspaceId: null, skillIds: [],
+    modelSource: 'controller_temporary', selectedModelId: 'model-42',
   });
   assert.equal(calls.at(-1).args.intent.selectedModelId, 'model-42');
-  await assert.rejects(feature.submitRemoteTask('remote-local-1', 'opaque-ref-1', {
-    kind: 'new', text: 'hello', modelSource: 'controller_temporary',
+  await assert.rejects(feature.reserveRemoteTask('remote-local-1', 'opaque-ref-1', {
+    kind: 'new', text: 'hello', mode: 'chat', workspaceId: null, skillIds: [],
+    modelSource: 'controller_temporary',
   }), { code: 'remote_task_intent_invalid' });
-  await assert.rejects(feature.submitRemoteTask('remote-local-1', 'opaque-ref-1', {
-    kind: 'new', text: 'hello', modelSource: 'controlled_device', apiKey: 'secret',
+  await assert.rejects(feature.reserveRemoteTask('remote-local-1', 'opaque-ref-1', {
+    kind: 'new', text: 'hello', mode: 'chat', workspaceId: null, skillIds: [],
+    modelSource: 'controlled_device', apiKey: 'secret',
   }), { code: 'remote_task_intent_invalid' });
   assert.equal(calls.length, 2, 'malformed intents never reach Rust');
 });
 
-test('retry is handle-only; abandon uses explicit local SessionStore identity', async () => {
+test('commit is handle-only; cancel and abandon use explicit local SessionStore identity', async () => {
   const { feature, calls } = installFeature();
   const handle = { taskId: 'task-1', clientRequestId: 'request-1', requestFingerprint: 'a'.repeat(64) };
-  await feature.submitRemoteTask('remote-local-1', 'opaque-ref-1', { kind: 'retry', handle });
-  assert.equal(calls.at(-1).args.intent.kind, 'retry');
-  await feature.abandonPreparedRemoteTask('remote-local-1', 'request-1', 'task-1');
+  await feature.commitRemoteTask('remote-local-1', 'opaque-ref-1', handle, ['attachment-1']);
+  assert.deepEqual(JSON.parse(JSON.stringify(calls.at(-1))), {
+    command: 'desktop_remote_task_commit_a',
+    args: { localSessionId: 'remote-local-1', remoteRef: 'opaque-ref-1', handle, attachmentIds: ['attachment-1'] },
+  });
+  await feature.cancelRemoteTask('remote-local-1', 'opaque-ref-1', 'task-1');
+  assert.equal(calls.at(-1).command, 'desktop_remote_task_cancel_a');
+  await feature.abandonRemoteTask('remote-local-1', 'request-1', 'task-1');
   assert.deepEqual(JSON.parse(JSON.stringify(calls.at(-1))), {
     command: 'desktop_remote_task_abandon_prepared_a',
     args: { localSessionId: 'remote-local-1', clientRequestId: 'request-1', taskId: 'task-1' },
   });
-  await assert.rejects(feature.submitRemoteTask('remote-local-1', 'opaque-ref-1', {
-    kind: 'retry', handle, text: 'different prompt',
-  }), { code: 'remote_task_intent_invalid' });
-  assert.equal(calls.length, 3);
+  await assert.rejects(feature.commitRemoteTask('remote-local-1', 'opaque-ref-1', { ...handle, text: 'different prompt' }, []),
+    { code: 'remote_task_intent_invalid' });
+  assert.equal(calls.length, 4);
+});
+
+test('remote attachment, permission and artifact facades use only desktop_remote_action_a', async () => {
+  const { feature, calls } = installFeature((command, args) => {
+    if (command !== 'desktop_remote_action_a') return undefined;
+    switch (args.intent.operation) {
+      case 'permission_list': return Promise.resolve({ permissions: [{
+        permission_request_id: 'permission-1', task_id: 'task-1', operation_type: 'shell',
+        risk_level: 'high', target_scope: 'workspace', preview: 'npm test', state: 'pending',
+      }] });
+      case 'attachment_begin': return Promise.resolve({ transfer_id: 'transfer-1', chunk_bytes: 4, total_bytes: 4 });
+      case 'artifact_index': return Promise.resolve({ artifacts: [{
+        artifact_id: 'artifact-1', task_id: 'task-1', display_name: 'report.txt',
+        mime_type: 'text/plain', total_bytes: 4, sha256: 'a'.repeat(64), preview_kind: 'text',
+      }] });
+      default: return Promise.resolve({ ok: true });
+    }
+  });
+  const permissions = await feature.permissionList('remote-local-1', 'opaque-ref-1', 'task-1');
+  assert.equal(permissions[0].permissionRequestId, 'permission-1');
+  const begin = await feature.attachmentBegin(
+    'remote-local-1', 'opaque-ref-1', 'task-1', 'file.txt', 'text/plain', 4, 'a'.repeat(64),
+  );
+  assert.equal(begin.transferId, 'transfer-1');
+  const artifacts = await feature.artifactIndex('remote-local-1', 'opaque-ref-1');
+  assert.equal(artifacts[0].artifactId, 'artifact-1');
+  assert.deepEqual([...new Set(calls.slice(-3).map(call => call.command))], ['desktop_remote_action_a']);
+  assert.equal(JSON.stringify(calls).includes('connectionId'), false);
+});
+
+test('remote actions reuse one request id across uncertain retry and later reconciliation', async () => {
+  let attempts = 0;
+  const { feature, calls } = installFeature((command) => {
+    if (command !== 'desktop_remote_action_a') return undefined;
+    attempts += 1;
+    if (attempts <= 2) {
+      const error = new Error('result_unknown');
+      error.code = 'result_unknown';
+      return Promise.reject(error);
+    }
+    return Promise.resolve({ permissions: [] });
+  });
+  await assert.rejects(
+    feature.permissionList('remote-local-1', 'opaque-ref-1', 'task-1'),
+    error => error.code === 'result_unknown' && typeof error.requestId === 'string',
+  );
+  await feature.permissionList('remote-local-1', 'opaque-ref-1', 'task-1');
+  const actionCalls = calls.filter(call => call.command === 'desktop_remote_action_a');
+  assert.equal(actionCalls.length, 3);
+  assert.equal(new Set(actionCalls.map(call => call.args.requestId)).size, 1);
 });
 
 test('desktop remote control capability stays false until explicit Windows Rust flag', async () => {
@@ -377,9 +549,10 @@ test('A capability read uses its bound projection command and strips non-allowli
   const projection = {
     connectionId: 'connection-1', controllerLeaseId: 'lease-1', leaseEpoch: '2',
     relayEpoch: 'relay-1', remoteControlGeneration: 'generation-1',
+    remoteSessionRef: 'ref-1',
     capabilityRevision: '4', expiresAtMs: '70000', modes: ['chat', 'code', 'secret-mode'],
     tools: [{ toolId: 'tool-1', displayName: 'Tool', credential: 'secret' }],
-    skills: [{ skillId: 'skill-1', displayName: 'Skill', privateKey: 'secret' }],
+    skills: [{ skillId: 'skill-1', displayName: 'Skill', scopes: ['chat'], privateKey: 'secret' }],
     workspaces: [{ workspaceId: 'workspace-1', displayName: 'Workspace', codeAllowed: true, hostPath: 'C:\\secret' }],
     token: 'secret',
   };
@@ -399,6 +572,9 @@ test('A capability read uses its bound projection command and strips non-allowli
   assert.equal(calls.some(({ command }) => command === 'desktop_remote_capabilities_snapshot'), false);
   assert.equal(result.capabilityRevision, 4);
   assert.deepEqual(JSON.parse(JSON.stringify(result.tools)), [{ displayName: 'Tool', toolId: 'tool-1' }]);
+  assert.deepEqual(JSON.parse(JSON.stringify(result.skills)), [
+    { displayName: 'Skill', skillId: 'skill-1', scopes: ['chat'] },
+  ]);
   assert.deepEqual(JSON.parse(JSON.stringify(result.modes)), ['chat', 'code']);
   assert.equal(JSON.stringify(result).includes('secret'), false);
   await assert.rejects(feature.capabilitiesSnapshot('other-ref'), { code: 'capability_snapshot_unavailable' });
@@ -421,6 +597,7 @@ test('A capability read drops changed bindings and non-increasing revisions', as
   const projection = {
     connectionId: 'connection-1', controllerLeaseId: 'lease-1', leaseEpoch: '2',
     relayEpoch: 'relay-1', remoteControlGeneration: 'generation-1', capabilityRevision: '3',
+    remoteSessionRef: 'ref-1',
     modes: ['chat'], tools: [], skills: [], workspaces: [],
   };
   state.desktopRemoteControl = logic.applyControllerStatus(state.desktopRemoteControl, live);
@@ -442,6 +619,7 @@ test('A capability read drops changed bindings and non-increasing revisions', as
   const nextProjection = {
     ...projection, connectionId: 'connection-2', controllerLeaseId: 'lease-2',
     leaseEpoch: '3', relayEpoch: 'relay-2', remoteControlGeneration: 'generation-2',
+    remoteSessionRef: 'ref-2',
   };
   state.desktopRemoteControl = logic.applyControllerStatus(state.desktopRemoteControl, {
     ...nextLive, intent: state.desktopRemoteControl.intents.controller,

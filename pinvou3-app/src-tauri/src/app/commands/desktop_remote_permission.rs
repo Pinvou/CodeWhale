@@ -1,134 +1,38 @@
 //! Windows remote permission commands (DEV-16).
 //!
-//! B can only list, stop or disconnect; the only Allow/Deny entry is
-//! `desktop_remote_permission_decide`, which requires the local A controller
-//! authority and is rejected for any other caller. The existing Web ACP respond
-//! commands are not a remote authority path: a remote task must go through this
-//! module, and the ACP adapter refuses non-controller sources.
+//! B can only stop or disconnect. A decisions arrive exclusively through the
+//! authenticated `remote_action_request` handler; no legacy Tauri decision or
+//! request command remains. Local/Web ACP responders fail closed for requests
+//! owned by a remote task.
 //!
-//! Registration no longer accepts permissionRequestId. B returns the minted
-//! opaque ID in PermissionView; all A retries/decisions must echo that value.
-//! This is the explicitly approved input migration; old caller-chosen fields
-//! are rejected rather than silently mapped to another approval.
+//! B mints opaque, non-reusable approval IDs. ACP callback IDs stay private;
+//! remote decisions must echo the B-authoritative ID.
 
 use std::sync::Arc;
 
-use serde_json::Value;
 use tauri::State;
 
-use crate::features::codex_acp::AcpPool;
+use crate::features::codex_acp::{AcpPool, RemotePermissionOwner};
 use crate::features::remote_control::controller::controlled::ControlledDeviceManager;
+#[cfg(test)]
 use crate::features::remote_control::controller::permission::{
-    DecisionAuthority, DecisionOutcome, DispatchCommit, PermissionAuthority, PermissionDecision,
-    PermissionRequest, PermissionView,
+    DecisionAuthority, PermissionRequest,
 };
-use crate::features::remote_control::controller::task::RemoteTaskLedger;
+use crate::features::remote_control::controller::permission::{
+    PermissionAuthority, PermissionDecision,
+};
 
 const UNSUPPORTED: &str = "desktop_remote_control_unsupported";
 
+#[cfg(test)]
 pub use crate::features::remote_control::controller::permission::PermissionRequestInput as DesktopRemotePermissionRequestInput;
 
 fn ensure_supported(controlled: &ControlledDeviceManager) -> Result<(), String> {
-    if controlled.is_supported() {
-        Ok(())
-    } else {
-        Err(UNSUPPORTED.to_owned())
-    }
-}
-
-#[tauri::command]
-pub fn desktop_remote_permission_request(
-    request: DesktopRemotePermissionRequestInput,
-    controlled: State<'_, ControlledDeviceManager>,
-    authority: State<'_, Arc<PermissionAuthority>>,
-) -> Result<PermissionView, String> {
-    ensure_supported(&controlled)?;
-    let live = controlled
-        .live_lease()
-        .map_err(|error| error.code.to_owned())?;
-    authority
-        .request(
-            &live,
-            &request.task_id,
-            PermissionRequest {
-                operation_type: request.operation_type,
-                risk_level: request.risk_level,
-                target_scope: request.target_scope,
-                preview: request.preview,
-                expires_at_ms: request.expires_at_ms,
-            },
-            authority.now_ms(),
-        )
-        .map_err(|error| error.code.to_owned())
-}
-
-/// The only remote Allow/Deny entry point. The `authority` value is derived
-/// server-side: a B-side caller cannot reach it, and the ledger is consulted to
-/// make sure the request belongs to a live remote task.
-#[tauri::command]
-pub fn desktop_remote_permission_decide(
-    task_id: String,
-    permission_request_id: String,
-    decision: String,
-    controlled: State<'_, ControlledDeviceManager>,
-    authority: State<'_, Arc<PermissionAuthority>>,
-    ledger: State<'_, Arc<RemoteTaskLedger>>,
-) -> Result<Value, String> {
-    ensure_supported(&controlled)?;
-    let live = controlled
-        .live_lease()
-        .map_err(|error| error.code.to_owned())?;
-    let record = ledger
-        .record(&task_id)
-        .map_err(|error| error.code.to_owned())?;
-    if record.is_terminal() {
-        return Err("task_state_conflict".to_owned());
-    }
-    let decision = PermissionDecision::parse(&decision)
-        .ok_or_else(|| "permission_decision_invalid".to_owned())?;
-    let outcome = authority
-        .decide(
-            DecisionAuthority::ControllerA,
-            &live,
-            &task_id,
-            &permission_request_id,
-            decision,
-            authority.now_ms(),
-        )
-        .map_err(|error| error.code.to_owned())?;
-
-    // Atomic dispatch boundary: only an allow that wins the CAS may run.
-    if matches!(
-        outcome,
-        DecisionOutcome::Decided {
-            decision: PermissionDecision::Allow,
-            ..
-        }
-    ) {
-        match authority
-            .commit_dispatch(&permission_request_id, authority.now_ms())
-            .map_err(|error| error.code.to_owned())?
-        {
-            DispatchCommit::Committed => {}
-            DispatchCommit::Rejected { code } => return Err(code.to_owned()),
-        }
-    }
-    authority
-        .view(&permission_request_id)
-        .map(|view| serde_json::to_value(view).unwrap_or(Value::Null))
-        .map_err(|error| error.code.to_owned())
-}
-
-/// B-side read-only view: no Allow/Approve control exists.
-#[tauri::command]
-pub fn desktop_remote_permission_list(
-    task_id: String,
-    controlled: State<'_, ControlledDeviceManager>,
-    authority: State<'_, Arc<PermissionAuthority>>,
-) -> Result<Vec<PermissionView>, String> {
-    ensure_supported(&controlled)?;
-    authority.sweep_expired(authority.now_ms());
-    Ok(authority.pending_for_task(&task_id))
+    crate::platform::capabilities::ensure_desktop_remote_control_enabled()?;
+    controlled
+        .is_supported()
+        .then_some(())
+        .ok_or_else(|| UNSUPPORTED.to_owned())
 }
 
 /// Called by every B-side terminal path (stop, refresh, disconnect, cancel).
@@ -148,14 +52,33 @@ pub fn desktop_remote_permission_deny_task(
 /// never decide a remote request.
 pub(crate) async fn respond_remote_permission_via_acp(
     acp_pool: &AcpPool,
-    session_id: &str,
-    tool_call_id: &str,
-    option_id: &str,
+    owner: &RemotePermissionOwner,
+    permission_request_id: &str,
+    decision: PermissionDecision,
 ) -> Result<(), String> {
-    acp_pool
-        .respond_permission(session_id, tool_call_id, option_id)
-        .await
-        .map_err(|_| "permission_dispatch_failed".to_owned())
+    let result = acp_pool
+        .respond_remote_permission(
+            owner,
+            permission_request_id,
+            decision == PermissionDecision::Allow,
+        )
+        .await;
+    if result.is_ok() {
+        return Ok(());
+    }
+    // The ACP adapter may observe the authority decision and win the response
+    // race. Treat that as the same successful resolution only while the exact
+    // owner is still current and the exact request is no longer pending.
+    if acp_pool.has_remote_permission_owner(owner)
+        && !acp_pool
+            .pending_remote_permissions(owner)
+            .await
+            .iter()
+            .any(|pending| pending.approval_id.as_deref() == Some(permission_request_id))
+    {
+        return Ok(());
+    }
+    Err("permission_dispatch_failed".to_owned())
 }
 
 #[cfg(test)]

@@ -137,6 +137,7 @@ struct WorkspaceAuthorization {
     id: String,
     display_name: String,
     path: PathBuf,
+    identity: super::super::platform::WorkspaceIdentity,
     code_allowed: bool,
 }
 
@@ -170,6 +171,12 @@ pub(crate) struct ControlledStatus {
     watchdog_deadline_b: Option<u64>,
     watchdog_suspect: bool,
     error_code: Option<String>,
+}
+
+impl ControlledStatus {
+    pub(crate) fn kind(&self) -> ControlledStatusKind {
+        self.status
+    }
 }
 
 impl std::fmt::Debug for ControlledStatus {
@@ -331,6 +338,27 @@ pub(crate) struct WorkspaceAuthorizationRequest {
     pub(crate) path: PathBuf,
     pub(crate) display_name: String,
     pub(crate) code_allowed: bool,
+    identity: super::super::platform::WorkspaceIdentity,
+}
+
+impl WorkspaceAuthorizationRequest {
+    pub(crate) fn new(path: PathBuf, display_name: String, code_allowed: bool) -> Result<Self> {
+        if !path.is_dir() {
+            return Err(ControlledStateError::new("workspace_path_invalid"));
+        }
+        // Keep the directory identity next to the authorization. Resolving an
+        // opaque workspace id for a code turn must prove that the path still
+        // names the directory that B approved, not a replacement at the same
+        // textual path.
+        let identity = super::super::platform::workspace_identity(&path)
+            .map_err(|_| ControlledStateError::new("workspace_identity_unavailable"))?;
+        Ok(Self {
+            path,
+            display_name,
+            code_allowed,
+            identity,
+        })
+    }
 }
 
 impl ControlledDeviceManager {
@@ -1054,6 +1082,28 @@ impl ControlledDeviceManager {
             .collect()
     }
 
+    /// Resolve an opaque capability back to the B-local directory while the
+    /// controlled lease is live. The path never leaves this process.
+    pub(crate) fn resolve_code_workspace(&self, workspace_id: &str) -> Result<PathBuf> {
+        let inner = self.inner.lock();
+        if inner.phase != ControlledStatusKind::Connected {
+            return Err(ControlledStateError::new("desktop_remote_not_connected"));
+        }
+        let workspace = inner
+            .workspaces
+            .iter()
+            .find(|workspace| workspace.id == workspace_id && workspace.code_allowed)
+            .ok_or_else(|| ControlledStateError::new("workspace_not_authorized"))?;
+        if !workspace.path.is_dir()
+            || super::super::platform::workspace_identity(&workspace.path)
+                .map(|identity| identity != workspace.identity)
+                .unwrap_or(true)
+        {
+            return Err(ControlledStateError::new("workspace_authorization_stale"));
+        }
+        Ok(workspace.path.clone())
+    }
+
     pub(crate) fn status(&self) -> ControlledStatus {
         status_locked(&self.inner.lock())
     }
@@ -1094,6 +1144,22 @@ impl ControlledDeviceManager {
             .clone()
             .ok_or_else(|| ControlledStateError::new("desktop_remote_not_connected"))?;
         Ok((context, inner.negotiated_capabilities.clone()))
+    }
+
+    /// B business actions are admitted only while this exact authenticated
+    /// generation remains connected. Stop/refresh cannot race the mutation.
+    pub(crate) fn with_current_business_lease<T>(
+        &self,
+        expected: &LeaseContext,
+        action: impl FnOnce() -> T,
+    ) -> Result<T> {
+        let inner = self.inner.lock();
+        if inner.phase != ControlledStatusKind::Connected
+            || inner.lease_context.as_ref() != Some(expected)
+        {
+            return Err(ControlledStateError::new("desktop_remote_not_connected"));
+        }
+        Ok(action())
     }
 
     /// Hold the B lifecycle lock through a narrow ledger admission. The
@@ -1238,6 +1304,7 @@ fn normalize_workspaces(
         output.push(WorkspaceAuthorization {
             id: format!("workspace_{}", Uuid::new_v4().simple()),
             display_name: display_name.to_owned(),
+            identity: request.identity,
             path: request.path,
             code_allowed: request.code_allowed,
         });
@@ -1417,6 +1484,7 @@ mod tests {
                     path: PathBuf::from("workspace-fixture"),
                     display_name: "Project".into(),
                     code_allowed: true,
+                    identity: super::super::super::platform::test_workspace_identity(6),
                 }],
             )
             .unwrap();
@@ -1617,6 +1685,7 @@ mod tests {
                     path: PathBuf::from(r"D:\projects"),
                     display_name: "Projects".into(),
                     code_allowed: true,
+                    identity: super::super::super::platform::test_workspace_identity(1),
                 }],
             )
             .unwrap();
@@ -1666,6 +1735,44 @@ mod tests {
         assert_eq!(projected.len(), 1);
         assert_eq!(projected[0].display_name, "Projects");
         assert!(!format!("{projected:?}").contains("projects"));
+    }
+
+    #[test]
+    fn opaque_workspace_resolves_only_while_the_b_authorized_directory_identity_is_live() {
+        let workspace = tempfile::tempdir().unwrap();
+        let authorized_path = workspace.path().to_path_buf();
+        let manager = ControlledDeviceManager::default();
+        let operation = manager
+            .start(
+                Some("Studio PC"),
+                vec![
+                    WorkspaceAuthorizationRequest::new(
+                        authorized_path.clone(),
+                        "Projects".into(),
+                        true,
+                    )
+                    .unwrap(),
+                ],
+            )
+            .unwrap();
+        register(&manager, &operation);
+        enter_handshake(&manager, &operation);
+        manager
+            .complete_connected(operation.clone(), lease(operation.generation()))
+            .unwrap();
+        let workspace_id = manager.workspaces().remove(0).workspace_id;
+        assert_eq!(
+            manager.resolve_code_workspace(&workspace_id).unwrap(),
+            authorized_path
+        );
+        std::fs::remove_dir_all(&authorized_path).unwrap();
+        assert_eq!(
+            manager
+                .resolve_code_workspace(&workspace_id)
+                .unwrap_err()
+                .code,
+            "workspace_authorization_stale"
+        );
     }
 
     #[test]
@@ -1727,6 +1834,7 @@ mod tests {
                     path: PathBuf::from(r"D:\reports"),
                     display_name: "Reports".into(),
                     code_allowed: false,
+                    identity: super::super::super::platform::test_workspace_identity(2),
                 }],
             )
             .unwrap();
@@ -2141,6 +2249,7 @@ mod tests {
                     path: PathBuf::from(r"D:\private"),
                     display_name: "Private".into(),
                     code_allowed: true,
+                    identity: super::super::super::platform::test_workspace_identity(3),
                 }],
             )
             .unwrap();
@@ -2296,6 +2405,7 @@ mod tests {
                     path: PathBuf::from(r"D:\secret"),
                     display_name: "Secret".into(),
                     code_allowed: true,
+                    identity: super::super::super::platform::test_workspace_identity(4),
                 }],
             )
             .unwrap();
@@ -2337,6 +2447,7 @@ mod tests {
                     path: PathBuf::from(r"D:\projects"),
                     display_name: "Projects".into(),
                     code_allowed: true,
+                    identity: super::super::super::platform::test_workspace_identity(5),
                 }],
             )
             .unwrap();

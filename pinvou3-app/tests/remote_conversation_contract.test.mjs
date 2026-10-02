@@ -32,7 +32,8 @@ test('A connection shell contains no second transcript, task list, history or co
   assert.ok(shell.includes('onRequestDisconnect'));
   assert.ok(shell.includes('onClose'));
   assert.ok(chat.includes('remoteProxyChatItems(activeSessionId, remoteProxyHistory)'));
-  assert.match(chat, /submitRemoteTask\(\s*remoteBinding\.localSessionId, remoteBinding\.remoteRef, intent/);
+  assert.match(chat, /reserveRemoteTask\(\s*remoteBinding\.localSessionId, remoteBinding\.remoteRef, intent/);
+  assert.match(chat, /commitRemoteTask\(\s*remoteBinding\.localSessionId, remoteBinding\.remoteRef, preparedOutcome\.handle, attachmentIds/);
   assert.match(chat, /readRemoteProxyHistory\(remoteBinding\.localSessionId\)[\s\S]*?recordRemoteDispatch\(/);
   assert.match(chat, /if \(outcome\.state !== 'queued'\) return 'held'/);
   assert.ok(!chat.includes('bs ? bs.transcript : []'));
@@ -46,6 +47,16 @@ test('remote and offline labels are localized at the single conversation boundar
     assert.ok(dict[language].remoteConversation.resultUnknownHint);
   }
   assert.ok(chat.includes('t.remoteConversation.offlineCopy'));
+});
+
+test('missing controlled-device model credentials are explicit and localized', () => {
+  for (const language of ['zh', 'en', 'ja']) {
+    assert.ok(dict[language].remoteConversation.controlledModelCredentialUnavailable);
+  }
+  assert.match(
+    chat,
+    /currentRemoteSendError === 'model_credential_unavailable'[\s\S]*controlledModelCredentialUnavailable/,
+  );
 });
 
 test('RemoteProxy sidebar offers only supported delete, not local metadata or folder actions', () => {

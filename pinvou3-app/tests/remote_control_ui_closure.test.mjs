@@ -100,7 +100,8 @@ test('the A bridge exposes intent commands without a second journal subscriber',
   assert.ok(!bridge.includes('"desktop-remote-controller-journal"'));
   assert.ok(!bridge.includes('applyJournalEvent'));
   assert.ok(bridge.includes('"desktop_remote_proxy"'));
-  for (const method of ['controllerCapabilitySend', 'submitRemoteTask']) {
+  for (const method of ['controllerCapabilitySend', 'reserveRemoteTask', 'commitRemoteTask',
+    'cancelRemoteTask', 'abandonRemoteTask']) {
     assert.ok(bridge.includes(`${method}: ${method}`), `${method} must be exported`);
   }
   assert.ok(bridge.includes('desktop_remote_controller_capability_send'));

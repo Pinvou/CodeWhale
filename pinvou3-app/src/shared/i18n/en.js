@@ -2196,10 +2196,6 @@ Object.assign(dictEn.uiChat, {
   bgTasks: 'Background Tasks',
   bgTasksRunning: n => `${n} background task${n === 1 ? '' : 's'} running`,
 });
-// restored: baseline catalog descriptions (referenced by the model catalog data)
-Object.assign(dictEn.uiSettingsDetail.modelDescriptions, { '本地服务默认模型': 'Default model for the local service', '高能力模型': 'High-capability model', '快速响应': 'Fast responses', '最新通用模型': 'Latest general-purpose model', '代码场景': 'Coding tasks', '高速代码场景': 'High-speed coding tasks', '稳定可用': 'Stable release', '高性价比': 'Cost-effective', '通用能力': 'General-purpose', '兼容保留': 'Compatibility option', '高速响应': 'High-speed responses', '轻量模型': 'Lightweight model'
-});
-
 // Windows desktop remote control: controlled-device panel (DEV-21).
 dictEn["controlledDevice"] = {
   connectionTitle: "Connection status",
@@ -2383,6 +2379,17 @@ Object.assign(dictEn.controllerConnection, {
 dictEn["remoteConversation"] = {
   title: "Remote conversation",
   remoteBadge: "Remote",
+  projectionUser: "Remote input",
+  projectionAssistant: "Remote reply",
+  projectionTool: "Remote tool event (details hidden)",
+  projectionApproval: "Remote approval event (details hidden)",
+  projectionStatus: "Remote task status updated",
+  projectionError: "Remote task error; check the task status",
+  projectionAttachment: "Remote attachment event (details hidden)",
+  projectionArtifact: "Remote artifact event (details hidden)",
+  projectionSnapshot: "Remote history resynchronized",
+  projectionEvent: "Remote event (details hidden)",
+  projectionAttachmentCount: count => `${count} attachment references; downloading requires a current verified connection`,
   localBadge: "Local",
   newSession: "New remote session",
   empty: "No remote conversation yet. Send the first message to start.",
@@ -2404,13 +2411,18 @@ dictEn["remoteConversation"] = {
   modelSourceDevice: "Device models",
   modelSourceMine: "My models",
   modelPickerTitle: "Model source",
+  modelRequired: "Model is required",
   modelNotExportable: "This model cannot be used remotely",
   modeChat: "Chat mode",
   modeCode: "Code mode",
+  modeLabel: "Task mode",
   modeHidden: "The other side has not enabled this mode",
   capabilitiesTitle: "Available capabilities",
   capabilitiesEmpty: "The other side exposes no tool or workspace yet.",
   workspaceLabel: "Workspace",
+  workspaceRequired: "Select a workspace",
+  skillsLabel: "Available skills",
+  toolsLabel: "Available tools",
   permissionTitle: "Needs your approval",
   permissionAllow: "Allow once",
   permissionDeny: "Deny",
@@ -2429,17 +2441,33 @@ dictEn["remoteConversation"] = {
   offlineHint: "This is a local copy; it does not mean the remote device is still connected.",
   journalResync: "The conversation state was re-synced.",
   resultUnknownHint: "The connection dropped, so this task's outcome cannot be confirmed.",
-  preparedNotSent: "This task was not sent. Retry with the same task ID, or abandon it before sending a new message.",
+  preparedNotSent: "This task has not been committed. Continue the same task, or abandon it before sending a new message.",
   preparedPayloadLost: "This task was not sent, but its payload cannot be recovered after restart. Abandon it safely before entering it again.",
   outcomeUnknownNoResend: "The task outcome is unknown. It cannot be resent automatically because that might run it twice. Check the controlled device first.",
-  retrySameTask: "Retry same task",
+  commitPreparedTask: "Continue commit",
   abandonPreparedTask: "Abandon safely",
   pendingActionFailed: "The pending-task action failed. Its recovery details are still kept.",
   deletePreparedBlocked: "This remote conversation has an unsent task. Open it and abandon that task safely before deleting the conversation.",
   draftCapacityExceeded: "This draft could not be kept across conversations because the temporary draft limit was reached. Copy it before switching away.",
   sessionBusy: "This remote session is running a task. Try again shortly; your message was kept.",
   temporaryModelCapabilityRequired: "The other device does not support using your model yet. Update both clients and reconnect, or use the controlled device's model.",
+  controlledModelCredentialUnavailable: "The controlled device's current model has no credentials. Configure the model there, or retry using your model.",
   errorGeneric: "The operation failed. Please try again.",
+  attachmentOnlyPrompt: "Process the attachments submitted with this task.",
+  addAttachment: "Add remote attachment",
+  removeAttachment: name => `Remove attachment ${name}`,
+  uploadingAttachment: (name, received, total) => `Uploading ${name} (${received}/${total} bytes)`,
+  taskActions: "Remote task actions",
+  runningTask: "Running task",
+  cancelTask: "Cancel task",
+  permissionRequest: "Permission request",
+  permissionTimedOut: "This permission request timed out and can no longer be handled.",
+  artifacts: "Remote artifacts",
+  previewArtifact: "Preview",
+  downloadArtifact: "Download",
+  previewUnavailable: "No text preview is available for this artifact.",
+  actionFailed: "Remote action failed",
+  actionResultUnknown: "The remote action outcome is unknown. Check the controlled device first; do not retry it as a new request, because that could run the action twice.",
 };
 
 // Sidebar label of the dedicated "Desktop Remote Control" settings sub-page.
@@ -2448,3 +2476,6 @@ dictEn.uiSettings.remoteControl = 'Desktop Remote Control';
 // (same pattern as "Help & Feedback → Behavior analytics").
 dictEn.uiSettingsDetail.desktopRemoteControlEntryDesc = "Let someone connect with a pairing code and run tasks with this machine's model; you can review and disconnect at any time.";
 dictEn.uiSettingsDetail.desktopRemoteControlBack = 'Back to General';
+// restored: baseline catalog descriptions (referenced by the model catalog data)
+Object.assign(dictEn.uiSettingsDetail.modelDescriptions, { '本地服务默认模型': 'Default model for the local service', '高能力模型': 'High-capability model', '快速响应': 'Fast responses', '最新通用模型': 'Latest general-purpose model', '代码场景': 'Coding tasks', '高速代码场景': 'High-speed coding tasks', '稳定可用': 'Stable release', '高性价比': 'Cost-effective', '通用能力': 'General-purpose', '兼容保留': 'Compatibility option', '高速响应': 'High-speed responses', '轻量模型': 'Lightweight model'
+});

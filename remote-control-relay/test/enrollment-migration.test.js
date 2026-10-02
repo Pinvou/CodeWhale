@@ -927,7 +927,9 @@ test("real legacy v2 Relay is safe only behind the enrollment gateway", async (t
   const controllerWebNotice = await controllerWebConnected;
   assert.equal(controllerWebNotice.endpoint_id, "legacy-preserved-endpoint");
   assert.equal(controllerWebNotice.lease_id, controllerRegistration.lease_id);
-  const controllerDisabled = nextMessage(controllerDesktop);
+  // Match the v1 rejection even if an unrelated v2 notice is queued.
+  const controllerDisabled = nextMessageMatching(controllerDesktop,
+    (message) => message.code === "desktop_controller_unavailable");
   const controllerClosed = socketClosed(controllerDesktop);
   controllerDesktop.send(JSON.stringify({ v: 1, type: "controller_capabilities" }));
   assert.equal((await controllerDisabled).code, "desktop_controller_unavailable");

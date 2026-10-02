@@ -311,6 +311,10 @@ pub(crate) struct PendingRemoteRequest {
     /// Durable pre-send barrier. Never move back to `NeverAttempted` after
     /// persistence, including when the transport reports an error.
     pub(crate) dispatch_state: PendingDispatchState,
+    /// Original reserve handle, retained only for read-only outcome queries
+    /// after authenticated attachment receipts finalized the fingerprint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) reservation_fingerprint: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -355,6 +359,10 @@ impl PendingRemoteRequest {
         if !valid_remote_identifier(&self.client_request_id)
             || !valid_remote_identifier(&self.task_id)
             || !valid_request_fingerprint(&self.request_fingerprint)
+            || self
+                .reservation_fingerprint
+                .as_deref()
+                .is_some_and(|value| !valid_request_fingerprint(value))
         {
             bail!("invalid remote pending correlation");
         }
@@ -493,6 +501,47 @@ impl SessionStore {
         Ok(PendingReservation::Inserted)
     }
 
+    /// Finalize the fingerprint of a prepared request after authenticated B
+    /// upload receipts have been bound to its in-process payload. The original
+    /// IDs stay fixed; an attempted request can never change semantics.
+    pub(crate) fn replace_prepared_remote_fingerprint(
+        &self,
+        id: &str,
+        remote_ref: &str,
+        context: &LiveRemoteContext,
+        client_request_id: &str,
+        task_id: &str,
+        old_fingerprint: &str,
+        new_fingerprint: &str,
+    ) -> Result<()> {
+        if !valid_request_fingerprint(old_fingerprint)
+            || !valid_request_fingerprint(new_fingerprint)
+        {
+            bail!("invalid remote request fingerprint");
+        }
+        let mut state = self.remote_proxies.lock();
+        require_live_locked(&state, id, remote_ref, context)?;
+        let mut record = state.records.get(id).expect("checked RemoteProxy").clone();
+        let pending = record
+            .pending
+            .iter_mut()
+            .find(|item| item.client_request_id == client_request_id && item.task_id == task_id)
+            .ok_or_else(|| anyhow::anyhow!("unknown remote pending request"))?;
+        if pending.request_fingerprint != old_fingerprint
+            || pending.dispatch_state != PendingDispatchState::PreparedNeverAttempted
+        {
+            bail!("remote request cannot change after its dispatch barrier");
+        }
+        if old_fingerprint == new_fingerprint {
+            return Ok(());
+        }
+        if pending.reservation_fingerprint.is_none() {
+            pending.reservation_fingerprint = Some(old_fingerprint.to_owned());
+        }
+        pending.request_fingerprint = new_fingerprint.to_owned();
+        persist_changed(&mut state, id, record)
+    }
+
     /// Persist the irreversible send barrier before any transport call. A
     /// failed persistence must stop dispatch; an ambiguous transport failure
     /// must never restore `NeverAttempted`.
@@ -520,6 +569,28 @@ impl SessionStore {
         }
         pending.dispatch_state = PendingDispatchState::AttemptMayHaveOccurred;
         persist_changed(&mut state, id, record)
+    }
+
+    /// A cancel request is meaningful only for a task whose send barrier was
+    /// durably crossed in this exact live RemoteProxy binding. Prepared tasks
+    /// must be abandoned instead; an arbitrary UI task ID is never authority.
+    pub(crate) fn require_attempted_remote_task(
+        &self,
+        id: &str,
+        remote_ref: &str,
+        context: &LiveRemoteContext,
+        task_id: &str,
+    ) -> Result<()> {
+        let state = self.remote_proxies.lock();
+        require_live_locked(&state, id, remote_ref, context)?;
+        let record = state.records.get(id).expect("checked RemoteProxy");
+        if !record.pending.iter().any(|pending| {
+            pending.task_id == task_id
+                && pending.dispatch_state == PendingDispatchState::AttemptMayHaveOccurred
+        }) {
+            bail!("remote task is not currently attempted");
+        }
+        Ok(())
     }
 
     /// Only a persisted proof of `NeverAttempted` permits abandoning a lost
