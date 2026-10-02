@@ -13,13 +13,13 @@ function publicKey() {
     .subarray(-32).toString("base64");
 }
 
-function fixture({ clock = () => 1000, failConsume = false } = {}) {
+function fixture({ clock = () => 1000, failConsume = false, pairingCapabilities = CAPABILITIES } = {}) {
   const pairing = Object.freeze({
     pairing_id: "pairing-0001",
     endpoint_id: "endpoint-0001",
     remote_control_generation: "generation-0001",
     handshake_public_key_b64: publicKey(),
-    capabilities: Object.freeze([...CAPABILITIES]),
+    capabilities: Object.freeze([...pairingCapabilities]),
   });
   const consumed = [];
   const terminal = [];
@@ -119,9 +119,9 @@ function receiptMessage(reserved, senderRole, secret) {
   };
 }
 
-async function start(manager) {
+async function start(manager, capabilities = CAPABILITIES) {
   return manager.claim({
-    message: claimMessage(), socketIdentity: "socket-A", source: "198.51.100.1",
+    message: claimMessage({ capabilities: [...capabilities] }), socketIdentity: "socket-A", source: "198.51.100.1",
   });
 }
 
@@ -168,6 +168,18 @@ test("two opposite receipts atomically consume pairing and create one controller
     handshakes: 0, leases: 1,
   });
   assert.equal(slots.read("endpoint-0001").owner, null);
+});
+
+test("temporary model capability is negotiated only when both client versions declare it", async () => {
+  const temporary = "temporary_model_package_v1";
+  const modernCapabilities = [...CAPABILITIES, temporary];
+  const modern = fixture({ pairingCapabilities: modernCapabilities });
+  const modernReservation = await start(modern.manager, modernCapabilities);
+  assert.equal(modernReservation.transcript.negotiated_capabilities.includes(temporary), true);
+
+  const oldControlled = fixture();
+  const mixedReservation = await start(oldControlled.manager, modernCapabilities);
+  assert.equal(mixedReservation.transcript.negotiated_capabilities.includes(temporary), false);
 });
 
 test("commitment, Finished and receipt enforce order, role, socket and replay", async () => {
