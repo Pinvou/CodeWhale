@@ -222,11 +222,35 @@ impl DeepSeekClient {
             .http_client
             .post(&url)
             .header("Accept", "text/event-stream")
-            .timeout(crate::client::NON_STREAMING_REQUEST_ENVELOPE)
+            .timeout(crate::client::non_streaming_request_envelope())
             .json(body)
             .send()
-            .await
-            .context("Anthropic Messages API request failed")?;
+            .await;
+        let response = match response {
+            Ok(response) => response,
+            Err(error) => {
+                let rendered = if error.is_timeout() {
+                    "anthropic request exceeded the envelope".to_string()
+                } else {
+                    format!("anthropic transport failure: {error}")
+                };
+                // A transport-level failure never reaches the status checks
+                // below, so it must mark health and probe on its own —
+                // otherwise a provider that stalls past the envelope leaves
+                // connection health stale until the next request retries.
+                // The isolated classifier request is the exception: a
+                // read-only inspection must not write the shared connection
+                // health (or fire a /models probe), matching the isolated
+                // dispatch contract of the generic send paths.
+                if !self.isolated_request_state {
+                    self.mark_request_failure(&rendered).await;
+                    self.maybe_probe_recovery().await;
+                }
+                return Err(
+                    anyhow::Error::new(error).context("Anthropic Messages API request failed")
+                );
+            }
+        };
         self.check_anthropic_response(response).await
     }
 
@@ -240,11 +264,19 @@ impl DeepSeekClient {
         if !status.is_success() {
             let raw = bounded_error_text(response, ERROR_BODY_MAX_BYTES).await;
             let (error_type, message) = parse_anthropic_error_envelope(&raw);
-            self.mark_request_failure(&format!("anthropic status={status}"))
-                .await;
+            // Same isolation contract as the transport-failure arm above: a
+            // status-level failure on the isolated classifier request must
+            // not write the shared connection health (the generic dialect's
+            // isolated dispatch path writes nothing either).
+            if !self.isolated_request_state {
+                self.mark_request_failure(&format!("anthropic status={status}"))
+                    .await;
+            }
             anyhow::bail!("Anthropic API error (HTTP {status} {error_type}): {message}");
         }
-        self.mark_request_success().await;
+        if !self.isolated_request_state {
+            self.mark_request_success().await;
+        }
         Ok(response)
     }
 

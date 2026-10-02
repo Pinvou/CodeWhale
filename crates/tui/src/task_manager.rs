@@ -1996,6 +1996,20 @@ impl TaskManager {
                         _ = self.cancel_token.cancelled(), if !self.cancel_token.is_cancelled() => {
                             cancel.cancel();
                         }
+                        // Known starvation shape (deliberate, disclosed
+                        // debt): `biased` polls the event arm before this
+                        // flush arm, and the debounce sleep restarts on
+                        // every loop iteration, so an event stream denser
+                        // than the debounce interval defers persistence
+                        // until the stream pauses or the loop exits (the
+                        // trailing flush below still lands it). Heartbeats
+                        // never arm `dirty` themselves, but their ~200ms
+                        // cadence still restarts the debounce, so dirty
+                        // state armed just before a silent-tool phase
+                        // stays unpersisted for that whole phase; a dense
+                        // run of unpersisted deltas starves it the same
+                        // way. Fixing it needs a deadline that survives
+                        // across iterations.
                         _ = sleep(persist_debounce), if dirty => {
                             if let Err(err) = self.flush_task(&task_id).await {
                                 tracing::error!("Failed to debounce-persist task {task_id}: {err}");
@@ -2009,6 +2023,12 @@ impl TaskManager {
         };
 
         while let Ok(event) = event_rx.try_recv() {
+            // Same invariant as the main loop's heartbeat short-circuit:
+            // liveness-only ticks are a no-op and must not take the
+            // manager-wide state lock, even while draining the tail.
+            if matches!(event, TaskExecutionEvent::ToolHeartbeat { .. }) {
+                continue;
+            }
             append_message_delta(&mut accumulated_result_text, &event);
             if let Err(err) = self.apply_execution_event(&task_id, event).await {
                 tracing::error!("Failed to apply trailing task event for {task_id}: {err}");
@@ -2039,6 +2059,14 @@ impl TaskManager {
     ) {
         if execution_event_is_progress(&event) {
             guard.note_progress(Instant::now());
+        }
+        // Liveness-only heartbeats never mutate the record: short-circuit
+        // before the state lock so a silent build's ~5 ticks/s do not take
+        // the manager-wide lock for a no-op, and so they do not mark the
+        // record dirty (a spurious dirty would only arm a redundant
+        // debounce flush).
+        if matches!(event, TaskExecutionEvent::ToolHeartbeat { .. }) {
+            return;
         }
         append_message_delta(accumulated_result_text, &event);
         match self.apply_execution_event(task_id, event).await {
