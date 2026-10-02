@@ -54,6 +54,11 @@ pub(crate) trait UploadStaging: Send + Sync {
     /// Return the absolute B-local published path; only this host port knows it.
     fn commit(&self, transfer: &CompletedTransfer) -> std::result::Result<PathBuf, String>;
 
+    fn published_read_owner(
+        &self,
+        handle_id: &str,
+    ) -> Option<Arc<dyn crate::features::files::file_ingest::AttachmentReadOwner>>;
+
     /// Drops the staging target. Must be idempotent.
     fn abort(&self, handle_id: &str) -> std::result::Result<(), String>;
 }
@@ -219,6 +224,14 @@ impl AttachmentUploads {
                         return Err(error);
                     }
                 };
+                let Some(read_owner) = self
+                    .staging
+                    .published_read_owner(handle_id)
+                    .filter(|owner| owner.path() == path)
+                else {
+                    self.release_staging(&mut state, handle_id);
+                    return Err("transfer_staging_failed".to_owned());
+                };
                 state.active.remove(handle_id);
                 state.completed.insert(
                     handle_id.to_owned(),
@@ -231,6 +244,7 @@ impl AttachmentUploads {
                             mime_type: completed.metadata.mime_type,
                             bytes,
                             sha256: sha256.clone(),
+                            read_owner: Some(read_owner),
                         },
                         completed_at_ms: now_b,
                         consumed: false,
@@ -373,9 +387,12 @@ impl AttachmentUploads {
     }
 
     fn release_staging(&self, state: &mut UploadState, handle_id: &str) {
+        // Drop the receipt's own Arc before checking for executing owners.
+        // Failed cleanup retains the stager authority and retry index only;
+        // a revoked receipt must not remain consumable.
+        state.active.remove(handle_id);
+        state.completed.remove(handle_id);
         if self.staging.abort(handle_id).is_ok() {
-            state.active.remove(handle_id);
-            state.completed.remove(handle_id);
             state.pending_cleanup.remove(handle_id);
         } else {
             state.pending_cleanup.insert(handle_id.to_owned());
@@ -417,6 +434,22 @@ mod tests {
         fail_on_chunk: bool,
     }
 
+    #[derive(Debug)]
+    struct RecordingReadOwner(PathBuf);
+
+    impl crate::features::files::file_ingest::AttachmentReadOwner for RecordingReadOwner {
+        fn path(&self) -> &std::path::Path {
+            &self.0
+        }
+        fn read_bounded(&self, _maximum_bytes: u64) -> std::io::Result<Vec<u8>> {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "recording port has no payload",
+            ))
+        }
+        fn request_cleanup(&self) {}
+    }
+
     impl UploadStaging for RecordingStaging {
         fn begin(
             &self,
@@ -455,6 +488,15 @@ mod tests {
                 .unwrap()
                 .push(format!("commit:{}", transfer.sha256));
             Ok(std::env::temp_dir().join(&transfer.handle_id))
+        }
+
+        fn published_read_owner(
+            &self,
+            handle_id: &str,
+        ) -> Option<Arc<dyn crate::features::files::file_ingest::AttachmentReadOwner>> {
+            Some(Arc::new(RecordingReadOwner(
+                std::env::temp_dir().join(handle_id),
+            )))
         }
 
         fn abort(&self, handle_id: &str) -> std::result::Result<(), String> {
