@@ -674,12 +674,12 @@ const NESTED_SCHEMAS: &[(&str, Schema)] = &[
     ),
 ];
 
-fn nested_schema(name: &str) -> &'static Schema {
-    &NESTED_SCHEMAS
+fn nested_schema(name: &str) -> Result<&'static Schema> {
+    NESTED_SCHEMAS
         .iter()
         .find(|(candidate, _)| *candidate == name)
-        .expect("registered nested schema")
-        .1
+        .map(|(_, schema)| schema)
+        .ok_or_else(|| ControllerProtocolError::new("invalid_message", format!("schema.{name}")))
 }
 
 const A: SenderRole = SenderRole::ControllerA;
@@ -1425,16 +1425,12 @@ pub(crate) fn validate_controller_message_json_in_context(
     }
     if kind == "controller_liveness_attestation_a" {
         validate_uint(
-            object
-                .get("observed_age_ms")
-                .expect("attestation age required"),
+            required_value(object, "observed_age_ms", "message")?,
             "observed_age_ms",
             30_000,
         )?;
         validate_uint(
-            object
-                .get("remaining_ttl_ms")
-                .expect("attestation TTL required"),
+            required_value(object, "remaining_ttl_ms", "message")?,
             "remaining_ttl_ms",
             30_000,
         )?;
@@ -1777,10 +1773,7 @@ pub(crate) fn validate_controller_registration_message_json(
         ));
     }
     let value = validate_controller_message_json(input, sender_role)?;
-    let kind = value
-        .get("type")
-        .and_then(Value::as_str)
-        .expect("validated type");
+    let kind = message_kind(as_object(&value, "message")?, "message")?;
     if kind == "desktop_pairing_register" {
         if value.get("registration_request_id") != context.request.get("registration_request_id")
             || registration_comparable(&value) != registration_comparable(&context.request)
@@ -1880,10 +1873,7 @@ pub(crate) fn validate_controller_lease_install_message_json(
 ) -> Result<LeaseInstallResult> {
     validate_runtime_capabilities(&context.negotiated_capabilities)?;
     let message = validate_controller_message_json(input, sender_role)?;
-    let kind = message
-        .get("type")
-        .and_then(Value::as_str)
-        .expect("validated type");
+    let kind = message_kind(as_object(&message, "message")?, "message")?;
     if !LEASE_INSTALL_MESSAGE_TYPES.contains(&kind) {
         return Err(ControllerProtocolError::new(
             "invalid_message",
@@ -1919,19 +1909,15 @@ pub(crate) fn validate_controller_lease_install_message_json(
             return Err(ControllerProtocolError::new("stale_context", field));
         }
     }
+    let message_object = as_object(&message, "message")?;
     let lease = LeaseContext {
-        connection_id: object_string(message.as_object().unwrap(), "connection_id", "message")?
+        connection_id: object_string(message_object, "connection_id", "message")?.into(),
+        controller_lease_id: object_string(message_object, "controller_lease_id", "message")?
             .into(),
-        controller_lease_id: object_string(
-            message.as_object().unwrap(),
-            "controller_lease_id",
-            "message",
-        )?
-        .into(),
-        lease_epoch: object_string(message.as_object().unwrap(), "lease_epoch", "message")?.into(),
-        relay_epoch: object_string(message.as_object().unwrap(), "relay_epoch", "message")?.into(),
+        lease_epoch: object_string(message_object, "lease_epoch", "message")?.into(),
+        relay_epoch: object_string(message_object, "relay_epoch", "message")?.into(),
         remote_control_generation: object_string(
-            message.as_object().unwrap(),
+            message_object,
             "remote_control_generation",
             "message",
         )?
@@ -1950,10 +1936,7 @@ pub(crate) fn validate_controller_runtime_message_json(
     })?;
     validate_runtime_capabilities(&context.negotiated_capabilities)?;
     let shape = validate_controller_message_json(input, sender_role)?;
-    let kind = shape
-        .get("type")
-        .and_then(Value::as_str)
-        .expect("validated type");
+    let kind = message_kind(as_object(&shape, "message")?, "message")?;
     if LEASE_INSTALL_MESSAGE_TYPES.contains(&kind) {
         return Err(ControllerProtocolError::new(
             "missing_field",
@@ -1961,7 +1944,7 @@ pub(crate) fn validate_controller_runtime_message_json(
         ));
     }
     let lease = if message_schema(kind)
-        .expect("registered schema")
+        .ok_or_else(|| ControllerProtocolError::new("unknown_message_type", "message.type"))?
         .required
         .contains(&"controller_lease_id")
     {
@@ -1974,10 +1957,7 @@ pub(crate) fn validate_controller_runtime_message_json(
     } else {
         shape
     };
-    let kind = value
-        .get("type")
-        .and_then(Value::as_str)
-        .expect("validated type");
+    let kind = message_kind(as_object(&value, "message")?, "message")?;
     if kind != "controller_capabilities" && kind != "error" {
         for required in outer_message_capabilities(kind) {
             if !context
@@ -1991,10 +1971,7 @@ pub(crate) fn validate_controller_runtime_message_json(
     }
     if kind == "encrypted_frame" {
         enforce_negotiated_payload(
-            value
-                .get("payload_kind")
-                .and_then(Value::as_str)
-                .expect("validated payload kind"),
+            object_string(as_object(&value, "message")?, "payload_kind", "message")?,
             &context.negotiated_capabilities,
         )?;
     }
@@ -2011,18 +1988,12 @@ pub(crate) fn validate_controller_runtime_payload_json(
     })?;
     validate_runtime_capabilities(&context.negotiated_capabilities)?;
     let shape = validate_controller_payload_json(input, sender_role)?;
-    let kind = shape
-        .get("type")
-        .and_then(Value::as_str)
-        .expect("validated type");
+    let kind = message_kind(as_object(&shape, "payload")?, "payload")?;
     enforce_negotiated_payload(kind, &context.negotiated_capabilities)?;
     let lease = require_runtime_lease(context)?;
     let value = validate_controller_payload_json_in_context(input, sender_role, Some(lease))?;
     if matches!(kind, "remote_action_request" | "remote_action_result") {
-        let operation = value
-            .get("operation")
-            .and_then(Value::as_str)
-            .expect("validated action");
+        let operation = object_string(as_object(&value, "payload")?, "operation", "payload")?;
         let required = if operation.starts_with("permission_") {
             "permission_v1"
         } else if operation.starts_with("attachment_") {
@@ -2137,11 +2108,7 @@ fn validate_object(
     }
     if full_lease_context {
         for field in LEASE_CONTEXT_FIELDS {
-            validate_named_field(
-                object,
-                field,
-                object.get(*field).expect("lease context presence checked"),
-            )?;
+            validate_named_field(object, field, required_value(object, *field, label)?)?;
         }
     }
     enforce_role_bindings(object, kind, sender_role)
@@ -2406,7 +2373,7 @@ fn validate_string_list(value: &Value, field: &str, allowed: &[&str]) -> Result<
         validate_identifier(value, field)?;
         let text = value
             .as_str()
-            .expect("identifier validation guarantees a string");
+            .ok_or_else(|| ControllerProtocolError::new("invalid_field", field))?;
         if !seen.insert(text) {
             return Err(ControllerProtocolError::new("invalid_field", field));
         }
@@ -2478,7 +2445,9 @@ fn enforce_role_bindings(
         let expected = match sender_role {
             SenderRole::ControllerA => "desktop_controller",
             SenderRole::ControlledB => "desktop_controlled_endpoint",
-            SenderRole::Relay => unreachable!("schema excludes relay"),
+            SenderRole::Relay => {
+                return Err(ControllerProtocolError::new("role_mismatch", "client_role"));
+            }
         };
         if object.get("client_role").and_then(Value::as_str) != Some(expected) {
             return Err(ControllerProtocolError::new("role_mismatch", "client_role"));
@@ -2499,11 +2468,9 @@ fn enforce_role_bindings(
         if object.get("direction").and_then(Value::as_str) != Some(expected) {
             return Err(ControllerProtocolError::new("role_mismatch", "direction"));
         }
-        let payload_kind = object
-            .get("payload_kind")
-            .and_then(Value::as_str)
-            .expect("payload kind validated");
-        let payload = payload_schema(payload_kind).expect("payload kind enum validated");
+        let payload_kind = object_string(object, "payload_kind", "message")?;
+        let payload = payload_schema(payload_kind)
+            .ok_or_else(|| ControllerProtocolError::new("unknown_message_type", "payload_kind"))?;
         if !payload.roles.contains(&sender_role) {
             return Err(ControllerProtocolError::new(
                 "role_mismatch",
@@ -2537,6 +2504,18 @@ fn exact_nested<'a>(
     Ok(object)
 }
 
+// Keep schema validation first so unknown/missing-field precedence stays unchanged.
+// Extraction remains fallible even when an earlier validator established the shape.
+fn required_value<'a>(
+    object: &'a Map<String, Value>,
+    field: &str,
+    label: &str,
+) -> Result<&'a Value> {
+    object
+        .get(field)
+        .ok_or_else(|| ControllerProtocolError::new("missing_field", format!("{label}.{field}")))
+}
+
 fn object_string<'a>(object: &'a Map<String, Value>, field: &str, label: &str) -> Result<&'a str> {
     object
         .get(field)
@@ -2545,9 +2524,9 @@ fn object_string<'a>(object: &'a Map<String, Value>, field: &str, label: &str) -
 }
 
 fn validate_task_submit(task: &Map<String, Value>) -> Result<()> {
-    let input_schema = nested_schema("task_input");
+    let input_schema = nested_schema("task_input")?;
     let input = exact_nested(
-        task.get("input").expect("task input required by schema"),
+        required_value(task, "input", "payload")?,
         input_schema.required,
         input_schema.optional,
         "payload.input",
@@ -2557,9 +2536,7 @@ fn validate_task_submit(task: &Map<String, Value>) -> Result<()> {
         return Err(ControllerProtocolError::new("invalid_field", "input.text"));
     }
     validate_string_list(
-        input
-            .get("attachment_ids")
-            .expect("attachment IDs required by nested schema"),
+        required_value(input, "attachment_ids", "payload.input")?,
         "input.attachment_ids",
         &[],
     )?;
@@ -2574,9 +2551,7 @@ fn validate_task_submit(task: &Map<String, Value>) -> Result<()> {
         ));
     }
     validate_string_list(
-        input
-            .get("skill_ids")
-            .expect("skill IDs required by nested schema"),
+        required_value(input, "skill_ids", "payload.input")?,
         "input.skill_ids",
         &[],
     )?;
@@ -2624,15 +2599,13 @@ fn validate_task_submit(task: &Map<String, Value>) -> Result<()> {
             "invalid_field",
             "payload.temporary_model_package",
         )),
-        _ => unreachable!("model source validated by outer schema"),
+        _ => Err(ControllerProtocolError::new("invalid_enum", "model_source")),
     }
 }
 
 fn validate_capability_snapshot(payload: &Map<String, Value>) -> Result<()> {
     validate_uint(
-        payload
-            .get("capability_revision")
-            .expect("capability revision required"),
+        required_value(payload, "capability_revision", "payload")?,
         "capability_revision",
         u64::MAX,
     )?;
@@ -2646,24 +2619,27 @@ fn validate_capability_snapshot(payload: &Map<String, Value>) -> Result<()> {
     let mut seen = HashSet::new();
     for mode in modes {
         validate_enum(mode, "modes", MODES)?;
-        if !seen.insert(mode.as_str().expect("mode enum validated")) {
+        if !seen.insert(
+            mode.as_str()
+                .ok_or_else(|| ControllerProtocolError::new("invalid_field", "modes"))?,
+        ) {
             return Err(ControllerProtocolError::new("invalid_field", "modes"));
         }
     }
     validate_descriptor_list(
-        payload.get("tools").expect("tools required"),
+        required_value(payload, "tools", "payload")?,
         "tools",
         "tool_id",
         false,
     )?;
     validate_descriptor_list(
-        payload.get("skills").expect("skills required"),
+        required_value(payload, "skills", "payload")?,
         "skills",
         "skill_id",
         false,
     )?;
     validate_descriptor_list(
-        payload.get("workspaces").expect("workspaces required"),
+        required_value(payload, "workspaces", "payload")?,
         "workspaces",
         "workspace_id",
         true,
@@ -2686,11 +2662,11 @@ fn validate_descriptor_list(
     for (index, item) in items.iter().enumerate() {
         let label = format!("{field}[{index}]");
         let descriptor_schema = if workspace {
-            nested_schema("workspace_descriptor")
+            nested_schema("workspace_descriptor")?
         } else if id_field == "tool_id" {
-            nested_schema("tool_descriptor")
+            nested_schema("tool_descriptor")?
         } else {
-            nested_schema("skill_descriptor")
+            nested_schema("skill_descriptor")?
         };
         let descriptor = exact_nested(
             item,
@@ -2699,7 +2675,7 @@ fn validate_descriptor_list(
             &label,
         )?;
         validate_identifier(
-            descriptor.get(id_field).expect("descriptor ID required"),
+            required_value(descriptor, id_field, &label)?,
             &format!("{label}.{id_field}"),
         )?;
         let id = object_string(descriptor, id_field, &label)?;
@@ -2707,9 +2683,7 @@ fn validate_descriptor_list(
             return Err(ControllerProtocolError::new("invalid_field", field));
         }
         bounded_text(
-            descriptor
-                .get("display_name")
-                .expect("descriptor display name required"),
+            required_value(descriptor, "display_name", &label)?,
             &format!("{label}.display_name"),
             128,
         )?;
@@ -2739,7 +2713,10 @@ fn validate_descriptor_list(
             let mut seen_scopes = HashSet::new();
             for scope in scopes {
                 validate_enum(scope, &format!("{label}.scopes"), MODES)?;
-                if !seen_scopes.insert(scope.as_str().expect("scope enum validated")) {
+                let scope = scope.as_str().ok_or_else(|| {
+                    ControllerProtocolError::new("invalid_enum", format!("{label}.scopes"))
+                })?;
+                if !seen_scopes.insert(scope) {
                     return Err(ControllerProtocolError::new(
                         "invalid_field",
                         format!("{label}.scopes"),
@@ -2762,7 +2739,7 @@ fn validate_artifact_index(payload: &Map<String, Value>) -> Result<()> {
     let mut ids = HashSet::new();
     for (index, item) in artifacts.iter().enumerate() {
         let label = format!("artifacts[{index}]");
-        let artifact_schema = nested_schema("artifact_descriptor");
+        let artifact_schema = nested_schema("artifact_descriptor")?;
         let artifact = exact_nested(
             item,
             artifact_schema.required,
@@ -2771,7 +2748,7 @@ fn validate_artifact_index(payload: &Map<String, Value>) -> Result<()> {
         )?;
         for field in ["artifact_id", "task_id"] {
             validate_identifier(
-                artifact.get(field).expect("artifact ID field required"),
+                required_value(artifact, field, &label)?,
                 &format!("{label}.{field}"),
             )?;
         }
@@ -2780,30 +2757,26 @@ fn validate_artifact_index(payload: &Map<String, Value>) -> Result<()> {
             return Err(ControllerProtocolError::new("invalid_field", "artifacts"));
         }
         bounded_text(
-            artifact
-                .get("display_name")
-                .expect("artifact display name required"),
+            required_value(artifact, "display_name", &label)?,
             &format!("{label}.display_name"),
             255,
         )?;
         validate_named_field(
             artifact,
             "mime_type",
-            artifact.get("mime_type").expect("artifact MIME required"),
+            required_value(artifact, "mime_type", &label)?,
         )?;
         validate_uint(
-            artifact.get("size_bytes").expect("artifact size required"),
+            required_value(artifact, "size_bytes", &label)?,
             &format!("{label}.size_bytes"),
             u64::MAX,
         )?;
         validate_hex_64(
-            artifact.get("sha256").expect("artifact digest required"),
+            required_value(artifact, "sha256", &label)?,
             &format!("{label}.sha256"),
         )?;
         validate_enum(
-            artifact
-                .get("preview_mode")
-                .expect("artifact preview mode required"),
+            required_value(artifact, "preview_mode", &label)?,
             &format!("{label}.preview_mode"),
             ARTIFACT_PREVIEW_MODES,
         )?;
@@ -2884,7 +2857,7 @@ fn validate_remote_action(payload: &Map<String, Value>, result: bool) -> Result<
         return Err(ControllerProtocolError::new("invalid_field", "error_code"));
     }
     let body = exact_nested(
-        payload.get("body").expect("action body required"),
+        required_value(payload, "body", "payload")?,
         required,
         optional,
         "body",
@@ -2971,7 +2944,7 @@ fn validate_remote_action_artifacts(value: &Value) -> Result<()> {
         ];
         let artifact = exact_nested(item, &fields, &[], "body.artifacts[]")?;
         for field in fields {
-            let entry = artifact.get(field).expect("required descriptor field");
+            let entry = required_value(artifact, field, "body.artifacts[]")?;
             match field {
                 "artifact_id" | "task_id" => validate_identifier(entry, "body.artifacts[].id")?,
                 "display_name" => {
@@ -3006,7 +2979,7 @@ fn validate_temporary_model_package(package: &Value, task: &Map<String, Value>) 
             "temporary_model_package",
         ));
     }
-    let package_schema = nested_schema("temporary_model_package_v1");
+    let package_schema = nested_schema("temporary_model_package_v1")?;
     let package = exact_nested(
         package,
         package_schema.required,
@@ -3021,26 +2994,24 @@ fn validate_temporary_model_package(package: &Value, task: &Map<String, Value>) 
         ));
     }
     validate_identifier(
-        package.get("package_id").expect("package ID required"),
+        required_value(package, "package_id", "temporary_model_package")?,
         "temporary_model_package.package_id",
     )?;
-    let binding_schema = nested_schema("temporary_model_binding");
+    let binding_schema = nested_schema("temporary_model_binding")?;
     let binding = exact_nested(
-        package.get("binding").expect("binding required"),
+        required_value(package, "binding", "temporary_model_package")?,
         binding_schema.required,
         binding_schema.optional,
         "temporary_model_package.binding",
     )?;
     for field in ["connection_id", "controller_lease_id", "task_id"] {
         validate_identifier(
-            binding.get(field).expect("binding field required"),
+            required_value(binding, field, "temporary_model_package.binding")?,
             &format!("temporary_model_package.binding.{field}"),
         )?;
     }
     validate_uint(
-        binding
-            .get("lease_epoch")
-            .expect("binding lease epoch required"),
+        required_value(binding, "lease_epoch", "temporary_model_package.binding")?,
         "temporary_model_package.binding.lease_epoch",
         u64::MAX,
     )?;
@@ -3058,17 +3029,15 @@ fn validate_temporary_model_package(package: &Value, task: &Map<String, Value>) 
         }
     }
     validate_route(
-        package.get("primary").expect("primary route required"),
+        required_value(package, "primary", "temporary_model_package")?,
         "temporary_model_package.primary",
     )?;
     validate_credential(
-        package
-            .get("primary_credential")
-            .expect("primary credential required"),
+        required_value(package, "primary_credential", "temporary_model_package")?,
         "temporary_model_package.primary_credential",
     )?;
     if let Some(fallback) = package.get("vision_fallback") {
-        let fallback_schema = nested_schema("vision_fallback");
+        let fallback_schema = nested_schema("vision_fallback")?;
         let fallback = exact_nested(
             fallback,
             fallback_schema.required,
@@ -3076,13 +3045,15 @@ fn validate_temporary_model_package(package: &Value, task: &Map<String, Value>) 
             "temporary_model_package.vision_fallback",
         )?;
         validate_route(
-            fallback.get("route").expect("fallback route required"),
+            required_value(fallback, "route", "temporary_model_package.vision_fallback")?,
             "temporary_model_package.vision_fallback.route",
         )?;
         validate_credential(
-            fallback
-                .get("credential")
-                .expect("fallback credential required"),
+            required_value(
+                fallback,
+                "credential",
+                "temporary_model_package.vision_fallback",
+            )?,
             "temporary_model_package.vision_fallback.credential",
         )?;
     }
@@ -3090,20 +3061,20 @@ fn validate_temporary_model_package(package: &Value, task: &Map<String, Value>) 
 }
 
 fn validate_route(value: &Value, label: &str) -> Result<()> {
-    let route_schema = nested_schema("route");
+    let route_schema = nested_schema("route")?;
     let route = exact_nested(value, route_schema.required, route_schema.optional, label)?;
     bounded_text(
-        route.get("display_name").expect("display name required"),
+        required_value(route, "display_name", label)?,
         &format!("{label}.display_name"),
         128,
     )?;
     validate_enum(
-        route.get("preset").expect("preset required"),
+        required_value(route, "preset", label)?,
         &format!("{label}.preset"),
         PRESETS,
     )?;
     validate_enum(
-        route.get("wire_api").expect("wire API required"),
+        required_value(route, "wire_api", label)?,
         &format!("{label}.wire_api"),
         WIRE_APIS,
     )?;
@@ -3116,20 +3087,18 @@ fn validate_route(value: &Value, label: &str) -> Result<()> {
         ));
     }
     let base_url = bounded_text(
-        route.get("base_url").expect("base URL required"),
+        required_value(route, "base_url", label)?,
         &format!("{label}.base_url"),
         2048,
     )?;
     validate_controller_base_url(base_url, &format!("{label}.base_url"))?;
     bounded_text(
-        route.get("model").expect("model required"),
+        required_value(route, "model", label)?,
         &format!("{label}.model"),
         256,
     )?;
     validate_enum(
-        route
-            .get("image_capability_override")
-            .expect("image override required"),
+        required_value(route, "image_capability_override", label)?,
         &format!("{label}.image_capability_override"),
         IMAGE_CAPABILITY_OVERRIDES,
     )?;
@@ -3261,7 +3230,7 @@ fn valid_ascii_host(host: &str) -> bool {
 }
 
 fn validate_credential(value: &Value, label: &str) -> Result<()> {
-    let credential_schema = nested_schema("credential");
+    let credential_schema = nested_schema("credential")?;
     let credential = exact_nested(
         value,
         credential_schema.required,
@@ -3269,14 +3238,12 @@ fn validate_credential(value: &Value, label: &str) -> Result<()> {
         label,
     )?;
     validate_enum(
-        credential.get("kind").expect("credential kind required"),
+        required_value(credential, "kind", label)?,
         &format!("{label}.kind"),
         CREDENTIAL_KINDS,
     )?;
     let secret = bounded_text(
-        credential
-            .get("secret")
-            .expect("credential secret required"),
+        required_value(credential, "secret", label)?,
         &format!("{label}.secret"),
         8192,
     )?;
@@ -3406,7 +3373,7 @@ pub(crate) fn build_pairing_transcript_preimage(value: &Value) -> Result<Vec<u8>
         "controller_connection_identity",
     ] {
         validate_identifier(
-            transcript.get(field).expect("transcript field required"),
+            required_value(transcript, field, "transcript")?,
             &format!("transcript.{field}"),
         )?;
     }
@@ -3420,7 +3387,7 @@ pub(crate) fn build_pairing_transcript_preimage(value: &Value) -> Result<Vec<u8>
     }
     for field in ["handshake_public_key_a_b64", "handshake_public_key_b_b64"] {
         validate_base64(
-            transcript.get(field).expect("transcript key required"),
+            required_value(transcript, field, "transcript")?,
             &format!("transcript.{field}"),
             32,
             Some(32),
@@ -3441,9 +3408,7 @@ pub(crate) fn build_pairing_transcript_preimage(value: &Value) -> Result<Vec<u8>
             "transcript.protocol_version",
         ));
     }
-    let negotiated_value = transcript
-        .get("negotiated_capabilities")
-        .expect("negotiated capabilities required");
+    let negotiated_value = required_value(transcript, "negotiated_capabilities", "transcript")?;
     validate_string_list(
         negotiated_value,
         "transcript.negotiated_capabilities",
@@ -3451,15 +3416,16 @@ pub(crate) fn build_pairing_transcript_preimage(value: &Value) -> Result<Vec<u8>
     )?;
     let negotiated = negotiated_value
         .as_array()
-        .expect("capability list validated")
+        .ok_or_else(|| {
+            ControllerProtocolError::new("invalid_field", "transcript.negotiated_capabilities")
+        })?
         .iter()
         .map(|value| {
-            value
-                .as_str()
-                .expect("capability string validated")
-                .to_owned()
+            value.as_str().map(str::to_owned).ok_or_else(|| {
+                ControllerProtocolError::new("invalid_field", "transcript.negotiated_capabilities")
+            })
         })
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>>>()?;
     if negotiated.is_empty() {
         return Err(ControllerProtocolError::new(
             "unsupported_capability",
@@ -3473,9 +3439,7 @@ pub(crate) fn build_pairing_transcript_preimage(value: &Value) -> Result<Vec<u8>
         ));
     }
     validate_hex_64(
-        transcript
-            .get("capability_hash")
-            .expect("capability hash required"),
+        required_value(transcript, "capability_hash", "transcript")?,
         "transcript.capability_hash",
     )?;
     if controller_capability_hash(&negotiated)?
@@ -3487,12 +3451,12 @@ pub(crate) fn build_pairing_transcript_preimage(value: &Value) -> Result<Vec<u8>
         ));
     }
     validate_uint(
-        transcript.get("expires_at_ms").expect("expiry required"),
+        required_value(transcript, "expires_at_ms", "transcript")?,
         "transcript.expires_at_ms",
         u64::MAX,
     )?;
     validate_base64(
-        transcript.get("nonce_b64").expect("nonce required"),
+        required_value(transcript, "nonce_b64", "transcript")?,
         "transcript.nonce_b64",
         16,
         Some(16),
@@ -3569,9 +3533,7 @@ pub(crate) fn negotiate_controller_capabilities(
 }
 
 fn validate_reserved_transcript(message: &Map<String, Value>) -> Result<()> {
-    let transcript = message
-        .get("transcript")
-        .expect("reserved transcript required");
+    let transcript = required_value(message, "transcript", "message")?;
     let transcript_object = as_object(transcript, "transcript")?;
     for field in [
         "pairing_id",
@@ -3612,9 +3574,7 @@ pub(crate) fn parse_controller_pairing_transcript(input: &str) -> Result<ParsedT
             "parsed_transcript",
         ));
     }
-    let transcript = message
-        .get("transcript")
-        .expect("reserved transcript required");
+    let transcript = required_value(message, "transcript", "message")?;
     let signature_preimage = build_pairing_transcript_preimage(transcript)?;
     let relay_signature = base64::engine::general_purpose::STANDARD
         .decode(object_string(message, "relay_signature_b64", "message")?)
@@ -3652,12 +3612,11 @@ pub(crate) fn parse_controller_pairing_transcript(input: &str) -> Result<ParsedT
         )?
         .to_owned(),
         negotiated_capabilities: serde_json::from_value(
-            transcript
-                .get("negotiated_capabilities")
-                .expect("validated capabilities required")
-                .clone(),
+            required_value(transcript, "negotiated_capabilities", "transcript")?.clone(),
         )
-        .expect("validated capabilities are strings"),
+        .map_err(|_| {
+            ControllerProtocolError::new("invalid_field", "transcript.negotiated_capabilities")
+        })?,
         capability_hash: object_string(transcript, "capability_hash", "transcript")?.to_owned(),
         relay_signing_key_id: object_string(message, "relay_signing_key_id", "message")?.to_owned(),
         signature_algorithm: object_string(message, "signature_algorithm", "message")?.to_owned(),
@@ -3685,14 +3644,12 @@ pub(crate) fn build_direct_liveness_aad(value: &Value) -> Result<Vec<u8>> {
         "remote_control_generation",
     ] {
         validate_identifier(
-            binding.get(field).expect("AAD field required"),
+            required_value(binding, field, "liveness_aad")?,
             &format!("liveness_aad.{field}"),
         )?;
     }
     validate_uint(
-        binding
-            .get("lease_epoch")
-            .expect("AAD lease epoch required"),
+        required_value(binding, "lease_epoch", "liveness_aad")?,
         "liveness_aad.lease_epoch",
         u64::MAX,
     )?;
@@ -3721,7 +3678,7 @@ pub(crate) fn validate_controller_liveness_payload_json(
         return Err(ControllerProtocolError::new("message_too_large", "json"));
     }
     let value = parse_unique_json(input)?;
-    let liveness_schema = nested_schema("controller_liveness_a");
+    let liveness_schema = nested_schema("controller_liveness_a")?;
     let object = exact_nested(
         &value,
         liveness_schema.required,
@@ -3751,25 +3708,21 @@ pub(crate) fn validate_controller_liveness_payload_json(
         ));
     }
     validate_base64(
-        object.get("challenge_b64").expect("challenge required"),
+        required_value(object, "challenge_b64", "liveness_payload")?,
         "challenge_b64",
         16,
         Some(16),
     )?;
     validate_identifier(
-        object
-            .get("liveness_epoch_a")
-            .expect("liveness epoch required"),
+        required_value(object, "liveness_epoch_a", "liveness_payload")?,
         "liveness_epoch_a",
     )?;
     validate_identifier(
-        object.get("challenge_id").expect("challenge ID required"),
+        required_value(object, "challenge_id", "liveness_payload")?,
         "challenge_id",
     )?;
     validate_uint(
-        object
-            .get("heartbeat_sequence_a")
-            .expect("sequence required"),
+        required_value(object, "heartbeat_sequence_a", "liveness_payload")?,
         "heartbeat_sequence_a",
         u64::MAX,
     )?;
@@ -3942,6 +3895,238 @@ mod tests {
 
     fn fixture() -> Value {
         serde_json::from_str(FIXTURE).expect("shared fixture must be valid JSON")
+    }
+
+    #[test]
+    fn extraction_helpers_fail_closed_and_nested_registry_is_complete() {
+        let object = json!({"present": 7});
+        let object = object.as_object().unwrap();
+        assert_eq!(
+            required_value(object, "present", "payload").unwrap(),
+            &json!(7)
+        );
+        let missing = required_value(object, "absent", "payload").unwrap_err();
+        assert_eq!(
+            (missing.code, missing.field.as_str()),
+            ("missing_field", "payload.absent")
+        );
+        let wrong_type = object_string(object, "present", "payload").unwrap_err();
+        assert_eq!(
+            (wrong_type.code, wrong_type.field.as_str()),
+            ("invalid_field", "payload.present")
+        );
+        let wrong_object = as_object(&json!([]), "message").unwrap_err();
+        assert_eq!(
+            (wrong_object.code, wrong_object.field.as_str()),
+            ("invalid_type", "message")
+        );
+        for (name, expected) in NESTED_SCHEMAS {
+            let actual = nested_schema(name).unwrap();
+            assert_eq!(actual.required, expected.required, "{name}:required");
+            assert_eq!(actual.optional, expected.optional, "{name}:optional");
+            assert_eq!(actual.roles, expected.roles, "{name}:roles");
+        }
+        let unknown = nested_schema("unregistered").err().unwrap();
+        assert_eq!(
+            (unknown.code, unknown.field.as_str()),
+            ("invalid_message", "schema.unregistered")
+        );
+        assert_eq!(
+            validate_string_list(&json!([7]), "capabilities", &[])
+                .unwrap_err()
+                .code,
+            "invalid_field"
+        );
+    }
+
+    #[test]
+    fn fallible_extraction_preserves_schema_errors_and_priority() {
+        let fixture = fixture();
+        // A08 replaced the unreleased artifact_index payload with the typed
+        // remote-action result. Keep the same descriptor extraction coverage
+        // on the live wire shape, without reviving the obsolete message type.
+        let lease = context();
+        let artifact_result = json!({"v":1,"type":"remote_action_result",
+        "connection_id":lease.connection_id,"controller_lease_id":lease.controller_lease_id,
+        "lease_epoch":lease.lease_epoch,"relay_epoch":lease.relay_epoch,
+        "remote_control_generation":lease.remote_control_generation,
+        "request_id":"request-action-1","session_id":"session-ref-1",
+        "operation":"artifact_index","ok":true,"body":{"artifacts":[{
+            "artifact_id":"artifact-1","task_id":"task-1","display_name":"report.txt",
+            "mime_type":"text/plain","total_bytes":"3","sha256":"a".repeat(64),
+            "preview_kind":"text"
+        }]}});
+        // Missing fields still fail in the owning strict schema, before extraction.
+        // Wrong-type errors retain the existing validator's code and field path.
+        let cases = [
+            (
+                "controlled",
+                "/input",
+                "payload.input",
+                "invalid_type",
+                "payload.input",
+            ),
+            (
+                "controlled",
+                "/input/attachment_ids",
+                "payload.input.attachment_ids",
+                "invalid_field",
+                "input.attachment_ids",
+            ),
+            (
+                "controlled",
+                "/input/skill_ids",
+                "payload.input.skill_ids",
+                "invalid_field",
+                "input.skill_ids",
+            ),
+            (
+                "temporary",
+                "/temporary_model_package/binding",
+                "temporary_model_package.binding",
+                "invalid_type",
+                "temporary_model_package.binding",
+            ),
+            (
+                "temporary",
+                "/temporary_model_package/binding/lease_epoch",
+                "temporary_model_package.binding.lease_epoch",
+                "invalid_field",
+                "temporary_model_package.binding.lease_epoch",
+            ),
+            (
+                "temporary",
+                "/temporary_model_package/primary",
+                "temporary_model_package.primary",
+                "invalid_type",
+                "temporary_model_package.primary",
+            ),
+            (
+                "temporary",
+                "/temporary_model_package/primary/display_name",
+                "temporary_model_package.primary.display_name",
+                "invalid_field",
+                "temporary_model_package.primary.display_name",
+            ),
+            (
+                "temporary",
+                "/temporary_model_package/primary_credential/secret",
+                "temporary_model_package.primary_credential.secret",
+                "invalid_field",
+                "temporary_model_package.primary_credential.secret",
+            ),
+            (
+                "capability_snapshot_vector",
+                "/modes",
+                "payload.modes",
+                "invalid_field",
+                "modes",
+            ),
+            (
+                "capability_snapshot_vector",
+                "/tools/0/display_name",
+                "tools[0].display_name",
+                "invalid_field",
+                "tools[0].display_name",
+            ),
+            (
+                "artifact_action_result",
+                "/body/artifacts/0/sha256",
+                "body.artifacts[].sha256",
+                "invalid_field",
+                "sha256",
+            ),
+        ];
+        for (vector, pointer, missing_field, wrong_code, wrong_field) in cases {
+            let base = if vector == "controlled" || vector == "temporary" {
+                &fixture["task_submit_vectors"][vector]
+            } else if vector == "artifact_action_result" {
+                &artifact_result
+            } else {
+                &fixture[vector]
+            };
+            let role = if vector == "controlled" || vector == "temporary" {
+                A
+            } else {
+                B
+            };
+            validate_controller_payload_json(&serde_json::to_string(base).unwrap(), role).unwrap();
+            let (parent, field) = pointer.rsplit_once('/').unwrap();
+            let mut missing = base.clone();
+            missing
+                .pointer_mut(parent)
+                .unwrap()
+                .as_object_mut()
+                .unwrap()
+                .remove(field);
+            let error =
+                validate_controller_payload_json(&serde_json::to_string(&missing).unwrap(), role)
+                    .unwrap_err();
+            assert_eq!(
+                (error.code, error.field.as_str()),
+                ("missing_field", missing_field),
+                "{vector}:{pointer}:missing"
+            );
+            let mut wrong = base.clone();
+            *wrong.pointer_mut(pointer).unwrap() = json!(7);
+            let error =
+                validate_controller_payload_json(&serde_json::to_string(&wrong).unwrap(), role)
+                    .unwrap_err();
+            assert_eq!(
+                (error.code, error.field.as_str()),
+                (wrong_code, wrong_field),
+                "{vector}:{pointer}:type"
+            );
+        }
+        let mut unknown_and_missing = fixture["task_submit_vectors"]["controlled"].clone();
+        let object = unknown_and_missing.as_object_mut().unwrap();
+        object.remove("input");
+        object.insert("unexpected".into(), json!(true));
+        let error = validate_controller_payload_json(
+            &serde_json::to_string(&unknown_and_missing).unwrap(),
+            A,
+        )
+        .unwrap_err();
+        assert_eq!(
+            (error.code, error.field.as_str()),
+            ("unknown_field", "schema")
+        );
+        let mut invalid_enum = fixture["task_submit_vectors"]["controlled"].clone();
+        invalid_enum["model_source"] = json!("unregistered");
+        let error =
+            validate_controller_payload_json(&serde_json::to_string(&invalid_enum).unwrap(), A)
+                .unwrap_err();
+        assert_eq!(
+            (error.code, error.field.as_str()),
+            ("invalid_enum", "model_source")
+        );
+        for (base, pointer, error_field) in [
+            (
+                &fixture["capability_snapshot_vector"],
+                "/tools/0",
+                "tools[0]",
+            ),
+            (&artifact_result, "/body/artifacts/0", "body.artifacts[]"),
+        ] {
+            let mut wrong_element = base.clone();
+            *wrong_element.pointer_mut(pointer).unwrap() = json!(7);
+            let error = validate_controller_payload_json(
+                &serde_json::to_string(&wrong_element).unwrap(),
+                B,
+            )
+            .unwrap_err();
+            assert_eq!(
+                (error.code, error.field),
+                ("invalid_type", error_field.to_owned())
+            );
+        }
+        let mut transcript = fixture["transcript_vector"]["transcript"].clone();
+        transcript["negotiated_capabilities"] = json!([7]);
+        let error = build_pairing_transcript_preimage(&transcript).unwrap_err();
+        assert_eq!(
+            (error.code, error.field.as_str()),
+            ("invalid_field", "transcript.negotiated_capabilities")
+        );
     }
 
     fn decode_hex(value: &str) -> Vec<u8> {

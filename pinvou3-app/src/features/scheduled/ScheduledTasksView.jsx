@@ -14,7 +14,7 @@ import memoryOrganizeImage from '../../assets/scheduled/memory-organize.jpg';
 
 /**
  * Scheduled task row record as delivered by `appState.scheduledTasks`
- * (backend wire shape; preview tasks carry the same core fields).
+ * (backend wire shape).
  * @typedef {object} ScheduledTask
  * @property {string} id - Stable task id.
  * @property {string} name - Task display name.
@@ -559,7 +559,7 @@ import memoryOrganizeImage from '../../assets/scheduled/memory-organize.jpg';
       }));
       const canOpenTaskFolder = can('externalSystemOpen');
       const [taskFilter, setTaskFilter] = useState('all');
-      // Second-level clock shared with the conversation timeline: always active, drives the preview nextRunAt and the runs-soon countdown.
+      // Second-level clock shared with the conversation timeline: always active, drives the runs-soon countdown.
       const clockNow = useConversationSecondClock(true);
       const [previewSelectedId, setPreviewSelectedId] = useState(null);
       const [previewTaskStatus, setPreviewTaskStatus] = useState({});
@@ -575,16 +575,8 @@ import memoryOrganizeImage from '../../assets/scheduled/memory-organize.jpg';
         }))
         : realTasks;
       const selectedId = appState.selectedScheduledTaskId || null;
-      const effectiveSelectedId = previewMode ? previewSelectedId : selectedId;
-      const selectedDetail = previewMode
-        ? tasks.find(task => task.id === effectiveSelectedId) || null
-        : rawSelectedDetail;
-      const runs = previewMode && effectiveSelectedId
-        ? (PREVIEW_SCHEDULED_RUNS[effectiveSelectedId] || []).map(run => ({
-          ...run,
-          error: run.error ? scheduledCopy.previewRunError : run.error,
-        }))
-        : rawRuns;
+      const selectedDetail = rawSelectedDetail;
+      const runs = rawRuns;
       const [createForm, setCreateForm] = useState(null);
       const [createScheduleRepeatIntent, setCreateScheduleRepeatIntent] = useState(null);
       const [deleteConfirmTask, setDeleteConfirmTask] = useState(null);
@@ -633,7 +625,7 @@ import memoryOrganizeImage from '../../assets/scheduled/memory-organize.jpg';
           || (taskFilter === 'paused' && task.status !== 'active');
         return matchesFilter;
       }));
-      const selected = tasks.find(task => task.id === effectiveSelectedId) || null;
+      const selected = tasks.find(task => task.id === selectedId) || null;
       const detail = selectedDetail && selected && selectedDetail.id === selected.id ? selectedDetail : selected;
       const bodyText = 'text-[#1F1F1F] dark:text-[#E3E3E3]';
       const fmtDateTime = (value) => {
@@ -727,7 +719,8 @@ import memoryOrganizeImage from '../../assets/scheduled/memory-organize.jpg';
         setDetailForm(taskForm(detail));
         setScheduleRepeatIntent(null);
         setSaveState('idle');
-      }, [effectiveSelectedId, detail && detail.id]);
+      // eslint-disable-next-line react-hooks/exhaustive-deps -- deps intentionally track only the selected id, so detail object references don't trigger repeated resets
+      }, [selectedId, detail && detail.id]);
 
       useEffect(() => {
         mountedRef.current = true;
@@ -853,10 +846,6 @@ import memoryOrganizeImage from '../../assets/scheduled/memory-organize.jpg';
       async function selectTask(id) {
         setCreateForm(null);
         setCreateScheduleRepeatIntent(null);
-        if (previewMode) {
-          setPreviewSelectedId(id);
-          return;
-        }
         if (!(await flushBeforeAction())) return;
         if (bridge && bridge.scheduled.selectScheduledTask) bridge.scheduled.selectScheduledTask(id);
         if (id && bridge && bridge.scheduled.refreshScheduledTaskData) bridge.scheduled.refreshScheduledTaskData(20).catch(() => {});
@@ -864,8 +853,7 @@ import memoryOrganizeImage from '../../assets/scheduled/memory-organize.jpg';
 
       async function startTemplate(template) {
         if (!(await flushBeforeAction())) return;
-        if (previewMode) setPreviewSelectedId(null);
-        else if (bridge && bridge.scheduled.selectScheduledTask) bridge.scheduled.selectScheduledTask(null);
+        if (bridge && bridge.scheduled.selectScheduledTask) bridge.scheduled.selectScheduledTask(null);
         setCreateScheduleRepeatIntent(null);
         setCreateForm({
           templateId: template.id,
@@ -879,8 +867,7 @@ import memoryOrganizeImage from '../../assets/scheduled/memory-organize.jpg';
 
       async function startBlankTask() {
         if (!(await flushBeforeAction())) return;
-        if (previewMode) setPreviewSelectedId(null);
-        else if (bridge && bridge.scheduled.selectScheduledTask) bridge.scheduled.selectScheduledTask(null);
+        if (bridge && bridge.scheduled.selectScheduledTask) bridge.scheduled.selectScheduledTask(null);
         setCreateScheduleRepeatIntent(null);
         setCreateForm({
           name: '',
@@ -960,13 +947,6 @@ import memoryOrganizeImage from '../../assets/scheduled/memory-organize.jpg';
 
       async function toggleTaskPaused(task) {
         if (!task) return;
-        if (previewMode) {
-          setPreviewTaskStatus(current => ({
-            ...current,
-            [task.id]: task.status === 'active' ? 'paused' : 'active',
-          }));
-          return;
-        }
         if (!bridge) return;
         try {
           if (!(await flushBeforeAction())) return;
@@ -1004,8 +984,7 @@ import memoryOrganizeImage from '../../assets/scheduled/memory-organize.jpg';
       async function saveDetailAndClose() {
         if (busyAction) return;
         if (!(await flushBeforeAction())) return;
-        if (previewMode) setPreviewSelectedId(null);
-        else if (bridge && bridge.scheduled.selectScheduledTask) bridge.scheduled.selectScheduledTask(null);
+        if (bridge && bridge.scheduled.selectScheduledTask) bridge.scheduled.selectScheduledTask(null);
       }
 
       async function openRunChat(run) {
@@ -1444,10 +1423,38 @@ import memoryOrganizeImage from '../../assets/scheduled/memory-organize.jpg';
         );
       };
 
-      // After binding shared state, call sites only pass className (invoked as a plain function here;
-      // do not switch to JSX usage — the factory runs during rendering, and JSX usage would create a
-      // new component type on every render and remount the subtree).
-      const MyTasksSection = makeMyTasksSection({ scheduledCopy, taskFilter, setTaskFilter, error, filtered, loading, renderTaskRow });
+      // My Tasks 分区（原 makeMyTasksSection 工厂内联为普通渲染函数）：闭包共享本视图的
+      // 过滤/加载状态；按普通函数调用而非 JSX 元素——每次渲染新建组件类型会导致子树重挂载。
+      // 唯一调用点固定传 'mb-0'，className 缺省即该值。
+      // eslint-disable-next-line @eslint-react/no-nested-component-definitions -- plain render function, never used as a JSX element (call site is MyTasksSection({ className: 'mb-0' })); the props-like signature only exists because that call form is pinned by tests
+      const MyTasksSection = ({ className = 'mb-0' } = {}) => (
+        <section className={className}>
+          <div className="mb-4 ml-1 flex items-center justify-between gap-4">
+            <h2 className={`text-[13px] font-bold uppercase tracking-wider ${mutedValue}`}>{scheduledCopy.myTasks}</h2>
+            <FilterTabs scheduledCopy={scheduledCopy} taskFilter={taskFilter} setTaskFilter={setTaskFilter} />
+          </div>
+          <div className={`overflow-hidden rounded-[20px] border shadow-[0_2px_10px_rgba(0,0,0,0.02),0_8px_32px_rgba(0,0,0,0.04)] border-black/5 bg-white dark:border-white/15 dark:bg-[#1C1C1E]`}>
+            {error && (
+              <div role="alert" data-testid="scheduled-error" className={`m-3 flex items-start gap-2 rounded-[12px] px-3 py-2 text-[13px] bg-[#FCE8E6] text-[#A50E0E] dark:bg-[#3A2424] dark:text-[#F2B8B5]`}>
+                <span className="min-w-0 flex-1">{error}</span>
+                <button type="button" onClick={() => bridge?.dismissScheduledTaskError?.()}
+                  aria-label={scheduledCopy.closeError} className="mt-[-2px] rounded-full p-1 opacity-65 transition-opacity hover:opacity-100">
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              </div>
+            )}
+            {filtered.length ? (
+              <div data-testid="scheduled-task-groups">
+                {filtered.map((task, index) => renderTaskRow(task, index, filtered))}
+              </div>
+            ) : (
+              <div className={`px-4 py-8 text-center text-[14px] ${mutedValue}`}>
+                {bridge?.available ? (loading ? scheduledCopy.loading : scheduledCopy.empty) : t.uiMonitor.bridgeNotReady}
+              </div>
+            )}
+          </div>
+        </section>
+      );
 
       const DetailTaskDialog = () => !(selected && detailForm) ? null : renderModal(
         <div className={dialogOverlayClass}>

@@ -439,7 +439,9 @@ impl RemoteDispatchService {
             {
                 return Err(error("remote_attachment_ids_invalid"));
             }
-            let cached = ephemeral.get(&key).expect("checked prepared entry");
+            let cached = ephemeral
+                .get_mut(&key)
+                .ok_or_else(|| error("remote_payload_unavailable"))?;
             if !cached.semantics.attachment_ids.is_empty()
                 && cached.semantics.attachment_ids != attachment_ids
             {
@@ -474,7 +476,6 @@ impl RemoteDispatchService {
                     attachment_ids,
                     &next_fingerprint,
                 )?;
-                let cached = ephemeral.get_mut(&key).expect("checked prepared entry");
                 cached.fingerprint = next_fingerprint.clone();
                 cached.semantics = next_semantics;
                 cached.wire_payload = next_payload;
@@ -538,6 +539,14 @@ impl RemoteDispatchService {
                 RemoteDispatchAttempt::NotAttempted,
             ));
         }
+        let key = (
+            local_session_id.to_owned(),
+            handle.client_request_id.clone(),
+            handle.task_id.clone(),
+        );
+        let std::collections::hash_map::Entry::Occupied(entry) = ephemeral.entry(key) else {
+            return Err(error("remote_payload_unavailable"));
+        };
         if self
             .port
             .mark_dispatch_attempt(
@@ -546,15 +555,7 @@ impl RemoteDispatchService {
                 remote_session_ref,
                 live,
                 handle,
-                &ephemeral
-                    .get(&(
-                        local_session_id.to_owned(),
-                        handle.client_request_id.clone(),
-                        handle.task_id.clone(),
-                    ))
-                    .expect("prepared entry before barrier")
-                    .semantics
-                    .attachment_ids,
+                &entry.get().semantics.attachment_ids,
             )
             .is_err()
         {
@@ -565,14 +566,7 @@ impl RemoteDispatchService {
         }
         // No subsequent error can justify an automatic resend. Moving out of
         // the cache also ensures secrets are not retained for retry.
-        let payload = ephemeral
-            .remove(&(
-                local_session_id.to_owned(),
-                handle.client_request_id.clone(),
-                handle.task_id.clone(),
-            ))
-            .expect("prepared entry after barrier")
-            .wire_payload;
+        let payload = entry.remove().wire_payload;
         let result = self.port.send_encrypted(&payload, live);
         drop(payload);
         Ok(handle.report(
@@ -1050,6 +1044,46 @@ mod tests {
         );
         assert_eq!(port.prepare_count.load(Ordering::SeqCst), 1);
         assert_eq!(port.send_count.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn missing_prepared_entry_fails_before_durable_attempt_barrier() {
+        let (_temp, store, request) = setup();
+        let port = Arc::new(FakePort::new(
+            store.clone(),
+            request.semantics.local_session_id.clone(),
+        ));
+        port.fail_after_persist.store(true, Ordering::SeqCst);
+        let service = RemoteDispatchService::new(store.clone(), port.clone());
+        service.reserve_new(same_request(&request)).unwrap();
+        port.fail_after_persist.store(false, Ordering::SeqCst);
+        let retry = handle(&store, &request);
+        let mut missing = HashMap::new();
+        let error = service
+            .advance_prepared(
+                &request.semantics.local_session_id,
+                &request.semantics.remote_session_ref,
+                &request.live,
+                &retry,
+                &mut missing,
+            )
+            .unwrap_err();
+        assert_eq!(error.code(), "remote_payload_unavailable");
+        let record = store
+            .remote_proxy_snapshot(&request.semantics.local_session_id)
+            .unwrap();
+        assert_eq!(
+            record.pending[0].dispatch_state,
+            PendingDispatchState::PreparedNeverAttempted
+        );
+        assert_eq!(port.send_count.load(Ordering::SeqCst), 0);
+        // The original package is still present in the service: an explicit
+        // commit crosses the barrier once, never as a side effect of failure.
+        assert_eq!(
+            commit(&service, &store, &request).unwrap().state,
+            RemoteDispatchState::Queued
+        );
+        assert_eq!(port.send_count.load(Ordering::SeqCst), 1);
     }
 
     fn handle(store: &SessionStore, request: &RemoteDispatchRequest) -> RemoteRetryHandle {
