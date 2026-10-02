@@ -4706,8 +4706,8 @@
   // sessions whose persisted artifact paths its lanes rebased (rebound,
   // failed AND post-busy ids — review #463 round-10 Major 2 + round-B
   // Major 1). The mark carries the rebind geometry as an ordered SEGMENT
-  // CHAIN: the artifact reconcile's stale-absolute rebase arm is gated on
-  // it (view healing, freshness window), and the wholesale artifact saves
+  // CHAIN: the artifact reconcile's stale-absolute rebase arm is gated on it
+  // (view healing, freshness window), and the wholesale artifact saves
   // rebase along the chain while the mark exists — a chat turn's buffer
   // save must not durably revert the backend rebase. Chained rebinds
   // APPEND a segment (A→B then B→C): the transform resolves in order, so
