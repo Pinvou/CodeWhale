@@ -2109,10 +2109,7 @@ fn validate_object(
             && !schema.optional.contains(&field.as_str())
             && !(full_lease_context && LEASE_CONTEXT_FIELDS.contains(&field.as_str()))
         {
-            return Err(ControllerProtocolError::new(
-                "unknown_field",
-                format!("{label}.{}", safe_field_name(field)),
-            ));
+            return Err(ControllerProtocolError::new("unknown_field", "schema"));
         }
     }
     for field in schema.required {
@@ -2148,19 +2145,6 @@ fn validate_object(
         }
     }
     enforce_role_bindings(object, kind, sender_role)
-}
-
-fn safe_field_name(value: &str) -> &str {
-    if !value.is_empty()
-        && value.len() <= 64
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
-    {
-        value
-    } else {
-        "unknown"
-    }
 }
 
 fn validate_named_field(object: &Map<String, Value>, field: &str, value: &Value) -> Result<()> {
@@ -2539,10 +2523,7 @@ fn exact_nested<'a>(
     let object = as_object(value, label)?;
     for field in object.keys() {
         if !required.contains(&field.as_str()) && !optional.contains(&field.as_str()) {
-            return Err(ControllerProtocolError::new(
-                "unknown_field",
-                format!("{label}.{}", safe_field_name(field)),
-            ));
+            return Err(ControllerProtocolError::new("unknown_field", "schema"));
         }
     }
     for field in required {
@@ -5194,6 +5175,49 @@ mod tests {
                 .code,
             "message_too_large"
         );
+    }
+
+    #[test]
+    fn attacker_controlled_unknown_field_names_never_reach_diagnostics() {
+        let sentinels = [
+            "2222222",
+            "endpointSentinelA1",
+            "leaseSentinelB2",
+            "tokenSentinelC3-credential-000001",
+            "keySentinelD4-credential-00000001",
+            "198.51.100.77",
+            "deviceSentinelE5",
+            "promptSentinelF6",
+            "replySentinelG7",
+            "toolArgsSentinelH8",
+            "fileSentinelI9.txt",
+            "/private/sentinel/J0",
+            "contentSentinelK1",
+        ];
+        for sentinel in sentinels {
+            let mut message = json!({
+                "v": 1,
+                "type": "controller_capabilities",
+                "request_id": "request-1",
+                "client_role": "desktop_controller",
+                "sender_role": "A",
+                "protocol_version": 1,
+                "capabilities": []
+            });
+            message
+                .as_object_mut()
+                .expect("test message is an object")
+                .insert(sentinel.to_owned(), json!(true));
+            let error = validate_controller_message_json(
+                &serde_json::to_string(&message).expect("test message serializes"),
+                A,
+            )
+            .expect_err("unknown field must fail closed");
+            let crash_projection = format!("{error:?}\n{error}");
+            assert_eq!(error.code, "unknown_field");
+            assert_eq!(error.field, "schema");
+            assert!(!crash_projection.contains(sentinel));
+        }
     }
 
     #[test]

@@ -1127,8 +1127,11 @@ impl RemoteJournal {
         };
         match result {
             Ok(stored) => stored,
-            Err(error) => {
-                eprintln!("[remote-control] journal append rejected: {}", error.code);
+            Err(_error) => {
+                crate::features::remote_control::controller::relay_runtime::log_controlled_event(
+                    "journal_append_rejected",
+                    "rejected",
+                );
                 None
             }
         }

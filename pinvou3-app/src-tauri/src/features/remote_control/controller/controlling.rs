@@ -95,6 +95,12 @@ pub(crate) struct ControllingStatus {
     error_code: Option<&'static str>,
 }
 
+impl ControllingStatus {
+    pub(crate) fn kind(&self) -> ControllingStatusKind {
+        self.status
+    }
+}
+
 impl std::fmt::Debug for ControllingStatus {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter

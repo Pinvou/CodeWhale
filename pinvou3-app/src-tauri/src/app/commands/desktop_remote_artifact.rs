@@ -148,7 +148,10 @@ impl DesktopRemoteArtifactRuntime {
                 tokio::time::sleep(std::time::Duration::from_secs(60)).await;
                 let expired = reaper_runtime.downloads.expire(monotonic_millis());
                 if expired > 0 {
-                    eprintln!("[remote-control] reaped {expired} stale artifact download(s)");
+                    crate::features::remote_control::controller::relay_runtime::log_controlled_event(
+                        "artifact_downloads_expired",
+                        "expired",
+                    );
                 }
             }
         });

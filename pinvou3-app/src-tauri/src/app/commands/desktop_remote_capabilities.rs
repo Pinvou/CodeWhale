@@ -5,8 +5,7 @@
 //! snapshot manager. DEV-20 owns final handler registration.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::OnceLock;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use tauri::{AppHandle, Manager as _};
 
@@ -19,6 +18,7 @@ use crate::features::remote_control::controller::capabilities::{
     CapabilitySource,
 };
 use crate::features::remote_control::controller::controlled::ControlledDeviceManager;
+use crate::features::remote_control::controller::relay_runtime::controlled_monotonic_millis;
 use crate::features::remote_control::controller::task::RemoteSessionLane;
 
 const UNSUPPORTED: &str = "desktop_remote_control_unsupported";
@@ -26,12 +26,6 @@ const ACP_STATUS_TIMEOUT_MS: u64 = 10_000;
 
 fn capability_error(error: CapabilityError) -> String {
     error.code.to_owned()
-}
-
-fn monotonic_millis() -> u64 {
-    static ORIGIN: OnceLock<Instant> = OnceLock::new();
-    let origin = ORIGIN.get_or_init(Instant::now);
-    u64::try_from(origin.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
 fn unix_millis() -> Result<u64, String> {
@@ -89,6 +83,7 @@ fn enabled_skill_projection(
 pub async fn desktop_remote_capabilities_snapshot(
     app: AppHandle,
 ) -> Result<CapabilitySnapshot, String> {
+    crate::platform::capabilities::ensure_desktop_remote_control_enabled()?;
     build_capability_snapshot(&app).await
 }
 
@@ -100,6 +95,7 @@ pub async fn desktop_remote_controlled_capabilities_snapshot(
     app: AppHandle,
     session_id: String,
 ) -> Result<serde_json::Value, String> {
+    crate::platform::capabilities::ensure_desktop_remote_control_enabled()?;
     let controlled = app.state::<ControlledDeviceManager>();
     if !controlled.is_supported() {
         return Err(UNSUPPORTED.to_owned());
@@ -108,7 +104,7 @@ pub async fn desktop_remote_controlled_capabilities_snapshot(
         .live_lease()
         .map_err(|error| error.code.to_owned())?;
     let manager = app.state::<CapabilitySnapshotManager>();
-    let now_b = monotonic_millis();
+    let now_b = controlled_monotonic_millis();
     // B observes but never mints a replacement revision here. A's authenticated
     // renewal request is the single writer, preventing two near-expiry readers
     // from racing revisions and invalidating an already returned A snapshot.
@@ -134,7 +130,7 @@ pub async fn desktop_remote_controlled_capabilities_snapshot(
         RemoteSessionLane::Chat | RemoteSessionLane::Unknown => "chat",
     };
     let mut projection = manager
-        .controlled_ui_projection(&snapshot, monotonic_millis(), unix_millis()?)
+        .controlled_ui_projection(&snapshot, controlled_monotonic_millis(), unix_millis()?)
         .map_err(capability_error)?;
     projection["sessionId"] = serde_json::Value::String(session_id);
     projection["sessionLane"] = serde_json::Value::String(session_lane.to_owned());
@@ -179,7 +175,7 @@ pub(crate) async fn build_capability_snapshot(
         workspaces: controlled.workspaces(),
     };
     app.state::<CapabilitySnapshotManager>()
-        .build(context, source, monotonic_millis())
+        .build(context, source, controlled_monotonic_millis())
         .map_err(capability_error)
 }
 
@@ -193,5 +189,62 @@ mod tests {
         assert_eq!(value.id, "tool.one");
         assert_eq!(value.display_name, "Browser");
         assert!(!format!("{value:?}").contains(r"D:\\"));
+    }
+
+    #[test]
+    fn capability_snapshot_and_task_admission_share_the_controlled_clock() {
+        let capability_source = include_str!("desktop_remote_capabilities.rs");
+        let business_source = include_str!("desktop_remote_controller_business.rs");
+        let task_source = include_str!("desktop_remote_task.rs");
+
+        let capability_build_start = capability_source
+            .find("pub(crate) async fn build_capability_snapshot(")
+            .unwrap();
+        let capability_build_end = capability_source[capability_build_start..]
+            .find("#[cfg(test)]")
+            .map(|offset| capability_build_start + offset)
+            .unwrap();
+        let capability_build = &capability_source[capability_build_start..capability_build_end];
+        assert!(
+            capability_build.contains(".build(context, source, controlled_monotonic_millis())")
+        );
+
+        let backend_start = business_source
+            .find("impl ControlledSubmissionPort for DesktopControlledSubmitBackend {")
+            .unwrap();
+        let backend = &business_source[backend_start..];
+        let mapping_start = backend.find("fn ensure_remote_mapping(").unwrap();
+        let mapping_end = backend[mapping_start..]
+            .find("fn ensure_local_mapping(")
+            .map(|offset| mapping_start + offset)
+            .unwrap();
+        let mapping_preflight = &backend[mapping_start..mapping_end];
+        assert!(mapping_preflight.contains(
+            "self.validate_task_capability(&task, &lease, controlled_monotonic_millis())?;"
+        ));
+
+        let prepare_start = backend.find("fn prepare_remote(").unwrap();
+        let prepare_end = backend[prepare_start..]
+            .find("fn prepare_local(")
+            .map(|offset| prepare_start + offset)
+            .unwrap();
+        let prepare_preflight = &backend[prepare_start..prepare_end];
+        assert!(prepare_preflight.contains(
+            "self.validate_task_capability(&request, &lease, controlled_monotonic_millis())?;"
+        ));
+
+        let submit_start = task_source
+            .find("fn submit_prepared_bound_task_inner(")
+            .unwrap();
+        let submit_end = task_source[submit_start..]
+            .find("fn admit_bound_task_with_ref(")
+            .map(|offset| submit_start + offset)
+            .unwrap();
+        let submit = &task_source[submit_start..submit_end];
+        let normalized_submit = submit.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(
+            normalized_submit
+                .contains("service, controlled_monotonic_millis(), local_attachments,")
+        );
     }
 }

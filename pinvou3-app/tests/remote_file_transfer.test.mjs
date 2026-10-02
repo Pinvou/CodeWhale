@@ -1,15 +1,10 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { webcrypto } from 'node:crypto';
 import {
   downloadRemoteArtifact,
   uploadRemoteFiles,
   validateRemoteFiles,
 } from '../src/features/remote-control/remote-file-transfer.mjs';
-
-if (!Object.hasOwn(globalThis, 'crypto')) {
-  Object.defineProperty(globalThis, 'crypto', { value: webcrypto, configurable: true });
-}
 
 function file(name, content, type = 'text/plain') {
   const bytes = new TextEncoder().encode(content);

@@ -12,12 +12,14 @@ use std::sync::Arc;
 use tauri::{AppHandle, Manager as _};
 use tokio::sync::oneshot;
 
+use crate::features::behavior_telemetry::{RemoteControlEvent, RemoteStage, track_remote_control};
 use crate::features::remote_control::controller::controlling::ControllingDeviceManager;
 use crate::features::remote_control::controller::controlling_session::ControllingSessionManager;
 use crate::features::remote_control::controller::encrypted_lane::ControllingLaneState;
 use crate::features::remote_control::controller::protocol::{
     LeaseContext, RuntimeValidationContext, SenderRole, validate_controller_runtime_payload_json,
 };
+use crate::features::remote_control::controller::relay_runtime::log_remote_action_event;
 use crate::features::sessions::SessionStore;
 use crate::features::sessions::remote_proxy::binding::LiveRemoteContext;
 
@@ -303,6 +305,12 @@ impl DesktopRemoteActionState {
                 .unwrap_or("remote_action_failed")
                 .to_owned())
         };
+        log_remote_action_event(
+            "controller",
+            "remote_action_result_received",
+            &pending.operation,
+            result.as_ref().map(|_| "ok").unwrap_or_else(|code| code),
+        );
         let _ = pending.reply.send(result);
         true
     }
@@ -544,82 +552,157 @@ pub async fn desktop_remote_action_a(
     request_id: String,
     intent: RemoteActionIntent,
 ) -> Result<Value, String> {
-    let store = app.state::<SessionStore>();
-    let manager = app.state::<ControllingDeviceManager>();
-    let sessions = app.state::<ControllingSessionManager>();
-    let state = app.state::<Arc<DesktopRemoteActionState>>();
-    let live = store
-        .remote_dispatch_live_context(&local_session_id, &remote_ref)
-        .map_err(|_| "remote_binding_mismatch".to_owned())?;
-    let (lease, capabilities) = manager
-        .live_runtime_context()
-        .map_err(|_| "controller_not_connected".to_owned())?;
-    if !lease_matches_remote_binding(&lease, &live) {
-        return Err("remote_binding_mismatch".to_owned());
-    }
-    state.purge_stale(&live);
-    let session = sessions
-        .state(&remote_ref, &lease)
-        .map_err(|_| "remote_session_unavailable".to_owned())?;
-    let record = store
-        .remote_proxy_snapshot(&local_session_id)
-        .ok_or_else(|| "remote_proxy_not_found".to_owned())?;
-    if record.controlled_session_id.as_deref() != Some(session.session_id.as_str()) {
-        return Err("remote_mapping_unconfirmed".to_owned());
-    }
-    if request_id.is_empty()
-        || request_id.len() > 128
-        || !request_id
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
-    {
-        return Err("remote_action_invalid".to_owned());
-    }
-    let operation = intent.operation().to_owned();
-    let payload = json!({"v":1,"type":"remote_action_request",
+    let operation = intent.operation();
+    log_remote_action_event(
+        "controller",
+        "remote_action_requested",
+        operation,
+        "requested",
+    );
+    crate::platform::capabilities::ensure_desktop_remote_control_enabled().map_err(|code| {
+        log_remote_action_event("controller", "remote_action_failed", operation, &code);
+        code
+    })?;
+    let started = std::time::Instant::now();
+    let metric = match &intent {
+        RemoteActionIntent::AttachmentChunk { .. } => Some(RemoteStage::Attachment),
+        RemoteActionIntent::ArtifactDownloadChunk { .. } => Some(RemoteStage::Artifact),
+        _ => None,
+    };
+    let result = async {
+        let store = app.state::<SessionStore>();
+        let manager = app.state::<ControllingDeviceManager>();
+        let sessions = app.state::<ControllingSessionManager>();
+        let state = app.state::<Arc<DesktopRemoteActionState>>();
+        let live = store
+            .remote_dispatch_live_context(&local_session_id, &remote_ref)
+            .map_err(|_| "remote_binding_mismatch".to_owned())?;
+        let (lease, capabilities) = manager
+            .live_runtime_context()
+            .map_err(|_| "controller_not_connected".to_owned())?;
+        if !lease_matches_remote_binding(&lease, &live) {
+            return Err("remote_binding_mismatch".to_owned());
+        }
+        state.purge_stale(&live);
+        sessions
+            .state(&remote_ref, &lease)
+            .map_err(|_| "remote_session_unavailable".to_owned())?;
+        // `remote_dispatch_live_context` already verified the current context,
+        // remote ref, confirmed mapping, and presence of B's Session id under
+        // the store lock. Registration atomically rechecks that authority via
+        // `with_current_dispatch_binding` and `require_live_remote_mutation`.
+        // A's remote/session id and B's controlled Session id are distinct
+        // namespaces and must not be compared for equality.
+        if request_id.is_empty()
+            || request_id.len() > 128
+            || !request_id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        {
+            return Err("remote_action_invalid".to_owned());
+        }
+        let operation = operation.to_owned();
+        let payload = json!({"v":1,"type":"remote_action_request",
         "connection_id":lease.connection_id,"controller_lease_id":lease.controller_lease_id,
         "lease_epoch":lease.lease_epoch,"relay_epoch":lease.relay_epoch,
         "remote_control_generation":lease.remote_control_generation,
         "request_id":request_id,"session_id":remote_ref,
         "operation":operation,"body":intent.body()});
-    validate_controller_runtime_payload_json(
-        &payload.to_string(),
-        SenderRole::ControllerA,
-        Some(&RuntimeValidationContext {
-            lease: Some(lease.clone()),
-            negotiated_capabilities: capabilities.clone(),
-        }),
-    )
-    .map_err(|_| "remote_action_invalid".to_owned())?;
-    let receiver = with_current_dispatch_binding(&app, &live, || {
-        store
-            .require_live_remote_mutation(&local_session_id, &remote_ref, &live)
-            .map_err(|_| "remote_binding_mismatch".to_owned())?;
-        state
-            .register(
-                request_id.clone(),
-                local_session_id.clone(),
-                remote_ref.clone(),
-                live.clone(),
-                operation.clone(),
-                intent.task_id().map(str::to_owned),
-                intent.transfer_id().map(str::to_owned),
-            )
-            .map_err(str::to_owned)
-    })
-    .map_err(|error| error.code().to_owned())?;
-    let result = send_action_encrypted(&app, &live, &payload);
-    if result.is_err() {
-        state.detach_uncertain(&request_id);
-        return Err("result_unknown".to_owned());
-    }
-    match tokio::time::timeout(std::time::Duration::from_secs(15), receiver).await {
-        Ok(Ok(result)) => result,
-        _ => {
+        validate_controller_runtime_payload_json(
+            &payload.to_string(),
+            SenderRole::ControllerA,
+            Some(&RuntimeValidationContext {
+                lease: Some(lease.clone()),
+                negotiated_capabilities: capabilities.clone(),
+            }),
+        )
+        .map_err(|error| {
+            log_remote_action_event(
+                "controller",
+                "remote_action_validation_failed",
+                &operation,
+                error.code,
+            );
+            "remote_action_invalid".to_owned()
+        })?;
+        let receiver = with_current_dispatch_binding(&app, &live, || {
+            store
+                .require_live_remote_mutation(&local_session_id, &remote_ref, &live)
+                .map_err(|_| "remote_binding_mismatch".to_owned())?;
+            state
+                .register(
+                    request_id.clone(),
+                    local_session_id.clone(),
+                    remote_ref.clone(),
+                    live.clone(),
+                    operation.clone(),
+                    intent.task_id().map(str::to_owned),
+                    intent.transfer_id().map(str::to_owned),
+                )
+                .map_err(str::to_owned)
+        })
+        .map_err(|error| error.code().to_owned())?;
+        let result = send_action_encrypted(&app, &live, &payload);
+        if result.is_err() {
             state.detach_uncertain(&request_id);
-            Err("result_unknown".to_owned())
+            log_remote_action_event(
+                "controller",
+                "remote_action_failed",
+                &operation,
+                "remote_send_uncertain",
+            );
+            return Err("result_unknown".to_owned());
+        }
+        log_remote_action_event("controller", "remote_action_sent", &operation, "sent");
+        match tokio::time::timeout(std::time::Duration::from_secs(15), receiver).await {
+            Ok(Ok(result)) => result,
+            _ => {
+                state.detach_uncertain(&request_id);
+                log_remote_action_event(
+                    "controller",
+                    "remote_action_timeout",
+                    &operation,
+                    "result_unknown",
+                );
+                Err("result_unknown".to_owned())
+            }
         }
     }
+    .await;
+    match &result {
+        Ok(_) => log_remote_action_event("controller", "remote_action_completed", operation, "ok"),
+        Err(code) => log_remote_action_event("controller", "remote_action_failed", operation, code),
+    }
+    if let Some(stage) = metric {
+        let completed = match (stage, &result) {
+            (RemoteStage::Attachment, Ok(body)) => {
+                body.get("state").and_then(Value::as_str) == Some("completed")
+            }
+            (RemoteStage::Artifact, Ok(body)) => {
+                body.get("completed").and_then(Value::as_bool) == Some(true)
+            }
+            (_, Ok(_)) => true,
+            (_, Err(_)) => true,
+        };
+        if completed {
+            let mut event = RemoteControlEvent::from_result(
+                stage,
+                &result,
+                started.elapsed().as_millis() as u64,
+            );
+            if let Ok(body) = &result {
+                if let Some(bytes) = body
+                    .get("received_bytes")
+                    .and_then(Value::as_str)
+                    .and_then(|value| value.parse::<u64>().ok())
+                {
+                    event = event.size_bytes(bytes);
+                }
+            }
+            track_remote_control(&app, event);
+        }
+    }
+    result
 }
 
 fn send_action_encrypted(

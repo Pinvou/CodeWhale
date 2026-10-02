@@ -28,11 +28,11 @@ const UNSUPPORTED: &str = "desktop_remote_control_unsupported";
 pub use crate::features::remote_control::controller::permission::PermissionRequestInput as DesktopRemotePermissionRequestInput;
 
 fn ensure_supported(controlled: &ControlledDeviceManager) -> Result<(), String> {
-    if controlled.is_supported() {
-        Ok(())
-    } else {
-        Err(UNSUPPORTED.to_owned())
-    }
+    crate::platform::capabilities::ensure_desktop_remote_control_enabled()?;
+    controlled
+        .is_supported()
+        .then_some(())
+        .ok_or_else(|| UNSUPPORTED.to_owned())
 }
 
 /// Called by every B-side terminal path (stop, refresh, disconnect, cancel).

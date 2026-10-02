@@ -34,11 +34,11 @@ python scripts/architecture-guard.py
 - `features/*/application/**/*.rs` 会被递归枚举；其中的用例签名和实现不得
   导入或调用 Tauri API，也不得直接依赖具体 `platform::app_events` 实现。
   宿主通知必须通过所属 feature 定义的窄端口由组合根注入。
-- `features/sessions/application/mod.rs` 的五个公开模块导出按 Rust token 检查固定为 DEV-26
-  预声明的 `admission`、`dispatch_remote`、`ports`、`project_remote`、
-  `submit_controlled`；声明必须无条件可用，顶层宏展开与
-  `include!` 不得增删导出；跨行声明和注释不能绕过检查。DEV-31 最终收口后，
-  journal sink 经 `project_remote` 完成正式同步，不再保留第二个同步用例。
+- `features/sessions/application/mod.rs` 的五个公开模块导出按 Rust token 检查固定为
+  `admission`、`dispatch_remote`、`ports`、`project_remote`、`submit_controlled`；
+  旧 `sync_remote_journal` 槽已由 RemoteProxy / `project_remote` 的单一投影 owner 取代，
+  不保留兼容模块；声明必须无条件可用，顶层宏展开与
+  `include!` 不得增删导出；跨行声明和注释不能绕过检查。后续任务只填充各自实现文件。
 - 整个 `features/remote_control/**/*.rs` 禁止新增直接 Tauri API 或宿主事件调用。
   `scripts/architecture-baseline.json` 按文件、调用模式和数量记录已有依赖，
   新文件与现有文件的增长均失败；宿主根路径别名、glob 导入及泛型 `emit` 调用

@@ -115,11 +115,7 @@
       listen("desktop-remote-controlled-status", function (event) {
         var payload = event && event.payload ? event.payload : event || {};
         noteControlledTerminal(payload);
-        clientLog(
-          "event status=" + String(payload.status || "") + " code=" + (payload.pairingCode ? "yes" : "no")
-          + " remaining=" + String(payload.pairingRemainingMs || "")
-          + " gen=" + String(payload.generation || ""),
-        );
+        clientEvent("controlled_status", controlledDiagnosticDetail(payload.status));
         publish(logic.applyControlledStatus(current(), controlledStatusPayload(payload)));
       }).then(function (off) {
         unlisten.push(off);
@@ -231,11 +227,7 @@
     function applyControlled(intent, result, replaceBinding) {
       var payload = result && typeof result === "object" ? result : {};
       noteControlledTerminal(payload);
-      clientLog(
-        "result status=" + String(payload.status || "") + " code=" + (payload.pairingCode ? "yes" : "no")
-        + " remaining=" + String(payload.pairingRemainingMs || "")
-        + " gen=" + String(payload.generation || ""),
-      );
+      clientEvent("controlled_result", controlledDiagnosticDetail(payload.status));
       publish(logic.applyControlledStatus(current(), Object.assign(
         controlledStatusPayload(payload), { intent: intent, replaceBinding: replaceBinding === true },
       )));
@@ -337,10 +329,19 @@
       return controlledStatus();
     }
 
-    /// 前端排障日志：写入与 Rust 相同的日志文件，支持人员可直接读取。
-    function clientLog(message) {
+    function controlledDiagnosticDetail(status) {
+      switch (status) {
+        case "registering": case "waiting_for_pairing": case "pairing_reserved":
+        case "handshake_pending": case "connected": case "reconnecting":
+        case "stopped": case "error": return status;
+        default: return "unknown";
+      }
+    }
+
+    /// Frontend diagnostics use fixed semantic categories only.
+    function clientEvent(event, detail) {
       if (!isAvailable()) return Promise.resolve();
-      return invoke("desktop_remote_client_log", { message: String(message || "") })
+      return invoke("desktop_remote_client_event", { event: event, detail: detail })
         .catch(function () {});
     }
 
@@ -563,7 +564,7 @@
             sessionRef: remoteRef,
             code: error.code,
           }));
-          clientLog("capability handshake failed code=" + String(error.code || "unknown"));
+          clientEvent("capability_handshake", "failed");
           throw error;
         })
         .finally(function () {
@@ -1231,8 +1232,8 @@
       controlledStop: controlledStop,
       controlledDisconnectNow: controlledDisconnectNow,
       controlledStatus: controlledStatus,
+      clientEvent: clientEvent,
       controlledSync: controlledSync,
-      clientLog: clientLog,
       endpointProfiles: endpointProfiles,
       setEndpointProfile: setEndpointProfile,
       controlledListWorkspaces: controlledListWorkspaces,

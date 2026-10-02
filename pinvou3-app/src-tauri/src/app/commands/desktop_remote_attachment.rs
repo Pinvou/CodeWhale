@@ -348,7 +348,10 @@ fn spawn_transfer_reaper(runtime: Arc<DesktopRemoteAttachmentRuntime>) {
             tokio::time::sleep(TRANSFER_REAPER_INTERVAL).await;
             let expired = runtime.uploads.expire(monotonic_millis());
             if expired > 0 {
-                eprintln!("[remote-control] reaped {expired} stale attachment upload(s)");
+                crate::features::remote_control::controller::relay_runtime::log_controlled_event(
+                    "attachment_uploads_expired",
+                    "expired",
+                );
             }
         }
     });

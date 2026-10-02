@@ -148,6 +148,7 @@ pub(crate) fn desktop_remote_proxy_open_live(
     sessions: State<'_, ControllingSessionManager>,
     existing_local_session_id: Option<String>,
 ) -> Result<LiveRemoteProxyOpen, String> {
+    crate::platform::capabilities::ensure_desktop_remote_control_enabled()?;
     open_live(
         &store,
         &manager,
@@ -236,8 +237,11 @@ fn read_visible(store: &SessionStore, local_session_id: &str) -> Result<Value, S
 }
 
 #[tauri::command]
-pub(crate) fn desktop_remote_proxy_history_list(store: State<'_, SessionStore>) -> Vec<Value> {
-    list_visible(&store)
+pub(crate) fn desktop_remote_proxy_history_list(
+    store: State<'_, SessionStore>,
+) -> Result<Vec<Value>, String> {
+    crate::platform::capabilities::ensure_desktop_remote_control_enabled()?;
+    Ok(list_visible(&store))
 }
 
 #[tauri::command]
@@ -245,6 +249,7 @@ pub(crate) fn desktop_remote_proxy_history_read(
     store: State<'_, SessionStore>,
     local_session_id: String,
 ) -> Result<Value, String> {
+    crate::platform::capabilities::ensure_desktop_remote_control_enabled()?;
     read_visible(&store, &local_session_id)
 }
 
@@ -253,6 +258,7 @@ pub(crate) fn desktop_remote_proxy_history_delete(
     store: State<'_, SessionStore>,
     local_session_id: String,
 ) -> Result<(), String> {
+    crate::platform::capabilities::ensure_desktop_remote_control_enabled()?;
     hide_visible(&store, &local_session_id)
 }
 

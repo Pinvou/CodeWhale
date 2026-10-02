@@ -223,12 +223,13 @@ function plainObject(value, label) {
   return value;
 }
 
-function safeFieldName(value) { return /^[A-Za-z0-9_]{1,64}$/u.test(value) ? value : "unknown"; }
-
 function exactObject(value, required, optional, label) {
   const object = plainObject(value, label);
   const allowed = new Set([...required, ...optional]);
-  for (const key of Object.keys(object)) if (!allowed.has(key)) fail("unknown_field", `${label}.${safeFieldName(key)}`);
+  // Object keys are attacker-controlled. Keep the diagnostic useful for
+  // classification without ever copying the rejected key into an error,
+  // crash report, or log projection.
+  for (const key of Object.keys(object)) if (!allowed.has(key)) fail("unknown_field", "schema");
   for (const key of required) if (!Object.hasOwn(object, key)) fail("missing_field", `${label}.${key}`);
   return object;
 }

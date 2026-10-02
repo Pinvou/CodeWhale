@@ -6,6 +6,7 @@
 
 use tauri::{AppHandle, Emitter, State};
 
+use crate::features::behavior_telemetry::{RemoteControlEvent, RemoteStage, track_remote_control};
 use crate::features::remote_control::RemoteControlManager;
 use crate::features::remote_control::controller::controlling::{
     ControllingDeviceManager, ControllingStateError, ControllingStatus,
@@ -25,11 +26,11 @@ fn controlling_error(error: ControllingStateError) -> String {
 }
 
 fn ensure_supported(manager: &ControllingDeviceManager) -> Result<(), String> {
-    if manager.is_supported() {
-        Ok(())
-    } else {
-        Err(UNSUPPORTED.to_owned())
-    }
+    crate::platform::capabilities::ensure_desktop_remote_control_enabled()?;
+    manager
+        .is_supported()
+        .then_some(())
+        .ok_or_else(|| UNSUPPORTED.to_owned())
 }
 
 fn emit_status(app: &AppHandle, status: &ControllingStatus) {
@@ -47,6 +48,8 @@ pub async fn desktop_remote_controller_connect(
     artifacts: State<'_, Arc<super::desktop_remote_artifact::DesktopRemoteArtifactRuntime>>,
     code: String,
 ) -> Result<ControllingStatus, String> {
+    let started = std::time::Instant::now();
+    let result = async {
     ensure_supported(&manager)?;
     let previous_connection_id = manager
         .live_runtime_context()
@@ -79,6 +82,16 @@ pub async fn desktop_remote_controller_connect(
             ),
         );
     connect_controlling_device(&app, &manager, relay.inner(), operation, journal).await
+    }.await;
+    track_remote_control(
+        &app,
+        RemoteControlEvent::from_result(
+            RemoteStage::Connection,
+            &result,
+            started.elapsed().as_millis() as u64,
+        ),
+    );
+    result
 }
 
 #[tauri::command]
@@ -89,21 +102,34 @@ pub async fn desktop_remote_controller_disconnect(
     actions: State<'_, Arc<super::desktop_remote_action::DesktopRemoteActionState>>,
     artifacts: State<'_, Arc<super::desktop_remote_artifact::DesktopRemoteArtifactRuntime>>,
 ) -> Result<ControllingStatus, String> {
-    ensure_supported(&manager)?;
-    // E2E-06：先尽力把显式断开告诉 Relay/B（本地断开始终权威，发送失败不阻塞）。
-    if let Some(receipt) = manager.send_disconnect_with_receipt("user_disconnect") {
-        // Queue admission is not delivery. Let the socket flush the final frame
-        // before local cleanup cancels its transport; offline peers stay bounded.
-        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), receipt).await;
+    let started = std::time::Instant::now();
+    let result = async {
+        ensure_supported(&manager)?;
+        // E2E-06：先尽力把显式断开告诉 Relay/B（本地断开始终权威，发送失败不阻塞）。
+        if let Some(receipt) = manager.send_disconnect_with_receipt("user_disconnect") {
+            // Queue admission is not delivery. Let the socket flush the final frame
+            // before local cleanup cancels its transport; offline peers stay bounded.
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(2), receipt).await;
+        }
+        sessions.clear();
+        actions.clear_all();
+        if let Ok((lease, _)) = manager.live_runtime_context() {
+            artifacts.clear_connection(&lease.connection_id);
+        }
+        let status = manager.disconnect();
+        emit_status(&app, &status);
+        Ok(status)
     }
-    sessions.clear();
-    actions.clear_all();
-    if let Ok((lease, _)) = manager.live_runtime_context() {
-        artifacts.clear_connection(&lease.connection_id);
-    }
-    let status = manager.disconnect();
-    emit_status(&app, &status);
-    Ok(status)
+    .await;
+    track_remote_control(
+        &app,
+        RemoteControlEvent::from_result(
+            RemoteStage::Disconnection,
+            &result,
+            started.elapsed().as_millis() as u64,
+        ),
+    );
+    result
 }
 
 #[tauri::command]

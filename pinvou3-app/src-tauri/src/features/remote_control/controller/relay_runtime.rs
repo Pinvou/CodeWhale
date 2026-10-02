@@ -17,11 +17,15 @@ use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Emitter, Manager as _};
 use tokio::sync::oneshot;
 
+use crate::features::behavior_telemetry::{
+    RemoteControlEvent, RemoteOutcome, RemoteReason, RemoteStage, track_remote_control,
+};
+use crate::features::remote_control::controller::ports::RemotePortError;
 use crate::features::remote_control::manager::RemoteControlManager;
 
 use super::controlled::{
     ControlledDeviceManager, ControlledLease, ControlledOperation, ControlledRegistration,
-    ControlledResumeStep, ControlledStatus,
+    ControlledResumeStep, ControlledStatus, ControlledStatusKind,
 };
 use super::controlled_handshake::ControlledHandshake;
 use super::controlling_handshake::JoinedLease;
@@ -159,7 +163,66 @@ fn wall_clock_millis() -> Result<u64, String> {
 // Keep the transport's existing host projection at one narrow callsite.
 // The controlled state owner constructs each status before it is published.
 fn emit_controlled_status(app: &AppHandle, status: &ControlledStatus) {
+    track_controlled_status_transition(app, status);
     let _ = app.emit(CONTROLLED_STATUS_EVENT, status);
+}
+
+/// Both worker and command projections pass through this transition gate.
+/// It retains only the fixed phase enum in memory; no generation or code is
+/// used for correlation or written to behavior telemetry.
+pub(crate) fn track_controlled_status_transition(app: &AppHandle, status: &ControlledStatus) {
+    static LAST: OnceLock<Mutex<Option<ControlledStatusKind>>> = OnceLock::new();
+    let mut last = LAST.get_or_init(|| Mutex::new(None)).lock();
+    let current = status.kind();
+    let previous = last.replace(current);
+    if previous == Some(current) {
+        return;
+    }
+    let event = match (previous, current) {
+        (Some(ControlledStatusKind::WaitingForPairing), ControlledStatusKind::PairingReserved) => {
+            Some(RemoteControlEvent::new(
+                RemoteStage::Claim,
+                RemoteOutcome::Ok,
+            ))
+        }
+        (Some(ControlledStatusKind::HandshakePending), ControlledStatusKind::Connected) => Some(
+            RemoteControlEvent::new(RemoteStage::Handshake, RemoteOutcome::Ok),
+        ),
+        (Some(ControlledStatusKind::Connected), ControlledStatusKind::Reconnecting) => Some(
+            RemoteControlEvent::new(RemoteStage::Disconnection, RemoteOutcome::Ok),
+        ),
+        (
+            Some(
+                ControlledStatusKind::Reconnecting
+                | ControlledStatusKind::ResumeProvisional
+                | ControlledStatusKind::ResumeActivatedPendingLiveness,
+            ),
+            ControlledStatusKind::Connected,
+        ) => Some(RemoteControlEvent::new(
+            RemoteStage::Resume,
+            RemoteOutcome::Ok,
+        )),
+        (
+            Some(
+                ControlledStatusKind::Reconnecting
+                | ControlledStatusKind::ResumeProvisional
+                | ControlledStatusKind::ResumeActivatedPendingLiveness,
+            ),
+            ControlledStatusKind::Error,
+        ) => Some(
+            RemoteControlEvent::new(RemoteStage::Resume, RemoteOutcome::Rejected)
+                .reason(RemoteReason::ResumeFailed),
+        ),
+        (Some(ControlledStatusKind::HandshakePending), ControlledStatusKind::Error) => Some(
+            RemoteControlEvent::new(RemoteStage::Handshake, RemoteOutcome::Rejected)
+                .reason(RemoteReason::HandshakeFailed),
+        ),
+        _ => None,
+    };
+    drop(last);
+    if let Some(event) = event {
+        track_remote_control(app, event);
+    }
 }
 /// 端点通道就绪等待：单次上限与重试间隔（整体最多 3 次尝试）。
 const ENDPOINT_READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
@@ -173,6 +236,146 @@ const ENDPOINT_READY_RETRY_DELAY: std::time::Duration = std::time::Duration::fro
 /// endpoint_id/lease/token/连接码），便于用户把文件直接发给支持而不担心泄漏。
 /// 写失败一律忽略，绝不影响主流程。
 pub(crate) fn log_relay_event(scope: &str, stage: &str, detail: &str) {
+    write_relay_event(scope, stage, None, detail);
+}
+
+/// Remote-action diagnostics add only the closed operation name to the common
+/// log envelope. Request/session identifiers and action bodies never reach the
+/// sink, while A/B traces can still be correlated by operation and timestamp.
+pub(crate) fn log_remote_action_event(scope: &str, stage: &str, operation: &str, detail: &str) {
+    write_relay_event(scope, stage, Some(operation), detail);
+}
+
+// Closed diagnostic projection for the controlled task admission boundary.
+// Keep this list synchronized with the stable codes accepted by
+// `desktop_remote_controller_business::submit_error`. Unknown static codes
+// remain private and collapse to `other` at the sink.
+const CONTROLLED_PORT_LOG_ERROR_CODES: &[&str] = &[
+    "capability_admission_capacity",
+    "capability_descriptor_capacity",
+    "capability_descriptor_duplicate",
+    "capability_display_invalid",
+    "capability_expiry_overflow",
+    "capability_id_invalid",
+    "capability_revision_exhausted",
+    "capability_snapshot_expired",
+    "capability_snapshot_missing",
+    "capability_snapshot_stale",
+    "capability_workspace_capacity",
+    "capability_workspace_duplicate",
+    "capability_workspace_not_authorized",
+    "controlled_session_projection_failed",
+    "desktop_remote_not_connected",
+    "lease_unavailable",
+    "model_binding_invalid",
+    "model_binding_stale",
+    "model_credential_unavailable",
+    "model_credential_invalid",
+    "model_credential_kind_unsupported",
+    "model_display_name_invalid",
+    "model_endpoint_insecure",
+    "model_endpoint_invalid",
+    "model_endpoint_local",
+    "model_endpoint_mode_unsupported",
+    "model_endpoint_private",
+    "model_endpoint_unresolved",
+    "model_image_override_unsupported",
+    "model_not_exportable",
+    "model_package_capacity",
+    "model_package_field_invalid",
+    "model_package_id_invalid",
+    "model_package_invalid",
+    "model_package_missing",
+    "model_package_missing_field",
+    "model_package_schema_unsupported",
+    "model_package_too_large",
+    "model_package_unknown_field",
+    "model_preset_unsupported",
+    "model_provider_kind_unsupported",
+    "model_reasoning_effort_unsupported",
+    "model_route_invalid",
+    "model_runtime_unavailable",
+    "model_secret_invalid",
+    "model_secret_too_large",
+    "model_vendor_unsupported",
+    "model_wire_api_mismatch",
+    "model_wire_api_unsupported",
+    "model_wire_name_invalid",
+    "task_binding_stale",
+    "task_input_digest_invalid",
+    "task_input_invalid",
+    "task_lease_mismatch",
+    "task_ledger_capacity",
+    "task_ledger_corrupt",
+    "task_ledger_persist_failed",
+    "task_ledger_serialize_failed",
+    "task_ledger_unreadable",
+    "task_ledger_version_unsupported",
+    "task_ledger_write_failed",
+    "task_mode_invalid",
+    "task_mode_unsupported",
+    "task_model_source_invalid",
+    "task_model_source_unsupported",
+    "task_not_found",
+    "task_payload_invalid_enum",
+    "task_payload_invalid_field",
+    "task_payload_invalid_json",
+    "task_payload_invalid_message",
+    "task_payload_invalid_type",
+    "task_payload_length_mismatch",
+    "task_payload_message_too_large",
+    "task_payload_missing_field",
+    "task_payload_replay",
+    "task_payload_role_mismatch",
+    "task_payload_stale_context",
+    "task_payload_unknown_field",
+    "task_payload_unknown_message_type",
+    "task_payload_unsupported_capability",
+    "task_payload_unsupported_version",
+    "task_request_conflict",
+    "task_request_invalid",
+    "task_result_digest_invalid",
+    "task_session_backend_bind_failed",
+    "task_session_binding_mismatch",
+    "task_session_busy",
+    "task_session_create_failed",
+    "task_session_generation_conflict",
+    "task_session_generation_stale",
+    "task_session_lane_conflict",
+    "task_session_lane_mismatch",
+    "task_session_lane_unknown",
+    "task_session_lookup_failed",
+    "task_session_map_conflict",
+    "task_session_not_found",
+    "task_session_provisioner_unavailable",
+    "task_skill_invalid",
+    "task_state_conflict",
+    "task_status_binding_invalid",
+    "task_workspace_capacity",
+    "task_workspace_not_authorized",
+    "task_workspace_required",
+    "task_workspace_unexpected",
+    "temporary_model_capability_required",
+];
+
+/// Log a stable application-boundary error without collapsing its code to
+/// `other` when it belongs to the explicit controlled-task diagnostic set.
+/// User input, identifiers and infrastructure error strings never reach the
+/// sink, and future port errors remain private until deliberately reviewed.
+pub(crate) fn log_controlled_port_error(stage: &str, error: RemotePortError) {
+    write_relay_event_inner("controlled", stage, None, log_port_error_detail(error));
+}
+
+fn write_relay_event(scope: &str, stage: &str, operation: Option<&str>, detail: &str) {
+    write_relay_event_inner(scope, stage, operation, log_detail(detail));
+}
+
+fn write_relay_event_inner(
+    scope: &str,
+    stage: &str,
+    operation: Option<&str>,
+    detail: &'static str,
+) {
     use std::io::Write as _;
     static LOG_WRITE_LOCK: OnceLock<parking_lot::Mutex<()>> = OnceLock::new();
 
@@ -196,22 +399,263 @@ pub(crate) fn log_relay_event(scope: &str, stage: &str, detail: &str) {
     else {
         return;
     };
-    let _ = writeln!(
-        file,
-        "ts_ms={timestamp_ms} [{scope}] stage={} detail={}",
-        bounded_log_token(stage),
-        bounded_log_token(detail)
-    );
+    if let Some(operation) = operation {
+        let _ = writeln!(
+            file,
+            "ts_ms={timestamp_ms} pid={} [{}] stage={} operation={} detail={}",
+            std::process::id(),
+            log_scope(scope),
+            log_stage(stage),
+            log_remote_action_operation(operation),
+            detail
+        );
+    } else {
+        let _ = writeln!(
+            file,
+            "ts_ms={timestamp_ms} pid={} [{}] stage={} detail={}",
+            std::process::id(),
+            log_scope(scope),
+            log_stage(stage),
+            detail
+        );
+    }
 }
 
-/// 有界化按位洗白：只保留可以安全落盘的字符集并限制长度，
-/// 空白、`=`、`?`、`&` 等分隔符一律丢掉，避免把连接码或凭据片段带进日志。
-pub(crate) fn bounded_log_token(value: &str) -> String {
-    value
-        .chars()
-        .filter(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | ':' | '.' | '/'))
-        .take(160)
-        .collect()
+fn log_scope(value: &str) -> &'static str {
+    match value {
+        "controlled" => "controlled",
+        "controller" => "controller",
+        _ => "unknown",
+    }
+}
+
+/// Semantic allowlists also reject identifiers consisting only of letters or digits.
+fn log_stage(value: &str) -> &'static str {
+    const STAGES: &[&str] = &[
+        "controlled_status",
+        "controlled_result",
+        "capability_handshake",
+        "start_rejected",
+        "start_failed",
+        "connect_requested",
+        "connect_rejected",
+        "connect_started",
+        "connected",
+        "connect_failed",
+        "status",
+        "handshake_failed",
+        "registration_rejected",
+        "registration_sent",
+        "registration_failed",
+        "registered",
+        "worker_started",
+        "endpoint_ready",
+        "runtime_relay_error",
+        "liveness_challenge",
+        "liveness_attestation",
+        "liveness_direct",
+        "task_submit_frame_received",
+        "task_submit_endpoint_received",
+        "task_submit_socket_written",
+        "task_submit_socket_write_failed",
+        "task_submit_decrypted",
+        "task_submit_dispatched",
+        "task_submit_dispatch_failed",
+        "task_submit_status_sent",
+        "task_submit_business_entered",
+        "task_submit_business_accepted",
+        "task_submit_business_rejected",
+        "task_submit_context_validated",
+        "task_submit_payload_validated",
+        "task_submit_identity_validated",
+        "task_submit_capability_validated",
+        "task_submit_mapping_ready",
+        "task_submit_mapping_projected",
+        "task_submit_prepared",
+        "controlled_submission_admission_entered",
+        "task_model_source_received",
+        "business_frame_dropped",
+        "business_frame_rejected",
+        "business_dispatch_failed",
+        "business_response_seal_failed",
+        "business_response_send_failed",
+        "capability_response_sent",
+        "capability_snapshot_failed",
+        "capability_snapshot_applied",
+        "capability_snapshot_rejected",
+        "capability_error_rejected",
+        "journal_event_rejected",
+        "journal_event_ignored",
+        "journal_event_applied",
+        "journal_event_verified",
+        "journal_event_gap",
+        "journal_snapshot_rejected",
+        "task_status_sent",
+        "task_status_not_sent",
+        "journal_event_not_sent",
+        "journal_event_sent",
+        "journal_snapshot_sent",
+        "remote_action_received",
+        "remote_action_requested",
+        "remote_action_validation_failed",
+        "remote_action_failed",
+        "remote_action_sent",
+        "remote_action_result_received",
+        "remote_action_completed",
+        "remote_action_timeout",
+        "relay_reset_enqueue_failed",
+        "relay_frame_oversized",
+        "relay_frame_rejected",
+        "relay_read_failed",
+        "relay_connect_failed",
+        "relay_send_failed",
+        "access_policy_load_failed",
+        "revocation_frame_rejected",
+        "revocation_ack_persist_failed",
+        "local_event_forward_failed",
+        "relay_message_rejected",
+        "revoked_config_remove_failed",
+        "revoked_ledger_remove_failed",
+        "session_id_rejected",
+        "session_scope_lookup_failed",
+        "stream_reset_enqueue_failed",
+        "attachment_digest_missing",
+        "attachment_uploads_expired",
+        "artifact_downloads_expired",
+        "task_terminal_persist_failed",
+        "task_rejected_persist_failed",
+        "task_dispatch_rejected",
+        "artifact_capture_failed",
+        "workspace_auth_restore_failed",
+        "attachment_release_failed",
+        "attachment_finalize_failed",
+        "attachment_cleanup_failed",
+        "journal_append_rejected",
+        "knowledge_model_load_failed",
+        "knowledge_mount_emit_failed",
+        "web_session_operation_failed",
+        "web_workspace_operation_failed",
+        "web_acp_operation_failed",
+        "lifecycle_checkpoint",
+    ];
+    STAGES
+        .iter()
+        .copied()
+        .find(|stage| *stage == value)
+        .unwrap_or("other")
+}
+
+fn log_detail(value: &str) -> &'static str {
+    const DETAILS: &[&str] = &[
+        "ok",
+        "failed",
+        "unknown",
+        "unavailable",
+        "accepted",
+        "rejected",
+        "sent",
+        "send_failed",
+        "requested",
+        "expired",
+        "ready",
+        "duplicate",
+        "connected",
+        "reconnecting",
+        "registering",
+        "waiting_for_pairing",
+        "pairing_reserved",
+        "handshake_pending",
+        "stopped",
+        "error",
+        "waiting_registered",
+        "channel_ready",
+        "opening",
+        "dispatching",
+        "forwarding_to_worker",
+        "validating",
+        "admitted",
+        "transport_error",
+        "controlled_device",
+        "controller_temporary",
+        "no_live_lease",
+        "relay_rejected",
+        "projection_failed",
+        "retired_epoch",
+        "replay_requested",
+        "invalid_envelope_or_identity",
+        "lease_unavailable",
+        "session_mapping_missing",
+        "status_unavailable",
+        "outbound_unavailable",
+        "seal_failed",
+        "queue_failed",
+        "generation_or_binding_stale",
+        "permission_expired",
+        "permission_denied",
+        "task_conflict",
+        "missing",
+        "remote_binding_mismatch",
+        "controller_not_connected",
+        "remote_session_unavailable",
+        "remote_proxy_not_found",
+        "remote_mapping_unconfirmed",
+        "remote_action_invalid",
+        "remote_action_capacity",
+        "remote_action_failed",
+        "remote_encrypt_failed",
+        "remote_send_uncertain",
+        "task_session_not_found",
+        "task_binding_stale",
+        "transfer_unknown",
+        "transfer_chunk_invalid",
+        "transfer_chunk_out_of_order",
+        "artifact_unavailable",
+        "runtime_started",
+        "start_requested",
+        "refresh_requested",
+        "refresh_retiring",
+        "refresh_connection_cleanup_begin",
+        "refresh_connection_cleanup_done",
+        "refresh_relay_stop_begin",
+        "refresh_relay_stop_done",
+        "refresh_state_rotation_begin",
+        "refresh_state_rotation_done",
+        "refresh_worker_start_begin",
+        "refresh_worker_start_done",
+        "refresh_registration_wait_begin",
+        "refresh_registration_wait_done",
+        "refresh_registration_wait_failed",
+        "refresh_completed",
+        "refresh_failed",
+        "stop_requested",
+        "stop_completed",
+        "disconnect_requested",
+        "disconnect_completed",
+    ];
+    if let Some(value) = DETAILS.iter().copied().find(|detail| *detail == value) {
+        return value;
+    }
+    super::protocol::CONTROLLER_ERROR_CODES
+        .iter()
+        .copied()
+        .find(|code| *code == value)
+        .unwrap_or("other")
+}
+
+fn log_port_error_detail(error: RemotePortError) -> &'static str {
+    CONTROLLED_PORT_LOG_ERROR_CODES
+        .iter()
+        .copied()
+        .find(|code| *code == error.code())
+        .unwrap_or("other")
+}
+
+fn log_remote_action_operation(value: &str) -> &'static str {
+    super::protocol::REMOTE_ACTION_OPERATIONS
+        .iter()
+        .copied()
+        .find(|operation| *operation == value)
+        .unwrap_or("other")
 }
 
 /// B 端预握手阶段的自帧回投过滤：Relay 会把发送方的 `finished_receipt_commit`
@@ -231,6 +675,31 @@ pub(crate) fn log_controller_event(stage: &str, detail: &str) {
     log_relay_event("controller", stage, detail);
 }
 
+/// Production failure projections deliberately accept the raw source values
+/// only to prove that the boundary discards them before touching the sink.
+pub(crate) fn log_attachment_digest_omitted(_file_name: &str) {
+    log_controlled_event("attachment_digest_missing", "missing");
+}
+
+pub(crate) fn log_task_persist_failure<T: ?Sized>(rejected: bool, _raw_error: &T) {
+    log_controlled_event(
+        if rejected {
+            "task_rejected_persist_failed"
+        } else {
+            "task_terminal_persist_failed"
+        },
+        "failed",
+    );
+}
+
+pub(crate) fn log_artifact_capture_failure<T: ?Sized>(_raw_error: &T) {
+    log_controlled_event("artifact_capture_failed", "failed");
+}
+
+pub(crate) fn log_attachment_cleanup_failure(_path: &std::path::Path, _raw_error: &std::io::Error) {
+    log_controlled_event("attachment_cleanup_failed", "failed");
+}
+
 /// 测试/内联断言用：日志行格式（不含时间戳，便于跨平台断言）。
 pub(crate) fn relay_log_line(scope: &str, stage: &str, detail: &str) -> String {
     format!("[{scope}] stage={stage} detail={detail}")
@@ -244,6 +713,21 @@ pub(crate) fn controlled_log_line(stage: &str, detail: &str) -> String {
 /// 测试/内联断言用：A 端日志行格式。
 pub(crate) fn controller_log_line(stage: &str, detail: &str) -> String {
     relay_log_line("controller", stage, detail)
+}
+
+pub(crate) fn remote_action_log_line(
+    scope: &str,
+    stage: &str,
+    operation: &str,
+    detail: &str,
+) -> String {
+    format!(
+        "[{}] stage={} operation={} detail={}",
+        log_scope(scope),
+        log_stage(stage),
+        log_remote_action_operation(operation),
+        log_detail(detail)
+    )
 }
 const REGISTRATION_CAPABILITIES: &[&str] = &[
     "pairing_v1",
@@ -1244,11 +1728,29 @@ async fn dispatch_decrypted_payload_cached<P: ControlledBusinessPort + ?Sized>(
                 .ok_or_else(|| "remote_action_invalid".to_owned())?;
             let fingerprint =
                 remote_action_fingerprint(lease, session_ref, request_id, operation, body);
+            log_remote_action_event(
+                "controlled",
+                "remote_action_received",
+                operation,
+                "requested",
+            );
             match action_results.lookup(request_id, fingerprint) {
                 RemoteActionCacheLookup::Hit(response) => {
+                    log_remote_action_event(
+                        "controlled",
+                        "remote_action_completed",
+                        operation,
+                        "duplicate",
+                    );
                     return Ok(vec![("remote_action_result", response)]);
                 }
                 RemoteActionCacheLookup::Conflict => {
+                    log_remote_action_event(
+                        "controlled",
+                        "remote_action_failed",
+                        operation,
+                        "result_unknown",
+                    );
                     return Ok(vec![(
                         "remote_action_result",
                         remote_action_response(
@@ -1265,6 +1767,20 @@ async fn dispatch_decrypted_payload_cached<P: ControlledBusinessPort + ?Sized>(
             let action = port
                 .remote_action(lease, session_ref, operation, body)
                 .await;
+            match &action {
+                Ok(_) => log_remote_action_event(
+                    "controlled",
+                    "remote_action_completed",
+                    operation,
+                    "ok",
+                ),
+                Err(code) => log_remote_action_event(
+                    "controlled",
+                    "remote_action_failed",
+                    operation,
+                    public_remote_action_error(code),
+                ),
+            }
             let response =
                 remote_action_response(lease, session_ref, request_id, operation, action);
             action_results.insert(request_id.to_owned(), fingerprint, response.clone());
@@ -1985,15 +2501,138 @@ mod tests {
             controller_log_line("connect_failed", "pairing_code_invalid"),
             "[controller] stage=connect_failed detail=pairing_code_invalid"
         );
+        assert_eq!(
+            remote_action_log_line(
+                "controller",
+                "remote_action_validation_failed",
+                "artifact_index",
+                "unsupported_capability"
+            ),
+            "[controller] stage=remote_action_validation_failed operation=artifact_index detail=unsupported_capability"
+        );
     }
 
     #[test]
-    fn bounded_log_token_drops_separators_so_credentials_cannot_be_pasted_in() {
+    fn log_allowlist_rejects_identifier_shaped_values_and_secrets() {
+        for sentinel in [
+            "AB12CD3",
+            "generation123",
+            "deviceAlice",
+            "sklive12345678",
+            "C:/Users/Alice",
+        ] {
+            assert_eq!(log_scope(sentinel), "unknown");
+            assert_eq!(log_stage(sentinel), "other");
+            assert_eq!(log_detail(sentinel), "other");
+            assert_eq!(log_remote_action_operation(sentinel), "other");
+        }
+        assert_eq!(log_stage("controlled_status"), "controlled_status");
+        assert_eq!(log_detail("pairing_code_invalid"), "pairing_code_invalid");
+        for stage in [
+            "task_submit_endpoint_received",
+            "task_submit_socket_written",
+            "task_submit_business_entered",
+            "task_submit_business_rejected",
+            "task_submit_context_validated",
+            "task_submit_payload_validated",
+            "task_submit_identity_validated",
+            "task_submit_capability_validated",
+            "task_submit_mapping_ready",
+            "task_submit_mapping_projected",
+            "task_submit_prepared",
+            "controlled_submission_admission_entered",
+            "task_model_source_received",
+        ] {
+            assert_eq!(log_stage(stage), stage);
+        }
+        for detail in ["forwarding_to_worker", "validating", "admitted"] {
+            assert_eq!(log_detail(detail), detail);
+        }
         assert_eq!(
-            bounded_log_token("code=AB12CD3 token=hunter2?x=1"),
-            "codeAB12CD3tokenhunter2x1"
+            log_port_error_detail(RemotePortError::new("task_workspace_required", false)),
+            "task_workspace_required"
         );
-        assert_eq!(bounded_log_token(&"a".repeat(400)).len(), 160);
+        for code in CONTROLLED_PORT_LOG_ERROR_CODES {
+            assert_eq!(
+                log_port_error_detail(RemotePortError::new(code, false)),
+                *code
+            );
+        }
+        assert_eq!(
+            log_port_error_detail(RemotePortError::new("internal_token_like_literal", false)),
+            "other"
+        );
+        assert_eq!(
+            log_remote_action_operation("artifact_index"),
+            "artifact_index"
+        );
+        assert_eq!(log_stage("lifecycle_checkpoint"), "lifecycle_checkpoint");
+        for detail in [
+            "runtime_started",
+            "refresh_requested",
+            "refresh_state_rotation_begin",
+            "refresh_registration_wait_done",
+            "refresh_failed",
+        ] {
+            assert_eq!(log_detail(detail), detail);
+        }
+    }
+
+    #[test]
+    fn real_remote_failure_projections_do_not_persist_any_sensitive_category() {
+        struct RestoreHome(Option<std::ffi::OsString>);
+        impl Drop for RestoreHome {
+            fn drop(&mut self) {
+                match self.0.take() {
+                    Some(value) => unsafe { std::env::set_var("PINVOU3_HOME", value) },
+                    None => unsafe { std::env::remove_var("PINVOU3_HOME") },
+                }
+            }
+        }
+        let _guard = crate::platform::paths::tests::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let directory = tempfile::tempdir().unwrap();
+        let _restore = RestoreHome(std::env::var_os("PINVOU3_HOME"));
+        unsafe { std::env::set_var("PINVOU3_HOME", directory.path()) };
+        let sentinels = [
+            "2222222",
+            "endpointSentinelA1",
+            "leaseSentinelB2",
+            "tokenSentinelC3-credential-000001",
+            "keySentinelD4-credential-00000001",
+            "198.51.100.77",
+            "deviceSentinelE5",
+            "promptSentinelF6",
+            "replySentinelG7",
+            "toolArgsSentinelH8",
+            "fileSentinelI9.txt",
+            "C:/private/sentinel/J0",
+            "contentSentinelK1",
+        ];
+        let raw = sentinels.join("|");
+        log_attachment_digest_omitted(&raw);
+        log_task_persist_failure(false, &raw);
+        log_task_persist_failure(true, &raw);
+        log_artifact_capture_failure(&raw);
+        let raw_path = std::path::Path::new(&raw);
+        let raw_error = std::io::Error::other(raw.clone());
+        log_attachment_cleanup_failure(raw_path, &raw_error);
+        log_remote_action_event("controller", &raw, &raw, &raw);
+        let written =
+            std::fs::read_to_string(directory.path().join("logs/remote-control.log")).unwrap();
+        for sentinel in sentinels {
+            assert!(!written.contains(sentinel));
+        }
+        for stage in [
+            "attachment_digest_missing",
+            "task_terminal_persist_failed",
+            "task_rejected_persist_failed",
+            "artifact_capture_failed",
+            "attachment_cleanup_failed",
+        ] {
+            assert!(written.contains(&format!("stage={stage}")));
+        }
     }
 
     /// Relay 会把发送方的 commit 原样回投（router 契约）：B 只吃 `sender_role == A`
