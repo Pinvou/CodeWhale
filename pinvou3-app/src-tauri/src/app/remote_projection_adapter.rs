@@ -148,7 +148,7 @@ fn projection_candidate(
             ProjectionPayload::Terminal {
                 entry: projection_entry(terminal.journal()),
                 status: terminal.status().as_str().to_owned(),
-                proof,
+                proof: Box::new(proof),
             }
         }
     };

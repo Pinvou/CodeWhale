@@ -111,6 +111,7 @@ struct CapabilityAdmissionGate {
 struct CapabilityAdmissionGateState {
     active_admissions: usize,
     refreshing: bool,
+    failed: bool,
 }
 
 /// A short-lived consistency token. It does not hold a mutex while the ledger
@@ -134,8 +135,11 @@ struct CapabilityRefreshGuard<'a> {
 impl CapabilityAdmissionGate {
     fn begin_admission(&self) -> Result<CapabilityAdmissionGuard<'_>> {
         let mut state = self.state.lock();
-        while state.refreshing {
+        while state.refreshing && !state.failed {
             self.changed.wait(&mut state);
+        }
+        if state.failed {
+            return Err(CapabilityError::new("capability_admission_corrupt"));
         }
         state.active_admissions = state
             .active_admissions
@@ -144,23 +148,31 @@ impl CapabilityAdmissionGate {
         Ok(CapabilityAdmissionGuard { gate: self })
     }
 
-    fn begin_refresh(&self) -> CapabilityRefreshGuard<'_> {
+    fn begin_refresh(&self) -> Result<CapabilityRefreshGuard<'_>> {
         let mut state = self.state.lock();
-        while state.refreshing || state.active_admissions != 0 {
+        while (state.refreshing || state.active_admissions != 0) && !state.failed {
             self.changed.wait(&mut state);
         }
+        if state.failed {
+            return Err(CapabilityError::new("capability_admission_corrupt"));
+        }
         state.refreshing = true;
-        CapabilityRefreshGuard { gate: self }
+        Ok(CapabilityRefreshGuard { gate: self })
     }
 }
 
 impl Drop for CapabilityAdmissionGuard<'_> {
     fn drop(&mut self) {
         let mut state = self.gate.state.lock();
-        state.active_admissions = state
-            .active_admissions
-            .checked_sub(1)
-            .expect("capability admission guard underflow");
+        let Some(remaining) = state.active_admissions.checked_sub(1) else {
+            // A broken ownership invariant cannot reopen the admission gate.
+            // Wake waiters so they fail closed instead of waiting indefinitely.
+            state.failed = true;
+            self.gate.changed.notify_all();
+            log::error!("capability admission guard underflow; gate failed closed");
+            return;
+        };
+        state.active_admissions = remaining;
         if state.active_admissions == 0 {
             self.gate.changed.notify_all();
         }
@@ -225,7 +237,7 @@ impl CapabilitySnapshotManager {
 
         // Snapshot publication is serialized with final ledger admission by a
         // consistency token rather than a mutex held across ledger persistence.
-        let _refresh = self.admission_gate.begin_refresh();
+        let _refresh = self.admission_gate.begin_refresh()?;
         let mut revision = self.revision.lock();
         *revision = revision
             .checked_add(1)
@@ -537,6 +549,40 @@ fn validate_display(value: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn admission_underflow_poison_rejects_both_admission_and_refresh() {
+        let gate = super::CapabilityAdmissionGate::default();
+        // An invalid guard models a broken ownership invariant, not an input
+        // reachable through the public pin API.
+        drop(super::CapabilityAdmissionGuard { gate: &gate });
+        assert!(gate.state.lock().failed);
+        assert_eq!(
+            gate.begin_admission().unwrap_err().code,
+            "capability_admission_corrupt"
+        );
+        assert_eq!(
+            gate.begin_refresh().err().unwrap().code,
+            "capability_admission_corrupt"
+        );
+        assert!(!gate.state.lock().refreshing);
+    }
+
+    #[test]
+    fn balanced_admission_release_preserves_refresh_and_never_poison_gates() {
+        let gate = super::CapabilityAdmissionGate::default();
+        let first = gate.begin_admission().unwrap();
+        let second = gate.begin_admission().unwrap();
+        assert_eq!(gate.state.lock().active_admissions, 2);
+        drop(first);
+        assert_eq!(gate.state.lock().active_admissions, 1);
+        drop(second);
+        assert_eq!(gate.state.lock().active_admissions, 0);
+        let refresh = gate.begin_refresh().unwrap();
+        assert!(gate.state.lock().refreshing);
+        drop(refresh);
+        assert!(!gate.state.lock().failed);
+        drop(gate.begin_admission().unwrap());
+    }
     use super::*;
 
     fn context(generation: &str) -> LeaseContext {

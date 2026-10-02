@@ -275,7 +275,8 @@ pub fn build_platform_key() -> String {
 }
 
 /// 拉 latest.json 与当前版本比较。网络失败返回 Err——启动静默检查由前端吞掉，
-/// 手动检查才展示错误。
+/// 手动检查才展示错误。失败提示是给用户的短文案，原始原因在此记入日志
+/// (开发期 stdout,打包构建进 app log),诊断轨迹走日志。
 pub async fn check_for_update() -> Result<UpdateInfo, String> {
     let _operation = UPDATE_OPERATION
         .try_lock()
@@ -285,8 +286,13 @@ pub async fn check_for_update() -> Result<UpdateInfo, String> {
     let client = update_client_builder(&manifest_url)?
         .timeout(Duration::from_secs(10))
         .build()
-        .map_err(|e| format!("HTTP client 构建失败: {e}"))?;
-    platform::check_for_update_info(&client, current, &manifest_url).await
+        .map_err(|e| {
+            log::warn!("[updater] update check failed: {e}");
+            format!("HTTP client 构建失败: {e}")
+        })?;
+    platform::check_for_update_info(&client, current, &manifest_url)
+        .await
+        .inspect_err(|e| log::warn!("[updater] update check failed: {e}"))
 }
 
 /// 下载更新包到 `~/.pinvou3/updates/`，流式写盘 + 校验，进度走
@@ -302,7 +308,9 @@ pub async fn download_update(
     // 必须在拿到 single-flight 后、发起请求前重置。下载实现不得在响应到达后再次
     // 清零，否则会让等待响应期间发生的取消被晚到响应覆盖。
     DOWNLOAD_CANCEL.store(false, Ordering::SeqCst);
-    platform::download_update_package(&info, app, &DOWNLOAD_CANCEL, DOWNLOAD_STALL_TIMEOUT).await
+    platform::download_update_package(&info, app, &DOWNLOAD_CANCEL, DOWNLOAD_STALL_TIMEOUT)
+        .await
+        .inspect_err(|e| log::warn!("[updater] download failed: {e}"))
 }
 
 /// 安装下载好的更新包。Linux 走 pkexec apt；Windows 启动 MSI/NSIS 安装器，成功启动后退出进程。
@@ -319,7 +327,11 @@ pub async fn install_update(
         platform::install_downloaded_update(deb_path, installer_path, info)
     })
     .await
-    .map_err(|e| format!("安装任务失败: {e}"))??;
+    .map_err(|e| {
+        log::warn!("[updater] install task failed: {e}");
+        format!("install task failed: {e}")
+    })?
+    .inspect_err(|e| log::warn!("[updater] install failed: {e}"))?;
     if exit_after_start {
         app.exit(0);
     }
@@ -345,7 +357,7 @@ pub async fn report_pending_update_result() -> Result<PendingUpdateReportResult,
     let client = update_client_builder(UPDATE_MANIFEST_URL)?
         .timeout(Duration::from_secs(10))
         .build()
-        .map_err(|e| format!("HTTP client 构建失败: {e}"))?;
+        .map_err(|e| format!("failed to build the HTTP client: {e}"))?;
     platform::report_pending_update_result_info(&client, env!("CARGO_PKG_VERSION")).await
 }
 
