@@ -11,7 +11,9 @@ use parking_lot::Mutex;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
-use super::limits::{MAX_FILE_NAME_CHARS, MAX_MIME_CHARS, MAX_TRANSFER_ID_CHARS, TransferLimits};
+use super::limits::{
+    MAX_FILE_NAME_CHARS, MAX_MIME_CHARS, MAX_TRANSFER_CHUNKS, MAX_TRANSFER_ID_CHARS, TransferLimits,
+};
 use crate::features::remote_control::controller::protocol::LeaseContext;
 
 /// Controller handles are namespaced so a Web handle can never be replayed
@@ -180,6 +182,13 @@ impl TransferMetadata {
         if self.total_bytes == 0 || self.total_bytes > limits.max_transfer_bytes {
             return Err(error("transfer_size_invalid"));
         }
+        // Narrowed chunk limits must not admit a file that cannot finish even
+        // when the sender uses the largest advertised chunks throughout.
+        if limits.chunk_bytes == 0
+            || self.total_bytes.div_ceil(limits.chunk_bytes as u64) > MAX_TRANSFER_CHUNKS as u64
+        {
+            return Err(error("transfer_chunk_budget"));
+        }
         if self.sha256.len() != 64 || !is_lower_hex(&self.sha256) {
             return Err(error("transfer_digest_invalid"));
         }
@@ -260,7 +269,9 @@ struct TransferState {
     metadata: TransferMetadata,
     received_bytes: u64,
     next_chunk: u64,
-    chunk_digests: HashMap<u64, String>,
+    // Accepted indices are contiguous: no map keys or per-digest allocations
+    // are needed. At most 4096 * 32 bytes of retry evidence per transfer.
+    chunk_digests: Vec<[u8; 32]>,
     hasher: Sha256,
     created_at_ms: u64,
     updated_at_ms: u64,
@@ -271,7 +282,6 @@ struct RegistryInner {
     transfers: HashMap<String, TransferState>,
     connection_bytes: HashMap<String, u64>,
     task_transfers: HashMap<String, usize>,
-    sequence: u64,
 }
 
 pub(crate) struct TransferRegistry {
@@ -306,6 +316,16 @@ impl TransferRegistry {
         metadata: TransferMetadata,
         now_b: u64,
     ) -> Result<(TransferHandle, TransferProgress)> {
+        self.begin_with_id_source(context, metadata, now_b, uuid::Uuid::new_v4)
+    }
+
+    fn begin_with_id_source(
+        &self,
+        context: TransferContext,
+        metadata: TransferMetadata,
+        now_b: u64,
+        mut next_id: impl FnMut() -> uuid::Uuid,
+    ) -> Result<(TransferHandle, TransferProgress)> {
         metadata.validate(&self.limits)?;
         let mut inner = self.inner.lock();
         if inner.transfers.len() >= self.limits.max_in_flight {
@@ -328,25 +348,24 @@ impl TransferRegistry {
         if task_count >= self.limits.max_transfers_per_task {
             return Err(error("transfer_task_capacity"));
         }
-        inner.sequence = inner
-            .sequence
-            .checked_add(1)
+        // A handle is a bearer capability, not a guessable process counter.
+        // Keep collision admission under the same lock, bounded and before
+        // any budget mutation, so an existing transfer can never be replaced.
+        let handle = (0..4)
+            .find_map(|_| {
+                let id = format!("{}{}", context.direction.prefix(), next_id());
+                (!inner.transfers.contains_key(&id)).then_some(TransferHandle {
+                    id,
+                    direction: context.direction,
+                })
+            })
             .ok_or_else(|| error("transfer_capacity"))?;
-        let handle = TransferHandle {
-            id: format!(
-                "{}{:08}-{}",
-                context.direction.prefix(),
-                inner.sequence,
-                inner.sequence
-            ),
-            direction: context.direction,
-        };
         let state = TransferState {
             context: context.clone(),
             metadata: metadata.clone(),
             received_bytes: 0,
             next_chunk: 0,
-            chunk_digests: HashMap::new(),
+            chunk_digests: Vec::new(),
             hasher: Sha256::new(),
             created_at_ms: now_b,
             updated_at_ms: now_b,
@@ -382,9 +401,12 @@ impl TransferRegistry {
         if state.context.direction != expected_direction || handle.direction != expected_direction {
             return Err(error("transfer_direction_mismatch"));
         }
-        let chunk_digest = hex_lower(&Sha256::digest(bytes));
         if chunk_index < state.next_chunk {
-            return match state.chunk_digests.get(&chunk_index) {
+            let chunk_digest: [u8; 32] = Sha256::digest(bytes).into();
+            return match usize::try_from(chunk_index)
+                .ok()
+                .and_then(|index| state.chunk_digests.get(index))
+            {
                 Some(existing) if existing == &chunk_digest => Ok(ChunkOutcome {
                     received_bytes: state.received_bytes,
                     next_chunk: state.next_chunk,
@@ -398,6 +420,12 @@ impl TransferRegistry {
         if chunk_index > state.next_chunk {
             return Err(error("transfer_chunk_out_of_order"));
         }
+        // Reject before hashing, allocating or changing progress. The caller
+        // owns terminal cleanup, as for other rejected chunks; retries of any
+        // accepted chunk remain verifiable even at the limit.
+        if state.chunk_digests.len() >= MAX_TRANSFER_CHUNKS {
+            return Err(error("transfer_chunk_budget"));
+        }
         let next_received = state
             .received_bytes
             .checked_add(bytes.len() as u64)
@@ -406,7 +434,7 @@ impl TransferRegistry {
             return Err(error("transfer_overrun"));
         }
         state.hasher.update(bytes);
-        state.chunk_digests.insert(chunk_index, chunk_digest);
+        state.chunk_digests.push(Sha256::digest(bytes).into());
         state.received_bytes = next_received;
         state.next_chunk = chunk_index + 1;
         state.updated_at_ms = now_b;
@@ -745,6 +773,113 @@ mod tests {
     }
 
     #[test]
+    fn handle_collision_retries_are_bounded_and_preserve_existing_state_and_budgets() {
+        let registry = TransferRegistry::default();
+        let data = [7u8; 8];
+        let context = TransferContext::new(
+            &context("generation-0001"),
+            "session-0001",
+            "task-0001",
+            TransferDirection::Upload,
+        )
+        .unwrap();
+        let collision_id = uuid::Uuid::from_u128(1);
+        let fresh_id = uuid::Uuid::from_u128(2);
+        let (existing, _) = registry
+            .begin_with_id_source(context.clone(), metadata("notes.txt", &data), 1_000, || {
+                collision_id
+            })
+            .unwrap();
+        registry
+            .accept_chunk(&existing, TransferDirection::Upload, 0, &[7], 1_100)
+            .unwrap();
+        let snapshot = || {
+            let inner = registry.inner.lock();
+            let state = inner.transfers.get(existing.id()).unwrap();
+            (
+                state.context.clone(),
+                state.metadata.clone(),
+                state.received_bytes,
+                state.next_chunk,
+                state.chunk_digests.clone(),
+                state.hasher.clone().finalize(),
+                state.created_at_ms,
+                state.updated_at_ms,
+            )
+        };
+        let before = snapshot();
+        let (connection_budget, task_budget) = {
+            let inner = registry.inner.lock();
+            (inner.connection_bytes.clone(), inner.task_transfers.clone())
+        };
+        let mut attempts = 0;
+        assert_eq!(
+            registry
+                .begin_with_id_source(context.clone(), metadata("other.txt", &data), 2_000, || {
+                    attempts += 1;
+                    collision_id
+                })
+                .unwrap_err()
+                .code,
+            "transfer_capacity"
+        );
+        assert_eq!(attempts, 4);
+        assert_eq!(snapshot(), before);
+        assert_eq!(registry.active_count(), 1);
+        {
+            let inner = registry.inner.lock();
+            assert_eq!(inner.connection_bytes, connection_budget);
+            assert_eq!(inner.task_transfers, task_budget);
+        }
+        attempts = 0;
+        let (second, _) = registry
+            .begin_with_id_source(context, metadata("other.txt", &data), 2_100, || {
+                attempts += 1;
+                if attempts < 4 { collision_id } else { fresh_id }
+            })
+            .unwrap();
+        assert_eq!(attempts, 4);
+        assert_ne!(existing.id(), second.id());
+        assert_eq!(snapshot(), before);
+        assert_eq!(registry.active_count(), 2);
+        assert_eq!(registry.connection_bytes("connection-0001"), 16);
+        assert_eq!(
+            registry.inner.lock().task_transfers.get("task-0001"),
+            Some(&2)
+        );
+        assert!(registry.abort(&existing));
+        assert!(registry.abort(&second));
+        assert_eq!(registry.connection_bytes("connection-0001"), 0);
+    }
+
+    #[test]
+    fn handles_use_random_v4_ids_across_registry_restarts_and_directions() {
+        let mut seen = std::collections::HashSet::new();
+        let data = [1u8; 8];
+        for _ in 0..32 {
+            let registry = TransferRegistry::default();
+            for direction in [TransferDirection::Upload, TransferDirection::Download] {
+                let context = TransferContext::new(
+                    &context("generation-0001"),
+                    "session-0001",
+                    "task-0001",
+                    direction,
+                )
+                .unwrap();
+                let (handle, _) = registry
+                    .begin(context, metadata("notes.txt", &data), 1_000)
+                    .unwrap();
+                let id = handle.id().strip_prefix(direction.prefix()).unwrap();
+                let random_id = uuid::Uuid::parse_str(id).unwrap();
+                assert_eq!(random_id.get_version(), Some(uuid::Version::Random));
+                assert_eq!(random_id.get_variant(), uuid::Variant::RFC4122);
+                assert!(seen.insert(handle.id().to_owned()));
+                assert!(registry.abort(&handle));
+            }
+        }
+    }
+
+    #[test]
     fn handles_are_directional_and_namespaced() {
         let registry = TransferRegistry::default();
         let data = vec![7u8; 512];
@@ -771,6 +906,170 @@ mod tests {
                 .code,
             "transfer_unknown"
         );
+    }
+
+    #[test]
+    fn narrowed_chunks_reject_impossible_transfers_before_reserving_resources() {
+        let registry = TransferRegistry::new(TransferLimits {
+            chunk_bytes: 1,
+            ..TransferLimits::default()
+        })
+        .unwrap();
+        let data = vec![7u8; MAX_TRANSFER_CHUNKS + 1];
+        let context = TransferContext::new(
+            &context("generation-0001"),
+            "session-0001",
+            "task-0001",
+            TransferDirection::Upload,
+        )
+        .unwrap();
+        assert_eq!(
+            registry
+                .begin(context, metadata("notes.txt", &data), 1_000)
+                .unwrap_err()
+                .code,
+            "transfer_chunk_budget"
+        );
+        assert_eq!(registry.active_count(), 0);
+        assert_eq!(registry.connection_bytes("connection-0001"), 0);
+        assert!(registry.inner.lock().task_transfers.is_empty());
+        let handle = upload(
+            &registry,
+            "task-0001",
+            "session-0001",
+            &data[..MAX_TRANSFER_CHUNKS],
+            1_100,
+        );
+        assert!(registry.abort(&handle));
+    }
+
+    #[test]
+    fn one_byte_chunks_have_bounded_retry_evidence_and_rejection_preserves_state() {
+        let registry = TransferRegistry::default();
+        let data = vec![7u8; MAX_TRANSFER_CHUNKS + 1];
+        let handle = upload(&registry, "task-0001", "session-0001", &data, 1_000);
+        for index in 0..MAX_TRANSFER_CHUNKS {
+            registry
+                .accept_chunk(
+                    &handle,
+                    TransferDirection::Upload,
+                    index as u64,
+                    &[7],
+                    1_100,
+                )
+                .unwrap();
+        }
+        let progress = registry.progress(&handle).unwrap();
+        let digest_before = {
+            let inner = registry.inner.lock();
+            let state = inner.transfers.get(handle.id()).unwrap();
+            assert_eq!(state.chunk_digests.len(), MAX_TRANSFER_CHUNKS);
+            assert!(state.chunk_digests.capacity() <= MAX_TRANSFER_CHUNKS);
+            assert_eq!(std::mem::size_of_val(&state.chunk_digests[0]), 32);
+            state.hasher.clone().finalize()
+        };
+        assert_eq!(
+            registry
+                .accept_chunk(
+                    &handle,
+                    TransferDirection::Upload,
+                    MAX_TRANSFER_CHUNKS as u64,
+                    &[7],
+                    1_900,
+                )
+                .unwrap_err()
+                .code,
+            "transfer_chunk_budget"
+        );
+        assert_eq!(registry.progress(&handle).unwrap(), progress);
+        assert_eq!(
+            registry.connection_bytes("connection-0001"),
+            data.len() as u64
+        );
+        {
+            let inner = registry.inner.lock();
+            let state = inner.transfers.get(handle.id()).unwrap();
+            assert_eq!(state.chunk_digests.len(), MAX_TRANSFER_CHUNKS);
+            assert_eq!(state.hasher.clone().finalize(), digest_before);
+            assert_eq!(state.updated_at_ms, 1_100);
+        }
+        // The whole accepted prefix stays verifiable at capacity, not just
+        // the most recent retry, and retries never extend the TTL.
+        for index in [0, (MAX_TRANSFER_CHUNKS - 1) as u64] {
+            assert!(
+                registry
+                    .accept_chunk(&handle, TransferDirection::Upload, index, &[7], 2_000)
+                    .unwrap()
+                    .duplicate
+            );
+            assert_eq!(
+                registry
+                    .accept_chunk(&handle, TransferDirection::Upload, index, &[8], 2_100)
+                    .unwrap_err()
+                    .code,
+                "transfer_chunk_conflict"
+            );
+        }
+        assert!(registry.abort(&handle));
+        assert_eq!(registry.active_count(), 0);
+        assert_eq!(registry.connection_bytes("connection-0001"), 0);
+        assert!(registry.inner.lock().task_transfers.is_empty());
+    }
+
+    #[test]
+    fn final_chunk_at_the_chunk_budget_completes_and_releases_resources() {
+        let registry = TransferRegistry::default();
+        let data = vec![3u8; MAX_TRANSFER_CHUNKS];
+        let handle = upload(&registry, "task-0001", "session-0001", &data, 1_000);
+        for index in 0..MAX_TRANSFER_CHUNKS {
+            let outcome = registry
+                .accept_chunk(
+                    &handle,
+                    TransferDirection::Upload,
+                    index as u64,
+                    &[3],
+                    1_100,
+                )
+                .unwrap();
+            assert_eq!(
+                outcome.completed.is_some(),
+                index + 1 == MAX_TRANSFER_CHUNKS
+            );
+        }
+        assert_eq!(registry.active_count(), 0);
+        assert_eq!(registry.connection_bytes("connection-0001"), 0);
+        assert!(registry.inner.lock().task_transfers.is_empty());
+    }
+
+    #[test]
+    fn largest_file_completes_with_advertised_chunk_size_in_both_directions() {
+        let registry = TransferRegistry::default();
+        let data = vec![5u8; registry.limits().max_transfer_bytes as usize];
+        let chunk_bytes = registry.limits().chunk_bytes;
+        assert!(data.len().div_ceil(chunk_bytes) <= MAX_TRANSFER_CHUNKS);
+        for direction in [TransferDirection::Upload, TransferDirection::Download] {
+            let context = TransferContext::new(
+                &context("generation-0001"),
+                "session-0001",
+                "task-0001",
+                direction,
+            )
+            .unwrap();
+            let (handle, _) = registry
+                .begin(context, metadata("large.bin", &data), 1_000)
+                .unwrap();
+            for (index, chunk) in data.chunks(chunk_bytes).enumerate() {
+                let outcome = registry
+                    .accept_chunk(&handle, direction, index as u64, chunk, 1_100)
+                    .unwrap();
+                if let Some(completed) = outcome.completed {
+                    assert_eq!(completed.bytes, data.len() as u64);
+                    assert_eq!(completed.sha256, metadata("large.bin", &data).sha256);
+                }
+            }
+            assert_eq!(registry.active_count(), 0);
+            assert_eq!(registry.connection_bytes("connection-0001"), 0);
+        }
     }
 
     #[test]
