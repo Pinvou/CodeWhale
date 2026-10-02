@@ -447,8 +447,8 @@ pub(crate) struct ControllingLaneSinks<'a> {
     pub(crate) on_liveness: &'a mut (dyn FnMut(Value) -> bool + Send),
 }
 
-/// 握手完成后的通道保活与业务帧派发：断线投影为 reconnecting 并清空业务通道
-/// （恢复与 liveness 属 E2E-06），加密业务帧解密后按 payload_kind 派发到会话/
+/// 握手完成后的通道保活与业务帧派发：首次断线冻结认证存活截止时间并挂起
+/// 业务通道，恢复期间绝不延长预算；加密业务帧解密后按 payload_kind 派发到会话/
 /// 任务状态域；未知帧、旧 lease/generation 帧与重放帧一律丢弃，绝不转发到
 /// legacy WebUI 事件流。
 pub(crate) async fn serve_controlling_lane(
