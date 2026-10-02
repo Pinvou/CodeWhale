@@ -362,6 +362,8 @@ impl ControllerResumeGate {
     }
 
     fn deadline_is_current(&self, now_b: u64, watchdog_deadline_b: Option<u64>) -> bool {
+        // The first disconnect freezes the local authenticated-evidence cutoff.
+        // Relay's wire deadline is an identity, never a local clock bound.
         self.frozen_deadline_b
             .is_some_and(|deadline| now_b < deadline)
             && watchdog_deadline_b.is_none_or(|deadline| now_b < deadline)
@@ -723,6 +725,33 @@ mod tests {
             "controller_resume_phase_invalid"
         );
         assert_eq!(expired.phase(), ResumePhase::Terminated);
+    }
+
+    #[test]
+    fn a_later_watchdog_deadline_cannot_invalidate_or_extend_the_resume_budget() {
+        let mut gate = ControllerResumeGate::new(
+            ControllerRole::ControllerA,
+            lease(),
+            [5; 32],
+            [6; 32],
+            30_000,
+        );
+
+        // The last valid local evidence freezes the budget at disconnect.
+        // Its cutoff is independent of the opaque Relay wire identity above.
+        gate.disconnect(19_000, Some(48_000)).unwrap();
+        assert_eq!(gate.phase(), ResumePhase::Disconnected);
+        assert_eq!(gate.frozen_deadline_b(), Some(48_000));
+
+        // A later proof cannot shorten a live budget or extend its boundary.
+        gate.prepare(30_000, Some(78_000)).unwrap();
+        assert_eq!(
+            gate.accept_provisional("activation-0001", 48_000, Some(78_000))
+                .unwrap_err()
+                .code,
+            "controller_resume_phase_invalid"
+        );
+        assert_eq!(gate.phase(), ResumePhase::Terminated);
     }
 
     #[test]

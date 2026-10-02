@@ -208,9 +208,8 @@ pub(super) fn append_web_attachment_upload_chunk(
         // an insecure origin where Web Crypto is unavailable — exactly the
         // remote scenario the digest protects. Surface the downgrade in the
         // desktop log instead of silently skipping verification.
-        log::warn!(
-            "[remote_control] web attachment upload {} committed without an integrity digest (older WebUI or Web Crypto unavailable)",
-            upload.file_name
+        crate::features::remote_control::controller::relay_runtime::log_attachment_digest_omitted(
+            &upload.file_name,
         );
     }
     // get_mut validated this under the same borrow just above; still return an
