@@ -254,8 +254,9 @@ impl SnapshotRepo {
         // The safety classifier resolves the workspace again (and HOME, twice)
         // with plain syscalls — an unbounded window between the probe that
         // just succeeded and git, on the very mount the probe bounds. Run
-        // the whole check under the same bound so the open path degrades
-        // within one probe budget instead of parking there.
+        // the whole check under the same bound so this leg, like every leg
+        // of the bounded open path, degrades within its own budget instead
+        // of parking there.
         let reason = snapshot_safety_reason_bounded(
             &work_tree,
             crate::config::effective_home_dir().as_deref(),
@@ -1167,14 +1168,22 @@ fn clear_stale_lock_in(lock_path: &Path, stale_age: Duration, now: SystemTime) -
     }
 }
 
-/// Sweep stale ref-update locks (`refs/heads/**.lock`, `packed-refs.lock`).
-/// `update-ref HEAD` at commit time and `pack-refs` take them; a git killed
-/// mid-update leaves one behind and, like every git lockfile, nothing but
-/// this sweep ages it out — every later snapshot would then fail at the ref
-/// update with the loss surfacing nowhere. Returns how many stale locks
-/// were removed.
+/// Sweep stale ref-update locks (`HEAD.lock`, `refs/heads/**.lock`,
+/// `packed-refs.lock`). `update-ref HEAD` at commit time takes the HEAD lock
+/// and the resolved branch's lock, and `pack-refs` takes `packed-refs.lock`;
+/// a git killed mid-update can leave any one of them behind (the locks are
+/// taken one after another, so a kill between them leaves a lone file) and,
+/// like every git lockfile, nothing but this sweep ages it out — every later
+/// snapshot would then fail at the ref update with the loss surfacing
+/// nowhere. `HEAD.lock` needs its own entry here because a leftover lock
+/// does not make the repo unready, so the init-path sweep never sees it on
+/// an already-initialized side repo. Returns how many stale locks were
+/// removed.
 fn clear_stale_ref_locks(git_dir: &Path, stale_age: Duration) -> io::Result<usize> {
     let mut swept = 0;
+    if clear_stale_lock(&git_dir.join("HEAD.lock"), stale_age)? {
+        swept += 1;
+    }
     if clear_stale_lock(&git_dir.join("packed-refs.lock"), stale_age)? {
         swept += 1;
     }
@@ -2730,11 +2739,12 @@ mod tests {
         let (repo, _home) = make_repo(tmp.path());
         let workspace = repo.work_tree().to_path_buf();
 
-        // `update-ref HEAD` at commit time takes `refs/heads/<branch>.lock`;
-        // a git killed mid-update leaves it behind and every later snapshot
-        // then fails at the ref update, with nothing but this sweep to age
-        // it out. Exactly the stale lock goes, like index.lock; a fresh one
-        // may belong to a live git and must survive.
+        // `update-ref HEAD` at commit time takes `.git/HEAD.lock` and the
+        // resolved branch's `refs/heads/<branch>.lock`; a git killed mid-update
+        // leaves one or both behind and every later snapshot then fails at the
+        // ref update, with nothing but this sweep to age them out. Exactly the
+        // stale locks go, like index.lock; a fresh one may belong to a live
+        // git and must survive.
         let refs_heads = repo.git_dir().join("refs").join("heads");
         std::fs::create_dir_all(&refs_heads).unwrap();
         let stale = refs_heads.join("main.lock");
@@ -2742,7 +2752,9 @@ mod tests {
         let nested = refs_heads.join("feature").join("topic.lock");
         std::fs::create_dir_all(nested.parent().unwrap()).unwrap();
         std::fs::write(&nested, b"stale").unwrap();
-        for lock in [&stale, &nested] {
+        let stale_head = repo.git_dir().join("HEAD.lock");
+        std::fs::write(&stale_head, b"stale").unwrap();
+        for lock in [&stale, &nested, &stale_head] {
             let old_time = SystemTime::now() - STALE_INDEX_LOCK_AGE - Duration::from_secs(60);
             let file = File::options().write(true).open(lock).unwrap();
             file.set_times(FileTimes::new().set_modified(old_time))
@@ -2756,10 +2768,25 @@ mod tests {
         assert!(!stale.exists(), "stale ref lock should be removed");
         assert!(!nested.exists(), "stale nested ref lock should be removed");
         assert!(
+            !stale_head.exists(),
+            "stale HEAD.lock should be removed: update-ref HEAD takes it, and a \
+             leftover one never makes the side repo unready"
+        );
+        assert!(
             fresh.exists(),
             "a fresh ref lock may belong to a live git and must be kept"
         );
         let _ = std::fs::remove_file(&fresh);
+
+        // A fresh HEAD.lock follows the same keep rule as every other lock.
+        let fresh_head = repo.git_dir().join("HEAD.lock");
+        std::fs::write(&fresh_head, b"fresh").unwrap();
+        SnapshotRepo::open_or_init(&workspace).unwrap();
+        assert!(
+            fresh_head.exists(),
+            "a fresh HEAD.lock may belong to a live git and must be kept"
+        );
+        let _ = std::fs::remove_file(&fresh_head);
     }
 
     #[test]
