@@ -347,8 +347,7 @@ codewhale-tui mcp tools codewhale
   `read_timeout`。`read_timeout` 约束快速请求（`resources/read`、发现流程等）的响应等待；
   `tools/call` 的内部读等待会自动放宽到至少其 `execute_timeout`。
   对 stdio 服务器，该预算按阶段生效（发送、读取各计一次）：几乎耗尽预算才读完输入的服务器
-  可能让总耗时接近 `execute_timeout` 的两倍。发送腿本身没有超时约束（已披露的债务）：不再
-  读取 stdin 的 stdio 服务器可以让写入阻塞超过任何预算。HTTP 服务器则由单个总超时
+  可能让总耗时接近 `execute_timeout` 的两倍。HTTP 服务器则由单个总超时
   `max(read_timeout, execute_timeout)` 约束整个交换。
 - `disabled`（布尔值，可选）
 - `enabled`（布尔值，可选，默认 `true`）
@@ -363,6 +362,11 @@ codewhale-tui mcp tools codewhale
 - `scopes`（数组，可选）：`mcp login` 的默认 OAuth 作用域。
 - `oauth.client_id`（字符串，可选）：预先注册的 OAuth 客户端 ID。
 - `oauth_resource`（字符串，可选）：附加到授权 URL 的资源参数。
+
+无头运行通过引擎侧的 stdio 代理访问 stdio 服务器，不使用这些设置；代理使用固定预算
+（握手 30 秒、请求 120 秒、工具调用 1800 秒）。其发送腿是持有连接锁的阻塞写入，刻意
+不做超时约束（已披露的债务，见 `codewhale-mcp` 写入点处的说明）：不再读取 stdin 的
+stdio 服务器可以让该写入阻塞超过任何预算。
 
 ## 安全说明
 

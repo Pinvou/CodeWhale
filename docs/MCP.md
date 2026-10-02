@@ -444,9 +444,7 @@ Per-server settings:
   a `tools/call` wait is automatically widened to at least its `execute_timeout`.
   For stdio servers the budget applies per leg (send, then read): a server that
   drains its input barely within the budget can push the total toward twice
-  `execute_timeout`. The send leg itself is not deadline-bounded (disclosed
-  debt): a stdio server that stops draining stdin can park the write past
-  every budget. An HTTP server is bounded by a single total timeout of
+  `execute_timeout`. An HTTP server is bounded by a single total timeout of
   `max(read_timeout, execute_timeout)` for the whole exchange.
 - `disabled` (bool, optional)
 - `enabled` (bool, optional, default `true`)
@@ -461,6 +459,13 @@ Per-server settings:
 - `scopes` (array, optional): default OAuth scopes for `mcp login`.
 - `oauth.client_id` (string, optional): pre-registered OAuth client ID.
 - `oauth_resource` (string, optional): resource parameter appended to the authorization URL.
+
+Headless runs reach stdio servers through the engine-side stdio proxy instead
+of these settings; it uses fixed budgets (30s handshake, 120s request, 1800s
+tool call). Its send leg is a blocking write under the connection lock and is
+deliberately not deadline-bounded (disclosed debt, noted at the write site in
+`codewhale-mcp`): a server that stops draining stdin can park that write past
+every budget.
 
 ## Safety Notes
 
