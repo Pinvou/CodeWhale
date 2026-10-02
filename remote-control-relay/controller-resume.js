@@ -134,6 +134,7 @@ export class ControllerResumeHooks {
 
     try {
       if (message.type === "controller_resume_prepare") {
+        state.resumeStartedAt ??= timestamp;
         return this.#prepare({ message, socketIdentity, role, lease, state });
       }
       if (message.type === "encrypted_resume_confirm") {
@@ -432,6 +433,9 @@ export class ControllerResumeHooks {
           tokenA: state.candidate.tokenA,
           tokenB: state.candidate.tokenB,
           resumeDeadlineMs: String(resumeDeadline),
+          latencyMs: state.resumeStartedAt === null
+            ? undefined
+            : Math.max(0, now(this.#clock) - state.resumeStartedAt),
         });
         zeroCandidate(state);
         // Retire all old per-attempt request IDs/ACKs, not just the tokens.
@@ -468,6 +472,7 @@ export class ControllerResumeHooks {
       activationAck: null,
       postActivationLiveness: null,
       candidate: null,
+      resumeStartedAt: null,
     });
     return Object.freeze({ deliveries: Object.freeze([]) });
   }

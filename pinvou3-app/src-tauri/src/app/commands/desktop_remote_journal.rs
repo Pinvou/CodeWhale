@@ -1,8 +1,16 @@
 //! B-owned authoritative remote journal and the A authenticated ingress adapter.
 
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
+use parking_lot::Mutex;
+
+use crate::features::behavior_telemetry::{
+    RemoteControlEvent, RemoteModelSource, RemoteOutcome, RemoteReason, RemoteStage,
+    track_remote_control_with_event_id,
+};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 use crate::app::commands::desktop_remote_task::DesktopRemoteTaskRuntime;
 use crate::features::remote_control::controller::controlled::ControlledDeviceManager;
@@ -37,11 +45,138 @@ pub(crate) struct DesktopRemoteJournalRuntime {
 pub(crate) struct DesktopTaskEventSink {
     app: tauri::AppHandle,
     journal: Arc<RemoteJournal>,
+    telemetry_seen: Mutex<TaskTelemetryDedupe>,
+}
+
+const TASK_TELEMETRY_DEDUPE_CAPACITY: usize = 8192;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TaskTelemetryLifecycle {
+    Admitted,
+    Terminal,
+}
+
+impl TaskTelemetryLifecycle {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Admitted => "admitted",
+            Self::Terminal => "terminal",
+        }
+    }
+}
+
+#[derive(Default)]
+struct TaskTelemetryState {
+    admitted: bool,
+    terminal: bool,
+}
+
+#[derive(Default)]
+struct TaskTelemetryDedupe {
+    tasks: HashMap<String, TaskTelemetryState>,
+    insertion_order: VecDeque<String>,
+}
+
+impl TaskTelemetryDedupe {
+    fn decide(&mut self, event: &RemoteTaskEvent) -> Option<String> {
+        let lifecycle = match event.status.as_str() {
+            "admitted" => TaskTelemetryLifecycle::Admitted,
+            "succeeded" | "failed" | "cancelled" | "interrupted" => {
+                TaskTelemetryLifecycle::Terminal
+            }
+            _ => return None,
+        };
+        if !self.tasks.contains_key(&event.task_id) {
+            while self.tasks.len() >= TASK_TELEMETRY_DEDUPE_CAPACITY {
+                let Some(oldest) = self.insertion_order.pop_front() else {
+                    break;
+                };
+                self.tasks.remove(&oldest);
+            }
+            self.insertion_order.push_back(event.task_id.clone());
+            self.tasks
+                .insert(event.task_id.clone(), TaskTelemetryState::default());
+        }
+        let state = self
+            .tasks
+            .get_mut(&event.task_id)
+            .expect("task telemetry state inserted");
+        let first = match lifecycle {
+            TaskTelemetryLifecycle::Admitted if !state.admitted && !state.terminal => {
+                state.admitted = true;
+                true
+            }
+            TaskTelemetryLifecycle::Terminal if !state.terminal => {
+                state.terminal = true;
+                true
+            }
+            _ => false,
+        };
+        first.then(|| stable_task_telemetry_event_id(&event.task_id, lifecycle))
+    }
+}
+
+fn stable_task_telemetry_event_id(task_id: &str, lifecycle: TaskTelemetryLifecycle) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"pinvou-remote-task-telemetry-v1\0");
+    digest.update(lifecycle.as_str().as_bytes());
+    digest.update(b"\0");
+    digest.update(task_id.as_bytes());
+    format!(
+        "beh_remote_{}",
+        crate::platform::encoding::hex_lower(&digest.finalize())
+    )
 }
 
 impl DesktopTaskEventSink {
     pub(crate) fn new(app: tauri::AppHandle, journal: Arc<RemoteJournal>) -> Self {
-        Self { app, journal }
+        Self {
+            app,
+            journal,
+            telemetry_seen: Mutex::new(TaskTelemetryDedupe::default()),
+        }
+    }
+
+    fn track_task_once(&self, event: &RemoteTaskEvent) {
+        let (stage, outcome, reason) = match event.status.as_str() {
+            "admitted" => (
+                RemoteStage::TaskAdmit,
+                RemoteOutcome::Ok,
+                RemoteReason::None,
+            ),
+            "succeeded" => (
+                RemoteStage::TaskTerminal,
+                RemoteOutcome::Ok,
+                RemoteReason::None,
+            ),
+            "failed" => (
+                RemoteStage::TaskTerminal,
+                RemoteOutcome::InternalError,
+                RemoteReason::Unknown,
+            ),
+            "cancelled" | "interrupted" => (
+                RemoteStage::TaskTerminal,
+                RemoteOutcome::Rejected,
+                RemoteReason::Unknown,
+            ),
+            _ => return,
+        };
+        let Some(event_id) = self.telemetry_seen.lock().decide(event) else {
+            return;
+        };
+        let source = match event.model_source {
+            crate::features::remote_control::controller::task::RemoteTaskModelSource::ControlledDevice =>
+                RemoteModelSource::Controlled,
+            crate::features::remote_control::controller::task::RemoteTaskModelSource::ControllerTemporary =>
+                RemoteModelSource::ControllerTemporary,
+        };
+        track_remote_control_with_event_id(
+            &self.app,
+            RemoteControlEvent::new(stage, outcome)
+                .reason(reason)
+                .model_source(source),
+            event_id,
+        );
     }
 }
 
@@ -61,6 +196,9 @@ pub(crate) fn publish_authoritative_task_status(app: &tauri::AppHandle, event: &
         );
         return;
     };
+    if event.generation != lease.remote_control_generation {
+        return;
+    }
     let runtime = app.state::<Arc<DesktopRemoteTaskRuntime>>();
     let Some(session_ref) = runtime.service().remote_ref_for(&event.session_id) else {
         crate::features::remote_control::controller::relay_runtime::log_controlled_event(
@@ -84,6 +222,17 @@ pub(crate) fn publish_authoritative_task_status(app: &tauri::AppHandle, event: &
         );
         return;
     };
+    if runtime
+        .service()
+        .status(&event.task_id)
+        .map(|record| {
+            record.session_id != event.session_id
+                || record.lease.remote_control_generation != event.generation
+        })
+        .unwrap_or(true)
+    {
+        return;
+    }
     let Some(object) = payload.as_object_mut() else {
         return;
     };
@@ -126,19 +275,22 @@ pub(crate) fn publish_authoritative_task_status(app: &tauri::AppHandle, event: &
 impl RemoteTaskEventSink for DesktopTaskEventSink {
     fn publish_task_event(&self, event: &RemoteTaskEvent) {
         use tauri::Emitter as _;
-        let _ = self.app.emit(TASK_STATUS_EVENT, event);
-        publish_authoritative_task_status(&self.app, event);
-        // Only the current authenticated B session/generation can allocate a
-        // visible journal sequence. Ordinary local sessions remain local.
         use tauri::Manager as _;
-        let Some((lease, _)) = self
+        let Some(lease) = self
             .app
             .state::<ControlledDeviceManager>()
-            .live_runtime_context()
+            .with_local_cancel_lease(Clone::clone)
             .ok()
         else {
             return;
         };
+        if event.generation != lease.remote_control_generation {
+            return;
+        }
+        let _ = self.app.emit(TASK_STATUS_EVENT, event);
+        publish_authoritative_task_status(&self.app, event);
+        // Only the current authenticated B session/generation can allocate a
+        // visible journal sequence. Ordinary local sessions remain local.
         let runtime = self.app.state::<Arc<DesktopRemoteTaskRuntime>>();
         let Some(remote_ref) = runtime.service().remote_ref_for(&event.session_id) else {
             return;
@@ -157,6 +309,10 @@ impl RemoteTaskEventSink for DesktopTaskEventSink {
         if record.lease.remote_control_generation != lease.remote_control_generation {
             return;
         }
+        // Decide telemetry exactly once per published lifecycle transition.
+        // A bounded local cache suppresses hot replays; its stable anonymous
+        // event ID keeps evicted replays idempotent in the existing pipeline.
+        self.track_task_once(event);
         if self
             .journal
             .bind_generation(&lease.remote_control_generation)
@@ -419,6 +575,28 @@ fn display_kind(event: &JournalEvent) -> Result<DisplayKind, String> {
     }
 }
 
+const REMOTE_TOOL_DISPLAY_SCHEMA: &str = "remote_tool_display/v1";
+
+fn remote_tool_display_body(event: &JournalEvent) -> Option<String> {
+    if event.kind != "tool" {
+        return None;
+    }
+    let tool_id = event.payload.get("tool_id").and_then(Value::as_str)?;
+    let tool_name = event.payload.get("tool_name").and_then(Value::as_str)?;
+    let tool_state = event.payload.get("tool_state").and_then(Value::as_str)?;
+    let output = event.payload.get("text").and_then(Value::as_str);
+    Some(
+        serde_json::json!({
+            "schema": REMOTE_TOOL_DISPLAY_SCHEMA,
+            "toolId": tool_id,
+            "toolName": tool_name,
+            "toolState": tool_state,
+            "output": output,
+        })
+        .to_string(),
+    )
+}
+
 fn display_event(event: &JournalEvent) -> Result<JournalDisplay, String> {
     event
         .validate_exportable()
@@ -428,6 +606,11 @@ fn display_event(event: &JournalEvent) -> Result<JournalDisplay, String> {
             return Err("remote_projection_terminal_status_mismatch".into());
         }
         Some(status.to_owned())
+    } else if event.kind == "tool" {
+        // A malformed or legacy tool event must not fall through to the
+        // generic JSON/text body. Without the complete display identity the
+        // UI cannot safely join start/end events into a native tool card.
+        remote_tool_display_body(event)
     } else {
         event
             .payload
@@ -562,6 +745,48 @@ impl ProxyEventVerificationPort for SnapshotFrameProof<'_, '_> {
 impl crate::features::remote_control::controller::controlling_service::ControllingJournalSink
     for DesktopControllerJournalSink
 {
+    fn publish_action_result(&self, lease: &LeaseContext, payload: &Value) -> Result<(), String> {
+        use tauri::Manager as _;
+        let manager = self.app.state::<
+            crate::features::remote_control::controller::controlling::ControllingDeviceManager,
+        >();
+        let lane = self.app.state::<
+            crate::features::remote_control::controller::encrypted_lane::ControllingLaneState,
+        >();
+        let store = self.app.state::<SessionStore>();
+        let actions = self
+            .app
+            .state::<Arc<super::desktop_remote_action::DesktopRemoteActionState>>();
+        let request_id = payload
+            .get("request_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "remote_action_result_invalid".to_owned())?;
+        let (local_session_id, remote_ref, expected_live) = actions
+            .pending_binding(request_id)
+            .ok_or_else(|| "remote_action_unknown".to_owned())?;
+        let identity = manager
+            .authenticated_remote_proxy_identity()
+            .map_err(|_| "remote_action_binding_stale".to_owned())?;
+        if &identity.0 != lease
+            || !super::desktop_remote_task::lease_matches_remote_binding(lease, &expected_live)
+            || identity.1 != expected_live.peer_id
+            || identity.2 != expected_live.resume_boundary_id
+        {
+            return Err("remote_action_binding_stale".to_owned());
+        }
+        manager.with_current_authenticated_remote_proxy_identity(&lane, &identity, || {
+            let current_live = store
+                .remote_dispatch_live_context(&local_session_id, &remote_ref)
+                .map_err(|_| "remote_action_binding_stale".to_owned())?;
+            store
+                .require_live_remote_mutation(&local_session_id, &remote_ref, &current_live)
+                .map_err(|_| "remote_action_binding_stale".to_owned())?;
+            if !actions.settle_authenticated(lease, &current_live, payload) {
+                return Err("remote_action_result_mismatch".to_owned());
+            }
+            Ok(())
+        })
+    }
     fn publish_capability(
         &self,
         projection: &crate::features::remote_control::controller::controlling_session::ControllingSessionProjection,
@@ -754,6 +979,155 @@ mod tests {
 
     fn runtime() -> Arc<DesktopRemoteJournalRuntime> {
         DesktopRemoteJournalRuntime::journal_only("epoch-1")
+    }
+
+    #[test]
+    fn tool_projection_preserves_only_the_safe_display_shape() {
+        let event = JournalEvent {
+            event_id: "event-tool-1".into(),
+            epoch: "epoch-1".into(),
+            sequence: 1,
+            kind: "tool".into(),
+            session_id: "session-1".into(),
+            task_id: Some("task-1".into()),
+            terminal_status: None,
+            payload: json!({
+                "tool_id": "call-1",
+                "tool_name": "weather",
+                "tool_state": "completed",
+                "text": "safe output",
+            }),
+        };
+        let display = display_event(&event).expect("safe tool display");
+        let body: Value = serde_json::from_str(display.body().expect("tool body")).unwrap();
+        assert_eq!(display.kind(), DisplayKind::Tool);
+        assert_eq!(body["schema"], REMOTE_TOOL_DISPLAY_SCHEMA);
+        assert_eq!(body["toolId"], "call-1");
+        assert_eq!(body["toolName"], "weather");
+        assert_eq!(body["toolState"], "completed");
+        assert_eq!(body["output"], "safe output");
+        assert!(body.get("args").is_none());
+    }
+
+    #[test]
+    fn incomplete_tool_projection_never_falls_back_to_a_raw_body() {
+        let event = JournalEvent {
+            event_id: "event-tool-legacy".into(),
+            epoch: "epoch-1".into(),
+            sequence: 1,
+            kind: "tool".into(),
+            session_id: "session-1".into(),
+            task_id: Some("task-1".into()),
+            terminal_status: None,
+            payload: json!({ "text": "legacy raw tool output" }),
+        };
+        let display = display_event(&event).expect("legacy tool display");
+        assert_eq!(display.kind(), DisplayKind::Tool);
+        assert_eq!(display.body(), None);
+    }
+
+    fn task_event(task_id: impl Into<String>, status: &str) -> RemoteTaskEvent {
+        use crate::features::remote_control::controller::task::RemoteTaskModelSource;
+
+        RemoteTaskEvent {
+            task_id: task_id.into(),
+            session_id: "session-1".into(),
+            generation: "generation-1".into(),
+            model_source: RemoteTaskModelSource::ControlledDevice,
+            status: status.into(),
+            sequence: "1".into(),
+            transition_sequence: 1,
+            outcome_unknown: false,
+            terminal_reason: None,
+            result_digest: None,
+        }
+    }
+
+    #[test]
+    fn task_telemetry_counts_each_lifecycle_once_with_stable_ids() {
+        let mut seen = TaskTelemetryDedupe::default();
+        let admitted = task_event("task-1", "admitted");
+        let admitted_id = seen.decide(&admitted).expect("first admission");
+        assert!(seen.decide(&admitted).is_none());
+
+        let succeeded = task_event("task-1", "succeeded");
+        let terminal_id = seen.decide(&succeeded).expect("first terminal");
+        assert!(seen.decide(&succeeded).is_none());
+        assert!(seen.decide(&task_event("task-1", "failed")).is_none());
+        assert_ne!(admitted_id, terminal_id);
+        assert_eq!(seen.tasks.len(), 1);
+    }
+
+    #[test]
+    fn task_telemetry_capacity_evicts_one_without_boundary_duplicates() {
+        let mut seen = TaskTelemetryDedupe::default();
+        for index in 0..(TASK_TELEMETRY_DEDUPE_CAPACITY - 1) {
+            assert!(
+                seen.decide(&task_event(format!("task-{index}"), "admitted"))
+                    .is_some()
+            );
+        }
+        assert_eq!(seen.tasks.len(), 8191);
+
+        let boundary = task_event("task-8191", "admitted");
+        let boundary_id = seen.decide(&boundary).expect("8192nd admission");
+        assert_eq!(seen.tasks.len(), 8192);
+        assert!(seen.decide(&boundary).is_none());
+
+        let overflow = task_event("task-8192", "admitted");
+        let overflow_id = seen.decide(&overflow).expect("8193rd admission");
+        assert_eq!(seen.tasks.len(), 8192);
+        assert!(seen.decide(&overflow).is_none());
+        assert_ne!(boundary_id, overflow_id);
+    }
+
+    #[test]
+    fn evicted_task_replays_reuse_lifecycle_event_ids() {
+        let mut seen = TaskTelemetryDedupe::default();
+        let admitted = task_event("old-task", "admitted");
+        let admitted_id = seen.decide(&admitted).expect("old admission");
+        let terminal = task_event("old-task", "succeeded");
+        let terminal_id = seen.decide(&terminal).expect("old terminal");
+        for index in 0..TASK_TELEMETRY_DEDUPE_CAPACITY {
+            assert!(
+                seen.decide(&task_event(format!("new-task-{index}"), "admitted"))
+                    .is_some()
+            );
+        }
+        assert_eq!(seen.tasks.len(), TASK_TELEMETRY_DEDUPE_CAPACITY);
+        assert_eq!(seen.decide(&admitted), Some(admitted_id));
+        assert_eq!(seen.decide(&terminal), Some(terminal_id));
+        assert!(seen.decide(&task_event("old-task", "cancelled")).is_none());
+        assert_eq!(seen.tasks.len(), TASK_TELEMETRY_DEDUPE_CAPACITY);
+    }
+
+    #[test]
+    fn terminal_before_admission_suppresses_late_admission() {
+        let mut seen = TaskTelemetryDedupe::default();
+        assert!(seen.decide(&task_event("task-1", "failed")).is_some());
+        assert!(seen.decide(&task_event("task-1", "admitted")).is_none());
+    }
+
+    #[test]
+    fn concurrent_task_telemetry_transition_has_one_local_winner() {
+        let seen = Arc::new(Mutex::new(TaskTelemetryDedupe::default()));
+        let event = task_event("concurrent-task", "admitted");
+        let handles = (0..8)
+            .map(|_| {
+                let seen = Arc::clone(&seen);
+                let event = event.clone();
+                std::thread::spawn(move || seen.lock().decide(&event))
+            })
+            .collect::<Vec<_>>();
+        let decisions = handles
+            .into_iter()
+            .filter_map(|handle| handle.join().expect("worker completes"))
+            .collect::<Vec<_>>();
+        assert_eq!(decisions.len(), 1);
+        assert_eq!(
+            decisions[0],
+            stable_task_telemetry_event_id("concurrent-task", TaskTelemetryLifecycle::Admitted)
+        );
     }
 
     #[test]

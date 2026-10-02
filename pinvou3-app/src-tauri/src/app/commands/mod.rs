@@ -25,6 +25,7 @@ pub(crate) mod codex;
 pub(crate) mod computer_use;
 pub(crate) mod connectors;
 pub(crate) mod dependencies;
+pub(crate) mod desktop_remote_action;
 pub(crate) mod desktop_remote_artifact;
 pub(crate) mod desktop_remote_attachment;
 pub(crate) mod desktop_remote_capabilities;

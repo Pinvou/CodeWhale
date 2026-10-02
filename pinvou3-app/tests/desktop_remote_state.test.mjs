@@ -54,23 +54,32 @@ function makeBridge(responses = {}) {
   };
 }
 
-test('legacy waiting aliases retain only absent pairing fields on the same status binding', () => {
+test('canonical waiting updates retain only absent pairing fields on the same status binding', () => {
   let state = logic.applyControlledStatus(logic.createState(), { ...fixtures.controlledWaiting, status: 'waiting_for_pairing' });
-  assert.equal(state.controlledDevice.status, 'waiting_connection');
+  assert.equal(state.controlledDevice.status, 'waiting_for_pairing');
   const partial = { status: 'waiting_for_pairing', generation: fixtures.controlledWaiting.generation, statusIntent: fixtures.controlledWaiting.statusIntent };
   state = logic.applyControlledStatus(state, partial);
   assert.equal(state.controlledDevice.pairingCode, fixtures.controlledWaiting.pairingCode);
-  assert.equal(state.controlledDevice.expiresAtMs, fixtures.controlledWaiting.pairingExpiresAtMs);
+  assert.equal(state.controlledDevice.pairingRemainingMs, fixtures.controlledWaiting.pairingRemainingMs);
   assert.equal(logic.applyControlledStatus(state, { ...partial, status: 'registering' }), state);
-  const cleared = logic.applyControlledStatus(state, { ...partial, pairingCode: null, pairingExpiresAtMs: null });
+  const cleared = logic.applyControlledStatus(state, { ...partial, pairingCode: null, pairingRemainingMs: null });
   assert.equal(cleared.controlledDevice.pairingCode, null);
-  assert.equal(cleared.controlledDevice.expiresAtMs, null);
+  assert.equal(cleared.controlledDevice.pairingRemainingMs, null);
   const changed = logic.applyControlledStatus(state, { ...partial, statusIntent: String(BigInt(partial.statusIntent) + 1n) });
   assert.equal(changed.controlledDevice.pairingCode, null);
-  assert.equal(changed.controlledDevice.expiresAtMs, null);
-  const stopped = logic.applyControlledStatus(state, { ...partial, status: 'stopped', pairingCode: '2345678', pairingExpiresAtMs: 999 });
+  assert.equal(changed.controlledDevice.pairingRemainingMs, null);
+  const stopped = logic.applyControlledStatus(state, { ...partial, status: 'stopped', pairingCode: '2345678', pairingRemainingMs: 999 });
   assert.equal(stopped.controlledDevice.pairingCode, null);
-  assert.equal(stopped.controlledDevice.expiresAtMs, null);
+  assert.equal(stopped.controlledDevice.pairingRemainingMs, null);
+});
+
+test('unreleased B status aliases are rejected instead of becoming a second DTO contract', () => {
+  const state = logic.createState();
+  for (const status of ['reserving', 'waiting_connection', 'safety_handshake', 'refreshing']) {
+    assert.equal(logic.applyControlledStatus(state, {
+      ...fixtures.controlledWaiting, status,
+    }), state, status);
+  }
 });
 
 test('controlled sync rejects late polling and does not replace a command intent', async () => {
@@ -88,7 +97,7 @@ test('controlled sync rejects late polling and does not replace a command intent
   await start;
   resolvePoll({ status: 'disabled', statusIntent: '0' });
   await poll;
-  assert.equal(host.state.controlledDevice.status, 'waiting_connection');
+  assert.equal(host.state.controlledDevice.status, 'waiting_for_pairing');
   const late = host.bridge.controlledSync();
   host.emit('desktop-remote-controlled-status', fixtures.controlledError);
   resolvePoll(fixtures.controlledWaiting);
@@ -99,7 +108,7 @@ test('controlled sync rejects late polling and does not replace a command intent
 
 test('real session bridge keeps the full capability binding and session across status updates', async () => {
   const projection = { ...fixtures.controllerConnected.lease, localSessionId: 'remote-session-1', remoteSessionRef: 'session-ref-1', sessionId: 'session-abc', mode: 'chat', capabilityRevision: 7 };
-  let snapshot = { ...fixtures.controllerConnected.lease, capabilityRevision: 7, modes: ['chat'], tools: [], skills: [], workspaces: [] };
+  let snapshot = { ...fixtures.controllerConnected.lease, remoteSessionRef: 'session-ref-1', capabilityRevision: 7, modes: ['chat'], tools: [], skills: [], workspaces: [] };
   const host = makeBridge({
     desktop_remote_controller_connect: fixtures.controllerConnected,
     desktop_remote_proxy_open_live: projection,
@@ -140,7 +149,7 @@ test('shared Rust fixtures project device names, errors, lease and pairing expir
   assert.equal(state.controllerConnection.generation, 'generation-0001');
   assert.equal(state.controllerConnection.deviceName, 'Studio PC');
   state = logic.applyControlledStatus(state, fixtures.controlledWaiting);
-  assert.equal(state.controlledDevice.expiresAtMs, 600000);
+  assert.equal(state.controlledDevice.pairingRemainingMs, 599000);
   assert.equal(state.controlledDevice.workspaceCount, 1);
   assert.equal(state.controlledDevice.codeModeAllowed, true);
   state = logic.applyControlledStatus(state, fixtures.controlledError);
@@ -197,7 +206,7 @@ test('real bridge subscribes during A connect and applies handshake, connected a
 test('command responses and B events share the Rust projection and reject replaced generations', async () => {
   const host = makeBridge({ desktop_remote_controlled_start: fixtures.controlledWaiting });
   await host.bridge.controlledStart('Studio PC', []);
-  assert.equal(host.state.controlledDevice.expiresAtMs, 600000);
+  assert.equal(host.state.controlledDevice.pairingRemainingMs, 599000);
   host.emit('desktop-remote-controlled-status', { ...fixtures.controlledWaiting, status: 'reserving' });
   assert.equal(host.state.controlledDevice.pairingCode, '2345678');
   host.emit('desktop-remote-controlled-status', fixtures.controlledError);
@@ -239,15 +248,15 @@ test('status polling cannot overwrite a newer event with an obsolete binding', a
   host.bridge.stop();
 });
 
-test('B old terminal and reserving events cannot replace a refreshed generation', () => {
+test('B old terminal and registering events cannot replace a refreshed generation', () => {
   let state = logic.applyControlledStatus(logic.createState(), fixtures.controlledWaiting);
   state = logic.beginControlledIntent(state, true);
   state = logic.applyControlledStatus(state, { ...fixtures.controlledWaiting, generation: 'generation-0002', statusIntent: '2', intent: state.intents.controlled, replaceBinding: true });
   assert.equal(logic.applyControlledStatus(state, fixtures.controlledError), state);
   assert.equal(logic.applyControlledStatus(state, { ...fixtures.controlledError, generation: null }), state);
-  state = logic.applyControlledStatus(state, { ...fixtures.controlledWaiting, generation: 'generation-0002', statusIntent: '2', status: 'refreshing' });
-  assert.equal(logic.applyControlledStatus(state, { ...fixtures.controlledWaiting, status: 'reserving' }), state);
-  state = logic.applyControlledStatus(state, { ...fixtures.controlledWaiting, status: 'reserving', generation: 'generation-0003', statusIntent: '3' });
+  state = logic.applyControlledStatus(state, { ...fixtures.controlledWaiting, generation: 'generation-0002', statusIntent: '2', status: 'retiring_generation' });
+  assert.equal(logic.applyControlledStatus(state, { ...fixtures.controlledWaiting, status: 'registering' }), state);
+  state = logic.applyControlledStatus(state, { ...fixtures.controlledWaiting, status: 'registering', generation: 'generation-0003', statusIntent: '3' });
   assert.equal(state.controlledDevice.generation, 'generation-0003');
 });
 
@@ -298,7 +307,7 @@ test('late controlled-device results never revive an older intent', () => {
 
   const stale = logic.applyControlledStatus(state, {
     intent: firstIntent,
-    status: 'waiting_connection',
+    status: 'waiting_for_pairing',
     pairingCode: '2345678',
     generation: 'gen-1',
   });
@@ -306,13 +315,13 @@ test('late controlled-device results never revive an older intent', () => {
 
   const fresh = logic.applyControlledStatus(state, {
     intent: secondIntent,
-    status: 'waiting_connection',
+    status: 'waiting_for_pairing',
     pairingCode: '3456789',
     generation: 'gen-2',
   });
-  assert.equal(fresh.controlledDevice.status, 'waiting_connection');
+  assert.equal(fresh.controlledDevice.status, 'waiting_for_pairing');
   assert.equal(fresh.controlledDevice.pairingCode, '3456789');
-  assert.equal(fresh.controlledDevice.expiresAtMs, null);
+  assert.equal(fresh.controlledDevice.pairingRemainingMs, null);
 
   const oldGeneration = logic.applyControlledStatus(fresh, {
     status: 'connected',
@@ -321,20 +330,21 @@ test('late controlled-device results never revive an older intent', () => {
   assert.equal(oldGeneration, fresh, 'a replaced generation must not overwrite state');
 });
 
-test('a relay registration result carries the pairing expiry into the UI state', () => {
+test('a relay registration result carries only the relative pairing countdown', () => {
   const state = logic.applyControlledStatus(logic.createState(), {
-    status: 'waiting_connection',
+    status: 'waiting_for_pairing',
     pairingCode: '3456789',
-    expiresAtMs: 1_800_000_000_000,
+    pairingRemainingMs: 30_000,
     generation: 'gen-1',
   });
-  assert.equal(state.controlledDevice.expiresAtMs, 1_800_000_000_000);
+  assert.equal(state.controlledDevice.pairingRemainingMs, 30_000);
+  assert.equal('expiresAtMs' in state.controlledDevice, false);
 });
 
 test('a stopped controlled device clears the pairing code', () => {
   let state = logic.createState();
   state = logic.applyControlledStatus(state, {
-    status: 'waiting_connection',
+    status: 'waiting_for_pairing',
     pairingCode: '3456789',
     generation: 'gen-1',
   });
@@ -382,6 +392,7 @@ test('capability snapshots are bound to connection, lease and revision', () => {
   state = logic.applyControllerStatus(state, {
     ...liveController('connection-1', '2'),
   });
+  state.controllerConnection.sessionRef = 'session-ref-1';
   const snapshot = {
     ...fixtures.controllerConnected.lease,
     connectionId: 'connection-1',
@@ -389,10 +400,11 @@ test('capability snapshots are bound to connection, lease and revision', () => {
     leaseEpoch: '2',
     relayEpoch: 'relay-connection-1',
     remoteControlGeneration: 'generation-connection-1',
+    remoteSessionRef: 'session-ref-1',
     capabilityRevision: 4,
     modes: ['chat', 'code'],
     tools: [{ toolId: 'browser', displayName: 'Browser' }],
-    skills: [{ skillId: 'visual-design', displayName: 'Visual' }],
+    skills: [{ skillId: 'visual-design', displayName: 'Visual', scopes: ['chat'] }],
     workspaces: [{ workspaceId: 'workspace-1', displayName: 'Project', codeAllowed: true }],
   };
   const applied = logic.applyCapabilities(state, snapshot);
@@ -479,6 +491,7 @@ test('B-side task projection keeps locally visible prompt text across status cha
     sessionId: 'session-b',
     sessionRef: 'session-ref-a',
     generation: 'generation-b',
+    lane: 'chat',
   });
   state = logic.applyControlledTaskEvent(state, {
     taskId: 'task-visible',
@@ -512,6 +525,7 @@ test('B-side projections reject stale sessions and reset with the controlled gen
     sessionId: 'session-current',
     sessionRef: 'session-ref-current',
     generation: 'generation-1',
+    lane: 'chat',
   });
 
   const staleTask = logic.applyControlledTaskEvent(state, {
@@ -553,7 +567,7 @@ test('B-side projections reject stale sessions and reset with the controlled gen
   state = logic.beginControlledIntent(state, true);
   state = logic.applyControlledStatus(state, {
     intent: state.intents.controlled,
-    status: 'reserving',
+    status: 'registering',
     generation: 'generation-2',
     replaceBinding: true,
   });
@@ -569,6 +583,7 @@ test('B-side task content remains visible after a terminal failure', () => {
     sessionId: 'session-b',
     sessionRef: 'remote-session-b',
     generation: 'generation-1',
+    lane: 'chat',
   });
   state = logic.applyControlledTaskEvent(state, {
     taskId: 'task-visible',
@@ -612,6 +627,7 @@ test('a new controlled-device generation drops old task projections', () => {
     sessionId: 'old-session',
     sessionRef: 'old-remote-session',
     generation: 'generation-1',
+    lane: 'chat',
   });
   state = logic.applyControlledTaskEvent(state, {
     taskId: 'old-task',
@@ -624,7 +640,7 @@ test('a new controlled-device generation drops old task projections', () => {
   state = logic.beginControlledIntent(state, true);
   state = logic.applyControlledStatus(state, {
     intent: state.intents.controlled,
-    status: 'waiting_connection',
+    status: 'waiting_for_pairing',
     generation: 'generation-2',
     replaceBinding: true,
   });
@@ -654,22 +670,42 @@ test('bridge feature gates every desktop call behind the Windows capability', ()
   assert.match(feature, /"controlledTranscript",/, 'B local session projection remains available');
   // The bridge must never forward raw credential fields.
   assert.ok(!/api_key|apiKey|credential_ref|credentialRef/.test(feature));
-  // Every desktop command it forwards is a desktop_remote_* command.
+  // Remote operations stay in the desktop namespace. B-local input may first
+  // adopt an existing managed draft attachment after the same feature gate.
   const invokes = [...feature.matchAll(/invoke\("([^"]+)"/g)].map((match) => match[1]);
   assert.ok(invokes.length > 20);
   for (const command of invokes) {
     assert.ok(
-      command.startsWith('desktop_remote_'),
+      command.startsWith('desktop_remote_') || command === 'adopt_draft_attachment',
       `unexpected command forwarded from the desktop bridge: ${command}`,
     );
   }
 });
 
+test('B capability UI follows an authoritative lane projection for the same session', () => {
+  let state = logic.createState();
+  state = logic.applyControlledStatus(state, { status: 'connected', generation: 'generation-1' });
+  state = logic.applyControlledSession(state, {
+    sessionId: 'session-1', sessionRef: 'remote-1', generation: 'generation-1', lane: 'chat',
+  });
+  assert.equal(state.controlledSession.lane, 'chat');
+  const code = logic.applyControlledSession(state, {
+    sessionId: 'session-1', sessionRef: 'remote-1', generation: 'generation-1', lane: 'code',
+  });
+  assert.equal(code.controlledSession.lane, 'code');
+  const invalid = logic.applyControlledSession(code, {
+    sessionId: 'session-1', sessionRef: 'remote-1', generation: 'generation-1', lane: 'future',
+  });
+  assert.equal(invalid, code);
+});
+
 test('B live status without a generation cannot open the controlled chat', () => {
   const initial = logic.createState();
   assert.equal(logic.applyControlledStatus(initial, { status: 'connected' }), initial);
-  assert.equal(logic.applyControlledStatus(initial, { status: 'waiting_connection', pairingCode: '2345678' }), initial);
-  assert.equal(logic.applyControlledStatus(initial, { status: 'waiting_for_pairing', generation: 'old' }), initial);
+  assert.equal(logic.applyControlledStatus(initial, { status: 'waiting_for_pairing', pairingCode: '2345678' }), initial);
+  const waiting = logic.applyControlledStatus(initial, { status: 'waiting_for_pairing', generation: 'old' });
+  assert.equal(waiting.controlledDevice.status, 'waiting_for_pairing');
+  assert.equal(waiting.controlledSession.sessionId, null);
 });
 
 test('authenticated RemoteProxy notifications require the exact live lease and never carry body text', () => {
@@ -760,7 +796,7 @@ test('terminal events from replaced A/B generations cannot clear the current UI'
     status: 'disconnected', connectionId: 'old', leaseEpoch: '2', generation: 'old-generation',
   }), a);
   let b = logic.applyControlledStatus(logic.createState(), {
-    status: 'waiting_connection', generation: 'new-generation',
+    status: 'waiting_for_pairing', generation: 'new-generation',
   });
   assert.equal(logic.applyControlledStatus(b, {
     status: 'stopped', generation: 'old-generation',
@@ -812,22 +848,22 @@ test('B terminal tombstones an old generation until an explicit start opens a fr
     status: 'connected', generation: 'generation-old',
   }), state);
   assert.equal(logic.applyControlledStatus(state, {
-    status: 'waiting_connection', generation: 'generation-new',
+    status: 'waiting_for_pairing', generation: 'generation-new',
   }), state, 'an event cannot initiate a generation after terminal');
   state = logic.beginControlledIntent(state, true);
   assert.equal(logic.applyControlledStatus(state, {
-    status: 'waiting_connection', generation: 'generation-new',
+    status: 'waiting_for_pairing', generation: 'generation-new',
   }), state, 'an event cannot consume an in-flight start intent');
   assert.equal(logic.applyControlledStatus(state, {
-    status: 'waiting_connection', generation: 'generation-old',
+    status: 'waiting_for_pairing', generation: 'generation-old',
   }), state, 'even a pending start cannot reuse a retired generation');
   state = logic.applyControlledStatus(state, {
-    intent: state.intents.controlled, status: 'waiting_connection', generation: 'generation-new',
+    intent: state.intents.controlled, status: 'waiting_for_pairing', generation: 'generation-new',
   });
   assert.equal(state.controlledDevice.generation, 'generation-new');
   assert.equal(state.controlledFenced, false);
   const unrequestedStart = logic.applyControlledStatus(state, {
-    status: 'waiting_connection', generation: 'generation-other',
+    status: 'waiting_for_pairing', generation: 'generation-other',
   });
   assert.equal(unrequestedStart, state, 'a late starting event cannot replace an active generation');
 });
@@ -900,12 +936,12 @@ test('identity-less B terminal during start suppresses that reply but not a late
   state = logic.applyControlledStatus(state, { status: 'stopped' });
   assert.equal(state.controlledTerminatedOpenIntent, first);
   assert.equal(logic.applyControlledStatus(state, {
-    intent: first, status: 'waiting_connection', generation: 'dead-generation', pairingCode: '1234567',
+    intent: first, status: 'waiting_for_pairing', generation: 'dead-generation', pairingCode: '1234567',
   }), state);
   state = logic.beginControlledIntent(state, true);
   const second = state.intents.controlled;
   state = logic.applyControlledStatus(state, {
-    intent: second, status: 'waiting_connection', generation: 'live-generation', pairingCode: '7654321',
+    intent: second, status: 'waiting_for_pairing', generation: 'live-generation', pairingCode: '7654321',
   });
   assert.equal(state.controlledDevice.generation, 'live-generation');
   assert.equal(state.controlledDevice.pairingCode, '7654321');
@@ -938,13 +974,13 @@ test('B pending-terminal fence opens only for a current authoritative generation
     status: 'stopped', generation: 'new-generation',
   }, 'new-generation'), state);
   assert.equal(logic.reconcileControlledOpenStatus(state, first, {
-    status: 'waiting_connection', generation: null,
+    status: 'waiting_for_pairing', generation: null,
   }, 'new-generation'), state);
   assert.equal(logic.reconcileControlledOpenStatus(state, first, {
-    status: 'waiting_connection', generation: 'other-generation',
+    status: 'waiting_for_pairing', generation: 'other-generation',
   }, 'new-generation'), state);
   state = logic.reconcileControlledOpenStatus(state, first, {
-    status: 'waiting_connection', generation: 'new-generation', pairingCode: '1234567',
+    status: 'waiting_for_pairing', generation: 'new-generation', pairingCode: '1234567',
   }, 'new-generation');
   assert.equal(state.controlledFenced, false);
   assert.equal(state.controlledDevice.pairingCode, '1234567');

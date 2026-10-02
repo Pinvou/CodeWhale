@@ -27,11 +27,11 @@ impl From<ControllingIntentProjection> for CapabilitySendAck {
 }
 
 fn ensure_supported(manager: &ControllingDeviceManager) -> Result<(), String> {
-    if manager.is_supported() {
-        Ok(())
-    } else {
-        Err("desktop_remote_control_unsupported".into())
-    }
+    crate::platform::capabilities::ensure_desktop_remote_control_enabled()?;
+    manager
+        .is_supported()
+        .then_some(())
+        .ok_or_else(|| "desktop_remote_control_unsupported".to_owned())
 }
 
 fn send_error_code(error: ControllerSendError) -> String {

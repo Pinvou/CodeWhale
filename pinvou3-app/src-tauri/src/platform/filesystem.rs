@@ -452,6 +452,467 @@ pub(crate) struct PrivateFileDirectory {
     _component_handles: Vec<File>,
 }
 
+/// A published object, not merely a pathname. Windows pins every ancestor
+/// and denies new write/delete access after authenticated readonly admission.
+/// The writer handle stays private; consumers can only take bounded snapshots.
+pub(crate) struct PublishedPrivateFile {
+    file: parking_lot::Mutex<Option<File>>,
+    _directory: Option<PrivateFileDirectory>,
+    path: PathBuf,
+    cleanup_requested: std::sync::atomic::AtomicBool,
+    #[cfg(windows)]
+    identity: (u32, u64),
+}
+
+impl std::fmt::Debug for PublishedPrivateFile {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("PublishedPrivateFile(<pinned>)")
+    }
+}
+
+impl PartialEq for PublishedPrivateFile {
+    fn eq(&self, other: &Self) -> bool {
+        std::ptr::eq(self, other)
+    }
+}
+
+impl Eq for PublishedPrivateFile {}
+
+impl PublishedPrivateFile {
+    pub(crate) fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub(crate) fn read_bounded(&self, maximum_bytes: u64) -> io::Result<Vec<u8>> {
+        use std::io::{Read as _, Seek as _};
+        let mut state = self.file.lock();
+        let file = state
+            .as_mut()
+            .ok_or_else(|| io::Error::other("private file is closed"))?;
+        file.rewind()?;
+        let mut bytes = Vec::new();
+        (&mut *file)
+            .take(maximum_bytes.saturating_add(1))
+            .read_to_end(&mut bytes)?;
+        if bytes.len() as u64 > maximum_bytes {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "private file exceeds bound",
+            ));
+        }
+        Ok(bytes)
+    }
+
+    pub(crate) fn request_cleanup(&self) {
+        self.cleanup_requested
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn cleanup(&self) -> io::Result<()> {
+        self.file.lock().take();
+        let directory = self
+            ._directory
+            .as_ref()
+            .ok_or_else(|| io::Error::other("private anchor missing"))?;
+        let name = self
+            .path
+            .file_name()
+            .ok_or_else(|| io::Error::other("private name missing"))?;
+        remove_known_private_file(directory, name, self.identity)
+    }
+
+    #[cfg(not(windows))]
+    pub(crate) fn cleanup(&self) -> io::Result<()> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "stable private read paths are unsupported",
+        ))
+    }
+}
+
+#[cfg(windows)]
+impl Drop for PublishedPrivateFile {
+    fn drop(&mut self) {
+        if !self
+            .cleanup_requested
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return;
+        }
+        // Last-owner cleanup uses the exact publication object, not a recursive
+        // pathname delete. Unknown entries are never removed.
+        let Some(path_parent) = self.path.parent() else {
+            return;
+        };
+        let Some(parent_path) = path_parent.parent() else {
+            return;
+        };
+        let Some(directory_name) = path_parent.file_name() else {
+            return;
+        };
+        let parent = match open_private_file_directory(parent_path) {
+            Ok(parent) => parent,
+            Err(_) => {
+                eprintln!("[private-file] cleanup anchor unavailable");
+                return;
+            }
+        };
+        if self.cleanup().is_err() {
+            eprintln!(
+                "[private-file] authenticated-object cleanup failed; foreign entries retained"
+            );
+            return;
+        }
+        self._directory.take();
+        if parent.remove_empty_child_directory(directory_name).is_err() {
+            eprintln!("[private-file] empty-directory cleanup failed; foreign entries retained");
+        }
+    }
+}
+
+pub(crate) const fn supports_private_read_path_publication() -> bool {
+    cfg!(windows)
+}
+
+/// Cleanup authority only: rejected content never grants read authority.
+pub(crate) struct PrivatePublicationCleanup {
+    #[cfg(windows)]
+    directory: PrivateFileDirectory,
+    #[cfg(windows)]
+    name: std::ffi::OsString,
+    #[cfg(windows)]
+    writer: Option<File>,
+    #[cfg(windows)]
+    identity: Option<(u32, u64)>,
+}
+
+impl PrivatePublicationCleanup {
+    pub(crate) fn cleanup(&mut self) -> io::Result<()> {
+        #[cfg(windows)]
+        {
+            if let Some(writer) = self.writer.as_ref() {
+                mark_windows_file_handle_for_deletion(writer)?;
+                self.writer.take();
+                return Ok(());
+            }
+            remove_known_private_file(
+                &self.directory,
+                &self.name,
+                self.identity
+                    .ok_or_else(|| io::Error::other("cleanup identity missing"))?,
+            )
+        }
+        #[cfg(not(windows))]
+        {
+            Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "private publication unsupported",
+            ))
+        }
+    }
+}
+
+#[derive(Debug)]
+struct RejectedPrivatePublication {
+    error: io::Error,
+    cleanup: Option<PrivatePublicationCleanup>,
+}
+
+impl std::fmt::Debug for PrivatePublicationCleanup {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("PrivatePublicationCleanup(<anchored>)")
+    }
+}
+
+impl std::fmt::Display for RejectedPrivatePublication {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("private publication rejected")
+    }
+}
+
+impl std::error::Error for RejectedPrivatePublication {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.error)
+    }
+}
+
+impl Drop for RejectedPrivatePublication {
+    fn drop(&mut self) {
+        // Local early failures have no transfer registry. Remote callers take
+        // the authority before dropping this error, retaining it for the reaper.
+        if let Some(cleanup) = self.cleanup.as_mut() {
+            if cleanup.cleanup().is_err() {
+                eprintln!(
+                    "[private-file] rejected-publication cleanup failed; foreign entries retained"
+                );
+            }
+        }
+    }
+}
+
+pub(crate) fn take_private_publication_cleanup(
+    error: &mut io::Error,
+) -> Option<PrivatePublicationCleanup> {
+    error
+        .get_mut()?
+        .downcast_mut::<RejectedPrivatePublication>()?
+        .cleanup
+        .take()
+}
+
+#[cfg(windows)]
+fn rejected_private_publication(
+    error: io::Error,
+    mut cleanup: PrivatePublicationCleanup,
+) -> io::Error {
+    if cleanup.cleanup().is_ok() {
+        return error;
+    }
+    eprintln!("[private-file] rejected-publication cleanup deferred; foreign entries retained");
+    io::Error::new(
+        error.kind(),
+        RejectedPrivatePublication {
+            error,
+            cleanup: Some(cleanup),
+        },
+    )
+}
+
+#[cfg(all(test, windows))]
+thread_local! {
+    pub(crate) static PRIVATE_PUBLICATION_BEFORE_READ: std::cell::RefCell<Option<Box<dyn FnOnce(&Path)>>> = const { std::cell::RefCell::new(None) };
+    static PRIVATE_PUBLICATION_AFTER_RENAME: std::cell::RefCell<Option<Box<dyn FnOnce(&Path)>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// No Unix path fallback: directory fds cannot prevent pathname replacement
+/// when a later external parser opens a path. This Windows-only capability is
+/// distinct from portable, handle-relative private writes.
+#[cfg(not(windows))]
+pub(crate) fn publish_private_read_path(
+    _directory: PrivateFileDirectory,
+    _name: &std::ffi::OsStr,
+    _content: &[u8],
+) -> io::Result<PublishedPrivateFile> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "stable private read paths are unsupported",
+    ))
+}
+
+#[cfg(windows)]
+pub(crate) fn publish_private_read_path(
+    directory: PrivateFileDirectory,
+    name: &std::ffi::OsStr,
+    content: &[u8],
+) -> io::Result<PublishedPrivateFile> {
+    use std::io::Write as _;
+    use std::os::windows::fs::OpenOptionsExt as _;
+    use windows_sys::Win32::Storage::FileSystem::{
+        DELETE, FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_READ, FILE_GENERIC_WRITE,
+        FILE_SHARE_READ,
+    };
+    validate_private_file_name(name)?;
+    let mut file = loop {
+        let temporary_name = private_atomic_temp_name();
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .access_mode(FILE_GENERIC_READ | FILE_GENERIC_WRITE | DELETE)
+            .create_new(true)
+            .share_mode(FILE_SHARE_READ)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(directory.canonical_path.join(temporary_name))
+        {
+            Ok(file) => break file,
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
+    };
+    let publish = (|| {
+        if !metadata_is_plain_file(&file.metadata()?) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "private publication is not plain",
+            ));
+        }
+        file.write_all(content)?;
+        file.sync_all()?;
+        let destination = directory._component_handles.last().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "directory has no handle")
+        })?;
+        rename_windows_file_to_directory(&file, destination, name, true)
+    })();
+    if let Err(error) = publish {
+        let _ = mark_windows_file_handle_for_deletion(&file);
+        return Err(error);
+    }
+    #[cfg(all(test, windows))]
+    PRIVATE_PUBLICATION_AFTER_RENAME.with(|hook| {
+        if let Some(hook) = hook.borrow_mut().take() {
+            hook(&directory.canonical_path.join(name));
+        }
+    });
+    let identity = match windows_plain_single_link_identity(&file) {
+        Ok(identity) => identity,
+        Err(error) => {
+            return Err(rejected_private_publication(
+                error,
+                PrivatePublicationCleanup {
+                    directory,
+                    name: name.to_owned(),
+                    writer: Some(file),
+                    identity: None,
+                },
+            ));
+        }
+    };
+    drop(file);
+    #[cfg(all(test, windows))]
+    PRIVATE_PUBLICATION_BEFORE_READ.with(|hook| {
+        if let Some(hook) = hook.borrow_mut().take() {
+            hook(&directory.canonical_path.join(name));
+        }
+    });
+    // No receipt exists in this window. Re-authenticate the original object
+    // and exact bytes under a read-only lease before publishing authority.
+    finish_private_read_publication(directory, name, identity, content)
+}
+
+#[cfg(windows)]
+fn finish_private_read_publication(
+    directory: PrivateFileDirectory,
+    name: &std::ffi::OsStr,
+    identity: (u32, u64),
+    content: &[u8],
+) -> io::Result<PublishedPrivateFile> {
+    use std::io::Read as _;
+    use std::os::windows::fs::OpenOptionsExt as _;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_READ, FILE_SHARE_READ,
+    };
+    let path = directory.canonical_path.join(name);
+    let file = std::fs::OpenOptions::new()
+        .access_mode(FILE_GENERIC_READ)
+        .share_mode(FILE_SHARE_READ)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(&path);
+    let mut file = match file {
+        Ok(file) => file,
+        Err(error) => {
+            return Err(rejected_private_publication(
+                error,
+                PrivatePublicationCleanup {
+                    directory,
+                    name: name.to_owned(),
+                    writer: None,
+                    identity: Some(identity),
+                },
+            ));
+        }
+    };
+    let verified = (|| {
+        if windows_plain_single_link_identity(&file)? != identity {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "private publication object changed",
+            ));
+        }
+        let mut actual = Vec::new();
+        (&mut file)
+            .take(content.len() as u64 + 1)
+            .read_to_end(&mut actual)?;
+        // Exact bytes imply equal length and SHA-256, without accepting even a
+        // theoretical digest collision. Verification never reopens a path.
+        if actual != content {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "private publication bytes changed",
+            ));
+        }
+        Ok(())
+    })();
+    if let Err(error) = verified {
+        drop(file);
+        return Err(rejected_private_publication(
+            error,
+            PrivatePublicationCleanup {
+                directory,
+                name: name.to_owned(),
+                writer: None,
+                identity: Some(identity),
+            },
+        ));
+    }
+    Ok(PublishedPrivateFile {
+        file: parking_lot::Mutex::new(Some(file)),
+        _directory: Some(directory),
+        path,
+        identity,
+        cleanup_requested: std::sync::atomic::AtomicBool::new(false),
+    })
+}
+
+#[cfg(windows)]
+fn windows_plain_single_link_identity(file: &File) -> io::Result<(u32, u64)> {
+    use std::os::windows::io::AsRawHandle as _;
+    use windows_sys::Win32::Storage::FileSystem::{
+        BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
+    };
+    if !metadata_is_plain_file(&file.metadata()?) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "private publication is not plain",
+        ));
+    }
+    let mut information = std::mem::MaybeUninit::<BY_HANDLE_FILE_INFORMATION>::zeroed();
+    // SAFETY: live owned file handle and valid writable output record.
+    if unsafe { GetFileInformationByHandle(file.as_raw_handle(), information.as_mut_ptr()) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: the successful API initialized the entire record.
+    let information = unsafe { information.assume_init() };
+    if information.nNumberOfLinks != 1 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "private publication has aliases",
+        ));
+    }
+    Ok((
+        information.dwVolumeSerialNumber,
+        (u64::from(information.nFileIndexHigh) << 32) | u64::from(information.nFileIndexLow),
+    ))
+}
+
+#[cfg(windows)]
+fn remove_known_private_file(
+    directory: &PrivateFileDirectory,
+    name: &std::ffi::OsStr,
+    expected: (u32, u64),
+) -> io::Result<()> {
+    use std::os::windows::fs::OpenOptionsExt as _;
+    use windows_sys::Win32::Storage::FileSystem::{
+        DELETE, FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_READ, FILE_SHARE_READ,
+    };
+    validate_private_file_name(name)?;
+    let file = match std::fs::OpenOptions::new()
+        .access_mode(FILE_GENERIC_READ | DELETE)
+        .share_mode(FILE_SHARE_READ)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(directory.canonical_path.join(name))
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    if windows_plain_single_link_identity(&file)? != expected {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "cleanup object changed",
+        ));
+    }
+    mark_windows_file_handle_for_deletion(&file)
+}
+
 #[cfg(any(
     windows,
     target_os = "macos",
@@ -2223,6 +2684,216 @@ pub(crate) mod tests {
     use std::path::Path;
 
     use super::{atomic_write, atomic_write_private, is_executable_file};
+
+    #[cfg(windows)]
+    #[test]
+    fn post_rename_identity_rejection_cleans_the_owned_leaf_not_its_alias() {
+        let temp = tempfile::tempdir().unwrap();
+        let alias = temp.path().join("foreign-alias.txt");
+        let captured_alias = alias.clone();
+        super::PRIVATE_PUBLICATION_AFTER_RENAME.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move |path| {
+                std::fs::hard_link(path, captured_alias).unwrap();
+            }));
+        });
+        let result = super::publish_private_read_path(
+            super::open_private_file_directory(temp.path()).unwrap(),
+            std::ffi::OsStr::new("report.txt"),
+            b"owned",
+        );
+        assert!(
+            result.is_err(),
+            "aliased publication grants no read authority"
+        );
+        assert!(!temp.path().join("report.txt").exists());
+        assert_eq!(std::fs::read(alias).unwrap(), b"owned");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn read_path_publication_authenticates_reopen_and_preserves_foreign_replacements() {
+        use super::{
+            finish_private_read_publication, open_private_file_directory,
+            windows_plain_single_link_identity,
+        };
+        use std::ffi::OsStr;
+        for replace in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let directory = open_private_file_directory(temp.path()).unwrap();
+            let path = temp.path().join("report.txt");
+            std::fs::write(&path, b"original").unwrap();
+            let original = std::fs::File::open(&path).unwrap();
+            let identity = windows_plain_single_link_identity(&original).unwrap();
+            drop(original);
+            if replace {
+                std::fs::rename(&path, temp.path().join("original.txt")).unwrap();
+            }
+            std::fs::write(&path, b"tampered").unwrap();
+            assert!(
+                finish_private_read_publication(
+                    directory,
+                    OsStr::new("report.txt"),
+                    identity,
+                    b"original"
+                )
+                .is_err()
+            );
+            if replace {
+                assert_eq!(std::fs::read(&path).unwrap(), b"tampered");
+                assert_eq!(
+                    std::fs::read(temp.path().join("original.txt")).unwrap(),
+                    b"original"
+                );
+            } else {
+                assert!(
+                    !path.exists(),
+                    "the matching original object can be revoked"
+                );
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn readonly_publication_allows_crt_reads_but_blocks_mutation_and_cleans_on_last_owner() {
+        use super::{open_private_file_directory, publish_private_read_path};
+        use std::ffi::{CString, OsStr};
+        unsafe extern "C" {
+            fn fopen(
+                path: *const std::ffi::c_char,
+                mode: *const std::ffi::c_char,
+            ) -> *mut std::ffi::c_void;
+            fn fread(
+                buffer: *mut std::ffi::c_void,
+                size: usize,
+                count: usize,
+                stream: *mut std::ffi::c_void,
+            ) -> usize;
+            fn fclose(stream: *mut std::ffi::c_void) -> std::ffi::c_int;
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let folder = temp.path().join("owned");
+        let owner = std::sync::Arc::new(
+            publish_private_read_path(
+                open_private_file_directory(&folder).unwrap(),
+                OsStr::new("image.png"),
+                b"png",
+            )
+            .unwrap(),
+        );
+        let path = owner.path().to_owned();
+        let compatible = crate::platform::os::platform_compat_path(&path.to_string_lossy());
+        let c_path = CString::new(compatible.to_string_lossy().as_bytes()).unwrap();
+        let mode = CString::new("rb").unwrap();
+        // SAFETY: both NUL-terminated C strings are live, fopen returns a fresh
+        // owned stream, the 3-byte buffer is writable, and fclose runs once.
+        let stream = unsafe { fopen(c_path.as_ptr(), mode.as_ptr()) };
+        assert!(
+            !stream.is_null(),
+            "a real CRT reader must accept the readonly lease"
+        );
+        let mut actual = [0u8; 3];
+        let read = unsafe { fread(actual.as_mut_ptr().cast(), 1, actual.len(), stream) };
+        let closed = unsafe { fclose(stream) };
+        assert_eq!(read, actual.len());
+        assert_eq!(closed, 0);
+        assert_eq!(&actual, b"png");
+        assert!(std::fs::write(&path, b"bad").is_err());
+        assert!(std::fs::remove_file(&path).is_err());
+        assert!(std::fs::rename(&path, temp.path().join("moved.png")).is_err());
+        assert!(std::fs::rename(&folder, temp.path().join("moved-folder")).is_err());
+        let reader = owner.clone();
+        owner.request_cleanup();
+        drop(owner);
+        assert_eq!(reader.read_bounded(3).unwrap(), b"png");
+        assert!(path.exists());
+        drop(reader);
+        assert!(!path.exists());
+        assert!(!folder.exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn publication_aliases_cannot_write_and_cleanup_retries_without_deleting_foreign_entries() {
+        use super::{open_private_file_directory, publish_private_read_path};
+        let temp = tempfile::tempdir().unwrap();
+        let owner = publish_private_read_path(
+            open_private_file_directory(temp.path()).unwrap(),
+            std::ffi::OsStr::new("report.txt"),
+            b"original",
+        )
+        .unwrap();
+        let alias = temp.path().join("alias.txt");
+        std::fs::hard_link(owner.path(), &alias).unwrap();
+        assert!(std::fs::write(&alias, b"replacement").is_err());
+        assert!(
+            owner.cleanup().is_err(),
+            "aliased objects must not be deleted"
+        );
+        assert_eq!(std::fs::read(&alias).unwrap(), b"original");
+        assert_eq!(std::fs::read(owner.path()).unwrap(), b"original");
+        std::fs::remove_file(&alias).unwrap();
+        owner.cleanup().unwrap();
+        assert!(!owner.path().exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn local_last_owner_cleanup_survives_early_errors_and_unwinding() {
+        use super::{open_private_file_directory, publish_private_read_path};
+        for unwind in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let folder = temp.path().join("local-attachment");
+            let owner = publish_private_read_path(
+                open_private_file_directory(&folder).unwrap(),
+                std::ffi::OsStr::new("report.txt"),
+                b"content",
+            )
+            .unwrap();
+            owner.request_cleanup();
+            if unwind {
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+                    let _owned = owner;
+                    panic!("local preflight stopped");
+                }));
+                assert!(result.is_err());
+            } else {
+                drop(owner);
+            }
+            assert!(!folder.exists());
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "opt-in PINVOU_TEST_PYTHON with reportlab and pypdf for external PDF parser compatibility"]
+    fn external_pdf_parser_reads_the_protected_publication() {
+        use super::{open_private_file_directory, publish_private_read_path};
+        let python =
+            std::env::var_os("PINVOU_TEST_PYTHON").expect("explicit Python runtime required");
+        let generated = std::process::Command::new(&python).args(["-c",
+            "import io,sys; from reportlab.pdfgen import canvas; b=io.BytesIO(); c=canvas.Canvas(b); c.drawString(72,72,'PINVOU-LEASE-EVIDENCE'); c.save(); sys.stdout.buffer.write(b.getvalue())"])
+            .output().unwrap();
+        assert!(generated.status.success(), "PDF fixture generation failed");
+        let temp = tempfile::tempdir().unwrap();
+        let owner = publish_private_read_path(
+            open_private_file_directory(temp.path()).unwrap(),
+            std::ffi::OsStr::new("report.pdf"),
+            &generated.stdout,
+        )
+        .unwrap();
+        let parsed = std::process::Command::new(python).args(["-c",
+            "import sys; from pypdf import PdfReader; d=PdfReader(sys.argv[1]); print(''.join(p.extract_text() for p in d.pages))"])
+            .arg(crate::platform::os::platform_compat_path(&owner.path().to_string_lossy()))
+            .output().unwrap();
+        assert!(parsed.status.success(), "external PDF parser failed");
+        assert!(
+            String::from_utf8(parsed.stdout)
+                .unwrap()
+                .contains("PINVOU-LEASE-EVIDENCE")
+        );
+        assert!(std::fs::write(owner.path(), b"replacement").is_err());
+    }
     #[cfg(unix)]
     use super::{create_secret_file, open_private_append_file};
     #[cfg(any(

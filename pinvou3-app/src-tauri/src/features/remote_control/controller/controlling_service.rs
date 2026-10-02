@@ -18,7 +18,8 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use super::controlling::{
-    ControllerLease, ControllerOperation, ControllingDeviceManager, ControllingStatus, ResumeStep,
+    ControllerLease, ControllerOperation, ControllingDeviceManager, ControllingStatus,
+    ControllingStatusKind, ResumeStep,
 };
 use super::controlling_handshake::{ControllingHandshake, HandshakeError};
 use super::controlling_runtime::{
@@ -44,6 +45,9 @@ use super::relay_transport::{
 use super::resume::{
     build_controller_resume_prepare, build_controller_resume_ready_ack, new_resume_challenge,
     relay_resume_deadline_ms, resume_frame_matches_lease,
+};
+use crate::features::behavior_telemetry::{
+    RemoteControlEvent, RemoteOutcome, RemoteReason, RemoteStage, track_remote_control,
 };
 use crate::features::remote_control::RemoteControlManager;
 
@@ -137,6 +141,12 @@ pub(crate) trait ControllingJournalSink: Send + Sync {
     /// 为写入对应历史并广播）。
     fn publish_snapshot(&self, _frame: &AuthenticatedSnapshotFrame<'_>) -> Result<(), String> {
         Err("remote_projection_not_configured".to_owned())
+    }
+
+    /// AEAD-opened action result. The application adapter correlates its
+    /// request and exact live RemoteProxy before releasing any bytes to UI.
+    fn publish_action_result(&self, _lease: &LeaseContext, _payload: &Value) -> Result<(), String> {
+        Err("remote_action_not_configured".to_owned())
     }
 }
 
@@ -429,7 +439,7 @@ pub(crate) struct ControllingLaneSinks<'a> {
     /// Authenticated capability response mapping, before A capability state advances.
     pub(crate) on_mapping:
         &'a mut (dyn FnMut(&LeaseContext, &str, &str) -> Result<(), String> + Send),
-    pub(crate) on_task: &'a mut (dyn FnMut(Value) + Send),
+    pub(crate) on_task: &'a mut (dyn FnMut(&LeaseContext, Value) + Send),
     /// 解密并校验过的 B 权威 journal：A 端仅投影到 RemoteProxy。
     pub(crate) on_journal:
         &'a mut (dyn FnMut(&AuthenticatedJournalFrame<'_>) -> Result<(), String> + Send),
@@ -961,8 +971,13 @@ fn dispatch_inbound_frame(
                         .and_then(Value::as_str)
                         .unwrap_or("unknown"),
                 );
-                (sinks.on_task)(event);
+                (sinks.on_task)(&lease, event);
             }
+        }
+        "remote_action_result" => {
+            // Only the authenticated decrypt path may reach this callback.
+            // The adapter never emits the raw result to WebView.
+            (sinks.on_task)(&lease, payload);
         }
         "journal_event" => {
             let Some(event) = journal_event_from_wire(&payload) else {
@@ -1583,7 +1598,34 @@ pub(crate) async fn connect_controlling_device(
         let sessions = keeper.state::<ControllingSessionManager>();
         let business = keeper.state::<ControllingLaneState>();
         let device = manager.inner();
+        let mut previous_status = ControllingStatusKind::Connected;
         let mut on_status = |status: &ControllingStatus| {
+            let current = status.kind();
+            if current != previous_status {
+                let event = match (previous_status, current) {
+                    (ControllingStatusKind::Connected, ControllingStatusKind::Reconnecting) => {
+                        Some(RemoteControlEvent::new(
+                            RemoteStage::Disconnection,
+                            RemoteOutcome::Ok,
+                        ))
+                    }
+                    (ControllingStatusKind::Reconnecting, ControllingStatusKind::Connected) => {
+                        Some(RemoteControlEvent::new(
+                            RemoteStage::Resume,
+                            RemoteOutcome::Ok,
+                        ))
+                    }
+                    (ControllingStatusKind::Reconnecting, ControllingStatusKind::Error) => Some(
+                        RemoteControlEvent::new(RemoteStage::Resume, RemoteOutcome::Rejected)
+                            .reason(RemoteReason::ResumeFailed),
+                    ),
+                    _ => None,
+                };
+                if let Some(event) = event {
+                    track_remote_control(&keeper, event);
+                }
+                previous_status = current;
+            }
             log_controller_event("status", &controller_status_log_detail(status));
             let _ = keeper.emit(CONTROLLER_STATUS_EVENT, status);
         };
@@ -1595,8 +1637,13 @@ pub(crate) async fn connect_controlling_device(
         let mut on_mapping = |lease: &LeaseContext, remote_ref: &str, controlled_id: &str| {
             mapping.confirm_mapping(lease, remote_ref, controlled_id)
         };
-        let mut on_task = |event: Value| {
-            let _ = keeper.emit(CONTROLLER_TASK_EVENT, event);
+        let action_sink = Arc::clone(&journal);
+        let mut on_task = |lease: &LeaseContext, event: Value| {
+            if event.get("type").and_then(Value::as_str) == Some("remote_action_result") {
+                let _ = action_sink.publish_action_result(lease, &event);
+            } else {
+                let _ = keeper.emit(CONTROLLER_TASK_EVENT, event);
+            }
         };
         let mut on_journal = |frame: &AuthenticatedJournalFrame<'_>| {
             // A 端经 app 组合适配器写入 SessionStore.RemoteProxy。
@@ -2151,7 +2198,7 @@ mod tests {
         let mut on_session = |projection: &ControllingSessionProjection| {
             sessions_seen.push(projection.session_id.clone());
         };
-        let mut on_task = |event: Value| tasks_seen.push(event);
+        let mut on_task = |_: &LeaseContext, event: Value| tasks_seen.push(event);
         let mut journal_seen: Vec<JournalEvent> = Vec::new();
         let mut on_journal = |frame: &AuthenticatedJournalFrame<'_>| {
             journal_seen.push(frame.event().clone());
@@ -2379,7 +2426,7 @@ mod tests {
         let mut on_session = |projection: &ControllingSessionProjection| {
             session_projections.push(projection.capability_revision);
         };
-        let mut on_task = |event: Value| task_events.push(event);
+        let mut on_task = |_: &LeaseContext, event: Value| task_events.push(event);
         let mut on_journal = |frame: &AuthenticatedJournalFrame<'_>| {
             journal_seen.push(frame.event().clone());
             Ok(())
@@ -2447,7 +2494,7 @@ mod tests {
         let seen_before = task_events.len();
         let mut stale_status = |_: &ControllingStatus| {};
         let mut stale_session = |_: &ControllingSessionProjection| {};
-        let mut stale_task = |event: Value| task_events.push(event);
+        let mut stale_task = |_: &LeaseContext, event: Value| task_events.push(event);
         let mut stale_journal = |_: &AuthenticatedJournalFrame<'_>| Ok(());
         let mut stale_snapshot = |_: &AuthenticatedSnapshotFrame<'_>| Ok(());
         let mut stale_liveness = |_: Value| true;
@@ -2606,7 +2653,7 @@ mod tests {
             statuses.push(projection(status)["status"].as_str().unwrap().to_owned());
         };
         let mut on_session = |_: &ControllingSessionProjection| {};
-        let mut on_task = |_: Value| {};
+        let mut on_task = |_: &LeaseContext, _: Value| {};
         let mut on_journal = |_: &AuthenticatedJournalFrame<'_>| Ok(());
         let mut on_snapshot = |_: &AuthenticatedSnapshotFrame<'_>| Ok(());
         let mut on_liveness = |_: Value| true;
@@ -2833,7 +2880,7 @@ mod tests {
         let mut on_session = |projection: &ControllingSessionProjection| {
             session_projections.push(projection.capability_revision);
         };
-        let mut on_task = |event: Value| task_events.push(event);
+        let mut on_task = |_: &LeaseContext, event: Value| task_events.push(event);
         let mut journal_events: Vec<JournalEvent> = Vec::new();
         let mut on_journal = |frame: &AuthenticatedJournalFrame<'_>| {
             journal_events.push(frame.event().clone());
@@ -2909,7 +2956,7 @@ mod tests {
         let mut on_status = |_: &ControllingStatus| {};
         let mut on_session =
             |projection: &ControllingSessionProjection| projections.push(projection.clone());
-        let mut on_task = |_: Value| {};
+        let mut on_task = |_: &LeaseContext, _: Value| {};
         let mut on_journal = |_: &AuthenticatedJournalFrame<'_>| Ok(());
         let mut on_snapshot = |_: &AuthenticatedSnapshotFrame<'_>| Ok(());
         let mut on_liveness = |_: Value| false;
@@ -3011,7 +3058,7 @@ mod tests {
         let mut responses = Vec::new();
         let mut on_status = |_: &ControllingStatus| {};
         let mut on_session = |_: &ControllingSessionProjection| {};
-        let mut on_task = |_: Value| {};
+        let mut on_task = |_: &LeaseContext, _: Value| {};
         let mut on_journal = |_: &AuthenticatedJournalFrame<'_>| Ok(());
         let mut on_snapshot = |_: &AuthenticatedSnapshotFrame<'_>| Ok(());
         let mut on_liveness = |frame: Value| {
@@ -3068,6 +3115,15 @@ mod tests {
 
         #[async_trait::async_trait]
         impl ControlledBusinessPort for TerminalPort {
+            async fn remote_action(
+                &self,
+                _lease: &LeaseContext,
+                _session_ref: &str,
+                _operation: &str,
+                _body: &Value,
+            ) -> Result<Value, String> {
+                Err("remote_action_unavailable".to_owned())
+            }
             async fn capability_snapshot(
                 &self,
                 _lease: &LeaseContext,
@@ -3272,7 +3328,7 @@ mod tests {
         let mut on_session = |projection: &ControllingSessionProjection| {
             session_projections.push(projection.session_id.clone());
         };
-        let mut on_task = |event: Value| task_events.push(event);
+        let mut on_task = |_: &LeaseContext, event: Value| task_events.push(event);
         let mut journal_events: Vec<JournalEvent> = Vec::new();
         let mut on_journal = |frame: &AuthenticatedJournalFrame<'_>| {
             journal_events.push(frame.event().clone());
@@ -3426,7 +3482,7 @@ mod tests {
         let mut snapshots_seen: Vec<JournalSnapshot> = Vec::new();
         let mut on_status = |_: &ControllingStatus| {};
         let mut on_session = |_: &ControllingSessionProjection| {};
-        let mut on_task = |_: Value| {};
+        let mut on_task = |_: &LeaseContext, _: Value| {};
         let mut on_journal = |_: &AuthenticatedJournalFrame<'_>| Ok(());
         let mut on_snapshot = |frame: &AuthenticatedSnapshotFrame<'_>| {
             snapshots_seen.push(frame.snapshot().clone());
@@ -3603,7 +3659,7 @@ mod tests {
         let mut frames = Vec::new();
         let mut on_status = |_: &ControllingStatus| {};
         let mut on_session = |_: &ControllingSessionProjection| {};
-        let mut on_task = |_: Value| {};
+        let mut on_task = |_: &LeaseContext, _: Value| {};
         let mut on_journal = |_: &AuthenticatedJournalFrame<'_>| Ok(());
         let mut on_snapshot = |_: &AuthenticatedSnapshotFrame<'_>| Ok(());
         let mut on_liveness = |frame: Value| {

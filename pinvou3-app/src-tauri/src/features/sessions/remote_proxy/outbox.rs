@@ -10,6 +10,7 @@ use crate::features::sessions::SessionStore;
 
 const FINGERPRINT_DOMAIN: &[u8] = b"pinvou-remote-request-semantics-v1\0";
 const MODEL_EXECUTION_DOMAIN: &[u8] = b"pinvou-remote-model-execution-v1\0";
+const TASK_INPUT_DOMAIN: &[u8] = b"pinvou-controller-task-input-v1";
 const ROUTE_FIELDS: &[&str] = &[
     "display_name",
     "preset",
@@ -174,11 +175,36 @@ pub(crate) fn request_fingerprint(
     Ok(hash_bytes(FINGERPRINT_DOMAIN, &canonical))
 }
 
+/// The frozen task-input digest includes the text and both reference lists.
+/// It is independent from the outbox fingerprint, which additionally binds
+/// the model, local SessionStore identity and current encrypted lease.
+pub(crate) fn remote_task_input_digest(
+    text: &str,
+    attachment_ids: &[String],
+    skill_ids: &[String],
+) -> String {
+    let mut hash = Sha256::new();
+    hash.update(TASK_INPUT_DOMAIN);
+    for field in [
+        text.as_bytes().to_vec(),
+        attachment_ids.join("\0").into_bytes(),
+        skill_ids.join("\0").into_bytes(),
+    ] {
+        hash.update((field.len() as u64).to_be_bytes());
+        hash.update(field);
+    }
+    hash.finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
 /// Ephemeral, sensitive in-process payload. It must never derive `Debug` or
 /// serialization and is dropped after the first dispatch attempt.
 pub(crate) struct PreparedOutboxEntry {
     pub(crate) fingerprint: String,
     pub(crate) context: LiveRemoteContext,
+    pub(crate) semantics: RemoteRequestSemantics,
     pub(crate) wire_payload: Value,
 }
 
@@ -203,6 +229,25 @@ impl SessionStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn attachment_input_digest_is_stable_and_binds_each_reference() {
+        assert_eq!(
+            remote_task_input_digest("hello", &[], &[]),
+            remote_task_input_digest("hello", &[], &[]),
+        );
+        let one = remote_task_input_digest("hello", &["attachment-1".into()], &[]);
+        assert_eq!(one.len(), 64);
+        assert_ne!(one, remote_task_input_digest("hello", &[], &[]));
+        assert_ne!(
+            one,
+            remote_task_input_digest("hello", &["attachment-2".into()], &[])
+        );
+        assert_eq!(
+            remote_task_input_digest("hello", &["attachment-1".into()], &["skill-1".into()],),
+            "edc6e22106c7785a93b3c6f7482a294fe5bea7748b31380728101e07b87a8065"
+        );
+    }
 
     #[test]
     fn fingerprint_covers_semantics_and_binding_without_serializing_payload() {

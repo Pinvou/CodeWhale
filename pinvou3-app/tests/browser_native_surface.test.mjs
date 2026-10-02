@@ -649,7 +649,7 @@ test('Linux WebDriver safely rebinds with a host marker without injecting remote
   );
   assert.match(marker, /BINDING_MARKER_PREFIX/);
   // The literal value is owned by the shared platform constant; the local name is an alias of it.
-  assert.match(nativePlatform, /HOST_BLANK_MARKER_WEBDRIVER_BIND_PREFIX: &str =\n\s*"about:blank#pinvou-webdriver-bind-";/);
+  assert.match(nativePlatform, /HOST_BLANK_MARKER_WEBDRIVER_BIND_PREFIX: &str =\r?\n\s*"about:blank#pinvou-webdriver-bind-";/);
   assert.match(linuxAutomation, /BINDING_MARKER_PREFIX: &str = super::HOST_BLANK_MARKER_WEBDRIVER_BIND_PREFIX;/);
   assert.match(
     linuxAutomation,

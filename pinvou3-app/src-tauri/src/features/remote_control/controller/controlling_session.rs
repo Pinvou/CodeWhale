@@ -6,9 +6,9 @@
 //! payload（能力快照请求、任务提交、任务取消）与输入摘要。前端只提交 UI 级
 //! 字段（标题、正文、模式），不再拼装任何协议字段。
 //!
-//! 当前仅开放 `chat` 模式；模型来源支持 B 本机模型（`controlled_device`），以及
-//! 租约已协商 `temporary_model_package_v1` 时的 A 端临时模型。代码模式、附件与成果
-//! 在此处失败关闭，等对应任务按能力开关打开。
+//! 可选模式来自 B 的认证能力快照；模型来源支持 B 本机模型（`controlled_device`），
+//! 以及租约已协商 `temporary_model_package_v1` 时、仅用于普通对话的 A 端临时模型。
+//! 工作区、工具和 Skill 只投影受控 opaque ID 与显示名。
 //! 任何上下文不匹配（无连接、lease 变更、未取到能力快照）都失败关闭。
 
 use std::collections::BTreeMap;
@@ -25,7 +25,7 @@ use super::protocol::{
     is_valid_identifier, validate_controller_runtime_payload_json,
 };
 
-/// 首版唯一开放的会话模式（代码模式需要工作区授权与能力开关，属后续任务）。
+/// 新会话意图的默认模式；每个任务仍必须按最新能力快照显式选择模式。
 const SESSION_MODE_CHAT: &str = "chat";
 /// 使用被控设备（B）本机模型。
 const MODEL_SOURCE_CONTROLLED: &str = "controlled_device";
@@ -98,17 +98,18 @@ pub(crate) struct ControllingSessionProjection {
 #[derive(Debug, Clone, Serialize, Eq, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ControllerCapabilityProjection {
-    connection_id: String,
-    controller_lease_id: String,
-    lease_epoch: String,
-    relay_epoch: String,
-    remote_control_generation: String,
-    capability_revision: u64,
-    expires_at_ms: u64,
-    modes: Vec<String>,
-    tools: Vec<ControllerToolDescriptor>,
-    skills: Vec<ControllerSkillDescriptor>,
-    workspaces: Vec<ControllerWorkspaceDescriptor>,
+    pub(crate) remote_session_ref: String,
+    pub(crate) connection_id: String,
+    pub(crate) controller_lease_id: String,
+    pub(crate) lease_epoch: String,
+    pub(crate) relay_epoch: String,
+    pub(crate) remote_control_generation: String,
+    pub(crate) capability_revision: u64,
+    pub(crate) expires_at_ms: u64,
+    pub(crate) modes: Vec<String>,
+    pub(crate) tools: Vec<ControllerToolDescriptor>,
+    pub(crate) skills: Vec<ControllerSkillDescriptor>,
+    pub(crate) workspaces: Vec<ControllerWorkspaceDescriptor>,
 }
 
 impl ControllerCapabilityProjection {
@@ -119,24 +120,25 @@ impl ControllerCapabilityProjection {
 
 #[derive(Debug, Clone, Serialize, Eq, PartialEq)]
 #[serde(rename_all = "camelCase")]
-struct ControllerToolDescriptor {
-    tool_id: String,
-    display_name: String,
+pub(crate) struct ControllerToolDescriptor {
+    pub(crate) tool_id: String,
+    pub(crate) display_name: String,
 }
 
 #[derive(Debug, Clone, Serialize, Eq, PartialEq)]
 #[serde(rename_all = "camelCase")]
-struct ControllerSkillDescriptor {
-    skill_id: String,
-    display_name: String,
+pub(crate) struct ControllerSkillDescriptor {
+    pub(crate) skill_id: String,
+    pub(crate) display_name: String,
+    pub(crate) scopes: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Eq, PartialEq)]
 #[serde(rename_all = "camelCase")]
-struct ControllerWorkspaceDescriptor {
-    workspace_id: String,
-    display_name: String,
-    code_allowed: bool,
+pub(crate) struct ControllerWorkspaceDescriptor {
+    pub(crate) workspace_id: String,
+    pub(crate) display_name: String,
+    pub(crate) code_allowed: bool,
 }
 
 /// 一次意图的投影：冻结 payload + 前端需要的标识（不含任何密钥材料）。
@@ -707,6 +709,7 @@ fn apply_snapshot_locked(
             Ok(ControllerSkillDescriptor {
                 skill_id: descriptor_string(value, "skill_id")?,
                 display_name: descriptor_string(value, "display_name")?,
+                scopes: string_list(value.get("scopes"), MAX_MODES)?,
             })
         })
         .collect::<Result<Vec<_>>>()?;
@@ -735,6 +738,7 @@ fn apply_snapshot_locked(
         .checked_add(valid_for_ms)
         .ok_or_else(|| SessionError::new("capability_snapshot_invalid"))?;
     let capability = ControllerCapabilityProjection {
+        remote_session_ref: intent.session_ref.clone(),
         connection_id: intent.lease.connection_id.clone(),
         controller_lease_id: intent.lease.controller_lease_id.clone(),
         lease_epoch: intent.lease.lease_epoch.clone(),
@@ -866,19 +870,38 @@ fn build_task_submit(
 }
 
 fn build_task_cancel(intent: &SessionIntent, request_id: &str, task_id: &str) -> Result<Value> {
-    let payload = json!({
+    let payload =
+        build_bound_task_cancel_payload(&intent.lease, &intent.session_id, request_id, task_id)?;
+    validate_outbound_payload(intent, &payload)
+}
+
+/// Pure cancellation frame builder for the SessionStore-backed A task path.
+/// The caller must first prove an attempted task in the current RemoteProxy
+/// binding; this helper deliberately owns no parallel task registry.
+pub(crate) fn build_bound_task_cancel_payload(
+    lease: &LeaseContext,
+    session_id: &str,
+    request_id: &str,
+    task_id: &str,
+) -> Result<Value> {
+    if !is_valid_identifier(session_id)
+        || !is_valid_identifier(request_id)
+        || !is_valid_identifier(task_id)
+    {
+        return Err(SessionError::new("task_request_invalid"));
+    }
+    Ok(json!({
         "v": 1,
         "type": "task_cancel",
-        "connection_id": intent.lease.connection_id,
-        "controller_lease_id": intent.lease.controller_lease_id,
-        "lease_epoch": intent.lease.lease_epoch,
-        "relay_epoch": intent.lease.relay_epoch,
-        "remote_control_generation": intent.lease.remote_control_generation,
+        "connection_id": lease.connection_id,
+        "controller_lease_id": lease.controller_lease_id,
+        "lease_epoch": lease.lease_epoch,
+        "relay_epoch": lease.relay_epoch,
+        "remote_control_generation": lease.remote_control_generation,
         "request_id": request_id,
         "task_id": task_id,
-        "session_id": intent.session_id,
-    });
-    validate_outbound_payload(intent, &payload)
+        "session_id": session_id,
+    }))
 }
 
 /// 输入摘要：域分离前缀 + 逐字段长度前缀，同参同摘要、异参不同摘要。冻结协议
@@ -1274,7 +1297,8 @@ mod tests {
         response["session_id"] = json!(first.session_id);
         response["controlled_session_id"] = json!("b-session-1");
         response["tools"] = json!([{"tool_id":"tool-1","display_name":"Tool"}]);
-        response["skills"] = json!([{"skill_id":"skill-1","display_name":"Skill"}]);
+        response["skills"] =
+            json!([{"skill_id":"skill-1","display_name":"Skill","scopes":["chat"]}]);
         response["valid_for_ms"] = json!("30000");
         sessions
             .apply_capability_snapshot_for_lease_with_mapping(
@@ -1293,6 +1317,7 @@ mod tests {
         assert_eq!(projection.capability_revision, 7);
         assert_eq!(projection.tools[0].tool_id, "tool-1");
         assert_eq!(projection.skills[0].skill_id, "skill-1");
+        assert_eq!(projection.skills[0].scopes, ["chat"]);
         assert_eq!(projection.workspaces[0].workspace_id, "workspace-0001");
         assert!(projection.expires_at_ms > 0);
         let encoded = serde_json::to_value(&projection).unwrap();
@@ -1313,6 +1338,7 @@ mod tests {
                 "modes",
                 "relayEpoch",
                 "remoteControlGeneration",
+                "remoteSessionRef",
                 "skills",
                 "tools",
                 "workspaces",
@@ -1325,6 +1351,7 @@ mod tests {
         assert!(encoded.get("peerId").is_none());
         assert!(encoded.get("credential").is_none());
         assert_eq!(encoded["tools"][0]["toolId"], "tool-1");
+        assert_eq!(encoded["skills"][0]["scopes"], json!(["chat"]));
         assert_eq!(encoded["workspaces"][0]["codeAllowed"], true);
         assert_eq!(
             sessions

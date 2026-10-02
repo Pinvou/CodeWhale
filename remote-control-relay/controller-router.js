@@ -10,6 +10,41 @@ const ID = /^[A-Za-z0-9][A-Za-z0-9._~-]{0,127}$/u;
 const HANDSHAKE_TYPES = new Set([
   "finished_receipt_commit", "encrypted_handshake_finished", "finished_receipt_ack",
 ]);
+const LIVENESS_TYPES = new Set([
+  "controller_liveness", "controller_liveness_challenge_a", "encrypted_controller_liveness_a",
+  "controller_liveness_attestation_request_a",
+]);
+const RESUME_TYPES = new Set([
+  "controller_resume_prepare", "encrypted_resume_confirm", "controller_resume_activation_ack",
+  "controller_post_activation_liveness", "controller_resume_ready_ack",
+]);
+const BUSINESS_STAGE = Object.freeze({
+  capability_snapshot_request: "task",
+  capability_snapshot: "task",
+  capability_snapshot_error: "task",
+  task_submit: "task",
+  task_cancel: "task",
+  task_status: "task",
+  remote_action_request: "task",
+  remote_action_result: "task",
+  temporary_model_package: "task",
+  journal_event: "task",
+  permission_list: "permission",
+  permission_decide: "permission",
+  attachment_begin: "attachment",
+  attachment_chunk: "attachment",
+  attachment_abort: "attachment",
+  artifact_index: "artifact",
+  artifact_preview: "artifact",
+  artifact_download_begin: "artifact",
+  artifact_download_chunk: "artifact",
+  artifact_download_abort: "artifact",
+});
+
+function businessAuditEvent(payloadKind, accepted) {
+  const stage = BUSINESS_STAGE[payloadKind];
+  return stage ? `${stage}_${accepted ? "forwarded" : "rejected"}` : null;
+}
 
 export class ControllerRouterError extends Error {
   constructor(code, options) {
@@ -150,6 +185,7 @@ export class ControllerRouter {
         if (peer.role !== "B") fail("controller_role_invalid");
         const response = await this.#registration.register(message, peer.authenticatedContext);
         this.#deliver(peer, response);
+        this.#emit("desktop_pairing_registered");
         return response;
       }
       if (message?.type === "controller_pairing_claim") {
@@ -165,7 +201,6 @@ export class ControllerRouter {
         controlled.counterpart = socketIdentity;
         this.#deliver(peer, reserved);
         this.#deliver(controlled, reserved);
-        this.#emit("controller_pairing_reserved");
         return reserved;
       }
       if (HANDSHAKE_TYPES.has(message?.type)) {
@@ -222,7 +257,6 @@ export class ControllerRouter {
         counterpart.controllerLeaseId = null;
         peer.counterpart = null;
         counterpart.counterpart = null;
-        this.#emit("controller_disconnected");
         return disconnect;
       }
       if (message?.type === "encrypted_frame") {
@@ -261,7 +295,8 @@ export class ControllerRouter {
           fail("controller_lease_not_found");
         }
         this.#deliver(counterpart, validated);
-        this.#emit("controller_business_forwarded");
+        const auditEvent = businessAuditEvent(validated.payload_kind, true);
+        if (auditEvent) this.#emit(auditEvent);
         return validated;
       }
       const hooks = this.#hooks.find((candidate) => candidate.handles(message?.type));
@@ -282,6 +317,8 @@ export class ControllerRouter {
           if (committed?.lease) {
             await Promise.all(this.#hooks.map((candidate) => candidate.onLeaseCreated(committed.lease)));
           }
+          if (LIVENESS_TYPES.has(message?.type)) this.#emit("liveness_forwarded");
+          if (RESUME_TYPES.has(message?.type)) this.#emit("resume_forwarded");
           return result ?? null;
         } catch (error) {
           try {
@@ -295,6 +332,18 @@ export class ControllerRouter {
       }
       fail("controller_message_unsupported");
     } catch (error) {
+      if (message?.type === "desktop_pairing_register") {
+        this.#emit("desktop_pairing_register_rejected");
+      } else if (HANDSHAKE_TYPES.has(message?.type)) {
+        this.#emit("handshake_rejected");
+      } else if (LIVENESS_TYPES.has(message?.type)) {
+        this.#emit("liveness_rejected");
+      } else if (RESUME_TYPES.has(message?.type)) {
+        this.#emit("resume_rejected");
+      } else if (message?.type === "encrypted_frame") {
+        const auditEvent = businessAuditEvent(message?.payload_kind, false);
+        if (auditEvent) this.#emit(auditEvent);
+      }
       const code = publicError(error);
       this.#send(peer.socket, {
         v: CONTROLLER_PROTOCOL_VERSION,
@@ -375,7 +424,16 @@ export class ControllerRouter {
   }
 
   async expire() {
-    const results = await Promise.all(this.#hooks.map((hooks) => hooks.expire()));
-    return results.reduce((sum, value) => sum + Number(value || 0), 0);
+    const results = await Promise.all(this.#hooks.map(async (hooks) => ({
+      hooks,
+      count: Number(await hooks.expire()) || 0,
+    })));
+    for (const { hooks, count } of results) {
+      const event = hooks instanceof ControllerLivenessHooks
+        ? "liveness_expired"
+        : (hooks instanceof ControllerResumeHooks ? "resume_expired" : null);
+      for (let index = 0; event && index < count; index += 1) this.#emit(event);
+    }
+    return results.reduce((sum, result) => sum + result.count, 0);
   }
 }

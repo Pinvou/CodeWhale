@@ -61,7 +61,10 @@ import { VoiceShortcutRouter } from '../features/voice-composer/VoiceShortcutRou
 import { MODEL_PRESET_DEFS } from '../features/settings/model-catalog.js';
 import { createPetActivationGuard } from '../features/pet/activation-guard.js';
 import { SessionAttachmentTitle } from '../features/attachments/SessionAttachmentTitle.jsx';
-import { openControlledDeviceChatWithRetry } from '../features/remote-control/remote-control-logic.mjs';
+import {
+  isControlledDeviceChatActive,
+  openControlledDeviceChatWithRetry,
+} from '../features/remote-control/remote-control-logic.mjs';
 import { modelSourceForLease } from '../features/remote-control/remote-model-source.mjs';
 import { mergeSessionStoreHistory } from '../features/remote-control/remote-session-adapter.mjs';
 import {
@@ -148,7 +151,7 @@ const APP_BRIDGE_STATE_DOMAINS = [
   'platform', 'sessions', 'chat', 'voice', 'knowledge', 'scheduled', 'monitor',
   'settings', 'models', 'llmapi', 'vllm', 'interaction', 'personas',
   'memory', 'remoteControl', 'updater', 'dependencies', 'teamRelay',
-  'projects', 'computerUse', 'desktopRemoteControl',
+  'projects', 'desktopRemoteControl', 'computerUse',
 ];
 
 function emitPetEvent(ev, name, payload) {
@@ -1442,10 +1445,10 @@ const NAV_PREFETCH = {
       const [poolMyOnly, setPoolMyOnly] = useState(false); // 跳卡池时是否直接落「我的卡牌」筛选(从确认窗"去查看"进来=true)
       const [webAccessOpen, setWebAccessOpen] = useState(false);
       const [remoteConversationOpen, setRemoteConversationOpen] = useState(false);
-      const [remoteModelSource, setRemoteModelSource] = useState('controlled_device');
-      const remoteModelLeaseKey = `${bs?.controllerConnection?.connectionId || ''}:${bs?.controllerConnection?.leaseEpoch || ''}`;
-      const remoteModelLeaseKeyRef = useRef(remoteModelLeaseKey);
+      const [remoteModelSource, setRemoteModelSource] = useState('controller_temporary');
       const remoteTemporaryModelAvailable = bs?.controllerConnection?.temporaryModelAvailable === true;
+      const remoteModelLeaseKey = `${bs?.controllerConnection?.connectionId || ''}:${bs?.controllerConnection?.leaseEpoch || ''}:${remoteTemporaryModelAvailable ? 'temporary' : 'controlled'}`;
+      const remoteModelLeaseKeyRef = useRef(remoteModelLeaseKey);
       const controlledDeviceAutoOpenRef = useRef(null);
       const controlledDeviceAutoOpenInFlightRef = useRef(null);
       const controlledSessionAutoOpenRef = useRef(null);
@@ -3734,7 +3737,13 @@ const NAV_PREFETCH = {
         setSearchOverlayOpen(true);
       }, []);
       const handleNavNewChat = useCallback(() => { handleNewChat(); }, [handleNewChat]);
-      const apiKeyGateOpen = shouldShowApiKeyGate(bs, currentView, bridge.available);
+      const isControlledChatActive = isControlledDeviceChatActive(bs?.controlledDevice);
+      const apiKeyGateOpen = shouldShowApiKeyGate(
+        bs,
+        currentView,
+        bridge.available,
+        isControlledChatActive,
+      );
       const browserOverlayIntent = [
         archiveConfirm ? 'archive-confirm' : '',
         searchOverlayOpen ? 'search' : '',
@@ -4611,7 +4620,9 @@ const NAV_PREFETCH = {
                   initialSection={settingsInitialSection}
                   remoteConversationOpen={remoteConversationOpen}
                   onRemoteConversationOpen={() => {
-                    openCurrentRemoteProxy().catch(() => setRemoteConversationOpen(true));
+                    openCurrentRemoteProxy()
+                      .then(opened => { if (!opened) setRemoteConversationOpen(true); })
+                      .catch(() => setRemoteConversationOpen(true));
                   }}
                   onRemoteConnected={activateRemoteProxy}
                   onRemoteConversationClose={() => setRemoteConversationOpen(false)}
@@ -4723,16 +4734,19 @@ const NAV_PREFETCH = {
               <ViewErrorBoundary t={t}>
                 <Suspense fallback={null}>
                   <div className="fixed inset-0 z-[120] flex items-start sm:items-center justify-center bg-black/50 p-3 sm:p-6">
-                    <div className="w-full max-w-[960px] max-h-full overflow-y-auto custom-scrollbar rounded-2xl bg-white shadow-2xl dark:bg-[#1F2023]">
+                    <div role="dialog" aria-modal="true" aria-labelledby="remote-connection-title" aria-describedby="remote-connection-background-hint" className="w-full max-w-[960px] max-h-full overflow-y-auto custom-scrollbar rounded-2xl bg-white shadow-2xl forced-colors:border forced-colors:border-[CanvasText] dark:bg-[#1F2023]">
                       <LazyRemoteConnectionShell
                         t={t}
                         bs={bs}
                         onClose={() => setRemoteConversationOpen(false)}
                         onOpenChat={openCurrentRemoteProxy}
                         onRequestDisconnect={async () => {
-                          if (bridge && bridge.available && bridge.desktopRemoteControl) {
-                            await bridge.desktopRemoteControl.controllerDisconnect();
+                          if (!bridge?.available || !bridge.desktopRemoteControl) {
+                            const failure = new Error('desktop_remote_control_unsupported');
+                            failure.code = 'desktop_remote_control_unsupported';
+                            throw failure;
                           }
+                          await bridge.desktopRemoteControl.controllerDisconnect();
                           setRemoteConversationOpen(false);
                         }}
                       />

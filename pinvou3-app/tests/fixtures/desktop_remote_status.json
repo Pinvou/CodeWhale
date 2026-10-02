@@ -28,16 +28,15 @@
     "errorCode": "endpoint_offline"
   },
   "controlledWaiting": {
-    "status": "waiting_connection",
+    "status": "waiting_for_pairing",
     "statusIntent": "1",
     "generation": "generation-0001",
     "registrationRequestId": "registration-0001",
     "pairingCode": "2345678",
-    "pairingExpiresAtMs": 600000,
+    "pairingRemainingMs": 599000,
     "deviceName": "Studio PC",
     "workspaceCount": 1,
     "codeModeAllowed": true,
-    "watchdogDeadlineB": null,
     "watchdogSuspect": false,
     "errorCode": null
   },
@@ -49,7 +48,6 @@
     "deviceName": null,
     "workspaceCount": 0,
     "codeModeAllowed": false,
-    "watchdogDeadlineB": null,
     "watchdogSuspect": false,
     "errorCode": "endpoint_offline"
   }

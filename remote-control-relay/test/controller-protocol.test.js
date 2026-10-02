@@ -134,15 +134,8 @@ function validPayload(type) {
     case "task_submit": return structuredClone(fixture.task_submit_vectors.controlled);
     case "task_cancel": return { ...base, request_id: "request-1", task_id: "task-1", session_id: "session-1" };
     case "task_status": return { ...base, request_id: "request-1", task_id: "task-1", session_id: "session-1", task_status: "succeeded", result_digest: ZERO_HASH };
-    case "permission_request": return { ...base, task_id: "task-1", permission_request_id: "permission-1", expires_at_ms: "1000", operation_type: "write_file", risk_level: "high", target_scope: "workspace", preview: "write file" };
-    case "permission_decision": return { ...base, task_id: "task-1", permission_request_id: "permission-1", request_id: "request-1", decision: "allow" };
-    case "attachment_begin": return { ...base, task_id: "task-1", session_id: "session-1", transfer_id: "transfer-1", file_name: "input.txt", mime_type: "text/plain", total_bytes: "3", sha256: ZERO_HASH };
-    case "attachment_chunk": return { ...base, task_id: "task-1", session_id: "session-1", transfer_id: "transfer-1", chunk_index: "0", chunk_b64: "AQID", chunk_bytes: "3" };
-    case "attachment_commit": return { ...base, task_id: "task-1", session_id: "session-1", transfer_id: "transfer-1", sha256: ZERO_HASH };
-    case "artifact_index_request": return { ...base, request_id: "request-1", session_id: "session-1" };
-    case "artifact_index": return structuredClone(fixture.artifact_index_vector);
-    case "artifact_read_request": return { ...base, request_id: "request-1", session_id: "session-1", artifact_id: "artifact-1", offset: "0", max_bytes: "1024" };
-    case "artifact_chunk": return { ...base, request_id: "request-1", session_id: "session-1", artifact_id: "artifact-1", offset: "0", chunk_b64: "AQID", chunk_bytes: "3", eof: true, sha256: ZERO_HASH };
+    case "remote_action_request": return { ...base, request_id: "request-1", session_id: "session-1", operation: "permission_list", body: { task_id: "task-1" } };
+    case "remote_action_result": return { ...base, request_id: "request-1", session_id: "session-1", operation: "permission_list", ok: true, body: { permissions: [] } };
     case "session_snapshot_request": return { ...base, request_id: "request-1", session_id: "session-1" };
     case "session_snapshot": return { ...base, request_id: "request-1", session_id: "session-1", journal_epoch: "journal-1", base_sequence: "1", snapshot_b64: "AQID", snapshot_bytes: "3", sha256: ZERO_HASH };
     case "journal_replay_request": return { ...base, request_id: "request-1", session_id: "session-1", journal_epoch: "journal-1", after_sequence: "1" };
@@ -248,7 +241,7 @@ test("pairing registration has a stable generation-scoped idempotency key", () =
 test("every decrypted payload is strict, role bound and lease bound", () => {
   for (const type of CONTROLLER_PAYLOAD_TYPES) {
     const payload = validPayload(type);
-    const role = ["capability_snapshot_request", "task_submit", "task_cancel", "permission_decision", "attachment_begin", "attachment_chunk", "attachment_commit", "artifact_index_request", "artifact_read_request", "session_snapshot_request", "journal_replay_request"].includes(type) ? "A" : "B";
+    const role = ["capability_snapshot_request", "task_submit", "task_cancel", "remote_action_request", "session_snapshot_request", "journal_replay_request"].includes(type) ? "A" : "B";
     assert.deepEqual(validateControllerPayload(payload, role, LEASE), payload, type);
     assertProtocolError("role_mismatch", () => validateControllerPayload(payload, role === "A" ? "B" : "A", LEASE));
     const stale = { ...payload, remote_control_generation: "generation-old" };
@@ -292,6 +285,15 @@ test("temporary model URLs follow the shared strict ASCII grammar", () => {
 test("runtime capability and artifact metadata stay minimal, revision-bound and path-free", () => {
   const capability = validPayload("capability_snapshot");
   validateControllerPayload(capability, "B", LEASE);
+  assert.deepEqual(capability.skills[0].scopes, ["chat", "code"]);
+  assertProtocolError("invalid_field", () => validateControllerPayload({
+    ...capability,
+    skills: [{ ...capability.skills[0], scopes: [] }],
+  }, "B", LEASE));
+  assertProtocolError("invalid_field", () => validateControllerPayload({
+    ...capability,
+    skills: [{ ...capability.skills[0], scopes: ["chat", "chat"] }],
+  }, "B", LEASE));
   for (const field of ["session_id", "controlled_session_id"]) {
     const missing = { ...capability };
     delete missing[field];
@@ -306,10 +308,13 @@ test("runtime capability and artifact metadata stay minimal, revision-bound and 
   const leakedCapability = structuredClone(capability);
   leakedCapability.workspaces[0].path = "C:\\private";
   assertProtocolError("unknown_field", () => validateControllerPayload(leakedCapability, "B", LEASE));
-  const artifact = validPayload("artifact_index");
+  const artifact = { ...validPayload("remote_action_result"), operation: "artifact_index", body: {
+    artifacts: [{ artifact_id: "artifact-1", task_id: "task-1", display_name: "report.txt", mime_type: "text/plain",
+      total_bytes: "3", sha256: ZERO_HASH, preview_kind: "text" }],
+  } };
   validateControllerPayload(artifact, "B", LEASE);
   const leakedArtifact = structuredClone(artifact);
-  leakedArtifact.artifacts[0].absolute_path = "C:\\private\\report.md";
+  leakedArtifact.body.artifacts[0].absolute_path = "C:\\private\\report.md";
   assertProtocolError("unknown_field", () => validateControllerPayload(leakedArtifact, "B", LEASE));
   assertProtocolError("invalid_enum", () => validateControllerPayload({ ...capability, modes: ["future"] }, "B", LEASE));
 });
@@ -404,6 +409,29 @@ test("runtime validation requires negotiated outer and inner capabilities", () =
       "A",
       { negotiated_capabilities: item.capabilities },
     ), item.name, item.expected_field);
+  }
+});
+
+test("remote actions require their operation capability in both encrypted directions", () => {
+  const cases = [
+    ["permission_list", { task_id: "task-1" }, { permissions: [] }, "permission_v1"],
+    ["attachment_abort", { task_id: "task-1", transfer_id: "ctr-up-1" }, { aborted: true }, "attachment_v1"],
+    ["artifact_index", {}, { artifacts: [] }, "artifact_v1"],
+  ];
+  for (const [operation, requestBody, resultBody, capability] of cases) {
+    for (const [type, role, body, ok] of [
+      ["remote_action_request", "A", requestBody, undefined],
+      ["remote_action_result", "B", resultBody, true],
+    ]) {
+      const payload = { v: 1, type, ...LEASE, request_id: "request-action-1",
+        session_id: "session-ref-1", operation, body, ...(ok === undefined ? {} : { ok }) };
+      const base = { lease: LEASE, negotiated_capabilities: ["task_v1"] };
+      assertProtocolError("unsupported_capability", () => validateControllerRuntimePayload(payload, role, base),
+        `${type}/${operation} must not borrow task_v1`);
+      validateControllerRuntimePayload(payload, role, {
+        lease: LEASE, negotiated_capabilities: ["task_v1", capability].sort(),
+      });
+    }
   }
 });
 

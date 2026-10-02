@@ -37,7 +37,7 @@ SESSION_APPLICATION_EXPORTS = (
 REMOTE_CONTROL_HOST_API_INITIAL_CEILING = {
     "pinvou3-app/src-tauri/src/features/remote_control/controller/controlling_service.rs:host_emit": 3,
     "pinvou3-app/src-tauri/src/features/remote_control/controller/controlling_service.rs:tauri_path": 2,
-    "pinvou3-app/src-tauri/src/features/remote_control/controller/relay_runtime.rs:host_emit": 7,
+    "pinvou3-app/src-tauri/src/features/remote_control/controller/relay_runtime.rs:host_emit": 1,
     "pinvou3-app/src-tauri/src/features/remote_control/controller/relay_runtime.rs:tauri_path": 2,
     "pinvou3-app/src-tauri/src/features/remote_control/controller/relay_transport.rs:tauri_path": 1,
     "pinvou3-app/src-tauri/src/features/remote_control/manager/mod.rs:host_emit": 4,
@@ -883,7 +883,7 @@ def session_application_exports(text: str) -> tuple[tuple[str, ...], ...]:
 
 
 def session_application_export_surface_is_frozen(text: str) -> bool:
-    """Keep the six declarations unconditional and forbid top-level expansion.
+    """Keep the five declarations unconditional and forbid top-level expansion.
 
     Inspect only top-level items so the ordinary test module can still contain
     attributes and local macros. A macro at the root could add exports which a

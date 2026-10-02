@@ -19,7 +19,7 @@ use sha2::{Digest, Sha256};
 
 use super::task::RemoteTaskEvent;
 #[cfg(test)]
-use super::task::RemoteTaskEventSink;
+use super::task::{RemoteTaskEventSink, RemoteTaskModelSource};
 
 /// Must not exceed SessionStore.RemoteProxy's authenticated projection window.
 pub(crate) const JOURNAL_CAPACITY: usize = 512;
@@ -1075,6 +1075,9 @@ impl RemoteJournal {
         generation: Option<&str>,
         event: &RemoteTaskEvent,
     ) -> Option<JournalEvent> {
+        if generation.is_some_and(|expected| expected != event.generation) {
+            return None;
+        }
         let terminal = matches!(
             event.status.as_str(),
             "succeeded" | "failed" | "cancelled" | "interrupted" | "result_unknown"
@@ -1124,8 +1127,11 @@ impl RemoteJournal {
         };
         match result {
             Ok(stored) => stored,
-            Err(error) => {
-                eprintln!("[remote-control] journal append rejected: {}", error.code);
+            Err(_error) => {
+                crate::features::remote_control::controller::relay_runtime::log_controlled_event(
+                    "journal_append_rejected",
+                    "rejected",
+                );
                 None
             }
         }
@@ -1677,6 +1683,8 @@ mod tests {
         sink.publish_task_event(&RemoteTaskEvent {
             task_id: "task-0001".into(),
             session_id: "session-0001".into(),
+            generation: "generation-0001".into(),
+            model_source: RemoteTaskModelSource::ControlledDevice,
             status: "running".into(),
             sequence: "1".into(),
             transition_sequence: 2,
@@ -1687,6 +1695,8 @@ mod tests {
         sink.publish_task_event(&RemoteTaskEvent {
             task_id: "task-0001".into(),
             session_id: "session-0001".into(),
+            generation: "generation-0001".into(),
+            model_source: RemoteTaskModelSource::ControlledDevice,
             status: "succeeded".into(),
             sequence: "2".into(),
             transition_sequence: 3,
@@ -1711,6 +1721,8 @@ mod tests {
         let event = RemoteTaskEvent {
             task_id: "task-0001".into(),
             session_id: "session-0001".into(),
+            generation: "generation-0001".into(),
+            model_source: RemoteTaskModelSource::ControlledDevice,
             status: "running".into(),
             sequence: "1".into(),
             transition_sequence: 2,
