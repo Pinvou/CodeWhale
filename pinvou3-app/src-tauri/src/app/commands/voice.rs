@@ -78,12 +78,15 @@ pub(crate) fn set_voice_shortcut_enabled(enabled: bool) -> Result<(), String> {
     Ok(())
 }
 
-/// Cross-window recording mutual exclusion: the frontend syncs its own window
-/// label when recording starts/ends/fails, and the native shortcut hook uses
-/// it to pick the trigger target window (see
-/// voice_shortcut::set_recording_owner). A window may only register its own
-/// label, so a broken or compromised renderer cannot pin an arbitrary window
-/// as the recording window and hijack the global Alt gesture.
+/// Cross-window recording mutual exclusion: the frontend atomically claims
+/// the recording ownership (its own window label bound to an operation token)
+/// before opening the microphone, and releases it when recording ends/fails;
+/// the native shortcut hook uses the current owner to pick the trigger target
+/// window (see voice_shortcut::set_recording_owner). A window may only
+/// register its own label, so a broken or compromised renderer cannot pin an
+/// arbitrary window as the recording window and hijack the global Alt gesture.
+/// The returned bool tells whether the claim/release landed; a failed claim
+/// fails the recording start before any microphone is opened.
 #[tauri::command]
 pub(crate) fn set_voice_shortcut_recording(
     window: tauri::WebviewWindow,
@@ -1027,6 +1030,7 @@ async fn call_voice_postprocess_model(
             system,
             &user,
             voice_postprocess_max_tokens(mode, retry),
+            bridge.opencode_conversation_key("voice-postprocess"),
         )
         .await?;
         let truncated = completion.stop_reason.as_deref() == Some("max_tokens");
@@ -1047,18 +1051,21 @@ async fn call_voice_postprocess_model(
         "stream": false
     });
     apply_voice_reasoning_controls(&mut body, preset, &bridge.provider(), &base_url, model_name);
-    let resp = client
-        .post(format!(
+    let resp = crate::core::model_endpoint::with_opencode_session_header(
+        client.post(format!(
             "{}/chat/completions",
             base_url.trim_end_matches('/')
-        ))
-        .bearer_auth(bridge.api_key())
-        .json(&body)
-        .send()
-        .await
-        .context("post voice postprocess chat/completions")?
-        .error_for_status()
-        .context("voice postprocess chat/completions status")?;
+        )),
+        &base_url,
+        bridge.opencode_conversation_key("voice-postprocess"),
+    )
+    .bearer_auth(bridge.api_key())
+    .json(&body)
+    .send()
+    .await
+    .context("post voice postprocess chat/completions")?
+    .error_for_status()
+    .context("voice postprocess chat/completions status")?;
     let value: Value = resp
         .json()
         .await
@@ -1325,9 +1332,15 @@ use crate::features::voice::{
 };
 use voice_asr_domain::*;
 
-async_command_passthrough!(microphone_domain, reset_microphone_permission(window: tauri::WebviewWindow) -> Result<bool, String>);
+async_command_passthrough!(
+    microphone_domain,
+    reset_microphone_permission(window: tauri::WebviewWindow) -> Result<bool, String>
+);
 async_command_passthrough!(voice_asr_domain, voice_asr_status() -> VoiceAsrStatus);
-async_command_passthrough!(voice_asr_domain, install_voice_asr(app: AppHandle) -> Result<VoiceAsrStatus, String>);
+async_command_passthrough!(
+    voice_asr_domain,
+    install_voice_asr(app: AppHandle) -> Result<VoiceAsrStatus, String>
+);
 sync_command_passthrough!(voice_asr_domain, cancel_voice_asr());
 
 #[cfg(test)]
