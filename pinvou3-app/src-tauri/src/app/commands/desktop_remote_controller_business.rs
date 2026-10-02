@@ -5,13 +5,17 @@
 //! `desktop_remote_task` / `desktop_remote_capabilities` 的同一套逻辑，避免
 //! 「命令入口」与「wire 入口」两份实现漂移。
 
-use serde_json::Value;
+use crate::features::codex_acp::{AcpPool, RemotePermissionOwner};
+use serde_json::{Value, json};
 
 use crate::features::remote_control::controller::capabilities::CapabilitySnapshotManager;
 use crate::features::remote_control::controller::controlled::{
     ControlledCleanupScope, ControlledCleanupSink, ControlledDeviceManager,
 };
-use crate::features::remote_control::controller::controlling_session::task_input_digest;
+use crate::features::remote_control::controller::permission::{
+    DecisionAuthority, DecisionOutcome, DispatchCommit, DispatchState, PermissionAuthority,
+    PermissionDecision,
+};
 use crate::features::remote_control::controller::ports::{
     ControlledExecutionPort, RemotePortError, RemotePortFuture,
 };
@@ -21,20 +25,62 @@ use crate::features::remote_control::controller::protocol::{
     validate_controller_runtime_payload_json,
 };
 use crate::features::remote_control::controller::relay_runtime::{
-    ControlledBusinessPort, controlled_monotonic_millis,
+    ControlledBusinessPort, controlled_monotonic_millis, log_controlled_port_error,
+};
+use crate::features::remote_control::controller::task::{
+    RemoteTaskLedger, RemoteTaskState, TaskLeaseBinding,
 };
 use crate::features::remote_control::controller::task::{
     RemoteTaskRequest, TASK_MODE_CHAT, TASK_MODE_CODE, TASK_MODEL_SOURCE_CONTROLLED,
 };
+use crate::features::remote_control::controller::transfer::core::{
+    TransferContext, TransferDirection, TransferMetadata,
+};
+use crate::features::remote_control::controller::transfer::upload::UploadProgress;
 use crate::features::sessions::application::ports::{UseCaseError, UseCaseFuture};
 use crate::features::sessions::application::submit_controlled::{
     ControlledInput, ControlledSubmission, ControlledSubmissionPort, ControlledSubmissionResult,
     LocalControlledInput, PreparedControlledTask, RemoteControlledInput, SubmitControlledUseCase,
 };
+use crate::features::sessions::remote_proxy::outbox::remote_task_input_digest;
 use crate::features::sessions::remote_proxy::schema::valid_remote_identifier;
 use base64::Engine as _;
+use std::collections::HashSet;
 use std::sync::Arc;
 use tauri::{AppHandle, Manager as _};
+
+/// A same-value allow retry observes the original dispatch, never dispatches twice.
+fn commit_effective_permission_allow(
+    authority: &PermissionAuthority,
+    request_id: &str,
+    outcome: &DecisionOutcome,
+) -> Result<(), String> {
+    match outcome {
+        DecisionOutcome::Decided {
+            decision: PermissionDecision::Allow,
+            dispatch_state,
+        }
+        | DecisionOutcome::Replayed {
+            decision: PermissionDecision::Allow,
+            dispatch_state,
+        } => {
+            if *dispatch_state == DispatchState::Dispatched {
+                return Ok(());
+            }
+            match authority
+                .commit_dispatch(request_id, authority.now_ms())
+                .map_err(|error| error.code.to_owned())?
+            {
+                DispatchCommit::Committed
+                | DispatchCommit::Rejected {
+                    code: "permission_already_dispatched",
+                } => Ok(()),
+                DispatchCommit::Rejected { code } => Err(code.to_owned()),
+            }
+        }
+        _ => Ok(()),
+    }
+}
 
 /// E2E-06：B 端清理端口。`ControlledDeviceManager` 在 stop / refresh / 远端断开 /
 /// 恢复失败等任何终态都会触发它；这里用同一代的任务登记表中断本代远端任务，
@@ -134,6 +180,9 @@ fn submit_error(code: &str) -> UseCaseError {
         "task_session_provisioner_unavailable" => {
             UseCaseError::new("task_session_provisioner_unavailable", true)
         }
+        "task_session_backend_bind_failed" => {
+            UseCaseError::new("task_session_backend_bind_failed", true)
+        }
         "task_session_create_failed" => UseCaseError::new("task_session_create_failed", true),
         "task_session_lookup_failed" => UseCaseError::new("task_session_lookup_failed", true),
         "task_request_conflict" => UseCaseError::new("task_request_conflict", false),
@@ -153,11 +202,13 @@ fn submit_error(code: &str) -> UseCaseError {
         "task_result_digest_invalid" => UseCaseError::new("task_result_digest_invalid", false),
         "task_input_digest_invalid" => UseCaseError::new("task_input_digest_invalid", false),
         "task_input_invalid" => UseCaseError::new("task_input_invalid", false),
+        "task_skill_invalid" => UseCaseError::new("task_skill_invalid", false),
         "task_mode_unsupported" => UseCaseError::new("task_mode_unsupported", false),
         "capability_snapshot_missing" => UseCaseError::new("capability_snapshot_missing", true),
         "capability_revision_exhausted" => {
             UseCaseError::new("capability_revision_exhausted", false)
         }
+        "capability_admission_capacity" => UseCaseError::new("capability_admission_capacity", true),
         "capability_expiry_overflow" => UseCaseError::new("capability_expiry_overflow", false),
         "capability_workspace_capacity" => UseCaseError::new("capability_workspace_capacity", true),
         "capability_workspace_duplicate" => {
@@ -180,6 +231,9 @@ fn submit_error(code: &str) -> UseCaseError {
         "model_package_missing" => UseCaseError::new("model_package_missing", false),
         "model_not_exportable" => UseCaseError::new("model_not_exportable", false),
         "task_workspace_required" => UseCaseError::new("task_workspace_required", false),
+        "task_workspace_not_authorized" => {
+            UseCaseError::new("task_workspace_not_authorized", false)
+        }
         "task_workspace_unexpected" => UseCaseError::new("task_workspace_unexpected", false),
         "task_mode_invalid" => UseCaseError::new("task_mode_invalid", false),
         "task_model_source_invalid" => UseCaseError::new("task_model_source_invalid", false),
@@ -193,6 +247,7 @@ fn submit_error(code: &str) -> UseCaseError {
         "lease_unavailable" => UseCaseError::new("lease_unavailable", true),
         "model_binding_invalid" => UseCaseError::new("model_binding_invalid", false),
         "model_binding_stale" => UseCaseError::new("model_binding_stale", true),
+        "model_credential_unavailable" => UseCaseError::new("model_credential_unavailable", false),
         "model_credential_invalid" => UseCaseError::new("model_credential_invalid", false),
         "model_credential_kind_unsupported" => {
             UseCaseError::new("model_credential_kind_unsupported", false)
@@ -227,6 +282,7 @@ fn submit_error(code: &str) -> UseCaseError {
             UseCaseError::new("model_reasoning_effort_unsupported", false)
         }
         "model_route_invalid" => UseCaseError::new("model_route_invalid", false),
+        "model_runtime_unavailable" => UseCaseError::new("model_runtime_unavailable", true),
         "model_secret_invalid" => UseCaseError::new("model_secret_invalid", false),
         "model_secret_too_large" => UseCaseError::new("model_secret_too_large", false),
         "model_vendor_unsupported" => UseCaseError::new("model_vendor_unsupported", false),
@@ -259,6 +315,7 @@ fn submit_error(code: &str) -> UseCaseError {
         "task_payload_stale_context" => UseCaseError::new("task_payload_stale_context", true),
         "task_payload_role_mismatch" => UseCaseError::new("task_payload_role_mismatch", false),
         "task_payload_replay" => UseCaseError::new("task_payload_replay", false),
+        "task_status_binding_invalid" => UseCaseError::new("task_status_binding_invalid", false),
         _ => UseCaseError::new("task_request_invalid", false),
     }
 }
@@ -290,6 +347,12 @@ fn validated_local_text(text: &str) -> Result<&str, UseCaseError> {
         return Err(UseCaseError::new("task_input_invalid", false));
     }
     Ok(trimmed)
+}
+
+fn log_task_submit_boundary(stage: &str) {
+    crate::features::remote_control::controller::relay_runtime::log_controlled_event(
+        stage, "ready",
+    );
 }
 
 struct DesktopControlledSubmitBackend {
@@ -327,6 +390,28 @@ impl DesktopControlledSubmitBackend {
         }
         Ok(validated)
     }
+
+    fn validate_task_capability(
+        &self,
+        request: &RemoteTaskRequest,
+        lease: &LeaseContext,
+        now_b: u64,
+    ) -> Result<(), UseCaseError> {
+        let skill_ids = request
+            .skill_ids()
+            .map_err(|error| submit_error(error.code))?;
+        self.app
+            .state::<CapabilitySnapshotManager>()
+            .validate_task_selection(
+                &request.capability_revision,
+                lease,
+                &request.mode,
+                &skill_ids,
+                request.workspace_id.as_deref(),
+                now_b,
+            )
+            .map_err(|error| submit_error(error.code))
+    }
 }
 
 impl ControlledSubmissionPort for DesktopControlledSubmitBackend {
@@ -336,10 +421,36 @@ impl ControlledSubmissionPort for DesktopControlledSubmitBackend {
         {
             return Err(UseCaseError::new("task_session_not_found", false));
         }
-        if input.code_mode {
-            return Err(UseCaseError::new("task_mode_unsupported", false));
+        if input.code_mode != input.workspace_id.is_some() {
+            return Err(UseCaseError::new("task_workspace_required", false));
         }
         let text = validated_local_text(&input.text)?;
+        if input.attachments.len() > 8
+            || input.skill_ids.len() > 32
+            || input
+                .attachments
+                .iter()
+                .any(|attachment| !valid_remote_identifier(&attachment.handle_id))
+        {
+            return Err(UseCaseError::new("task_request_invalid", false));
+        }
+        let mut unique_attachments = HashSet::new();
+        let mut unique_skills = HashSet::new();
+        if input
+            .attachments
+            .iter()
+            .any(|attachment| !unique_attachments.insert(attachment.handle_id.as_str()))
+            || input.skill_ids.iter().any(|skill_id| {
+                !valid_remote_identifier(skill_id) || !unique_skills.insert(skill_id.as_str())
+            })
+        {
+            return Err(UseCaseError::new("task_request_invalid", false));
+        }
+        let attachment_ids = input
+            .attachments
+            .iter()
+            .map(|attachment| attachment.handle_id.clone())
+            .collect::<Vec<_>>();
         let (lease, caps) = self.live_context()?;
         if lease.remote_control_generation != input.generation {
             return Err(UseCaseError::new("task_session_generation_stale", true));
@@ -360,26 +471,36 @@ impl ControlledSubmissionPort for DesktopControlledSubmitBackend {
             "session_id": input.expected_session_id,
             "capability_revision": "1",
             "model_source": TASK_MODEL_SOURCE_CONTROLLED,
-            "mode": TASK_MODE_CHAT,
-            "input_digest": task_input_digest(text),
+            "mode": if input.code_mode { TASK_MODE_CODE } else { TASK_MODE_CHAT },
+            "input_digest": remote_task_input_digest(text, &attachment_ids, &input.skill_ids),
             "input": {
                 "text": text,
-                "attachment_ids": Vec::<String>::new(),
-                "skill_ids": Vec::<String>::new(),
+                "attachment_ids": attachment_ids,
+                "skill_ids": input.skill_ids,
             },
         });
+        let mut preflight = preflight;
+        if let Some(workspace_id) = input.workspace_id.as_deref() {
+            preflight["input"]["workspace_id"] = serde_json::json!(workspace_id);
+        }
         self.validate_payload(&preflight, &lease, &caps)?;
         let runtime = self
             .app
             .state::<Arc<super::desktop_remote_task::DesktopRemoteTaskRuntime>>();
         let service = runtime.service();
-        let trusted_ref = super::desktop_remote_task::trusted_chat_remote_ref(
-            &service,
-            &input.expected_session_id,
-            &input.generation,
-        )
-        .map_err(|code| submit_error(&code))?;
-        if trusted_ref != input.remote_ref {
+        let (trusted_ref, lane, workspace_id) =
+            super::desktop_remote_task::trusted_local_remote_binding(
+                &service,
+                &runtime.authorizations(),
+                &input.expected_session_id,
+                &input.generation,
+            )
+            .map_err(|code| submit_error(&code))?;
+        if trusted_ref != input.remote_ref
+            || (lane == crate::features::remote_control::controller::task::RemoteSessionLane::Code)
+                != input.code_mode
+            || workspace_id != input.workspace_id
+        {
             return Err(UseCaseError::new("task_session_not_found", false));
         }
         Ok(())
@@ -395,6 +516,11 @@ impl ControlledSubmissionPort for DesktopControlledSubmitBackend {
         if task.session_id != input.remote_ref {
             return Err(UseCaseError::new("task_request_invalid", false));
         }
+        // Reject an expired or policy-replaced snapshot before allocating or
+        // claiming a B Session. Final admission repeats this under a snapshot
+        // consistency token; this preflight is only the cheap early boundary.
+        self.validate_task_capability(&task, &lease, controlled_monotonic_millis())?;
+        log_task_submit_boundary("task_submit_capability_validated");
         let service = self
             .app
             .state::<Arc<super::desktop_remote_task::DesktopRemoteTaskRuntime>>()
@@ -402,6 +528,7 @@ impl ControlledSubmissionPort for DesktopControlledSubmitBackend {
         let b_session_id = service
             .ensure_authenticated_task_session(&task, &lease, &input.title)
             .map_err(|error| submit_error(error.code))?;
+        log_task_submit_boundary("task_submit_mapping_ready");
         // Mirror the controlled lifecycle guard used by the existing open
         // path. A disconnect between reading the lease and creating the
         // mapping must not leave an old-generation binding available.
@@ -419,6 +546,7 @@ impl ControlledSubmissionPort for DesktopControlledSubmitBackend {
             &lease,
         )
         .map_err(|code| submit_error(&code))?;
+        log_task_submit_boundary("task_submit_mapping_projected");
         Ok(b_session_id)
     }
 
@@ -427,13 +555,22 @@ impl ControlledSubmissionPort for DesktopControlledSubmitBackend {
             .app
             .state::<Arc<super::desktop_remote_task::DesktopRemoteTaskRuntime>>()
             .service();
-        let trusted_ref = super::desktop_remote_task::trusted_chat_remote_ref(
-            &service,
-            &input.expected_session_id,
-            &input.generation,
-        )
-        .map_err(|code| submit_error(&code))?;
-        if trusted_ref == input.remote_ref {
+        let (trusted_ref, lane, workspace_id) =
+            super::desktop_remote_task::trusted_local_remote_binding(
+                &service,
+                &self
+                    .app
+                    .state::<Arc<super::desktop_remote_task::DesktopRemoteTaskRuntime>>()
+                    .authorizations(),
+                &input.expected_session_id,
+                &input.generation,
+            )
+            .map_err(|code| submit_error(&code))?;
+        if trusted_ref == input.remote_ref
+            && (lane == crate::features::remote_control::controller::task::RemoteSessionLane::Code)
+                == input.code_mode
+            && workspace_id == input.workspace_id
+        {
             Ok(input.expected_session_id.clone())
         } else {
             Err(UseCaseError::new("task_session_not_found", false))
@@ -453,6 +590,8 @@ impl ControlledSubmissionPort for DesktopControlledSubmitBackend {
         validated["session_id"] = Value::String(b_session_id.to_owned());
         let request = RemoteTaskRequest::from_payload(&validated)
             .map_err(|error| submit_error(error.code))?;
+        self.validate_task_capability(&request, &lease, controlled_monotonic_millis())?;
+        log_task_submit_boundary("task_submit_prepared");
         Ok(PreparedControlledTask {
             remote_ref: input.remote_ref,
             b_session_id: b_session_id.to_owned(),
@@ -460,6 +599,7 @@ impl ControlledSubmissionPort for DesktopControlledSubmitBackend {
             client_request_id: request.client_request_id,
             input_digest: request.input_digest,
             payload: validated,
+            local_attachments: None,
         })
     }
 
@@ -484,6 +624,19 @@ impl ControlledSubmissionPort for DesktopControlledSubmitBackend {
             .ok_or_else(|| UseCaseError::new("capability_snapshot_missing", true))?;
         let unique = uuid::Uuid::new_v4().simple().to_string();
         let text = input.text.trim();
+        let attachment_ids = input
+            .attachments
+            .iter()
+            .map(|attachment| attachment.handle_id.clone())
+            .collect::<Vec<_>>();
+        let mode = if input.code_mode {
+            TASK_MODE_CODE
+        } else {
+            TASK_MODE_CHAT
+        };
+        capabilities
+            .validate_skills_for_mode(&lease, mode, &input.skill_ids, now_b)
+            .map_err(|error| submit_error(error.code))?;
         let payload = serde_json::json!({
             "v": 1,
             "type": "task_submit",
@@ -498,14 +651,21 @@ impl ControlledSubmissionPort for DesktopControlledSubmitBackend {
             "session_id": b_session_id,
             "capability_revision": revision,
             "model_source": TASK_MODEL_SOURCE_CONTROLLED,
-            "mode": TASK_MODE_CHAT,
-            "input_digest": task_input_digest(text),
+            "mode": mode,
+            "input_digest": remote_task_input_digest(text, &attachment_ids, &input.skill_ids),
             "input": {
                 "text": text,
-                "attachment_ids": Vec::<String>::new(),
-                "skill_ids": Vec::<String>::new(),
+                "attachment_ids": attachment_ids,
+                "skill_ids": input.skill_ids,
             },
         });
+        let mut payload = payload;
+        if let Some(workspace_id) = input.workspace_id.as_deref() {
+            capabilities
+                .workspace_for_task(revision, &lease, workspace_id, now_b)
+                .map_err(|error| submit_error(error.code))?;
+            payload["input"]["workspace_id"] = serde_json::json!(workspace_id);
+        }
         let validated = self.validate_payload(&payload, &lease, &caps)?;
         let request = RemoteTaskRequest::from_payload(&validated)
             .map_err(|error| submit_error(error.code))?;
@@ -516,16 +676,19 @@ impl ControlledSubmissionPort for DesktopControlledSubmitBackend {
             client_request_id: request.client_request_id,
             input_digest: request.input_digest,
             payload: validated,
+            local_attachments: Some(input.attachments),
         })
     }
 
     fn admit_and_dispatch(&self, prepared: PreparedControlledTask) -> UseCaseFuture<'_, Value> {
         Box::pin(async move {
-            super::desktop_remote_task::submit_prepared_bound_task(
+            log_task_submit_boundary("controlled_submission_admission_entered");
+            super::desktop_remote_task::submit_prepared_local_bound_task(
                 &self.app,
                 &prepared.b_session_id,
                 &prepared.remote_ref,
                 &prepared.payload,
+                prepared.local_attachments.unwrap_or_default(),
             )
             .map_err(|code| submit_error(&code))
         })
@@ -550,6 +713,7 @@ async fn submit_prevalidated_remote<P: ControlledSubmissionPort>(
     {
         return Err(UseCaseError::new("task_request_invalid", false));
     }
+    log_task_submit_boundary("task_submit_identity_validated");
     input.payload = validated;
     ControlledSubmission::new(port)
         .submit(ControlledInput::Remote(input))
@@ -574,9 +738,11 @@ impl ControlledExecutionPort for DesktopControlledExecutionAdapter {
             if lease.remote_control_generation != request.generation {
                 return Err(RemotePortError::new("task_session_generation_stale", true));
             }
+            log_task_submit_boundary("task_submit_context_validated");
             let validated = backend
                 .validate_payload(&request.payload, &lease, &caps)
                 .map_err(|error| RemotePortError::new(error.code(), error.is_retryable()))?;
+            log_task_submit_boundary("task_submit_payload_validated");
             submit_prevalidated_remote(backend, request, validated)
                 .await
                 .map_err(|error| RemotePortError::new(error.code(), error.is_retryable()))
@@ -584,34 +750,327 @@ impl ControlledExecutionPort for DesktopControlledExecutionAdapter {
     }
 }
 
+impl DesktopControlledBusiness {
+    async fn handle_remote_permission_decision(
+        &self,
+        lease: &LeaseContext,
+        session_ref: &str,
+        body: &Value,
+    ) -> Result<Value, String> {
+        let controlled = self.app.state::<ControlledDeviceManager>();
+        let (owner, request_id, decision) = controlled
+            .with_current_business_lease(lease, || {
+                let field = |key: &str| -> Result<&str, String> {
+                    body.get(key)
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| "remote_action_invalid".to_owned())
+                };
+                let task_id = field("task_id")?;
+                let request_id = field("permission_request_id")?;
+                let decision = PermissionDecision::parse(field("decision")?)
+                    .ok_or_else(|| "permission_decision_invalid".to_owned())?;
+                let tasks = self
+                    .app
+                    .state::<Arc<super::desktop_remote_task::DesktopRemoteTaskRuntime>>();
+                let session_id = tasks
+                    .service()
+                    .session_for(session_ref, &lease.remote_control_generation)
+                    .ok_or_else(|| "task_session_binding_mismatch".to_owned())?;
+                let record = self
+                    .app
+                    .state::<Arc<RemoteTaskLedger>>()
+                    .record(task_id)
+                    .map_err(|error| error.code.to_owned())?;
+                if record.session_id != session_id
+                    || record.lease != TaskLeaseBinding::from_context(lease)
+                    || record.is_terminal()
+                {
+                    return Err("task_session_binding_mismatch".to_owned());
+                }
+                let authority = self.app.state::<Arc<PermissionAuthority>>();
+                let outcome = authority
+                    .decide(
+                        DecisionAuthority::ControllerA,
+                        lease,
+                        task_id,
+                        request_id,
+                        decision,
+                        authority.now_ms(),
+                    )
+                    .map_err(|error| error.code.to_owned())?;
+                commit_effective_permission_allow(&authority, request_id, &outcome)?;
+                Ok((
+                    RemotePermissionOwner {
+                        session_id,
+                        task_id: task_id.to_owned(),
+                        lease: lease.clone(),
+                    },
+                    request_id.to_owned(),
+                    if matches!(outcome, DecisionOutcome::Expired) {
+                        PermissionDecision::Deny
+                    } else {
+                        decision
+                    },
+                ))
+            })
+            .map_err(|error| error.code.to_owned())??;
+
+        super::desktop_remote_permission::respond_remote_permission_via_acp(
+            &self.app.state::<AcpPool>(),
+            &owner,
+            &request_id,
+            decision,
+        )
+        .await?;
+        controlled
+            .with_current_business_lease(lease, || {
+                let record = self
+                    .app
+                    .state::<Arc<RemoteTaskLedger>>()
+                    .record(&owner.task_id)
+                    .map_err(|error| error.code.to_owned())?;
+                if record.session_id != owner.session_id
+                    || record.lease != TaskLeaseBinding::from_context(lease)
+                    || !matches!(
+                        record.state,
+                        RemoteTaskState::Running | RemoteTaskState::WaitingPermission
+                    )
+                {
+                    return Err("task_session_binding_mismatch".to_owned());
+                }
+                Ok(())
+            })
+            .map_err(|error| error.code.to_owned())??;
+        let view = self
+            .app
+            .state::<Arc<PermissionAuthority>>()
+            .view(&request_id)
+            .map_err(|error| error.code.to_owned())?;
+        Ok(json!({"state": view.state}))
+    }
+
+    /// Resolve the A reference only through the current authenticated B
+    /// generation's authoritative map. A caller cannot select an arbitrary
+    /// local journal by supplying a different reference.
+    fn authoritative_journal_session(
+        &self,
+        lease: &LeaseContext,
+        session_ref: &str,
+    ) -> Result<String, String> {
+        let (current, _) = self
+            .app
+            .state::<ControlledDeviceManager>()
+            .live_runtime_context()
+            .map_err(|_| "journal_lease_stale".to_owned())?;
+        if &current != lease {
+            return Err("journal_lease_stale".to_owned());
+        }
+        let runtime = self
+            .app
+            .state::<Arc<super::desktop_remote_task::DesktopRemoteTaskRuntime>>();
+        runtime
+            .service()
+            .session_for(session_ref, &lease.remote_control_generation)
+            .ok_or_else(|| "journal_session_mapping_missing".to_owned())
+    }
+
+    fn handle_remote_action(
+        &self,
+        lease: &LeaseContext,
+        session_ref: &str,
+        operation: &str,
+        body: &Value,
+    ) -> Result<Value, String> {
+        let controlled = self.app.state::<ControlledDeviceManager>();
+        controlled
+            .with_current_business_lease(lease, || {
+                let tasks = self
+                    .app
+                    .state::<Arc<super::desktop_remote_task::DesktopRemoteTaskRuntime>>();
+                let session_id = tasks
+                    .service()
+                    .session_for(session_ref, &lease.remote_control_generation)
+                    .ok_or_else(|| "task_session_binding_mismatch".to_owned())?;
+                let field = |key: &str| -> Result<&str, String> {
+                    body.get(key)
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| "remote_action_invalid".to_owned())
+                };
+                let number = |key: &str| -> Result<u64, String> {
+                    field(key)?.parse::<u64>().map_err(|_| "remote_action_invalid".to_owned())
+                };
+                let task_id = body.get("task_id").and_then(Value::as_str);
+                let require_task = |allow_terminal: bool| -> Result<(), String> {
+                    let record = self
+                        .app
+                        .state::<Arc<RemoteTaskLedger>>()
+                        .record(task_id.ok_or_else(|| "remote_action_invalid".to_owned())?)
+                        .map_err(|error| error.code.to_owned())?;
+                    if record.session_id != session_id
+                        || record.lease != TaskLeaseBinding::from_context(lease)
+                        || (!allow_terminal && record.is_terminal())
+                    {
+                        return Err("task_session_binding_mismatch".to_owned());
+                    }
+                    Ok(())
+                };
+                let now = controlled_monotonic_millis();
+                match operation {
+                    "permission_list" => {
+                        require_task(false)?;
+                        let views = self.app.state::<Arc<PermissionAuthority>>()
+                            .pending_for_task(field("task_id")?);
+                        if views.len() > 8 { return Err("permission_capacity".to_owned()); }
+                        let permissions: Vec<Value> = views.into_iter().map(|view| json!({
+                            "permission_request_id":view.permission_request_id,"task_id":view.task_id,
+                            "operation_type":view.operation_type,"risk_level":view.risk_level,
+                            "target_scope":view.target_scope,"preview":view.preview,
+                            "expires_at_ms":view.expires_at_ms.to_string(),"state":view.state,
+                            "decision":view.decision,"dispatch_state":view.dispatch_state,
+                        })).collect();
+                        Ok(json!({"permissions": permissions}))
+                    }
+                    "permission_decide" => {
+                        Err("remote_action_async_required".to_owned())
+                    }
+                    "attachment_begin" => {
+                        let runtime = self.app.state::<Arc<super::desktop_remote_attachment::DesktopRemoteAttachmentRuntime>>();
+                        let context = TransferContext::new(lease, &session_id, field("task_id")?, TransferDirection::Upload)
+                            .map_err(|error| error.code.to_owned())?;
+                        let metadata = TransferMetadata {
+                            file_name: field("file_name")?.to_owned(), mime_type: field("mime_type")?.to_owned(),
+                            total_bytes: number("total_bytes")?,
+                            sha256: field("sha256")?.to_owned(),
+                        };
+                        let begun = runtime.uploads().begin(context, metadata, now)?;
+                        Ok(json!({"transfer_id": begun.handle_id, "chunk_bytes": begun.chunk_bytes.to_string(),
+                            "total_bytes": begun.total_bytes.to_string()}))
+                    }
+                    "attachment_chunk" | "attachment_abort" => {
+                        let runtime = self.app.state::<Arc<super::desktop_remote_attachment::DesktopRemoteAttachmentRuntime>>();
+                        runtime.uploads().require_upload_binding(
+                            field("transfer_id")?, lease, &session_id, field("task_id")?,
+                        )?;
+                        if operation == "attachment_abort" {
+                            return Ok(json!({"aborted": runtime.uploads().abort(field("transfer_id")?)}));
+                        }
+                        let bytes = base64::engine::general_purpose::STANDARD
+                            .decode(field("chunk_b64")?)
+                            .map_err(|_| "transfer_chunk_invalid".to_owned())?;
+                        if bytes.len() as u64 != number("chunk_bytes")? {
+                            return Err("transfer_chunk_invalid".to_owned());
+                        }
+                        let progress = runtime.uploads().accept_chunk(
+                            field("transfer_id")?, number("chunk_index")?,
+                            &bytes, now,
+                        )?;
+                        Ok(match progress {
+                            UploadProgress::Accepted { received_bytes, .. } => json!({"state":"accepted","received_bytes":received_bytes.to_string()}),
+                            UploadProgress::Duplicate { received_bytes } => json!({"state":"duplicate","received_bytes":received_bytes.to_string()}),
+                            UploadProgress::Completed { sha256, bytes } => json!({"state":"completed","received_bytes":bytes.to_string(),"sha256":sha256}),
+                        })
+                    }
+                    "artifact_index" | "artifact_preview" | "artifact_download_begin"
+                    | "artifact_download_chunk" | "artifact_download_abort" => {
+                        let runtime = self.app.state::<Arc<super::desktop_remote_artifact::DesktopRemoteArtifactRuntime>>();
+                        match operation {
+                            "artifact_index" => {
+                                let artifacts: Vec<Value> = runtime.artifact_index(lease, &session_id)?.into_iter()
+                                    .map(|item| json!({"artifact_id":item.artifact_id,
+                                        "task_id":item.task_id,
+                                        "display_name":item.display_name,"mime_type":item.mime_type,
+                                        "total_bytes":item.total_bytes.to_string(),"sha256":item.sha256,
+                                        "preview_kind":item.preview_kind})).collect();
+                                Ok(json!({"artifacts":artifacts}))
+                            }
+                            "artifact_preview" => {
+                                let preview = runtime.artifact_preview(lease, &session_id, field("artifact_id")?)?;
+                                let mut body = json!({"artifact_id":preview.artifact_id,
+                                    "preview_kind":preview.preview_kind,"truncated":preview.truncated});
+                                if let Some(text) = preview.text { body["text"] = json!(text); }
+                                Ok(body)
+                            }
+                            "artifact_download_begin" => {
+                                let begun = runtime.artifact_download_begin(lease, &session_id,
+                                    field("task_id")?, field("artifact_id")?, now)?;
+                                Ok(json!({"transfer_id":begun.handle_id,"chunk_bytes":begun.chunk_bytes.to_string(),
+                                    "total_bytes":begun.total_bytes.to_string()}))
+                            }
+                            "artifact_download_chunk" => {
+                                let chunk = runtime.artifact_download_chunk(lease, &session_id, field("task_id")?,
+                                    field("artifact_id")?, field("transfer_id")?, number("chunk_index")?, now)?
+                                    .ok_or_else(|| "artifact_unavailable".to_owned())?;
+                                Ok(json!({"chunk_index":chunk.chunk_index.to_string(),
+                                    "chunk_b64":base64::engine::general_purpose::STANDARD.encode(&chunk.bytes),
+                                    "chunk_bytes":chunk.bytes.len().to_string(), "received_bytes":chunk.received_bytes.to_string(),
+                                    "next_chunk":chunk.next_chunk.to_string(),"completed":chunk.completed.is_some()}))
+                            }
+                            _ => {
+                                Ok(json!({"aborted":runtime.artifact_download_abort(lease, &session_id,
+                                    field("task_id")?, field("artifact_id")?, field("transfer_id")?)?}))
+                            }
+                        }
+                    }
+                    _ => Err("remote_action_invalid".to_owned()),
+                }
+            })
+            .map_err(|error| error.code.to_owned())?
+    }
+}
+
+/// B sends its actual Session identity only inside the authenticated encrypted
+/// capability response; A's opaque wire ref remains a distinct field.
+fn bind_capability_session(
+    mut payload: Value,
+    remote_ref: &str,
+    controlled_session_id: &str,
+) -> Result<Value, String> {
+    let object = payload
+        .as_object_mut()
+        .ok_or_else(|| "capability_snapshot_invalid".to_owned())?;
+    object.insert("session_id".into(), Value::String(remote_ref.to_owned()));
+    object.insert(
+        "controlled_session_id".into(),
+        Value::String(controlled_session_id.to_owned()),
+    );
+    Ok(payload)
+}
+
 #[async_trait::async_trait]
 impl ControlledBusinessPort for DesktopControlledBusiness {
+    async fn remote_action(
+        &self,
+        lease: &LeaseContext,
+        session_ref: &str,
+        operation: &str,
+        body: &Value,
+    ) -> Result<Value, String> {
+        if operation == "permission_decide" {
+            self.handle_remote_permission_decision(lease, session_ref, body)
+                .await
+        } else {
+            self.handle_remote_action(lease, session_ref, operation, body)
+        }
+    }
     async fn capability_snapshot(
         &self,
         lease: &LeaseContext,
         request_id: &str,
-        session_id: Option<&str>,
+        session_id: &str,
         known_revision: u64,
     ) -> Result<Value, String> {
-        let controlled_session =
-            if let Some(session_ref) = session_id.filter(|value| !value.is_empty()) {
-                let authoritative_id = super::desktop_remote_task::ensure_controlled_session(
-                    &self.app,
-                    session_ref,
-                    "",
-                    false,
-                    &lease.remote_control_generation,
-                )?;
-                Some((session_ref.to_owned(), authoritative_id))
-            } else {
-                None
-            };
+        let authoritative_id = super::desktop_remote_task::ensure_unclaimed_controlled_session(
+            &self.app,
+            session_id,
+            "",
+            &lease.remote_control_generation,
+        )?;
         let capabilities = self.app.state::<CapabilitySnapshotManager>();
         let now_b =
             crate::features::remote_control::controller::relay_runtime::controlled_monotonic_millis(
             );
         // 只复用刚生成、且比 A 已知 revision 更新的快照：这能吸收紧邻的重复
-        // 请求，又不会把临近过期的快照当作完整 30 秒租期返回给兼容旧报文的 A。
+        // 请求，也不会把临近过期的快照误报成完整 30 秒有效期。
         if let Ok(current) = capabilities.current_for_context(lease, now_b) {
             let payload = capabilities.wire_capability_snapshot(&current, request_id);
             let revision = payload["capability_revision"]
@@ -624,19 +1083,17 @@ impl ControlledBusinessPort for DesktopControlledBusiness {
                 .unwrap_or(0)
                 .saturating_sub(now_b);
             if revision > known_revision && remaining_ms >= 29_000 {
-                if let Some((session_ref, authoritative_id)) = controlled_session.as_ref() {
-                    super::desktop_remote_task::project_controlled_session(
-                        &self.app,
-                        session_ref,
-                        authoritative_id,
-                        lease,
-                    )?;
-                }
+                super::desktop_remote_task::project_controlled_session(
+                    &self.app,
+                    session_id,
+                    &authoritative_id,
+                    lease,
+                )?;
                 crate::features::remote_control::controller::relay_runtime::log_controlled_event(
                     "capability_snapshot_ready",
                     "cached",
                 );
-                return Ok(payload);
+                return bind_capability_session(payload, session_id, &authoritative_id);
             }
         }
         let snapshot = match super::desktop_remote_capabilities::build_capability_snapshot(
@@ -657,15 +1114,17 @@ impl ControlledBusinessPort for DesktopControlledBusiness {
             "capability_snapshot_ready",
             "fresh",
         );
-        if let Some((session_ref, authoritative_id)) = controlled_session.as_ref() {
-            super::desktop_remote_task::project_controlled_session(
-                &self.app,
-                session_ref,
-                authoritative_id,
-                lease,
-            )?;
-        }
-        Ok(capabilities.wire_capability_snapshot(&snapshot, request_id))
+        super::desktop_remote_task::project_controlled_session(
+            &self.app,
+            session_id,
+            &authoritative_id,
+            lease,
+        )?;
+        bind_capability_session(
+            capabilities.wire_capability_snapshot(&snapshot, request_id),
+            session_id,
+            &authoritative_id,
+        )
     }
 
     async fn submit_task(
@@ -695,12 +1154,10 @@ impl ControlledBusinessPort for DesktopControlledBusiness {
             input_digest: field("input_digest"),
             payload: payload.clone(),
         };
-        let port = DesktopControlledExecutionAdapter::new(self.app.clone());
-        let result = port
-            .execute_controlled(request)
-            .await
-            .map(|outcome| outcome.status)
-            .map_err(|error| error.code().to_owned());
+        let port = self
+            .app
+            .state::<crate::app::desktop_remote_composition::DesktopControlledExecutionPort>();
+        let result = port.execute_controlled(request).await;
         match &result {
             Ok(_) => {
                 crate::features::remote_control::controller::relay_runtime::log_controlled_event(
@@ -708,14 +1165,11 @@ impl ControlledBusinessPort for DesktopControlledBusiness {
                     "admitted",
                 )
             }
-            Err(error) => {
-                crate::features::remote_control::controller::relay_runtime::log_controlled_event(
-                    "task_submit_business_rejected",
-                    error,
-                )
-            }
+            Err(error) => log_controlled_port_error("task_submit_business_rejected", *error),
         }
         result
+            .map(|outcome| outcome.status)
+            .map_err(|error| error.code().to_owned())
     }
 
     async fn cancel_task(
@@ -734,29 +1188,39 @@ impl ControlledBusinessPort for DesktopControlledBusiness {
         journal_epoch: &str,
         after_sequence: u64,
     ) -> Result<Vec<(String, Value)>, String> {
+        let b_session_id = self.authoritative_journal_session(lease, session_ref)?;
         let history = self
             .app
-            .state::<std::sync::Arc<super::desktop_remote_history::DesktopRemoteHistoryRuntime>>();
+            .state::<std::sync::Arc<super::desktop_remote_journal::DesktopRemoteJournalRuntime>>();
+        history
+            .journal()
+            .bind_generation(&lease.remote_control_generation)
+            .map_err(|error| error.code.to_owned())?;
         Ok(
-            match history.journal().replay_after(journal_epoch, after_sequence) {
-                crate::features::remote_control::controller::journal::ReplayOutcome::Events(events) => {
-                    events
-                        .into_iter()
-                        .filter_map(|event| {
-                            crate::features::remote_control::controller::relay_runtime::build_journal_event_payload(
-                                lease,
-                                session_ref,
-                                &event,
-                            )
-                            .map(|payload| ("journal_event".to_owned(), payload))
-                        })
-                        .take(MAX_REPLAY_FRAMES)
-                        .collect()
-                }
-                crate::features::remote_control::controller::journal::ReplayOutcome::Gap(snapshot) => {
+            match history
+                .journal()
+                .replay_after_for_generation(
+                    &lease.remote_control_generation,
+                    &b_session_id,
+                    journal_epoch,
+                    after_sequence,
+                )
+                .map_err(|error| error.code.to_owned())?
+            {
+                crate::features::remote_control::controller::journal::ReplayOutcome::Events(
+                    events,
+                ) => build_replay_frames(lease, session_ref, &events)?,
+                crate::features::remote_control::controller::journal::ReplayOutcome::Gap(
+                    snapshot,
+                ) => {
                     vec![(
                         "session_snapshot".to_owned(),
-                        build_session_snapshot_payload(lease, session_ref, "request-replay-gap", &snapshot)?,
+                        build_session_snapshot_payload(
+                            lease,
+                            session_ref,
+                            "request-replay-gap",
+                            &snapshot,
+                        )?,
                     )]
                 }
             },
@@ -769,16 +1233,41 @@ impl ControlledBusinessPort for DesktopControlledBusiness {
         session_ref: &str,
         request_id: &str,
     ) -> Result<Value, String> {
+        let b_session_id = self.authoritative_journal_session(lease, session_ref)?;
         let history = self
             .app
-            .state::<std::sync::Arc<super::desktop_remote_history::DesktopRemoteHistoryRuntime>>();
-        let snapshot = history.journal().snapshot();
+            .state::<std::sync::Arc<super::desktop_remote_journal::DesktopRemoteJournalRuntime>>();
+        history
+            .journal()
+            .bind_generation(&lease.remote_control_generation)
+            .map_err(|error| error.code.to_owned())?;
+        let snapshot = history
+            .journal()
+            .snapshot_for_generation(&lease.remote_control_generation, &b_session_id)
+            .map_err(|error| error.code.to_owned())?;
         build_session_snapshot_payload(lease, session_ref, request_id, &snapshot)
     }
 }
 
 /// 一次回放最多回传的帧数：journal 保留窗口有界，但仍给回放本身一个硬上限。
 const MAX_REPLAY_FRAMES: usize = 256;
+
+fn build_replay_frames(
+    lease: &LeaseContext,
+    session_ref: &str,
+    events: &[crate::features::remote_control::controller::journal::JournalEvent],
+) -> Result<Vec<(String, Value)>, String> {
+    let mut frames = Vec::with_capacity(events.len());
+    for page in events.chunks(MAX_REPLAY_FRAMES) {
+        for event in page {
+            let payload = crate::features::remote_control::controller::relay_runtime::build_journal_event_payload(
+                lease, session_ref, event,
+            ).ok_or_else(|| "journal_event_not_exportable".to_owned())?;
+            frames.push(("journal_event".to_owned(), payload));
+        }
+    }
+    Ok(frames)
+}
 
 /// 构造 wire `session_snapshot`（E2E-05 缺口恢复）：快照本体 base64 + 摘要，
 /// 会话身份使用 A 的引用。
@@ -788,20 +1277,18 @@ fn build_session_snapshot_payload(
     request_id: &str,
     snapshot: &crate::features::remote_control::controller::journal::JournalSnapshot,
 ) -> Result<Value, String> {
-    // Keep the authenticated snapshot body on the same A-generated session
-    // identity as incremental journal events. The snapshot digest does not
-    // include session ids, so the authoritative continuity proof is unchanged.
-    let mut wire_snapshot = snapshot.clone();
-    for event in &mut wire_snapshot.events {
-        event.session_id = session_ref.to_owned();
-    }
+    // Remapping B's authoritative identity to A's opaque reference changes
+    // the committed bytes; the digest must be recomputed over that wire body.
+    let wire_snapshot = snapshot
+        .remap_session(session_ref)
+        .map_err(|error| error.code.to_owned())?;
     let raw =
         serde_json::to_vec(&wire_snapshot).map_err(|_| "journal_snapshot_invalid".to_owned())?;
     let digest = wire_snapshot.digest.clone();
     if digest.len() != 64 {
         return Err("journal_snapshot_invalid".to_owned());
     }
-    Ok(serde_json::json!({
+    let payload = serde_json::json!({
         "v": 1,
         "type": "session_snapshot",
         "connection_id": lease.connection_id,
@@ -816,7 +1303,141 @@ fn build_session_snapshot_payload(
         "snapshot_b64": base64::engine::general_purpose::STANDARD.encode(&raw),
         "snapshot_bytes": raw.len().to_string(),
         "sha256": digest,
-    }))
+    });
+    // The encrypted lane validates plaintext JSON at 512 KiB. Check the
+    // complete envelope here, including base64 and all context fields, so a
+    // retained journal snapshot is never silently unsendable.
+    let wire_len = serde_json::to_vec(&payload)
+        .map_err(|_| "journal_snapshot_invalid".to_owned())?
+        .len();
+    if wire_len > crate::features::remote_control::controller::protocol::MAX_DECRYPTED_PAYLOAD_BYTES
+    {
+        return Err("journal_snapshot_too_large".to_owned());
+    }
+    Ok(payload)
+}
+
+#[cfg(test)]
+mod dev19_replay_tests {
+    use super::*;
+    use crate::features::remote_control::controller::journal::{
+        JournalKind, JournalSnapshot, RemoteJournal,
+    };
+    use serde_json::json;
+
+    fn lease() -> LeaseContext {
+        LeaseContext {
+            connection_id: "connection-1".into(),
+            controller_lease_id: "lease-1".into(),
+            lease_epoch: "1".into(),
+            relay_epoch: "relay-1".into(),
+            remote_control_generation: "generation-1".into(),
+        }
+    }
+
+    #[test]
+    fn replay_over_256_is_fully_paged_without_silent_truncation() {
+        let journal = RemoteJournal::new("epoch-1");
+        for sequence in 1..=300 {
+            journal
+                .append(
+                    &format!("event-{sequence}"),
+                    JournalKind::UserMessage,
+                    "b-session",
+                    None,
+                    json!({"text": "safe"}),
+                )
+                .unwrap();
+        }
+        let events = match journal.replay_after_for("b-session", "epoch-1", 0).unwrap() {
+            crate::features::remote_control::controller::journal::ReplayOutcome::Events(events) => {
+                events
+            }
+            _ => panic!("window should be replayable"),
+        };
+        let frames = build_replay_frames(&lease(), "remote-ref", &events).unwrap();
+        assert_eq!(frames.len(), 300);
+        assert_eq!(frames.first().unwrap().1["event_sequence"], "1");
+        assert_eq!(frames.last().unwrap().1["event_sequence"], "300");
+        assert!(
+            frames
+                .iter()
+                .all(|(_, frame)| frame["session_id"] == "remote-ref")
+        );
+    }
+
+    #[test]
+    fn wire_snapshot_rehashes_exact_remapped_content() {
+        let journal = RemoteJournal::new("epoch-1");
+        journal
+            .append(
+                "event-1",
+                JournalKind::UserMessage,
+                "b-session",
+                None,
+                json!({"text":"safe"}),
+            )
+            .unwrap();
+        let original = journal.snapshot_for("b-session").unwrap();
+        let wire =
+            build_session_snapshot_payload(&lease(), "remote-ref", "request-1", &original).unwrap();
+        let raw = base64::engine::general_purpose::STANDARD
+            .decode(wire["snapshot_b64"].as_str().unwrap())
+            .unwrap();
+        let mapped: JournalSnapshot = serde_json::from_slice(&raw).unwrap();
+        assert!(mapped.verify_digest());
+        assert_eq!(mapped.session_id, "remote-ref");
+        assert_eq!(mapped.events[0].session_id, "remote-ref");
+        assert_ne!(mapped.digest, original.digest);
+        assert_eq!(wire["sha256"], mapped.digest);
+    }
+
+    #[test]
+    fn retained_snapshot_fits_plaintext_budget_and_oversize_fails_closed() {
+        let journal = RemoteJournal::new("epoch-1");
+        for sequence in 1..=100 {
+            journal
+                .append(
+                    &format!("event-{sequence}"),
+                    JournalKind::UserMessage,
+                    "b-session",
+                    None,
+                    json!({"text":"x".repeat(4096)}),
+                )
+                .unwrap();
+        }
+        let retained = journal.snapshot_for("b-session").unwrap();
+        let near_wire =
+            build_session_snapshot_payload(&lease(), &"r".repeat(128), &"q".repeat(128), &retained)
+                .unwrap();
+        let near_bytes = serde_json::to_vec(&near_wire).unwrap().len();
+        assert!(
+            near_bytes > 300 * 1024,
+            "test must approach the wire ceiling"
+        );
+        assert!(
+            near_bytes
+                <= crate::features::remote_control::controller::protocol::MAX_DECRYPTED_PAYLOAD_BYTES
+        );
+
+        let mut too_large = retained.clone();
+        let template = too_large.events.last().unwrap().clone();
+        too_large.events.clear();
+        for sequence in 1..=150 {
+            let mut event = template.clone();
+            event.event_id = format!("oversized-{sequence}");
+            event.sequence = sequence;
+            too_large.events.push(event);
+        }
+        too_large.sequence = 150;
+        too_large.digest = too_large.compute_digest();
+        assert!(too_large.verify_digest());
+        assert_eq!(
+            build_session_snapshot_payload(&lease(), "remote-ref", "request-1", &too_large)
+                .unwrap_err(),
+            "journal_snapshot_too_large"
+        );
+    }
 }
 
 /// B 端是否仍持有活租约（供 worker 在派发前自检；当前由设备所有者状态判断）。
@@ -842,6 +1463,104 @@ mod submit_boundary_tests {
     };
     use crate::features::remote_control::controller::controlling_session::task_input_digest;
     use crate::features::remote_control::controller::protocol::validate_controller_payload_json;
+
+    #[test]
+    fn same_allow_retries_and_concurrent_dispatch_are_idempotent() {
+        use super::*;
+        use crate::features::remote_control::controller::permission::PermissionRequest;
+        let authority = Arc::new(PermissionAuthority::with_clock(Arc::new(|| 9_001_000)));
+        let lease = LeaseContext {
+            connection_id: "connection-1".into(),
+            controller_lease_id: "lease-1".into(),
+            lease_epoch: "1".into(),
+            relay_epoch: "relay-1".into(),
+            remote_control_generation: "generation-1".into(),
+        };
+        let id = authority
+            .request(
+                &lease,
+                "task-1",
+                PermissionRequest {
+                    operation_type: "shell_command".into(),
+                    risk_level: "high".into(),
+                    target_scope: "workspace-1".into(),
+                    preview: "command".into(),
+                    expires_at_ms: authority.now_ms() + 60_000,
+                },
+                authority.now_ms(),
+            )
+            .unwrap()
+            .permission_request_id;
+        // Both callers observe allow before either crosses the dispatch CAS.
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let handles: Vec<_> = (0..2)
+            .map(|_| {
+                let authority = Arc::clone(&authority);
+                let barrier = Arc::clone(&barrier);
+                let lease = lease.clone();
+                let id = id.clone();
+                std::thread::spawn(move || {
+                    let outcome = authority
+                        .decide(
+                            DecisionAuthority::ControllerA,
+                            &lease,
+                            "task-1",
+                            &id,
+                            PermissionDecision::Allow,
+                            authority.now_ms(),
+                        )
+                        .unwrap();
+                    barrier.wait();
+                    commit_effective_permission_allow(&authority, &id, &outcome)
+                })
+            })
+            .collect();
+        for handle in handles {
+            assert_eq!(handle.join().unwrap(), Ok(()));
+        }
+        let retry = authority
+            .decide(
+                DecisionAuthority::ControllerA,
+                &lease,
+                "task-1",
+                &id,
+                PermissionDecision::Allow,
+                authority.now_ms(),
+            )
+            .unwrap();
+        assert_eq!(
+            retry,
+            DecisionOutcome::Replayed {
+                decision: PermissionDecision::Allow,
+                dispatch_state: DispatchState::Dispatched,
+            }
+        );
+        assert_eq!(
+            commit_effective_permission_allow(&authority, &id, &retry),
+            Ok(())
+        );
+        assert_eq!(
+            authority.commit_dispatch(&id, authority.now_ms()).unwrap(),
+            DispatchCommit::Rejected {
+                code: "permission_already_dispatched"
+            }
+        );
+        assert_eq!(
+            authority
+                .decide(
+                    DecisionAuthority::ControllerA,
+                    &lease,
+                    "task-1",
+                    &id,
+                    PermissionDecision::Deny,
+                    authority.now_ms()
+                )
+                .unwrap_err()
+                .code,
+            "permission_already_decided"
+        );
+        assert_eq!(authority.view(&id).unwrap().dispatch_state, "dispatched");
+    }
 
     #[derive(Default)]
     struct SubmissionTrace {
@@ -880,6 +1599,7 @@ mod submit_boundary_tests {
                 client_request_id: input.client_request_id,
                 input_digest: input.input_digest,
                 payload,
+                local_attachments: None,
             })
         }
 
@@ -1005,7 +1725,10 @@ mod submit_boundary_tests {
             ("task_binding_stale", true),
             ("task_ledger_capacity", true),
             ("task_ledger_persist_failed", true),
+            ("task_session_backend_bind_failed", true),
+            ("task_status_binding_invalid", false),
             ("task_workspace_unexpected", false),
+            ("task_workspace_not_authorized", false),
             ("task_session_binding_mismatch", false),
             ("task_mode_invalid", false),
             ("task_model_source_invalid", false),

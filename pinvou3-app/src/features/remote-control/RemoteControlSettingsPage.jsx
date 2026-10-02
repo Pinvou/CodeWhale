@@ -1,7 +1,8 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Monitor, Smartphone } from '../../components/icons.jsx';
-import ControlledDevicePanel, { countdownSeconds } from './ControlledDevicePanel.jsx';
+import ControlledDevicePanel from './ControlledDevicePanel.jsx';
 import RemoteControllerPanel from './RemoteControllerPanel.jsx';
+import { CONTROLLED_BOUND_STATUSES, countdownSeconds } from './controlled-device-panel-state.mjs';
 import { controlledDeviceUiState, controllerConnectionUiState, remoteControlTabTone } from './remote-control-logic.mjs';
 
 function dotClass(state) {
@@ -13,9 +14,13 @@ function dotClass(state) {
 }
 
 const CONTROLLED_STATE_KEYS = {
-  off: 'stateOff', reserving: 'stateReserving', waiting: 'stateWaiting', expiring: 'stateExpiring',
-  expired: 'stateExpired', reserved: 'stateReserved', handshake: 'stateHandshake', connected: 'stateConnected',
-  reconnecting: 'stateReconnecting', refreshing: 'stateRefreshing', stopping: 'stateStopping', error: 'stateError',
+  off: 'stateOff', stopped: 'stateStopped', registering: 'stateRegistering',
+  waiting_for_pairing: 'stateWaiting', expiring: 'stateExpiring', expired: 'stateExpired',
+  pairing_reserved: 'statePairingReserved', handshake_pending: 'stateHandshakePending',
+  connected: 'stateConnected', reconnecting: 'stateReconnecting',
+  resume_provisional: 'stateResumeProvisional',
+  resume_activated_pending_liveness: 'stateResumeActivatedPendingLiveness',
+  retiring_generation: 'stateRetiringGeneration', stopping: 'stateStopping', error: 'stateError',
 };
 
 const CONTROLLER_STATE_KEYS = {
@@ -41,19 +46,32 @@ export default function RemoteControlSettingsPage({
   const [controllerFormValue, setControllerFormValue] = useState('');
   const [controllerFormState, setControllerFormState] = useState('empty');
   const [controlledNow, setControlledNow] = useState(() => Date.now());
-  const [controlledLocalState, setControlledLocalState] = useState(null);
   const controlledDevice = bs?.controlledDevice || {};
-  const controlledSeconds = countdownSeconds(controlledDevice.expiresAtMs, controlledNow);
+  const countdownObservation = useRef({ generation: null, remainingMs: null, observedAtMs: controlledNow });
+  if (countdownObservation.current.generation !== controlledDevice.generation
+    || countdownObservation.current.remainingMs !== controlledDevice.pairingRemainingMs) {
+    countdownObservation.current = {
+      generation: controlledDevice.generation,
+      remainingMs: controlledDevice.pairingRemainingMs,
+      observedAtMs: Date.now(),
+    };
+  }
+  const controlledSeconds = countdownSeconds(
+    countdownObservation.current.remainingMs,
+    countdownObservation.current.observedAtMs,
+    controlledNow,
+  );
 
   useEffect(() => {
-    if (!controlledDevice.expiresAtMs) return undefined;
+    if (!Number.isSafeInteger(controlledDevice.pairingRemainingMs)
+      && !CONTROLLED_BOUND_STATUSES.has(controlledDevice.status)) return undefined;
     const timer = setInterval(() => setControlledNow(Date.now()), 1000);
     return () => clearInterval(timer);
-  }, [controlledDevice.expiresAtMs]);
+  }, [controlledDevice.pairingRemainingMs, controlledDevice.status]);
 
   const controlledState = useMemo(() => {
-    return controlledDeviceUiState(controlledDevice, controlledSeconds, controlledLocalState);
-  }, [controlledDevice, controlledLocalState, controlledSeconds]);
+    return controlledDeviceUiState(controlledDevice, controlledSeconds);
+  }, [controlledDevice, controlledSeconds]);
   const controllerState = controllerConnectionUiState(bs?.controllerConnection || {}, controllerFormState);
   const tabs = [
     { id: 'controlled', label: copy.controlledSide, hint: copy.controlledSideHint, icon: Monitor, state: controlledState, statusLabel: controlledCopy[CONTROLLED_STATE_KEYS[controlledState]] },
@@ -115,7 +133,7 @@ export default function RemoteControlSettingsPage({
           supported={supported}
           effectiveState={controlledState}
           secondsRemaining={controlledSeconds}
-          onLocalStateChange={setControlledLocalState}
+          nowMs={controlledNow}
         />
       </div>
       <div id="remote-control-panel-controller" role="tabpanel" aria-labelledby="remote-control-tab-controller" hidden={role !== 'controller'}>

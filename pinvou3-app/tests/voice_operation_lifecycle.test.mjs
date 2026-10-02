@@ -156,7 +156,7 @@ for (const [lane, source] of Object.entries(sources)) {
     assert.equal(operation.pendingSubmission, false);
     assert.equal(h.api.getVoiceOperationId(null, 'chat'), operation.operationId);
     assert.equal(h.events.length, 0);
-    assert.match(chat, /return result === 'restored' \? false : result;/);
+    assert.match(chat, /return result === 'restored' \|\| result === 'held' \? false : result;/);
   });
 
   test(`${lane}: queued admission cannot associate the same voice with another manual message`, () => {
@@ -483,7 +483,7 @@ for (const lane of ['desktop', 'web']) {
         const sendStart = chat.indexOf('      const sendChatMessage = useCallback(');
         const sendEnd = chat.indexOf('\n      // ConversationTimeline', sendStart);
         const dispatchStart = chat.indexOf('      const dispatchChatMessage = useCallback(');
-        const dispatchEnd = chat.indexOf('      const openRemoteSession = useCallback(', dispatchStart);
+        const dispatchEnd = chat.indexOf('      // SessionStore mapping/lease establishment', dispatchStart);
         const taskStart = chat.indexOf('        sendTask: async (outgoing, context) => {');
         const taskEnd = chat.indexOf('\n        onTaskAccepted:', taskStart);
         const task = chat.slice(taskStart, taskEnd).trim().replace(/^sendTask:/, 'this.voiceTask =').replace(/,$/, ';');

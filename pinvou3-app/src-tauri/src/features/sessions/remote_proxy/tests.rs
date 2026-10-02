@@ -4,9 +4,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use super::binding::{AuthenticatedMapping, LiveRemoteContext};
 use super::routing::{LocalBackendBinding, SessionRoute};
 use super::schema::{
-    AuthenticatedCursor, AuthenticatedProjection, AuthenticatedSnapshot, PendingDispatchState,
-    PendingRemoteRequest, ProjectionAttachment, ProjectionEntry, ProjectionKind, RemoteUiMetadata,
-    RetiredRequestDisposition, SnapshotCandidate, SnapshotVerificationPort,
+    PendingDispatchState, PendingRemoteRequest, ProjectionAttachment, ProjectionEntry,
+    ProjectionKind, RetiredRequestDisposition,
 };
 use crate::features::sessions::{SessionKind, SessionStore};
 
@@ -40,45 +39,15 @@ fn projection_entry(sequence: u64, body: &str) -> ProjectionEntry {
     }
 }
 
-struct TestAuthenticatedSnapshotVerifier;
-
-impl SnapshotVerificationPort for TestAuthenticatedSnapshotVerifier {
-    fn verify_authenticated_snapshot(
-        &self,
-        _local_session_id: &str,
-        _remote_ref: &str,
-        _context: &LiveRemoteContext,
-        _candidate: &SnapshotCandidate,
-    ) -> anyhow::Result<()> {
-        Ok(())
-    }
-}
-
-fn verified_snapshot(
-    opened: &super::binding::RemoteOpen,
-    live: &LiveRemoteContext,
-    projection: AuthenticatedProjection,
-    cursor: AuthenticatedCursor,
-) -> anyhow::Result<AuthenticatedSnapshot> {
-    let verifier: Arc<dyn SnapshotVerificationPort> = Arc::new(TestAuthenticatedSnapshotVerifier);
-    AuthenticatedSnapshot::verify(
-        &opened.local_session_id,
-        &opened.remote_session_ref,
-        live,
-        SnapshotCandidate { projection, cursor },
-        verifier.as_ref(),
-    )
-}
-
 #[test]
 fn remote_open_is_idempotent_only_within_original_live_boundary() {
     let temp = tempfile::tempdir().unwrap();
     let store = make_store(temp.path());
     let live = context();
-    let opened = store.open_remote_proxy(None, &live).unwrap();
+    let opened = store.test_commit_remote_proxy_open(None, &live).unwrap();
     assert_eq!(
         store
-            .open_remote_proxy(Some(&opened.local_session_id), &live)
+            .test_commit_remote_proxy_open(Some(&opened.local_session_id), &live)
             .unwrap(),
         opened
     );
@@ -117,7 +86,7 @@ fn remote_open_is_idempotent_only_within_original_live_boundary() {
     );
     assert!(
         restarted
-            .open_remote_proxy(Some(&opened.local_session_id), &live)
+            .test_commit_remote_proxy_open(Some(&opened.local_session_id), &live)
             .is_err()
     );
     assert!(
@@ -132,7 +101,9 @@ fn remote_open_is_idempotent_only_within_original_live_boundary() {
             )
             .is_err()
     );
-    let fresh = restarted.open_remote_proxy(None, &live).unwrap();
+    let fresh = restarted
+        .test_commit_remote_proxy_open(None, &live)
+        .unwrap();
     assert_ne!(fresh.local_session_id, opened.local_session_id);
     assert_ne!(fresh.remote_session_ref, opened.remote_session_ref);
 }
@@ -142,8 +113,8 @@ fn authenticated_mapping_and_full_live_context_gate_mutations() {
     let temp = tempfile::tempdir().unwrap();
     let store = make_store(temp.path());
     let live = context();
-    let opened = store.open_remote_proxy(None, &live).unwrap();
-    let another = store.open_remote_proxy(None, &live).unwrap();
+    let opened = store.test_commit_remote_proxy_open(None, &live).unwrap();
+    let another = store.test_commit_remote_proxy_open(None, &live).unwrap();
     let mapping = AuthenticatedMapping {
         remote_session_ref: opened.remote_session_ref.clone(),
         controlled_session_id: "b-authority".into(),
@@ -167,6 +138,21 @@ fn authenticated_mapping_and_full_live_context_gate_mutations() {
     );
     store
         .confirm_remote_mapping(&opened.local_session_id, &live, &mapping)
+        .unwrap();
+    assert_ne!(
+        opened.remote_session_ref, mapping.controlled_session_id,
+        "A's remote reference and B's Session id are different namespaces"
+    );
+    let dispatch_context = store
+        .remote_dispatch_live_context(&opened.local_session_id, &opened.remote_session_ref)
+        .unwrap();
+    assert_eq!(dispatch_context, live);
+    store
+        .require_live_remote_mutation(
+            &opened.local_session_id,
+            &opened.remote_session_ref,
+            &dispatch_context,
+        )
         .unwrap();
     store
         .confirm_remote_mapping(&opened.local_session_id, &live, &mapping)
@@ -219,7 +205,7 @@ fn authenticated_mapping_and_full_live_context_gate_mutations() {
                 .is_err()
         );
     }
-    store.disconnect_remote_proxy(&opened.local_session_id);
+    store.test_expire_remote_binding(&opened.local_session_id);
     assert_eq!(
         store
             .route_session(&opened.local_session_id, false, None, None)
@@ -236,45 +222,11 @@ fn authenticated_mapping_and_full_live_context_gate_mutations() {
             )
             .is_err()
     );
-    let mut resumed = live.clone();
-    resumed.connection_id = "connection-2".into();
-    resumed.lease_epoch = "epoch-2".into();
-    resumed.generation = "generation-2".into();
-    store
-        .resume_remote_proxy(&opened.local_session_id, &resumed)
-        .unwrap();
-    assert!(
-        store
-            .route_session(
-                &opened.local_session_id,
-                true,
-                Some(&opened.remote_session_ref),
-                Some(&resumed)
-            )
-            .is_err()
-    );
-    store
-        .confirm_remote_mapping(&opened.local_session_id, &resumed, &mapping)
-        .unwrap();
-    assert_eq!(
-        store
-            .route_session(
-                &opened.local_session_id,
-                true,
-                Some(&opened.remote_session_ref),
-                Some(&resumed)
-            )
-            .unwrap(),
-        SessionRoute::RemoteControl
-    );
-    let mut repaired = resumed.clone();
+    let mut repaired = live.clone();
     repaired.resume_boundary_id = "new-pairing".into();
-    assert!(
-        store
-            .resume_remote_proxy(&opened.local_session_id, &repaired)
-            .is_err()
-    );
-    let fresh = store.open_remote_proxy(None, &repaired).unwrap();
+    let fresh = store
+        .test_commit_remote_proxy_open(None, &repaired)
+        .unwrap();
     assert_ne!(fresh.remote_session_ref, opened.remote_session_ref);
     assert!(
         store
@@ -282,13 +234,13 @@ fn authenticated_mapping_and_full_live_context_gate_mutations() {
                 &opened.local_session_id,
                 true,
                 Some(&opened.remote_session_ref),
-                Some(&resumed)
+                Some(&live)
             )
             .is_err()
     );
     assert!(
         store
-            .open_remote_proxy(Some(&opened.local_session_id), &repaired)
+            .test_commit_remote_proxy_open(Some(&opened.local_session_id), &repaired)
             .is_err()
     );
 }
@@ -303,7 +255,9 @@ fn three_routes_use_durable_kind_and_trusted_backend_binding() {
     let acp = store
         .create_new("model".into(), None, temp.path().join("acp"))
         .unwrap();
-    let remote = store.open_remote_proxy(None, &context()).unwrap();
+    let remote = store
+        .test_commit_remote_proxy_open(None, &context())
+        .unwrap();
     let resolutions = Arc::new(AtomicUsize::new(0));
     let resolution_count = Arc::clone(&resolutions);
     let acp_id = acp.metadata.id.clone();
@@ -359,34 +313,11 @@ fn three_routes_use_durable_kind_and_trusted_backend_binding() {
 }
 
 #[test]
-fn metadata_cursor_and_pending_are_bounded_and_field_scoped() {
+fn pending_is_bounded_and_durable_without_a_second_projection_writer() {
     let temp = tempfile::tempdir().unwrap();
     let store = make_store(temp.path());
     let live = context();
-    let opened = store.open_remote_proxy(None, &live).unwrap();
-    store
-        .update_remote_ui(
-            &opened.local_session_id,
-            RemoteUiMetadata {
-                title: "A local title".into(),
-                pinned: true,
-                hidden: false,
-                last_opened_at: None,
-            },
-        )
-        .unwrap();
-    let mut first = projection_entry(1, "first");
-    first.journal_epoch = "e".into();
-    assert!(
-        store
-            .append_remote_projection(
-                &opened.local_session_id,
-                &opened.remote_session_ref,
-                &live,
-                first.clone()
-            )
-            .is_err()
-    );
+    let opened = store.test_commit_remote_proxy_open(None, &live).unwrap();
     store
         .confirm_remote_mapping(
             &opened.local_session_id,
@@ -397,39 +328,12 @@ fn metadata_cursor_and_pending_are_bounded_and_field_scoped() {
             },
         )
         .unwrap();
-    store
-        .append_remote_projection(
-            &opened.local_session_id,
-            &opened.remote_session_ref,
-            &live,
-            first.clone(),
-        )
-        .unwrap();
-    let mut second = projection_entry(2, "second");
-    second.journal_epoch = "e".into();
-    store
-        .append_remote_projection(
-            &opened.local_session_id,
-            &opened.remote_session_ref,
-            &live,
-            second,
-        )
-        .unwrap();
-    assert!(
-        store
-            .append_remote_projection(
-                &opened.local_session_id,
-                &opened.remote_session_ref,
-                &live,
-                first
-            )
-            .is_err()
-    );
     let pending = PendingRemoteRequest {
         client_request_id: "request-1".into(),
         task_id: "task-1".into(),
         request_fingerprint: "a".repeat(64),
         dispatch_state: PendingDispatchState::PreparedNeverAttempted,
+        reservation_fingerprint: None,
     };
     store
         .insert_remote_pending(
@@ -458,6 +362,7 @@ fn metadata_cursor_and_pending_are_bounded_and_field_scoped() {
                     task_id: format!("task-{index}"),
                     request_fingerprint: format!("{index:064x}"),
                     dispatch_state: PendingDispatchState::PreparedNeverAttempted,
+                    reservation_fingerprint: None,
                 },
             )
             .unwrap();
@@ -473,109 +378,58 @@ fn metadata_cursor_and_pending_are_bounded_and_field_scoped() {
                     task_id: "task-65".into(),
                     request_fingerprint: "b".repeat(64),
                     dispatch_state: PendingDispatchState::PreparedNeverAttempted,
-                }
+                    reservation_fingerprint: None,
+                },
             )
             .is_err()
     );
-    let record = store
-        .remote_proxy_snapshot(&opened.local_session_id)
-        .unwrap();
-    assert_eq!(record.pending.len(), 64);
-    assert_eq!(record.ui.title, "A local title");
-    assert_eq!(record.authenticated_cursor.unwrap().sequence, 2);
+    assert_eq!(
+        store
+            .remote_proxy_snapshot(&opened.local_session_id)
+            .unwrap()
+            .pending
+            .len(),
+        64
+    );
     let restarted = make_store(temp.path());
-    assert!(
+    assert_eq!(
         restarted
             .remote_proxy_snapshot(&opened.local_session_id)
             .unwrap()
-            .pending[0]
-            .dispatch_state
-            == PendingDispatchState::PreparedNeverAttempted
+            .pending
+            .len(),
+        64
     );
 }
 
 #[test]
-fn version_zero_records_migrate_without_granting_live_authority() {
+fn unsupported_schema_versions_fail_without_rewriting_disk() {
     let temp = tempfile::tempdir().unwrap();
-    let sessions = temp.path().join("sessions");
-    std::fs::create_dir_all(&sessions).unwrap();
-    let path = sessions.join("_remote_proxies.json");
-    std::fs::write(
-        &path,
-        serde_json::to_vec(&serde_json::json!({
-            "schema_version": 0,
-            "records": [{
-                "local_session_id": "remote-legacy",
-                "peer_id": "authenticated-peer",
-                "remote_session_ref": "historical-ref",
-                "controlled_session_id": "b-session",
-                "title": "old title"
-            }]
-        }))
-        .unwrap(),
-    )
-    .unwrap();
     let store = make_store(temp.path());
-    let record = store.remote_proxy_snapshot("remote-legacy").unwrap();
-    assert_eq!(record.schema_version, 3);
-    assert_eq!(record.ui.title, "old title");
-    assert!(
-        store
-            .route_session(
-                "remote-legacy",
-                true,
-                Some("historical-ref"),
-                Some(&context())
-            )
-            .is_err()
-    );
-    assert_eq!(
-        store
-            .route_session("remote-legacy", false, None, None)
-            .unwrap(),
-        SessionRoute::RemoteReadOnly
-    );
-    assert_eq!(
-        serde_json::from_slice::<serde_json::Value>(&std::fs::read(&path).unwrap()).unwrap()["schema_version"],
-        3
-    );
+    store
+        .test_commit_remote_proxy_open(None, &context())
+        .unwrap();
+    let path = temp.path().join("sessions/_remote_proxies.json");
     drop(store);
-    let mut corrupted =
+    let pristine =
         serde_json::from_slice::<serde_json::Value>(&std::fs::read(&path).unwrap()).unwrap();
-    corrupted["schema_version"] = 99.into();
-    std::fs::write(&path, serde_json::to_vec(&corrupted).unwrap()).unwrap();
-    assert!(SessionStore::boot_at_test_dir(temp.path()).is_err());
+    for version in [0, 1, 2, 99] {
+        let mut unsupported = pristine.clone();
+        unsupported["schema_version"] = version.into();
+        let bytes = serde_json::to_vec(&unsupported).unwrap();
+        std::fs::write(&path, &bytes).unwrap();
+        assert!(SessionStore::boot_at_test_dir(temp.path()).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    }
 }
 
 #[test]
-fn offline_projection_is_readable_and_enumerable_after_restart() {
+fn authenticated_projection_is_readable_after_restart_but_offline_writes_fail() {
     let temp = tempfile::tempdir().unwrap();
     let store = make_store(temp.path());
     let live = context();
-    let first = store.open_remote_proxy(None, &live).unwrap();
-    let second = store.open_remote_proxy(None, &live).unwrap();
-    store
-        .update_remote_ui(
-            &first.local_session_id,
-            RemoteUiMetadata {
-                title: "first".into(),
-                pinned: true,
-                hidden: false,
-                last_opened_at: Some("2026-09-27T10:00:00+08:00".into()),
-            },
-        )
-        .unwrap();
-    store
-        .update_remote_ui(
-            &second.local_session_id,
-            RemoteUiMetadata {
-                title: "second".into(),
-                pinned: false,
-                hidden: true,
-                last_opened_at: Some("2026-09-27T11:00:00+08:00".into()),
-            },
-        )
-        .unwrap();
+    let first = store.test_commit_remote_proxy_open(None, &live).unwrap();
+    let second = store.test_commit_remote_proxy_open(None, &live).unwrap();
     store
         .confirm_remote_mapping(
             &first.local_session_id,
@@ -587,71 +441,74 @@ fn offline_projection_is_readable_and_enumerable_after_restart() {
         )
         .unwrap();
     let entry = projection_entry(1, "authenticated body");
-    store
-        .append_remote_projection(
-            &first.local_session_id,
-            &first.remote_session_ref,
-            &live,
-            entry.clone(),
-        )
-        .unwrap();
-    assert!(
+    assert_eq!(
         store
-            .append_remote_projection(
+            .project_authenticated_remote_entry(
                 &first.local_session_id,
                 &first.remote_session_ref,
                 &live,
+                "b-1",
+                entry.clone(),
+            )
+            .unwrap(),
+        super::projection::ProjectionWrite::Inserted
+    );
+    assert_eq!(
+        store
+            .project_authenticated_remote_entry(
+                &first.local_session_id,
+                &first.remote_session_ref,
+                &live,
+                "b-1",
+                entry.clone(),
+            )
+            .unwrap(),
+        super::projection::ProjectionWrite::Unchanged
+    );
+    assert!(
+        store
+            .project_authenticated_remote_entry(
+                &second.local_session_id,
+                &first.remote_session_ref,
+                &live,
+                "b-1",
                 entry.clone(),
             )
             .is_err()
     );
-    assert!(
-        store
-            .append_remote_projection(
-                &second.local_session_id,
-                &first.remote_session_ref,
-                &live,
-                entry.clone()
-            )
-            .is_err()
-    );
     let restarted = make_store(temp.path());
-    let list = restarted.list_remote_proxy_history();
-    assert_eq!(
-        list.iter()
-            .map(|item| item.local_session_id.as_str())
-            .collect::<Vec<_>>(),
-        vec![
-            first.local_session_id.as_str(),
-            second.local_session_id.as_str()
-        ]
-    );
-    assert_eq!(list[0].projected_entry_count, 1);
+    let ids = restarted
+        .list_remote_proxy_history()
+        .into_iter()
+        .map(|item| item.local_session_id)
+        .collect::<Vec<_>>();
+    assert!(ids.contains(&first.local_session_id));
+    assert!(ids.contains(&second.local_session_id));
     let view = restarted
         .read_remote_proxy_history(&first.local_session_id)
         .unwrap();
-    assert_eq!(view.projection.schema_version, 1);
     assert_eq!(view.projection.entries, vec![entry]);
     assert_eq!(view.authenticated_cursor.unwrap().sequence, 1);
     assert!(restarted.read_remote_proxy_history("missing").is_none());
     assert!(
         restarted
-            .append_remote_projection(
+            .project_authenticated_remote_entry(
                 &first.local_session_id,
                 &first.remote_session_ref,
                 &live,
-                projection_entry(2, "offline write")
+                "b-1",
+                projection_entry(2, "offline write"),
             )
             .is_err()
     );
 }
 
 #[test]
-fn projection_contract_enforces_dedup_bounds_and_structural_secret_rejection() {
+fn projection_writer_enforces_immutable_keys_bounds_and_secret_rejection() {
     let temp = tempfile::tempdir().unwrap();
     let store = make_store(temp.path());
     let live = context();
-    let opened = store.open_remote_proxy(None, &live).unwrap();
+    let opened = store.test_commit_remote_proxy_open(None, &live).unwrap();
     store
         .confirm_remote_mapping(
             &opened.local_session_id,
@@ -674,10 +531,11 @@ fn projection_contract_enforces_dedup_bounds_and_structural_secret_rejection() {
         checksum_sha256: "a".repeat(64),
     });
     store
-        .append_remote_projection(
+        .project_authenticated_remote_entry(
             &opened.local_session_id,
             &opened.remote_session_ref,
             &live,
+            "b-1",
             entry.clone(),
         )
         .unwrap();
@@ -685,21 +543,23 @@ fn projection_contract_enforces_dedup_bounds_and_structural_secret_rejection() {
     conflict.body = Some("different".into());
     assert!(
         store
-            .append_remote_projection(
+            .project_authenticated_remote_entry(
                 &opened.local_session_id,
                 &opened.remote_session_ref,
                 &live,
-                conflict
+                "b-1",
+                conflict,
             )
             .is_err()
     );
     assert!(
         store
-            .append_remote_projection(
+            .project_authenticated_remote_entry(
                 &opened.local_session_id,
                 &opened.remote_session_ref,
                 &live,
-                projection_entry(2, &"x".repeat(16 * 1024 + 1))
+                "b-1",
+                projection_entry(2, &"x".repeat(16 * 1024 + 1)),
             )
             .is_err()
     );
@@ -707,62 +567,15 @@ fn projection_contract_enforces_dedup_bounds_and_structural_secret_rejection() {
     too_many_attachments.attachments = vec![entry.attachments[0].clone(); 17];
     assert!(
         store
-            .append_remote_projection(
+            .project_authenticated_remote_entry(
                 &opened.local_session_id,
                 &opened.remote_session_ref,
                 &live,
-                too_many_attachments
+                "b-1",
+                too_many_attachments,
             )
             .is_err()
     );
-    let large = AuthenticatedProjection {
-        schema_version: 1,
-        entries: (2..=71)
-            .map(|sequence| projection_entry(sequence, &"x".repeat(16 * 1024)))
-            .collect(),
-    };
-    assert!(
-        verified_snapshot(
-            &opened,
-            &live,
-            large,
-            AuthenticatedCursor {
-                journal_epoch: "journal-1".into(),
-                sequence: 71
-            }
-        )
-        .is_err()
-    );
-    let full = AuthenticatedProjection {
-        schema_version: 1,
-        entries: (2..=513)
-            .map(|sequence| projection_entry(sequence, "x"))
-            .collect(),
-    };
-    let full_snapshot = verified_snapshot(
-        &opened,
-        &live,
-        full,
-        AuthenticatedCursor {
-            journal_epoch: "journal-1".into(),
-            sequence: 513,
-        },
-    )
-    .unwrap();
-    store
-        .replace_remote_projection_from_authenticated_snapshot(full_snapshot)
-        .unwrap();
-    assert!(
-        store
-            .append_remote_projection(
-                &opened.local_session_id,
-                &opened.remote_session_ref,
-                &live,
-                projection_entry(514, "overflow")
-            )
-            .is_err()
-    );
-
     let mut json = serde_json::to_value(entry).unwrap();
     json["authorization_header"] = "secret".into();
     assert!(serde_json::from_value::<ProjectionEntry>(json).is_err());
@@ -779,182 +592,11 @@ fn projection_contract_enforces_dedup_bounds_and_structural_secret_rejection() {
 }
 
 #[test]
-fn legacy_v1_without_projection_is_upgraded_deterministically() {
-    let temp = tempfile::tempdir().unwrap();
-    let store = make_store(temp.path());
-    let opened = store.open_remote_proxy(None, &context()).unwrap();
-    let path = temp.path().join("sessions/_remote_proxies.json");
-    drop(store);
-    let mut file: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-    file["schema_version"] = 1.into();
-    file["records"][0]["schema_version"] = 1.into();
-    file["records"][0]["authenticated_cursor"] = serde_json::json!({
-        "journal_epoch": "unbacked-old-epoch", "sequence": 7
-    });
-    file["records"][0]["pending"] = serde_json::json!([{
-        "client_request_id": "-request-1",
-        "task_id": ":task-1",
-        "request_fingerprint": "a".repeat(64),
-        "outcome_unknown": false,
-    }]);
-    file["records"][0]
-        .as_object_mut()
-        .unwrap()
-        .remove("projection");
-    file["records"][0]
-        .as_object_mut()
-        .unwrap()
-        .remove("retired_epochs");
-    file["records"][0]
-        .as_object_mut()
-        .unwrap()
-        .remove("retired_requests");
-    std::fs::write(&path, serde_json::to_vec(&file).unwrap()).unwrap();
-    let migrated = make_store(temp.path());
-    let view = migrated
-        .read_remote_proxy_history(&opened.local_session_id)
-        .unwrap();
-    assert!(view.projection.entries.is_empty());
-    assert!(view.authenticated_cursor.is_none());
-    assert_eq!(view.projection.schema_version, 1);
-    assert!(
-        migrated
-            .remote_proxy_snapshot(&opened.local_session_id)
-            .unwrap()
-            .pending[0]
-            .dispatch_state
-            == PendingDispatchState::AttemptMayHaveOccurred
-    );
-    assert_eq!(
-        migrated
-            .remote_proxy_snapshot(&opened.local_session_id)
-            .unwrap()
-            .pending[0]
-            .client_request_id,
-        "-request-1"
-    );
-    let rewritten: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-    assert_eq!(rewritten["schema_version"], 3);
-    assert_eq!(rewritten["records"][0]["schema_version"], 3);
-    assert_eq!(rewritten["records"][0]["projection"]["schema_version"], 1);
-    assert_eq!(
-        rewritten["records"][0]["retired_epochs"],
-        serde_json::json!([])
-    );
-    assert_eq!(
-        rewritten["records"][0]["retired_requests"],
-        serde_json::json!([])
-    );
-    drop(migrated);
-    let reopened = make_store(temp.path());
-    assert_eq!(
-        reopened
-            .read_remote_proxy_history(&opened.local_session_id)
-            .unwrap(),
-        view
-    );
-    assert!(
-        reopened
-            .remote_proxy_snapshot(&opened.local_session_id)
-            .unwrap()
-            .pending[0]
-            .dispatch_state
-            == PendingDispatchState::AttemptMayHaveOccurred
-    );
-}
-
-#[test]
-fn v1_and_v2_reject_malformed_or_conflicting_pending_without_rewriting_disk() {
-    let temp = tempfile::tempdir().unwrap();
-    let store = make_store(temp.path());
-    store.open_remote_proxy(None, &context()).unwrap();
-    let path = temp.path().join("sessions/_remote_proxies.json");
-    let pristine: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-    drop(store);
-
-    let valid = serde_json::json!({
-        "client_request_id": "request-1",
-        "task_id": "task-1",
-        "request_fingerprint": "a".repeat(64),
-        "outcome_unknown": false,
-    });
-    let mut cases = Vec::new();
-    for (field, value) in [
-        ("client_request_id", serde_json::json!("")),
-        ("task_id", serde_json::json!("")),
-        ("client_request_id", serde_json::json!("a".repeat(129))),
-        ("task_id", serde_json::json!("t".repeat(129))),
-        ("client_request_id", serde_json::json!("bad space")),
-        ("task_id", serde_json::json!("éclair")),
-        ("task_id", serde_json::json!("bad/slash")),
-        ("request_fingerprint", serde_json::json!("A".repeat(64))),
-        ("request_fingerprint", serde_json::json!("g".repeat(64))),
-        ("request_fingerprint", serde_json::json!("a".repeat(63))),
-    ] {
-        let mut malformed = valid.clone();
-        malformed[field] = value;
-        cases.push(vec![malformed]);
-    }
-    // An exact duplicate is not a second correlation slot. Neither a shared
-    // client ID nor a shared task ID may silently win on migration.
-    cases.push(vec![valid.clone(), valid.clone()]);
-    let mut same_client = valid.clone();
-    same_client["task_id"] = "task-2".into();
-    cases.push(vec![valid.clone(), same_client]);
-    let mut same_task = valid.clone();
-    same_task["client_request_id"] = "request-2".into();
-    cases.push(vec![valid.clone(), same_task]);
-    let mut same_pair_other_fingerprint = valid.clone();
-    same_pair_other_fingerprint["request_fingerprint"] = "b".repeat(64).into();
-    cases.push(vec![valid.clone(), same_pair_other_fingerprint]);
-    cases.push(
-        (0..65)
-            .map(|index| {
-                serde_json::json!({
-                    "client_request_id": format!("request-{index}"),
-                    "task_id": format!("task-{index}"),
-                    "request_fingerprint": format!("{index:064x}"),
-                    "outcome_unknown": false,
-                })
-            })
-            .collect(),
-    );
-
-    for version in [1, 2] {
-        for pending in &cases {
-            let mut file = pristine.clone();
-            file["schema_version"] = version.into();
-            file["records"][0]["schema_version"] = version.into();
-            file["records"][0]["pending"] = serde_json::Value::Array(pending.clone());
-            file["records"][0]
-                .as_object_mut()
-                .unwrap()
-                .remove("retired_requests");
-            if version == 1 {
-                let record = file["records"][0].as_object_mut().unwrap();
-                record.remove("projection");
-                record.remove("retired_epochs");
-            }
-            let bytes = serde_json::to_vec(&file).unwrap();
-            std::fs::write(&path, &bytes).unwrap();
-            assert!(
-                SessionStore::boot_at_test_dir(temp.path()).is_err(),
-                "v{version} accepted invalid pending {pending:?}"
-            );
-            assert_eq!(std::fs::read(&path).unwrap(), bytes);
-        }
-    }
-}
-
-#[test]
 fn pending_write_uses_protocol_field_rules_and_keeps_recovered_uncertainty() {
     let temp = tempfile::tempdir().unwrap();
     let store = make_store(temp.path());
     let live = context();
-    let opened = store.open_remote_proxy(None, &live).unwrap();
+    let opened = store.test_commit_remote_proxy_open(None, &live).unwrap();
     store
         .confirm_remote_mapping(
             &opened.local_session_id,
@@ -978,6 +620,7 @@ fn pending_write_uses_protocol_field_rules_and_keeps_recovered_uncertainty() {
         task_id: "task-1".into(),
         request_fingerprint: "a".repeat(64),
         dispatch_state: PendingDispatchState::PreparedNeverAttempted,
+        reservation_fingerprint: None,
     };
     let mut invalid = valid.clone();
     invalid.client_request_id = "bad/slash".into();
@@ -992,6 +635,17 @@ fn pending_write_uses_protocol_field_rules_and_keeps_recovered_uncertainty() {
     let mut invalid = valid.clone();
     invalid.request_fingerprint = "A".repeat(64);
     assert!(write(invalid).is_err());
+    let encoded = serde_json::to_value(&valid).unwrap();
+    assert!(encoded.get("reservation_fingerprint").is_none());
+    assert_eq!(
+        serde_json::from_value::<PendingRemoteRequest>(encoded).unwrap(),
+        valid
+    );
+    for alias in ["short".to_owned(), "A".repeat(64)] {
+        let mut invalid = valid.clone();
+        invalid.reservation_fingerprint = Some(alias);
+        assert!(write(invalid).is_err());
+    }
     write(valid.clone()).unwrap();
     write(valid.clone()).unwrap();
     assert!(
@@ -1011,7 +665,9 @@ fn pending_write_uses_protocol_field_rules_and_keeps_recovered_uncertainty() {
 fn v3_cannot_masquerade_as_legacy_by_erasing_security_fields() {
     let temp = tempfile::tempdir().unwrap();
     let store = make_store(temp.path());
-    store.open_remote_proxy(None, &context()).unwrap();
+    store
+        .test_commit_remote_proxy_open(None, &context())
+        .unwrap();
     let path = temp.path().join("sessions/_remote_proxies.json");
     let pristine: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
@@ -1054,344 +710,13 @@ fn v3_cannot_masquerade_as_legacy_by_erasing_security_fields() {
     assert!(SessionStore::boot_at_test_dir(temp.path()).is_ok());
 }
 
-#[test]
-fn journal_append_is_contiguous_and_epoch_change_requires_verified_snapshot() {
-    let temp = tempfile::tempdir().unwrap();
-    let store = make_store(temp.path());
-    let live = context();
-    let opened = store.open_remote_proxy(None, &live).unwrap();
-    store
-        .confirm_remote_mapping(
-            &opened.local_session_id,
-            &live,
-            &AuthenticatedMapping {
-                remote_session_ref: opened.remote_session_ref.clone(),
-                controlled_session_id: "b-1".into(),
-            },
-        )
-        .unwrap();
-    let append = |entry| {
-        store.append_remote_projection(
-            &opened.local_session_id,
-            &opened.remote_session_ref,
-            &live,
-            entry,
-        )
-    };
-    assert!(append(projection_entry(0, "zero")).is_err());
-    assert!(append(projection_entry(2, "first gap")).is_err());
-    assert!(
-        store
-            .read_remote_proxy_history(&opened.local_session_id)
-            .unwrap()
-            .projection
-            .entries
-            .is_empty()
-    );
-    append(projection_entry(1, "one")).unwrap();
-    assert!(append(projection_entry(1, "one")).is_err());
-    assert!(append(projection_entry(3, "gap")).is_err());
-    let mut another_epoch = projection_entry(2, "wrong epoch");
-    another_epoch.journal_epoch = "journal-2".into();
-    assert!(append(another_epoch).is_err());
-    append(projection_entry(2, "two")).unwrap();
-    assert!(append(projection_entry(4, "no-content gap")).is_err());
-
-    let mut epoch_two_first = projection_entry(1, "new epoch one");
-    epoch_two_first.journal_epoch = "journal-2".into();
-    let mut epoch_two_second = projection_entry(2, "new epoch two");
-    epoch_two_second.journal_epoch = "journal-2".into();
-    let snapshot = verified_snapshot(
-        &opened,
-        &live,
-        AuthenticatedProjection {
-            schema_version: 1,
-            entries: vec![epoch_two_first.clone(), epoch_two_second.clone()],
-        },
-        AuthenticatedCursor {
-            journal_epoch: "journal-2".into(),
-            sequence: 2,
-        },
-    )
-    .unwrap();
-    store
-        .replace_remote_projection_from_authenticated_snapshot(snapshot)
-        .unwrap();
-    assert!(append(projection_entry(3, "old epoch replay")).is_err());
-    let view = store
-        .read_remote_proxy_history(&opened.local_session_id)
-        .unwrap();
-    assert_eq!(
-        view.projection.entries,
-        vec![epoch_two_first, epoch_two_second]
-    );
-    assert_eq!(
-        view.authenticated_cursor.as_ref().unwrap().journal_epoch,
-        "journal-2"
-    );
-    assert_eq!(
-        store
-            .remote_proxy_snapshot(&opened.local_session_id)
-            .unwrap()
-            .retired_epochs,
-        vec!["journal-1"]
-    );
-
-    let mut old_snapshot = AuthenticatedProjection::default();
-    old_snapshot.entries = vec![projection_entry(1, "one"), projection_entry(2, "two")];
-    let old_cursor = AuthenticatedCursor {
-        journal_epoch: "journal-1".into(),
-        sequence: 2,
-    };
-    let old = verified_snapshot(&opened, &live, old_snapshot.clone(), old_cursor.clone()).unwrap();
-    let file = temp.path().join("sessions/_remote_proxies.json");
-    let before = std::fs::read(&file).unwrap();
-    assert!(
-        store
-            .replace_remote_projection_from_authenticated_snapshot(old)
-            .is_err()
-    );
-    assert_eq!(std::fs::read(&file).unwrap(), before);
-
-    // A failed atomic persistence cannot publish a new epoch/cursor in memory.
-    let mut epoch_three = projection_entry(1, "epoch three");
-    epoch_three.journal_epoch = "journal-3".into();
-    let epoch_three_snapshot = verified_snapshot(
-        &opened,
-        &live,
-        AuthenticatedProjection {
-            schema_version: 1,
-            entries: vec![epoch_three],
-        },
-        AuthenticatedCursor {
-            journal_epoch: "journal-3".into(),
-            sequence: 1,
-        },
-    )
-    .unwrap();
-    let original_path = {
-        let mut state = store.remote_proxies.lock();
-        std::mem::replace(
-            &mut state.path,
-            temp.path().join("missing-parent/remote.json"),
-        )
-    };
-    assert!(
-        store
-            .replace_remote_projection_from_authenticated_snapshot(epoch_three_snapshot)
-            .is_err()
-    );
-    store.remote_proxies.lock().path = original_path;
-    assert_eq!(
-        store
-            .read_remote_proxy_history(&opened.local_session_id)
-            .unwrap(),
-        view
-    );
-    assert_eq!(std::fs::read(&file).unwrap(), before);
-
-    let restarted = make_store(temp.path());
-    assert_eq!(
-        restarted
-            .read_remote_proxy_history(&opened.local_session_id)
-            .unwrap(),
-        view
-    );
-    assert_eq!(
-        restarted
-            .remote_proxy_snapshot(&opened.local_session_id)
-            .unwrap()
-            .retired_epochs,
-        vec!["journal-1"]
-    );
-    // Simulate a future trusted rebind after restart: retired epochs remain a
-    // durable independent guard, even when a live binding is again present.
-    {
-        let mut state = restarted.remote_proxies.lock();
-        state.current_context = Some(live.clone());
-        state.openings.insert(
-            opened.local_session_id.clone(),
-            super::binding::LiveRemoteBinding {
-                context: live.clone(),
-                confirmed: true,
-            },
-        );
-    }
-    let old_again = verified_snapshot(&opened, &live, old_snapshot, old_cursor).unwrap();
-    assert!(
-        restarted
-            .replace_remote_projection_from_authenticated_snapshot(old_again)
-            .is_err()
-    );
-    assert_eq!(std::fs::read(&file).unwrap(), before);
-}
-
-#[test]
-fn snapshot_rejects_mixed_epoch_gap_and_cursor_mismatch_before_write() {
-    let temp = tempfile::tempdir().unwrap();
-    let store = make_store(temp.path());
-    let live = context();
-    let opened = store.open_remote_proxy(None, &live).unwrap();
-    store
-        .confirm_remote_mapping(
-            &opened.local_session_id,
-            &live,
-            &AuthenticatedMapping {
-                remote_session_ref: opened.remote_session_ref.clone(),
-                controlled_session_id: "b-1".into(),
-            },
-        )
-        .unwrap();
-    let original = store
-        .read_remote_proxy_history(&opened.local_session_id)
-        .unwrap();
-    let cursor = AuthenticatedCursor {
-        journal_epoch: "journal-2".into(),
-        sequence: 3,
-    };
-    let mut mixed = projection_entry(2, "mixed");
-    mixed.journal_epoch = "journal-1".into();
-    let new_entry = |sequence, body| {
-        let mut entry = projection_entry(sequence, body);
-        entry.journal_epoch = "journal-2".into();
-        entry
-    };
-    for entries in [
-        vec![new_entry(1, "a"), mixed, new_entry(3, "c")],
-        vec![new_entry(1, "a"), new_entry(3, "c")],
-        vec![new_entry(1, "a"), new_entry(2, "b")],
-    ] {
-        assert!(
-            verified_snapshot(
-                &opened,
-                &live,
-                AuthenticatedProjection {
-                    schema_version: 1,
-                    entries,
-                },
-                cursor.clone()
-            )
-            .is_err()
-        );
-    }
-    assert_eq!(
-        store
-            .read_remote_proxy_history(&opened.local_session_id)
-            .unwrap(),
-        original
-    );
-}
-
 fn pending_request(client: &str, task: &str) -> PendingRemoteRequest {
     PendingRemoteRequest {
         client_request_id: client.into(),
         task_id: task.into(),
         request_fingerprint: "a".repeat(64),
         dispatch_state: PendingDispatchState::PreparedNeverAttempted,
-    }
-}
-
-#[test]
-fn dispatch_barrier_and_terminal_retirement_are_durable_and_irreversible() {
-    let temp = tempfile::tempdir().unwrap();
-    let store = make_store(temp.path());
-    let live = context();
-    let opened = store.open_remote_proxy(None, &live).unwrap();
-    store
-        .confirm_remote_mapping(
-            &opened.local_session_id,
-            &live,
-            &AuthenticatedMapping {
-                remote_session_ref: opened.remote_session_ref.clone(),
-                controlled_session_id: "b-session".into(),
-            },
-        )
-        .unwrap();
-    let pending = pending_request("request-1", "task-1");
-    store
-        .insert_remote_pending(
-            &opened.local_session_id,
-            &opened.remote_session_ref,
-            &live,
-            pending.clone(),
-        )
-        .unwrap();
-    store
-        .mark_remote_dispatch_attempt(
-            &opened.local_session_id,
-            &opened.remote_session_ref,
-            &live,
-            "request-1",
-            "task-1",
-            &pending.request_fingerprint,
-        )
-        .unwrap();
-    assert!(
-        store
-            .mark_remote_dispatch_attempt(
-                &opened.local_session_id,
-                &opened.remote_session_ref,
-                &live,
-                "request-1",
-                "task-1",
-                &pending.request_fingerprint
-            )
-            .is_err()
-    );
-    assert!(
-        store
-            .abandon_unattempted_remote_pending(
-                &opened.local_session_id,
-                "request-1",
-                "task-1",
-                &pending.request_fingerprint
-            )
-            .is_err()
-    );
-    store
-        .retire_remote_pending_terminal(
-            &opened.local_session_id,
-            &opened.remote_session_ref,
-            &live,
-            "b-session",
-            "request-1",
-            "task-1",
-            &pending.request_fingerprint,
-        )
-        .unwrap();
-    drop(store);
-    let restarted = make_store(temp.path());
-    let retired = &restarted
-        .remote_proxy_snapshot(&opened.local_session_id)
-        .unwrap()
-        .retired_requests[0];
-    assert_eq!(retired.disposition, RetiredRequestDisposition::Terminal);
-    assert_eq!(retired.request_fingerprint, pending.request_fingerprint);
-    let another = restarted.open_remote_proxy(None, &live).unwrap();
-    restarted
-        .confirm_remote_mapping(
-            &another.local_session_id,
-            &live,
-            &AuthenticatedMapping {
-                remote_session_ref: another.remote_session_ref.clone(),
-                controlled_session_id: "another-b-session".into(),
-            },
-        )
-        .unwrap();
-    for attempt in [
-        pending_request("request-1", "task-2"),
-        pending_request("request-2", "task-1"),
-    ] {
-        assert!(
-            restarted
-                .insert_remote_pending(
-                    &another.local_session_id,
-                    &another.remote_session_ref,
-                    &live,
-                    attempt
-                )
-                .is_err()
-        );
+        reservation_fingerprint: None,
     }
 }
 
@@ -1400,7 +725,7 @@ fn never_attempted_abandon_is_atomic_and_retires_both_ids_across_records() {
     let temp = tempfile::tempdir().unwrap();
     let store = make_store(temp.path());
     let live = context();
-    let opened = store.open_remote_proxy(None, &live).unwrap();
+    let opened = store.test_commit_remote_proxy_open(None, &live).unwrap();
     store
         .confirm_remote_mapping(
             &opened.local_session_id,
@@ -1479,7 +804,9 @@ fn never_attempted_abandon_is_atomic_and_retires_both_ids_across_records() {
         retired.disposition,
         RetiredRequestDisposition::AbandonedNeverAttempted
     );
-    let another = restarted.open_remote_proxy(None, &live).unwrap();
+    let another = restarted
+        .test_commit_remote_proxy_open(None, &live)
+        .unwrap();
     restarted
         .confirm_remote_mapping(
             &another.local_session_id,
@@ -1508,65 +835,12 @@ fn never_attempted_abandon_is_atomic_and_retires_both_ids_across_records() {
 }
 
 #[test]
-fn v2_pending_migrates_to_possibly_attempted_without_releasing_ids() {
-    let temp = tempfile::tempdir().unwrap();
-    let store = make_store(temp.path());
-    let opened = store.open_remote_proxy(None, &context()).unwrap();
-    let path = temp.path().join("sessions/_remote_proxies.json");
-    drop(store);
-    let mut file: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-    file["schema_version"] = 2.into();
-    file["records"][0]["schema_version"] = 2.into();
-    file["records"][0]
-        .as_object_mut()
-        .unwrap()
-        .remove("retired_requests");
-    file["records"][0]["pending"] = serde_json::json!([{
-        "client_request_id": "request-1",
-        "task_id": "task-1",
-        "request_fingerprint": "a".repeat(64),
-        "outcome_unknown": false
-    }]);
-    std::fs::write(&path, serde_json::to_vec(&file).unwrap()).unwrap();
-    let migrated = make_store(temp.path());
-    let pending = &migrated
-        .remote_proxy_snapshot(&opened.local_session_id)
-        .unwrap()
-        .pending[0];
-    assert_eq!(
-        pending.dispatch_state,
-        PendingDispatchState::AttemptMayHaveOccurred
-    );
-    assert!(
-        migrated
-            .abandon_unattempted_remote_pending(
-                &opened.local_session_id,
-                "request-1",
-                "task-1",
-                &"a".repeat(64)
-            )
-            .is_err()
-    );
-    let rewritten: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-    assert_eq!(rewritten["schema_version"], 3);
-    assert_eq!(
-        rewritten["records"][0]["pending"][0]["dispatch_state"],
-        "attempt_may_have_occurred"
-    );
-    assert!(
-        rewritten["records"][0]["pending"][0]
-            .get("outcome_unknown")
-            .is_none()
-    );
-}
-
-#[test]
 fn v3_rejects_incomplete_or_conflicting_outbox_contract_without_disk_rewrite() {
     let temp = tempfile::tempdir().unwrap();
     let store = make_store(temp.path());
-    store.open_remote_proxy(None, &context()).unwrap();
+    store
+        .test_commit_remote_proxy_open(None, &context())
+        .unwrap();
     let path = temp.path().join("sessions/_remote_proxies.json");
     let pristine: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
@@ -1616,229 +890,4 @@ fn v3_rejects_incomplete_or_conflicting_outbox_contract_without_disk_rewrite() {
         assert!(SessionStore::boot_at_test_dir(temp.path()).is_err());
         assert_eq!(std::fs::read(&path).unwrap(), bytes);
     }
-}
-
-#[test]
-fn terminal_retirement_rechecks_live_b_mapping_and_correlation_under_write_lock() {
-    let temp = tempfile::tempdir().unwrap();
-    let store = make_store(temp.path());
-    let live = context();
-    let opened = store.open_remote_proxy(None, &live).unwrap();
-    store
-        .confirm_remote_mapping(
-            &opened.local_session_id,
-            &live,
-            &AuthenticatedMapping {
-                remote_session_ref: opened.remote_session_ref.clone(),
-                controlled_session_id: "b-session-1".into(),
-            },
-        )
-        .unwrap();
-    let pending = pending_request("request-1", "task-1");
-    store
-        .insert_remote_pending(
-            &opened.local_session_id,
-            &opened.remote_session_ref,
-            &live,
-            pending.clone(),
-        )
-        .unwrap();
-    store
-        .mark_remote_dispatch_attempt(
-            &opened.local_session_id,
-            &opened.remote_session_ref,
-            &live,
-            "request-1",
-            "task-1",
-            &pending.request_fingerprint,
-        )
-        .unwrap();
-    let path = temp.path().join("sessions/_remote_proxies.json");
-    let before = std::fs::read(&path).unwrap();
-    let retire = |context: &LiveRemoteContext,
-                  remote_ref: &str,
-                  b_session: &str,
-                  client_id: &str,
-                  task_id: &str,
-                  fingerprint: &str| {
-        store.retire_remote_pending_terminal(
-            &opened.local_session_id,
-            remote_ref,
-            context,
-            b_session,
-            client_id,
-            task_id,
-            fingerprint,
-        )
-    };
-    let mut stale_generation = live.clone();
-    stale_generation.generation = "stale-generation".into();
-    let mut wrong_lease = live.clone();
-    wrong_lease.controller_lease_id = "wrong-lease".into();
-    let mut wrong_connection = live.clone();
-    wrong_connection.connection_id = "wrong-connection".into();
-    for changed in [&stale_generation, &wrong_lease, &wrong_connection] {
-        assert!(
-            retire(
-                changed,
-                &opened.remote_session_ref,
-                "b-session-1",
-                "request-1",
-                "task-1",
-                &pending.request_fingerprint
-            )
-            .is_err()
-        );
-    }
-    let wrong_fingerprint = "b".repeat(64);
-    for (remote_ref, b_session, client_id, task_id, fingerprint) in [
-        (
-            "foreign-ref",
-            "b-session-1",
-            "request-1",
-            "task-1",
-            pending.request_fingerprint.as_str(),
-        ),
-        (
-            opened.remote_session_ref.as_str(),
-            "foreign-b-session",
-            "request-1",
-            "task-1",
-            pending.request_fingerprint.as_str(),
-        ),
-        (
-            opened.remote_session_ref.as_str(),
-            "b-session-1",
-            "foreign-request",
-            "task-1",
-            pending.request_fingerprint.as_str(),
-        ),
-        (
-            opened.remote_session_ref.as_str(),
-            "b-session-1",
-            "request-1",
-            "foreign-task",
-            pending.request_fingerprint.as_str(),
-        ),
-        (
-            opened.remote_session_ref.as_str(),
-            "b-session-1",
-            "request-1",
-            "task-1",
-            wrong_fingerprint.as_str(),
-        ),
-    ] {
-        assert!(
-            retire(
-                &live,
-                remote_ref,
-                b_session,
-                client_id,
-                task_id,
-                fingerprint
-            )
-            .is_err()
-        );
-    }
-    assert_eq!(std::fs::read(&path).unwrap(), before);
-    assert_eq!(
-        store
-            .remote_proxy_snapshot(&opened.local_session_id)
-            .unwrap()
-            .pending
-            .len(),
-        1
-    );
-
-    // A read-only validation is not a grant: disconnect between validation
-    // and write must make the atomic terminal operation fail closed.
-    store
-        .require_live_remote_mutation(&opened.local_session_id, &opened.remote_session_ref, &live)
-        .unwrap();
-    store.disconnect_remote_proxy(&opened.local_session_id);
-    assert!(
-        retire(
-            &live,
-            &opened.remote_session_ref,
-            "b-session-1",
-            "request-1",
-            "task-1",
-            &pending.request_fingerprint
-        )
-        .is_err()
-    );
-    assert_eq!(std::fs::read(&path).unwrap(), before);
-
-    let mut rebound = live.clone();
-    rebound.connection_id = "connection-2".into();
-    rebound.lease_epoch = "epoch-2".into();
-    rebound.generation = "generation-2".into();
-    rebound.control_connected = true;
-    rebound.encrypted_channel_connected = true;
-    store
-        .resume_remote_proxy(&opened.local_session_id, &rebound)
-        .unwrap();
-    store
-        .confirm_remote_mapping(
-            &opened.local_session_id,
-            &rebound,
-            &AuthenticatedMapping {
-                remote_session_ref: opened.remote_session_ref.clone(),
-                controlled_session_id: "b-session-1".into(),
-            },
-        )
-        .unwrap();
-    assert!(
-        retire(
-            &live,
-            &opened.remote_session_ref,
-            "b-session-1",
-            "request-1",
-            "task-1",
-            &pending.request_fingerprint
-        )
-        .is_err()
-    );
-    assert_eq!(std::fs::read(&path).unwrap(), before);
-
-    // Persistence failure rolls back the in-memory retirement as well.
-    let original_path = {
-        let mut state = store.remote_proxies.lock();
-        std::mem::replace(
-            &mut state.path,
-            temp.path().join("missing-parent/remote.json"),
-        )
-    };
-    assert!(
-        retire(
-            &rebound,
-            &opened.remote_session_ref,
-            "b-session-1",
-            "request-1",
-            "task-1",
-            &pending.request_fingerprint
-        )
-        .is_err()
-    );
-    store.remote_proxies.lock().path = original_path;
-    assert_eq!(std::fs::read(&path).unwrap(), before);
-    let record = store
-        .remote_proxy_snapshot(&opened.local_session_id)
-        .unwrap();
-    assert_eq!(record.pending.len(), 1);
-    assert!(record.retired_requests.is_empty());
-    retire(
-        &rebound,
-        &opened.remote_session_ref,
-        "b-session-1",
-        "request-1",
-        "task-1",
-        &pending.request_fingerprint,
-    )
-    .unwrap();
-    let record = store
-        .remote_proxy_snapshot(&opened.local_session_id)
-        .unwrap();
-    assert!(record.pending.is_empty());
-    assert_eq!(record.retired_requests.len(), 1);
 }

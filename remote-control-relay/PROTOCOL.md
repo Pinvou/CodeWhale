@@ -520,15 +520,19 @@ algorithm below; Rust constructs it from individual fields rather than hashing
 a fixture-supplied preimage.
 
 Every decrypted payload carries full lease context. A requests B's runtime
-allowlist with `capability_snapshot_request {request_id,known_revision}`; B
-returns `capability_snapshot {request_id,capability_revision,expires_at_ms,
-modes,tools,skills,workspaces}`. The echoed, globally unique `request_id` binds
-the response to the exact local session without adding fields that older v1
-peers reject; parsers also accept optional `session_id` and `valid_for_ms` from
-newer peers. If snapshot construction fails, B returns
-`capability_snapshot_error {request_id,session_id?,code}` with
-the bounded `capability_snapshot_unavailable` code. Tool/Skill entries contain only an opaque ID
-and display name. Workspace entries contain only opaque ID, display name and
+allowlist with `capability_snapshot_request {request_id,session_id,known_revision}`;
+`session_id` is A's Rust-generated RemoteProxy reference. B first resolves the
+current generation's authoritative local Session and returns
+`capability_snapshot {request_id,session_id,controlled_session_id,
+capability_revision,expires_at_ms,modes,tools,skills,workspaces}`. A accepts
+the B Session mapping only after encrypted authentication and exact request,
+reference and lease checks. `valid_for_ms` is optional TTL metadata, not a
+mapping fallback. If snapshot construction fails, B returns
+`capability_snapshot_error {request_id,session_id,code}` with
+the bounded `capability_snapshot_unavailable` code. Tool entries contain only an opaque ID and
+display name. Skill entries additionally contain a non-empty, duplicate-free `scopes` array whose
+values are `chat` and/or `code`; one opaque skill ID can therefore be advertised for both lanes
+without collapsing their authorization scopes. Workspace entries contain only opaque ID, display name and
 `code_allowed`; paths, configuration, source and credentials are forbidden.
 Lists are bounded to 256 unique entries, revisions are canonical decimal
 strings, and a task binds the exact `capability_revision` it consumed.
@@ -581,7 +585,7 @@ text “连接码无效或已失效”. A legacy conflict remains exactly
 plus close code `1008`.
 
 The contract digest is
-`04c9f3721bbf38afbe6f51550bdba773a9225d318fe7977249f3f9bed1974d47`.
+`f98dc9475965ad51f72e22872774bbeb3729fb53e55405a4390b6b09079bebef`.
 It is SHA-256 over canonical JSON (object keys recursively sorted, array order
 preserved, compact JSON scalars) of `{contract,fixture}`. `contract` is the
 executable manifest containing every schema required/optional field, role
@@ -736,17 +740,17 @@ JSON shape is valid. Pairing registration additionally uses the stable
 
 The frozen decrypted `encrypted_frame` payload kinds are
 `capability_snapshot_request`, `capability_snapshot`, `capability_snapshot_error`, `task_submit`,
-`task_cancel`, `task_status`, `permission_request`, `permission_decision`,
-`attachment_begin`, `attachment_chunk`, `attachment_commit`,
-`artifact_index_request`, `artifact_index`, `artifact_read_request`,
-`artifact_chunk`, `session_snapshot_request`, `session_snapshot`,
-`journal_replay_request` and `journal_event`. A sends capability, task, cancel,
-approval, upload, read and replay requests. B sends capability snapshots/errors, task
-states, permission requests, artifact indexes/chunks, snapshots and journal events. The parser
+`task_cancel`, `task_status`, `remote_action_request`, `remote_action_result`,
+`session_snapshot_request`, `session_snapshot`, `journal_replay_request` and
+`journal_event`. A sends capability, task, cancel, closed operation-specific
+actions and replay requests. B sends capability snapshots/errors, task states,
+correlated action results, snapshots and journal events. The parser
 rejects these payloads when presented by the opposite role. Every task,
 permission, attachment, artifact, snapshot and journal operation is bound to
 the same `connection_id + controller_lease_id + lease_epoch`; task and transfer
-messages additionally carry their exact task/session/request identifiers.
+messages additionally carry their exact task/session/request identifiers. The
+action envelope requires `task_v1`; after decryption, permission, attachment
+and artifact operations also require their own negotiated capability.
 The outer gate maps pairing messages to `pairing_v1`, receipt/Finished messages
 to `finished_receipt_v1`, liveness messages to `role_liveness_v1`, resume
 messages to `resume_v1`, and encrypted frames/disconnect to

@@ -1,8 +1,60 @@
 # Windows 双端远程控制代码架构
 
-> 本文描述当前桌面双端远程控制的代码结构、状态所有权和业务调用流程，并给出后续无行为变更的整理方向。
->
-> 本文中的双端远程控制，是指 Windows 桌面 A 端控制 B 端的加密远程会话，不是浏览器 WebUI 远程访问。WebUI 架构见 `docs/remote-control-phase1-architecture.md`。
+本文当前契约描述 Windows 桌面 A 端控制 B 端的加密远程会话。已发布的浏览器 WebUI v2 是另一条既有能力，架构见 `docs/remote-control-phase1-architecture.md`。
+
+## 当前架构契约
+
+以下落位与本轮闭环代码对应，是当前实现说明。附录保留 A19 原设计过程；其中的“当前”“目标”“推荐迁移”等文字只描述当时的快照，不能作为当前目录索引、待办、兼容要求或发布验收证据。
+
+### 权威状态与调用边界
+
+- B 的 `SessionStore`、任务准入、执行及 Journal 是业务事实源。A 的 `SessionStore.RemoteProxy` 保存本地 UI 元数据、有限 pending/outbox 与已认证历史投影，不是第二个业务权威。
+- A 的远程输入按 `prepare → persist → dispatch` 执行；持久化失败禁止发送。已认证的 B 结果、Journal 或快照在精确会话与租约绑定内对账，不能用前端投影覆盖 B。
+- B 本地输入和 A 网络输入复用同一权威 Session、turn 准入与执行链路。远控 feature 定义窄端口，app 组合根注入适配，禁止反向依赖 Tauri Command。
+- `SessionStore`、`EnginePool`、`AcpPool` 与 `RemoteControl` 保持并列；RemoteProxy 不进入 A 本机 EnginePool/AcpPool，也不新增持有第二套状态的统一 Runtime。
+- `ChatView.jsx` 是远程会话正文的唯一界面。`RemoteConnectionShell.jsx` 仅负责连接；已删除 `RemoteConversationView.jsx`、独立 `RemoteHistoryStore` 及第二份会话正文供数链路。
+- 断线首次发生时冻结最后有效认证存活证据的恢复截止时间，恢复过程中不得延长；恢复未完成时禁止业务帧，失败、停止和租约变化进入统一清理。
+- Relay 转发加密业务帧，但首版握手仍以受信 Relay 遵守协议为安全前提；不得将被动不可解密宣传成可抵御恶意 Relay 主动 MITM。
+
+### 当前代码落位
+
+下表 Rust 路径均相对 `pinvou3-app/src-tauri/src/`，前端路径相对 `pinvou3-app/src/`。
+
+| 当前模块 | 职责 |
+|---|---|
+| `features/remote-control/RemoteControlSettingsPage.jsx`、`ControlledDevicePanel.jsx`、`RemoteControllerPanel.jsx`、`RemoteConnectForm.jsx` | 设置页角色页签、连接意图与状态展示 |
+| `features/chat/ChatView.jsx` | 统一会话正文、输入与远程任务操作 |
+| `features/remote-control/remote-control-state.js` | 认证绑定、状态投影和迟到事件过滤，不持有第二份正文 |
+| `platform/tauri/bridge/desktop-remote-control.js` | 窄 IPC 及事件接线，消费已加载且显式为 true 的语义能力 |
+| `app/commands/desktop_remote_proxy.rs` | RemoteProxy 打开及统一历史入口 |
+| `app/commands/desktop_remote_action.rs`、`desktop_remote_capability.rs` | 当前租约内的远程意图和能力入口 |
+| `app/commands/desktop_remote_journal.rs`、`desktop_remote_task.rs` | 权威事件适配、任务准入及执行接线 |
+| `app/desktop_remote_composition.rs`、`app/remote_projection_adapter.rs` | 端口装配与权威投影适配 |
+| `features/sessions/application/` | 准入、远程 dispatch、受控提交及投影的薄用例编排 |
+| `features/sessions/remote_proxy/` | binding、outbox、原子持久化、历史及已认证投影 |
+| `features/remote_control/controller/` | 双端连接、握手、协议、加密通道、存活、恢复、任务、审批与传输 |
+| `features/behavior_telemetry/remote_control.rs` | 复用共享低基数行为统计，不保留独立远控统计权威 |
+
+旧 `app/commands/desktop_remote_controller_session.rs`、`app/commands/desktop_remote_history.rs` 及 `features/remote_control/controller/history.rs` 已删除，不是当前入口。功能专属 OS 适配留在 `features/remote_control/platform/`；只有跨功能 OS 原语进入全局 `platform/`。
+
+### 状态与兼容边界
+
+B 的 Rust 权威枚举以 `features/remote_control/controller/controlled.rs` 中的 `ControlledStatusKind` 为准：`Disabled`、`Registering`、`WaitingForPairing`、`PairingReserved`、`HandshakePending`、`Connected`、`Reconnecting`、`ResumeProvisional`、`ResumeActivatedPendingLiveness`、`RetiringGeneration`、`Stopping`、`Stopped`、`Error`。序列化 DTO 与 UI 展示状态不等同；前端只按 canonical DTO 投影，不接受未发布旧状态别名。附录的旧 B 状态表不再是当前契约。
+
+本桌面功能尚未发布，旧远控 history 格式、直接 wire 构造入口、状态别名及旧 UI 不提供迁移、兼容读取、双写或稳定版本保留窗口。历史设计中的兼容迁移计划已废弃，不实施、不作为后续技术债。保留已发布的 Legacy Web v2 行为，不能以桌面功能未发布为由破坏它。
+
+### 验证与未验证边界
+
+架构守卫、前端契约、Session RemoteProxy 测试、controller crypto harness 与 Relay 套件共同验证各边界，不能只凭测试通过推断完整产品验收。构建使用项目 npm 命令；相关入口包括 `npm --prefix pinvou3-app test`、`npm --prefix pinvou3-app run build:ui`、`python3 scripts/architecture-guard.py` 和 `npm --prefix remote-control-relay test`。
+
+本轮传播的真实浏览器 smoke、双 Windows 已安装应用旅程、线上/公网部署及 DEV-25 发布验收仍未完成。GNU 本机诊断不替代正式 MSVC，条件跳过不计覆盖；CI 的窄范围审查/传播豁免不意味着全绿、Ready 或允许合并。当前 PR 中按 head 记录的实际验证结论优先，附录不充当验证证据。
+
+## 历史设计附录（已被当前契约替代）
+
+<details>
+<summary>A19 原始设计快照：仅供追溯，不是当前实现、兼容要求或待执行迁移计划</summary>
+
+以下保留原波次的设计与问题分析。旧目录、状态和迁移设想均限定为历史记录；已落实的 RemoteProxy、统一 ChatView、窄端口与清理边界以本文“当前架构契约”为准。
 
 ## 1. 角色与边界
 
@@ -876,3 +928,5 @@ npm --prefix pinvou3-app test
 python3 scripts/architecture-guard.py
 cargo test --manifest-path pinvou3-app/src-tauri/Cargo.toml remote_control:: -- --test-threads=1
 ```
+
+</details>

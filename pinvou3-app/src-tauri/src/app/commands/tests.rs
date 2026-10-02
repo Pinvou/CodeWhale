@@ -13,7 +13,9 @@ use std::path::{Path, PathBuf};
 
 #[test]
 fn remote_pending_identifier_contract_matches_controlled_task_protocol() {
-    use crate::features::remote_control::controller::task::RemoteTaskRequest;
+    use crate::features::remote_control::controller::task::{
+        RemoteTaskRequest, task_input_digest_for_value,
+    };
     use crate::features::sessions::remote_proxy::schema::valid_remote_identifier;
 
     // The pending slot on A must accept exactly the identifiers B's frozen
@@ -44,9 +46,13 @@ fn remote_pending_identifier_contract_matches_controlled_task_protocol() {
                 "capability_revision": "1",
                 "mode": "chat",
                 "model_source": "controlled_device",
-                "input_digest": "a".repeat(64),
                 "input": {"text": "hello", "attachment_ids": [], "skill_ids": []},
             });
+            // Keep the request valid independently of the identifier under test;
+            // the admission boundary verifies the canonical input digest.
+            payload["input_digest"] = task_input_digest_for_value(&payload["input"])
+                .expect("valid task input")
+                .into();
             payload[field] = id.clone().into();
             assert_eq!(
                 RemoteTaskRequest::from_payload(&payload).is_ok(),
@@ -78,7 +84,7 @@ fn local_chat_command_guard_rejects_remote_proxy_without_backend_dispatch() {
         control_connected: true,
         encrypted_channel_connected: true,
     };
-    let remote = store.open_remote_proxy(None, &context).unwrap();
+    let remote = store.test_commit_remote_proxy_open(None, &context).unwrap();
     let error = ensure_chat_session(&store, &remote.local_session_id, "save_session_messages")
         .expect_err("remote session must not use local transcript command");
     assert!(error.contains("authenticated remote route"));

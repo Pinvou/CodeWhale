@@ -4,7 +4,8 @@
 //! Tauri/CodeWhale graph. Transport is deliberately out of scope: its test
 //! double models only installed/closed admission for local manager tests; it
 //! cannot claim protocol queue, network, or runtime transport coverage.
-//! The platform capability projection is also a test double, not OS coverage.
+//! Workspace identity uses the production OS adapter below. This is not
+//! end-to-end filesystem or packaged application coverage.
 //! Endpoint profile lookup supplies a non-production public-key fixture; actual
 //! persisted/environment-selected deployment profiles are outside this harness.
 //! Transfer tests compile the actual byte-budget and retry-evidence core; they
@@ -18,6 +19,9 @@ mod protocol;
 
 #[path = "../../../src/features/remote_control/controller/crypto.rs"]
 mod crypto;
+
+#[path = "../../../src/features/remote_control/controller/encrypted_lane.rs"]
+mod encrypted_lane;
 
 #[path = "../../../src/features/remote_control/controller/liveness.rs"]
 pub(crate) mod liveness;
@@ -39,6 +43,31 @@ mod test_support;
 
 mod features {
     pub(crate) mod remote_control {
+        mod platform {
+            include!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../src/features/remote_control/platform/mod.rs"
+            ));
+        }
+
+        #[derive(Debug, Clone, PartialEq, Eq)]
+        pub(crate) struct HarnessWorkspaceIdentity(platform::WorkspaceIdentity);
+
+        pub(crate) fn workspace_identity(
+            path: &std::path::Path,
+        ) -> std::io::Result<HarnessWorkspaceIdentity> {
+            platform::workspace_identity(path).map(HarnessWorkspaceIdentity)
+        }
+
+        #[cfg(test)]
+        pub(crate) fn test_workspace_identity(seed: u64) -> HarnessWorkspaceIdentity {
+            HarnessWorkspaceIdentity(platform::test_workspace_identity(seed))
+        }
+
+        pub(crate) fn desktop_control_supported() -> bool {
+            platform::desktop_control_supported()
+        }
+
         pub(crate) mod manager {
             pub(crate) struct HarnessRelayTrustProfile {
                 pub(crate) signing_key_id: &'static str,
@@ -56,16 +85,19 @@ mod features {
         }
 
         pub(crate) mod controller {
-            pub(crate) use crate::liveness;
             #[cfg(test)]
-            pub(crate) use crate::protocol;
+            pub(crate) use crate::{liveness, protocol, test_support};
         }
     }
 }
 
 mod platform {
+    pub(crate) use crate::features::remote_control::HarnessWorkspaceIdentity as WorkspaceIdentity;
+    #[cfg(test)]
+    pub(crate) use crate::features::remote_control::test_workspace_identity;
+    pub(crate) use crate::features::remote_control::workspace_identity;
     pub(crate) fn desktop_control_supported() -> bool {
-        cfg!(target_os = "windows")
+        crate::features::remote_control::desktop_control_supported()
     }
 }
 
@@ -106,9 +138,10 @@ mod relay_transport {
         )
     }
 
-    #[derive(Debug)]
+    #[derive(Debug, Eq, PartialEq)]
     pub(crate) enum ControllerSendError {
         Unauthenticated,
+        InvalidFrame(&'static str),
     }
 
     impl ControllerTransportSender {
@@ -153,8 +186,16 @@ mod relay_transport {
 
         pub(crate) fn try_send_business(
             &self,
-            _frame: &serde_json::Value,
+            frame: &serde_json::Value,
         ) -> Result<(), ControllerSendError> {
+            if self.is_stopped() || !self.authenticated.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(ControllerSendError::Unauthenticated);
+            }
+            // Only malformed-empty rejection is modeled for the identity
+            // guard test. A valid frame cannot claim any transport coverage.
+            if frame.as_object().is_some_and(|fields| fields.is_empty()) {
+                return Err(ControllerSendError::InvalidFrame("invalid_message"));
+            }
             panic!("transport is outside this local-state harness");
         }
 

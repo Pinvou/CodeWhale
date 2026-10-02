@@ -168,11 +168,24 @@ fn client_event_field_allowed(field: &str) -> bool {
             | "rating"
             | "reason_code"
             | "content_type"
+            | "remote_stage"
+            | "remote_outcome"
+            | "remote_reason"
+            | "remote_latency_bucket"
+            | "remote_model_source"
+            | "remote_size_bucket"
+            | "remote_permission_step"
     )
 }
 
 fn validate_client_event_fields(event: &BehaviorEvent) -> Result<()> {
+    if event.event_name == "remote_control_event" {
+        return remote_control::validate_event_fields(event);
+    }
     for field in event.fields.keys() {
+        if field.starts_with("remote_") {
+            anyhow::bail!("remote-control event field is not allowed on another event");
+        }
         if !client_event_field_allowed(field) {
             anyhow::bail!("behavior event field is not allowlisted: {field}");
         }
@@ -1659,7 +1672,14 @@ fn nonempty(value: String) -> Option<String> {
 #[path = "behavior_telemetry/events.rs"]
 mod events;
 
+#[path = "behavior_telemetry/remote_control.rs"]
+mod remote_control;
+
 pub use events::*;
+pub(crate) use remote_control::{
+    RemoteControlEvent, RemoteModelSource, RemoteOutcome, RemotePermissionStep, RemoteReason,
+    RemoteStage, track_remote_control, track_remote_control_with_event_id,
+};
 
 #[cfg(all(test, feature = "behavior-telemetry-test"))]
 mod tests {

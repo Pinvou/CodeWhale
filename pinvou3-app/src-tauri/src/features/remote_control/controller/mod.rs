@@ -8,7 +8,7 @@ pub(crate) mod controlling_service;
 pub(crate) mod controlling_session;
 pub(crate) mod crypto;
 pub(crate) mod encrypted_lane;
-pub(crate) mod history;
+pub(crate) mod event_envelope;
 pub(crate) mod journal;
 pub(crate) mod liveness;
 pub(crate) mod permission;
@@ -19,7 +19,6 @@ pub(crate) mod relay_runtime;
 pub(crate) mod relay_transport;
 pub(crate) mod resume;
 pub(crate) mod task;
-pub(crate) mod telemetry;
 pub(crate) mod temporary_model;
 #[cfg(test)]
 pub(crate) mod test_support;
