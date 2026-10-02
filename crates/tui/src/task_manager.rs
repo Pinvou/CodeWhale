@@ -2003,10 +2003,13 @@ impl TaskManager {
                         // than the debounce interval defers persistence
                         // until the stream pauses or the loop exits (the
                         // trailing flush below still lands it). Heartbeats
-                        // never arm `dirty`, so the silent-tool tick stream
-                        // cannot starve this; a dense run of unpersisted
-                        // deltas can. Fixing it needs a deadline that
-                        // survives across iterations.
+                        // never arm `dirty` themselves, but their ~200ms
+                        // cadence still restarts the debounce, so dirty
+                        // state armed just before a silent-tool phase
+                        // stays unpersisted for that whole phase; a dense
+                        // run of unpersisted deltas starves it the same
+                        // way. Fixing it needs a deadline that survives
+                        // across iterations.
                         _ = sleep(persist_debounce), if dirty => {
                             if let Err(err) = self.flush_task(&task_id).await {
                                 tracing::error!("Failed to debounce-persist task {task_id}: {err}");
