@@ -56,10 +56,6 @@ benchmark-hooks = ["dep:agent-backend-api", "deepseek-tui/benchmark-eval-control
 # target. Keeping those tests out of the monolithic lib-test harness bounds
 # rustc/ThinLTO memory without exposing the adapters in release builds.
 behavior-telemetry-test = []
-# Isolated macOS BrowserCore build for physical-device acceptance. Production release is
-# controlled only by `platform::capabilities::MACOS_BROWSER_RELEASED`; this feature is never
-# included in the default feature set.
-browser-macos-preview = []
 
 [build-dependencies]
 tauri-build = { version = "2.6.1", features = [] }
@@ -96,7 +92,7 @@ async-trait = "0.1" # impl 底座 ToolSpec(kb_search Agentic 工具)
 agent-backend-api = { path = "../../pinvou-cli/crates/agent-backend-api", optional = true }
 tokio = { version = "1.49", features = ["full"] }
 tokio-util = { version = "0.7.16", features = ["compat", "io"] }
-uuid = { version = "1.11", features = ["v4"] }
+uuid = { version = "1.11", features = ["v4", "v5"] }
 
 # 外部 Agent ACP 客户端：只负责协议连接与 typed schema。Agent 本体由
 # Codex/Claude/Kimi 各自的 ACP 实现提供，pinvou3 不复制其会话/工具循环。
@@ -211,6 +207,10 @@ age = { version = "=0.12.1", default-features = false }
 # construct/use/drop them on computer_use's dedicated worker thread.
 xcap = "0.9.8"
 enigo = "0.6"
+# ACP resource ledger: aggregate RSS + process-tree ownership on Linux/macOS/Windows.
+# Pin 0.36.x for the project's Rust 1.89 toolchain; 0.39 requires Rust 1.95.
+# Disable disk/network/user/component probes because the ledger only samples processes.
+sysinfo = { version = "=0.36.1", default-features = false, features = ["system"] }
 
 # keyring 不再直接依赖 —— 凭证走底座 codewhale-secrets(它内部按平台引 keyring)。
 # 这条曾有过一处漏网:模型商店的 HF Token 自建 keyring::Entry,与本注释矛盾。

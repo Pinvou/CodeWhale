@@ -2502,6 +2502,8 @@
   var testImageInputCapability = settingsFeature.testImageInputCapability;
   var probeLocalServerKind = settingsFeature.probeLocalServerKind;
   var testSearchProvider = settingsFeature.testSearchProvider;
+  var setBuiltinFeatureEnabled = settingsFeature.setBuiltinFeatureEnabled;
+  var listBuiltinFeatures = settingsFeature.listBuiltinFeatures;
 
   var interactionFeature = installBridgeFeature("interaction", {
     state: state, invoke: invoke, notify: notify, bt: bt,
@@ -2894,6 +2896,7 @@
       syncVoiceShortcutRecording: syncVoiceShortcutRecording,
       abandonVoiceResult: abandonVoiceResult,
       getVoiceOperationId: voiceFeature.getVoiceOperationId,
+      hasVoiceSubmissionPending: voiceFeature.hasVoiceSubmissionPending,
       beginVoiceSubmission: voiceFeature.beginVoiceSubmission,
       completeVoiceSubmission: voiceFeature.completeVoiceSubmission,
       dismissVoiceInput: voiceFeature.dismissVoiceInput,
@@ -2978,6 +2981,8 @@
       testSearchProvider: testSearchProvider,
       loadBehaviorTelemetryStatus: loadBehaviorTelemetryStatus,
       setBehaviorTelemetryEnabled: setBehaviorTelemetryEnabled,
+      listBuiltinFeatures: listBuiltinFeatures,
+      setBuiltinFeatureEnabled: setBuiltinFeatureEnabled,
     },
     feedback: { submitFeedback: submitFeedback },
     llmapi: {
