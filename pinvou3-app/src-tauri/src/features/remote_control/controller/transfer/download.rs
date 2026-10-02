@@ -893,6 +893,150 @@ mod tests {
     }
 
     #[test]
+    fn chunk_budget_rejection_releases_the_download_handle_and_budget() {
+        // A source may return less than max_bytes. Model repeated short reads
+        // so the advertised byte budget alone cannot bound retry evidence.
+        struct ShortChunkSource {
+            total_bytes: u64,
+        }
+        impl DownloadSource for ShortChunkSource {
+            fn total_bytes(&self) -> u64 {
+                self.total_bytes
+            }
+
+            fn read_chunk(
+                &self,
+                chunk_index: u64,
+                _max_bytes: usize,
+            ) -> Result<Option<Vec<u8>>, String> {
+                Ok((chunk_index < self.total_bytes).then(|| vec![1]))
+            }
+        }
+
+        let (downloads, index) = downloads();
+        let chunk_count = super::super::limits::MAX_TRANSFER_CHUNKS;
+        let data = vec![1_u8; chunk_count + 1];
+        index
+            .register(
+                &lease(),
+                "session-0001",
+                "task-0001",
+                "artifact-budget",
+                "report.bin",
+                "application/octet-stream",
+                &digest(&data),
+                Arc::new(ShortChunkSource {
+                    total_bytes: data.len() as u64,
+                }),
+            )
+            .unwrap();
+        let begin = downloads
+            .begin(
+                &lease(),
+                "session-0001",
+                "task-0001",
+                "artifact-budget",
+                1_000,
+            )
+            .unwrap();
+        for chunk_index in 0..chunk_count {
+            let chunk = downloads
+                .next_chunk_bound(
+                    &lease(),
+                    "session-0001",
+                    "task-0001",
+                    "artifact-budget",
+                    &begin.handle_id,
+                    chunk_index as u64,
+                    1_100,
+                )
+                .unwrap()
+                .unwrap();
+            assert_eq!(chunk.bytes, [1]);
+            assert_eq!(chunk.received_bytes, (chunk_index + 1) as u64);
+            assert_eq!(chunk.next_chunk, (chunk_index + 1) as u64);
+            assert!(chunk.completed.is_none());
+        }
+        assert_eq!(downloads.registry.active_count(), 1);
+        assert_eq!(downloads.active.lock().len(), 1);
+        assert_eq!(
+            downloads.registry.connection_bytes("connection-0001"),
+            data.len() as u64
+        );
+        assert_eq!(
+            downloads
+                .next_chunk_bound(
+                    &lease(),
+                    "session-0001",
+                    "task-0001",
+                    "artifact-budget",
+                    &begin.handle_id,
+                    chunk_count as u64,
+                    1_200,
+                )
+                .unwrap_err(),
+            "transfer_chunk_budget"
+        );
+        assert_eq!(downloads.registry.active_count(), 0);
+        assert_eq!(downloads.registry.connection_bytes("connection-0001"), 0);
+        assert!(downloads.active.lock().is_empty());
+        assert_eq!(
+            downloads
+                .next_chunk_bound(
+                    &lease(),
+                    "session-0001",
+                    "task-0001",
+                    "artifact-budget",
+                    &begin.handle_id,
+                    0,
+                    1_300
+                )
+                .unwrap_err(),
+            "transfer_unknown"
+        );
+        assert!(!downloads.abort(&begin.handle_id));
+        // The failed transfer owns accounting, not the session's artifact.
+        assert!(index.descriptor("session-0001", "artifact-budget").is_ok());
+    }
+
+    #[test]
+    fn impossible_chunk_budget_is_refused_without_a_download_allocation() {
+        let registry = Arc::new(
+            TransferRegistry::new(super::super::TransferLimits {
+                chunk_bytes: 1,
+                ..super::super::TransferLimits::default()
+            })
+            .unwrap(),
+        );
+        let index = Arc::new(ArtifactIndex::default());
+        let downloads = ArtifactDownloads::new(registry.clone(), index.clone());
+        let data = vec![1_u8; super::super::limits::MAX_TRANSFER_CHUNKS + 1];
+        register(
+            &index,
+            "artifact-budget",
+            "report.bin",
+            "application/octet-stream",
+            &data,
+        );
+        assert_eq!(
+            downloads
+                .begin(
+                    &lease(),
+                    "session-0001",
+                    "task-0001",
+                    "artifact-budget",
+                    1_000
+                )
+                .unwrap_err(),
+            "transfer_chunk_budget"
+        );
+        assert_eq!(registry.active_count(), 0);
+        assert_eq!(registry.connection_bytes("connection-0001"), 0);
+        assert!(downloads.active.lock().is_empty());
+        assert!(index.descriptor("session-0001", "artifact-budget").is_ok());
+    }
+
+    #[test]
     fn chunk_arithmetic_is_bounded_and_never_widens_the_protocol_limit() {
         assert_eq!(chunk_count(0, 1024), 0);
         assert_eq!(chunk_count(1024, 1024), 1);
