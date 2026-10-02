@@ -290,6 +290,7 @@ fn controller_relay_message(value: &Value) -> bool {
             "finished_receipt_commit"
                 | "finished_receipt_ack"
                 | "encrypted_handshake_finished"
+                | "encrypted_controller_liveness_a"
                 | "encrypted_frame"
         )
 }
@@ -3279,6 +3280,7 @@ mod tests {
             "desktop_relay_connection",
             "error",
             "controller_joined",
+            "encrypted_controller_liveness_a",
             "encrypted_frame",
         ] {
             assert!(

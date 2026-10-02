@@ -35,6 +35,23 @@ primary, backup, lock, marker, temporary, stale-lock, or other reserved
 management path. Controller state filenames using those reserved suffixes are
 also rejected.
 
+## Desktop Relay signature pins
+
+The desktop application normally uses the signing key ID and public key from
+its bundled endpoint profile. For an administrator-managed Relay, set both
+`PINVOU_REMOTE_RELAY_SIGNING_KEY_ID` and
+`PINVOU_REMOTE_RELAY_SIGNING_PUBLIC_KEY_B64` in the desktop process environment
+before starting the application. The public value is standard base64 of the
+raw 32-byte Ed25519 public key, not PEM, SPKI DER, or the Relay's PKCS#8 private
+key. Provision the matching key ID and public key through a trusted
+administrator channel; never obtain the trust pin from an unverified handshake.
+
+Neither override being set selects the bundled profile. A partial override or
+malformed key fails closed; it does not fall back to bundled trust. Provision
+matching pins on both desktop peers when changing the Relay signing key, then
+restart the desktop processes. The signing private key remains Relay-only and
+must never be copied into a desktop environment, repository, PR, or log.
+
 ## Persistence and concurrency contract
 
 `relay-state-store.js` owns an independent, versioned controller state file and
