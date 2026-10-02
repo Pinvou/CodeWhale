@@ -180,9 +180,7 @@ impl JournalSnapshot {
         });
         let mut hasher = Sha256::new();
         hasher.update(b"pinvou-journal-snapshot-v1\0");
-        hasher.update(
-            serde_json::to_vec(&canonical_json(&value)).expect("serializable journal snapshot"),
-        );
+        hasher.update(canonical_json(&value).to_string().as_bytes());
         crate::platform::encoding::hex_lower(&hasher.finalize())
     }
 
@@ -852,6 +850,20 @@ mod dev19_contract_tests {
             .unwrap();
         let original = journal.snapshot_for("session-b").unwrap();
         assert!(original.verify_digest());
+        let legacy_bytes = serde_json::to_vec(&canonical_json(&json!({
+            "epoch": original.epoch,
+            "session_id": original.session_id,
+            "base_sequence": original.sequence,
+            "events": original.events,
+        })))
+        .unwrap();
+        let mut legacy_hasher = Sha256::new();
+        legacy_hasher.update(b"pinvou-journal-snapshot-v1\0");
+        legacy_hasher.update(legacy_bytes);
+        assert_eq!(
+            original.compute_digest(),
+            crate::platform::encoding::hex_lower(&legacy_hasher.finalize())
+        );
         let mapped = original.remap_session("remote-a").unwrap();
         assert_ne!(original.digest, mapped.digest);
         assert!(mapped.verify_digest());

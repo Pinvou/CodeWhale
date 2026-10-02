@@ -39,7 +39,7 @@ pub(crate) enum ProjectionPayload {
     Terminal {
         entry: ProjectionEntry,
         status: String,
-        proof: VerifiedRemoteTerminal,
+        proof: Box<VerifiedRemoteTerminal>,
     },
 }
 
@@ -163,7 +163,7 @@ impl RemoteProjectionService {
                 status,
                 proof,
             } => {
-                let terminal = proof.into_candidate();
+                let terminal = (*proof).into_candidate();
                 if terminal.local_session_id != binding.local_session_id
                     || terminal.remote_session_ref != binding.remote_session_ref
                     || terminal.controlled_session_id != binding.controlled_session_id

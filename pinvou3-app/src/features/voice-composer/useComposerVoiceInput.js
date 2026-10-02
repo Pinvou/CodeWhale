@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { isImeComposing } from '../../shared/ime-guard.mjs';
+import { isVoiceActive } from './voice-ui-policy.mjs';
 import { voicePostprocessEnabled } from '../chat/voice-shortcut-settings.mjs';
 import {
   getActiveVoiceTarget,
@@ -116,12 +117,33 @@ function useComposerVoiceInput(adapter) {
     current.bridge.voice.dismissVoiceInput();
   }, []);
 
-  const discardVoiceResult = useCallback((context) => {
-    if (context?.operationId) adapterRef.current?.bridge?.voice.abandonVoiceResult(context.operationId);
+  // Dismissing the finished notice (or applying an edit preview) only hides
+  // the voice UI: the unsent operation stays adoptable by a later manual
+  // send. An in-flight recording is still an explicit cancel.
+  const dismissVoice = useCallback(() => {
+    const current = adapterRef.current || {};
+    if (!current.bridge || !current.bridge.available) return;
+    if (typeof current.bridge.voice?.dismissVoiceInput === 'function') {
+      current.bridge.voice.dismissVoiceInput();
+    }
   }, []);
 
+  // Abandon the result of the operation that recorded it (called when the
+  // preview is discarded): ending an unsent operation without sending it.
+  const discardVoiceResult = useCallback((context) => {
+    if (context?.operationId) {
+      const current = adapterRef.current || {};
+      const voiceApi = current.bridge && current.bridge.voice;
+      if (voiceApi && typeof voiceApi.abandonVoiceResult === 'function') {
+        voiceApi.abandonVoiceResult(context.operationId);
+      }
+    }
+  }, []);
+
+  // Disposing a preview also abandons the result: a stale preview must never
+  // keep the operation alive (or let a later apply resurrect it).
   const discardEditPreview = useCallback(() => {
-    discardVoiceResult(editPreviewRef.current?.context);
+    if (editPreviewRef.current) discardVoiceResult(editPreviewRef.current.context);
     editPreviewRef.current = null;
     setEditPreview(null);
   }, [discardVoiceResult]);
@@ -137,10 +159,7 @@ function useComposerVoiceInput(adapter) {
       closeVoice();
       return;
     }
-    const current = adapterRef.current || {};
-    if (!current.bridge || !current.bridge.available) return;
-    current.bridge.voice.cancelVoiceInput();
-    current.bridge.voice.clearVoiceInput();
+    closeVoice();
   }, [closeVoice, discardEditPreview]);
 
   const applyVoiceEditPreview = useCallback(async (options = {}) => {
@@ -169,7 +188,9 @@ function useComposerVoiceInput(adapter) {
     current.setDraft(next);
     editPreviewRef.current = null;
     setEditPreview(null);
-    current.bridge.voice.dismissVoiceInput();
+    // Applying a preview keeps the operation alive: the send (if any) adopts
+    // it and ends it on the send path; a manual retry keeps the provenance.
+    dismissVoice();
     if (!options.send) return true;
     if (typeof current.canSendTask === 'function' && !current.canSendTask(next, { mode: 'edit', preview })) {
       if (typeof current.onTaskBlocked === 'function') current.onTaskBlocked('gate', next, { mode: 'edit', preview });
@@ -177,7 +198,7 @@ function useComposerVoiceInput(adapter) {
     }
     if (typeof current.sendTask !== 'function') return false;
     return deliverVoiceTask(current, next, { ...preview.context, mode: 'edit', preview }, taskSendInFlightRef);
-  }, [editPreview, discardEditPreview]);
+  }, [editPreview, dismissVoice, discardEditPreview]);
 
   const clearStaleVoiceState = useCallback((targetId, sessionId) => {
     const current = adapterRef.current || {};
@@ -203,13 +224,18 @@ function useComposerVoiceInput(adapter) {
     }
 
     const recognized = String(text || '').trim();
-    if (!recognized) { discardVoiceResult(context); return; }
+    if (!recognized) {
+      discardVoiceResult(context);
+      return;
+    }
 
     const mode = normalizeMode(context && context.mode);
     if (mode === 'edit') {
       const original = trimDraft(draftBeforeStart);
       const next = trimDraft(recognized);
       if (!original || !next || next === original) {
+        // An unchanged edit yields no preview and no unsent result: abandon
+        // the operation instead of leaving it recorded on the draft.
         discardVoiceResult(context);
         if (next === original && typeof current.onEditUnchanged === 'function') {
           current.onEditUnchanged({ original, instruction: trimDraft(context && context.rawText), context });
@@ -337,12 +363,17 @@ function useComposerVoiceInput(adapter) {
       (text, draftBeforeStart, context) => handleVoiceResult(sessionId, text, draftBeforeStart, context),
       {
         mode: nextMode,
-        sessionId: current.sessionId || null,
-        ownerKind: current.ownerKind || 'chat',
-        modelId: current.modelId || null,
         beforePermission: typeof current.beforePermission === 'function'
           ? current.beforePermission
           : undefined,
+        // Lane identity for the bridge's operation bookkeeping: the operation
+        // map keys adoption and the chat context guard by (sessionId,
+        // ownerKind), so a non-chat composer must not be booked under the
+        // chat lane's active session — its exemption from that guard and its
+        // own session binding (first-turn rebind) depend on these values.
+        ownerKind: current.ownerKind || 'chat',
+        sessionId: current.sessionId || null,
+        modelId: current.modelId || null,
       },
     );
     return true;
@@ -390,11 +421,16 @@ function useComposerVoiceInput(adapter) {
     return () => window.removeEventListener('keydown', handleEditPreviewKeyDown, true);
   }, [editPreview, cancelVoiceEditPreview, applyVoiceEditPreview]);
 
-  // When the session/workspace/target identity changes, a leftover voice rewrite preview
-  // belongs to the old context: applying its next into the new session's draft, or sending
-  // it into the new session via sendTask, would be cross-context data pollution, so cancel
-  // it automatically on identity change (explicit user apply/cancel is unaffected). On the
-  // first frame (previous is null) only register the identity, without cancelling.
+  // When the session/workspace/target identity changes, anything still owned
+  // by the old context must not leak into the new one: applying a leftover
+  // rewrite preview, or the writeback/auto-send of an in-flight recording,
+  // would land old-context content in the new session's composer —
+  // cross-context data pollution. The bridge's context_mismatch guard only
+  // watches the chat lane's activeSessionId and non-chat lanes do not
+  // materialize one, so the in-flight recording is cancelled here (explicit
+  // user apply/cancel is unaffected; a finished unsent result stays adoptable
+  // because it is keyed to its recording-time session). On the first frame
+  // (previous is null) only register the identity, without cancelling.
   const voiceContextIdentityRef = useRef(null);
   useEffect(() => {
     const identity = [
@@ -409,8 +445,23 @@ function useComposerVoiceInput(adapter) {
     if (editPreviewRef.current) {
       discardEditPreview();
       closeVoice();
+      return;
     }
-  }, [adapter.targetId, adapter.ownerKind, adapter.workspaceId, adapter.sessionId, closeVoice, discardEditPreview]);
+    const current = adapterRef.current || {};
+    const voiceInput = current.voiceInput;
+    if (isVoiceActive({ status: voiceInput && voiceInput.status })) {
+      // A parked submission is already committed to its admission outcome:
+      // first-turn materialization flips this adapter's identity mid-send,
+      // and cancelling here would only kill the completion notice of a
+      // message that still lands (the bridge settles it accepted). A context
+      // switch before the park still cancels — that is the wrong-session
+      // auto-send protection.
+      const voiceApi = current.bridge && current.bridge.voice;
+      const parked = typeof (voiceApi && voiceApi.hasVoiceSubmissionPending) === 'function'
+        && voiceApi.hasVoiceSubmissionPending();
+      if (!parked) cancelVoice();
+    }
+  }, [adapter.targetId, adapter.ownerKind, adapter.workspaceId, adapter.sessionId, closeVoice, discardEditPreview, cancelVoice]);
 
   useEffect(() => {
     const current = adapterRef.current || {};
@@ -447,6 +498,7 @@ function useComposerVoiceInput(adapter) {
     triggerVoice,
     cancelVoice,
     closeVoice,
+    dismissVoice,
     cancelVoiceEditPreview,
     applyVoiceEditPreview,
   };
