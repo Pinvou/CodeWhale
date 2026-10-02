@@ -20,7 +20,7 @@ use crate::features::sessions;
 pub use crate::platform::paths;
 pub use crate::platform::prefs;
 
-use std::{path::PathBuf, sync::Arc};
+use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 use anyhow::Result;
 use deepseek_tui::AppMode;
@@ -37,7 +37,8 @@ use self::bundle::{
 };
 use self::prefs::{ModelPreset, SavedModel, UserPrefs};
 use crate::core::always_thinking::{AlwaysThinkingSpec, always_thinking_spec};
-use crate::core::model_endpoint::LocalServerKind;
+use crate::core::model_endpoint::opencode_session_id_for;
+use crate::core::model_endpoint::{LocalServerKind, is_opencode_gateway_base_url};
 use crate::core::session_mode::SessionMode;
 use crate::features::assistant::expert_roster::ExpertRosterSnapshot;
 use crate::features::assistant::image_capability::{
@@ -115,6 +116,12 @@ fn is_official_deepseek_base_url(base_url: &str) -> bool {
     // rewriting.
     matches!(normalized.as_str(), "https://api.deepseek.com")
 }
+
+/// Conversation key for engine configs that carry no session identity
+/// (global bridge clones, preview/headless builds). Session-bound bridges
+/// mint per-session IDs via `session_affinity_key` instead; see
+/// `core::model_endpoint::opencode_session_id_for`.
+const ENGINE_DEFAULT_CONVERSATION_KEY: &str = "engine-default";
 
 /// SiliconFlow China endpoint discrimination: the foundation splits
 /// Siliconflow / SiliconflowCN into two provider kinds with identical wire
@@ -223,6 +230,30 @@ pub use crate::features::sessions::{ExecutionRootResolver, SessionRoots};
 /// and the host has no boundary that rewrites tool arguments.
 const HOST_STEP_BUDGET: u32 = 2_000;
 
+/// One-shot gate for the removed-`PINVOU3_MAX_TOOL_CALLS` warning: the config
+/// builder runs at every engine spawn, so without it a batch spawning N
+/// sessions prints N identical lines.
+static REMOVED_TOOL_CALL_CAP_WARNED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+
+/// Warn once per process that the removed `PINVOU3_MAX_TOOL_CALLS` override
+/// is still exported, and report whether THIS call printed the line: the
+/// config builder runs at every engine spawn, so without the gate a batch
+/// spawning N sessions prints N identical lines. The gate is injected so
+/// tests can pin the once-only contract against a fresh gate instead of the
+/// process-global static.
+fn removed_cap_env_warning(gate: &std::sync::OnceLock<()>) -> bool {
+    let present = std::env::var_os("PINVOU3_MAX_TOOL_CALLS").is_some();
+    let warned = present && gate.set(()).is_ok();
+    if warned {
+        eprintln!(
+            "[pinvou3] PINVOU3_MAX_TOOL_CALLS is no longer read: the tool-call \
+             round cap was removed; runaway protection is the foundation's \
+             max_steps and per-turn wall clock."
+        );
+    }
+    warned
+}
+
 #[derive(Clone)]
 pub struct Pinvou3Bridge {
     pub prefs: UserPrefs,
@@ -235,6 +266,13 @@ pub struct Pinvou3Bridge {
     /// RuntimeModelProvider 为本次引擎准备的内存凭据。Some 时是最终值，不能再被
     /// 环境变量或本地凭据库覆盖；Debug 由包装类型强制脱敏。
     pub runtime_model_credential: Option<RuntimeModelCredential>,
+    /// Conversation identity for the OpenCode gateway session-affinity header
+    /// (`x-opencode-session`, one stable ID per conversation). Set by
+    /// `EnginePool::prepare_runtime_model` to the session id so a session
+    /// keeps one header value across engine respawns; `None` = non-session
+    /// bridge clone, falls back to a shared default conversation key in
+    /// `build_dt_config`.
+    pub session_affinity_key: Option<String>,
     /// `max_model_len` (context window) probed from the local vLLM
     /// `/v1/models` endpoint. Injected at
     /// EnginePool spawn by `resolve_served_model` (the matched entry's own
@@ -294,6 +332,7 @@ impl std::fmt::Debug for Pinvou3Bridge {
             .field("workspace", &self.workspace)
             .field("session_model", &self.session_model)
             .field("runtime_model_credential", &self.runtime_model_credential)
+            .field("session_affinity_key", &self.session_affinity_key)
             .field("probed_context_tokens", &self.probed_context_tokens)
             .field("probed_output_tokens", &self.probed_output_tokens)
             .field("probed_local_kind", &self.probed_local_kind)
@@ -341,6 +380,10 @@ impl crate::features::memory::MemoryReviewModel for Pinvou3Bridge {
 
     fn memory_locale_tag(&self) -> String {
         self.locale_tag().to_string()
+    }
+
+    fn aux_conversation_key(&self, feature_label: &str) -> String {
+        self.opencode_conversation_key(feature_label).to_string()
     }
 }
 
@@ -402,13 +445,17 @@ impl Pinvou3Bridge {
         crate::platform::startup::mark("bridge_boot:bundle_extract:done");
         // One-time migration of old-layout CLI binaries
         // (connectors/<platform>/bin/) to the versioned asset library
-        // (marketplace-unification §9.3): only moved after SHA-256
-        // verification; mismatches stay in place (store-side degraded
-        // semantics, re-downloaded on reconnect). Done in the app-side boot
+        // (marketplace-unification §9.3): a legacy file matching the pin is
+        // moved in; a mismatch is kept only while the pinned version is absent
+        // (the connector's only local runtime; store-side degraded semantics,
+        // re-downloaded on reconnect) and removed once the pinned copy is
+        // verified in place (kept, it would only shadow the upgraded runtime).
+        // Done in the app-side boot
         // rather than inside runtime_bundle: the connectors → runtime_bundle
         // dependency already exists and a reverse call would form a cycle
         // (the architecture guard's rust_feature_cycles baseline is empty).
-        // Idempotent, returns no error internally, does not block startup.
+        // Idempotent, returns no error internally; microsecond-scale in
+        // steady state (per-artifact stat, early return) on the boot path.
         crate::features::connectors::native_installer::migrate_legacy_cli_binaries();
         crate::platform::startup::mark("bridge_boot:mcp_secret_sync:start");
         if let Err(err) = marketplace::sync_mcp_secret_values() {
@@ -432,6 +479,7 @@ impl Pinvou3Bridge {
             workspace: paths::user_home_dir(),
             session_model: None,
             runtime_model_credential: None,
+            session_affinity_key: None,
             probed_context_tokens: None,
             probed_output_tokens: None,
             probed_local_kind: None,
@@ -1875,7 +1923,7 @@ impl Pinvou3Bridge {
             goal_token_budget,
             goal_status,
             disallowed_tools: _, // pinvou3 computes the initial value from the persisted list (see the construction site); the default value is ignored
-            max_tool_calls,
+            max_tool_calls: _,
             // —— Fields added upstream in v0.8.65, defaults passed through ——
             //   subagents_enabled: default true (generic multi-agent delegation requires SpawnSubAgent).
             //   launch_concurrency/max_admitted_subagents/subagent_token_budget: subagent
@@ -2140,48 +2188,18 @@ impl Pinvou3Bridge {
                 let n = crate::features::marketplace::unavailable_tool_names();
                 if n.is_empty() { None } else { Some(n) }
             },
+            // No tool-call round limit: upstream `max_tool_calls` defaults to
+            // `None` (the admission gate is fully lazy). Runaway protection
+            // stays with the foundation's own max_steps, per-turn wall clock,
+            // bounded retries, and cancel boundaries — the host adds no
+            // per-call-count gate of its own. Harnesses that still export the
+            // old override get told it is dead instead of silently ignored —
+            // once per process, since this config builder runs at every
+            // engine spawn and a batch would otherwise print one identical
+            // line per session.
             max_tool_calls: {
-                #[cfg(feature = "benchmark-hooks")]
-                {
-                    // Eval builds pin 8 tool calls per turn by default (the
-                    // GAIA runaway guard). Long-horizon agentic scenarios such
-                    // as Terminal-Bench raise it explicitly via
-                    // PINVOU3_MAX_TOOL_CALLS, same env convention as
-                    // PINVOU3_ALLOW_SHELL/PINVOU3_MAX_OUTPUT_TOKENS; unset
-                    // keeps the behavior bit-identical.
-                    let cap = match std::env::var("PINVOU3_MAX_TOOL_CALLS") {
-                        Ok(value) => match value.parse::<u32>() {
-                            // A zero cap would disable every tool call, which
-                            // is never a useful configuration: reject it like
-                            // any other invalid value.
-                            Ok(0) => {
-                                eprintln!(
-                                    "[pinvou3-app] ignoring PINVOU3_MAX_TOOL_CALLS=0 (a zero per-turn cap would disable every tool); falling back to the default cap of 8"
-                                );
-                                8
-                            }
-                            Ok(cap) => cap,
-                            Err(_) => {
-                                eprintln!(
-                                    "[pinvou3-app] ignoring invalid PINVOU3_MAX_TOOL_CALLS={value:?}; falling back to the default cap of 8"
-                                );
-                                8
-                            }
-                        },
-                        Err(std::env::VarError::NotUnicode(value)) => {
-                            eprintln!(
-                                "[pinvou3-app] ignoring invalid PINVOU3_MAX_TOOL_CALLS={value:?}; falling back to the default cap of 8"
-                            );
-                            8
-                        }
-                        Err(std::env::VarError::NotPresent) => 8,
-                    };
-                    Some(max_tool_calls.unwrap_or(cap).min(cap))
-                }
-                #[cfg(not(feature = "benchmark-hooks"))]
-                {
-                    max_tool_calls
-                }
+                removed_cap_env_warning(&REMOVED_TOOL_CALL_CAP_WARNED);
+                None
             },
             // [pinvou3-fork] pass the default through (empty); kb_search is
             // injected per session in spawn_for_session
@@ -2557,6 +2575,14 @@ impl Pinvou3Bridge {
             &model,
             reasoning_stream_style,
         );
+        if is_opencode_gateway_base_url(&base_url) {
+            cfg.http_headers.get_or_insert_with(HashMap::new).insert(
+                "x-opencode-session".to_string(),
+                opencode_session_id_for(
+                    self.opencode_conversation_key(ENGINE_DEFAULT_CONVERSATION_KEY),
+                ),
+            );
+        }
         cfg.default_text_model = Some(model);
         // Local models (vLLM / probed Ollama) default to the lowest thinking
         // tier (see request_reasoning_effort); everything else defaults to
@@ -2573,6 +2599,17 @@ impl Pinvou3Bridge {
             .get_or_insert_with(Default::default)
             .default_max_steps = Some(HOST_STEP_BUDGET);
         cfg
+    }
+
+    /// Conversation key for the OpenCode gateway session-affinity header on
+    /// auxiliary (hand-rolled) requests: the session id when this bridge is
+    /// session-bound — matching the official client, where auxiliary calls
+    /// share the conversation's session ID — otherwise the caller's feature
+    /// label (connection tests and probes have no conversation).
+    pub(crate) fn opencode_conversation_key<'a>(&'a self, feature_label: &'a str) -> &'a str {
+        self.session_affinity_key
+            .as_deref()
+            .unwrap_or(feature_label)
     }
 
     /// Inject the native `[fleet.profiles]` of the Pinvou expert pool for an
@@ -2860,9 +2897,10 @@ impl Pinvou3Bridge {
             deepseek_tui::core::ops::TurnToolSecurityPolicy::new(Some(Vec::new()), Some(exact))
                 .with_read_only_dispatch();
         #[cfg(feature = "benchmark-hooks")]
-        let turn_tool_security = turn_tool_security
-            .with_final_only_after_tool_budget()
-            .with_missing_read_action_repair();
+        // With no tool-call round limit, the final-only-after-budget mode can
+        // never trigger, so it is no longer armed; missing-read-action repair
+        // is budget-independent and stays.
+        let turn_tool_security = turn_tool_security.with_missing_read_action_repair();
         Ok(Op::SendMessage {
             content,
             mode: AppMode::Agent,
@@ -3270,6 +3308,34 @@ fn interpreters_for_script(path: &std::path::Path) -> &'static [&'static str] {
 }
 
 #[cfg(test)]
+impl Pinvou3Bridge {
+    /// Test fixture (single implementation, shared by the bridge.rs /
+    /// engine_pool.rs tests): all default fields, with only `session_model`
+    /// given by the caller per case semantics (the EnginePool wiring cases
+    /// inject a per-session locked model; the other cases pass `None` and go
+    /// through the prefs-global active). The bundle resolves via
+    /// `Pinvou3Bundle::paths()` (tests needing env isolation hold ENV_LOCK
+    /// themselves).
+    pub(crate) fn test_fixture(session_model: Option<SavedModel>) -> Self {
+        Pinvou3Bridge {
+            prefs: UserPrefs::default(),
+            bundle: Pinvou3Bundle::paths(),
+            workspace: std::env::temp_dir(),
+            session_model,
+            runtime_model_credential: None,
+            session_affinity_key: None,
+            probed_context_tokens: None,
+            probed_output_tokens: None,
+            probed_local_kind: None,
+            execution_root_resolver: None,
+            code_session_predicate: None,
+            external_acp_session_predicate: None,
+            image_analyze_always: false,
+        }
+    }
+}
+
+#[cfg(test)]
 // Tests borrow platform::paths::tests::ENV_LOCK (std Mutex) to serialize global env access;
 // cargo test runs test threads in parallel, but env-writing tests are mutually serialized, and
 // the lock is held across await only inside a current_thread runtime with no reentrant path,
@@ -3340,6 +3406,7 @@ mod tests {
             workspace: std::env::temp_dir(),
             session_model: None,
             runtime_model_credential: None,
+            session_affinity_key: None,
             probed_context_tokens: None,
             probed_output_tokens: None,
             probed_local_kind: None,
@@ -3981,10 +4048,27 @@ mod tests {
         );
         // MarketplaceManager::list_tools still reads installed.json for MCP
         // installation state; bundles.json supplies source and display metadata.
+        // Builtin plugins (§3.1) surface in the inventory regardless of
+        // installed.json, so the assertions count non-builtin entries only.
+        // §3.2 truth-source inversion: the store record keeps weather listed
+        // even with installed.json rewritten, so remove it there too.
+        store.remove("weather").unwrap();
         std::fs::write(&installed, r#"["qcc"]"#).unwrap();
-        assert_eq!(inventory("plain").as_array().unwrap().len(), 1);
+        let plain_now = inventory("plain").as_array().unwrap().clone();
+        assert_eq!(
+            plain_now.iter().filter(|e| e["builtin"] != true).count(),
+            1,
+            "exactly qcc beyond the builtin session-reader"
+        );
+        // The store record keeps qcc listed too, so delist it there as well
+        // before asserting the empty inventory.
+        store.remove("qcc").unwrap();
         std::fs::write(&installed, "[]").unwrap();
-        assert!(inventory("plain").as_array().unwrap().is_empty());
+        let plain_now = inventory("plain").as_array().unwrap().clone();
+        assert!(
+            plain_now.iter().all(|e| e["builtin"] == true),
+            "non-builtin entries must all be gone; got {plain_now:?}"
+        );
         let Op::SendMessage { content, .. } = bridge
             .build_send_message_op(
                 "plain",
@@ -6379,58 +6463,65 @@ mod tests {
         );
     }
 
-    /// Tool-call guard of benchmark-hooks builds: the default 8 calls/turn
-    /// stays, PINVOU3_MAX_TOOL_CALLS raises it explicitly (Terminal-Bench and
-    /// similar agentic scenarios).
-    #[cfg(feature = "benchmark-hooks")]
+    /// The migration notice for the removed knob is emitted at most once per
+    /// process: an exported `PINVOU3_MAX_TOOL_CALLS` warns on the first
+    /// engine-config build and stays silent afterwards.
     #[test]
-    fn engine_config_tool_call_cap_respects_env_override() {
+    fn removed_cap_warning_fires_once_per_gate() {
+        let gate = std::sync::OnceLock::new();
         let (_lock, _env) = locked_env(&["PINVOU3_MAX_TOOL_CALLS"]);
-        // SAFETY: platform::paths::tests::ENV_LOCK held; env writes are serialized.
+        // SAFETY: ENV_LOCK held; env writes are serialized across tests.
         unsafe { std::env::remove_var("PINVOU3_MAX_TOOL_CALLS") };
+        assert!(!removed_cap_env_warning(&gate), "no env: nothing to warn");
+        // SAFETY: see above.
+        unsafe { std::env::set_var("PINVOU3_MAX_TOOL_CALLS", "512") };
+        assert!(removed_cap_env_warning(&gate), "first presence warns");
+        assert!(
+            !removed_cap_env_warning(&gate),
+            "second presence must stay silent - one line per process"
+        );
+        assert!(!removed_cap_env_warning(&gate));
+    }
+
+    /// No host-level tool-call round limit under any feature combination:
+    /// `build_engine_config` must not configure `max_tool_calls` (upstream
+    /// `None` = unbounded, admission gate lazy). Runaway protection stays
+    /// with the foundation's max_steps, per-turn wall clock, bounded retries,
+    /// and cancel boundaries. The removed `PINVOU3_MAX_TOOL_CALLS` env knob
+    /// must stay dead: setting it must not resurrect a cap in either config
+    /// path. This is the test `scripts/fork-guard.sh` pins by name.
+    #[test]
+    fn engine_config_has_no_tool_call_cap() {
+        // Taken FIRST, before any `build_engine_config`: that call reads
+        // PINVOU3_MAX_TOOL_CALLS (to warn about it) and the sibling test
+        // above writes the same variable under this lock. Reading it outside
+        // the lock races that `set_var` — the exact unsoundness the env lock
+        // exists to prevent.
+        let (_lock, _env) = locked_env(&["PINVOU3_MAX_TOOL_CALLS"]);
         assert_eq!(
             fixture_bridge().build_engine_config().max_tool_calls,
-            Some(8),
-            "eval builds must keep the default guard of 8 tool calls per turn"
+            None,
+            "the host must not configure a per-turn tool-call cap"
         );
-
-        // SAFETY: see above.
+        let cfg = fixture_bridge().build_engine_config_for_session("any_session");
+        assert_eq!(
+            cfg.max_tool_calls, None,
+            "per-session configs must not grow a tool-call cap either"
+        );
+        // SAFETY: ENV_LOCK held; env writes are serialized across tests.
         unsafe { std::env::set_var("PINVOU3_MAX_TOOL_CALLS", "512") };
         assert_eq!(
             fixture_bridge().build_engine_config().max_tool_calls,
-            Some(512),
-            "PINVOU3_MAX_TOOL_CALLS must be able to raise the guard"
+            None,
+            "the removed PINVOU3_MAX_TOOL_CALLS knob must not resurrect a cap"
         );
-
-        // A zero cap would disable every tool call; it must be rejected like
-        // any other invalid value instead of silently disabling all tools.
-        // SAFETY: see above.
-        unsafe { std::env::set_var("PINVOU3_MAX_TOOL_CALLS", "0") };
         assert_eq!(
-            fixture_bridge().build_engine_config().max_tool_calls,
-            Some(8),
-            "PINVOU3_MAX_TOOL_CALLS=0 must fall back to the default guard of 8"
+            fixture_bridge()
+                .build_engine_config_for_session("any_session")
+                .max_tool_calls,
+            None,
+            "the removed knob must not reach per-session configs either"
         );
-
-        // Non-UTF-8 values cannot parse; they must fall back to the default
-        // instead of panicking or corrupting the cap. Unix-only: only Unix
-        // can build a non-UTF-8 OsStr from raw bytes.
-        #[cfg(unix)]
-        {
-            use std::os::unix::ffi::OsStrExt;
-            // SAFETY: see above.
-            unsafe {
-                std::env::set_var(
-                    "PINVOU3_MAX_TOOL_CALLS",
-                    std::ffi::OsStr::from_bytes(&[0xff]),
-                );
-            }
-            assert_eq!(
-                fixture_bridge().build_engine_config().max_tool_calls,
-                Some(8),
-                "a non-UTF-8 PINVOU3_MAX_TOOL_CALLS must fall back to the default guard of 8"
-            );
-        }
     }
 
     /// Security-sensitive fields must stay fixed — changing these values
@@ -7336,6 +7427,261 @@ mod tests {
                 .and_then(|providers| providers.openai.reasoning_stream_style.as_deref()),
             None,
             "generic OpenAI-compatible routes must not guess reasoning semantics"
+        );
+    }
+
+    /// OpenCode Go gateway (/zen/go/v1) enforces `x-opencode-session` with
+    /// HTTP 400 since 2026-09 (plain Zen ignores it today; the /zen prefix
+    /// match is future-proofing). Custom OpenAI-compatible endpoints resolve
+    /// to provider `openai`, so the bridge must supply the header itself,
+    /// keyed per conversation (`session_affinity_key`): one stable ID per
+    /// conversation, distinct across sessions, never on non-gateway routes.
+    #[test]
+    fn opencode_gateway_base_url_carries_stable_session_header() {
+        let (_lock, _env) = locked_env(&[
+            "DEEPSEEK_MODEL",
+            "DEEPSEEK_PROVIDER",
+            "DEEPSEEK_BASE_URL",
+            "DEEPSEEK_API_KEY",
+        ]);
+        // locked_env snapshots but does not clear; drop any ambient overrides
+        // so the exclusion asserts below cannot be skewed by env pollution.
+        // SAFETY: ENV_LOCK held for the whole test; writes are serialized.
+        unsafe { std::env::remove_var("DEEPSEEK_MODEL") };
+        unsafe { std::env::remove_var("DEEPSEEK_PROVIDER") };
+        unsafe { std::env::remove_var("DEEPSEEK_BASE_URL") };
+        unsafe { std::env::remove_var("DEEPSEEK_API_KEY") };
+
+        let mut bridge = fixture_bridge();
+        set_active_model(
+            &mut bridge,
+            ModelPreset::OpenaiCompatible,
+            "grok-4.5",
+            "https://opencode.ai/zen/go/v1",
+            "sk-xxx",
+        );
+        let cfg = bridge.build_dt_config();
+        let first = cfg
+            .http_headers
+            .as_ref()
+            .and_then(|headers| headers.get("x-opencode-session"))
+            .expect("OpenCode gateway route must carry x-opencode-session")
+            .clone();
+        assert!(
+            uuid::Uuid::parse_str(&first).is_ok(),
+            "session id must be a UUID, got {first}"
+        );
+        let second = bridge
+            .build_dt_config()
+            .http_headers
+            .as_ref()
+            .and_then(|headers| headers.get("x-opencode-session"))
+            .cloned()
+            .expect("header must persist across config rebuilds");
+        assert_eq!(
+            first, second,
+            "session id must be stable across config rebuilds"
+        );
+
+        // Zen-native endpoint shares the /zen prefix and must be covered too;
+        // both fixtures have no session key, so they share the default
+        // conversation and therefore the same ID.
+        let mut zen = fixture_bridge();
+        set_active_model(
+            &mut zen,
+            ModelPreset::OpenaiCompatible,
+            "gpt-5.5",
+            "https://opencode.ai/zen/v1",
+            "sk-xxx",
+        );
+        let zen_header = zen
+            .build_dt_config()
+            .http_headers
+            .as_ref()
+            .and_then(|headers| headers.get("x-opencode-session"))
+            .cloned()
+            .expect("Zen-native gateway route must carry x-opencode-session");
+        assert_eq!(
+            first, zen_header,
+            "default-conversation bridges must share one stable ID"
+        );
+
+        // Per-conversation semantics: session-keyed bridges keep one ID
+        // across (simulated) respawns and differ across sessions.
+        let gateway = "https://opencode.ai/zen/go/v1";
+        let mut keyed_a = fixture_bridge();
+        keyed_a.session_affinity_key = Some("session-a".to_string());
+        set_active_model(
+            &mut keyed_a,
+            ModelPreset::OpenaiCompatible,
+            "m",
+            gateway,
+            "sk-xxx",
+        );
+        let a = keyed_a
+            .build_dt_config()
+            .http_headers
+            .as_ref()
+            .and_then(|headers| headers.get("x-opencode-session"))
+            .cloned()
+            .expect("session-keyed gateway route must carry the header");
+        assert_ne!(
+            a, first,
+            "session IDs must not collide with the default conversation"
+        );
+        let mut keyed_a_respawn = fixture_bridge();
+        keyed_a_respawn.session_affinity_key = Some("session-a".to_string());
+        set_active_model(
+            &mut keyed_a_respawn,
+            ModelPreset::OpenaiCompatible,
+            "m",
+            gateway,
+            "sk-xxx",
+        );
+        assert_eq!(
+            keyed_a_respawn
+                .build_dt_config()
+                .http_headers
+                .as_ref()
+                .and_then(|headers| headers.get("x-opencode-session"))
+                .cloned()
+                .expect("respawned bridge must carry the header"),
+            a,
+            "one stable ID per conversation: respawn must reuse the session ID"
+        );
+        let mut keyed_b = fixture_bridge();
+        keyed_b.session_affinity_key = Some("session-b".to_string());
+        set_active_model(
+            &mut keyed_b,
+            ModelPreset::OpenaiCompatible,
+            "m",
+            gateway,
+            "sk-xxx",
+        );
+        assert_ne!(
+            keyed_b
+                .build_dt_config()
+                .http_headers
+                .as_ref()
+                .and_then(|headers| headers.get("x-opencode-session"))
+                .cloned()
+                .expect("second session must carry the header"),
+            a,
+            "distinct conversations must get distinct IDs"
+        );
+
+        let mut other = fixture_bridge();
+        set_active_model(
+            &mut other,
+            ModelPreset::OpenaiCompatible,
+            "custom-model",
+            "https://api.openai.com/v1",
+            "sk-xxx",
+        );
+        assert!(
+            other
+                .build_dt_config()
+                .http_headers
+                .as_ref()
+                .and_then(|headers| headers.get("x-opencode-session"))
+                .is_none(),
+            "non-OpenCode routes must not carry the header"
+        );
+    }
+
+    /// Gateway matcher edges: uppercase hosts (URL parsing lowercases them),
+    /// FQDN trailing dots, and www subdomains match; non-gateway hosts and
+    /// paths that merely start with "/zen" (e.g. /zenith) do not.
+    #[test]
+    fn opencode_gateway_matcher_edges() {
+        assert!(crate::core::model_endpoint::is_opencode_gateway_base_url(
+            "https://OpenCode.AI/zen/v1"
+        ));
+        assert!(crate::core::model_endpoint::is_opencode_gateway_base_url(
+            "https://opencode.ai./zen/go/v1"
+        ));
+        assert!(crate::core::model_endpoint::is_opencode_gateway_base_url(
+            "https://www.opencode.ai/zen/v1"
+        ));
+        assert!(crate::core::model_endpoint::is_opencode_gateway_base_url(
+            "https://opencode.ai/zen"
+        ));
+        assert!(!crate::core::model_endpoint::is_opencode_gateway_base_url(
+            "https://opencode.ai/v1"
+        ));
+        assert!(!crate::core::model_endpoint::is_opencode_gateway_base_url(
+            "https://opencode.ai/zenith/v1"
+        ));
+        assert!(!crate::core::model_endpoint::is_opencode_gateway_base_url(
+            "https://evil.example.com/zen/v1"
+        ));
+        // Lookalike hosts: a suffix/prefix matcher regression would leak the
+        // session UUID to these, so both directions are pinned.
+        assert!(!crate::core::model_endpoint::is_opencode_gateway_base_url(
+            "https://notopencode.ai/zen/v1"
+        ));
+        assert!(!crate::core::model_endpoint::is_opencode_gateway_base_url(
+            "https://opencode.ai.evil.com/zen/v1"
+        ));
+        assert!(!crate::core::model_endpoint::is_opencode_gateway_base_url(
+            "not a url"
+        ));
+    }
+
+    /// The auxiliary-request helper attaches the conversation-keyed header on
+    /// gateway routes and is a no-op elsewhere.
+    #[test]
+    fn aux_requests_carry_gateway_header_only_on_gateway_routes() {
+        let gateway = "https://opencode.ai/zen/v1";
+        let client = reqwest::Client::new();
+        let attach = |base_url: &str, key: &str| {
+            crate::core::model_endpoint::with_opencode_session_header(
+                client.post(format!("{base_url}/chat/completions")),
+                base_url,
+                key,
+            )
+        };
+        let request = attach(gateway, "memory-review")
+            .build()
+            .expect("request builds");
+        assert_eq!(
+            request.headers().get("x-opencode-session"),
+            Some(
+                &crate::core::model_endpoint::opencode_session_id_for("memory-review")
+                    .parse()
+                    .expect("valid header value")
+            ),
+            "gateway aux request must carry the conversation-keyed header"
+        );
+        let request = attach("https://api.openai.com/v1", "memory-review")
+            .build()
+            .expect("request builds");
+        assert!(
+            request.headers().get("x-opencode-session").is_none(),
+            "non-gateway aux request must stay clean"
+        );
+        assert_ne!(
+            crate::core::model_endpoint::opencode_session_id_for("memory-review"),
+            crate::core::model_endpoint::opencode_session_id_for("voice-postprocess"),
+            "distinct conversation keys must mint distinct IDs"
+        );
+    }
+
+    /// Auxiliary callers key the gateway header on the session id when the
+    /// bridge is session-bound, falling back to their feature label otherwise.
+    #[test]
+    fn aux_conversation_key_prefers_session_id_over_feature_label() {
+        let mut bridge = fixture_bridge();
+        assert_eq!(
+            bridge.opencode_conversation_key("voice-postprocess"),
+            "voice-postprocess",
+            "unbound bridges keep the feature label"
+        );
+        bridge.session_affinity_key = Some("session-a".to_string());
+        assert_eq!(
+            bridge.opencode_conversation_key("voice-postprocess"),
+            "session-a",
+            "session-bound bridges share the conversation's session ID"
         );
     }
 
