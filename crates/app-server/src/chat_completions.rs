@@ -1583,6 +1583,63 @@ model = "gpt-6-sol"
         );
     }
 
+    /// Same fail-closed contract for the Anthropic dialect: a
+    /// `wire = "anthropic"` custom table resolves to a Messages-protocol
+    /// route and must be rejected by the Chat-Completions-only guard, not
+    /// forwarded a chat body.
+    #[tokio::test]
+    async fn custom_anthropic_wire_table_is_rejected_fail_closed() {
+        install_crypto_provider();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let config_path = tmp.path().join("config.toml");
+        // The base URL is never contacted: the guard fires before any
+        // upstream I/O.
+        fs::write(
+            &config_path,
+            r#"
+provider = "custom"
+
+[providers.custom]
+wire = "anthropic"
+base_url = "https://relay.example/v1"
+api_key = "custom-anthropic-key"
+model = "custom-claude"
+"#,
+        )
+        .expect("write config");
+        let state = build_state(Some(config_path), None).expect("state");
+        let app = app_router(state, &[]);
+
+        let body = serde_json::json!({
+            "messages": [{"role": "user", "content": "hello"}]
+        });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/v1/chat/completions")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .expect("error body");
+        let payload: serde_json::Value = serde_json::from_slice(&bytes).expect("json error body");
+        assert_eq!(payload["error"]["code"], "provider_wire_format_unsupported");
+        assert_eq!(payload["error"]["type"], "unsupported_provider");
+        assert!(
+            payload["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("AnthropicMessages")),
+            "the error names the offending dialect: {payload}"
+        );
+    }
+
     #[test]
     fn upstream_url_defaults_to_v1_chat_completions() {
         let endpoint = ResolvedModelEndpoint {

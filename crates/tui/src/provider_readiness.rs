@@ -768,26 +768,13 @@ mod tests {
     #[test]
     fn custom_wire_tables_validate_through_the_route_resolver() {
         let _lock = crate::test_support::lock_test_env();
-        let config = crate::config::Config {
-            provider: Some("pinvou_responses".to_string()),
-            providers: Some(crate::config::ProvidersConfig {
-                custom: [(
-                    "pinvou_responses".to_string(),
-                    crate::config::ProviderConfig {
-                        kind: Some("openai-compatible".to_string()),
-                        wire: Some("responses".to_string()),
-                        base_url: Some("https://relay.example/v1".to_string()),
-                        api_key: Some("readiness-wire-test-key".to_string()),
-                        model: Some("gpt-6-sol".to_string()),
-                        ..Default::default()
-                    },
-                )]
-                .into_iter()
-                .collect(),
-                ..Default::default()
-            }),
-            ..Default::default()
-        };
+        let config = crate::test_support::custom_named_table_config(
+            "pinvou_responses",
+            Some("responses"),
+            "https://relay.example/v1",
+            "readiness-wire-test-key",
+            "gpt-6-sol",
+        );
         assert!(route_is_valid_for_model(
             &config,
             ApiProvider::Custom,
