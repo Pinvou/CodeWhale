@@ -183,9 +183,8 @@ export class ControllerLivenessHooks {
     return Object.freeze({ deliveries: Object.freeze([delivery("A", validated)]) });
   }
 
-  #forwardEncryptedLiveness({ message, context, state, now }) {
+  #forwardEncryptedLiveness({ message, context }) {
     const validated = validateControllerMessage(message, "A", context);
-    state.last_encrypted_liveness_at = now;
     return Object.freeze({ deliveries: Object.freeze([delivery("B", validated)]) });
   }
 

@@ -962,6 +962,129 @@ mod tests {
     }
 
     #[test]
+    fn verified_resume_reinstalls_real_transport_only_at_final_gate_and_fails_closed() {
+        use crate::features::remote_control::controller::controlling::{
+            ControllerLease, ControllingStatusKind, ResumeStep,
+        };
+        for (generation, stopped) in [
+            ("generation-0001", false),
+            ("generation-replaced", false),
+            ("generation-0001", true),
+        ] {
+            let manager = ControllingDeviceManager::default();
+            let operation = manager.connect("234-4567").unwrap();
+            manager.complete_reserved(operation.clone()).unwrap();
+            let expected = lease("1", "generation-0001");
+            manager
+                .complete_connected(
+                    operation.clone(),
+                    ControllerLease {
+                        context: expected.context.clone(),
+                        peer_endpoint_id: "endpoint-0001".into(),
+                        reservation_id: "reservation-0001".into(),
+                        device_display_name: "remote-device".into(),
+                        liveness_epoch_a: "live-a-1".into(),
+                        resume_deadline_b: 30_000,
+                        resume_token: [1; 32],
+                        transport_key_fingerprint: [2; 32],
+                        negotiated_capabilities: expected.negotiated_capabilities.clone(),
+                    },
+                )
+                .unwrap();
+            let (sender, mut receiver) =
+                transport_channels(ControllerRole::ControllerA, generation, 2, 2, 8192, 1024);
+            if generation == "generation-0001" {
+                sender
+                    .install_authenticated_lease(expected.clone())
+                    .unwrap();
+            }
+            manager.replace_transport(sender.clone());
+            sender.clear_authenticated_lease();
+            if stopped {
+                sender.stop();
+            }
+            manager.mark_transport_disconnected(1_000, Some(30_000));
+            manager.begin_resume(operation.clone(), 2_000).unwrap();
+            let activation = "activation-0001";
+            let frame = json!({
+                "v":1, "type":"encrypted_frame", "connection_id":"connection-0001",
+                "controller_lease_id":"lease-0001", "lease_epoch":"1", "relay_epoch":"relay-epoch-0001",
+                "remote_control_generation":"generation-0001", "frame_sequence":"1", "direction":"a_to_b",
+                "payload_kind":"task_submit", "ciphertext_b64":"AQID", "ciphertext_bytes":"3"
+            });
+            for (step, at) in [
+                (
+                    ResumeStep::Provisional {
+                        activation_id: activation,
+                    },
+                    3_000,
+                ),
+                (
+                    ResumeStep::Confirmed {
+                        activation_id: activation,
+                    },
+                    4_000,
+                ),
+                (
+                    ResumeStep::ActivationPending {
+                        activation_id: activation,
+                    },
+                    5_000,
+                ),
+                (
+                    ResumeStep::LivenessConfirmed {
+                        activation_id: activation,
+                    },
+                    6_000,
+                ),
+                (
+                    ResumeStep::ReadyAcknowledged {
+                        activation_id: activation,
+                    },
+                    7_000,
+                ),
+            ] {
+                manager.advance_resume(operation.clone(), step, at).unwrap();
+                assert!(sender.authenticated_lease().is_none());
+                assert_eq!(
+                    sender.try_send_business(&frame),
+                    Err(ControllerSendError::Unauthenticated)
+                );
+                assert!(receiver.business_rx.try_recv().is_err());
+            }
+            let result = manager.complete_resumed(
+                operation, activation, 8_000, "live-a-2", [3; 32], [4; 32], 60_000,
+            );
+            if generation != "generation-0001" || stopped {
+                assert!(result.is_err());
+                assert_eq!(manager.status().kind(), ControllingStatusKind::Error);
+                assert!(manager.live_lease().is_err());
+                assert!(sender.authenticated_lease().is_none());
+                assert!(sender.is_stopped());
+                continue;
+            }
+            result.unwrap();
+            assert_eq!(
+                sender.authenticated_lease().unwrap().context,
+                expected.context
+            );
+            sender.try_send_business(&frame).unwrap();
+            let queued = receiver.business_rx.try_recv().unwrap();
+            assert_eq!(
+                serde_json::from_str::<Value>(queued.payload.as_str()).unwrap(),
+                frame
+            );
+            assert_eq!(queued.lease_context, Some(expected.context));
+            sender.try_send_business(&frame).unwrap();
+            sender.try_send_business(&frame).unwrap();
+            assert_eq!(
+                sender.try_send_business(&frame),
+                Err(ControllerSendError::QueueFull(FramePriority::Business))
+            );
+        }
+    }
+
+    #[test]
     fn queue_full_releases_byte_budget_and_cancel_is_terminal() {
         let (sender, _receiver) = transport_channels(
             ControllerRole::ControllerA,
