@@ -11,7 +11,10 @@ use ring::signature::{Ed25519KeyPair, KeyPair};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
-use super::crypto::{AuthenticatedRelayTrustConfig, HandshakeKeyPair};
+use super::crypto::{
+    AuthenticatedRelayTrustConfig, ControllerRole, HandshakeBinding, HandshakeKeyPair,
+    HandshakePublicKey, SessionKeys,
+};
 use super::protocol::build_pairing_transcript_preimage;
 
 pub(crate) struct SignedRelay {
@@ -119,5 +122,66 @@ pub(crate) fn pairing_fixture(key_id: &str) -> PairingFixture {
         a_keys,
         b_keys,
         resume_token,
+    }
+}
+
+/// 从验签 transcript 报文里解出握手绑定（relay_epoch / pairing_id /
+/// reservation_id / transcript_hash 原始字节）。
+pub(crate) fn handshake_binding(reserved: &Value) -> HandshakeBinding {
+    let transcript_hash = reserved["transcript_hash"]
+        .as_str()
+        .expect("fixture carries a transcript hash");
+    let mut bytes = [0_u8; 32];
+    for (index, chunk) in transcript_hash.as_bytes().chunks_exact(2).enumerate() {
+        bytes[index] = u8::from_str_radix(std::str::from_utf8(chunk).unwrap(), 16).unwrap();
+    }
+    HandshakeBinding::new(
+        reserved["relay_epoch"].as_str().unwrap(),
+        reserved["pairing_id"].as_str().unwrap(),
+        reserved["reservation_id"].as_str().unwrap(),
+        bytes,
+    )
+    .unwrap()
+}
+
+/// 用给定角色的握手密钥与对端公钥派生会话密钥（与真实握手路径一致）。
+pub(crate) fn role_session_keys(
+    _role: ControllerRole,
+    keys: HandshakeKeyPair,
+    peer_public: [u8; 32],
+    reserved: &Value,
+) -> SessionKeys {
+    // 会话密钥本身与角色无关（角色只在收据/业务密钥派生时区分），这里保留
+    // 参数以便调用点显式声明意图。
+    let binding = handshake_binding(reserved);
+    keys.into_session_keys(HandshakePublicKey::from_bytes(peer_public), &binding)
+        .unwrap()
+}
+
+/// 一次派生双向会话密钥：会话 root 与角色无关，因此 A 用 (a_secret, b_public)、
+/// B 用 (b_secret, a_public) 会得到同一份 root，角色差异只体现在业务密钥方向。
+pub(crate) fn paired_session_keys(
+    a_keys: HandshakeKeyPair,
+    b_keys: HandshakeKeyPair,
+    reserved: &Value,
+) -> (SessionKeys, SessionKeys) {
+    let a_public = a_keys.public_key().to_bytes();
+    let b_public = b_keys.public_key().to_bytes();
+    let a_session = role_session_keys(ControllerRole::A, a_keys, b_public, reserved);
+    let b_session = role_session_keys(ControllerRole::B, b_keys, a_public, reserved);
+    (a_session, b_session)
+}
+
+/// 由 fixture 的预留报文构造对应的租约上下文。
+pub(crate) fn lease_context(reserved: &Value) -> super::protocol::LeaseContext {
+    super::protocol::LeaseContext {
+        connection_id: "connection-0001".into(),
+        controller_lease_id: "lease-0001".into(),
+        lease_epoch: "1".into(),
+        relay_epoch: reserved["relay_epoch"].as_str().unwrap().to_owned(),
+        remote_control_generation: reserved["remote_control_generation"]
+            .as_str()
+            .unwrap()
+            .to_owned(),
     }
 }

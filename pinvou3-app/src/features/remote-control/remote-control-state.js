@@ -29,8 +29,10 @@
       generation: null,
       statusIntent: null,
       pairingCode: null,
-      expiresAtMs: null,
+      pairingRemainingMs: null,
       deviceName: null,
+      controllerDeviceName: null,
+      connectedDurationMs: null,
       workspaceCount: 0,
       codeModeAllowed: false,
       workspaces: [],
@@ -42,24 +44,55 @@
     return {
       status: "idle",
       connectionId: null,
-      leaseEpoch: null,
-      claimRequestId: null,
       controllerLeaseId: null,
+      leaseEpoch: null,
       relayEpoch: null,
-      remoteControlGeneration: null,
+      generation: null,
+      claimRequestId: null,
       deviceName: null,
       lastError: null,
+      // E2E-03：A 端远程会话身份与能力版本由 Rust 构造后投影到这里，视图不再
+      // 自行拼装协议字段。
+      sessionRef: null,
+      localSessionId: null,
+      mappingConfirmed: false,
+      sessionId: null,
+      sessionMode: null,
+      capabilityRevision: null,
+      capabilityStatus: "idle",
+      capabilityError: null,
+      capabilityRequestId: null,
+      capabilityValidForMs: null,
+      temporaryModelAvailable: false,
     };
   }
 
   function createState() {
     return {
       controlledDevice: createControlledDevice(),
+      controlledSession: {
+        sessionId: null,
+        sessionRef: null,
+        generation: null,
+        lane: null,
+      },
       controllerConnection: createControllerConnection(),
       remoteCapabilities: null,
       remoteModels: [],
-      remoteHistories: [],
-      tasks: [],
+      remoteProxyHistories: [],
+      remoteProxyHistory: null,
+      remoteProxyNotice: null,
+      remoteProxyCapabilityRevisions: {},
+      retiredControlledGenerations: [],
+      retiredControllerLeases: [],
+      controlledFenced: false,
+      controllerFenced: false,
+      controlledOpenIntent: null,
+      controllerOpenIntent: null,
+      controlledTerminatedOpenIntent: null,
+      controllerTerminatedOpenIntent: null,
+      controlledTasks: [],
+      controlledTranscript: [],
       intents: { controlled: 0, controller: 0 },
       revision: 0,
     };
@@ -73,12 +106,31 @@
     return next;
   }
 
-  function beginControlledIntent(state) {
-    return bump(state, "controlled");
+  function beginControlledIntent(state, openNewGeneration) {
+    var next = bump(state, "controlled");
+    if (openNewGeneration === true) {
+      next.controlledOpenIntent = next.intents.controlled;
+      next.controlledTerminatedOpenIntent = null;
+    }
+    return next;
   }
 
-  function beginControllerIntent(state) {
-    return bump(state, "controller");
+  function beginControllerIntent(state, openNewConnection) {
+    var next = bump(state, "controller");
+    if (openNewConnection === true) {
+      next.controllerOpenIntent = next.intents.controller;
+      next.controllerTerminatedOpenIntent = null;
+    }
+    return next;
+  }
+
+  function retireIdentity(items, identity) {
+    if (!identity || items.indexOf(identity) >= 0) return items;
+    return items.concat([identity]).slice(-32);
+  }
+
+  function leaseIdentity(connectionId, leaseEpoch) {
+    return connectionId && leaseEpoch ? String(connectionId) + "\u0000" + String(leaseEpoch) : null;
   }
 
   function shallowCopy(value) {
@@ -104,69 +156,219 @@
     var payload = envelope || {};
     if (!isCurrentIntent(state, "controlled", payload.intent)) return state;
     var status = payload.status ? String(payload.status) : null;
-    if (!status) return state;
+    if (!["disabled", "registering", "waiting_for_pairing", "pairing_reserved",
+      "handshake_pending", "connected", "reconnecting", "resume_provisional",
+      "resume_activated_pending_liveness", "retiring_generation", "stopping",
+      "stopped", "error"].includes(status)) return state;
     var generation = payload.generation ? String(payload.generation) : null;
+    if (!CONTROLLED_TERMINAL[status] && !generation) return state;
     var current = state.controlledDevice;
-    var replaceBinding = payload.replaceBinding === true && payload.intent !== undefined;
     var statusIntent = payload.statusIntent === undefined ? null : String(payload.statusIntent);
     if (statusIntent && !/^(0|[1-9][0-9]*)$/.test(statusIntent)) return state;
     if (statusIntent && current.statusIntent && BigInt(statusIntent) < BigInt(current.statusIntent)) return state;
-    if (current.generation && !generation && !replaceBinding) return state;
-    var starting = status === "reserving" || status === "waiting_connection";
-    if (
-      generation &&
-      current.generation &&
-      generation !== current.generation &&
-      !replaceBinding &&
-      !(current.status === "refreshing" && status === "reserving")
-    ) {
-      return state;
+    var authorizedOpen = payload.intent != null && payload.intent === state.controlledOpenIntent;
+    var replaceBinding = payload.replaceBinding === true && authorizedOpen;
+    var refreshTransition = current.status === "retiring_generation" && status === "registering" &&
+      statusIntent && current.statusIntent && BigInt(statusIntent) > BigInt(current.statusIntent);
+    // Only the current Rust ControlledStatus enum may open a generation.
+    var starting = status === "registering" || status === "waiting_for_pairing";
+    var waiting = status === "waiting_for_pairing";
+    var pendingOpen = state.controlledOpenIntent === state.intents.controlled;
+    if (CONTROLLED_TERMINAL[status] && !state.controlledFenced
+      && current.generation && !generation && payload.intent == null) return state;
+    if (state.controlledFenced && CONTROLLED_TERMINAL[status] && payload.intent == null && !pendingOpen) return state;
+    if (payload.intent != null && payload.intent === state.controlledTerminatedOpenIntent) return state;
+    if (generation && state.retiredControlledGenerations.indexOf(generation) >= 0) return state;
+    if (state.controlledFenced && !CONTROLLED_TERMINAL[status]) {
+      if (state.controlledOpenIntent !== state.intents.controlled
+        || payload.intent !== state.controlledOpenIntent) return state;
     }
-    if (!replaceBinding && CONTROLLED_TERMINAL[current.status] && current.generation &&
+    if (generation && current.generation && generation !== current.generation) {
+      if (!starting || (!authorizedOpen && !refreshTransition)) return state;
+    }
+    if (!authorizedOpen && CONTROLLED_TERMINAL[current.status] && current.generation &&
         !CONTROLLED_TERMINAL[status]) return state;
-    if (generation === current.generation && current.status === "waiting_connection" && status === "reserving") return state;
+    if (generation === current.generation && current.status === "waiting_for_pairing" && status === "registering") return state;
     if (generation === current.generation &&
         (current.status === "connected" || current.status === "reconnecting" ||
-         current.status === "safety_handshake" || current.status === "refreshing") && starting) return state;
+         current.status === "handshake_pending" || current.status === "retiring_generation" ||
+         current.status === "resume_provisional" || current.status === "resume_activated_pending_liveness" ||
+         current.status === "pairing_reserved" || current.status === "stopping") && starting) return state;
     var next = shallowCopy(state);
+    var startsNewGeneration = starting
+      && generation
+      && current.generation
+      && generation !== current.generation;
+    if (startsNewGeneration) {
+      next.retiredControlledGenerations = retireIdentity(state.retiredControlledGenerations, current.generation);
+      next.controlledSession = { sessionId: null, sessionRef: null, generation: generation, lane: null };
+      next.controlledTasks = [];
+      next.controlledTranscript = [];
+    }
+    // Partial waiting updates may retain a code only within the same binding.
+    // Explicit null, a new status intent or a terminal status clears it.
+    var retainPairing = status === "waiting_for_pairing" && current.status === status &&
+      generation === current.generation && statusIntent === current.statusIntent && !replaceBinding;
     next.controlledDevice = {
       status: status,
       generation: generation || (starting ? current.generation : null),
       statusIntent: statusIntent || current.statusIntent,
-      pairingCode: CONTROLLED_TERMINAL[status] ? null : payload.pairingCode || null,
-      expiresAtMs: CONTROLLED_TERMINAL[status] ? null : payload.pairingExpiresAtMs || null,
+      pairingCode: CONTROLLED_TERMINAL[status] ? null :
+        (payload.pairingCode === undefined && retainPairing ? current.pairingCode : payload.pairingCode || null),
       deviceName: payload.deviceName || null,
+      controllerDeviceName: CONTROLLED_TERMINAL[status] ? null : payload.controllerDeviceName || null,
       workspaceCount: Number(payload.workspaceCount) || 0,
       codeModeAllowed: payload.codeModeAllowed === true,
+      pairingRemainingMs: CONTROLLED_TERMINAL[status] ? null :
+        (payload.pairingRemainingMs === undefined && retainPairing ? current.pairingRemainingMs :
+          Number.isSafeInteger(payload.pairingRemainingMs) && payload.pairingRemainingMs >= 0
+            ? payload.pairingRemainingMs : null),
+      connectedDurationMs: Number.isSafeInteger(payload.connectedDurationMs)
+        && payload.connectedDurationMs >= 0 ? payload.connectedDurationMs : null,
       workspaces: Array.isArray(payload.workspaces) ? payload.workspaces.slice(0, 32) : current.workspaces,
-      lastError: payload.errorCode || null,
+      lastError: payload.errorCode || payload.error || null,
     };
+    if (generation && !CONTROLLED_TERMINAL[status]) {
+      next.controlledFenced = false;
+      if (payload.intent != null && payload.intent === state.controlledOpenIntent) {
+        next.controlledOpenIntent = null;
+      }
+    }
+    if (CONTROLLED_TERMINAL[status]) {
+      if (pendingOpen) next.controlledTerminatedOpenIntent = state.controlledOpenIntent;
+      next.retiredControlledGenerations = retireIdentity(
+        next.retiredControlledGenerations, current.generation || generation,
+      );
+      next.controlledFenced = true;
+      next.controlledOpenIntent = null;
+      next.controlledSession = { sessionId: null, sessionRef: null, generation: null, lane: null };
+      next.controlledTasks = [];
+      next.controlledTranscript = [];
+    }
+    next.revision = state.revision + 1;
+    return next;
+  }
+
+  function reconcileControlledOpenStatus(state, intent, envelope, expectedGeneration) {
+    var payload = envelope || {};
+    var generation = payload.generation ? String(payload.generation) : "";
+    if (!state.controlledFenced || state.controlledTerminatedOpenIntent !== intent
+      || state.intents.controlled !== intent || !generation
+      || generation !== String(expectedGeneration || "")
+      || state.retiredControlledGenerations.indexOf(generation) >= 0
+      || ["registering", "waiting_for_pairing", "pairing_reserved", "handshake_pending",
+        "connected", "reconnecting", "resume_provisional",
+        "resume_activated_pending_liveness", "retiring_generation"].indexOf(payload.status) < 0) {
+      return state;
+    }
+    var candidate = shallowCopy(state);
+    candidate.controlledOpenIntent = intent;
+    candidate.controlledTerminatedOpenIntent = null;
+    var applied = applyControlledStatus(candidate, Object.assign({}, payload, { intent: intent }));
+    return applied === candidate ? state : applied;
+  }
+
+  /** Bind B's visible composer and transcript to the authoritative session
+   * created for the current controlled generation. */
+  function applyControlledSession(state, envelope) {
+    var payload = envelope || {};
+    var sessionId = payload.sessionId ? String(payload.sessionId) : "";
+    var sessionRef = payload.sessionRef ? String(payload.sessionRef) : "";
+    var generation = payload.generation ? String(payload.generation) : "";
+    var lane = payload.lane === "code" ? "code" : payload.lane === "chat" ? "chat" : "";
+    var currentGeneration = String((state.controlledDevice && state.controlledDevice.generation) || "");
+    var status = state.controlledDevice && state.controlledDevice.status;
+    if (!sessionId || !sessionRef || !generation || !lane) return state;
+    if (status !== "connected" && status !== "reconnecting") return state;
+    if (!currentGeneration || generation !== currentGeneration) return state;
+    var current = state.controlledSession || {};
+    if (
+      current.sessionId === sessionId
+      && current.sessionRef === sessionRef
+      && current.generation === generation
+      && current.lane === lane
+    ) return state;
+    var next = shallowCopy(state);
+    next.controlledSession = {
+      sessionId: sessionId,
+      sessionRef: sessionRef,
+      generation: generation,
+      lane: lane,
+    };
+    next.controlledTasks = [];
+    next.controlledTranscript = [];
     next.revision = state.revision + 1;
     return next;
   }
 
   function applyControllerStatus(state, envelope) {
     var payload = envelope || {};
+    // The Rust status DTO carries its lease as one nested authenticated tuple.
+    // Normalize it once to A22's internal RemoteProxy/fence state shape.
+    if (Object.prototype.hasOwnProperty.call(payload, "lease")) {
+      var lease = payload.lease || {};
+      var prior = state.controllerConnection;
+      if (payload.status === "reconnecting" && payload.lease == null &&
+          payload.claimRequestId && payload.claimRequestId === prior.claimRequestId &&
+          (prior.status === "connected" || prior.status === "reconnecting")) {
+        lease = {
+          connectionId: prior.connectionId, controllerLeaseId: prior.controllerLeaseId,
+          leaseEpoch: prior.leaseEpoch, relayEpoch: prior.relayEpoch,
+          remoteControlGeneration: prior.generation,
+        };
+      }
+      payload = Object.assign({}, payload, {
+        connectionId: lease.connectionId || null,
+        controllerLeaseId: lease.controllerLeaseId || null,
+        leaseEpoch: lease.leaseEpoch == null ? null : String(lease.leaseEpoch),
+        relayEpoch: lease.relayEpoch || null,
+        generation: lease.remoteControlGeneration || null,
+        deviceName: payload.deviceDisplayName || null,
+        error: payload.errorCode || null,
+      });
+    }
     if (!isCurrentIntent(state, "controller", payload.intent)) return state;
     var status = payload.status ? String(payload.status) : null;
     if (!status) return state;
-    var lease = payload.lease || {};
-    var connectionId = lease.connectionId ? String(lease.connectionId) : null;
-    var leaseEpoch = lease.leaseEpoch === 0 || lease.leaseEpoch ? String(lease.leaseEpoch) : null;
+    var connectionId = payload.connectionId ? String(payload.connectionId) : null;
+    var leaseEpoch = payload.leaseEpoch === 0 || payload.leaseEpoch ? String(payload.leaseEpoch) : null;
     if (leaseEpoch && !/^(0|[1-9][0-9]*)$/.test(leaseEpoch)) return state;
-    var claimRequestId = payload.claimRequestId || null;
+    var controllerLeaseId = payload.controllerLeaseId ? String(payload.controllerLeaseId) : null;
+    var relayEpoch = payload.relayEpoch ? String(payload.relayEpoch) : null;
+    var generation = payload.generation ? String(payload.generation) : null;
     var current = state.controllerConnection;
-    var newClaim = claimRequestId && claimRequestId !== current.claimRequestId;
-    var replaceBinding = payload.replaceBinding === true && payload.intent !== undefined;
-    if (newClaim && current.claimRequestId && !replaceBinding) return state;
-    if (!newClaim && CONTROLLER_TERMINAL[current.status] && current.claimRequestId &&
-        !CONTROLLER_TERMINAL[status]) return state;
-    // Only a fresh explicit connect intent can replace the previous binding.
+    var claimRequestId = payload.claimRequestId || null;
+    var sameClaim = claimRequestId && claimRequestId === current.claimRequestId;
+    var renewedLease = sameClaim && Object.prototype.hasOwnProperty.call(payload, "lease") &&
+      connectionId === current.connectionId && leaseEpoch && current.leaseEpoch &&
+      BigInt(leaseEpoch) > BigInt(current.leaseEpoch);
+    var replaceBinding = claimRequestId && !sameClaim && payload.replaceBinding === true &&
+      payload.intent != null && payload.intent === state.controllerOpenIntent;
+    if (claimRequestId && current.claimRequestId && !sameClaim &&
+        !replaceBinding) return state;
+    if (sameClaim && current.status === "safety_handshake" && status === "connecting") return state;
+    var identity = leaseIdentity(connectionId, leaseEpoch);
+    var pendingOpen = state.controllerOpenIntent === state.intents.controller;
+    if (CONTROLLER_TERMINAL[status] && current.connectionId && payload.intent == null
+      && payload.authoritativeRead !== true
+      && !sameClaim
+      && (!connectionId || !controllerLeaseId || !leaseEpoch || !relayEpoch || !generation)) return state;
+    if (state.controllerFenced && CONTROLLER_TERMINAL[status] && payload.intent == null && !pendingOpen) return state;
+    if (payload.intent != null && payload.intent === state.controllerTerminatedOpenIntent) return state;
+    if (identity && state.retiredControllerLeases.indexOf(identity) >= 0) return state;
+    if (state.controllerFenced && !CONTROLLER_TERMINAL[status]) {
+      if (state.controllerOpenIntent !== state.intents.controller
+        || payload.intent !== state.controllerOpenIntent) return state;
+    }
+    var liveStatus = status === "connected" || status === "reconnecting";
+    if (liveStatus && (!connectionId || !controllerLeaseId || !leaseEpoch || !relayEpoch || !generation)) {
+      return state;
+    }
+    if (!CONTROLLER_TERMINAL[status] && !liveStatus && current.connectionId && !replaceBinding) return state;
     if (
       connectionId &&
       current.connectionId &&
-      connectionId !== current.connectionId &&
-      !(newClaim && replaceBinding)
+      connectionId !== current.connectionId && !replaceBinding
     ) {
       return state;
     }
@@ -174,37 +376,174 @@
       leaseEpoch &&
       current.leaseEpoch &&
       connectionId === current.connectionId &&
-      BigInt(leaseEpoch) < BigInt(current.leaseEpoch)
+      leaseEpoch !== current.leaseEpoch && !replaceBinding && !renewedLease
     ) {
       return state;
     }
-    if (!newClaim && (current.status === "connected" || current.status === "reconnecting") &&
-        (status === "connecting" || status === "safety_handshake")) return state;
-    if (!newClaim && current.status === "safety_handshake" && status === "connecting") return state;
-    if (!newClaim && connectionId && current.connectionId &&
-        ["controllerLeaseId", "relayEpoch", "remoteControlGeneration"].some(function (key) {
-          return String(lease[key] || "") !== String(current[key] || "");
-        })) return state;
-    var retained = status === "reconnecting" && !newClaim ? current : {};
+    if (controllerLeaseId && current.controllerLeaseId && controllerLeaseId !== current.controllerLeaseId && !replaceBinding && !renewedLease) return state;
+    if (relayEpoch && current.relayEpoch && relayEpoch !== current.relayEpoch && !replaceBinding && !renewedLease) return state;
+    if (connectionId && connectionId === current.connectionId && leaseEpoch === current.leaseEpoch
+      && current.generation && generation && generation !== current.generation && !replaceBinding) return state;
+    if (replaceBinding || renewedLease) {
+      current = createControllerConnection();
+    }
     var next = shallowCopy(state);
     next.controllerConnection = {
       status: status,
-      connectionId: connectionId || retained.connectionId || null,
-      leaseEpoch: leaseEpoch || retained.leaseEpoch || null,
-      claimRequestId: claimRequestId,
-      controllerLeaseId: lease.controllerLeaseId || retained.controllerLeaseId || null,
-      relayEpoch: lease.relayEpoch || retained.relayEpoch || null,
-      remoteControlGeneration: lease.remoteControlGeneration || retained.remoteControlGeneration || null,
-      deviceName: payload.deviceDisplayName || null,
-      lastError: payload.errorCode || null,
+      connectionId: connectionId || current.connectionId,
+      controllerLeaseId: controllerLeaseId || current.controllerLeaseId,
+      leaseEpoch: leaseEpoch || current.leaseEpoch,
+      relayEpoch: relayEpoch || current.relayEpoch,
+      generation: generation || current.generation,
+      claimRequestId: claimRequestId || current.claimRequestId,
+      deviceName: payload.deviceName || current.deviceName,
+      lastError: payload.error || null,
+      sessionRef: current.sessionRef,
+      localSessionId: current.localSessionId,
+      mappingConfirmed: current.mappingConfirmed === true,
+      sessionId: current.sessionId,
+      sessionMode: current.sessionMode,
+      capabilityRevision: current.capabilityRevision,
+      capabilityStatus: current.capabilityStatus,
+      capabilityError: current.capabilityError,
+      capabilityRequestId: current.capabilityRequestId,
+      capabilityValidForMs: current.capabilityValidForMs,
+      temporaryModelAvailable: current.temporaryModelAvailable === true,
     };
-    if (CONTROLLER_TERMINAL[status] || newClaim ||
-        (leaseEpoch && current.leaseEpoch && leaseEpoch !== current.leaseEpoch)) {
+    if (replaceBinding || renewedLease) {
       next.remoteCapabilities = null;
+      next.remoteProxyNotice = null;
+      next.remoteProxyCapabilityRevisions = {};
     }
-    if (CONTROLLER_TERMINAL[status] || newClaim) {
-      next.tasks = [];
+    if (identity && !CONTROLLER_TERMINAL[status]) {
+      next.controllerFenced = false;
+      if (payload.intent != null && payload.intent === state.controllerOpenIntent) {
+        next.controllerOpenIntent = null;
+      }
     }
+    if (CONTROLLER_TERMINAL[status]) {
+      if (pendingOpen) next.controllerTerminatedOpenIntent = state.controllerOpenIntent;
+      next.retiredControllerLeases = retireIdentity(
+        next.retiredControllerLeases,
+        leaseIdentity(current.connectionId, current.leaseEpoch) || identity,
+      );
+      next.controllerFenced = true;
+      next.controllerOpenIntent = null;
+      next.remoteCapabilities = null;
+      next.remoteProxyNotice = null;
+      next.remoteProxyCapabilityRevisions = {};
+      next.controllerConnection.connectionId = null;
+      next.controllerConnection.controllerLeaseId = null;
+      next.controllerConnection.leaseEpoch = null;
+      next.controllerConnection.relayEpoch = null;
+      next.controllerConnection.generation = null;
+      // 终端状态清空会话身份：旧 sessionId 不得被下一次连接复用。
+      next.controllerConnection.sessionRef = null;
+      next.controllerConnection.localSessionId = null;
+      next.controllerConnection.mappingConfirmed = false;
+      next.controllerConnection.sessionId = null;
+      next.controllerConnection.sessionMode = null;
+      next.controllerConnection.capabilityRevision = null;
+      next.controllerConnection.capabilityStatus = "idle";
+      next.controllerConnection.capabilityError = null;
+      next.controllerConnection.capabilityRequestId = null;
+      next.controllerConnection.capabilityValidForMs = null;
+      next.controllerConnection.temporaryModelAvailable = false;
+    }
+    next.revision = state.revision + 1;
+    return next;
+  }
+
+  function reconcileControllerOpenStatus(state, intent, envelope) {
+    var payload = envelope || {};
+    if (!state.controllerFenced || state.controllerTerminatedOpenIntent !== intent
+      || state.intents.controller !== intent
+      || (payload.status !== "connected" && payload.status !== "reconnecting")
+      || !payload.connectionId || !payload.controllerLeaseId || !payload.leaseEpoch
+      || !payload.relayEpoch || !payload.generation) return state;
+    var candidate = shallowCopy(state);
+    candidate.controllerOpenIntent = intent;
+    candidate.controllerTerminatedOpenIntent = null;
+    var applied = applyControllerStatus(candidate, Object.assign({}, payload, { intent: intent }));
+    return applied === candidate ? state : applied;
+  }
+
+  /** Rust's authenticated projection event is an invalidation notice only.
+   * Journal contents must be read from SessionStore by the RemoteProxy API;
+   * transport events never become display text directly. */
+  function applyRemoteProxyNotice(state, envelope) {
+    var item = envelope && typeof envelope === "object" ? envelope : {};
+    var live = state.controllerConnection;
+    if (live.status !== "connected" && live.status !== "reconnecting") return state;
+    var fields = ["connectionId", "controllerLeaseId", "leaseEpoch", "relayEpoch", "generation"];
+    if (fields.some(function (field) {
+      return !live[field] || !item[field] || String(item[field]) !== String(live[field]);
+    })) return state;
+    if (!/^remote-[A-Za-z0-9._:-]+$/.test(item.localSessionId || "")
+      || !item.remoteSessionRef || !item.controlledSessionId
+      || ["journal", "snapshot", "terminal", "capability"].indexOf(item.kind) < 0) return state;
+    if (item.localSessionId !== live.localSessionId
+      || item.remoteSessionRef !== live.sessionRef) return state;
+    var detail = item.fields && typeof item.fields === "object" ? item.fields : {};
+    var revision = Number(detail.capabilityRevision);
+    if (item.kind === "capability" && (!Number.isSafeInteger(revision) || revision <= 0)) return state;
+    var knownRevision = (state.remoteProxyCapabilityRevisions || {})[item.localSessionId] || 0;
+    if (item.kind === "capability" && revision <= knownRevision) return state;
+    var previous = state.remoteProxyNotice;
+    if (previous && previous.localSessionId === item.localSessionId
+      && previous.connectionId === item.connectionId
+      && previous.leaseEpoch === String(item.leaseEpoch)
+      && previous.kind === item.kind
+      && previous.sequence === detail.sequence
+      && previous.capabilityRevision === (item.kind === "capability" ? revision : null)) return state;
+    var next = shallowCopy(state);
+    next.controllerConnection = shallowCopy(live);
+    next.controllerConnection.mappingConfirmed = true;
+    next.remoteProxyNotice = {
+      kind: item.kind,
+      localSessionId: String(item.localSessionId),
+      remoteSessionRef: String(item.remoteSessionRef),
+      connectionId: String(item.connectionId),
+      leaseEpoch: String(item.leaseEpoch),
+      capabilityRevision: item.kind === "capability" ? revision : null,
+      journalEpoch: typeof detail.journalEpoch === "string" ? detail.journalEpoch.slice(0, 128) : null,
+      sequence: Number.isSafeInteger(detail.sequence) && detail.sequence >= 0 ? detail.sequence : null,
+    };
+    if (item.kind === "capability") {
+      next.controllerConnection.capabilityRevision = revision;
+      next.controllerConnection.capabilityStatus = "ready";
+      next.controllerConnection.capabilityError = null;
+      next.remoteProxyCapabilityRevisions = shallowCopy(state.remoteProxyCapabilityRevisions || {});
+      next.remoteProxyCapabilityRevisions[item.localSessionId] = revision;
+    }
+    next.revision = state.revision + 1;
+    return next;
+  }
+
+  function applyCapabilityPending(state, envelope) {
+    var payload = envelope || {};
+    var current = state.controllerConnection;
+    if (!current.sessionRef || String(payload.sessionRef || "") !== String(current.sessionRef)) return state;
+    var next = shallowCopy(state);
+    next.controllerConnection = shallowCopy(current);
+    next.controllerConnection.capabilityStatus = "preparing";
+    next.controllerConnection.capabilityError = null;
+    next.revision = state.revision + 1;
+    return next;
+  }
+
+  function applyCapabilityFailure(state, envelope) {
+    var payload = envelope || {};
+    var current = state.controllerConnection;
+    if (!current.sessionRef || String(payload.sessionRef || "") !== String(current.sessionRef)) return state;
+    var next = shallowCopy(state);
+    next.controllerConnection = shallowCopy(current);
+    next.controllerConnection.capabilityRevision = null;
+    next.controllerConnection.capabilityStatus = "error";
+    next.controllerConnection.capabilityError = String(payload.code || "capability_snapshot_unavailable");
+    next.controllerConnection.capabilityRequestId = payload.requestId ? String(payload.requestId) : null;
+    next.controllerConnection.capabilityValidForMs = null;
+    next.remoteCapabilities = null;
     next.revision = state.revision + 1;
     return next;
   }
@@ -218,31 +557,112 @@
     var connection = state.controllerConnection;
     if (!connection.connectionId || connection.status !== "connected") return state;
     if (String(payload.connectionId || "") !== String(connection.connectionId)) return state;
+    if (connection.controllerLeaseId && String(payload.controllerLeaseId || "") !== connection.controllerLeaseId) return state;
     if (String(payload.leaseEpoch || "") !== String(connection.leaseEpoch)) return state;
-    if (["controllerLeaseId", "relayEpoch", "remoteControlGeneration"].some(function (key) {
-      return String(payload[key] || "") !== String(connection[key] || "");
-    })) return state;
+    if (connection.relayEpoch && String(payload.relayEpoch || "") !== connection.relayEpoch) return state;
+    if (connection.generation && String(payload.remoteControlGeneration || "") !== connection.generation) return state;
+    if (!connection.sessionRef || String(payload.remoteSessionRef || "") !== String(connection.sessionRef)) return state;
     var revision = Number(payload.capabilityRevision);
-    if (!isFinite(revision) || revision <= 0) return state;
+    if (!Number.isSafeInteger(revision) || revision <= 0) return state;
     if (state.remoteCapabilities && revision <= Number(state.remoteCapabilities.capabilityRevision)) {
       return state;
     }
     var next = shallowCopy(state);
     next.remoteCapabilities = {
       connectionId: payload.connectionId,
-      controllerLeaseId: payload.controllerLeaseId,
+      remoteSessionRef: payload.remoteSessionRef,
+      controllerLeaseId: payload.controllerLeaseId || null,
       leaseEpoch: payload.leaseEpoch,
       relayEpoch: payload.relayEpoch || null,
       remoteControlGeneration: payload.remoteControlGeneration || null,
       capabilityRevision: revision,
-      modes: Array.isArray(payload.modes) ? payload.modes.slice(0, 2) : [],
-      tools: Array.isArray(payload.tools) ? payload.tools.slice(0, 256) : [],
-      skills: Array.isArray(payload.skills) ? payload.skills.slice(0, 256) : [],
-      workspaces: Array.isArray(payload.workspaces) ? payload.workspaces.slice(0, 16) : [],
-      expiresAtMs: payload.expiresAtMs || null,
+      modes: Array.isArray(payload.modes) ? payload.modes.filter(function (mode) {
+        return mode === "chat" || mode === "code";
+      }).slice(0, 2) : [],
+      tools: capabilityDescriptors(payload.tools, "toolId", 256),
+      skills: capabilityDescriptors(payload.skills, "skillId", 256, false, true),
+      workspaces: capabilityDescriptors(payload.workspaces, "workspaceId", 16, true),
+      expiresAtMs: typeof payload.expiresAtMs === "string" || Number.isSafeInteger(payload.expiresAtMs)
+        ? payload.expiresAtMs : null,
     };
     next.revision = state.revision + 1;
     return next;
+  }
+
+  /** transcript 条目上限：只保留最近正文，避免无限增长。 */
+  var MAX_TRANSCRIPT_ENTRIES = 200;
+
+  /**
+   * B-side UI projection for the authoritative local Session timeline.
+   * A-side history is read only from SessionStore.RemoteProxy.
+   */
+  function applyJournalEventTo(state, envelope, transcriptField) {
+    var payload = envelope || {};
+    var transcript = state[transcriptField] || [];
+    if (payload.snapshot) {
+      var snapshot = payload.snapshot;
+      var events = Array.isArray(snapshot.events) ? snapshot.events : [];
+      var sessionId = events.length ? String(events[0].sessionId || "") : "";
+      if (!sessionId) return state;
+      var entries = events.map(toTranscriptEntry).filter(Boolean);
+      var kept = transcript.filter(function (entry) {
+        return entry.sessionId !== sessionId;
+      });
+      var next = shallowCopy(state);
+      next[transcriptField] = kept.concat(entries).slice(-MAX_TRANSCRIPT_ENTRIES);
+      next.revision = state.revision + 1;
+      return next;
+    }
+    var entry = toTranscriptEntry(payload.event);
+    if (!entry) return state;
+    var current = transcript;
+    for (var index = 0; index < current.length; index += 1) {
+      if (
+        current[index].sessionId === entry.sessionId &&
+        current[index].epoch === entry.epoch &&
+        current[index].sequence === entry.sequence
+      ) {
+        return state;
+      }
+    }
+    var list = current.concat([entry]);
+    if (list.length > MAX_TRANSCRIPT_ENTRIES) {
+      list = list.slice(list.length - MAX_TRANSCRIPT_ENTRIES);
+    }
+    var updated = shallowCopy(state);
+    updated[transcriptField] = list;
+    updated.revision = state.revision + 1;
+    return updated;
+  }
+
+  function applyControlledJournalEvent(state, envelope) {
+    var event = envelope && envelope.event;
+    var session = state.controlledSession || {};
+    if (!event || !session.sessionId || String(event.sessionId || "") !== String(session.sessionId)) {
+      return state;
+    }
+    return applyJournalEventTo(state, envelope, "controlledTranscript");
+  }
+
+  /** User, assistant and reasoning text become transcript entries; everything
+   * else keeps its existing task/status projection. */
+  function toTranscriptEntry(event) {
+    if (!event || typeof event !== "object") return null;
+    var kind = event.kind ? String(event.kind) : "";
+    var role = kind === "user_message"
+      ? "user"
+      : (kind === "assistant_delta" ? "assistant" : (kind === "reasoning" ? "reasoning" : ""));
+    if (!role) return null;
+    var text = event.payload && event.payload.text ? String(event.payload.text) : "";
+    if (!text) return null;
+    return {
+      sessionId: String(event.sessionId || ""),
+      epoch: String(event.epoch || ""),
+      sequence: Number(event.sequence || 0),
+      taskId: event.taskId ? String(event.taskId) : null,
+      role: role,
+      text: text.slice(0, 8192),
+    };
   }
 
   /** Model descriptors are opaque: only IDs, names and reasons reach JS. */
@@ -250,31 +670,234 @@
     if (!Array.isArray(models)) return state;
     var next = shallowCopy(state);
     next.remoteModels = models.slice(0, 128).map(function (model) {
+      var item = model && typeof model === "object" ? model : {};
       return {
-        modelId: String(model && model.modelId ? model.modelId : ""),
-        displayName: String(model && model.displayName ? model.displayName : ""),
-        exportable: !!(model && model.exportable),
-        reason: model && model.reason ? String(model.reason) : null,
-        visionModelId: model && model.visionModelId ? String(model.visionModelId) : null,
+        modelId: typeof item.modelId === "string" ? item.modelId.slice(0, 128) : "",
+        displayName: typeof item.displayName === "string" ? item.displayName.slice(0, 256) : "",
+        exportable: item.exportable === true,
+        reason: typeof item.reason === "string" ? item.reason.slice(0, 128) : null,
+        visionModelId: typeof item.visionModelId === "string" ? item.visionModelId.slice(0, 128) : null,
+      };
+    }).filter(function (item) { return item.modelId.length > 0; });
+    next.revision = state.revision + 1;
+    return next;
+  }
+
+  function capabilityDescriptors(entries, idField, limit, workspace, skill) {
+    if (!Array.isArray(entries)) return [];
+    return entries.slice(0, limit).filter(function (entry) {
+      return entry && typeof entry === "object"
+        && typeof entry[idField] === "string" && !!entry[idField]
+        && typeof entry.displayName === "string";
+    }).map(function (entry) {
+      var safe = { displayName: entry.displayName.slice(0, 256) };
+      safe[idField] = entry[idField].slice(0, 128);
+      if (workspace) safe.codeAllowed = entry.codeAllowed === true;
+      if (skill) safe.scopes = Array.isArray(entry.scopes)
+        ? entry.scopes.filter(function (scope, index, scopes) {
+          return (scope === "chat" || scope === "code") && scopes.indexOf(scope) === index;
+        }).slice(0, 2)
+        : [];
+      return safe;
+    });
+  }
+
+  function remoteProxyId(value) {
+    return typeof value === "string" && /^remote-[A-Za-z0-9._:-]+$/.test(value)
+      && value.length <= 128;
+  }
+
+  function projectionText(value, maximum) {
+    return typeof value === "string" ? value.slice(0, maximum) : "";
+  }
+
+  function projectRemoteProxyList(state, records) {
+    if (!Array.isArray(records)) return state;
+    var next = shallowCopy(state);
+    next.remoteProxyHistories = records.slice(0, 256).filter(function (item) {
+      return item && remoteProxyId(item.localSessionId);
+    }).map(function (item) {
+      return {
+        localSessionId: item.localSessionId,
+        title: projectionText(item.title, 120),
+        pinned: item.pinned === true,
+        lastOpenedAt: projectionText(item.lastOpenedAt, 64) || null,
+        projectedEntryCount: Number.isSafeInteger(item.projectedEntryCount)
+          && item.projectedEntryCount >= 0 ? item.projectedEntryCount : 0,
       };
     });
     next.revision = state.revision + 1;
     return next;
   }
 
-  function applyHistories(state, histories) {
-    if (!Array.isArray(histories)) return state;
+  function applyRemoteProxyBinding(state, envelope) {
+    var payload = envelope || {};
+    var current = state.controllerConnection;
+    var localSessionId = String(payload.localSessionId || "");
+    var remoteRef = String(payload.remoteSessionRef || "");
+    if (current.status !== "connected" || state.controllerFenced
+      || localSessionId.length > 128 || !/^remote-[A-Za-z0-9._:-]+$/.test(localSessionId)
+      || !/^[A-Za-z0-9._:-]{1,128}$/.test(remoteRef)
+      || !payload.sessionId || payload.mode !== "chat"
+      || String(payload.connectionId || "") !== String(current.connectionId || "")
+      || String(payload.controllerLeaseId || "") !== String(current.controllerLeaseId || "")
+      || String(payload.leaseEpoch || "") !== String(current.leaseEpoch || "")
+      || String(payload.relayEpoch || "") !== String(current.relayEpoch || "")
+      || String(payload.remoteControlGeneration || "") !== String(current.generation || "")
+      || !current.connectionId || !current.controllerLeaseId || !current.leaseEpoch
+      || !current.relayEpoch || !current.generation) return state;
+    if (current.sessionRef && current.sessionRef !== remoteRef) return state;
     var next = shallowCopy(state);
-    next.remoteHistories = histories.slice(0, 64).map(function (record) {
-      return {
-        historyId: String(record && record.historyId ? record.historyId : ""),
-        title: String(record && record.title ? record.title : ""),
-        deviceDisplayName: String(record && record.deviceDisplayName ? record.deviceDisplayName : ""),
-        state: String(record && record.state ? record.state : "offline_copy"),
-        lastSequence: Number(record && record.lastSequence ? record.lastSequence : 0),
-        lastTerminalStatus: record && record.lastTerminalStatus ? String(record.lastTerminalStatus) : null,
-      };
+    next.controllerConnection = shallowCopy(current);
+    next.controllerConnection.localSessionId = localSessionId;
+    next.controllerConnection.sessionRef = remoteRef;
+    next.controllerConnection.mappingConfirmed = payload.mappingConfirmed === true;
+    next.controllerConnection.sessionId = String(payload.sessionId);
+    next.controllerConnection.sessionMode = "chat";
+    next.controllerConnection.capabilityRevision = Number.isSafeInteger(payload.capabilityRevision)
+      && payload.capabilityRevision > 0 ? payload.capabilityRevision : null;
+    next.controllerConnection.capabilityValidForMs = payload.capabilityValidForMs == null
+      ? null : Number(payload.capabilityValidForMs);
+    next.controllerConnection.capabilityError = payload.capabilityError || null;
+    next.controllerConnection.capabilityRequestId = payload.capabilityRequestId || null;
+    next.controllerConnection.capabilityStatus = next.controllerConnection.capabilityError
+      ? "error" : (next.controllerConnection.capabilityRevision == null ? "idle" : "ready");
+    next.controllerConnection.temporaryModelAvailable = payload.temporaryModelAvailable === true;
+    next.revision = state.revision + 1;
+    return next;
+  }
+
+  function matchesRemoteProxyCapabilityBinding(state, envelope) {
+    var payload = envelope || {};
+    var live = state.controllerConnection || {};
+    return (live.status === "connected" || live.status === "reconnecting")
+      && !!live.localSessionId && !!live.sessionRef && !!live.sessionId
+      && !!live.connectionId && !!live.controllerLeaseId && !!live.leaseEpoch
+      && !!live.relayEpoch && !!live.generation
+      && String(payload.localSessionId || "") === live.localSessionId
+      && String(payload.remoteSessionRef || "") === live.sessionRef
+      && String(payload.sessionId || "") === live.sessionId
+      && String(payload.connectionId || "") === live.connectionId
+      && String(payload.controllerLeaseId || "") === live.controllerLeaseId
+      && String(payload.leaseEpoch || "") === live.leaseEpoch
+      && String(payload.relayEpoch || "") === live.relayEpoch
+      && String(payload.remoteControlGeneration || "") === live.generation
+      && /^[A-Za-z0-9._:-]{1,128}$/.test(String(payload.capabilityRequestId || ""));
+  }
+
+  function applyRemoteProxyCapabilityResult(state, envelope) {
+    if (!matchesRemoteProxyCapabilityBinding(state, envelope)) return state;
+    var payload = envelope;
+    var current = state.controllerConnection;
+    var errorCode = String(payload.capabilityError || "");
+    var revision = Number(payload.capabilityRevision);
+    var confirmed = payload.mappingConfirmed === true && !errorCode
+      && Number.isSafeInteger(revision) && revision > 0;
+    if (confirmed && current.capabilityRevision != null
+      && revision < current.capabilityRevision) return state;
+    var next = shallowCopy(state);
+    next.controllerConnection = shallowCopy(current);
+    // Mapping is a distinct B-authoritative fact. A renewal can fail after
+    // the mapping was already confirmed; the capability still fails closed.
+    next.controllerConnection.mappingConfirmed = payload.mappingConfirmed === true;
+    next.controllerConnection.capabilityRequestId = payload.capabilityRequestId;
+    next.controllerConnection.capabilityRevision = confirmed ? revision : null;
+    next.controllerConnection.capabilityStatus = confirmed ? "ready" : "error";
+    next.controllerConnection.capabilityError = confirmed
+      ? null : (errorCode || "capability_snapshot_unavailable");
+    next.controllerConnection.capabilityValidForMs = confirmed
+      && Number.isSafeInteger(payload.capabilityValidForMs)
+      && payload.capabilityValidForMs > 0 ? payload.capabilityValidForMs : null;
+    next.controllerConnection.temporaryModelAvailable = confirmed
+      && payload.temporaryModelAvailable === true;
+    if (confirmed) {
+      next.remoteProxyCapabilityRevisions = shallowCopy(state.remoteProxyCapabilityRevisions || {});
+      next.remoteProxyCapabilityRevisions[payload.localSessionId] = Math.max(
+        next.remoteProxyCapabilityRevisions[payload.localSessionId] || 0, revision,
+      );
+    }
+    if (!confirmed) next.remoteCapabilities = null;
+    next.revision = state.revision + 1;
+    return next;
+  }
+
+  var PROJECTION_KINDS = {
+    user_message: true, assistant_message: true, reasoning: true, tool: true,
+    approval: true, status: true, error: true, attachment: true,
+    artifact: true, snapshot_marker: true,
+  };
+
+  function projectRemoteProxyRead(state, record) {
+    if (!record || !remoteProxyId(record.localSessionId)
+      || !Array.isArray(record.entries) || record.entries.length > 512
+      || !Number.isSafeInteger(record.pendingUnknownCount) || record.pendingUnknownCount < 0
+      || !Array.isArray(record.unattemptedPending) || record.unattemptedPending.length > 128
+      || record.unattemptedPending.some(function (item) {
+        return !item || item.dispatchState !== "prepared_never_attempted"
+          || !/^[A-Za-z0-9._:-]{1,128}$/.test(item.taskId || "")
+          || !/^[A-Za-z0-9._:-]{1,128}$/.test(item.clientRequestId || "")
+          || !/^[a-fA-F0-9]{64}$/.test(item.requestFingerprint || "");
+      })) return state;
+    var next = shallowCopy(state);
+    next.remoteProxyHistory = {
+      localSessionId: record.localSessionId,
+      title: projectionText(record.title, 120),
+      pinned: record.pinned === true,
+      lastOpenedAt: projectionText(record.lastOpenedAt, 64) || null,
+      authenticatedCursor: record.authenticatedCursor
+        && typeof record.authenticatedCursor.journalEpoch === "string"
+        && Number.isSafeInteger(record.authenticatedCursor.sequence)
+        ? {
+            journalEpoch: projectionText(record.authenticatedCursor.journalEpoch, 128),
+            sequence: record.authenticatedCursor.sequence,
+          } : null,
+      pendingUnknownCount: record.pendingUnknownCount,
+      unattemptedPending: record.unattemptedPending.map(function (item) {
+        return {
+          taskId: item.taskId,
+          clientRequestId: item.clientRequestId,
+          requestFingerprint: item.requestFingerprint,
+          dispatchState: item.dispatchState,
+        };
+      }),
+      entries: record.entries.filter(function (entry) {
+        return entry && typeof entry.journalEpoch === "string"
+          && Number.isSafeInteger(entry.sequence) && entry.sequence >= 0
+          && typeof entry.eventId === "string" && PROJECTION_KINDS[entry.kind] === true;
+      }).map(function (entry) {
+        return {
+          journalEpoch: projectionText(entry.journalEpoch, 128),
+          sequence: entry.sequence,
+          eventId: projectionText(entry.eventId, 128),
+          kind: entry.kind,
+          taskId: projectionText(entry.taskId, 128) || null,
+          body: typeof entry.body === "string" ? entry.body.slice(0, 16384) : null,
+          attachments: Array.isArray(entry.attachments) ? entry.attachments.slice(0, 16).map(function (attachment) {
+            var value = attachment && typeof attachment === "object" ? attachment : {};
+            return {
+              id: projectionText(value.id, 128),
+              displayName: projectionText(value.displayName, 256),
+              contentType: projectionText(value.contentType, 128),
+              byteLength: Number.isSafeInteger(value.byteLength) && value.byteLength >= 0 ? value.byteLength : 0,
+              checksumSha256: /^[a-fA-F0-9]{64}$/.test(value.checksumSha256 || "")
+                ? value.checksumSha256 : "",
+            };
+          }) : [],
+        };
+      }),
+    };
+    next.revision = state.revision + 1;
+    return next;
+  }
+
+  function hideRemoteProxyHistory(state, localSessionId) {
+    var next = shallowCopy(state);
+    next.remoteProxyHistories = (state.remoteProxyHistories || []).filter(function (item) {
+      return item.localSessionId !== localSessionId;
     });
+    if (next.remoteProxyHistory && next.remoteProxyHistory.localSessionId === localSessionId) {
+      next.remoteProxyHistory = null;
+    }
     next.revision = state.revision + 1;
     return next;
   }
@@ -283,20 +906,26 @@
    * Task events are deduplicated by (taskId, status) and never regress a
    * committed terminal state.
    */
-  function applyTaskEvent(state, event) {
+  function applyTaskEventTo(state, event, tasksField) {
+    // Current B sources intentionally differ: the encrypted task_status
+    // protocol uses snake_case, while local admitted/executor projections
+    // emitted by the same Rust task service use camelCase.
     var payload = event || {};
-    var taskId = payload.taskId ? String(payload.taskId) : "";
-    var status = payload.status ? String(payload.status) : "";
+    var taskIdValue = payload.taskId || payload.task_id;
+    var statusValue = payload.status || payload.taskStatus || payload.task_status;
+    var taskId = taskIdValue ? String(taskIdValue) : "";
+    var status = statusValue ? String(statusValue) : "";
     if (!taskId || !status) return state;
     var connection = state.controllerConnection;
+    var connectionId = payload.connectionId || payload.connection_id;
     // A08/A11 must add the full lease tuple to RemoteTaskEvent. Until then,
     // this local projection cannot identify old unbound events delivered after
     // reconnect; it can reject the offline window, not claim wire isolation.
-    if (connection.status !== "connected") return state;
-    if (connection.connectionId && payload.connectionId && String(payload.connectionId) !== String(connection.connectionId)) {
+    if (tasksField === "tasks" && connection.status !== "connected") return state;
+    if (tasksField === "tasks" && connection.connectionId && connectionId && String(connectionId) !== String(connection.connectionId)) {
       return state;
     }
-    var tasks = (state.tasks || []).slice();
+    var tasks = (state[tasksField] || []).slice();
     var index = -1;
     for (var i = 0; i < tasks.length; i += 1) {
       if (tasks[i].taskId === taskId) {
@@ -304,24 +933,133 @@
         break;
       }
     }
-    if (index >= 0 && TASK_TERMINAL[tasks[index].status]) return state;
+    var source = payload.modelSource;
+    var modelSource = source === "controlled_device" || source === "controller_temporary"
+      ? source : null;
+    if (index >= 0 && TASK_TERMINAL[tasks[index].status]) {
+      if (!modelSource || tasks[index].modelSource) return state;
+      tasks[index] = Object.assign({}, tasks[index], { modelSource: modelSource });
+      var terminalEnriched = shallowCopy(state);
+      terminalEnriched[tasksField] = tasks;
+      terminalEnriched.revision = state.revision + 1;
+      return terminalEnriched;
+    }
+    // An admitted acknowledgement may arrive after the executor's running
+    // event on a multi-thread runtime. Keep the newer lifecycle state while
+    // still accepting prompt text that only the admitted projection carries.
+    if (index >= 0 && status === "admitted" && tasks[index].status !== "admitted") {
+      var lateText = payload.text ? String(payload.text).slice(0, 8192) : null;
+      if (!lateText || tasks[index].text) return state;
+      tasks[index] = Object.assign({}, tasks[index], {
+        text: lateText,
+        modelSource: modelSource || tasks[index].modelSource || null,
+      });
+      var promptUpdated = shallowCopy(state);
+      promptUpdated[tasksField] = tasks;
+      promptUpdated.revision = state.revision + 1;
+      return promptUpdated;
+    }
     var entry = {
       taskId: taskId,
-      sessionId: payload.sessionId ? String(payload.sessionId) : (index >= 0 ? tasks[index].sessionId : null),
+      sessionId: (payload.sessionId || payload.session_id)
+        ? String(payload.sessionId || payload.session_id)
+        : (index >= 0 ? tasks[index].sessionId : null),
       status: status,
-      outcomeUnknown: !!payload.outcomeUnknown,
-      terminalReason: payload.terminalReason ? String(payload.terminalReason) : null,
-      resultDigest: payload.resultDigest ? String(payload.resultDigest) : null,
+      modelSource: modelSource || (index >= 0 ? tasks[index].modelSource || null : null),
+      text: payload.text
+        ? String(payload.text).slice(0, 8192)
+        : (index >= 0 ? tasks[index].text || null : null),
+      messageIndex: Number.isInteger(payload.messageIndex)
+        ? payload.messageIndex
+        : (index >= 0 ? tasks[index].messageIndex : null),
+      assistantText: index >= 0 ? tasks[index].assistantText || null : null,
+      errorText: index >= 0 ? tasks[index].errorText || null : null,
+      contentEventIds: index >= 0 ? (tasks[index].contentEventIds || []).slice() : [],
+      outcomeUnknown: !!(payload.outcomeUnknown || payload.outcome_unknown),
+      terminalReason: (payload.terminalReason || payload.terminal_reason)
+        ? String(payload.terminalReason || payload.terminal_reason)
+        : null,
+      resultDigest: (payload.resultDigest || payload.result_digest)
+        ? String(payload.resultDigest || payload.result_digest)
+        : null,
     };
     if (index >= 0) {
-      if (tasks[index].status === status) return state;
+      if (
+        tasks[index].status === status
+        && tasks[index].modelSource === entry.modelSource
+        && tasks[index].text === entry.text
+        && tasks[index].messageIndex === entry.messageIndex
+        && tasks[index].assistantText === entry.assistantText
+        && tasks[index].errorText === entry.errorText
+        && tasks[index].outcomeUnknown === entry.outcomeUnknown
+        && tasks[index].terminalReason === entry.terminalReason
+        && tasks[index].resultDigest === entry.resultDigest
+      ) return state;
       tasks[index] = entry;
     } else {
       if (tasks.length >= 64) tasks.shift();
       tasks.push(entry);
     }
     var next = shallowCopy(state);
-    next.tasks = tasks;
+    next[tasksField] = tasks;
+    next.revision = state.revision + 1;
+    return next;
+  }
+
+  function applyControlledTaskEvent(state, event) {
+    var payload = event || {};
+    var session = state.controlledSession || {};
+    var sessionId = payload.sessionId || payload.session_id;
+    if (!session.sessionId || String(sessionId || "") !== String(session.sessionId)) {
+      return state;
+    }
+    var generation = payload.generation || payload.remoteControlGeneration
+      || payload.remote_control_generation;
+    if (generation && String(generation) !== String(session.generation || "")) return state;
+    return applyTaskEventTo(state, payload, "controlledTasks");
+  }
+
+  /**
+   * Projects authoritative B-side task text into the same durable task entry
+   * used by status events. Admission text is visible immediately; assistant
+   * output remains visible after the task reaches a terminal state.
+   */
+  function applyTaskContent(state, event) {
+    var payload = event || {};
+    var taskId = payload.taskId ? String(payload.taskId) : "";
+    var role = payload.role ? String(payload.role) : "";
+    var text = payload.text ? String(payload.text).slice(0, 8192) : "";
+    var eventId = payload.eventId ? String(payload.eventId) : "";
+    if (!taskId || !eventId || !text || (role !== "user" && role !== "assistant" && role !== "error")) {
+      return state;
+    }
+    var session = state.controlledSession || {};
+    if (!session.sessionId || String(payload.sessionId || "") !== String(session.sessionId)) {
+      return state;
+    }
+    var tasks = (state.controlledTasks || []).slice();
+    var index = tasks.findIndex(function (task) { return task && task.taskId === taskId; });
+    if (index < 0) return state;
+    var current = tasks[index];
+    if (payload.sessionId && current.sessionId && String(payload.sessionId) !== current.sessionId) {
+      return state;
+    }
+    var nextEntry = shallowCopy(current);
+    var contentEventIds = (current.contentEventIds || []).slice();
+    if (contentEventIds.indexOf(eventId) >= 0) return state;
+    if (contentEventIds.length >= 32) contentEventIds.shift();
+    contentEventIds.push(eventId);
+    nextEntry.contentEventIds = contentEventIds;
+    if (role === "user") {
+      nextEntry.text = text;
+    } else if (role === "assistant") {
+      nextEntry.assistantText = String(current.assistantText || "") + text;
+    } else {
+      nextEntry.errorText = String(current.errorText || "") + text;
+    }
+    tasks[index] = nextEntry;
+    var next = shallowCopy(state);
+    next.controlledTasks = tasks;
     next.revision = state.revision + 1;
     return next;
   }
@@ -348,11 +1086,24 @@
     beginControllerIntent: beginControllerIntent,
     isCurrentIntent: isCurrentIntent,
     applyControlledStatus: applyControlledStatus,
+    reconcileControlledOpenStatus: reconcileControlledOpenStatus,
+    applyControlledSession: applyControlledSession,
     applyControllerStatus: applyControllerStatus,
+    reconcileControllerOpenStatus: reconcileControllerOpenStatus,
+    applyRemoteProxyNotice: applyRemoteProxyNotice,
+    applyRemoteProxyBinding: applyRemoteProxyBinding,
+    matchesRemoteProxyCapabilityBinding: matchesRemoteProxyCapabilityBinding,
+    applyRemoteProxyCapabilityResult: applyRemoteProxyCapabilityResult,
+    applyCapabilityPending: applyCapabilityPending,
+    applyCapabilityFailure: applyCapabilityFailure,
     applyCapabilities: applyCapabilities,
+    applyControlledJournalEvent: applyControlledJournalEvent,
     applyModels: applyModels,
-    applyHistories: applyHistories,
-    applyTaskEvent: applyTaskEvent,
+    projectRemoteProxyList: projectRemoteProxyList,
+    projectRemoteProxyRead: projectRemoteProxyRead,
+    hideRemoteProxyHistory: hideRemoteProxyHistory,
+    applyControlledTaskEvent: applyControlledTaskEvent,
+    applyTaskContent: applyTaskContent,
     matchesLiveContext: matchesLiveContext,
     isTaskTerminal: function (status) {
       return !!TASK_TERMINAL[status];

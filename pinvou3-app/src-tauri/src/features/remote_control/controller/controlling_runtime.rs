@@ -8,6 +8,8 @@
 use serde_json::Value;
 
 use super::controlling_handshake::{ControllingHandshake, HandshakeError, JoinedLease};
+use super::crypto::SessionKeys;
+use super::protocol::{ROLE_A, is_self_echoed_handshake_frame};
 
 /// 端口抽象：`send` 交给传输层出站，`recv` 返回下一条入站报文。
 #[async_trait::async_trait]
@@ -19,6 +21,13 @@ pub(crate) trait ControllingRelayPort: Send {
     /// 公共错误闭集，状态所有者据此向用户给出有限错误。
     fn relay_error_code(&self) -> Option<&'static str> {
         None
+    }
+
+    /// 是否收到过 Relay 的 `error` 帧（**无论其码是否在闭集内**）。只用于把
+    /// 失败归因到 Relay 还是本地校验：闭集外的码会被 `relay_error_code` 丢弃，
+    /// 单看公共码无法区分「Relay 拒绝」与「本地握手校验拒绝」。
+    fn relay_error_seen(&self) -> bool {
+        false
     }
 
     /// 通道是否已断开。用于把失败映射为「对端不可达」而不是协议错误。
@@ -44,11 +53,15 @@ pub(crate) enum ControllingStageEvent {
 /// 握手完成后的租约材料：租约身份来自 `controller_joined`，能力与 transcript
 /// 哈希来自验签后的 `controller_pairing_reserved`。调用方据此安装认证租约并
 /// 派生传输指纹；本模块不产生任何可安装材料以外的状态。
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug)]
 pub(crate) struct ControllingHandshakeOutcome {
     pub(crate) lease: JoinedLease,
+    pub(crate) peer_endpoint_id: String,
+    pub(crate) reservation_id: String,
     pub(crate) negotiated_capabilities: Vec<String>,
     pub(crate) transcript_hash: [u8; 32],
+    /// 会话密钥：握手的最终产物，只在调用方导入加密业务通道时使用一次。
+    pub(crate) session: SessionKeys,
 }
 
 fn kind(message: &Value) -> Option<&str> {
@@ -96,13 +109,18 @@ pub(crate) async fn drive_controlling_handshake<P: ControllingRelayPort>(
     let joined = next_of_type(port, "controller_joined").await?;
     let lease = handshake.accept_joined(&joined)?;
     on_stage(ControllingStageEvent::Joined)?;
+    // 会话密钥在 Joined 之后才可取用；此后握手对象不再持有密钥材料。
+    let session = handshake.take_session()?;
     let transcript_hash = handshake
         .transcript_hash()
         .ok_or_else(|| HandshakeError::new("controller_handshake_stage_invalid"))?;
     Ok(ControllingHandshakeOutcome {
         lease,
+        peer_endpoint_id: handshake.peer_endpoint_id().to_owned(),
+        reservation_id: handshake.reservation_id().to_owned(),
         negotiated_capabilities: handshake.negotiated_capabilities().to_vec(),
         transcript_hash,
+        session,
     })
 }
 
@@ -110,10 +128,19 @@ async fn next_of_type<P: ControllingRelayPort>(
     port: &mut P,
     expected: &'static str,
 ) -> Result<Value, HandshakeError> {
-    match port.recv().await {
-        Some(message) if kind(&message) == Some(expected) => Ok(message),
-        // 端口断开或消息类型不符都失败关闭：迟到/错序报文不得被当作下一步。
-        _ => Err(HandshakeError::new("controller_handshake_rejected")),
+    loop {
+        match port.recv().await {
+            Some(message) if kind(&message) == Some(expected) => {
+                // Relay 会把本端 commit 原样回投（router 契约）：自帧不是对端输入，
+                // 跳过继续等待，否则会被误判成 sender_role 不符而失败关闭。
+                if is_self_echoed_handshake_frame(&message, ROLE_A) {
+                    continue;
+                }
+                return Ok(message);
+            }
+            // 端口断开或消息类型不符都失败关闭：迟到/错序报文不得被当作下一步。
+            _ => return Err(HandshakeError::new("controller_handshake_rejected")),
+        }
     }
 }
 
@@ -381,8 +408,9 @@ mod tests {
                 .negotiated_capabilities
                 .contains(&"pairing_v1".to_owned())
         );
-        // worker 只负责编排；业务密钥仍在调用方用真实 LeaseBinding 派生。
-        assert!(a.take_session().is_ok());
+        // 会话密钥已随 outcome 交给调用方（安装加密业务通道时再用真实
+        // LeaseBinding 派生业务密钥），握手对象不再持有密钥材料。
+        assert!(a.take_session().is_err());
         let outbound_types: Vec<String> = port
             .outbound
             .borrow()

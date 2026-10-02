@@ -24,6 +24,10 @@ pub use features::assistant::attachments::stage_file_in_workspace;
 pub use features::assistant::product_runtime::{agentic_task, headless_bridge};
 
 use crate::app::commands;
+use crate::app::desktop_remote_composition::{
+    DesktopControlledExecutionPort, DesktopLocalExecutionPort, DesktopRemoteApplicationEvents,
+    DesktopRemoteProjectionPort,
+};
 use crate::features::{
     assistant::{engine_pool::EnginePool, platform::bridge},
     connectors::{connector_cli, eip, zhidao},
@@ -34,7 +38,9 @@ use crate::features::{
     remote_control::RemoteControlManager,
     remote_control::controller::{
         capabilities::CapabilitySnapshotManager, controlled::ControlledDeviceManager,
-        controlling::ControllingDeviceManager, permission::PermissionAuthority,
+        controlling::ControllingDeviceManager, controlling_session::ControllingSessionManager,
+        encrypted_lane::ControlledLaneState, encrypted_lane::ControllingLaneState,
+        permission::PermissionAuthority,
     },
     remote_knowledge::RemoteKnowledgeService,
     scheduled::tasks as scheduled_tasks,
@@ -1080,6 +1086,20 @@ pub fn run() {
                             let acp_pool = acp_pool_for_capabilities.clone();
                             move |session_id: &str| acp_pool.is_acp(session_id)
                         }));
+                    // Route ordinary Sessions using the same trusted ACP
+                    // binding (including its durable metadata fallback).
+                    // RemoteProxy is classified by SessionStore first and
+                    // never invokes this local-backend resolver.
+                    store_for_engine.set_local_backend_resolver(std::sync::Arc::new({
+                        let acp_pool = acp_pool_for_capabilities.clone();
+                        move |session_id: &str| {
+                            Ok(if acp_pool.is_acp(session_id) {
+                                crate::features::sessions::remote_proxy::routing::LocalBackendBinding::Acp
+                            } else {
+                                crate::features::sessions::remote_proxy::routing::LocalBackendBinding::Engine
+                            })
+                        }
+                    }));
                     // sessions feature 自己的 code 判定（mode 默认值解析 + 仅 code
                     // 持久化），与 bridge 共用同一份 SessionAgentStore 闭包。
                     store_for_engine.set_code_session_predicate(std::sync::Arc::new({
@@ -1152,36 +1172,74 @@ pub fn run() {
                                 0,
                             ).map_err(|error| error.code.to_owned())?,
                         );
-                        handle.manage(ControlledDeviceManager::default());
+                        // E2E-06：B 端清理端口必须在任何终态（stop/refresh/远端断开/
+                        // 恢复失败）都能中断本代远端任务并回收其凭证。
+                        let controlled_device_manager = ControlledDeviceManager::default();
+                        controlled_device_manager.register_cleanup_sink(std::sync::Arc::new(
+                            commands::desktop_remote_controller_business::DesktopControlledCleanup::new(
+                                handle.clone(),
+                            ),
+                        ));
+                        handle.manage(controlled_device_manager);
                         commands::desktop_remote_controlled::spawn_watchdog_reaper(handle.clone());
                         handle.manage(ControllingDeviceManager::default());
+                        handle.manage(ControllingSessionManager::default());
+                        handle.manage(ControllingLaneState::default());
+                        handle.manage(ControlledLaneState::default());
+                        handle.manage(
+                            features::remote_control::controller::relay_runtime::ControlledOutboundState::default(),
+                        );
                         handle.manage(CapabilitySnapshotManager::default());
                         let temporary_models = commands::desktop_remote_model::shared_model_store();
                         handle.manage(temporary_models.clone());
                         let permission_authority = std::sync::Arc::new(PermissionAuthority::default());
+                        let permission_telemetry_app = handle.clone();
+                        permission_authority.set_telemetry_sink(std::sync::Arc::new(move |metric| {
+                            use features::behavior_telemetry::{
+                                RemoteControlEvent, RemoteOutcome, RemotePermissionStep, RemoteReason,
+                                RemoteStage, track_remote_control,
+                            };
+                            use features::remote_control::controller::permission::PermissionTelemetryTransition;
+                            let (outcome, reason, step) = match metric.transition {
+                                PermissionTelemetryTransition::Requested =>
+                                    (RemoteOutcome::Ok, RemoteReason::None, RemotePermissionStep::Request),
+                                PermissionTelemetryTransition::Allowed =>
+                                    (RemoteOutcome::Ok, RemoteReason::None, RemotePermissionStep::Allowed),
+                                PermissionTelemetryTransition::Denied =>
+                                    (RemoteOutcome::Rejected, RemoteReason::PermissionDenied, RemotePermissionStep::Denied),
+                                PermissionTelemetryTransition::Expired =>
+                                    (RemoteOutcome::Expired, RemoteReason::PermissionTimeout, RemotePermissionStep::Expired),
+                            };
+                            track_remote_control(&permission_telemetry_app,
+                                RemoteControlEvent::new(RemoteStage::Permission, outcome)
+                                    .reason(reason)
+                                    .permission_step(step)
+                                    .latency_ms(metric.latency_ms));
+                        }));
                         handle.manage(permission_authority.clone());
                         let desktop_task_runtime = commands::desktop_remote_task::DesktopRemoteTaskRuntime::new(
                             handle.clone(),
                             store_for_engine.clone(),
                             pool.clone(),
                             acp_pool_for_capabilities.clone(),
+                            temporary_models.clone(),
                             ledger,
                         );
                         handle.manage(desktop_task_runtime.ledger());
                         let desktop_attachments =
                             commands::desktop_remote_attachment::DesktopRemoteAttachmentRuntime::from_session_store(
                                 store_for_engine.clone(),
-                                desktop_task_runtime.service(),
                             );
                         let desktop_artifacts =
                             commands::desktop_remote_artifact::DesktopRemoteArtifactRuntime::with_default_registry(
                                 desktop_task_runtime.service(),
                             );
-                        let history_path = crate::platform::paths::sessions_root()
-                            .join("_remote_control_history.json");
+                        desktop_task_runtime.set_code_artifact_port(desktop_artifacts.clone());
+                        desktop_task_runtime
+                            .hooks()
+                            .set_artifact_scope(desktop_artifacts.clone());
                         let desktop_history =
-                            commands::desktop_remote_history::DesktopRemoteHistoryRuntime::with_persistent_history(
-                                history_path,
+                            commands::desktop_remote_journal::DesktopRemoteJournalRuntime::journal_only(
                                 format!("boot-{}", std::process::id()),
                             );
                         desktop_task_runtime
@@ -1197,7 +1255,7 @@ pub fn run() {
                             ),
                         ));
                         desktop_task_runtime.hooks().set_journal(std::sync::Arc::new(
-                            commands::desktop_remote_history::DesktopTaskEventSink::new(
+                            commands::desktop_remote_journal::DesktopTaskEventSink::new(
                                 handle.clone(),
                                 desktop_history.journal().clone(),
                             ),
@@ -1212,6 +1270,49 @@ pub fn run() {
                         handle.manage(desktop_attachments);
                         handle.manage(desktop_artifacts);
                         handle.manage(desktop_history);
+                        // DEV-20 composition: one B execution port for both
+                        // authenticated network ingress and B-local ChatView.
+                        let controlled_owner = std::sync::Arc::new(
+                            commands::desktop_remote_controller_business::DesktopControlledExecutionAdapter::new(
+                                handle.clone(),
+                            ),
+                        );
+                        let controlled_execution: DesktopControlledExecutionPort = controlled_owner.clone();
+                        let local_execution: DesktopLocalExecutionPort = controlled_owner;
+                        handle.manage(controlled_execution);
+                        handle.manage(local_execution);
+                        // The typed A projection port and the host event adapter
+                        // share the existing SessionStore and live role owners.
+                        // Verified encrypted ingress feeds the single typed
+                        // RemoteProxy projection path.
+                        let host_events: std::sync::Arc<
+                            dyn features::sessions::application::ports::ApplicationEventPort,
+                        > = std::sync::Arc::new(DesktopRemoteApplicationEvents(handle.clone()));
+                        let projector = std::sync::Arc::new(
+                            features::sessions::application::project_remote::RemoteProjectionService::new(
+                                store_for_engine.clone(),
+                                host_events,
+                            ),
+                        );
+                        let projection = std::sync::Arc::new(
+                            app::remote_projection_adapter::RemoteProjectionAdapter::new(projector),
+                        );
+                        let projection_port: DesktopRemoteProjectionPort = projection.clone();
+                        handle.manage(projection);
+                        handle.manage(projection_port);
+                        handle.manage(std::sync::Arc::new(
+                            commands::desktop_remote_action::DesktopRemoteActionState::default(),
+                        ));
+                        handle.manage(
+                            features::sessions::application::dispatch_remote::RemoteDispatchService::new(
+                                store_for_engine.clone(),
+                                std::sync::Arc::new(
+                                    commands::desktop_remote_task::DesktopRemoteTaskDispatchPort::new(
+                                        handle.clone(),
+                                    ),
+                                ),
+                            ),
+                        );
                         eprintln!("[pinvou3-app] Windows desktop remote control ready");
                         Ok(())
                     })();
@@ -1602,54 +1703,39 @@ pub fn run() {
             commands::desktop_remote_controlled::desktop_remote_controlled_stop,
             commands::desktop_remote_controlled::desktop_remote_controlled_disconnect_now,
             commands::desktop_remote_controlled::desktop_remote_controlled_status,
+            commands::desktop_remote_controlled::desktop_remote_client_event,
             commands::desktop_remote_controlled::desktop_remote_controlled_poll_watchdog,
-            commands::desktop_remote_controlled::desktop_remote_controlled_authorize_workspace,
             commands::desktop_remote_controlled::desktop_remote_controlled_list_workspaces,
             commands::desktop_remote_controller::desktop_remote_controller_connect,
             commands::desktop_remote_controller::desktop_remote_controller_disconnect,
             commands::desktop_remote_controller::desktop_remote_controller_status,
-            commands::desktop_remote_controller::desktop_remote_controller_live_context,
-            commands::desktop_remote_controller::desktop_remote_controller_create_history,
-            commands::desktop_remote_controller::desktop_remote_controller_list_history,
+            commands::desktop_remote_capability::desktop_remote_controller_capability_snapshot,
+            commands::desktop_remote_capability::desktop_remote_controller_capability_send,
             commands::desktop_remote_capabilities::desktop_remote_capabilities_snapshot,
-            commands::desktop_remote_task::desktop_remote_task_open_session,
-            commands::desktop_remote_task::desktop_remote_task_switch_session,
-            commands::desktop_remote_task::desktop_remote_task_close_session,
-            commands::desktop_remote_task::desktop_remote_task_submit,
-            commands::desktop_remote_task::desktop_remote_task_cancel,
-            commands::desktop_remote_task::desktop_remote_task_status,
-            commands::desktop_remote_task::desktop_remote_task_interrupt_all,
+            commands::desktop_remote_capabilities::desktop_remote_controlled_capabilities_snapshot,
+            commands::desktop_remote_task::desktop_remote_controlled_task_send,
+            commands::desktop_remote_task::desktop_remote_controlled_task_stop,
+            commands::desktop_remote_task::desktop_remote_task_reserve_a,
+            commands::desktop_remote_action::desktop_remote_action_a,
+            commands::desktop_remote_task::desktop_remote_task_commit_a,
+            commands::desktop_remote_task::desktop_remote_task_cancel_a,
+            commands::desktop_remote_task::desktop_remote_task_abandon_prepared_a,
+            commands::desktop_remote_proxy::desktop_remote_proxy_history_list,
+            commands::desktop_remote_proxy::desktop_remote_proxy_history_read,
+            commands::desktop_remote_proxy::desktop_remote_proxy_history_delete,
+            commands::desktop_remote_proxy::desktop_remote_proxy_open_live,
             commands::desktop_remote_model::desktop_remote_model_list_exportable,
             commands::desktop_remote_model::desktop_remote_model_install,
             commands::desktop_remote_model::desktop_remote_model_release,
             commands::desktop_remote_model::desktop_remote_model_active,
-            commands::desktop_remote_permission::desktop_remote_permission_request,
-            commands::desktop_remote_permission::desktop_remote_permission_decide,
-            commands::desktop_remote_permission::desktop_remote_permission_list,
             commands::desktop_remote_permission::desktop_remote_permission_deny_task,
-            commands::desktop_remote_attachment::desktop_remote_attachment_begin,
-            commands::desktop_remote_attachment::desktop_remote_attachment_chunk,
-            commands::desktop_remote_attachment::desktop_remote_attachment_abort,
-            commands::desktop_remote_artifact::desktop_remote_artifact_index,
-            commands::desktop_remote_artifact::desktop_remote_artifact_preview,
-            commands::desktop_remote_artifact::desktop_remote_artifact_download_begin,
-            commands::desktop_remote_artifact::desktop_remote_artifact_download_chunk,
-            commands::desktop_remote_artifact::desktop_remote_artifact_download_abort,
-            commands::desktop_remote_history::desktop_remote_history_list,
-            commands::desktop_remote_history::desktop_remote_history_load,
-            commands::desktop_remote_history::desktop_remote_history_delete,
-            commands::desktop_remote_history::desktop_remote_history_create,
-            commands::desktop_remote_history::desktop_remote_history_mark_offline,
-            commands::desktop_remote_history::desktop_remote_history_apply_event,
-            commands::desktop_remote_history::desktop_remote_history_apply_snapshot,
-            commands::desktop_remote_history::desktop_remote_journal_replay,
-            commands::desktop_remote_history::desktop_remote_journal_snapshot,
-            commands::desktop_remote_history::desktop_remote_journal_acknowledge,
             commands::remote_control::web_access_enable,
             commands::remote_control::web_access_disable,
             commands::remote_control::web_access_status,
             commands::remote_control::web_access_rotate,
             commands::remote_control::web_access_relay_settings,
+            commands::remote_control::desktop_remote_endpoint_profiles,
+            commands::remote_control::desktop_remote_set_endpoint_profile,
             commands::remote_control::web_access_set_relay,
             commands::remote_control::web_access_reset_relay,
             commands::remote_control::web_access_bridge_ready,
