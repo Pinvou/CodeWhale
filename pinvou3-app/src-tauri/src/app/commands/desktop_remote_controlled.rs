@@ -284,7 +284,12 @@ mod tests {
 
     #[test]
     fn workspace_command_accepts_only_a_real_browsable_directory() {
-        let directory = tempfile::tempdir().unwrap();
+        // Exercise the production HOME policy without changing process-wide
+        // environment or weakening validation on Linux/macOS.
+        let directory = tempfile::Builder::new()
+            .prefix(".pinvou3-controlled-workspace-test-")
+            .tempdir_in(crate::platform::os::user_home_dir())
+            .unwrap();
         let request = workspace_request(input(directory.path())).unwrap();
         assert_eq!(
             request.path.file_name(),
