@@ -319,6 +319,43 @@ pub(crate) fn test_tui_options(workspace: impl AsRef<Path>) -> crate::tui::app::
     }
 }
 
+/// A one-table Custom test config: `provider` selects the named
+/// `[providers.<name>]` table with the given wire dialect, endpoint,
+/// credential, and model. `wire = None` keeps the legacy Chat default.
+///
+/// Consolidates the per-test `[providers.<name>]` literals (wire-override
+/// route tests, transport pins, readiness, prompt suggestion); tests that
+/// need a second table or extra fields mutate the returned value at the call
+/// site, per the same convention as [`test_tui_options`].
+pub(crate) fn custom_named_table_config(
+    name: &str,
+    wire: Option<&str>,
+    base_url: &str,
+    api_key: &str,
+    model: &str,
+) -> crate::config::Config {
+    crate::config::Config {
+        provider: Some(name.to_string()),
+        providers: Some(crate::config::ProvidersConfig {
+            custom: [(
+                name.to_string(),
+                crate::config::ProviderConfig {
+                    kind: Some("openai-compatible".to_string()),
+                    wire: wire.map(str::to_string),
+                    base_url: Some(base_url.to_string()),
+                    api_key: Some(api_key.to_string()),
+                    model: Some(model.to_string()),
+                    ..crate::config::ProviderConfig::default()
+                },
+            )]
+            .into_iter()
+            .collect(),
+            ..crate::config::ProvidersConfig::default()
+        }),
+        ..crate::config::Config::default()
+    }
+}
+
 /// Build an `App` whose observable state does not depend on the developer's
 /// machine.
 ///

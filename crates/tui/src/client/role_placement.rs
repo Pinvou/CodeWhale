@@ -379,6 +379,9 @@ mod adapter_agreement_tests {
             ApiProvider::Openai,
             ApiProvider::Openai.as_str(),
             "fp-openai-endpoint",
+            // Inert here: this test carries no fingerprint-less reasoning
+            // state, so the endpoint's officialness never enters the gate.
+            "https://relay.example.test/v1",
         );
         assert_eq!(
             roles(&items),

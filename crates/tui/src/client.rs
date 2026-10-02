@@ -1433,10 +1433,11 @@ impl DeepSeekClient {
     }
 
     /// Provider tag minted into captured [`OpaqueReasoningState`] and required
-    /// by the replay gate. Non-Custom backends are single-endpoint, so the
-    /// provider slug suffices; every named Custom table shares the `custom`
-    /// slug, so the tag carries the frozen table identity — encrypted
-    /// reasoning captured for one table must never replay onto another.
+    /// by the replay gate. Built-in backends replay under their provider slug
+    /// (the gate pairs it with the official-endpoint rule for fingerprint-less
+    /// states); every named Custom table shares the `custom` slug, so the tag
+    /// carries the frozen table identity — encrypted reasoning captured for
+    /// one table must never replay onto another.
     pub(super) fn reasoning_provider_tag(&self) -> String {
         if self.api_provider != ApiProvider::Custom {
             return self.api_provider.as_str().to_string();
@@ -2166,6 +2167,7 @@ impl DeepSeekClient {
                     self.api_provider,
                     &self.reasoning_provider_tag(),
                     &self.reasoning_endpoint_fingerprint(),
+                    &self.base_url,
                 );
                 let is_codex = self.api_provider == ApiProvider::OpenaiCodex;
                 let url = if is_codex {
@@ -11918,26 +11920,13 @@ mod tests {
             .await;
 
         let _env_lock = crate::test_support::lock_test_env();
-        let config = Config {
-            provider: Some("pinvou_responses".to_string()),
-            providers: Some(ProvidersConfig {
-                custom: [(
-                    "pinvou_responses".to_string(),
-                    ProviderConfig {
-                        kind: Some("openai-compatible".to_string()),
-                        wire: Some("responses".to_string()),
-                        base_url: Some(format!("{}/v1", server.uri())),
-                        api_key: Some("custom-responses-key".to_string()),
-                        model: Some("gpt-6-sol".to_string()),
-                        ..ProviderConfig::default()
-                    },
-                )]
-                .into_iter()
-                .collect(),
-                ..ProvidersConfig::default()
-            }),
-            ..Config::default()
-        };
+        let config = crate::test_support::custom_named_table_config(
+            "pinvou_responses",
+            Some("responses"),
+            &format!("{}/v1", server.uri()),
+            "custom-responses-key",
+            "gpt-6-sol",
+        );
         let route = crate::route_runtime::resolve_runtime_route(
             &config,
             ApiProvider::Custom,
@@ -12029,26 +12018,13 @@ mod tests {
             .await;
 
         let _env_lock = crate::test_support::lock_test_env();
-        let config = Config {
-            provider: Some("pinvou_messages".to_string()),
-            providers: Some(ProvidersConfig {
-                custom: [(
-                    "pinvou_messages".to_string(),
-                    ProviderConfig {
-                        kind: Some("openai-compatible".to_string()),
-                        wire: Some("anthropic".to_string()),
-                        base_url: Some(format!("{}/v1", server.uri())),
-                        api_key: Some("custom-anthropic-key".to_string()),
-                        model: Some("custom-claude".to_string()),
-                        ..ProviderConfig::default()
-                    },
-                )]
-                .into_iter()
-                .collect(),
-                ..ProvidersConfig::default()
-            }),
-            ..Config::default()
-        };
+        let config = crate::test_support::custom_named_table_config(
+            "pinvou_messages",
+            Some("anthropic"),
+            &format!("{}/v1", server.uri()),
+            "custom-anthropic-key",
+            "custom-claude",
+        );
         let route = crate::route_runtime::resolve_runtime_route(
             &config,
             ApiProvider::Custom,

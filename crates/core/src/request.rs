@@ -136,8 +136,10 @@ pub struct OpaqueReasoningState {
     /// opaque blobs — the provider tag alone pins the table name, not the URL
     /// behind it. States minted before this field existed carry `None`:
     /// those fail closed on Custom tags (no proof of origin, and the endpoint
-    /// can move under a stable tag) and keep replaying on fixed-endpoint
-    /// providers, whose URL cannot have changed.
+    /// can move under a stable tag), and built-in tags keep replaying only
+    /// while the requesting client still points at the provider's official
+    /// endpoint — a re-pointed client has no proof of where an old state was
+    /// captured, so it fails closed too.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub endpoint: Option<String>,
 }

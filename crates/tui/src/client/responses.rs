@@ -9,6 +9,7 @@
 
 use anyhow::{Context, Result};
 use codewhale_config::provider::WireFormat;
+use codewhale_config::provider_base_url_is_official;
 use serde_json::{Value, json};
 
 use crate::config::ApiProvider;
@@ -39,6 +40,10 @@ pub(super) fn build_responses_body(request: &MessageRequest) -> Value {
         ApiProvider::OpenaiCodex,
         ApiProvider::OpenaiCodex.as_str(),
         "fp-codex-endpoint",
+        // The catalog Codex endpoint — the only URL fingerprint-less legacy
+        // states may replay onto (see the gate in
+        // `convert_messages_to_responses_input`).
+        "https://chatgpt.com/backend-api",
     )
 }
 
@@ -58,10 +63,11 @@ fn responses_route_sends_encrypted_reasoning_include(provider: ApiProvider) -> b
 /// Whether a captured provider tag names endpoint-scoped Custom identity: the
 /// legacy root table (`custom`) or a named table (`custom/<name>`), exactly
 /// the tags `DeepSeekClient::reasoning_provider_tag` mints for Custom. These
-/// are the only tags whose endpoint can change while the tag stays put, so
-/// they are the only fingerprint-less (pre-fingerprint) states that fail
-/// closed instead of replaying; a built-in provider's URL is fixed, so its
-/// legacy states have nowhere else to have come from.
+/// are the tags whose endpoint can change while the tag stays put, so they
+/// are the fingerprint-less (pre-fingerprint) states that always fail closed.
+/// Built-in tags take the narrower rule at the replay gate: a fingerprint-less
+/// state may only ride the provider's official endpoint — without a
+/// fingerprint it is the one origin this gate still vouches for.
 fn is_custom_reasoning_tag(tag: &str) -> bool {
     tag == "custom" || tag.starts_with("custom/")
 }
@@ -82,14 +88,20 @@ fn is_custom_reasoning_tag(tag: &str) -> bool {
 /// `DeepSeekClient::reasoning_endpoint_fingerprint`): the tag pins the table
 /// name, not the URL behind it, so a state captured before the table's
 /// `base_url` was edited stops replaying. States minted before fingerprints
-/// existed carry no proof of origin: Custom endpoints can move under a stable
-/// tag, so those fail closed, while a fixed-endpoint provider's URL cannot
-/// have changed and its old sessions keep replaying.
+/// existed carry no proof of origin: Custom endpoints can move under a
+/// stable tag, so those fail closed, and built-in tags keep replaying only
+/// while `current_base_url` is still the provider's official endpoint — a
+/// client re-pointed by config has no way to prove where an old state was
+/// captured, so it fails closed too.
+///
+/// `current_base_url` is the endpoint this request is about to be POSTed to
+/// (the client's frozen base URL); it decides that legacy arm.
 pub(super) fn build_responses_body_for_provider(
     request: &MessageRequest,
     provider: ApiProvider,
     reasoning_provider_tag: &str,
     reasoning_endpoint_fingerprint: &str,
+    current_base_url: &str,
 ) -> Value {
     let is_deepseek = matches!(provider, ApiProvider::Deepseek | ApiProvider::DeepseekCN);
     // Concentrate documents `model`, `input`, `stream`, `max_output_tokens`,
@@ -141,6 +153,7 @@ pub(super) fn build_responses_body_for_provider(
         provider,
         reasoning_provider_tag,
         reasoning_endpoint_fingerprint,
+        current_base_url,
     );
     if is_concentrate {
         input.insert(
@@ -787,8 +800,19 @@ pub(super) fn convert_messages_to_responses_input(
     provider: ApiProvider,
     reasoning_provider_tag: &str,
     reasoning_endpoint_fingerprint: &str,
+    current_base_url: &str,
 ) -> Vec<Value> {
     let is_deepseek = matches!(provider, ApiProvider::Deepseek | ApiProvider::DeepseekCN);
+    // Fingerprint-less (pre-fingerprint) states carry no proof of which
+    // endpoint minted them, so they may only replay where the endpoint cannot
+    // have moved: a built-in on its official endpoint family. Custom is
+    // excluded by its tag at the gate below (and
+    // `provider_base_url_is_official` rejects it outright), and a built-in
+    // re-pointed by config or env loses the credit — it has no way to prove
+    // an old state came from the new URL.
+    let fingerprintless_replay_official = provider
+        .kind()
+        .is_some_and(|kind| provider_base_url_is_official(kind, current_base_url));
     let mut items = Vec::new();
 
     for msg in &request.messages {
@@ -891,12 +915,16 @@ pub(super) fn convert_messages_to_responses_input(
                                 // minted before fingerprints existed carry no
                                 // proof of which endpoint produced them:
                                 // Custom endpoints can move under a stable
-                                // tag, so those fail closed instead of riding
-                                // a re-pointed table's wire, while a
-                                // fixed-endpoint provider's URL cannot have
-                                // changed and its old sessions keep replaying.
+                                // tag, so those fail closed, and a built-in
+                                // keeps replaying only while the client still
+                                // points at the provider's official endpoint
+                                // (`fingerprintless_replay_official` above) —
+                                // a re-pointed client gets no such credit.
                                 let endpoint_matches = match &state.endpoint {
-                                    None => !is_custom_reasoning_tag(&state.provider),
+                                    None => {
+                                        !is_custom_reasoning_tag(&state.provider)
+                                            && fingerprintless_replay_official
+                                    }
                                     Some(captured) => captured == reasoning_endpoint_fingerprint,
                                 };
                                 if state.provider == reasoning_provider_tag

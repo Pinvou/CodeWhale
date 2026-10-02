@@ -12,6 +12,15 @@ use crate::models::SystemPrompt;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 
+/// The catalog Codex endpoint: `provider_base_url_is_official` matches the
+/// exact URL, so this literal pins the official side of the fingerprint-less
+/// replay arm (the config crate keeps the constant crate-private).
+const OFFICIAL_CODEX_BASE_URL: &str = "https://chatgpt.com/backend-api";
+
+/// Placeholder endpoint for body-builder tests that do not exercise the
+/// fingerprint-less replay arm — its officialness only matters there.
+const BODY_TEST_BASE_URL: &str = "https://relay.example.test/v1";
+
 #[derive(Clone)]
 struct RetryThenSuccess {
     attempts: Arc<AtomicUsize>,
@@ -573,6 +582,7 @@ fn concentrate_responses_body_sends_only_documented_fields() {
         ApiProvider::Concentrate,
         ApiProvider::Concentrate.as_str(),
         "fp-concentrate-endpoint",
+        BODY_TEST_BASE_URL,
     );
     let documented = [
         "model",
@@ -627,6 +637,7 @@ fn concentrate_responses_body_sends_only_documented_fields() {
         ApiProvider::Openai,
         ApiProvider::Openai.as_str(),
         "fp-generic-endpoint",
+        BODY_TEST_BASE_URL,
     );
     assert!(
         generic.get("store").is_some()
@@ -659,6 +670,7 @@ fn deepseek_flash_responses_body_uses_stateless_0731_contract() {
         ApiProvider::Deepseek,
         ApiProvider::Deepseek.as_str(),
         "fp-deepseek-endpoint",
+        BODY_TEST_BASE_URL,
     );
 
     assert_eq!(body["model"], "deepseek-v4-flash");
@@ -697,6 +709,7 @@ fn codex_responses_body_omits_the_output_cap_the_backend_rejects() {
         ApiProvider::OpenaiCodex,
         ApiProvider::OpenaiCodex.as_str(),
         "fp-codex-endpoint",
+        OFFICIAL_CODEX_BASE_URL,
     );
     assert!(
         codex.get("max_output_tokens").is_none(),
@@ -712,6 +725,7 @@ fn codex_responses_body_omits_the_output_cap_the_backend_rejects() {
         ApiProvider::Deepseek,
         ApiProvider::Deepseek.as_str(),
         "fp-deepseek-endpoint",
+        BODY_TEST_BASE_URL,
     );
     assert_eq!(deepseek["max_output_tokens"], json!(4_096));
 }
@@ -746,6 +760,7 @@ fn codex_replays_only_exact_model_opaque_reasoning_state() {
         ApiProvider::OpenaiCodex,
         ApiProvider::OpenaiCodex.as_str(),
         ENDPOINT_FP,
+        OFFICIAL_CODEX_BASE_URL,
     );
     let exact_wire = exact.to_string();
     assert!(!exact_wire.contains(SENTINEL), "{exact}");
@@ -763,6 +778,7 @@ fn codex_replays_only_exact_model_opaque_reasoning_state() {
         ApiProvider::OpenaiCodex,
         ApiProvider::OpenaiCodex.as_str(),
         ENDPOINT_FP,
+        OFFICIAL_CODEX_BASE_URL,
     );
     assert!(!switched_model.to_string().contains(SENTINEL));
     assert!(
@@ -778,6 +794,7 @@ fn codex_replays_only_exact_model_opaque_reasoning_state() {
         ApiProvider::Deepseek,
         ApiProvider::Deepseek.as_str(),
         ENDPOINT_FP,
+        BODY_TEST_BASE_URL,
     );
     let switched_wire = switched_provider.to_string();
     assert!(!switched_wire.contains(SENTINEL), "{switched_provider}");
@@ -1144,6 +1161,7 @@ fn responses_input_includes_user_role_tool_results() {
         ApiProvider::OpenaiCodex,
         ApiProvider::OpenaiCodex.as_str(),
         "fp-codex-endpoint",
+        OFFICIAL_CODEX_BASE_URL,
     );
 
     assert_eq!(input[0]["type"], "function_call");
@@ -1185,6 +1203,7 @@ fn responses_input_encodes_tool_call_names() {
         ApiProvider::OpenaiCodex,
         ApiProvider::OpenaiCodex.as_str(),
         "fp-codex-endpoint",
+        OFFICIAL_CODEX_BASE_URL,
     );
 
     assert_eq!(input[0]["type"], "function_call");
@@ -1317,6 +1336,7 @@ fn user_image_becomes_an_input_image_item() {
         ApiProvider::OpenaiCodex,
         ApiProvider::OpenaiCodex.as_str(),
         "fp-codex-endpoint",
+        OFFICIAL_CODEX_BASE_URL,
     );
 
     let user = items
@@ -1374,6 +1394,7 @@ fn tool_result_image_becomes_native_function_output_content() {
         ApiProvider::OpenaiCodex,
         ApiProvider::OpenaiCodex.as_str(),
         "fp-codex-endpoint",
+        OFFICIAL_CODEX_BASE_URL,
     );
     let output = items
         .iter()
@@ -1417,6 +1438,7 @@ fn responses_input_keeps_system_role_history_messages() {
         ApiProvider::OpenaiCodex,
         ApiProvider::OpenaiCodex.as_str(),
         "fp-codex-endpoint",
+        OFFICIAL_CODEX_BASE_URL,
     );
 
     let system = items
@@ -1458,26 +1480,13 @@ async fn forkguard_custom_responses_stream_captures_encrypted_reasoning_as_opaqu
 
     let client = {
         let _env_lock = crate::test_support::lock_test_env();
-        let config = Config {
-            provider: Some("pinvou_responses".to_string()),
-            providers: Some(ProvidersConfig {
-                custom: [(
-                    "pinvou_responses".to_string(),
-                    ProviderConfig {
-                        kind: Some("openai-compatible".to_string()),
-                        wire: Some("responses".to_string()),
-                        base_url: Some(format!("{}/v1", server.uri())),
-                        api_key: Some("custom-responses-key".to_string()),
-                        model: Some("gpt-6-sol".to_string()),
-                        ..ProviderConfig::default()
-                    },
-                )]
-                .into_iter()
-                .collect(),
-                ..ProvidersConfig::default()
-            }),
-            ..Config::default()
-        };
+        let config = crate::test_support::custom_named_table_config(
+            "pinvou_responses",
+            Some("responses"),
+            &format!("{}/v1", server.uri()),
+            "custom-responses-key",
+            "gpt-6-sol",
+        );
         DeepSeekClient::new(&config).expect("Custom responses client should resolve")
         // `DeepSeekClient::new` reads the table's `wire` dialect
         // (`provider_wire_format_for_config`), so this ambient client speaks
@@ -1548,27 +1557,14 @@ async fn forkguard_custom_chat_stream_does_not_capture_encrypted_reasoning() {
 
     let client = {
         let _env_lock = crate::test_support::lock_test_env();
-        let config = Config {
-            provider: Some("pinvou_chat_table".to_string()),
-            providers: Some(ProvidersConfig {
-                custom: [(
-                    "pinvou_chat_table".to_string(),
-                    ProviderConfig {
-                        kind: Some("openai-compatible".to_string()),
-                        // No `wire`: the legacy table default is the Chat
-                        // transport.
-                        base_url: Some(format!("{}/v1", server.uri())),
-                        api_key: Some("custom-chat-key".to_string()),
-                        model: Some("vendor-model".to_string()),
-                        ..ProviderConfig::default()
-                    },
-                )]
-                .into_iter()
-                .collect(),
-                ..ProvidersConfig::default()
-            }),
-            ..Config::default()
-        };
+        // No `wire`: the legacy table default is the Chat transport.
+        let config = crate::test_support::custom_named_table_config(
+            "pinvou_chat_table",
+            None,
+            &format!("{}/v1", server.uri()),
+            "custom-chat-key",
+            "vendor-model",
+        );
         DeepSeekClient::new(&config).expect("Custom chat client should resolve")
     };
     assert_eq!(client.wire_format, WireFormat::ChatCompletions);
@@ -1621,26 +1617,13 @@ async fn forkguard_custom_responses_capture_tolerates_missing_or_empty_encrypted
 
     let client = {
         let _env_lock = crate::test_support::lock_test_env();
-        let config = Config {
-            provider: Some("pinvou_responses".to_string()),
-            providers: Some(ProvidersConfig {
-                custom: [(
-                    "pinvou_responses".to_string(),
-                    ProviderConfig {
-                        kind: Some("openai-compatible".to_string()),
-                        wire: Some("responses".to_string()),
-                        base_url: Some(format!("{}/v1", server.uri())),
-                        api_key: Some("custom-responses-key".to_string()),
-                        model: Some("gpt-6-sol".to_string()),
-                        ..ProviderConfig::default()
-                    },
-                )]
-                .into_iter()
-                .collect(),
-                ..ProvidersConfig::default()
-            }),
-            ..Config::default()
-        };
+        let config = crate::test_support::custom_named_table_config(
+            "pinvou_responses",
+            Some("responses"),
+            &format!("{}/v1", server.uri()),
+            "custom-responses-key",
+            "gpt-6-sol",
+        );
         DeepSeekClient::new(&config).expect("Custom responses client should resolve")
     };
     let mut stream = client
@@ -1678,7 +1661,9 @@ async fn forkguard_custom_responses_capture_tolerates_missing_or_empty_encrypted
 /// whatever endpoint table A later points at. A pre-fingerprint state (no
 /// endpoint field) carries no proof of origin, so on a Custom tag it fails
 /// closed too: it must not ride a table's wire even at the table's current
-/// URL, because the URL may not be the one that minted it.
+/// URL, because the URL may not be the one that minted it. (Built-in tags
+/// take the narrower official-endpoint rule, pinned by the two
+/// legacy-state tests further down.)
 #[test]
 fn forkguard_custom_responses_replays_only_exact_model_opaque_reasoning_state() {
     const SENTINEL: &str = "readable private reasoning must not be replayed";
@@ -1711,6 +1696,7 @@ fn forkguard_custom_responses_replays_only_exact_model_opaque_reasoning_state() 
         ApiProvider::Custom,
         MINTING_TABLE,
         MINTING_ENDPOINT_FP,
+        BODY_TEST_BASE_URL,
     );
     let exact_wire = exact.to_string();
     assert!(!exact_wire.contains(SENTINEL), "{exact}");
@@ -1730,6 +1716,7 @@ fn forkguard_custom_responses_replays_only_exact_model_opaque_reasoning_state() 
         ApiProvider::Custom,
         MINTING_TABLE,
         "fp-new-endpoint-after-base-url-edit",
+        BODY_TEST_BASE_URL,
     );
     assert!(
         !switched_endpoint.to_string().contains("enc_custom_payload"),
@@ -1746,9 +1733,10 @@ fn forkguard_custom_responses_replays_only_exact_model_opaque_reasoning_state() 
     // States minted before endpoint fingerprints existed carry none and fail
     // closed on Custom: with no proof of which endpoint minted the blob, a
     // stable table tag proves nothing about the URL behind it, so the blob
-    // must not ride the wire even at the table's current URL. The upgrade
-    // cost is one turn of reasoning continuity; fresh captures carry
-    // fingerprints and replay resumes from the next turn.
+    // must not ride the wire even at the table's current URL. The state
+    // stays in history and is dropped on every turn until compaction gives
+    // the session a clean slate; fresh captures carry fingerprints and
+    // replay resumes from the next captured turn.
     request.messages[0].content = vec![ContentBlock::Thinking {
         thinking: SENTINEL.to_string(),
         signature: None,
@@ -1766,6 +1754,7 @@ fn forkguard_custom_responses_replays_only_exact_model_opaque_reasoning_state() 
         ApiProvider::Custom,
         MINTING_TABLE,
         MINTING_ENDPOINT_FP,
+        BODY_TEST_BASE_URL,
     );
     let legacy_wire = legacy_state.to_string();
     assert!(!legacy_wire.contains(SENTINEL), "{legacy_state}");
@@ -1800,6 +1789,7 @@ fn forkguard_custom_responses_replays_only_exact_model_opaque_reasoning_state() 
         ApiProvider::Custom,
         "custom",
         MINTING_ENDPOINT_FP,
+        BODY_TEST_BASE_URL,
     );
     assert!(
         !legacy_root.to_string().contains("enc_legacy_root_payload"),
@@ -1825,6 +1815,7 @@ fn forkguard_custom_responses_replays_only_exact_model_opaque_reasoning_state() 
         ApiProvider::Custom,
         "custom/other_relay",
         MINTING_ENDPOINT_FP,
+        BODY_TEST_BASE_URL,
     );
     let switched_table_wire = switched_table.to_string();
     assert!(!switched_table_wire.contains(SENTINEL));
@@ -1860,6 +1851,7 @@ fn forkguard_custom_responses_replays_only_exact_model_opaque_reasoning_state() 
         ApiProvider::Custom,
         MINTING_TABLE,
         MINTING_ENDPOINT_FP,
+        BODY_TEST_BASE_URL,
     );
     let codex_state_wire = codex_state_on_custom.to_string();
     assert!(!codex_state_wire.contains(SENTINEL));
@@ -1874,6 +1866,7 @@ fn forkguard_custom_responses_replays_only_exact_model_opaque_reasoning_state() 
         ApiProvider::Custom,
         MINTING_TABLE,
         MINTING_ENDPOINT_FP,
+        BODY_TEST_BASE_URL,
     );
     assert!(!switched_model.to_string().contains(SENTINEL));
     assert!(
@@ -1885,12 +1878,11 @@ fn forkguard_custom_responses_replays_only_exact_model_opaque_reasoning_state() 
     );
 }
 
-/// The legacy migration is fail-closed only where the endpoint can move. A
-/// fingerprint-less state from a fixed-endpoint provider predates the
-/// endpoint field entirely, and that provider's URL cannot change under its
-/// stable tag, so the state provably came from the only endpoint the tag
-/// ever had — it keeps replaying so pre-upgrade sessions on built-in
-/// providers keep their reasoning continuity.
+/// The legacy migration is fail-closed wherever the endpoint can move. A
+/// fingerprint-less state from a built-in provider keeps replaying only on
+/// that provider's official endpoint — the one origin the gate vouches for
+/// without a fingerprint — so pre-upgrade sessions on the official route
+/// keep their reasoning continuity.
 #[test]
 fn forkguard_fixed_endpoint_legacy_state_without_fingerprint_keeps_replaying() {
     const SENTINEL: &str = "readable private reasoning must not be replayed";
@@ -1919,6 +1911,7 @@ fn forkguard_fixed_endpoint_legacy_state_without_fingerprint_keeps_replaying() {
         ApiProvider::OpenaiCodex,
         ApiProvider::OpenaiCodex.as_str(),
         ENDPOINT_FP,
+        OFFICIAL_CODEX_BASE_URL,
     );
     assert_eq!(
         body.pointer("/input/0/type"),
@@ -1928,6 +1921,54 @@ fn forkguard_fixed_endpoint_legacy_state_without_fingerprint_keeps_replaying() {
     assert_eq!(
         body.pointer("/input/0/encrypted_content"),
         Some(&json!("enc_legacy_codex_payload"))
+    );
+}
+
+/// The carve-out above must not extend to a re-pointed built-in: config and
+/// env can move a built-in provider's base URL while its tag stays put
+/// (`OPENAI_CODEX_BASE_URL`, a root/base_url override, a CLI flag), so a
+/// fingerprint-less state carries no proof it came from the new endpoint.
+/// The same tag that keeps replaying on the official route must fail closed
+/// the moment the client points elsewhere — same rule, same direction as the
+/// Custom fail-closed arm above.
+#[test]
+fn forkguard_repointed_builtin_legacy_state_without_fingerprint_fails_closed() {
+    const SENTINEL: &str = "readable private reasoning must not be replayed";
+    let mut request = minimal_responses_request();
+    request.messages.insert(
+        0,
+        Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::Thinking {
+                thinking: SENTINEL.to_string(),
+                signature: None,
+                state: Some(OpaqueReasoningState {
+                    provider: ApiProvider::OpenaiCodex.as_str().to_string(),
+                    api: "openai-responses".to_string(),
+                    model: request.model.clone(),
+                    id: Some("rs_legacy_codex".to_string()),
+                    encrypted_content: "enc_legacy_codex_payload".to_string(),
+                    endpoint: None,
+                }),
+            }],
+        },
+    );
+    let body = build_responses_body_for_provider(
+        &request,
+        ApiProvider::OpenaiCodex,
+        ApiProvider::OpenaiCodex.as_str(),
+        "fp-codex-endpoint",
+        "https://proxy.example.test/backend-api",
+    );
+    assert!(
+        !body.to_string().contains("enc_legacy_codex_payload"),
+        "a fingerprint-less built-in state must not replay onto a re-pointed endpoint: {body}"
+    );
+    assert!(
+        body.get("input")
+            .and_then(Value::as_array)
+            .is_some_and(|items| items.iter().all(|item| item["type"] != "reasoning")),
+        "{body}"
     );
 }
 
