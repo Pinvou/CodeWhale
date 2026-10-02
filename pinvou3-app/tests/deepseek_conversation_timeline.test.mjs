@@ -469,10 +469,10 @@ try {
   );
   assert.ok(chatView.includes('<ConversationTimeline'), 'DeepSeek must render through the shared timeline by default');
   assert.ok(chatView.includes('data-testid="chat-artifacts-entry"')
-    && chatView.includes('{activeSessionId && (')
-    && chatView.includes('const artifactsVisible = Boolean(activeSessionId && artifactsOpen)')
+    && chatView.includes('{activeSessionId && !remoteTranscriptActive && (')
+    && chatView.includes('const artifactsVisible = Boolean(activeSessionId && artifactsOpen && !remoteTranscriptActive)')
     && chatView.includes('if (!activeSessionId) setArtifactsOpen(false)'),
-  'the empty Work home must hide and close the artifacts entry until a session exists');
+  'the empty Work home and RemoteProxy must hide the local artifacts dock until a local session exists');
   assert.ok(chatView.includes('<ConversationActivityIndicator')
     && chatView.includes('turn={activeConversationTurn}')
     && conversationView.includes("if (!turn || turn.status !== 'running') return null"),
