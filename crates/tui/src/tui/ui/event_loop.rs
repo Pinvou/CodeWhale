@@ -582,71 +582,46 @@ pub async fn run_tui(
             };
 
         match load_result {
-            Ok(Some(saved)) => {
-                // Round-26 M26-2: the CLI resume MOVES the session onto the
-                // process workspace when they differ — validate the carried
-                // set before applying anything (a widening entry is refused
-                // honestly; a pure load in the session's own directory keeps
-                // the tolerant normalizer).
-                let roots_seed = match crate::tui::ui::session_state::seed_loaded_workspace_roots(
-                    &saved.metadata.workspace,
-                    &saved.metadata.workspace_roots,
-                    &app.workspace,
-                ) {
-                    Ok(roots) => Some(roots),
-                    Err(reason) => {
-                        app.status_message = Some(format!(
-                            "Failed to resume session {}: {reason}",
-                            crate::session_manager::truncate_id(&saved.metadata.id),
-                        ));
-                        None
-                    }
-                };
-                if let Some(roots_seed) = roots_seed {
-                    match manager.load_session_goal(&saved.metadata.id) {
-                        Ok(goal) => {
-                            match apply_loaded_session_with_goal(
-                                &mut app,
-                                config,
-                                &saved,
-                                goal.as_ref(),
+            Ok(Some(saved)) => match manager.load_session_goal(&saved.metadata.id) {
+                Ok(goal) => {
+                    match apply_loaded_session_with_goal(&mut app, config, &saved, goal.as_ref()) {
+                        Ok(()) => {
+                            // The engine below is built and synced from App
+                            // state: without this seed, a multi-root session
+                            // resumed from the CLI runs single-root for the
+                            // whole process lifetime. Seeded under the RECORD
+                            // primary (B27-1/B27-2): the restore re-homes the
+                            // app onto it, so this is a pure load and the
+                            // launch directory never enters the set.
+                            app.workspace_roots =
+                                crate::tui::ui::session_state::seed_loaded_workspace_roots(
+                                    &saved.metadata.workspace,
+                                    &saved.metadata.workspace_roots,
+                                );
+                            // Name the inherited set in the transcript: the
+                            // roots arrived from another host and no header
+                            // chrome reports them.
+                            if let Some(notice) = workspace_roots_notice(
+                                app.ui_locale,
+                                &app.workspace,
+                                &app.workspace_roots,
                             ) {
-                                Ok(()) => {
-                                    // The engine below is built and synced from App
-                                    // state: without this seed, a multi-root session
-                                    // resumed from the CLI runs single-root for the
-                                    // whole process lifetime. The seed was validated
-                                    // above (M26-2): pure load → tolerant normalize,
-                                    // moved primary → validated before any mutation.
-                                    app.workspace_roots = roots_seed;
-                                    // Name the inherited set in the transcript: the
-                                    // roots arrived from another host and no header
-                                    // chrome reports them.
-                                    if let Some(notice) = workspace_roots_notice(
-                                        app.ui_locale,
-                                        &app.workspace,
-                                        &app.workspace_roots,
-                                    ) {
-                                        app.add_message(HistoryCell::System { content: notice });
-                                    }
-                                    app.status_message = Some(format!(
-                                        "Resumed session: {}",
-                                        crate::session_manager::truncate_id(&saved.metadata.id)
-                                    ));
-                                }
-                                Err(err) => {
-                                    app.status_message =
-                                        Some(format!("Failed to restore session: {err}"));
-                                }
+                                app.add_message(HistoryCell::System { content: notice });
                             }
+                            app.status_message = Some(format!(
+                                "Resumed session: {}",
+                                crate::session_manager::truncate_id(&saved.metadata.id)
+                            ));
                         }
                         Err(err) => {
-                            app.status_message =
-                                Some(format!("Failed to restore session goal: {err}"));
+                            app.status_message = Some(format!("Failed to restore session: {err}"));
                         }
                     }
                 }
-            }
+                Err(err) => {
+                    app.status_message = Some(format!("Failed to restore session goal: {err}"));
+                }
+            },
             Ok(None) => {
                 app.status_message = Some("No sessions found to resume".to_string());
             }

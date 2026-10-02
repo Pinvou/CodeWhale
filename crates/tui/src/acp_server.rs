@@ -1611,7 +1611,21 @@ impl AcpServer {
                 "session {session_id} has an empty workspace"
             )));
         }
+        // A28-2: the persisted set is armed VERBATIM into the tool registry
+        // and the per-turn sandbox — a hand-edited or poisoned record
+        // carrying `/` (or any primary ancestor) gave the rehydrated
+        // session a fully-writable posture silently, where the REST resume
+        // lane answers 400 for the same row and the TUI lane tolerates with
+        // a disclosure. Validate here: a poisoned row is refused with the
+        // intake reason (the IDE can repair the record); a clean row passes
+        // byte-identically (same primary, no re-anchor).
         let workspace_roots = saved.metadata.workspace_roots.clone();
+        let workspace_roots = codewhale_core::validate_workspace_roots(&cwd, &workspace_roots)
+            .map_err(|reason| {
+                AcpError::invalid_params(format!(
+                    "session {session_id} root set no longer passes intake: {reason}"
+                ))
+            })?;
         let tool_registry = Arc::new(build_acp_tool_registry(
             &self.config,
             &cwd,
@@ -2830,6 +2844,64 @@ mod tests {
             .new_session(json!({"cwd": ""}))
             .expect_err("empty cwd must be rejected");
         assert_eq!(err.code, -32602);
+    }
+
+    fn session_load_rejects_a_poisoned_persisted_root_set_body() {
+        // A28-2: session/load armed the persisted set verbatim — a record
+        // carrying `/` gave the rehydrated IDE session a fully-writable
+        // posture where REST resume answers 400 for the same row. The load
+        // now runs the validating intake and refuses with the reason.
+        let _guard = crate::test_support::lock_test_env();
+        let home = tempfile::TempDir::new().expect("isolated codewhale home");
+        let _home_guard =
+            crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", home.path().as_os_str());
+        let workspace = home.path().join("ws");
+        std::fs::create_dir_all(&workspace).expect("workspace dir");
+        let mut saved = crate::session_manager::create_saved_session(
+            &[Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text {
+                    text: "poisoned".to_string(),
+                    cache_control: None,
+                }],
+            }],
+            "deepseek-v4-flash",
+            &workspace,
+            0,
+            None,
+        );
+        saved.metadata.workspace_roots = vec![workspace.clone(), std::path::PathBuf::from("/")];
+        let session_id = saved.metadata.id.clone();
+        let manager = crate::session_manager::SessionManager::new(
+            crate::session_manager::default_sessions_dir().expect("sessions dir"),
+        )
+        .expect("session manager");
+        manager.save_session(&saved).expect("seed poisoned record");
+
+        let mut server = AcpServer::new(
+            Config::default(),
+            "deepseek-v4-flash".to_string(),
+            workspace.clone(),
+        );
+        let err = server
+            .load_session(json!({"sessionId": session_id}))
+            .expect_err("a poisoned root set must be refused at load");
+        assert_eq!(err.code, -32602);
+        assert!(
+            err.message.contains("no longer passes intake"),
+            "the refusal carries the intake reason: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn session_load_rejects_a_poisoned_persisted_root_set() {
+        std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(session_load_rejects_a_poisoned_persisted_root_set_body)
+            .expect("spawn test thread")
+            .join()
+            .expect("test thread");
     }
 
     #[test]

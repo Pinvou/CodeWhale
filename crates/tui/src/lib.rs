@@ -8425,7 +8425,17 @@ fn fork_session(
     // constructed (empty) metadata persists, and the disk-authority
     // lifecycle merge keeps re-erasing any later correction - the same
     // sticky erasure the in-app `/fork` stamp prevents.
-    forked.metadata.workspace_roots = saved.metadata.workspace_roots.clone();
+    // M27-3: the CLI fork mints a session-row copy like every other fork
+    // face — the same validating intake applies, so an out-of-band poisoned
+    // source row cannot ride the fork to durable propagation past the
+    // source's own runtime resume rejection.
+    forked.metadata.workspace_roots = match codewhale_core::validate_workspace_roots(
+        &saved.metadata.workspace,
+        &saved.metadata.workspace_roots,
+    ) {
+        Ok(roots) => roots,
+        Err(reason) => bail!("source session root set no longer passes intake: {reason}"),
+    };
     manager.save_session(&forked)?;
 
     let source_title = saved.metadata.title.trim();

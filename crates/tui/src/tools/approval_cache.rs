@@ -37,7 +37,6 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use crate::command_safety::classify_command;
-use crate::tools::apply_patch::{NormalizedApplyPatchInput, normalize_apply_patch_input};
 
 /// The fingerprint of a tool call — stable enough to match repeated
 /// calls but specific enough to avoid privilege confusion.
@@ -84,6 +83,15 @@ pub fn build_approval_grouping_key(tool_name: &str, input: &serde_json::Value) -
     let tool_name = crate::tools::canonical_action::canonical_action_alias(tool_name, input);
     let fingerprint = match tool_name {
         "apply_patch" => {
+            // B27-3 + A28-3: key on the REAL parser's plan —
+            // `preflight_apply_patch`, the same alias-folded judgment every
+            // plan-time gate uses. The round-26 ad-hoc scan (a) keyed the
+            // top-level override for replace-forms where execution never
+            // reads it (an approved patch grant then auto-approved an
+            // arbitrary replace-write under the same decoy override), and
+            // (b) collected only `+++ b/` headers, keying `+++ a/`-spelled,
+            // bare, timestamped, and /dev/null-delete sections into one
+            // shared `no_files` family that covers arbitrary targets.
             let paths_hash = hash_patch_paths(input);
             format!("patch:{paths_hash}")
         }
@@ -153,64 +161,44 @@ fn shell_cwd_operand(input: &serde_json::Value) -> Option<&str> {
         .filter(|cwd| !cwd.is_empty())
 }
 
-/// Hash the sorted set of file paths referenced by a patch input.
+/// Hash the write targets of a patch input, taken from the REAL parser's
+/// plan (`preflight_apply_patch`): the top-level override keys ONLY in the
+/// patch form (execution's PathOverride-wins semantics; replace-form top
+/// levels are decoys), otherwise the touched file set keys as parsed —
+/// every accepted `+++` spelling (`a/`/`b/` prefixes, bare, tab timestamps)
+/// normalizes to the execution target, and deletions key under a separate
+/// delete marker so a delete grant never covers writes (B27-3/A28-3).
 fn hash_patch_paths(input: &serde_json::Value) -> String {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
 
-    // Round-26 M26-3: fold the alias spellings and honor the top-level
-    // `path` override EXACTLY like execution does (a PathOverride wins and
-    // the payload headers become decoys) — the grouping key must cover the
-    // file the write actually lands on. The key used to hash only the
-    // headers, so the same patch body under two different `filePath`
-    // overrides shared one grant key and a session-approved family
-    // auto-approved a redirect to an arbitrary target (the B20-2 shell
-    // class, on the patch arm).
     let mut folded = input.clone();
     if super::file::apply_param_aliases(&mut folded, super::file::PATH_ALIASES, "apply_patch")
         .is_err()
     {
-        // Alias conflict: execution fails the call too; fall through and
-        // key on the raw header set rather than under-keying.
+        // Alias conflict: execution fails the call too; a distinct family
+        // keeps the key from silently matching a folded spelling.
+        return "alias_conflict".to_string();
     }
-    if let Some(override_path) = folded.get("path").and_then(Value::as_str) {
-        let mut hasher = DefaultHasher::new();
-        override_path.hash(&mut hasher);
-        return format!("override:{:x}", hasher.finish());
-    }
-
-    let mut paths: Vec<&str> = Vec::new();
-
-    match normalize_apply_patch_input(&folded) {
-        Ok(NormalizedApplyPatchInput::Replacement { entries, .. }) => {
-            for change in entries {
-                if let Some(path) = change.get("path").and_then(|v| v.as_str()) {
-                    paths.push(path);
+    match super::apply_patch::preflight_apply_patch(&folded) {
+        Ok(plan) => {
+            let mut hasher = DefaultHasher::new();
+            if let Some(override_path) = plan.path_override.as_deref() {
+                "override".hash(&mut hasher);
+                override_path.hash(&mut hasher);
+            } else {
+                for path in &plan.touched_files {
+                    path.hash(&mut hasher);
+                }
+                for path in &plan.deletes {
+                    "delete".hash(&mut hasher);
+                    path.hash(&mut hasher);
                 }
             }
+            format!("{:x}", hasher.finish())
         }
-        Ok(NormalizedApplyPatchInput::Patch(patch_text)) => {
-            for line in patch_text.lines() {
-                if let Some(rest) = line.strip_prefix("+++ b/") {
-                    paths.push(rest.trim());
-                }
-            }
-        }
-        Err(_) => {}
+        Err(_) => "unparseable".to_string(),
     }
-
-    paths.sort();
-    paths.dedup();
-
-    if paths.is_empty() {
-        return "no_files".to_string();
-    }
-
-    let mut hasher = DefaultHasher::new();
-    for path in &paths {
-        path.hash(&mut hasher);
-    }
-    format!("{:x}", hasher.finish())
 }
 
 /// Parse the host portion from a URL input.
@@ -433,6 +421,72 @@ mod tests {
         assert_eq!(
             canonical, alias_spellings,
             "alias spellings of the same override collapse to one family"
+        );
+
+        // B27-3: in the REPLACE form the top-level path is a decoy execution
+        // never reads — the key must follow the entries, so an approved
+        // patch-form override grant cannot cover a replace-write hiding
+        // behind the same decoy.
+        let replace_decoy = build_approval_grouping_key(
+            "apply_patch",
+            &json!({"path": ".git/hooks/pre-commit", "replace": [{"path": "notes.txt", "content": "x"}]}),
+        );
+        let replace_plain = build_approval_grouping_key(
+            "apply_patch",
+            &json!({"replace": [{"path": "notes.txt", "content": "x"}]}),
+        );
+        assert_eq!(
+            replace_decoy, replace_plain,
+            "a replace-form top-level path is a decoy and must not key the family"
+        );
+        assert_ne!(
+            replace_plain,
+            build_approval_grouping_key(
+                "apply_patch",
+                &json!({"replace": [{"path": "other.txt", "content": "x"}]}),
+            ),
+            "different replace targets are different families"
+        );
+
+        // A28-3: header spellings the old ad-hoc scan missed (`+++ a/`, bare
+        // `+++ x`) key to the REAL target, and a single-file grant must not
+        // cover a two-file patch whose second section rides such a spelling.
+        // `+++ a/x`-spelled and `+++ b/x`-spelled writes of the same target
+        // are ONE family (the parser normalizes both to x) — the old ad-hoc
+        // `+++ b/`-only scan keyed the a-spelling into the shared `no_files`
+        // family, whose grant then covered arbitrary targets (A28-3).
+        let b_spelled = build_approval_grouping_key(
+            "apply_patch",
+            &json!({"patch": "--- a/.env\n+++ b/.env\n@@ -1,1 +1,1 @@\n-old\n+new\n"}),
+        );
+        let a_spelled = build_approval_grouping_key(
+            "apply_patch",
+            &json!({"patch": "--- b/.env\n+++ a/.env\n@@ -1,1 +1,1 @@\n-old\n+new\n"}),
+        );
+        assert_eq!(
+            b_spelled, a_spelled,
+            "header-prefix spellings of the same target collapse to one family"
+        );
+        assert_ne!(
+            b_spelled,
+            build_approval_grouping_key(
+                "apply_patch",
+                &json!({"patch": "--- a/other.txt\n+++ b/other.txt\n@@ -1,1 +1,1 @@\n-old\n+new\n"}),
+            ),
+            "different targets stay different families"
+        );
+        // Deletions key under a delete marker: a delete grant covers no write.
+        let deletion = build_approval_grouping_key(
+            "apply_patch",
+            &json!({"patch": "--- a/old.txt\n+++ /dev/null\n@@ -1 +0,0 @@\n-gone\n"}),
+        );
+        let write_same_path = build_approval_grouping_key(
+            "apply_patch",
+            &json!({"patch": "--- a/old.txt\n+++ b/old.txt\n@@ -1,1 +1,1 @@\n-old\n+new\n"}),
+        );
+        assert_ne!(
+            deletion, write_same_path,
+            "a deletion keys apart from a write of the same path"
         );
     }
 

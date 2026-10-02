@@ -117,16 +117,13 @@ fn import_container(
     // root set is re-pointed with it. Leaving the previous session's set in
     // place would let the next autosave stamp it onto the imported record —
     // durable roots bleed across sessions that never shared a directory.
-    // Round-26 M26-2 comment fix: `import_foreign` mints the record under
-    // the CURRENT workspace with an EMPTY root set, so this seed is the
-    // single-root shape by construction — the validating helper is used for
-    // uniformity with the other load faces (an empty set always passes).
+    // B27-1/B27-2: seeded under the record's own primary — `import_foreign`
+    // mints the record under the CURRENT workspace with an EMPTY root set,
+    // so this is the single-root pure-load shape by construction.
     app.workspace_roots = crate::tui::ui::seed_loaded_workspace_roots(
         &imported.metadata.workspace,
         &imported.metadata.workspace_roots,
-        &imported.metadata.workspace,
-    )
-    .unwrap_or_default();
+    );
     app.view_stack.push(SessionPickerView::new_selecting(
         &app.workspace,
         app.ui_locale,

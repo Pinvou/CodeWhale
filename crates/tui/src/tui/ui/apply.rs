@@ -1188,23 +1188,6 @@ pub(crate) async fn apply_command_result(
                         return Ok(false);
                     }
                 };
-                // Round-26 M26-2: a moved primary validates the carried set
-                // BEFORE any app mutation — the load refuses honestly instead
-                // of materializing a widening entry the intakes refuse.
-                let roots_seed = match crate::tui::ui::session_state::seed_loaded_workspace_roots(
-                    &session.metadata.workspace,
-                    &session.metadata.workspace_roots,
-                    &app.workspace,
-                ) {
-                    Ok(roots) => roots,
-                    Err(reason) => {
-                        app.status_message = Some(format!(
-                            "Failed to load session {}: {reason}",
-                            path.display()
-                        ));
-                        return Ok(false);
-                    }
-                };
                 let fresh_config =
                     match Config::load(app.config_path.clone(), app.config_profile.as_deref()) {
                         Ok(config) => config,
@@ -1232,11 +1215,14 @@ pub(crate) async fn apply_command_result(
                 // (no multi-root UI): seed the app state only after every
                 // fallible restore step has succeeded, so a failed load
                 // cannot leave the *current* session's engine inheriting a
-                // foreign root set through the next routine re-sync. The
-                // seed was validated against the load primary above (M26-2):
-                // a pure load normalizes tolerantly, a moved primary refused
-                // before any mutation.
-                app.workspace_roots = roots_seed;
+                // foreign root set through the next routine re-sync. Seeded
+                // under the RECORD primary (B27-1/B27-2): the restore has
+                // already re-homed the app there, so this is a pure load and
+                // the launch directory never enters the set.
+                app.workspace_roots = crate::tui::ui::session_state::seed_loaded_workspace_roots(
+                    &session.metadata.workspace,
+                    &session.metadata.workspace_roots,
+                );
                 sync_runtime_workspace_state(task_manager, app.workspace.clone()).await;
                 if respawn {
                     let _ = engine_handle.send(Op::Shutdown).await;

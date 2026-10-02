@@ -12146,6 +12146,43 @@ async fn both_fork_faces_reject_a_poisoned_source_root_set() -> Result<()> {
 }
 
 #[tokio::test]
+async fn both_fork_faces_clear_the_source_session_handle() -> Result<()> {
+    // M27-2: ensure_engine_loaded prefers thread.session_id and would
+    // replay the FULL source session file into the fork's model context —
+    // for the backtrack faces that includes exactly the turns the fork
+    // dropped. Both runtime fork faces clear the handle (and task_id, the
+    // sibling owner identity).
+    let manager = test_manager(test_runtime_dir())?;
+    let workspace = std::env::temp_dir().join("codewhale-runtime-fork-handle");
+    let thread = manager
+        .create_thread(CreateThreadRequest {
+            workspace: Some(workspace.clone()),
+            ..Default::default()
+        })
+        .await?;
+    manager
+        .set_thread_session_id(&thread.id, "source-session-handle")
+        .await
+        .expect("seed source session handle");
+    seed_turns_with_user_messages(&manager, &thread.id, &["first", "second"])?;
+
+    let bare = manager.fork_thread(&thread.id).await?;
+    assert_eq!(
+        bare.session_id, None,
+        "fork_thread must not inherit the source session handle"
+    );
+    assert_eq!(bare.task_id, None);
+
+    let (backtracked, _) = manager.fork_at_user_message(&thread.id, 0).await?;
+    assert_eq!(
+        backtracked.session_id, None,
+        "the backtrack fork must not replay the dropped tail through the inherited handle"
+    );
+    assert_eq!(backtracked.task_id, None);
+    Ok(())
+}
+
+#[tokio::test]
 async fn fork_at_user_message_drops_tail_and_returns_user_text() -> Result<()> {
     // Seed three completed user/assistant turns. Backtracking with
     // depth=0 should drop only the most recent turn ("third") and

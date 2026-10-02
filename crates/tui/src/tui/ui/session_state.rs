@@ -613,34 +613,27 @@ pub(crate) async fn sync_runtime_workspace_state(
     task_manager.set_default_workspace(workspace).await;
 }
 
-/// Round-26 M26-2: the load/resume faces' root-set seed. The core resume
-/// lane's own rule, applied to the TUI faces that used to seed the
-/// tolerant normalizer even when the session MOVED onto a different
-/// primary — a carried entry that would widen past the new primary (an
-/// ancestor, a super-root) was kept alive in the materialized sandbox for
-/// the process lifetime and durably re-minted by the next autosave, the
-/// exact shape `/cd`, `/fork`, runtime PATCH and every intake refuse. A
-/// PURE load (primary unchanged) keeps the tolerant normalizer so legacy
-/// and hand-edited rows stay loadable; a MOVE validates and refuses
-/// honestly.
+/// The load/resume faces' root-set seed (round-26 M26-2, corrected by
+/// round-27 B27-1/B27-2). The TUI restore path RE-HOMES the app onto the
+/// record's own primary (`apply_workspace_runtime_state` runs inside
+/// `apply_loaded_session_*`), so by the time the engine consumes the set
+/// this is a PURE LOAD in the core lane's terms — the tolerant normalizer
+/// under the RECORD primary is the correct semantics, legacy and
+/// hand-edited rows stay loadable, and the LAUNCH directory never enters
+/// the set. The round-26 "moved primary validates" shape seeded against
+/// the pre-restore `app.workspace` instead: the launch directory became an
+/// undeclared writable root (B27-1, persisted by the next autosave) and
+/// primary-led rows loaded from a subdirectory were falsely rejected by
+/// the ancestor rule because the record primary was not stripped first
+/// (B27-2 — core's real move arm, `/cd` and `/fork` all strip it). A
+/// genuine primary MOVE keeps using the core lane's own validating path
+/// (`resolve_resume_roots`), which strips the old primary before
+/// validating; no TUI face moves the primary.
 pub(crate) fn seed_loaded_workspace_roots(
     record_primary: &std::path::Path,
     persisted_roots: &[std::path::PathBuf],
-    target_primary: &std::path::Path,
-) -> std::result::Result<Vec<std::path::PathBuf>, String> {
-    if record_primary == target_primary {
-        return Ok(codewhale_core::normalize_workspace_roots(
-            target_primary,
-            persisted_roots,
-        ));
-    }
-    codewhale_core::validate_workspace_roots(target_primary, persisted_roots).map_err(|reason| {
-        format!(
-            "the session's recorded root set would widen past {} ({reason}); \
-             load it in its own directory, or clear the widening roots from the saved record",
-            target_primary.display()
-        )
-    })
+) -> Vec<std::path::PathBuf> {
+    codewhale_core::normalize_workspace_roots(record_primary, persisted_roots)
 }
 
 /// One-line human disclosure for a session that carries accessible roots
@@ -1790,52 +1783,42 @@ mod seed_loaded_workspace_roots_tests {
     use super::seed_loaded_workspace_roots;
 
     #[test]
-    fn validates_moves_and_tolerates_pure_loads() {
-        // Round-26 M26-2: the four TUI load/resume faces used to seed the
-        // tolerant normalizer even when the session MOVED onto a different
-        // primary, keeping a carried ancestor/super-root alive in the live
-        // sandbox — the shape /cd, /fork, runtime PATCH and every intake
-        // refuse. A move now validates (the refusal names the widening
-        // entry); a pure load in the session's own directory keeps the
-        // tolerant normalizer so legacy rows stay loadable.
+    fn seeds_under_the_record_primary_and_never_the_launch_directory() {
+        // Round-27 B27-1 regression pin: the round-26 shape seeded against
+        // the PRE-restore app.workspace, so a record loaded from a different
+        // directory ended up with the LAUNCH directory materialized as an
+        // undeclared writable root (persisted by the next autosave). The
+        // restore re-homes the app onto the record primary, so the seed
+        // anchors there — the launch directory can never enter the set.
         let record_primary = std::path::PathBuf::from("/work/project");
+        let launch_dir = std::path::PathBuf::from("/home/alice/elsewhere");
         let carried = vec![
             std::path::PathBuf::from("/work/project"),
             std::path::PathBuf::from("/home/alice"),
         ];
-
-        // Pure load: tolerated (the set normalizes under the record primary).
-        let seeded = seed_loaded_workspace_roots(&record_primary, &carried, &record_primary)
-            .expect("a pure load keeps the tolerant normalizer");
+        let seeded = seed_loaded_workspace_roots(&record_primary, &carried);
         assert_eq!(seeded, carried);
-
-        // Move: the ancestor entry is refused with the intake reason.
-        let moved_primary = std::path::PathBuf::from("/home/alice/elsewhere");
-        let err = seed_loaded_workspace_roots(&record_primary, &carried, &moved_primary)
-            .expect_err("a move must refuse a carried ancestor of the new primary");
         assert!(
-            err.contains("widen") && err.contains("ancestor"),
-            "the refusal names the widening entry: {err}"
+            !seeded.contains(&launch_dir),
+            "the launch directory must never be seeded as a root: {seeded:?}"
         );
-
-        // Move onto a primary the carried set does not widen past stays fine.
-        let ok = seed_loaded_workspace_roots(
+        // The launch directory being an ANCESTOR of nothing relevant is not
+        // consulted at all — no move arm exists on the TUI faces (B27-2:
+        // primary-led rows load from any directory without false refusal).
+        let primary_led = seed_loaded_workspace_roots(
             &record_primary,
             &[
                 std::path::PathBuf::from("/work/project"),
                 std::path::PathBuf::from("/srv/data"),
             ],
-            &moved_primary,
-        )
-        .expect("a carried sibling root survives a move");
+        );
         assert_eq!(
-            ok,
+            primary_led,
             vec![
-                moved_primary.clone(),
                 std::path::PathBuf::from("/work/project"),
                 std::path::PathBuf::from("/srv/data"),
             ],
-            "the move seeds the new primary plus the carried set unchanged"
+            "a primary-led row is a pure load from any directory (B27-2)"
         );
     }
 }
