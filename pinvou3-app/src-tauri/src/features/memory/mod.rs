@@ -53,6 +53,12 @@ pub use self::io::{
     upsert_recent_work,
 };
 
+// ---- Stored text length cap (io) ----
+// The CLI's `memory add` validation must use the same cap constant as the
+// write side; a local copy would reintroduce a spurious
+// `memory_add_not_materialized` failure whenever the cap changes.
+pub use self::io::WORK_CONTEXT_TEXT_MAX_CHARS;
+
 // ---- LLM 后台复盘（llm_review）----
 pub use self::llm_review::review_turn_candidates_with_llm;
 
