@@ -30,6 +30,10 @@ const CLAIM_CAPABILITIES: &[&str] = &[
     "role_liveness_v1",
     "resume_v1",
     "task_v1",
+    "temporary_model_package_v1",
+    "permission_v1",
+    "attachment_v1",
+    "artifact_v1",
     "snapshot_journal_v1",
 ];
 
@@ -172,6 +176,7 @@ pub(crate) struct ControllingHandshake {
     transcript_hash: Option<[u8; 32]>,
     negotiated_capabilities: Vec<String>,
     pairing_id: String,
+    peer_endpoint_id: String,
     reservation_id: String,
     relay_epoch: String,
     generation: String,
@@ -202,6 +207,7 @@ impl ControllingHandshake {
             transcript_hash: None,
             negotiated_capabilities: Vec::new(),
             pairing_id: String::new(),
+            peer_endpoint_id: String::new(),
             reservation_id: String::new(),
             relay_epoch: String::new(),
             generation: String::new(),
@@ -281,6 +287,7 @@ impl ControllingHandshake {
         self.transcript_hash = Some(transcript_hash);
         self.negotiated_capabilities = context.negotiated_capabilities().to_vec();
         self.pairing_id = context.pairing_id().to_owned();
+        self.peer_endpoint_id = context.peer_endpoint_id().to_owned();
         self.reservation_id = context.reservation_id().to_owned();
         self.relay_epoch = context.relay_epoch().to_owned();
         self.generation = context.remote_control_generation().to_owned();
@@ -363,10 +370,6 @@ impl ControllingHandshake {
         if self.peer_commitment.as_deref() != Some(hex_lower(&commitment).as_str()) {
             return Err(HandshakeError::new("controller_commitment_mismatch"));
         }
-        let receipt = self
-            .receipt
-            .as_ref()
-            .ok_or_else(|| HandshakeError::new("controller_handshake_stage_invalid"))?;
         let ack = self.envelope(
             "finished_receipt_ack",
             json!({
@@ -374,7 +377,10 @@ impl ControllingHandshake {
                 // sender_role = 产出被回执 Finished 的一侧。
                 "sender_role": "B",
                 "receiver_role": "A",
-                "receipt_secret_b64": receipt.to_base64(),
+                // Relay 的收据校验契约（`controller-lease.js` 的 `acceptReceipt`）：
+                // 帧里带的必须是 `sender_role`（B）的 receipt secret —— 也就是本端
+                // 刚从对端 Finished 里解开的 `peer_receipt`，而不是本端自己的 receipt。
+                "receipt_secret_b64": peer_receipt.to_base64(),
             }),
         )?;
         self.stage = HandshakeStage::FinishedSent;
@@ -401,6 +407,15 @@ impl ControllingHandshake {
     /// 验签 transcript 里 B 拥有的 generation（绑定 transport 用）。
     pub(crate) fn remote_control_generation(&self) -> &str {
         &self.generation
+    }
+
+    /// B 的 endpoint 身份来自 Relay 签名 transcript，不接受 UI 声明。
+    pub(crate) fn peer_endpoint_id(&self) -> &str {
+        &self.peer_endpoint_id
+    }
+
+    pub(crate) fn reservation_id(&self) -> &str {
+        &self.reservation_id
     }
 
     /// Relay 在 transcript 中协商出的能力集合（安装租约的准入上下文）。

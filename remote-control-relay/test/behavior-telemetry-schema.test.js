@@ -38,13 +38,74 @@ function taskFinished(overrides = {}) {
   };
 }
 
+function remoteControlEvent(overrides = {}) {
+  const event = taskFinished({
+    event_name: "remote_control_event",
+    remote_stage: "task_terminal",
+    remote_outcome: "ok",
+    remote_reason: "none",
+    remote_latency_bucket: "lt_5s",
+    remote_model_source: "controlled",
+    remote_size_bucket: "1_10mib",
+  });
+  for (const field of [
+    "session_id", "attempt_id", "turn_id", "mode", "initiator_type", "input_type",
+    "has_attachment", "status", "duration_ms",
+  ]) delete event[field];
+  return Object.assign(event, overrides);
+}
+
 test("v1 schema freezes every P0/P1 event and excludes deferred P2 events", () => {
   assert.equal(BEHAVIOR_TELEMETRY_SCHEMA.$schema, "https://json-schema.org/draft/2020-12/schema");
   assert.equal(BEHAVIOR_EVENT_NAMES.size, Object.keys(BEHAVIOR_EVENT_CONTRACTS).length);
   assert(BEHAVIOR_EVENT_NAMES.has("task_submitted"));
   assert(BEHAVIOR_EVENT_NAMES.has("response_copied"));
+  assert(BEHAVIOR_EVENT_NAMES.has("remote_control_event"));
   assert(!BEHAVIOR_EVENT_NAMES.has("payment_succeeded"));
   assert(!BEHAVIOR_EVENT_NAMES.has("experiment_exposed"));
+});
+
+test("remote-control events accept only their fixed low-cardinality contract", () => {
+  assert.deepEqual(validateBehaviorEventShape(remoteControlEvent(), { now: NOW }), { ok: true });
+  assert.deepEqual(validateBehaviorEventShape(remoteControlEvent({
+    remote_stage: "permission",
+    remote_permission_step: "request",
+  }), { now: NOW }), { ok: true });
+  for (const [field, value] of [
+    ["remote_stage", "private-stage"],
+    ["remote_outcome", "maybe"],
+    ["remote_reason", "private-reason"],
+    ["remote_latency_bucket", "123ms"],
+    ["remote_model_source", "private-model-id"],
+    ["remote_size_bucket", "1234567"],
+    ["remote_permission_step", "maybe"],
+    ["session_id", "private-session"],
+    ["endpoint", "https://private.example"],
+    ["prompt", "private prompt"],
+    ["path", "C:\\private\\secret.txt"],
+  ]) {
+    assert.deepEqual(validateBehaviorEventShape(remoteControlEvent({ [field]: value }), { now: NOW }), {
+      ok: false, reason: "invalid_field", field,
+    });
+  }
+  const missing = remoteControlEvent();
+  delete missing.remote_reason;
+  assert.deepEqual(validateBehaviorEventShape(missing, { now: NOW }), {
+    ok: false, reason: "invalid_field", field: "remote_reason",
+  });
+  assert.deepEqual(validateBehaviorEventShape(taskFinished({ remote_stage: "task_submit" }), { now: NOW }), {
+    ok: false, reason: "invalid_field", field: "remote_stage",
+  });
+  assert.deepEqual(validateBehaviorEventShape(remoteControlEvent({
+    remote_stage: "permission",
+  }), { now: NOW }), {
+    ok: false, reason: "invalid_field", field: "remote_permission_step",
+  });
+  assert.deepEqual(validateBehaviorEventShape(remoteControlEvent({
+    remote_permission_step: "allowed",
+  }), { now: NOW }), {
+    ok: false, reason: "invalid_field", field: "remote_permission_step",
+  });
 });
 
 test("validates required fields, controlled enums and server-owned fields", () => {

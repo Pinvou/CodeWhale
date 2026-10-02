@@ -208,7 +208,11 @@ impl ControlledHandshake {
             json!({
                 "sender_role": "A",
                 "receiver_role": "B",
-                "receipt_secret_b64": self.receipt.to_base64(),
+                // Relay 的收据校验契约（`controller-lease.js` 的 `acceptReceipt`）：
+                // 帧里带的必须是 `sender_role` 那一方（即刚收到 Finished 的对端）
+                // 的 receipt secret，Relay 用它去核对对端先前的 commitment。
+                // 这里必须回传刚解开的 `peer_receipt`，不是本端自己的 receipt。
+                "receipt_secret_b64": peer_receipt.to_base64(),
             }),
         )?;
         self.stage = ControlledHandshakeStage::Acked;

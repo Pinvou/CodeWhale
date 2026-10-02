@@ -6,19 +6,26 @@
 //! over from `controller_pairing_reserved`, runs the commitment/Finished
 //! exchange and applies `controller_joined` to the device owner.
 
+use std::collections::HashMap;
 use std::sync::OnceLock;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use base64::Engine as _;
+use parking_lot::Mutex;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Emitter, Manager as _};
 use tokio::sync::oneshot;
 
+use crate::features::behavior_telemetry::{
+    RemoteControlEvent, RemoteOutcome, RemoteReason, RemoteStage, track_remote_control,
+};
+use crate::features::remote_control::controller::ports::RemotePortError;
 use crate::features::remote_control::manager::RemoteControlManager;
 
 use super::controlled::{
     ControlledDeviceManager, ControlledLease, ControlledOperation, ControlledRegistration,
-    ControlledStatus,
+    ControlledResumeStep, ControlledStatus, ControlledStatusKind,
 };
 use super::controlled_handshake::ControlledHandshake;
 use super::controlling_handshake::JoinedLease;
@@ -30,11 +37,698 @@ use super::crypto::{
 use super::encrypted_lane::ControlledLaneState;
 use super::protocol::LeaseContext;
 use super::protocol::{
-    RegistrationValidationContext, SenderRole, validate_controller_message_json,
-    validate_controller_registration_message_json,
+    ROLE_B, RegistrationValidationContext, SenderRole, is_self_echoed_handshake_frame,
+    validate_controller_message_json, validate_controller_registration_message_json,
+};
+use super::resume::{
+    build_controller_post_activation_liveness, build_controller_resume_activation_ack,
+    build_controller_resume_prepare, build_controller_resume_ready_ack, new_resume_challenge,
+    resume_frame_matches_lease,
 };
 
 const REGISTRATION_TIMEOUT_MS: u64 = 30_000;
+const MAX_PAIRING_CODE_TTL_MS: u64 = 5 * 60_000;
+const REMOTE_ACTION_CACHE_CAPACITY: usize = 256;
+const REMOTE_ACTION_CACHE_TTL: Duration = Duration::from_secs(10 * 60);
+
+#[derive(Clone)]
+struct CachedRemoteActionResult {
+    fingerprint: [u8; 32],
+    response: Value,
+    touched_at: Instant,
+}
+
+#[derive(Default)]
+struct RemoteActionResultCache {
+    entries: Mutex<HashMap<String, CachedRemoteActionResult>>,
+}
+
+enum RemoteActionCacheLookup {
+    Miss,
+    Hit(Value),
+    Conflict,
+}
+
+impl RemoteActionResultCache {
+    fn lookup(&self, request_id: &str, fingerprint: [u8; 32]) -> RemoteActionCacheLookup {
+        let mut entries = self.entries.lock();
+        let now = Instant::now();
+        entries.retain(|_, entry| {
+            now.saturating_duration_since(entry.touched_at) <= REMOTE_ACTION_CACHE_TTL
+        });
+        match entries.get_mut(request_id) {
+            Some(entry) if entry.fingerprint == fingerprint => {
+                entry.touched_at = now;
+                RemoteActionCacheLookup::Hit(entry.response.clone())
+            }
+            Some(_) => RemoteActionCacheLookup::Conflict,
+            None => RemoteActionCacheLookup::Miss,
+        }
+    }
+
+    fn insert(&self, request_id: String, fingerprint: [u8; 32], response: Value) {
+        let mut entries = self.entries.lock();
+        let now = Instant::now();
+        entries.retain(|_, entry| {
+            now.saturating_duration_since(entry.touched_at) <= REMOTE_ACTION_CACHE_TTL
+        });
+        if entries.len() >= REMOTE_ACTION_CACHE_CAPACITY {
+            if let Some(oldest) = entries
+                .iter()
+                .min_by_key(|(_, entry)| entry.touched_at)
+                .map(|(request_id, _)| request_id.clone())
+            {
+                entries.remove(&oldest);
+            }
+        }
+        entries.insert(
+            request_id,
+            CachedRemoteActionResult {
+                fingerprint,
+                response,
+                touched_at: now,
+            },
+        );
+    }
+}
+
+fn remote_action_fingerprint(
+    lease: &LeaseContext,
+    session_ref: &str,
+    request_id: &str,
+    operation: &str,
+    body: &Value,
+) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    let body_bytes = serde_json::to_vec(body).expect("validated remote action body serializes");
+    for field in [
+        lease.connection_id.as_bytes(),
+        lease.controller_lease_id.as_bytes(),
+        lease.lease_epoch.as_bytes(),
+        lease.relay_epoch.as_bytes(),
+        lease.remote_control_generation.as_bytes(),
+        session_ref.as_bytes(),
+        request_id.as_bytes(),
+        operation.as_bytes(),
+        body_bytes.as_slice(),
+    ] {
+        hasher.update((field.len() as u64).to_be_bytes());
+        hasher.update(field);
+    }
+    hasher.finalize().into()
+}
+
+// Relay signs a wall-clock expiry, whereas the B lifecycle owner and UI
+// countdown use one local monotonic clock. Convert once at receipt; never
+// expose either absolute clock origin to the WebView.
+fn pairing_deadline_b(wire_expiry_ms: u64, wall_now_ms: u64, now_b: u64) -> Result<u64, String> {
+    let remaining = wire_expiry_ms
+        .checked_sub(wall_now_ms)
+        .filter(|remaining| *remaining > 0)
+        .ok_or_else(|| "pairing_code_expired".to_owned())?
+        .min(MAX_PAIRING_CODE_TTL_MS);
+    now_b
+        .checked_add(remaining)
+        .ok_or_else(|| "pairing_registration_invalid".to_owned())
+}
+
+fn wall_clock_millis() -> Result<u64, String> {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|elapsed| u64::try_from(elapsed.as_millis()).ok())
+        .ok_or_else(|| "pairing_clock_invalid".to_owned())
+}
+
+// Keep the transport's existing host projection at one narrow callsite.
+// The controlled state owner constructs each status before it is published.
+fn emit_controlled_status(app: &AppHandle, status: &ControlledStatus) {
+    track_controlled_status_transition(app, status);
+    let _ = app.emit(CONTROLLED_STATUS_EVENT, status);
+}
+
+/// Both worker and command projections pass through this transition gate.
+/// It retains only the fixed phase enum in memory; no generation or code is
+/// used for correlation or written to behavior telemetry.
+pub(crate) fn track_controlled_status_transition(app: &AppHandle, status: &ControlledStatus) {
+    static LAST: OnceLock<Mutex<Option<ControlledStatusKind>>> = OnceLock::new();
+    let mut last = LAST.get_or_init(|| Mutex::new(None)).lock();
+    let current = status.kind();
+    let previous = last.replace(current);
+    if previous == Some(current) {
+        return;
+    }
+    let event = match (previous, current) {
+        (Some(ControlledStatusKind::WaitingForPairing), ControlledStatusKind::PairingReserved) => {
+            Some(RemoteControlEvent::new(
+                RemoteStage::Claim,
+                RemoteOutcome::Ok,
+            ))
+        }
+        (Some(ControlledStatusKind::HandshakePending), ControlledStatusKind::Connected) => Some(
+            RemoteControlEvent::new(RemoteStage::Handshake, RemoteOutcome::Ok),
+        ),
+        (Some(ControlledStatusKind::Connected), ControlledStatusKind::Reconnecting) => Some(
+            RemoteControlEvent::new(RemoteStage::Disconnection, RemoteOutcome::Ok),
+        ),
+        (
+            Some(
+                ControlledStatusKind::Reconnecting
+                | ControlledStatusKind::ResumeProvisional
+                | ControlledStatusKind::ResumeActivatedPendingLiveness,
+            ),
+            ControlledStatusKind::Connected,
+        ) => Some(RemoteControlEvent::new(
+            RemoteStage::Resume,
+            RemoteOutcome::Ok,
+        )),
+        (
+            Some(
+                ControlledStatusKind::Reconnecting
+                | ControlledStatusKind::ResumeProvisional
+                | ControlledStatusKind::ResumeActivatedPendingLiveness,
+            ),
+            ControlledStatusKind::Error,
+        ) => Some(
+            RemoteControlEvent::new(RemoteStage::Resume, RemoteOutcome::Rejected)
+                .reason(RemoteReason::ResumeFailed),
+        ),
+        (Some(ControlledStatusKind::HandshakePending), ControlledStatusKind::Error) => Some(
+            RemoteControlEvent::new(RemoteStage::Handshake, RemoteOutcome::Rejected)
+                .reason(RemoteReason::HandshakeFailed),
+        ),
+        _ => None,
+    };
+    drop(last);
+    if let Some(event) = event {
+        track_remote_control(app, event);
+    }
+}
+/// 端点通道就绪等待：单次上限与重试间隔（整体最多 3 次尝试）。
+const ENDPOINT_READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+const ENDPOINT_READY_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// 双端共用的排障日志写入器（追加写入 `~/.pinvou3/logs/remote-control.log`）。
+///
+/// `scope` 只区分端别：`controlled`（B 端）与 `controller`（A 端），便于同一台机器
+/// 或同一份日志里对照同一次连接的阶段。只在「启停/注册/握手/连接结果」这些用户可
+/// 感知的失败与成功节点写一行有界文本：不含占位符之外的任何标识（不写
+/// endpoint_id/lease/token/连接码），便于用户把文件直接发给支持而不担心泄漏。
+/// 写失败一律忽略，绝不影响主流程。
+pub(crate) fn log_relay_event(scope: &str, stage: &str, detail: &str) {
+    write_relay_event(scope, stage, None, detail);
+}
+
+/// Remote-action diagnostics add only the closed operation name to the common
+/// log envelope. Request/session identifiers and action bodies never reach the
+/// sink, while A/B traces can still be correlated by operation and timestamp.
+pub(crate) fn log_remote_action_event(scope: &str, stage: &str, operation: &str, detail: &str) {
+    write_relay_event(scope, stage, Some(operation), detail);
+}
+
+// Closed diagnostic projection for the controlled task admission boundary.
+// Keep this list synchronized with the stable codes accepted by
+// `desktop_remote_controller_business::submit_error`. Unknown static codes
+// remain private and collapse to `other` at the sink.
+const CONTROLLED_PORT_LOG_ERROR_CODES: &[&str] = &[
+    "capability_admission_capacity",
+    "capability_descriptor_capacity",
+    "capability_descriptor_duplicate",
+    "capability_display_invalid",
+    "capability_expiry_overflow",
+    "capability_id_invalid",
+    "capability_revision_exhausted",
+    "capability_snapshot_expired",
+    "capability_snapshot_missing",
+    "capability_snapshot_stale",
+    "capability_workspace_capacity",
+    "capability_workspace_duplicate",
+    "capability_workspace_not_authorized",
+    "controlled_session_projection_failed",
+    "desktop_remote_not_connected",
+    "lease_unavailable",
+    "model_binding_invalid",
+    "model_binding_stale",
+    "model_credential_unavailable",
+    "model_credential_invalid",
+    "model_credential_kind_unsupported",
+    "model_display_name_invalid",
+    "model_endpoint_insecure",
+    "model_endpoint_invalid",
+    "model_endpoint_local",
+    "model_endpoint_mode_unsupported",
+    "model_endpoint_private",
+    "model_endpoint_unresolved",
+    "model_image_override_unsupported",
+    "model_not_exportable",
+    "model_package_capacity",
+    "model_package_field_invalid",
+    "model_package_id_invalid",
+    "model_package_invalid",
+    "model_package_missing",
+    "model_package_missing_field",
+    "model_package_schema_unsupported",
+    "model_package_too_large",
+    "model_package_unknown_field",
+    "model_preset_unsupported",
+    "model_provider_kind_unsupported",
+    "model_reasoning_effort_unsupported",
+    "model_route_invalid",
+    "model_runtime_unavailable",
+    "model_secret_invalid",
+    "model_secret_too_large",
+    "model_vendor_unsupported",
+    "model_wire_api_mismatch",
+    "model_wire_api_unsupported",
+    "model_wire_name_invalid",
+    "task_binding_stale",
+    "task_input_digest_invalid",
+    "task_input_invalid",
+    "task_lease_mismatch",
+    "task_ledger_capacity",
+    "task_ledger_corrupt",
+    "task_ledger_persist_failed",
+    "task_ledger_serialize_failed",
+    "task_ledger_unreadable",
+    "task_ledger_version_unsupported",
+    "task_ledger_write_failed",
+    "task_mode_invalid",
+    "task_mode_unsupported",
+    "task_model_source_invalid",
+    "task_model_source_unsupported",
+    "task_not_found",
+    "task_payload_invalid_enum",
+    "task_payload_invalid_field",
+    "task_payload_invalid_json",
+    "task_payload_invalid_message",
+    "task_payload_invalid_type",
+    "task_payload_length_mismatch",
+    "task_payload_message_too_large",
+    "task_payload_missing_field",
+    "task_payload_replay",
+    "task_payload_role_mismatch",
+    "task_payload_stale_context",
+    "task_payload_unknown_field",
+    "task_payload_unknown_message_type",
+    "task_payload_unsupported_capability",
+    "task_payload_unsupported_version",
+    "task_request_conflict",
+    "task_request_invalid",
+    "task_result_digest_invalid",
+    "task_session_backend_bind_failed",
+    "task_session_binding_mismatch",
+    "task_session_busy",
+    "task_session_create_failed",
+    "task_session_generation_conflict",
+    "task_session_generation_stale",
+    "task_session_lane_conflict",
+    "task_session_lane_mismatch",
+    "task_session_lane_unknown",
+    "task_session_lookup_failed",
+    "task_session_map_conflict",
+    "task_session_not_found",
+    "task_session_provisioner_unavailable",
+    "task_skill_invalid",
+    "task_state_conflict",
+    "task_status_binding_invalid",
+    "task_workspace_capacity",
+    "task_workspace_not_authorized",
+    "task_workspace_required",
+    "task_workspace_unexpected",
+    "temporary_model_capability_required",
+];
+
+/// Log a stable application-boundary error without collapsing its code to
+/// `other` when it belongs to the explicit controlled-task diagnostic set.
+/// User input, identifiers and infrastructure error strings never reach the
+/// sink, and future port errors remain private until deliberately reviewed.
+pub(crate) fn log_controlled_port_error(stage: &str, error: RemotePortError) {
+    write_relay_event_inner("controlled", stage, None, log_port_error_detail(error));
+}
+
+fn write_relay_event(scope: &str, stage: &str, operation: Option<&str>, detail: &str) {
+    write_relay_event_inner(scope, stage, operation, log_detail(detail));
+}
+
+fn write_relay_event_inner(
+    scope: &str,
+    stage: &str,
+    operation: Option<&str>,
+    detail: &'static str,
+) {
+    use std::io::Write as _;
+    static LOG_WRITE_LOCK: OnceLock<parking_lot::Mutex<()>> = OnceLock::new();
+
+    // Several transport/task callbacks can report transitions concurrently.
+    // Serialize the complete append so two records cannot be spliced together.
+    let _write_guard = LOG_WRITE_LOCK
+        .get_or_init(|| parking_lot::Mutex::new(()))
+        .lock();
+    let timestamp_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or(0);
+    let dir = crate::platform::paths::pinvou3_home().join("logs");
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join("remote-control.log"))
+    else {
+        return;
+    };
+    if let Some(operation) = operation {
+        let _ = writeln!(
+            file,
+            "ts_ms={timestamp_ms} pid={} [{}] stage={} operation={} detail={}",
+            std::process::id(),
+            log_scope(scope),
+            log_stage(stage),
+            log_remote_action_operation(operation),
+            detail
+        );
+    } else {
+        let _ = writeln!(
+            file,
+            "ts_ms={timestamp_ms} pid={} [{}] stage={} detail={}",
+            std::process::id(),
+            log_scope(scope),
+            log_stage(stage),
+            detail
+        );
+    }
+}
+
+fn log_scope(value: &str) -> &'static str {
+    match value {
+        "controlled" => "controlled",
+        "controller" => "controller",
+        _ => "unknown",
+    }
+}
+
+/// Semantic allowlists also reject identifiers consisting only of letters or digits.
+fn log_stage(value: &str) -> &'static str {
+    const STAGES: &[&str] = &[
+        "controlled_status",
+        "controlled_result",
+        "capability_handshake",
+        "start_rejected",
+        "start_failed",
+        "connect_requested",
+        "connect_rejected",
+        "connect_started",
+        "connected",
+        "connect_failed",
+        "status",
+        "handshake_failed",
+        "registration_rejected",
+        "registration_sent",
+        "registration_failed",
+        "registered",
+        "worker_started",
+        "endpoint_ready",
+        "runtime_relay_error",
+        "liveness_challenge",
+        "liveness_attestation",
+        "liveness_direct",
+        "task_submit_frame_received",
+        "task_submit_endpoint_received",
+        "task_submit_socket_written",
+        "task_submit_socket_write_failed",
+        "task_submit_decrypted",
+        "task_submit_dispatched",
+        "task_submit_dispatch_failed",
+        "task_submit_status_sent",
+        "task_submit_business_entered",
+        "task_submit_business_accepted",
+        "task_submit_business_rejected",
+        "task_submit_context_validated",
+        "task_submit_payload_validated",
+        "task_submit_identity_validated",
+        "task_submit_capability_validated",
+        "task_submit_mapping_ready",
+        "task_submit_mapping_projected",
+        "task_submit_prepared",
+        "controlled_submission_admission_entered",
+        "task_model_source_received",
+        "business_frame_dropped",
+        "business_frame_rejected",
+        "business_dispatch_failed",
+        "business_response_seal_failed",
+        "business_response_send_failed",
+        "capability_response_sent",
+        "capability_snapshot_failed",
+        "capability_snapshot_applied",
+        "capability_snapshot_rejected",
+        "capability_error_rejected",
+        "journal_event_rejected",
+        "journal_event_ignored",
+        "journal_event_applied",
+        "journal_event_verified",
+        "journal_event_gap",
+        "journal_snapshot_rejected",
+        "task_status_sent",
+        "task_status_not_sent",
+        "journal_event_not_sent",
+        "journal_event_sent",
+        "journal_snapshot_sent",
+        "remote_action_received",
+        "remote_action_requested",
+        "remote_action_validation_failed",
+        "remote_action_failed",
+        "remote_action_sent",
+        "remote_action_result_received",
+        "remote_action_completed",
+        "remote_action_timeout",
+        "relay_reset_enqueue_failed",
+        "relay_frame_oversized",
+        "relay_frame_rejected",
+        "relay_read_failed",
+        "relay_connect_failed",
+        "relay_send_failed",
+        "access_policy_load_failed",
+        "revocation_frame_rejected",
+        "revocation_ack_persist_failed",
+        "local_event_forward_failed",
+        "relay_message_rejected",
+        "revoked_config_remove_failed",
+        "revoked_ledger_remove_failed",
+        "session_id_rejected",
+        "session_scope_lookup_failed",
+        "stream_reset_enqueue_failed",
+        "attachment_digest_missing",
+        "attachment_uploads_expired",
+        "artifact_downloads_expired",
+        "task_terminal_persist_failed",
+        "task_rejected_persist_failed",
+        "task_dispatch_rejected",
+        "artifact_capture_failed",
+        "workspace_auth_restore_failed",
+        "attachment_release_failed",
+        "attachment_finalize_failed",
+        "attachment_cleanup_failed",
+        "journal_append_rejected",
+        "knowledge_model_load_failed",
+        "knowledge_mount_emit_failed",
+        "web_session_operation_failed",
+        "web_workspace_operation_failed",
+        "web_acp_operation_failed",
+        "lifecycle_checkpoint",
+    ];
+    STAGES
+        .iter()
+        .copied()
+        .find(|stage| *stage == value)
+        .unwrap_or("other")
+}
+
+fn log_detail(value: &str) -> &'static str {
+    const DETAILS: &[&str] = &[
+        "ok",
+        "failed",
+        "unknown",
+        "unavailable",
+        "accepted",
+        "rejected",
+        "sent",
+        "send_failed",
+        "requested",
+        "expired",
+        "ready",
+        "duplicate",
+        "connected",
+        "reconnecting",
+        "registering",
+        "waiting_for_pairing",
+        "pairing_reserved",
+        "handshake_pending",
+        "stopped",
+        "error",
+        "waiting_registered",
+        "channel_ready",
+        "opening",
+        "dispatching",
+        "forwarding_to_worker",
+        "validating",
+        "admitted",
+        "transport_error",
+        "controlled_device",
+        "controller_temporary",
+        "no_live_lease",
+        "relay_rejected",
+        "projection_failed",
+        "retired_epoch",
+        "replay_requested",
+        "invalid_envelope_or_identity",
+        "lease_unavailable",
+        "session_mapping_missing",
+        "status_unavailable",
+        "outbound_unavailable",
+        "seal_failed",
+        "queue_failed",
+        "generation_or_binding_stale",
+        "permission_expired",
+        "permission_denied",
+        "task_conflict",
+        "missing",
+        "remote_binding_mismatch",
+        "controller_not_connected",
+        "remote_session_unavailable",
+        "remote_proxy_not_found",
+        "remote_mapping_unconfirmed",
+        "remote_action_invalid",
+        "remote_action_capacity",
+        "remote_action_failed",
+        "remote_encrypt_failed",
+        "remote_send_uncertain",
+        "task_session_not_found",
+        "task_binding_stale",
+        "transfer_unknown",
+        "transfer_chunk_invalid",
+        "transfer_chunk_out_of_order",
+        "artifact_unavailable",
+        "runtime_started",
+        "start_requested",
+        "refresh_requested",
+        "refresh_retiring",
+        "refresh_connection_cleanup_begin",
+        "refresh_connection_cleanup_done",
+        "refresh_relay_stop_begin",
+        "refresh_relay_stop_done",
+        "refresh_state_rotation_begin",
+        "refresh_state_rotation_done",
+        "refresh_worker_start_begin",
+        "refresh_worker_start_done",
+        "refresh_registration_wait_begin",
+        "refresh_registration_wait_done",
+        "refresh_registration_wait_failed",
+        "refresh_completed",
+        "refresh_failed",
+        "stop_requested",
+        "stop_completed",
+        "disconnect_requested",
+        "disconnect_completed",
+    ];
+    if let Some(value) = DETAILS.iter().copied().find(|detail| *detail == value) {
+        return value;
+    }
+    super::protocol::CONTROLLER_ERROR_CODES
+        .iter()
+        .copied()
+        .find(|code| *code == value)
+        .unwrap_or("other")
+}
+
+fn log_port_error_detail(error: RemotePortError) -> &'static str {
+    CONTROLLED_PORT_LOG_ERROR_CODES
+        .iter()
+        .copied()
+        .find(|code| *code == error.code())
+        .unwrap_or("other")
+}
+
+fn log_remote_action_operation(value: &str) -> &'static str {
+    super::protocol::REMOTE_ACTION_OPERATIONS
+        .iter()
+        .copied()
+        .find(|operation| *operation == value)
+        .unwrap_or("other")
+}
+
+/// B 端预握手阶段的自帧回投过滤：Relay 会把发送方的 `finished_receipt_commit`
+/// 原样回投，B 只处理 `sender_role == A` 的对端帧，自己的回投必须跳过。
+pub(crate) fn skip_self_echoed_frame(message: &Value) -> bool {
+    is_self_echoed_handshake_frame(message, ROLE_B)
+}
+
+/// B 端（被控端）排障日志。
+pub(crate) fn log_controlled_event(stage: &str, detail: &str) {
+    log_relay_event("controlled", stage, detail);
+}
+
+/// A 端（控制端）排障日志。A 端此前没有任何落盘痕迹，导致「连接码无效或已过期」
+/// 这类失败只能靠猜；这里补上与 B 端对称的阶段与结果码。
+pub(crate) fn log_controller_event(stage: &str, detail: &str) {
+    log_relay_event("controller", stage, detail);
+}
+
+/// Production failure projections deliberately accept the raw source values
+/// only to prove that the boundary discards them before touching the sink.
+pub(crate) fn log_attachment_digest_omitted(_file_name: &str) {
+    log_controlled_event("attachment_digest_missing", "missing");
+}
+
+pub(crate) fn log_task_persist_failure<T: ?Sized>(rejected: bool, _raw_error: &T) {
+    log_controlled_event(
+        if rejected {
+            "task_rejected_persist_failed"
+        } else {
+            "task_terminal_persist_failed"
+        },
+        "failed",
+    );
+}
+
+pub(crate) fn log_artifact_capture_failure<T: ?Sized>(_raw_error: &T) {
+    log_controlled_event("artifact_capture_failed", "failed");
+}
+
+pub(crate) fn log_attachment_cleanup_failure(_path: &std::path::Path, _raw_error: &std::io::Error) {
+    log_controlled_event("attachment_cleanup_failed", "failed");
+}
+
+/// 测试/内联断言用：日志行格式（不含时间戳，便于跨平台断言）。
+pub(crate) fn relay_log_line(scope: &str, stage: &str, detail: &str) -> String {
+    format!("[{scope}] stage={stage} detail={detail}")
+}
+
+/// 测试/内联断言用：B 端日志行格式。
+pub(crate) fn controlled_log_line(stage: &str, detail: &str) -> String {
+    relay_log_line("controlled", stage, detail)
+}
+
+/// 测试/内联断言用：A 端日志行格式。
+pub(crate) fn controller_log_line(stage: &str, detail: &str) -> String {
+    relay_log_line("controller", stage, detail)
+}
+
+pub(crate) fn remote_action_log_line(
+    scope: &str,
+    stage: &str,
+    operation: &str,
+    detail: &str,
+) -> String {
+    format!(
+        "[{}] stage={} operation={} detail={}",
+        log_scope(scope),
+        log_stage(stage),
+        log_remote_action_operation(operation),
+        log_detail(detail)
+    )
+}
 const REGISTRATION_CAPABILITIES: &[&str] = &[
     "pairing_v1",
     "encrypted_frames_v1",
@@ -42,6 +736,12 @@ const REGISTRATION_CAPABILITIES: &[&str] = &[
     // E2E-03：B 端的权威 session / 任务台账（DEV-12/DEV-13）已实现，注册时
     // 一并声明 task_v1，使 A 的能力快照请求与任务请求能通过协商。
     "task_v1",
+    "temporary_model_package_v1",
+    // DEV-23：审批、附件和成果均通过统一 remote_action 加密通道；只有在生产
+    // 注册能力中显式声明，A/B 才能协商出相应 operation capability。
+    "permission_v1",
+    "attachment_v1",
+    "artifact_v1",
     // E2E-05：B 的权威 journal（DEV-19）已实现，声明 snapshot_journal_v1 使
     // journal_event / journal_replay 等正文事件能通过协商。
     "snapshot_journal_v1",
@@ -82,6 +782,9 @@ pub(crate) struct ControlledRelayWorker {
     channel: crate::features::remote_control::manager::ControllerRelayChannel,
     /// 业务派发端口：由命令层注入（能力快照 / 任务接纳 / 取消）。
     business: std::sync::Arc<dyn ControlledBusinessPort>,
+    /// Generation-local action outcomes. Dropping the worker on disconnect
+    /// clears the cache; every hit is bound to the full request fingerprint.
+    action_results: RemoteActionResultCache,
 }
 
 /// Narrow port over the generation-bound Relay lane. Keeps the registration
@@ -102,14 +805,6 @@ impl ControlledRelayPort for crate::features::remote_control::manager::Controlle
     async fn recv(&mut self) -> Option<Value> {
         crate::features::remote_control::manager::ControllerRelayChannel::recv(self).await
     }
-}
-
-#[derive(Debug)]
-pub(crate) enum RegistrationStep {
-    /// Relay traffic that belongs to another phase (e.g. the synthetic
-    /// `desktop_endpoint_registered` acknowledgement) is ignored here.
-    Ignore,
-    Registered(Box<ControlledRegistration>),
 }
 
 /// `controller_joined` 之后的租约材料：租约身份来自 Relay，传输指纹由双方
@@ -216,30 +911,70 @@ impl ControlledHandshakeDriver {
     }
 }
 
-/// Waits for the registration response for `request`. Extracted from the worker
-/// so timeout / disconnect / ignore-unknown branches are covered by tests.
-pub(crate) async fn next_registration_step<P: ControlledRelayPort>(
+/// Waits for the registration response for `request`. Unrelated controller
+/// frames are consumed without extending the attempt's absolute deadline.
+pub(crate) async fn wait_for_registration<P: ControlledRelayPort>(
     port: &mut P,
     request: &Value,
     code_wrap: &CodeWrapKeyPair,
     timeout: std::time::Duration,
-) -> Result<RegistrationStep, String> {
+) -> Result<ControlledRegistration, String> {
     let deadline = tokio::time::sleep(timeout);
     tokio::pin!(deadline);
     loop {
         tokio::select! {
+            biased;
             _ = &mut deadline => return Err("pairing_registration_timeout".to_owned()),
             message = port.recv() => {
                 let Some(message) = message else {
                     return Err("desktop_relay_disconnected".to_owned());
                 };
-                if message.get("type").and_then(Value::as_str)
-                    == Some("desktop_endpoint_registered")
-                {
-                    return Ok(RegistrationStep::Ignore);
+                let kind = message.get("type").and_then(Value::as_str);
+                match kind {
+                    Some("desktop_relay_connection") => {
+                        if message.get("connected").and_then(Value::as_bool) == Some(false) {
+                            return Err("desktop_relay_disconnected".to_owned());
+                        }
+                        continue;
+                    }
+                    Some("desktop_endpoint_registered") => {
+                        continue;
+                    }
+                    Some("desktop_pairing_registered") | Some("error") => {}
+                    // The controller lane also carries transport and later-phase
+                    // control frames. They are not registration responses and
+                    // must never be fed to the registration validator.
+                    _ => continue,
                 }
-                return registration_from_response(code_wrap, request, &message)
-                    .map(|registration| RegistrationStep::Registered(Box::new(registration)));
+                // relay 的拒绝必须保留原始有界码，便于定位（此前被映射成
+                // pairing_registration_rejected 后丢失了原因）。
+                if kind == Some("error") {
+                    let code = message
+                        .get("code")
+                        .and_then(Value::as_str)
+                        .unwrap_or("relay_error");
+                    // The shared Relay uses v2 for its outer Web-access lane and
+                    // controller-v1 for desktop control. A v2 version rejection
+                    // for our v1 registration means the controller dispatcher is
+                    // not enabled on that Relay; surface the deployment fault
+                    // instead of collapsing it into a generic registration error.
+                    if message.get("v").and_then(Value::as_u64) == Some(2)
+                        && matches!(
+                            code,
+                            "unsupported_protocol_version" | "desktop_controller_unavailable"
+                        )
+                    {
+                        log_controlled_event("registration_rejected", code);
+                        return Err("desktop_controller_relay_unavailable".to_owned());
+                    }
+                    // Errors from connection setup or another in-flight request
+                    // share this lane but are not replies to this registration.
+                    if message.get("request_id") != request.get("request_id") {
+                        continue;
+                    }
+                    log_controlled_event("registration_rejected", code);
+                }
+                return registration_from_response(code_wrap, request, &message);
             }
         }
     }
@@ -255,6 +990,7 @@ impl ControlledRelayWorker {
         let code_wrap = CodeWrapKeyPair::generate().map_err(|_| "pairing_key_invalid")?;
         let handshake = HandshakeKeyPair::generate().map_err(|_| "handshake_key_invalid")?;
         let channel = relay.start_controller_relay(operation.generation()).await?;
+        log_controlled_event("worker_started", "channel_ready");
         let (done_tx, done_rx) = oneshot::channel();
         let mut worker = Self {
             app,
@@ -264,6 +1000,7 @@ impl ControlledRelayWorker {
             handshake: Some(handshake),
             channel,
             business,
+            action_results: RemoteActionResultCache::default(),
         };
         tauri::async_runtime::spawn(async move {
             let result = worker.register_pairing().await;
@@ -283,39 +1020,76 @@ impl ControlledRelayWorker {
         let registration_request_id = manager
             .registration_request_id(self.operation.clone())
             .map_err(|error| error.code.to_owned())?;
-        let endpoint_id = self.relay.controller_endpoint_id()?;
-        let request = registration_request(
-            &registration_request_id,
-            &endpoint_id,
-            self.operation.generation(),
-            &self.code_wrap,
-            self.handshake
-                .as_ref()
-                .ok_or_else(|| "handshake_key_invalid".to_owned())?,
-        )?;
-        self.channel.try_send(request.clone())?;
-        loop {
-            match next_registration_step(
+        // 注册帧必须在端点 socket 已认证为 B 之后发出，否则会被 relay 以角色无效
+        // 拒绝；同时网络抖动可能让端点通道 20 秒内都没就绪，因此整体**有界重试**：
+        // 每次重试复用同一个 registration_request_id，relay 侧按幂等键返回同一结果。
+        const MAX_ATTEMPTS: u32 = 3;
+        for attempt in 1..=MAX_ATTEMPTS {
+            match self.relay.wait_endpoint_ready(ENDPOINT_READY_TIMEOUT).await {
+                Ok(()) => log_controlled_event("endpoint_ready", "ok"),
+                Err(error) => {
+                    log_controlled_event("endpoint_ready", &error);
+                    if attempt < MAX_ATTEMPTS {
+                        tokio::time::sleep(ENDPOINT_READY_RETRY_DELAY).await;
+                        continue;
+                    }
+                    return Err(error);
+                }
+            }
+            let endpoint_id = self.relay.controller_endpoint_id()?;
+            let request = registration_request(
+                &registration_request_id,
+                &endpoint_id,
+                self.operation.generation(),
+                &self.code_wrap,
+                self.handshake
+                    .as_ref()
+                    .ok_or_else(|| "handshake_key_invalid".to_owned())?,
+            )?;
+            self.channel.try_send(request.clone())?;
+            // 区分「连注册帧都没发出去」与「发出后等待/被拒」这两类失败。
+            log_controlled_event("registration_sent", "waiting_registered");
+            match wait_for_registration(
                 &mut self.channel,
                 &request,
                 &self.code_wrap,
                 std::time::Duration::from_millis(REGISTRATION_TIMEOUT_MS),
             )
-            .await?
+            .await
             {
-                RegistrationStep::Ignore => continue,
-                RegistrationStep::Registered(registration) => {
+                Ok(mut registration) => {
+                    let now_b = controlled_monotonic_millis();
+                    registration.expires_at_ms = pairing_deadline_b(
+                        registration.expires_at_ms,
+                        wall_clock_millis()?,
+                        now_b,
+                    )?;
                     let status = manager
-                        .complete_registration(self.operation.clone(), *registration, 0)
+                        .complete_registration(self.operation.clone(), registration, now_b)
                         .map_err(|error| error.code.to_owned())?;
-                    let _ = self.app.emit(CONTROLLED_STATUS_EVENT, &status);
+                    log_controlled_event("registered", "waiting_for_pairing");
+                    emit_controlled_status(&self.app, &status);
                     return Ok(status);
+                }
+                Err(error) => {
+                    log_controlled_event("registration_failed", &error);
+                    let retryable = matches!(
+                        error.as_str(),
+                        "pairing_registration_timeout" | "desktop_relay_disconnected"
+                    );
+                    if retryable && attempt < MAX_ATTEMPTS {
+                        tokio::time::sleep(ENDPOINT_READY_RETRY_DELAY).await;
+                        continue;
+                    }
+                    return Err(error);
                 }
             }
         }
+        Err("pairing_registration_failed".to_owned())
     }
 
     fn fail_registration(&self, error: &str) {
+        log_controlled_event("registration_failed", &sanitize_error(error));
         let manager = self.app.state::<ControlledDeviceManager>();
         if !manager.is_pending_handshake(self.operation.clone()) {
             // 用户已停止/断开，或本代已被刷新取代：不覆盖既有投影。
@@ -323,7 +1097,7 @@ impl ControlledRelayWorker {
         }
         let bounded = sanitize_error(error);
         if let Ok(status) = manager.fail_operation(self.operation.clone(), bounded) {
-            let _ = self.app.emit(CONTROLLED_STATUS_EVENT, &status);
+            emit_controlled_status(&self.app, &status);
         }
     }
 
@@ -342,6 +1116,7 @@ impl ControlledRelayWorker {
         let mut driver = ControlledHandshakeDriver::new(keys);
         let mut joined = false;
         let mut evidence = LivenessEvidenceState::default();
+        let mut resume = ControlledResumeAttempt::default();
         let mut poll =
             tokio::time::interval(std::time::Duration::from_millis(LIVENESS_EVIDENCE_POLL_MS));
         poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -350,14 +1125,39 @@ impl ControlledRelayWorker {
             tokio::select! {
                 biased;
                 _ = poll.tick() => {
-                    if joined {
+                    if joined && !resume.is_active() {
                         self.pump_liveness_evidence(&mut evidence);
                     }
                     continue 'serve;
                 }
                 message = self.channel.recv() => {
                     let Some(message) = message else { break 'serve };
+                    if message.get("type").and_then(Value::as_str) == Some("desktop_controller_stop") {
+                        break 'serve;
+                    }
                     if joined {
+                        // E2E-06：恢复进行中时所有帧都由恢复状态机处理，业务帧与
+                        // 存活证据一律不派发（Relay 侧同样禁止业务帧）。
+                        if resume.is_active() {
+                            let manager = self.app.state::<ControlledDeviceManager>();
+                            let lane = self.app.state::<ControlledLaneState>();
+                            match handle_controlled_resume_frame(
+                                &self.channel,
+                                manager.inner(),
+                                lane.inner(),
+                                &mut resume,
+                                &message,
+                            ) {
+                                ControlledResumeOutcome::Failed => break 'serve,
+                                ControlledResumeOutcome::Completed
+                                | ControlledResumeOutcome::Progressed => {
+                                    let status = manager.poll_watchdog(controlled_monotonic_millis());
+                                    emit_controlled_status(&self.app, &status);
+                                }
+                                ControlledResumeOutcome::Ignored => {}
+                            }
+                            continue 'serve;
+                        }
                         match message.get("type").and_then(Value::as_str) {
                             Some("encrypted_frame") => {
                                 self.dispatch_business_frame(&message).await;
@@ -370,14 +1170,47 @@ impl ControlledRelayWorker {
                             Some("encrypted_controller_liveness_a") => {
                                 self.accept_direct_liveness(&message, &mut evidence);
                             }
+                            Some("error") => {
+                                let code = message
+                                    .get("code")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or("relay_error");
+                                log_controlled_event("runtime_relay_error", code);
+                            }
                             // E2E-06：A 端显式断开 → 终结租约并结束本代通道。
                             Some("controller_disconnect") => {
                                 if self.accept_remote_disconnect(&message) {
                                     break 'serve;
                                 }
                             }
+                            // E2E-06：desktop socket 掉线 → 挂起业务通道并启动恢复。
+                            Some("desktop_relay_connection") => {
+                                let connected = message
+                                    .get("connected")
+                                    .and_then(Value::as_bool)
+                                    .unwrap_or(true);
+                                if !connected {
+                                    let manager = self.app.state::<ControlledDeviceManager>();
+                                    let lane = self.app.state::<ControlledLaneState>();
+                                    lane.suspend();
+                                    if !begin_controlled_resume(
+                                        &self.channel,
+                                        manager.inner(),
+                                        &mut resume,
+                                    ) {
+                                        break 'serve;
+                                    }
+                                }
+                            }
                             _ => {}
                         }
+                        continue 'serve;
+                    }
+                    // Relay 会把本端 commit 原样回投（router 契约，见
+                    // `controller-router.test.js`）。自帧回投不是对端输入，跳过而不是
+                    // 失败关闭：否则 B 会在收到自己 commitment 的瞬间以
+                    // `controller_handshake_rejected` 结束整条通道（2026-09-20 真机）。
+                    if skip_self_echoed_frame(&message) {
                         continue 'serve;
                     }
                     let result = match message.get("type").and_then(Value::as_str) {
@@ -409,6 +1242,20 @@ impl ControlledRelayWorker {
                                 self.fail_handshake(&error);
                                 return;
                             }
+                            if message.get("type").and_then(Value::as_str)
+                                == Some("controller_pairing_reserved")
+                            {
+                                let manager = self.app.state::<ControlledDeviceManager>();
+                                match manager.mark_handshake_pending(self.operation.clone()) {
+                                    Ok(status) => {
+                                        emit_controlled_status(&self.app, &status);
+                                    }
+                                    Err(error) => {
+                                        self.fail_handshake(error.code);
+                                        return;
+                                    }
+                                }
+                            }
                         }
                         Ok(None) => {}
                         Err(code) => {
@@ -420,7 +1267,9 @@ impl ControlledRelayWorker {
             }
         }
         // 通道关闭（stop/refresh/断线）时丢弃出站旁路，避免旧 generation 继续回传。
-        self.app.state::<ControlledOutboundState>().clear();
+        self.app
+            .state::<ControlledOutboundState>()
+            .clear_generation(self.channel.generation());
     }
 
     /// E2E-06：按 watchdog 需求发起挑战 / 升级到 Relay 签名兜底 / 作废超时挑战。
@@ -431,7 +1280,7 @@ impl ControlledRelayWorker {
         match liveness_evidence_action(needs, evidence, now_b) {
             LivenessEvidenceAction::Idle => {}
             LivenessEvidenceAction::Challenge => {
-                let Ok((lease, _)) = manager.live_runtime_context() else {
+                let Ok((lease, _)) = manager.liveness_runtime_context() else {
                     return;
                 };
                 let Ok((challenge_id, challenge_b64)) = manager.begin_liveness_challenge(now_b)
@@ -445,15 +1294,20 @@ impl ControlledRelayWorker {
                     &challenge_id,
                     &challenge_b64,
                 ) else {
+                    manager.cancel_liveness_challenge(&challenge_id);
                     return;
                 };
                 if self.channel.try_send(frame).is_ok() {
                     evidence.outstanding = Some((challenge_id, challenge_b64, now_b));
                     evidence.escalated = false;
+                    log_controlled_event("liveness_challenge", "sent");
+                } else {
+                    manager.cancel_liveness_challenge(&challenge_id);
+                    log_controlled_event("liveness_challenge", "send_failed");
                 }
             }
             LivenessEvidenceAction::Escalate => {
-                let Ok((lease, _)) = manager.live_runtime_context() else {
+                let Ok((lease, _)) = manager.liveness_runtime_context() else {
                     return;
                 };
                 let Some((challenge_id, challenge_b64, _)) = evidence.outstanding.clone() else {
@@ -470,11 +1324,15 @@ impl ControlledRelayWorker {
                 };
                 if self.channel.try_send(frame).is_ok() {
                     evidence.escalated = true;
+                    log_controlled_event("liveness_attestation", "requested");
                 }
             }
             LivenessEvidenceAction::Reset => {
-                evidence.outstanding = None;
+                if let Some((challenge_id, _, _)) = evidence.outstanding.take() {
+                    manager.cancel_liveness_challenge(&challenge_id);
+                }
                 evidence.escalated = false;
+                log_controlled_event("liveness_challenge", "expired");
             }
         }
     }
@@ -504,7 +1362,7 @@ impl ControlledRelayWorker {
             Ok(status) => {
                 self.app.state::<ControlledLaneState>().clear();
                 self.app.state::<ControlledOutboundState>().clear();
-                let _ = self.app.emit(CONTROLLED_STATUS_EVENT, &status);
+                emit_controlled_status(&self.app, &status);
                 true
             }
             Err(_) => false,
@@ -531,12 +1389,13 @@ impl ControlledRelayWorker {
             _ => return,
         }
         let now_b = controlled_monotonic_millis();
-        if manager
-            .accept_direct_liveness(&inner.to_string(), now_b)
-            .is_ok()
-        {
-            evidence.outstanding = None;
-            evidence.escalated = false;
+        match manager.accept_direct_liveness(&inner.to_string(), now_b) {
+            Ok(()) => {
+                evidence.outstanding = None;
+                evidence.escalated = false;
+                log_controlled_event("liveness_direct", "accepted");
+            }
+            Err(error) => log_controlled_event("liveness_direct", error.code),
         }
     }
 
@@ -556,12 +1415,13 @@ impl ControlledRelayWorker {
         };
         let manager = self.app.state::<ControlledDeviceManager>();
         let now_b = controlled_monotonic_millis();
-        if manager
-            .accept_liveness_attestation(&message.to_string(), &trust, sent_at_b, now_b)
-            .is_ok()
-        {
-            evidence.outstanding = None;
-            evidence.escalated = false;
+        match manager.accept_liveness_attestation(&message.to_string(), &trust, sent_at_b, now_b) {
+            Ok(()) => {
+                evidence.outstanding = None;
+                evidence.escalated = false;
+                log_controlled_event("liveness_attestation", "accepted");
+            }
+            Err(error) => log_controlled_event("liveness_attestation", error.code),
         }
     }
 
@@ -575,14 +1435,14 @@ impl ControlledRelayWorker {
         let trust = load_relay_trust_config(|name| std::env::var(name).ok())
             .map_err(|_| RELAY_TRUST_UNCONFIGURED.to_owned())?;
         let manager = self.app.state::<ControlledDeviceManager>();
-        let status = manager
-            .mark_claimed(self.operation.clone())
-            .map_err(|error| error.code.to_owned())?;
-        let _ = self.app.emit(CONTROLLED_STATUS_EVENT, &status);
-        driver
+        let commit = driver
             .accept_reserved(message, &trust)
-            .map(Some)
-            .map_err(|code| code.to_owned())
+            .map_err(str::to_owned)?;
+        let status = manager
+            .mark_pairing_reserved(self.operation.clone())
+            .map_err(|error| error.code.to_owned())?;
+        emit_controlled_status(&self.app, &status);
+        Ok(Some(commit))
     }
 
     /// 应用 `controller_joined`：构造 B 端租约（含双方一致的传输指纹）并进入
@@ -616,7 +1476,7 @@ impl ControlledRelayWorker {
         let status = manager
             .complete_connected(self.operation.clone(), lease)
             .map_err(|error| error.code.to_owned())?;
-        let _ = self.app.emit(CONTROLLED_STATUS_EVENT, &status);
+        emit_controlled_status(&self.app, &status);
         Ok(())
     }
 
@@ -628,7 +1488,7 @@ impl ControlledRelayWorker {
         if let Ok(status) =
             manager.fail_operation(self.operation.clone(), HANDSHAKE_FAILED.to_owned())
         {
-            let _ = self.app.emit(CONTROLLED_STATUS_EVENT, &status);
+            emit_controlled_status(&self.app, &status);
         }
         HANDSHAKE_FAILED.to_owned()
     }
@@ -636,6 +1496,7 @@ impl ControlledRelayWorker {
     /// 握手失败收尾：投影为有界错误并结束本代通道（dropping the channel 会
     /// 清掉该 generation 的通道绑定，本地停止/刷新入口保持可用）。
     fn fail_handshake(&self, error: &str) {
+        log_controlled_event("handshake_failed", &sanitize_error(error));
         let manager = self.app.state::<ControlledDeviceManager>();
         if !manager.is_pending_handshake(self.operation.clone()) {
             // 用户已停止/断开，或本代已被刷新取代：不覆盖既有投影。
@@ -643,7 +1504,7 @@ impl ControlledRelayWorker {
         }
         let bounded = sanitize_error(error);
         if let Ok(status) = manager.fail_operation(self.operation.clone(), bounded) {
-            let _ = self.app.emit(CONTROLLED_STATUS_EVENT, &status);
+            emit_controlled_status(&self.app, &status);
         }
     }
 
@@ -651,27 +1512,69 @@ impl ControlledRelayWorker {
     /// 解密/校验失败、业务拒绝）都不产生副作用；业务拒绝时回传有界错误的
     /// `task_status` 由命令层决定（这里只负责通道语义）。
     async fn dispatch_business_frame(&self, frame: &Value) {
+        let is_task_submit =
+            frame.get("payload_kind").and_then(Value::as_str) == Some("task_submit");
+        if is_task_submit {
+            log_controlled_event("task_submit_frame_received", "opening");
+        }
         let manager = self.app.state::<ControlledDeviceManager>();
         let Ok((lease, capabilities)) = manager.live_runtime_context() else {
+            log_controlled_event("business_frame_dropped", "no_live_lease");
             return;
         };
         let business = self.app.state::<ControlledLaneState>();
-        let Ok((payload_kind, payload)) = business.open(frame, &capabilities) else {
-            return;
+        let (payload_kind, payload) = match business.open(frame, &capabilities) {
+            Ok(opened) => opened,
+            Err(error) => {
+                log_controlled_event("business_frame_rejected", error.code());
+                return;
+            }
         };
-        let Ok(responses) =
-            dispatch_decrypted_payload(self.business.as_ref(), &lease, &payload_kind, &payload)
-                .await
-        else {
-            return;
+        if payload_kind == "task_submit" {
+            log_controlled_event("task_submit_decrypted", "dispatching");
+        }
+        let responses = match dispatch_decrypted_payload_cached(
+            self.business.as_ref(),
+            &self.action_results,
+            &lease,
+            &payload_kind,
+            &payload,
+        )
+        .await
+        {
+            Ok(responses) => responses,
+            Err(error) => {
+                log_controlled_event("business_dispatch_failed", &error);
+                if is_task_submit {
+                    log_controlled_event("task_submit_dispatch_failed", &error);
+                }
+                return;
+            }
         };
+        if is_task_submit {
+            log_controlled_event("task_submit_dispatched", "accepted");
+        }
         // 一条请求可能产出多帧（journal 回放），逐帧加密回传；单帧失败即停止。
         for (response_kind, response) in responses {
-            let Ok(frame) = business.seal(response_kind, &response, &capabilities) else {
-                return;
+            let frame = match business.seal(response_kind, &response, &capabilities) {
+                Ok(frame) => frame,
+                Err(error) => {
+                    log_controlled_event("business_response_seal_failed", error.code());
+                    return;
+                }
             };
             if self.channel.try_send(frame).is_err() {
+                log_controlled_event("business_response_send_failed", response_kind);
                 return;
+            }
+            if is_task_submit && response_kind == "task_status" {
+                log_controlled_event("task_submit_status_sent", "accepted");
+            }
+            if matches!(
+                response_kind,
+                "capability_snapshot" | "capability_snapshot_error"
+            ) {
+                log_controlled_event("capability_response_sent", response_kind);
             }
         }
     }
@@ -732,11 +1635,22 @@ pub(crate) fn liveness_evidence_action(
 /// 接纳与取消）由命令层实现，避免两条实现漂移。
 #[async_trait::async_trait]
 pub(crate) trait ControlledBusinessPort: Send + Sync {
+    /// A closed, lease-bound desktop action. The implementation resolves the
+    /// authoritative B session before touching permission or transfer state.
+    async fn remote_action(
+        &self,
+        lease: &LeaseContext,
+        session_ref: &str,
+        operation: &str,
+        body: &Value,
+    ) -> Result<Value, String>;
+
     /// 构造 wire `capability_snapshot`（`known_revision` 命中未过期快照时复用）。
     async fn capability_snapshot(
         &self,
         lease: &LeaseContext,
         request_id: &str,
+        session_id: &str,
         known_revision: u64,
     ) -> Result<Value, String>;
 
@@ -784,7 +1698,94 @@ pub(crate) async fn dispatch_decrypted_payload<P: ControlledBusinessPort + ?Size
     payload_kind: &str,
     payload: &Value,
 ) -> Result<Vec<(&'static str, Value)>, String> {
+    let action_results = RemoteActionResultCache::default();
+    dispatch_decrypted_payload_cached(port, &action_results, lease, payload_kind, payload).await
+}
+
+async fn dispatch_decrypted_payload_cached<P: ControlledBusinessPort + ?Sized>(
+    port: &P,
+    action_results: &RemoteActionResultCache,
+    lease: &LeaseContext,
+    payload_kind: &str,
+    payload: &Value,
+) -> Result<Vec<(&'static str, Value)>, String> {
     match payload_kind {
+        "remote_action_request" => {
+            let session_ref = payload
+                .get("session_id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "remote_action_invalid".to_owned())?;
+            let request_id = payload
+                .get("request_id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "remote_action_invalid".to_owned())?;
+            let operation = payload
+                .get("operation")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "remote_action_invalid".to_owned())?;
+            let body = payload
+                .get("body")
+                .ok_or_else(|| "remote_action_invalid".to_owned())?;
+            let fingerprint =
+                remote_action_fingerprint(lease, session_ref, request_id, operation, body);
+            log_remote_action_event(
+                "controlled",
+                "remote_action_received",
+                operation,
+                "requested",
+            );
+            match action_results.lookup(request_id, fingerprint) {
+                RemoteActionCacheLookup::Hit(response) => {
+                    log_remote_action_event(
+                        "controlled",
+                        "remote_action_completed",
+                        operation,
+                        "duplicate",
+                    );
+                    return Ok(vec![("remote_action_result", response)]);
+                }
+                RemoteActionCacheLookup::Conflict => {
+                    log_remote_action_event(
+                        "controlled",
+                        "remote_action_failed",
+                        operation,
+                        "result_unknown",
+                    );
+                    return Ok(vec![(
+                        "remote_action_result",
+                        remote_action_response(
+                            lease,
+                            session_ref,
+                            request_id,
+                            operation,
+                            Err("result_unknown".to_owned()),
+                        ),
+                    )]);
+                }
+                RemoteActionCacheLookup::Miss => {}
+            }
+            let action = port
+                .remote_action(lease, session_ref, operation, body)
+                .await;
+            match &action {
+                Ok(_) => log_remote_action_event(
+                    "controlled",
+                    "remote_action_completed",
+                    operation,
+                    "ok",
+                ),
+                Err(code) => log_remote_action_event(
+                    "controlled",
+                    "remote_action_failed",
+                    operation,
+                    public_remote_action_error(code),
+                ),
+            }
+            let response =
+                remote_action_response(lease, session_ref, request_id, operation, action);
+            action_results.insert(request_id.to_owned(), fingerprint, response.clone());
+            Ok(vec![("remote_action_result", response)])
+        }
         "capability_snapshot_request" => {
             let request_id = payload
                 .get("request_id")
@@ -795,10 +1796,20 @@ pub(crate) async fn dispatch_decrypted_payload<P: ControlledBusinessPort + ?Size
                 .and_then(Value::as_str)
                 .and_then(|value| value.parse::<u64>().ok())
                 .ok_or_else(|| "task_request_invalid".to_owned())?;
-            let response = port
-                .capability_snapshot(lease, request_id, known_revision)
-                .await?;
-            Ok(vec![("capability_snapshot", response)])
+            let session_id = payload
+                .get("session_id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "task_request_invalid".to_owned())?;
+            match port
+                .capability_snapshot(lease, request_id, session_id, known_revision)
+                .await
+            {
+                Ok(response) => Ok(vec![("capability_snapshot", response)]),
+                Err(_) => Ok(vec![(
+                    "capability_snapshot_error",
+                    capability_snapshot_error(lease, request_id, session_id),
+                )]),
+            }
         }
         "task_submit" => {
             let session_ref = payload
@@ -875,6 +1886,72 @@ pub(crate) async fn dispatch_decrypted_payload<P: ControlledBusinessPort + ?Size
     }
 }
 
+fn remote_action_response(
+    lease: &LeaseContext,
+    session_ref: &str,
+    request_id: &str,
+    operation: &str,
+    action: Result<Value, String>,
+) -> Value {
+    let (ok, body, error_code) = match action {
+        Ok(body) => (true, body, None),
+        Err(code) => (
+            false,
+            serde_json::json!({}),
+            Some(public_remote_action_error(&code)),
+        ),
+    };
+    let mut response = serde_json::json!({
+        "v": 1, "type": "remote_action_result",
+        "connection_id": lease.connection_id,
+        "controller_lease_id": lease.controller_lease_id,
+        "lease_epoch": lease.lease_epoch,
+        "relay_epoch": lease.relay_epoch,
+        "remote_control_generation": lease.remote_control_generation,
+        "request_id": request_id,
+        "session_id": session_ref,
+        "operation": operation,
+        "ok": ok,
+        "body": body,
+    });
+    if let Some(error_code) = error_code {
+        response["error_code"] = Value::String(error_code.to_owned());
+    }
+    response
+}
+
+fn public_remote_action_error(code: &str) -> &'static str {
+    match code {
+        "permission_expired" => "permission_expired",
+        "permission_already_decided" => "permission_already_decided",
+        "permission_not_found" => "permission_not_found",
+        "task_session_not_found" => "task_session_not_found",
+        "task_binding_stale" => "task_binding_stale",
+        "transfer_unknown" => "transfer_unknown",
+        "transfer_chunk_invalid" => "transfer_chunk_invalid",
+        "transfer_chunk_out_of_order" => "transfer_chunk_out_of_order",
+        "artifact_unavailable" => "artifact_unavailable",
+        "result_unknown" => "result_unknown",
+        _ => "remote_action_failed",
+    }
+}
+
+fn capability_snapshot_error(lease: &LeaseContext, request_id: &str, session_id: &str) -> Value {
+    let payload = json!({
+        "v": 1,
+        "type": "capability_snapshot_error",
+        "connection_id": lease.connection_id,
+        "controller_lease_id": lease.controller_lease_id,
+        "lease_epoch": lease.lease_epoch,
+        "relay_epoch": lease.relay_epoch,
+        "remote_control_generation": lease.remote_control_generation,
+        "request_id": request_id,
+        "session_id": session_id,
+        "code": "capability_snapshot_unavailable",
+    });
+    payload
+}
+
 fn rewrite_session_id(mut payload: Value, session_ref: &str) -> Result<Value, String> {
     let object = payload
         .as_object_mut()
@@ -899,8 +1976,13 @@ pub(crate) fn build_journal_event_payload(
     session_ref: &str,
     event: &super::journal::JournalEvent,
 ) -> Option<Value> {
-    let wire_kind = wire_event_kind(event)?;
-    let raw = serde_json::to_vec(event).ok()?;
+    event.validate_exportable().ok()?;
+    let wire_kind = event.wire_kind()?;
+    // B owns the local session id while the wire contract owns A's opaque
+    // session id. Envelope and authenticated body must use the same identity.
+    let mut wire_event = event.clone();
+    wire_event.session_id = session_ref.to_owned();
+    let raw = serde_json::to_vec(&wire_event).ok()?;
     if raw.len() > super::journal::MAX_EVENT_PAYLOAD_BYTES {
         return None;
     }
@@ -913,28 +1995,12 @@ pub(crate) fn build_journal_event_payload(
         "relay_epoch": lease.relay_epoch,
         "remote_control_generation": lease.remote_control_generation,
         "session_id": session_ref,
-        "journal_epoch": event.epoch,
-        "event_sequence": event.sequence.to_string(),
+        "journal_epoch": wire_event.epoch,
+        "event_sequence": wire_event.sequence.to_string(),
         "event_kind": wire_kind,
         "event_b64": base64::engine::general_purpose::STANDARD.encode(&raw),
         "event_bytes": raw.len().to_string(),
     }))
-}
-
-/// 内部 journal 类型 → 冻结 wire 闭集；无对应项时返回 None（不回传）。
-fn wire_event_kind(event: &super::journal::JournalEvent) -> Option<&'static str> {
-    match event.kind.as_str() {
-        "user_message" => Some("user_message"),
-        "assistant_delta" => Some("assistant_delta"),
-        "reasoning" => Some("reasoning"),
-        "tool" => Some("tool"),
-        "permission" => Some("permission"),
-        "error" => Some("error"),
-        "artifact" => Some("artifact"),
-        // 只有终态任务状态走 journal 回传；进行中状态由 task_status 帧投影。
-        "task_status" if event.terminal_status.is_some() => Some("terminal"),
-        _ => None,
-    }
 }
 
 /// B 端出站旁路：权威 journal 事件需要经同一代 endpoint lane 回传 A，而 lane 的
@@ -946,6 +2012,15 @@ pub(crate) struct ControlledOutboundState {
 }
 
 impl ControlledOutboundState {
+    pub(crate) fn clear_generation(&self, generation: &str) {
+        let mut sender = self.sender.lock();
+        if sender
+            .as_ref()
+            .is_some_and(|sender| sender.generation() == generation)
+        {
+            *sender = None;
+        }
+    }
     pub(crate) fn install(
         &self,
         sender: crate::features::remote_control::manager::ControllerRelaySender,
@@ -966,6 +2041,308 @@ impl ControlledOutboundState {
 
 /// 由 `controller_joined` 材料构造 B 端租约（纯函数）。传输指纹与 A 端使用
 /// 同一份验签 transcript、按 B 角色域分离派生；租约在真正落地前不投影状态。
+/// E2E-06：B 端恢复尝试状态（`challenge_b64` 非空即代表一次进行中的恢复）。
+#[derive(Default)]
+pub(crate) struct ControlledResumeAttempt {
+    lease: Option<LeaseContext>,
+    activation_id: Option<String>,
+    challenge_b64: String,
+    relay_deadline_identity_ms: u64,
+    liveness_epoch_b: String,
+    peer_confirmed: bool,
+    confirmed: bool,
+    ack_sent: bool,
+    liveness_sent: bool,
+    ready_sent: bool,
+}
+
+impl ControlledResumeAttempt {
+    pub(crate) fn is_active(&self) -> bool {
+        !self.challenge_b64.is_empty()
+    }
+
+    fn reset(&mut self) {
+        *self = Self::default();
+    }
+}
+
+/// E2E-06：B 端恢复帧处理结果。
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(crate) enum ControlledResumeOutcome {
+    Ignored,
+    Progressed,
+    Completed,
+    Failed,
+}
+
+/// E2E-06：`desktop socket` 掉线后启动 B 端恢复：投影 reconnecting、取恢复材料，
+/// 并按冻结协议发出 `controller_resume_prepare`。任一步失败返回 false，调用方
+/// 必须结束本代通道（此时管理器的恢复失败路径已经清理租约与本代凭证）。
+pub(crate) fn begin_controlled_resume<P: ControlledRelayPort + ?Sized>(
+    port: &P,
+    manager: &ControlledDeviceManager,
+    resume: &mut ControlledResumeAttempt,
+) -> bool {
+    let Some(operation) = manager.current_operation() else {
+        return false;
+    };
+    let now_b = controlled_monotonic_millis();
+    let _ = manager.mark_transport_disconnected(now_b);
+    let Ok(material) = manager.begin_resume(operation, now_b) else {
+        return false;
+    };
+    let Ok(challenge) = new_resume_challenge() else {
+        return false;
+    };
+    let request_id = format!("request-resume-{}", uuid::Uuid::new_v4().simple());
+    let Ok(frame) = build_controller_resume_prepare(
+        &material.lease,
+        super::relay_transport::ControllerRole::ControlledB,
+        &request_id,
+        &material.resume_token,
+        &challenge,
+        material.relay_deadline_identity_ms,
+    ) else {
+        return false;
+    };
+    if port.try_send(frame).is_err() {
+        return false;
+    }
+    resume.lease = Some(material.lease);
+    resume.challenge_b64 = challenge;
+    resume.relay_deadline_identity_ms = material.relay_deadline_identity_ms;
+    // 激活后的 liveness epoch 必须与旧值不同（Relay 会据此拒绝复用）。
+    resume.liveness_epoch_b = format!("live-b-{}", uuid::Uuid::new_v4().simple());
+    resume.activation_id = None;
+    resume.peer_confirmed = false;
+    resume.confirmed = false;
+    resume.ack_sent = false;
+    resume.liveness_sent = false;
+    resume.ready_sent = false;
+    true
+}
+
+/// E2E-06：按 Relay/A 的恢复帧推进 B 端相位。任何相位不符、对端确认验签失败或
+/// `controller_resumed` 材料不完整都失败关闭（管理器侧已清理本代）。
+pub(crate) fn handle_controlled_resume_frame<P: ControlledRelayPort + ?Sized>(
+    port: &P,
+    manager: &ControlledDeviceManager,
+    lane: &ControlledLaneState,
+    resume: &mut ControlledResumeAttempt,
+    message: &Value,
+) -> ControlledResumeOutcome {
+    let Some(kind) = message.get("type").and_then(Value::as_str) else {
+        return ControlledResumeOutcome::Ignored;
+    };
+    let Some(operation) = manager.current_operation() else {
+        return ControlledResumeOutcome::Failed;
+    };
+    let Some(lease) = resume.lease.clone() else {
+        return ControlledResumeOutcome::Failed;
+    };
+    // 审核修复：Relay/A 的恢复帧必须绑定当前租约；旧代际或旧租约的残留帧一律
+    // 丢弃，既不推进相位也不终止候选。
+    if !resume_frame_matches_lease(&lease, message) {
+        return ControlledResumeOutcome::Ignored;
+    }
+    let role = super::relay_transport::ControllerRole::ControlledB;
+    let now_b = controlled_monotonic_millis();
+    let request_id = || format!("request-resume-{}", uuid::Uuid::new_v4().simple());
+    match kind {
+        "controller_resume_provisional" => {
+            let Some(activation_id) = message.get("activation_id").and_then(Value::as_str) else {
+                return ControlledResumeOutcome::Ignored;
+            };
+            if resume.activation_id.is_some() {
+                return ControlledResumeOutcome::Ignored;
+            }
+            if manager
+                .advance_resume(
+                    operation.clone(),
+                    ControlledResumeStep::Provisional { activation_id },
+                    now_b,
+                )
+                .is_err()
+            {
+                return ControlledResumeOutcome::Failed;
+            }
+            let Ok(confirm) = lane.seal_resume_confirm(&request_id(), activation_id) else {
+                return ControlledResumeOutcome::Failed;
+            };
+            if port.try_send(confirm).is_err() {
+                return ControlledResumeOutcome::Failed;
+            }
+            resume.activation_id = Some(activation_id.to_owned());
+            ControlledResumeOutcome::Progressed
+        }
+        "encrypted_resume_confirm" => match lane.open_resume_confirm(message) {
+            Ok(()) => {
+                resume.peer_confirmed = true;
+                ControlledResumeOutcome::Progressed
+            }
+            Err(_) => ControlledResumeOutcome::Ignored,
+        },
+        "controller_resume_activation_pending" => {
+            let Some(activation_id) = message.get("activation_id").and_then(Value::as_str) else {
+                return ControlledResumeOutcome::Ignored;
+            };
+            if resume.ack_sent || !resume.peer_confirmed {
+                return ControlledResumeOutcome::Ignored;
+            }
+            if !resume.confirmed {
+                if manager
+                    .advance_resume(
+                        operation.clone(),
+                        ControlledResumeStep::Confirmed { activation_id },
+                        now_b,
+                    )
+                    .is_err()
+                {
+                    return ControlledResumeOutcome::Failed;
+                }
+                resume.confirmed = true;
+            }
+            let Ok(ack) = build_controller_resume_activation_ack(
+                &lease,
+                &request_id(),
+                activation_id,
+                resume.relay_deadline_identity_ms,
+            ) else {
+                return ControlledResumeOutcome::Failed;
+            };
+            if port.try_send(ack).is_err() {
+                return ControlledResumeOutcome::Failed;
+            }
+            if manager
+                .advance_resume(
+                    operation.clone(),
+                    ControlledResumeStep::ActivationAcknowledged { activation_id },
+                    now_b,
+                )
+                .is_err()
+            {
+                return ControlledResumeOutcome::Failed;
+            }
+            resume.ack_sent = true;
+            if manager
+                .advance_resume(
+                    operation,
+                    ControlledResumeStep::PostActivationLiveness {
+                        activation_id,
+                        liveness_epoch_b: &resume.liveness_epoch_b,
+                    },
+                    now_b,
+                )
+                .is_err()
+            {
+                return ControlledResumeOutcome::Failed;
+            }
+            let Ok(liveness) = build_controller_post_activation_liveness(
+                &lease,
+                &request_id(),
+                activation_id,
+                &resume.liveness_epoch_b,
+            ) else {
+                return ControlledResumeOutcome::Failed;
+            };
+            if port.try_send(liveness).is_err() {
+                return ControlledResumeOutcome::Failed;
+            }
+            resume.liveness_sent = true;
+            ControlledResumeOutcome::Progressed
+        }
+        "controller_post_activation_liveness_confirmed" => {
+            let Some(activation_id) = message.get("activation_id").and_then(Value::as_str) else {
+                return ControlledResumeOutcome::Ignored;
+            };
+            let Some(liveness_epoch_b) = message.get("liveness_epoch_b").and_then(Value::as_str)
+            else {
+                return ControlledResumeOutcome::Ignored;
+            };
+            let Some(heartbeat_sequence_b) =
+                message.get("heartbeat_sequence_b").and_then(Value::as_str)
+            else {
+                return ControlledResumeOutcome::Ignored;
+            };
+            if !resume.liveness_sent || resume.ready_sent {
+                return ControlledResumeOutcome::Ignored;
+            }
+            let Ok(ready) = build_controller_resume_ready_ack(
+                &lease,
+                role,
+                &request_id(),
+                activation_id,
+                liveness_epoch_b,
+                heartbeat_sequence_b,
+            ) else {
+                return ControlledResumeOutcome::Failed;
+            };
+            if port.try_send(ready).is_err() {
+                return ControlledResumeOutcome::Failed;
+            }
+            if manager
+                .advance_resume(
+                    operation,
+                    ControlledResumeStep::ReadyAcknowledged { activation_id },
+                    now_b,
+                )
+                .is_err()
+            {
+                return ControlledResumeOutcome::Failed;
+            }
+            resume.ready_sent = true;
+            ControlledResumeOutcome::Progressed
+        }
+        "controller_resumed" => {
+            if !resume.ready_sent {
+                return ControlledResumeOutcome::Ignored;
+            }
+            let Some(activation_id) = message.get("activation_id").and_then(Value::as_str) else {
+                return ControlledResumeOutcome::Ignored;
+            };
+            let Some(liveness_epoch_a) = message.get("liveness_epoch_a").and_then(Value::as_str)
+            else {
+                return ControlledResumeOutcome::Ignored;
+            };
+            let Some(new_token) = message.get("new_resume_token_b64").and_then(Value::as_str)
+            else {
+                return ControlledResumeOutcome::Ignored;
+            };
+            let Some(relay_deadline) = super::resume::relay_resume_deadline_ms(message) else {
+                return ControlledResumeOutcome::Failed;
+            };
+            let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(new_token) else {
+                return ControlledResumeOutcome::Ignored;
+            };
+            let Ok(token) = <[u8; 32]>::try_from(decoded.as_slice()) else {
+                return ControlledResumeOutcome::Ignored;
+            };
+            let Ok(fingerprint) = lane.resume_fingerprint(activation_id) else {
+                return ControlledResumeOutcome::Failed;
+            };
+            if manager
+                .complete_resumed(
+                    operation,
+                    activation_id,
+                    now_b,
+                    liveness_epoch_a,
+                    token,
+                    fingerprint,
+                    relay_deadline,
+                )
+                .is_err()
+            {
+                return ControlledResumeOutcome::Failed;
+            }
+            lane.activate();
+            resume.reset();
+            ControlledResumeOutcome::Completed
+        }
+        "error" => ControlledResumeOutcome::Failed,
+        _ => ControlledResumeOutcome::Ignored,
+    }
+}
+
 fn controlled_lease_from_outcome(
     outcome: ControlledHandshakeOutcome,
     now_b: u64,
@@ -1088,17 +2465,289 @@ fn sanitize_error(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn relay_wall_expiry_becomes_a_bounded_local_monotonic_deadline() {
+        assert_eq!(
+            pairing_deadline_b(1_030_000, 1_000_000, 70).unwrap(),
+            30_070
+        );
+        assert_eq!(
+            pairing_deadline_b(2_000_000, 1_000_000, 70).unwrap(),
+            70 + MAX_PAIRING_CODE_TTL_MS
+        );
+        assert_eq!(
+            pairing_deadline_b(1_000_000, 1_000_000, 70).unwrap_err(),
+            "pairing_code_expired"
+        );
+        assert_eq!(
+            pairing_deadline_b(999_999, 1_000_000, 70).unwrap_err(),
+            "pairing_code_expired"
+        );
+    }
     use crate::features::remote_control::controller::controlling_handshake::ControllingHandshake;
     use crate::features::remote_control::controller::crypto::{CodeWrapKeyPair, HandshakeKeyPair};
     use crate::features::remote_control::controller::test_support::PairingFixture;
     use std::collections::VecDeque;
     use std::time::Duration;
 
+    #[test]
+    fn relay_log_lines_are_scoped_and_keep_the_legacy_controlled_prefix() {
+        assert_eq!(
+            controlled_log_line("registered", "waiting_for_pairing"),
+            "[controlled] stage=registered detail=waiting_for_pairing"
+        );
+        assert_eq!(
+            controller_log_line("connect_failed", "pairing_code_invalid"),
+            "[controller] stage=connect_failed detail=pairing_code_invalid"
+        );
+        assert_eq!(
+            remote_action_log_line(
+                "controller",
+                "remote_action_validation_failed",
+                "artifact_index",
+                "unsupported_capability"
+            ),
+            "[controller] stage=remote_action_validation_failed operation=artifact_index detail=unsupported_capability"
+        );
+    }
+
+    #[test]
+    fn log_allowlist_rejects_identifier_shaped_values_and_secrets() {
+        for sentinel in [
+            "AB12CD3",
+            "generation123",
+            "deviceAlice",
+            "sklive12345678",
+            "C:/Users/Alice",
+        ] {
+            assert_eq!(log_scope(sentinel), "unknown");
+            assert_eq!(log_stage(sentinel), "other");
+            assert_eq!(log_detail(sentinel), "other");
+            assert_eq!(log_remote_action_operation(sentinel), "other");
+        }
+        assert_eq!(log_stage("controlled_status"), "controlled_status");
+        assert_eq!(log_detail("pairing_code_invalid"), "pairing_code_invalid");
+        for stage in [
+            "task_submit_endpoint_received",
+            "task_submit_socket_written",
+            "task_submit_business_entered",
+            "task_submit_business_rejected",
+            "task_submit_context_validated",
+            "task_submit_payload_validated",
+            "task_submit_identity_validated",
+            "task_submit_capability_validated",
+            "task_submit_mapping_ready",
+            "task_submit_mapping_projected",
+            "task_submit_prepared",
+            "controlled_submission_admission_entered",
+            "task_model_source_received",
+        ] {
+            assert_eq!(log_stage(stage), stage);
+        }
+        for detail in ["forwarding_to_worker", "validating", "admitted"] {
+            assert_eq!(log_detail(detail), detail);
+        }
+        assert_eq!(
+            log_port_error_detail(RemotePortError::new("task_workspace_required", false)),
+            "task_workspace_required"
+        );
+        for code in CONTROLLED_PORT_LOG_ERROR_CODES {
+            assert_eq!(
+                log_port_error_detail(RemotePortError::new(code, false)),
+                *code
+            );
+        }
+        assert_eq!(
+            log_port_error_detail(RemotePortError::new("internal_token_like_literal", false)),
+            "other"
+        );
+        assert_eq!(
+            log_remote_action_operation("artifact_index"),
+            "artifact_index"
+        );
+        assert_eq!(log_stage("lifecycle_checkpoint"), "lifecycle_checkpoint");
+        for detail in [
+            "runtime_started",
+            "refresh_requested",
+            "refresh_state_rotation_begin",
+            "refresh_registration_wait_done",
+            "refresh_failed",
+        ] {
+            assert_eq!(log_detail(detail), detail);
+        }
+    }
+
+    #[test]
+    fn real_remote_failure_projections_do_not_persist_any_sensitive_category() {
+        struct RestoreHome(Option<std::ffi::OsString>);
+        impl Drop for RestoreHome {
+            fn drop(&mut self) {
+                match self.0.take() {
+                    Some(value) => unsafe { std::env::set_var("PINVOU3_HOME", value) },
+                    None => unsafe { std::env::remove_var("PINVOU3_HOME") },
+                }
+            }
+        }
+        let _guard = crate::platform::paths::tests::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let directory = tempfile::tempdir().unwrap();
+        let _restore = RestoreHome(std::env::var_os("PINVOU3_HOME"));
+        unsafe { std::env::set_var("PINVOU3_HOME", directory.path()) };
+        let sentinels = [
+            "2222222",
+            "endpointSentinelA1",
+            "leaseSentinelB2",
+            "tokenSentinelC3-credential-000001",
+            "keySentinelD4-credential-00000001",
+            "198.51.100.77",
+            "deviceSentinelE5",
+            "promptSentinelF6",
+            "replySentinelG7",
+            "toolArgsSentinelH8",
+            "fileSentinelI9.txt",
+            "C:/private/sentinel/J0",
+            "contentSentinelK1",
+        ];
+        let raw = sentinels.join("|");
+        log_attachment_digest_omitted(&raw);
+        log_task_persist_failure(false, &raw);
+        log_task_persist_failure(true, &raw);
+        log_artifact_capture_failure(&raw);
+        let raw_path = std::path::Path::new(&raw);
+        let raw_error = std::io::Error::other(raw.clone());
+        log_attachment_cleanup_failure(raw_path, &raw_error);
+        log_remote_action_event("controller", &raw, &raw, &raw);
+        let written =
+            std::fs::read_to_string(directory.path().join("logs/remote-control.log")).unwrap();
+        for sentinel in sentinels {
+            assert!(!written.contains(sentinel));
+        }
+        for stage in [
+            "attachment_digest_missing",
+            "task_terminal_persist_failed",
+            "task_rejected_persist_failed",
+            "artifact_capture_failed",
+            "attachment_cleanup_failed",
+        ] {
+            assert!(written.contains(&format!("stage={stage}")));
+        }
+    }
+
+    /// Relay 会把发送方的 commit 原样回投（router 契约）：B 只吃 `sender_role == A`
+    /// 的对端帧，自己的回投必须被跳过，否则真机上会在拿到预留的下一帧直接
+    /// `controller_handshake_rejected`（2026-09-20 实测）。
+    /// Relay 的收据校验契约（`controller-lease.js` 的 `acceptReceipt`）：
+    /// `finished_receipt_ack` 里带的必须是 `sender_role` 那一方（对端）的 receipt
+    /// secret，且能重算出对端先前的 commitment。这里在客户端侧做同构校验——真机
+    /// 首次暴露的 `finished_receipt_invalid`（端上兜底成 `invalid_message`）就是
+    /// 两端各自误传了自己的 receipt。
+    #[test]
+    fn receipt_ack_carries_the_peer_receipt_matching_its_commitment() {
+        use crate::features::remote_control::controller::crypto::{
+            ControllerRole as HandshakeRole, ReceiptSecret,
+        };
+        use crate::features::remote_control::controller::test_support::{
+            handshake_binding, hex_lower, pairing_fixture,
+        };
+
+        let PairingFixture {
+            relay,
+            reservation,
+            a_keys,
+            b_keys,
+            ..
+        } = pairing_fixture("relay-key-runtime");
+        let binding = handshake_binding(&reservation);
+        let mut driver = ControlledHandshakeDriver::new(b_keys);
+        let mut a = ControllingHandshake::new(
+            reservation["request_id"].as_str().unwrap(),
+            "claim-0001",
+            "2345678",
+            a_keys,
+            relay.trust.clone(),
+        );
+        let b_commit = driver.accept_reserved(&reservation, &relay.trust).unwrap();
+        let a_commit = a.accept_reserved(&reservation).unwrap();
+        let b_finished = driver.accept_peer_commitment(&a_commit).unwrap();
+        let a_finished = a.accept_peer_commitment(&b_commit).unwrap();
+        let b_ack = driver.accept_peer_finished(&a_finished).unwrap();
+        let a_ack = a.accept_peer_finished(&b_finished).unwrap();
+
+        // A 提交的 ack 声明 sender_role=B：必须携带 B 的 receipt（对得上 B 的 commitment）。
+        let from_a_ack =
+            ReceiptSecret::from_base64_for_test(a_ack["receipt_secret_b64"].as_str().unwrap())
+                .unwrap();
+        assert_eq!(
+            hex_lower(&from_a_ack.commitment(&binding, HandshakeRole::B).unwrap()),
+            b_commit["commitment"].as_str().unwrap()
+        );
+        // B 提交的 ack 声明 sender_role=A：必须携带 A 的 receipt。
+        let from_b_ack =
+            ReceiptSecret::from_base64_for_test(b_ack["receipt_secret_b64"].as_str().unwrap())
+                .unwrap();
+        assert_eq!(
+            hex_lower(&from_b_ack.commitment(&binding, HandshakeRole::A).unwrap()),
+            a_commit["commitment"].as_str().unwrap()
+        );
+        // 反向核对：把 A 的 receipt 当成 B 的 receipt 去算，必然对不上 B 的 commitment
+        //（这正是修复前两端实际发出的内容）。
+        assert_ne!(
+            hex_lower(&from_b_ack.commitment(&binding, HandshakeRole::B).unwrap()),
+            b_commit["commitment"].as_str().unwrap()
+        );
+    }
+
+    #[test]
+    fn only_peer_handshake_frames_are_dispatched_on_the_controlled_lane() {
+        let frame = |kind: &str, role: &str| {
+            json!({
+                "v": 1,
+                "type": kind,
+                "request_id": "request-0001",
+                "pairing_id": "pairing-0001",
+                "reservation_id": "reservation-0001",
+                "remote_control_generation": "generation-0001",
+                "relay_epoch": "relay-epoch-0001",
+                "transcript_hash": "00".repeat(32),
+                "sender_role": role,
+                "commitment": "11".repeat(32),
+                "ciphertext_b64": "AQID",
+                "ciphertext_bytes": "3",
+            })
+        };
+        assert!(skip_self_echoed_frame(&frame(
+            "finished_receipt_commit",
+            "B"
+        )));
+        assert!(!skip_self_echoed_frame(&frame(
+            "finished_receipt_commit",
+            "A"
+        )));
+        assert!(skip_self_echoed_frame(&frame(
+            "encrypted_handshake_finished",
+            "B"
+        )));
+        assert!(!skip_self_echoed_frame(&frame(
+            "encrypted_handshake_finished",
+            "A"
+        )));
+        // 其它帧（预留、joined、加密业务帧）绝不按自帧吞掉。
+        assert!(!skip_self_echoed_frame(&frame(
+            "controller_pairing_reserved",
+            "B"
+        )));
+        assert!(!skip_self_echoed_frame(&frame("controller_joined", "B")));
+        assert!(!skip_self_echoed_frame(&frame("encrypted_frame", "B")));
+    }
+
     /// Deterministic fake lane: queued messages, then either hang or close.
     struct FakePort {
         queued: VecDeque<Value>,
         sent: std::sync::Mutex<Vec<Value>>,
         hang: bool,
+        recv_delay: Duration,
     }
 
     impl FakePort {
@@ -1107,6 +2756,16 @@ mod tests {
                 queued: messages.into(),
                 sent: std::sync::Mutex::new(Vec::new()),
                 hang,
+                recv_delay: Duration::ZERO,
+            }
+        }
+
+        fn delayed(messages: Vec<Value>, hang: bool, recv_delay: Duration) -> Self {
+            Self {
+                queued: messages.into(),
+                sent: std::sync::Mutex::new(Vec::new()),
+                hang,
+                recv_delay,
             }
         }
     }
@@ -1119,6 +2778,9 @@ mod tests {
         }
 
         async fn recv(&mut self) -> Option<Value> {
+            if !self.recv_delay.is_zero() {
+                tokio::time::sleep(self.recv_delay).await;
+            }
             if let Some(message) = self.queued.pop_front() {
                 return Some(message);
             }
@@ -1207,6 +2869,10 @@ mod tests {
             "role_liveness_v1",
             "resume_v1",
             "task_v1",
+            "temporary_model_package_v1",
+            "permission_v1",
+            "attachment_v1",
+            "artifact_v1",
             "snapshot_journal_v1",
         ] {
             assert!(claim.contains(&family), "A 端未声明 {family}");
@@ -1223,28 +2889,63 @@ mod tests {
             ],
             false,
         );
-        let first = block_on(next_registration_step(
+        let registration = block_on(wait_for_registration(
             &mut port,
             &request,
             &receiver,
             Duration::from_millis(500),
         ))
         .unwrap();
-        assert!(matches!(first, RegistrationStep::Ignore));
-        let second = block_on(next_registration_step(
+        assert_eq!(registration.pairing_code, "2345678");
+        assert!(!format!("{registration:?}").contains("2345678"));
+    }
+
+    #[test]
+    fn registration_ignores_relay_connection_frame_before_the_sealed_result() {
+        let (request, receiver) = registration_request_fixture();
+        let mut port = FakePort::new(
+            vec![
+                json!({
+                    "type": "desktop_relay_connection",
+                    "endpoint_id": "endpoint-0001",
+                    "connected": true,
+                    "error": null,
+                }),
+                registered_response(&receiver),
+            ],
+            false,
+        );
+        block_on(wait_for_registration(
             &mut port,
             &request,
             &receiver,
             Duration::from_millis(500),
         ))
         .unwrap();
-        match second {
-            RegistrationStep::Registered(registration) => {
-                assert_eq!(registration.pairing_code, "2345678");
-                assert!(!format!("{registration:?}").contains("2345678"));
-            }
-            RegistrationStep::Ignore => panic!("sealed result must not be ignored"),
-        }
+    }
+
+    #[test]
+    fn registration_treats_relay_disconnect_frame_as_retryable_disconnect() {
+        let (request, receiver) = registration_request_fixture();
+        let mut port = FakePort::new(
+            vec![json!({
+                "type": "desktop_relay_connection",
+                "endpoint_id": "endpoint-0001",
+                "connected": false,
+                "error": "transport_closed",
+            })],
+            false,
+        );
+        assert_eq!(
+            block_on(wait_for_registration(
+                &mut port,
+                &request,
+                &receiver,
+                Duration::from_millis(500),
+            ))
+            .unwrap_err(),
+            "desktop_relay_disconnected"
+        );
     }
 
     #[test]
@@ -1252,7 +2953,7 @@ mod tests {
         let (request, receiver) = registration_request_fixture();
         let mut port = FakePort::new(Vec::new(), true);
         assert_eq!(
-            block_on(next_registration_step(
+            block_on(wait_for_registration(
                 &mut port,
                 &request,
                 &receiver,
@@ -1264,11 +2965,48 @@ mod tests {
     }
 
     #[test]
+    fn ignored_frames_do_not_extend_the_registration_deadline() {
+        let (request, receiver) = registration_request_fixture();
+        let ignored = vec![
+            json!({ "v": 2, "type": "desktop_endpoint_registered", "endpoint_id": "endpoint-0001" }),
+            json!({
+                "type": "desktop_relay_connection",
+                "endpoint_id": "endpoint-0001",
+                "connected": true,
+                "error": null,
+            }),
+            json!({
+                "v": 1,
+                "type": "error",
+                "request_id": "request-from-another-phase",
+                "code": "enrollment_required",
+                "message": "not this registration",
+            }),
+        ];
+        let mut port = FakePort::delayed(ignored, true, Duration::from_millis(50));
+        let started = std::time::Instant::now();
+        assert_eq!(
+            block_on(wait_for_registration(
+                &mut port,
+                &request,
+                &receiver,
+                Duration::from_millis(130),
+            ))
+            .unwrap_err(),
+            "pairing_registration_timeout"
+        );
+        assert!(
+            started.elapsed() < Duration::from_millis(220),
+            "ignored frames must not restart the attempt timeout"
+        );
+    }
+
+    #[test]
     fn closed_relay_lane_fails_closed() {
         let (request, receiver) = registration_request_fixture();
         let mut port = FakePort::new(Vec::new(), false);
         assert_eq!(
-            block_on(next_registration_step(
+            block_on(wait_for_registration(
                 &mut port,
                 &request,
                 &receiver,
@@ -1287,18 +3025,19 @@ mod tests {
                 "v": 1,
                 "type": "error",
                 "request_id": "request-registration-0001",
-                "code": "endpoint_not_enrolled",
+                "code": "enrollment_required",
                 "message": "pairing registration rejected",
             })],
             false,
         );
-        let error = block_on(next_registration_step(
+        let error = block_on(wait_for_registration(
             &mut port,
             &request,
             &receiver,
             Duration::from_millis(500),
         ))
         .unwrap_err();
+        assert_eq!(error, "enrollment_required");
         assert!(
             error
                 .chars()
@@ -1306,6 +3045,60 @@ mod tests {
             "relay failures must stay bounded: {error}"
         );
         assert!(!error.contains(' '));
+    }
+
+    #[test]
+    fn registration_ignores_an_error_for_another_request() {
+        let (request, receiver) = registration_request_fixture();
+        let mut port = FakePort::new(
+            vec![
+                json!({
+                    "v": 1,
+                    "type": "error",
+                    "request_id": "request-from-another-phase",
+                    "code": "enrollment_required",
+                    "message": "pairing registration rejected",
+                }),
+                registered_response(&receiver),
+            ],
+            false,
+        );
+        block_on(wait_for_registration(
+            &mut port,
+            &request,
+            &receiver,
+            Duration::from_millis(500),
+        ))
+        .unwrap();
+    }
+
+    #[test]
+    fn disabled_controller_lane_has_a_specific_bounded_error() {
+        let (request, receiver) = registration_request_fixture();
+        for relay_code in [
+            "unsupported_protocol_version",
+            "desktop_controller_unavailable",
+        ] {
+            let mut port = FakePort::new(
+                vec![json!({
+                    "v": 2,
+                    "type": "error",
+                    "code": relay_code,
+                    "message": "desktop controller is unavailable",
+                })],
+                false,
+            );
+            assert_eq!(
+                block_on(wait_for_registration(
+                    &mut port,
+                    &request,
+                    &receiver,
+                    Duration::from_millis(500),
+                ))
+                .unwrap_err(),
+                "desktop_controller_relay_unavailable"
+            );
+        }
     }
 
     fn keys() -> (CodeWrapKeyPair, CodeWrapKeyPair) {
@@ -1589,16 +3382,34 @@ mod tests {
     /// 回 A 端的会话引用；未知类型与畸形载荷不产生任何动作。
     #[tokio::test]
     async fn decrypted_payloads_dispatch_and_rewrite_the_session_reference() {
-        struct StubPort;
+        #[derive(Default)]
+        struct StubPort {
+            action_calls: std::sync::atomic::AtomicUsize,
+        }
 
         #[async_trait::async_trait]
         impl ControlledBusinessPort for StubPort {
+            async fn remote_action(
+                &self,
+                _lease: &LeaseContext,
+                _session_ref: &str,
+                _operation: &str,
+                _body: &Value,
+            ) -> Result<Value, String> {
+                self.action_calls
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(json!({"applied": true}))
+            }
             async fn capability_snapshot(
                 &self,
                 _lease: &LeaseContext,
                 request_id: &str,
+                _session_id: &str,
                 known_revision: u64,
             ) -> Result<Value, String> {
+                if known_revision == 999 {
+                    return Err("capability_source_unavailable".to_owned());
+                }
                 Ok(json!({
                     "v": 1,
                     "type": "capability_snapshot",
@@ -1664,13 +3475,61 @@ mod tests {
             );
         let lease =
             crate::features::remote_control::controller::test_support::lease_context(&reservation);
-        let port = StubPort;
+        let port = StubPort::default();
+
+        let action_results = RemoteActionResultCache::default();
+        let action = json!({
+            "request_id":"action-1","session_id":"session-a-ref",
+            "operation":"permission_decide",
+            "body":{"task_id":"task-1","permission_request_id":"permission-1","decision":"allow"}
+        });
+        let first = dispatch_decrypted_payload_cached(
+            &port,
+            &action_results,
+            &lease,
+            "remote_action_request",
+            &action,
+        )
+        .await
+        .unwrap();
+        let retry = dispatch_decrypted_payload_cached(
+            &port,
+            &action_results,
+            &lease,
+            "remote_action_request",
+            &action,
+        )
+        .await
+        .unwrap();
+        assert_eq!(first, retry);
+        assert_eq!(
+            port.action_calls.load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+        let conflict = dispatch_decrypted_payload_cached(
+            &port,
+            &action_results,
+            &lease,
+            "remote_action_request",
+            &json!({
+                "request_id":"action-1","session_id":"other-session",
+                "operation":"permission_decide","body":action["body"],
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(conflict[0].1["error_code"], "result_unknown");
+        assert_eq!(
+            port.action_calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "a reused request id with a different binding must never execute"
+        );
 
         let frames = dispatch_decrypted_payload(
             &port,
             &lease,
             "capability_snapshot_request",
-            &json!({"request_id": "request-1", "known_revision": "4"}),
+            &json!({"request_id": "request-1", "session_id": "session-a-ref", "known_revision": "4"}),
         )
         .await
         .unwrap();
@@ -1679,6 +3538,24 @@ mod tests {
         assert_eq!(kind, "capability_snapshot");
         assert_eq!(response["request_id"], "request-1");
         assert_eq!(response["capability_revision"], "5");
+
+        let frames = dispatch_decrypted_payload(
+            &port,
+            &lease,
+            "capability_snapshot_request",
+            &json!({
+                "request_id": "request-failed",
+                "session_id": "session-a-ref",
+                "known_revision": "999",
+            }),
+        )
+        .await
+        .unwrap();
+        let (kind, response) = frames.into_iter().next().unwrap();
+        assert_eq!(kind, "capability_snapshot_error");
+        assert_eq!(response["request_id"], "request-failed");
+        assert_eq!(response["session_id"], "session-a-ref");
+        assert_eq!(response["code"], "capability_snapshot_unavailable");
 
         let frames = dispatch_decrypted_payload(
             &port,
@@ -1783,7 +3660,9 @@ mod tests {
                 .unwrap(),
         )
         .unwrap();
-        assert_eq!(decoded, event);
+        let mut expected = event.clone();
+        expected.session_id = "session-a-ref".to_owned();
+        assert_eq!(decoded, expected);
         // 进行中的任务状态与附件/快照不回传（由 task_status 帧或后续任务负责）。
         let mut running = event.clone();
         running.kind = "task_status".to_owned();
@@ -1792,6 +3671,208 @@ mod tests {
         let mut attachment = event.clone();
         attachment.kind = "attachment".to_owned();
         assert!(build_journal_event_payload(&lease, "session-a-ref", &attachment).is_none());
+    }
+
+    /// E2E-06：B 端恢复序列——掉线后发 prepare，provisional 回 confirm，校验对端
+    /// confirm 后依次发 activation_ack / post_activation_liveness / ready_ack，
+    /// `controller_resumed` 后重开业务闸门。
+    #[test]
+    fn controlled_resume_sequence_sends_every_frame_and_reopens_business() {
+        use crate::features::remote_control::controller::encrypted_lane::ControllingLaneState;
+        use crate::features::remote_control::controller::test_support::{
+            lease_context, paired_session_keys, pairing_fixture,
+        };
+
+        let fixture = pairing_fixture("relay-key-b-resume");
+        let (a_session, b_session) =
+            paired_session_keys(fixture.a_keys, fixture.b_keys, &fixture.reservation);
+        let manager = ControlledDeviceManager::default();
+        let operation = manager.start(None, Vec::new()).unwrap();
+        // `controlled_monotonic_millis` has a process-wide origin. Anchor the
+        // fixture to the current clock so a long-running/full test suite does
+        // not turn this otherwise-valid resume lease into an expired one.
+        let now_b = controlled_monotonic_millis();
+        let resume_deadline_b = now_b.saturating_add(30_000);
+        // 租约的 generation 必须与本代一致（complete_connected 会据此校验）。
+        let lease_context = LeaseContext {
+            remote_control_generation: operation.generation().to_owned(),
+            ..lease_context(&fixture.reservation)
+        };
+        manager
+            .complete_registration(
+                operation.clone(),
+                ControlledRegistration {
+                    pairing_code: "2345678".into(),
+                    sealed_code_b64: "sealed".into(),
+                    expires_at_ms: resume_deadline_b,
+                },
+                now_b,
+            )
+            .unwrap();
+        manager.mark_pairing_reserved(operation.clone()).unwrap();
+        manager.mark_handshake_pending(operation.clone()).unwrap();
+        manager
+            .complete_connected(
+                operation.clone(),
+                ControlledLease {
+                    context: lease_context.clone(),
+                    liveness_epoch_a: "live-a-1".into(),
+                    resume_deadline_b,
+                    resume_token: [1; 32],
+                    transport_key_fingerprint: [2; 32],
+                    controller_device_name: "Controller PC".into(),
+                    connected_at_b: now_b,
+                    negotiated_capabilities: vec!["encrypted_frames_v1".into(), "resume_v1".into()],
+                },
+            )
+            .unwrap();
+        let lane = ControlledLaneState::default();
+        lane.install(HandshakeRole::B, &lease_context, b_session)
+            .unwrap();
+        let peer = ControllingLaneState::default();
+        peer.install(HandshakeRole::A, &lease_context, a_session)
+            .unwrap();
+
+        let port = FakePort::new(vec![], false);
+        let mut resume = ControlledResumeAttempt::default();
+        assert!(begin_controlled_resume(&port, &manager, &mut resume));
+        assert!(resume.is_active(), "恢复尝试必须处于进行中");
+        let activation = "activation-0001";
+
+        // provisional → B 回 confirm。
+        assert_eq!(
+            handle_controlled_resume_frame(
+                &port,
+                &manager,
+                &lane,
+                &mut resume,
+                &json!({
+                    "type": "controller_resume_provisional",
+                    "activation_id": activation,
+                    "connection_id": lease_context.connection_id,
+                    "controller_lease_id": lease_context.controller_lease_id,
+                    "lease_epoch": lease_context.lease_epoch,
+                    "relay_epoch": lease_context.relay_epoch,
+                    "remote_control_generation": lease_context.remote_control_generation,
+                }),
+            ),
+            ControlledResumeOutcome::Progressed
+        );
+        // A 的 confirm（同一 resume 秘密）必须验签通过。
+        let peer_confirm = peer
+            .seal_resume_confirm("request-resume-peer", activation)
+            .unwrap();
+        assert_eq!(
+            handle_controlled_resume_frame(&port, &manager, &lane, &mut resume, &peer_confirm),
+            ControlledResumeOutcome::Progressed
+        );
+        // 审核回归：旧 generation 的恢复帧必须被丢弃且不影响相位。
+        assert_eq!(
+            handle_controlled_resume_frame(
+                &port,
+                &manager,
+                &lane,
+                &mut resume,
+                &json!({
+                    "type": "controller_resume_activation_pending",
+                    "activation_id": activation,
+                    "connection_id": lease_context.connection_id,
+                    "controller_lease_id": lease_context.controller_lease_id,
+                    "lease_epoch": lease_context.lease_epoch,
+                    "relay_epoch": lease_context.relay_epoch,
+                    "remote_control_generation": "generation-stale",
+                }),
+            ),
+            ControlledResumeOutcome::Ignored
+        );
+        // activation_pending → activation_ack + post_activation_liveness。
+        assert_eq!(
+            handle_controlled_resume_frame(
+                &port,
+                &manager,
+                &lane,
+                &mut resume,
+                &json!({
+                    "type": "controller_resume_activation_pending",
+                    "activation_id": activation,
+                    "connection_id": lease_context.connection_id,
+                    "controller_lease_id": lease_context.controller_lease_id,
+                    "lease_epoch": lease_context.lease_epoch,
+                    "relay_epoch": lease_context.relay_epoch,
+                    "remote_control_generation": lease_context.remote_control_generation,
+                }),
+            ),
+            ControlledResumeOutcome::Progressed
+        );
+        let epoch_b = resume.liveness_epoch_b.clone();
+        assert_eq!(
+            handle_controlled_resume_frame(
+                &port,
+                &manager,
+                &lane,
+                &mut resume,
+                &json!({
+                    "type": "controller_post_activation_liveness_confirmed",
+                    "activation_id": activation,
+                    "liveness_epoch_b": epoch_b,
+                    "heartbeat_sequence_b": "1",
+                    "connection_id": lease_context.connection_id,
+                    "controller_lease_id": lease_context.controller_lease_id,
+                    "lease_epoch": lease_context.lease_epoch,
+                    "relay_epoch": lease_context.relay_epoch,
+                    "remote_control_generation": lease_context.remote_control_generation,
+                }),
+            ),
+            ControlledResumeOutcome::Progressed
+        );
+        assert_eq!(
+            handle_controlled_resume_frame(
+                &port,
+                &manager,
+                &lane,
+                &mut resume,
+                &json!({
+                    "type": "controller_resumed",
+                    "activation_id": activation,
+                    "liveness_epoch_a": "live-a-2",
+                    "liveness_epoch_b": epoch_b,
+                    "resume_deadline_ms": "1700000030000",
+                    "new_resume_token_b64": base64::engine::general_purpose::STANDARD
+                        .encode([3_u8; 32]),
+                    "connection_id": lease_context.connection_id,
+                    "controller_lease_id": lease_context.controller_lease_id,
+                    "lease_epoch": lease_context.lease_epoch,
+                    "relay_epoch": lease_context.relay_epoch,
+                    "remote_control_generation": lease_context.remote_control_generation,
+                }),
+            ),
+            ControlledResumeOutcome::Completed
+        );
+        assert!(!resume.is_active());
+        assert!(manager.live_lease().is_ok(), "恢复完成后必须回到 connected");
+        assert_eq!(manager.live_liveness_epoch().as_deref(), Some("live-a-2"));
+        assert!(!lane.is_suspended(), "恢复完成后业务通道必须重新打开");
+        let now_b = controlled_monotonic_millis();
+        manager.mark_transport_disconnected(now_b);
+        let second = manager
+            .begin_resume(manager.current_operation().unwrap(), now_b)
+            .unwrap();
+        assert_eq!(second.relay_deadline_identity_ms, 1_700_000_030_000);
+        let sent = port.sent.lock().unwrap();
+        let kinds: Vec<&str> = sent
+            .iter()
+            .filter_map(|frame| frame.get("type").and_then(Value::as_str))
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![
+                "controller_resume_prepare",
+                "encrypted_resume_confirm",
+                "controller_resume_activation_ack",
+                "controller_post_activation_liveness",
+                "controller_resume_ready_ack",
+            ]
+        );
     }
 
     /// 出站旁路（journal 回传句柄）：安装后可取用同一代 sender，清空后不再可发。
