@@ -532,7 +532,7 @@ fn snapshot_failure_hint(message: &str, size_gated: bool) -> &'static str {
         // the directory discards the workspace's whole undo history.
         "  the snapshot side repo under `~/.codewhale/snapshots` is half-initialized; snapshots sweep a leftover lock and re-init automatically once it ages out (about an hour) — remove that workspace's directory (discarding its snapshot history) only if the error persists past that."
     } else {
-        "  the timed-out git likely left a stale index.lock in the snapshot side repo; snapshots retry once it ages out (about an hour)."
+        "  the timed-out git likely left a stale lock file in the snapshot side repo (`index.lock`, or a ref lock such as `HEAD.lock` from an interrupted ref update); snapshots retry once it ages out (about an hour)."
     }
 }
 
@@ -570,9 +570,13 @@ mod snapshot_failure_hint_tests {
     }
 
     #[test]
-    fn other_git_timeouts_keep_the_stale_index_lock_hint() {
+    fn other_git_timeouts_keep_the_stale_lock_hint() {
         let message = format!("{} after 300s: …", git_timeout_marker("commit"));
-        assert!(snapshot_failure_hint(&message, false).contains("index.lock"));
+        let hint = snapshot_failure_hint(&message, false);
+        assert!(hint.contains("stale lock file"), "{hint}");
+        // `update-ref HEAD` leaves a `HEAD.lock`, not an `index.lock`, so
+        // the generic arm must not promise a single lock name.
+        assert!(hint.contains("ref lock"), "{hint}");
     }
 
     // A non-zero-status `git init` repeats forever and carries
