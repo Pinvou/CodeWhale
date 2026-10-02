@@ -942,6 +942,15 @@ pub trait TaskExecutor: Send + Sync {
         events: mpsc::Sender<TaskExecutionEvent>,
         cancel: CancellationToken,
     ) -> TaskExecutionResult;
+
+    /// Test seam for the server wiring pin: the built-in executor as the
+    /// manager actually received it, so the pin reads the answerability flag
+    /// where `start_with_runtime_manager` forwarded it. Custom executors
+    /// keep the default — there is nothing to expose.
+    #[cfg(test)]
+    fn as_engine_executor(&self) -> Option<&EngineTaskExecutor> {
+        None
+    }
 }
 
 /// Executor backed by the shared runtime and its canonical provider resolver.
@@ -1050,6 +1059,11 @@ impl TaskExecutor for EngineTaskExecutor {
             self.answerable_waits,
         )
         .await
+    }
+
+    #[cfg(test)]
+    fn as_engine_executor(&self) -> Option<&EngineTaskExecutor> {
+        Some(self)
     }
 }
 
@@ -4791,6 +4805,41 @@ mod tests {
             !cfg.human_waits_answerable,
             "from_runtime must default to unanswerable human waits"
         );
+    }
+
+    #[tokio::test]
+    async fn server_task_runtime_wires_answerable_human_waits_into_the_executor() -> Result<()> {
+        // The server opt-in must survive every hop of its wiring: the
+        // `server_task_config` builder and `start_with_runtime_manager`'s
+        // forward into `EngineTaskExecutor`. Reverting any one hop to the
+        // unanswerable default left the whole suite green — the review gap
+        // this pin closes — so the assertion reads the flag where it lands:
+        // the executor field the manager runs tasks on, built through the
+        // same `open_server_task_runtime` entry `run_http_server` uses.
+        let _env_lock = crate::test_support::lock_test_env();
+        let tasks_dir = tempfile::tempdir()?.keep();
+        let _tasks_dir =
+            crate::test_support::EnvVarGuard::set("CODEWHALE_TASKS_DIR", tasks_dir.as_os_str());
+        let workspace = tempfile::tempdir()?.keep();
+        let registry = crate::plugins::PluginDiscoveryContext::capture_pre_dotenv()
+            .registry_for_workspace(&workspace);
+        let (_runtime_threads, manager) = crate::runtime_api::open_server_task_runtime(
+            &Config::default(),
+            &workspace,
+            registry,
+            1,
+        )
+        .await?;
+        let engine = manager
+            .executor
+            .as_engine_executor()
+            .expect("the server task runtime must use the built-in engine executor");
+        assert!(
+            engine.answerable_waits,
+            "the server task runtime must forward the answerable opt-in into its executor"
+        );
+        manager.shutdown();
+        Ok(())
     }
 
     #[test]
