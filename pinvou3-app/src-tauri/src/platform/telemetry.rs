@@ -192,6 +192,9 @@ impl TelemetryState {
     }
 
     pub fn record_turn(&self, input_tokens: u32, output_tokens: u32, success: bool) {
+        // Rust 1.99 deprecated fetch_update (renamed to try_update); the MSRV
+        // (1.89) predates the new name, so keep the old call.
+        #[allow(deprecated)]
         let _ =
             self.inner
                 .active_turns
