@@ -398,6 +398,22 @@ impl ControllingDeviceManager {
             .as_ref()
             .and_then(|gate| gate.resumed_liveness_epoch().map(str::to_owned))
             .unwrap_or_default();
+        // Disconnect clears transport admission. Reinstall only after the complete
+        // authenticated resume gate succeeds, before publishing Connected.
+        if let Some(transport) = inner.transport.as_ref() {
+            if transport
+                .install_authenticated_lease(super::relay_transport::AuthenticatedLease {
+                    context: lease.context.clone(),
+                    negotiated_capabilities: lease.negotiated_capabilities.clone(),
+                })
+                .is_err()
+            {
+                clear_live_context(&mut inner);
+                inner.phase = ControllingStatusKind::Error;
+                inner.error_code = Some(RESUME_FAILED_ERROR);
+                return Err(ControllingStateError::new("controller_resume_failed"));
+            }
+        }
         inner.resume_gate = Some(ControllerResumeGate::new(
             ControllerRole::ControllerA,
             lease.context.clone(),
@@ -1224,6 +1240,23 @@ mod tests {
         manager
             .complete_connected(operation.clone(), lease())
             .unwrap();
+        let (sender, _receiver) = super::super::relay_transport::transport_channels(
+            ControllerRole::ControllerA,
+            "generation-0001",
+            2,
+            2,
+            8192,
+            1024,
+        );
+        sender
+            .install_authenticated_lease(super::super::relay_transport::AuthenticatedLease {
+                context: lease().context,
+                negotiated_capabilities: lease().negotiated_capabilities,
+            })
+            .unwrap();
+        manager.replace_transport(sender.clone());
+        // The real disconnect callback invalidates sender admission.
+        sender.clear_authenticated_lease();
         manager.mark_transport_disconnected(5_000, Some(30_000));
         manager.begin_resume(operation.clone(), 1_000).unwrap();
         for (step, now_b) in [
@@ -1261,12 +1294,38 @@ mod tests {
             manager
                 .advance_resume(operation.clone(), step, now_b)
                 .unwrap();
+            assert!(
+                sender.authenticated_lease().is_none(),
+                "intermediate resume steps cannot admit business"
+            );
         }
         let resumed = manager
             .complete_resumed(
                 operation, activation, 7_000, "live:a-2", [3; 32], [4; 32], 30_000,
             )
             .unwrap();
+        assert_eq!(
+            sender.authenticated_lease().unwrap().context,
+            lease().context
+        );
+        let frame = serde_json::json!({
+            "v": 1, "type": "encrypted_frame", "connection_id": "connection-0001",
+            "controller_lease_id": "lease-0001", "lease_epoch": "1",
+            "relay_epoch": "relay-epoch-0001", "remote_control_generation": "generation-0001",
+            "frame_sequence": "1", "direction": "a_to_b", "payload_kind": "task_submit",
+            "ciphertext_b64": "AQID", "ciphertext_bytes": "3"
+        });
+        sender
+            .try_send_business(&frame)
+            .expect("complete resumed restores actual transport admission");
+        sender.try_send_business(&frame).unwrap();
+        assert_eq!(
+            sender.try_send_business(&frame),
+            Err(ControllerSendError::QueueFull(
+                super::super::relay_transport::FramePriority::Business,
+            )),
+            "two real queued frames exhaust the bounded business queue"
+        );
         assert_eq!(resumed.status, ControllingStatusKind::Connected);
         assert_eq!(
             manager.live_lease().unwrap().controller_lease_id,
@@ -1276,11 +1335,12 @@ mod tests {
 
     #[test]
     fn invalid_resumed_cycle_metadata_fails_closed_before_installation() {
-        for (deadline, epoch) in [
-            (0, "live-a-2"),
-            (60_000, ""),
-            (60_000, "invalid epoch"),
-            (60_000, "live~a-2"),
+        for (deadline, epoch, generation) in [
+            (0, "live-a-2", "generation-0001"),
+            (60_000, "", "generation-0001"),
+            (60_000, "invalid epoch", "generation-0001"),
+            (60_000, "live~a-2", "generation-0001"),
+            (60_000, "live-a-2", "generation-replaced"),
         ] {
             let manager = ControllingDeviceManager::default();
             let operation = manager.connect("234-4567").unwrap();
@@ -1288,6 +1348,15 @@ mod tests {
             manager
                 .complete_connected(operation.clone(), lease())
                 .unwrap();
+            let (sender, _receiver) = super::super::relay_transport::transport_channels(
+                ControllerRole::ControllerA,
+                generation,
+                2,
+                2,
+                8192,
+                1024,
+            );
+            manager.replace_transport(sender.clone());
             manager.mark_transport_disconnected(5_000, Some(30_000));
             manager.begin_resume(operation.clone(), 6_000).unwrap();
             let activation = "activation-0001";
@@ -1341,6 +1410,11 @@ mod tests {
             let inner = manager.inner.lock();
             assert!(inner.lease.is_none());
             assert!(inner.resume_gate.is_none());
+            assert!(sender.authenticated_lease().is_none());
+            assert!(
+                sender.is_stopped(),
+                "failed installation stops the current transport owner"
+            );
         }
     }
 
