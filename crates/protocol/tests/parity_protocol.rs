@@ -1,10 +1,12 @@
 use codewhale_protocol::{
-    AppRequest, EventFrame, ThreadGoal, ThreadGoalProgressParams, ThreadGoalSetParams,
-    ThreadGoalStatus, ThreadListParams, ThreadRequest, ThreadResumeParams, ToolOutput,
-    UserInputAnswerEvent, UserInputOptionEvent, UserInputQuestionEvent, UserInputRequestEvent,
+    AppRequest, EventFrame, Thread, ThreadGoal, ThreadGoalProgressParams, ThreadGoalSetParams,
+    ThreadGoalStatus, ThreadListParams, ThreadRequest, ThreadResumeParams, ThreadStartParams,
+    ThreadStatus, ToolOutput, UserInputAnswerEvent, UserInputOptionEvent, UserInputQuestionEvent,
+    UserInputRequestEvent,
     runtime::{RUNTIME_EVENT_ENVELOPE_SCHEMA_VERSION, RuntimeEventEnvelope},
 };
 use serde_json::{Value, json};
+use std::path::PathBuf;
 
 #[test]
 fn mcp_tool_output_public_shape_remains_source_compatible() {
@@ -109,6 +111,10 @@ fn thread_resume_params_round_trip() {
         base_instructions: Some("base".to_string()),
         developer_instructions: Some("dev".to_string()),
         personality: Some("default".to_string()),
+        workspace_roots: Some(vec![
+            PathBuf::from("/repo/main"),
+            PathBuf::from("/repo/shared"),
+        ]),
         persist_extended_history: true,
     });
 
@@ -118,10 +124,170 @@ fn thread_resume_params_round_trip() {
         ThreadRequest::Resume(params) => {
             assert_eq!(params.thread_id, "thread-123");
             assert_eq!(params.model.as_deref(), Some("deepseek-v4-pro"));
+            assert_eq!(
+                params.workspace_roots,
+                Some(vec![
+                    PathBuf::from("/repo/main"),
+                    PathBuf::from("/repo/shared"),
+                ]),
+                "an explicit root set round-trips"
+            );
+            assert!(
+                encoded.contains(r#""workspace_roots":["/repo/main","/repo/shared"]"#),
+                "the encoded frame must actually carry the set: {encoded}"
+            );
             assert!(params.persist_extended_history);
         }
         other => panic!("unexpected request: {other:?}"),
     }
+}
+
+#[test]
+fn thread_start_params_workspace_roots_round_trip() {
+    let request = ThreadRequest::Start(ThreadStartParams {
+        model: None,
+        model_provider: None,
+        cwd: Some(PathBuf::from("/repo/main")),
+        workspace_roots: vec![PathBuf::from("/repo/lib"), PathBuf::from("/repo/docs")],
+        persist_extended_history: false,
+    });
+
+    let encoded = serde_json::to_string(&request).expect("serialize request");
+    assert!(encoded.contains(r#""workspace_roots":["/repo/lib","/repo/docs"]"#));
+    let decoded: ThreadRequest = serde_json::from_str(&encoded).expect("deserialize request");
+    match decoded {
+        ThreadRequest::Start(params) => {
+            assert_eq!(
+                params.workspace_roots,
+                vec![PathBuf::from("/repo/lib"), PathBuf::from("/repo/docs")]
+            );
+        }
+        other => panic!("unexpected request: {other:?}"),
+    }
+}
+
+#[test]
+fn thread_resume_params_explicit_empty_set_survives_the_wire() {
+    // The three-state resume contract rides on the wire distinguishing
+    // three shapes: absent key = None = inherit the persisted set;
+    // `[]` = Some(vec![]) = an explicit clear back to the bare cwd;
+    // non-empty = replace. A skip-attr or deserialize-adapter refactor
+    // that folds `[]` into `None` would silently degrade explicit-clear
+    // back to inherit - this pins the distinction on the wire itself.
+    let payload = r#"{"kind":"resume","thread_id":"t","workspace_roots":[]}"#;
+    let decoded: ThreadRequest = serde_json::from_str(payload).expect("deserialize explicit clear");
+    match &decoded {
+        ThreadRequest::Resume(params) => {
+            assert_eq!(params.workspace_roots, Some(Vec::new()));
+            let encoded = serde_json::to_string(&decoded).expect("re-encode");
+            assert!(
+                encoded.contains(r#""workspace_roots":[]"#),
+                "an explicit clear must re-encode with the key present: {encoded}"
+            );
+        }
+        other => panic!("unexpected request: {other:?}"),
+    }
+}
+
+#[test]
+fn thread_params_without_workspace_roots_deserialize_to_empty() {
+    // Payloads written before the field existed carry no workspace_roots key;
+    // they must still decode, yielding an empty root set.
+    let legacy_start = r#"{"kind":"start","cwd":"/repo"}"#;
+    let decoded: ThreadRequest =
+        serde_json::from_str(legacy_start).expect("deserialize legacy start request");
+    match decoded {
+        ThreadRequest::Start(params) => {
+            assert!(params.workspace_roots.is_empty());
+            assert!(
+                !serde_json::to_string(&params)
+                    .expect("serialize start params")
+                    .contains("workspace_roots"),
+                "empty root set must stay off the wire"
+            );
+        }
+        other => panic!("unexpected request: {other:?}"),
+    }
+
+    let legacy_resume = r#"{"kind":"resume","thread_id":"thread-1"}"#;
+    let decoded: ThreadRequest =
+        serde_json::from_str(legacy_resume).expect("deserialize legacy resume request");
+    match decoded {
+        ThreadRequest::Resume(params) => assert!(params.workspace_roots.is_none()),
+        other => panic!("unexpected request: {other:?}"),
+    }
+
+    let legacy_fork = r#"{"kind":"fork","thread_id":"thread-1"}"#;
+    let decoded: ThreadRequest =
+        serde_json::from_str(legacy_fork).expect("deserialize legacy fork request");
+    match decoded {
+        // Absent must mean "inherit the parent's set": an empty `Some` would
+        // be read as an explicit clear and degrade a multi-root parent to
+        // the fork cwd.
+        ThreadRequest::Fork(params) => assert!(params.workspace_roots.is_none()),
+        other => panic!("unexpected request: {other:?}"),
+    }
+}
+
+#[test]
+fn thread_fork_params_explicit_empty_set_survives_the_wire() {
+    // Same three-state contract as resume: absent key = None = inherit,
+    // `[]` = Some(vec![]) = explicit clear, non-empty = replace.
+    let payload = r#"{"kind":"fork","thread_id":"t","workspace_roots":[]}"#;
+    let decoded: ThreadRequest = serde_json::from_str(payload).expect("deserialize explicit clear");
+    match &decoded {
+        ThreadRequest::Fork(params) => {
+            assert_eq!(params.workspace_roots, Some(Vec::new()));
+            let encoded = serde_json::to_string(&decoded).expect("re-encode");
+            assert!(
+                encoded.contains(r#""workspace_roots":[]"#),
+                "an explicit clear must re-encode with the key present: {encoded}"
+            );
+        }
+        other => panic!("unexpected request: {other:?}"),
+    }
+}
+
+#[test]
+fn thread_dto_workspace_roots_default_for_legacy_payloads() {
+    let legacy = r#"{
+        "id": "thread-1",
+        "preview": "",
+        "ephemeral": false,
+        "model_provider": "deepseek",
+        "created_at": 1,
+        "updated_at": 2,
+        "status": "idle",
+        "cwd": "/repo",
+        "cli_version": "0.0.0",
+        "source": "interactive"
+    }"#;
+    let decoded: Thread = serde_json::from_str(legacy).expect("deserialize legacy thread");
+    assert!(decoded.workspace_roots.is_empty());
+    assert!(matches!(decoded.status, ThreadStatus::Idle));
+
+    // An empty root set is omitted from the wire frame, matching the params'
+    // skip-if-empty convention: a thread decoded from a legacy payload keeps
+    // the historical frame byte-identical. (A thread CREATED by this build
+    // always carries at least [cwd] — intake normalization never yields an
+    // empty set — so omission happens only for pre-field rows.)
+    let encoded_single_root =
+        serde_json::to_string(&decoded).expect("serialize single-root thread");
+    let frame: serde_json::Value =
+        serde_json::from_str(&encoded_single_root).expect("single-root frame parses");
+    assert!(
+        frame.get("workspace_roots").is_none(),
+        "an empty root set must stay off the wire frame: {frame}"
+    );
+
+    let mut current = decoded;
+    current.workspace_roots = vec![PathBuf::from("/repo"), PathBuf::from("/repo/lib")];
+    let encoded = serde_json::to_string(&current).expect("serialize thread");
+    let round_tripped: Thread = serde_json::from_str(&encoded).expect("round-trip thread");
+    assert_eq!(
+        round_tripped.workspace_roots,
+        vec![PathBuf::from("/repo"), PathBuf::from("/repo/lib")]
+    );
 }
 
 #[test]

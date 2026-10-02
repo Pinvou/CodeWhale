@@ -198,6 +198,16 @@ pub(super) async fn patch_session(
     Path(id): Path<String>,
     Json(req): Json<PatchSessionRequest>,
 ) -> Result<Json<PatchSessionResponse>, ApiError> {
+    // Normalize the id once at the boundary: the store judges the trimmed
+    // value, so a padded id (`"%20sess…"` in the path) is one session to the
+    // store, not two rows distinguished by whitespace. An empty id has no
+    // target.
+    let id = id.trim().to_string();
+    if id.is_empty() {
+        return Err(ApiError::bad_request(
+            "PATCH /v1/sessions/{id} requires a non-empty session id",
+        ));
+    }
     if req.title.is_none() && req.archived.is_none() {
         return Err(ApiError::bad_request(
             "PATCH /v1/sessions/{id} requires at least one of `title` or `archived`",
@@ -312,6 +322,7 @@ pub(super) async fn resume_session_thread(
             model_provider: Some(session.metadata.model_provider.clone()),
             model_provider_id: session.metadata.model_provider_id.clone(),
             workspace: Some(session.metadata.workspace.clone()),
+            workspace_roots: session.metadata.workspace_roots.clone(),
             mode: Some(mode),
             allow_shell: None,
             trust_mode: None,
@@ -418,6 +429,7 @@ pub(super) async fn create_session_from_thread(
         )?;
     }
     session.system_prompt = detail.thread.system_prompt.clone();
+    session.metadata.workspace_roots = detail.thread.workspace_roots.clone();
 
     if let Some(title) =
         session_title_override(req.title.as_deref(), detail.thread.title.as_deref())
@@ -717,8 +729,22 @@ async fn persist_thread_cost(
 /// token counts and message ordering are authoritative.
 pub(super) async fn save_current_session(
     State(state): State<RuntimeApiState>,
-    Json(req): Json<SaveSessionRequest>,
+    Json(mut req): Json<SaveSessionRequest>,
 ) -> Result<Json<SaveSessionResponse>, ApiError> {
+    // Normalize the id once at the boundary: the store judges the trimmed
+    // value, so a padded id (`" sess… "`) is one session to the store, not
+    // two rows distinguished by whitespace. An explicit-but-empty id has no
+    // target at all and is rejected, not silently turned into "create new".
+    if let Some(raw) = req.session_id.as_deref() {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return Err(ApiError::bad_request(
+                "`session_id` must not be empty when provided",
+            ));
+        }
+        req.session_id = Some(trimmed.to_string());
+    }
+
     // Find the thread to save.
     let thread_id = match req.thread_id {
         Some(id) => id,
@@ -736,6 +762,14 @@ pub(super) async fn save_current_session(
                 .ok_or_else(|| ApiError::bad_request("No threads to save"))?
         }
     };
+
+    // Round-20 B20-3: the live-session guard was removed. The static
+    // registry is process-local and the runtime HTTP server never coexists
+    // with an interactive TUI surface in any shipped topology, so the guard
+    // could never engage — it headlined a breaking change that is
+    // unobservable (the registry itself stays: same-process retention
+    // pruning consults it). A concurrent writer in the same process is
+    // still arbitrated by last-write-wins at the store layer.
 
     // Get the engine handle (loads the thread into an engine if needed),
     // then request a session snapshot. This reuses the same code path as
@@ -774,6 +808,19 @@ pub(super) async fn save_current_session(
                     snapshot.model_provider_id.as_deref(),
                 );
                 updated.metadata.mode = Some(snapshot.mode.clone());
+                // The paired set travels with the workspace it belongs to,
+                // exactly as in `/rename` and `/fork`: a PATCH may have moved
+                // the thread since this session was last saved, and stamping
+                // only the roots would persist `workspace: <abandoned>` next
+                // to a set led by the new directory — a later resume-thread
+                // then re-admits the abandoned directory as a writable
+                // primary root. Both fields come from the same snapshot,
+                // re-normalized so the pair is consistent by construction.
+                updated.metadata.workspace = snapshot.workspace.clone();
+                updated.metadata.workspace_roots = codewhale_core::normalize_workspace_roots(
+                    &snapshot.workspace,
+                    &snapshot.workspace_roots,
+                );
                 updated
             }
             Err(e) => {
@@ -791,6 +838,7 @@ pub(super) async fn save_current_session(
                         &snapshot.model_provider,
                         snapshot.model_provider_id.as_deref(),
                     );
+                    session.metadata.workspace_roots = snapshot.workspace_roots.clone();
                     session
                 } else {
                     return Err(ApiError::internal(format!(
@@ -812,6 +860,7 @@ pub(super) async fn save_current_session(
             &snapshot.model_provider,
             snapshot.model_provider_id.as_deref(),
         );
+        session.metadata.workspace_roots = snapshot.workspace_roots.clone();
         session
     };
 
@@ -970,9 +1019,9 @@ fn map_session_err(id: &str, err: std::io::Error, action: &str) -> ApiError {
         std::io::ErrorKind::InvalidInput => {
             ApiError::bad_request(format!("Invalid session id '{id}'"))
         }
-        // The session is open in an interactive Codewhale session, which holds
-        // the authoritative copy in memory. Fail closed with a typed conflict
-        // rather than write something its next autosave would revert.
+        // Round-20 B20-3 retired the producing live-session guard, so this
+        // kind has no producer left on Unix; the mapping is retained
+        // defensively (a future io producer must not surface as a 500).
         std::io::ErrorKind::ResourceBusy => ApiError {
             status: StatusCode::CONFLICT,
             message: err.to_string(),
@@ -982,6 +1031,18 @@ fn map_session_err(id: &str, err: std::io::Error, action: &str) -> ApiError {
 }
 
 fn map_resume_thread_create_err(err: anyhow::Error) -> ApiError {
+    // Intake validation failures are client errors (round-24 P3): the
+    // resume lane forwards the SAVED session's workspace/roots into
+    // `create_thread`, whose validating intake can reject them — a
+    // hand-edited or migrated session row with a `/`-rooted or over-cap
+    // root set must answer 400 with the reason, exactly like the `/thread`
+    // and `/tool` lanes, not a server-fault 500.
+    if err
+        .downcast_ref::<codewhale_core::IntakeValidationError>()
+        .is_some()
+    {
+        return ApiError::bad_request(format!("Failed to create thread: {err}"));
+    }
     let reason = err.to_string();
     let message = format!("Failed to create thread: {reason}");
     if reason.starts_with("saved session has an empty provider identity")
@@ -1097,5 +1158,26 @@ mod resume_thread_error_tests {
             "Failed to save runtime thread: permission denied"
         ));
         assert_eq!(storage.status, StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[test]
+    fn intake_validation_errors_answer_400_like_the_thread_lane() {
+        // Round-24 P3: the resume lane forwards the saved session's root
+        // set into create_thread's validating intake; a rejected row (here
+        // a `/`-rooted set read back from a hand-edited session file) is a
+        // client-fixable record, not a server fault — the mapping must
+        // match the /thread and /tool lanes instead of the old 500.
+        let err = codewhale_core::validate_workspace_roots(
+            std::path::Path::new("/ws"),
+            &[std::path::PathBuf::from("/")],
+        )
+        .expect_err("a filesystem-root declaration is rejected at intake");
+        let mapped = map_resume_thread_create_err(err);
+        assert_eq!(mapped.status, StatusCode::BAD_REQUEST);
+        assert!(
+            mapped.message.contains("filesystem root"),
+            "the 400 body carries the intake reason: {}",
+            mapped.message
+        );
     }
 }

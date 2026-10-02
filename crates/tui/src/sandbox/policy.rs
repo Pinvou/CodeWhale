@@ -313,7 +313,14 @@ impl SandboxPolicy {
                 exclude_slash_tmp,
                 ..
             } => {
-                let mut roots: Vec<PathBuf> = writable_roots.clone();
+                // Canonicalize the configured roots the same way as the cwd,
+                // /tmp, and TMPDIR entries below: on macOS a `/var` spelling
+                // and its `/private/var` reality are the same directory, and
+                // the sandbox consumers compare canonical forms.
+                let mut roots: Vec<PathBuf> = writable_roots
+                    .iter()
+                    .map(|root| root.canonicalize().unwrap_or_else(|_| root.clone()))
+                    .collect();
 
                 // Add the current working directory
                 if let Ok(canonical_cwd) = cwd.canonicalize() {
@@ -325,10 +332,15 @@ impl SandboxPolicy {
                 // Git worktrees keep mutable metadata outside the worktree
                 // directory. Allow only the gitdir and commondir derived from
                 // a workspace `.git` pointer, preserving the workspace boundary
-                // for all other external paths.
-                for root in roots.clone() {
-                    roots.extend(resolve_git_worktree_writable_roots(&root));
+                // for all other external paths. (Round-24 P3 perf: the walk
+                // results buffer into a side vec — the old `roots.clone()`
+                // copied the whole root vec per exec command only to iterate
+                // it while extending.)
+                let mut git_pointer_roots = Vec::new();
+                for root in &roots {
+                    git_pointer_roots.extend(resolve_git_worktree_writable_roots(root));
                 }
+                roots.extend(git_pointer_roots);
 
                 // Add /tmp unless excluded
                 if !exclude_slash_tmp && let Ok(tmp) = Path::new("/tmp").canonicalize() {

@@ -27,7 +27,7 @@
 //!   | Tool           | Grouping key                             |
 //!   |---------------|------------------------------------------|
 //!   | `apply_patch`  | `patch:<hash of file paths>`             |
-//!   | shell tools    | `shell:<command prefix>`                 |
+//!   | shell tools    | `shell:<command prefix>` (+ `@cwd:<operand>` when the call carries one) |
 //!   | `fetch_url`    | `net:<hostname>`                         |
 //!   | everything else| `tool:<tool_name>:<hash of input>`       |
 //!
@@ -37,7 +37,6 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use crate::command_safety::classify_command;
-use crate::tools::apply_patch::{NormalizedApplyPatchInput, normalize_apply_patch_input};
 
 /// The fingerprint of a tool call — stable enough to match repeated
 /// calls but specific enough to avoid privilege confusion.
@@ -84,6 +83,15 @@ pub fn build_approval_grouping_key(tool_name: &str, input: &serde_json::Value) -
     let tool_name = crate::tools::canonical_action::canonical_action_alias(tool_name, input);
     let fingerprint = match tool_name {
         "apply_patch" => {
+            // B27-3 + A28-3: key on the REAL parser's plan —
+            // `preflight_apply_patch`, the same alias-folded judgment every
+            // plan-time gate uses. The round-26 ad-hoc scan (a) keyed the
+            // top-level override for replace-forms where execution never
+            // reads it (an approved patch grant then auto-approved an
+            // arbitrary replace-write under the same decoy override), and
+            // (b) collected only `+++ b/` headers, keying `+++ a/`-spelled,
+            // bare, timestamped, and /dev/null-delete sections into one
+            // shared `no_files` family that covers arbitrary targets.
             let paths_hash = hash_patch_paths(input);
             format!("patch:{paths_hash}")
         }
@@ -94,7 +102,18 @@ pub fn build_approval_grouping_key(tool_name: &str, input: &serde_json::Value) -
         | "exec_wait"
         | "exec_interact" => {
             let prefix = command_prefix(input);
-            format!("shell:{prefix}")
+            // The approval side judges the resolved effective cwd (the same
+            // value exec rule matching sees), so the grant is keyed to the
+            // command family AND the cwd operand: a grant approved at the
+            // session workspace must not silently cover the same command
+            // redirected into another root.
+            match shell_cwd_operand(input) {
+                // Length-prefix the operand (round-20 B20-2): the raw
+                // `prefix@cwd:` concatenation is non-injective — model-craftable
+                // spellings of prefix/cwd collide across the boundary.
+                Some(cwd) => format!("shell:{prefix}@cwd:{}:{cwd}", cwd.len()),
+                None => format!("shell:{prefix}"),
+            }
         }
         "fetch_url" | "web.fetch" | "web_fetch" => {
             let host = parse_host(input);
@@ -128,43 +147,58 @@ fn command_prefix(input: &serde_json::Value) -> String {
     classify_command(&tokens)
 }
 
-/// Hash the sorted set of file paths referenced by a patch input.
+/// Return the exec `cwd`/`working_dir` operand when the call carries one —
+/// the value the approval side resolves and judges as the effective cwd.
+fn shell_cwd_operand(input: &serde_json::Value) -> Option<&str> {
+    // Round-20 B20-2: mirror the check-side and execution field semantics —
+    // `get("cwd")` returning `Some(Value::Null)` used to block the
+    // `working_dir` fallback, keying the grant to the no-operand family
+    // while the check/exec treated the same call as redirected to
+    // `working_dir`. Skip Null (and non-string) values like they do.
+    ["cwd", "working_dir"]
+        .iter()
+        .find_map(|name| input.get(name).and_then(Value::as_str))
+        .filter(|cwd| !cwd.is_empty())
+}
+
+/// Hash the write targets of a patch input, taken from the REAL parser's
+/// plan (`preflight_apply_patch`): the top-level override keys ONLY in the
+/// patch form (execution's PathOverride-wins semantics; replace-form top
+/// levels are decoys), otherwise the touched file set keys as parsed —
+/// every accepted `+++` spelling (`a/`/`b/` prefixes, bare, tab timestamps)
+/// normalizes to the execution target, and deletions key under a separate
+/// delete marker so a delete grant never covers writes (B27-3/A28-3).
 fn hash_patch_paths(input: &serde_json::Value) -> String {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
 
-    let mut paths: Vec<&str> = Vec::new();
-
-    match normalize_apply_patch_input(input) {
-        Ok(NormalizedApplyPatchInput::Replacement { entries, .. }) => {
-            for change in entries {
-                if let Some(path) = change.get("path").and_then(|v| v.as_str()) {
-                    paths.push(path);
+    let mut folded = input.clone();
+    if super::file::apply_param_aliases(&mut folded, super::file::PATH_ALIASES, "apply_patch")
+        .is_err()
+    {
+        // Alias conflict: execution fails the call too; a distinct family
+        // keeps the key from silently matching a folded spelling.
+        return "alias_conflict".to_string();
+    }
+    match super::apply_patch::preflight_apply_patch(&folded) {
+        Ok(plan) => {
+            let mut hasher = DefaultHasher::new();
+            if let Some(override_path) = plan.path_override.as_deref() {
+                "override".hash(&mut hasher);
+                override_path.hash(&mut hasher);
+            } else {
+                for path in &plan.touched_files {
+                    path.hash(&mut hasher);
+                }
+                for path in &plan.deletes {
+                    "delete".hash(&mut hasher);
+                    path.hash(&mut hasher);
                 }
             }
+            format!("{:x}", hasher.finish())
         }
-        Ok(NormalizedApplyPatchInput::Patch(patch_text)) => {
-            for line in patch_text.lines() {
-                if let Some(rest) = line.strip_prefix("+++ b/") {
-                    paths.push(rest.trim());
-                }
-            }
-        }
-        Err(_) => {}
+        Err(_) => "unparseable".to_string(),
     }
-
-    paths.sort();
-    paths.dedup();
-
-    if paths.is_empty() {
-        return "no_files".to_string();
-    }
-
-    let mut hasher = DefaultHasher::new();
-    for path in &paths {
-        path.hash(&mut hasher);
-    }
-    format!("{:x}", hasher.finish())
 }
 
 /// Parse the host portion from a URL input.
@@ -354,6 +388,109 @@ mod tests {
     }
 
     #[test]
+    fn grouping_key_rekeys_on_the_top_level_path_override() {
+        // Round-26 M26-3: execution's PathOverride wins over the payload
+        // headers (they become decoys), so the grouping key must cover the
+        // override — the same patch body under two different targets used
+        // to share one grant key, letting a session-approved family
+        // auto-approve a redirect to an arbitrary file (the B20-2 shell
+        // class, on the patch arm). Alias spellings fold first, exactly
+        // like preflight/execute.
+        let patch = "@@ -1,2 +1,2 @@\n old\n-value\n+new-value\n";
+        let decoy = build_approval_grouping_key("apply_patch", &json!({"patch": patch}));
+        for alias in ["path", "file_path", "filePath"] {
+            let redirected = build_approval_grouping_key(
+                "apply_patch",
+                &json!({alias: ".git/hooks/pre-commit", "patch": patch}),
+            );
+            assert_ne!(
+                redirected, decoy,
+                "an {alias} override must re-key the grant family away from the header set"
+            );
+        }
+        // The same override target under different alias spellings is ONE
+        // family (the fold runs before hashing).
+        let canonical = build_approval_grouping_key(
+            "apply_patch",
+            &json!({"path": ".git/hooks/pre-commit", "patch": patch}),
+        );
+        let alias_spellings = build_approval_grouping_key(
+            "apply_patch",
+            &json!({"filePath": ".git/hooks/pre-commit", "patch": patch}),
+        );
+        assert_eq!(
+            canonical, alias_spellings,
+            "alias spellings of the same override collapse to one family"
+        );
+
+        // B27-3: in the REPLACE form the top-level path is a decoy execution
+        // never reads — the key must follow the entries, so an approved
+        // patch-form override grant cannot cover a replace-write hiding
+        // behind the same decoy.
+        let replace_decoy = build_approval_grouping_key(
+            "apply_patch",
+            &json!({"path": ".git/hooks/pre-commit", "replace": [{"path": "notes.txt", "content": "x"}]}),
+        );
+        let replace_plain = build_approval_grouping_key(
+            "apply_patch",
+            &json!({"replace": [{"path": "notes.txt", "content": "x"}]}),
+        );
+        assert_eq!(
+            replace_decoy, replace_plain,
+            "a replace-form top-level path is a decoy and must not key the family"
+        );
+        assert_ne!(
+            replace_plain,
+            build_approval_grouping_key(
+                "apply_patch",
+                &json!({"replace": [{"path": "other.txt", "content": "x"}]}),
+            ),
+            "different replace targets are different families"
+        );
+
+        // A28-3: header spellings the old ad-hoc scan missed (`+++ a/`, bare
+        // `+++ x`) key to the REAL target, and a single-file grant must not
+        // cover a two-file patch whose second section rides such a spelling.
+        // `+++ a/x`-spelled and `+++ b/x`-spelled writes of the same target
+        // are ONE family (the parser normalizes both to x) — the old ad-hoc
+        // `+++ b/`-only scan keyed the a-spelling into the shared `no_files`
+        // family, whose grant then covered arbitrary targets (A28-3).
+        let b_spelled = build_approval_grouping_key(
+            "apply_patch",
+            &json!({"patch": "--- a/.env\n+++ b/.env\n@@ -1,1 +1,1 @@\n-old\n+new\n"}),
+        );
+        let a_spelled = build_approval_grouping_key(
+            "apply_patch",
+            &json!({"patch": "--- b/.env\n+++ a/.env\n@@ -1,1 +1,1 @@\n-old\n+new\n"}),
+        );
+        assert_eq!(
+            b_spelled, a_spelled,
+            "header-prefix spellings of the same target collapse to one family"
+        );
+        assert_ne!(
+            b_spelled,
+            build_approval_grouping_key(
+                "apply_patch",
+                &json!({"patch": "--- a/other.txt\n+++ b/other.txt\n@@ -1,1 +1,1 @@\n-old\n+new\n"}),
+            ),
+            "different targets stay different families"
+        );
+        // Deletions key under a delete marker: a delete grant covers no write.
+        let deletion = build_approval_grouping_key(
+            "apply_patch",
+            &json!({"patch": "--- a/old.txt\n+++ /dev/null\n@@ -1 +0,0 @@\n-gone\n"}),
+        );
+        let write_same_path = build_approval_grouping_key(
+            "apply_patch",
+            &json!({"patch": "--- a/old.txt\n+++ b/old.txt\n@@ -1,1 +1,1 @@\n-old\n+new\n"}),
+        );
+        assert_ne!(
+            deletion, write_same_path,
+            "a deletion keys apart from a write of the same path"
+        );
+    }
+
+    #[test]
     fn grouping_key_treats_replace_and_legacy_changes_as_the_same_path_set() {
         let canonical = build_approval_grouping_key(
             "apply_patch",
@@ -378,6 +515,56 @@ mod tests {
         let group_b =
             build_approval_grouping_key("exec_shell", &json!({"command": "cargo build --release"}));
         assert_eq!(group_a, group_b, "approvals must group by command family");
+    }
+
+    #[test]
+    fn shell_grouping_key_rekeys_on_the_cwd_operand() {
+        let at_workspace =
+            build_approval_grouping_key("exec_shell", &json!({"command": "git status"}));
+        let redirected = build_approval_grouping_key(
+            "exec_shell",
+            &json!({"command": "git status", "cwd": "/attached/repo"}),
+        );
+        assert_ne!(
+            at_workspace, redirected,
+            "a grant approved at the session workspace must not cover the same command redirected into another root"
+        );
+
+        let same_redirect = build_approval_grouping_key(
+            "exec_shell",
+            &json!({"command": "git status -s", "cwd": "/attached/repo"}),
+        );
+        assert_eq!(
+            redirected, same_redirect,
+            "the same command family in the same cwd stays one grant"
+        );
+
+        let via_working_dir = build_approval_grouping_key(
+            "exec_shell",
+            &json!({"command": "git status", "working_dir": "/attached/repo"}),
+        );
+        assert_eq!(
+            redirected, via_working_dir,
+            "cwd and working_dir are the same operand for the grant key"
+        );
+
+        // Round-20 B20-2: `cwd: null` must not block the `working_dir`
+        // fallback — the null spelling used to key the NO-OPERAND family
+        // while the check and execution treated the same call as redirected,
+        // letting a session-approved plain command run in the attached root
+        // unprompted.
+        let null_cwd_with_working_dir = build_approval_grouping_key(
+            "exec_shell",
+            &json!({"command": "git status", "cwd": null, "working_dir": "/attached/repo"}),
+        );
+        assert_eq!(
+            redirected, null_cwd_with_working_dir,
+            "a null cwd plus working_dir keys as the redirected operand"
+        );
+        assert_ne!(
+            at_workspace, null_cwd_with_working_dir,
+            "the redirected spelling must not collide with the no-operand family"
+        );
     }
 
     #[test]

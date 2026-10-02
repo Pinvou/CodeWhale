@@ -521,6 +521,11 @@ a TLS or verified transport boundary.
 - `GET /v1/sessions/summary?…` (same query params; projected row shape)
 - `GET /v1/sessions/{id}` (add `?peek=true&entries=12` for a bounded, redacted
   read-only peek instead of the full transcript)
+- `POST /v1/sessions` (`{ "thread_id": string, "title"?: string }` — save a
+  thread's stored turns as a new session)
+- `PUT /v1/sessions` (`{ "thread_id"?: string, "session_id"?: string }` —
+  snapshot a thread's live engine state; a `session_id` overwrites that
+  session in place)
 - `PATCH /v1/sessions/{id}` (`{ "title"?: string, "archived"?: bool }`)
 - `DELETE /v1/sessions/{id}`
 - `POST /v1/sessions/{id}/resume-thread`
@@ -560,9 +565,12 @@ archive notion.
 
 While a session is open in an interactive Codewhale process, that process holds
 the authoritative copy in memory and rewrites the whole document on its next
-autosave. `PATCH` therefore fails closed on it with `409 Conflict` rather than
-writing something that would be silently reverted. Change it in the terminal
-instead. A standalone `codewhale web` holds nothing open and is never blocked.
+autosave. **Retracted (round-20 B20-3):** the `409 Conflict` guard on
+`PATCH` and `PUT /v1/sessions` was removed — the process-local live-session
+registry cannot coexist with the runtime HTTP server in any shipped
+topology, so the conflict was unobservable and the guard is gone. Same-
+process writers converge by last-write-wins at the store layer; change a
+session open in the terminal from the terminal.
 
 `GET /v1/sessions/{id}?peek=true` returns a bounded, redacted, read-only view
 instead of the transcript: at most 12 entries of at most 400 characters each
@@ -590,9 +598,43 @@ provider, model, workspace, and permission fields:
   "model_provider": "openai-codex",
   "model": "gpt-5.6",
   "reasoning_effort": "high",
-  "allowed_tools": ["read_file", "search"]
+  "allowed_tools": ["read_file", "search"],
+  "workspace_roots": ["/Users/you/projects/codewhale", "/Users/you/projects/shared"]
 }
 ```
+
+`workspace_roots` (added by the multi-root workspace theme) declares the
+thread's full accessible root set: the first entry is the primary root (the
+thread's `workspace`) and the rest are attached roots whose writes the
+thread's sandbox policy, write carve-out, and repo law also govern. One
+server-side substitution qualifies "first entry": when the request omits
+`workspace`, the server fills in its own workspace, which takes the primary
+slot and demotes the client-sent first entry to an attached root. Omitting
+the field yields the historical single-root thread: the stored set is
+`[workspace]`, serialized as a one-element array (see the ThreadRecord note
+under "Runtime data model"). `PATCH
+/v1/threads/{id}` accepts the same field to reshape a live thread (empty
+array clears back to the bare workspace); a change while a turn is active is
+rejected. `POST /v1/threads/{id}/fork` and `POST /v1/threads/{id}/resume`
+take no request body: both always inherit the thread's stored set, and a
+client posting `workspace_roots` to either gets plain inheritance — reshape
+through `PATCH` instead.
+
+Resuming or forking a thread id that does not exist answers `404 Not Found`
+(the stdio `thread/resume` / `thread/fork` methods answer the typed
+`thread_not_found` error, `-32004`) instead of a success envelope carrying
+`status: "missing"`, so a stale id no longer hides behind a 200. Declared
+`workspace_roots` are validated at intake rather than silently reshaped: a
+root that is not an absolute path (a `~/shared` spelling is refused, not
+dropped), a root that normalizes to the filesystem root (`/`, `/..`), and a
+root that is an ancestor of the primary workspace (its parent directory)
+all answer `400 Bad Request` with the reason — each of those would widen
+the per-turn sandbox past what the request declared. A root that sits under
+the primary is accepted, and an explicit empty array still clears back to
+the bare workspace. These rejection checks are **lexical** (round-20
+B20-4): enforcement canonicalizes per root, so a symlink spelling can carry
+a lexically-sibling root past the ancestor rejection; canonicalize-at-
+intake is the scheduled promotion.
 
 `reasoning_effort` uses the canonical Runtime vocabulary (`auto`, `off`,
 `low`, `medium`, `high`, `xhigh`, `ultra`, or `max`; documented compatibility
@@ -777,6 +819,22 @@ the first returned event advances past exactly the omitted history.
 returns `{"restored": "<snapshot-id>"}`. The `id` must match a listed
 snapshot exactly (full id, case-sensitive); an unknown or malformed id
 returns `404` before any git command runs.
+
+When the snapshot's owning thread declares a root outside the primary
+workspace, the restore response grows a `boundary` object naming what the
+rollback does not cover: `attached_roots_not_reverted` (always `true`) and
+`note` (human-readable text). Single-root restores keep the legacy bare
+shape above — no `boundary` key.
+
+```json
+{
+  "restored": "<snapshot-id>",
+  "boundary": {
+    "attached_roots_not_reverted": true,
+    "note": "Only the primary workspace was reverted; attached workspace roots were not rolled back."
+  }
+}
+```
 
 ```json
 [
@@ -1015,7 +1073,13 @@ The runtime uses a durable Thread/Turn/Item lifecycle.
 
 - **ThreadRecord** — `id`, `created_at`, `updated_at`, `model`,
   `model_provider` (generic kind), `model_provider_id` (optional exact configured
-  route), `workspace`, `mode`, `task_id`, `system_prompt`, `latest_turn_id`,
+  route), `workspace`, `workspace_roots` (the full accessible root set,
+  primary first; normalization always prepends the workspace, so a thread
+  created through `POST /v1/threads` serializes at least one element — a
+  single-root thread reads `"workspace_roots": ["<workspace>"]` — and any
+  row whose normalized set is empty — including every row persisted before
+  the field existed — omits the key entirely), `mode`,
+  `task_id`, `system_prompt`, `latest_turn_id`,
   `latest_response_bookmark`, `archived`
 - **TurnRecord** — `id`, `thread_id`, `status` (`queued|in_progress|completed|
   failed|interrupted|canceled`), `effective_provider`, `effective_model`,

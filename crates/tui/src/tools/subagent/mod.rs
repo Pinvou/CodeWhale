@@ -3352,6 +3352,17 @@ pub struct SubAgentManager {
     pending_follow_ups: HashMap<String, Arc<std::sync::atomic::AtomicUsize>>,
     /// Test/observability: agent ids that received a live wake via followup.
     woken_agents: HashMap<String, bool>,
+    /// Test/observability: the workspace root set each spawned child was
+    /// launched with, keyed by child agent id. `ToolContext::boundary_roots`
+    /// and the gate's sandbox policy both materialize from this set.
+    #[cfg(test)]
+    spawned_workspace_roots: HashMap<String, Vec<PathBuf>>,
+    /// Test/observability: the exec-lane sandbox policy each spawned child
+    /// was launched with, keyed by child agent id. The policy is cloned from
+    /// the parent, so a worktree child must re-derive it from its cleared
+    /// root set or the parent's attached roots stay writable.
+    #[cfg(test)]
+    spawned_sandbox_policies: HashMap<String, Option<crate::sandbox::SandboxPolicy>>,
     /// Agent ids whose handle-store entries should be evicted on the next async
     /// drain. Populated by `cleanup()` when an agent record is retired; drained
     /// by async callers that hold the `HandleStore` lock (#3885).
@@ -3474,6 +3485,10 @@ impl SubAgentManager {
             queued_mail: HashMap::new(),
             pending_follow_ups: HashMap::new(),
             woken_agents: HashMap::new(),
+            #[cfg(test)]
+            spawned_workspace_roots: HashMap::new(),
+            #[cfg(test)]
+            spawned_sandbox_policies: HashMap::new(),
             pending_handle_evictions: Vec::new(),
             resume_targets: HashMap::new(),
             child_approvals: HashMap::new(),
@@ -5824,6 +5839,7 @@ impl SubAgentManager {
             fork_context,
             workspace,
             claim,
+            recorded_worktree_isolation,
             preserved_profile,
             child_route,
         ) = {
@@ -5866,13 +5882,26 @@ impl SubAgentManager {
             // stays inside the coordination ledger with the original bounded
             // scope instead of inheriting the caller's unchecked write surface.
             // The ledger claim is already namespaced and carries the isolation
-            // flag; both are passed through to the spawn seam.
+            // flag; both are passed through to the spawn seam. The claim is
+            // not the isolation authority, though — it can be released or
+            // never have existed for a worktree child — so the worker
+            // record's launch manifest is read below as the durable fallback.
             let claim = self
                 .coordination
                 .write_claims
                 .iter()
                 .find(|record| record.claim.owner == agent_id)
                 .map(|record| (record.claim.clone(), record.isolated_worktree));
+            // The spec's launch manifest durably pins that this child was
+            // spawned into an isolated worktree, independent of the claim
+            // lifecycle. Keying isolation on the claim alone resumed a
+            // released or claim-less worktree child in the caller's full
+            // root set — wider than the spawn it continues.
+            let recorded_worktree_isolation = self
+                .worker_records
+                .get(&agent_id)
+                .and_then(|record| record.spec.launch_manifest.as_ref())
+                .map(|manifest| manifest.worktree);
             // Preserve the interrupted child's runtime posture (read_only /
             // denied tools / shell) instead of rebuilding from the caller's
             // role, which could widen the resumed child's authority.
@@ -5893,6 +5922,7 @@ impl SubAgentManager {
                 agent.fork_context,
                 agent.workspace.clone(),
                 claim,
+                recorded_worktree_isolation,
                 preserved_profile,
                 child_route,
             )
@@ -5909,10 +5939,34 @@ impl SubAgentManager {
             ));
         }
         let runtime = runtime.background_runtime();
+        // The live claim's flag wins (it is the freshest isolation truth);
+        // the launch manifest covers the released/never-claimed legs.
+        let isolated_worktree = claim
+            .as_ref()
+            .map(|(_, isolated)| *isolated)
+            .or(recorded_worktree_isolation)
+            .unwrap_or(false);
         // Resume in the interrupted child's workspace, not the caller's
         // (worktree/cwd children must not resume in the parent directory).
         let mut runtime = runtime;
-        runtime.context.workspace = workspace;
+        if isolated_worktree {
+            // Same isolation rule as a fresh worktree spawn: a worktree
+            // child's boundary is the worktree alone, so the parent's
+            // attached roots do not carry over into the resumed child
+            // (neither `boundary_roots` nor the gate's sandbox policy may
+            // resolve or write outside the worktree). Re-derive the cloned
+            // sandbox policy as well — the exec lane consumes it verbatim.
+            // `rebase_roots` (round-26 B26-1) also drops the parent-shared
+            // boundary memo with the pair swap.
+            runtime.context.rebase_roots(workspace, Vec::new());
+            rederive_sandbox_policy_roots(&mut runtime.context);
+        } else {
+            // A cwd-resumed child keeps the carried root set; the memo still
+            // refreshes because the primary moved (the boundary normalizes
+            // the set against the new primary).
+            let carried = runtime.context.workspace_roots.clone();
+            runtime.context.rebase_roots(workspace, carried);
+        }
         let options = SubAgentSpawnOptions {
             name: None, // the old session name stays owned by the terminal record
             model: Some(model),
@@ -5921,10 +5975,7 @@ impl SubAgentManager {
             nickname: None,
             fork_context,
             write_claim: claim.as_ref().map(|(claim, _)| claim.clone()),
-            isolated_worktree: claim
-                .as_ref()
-                .map(|(_, isolated)| *isolated)
-                .unwrap_or(false),
+            isolated_worktree,
             claim_pre_namespaced: claim.is_some(),
             preserve_runtime_profile: preserved_profile,
             ..Default::default()
@@ -6729,6 +6780,14 @@ impl SubAgentManager {
         }
 
         let launch_gate = (runtime.spawn_depth == 1).then(|| self.launch_gate.clone());
+        #[cfg(test)]
+        self.spawned_workspace_roots
+            .insert(agent_id.clone(), runtime.context.workspace_roots.clone());
+        #[cfg(test)]
+        self.spawned_sandbox_policies.insert(
+            agent_id.clone(),
+            runtime.context.elevated_sandbox_policy.clone(),
+        );
         let task = SubAgentTask {
             manager_handle,
             runtime,
@@ -9300,6 +9359,24 @@ async fn wait_result_payload(
     Ok(tool_result)
 }
 
+/// Re-derive the exec lane's writable roots after a worktree clear site
+/// resets `context.workspace_roots`. A child runtime clones the parent's
+/// context wholesale — including `elevated_sandbox_policy`, which the engine
+/// built over the parent's full root set — so without this rebuild the exec
+/// lane (`shell.rs` policy override → `WorkspaceWrite::get_writable_roots`)
+/// would still treat the parent's attached roots as writable while the file
+/// lane's `boundary_roots` no longer resolves there. Only the WorkspaceWrite
+/// face carries a root set to re-derive; the other postures hold none.
+fn rederive_sandbox_policy_roots(context: &mut ToolContext) {
+    let cleared =
+        codewhale_core::normalize_workspace_roots(&context.workspace, &context.workspace_roots);
+    if let Some(crate::sandbox::SandboxPolicy::WorkspaceWrite { writable_roots, .. }) =
+        context.elevated_sandbox_policy.as_mut()
+    {
+        *writable_roots = cleared;
+    }
+}
+
 async fn spawn_subagent_from_input(
     input: Value,
     manager: SharedSubAgentManager,
@@ -9408,7 +9485,30 @@ async fn spawn_subagent_from_input(
         spawn_request.max_depth,
     );
     if let Some(workspace) = child_workspace {
-        child_runtime.context.workspace = workspace.clone();
+        if spawn_request.worktree.is_some() {
+            // A worktree child is an isolation boundary, not a wider
+            // session: its boundary is the worktree alone, so the parent's
+            // attached roots do not carry over (at base a worktree child
+            // could only resolve inside its worktree). The cloned sandbox
+            // policy must be re-derived too — it was built over the parent's
+            // full root set, and the exec lane consumes it verbatim.
+            // `rebase_roots` (round-26 B26-1): the pair swap MUST also drop
+            // the parent-shared boundary memo, or the child's file-tool
+            // containment keeps judging against the parent's boundary.
+            child_runtime
+                .context
+                .rebase_roots(workspace.clone(), Vec::new());
+            rederive_sandbox_policy_roots(&mut child_runtime.context);
+        } else {
+            // An explicit `cwd:` swap without a worktree is non-isolating and
+            // keeps the parent's root set (disclosed in the PR description) —
+            // but the memo still refreshes: the boundary normalizes the
+            // carried set against the NEW primary.
+            let carried = child_runtime.context.workspace_roots.clone();
+            child_runtime
+                .context
+                .rebase_roots(workspace.clone(), carried);
+        }
         // A worktree child gets a distinct workspace-scoped plugin catalog.
         // Reusing the parent's registry here would leak workspace plugins (and
         // their authority receipts) across the exact isolation boundary the
@@ -14499,6 +14599,7 @@ impl SubAgentToolRegistry {
             approval_mode,
             workspace_trusted,
             Some(&workspace),
+            &self.gate_runtime.context.workspace_roots,
         );
         let (decision, _audit) = auto_review_plan_decision_for_context(
             &self.gate_runtime.auto_review_policy,
@@ -14879,6 +14980,7 @@ impl SubAgentToolRegistry {
         }
         crate::core::authority::paths_within_workspace_write_carve_out(
             &self.registry.context().workspace,
+            &self.registry.context().workspace_roots,
             &raw_mutation_target_paths(name, input),
         )
     }
@@ -15457,6 +15559,7 @@ impl SubAgentToolRegistry {
             name,
             &input,
             &self.registry.context().workspace,
+            &self.registry.context().workspace_roots,
             crate::tui::approval::ApprovalMode::Auto,
         )
         .or_else(|| {
@@ -15465,6 +15568,7 @@ impl SubAgentToolRegistry {
                 name,
                 &input,
                 &self.registry.context().workspace,
+                &self.registry.context().workspace_roots,
                 crate::tui::approval::ApprovalMode::Auto,
             )
         });

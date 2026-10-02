@@ -966,6 +966,7 @@ pub enum AppAction {
         system_prompt: Option<SystemPrompt>,
         model: String,
         workspace: PathBuf,
+        workspace_roots: Vec<PathBuf>,
         mode: AppMode,
     },
     OpenConfigView,

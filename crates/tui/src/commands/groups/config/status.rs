@@ -45,6 +45,20 @@ fn format_status(app: &App) -> String {
         MessageId::StatusLabelDirectory,
         &display_path(&app.workspace),
     );
+    // Human-facing disclosure of the session's accessible root set: the
+    // `Accessible folders:` turn-meta line is model-facing only, and a
+    // session whose roots were attached once (or inherited through resume or
+    // a bare fork) re-entered the TUI with zero indication that writes under
+    // any attached root are governed by this session's policy. Absent for a
+    // single-root session, matching the model-facing line's convention.
+    if let Some(roots) = workspace_roots_summary(app) {
+        push_row(
+            &mut out,
+            locale,
+            MessageId::StatusLabelWorkspaceRoots,
+            &roots,
+        );
+    }
     push_row(
         &mut out,
         locale,
@@ -273,12 +287,43 @@ fn push_row(out: &mut String, locale: Locale, label: MessageId, value: &str) {
     let _ = writeln!(out, "  {label:<LABEL_WIDTH$} {value}");
 }
 
+/// The roots attached beside the primary workspace, in session order, capped
+/// like the model-facing `Accessible folders:` line (by count, with a
+/// remainder suffix). `None` for a single-root session: the Directory row
+/// above already names the only accessible root.
+fn workspace_roots_summary(app: &App) -> Option<String> {
+    const MAX_LISTED_ROOTS: usize = 5;
+    let additional: Vec<String> = app
+        .workspace_roots
+        .iter()
+        .filter(|root| root.as_path() != app.workspace.as_path())
+        .map(|root| display_path(root))
+        .collect();
+    if additional.is_empty() {
+        return None;
+    }
+    let remainder = additional.len().saturating_sub(MAX_LISTED_ROOTS);
+    let mut listed = additional
+        .into_iter()
+        .take(MAX_LISTED_ROOTS)
+        .collect::<Vec<_>>()
+        .join(", ");
+    if remainder > 0 {
+        listed.push_str(
+            &tr(app.ui_locale, MessageId::WorkspaceRootsRemainder)
+                .replace("{count}", &remainder.to_string()),
+        );
+    }
+    Some(listed)
+}
+
 fn safety_summary(app: &App) -> Cow<'static, str> {
     let policy = crate::core::authority::sandbox_policy_for_turn(
         app.mode,
         app.approval_mode,
         app.configured_sandbox_mode.as_deref(),
         &app.workspace,
+        &app.workspace_roots,
         crate::core::authority::SandboxNetworkAccess::from_config(app.configured_sandbox_network),
     );
     // The policy is the intent; `sandbox_backend` is what this platform can
@@ -919,5 +964,92 @@ mod tests {
     fn project_docs_reports_missing_docs() {
         let tmpdir = TempDir::new().expect("temp dir");
         assert_eq!(project_docs(tmpdir.path(), Locale::En), "no project docs");
+    }
+
+    #[test]
+    fn status_report_names_the_accessible_root_set() {
+        let tmpdir = TempDir::new().expect("temp dir");
+        let mut app = create_test_app(tmpdir.path().to_path_buf());
+
+        // A single-root session keeps the report unchanged: the Directory row
+        // already names the only accessible root.
+        let single = format_status(&app);
+        assert!(!single.contains("Accessible folders:"));
+
+        let attached = TempDir::new().expect("attached dir");
+        app.workspace_roots = vec![
+            app.workspace.clone(),
+            attached.path().to_path_buf(),
+            PathBuf::from("/shared/telemetry"),
+        ];
+        let multi = format_status(&app);
+        assert!(
+            multi.contains("Accessible folders:"),
+            "the live root set must be visible to the human: {multi}"
+        );
+        assert!(
+            multi.contains(&display_path(attached.path())),
+            "attached roots are enumerated: {multi}"
+        );
+        assert!(multi.contains("/shared/telemetry"), "{multi}");
+        let roots_line = multi
+            .lines()
+            .find(|line| line.contains("Accessible folders:"))
+            .expect("roots row");
+        assert!(
+            !roots_line.contains(&display_path(&app.workspace)),
+            "the primary is the Directory row's fact, not the enumeration's: {roots_line}"
+        );
+    }
+
+    #[test]
+    fn status_report_caps_the_root_enumeration() {
+        let tmpdir = TempDir::new().expect("temp dir");
+        let mut app = create_test_app(tmpdir.path().to_path_buf());
+        app.workspace_roots = (0..7)
+            .map(|index| PathBuf::from(format!("/shared/root-{index}")))
+            .collect();
+        let multi = format_status(&app);
+        assert!(multi.contains("/shared/root-4"), "{multi}");
+        assert!(!multi.contains("/shared/root-5"), "{multi}");
+        assert!(multi.contains("(+2 more)"), "{multi}");
+    }
+
+    #[test]
+    fn workspace_roots_notice_only_fires_beside_the_primary() {
+        use crate::tui::ui::workspace_roots_notice;
+
+        assert_eq!(
+            workspace_roots_notice(Locale::En, Path::new("/w"), &[]),
+            None
+        );
+        assert_eq!(
+            workspace_roots_notice(Locale::En, Path::new("/w"), &[PathBuf::from("/w")]),
+            None,
+            "the primary alone is not a disclosure"
+        );
+        let notice = workspace_roots_notice(
+            Locale::En,
+            Path::new("/w"),
+            &[PathBuf::from("/w"), PathBuf::from("/r2")],
+        )
+        .expect("notice");
+        assert!(notice.contains("Accessible folders beside /w"), "{notice}");
+        assert!(notice.contains("/r2"), "{notice}");
+
+        // The disclosure is user-visible prose: a non-English locale must
+        // render its own pack, not the English template.
+        let japanese = workspace_roots_notice(
+            Locale::Ja,
+            Path::new("/w"),
+            &[PathBuf::from("/w"), PathBuf::from("/r2")],
+        )
+        .expect("notice");
+        assert!(japanese.contains("アクセス可能なフォルダ"), "{japanese}");
+        assert!(
+            !japanese.contains("Accessible folders beside"),
+            "{japanese}"
+        );
+        assert!(japanese.contains("/r2"), "{japanese}");
     }
 }

@@ -937,6 +937,7 @@ fn readonly_program_resolution_ignores_workspace_shadow_executables() {
     let workspace = tempdir().expect("workspace");
     let trusted = tempdir().expect("trusted bin");
     let path = std::env::join_paths([workspace.path(), trusted.path()]).expect("test PATH");
+    let roots = [workspace.path().to_path_buf()];
 
     for program in ["git", "gh", "rg"] {
         let file = if cfg!(windows) {
@@ -956,10 +957,53 @@ fn readonly_program_resolution_ignores_workspace_shadow_executables() {
             }
         }
         let resolved =
-            resolve_readonly_program_from_path(program, workspace.path(), &path).expect("resolved");
+            resolve_readonly_program_from_path(program, &roots, &path).expect("resolved");
         assert_eq!(resolved, trusted.path().join(file).canonicalize().unwrap());
         assert!(resolved.is_absolute() && !resolved.starts_with(workspace.path()));
     }
+}
+
+/// B14-1: an attached root is agent-writable, so an executable planted inside
+/// it must shadow nothing and its PATH entries must be stripped — exactly
+/// like the primary root. Judging only the primary here fails open.
+#[cfg(any(unix, windows))]
+#[test]
+fn forkguard_workspace_roots_readonly_shell_distrusts_attached_root_programs() {
+    let workspace = tempdir().expect("workspace");
+    let attached = tempdir().expect("attached root");
+    let trusted = tempdir().expect("trusted bin");
+    let path = std::env::join_paths([workspace.path(), attached.path(), trusted.path()])
+        .expect("test PATH");
+    let roots = [
+        workspace.path().to_path_buf(),
+        attached.path().to_path_buf(),
+    ];
+
+    let file = if cfg!(windows) { "git.exe" } else { "git" };
+    for directory in [workspace.path(), attached.path(), trusted.path()] {
+        let executable = directory.join(file);
+        std::fs::write(&executable, b"fixture").expect("fixture executable");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mut permissions = executable.metadata().unwrap().permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(&executable, permissions).unwrap();
+        }
+    }
+
+    let resolved = resolve_readonly_program_from_path("git", &roots, &path).expect("resolved");
+    assert_eq!(resolved, trusted.path().join(file).canonicalize().unwrap());
+
+    // A program that exists only inside an attached root fails closed.
+    let attached_only = std::env::join_paths([attached.path()]).expect("attached-only PATH");
+    resolve_readonly_program_from_path("git", &roots, &attached_only)
+        .expect_err("a program inside an attached root must not be trusted");
+
+    // PATH entries under attached roots are stripped from the sanitized set.
+    let sanitized = readonly_sanitized_path_from(&roots, &path).expect("sanitized PATH");
+    let kept: Vec<_> = std::env::split_paths(&sanitized).collect();
+    assert_eq!(kept, vec![trusted.path().canonicalize().unwrap()]);
 }
 
 #[test]
@@ -1001,8 +1045,9 @@ fn readonly_operands_are_workspace_bounded_and_symlink_aware() {
     let outside = tempdir().expect("outside");
     std::fs::write(workspace.path().join("inside.txt"), "inside").expect("inside file");
     std::fs::write(outside.path().join("secret.txt"), "secret").expect("outside file");
+    let roots = [workspace.path().to_path_buf()];
 
-    enforce_readonly_workspace_operands("cat inside.txt", workspace.path(), workspace.path())
+    enforce_readonly_workspace_operands("cat inside.txt", &roots, workspace.path())
         .expect("in-workspace operand");
     let inside_absolute = workspace
         .path()
@@ -1011,7 +1056,7 @@ fn readonly_operands_are_workspace_bounded_and_symlink_aware() {
         .expect("canonical inside file");
     enforce_readonly_workspace_operands(
         &format!("cat {}", inside_absolute.display()),
-        workspace.path(),
+        &roots,
         workspace.path(),
     )
     .expect("absolute in-workspace operand");
@@ -1023,7 +1068,7 @@ fn readonly_operands_are_workspace_bounded_and_symlink_aware() {
         .expect("canonical outside file");
     let error = enforce_readonly_workspace_operands(
         &format!("cat {}", outside_absolute.display()),
-        workspace.path(),
+        &roots,
         workspace.path(),
     )
     .expect_err("absolute outside operand must fail")
@@ -1038,10 +1083,9 @@ fn readonly_operands_are_workspace_bounded_and_symlink_aware() {
         r"cat C:\secret",
         r"cat \\server\share\secret",
     ] {
-        let error =
-            enforce_readonly_workspace_operands(command, workspace.path(), workspace.path())
-                .expect_err("out-of-workspace operand must fail")
-                .to_string();
+        let error = enforce_readonly_workspace_operands(command, &roots, workspace.path())
+            .expect_err("out-of-workspace operand must fail")
+            .to_string();
         assert!(error.contains("inside the workspace"), "{command}: {error}");
     }
 
@@ -1052,13 +1096,10 @@ fn readonly_operands_are_workspace_bounded_and_symlink_aware() {
             workspace.path().join("secret-link"),
         )
         .expect("outside symlink");
-        let error = enforce_readonly_workspace_operands(
-            "cat secret-link",
-            workspace.path(),
-            workspace.path(),
-        )
-        .expect_err("symlink escape must fail")
-        .to_string();
+        let error =
+            enforce_readonly_workspace_operands("cat secret-link", &roots, workspace.path())
+                .expect_err("symlink escape must fail")
+                .to_string();
         assert!(error.contains("resolves outside"), "{error}");
 
         let subdir = workspace.path().join("subdir");
@@ -1068,9 +1109,64 @@ fn readonly_operands_are_workspace_bounded_and_symlink_aware() {
             subdir.join("secret-link"),
         )
         .expect("cwd-relative outside symlink");
-        enforce_readonly_workspace_operands("cat secret-link", workspace.path(), &subdir)
+        enforce_readonly_workspace_operands("cat secret-link", &roots, &subdir)
             .expect_err("operands must resolve relative to the effective cwd");
     }
+}
+
+/// B14-1: the operand/cwd gate judges against the full declared root set.
+/// Operands and working directories under an attached root were already
+/// admitted by the roots-aware `resolve_path`; refusing them here would
+/// contradict the session's own declaration, while anything outside every
+/// root stays refused.
+#[test]
+fn forkguard_workspace_roots_readonly_shell_operands_span_attached_roots() {
+    let workspace = tempdir().expect("workspace");
+    let attached = tempdir().expect("attached root");
+    let outside = tempdir().expect("outside");
+    std::fs::write(attached.path().join("shared.txt"), "shared").expect("attached file");
+    std::fs::write(outside.path().join("secret.txt"), "secret").expect("outside file");
+    let roots = [
+        workspace.path().to_path_buf(),
+        attached.path().to_path_buf(),
+    ];
+
+    // The working directory may sit under an attached root, and relative
+    // operands resolve there.
+    enforce_readonly_workspace_operands("cat shared.txt", &roots, attached.path())
+        .expect("operand under an attached root");
+
+    let attached_absolute = attached
+        .path()
+        .join("shared.txt")
+        .canonicalize()
+        .expect("canonical attached file");
+    enforce_readonly_workspace_operands(
+        &format!("cat {}", attached_absolute.display()),
+        &roots,
+        workspace.path(),
+    )
+    .expect("absolute operand under an attached root");
+
+    // A directory outside every declared root stays refused.
+    let outside_absolute = outside
+        .path()
+        .join("secret.txt")
+        .canonicalize()
+        .expect("canonical outside file");
+    let error = enforce_readonly_workspace_operands(
+        &format!("cat {}", outside_absolute.display()),
+        &roots,
+        workspace.path(),
+    )
+    .expect_err("operand outside every root must fail")
+    .to_string();
+    assert!(error.contains("operand.outside_workspace"), "{error}");
+
+    // A working directory outside every root stays refused even when the
+    // operand itself sits under one.
+    enforce_readonly_workspace_operands("cat shared.txt", &roots, outside.path())
+        .expect_err("cwd outside every root must fail");
 }
 
 #[test]
