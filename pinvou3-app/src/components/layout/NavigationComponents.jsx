@@ -68,7 +68,7 @@ const NavItem = memo(function NavItem({ icon, label, active, unread = false, unr
       const drag = useLongPressDrag(sessionDragKind, onPickUp);
       const dragProps = sessionDragKind ? drag.handlers : {};
       const selectChat = () => onSelect(chat.id);
-      function save() { const tx = val.trim(); setEditing(false); if (tx && tx !== chat.title) onRename(chat.id, tx); }
+      function save() { const tx = val.trim(); setEditing(false); if (onRename && tx && tx !== chat.title) onRename(chat.id, tx); }
       // Portal "more" menu placement/close lives in the shared hook (same
       // plumbing as the project-group header menu). Height covers the tallest
       // variant actually rendered — 6 menu items at h-9 (36px) + 9px divider +
@@ -90,14 +90,14 @@ const NavItem = memo(function NavItem({ icon, label, active, unread = false, unr
           data-testid={chat.menuTestId}
           className={`fixed z-[1000] overflow-hidden rounded-xl py-1 shadow-xl ring-1 bg-white ring-black/10 dark:bg-[#202124] dark:ring-white/10`}
           style={menuStyle}>
-          <button className={menuItemCls} onClick={() => { closeMenu(); onTogglePinned && onTogglePinned(chat.id, !chat.pinned); }}>
+          {onTogglePinned && <button className={menuItemCls} onClick={() => { closeMenu(); onTogglePinned(chat.id, !chat.pinned); }}>
             {chat.pinned ? <PinOffIcon size={15} /> : <PinIcon size={15} />}
             <span>{chat.pinned ? t.riUnpin : t.riPin}</span>
-          </button>
-          <button className={menuItemCls} onClick={() => { closeMenu(); setVal(chat.title); setEditing(true); }}>
+          </button>}
+          {onRename && <button className={menuItemCls} onClick={() => { closeMenu(); setVal(chat.title); setEditing(true); }}>
             <Edit2 size={15} />
             <span>{t.riRename}</span>
-          </button>
+          </button>}
           {onMoveToProject && (
             <button type="button" className={menuItemCls} onClick={() => { rowLabelRef.current?.focus(); closeMenu(); onMoveToProject(chat); }}>
               <Layers size={15} />
@@ -220,10 +220,10 @@ const NavItem = memo(function NavItem({ icon, label, active, unread = false, unr
                 </span>
               )}
               <div className="mr-4 hidden group-hover:flex group-focus-within:flex max-sm:flex items-center gap-0.5 shrink-0">
-                <button title={chat.pinned ? t.riUnpin : t.riPin} onClick={(e) => { e.stopPropagation(); onTogglePinned && onTogglePinned(chat.id, !chat.pinned); }}
+                {onTogglePinned && <button title={chat.pinned ? t.riUnpin : t.riPin} onClick={(e) => { e.stopPropagation(); onTogglePinned(chat.id, !chat.pinned); }}
                   className="w-6 h-6 rounded-full flex items-center justify-center transition-colors text-[#5F6368] hover:bg-[#D3D7DB] dark:text-[#C4C7C5] dark:hover:bg-[#444746]">
                   {chat.pinned ? <PinOffIcon size={13} /> : <PinIcon size={13} />}
-                </button>
+                </button>}
 
                 <div className="relative">
                   <button title={t.riMore} onClick={toggleMenu}

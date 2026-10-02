@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { Check, ChevronDown, ChevronLeft, ChevronRight, Code, Cpu, Database, Globe, MessageSquare, Plus, RefreshCw, Search, Sparkles, User, Users, Wrench, X } from '../../components/icons.jsx';
 import { ArchivedDeleteConfirmDialog } from '../sessions/ArchiveConfirmDialog.jsx';
@@ -6,8 +6,7 @@ import { Toggle } from '../../components/Toggle.jsx';
 import PetSettingsSection from '../pet/PetSettingsSection.jsx';
 import { DEFAULT_PET_ID } from '../pet/pet-registry.js';
 import { TeamRelayAccessSettings } from '../team-relay/TeamRelayAccessSettings.jsx';
-import ControlledDevicePanel from '../remote-control/ControlledDevicePanel.jsx';
-import RemoteControllerPanel from '../remote-control/RemoteControllerPanel.jsx';
+import RemoteControlSettingsPage from '../remote-control/RemoteControlSettingsPage.jsx';
 import { bridge, isLocalModel, useBridgeState } from '../../hooks/useBridge.js';
 import { formatSessionDate } from '../../shared/date-utils.js';
 import { isBuiltInLlmApiModel, selectableModels } from '../../shared/model-options.js';
@@ -1763,6 +1762,7 @@ const formatMemoryTime = (item, copy) => {
       const builtinAvailableModels = llmApiModels.available_models || [];
       const builtinDefaultModel = llmApiModels.default_model || (((bs && bs.settings && bs.settings.advanced && bs.settings.advanced.builtin_llmapi_default_model) || '') || '');
       const versionUpdateRef = useRef(null);
+      const settingsContentRef = useRef(null);
       const hasUpdate = !!(bs && bs.updateInfo && bs.updateInfo.available);
       const archivedSessions = (bs && bs.archivedSessions) || [];
       const memorySettingsVisible = !!(bs && bs.settings && bs.settings.language === 'zh-Hans');
@@ -1796,6 +1796,10 @@ const formatMemoryTime = (item, copy) => {
           versionUpdateRef.current && versionUpdateRef.current.scrollIntoView({ behavior: 'smooth', block: 'center' });
         });
       }, [canUpdateApp, updateFocusTick]);
+      useLayoutEffect(() => {
+        if (activeSection !== 'remote' || !settingsContentRef.current) return;
+        settingsContentRef.current.scrollTop = 0;
+      }, [activeSection]);
       useEffect(() => {
         if (initialSection === 'providers') {
           setActiveSection('model');
@@ -2404,23 +2408,15 @@ const formatMemoryTime = (item, copy) => {
             <ChevronLeft size={15} />
             {settingsCopy.desktopRemoteControlBack}
           </button>
-          <IOSSection title={t.controllerConnection.controllerSide}>
-            <div className="p-4">
-              <RemoteControllerPanel
-                t={t}
-                bs={bs}
-                conversationOpen={remoteConversationOpen}
-                onConversationOpen={onRemoteConversationOpen}
-                onConnected={onRemoteConnected}
-                onConversationClose={onRemoteConversationClose}
-              />
-            </div>
-          </IOSSection>
-          <IOSSection title={t.controllerConnection.controlledSide}>
-            <div className="p-4">
-              <ControlledDevicePanel t={t} bs={bs} supported />
-            </div>
-          </IOSSection>
+          <RemoteControlSettingsPage
+            t={t}
+            bs={bs}
+            supported={canDesktopRemoteControl}
+            conversationOpen={remoteConversationOpen}
+            onConversationOpen={onRemoteConversationOpen}
+            onConnected={onRemoteConnected}
+            onConversationClose={onRemoteConversationClose}
+          />
         </>
       );
       const renderModels = () => (
@@ -2843,7 +2839,7 @@ const formatMemoryTime = (item, copy) => {
               </button>
             )}
             </div>
-            <main data-testid="settings-content" className="w-full flex-1 min-w-0 min-h-0 overflow-y-auto custom-scrollbar px-4 sm:px-6 md:px-8 py-4 sm:py-7">
+            <main ref={settingsContentRef} data-testid="settings-content" className="w-full flex-1 min-w-0 min-h-0 overflow-y-auto custom-scrollbar px-4 sm:px-6 md:px-8 py-4 sm:py-7">
               <div className="max-w-[680px]">
                 <div className="mb-5 sm:mb-6">
                   <h1 className="text-[22px] sm:text-[24px] leading-tight font-semibold tracking-normal">{sectionTitle}</h1>

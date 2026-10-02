@@ -6,7 +6,7 @@
 >
 > 适用范围：Windows 双端桌面远控；现有 WebUI v2 必须保持兼容
 >
-> 更新日期：2026-10-01
+> 更新日期：2026-10-02
 
 ## 1. 目的与执行规则
 
@@ -38,7 +38,7 @@
 | Session/任务 | `SessionStore` 是本机权威存储；普通聊天由 `EnginePool` 驱动，代码任务由 `AcpPool` 驱动；现有 Web RPC 有持久幂等台账和 turn/session 范围检查 | B Session 保持唯一事实源；桌面远程任务需独立 request/task ledger、来源标记和 turn lock，不得复用 Web lease 身份 |
 | 审批 | `CodexAcpPendingPermission`/`CodexAcpPendingElicitation` 与 `AcpPool::respond_permission` 支持本地和 Web 操作 | 桌面远程任务必须在适配层增加绑定和 CAS；A 是唯一 Allow 权威，B UI 只能查看、停止或断开 |
 | 附件/成果 | Web 路径已有有界分块上传、摘要校验、Session 隔离、artifact chunk/preview；前端有 attachments/artifacts 组件和测试 | 复用限制与预览能力，但新增 E2E 密文、connection/lease/session/artifact ID 绑定；绝不传 B 绝对路径 |
-| 同步/历史 | Web 事件代理有 stream sequence、snapshot/reset 和 Session 分块；桌面本地 Session/产物可持久化 | A 需要独立的远程历史仓库；只写入认证后的事件/快照，删除与 B Session 解耦 |
+| 同步/历史 | Web 事件代理有 stream sequence、snapshot/reset 和 Session 分块；桌面本地 Session/产物可持久化 | A 的离线副本由单一 SessionStore RemoteProxy 保存；只写入认证后的投影，删除与 B Session 解耦，不另建历史仓库 |
 | i18n/平台 | 文案集中在 `src/shared/i18n/{zh,en,ja}.js`；平台能力由 `src/shared/platform.js`、Web bootstrap 和 Tauri 能力返回控制 | 新文案三语同批提交；只在 Windows 打开能力，键盘、读屏、焦点和倒计时不能仅靠颜色表达 |
 | 遥测/部署 | Relay 复用 `telemetry-service.js` 和现有匿名行为遥测；部署有 nginx/hardening 与 deploy 测试 | 只增加受控枚举和聚合计数；enrollment gateway、registry 备份、迁移与安全回滚必须成为生产门禁 |
 
@@ -61,17 +61,35 @@ pinvou3-app/src-tauri/src/features/remote_control/
   controller/controlled.rs     # B 状态所有者
   controller/controlling.rs    # A 状态所有者
   controller/task.rs
-  controller/history.rs
-  controller/transfer.rs
+  controller/journal.rs        # B 权威 journal，不建立第二套 A 历史
+  controller/transfer/         # 附件与成果的安全传输
+
+pinvou3-app/src-tauri/src/features/sessions/
+  remote_proxy/               # SessionStore 持久投影、精确绑定与 outbox
+  application/                # 唯一远控提交、执行与投影用例
 
 pinvou3-app/src/features/remote-control/
   ControlledDevicePanel.jsx
-  ConnectRemoteDeviceDialog.jsx
-  RemoteConversationView.jsx
+  RemoteConnectForm.jsx
+  RemoteConnectionShell.jsx   # 仅连接控制，会话复用现有 ChatView
   remote-control-state.js
 ```
 
 目录名是建议落点；实际拆分可随实现调整，但必须保持 Web access、A controller、B controlled endpoint 三个状态所有者彼此独立，并通过稳定接口共享底层 transport、Session、附件与产物能力。
+
+### A08 审核修复的依赖前移边界
+
+A08 保留 DEV-21～DEV-24 的可用 UI 与单一遥测验收，不降为占位骨架。当前本地 Tauri `task_submit` 注册不能代替真实的 A→B 接线；为修复该闭环，选择性前移下游已经实现的必要依赖，原提交历史保持不变。
+
+| 前移边界 | 必须一起形成的行为 |
+|---|---|
+| 连接与恢复 owner | Relay 注册、claim、握手、加密 lane；认证存活证据；首次断线冻结截止时间，恢复期间不延长 |
+| 执行与权限 owner | 唯一 Session/任务入口、真实取消；B 本地 opaque 工作区授权；快照 revision 校验；不可复用审批 ID；任务级模型凭据隔离 |
+| 历史与 UI owner | SessionStore RemoteProxy 的精确绑定、原子 outbox、typed projection；现有 ChatView；不保留临时会话视图或第二套历史 |
+| 文件与模型使用者 | 附件按已认证只读 handle 使用，读 owner 持有至执行终态；成果与模型释放仍受精确任务、会话和 lease 约束 |
+| 能力与遥测 | 平台能力未加载或非 Windows 时失败关闭；统一状态 DTO；复用 BehaviorTelemetry 与 Relay 聚合指标，不包含身份、正文、路径或凭据 |
+
+不前移后续 OpenCode gateway、知识库下载、连接器 PATH 及发布工作流；不宣称该波次已完成 OpenCode Zen/Go 远端模型兼容。部署脚本仅同步 Relay 模块发布单元及完整回滚清单，不执行部署或启用生产服务。默认产品编译、定向行为测试、Legacy Web 回归、独立审核与当前 head CI 分别记录；静态契约和本地测试不能代替双机/公网发布证据。
 
 ## 4. 依赖 DAG 与交付批次
 
@@ -90,7 +108,7 @@ DEV-13 ───────────┬─ DEV-15 临时模型包
                   └─ DEV-16 A 唯一审批
 DEV-14 ───────────┬─ DEV-17 附件上传
                   └─ DEV-18 成果下载
-DEV-13 + DEV-16 + DEV-17 + DEV-18 ── DEV-19 journal 与 A 独立历史
+DEV-13 + DEV-16 + DEV-17 + DEV-18 ── DEV-19 journal 与 SessionStore RemoteProxy
 DEV-10 + DEV-11 + DEV-12 + DEV-15 + DEV-19 ── DEV-20 Tauri 注册、前端桥与状态域
 DEV-10 + DEV-15 + DEV-16 + DEV-20 ── DEV-21 B 面板
 DEV-11 + DEV-20 + DEV-21 ─────────── DEV-22 A 连接壳
@@ -110,8 +128,8 @@ DEV-02 + DEV-21 + DEV-22 + DEV-23 + DEV-24 ── DEV-25 公网交付 E2E
 | 2B：双端连接 | DEV-10、DEV-11 可并行（均等待 DEV-06、DEV-08、DEV-09） | 两个 Windows backend 能配对、断开和安全恢复 |
 | 3A：业务入口 | DEV-12；完成后 DEV-13 | 能力/工作区先于任务接纳，任务 ledger 再成为扩展点 |
 | 3B：业务扩展 | DEV-14、DEV-15、DEV-16 可并行（均等待 DEV-13）；DEV-14 完成后 DEV-17、DEV-18 可并行 | transfer core 先冻结，模型/审批/附件/成果各自闭环且不争用共享文件 |
-| 3C：同步 | DEV-19（等待 DEV-13、DEV-16～DEV-18） | journal、快照和 A 独立历史覆盖全部业务事件 |
-| 4A：Tauri/前端基座 | DEV-20（等待 DEV-10、DEV-11、DEV-12、DEV-15、DEV-19） | 单一任务注册所有 desktop commands，独立 B/A/capability/history/model 状态域接入且 Web bridge 不变 |
+| 3C：同步 | DEV-19（等待 DEV-13、DEV-16～DEV-18） | B journal/快照经认证后投影到 SessionStore RemoteProxy，覆盖全部业务事件，不成为第二历史 |
+| 4A：Tauri/前端基座 | DEV-20（等待 DEV-10、DEV-11、DEV-12、DEV-15、DEV-19） | 单一 composition root 注册 desktop commands/ports；B/A/capability/model 状态与 SessionStore 历史投影接入，Web bridge 不变 |
 | 4B：分面 UI | DEV-21；完成后 DEV-22；完成后 DEV-23 | 三个任务因共享 `main.jsx` 与三语 i18n 中央文件而严格串行，各自仍可独立验收 |
 | 4C：生产门禁 | DEV-24（等待 DEV-23 与全部后端领域） | 最小化遥测、审计、泄露扫描和最终 UI 事件门禁就绪 |
 | 5：公网交付 | DEV-25 | 迁移、灰度、回滚、真实双机 E2E 全部通过 |
@@ -239,7 +257,7 @@ DEV-02 + DEV-21 + DEV-22 + DEV-23 + DEV-24 ── DEV-25 公网交付 E2E
 - **目标**：在不改变现有 WebAccess API 的前提下，先建立 A/B 共用的有界 Relay transport、controller frame dispatch 和独立状态所有者接口，成为 liveness 与 resume 的唯一网络承载层。
 - **范围**：从当前 `relay_client.rs` 提取可复用连接原语；为 controller 增加有界收发队列、优先级/背压、敏感帧专用序列化、取消 token、事件 sink；明确 Web manager、B manager、A manager 生命周期；提供 transport clock/RTT 注入点；一次性声明 controller feature 与 desktop command 子模块槽和任务扩展 trait。
 - **不做**：不实现具体配对、liveness、watchdog 或 resume；不改 Web `access-policy.json`；不把 controller 状态加入 `WebAccessStatusKind`。
-- **预计文件**：`features/remote_control/mod.rs`、`relay_client.rs`、`controller/{mod,relay_transport}.rs`（新）、预留的 `controller/{liveness,resume,controlled,controlling,capabilities,task,temporary_model,permission,journal,history}.rs` 与 `controller/transfer/mod.rs` 可编译槽、`app/commands/mod.rs`（本功能唯一一次模块声明）、预留的 `desktop_remote_{controlled,controller,capabilities,task,model,permission,attachment,artifact,history}.rs` 九个可编译 command 模块和 transport 单测。本任务独占 `relay_transport.rs`/`relay_client.rs`/两个中央 `mod.rs`；后续任务分别只实现已分配子模块，DEV-20 独占 `lib.rs` 最终注册。
+- **预计文件**：`features/remote_control/mod.rs`、`relay_client.rs`、`controller/{mod,relay_transport}.rs`（新）、预留的 `controller/{liveness,resume,controlled,controlling,capabilities,task,temporary_model,permission,journal}.rs` 与 `controller/transfer/mod.rs` 可编译槽、`app/commands/mod.rs`、预留的 `desktop_remote_{controlled,controller,capabilities,task,model,permission,attachment,artifact,journal}.rs` command 模块和 transport 单测。A 历史统一归 DEV-19 的 `features/sessions/remote_proxy/`，不得预留第二历史实现。本任务拥有 transport 基座；后续模块声明由各 owner 串行追加，DEV-20 独占 `lib.rs` 最终组合与注册。
 - **协议/数据**：业务帧只接受已认证 lease context；队列上限不得宽于现有 Relay 帧与字节预算；断线事件带 generation/lease epoch；控制帧和业务帧分队列且都受总字节预算。
 - **测试**：队列满、敏感帧过大、取消、重连、消息优先级、RTT 采样、旧 generation/epoch frame 丢弃；现有 remote_control Rust 测试和 Web contract 不回归。
 - **验收**：三个状态域可独立启动/停止；controller transport 未连接时不能调用 Web RPC 后门；现有 Web 分享行为兼容；后续模块无需编辑 transport 内部实现。
@@ -289,16 +307,16 @@ DEV-02 + DEV-21 + DEV-22 + DEV-23 + DEV-24 ── DEV-25 公网交付 E2E
 - **需求映射**：RC-B-001～018、RC-L-006、RC-L-008、RC-T-011～012、RC-C-010、RC-C-014。
 - **建议提交**：`feat(remote-control): 实现Windows被控端状态机`
 
-### DEV-11：A 主控端 claim、连接生命周期与远程历史壳层
+### DEV-11：A 主控端 claim、连接生命周期与 RemoteProxy 绑定入口
 
 - **依赖**：DEV-06、DEV-08、DEV-09。
 - **目标**：实现 A 输入码、自动握手、后台连接、显式断开、短暂恢复和非敏感历史容器，为后续业务消息提供稳定 connection context。
-- **范围**：码规范化；连接状态/错误映射；A 临时 claim 身份；后台 transport 与窗口可见性解耦；显式 disconnect；resume token 内存生命周期；远程连接元数据与独立 history ID；Tauri commands/events。
+- **范围**：码规范化；连接状态/错误映射；A 临时 claim 身份；后台 transport 与窗口可见性解耦；显式 disconnect；resume token 内存生命周期；远程连接元数据与 SessionStore RemoteProxy 的精确绑定入口；Tauri commands/events。
 - **不做**：不持久化码/设备凭证，不实现具体任务/模型/附件，不让关闭窗口等于断开。
-- **预计文件**：`controller/controlling.rs`、`app/commands/desktop_remote_controller.rs`（均由本任务独占）和 Rust 单测；history 只使用 DEV-07 预留接口，持久实现归 DEV-19；不修改 `app/commands/mod.rs`、现有 `remote_control.rs` 或 `lib.rs`。
+- **预计文件**：`controller/controlling.rs`、`app/commands/desktop_remote_controller.rs`（均由本任务独占）和 Rust 单测；历史只使用 SessionStore RemoteProxy 窄接口，持久投影实现归 DEV-19；不另建历史 manager/store，不修改现有 `remote_control.rs` 或 `lib.rs`。
 - **协议/数据**：持久化只含远程历史标题、脱敏设备显示名、终态和 B Session 映射的非敏感引用；所有可操作 API 要求 live connection/lease/epoch。
 - **测试**：粘贴/大小写/分隔符、统一无效码、busy/离线/版本不兼容、窗口隐藏后台继续、显式断开、旧码不自动重试、进程重启 token 不恢复、迟到连接结果丢弃。
-- **验收**：输入有效码无需 B 二次确认进入 connected；断开后发送/审批 API 同步拒绝；历史壳可离线枚举但明确不是活动连接。
+- **验收**：输入有效码无需 B 二次确认进入 connected；断开后发送/审批 API 同步拒绝；RemoteProxy 离线投影可经 SessionStore 枚举但明确不是活动连接。
 - **风险**：误把短期码当设备身份。存储 schema 不含 code，UI API 只返回短期凭证提示状态。
 - **需求映射**：RC-A-001～010、RC-L-005、RC-L-009～014、RC-S-008～009。
 - **建议提交**：`feat(remote-control): 实现Windows主控端连接`
@@ -404,14 +422,14 @@ DEV-02 + DEV-21 + DEV-22 + DEV-23 + DEV-24 ── DEV-25 公网交付 E2E
 - **需求映射**：RC-F-005～008、RC-S-002、RC-S-007。
 - **建议提交**：`feat(remote-control): 支持远程成果交付`
 
-### DEV-19：权威事件 journal、快照恢复与 A 独立历史
+### DEV-19：权威事件 journal、快照恢复与 SessionStore RemoteProxy
 
 - **依赖**：DEV-13、DEV-16、DEV-17、DEV-18。
 - **目标**：同步消息、流式输出、思考、工具、审批、错误、取消、附件和成果状态，并让 A 建立可离线查看、与 B 删除语义解耦的独立副本。
-- **范围**：per-lease/session event epoch+sequence、bounded journal、ACK/replay、gap→snapshot reset、事件去重、终态 CAS、认证后写入、A history versioned store、删除/归档、敏感字段清洗。
-- **不做**：不让 A 历史成为执行真相源，不把 B Session JSON 原样复制，不同步 API key/绝对路径/工具秘密。
-- **预计文件**：`controller/journal.rs`、`controller/history.rs`、`app/commands/desktop_remote_history.rs`（均由本任务独占）、SessionStore 只读 snapshot 投影、同步单测与故障注入 fixture；不修改中央 command/`lib.rs`。
-- **协议/数据**：snapshot 有 base epoch/sequence 和内容摘要；journal 不覆盖 gap 时 A 原子丢弃不完整增量再换快照；历史记录标记 `remote_copy` 和最后已认证终态。
+- **范围**：per-lease/session event epoch+sequence、bounded journal、ACK/replay、gap→snapshot reset、事件去重、终态 CAS、认证后写入、SessionStore RemoteProxy 的版本化投影/精确绑定/原子 outbox、软删除、敏感字段清洗。
+- **不做**：不让 A 离线副本成为执行真相源，不把 B Session JSON 原样复制，不同步 API key/绝对路径/工具秘密，不建立独立 history store。B journal 仅为传输/审计与同步游标，不作为第二历史。
+- **预计文件**：`controller/journal.rs`、`app/commands/desktop_remote_journal.rs`、`features/sessions/remote_proxy/`、`features/sessions/application/project_remote.rs`、`app/commands/desktop_remote_proxy.rs`、host projection adapter、同步单测与故障注入 fixture；最终组合归 DEV-20。
+- **协议/数据**：snapshot 有 base epoch/sequence 和内容摘要；journal 不覆盖 gap 时 A 原子丢弃不完整增量再换快照；历史记录明确 `RemoteProxy` kind 和最后已认证终态，live credential 永不保存。打开 live proxy 必须在完整认证绑定的原子检查内 prepare/commit，不以 ID 前缀或 JS state 判权威。
 - **测试**：重复/乱序/丢失、journal 溢出、快照期间新事件、重连 replay、跨 epoch 迟到、各类事件、A/B 独立删除、离线重启、损坏 history、凭证/路径哨兵扫描。
 - **验收**：A 与 B 在连接态最终收敛；重复包不重复消息/终态；离线历史明确为副本，且 A 删除不触发 B Session 操作。
 - **风险**：快照与增量竞态。使用 snapshot base sequence + 原子 replace，再接收大于 base 的事件。
@@ -422,11 +440,11 @@ DEV-02 + DEV-21 + DEV-22 + DEV-23 + DEV-24 ── DEV-25 公网交付 E2E
 
 - **依赖**：DEV-10、DEV-11、DEV-12、DEV-15、DEV-19。
 - **目标**：由单一整合任务注册全部 desktop Tauri commands，把 B、A、能力快照、临时模型和远程历史 API 接入前端，同时保持现有 `webAccess` bridge/状态/策略不变。
-- **范围**：在 `lib.rs` 一次性注册 DEV-10、DEV-11、DEV-12、DEV-13、DEV-15、DEV-16、DEV-17、DEV-18、DEV-19 已实现的九个独立 command 模块；新增 feature bridge/domain adapter；建立 `controlledDevice`/`controllerConnection`/`remoteCapabilities`/`remoteModels`/`remoteHistories` 独立状态；冻结“按当前 connection/lease/revision 读取能力快照”的 bridge contract；监听 status/journal；intent sequence + generation/lease epoch 门；窗口隐藏与 transport 连接解耦；冻结“列出可导出模型描述 → 只提交 selected model ID + 稳定 task/request ID → Rust 解析凭证、构造 v1 包并与任务原子提交”的 bridge contract。
+- **范围**：在 `lib.rs` 单一 composition root 组合并注册已经实现的 commands 与 execution/projection/dispatch ports；durable ledger 和必要 owner 初始化成功后才公开，失败仅禁用桌面远控，Legacy Web 在失败域外。建立 `controlledDevice`/`controllerConnection`/`remoteCapabilities`/`remoteModels` 展示状态及 `remoteProxyHistories`/`remoteProxyHistory` 的只读投影；冻结“按当前 connection/lease/revision 读取能力快照”的 bridge contract；监听权威 status/RemoteProxy 通知；intent sequence + generation/lease epoch 门；窗口隐藏与 transport 连接解耦。UI 只提交模式、模型选择及用户输入 intent；Rust 生成任务/request 身份、冻结快照、解析凭据并构包，通过 SessionStore 原子 outbox 完成 reserve/action/commit，后续重试和取消仅用权威 handle。
 - **不做**：不在本任务完成视觉 UI；不让 JS 接触 API key、credential_ref 或完整 `SavedModel`；不在 bridge 中构造模型包；不把 desktop command 加进 Web `access-policy.json`；Web build 不获得桌面敏感 API。
-- **预计文件**：`pinvou3-app/src-tauri/src/lib.rs`（本功能中央 command 注册的唯一 owner）、`src/platform/tauri/bridge/desktop-remote-control.js`（新）、`src/platform/tauri/bridge.js`、`src/features/remote-control/remote-control-state.js`（新）、`src/shared/platform.js`、任务专属 bridge contract/race 测试；不修改 DEV-07 已冻结的 `app/commands/mod.rs` 或任一 feature command 实现。
-- **协议/数据**：能力快照前端投影只含 DEV-12 allowlist，并绑定当前 connection/lease/revision，旧 revision 原子丢弃；前端模型列表只含 opaque model ID、显示名、能力和不可导出原因；任务提交只传 model source/ID 与任务绑定字段，由 Rust DEV-15 命令在安全存储解析 key、构包、加密并交给 DEV-13 admission，任一步失败都不发送任务且不回退 B 模型；secret/receipt/token/model key 永不出 Rust；所有异步完成写入校验当前 intent/generation/lease。
-- **测试**：start/stop/refresh/claim/disconnect 交错、旧事件/旧快照、关闭窗口、平台 capability；能力快照读取、字段 allowlist、跨 lease/revision 丢弃、Skill/工具凭证不进 JS；可导出/不可导出模型投影、选择 model ID、构包失败不提交、构包与 task ID 原子绑定、重试保持 request ID、JS state/event/error 无 key/credential_ref；九个 command 模块各注册一次；Web bridge 无新命令；bridge protocol hash/contract。
+- **预计文件**：`pinvou3-app/src-tauri/src/lib.rs`（本功能中央 command 注册的唯一 owner）、`app/desktop_remote_composition.rs`、`app/remote_projection_adapter.rs`、`app/commands/mod.rs` 及 desktop command 模块的串行整合、`src/platform/tauri/bridge/desktop-remote-control.js`、`src/platform/tauri/bridge.js`、`src/features/remote-control/remote-control-state.js`、`src/shared/platform.js`、任务专属 bridge contract/race 测试；各 owner 经窄接口整合，不新增第二套历史或执行状态。
+- **协议/数据**：能力快照前端投影只含 DEV-12 allowlist，并绑定当前 connection/lease/revision，旧 revision 原子丢弃；前端模型列表只含 opaque model ID、显示名、能力和不可导出原因；UI 提交 model source/ID、模式与用户输入 intent，不生成 wire task/request ID；Rust 在当前认证绑定内生成身份、冻结快照、解析凭据、构包并经原子 outbox 发送，任一步失败都不发送任务且不回退 B 模型；secret/receipt/token/model key 永不出 Rust；所有异步完成写入校验当前 intent/generation/lease。
+- **测试**：start/stop/refresh/claim/disconnect 交错、旧事件/旧快照、关闭窗口、平台 capability；能力快照读取、字段 allowlist、跨 lease/revision 丢弃、Skill/工具凭证不进 JS；可导出/不可导出模型投影、选择 model ID、构包失败不提交、构包与 Rust 生成身份原子绑定、重试使用同一权威 handle、JS state/event/error 无 key/credential_ref；实际 desktop command 清单各注册一次，durable 初始化失败时不公开半成品 owner；Web bridge 无新命令；bridge protocol hash/contract。
 - **验收**：迟到回包不能复活旧码、旧连接、旧能力或旧任务；DEV-23 只消费稳定 bridge API 即可读取能力快照、完成模型选择和任务提交，不读取 prefs/Skill 私有文件、不构包、不调用底层 Tauri；WebUI v2 build/fixture 不变；非 Windows capability 为 false。
 - **风险**：现有 `remoteControl` 名称已指 WebAccess。新域采用不歧义命名并提供一次内部迁移，不能偷换旧 API 语义。
 - **需求映射**：RC-B-001、RC-B-005、RC-B-013～014、RC-A-004～006、RC-A-009、RC-T-003、RC-T-005、RC-T-008、RC-M-001～006、RC-M-009、RC-S-003～006。
@@ -452,7 +470,7 @@ DEV-02 + DEV-21 + DEV-22 + DEV-23 + DEV-24 ── DEV-25 公网交付 E2E
 - **目标**：独立交付 A 的“连接远程设备”入口、连接状态壳和后台连接/显式断开语义。
 - **范围**：7 位码输入、粘贴/大写/分隔符规范化、连接中/connected/offline/busy/统一无效码/版本错误、短期 bearer secret 提示、远程设备标识、关闭窗口与断开设备分离；三语和可访问性。
 - **不做**：不实现消息、模型、审批、附件或成果能力；不保存连接码或长期设备凭证。
-- **预计文件**：`src/features/remote-control/ConnectRemoteDeviceDialog.jsx`、`RemoteConnectionShell.jsx`（新）、`src/shared/i18n/{zh,en,ja}.js` 的 `controllerConnection` 命名空间、`src/app/main.jsx` 窗口路由和 smoke/a11y 测试；只在 DEV-21 合入后串行编辑中央 UI/i18n 文件。
+- **预计文件**：`src/features/remote-control/RemoteConnectForm.jsx`、`RemoteConnectionShell.jsx`、`src/shared/i18n/{zh,en,ja}.js` 的 `controllerConnection` 命名空间、`src/app/main.jsx` 路由和 smoke/a11y 测试；只在 DEV-21 合入后串行编辑中央 UI/i18n 文件。
 - **协议/数据**：仅本地格式错误给具体提示；所有服务端失效原因统一文案；关闭窗口只改变可见性，显式断开才调用 transport disconnect。
 - **测试**：输入法/粘贴/键盘、错误映射、统一码文案、窗口关闭后台存活、显式断开、焦点陷阱/恢复、读屏状态、三语、非 Windows 隐藏。
 - **验收**：A 可无 B 二次确认建立连接；关闭窗口不终止任务；断开后壳层不可发送/审批且明确安全收尾。
@@ -463,10 +481,10 @@ DEV-02 + DEV-21 + DEV-22 + DEV-23 + DEV-24 ── DEV-25 公网交付 E2E
 ### DEV-23：Windows 远程会话能力 UI、三语与可访问性
 
 - **依赖**：DEV-13、DEV-15、DEV-16、DEV-17、DEV-18、DEV-19、DEV-20、DEV-22。
-- **目标**：在 A 连接壳内交付远程消息、模型、能力、审批、附件、成果和独立历史的完整 UI。
+- **目标**：A 连接壳只控制连接；在现有 ChatView 内交付远程消息、模型、能力、审批、附件、成果与 SessionStore RemoteProxy 离线副本的完整 UI。
 - **范围**：远程 Session 创建/切换、显著远程标识、通过 DEV-20 bridge contract 完成 B/我的模型选择与原子任务提交、模式/能力快照、流式/工具/错误/取消、A 审批、附件上传、成果预览/下载、离线副本；三语和键盘/读屏/焦点/高对比测试。
 - **不做**：不复制整套 ChatView 状态机，不显示 B 路径/Key，不允许 B Allow，不把 A 历史误标为在线 Session。
-- **预计文件**：`src/features/remote-control/RemoteConversationView.jsx` 及 model/permission/transfer/history 子组件（新）、`src/shared/i18n/{zh,en,ja}.js` 的 `remoteConversation` 命名空间、必要的 `src/app/main.jsx` 会话路由、UI smoke/a11y 测试；依赖 DEV-22 后串行编辑中央 UI/i18n 文件。
+- **预计文件**：现有 `src/features/chat/ChatView.jsx` 与 `src/features/remote-control/` 内的 model/permission/transfer/RemoteProxy adapter、`src/shared/i18n/{zh,en,ja}.js` 的 `remoteConversation` 命名空间、必要的 `src/app/main.jsx` 会话路由、UI smoke/a11y 测试；不复制 ChatView 状态机，依赖 DEV-22 后串行编辑中央 UI/i18n 文件。
 - **协议/数据**：所有动作经 DEV-20 bridge；渲染事件需匹配当前 connection/lease/session；download-only、result unknown、offline copy 等状态使用明确文案。
 - **测试**：三语全旅程、仅通过 DEV-20 API 完成模型列表/选择/提交且组件源码不读取 prefs/credential/构包字段、审批 allow/deny/timeout、附件/成果、journal reset、重复终态、离线历史、窗口隐藏、键盘与读屏、缩放/高对比。
 - **验收**：用户无需开发工具完成基础与完整能力旅程；远程/本地上下文始终可辨；所有安全失败均有可恢复提示。
@@ -703,7 +721,7 @@ npm --prefix pinvou3-app run lint:ui
 
 1. **协议出口**：DEV-00～DEV-09 完成，测试客户端能建立密文租约、证明 30 秒 watchdog 并完成无业务 provisional resume；旧 Web v2 全绿。
 2. **基础功能出口**：DEV-10～DEV-13、DEV-20、DEV-22 完成，两台 Windows 可用 B 模型完成普通任务、安全断开和后台窗口旅程。
-3. **完整能力出口**：DEV-14～DEV-19、DEV-21、DEV-23 完成，模型、审批、附件、成果、同步与历史形成闭环。
+3. **完整能力出口**：DEV-14～DEV-19、DEV-21、DEV-23 完成，模型、审批、附件、成果、认证同步与单一 SessionStore RemoteProxy/ChatView 形成闭环；不存在第二历史或临时会话状态机。
 4. **生产出口**：DEV-24～DEV-25 完成，enrollment 覆盖率、限流、告警、迁移、回滚和真实双机证据齐全。
 
 任何出口存在以下情况时必须阻断：未 enrolled 公网首次注册可成功；Web/controller 可互相顶替；Relay 可见业务明文/API key；B 可 Allow；30 秒预算可被 B 心跳、重试或网络检测额外延长；旧 token/generation/lease 可复活；任务重试产生重复副作用；裸 v2 可被回滚上线。

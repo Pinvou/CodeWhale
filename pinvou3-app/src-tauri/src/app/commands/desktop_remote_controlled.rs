@@ -5,8 +5,10 @@
 //! projection; no pairing, lease, token, key, or host-path value is persisted.
 
 use serde::Deserialize;
+use std::sync::Arc;
 use tauri::{AppHandle, Emitter, State};
 
+use crate::features::behavior_telemetry::{RemoteControlEvent, RemoteStage, track_remote_control};
 use crate::features::files::file_ingest::validate_browsable_path;
 use crate::features::remote_control::RemoteControlManager;
 use crate::features::remote_control::controller::controlled::{
@@ -26,14 +28,31 @@ const WATCHDOG_POLL_INTERVAL_MS: u64 = 1_000;
 /// 周期推进 B 端本地 watchdog。Tauri managed state 由 app 持有，这里只借用，
 /// 因此不改变 `ControlledDeviceManager` 的所有权与 Drop 语义。
 pub(crate) fn spawn_watchdog_reaper(app: AppHandle) {
+    crate::features::remote_control::controller::relay_runtime::log_controlled_event(
+        "lifecycle_checkpoint",
+        "runtime_started",
+    );
     tauri::async_runtime::spawn(async move {
         let mut last_projection = String::new();
         loop {
             tokio::time::sleep(std::time::Duration::from_millis(WATCHDOG_POLL_INTERVAL_MS)).await;
             let status = {
                 use tauri::Manager as _;
-                app.state::<ControlledDeviceManager>()
-                    .poll_watchdog(controlled_monotonic_millis())
+                let manager = app.state::<ControlledDeviceManager>();
+                let connection_id = manager
+                    .live_runtime_context()
+                    .ok()
+                    .map(|(lease, _)| lease.connection_id);
+                let status = manager.poll_watchdog(controlled_monotonic_millis());
+                if manager.live_runtime_context().is_err() {
+                    if let Some(connection_id) = connection_id {
+                        app.state::<Arc<super::desktop_remote_attachment::DesktopRemoteAttachmentRuntime>>()
+                            .uploads_cleanup_for_connection(&connection_id);
+                        app.state::<Arc<super::desktop_remote_artifact::DesktopRemoteArtifactRuntime>>()
+                            .clear_connection(&connection_id);
+                    }
+                }
+                status
             };
             // 仅在状态投影变化时广播，避免空闲时每秒刷事件。
             let projection = serde_json::to_string(&status).unwrap_or_default();
@@ -58,11 +77,11 @@ fn controlled_error(error: ControlledStateError) -> String {
 }
 
 fn ensure_supported(manager: &ControlledDeviceManager) -> Result<(), String> {
-    if manager.is_supported() {
-        Ok(())
-    } else {
-        Err(UNSUPPORTED.to_owned())
-    }
+    crate::platform::capabilities::ensure_desktop_remote_control_enabled()?;
+    manager
+        .is_supported()
+        .then_some(())
+        .ok_or_else(|| UNSUPPORTED.to_owned())
 }
 
 fn workspace_request(
@@ -73,11 +92,8 @@ fn workspace_request(
     if !path.is_dir() {
         return Err("workspace_path_invalid".to_owned());
     }
-    Ok(WorkspaceAuthorizationRequest {
-        path,
-        display_name: input.display_name,
-        code_allowed: input.code_allowed,
-    })
+    WorkspaceAuthorizationRequest::new(path, input.display_name, input.code_allowed)
+        .map_err(controlled_error)
 }
 
 fn workspace_requests(
@@ -87,16 +103,86 @@ fn workspace_requests(
 }
 
 fn emit_status(app: &AppHandle, status: &ControlledStatus) {
+    crate::features::remote_control::controller::relay_runtime::track_controlled_status_transition(
+        app, status,
+    );
     let _ = app.emit(STATUS_EVENT, status);
 }
 
-/// 前端排障日志（仅用于定位「后端已出码、界面无码」这类投影问题）：
-/// 把前端持有的被控状态写成一行有界文本，落到与 Rust 相同的日志文件里，
-/// 支持人员可直接读取，不需要用户在界面上转述。
+/// Frontend projection diagnostics accept only semantic categories. The UI
+/// cannot submit a code, generation, endpoint, device name or free text.
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClientRemoteEvent {
+    ControlledStatus,
+    ControlledResult,
+    CapabilityHandshake,
+}
+
+impl ClientRemoteEvent {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::ControlledStatus => "controlled_status",
+            Self::ControlledResult => "controlled_result",
+            Self::CapabilityHandshake => "capability_handshake",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClientRemoteDetail {
+    Registering,
+    WaitingForPairing,
+    PairingReserved,
+    HandshakePending,
+    Connected,
+    Reconnecting,
+    Stopped,
+    Error,
+    Failed,
+    Unknown,
+}
+
+impl ClientRemoteDetail {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Registering => "registering",
+            Self::WaitingForPairing => "waiting_for_pairing",
+            Self::PairingReserved => "pairing_reserved",
+            Self::HandshakePending => "handshake_pending",
+            Self::Connected => "connected",
+            Self::Reconnecting => "reconnecting",
+            Self::Stopped => "stopped",
+            Self::Error => "error",
+            Self::Failed => "failed",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+fn validate_client_remote_event(
+    event: ClientRemoteEvent,
+    detail: ClientRemoteDetail,
+) -> Result<(), String> {
+    if matches!(event, ClientRemoteEvent::CapabilityHandshake)
+        && !matches!(detail, ClientRemoteDetail::Failed)
+    {
+        return Err("remote_client_event_invalid".into());
+    }
+    Ok(())
+}
+
 #[tauri::command]
-pub fn desktop_remote_client_log(message: String) -> Result<(), String> {
+pub fn desktop_remote_client_event(
+    event: ClientRemoteEvent,
+    detail: ClientRemoteDetail,
+) -> Result<(), String> {
+    crate::platform::capabilities::ensure_desktop_remote_control_enabled()?;
+    validate_client_remote_event(event, detail)?;
     super::super::super::features::remote_control::controller::relay_runtime::log_controlled_event(
-        "client", &message,
+        event.as_str(),
+        detail.as_str(),
     );
     Ok(())
 }
@@ -109,6 +195,12 @@ pub async fn desktop_remote_controlled_start(
     device_name: Option<String>,
     workspaces: Vec<DesktopControlledWorkspaceInput>,
 ) -> Result<ControlledStatus, String> {
+    crate::features::remote_control::controller::relay_runtime::log_controlled_event(
+        "lifecycle_checkpoint",
+        "start_requested",
+    );
+    let started = std::time::Instant::now();
+    let result = async {
     ensure_supported(&manager)?;
     let workspaces = workspace_requests(workspaces)?;
     if let Err(error) = manager.start(device_name.as_deref(), workspaces) {
@@ -170,6 +262,16 @@ pub async fn desktop_remote_controlled_start(
             Err("pairing_registration_failed".to_owned())
         }
     }
+    }.await;
+    track_remote_control(
+        &app,
+        RemoteControlEvent::from_result(
+            RemoteStage::Start,
+            &result,
+            started.elapsed().as_millis() as u64,
+        ),
+    );
+    result
 }
 
 #[tauri::command]
@@ -177,35 +279,89 @@ pub async fn desktop_remote_controlled_refresh(
     app: AppHandle,
     manager: State<'_, ControlledDeviceManager>,
     relay: State<'_, RemoteControlManager>,
+    attachments: State<'_, Arc<super::desktop_remote_attachment::DesktopRemoteAttachmentRuntime>>,
+    artifacts: State<'_, Arc<super::desktop_remote_artifact::DesktopRemoteArtifactRuntime>>,
 ) -> Result<ControlledStatus, String> {
-    ensure_supported(&manager)?;
-    if let Some(generation) = manager.current_generation() {
-        relay.stop_controller_relay(&generation);
-    }
-    let refresh = manager.begin_refresh().map_err(controlled_error)?;
-    let operation = manager
-        .complete_refresh_revoked(refresh)
-        .map_err(controlled_error)?;
-    let done = ControlledRelayWorker::start(
-        app.clone(),
-        relay.inner().clone(),
-        operation,
-        std::sync::Arc::new(
-            super::desktop_remote_controller_business::DesktopControlledBusiness {
-                app: app.clone(),
-            },
-        ),
-    )
-    .await
-    .map_err(|error| error.to_string())?;
-    match done.await {
-        Ok(Ok(status)) => {
-            emit_status(&app, &status);
-            Ok(status)
+    let checkpoint = |detail| {
+        crate::features::remote_control::controller::relay_runtime::log_controlled_event(
+            "lifecycle_checkpoint",
+            detail,
+        );
+    };
+    checkpoint("refresh_requested");
+    let started = std::time::Instant::now();
+    let result = async {
+        ensure_supported(&manager)?;
+        let old_generation = manager.current_generation();
+        let old_connection_id = manager
+            .live_runtime_context()
+            .ok()
+            .map(|(lease, _)| lease.connection_id);
+        let refresh = manager.begin_refresh().map_err(controlled_error)?;
+        checkpoint("refresh_retiring");
+        if let Some(connection_id) = old_connection_id {
+            checkpoint("refresh_connection_cleanup_begin");
+            attachments.uploads_cleanup_for_connection(&connection_id);
+            artifacts.clear_connection(&connection_id);
+            checkpoint("refresh_connection_cleanup_done");
         }
-        Ok(Err(error)) => Err(error),
-        Err(_) => Err("pairing_registration_failed".to_owned()),
+        emit_status(&app, &manager.status());
+        if let Some(generation) = old_generation {
+            checkpoint("refresh_relay_stop_begin");
+            relay.stop_controller_relay(&generation);
+            checkpoint("refresh_relay_stop_done");
+        }
+        checkpoint("refresh_state_rotation_begin");
+        let operation = manager
+            .complete_refresh_revoked(refresh)
+            .map_err(controlled_error)?;
+        checkpoint("refresh_state_rotation_done");
+        checkpoint("refresh_worker_start_begin");
+        let done = ControlledRelayWorker::start(
+            app.clone(),
+            relay.inner().clone(),
+            operation,
+            std::sync::Arc::new(
+                super::desktop_remote_controller_business::DesktopControlledBusiness {
+                    app: app.clone(),
+                },
+            ),
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+        checkpoint("refresh_worker_start_done");
+        checkpoint("refresh_registration_wait_begin");
+        match done.await {
+            Ok(Ok(status)) => {
+                checkpoint("refresh_registration_wait_done");
+                emit_status(&app, &status);
+                Ok(status)
+            }
+            Ok(Err(error)) => {
+                checkpoint("refresh_registration_wait_failed");
+                Err(error)
+            }
+            Err(_) => {
+                checkpoint("refresh_registration_wait_failed");
+                Err("pairing_registration_failed".to_owned())
+            }
+        }
     }
+    .await;
+    checkpoint(if result.is_ok() {
+        "refresh_completed"
+    } else {
+        "refresh_failed"
+    });
+    track_remote_control(
+        &app,
+        RemoteControlEvent::from_result(
+            RemoteStage::Refresh,
+            &result,
+            started.elapsed().as_millis() as u64,
+        ),
+    );
+    result
 }
 
 #[tauri::command]
@@ -213,14 +369,47 @@ pub fn desktop_remote_controlled_stop(
     app: AppHandle,
     manager: State<'_, ControlledDeviceManager>,
     relay: State<'_, RemoteControlManager>,
+    attachments: State<'_, Arc<super::desktop_remote_attachment::DesktopRemoteAttachmentRuntime>>,
+    artifacts: State<'_, Arc<super::desktop_remote_artifact::DesktopRemoteArtifactRuntime>>,
 ) -> Result<ControlledStatus, String> {
-    ensure_supported(&manager)?;
-    if let Some(generation) = manager.current_generation() {
-        relay.stop_controller_relay(&generation);
-    }
-    let status = manager.stop();
-    emit_status(&app, &status);
-    Ok(status)
+    crate::features::remote_control::controller::relay_runtime::log_controlled_event(
+        "lifecycle_checkpoint",
+        "stop_requested",
+    );
+    let started = std::time::Instant::now();
+    let result = (|| {
+        ensure_supported(&manager)?;
+        let generation = manager.current_generation();
+        let connection_id = manager
+            .live_runtime_context()
+            .ok()
+            .map(|(lease, _)| lease.connection_id);
+        let stopping = manager.begin_stop();
+        emit_status(&app, &stopping);
+        if let Some(generation) = generation {
+            relay.stop_controller_relay(&generation);
+        }
+        let stopped = manager.finish_stop();
+        if let Some(connection_id) = connection_id {
+            attachments.uploads_cleanup_for_connection(&connection_id);
+            artifacts.clear_connection(&connection_id);
+        }
+        emit_status(&app, &stopped);
+        crate::features::remote_control::controller::relay_runtime::log_controlled_event(
+            "lifecycle_checkpoint",
+            "stop_completed",
+        );
+        Ok(stopped)
+    })();
+    track_remote_control(
+        &app,
+        RemoteControlEvent::from_result(
+            RemoteStage::Stop,
+            &result,
+            started.elapsed().as_millis() as u64,
+        ),
+    );
+    result
 }
 
 #[tauri::command]
@@ -228,13 +417,31 @@ pub fn desktop_remote_controlled_disconnect_now(
     app: AppHandle,
     manager: State<'_, ControlledDeviceManager>,
     relay: State<'_, RemoteControlManager>,
+    attachments: State<'_, Arc<super::desktop_remote_attachment::DesktopRemoteAttachmentRuntime>>,
+    artifacts: State<'_, Arc<super::desktop_remote_artifact::DesktopRemoteArtifactRuntime>>,
 ) -> Result<ControlledStatus, String> {
+    crate::features::remote_control::controller::relay_runtime::log_controlled_event(
+        "lifecycle_checkpoint",
+        "disconnect_requested",
+    );
     ensure_supported(&manager)?;
+    let connection_id = manager
+        .live_runtime_context()
+        .ok()
+        .map(|(lease, _)| lease.connection_id);
     if let Some(generation) = manager.current_generation() {
         relay.stop_controller_relay(&generation);
     }
     let status = manager.disconnect_now();
+    if let Some(connection_id) = connection_id {
+        attachments.uploads_cleanup_for_connection(&connection_id);
+        artifacts.clear_connection(&connection_id);
+    }
     emit_status(&app, &status);
+    crate::features::remote_control::controller::relay_runtime::log_controlled_event(
+        "lifecycle_checkpoint",
+        "disconnect_completed",
+    );
     Ok(status)
 }
 
@@ -243,7 +450,7 @@ pub fn desktop_remote_controlled_status(
     manager: State<'_, ControlledDeviceManager>,
 ) -> Result<ControlledStatus, String> {
     ensure_supported(&manager)?;
-    Ok(manager.status())
+    Ok(manager.poll_watchdog(controlled_monotonic_millis()))
 }
 
 #[tauri::command]
@@ -255,21 +462,6 @@ pub fn desktop_remote_controlled_poll_watchdog(
     let status = manager.poll_watchdog(controlled_monotonic_millis());
     emit_status(&app, &status);
     Ok(status)
-}
-
-#[tauri::command]
-pub fn desktop_remote_controlled_authorize_workspace(
-    app: AppHandle,
-    manager: State<'_, ControlledDeviceManager>,
-    workspace: DesktopControlledWorkspaceInput,
-) -> Result<ControlledWorkspaceInfo, String> {
-    ensure_supported(&manager)?;
-    let request = workspace_request(workspace)?;
-    let info = manager
-        .authorize_workspace(request)
-        .map_err(controlled_error)?;
-    emit_status(&app, &manager.status());
-    Ok(info)
 }
 
 #[tauri::command]
@@ -314,6 +506,36 @@ mod tests {
             Err(error) => error,
         };
         assert_eq!(error, "workspace_path_invalid");
+    }
+
+    #[test]
+    fn client_diagnostics_reject_free_text_and_identity_fields() {
+        assert!(serde_json::from_str::<ClientRemoteEvent>("\"controlled_status\"").is_ok());
+        assert!(serde_json::from_str::<ClientRemoteDetail>("\"connected\"").is_ok());
+        for value in ["\"generation123\"", "\"AB12CD3\"", "\"deviceAlice\""] {
+            assert!(serde_json::from_str::<ClientRemoteEvent>(value).is_err());
+            assert!(serde_json::from_str::<ClientRemoteDetail>(value).is_err());
+        }
+        assert_eq!(
+            validate_client_remote_event(
+                ClientRemoteEvent::CapabilityHandshake,
+                ClientRemoteDetail::Connected
+            )
+            .unwrap_err(),
+            "remote_client_event_invalid"
+        );
+        assert_eq!(
+            desktop_remote_client_event(
+                ClientRemoteEvent::CapabilityHandshake,
+                ClientRemoteDetail::Connected
+            )
+            .unwrap_err(),
+            if crate::platform::capabilities::ensure_desktop_remote_control_enabled().is_ok() {
+                "remote_client_event_invalid"
+            } else {
+                UNSUPPORTED
+            }
+        );
     }
 
     #[test]
