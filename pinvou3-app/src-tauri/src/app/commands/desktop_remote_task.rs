@@ -322,10 +322,9 @@ impl DesktopRemoteTaskRuntime {
         pool: EnginePool,
         acp_pool: AcpPool,
         temporary_models: SharedTemporaryModelStore,
+        ledger: Arc<RemoteTaskLedger>,
     ) -> Arc<Self> {
-        let service = Arc::new(RemoteTaskService::new(Arc::new(
-            RemoteTaskLedger::in_memory(),
-        )));
+        let service = Arc::new(RemoteTaskService::new(ledger));
         let authorizations = Arc::new(RemoteWorkspaceAuthorizations::default());
         service.set_session_provisioner(Arc::new(DesktopRemoteSessionProvisioner::new(
             store.clone(),
