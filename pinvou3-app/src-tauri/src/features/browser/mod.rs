@@ -553,6 +553,9 @@ impl BrowserManager {
     }
 
     fn next_watch_retry_delay(&self) -> Duration {
+        // Rust 1.99 deprecated fetch_update (renamed to try_update); the MSRV
+        // (1.89) predates the new name, so keep the old call.
+        #[allow(deprecated)]
         let current = self
             .watch_retry_delay_ms
             .fetch_update(
@@ -2950,8 +2953,8 @@ impl BrowserManager {
         start_guard: tokio::sync::MutexGuard<'_, ()>,
     ) -> Result<RestoreWorkspaceOutcome, String> {
         // When the product gate is closed, do not even read the restore manifest or
-        // create hidden WebViews from it. Preserve it unchanged for a future enabled
-        // or preview acceptance build.
+        // create hidden WebViews from it. Preserve it unchanged for a future
+        // enabled build.
         if !crate::platform::capabilities::browser_product_enabled() {
             return Ok(RestoreWorkspaceOutcome::Missing);
         }
