@@ -236,12 +236,14 @@ impl CodeWrapKeyPair {
                 "sealed_code_v1",
             ));
         }
-        let relay_public_key: [u8; 32] = envelope[1..33]
-            .try_into()
-            .expect("sealed-code public key has fixed length");
-        let nonce: [u8; AEAD_NONCE_BYTES] = envelope[33..45]
-            .try_into()
-            .expect("sealed-code nonce has fixed length");
+        let relay_public_key: [u8; 32] = envelope
+            .get(1..33)
+            .and_then(|bytes| bytes.try_into().ok())
+            .ok_or_else(|| ControllerCryptoError::new("invalid_ciphertext", "sealed_code_v1"))?;
+        let nonce: [u8; AEAD_NONCE_BYTES] = envelope
+            .get(33..45)
+            .and_then(|bytes| bytes.try_into().ok())
+            .ok_or_else(|| ControllerCryptoError::new("invalid_ciphertext", "sealed_code_v1"))?;
         let key = self.derive_wrapping_key(CodeWrapPublicKey(relay_public_key), binding)?;
         let aad = binding.aad()?;
         let mut plaintext = open_aead(
@@ -450,9 +452,13 @@ pub(crate) enum ControllerRole {
 
 impl ControllerRole {
     fn wire(self) -> &'static [u8] {
+        self.wire_str().as_bytes()
+    }
+
+    fn wire_str(self) -> &'static str {
         match self {
-            Self::A => b"A",
-            Self::B => b"B",
+            Self::A => "A",
+            Self::B => "B",
         }
     }
 }
@@ -496,7 +502,7 @@ impl ReceiptSecret {
             &binding.pairing_id,
             &binding.reservation_id,
             &transcript_hash,
-            std::str::from_utf8(sender.wire()).expect("role is ASCII"),
+            sender.wire_str(),
             &self.0[..],
         )
         .map_err(|_| ControllerCryptoError::new("invalid_binding", "receipt"))?;
@@ -724,15 +730,25 @@ fn parse_finished(
 }
 
 fn take_lp<'a>(input: &'a [u8], cursor: &mut usize) -> CryptoResult<&'a [u8]> {
+    let header_end = cursor
+        .checked_add(4)
+        .ok_or_else(|| ControllerCryptoError::new("invalid_finished", "length"))?;
     let length_bytes = input
-        .get(*cursor..*cursor + 4)
+        .get(*cursor..header_end)
         .ok_or_else(|| ControllerCryptoError::new("invalid_finished", "length"))?;
-    let length = u32::from_be_bytes(length_bytes.try_into().expect("four bytes")) as usize;
-    *cursor += 4;
+    let length = u32::from_be_bytes(
+        length_bytes
+            .try_into()
+            .map_err(|_| ControllerCryptoError::new("invalid_finished", "length"))?,
+    ) as usize;
+    *cursor = header_end;
+    let value_end = cursor
+        .checked_add(length)
+        .ok_or_else(|| ControllerCryptoError::new("invalid_finished", "length"))?;
     let value = input
-        .get(*cursor..*cursor + length)
+        .get(*cursor..value_end)
         .ok_or_else(|| ControllerCryptoError::new("invalid_finished", "length"))?;
-    *cursor += length;
+    *cursor = value_end;
     Ok(value)
 }
 
@@ -1001,8 +1017,7 @@ fn seal_aead(
     if output_len > maximum {
         return Err(ControllerCryptoError::new("plaintext_too_large", "aead"));
     }
-    Aes256Gcm::new_from_slice(key)
-        .expect("AES-256 key length is fixed")
+    Aes256Gcm::new(key.into())
         .encrypt(
             Nonce::from_slice(&nonce),
             Payload {
@@ -1023,8 +1038,7 @@ fn open_aead(
     if ciphertext.len() < AEAD_TAG_BYTES || ciphertext.len() > maximum {
         return Err(ControllerCryptoError::new("invalid_ciphertext", "aead"));
     }
-    Aes256Gcm::new_from_slice(key)
-        .expect("AES-256 key length is fixed")
+    Aes256Gcm::new(key.into())
         .decrypt(
             Nonce::from_slice(&nonce),
             Payload {
@@ -1442,6 +1456,55 @@ mod tests {
     }
 
     #[test]
+    fn length_prefix_extraction_is_checked_and_preserves_cursor_semantics() {
+        for (input, start, expected_cursor) in [
+            (vec![], 0, 0),
+            (vec![0; 3], 0, 0),
+            (vec![0; 4], usize::MAX, usize::MAX),
+            (vec![0; 4], usize::MAX - 3, usize::MAX - 3),
+            (vec![0, 0, 0, 1], 0, 4),
+            (u32::MAX.to_be_bytes().to_vec(), 0, 4),
+        ] {
+            let mut cursor = start;
+            let error = take_lp(&input, &mut cursor).unwrap_err();
+            assert_eq!((error.code, error.field), ("invalid_finished", "length"));
+            assert_eq!(cursor, expected_cursor);
+        }
+        let mut cursor = 0;
+        assert_eq!(take_lp(&[0; 4], &mut cursor).unwrap(), b"");
+        assert_eq!(cursor, 4);
+        let input = [9, 0, 0, 0, 2, b'A', b'B', 9];
+        cursor = 1;
+        assert_eq!(take_lp(&input, &mut cursor).unwrap(), b"AB");
+        assert_eq!(cursor, 7);
+    }
+
+    #[test]
+    fn both_receipt_roles_use_the_exact_protocol_preimage() {
+        let secret = ReceiptSecret::from_test_bytes([9; RECEIPT_SECRET_BYTES]);
+        let binding = binding();
+        let transcript = hex_lower(&binding.transcript_hash);
+        let mut commitments = Vec::new();
+        for (role, wire) in [(ControllerRole::A, "A"), (ControllerRole::B, "B")] {
+            assert_eq!(role.wire(), wire.as_bytes());
+            let preimage = build_receipt_commitment_preimage(
+                &binding.relay_epoch,
+                &binding.pairing_id,
+                &binding.reservation_id,
+                &transcript,
+                wire,
+                &[9; RECEIPT_SECRET_BYTES],
+            )
+            .unwrap();
+            let expected: [u8; 32] = Sha256::digest(&preimage).into();
+            let actual = secret.commitment(&binding, role).unwrap();
+            assert_eq!(actual, expected);
+            commitments.push(actual);
+        }
+        assert_ne!(commitments[0], commitments[1]);
+    }
+
+    #[test]
     fn sealed_code_v1_matches_node_vector_and_rejects_every_binding_tamper() {
         let fixture = fixture();
         let vector = &fixture["sealed_code_vector"];
@@ -1540,6 +1603,26 @@ mod tests {
                 .code,
             "invalid_ciphertext"
         );
+        for length in 0..SEALED_CODE_BYTES {
+            let error = receiver
+                .open_sealed_code(&binding, &envelope[..length])
+                .unwrap_err();
+            assert_eq!(
+                (error.code, error.field),
+                ("invalid_ciphertext", "sealed_code_v1")
+            );
+        }
+        let mut oversized = envelope.clone();
+        oversized.push(0);
+        let mut wrong_version = envelope.clone();
+        wrong_version[0] ^= 1;
+        for invalid in [oversized, wrong_version] {
+            let error = receiver.open_sealed_code(&binding, &invalid).unwrap_err();
+            assert_eq!(
+                (error.code, error.field),
+                ("invalid_ciphertext", "sealed_code_v1")
+            );
+        }
         let source = include_str!("crypto.rs").replace("\r\n", "\n");
         assert!(source.contains("pub(crate) fn seal_pairing_code(\n        self,"));
         let forbidden = ["pub(crate) fn seal_pairing_code_with", "_nonce"].concat();
