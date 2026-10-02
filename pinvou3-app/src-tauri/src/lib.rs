@@ -16,6 +16,8 @@ pub mod platform;
 )]
 unsafe extern "C" {}
 
+use std::io::Write as _;
+
 use tauri::Manager;
 
 pub use features::assistant::attachments::stage_file_in_workspace;
@@ -95,13 +97,21 @@ fn ensure_release_env() {
                 skills_dir.join("eip").join("bin"),
                 skills_dir.join("zhidao").join("bin"),
             ];
+            // Versioned CLI asset dirs (one per lock-pinned artifact) must come
+            // BEFORE the legacy-layout dir: the pinned copy is hash-verified and
+            // is the authoritative runtime. With the legacy dir first, a stale
+            // old-version binary left there shadows the upgraded CLI for every
+            // PATH-based consumer (observed: a leftover wecom-cli 0.1.9 kept
+            // running after the upgrade to 1.2.1). The legacy dir itself stays
+            // on PATH (after the versioned dirs): binaries not yet migrated,
+            // or whose pinned version is not installed, still resolve by name
+            // (it is their only local runtime).
+            for (name, pin) in crate::platform::connector_lock::all_artifact_pins() {
+                dirs.push(crate::platform::paths::assets_cli_dir(&name, &pin.version));
+            }
             if let Some(connector_bin) = crate::platform::paths::managed_connector_bin_dir() {
                 // 旧布局（过渡期保留：未迁移的存量二进制还能按名解析）
                 dirs.push(connector_bin);
-            }
-            // 版本化 CLI 资产目录进 PATH（按 lock 表当前版本逐个登记）
-            for (name, pin) in crate::platform::connector_lock::all_artifact_pins() {
-                dirs.push(crate::platform::paths::assets_cli_dir(&name, &pin.version));
             }
             if let Ok(prefix) = env::var("NPM_CONFIG_PREFIX") {
                 dirs.push(std::path::Path::new(&prefix).join("bin"));
@@ -748,12 +758,41 @@ pub fn run() {
             features::browser::install_automation_context(app);
             #[cfg(target_os = "macos")]
             features::updater::cleanup_stale_backup();
+            // Attach the logging backend in ALL builds, not just debug: without
+            // it every log:: line — connector and updater failure causes among
+            // them — is a no-op in release and the raw cause of a failure is
+            // lost. LogDir is the OS-standard per-app log directory and the
+            // plugin's default rotation keeps the file bounded (KeepOne, 40KB).
+            // The Stdout target is debug-only: packaged Windows runs without a
+            // console (`windows_subsystem = "windows"`), where stdout writes
+            // fail and fern's error fallback then panics the logging thread
+            // and starves the file target chained after it — release runs
+            // everywhere read the file instead, terminal dev runs keep stdout.
+            // An unusable log directory must not take boot down, so an attach
+            // failure only leaves a best-effort stderr note and startup
+            // continues without the backend.
+            let mut log_targets = vec![tauri_plugin_log::Target::new(
+                tauri_plugin_log::TargetKind::LogDir { file_name: None },
+            )];
             if cfg!(debug_assertions) {
-                app.handle().plugin(
-                    tauri_plugin_log::Builder::default()
-                        .level(log::LevelFilter::Info)
-                        .build(),
-                )?;
+                log_targets.push(tauri_plugin_log::Target::new(
+                    tauri_plugin_log::TargetKind::Stdout,
+                ));
+            }
+            if let Err(e) = app.handle().plugin(
+                tauri_plugin_log::Builder::default()
+                    .level(log::LevelFilter::Info)
+                    .targets(log_targets)
+                    .build(),
+            ) {
+                // Best-effort only: `eprintln!` panics when the stderr write
+                // fails (no console on packaged Windows), and a panic inside
+                // setup takes boot down — the exact scenario this arm exists
+                // to survive.
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "[pinvou3] failed to attach the logging plugin: {e}"
+                );
             }
             startup::mark("setup:plugins_ready");
             crate::platform::window_startup::arm_hidden_main_window_fallback(app.handle());
@@ -1105,9 +1144,9 @@ pub fn run() {
                             );
                             crate::features::memory::discard_turn_capture(session_id);
                             // Self-metrics accumulate per session key
-                            // (warmed_sessions inserts on every TurnComplete
-                            // and is never reclaimed); clear the keys on
-                            // deletion.
+                            // (inflight entries are inserted on TurnStarted
+                            // and only cleared on TurnComplete/abort); clear
+                            // the key on deletion.
                             if let Some(metrics) = app_for_purge_hook
                                 .try_state::<crate::features::monitor::MonitorState>()
                                 .map(|state| state.self_metrics())
@@ -1810,6 +1849,8 @@ pub fn run() {
             commands::marketplace::start_marketplace_tool_oauth_login,
             commands::marketplace::cancel_marketplace_tool_oauth_login,
             commands::marketplace::uninstall_marketplace_tool,
+            commands::builtin::list_builtin_features,
+            commands::builtin::set_builtin_feature_enabled,
             commands::artifacts::detect_obsidian,
             commands::knowledge::kb_start_scan,
             commands::knowledge::kb_scan_status,
@@ -2448,6 +2489,61 @@ mod release_env_defaults_guard {
             std::env::var_os("PINVOU3_MAX_OUTPUT_TOKENS").is_none(),
             "ensure_release_env must not re-inject PINVOU3_MAX_OUTPUT_TOKENS (the Pinvou cap travels only via prefs/route)"
         );
+    }
+
+    /// PATH assembly order guard: lock-pinned versioned CLI asset dirs must
+    /// precede the legacy `connectors/<platform>/bin/` dir. A stale old-version
+    /// binary left in the legacy dir must not shadow the upgraded runtime
+    /// (observed: a leftover wecom-cli 0.1.9 kept running after the upgrade to
+    /// 1.2.1); the legacy dir itself must stay on PATH — connectors whose
+    /// pinned version is not installed resolve through it by name.
+    #[test]
+    fn release_env_path_orders_versioned_cli_dirs_before_legacy_bin() {
+        let _lock = crate::platform::paths::tests::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let _snapshot = EnvSnapshot::take();
+
+        // The PATH branch only runs when var_os("PATH") exists; set a sentinel
+        // first so the assertions cover exactly what ensure_release_env
+        // assembled. PINVOU3_HOME is repointed at a nonexistent test path —
+        // directory existence plays no part in PATH assembly.
+        // SAFETY: holding platform::paths::tests::ENV_LOCK (first line); env writes serialized.
+        unsafe { std::env::set_var("PINVOU3_HOME", "/tmp/pinvou3-path-order-test") };
+        // SAFETY: same as above; ENV_LOCK serialization.
+        unsafe { std::env::set_var("PATH", "/usr/bin:/bin") };
+        super::ensure_release_env();
+
+        let path = std::env::var_os("PATH").expect("ensure_release_env must rewrite PATH");
+        let dirs: Vec<std::path::PathBuf> = std::env::split_paths(&path).collect();
+        // 软跳过仅限真正不支持的架构；受支持平台上 wrapper 回归会在此硬断言
+        // 失败（契约见 platform::test_support 同名 helper）。
+        let Some(legacy) =
+            crate::platform::test_support::managed_connector_bin_dir_or_assert_unsupported()
+        else {
+            return;
+        };
+        let legacy_idx = dirs
+            .iter()
+            .position(|d| d == &legacy)
+            .expect("legacy bin dir must stay on PATH for not-yet-migrated binaries");
+        let pins = crate::platform::connector_lock::all_artifact_pins();
+        assert!(
+            !pins.is_empty(),
+            "test platform lock must pin at least one CLI artifact"
+        );
+        for (name, pin) in &pins {
+            let versioned = crate::platform::paths::assets_cli_dir(&name, &pin.version);
+            let idx = dirs
+                .iter()
+                .position(|d| d == &versioned)
+                .unwrap_or_else(|| panic!("versioned {name} asset dir must be on PATH"));
+            assert!(
+                idx < legacy_idx,
+                "versioned {name} dir must precede the legacy bin dir (stale legacy binaries must not shadow the pinned runtime)"
+            );
+        }
+        // EnvSnapshot::drop restores the full snapshot on exit (PATH / PINVOU3_HOME included).
     }
 
     /// `startup_process_env` is the sole injection funnel for
