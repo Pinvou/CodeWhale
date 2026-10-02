@@ -6,12 +6,13 @@
 //! payload（能力快照请求、任务提交、任务取消）与输入摘要。前端只提交 UI 级
 //! 字段（标题、正文、模式），不再拼装任何协议字段。
 //!
-//! 当前仅开放 `chat` 模式；模型来源支持 B 本机模型（`controlled_device`），以及
-//! 租约已协商 `temporary_model_package_v1` 时的 A 端临时模型。代码模式、附件与成果
-//! 在此处失败关闭，等对应任务按能力开关打开。
+//! 可选模式来自 B 的认证能力快照；模型来源支持 B 本机模型（`controlled_device`），
+//! 以及租约已协商 `temporary_model_package_v1` 时、仅用于普通对话的 A 端临时模型。
+//! 工作区、工具和 Skill 只投影受控 opaque ID 与显示名。
 //! 任何上下文不匹配（无连接、lease 变更、未取到能力快照）都失败关闭。
 
 use std::collections::BTreeMap;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use parking_lot::Mutex;
 use serde::Serialize;
@@ -24,7 +25,7 @@ use super::protocol::{
     is_valid_identifier, validate_controller_runtime_payload_json,
 };
 
-/// 首版唯一开放的会话模式（代码模式需要工作区授权与能力开关，属后续任务）。
+/// 新会话意图的默认模式；每个任务仍必须按最新能力快照显式选择模式。
 const SESSION_MODE_CHAT: &str = "chat";
 /// 使用被控设备（B）本机模型。
 const MODEL_SOURCE_CONTROLLED: &str = "controlled_device";
@@ -38,6 +39,7 @@ const MAX_TRACKED_TASKS: usize = 64;
 const MAX_WORKSPACES: usize = 16;
 const MAX_MODES: usize = 2;
 const MAX_PENDING_CAPABILITY_REQUESTS: usize = 4;
+const MAX_A_CAPABILITY_TTL_MS: u64 = 30_000;
 /// 输入摘要的域分离前缀：同参必须同摘要、异参必须不同摘要。
 const TASK_DIGEST_DOMAIN: &[u8] = b"pinvou-controller-task-input-v1";
 
@@ -91,6 +93,54 @@ pub(crate) struct ControllingSessionProjection {
     pub(crate) task_count: usize,
 }
 
+/// Only schema-approved, non-sensitive descriptor fields from an authenticated
+/// B snapshot. This is never the raw wire payload or B's local capability owner.
+#[derive(Debug, Clone, Serialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ControllerCapabilityProjection {
+    pub(crate) remote_session_ref: String,
+    pub(crate) connection_id: String,
+    pub(crate) controller_lease_id: String,
+    pub(crate) lease_epoch: String,
+    pub(crate) relay_epoch: String,
+    pub(crate) remote_control_generation: String,
+    pub(crate) capability_revision: u64,
+    pub(crate) expires_at_ms: u64,
+    pub(crate) modes: Vec<String>,
+    pub(crate) tools: Vec<ControllerToolDescriptor>,
+    pub(crate) skills: Vec<ControllerSkillDescriptor>,
+    pub(crate) workspaces: Vec<ControllerWorkspaceDescriptor>,
+}
+
+impl ControllerCapabilityProjection {
+    pub(crate) fn revision(&self) -> u64 {
+        self.capability_revision
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ControllerToolDescriptor {
+    pub(crate) tool_id: String,
+    pub(crate) display_name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ControllerSkillDescriptor {
+    pub(crate) skill_id: String,
+    pub(crate) display_name: String,
+    pub(crate) scopes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ControllerWorkspaceDescriptor {
+    pub(crate) workspace_id: String,
+    pub(crate) display_name: String,
+    pub(crate) code_allowed: bool,
+}
+
 /// 一次意图的投影：冻结 payload + 前端需要的标识（不含任何密钥材料）。
 #[derive(Debug, Clone, Serialize, Eq, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -104,6 +154,7 @@ pub(crate) struct ControllingIntentProjection {
     pub(crate) payload: Value,
 }
 
+#[derive(Clone)]
 struct SessionIntent {
     session_ref: String,
     session_id: String,
@@ -114,6 +165,8 @@ struct SessionIntent {
     negotiated_capabilities: Vec<String>,
     capability_revision: Option<u64>,
     capability_valid_for_ms: Option<u64>,
+    capability_projection: Option<ControllerCapabilityProjection>,
+    capability_deadline: Option<Instant>,
     capability_error: Option<String>,
     last_capability_request_id: Option<String>,
     pending_capability_requests: Vec<String>,
@@ -172,14 +225,27 @@ pub(crate) struct ControllingSessionManager {
 impl ControllingSessionManager {
     /// 打开（或复用同名 ref 的）远程会话意图。要求当前存在活租约，并把该租约
     /// 与协商能力固化进意图；模式与模型来源按首版能力开关失败关闭。
-    pub(crate) fn open(
+    /// The created flag is decided under the same intent lock as open; callers
+    /// must not infer ownership from a separate state read when compensating.
+    pub(crate) fn open_with_outcome(
         &self,
         remote_ref: Option<&str>,
         title: &str,
         mode: &str,
         lease: &LeaseContext,
         negotiated_capabilities: &[String],
-    ) -> Result<ControllingSessionProjection> {
+    ) -> Result<(ControllingSessionProjection, bool)> {
+        self.open_internal(remote_ref, title, mode, lease, negotiated_capabilities)
+    }
+
+    fn open_internal(
+        &self,
+        remote_ref: Option<&str>,
+        title: &str,
+        mode: &str,
+        lease: &LeaseContext,
+        negotiated_capabilities: &[String],
+    ) -> Result<(ControllingSessionProjection, bool)> {
         if mode != SESSION_MODE_CHAT {
             return Err(SessionError::new("session_mode_unavailable"));
         }
@@ -198,14 +264,17 @@ impl ControllingSessionManager {
             .find(|intent| intent.session_ref == session_ref)
         {
             ensure_context(existing, lease)?;
-            return Ok(existing.projection());
+            if existing.session_id != session_ref {
+                return Err(SessionError::new("session_reference_conflict"));
+            }
+            return Ok((existing.projection(), false));
         }
         if intents.len() >= MAX_SESSION_INTENTS {
             return Err(SessionError::new("session_capacity"));
         }
         let intent = SessionIntent {
+            session_id: session_ref.clone(),
             session_ref,
-            session_id: format!("session-{}", Uuid::new_v4().simple()),
             title: title.to_owned(),
             mode: SESSION_MODE_CHAT.to_owned(),
             model_source: MODEL_SOURCE_CONTROLLED.to_owned(),
@@ -213,6 +282,8 @@ impl ControllingSessionManager {
             negotiated_capabilities: negotiated_capabilities.to_vec(),
             capability_revision: None,
             capability_valid_for_ms: None,
+            capability_projection: None,
+            capability_deadline: None,
             capability_error: None,
             last_capability_request_id: None,
             pending_capability_requests: Vec::new(),
@@ -223,7 +294,7 @@ impl ControllingSessionManager {
         };
         let projection = intent.projection();
         intents.push(intent);
-        Ok(projection)
+        Ok((projection, true))
     }
 
     pub(crate) fn state(
@@ -235,6 +306,39 @@ impl ControllingSessionManager {
         let intent = find_intent(&mut intents, remote_ref)?;
         ensure_context(intent, lease)?;
         Ok(intent.projection())
+    }
+
+    /// Read only A's authenticated, still-live capability projection for the
+    /// exact remote ref and lease. B's local CapabilitySnapshotManager is not
+    /// consulted and no raw protocol payload crosses to the WebView.
+    pub(crate) fn capability_projection(
+        &self,
+        remote_ref: &str,
+        lease: &LeaseContext,
+    ) -> Result<ControllerCapabilityProjection> {
+        let mut intents = self.intents.lock();
+        let intent = find_intent(&mut intents, remote_ref)?;
+        ensure_context(intent, lease)?;
+        let deadline = intent
+            .capability_deadline
+            .ok_or_else(|| SessionError::new("capability_snapshot_required"))?;
+        if Instant::now() >= deadline {
+            return Err(SessionError::new("capability_snapshot_expired"));
+        }
+        let projection = intent
+            .capability_projection
+            .as_ref()
+            .ok_or_else(|| SessionError::new("capability_snapshot_required"))?;
+        if projection.connection_id != lease.connection_id
+            || projection.controller_lease_id != lease.controller_lease_id
+            || projection.lease_epoch != lease.lease_epoch
+            || projection.relay_epoch != lease.relay_epoch
+            || projection.remote_control_generation != lease.remote_control_generation
+            || Some(projection.capability_revision) != intent.capability_revision
+        {
+            return Err(SessionError::new("session_context_stale"));
+        }
+        Ok(projection.clone())
     }
 
     /// 关闭一个会话意图；不存在的 ref 视为已经关闭（幂等）。
@@ -268,26 +372,13 @@ impl ControllingSessionManager {
         Ok(intent_projection(request_id, intent, None, None, payload))
     }
 
-    /// 应用 B 的能力快照：校验冻结形状、lease 绑定与 revision 单调性，并记录
-    /// 协商出的模式与工作区。revision 回退或形状不符都失败关闭。
-    pub(crate) fn apply_capability_snapshot(
-        &self,
-        remote_ref: &str,
-        payload: &Value,
-        lease: &LeaseContext,
-    ) -> Result<ControllingSessionProjection> {
-        let mut intents = self.intents.lock();
-        let intent = find_intent(&mut intents, remote_ref)?;
-        ensure_context(intent, lease)?;
-        apply_snapshot_locked(intent, payload)
-    }
-
-    /// 按 lease + request_id 精确定位请求会话并应用快照；若对端额外携带
-    /// session_id，则同时校验两者，避免任何跨会话响应被接受。
-    pub(crate) fn apply_capability_snapshot_for_lease(
+    /// Stage the fully validated response before confirming the B-owned Session
+    /// mapping. Only after the mapping writer succeeds is the capability applied.
+    pub(crate) fn apply_capability_snapshot_for_lease_with_mapping(
         &self,
         lease: &LeaseContext,
         payload: &Value,
+        confirm_mapping: impl FnOnce(&str, &str) -> Result<()>,
     ) -> Result<ControllingSessionProjection> {
         let mut intents = self.intents.lock();
         let intent = find_capability_response_intent(&mut intents, lease, payload)?;
@@ -299,8 +390,15 @@ impl ControllingSessionManager {
         {
             return Err(SessionError::new("capability_response_unexpected"));
         }
-        let projection = apply_snapshot_locked(intent, payload)?;
-        intent.pending_capability_requests.clear();
+        let controlled_session_id = payload
+            .get("controlled_session_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| SessionError::new("capability_snapshot_invalid"))?;
+        let mut staged = intent.clone();
+        let projection = apply_snapshot_locked(&mut staged, payload, true)?;
+        confirm_mapping(&intent.session_ref, controlled_session_id)?;
+        staged.pending_capability_requests.clear();
+        *intent = staged;
         Ok(projection)
     }
 
@@ -331,6 +429,8 @@ impl ControllingSessionManager {
         intent.pending_capability_requests.clear();
         intent.capability_revision = None;
         intent.capability_valid_for_ms = None;
+        intent.capability_projection = None;
+        intent.capability_deadline = None;
         intent.capability_error = Some(code.to_owned());
         intent.last_capability_request_id = Some(request_id.to_owned());
         intent.modes = vec![SESSION_MODE_CHAT.to_owned()];
@@ -364,6 +464,8 @@ impl ControllingSessionManager {
         intent.pending_capability_requests.clear();
         intent.capability_revision = None;
         intent.capability_valid_for_ms = None;
+        intent.capability_projection = None;
+        intent.capability_deadline = None;
         intent.capability_error = Some(code.to_owned());
         intent.last_capability_request_id = Some(request_id);
         intent.modes = vec![SESSION_MODE_CHAT.to_owned()];
@@ -541,6 +643,7 @@ fn find_capability_response_intent<'a>(
 fn apply_snapshot_locked(
     intent: &mut SessionIntent,
     payload: &Value,
+    authenticated_ingress: bool,
 ) -> Result<ControllingSessionProjection> {
     let validated = validate_inbound_payload(intent, payload, "capability_snapshot")?;
     let revision = validated
@@ -548,6 +651,9 @@ fn apply_snapshot_locked(
         .and_then(Value::as_str)
         .and_then(|value| value.parse::<u64>().ok())
         .ok_or_else(|| SessionError::new("capability_snapshot_invalid"))?;
+    if revision == 0 {
+        return Err(SessionError::new("capability_snapshot_invalid"));
+    }
     if intent
         .capability_revision
         .is_some_and(|known| revision < known)
@@ -559,6 +665,7 @@ fn apply_snapshot_locked(
         return Err(SessionError::new("capability_snapshot_invalid"));
     }
     let mut workspace_ids = Vec::new();
+    let mut workspaces = Vec::new();
     for workspace in validated
         .get("workspaces")
         .and_then(Value::as_array)
@@ -569,21 +676,115 @@ fn apply_snapshot_locked(
             .and_then(Value::as_str)
             .ok_or_else(|| SessionError::new("capability_snapshot_invalid"))?;
         workspace_ids.push(workspace_id.to_owned());
+        workspaces.push(ControllerWorkspaceDescriptor {
+            workspace_id: workspace_id.to_owned(),
+            display_name: descriptor_string(workspace, "display_name")?,
+            code_allowed: workspace
+                .get("code_allowed")
+                .and_then(Value::as_bool)
+                .ok_or_else(|| SessionError::new("capability_snapshot_invalid"))?,
+        });
         if workspace_ids.len() > MAX_WORKSPACES {
             return Err(SessionError::new("capability_snapshot_invalid"));
         }
     }
-    intent.capability_revision = Some(revision);
-    intent.capability_valid_for_ms = validated
+    let tools = validated
+        .get("tools")
+        .and_then(Value::as_array)
+        .ok_or_else(|| SessionError::new("capability_snapshot_invalid"))?
+        .iter()
+        .map(|value| {
+            Ok(ControllerToolDescriptor {
+                tool_id: descriptor_string(value, "tool_id")?,
+                display_name: descriptor_string(value, "display_name")?,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let skills = validated
+        .get("skills")
+        .and_then(Value::as_array)
+        .ok_or_else(|| SessionError::new("capability_snapshot_invalid"))?
+        .iter()
+        .map(|value| {
+            Ok(ControllerSkillDescriptor {
+                skill_id: descriptor_string(value, "skill_id")?,
+                display_name: descriptor_string(value, "display_name")?,
+                scopes: string_list(value.get("scopes"), MAX_MODES)?,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let valid_for_ms = validated
         .get("valid_for_ms")
         .and_then(Value::as_str)
-        .and_then(|value| value.parse::<u64>().ok())
-        .or(Some(30_000));
+        .map(str::parse::<u64>)
+        .transpose()
+        .map_err(|_| SessionError::new("capability_snapshot_invalid"))?
+        .unwrap_or(MAX_A_CAPABILITY_TTL_MS)
+        .min(MAX_A_CAPABILITY_TTL_MS);
+    if valid_for_ms == 0 {
+        return Err(SessionError::new("capability_snapshot_invalid"));
+    }
+    let deadline = Instant::now()
+        .checked_add(Duration::from_millis(valid_for_ms))
+        .ok_or_else(|| SessionError::new("capability_snapshot_invalid"))?;
+    let now_ms = u64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| SessionError::new("capability_snapshot_invalid"))?
+            .as_millis(),
+    )
+    .map_err(|_| SessionError::new("capability_snapshot_invalid"))?;
+    let expires_at_ms = now_ms
+        .checked_add(valid_for_ms)
+        .ok_or_else(|| SessionError::new("capability_snapshot_invalid"))?;
+    let capability = ControllerCapabilityProjection {
+        remote_session_ref: intent.session_ref.clone(),
+        connection_id: intent.lease.connection_id.clone(),
+        controller_lease_id: intent.lease.controller_lease_id.clone(),
+        lease_epoch: intent.lease.lease_epoch.clone(),
+        relay_epoch: intent.lease.relay_epoch.clone(),
+        remote_control_generation: intent.lease.remote_control_generation.clone(),
+        capability_revision: revision,
+        expires_at_ms,
+        modes: modes.clone(),
+        tools,
+        skills,
+        workspaces,
+    };
+    if intent.capability_revision == Some(revision) {
+        if !authenticated_ingress {
+            return Ok(intent.projection());
+        }
+        let old = intent
+            .capability_projection
+            .as_ref()
+            .ok_or_else(|| SessionError::new("capability_snapshot_stale"))?;
+        if old.modes != capability.modes
+            || old.tools != capability.tools
+            || old.skills != capability.skills
+            || old.workspaces != capability.workspaces
+        {
+            return Err(SessionError::new("capability_snapshot_stale"));
+        }
+        return Ok(intent.projection());
+    }
+    intent.capability_revision = Some(revision);
+    intent.capability_valid_for_ms = Some(valid_for_ms);
+    intent.capability_projection = authenticated_ingress.then_some(capability);
+    intent.capability_deadline = authenticated_ingress.then_some(deadline);
     intent.capability_error = None;
     intent.last_capability_request_id = Some(response_request_id(&validated)?.to_owned());
     intent.modes = modes;
     intent.workspace_ids = workspace_ids;
     Ok(intent.projection())
+}
+
+fn descriptor_string(value: &Value, key: &str) -> Result<String> {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| SessionError::new("capability_snapshot_invalid"))
 }
 
 /// 会话绑定校验：lease 的五元组必须与意图创建时完全一致，否则视为陈旧
@@ -669,19 +870,38 @@ fn build_task_submit(
 }
 
 fn build_task_cancel(intent: &SessionIntent, request_id: &str, task_id: &str) -> Result<Value> {
-    let payload = json!({
+    let payload =
+        build_bound_task_cancel_payload(&intent.lease, &intent.session_id, request_id, task_id)?;
+    validate_outbound_payload(intent, &payload)
+}
+
+/// Pure cancellation frame builder for the SessionStore-backed A task path.
+/// The caller must first prove an attempted task in the current RemoteProxy
+/// binding; this helper deliberately owns no parallel task registry.
+pub(crate) fn build_bound_task_cancel_payload(
+    lease: &LeaseContext,
+    session_id: &str,
+    request_id: &str,
+    task_id: &str,
+) -> Result<Value> {
+    if !is_valid_identifier(session_id)
+        || !is_valid_identifier(request_id)
+        || !is_valid_identifier(task_id)
+    {
+        return Err(SessionError::new("task_request_invalid"));
+    }
+    Ok(json!({
         "v": 1,
         "type": "task_cancel",
-        "connection_id": intent.lease.connection_id,
-        "controller_lease_id": intent.lease.controller_lease_id,
-        "lease_epoch": intent.lease.lease_epoch,
-        "relay_epoch": intent.lease.relay_epoch,
-        "remote_control_generation": intent.lease.remote_control_generation,
+        "connection_id": lease.connection_id,
+        "controller_lease_id": lease.controller_lease_id,
+        "lease_epoch": lease.lease_epoch,
+        "relay_epoch": lease.relay_epoch,
+        "remote_control_generation": lease.remote_control_generation,
         "request_id": request_id,
         "task_id": task_id,
-        "session_id": intent.session_id,
-    });
-    validate_outbound_payload(intent, &payload)
+        "session_id": session_id,
+    }))
 }
 
 /// 输入摘要：域分离前缀 + 逐字段长度前缀，同参同摘要、异参不同摘要。冻结协议
@@ -749,6 +969,62 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    // Test construction still traverses the production open outcome and the
+    // pending-request + validated B-mapping capability admission path.
+    trait SessionTestSetup {
+        fn open_for_test(
+            &self,
+            remote_ref: Option<&str>,
+            title: &str,
+            mode: &str,
+            lease: &LeaseContext,
+            capabilities: &[String],
+        ) -> Result<ControllingSessionProjection>;
+        fn apply_checked_snapshot_for_test(
+            &self,
+            remote_ref: &str,
+            payload: &Value,
+            lease: &LeaseContext,
+        ) -> Result<ControllingSessionProjection>;
+    }
+
+    impl SessionTestSetup for ControllingSessionManager {
+        fn open_for_test(
+            &self,
+            remote_ref: Option<&str>,
+            title: &str,
+            mode: &str,
+            lease: &LeaseContext,
+            capabilities: &[String],
+        ) -> Result<ControllingSessionProjection> {
+            self.open_with_outcome(remote_ref, title, mode, lease, capabilities)
+                .map(|(projection, _created)| projection)
+        }
+
+        fn apply_checked_snapshot_for_test(
+            &self,
+            remote_ref: &str,
+            payload: &Value,
+            lease: &LeaseContext,
+        ) -> Result<ControllingSessionProjection> {
+            let request = self.capability_request(remote_ref, lease)?;
+            let mut response = payload.clone();
+            response["request_id"] = json!(request.request_id);
+            response["session_id"] = json!(request.session_id);
+            response["controlled_session_id"] = json!("b-session-1");
+            self.apply_capability_snapshot_for_lease_with_mapping(
+                lease,
+                &response,
+                |actual_ref, b_session| {
+                    if actual_ref != remote_ref || b_session != "b-session-1" {
+                        return Err(SessionError::new("remote_mapping_mismatch"));
+                    }
+                    Ok(())
+                },
+            )
+        }
+    }
+
     fn lease() -> LeaseContext {
         LeaseContext {
             connection_id: "connection-0001".into(),
@@ -794,7 +1070,7 @@ mod tests {
     fn session_open_binds_the_live_lease_and_only_opens_chat() {
         let sessions = ControllingSessionManager::default();
         let projection = sessions
-            .open(None, "  Weekly report  ", "chat", &lease(), &capabilities())
+            .open_for_test(None, "  Weekly report  ", "chat", &lease(), &capabilities())
             .unwrap();
         assert_eq!(projection.title, "Weekly report");
         assert_eq!(projection.mode, "chat");
@@ -802,19 +1078,19 @@ mod tests {
         assert_eq!(projection.connection_id, "connection-0001");
         assert_eq!(projection.controller_lease_id, "lease-0001");
         assert_eq!(projection.lease_epoch, "1");
+        assert_eq!(projection.session_id, projection.session_ref);
         assert_eq!(projection.relay_epoch, "relay-epoch-0001");
         assert_eq!(projection.remote_control_generation, "generation-0001");
         let serialized = serde_json::to_value(&projection).unwrap();
         assert_eq!(serialized["controllerLeaseId"], "lease-0001");
         assert_eq!(serialized["relayEpoch"], "relay-epoch-0001");
-        assert!(projection.session_id.starts_with("session-"));
         assert!(is_valid_identifier(&projection.session_id));
         assert_eq!(projection.capability_revision, None);
         assert!(projection.temporary_model_available);
         assert_eq!(projection.modes, vec!["chat".to_owned()]);
 
         let controlled_only = sessions
-            .open(
+            .open_for_test(
                 Some("session-ref-controlled-only"),
                 "Controlled only",
                 "chat",
@@ -831,28 +1107,28 @@ mod tests {
         // 首版能力开关：代码模式、空标题与非法引用都失败关闭。
         assert_eq!(
             sessions
-                .open(None, "Code", "code", &lease(), &capabilities())
+                .open_for_test(None, "Code", "code", &lease(), &capabilities())
                 .unwrap_err()
                 .code,
             "session_mode_unavailable"
         );
         assert_eq!(
             sessions
-                .open(None, "   ", "chat", &lease(), &capabilities())
+                .open_for_test(None, "   ", "chat", &lease(), &capabilities())
                 .unwrap_err()
                 .code,
             "session_title_invalid"
         );
         assert_eq!(
             sessions
-                .open(Some("bad ref"), "Title", "chat", &lease(), &capabilities())
+                .open_for_test(Some("bad ref"), "Title", "chat", &lease(), &capabilities())
                 .unwrap_err()
                 .code,
             "session_reference_invalid"
         );
         // 同名 ref 复用同一意图（幂等打开）。
         let reopened = sessions
-            .open(
+            .open_for_test(
                 Some(&projection.session_ref),
                 "Weekly report",
                 "chat",
@@ -867,7 +1143,7 @@ mod tests {
     fn capability_request_and_snapshot_apply_are_lease_bound_and_monotonic() {
         let sessions = ControllingSessionManager::default();
         let session = sessions
-            .open(None, "Session", "chat", &lease(), &capabilities())
+            .open_for_test(None, "Session", "chat", &lease(), &capabilities())
             .unwrap();
         let request = sessions
             .capability_request(&session.session_ref, &lease())
@@ -877,19 +1153,19 @@ mod tests {
         assert_eq!(request.payload["session_id"], session.session_id);
 
         let applied = sessions
-            .apply_capability_snapshot(&session.session_ref, &snapshot(4), &lease())
+            .apply_checked_snapshot_for_test(&session.session_ref, &snapshot(4), &lease())
             .unwrap();
         assert_eq!(applied.capability_revision, Some(4));
         assert_eq!(applied.workspace_count, 1);
 
         // 同 revision 幂等；回退失败关闭。
         let idempotent = sessions
-            .apply_capability_snapshot(&session.session_ref, &snapshot(4), &lease())
+            .apply_checked_snapshot_for_test(&session.session_ref, &snapshot(4), &lease())
             .unwrap();
         assert_eq!(idempotent.capability_revision, Some(4));
         assert_eq!(
             sessions
-                .apply_capability_snapshot(&session.session_ref, &snapshot(3), &lease())
+                .apply_checked_snapshot_for_test(&session.session_ref, &snapshot(3), &lease())
                 .unwrap_err()
                 .code,
             "capability_snapshot_stale"
@@ -899,7 +1175,7 @@ mod tests {
         foreign["lease_epoch"] = json!("2");
         assert_eq!(
             sessions
-                .apply_capability_snapshot(&session.session_ref, &foreign, &lease())
+                .apply_checked_snapshot_for_test(&session.session_ref, &foreign, &lease())
                 .unwrap_err()
                 .code,
             "capability_snapshot_invalid"
@@ -909,7 +1185,7 @@ mod tests {
         other_lease.remote_control_generation = "generation-0002".into();
         assert_eq!(
             sessions
-                .apply_capability_snapshot(&session.session_ref, &snapshot(6), &other_lease)
+                .apply_checked_snapshot_for_test(&session.session_ref, &snapshot(6), &other_lease)
                 .unwrap_err()
                 .code,
             "session_context_stale"
@@ -920,7 +1196,7 @@ mod tests {
     fn capability_responses_are_request_and_session_bound() {
         let sessions = ControllingSessionManager::default();
         let first = sessions
-            .open(
+            .open_for_test(
                 Some("session-ref-first"),
                 "First",
                 "chat",
@@ -929,7 +1205,7 @@ mod tests {
             )
             .unwrap();
         let second = sessions
-            .open(
+            .open_for_test(
                 Some("session-ref-second"),
                 "Second",
                 "chat",
@@ -942,9 +1218,19 @@ mod tests {
             .unwrap();
         let mut response = snapshot(5);
         response["request_id"] = json!(request.request_id);
+        response["session_id"] = json!(second.session_id);
+        response["controlled_session_id"] = json!("b-session-1");
 
         let applied = sessions
-            .apply_capability_snapshot_for_lease(&lease(), &response)
+            .apply_capability_snapshot_for_lease_with_mapping(
+                &lease(),
+                &response,
+                |remote_ref, b| {
+                    assert_eq!(remote_ref, second.session_ref);
+                    assert_eq!(b, "b-session-1");
+                    Ok(())
+                },
+            )
             .unwrap();
         assert_eq!(applied.session_ref, second.session_ref);
         assert_eq!(applied.capability_revision, Some(5));
@@ -968,6 +1254,7 @@ mod tests {
             "relay_epoch": "relay-epoch-0001",
             "remote_control_generation": "generation-0001",
             "request_id": retry.request_id,
+            "session_id": first.session_ref,
             "code": "capability_snapshot_unavailable",
         });
         let failed = sessions
@@ -982,10 +1269,168 @@ mod tests {
     }
 
     #[test]
+    fn authenticated_a_capability_projection_is_allowlisted_ref_lease_revision_and_ttl_bound() {
+        let sessions = ControllingSessionManager::default();
+        let first = sessions
+            .open_for_test(
+                Some("ref-first"),
+                "First",
+                "chat",
+                &lease(),
+                &capabilities(),
+            )
+            .unwrap();
+        let second = sessions
+            .open_for_test(
+                Some("ref-second"),
+                "Second",
+                "chat",
+                &lease(),
+                &capabilities(),
+            )
+            .unwrap();
+        let request = sessions
+            .capability_request(&first.session_ref, &lease())
+            .unwrap();
+        let mut response = snapshot(7);
+        response["request_id"] = json!(request.request_id);
+        response["session_id"] = json!(first.session_id);
+        response["controlled_session_id"] = json!("b-session-1");
+        response["tools"] = json!([{"tool_id":"tool-1","display_name":"Tool"}]);
+        response["skills"] =
+            json!([{"skill_id":"skill-1","display_name":"Skill","scopes":["chat"]}]);
+        response["valid_for_ms"] = json!("30000");
+        sessions
+            .apply_capability_snapshot_for_lease_with_mapping(
+                &lease(),
+                &response,
+                |remote_ref, b| {
+                    assert_eq!(remote_ref, first.session_ref);
+                    assert_eq!(b, "b-session-1");
+                    Ok(())
+                },
+            )
+            .unwrap();
+        let projection = sessions
+            .capability_projection(&first.session_ref, &lease())
+            .unwrap();
+        assert_eq!(projection.capability_revision, 7);
+        assert_eq!(projection.tools[0].tool_id, "tool-1");
+        assert_eq!(projection.skills[0].skill_id, "skill-1");
+        assert_eq!(projection.skills[0].scopes, ["chat"]);
+        assert_eq!(projection.workspaces[0].workspace_id, "workspace-0001");
+        assert!(projection.expires_at_ms > 0);
+        let encoded = serde_json::to_value(&projection).unwrap();
+        let actual_keys: std::collections::BTreeSet<_> = encoded
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            actual_keys,
+            [
+                "capabilityRevision",
+                "connectionId",
+                "controllerLeaseId",
+                "expiresAtMs",
+                "leaseEpoch",
+                "modes",
+                "relayEpoch",
+                "remoteControlGeneration",
+                "remoteSessionRef",
+                "skills",
+                "tools",
+                "workspaces",
+            ]
+            .into_iter()
+            .collect()
+        );
+        assert!(encoded.get("requestId").is_none());
+        assert!(encoded.get("sessionId").is_none());
+        assert!(encoded.get("peerId").is_none());
+        assert!(encoded.get("credential").is_none());
+        assert_eq!(encoded["tools"][0]["toolId"], "tool-1");
+        assert_eq!(encoded["skills"][0]["scopes"], json!(["chat"]));
+        assert_eq!(encoded["workspaces"][0]["codeAllowed"], true);
+        assert_eq!(
+            sessions
+                .capability_projection(&second.session_ref, &lease())
+                .unwrap_err()
+                .code,
+            "capability_snapshot_required"
+        );
+        let mut other_lease = lease();
+        other_lease.controller_lease_id = "lease-other".into();
+        assert_eq!(
+            sessions
+                .capability_projection(&first.session_ref, &other_lease)
+                .unwrap_err()
+                .code,
+            "session_context_stale"
+        );
+        let retry = sessions
+            .capability_request(&first.session_ref, &lease())
+            .unwrap();
+        let mut conflicting_same_revision = response.clone();
+        conflicting_same_revision["request_id"] = json!(retry.request_id);
+        conflicting_same_revision["tools"] =
+            json!([{"tool_id":"tool-2","display_name":"Other Tool"}]);
+        assert_eq!(
+            sessions
+                .apply_capability_snapshot_for_lease_with_mapping(
+                    &lease(),
+                    &conflicting_same_revision,
+                    |remote_ref, b| {
+                        assert_eq!(remote_ref, first.session_ref);
+                        assert_eq!(b, "b-session-1");
+                        Ok(())
+                    }
+                )
+                .unwrap_err()
+                .code,
+            "capability_snapshot_stale"
+        );
+        let mut stale = response.clone();
+        stale["request_id"] = json!(retry.request_id);
+        stale["capability_revision"] = json!("6");
+        assert_eq!(
+            sessions
+                .apply_capability_snapshot_for_lease_with_mapping(
+                    &lease(),
+                    &stale,
+                    |remote_ref, b| {
+                        assert_eq!(remote_ref, first.session_ref);
+                        assert_eq!(b, "b-session-1");
+                        Ok(())
+                    }
+                )
+                .unwrap_err()
+                .code,
+            "capability_snapshot_stale"
+        );
+        {
+            let mut intents = sessions.intents.lock();
+            let intent = intents
+                .iter_mut()
+                .find(|item| item.session_ref == first.session_ref)
+                .unwrap();
+            intent.capability_deadline = Some(Instant::now() - Duration::from_millis(1));
+        }
+        assert_eq!(
+            sessions
+                .capability_projection(&first.session_ref, &lease())
+                .unwrap_err()
+                .code,
+            "capability_snapshot_expired"
+        );
+    }
+
+    #[test]
     fn relay_failure_is_only_associated_when_one_capability_session_is_pending() {
         let sessions = ControllingSessionManager::default();
         let first = sessions
-            .open(
+            .open_for_test(
                 Some("session-ref-first"),
                 "First",
                 "chat",
@@ -1007,7 +1452,7 @@ mod tests {
         );
 
         let second = sessions
-            .open(
+            .open_for_test(
                 Some("session-ref-second"),
                 "Second",
                 "chat",
@@ -1048,7 +1493,7 @@ mod tests {
     fn task_intent_builds_a_frozen_payload_and_requires_a_snapshot() {
         let sessions = ControllingSessionManager::default();
         let session = sessions
-            .open(None, "Session", "chat", &lease(), &capabilities())
+            .open_for_test(None, "Session", "chat", &lease(), &capabilities())
             .unwrap();
         // 未取到能力快照前不得构造任务。
         assert_eq!(
@@ -1066,7 +1511,7 @@ mod tests {
             "task_input_invalid"
         );
         sessions
-            .apply_capability_snapshot(&session.session_ref, &snapshot(4), &lease())
+            .apply_checked_snapshot_for_test(&session.session_ref, &snapshot(4), &lease())
             .unwrap();
 
         let intent = sessions
@@ -1101,6 +1546,8 @@ mod tests {
                     negotiated_capabilities: capabilities(),
                     capability_revision: Some(4),
                     capability_valid_for_ms: Some(30_000),
+                    capability_projection: None,
+                    capability_deadline: None,
                     capability_error: None,
                     last_capability_request_id: None,
                     pending_capability_requests: Vec::new(),
@@ -1139,10 +1586,10 @@ mod tests {
     fn temporary_model_selection_binds_the_package_to_the_generated_task() {
         let sessions = ControllingSessionManager::default();
         let session = sessions
-            .open(None, "Session", "chat", &lease(), &capabilities())
+            .open_for_test(None, "Session", "chat", &lease(), &capabilities())
             .unwrap();
         sessions
-            .apply_capability_snapshot(&session.session_ref, &snapshot(4), &lease())
+            .apply_checked_snapshot_for_test(&session.session_ref, &snapshot(4), &lease())
             .unwrap();
         let fixture: Value = serde_json::from_str(include_str!(
             "../../../../../../remote-control-relay/test/fixtures/controller-protocol-v1.json"
@@ -1183,7 +1630,7 @@ mod tests {
         // 未协商 task_v1 时，快照请求本身就非法（能力闭集失败关闭）。
         let without_task = vec!["encrypted_frames_v1".to_owned(), "pairing_v1".to_owned()];
         let session = sessions
-            .open(None, "Session", "chat", &lease(), &without_task)
+            .open_for_test(None, "Session", "chat", &lease(), &without_task)
             .unwrap();
         assert_eq!(
             sessions
@@ -1195,7 +1642,7 @@ mod tests {
 
         let legacy = ControllingSessionManager::default();
         let session = legacy
-            .open(
+            .open_for_test(
                 None,
                 "Legacy",
                 "chat",
@@ -1208,7 +1655,7 @@ mod tests {
             )
             .unwrap();
         legacy
-            .apply_capability_snapshot(&session.session_ref, &snapshot(1), &lease())
+            .apply_checked_snapshot_for_test(&session.session_ref, &snapshot(1), &lease())
             .unwrap();
         assert_eq!(
             legacy
@@ -1229,7 +1676,7 @@ mod tests {
     fn closing_and_clearing_drop_intents() {
         let sessions = ControllingSessionManager::default();
         let session = sessions
-            .open(None, "Session", "chat", &lease(), &capabilities())
+            .open_for_test(None, "Session", "chat", &lease(), &capabilities())
             .unwrap();
         sessions.close(&session.session_ref).unwrap();
         sessions.close(&session.session_ref).unwrap();
@@ -1250,7 +1697,7 @@ mod tests {
         // 会话容量上限：超出后拒绝而不是静默替换。
         for index in 0..MAX_SESSION_INTENTS {
             sessions
-                .open(
+                .open_for_test(
                     Some(&format!("session-ref-{index}")),
                     "Session",
                     "chat",
@@ -1261,7 +1708,7 @@ mod tests {
         }
         assert_eq!(
             sessions
-                .open(None, "Session", "chat", &lease(), &capabilities())
+                .open_for_test(None, "Session", "chat", &lease(), &capabilities())
                 .unwrap_err()
                 .code,
             "session_capacity"

@@ -1643,6 +1643,7 @@ impl TranscriptAuthenticator {
         Ok(LeaseInstallValidationContext::new(VerifiedTranscript {
             request_id: parts.request_id,
             expected_pairing_id: parts.expected_pairing_id,
+            peer_endpoint_id: parts.peer_endpoint_id,
             reservation_id: parts.reservation_id,
             remote_control_generation: parts.remote_control_generation,
             relay_epoch: parts.relay_epoch,
@@ -1681,6 +1682,7 @@ impl fmt::Debug for TranscriptAuthenticator {
 pub(crate) struct VerifiedTranscript {
     request_id: String,
     expected_pairing_id: String,
+    peer_endpoint_id: String,
     reservation_id: String,
     remote_control_generation: String,
     relay_epoch: String,
@@ -1698,6 +1700,9 @@ impl VerifiedTranscript {
     }
     pub(crate) fn expected_pairing_id(&self) -> &str {
         &self.expected_pairing_id
+    }
+    pub(crate) fn peer_endpoint_id(&self) -> &str {
+        &self.peer_endpoint_id
     }
     pub(crate) fn reservation_id(&self) -> &str {
         &self.reservation_id

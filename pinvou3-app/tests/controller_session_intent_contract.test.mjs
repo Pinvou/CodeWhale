@@ -28,22 +28,28 @@ const desktopFacade = fs.readFileSync(
 
 function connectedState() {
   return logic.applyControllerStatus(logic.createState(), {
-    ...statusFixtures.controllerConnected,
-    lease: { ...statusFixtures.controllerConnected.lease, connectionId: 'connection-1', leaseEpoch: '2' },
+    status: 'connected',
+    connectionId: 'connection-1',
+    controllerLeaseId: 'controller-lease-1',
+    leaseEpoch: '2',
+    relayEpoch: 'relay-1',
+    generation: 'generation-1',
   });
 }
 
-test('the session projection carries the real remote session id into UI state', () => {
-  const state = logic.applyControllerSession(connectedState(), {
-    ...statusFixtures.controllerConnected.lease,
-    sessionRef: 'session-ref-1',
-    sessionId: 'session-abc',
-    mode: 'chat',
-    connectionId: 'connection-1',
-    leaseEpoch: '2',
-    capabilityRevision: 4,
-    temporaryModelAvailable: true,
+function bind(state = connectedState(), overrides = {}) {
+  return logic.applyRemoteProxyBinding(state, {
+    localSessionId: 'remote-local-1', remoteSessionRef: 'session-ref-1',
+    sessionId: 'session-abc', mode: 'chat', connectionId: 'connection-1',
+    controllerLeaseId: 'controller-lease-1', leaseEpoch: '2', relayEpoch: 'relay-1',
+    remoteControlGeneration: 'generation-1', capabilityRevision: 4,
+    temporaryModelAvailable: true, mappingConfirmed: false,
+    ...overrides,
   });
+}
+
+test('the authenticated RemoteProxy open carries the real remote session id into UI state', () => {
+  const state = bind();
   assert.equal(state.controllerConnection.sessionId, 'session-abc');
   assert.equal(state.controllerConnection.sessionRef, 'session-ref-1');
   assert.equal(state.controllerConnection.sessionMode, 'chat');
@@ -51,28 +57,17 @@ test('the session projection carries the real remote session id into UI state', 
   assert.equal(state.controllerConnection.temporaryModelAvailable, true);
 });
 
-test('foreign connections, older leases and terminal states never adopt a session', () => {
+test('foreign connections, older leases and terminal states never adopt a RemoteProxy binding', () => {
   const base = connectedState();
-  const projection = {
-    ...statusFixtures.controllerConnected.lease,
-    sessionRef: 'session-ref-1',
-    sessionId: 'session-abc',
-    connectionId: 'connection-1',
-    leaseEpoch: '2',
-  };
-  const foreign = logic.applyControllerSession(base, {
-    ...projection,
-    connectionId: 'connection-9',
-  });
+  const foreign = bind(base, { connectionId: 'connection-9' });
   assert.equal(foreign, base, 'another connection must not take over the session');
-
-  const olderLease = logic.applyControllerSession(base, { ...projection, leaseEpoch: '1' });
+  const olderLease = bind(base, { leaseEpoch: '1' });
   assert.equal(olderLease, base, 'an older lease must not take over the session');
-
-  const withSession = logic.applyControllerSession(base, projection);
+  const withSession = bind(base);
   assert.equal(withSession.controllerConnection.sessionId, 'session-abc');
   const disconnected = logic.applyControllerStatus(withSession, {
-    status: 'disconnected', claimRequestId: statusFixtures.controllerConnected.claimRequestId,
+    status: 'disconnected', connectionId: 'connection-1', controllerLeaseId: 'controller-lease-1',
+    leaseEpoch: '2', relayEpoch: 'relay-1', generation: 'generation-1',
   });
   assert.equal(disconnected.controllerConnection.sessionId, null);
   assert.equal(disconnected.controllerConnection.sessionRef, null);
@@ -82,22 +77,15 @@ test('foreign connections, older leases and terminal states never adopt a sessio
 
 test('the bridge maps the lease-bound temporary-model decision without exposing credentials', () => {
   const mapping = bridge.slice(
-    bridge.indexOf('function applyControllerSession'),
-    bridge.indexOf('function controllerListHistory'),
+    bridge.indexOf('function openLiveRemoteProxy'),
+    bridge.indexOf('function readRemoteProxyHistory'),
   );
-  assert.ok(mapping.includes('temporaryModelAvailable: payload.temporaryModelAvailable === true'));
+  assert.ok(mapping.includes('logic.applyRemoteProxyBinding'));
   assert.ok(!/credential|apiKey|privateKey/.test(mapping));
 });
 
 test('an absent temporary-model projection fails closed for mixed client versions', () => {
-  const state = logic.applyControllerSession(connectedState(), {
-    sessionRef: 'session-ref-old-b',
-    sessionId: 'session-old-b',
-    mode: 'chat',
-    connectionId: 'connection-1',
-    leaseEpoch: '2',
-    capabilityRevision: 1,
-  });
+  const state = bind(connectedState(), { temporaryModelAvailable: undefined });
   assert.equal(state.controllerConnection.temporaryModelAvailable, false);
 });
 
@@ -105,34 +93,32 @@ test('session projection requires the exact full tuple including large epochs an
   const live = { ...statusFixtures.controllerConnected.lease, leaseEpoch: '9007199254740993' };
   const connected = { ...statusFixtures.controllerConnected, lease: live };
   const base = logic.applyControllerStatus(logic.createState(), connected);
-  const projection = { ...live, sessionRef: 'session-ref-1', sessionId: 'session-abc', mode: 'chat', capabilityRevision: 7 };
-  const withSession = logic.applyControllerSession(base, projection);
+  const projection = { ...live, localSessionId: 'remote-large-epoch', remoteSessionRef: 'session-ref-1', sessionId: 'session-abc', mode: 'chat', capabilityRevision: 7 };
+  const withSession = logic.applyRemoteProxyBinding(base, projection);
   assert.equal(withSession.controllerConnection.sessionId, 'session-abc');
   for (const key of ['connectionId', 'controllerLeaseId', 'leaseEpoch', 'relayEpoch', 'remoteControlGeneration']) {
     const stale = { ...projection, sessionId: 'stale-session', [key]: key === 'leaseEpoch' ? '9007199254740992' : 'foreign-binding' };
-    assert.equal(logic.applyControllerSession(withSession, stale), withSession, `${key} must match exactly`);
-    assert.equal(logic.applyControllerSession(withSession, { ...projection, [key]: null }), withSession, `${key} must not be omitted`);
+    assert.equal(logic.applyRemoteProxyBinding(withSession, stale), withSession, `${key} must match exactly`);
+    assert.equal(logic.applyRemoteProxyBinding(withSession, { ...projection, [key]: null }), withSession, `${key} must not be omitted`);
   }
   const reconnecting = logic.applyControllerStatus(withSession, { ...connected, status: 'reconnecting', lease: null });
   assert.equal(reconnecting.controllerConnection.sessionId, 'session-abc');
-  assert.equal(logic.applyControllerSession(reconnecting, { ...projection, sessionId: 'late-session' }), reconnecting);
+  assert.equal(logic.applyRemoteProxyBinding(reconnecting, { ...projection, sessionId: 'late-session' }), reconnecting);
   const renewed = logic.applyControllerStatus(reconnecting, { ...connected, lease: { ...live, leaseEpoch: '9007199254740994' } });
   assert.equal(renewed.controllerConnection.sessionId, null);
   assert.equal(renewed.controllerConnection.capabilityRevision, null);
 });
 
 test('capability snapshots keep the revision and the negotiated modes', () => {
-  let state = logic.applyControllerSession(connectedState(), {
-    ...statusFixtures.controllerConnected.lease,
-    sessionRef: 'session-ref-1',
-    sessionId: 'session-abc',
-    connectionId: 'connection-1',
-    leaseEpoch: '2',
-  });
+  let state = bind();
   state = logic.applyCapabilities(state, {
     ...statusFixtures.controllerConnected.lease,
     connectionId: 'connection-1',
+    controllerLeaseId: 'controller-lease-1',
     leaseEpoch: '2',
+    relayEpoch: 'relay-1',
+    remoteControlGeneration: 'generation-1',
+    remoteSessionRef: 'session-ref-1',
     capabilityRevision: 7,
     modes: ['chat'],
     tools: [],
@@ -148,43 +134,38 @@ test('capability snapshots keep the revision and the negotiated modes', () => {
 
 test('the bridge forwards UI fields only and never builds protocol payloads', () => {
   for (const method of [
-    'controllerSessionOpen',
-    'controllerSessionState',
-    'controllerSessionClose',
-    'controllerCapabilityRequest',
-    'controllerApplyCapabilitySnapshot',
-    'controllerTaskIntent',
-    'controllerTaskCancelIntent',
-    'controllerTaskSend',
-    'controllerTaskCancelSend',
+    'openLiveRemoteProxy',
+    'controllerCapabilitySend',
+    'reserveRemoteTask',
+    'commitRemoteTask',
+    'cancelRemoteTask',
+    'abandonRemoteTask',
   ]) {
     assert.ok(bridge.includes(`${method}: ${method}`), `${method} must be exported`);
   }
-  // 任务意图只把正文交给 Rust；协议字段与摘要一律不在 JS 出现。
-  const intent = bridge.slice(
-    bridge.indexOf('function controllerTaskIntent'),
-    bridge.indexOf('function controllerTaskCancelIntent'),
+  // The dispatch bridge forwards bounded UI intent; Rust owns wire construction.
+  const dispatch = bridge.slice(
+    bridge.indexOf('function reserveRemoteTask'),
+    bridge.indexOf('function invokeRemoteAction'),
   );
-  assert.ok(intent.includes('text: String(text || "")'));
-  assert.ok(!/input_digest|inputDigest|connection_id|controller_lease_id|relay_epoch/.test(intent));
+  for (const command of ['desktop_remote_task_reserve_a', 'desktop_remote_task_commit_a',
+    'desktop_remote_task_cancel_a', 'desktop_remote_task_abandon_prepared_a']) {
+    assert.ok(dispatch.includes(`invoke("${command}"`));
+  }
+  assert.ok(!/input_digest|inputDigest|connection_id|controller_lease_id|relay_epoch/.test(dispatch));
   const uiPaths = [
     bridge.slice(
-      bridge.indexOf('function controllerSessionOpen'),
-      bridge.indexOf('function controllerSessionState'),
-    ),
-    intent,
-    bridge.slice(
-      bridge.indexOf('function controllerTaskCancelIntent'),
-      bridge.indexOf('function applyControllerSession'),
+      bridge.indexOf('function openLiveRemoteProxy'),
+      bridge.indexOf('function readRemoteProxyHistory'),
     ),
   ].join('\n');
   assert.ok(
     !/input_digest|client_request_id|capability_revision|controller_lease_id|relay_epoch/.test(uiPaths),
     'UI paths must not carry protocol field names',
   );
-  // 会话事件驱动 UI 状态（sessionId 由 Rust 投影）。
-  assert.ok(bridge.includes('"desktop-remote-controller-session"'));
-  assert.ok(bridge.includes('applyControllerSession'));
+  assert.ok(bridge.includes('"desktop-remote-proxy-capability"'));
+  assert.ok(!bridge.includes('"desktop-remote-controller-session"'));
+  assert.ok(bridge.includes('settleCapabilityResponse(payload)'));
 });
 
 test('controller command results preserve the complete Rust DTO for shared state projection', () => {
@@ -192,25 +173,27 @@ test('controller command results preserve the complete Rust DTO for shared state
     bridge.indexOf('function applyController'),
     bridge.indexOf('function controlledStart'),
   );
-  assert.ok(apply.includes('var payload = shallow(result)'));
-  assert.ok(apply.includes('payload.intent = intent'));
-  assert.ok(apply.includes('payload.replaceBinding = replaceBinding === true'));
-  assert.ok(apply.includes('logic.applyControllerStatus(current(), payload)'));
-  assert.equal((bridge.match(/listen\("desktop-remote-controller-status"/g) || []).length, 1);
+  assert.ok(apply.includes('controllerStatusPayload(result)'));
+  assert.ok(apply.includes('connectionId: payload.connectionId'));
+  assert.ok(apply.includes('leaseEpoch: payload.leaseEpoch'));
+  assert.ok(apply.includes('deviceName: payload.deviceName'));
+  const mapping = bridge.slice(
+    bridge.indexOf('function controllerStatusPayload'),
+    bridge.indexOf('function rememberCapabilityOutcome'),
+  );
+  assert.ok(mapping.includes('wire.lease'));
+  assert.ok(mapping.includes('lease.connectionId'));
+  assert.ok(mapping.includes('lease.leaseEpoch'));
 });
 
 test('the desktop facade exposes the A-side session and task bridge methods', () => {
   for (const method of [
-    'controllerSessionOpen',
-    'controllerSessionState',
-    'controllerSessionClose',
-    'controllerCapabilityRequest',
+    'openLiveRemoteProxy',
     'controllerCapabilitySend',
-    'controllerApplyCapabilitySnapshot',
-    'controllerTaskIntent',
-    'controllerTaskCancelIntent',
-    'controllerTaskSend',
-    'controllerTaskCancelSend',
+    'reserveRemoteTask',
+    'commitRemoteTask',
+    'cancelRemoteTask',
+    'abandonRemoteTask',
   ]) {
     assert.ok(
       desktopFacade.includes(`${method}: desktopRemoteControlFeature.${method}`),
@@ -219,18 +202,29 @@ test('the desktop facade exposes the A-side session and task bridge methods', ()
   }
 });
 
-test('capability snapshots cross the bridge without leaking wire field names', () => {
-  // 快照从 wire 进来后先映射成 UI 字段，再进入能力域状态。
-  assert.ok(bridge.includes('function capabilitySnapshotForUi'));
-  assert.ok(bridge.includes('applyCapabilities(current(), capabilitySnapshotForUi(body))'));
-  const mapping = bridge.slice(
-    bridge.indexOf('function capabilitySnapshotForUi'),
-    bridge.indexOf('function controllerTaskIntent'),
+test('legacy wire-building entry points are absent', () => {
+  assert.ok(!bridge.includes('desktop_remote_controller_apply_capability_snapshot'));
+  assert.ok(!bridge.includes('desktop_remote_controller_task_send'));
+  assert.ok(!desktopFacade.includes('controllerApplyCapabilitySnapshot:'));
+  assert.ok(!desktopFacade.includes('controllerTaskSend:'));
+  for (const method of ['controllerCapabilityRequest', 'controllerTaskIntent', 'controllerTaskCancelIntent', 'controllerTaskCancelSend']) {
+    assert.ok(!bridge.includes(`function ${method}`));
+    assert.ok(!bridge.includes(`${method}: ${method}`));
+    assert.ok(!desktopFacade.includes(`${method}:`));
+  }
+  assert.ok(!bridge.includes('desktop_remote_controller_task_intent'));
+  assert.ok(!bridge.includes('desktop_remote_controller_task_cancel_intent'));
+  assert.ok(!bridge.includes('desktop_remote_controller_capability_request'));
+  assert.ok(!bridge.includes('desktop_remote_controller_task_cancel_send'));
+});
+
+test('capability send consumes a narrow acknowledgement, not a wire payload', () => {
+  const capabilitySend = bridge.slice(
+    bridge.indexOf('function capabilityAttempt'),
+    bridge.indexOf('function scheduleCapabilityRenewal'),
   );
-  assert.ok(mapping.includes('wire.capability_revision'));
-  assert.ok(mapping.includes('wire.workspaces'));
-  assert.ok(mapping.includes('capabilityRevision'));
-  assert.ok(!/workspaces: Array.isArray\(wire/.test(bridge.slice(0, bridge.indexOf('function capabilitySnapshotForUi'))));
+  assert.ok(capabilitySend.includes('waitForCapabilityResponse(intent, remoteRef)'));
+  assert.ok(!capabilitySend.includes('intent.payload'));
 });
 
 test('capability preparation waits for a response, retries finitely and renews before expiry', () => {
@@ -243,28 +237,28 @@ test('capability preparation waits for a response, retries finitely and renews b
   assert.ok(bridge.includes('beginCapabilityHandshake(sessionRef, true)'));
 });
 
-test('reopening a session reuses the connection session reference', () => {
+test('opening a live RemoteProxy reuses only an explicitly selected local ID', () => {
   const open = bridge.slice(
-    bridge.indexOf('function controllerSessionOpen'),
-    bridge.indexOf('function controllerSessionState'),
+    bridge.indexOf('function openLiveRemoteProxy'),
+    bridge.indexOf('function readRemoteProxyHistory'),
   );
-  assert.ok(open.includes('controllerConnection.sessionRef'));
-  assert.ok(open.includes('remoteRef: existing || null'));
-  assert.ok(open.includes('var snapshot = current();'));
-  assert.ok(!open.includes('var current = current();'));
+  assert.ok(open.includes('existingLocalSessionId: existingLocalSessionId || null'));
+  assert.ok(open.includes('logic.applyRemoteProxyBinding'));
+  for (const old of ['controllerSessionOpen', 'controllerSessionState', 'controllerSessionClose']) {
+    assert.ok(!bridge.includes(`function ${old}`));
+    assert.ok(!desktopFacade.includes(`${old}:`));
+  }
 });
 
-test('the encrypted send entry points only carry UI fields', () => {
+test('durable A dispatch carries only a local SessionStore identity and intent', () => {
   const send = bridge.slice(
-    bridge.indexOf('function controllerTaskSend'),
-    bridge.indexOf('function applyControllerSession'),
+    bridge.indexOf('function reserveRemoteTask'),
+    bridge.indexOf('function invokeRemoteAction'),
   );
-  assert.ok(send.includes('var visibleText = String(text || "").trim()'));
-  assert.ok(send.includes('text: visibleText'));
-  assert.ok(send.includes('taskId: taskId'));
-  const invokePayload = send.slice(send.indexOf('return invoke('), send.indexOf('}).catch'));
-  assert.ok(
-    !/input_digest|client_request_id|session_id|controller_lease_id/.test(invokePayload),
-    'the send path must not assemble protocol fields',
-  );
+  assert.ok(send.includes('desktop_remote_task_reserve_a'));
+  assert.ok(send.includes('desktop_remote_task_commit_a'));
+  assert.ok(send.includes('desktop_remote_task_cancel_a'));
+  assert.ok(send.includes('localSessionId: localSessionId'));
+  assert.ok(send.includes('remoteRef: remoteRef'));
+  assert.ok(!/input_digest|connection_id|controller_lease_id|credential_ref/.test(send));
 });

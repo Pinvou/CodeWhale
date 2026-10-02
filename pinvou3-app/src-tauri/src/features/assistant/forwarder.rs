@@ -17,6 +17,31 @@ fn behavior_task_status(status: TurnOutcomeStatus, error: Option<&str>) -> &'sta
     }
 }
 
+#[derive(Default)]
+struct TurnAssistantCollector {
+    text: String,
+}
+
+impl TurnAssistantCollector {
+    fn reset(&mut self) {
+        self.text.clear();
+    }
+
+    fn start_content_block(&mut self, index: usize) {
+        if index == 0 {
+            self.reset();
+        }
+    }
+
+    fn push(&mut self, text: &str) {
+        self.text.push_str(text);
+    }
+
+    fn take(&mut self) -> Option<String> {
+        (!self.text.trim().is_empty()).then(|| std::mem::take(&mut self.text))
+    }
+}
+
 /// Summary detail line for the persistent startup timeline describing a
 /// terminal MCP session-boot receipt. `enabled_servers` counts only enabled
 /// servers: disabled ones are configuration state, not boot participants, and
@@ -218,31 +243,6 @@ fn persist_mcp_boot_receipt(
     }
 }
 
-#[derive(Default)]
-struct TurnAssistantCollector {
-    text: String,
-}
-
-impl TurnAssistantCollector {
-    fn reset(&mut self) {
-        self.text.clear();
-    }
-
-    fn start_content_block(&mut self, index: usize) {
-        if index == 0 {
-            self.reset();
-        }
-    }
-
-    fn push(&mut self, text: &str) {
-        self.text.push_str(text);
-    }
-
-    fn take(&mut self) -> Option<String> {
-        (!self.text.trim().is_empty()).then(|| std::mem::take(&mut self.text))
-    }
-}
-
 /// 后台 task：持续读 rx_event 转 Tauri emit。
 ///
 /// 关键点：监听 `Event::ApprovalRequired` 并主动 `approve_tool_call`。
@@ -315,6 +315,10 @@ pub(crate) fn spawn_event_forwarder(
             .try_state::<crate::features::monitor::MonitorState>()
             .map(|s| s.self_metrics());
         let mut current_turn_id: Option<String> = None;
+        // Last assistant message of the active turn. MessageStarted(index=0)
+        // identifies a new provider response, so tool-loop intermediate text
+        // cannot be mistaken for the final answer.
+        let mut current_assistant = TurnAssistantCollector::default();
         let mut startup_first_output_recorded = false;
         // Dedupe memory for MCP boot receipts: the engine re-reports on every
         // real turn, so only failure-set changes are persisted (see
@@ -323,10 +327,6 @@ pub(crate) fn spawn_event_forwarder(
         // fresh forwarder, so a persistent failure re-persists once per engine
         // rebuild (bounded per lifecycle), not per turn.
         let mut last_mcp_boot_failure_set: Option<Vec<(String, bool, String)>> = None;
-        // Last assistant message of the active turn. MessageStarted(index=0)
-        // identifies a new provider response, so tool-loop intermediate text
-        // cannot be mistaken for the final answer.
-        let mut current_assistant = TurnAssistantCollector::default();
         #[cfg(feature = "benchmark-hooks")]
         let mut first_delta_done: std::collections::HashSet<String> =
             std::collections::HashSet::new();
@@ -1863,6 +1863,37 @@ pub(crate) fn spawn_event_forwarder(
 }
 
 #[cfg(test)]
+mod remote_assistant_tests {
+    use super::TurnAssistantCollector;
+
+    #[test]
+    fn collector_keeps_only_the_current_turns_last_model_response() {
+        let mut collector = TurnAssistantCollector::default();
+        collector.start_content_block(0);
+        collector.push("first turn answer");
+        assert_eq!(collector.take().as_deref(), Some("first turn answer"));
+
+        collector.reset();
+        collector.start_content_block(0);
+        collector.push("tool-loop preface");
+        collector.start_content_block(0);
+        collector.push("## Final\n\n| A | B |");
+        assert_eq!(collector.take().as_deref(), Some("## Final\n\n| A | B |"));
+        assert_eq!(collector.take(), None);
+    }
+
+    #[test]
+    fn thinking_first_response_resets_prior_assistant_text() {
+        let mut collector = TurnAssistantCollector::default();
+        collector.push("stale");
+        collector.start_content_block(0);
+        collector.start_content_block(1);
+        collector.push("fresh");
+        assert_eq!(collector.take().as_deref(), Some("fresh"));
+    }
+}
+
+#[cfg(test)]
 mod mcp_boot_persistence_tests {
     use super::{mcp_boot_failure_details, mcp_boot_persistence, mcp_boot_summary_detail};
     use deepseek_tui::mcp::{McpManagerSnapshot, McpServerCapabilityMetadata, McpServerSnapshot};
@@ -2107,36 +2138,5 @@ mod mcp_boot_persistence_tests {
         let before = std::fs::read(&log_path).unwrap();
         super::record_mcp_session_boot("sess-tl", &boot_event(5), &mut last);
         assert_eq!(std::fs::read(&log_path).unwrap(), before);
-    }
-}
-
-#[cfg(test)]
-mod remote_assistant_tests {
-    use super::TurnAssistantCollector;
-
-    #[test]
-    fn collector_keeps_only_the_current_turns_last_model_response() {
-        let mut collector = TurnAssistantCollector::default();
-        collector.start_content_block(0);
-        collector.push("first turn answer");
-        assert_eq!(collector.take().as_deref(), Some("first turn answer"));
-
-        collector.reset();
-        collector.start_content_block(0);
-        collector.push("tool-loop preface");
-        collector.start_content_block(0);
-        collector.push("## Final\n\n| A | B |");
-        assert_eq!(collector.take().as_deref(), Some("## Final\n\n| A | B |"));
-        assert_eq!(collector.take(), None);
-    }
-
-    #[test]
-    fn thinking_first_response_resets_prior_assistant_text() {
-        let mut collector = TurnAssistantCollector::default();
-        collector.push("stale");
-        collector.start_content_block(0);
-        collector.start_content_block(1);
-        collector.push("fresh");
-        assert_eq!(collector.take().as_deref(), Some("fresh"));
     }
 }

@@ -13,6 +13,7 @@ import {
   buildSealedCodeAad,
   parseSealedCodeV1,
   receiptCommitmentHex,
+  CONTROLLER_SUBPROTOCOL,
 } from "../protocol-controller.js";
 import { smokeControllerRoute } from "../scripts/controller-route-smoke.mjs";
 
@@ -75,6 +76,17 @@ function openSocket(url = wsUrl, options = {}) {
   return new Promise((resolve, reject) => {
     const ws = new WebSocket(url, options);
     ws.once("open", () => resolve(ws));
+    ws.once("error", reject);
+  });
+}
+
+function openControllerSocket(url = wsUrl) {
+  return new Promise((resolve, reject) => {
+    const ws = new WebSocket(url, CONTROLLER_SUBPROTOCOL);
+    ws.once("open", () => {
+      if (ws.protocol === CONTROLLER_SUBPROTOCOL) resolve(ws);
+      else reject(new Error("controller subprotocol was not negotiated"));
+    });
     ws.once("error", reject);
   });
 }
@@ -142,8 +154,9 @@ function waitForClose(ws, timeoutMs = 3000) {
   });
 }
 
-async function registerDesktop(endpointId, accessToken, desktopSecret, url = wsUrl, timeoutMs = 3000) {
-  const ws = await openSocket(url);
+async function registerDesktop(endpointId, accessToken, desktopSecret, url = wsUrl, timeoutMs = 3000,
+  controllerCapable = false) {
+  const ws = controllerCapable ? await openControllerSocket(url) : await openSocket(url);
   const registered = nextMessage(ws, "desktop_endpoint_registered", timeoutMs);
   ws.send(JSON.stringify({
     v: 2,
@@ -396,7 +409,7 @@ test("healthz exposes aggregate endpoint counters and no identifiers", async () 
 });
 
 test("controller v1 fails with a specific error when its runtime is disabled", async (t) => {
-  const socket = await openSocket();
+  const socket = await openControllerSocket();
   t.after(() => closeSocket(socket));
   const unavailable = nextMessage(socket, "error");
   socket.send(JSON.stringify({
@@ -413,6 +426,39 @@ test("controller v1 fails with a specific error when its runtime is disabled", a
   }));
   assert.equal((await unavailable).code, "desktop_controller_unavailable");
   await waitForClose(socket);
+});
+
+test("disabled controller rejects v1 without opening or rewriting registry and tombstones", async () => {
+  const controllerStatePath = join(testRoot, `disabled-controller-state-${Date.now()}.json`);
+  const preserved = Buffer.from('{"opaque_registry_and_tombstones":"must-remain-byte-identical"}\n', "utf8");
+  await writeFile(controllerStatePath, preserved);
+  const isolated = await spawnRelay({
+    PINVOU_DESKTOP_CONTROLLER_ENABLED: "0",
+    PINVOU_REMOTE_CONTROLLER_STATE_PATH: controllerStatePath,
+  });
+  let socket;
+  try {
+    socket = await openControllerSocket(isolated.wsUrl);
+    const unavailable = nextMessage(socket, "error");
+    socket.send(JSON.stringify({
+      v: 1,
+      type: "desktop_pairing_register",
+      request_id: "request-disabled-preserve-state",
+      registration_request_id: "registration-disabled-preserve-state",
+      endpoint_id: "endpoint-disabled-preserve-state",
+      remote_control_generation: "generation-disabled-preserve-state",
+      code_wrap_public_key_b64: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+      handshake_public_key_b64: "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+      key_algorithm: "x25519",
+      capabilities: ["pairing_v1"],
+    }));
+    assert.equal((await unavailable).code, "desktop_controller_unavailable");
+    await waitForClose(socket);
+  } finally {
+    closeSocket(socket);
+    await stopRelay(isolated.child);
+  }
+  assert.deepEqual(await readFile(controllerStatePath), preserved);
 });
 
 test("stats and telemetry keep their dedicated top-level paths", async () => {
@@ -1199,7 +1245,7 @@ test("expired Web endpoint releases its exact interaction slot before deletion",
     // The real heartbeat performs TTL expiry; wait on the observable Web close,
     // not a timing assumption or direct call into the cleanup implementation.
     await waitForClose(web.ws, 10000);
-    const reconnect = await registerDesktop(endpointId, accessToken, desktopSecret, isolated.wsUrl, 15000);
+    const reconnect = await registerDesktop(endpointId, accessToken, desktopSecret, isolated.wsUrl, 15000, true);
     sockets.push(reconnect.ws);
     const codeWrap = crypto.generateKeyPairSync("x25519");
     const handshakeB = crypto.generateKeyPairSync("x25519");
@@ -1212,7 +1258,7 @@ test("expired Web endpoint releases its exact interaction slot before deletion",
       capabilities: ["pairing_v1", "encrypted_frames_v1", "finished_receipt_v1"] }));
     const registration = await registered;
     assert.equal(registration.type, "desktop_pairing_registered", registration.code);
-    const controller = await openSocket(isolated.wsUrl);
+    const controller = await openControllerSocket(isolated.wsUrl);
     sockets.push(controller);
     const reserved = nextMessageOneOf(controller, ["controller_pairing_reserved", "error"], 10000);
     const handshakeA = crypto.generateKeyPairSync("x25519");
@@ -1299,7 +1345,8 @@ test("real Relay heartbeat retries failed reservation invalidation and releases 
     const endpointId = "endpoint-controller-timeout";
     const accessToken = "controller-timeout-access-token-00000001";
     const desktopSecret = "controller-timeout-desktop-secret-000001";
-    const desktop = await registerDesktop(endpointId, accessToken, desktopSecret, isolated.wsUrl, 15_000);
+    const desktop = await registerDesktop(endpointId, accessToken, desktopSecret,
+      isolated.wsUrl, 15_000, true);
     sockets.push(desktop.ws);
 
     const codeWrap = crypto.generateKeyPairSync("x25519");
@@ -1323,7 +1370,7 @@ test("real Relay heartbeat retries failed reservation invalidation and releases 
     if (registered.type === "error") throw new Error(`pairing registration failed: ${registered.code}`);
     const pairingCode = openPairingCode(codeWrap.privateKey, registered);
 
-    const controller = await openSocket(isolated.wsUrl);
+    const controller = await openControllerSocket(isolated.wsUrl);
     sockets.push(controller);
     const reservedA = nextMessage(controller, "controller_pairing_reserved", 10_000);
     const reservedB = nextMessage(desktop.ws, "controller_pairing_reserved", 10_000);
@@ -1377,11 +1424,28 @@ test("controller v1 completes a real three-party encrypted handshake beside lega
   try {
     const controllerHealth = await (await fetch(`${isolated.httpUrl}/pinvou3/remote/healthz`)).json();
     assert.equal(controllerHealth.desktop_controller_enabled, true);
+    const legacySocket = await openSocket(isolated.wsUrl);
+    sockets.push(legacySocket);
+    assert.equal(legacySocket.protocol, "");
+    const mixedVersionError = nextMessage(legacySocket, "error");
+    legacySocket.send('{"v":1,"v":2,"type":"web_client_join"}');
+    assert.equal((await mixedVersionError).code, "bad_json");
+    const unnegotiatedV1 = nextMessage(legacySocket, "error");
+    legacySocket.send('{"v":1,"type":"controller_capabilities"}');
+    assert.equal((await unnegotiatedV1).code, "unsupported_protocol_version");
+    closeSocket(legacySocket);
+    const duplicateSocket = await openControllerSocket(isolated.wsUrl);
+    sockets.push(duplicateSocket);
+    const duplicateError = nextMessage(duplicateSocket, "error");
+    duplicateSocket.send('{"v":1,"type":"controller_pairing_claim","type":"controller_capabilities"}');
+    assert.equal((await duplicateError).code, "bad_json");
+    closeSocket(duplicateSocket);
     await smokeControllerRoute(isolated.wsUrl);
     const endpointId = "endpoint-controller-e2e";
     const accessToken = "controller-access-token-0000000000000001";
     const desktopSecret = "controller-desktop-secret-000000000001";
-    const desktop = await registerDesktop(endpointId, accessToken, desktopSecret, isolated.wsUrl, 15_000);
+    const desktop = await registerDesktop(endpointId, accessToken, desktopSecret,
+      isolated.wsUrl, 15_000, true);
     sockets.push(desktop.ws);
 
     const codeWrap = crypto.generateKeyPairSync("x25519");
@@ -1406,7 +1470,7 @@ test("controller v1 completes a real three-party encrypted handshake beside lega
     const pairingCode = openPairingCode(codeWrap.privateKey, registered);
     assert.match(pairingCode, /^[23456789ABCDEFGHJKMNPQRSTUVWXYZ]{7}$/u);
 
-    const controller = await openSocket(isolated.wsUrl);
+    const controller = await openControllerSocket(isolated.wsUrl);
     sockets.push(controller);
     const reservedA = nextMessage(controller, "controller_pairing_reserved", 10_000);
     const reservedB = nextMessage(desktop.ws, "controller_pairing_reserved", 10_000);
@@ -1550,14 +1614,11 @@ test("controller v1 completes a real three-party encrypted handshake beside lega
     const web = await openSocket(isolated.wsUrl);
     sockets.push(web);
     const conflict = nextMessage(web, "error");
-    web.send(JSON.stringify({
-      v: 2,
-      type: "web_client_join",
-      endpoint_id: endpointId,
-      access_token: accessToken,
-      stream_epoch: null,
-      after_seq: 0,
-    }));
+    // Legacy v2 retains duplicate ordinary fields. The endpoint is occupied
+    // by controller A, so routing still returns the existing conflict code.
+    web.send(`{"v":2,"type":"web_client_join","type":"web_client_join",`
+      + `"endpoint_id":"${endpointId}","access_token":"${accessToken}",`
+      + '"stream_epoch":null,"after_seq":0}');
     assert.equal((await conflict).code, "endpoint_not_found");
   } finally {
     sockets.forEach(closeSocket);
