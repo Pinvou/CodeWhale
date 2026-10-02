@@ -308,12 +308,15 @@ async fn run_plugin_child_raw(
             // the captured tail (a drain that outlived the grace, or the
             // size cap stopping the capture) would otherwise vanish: an
             // unparseable, possibly cut-off output must not pass as a
-            // silent success.
+            // silent success. The echo is bounded — the capture can be
+            // 16 MiB of capture, and none of it needs to reach the
+            // transcript.
             Err(ToolError::execution_failed(format!(
                 "plugin script stdout did not parse as a tool result and the \
                  captured output is truncated (the pipes did not close after \
-                 the interpreter exited, or the size cap stopped the capture): \
-                 {stdout}"
+                 the interpreter exited, or the size cap stopped the capture); \
+                 first characters: {}",
+                codewhale_hooks::bounded_text(&stdout, 512)
             )))
         } else {
             Ok(ToolResult::success(stdout))
