@@ -863,7 +863,10 @@ fn next_liveness_frame(
     let epoch = manager.live_liveness_epoch()?;
     let next = liveness.next_sequence()?;
     let frame = crate::features::remote_control::controller::liveness::build_controller_liveness(
-        &lease, &epoch, next,
+        &lease,
+        SenderRole::ControllerA,
+        &epoch,
+        next,
     )
     .ok()?;
     Some(frame)
@@ -1076,7 +1079,8 @@ fn dispatch_liveness_challenge(
     let Some(challenge_b64) = challenge.get("challenge_b64").and_then(Value::as_str) else {
         return;
     };
-    if !liveness.mark_answered(challenge_id) {
+    let now_a = lane_monotonic_millis();
+    if !liveness.can_answer(challenge_id, now_a) {
         return;
     }
     let Some(sequence) = liveness.next_sequence() else {
@@ -1102,7 +1106,9 @@ fn dispatch_liveness_challenge(
     let Ok(response) = business.seal_liveness(&inner, capabilities) else {
         return;
     };
-    (sinks.on_liveness)(response);
+    if (sinks.on_liveness)(response) {
+        liveness.record_answered(challenge_id, now_a);
+    }
 }
 
 /// wire `session_snapshot` → 权威快照。base64 体积与声明一致、摘要与快照本体
@@ -1244,8 +1250,10 @@ fn project_journal_snapshot(
 #[derive(Default)]
 pub(crate) struct LivenessExpectations {
     sequence: u64,
-    answered: std::collections::BTreeSet<String>,
+    answered: std::collections::BTreeMap<String, u64>,
 }
+
+const MAX_ANSWERED_LIVENESS_CHALLENGES: usize = 64;
 
 impl LivenessExpectations {
     pub(crate) fn next_sequence(&mut self) -> Option<u64> {
@@ -1253,9 +1261,18 @@ impl LivenessExpectations {
         Some(self.sequence)
     }
 
-    /// 返回 true 表示这是该挑战的首次应答。
-    pub(crate) fn mark_answered(&mut self, challenge_id: &str) -> bool {
-        self.answered.insert(challenge_id.to_owned())
+    fn can_answer(&mut self, challenge_id: &str, now_a: u64) -> bool {
+        self.answered.retain(|_, answered_at| {
+            now_a.saturating_sub(*answered_at) <= super::liveness::LIVENESS_TOTAL_BUDGET_MS
+        });
+        !self.answered.contains_key(challenge_id)
+            && self.answered.len() < MAX_ANSWERED_LIVENESS_CHALLENGES
+    }
+
+    /// Seal/enqueue failures leave the challenge retryable. At capacity we
+    /// fail closed instead of evicting replay history inside its validity window.
+    fn record_answered(&mut self, challenge_id: &str, now_a: u64) {
+        self.answered.insert(challenge_id.to_owned(), now_a);
     }
 }
 
@@ -3053,6 +3070,8 @@ mod tests {
         let mut lane = TestLane::with_events(vec![
             ControllerLaneEvent::Frame(stale.to_string()),
             ControllerLaneEvent::Frame(challenge.to_string()),
+            ControllerLaneEvent::Frame(challenge.to_string()),
+            ControllerLaneEvent::Frame(challenge.to_string()),
         ]);
         let sessions = ControllingSessionManager::default();
         let mut responses = Vec::new();
@@ -3063,7 +3082,7 @@ mod tests {
         let mut on_snapshot = |_: &AuthenticatedSnapshotFrame<'_>| Ok(());
         let mut on_liveness = |frame: Value| {
             responses.push(frame);
-            true
+            responses.len() > 1
         };
         let mut sinks = ControllingLaneSinks {
             on_status: &mut on_status,
@@ -3077,14 +3096,18 @@ mod tests {
 
         serve_controlling_lane(&mut lane, &manager, &sessions, &business, &mut sinks).await;
         drop(sinks);
-        assert_eq!(responses.len(), 1, "旧 generation 挑战必须被静默丢弃");
+        assert_eq!(
+            responses.len(),
+            2,
+            "failed admission is retryable; admitted replay and old generation are dropped"
+        );
         assert_eq!(responses[0]["type"], "encrypted_controller_liveness_a");
 
         let responder = EncryptedLane::new(HandshakeRole::B, &lease, b_session).unwrap();
-        let proof = responder.open_liveness(&responses[0]).unwrap();
+        let proof = responder.open_liveness(&responses[1]).unwrap();
         assert_eq!(proof["type"], "controller_liveness_a");
         assert_eq!(proof["challenge_id"], "challenge-0001");
-        assert_eq!(proof["heartbeat_sequence_a"], "1");
+        assert_eq!(proof["heartbeat_sequence_a"], "2");
         assert_eq!(proof["liveness_epoch_a"], "live-a-1");
     }
 
@@ -3100,6 +3123,24 @@ mod tests {
             &pairing_fixture(RELAY_KEY_ID).reservation,
         );
         b
+    }
+
+    #[test]
+    fn answered_challenges_are_bounded_and_recent_replays_are_never_evicted() {
+        let mut state = LivenessExpectations::default();
+        for index in 0..MAX_ANSWERED_LIVENESS_CHALLENGES {
+            let id = format!("challenge-{index}");
+            assert!(state.can_answer(&id, 1_000));
+            state.record_answered(&id, 1_000);
+        }
+        assert!(!state.can_answer("overflow", 31_000));
+        assert!(!state.can_answer("challenge-0", 31_000));
+        assert_eq!(state.answered.len(), MAX_ANSWERED_LIVENESS_CHALLENGES);
+        assert!(state.can_answer("overflow", 31_001));
+        assert!(state.answered.is_empty());
+        // Looking up a retry before successful enqueue does not consume it.
+        assert!(state.can_answer("retry", 31_001));
+        assert!(state.can_answer("retry", 31_001));
     }
 
     /// E2E-04 出口：同一进程内完成「A 发加密任务 → B 解密派发 → B 加密回传 →
