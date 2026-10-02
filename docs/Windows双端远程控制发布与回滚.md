@@ -95,6 +95,8 @@ GitHub protected environment/self-hosted runner、runner OS 与同一 SID 进程
 
 `remote-control-relay/docs/schemas/remote-control-release-evidence.v1.schema.json` 和严格 validator 共同约束 manifest：
 
+> 当前传播仅核对代码与门禁合同，不代表真实双 Windows、生产等价部署或 DEV-25 发布证据已经取得。缺少真实证据时发布资格仍为 `BLOCKED`，不能以历史 pilot、单元测试或本次传播替代。
+
 - commit SHA；A/B 安装包版本、SHA-256、Authenticode 指纹；
 - Relay 版本、配置指纹、公网 origin 摘要、100% registry coverage、生产等价声明；
 - A/B 匿名机器身份摘要与 Windows build；

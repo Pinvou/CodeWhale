@@ -156,10 +156,6 @@
     var payload = envelope || {};
     if (!isCurrentIntent(state, "controlled", payload.intent)) return state;
     var status = payload.status ? String(payload.status) : null;
-    if (status === "reserving") status = "registering";
-    if (status === "waiting_connection") status = "waiting_for_pairing";
-    if (status === "safety_handshake") status = "handshake_pending";
-    if (status === "refreshing") status = "retiring_generation";
     if (!["disabled", "registering", "waiting_for_pairing", "pairing_reserved",
       "handshake_pending", "connected", "reconnecting", "resume_provisional",
       "resume_activated_pending_liveness", "retiring_generation", "stopping",

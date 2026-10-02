@@ -458,7 +458,9 @@ test('remote actions reuse one request id across uncertain retry and later recon
     if (command !== 'desktop_remote_action_a') return undefined;
     attempts += 1;
     if (attempts <= 2) {
-      return Promise.reject(Object.assign(new Error('result_unknown'), { code: 'result_unknown' }));
+      const error = new Error('result_unknown');
+      error.code = 'result_unknown';
+      return Promise.reject(error);
     }
     return Promise.resolve({ permissions: [] });
   });

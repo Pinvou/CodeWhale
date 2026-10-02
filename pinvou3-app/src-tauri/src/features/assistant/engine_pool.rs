@@ -118,6 +118,15 @@ impl RemoteRuntimeModelBundle {
 /// 且无 in-flight turn 且非 active 会话时回收（复用 `reclaim_engine_entry` 的
 /// 回收序列）。回收回到 lazy spawn 语义，下次发消息重建 + SyncSession 注水，
 /// 无损；30 分钟取偏保守值，宁可少回收也不误伤刚要使用的会话。
+/// Engine idle-reclaim threshold: an engine is an in-process task (not a
+/// subprocess), but each occupies a channel, a toolset, and a hydrated
+/// conversation context; the pool is unbounded and memory grows linearly
+/// with session count. Reclaim engines idle beyond this threshold with no
+/// in-flight turn that are not the active session (reusing
+/// `reclaim_engine_entry`'s reclaim sequence). Reclaiming returns to
+/// lazy-spawn semantics: the next message rebuilds + rehydrates via
+/// SyncSession, losslessly. 30 minutes is a deliberately conservative
+/// value — better to under-reclaim than to evict a session about to be used.
 const IDLE_EVICT_AFTER_SECS: u64 = 30 * 60;
 /// Idle-reclaim sweep interval: one pass every 5 minutes, a balance between
 /// timeliness and sweep overhead (in step with the AcpPool idle reclaim and
@@ -1752,7 +1761,8 @@ impl EnginePool {
         // on /v1/models without credentials, and misclassifying it as a
         // generic endpoint loses the local default thinking tier and the
         // vLLM tiers (inference itself still succeeds with the configured
-        // key).
+        // key). A task-scoped remote route is authoritative and must not be
+        // rewritten by endpoint probing.
         if !bridge.runtime_route_is_locked()
             && bridge.provider() == "openai"
             && base_url_uses_local_or_private(&bridge.base_url())
@@ -1785,8 +1795,8 @@ impl EnginePool {
         // facts belonging to another model and must not be misattributed.
         // Cloud presets and coding_plan are not operator-owned and are not
         // probed.
-        let is_vllm_route = bridge.provider() == "vllm";
         if !bridge.runtime_route_is_locked() {
+            let is_vllm_route = bridge.provider() == "vllm";
             if let Some(model) = bridge.effective_model_owned() {
                 Self::adopt_probed_endpoint_facts(
                     &mut bridge,
@@ -1798,6 +1808,28 @@ impl EnginePool {
             }
         }
         bridge
+    }
+
+    async fn fresh_bridge_for_policy(
+        &self,
+        session_id: &str,
+        scheduled_unattended: bool,
+    ) -> Result<Pinvou3Bridge> {
+        #[cfg(any(feature = "benchmark-hooks", test))]
+        let eval_model = self.eval_model_snapshots.for_session(session_id);
+        #[cfg(not(any(feature = "benchmark-hooks", test)))]
+        let eval_model = None;
+        let (bridge, prepared, pins_scheduled_model) = self
+            .prepare_runtime_model(
+                session_id,
+                scheduled_unattended,
+                false,
+                eval_model,
+                None,
+                None,
+            )
+            .await?;
+        Ok(Self::finalize_runtime_bridge(bridge, &prepared, pins_scheduled_model).await)
     }
 
     /// Spawn-time probe and fact adoption (the testable core of
@@ -1839,28 +1871,6 @@ impl EnginePool {
             bridge.probed_context_tokens = max_len;
             bridge.probed_output_tokens = max_output;
         }
-    }
-
-    async fn fresh_bridge_for_policy(
-        &self,
-        session_id: &str,
-        scheduled_unattended: bool,
-    ) -> Result<Pinvou3Bridge> {
-        #[cfg(any(feature = "benchmark-hooks", test))]
-        let eval_model = self.eval_model_snapshots.for_session(session_id);
-        #[cfg(not(any(feature = "benchmark-hooks", test)))]
-        let eval_model = None;
-        let (bridge, prepared, pins_scheduled_model) = self
-            .prepare_runtime_model(
-                session_id,
-                scheduled_unattended,
-                false,
-                eval_model,
-                None,
-                None,
-            )
-            .await?;
-        Ok(Self::finalize_runtime_bridge(bridge, &prepared, pins_scheduled_model).await)
     }
 
     /// Get the session's engine, spawning one if absent. After spawn, if the
@@ -5336,6 +5346,19 @@ mod scheduled_model_tests {
     }
 
     #[test]
+    fn saved_model_update_revision_forces_next_turn_rebuild() {
+        let revisions = ModelUpdateRevisions::default();
+        let prepared = PreparedRuntimeModel::unchanged(model("model-1", "wire-model"));
+        let previous =
+            PreparedRuntimeState::new(prepared.clone(), false, revisions.current("model-1"));
+
+        revisions.bump("model-1");
+        let after_save = PreparedRuntimeState::new(prepared, false, revisions.current("model-1"));
+
+        assert!(after_save.requires_rebuild_from(&previous));
+    }
+
+    #[test]
     fn mcp_config_revision_bump_forces_next_turn_rebuild() {
         // A pin for the mark_mcp_config_updated contract (the counterpart of the
         // model path's requires_rebuild_from predicate): when the model is
@@ -5354,19 +5377,6 @@ mod scheduled_model_tests {
             !entry_is_fresh(true, 7, 8),
             "model change plus revision bump together must be judged stale"
         );
-    }
-
-    #[test]
-    fn saved_model_update_revision_forces_next_turn_rebuild() {
-        let revisions = ModelUpdateRevisions::default();
-        let prepared = PreparedRuntimeModel::unchanged(model("model-1", "wire-model"));
-        let previous =
-            PreparedRuntimeState::new(prepared.clone(), false, revisions.current("model-1"));
-
-        revisions.bump("model-1");
-        let after_save = PreparedRuntimeState::new(prepared, false, revisions.current("model-1"));
-
-        assert!(after_save.requires_rebuild_from(&previous));
     }
 
     #[test]

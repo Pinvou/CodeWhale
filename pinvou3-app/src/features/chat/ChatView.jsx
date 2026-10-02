@@ -1009,42 +1009,6 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
       const showControlledTask = controlledDevice.status === 'connected' && controlledActiveTasks.length > 0;
       const activeSessionIdRef = useRef(activeSessionId);
       activeSessionIdRef.current = activeSessionId;
-      const computerUseCopy = t.uiComputerUse;
-      const computerUseSlice = (bs && bs.computerUse) || null;
-      // Fetch the authoritative computer-use state on session mount/switch: the banner and
-      // consent dialogs apply only to the active session; pending requests of background
-      // sessions are parked per session on the bridge side and resurface with this refresh
-      // when switching back. Before issuing the IPC, refreshStatus synchronously calls
-      // clearSessionRequests to drop pending dialogs left by the previous session (a pure
-      // state operation), so during the async refresh window the old session's consent
-      // dialogs are no longer clickable.
-      useEffect(() => {
-        if (!COMPUTER_USE_ENABLED || !bridge.available || !bridge.computerUse || !activeSessionId) return;
-        bridge.computerUse.refreshStatus(activeSessionId).catch(() => {});
-        // Missed-event fallback: if grant/stop events were missed by the frontend (e.g. a
-        // refresh or a backgrounded window), the banner would drift from the real
-        // authorization state — this periodic refreshStatus reconciles with the backend,
-        // recovering missed grant/stop events so the banner realigns (a pure recovery
-        // mechanism; it does not change the authorization's own lifecycle).
-        // Skip polling while there is no last-known state yet (nothing has
-        // published a slice) or the last known state is disabled: a null
-        // slice used to still fire an empty round-trip every 30s, and a
-        // disabled feature has nothing to reconcile (the mount refresh above
-        // covers cold start; re-enabling goes through setEnabled, which
-        // re-reads the authoritative state directly and cannot miss the
-        // state flip).
-        const reconciler = setInterval(() => {
-          try {
-            const snapshot = bridge.state.get("computerUse");
-            const slice = snapshot && snapshot.computerUse;
-            if (!slice || slice.enabled === false) return;
-          } catch {
-            /* state.get unavailable: keep polling */
-          }
-          bridge.computerUse.refreshStatus(activeSessionId).catch(() => {});
-        }, 30_000);
-        return () => clearInterval(reconciler);
-      }, [activeSessionId]);
       const localBusy = bs ? bs.busy : false;
       const remoteBinding = useMemo(
         () => liveRemoteProxyBinding(activeSessionId, remoteProxyHistory, remoteConnection),
@@ -1340,6 +1304,42 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
       const conversationBusy = remoteChatActive
         ? !!currentRemoteTaskId
         : (controlledChatActive ? localBusy : busy);
+      const computerUseCopy = t.uiComputerUse;
+      const computerUseSlice = (bs && bs.computerUse) || null;
+      // Fetch the authoritative computer-use state on session mount/switch: the banner and
+      // consent dialogs apply only to the active session; pending requests of background
+      // sessions are parked per session on the bridge side and resurface with this refresh
+      // when switching back. Before issuing the IPC, refreshStatus synchronously calls
+      // clearSessionRequests to drop pending dialogs left by the previous session (a pure
+      // state operation), so during the async refresh window the old session's consent
+      // dialogs are no longer clickable.
+      useEffect(() => {
+        if (!COMPUTER_USE_ENABLED || !bridge.available || !bridge.computerUse || !activeSessionId) return;
+        bridge.computerUse.refreshStatus(activeSessionId).catch(() => {});
+        // Missed-event fallback: if grant/stop events were missed by the frontend (e.g. a
+        // refresh or a backgrounded window), the banner would drift from the real
+        // authorization state — this periodic refreshStatus reconciles with the backend,
+        // recovering missed grant/stop events so the banner realigns (a pure recovery
+        // mechanism; it does not change the authorization's own lifecycle).
+        // Skip polling while there is no last-known state yet (nothing has
+        // published a slice) or the last known state is disabled: a null
+        // slice used to still fire an empty round-trip every 30s, and a
+        // disabled feature has nothing to reconcile (the mount refresh above
+        // covers cold start; re-enabling goes through setEnabled, which
+        // re-reads the authoritative state directly and cannot miss the
+        // state flip).
+        const reconciler = setInterval(() => {
+          try {
+            const snapshot = bridge.state.get("computerUse");
+            const slice = snapshot && snapshot.computerUse;
+            if (!slice || slice.enabled === false) return;
+          } catch {
+            /* state.get unavailable: keep polling */
+          }
+          bridge.computerUse.refreshStatus(activeSessionId).catch(() => {});
+        }, 30_000);
+        return () => clearInterval(reconciler);
+      }, [activeSessionId]);
       // 停止按钮 single-flight:busy 在首次 cancel_generation 返回前就复位,
       // 双击会发第二个并发取消请求。cancellingSessionIds 在 invoke 完成前禁用
       // **对应 session** 的按钮（按 session 集合记录而非全局布尔或单个 sid：
@@ -4268,13 +4268,13 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
                       <span className="truncate">{workspaceName(sessionWorkspaceBinding, t.uiChatWorkspace.unknownDirectory)}</span>
                     </span>
                   )}
-                    <ComposerModeChip t={t} bs={bs} compact={composerCompact} onSwitch={handleModeChipSwitch} />
+                  <ComposerModeChip t={t} bs={bs} compact={composerCompact} onSwitch={handleModeChipSwitch} />
                   {/* Scheduled run conversations expose no swarm toggle:
                       the backend's swarm_mode_available excludes them (the
                       engine always assembles plain config there), so the
                       entry hides up front instead of erroring on click. */}
-                    <ComposerModelSelector t={t} bs={bs} onGotoSettings={onGotoModelSettings || onGotoSettings} compact={composerCompact} multiAgentAvailable={!scheduledRunContext} />
-                    <ComposerToolMenu t={t} onGotoTools={onGotoTools} sessionId={bs && bs.activeSessionId} compact={composerCompact} activeSkill={bs && bs.activeSkill} />
+                  <ComposerModelSelector t={t} bs={bs} onGotoSettings={onGotoModelSettings || onGotoSettings} compact={composerCompact} multiAgentAvailable={!scheduledRunContext} />
+                  <ComposerToolMenu t={t} onGotoTools={onGotoTools} sessionId={bs && bs.activeSessionId} compact={composerCompact} activeSkill={bs && bs.activeSkill} />
                     <ComposerKbSelector t={t} bs={bs} compact={composerCompact} />
                   </>}
                   {controlledChatActive && !remoteChatActive && (

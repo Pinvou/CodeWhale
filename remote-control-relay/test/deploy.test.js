@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { access, chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { access, chmod, copyFile, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
@@ -24,6 +24,11 @@ test("production deploy builds and replaces the complete shared WebUI dist", asy
   assert.match(source, /PINVOU_REMOTE_PUBLIC_BASE_PATH="\$BASE_PATH" npm run build:web/);
   assert.match(source, /tar -czf - -C "\$RELAY_DIR\/web\/dist" \./);
   assert.match(source, /behavior-telemetry-schema\.js/);
+  assert.match(source, /mapfile -t relay_modules/);
+  assert.match(source, /"\$\{relay_modules\[@\]\}"/);
+  assert.match(source, /mkdir -p "\$backup\/code-js"/);
+  assert.match(source, /for module in "\$code_stage"\/\*\.js/);
+  assert.equal((source.match(/for module in "\$backup\/code-js"\/\*\.js/g) || []).length, 2);
   assert.match(source, /docs\/schemas\/behavior-telemetry-v1\.schema\.json/);
   assert.match(source, /docs\/schemas\/behavior-telemetry-registries\.json/);
   assert.match(source, /await import\('\.\/telemetry-service\.js'\)/);
@@ -50,7 +55,7 @@ test("production deploy builds and replaces the complete shared WebUI dist", asy
   assert.equal((source.match(/for _ in \$\(seq 1 30\); do/g) || []).length, 2);
   assert.match(source, /if curl -fsS http:\/\/127\.0\.0\.1:8787\/pinvou3\/remote\/healthz >\/dev\/null 2>&1/);
   assert.match(source, /controller-v1 路由烟测失败/);
-  assert.equal((source.match(/backup\/code-js\/\*\.js/g) || []).length, 2);
+  assert.equal((source.match(/cp -a "\$module" "\$remote_dir\/"/g) || []).length, 3);
   assert.doesNotMatch(source, /PINVOU_ALLOW_LEGACY_REMOTE_DEPLOY/);
   assert.doesNotMatch(source, /nginx -t|systemctl reload nginx/);
 });
@@ -61,15 +66,11 @@ test("production relay code artifact supports a cold ESM load", async (t) => {
   t.after(() => rm(root, { recursive: true, force: true }));
   const stage = join(root, "stage");
   await mkdir(stage);
-  // Keep the archive on stdio and every tar path operand relative to `cwd`.
-  // GNU tar treats a Windows drive-letter archive (for example D:\\...) as a
-  // remote-shell target, and directly spawned MSYS tar does not translate an
-  // absolute `-C` operand. This remains a real compress/extract cold load and
-  // works consistently with GNU tar and the Windows BSD tar implementation.
+  // Keep archive bytes on stdio and tar operands relative to cwd on Windows.
   const packed = spawnSync("tar", [
     "-czf", "-",
     "-C", "remote-control-relay",
-    "server.js", "telemetry-service.js", "behavior-telemetry-schema.js", "controller-telemetry.js",
+    ...(await readdir(relayDir)).filter((name) => name.endsWith(".js")),
     "-C", "..",
     "docs/schemas/behavior-telemetry-v1.schema.json",
     "docs/schemas/behavior-telemetry-registries.json",
@@ -87,6 +88,33 @@ test("production relay code artifact supports a cold ESM load", async (t) => {
     "await import('./telemetry-service.js')",
   ], { cwd: stage, encoding: "utf8" });
   assert.equal(loaded.status, 0, loaded.stderr);
+});
+
+test("staged controller smoke resolves its protocol after the real module install loop", async (t) => {
+  const relayDir = join(repoRoot, "remote-control-relay");
+  const root = await mkdtemp(join(relayDir, ".deploy-stage-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const stage = join(root, "stage");
+  const installed = join(root, "installed");
+  await mkdir(join(stage, "scripts"), { recursive: true });
+  await mkdir(installed);
+  for (const name of (await readdir(relayDir)).filter((entry) => entry.endsWith(".js"))) {
+    await copyFile(join(relayDir, name), join(stage, name));
+  }
+  await copyFile(join(relayDir, "scripts", "controller-route-smoke.mjs"), join(stage, "scripts", "controller-route-smoke.mjs"));
+  // Replay the install loop from the actual deployment script, not a test copy.
+  const source = await readFile(deployScript, "utf8");
+  const loop = source.match(/for module in "\$code_stage"\/\*\.js; do[\s\S]*?\r?\ndone/);
+  assert.ok(loop, "the deployment must install the complete root module set");
+  const copied = spawnSync("bash", ["-c", `set -euo pipefail\ncode_stage=stage\nremote_dir=installed\n${loop[0]}`], { cwd: root, encoding: "utf8" });
+  assert.equal(copied.status, 0, copied.stderr || String(copied.error));
+  const loaded = spawnSync(process.execPath, [
+    "--input-type=module",
+    "-e",
+    "await import('./stage/scripts/controller-route-smoke.mjs')",
+  ], { cwd: root, encoding: "utf8" });
+  assert.equal(loaded.status, 0, loaded.stderr);
+  assert.equal(await readFile(join(installed, "protocol-controller.js"), "utf8"), await readFile(join(stage, "protocol-controller.js"), "utf8"));
 });
 
 async function executable(path, content) {

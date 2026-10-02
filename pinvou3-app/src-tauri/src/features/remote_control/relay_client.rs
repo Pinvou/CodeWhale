@@ -788,6 +788,13 @@ async fn run_loop(
                 outbound = rx_out.recv() => {
                     match outbound {
                         Some(frame) => {
+                            if legacy_v2_only && frame.controller_v1 {
+                                if !controller_unavailable_reported {
+                                    controller_unavailable_reported = true;
+                                    if !notify_controller_unavailable(&tx_in, &shutdown).await { return; }
+                                }
+                                continue;
+                            }
                             let send_result = tokio::select! {
                                 biased;
                                 _ = shutdown.cancelled() => return,
