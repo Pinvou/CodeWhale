@@ -363,7 +363,8 @@ codewhale-tui mcp tools codewhale
 - `oauth.client_id`（字符串，可选）：预先注册的 OAuth 客户端 ID。
 - `oauth_resource`（字符串，可选）：附加到授权 URL 的资源参数。
 
-无头运行通过引擎侧的 stdio 代理访问 stdio 服务器，不使用这些设置；代理使用固定预算
+无头运行通过引擎侧的 stdio 代理访问 stdio 服务器，不使用这些超时设置（各服务器的
+`command`/`args`/`env` 仍然生效）；代理使用固定预算
 （握手 30 秒、请求 120 秒、工具调用 1800 秒）。其发送腿是持有连接锁的阻塞写入，刻意
 不做超时约束（已披露的债务，见 `codewhale-mcp` 写入点处的说明）：不再读取 stdin 的
 stdio 服务器可以让该写入阻塞超过任何预算。

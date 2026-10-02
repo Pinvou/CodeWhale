@@ -1145,8 +1145,9 @@ resolution forced by an
 interrupt, shutdown, or engine exit carries `decision: "deny"` plus
 `interrupted: true` (and no user selection was made); a decision the user
 actually made never carries `interrupted`. `approval.decided` also carries
-`posture` when an execution-policy posture rather than a human forced the
-outcome; it is absent for every other decision on the raw event stream, and
+`posture` when an execution-policy posture **deny** rather than a human
+forced the outcome; it is absent for every other decision on the raw event
+stream (automatic non-posture resolutions carry `auto: true` instead), and
 the compat `/v1/stream` maps the absent field to `null`. A decision posted to
 `/v1/approvals/{id}` either resolves the approval (and is published as that
 decision) or is rejected with 404 — it is never accepted and then replaced by

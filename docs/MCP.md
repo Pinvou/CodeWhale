@@ -461,8 +461,8 @@ Per-server settings:
 - `oauth_resource` (string, optional): resource parameter appended to the authorization URL.
 
 Headless runs reach stdio servers through the engine-side stdio proxy instead
-of these settings; it uses fixed budgets (30s handshake, 120s request, 1800s
-tool call). Its send leg is a blocking write under the connection lock and is
+of these timeout settings (per-server `command`/`args`/`env` still apply); it
+uses fixed budgets (30s handshake, 120s request, 1800s tool call). Its send leg is a blocking write under the connection lock and is
 deliberately not deadline-bounded (disclosed debt, noted at the write site in
 `codewhale-mcp`): a server that stops draining stdin can park that write past
 every budget.
