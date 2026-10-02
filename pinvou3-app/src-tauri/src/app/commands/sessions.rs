@@ -1175,7 +1175,6 @@ pub struct AuxSessionBinding {
     pub id: String,
 }
 
-
 async fn reset_aux_session_inner(
     session_id: String,
     app: AppHandle,
