@@ -13,6 +13,10 @@ pub(crate) const MAX_TRANSFER_BYTES: u64 = 32 * 1024 * 1024;
 pub(crate) const MAX_CONNECTION_TRANSFER_BYTES: u64 = 64 * 1024 * 1024;
 pub(crate) const MAX_IN_FLIGHT_TRANSFERS: usize = 4;
 pub(crate) const MAX_TRANSFERS_PER_TASK: usize = 8;
+/// Unique chunks, excluding identical retries. This separately bounds retry
+/// evidence even when a peer sends one-byte chunks. A sender must select a
+/// chunk size that can finish within this budget (32 MiB needs >= 8 KiB).
+pub(crate) const MAX_TRANSFER_CHUNKS: usize = 4096;
 pub(crate) const TRANSFER_TTL: Duration = Duration::from_secs(10 * 60);
 pub(crate) const MAX_TRANSFER_ID_CHARS: usize = 128;
 pub(crate) const MAX_FILE_NAME_CHARS: usize = 200;
