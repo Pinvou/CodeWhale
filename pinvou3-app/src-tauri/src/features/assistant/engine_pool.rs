@@ -66,12 +66,67 @@ use crate::features::assistant::expert_roster::ExpertRosterSnapshot;
 use crate::features::assistant::platform::bridge::{Pinvou3Bridge, base_url_uses_local_or_private};
 use crate::features::assistant::runtime_model::{
     ModelCredentialMode, PassthroughRuntimeModelProvider, PreparedRuntimeModel,
-    RuntimeModelProvider, RuntimeModelRequest,
+    RuntimeModelCredential, RuntimeModelProvider, RuntimeModelRequest,
 };
 use crate::features::assistant::turn_shell_tasks::{SessionShellManagers, SessionTurnShellTasks};
 use crate::features::sessions::{ScheduledRunProfile, SessionStore, transcript_revision};
+use crate::platform::credential_store::{CredentialStore, SystemCredentialStore};
 use crate::platform::prefs::{SavedModel, UserPrefs};
 
+/// Fully isolated model override used by one controller task. Credentials are
+/// extracted immediately and the model copies retained by the bridge are
+/// scrubbed before Debug output can observe them.
+pub(crate) struct RemoteRuntimeModelBundle {
+    primary: SavedModel,
+    primary_credential: RuntimeModelCredential,
+    vision: Option<SavedModel>,
+    vision_credential: Option<RuntimeModelCredential>,
+}
+
+/// Per-call preparation inputs, including the remote task's frozen route.
+#[derive(Default)]
+struct RuntimeModelOverrides {
+    freeze_remote_credentials: bool,
+    explicit_model: Option<SavedModel>,
+    explicit_credential: Option<RuntimeModelCredential>,
+    remote_bundle: Option<RemoteRuntimeModelBundle>,
+}
+
+impl RemoteRuntimeModelBundle {
+    pub(crate) fn new(mut primary: SavedModel, mut vision: Option<SavedModel>) -> Result<Self> {
+        let primary_credential = RuntimeModelCredential::api_key(primary.api_key.clone())?;
+        primary.api_key.clear();
+        let vision_credential = vision
+            .as_ref()
+            .map(|model| RuntimeModelCredential::api_key(model.api_key.clone()))
+            .transpose()?;
+        if let Some(model) = vision.as_mut() {
+            model.api_key.clear();
+        }
+        Ok(Self {
+            primary,
+            primary_credential,
+            vision,
+            vision_credential,
+        })
+    }
+
+    fn image_input_mode(&self) -> crate::features::assistant::image_capability::ImageInputMode {
+        use crate::features::assistant::image_capability::{
+            effective_image_capability, image_input_mode,
+        };
+        image_input_mode(
+            effective_image_capability(&self.primary),
+            self.vision.is_some(),
+        )
+    }
+}
+
+/// Engine 空闲回收阈值：engine 是进程内 task（非子进程），但每个都占一份通道、
+/// 工具集与注水后的对话上下文，池无上限、内存随会话数线性涨。空闲超过该时长
+/// 且无 in-flight turn 且非 active 会话时回收（复用 `reclaim_engine_entry` 的
+/// 回收序列）。回收回到 lazy spawn 语义，下次发消息重建 + SyncSession 注水，
+/// 无损；30 分钟取偏保守值，宁可少回收也不误伤刚要使用的会话。
 /// Engine idle-reclaim threshold: an engine is an in-process task (not a
 /// subprocess), but each occupies a channel, a toolset, and a hydrated
 /// conversation context; the pool is unbounded and memory grows linearly
@@ -1342,6 +1397,121 @@ fn entry_is_fresh(
     !requires_model_rebuild && entry_mcp_config_revision == current_mcp_config_revision
 }
 
+#[cfg(test)]
+#[path = "engine_pool_remote_tests.rs"]
+mod remote_snapshot_tests;
+
+fn remote_owner_matches(
+    resident: Option<&Arc<super::skill_materialization::RemoteTurnOwner>>,
+    incoming: Option<&Arc<super::skill_materialization::RemoteTurnOwner>>,
+) -> bool {
+    match (resident, incoming) {
+        (None, None) => true,
+        (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+        _ => false,
+    }
+}
+
+/// Own an unpublished engine across the entries-lock await. Cancellation
+/// cannot detach a cold forwarder or strand its private discovery root.
+struct ColdEngineCustody {
+    resources: Option<(AppEngine, JoinHandle<()>)>,
+}
+
+impl ColdEngineCustody {
+    fn new(engine: AppEngine, forwarder: JoinHandle<()>) -> Self {
+        Self {
+            resources: Some((engine, forwarder)),
+        }
+    }
+
+    fn adopt(mut self) -> (AppEngine, JoinHandle<()>) {
+        self.resources
+            .take()
+            .expect("cold engine custody already adopted")
+    }
+}
+
+impl Drop for ColdEngineCustody {
+    fn drop(&mut self) {
+        let Some((engine, forwarder)) = self.resources.take() else {
+            return;
+        };
+        engine.cancel_current();
+        forwarder.abort();
+        let mut pending = Vec::new();
+        let mut blocked = false;
+        for op in EnginePool::shutdown_cancel_cascade_ops() {
+            if blocked {
+                pending.push(op);
+                continue;
+            }
+            match engine.handle.tx_op.try_send(op) {
+                Ok(()) => {}
+                Err(tokio::sync::mpsc::error::TrySendError::Full(op)) => {
+                    pending.push(op);
+                    blocked = true;
+                }
+                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => return,
+            }
+        }
+        if !pending.is_empty() {
+            // Same bounded FIFO fallback as ordinary reclaim; retains this
+            // engine/bridge only, never a pool gate or newer entry.
+            let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+                // Drop must never panic during shutdown/unwinding. Synchronous
+                // cancel/abort/try_send above are the no-runtime best effort.
+                return;
+            };
+            runtime.spawn(async move {
+                retry_shutdown_sends(
+                    |op| engine.handle.send(op),
+                    pending,
+                    RECLAIM_SHUTDOWN_RETRY_PATIENCE,
+                )
+                .await;
+            });
+        }
+    }
+}
+
+async fn publish_cold_entry<F>(
+    entries: &Mutex<HashMap<String, EngineEntry>>,
+    session_id: &str,
+    custody: ColdEngineCustody,
+    build: F,
+) -> AppEngine
+where
+    F: FnOnce(AppEngine, JoinHandle<()>) -> EngineEntry,
+{
+    let mut entries = entries.lock().await;
+    // Per-session runtime locking excludes replacements at publication. Keep
+    // custody armed if a future bypass violates that invariant.
+    assert!(
+        !entries.contains_key(session_id),
+        "cold publication would replace an owned entry"
+    );
+    let (engine, forwarder) = custody.adopt();
+    let result = engine.clone();
+    entries.insert(session_id.to_owned(), build(engine, forwarder));
+    result
+}
+
+fn take_remote_owned_entry(
+    entries: &mut HashMap<String, EngineEntry>,
+    session_id: &str,
+    owner: &Arc<super::skill_materialization::RemoteTurnOwner>,
+) -> Option<EngineEntry> {
+    if entries
+        .get(session_id)
+        .is_some_and(|entry| remote_owner_matches(entry.remote_owner.as_ref(), Some(owner)))
+    {
+        entries.remove(session_id)
+    } else {
+        None
+    }
+}
+
 /// A reused engine's pending native-window re-check (see
 /// `EngineEntry::native_window_pending`): which server kind to ask and for
 /// which model name. No URL or credential — the re-probe runs against the
@@ -1404,6 +1574,7 @@ struct EngineEntry {
     /// The runtime model, provider version, and local model revision actually
     /// used when this engine was created.
     runtime_model: PreparedRuntimeState,
+    remote_owner: Option<Arc<super::skill_materialization::RemoteTurnOwner>>,
     /// MCP config revision. Bumped after a background migration atomically
     /// updates mcp.json; the next engine fetch safely reclaims the old
     /// instance and lazily rebuilds, so new dependencies/startup parameters
@@ -1472,13 +1643,36 @@ impl ModelUpdateRevisions {
 #[derive(Clone, PartialEq, Eq)]
 struct PreparedRuntimeState {
     prepared: PreparedRuntimeModel,
+    credential_resolution: RuntimeCredentialResolution,
     model_update_revision: u64,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RuntimeCredentialResolution {
+    /// Engine construction may still resolve process or credential-store state.
+    Dynamic,
+    /// The remote-send boundary intentionally froze an unauthenticated route.
+    FrozenAbsent,
+    /// The remote-send boundary froze the credential carried by `prepared`.
+    FrozenPresent,
+}
+
 impl PreparedRuntimeState {
-    fn new(prepared: PreparedRuntimeModel, model_update_revision: u64) -> Self {
+    fn new(
+        prepared: PreparedRuntimeModel,
+        runtime_model_credential_frozen: bool,
+        model_update_revision: u64,
+    ) -> Self {
+        let credential_resolution = if !runtime_model_credential_frozen {
+            RuntimeCredentialResolution::Dynamic
+        } else if prepared.credential.is_some() {
+            RuntimeCredentialResolution::FrozenPresent
+        } else {
+            RuntimeCredentialResolution::FrozenAbsent
+        };
         Self {
             prepared,
+            credential_resolution,
             model_update_revision,
         }
     }
@@ -1515,6 +1709,7 @@ pub struct EnginePool {
     tool_factory: EngineToolFactory,
     tool_policy: ToolPolicy,
     runtime_model_provider: Arc<dyn RuntimeModelProvider>,
+    runtime_credential_store: Arc<dyn CredentialStore>,
     /// All sessions share one booted bridge (boot writes to disk / sets env,
     /// so it can happen only once). Commands reading model / workspace also go
     /// through here.
@@ -1659,6 +1854,24 @@ impl EnginePool {
         tool_policy: ToolPolicy,
         runtime_model_provider: Arc<dyn RuntimeModelProvider>,
     ) -> Result<Self> {
+        Self::new_with_runtime_dependencies(
+            app,
+            store,
+            tool_factory,
+            tool_policy,
+            runtime_model_provider,
+            Arc::new(SystemCredentialStore::new()),
+        )
+    }
+
+    fn new_with_runtime_dependencies(
+        app: AppHandle,
+        store: SessionStore,
+        tool_factory: EngineToolFactory,
+        tool_policy: ToolPolicy,
+        runtime_model_provider: Arc<dyn RuntimeModelProvider>,
+        runtime_credential_store: Arc<dyn CredentialStore>,
+    ) -> Result<Self> {
         let bridge = Pinvou3Bridge::boot()?;
         Ok(Self {
             entries: Arc::new(Mutex::new(HashMap::new())),
@@ -1676,6 +1889,7 @@ impl EnginePool {
             tool_factory,
             tool_policy,
             runtime_model_provider,
+            runtime_credential_store,
             bridge,
             idle_reaper: Arc::new(SyncMutex::new(None)),
             scheduled_running_sessions: Arc::new(SyncMutex::new(HashSet::new())),
@@ -1897,7 +2111,7 @@ impl EnginePool {
         #[cfg(not(any(feature = "benchmark-hooks", test)))]
         let eval_model = None;
         let (bridge, prepared, pins_scheduled_model) = self
-            .prepare_runtime_model(session_id, false, eval_model)
+            .prepare_runtime_model(session_id, false, false, eval_model, None, None)
             .await?;
         Ok(Self::finalize_runtime_bridge(bridge, &prepared, pins_scheduled_model).await)
     }
@@ -1934,15 +2148,24 @@ impl EnginePool {
         &self,
         session_id: &str,
         scheduled_unattended: bool,
+        freeze_remote_credentials: bool,
         explicit_model_override: Option<SavedModel>,
+        explicit_credential: Option<RuntimeModelCredential>,
+        remote_bundle: Option<RemoteRuntimeModelBundle>,
     ) -> Result<(Pinvou3Bridge, PreparedRuntimeModel, bool)> {
         Self::prepare_runtime_model_with(
             &self.store,
             self.runtime_model_provider.as_ref(),
+            self.runtime_credential_store.as_ref(),
             self.bridge.clone(),
             session_id,
             scheduled_unattended,
-            explicit_model_override,
+            RuntimeModelOverrides {
+                freeze_remote_credentials,
+                explicit_model: explicit_model_override,
+                explicit_credential,
+                remote_bundle,
+            },
         )
         .await
     }
@@ -1954,14 +2177,22 @@ impl EnginePool {
     async fn prepare_runtime_model_with(
         store: &SessionStore,
         runtime_model_provider: &dyn RuntimeModelProvider,
+        runtime_credential_store: &dyn CredentialStore,
         base_bridge: Pinvou3Bridge,
         session_id: &str,
         scheduled_unattended: bool,
-        explicit_model_override: Option<SavedModel>,
+        overrides: RuntimeModelOverrides,
     ) -> Result<(Pinvou3Bridge, PreparedRuntimeModel, bool)> {
         let mut bridge = base_bridge;
         bridge.prefs = UserPrefs::load();
         Self::install_session_affinity_key(&mut bridge, session_id);
+        let RuntimeModelOverrides {
+            freeze_remote_credentials,
+            explicit_model: explicit_model_override,
+            explicit_credential,
+            remote_bundle,
+        } = overrides;
+        let runtime_route_locked = remote_bundle.is_some();
         let scheduled_profile = store.scheduled_profile(session_id);
         // Same caliber as the command layer chat.rs's is_scheduled (a
         // scheduled_profile existing is enough): a scheduled session's images
@@ -1972,6 +2203,15 @@ impl EnginePool {
         let interactive_model_override = store.session_model_override(session_id);
         let pins_scheduled_model = scheduled_profile.is_some()
             && (scheduled_unattended || interactive_model_override.is_none());
+        let (explicit_model_override, explicit_credential) = match remote_bundle {
+            Some(bundle) => {
+                bridge.runtime_route_locked = true;
+                bridge.runtime_vision_model = bundle.vision;
+                bridge.runtime_vision_credential = bundle.vision_credential;
+                (Some(bundle.primary), Some(bundle.primary_credential))
+            }
+            None => (explicit_model_override, explicit_credential),
+        };
         bridge.session_model = resolve_runtime_model_override(explicit_model_override, || {
             resolve_spawn_model(
                 &bridge.prefs.advanced.saved_models,
@@ -1983,21 +2223,20 @@ impl EnginePool {
         let selected = bridge
             .effective_model_owned()
             .context("No effective model is available for runtime preparation")?;
-        let selected_id = selected.id.clone();
-        let prepared = runtime_model_provider
-            .prepare(RuntimeModelRequest {
+        let prepared = prepare_selected_runtime_model(
+            runtime_model_provider,
+            runtime_credential_store,
+            &mut bridge,
+            RuntimeModelRequest {
                 session_id: session_id.to_string(),
                 model: selected,
                 scheduled_unattended,
-            })
-            .await?;
-        if prepared.model.id != selected_id {
-            bail!(
-                "Runtime model provider changed model identity from '{}' to '{}'",
-                selected_id,
-                prepared.model.id
-            );
-        }
+            },
+            explicit_credential,
+            runtime_route_locked,
+            freeze_remote_credentials,
+        )
+        .await?;
         Ok((bridge, prepared, pins_scheduled_model))
     }
 
@@ -2022,8 +2261,6 @@ impl EnginePool {
         prepared: &PreparedRuntimeModel,
         pins_scheduled_model: bool,
     ) -> Pinvou3Bridge {
-        bridge.session_model = Some(prepared.model.clone());
-        bridge.runtime_model_credential = prepared.credential.clone();
         // Local endpoints (OpenAI-compatible presets and LocalVllm presets
         // pointing at local/intranet services): probe the service type
         // (Ollama / vLLM / LM Studio / generic). An OpenaiCompatible route's
@@ -2038,6 +2275,7 @@ impl EnginePool {
         // cannot flip the wire route for these presets (`provider()` resolves
         // LocalVllm to "vllm" from the preset arm before ever consulting the
         // probed kind), so a real vLLM classified `Vllm` is inert here.
+        apply_prepared_runtime_model(&mut bridge, prepared);
         // A probe failure (service not started/timeout/auth failure) is
         // classified as generic, keeping the existing openai wire route. The
         // probe request carries a credential from the same origin as real
@@ -2045,8 +2283,10 @@ impl EnginePool {
         // on /v1/models without credentials, and misclassifying it as a
         // generic endpoint loses the local default thinking tier and the
         // vLLM tiers (inference itself still succeeds with the configured
-        // key).
-        if (bridge.provider() == "openai" || bridge.provider() == "vllm")
+        // key). A task-scoped remote route is authoritative and must not be
+        // rewritten by endpoint probing.
+        if !bridge.runtime_route_is_locked()
+            && (bridge.provider() == "openai" || bridge.provider() == "vllm")
             && base_url_uses_local_or_private(&bridge.base_url())
         {
             let api_key = bridge.api_key();
@@ -2072,23 +2312,46 @@ impl EnginePool {
         // engine loads B" chain break; only follow the served name on a
         // single-model server that does not expose the configured name.
         // Non-vLLM operator-owned routes do no name correction and adopt
-        // facts only when the sent name is the served one
-        // (`adopts_probed_facts`): a kept multi-entry name trivially is
-        // (served == configured), while a single-entry "borrowed name"
-        // returns facts belonging to another model and must not be
-        // misattributed. Cloud presets and coding_plan are not
-        // operator-owned and are not probed.
-        let is_vllm_route = bridge.provider() == "vllm";
-        if let Some(model) = bridge.effective_model_owned() {
-            Self::adopt_probed_endpoint_facts(
-                &mut bridge,
-                model,
-                is_vllm_route,
-                pins_scheduled_model,
-            )
-            .await;
+        // facts only when the configured name exactly hits the list
+        // (`adopts_probed_facts`) — a single-entry "borrowed name" returns
+        // facts belonging to another model and must not be misattributed.
+        // Cloud presets and coding_plan are not operator-owned and are not
+        // probed.
+        if !bridge.runtime_route_is_locked() {
+            let is_vllm_route = bridge.provider() == "vllm";
+            if let Some(model) = bridge.effective_model_owned() {
+                Self::adopt_probed_endpoint_facts(
+                    &mut bridge,
+                    model,
+                    is_vllm_route,
+                    pins_scheduled_model,
+                )
+                .await;
+            }
         }
         bridge
+    }
+
+    async fn fresh_bridge_for_policy(
+        &self,
+        session_id: &str,
+        scheduled_unattended: bool,
+    ) -> Result<Pinvou3Bridge> {
+        #[cfg(any(feature = "benchmark-hooks", test))]
+        let eval_model = self.eval_model_snapshots.for_session(session_id);
+        #[cfg(not(any(feature = "benchmark-hooks", test)))]
+        let eval_model = None;
+        let (bridge, prepared, pins_scheduled_model) = self
+            .prepare_runtime_model(
+                session_id,
+                scheduled_unattended,
+                false,
+                eval_model,
+                None,
+                None,
+            )
+            .await?;
+        Ok(Self::finalize_runtime_bridge(bridge, &prepared, pins_scheduled_model).await)
     }
 
     /// Spawn-time probe and fact adoption (the testable core of
@@ -2307,7 +2570,7 @@ impl EnginePool {
         let eval_model = self.eval_model_snapshots.for_session(session_id);
         #[cfg(not(any(feature = "benchmark-hooks", test)))]
         let eval_model = None;
-        self.get_or_spawn_with_policy(session_id, false, eval_model)
+        self.get_or_spawn_with_policy(session_id, false, false, eval_model, None, None, None)
             .await
     }
 
@@ -2318,7 +2581,11 @@ impl EnginePool {
         &self,
         session_id: &str,
         scheduled_unattended: bool,
+        require_remote_model_credentials: bool,
         explicit_model_override: Option<SavedModel>,
+        explicit_credential: Option<RuntimeModelCredential>,
+        remote_bundle: Option<RemoteRuntimeModelBundle>,
+        remote_skills: Option<Arc<super::skill_materialization::RemoteTurnSkills>>,
     ) -> Result<AppEngine> {
         let acquisition_started = Instant::now();
         let runtime_lock_started = Instant::now();
@@ -2327,11 +2594,22 @@ impl EnginePool {
         let runtime_lock_ms = elapsed_ms(runtime_lock_started);
         let prepare_model_started = Instant::now();
         let (bridge, prepared, pins_scheduled_model) = self
-            .prepare_runtime_model(session_id, scheduled_unattended, explicit_model_override)
+            .prepare_runtime_model(
+                session_id,
+                scheduled_unattended,
+                require_remote_model_credentials,
+                explicit_model_override,
+                explicit_credential,
+                remote_bundle,
+            )
             .await?;
         let prepare_model_ms = elapsed_ms(prepare_model_started);
         let model_update_revision = self.model_update_revisions.current(&prepared.model.id);
-        let prepared = PreparedRuntimeState::new(prepared, model_update_revision);
+        let prepared = PreparedRuntimeState::new(
+            prepared,
+            bridge.runtime_model_credential_frozen,
+            model_update_revision,
+        );
         let mcp_config_revision = self.mcp_config_revision.load(Ordering::Acquire);
 
         let (fresh_engine, pending_window, stale) = {
@@ -2341,6 +2619,9 @@ impl EnginePool {
                     prepared.requires_rebuild_from(&entry.runtime_model),
                     entry.mcp_config_revision,
                     mcp_config_revision,
+                ) && remote_owner_matches(
+                    entry.remote_owner.as_ref(),
+                    remote_skills.as_ref().map(|skills| skills.owner()),
                 ) {
                     (
                         Some(entry.engine.clone()),
@@ -2428,10 +2709,10 @@ impl EnginePool {
         }
         let reclaim_ms = elapsed_ms(reclaim_started);
 
-        let is_scheduled = self.store.scheduled_profile(session_id).is_some();
         let finalize_bridge_started = Instant::now();
-        let bridge =
+        let mut bridge =
             Self::finalize_runtime_bridge(bridge, &prepared.prepared, pins_scheduled_model).await;
+        bridge.remote_turn_skills = remote_skills.clone();
         let finalize_bridge_ms = elapsed_ms(finalize_bridge_started);
         // Pending re-adoption marker for engine reuse (see
         // `EngineEntry::native_window_pending`): armed by the adoption inside
@@ -2473,7 +2754,7 @@ impl EnginePool {
         // is materialized — the send path and the toggle hot refresh skip aux
         // on the same rule (round-31 M8). The #608 timing bracket stays
         // outside the guard: for aux it simply reports a near-zero span.
-        if !crate::features::sessions::is_aux_session_id(session_id) {
+        if remote_skills.is_none() && !crate::features::sessions::is_aux_session_id(session_id) {
             let sid = session_id.to_string();
             let scope = self.bridge.session_policy(&sid).mode();
             let project_workspace = self.project_workspace_for(&sid);
@@ -2503,6 +2784,13 @@ impl EnginePool {
             .fetch_add(1, Ordering::Relaxed)
             .saturating_add(1);
         let spawn_engine_started = Instant::now();
+        // Load before spawning: no fallible disk read may strand a cold engine.
+        let load_session_started = Instant::now();
+        let saved = self
+            .store
+            .load(session_id)
+            .with_context(|| format!("load session {session_id} before spawning its engine"))?;
+        let load_session_ms = elapsed_ms(load_session_started);
         let (engine, forwarder) = AppEngine::spawn_for_session(
             self.app.clone(),
             self.store.clone(),
@@ -2515,8 +2803,9 @@ impl EnginePool {
             shell_manager,
             turn_shell_tasks,
             steer_incarnation,
-        )
-        .await?;
+        )?;
+        let custody = ColdEngineCustody::new(engine, forwarder);
+        let engine = &custody.resources.as_ref().expect("owned cold engine").0;
         let spawn_engine_ms = elapsed_ms(spawn_engine_started);
 
         // Sync is mandatory even when messages is empty: SyncSession not only
@@ -2525,57 +2814,27 @@ impl EnginePool {
         // get the first turn's SessionUpdated rejected on an id mismatch,
         // ending with only the user message durable and the assistant reply
         // lost.
-        let load_session_started = Instant::now();
-        let loaded_session = self.store.load(session_id);
-        let load_session_ms = elapsed_ms(load_session_started);
         let sync_session_started = Instant::now();
-        match loaded_session {
-            Ok(saved) => {
-                if let Err(error) = engine
-                    .sync_session(session_id.to_string(), saved.messages)
-                    .await
-                {
-                    if is_scheduled {
-                        let _ = engine.handle.send(Op::Shutdown).await;
-                        forwarder.abort();
-                        return Err(error).with_context(|| {
-                            format!("sync scheduled session {session_id} before its first turn")
-                        });
-                    }
-                    eprintln!("[engine_pool] sync history for {session_id} failed: {error:?}");
-                } else {
-                    // The hydrated history is forwarder-sanitized: old
-                    // transcript rules can no longer match the new engine's
-                    // snapshot, so prune them to stop rules accumulating per
-                    // turn. The interactive path installs rules around spawn
-                    // (reserve already marked active); the retain predicate
-                    // guarantees the in-flight reservation's rule survives.
-                    turn_lifecycle.prune_stale_transcript_rules();
-                }
-            }
-            Err(error) => {
-                let _ = engine.handle.send(Op::Shutdown).await;
-                forwarder.abort();
-                return Err(error).with_context(|| {
-                    format!("load session {session_id} before spawning its engine")
-                });
-            }
-        }
+        engine
+            .try_sync_new_session(session_id.to_string(), saved.messages)
+            .with_context(|| format!("sync session {session_id} before publication"))?;
+        turn_lifecycle.prune_stale_transcript_rules();
         let sync_session_ms = elapsed_ms(sync_session_started);
 
-        self.entries.lock().await.insert(
-            session_id.to_string(),
+        let engine = publish_cold_entry(&self.entries, session_id, custody, |engine, forwarder| {
             EngineEntry {
-                engine: engine.clone(),
+                engine,
                 forwarder,
                 runtime_model: prepared,
+                remote_owner: remote_skills.as_ref().map(|skills| skills.owner().clone()),
                 mcp_config_revision,
                 native_window_pending,
                 spawned_at_ms,
                 steer_incarnation,
                 last_active_epoch_ms: AtomicU64::new(Self::now_epoch_ms()),
-            },
-        );
+            }
+        })
+        .await;
         crate::features::assistant::timing::record_engine_ready(
             session_id,
             crate::features::assistant::timing::EngineAcquireTiming {
@@ -3096,6 +3355,26 @@ impl EnginePool {
         }
     }
 
+    /// Old remote cleanup must neither evict a replacement nor invalidate a
+    /// newer reservation when its own attempt never reached publication.
+    pub(crate) async fn evict_remote_owner(
+        &self,
+        session_id: &str,
+        owner: &Arc<super::skill_materialization::RemoteTurnOwner>,
+    ) {
+        let turn_lock = self.turn_locks.for_session(session_id).await;
+        let _turn = turn_lock.lock().await;
+        let runtime_lock = self.runtime_model_locks.for_session(session_id).await;
+        let _runtime = runtime_lock.lock().await;
+        let entry = {
+            let mut entries = self.entries.lock().await;
+            take_remote_owned_entry(&mut entries, session_id, owner)
+        };
+        if let Some(entry) = entry {
+            self.reclaim_engine_entry(session_id, entry).await;
+        }
+    }
+
     async fn evict_locked(&self, session_id: &str) {
         let runtime_lock = self.runtime_model_locks.for_session(session_id).await;
         let _runtime = runtime_lock.lock().await;
@@ -3480,6 +3759,155 @@ impl EnginePool {
         .await
     }
 
+    /// Remote-control turn entry point with a task-scoped model override.
+    /// The override participates in normal runtime preparation and engine
+    /// rebuild checks but is never written to the session model sidecar.
+    pub(crate) async fn send_remote_user_message<F>(
+        &self,
+        session_id: &str,
+        content: String,
+        skill_ids: Vec<String>,
+        model_override: Option<RemoteRuntimeModelBundle>,
+        owner: Arc<super::skill_materialization::RemoteTurnOwner>,
+        on_reserved: F,
+    ) -> Result<()>
+    where
+        F: FnOnce(u64) + Send,
+    {
+        let reservation = self.reserve_turn(session_id)?;
+        on_reserved(reservation.generation());
+        let skill_session_id = session_id.to_owned();
+        let skills = tokio::task::spawn_blocking(move || {
+            crate::features::assistant::skill_materialization::materialize_plain_remote_turn_skills(
+                &skill_session_id,
+                &skill_ids,
+                owner,
+            )
+        })
+        .await
+        .map_err(|_| anyhow::anyhow!("task_skill_unavailable"))?
+        .map_err(anyhow::Error::msg)?;
+        let display_message = user_display_message(content.clone());
+        self.send_reserved_user_message_with_model_override(
+            session_id,
+            content,
+            display_message,
+            AppMode::Agent,
+            false,
+            None,
+            Vec::new(),
+            reservation,
+            true,
+            None,
+            model_override,
+            Some(Arc::new(skills)),
+        )
+        .await
+    }
+
+    /// Remote attachments use the same ingestion and message construction as
+    /// local chat, while retaining the task-scoped model and the single turn
+    /// reservation. This method never accepts an A-supplied filesystem path.
+    pub(crate) async fn send_remote_user_message_with_attachments<F>(
+        &self,
+        session_id: &str,
+        content: String,
+        attachments: Vec<crate::features::files::file_ingest::IngestResult>,
+        skill_ids: Vec<String>,
+        model_override: Option<RemoteRuntimeModelBundle>,
+        owner: Arc<super::skill_materialization::RemoteTurnOwner>,
+        on_reserved: F,
+    ) -> Result<()>
+    where
+        F: FnOnce(u64) + Send,
+    {
+        use crate::features::assistant::attachments::{
+            build_message_with_attachments_in_dir, prepare_native_user_message_in_dir,
+        };
+        use crate::features::assistant::image_capability::ImageInputMode;
+
+        if attachments.is_empty() {
+            return self
+                .send_remote_user_message(
+                    session_id,
+                    content,
+                    skill_ids,
+                    model_override,
+                    owner,
+                    on_reserved,
+                )
+                .await;
+        }
+        let reservation = self.reserve_turn(session_id)?;
+        on_reserved(reservation.generation());
+        let skill_session_id = session_id.to_owned();
+        let skills = tokio::task::spawn_blocking(move || {
+            crate::features::assistant::skill_materialization::materialize_plain_remote_turn_skills(
+                &skill_session_id,
+                &skill_ids,
+                owner,
+            )
+        })
+        .await
+        .map_err(|_| anyhow::anyhow!("task_skill_unavailable"))?
+        .map_err(anyhow::Error::msg)?;
+        let roots = self.store.session_roots(session_id)?;
+        let has_images = attachments.iter().any(|item| item.kind == "image");
+        let image_mode = if has_images {
+            match model_override.as_ref() {
+                Some(bundle) => bundle.image_input_mode(),
+                None => self.fresh_bridge_for(session_id).await?.image_input_mode(),
+            }
+        } else {
+            ImageInputMode::Native
+        };
+        if has_images && image_mode == ImageInputMode::Unsupported {
+            bail!("task_image_input_unsupported");
+        }
+        let names = attachments
+            .iter()
+            .map(|item| item.basename.as_str())
+            .collect::<Vec<_>>();
+        let names = serde_json::to_string(&names)?;
+        let display_content = if content.trim().is_empty() {
+            format!("📎 {names}")
+        } else {
+            format!("{content}\n\n📎 {names}")
+        };
+        let engine_content = if has_images && image_mode == ImageInputMode::Native {
+            prepare_native_user_message_in_dir(
+                content,
+                attachments,
+                &roots.execution,
+                "attachments",
+            )
+            .map_err(anyhow::Error::msg)?
+        } else {
+            build_message_with_attachments_in_dir(
+                content,
+                attachments,
+                &roots.ledger,
+                "attachments",
+                roots.ledger != roots.execution,
+            )
+        };
+        self.send_reserved_user_message_with_model_override(
+            session_id,
+            engine_content,
+            user_display_message(display_content),
+            AppMode::Agent,
+            false,
+            None,
+            Vec::new(),
+            reservation,
+            true,
+            None,
+            model_override,
+            Some(Arc::new(skills)),
+        )
+        .await
+    }
+
     /// 评测策略轮刻意不带专家快照/候选：评测度量的是被测策略本身，候选
     /// 匹配属产品行为，混入会让评测结果与产品行为互相污染。
     #[cfg(any(feature = "benchmark-hooks", test))]
@@ -3546,7 +3974,40 @@ impl EnginePool {
         restrict_tools_for_turn: bool,
         expert_snapshot: Option<std::sync::Arc<ExpertRosterSnapshot>>,
         expert_candidates: Vec<String>,
+        reservation: TurnReservation,
+    ) -> Result<()> {
+        self.send_reserved_user_message_with_model_override(
+            session_id,
+            content,
+            display_message,
+            mode,
+            restrict_tools_for_turn,
+            expert_snapshot,
+            expert_candidates,
+            reservation,
+            false,
+            None,
+            None,
+            None,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn send_reserved_user_message_with_model_override(
+        &self,
+        session_id: &str,
+        content: String,
+        display_message: Message,
+        mode: AppMode,
+        restrict_tools_for_turn: bool,
+        expert_snapshot: Option<std::sync::Arc<ExpertRosterSnapshot>>,
+        expert_candidates: Vec<String>,
         mut reservation: TurnReservation,
+        require_remote_model_credentials: bool,
+        model_override: Option<SavedModel>,
+        remote_bundle: Option<RemoteRuntimeModelBundle>,
+        remote_skills: Option<Arc<super::skill_materialization::RemoteTurnSkills>>,
     ) -> Result<()> {
         let baseline_revision = reservation
             .base_transcript_revision()
@@ -3598,7 +4059,25 @@ impl EnginePool {
             .as_ref()
             .map(crate::features::personas::equip_anchor);
         let persona_conversational = active_card.as_ref().is_some_and(|c| c.conversational_only);
-        let engine = self.get_or_spawn(session_id).await?;
+        let restrict_tools = active_card
+            .as_ref()
+            .map_or(false, |c| c.conversational_only);
+        let restrict_tools = restrict_tools || restrict_tools_for_turn;
+        let explicit_credential = model_override
+            .as_ref()
+            .map(|model| RuntimeModelCredential::api_key(model.api_key.clone()))
+            .transpose()?;
+        let engine = self
+            .get_or_spawn_with_policy(
+                session_id,
+                false,
+                require_remote_model_credentials,
+                model_override,
+                explicit_credential,
+                remote_bundle,
+                remote_skills,
+            )
+            .await?;
         forward_forced_turn_restrict(
             session_id,
             persona_conversational,
@@ -3702,7 +4181,7 @@ impl EnginePool {
             self.evict_locked(session_id).await;
             crate::features::assistant::timing::start_turn(session_id);
             let engine = match self
-                .get_or_spawn_with_policy(session_id, true, None)
+                .get_or_spawn_with_policy(session_id, true, false, None, None, None, None)
                 .await
             {
                 Ok(engine) => engine,
@@ -4260,6 +4739,65 @@ impl EnginePool {
     }
 }
 
+fn apply_prepared_runtime_model(bridge: &mut Pinvou3Bridge, prepared: &PreparedRuntimeModel) {
+    bridge.session_model = Some(prepared.model.clone());
+    bridge.runtime_model_credential = prepared.credential.clone();
+}
+
+pub(crate) async fn prepare_selected_runtime_model(
+    provider: &dyn RuntimeModelProvider,
+    credential_store: &dyn CredentialStore,
+    bridge: &mut Pinvou3Bridge,
+    request: RuntimeModelRequest,
+    explicit_credential: Option<RuntimeModelCredential>,
+    route_locked: bool,
+    freeze_remote_credentials: bool,
+) -> Result<PreparedRuntimeModel> {
+    let selected = request.model.clone();
+    let mut prepared = match provider.prepare(request).await {
+        Ok(prepared) => prepared,
+        Err(error) if freeze_remote_credentials => {
+            return Err(error.context("model_runtime_unavailable"));
+        }
+        Err(error) => return Err(error),
+    };
+    if let Some(credential) = explicit_credential {
+        prepared.credential = Some(credential);
+        prepared.revision = Some(format!("task-scoped-{}", selected.id));
+    }
+    validate_prepared_runtime_route(&selected, &prepared, route_locked)?;
+    if freeze_remote_credentials {
+        freeze_remote_runtime_credentials(provider, credential_store, bridge, &mut prepared)?;
+    }
+    Ok(prepared)
+}
+
+fn freeze_remote_runtime_credentials(
+    provider: &dyn RuntimeModelProvider,
+    credential_store: &dyn CredentialStore,
+    bridge: &mut Pinvou3Bridge,
+    prepared: &mut PreparedRuntimeModel,
+) -> Result<()> {
+    apply_prepared_runtime_model(bridge, prepared);
+    let credential_mode = provider.credential_mode(&prepared.model, bridge.api_key_required());
+    if prepared.credential.is_none() && credential_mode != ModelCredentialMode::BackendManaged {
+        let api_key = bridge.api_key_with_store(credential_store);
+        if !api_key.trim().is_empty() {
+            prepared.credential = Some(RuntimeModelCredential::api_key(api_key)?);
+        }
+    }
+    apply_prepared_runtime_model(bridge, prepared);
+    bridge.runtime_model_credential_frozen = true;
+    validate_runtime_model_credentials(bridge)
+}
+
+fn validate_runtime_model_credentials(bridge: &Pinvou3Bridge) -> Result<()> {
+    if bridge.api_key_required() && bridge.api_key().trim().is_empty() {
+        anyhow::bail!("model_credential_unavailable");
+    }
+    Ok(())
+}
+
 #[cfg(any(feature = "benchmark-hooks", test))]
 fn identity_for_saved_model(bridge: &Pinvou3Bridge, saved: &SavedModel) -> ModelIdentity {
     let effective = bridge.with_session_model(Some(saved.clone()));
@@ -4501,6 +5039,24 @@ where
     }
 }
 
+fn validate_prepared_runtime_route(
+    selected: &SavedModel,
+    prepared: &PreparedRuntimeModel,
+    route_locked: bool,
+) -> Result<()> {
+    if prepared.model.id != selected.id {
+        bail!(
+            "Runtime model provider changed model identity from '{}' to '{}'",
+            selected.id,
+            prepared.model.id
+        );
+    }
+    if route_locked && prepared.model != *selected {
+        bail!("Runtime model provider changed a locked runtime route");
+    }
+    Ok(())
+}
+
 async fn prepare_draft_runtime_model(
     provider: &dyn RuntimeModelProvider,
     model: SavedModel,
@@ -4601,20 +5157,26 @@ mod scheduled_model_tests {
         delete_scheduled_run_with_gate, delete_then_forget, dispatch_turn_bound_cancel,
         entry_is_fresh, evict_if_idle_with_gates, forward_edit_resend_with_reminder,
         forward_forced_turn_restrict, generation_matches, identity_for_active_model,
-        identity_for_saved_model, merge_aux_zero_tool_reminder, quiesce_engine_before_reclaim,
-        rebind_evict_with_gates, rebind_evictable, reset_aux_session_delete_with_gate,
-        resolve_eval_model_selection_from, resolve_runtime_model_override, resolve_scheduled_model,
-        resolve_spawn_model, retry_shutdown_sends, scheduled_profile_after_turn_gate,
-        should_still_reap_after_snapshot, turn_restrict_tools, user_display_message,
+        identity_for_saved_model, merge_aux_zero_tool_reminder, prepare_selected_runtime_model,
+        quiesce_engine_before_reclaim, rebind_evict_with_gates, rebind_evictable,
+        reset_aux_session_delete_with_gate, resolve_eval_model_selection_from,
+        resolve_runtime_model_override, resolve_scheduled_model, resolve_spawn_model,
+        retry_shutdown_sends, scheduled_profile_after_turn_gate, should_still_reap_after_snapshot,
+        turn_restrict_tools, user_display_message, validate_prepared_runtime_route,
     };
     use crate::features::assistant::engine::TurnBoundCancelOps;
     use crate::features::assistant::runtime_model::{
-        PassthroughRuntimeModelProvider, PreparedRuntimeModel,
+        ModelCredentialMode, PassthroughRuntimeModelProvider, PreparedRuntimeModel,
+        RuntimeModelCredential, RuntimeModelProvider, RuntimeModelRequest,
     };
     use crate::features::sessions::{ScheduledRunMode, ScheduledRunProfile, SessionStore};
-    use crate::platform::credential_store::{CredentialEditAction, CredentialState};
+    use crate::platform::credential_store::{
+        CredentialEditAction, CredentialReference, CredentialState, CredentialStore,
+        MemoryCredentialStore,
+    };
     use crate::platform::paths::tests::ENV_LOCK;
     use crate::platform::prefs::{ImageCapabilityOverride, ModelPreset, SavedModel};
+    use async_trait::async_trait;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex as StdMutex};
@@ -4651,6 +5213,7 @@ mod scheduled_model_tests {
             "DEEPSEEK_MODEL",
             "DEEPSEEK_PROVIDER",
             "DEEPSEEK_BASE_URL",
+            "DEEPSEEK_API_KEY",
             "DEEPSEEK_MAX_OUTPUT_TOKENS",
             "PINVOU3_SESSION_ARTIFACTS",
         ]);
@@ -4667,6 +5230,8 @@ mod scheduled_model_tests {
         unsafe { std::env::remove_var("DEEPSEEK_PROVIDER") };
         // SAFETY: the caller's test holds platform::paths::tests::ENV_LOCK throughout; env writes are serialized in-process.
         unsafe { std::env::remove_var("DEEPSEEK_BASE_URL") };
+        // SAFETY: the caller's test holds platform::paths::tests::ENV_LOCK throughout; env writes are serialized in-process.
+        unsafe { std::env::remove_var("DEEPSEEK_API_KEY") };
         let bridge = Pinvou3Bridge::boot().expect("boot isolated test bridge");
         (bridge, home, restore)
     }
@@ -5100,10 +5665,11 @@ mod scheduled_model_tests {
         let (prepared, _prepared_model, _pins) = super::EnginePool::prepare_runtime_model_with(
             &store,
             &PassthroughRuntimeModelProvider,
+            &MemoryCredentialStore::default(),
             bridge,
             "session-affinity-under-test",
             false,
-            None,
+            super::RuntimeModelOverrides::default(),
         )
         .await
         .expect("runtime model preparation succeeds");
@@ -5673,6 +6239,308 @@ mod scheduled_model_tests {
         }
     }
 
+    struct ControlledRuntimeProvider {
+        calls: AtomicUsize,
+        fail: AtomicBool,
+        credential_mode: ModelCredentialMode,
+        managed_key: StdMutex<Option<String>>,
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn preparation_funnel_keeps_session_affinity_and_frozen_remote_route_together() {
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let (bridge, home, _env) = isolated_eval_bridge();
+        let store = SessionStore::boot().unwrap();
+        let credentials = MemoryCredentialStore::default();
+        let provider = ControlledRuntimeProvider::user_managed();
+        let mut primary = model("task-primary", "primary-wire");
+        primary.api_key = "task-scoped-fixture-key".into();
+        let mut vision = model("task-vision", "vision-wire");
+        vision.api_key = "vision-fixture-key".into();
+        let bundle = super::RemoteRuntimeModelBundle::new(primary, Some(vision)).unwrap();
+        let (prepared_bridge, prepared, _) = super::EnginePool::prepare_runtime_model_with(
+            &store,
+            provider.as_ref(),
+            &credentials,
+            bridge,
+            "remote-affinity-session",
+            false,
+            super::RuntimeModelOverrides {
+                freeze_remote_credentials: true,
+                remote_bundle: Some(bundle),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            prepared_bridge.session_affinity_key.as_deref(),
+            Some("remote-affinity-session")
+        );
+        assert!(prepared_bridge.runtime_model_credential_frozen);
+        assert!(prepared_bridge.runtime_route_locked);
+        assert_eq!(prepared.model.id, "task-primary");
+        assert!(prepared.model.api_key.is_empty());
+        assert_eq!(
+            prepared_bridge.runtime_vision_model.as_ref().unwrap().id,
+            "task-vision"
+        );
+        assert!(
+            prepared_bridge
+                .runtime_vision_model
+                .as_ref()
+                .unwrap()
+                .api_key
+                .is_empty()
+        );
+        assert!(prepared_bridge.runtime_vision_credential.is_some());
+        assert_eq!(
+            prepared_bridge.build_dt_config().api_key.as_deref(),
+            Some("task-scoped-fixture-key")
+        );
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+        let debug = format!("{prepared_bridge:?}");
+        assert!(!debug.contains("task-scoped-fixture-key"));
+        assert!(!debug.contains("vision-fixture-key"));
+        let _ = std::fs::remove_dir_all(home);
+    }
+
+    impl ControlledRuntimeProvider {
+        fn user_managed() -> Arc<Self> {
+            Arc::new(Self {
+                calls: AtomicUsize::new(0),
+                fail: AtomicBool::new(false),
+                credential_mode: ModelCredentialMode::UserManaged,
+                managed_key: StdMutex::new(None),
+            })
+        }
+
+        fn backend_managed(key: &str) -> Self {
+            Self {
+                calls: AtomicUsize::new(0),
+                fail: AtomicBool::new(false),
+                credential_mode: ModelCredentialMode::BackendManaged,
+                managed_key: StdMutex::new(Some(key.to_owned())),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl RuntimeModelProvider for ControlledRuntimeProvider {
+        fn credential_mode(
+            &self,
+            _model: &SavedModel,
+            _user_api_key_required: bool,
+        ) -> ModelCredentialMode {
+            self.credential_mode
+        }
+
+        async fn prepare(
+            &self,
+            request: RuntimeModelRequest,
+        ) -> anyhow::Result<PreparedRuntimeModel> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            if self.fail.load(Ordering::SeqCst) {
+                anyhow::bail!("private provider preparation detail");
+            }
+            let credential = self
+                .managed_key
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .as_ref()
+                .map(|key| RuntimeModelCredential::api_key(key.clone()))
+                .transpose()?;
+            Ok(PreparedRuntimeModel {
+                model: request.model,
+                credential,
+                revision: None,
+            })
+        }
+    }
+
+    #[test]
+    fn locked_runtime_route_rejects_provider_route_rewrite() {
+        let selected = model("runtime-model", "controller-model");
+        let mut rewritten = selected.clone();
+        rewritten.base_url = "https://controlled.invalid/v1".to_string();
+        let prepared = PreparedRuntimeModel::unchanged(rewritten);
+
+        assert!(validate_prepared_runtime_route(&selected, &prepared, true).is_err());
+        assert!(validate_prepared_runtime_route(&selected, &prepared, false).is_ok());
+    }
+
+    #[test]
+    fn engine_reuse_distinguishes_dynamic_and_frozen_absent_credentials_both_ways() {
+        let _guard = crate::platform::paths::tests::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let (mut bridge, home, _env) = isolated_eval_bridge();
+        let store = MemoryCredentialStore::default();
+        let credential_ref = CredentialReference::for_model("loopback");
+        store.set(&credential_ref, "old-dynamic-key").unwrap();
+        let mut selected = model("loopback", "wire-model");
+        selected.base_url = "http://127.0.0.1:18080/v1".to_owned();
+        selected.credential_ref = Some(credential_ref.clone());
+        bridge.session_model = Some(selected.clone());
+        let prepared = PreparedRuntimeModel::unchanged(selected);
+
+        assert_eq!(
+            bridge.api_key_with_store(&store),
+            "old-dynamic-key",
+            "an ordinary engine can still resolve mutable credential state"
+        );
+        let dynamic = PreparedRuntimeState::new(prepared.clone(), false, 0);
+
+        store.delete(&credential_ref).unwrap();
+        bridge.runtime_model_credential_frozen = true;
+        assert_eq!(
+            bridge.api_key_with_store(&store),
+            "",
+            "frozen absence must not reread the old credential"
+        );
+        let frozen_absent = PreparedRuntimeState::new(prepared.clone(), true, 0);
+
+        assert!(frozen_absent.requires_rebuild_from(&dynamic));
+
+        store.set(&credential_ref, "new-dynamic-key").unwrap();
+        bridge.runtime_model_credential_frozen = false;
+        assert_eq!(bridge.api_key_with_store(&store), "new-dynamic-key");
+        let dynamic_after_frozen = PreparedRuntimeState::new(prepared, false, 0);
+        assert!(dynamic_after_frozen.requires_rebuild_from(&frozen_absent));
+        let _ = std::fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn frozen_present_credentials_reuse_only_the_identical_snapshot() {
+        let selected = model("managed", "wire-model");
+        let prepared = PreparedRuntimeModel {
+            model: selected.clone(),
+            credential: Some(RuntimeModelCredential::api_key("frozen-key").unwrap()),
+            revision: Some("provider-revision-1".to_owned()),
+        };
+        let first = PreparedRuntimeState::new(prepared.clone(), true, 7);
+        let identical = PreparedRuntimeState::new(prepared, true, 7);
+        assert!(!identical.requires_rebuild_from(&first));
+
+        let rotated = PreparedRuntimeState::new(
+            PreparedRuntimeModel {
+                model: selected,
+                credential: Some(RuntimeModelCredential::api_key("rotated-key").unwrap()),
+                revision: Some("provider-revision-1".to_owned()),
+            },
+            true,
+            7,
+        );
+        assert!(rotated.requires_rebuild_from(&first));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn remote_snapshot_prefers_provider_credential_and_never_logs_plaintext() {
+        let _guard = crate::platform::paths::tests::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let (mut bridge, home, _env) = isolated_eval_bridge();
+        let store = MemoryCredentialStore::default();
+        let credential_ref = CredentialReference::for_model("managed");
+        store.set(&credential_ref, "user-key").unwrap();
+        let mut selected = model("managed", "wire-model");
+        selected.credential_ref = Some(credential_ref.clone());
+        bridge.session_model = Some(selected.clone());
+        let provider = ControlledRuntimeProvider::backend_managed("provider-key");
+
+        let prepared = prepare_selected_runtime_model(
+            &provider,
+            &store,
+            &mut bridge,
+            RuntimeModelRequest {
+                session_id: "session-managed".to_owned(),
+                model: selected,
+                scheduled_unattended: false,
+            },
+            None,
+            false,
+            true,
+        )
+        .await
+        .unwrap();
+        store.set(&credential_ref, "rotated-user-key").unwrap();
+
+        assert!(prepared.credential.is_some());
+        assert_eq!(
+            bridge.build_dt_config().api_key.as_deref(),
+            Some("provider-key")
+        );
+        let debug = format!("{bridge:?}");
+        assert!(!debug.contains("provider-key"));
+        assert!(!debug.contains("user-key"));
+        assert!(debug.contains("[REDACTED]"));
+        let _ = std::fs::remove_dir_all(home);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn non_remote_runtime_preparation_does_not_enable_the_credential_gate() {
+        let _guard = crate::platform::paths::tests::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let (bridge, home, _env) = isolated_eval_bridge();
+        let provider = ControlledRuntimeProvider::user_managed();
+        let store = MemoryCredentialStore::default();
+        for (session_id, scheduled_unattended) in [
+            ("ordinary-session", false),
+            ("scheduled-session", true),
+            ("eval-session", false),
+        ] {
+            let selected = model(session_id, "wire-model");
+            let mut candidate = bridge.clone();
+            candidate.session_model = Some(selected.clone());
+            let prepared = prepare_selected_runtime_model(
+                provider.as_ref(),
+                &store,
+                &mut candidate,
+                RuntimeModelRequest {
+                    session_id: session_id.to_owned(),
+                    model: selected,
+                    scheduled_unattended,
+                },
+                None,
+                false,
+                false,
+            )
+            .await
+            .expect("non-remote preparation must preserve its existing semantics");
+            assert!(prepared.credential.is_none());
+            assert!(!candidate.runtime_model_credential_frozen);
+        }
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 3);
+        provider.fail.store(true, Ordering::SeqCst);
+        let selected = model("ordinary-failure", "wire-model");
+        let mut candidate = bridge.clone();
+        candidate.session_model = Some(selected.clone());
+        let error = match prepare_selected_runtime_model(
+            provider.as_ref(),
+            &store,
+            &mut candidate,
+            RuntimeModelRequest {
+                session_id: "ordinary-failure".to_owned(),
+                model: selected,
+                scheduled_unattended: false,
+            },
+            None,
+            false,
+            false,
+        )
+        .await
+        {
+            Ok(_) => panic!("ordinary provider failures retain their existing error"),
+            Err(error) => error,
+        };
+        assert_eq!(error.to_string(), "private provider preparation detail");
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 4);
+        let _ = std::fs::remove_dir_all(home);
+    }
+
     #[test]
     fn missing_eval_model_error_names_only_the_requested_id() {
         let _guard = crate::platform::paths::tests::ENV_LOCK
@@ -5994,6 +6862,19 @@ mod scheduled_model_tests {
     }
 
     #[test]
+    fn saved_model_update_revision_forces_next_turn_rebuild() {
+        let revisions = ModelUpdateRevisions::default();
+        let prepared = PreparedRuntimeModel::unchanged(model("model-1", "wire-model"));
+        let previous =
+            PreparedRuntimeState::new(prepared.clone(), false, revisions.current("model-1"));
+
+        revisions.bump("model-1");
+        let after_save = PreparedRuntimeState::new(prepared, false, revisions.current("model-1"));
+
+        assert!(after_save.requires_rebuild_from(&previous));
+    }
+
+    #[test]
     fn mcp_config_revision_bump_forces_next_turn_rebuild() {
         // A pin for the mark_mcp_config_updated contract (the counterpart of the
         // model path's requires_rebuild_from predicate): when the model is
@@ -6027,7 +6908,8 @@ mod scheduled_model_tests {
         // message is submitted to the rebuilt engine.
         let revisions = ModelUpdateRevisions::default();
         let prepared = PreparedRuntimeModel::unchanged(model("model-1", "wire-model"));
-        let entry_state = PreparedRuntimeState::new(prepared.clone(), revisions.current("model-1"));
+        let entry_state =
+            PreparedRuntimeState::new(prepared.clone(), false, revisions.current("model-1"));
 
         let lifecycles = SessionTurnLifecycles::default();
         let sid = "session-rebuild-reservation";
@@ -6043,7 +6925,8 @@ mod scheduled_model_tests {
         // Saving the model: after the revision bump the next turn's prepared
         // state necessarily differs -> a rebuild is required.
         revisions.bump("model-1");
-        let next_turn_state = PreparedRuntimeState::new(prepared, revisions.current("model-1"));
+        let next_turn_state =
+            PreparedRuntimeState::new(prepared, false, revisions.current("model-1"));
         assert!(
             next_turn_state.requires_rebuild_from(&entry_state),
             "saved-model revision must force the next turn to rebuild the engine"
@@ -6055,6 +6938,7 @@ mod scheduled_model_tests {
         // the previous model's engine and no test would notice.
         let other_model_state = PreparedRuntimeState::new(
             PreparedRuntimeModel::unchanged(model("model-2", "wire-model-2")),
+            false,
             revisions.current("model-1"),
         );
         assert!(
@@ -8885,6 +9769,11 @@ mod probed_facts_wiring_tests {
             workspace: std::env::temp_dir(),
             session_model: Some(model),
             runtime_model_credential: None,
+            runtime_model_credential_frozen: false,
+            remote_turn_skills: None,
+            runtime_route_locked: false,
+            runtime_vision_model: None,
+            runtime_vision_credential: None,
             session_affinity_key: None,
             probed_context_tokens: None,
             probed_output_tokens: None,

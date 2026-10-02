@@ -178,6 +178,7 @@ export class ControllerResumeHooks {
       }
       let result;
       if (message.type === "controller_resume_prepare") {
+        state.resumeStartedAt ??= timestamp;
         result = this.#prepare({ message, socketIdentity, role, lease, state });
       } else if (message.type === "encrypted_resume_confirm") {
         result = this.#confirm({ message, socketIdentity, role, lease, state });
@@ -484,6 +485,9 @@ export class ControllerResumeHooks {
           tokenA: state.candidate.tokenA,
           tokenB: state.candidate.tokenB,
           resumeDeadlineMs: String(resumeDeadline),
+          latencyMs: state.resumeStartedAt === null
+            ? undefined
+            : Math.max(0, now(this.#clock) - state.resumeStartedAt),
         });
         cleanupOwner = updated;
         const retired = Object.freeze({ activationId: state.activationId, accepted: new Map(state.accepted) });
@@ -541,6 +545,7 @@ export class ControllerResumeHooks {
       activationAck: null,
       postActivationLiveness: null,
       candidate: null,
+      resumeStartedAt: null,
       accepted: new Map(),
       retired: null,
     });

@@ -1,4 +1,8 @@
-import { CONTROLLER_PROTOCOL_VERSION, validateControllerMessage } from "./protocol-controller.js";
+import {
+  CONTROLLER_PROTOCOL_VERSION,
+  validateControllerMessage,
+  validateControllerRuntimeMessage,
+} from "./protocol-controller.js";
 import { ControllerLivenessHooks } from "./controller-liveness.js";
 import { ControllerResumeHooks } from "./controller-resume.js";
 
@@ -6,6 +10,42 @@ const ID = /^[A-Za-z0-9][A-Za-z0-9._~-]{0,127}$/u;
 const HANDSHAKE_TYPES = new Set([
   "finished_receipt_commit", "encrypted_handshake_finished", "finished_receipt_ack",
 ]);
+const LIVENESS_TYPES = new Set([
+  "controller_liveness", "controller_liveness_challenge_a", "encrypted_controller_liveness_a",
+  "controller_liveness_attestation_request_a",
+  "controller_liveness_attestation_request_b",
+]);
+const RESUME_TYPES = new Set([
+  "controller_resume_prepare", "encrypted_resume_confirm", "controller_resume_activation_ack",
+  "controller_post_activation_liveness", "controller_resume_ready_ack",
+]);
+const BUSINESS_STAGE = Object.freeze({
+  capability_snapshot_request: "task",
+  capability_snapshot: "task",
+  capability_snapshot_error: "task",
+  task_submit: "task",
+  task_cancel: "task",
+  task_status: "task",
+  remote_action_request: "task",
+  remote_action_result: "task",
+  temporary_model_package: "task",
+  journal_event: "task",
+  permission_list: "permission",
+  permission_decide: "permission",
+  attachment_begin: "attachment",
+  attachment_chunk: "attachment",
+  attachment_abort: "attachment",
+  artifact_index: "artifact",
+  artifact_preview: "artifact",
+  artifact_download_begin: "artifact",
+  artifact_download_chunk: "artifact",
+  artifact_download_abort: "artifact",
+});
+
+function businessAuditEvent(payloadKind, accepted) {
+  const stage = BUSINESS_STAGE[payloadKind];
+  return stage ? `${stage}_${accepted ? "forwarded" : "rejected"}` : null;
+}
 
 export class ControllerRouterError extends Error {
   constructor(code, options) {
@@ -54,6 +94,7 @@ export class ControllerRouter {
     audit = () => {},
     livenessHooks = new ControllerLivenessHooks({ leaseManager }),
     resumeHooks = new ControllerResumeHooks({ leaseManager }),
+    additionalHooks = [],
   } = {}) {
     if (!pairingRegistrationHandler || typeof pairingRegistrationHandler.register !== "function"
       || !leaseManager || typeof leaseManager.claimForDelivery !== "function"
@@ -69,7 +110,9 @@ export class ControllerRouter {
       || typeof send !== "function" || typeof audit !== "function") {
       fail("controller_router_config_invalid");
     }
-    for (const hooks of [livenessHooks, resumeHooks]) {
+    if (!Array.isArray(additionalHooks)) fail("controller_router_config_invalid");
+    const hooksList = [livenessHooks, resumeHooks, ...additionalHooks];
+    for (const hooks of hooksList) {
       if (!hooks || typeof hooks.handles !== "function" || typeof hooks.handle !== "function"
         || typeof hooks.onLeaseCreated !== "function" || typeof hooks.onSocketClosed !== "function"
         || typeof hooks.onLeaseTerminated !== "function" || typeof hooks.expire !== "function") {
@@ -81,7 +124,7 @@ export class ControllerRouter {
     this.#send = send;
     this.#audit = audit;
     this.#livenessHooks = livenessHooks;
-    this.#hooks = Object.freeze([livenessHooks, resumeHooks]);
+    this.#hooks = Object.freeze(hooksList);
     this.#leases.setTerminationObserver(async (event, leaseOwner, previousOwner) => {
       this.#clearAllLeaseLinks(leaseOwner);
       const owners = previousOwner ? [leaseOwner, previousOwner] : [leaseOwner];
@@ -153,6 +196,7 @@ export class ControllerRouter {
         if (peer.role !== "B") fail("controller_role_invalid");
         const response = await this.#registration.register(message, peer.authenticatedContext);
         this.#deliver(peer, response);
+        this.#emit("desktop_pairing_registered");
         return response;
       }
       if (message?.type === "controller_pairing_claim") {
@@ -178,7 +222,6 @@ export class ControllerRouter {
         controlled.pendingReservationId = reserved.reservation_id;
         this.#deliver(peer, reserved);
         this.#deliver(controlled, reserved);
-        this.#emit("controller_pairing_reserved");
         return reserved;
       }
       if (HANDSHAKE_TYPES.has(message?.type)) {
@@ -238,8 +281,47 @@ export class ControllerRouter {
           await this.#leases.terminateLease({ controllerLeaseId: lease.controller_lease_id,
             reason: disconnect.reason, expectedLease: lease });
         }
-        this.#emit("controller_disconnected");
         return disconnect;
+      }
+      if (message?.type === "encrypted_frame") {
+        if (!new Set(["A", "B"]).has(peer.role) || !peer.controllerLeaseId) {
+          fail("controller_role_invalid");
+        }
+        const lease = this.#leases.lease(peer.controllerLeaseId);
+        if (!lease || lease.sockets?.[peer.role] !== socketIdentity) {
+          fail("controller_lease_not_found");
+        }
+        const resume = this.#hooks.find(
+          (candidate) => typeof candidate.isBusinessAllowed === "function",
+        );
+        if (resume && !resume.isBusinessAllowed(lease.controller_lease_id)) {
+          fail("controller_business_suspended");
+        }
+        let validated;
+        try {
+          validated = validateControllerRuntimeMessage(message, peer.role, {
+            lease: {
+              connection_id: lease.connection_id,
+              controller_lease_id: lease.controller_lease_id,
+              lease_epoch: lease.lease_epoch,
+              relay_epoch: lease.relay_epoch,
+              remote_control_generation: lease.remote_control_generation,
+            },
+            negotiated_capabilities: lease.negotiated_capabilities,
+          });
+        } catch (error) {
+          fail("controller_business_invalid", error);
+        }
+        const counterpart = this.#counterpart(peer);
+        const counterpartRole = peer.role === "A" ? "B" : "A";
+        if (lease.sockets?.[counterpartRole] !== counterpart.socketIdentity
+          || counterpart.controllerLeaseId !== lease.controller_lease_id) {
+          fail("controller_lease_not_found");
+        }
+        this.#deliver(counterpart, validated);
+        const auditEvent = businessAuditEvent(validated.payload_kind, true);
+        if (auditEvent) this.#emit(auditEvent);
+        return validated;
       }
       const hooks = this.#hooks.find((candidate) => candidate.handles(message?.type));
       if (hooks) {
@@ -260,6 +342,8 @@ export class ControllerRouter {
             await Promise.all(this.#hooks.map((candidate) => candidate.onLeaseCreated(committed.lease)));
           }
           result?.finalize?.();
+          if (LIVENESS_TYPES.has(message?.type)) this.#emit("liveness_forwarded");
+          if (RESUME_TYPES.has(message?.type)) this.#emit("resume_forwarded");
           return result ?? null;
         } catch (error) {
           // Accepted hook results own this exact immutable lease revision.
@@ -275,6 +359,18 @@ export class ControllerRouter {
       }
       fail("controller_message_unsupported");
     } catch (error) {
+      if (message?.type === "desktop_pairing_register") {
+        this.#emit("desktop_pairing_register_rejected");
+      } else if (HANDSHAKE_TYPES.has(message?.type)) {
+        this.#emit("handshake_rejected");
+      } else if (LIVENESS_TYPES.has(message?.type)) {
+        this.#emit("liveness_rejected");
+      } else if (RESUME_TYPES.has(message?.type)) {
+        this.#emit("resume_rejected");
+      } else if (message?.type === "encrypted_frame") {
+        const auditEvent = businessAuditEvent(message?.payload_kind, false);
+        if (auditEvent) this.#emit(auditEvent);
+      }
       const code = publicError(error);
       try { this.#send(peer.socket, {
         v: CONTROLLER_PROTOCOL_VERSION,
@@ -410,7 +506,16 @@ export class ControllerRouter {
   }
 
   async expire() {
-    const results = await Promise.all(this.#hooks.map((hooks) => hooks.expire()));
+    const results = await Promise.all(this.#hooks.map(async (hooks) => ({
+      hooks,
+      count: Number(await hooks.expire()) || 0,
+    })));
+    for (const { hooks, count } of results) {
+      const event = hooks instanceof ControllerLivenessHooks
+        ? "liveness_expired"
+        : (hooks instanceof ControllerResumeHooks ? "resume_expired" : null);
+      for (let index = 0; event && index < count; index += 1) this.#emit(event);
+    }
     for (const peer of this.#peers.values()) {
       if (peer.role !== "A" || !peer.pendingReservationId) continue;
       if (!this.#leases.isPendingHandshake({ reservationId: peer.pendingReservationId,
@@ -418,6 +523,6 @@ export class ControllerRouter {
         this.#clearPendingLinks(peer, peer.pendingReservationId);
       }
     }
-    return results.reduce((sum, value) => sum + Number(value || 0), 0);
+    return results.reduce((sum, result) => sum + result.count, 0);
   }
 }

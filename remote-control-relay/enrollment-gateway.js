@@ -5,6 +5,7 @@ import { isIP } from "node:net";
 import { promisify } from "node:util";
 import { URL } from "node:url";
 import { WebSocket, WebSocketServer } from "ws";
+import { CONTROLLER_SUBPROTOCOL, parseLegacyWebWireJson } from "./protocol-controller.js";
 import { closeClientFromUpstream } from "./websocket-close.js";
 
 const MAX_FIRST_FRAME_BYTES = 16 * 1024;
@@ -116,7 +117,7 @@ function genericEnrollmentError(requestId) {
 function firstFrame(message) {
   if (typeof message !== "string" || Buffer.byteLength(message, "utf8") > MAX_FIRST_FRAME_BYTES) fail("gateway_frame_invalid");
   let parsed;
-  try { parsed = JSON.parse(message); } catch { fail("gateway_frame_invalid"); }
+  try { parsed = parseLegacyWebWireJson(message); } catch { fail("gateway_frame_invalid"); }
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed) || parsed.v !== 2) fail("gateway_frame_invalid");
   if (!(["desktop_endpoint_register", "web_client_join"].includes(parsed.type))
     || typeof parsed.endpoint_id !== "string" || typeof parsed.access_token !== "string") {
@@ -180,6 +181,7 @@ export function createEnrollmentGateway({
     return ip;
   });
   const connectionBuckets = new Map();
+  let negotiatingUpstreams = 0;
   const server = http.createServer((request, response) => {
     if (request.url === `${basePath}/healthz` || request.url === "/healthz") {
       response.writeHead(200, {
@@ -193,7 +195,12 @@ export function createEnrollmentGateway({
     response.writeHead(404, { "content-type": "text/plain; charset=utf-8" });
     response.end("not found");
   });
-  const wss = new WebSocketServer({ noServer: true, maxPayload: maxPayloadBytes });
+  const wss = new WebSocketServer({
+    noServer: true,
+    maxPayload: maxPayloadBytes,
+    handleProtocols: (_protocols, request) => request.enrollmentUpstream?.protocol === CONTROLLER_SUBPROTOCOL
+      ? CONTROLLER_SUBPROTOCOL : false,
+  });
   wss.on("headers", (headers) => headers.push("X-Pinvou-Enrollment-Gateway: v1"));
 
   server.on("upgrade", (request, socket, head) => {
@@ -219,19 +226,90 @@ export function createEnrollmentGateway({
       socket.destroy();
       return;
     }
-    if (wss.clients.size >= maxConnections
+    if (wss.clients.size + negotiatingUpstreams >= maxConnections
       || !consumeBucket(connectionBuckets, source, connectionLimit, connectionWindowMs, maxSourceBuckets)) {
       socket.write("HTTP/1.1 429 Too Many Requests\r\nConnection: close\r\n\r\n");
       socket.destroy();
       return;
     }
     request.enrollmentGatewaySource = source;
-    wss.handleUpgrade(request, socket, head, (client) => wss.emit("connection", client, request));
+    const completeUpgrade = (upstream = null) => {
+      if (socket.destroyed) {
+        upstream?.terminate();
+        return;
+      }
+      request.enrollmentUpstream = upstream;
+      wss.handleUpgrade(request, socket, head, (client) => {
+        // The client asked for controller v1 but the old upstream did not
+        // negotiate it. Respond without the protocol so the desktop retries
+        // with a separate v2-only connection.
+        if (wantsController && !upstream) {
+          client.close(1008, "controller subprotocol unavailable");
+          return;
+        }
+        wss.emit("connection", client, request);
+      });
+    };
+    const requestedProtocols = String(request.headers["sec-websocket-protocol"] || "")
+      .split(",").map((item) => item.trim());
+    const wantsController = requestedProtocols.includes(CONTROLLER_SUBPROTOCOL);
+    if (!wantsController) {
+      completeUpgrade();
+      return;
+    }
+    // The upstream connection is held, with no application frame sent, until
+    // the downstream first frame passes enrollment authorization. Its actual
+    // handshake decides whether the downstream may negotiate controller v1.
+    negotiatingUpstreams += 1;
+    let negotiationPending = true;
+    const finishNegotiation = () => {
+      if (!negotiationPending) return;
+      negotiationPending = false;
+      negotiatingUpstreams -= 1;
+    };
+    const upstream = new WebSocket(upstreamUrl, CONTROLLER_SUBPROTOCOL, {
+      headers: {
+        "x-pinvou-enrollment-gateway": "v1",
+        "x-forwarded-for": source,
+        ...(typeof request.headers.origin === "string" ? { origin: request.headers.origin } : {}),
+      },
+      maxPayload: maxPayloadBytes,
+      handshakeTimeout: authTimeoutMs,
+    });
+    socket.once("close", () => {
+      finishNegotiation();
+      upstream.terminate();
+    });
+    const negotiationError = (error) => {
+      finishNegotiation();
+      if (/Server sent no subprotocol/u.test(error.message)) completeUpgrade();
+      else if (!socket.destroyed) {
+        socket.write("HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n");
+        socket.destroy();
+      }
+    };
+    upstream.once("open", () => {
+      finishNegotiation();
+      upstream.off("error", negotiationError);
+      completeUpgrade(upstream);
+    });
+    upstream.once("error", negotiationError);
   });
 
   wss.on("connection", (client, request) => {
     let authenticated = false;
-    let upstream = null;
+    let upstream = request.enrollmentUpstream || null;
+    let firstRequestId = null;
+    const attachUpstream = () => {
+      upstream.once("error", () => {
+        clearTimeout(timer);
+        if (!authenticated) closePolicy(client, firstRequestId);
+        else if (client.readyState === WebSocket.OPEN) client.close(1011, "upstream unavailable");
+      });
+      upstream.once("close", (code, reason) => {
+        closeClientFromUpstream(client, code, reason);
+      });
+    };
     const ingress = { started_at: Date.now(), messages: 0, bytes: 0 };
     const consumeIngress = (bytes) => {
       const now = Date.now();
@@ -246,6 +324,7 @@ export function createEnrollmentGateway({
     };
     const timer = setTimeout(() => closePolicy(client), authTimeoutMs);
     timer.unref?.();
+    if (upstream) attachUpstream();
     client.on("error", (error) => {
       clearTimeout(timer);
       logger?.warn?.("enrollment gateway client socket failed", { code: error?.code || "socket_error" });
@@ -272,6 +351,7 @@ export function createEnrollmentGateway({
         raw = data.toString("utf8");
         if (!consumeIngress(Buffer.byteLength(raw, "utf8"))) fail("gateway_ingress_rate_limited");
         parsed = firstFrame(raw);
+        firstRequestId = parsed.request_id;
         if (parsed.type === "desktop_endpoint_register") {
           await registry.authorizeDesktopRegistration({ endpointId: parsed.endpoint_id,
             accessToken: parsed.access_token, desktopSecret: parsed.desktop_secret });
@@ -285,15 +365,11 @@ export function createEnrollmentGateway({
         return;
       }
       if (client.readyState !== WebSocket.OPEN) return;
-      upstream = new WebSocket(upstreamUrl, {
-        headers: {
-          "x-pinvou-enrollment-gateway": "v1",
-          "x-forwarded-for": request.enrollmentGatewaySource,
-          ...(typeof request.headers.origin === "string" ? { origin: request.headers.origin } : {}),
-        },
-        maxPayload: maxPayloadBytes,
-      });
-      upstream.once("open", () => {
+      const startForwarding = () => {
+        if (upstream.readyState !== WebSocket.OPEN) {
+          closePolicy(client, firstRequestId);
+          return;
+        }
         clearTimeout(timer);
         authenticated = true;
         client.off("message", rejectPipelinedFrame);
@@ -304,19 +380,38 @@ export function createEnrollmentGateway({
             closePolicy(client);
             return;
           }
+          if (!binary) {
+            try { parseLegacyWebWireJson(String(message)); } catch {
+              closePolicy(client);
+              return;
+            }
+          }
           if (upstream.readyState === WebSocket.OPEN) upstream.send(message, { binary });
         });
         upstream.on("message", (message, binary) => {
-          if (client.readyState === WebSocket.OPEN) client.send(message, { binary });
+          if (client.readyState !== WebSocket.OPEN) return;
+          if (!binary) {
+            try { parseLegacyWebWireJson(String(message)); } catch {
+              closePolicy(client);
+              return;
+            }
+          }
+          client.send(message, { binary });
         });
-      });
-      upstream.once("error", () => {
-        clearTimeout(timer);
-        if (!authenticated) closePolicy(client, parsed.request_id);
-      });
-      upstream.once("close", (code, reason) => {
-        closeClientFromUpstream(client, code, reason);
-      });
+      };
+      if (upstream) startForwarding();
+      else {
+        upstream = new WebSocket(upstreamUrl, {
+          headers: {
+            "x-pinvou-enrollment-gateway": "v1",
+            "x-forwarded-for": request.enrollmentGatewaySource,
+            ...(typeof request.headers.origin === "string" ? { origin: request.headers.origin } : {}),
+          },
+          maxPayload: maxPayloadBytes,
+        });
+        attachUpstream();
+        upstream.once("open", startForwarding);
+      }
     });
     client.once("close", () => {
       clearTimeout(timer);

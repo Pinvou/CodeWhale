@@ -140,8 +140,8 @@ export class ControllerLeaseManager {
     this.#onLeaseTerminated = onLeaseTerminated;
   }
 
-  #emit(event) {
-    try { this.#audit(event); } catch { /* audit cannot affect authorization */ }
+  #emit(event, latencyMs) {
+    try { this.#audit(event, latencyMs); } catch { /* audit cannot affect authorization */ }
   }
 
   #now(futureMs = 0) {
@@ -319,6 +319,7 @@ export class ControllerLeaseManager {
         receipts: new Set(),
         reserved_message: reserved,
         commit_promise: null,
+        started_at_ms: this.#now(),
       });
       this.#emit("handshake_started");
       return reserved;
@@ -494,7 +495,7 @@ export class ControllerLeaseManager {
       this.#leases.set(controllerLeaseId, lease);
       this.#pendingLeaseIds.delete(controllerLeaseId);
       this.#handshakes.delete(reservation.reservation_id);
-      this.#emit("controller_lease_created");
+      this.#emit("controller_lease_created", this.#now() - handshake.started_at_ms);
       return Object.freeze({ lease, messages });
     } catch (error) {
       handshake.state = "failed";
@@ -562,6 +563,7 @@ export class ControllerLeaseManager {
     livenessEpochB,
     tokenA,
     tokenB,
+    latencyMs,
     resumeDeadlineMs,
   } = {}) {
     controllerLeaseId = id(controllerLeaseId, "controller_lease_id");
@@ -615,7 +617,7 @@ export class ControllerLeaseManager {
       // Only the immediate predecessor can still have a hook installation in
       // flight. One entry per live lease, not an ever-growing resume history.
       this.#previousLeases.set(controllerLeaseId, lease);
-      this.#emit("controller_resume_completed");
+      this.#emit("controller_resume_completed", latencyMs);
       return updated;
     } finally {
       nextTokenA.fill(0);

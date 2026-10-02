@@ -582,13 +582,40 @@ export default defineConfig(({ mode }) => {
             // chunk from rolldown's automatic splitting, so this only applies
             // to the web mode.
             codeSplitting: {
-              groups: [{
-                name: 'vendor',
-                test: /node_modules[\\/](react|react-dom|scheduler)[\\/]/,
-              }],
+              groups: [
+                {
+                  name: 'vendor',
+                  test: /node_modules[\\/](react|react-dom|scheduler)[\\/]/,
+                },
+                {
+                  // Markdown rendering is only needed after a conversation view
+                  // loads. Keep its parser, sanitizer, and syntax highlighter out
+                  // of the Web shell's startup chunk.
+                  name: 'markdown-vendor',
+                  test: /node_modules[\\/](marked|dompurify|highlight\.js)[\\/]/,
+                },
+                {
+                  // Keep ChatView statically imported so the desktop/web shell
+                  // and source-contract tests retain the same startup semantics,
+                  // while preventing the large component module from inflating
+                  // the entry chunk beyond its per-chunk budget.
+                  name: 'chat-view',
+                  test: /[\\/]features[\\/]chat[\\/]ChatView\.jsx$/,
+                },
+              ],
             },
           }
-        : undefined,
+        : {
+            codeSplitting: {
+              groups: [{
+                // The desktop multi-entry build shares dependencies
+                // automatically, but ChatView itself still needs an explicit
+                // static group to keep the main entry within budget.
+                name: 'chat-view',
+                test: /[\\/]features[\\/]chat[\\/]ChatView\.jsx$/,
+              }],
+            },
+          },
     },
   },
   };
