@@ -382,10 +382,9 @@ impl DesktopRemoteTaskRuntime {
         pool: EnginePool,
         acp_pool: AcpPool,
         temporary_models: SharedTemporaryModelStore,
+        ledger: Arc<RemoteTaskLedger>,
     ) -> Arc<Self> {
-        let service = Arc::new(RemoteTaskService::new(Arc::new(
-            RemoteTaskLedger::in_memory(),
-        )));
+        let service = Arc::new(RemoteTaskService::new(ledger));
         let authorizations = Arc::new(RemoteWorkspaceAuthorizations::default());
         let acp_pool = Arc::new(acp_pool);
         service.set_session_provisioner(Arc::new(DesktopRemoteSessionProvisioner::new(
@@ -702,6 +701,9 @@ fn local_controlled_attachments(
     if sources.len() > 8 {
         return Err("task_attachments_invalid".to_owned());
     }
+    if !crate::platform::filesystem::supports_private_read_path_publication() {
+        return Err("unsupported".to_owned());
+    }
     let mut published = Vec::with_capacity(sources.len());
     for source in sources {
         let attachment = (|| {
@@ -721,24 +723,42 @@ fn local_controlled_attachments(
                 .ok_or_else(|| "task_attachments_invalid".to_owned())?
                 .to_owned();
             let handle_id = format!("local-attach-{}", Uuid::new_v4().simple());
-            let directory = session_root.join("remote_uploads").join(&handle_id);
-            std::fs::create_dir_all(&directory)
+            use std::io::Read as _;
+            let mut bytes = Vec::new();
+            std::fs::File::open(&source_path)
+                .map_err(|_| "task_attachment_unavailable".to_owned())?
+                .take(crate::features::files::file_ingest::MAX_FILE_BYTES + 1)
+                .read_to_end(&mut bytes)
                 .map_err(|_| "task_attachment_unavailable".to_owned())?;
-            let path = directory.join(super::desktop_remote_attachment::safe_file_name(
-                &display_name,
-            ));
-            if std::fs::copy(&source_path, &path).is_err() {
-                let _ = std::fs::remove_dir_all(&directory);
-                return Err("task_attachment_unavailable".to_owned());
-            }
-            let bytes = std::fs::read(&path).map_err(|_| {
-                let _ = std::fs::remove_dir_all(&directory);
-                "task_attachment_unavailable".to_owned()
-            })?;
             if bytes.len() as u64 > crate::features::files::file_ingest::MAX_FILE_BYTES {
-                let _ = std::fs::remove_dir_all(&directory);
                 return Err("task_attachments_invalid".to_owned());
             }
+            let root = crate::platform::filesystem::open_private_file_directory(session_root)
+                .map_err(|_| "task_attachment_unavailable".to_owned())?;
+            let parent = root
+                .create_private_child_directory(std::ffi::OsStr::new("remote_uploads"))
+                .map_err(|_| "task_attachment_unavailable".to_owned())?;
+            let directory = parent
+                .create_private_child_directory(std::ffi::OsStr::new(&handle_id))
+                .map_err(|_| "task_attachment_unavailable".to_owned())?;
+            let read_owner = match crate::platform::filesystem::publish_private_read_path(
+                directory,
+                std::ffi::OsStr::new(&super::desktop_remote_attachment::safe_file_name(
+                    &display_name,
+                )),
+                &bytes,
+            ) {
+                Ok(owner) => Arc::new(owner),
+                Err(_) => {
+                    let _ = parent.remove_empty_child_directory(std::ffi::OsStr::new(&handle_id));
+                    return Err("task_attachment_unavailable".to_owned());
+                }
+            };
+            // Local publications are RAII-owned immediately, before any later
+            // allocation/admission can fail or unwind. Last-owner cleanup never
+            // follows a replacement leaf or recursively removes foreign data.
+            read_owner.request_cleanup();
+            let path = read_owner.path().to_owned();
             let sha256 = Sha256::digest(&bytes)
                 .iter()
                 .map(|byte| format!("{byte:02x}"))
@@ -750,6 +770,7 @@ fn local_controlled_attachments(
                 mime_type: "application/octet-stream".to_owned(),
                 bytes: bytes.len() as u64,
                 sha256,
+                read_owner: Some(read_owner),
             })
         })();
         match attachment {
@@ -926,7 +947,7 @@ pub(crate) fn submit_prepared_local_bound_task(
     )
 }
 
-struct LocalAttachmentCleanup(Vec<std::path::PathBuf>);
+struct LocalAttachmentCleanup(Vec<PublishedAttachment>);
 
 impl LocalAttachmentCleanup {
     fn new(attachments: Option<&Vec<PublishedAttachment>>) -> Self {
@@ -939,7 +960,7 @@ impl LocalAttachmentCleanup {
                     let root = directory.parent()?;
                     (directory.file_name()?.to_str()? == attachment.handle_id
                         && root.file_name()?.to_str()? == "remote_uploads")
-                        .then(|| directory.to_owned())
+                        .then(|| attachment.clone())
                 })
                 .collect(),
         )
@@ -952,8 +973,12 @@ impl LocalAttachmentCleanup {
 
 impl Drop for LocalAttachmentCleanup {
     fn drop(&mut self) {
-        for directory in self.0.drain(..) {
-            let _ = std::fs::remove_dir_all(directory);
+        for attachment in self.0.drain(..) {
+            if let Some(owner) = attachment.read_owner {
+                // Request last-owner cleanup. Executing turns retain their
+                // own Arc, so an IPC guard can never revoke a live parser.
+                owner.request_cleanup();
+            }
         }
     }
 }
@@ -2024,6 +2049,14 @@ mod tests {
 
     #[test]
     fn b_local_chat_and_code_inputs_keep_paths_out_of_authoritative_payloads() {
+        if !crate::platform::filesystem::supports_private_read_path_publication() {
+            assert_eq!(
+                local_controlled_attachments(std::path::Path::new("unused"), Vec::new())
+                    .unwrap_err(),
+                "unsupported"
+            );
+            return;
+        }
         let path = std::env::temp_dir().join(format!(
             "pinvou-controlled-local-{}.txt",
             Uuid::new_v4().simple()
@@ -2044,9 +2077,11 @@ mod tests {
         assert_eq!(attachments.len(), 1);
         assert!(attachments[0].handle_id.starts_with("local-attach-"));
         assert!(
-            attachments[0]
-                .path
-                .starts_with(session_root.join("remote_uploads"))
+            attachments[0].path.starts_with(
+                std::fs::canonicalize(&session_root)
+                    .unwrap()
+                    .join("remote_uploads")
+            )
         );
         let attachment_ids = vec![attachments[0].handle_id.clone()];
 
@@ -2097,8 +2132,9 @@ mod tests {
                     .contains(path.to_string_lossy().as_ref())
             );
         }
-        let _ = std::fs::remove_file(path);
-        let _ = std::fs::remove_dir_all(session_root);
+        drop(attachments);
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_dir_all(session_root).unwrap();
     }
 
     #[test]
