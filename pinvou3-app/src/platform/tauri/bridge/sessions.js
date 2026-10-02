@@ -536,7 +536,12 @@
     } catch (e) {
       if (seq !== historyListSeq) return;
       console.warn("list_sessions failed", e);
-      state.sessions = [];
+      // Keep the previously observed list on a transient refresh failure:
+      // publishing an empty snapshot here would read as "every task deleted"
+      // to the aux-chat purge reconcile (wireAuxSessionPurge), which would
+      // then purge every task's unsent drafts and staged quotes. The archived
+      // leg below keeps its previous list on failure for the same reason.
+      state.sessions = state.sessions || [];
     }
     try {
       var archivedSessions = await invoke("list_archived_sessions");
@@ -1327,6 +1332,18 @@
     loadWorkingSetFrom(freshBuffer());
   }
 
+  // session:deleted fan-out: applyDeletedSession is the ONE path that
+  // observes every deleted id — list_sessions excludes code-mode sessions
+  // (they are listed by list_codex_acp_sessions), so a slice-diff consumer
+  // never learns a code task was deleted. Feature modules cannot reach into
+  // this module's scope, so the feature-layer consumer (the aux-chat purge
+  // wiring) registers a listener here instead of the sessions domain pushing.
+  var sessionDeletedListeners = new Set();
+  function onSessionDeleted(listener) {
+    if (typeof listener !== "function") return function () {};
+    sessionDeletedListeners.add(listener);
+    return function () { sessionDeletedListeners.delete(listener); };
+  }
   function applyDeletedSession(id) {
     if (typeof id !== "string" || !id) return false;
     invalidateScheduledRecentRunsForSession(id);
@@ -1341,6 +1358,9 @@
     state.scheduledTaskRuns = (state.scheduledTaskRuns || []).filter(function (run) {
       return !run || run.sessionId !== id;
     });
+    for (const listener of sessionDeletedListeners) {
+      try { listener(id); } catch (error) { console.warn("session:deleted listener failed", error); }
+    }
     notify();
     return true;
   }
@@ -1691,6 +1711,7 @@
       leaveSessionView: leaveSessionView,
       applyDeletedSession: applyDeletedSession,
       applyWorkspaceReboundMark: applyWorkspaceReboundMark,
+      onSessionDeleted: onSessionDeleted,
       deleteSession: deleteSession,
       renameSession: renameSession,
       toggleSessionPinned: toggleSessionPinned,
