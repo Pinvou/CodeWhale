@@ -332,8 +332,8 @@ pub(crate) struct ControllingLaneSinks<'a> {
     pub(crate) on_liveness: &'a mut (dyn FnMut(Value) + Send),
 }
 
-/// 握手完成后的通道保活与业务帧派发：断线投影为 reconnecting 并清空业务通道
-/// （恢复与 liveness 属 E2E-06），加密业务帧解密后按 payload_kind 派发到会话/
+/// 握手完成后的业务帧派发：本波尚未接线用于恢复的认证存活截止时间，断线
+/// 失败关闭并清空业务通道；加密业务帧解密后按 payload_kind 派发到会话/
 /// 任务状态域；未知帧、旧 lease/generation 帧与重放帧一律丢弃，绝不转发到
 /// legacy WebUI 事件流。
 pub(crate) async fn serve_controlling_lane(
@@ -385,7 +385,12 @@ pub(crate) async fn serve_controlling_lane_with_interval(
                     ControllerLaneEvent::Disconnected => {
                         // 断线后不再有可用租约/会话密钥：先清空业务通道，再投影状态。
                         business.clear();
-                        let status = manager.mark_transport_disconnected();
+                        // Heartbeat receipts alone must not invent a recovery
+                        // deadline; the recovery-budget owner arrives later.
+                        let status = manager.mark_transport_disconnected(
+                            super::relay_runtime::controlled_monotonic_millis(),
+                            None,
+                        );
                         (sinks.on_status)(&status);
                     }
                     ControllerLaneEvent::Frame(json) => {
@@ -1250,7 +1255,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn post_handshake_disconnect_projects_reconnecting_and_keeps_draining() {
+    async fn post_handshake_disconnect_without_evidence_fails_closed_and_keeps_draining() {
         let manager = ControllingDeviceManager::default();
         let operation = manager.connect("234-4567").unwrap();
         manager.complete_reserved(operation.clone()).unwrap();
@@ -1310,15 +1315,20 @@ mod tests {
             on_liveness: &mut on_liveness,
         };
         serve_controlling_lane(&mut lane, &manager, &sessions, &business, &mut sinks).await;
-        assert_eq!(statuses, vec!["reconnecting".to_owned()]);
+        assert_eq!(statuses, vec!["error".to_owned()]);
         assert!(sessions_seen.is_empty());
         assert!(tasks_seen.is_empty());
         assert!(journal_seen.is_empty());
         assert_eq!(
             projection(&manager.status())["status"],
-            "reconnecting",
-            "断线后不能继续声称 connected"
+            "error",
+            "没有认证存活证据时不得制造恢复预算"
         );
+        assert_eq!(
+            projection(&manager.status())["errorCode"],
+            "endpoint_offline"
+        );
+        assert!(manager.live_runtime_context().is_err());
     }
 
     /// 用户已显式断开（或尝试已被取代）时，在途失败不得把状态覆盖成 error。
