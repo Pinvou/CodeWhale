@@ -8757,6 +8757,75 @@ mod tests {
         server.verify().await;
     }
 
+    #[tokio::test]
+    async fn anthropic_isolated_requests_keep_shared_health_untouched_on_status_errors() {
+        // The status-level arm of the Anthropic transport (HTTP 4xx/5xx
+        // error envelopes) marks health as well, so the isolated
+        // classifier request must skip it too: two failures would cross
+        // the degradation threshold and fire a /models probe from a
+        // read-only inspection — the same leak the transport-stall pin
+        // above covers for the transport arm.
+        let _env_lock = crate::test_support::lock_test_env();
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/anthropic/v1/messages"))
+            .respond_with(ResponseTemplate::new(500).set_body_json(json!({
+                "type": "error",
+                "error": {"type": "api_error", "message": "boom"}
+            })))
+            .expect(2)
+            .mount(&server)
+            .await;
+        // No probe may fire from the isolated path: expect(0) fails
+        // server.verify() if the status arm leaks a health write.
+        Mock::given(method("GET"))
+            .and(path("/anthropic/v1/models"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "data": [] })))
+            .expect(0)
+            .mount(&server)
+            .await;
+
+        let mut client =
+            minimax_anthropic_client_with_base_url(format!("{}/anthropic", server.uri()));
+        client.test_messages_transport_base_url = Some(format!("{}/anthropic", server.uri()));
+        client.isolated_request_state = true;
+        let request = MessageRequest {
+            model: "MiniMax-M3".to_string(),
+            messages: vec![Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text {
+                    text: "hello".to_string(),
+                    cache_control: None,
+                }],
+            }],
+            max_tokens: 32,
+            system: None,
+            tools: None,
+            tool_choice: None,
+            metadata: None,
+            thinking: None,
+            reasoning_effort: Some("off".to_string()),
+            stream: Some(false),
+            temperature: None,
+            top_p: None,
+        };
+        for _ in 0..2 {
+            client
+                .create_message(request.clone())
+                .await
+                .expect_err("an HTTP 500 must surface as an API error");
+        }
+        let health = client.connection_health.lock().await;
+        assert_eq!(
+            health.consecutive_failures, 0,
+            "an isolated request must not write the shared connection health on a \
+             status error"
+        );
+        assert_eq!(health.state, ConnectionState::Healthy);
+        drop(health);
+        server.verify().await;
+    }
+
     #[test]
     fn custom_api_key_header_is_allowed_without_primary_provider_key() {
         let mut extra = HashMap::new();

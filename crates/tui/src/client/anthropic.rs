@@ -264,11 +264,19 @@ impl DeepSeekClient {
         if !status.is_success() {
             let raw = bounded_error_text(response, ERROR_BODY_MAX_BYTES).await;
             let (error_type, message) = parse_anthropic_error_envelope(&raw);
-            self.mark_request_failure(&format!("anthropic status={status}"))
-                .await;
+            // Same isolation contract as the transport-failure arm above: a
+            // status-level failure on the isolated classifier request must
+            // not write the shared connection health (the generic dialect's
+            // isolated dispatch path writes nothing either).
+            if !self.isolated_request_state {
+                self.mark_request_failure(&format!("anthropic status={status}"))
+                    .await;
+            }
             anyhow::bail!("Anthropic API error (HTTP {status} {error_type}): {message}");
         }
-        self.mark_request_success().await;
+        if !self.isolated_request_state {
+            self.mark_request_success().await;
+        }
         Ok(response)
     }
 
