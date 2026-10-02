@@ -228,7 +228,7 @@ impl DesktopRemoteArtifactRuntime {
             }
             captures
                 .remove(task_id)
-                .expect("capture checked while holding the same lock")
+                .ok_or_else(|| "artifact_capture_missing".to_owned())?
         };
         let mut changed: Vec<_> = after
             .into_iter()
