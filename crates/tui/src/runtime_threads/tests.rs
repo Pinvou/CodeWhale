@@ -12532,3 +12532,29 @@ async fn a_waiter_never_removes_a_live_approval_that_reuses_its_id() -> Result<(
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn the_emit_failure_rollback_never_evicts_a_foreign_same_id_entry() -> Result<()> {
+    // Providers reuse tool-call ids across threads. The
+    // `approval.required`-emit-failure rollback removes its own
+    // registration; under a reused id the map entry may already belong to
+    // another thread's live waiter, and a blanket remove would strand it —
+    // the rollback may only take a same-thread match.
+    let manager = test_manager(test_runtime_dir())?;
+    let foreign = manager
+        .create_thread(CreateThreadRequest::default())
+        .await?;
+    let mine = manager
+        .create_thread(CreateThreadRequest::default())
+        .await?;
+    let _live = manager.register_pending_approval_for_thread_for_test(&foreign.id, "call_0");
+    manager.cancel_thread_pending_approval("call_0", &mine.id);
+    assert_eq!(
+        manager.pending_approvals_count(),
+        1,
+        "a foreign thread's live entry must survive the rollback"
+    );
+    manager.cancel_thread_pending_approval("call_0", &foreign.id);
+    assert_eq!(manager.pending_approvals_count(), 0);
+    Ok(())
+}

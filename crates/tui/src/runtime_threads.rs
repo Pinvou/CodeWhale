@@ -3544,8 +3544,19 @@ impl RuntimeThreadManager {
         rx
     }
 
-    fn cancel_pending_approval(&self, approval_id: &str) {
-        self.pending_approvals.lock().remove(approval_id);
+    /// Remove `approval_id` only if the entry still belongs to `thread_id`.
+    /// The `approval.required`-emit-failure rollback races a same-id
+    /// registration from another thread (providers reuse tool-call ids
+    /// across threads), and a blanket remove could evict that other
+    /// waiter's live entry — so only a same-thread match goes.
+    fn cancel_thread_pending_approval(&self, approval_id: &str, thread_id: &str) {
+        let mut map = self.pending_approvals.lock();
+        if map
+            .get(approval_id)
+            .is_some_and(|entry| entry.thread_id == thread_id)
+        {
+            map.remove(approval_id);
+        }
     }
 
     /// Remove `approval_id` only if its receiver is closed, i.e. the entry
@@ -6918,7 +6929,9 @@ impl RuntimeThreadManager {
                 )
                 .await
             {
-                tracing::error!("Failed to emit approval resolution after monitor failure: {err}");
+                tracing::error!(
+                    "Failed to emit approval resolution for {approval_id} after monitor failure: {err}"
+                );
             }
         }
 
@@ -9396,7 +9409,7 @@ impl RuntimeThreadManager {
                         )
                         .await
                     {
-                        self.cancel_pending_approval(&id);
+                        self.cancel_thread_pending_approval(&id, &thread_id);
                         drop(projection);
                         let _ = engine.deny_tool_call(&id).await;
                         return Err(err);
