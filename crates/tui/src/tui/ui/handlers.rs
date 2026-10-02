@@ -1148,24 +1148,6 @@ pub(crate) async fn handle_view_events(
 
                 match manager.load_session(&session_id) {
                     Ok(session) => {
-                        // Round-26 M26-2: switching onto a session whose
-                        // recorded primary differs from the current workspace
-                        // validates the carried set BEFORE any mutation — a
-                        // widening entry refuses the switch honestly.
-                        let roots_seed =
-                            match crate::tui::ui::session_state::seed_loaded_workspace_roots(
-                                &session.metadata.workspace,
-                                &session.metadata.workspace_roots,
-                                &app.workspace,
-                            ) {
-                                Ok(roots) => roots,
-                                Err(reason) => {
-                                    app.status_message = Some(format!(
-                                        "Failed to load session {session_id}: {reason}"
-                                    ));
-                                    continue;
-                                }
-                            };
                         let next_config = config.clone();
                         let respawn = match apply_loaded_session_config_snapshot(
                             app,
@@ -1186,11 +1168,16 @@ pub(crate) async fn handle_view_events(
                         // and the respawned engine plus every re-sync read
                         // this field. Without it, switching sessions either
                         // leaks the previous session's set into this one or
-                        // silently strips this session's persisted set. The
-                        // seed was validated against the load primary above
-                        // (M26-2): a pure load normalizes tolerantly, a moved
-                        // primary refused before any mutation.
-                        app.workspace_roots = roots_seed;
+                        // silently strips this session's persisted set.
+                        // Seeded under the RECORD primary (B27-1/B27-2): the
+                        // restore re-homes the app onto it, so this is a pure
+                        // load and the previous session's directory never
+                        // enters the set.
+                        app.workspace_roots =
+                            crate::tui::ui::session_state::seed_loaded_workspace_roots(
+                                &session.metadata.workspace,
+                                &session.metadata.workspace_roots,
+                            );
                         sync_runtime_workspace_state(task_manager, app.workspace.clone()).await;
                         if respawn {
                             let _ = engine_handle.send(Op::Shutdown).await;

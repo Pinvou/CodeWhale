@@ -172,11 +172,13 @@ mod tests {
             "an inward-symlink root must fire the boundary note"
         );
         // A plain root nested under the primary keeps the old behavior even
-        // though the primary itself now also canonicalizes.
-        assert!(!restore_covers_primary_only(
-            &workspace,
-            &[workspace.join("nested")]
-        ));
+        // though the primary itself now also canonicalizes. A28-4: the dir
+        // must EXIST first — a missing target canonicalizes to the raw
+        // /var spelling while the primary canonicalizes to /private/var,
+        // mixing spellings and spuriously firing the note on stock macOS.
+        let nested_plain = workspace.join("nested");
+        std::fs::create_dir_all(&nested_plain).expect("mkdir nested");
+        assert!(!restore_covers_primary_only(&workspace, &[nested_plain]));
         // A symlink INSIDE the primary pointing at a nested directory stays
         // inside on both spellings — no note.
         let nested = workspace.join("nested-real");

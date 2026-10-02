@@ -689,7 +689,12 @@ fn rebased_roots_drop_the_parent_filled_boundary_memo() {
     let ok = parent
         .resolve_path(secret.to_string_lossy().as_ref())
         .expect("the attached root admits the path for the parent");
-    assert!(ok.starts_with(&attached));
+    // M27-1: resolve_path canonicalizes its return — compare against the
+    // canonical spelling so the pin survives a symlinked temp root (macOS
+    // /var vs /private/var), instead of aborting before the isolation
+    // assertions on every stock macOS box.
+    let attached_canonical = attached.canonicalize().expect("canonical attached");
+    assert!(ok.starts_with(&attached_canonical));
 
     // Child: a clone of the parent runtime's context, rebased onto a fresh
     // worktree (the production spawn/resume shape).

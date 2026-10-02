@@ -6161,6 +6161,12 @@ impl RuntimeThreadManager {
         forked.updated_at = now;
         forked.latest_turn_id = None;
         forked.archived = false;
+        // M27-2: the fork must NOT inherit the source's session handle —
+        // ensure_engine_loaded prefers it and would replay the FULL source
+        // history into the model context (for fork_at_user_message that
+        // includes exactly the turns the backtrack dropped).
+        forked.session_id = None;
+        forked.task_id = None;
         // A fork MINTS a new row, so the cloned set passes the same
         // validating intake the create lane applies (round-24 P3, closing
         // the "a bare fork fails loud" over-generalization): a poisoned
@@ -6298,6 +6304,12 @@ impl RuntimeThreadManager {
         forked.updated_at = now;
         forked.latest_turn_id = None;
         forked.archived = false;
+        // M27-2: same session-handle clearing as fork_thread — the undo
+        // contract must hold at the model-context layer too, or
+        // ensure_engine_loaded replays the full source history (dropped
+        // tail included) through the inherited handle.
+        forked.session_id = None;
+        forked.task_id = None;
         // Round-26 M26-1: this fork face (the live /undo, /patch-undo, and
         // /retry routes) MINTS a new row exactly like `fork_thread` and now
         // runs the same validating intake on the cloned set — a poisoned
