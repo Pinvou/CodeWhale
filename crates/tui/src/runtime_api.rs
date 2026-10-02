@@ -833,6 +833,57 @@ fn open_runtime_threads_for_server(
     Ok((manager, workshop_activation))
 }
 
+/// Build the task manager config for the runtime API server.
+///
+/// This is where the server opts its tasks into answerable human waits:
+/// the tasks it runs are served by this server's HTTP decision endpoints
+/// (`/v1/approvals/`, `/v1/user-input/`), so a pending prompt on
+/// them is a human-paced wait the wall clock may pause for — see
+/// [`TaskManagerConfig::human_waits_answerable`].
+#[must_use]
+pub fn server_task_config(
+    config: &Config,
+    workspace: PathBuf,
+    workers: usize,
+) -> TaskManagerConfig {
+    let mut task_cfg = TaskManagerConfig::from_runtime(
+        config,
+        workspace,
+        Some(config.default_model()),
+        Some(workers),
+    );
+    task_cfg.human_waits_answerable = true;
+    task_cfg
+}
+
+/// Open the runtime threads and the task manager the server serves, wiring
+/// the server's answerable human-wait opt-in ([`server_task_config`]) into
+/// the task executor.
+///
+/// This is the single wiring point for that opt-in: `run_http_server` builds
+/// its runtime here, and the wiring pin reads the flag where it lands — the
+/// executor the manager runs tasks on — so dropping the opt-in, or its
+/// forward into the executor, turns the pin red instead of silently keeping
+/// every served task's wall clock running through prompts.
+pub(crate) async fn open_server_task_runtime(
+    config: &Config,
+    workspace: &FsPath,
+    plugin_registry: Arc<crate::plugins::PluginRegistry>,
+    workers: usize,
+) -> Result<(SharedRuntimeThreadManager, SharedTaskManager)> {
+    let task_cfg = server_task_config(config, workspace.to_path_buf(), workers);
+    let (runtime_threads, _workshop_activation) = open_runtime_threads_for_server(
+        config,
+        workspace.to_path_buf(),
+        RuntimeThreadManagerConfig::from_task_data_dir(task_cfg.data_dir.clone()),
+        plugin_registry,
+    )?;
+    let task_manager =
+        TaskManager::start_with_runtime_manager(task_cfg, config.clone(), runtime_threads.clone())
+            .await?;
+    Ok((runtime_threads, task_manager))
+}
+
 /// Start the runtime API server.
 pub async fn run_http_server(
     config: Config,
@@ -842,22 +893,13 @@ pub async fn run_http_server(
 ) -> Result<()> {
     validate_runtime_listener_security(&options)?;
 
-    let task_default_model = config.default_model();
-    let task_cfg = TaskManagerConfig::from_runtime(
+    let (runtime_threads, task_manager) = open_server_task_runtime(
         &config,
-        workspace.clone(),
-        Some(task_default_model),
-        Some(options.workers),
-    );
-    let (runtime_threads, _workshop_activation) = open_runtime_threads_for_server(
-        &config,
-        workspace.clone(),
-        RuntimeThreadManagerConfig::from_task_data_dir(task_cfg.data_dir.clone()),
+        &workspace,
         plugin_discovery.registry_for_workspace(&workspace),
-    )?;
-    let task_manager =
-        TaskManager::start_with_runtime_manager(task_cfg, config.clone(), runtime_threads.clone())
-            .await?;
+        options.workers,
+    )
+    .await?;
     let automations = Arc::new(Mutex::new(AutomationManager::default_location()?));
     runtime_threads.attach_automation_manager(automations.clone());
     let scheduler_cancel = CancellationToken::new();
