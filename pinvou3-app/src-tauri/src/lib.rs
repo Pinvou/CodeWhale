@@ -1244,65 +1244,80 @@ pub fn run() {
                     pool.start_idle_reaper();
                     eprintln!("[pinvou3-app] engine pool ready (lazy spawn per session)");
                     // ── Windows 桌面双端远程控制（DEV-20 单一注册点） ──
-                    handle.manage(ControlledDeviceManager::default());
-                    handle.manage(ControllingDeviceManager::default());
-                    handle.manage(CapabilitySnapshotManager::default());
-                    let temporary_models = commands::desktop_remote_model::shared_model_store();
-                    handle.manage(temporary_models.clone());
-                    let permission_authority = std::sync::Arc::new(PermissionAuthority::default());
-                    handle.manage(permission_authority.clone());
-                    let desktop_task_runtime = commands::desktop_remote_task::DesktopRemoteTaskRuntime::new(
-                        handle.clone(),
-                        store_for_engine.clone(),
-                        pool.clone(),
-                        acp_pool_for_capabilities.clone(),
-                    );
-                    handle.manage(desktop_task_runtime.ledger());
-                    let desktop_attachments =
-                        commands::desktop_remote_attachment::DesktopRemoteAttachmentRuntime::from_session_store(
-                            store_for_engine.clone(),
-                            desktop_task_runtime.service(),
+                    let desktop_boot = (|| -> Result<(), String> {
+                        // A corrupt/unwritable remote ledger disables this domain;
+                        // it must not prevent the released Legacy Web from resuming.
+                        let ledger = std::sync::Arc::new(
+                            crate::features::remote_control::controller::task::RemoteTaskLedger::open_recovered(
+                                crate::platform::paths::sessions_root().join("_remote_control_tasks.json"),
+                                0,
+                            ).map_err(|error| error.code.to_owned())?,
                         );
-                    let desktop_artifacts =
-                        commands::desktop_remote_artifact::DesktopRemoteArtifactRuntime::with_default_registry(
-                            desktop_task_runtime.service(),
-                        );
-                    let history_path = crate::platform::paths::sessions_root()
-                        .join("_remote_control_history.json");
-                    let desktop_history =
-                        commands::desktop_remote_history::DesktopRemoteHistoryRuntime::with_persistent_history(
-                            history_path,
-                            format!("boot-{}", std::process::id()),
-                        );
-                    desktop_task_runtime
-                        .hooks()
-                        .set_model_scope(temporary_models);
-                    desktop_task_runtime
-                        .hooks()
-                        .set_permission_scope(permission_authority);
-                    desktop_task_runtime.hooks().set_transfer_scope(std::sync::Arc::new(
-                        commands::desktop_remote_attachment::DesktopRemoteTransferScope::new(
-                            desktop_attachments.clone(),
-                            desktop_artifacts.clone(),
-                        ),
-                    ));
-                    desktop_task_runtime.hooks().set_journal(std::sync::Arc::new(
-                        commands::desktop_remote_history::DesktopTaskEventSink::new(
+                        handle.manage(ControlledDeviceManager::default());
+                        handle.manage(ControllingDeviceManager::default());
+                        handle.manage(CapabilitySnapshotManager::default());
+                        let temporary_models = commands::desktop_remote_model::shared_model_store();
+                        handle.manage(temporary_models.clone());
+                        let permission_authority = std::sync::Arc::new(PermissionAuthority::default());
+                        handle.manage(permission_authority.clone());
+                        let desktop_task_runtime = commands::desktop_remote_task::DesktopRemoteTaskRuntime::new(
                             handle.clone(),
-                            desktop_history.journal().clone(),
-                        ),
-                    ));
-                    let recovered = desktop_task_runtime.recover_after_restart();
-                    if recovered > 0 {
-                        eprintln!(
-                            "[pinvou3-app] remote control: {recovered} in-flight task(s) closed after restart"
+                            store_for_engine.clone(),
+                            pool.clone(),
+                            acp_pool_for_capabilities.clone(),
+                            ledger,
                         );
+                        handle.manage(desktop_task_runtime.ledger());
+                        let desktop_attachments =
+                            commands::desktop_remote_attachment::DesktopRemoteAttachmentRuntime::from_session_store(
+                                store_for_engine.clone(),
+                                desktop_task_runtime.service(),
+                            );
+                        let desktop_artifacts =
+                            commands::desktop_remote_artifact::DesktopRemoteArtifactRuntime::with_default_registry(
+                                desktop_task_runtime.service(),
+                            );
+                        let history_path = crate::platform::paths::sessions_root()
+                            .join("_remote_control_history.json");
+                        let desktop_history =
+                            commands::desktop_remote_history::DesktopRemoteHistoryRuntime::with_persistent_history(
+                                history_path,
+                                format!("boot-{}", std::process::id()),
+                            );
+                        desktop_task_runtime
+                            .hooks()
+                            .set_model_scope(temporary_models);
+                        desktop_task_runtime
+                            .hooks()
+                            .set_permission_scope(permission_authority);
+                        desktop_task_runtime.hooks().set_transfer_scope(std::sync::Arc::new(
+                            commands::desktop_remote_attachment::DesktopRemoteTransferScope::new(
+                                desktop_attachments.clone(),
+                                desktop_artifacts.clone(),
+                            ),
+                        ));
+                        desktop_task_runtime.hooks().set_journal(std::sync::Arc::new(
+                            commands::desktop_remote_history::DesktopTaskEventSink::new(
+                                handle.clone(),
+                                desktop_history.journal().clone(),
+                            ),
+                        ));
+                        let recovered = desktop_task_runtime.recover_after_restart();
+                        if recovered > 0 {
+                            eprintln!(
+                                "[pinvou3-app] remote control: {recovered} in-flight task(s) closed after restart"
+                            );
+                        }
+                        handle.manage(desktop_task_runtime);
+                        handle.manage(desktop_attachments);
+                        handle.manage(desktop_artifacts);
+                        handle.manage(desktop_history);
+                        eprintln!("[pinvou3-app] Windows desktop remote control ready");
+                        Ok(())
+                    })();
+                    if let Err(error) = desktop_boot {
+                        eprintln!("[pinvou3-app] desktop remote control disabled: {error}");
                     }
-                    handle.manage(desktop_task_runtime);
-                    handle.manage(desktop_attachments);
-                    handle.manage(desktop_artifacts);
-                    handle.manage(desktop_history);
-                    eprintln!("[pinvou3-app] Windows desktop remote control ready");
                     match remote_control_manager.resume() {
                         Ok(true) => eprintln!("[pinvou3-app] persistent Web access resumed"),
                         Ok(false) => {}
