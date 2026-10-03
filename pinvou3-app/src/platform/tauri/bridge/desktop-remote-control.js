@@ -1115,6 +1115,14 @@
       });
     }
 
+    // B's local, sanitized read-only projection. Never uses A's remote action
+    // signature and never creates a decision or mutates A's permission mirror.
+    function controlledPermissionList(taskId) {
+      ensureAvailable();
+      if (!requiredOpaqueId(taskId)) return Promise.reject(invalidTaskIntent());
+      return invoke("desktop_remote_permission_list_b", { taskId: taskId });
+    }
+
     function permissionDenyTask(taskId, reason) {
       ensureAvailable();
       return invoke("desktop_remote_permission_deny_task", { taskId: taskId, reason: reason || "b_stop" });
@@ -1256,6 +1264,7 @@
       cancelRemoteTask: cancelRemoteTask,
       abandonRemoteTask: abandonRemoteTask,
       permissionList: permissionList,
+      controlledPermissionList: controlledPermissionList,
       permissionDecide: permissionDecide,
       permissionDenyTask: permissionDenyTask,
       attachmentBegin: attachmentBegin,
