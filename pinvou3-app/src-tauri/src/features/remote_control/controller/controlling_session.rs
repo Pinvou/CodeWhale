@@ -302,10 +302,22 @@ impl ControllingSessionManager {
         remote_ref: &str,
         lease: &LeaseContext,
     ) -> Result<ControllingSessionProjection> {
+        self.with_state_for_lease(remote_ref, lease, |projection| projection.clone())
+    }
+
+    /// Dispatch/cancel commits acquire intents before the authenticated owner,
+    /// just like capability mapping. Keep the exact mapping stable through the
+    /// commit, but never acquire intents from inside an owner-held closure.
+    pub(crate) fn with_state_for_lease<T>(
+        &self,
+        remote_ref: &str,
+        lease: &LeaseContext,
+        commit: impl FnOnce(&ControllingSessionProjection) -> T,
+    ) -> Result<T> {
         let mut intents = self.intents.lock();
         let intent = find_intent(&mut intents, remote_ref)?;
         ensure_context(intent, lease)?;
-        Ok(intent.projection())
+        Ok(commit(&intent.projection()))
     }
 
     /// Read only A's authenticated, still-live capability projection for the
@@ -1185,6 +1197,44 @@ mod tests {
             )
             .unwrap();
         assert_eq!(reopened.session_id, projection.session_id);
+    }
+
+    #[test]
+    fn cancel_mapping_commit_takes_intents_before_owner_and_rejects_closed_or_stale_refs() {
+        let sessions = ControllingSessionManager::default();
+        let session = sessions
+            .open_for_test(None, "Session", "chat", &lease(), &capabilities())
+            .unwrap();
+        let owner = Mutex::new(());
+        let selected = sessions
+            .with_state_for_lease(&session.session_ref, &lease(), |projection| {
+                assert!(
+                    sessions.intents.is_locked(),
+                    "cancel must acquire intents before owner"
+                );
+                let _owner = owner.lock();
+                assert_eq!(projection.session_ref, session.session_ref);
+                projection.session_id.clone()
+            })
+            .unwrap();
+        assert_eq!(selected, session.session_id);
+        let mut stale = lease();
+        stale.lease_epoch = "2".to_owned();
+        assert!(
+            sessions
+                .with_state_for_lease(&session.session_ref, &stale, |_| {
+                    panic!("stale mapping must not enter owner commit")
+                })
+                .is_err()
+        );
+        sessions.close(&session.session_ref).unwrap();
+        assert!(
+            sessions
+                .with_state_for_lease(&session.session_ref, &lease(), |_| {
+                    panic!("closed mapping must not enter owner commit")
+                })
+                .is_err()
+        );
     }
 
     #[test]

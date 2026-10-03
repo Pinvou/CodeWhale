@@ -167,7 +167,7 @@ try {
       actions.push(`click_permission_${decision}`, `assert_permission_${decision}_applied`);
     } else if (phase === "attachment") {
       const attachmentSelector = await exactCoordinatedSelector("chat-remote-attachment-input");
-      await waitFor(async () => Boolean(await evaluate(`document.querySelector(${JSON.stringify(attachmentSelector)})`)), "ui_smoke_attachment_input_missing");
+      await waitFor(async () => await evaluate(`Boolean(document.querySelector(${JSON.stringify(attachmentSelector)}))`), "ui_smoke_attachment_input_missing");
       attachmentFixture = resolve(`${output}.attachment.txt`);
       await writeFile(attachmentFixture, "pinvou remote-control UI smoke attachment\n", { encoding: "utf8", flag: "wx" });
       await command("DOM.enable");
@@ -190,9 +190,9 @@ try {
       await waitVisible('[data-testid="chat-remote-artifact-download"]');
       await click('[data-testid="chat-remote-artifact-download"]');
       await waitVisible('[data-testid="chat-remote-action-error"]');
-      await waitFor(async () => Boolean(await evaluate(`document.querySelector('[data-testid="chat-remote-artifact-download"]:not(:disabled)')`)), "ui_smoke_artifact_download_stuck");
+      await waitFor(async () => await evaluate(`Boolean(document.querySelector('[data-testid="chat-remote-artifact-download"]:not(:disabled)'))`), "ui_smoke_artifact_download_stuck");
       await click('[data-testid="chat-remote-artifact-download"]');
-      await waitFor(async () => !(await evaluate(`Boolean(document.querySelector('[data-testid="chat-remote-action-error"]')`)), "ui_smoke_artifact_error_recovery_failed");
+      await waitFor(async () => !(await evaluate(`Boolean(document.querySelector('[data-testid="chat-remote-action-error"]'))`)), "ui_smoke_artifact_error_recovery_failed");
       actions.push("open_artifact_preview", "assert_artifact_preview", "close_artifact_preview", "download_artifact_expected_failure", "retry_artifact_download", "assert_artifact_recovery_ready");
     }
   }

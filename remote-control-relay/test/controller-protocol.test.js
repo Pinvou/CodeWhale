@@ -172,6 +172,18 @@ test("protocol documentation anchors match the executable registries and digests
   assert.match(document, new RegExp("The contract digest is\\s+`" + CONTROLLER_CONTRACT_SHA256 + "`"));
   assert.match(document, /standalone declaration, so clients must not send it to the live router/u);
   assert.match(document, /A's `controller_pairing_claim`\s+carry their capability lists/u);
+  const artifactSection = document.match(/The `artifact_index` operation([\s\S]*?)The shared fixture/u)?.[1];
+  assert.ok(artifactSection, 'artifact_index must be documented as a remote action');
+  assert.match(artifactSection, /`body\.artifacts`[\s\S]*?`remote_action_result`/u);
+  const artifactFields = artifactSection.match(/Each item is exactly `([^`]+)`/u)?.[1];
+  assert.ok(artifactFields);
+  assert.deepEqual(artifactFields.split(',').map((field) => field.trim()),
+    ['artifact_id', 'task_id', 'display_name', 'mime_type', 'total_bytes', 'sha256', 'preview_kind']);
+  const previewKinds = artifactSection.match(/preview kinds are ([\s\S]*?)\. Subsequent/u)?.[1];
+  assert.ok(previewKinds);
+  assert.deepEqual(quoted(previewKinds), ['text', 'download_only', 'unsupported']);
+  assert.match(artifactSection, /`remote_action_request`[\s\S]*?`artifact_id`[\s\S]*?`task_id`[\s\S]*?`transfer_id`/u);
+  assert.doesNotMatch(artifactSection, /size_bytes|preview_mode|inline_text|inline_image/u);
 });
 
 test("raw controller JSON rejects duplicate keys before object construction", () => {

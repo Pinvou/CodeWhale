@@ -7,7 +7,7 @@ param(
 
 Set-StrictMode -Version Latest
 
-function ConvertTo-PinvouWindowsCommandLineArgument {
+function global:ConvertTo-PinvouWindowsCommandLineArgument {
     param([AllowEmptyString()][string]$Value)
     if ($Value -notmatch '[\s"]') { return $Value }
     $builder = [Text.StringBuilder]::new()

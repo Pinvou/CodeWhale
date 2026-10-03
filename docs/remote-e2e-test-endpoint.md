@@ -96,12 +96,14 @@ telemetry 数据目录独立（`/var/lib/pinvou-telemetry-test`），与生产�
 ### 桌面 app 指向测试端点
 
 首选内置 profile：地址与信任根同源（`pinvou3-app/src-tauri/src/features/remote_control/manager/` 内置）。
-`run-dev.sh` 默认就选中 `test`，因此调试构建开箱即指向测试端点：
+`run-dev.sh` 在未显式选 profile 时默认选 `test`。只有没有地址/pin 环境覆盖及持久自定义地址时，地址与信任根才同时采用该内置 profile：
 
 ```bash
 PINVOU_REMOTE_ENDPOINT_PROFILE=test pinvou3-tauri   # 或 ./pinvou3-app/run-dev.sh
 PINVOU_REMOTE_ENDPOINT_PROFILE=production pinvou3-tauri   # 临时切回生产
 ```
+
+只切 profile 不会清除 runtime/URL/pin 覆盖或用户持久地址；切换前须核对这些更高优先级来源。`run-remote-control-endpoint.ps1 -Mode Production` 清除进程覆盖但仍保留持久设置，不保证强制指向生产。不得将本节命令当作端点隔离或真实双机验收。
 
 仅当自建 Relay 与当前 profile 共用信任根时，才用地址环境变量单独覆盖
 （**只覆盖地址不会同步换信任根**，两端不在同一信任根时 controller 握手会失败关闭）：
