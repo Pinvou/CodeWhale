@@ -110,9 +110,10 @@ mod relay_transport {
 
     // Admission-only test double for manager lifecycle tests. It does not
     // validate frames, enqueue bytes, start workers or communicate over a socket.
+    #[derive(Clone)]
     pub(crate) struct ControllerTransportSender {
-        authenticated: std::sync::atomic::AtomicBool,
-        stopped: std::sync::atomic::AtomicBool,
+        authenticated: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        stopped: std::sync::Arc<std::sync::atomic::AtomicBool>,
     }
 
     pub(crate) struct AuthenticatedLease {
@@ -131,8 +132,8 @@ mod relay_transport {
     ) -> (ControllerTransportSender, ()) {
         (
             ControllerTransportSender {
-                authenticated: std::sync::atomic::AtomicBool::new(false),
-                stopped: std::sync::atomic::AtomicBool::new(false),
+                authenticated: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                stopped: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             },
             (),
         )

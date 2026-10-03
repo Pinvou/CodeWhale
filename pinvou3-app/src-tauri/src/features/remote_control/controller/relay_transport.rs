@@ -1195,6 +1195,7 @@ mod tests {
                         reservation_id: "reservation-0001".into(),
                         device_display_name: "remote-device".into(),
                         liveness_epoch_a: "live-a-1".into(),
+                        liveness_epoch_b: "live-b-1".into(),
                         resume_deadline_b: 30_000,
                         resume_token: [1; 32],
                         transport_key_fingerprint: [2; 32],
@@ -1280,7 +1281,13 @@ mod tests {
                 emit_disconnected(&config, &sender, &|_| {}, "closed".into());
             }
             let result = manager.complete_resumed(
-                operation, activation, 8_000, "live-a-2", [3; 32], [4; 32], 60_000,
+                operation,
+                activation,
+                8_000,
+                ("live-a-2", "live-b-2"),
+                [3; 32],
+                [4; 32],
+                60_000,
             );
             if generation != "generation-0001" || stopped || close_after_final {
                 assert!(result.is_err());

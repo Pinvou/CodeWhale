@@ -10,7 +10,7 @@ use uuid::Uuid;
 use zeroize::{Zeroize, Zeroizing};
 
 use super::liveness::validate_liveness_epoch;
-use super::protocol::LeaseContext;
+use super::protocol::{LeaseContext, RuntimeValidationContext};
 use super::relay_transport::{ControllerRole, ControllerSendError, ControllerTransportSender};
 use super::resume::ControllerResumeGate;
 
@@ -47,7 +47,7 @@ pub(crate) struct ControllingStateError {
 }
 
 impl ControllingStateError {
-    const fn new(code: &'static str) -> Self {
+    pub(crate) const fn new(code: &'static str) -> Self {
         Self { code }
     }
 }
@@ -123,6 +123,7 @@ pub(crate) struct ControllerLease {
     pub(crate) reservation_id: String,
     pub(crate) device_display_name: String,
     pub(crate) liveness_epoch_a: String,
+    pub(crate) liveness_epoch_b: String,
     pub(crate) resume_deadline_b: u64,
     pub(crate) resume_token: [u8; 32],
     pub(crate) transport_key_fingerprint: [u8; 32],
@@ -137,6 +138,7 @@ impl std::fmt::Debug for ControllerLease {
             .field("context", &self.context)
             .field("device_display_name", &self.device_display_name)
             .field("liveness_epoch_a", &self.liveness_epoch_a)
+            .field("liveness_epoch_b", &self.liveness_epoch_b)
             .field("resume_deadline_b", &self.resume_deadline_b)
             .field("resume_token", &"[REDACTED]")
             .field("transport_key_fingerprint", &"[REDACTED]")
@@ -235,6 +237,21 @@ impl ControllingDeviceManager {
         }
     }
 
+    pub(crate) fn replace_owned_transport(
+        &self,
+        operation: &ControllerOperation,
+        transport: ControllerTransportSender,
+        business: &super::encrypted_lane::ControllingLaneState,
+    ) -> Result<()> {
+        let mut inner = self.inner.lock();
+        ensure_operation(&inner, operation)?;
+        if let Some(previous) = inner.transport.replace(transport) {
+            previous.stop();
+        }
+        business.clear();
+        Ok(())
+    }
+
     pub(crate) fn stop(&self) {
         let mut inner = self.inner.lock();
         clear_live_context(&mut inner);
@@ -306,12 +323,25 @@ impl ControllingDeviceManager {
         operation: ControllerOperation,
         lease: ControllerLease,
     ) -> Result<ControllingStatus> {
+        self.complete_connected_with_install(operation, lease, || Ok(()))
+    }
+
+    pub(crate) fn complete_connected_with_install(
+        &self,
+        operation: ControllerOperation,
+        lease: ControllerLease,
+        install: impl FnOnce() -> Result<()>,
+    ) -> Result<ControllingStatus> {
         let device_name = normalize_device_name(&lease.device_display_name)?;
+        validate_liveness_epoch(&lease.liveness_epoch_a)
+            .and_then(|_| validate_liveness_epoch(&lease.liveness_epoch_b))
+            .map_err(|_| ControllingStateError::new("controller_liveness_epoch_invalid"))?;
         let mut inner = self.inner.lock();
         ensure_operation(&inner, &operation)?;
         if inner.phase != ControllingStatusKind::SafetyHandshake {
             return Err(ControllingStateError::new("controller_phase_invalid"));
         }
+        install()?;
         let gate = ControllerResumeGate::new(
             ControllerRole::ControllerA,
             lease.context.clone(),
@@ -351,12 +381,38 @@ impl ControllingDeviceManager {
         status_locked(&inner)
     }
 
+    pub(crate) fn mark_owned_transport_disconnected(
+        &self,
+        operation: &ControllerOperation,
+        now_a: u64,
+        evidence_deadline_a: Option<u64>,
+        business: &super::encrypted_lane::ControllingLaneState,
+    ) -> Result<ControllingStatus> {
+        let mut inner = self.inner.lock();
+        ensure_operation(&inner, operation)?;
+        business.suspend();
+        if inner.phase == ControllingStatusKind::Connected {
+            if inner
+                .resume_gate
+                .as_mut()
+                .is_some_and(|gate| gate.disconnect(now_a, evidence_deadline_a).is_ok())
+            {
+                inner.phase = ControllingStatusKind::Reconnecting;
+            } else {
+                clear_live_context(&mut inner);
+                inner.phase = ControllingStatusKind::Error;
+                inner.error_code = Some("endpoint_offline");
+            }
+        }
+        Ok(status_locked(&inner))
+    }
+
     pub(crate) fn complete_resumed(
         &self,
         operation: ControllerOperation,
         activation_id: &str,
         now_b: u64,
-        liveness_epoch_a: impl Into<String>,
+        liveness_epochs: (&str, &str),
         resume_token: [u8; 32],
         transport_key_fingerprint: [u8; 32],
         new_deadline_b: u64,
@@ -371,9 +427,12 @@ impl ControllingDeviceManager {
         };
         // 先让旧 gate 用完整的 `controller_resumed`（同一 activation + 轮换后的
         // 令牌/指纹）消费旧材料；任何不符都终止候选。
-        let liveness_epoch_a = liveness_epoch_a.into();
+        let liveness_epoch_a = liveness_epochs.0.to_owned();
+        let liveness_epoch_b = liveness_epochs.1.to_owned();
         let accepted = new_deadline_b > 0
             && validate_liveness_epoch(&liveness_epoch_a).is_ok()
+            && validate_liveness_epoch(&liveness_epoch_b).is_ok()
+            && liveness_epoch_b != lease.liveness_epoch_b
             && match inner.resume_gate.as_mut() {
                 Some(gate) => gate
                     .accept_resumed(
@@ -427,6 +486,7 @@ impl ControllingDeviceManager {
         ));
         if let Some(lease) = inner.lease.as_mut() {
             lease.liveness_epoch_a = liveness_epoch_a;
+            lease.liveness_epoch_b = liveness_epoch_b;
             lease.resume_deadline_b = new_deadline_b;
         }
         inner.phase = ControllingStatusKind::Connected;
@@ -520,6 +580,51 @@ impl ControllingDeviceManager {
             })
     }
 
+    /// A keeper belongs to one connection intent. Closure must not re-enter owner.
+    pub(crate) fn with_lane_owner<T>(
+        &self,
+        operation: &ControllerOperation,
+        action: impl FnOnce() -> T,
+    ) -> Result<T> {
+        let inner = self.inner.lock();
+        ensure_operation(&inner, operation)?;
+        Ok(action())
+    }
+
+    pub(crate) fn transport_for_operation(
+        &self,
+        operation: &ControllerOperation,
+    ) -> Result<Option<ControllerTransportSender>> {
+        let inner = self.inner.lock();
+        ensure_operation(&inner, operation)?;
+        Ok(inner.transport.clone())
+    }
+
+    pub(crate) fn with_peer_liveness_context<T>(
+        &self,
+        operation: &ControllerOperation,
+        action: impl FnOnce(&RuntimeValidationContext, &str, &str) -> T,
+    ) -> Result<T> {
+        let inner = self.inner.lock();
+        ensure_operation(&inner, operation)?;
+        if inner.phase != ControllingStatusKind::Connected {
+            return Err(ControllingStateError::new("lease_unavailable"));
+        }
+        let lease = inner
+            .lease
+            .as_ref()
+            .ok_or_else(|| ControllingStateError::new("lease_unavailable"))?;
+        let runtime = RuntimeValidationContext {
+            lease: Some(lease.context.clone()),
+            negotiated_capabilities: lease.negotiated_capabilities.clone(),
+        };
+        Ok(action(
+            &runtime,
+            &lease.liveness_epoch_b,
+            &lease.liveness_epoch_a,
+        ))
+    }
+
     /// E2E-06：发送恢复族的敏感控制帧（prepare/confirm/ready_ack）。
     pub(crate) fn send_resume_control(
         &self,
@@ -603,7 +708,31 @@ impl ControllingDeviceManager {
         expected: &(LeaseContext, String, String),
         commit: impl FnOnce() -> std::result::Result<T, String>,
     ) -> std::result::Result<T, String> {
+        self.with_authenticated_identity_owner(None, lane, expected, commit)
+    }
+
+    pub(crate) fn with_owned_authenticated_remote_proxy_identity<T>(
+        &self,
+        operation: &ControllerOperation,
+        lane: &super::encrypted_lane::ControllingLaneState,
+        expected: &(LeaseContext, String, String),
+        commit: impl FnOnce() -> std::result::Result<T, String>,
+    ) -> std::result::Result<T, String> {
+        self.with_authenticated_identity_owner(Some(operation), lane, expected, commit)
+    }
+
+    fn with_authenticated_identity_owner<T>(
+        &self,
+        operation: Option<&ControllerOperation>,
+        lane: &super::encrypted_lane::ControllingLaneState,
+        expected: &(LeaseContext, String, String),
+        commit: impl FnOnce() -> std::result::Result<T, String>,
+    ) -> std::result::Result<T, String> {
         let inner = self.inner.lock();
+        if let Some(operation) = operation {
+            ensure_operation(&inner, operation)
+                .map_err(|_| "remote_proxy_channel_changed".to_owned())?;
+        }
         let lease = inner
             .lease
             .as_ref()
@@ -707,6 +836,25 @@ impl ControllingDeviceManager {
             .lease
             .as_ref()
             .map(|lease| lease.liveness_epoch_a.clone())
+    }
+
+    /// One owner-lock snapshot binds the peer epoch to its runtime lease.
+    pub(crate) fn peer_liveness_context(&self) -> Result<(RuntimeValidationContext, String)> {
+        let inner = self.inner.lock();
+        if inner.phase != ControllingStatusKind::Connected {
+            return Err(ControllingStateError::new("lease_unavailable"));
+        }
+        let lease = inner
+            .lease
+            .as_ref()
+            .ok_or_else(|| ControllingStateError::new("lease_unavailable"))?;
+        Ok((
+            RuntimeValidationContext {
+                lease: Some(lease.context.clone()),
+                negotiated_capabilities: lease.negotiated_capabilities.clone(),
+            },
+            lease.liveness_epoch_b.clone(),
+        ))
     }
 
     /// E2E-06：尽力发送显式断开帧（失败不影响本地断开，本地状态始终权威）。
@@ -1077,6 +1225,7 @@ mod tests {
             reservation_id: "reservation-0001".into(),
             device_display_name: " Studio PC ".into(),
             liveness_epoch_a: "live-a-1".into(),
+            liveness_epoch_b: "live-b-1".into(),
             resume_deadline_b: 30_000,
             resume_token: [1; 32],
             transport_key_fingerprint: [2; 32],
@@ -1101,6 +1250,151 @@ mod tests {
                 "{code}"
             );
         }
+    }
+
+    #[test]
+    fn final_projection_owner_rejects_old_intent_even_with_identical_identity_and_active_lane() {
+        use crate::features::remote_control::controller::test_support::{
+            lease_context, paired_session_keys, pairing_fixture,
+        };
+        let fixture = pairing_fixture("relay-owned-projection-test");
+        let context = lease_context(&fixture.reservation);
+        let (keys, _) = paired_session_keys(fixture.a_keys, fixture.b_keys, &fixture.reservation);
+        let manager = ControllingDeviceManager::default();
+        let connect = || {
+            let operation = manager.connect("2345678").unwrap();
+            manager.complete_reserved(operation.clone()).unwrap();
+            manager
+                .complete_connected(
+                    operation.clone(),
+                    ControllerLease {
+                        context: context.clone(),
+                        ..lease()
+                    },
+                )
+                .unwrap();
+            operation
+        };
+        let old = connect();
+        let identity = manager.authenticated_remote_proxy_identity().unwrap();
+        let lane = super::super::encrypted_lane::ControllingLaneState::default();
+        lane.install(super::super::crypto::ControllerRole::A, &context, keys)
+            .unwrap();
+        manager.disconnect();
+        let current = connect();
+        assert_eq!(
+            manager.authenticated_remote_proxy_identity().unwrap(),
+            identity
+        );
+        let writes = std::cell::Cell::new(0);
+        for side_effect in [
+            "journal",
+            "snapshot",
+            "action_settle",
+            "capability_publish",
+            "mapping",
+        ] {
+            assert!(
+                manager
+                    .with_owned_authenticated_remote_proxy_identity(&old, &lane, &identity, || {
+                        writes.set(writes.get() + 1);
+                        Ok(())
+                    })
+                    .is_err(),
+                "{side_effect}"
+            );
+        }
+        assert_eq!(writes.get(), 0);
+        manager
+            .with_owned_authenticated_remote_proxy_identity(&current, &lane, &identity, || {
+                writes.set(writes.get() + 1);
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(writes.get(), 1, "current owner must still be usable");
+        // Every production sink uses the same final owned commit boundary.
+        let source = include_str!("../../../app/commands/desktop_remote_journal.rs");
+        for entry in [
+            "fn project_frame(",
+            "fn publish_action_result(",
+            "fn publish_capability(",
+            "fn confirm_mapping(",
+        ] {
+            let part = &source[source.find(entry).unwrap()..];
+            let end = part[4..]
+                .find("\n    fn ")
+                .map(|n| n + 4)
+                .unwrap_or(part.len());
+            assert!(
+                part[..end].contains("with_owned_authenticated_remote_proxy_identity"),
+                "{entry}"
+            );
+        }
+    }
+
+    #[test]
+    fn old_keeper_snapshot_cannot_commit_or_clear_after_owner_replacement() {
+        let manager = ControllingDeviceManager::default();
+        let old = manager.connect("2345678").unwrap();
+        manager.complete_reserved(old.clone()).unwrap();
+        manager.complete_connected(old.clone(), lease()).unwrap();
+        let (runtime, epoch_b) = manager
+            .with_peer_liveness_context(&old, |runtime, b, _| (runtime.clone(), b.to_owned()))
+            .unwrap();
+        assert_eq!(epoch_b, "live-b-1");
+        // Pause immediately after the snapshot, then replace the owner. Even
+        // identical test lease bytes cannot make an old intent current again.
+        manager.disconnect();
+        let current = manager.connect("3456789").unwrap();
+        manager.complete_reserved(current.clone()).unwrap();
+        manager
+            .complete_connected(current.clone(), lease())
+            .unwrap();
+        let calls = std::cell::Cell::new(0);
+        assert!(
+            manager
+                .with_peer_liveness_context(&old, |_, _, _| {
+                    calls.set(1);
+                    runtime
+                })
+                .is_err()
+        );
+        assert!(manager.with_lane_owner(&old, || calls.set(2)).is_err());
+        assert!(
+            manager
+                .complete_connected_with_install(old.clone(), lease(), || {
+                    calls.set(3);
+                    Ok(())
+                })
+                .is_err()
+        );
+        assert!(
+            manager
+                .with_lane_owner(&old, || {
+                    /* status + telemetry final boundary */
+                    calls.set(4);
+                })
+                .is_err()
+        );
+        assert!(manager.transport_for_operation(&old).is_err());
+        assert!(
+            manager
+                .fail_connection(old.clone(), "endpoint_offline")
+                .is_err()
+        );
+        assert!(
+            manager
+                .mark_owned_transport_disconnected(
+                    &old,
+                    31_000,
+                    None,
+                    &super::super::encrypted_lane::ControllingLaneState::default()
+                )
+                .is_err()
+        );
+        assert_eq!(calls.get(), 0);
+        assert_eq!(manager.current_operation(), Some(current));
+        assert_eq!(manager.status().kind(), ControllingStatusKind::Connected);
     }
 
     #[test]
@@ -1284,7 +1578,13 @@ mod tests {
         }
         let resumed = manager
             .complete_resumed(
-                operation, activation, 7_000, "live:a-2", [3; 32], [4; 32], 30_000,
+                operation,
+                activation,
+                7_000,
+                ("live:a-2", "live-b-2"),
+                [3; 32],
+                [4; 32],
+                30_000,
             )
             .unwrap();
         assert_eq!(resumed.status, ControllingStatusKind::Connected);
@@ -1350,7 +1650,13 @@ mod tests {
             assert_eq!(
                 manager
                     .complete_resumed(
-                        operation, activation, 12_000, epoch, [3; 32], [4; 32], deadline
+                        operation,
+                        activation,
+                        12_000,
+                        (epoch, "live-b-2"),
+                        [3; 32],
+                        [4; 32],
+                        deadline
                     )
                     .unwrap_err()
                     .code,
