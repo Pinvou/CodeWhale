@@ -2,7 +2,7 @@
 
 use std::collections::HashSet;
 use std::fs;
-use std::io::ErrorKind;
+use std::io::{ErrorKind, Read};
 use std::path::{Path, PathBuf};
 
 use super::RemoteProxyState;
@@ -13,9 +13,33 @@ use super::schema::{
 use anyhow::{Context, Result, bail};
 
 impl RemoteProxyState {
+    /// Remote cache failure must not prevent local SessionStore startup. The
+    /// strict loader remains the schema authority; a failure grants no remote
+    /// identity and cannot be healed by overwriting the failed file.
+    pub(crate) fn load_for_startup(path: PathBuf, sessions_dir: &Path) -> Self {
+        match Self::load(path.clone(), sessions_dir) {
+            Ok(state) => state,
+            Err(_) => {
+                eprintln!("[sessions] RemoteProxy cache unavailable; remote writes disabled");
+                Self {
+                    path,
+                    load_failed: true,
+                    ..Self::default()
+                }
+            }
+        }
+    }
+
+    pub(super) fn require_available(&self) -> Result<()> {
+        if self.load_failed {
+            bail!("RemoteProxy cache is unavailable; original file preserved");
+        }
+        Ok(())
+    }
+
     pub(crate) fn load(path: PathBuf, sessions_dir: &Path) -> Result<Self> {
-        let bytes = match fs::read(&path) {
-            Ok(bytes) => bytes,
+        let file = match fs::File::open(&path) {
+            Ok(file) => file,
             Err(error) if error.kind() == ErrorKind::NotFound => {
                 return Ok(Self {
                     path,
@@ -24,6 +48,10 @@ impl RemoteProxyState {
             }
             Err(error) => return Err(error).with_context(|| format!("read {}", path.display())),
         };
+        let mut bytes = Vec::new();
+        file.take(MAX_REMOTE_PROXY_FILE_BYTES as u64 + 1)
+            .read_to_end(&mut bytes)
+            .with_context(|| format!("read {}", path.display()))?;
         if bytes.len() > MAX_REMOTE_PROXY_FILE_BYTES {
             bail!("RemoteProxy file exceeds byte budget");
         }
@@ -66,6 +94,7 @@ impl RemoteProxyState {
     }
 
     pub(super) fn persist(&self) -> Result<()> {
+        self.require_available()?;
         if self.records.len() > MAX_REMOTE_PROXY_RECORDS {
             bail!("RemoteProxy record capacity exceeded");
         }

@@ -424,6 +424,24 @@ test('commit is handle-only; cancel and abandon use explicit local SessionStore 
   assert.equal(calls.length, 4);
 });
 
+test('B permission reads use the local readonly command, never A remote authority', async () => {
+  const view = [{ permissionRequestId: 'approval-b', taskId: 'task-b',
+    operationType: 'file_write', targetScope: '[PATH]', preview: '[REDACTED]', state: 'pending' }];
+  const { feature, calls, state } = installFeature((command) => (
+    command === 'desktop_remote_permission_list_b' ? Promise.resolve(view) : undefined
+  ));
+  const before = JSON.stringify(state.desktopRemoteControl.remotePermissions);
+  assert.deepEqual(await feature.controlledPermissionList('task-b'), view);
+  assert.deepEqual(JSON.parse(JSON.stringify(calls.at(-1))), {
+    command: 'desktop_remote_permission_list_b', args: { taskId: 'task-b' },
+  });
+  assert.equal(JSON.stringify(state.desktopRemoteControl.remotePermissions), before);
+  const callCount = calls.length;
+  await assert.rejects(feature.controlledPermissionList(''), { code: 'remote_task_intent_invalid' });
+  assert.equal(calls.length, callCount);
+  assert.equal(calls.some(call => call.command === 'desktop_remote_action_a'), false);
+});
+
 test('remote attachment, permission and artifact facades use only desktop_remote_action_a', async () => {
   const { feature, calls } = installFeature((command, args) => {
     if (command !== 'desktop_remote_action_a') return undefined;

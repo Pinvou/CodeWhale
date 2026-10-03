@@ -9,6 +9,7 @@ import {
   newRemoteTaskIntent,
   remoteProxyHandshakeBinding,
   remoteProxyLeaseIdentity,
+  remoteProxyComposerIdentity,
   remoteProxyModelSelectionIdentity,
   remoteProxyPresentationState,
   remoteProxyChatItems,
@@ -405,19 +406,25 @@ test('model selection survives capability renewal but resets to the configured d
   }
 });
 
-test('late send failure cannot restore text or error across session, lease or capability revision', () => {
+test('draft ownership survives capability renewal but exact operation ownership does not', () => {
   const connection = {
     sessionRef: 'ref-1', connectionId: 'connection-1', controllerLeaseId: 'lease-1',
     leaseEpoch: '2', relayEpoch: 'relay-1', generation: 'generation-1', capabilityRevision: 3,
   };
-  const sent = remoteProxyLeaseIdentity('remote-local-1', connection);
+  const sent = remoteProxyComposerIdentity('remote-local-1', connection);
   assert.equal(sameRemoteComposerOwner('remote-local-1', sent, 'remote-local-1', sent), true);
   assert.equal(sameRemoteComposerOwner('remote-local-1', sent, 'remote-local-2', sent), false);
   for (const changed of [
     { controllerLeaseId: 'lease-2' }, { relayEpoch: 'relay-2' },
-    { generation: 'generation-2' }, { capabilityRevision: 4 },
+    { generation: 'generation-2' }, { sessionRef: 'ref-2' },
+    { connectionId: 'connection-2' }, { leaseEpoch: '3' },
   ]) {
-    const current = remoteProxyLeaseIdentity('remote-local-1', { ...connection, ...changed });
+    const current = remoteProxyComposerIdentity('remote-local-1', { ...connection, ...changed });
     assert.equal(sameRemoteComposerOwner('remote-local-1', sent, 'remote-local-1', current), false);
   }
+  const renewed = { ...connection, capabilityRevision: 4 };
+  assert.equal(sameRemoteComposerOwner('remote-local-1', sent, 'remote-local-1',
+    remoteProxyComposerIdentity('remote-local-1', renewed)), true);
+  assert.notEqual(remoteProxyLeaseIdentity('remote-local-1', connection),
+    remoteProxyLeaseIdentity('remote-local-1', renewed));
 });
