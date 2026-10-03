@@ -1155,19 +1155,8 @@ fn admit_and_dispatch(
                     .ok_or("task_attachments_invalid")?;
                 // A handle is only a reference. Consume completed B receipts
                 // once, under the current B lease gate, after admission.
-                let attachments = if let Some(attachments) = local_attachments {
-                    let exact = attachment_ids.len() == attachments.len()
-                        && attachment_ids
-                            .iter()
-                            .zip(&attachments)
-                            .all(|(id, attachment)| id == &attachment.handle_id);
-                    if !exact {
-                        return Err("task_attachments_invalid");
-                    }
-                    attachments
-                } else if attachment_ids.is_empty() {
-                    Vec::new()
-                } else {
+                let attachments = crate::features::sessions::application::submit_controlled::resolve_controlled_attachments(
+                    &attachment_ids, local_attachments, || {
                     let controlled = app.state::<ControlledDeviceManager>();
                     let uploads = app.state::<
                         Arc<super::desktop_remote_attachment::DesktopRemoteAttachmentRuntime>,
@@ -1184,9 +1173,13 @@ fn admit_and_dispatch(
                                 &task_id,
                             )
                         })
-                        .map_err(|_| "task_generation_stale")?
-                        .map_err(|_| "task_attachments_invalid")?
-                };
+                        .map_err(|_| "task_generation_stale".to_owned())?
+                        .map_err(|_| "task_attachments_invalid".to_owned())
+                    },
+                ).map_err(|code| {
+                    if code == "task_generation_stale" { "task_generation_stale" }
+                    else { "task_attachments_invalid" }
+                })?;
                 let projected_model_source = RemoteTaskModelSource::from_record(&ticket.record)
                     .ok_or("task_model_source_invalid")?;
                 if model_source == TASK_MODEL_SOURCE_TEMPORARY {
@@ -1525,15 +1518,16 @@ impl RemoteTaskDispatchPort for DesktopRemoteTaskDispatchPort {
         let (lease, _, _) = manager
             .authenticated_remote_proxy_identity()
             .map_err(|_| dispatch_error("remote_binding_mismatch"))?;
-        let session_id = with_current_dispatch_binding(&self.app, live, || {
-            store
-                .require_attempted_remote_task(local_session_id, remote_ref, live, task_id)
-                .map_err(|_| "remote_task_not_cancellable".to_owned())?;
-            let session = sessions
-                .state(remote_ref, &lease)
-                .map_err(|_| "remote_binding_mismatch".to_owned())?;
-            Ok(session.session_id)
-        })?;
+        let session_id = sessions
+            .with_state_for_lease(remote_ref, &lease, |session| {
+                with_current_dispatch_binding(&self.app, live, || {
+                    store
+                        .require_attempted_remote_task(local_session_id, remote_ref, live, task_id)
+                        .map_err(|_| "remote_task_not_cancellable".to_owned())?;
+                    Ok(session.session_id.clone())
+                })
+            })
+            .map_err(|_| dispatch_error("remote_binding_mismatch"))??;
         let request_id = format!("request-{}", Uuid::new_v4().simple());
         let payload = build_bound_task_cancel_payload(&lease, &session_id, &request_id, task_id)
             .map_err(|_| dispatch_error("remote_request_invalid"))?;
