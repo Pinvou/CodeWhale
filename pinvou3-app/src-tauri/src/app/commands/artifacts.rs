@@ -704,6 +704,9 @@ const EXTERNAL_URL_ALLOWLIST: &[&str] = &[
     "https://open.zhihuiya.com/",
     // MegaCube 官网(侧边栏 footer 入口跳转)
     "https://www.h3c.com/",
+    // H3C SSO 登录页:`eip auth login` / `zhidao login` 返回的 SSO 地址都在这里,
+    // 连接 EIP(员工门户)/知道时"在浏览器打开"按钮走这里
+    "https://sso.h3c.com/",
     // 飞书/Lark OAuth(device flow 授权页 + 账号页);连接飞书走这里开浏览器
     "https://open.feishu.cn/",
     "https://accounts.feishu.cn/",
@@ -714,6 +717,8 @@ const EXTERNAL_URL_ALLOWLIST: &[&str] = &[
     "https://meeting.tencent.com/",
     // WeCom scan-to-authorize page (the gen landing page printed by `wecom-cli auth init`); connecting WeCom opens the browser here
     "https://work.weixin.qq.com/",
+    // WeCom 官方开发者文档站:企微群机器人 Key 弹窗的"查看官方群机器人文档"走这里
+    "https://developer.work.weixin.qq.com/",
     // DingTalk device authorization login page (the user_code login page printed by `dws auth login --device`); connecting DingTalk opens the browser here
     "https://login.dingtalk.com/",
     // Obsidian 官网:知识库连接器探测到未安装时,引导用户下载

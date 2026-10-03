@@ -178,6 +178,16 @@ pub async fn accept_plan(
     // is_user_turn_prompt 计数口径一致），切 YOLO 执行恰是最高风险的一轮——
     // 缺快照会让其编辑只能连同前一轮一起回退（评审 M6）。失败/超预算如实记
     // 日志不阻断 turn（设计 §5 降级语义）；发送失败按 id 作废「未成活」快照。
+    // Computed BEFORE the snapshot so the checkpoint label quotes this turn's
+    // actual display content; the literal below is only the no-display-message
+    // fallback. That fallback is fixed zh persisted as ledger fidelity data
+    // (historical fidelity with the pre-cleanup surface) and printed verbatim
+    // by the CLI — localizing it is a consumer-side decision, not a label-side
+    // one (PR #602).
+    let display_content = display_message
+        .map(|message| message.trim().to_string())
+        .filter(|message| !message.is_empty())
+        .unwrap_or_else(|| "✅ 就这么干".to_string());
     let mut created_snapshot_id: Option<String> = None;
     let mut checkpoint_ledger_root = None;
     if store.is_code_session(&session_id) {
@@ -189,7 +199,7 @@ pub async fn accept_plan(
         let sid_count = session_id.clone();
         let checkpoint_ledger = roots.ledger.clone();
         let checkpoint_execution = roots.execution.clone();
-        let label = "✅ 就这么干".to_string();
+        let label = display_content.clone();
         let snapshot = tauri::async_runtime::spawn_blocking(move || {
             if !crate::features::code_checkpoints::execution_root_within_snapshot_budget(
                 &checkpoint_execution,
@@ -279,10 +289,6 @@ pub async fn accept_plan(
         accept_plan_instruction(&plan_markdown),
         super::multiagent::MatchSource(&plan_markdown),
     );
-    let display_content = display_message
-        .map(|message| message.trim().to_string())
-        .filter(|message| !message.is_empty())
-        .unwrap_or_else(|| "✅ 就这么干".to_string());
     crate::features::assistant::timing::start_turn(&session_id);
     if let Err(error) = pool
         .send_reserved_user_message(

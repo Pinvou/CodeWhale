@@ -473,7 +473,11 @@ impl SessionStore {
         }
         let mut state = self.remote_proxies.lock();
         require_live_locked(&state, id, remote_ref, context)?;
-        let mut record = state.records.get(id).expect("checked RemoteProxy").clone();
+        let mut record = state
+            .records
+            .get(id)
+            .ok_or_else(|| anyhow::anyhow!("unknown RemoteProxy"))?
+            .clone();
         if let Some(existing) = record.pending.iter().find(|item| {
             item.client_request_id == pending.client_request_id || item.task_id == pending.task_id
         }) {
@@ -521,7 +525,11 @@ impl SessionStore {
         }
         let mut state = self.remote_proxies.lock();
         require_live_locked(&state, id, remote_ref, context)?;
-        let mut record = state.records.get(id).expect("checked RemoteProxy").clone();
+        let mut record = state
+            .records
+            .get(id)
+            .ok_or_else(|| anyhow::anyhow!("unknown RemoteProxy"))?
+            .clone();
         let pending = record
             .pending
             .iter_mut()
@@ -556,7 +564,11 @@ impl SessionStore {
     ) -> Result<()> {
         let mut state = self.remote_proxies.lock();
         require_live_locked(&state, id, remote_ref, context)?;
-        let mut record = state.records.get(id).expect("checked RemoteProxy").clone();
+        let mut record = state
+            .records
+            .get(id)
+            .ok_or_else(|| anyhow::anyhow!("unknown RemoteProxy"))?
+            .clone();
         let pending = record
             .pending
             .iter_mut()
@@ -583,7 +595,10 @@ impl SessionStore {
     ) -> Result<()> {
         let state = self.remote_proxies.lock();
         require_live_locked(&state, id, remote_ref, context)?;
-        let record = state.records.get(id).expect("checked RemoteProxy");
+        let record = state
+            .records
+            .get(id)
+            .ok_or_else(|| anyhow::anyhow!("unknown RemoteProxy"))?;
         if !record.pending.iter().any(|pending| {
             pending.task_id == task_id
                 && pending.dispatch_state == PendingDispatchState::AttemptMayHaveOccurred
