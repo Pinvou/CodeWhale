@@ -2372,7 +2372,7 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
         const requestKey = [
           remoteConnection?.connectionId,
           remoteConnection?.leaseEpoch,
-          remoteConnection?.remoteControlGeneration,
+          remoteConnection?.generation,
           sessionRef,
         ].map((part) => String(part || '')).join(':');
         requester.update({
@@ -2391,7 +2391,7 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
         remoteConnection?.capabilityStatus,
         remoteConnection?.connectionId,
         remoteConnection?.leaseEpoch,
-        remoteConnection?.remoteControlGeneration,
+        remoteConnection?.generation,
         remoteConnection?.sessionRef,
         remoteConnection?.status,
       ]);
