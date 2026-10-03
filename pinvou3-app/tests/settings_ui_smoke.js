@@ -250,7 +250,7 @@ function injectSource() {
       switch (cmd) {
         case 'get_platform_capabilities': return Promise.resolve({
           os: 'windows',
-          desktopRemoteControl: true,
+          desktopRemoteControlSupported: true,
           showMegacubeSite: false,
           showSuperPermissionSettings: false,
           usesBundledDependencyInstaller: true,

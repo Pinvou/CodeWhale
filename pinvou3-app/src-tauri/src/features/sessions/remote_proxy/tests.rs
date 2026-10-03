@@ -27,6 +27,91 @@ fn make_store(root: &std::path::Path) -> SessionStore {
     SessionStore::boot_at_test_dir(root).expect("test SessionStore")
 }
 
+fn assert_invalid_cache_is_isolated(root: &std::path::Path) {
+    let sessions_dir = root.join("sessions");
+    let path = sessions_dir.join("_remote_proxies.json");
+    let bytes = std::fs::read(&path).unwrap();
+    assert!(super::RemoteProxyState::load(path.clone(), &sessions_dir).is_err());
+    // Repeating the app's boot fallback must not repeat the remote failure.
+    for _ in 0..2 {
+        let store = make_store(root);
+        let local = store
+            .create_new("/model".into(), None, root.to_path_buf())
+            .unwrap();
+        assert!(store.load(&local.metadata.id).is_ok());
+        assert_eq!(
+            store.session_kind(&local.metadata.id).unwrap(),
+            SessionKind::Chat
+        );
+        assert!(
+            store
+                .list()
+                .unwrap()
+                .iter()
+                .any(|item| item.id == local.metadata.id)
+        );
+        assert!(store.prepare_remote_proxy_open(None, &context()).is_err());
+        assert!(store.remote_proxies.lock().persist().is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    }
+}
+
+#[test]
+fn malformed_and_oversized_remote_cache_do_not_block_local_startup() {
+    for bytes in [
+        b"{broken".to_vec(),
+        vec![b' '; super::schema::MAX_REMOTE_PROXY_FILE_BYTES + 1],
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let store = make_store(temp.path());
+        drop(store);
+        std::fs::write(temp.path().join("sessions/_remote_proxies.json"), bytes).unwrap();
+        assert_invalid_cache_is_isolated(temp.path());
+    }
+}
+
+#[test]
+fn remote_cache_local_id_collision_does_not_block_local_startup() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = make_store(temp.path());
+    let opened = store
+        .test_commit_remote_proxy_open(None, &context())
+        .unwrap();
+    drop(store);
+    let local = deepseek_tui::session_manager::create_saved_session_with_id_and_mode(
+        opened.local_session_id.clone(),
+        &[],
+        "/model",
+        temp.path(),
+        0,
+        None,
+        None,
+    );
+    let local_path = temp
+        .path()
+        .join(format!("sessions/{}.json", opened.local_session_id));
+    let local_bytes = serde_json::to_vec(&local).unwrap();
+    std::fs::write(&local_path, &local_bytes).unwrap();
+    assert_invalid_cache_is_isolated(temp.path());
+    let restarted = make_store(temp.path());
+    assert_eq!(
+        restarted
+            .load(&opened.local_session_id)
+            .unwrap()
+            .metadata
+            .id,
+        opened.local_session_id
+    );
+    assert!(
+        restarted
+            .list()
+            .unwrap()
+            .iter()
+            .any(|item| item.id == opened.local_session_id)
+    );
+    assert_eq!(std::fs::read(local_path).unwrap(), local_bytes);
+}
+
 fn projection_entry(sequence: u64, body: &str) -> ProjectionEntry {
     ProjectionEntry {
         journal_epoch: "journal-1".into(),
@@ -418,7 +503,7 @@ fn unsupported_schema_versions_fail_without_rewriting_disk() {
         unsupported["schema_version"] = version.into();
         let bytes = serde_json::to_vec(&unsupported).unwrap();
         std::fs::write(&path, &bytes).unwrap();
-        assert!(SessionStore::boot_at_test_dir(temp.path()).is_err());
+        assert_invalid_cache_is_isolated(temp.path());
         assert_eq!(std::fs::read(&path).unwrap(), bytes);
     }
 }
@@ -686,7 +771,7 @@ fn v3_cannot_masquerade_as_legacy_by_erasing_security_fields() {
                 .remove(field);
         }
         std::fs::write(&path, serde_json::to_vec(&tampered).unwrap()).unwrap();
-        assert!(SessionStore::boot_at_test_dir(temp.path()).is_err());
+        assert_invalid_cache_is_isolated(temp.path());
     }
     for tamper in [
         "retired-type",
@@ -704,7 +789,7 @@ fn v3_cannot_masquerade_as_legacy_by_erasing_security_fields() {
             _ => tampered["records"][0]["schema_version"] = 1.into(),
         }
         std::fs::write(&path, serde_json::to_vec(&tampered).unwrap()).unwrap();
-        assert!(SessionStore::boot_at_test_dir(temp.path()).is_err());
+        assert_invalid_cache_is_isolated(temp.path());
     }
     std::fs::write(&path, serde_json::to_vec(&pristine).unwrap()).unwrap();
     assert!(SessionStore::boot_at_test_dir(temp.path()).is_ok());
@@ -887,7 +972,7 @@ fn v3_rejects_incomplete_or_conflicting_outbox_contract_without_disk_rewrite() {
     for case in cases {
         let bytes = serde_json::to_vec(&case).unwrap();
         std::fs::write(&path, &bytes).unwrap();
-        assert!(SessionStore::boot_at_test_dir(temp.path()).is_err());
+        assert_invalid_cache_is_isolated(temp.path());
         assert_eq!(std::fs::read(&path).unwrap(), bytes);
     }
 }

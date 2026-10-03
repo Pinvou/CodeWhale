@@ -542,6 +542,13 @@ pub(crate) enum AdmissionOutcome {
     Replay(RemoteTaskRecord),
 }
 
+/// Callback-free durable decision, finalized after the lifecycle lock is
+/// released. Installation failures are already terminal in the ledger.
+pub(crate) enum PreparedTaskAdmission {
+    Accepted(AdmissionOutcome),
+    InstallationFailed(RemoteTaskRecord, &'static str),
+}
+
 #[derive(Debug)]
 pub(crate) enum CancelOutcome {
     /// Dispatch had not been committed, so the operation is rejected outright.
@@ -848,9 +855,35 @@ impl RemoteTaskLedger {
         Ok(updated)
     }
 
+    #[cfg(test)]
     pub(crate) fn request_cancel(&self, task_id: &str, now_b: u64) -> Result<CancelOutcome> {
+        self.request_cancel_matching(task_id, now_b, None)
+    }
+
+    pub(crate) fn request_cancel_bound(
+        &self,
+        lease: &LeaseContext,
+        session_id: &str,
+        task_id: &str,
+        now_b: u64,
+    ) -> Result<CancelOutcome> {
+        self.request_cancel_matching(task_id, now_b, Some((lease, session_id)))
+    }
+
+    fn request_cancel_matching(
+        &self,
+        task_id: &str,
+        now_b: u64,
+        binding: Option<(&LeaseContext, &str)>,
+    ) -> Result<CancelOutcome> {
         let mut inner = self.inner.lock();
         let previous = self.record_locked(&inner, task_id)?;
+        if binding.is_some_and(|(lease, session_id)| {
+            previous.lease != TaskLeaseBinding::from_context(lease)
+                || previous.session_id != session_id
+        }) {
+            return Err(error("task_binding_stale"));
+        }
         if previous.is_terminal() {
             return Ok(CancelOutcome::AlreadyTerminal(previous));
         }
@@ -1282,6 +1315,17 @@ pub(crate) trait RemoteSessionProvisioner: Send + Sync {
 
     fn session_exists(&self, session_id: &str) -> std::result::Result<bool, String>;
 
+    /// Resolve B-owned workspace authority before taking the session lock.
+    /// Implementations may consult the controlled-device owner here, but must
+    /// never re-enter that owner from `claim_execution_lane` below.
+    #[cfg(not(test))]
+    fn resolve_code_workspace(&self, workspace_id: &str) -> std::result::Result<PathBuf, String>;
+
+    #[cfg(test)]
+    fn resolve_code_workspace(&self, workspace_id: &str) -> std::result::Result<PathBuf, String> {
+        Ok(PathBuf::from(workspace_id))
+    }
+
     /// Bind an already-created authoritative Session to the execution backend
     /// selected by the first authenticated task. For code this resolves the
     /// opaque workspace capability entirely on B and persists the ACP owner
@@ -1291,7 +1335,7 @@ pub(crate) trait RemoteSessionProvisioner: Send + Sync {
         &self,
         session_id: &str,
         code_mode: bool,
-        workspace_id: Option<&str>,
+        workspace: Option<&Path>,
     ) -> std::result::Result<(), String>;
 
     #[cfg(test)]
@@ -1299,7 +1343,7 @@ pub(crate) trait RemoteSessionProvisioner: Send + Sync {
         &self,
         _session_id: &str,
         _code_mode: bool,
-        _workspace_id: Option<&str>,
+        _workspace: Option<&Path>,
     ) -> std::result::Result<(), String> {
         Ok(())
     }
@@ -1708,6 +1752,15 @@ impl RemoteTaskHooks {
 
 /// Single facade used by the Tauri command layer. It is the only place that
 /// turns an admission into a dispatch and that runs the terminal cleanup.
+/// Validated, path-resolved preparation has no Session/ACP side effects.
+/// The app claims it only while holding the exact controlled lease owner.
+pub(crate) struct PreparedTaskSession {
+    request: RemoteTaskRequest,
+    title: String,
+    workspace: Option<PathBuf>,
+    provisioner: Arc<dyn RemoteSessionProvisioner>,
+}
+
 pub(crate) struct RemoteTaskService {
     ledger: Arc<RemoteTaskLedger>,
     sessions: RemoteSessionMap,
@@ -1821,23 +1874,68 @@ impl RemoteTaskService {
     /// shape has been checked may claim an Unknown mapping. The live lease is
     /// rechecked here, before the mapping transition, rather than trusting a
     /// UI-provided code_mode flag or session reference.
+    #[cfg(test)]
     pub(crate) fn ensure_authenticated_task_session(
         &self,
         request: &RemoteTaskRequest,
         live: &LeaseContext,
         title: &str,
     ) -> Result<String> {
+        let prepared = self.prepare_authenticated_task_session(request, live, title)?;
+        self.claim_prepared_task_session(prepared, live)
+    }
+
+    pub(crate) fn prepare_authenticated_task_session(
+        &self,
+        request: &RemoteTaskRequest,
+        live: &LeaseContext,
+        title: &str,
+    ) -> Result<PreparedTaskSession> {
         request.validate()?;
         if request.lease != TaskLeaseBinding::from_context(live) {
             return Err(error("task_lease_mismatch"));
         }
-        self.ensure_remote_session_for_lane_with_workspace(
-            &request.session_id,
-            title,
-            request.mode == TASK_MODE_CODE,
-            request.workspace_id.as_deref(),
+        let provisioner = self
+            .provisioner
+            .lock()
+            .clone()
+            .ok_or_else(|| error("task_session_provisioner_unavailable"))?;
+        let workspace = request
+            .workspace_id
+            .as_deref()
+            .filter(|_| request.mode == TASK_MODE_CODE)
+            .map(|id| {
+                provisioner
+                    .resolve_code_workspace(id)
+                    .map_err(|_| error("task_workspace_not_authorized"))
+            })
+            .transpose()?;
+        Ok(PreparedTaskSession {
+            request: request.clone(),
+            title: title.to_owned(),
+            workspace,
+            provisioner,
+        })
+    }
+
+    /// Caller holds with_current_business_lease through all Session/ACP mutations.
+    /// This consumes resolved paths and never re-enters the controlled owner.
+    pub(crate) fn claim_prepared_task_session(
+        &self,
+        prepared: PreparedTaskSession,
+        live: &LeaseContext,
+    ) -> Result<String> {
+        if prepared.request.lease != TaskLeaseBinding::from_context(live) {
+            return Err(error("task_lease_mismatch"));
+        }
+        self.claim_remote_session_for_lane(
+            &prepared.request.session_id,
+            &prepared.title,
+            prepared.request.mode == TASK_MODE_CODE,
+            prepared.workspace.as_deref(),
             &live.remote_control_generation,
             true,
+            &prepared.provisioner,
         )
     }
 
@@ -1868,6 +1966,43 @@ impl RemoteTaskService {
         generation: &str,
         allow_unknown_claim: bool,
     ) -> Result<String> {
+        let provisioner = self
+            .provisioner
+            .lock()
+            .clone()
+            .ok_or_else(|| error("task_session_provisioner_unavailable"))?;
+        // Lock order is owner -> session -> ledger. Resolve before session,
+        // including for an Unknown mapping claimed by its first code task.
+        let workspace = if let Some(id) = workspace_id.filter(|_| code_mode) {
+            Some(
+                provisioner
+                    .resolve_code_workspace(id)
+                    .map_err(|_| error("task_workspace_not_authorized"))?,
+            )
+        } else {
+            None
+        };
+        self.claim_remote_session_for_lane(
+            remote_ref,
+            title,
+            code_mode,
+            workspace.as_deref(),
+            generation,
+            allow_unknown_claim,
+            &provisioner,
+        )
+    }
+
+    fn claim_remote_session_for_lane(
+        &self,
+        remote_ref: &str,
+        title: &str,
+        code_mode: bool,
+        workspace: Option<&std::path::Path>,
+        generation: &str,
+        allow_unknown_claim: bool,
+        provisioner: &Arc<dyn RemoteSessionProvisioner>,
+    ) -> Result<String> {
         let _guard = self.session_open_lock.lock();
         let requested = RemoteSessionLane::from_code_mode(code_mode);
         if let Some(session_id) = self.sessions.session_for(remote_ref, generation) {
@@ -1876,13 +2011,8 @@ impl RemoteTaskService {
                 .lane_for_session(&session_id, generation)
                 .ok_or_else(|| error("task_session_not_found"))?;
             if current == RemoteSessionLane::Unknown && allow_unknown_claim {
-                let provisioner = self
-                    .provisioner
-                    .lock()
-                    .clone()
-                    .ok_or_else(|| error("task_session_provisioner_unavailable"))?;
                 provisioner
-                    .claim_execution_lane(&session_id, code_mode, workspace_id)
+                    .claim_execution_lane(&session_id, code_mode, workspace)
                     .map_err(|_| error("task_session_backend_bind_failed"))?;
             }
             let claimed = self.sessions.ensure_lane(
@@ -1896,16 +2026,11 @@ impl RemoteTaskService {
             }
             return Ok(session_id);
         }
-        let provisioner = self
-            .provisioner
-            .lock()
-            .clone()
-            .ok_or_else(|| error("task_session_provisioner_unavailable"))?;
         let session_id = provisioner
             .create_authoritative_session(title, code_mode)
             .map_err(|_| error("task_session_create_failed"))?;
         provisioner
-            .claim_execution_lane(&session_id, code_mode, workspace_id)
+            .claim_execution_lane(&session_id, code_mode, workspace)
             .map_err(|_| error("task_session_backend_bind_failed"))?;
         self.sessions
             .bind(remote_ref, &session_id, generation, requested)
@@ -2099,6 +2224,25 @@ impl RemoteTaskService {
         expected_remote_ref: Option<&str>,
         install: impl FnOnce(&RemoteTaskTicket) -> std::result::Result<(), &'static str>,
     ) -> Result<AdmissionOutcome> {
+        let prepared =
+            self.prepare_bound_admission(live, payload, now_b, expected_remote_ref, install)?;
+        self.finish_bound_admission(prepared)
+    }
+
+    /// Called under the controlled-device owner lock. Only mutate the ledger
+    /// and install task resources here; journal/cleanup hooks may re-enter the
+    /// owner and therefore belong to `finish_bound_admission` after unlock.
+    pub(crate) fn prepare_bound_admission(
+        &self,
+        live: &LeaseContext,
+        payload: &Value,
+        now_b: u64,
+        expected_remote_ref: Option<&str>,
+        install: impl FnOnce(&RemoteTaskTicket) -> std::result::Result<(), &'static str>,
+    ) -> Result<PreparedTaskAdmission> {
+        if let Some(remote_ref) = expected_remote_ref {
+            validate_identifier(remote_ref)?;
+        }
         let request = RemoteTaskRequest::from_payload(payload)?;
         let _guard = self.session_open_lock.lock();
         let binding = self
@@ -2125,17 +2269,39 @@ impl RemoteTaskService {
         let outcome = self.ledger.admit(live, &request, now_b)?;
         if let AdmissionOutcome::Admitted(ticket) = &outcome {
             if let Err(code) = install(ticket) {
-                let _ = self.finish(
+                let failed = self.ledger.complete_with_reason(
                     &ticket.record.task_id,
                     RemoteTaskTerminal::Failed,
                     Some(code.to_owned()),
+                    None,
                     now_b,
-                );
-                return Err(error(code));
+                )?;
+                return Ok(PreparedTaskAdmission::InstallationFailed(failed, code));
             }
-            self.publish(&ticket.record);
         }
-        Ok(outcome)
+        Ok(PreparedTaskAdmission::Accepted(outcome))
+    }
+
+    pub(crate) fn finish_bound_admission(
+        &self,
+        prepared: PreparedTaskAdmission,
+    ) -> Result<AdmissionOutcome> {
+        match prepared {
+            PreparedTaskAdmission::Accepted(outcome) => {
+                if let AdmissionOutcome::Admitted(ticket) = &outcome {
+                    // Cleanup may have won immediately after admission. Never
+                    // republish its older admitted state over a newer terminal.
+                    if let Ok(current) = self.ledger.record(&ticket.record.task_id) {
+                        self.publish(&current);
+                    }
+                }
+                Ok(outcome)
+            }
+            PreparedTaskAdmission::InstallationFailed(record, code) => {
+                self.cleanup(&record, code.to_owned());
+                Err(error(code))
+            }
+        }
     }
 
     pub(crate) async fn dispatch(
@@ -2338,6 +2504,7 @@ impl RemoteTaskService {
         Ok(record)
     }
 
+    #[cfg(test)]
     pub(crate) fn cancel(&self, task_id: &str, now_b: u64) -> Result<CancelOutcome> {
         let outcome = self.ledger.request_cancel(task_id, now_b)?;
         self.finish_cancel_outcome(&outcome);
@@ -2369,7 +2536,27 @@ impl RemoteTaskService {
         {
             return Err(error("task_binding_stale"));
         }
-        self.ledger.request_cancel(task_id, now_b)
+        self.ledger
+            .request_cancel_bound(lease, &record.session_id, task_id, now_b)
+    }
+
+    /// Remote cancellation pins the authenticated reference mapping and checks
+    /// the exact task lease/session atomically with the ledger mutation. No
+    /// callbacks are emitted while the caller holds the B lifecycle lock.
+    pub(crate) fn prepare_remote_cancel(
+        &self,
+        lease: &LeaseContext,
+        remote_ref: &str,
+        task_id: &str,
+        now_b: u64,
+    ) -> Result<CancelOutcome> {
+        let _guard = self.session_open_lock.lock();
+        let session_id = self
+            .sessions
+            .session_for(remote_ref, &lease.remote_control_generation)
+            .ok_or_else(|| error("task_binding_stale"))?;
+        self.ledger
+            .request_cancel_bound(lease, &session_id, task_id, now_b)
     }
 
     pub(crate) fn finish_cancel_outcome(&self, outcome: &CancelOutcome) {
@@ -2409,6 +2596,7 @@ impl RemoteTaskService {
         let _guard = self.session_open_lock.lock();
         let records = self.ledger.interrupt_generation(generation, reason, now_b);
         self.sessions.clear_generation(generation);
+        drop(_guard);
         self.finish_interrupted(records)
     }
 
@@ -2825,12 +3013,12 @@ mod tests {
             &self,
             session_id: &str,
             code_mode: bool,
-            workspace_id: Option<&str>,
+            workspace: Option<&Path>,
         ) -> std::result::Result<(), String> {
             self.claims.lock().push((
                 session_id.to_owned(),
                 code_mode,
-                workspace_id.map(str::to_owned),
+                workspace.map(|path| path.to_string_lossy().into_owned()),
             ));
             if self.fail_claim.load(Ordering::SeqCst) {
                 Err("backend_bind_failed".to_owned())
@@ -4053,6 +4241,85 @@ mod tests {
     }
 
     #[test]
+    fn remote_cancel_rejects_foreign_session_and_every_stale_lease_field_atomically() {
+        let (service, hooks) = service(RecordingExecutor::ok());
+        service.set_session_provisioner(Arc::new(FakeSessions::default()));
+        let session = service
+            .ensure_remote_session("ref-chat", "Chat", false, "generation-0001")
+            .unwrap();
+        service
+            .sessions
+            .bind(
+                "ref-other",
+                "session-0002",
+                "generation-0001",
+                RemoteSessionLane::Chat,
+            )
+            .unwrap();
+        admitted(
+            &service,
+            &payload(&session, "task-0001", "client-0001", &digest(1)),
+            1_000,
+        );
+        let before = serde_json::to_value(service.status("task-0001").unwrap()).unwrap();
+        let events_before = hooks.events.lock().len();
+        let live = context("generation-0001");
+        for remote_ref in ["ref-other", "ref-unknown"] {
+            assert_eq!(
+                service
+                    .prepare_remote_cancel(&live, remote_ref, "task-0001", 1_100)
+                    .unwrap_err()
+                    .code,
+                "task_binding_stale"
+            );
+        }
+        for field in 0..5 {
+            let mut stale = live.clone();
+            match field {
+                0 => stale.connection_id = "connection-other".into(),
+                1 => stale.controller_lease_id = "lease-other".into(),
+                2 => stale.lease_epoch = "2".into(),
+                3 => stale.relay_epoch = "relay-other".into(),
+                _ => stale.remote_control_generation = "generation-other".into(),
+            }
+            assert_eq!(
+                service
+                    .prepare_remote_cancel(&stale, "ref-chat", "task-0001", 1_100)
+                    .unwrap_err()
+                    .code,
+                "task_binding_stale"
+            );
+            assert_eq!(
+                serde_json::to_value(service.status("task-0001").unwrap()).unwrap(),
+                before
+            );
+        }
+        assert_eq!(hooks.events.lock().len(), events_before);
+        let outcome = service
+            .prepare_remote_cancel(&live, "ref-chat", "task-0001", 1_200)
+            .unwrap();
+        assert!(matches!(outcome, CancelOutcome::CancelledBeforeDispatch(_)));
+        service.finish_cancel_outcome(&outcome);
+        assert_eq!(
+            service.status("task-0001").unwrap().wire_status(),
+            "cancelled"
+        );
+        // Terminal retries still need authority; an AlreadyTerminal response
+        // must not disclose another session's task.
+        assert!(
+            service
+                .prepare_remote_cancel(&live, "ref-other", "task-0001", 1_300)
+                .is_err()
+        );
+        assert!(matches!(
+            service
+                .prepare_remote_cancel(&live, "ref-chat", "task-0001", 1_300)
+                .unwrap(),
+            CancelOutcome::AlreadyTerminal(_)
+        ));
+    }
+
+    #[test]
     fn local_stop_requires_current_lease_and_bound_b_session() {
         let (service, hooks) = service(RecordingExecutor::ok());
         service.set_session_provisioner(Arc::new(FakeSessions::default()));
@@ -5017,6 +5284,70 @@ mod tests {
         assert_eq!(
             service.status("task-after-switch").unwrap_err().code,
             "task_not_found"
+        );
+    }
+
+    #[test]
+    fn workspace_owner_resolution_precedes_session_lock_and_lane_claim_uses_only_path() {
+        struct Resolver {
+            service: std::sync::Weak<RemoteTaskService>,
+            sessions: FakeSessions,
+        }
+        impl RemoteSessionProvisioner for Resolver {
+            fn create_authoritative_session(
+                &self,
+                title: &str,
+                code: bool,
+            ) -> std::result::Result<String, String> {
+                self.sessions.create_authoritative_session(title, code)
+            }
+            fn session_exists(&self, id: &str) -> std::result::Result<bool, String> {
+                self.sessions.session_exists(id)
+            }
+            fn resolve_code_workspace(&self, id: &str) -> std::result::Result<PathBuf, String> {
+                assert!(
+                    self.service
+                        .upgrade()
+                        .unwrap()
+                        .session_open_lock
+                        .try_lock()
+                        .is_some(),
+                    "workspace authority must not run under the session lock"
+                );
+                Ok(PathBuf::from(id))
+            }
+            fn claim_execution_lane(
+                &self,
+                session: &str,
+                code: bool,
+                workspace: Option<&Path>,
+            ) -> std::result::Result<(), String> {
+                self.sessions.claim_execution_lane(session, code, workspace)
+            }
+        }
+        let service = Arc::new(RemoteTaskService::new(Arc::new(
+            RemoteTaskLedger::in_memory(),
+        )));
+        let resolver = Arc::new(Resolver {
+            service: Arc::downgrade(&service),
+            sessions: FakeSessions::default(),
+        });
+        service.set_session_provisioner(resolver.clone());
+        service
+            .ensure_unclaimed_remote_session("ref-workspace-order", "Unknown", "generation-0001")
+            .unwrap();
+        let task = request(&code_payload(
+            "ref-workspace-order",
+            "task-workspace-order",
+            "client-workspace-order",
+            "workspace-0001",
+        ));
+        service
+            .ensure_authenticated_task_session(&task, &context("generation-0001"), "Code")
+            .unwrap();
+        assert_eq!(
+            resolver.sessions.claims.lock().as_slice(),
+            &[("session-0001".into(), true, Some("workspace-0001".into()))]
         );
     }
 
