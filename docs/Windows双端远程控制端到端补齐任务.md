@@ -211,7 +211,7 @@ E2E-04（加密业务帧双向派发）。开工前需先读第 4 节与本节�
 - 已按第 4 节决策实现「回传 frame 的 session_id 统一改写回 A 的 ref」；B 内部权威会话 id 只存在于 `RemoteSessionMap` 与台账中。
 - `role_liveness_v1` / `resume_v1` 仍未在 B 注册能力中声明，E2E-06 处理心跳时一并补齐并补协商用例（`task_v1`、`snapshot_journal_v1` 已在 E2E-03/05 补齐）。
 
-## 8. E2E-05 实施进度（进行中，未审核）
+## 8. E2E-05 实施进度（历史阶段快照：当时进行中，未审核）
 
 ### 8.1 已落地
 
@@ -236,7 +236,7 @@ E2E-04（加密业务帧双向派发）。开工前需先读第 4 节与本节�
 - 敏感信息：正文只进权威 journal 与 A 独立历史（本地），wire 明文只有 epoch/序号/类型；无凭证、无路径、无主机信息；transcript 只保留最近 200 条且按 session+epoch+sequence 去重。
 - 登记缺口：B 回复取轮次结束后的 SessionStore 文本（非流式）；A 端首次收到事件时直接从该事件起算（完整快照引导属可选优化）。
 
-## 9. E2E-06 实施进度（进行中，未审核）
+## 9. E2E-06 实施进度（历史阶段快照：当时进行中，未审核）
 
 出口：有效 A 存活证据不超过 30 秒；停止/断开产生明确终态并清理远端任务。
 
@@ -252,7 +252,9 @@ E2E-04（加密业务帧双向派发）。开工前需先读第 4 节与本节�
 | `a8a56a490` | A 端权威快照恢复：解密校验快照（体积/摘要/epoch/基准）→ 推进期望值 → 经 `ControllingJournalSink::publish_snapshot` 交命令层 `apply_snapshot`；1 条用例 |
 | `94141a2e8` | A 端存活直接应答（liveness AEAD）：crypto 新增方向无关的 `liveness_root` 与 `LivenessCipher`（A 角色域 + 租约五元组派生，AAD 为冻结 `aad_binding`，nonce 前置）；EncryptedLane `seal_liveness`/`open_liveness`；A 保活任务应答 `controller_liveness_challenge_a`（共享单调序号、同一挑战只答一次）；B 解封后 `accept_direct_liveness` 续期并停止升级兜底；2 条用例 |
 
-### 9.2 剩余步骤
+### 9.2 剩余步骤（历史快照，已被 9.5 及后续实现取代）
+
+以下“尚未接线”“恢复无法完成”仅描述当时阶段，不代表当前代码。后续双端恢复接线、认证租约重装、B 心跳及首次断线冻结预算已落地；现有验证包含状态机/进程内端口与源码契约，不等于真实双 Windows、完整 B worker/Tauri/TCP 恢复旅程或发布验收。历史测试数量与审核结论保留原样，当前证据以对应 PR 的固定提交记录为准。
 
 1. ~~**B 侧存活证据链**~~ 已完成：兜底路径（`8d5ae57f2`、`e8fea59db`）+ 直接应答路径（`94141a2e8`）；A 心跳 3 秒一次，B 优先用直接证明续期，未及时到达才升级 Relay 签名兜底。
 2. **显式断开**：A 的 `disconnect` 在停止 worker 前发送 `controller_disconnect`；
@@ -314,7 +316,7 @@ E2E-04（加密业务帧双向派发）。开工前需先读第 4 节与本节�
 - 登记缺口（非本轮 blocker）：① 真机双端断线恢复演练未执行（环境限制，随 E2E-08 登记为发布缺口）；② `DesktopControlledCleanup` 适配器无 Tauri 级测试（本仓库无 `mock_app` 先例），其触发面由 manager 侧 stop/refresh/远端断开三条路径用例覆盖，适配器逻辑为 `try_state` + `interrupt_generation` 直连。
 - 结论：**REVIEW: PASS**。下一步进入 E2E-07 剩余项（浏览器冒烟与正式审核）。
 
-## 10. E2E-07 实施进度（进行中，未审核）
+## 10. E2E-07 实施进度（历史阶段快照：当时进行中，未审核）
 
 出口：三个 UI 面有可执行行为测试；不可用能力不暴露半通路。
 
@@ -421,12 +423,14 @@ node --test pinvou3-app/tests/<相关契约>.test.mjs
 
 **UI 改动的强制项（2026-09-20 补充）**：任何改动设置页/面板的提交，除源码契约测试外必须跑
 `npm --prefix pinvou3-app run build:ui && npm --prefix pinvou3-app run test:settings-ui`
-（jsdom 真实渲染 + 错误边界断言）。原因：`ControlledDevicePanel` 里新增的
+（当前为 Puppeteer 加载真实 Vite dist、mock Tauri 的浏览器渲染及错误边界断言，不是 jsdom，也不是双机或真实宿主验收）。历史原因：`ControlledDevicePanel` 里新增的
 `bridge.desktopRemoteControl.endpointProfiles()` 在缺少该方法的宿主实现上是**同步抛错**，会让整页被
 错误边界接住（用户侧表现为「设置页面加载失败」），而源码契约测试与 `build:ui` 都发现不了——只有
-jsdom 冒烟能复现（本次即由 `test:settings-ui` 的 ① 断言捕获）。
+运行时渲染冒烟才能覆盖此类问题。该记录描述当时故障；当前 B 面板不暴露端点切换，不要求恢复旧下拉。执行时须确认浏览器用例实际运行；浏览器缺失、启动失败或任何 SKIP 都不得记为验证通过。
 
 ## 13. 生产打通与端上排障记录（2026-09-20）
+
+> 历史排障快照：下述线上状态、临时诊断接口、旧包与 328～331 条测试数字仅记录当时阶段，不是当前 head 验证或最新部署证据。当前恢复链路、B 面板边界与正式发布要求以现行拆分文档及后续审核修复为准；未发布桌面协议随 A/B/Relay 一起升级，不保留旧开发接口兼容路径。production 的 development+TOFU 迁移与关闭仍须在正式发布前取得实际证据。
 
 ### 13.1 历史试验部署（已废止，禁止作为生产配置）
 
@@ -445,7 +449,9 @@ jsdom 冒烟能复现（本次即由 `test:settings-ui` 的 ① 断言捕获）�
 | 后端已 `waiting_connection` 但界面无码 | 状态代际门只认旧拼写 `registering/waiting_for_pairing`，新 generation 的 `waiting_connection` 被丢弃 | `starting` 接受 `reserving/waiting_connection`（`ddc376767`） |
 | 同上（更深一层） | 域切片 `snapshotStateSlice` 读顶层键，而 feature 只把状态挂在嵌套键 `desktopRemoteControl` → `bs.controlledDevice` 恒为 `undefined` | `publish` 时把 7 个切片镜像到顶层，并在安装时镜像初始状态（`2edc456cf`；注意必须在 `STATE_SLICES` 初始化之后调用，见 `0fba53786` 的回归修复） |
 
-### 13.3 端上排障能力（保留）
+### 13.3 当时的端上排障能力（历史记录）
+
+当前已移除临时 `desktop_remote_client_log` / `clientLog` 自由文本接口；前端仅经 `desktop_remote_client_event` / `clientEvent` 提交闭集 event/detail，Rust 日志 sink 再以字段白名单收敛未知值为 `other`。旧 `profile/source/path`、`origin` 等拼接详情不保证留存，不能把下列历史日志描述当成当前日志合同。Rust 双端日志仍在，但轮转、容量、开关、异步写入及跨进程/文件权限验收另行跟进，不因本记录视为完成。
 
 - `~/.pinvou3/logs/remote-control.log`：B 端（`[controlled]`）起停/注册/握手/端点就绪/relay 拒绝码，以及前端 `event`/`result`/`ui` 三类投影
   （`desktop_remote_client_log` 命令 + bridge `clientLog`）。只写阶段与有界值，不含 endpoint/lease/token。
@@ -471,9 +477,7 @@ jsdom 冒烟能复现（本次即由 `test:settings-ui` 的 ① 断言捕获）�
 - **修复**：清除本机 User 级覆盖变量并以干净环境重启；同时补 A 端有界排障日志（此前 A 端完全没有落盘痕迹，
   失败只能从界面文案反推，这是本次排查最耗时的原因）。日志写入器泛化为 `log_relay_event(scope, …)`，
   `controlled` / `controller` 两个 scope 共用同一份有界规则与同一文件。
-- **保守默认（登记）**：保留 `PINVOU_REMOTE_*` 覆盖能力供本地/测试使用，但**生产环境不得设置任何
-  `PINVOU_REMOTE_*` 环境变量**；一旦被覆盖，A 端每次连接都会写出 `source:env|settings|profile` 与端点路径，
-  可直接自查，无需再靠猜。生产默认走内置 `production` profile（地址 + 信任根均内置，用户零配置）。
+- **保守默认（登记）**：桌面生产客户端不得遗留未经确认的测试地址、profile 或 pin 覆盖；自建 Relay 的显式地址与信任根配置仍允许，需成对正确配置并核对持久自定义地址。该约束不禁止 Relay 服务端必需的部署密钥环境。生产客户端无覆盖或自定义设置时默认用内置 `production`；当前日志闭集行为见 13.3，不能依赖历史拼接详情排障。
 - **验证**：`cargo test remote_control::` **328 通过 / 0 失败**（新增 3 条：A/B 日志行格式、有界洗白、端点路径脱敏）；
   `cargo test remote_control::controller::relay_runtime` **17 通过 / 0 失败**；
   `cargo test remote_control::manager::persistence` **1 通过 / 0 失败**；`python scripts/architecture-guard.py` 通过。
@@ -538,7 +542,9 @@ jsdom 冒烟能复现（本次即由 `test:settings-ui` 的 ① 断言捕获）�
   所有值仍是协议枚举名，不含文案、连接码或凭据。
 - **验证**：`cargo test remote_control::` **331 通过 / 0 失败**；`python scripts/architecture-guard.py` 通过。
 
-### 13.10 设置页：桌面远程控制迁入独立二级页面（UX 调整）
+### 13.10 设置页：桌面远程控制迁入独立二级页面（历史 UX 调整）
+
+> 本节保留当时迁移和验证记录，旧侧栏入口、95/7 等计数不是当前验收。当前 A/B 入口已统一到「通用 → 桌面远程控制」的角色分区，B 端不展示端点切换；当前语义与实际验证以生产代码及对应 PR 固定 head 为准。
 
 - **背景**：被控端面板（`ControlledDevicePanel`，含连接码、服务端点切换、工作区授权、只读提示）原先内联在
   「通用」分区，与外观/通知/语音等常规偏好混排。

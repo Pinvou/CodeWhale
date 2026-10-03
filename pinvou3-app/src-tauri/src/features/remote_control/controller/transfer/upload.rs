@@ -549,6 +549,43 @@ mod tests {
     }
 
     #[test]
+    fn remote_admission_source_consumes_a_completed_receipt_exactly_once() {
+        use crate::features::sessions::application::submit_controlled::resolve_controlled_attachments;
+        let staging = Arc::new(RecordingStaging::default());
+        let uploads = uploads(staging, TransferLimits::default());
+        let data = b"remote attachment";
+        let begin = uploads
+            .begin(upload_context(), metadata_for(data), 1_000)
+            .unwrap();
+        uploads
+            .accept_chunk(&begin.handle_id, 0, data, 1_100)
+            .unwrap();
+        let ids = vec![begin.handle_id];
+        // Reproduces the old source fold: it must refuse, never consume.
+        assert_eq!(
+            resolve_controlled_attachments(&ids, Some(Vec::new()), || {
+                panic!("local mismatch must not consume an A upload")
+            })
+            .unwrap_err(),
+            "task_attachments_invalid"
+        );
+        let attachments = resolve_controlled_attachments(&ids, None, || {
+            uploads.consume_completed(&ids, &lease(), "session-0001", "task-0001")
+        })
+        .unwrap();
+        assert_eq!(attachments.len(), 1);
+        assert_eq!(attachments[0].handle_id, ids[0]);
+        assert_eq!(attachments[0].bytes, data.len() as u64);
+        assert_eq!(
+            resolve_controlled_attachments(&ids, None, || {
+                uploads.consume_completed(&ids, &lease(), "session-0001", "task-0001")
+            })
+            .unwrap_err(),
+            "transfer_binding_stale"
+        );
+    }
+
+    #[test]
     fn staging_port_receives_ordered_chunks_and_a_verified_commit() {
         let staging = Arc::new(RecordingStaging::default());
         let uploads = uploads(staging.clone(), TransferLimits::default());
