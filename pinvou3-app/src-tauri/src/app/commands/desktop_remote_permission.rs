@@ -1,6 +1,6 @@
 //! Windows remote permission commands (DEV-16).
 //!
-//! B can only stop or disconnect. A decisions arrive exclusively through the
+//! B can read pending approvals, stop or disconnect, but cannot approve. A decisions arrive exclusively through the
 //! authenticated `remote_action_request` handler; no legacy Tauri decision or
 //! request command remains. Local/Web ACP responders fail closed for requests
 //! owned by a remote task.
@@ -19,7 +19,7 @@ use crate::features::remote_control::controller::permission::{
     DecisionAuthority, PermissionRequest,
 };
 use crate::features::remote_control::controller::permission::{
-    PermissionAuthority, PermissionDecision,
+    PermissionAuthority, PermissionDecision, PermissionView,
 };
 
 const UNSUPPORTED: &str = "desktop_remote_control_unsupported";
@@ -33,6 +33,17 @@ fn ensure_supported(controlled: &ControlledDeviceManager) -> Result<(), String> 
         .is_supported()
         .then_some(())
         .ok_or_else(|| UNSUPPORTED.to_owned())
+}
+
+/// Sanitized local projection only. Decisions remain exclusive to remote A.
+#[tauri::command]
+pub(crate) fn desktop_remote_permission_list_b(
+    task_id: String,
+    controlled: State<'_, ControlledDeviceManager>,
+    authority: State<'_, Arc<PermissionAuthority>>,
+) -> Result<Vec<PermissionView>, String> {
+    ensure_supported(&controlled)?;
+    Ok(authority.pending_for_task(&task_id))
 }
 
 /// Called by every B-side terminal path (stop, refresh, disconnect, cancel).

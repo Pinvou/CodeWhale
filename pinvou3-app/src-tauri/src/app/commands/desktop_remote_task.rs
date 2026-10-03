@@ -139,28 +139,34 @@ impl RemoteSessionProvisioner for DesktopRemoteSessionProvisioner {
         &self,
         session_id: &str,
         code_mode: bool,
-        workspace_id: Option<&str>,
+        workspace: Option<&std::path::Path>,
     ) -> std::result::Result<(), String> {
         if !code_mode {
             return Ok(());
         }
-        let workspace_id = workspace_id.ok_or_else(|| "task_workspace_required".to_owned())?;
-        let path = self
-            .app
-            .state::<ControlledDeviceManager>()
-            .resolve_code_workspace(workspace_id)
-            .map_err(|error| error.code.to_owned())?;
-        let path = crate::features::codex_acp::validate_codex_project_workspace(&path)
-            .map_err(|_| "task_workspace_not_authorized".to_owned())?;
+        let path = workspace.ok_or_else(|| "task_workspace_required".to_owned())?;
         self.acp_pool
             .agents()
             .set_acp_workspace(
                 session_id,
                 crate::features::codex_acp::AgentBackend::CodexAcp,
                 crate::features::codex_acp::CodexWorkspaceKind::Project,
-                Some(path),
+                Some(path.to_path_buf()),
             )
             .map_err(|_| "task_session_backend_bind_failed".to_owned())
+    }
+
+    fn resolve_code_workspace(
+        &self,
+        workspace_id: &str,
+    ) -> std::result::Result<std::path::PathBuf, String> {
+        let path = self
+            .app
+            .state::<ControlledDeviceManager>()
+            .resolve_code_workspace(workspace_id)
+            .map_err(|error| error.code.to_owned())?;
+        crate::features::codex_acp::validate_codex_project_workspace(&path)
+            .map_err(|_| "task_workspace_not_authorized".to_owned())
     }
 }
 
@@ -386,6 +392,14 @@ impl DesktopRemoteTaskRuntime {
     ) -> Arc<Self> {
         let service = Arc::new(RemoteTaskService::new(ledger));
         let authorizations = Arc::new(RemoteWorkspaceAuthorizations::default());
+        let purged_authorizations = Arc::clone(&authorizations);
+        store.register_session_purged_hook(Arc::new(move |session_id| {
+            purged_authorizations.revoke_session(session_id);
+        }));
+        let deleted_authorizations = Arc::clone(&authorizations);
+        store.register_session_deleted_hook(Arc::new(move |session_id| {
+            deleted_authorizations.revoke_session(session_id);
+        }));
         let acp_pool = Arc::new(acp_pool);
         service.set_session_provisioner(Arc::new(DesktopRemoteSessionProvisioner::new(
             app.clone(),
@@ -523,65 +537,42 @@ fn validated_task_payload(
     Ok(validated)
 }
 
-/// Ensure the A-side session reference already owns a B-authoritative session
-/// during capability preparation. This lets either endpoint be first to type.
-pub(crate) fn ensure_controlled_session(
-    app: &AppHandle,
-    remote_session_ref: &str,
-    title: &str,
-    code_mode: bool,
-    generation: &str,
-) -> Result<String, String> {
-    let controlled = app.state::<ControlledDeviceManager>();
-    let is_current = controlled
-        .live_runtime_context()
-        .is_ok_and(|(lease, _)| lease.remote_control_generation == generation);
-    if !is_current {
-        return Err("task_session_generation_stale".to_owned());
-    }
-    let runtime = app.state::<Arc<DesktopRemoteTaskRuntime>>();
-    let session_id = runtime
-        .service()
-        .ensure_remote_session(remote_session_ref, title, code_mode, generation)
-        .map_err(|error| error.code.to_owned())?;
-    let remains_current = controlled
-        .live_runtime_context()
-        .is_ok_and(|(lease, _)| lease.remote_control_generation == generation);
-    if !remains_current {
-        runtime.service().clear_generation_sessions(generation);
-        return Err("task_session_generation_stale".to_owned());
-    }
-    Ok(session_id)
-}
-
 /// Capability exchange precedes A's mode choice, so it must not silently pin
 /// the B session to chat. The first authenticated task claims chat/code once.
 pub(crate) fn ensure_unclaimed_controlled_session(
     app: &AppHandle,
     remote_session_ref: &str,
     title: &str,
-    generation: &str,
+    lease: &LeaseContext,
 ) -> Result<String, String> {
     let controlled = app.state::<ControlledDeviceManager>();
-    let is_current = controlled
-        .live_runtime_context()
-        .is_ok_and(|(lease, _)| lease.remote_control_generation == generation);
-    if !is_current {
-        return Err("task_session_generation_stale".to_owned());
-    }
     let runtime = app.state::<Arc<DesktopRemoteTaskRuntime>>();
-    let session_id = runtime
-        .service()
-        .ensure_unclaimed_remote_session(remote_session_ref, title, generation)
-        .map_err(|error| error.code.to_owned())?;
-    if !controlled
-        .live_runtime_context()
-        .is_ok_and(|(lease, _)| lease.remote_control_generation == generation)
-    {
-        runtime.service().clear_generation_sessions(generation);
-        return Err("task_session_generation_stale".to_owned());
-    }
-    Ok(session_id)
+    ensure_unclaimed_session_for_lease(
+        &controlled,
+        &runtime.service(),
+        lease,
+        remote_session_ref,
+        title,
+    )
+}
+
+fn ensure_unclaimed_session_for_lease(
+    controlled: &ControlledDeviceManager,
+    service: &RemoteTaskService,
+    lease: &LeaseContext,
+    remote_session_ref: &str,
+    title: &str,
+) -> Result<String, String> {
+    controlled
+        .with_current_business_lease(lease, || {
+            service.ensure_unclaimed_remote_session(
+                remote_session_ref,
+                title,
+                &lease.remote_control_generation,
+            )
+        })
+        .map_err(|_| "task_session_generation_stale".to_owned())?
+        .map_err(|error| error.code.to_owned())
 }
 
 pub(crate) fn project_controlled_session(
@@ -629,7 +620,7 @@ pub(crate) fn trusted_local_remote_binding(
     let workspace_id = match lane {
         RemoteSessionLane::Code => Some(
             authorizations
-                .workspace_for_session(session_id)
+                .workspace_for_session(session_id, generation)
                 .ok_or_else(|| "task_workspace_not_authorized".to_owned())?,
         ),
         RemoteSessionLane::Chat | RemoteSessionLane::Unknown => None,
@@ -1026,6 +1017,7 @@ fn submit_prepared_bound_task_inner(
     )
 }
 
+#[cfg(test)]
 fn admit_bound_task_with_ref(
     service: &RemoteTaskService,
     lease: &LeaseContext,
@@ -1108,7 +1100,8 @@ fn admit_and_dispatch(
                 .map_err(|error| error.code)?;
         }
         if let Some(workspace_id) = code_workspace.as_deref() {
-            if !authorizations.authorize(session_id, workspace_id) {
+            if !authorizations.authorize(session_id, workspace_id, &lease.remote_control_generation)
+            {
                 return Err("task_workspace_capacity");
             }
         }
@@ -1118,25 +1111,29 @@ fn admit_and_dispatch(
     // ledger admission call. Snapshot refresh uses a writer token and cannot
     // replace policy in the gap between this validation and acceptance. The
     // token is released before attachment consumption or executor dispatch.
-    let capability_admission = capabilities
-        .pin_task_admission(
-            &request.capability_revision,
-            lease,
-            &mode,
-            &skill_ids,
-            code_workspace.as_deref(),
-            now_b,
-        )
+    let controlled = app.state::<ControlledDeviceManager>();
+    let prepared_admission = controlled
+        .with_current_business_lease(lease, || {
+            let capability_admission = capabilities
+                .pin_task_admission(
+                    &request.capability_revision,
+                    lease,
+                    &mode,
+                    &skill_ids,
+                    code_workspace.as_deref(),
+                    now_b,
+                )
+                .map_err(|error| error.code.to_owned())?;
+            let prepared = service
+                .prepare_bound_admission(lease, validated, now_b, expected_remote_ref, install)
+                .map_err(|error| error.code.to_owned())?;
+            drop(capability_admission);
+            Ok::<_, String>(prepared)
+        })
+        .map_err(|error| error.code.to_owned())??;
+    let outcome = service
+        .finish_bound_admission(prepared_admission)
         .map_err(|error| error.code.to_owned())?;
-    let outcome = admit_bound_task_with_ref(
-        &service,
-        lease,
-        validated,
-        now_b,
-        expected_remote_ref,
-        install,
-    )?;
-    drop(capability_admission);
     match outcome {
         AdmissionOutcome::Replay(record) => service
             .status_payload(&record.task_id)
@@ -1395,22 +1392,39 @@ fn admit_and_dispatch(
 }
 
 /// wire 入口（E2E-04）：取消一条任务并回传终态/请求态载荷。
-pub(crate) fn cancel_decrypted_task(app: &AppHandle, task_id: &str) -> Result<Value, String> {
+pub(crate) fn cancel_decrypted_task(
+    app: &AppHandle,
+    lease: &LeaseContext,
+    session_ref: &str,
+    task_id: &str,
+) -> Result<Value, String> {
     let controlled = app.state::<ControlledDeviceManager>();
     ensure_supported(&controlled)?;
     let runtime = app.state::<Arc<DesktopRemoteTaskRuntime>>();
-    cancel_and_project(app, &runtime.service(), task_id)
+    cancel_and_project(app, &runtime.service(), lease, session_ref, task_id)
 }
 
 /// 取消并产出回包（命令入口与 wire 入口共用）。
 fn cancel_and_project(
     app: &AppHandle,
     service: &Arc<RemoteTaskService>,
+    lease: &LeaseContext,
+    session_ref: &str,
     task_id: &str,
 ) -> Result<Value, String> {
-    let outcome = service
-        .cancel(task_id, controlled_monotonic_millis())
+    let controlled = app.state::<ControlledDeviceManager>();
+    let outcome = controlled
+        .with_current_business_lease(lease, || {
+            service.prepare_remote_cancel(
+                lease,
+                session_ref,
+                task_id,
+                controlled_monotonic_millis(),
+            )
+        })
+        .map_err(|error| error.code.to_owned())?
         .map_err(|error| error.code.to_owned())?;
+    service.finish_cancel_outcome(&outcome);
     let payload = service
         .status_payload(task_id)
         .map_err(|error| error.code.to_owned())?;
@@ -2264,10 +2278,18 @@ mod tests {
             .unwrap();
         let admission = &source[start..end];
         let pin = admission.find(".pin_task_admission(").unwrap();
-        let ledger = admission.find("admit_bound_task_with_ref(").unwrap();
+        let owner = admission.find(".with_current_business_lease(").unwrap();
+        let ledger = admission.find(".prepare_bound_admission(").unwrap();
         let release = admission.find("drop(capability_admission)").unwrap();
+        let finalize = admission.find(".finish_bound_admission(").unwrap();
         let attachment_consume = admission.find("consume_completed(").unwrap();
-        assert!(pin < ledger && ledger < release && release < attachment_consume);
+        assert!(
+            owner < pin
+                && pin < ledger
+                && ledger < release
+                && release < finalize
+                && finalize < attachment_consume
+        );
         for authority in [
             "&request.capability_revision",
             "lease,",
@@ -2278,6 +2300,470 @@ mod tests {
         ] {
             assert!(admission[pin..ledger].contains(authority), "{authority}");
         }
+    }
+
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    fn task_admission_fixture() -> (
+        Arc<ControlledDeviceManager>,
+        Arc<crate::features::remote_control::controller::task::RemoteTaskService>,
+        LeaseContext,
+        serde_json::Value,
+    ) {
+        use crate::features::remote_control::controller::task::{
+            RemoteSessionProvisioner, RemoteTaskLedger, RemoteTaskService,
+        };
+        struct Sessions;
+        impl RemoteSessionProvisioner for Sessions {
+            fn create_authoritative_session(
+                &self,
+                _: &str,
+                _: bool,
+            ) -> std::result::Result<String, String> {
+                Ok("b-session-admission".into())
+            }
+            fn session_exists(&self, _: &str) -> std::result::Result<bool, String> {
+                Ok(true)
+            }
+        }
+        let manager = Arc::new(ControlledDeviceManager::default());
+        let operation = manager.start(None, Vec::new()).unwrap();
+        manager
+            .complete_registration(
+                operation.clone(),
+                crate::features::remote_control::controller::controlled::ControlledRegistration {
+                    pairing_code: "2345678".into(),
+                    sealed_code_b64: "sealed".into(),
+                    expires_at_ms: 30_000,
+                },
+                1_000,
+            )
+            .unwrap();
+        manager.mark_pairing_reserved(operation.clone()).unwrap();
+        manager.mark_handshake_pending(operation.clone()).unwrap();
+        manager
+            .complete_connected(
+                operation.clone(),
+                crate::features::remote_control::controller::controlled::ControlledLease {
+                    context: LeaseContext {
+                        connection_id: "connection-0001".into(),
+                        controller_lease_id: "lease-0001".into(),
+                        lease_epoch: "1".into(),
+                        relay_epoch: "relay-epoch-0001".into(),
+                        remote_control_generation: operation.generation().to_owned(),
+                    },
+                    liveness_epoch_a: "live-a-1".into(),
+                    resume_deadline_b: 30_000,
+                    resume_token: [1; 32],
+                    transport_key_fingerprint: [2; 32],
+                    controller_device_name: "Controller".into(),
+                    connected_at_b: 3_000,
+                    negotiated_capabilities: vec!["task_v1".into()],
+                },
+            )
+            .unwrap();
+        let context = manager.live_lease().unwrap();
+        let service = Arc::new(RemoteTaskService::new(Arc::new(
+            RemoteTaskLedger::in_memory(),
+        )));
+        service.set_session_provisioner(Arc::new(Sessions));
+        service
+            .ensure_remote_session("a-ref-admission", "Chat", false, operation.generation())
+            .unwrap();
+        let payload = serde_json::json!({
+            "connection_id": context.connection_id, "controller_lease_id": context.controller_lease_id,
+            "lease_epoch": context.lease_epoch, "relay_epoch": context.relay_epoch,
+            "remote_control_generation": context.remote_control_generation,
+            "task_id": "task-admission", "client_request_id": "client-admission",
+            "session_id": "b-session-admission", "capability_revision": "1",
+            "mode": "chat", "model_source": "controlled_device", "input_digest": crate::features::sessions::remote_proxy::outbox::remote_task_input_digest("hello", &[], &[]),
+            "input": {"text": "hello", "attachment_ids": [], "skill_ids": []}
+        });
+        (manager, service, context, payload)
+    }
+
+    #[test]
+    fn resolved_task_session_cannot_claim_or_allocate_after_generation_cleanup() {
+        use crate::features::remote_control::controller::task::{
+            RemoteSessionProvisioner, RemoteTaskRequest,
+        };
+        struct CountingSessions {
+            creates: AtomicUsize,
+            claims: AtomicUsize,
+            resolves: AtomicUsize,
+        }
+        impl RemoteSessionProvisioner for CountingSessions {
+            fn create_authoritative_session(&self, _: &str, _: bool) -> Result<String, String> {
+                self.creates.fetch_add(1, Ordering::SeqCst);
+                Ok("late-code-session".into())
+            }
+            fn session_exists(&self, _: &str) -> Result<bool, String> {
+                Ok(true)
+            }
+            fn resolve_code_workspace(&self, _: &str) -> Result<std::path::PathBuf, String> {
+                self.resolves.fetch_add(1, Ordering::SeqCst);
+                Ok(std::path::PathBuf::from("resolved-workspace"))
+            }
+            fn claim_execution_lane(
+                &self,
+                _: &str,
+                _: bool,
+                _: Option<&std::path::Path>,
+            ) -> Result<(), String> {
+                self.claims.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+        }
+        // Exercise both a new mapping and an Unknown mapping's first claim.
+        for existing in [false, true] {
+            let (manager, service, context, mut payload) = task_admission_fixture();
+            let counter = Arc::new(CountingSessions {
+                creates: AtomicUsize::new(0),
+                claims: AtomicUsize::new(0),
+                resolves: AtomicUsize::new(0),
+            });
+            service.set_session_provisioner(counter.clone());
+            if existing {
+                service
+                    .ensure_unclaimed_remote_session(
+                        "code-ref",
+                        "Code",
+                        &context.remote_control_generation,
+                    )
+                    .unwrap();
+            }
+            let creates_before = counter.creates.load(Ordering::SeqCst);
+            payload["session_id"] = json!("code-ref");
+            payload["mode"] = json!("code");
+            payload["input"]["workspace_id"] = json!("workspace-code");
+            let task = RemoteTaskRequest::from_payload(&payload).unwrap();
+            let prepared = service
+                .prepare_authenticated_task_session(&task, &context, "Code")
+                .unwrap();
+            assert_eq!(counter.resolves.load(Ordering::SeqCst), 1);
+            manager.stop();
+            service.interrupt_generation_and_clear_sessions(
+                &context.remote_control_generation,
+                "stopped",
+                4_000,
+            );
+            assert!(
+                manager
+                    .with_current_business_lease(&context, || service
+                        .claim_prepared_task_session(prepared, &context))
+                    .is_err()
+            );
+            assert_eq!(counter.creates.load(Ordering::SeqCst), creates_before);
+            assert_eq!(counter.claims.load(Ordering::SeqCst), 0);
+            assert!(
+                service
+                    .session_for("code-ref", &context.remote_control_generation)
+                    .is_none()
+            );
+            assert_eq!(service.ledger().live_task_count(), 0);
+        }
+    }
+
+    #[test]
+    fn capability_session_creation_is_owner_gated_and_transient_loss_keeps_admitted_mapping() {
+        use crate::features::remote_control::controller::task::RemoteSessionProvisioner;
+        struct CapabilitySession;
+        impl RemoteSessionProvisioner for CapabilitySession {
+            fn create_authoritative_session(&self, _: &str, _: bool) -> Result<String, String> {
+                Ok("b-capability-session".into())
+            }
+            fn session_exists(&self, _: &str) -> Result<bool, String> {
+                Ok(true)
+            }
+        }
+        let (manager, service, context, payload) = task_admission_fixture();
+        let admitted = manager
+            .with_current_business_lease(&context, || {
+                service.prepare_bound_admission(
+                    &context,
+                    &payload,
+                    3_500,
+                    Some("a-ref-admission"),
+                    |_| Ok(()),
+                )
+            })
+            .unwrap()
+            .unwrap();
+        service.finish_bound_admission(admitted).unwrap();
+        service.set_session_provisioner(Arc::new(CapabilitySession));
+        let created = ensure_unclaimed_session_for_lease(
+            &manager,
+            &service,
+            &context,
+            "capability-ref",
+            "Session",
+        )
+        .unwrap();
+        manager.mark_transport_disconnected(4_000);
+        assert_eq!(
+            service
+                .session_for("capability-ref", &context.remote_control_generation)
+                .as_deref(),
+            Some(created.as_str())
+        );
+        assert_eq!(
+            service
+                .session_for("a-ref-admission", &context.remote_control_generation)
+                .as_deref(),
+            Some("b-session-admission")
+        );
+        assert_eq!(service.ledger().live_task_count(), 1);
+        assert!(
+            ensure_unclaimed_session_for_lease(
+                &manager,
+                &service,
+                &context,
+                "late-capability-ref",
+                "Session"
+            )
+            .is_err()
+        );
+        assert!(
+            service
+                .session_for("late-capability-ref", &context.remote_control_generation)
+                .is_none()
+        );
+        let source = include_str!("desktop_remote_task.rs");
+        let start = source
+            .find("pub(crate) fn ensure_unclaimed_controlled_session(")
+            .unwrap();
+        let end = start
+            + source[start..]
+                .find("pub(crate) fn project_controlled_session(")
+                .unwrap();
+        assert!(!source[start..end].contains("clear_generation_sessions"));
+    }
+
+    #[test]
+    fn successful_session_claim_before_transient_loss_preserves_other_admitted_mappings() {
+        use crate::features::remote_control::controller::task::RemoteTaskRequest;
+        let (manager, service, context, mut payload) = task_admission_fixture();
+        let prepared_admission = manager
+            .with_current_business_lease(&context, || {
+                service.prepare_bound_admission(
+                    &context,
+                    &payload,
+                    3_500,
+                    Some("a-ref-admission"),
+                    |_| Ok(()),
+                )
+            })
+            .unwrap()
+            .unwrap();
+        service.finish_bound_admission(prepared_admission).unwrap();
+        // Same provisioner ID is deliberately avoided by starting with a new
+        // unclaimed reference bound to an existing separate B session.
+        service
+            .switch_remote_session(
+                "new-chat-ref",
+                "b-session-other",
+                &context.remote_control_generation,
+            )
+            .unwrap();
+        payload["session_id"] = json!("new-chat-ref");
+        let task = RemoteTaskRequest::from_payload(&payload).unwrap();
+        let prepared = service
+            .prepare_authenticated_task_session(&task, &context, "Chat")
+            .unwrap();
+        let claimed = manager
+            .with_current_business_lease(&context, || {
+                service.claim_prepared_task_session(prepared, &context)
+            })
+            .unwrap()
+            .unwrap();
+        manager.mark_transport_disconnected(4_000);
+        assert_eq!(
+            service
+                .session_for("new-chat-ref", &context.remote_control_generation)
+                .as_deref(),
+            Some(claimed.as_str())
+        );
+        assert_eq!(
+            service
+                .session_for("a-ref-admission", &context.remote_control_generation)
+                .as_deref(),
+            Some("b-session-admission")
+        );
+        assert_eq!(service.ledger().live_task_count(), 1);
+        let source = include_str!("desktop_remote_controller_business.rs");
+        let start = source.find("fn ensure_remote_mapping(").unwrap();
+        let end = start + source[start..].find("fn ensure_local_mapping(").unwrap();
+        assert!(!source[start..end].contains("clear_generation_sessions"));
+    }
+
+    #[test]
+    fn task_preparation_paused_before_disconnect_cannot_admit_on_its_stale_snapshot() {
+        let (manager, service, context, payload) = task_admission_fixture();
+        let installs = Arc::new(AtomicUsize::new(0));
+        let (prepared_tx, prepared_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let worker_owner = Arc::clone(&manager);
+        let worker_service = Arc::clone(&service);
+        let worker_installs = Arc::clone(&installs);
+        let worker = std::thread::spawn(move || {
+            prepared_tx.send(()).unwrap();
+            release_rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap();
+            worker_owner.with_current_business_lease(&context, || {
+                worker_service.prepare_bound_admission(
+                    &context,
+                    &payload,
+                    4_001,
+                    Some("a-ref-admission"),
+                    |_| {
+                        worker_installs.fetch_add(1, Ordering::SeqCst);
+                        Ok(())
+                    },
+                )
+            })
+        });
+        prepared_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        manager.mark_transport_disconnected(4_000);
+        release_tx.send(()).unwrap();
+        assert!(worker.join().unwrap().is_err());
+        assert_eq!(installs.load(Ordering::SeqCst), 0);
+        assert_eq!(service.ledger().live_task_count(), 0);
+        assert!(service.status("task-admission").is_err());
+        assert!(
+            service.is_remote_session("b-session-admission"),
+            "transient loss preserves an existing mapping"
+        );
+    }
+
+    #[test]
+    fn durable_task_admission_defers_owner_reentrant_journal_until_unlock() {
+        use crate::features::remote_control::controller::task::{
+            AdmissionOutcome, RemoteTaskEvent, RemoteTaskEventSink,
+        };
+        struct OwnerJournal {
+            manager: Arc<ControlledDeviceManager>,
+            calls: AtomicUsize,
+        }
+        impl RemoteTaskEventSink for OwnerJournal {
+            fn publish_task_event(&self, _: &RemoteTaskEvent) {
+                self.manager.with_local_cancel_lease(|_| ()).unwrap();
+                self.calls.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        let (manager, service, context, payload) = task_admission_fixture();
+        let journal = Arc::new(OwnerJournal {
+            manager: Arc::clone(&manager),
+            calls: AtomicUsize::new(0),
+        });
+        service.hooks().set_journal(journal.clone());
+        let prepared = manager
+            .with_current_business_lease(&context, || {
+                service.prepare_bound_admission(
+                    &context,
+                    &payload,
+                    3_500,
+                    Some("a-ref-admission"),
+                    |_| Ok(()),
+                )
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(journal.calls.load(Ordering::SeqCst), 0);
+        manager.mark_transport_disconnected(4_000);
+        assert!(matches!(
+            service.finish_bound_admission(prepared).unwrap(),
+            AdmissionOutcome::Admitted(_)
+        ));
+        assert_eq!(journal.calls.load(Ordering::SeqCst), 1);
+        // A transient disconnect neither interrupts the accepted task nor
+        // destroys its replay record; an exact retry has no second ticket.
+        let replay = service
+            .prepare_bound_admission(&context, &payload, 4_001, Some("a-ref-admission"), |_| {
+                panic!("replay must not reinstall resources")
+            })
+            .unwrap();
+        assert!(matches!(
+            service.finish_bound_admission(replay).unwrap(),
+            AdmissionOutcome::Replay(_)
+        ));
+        assert_eq!(service.ledger().live_task_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn cleanup_after_admission_before_dispatch_prevents_any_executor_entry() {
+        use crate::features::remote_control::controller::task::{
+            AdmissionOutcome, ControllerTaskEventSink, ControllerTaskExecutor, RemoteTaskService,
+        };
+        struct Cleanup(Arc<RemoteTaskService>);
+        impl crate::features::remote_control::controller::controlled::ControlledCleanupSink for Cleanup {
+            fn cleanup(
+                &self,
+                generation: &str,
+                _: crate::features::remote_control::controller::controlled::ControlledCleanupScope,
+            ) {
+                self.0.interrupt_generation_and_clear_sessions(
+                    generation,
+                    "remote_control_stopped",
+                    4_000,
+                );
+            }
+        }
+        struct Executor(AtomicUsize);
+        #[async_trait::async_trait]
+        impl ControllerTaskExecutor for Executor {
+            async fn execute(
+                &self,
+                _: serde_json::Value,
+                _: Arc<dyn ControllerTaskEventSink>,
+                _: tokio_util::sync::CancellationToken,
+            ) -> std::result::Result<(), String> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+        }
+        struct Events;
+        impl ControllerTaskEventSink for Events {
+            fn emit(&self, _: serde_json::Value) {}
+        }
+        let (manager, service, context, payload) = task_admission_fixture();
+        manager.register_cleanup_sink(Arc::new(Cleanup(Arc::clone(&service))));
+        let executor = Arc::new(Executor(AtomicUsize::new(0)));
+        service.register_executor("chat", executor.clone());
+        let prepared = manager
+            .with_current_business_lease(&context, || {
+                service.prepare_bound_admission(
+                    &context,
+                    &payload,
+                    3_500,
+                    Some("a-ref-admission"),
+                    |_| Ok(()),
+                )
+            })
+            .unwrap()
+            .unwrap();
+        manager.stop();
+        let AdmissionOutcome::Admitted(ticket) = service.finish_bound_admission(prepared).unwrap()
+        else {
+            panic!("expected only ticket")
+        };
+        assert!(
+            service
+                .dispatch(
+                    ticket,
+                    Arc::new(Events),
+                    tokio_util::sync::CancellationToken::new(),
+                    4_001
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(executor.0.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            service.status("task-admission").unwrap().wire_status(),
+            "interrupted"
+        );
     }
 
     #[test]
@@ -2552,7 +3038,7 @@ mod tests {
         let authorizations = RemoteWorkspaceAuthorizations::default();
         let authorize = |_: &RemoteTaskTicket| {
             authorizations
-                .authorize("b-code-session", "workspace-1")
+                .authorize("b-code-session", "workspace-1", "generation-1")
                 .then_some(())
                 .ok_or("task_workspace_capacity")
         };
@@ -2568,7 +3054,7 @@ mod tests {
             .unwrap_err(),
             "task_session_binding_mismatch"
         );
-        assert!(!authorizations.is_authorized("b-code-session", "workspace-1"));
+        assert!(!authorizations.is_authorized("b-code-session", "workspace-1", "generation-1"));
         assert_eq!(
             admit_bound_task_with_ref(
                 &service,
@@ -2581,7 +3067,7 @@ mod tests {
             .unwrap_err(),
             "task_session_lane_mismatch"
         );
-        assert!(!authorizations.is_authorized("b-code-session", "workspace-1"));
+        assert!(!authorizations.is_authorized("b-code-session", "workspace-1", "generation-1"));
         assert_eq!(service.ledger().live_task_count(), 0);
         assert!(matches!(
             admit_bound_task_with_ref(
@@ -2594,7 +3080,7 @@ mod tests {
             ),
             Ok(AdmissionOutcome::Admitted(_))
         ));
-        assert!(authorizations.is_authorized("b-code-session", "workspace-1"));
+        assert!(authorizations.is_authorized("b-code-session", "workspace-1", "generation-1"));
     }
 
     #[test]
