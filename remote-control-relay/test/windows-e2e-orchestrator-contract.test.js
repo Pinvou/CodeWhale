@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { createRequire } from "node:module";
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 import yaml from "yaml";
 
@@ -21,6 +23,21 @@ test("evidence workflow is protected, fail-closed and validates the protected bu
     assert.ok(rendered.includes(marker), `missing ${marker}`);
   }
   assert.match(workflowText, /run-windows-remote-control-e2e\.ps1/u);
+});
+
+test("workflow resolves its actual verifier from the workspace independent of action module cwd", async () => {
+  const step = workflow.jobs["physical-dual-windows-evidence"].steps.find((item) => item.id === "protected-build");
+  const requireFromAction = createRequire(fileURLToPath(new URL("./fixtures/isolated-action.cjs", import.meta.url)));
+  let loaded = false;
+  const requireVerifier = (path) => { const value = requireFromAction(path); assert.equal(typeof value.selectProtectedWorkflowArtifact, "function"); loaded = true; return value; };
+  const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+  const failed = [];
+  await new AsyncFunction("require", "process", "core", "github", "context", step.with.script)(
+    requireVerifier, { env: { GITHUB_WORKSPACE: fileURLToPath(new URL("../../", import.meta.url)) } },
+    { setFailed: (code) => failed.push(code) }, {}, {},
+  );
+  assert.equal(loaded, true);
+  assert.deepEqual(failed, ["protected_build_identity_missing"]);
 });
 
 test("orchestrator binds the protected commit and requires two distinct Windows machines", () => {

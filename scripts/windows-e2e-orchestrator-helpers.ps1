@@ -1,6 +1,6 @@
 Set-StrictMode -Version Latest
 
-function Get-PinvouSha256Hex {
+function global:Get-PinvouSha256Hex {
     param([Parameter(Mandatory = $true)][byte[]]$Bytes)
     $algorithm = [Security.Cryptography.SHA256]::Create()
     try { ([BitConverter]::ToString($algorithm.ComputeHash($Bytes))).Replace('-', '').ToLowerInvariant() }
@@ -27,7 +27,7 @@ function Invoke-PinvouCleanupSteps {
     if ($errors.Count -gt 0) { throw ('e2e_cleanup_failed:' + ($errors -join '|')) }
 }
 
-function Assert-PinvouChildPath {
+function global:Assert-PinvouChildPath {
     param([string]$Root, [string]$Candidate, [string]$ErrorCode)
     $root = [IO.Path]::GetFullPath($Root).TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
     $candidate = [IO.Path]::GetFullPath($Candidate)
@@ -39,7 +39,7 @@ function Assert-PinvouChildPath {
     $candidate
 }
 
-function Get-PinvouChildRelativePath {
+function global:Get-PinvouChildRelativePath {
     param([string]$Root, [string]$Candidate, [string]$ErrorCode)
     $root = [IO.Path]::GetFullPath($Root).TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
     $candidate = Assert-PinvouChildPath $root $Candidate $ErrorCode
@@ -110,7 +110,7 @@ function global:Invoke-PinvouTrustedNode {
     Invoke-PinvouTrustedGuard -FilePath $node -Arguments $Arguments -AdditionalFilePaths @($uiScript)
 }
 
-function Assert-PinvouExactProperties {
+function global:Assert-PinvouExactProperties {
     param([Parameter(Mandatory = $true)]$Value, [Parameter(Mandatory = $true)][string[]]$Names, [string]$ErrorCode = 'e2e_schema_invalid')
     if ($null -eq $Value -or $Value -is [Array] -or $Value -is [string] -or $Value -is [ValueType]) { throw $ErrorCode }
     $actual = @($Value.PSObject.Properties.Name)

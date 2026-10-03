@@ -10,7 +10,7 @@
 |---|---|
 | 拓扑 | 两台身份不同、可独立隔离网络的 Windows 设备 A/B；生产等价 `wss://` Relay、TLS 终止及无旁路 enrollment gateway |
 | 软件 | A/B 使用同一已签名安装包；记录版本、SHA-256、Authenticode 证书指纹和匿名机器身份摘要；受保护构建 provenance/SBOM 必须把安装包绑定当前 commit |
-| Enrollment | 官方环境完成既有 endpoint 认领，自托管完成 dry-run/批量 allowlist 或 re-enroll；覆盖率为 100%；生产 `official`/`self_hosted` 且 TOFU=false |
+| Enrollment | 当前生产使用 `self_hosted`，完成 dry-run/批量 allowlist 或 re-enroll，覆盖率为 100% 且 TOFU=false；`official` live claim 尚未接线，预检与启动失败关闭，不作为现成可用部署方式 |
 | 回滚 | 提供真实旧 Relay 二进制；只允许在 registry-aware gateway 后、loopback 监听；裸 v2 必须被预检拒绝 |
 | 功能开关 | Windows A/B 客户端默认开启，显式设为 `0` 时入口隐藏且底层拒绝；非法值失败关闭。Relay 仍须由部署环境将 `PINVOU_DESKTOP_CONTROLLER_ENABLED` 精确设为 `1` 才接受桌面控制流量。关闭任一侧均保留 registry/tombstone |
 | 自动化 | 使用 `scripts/run-windows-remote-control-e2e.ps1`；驱动器必须是有效签名的真实应用驱动，不接受 mock Relay、假状态或手填 pass |
@@ -84,10 +84,15 @@
   -InstallerBuildRunId <protected-build-run-id> `
   -TrustedSignerThumbprint <fixed-certificate-thumbprint> `
   -TrustedSignerPublisher <exact-certificate-subject> `
+  -TrustedNodePath <protected-absolute-node.exe> -TrustedNodeSha256 <protected-node-sha256> `
+  -TrustedNodeSignerThumbprint <fixed-node-certificate-thumbprint> `
+  -TrustedNodeSignerPublisher <exact-node-certificate-subject> `
+  -TrustedGhPath <protected-absolute-gh.exe> `
+  -ExpectedSourceCommit <current-40-hex-head-sha> -RepositoryRoot <absolute-checkout-directory> `
   -RelayUrl wss://<production-equivalent>/pinvou3/remote/ws `
   -DisabledRelayUrl wss://<feature-off-production-equivalent>/pinvou3/remote/ws `
   -LegacyGatewayUrl wss://<registry-aware-gateway>/pinvou3/remote/ws `
-  -EnrollmentDeployment official `
+  -EnrollmentDeployment self_hosted `
   -AttestationProvider remote_signing_service -AttestationKeyId <protected-remote-key-id> `
   -AttestationAclSha256 <protected-acl-attestation-sha256> `
   -AttestationProviderMeasurementSha256 <allowlisted-provider-measurement-sha256> `
@@ -101,7 +106,7 @@
   -EvidenceDirectory <new-empty-directory>
 ```
 
-脚本不接受外部传入的 commit，而是直接绑定当前 `git HEAD`；自托管发布将 `-EnrollmentDeployment` 设为 `self_hosted`。A/B 必须是不同机器身份，驱动器和安装包必须由参数指定的固定发布证书签名；两台机器都会独立启动应用和受信驱动，任一缺失即中止，不生成 PASS manifest。
+脚本要求 `-ExpectedSourceCommit` 与当前 `git HEAD` 一致，CI 还核对 `GITHUB_SHA`；受保护 Node/GH 路径和信任参数不可省略。当前服务端仅支持生产 `self_hosted` 且关闭 TOFU，`official` live claim 尚未接线，预检及启动明确失败关闭。A/B 必须是不同机器身份，驱动器和安装包必须由参数指定的固定发布证书签名；两台机器都会独立启动应用和受信驱动，任一缺失即中止，不生成 PASS manifest。
 
 旧 Relay 输入是受保护配置而不是说明性附件：inventory 与 gateway config 都采用 `additionalProperties=false` 的严格结构，各有且仅有一个启用项，并以同一 `route_id`、`target=legacy_relay`、`no_bypass=true` 和目标公网 URL 摘要对应。编排器只生成经敏感扫描的最小 route spec 传给 A，绝不复制完整受保护配置；driver 激活的 owned route 必须绑定 run nonce、route ID、两份配置摘要和原状态摘要。无论后续成功或失败，`finally` 都必须撤销公网 route、恢复原状态并主动复核，清理失败阻断发布。
 
