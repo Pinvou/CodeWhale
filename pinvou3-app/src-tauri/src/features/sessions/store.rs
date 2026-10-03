@@ -236,10 +236,12 @@ impl SessionStore {
         }
         let store = Self {
             manager: Arc::new(manager),
-            remote_proxies: Arc::new(Mutex::new(super::remote_proxy::RemoteProxyState::load(
-                sessions_dir.join("_remote_proxies.json"),
-                &sessions_dir,
-            )?)),
+            remote_proxies: Arc::new(Mutex::new(
+                super::remote_proxy::RemoteProxyState::load_for_startup(
+                    sessions_dir.join("_remote_proxies.json"),
+                    &sessions_dir,
+                ),
+            )),
             local_backend_resolver: Arc::new(RwLock::new(None)),
             scheduled_profiles: Arc::new(RwLock::new(HashMap::new())),
             scheduled_profiles_path: Arc::new(scheduled_profiles_path),

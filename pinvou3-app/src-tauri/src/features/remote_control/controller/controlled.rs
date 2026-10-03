@@ -1089,19 +1089,30 @@ impl ControlledDeviceManager {
         if inner.phase != ControlledStatusKind::Connected {
             return Err(ControlledStateError::new("desktop_remote_not_connected"));
         }
-        let workspace = inner
-            .workspaces
-            .iter()
-            .find(|workspace| workspace.id == workspace_id && workspace.code_allowed)
-            .ok_or_else(|| ControlledStateError::new("workspace_not_authorized"))?;
-        if !workspace.path.is_dir()
-            || super::super::platform::workspace_identity(&workspace.path)
-                .map(|identity| identity != workspace.identity)
-                .unwrap_or(true)
+        resolve_workspace_locked(&inner, workspace_id)
+    }
+
+    /// An already admitted task may finish during transient transport recovery.
+    /// Its caller first checks the durable task and generation-scoped execution
+    /// grant; this path never authorizes a new task or a replacement lease.
+    pub(crate) fn resolve_admitted_code_workspace(
+        &self,
+        expected: &LeaseContext,
+        workspace_id: &str,
+    ) -> Result<PathBuf> {
+        let inner = self.inner.lock();
+        if inner.lease_context.as_ref() != Some(expected)
+            || !matches!(
+                inner.phase,
+                ControlledStatusKind::Connected
+                    | ControlledStatusKind::Reconnecting
+                    | ControlledStatusKind::ResumeProvisional
+                    | ControlledStatusKind::ResumeActivatedPendingLiveness
+            )
         {
-            return Err(ControlledStateError::new("workspace_authorization_stale"));
+            return Err(ControlledStateError::new("desktop_remote_not_connected"));
         }
-        Ok(workspace.path.clone())
+        resolve_workspace_locked(&inner, workspace_id)
     }
 
     pub(crate) fn status(&self) -> ControlledStatus {
@@ -1202,6 +1213,32 @@ impl ControlledDeviceManager {
         Ok((context, inner.negotiated_capabilities.clone()))
     }
 
+    /// Keep the original worker and complete lease bound through control enqueue.
+    /// Only liveness-suspect is allowed; a transport-disconnected/resuming worker
+    /// cannot manufacture fresh role evidence. The action must not re-enter us.
+    pub(crate) fn with_owned_liveness_lease<T>(
+        &self,
+        operation: &ControlledOperation,
+        expected: &LeaseContext,
+        action: impl FnOnce() -> T,
+    ) -> Result<T> {
+        let inner = self.inner.lock();
+        ensure_operation(&inner, operation)?;
+        let allowed = inner.phase == ControlledStatusKind::Connected
+            || (inner.phase == ControlledStatusKind::Reconnecting
+                && inner.reconnect_reason == Some(ReconnectReason::LivenessSuspect));
+        if !allowed
+            || inner.lease_context.as_ref() != Some(expected)
+            || !inner
+                .negotiated_capabilities
+                .iter()
+                .any(|cap| cap == "role_liveness_v1")
+        {
+            return Err(ControlledStateError::new("desktop_remote_not_connected"));
+        }
+        Ok(action())
+    }
+
     pub(crate) fn register_cleanup_sink(&self, sink: Arc<dyn ControlledCleanupSink>) {
         self.cleanup_sinks.lock().push(sink);
     }
@@ -1235,6 +1272,22 @@ impl ControlledDeviceManager {
             sink.cleanup(generation, ControlledCleanupScope::ALL);
         }
     }
+}
+
+fn resolve_workspace_locked(inner: &Inner, workspace_id: &str) -> Result<PathBuf> {
+    let workspace = inner
+        .workspaces
+        .iter()
+        .find(|workspace| workspace.id == workspace_id && workspace.code_allowed)
+        .ok_or_else(|| ControlledStateError::new("workspace_not_authorized"))?;
+    if !workspace.path.is_dir()
+        || super::super::platform::workspace_identity(&workspace.path)
+            .map(|identity| identity != workspace.identity)
+            .unwrap_or(true)
+    {
+        return Err(ControlledStateError::new("workspace_authorization_stale"));
+    }
+    Ok(workspace.path.clone())
 }
 
 impl Drop for ControlledDeviceManager {
@@ -1797,6 +1850,61 @@ mod tests {
                 .unwrap_err()
                 .code,
             "workspace_authorization_stale"
+        );
+    }
+
+    #[test]
+    fn admitted_workspace_survives_transient_loss_but_not_another_lease_or_stop() {
+        let directory = tempfile::tempdir().unwrap();
+        let manager = ControlledDeviceManager::default();
+        let operation = manager
+            .start(
+                None,
+                vec![
+                    WorkspaceAuthorizationRequest::new(
+                        directory.path().to_path_buf(),
+                        "Project".into(),
+                        true,
+                    )
+                    .unwrap(),
+                ],
+            )
+            .unwrap();
+        register(&manager, &operation);
+        enter_handshake(&manager, &operation);
+        manager
+            .complete_connected(operation.clone(), lease(operation.generation()))
+            .unwrap();
+        let context = manager.live_lease().unwrap();
+        let workspace_id = manager.workspaces().remove(0).workspace_id;
+        for field in 0..5 {
+            let mut wrong = context.clone();
+            match field {
+                0 => wrong.connection_id.push_str("-other"),
+                1 => wrong.controller_lease_id.push_str("-other"),
+                2 => wrong.lease_epoch = "2".into(),
+                3 => wrong.relay_epoch.push_str("-other"),
+                _ => wrong.remote_control_generation.push_str("-other"),
+            }
+            assert!(
+                manager
+                    .resolve_admitted_code_workspace(&wrong, &workspace_id)
+                    .is_err()
+            );
+        }
+        manager.mark_transport_disconnected(4_000);
+        assert!(manager.resolve_code_workspace(&workspace_id).is_err());
+        assert_eq!(
+            manager
+                .resolve_admitted_code_workspace(&context, &workspace_id)
+                .unwrap(),
+            directory.path()
+        );
+        manager.stop();
+        assert!(
+            manager
+                .resolve_admitted_code_workspace(&context, &workspace_id)
+                .is_err()
         );
     }
 
