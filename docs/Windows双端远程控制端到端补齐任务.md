@@ -430,6 +430,8 @@ node --test pinvou3-app/tests/<相关契约>.test.mjs
 
 ## 13. 生产打通与端上排障记录（2026-09-20）
 
+> 历史排障快照：下述线上状态、临时诊断接口、旧包与 328～331 条测试数字仅记录当时阶段，不是当前 head 验证或最新部署证据。当前恢复链路、B 面板边界与正式发布要求以现行拆分文档及后续审核修复为准；未发布桌面协议随 A/B/Relay 一起升级，不保留旧开发接口兼容路径。production 的 development+TOFU 迁移与关闭仍须在正式发布前取得实际证据。
+
 ### 13.1 生产 controller lane 已启用
 
 生产 relay（8787）已部署含 controller-v1 的版本并启用 `PINVOU_DESKTOP_CONTROLLER_ENABLED=1`（`development + TOFU`，安全降级经用户确认），
@@ -446,7 +448,9 @@ node --test pinvou3-app/tests/<相关契约>.test.mjs
 | 后端已 `waiting_connection` 但界面无码 | 状态代际门只认旧拼写 `registering/waiting_for_pairing`，新 generation 的 `waiting_connection` 被丢弃 | `starting` 接受 `reserving/waiting_connection`（`ddc376767`） |
 | 同上（更深一层） | 域切片 `snapshotStateSlice` 读顶层键，而 feature 只把状态挂在嵌套键 `desktopRemoteControl` → `bs.controlledDevice` 恒为 `undefined` | `publish` 时把 7 个切片镜像到顶层，并在安装时镜像初始状态（`2edc456cf`；注意必须在 `STATE_SLICES` 初始化之后调用，见 `0fba53786` 的回归修复） |
 
-### 13.3 端上排障能力（保留）
+### 13.3 当时的端上排障能力（历史记录）
+
+当前已移除临时 `desktop_remote_client_log` / `clientLog` 自由文本接口；前端仅经 `desktop_remote_client_event` / `clientEvent` 提交闭集 event/detail，Rust 日志 sink 再以字段白名单收敛未知值为 `other`。旧 `profile/source/path`、`origin` 等拼接详情不保证留存，不能把下列历史日志描述当成当前日志合同。Rust 双端日志仍在，但轮转、容量、开关、异步写入及跨进程/文件权限验收另行跟进，不因本记录视为完成。
 
 - `~/.pinvou3/logs/remote-control.log`：B 端（`[controlled]`）起停/注册/握手/端点就绪/relay 拒绝码，以及前端 `event`/`result`/`ui` 三类投影
   （`desktop_remote_client_log` 命令 + bridge `clientLog`）。只写阶段与有界值，不含 endpoint/lease/token。
@@ -472,9 +476,7 @@ node --test pinvou3-app/tests/<相关契约>.test.mjs
 - **修复**：清除本机 User 级覆盖变量并以干净环境重启；同时补 A 端有界排障日志（此前 A 端完全没有落盘痕迹，
   失败只能从界面文案反推，这是本次排查最耗时的原因）。日志写入器泛化为 `log_relay_event(scope, …)`，
   `controlled` / `controller` 两个 scope 共用同一份有界规则与同一文件。
-- **保守默认（登记）**：保留 `PINVOU_REMOTE_*` 覆盖能力供本地/测试使用，但**生产环境不得设置任何
-  `PINVOU_REMOTE_*` 环境变量**；一旦被覆盖，A 端每次连接都会写出 `source:env|settings|profile` 与端点路径，
-  可直接自查，无需再靠猜。生产默认走内置 `production` profile（地址 + 信任根均内置，用户零配置）。
+- **保守默认（登记）**：桌面生产客户端不得遗留未经确认的测试地址、profile 或 pin 覆盖；自建 Relay 的显式地址与信任根配置仍允许，需成对正确配置并核对持久自定义地址。该约束不禁止 Relay 服务端必需的部署密钥环境。生产客户端无覆盖或自定义设置时默认用内置 `production`；当前日志闭集行为见 13.3，不能依赖历史拼接详情排障。
 - **验证**：`cargo test remote_control::` **328 通过 / 0 失败**（新增 3 条：A/B 日志行格式、有界洗白、端点路径脱敏）；
   `cargo test remote_control::controller::relay_runtime` **17 通过 / 0 失败**；
   `cargo test remote_control::manager::persistence` **1 通过 / 0 失败**；`python scripts/architecture-guard.py` 通过。
