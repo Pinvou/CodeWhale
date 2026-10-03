@@ -211,7 +211,7 @@ E2E-04（加密业务帧双向派发）。开工前需先读第 4 节与本节�
 - 已按第 4 节决策实现「回传 frame 的 session_id 统一改写回 A 的 ref」；B 内部权威会话 id 只存在于 `RemoteSessionMap` 与台账中。
 - `role_liveness_v1` / `resume_v1` 仍未在 B 注册能力中声明，E2E-06 处理心跳时一并补齐并补协商用例（`task_v1`、`snapshot_journal_v1` 已在 E2E-03/05 补齐）。
 
-## 8. E2E-05 实施进度（进行中，未审核）
+## 8. E2E-05 实施进度（历史阶段快照：当时进行中，未审核）
 
 ### 8.1 已落地
 
@@ -236,7 +236,7 @@ E2E-04（加密业务帧双向派发）。开工前需先读第 4 节与本节�
 - 敏感信息：正文只进权威 journal 与 A 独立历史（本地），wire 明文只有 epoch/序号/类型；无凭证、无路径、无主机信息；transcript 只保留最近 200 条且按 session+epoch+sequence 去重。
 - 登记缺口：B 回复取轮次结束后的 SessionStore 文本（非流式）；A 端首次收到事件时直接从该事件起算（完整快照引导属可选优化）。
 
-## 9. E2E-06 实施进度（进行中，未审核）
+## 9. E2E-06 实施进度（历史阶段快照：当时进行中，未审核）
 
 出口：有效 A 存活证据不超过 30 秒；停止/断开产生明确终态并清理远端任务。
 
@@ -252,7 +252,9 @@ E2E-04（加密业务帧双向派发）。开工前需先读第 4 节与本节�
 | `a8a56a490` | A 端权威快照恢复：解密校验快照（体积/摘要/epoch/基准）→ 推进期望值 → 经 `ControllingJournalSink::publish_snapshot` 交命令层 `apply_snapshot`；1 条用例 |
 | `94141a2e8` | A 端存活直接应答（liveness AEAD）：crypto 新增方向无关的 `liveness_root` 与 `LivenessCipher`（A 角色域 + 租约五元组派生，AAD 为冻结 `aad_binding`，nonce 前置）；EncryptedLane `seal_liveness`/`open_liveness`；A 保活任务应答 `controller_liveness_challenge_a`（共享单调序号、同一挑战只答一次）；B 解封后 `accept_direct_liveness` 续期并停止升级兜底；2 条用例 |
 
-### 9.2 剩余步骤
+### 9.2 剩余步骤（历史快照，已被 9.5 及后续实现取代）
+
+以下“尚未接线”“恢复无法完成”仅描述当时阶段，不代表当前代码。后续双端恢复接线、认证租约重装、B 心跳及首次断线冻结预算已落地；现有验证包含状态机/进程内端口与源码契约，不等于真实双 Windows、完整 B worker/Tauri/TCP 恢复旅程或发布验收。历史测试数量与审核结论保留原样，当前证据以对应 PR 的固定提交记录为准。
 
 1. ~~**B 侧存活证据链**~~ 已完成：兜底路径（`8d5ae57f2`、`e8fea59db`）+ 直接应答路径（`94141a2e8`）；A 心跳 3 秒一次，B 优先用直接证明续期，未及时到达才升级 Relay 签名兜底。
 2. **显式断开**：A 的 `disconnect` 在停止 worker 前发送 `controller_disconnect`；
@@ -314,7 +316,7 @@ E2E-04（加密业务帧双向派发）。开工前需先读第 4 节与本节�
 - 登记缺口（非本轮 blocker）：① 真机双端断线恢复演练未执行（环境限制，随 E2E-08 登记为发布缺口）；② `DesktopControlledCleanup` 适配器无 Tauri 级测试（本仓库无 `mock_app` 先例），其触发面由 manager 侧 stop/refresh/远端断开三条路径用例覆盖，适配器逻辑为 `try_state` + `interrupt_generation` 直连。
 - 结论：**REVIEW: PASS**。下一步进入 E2E-07 剩余项（浏览器冒烟与正式审核）。
 
-## 10. E2E-07 实施进度（进行中，未审核）
+## 10. E2E-07 实施进度（历史阶段快照：当时进行中，未审核）
 
 出口：三个 UI 面有可执行行为测试；不可用能力不暴露半通路。
 
