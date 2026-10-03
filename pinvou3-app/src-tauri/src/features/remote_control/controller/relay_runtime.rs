@@ -2230,7 +2230,9 @@ pub(crate) enum ControlledResumeOutcome {
 
 /// E2E-06：`desktop socket` 掉线后启动 B 端恢复：投影 reconnecting、取恢复材料，
 /// 并按冻结协议发出 `controller_resume_prepare`。任一步失败返回 false，调用方
-/// 必须结束本代通道（此时管理器的恢复失败路径已经清理租约与本代凭证）。
+/// 必须结束本代通道。管理器内部的恢复失败会立即清理租约与本代凭证；构造或
+/// 入队等管理器外失败由已冻结的 watchdog 截止及独立每秒 reaper 有界收口，
+/// 不表示所有返回 false 的路径都已经完成清理，也不会因恢复而延长截止。
 pub(crate) fn begin_controlled_resume<P: ControlledRelayPort + ?Sized>(
     port: &P,
     manager: &ControlledDeviceManager,

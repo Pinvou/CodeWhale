@@ -110,7 +110,8 @@ function Write-EnvFiles {
     $pairingHmac = -join ((48..57) + (65..90) + (97..122) | Get-Random -Count 48 | ForEach-Object { [char]$_ })
     $wsUrl = "ws://127.0.0.1:$Port/pinvou3/remote/ws"
     $controllerState = Join-Path $stateDir 'controller-state.json'
-    $legacyState = Join-Path $stateDir 'legacy-web-state.json'
+    # legacy 文件必须在 controller 状态目录之外，否则 enrollment 配置失败关闭。
+    $legacyState = Join-Path $KeyStore 'legacy-web-state.json'
 
     $relayEnv = @(
         '#' + ' 本地自测 Relay 环境（由 scripts/remote-control-local-selftest.ps1 生成，禁止提交）'

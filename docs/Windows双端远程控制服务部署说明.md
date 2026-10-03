@@ -5,7 +5,7 @@
 
 ## 1. 本机部署（自测用，已完成）
 
-适用：单机联调、配合 [本地单机自测脚本](D:/13_Pinvou/pinvou3-main-1/scripts/remote-control-local-selftest.ps1) 与刚生成的安装包做双进程冒烟。
+适用：单机联调、配合 [本地单机自测脚本](../scripts/remote-control-local-selftest.ps1) 与刚生成的安装包做双进程冒烟。
 
 ```powershell
 # 起服务（生成/复用信任根 + development+TOFU 模式启动 Relay）
@@ -59,7 +59,9 @@ PINVOU_REMOTE_RUNTIME_RELAY_WS_URL = ws://127.0.0.1:8787/pinvou3/remote/ws
 | `PINVOU_REMOTE_ALLOWED_PROXY_IPS` / `PINVOU_REMOTE_TRUSTED_PROXY_IPS` | 实际反向代理的 IPv4/IPv6 地址列表；两者必须显式配置且集合完全一致 |
 | 遥测（可选） | enrollment token / device pepper / admin password；未配置即禁用遥测（本机部署即此状态） |
 
-客户端侧必须 pin 同一份公钥（原始 32 字节 base64）：`PINVOU_REMOTE_RELAY_SIGNING_KEY_ID` + `PINVOU_REMOTE_RELAY_SIGNING_PUBLIC_KEY_B64`；缺失会以 `relay_trust_unconfigured` 失败关闭。
+客户端侧必须 pin 同一份公钥（原始 32 字节 base64）。内置 production/test profile 随包提供 key id 与公钥；自建或轮换后的服务需成对设置 `PINVOU_REMOTE_RELAY_SIGNING_KEY_ID` + `PINVOU_REMOTE_RELAY_SIGNING_PUBLIC_KEY_B64`。不能把未设置环境变量等同于无信任根；显式覆盖不完整或无效仍失败关闭，服务公钥与客户端 pin 不一致不能配对。
+
+`run-remote-control-endpoint.ps1 -Mode Production` 清除进程级 profile、地址与信任根覆盖，但不修改持久配置。若用户持久选择了 test 或自定义 Relay，清除环境后仍采用该选择；请先在设置中确认端点。Test 模式显式选 test 并清除遗留 runtime 地址覆盖，避免同一进程切换后使用旧地址。
 
 生产部署脚本会在通过 controller 环境文件预检后，以 `root:root`、`0700` 显式创建
 `/var/lib/pinvou-remote-relay/state`。状态存储本身不会创建缺失的父目录，这是为了保留

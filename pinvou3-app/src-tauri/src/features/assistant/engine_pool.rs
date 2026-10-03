@@ -92,6 +92,21 @@ struct RuntimeModelOverrides {
     remote_bundle: Option<RemoteRuntimeModelBundle>,
 }
 
+#[derive(Default)]
+struct RemoteTurnRuntimePolicy {
+    require_model_credentials: bool,
+    skill_owner: Option<uuid::Uuid>,
+}
+
+impl RemoteTurnRuntimePolicy {
+    fn remote(skill_owner: uuid::Uuid) -> Self {
+        Self {
+            require_model_credentials: true,
+            skill_owner: Some(skill_owner),
+        }
+    }
+}
+
 impl RemoteRuntimeModelBundle {
     pub(crate) fn new(mut primary: SavedModel, mut vision: Option<SavedModel>) -> Result<Self> {
         let primary_credential = RuntimeModelCredential::api_key(primary.api_key.clone())?;
@@ -1991,8 +2006,15 @@ impl EnginePool {
         let eval_model = self.eval_model_snapshots.for_session(session_id);
         #[cfg(not(any(feature = "benchmark-hooks", test)))]
         let eval_model = None;
-        self.get_or_spawn_with_policy(session_id, false, false, eval_model, None, None)
-            .await
+        self.get_or_spawn_with_policy(
+            session_id,
+            false,
+            RemoteTurnRuntimePolicy::default(),
+            eval_model,
+            None,
+            None,
+        )
+        .await
     }
 
     /// Spawn policy for an unattended automation turn is deliberately distinct
@@ -2002,7 +2024,7 @@ impl EnginePool {
         &self,
         session_id: &str,
         scheduled_unattended: bool,
-        require_remote_model_credentials: bool,
+        remote_policy: RemoteTurnRuntimePolicy,
         explicit_model_override: Option<SavedModel>,
         explicit_credential: Option<RuntimeModelCredential>,
         remote_bundle: Option<RemoteRuntimeModelBundle>,
@@ -2017,7 +2039,7 @@ impl EnginePool {
             .prepare_runtime_model(
                 session_id,
                 scheduled_unattended,
-                require_remote_model_credentials,
+                remote_policy.require_model_credentials,
                 explicit_model_override,
                 explicit_credential,
                 remote_bundle,
@@ -2048,7 +2070,10 @@ impl EnginePool {
                 (None, None)
             }
         };
-        if let Some(engine) = fresh_engine {
+        if let Some(mut engine) = fresh_engine {
+            // The cheap handle clone belongs to this send, not to the cached
+            // engine's previous remote task owner. Local sends carry None.
+            engine.bridge.remote_skill_owner = remote_policy.skill_owner;
             crate::features::assistant::timing::record_engine_ready(
                 session_id,
                 crate::features::assistant::timing::EngineAcquireTiming {
@@ -2076,8 +2101,9 @@ impl EnginePool {
 
         let is_scheduled = self.store.scheduled_profile(session_id).is_some();
         let finalize_bridge_started = Instant::now();
-        let bridge =
+        let mut bridge =
             Self::finalize_runtime_bridge(bridge, &prepared.prepared, pins_scheduled_model).await;
+        bridge.remote_skill_owner = remote_policy.skill_owner;
         let finalize_bridge_ms = elapsed_ms(finalize_bridge_started);
         let tool_setup_started = Instant::now();
         // The shell execution directory and the engine cwd share one source:
@@ -2100,8 +2126,10 @@ impl EnginePool {
             crate::features::connectors::ima::ImaOpenApiTool::new(),
         ));
         let tool_setup_ms = elapsed_ms(tool_setup_started);
-        // Skill dual-scope governance: compose the composed directory fully
-        // at spawn (materialization opportunity one, V-7). The composed
+        // Local turns compose B's enabled set at spawn (V-7). Both remote
+        // send paths require frozen credentials and have already prepared
+        // their exact skill selection before acquisition; preserve it across
+        // cold spawn and model rebuild rather than widening it here. The composed
         // directory is the discovery root of EngineConfig.skills_dir (the
         // path injected by build_engine_config_for_session_roots) and must
         // exist before spawn, otherwise the first turn's prompt has no
@@ -2112,10 +2140,11 @@ impl EnginePool {
             let scope = self.bridge.session_policy(&sid).mode();
             let project_workspace = self.project_workspace_for(&sid);
             tokio::task::spawn_blocking(move || {
-                crate::features::assistant::skill_materialization::materialize_session_skills(
+                crate::features::assistant::skill_materialization::prepare_engine_spawn_skills(
                     &sid,
                     scope,
                     project_workspace.as_deref(),
+                    remote_policy.skill_owner,
                 )
             })
             .await
@@ -2860,7 +2889,11 @@ impl EnginePool {
         if enabled && !self.swarm_mode_available(session_id) {
             anyhow::bail!("当前会话不支持 Pinvou 蜂群模式");
         }
-        let _reservation = self.turn_lifecycles.for_session(session_id).reserve()?;
+        let _reservation =
+            super::skill_materialization::reserve_unfrozen_session_turn(session_id, || {
+                self.turn_lifecycles.for_session(session_id).reserve()
+            })
+            .map_err(anyhow::Error::msg)??;
         let turn_lock = self.turn_locks.for_session(session_id).await;
         let _turn = turn_lock.lock().await;
         self.store.set_multi_agent(session_id, enabled)?;
@@ -2889,7 +2922,11 @@ impl EnginePool {
         if _flag_guard.as_deref().is_some_and(|rewinding| *rewinding) {
             bail!("该会话绑定的项目目录正在回退/回滚，请稍后重试");
         }
-        let mut reservation = self.turn_lifecycles.for_session(session_id).reserve()?;
+        let mut reservation =
+            super::skill_materialization::reserve_unfrozen_session_turn(session_id, || {
+                self.turn_lifecycles.for_session(session_id).reserve()
+            })
+            .map_err(anyhow::Error::msg)??;
         let baseline = self.store.load(session_id)?;
         reservation.set_base_transcript_revision(transcript_revision(&baseline.messages)?);
         Ok(reservation)
@@ -3039,24 +3076,21 @@ impl EnginePool {
     /// Remote-control turn entry point with a task-scoped model override.
     /// The override participates in normal runtime preparation and engine
     /// rebuild checks but is never written to the session model sidecar.
-    pub(crate) async fn send_remote_user_message<F>(
+    pub(crate) async fn send_remote_user_message(
         &self,
         session_id: &str,
         content: String,
         skill_ids: Vec<String>,
         model_override: Option<RemoteRuntimeModelBundle>,
-        on_reserved: F,
-    ) -> Result<()>
-    where
-        F: FnOnce(u64) + Send,
-    {
-        let reservation = self.reserve_turn(session_id)?;
-        on_reserved(reservation.generation());
+        skill_owner: uuid::Uuid,
+        reservation: TurnReservation,
+    ) -> Result<()> {
         let skill_session_id = session_id.to_owned();
         tokio::task::spawn_blocking(move || {
             crate::features::assistant::skill_materialization::materialize_plain_remote_turn_skills(
                 &skill_session_id,
                 &skill_ids,
+                skill_owner,
             )
         })
         .await
@@ -3072,7 +3106,7 @@ impl EnginePool {
             None,
             Vec::new(),
             reservation,
-            true,
+            RemoteTurnRuntimePolicy::remote(skill_owner),
             None,
             model_override,
         )
@@ -3082,18 +3116,16 @@ impl EnginePool {
     /// Remote attachments use the same ingestion and message construction as
     /// local chat, while retaining the task-scoped model and the single turn
     /// reservation. This method never accepts an A-supplied filesystem path.
-    pub(crate) async fn send_remote_user_message_with_attachments<F>(
+    pub(crate) async fn send_remote_user_message_with_attachments(
         &self,
         session_id: &str,
         content: String,
         attachments: Vec<crate::features::files::file_ingest::IngestResult>,
         skill_ids: Vec<String>,
         model_override: Option<RemoteRuntimeModelBundle>,
-        on_reserved: F,
-    ) -> Result<()>
-    where
-        F: FnOnce(u64) + Send,
-    {
+        skill_owner: uuid::Uuid,
+        reservation: TurnReservation,
+    ) -> Result<()> {
         use crate::features::assistant::attachments::{
             build_message_with_attachments_in_dir, prepare_native_user_message_in_dir,
         };
@@ -3106,17 +3138,17 @@ impl EnginePool {
                     content,
                     skill_ids,
                     model_override,
-                    on_reserved,
+                    skill_owner,
+                    reservation,
                 )
                 .await;
         }
-        let reservation = self.reserve_turn(session_id)?;
-        on_reserved(reservation.generation());
         let skill_session_id = session_id.to_owned();
         tokio::task::spawn_blocking(move || {
             crate::features::assistant::skill_materialization::materialize_plain_remote_turn_skills(
                 &skill_session_id,
                 &skill_ids,
+                skill_owner,
             )
         })
         .await
@@ -3171,7 +3203,7 @@ impl EnginePool {
             None,
             Vec::new(),
             reservation,
-            true,
+            RemoteTurnRuntimePolicy::remote(skill_owner),
             None,
             model_override,
         )
@@ -3255,7 +3287,7 @@ impl EnginePool {
             expert_snapshot,
             expert_candidates,
             reservation,
-            false,
+            RemoteTurnRuntimePolicy::default(),
             None,
             None,
         )
@@ -3273,7 +3305,7 @@ impl EnginePool {
         expert_snapshot: Option<std::sync::Arc<ExpertRosterSnapshot>>,
         expert_candidates: Vec<String>,
         mut reservation: TurnReservation,
-        require_remote_model_credentials: bool,
+        remote_policy: RemoteTurnRuntimePolicy,
         model_override: Option<SavedModel>,
         remote_bundle: Option<RemoteRuntimeModelBundle>,
     ) -> Result<()> {
@@ -3336,7 +3368,7 @@ impl EnginePool {
         self.get_or_spawn_with_policy(
             session_id,
             false,
-            require_remote_model_credentials,
+            remote_policy,
             model_override,
             explicit_credential,
             remote_bundle,
@@ -3437,7 +3469,7 @@ impl EnginePool {
             self.evict_locked(session_id).await;
             crate::features::assistant::timing::start_turn(session_id);
             let engine = match self
-                .get_or_spawn_with_policy(session_id, true, false, None, None, None)
+                .get_or_spawn_with_policy(session_id, true, RemoteTurnRuntimePolicy::default(), None, None, None)
                 .await
             {
                 Ok(engine) => engine,
@@ -8183,6 +8215,7 @@ mod probed_facts_wiring_tests {
             runtime_model_credential: None,
             runtime_model_credential_frozen: false,
             runtime_route_locked: false,
+            remote_skill_owner: None,
             runtime_vision_model: None,
             runtime_vision_credential: None,
             session_affinity_key: None,
