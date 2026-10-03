@@ -1213,6 +1213,32 @@ impl ControlledDeviceManager {
         Ok((context, inner.negotiated_capabilities.clone()))
     }
 
+    /// Keep the original worker and complete lease bound through control enqueue.
+    /// Only liveness-suspect is allowed; a transport-disconnected/resuming worker
+    /// cannot manufacture fresh role evidence. The action must not re-enter us.
+    pub(crate) fn with_owned_liveness_lease<T>(
+        &self,
+        operation: &ControlledOperation,
+        expected: &LeaseContext,
+        action: impl FnOnce() -> T,
+    ) -> Result<T> {
+        let inner = self.inner.lock();
+        ensure_operation(&inner, operation)?;
+        let allowed = inner.phase == ControlledStatusKind::Connected
+            || (inner.phase == ControlledStatusKind::Reconnecting
+                && inner.reconnect_reason == Some(ReconnectReason::LivenessSuspect));
+        if !allowed
+            || inner.lease_context.as_ref() != Some(expected)
+            || !inner
+                .negotiated_capabilities
+                .iter()
+                .any(|cap| cap == "role_liveness_v1")
+        {
+            return Err(ControlledStateError::new("desktop_remote_not_connected"));
+        }
+        Ok(action())
+    }
+
     pub(crate) fn register_cleanup_sink(&self, sink: Arc<dyn ControlledCleanupSink>) {
         self.cleanup_sinks.lock().push(sink);
     }
