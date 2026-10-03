@@ -104,7 +104,7 @@ const MAX_ARTIFACTS: usize = 256;
 pub(crate) const MAX_ENCRYPTED_WIRE_BYTES: usize =
     MAX_ENCRYPTED_FRAME_BYTES.div_ceil(3) * 4 + MAX_CONTROL_MESSAGE_BYTES;
 const CONTROLLER_CONTRACT_SHA256: &str =
-    "f98dc9475965ad51f72e22872774bbeb3729fb53e55405a4390b6b09079bebef";
+    "11c728929280ade5f529efc38a0fca6d618a77839bba1c7e48938b34e781f889";
 
 pub(crate) const CONTROLLER_CAPABILITIES: &[&str] = &[
     "pairing_v1",
@@ -137,6 +137,8 @@ pub(crate) const CONTROLLER_MESSAGE_TYPES: &[&str] = &[
     "encrypted_controller_liveness_a",
     "controller_liveness_attestation_request_a",
     "controller_liveness_attestation_a",
+    "controller_liveness_attestation_request_b",
+    "controller_liveness_attestation_b",
     "controller_resume_prepare",
     "controller_resume_provisional",
     "encrypted_resume_confirm",
@@ -486,6 +488,14 @@ const OUTER_MESSAGE_CAPABILITY_BINDINGS: &[CapabilityBinding] = &[
     },
     CapabilityBinding {
         kind: "controller_liveness_attestation_a",
+        capabilities: &["role_liveness_v1"],
+    },
+    CapabilityBinding {
+        kind: "controller_liveness_attestation_request_b",
+        capabilities: &["role_liveness_v1"],
+    },
+    CapabilityBinding {
+        kind: "controller_liveness_attestation_b",
         capabilities: &["role_liveness_v1"],
     },
     CapabilityBinding {
@@ -934,6 +944,47 @@ fn message_schema(kind: &str) -> Option<Schema> {
                 "remote_control_generation",
                 "liveness_epoch_a",
                 "heartbeat_sequence_a",
+                "attestation_sequence",
+                "challenge_id",
+                "challenge_b64",
+                "observed_age_ms",
+                "remaining_ttl_ms",
+                "issued_at_relay",
+                "relay_signing_key_id",
+                "signature_algorithm",
+                "relay_signature_b64",
+            ],
+            optional: &[],
+            roles: &[RELAY],
+        },
+        "controller_liveness_attestation_request_b" => Schema {
+            required: &[
+                "v",
+                "type",
+                "request_id",
+                "connection_id",
+                "controller_lease_id",
+                "lease_epoch",
+                "relay_epoch",
+                "remote_control_generation",
+                "challenge_id",
+                "challenge_b64",
+            ],
+            optional: &[],
+            roles: &[A],
+        },
+        "controller_liveness_attestation_b" => Schema {
+            required: &[
+                "v",
+                "type",
+                "request_id",
+                "connection_id",
+                "controller_lease_id",
+                "lease_epoch",
+                "relay_epoch",
+                "remote_control_generation",
+                "liveness_epoch_b",
+                "heartbeat_sequence_b",
                 "attestation_sequence",
                 "challenge_id",
                 "challenge_b64",
@@ -1423,7 +1474,10 @@ pub(crate) fn validate_controller_message_json_in_context(
     if kind == "controller_pairing_reserved" {
         validate_reserved_transcript(object)?;
     }
-    if kind == "controller_liveness_attestation_a" {
+    if matches!(
+        kind,
+        "controller_liveness_attestation_a" | "controller_liveness_attestation_b"
+    ) {
         validate_uint(
             required_value(object, "observed_age_ms", "message")?,
             "observed_age_ms",
@@ -2038,6 +2092,8 @@ fn requires_full_lease_context(kind: &str, label: &str) -> bool {
             | "controller_liveness_challenge_a"
             | "controller_liveness_attestation_request_a"
             | "controller_liveness_attestation_a"
+            | "controller_liveness_attestation_request_b"
+            | "controller_liveness_attestation_b"
             | "controller_resume_prepare"
             | "controller_resume_provisional"
             | "encrypted_resume_confirm"
@@ -3762,6 +3818,38 @@ pub(crate) fn build_liveness_attestation_preimage(message: &Value) -> Result<Vec
     Ok(output)
 }
 
+pub(crate) fn build_peer_liveness_attestation_preimage(message: &Value) -> Result<Vec<u8>> {
+    const FIELDS: &[&str] = &[
+        "type",
+        "request_id",
+        "connection_id",
+        "controller_lease_id",
+        "lease_epoch",
+        "relay_epoch",
+        "remote_control_generation",
+        "liveness_epoch_b",
+        "heartbeat_sequence_b",
+        "attestation_sequence",
+        "challenge_id",
+        "challenge_b64",
+        "observed_age_ms",
+        "remaining_ttl_ms",
+        "issued_at_relay",
+        "relay_signing_key_id",
+        "signature_algorithm",
+    ];
+    let object = as_object(message, "attestation")?;
+    if object.get("type").and_then(Value::as_str) != Some("controller_liveness_attestation_b") {
+        return Err(ControllerProtocolError::new("invalid_field", "type"));
+    }
+    let mut output = b"pinvou-controller-peer-b-attestation-v1".to_vec();
+    length_prefix_text(&mut output, &CONTROLLER_PROTOCOL_VERSION.to_string());
+    for field in FIELDS {
+        length_prefix_text(&mut output, object_string(object, field, "attestation")?);
+    }
+    Ok(output)
+}
+
 /// Parsed signing material is not authenticated evidence. Only the enrolled
 /// Relay trust verifier may authorize it before a watchdog state transition.
 pub(crate) struct ParsedLivenessAttestation {
@@ -3774,7 +3862,13 @@ pub(crate) struct ParsedLivenessAttestation {
 pub(crate) fn parse_liveness_attestation(input: &str) -> Result<ParsedLivenessAttestation> {
     let value = validate_controller_message_json(input, RELAY)?;
     let message = as_object(&value, "attestation")?;
-    let signature_preimage = build_liveness_attestation_preimage(&value)?;
+    let signature_preimage = if message.get("type").and_then(Value::as_str)
+        == Some("controller_liveness_attestation_b")
+    {
+        build_peer_liveness_attestation_preimage(&value)?
+    } else {
+        build_liveness_attestation_preimage(&value)?
+    };
     let relay_signature = base64::engine::general_purpose::STANDARD
         .decode(object_string(
             message,
