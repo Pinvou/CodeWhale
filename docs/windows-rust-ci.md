@@ -63,6 +63,26 @@ Each run emits only aggregate, non-sensitive diagnostics:
 No environment values, paths outside the workspace, command output credentials, or
 cache keys derived from secrets are printed.
 
+## Link memory on the hosted runner
+
+The `regression` leg's cold test-binary link can OOM the 16 GB hosted runner.
+The failure mode is not a crash but silent pagefile thrash: the 2026-10
+stable-1.99 rollover reproduced it twice (runs 36919362322 and 36940184038),
+with the whole dependency graph compiling in ~25 minutes and the final link
+producing zero output for the remaining hours until the cap killed the leg.
+The job therefore mirrors the recipe the linux `rust-test` leg measured for
+the same OOM: `CARGO_PROFILE_DEV_LTO=thin` (cross-crate dead-code elimination
+shrinks the test binary; cargo passes `-C linker-plugin-lto` to
+dependencies), `CARGO_PROFILE_DEV_DEBUG=0` (no DWARF; panic file:line comes
+from `Location` rodata), and `RUSTFLAGS` selecting the bundled lld with
+`/threads:1` so both the ThinLTO backends and the final link stay serial
+(the linux leg uses the gcc-driver equivalents `-fuse-ld=lld`,
+`--thinlto-jobs=1`, `--threads=1`). Growing the hosted runner's pagefile is
+not an option: a pagefile change requires a reboot a CI job cannot perform,
+so peak link memory is cut below RAM instead. The linker-selection flags are
+probed per toolchain by the probe step, since the stable surface for picking
+lld has moved between releases.
+
 ## Expected result and rollback
 
 Previously the critical path was approximately `setup + check + link + tests`.
