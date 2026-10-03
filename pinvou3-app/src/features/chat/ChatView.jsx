@@ -67,6 +67,7 @@ import {
   activeLiveRemoteTaskId,
   remoteProxyHandshakeBinding,
   remoteProxyLeaseIdentity,
+  remoteProxyComposerIdentity,
   remoteProxyModelSelectionIdentity,
   remoteProxyPresentationState,
   remoteProjectionLabelKey,
@@ -78,6 +79,7 @@ import {
 } from '../remote-control/remote-session-adapter.mjs';
 import {
   downloadRemoteArtifact,
+  createRemoteTransferGuard,
   saveRemoteArtifactBlob,
   uploadRemoteFiles,
   validateRemoteFiles,
@@ -94,6 +96,7 @@ import {
   taskStatusKey,
 } from '../remote-control/remote-control-logic.mjs';
 import { createCapabilityRequestLoop } from '../remote-control/capability-request-loop.mjs';
+import { permissionOperationCopyKey, permissionRedactionCopyKey } from '../remote-control/controlled-device-panel-state.mjs';
 import {
   canUseControllerTemporaryModel,
   clearResolvedRemoteModelRequiredError,
@@ -931,6 +934,7 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
       const controlledCapabilityRequestRef = useRef(0);
       const [remotePreparedFiles, setRemotePreparedFiles] = useState(null);
       const [remoteTransfer, setRemoteTransfer] = useState(null);
+      const [remoteTransferGuard] = useState(createRemoteTransferGuard);
       const [remotePermissions, setRemotePermissions] = useState([]);
       const [remoteArtifacts, setRemoteArtifacts] = useState([]);
       const [remoteArtifactPreview, setRemoteArtifactPreview] = useState(null);
@@ -948,6 +952,12 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
       const remoteSendIdentityRef = useRef(remoteSendIdentity);
       // eslint-disable-next-line react-hooks/refs -- async completion checks the latest committed binding
       remoteSendIdentityRef.current = remoteSendIdentity;
+      const remoteComposerIdentity = remoteChatActive
+        ? remoteProxyComposerIdentity(activeSessionId, remoteConnection)
+        : remoteSendIdentity;
+      const remoteComposerIdentityRef = useRef(remoteComposerIdentity);
+      // eslint-disable-next-line react-hooks/refs -- failed sends restore only the current draft owner
+      remoteComposerIdentityRef.current = remoteComposerIdentity;
       useEffect(() => {
         setRemoteSendError(current => (
           current && current.identity !== remoteSendIdentity ? null : current
@@ -1164,11 +1174,12 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
         setRemoteSkillIds([]);
         setRemotePreparedFiles(null);
         setRemoteTransfer(null);
+        remoteTransferGuard.invalidate();
         setRemotePermissions([]);
         setRemoteArtifacts([]);
         setRemoteArtifactPreview(null);
         setRemoteActionError(null);
-      }, [remoteSendIdentity]);
+      }, [remoteComposerIdentity, remoteTransferGuard]);
       useEffect(() => {
         if (!remoteArtifactPreview) return undefined;
         remoteArtifactPreviewCloseRef.current?.focus();
@@ -2175,6 +2186,8 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
             setRemoteSendError({ identity: sendIdentity, code: remoteModelError });
             return false;
           }
+          const transferAttempt = remoteTransferGuard.start(sendIdentity);
+          const currentTransfer = () => remoteTransferGuard.isCurrent(transferAttempt, remoteSendIdentityRef.current);
           try {
             const taskText = outgoing || t.remoteConversation.attachmentOnlyPrompt;
             const intent = newRemoteTaskIntent(
@@ -2195,15 +2208,18 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
             );
             setRemoteDispatchRevision(value => value + 1);
             if (preparedOutcome.state !== 'prepared_not_sent' || !preparedOutcome.handle) return 'held';
+            if (!currentTransfer()) return 'held';
             const selectedFiles = remoteFiles.slice();
             setRemotePreparedFiles({ taskId: preparedOutcome.handle.taskId, files: selectedFiles });
             let attachmentIds = [];
             if (selectedFiles.length) {
-              setRemoteTransfer({ state: 'uploading', fileName: selectedFiles[0].name, receivedBytes: 0, totalBytes: selectedFiles[0].size });
+              setRemoteTransfer({ owner: transferAttempt, state: 'uploading', fileName: selectedFiles[0].name, receivedBytes: 0, totalBytes: selectedFiles[0].size });
               attachmentIds = await uploadRemoteFiles(
                 bridge.desktopRemoteControl, remoteBinding, preparedOutcome.handle.taskId, selectedFiles,
-                progress => setRemoteTransfer({ state: 'uploading', ...progress }),
+                progress => setRemoteTransfer(current => currentTransfer()
+                  ? { owner: transferAttempt, state: 'uploading', ...progress } : current),
               );
+              if (!currentTransfer()) return 'held';
               setRemotePreparedFiles({ taskId: preparedOutcome.handle.taskId, files: selectedFiles, attachmentIds });
             }
             const report = await bridge.desktopRemoteControl.commitRemoteTask(
@@ -2216,15 +2232,20 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
             );
             setRemoteDispatchRevision(value => value + 1);
             setRemoteSendError(current => current?.identity === sendIdentity ? null : current);
-            setRemoteTransfer(null);
-            setRemotePreparedFiles(null);
-            setRemoteFiles([]);
+            if (currentTransfer()) {
+              setRemotePreparedFiles(null);
+              setRemoteFiles(current => current === remoteFiles ? [] : current);
+            }
             if (outcome.state !== 'queued') return 'held';
           } catch (failure) {
             if (remoteSendIdentityRef.current === sendIdentity) {
               setRemoteSendError({ identity: sendIdentity, code: String(failure?.code || 'errorGeneric') });
             }
             throw failure;
+          } finally {
+            if (remoteTransferGuard.finish(transferAttempt)) {
+              setRemoteTransfer(current => current?.owner === transferAttempt ? null : current);
+            }
           }
           return true;
         }
@@ -2322,7 +2343,7 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
         // as-is: the voice task lane needs to tell "restored" apart from
         // accepted, while ordinary sends treat both as not-false.
         return dispatchResult;
-      }, [activeSessionId, attachments, controlledCapabilityBound, controlledCapabilityBusy, controlledChatActive, controlledLinkReady, controlledSession.sessionId, controlledSkillIds, dataVisualizationSceneActive, documentWritingSceneActive, effectiveRemoteModelSource, hasReadyAttachment, personalWorkbenchSceneActive, pptDesignSceneActive, remoteBinding, remoteChatActive, remoteFiles, remoteMode, remoteModelError, remoteNewDispatchReady, remoteProxyHistory, remoteSendIdentity, remoteSkillIds, remoteWorkspaceId, selectedRemoteModelId, t, visualPosterSceneActive]);
+      }, [activeSessionId, attachments, controlledCapabilityBound, controlledCapabilityBusy, controlledChatActive, controlledLinkReady, controlledSession.sessionId, controlledSkillIds, dataVisualizationSceneActive, documentWritingSceneActive, effectiveRemoteModelSource, hasReadyAttachment, personalWorkbenchSceneActive, pptDesignSceneActive, remoteBinding, remoteChatActive, remoteFiles, remoteMode, remoteModelError, remoteNewDispatchReady, remoteProxyHistory, remoteSendIdentity, remoteSkillIds, remoteTransferGuard, remoteWorkspaceId, selectedRemoteModelId, t, visualPosterSceneActive]);
 
       // SessionStore mapping/lease establishment is owned by the A-side
       // authenticated ensure/bind command, never by an implicit ChatView open.
@@ -2408,14 +2429,19 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
           || item.identity !== remoteSendIdentity) return;
         setRemoteDispatchAction(item.taskId);
         setRemoteDispatchActionError(null);
+        const transferAttempt = remoteTransferGuard.start(item.identity);
+        const currentTransfer = () => remoteTransferGuard.isCurrent(transferAttempt, remoteSendIdentityRef.current);
         try {
           const preparedFiles = remotePreparedFiles?.taskId === item.taskId ? remotePreparedFiles : null;
           let attachmentIds = preparedFiles?.attachmentIds || [];
           if (!attachmentIds.length && preparedFiles?.files?.length) {
+            setRemoteTransfer({ owner: transferAttempt, state: 'uploading', receivedBytes: 0, totalBytes: preparedFiles.files[0].size, fileName: preparedFiles.files[0].name });
             attachmentIds = await uploadRemoteFiles(
               bridge.desktopRemoteControl, remoteBinding, item.taskId, preparedFiles.files,
-              progress => setRemoteTransfer({ state: 'uploading', ...progress }),
+              progress => setRemoteTransfer(current => currentTransfer()
+                ? { owner: transferAttempt, state: 'uploading', ...progress } : current),
             );
+            if (!currentTransfer()) return;
             setRemotePreparedFiles({ ...preparedFiles, attachmentIds });
           }
           const report = await bridge.desktopRemoteControl.commitRemoteTask(
@@ -2429,14 +2455,18 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
           recordRemoteDispatch(item.localSessionId, item.remoteRef, item.identity, item.text,
             sameHandle ? report : { state: 'outcome_unknown', retryHandle: item.handle },
             remoteProxyHistory);
-          setRemoteTransfer(null);
-          setRemotePreparedFiles(null);
-          setRemoteFiles([]);
+          if (currentTransfer()) {
+            setRemotePreparedFiles(null);
+            setRemoteFiles(current => current === remoteFiles ? [] : current);
+          }
           setRemoteDispatchRevision(value => value + 1);
         } catch (failure) {
-          setRemoteDispatchActionError({ localSessionId: item.localSessionId, code: String(failure?.code || 'errorGeneric') });
+          if (currentTransfer()) setRemoteDispatchActionError({ localSessionId: item.localSessionId, code: String(failure?.code || 'errorGeneric') });
         } finally {
-          setRemoteDispatchAction(null);
+          if (remoteTransferGuard.finish(transferAttempt)) {
+            setRemoteTransfer(current => current?.owner === transferAttempt ? null : current);
+            setRemoteDispatchAction(current => current === item.taskId ? null : current);
+          }
         }
       }
       async function abandonRemoteTask(item) {
@@ -3009,9 +3039,9 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
         }
         const text = constrained.text;
         const sentSessionId = activeSessionId;
-        const sentRemoteIdentity = remoteSendIdentity;
+        const sentRemoteIdentity = remoteComposerIdentity;
         const mayRestore = () => !remoteTranscriptActive || sameRemoteComposerOwner(
-          sentSessionId, sentRemoteIdentity, activeSessionIdRef.current, remoteSendIdentityRef.current,
+          sentSessionId, sentRemoteIdentity, activeSessionIdRef.current, remoteComposerIdentityRef.current,
         );
         // Clear the composer the moment the button is clicked (before the
         // await returns); on failure (reserve conflict etc.) or a notice-only
@@ -3708,9 +3738,9 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
                 )}
                 {remotePermissions.map(permission => (
                   <div key={permission.permissionRequestId} role="alert" data-coordination-id={permission.permissionRequestId} className="mb-2 rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 py-2">
-                    <div className="font-medium">{t.remoteConversation.permissionRequest}: {permission.operationType}</div>
-                    {permission.preview && <p className="mt-1 whitespace-pre-wrap break-words">{permission.preview}</p>}
-                    {permission.targetScope && <p className="mt-1 opacity-70">{permission.targetScope}</p>}
+                    <div className="font-medium">{t.remoteConversation.permissionRequest}: {t.controlledDevice[permissionOperationCopyKey(permission.operationType)]}</div>
+                    {permissionRedactionCopyKey(permission.preview) && <p className="mt-1 whitespace-pre-wrap break-words">{t.controlledDevice[permissionRedactionCopyKey(permission.preview)]}</p>}
+                    {permissionRedactionCopyKey(permission.targetScope) && <p className="mt-1 opacity-70">{t.controlledDevice[permissionRedactionCopyKey(permission.targetScope)]}</p>}
                     {permission.state === 'pending' ? (
                       <div className="mt-2 flex gap-2">
                         <button type="button" data-testid="chat-remote-permission-allow" data-coordination-id={permission.permissionRequestId} onClick={() => decideRemotePermission(permission, 'allow')} disabled={!!remoteDispatchAction}
