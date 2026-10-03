@@ -1472,15 +1472,12 @@ impl RequestLedger {
     /// Callers must first drain hosted request scanners and finish all native
     /// teardown; otherwise removing a pending compensation record would make a
     /// retry unable to close the resource it created.
-    // request_key(session_id, "purge") always ends with the fixed suffix just
-    // passed to it, so strip_suffix always succeeds.
-    #[allow(clippy::expect_used)]
     pub(super) fn purge_session(&mut self, session_id: &str) -> Result<usize, String> {
         // Reuse the request-key validator so purge cannot turn an invalid,
         // attacker-controlled prefix into a cross-session deletion.
         let prefix = request_key(session_id, "purge")?
             .strip_suffix("purge")
-            .expect("fixed request id suffix")
+            .ok_or_else(|| "Browser request key is missing its fixed suffix".to_string())?
             .to_string();
         let before = self.records.len();
         self.records.retain(|key, _| !key.starts_with(&prefix));

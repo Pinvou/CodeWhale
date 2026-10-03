@@ -28,14 +28,130 @@ pub(crate) fn with_temp_home(prefix: &str, f: impl FnOnce()) {
     let prev = std::env::var("PINVOU3_HOME").ok();
     // SAFETY: holding platform::paths::tests::ENV_LOCK; env writes serialized in-process.
     unsafe { std::env::set_var("PINVOU3_HOME", &dir) };
-    f();
-    match prev {
-        // SAFETY: holding platform::paths::tests::ENV_LOCK; env writes serialized in-process.
-        Some(v) => unsafe { std::env::set_var("PINVOU3_HOME", v) },
-        // SAFETY: holding platform::paths::tests::ENV_LOCK; env writes serialized in-process.
-        None => unsafe { std::env::remove_var("PINVOU3_HOME") },
+
+    // Restore through Drop, not straight-line code after `f()`. A failing
+    // assertion inside the closure unwinds, and with the restore written
+    // inline it would be skipped: the temp dir leaks AND PINVOU3_HOME stays
+    // pointed at it for every later test in this process, so one genuine
+    // failure cascades into a string of unrelated ones and the suite's red
+    // signal stops meaning anything. Same RAII contract as `EnvRestore` below.
+    struct TempHomeRestore {
+        previous: Option<OsString>,
+        dir: std::path::PathBuf,
     }
-    let _ = std::fs::remove_dir_all(&dir);
+    impl Drop for TempHomeRestore {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                // SAFETY: the caller still holds ENV_LOCK for this scope.
+                Some(v) => unsafe { std::env::set_var("PINVOU3_HOME", v) },
+                // SAFETY: the caller still holds ENV_LOCK for this scope.
+                None => unsafe { std::env::remove_var("PINVOU3_HOME") },
+            }
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+    // Declared after `_g` so it drops BEFORE the lock is released: no other
+    // test may observe the temporary value.
+    let _restore = TempHomeRestore {
+        previous: prev.map(OsString::from),
+        dir: dir.clone(),
+    };
+    f();
+}
+
+/// Take the crate-unique env lock and snapshot a set of env vars in one step:
+/// `let (_lock, _env) = locked_env(&["PINVOU3_HOME"]);`
+/// Not reentrant — never call while already holding ENV_LOCK. The guard
+/// releases the lock and restores the env when scope exits (including panic
+/// unwind). (`bridge.rs`'s test module still keeps a private
+/// `locked_env`/`EnvGuard` pair; its ~hundred call sites have not been
+/// migrated here — new code always uses this implementation so the old pair
+/// stops spreading.)
+#[cfg(test)]
+pub(crate) fn locked_env(
+    vars: &[&'static str],
+) -> (std::sync::MutexGuard<'static, ()>, EnvRestore) {
+    let lock = crate::platform::paths::tests::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    (lock, EnvRestore::capture(vars))
+}
+
+/// 连接器旧布局 bin 目录的测试入口：返回 `managed_connector_bin_dir()`；为
+/// `None` 时硬断言当前目标平台确实不受 lock 表覆盖。消费方测试（存量迁移、
+/// PATH 次序等）据此软跳过——受支持平台上的 wrapper 回归在这里失败，而不是
+/// 被各消费方测试的 `else { return }` 静默吞掉（否则 PATH 注入、存量迁移/
+/// 残留清理、spawn 回退解析的回归会全部变哑）。
+#[cfg(test)]
+pub(crate) fn managed_connector_bin_dir_or_assert_unsupported() -> Option<std::path::PathBuf> {
+    let dir = crate::platform::paths::managed_connector_bin_dir();
+    if dir.is_none() {
+        assert!(
+            crate::platform::paths::connector_platform_dir(
+                std::env::consts::OS,
+                std::env::consts::ARCH
+            )
+            .is_none(),
+            "managed_connector_bin_dir must be Some on a lock-covered platform (os={}, arch={})",
+            std::env::consts::OS,
+            std::env::consts::ARCH
+        );
+    }
+    dir
+}
+
+/// RAII 快照/恢复一组环境变量：`capture` 记录现值，`Drop`（含 panic 路径）
+/// 逐一恢复。调用方测试必须先持有 `platform::paths::tests::ENV_LOCK` 再
+/// capture，保证 env 写全程在锁内串行。
+use std::ffi::OsString;
+
+#[cfg(test)]
+pub(crate) struct EnvRestore {
+    saved: Vec<(&'static str, Option<OsString>)>,
+    /// env 恢复完成后执行的一次性收尾动作（如 multiagent 回归测试恢复
+    /// PINVOU3_HOME 后刷新 personas 缓存）；普通用例为 `None`。
+    post_restore: Option<Box<dyn FnOnce() + Send>>,
+}
+
+#[cfg(test)]
+impl EnvRestore {
+    pub(crate) fn capture(names: &[&'static str]) -> Self {
+        Self {
+            saved: names
+                .iter()
+                .map(|name| (*name, std::env::var_os(name)))
+                .collect(),
+            post_restore: None,
+        }
+    }
+
+    /// 同 [`EnvRestore::capture`]，并在 env 全部恢复完成后执行一次
+    /// `post_restore`（先恢复 env、后收尾，保证收尾读到的是恢复后的环境）。
+    pub(crate) fn capture_with_post_restore(
+        names: &[&'static str],
+        post_restore: impl FnOnce() + Send + 'static,
+    ) -> Self {
+        let mut this = Self::capture(names);
+        this.post_restore = Some(Box::new(post_restore));
+        this
+    }
+}
+
+#[cfg(test)]
+impl Drop for EnvRestore {
+    fn drop(&mut self) {
+        for (name, value) in self.saved.drain(..) {
+            match value {
+                // SAFETY: the caller's test holds platform::paths::tests::ENV_LOCK throughout; env writes are serialized in-process.
+                Some(value) => unsafe { std::env::set_var(name, value) },
+                // SAFETY: the caller's test holds platform::paths::tests::ENV_LOCK throughout; env writes are serialized in-process.
+                None => unsafe { std::env::remove_var(name) },
+            }
+        }
+        if let Some(post_restore) = self.post_restore.take() {
+            post_restore();
+        }
+    }
 }
 
 /// Test helper: drop the current user's read permission on `dir` (Unix chmod
@@ -89,5 +205,43 @@ impl Drop for UnreadableDirForTest {
         {
             let _ = &self.dir;
         }
+    }
+}
+
+/// POSIX mode bits of `path`, or `None` where the platform has none.
+///
+/// Permission assertions belong to the platform layer: a feature test that
+/// writes its own `#[cfg(unix)]` block puts an OS conditional outside an
+/// adapter (architecture guard `rust_target_cfg_outside_adapter`), and every
+/// such copy drifts on its own. Callers assert `Some(0o600)` and skip on
+/// `None`.
+#[cfg(test)]
+pub(crate) fn permission_bits(path: &std::path::Path) -> Option<u32> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        Some(std::fs::metadata(path).ok()?.permissions().mode() & 0o777)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        None
+    }
+}
+
+/// Loosens `path` to 0644 the way a pre-hardening build's umask left it, so a
+/// test can prove the next write tightens it. No-op (and reports `false`)
+/// where the platform has no mode bits.
+#[cfg(test)]
+pub(crate) fn loosen_to_world_readable_for_test(path: &std::path::Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o644)).is_ok()
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        false
     }
 }

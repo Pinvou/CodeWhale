@@ -135,10 +135,8 @@
   // monitor page is open. Numeric values jitter naturally (cpu/gpu
   // percentages etc.), so comparisons allow a 0.5 tolerance (prefer one
   // extra notify over ever getting stuck); counters are mostly strings after
-  // toFixed/round and compare exactly. updatedAt is a poll-tick marker (never
-  // rendered, only a sampling trigger) and must be excluded, otherwise every
-  // second counts as "changed"; the page clock is driven by MonitorView's
-  // local 1s timer and does not depend on it.
+  // toFixed/round and compare exactly. The page clock is driven by
+  // MonitorView's local 1s timer and does not depend on any poll-tick marker.
   function monitorFmtEqual(prev, next) {
     if (prev === next) return true;
     if (!prev || !next) return false;
@@ -152,7 +150,6 @@
     if (keys.length !== Object.keys(prev).length) return false;
     for (let i = 0; i < keys.length; i++) {
       const key = keys[i];
-      if (key === "updatedAt") continue;
       const a = prev[key];
       const b = next[key];
       if (a && b && typeof a === "object" && typeof b === "object") {
@@ -288,7 +285,6 @@
         appVersion: snap.app ? snap.app.pinvou3_version + bt("betaVersionSuffix") : "—",
         dtVersion: snap.app ? snap.app.deepseek_tui_version : "—",
         uptime: snap.app ? fmtDuration(snap.app.session_uptime_secs) : "—",
-        updatedAt: snap.generated_at_ms ? new Date(snap.generated_at_ms).toLocaleTimeString() : "—",
       };
       if (snap.vllm && snap.vllm.max_model_len) {
         maxModelLen = snap.vllm.max_model_len;

@@ -100,7 +100,11 @@ pub async fn checkpoint_diff(
                 "会话「{busy}」绑定同一项目目录且正在执行，请稍后再读取变更预览"
             ));
         }
-        checkpoints::diff_checkpoint(&ledger, &execution, &checkpoint_id)
+        // `false`: the webview renders only the `changes` list (RewindChip);
+        // generating the unified diff here would cost a full `git diff` per
+        // preview open for bytes nothing reads. The patch surface is the
+        // CLI's, whose caller passes `true`.
+        checkpoints::diff_checkpoint(&ledger, &execution, &checkpoint_id, false)
             .map_err(|error| format!("读取检查点差异失败: {error:#}"))
     })
     .await

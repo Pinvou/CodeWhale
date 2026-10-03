@@ -54,7 +54,12 @@ function injectSource() {
     };
     window.addEventListener('pinvou:tools-changed',()=>{state.composerChanged++;});
     window.__TAURI_EVENT_HANDLERS__={};
-    const tools=()=>Object.entries(TOOL_META).map(([id,[name,companions]])=>({id,name,description:'test',version:'1.0.0',icon:'',category:'test',installed:!!state.installed[id],companion_skills:companions}));
+    const tools=()=>Object.entries(TOOL_META).map(([id,[name,companions]])=>({id,name,description:'test',version:'1.0.0',icon:'',category:'test',installed:!!state.installed[id],companion_skills:companions}))
+      // Builtin plugins (contract §3.1): entries with builtin===true +
+      // visibility:system go to the read-only "builtin plugins" subpage, not
+      // the regular card flow; the audit fields (tool list/security level/
+      // data access/bundle version) ride along in list_marketplace_tools.
+      .concat([{id:'session-reader',name:'会话读取',description:'只读读取本机其他会话',version:'1.0.0',icon:'',category:'test',installed:true,companion_skills:[],builtin:true,visibility:'system',security_level:'L0',data_access:['sessions.read'],mcp_tools:['mcp_session-reader_read_session','mcp_session-reader_list_sessions'],bundle_version:'8.8.8'}]);
     const skills=()=>[
       // companion 技能安装态 = 所属 MCP 已装 或 技能独立已装（G3 混合态）。
       {id:'government-writing',title:'党政机关公文写作',installed:!!(state.installed.gongwen||state.skills['government-writing']),user_uploaded:false},
@@ -151,6 +156,11 @@ function injectSource() {
             const c=!!state.skills.visualizer;
             return Promise.resolve(mk(c,true,null,c?[act('uninstall')]:[act('install')]));
           }
+          // Builtin plugins: no actions (the read-only subpage does not
+          // consume readiness; batch lookups must not error on it either).
+          if(id==='session-reader'){
+            return Promise.resolve(mk(true,true,null,[]));
+          }
           if(id==='government-writing'){
             const c=!!(state.installed.gongwen||state.skills['government-writing']);
             return Promise.resolve(mk(c,true,null,c?[act('uninstall')]:[act('install')]));
@@ -177,7 +187,9 @@ function injectSource() {
         // mock 不再 no-op，勾选往返才可测）。
         case 'get_bundle_visibility': return state.failVisibility ? Promise.reject(new Error('mock visibility read failure')) : Promise.resolve(state.hidden[args.scope]||[]);
         case 'set_bundle_visibility': state.hidden[args.scope]=(args.bundleIds||[]).map(toPackageId); return Promise.resolve(null);
-        case 'feishu_apply_skills': case 'wecom_apply_skills': case 'dingtalk_apply_skills': case 'tmeet_apply_skills': return Promise.resolve(null);
+        // failApplySkills simulates the skill write failing after authorization already succeeded (M1 regression).
+        case 'feishu_apply_skills': case 'wecom_apply_skills': case 'dingtalk_apply_skills': case 'tmeet_apply_skills':
+          return state.failApplySkills ? Promise.reject(new Error('mock apply skills failure')) : Promise.resolve(null);
         // failOpenExternal simulates an external-url allowlist rejection: the WeCom QR modal's "Open in browser" must surface a visible error.
         case 'open_external_url': return state.failOpenExternal ? Promise.reject('external-url-not-allowlisted') : Promise.resolve(null);
         default: return Promise.resolve(null);
@@ -279,8 +291,11 @@ async function visibilityBox(page, cardText, modeLabel, click) {
 }
 
 (async () => {
-  const { dict } = await import('../src/shared/i18n.js');
+  // The tmeet readiness failure renders the localized auth_failed connector error; read it from the dictionary so the copy can change freely.
+  const { dict } = await import('./helpers/i18n-all.js');
   const tmeetAuthFailedCopy = dict.zh.uiToolStore.connectorErrors.auth_failed;
+  const tmeetSkillsFailedCopy = dict.zh.uiToolStore.connectorErrors.skills_enable_failed;
+  const wecomAuthFailedCopy = dict.zh.uiToolStore.connectorErrors.auth_failed;
   const { url } = await startUiTestServer();
   const browser = await puppeteer.launch({executablePath:CHROME,headless:'new',args:['--no-sandbox','--disable-gpu','--no-first-run'],userDataDir:PROFILE});
   const page = await browser.newPage();
@@ -541,6 +556,48 @@ async function visibilityBox(page, cardText, modeLabel, click) {
       }));
       await page.evaluate(() => { window.__TOOL_STORE_TEST__.failOpenExternal = false; });
       await dismiss(page);
+      // Backend `wecom:error` events are the only ingress that carries real raw
+      // backend text (the Rust json! message field); the card must render the
+      // localized category message and never the raw payload or its details.
+      await page.evaluate(() => window.__emitTauri('wecom:error', {
+        phase: 'authorize',
+        code: 'auth_failed',
+        message: 'RAW后端诊断 payload secret_token=abcdef 授权流程中断',
+      }));
+      await sleep(150);
+      rec('WeCom backend error event renders localized copy without the raw payload', await page.evaluate((authFailedCopy) => {
+        const text = document.body.innerText;
+        return text.includes(authFailedCopy) && !text.includes('secret_token') && !text.includes('RAW后端诊断');
+      }, wecomAuthFailedCopy));
+      await clickExact(page, '关闭'); await sleep(150);
+      // A late backend error after the card was closed must not fabricate a
+      // fresh error card (the flow store is null; the listener drops the event).
+      // Official 并存口径:主视图 wecom:error 监听对每条失败事件弹本地化 toast(「知道了」
+      // 才消),迟到的重发事件会再次弹 toast——这是 Official 既有 UX,不属于卡片复活。
+      // 因此卡片复活的断言以卡片自身标记为准(「连接未完成」标题与关闭/重试按钮),
+      // toast 的本地化文案不算复活;原始负载在卡片与 toast 两个界面上都不得出现。
+      await page.evaluate(() => window.__emitTauri('wecom:error', {
+        phase: 'authorize',
+        code: 'auth_failed',
+        message: 'RAW后端诊断 payload secret_token=abcdef 授权流程中断',
+      }));
+      await sleep(150);
+      rec('WeCom late backend error after close does not resurrect the card', await page.evaluate(() => (
+        !document.body.innerText.includes('连接未完成')
+        && ![...document.querySelectorAll('button')].some(b => ['关闭', '重试'].includes((b.textContent || '').trim()))
+        && !document.body.innerText.includes('secret_token')
+        && !document.body.innerText.includes('RAW后端诊断')
+      )));
+      // Re-open the flow card through the real connect path first: a late QR
+      // event must not fabricate a card from a closed flow (the listener drops
+      // it), so the QR restore below only works on a card opened by a connect.
+      await clickExact(page, '连接'); await sleep(260);
+      await page.evaluate(() => window.__emitTauri('wecom:qr', {
+        phase: 'authorize',
+        url: 'https://work.weixin.qq.com/ai/qc/gen?source=wecom_cli_external&test=1',
+        qr_data_url: 'data:image/png;base64,AAAA',
+      }));
+      await sleep(150);
       await clickExact(page, '取消'); await sleep(150);
       rec('WeCom flow-card cancel clears the flow card', await page.evaluate(() => {
         const qrImg = [...document.querySelectorAll('img')].some(i => (i.getAttribute('src') || '') === 'data:image/png;base64,AAAA');
@@ -571,6 +628,20 @@ async function visibilityBox(page, cardText, modeLabel, click) {
           && !document.body.innerText.includes('已连接腾讯会议')
           && document.body.innerText.includes(authFailedCopy);
       }, { beforeApply, authFailedCopy: tmeetAuthFailedCopy }));
+      // Regression: when the readiness re-check passes but the skill write itself throws, the card
+      // must report skills_enable_failed — authorization demonstrably succeeded, so auth_failed is false.
+      await page.evaluate(() => {
+        window.__TOOL_STORE_TEST__.connected.tmeet = true; // readiness re-check now passes
+        window.__TOOL_STORE_TEST__.failApplySkills = true;
+        return window.__emitTauri('tmeet:connected', {});
+      });
+      await sleep(180);
+      rec('腾讯会议授权成功但技能写入失败须报技能启用失败', await page.evaluate(({ skillsFailedCopy, authFailedCopy }) => (
+        document.body.innerText.includes(skillsFailedCopy)
+        && !document.body.innerText.includes(authFailedCopy)
+        && !document.body.innerText.includes('已连接腾讯会议')
+      ), { skillsFailedCopy: tmeetSkillsFailedCopy, authFailedCopy: tmeetAuthFailedCopy }));
+      await page.evaluate(() => { window.__TOOL_STORE_TEST__.failApplySkills = false; });
     }
     await page.evaluate((id,event)=>{window.__TOOL_STORE_TEST__.connected[id]=true;return window.__emitTauri(event,{});},id,event);
     await sleep(180); await dismiss(page);
@@ -680,6 +751,50 @@ async function visibilityBox(page, cardText, modeLabel, click) {
     if(x.args.toolId==='ima')return false;
     return x.args&&x.args.toolId&&!x.args.config;
   }));
+
+  // Built-in plugins subpage (contract §3.1 transparency/audit window):
+  // toolbar entry -> read-only card field assertions -> back to the main list.
+  // session-reader comes from the mocked list_marketplace_tools
+  // (builtin===true + visibility:system); the builtin skill (visual design) comes
+  // from tsSkillsData static data — both land on the same subpage.
+  await page.click('[data-testid="tool-store-builtin-plugins"]');
+  await sleep(300);
+  const builtinPage=await page.evaluate(()=>{
+    const list=document.querySelector('[data-testid="builtin-plugin-list"]');
+    if(!list)return {list:false};
+    const cards=[...list.querySelectorAll('[data-testid="builtin-plugin-card"]')];
+    const text=c=>(c&&(c.textContent||''))||'';
+    const sr=cards.find(c=>c.getAttribute('data-tool-id')==='session-reader');
+    return {
+      list:true,
+      sr:!!sr,
+      badge:text(sr).includes('内置 · 始终启用'),
+      tools:text(sr).includes('read_session')&&text(sr).includes('list_sessions'),
+      level:text(sr).includes('L0'),
+      version:text(sr).includes('v8.8.8'),
+      access:text(sr).includes('本机会话存储（只读）'),
+      // Read-only: the card carries no buttons at all (no uninstall/toggle/
+      // configure actions).
+      noAction:!!sr&&sr.querySelector('button')===null,
+      skill:cards.some(c=>text(c).includes('视觉设计')),
+      // The mode-controlled builtin skill must show the mode-controlled badge
+      // on this audit page (agreeing with its store card), never "always on"
+      // (review round-5 M3).
+      skillCardText:(()=>{const c=cards.find(c=>text(c).includes('视觉设计'));return c?(c.textContent||''):null;})(),
+    };
+  });
+  rec('builtin subpage card fields (badge/tool list/security level/version/data access/read-only without buttons)',
+    builtinPage.list&&builtinPage.sr&&builtinPage.badge&&builtinPage.tools&&builtinPage.level&&builtinPage.version&&builtinPage.access&&builtinPage.noAction&&builtinPage.skill,
+    builtinPage.list?'':JSON.stringify(builtinPage));
+  rec('builtin subpage mode-controlled skill badge agrees with the store card',
+    !!builtinPage.skillCardText&&builtinPage.skillCardText.includes('内置 · 受模式控制')&&!builtinPage.skillCardText.includes('内置 · 始终启用'),
+    builtinPage.skillCardText===null?'card missing':builtinPage.skillCardText);
+  await page.click('[data-testid="builtin-plugins-back"]');
+  await sleep(200);
+  rec('builtin subpage returns to the main list',await page.evaluate((selector)=>(
+    !document.querySelector('[data-testid="builtin-plugin-list"]')
+    &&(!!document.querySelector(selector)||[...document.querySelectorAll('input')].some(el=>(el.getAttribute('placeholder')||'').includes('搜索')))
+  ),TOOL_STORE_SEARCH_SELECTOR));
   rec('页面无未处理 JavaScript 异常',errors.length===0,errors.slice(0,2).join(' | '));
 
   await browser.close();
