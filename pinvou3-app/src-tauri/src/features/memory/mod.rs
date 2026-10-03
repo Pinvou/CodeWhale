@@ -59,6 +59,13 @@ pub use self::io::{
 // `memory_add_not_materialized` failure whenever the cap changes.
 pub use self::io::WORK_CONTEXT_TEXT_MAX_CHARS;
 
+// ---- stored-text normalization (util) ----
+// The CLI predicts the text `memory add` stores for work context and the text
+// `memory update` stores in every editable store; those writers normalize it
+// with this function, so a local copy would drift into false
+// "not materialized" failures.
+pub use self::util::clean_candidate_sentence;
+
 // ---- LLM 后台复盘（llm_review）----
 pub use self::llm_review::review_turn_candidates_with_llm;
 

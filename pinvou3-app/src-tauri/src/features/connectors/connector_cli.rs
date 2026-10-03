@@ -780,17 +780,18 @@ fn collect_refresh_outcomes(
 pub fn bundle_store_on_connected(id: &str) {
     use crate::features::marketplace::bundle;
     use crate::features::marketplace::store::{
-        ASSET_KIND_CLI, AssetRef, BundleRecord, BundleSource, BundleStore,
+        ASSET_KIND_CLI, AssetEntry, AssetRef, BundleRecord, BundleSource, BundleStore,
     };
     let mut record = BundleRecord::installed_now(id, BundleSource::Builtin);
     if let Some(bin) = bundle::cli_bundle_bin(id) {
         if let Some(pin) = crate::platform::connector_lock::artifact_pin(bin) {
-            record.assets.push(AssetRef {
+            record.assets.push(AssetEntry::Ref(AssetRef {
                 kind: ASSET_KIND_CLI.to_string(),
                 name: bin.to_string(),
                 version: pin.version,
                 sha256: pin.binary_sha256,
-            });
+                ..AssetRef::default()
+            }));
         }
     }
     if let Err(e) = BundleStore::new().upsert_preserving(record) {
