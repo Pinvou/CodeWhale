@@ -337,6 +337,12 @@ export function sameRemoteComposerOwner(sentSessionId, sentIdentity, currentSess
     && !!sentIdentity && sentIdentity === currentIdentity;
 }
 
+// Drafts share the stable lease/session ownership of model selection. This
+// identity must never replace the revision-bound dispatch identity above.
+export function remoteProxyComposerIdentity(localSessionId, connection) {
+  return remoteProxyModelSelectionIdentity(localSessionId, connection);
+}
+
 export function selectedExportableRemoteModelId(bindingKey, listing, selection, defaultModelId = null) {
   if (!bindingKey || listing?.key !== bindingKey) return null;
   const modelId = selection?.key === bindingKey ? selection.modelId : defaultModelId;

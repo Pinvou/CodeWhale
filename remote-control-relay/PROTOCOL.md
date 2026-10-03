@@ -488,6 +488,64 @@ only a greater value is accepted. The state layer may replace the deadline when
 the attestation advances and A's heartbeat advances; an equal A heartbeat may
 only tighten the existing deadline.
 
+### A's authenticated proof of B and recovery cutoff
+
+A's own `controller_liveness` transport admission is not evidence that B is
+alive and MUST NOT renew A's local lifetime. A instead sends
+`controller_liveness_attestation_request_b` to Relay with its current full
+lease context, `request_id`, and a fresh one-shot `challenge_id/challenge_b64`.
+Only authenticated A may request this proof. Relay signs
+`controller_liveness_attestation_b` from its latest strictly increasing
+heartbeat received on the currently bound B socket, never from A activity or
+the initial sequence-zero seed. B evidence older than 5 seconds is rejected.
+This is explicitly a trusted-Relay observation of authenticated B socket
+activity, not an end-to-end signature made by B. It neither proves task progress
+nor authorizes any business operation. The Relay trust root pinned for pairing
+also verifies these proofs for the lifetime of that same connection.
+
+The proof uses domain `pinvou-controller-peer-b-attestation-v1`, followed by
+LP-encoded `v` (decimal text), `type, request_id, connection_id,
+controller_lease_id, lease_epoch, relay_epoch, remote_control_generation,
+liveness_epoch_b, heartbeat_sequence_b, attestation_sequence, challenge_id,
+challenge_b64, observed_age_ms, remaining_ttl_ms, issued_at_relay,
+relay_signing_key_id, signature_algorithm`. It is distinct from the A-proof
+signature domain. B-proof sequences and bounded consumed challenge-ID history
+are independent of A-proof state; reusing an ID with different bytes is still
+a replay within the 30-second validity window.
+
+A retains at most one pending challenge bound to its local send time, exact
+lease/generation, B epoch, and both correlation IDs. It verifies the pinned
+Relay signature, full context, schema, capability, sequence floors and pending
+challenge before committing any state. The local candidate cutoff is
+`receive_time + min(remaining_ttl_ms, 30000 - observed_age_ms) - full_RTT - 1000`;
+RTT and observation age may each be at most 5000 ms. Relay wall-clock time is
+signed metadata, never a local deadline. The timer is anchored to receipt,
+excluding signature-validation and scheduling cost. New B heartbeat sequences
+may replace the cutoff; equal sequences may only tighten it, and older B or
+replayed proof sequences are rejected. Failed admission, unanswered requests,
+bare B challenges and A heartbeats grant no lifetime.
+An exact pending proof-request `error` consumes only that request without
+changing the cutoff or failing another capability/journal request. The keeper
+pins its original connection intent and transport; a replaced keeper cannot
+send through the replacement transport, commit evidence, or clear its lane.
+
+Initial authenticated join starts one finite 30-second cycle. The first
+transport disconnect freezes the last valid local cutoff and clears pending
+proofs. In-flight proofs, retry traffic and repeated disconnects never extend
+it. Only a fully authenticated final resume, consistent with the confirmed B
+epoch and successfully reinstalled transport authority, starts a fresh cycle.
+This unreleased desktop protocol is upgraded atomically with its contract hash;
+mixed implementations fail closed without falling back to self-TX renewal.
+
+B business preparation may run on a serial worker while control/resume polling
+continues. Final task admission pins the exact connected five-field lease,
+capability revision and session mapping through durable ledger admission and
+task-resource installation. Workspace authority is resolved before the session
+lock; lock order remains owner → session → ledger. Journal and cleanup callbacks
+run only after releasing those locks. A transient disconnect preserves an
+already admitted task and its idempotency record; lifecycle cleanup before
+dispatch prevents executor entry.
+
 `controller_pairing_reserved` delivers the same strict
 `controller_pairing_transcript/v1` object to both peers. Its ordered fields are
 `schema, relay_epoch, pairing_id, reservation_id, endpoint_id,
@@ -585,7 +643,7 @@ text “连接码无效或已失效”. A legacy conflict remains exactly
 plus close code `1008`.
 
 The contract digest is
-`f98dc9475965ad51f72e22872774bbeb3729fb53e55405a4390b6b09079bebef`.
+`11c728929280ade5f529efc38a0fca6d618a77839bba1c7e48938b34e781f889`.
 It is SHA-256 over canonical JSON (object keys recursively sorted, array order
 preserved, compact JSON scalars) of `{contract,fixture}`. `contract` is the
 executable manifest containing every schema required/optional field, role

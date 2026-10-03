@@ -74,7 +74,8 @@ test('task and permission cards use only the B authoritative session and generat
     ).map(task => task.taskId), ['same'], `${recovery} retains the bound task for local stop`);
   }
   const panel = read('features/remote-control/ControlledDevicePanel.jsx');
-  assert.match(panel, /permissionList\(task\.taskId\)/);
+  assert.match(panel, /controlledPermissionList\(task\.taskId\)/);
+  assert.doesNotMatch(panel, /remote\.permissionList\(/);
   assert.match(panel, /setPermissionReadStatus\(waiting\.length > 0 \? 'error' : 'idle'\)/);
   assert.match(panel, /controlledStopTask\(task\.taskId\)/);
   assert.match(panel, /aria-label=\{copy\.stopTaskForTask\(task\.taskId\)\}/);
