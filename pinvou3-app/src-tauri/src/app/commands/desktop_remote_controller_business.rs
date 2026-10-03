@@ -98,6 +98,16 @@ impl DesktopControlledCleanup {
 
 impl ControlledCleanupSink for DesktopControlledCleanup {
     fn cleanup(&self, generation: &str, scope: ControlledCleanupScope) {
+        // Registry entries belong to one authenticated generation. An old
+        // cleanup cannot clear a newly paired generation's authorizations.
+        if scope.workspace_grants || scope.remote_tasks {
+            if let Some(runtime) = self
+                .app
+                .try_state::<Arc<super::desktop_remote_task::DesktopRemoteTaskRuntime>>()
+            {
+                runtime.authorizations().clear_generation(generation);
+            }
+        }
         if scope.session_keys {
             if let Some(relay) = self
                 .app
@@ -525,20 +535,21 @@ impl ControlledSubmissionPort for DesktopControlledSubmitBackend {
             .app
             .state::<Arc<super::desktop_remote_task::DesktopRemoteTaskRuntime>>()
             .service();
-        let b_session_id = service
-            .ensure_authenticated_task_session(&task, &lease, &input.title)
+        let prepared_session = service
+            .prepare_authenticated_task_session(&task, &lease, &input.title)
+            .map_err(|error| submit_error(error.code))?;
+        let b_session_id = self
+            .app
+            .state::<ControlledDeviceManager>()
+            .with_current_business_lease(&lease, || {
+                service.claim_prepared_task_session(prepared_session, &lease)
+            })
+            .map_err(|_| UseCaseError::new("task_session_generation_stale", true))?
             .map_err(|error| submit_error(error.code))?;
         log_task_submit_boundary("task_submit_mapping_ready");
-        // Mirror the controlled lifecycle guard used by the existing open
-        // path. A disconnect between reading the lease and creating the
-        // mapping must not leave an old-generation binding available.
-        if !self
-            .live_context()
-            .is_ok_and(|(current, _)| current == lease)
-        {
-            service.clear_generation_sessions(&lease.remote_control_generation);
-            return Err(UseCaseError::new("task_session_generation_stale", true));
-        }
+        // Claim is already linearized under this exact owner. Transient
+        // disconnect afterwards preserves all accepted generation mappings;
+        // terminal cleanup, not a late preflight, owns their retirement.
         super::desktop_remote_task::project_controlled_session(
             &self.app,
             &input.remote_ref,
@@ -1060,10 +1071,7 @@ impl ControlledBusinessPort for DesktopControlledBusiness {
         known_revision: u64,
     ) -> Result<Value, String> {
         let authoritative_id = super::desktop_remote_task::ensure_unclaimed_controlled_session(
-            &self.app,
-            session_id,
-            "",
-            &lease.remote_control_generation,
+            &self.app, session_id, "", lease,
         )?;
         let capabilities = self.app.state::<CapabilitySnapshotManager>();
         let now_b =
@@ -1174,11 +1182,12 @@ impl ControlledBusinessPort for DesktopControlledBusiness {
 
     async fn cancel_task(
         &self,
-        _lease: &LeaseContext,
-        _session_ref: &str,
+        lease: &LeaseContext,
+        session_ref: &str,
         task_id: &str,
     ) -> Result<Option<Value>, String> {
-        super::desktop_remote_task::cancel_decrypted_task(&self.app, task_id).map(Some)
+        super::desktop_remote_task::cancel_decrypted_task(&self.app, lease, session_ref, task_id)
+            .map(Some)
     }
 
     async fn replay_journal(

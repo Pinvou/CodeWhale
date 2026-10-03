@@ -440,8 +440,8 @@ impl ControllerLivenessWatchdog {
     }
 }
 
-/// A/B 角色心跳只更新 Relay 对相应 socket 的存活记录，不能替代 B 验证的
-/// A 端直接证明或签名 attestation。序号必须单调递增且不能为 0，epoch 来自
+/// A/B 心跳只更新 Relay 对相应认证 socket 的记录，不直接续期对端预算。
+/// 序号必须单调递增且不能为 0，epoch 来自
 /// `controller_joined` 下发的租约身份。
 pub(crate) fn build_controller_liveness(
     lease: &LeaseContext,
