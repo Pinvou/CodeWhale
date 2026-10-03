@@ -62,7 +62,7 @@ import { MODEL_PRESET_DEFS } from '../features/settings/model-catalog.js';
 import { createPetActivationGuard } from '../features/pet/activation-guard.js';
 import { SessionAttachmentTitle } from '../features/attachments/SessionAttachmentTitle.jsx';
 import {
-  isControlledDeviceChatActive,
+  isControlledSessionChatActive,
   openControlledDeviceChatWithRetry,
 } from '../features/remote-control/remote-control-logic.mjs';
 import { modelSourceForLease } from '../features/remote-control/remote-model-source.mjs';
@@ -3729,7 +3729,9 @@ const NAV_PREFETCH = {
         setSearchOverlayOpen(true);
       }, []);
       const handleNavNewChat = useCallback(() => { handleNewChat(); }, [handleNewChat]);
-      const isControlledChatActive = isControlledDeviceChatActive(bs?.controlledDevice);
+      const isControlledChatActive = isControlledSessionChatActive(
+        bs?.controlledDevice, bs?.controlledSession, bs?.activeSessionId,
+      );
       const apiKeyGateOpen = shouldShowApiKeyGate(
         bs,
         currentView,
