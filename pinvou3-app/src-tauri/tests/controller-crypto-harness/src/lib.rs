@@ -110,9 +110,10 @@ mod relay_transport {
 
     // Admission-only test double for manager lifecycle tests. It does not
     // validate frames, enqueue bytes, start workers or communicate over a socket.
+    #[derive(Clone)]
     pub(crate) struct ControllerTransportSender {
-        authenticated: std::sync::atomic::AtomicBool,
-        stopped: std::sync::atomic::AtomicBool,
+        authenticated: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        stopped: std::sync::Arc<std::sync::atomic::AtomicBool>,
     }
 
     pub(crate) struct AuthenticatedLease {
@@ -131,8 +132,8 @@ mod relay_transport {
     ) -> (ControllerTransportSender, ()) {
         (
             ControllerTransportSender {
-                authenticated: std::sync::atomic::AtomicBool::new(false),
-                stopped: std::sync::atomic::AtomicBool::new(false),
+                authenticated: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                stopped: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             },
             (),
         )
@@ -162,6 +163,16 @@ mod relay_transport {
             _frame: &T,
         ) -> Result<(), ControllerSendError> {
             panic!("resume transport is outside this local-state harness");
+        }
+
+        pub(crate) fn install_authenticated_lease_after_resume(
+            &self,
+            _lease: AuthenticatedLease,
+            _activation_id: &str,
+        ) -> Result<(), ControllerSendError> {
+            // This double has no socket epoch or one-shot final-frame proof.
+            // It must never pretend that authenticated resume was validated.
+            Err(ControllerSendError::Unauthenticated)
         }
 
         #[cfg(test)]
@@ -206,6 +217,51 @@ mod relay_transport {
 
         pub(crate) fn is_stopped(&self) -> bool {
             self.stopped.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn resume_install_double_never_grants_transport_authority() {
+            for stopped in [false, true] {
+                let (sender, _) = transport_channels(
+                    ControllerRole::ControllerA,
+                    "generation-harness",
+                    1,
+                    1,
+                    1024,
+                    512,
+                );
+                if stopped {
+                    sender.stop();
+                }
+                let lease = AuthenticatedLease {
+                    context: crate::protocol::LeaseContext {
+                        connection_id: "connection-harness".into(),
+                        controller_lease_id: "lease-harness".into(),
+                        lease_epoch: "lease-epoch-harness".into(),
+                        relay_epoch: "relay-epoch-harness".into(),
+                        remote_control_generation: "generation-harness".into(),
+                    },
+                    negotiated_capabilities: Vec::new(),
+                };
+                assert_eq!(
+                    sender.install_authenticated_lease_after_resume(lease, "activation-harness"),
+                    Err(ControllerSendError::Unauthenticated)
+                );
+                assert!(
+                    !sender
+                        .authenticated
+                        .load(std::sync::atomic::Ordering::SeqCst)
+                );
+                assert_eq!(
+                    sender.try_send_authenticated_control(&serde_json::json!({})),
+                    Err(ControllerSendError::Unauthenticated)
+                );
+            }
         }
     }
 }
