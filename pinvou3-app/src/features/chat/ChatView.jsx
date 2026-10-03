@@ -3489,7 +3489,7 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
                     {scopedRemoteConnection?.sessionRef
                       ? (effectiveRemoteModelSource === 'controller_temporary'
                         ? t.remoteConversation.modelSourceMine
-                        : t.controllerConnection.modelSourceDevice)
+                        : t.remoteConversation.modelSourceDevice)
                       : t.controllerConnection.remoteSessionPreparing}
                   </span>
                 </div>
