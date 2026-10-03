@@ -21,10 +21,10 @@ const REQUIRED_KEYS = Object.freeze([
 ]);
 
 const EXACT_VALUES = Object.freeze({
-  NODE_ENV: "development",
+  NODE_ENV: "production",
   PINVOU_DESKTOP_CONTROLLER_ENABLED: "1",
-  PINVOU_REMOTE_ENROLLMENT_DEPLOYMENT: "development",
-  PINVOU_REMOTE_ENROLLMENT_DEVELOPMENT_TOFU: "true",
+  PINVOU_REMOTE_ENROLLMENT_DEPLOYMENT: "self_hosted",
+  PINVOU_REMOTE_ENROLLMENT_DEVELOPMENT_TOFU: "false",
   PINVOU_REMOTE_CONTROLLER_STATE_PATH:
     "/var/lib/pinvou-remote-relay/state/controller-state.json",
   PINVOU_REMOTE_STATE_PATH: "/opt/pinvou-remote-relay/data/relay-state.json",
@@ -56,6 +56,10 @@ export function validateControllerEnvironment(entries) {
     if (!entries.has(key) || entries.get(key).length === 0) {
       fail("controller_env_required_value_missing");
     }
+  }
+  // Match the implemented server dispatcher; official live claims are not wired.
+  if (entries.get("PINVOU_REMOTE_ENROLLMENT_DEPLOYMENT") === "official") {
+    fail("official_controller_claim_dispatcher_unavailable");
   }
   for (const [key, expected] of Object.entries(EXACT_VALUES)) {
     if (entries.get(key) !== expected) fail("controller_env_required_value_invalid");
