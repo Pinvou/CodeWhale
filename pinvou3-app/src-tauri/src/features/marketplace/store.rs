@@ -1467,7 +1467,7 @@ mod tests {
 
     #[test]
     fn upsert_preserving_keeps_assets_unless_the_new_record_carries_some() {
-        with_temp_home(|| {
+        with_temp_home("pinvou3-store-test", || {
             let store = BundleStore::new();
             let mut first = record("feishu", BundleSource::Builtin);
             first.assets = vec![cli_asset("1.0.0")];
@@ -1496,7 +1496,7 @@ mod tests {
 
     #[test]
     fn unreadable_asset_entries_neither_fail_the_load_nor_get_dropped() {
-        with_temp_home(|| {
+        with_temp_home("pinvou3-store-test", || {
             let store = BundleStore::new();
             let path = store.file_path();
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -1549,7 +1549,7 @@ mod tests {
     /// per-entry degrade is tolerant.
     #[test]
     fn unreadable_assets_container_fails_the_load_loud() {
-        with_temp_home(|| {
+        with_temp_home("pinvou3-store-test", || {
             let store = BundleStore::new();
             let path = store.file_path();
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
