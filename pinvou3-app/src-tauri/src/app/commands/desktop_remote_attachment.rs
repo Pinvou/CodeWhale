@@ -892,7 +892,7 @@ mod tests {
                 runtime
                     .uploads
                     .consume_completed(
-                        &[begin.handle_id.clone()],
+                        std::slice::from_ref(&begin.handle_id),
                         &lease(),
                         "session-0001",
                         "task-0001",
@@ -1028,7 +1028,7 @@ mod tests {
         let descriptors = runtime
             .uploads
             .consume_completed(
-                &[begin.handle_id.clone()],
+                std::slice::from_ref(&begin.handle_id),
                 &lease(),
                 "session-0001",
                 "task-0001",
