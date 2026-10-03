@@ -270,6 +270,7 @@ pub struct Pinvou3Bridge {
     /// also records an intentional absence, preventing engine construction
     /// from consulting mutable process or credential-store state again.
     pub(crate) runtime_model_credential_frozen: bool,
+    pub(crate) remote_skill_owner: Option<uuid::Uuid>,
     /// The app has supplied a complete task-scoped route. Process-wide model
     /// environment variables and discovery probes must not rewrite it.
     pub runtime_route_locked: bool,
@@ -500,6 +501,7 @@ impl Pinvou3Bridge {
             session_model: None,
             runtime_model_credential: None,
             runtime_model_credential_frozen: false,
+            remote_skill_owner: None,
             runtime_route_locked: false,
             runtime_vision_model: None,
             runtime_vision_credential: None,
@@ -2925,7 +2927,7 @@ impl Pinvou3Bridge {
         persona_reminder: Option<String>,
         restrict_tools: bool,
     ) -> Result<Op> {
-        self.ensure_session_skills_for_send(session_id);
+        self.ensure_session_skills_for_send(session_id)?;
         self.build_send_message_op_with_hooks(
             session_id,
             content,
@@ -2945,7 +2947,7 @@ impl Pinvou3Bridge {
         content: String,
         policy: &crate::features::assistant::product_runtime::eval_tool_policy::EvalTurnPolicy,
     ) -> Result<Op> {
-        self.ensure_session_skills_for_send(session_id);
+        self.ensure_session_skills_for_send(session_id)?;
         let content = format!("{}\n\n{content}", policy.id.model_reminder());
         let allowed_tools = policy
             .allowed_tools
@@ -3012,7 +3014,7 @@ impl Pinvou3Bridge {
         snapshot: &ExpertRosterSnapshot,
         expert_candidates: &[String],
     ) -> Result<Op> {
-        self.ensure_session_skills_for_send(session_id);
+        self.ensure_session_skills_for_send(session_id)?;
         self.build_send_message_op_with_hooks(
             session_id,
             content,
@@ -3035,7 +3037,7 @@ impl Pinvou3Bridge {
         format!("sub-{}", uuid::Uuid::new_v4())
     }
 
-    fn ensure_session_skills_for_send(&self, session_id: &str) {
+    fn ensure_session_skills_for_send(&self, session_id: &str) -> Result<()> {
         // Send-path self-healing (skill dual-scope governance §2.3.3): rebuild the
         // composed directory from the current mode scope when missing (a microsecond
         // stat) so a manual deletion is not silently lost; no full comparison every
@@ -3049,7 +3051,9 @@ impl Pinvou3Bridge {
             session_id,
             self.session_policy(session_id).mode(),
             bound_workspace.as_deref(),
-        );
+            self.remote_skill_owner,
+        )
+        .map_err(anyhow::Error::msg)
     }
 
     fn build_send_message_op_with_hooks(
@@ -3387,6 +3391,7 @@ impl Pinvou3Bridge {
             session_model,
             runtime_model_credential: None,
             runtime_model_credential_frozen: false,
+            remote_skill_owner: None,
             runtime_route_locked: false,
             runtime_vision_model: None,
             runtime_vision_credential: None,
@@ -3474,6 +3479,7 @@ mod tests {
             session_model: None,
             runtime_model_credential: None,
             runtime_model_credential_frozen: false,
+            remote_skill_owner: None,
             runtime_route_locked: false,
             runtime_vision_model: None,
             runtime_vision_credential: None,
