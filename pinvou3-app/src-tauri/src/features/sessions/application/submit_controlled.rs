@@ -98,6 +98,98 @@ pub(crate) struct PreparedControlledTask {
     pub(crate) local_attachments: Option<Vec<PublishedAttachment>>,
 }
 
+/// Resolve the source without turning authenticated remote upload references
+/// into B-local descriptors. The host keeps its current-lease guard around the
+/// injected receipt consumer; a local mismatch must never fall back to it.
+pub(crate) fn resolve_controlled_attachments(
+    attachment_ids: &[String],
+    local: Option<Vec<PublishedAttachment>>,
+    consume_remote: impl FnOnce() -> Result<Vec<PublishedAttachment>, String>,
+) -> Result<Vec<PublishedAttachment>, String> {
+    match local {
+        Some(attachments) => {
+            if attachment_ids.len() != attachments.len()
+                || !attachment_ids
+                    .iter()
+                    .zip(&attachments)
+                    .all(|(id, attachment)| id == &attachment.handle_id)
+            {
+                return Err("task_attachments_invalid".to_owned());
+            }
+            Ok(attachments)
+        }
+        None if attachment_ids.is_empty() => Ok(Vec::new()),
+        None => consume_remote(),
+    }
+}
+
+#[cfg(test)]
+mod attachment_source_tests {
+    use super::*;
+
+    fn descriptor(id: &str) -> PublishedAttachment {
+        PublishedAttachment {
+            handle_id: id.to_owned(),
+            path: std::path::PathBuf::from("fixture.txt"),
+            display_name: "fixture.txt".to_owned(),
+            mime_type: "text/plain".to_owned(),
+            bytes: 1,
+            sha256: "0".repeat(64),
+            read_owner: None,
+        }
+    }
+
+    #[test]
+    fn remote_attachment_ids_consume_receipts_and_propagate_rejection() {
+        let ids = vec!["uploaded-handle".to_owned()];
+        let received =
+            resolve_controlled_attachments(&ids, None, || Ok(vec![descriptor("uploaded-handle")]))
+                .unwrap();
+        assert_eq!(received[0].handle_id, ids[0]);
+        assert_eq!(
+            resolve_controlled_attachments(&ids, None, || Err(
+                "task_attachments_invalid".to_owned()
+            ))
+            .unwrap_err(),
+            "task_attachments_invalid"
+        );
+        assert!(
+            resolve_controlled_attachments(&[], None, || panic!(
+                "no IDs means no receipt consumption"
+            ))
+            .unwrap()
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn local_attachment_matching_never_falls_back_to_remote_uploads() {
+        let ids = vec!["local-handle".to_owned()];
+        let received =
+            resolve_controlled_attachments(&ids, Some(vec![descriptor("local-handle")]), || {
+                panic!("local descriptors cannot consume remote receipts")
+            })
+            .unwrap();
+        assert_eq!(received[0].handle_id, ids[0]);
+        for local in [Vec::new(), vec![descriptor("other-handle")]] {
+            assert_eq!(
+                resolve_controlled_attachments(&ids, Some(local), || panic!(
+                    "mismatched local source cannot fall back"
+                ))
+                .unwrap_err(),
+                "task_attachments_invalid"
+            );
+        }
+        assert!(
+            resolve_controlled_attachments(&[], Some(Vec::new()), || panic!(
+                "empty local selection stays local"
+            ))
+            .unwrap()
+            .is_empty()
+        );
+    }
+}
+
 fn payload_matches_identity(
     payload: &Value,
     session: &str,
