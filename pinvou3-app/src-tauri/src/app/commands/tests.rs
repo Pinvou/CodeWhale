@@ -3029,5 +3029,3 @@ fn save_model_inner_commits_prefs_before_the_deferred_delete() {
         "exactly one deferred keyring delete, attempted after the commit"
     );
 }
-    );
-}
