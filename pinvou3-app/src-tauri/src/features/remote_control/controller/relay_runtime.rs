@@ -120,7 +120,7 @@ fn remote_action_fingerprint(
     body: &Value,
 ) -> [u8; 32] {
     let mut hasher = Sha256::new();
-    let body_bytes = serde_json::to_vec(body).expect("validated remote action body serializes");
+    let body_bytes = body.to_string().into_bytes();
     for field in [
         lease.connection_id.as_bytes(),
         lease.controller_lease_id.as_bytes(),
@@ -2587,6 +2587,52 @@ fn sanitize_error(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compact_value_fingerprint_preserves_the_original_serialized_bytes() {
+        let lease = LeaseContext {
+            connection_id: "connection-1".into(),
+            controller_lease_id: "lease-1".into(),
+            lease_epoch: "epoch-1".into(),
+            relay_epoch: "relay-1".into(),
+            remote_control_generation: "generation-1".into(),
+        };
+        for body in [
+            json!({}),
+            json!({"text":"中文\nquoted\""}),
+            json!({"n":u64::MAX}),
+            json!({"a":[null,true,3.25],"z":{"state":"completed"}}),
+        ] {
+            let bytes = serde_json::to_vec(&body).unwrap();
+            assert_eq!(body.to_string().as_bytes(), bytes);
+            let mut previous = Sha256::new();
+            for field in [
+                lease.connection_id.as_bytes(),
+                lease.controller_lease_id.as_bytes(),
+                lease.lease_epoch.as_bytes(),
+                lease.relay_epoch.as_bytes(),
+                lease.remote_control_generation.as_bytes(),
+                b"session-1",
+                b"request-1",
+                b"artifact_index",
+                bytes.as_slice(),
+            ] {
+                previous.update((field.len() as u64).to_be_bytes());
+                previous.update(field);
+            }
+            let expected: [u8; 32] = previous.finalize().into();
+            assert_eq!(
+                remote_action_fingerprint(
+                    &lease,
+                    "session-1",
+                    "request-1",
+                    "artifact_index",
+                    &body
+                ),
+                expected
+            );
+        }
+    }
 
     #[test]
     fn relay_wall_expiry_becomes_a_bounded_local_monotonic_deadline() {
