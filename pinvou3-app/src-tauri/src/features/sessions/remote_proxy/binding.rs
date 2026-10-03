@@ -265,7 +265,7 @@ impl SessionStore {
         state
             .openings
             .get_mut(id)
-            .expect("checked opening")
+            .ok_or_else(|| anyhow::anyhow!("no in-process remote open"))?
             .confirmed = true;
         Ok(())
     }

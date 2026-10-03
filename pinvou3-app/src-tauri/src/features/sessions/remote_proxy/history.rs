@@ -60,7 +60,7 @@ mod tests {
         let opened = store.test_commit_remote_proxy_open(None, &live).unwrap();
         {
             let mut state = store.remote_proxies.lock();
-            let mut record = state.records.get(&opened.local_session_id).unwrap().clone();
+            let mut record = state.records[&opened.local_session_id].clone();
             record.retired_requests.push(RetiredRemoteRequest {
                 client_request_id: "retired-request-1".into(),
                 task_id: "retired-task-1".into(),
