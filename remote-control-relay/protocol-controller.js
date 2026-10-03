@@ -16,7 +16,7 @@ const MAX_DESCRIPTORS = 256;
 const MAX_ARTIFACTS = 256;
 const MAX_SENSITIVE_STRING_BYTES = 8 * 1024;
 export const MAX_ENCRYPTED_WIRE_BYTES = Math.ceil(MAX_ENCRYPTED_FRAME_BYTES / 3) * 4 + MAX_CONTROL_MESSAGE_BYTES;
-export const CONTROLLER_CONTRACT_SHA256 = "f98dc9475965ad51f72e22872774bbeb3729fb53e55405a4390b6b09079bebef";
+export const CONTROLLER_CONTRACT_SHA256 = "11c728929280ade5f529efc38a0fca6d618a77839bba1c7e48938b34e781f889";
 
 export const CONTROLLER_CAPABILITIES = Object.freeze([
   "pairing_v1", "encrypted_frames_v1", "finished_receipt_v1", "role_liveness_v1", "resume_v1",
@@ -28,7 +28,8 @@ export const CONTROLLER_MESSAGE_TYPES = Object.freeze([
   "desktop_pairing_revoke", "controller_pairing_claim", "controller_pairing_reserved", "finished_receipt_commit",
   "encrypted_handshake_finished", "finished_receipt_ack", "controller_joined", "controller_liveness",
   "controller_liveness_challenge_a", "encrypted_controller_liveness_a", "controller_liveness_attestation_request_a",
-  "controller_liveness_attestation_a", "controller_resume_prepare", "controller_resume_provisional",
+  "controller_liveness_attestation_a", "controller_liveness_attestation_request_b", "controller_liveness_attestation_b",
+  "controller_resume_prepare", "controller_resume_provisional",
   "encrypted_resume_confirm", "controller_resume_activation_ack", "controller_resume_activation_pending",
   "controller_post_activation_liveness", "controller_post_activation_liveness_confirmed", "controller_resume_ready_ack",
   "controller_resumed", "encrypted_frame", "controller_disconnect", "error",
@@ -102,6 +103,8 @@ const MESSAGE_SCHEMAS = Object.freeze({
   encrypted_controller_liveness_a: schema(["v", "type", ...ROUTING_CONTEXT_FIELDS, "ciphertext_b64", "ciphertext_bytes"], [], ["A"]),
   controller_liveness_attestation_request_a: schema(["v", "type", "request_id", ...LEASE_CONTEXT_FIELDS, "challenge_id", "challenge_b64"], [], ["B"]),
   controller_liveness_attestation_a: schema(["v", "type", "request_id", ...LEASE_CONTEXT_FIELDS, "liveness_epoch_a", "heartbeat_sequence_a", "attestation_sequence", "challenge_id", "challenge_b64", "observed_age_ms", "remaining_ttl_ms", "issued_at_relay", "relay_signing_key_id", "signature_algorithm", "relay_signature_b64"], [], ["relay"]),
+  controller_liveness_attestation_request_b: schema(["v", "type", "request_id", ...LEASE_CONTEXT_FIELDS, "challenge_id", "challenge_b64"], [], ["A"]),
+  controller_liveness_attestation_b: schema(["v", "type", "request_id", ...LEASE_CONTEXT_FIELDS, "liveness_epoch_b", "heartbeat_sequence_b", "attestation_sequence", "challenge_id", "challenge_b64", "observed_age_ms", "remaining_ttl_ms", "issued_at_relay", "relay_signing_key_id", "signature_algorithm", "relay_signature_b64"], [], ["relay"]),
   controller_resume_prepare: schema(["v", "type", "request_id", ...LEASE_CONTEXT_FIELDS, "sender_role", "resume_token_b64", "transport_challenge_b64", "original_deadline_ms"], [], ["A", "B"]),
   controller_resume_provisional: schema(["v", "type", "request_id", ...LEASE_CONTEXT_FIELDS, "activation_id", "original_deadline_ms"], [], ["relay"]),
   encrypted_resume_confirm: schema(["v", "type", "request_id", ...LEASE_CONTEXT_FIELDS, "activation_id", "sender_role", "ciphertext_b64", "ciphertext_bytes"], [], ["A", "B"]),
@@ -175,6 +178,7 @@ const OUTER_MESSAGE_CAPABILITIES = Object.freeze({
   finished_receipt_commit: ["finished_receipt_v1"], encrypted_handshake_finished: ["finished_receipt_v1"], finished_receipt_ack: ["finished_receipt_v1"],
   controller_liveness: ["role_liveness_v1"], controller_liveness_challenge_a: ["role_liveness_v1"],
   encrypted_controller_liveness_a: ["role_liveness_v1"], controller_liveness_attestation_request_a: ["role_liveness_v1"], controller_liveness_attestation_a: ["role_liveness_v1"],
+  controller_liveness_attestation_request_b: ["role_liveness_v1"], controller_liveness_attestation_b: ["role_liveness_v1"],
   controller_resume_prepare: ["resume_v1"], controller_resume_provisional: ["resume_v1"], encrypted_resume_confirm: ["resume_v1"],
   controller_resume_activation_ack: ["resume_v1"], controller_resume_activation_pending: ["resume_v1"], controller_post_activation_liveness: ["resume_v1"],
   controller_post_activation_liveness_confirmed: ["resume_v1"], controller_resume_ready_ack: ["resume_v1"], controller_resumed: ["resume_v1"],
@@ -532,6 +536,10 @@ export function validateControllerMessage(input, senderRole, expectedContext) {
   }
   if (result.value.type === "controller_pairing_reserved") validateReservedTranscript(result.value);
   if (result.value.type === "controller_liveness_attestation_a") validateAttestation(result.value, expectedContext);
+  if (result.value.type === "controller_liveness_attestation_b") {
+    decimal(result.value.observed_age_ms, "observed_age_ms", 30_000n);
+    decimal(result.value.remaining_ttl_ms, "remaining_ttl_ms", 30_000n);
+  }
   return result.value;
 }
 
@@ -1152,6 +1160,21 @@ const ATTESTATION_FIELDS = Object.freeze([
 export function buildLivenessAttestationPreimage(message) {
   if (message.type !== "controller_liveness_attestation_a") fail("invalid_field", "type");
   return Buffer.concat([Buffer.from("pinvou-controller-liveness-attestation-v1", "ascii"), ...ATTESTATION_FIELDS.map((field) => lp(message[field]))]);
+}
+
+// A's proof of B is direction/domain-separated and covers the entire unsigned
+// envelope, including both correlation IDs. Relay time is signed metadata,
+// never a cross-machine local deadline.
+export function buildPeerLivenessAttestationPreimage(message) {
+  if (message.type !== "controller_liveness_attestation_b") fail("invalid_field", "type");
+  const fields = [
+    "v", "type", "request_id", ...LEASE_CONTEXT_FIELDS,
+    "liveness_epoch_b", "heartbeat_sequence_b", "attestation_sequence",
+    "challenge_id", "challenge_b64", "observed_age_ms", "remaining_ttl_ms",
+    "issued_at_relay", "relay_signing_key_id", "signature_algorithm",
+  ];
+  return Buffer.concat([Buffer.from("pinvou-controller-peer-b-attestation-v1", "ascii"),
+    ...fields.map((field) => lp(String(message[field])))]);
 }
 
 export function controllerAllowedRoles(type) {
