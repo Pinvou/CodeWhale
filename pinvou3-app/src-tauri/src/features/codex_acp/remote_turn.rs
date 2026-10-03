@@ -24,7 +24,7 @@ use crate::features::remote_control::controller::permission::PermissionAuthority
 use crate::features::remote_control::controller::protocol::LeaseContext;
 use crate::features::remote_control::controller::task::{
     ControllerTaskEventSink, PublishedAttachment, RemoteCodeTurnPort, RemoteTaskService,
-    RemoteTaskState, TASK_CANCELLED_CODE,
+    RemoteTaskState, TASK_CANCELLED_CODE, TaskLeaseBinding,
 };
 use crate::features::remote_control::controller::transfer::download::ArtifactDescriptor;
 
@@ -346,39 +346,57 @@ fn project_acp_event(
 /// are written only by the command layer and dropped when the connection ends.
 #[derive(Default)]
 pub(crate) struct RemoteWorkspaceAuthorizations {
-    entries: Mutex<HashSet<(String, String)>>,
+    entries: Mutex<HashSet<(String, String, String)>>,
 }
 
 impl RemoteWorkspaceAuthorizations {
-    pub(crate) fn authorize(&self, session_id: &str, workspace_id: &str) -> bool {
+    pub(crate) fn authorize(&self, session_id: &str, workspace_id: &str, generation: &str) -> bool {
         let mut entries = self.entries.lock();
-        if entries
-            .iter()
-            .any(|(session, workspace)| session == session_id && workspace != workspace_id)
-        {
+        if entries.iter().any(|(session, workspace, owner)| {
+            session == session_id && (workspace != workspace_id || owner != generation)
+        }) {
             return false;
         }
         if entries.len() >= MAX_AUTHORIZED_REFS
-            && !entries.contains(&(session_id.to_owned(), workspace_id.to_owned()))
+            && !entries.contains(&(
+                session_id.to_owned(),
+                workspace_id.to_owned(),
+                generation.to_owned(),
+            ))
         {
             return false;
         }
-        entries.insert((session_id.to_owned(), workspace_id.to_owned()));
+        entries.insert((
+            session_id.to_owned(),
+            workspace_id.to_owned(),
+            generation.to_owned(),
+        ));
         true
     }
 
-    pub(crate) fn is_authorized(&self, session_id: &str, workspace_id: &str) -> bool {
-        self.entries
-            .lock()
-            .contains(&(session_id.to_owned(), workspace_id.to_owned()))
+    pub(crate) fn is_authorized(
+        &self,
+        session_id: &str,
+        workspace_id: &str,
+        generation: &str,
+    ) -> bool {
+        self.entries.lock().contains(&(
+            session_id.to_owned(),
+            workspace_id.to_owned(),
+            generation.to_owned(),
+        ))
     }
 
-    pub(crate) fn workspace_for_session(&self, session_id: &str) -> Option<String> {
+    pub(crate) fn workspace_for_session(
+        &self,
+        session_id: &str,
+        generation: &str,
+    ) -> Option<String> {
         let entries = self.entries.lock();
         let mut matches = entries
             .iter()
-            .filter(|(candidate, _)| candidate == session_id)
-            .map(|(_, workspace)| workspace.clone());
+            .filter(|(candidate, _, owner)| candidate == session_id && owner == generation)
+            .map(|(_, workspace, _)| workspace.clone());
         let workspace = matches.next()?;
         // A code Session is bound to one project. Ambiguity must fail closed.
         matches.next().is_none().then_some(workspace)
@@ -387,7 +405,13 @@ impl RemoteWorkspaceAuthorizations {
     pub(crate) fn revoke_session(&self, session_id: &str) {
         self.entries
             .lock()
-            .retain(|(candidate, _)| candidate != session_id);
+            .retain(|(candidate, _, _)| candidate != session_id);
+    }
+
+    pub(crate) fn clear_generation(&self, generation: &str) {
+        self.entries
+            .lock()
+            .retain(|(_, _, owner)| owner != generation);
     }
 
     pub(crate) fn clear(&self) {
@@ -567,13 +591,27 @@ impl RemoteCodeTurnPort for AcpPoolCodeTurnPort {
         events: Arc<dyn ControllerTaskEventSink>,
         cancel: CancellationToken,
     ) -> std::result::Result<(), String> {
-        if !self.authorizations.is_authorized(session_id, workspace_id) {
+        if !self.authorizations.is_authorized(
+            session_id,
+            workspace_id,
+            &lease.remote_control_generation,
+        ) {
             return Err("task_workspace_not_authorized".to_owned());
+        }
+        let record = self
+            .tasks
+            .status(task_id)
+            .map_err(|_| "task_binding_stale".to_owned())?;
+        if record.is_terminal()
+            || record.session_id != session_id
+            || record.lease != TaskLeaseBinding::from_context(lease)
+        {
+            return Err("task_binding_stale".to_owned());
         }
         let authorized_path = self
             .app
             .state::<crate::features::remote_control::controller::controlled::ControlledDeviceManager>()
-            .resolve_code_workspace(workspace_id)
+            .resolve_admitted_code_workspace(lease, workspace_id)
             .map_err(|_| "task_workspace_not_authorized".to_owned())?;
         let workspace = self
             .pool
@@ -970,24 +1008,30 @@ mod tests {
     #[test]
     fn authorization_registry_is_bounded_and_session_scoped() {
         let registry = RemoteWorkspaceAuthorizations::default();
-        assert!(registry.authorize("session-0001", "workspace-0001"));
-        assert!(registry.is_authorized("session-0001", "workspace-0001"));
+        assert!(registry.authorize("session-0001", "workspace-0001", "generation-1"));
+        assert!(registry.is_authorized("session-0001", "workspace-0001", "generation-1"));
         assert_eq!(
-            registry.workspace_for_session("session-0001").as_deref(),
+            registry
+                .workspace_for_session("session-0001", "generation-1")
+                .as_deref(),
             Some("workspace-0001")
         );
-        assert!(!registry.is_authorized("session-0002", "workspace-0001"));
-        assert!(!registry.is_authorized("session-0001", "workspace-0002"));
+        assert!(!registry.is_authorized("session-0002", "workspace-0001", "generation-1"));
+        assert!(!registry.is_authorized("session-0001", "workspace-0002", "generation-1"));
+        assert!(!registry.is_authorized("session-0001", "workspace-0001", "generation-2"));
 
-        assert!(!registry.authorize("session-0001", "workspace-0002"));
+        assert!(!registry.authorize("session-0001", "workspace-0002", "generation-1"));
+        assert!(!registry.authorize("session-0001", "workspace-0001", "generation-2"));
         assert_eq!(
-            registry.workspace_for_session("session-0001").as_deref(),
+            registry
+                .workspace_for_session("session-0001", "generation-1")
+                .as_deref(),
             Some("workspace-0001"),
             "a code session remains bound to its first authenticated project"
         );
 
         registry.revoke_session("session-0001");
-        assert!(!registry.is_authorized("session-0001", "workspace-0001"));
+        assert!(!registry.is_authorized("session-0001", "workspace-0001", "generation-1"));
     }
 
     #[test]
@@ -996,13 +1040,40 @@ mod tests {
         for index in 0..MAX_AUTHORIZED_REFS {
             assert!(registry.authorize(
                 &format!("session-{index:04}"),
-                &format!("workspace-{index:04}")
+                &format!("workspace-{index:04}"),
+                "generation-1"
             ));
         }
-        assert!(!registry.authorize("session-overflow", "workspace-overflow"));
+        assert!(!registry.authorize("session-overflow", "workspace-overflow", "generation-1"));
         // Re-authorizing an existing pair stays idempotent at the cap.
-        assert!(registry.authorize("session-0000", "workspace-0000"));
+        assert!(registry.authorize("session-0000", "workspace-0000", "generation-1"));
         registry.clear();
-        assert!(registry.authorize("session-0001", "workspace-overflow"));
+        assert!(registry.authorize("session-0001", "workspace-overflow", "generation-1"));
+    }
+
+    #[test]
+    fn generation_cleanup_reclaims_capacity_without_revoking_a_replacement() {
+        let registry = RemoteWorkspaceAuthorizations::default();
+        assert!(registry.authorize("replacement", "workspace-new", "generation-new"));
+        for index in 0..MAX_AUTHORIZED_REFS - 1 {
+            assert!(registry.authorize(&format!("old-{index}"), "workspace-old", "generation-old"));
+        }
+        assert!(!registry.authorize("overflow", "workspace-old", "generation-old"));
+        registry.clear_generation("generation-old");
+        assert!(registry.is_authorized("replacement", "workspace-new", "generation-new"));
+        for index in 0..MAX_AUTHORIZED_REFS - 1 {
+            assert!(!registry.is_authorized(
+                &format!("old-{index}"),
+                "workspace-old",
+                "generation-old"
+            ));
+            assert!(registry.authorize(
+                &format!("next-{index}"),
+                "workspace-next",
+                "generation-next"
+            ));
+        }
+        registry.revoke_session("replacement");
+        assert!(registry.authorize("after-close", "workspace-close", "generation-next"));
     }
 }

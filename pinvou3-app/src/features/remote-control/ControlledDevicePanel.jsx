@@ -192,7 +192,7 @@ export default function ControlledDevicePanel({
   useEffect(() => {
     const remote = bridge?.available && bridge.desktopRemoteControl;
     const waiting = currentTasks.filter(task => task.status === 'waiting_permission');
-    if (!remote?.permissionList || waiting.length === 0) {
+    if (!remote?.controlledPermissionList || waiting.length === 0) {
       setPermissions([]);
       setPermissionReadStatus(waiting.length > 0 ? 'error' : 'idle');
       return undefined;
@@ -201,7 +201,7 @@ export default function ControlledDevicePanel({
     const startingAuthority = authority.current;
     setPermissions([]);
     setPermissionReadStatus('loading');
-    Promise.all(waiting.map(task => remote.permissionList(task.taskId))).then(results => {
+    Promise.all(waiting.map(task => remote.controlledPermissionList(task.taskId))).then(results => {
       if (cancelled || authority.current !== startingAuthority) return;
       if (results.some(result => !Array.isArray(result))) {
         setPermissionReadStatus('error');
