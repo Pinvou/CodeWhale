@@ -28,8 +28,8 @@ use super::controlling_runtime::{
 };
 use super::controlling_session::{ControllingSessionManager, ControllingSessionProjection};
 use super::crypto::{
-    ControllerRole as HandshakeRole, HandshakeKeyPair, load_relay_trust_config,
-    transport_key_fingerprint,
+    AuthenticatedRelayTrustConfig, ControllerRole as HandshakeRole, HandshakeKeyPair,
+    load_relay_trust_config, transport_key_fingerprint,
 };
 use super::encrypted_lane::ControllingLaneState;
 use super::journal::{JournalEvent, JournalSnapshot, MAX_EVENT_PAYLOAD_BYTES};
@@ -91,11 +91,15 @@ pub(crate) trait ControllingLane: Send {
 /// Constructed only inside the AEAD-opened business-frame dispatcher. The
 /// app receives an authenticated frame, never a caller-asserted boolean.
 pub(crate) struct AuthenticatedJournalFrame<'a> {
+    operation: &'a ControllerOperation,
     lease: &'a LeaseContext,
     event: &'a JournalEvent,
 }
 
 impl AuthenticatedJournalFrame<'_> {
+    pub(crate) fn operation(&self) -> &ControllerOperation {
+        self.operation
+    }
     pub(crate) fn lease(&self) -> &LeaseContext {
         self.lease
     }
@@ -105,11 +109,15 @@ impl AuthenticatedJournalFrame<'_> {
 }
 
 pub(crate) struct AuthenticatedSnapshotFrame<'a> {
+    operation: &'a ControllerOperation,
     lease: &'a LeaseContext,
     snapshot: &'a JournalSnapshot,
 }
 
 impl AuthenticatedSnapshotFrame<'_> {
+    pub(crate) fn operation(&self) -> &ControllerOperation {
+        self.operation
+    }
     pub(crate) fn lease(&self) -> &LeaseContext {
         self.lease
     }
@@ -121,7 +129,11 @@ impl AuthenticatedSnapshotFrame<'_> {
 pub(crate) trait ControllingJournalSink: Send + Sync {
     fn publish(&self, frame: &AuthenticatedJournalFrame<'_>) -> Result<(), String>;
 
-    fn publish_capability(&self, _projection: &ControllingSessionProjection) -> Result<(), String> {
+    fn publish_capability(
+        &self,
+        _operation: &ControllerOperation,
+        _projection: &ControllingSessionProjection,
+    ) -> Result<(), String> {
         Err("remote_capability_projection_not_configured".into())
     }
 
@@ -130,6 +142,7 @@ pub(crate) trait ControllingJournalSink: Send + Sync {
     /// SessionStore under the current authenticated lease and lane guard.
     fn confirm_mapping(
         &self,
+        _operation: &ControllerOperation,
         _lease: &LeaseContext,
         _remote_ref: &str,
         _controlled_session_id: &str,
@@ -145,7 +158,12 @@ pub(crate) trait ControllingJournalSink: Send + Sync {
 
     /// AEAD-opened action result. The application adapter correlates its
     /// request and exact live RemoteProxy before releasing any bytes to UI.
-    fn publish_action_result(&self, _lease: &LeaseContext, _payload: &Value) -> Result<(), String> {
+    fn publish_action_result(
+        &self,
+        _operation: &ControllerOperation,
+        _lease: &LeaseContext,
+        _payload: &Value,
+    ) -> Result<(), String> {
         Err("remote_action_not_configured".to_owned())
     }
 }
@@ -338,14 +356,14 @@ pub(crate) async fn run_controlling_connection<P: ControllingRelayPort>(
             log_controller_event("handshake_failed", handshake_error.code);
             log_controller_event("connect_failed", &failure_origin_detail(port, code));
             sender.stop();
-            business.clear();
+            let _ = manager.with_lane_owner(&operation, || business.clear());
             return Err(fail_connection(manager, operation, code, on_status));
         }
         Err(_elapsed) => {
             let code = public_failure_code(port, true);
             log_controller_event("connect_failed", &failure_origin_detail(port, code));
             sender.stop();
-            business.clear();
+            let _ = manager.with_lane_owner(&operation, || business.clear());
             return Err(fail_connection(manager, operation, code, on_status));
         }
     };
@@ -357,7 +375,7 @@ pub(crate) async fn run_controlling_connection<P: ControllingRelayPort>(
         }
         Err(code) => {
             sender.stop();
-            business.clear();
+            let _ = manager.with_lane_owner(&operation, || business.clear());
             // 本地收尾失败（指纹派生、租约安装）时不能停在非终态阶段：只有在
             // 本次尝试仍然待决时才投影为有界错误，已断开/已被取代时不覆盖。
             let _ = fail_connection(manager, operation, GENERIC_CONNECT_ERROR, on_status);
@@ -390,24 +408,28 @@ fn complete_connected(
         reservation_id: outcome.reservation_id,
         device_display_name: DEVICE_DISPLAY_NAME_PLACEHOLDER.to_owned(),
         liveness_epoch_a: outcome.lease.liveness_epoch_a.clone(),
+        liveness_epoch_b: outcome.lease.liveness_epoch_b.clone(),
         resume_deadline_b: outcome.lease.resume_deadline_ms,
         resume_token: outcome.lease.resume_token,
         transport_key_fingerprint: fingerprint,
         negotiated_capabilities: outcome.negotiated_capabilities.clone(),
     };
-    sender
-        .install_authenticated_lease(AuthenticatedLease {
-            context,
-            negotiated_capabilities: outcome.negotiated_capabilities,
-        })
-        .map_err(|_| GENERIC_CONNECT_ERROR.to_owned())?;
     // 加密业务通道与租约同时就位：状态一旦进入 connected，业务帧既有租约准入
     // 也有会话密钥可用。
-    business
-        .install(HandshakeRole::A, &lease.context, outcome.session)
-        .map_err(|_| GENERIC_CONNECT_ERROR.to_owned())?;
     manager
-        .complete_connected(operation, lease)
+        .complete_connected_with_install(operation, lease, || {
+            sender
+                .install_authenticated_lease(AuthenticatedLease {
+                    context: context.clone(),
+                    negotiated_capabilities: outcome.negotiated_capabilities,
+                })
+                .map_err(|_| {
+                    super::controlling::ControllingStateError::new(GENERIC_CONNECT_ERROR)
+                })?;
+            business
+                .install(HandshakeRole::A, &context, outcome.session)
+                .map_err(|_| super::controlling::ControllingStateError::new(GENERIC_CONNECT_ERROR))
+        })
         .map_err(|error| error.code.to_owned())
 }
 
@@ -485,31 +507,108 @@ pub(crate) async fn serve_controlling_lane_with_interval(
     sinks: &mut ControllingLaneSinks<'_>,
     heartbeat_interval: Duration,
 ) {
+    // Pin once for the whole authenticated lane; a later environment/profile
+    // edit cannot replace its verifier while messages are being processed.
+    let Some(operation) = manager.current_operation() else {
+        return;
+    };
+    let trust = load_relay_trust_config(|name| std::env::var(name).ok());
+    serve_controlling_lane_with_evidence_context(
+        lane,
+        manager,
+        sessions,
+        business,
+        sinks,
+        heartbeat_interval,
+        PeerEvidenceContext {
+            trust: trust.as_ref().ok(),
+            monotonic: &lane_monotonic_millis,
+            operation,
+        },
+    )
+    .await;
+}
+
+struct PeerEvidenceContext<'a> {
+    trust: Option<&'a AuthenticatedRelayTrustConfig>,
+    monotonic: &'a (dyn Fn() -> u64 + Send + Sync),
+    operation: ControllerOperation,
+}
+
+async fn serve_controlling_lane_with_evidence_context(
+    lane: &mut (impl ControllingLane + ?Sized),
+    manager: &ControllingDeviceManager,
+    sessions: &ControllingSessionManager,
+    business: &ControllingLaneState,
+    sinks: &mut ControllingLaneSinks<'_>,
+    heartbeat_interval: Duration,
+    evidence: PeerEvidenceContext<'_>,
+) {
+    let operation = evidence.operation.clone();
+    let Ok(owned_sender) = manager.transport_for_operation(&operation) else {
+        return;
+    };
+    let mut owned_liveness = |frame: Value| {
+        if manager.with_lane_owner(&operation, || ()).is_err() {
+            return false;
+        }
+        if let Some(sender) = owned_sender.as_ref() {
+            return sender.try_send_authenticated_control(&frame).is_ok();
+        }
+        #[cfg(test)]
+        {
+            (sinks.on_liveness)(frame)
+        }
+        #[cfg(not(test))]
+        {
+            false
+        }
+    };
+    let mut owned_sinks = ControllingLaneSinks {
+        on_status: &mut *sinks.on_status,
+        on_session: &mut *sinks.on_session,
+        on_mapping: &mut *sinks.on_mapping,
+        on_task: &mut *sinks.on_task,
+        on_journal: &mut *sinks.on_journal,
+        on_snapshot: &mut *sinks.on_snapshot,
+        on_liveness: &mut owned_liveness,
+    };
+    let sinks = &mut owned_sinks;
     let mut heartbeat = tokio::time::interval(heartbeat_interval);
     heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     heartbeat.tick().await;
     let mut liveness = LivenessExpectations::default();
     let mut journal = JournalExpectations::default();
     let mut resume = ResumeAttempt::default();
-    let mut budget = LivenessBudget::authenticated_cycle(lane_monotonic_millis());
+    let mut budget = LivenessBudget::authenticated_cycle((evidence.monotonic)());
     let mut resume_deadline = budget.timer();
     loop {
         tokio::select! {
             biased;
             _ = heartbeat.tick() => {
+                if manager.with_lane_owner(&operation, || ()).is_err() { return; }
                 // 恢复期间不发心跳：业务与存活闸门都已挂起。
                 if !resume.is_active() {
-                    if let Some(frame) = next_liveness_frame(manager, &mut liveness) {
-                        let admitted = (sinks.on_liveness)(frame);
-                        budget.submitted(lane_monotonic_millis(), admitted);
-                        resume_deadline = budget.timer();
+                    if let Ok((runtime, epoch_b, epoch_a)) = manager.with_peer_liveness_context(&operation, |runtime, b, a| (runtime.clone(), b.to_owned(), a.to_owned())) {
+                        if let Some(lease) = runtime.lease.as_ref() {
+                            if let Some(next) = liveness.next_sequence() {
+                                if let Ok(frame) = super::liveness::build_controller_liveness(lease, SenderRole::ControllerA, &epoch_a, next) { (sinks.on_liveness)(frame); }
+                            }
+                            if let Some(request) = budget.request_peer_evidence(lease, &epoch_b, (evidence.monotonic)()) {
+                                if !(sinks.on_liveness)(request) {
+                                    budget.cancel_peer_request();
+                                }
+                            }
+                        }
                     }
-                    if let Ok((lease, capabilities)) = manager.live_runtime_context() {
+                    if let Ok(runtime) = manager.with_peer_liveness_context(&operation, |runtime, _, _| runtime.clone()) {
+                        let Some(lease) = runtime.lease else { return; };
+                        let capabilities = runtime.negotiated_capabilities;
                         for (session_ref, pending) in journal.due_replays(
                             &lease.remote_control_generation, tokio::time::Instant::now()
                         ) {
                             let _ = request_journal_replay(
-                                manager, business, &lease, &capabilities, &session_ref,
+                                manager, &operation, business, &lease, &capabilities, &session_ref,
                                 &pending.epoch, pending.after, &pending.request_id,
                             );
                         }
@@ -519,11 +618,12 @@ pub(crate) async fn serve_controlling_lane_with_interval(
             // 本地恢复预算耗尽：清空通道并按有界错误结束本次连接（Relay 侧
             // 自己的 deadline 是权威，本地只保证不会无限等待）。
             _ = tokio::time::sleep_until(resume_deadline) => {
-                business.clear();
-                fail_resume(manager, sinks);
+                if manager.with_lane_owner(&operation, || business.clear()).is_err() { return; }
+                fail_resume(manager, &operation, sinks);
                 return;
             }
             event = lane.next_lane_event() => {
+                if manager.with_lane_owner(&operation, || ()).is_err() { return; }
                 let Some(event) = event else { return };
                 match event {
                     ControllerLaneEvent::Disconnected => {
@@ -531,23 +631,22 @@ pub(crate) async fn serve_controlling_lane_with_interval(
                             continue;
                         }
                         // 断线：保留密钥材料并挂起业务/存活帧，随后启动恢复流程。
-                        business.suspend();
-                        let now_b = lane_monotonic_millis();
+                        let now_b = (evidence.monotonic)();
                         let cutoff = budget.freeze(now_b);
-                        let status = manager.mark_transport_disconnected(now_b, cutoff);
+                        let Ok(status) = manager.mark_owned_transport_disconnected(&operation, now_b, cutoff, business) else { return; };
                         (sinks.on_status)(&status);
-                        if begin_resume(lane, manager, &mut resume, now_b) {
+                        if begin_resume(lane, manager, &operation, &mut resume, now_b) {
                             resume_deadline = budget.timer();
                         } else {
-                            business.clear();
-                            fail_resume(manager, sinks);
+                            let _ = manager.with_lane_owner(&operation, || business.clear());
+                            fail_resume(manager, &operation, sinks);
                             return;
                         }
                     }
                     ControllerLaneEvent::Frame(json) => {
                         if resume.is_active() {
-                            let now_b = lane_monotonic_millis();
-                            match handle_resume_frame(lane, manager, business, &mut resume, now_b, &json) {
+                            let now_b = (evidence.monotonic)();
+                            match handle_resume_frame(lane, manager, &operation, business, &mut resume, now_b, &json) {
                                 ResumeOutcome::Progressed | ResumeOutcome::Ignored => {}
                                 ResumeOutcome::Completed => {
                                     resume.reset();
@@ -562,14 +661,25 @@ pub(crate) async fn serve_controlling_lane_with_interval(
                                     resume_deadline = budget.timer();
                                 }
                                 ResumeOutcome::Failed => {
-                                    business.clear();
-                                    fail_resume(manager, sinks);
+                                    let _ = manager.with_lane_owner(&operation, || business.clear());
+                                    fail_resume(manager, &operation, sinks);
                                     return;
+                                }
+                            }
+                        } else if budget.consume_peer_error(&json) {
+                            log_controller_event("peer_evidence_rejected", "relay_rejected");
+                        } else if serde_json::from_str::<Value>(&json).ok().and_then(|frame| frame["type"].as_str().map(str::to_owned)).as_deref() == Some("controller_liveness_attestation_b") {
+                            let received_at = tokio::time::Instant::now();
+                            let now_a = (evidence.monotonic)();
+                            if let Some(trust) = evidence.trust {
+                                if manager.with_peer_liveness_context(&operation, |runtime, epoch_b, _| budget.accept_peer_evidence(&json, trust, runtime, epoch_b, now_a, received_at)).is_ok_and(|accepted| accepted.is_ok()) {
+                                    resume_deadline = budget.timer();
                                 }
                             }
                         } else {
                             dispatch_inbound_frame(
                                 manager,
+                                &operation,
                                 sessions,
                                 business,
                                 &mut journal,
@@ -593,6 +703,7 @@ struct ResumeAttempt {
     challenge_b64: String,
     confirmed: bool,
     ready_sent: bool,
+    peer_epoch_b: Option<String>,
 }
 
 impl ResumeAttempt {
@@ -618,11 +729,12 @@ fn lane_monotonic_millis() -> u64 {
 }
 
 /// 恢复失败收尾：清空活动上下文并把状态投影为有界错误。
-fn fail_resume(manager: &ControllingDeviceManager, sinks: &mut ControllingLaneSinks<'_>) {
-    let Some(operation) = manager.current_operation() else {
-        return;
-    };
-    if let Ok(status) = manager.fail_connection(operation, PEER_UNAVAILABLE_ERROR) {
+fn fail_resume(
+    manager: &ControllingDeviceManager,
+    operation: &ControllerOperation,
+    sinks: &mut ControllingLaneSinks<'_>,
+) {
+    if let Ok(status) = manager.fail_connection(operation.clone(), PEER_UNAVAILABLE_ERROR) {
         (sinks.on_status)(&status);
     }
 }
@@ -631,13 +743,11 @@ fn fail_resume(manager: &ControllingDeviceManager, sinks: &mut ControllingLaneSi
 fn begin_resume(
     lane: &(impl ControllingLane + ?Sized),
     manager: &ControllingDeviceManager,
+    operation: &ControllerOperation,
     resume: &mut ResumeAttempt,
     now_b: u64,
 ) -> bool {
-    let Some(operation) = manager.current_operation() else {
-        return false;
-    };
-    let Ok(material) = manager.begin_resume(operation, now_b) else {
+    let Ok(material) = manager.begin_resume(operation.clone(), now_b) else {
         return false;
     };
     let Ok(challenge) = new_resume_challenge() else {
@@ -670,6 +780,7 @@ fn begin_resume(
 fn handle_resume_frame(
     lane: &(impl ControllingLane + ?Sized),
     manager: &ControllingDeviceManager,
+    owner: &ControllerOperation,
     business: &ControllingLaneState,
     resume: &mut ResumeAttempt,
     now_b: u64,
@@ -681,9 +792,10 @@ fn handle_resume_frame(
     let Some(kind) = frame.get("type").and_then(Value::as_str) else {
         return ResumeOutcome::Ignored;
     };
-    let Some(operation) = manager.current_operation() else {
+    let operation = owner.clone();
+    if manager.with_lane_owner(owner, || ()).is_err() {
         return ResumeOutcome::Failed;
-    };
+    }
     let Some(lease) = resume.lease.clone() else {
         return ResumeOutcome::Failed;
     };
@@ -787,9 +899,6 @@ fn handle_resume_frame(
             ) else {
                 return ResumeOutcome::Failed;
             };
-            if lane.send_resume_control(ready).is_err() {
-                return ResumeOutcome::Failed;
-            }
             // 本端 ready_ack 也是 gate 的最后一步本地相位：只有完成它，
             // `controller_resumed` 才可能被接受。
             if manager
@@ -802,7 +911,11 @@ fn handle_resume_frame(
             {
                 return ResumeOutcome::Failed;
             }
+            if lane.send_resume_control(ready).is_err() {
+                return ResumeOutcome::Failed;
+            }
             resume.ready_sent = true;
+            resume.peer_epoch_b = Some(liveness_epoch_b.to_owned());
             ResumeOutcome::Progressed
         }
         "controller_resumed" => {
@@ -816,6 +929,13 @@ fn handle_resume_frame(
             else {
                 return ResumeOutcome::Ignored;
             };
+            let Some(liveness_epoch_b) = frame.get("liveness_epoch_b").and_then(Value::as_str)
+            else {
+                return ResumeOutcome::Ignored;
+            };
+            if resume.peer_epoch_b.as_deref() != Some(liveness_epoch_b) {
+                return ResumeOutcome::Failed;
+            }
             let Some(new_token) = frame.get("new_resume_token_b64").and_then(Value::as_str) else {
                 return ResumeOutcome::Ignored;
             };
@@ -836,7 +956,7 @@ fn handle_resume_frame(
                     operation,
                     activation_id,
                     now_b,
-                    liveness_epoch_a,
+                    (liveness_epoch_a, liveness_epoch_b),
                     token,
                     fingerprint,
                     relay_deadline,
@@ -845,7 +965,12 @@ fn handle_resume_frame(
             {
                 return ResumeOutcome::Failed;
             }
-            business.activate();
+            if manager
+                .with_lane_owner(owner, || business.activate())
+                .is_err()
+            {
+                return ResumeOutcome::Failed;
+            }
             ResumeOutcome::Completed
         }
         "error" => ResumeOutcome::Failed,
@@ -876,6 +1001,7 @@ fn next_liveness_frame(
 /// 失败）都静默丢弃——攻击者不能通过伪造帧影响任何状态。
 fn dispatch_inbound_frame(
     manager: &ControllingDeviceManager,
+    operation: &ControllerOperation,
     sessions: &ControllingSessionManager,
     business: &ControllingLaneState,
     journal: &mut JournalExpectations,
@@ -886,9 +1012,15 @@ fn dispatch_inbound_frame(
     let Ok(frame) = serde_json::from_str::<Value>(json) else {
         return;
     };
-    let Ok((lease, capabilities)) = manager.live_runtime_context() else {
+    let Ok((runtime, epoch_a)) = manager
+        .with_peer_liveness_context(operation, |runtime, _, a| (runtime.clone(), a.to_owned()))
+    else {
         return;
     };
+    let Some(lease) = runtime.lease else {
+        return;
+    };
+    let capabilities = runtime.negotiated_capabilities;
     if frame.get("type").and_then(Value::as_str) == Some("error") {
         if let Some(request_id) = frame.get("request_id").and_then(Value::as_str) {
             // A correlated negative response may advance retry to the next
@@ -900,8 +1032,16 @@ fn dispatch_inbound_frame(
             .and_then(Value::as_str)
             .unwrap_or("invalid_message");
         log_controller_event("runtime_relay_error", relay_code);
-        match sessions.fail_pending_capability_for_lease(&lease, "capability_snapshot_unavailable")
-        {
+        let outcome = sessions.fail_pending_capability_for_lease_with_guard(
+            &lease,
+            "capability_snapshot_unavailable",
+            |commit| {
+                manager.with_lane_owner(operation, commit).map_err(|_| {
+                    super::controlling_session::SessionError::new("session_context_stale")
+                })
+            },
+        );
+        match outcome {
             Ok(projection) => {
                 log_controller_event("capability_snapshot_failed", "relay_rejected");
                 (sinks.on_session)(&projection);
@@ -919,11 +1059,13 @@ fn dispatch_inbound_frame(
     if frame.get("type").and_then(Value::as_str) == Some("controller_liveness_challenge_a") {
         dispatch_liveness_challenge(
             manager,
+            operation,
             business,
             liveness,
             &frame,
             &lease,
             &capabilities,
+            &epoch_a,
             sinks,
         );
         return;
@@ -931,17 +1073,55 @@ fn dispatch_inbound_frame(
     if frame.get("type").and_then(Value::as_str) != Some("encrypted_frame") {
         return;
     }
-    let Ok((payload_kind, payload)) = business.open(&frame, &capabilities) else {
+    let Ok(Ok((payload_kind, payload))) =
+        manager.with_lane_owner(operation, || business.open(&frame, &capabilities))
+    else {
         return;
     };
-    match payload_kind.as_str() {
+    dispatch_authenticated_payload(
+        manager,
+        operation,
+        sessions,
+        business,
+        journal,
+        &lease,
+        &capabilities,
+        &payload_kind,
+        payload,
+        sinks,
+    );
+}
+
+/// AEAD admission and projection are separate boundaries: final shared-state
+/// commits still validate this original owner after a replacement can occur.
+fn dispatch_authenticated_payload(
+    manager: &ControllingDeviceManager,
+    operation: &ControllerOperation,
+    sessions: &ControllingSessionManager,
+    business: &ControllingLaneState,
+    journal: &mut JournalExpectations,
+    lease: &LeaseContext,
+    capabilities: &[String],
+    payload_kind: &str,
+    payload: Value,
+    sinks: &mut ControllingLaneSinks<'_>,
+) {
+    if manager.with_lane_owner(operation, || ()).is_err() {
+        return;
+    }
+    match payload_kind {
         "capability_snapshot" => {
-            match sessions.apply_capability_snapshot_for_lease_with_mapping(
+            match sessions.apply_capability_snapshot_for_lease_with_mapping_and_guard(
                 &lease,
                 &payload,
                 |remote_ref, controlled_session_id| {
                     (sinks.on_mapping)(&lease, remote_ref, controlled_session_id).map_err(|_| {
                         super::controlling_session::SessionError::new("remote_mapping_unavailable")
+                    })
+                },
+                |commit| {
+                    manager.with_lane_owner(operation, commit).map_err(|_| {
+                        super::controlling_session::SessionError::new("session_context_stale")
                     })
                 },
             ) {
@@ -955,7 +1135,11 @@ fn dispatch_inbound_frame(
             }
         }
         "capability_snapshot_error" => {
-            match sessions.apply_capability_error_for_lease(&lease, &payload) {
+            match sessions.apply_capability_error_for_lease_with_guard(&lease, &payload, |commit| {
+                manager.with_lane_owner(operation, commit).map_err(|_| {
+                    super::controlling_session::SessionError::new("session_context_stale")
+                })?
+            }) {
                 Ok(projection) => {
                     log_controller_event("capability_snapshot_failed", "unavailable");
                     (sinks.on_session)(&projection);
@@ -993,6 +1177,7 @@ fn dispatch_inbound_frame(
             }
             match project_journal_event(journal, &event, &mut |event| {
                 (sinks.on_journal)(&AuthenticatedJournalFrame {
+                    operation,
                     lease: &lease,
                     event,
                 })
@@ -1017,6 +1202,7 @@ fn dispatch_inbound_frame(
                         |pending| {
                             request_journal_replay(
                                 manager,
+                                operation,
                                 business,
                                 &lease,
                                 &capabilities,
@@ -1039,6 +1225,7 @@ fn dispatch_inbound_frame(
             // authority and may never skip that comparison.
             match project_journal_snapshot(journal, &snapshot, &mut |snapshot| {
                 (sinks.on_snapshot)(&AuthenticatedSnapshotFrame {
+                    operation,
                     lease: &lease,
                     snapshot,
                 })
@@ -1055,11 +1242,13 @@ fn dispatch_inbound_frame(
 /// AEAD 证明；因此明文控制帧仍不会被直接当成 B 的有效存活证据。
 fn dispatch_liveness_challenge(
     manager: &ControllingDeviceManager,
+    operation: &ControllerOperation,
     business: &ControllingLaneState,
     liveness: &mut LivenessExpectations,
     frame: &Value,
     lease: &LeaseContext,
     capabilities: &[String],
+    epoch: &str,
     sinks: &mut ControllingLaneSinks<'_>,
 ) {
     let context = RuntimeValidationContext {
@@ -1086,9 +1275,6 @@ fn dispatch_liveness_challenge(
     let Some(sequence) = liveness.next_sequence() else {
         return;
     };
-    let Some(epoch) = manager.live_liveness_epoch() else {
-        return;
-    };
     let inner = serde_json::json!({
         "v": 1,
         "type": "controller_liveness_a",
@@ -1103,7 +1289,9 @@ fn dispatch_liveness_challenge(
         "challenge_id": challenge_id,
         "challenge_b64": challenge_b64,
     });
-    let Ok(response) = business.seal_liveness(&inner, capabilities) else {
+    let Ok(Ok(response)) =
+        manager.with_lane_owner(operation, || business.seal_liveness(&inner, capabilities))
+    else {
         return;
     };
     if (sinks.on_liveness)(response) {
@@ -1472,6 +1660,7 @@ pub(crate) fn build_journal_replay_request(
 /// 请求缺失区间的回放；失败不影响缺口事件的丢弃语义（下次事件仍会重试）。
 fn request_journal_replay(
     manager: &ControllingDeviceManager,
+    operation: &ControllerOperation,
     business: &ControllingLaneState,
     lease: &LeaseContext,
     capabilities: &[String],
@@ -1489,10 +1678,19 @@ fn request_journal_replay(
     ) else {
         return false;
     };
-    let Ok(frame) = business.seal("journal_replay_request", &payload, capabilities) else {
+    let Ok(sender) = manager.transport_for_operation(operation) else {
         return false;
     };
-    manager.send_authenticated_business(&frame).is_ok()
+    manager
+        .with_lane_owner(operation, || {
+            let Ok(frame) = business.seal("journal_replay_request", &payload, capabilities) else {
+                return false;
+            };
+            sender
+                .as_ref()
+                .is_some_and(|sender| sender.try_send_business(&frame).is_ok())
+        })
+        .unwrap_or(false)
 }
 
 fn begin_and_send_replay(
@@ -1569,13 +1767,15 @@ pub(crate) async fn connect_controlling_device(
         operation.claim_request_id().to_owned(),
         code,
         keys,
-        trust,
+        trust.clone(),
     );
     let (sender, mut port) = spawn_controlling_lane(&relay.controller_relay_ws_url());
     // 先登记 transport，保证并发的断开/重连能立刻停止本次尝试。
-    manager.replace_transport(sender.clone());
     let business = app.state::<ControllingLaneState>();
-    business.clear();
+    if let Err(error) = manager.replace_owned_transport(&operation, sender.clone(), &business) {
+        sender.stop();
+        return Err(error.code.to_owned());
+    }
 
     // A 端排障日志：先把「这次到底连的是哪个端点的哪条路径」写死，再把每个状态
     // 投影与最终结果码记下来。没有这几行时，「连接码无效或已过期」无法区分
@@ -1583,12 +1783,14 @@ pub(crate) async fn connect_controlling_device(
     let endpoint_detail = relay.controller_endpoint_log_detail();
     log_controller_event("connect_started", &endpoint_detail);
     let mut emit = |status: &ControllingStatus| {
-        log_controller_event("status", &controller_status_log_detail(status));
-        let _ = app.emit(CONTROLLER_STATUS_EVENT, status);
+        let _ = manager.with_lane_owner(&operation, || {
+            log_controller_event("status", &controller_status_log_detail(status));
+            let _ = app.emit(CONTROLLER_STATUS_EVENT, status);
+        });
     };
     let status = match run_controlling_connection(
         manager,
-        operation,
+        operation.clone(),
         &mut port,
         &mut handshake,
         &sender,
@@ -1614,52 +1816,59 @@ pub(crate) async fn connect_controlling_device(
         let manager = keeper.state::<ControllingDeviceManager>();
         let sessions = keeper.state::<ControllingSessionManager>();
         let business = keeper.state::<ControllingLaneState>();
-        let device = manager.inner();
         let mut previous_status = ControllingStatusKind::Connected;
         let mut on_status = |status: &ControllingStatus| {
-            let current = status.kind();
-            if current != previous_status {
-                let event = match (previous_status, current) {
-                    (ControllingStatusKind::Connected, ControllingStatusKind::Reconnecting) => {
-                        Some(RemoteControlEvent::new(
-                            RemoteStage::Disconnection,
-                            RemoteOutcome::Ok,
-                        ))
+            let _ = manager.with_lane_owner(&operation, || {
+                let current = status.kind();
+                if current != previous_status {
+                    let event = match (previous_status, current) {
+                        (ControllingStatusKind::Connected, ControllingStatusKind::Reconnecting) => {
+                            Some(RemoteControlEvent::new(
+                                RemoteStage::Disconnection,
+                                RemoteOutcome::Ok,
+                            ))
+                        }
+                        (ControllingStatusKind::Reconnecting, ControllingStatusKind::Connected) => {
+                            Some(RemoteControlEvent::new(
+                                RemoteStage::Resume,
+                                RemoteOutcome::Ok,
+                            ))
+                        }
+                        (ControllingStatusKind::Reconnecting, ControllingStatusKind::Error) => {
+                            Some(
+                                RemoteControlEvent::new(
+                                    RemoteStage::Resume,
+                                    RemoteOutcome::Rejected,
+                                )
+                                .reason(RemoteReason::ResumeFailed),
+                            )
+                        }
+                        _ => None,
+                    };
+                    if let Some(event) = event {
+                        track_remote_control(&keeper, event);
                     }
-                    (ControllingStatusKind::Reconnecting, ControllingStatusKind::Connected) => {
-                        Some(RemoteControlEvent::new(
-                            RemoteStage::Resume,
-                            RemoteOutcome::Ok,
-                        ))
-                    }
-                    (ControllingStatusKind::Reconnecting, ControllingStatusKind::Error) => Some(
-                        RemoteControlEvent::new(RemoteStage::Resume, RemoteOutcome::Rejected)
-                            .reason(RemoteReason::ResumeFailed),
-                    ),
-                    _ => None,
-                };
-                if let Some(event) = event {
-                    track_remote_control(&keeper, event);
+                    previous_status = current;
                 }
-                previous_status = current;
-            }
-            log_controller_event("status", &controller_status_log_detail(status));
-            let _ = keeper.emit(CONTROLLER_STATUS_EVENT, status);
+                log_controller_event("status", &controller_status_log_detail(status));
+                let _ = keeper.emit(CONTROLLER_STATUS_EVENT, status);
+            });
         };
         let capability_sink = Arc::clone(&journal);
         let mut on_session = |projection: &ControllingSessionProjection| {
-            let _ = capability_sink.publish_capability(projection);
+            let _ = capability_sink.publish_capability(&operation, projection);
         };
         let mapping = Arc::clone(&journal);
         let mut on_mapping = |lease: &LeaseContext, remote_ref: &str, controlled_id: &str| {
-            mapping.confirm_mapping(lease, remote_ref, controlled_id)
+            mapping.confirm_mapping(&operation, lease, remote_ref, controlled_id)
         };
         let action_sink = Arc::clone(&journal);
         let mut on_task = |lease: &LeaseContext, event: Value| {
             if event.get("type").and_then(Value::as_str) == Some("remote_action_result") {
-                let _ = action_sink.publish_action_result(lease, &event);
+                let _ = action_sink.publish_action_result(&operation, lease, &event);
             } else {
-                let _ = keeper.emit(CONTROLLER_TASK_EVENT, event);
+                let _ = manager
+                    .with_lane_owner(&operation, || keeper.emit(CONTROLLER_TASK_EVENT, event));
             }
         };
         let mut on_journal = |frame: &AuthenticatedJournalFrame<'_>| {
@@ -1671,8 +1880,8 @@ pub(crate) async fn connect_controlling_device(
             journal.publish_snapshot(frame)
         };
         let mut on_liveness = |frame: Value| {
-            // E2E-06 心跳：经当前认证 transport 的租约控制队列发送。
-            device.send_authenticated_control(&frame).is_ok()
+            // Pinned to this connection even if the singleton is replaced.
+            sender.try_send_authenticated_control(&frame).is_ok()
         };
         let mut sinks = ControllingLaneSinks {
             on_status: &mut on_status,
@@ -1683,12 +1892,18 @@ pub(crate) async fn connect_controlling_device(
             on_snapshot: &mut on_snapshot,
             on_liveness: &mut on_liveness,
         };
-        serve_controlling_lane(
+        serve_controlling_lane_with_evidence_context(
             &mut port,
             manager.inner(),
             sessions.inner(),
             business.inner(),
             &mut sinks,
+            Duration::from_millis(LIVENESS_HEARTBEAT_INTERVAL_MS),
+            PeerEvidenceContext {
+                trust: Some(&trust),
+                monotonic: &lane_monotonic_millis,
+                operation: operation.clone(),
+            },
         )
         .await;
     });
@@ -2186,6 +2401,7 @@ mod tests {
                     reservation_id: "reservation-0001".into(),
                     device_display_name: DEVICE_DISPLAY_NAME_PLACEHOLDER.to_owned(),
                     liveness_epoch_a: "liveness-epoch-a-0001".into(),
+                    liveness_epoch_b: "liveness-epoch-b-0001".into(),
                     resume_deadline_b: 30_000,
                     resume_token: [7_u8; 32],
                     transport_key_fingerprint: [9_u8; 32],
@@ -2285,6 +2501,7 @@ mod tests {
                     reservation_id: "reservation-0001".into(),
                     device_display_name: DEVICE_DISPLAY_NAME_PLACEHOLDER.to_owned(),
                     liveness_epoch_a: "liveness-epoch-a-0001".into(),
+                    liveness_epoch_b: "liveness-epoch-b-0001".into(),
                     resume_deadline_b: 30_000,
                     resume_token: [7_u8; 32],
                     transport_key_fingerprint: [9_u8; 32],
@@ -2563,6 +2780,7 @@ mod tests {
                     reservation_id: "reservation-0001".into(),
                     device_display_name: DEVICE_DISPLAY_NAME_PLACEHOLDER.to_owned(),
                     liveness_epoch_a: "liveness-epoch-a-0001".into(),
+                    liveness_epoch_b: "liveness-epoch-b-0001".into(),
                     resume_deadline_b: 30_000,
                     resume_token: [7_u8; 32],
                     transport_key_fingerprint: [9_u8; 32],
@@ -2805,6 +3023,7 @@ mod tests {
                     reservation_id: "reservation-0001".into(),
                     device_display_name: DEVICE_DISPLAY_NAME_PLACEHOLDER.to_owned(),
                     liveness_epoch_a: "live-a-1".into(),
+                    liveness_epoch_b: "live-b-1".into(),
                     resume_deadline_b: 30_000,
                     resume_token: [7_u8; 32],
                     transport_key_fingerprint: [9_u8; 32],
@@ -2946,13 +3165,14 @@ mod tests {
         manager.complete_reserved(operation.clone()).unwrap();
         manager
             .complete_connected(
-                operation,
+                operation.clone(),
                 ControllerLease {
                     context: lease.clone(),
                     peer_endpoint_id: "endpoint-0001".into(),
                     reservation_id: "reservation-0001".into(),
                     device_display_name: DEVICE_DISPLAY_NAME_PLACEHOLDER.to_owned(),
                     liveness_epoch_a: "live-a-1".into(),
+                    liveness_epoch_b: "live-b-1".into(),
                     resume_deadline_b: 30_000,
                     resume_token: [7_u8; 32],
                     transport_key_fingerprint: [9_u8; 32],
@@ -2990,6 +3210,7 @@ mod tests {
         let mut liveness = LivenessExpectations::default();
         dispatch_inbound_frame(
             &manager,
+            &manager.current_operation().unwrap(),
             &sessions,
             &business,
             &mut journal,
@@ -3015,9 +3236,154 @@ mod tests {
             projections[0].capability_error.as_deref(),
             Some("capability_snapshot_unavailable")
         );
+        // Replacement can happen after the keeper's cheap event fence. Reuse
+        // the same lease bytes deliberately: only the original operation owns
+        // this plaintext error, and must not consume the new pending request.
+        manager.with_lane_owner(&operation, || ()).unwrap();
+        manager.disconnect();
+        let replacement = manager.connect("234-4567").unwrap();
+        manager.complete_reserved(replacement.clone()).unwrap();
+        manager
+            .complete_connected(
+                replacement,
+                ControllerLease {
+                    context: lease.clone(),
+                    peer_endpoint_id: "endpoint-0001".into(),
+                    reservation_id: "reservation-0001".into(),
+                    device_display_name: DEVICE_DISPLAY_NAME_PLACEHOLDER.to_owned(),
+                    liveness_epoch_a: "live-a-2".into(),
+                    liveness_epoch_b: "live-b-2".into(),
+                    resume_deadline_b: 30_000,
+                    resume_token: [7; 32],
+                    transport_key_fingerprint: [9; 32],
+                    negotiated_capabilities: capabilities.clone(),
+                },
+            )
+            .unwrap();
+        let next_request = sessions
+            .capability_request(&session.session_ref, &lease)
+            .unwrap();
+        let mut ignored_session =
+            |_: &ControllingSessionProjection| panic!("old error reached new owner");
+        let mut stale_sinks = ControllingLaneSinks {
+            on_status: &mut on_status,
+            on_session: &mut ignored_session,
+            on_mapping: &mut |_, _, _| Ok(()),
+            on_task: &mut on_task,
+            on_journal: &mut on_journal,
+            on_snapshot: &mut on_snapshot,
+            on_liveness: &mut on_liveness,
+        };
+        dispatch_inbound_frame(&manager, &operation, &sessions, &business, &mut journal, &mut liveness,
+            &json!({"v":1,"type":"error","request_id":"old-error","code":"invalid_message","message":"invalid message"}).to_string(), &mut stale_sinks);
+        let still_pending = sessions
+            .fail_pending_capability_for_lease(&lease, "capability_snapshot_unavailable")
+            .unwrap();
+        assert_eq!(
+            still_pending.capability_request_id.as_deref(),
+            Some(next_request.request_id.as_str())
+        );
+        assert!(!request_journal_replay(
+            &manager,
+            &operation,
+            &business,
+            &lease,
+            &capabilities,
+            &session.session_ref,
+            "journal-epoch",
+            0,
+            "old-replay"
+        ));
     }
 
     /// E2E-06：Relay 顶层存活挑战必须经租约校验并由 A 返回加密证明。
+    #[test]
+    fn opened_capability_error_cannot_mutate_a_replacement_owner_with_identical_lease() {
+        let fixture = pairing_fixture(RELAY_KEY_ID);
+        let lease = lease_context(&fixture.reservation);
+        let (a_keys, b_keys) =
+            paired_session_keys(fixture.a_keys, fixture.b_keys, &fixture.reservation);
+        let capabilities = vec!["encrypted_frames_v1".into(), "task_v1".into()];
+        let manager = ControllingDeviceManager::default();
+        let connect = || {
+            let operation = manager.connect("234-4567").unwrap();
+            manager.complete_reserved(operation.clone()).unwrap();
+            manager
+                .complete_connected(
+                    operation.clone(),
+                    ControllerLease {
+                        context: lease.clone(),
+                        peer_endpoint_id: "endpoint-0001".into(),
+                        reservation_id: "reservation-0001".into(),
+                        device_display_name: DEVICE_DISPLAY_NAME_PLACEHOLDER.to_owned(),
+                        liveness_epoch_a: "live-a-1".into(),
+                        liveness_epoch_b: "live-b-1".into(),
+                        resume_deadline_b: 30_000,
+                        resume_token: [7; 32],
+                        transport_key_fingerprint: [9; 32],
+                        negotiated_capabilities: capabilities.clone(),
+                    },
+                )
+                .unwrap();
+            operation
+        };
+        let old = connect();
+        let sessions = ControllingSessionManager::default();
+        let session = sessions
+            .open_with_outcome(None, "Session", "chat", &lease, &capabilities)
+            .unwrap()
+            .0;
+        let request = sessions
+            .capability_request(&session.session_ref, &lease)
+            .unwrap();
+        let payload = json!({ "v":1,"type":"capability_snapshot_error", "connection_id":lease.connection_id,
+            "controller_lease_id":lease.controller_lease_id,"lease_epoch":lease.lease_epoch,"relay_epoch":lease.relay_epoch,
+            "remote_control_generation":lease.remote_control_generation,"request_id":request.request_id,"session_id":session.session_id,
+            "code":"capability_snapshot_unavailable" });
+        let business = ControllingLaneState::default();
+        business.install(HandshakeRole::A, &lease, a_keys).unwrap();
+        let mut b = EncryptedLane::new(HandshakeRole::B, &lease, b_keys).unwrap();
+        let encrypted = b
+            .seal("capability_snapshot_error", &payload, &capabilities)
+            .unwrap();
+        let (kind, opened) = manager
+            .with_lane_owner(&old, || business.open(&encrypted, &capabilities))
+            .unwrap()
+            .unwrap();
+        // The old frame passed AEAD before the singleton was replaced. The
+        // intent/request deliberately remain pending with identical lease bytes.
+        manager.disconnect();
+        let _new = connect();
+        let mut sinks = ControllingLaneSinks {
+            on_status: &mut |_| {},
+            on_session: &mut |_| panic!("stale capability error projected"),
+            on_mapping: &mut |_, _, _| Ok(()),
+            on_task: &mut |_, _| {},
+            on_journal: &mut |_| Ok(()),
+            on_snapshot: &mut |_| Ok(()),
+            on_liveness: &mut |_| false,
+        };
+        dispatch_authenticated_payload(
+            &manager,
+            &old,
+            &sessions,
+            &business,
+            &mut JournalExpectations::default(),
+            &lease,
+            &capabilities,
+            &kind,
+            opened,
+            &mut sinks,
+        );
+        let pending = sessions
+            .fail_pending_capability_for_lease(&lease, "capability_snapshot_unavailable")
+            .unwrap();
+        assert_eq!(
+            pending.capability_request_id.as_deref(),
+            Some(request.request_id.as_str())
+        );
+    }
+
     #[tokio::test]
     async fn top_level_liveness_challenge_produces_direct_encrypted_proof() {
         let PairingFixture {
@@ -3046,6 +3412,7 @@ mod tests {
                     reservation_id: "reservation-0001".into(),
                     device_display_name: DEVICE_DISPLAY_NAME_PLACEHOLDER.to_owned(),
                     liveness_epoch_a: "live-a-1".into(),
+                    liveness_epoch_b: "live-b-1".into(),
                     resume_deadline_b: 30_000,
                     resume_token: [7_u8; 32],
                     transport_key_fingerprint: [9_u8; 32],
@@ -3260,6 +3627,7 @@ mod tests {
                     reservation_id: "reservation-0001".into(),
                     device_display_name: DEVICE_DISPLAY_NAME_PLACEHOLDER.to_owned(),
                     liveness_epoch_a: "live-a-1".into(),
+                    liveness_epoch_b: "live-b-1".into(),
                     resume_deadline_b: 30_000,
                     resume_token: [7_u8; 32],
                     transport_key_fingerprint: [9_u8; 32],
@@ -3437,6 +3805,7 @@ mod tests {
                     reservation_id: "reservation-0001".into(),
                     device_display_name: DEVICE_DISPLAY_NAME_PLACEHOLDER.to_owned(),
                     liveness_epoch_a: "live-a-1".into(),
+                    liveness_epoch_b: "live-b-1".into(),
                     resume_deadline_b: 30_000,
                     resume_token: [7_u8; 32],
                     transport_key_fingerprint: [9_u8; 32],
@@ -3683,6 +4052,7 @@ mod tests {
                     reservation_id: "reservation-0001".into(),
                     device_display_name: DEVICE_DISPLAY_NAME_PLACEHOLDER.to_owned(),
                     liveness_epoch_a: "live-a-1".into(),
+                    liveness_epoch_b: "live-b-1".into(),
                     resume_deadline_b: 30_000,
                     resume_token: [7_u8; 32],
                     transport_key_fingerprint: [9_u8; 32],
@@ -3729,6 +4099,15 @@ mod tests {
         )
         .await;
         assert!(outcome.is_err(), "长连接保活任务不应自行结束");
+        assert!(
+            frames
+                .iter()
+                .any(|frame| frame["type"] == "controller_liveness_attestation_request_b")
+        );
+        let frames: Vec<_> = frames
+            .iter()
+            .filter(|frame| frame["type"] == "controller_liveness")
+            .collect();
         assert!(frames.len() >= 2, "应按间隔持续发送心跳");
         assert_eq!(frames[0]["type"], "controller_liveness");
         assert_eq!(frames[0]["sender_role"], "A");
@@ -3737,6 +4116,348 @@ mod tests {
         assert_eq!(frames[1]["heartbeat_sequence"], "2");
         assert_eq!(frames[0]["connection_id"], "connection-0001");
         assert_eq!(frames[0]["lease_epoch"], "1");
+    }
+
+    /// Real Node Router, LeaseManager receipt gate and signed liveness hooks
+    /// feed the actual Rust A service over local IPC. Storage/enrollment,
+    /// endpoint Finished crypto and socket transport are separate test scopes;
+    /// no fabricated Relay or fabricated signed response is used here.
+    #[tokio::test(start_paused = true)]
+    async fn real_node_router_b_proof_keeps_a_alive_then_b_loss_expires_despite_a_tx() {
+        use std::io::{BufRead as _, Write as _};
+        use std::process::{Command, Stdio};
+
+        struct NodeRpc {
+            child: std::process::Child,
+            input: std::process::ChildStdin,
+            output: std::io::BufReader<std::process::ChildStdout>,
+        }
+        impl NodeRpc {
+            fn read(&mut self) -> Value {
+                let mut line = String::new();
+                assert!(
+                    self.output.read_line(&mut line).unwrap() > 0,
+                    "Node fixture must reply within its 15s watchdog"
+                );
+                assert!(line.len() < 64 * 1024);
+                serde_json::from_str(&line).unwrap()
+            }
+            fn send(&mut self, command: Value) -> Value {
+                writeln!(self.input, "{command}").unwrap();
+                self.input.flush().unwrap();
+                self.read()
+            }
+        }
+        impl Drop for NodeRpc {
+            fn drop(&mut self) {
+                let _ = self.child.kill();
+                let _ = self.child.wait();
+            }
+        }
+        struct IpcLane(mpsc::UnboundedReceiver<ControllerLaneEvent>);
+        #[async_trait::async_trait]
+        impl ControllingLane for IpcLane {
+            async fn next_lane_event(&mut self) -> Option<ControllerLaneEvent> {
+                self.0.recv().await
+            }
+        }
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let b_manager = super::super::controlled::ControlledDeviceManager::default();
+        let b_operation = b_manager.start(None, Vec::new()).unwrap();
+        let mut child = Command::new("node")
+            .env("PINVOU_TEST_B_GENERATION", b_operation.generation())
+            .arg(root.join("remote-control-relay/test/fixtures/peer-liveness-router.js"))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .expect("local Node runtime is required for the deterministic Relay contract");
+        let mut rpc = NodeRpc {
+            input: child.stdin.take().unwrap(),
+            output: std::io::BufReader::new(child.stdout.take().unwrap()),
+            child,
+        };
+        let startup = rpc.read();
+        let trust = AuthenticatedRelayTrustConfig::from_pinned_keys([(
+            startup["key_id"].as_str().unwrap().to_owned(),
+            startup["public_key_b64"].as_str().unwrap().to_owned(),
+        )])
+        .unwrap();
+        let reserved = &startup["reserved"];
+        let parsed =
+            super::super::protocol::parse_controller_pairing_transcript(&reserved.to_string())
+                .unwrap();
+        super::super::crypto::authenticate_relay_transcript(&trust, parsed).unwrap();
+        let joined = super::super::controlling_handshake::validate_joined_lease(
+            &startup["joined"],
+            reserved["pairing_id"].as_str().unwrap(),
+            reserved["reservation_id"].as_str().unwrap(),
+            reserved["relay_epoch"].as_str().unwrap(),
+            reserved["transcript_hash"].as_str().unwrap(),
+        )
+        .unwrap();
+        let manager = ControllingDeviceManager::default();
+        let operation = manager.connect("2345678").unwrap();
+        manager.complete_reserved(operation.clone()).unwrap();
+        manager
+            .complete_connected(
+                operation,
+                ControllerLease {
+                    context: LeaseContext {
+                        connection_id: joined.connection_id,
+                        controller_lease_id: joined.controller_lease_id,
+                        lease_epoch: joined.lease_epoch.to_string(),
+                        relay_epoch: joined.relay_epoch,
+                        remote_control_generation: joined.remote_control_generation,
+                    },
+                    peer_endpoint_id: "endpoint-ipc".into(),
+                    reservation_id: reserved["reservation_id"].as_str().unwrap().into(),
+                    device_display_name: "test-device".into(),
+                    liveness_epoch_a: joined.liveness_epoch_a,
+                    liveness_epoch_b: joined.liveness_epoch_b,
+                    resume_deadline_b: joined.resume_deadline_ms,
+                    resume_token: joined.resume_token,
+                    transport_key_fingerprint: [8; 32],
+                    negotiated_capabilities: serde_json::from_value(
+                        startup["capabilities"].clone(),
+                    )
+                    .unwrap(),
+                },
+            )
+            .unwrap();
+        let b_context = manager.live_lease().unwrap();
+        let b_epoch = startup["joined"]["liveness_epoch_b"].as_str().unwrap();
+        super::super::controlled_heartbeat::test_support::connect(
+            &b_manager,
+            &b_operation,
+            b_context.clone(),
+            startup["joined"]["liveness_epoch_a"].as_str().unwrap(),
+            serde_json::from_value(startup["capabilities"].clone()).unwrap(),
+        );
+        let b_port = super::super::controlled_heartbeat::test_support::CapturePort::default();
+        let mut b_heartbeat = super::super::controlled_heartbeat::ControlledHeartbeat::default();
+        b_heartbeat.install(b_context, b_epoch).unwrap();
+        let origin = tokio::time::Instant::now();
+        let clock = || u64::try_from(origin.elapsed().as_millis()).unwrap();
+        let (tx, rx) = mpsc::unbounded_channel();
+        let mut lane = IpcLane(rx);
+        let mut a_heartbeats_after_b_loss = 0;
+        let mut proofs = 0;
+        let mut proof_rejections = 0;
+        let mut on_liveness = |frame: Value| {
+            let now = clock();
+            if now >= 35_000 && frame["type"] == "controller_liveness" {
+                a_heartbeats_after_b_loss += 1;
+            }
+            let b_frame = if now < 35_000 {
+                b_heartbeat
+                    .pump(&b_manager, &b_operation, false, &b_port)
+                    .unwrap();
+                b_port.frames.lock().pop()
+            } else {
+                None
+            };
+            let reply = rpc.send(json!({"frame": frame, "clock_ms": now, "b_frame": b_frame}));
+            for frame in reply["deliveries"].as_array().unwrap() {
+                if frame["type"] == "controller_liveness_attestation_b" {
+                    proofs += 1;
+                }
+                if frame["type"] == "error" {
+                    proof_rejections += 1;
+                }
+                tx.send(ControllerLaneEvent::Frame(frame.to_string()))
+                    .unwrap();
+            }
+            // Even Relay rejection was successfully transmitted by A. This
+            // must not be mistaken for authenticated B evidence.
+            true
+        };
+        let mut status = Vec::new();
+        let mut on_status = |value: &ControllingStatus| status.push(value.kind());
+        let mut sinks = ControllingLaneSinks {
+            on_status: &mut on_status,
+            on_session: &mut |_| {},
+            on_mapping: &mut |_, _, _| Ok(()),
+            on_task: &mut |_, _| {},
+            on_journal: &mut |_| Ok(()),
+            on_snapshot: &mut |_| Ok(()),
+            on_liveness: &mut on_liveness,
+        };
+        let sessions = ControllingSessionManager::default();
+        let current_lease = manager.live_lease().unwrap();
+        let caps: Vec<String> = serde_json::from_value(startup["capabilities"].clone()).unwrap();
+        sessions
+            .open_with_outcome(
+                Some("capability-unrelated"),
+                "Pending",
+                "chat",
+                &current_lease,
+                &caps,
+            )
+            .unwrap();
+        sessions
+            .capability_request("capability-unrelated", &current_lease)
+            .unwrap();
+        let business = ControllingLaneState::default();
+        tokio::time::timeout(
+            Duration::from_secs(70),
+            serve_controlling_lane_with_evidence_context(
+                &mut lane,
+                &manager,
+                &sessions,
+                &business,
+                &mut sinks,
+                Duration::from_secs(3),
+                PeerEvidenceContext {
+                    trust: Some(&trust),
+                    monotonic: &clock,
+                    operation: manager.current_operation().unwrap(),
+                },
+            ),
+        )
+        .await
+        .expect("B loss must end A inside the finite authenticated cutoff");
+        assert!(
+            (35_000..65_000).contains(&clock()),
+            "healthy B must survive the initial 30s, and lost B must not renew forever"
+        );
+        assert!(proofs >= 10);
+        assert!(
+            proof_rejections >= 5,
+            "the real Router remains alive after stale B evidence"
+        );
+        assert!(
+            sessions
+                .state("capability-unrelated", &current_lease)
+                .unwrap()
+                .capability_error
+                .is_none(),
+            "peer proof rejection must not fail a capability request"
+        );
+        assert!(
+            a_heartbeats_after_b_loss >= 5,
+            "A TX remains successful after B silence"
+        );
+        assert_eq!(manager.status().kind(), ControllingStatusKind::Error);
+        assert!(manager.live_lease().is_err());
+        assert_eq!(status.last(), Some(&ControllingStatusKind::Error));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn keeper_replaced_after_heartbeat_snapshot_never_sends_peer_request_on_new_owner() {
+        struct PendingLane;
+        #[async_trait::async_trait]
+        impl ControllingLane for PendingLane {
+            async fn next_lane_event(&mut self) -> Option<ControllerLaneEvent> {
+                std::future::pending().await
+            }
+        }
+        fn connect(manager: &ControllingDeviceManager, generation: &str) -> ControllerOperation {
+            let operation = manager.connect("2345678").unwrap();
+            manager.complete_reserved(operation.clone()).unwrap();
+            manager
+                .complete_connected(
+                    operation.clone(),
+                    ControllerLease {
+                        context: LeaseContext {
+                            connection_id: "connection-owner".into(),
+                            controller_lease_id: "lease-owner".into(),
+                            lease_epoch: "1".into(),
+                            relay_epoch: "relay-owner".into(),
+                            remote_control_generation: generation.into(),
+                        },
+                        peer_endpoint_id: "endpoint-owner".into(),
+                        reservation_id: "reservation-owner".into(),
+                        device_display_name: "Owner".into(),
+                        liveness_epoch_a: "live-a-owner".into(),
+                        liveness_epoch_b: "live-b-owner".into(),
+                        resume_deadline_b: 30_000,
+                        resume_token: [1; 32],
+                        transport_key_fingerprint: [2; 32],
+                        negotiated_capabilities: vec!["role_liveness_v1".into()],
+                    },
+                )
+                .unwrap();
+            operation
+        }
+        let manager = ControllingDeviceManager::default();
+        let old = connect(&manager, "generation-old");
+        let mut calls = 0;
+        let mut replacement = None;
+        let mut on_liveness = |frame: Value| {
+            calls += 1;
+            assert_eq!(frame["type"], "controller_liveness");
+            assert_eq!(frame["remote_control_generation"], "generation-old");
+            manager.disconnect();
+            replacement = Some(connect(&manager, "generation-new"));
+            true
+        };
+        let mut statuses = Vec::new();
+        let mut on_status = |status: &ControllingStatus| statuses.push(status.kind());
+        let mut sinks = ControllingLaneSinks {
+            on_status: &mut on_status,
+            on_session: &mut |_| {},
+            on_mapping: &mut |_, _, _| Ok(()),
+            on_task: &mut |_, _| {},
+            on_journal: &mut |_| Ok(()),
+            on_snapshot: &mut |_| Ok(()),
+            on_liveness: &mut on_liveness,
+        };
+        let origin = tokio::time::Instant::now();
+        let clock = || u64::try_from(origin.elapsed().as_millis()).unwrap();
+        serve_controlling_lane_with_evidence_context(
+            &mut PendingLane,
+            &manager,
+            &ControllingSessionManager::default(),
+            &ControllingLaneState::default(),
+            &mut sinks,
+            Duration::from_secs(3),
+            PeerEvidenceContext {
+                trust: None,
+                monotonic: &clock,
+                operation: old.clone(),
+            },
+        )
+        .await;
+        drop(sinks);
+        assert_eq!(
+            calls, 1,
+            "old pending proof request must not reach the new owner"
+        );
+        assert!(statuses.is_empty(), "old timeout cannot fail the new owner");
+        assert_eq!(manager.current_operation(), replacement);
+        assert_eq!(manager.status().kind(), ControllingStatusKind::Connected);
+        assert_eq!(
+            manager.live_lease().unwrap().remote_control_generation,
+            "generation-new"
+        );
+        // Production spawn passes its original intent explicitly. A delayed
+        // keeper starting only after replacement must exit without any TX.
+        let mut no_tx = |_: Value| -> bool { panic!("stale keeper cannot send") };
+        let mut sinks = ControllingLaneSinks {
+            on_status: &mut |_| panic!("stale keeper cannot project"),
+            on_session: &mut |_| {},
+            on_mapping: &mut |_, _, _| Ok(()),
+            on_task: &mut |_, _| {},
+            on_journal: &mut |_| Ok(()),
+            on_snapshot: &mut |_| Ok(()),
+            on_liveness: &mut no_tx,
+        };
+        serve_controlling_lane_with_evidence_context(
+            &mut PendingLane,
+            &manager,
+            &ControllingSessionManager::default(),
+            &ControllingLaneState::default(),
+            &mut sinks,
+            Duration::from_secs(3),
+            PeerEvidenceContext {
+                trust: None,
+                monotonic: &clock,
+                operation: old,
+            },
+        )
+        .await;
+        assert_eq!(manager.status().kind(), ControllingStatusKind::Connected);
     }
 }
 

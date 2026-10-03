@@ -108,7 +108,9 @@ function validMessage(type, role = fixture.message_role_matrix[type][0]) {
     case "controller_liveness_challenge_a": return { ...common, ...request, ...LEASE, challenge_id: "challenge-0001", challenge_b64: ZERO_NONCE };
     case "encrypted_controller_liveness_a": return structuredClone(fixture.direct_liveness_vector.outer);
     case "controller_liveness_attestation_request_a": return { ...common, ...request, ...LEASE, challenge_id: "challenge-0001", challenge_b64: ZERO_NONCE };
+    case "controller_liveness_attestation_request_b": return { ...common, ...request, ...LEASE, challenge_id: "challenge-0001", challenge_b64: ZERO_NONCE };
     case "controller_liveness_attestation_a": return structuredClone(fixture.attestation_vector.message);
+    case "controller_liveness_attestation_b": return structuredClone(fixture.peer_b_attestation_vector.message);
     case "controller_resume_prepare": return { ...common, ...request, ...LEASE, sender_role: role, resume_token_b64: "AQID", transport_challenge_b64: ZERO_NONCE, original_deadline_ms: "30000" };
     case "controller_resume_provisional": return { ...common, ...request, ...activation, original_deadline_ms: "30000" };
     case "encrypted_resume_confirm": return { ...common, ...request, ...activation, sender_role: role, ciphertext_b64: "AQID", ciphertext_bytes: "3" };

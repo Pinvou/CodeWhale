@@ -476,6 +476,7 @@ impl DesktopControllerJournalSink {
 
     fn project_frame(
         &self,
+        operation: &crate::features::remote_control::controller::controlling::ControllerOperation,
         frame_lease: &LeaseContext,
         remote_ref: &str,
         make_authenticated: impl FnOnce(
@@ -509,7 +510,8 @@ impl DesktopControllerJournalSink {
             control_connected: true,
             encrypted_channel_connected: true,
         };
-        manager.with_current_authenticated_remote_proxy_identity(
+        manager.with_owned_authenticated_remote_proxy_identity(
+            operation,
             &lane,
             &(current.clone(), peer.clone(), boundary.clone()),
             || {
@@ -740,7 +742,12 @@ impl ProxyEventVerificationPort for SnapshotFrameProof<'_, '_> {
 impl crate::features::remote_control::controller::controlling_service::ControllingJournalSink
     for DesktopControllerJournalSink
 {
-    fn publish_action_result(&self, lease: &LeaseContext, payload: &Value) -> Result<(), String> {
+    fn publish_action_result(
+        &self,
+        operation: &crate::features::remote_control::controller::controlling::ControllerOperation,
+        lease: &LeaseContext,
+        payload: &Value,
+    ) -> Result<(), String> {
         use tauri::Manager as _;
         let manager = self.app.state::<
             crate::features::remote_control::controller::controlling::ControllingDeviceManager,
@@ -769,7 +776,7 @@ impl crate::features::remote_control::controller::controlling_service::Controlli
         {
             return Err("remote_action_binding_stale".to_owned());
         }
-        manager.with_current_authenticated_remote_proxy_identity(&lane, &identity, || {
+        manager.with_owned_authenticated_remote_proxy_identity(operation, &lane, &identity, || {
             let current_live = store
                 .remote_dispatch_live_context(&local_session_id, &remote_ref)
                 .map_err(|_| "remote_action_binding_stale".to_owned())?;
@@ -784,6 +791,7 @@ impl crate::features::remote_control::controller::controlling_service::Controlli
     }
     fn publish_capability(
         &self,
+        operation: &crate::features::remote_control::controller::controlling::ControllerOperation,
         projection: &crate::features::remote_control::controller::controlling_session::ControllingSessionProjection,
     ) -> Result<(), String> {
         use tauri::{Emitter as _, Manager as _};
@@ -815,7 +823,8 @@ impl crate::features::remote_control::controller::controlling_service::Controlli
             control_connected: true,
             encrypted_channel_connected: true,
         };
-        manager.with_current_authenticated_remote_proxy_identity(
+        manager.with_owned_authenticated_remote_proxy_identity(
+            operation,
             &lane,
             &(lease.clone(), peer_id, resume_boundary_id),
             || {
@@ -855,6 +864,7 @@ impl crate::features::remote_control::controller::controlling_service::Controlli
 
     fn confirm_mapping(
         &self,
+        operation: &crate::features::remote_control::controller::controlling::ControllerOperation,
         lease: &LeaseContext,
         remote_ref: &str,
         controlled_session_id: &str,
@@ -884,7 +894,8 @@ impl crate::features::remote_control::controller::controlling_service::Controlli
             control_connected: true,
             encrypted_channel_connected: true,
         };
-        manager.with_current_authenticated_remote_proxy_identity(
+        manager.with_owned_authenticated_remote_proxy_identity(
+            operation,
             &lane,
             &(lease.clone(), peer_id, resume_boundary_id),
             || {
@@ -907,6 +918,7 @@ impl crate::features::remote_control::controller::controlling_service::Controlli
 
     fn publish(&self, frame: &AuthenticatedJournalFrame<'_>) -> Result<(), String> {
         self.project_frame(
+            frame.operation(),
             frame.lease(),
             &frame.event().session_id,
             |store, binding, live| {
@@ -955,6 +967,7 @@ impl crate::features::remote_control::controller::controlling_service::Controlli
             return Err("remote_projection_snapshot_digest_invalid".into());
         }
         self.project_frame(
+            frame.operation(),
             frame.lease(),
             &frame.snapshot().session_id,
             |_, binding, _| {
