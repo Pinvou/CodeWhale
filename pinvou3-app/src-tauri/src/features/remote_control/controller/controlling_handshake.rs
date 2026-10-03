@@ -75,6 +75,7 @@ pub(crate) struct JoinedLease {
     pub(crate) relay_epoch: String,
     pub(crate) remote_control_generation: String,
     pub(crate) liveness_epoch_a: String,
+    pub(crate) liveness_epoch_b: String,
     pub(crate) resume_deadline_ms: u64,
     pub(crate) resume_token: [u8; RESUME_TOKEN_BYTES],
 }
@@ -91,6 +92,7 @@ impl std::fmt::Debug for JoinedLease {
             .field("relay_epoch", &self.relay_epoch)
             .field("remote_control_generation", &self.remote_control_generation)
             .field("liveness_epoch_a", &self.liveness_epoch_a)
+            .field("liveness_epoch_b", &self.liveness_epoch_b)
             .field("resume_deadline_ms", &self.resume_deadline_ms)
             .field("resume_token", &"[REDACTED]")
             .finish()
@@ -160,6 +162,7 @@ pub(crate) fn validate_joined_lease(
         relay_epoch: string("relay_epoch")?,
         remote_control_generation: string("remote_control_generation")?,
         liveness_epoch_a: string("liveness_epoch_a")?,
+        liveness_epoch_b: string("liveness_epoch_b")?,
         resume_deadline_ms,
         resume_token,
     })

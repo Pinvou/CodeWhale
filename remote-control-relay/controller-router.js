@@ -13,6 +13,7 @@ const HANDSHAKE_TYPES = new Set([
 const LIVENESS_TYPES = new Set([
   "controller_liveness", "controller_liveness_challenge_a", "encrypted_controller_liveness_a",
   "controller_liveness_attestation_request_a",
+  "controller_liveness_attestation_request_b",
 ]);
 const RESUME_TYPES = new Set([
   "controller_resume_prepare", "encrypted_resume_confirm", "controller_resume_activation_ack",
