@@ -98,6 +98,21 @@ test('App initializes and passes the controller configured model source', () => 
     'detached ChatViews must use the same default when App does not pass the prop');
 });
 
+test('capability renewal preserves draft state while dispatch stays revision-bound', () => {
+  assert.match(chat, /remoteProxyComposerIdentity\(activeSessionId, remoteConnection\)/);
+  assert.match(chat, /sameRemoteComposerOwner\(\s*sentSessionId, sentRemoteIdentity, activeSessionIdRef\.current, remoteComposerIdentityRef\.current/);
+  const resetting = sourceSection(chat, 'setRemoteFiles([]);', 'if (!remoteArtifactPreview)');
+  assert.match(resetting, /\[remoteComposerIdentity, remoteTransferGuard\]/);
+  assert.doesNotMatch(resetting, /\[remoteSendIdentity\]/);
+  assert.match(chat, /item\.identity !== remoteSendIdentity/);
+});
+
+test('both upload paths have owner-scoped finally cleanup and guarded progress', () => {
+  assert.equal((chat.match(/remoteTransferGuard\.finish\(transferAttempt\)/g) || []).length, 2);
+  assert.equal((chat.match(/current\?\.owner === transferAttempt \? null : current/g) || []).length, 2);
+  assert.equal((chat.match(/progress => setRemoteTransfer\(current => currentTransfer\(\)/g) || []).length, 2);
+});
+
 test('remote model listing reloads per capability revision without changing its stable selection key', () => {
   const loading = sourceSection(
     chat, 'const remoteModelListingRequestIdentity =',

@@ -83,6 +83,7 @@ impl SessionStore {
             bail!("remote controller channel is not connected");
         }
         let state = self.remote_proxies.lock();
+        state.require_available()?;
         if let Some(id) = existing_id {
             let record = state
                 .records
@@ -140,6 +141,7 @@ impl SessionStore {
             bail!("remote controller channel changed");
         }
         let mut state = self.remote_proxies.lock();
+        state.require_available()?;
         let id = &prepared.open.local_session_id;
         let remote_ref = &prepared.open.remote_session_ref;
         if prepared.existing {

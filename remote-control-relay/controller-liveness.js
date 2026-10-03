@@ -3,7 +3,9 @@ import crypto from "node:crypto";
 import {
   CONTROLLER_PROTOCOL_VERSION,
   buildLivenessAttestationPreimage,
+  buildPeerLivenessAttestationPreimage,
   validateControllerMessage,
+  validateControllerRuntimeMessage,
 } from "./protocol-controller.js";
 
 const TYPES = new Set([
@@ -11,6 +13,7 @@ const TYPES = new Set([
   "controller_liveness_challenge_a",
   "encrypted_controller_liveness_a",
   "controller_liveness_attestation_request_a",
+  "controller_liveness_attestation_request_b",
 ]);
 const TOTAL_BUDGET_MS = 30_000;
 const MAX_ATTESTATION_AGE_MS = 5_000;
@@ -88,6 +91,8 @@ function newState(lease, now) {
     last_liveness_a: { epoch: lease.liveness_epoch_a, sequence: 0n, at: now },
     last_liveness_b: { epoch: lease.liveness_epoch_b, sequence: 0n, at: now },
     attestation_sequence: 0n,
+    peer_b_attestation_sequence: 0n,
+    peer_b_used_challenges: new Map(),
     pending_challenges: new Map(),
     used_challenges: new Map(),
   };
@@ -155,6 +160,9 @@ export class ControllerLivenessHooks {
     }
     const state = this.#states.get(context.controller_lease_id);
     if (!state) fail("controller_liveness_state_not_found");
+    // Validate using the authenticated socket's actual role, not the role a
+    // specialized handler expects. A B socket cannot request proof as A.
+    validateControllerMessage(message, role, context);
 
     if (message.type === "controller_liveness") {
       return this.#acceptTransportHeartbeat({ message, role, context, state, now });
@@ -165,7 +173,57 @@ export class ControllerLivenessHooks {
     if (message.type === "encrypted_controller_liveness_a") {
       return this.#forwardEncryptedLiveness({ message, context, state, now });
     }
+    if (message.type === "controller_liveness_attestation_request_b") {
+      return this.#issuePeerBAttestation({ message, context, state, now });
+    }
     return this.#issueAttestation({ message, context, state, now });
+  }
+
+  #issuePeerBAttestation({ message, context, state, now }) {
+    const validated = validateControllerRuntimeMessage(message, "A", {
+      lease: Object.fromEntries(["connection_id", "controller_lease_id", "lease_epoch", "relay_epoch", "remote_control_generation"].map(field => [field, context[field]])),
+      negotiated_capabilities: context.negotiated_capabilities,
+    });
+    if (!this.#signing.signAttestation) fail("controller_liveness_attestation_unavailable");
+    for (const [id, consumedAt] of state.peer_b_used_challenges) {
+      if (now - consumedAt > TOTAL_BUDGET_MS) state.peer_b_used_challenges.delete(id);
+    }
+    const challengeKey = validated.challenge_id;
+    if (state.peer_b_used_challenges.has(challengeKey)) fail("controller_liveness_challenge_replay");
+    if (state.peer_b_used_challenges.size >= MAX_USED_CHALLENGES) fail("controller_liveness_challenge_capacity");
+    const evidence = state.last_liveness_b;
+    const observedAge = now - evidence.at;
+    if (evidence.epoch !== context.liveness_epoch_b || evidence.sequence === 0n
+      || !Number.isSafeInteger(observedAge) || observedAge < 0 || observedAge > MAX_ATTESTATION_AGE_MS) {
+      fail("controller_liveness_attestation_stale");
+    }
+    const sequence = state.peer_b_attestation_sequence + 1n;
+    const unsigned = {
+      v: CONTROLLER_PROTOCOL_VERSION,
+      type: "controller_liveness_attestation_b",
+      request_id: validated.request_id,
+      connection_id: context.connection_id,
+      controller_lease_id: context.controller_lease_id,
+      lease_epoch: context.lease_epoch,
+      relay_epoch: context.relay_epoch,
+      remote_control_generation: context.remote_control_generation,
+      liveness_epoch_b: evidence.epoch,
+      heartbeat_sequence_b: evidence.sequence.toString(),
+      attestation_sequence: sequence.toString(),
+      challenge_id: validated.challenge_id,
+      challenge_b64: validated.challenge_b64,
+      observed_age_ms: observedAge.toString(),
+      remaining_ttl_ms: (TOTAL_BUDGET_MS - observedAge).toString(),
+      issued_at_relay: now.toString(),
+      relay_signing_key_id: this.#signing.signingKeyId,
+      signature_algorithm: "ed25519",
+    };
+    const signature = this.#signing.signAttestation(buildPeerLivenessAttestationPreimage(unsigned));
+    if (!Buffer.isBuffer(signature) || signature.length !== 64) fail("controller_liveness_signature_invalid");
+    const attestation = validateControllerMessage({ ...unsigned, relay_signature_b64: signature.toString("base64") }, "relay", context);
+    state.peer_b_attestation_sequence = sequence;
+    state.peer_b_used_challenges.set(challengeKey, now);
+    return Object.freeze({ deliveries: Object.freeze([delivery("A", attestation)]) });
   }
 
   #acceptTransportHeartbeat({ message, role, context, state, now }) {

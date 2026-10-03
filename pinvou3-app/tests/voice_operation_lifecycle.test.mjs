@@ -437,7 +437,7 @@ for (const lane of ['desktop', 'web']) {
           controlledSession: { sessionId: null },
           remoteChatActive: false, remoteConnection: null, remoteLinkReady: false,
           remoteSessionBusy: false,
-          remoteSendIdentity: null, effectiveRemoteModelSource: null, remoteBinding: null,
+          remoteSendIdentity: null, remoteTransferGuard: null, effectiveRemoteModelSource: null, remoteBinding: null,
           remoteFiles: [], remoteNewDispatchReady: false, remoteProxyHistory: null,
           remoteModelError: null, remoteModelSource: 'controlled_device',
           remoteMode: 'chat', remoteSkillIds: [], remoteWorkspaceId: '',

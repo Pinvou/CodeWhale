@@ -8,6 +8,7 @@
 
 use std::collections::HashMap;
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use base64::Engine as _;
@@ -782,9 +783,10 @@ pub(crate) struct ControlledRelayWorker {
     channel: crate::features::remote_control::manager::ControllerRelayChannel,
     /// 业务派发端口：由命令层注入（能力快照 / 任务接纳 / 取消）。
     business: std::sync::Arc<dyn ControlledBusinessPort>,
-    /// Generation-local action outcomes. Dropping the worker on disconnect
-    /// clears the cache; every hit is bound to the full request fingerprint.
-    action_results: RemoteActionResultCache,
+    /// Generation-local action outcomes survive same-lease transport resume.
+    /// Dropping the generation owner clears them; every hit is fingerprint-bound.
+    action_results: std::sync::Arc<RemoteActionResultCache>,
+    business_epoch: std::sync::Arc<AtomicU64>,
 }
 
 /// Narrow port over the generation-bound Relay lane. Keeps the registration
@@ -1000,7 +1002,8 @@ impl ControlledRelayWorker {
             handshake: Some(handshake),
             channel,
             business,
-            action_results: RemoteActionResultCache::default(),
+            action_results: std::sync::Arc::new(RemoteActionResultCache::default()),
+            business_epoch: std::sync::Arc::new(AtomicU64::new(0)),
         };
         tauri::async_runtime::spawn(async move {
             let result = worker.register_pairing().await;
@@ -1117,6 +1120,7 @@ impl ControlledRelayWorker {
         let mut joined = false;
         let mut evidence = LivenessEvidenceState::default();
         let mut resume = ControlledResumeAttempt::default();
+        let business_worker = self.business_worker();
         let mut poll =
             tokio::time::interval(std::time::Duration::from_millis(LIVENESS_EVIDENCE_POLL_MS));
         poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -1149,8 +1153,11 @@ impl ControlledRelayWorker {
                                 &message,
                             ) {
                                 ControlledResumeOutcome::Failed => break 'serve,
-                                ControlledResumeOutcome::Completed
-                                | ControlledResumeOutcome::Progressed => {
+                                ControlledResumeOutcome::Completed => {
+                                    let status = manager.poll_watchdog(controlled_monotonic_millis());
+                                    emit_controlled_status(&self.app, &status);
+                                }
+                                ControlledResumeOutcome::Progressed => {
                                     let status = manager.poll_watchdog(controlled_monotonic_millis());
                                     emit_controlled_status(&self.app, &status);
                                 }
@@ -1160,7 +1167,15 @@ impl ControlledRelayWorker {
                         }
                         match message.get("type").and_then(Value::as_str) {
                             Some("encrypted_frame") => {
-                                self.dispatch_business_frame(&message).await;
+                                if let Some(job) = self.admit_business_frame(&message) {
+                                    if business_worker.try_submit(job).is_err() {
+                                        if let Ok(status) = self.app.state::<ControlledDeviceManager>()
+                                            .fail_operation(self.operation.clone(), "desktop_remote_business_queue_full".into()) {
+                                            emit_controlled_status(&self.app, &status);
+                                        }
+                                        break 'serve;
+                                    }
+                                }
                             }
                             // E2E-06：Relay 签名兜底证明 → 续期 B 的 watchdog。
                             Some("controller_liveness_attestation_a") => {
@@ -1192,7 +1207,18 @@ impl ControlledRelayWorker {
                                 if !connected {
                                     let manager = self.app.state::<ControlledDeviceManager>();
                                     let lane = self.app.state::<ControlledLaneState>();
-                                    lane.suspend();
+                                    // Do not abort a potentially executed remote action
+                                    // before it caches its result. Retain one executor so
+                                    // resumed retries cannot overtake it; discard only
+                                    // unstarted work and fence old-epoch response frames.
+                                    if manager.with_local_cancel_lease(|_| {
+                                        self.business_epoch.fetch_add(1, Ordering::AcqRel);
+                                        lane.suspend();
+                                    }).is_err() {
+                                        self.business_epoch.fetch_add(1, Ordering::AcqRel);
+                                        lane.suspend();
+                                    }
+                                    business_worker.clear_pending();
                                     if !begin_controlled_resume(
                                         &self.channel,
                                         manager.inner(),
@@ -1266,6 +1292,7 @@ impl ControlledRelayWorker {
                 }
             }
         }
+        drop(business_worker);
         // 通道关闭（stop/refresh/断线）时丢弃出站旁路，避免旧 generation 继续回传。
         self.app
             .state::<ControlledOutboundState>()
@@ -1511,7 +1538,7 @@ impl ControlledRelayWorker {
     /// 已认证业务帧：解密 → 派发 → 用同一通道加密回包。任何一层不符（无活租约、
     /// 解密/校验失败、业务拒绝）都不产生副作用；业务拒绝时回传有界错误的
     /// `task_status` 由命令层决定（这里只负责通道语义）。
-    async fn dispatch_business_frame(&self, frame: &Value) {
+    fn admit_business_frame(&self, frame: &Value) -> Option<ControlledBusinessJob> {
         let is_task_submit =
             frame.get("payload_kind").and_then(Value::as_str) == Some("task_submit");
         if is_task_submit {
@@ -1520,27 +1547,84 @@ impl ControlledRelayWorker {
         let manager = self.app.state::<ControlledDeviceManager>();
         let Ok((lease, capabilities)) = manager.live_runtime_context() else {
             log_controlled_event("business_frame_dropped", "no_live_lease");
-            return;
+            return None;
         };
         let business = self.app.state::<ControlledLaneState>();
         let (payload_kind, payload) = match business.open(frame, &capabilities) {
             Ok(opened) => opened,
             Err(error) => {
                 log_controlled_event("business_frame_rejected", error.code());
-                return;
+                return None;
             }
         };
         if payload_kind == "task_submit" {
             log_controlled_event("task_submit_decrypted", "dispatching");
         }
-        let responses = match dispatch_decrypted_payload_cached(
-            self.business.as_ref(),
-            &self.action_results,
-            &lease,
-            &payload_kind,
-            &payload,
-        )
-        .await
+        Some(ControlledBusinessJob {
+            transport_epoch: self.business_epoch.load(Ordering::Acquire),
+            lease,
+            capabilities,
+            payload_kind: payload_kind.to_owned(),
+            payload,
+        })
+    }
+
+    fn business_worker(
+        &self,
+    ) -> super::business_worker::SerialBusinessWorker<ControlledBusinessJob> {
+        let app = self.app.clone();
+        let port = self.business.clone();
+        let cache = self.action_results.clone();
+        let sender = self.channel.sender();
+        let epoch = self.business_epoch.clone();
+        // Each validated plaintext is <=512KiB. Four queued jobs plus one
+        // in-flight job bound memory and retain one strictly sequential executor.
+        super::business_worker::SerialBusinessWorker::start(4, move |job| {
+            let app = app.clone();
+            let port = port.clone();
+            let cache = cache.clone();
+            let sender = sender.clone();
+            let epoch = epoch.clone();
+            async move {
+                dispatch_controlled_business_job(&app, port.as_ref(), &cache, &sender, &epoch, job)
+                    .await;
+            }
+        })
+    }
+}
+
+struct ControlledBusinessJob {
+    transport_epoch: u64,
+    lease: LeaseContext,
+    capabilities: Vec<String>,
+    payload_kind: String,
+    payload: Value,
+}
+
+async fn dispatch_controlled_business_job(
+    app: &AppHandle,
+    port: &dyn ControlledBusinessPort,
+    cache: &RemoteActionResultCache,
+    sender: &crate::features::remote_control::manager::ControllerRelaySender,
+    epoch: &AtomicU64,
+    job: ControlledBusinessJob,
+) {
+    let ControlledBusinessJob {
+        transport_epoch,
+        lease,
+        capabilities,
+        payload_kind,
+        payload,
+    } = job;
+    let manager = app.state::<ControlledDeviceManager>();
+    if epoch.load(Ordering::Acquire) != transport_epoch
+        || manager.with_current_business_lease(&lease, || ()).is_err()
+    {
+        return;
+    }
+    let is_task_submit = payload_kind == "task_submit";
+    let responses =
+        match dispatch_decrypted_payload_cached(port, cache, &lease, &payload_kind, &payload).await
         {
             Ok(responses) => responses,
             Err(error) => {
@@ -1551,9 +1635,17 @@ impl ControlledRelayWorker {
                 return;
             }
         };
-        if is_task_submit {
-            log_controlled_event("task_submit_dispatched", "accepted");
+    if is_task_submit {
+        log_controlled_event("task_submit_dispatched", "accepted");
+    }
+    // Async business may finish after stop/disconnect/re-pair. Seal/send while
+    // pinned to the same current live lease; no late response may enter a new
+    // transport cycle or resurrect suspended business authority.
+    let _ = manager.with_current_business_lease(&lease, || {
+        if epoch.load(Ordering::Acquire) != transport_epoch {
+            return;
         }
+        let business = app.state::<ControlledLaneState>();
         // 一条请求可能产出多帧（journal 回放），逐帧加密回传；单帧失败即停止。
         for (response_kind, response) in responses {
             let frame = match business.seal(response_kind, &response, &capabilities) {
@@ -1563,7 +1655,7 @@ impl ControlledRelayWorker {
                     return;
                 }
             };
-            if self.channel.try_send(frame).is_err() {
+            if sender.try_send(frame).is_err() {
                 log_controlled_event("business_response_send_failed", response_kind);
                 return;
             }
@@ -1577,7 +1669,7 @@ impl ControlledRelayWorker {
                 log_controlled_event("capability_response_sent", response_kind);
             }
         }
-    }
+    });
 }
 
 /// E2E-06：证据轮询间隔（远小于 30 秒预算）。
@@ -2175,20 +2267,21 @@ pub(crate) fn handle_controlled_resume_frame<P: ControlledRelayPort + ?Sized>(
             resume.activation_id = Some(activation_id.to_owned());
             ControlledResumeOutcome::Progressed
         }
-        "encrypted_resume_confirm" => match lane.open_resume_confirm(message) {
-            Ok(()) => {
-                resume.peer_confirmed = true;
-                ControlledResumeOutcome::Progressed
+        "encrypted_resume_confirm" => {
+            if message.get("activation_id").and_then(Value::as_str)
+                != resume.activation_id.as_deref()
+                || lane.open_resume_confirm(message).is_err()
+                || resume.ack_sent
+            {
+                return ControlledResumeOutcome::Ignored;
             }
-            Err(_) => ControlledResumeOutcome::Ignored,
-        },
-        "controller_resume_activation_pending" => {
-            let Some(activation_id) = message.get("activation_id").and_then(Value::as_str) else {
+            let Some(activation_id) = resume.activation_id.as_deref() else {
                 return ControlledResumeOutcome::Ignored;
             };
-            if resume.ack_sent || !resume.peer_confirmed {
-                return ControlledResumeOutcome::Ignored;
-            }
+            // Relay cannot emit pending until B acknowledges activation. B's
+            // own confirm was queued first on this same FIFO socket; now the
+            // verified A confirm authorizes B's local acceptance and ACK.
+            resume.peer_confirmed = true;
             if !resume.confirmed {
                 if manager
                     .advance_resume(
@@ -2210,9 +2303,6 @@ pub(crate) fn handle_controlled_resume_frame<P: ControlledRelayPort + ?Sized>(
             ) else {
                 return ControlledResumeOutcome::Failed;
             };
-            if port.try_send(ack).is_err() {
-                return ControlledResumeOutcome::Failed;
-            }
             if manager
                 .advance_resume(
                     operation.clone(),
@@ -2223,7 +2313,19 @@ pub(crate) fn handle_controlled_resume_frame<P: ControlledRelayPort + ?Sized>(
             {
                 return ControlledResumeOutcome::Failed;
             }
+            if port.try_send(ack).is_err() {
+                return ControlledResumeOutcome::Failed;
+            }
             resume.ack_sent = true;
+            ControlledResumeOutcome::Progressed
+        }
+        "controller_resume_activation_pending" => {
+            let Some(activation_id) = message.get("activation_id").and_then(Value::as_str) else {
+                return ControlledResumeOutcome::Ignored;
+            };
+            if !resume.ack_sent || !resume.peer_confirmed || resume.liveness_sent {
+                return ControlledResumeOutcome::Ignored;
+            }
             if manager
                 .advance_resume(
                     operation,
@@ -2277,9 +2379,6 @@ pub(crate) fn handle_controlled_resume_frame<P: ControlledRelayPort + ?Sized>(
             ) else {
                 return ControlledResumeOutcome::Failed;
             };
-            if port.try_send(ready).is_err() {
-                return ControlledResumeOutcome::Failed;
-            }
             if manager
                 .advance_resume(
                     operation,
@@ -2288,6 +2387,9 @@ pub(crate) fn handle_controlled_resume_frame<P: ControlledRelayPort + ?Sized>(
                 )
                 .is_err()
             {
+                return ControlledResumeOutcome::Failed;
+            }
+            if port.try_send(ready).is_err() {
                 return ControlledResumeOutcome::Failed;
             }
             resume.ready_sent = true;
@@ -3382,9 +3484,12 @@ mod tests {
     /// 回 A 端的会话引用；未知类型与畸形载荷不产生任何动作。
     #[tokio::test]
     async fn decrypted_payloads_dispatch_and_rewrite_the_session_reference() {
+        use std::sync::Arc;
+
         #[derive(Default)]
         struct StubPort {
             action_calls: std::sync::atomic::AtomicUsize,
+            block: Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
         }
 
         #[async_trait::async_trait]
@@ -3398,6 +3503,10 @@ mod tests {
             ) -> Result<Value, String> {
                 self.action_calls
                     .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if let Some((started, release)) = &self.block {
+                    started.notify_one();
+                    release.notified().await;
+                }
                 Ok(json!({"applied": true}))
             }
             async fn capability_snapshot(
@@ -3603,6 +3712,84 @@ mod tests {
                 .unwrap_err(),
             "task_request_invalid"
         );
+
+        // A disconnect may occur after the side effect but before its result
+        // is cached. Keep this in-flight call on the same serial executor;
+        // the resumed retry must see the cache, never re-execute the action.
+        let started = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let blocking = Arc::new(StubPort {
+            action_calls: Default::default(),
+            block: Some((started.clone(), release.clone())),
+        });
+        let cache = Arc::new(RemoteActionResultCache::default());
+        let epoch = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let outputs = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let completions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let done = Arc::new(tokio::sync::Notify::new());
+        let worker = super::super::business_worker::SerialBusinessWorker::start(4, {
+            let port = blocking.clone();
+            let cache = cache.clone();
+            let epoch = epoch.clone();
+            let outputs = outputs.clone();
+            let completions = completions.clone();
+            let done = done.clone();
+            let lease = lease.clone();
+            move |(admitted_epoch, payload): (u64, Value)| {
+                let port = port.clone();
+                let cache = cache.clone();
+                let epoch = epoch.clone();
+                let outputs = outputs.clone();
+                let completions = completions.clone();
+                let done = done.clone();
+                let lease = lease.clone();
+                async move {
+                    let result = dispatch_decrypted_payload_cached(
+                        port.as_ref(),
+                        &cache,
+                        &lease,
+                        "remote_action_request",
+                        &payload,
+                    )
+                    .await
+                    .unwrap();
+                    if epoch.load(std::sync::atomic::Ordering::Acquire) == admitted_epoch {
+                        outputs.lock().push(result);
+                    }
+                    completions.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                    done.notify_one();
+                }
+            }
+        });
+        worker.try_submit((0, action.clone())).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), started.notified())
+            .await
+            .unwrap();
+        worker
+            .try_submit((0, json!({"request_id":"discard-queued"})))
+            .unwrap();
+        epoch.store(1, std::sync::atomic::Ordering::Release);
+        worker.clear_pending();
+        worker.try_submit((1, action)).unwrap();
+        release.notify_one();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while completions.load(std::sync::atomic::Ordering::Acquire) < 2 {
+                done.notified().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            blocking
+                .action_calls
+                .load(std::sync::atomic::Ordering::Acquire),
+            1
+        );
+        assert_eq!(
+            outputs.lock().len(),
+            1,
+            "only the resumed retry may publish its cached result"
+        );
     }
 
     /// E2E-05：B → A 的 journal_event 信封必须通过冻结运行时校验（角色 B +
@@ -3759,6 +3946,22 @@ mod tests {
             ControlledResumeOutcome::Progressed
         );
         // A 的 confirm（同一 resume 秘密）必须验签通过。
+        let mismatched_confirm = peer
+            .seal_resume_confirm("request-resume-wrong", "activation-wrong")
+            .unwrap();
+        let sent_before = port.sent.lock().unwrap().len();
+        assert_eq!(
+            handle_controlled_resume_frame(
+                &port,
+                &manager,
+                &lane,
+                &mut resume,
+                &mismatched_confirm
+            ),
+            ControlledResumeOutcome::Ignored
+        );
+        assert_eq!(port.sent.lock().unwrap().len(), sent_before);
+        assert!(!resume.peer_confirmed && !resume.ack_sent);
         let peer_confirm = peer
             .seal_resume_confirm("request-resume-peer", activation)
             .unwrap();
@@ -3766,6 +3969,20 @@ mod tests {
             handle_controlled_resume_frame(&port, &manager, &lane, &mut resume, &peer_confirm),
             ControlledResumeOutcome::Progressed
         );
+        assert!(
+            resume.ack_sent,
+            "B must send ACK before Relay can generate pending"
+        );
+        assert_eq!(
+            port.sent.lock().unwrap().last().unwrap()["type"],
+            "controller_resume_activation_ack"
+        );
+        let sent_before = port.sent.lock().unwrap().len();
+        assert_eq!(
+            handle_controlled_resume_frame(&port, &manager, &lane, &mut resume, &peer_confirm),
+            ControlledResumeOutcome::Ignored
+        );
+        assert_eq!(port.sent.lock().unwrap().len(), sent_before);
         // 审核回归：旧 generation 的恢复帧必须被丢弃且不影响相位。
         assert_eq!(
             handle_controlled_resume_frame(
@@ -3785,7 +4002,7 @@ mod tests {
             ),
             ControlledResumeOutcome::Ignored
         );
-        // activation_pending → activation_ack + post_activation_liveness。
+        // Relay pending follows B's ACK; now B sends post-activation liveness.
         assert_eq!(
             handle_controlled_resume_frame(
                 &port,

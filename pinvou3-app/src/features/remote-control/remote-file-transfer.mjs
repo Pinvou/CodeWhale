@@ -2,6 +2,27 @@ const MAX_FILE_BYTES = 32 * 1024 * 1024;
 const MAX_TOTAL_BYTES = 64 * 1024 * 1024;
 const MAX_FILES = 8;
 
+// Operation identity is revision-bound; finishing an old operation may never
+// clear a newer upload. Tokens are local UI ownership, not remote authority.
+export function createRemoteTransferGuard() {
+  let owner = null;
+  return {
+    start(identity) {
+      owner = Object.freeze({ identity });
+      return owner;
+    },
+    isCurrent(attempt, identity) {
+      return !!attempt && owner === attempt && attempt.identity === identity;
+    },
+    finish(attempt) {
+      if (!attempt || owner !== attempt) return false;
+      owner = null;
+      return true;
+    },
+    invalidate() { owner = null; },
+  };
+}
+
 function hex(bytes) {
   return Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('');
 }
