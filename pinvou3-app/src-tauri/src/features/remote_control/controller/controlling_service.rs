@@ -592,7 +592,7 @@ async fn serve_controlling_lane_with_evidence_context(
                     if let Ok((runtime, epoch_b, epoch_a)) = manager.with_peer_liveness_context(&operation, |runtime, b, a| (runtime.clone(), b.to_owned(), a.to_owned())) {
                         if let Some(lease) = runtime.lease.as_ref() {
                             if let Some(next) = liveness.next_sequence() {
-                                if let Ok(frame) = super::liveness::build_controller_liveness(lease, &epoch_a, next) { (sinks.on_liveness)(frame); }
+                                if let Ok(frame) = super::liveness::build_controller_liveness(lease, SenderRole::ControllerA, &epoch_a, next) { (sinks.on_liveness)(frame); }
                             }
                             if let Some(request) = budget.request_peer_evidence(lease, &epoch_b, (evidence.monotonic)()) {
                                 if !(sinks.on_liveness)(request) {
@@ -988,7 +988,10 @@ fn next_liveness_frame(
     let epoch = manager.live_liveness_epoch()?;
     let next = liveness.next_sequence()?;
     let frame = crate::features::remote_control::controller::liveness::build_controller_liveness(
-        &lease, &epoch, next,
+        &lease,
+        SenderRole::ControllerA,
+        &epoch,
+        next,
     )
     .ok()?;
     Some(frame)
@@ -4121,7 +4124,10 @@ mod tests {
             }
         }
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let b_manager = super::super::controlled::ControlledDeviceManager::default();
+        let b_operation = b_manager.start(None, Vec::new()).unwrap();
         let mut child = Command::new("node")
+            .env("PINVOU_TEST_B_GENERATION", b_operation.generation())
             .arg(root.join("remote-control-relay/test/fixtures/peer-liveness-router.js"))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -4181,6 +4187,18 @@ mod tests {
                 },
             )
             .unwrap();
+        let b_context = manager.live_lease().unwrap();
+        let b_epoch = startup["joined"]["liveness_epoch_b"].as_str().unwrap();
+        super::super::controlled_heartbeat::test_support::connect(
+            &b_manager,
+            &b_operation,
+            b_context.clone(),
+            startup["joined"]["liveness_epoch_a"].as_str().unwrap(),
+            serde_json::from_value(startup["capabilities"].clone()).unwrap(),
+        );
+        let b_port = super::super::controlled_heartbeat::test_support::CapturePort::default();
+        let mut b_heartbeat = super::super::controlled_heartbeat::ControlledHeartbeat::default();
+        b_heartbeat.install(b_context, b_epoch).unwrap();
         let origin = tokio::time::Instant::now();
         let clock = || u64::try_from(origin.elapsed().as_millis()).unwrap();
         let (tx, rx) = mpsc::unbounded_channel();
@@ -4193,8 +4211,15 @@ mod tests {
             if now >= 35_000 && frame["type"] == "controller_liveness" {
                 a_heartbeats_after_b_loss += 1;
             }
-            let reply =
-                rpc.send(json!({"frame": frame, "clock_ms": now, "healthy_b": now < 35_000}));
+            let b_frame = if now < 35_000 {
+                b_heartbeat
+                    .pump(&b_manager, &b_operation, false, &b_port)
+                    .unwrap();
+                b_port.frames.lock().pop()
+            } else {
+                None
+            };
+            let reply = rpc.send(json!({"frame": frame, "clock_ms": now, "b_frame": b_frame}));
             for frame in reply["deliveries"].as_array().unwrap() {
                 if frame["type"] == "controller_liveness_attestation_b" {
                     proofs += 1;

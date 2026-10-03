@@ -1118,6 +1118,7 @@ impl ControlledRelayWorker {
         };
         let mut driver = ControlledHandshakeDriver::new(keys);
         let mut joined = false;
+        let mut heartbeat = super::controlled_heartbeat::ControlledHeartbeat::default();
         let mut evidence = LivenessEvidenceState::default();
         let mut resume = ControlledResumeAttempt::default();
         let business_worker = self.business_worker();
@@ -1130,6 +1131,13 @@ impl ControlledRelayWorker {
                 biased;
                 _ = poll.tick() => {
                     if joined && !resume.is_active() {
+                        if let Err(code) = heartbeat.pump(
+                            self.app.state::<ControlledDeviceManager>().inner(),
+                            &self.operation, resume.is_active(), &self.channel,
+                        ) {
+                            self.fail_runtime(&code);
+                            break 'serve;
+                        }
                         self.pump_liveness_evidence(&mut evidence);
                     }
                     continue 'serve;
@@ -1154,6 +1162,13 @@ impl ControlledRelayWorker {
                             ) {
                                 ControlledResumeOutcome::Failed => break 'serve,
                                 ControlledResumeOutcome::Completed => {
+                                    let epoch = message.get("liveness_epoch_b").and_then(Value::as_str).unwrap_or_default();
+                                    let Ok((lease, _)) = manager.liveness_runtime_context() else { break 'serve };
+                                    if heartbeat.install(lease, epoch).is_err() {
+                                        self.fail_runtime(HANDSHAKE_FAILED);
+                                        break 'serve;
+                                    }
+                                    evidence = LivenessEvidenceState::default();
                                     let status = manager.poll_watchdog(controlled_monotonic_millis());
                                     emit_controlled_status(&self.app, &status);
                                 }
@@ -1254,6 +1269,13 @@ impl ControlledRelayWorker {
                         Some("controller_joined") => {
                             match self.complete_handshake(&message, &mut driver) {
                                 Ok(()) => {
+                                    let manager = self.app.state::<ControlledDeviceManager>();
+                                    let Ok((lease, _)) = manager.liveness_runtime_context() else { return };
+                                    let epoch = message.get("liveness_epoch_b").and_then(Value::as_str).unwrap_or_default();
+                                    if heartbeat.install(lease, epoch).is_err() {
+                                        self.fail_runtime(HANDSHAKE_FAILED);
+                                        return;
+                                    }
                                     joined = true;
                                     Ok(None)
                                 }
@@ -1531,6 +1553,13 @@ impl ControlledRelayWorker {
         }
         let bounded = sanitize_error(error);
         if let Ok(status) = manager.fail_operation(self.operation.clone(), bounded) {
+            emit_controlled_status(&self.app, &status);
+        }
+    }
+
+    fn fail_runtime(&self, error: &str) {
+        let manager = self.app.state::<ControlledDeviceManager>();
+        if let Ok(status) = manager.fail_operation(self.operation.clone(), sanitize_error(error)) {
             emit_controlled_status(&self.app, &status);
         }
     }
@@ -2397,6 +2426,11 @@ pub(crate) fn handle_controlled_resume_frame<P: ControlledRelayPort + ?Sized>(
         }
         "controller_resumed" => {
             if !resume.ready_sent {
+                return ControlledResumeOutcome::Ignored;
+            }
+            if message.get("liveness_epoch_b").and_then(Value::as_str)
+                != Some(resume.liveness_epoch_b.as_str())
+            {
                 return ControlledResumeOutcome::Ignored;
             }
             let Some(activation_id) = message.get("activation_id").and_then(Value::as_str) else {
@@ -3909,7 +3943,11 @@ mod tests {
                     transport_key_fingerprint: [2; 32],
                     controller_device_name: "Controller PC".into(),
                     connected_at_b: now_b,
-                    negotiated_capabilities: vec!["encrypted_frames_v1".into(), "resume_v1".into()],
+                    negotiated_capabilities: vec![
+                        "encrypted_frames_v1".into(),
+                        "resume_v1".into(),
+                        "role_liveness_v1".into(),
+                    ],
                 },
             )
             .unwrap();
@@ -3921,8 +3959,27 @@ mod tests {
             .unwrap();
 
         let port = FakePort::new(vec![], false);
+        let heartbeat_port =
+            super::super::controlled_heartbeat::test_support::CapturePort::default();
+        let mut heartbeat = super::super::controlled_heartbeat::ControlledHeartbeat::default();
+        heartbeat
+            .install(lease_context.clone(), "live-b-1")
+            .unwrap();
+        heartbeat
+            .pump(&manager, &operation, false, &heartbeat_port)
+            .unwrap();
+        assert_eq!(heartbeat_port.frames.lock()[0]["heartbeat_sequence"], "1");
         let mut resume = ControlledResumeAttempt::default();
+        lane.suspend();
         assert!(begin_controlled_resume(&port, &manager, &mut resume));
+        heartbeat
+            .pump(&manager, &operation, resume.is_active(), &heartbeat_port)
+            .unwrap();
+        assert_eq!(
+            heartbeat_port.frames.lock().len(),
+            1,
+            "recovery never emits role evidence"
+        );
         assert!(resume.is_active(), "恢复尝试必须处于进行中");
         let activation = "activation-0001";
 
@@ -4042,33 +4099,57 @@ mod tests {
             ),
             ControlledResumeOutcome::Progressed
         );
+        let final_frame = json!({
+            "v": 1, "type": "controller_resumed", "request_id": "request-final-resume", "activation_id": activation,
+            "liveness_epoch_a": "live-a-2", "liveness_epoch_b": epoch_b,
+            "resume_deadline_ms": "1700000030000",
+            "new_resume_token_b64": base64::engine::general_purpose::STANDARD.encode([3_u8; 32]),
+            "connection_id": lease_context.connection_id,
+            "controller_lease_id": lease_context.controller_lease_id,
+            "lease_epoch": lease_context.lease_epoch,
+            "relay_epoch": lease_context.relay_epoch,
+            "remote_control_generation": lease_context.remote_control_generation,
+        });
+        super::super::protocol::validate_controller_runtime_message_json(
+            &final_frame.to_string(),
+            SenderRole::Relay,
+            Some(&super::super::protocol::RuntimeValidationContext {
+                lease: Some(lease_context.clone()),
+                negotiated_capabilities: vec![
+                    "encrypted_frames_v1".into(),
+                    "resume_v1".into(),
+                    "role_liveness_v1".into(),
+                ],
+            }),
+        )
+        .unwrap();
+        let mut wrong_epoch = final_frame.clone();
+        wrong_epoch["liveness_epoch_b"] = json!("live-b-foreign");
         assert_eq!(
-            handle_controlled_resume_frame(
-                &port,
-                &manager,
-                &lane,
-                &mut resume,
-                &json!({
-                    "type": "controller_resumed",
-                    "activation_id": activation,
-                    "liveness_epoch_a": "live-a-2",
-                    "liveness_epoch_b": epoch_b,
-                    "resume_deadline_ms": "1700000030000",
-                    "new_resume_token_b64": base64::engine::general_purpose::STANDARD
-                        .encode([3_u8; 32]),
-                    "connection_id": lease_context.connection_id,
-                    "controller_lease_id": lease_context.controller_lease_id,
-                    "lease_epoch": lease_context.lease_epoch,
-                    "relay_epoch": lease_context.relay_epoch,
-                    "remote_control_generation": lease_context.remote_control_generation,
-                }),
-            ),
+            handle_controlled_resume_frame(&port, &manager, &lane, &mut resume, &wrong_epoch),
+            ControlledResumeOutcome::Ignored
+        );
+        assert!(resume.is_active());
+        assert!(
+            lane.is_suspended(),
+            "foreign B epoch cannot reopen the lane or install heartbeat state"
+        );
+        assert_eq!(
+            handle_controlled_resume_frame(&port, &manager, &lane, &mut resume, &final_frame,),
             ControlledResumeOutcome::Completed
         );
         assert!(!resume.is_active());
         assert!(manager.live_lease().is_ok(), "恢复完成后必须回到 connected");
         assert_eq!(manager.live_liveness_epoch().as_deref(), Some("live-a-2"));
         assert!(!lane.is_suspended(), "恢复完成后业务通道必须重新打开");
+        heartbeat.install(lease_context.clone(), &epoch_b).unwrap();
+        heartbeat
+            .pump(&manager, &operation, resume.is_active(), &heartbeat_port)
+            .unwrap();
+        let heartbeat_frames = heartbeat_port.frames.lock();
+        assert_eq!(heartbeat_frames[1]["liveness_epoch"], epoch_b);
+        assert_eq!(heartbeat_frames[1]["heartbeat_sequence"], "1");
+        drop(heartbeat_frames);
         let now_b = controlled_monotonic_millis();
         manager.mark_transport_disconnected(now_b);
         let second = manager

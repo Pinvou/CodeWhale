@@ -524,6 +524,13 @@ excluding signature-validation and scheduling cost. New B heartbeat sequences
 may replace the cutoff; equal sequences may only tighten it, and older B or
 replayed proof sequences are rejected. Failed admission, unanswered requests,
 bare B challenges and A heartbeats grant no lifetime.
+The Rust B worker produces ordinary role-B heartbeats from its verified
+joined/final-resumed lease every control poll. The full original operation and
+lease stay locked through enqueue; transport disconnect, resume admission and
+retired workers cannot publish them. A successful enqueue alone is not proof
+for A: only the Relay's authenticated B socket observation can be signed. B's
+own watchdog for A is never renewed by these heartbeats. Resume installs B's
+validated new epoch and restarts the role sequence only after the final gate.
 An exact pending proof-request `error` consumes only that request without
 changing the cutoff or failing another capability/journal request. The keeper
 pins its original connection intent and transport; a replaced keeper cannot

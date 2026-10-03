@@ -18,7 +18,7 @@ const capabilities = ["encrypted_frames_v1", "finished_receipt_v1", "pairing_v1"
 const signing = crypto.generateKeyPairSync("ed25519");
 const keyId = "relay-key-ipc-fixture";
 const publicKey = () => crypto.generateKeyPairSync("x25519").publicKey.export({format: "der", type: "spki"}).subarray(-32).toString("base64");
-const pairing = {pairing_id: "pairing-ipc", endpoint_id: "endpoint-ipc", remote_control_generation: "generation-ipc", handshake_public_key_b64: publicKey(), capabilities};
+const pairing = {pairing_id: "pairing-ipc", endpoint_id: "endpoint-ipc", remote_control_generation: process.env.PINVOU_TEST_B_GENERATION ?? "generation-ipc", handshake_public_key_b64: publicKey(), capabilities};
 let consumed = false;
 const pairings = {
   activePairing: id => !consumed && id === pairing.pairing_id ? pairing : null,
@@ -56,17 +56,16 @@ for(const role of ["A", "B"]){
 const joined = sentA.find(message => message.type === "controller_joined");
 if(!joined || !consumed) throw new Error("production receipt/lease gate did not complete");
 const lease = leases.lease(joined.controller_lease_id);
-const context = Object.fromEntries(["connection_id", "controller_lease_id", "lease_epoch", "relay_epoch", "remote_control_generation"].map(field => [field, lease[field]]));
 process.stdout.write(JSON.stringify({joined, reserved, public_key_b64: signing.publicKey.export({format: "der", type: "spki"}).subarray(-32).toString("base64"), key_id: keyId, capabilities}) + "\n");
-let bSequence = 0;
 for await (const line of readline.createInterface({input: process.stdin, crlfDelay: Infinity})) {
   const command = JSON.parse(line);
   if(!Number.isSafeInteger(command.clock_ms) || command.clock_ms < clock) throw new Error("invalid fixture clock");
   clock = command.clock_ms;
   sentA.length = 0;
-  if(command.frame.type === "controller_liveness_attestation_request_b" && command.healthy_b){
-    await router.handle({socketIdentity: "socket-B", message: {v: 1, type: "controller_liveness", ...context,
-      sender_role: "B", liveness_epoch: lease.liveness_epoch_b, heartbeat_sequence: String(++bSequence)}});
+  // B role evidence must be supplied by the Rust production poll producer.
+  // This fixture never fabricates a heartbeat in response to A activity.
+  if(command.b_frame){
+    await router.handle({socketIdentity: "socket-B", message: command.b_frame});
   }
   // The real server catches Router rejection after it emits the public error
   // frame. Keep the authenticated socket open when B evidence has gone stale.

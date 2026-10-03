@@ -429,15 +429,21 @@ impl ControllerLivenessWatchdog {
     }
 }
 
-/// E2E-06：A 端心跳帧（`controller_liveness`）。这是控制帧（不加密），Relay 与
-/// B 都以它作为「A 仍存活」的证据。序号必须单调递增且不能为 0，epoch 来自
+/// A/B 心跳只更新 Relay 对相应认证 socket 的记录，不直接续期对端预算。
+/// 序号必须单调递增且不能为 0，epoch 来自
 /// `controller_joined` 下发的租约身份。
 pub(crate) fn build_controller_liveness(
     lease: &LeaseContext,
-    liveness_epoch_a: &str,
+    role: super::protocol::SenderRole,
+    liveness_epoch: &str,
     heartbeat_sequence: u64,
 ) -> Result<serde_json::Value> {
-    if heartbeat_sequence == 0 || !is_valid_liveness_epoch(liveness_epoch_a) {
+    let sender_role = match role {
+        super::protocol::SenderRole::ControllerA => "A",
+        super::protocol::SenderRole::ControlledB => "B",
+        _ => return Err(LivenessError::new("invalid_role", "controller_liveness")),
+    };
+    if heartbeat_sequence == 0 || !is_valid_liveness_epoch(liveness_epoch) {
         return Err(LivenessError::new("invalid_field", "controller_liveness"));
     }
     Ok(serde_json::json!({
@@ -448,8 +454,8 @@ pub(crate) fn build_controller_liveness(
         "lease_epoch": lease.lease_epoch,
         "relay_epoch": lease.relay_epoch,
         "remote_control_generation": lease.remote_control_generation,
-        "sender_role": "A",
-        "liveness_epoch": liveness_epoch_a,
+        "sender_role": sender_role,
+        "liveness_epoch": liveness_epoch,
         "heartbeat_sequence": heartbeat_sequence.to_string(),
     }))
 }
@@ -1136,7 +1142,8 @@ mod tests {
         };
 
         let lease = lease();
-        let frame = build_controller_liveness(&lease, "live-a-1", 1).unwrap();
+        let frame =
+            build_controller_liveness(&lease, SenderRole::ControllerA, "live-a-1", 1).unwrap();
         validate_controller_message_json(&frame.to_string(), SenderRole::ControllerA).unwrap();
         validate_controller_runtime_message_json(
             &frame.to_string(),
@@ -1156,9 +1163,10 @@ mod tests {
         assert_eq!(frame["heartbeat_sequence"], "1");
         assert_eq!(frame["liveness_epoch"], "live-a-1");
 
-        assert!(build_controller_liveness(&lease, "live-a-1", 0).is_err());
-        assert!(build_controller_liveness(&lease, "", 1).is_err());
-        assert!(build_controller_liveness(&lease, "live a", 1).is_err());
+        assert!(build_controller_liveness(&lease, SenderRole::ControllerA, "live-a-1", 0).is_err());
+        assert!(build_controller_liveness(&lease, SenderRole::ControllerA, "", 1).is_err());
+        assert!(build_controller_liveness(&lease, SenderRole::ControllerA, "live a", 1).is_err());
+        assert!(build_controller_liveness(&lease, SenderRole::Relay, "live-a-1", 1).is_err());
     }
 
     /// E2E-06：B 端证据需求策略——没有证据、进入 suspect 或余量不足时为真；
