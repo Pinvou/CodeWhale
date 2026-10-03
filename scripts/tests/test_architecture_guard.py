@@ -26,9 +26,10 @@ class ArchitectureGuardUnitTests(unittest.TestCase):
         cls.guard = load_guard_module()
 
     def _migration_fixture_reference(self):
-        # Immutable pre-1360 main snapshot whose three-way limits match the
-        # registered migration baseline. generated_from tracks older resources.
-        reference = "d6a89486073e6a40fa037f60a92a7a6c046bc495"
+        # Immutable integration target used for this migration calibration.
+        # It includes frozen main's builtin references; never use a moving ref.
+        # generated_from tracks older resources, not the migration target.
+        reference = "0841a2d04dcd9aff9eba57c29525a8854694090b"
         self.assertEqual(
             reference,
             subprocess.check_output(
@@ -454,6 +455,19 @@ class ArchitectureGuardUnitTests(unittest.TestCase):
         self.assertEqual([], self.guard.compare_baseline_ratchet(
             baseline, previous, merge_state, anchor_state, target_state
         ))
+
+        # These extra allowances are valid only when the target actually owns
+        # frozen main's builtin references. The old 57/47 calibration must
+        # still reject a candidate claiming 58/50; no global exemption is added.
+        stale_target_edges = Counter(target_state[2])
+        stale_target_edges[("assistant", "marketplace")] -= 1
+        stale_target_edges[("runtime_bundle", "marketplace")] -= 3
+        stale_failures = self.guard.compare_baseline_ratchet(
+            baseline, previous, merge_state, anchor_state,
+            (target_state[0], target_state[1], stale_target_edges),
+        )
+        for edge in ("assistant->marketplace", "runtime_bundle->marketplace"):
+            self.assertTrue(any(edge in failure for failure in stale_failures))
 
         expanded = json.loads(json.dumps(baseline))
         expanded["rules"]["rust_cyclic_feature_dependencies"]["assistant->knowledge"] += 1

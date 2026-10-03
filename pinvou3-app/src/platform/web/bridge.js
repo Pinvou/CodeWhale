@@ -9701,6 +9701,17 @@
     return operation ? operation.operationId : null;
   }
 
+  // Whether the composer's current voice operation is parked on an in-flight
+  // send admission. The composer hook skips its identity-change auto-cancel
+  // for a parked operation: first-turn materialization flips the adapter
+  // identity mid-send, and cancelling here would only kill the completion
+  // notice of a message that still lands. A context switch before the park
+  // still cancels — that is the wrong-session auto-send protection.
+  function hasVoiceSubmissionPending() {
+    var operation = voiceOperations.get((state.voiceInput || {}).operationId);
+    return !!(operation && operation.pendingSubmission);
+  }
+
   function beginVoiceSubmission(operationId, sessionId) {
     var operation = voiceOperations.get(operationId);
     if (!operation || operation.telemetryTerminal) return;
@@ -10623,6 +10634,7 @@
     clearVoiceInput: clearVoiceInput,
     abandonVoiceResult: abandonVoiceResult,
     getVoiceOperationId: getVoiceOperationId,
+    hasVoiceSubmissionPending: hasVoiceSubmissionPending,
     beginVoiceSubmission: beginVoiceSubmission,
     completeVoiceSubmission: completeVoiceSubmission,
     dismissVoiceInput: dismissVoiceInput,

@@ -194,10 +194,9 @@ impl DesktopRemoteActionState {
         {
             return false;
         }
-        let pending = inner
-            .pending
-            .remove(request_id)
-            .expect("matched pending action");
+        let Some(pending) = inner.pending.remove(request_id) else {
+            return false;
+        };
         let ok = payload.get("ok").and_then(Value::as_bool) == Some(true);
         let body = payload.get("body").cloned().unwrap_or(Value::Null);
         if ok && pending.operation == "attachment_begin" {
@@ -248,10 +247,12 @@ impl DesktopRemoteActionState {
                     .send(Err("remote_attachment_binding_mismatch".into()));
                 return true;
             }
-            let upload = inner
-                .uploads
-                .get_mut(transfer_id)
-                .expect("binding checked while holding the same lock");
+            let Some(upload) = inner.uploads.get_mut(transfer_id) else {
+                let _ = pending
+                    .reply
+                    .send(Err("remote_attachment_binding_mismatch".into()));
+                return true;
+            };
             if body.get("state").and_then(Value::as_str) == Some("completed") {
                 upload.complete = true;
             }
@@ -455,15 +456,16 @@ impl RemoteActionIntent {
         }
     }
 
-    fn body(&self) -> Value {
-        let mut body =
-            serde_json::to_value(self).expect("action intent serializes")["body"].clone();
+    fn body(&self) -> Result<Value, String> {
+        let mut body = serde_json::to_value(self)
+            .map_err(|_| "remote_action_invalid".to_owned())?["body"]
+            .clone();
         for field in ["total_bytes", "chunk_index", "chunk_bytes"] {
             if let Some(number) = body.get(field).and_then(Value::as_u64) {
                 body[field] = Value::String(number.to_string());
             }
         }
-        body
+        Ok(body)
     }
 }
 
@@ -602,12 +604,13 @@ pub async fn desktop_remote_action_a(
             return Err("remote_action_invalid".to_owned());
         }
         let operation = operation.to_owned();
+        let body = intent.body()?;
         let payload = json!({"v":1,"type":"remote_action_request",
         "connection_id":lease.connection_id,"controller_lease_id":lease.controller_lease_id,
         "lease_epoch":lease.lease_epoch,"relay_epoch":lease.relay_epoch,
         "remote_control_generation":lease.remote_control_generation,
         "request_id":request_id,"session_id":remote_ref,
-        "operation":operation,"body":intent.body()});
+        "operation":operation,"body":body});
         validate_controller_runtime_payload_json(
             &payload.to_string(),
             SenderRole::ControllerA,
@@ -748,6 +751,67 @@ fn send_action_encrypted(
 mod tests {
     use super::*;
     use tokio::sync::oneshot::error::TryRecvError;
+
+    #[test]
+    fn fallible_intent_body_preserves_the_typed_wire_shape() {
+        for intent in [
+            RemoteActionIntent::PermissionList {
+                task_id: "task-1".into(),
+            },
+            RemoteActionIntent::PermissionDecide {
+                task_id: "task-1".into(),
+                permission_request_id: "permission-1".into(),
+                decision: "deny".into(),
+            },
+            RemoteActionIntent::AttachmentBegin {
+                task_id: "task-1".into(),
+                file_name: "report.txt".into(),
+                mime_type: "text/plain".into(),
+                total_bytes: u64::MAX,
+                sha256: "a".repeat(64),
+            },
+            RemoteActionIntent::AttachmentChunk {
+                task_id: "task-1".into(),
+                transfer_id: "transfer-1".into(),
+                chunk_index: u64::MAX,
+                chunk_b64: "YWJj".into(),
+                chunk_bytes: 3,
+            },
+            RemoteActionIntent::AttachmentAbort {
+                task_id: "task-1".into(),
+                transfer_id: "transfer-1".into(),
+            },
+            RemoteActionIntent::ArtifactIndex,
+            RemoteActionIntent::ArtifactPreview {
+                artifact_id: "artifact-1".into(),
+            },
+            RemoteActionIntent::ArtifactDownloadBegin {
+                task_id: "task-1".into(),
+                artifact_id: "artifact-1".into(),
+            },
+            RemoteActionIntent::ArtifactDownloadChunk {
+                task_id: "task-1".into(),
+                artifact_id: "artifact-1".into(),
+                transfer_id: "transfer-1".into(),
+                chunk_index: u64::MAX,
+            },
+            RemoteActionIntent::ArtifactDownloadAbort {
+                task_id: "task-1".into(),
+                artifact_id: "artifact-1".into(),
+                transfer_id: "transfer-1".into(),
+            },
+        ] {
+            let serialized = serde_json::to_value(&intent).unwrap();
+            let mut expected = serialized["body"].clone();
+            for field in ["total_bytes", "chunk_index", "chunk_bytes"] {
+                if let Some(number) = expected.get(field).and_then(Value::as_u64) {
+                    expected[field] = Value::String(number.to_string());
+                }
+            }
+            assert_eq!(intent.body().unwrap(), expected);
+            assert_eq!(serialized["operation"], intent.operation());
+        }
+    }
 
     fn live() -> LiveRemoteContext {
         LiveRemoteContext {
