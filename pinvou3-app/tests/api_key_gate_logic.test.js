@@ -3,7 +3,7 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
-const { isControlledDeviceChatActive } = require('../src/features/remote-control/remote-control-logic.mjs');
+const { isControlledSessionChatActive } = require('../src/features/remote-control/remote-control-logic.mjs');
 
 const sourcePath = path.join(__dirname, '..', 'src', 'hooks', 'useBridge.js');
 const source = fs.readFileSync(sourcePath, 'utf8');
@@ -43,16 +43,20 @@ const state = (credentialState, config = {}) => ({
     ...config,
   },
 });
-const gateForControlledStatus = (status, credentialState = 'missing') => {
+const gateForControlledStatus = (status, credentialState = 'missing', activeSessionId = 'b-session') => {
   const bridgeState = {
     ...state(credentialState),
     controlledDevice: { status, generation: 'generation-1' },
+    controlledSession: { sessionId: 'b-session' },
+    activeSessionId,
   };
   return shouldShowApiKeyGate(
     bridgeState,
     'chat',
     true,
-    isControlledDeviceChatActive(bridgeState.controlledDevice),
+    isControlledSessionChatActive(
+      bridgeState.controlledDevice, bridgeState.controlledSession, bridgeState.activeSessionId,
+    ),
   );
 };
 
@@ -122,6 +126,10 @@ assert.strictEqual(
   true,
   'the local API Key gate must resume after controlled mode stops',
 );
+for (const activeSessionId of ['local-session', null, '']) {
+  assert.strictEqual(gateForControlledStatus('connected', 'missing', activeSessionId), true,
+    'another local conversation keeps its own credential gate');
+}
 assert.strictEqual(
   shouldShowApiKeyGate(state('missing', {
     preset: 'openai_compatible',
@@ -140,12 +148,12 @@ assert.strictEqual(shouldShowApiKeyGate(state('missing'), 'scheduled', true), fa
 
 assert.match(
   mainSource,
-  /import\s*\{[^}]*isControlledDeviceChatActive[^}]*\}\s*from ['"]\.\.\/features\/remote-control\/remote-control-logic\.mjs['"]/s,
+  /import\s*\{[^}]*isControlledSessionChatActive[^}]*\}\s*from ['"]\.\.\/features\/remote-control\/remote-control-logic\.mjs['"]/s,
   'the app composition layer must import the shared controlled-chat predicate',
 );
 assert.match(
   mainSource,
-  /const isControlledChatActive = isControlledDeviceChatActive\(bs\?\.controlledDevice\);/,
+  /const isControlledChatActive = isControlledSessionChatActive\(\s*bs\?\.controlledDevice, bs\?\.controlledSession, bs\?\.activeSessionId,\s*\);/,
   'the app composition layer must derive controlled-chat ownership from the shared predicate',
 );
 assert.match(
