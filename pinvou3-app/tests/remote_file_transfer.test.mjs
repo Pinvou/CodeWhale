@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   downloadRemoteArtifact,
+  createRemoteTransferGuard,
   uploadRemoteFiles,
   validateRemoteFiles,
 } from '../src/features/remote-control/remote-file-transfer.mjs';
@@ -10,6 +11,24 @@ function file(name, content, type = 'text/plain') {
   const bytes = new TextEncoder().encode(content);
   return { name, type, size: bytes.length, arrayBuffer: async () => bytes.buffer.slice(0) };
 }
+
+test('failed uploads clear their own loading state without clearing a newer attempt', async () => {
+  const guard = createRemoteTransferGuard();
+  const first = guard.start('lease/revision-1');
+  assert.equal(guard.isCurrent(first, 'lease/revision-1'), true);
+  assert.equal(guard.isCurrent(first, 'lease/revision-2'), false);
+  // Finally still clears this upload after a snapshot renews.
+  assert.equal(guard.finish(first), true);
+  assert.equal(guard.isCurrent(first, 'lease/revision-1'), false);
+  const old = guard.start('lease/revision-2');
+  const later = guard.start('lease/revision-2');
+  assert.equal(guard.isCurrent(old, 'lease/revision-2'), false);
+  assert.equal(guard.finish(old), false);
+  assert.equal(guard.isCurrent(later, 'lease/revision-2'), true);
+  guard.invalidate();
+  assert.equal(guard.isCurrent(later, 'lease/revision-2'), false);
+  assert.equal(guard.finish(later), false);
+});
 
 test('remote attachment upload hashes bytes and commits only B-confirmed transfer IDs', async () => {
   const chunks = [];
