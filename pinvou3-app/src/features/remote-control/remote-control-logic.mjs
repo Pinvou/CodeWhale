@@ -260,6 +260,14 @@ export function isControlledDeviceChatActive(controlledDevice) {
     'resume_activated_pending_liveness'].includes(status);
 }
 
+/** Device ownership never changes the meaning of another local conversation. */
+export function isControlledSessionChatActive(controlledDevice, controlledSession, activeSessionId) {
+  return isControlledDeviceChatActive(controlledDevice)
+    && typeof activeSessionId === 'string'
+    && activeSessionId.length > 0
+    && activeSessionId === controlledSession?.sessionId;
+}
+
 /**
  * Retries a B-side chat navigation only while the originating connection and
  * view intent are still current. A failed attempt is never treated as opened.

@@ -95,20 +95,22 @@
 | `DesktopControlledCleanup` 适配器测试 | 仓库无 `mock_app` 先例，当前由 manager 侧三条路径用例覆盖触发面，Tauri 级测试列入后续 |
 | remote_control 之外的既有失败 | 全量 `cargo test --lib` 有 6～8 条与本功能无关的既有失败（进程树终止超时、marketplace 工具缺失等），属环境限制，已在任务文档登记 |
 
-## 8. 生产 controller lane 启用记录（2026-09-19，含已接受的安全降级）
+## 8. 生产 controller lane 历史启用记录（2026-09-19，当时采用安全降级）
+
+> 以下为当时环境和操作的历史快照，不是当前生产部署授权或验收证据。A18 已移除生产预检的 development + TOFU 降级门禁：当前必须 `NODE_ENV=production`、`PINVOU_REMOTE_ENROLLMENT_DEPLOYMENT=self_hosted`、`PINVOU_REMOTE_ENROLLMENT_DEVELOPMENT_TOFU=false`。`official` live claim 尚未接线，预检及启动均明确失败关闭；存量端点清单、registry 迁移和不可旁路 gateway 仍为 [#1428](https://github.com/Pinvou/pinvou3/issues/1428) 的发布阻塞。本次只修复代码与文档，未核验或改变线上状态。
 
 ### 8.1 变更内容
 
 1. 生产 Relay（`pinvou-remote-relay.service`，`/opt/pinvou-remote-relay`，端口 8787）升级到含 controller-v1 的版本（原先为 v2-only 旧代码）。
 2. 新增 drop-in `/etc/systemd/system/pinvou-remote-relay.service.d/40-controller.conf`，`EnvironmentFile=/etc/pinvou-remote-relay-controller.env`（**0600**，私钥不出主机）。
 3. 环境文件要点：`PINVOU_DESKTOP_CONTROLLER_ENABLED=1`、`NODE_ENV=development`、`PINVOU_REMOTE_ENROLLMENT_DEPLOYMENT=development`、`PINVOU_REMOTE_ENROLLMENT_DEVELOPMENT_TOFU=true`、enrollment/pairing HMAC 各一组、`PINVOU_REMOTE_RELAY_SIGNING_KEY_ID=prod-relay-key-1`、`PINVOU_REMOTE_CONTROLLER_STATE_PATH=/var/lib/pinvou-remote-relay/state/controller-state.json`（目录 0700）、`PINVOU_REMOTE_STATE_PATH=/opt/pinvou-remote-relay/data/relay-state.json`（沿用既有状态，未迁移）。
-4. 生产部署脚本必须拒绝环境文件符号链接，校验其为 `root:root`、`0600`，并严格验证上述 development + TOFU 配置及两条状态路径；脚本原子维护 `40-controller.conf`，在本机执行无状态变更的 controller-v1 路由烟测，并在本机与公网健康检查中确认 `desktop_controller_enabled=true`。任一检查失败都必须整体恢复旧版 JS 模块和 systemd drop-in，禁止以 Web v2 正常但桌面控制不可用或新旧模块混装的状态通过发布。
+4. 当前生产部署脚本必须拒绝环境文件符号链接，校验其为 `root:root`、`0600`，并严格验证本节开头的 production + self_hosted + TOFU=false 配置及两条状态路径，不再接纳第 3 项历史降级配置；脚本原子维护 `40-controller.conf`，在本机执行无状态变更的 controller-v1 路由烟测，并在本机与公网健康检查中确认 `desktop_controller_enabled=true`。任一检查失败都必须整体恢复旧版 JS 模块和 systemd drop-in，禁止以 Web v2 正常但桌面控制不可用或新旧模块混装的状态通过发布。
 
-### 8.2 为什么启用 TOFU（已接受的安全降级）
+### 8.2 当时为什么启用 TOFU（历史原因，不再作为生产例外）
 
 - 生产状态文件只有 `version` 与 `revoked_endpoints`，**没有端点清单**：存量端点只存在于内存，无法做「registry 覆盖率 100%」的迁移。
 - 一旦启用 controller runtime，v2 的 `desktop_endpoint_register` 也会先过 registry（`server.js:886`）；在 `official` 且无 TOFU 的模式下，全部存量端点重连会被 `enrollment_required` 拒绝。
-- 因此经用户确认，**生产采用 `development + TOFU`**：未登记客户端可自助注册。这是明确的安全降级，必须在发布说明中披露；正式发布前应补齐端点清单与 registry 迁移，然后关闭 TOFU。
+- 因此当时经用户确认，**历史生产配置采用 `development + TOFU`**：未登记客户端可自助注册。这是当时的安全降级记录，不是当前生产例外；正式发布前必须补齐端点清单与 registry 迁移，关闭 TOFU，不能以保留旧配置绕过门禁。
 
 ### 8.3 信任根（公钥随包内置，私钥只在部署环境）
 
