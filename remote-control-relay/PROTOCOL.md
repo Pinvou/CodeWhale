@@ -634,11 +634,15 @@ or bare IPv6, fragment, whitespace, or backslash. The suffix is an optional
 each percent escape is exactly `%` plus two uppercase hex digits. Lowercase
 escapes and malformed escapes fail rather than normalize.
 
-`artifact_index` returns bounded metadata objects rather than bare paths or
-IDs. Each item is exactly `artifact_id, task_id, display_name, mime_type,
-size_bytes, sha256, preview_mode`; preview mode is `inline_text`,
-`inline_image`, or `download_only`. A subsequent read still uses only the
-opaque artifact ID under the same lease/session context.
+The `artifact_index` operation returns bounded metadata in `body.artifacts`
+of a successful `remote_action_result`, never as a standalone payload.
+Each item is exactly `artifact_id, task_id, display_name, mime_type,
+total_bytes, sha256, preview_kind`; preview kinds are `text`,
+`download_only`, or `unsupported`. Subsequent preview and download requests
+use `remote_action_request` under the same lease/session context. Preview
+selects the opaque `artifact_id`; downloads also bind `task_id`, and their
+chunk/abort operations additionally bind `transfer_id`. No host path is
+accepted as read authority.
 
 The shared fixture freezes the contract SHA-256, complete registries, exhaustive
 outer-message role matrix, canonical transcript/receipt/liveness/attestation

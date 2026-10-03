@@ -51,7 +51,7 @@ test('real UI smoke drives CDP against a Tauri page and covers every release pha
   assert.match(chatViewSource, /attachmentCoordinationIds/u);
 });
 
-async function runAgainstFakeCdp(t, { phase, pendingCount = 1 }) {
+async function runAgainstFakeCdp(t, { phase, pendingCount = 1, malformedRecovery = false, absentAttachment = false, disabledDownload = false }) {
   const commands = []; let selectorLengthReads = 0;
   const server = createServer((request, response) => {
     if (request.url === '/json/list') {
@@ -66,14 +66,29 @@ async function runAgainstFakeCdp(t, { phase, pendingCount = 1 }) {
     let result = {};
     if (command.method === 'Runtime.evaluate') {
       const expression = command.params.expression;
+      // Parse the actual page expression before producing fixture values. CDP
+      // reports syntax failures as exceptionDetails, never a successful value.
+      try {
+        const checked = malformedRecovery && expression.includes('Boolean(document.querySelector') && expression.includes('chat-remote-action-error')
+          ? expression.slice(0, -1) : expression;
+        new Function(`return (${checked});`);
+      } catch {
+        client.send(JSON.stringify({ id: command.id, result: { exceptionDetails: { text: 'SyntaxError' } } }));
+        return;
+      }
       let value = true;
       if (expression.includes('exact: document.querySelectorAll')) value = { exact: 1, pending: pendingCount };
       else if (expression.includes('getBoundingClientRect')) value = { x: 20, y: 20 };
       else if (expression.includes('querySelectorAll') && expression.endsWith('.length')) { selectorLengthReads += 1; value = selectorLengthReads === 1 ? 1 : 0; }
       else if (expression.includes('Boolean(document.querySelector')) {
-        value = expression.includes('chat-remote-attachment-input') || expression.includes('chat-remote-artifact-download\\"]:not(:disabled)');
+        value = (expression.includes('chat-remote-attachment-input') && !absentAttachment)
+          || (expression.includes('chat-remote-artifact-download') && expression.includes(':not(:disabled)') && !disabledDownload);
       }
-      result = { result: { value } };
+      // A DOM remote object has no result.value with returnByValue; don't let a
+      // canned true conceal returning a node rather than a page-side Boolean.
+      result = expression.startsWith('document.querySelector(') && expression.endsWith(')')
+        ? { result: { type: 'object', subtype: 'node', description: 'HTMLInputElement' } }
+        : { result: { value } };
     } else if (command.method === 'DOM.getDocument') result = { root: { nodeId: 1 } };
     else if (command.method === 'DOM.querySelector') result = { nodeId: 2 };
     client.send(JSON.stringify({ id: command.id, result }));
@@ -122,4 +137,23 @@ test('fake CDP integration rejects multiple pending controls for one coordinatio
   const result = await runAgainstFakeCdp(t, { phase: 'approval-deny', pendingCount: 2 });
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /ui_smoke_coordination_ambiguous/u);
+});
+
+test('fake CDP rejects malformed page expressions without creating pass evidence', async (t) => {
+  const result = await runAgainstFakeCdp(t, { phase: 'artifact', malformedRecovery: true });
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /ui_smoke_page_evaluation_failed/u);
+  await assert.rejects(readFile(result.output), { code: 'ENOENT' });
+});
+
+test('fake CDP rejects an absent attachment input and a disabled artifact download', async (t) => {
+  for (const scenario of [
+    { phase: 'attachment', absentAttachment: true, code: 'ui_smoke_attachment_input_missing' },
+    { phase: 'artifact', disabledDownload: true, code: 'ui_smoke_artifact_download_stuck' },
+  ]) {
+    const result = await runAgainstFakeCdp(t, scenario);
+    assert.notEqual(result.status, 0);
+    assert.ok(result.stderr.includes(scenario.code), result.stderr);
+    await assert.rejects(readFile(result.output), { code: 'ENOENT' });
+  }
 });

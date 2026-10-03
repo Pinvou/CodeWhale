@@ -254,7 +254,7 @@ $RemoteBootstrap = {
     $rootPath = [System.IO.Path]::GetFullPath($Root).TrimEnd([System.IO.Path]::DirectorySeparatorChar)
     if (-not [System.IO.Directory]::Exists($rootPath) -or (([System.IO.File]::GetAttributes($rootPath)) -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'e2e_bootstrap_root_reparse_point' }
     $rootUri = [System.Uri]::new($rootPath + [System.IO.Path]::DirectorySeparatorChar)
-    try { $expectedFiles = @($ExpectedFilesJson | ConvertFrom-Json) } catch { throw 'e2e_bootstrap_manifest_invalid' }
+    try { $expectedFiles = @(($ExpectedFilesJson | ConvertFrom-Json)) } catch { throw 'e2e_bootstrap_manifest_invalid' }
     if (-not $expectedFiles -or $expectedFiles.Count -gt 32) { throw 'e2e_bootstrap_manifest_invalid' }
     $hashes = @{}
     foreach ($expected in $expectedFiles) {
