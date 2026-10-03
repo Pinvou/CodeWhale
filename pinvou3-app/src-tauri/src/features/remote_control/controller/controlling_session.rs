@@ -380,6 +380,23 @@ impl ControllingSessionManager {
         payload: &Value,
         confirm_mapping: impl FnOnce(&str, &str) -> Result<()>,
     ) -> Result<ControllingSessionProjection> {
+        self.apply_capability_snapshot_for_lease_with_mapping_and_guard(
+            lease,
+            payload,
+            confirm_mapping,
+            |commit| Ok(commit()),
+        )
+    }
+
+    pub(crate) fn apply_capability_snapshot_for_lease_with_mapping_and_guard(
+        &self,
+        lease: &LeaseContext,
+        payload: &Value,
+        confirm_mapping: impl FnOnce(&str, &str) -> Result<()>,
+        owner: impl FnOnce(
+            &mut dyn FnMut() -> ControllingSessionProjection,
+        ) -> Result<ControllingSessionProjection>,
+    ) -> Result<ControllingSessionProjection> {
         let mut intents = self.intents.lock();
         let intent = find_capability_response_intent(&mut intents, lease, payload)?;
         let request_id = response_request_id(payload)?;
@@ -398,8 +415,10 @@ impl ControllingSessionManager {
         let projection = apply_snapshot_locked(&mut staged, payload, true)?;
         confirm_mapping(&intent.session_ref, controlled_session_id)?;
         staged.pending_capability_requests.clear();
-        *intent = staged;
-        Ok(projection)
+        owner(&mut || {
+            *intent = staged.clone();
+            projection.clone()
+        })
     }
 
     pub(crate) fn apply_capability_error_for_lease(
@@ -407,35 +426,48 @@ impl ControllingSessionManager {
         lease: &LeaseContext,
         payload: &Value,
     ) -> Result<ControllingSessionProjection> {
+        self.apply_capability_error_for_lease_with_guard(lease, payload, |commit| commit())
+    }
+
+    pub(crate) fn apply_capability_error_for_lease_with_guard(
+        &self,
+        lease: &LeaseContext,
+        payload: &Value,
+        owner: impl FnOnce(
+            &mut dyn FnMut() -> Result<ControllingSessionProjection>,
+        ) -> Result<ControllingSessionProjection>,
+    ) -> Result<ControllingSessionProjection> {
         let mut intents = self.intents.lock();
         let intent = find_capability_response_intent(&mut intents, lease, payload)?;
         let validated = validate_inbound_payload(intent, payload, "capability_snapshot_error")?;
         let request_id = response_request_id(&validated)?;
-        if intent
-            .pending_capability_requests
-            .last()
-            .map(String::as_str)
-            != Some(request_id)
-        {
-            intent
+        owner(&mut || {
+            if intent
                 .pending_capability_requests
-                .retain(|pending| pending != request_id);
-            return Err(SessionError::new("capability_response_stale"));
-        }
-        let code = validated
-            .get("code")
-            .and_then(Value::as_str)
-            .ok_or_else(|| SessionError::new("capability_snapshot_invalid"))?;
-        intent.pending_capability_requests.clear();
-        intent.capability_revision = None;
-        intent.capability_valid_for_ms = None;
-        intent.capability_projection = None;
-        intent.capability_deadline = None;
-        intent.capability_error = Some(code.to_owned());
-        intent.last_capability_request_id = Some(request_id.to_owned());
-        intent.modes = vec![SESSION_MODE_CHAT.to_owned()];
-        intent.workspace_ids.clear();
-        Ok(intent.projection())
+                .last()
+                .map(String::as_str)
+                != Some(request_id)
+            {
+                intent
+                    .pending_capability_requests
+                    .retain(|pending| pending != request_id);
+                return Err(SessionError::new("capability_response_stale"));
+            }
+            let code = validated
+                .get("code")
+                .and_then(Value::as_str)
+                .ok_or_else(|| SessionError::new("capability_snapshot_invalid"))?;
+            intent.pending_capability_requests.clear();
+            intent.capability_revision = None;
+            intent.capability_valid_for_ms = None;
+            intent.capability_projection = None;
+            intent.capability_deadline = None;
+            intent.capability_error = Some(code.to_owned());
+            intent.last_capability_request_id = Some(request_id.to_owned());
+            intent.modes = vec![SESSION_MODE_CHAT.to_owned()];
+            intent.workspace_ids.clear();
+            Ok(intent.projection())
+        })
     }
 
     /// Relay 在已连接阶段拒绝业务帧时，外层错误帧不携带加密载荷里的 request_id。
@@ -445,6 +477,20 @@ impl ControllingSessionManager {
         &self,
         lease: &LeaseContext,
         code: &str,
+    ) -> Result<ControllingSessionProjection> {
+        self.fail_pending_capability_for_lease_with_guard(lease, code, |commit| Ok(commit()))
+    }
+
+    /// Match capability mapping's lock order: session intents -> connection
+    /// owner. The guard holds the owner only through this callback-free commit;
+    /// projection/event callbacks run after both locks have been released.
+    pub(crate) fn fail_pending_capability_for_lease_with_guard(
+        &self,
+        lease: &LeaseContext,
+        code: &str,
+        owner: impl FnOnce(
+            &mut dyn FnMut() -> ControllingSessionProjection,
+        ) -> Result<ControllingSessionProjection>,
     ) -> Result<ControllingSessionProjection> {
         let mut intents = self.intents.lock();
         let mut matching = intents.iter_mut().filter(|intent| {
@@ -461,16 +507,18 @@ impl ControllingSessionManager {
             .last()
             .cloned()
             .ok_or_else(|| SessionError::new("capability_response_unexpected"))?;
-        intent.pending_capability_requests.clear();
-        intent.capability_revision = None;
-        intent.capability_valid_for_ms = None;
-        intent.capability_projection = None;
-        intent.capability_deadline = None;
-        intent.capability_error = Some(code.to_owned());
-        intent.last_capability_request_id = Some(request_id);
-        intent.modes = vec![SESSION_MODE_CHAT.to_owned()];
-        intent.workspace_ids.clear();
-        Ok(intent.projection())
+        owner(&mut || {
+            intent.pending_capability_requests.clear();
+            intent.capability_revision = None;
+            intent.capability_valid_for_ms = None;
+            intent.capability_projection = None;
+            intent.capability_deadline = None;
+            intent.capability_error = Some(code.to_owned());
+            intent.last_capability_request_id = Some(request_id.clone());
+            intent.modes = vec![SESSION_MODE_CHAT.to_owned()];
+            intent.workspace_ids.clear();
+            intent.projection()
+        })
     }
 
     /// 当前租约上的会话引用（心跳/恢复等按租约定位的场景使用）。
@@ -1137,6 +1185,117 @@ mod tests {
             )
             .unwrap();
         assert_eq!(reopened.session_id, projection.session_id);
+    }
+
+    #[test]
+    fn capability_mapping_and_relay_error_share_session_then_owner_lock_order() {
+        use super::super::controlling::{ControllerLease, ControllingDeviceManager};
+        let manager = std::sync::Arc::new(ControllingDeviceManager::default());
+        let connect = || {
+            let op = manager.connect("234-4567").unwrap();
+            manager.complete_reserved(op.clone()).unwrap();
+            manager
+                .complete_connected(
+                    op.clone(),
+                    ControllerLease {
+                        context: lease(),
+                        peer_endpoint_id: "endpoint-0001".into(),
+                        reservation_id: "reservation-0001".into(),
+                        device_display_name: "Device".into(),
+                        liveness_epoch_a: "live-a-1".into(),
+                        liveness_epoch_b: "live-b-1".into(),
+                        resume_deadline_b: 30_000,
+                        resume_token: [1; 32],
+                        transport_key_fingerprint: [2; 32],
+                        negotiated_capabilities: capabilities(),
+                    },
+                )
+                .unwrap();
+            op
+        };
+        let old = connect();
+        let sessions = std::sync::Arc::new(ControllingSessionManager::default());
+        let session = sessions
+            .open_for_test(None, "Session", "chat", &lease(), &capabilities())
+            .unwrap();
+        let request = sessions
+            .capability_request(&session.session_ref, &lease())
+            .unwrap();
+        let mut response = snapshot(4);
+        response["session_id"] = json!(session.session_id);
+        response["controlled_session_id"] = json!("b-session-1");
+        response["request_id"] = json!(request.request_id);
+        let (mapping_tx, mapping_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let mapping_sessions = sessions.clone();
+        let mapping_owner = manager.clone();
+        let mapping = std::thread::spawn(move || {
+            mapping_sessions.apply_capability_snapshot_for_lease_with_mapping(
+                &lease(),
+                &response,
+                |_, _| {
+                    mapping_tx.send(()).unwrap();
+                    release_rx
+                        .recv_timeout(std::time::Duration::from_secs(5))
+                        .unwrap();
+                    mapping_owner
+                        .with_lane_owner(&old, || ())
+                        .map_err(|_| SessionError::new("session_context_stale"))
+                },
+            )
+        });
+        mapping_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        manager.disconnect();
+        let replacement = connect();
+        let error_owner = manager.clone();
+        let error_sessions = sessions.clone();
+        let error_op = replacement.clone();
+        let (error_tx, error_rx) = std::sync::mpsc::channel();
+        let error = std::thread::spawn(move || {
+            error_tx.send(()).unwrap();
+            error_sessions.fail_pending_capability_for_lease_with_guard(
+                &lease(),
+                "capability_snapshot_unavailable",
+                |commit| {
+                    assert!(
+                        error_sessions.intents.is_locked(),
+                        "owner guard must run only after intents acquisition"
+                    );
+                    error_owner
+                        .with_lane_owner(&error_op, commit)
+                        .map_err(|_| SessionError::new("session_context_stale"))
+                },
+            )
+        });
+        error_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        // While the mapping holds intents, the error worker must NOT hold
+        // owner. Probe from a third thread, with a bounded test failure.
+        let probe_owner = manager.clone();
+        let (probe_tx, probe_rx) = std::sync::mpsc::channel();
+        let probe = std::thread::spawn(move || {
+            probe_owner.with_lane_owner(&replacement, || probe_tx.send(()).unwrap())
+        });
+        let owner_available = probe_rx.recv_timeout(std::time::Duration::from_secs(5));
+        release_tx.send(()).unwrap();
+        assert!(
+            owner_available.is_ok(),
+            "error inverted the session/owner lock order"
+        );
+        assert!(mapping.join().unwrap().is_err());
+        assert!(probe.join().unwrap().is_ok());
+        assert_eq!(
+            error
+                .join()
+                .unwrap()
+                .unwrap()
+                .capability_request_id
+                .as_deref(),
+            Some(request.request_id.as_str())
+        );
     }
 
     #[test]

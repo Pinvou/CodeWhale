@@ -254,6 +254,12 @@ impl QueuedFrame {
     }
 }
 
+struct ResumeInstallAuthority {
+    activation_id: String,
+    transport_epoch: u64,
+    context: LeaseContext,
+}
+
 #[derive(Clone)]
 pub(crate) struct ControllerTransportSender {
     role: ControllerRole,
@@ -263,6 +269,9 @@ pub(crate) struct ControllerTransportSender {
     total_budget: Arc<Semaphore>,
     business_budget: Arc<Semaphore>,
     lease: Arc<RwLock<Option<AuthenticatedLease>>>,
+    // A disconnected lease is a resume-frame binding only, never business or TX authority.
+    resume_lease: Arc<RwLock<Option<AuthenticatedLease>>>,
+    resume_install: Arc<RwLock<Option<ResumeInstallAuthority>>>,
     transport_epoch: Arc<AtomicU64>,
     shutdown: CancellationToken,
 }
@@ -303,12 +312,99 @@ impl ControllerTransportSender {
                 "remote_control_generation".into(),
             ));
         }
-        *self.lease.write() = Some(lease);
+        let mut current = self.lease.write();
+        if self.is_stopped() {
+            return Err(ControllerSendError::Closed);
+        }
+        *current = Some(lease);
+        *self.resume_lease.write() = None;
+        *self.resume_install.write() = None;
         Ok(())
     }
 
+    /// Consume the final frame's one-shot authority on the exact receiving
+    /// socket epoch. A queued final from a subsequently closed socket cannot
+    /// reopen TX, even if another socket has already reconnected.
+    pub(crate) fn install_authenticated_lease_after_resume(
+        &self,
+        lease: AuthenticatedLease,
+        activation_id: &str,
+    ) -> Result<(), ControllerSendError> {
+        let bound = self.generation();
+        if bound.is_empty() || lease.context.remote_control_generation != bound {
+            return Err(ControllerSendError::InvalidFrame(
+                "remote_control_generation".into(),
+            ));
+        }
+        let mut current = self.lease.write();
+        let mut saved = self.resume_lease.write();
+        let mut authority = self.resume_install.write();
+        if self.is_stopped() {
+            return Err(ControllerSendError::Closed);
+        }
+        if current.is_some()
+            || !saved
+                .as_ref()
+                .is_some_and(|previous| previous.context == lease.context)
+            || !authority.as_ref().is_some_and(|proof| {
+                proof.activation_id == activation_id
+                    && proof.transport_epoch == self.transport_epoch.load(Ordering::Acquire)
+                    && proof.context == lease.context
+            })
+        {
+            return Err(ControllerSendError::Unauthenticated);
+        }
+        *current = Some(lease);
+        *saved = None;
+        *authority = None;
+        Ok(())
+    }
+
+    fn record_resume_install(&self, frame: &Value, inbound_epoch: u64) -> bool {
+        let current = self.lease.read();
+        let saved = self.resume_lease.read();
+        if self.is_stopped()
+            || current.is_some()
+            || inbound_epoch != self.transport_epoch.load(Ordering::Acquire)
+        {
+            return false;
+        }
+        let Some(saved) = saved.as_ref() else {
+            return false;
+        };
+        if !super::resume::resume_frame_matches_lease(&saved.context, frame) {
+            return false;
+        }
+        let Some(activation_id) = frame.get("activation_id").and_then(Value::as_str) else {
+            return false;
+        };
+        *self.resume_install.write() = Some(ResumeInstallAuthority {
+            activation_id: activation_id.to_owned(),
+            transport_epoch: inbound_epoch,
+            context: saved.context.clone(),
+        });
+        true
+    }
+
     pub(crate) fn clear_authenticated_lease(&self) {
-        *self.lease.write() = None;
+        let mut current = self.lease.write();
+        *current = None;
+        *self.resume_lease.write() = None;
+        *self.resume_install.write() = None;
+    }
+
+    fn suspend_authenticated_lease(&self) {
+        let mut current = self.lease.write();
+        self.transport_epoch.fetch_add(1, Ordering::AcqRel);
+        let mut resume = self.resume_lease.write();
+        *self.resume_install.write() = None;
+        if self.is_stopped() {
+            *current = None;
+            *resume = None;
+        } else if let Some(previous) = current.take() {
+            *resume = Some(previous);
+        }
+        // Repeated failed reconnects preserve the original binding, not a new lease.
     }
 
     pub(crate) fn authenticated_lease(&self) -> Option<AuthenticatedLease> {
@@ -598,6 +694,8 @@ fn transport_channels_shared(
             total_budget,
             business_budget,
             lease: Arc::new(RwLock::new(None)),
+            resume_lease: Arc::new(RwLock::new(None)),
+            resume_install: Arc::new(RwLock::new(None)),
             transport_epoch: Arc::new(AtomicU64::new(0)),
             shutdown,
         },
@@ -807,8 +905,7 @@ fn emit_disconnected(
         lease_epoch: current_lease_epoch(sender),
         error,
     };
-    sender.transport_epoch.fetch_add(1, Ordering::AcqRel);
-    sender.clear_authenticated_lease();
+    sender.suspend_authenticated_lease();
     sink.emit(event);
 }
 
@@ -827,6 +924,7 @@ fn dispatch_inbound(
     sink: &dyn ControllerEventSink,
     text: &str,
 ) {
+    let inbound_epoch = sender.transport_epoch.load(Ordering::Acquire);
     let Ok(shape) = serde_json::from_str::<Value>(text) else {
         return;
     };
@@ -854,7 +952,19 @@ fn dispatch_inbound(
         validate_controller_message_json(text, SenderRole::Relay).is_ok()
             || validate_controller_message_json(text, config.role.peer_role()).is_ok()
     };
-    if !validated || !inbound_context_matches(&shape, lease.as_ref()) {
+    let context_matches = inbound_context_matches(&shape, lease.as_ref())
+        || (lease.is_none()
+            && is_inbound_resume_frame(kind, config.role)
+            && sender.resume_lease.read().as_ref().is_some_and(|saved| {
+                super::resume::resume_frame_matches_lease(&saved.context, &shape)
+            }));
+    if !validated || !context_matches {
+        return;
+    }
+    if kind == Some("controller_resumed")
+        && config.role == ControllerRole::ControllerA
+        && !sender.record_resume_install(&shape, inbound_epoch)
+    {
         return;
     }
     sink.emit(ControllerTransportEvent::Frame {
@@ -876,6 +986,27 @@ fn generation_admits(bound: &str, value: &Value) -> bool {
             .get("remote_control_generation")
             .and_then(Value::as_str)
             .is_none_or(|generation| generation == bound)
+}
+
+fn is_inbound_resume_frame(kind: Option<&str>, role: ControllerRole) -> bool {
+    matches!(
+        kind,
+        Some(
+            "controller_resume_provisional"
+                | "encrypted_resume_confirm"
+                | "controller_resume_activation_pending"
+                | "controller_resumed"
+        )
+    ) || matches!(
+        (kind, role),
+        (
+            Some("controller_post_activation_liveness_confirmed"),
+            ControllerRole::ControllerA
+        ) | (
+            Some("controller_post_activation_liveness"),
+            ControllerRole::ControlledB
+        )
+    )
 }
 
 fn inbound_context_matches(value: &Value, lease: Option<&AuthenticatedLease>) -> bool {
@@ -961,15 +1092,95 @@ mod tests {
         })
     }
 
+    fn resume_final(context: &LeaseContext, activation_id: &str) -> Value {
+        json!({
+            "v": 1, "type": "controller_resumed", "request_id": "request-resume-final",
+            "activation_id": activation_id,
+            "connection_id": context.connection_id,
+            "controller_lease_id": context.controller_lease_id,
+            "lease_epoch": context.lease_epoch, "relay_epoch": context.relay_epoch,
+            "remote_control_generation": context.remote_control_generation,
+            "liveness_epoch_a": "live-a-2", "liveness_epoch_b": "live-b-2",
+            "resume_deadline_ms": "60000",
+            "new_resume_token_b64": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE="
+        })
+    }
+
+    #[test]
+    fn resume_install_is_activation_bound_one_shot_and_closed_by_next_socket_epoch() {
+        for lose_socket in [false, true] {
+            let expected = lease("1", "generation-0001");
+            let (sender, _) = transport_channels(
+                ControllerRole::ControllerA,
+                "generation-0001",
+                2,
+                2,
+                8192,
+                1024,
+            );
+            sender
+                .install_authenticated_lease(expected.clone())
+                .unwrap();
+            sender.suspend_authenticated_lease();
+            let config = ControllerTransportConfig::new(
+                "ws://127.0.0.1:1",
+                ControllerRole::ControllerA,
+                "generation-0001",
+            );
+            let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let capture = events.clone();
+            let sink = move |event| capture.lock().unwrap().push(event);
+            validate_controller_message_json(
+                &resume_final(&expected.context, "activation-0001").to_string(),
+                SenderRole::Relay,
+            )
+            .unwrap();
+            dispatch_inbound(
+                &config,
+                &sender,
+                &sink,
+                &resume_final(&expected.context, "activation-0001").to_string(),
+            );
+            assert_eq!(
+                events.lock().unwrap().len(),
+                1,
+                "final must really pass RX admission"
+            );
+            assert_eq!(
+                sender
+                    .install_authenticated_lease_after_resume(expected.clone(), "activation-other"),
+                Err(ControllerSendError::Unauthenticated)
+            );
+            if lose_socket {
+                emit_disconnected(&config, &sender, &sink, "closed".into());
+                assert_eq!(
+                    sender.install_authenticated_lease_after_resume(expected, "activation-0001"),
+                    Err(ControllerSendError::Unauthenticated)
+                );
+                assert!(sender.authenticated_lease().is_none());
+            } else {
+                sender
+                    .install_authenticated_lease_after_resume(expected.clone(), "activation-0001")
+                    .unwrap();
+                assert!(sender.authenticated_lease().is_some());
+                assert_eq!(
+                    sender.install_authenticated_lease_after_resume(expected, "activation-0001"),
+                    Err(ControllerSendError::Unauthenticated)
+                );
+            }
+        }
+    }
+
     #[test]
     fn verified_resume_reinstalls_real_transport_only_at_final_gate_and_fails_closed() {
         use crate::features::remote_control::controller::controlling::{
             ControllerLease, ControllingStatusKind, ResumeStep,
         };
-        for (generation, stopped) in [
-            ("generation-0001", false),
-            ("generation-replaced", false),
-            ("generation-0001", true),
+        for (generation, stopped, close_after_final) in [
+            ("generation-0001", false, false),
+            ("generation-replaced", false, false),
+            ("generation-0001", true, false),
+            ("generation-0001", false, true),
         ] {
             let manager = ControllingDeviceManager::default();
             let operation = manager.connect("234-4567").unwrap();
@@ -984,6 +1195,7 @@ mod tests {
                         reservation_id: "reservation-0001".into(),
                         device_display_name: "remote-device".into(),
                         liveness_epoch_a: "live-a-1".into(),
+                        liveness_epoch_b: "live-b-1".into(),
                         resume_deadline_b: 30_000,
                         resume_token: [1; 32],
                         transport_key_fingerprint: [2; 32],
@@ -999,7 +1211,7 @@ mod tests {
                     .unwrap();
             }
             manager.replace_transport(sender.clone());
-            sender.clear_authenticated_lease();
+            sender.suspend_authenticated_lease();
             if stopped {
                 sender.stop();
             }
@@ -1052,10 +1264,32 @@ mod tests {
                 );
                 assert!(receiver.business_rx.try_recv().is_err());
             }
-            let result = manager.complete_resumed(
-                operation, activation, 8_000, "live-a-2", [3; 32], [4; 32], 60_000,
+            let config = ControllerTransportConfig::new(
+                "ws://127.0.0.1:1",
+                ControllerRole::ControllerA,
+                generation,
             );
-            if generation != "generation-0001" || stopped {
+            dispatch_inbound(
+                &config,
+                &sender,
+                &|_| {},
+                &resume_final(&expected.context, activation).to_string(),
+            );
+            if close_after_final {
+                // Final Frame was already delivered, but the socket closed
+                // before the manager consumed it from its event queue.
+                emit_disconnected(&config, &sender, &|_| {}, "closed".into());
+            }
+            let result = manager.complete_resumed(
+                operation,
+                activation,
+                8_000,
+                ("live-a-2", "live-b-2"),
+                [3; 32],
+                [4; 32],
+                60_000,
+            );
+            if generation != "generation-0001" || stopped || close_after_final {
                 assert!(result.is_err());
                 assert_eq!(manager.status().kind(), ControllingStatusKind::Error);
                 assert!(manager.live_lease().is_err());
@@ -1593,5 +1827,115 @@ mod tests {
         sender.stop();
         assert_eq!(result[0]["request_id"], "request-0001");
         assert_eq!(result[1]["request_id"], "request-0002");
+    }
+
+    #[tokio::test]
+    async fn resume_provisional_crosses_real_websocket_after_disconnect_clears_lease() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let provisional = json!({
+            "v": 1, "type": "controller_resume_provisional", "request_id": "request-resume-1",
+            "connection_id": "connection-0001", "controller_lease_id": "lease-0001",
+            "lease_epoch": "7", "relay_epoch": "relay-epoch-0001",
+            "remote_control_generation": "generation-0001", "activation_id": "activation-0001",
+            "original_deadline_ms": "30000"
+        });
+        validate_controller_message_json(&provisional.to_string(), SenderRole::Relay).unwrap();
+        let expected = provisional.clone();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = accept_hdr_async(stream, ControllerSubprotocolCallback)
+                .await
+                .unwrap();
+            assert!(matches!(
+                socket.next().await.unwrap().unwrap(),
+                Message::Text(_)
+            ));
+            socket.send(Message::Close(None)).await.unwrap();
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = accept_hdr_async(stream, ControllerSubprotocolCallback)
+                .await
+                .unwrap();
+            let Message::Text(prepare) = socket.next().await.unwrap().unwrap() else {
+                panic!("expected resume prepare");
+            };
+            assert_eq!(
+                serde_json::from_str::<Value>(prepare.as_str()).unwrap()["type"],
+                "controller_resume_prepare"
+            );
+            let mut stale = provisional.clone();
+            stale["remote_control_generation"] = json!("generation-stale");
+            socket
+                .send(Message::Text(stale.to_string().into()))
+                .await
+                .unwrap();
+            let mut wrong_lease = provisional.clone();
+            wrong_lease["controller_lease_id"] = json!("lease-other");
+            socket
+                .send(Message::Text(wrong_lease.to_string().into()))
+                .await
+                .unwrap();
+            // Even during resume, unauthenticated encrypted business stays closed.
+            socket.send(Message::Text(json!({
+                "v":1, "type":"encrypted_frame", "connection_id":"connection-0001",
+                "controller_lease_id":"lease-0001", "lease_epoch":"7", "relay_epoch":"relay-epoch-0001",
+                "remote_control_generation":"generation-0001", "frame_sequence":"1", "direction":"b_to_a",
+                "payload_kind":"task_status", "ciphertext_b64":"AQID", "ciphertext_bytes":"3"
+            }).to_string().into())).await.unwrap();
+            socket
+                .send(Message::Text(provisional.to_string().into()))
+                .await
+                .unwrap();
+            let _ = socket.next().await;
+        });
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+        let sender = spawn_controller_transport(
+            ControllerTransportConfig::new(url, ControllerRole::ControllerA, "generation-0001"),
+            Arc::new(move |event| {
+                let _ = event_tx.send(event);
+            }),
+        );
+        let delivered = tokio::time::timeout(Duration::from_secs(8), async {
+            while !matches!(
+                event_rx.recv().await.unwrap(),
+                ControllerTransportEvent::Connected { .. }
+            ) {}
+            sender
+                .install_authenticated_lease(lease("7", "generation-0001"))
+                .unwrap();
+            sender
+                .try_send_control(&control("request-initial-1"))
+                .unwrap();
+            while !matches!(
+                event_rx.recv().await.unwrap(),
+                ControllerTransportEvent::Disconnected { .. }
+            ) {}
+            assert!(sender.authenticated_lease().is_none());
+            while !matches!(
+                event_rx.recv().await.unwrap(),
+                ControllerTransportEvent::Connected { .. }
+            ) {}
+            sender.try_send_sensitive_resume_control(&json!({
+                "v":1, "type":"controller_resume_prepare", "request_id":"request-resume-1",
+                "connection_id":"connection-0001", "controller_lease_id":"lease-0001",
+                "lease_epoch":"7", "relay_epoch":"relay-epoch-0001",
+                "remote_control_generation":"generation-0001", "sender_role":"A",
+                "resume_token_b64":"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+                "transport_challenge_b64":"AAAAAAAAAAAAAAAAAAAAAA==", "original_deadline_ms":"30000"
+            })).unwrap();
+            loop {
+                if let ControllerTransportEvent::Frame { json, .. } = event_rx.recv().await.unwrap()
+                {
+                    return serde_json::from_str::<Value>(&json).unwrap();
+                }
+            }
+        })
+        .await;
+        sender.stop();
+        server.abort();
+        assert_eq!(
+            delivered.expect("valid resume must cross real transport admission"),
+            expected
+        );
     }
 }

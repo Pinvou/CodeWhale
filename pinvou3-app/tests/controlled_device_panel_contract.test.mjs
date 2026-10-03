@@ -64,7 +64,8 @@ test('the panel never exposes an approval control', () => {
   assert.ok(!/\bAllow\b|\bApprove\b|allowButton|approveButton/.test(panelCode));
   assert.ok(!panelCode.includes('remotePermissions'));
   assert.ok(panelCode.includes('currentControlledTasks(device, bs?.controlledSession, bs?.controlledTasks)'));
-  assert.ok(panelCode.includes('permissionList(task.taskId)'));
+  assert.ok(panelCode.includes('controlledPermissionList(task.taskId)'));
+  assert.ok(!panelCode.includes('remote.permissionList('));
   assert.ok(!panelCode.includes('permissionDecide('));
   assert.ok(panelCode.includes('securityNotice'));
 });

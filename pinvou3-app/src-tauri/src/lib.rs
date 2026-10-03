@@ -1768,6 +1768,7 @@ pub fn run() {
             commands::desktop_remote_model::desktop_remote_model_release,
             commands::desktop_remote_model::desktop_remote_model_active,
             commands::desktop_remote_permission::desktop_remote_permission_deny_task,
+            commands::desktop_remote_permission::desktop_remote_permission_list_b,
             commands::remote_control::web_access_enable,
             commands::remote_control::web_access_disable,
             commands::remote_control::web_access_status,
