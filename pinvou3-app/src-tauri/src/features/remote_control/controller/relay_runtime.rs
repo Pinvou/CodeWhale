@@ -8,6 +8,7 @@
 
 use std::collections::HashMap;
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use base64::Engine as _;
@@ -782,9 +783,10 @@ pub(crate) struct ControlledRelayWorker {
     channel: crate::features::remote_control::manager::ControllerRelayChannel,
     /// 业务派发端口：由命令层注入（能力快照 / 任务接纳 / 取消）。
     business: std::sync::Arc<dyn ControlledBusinessPort>,
-    /// Generation-local action outcomes. Dropping the worker on disconnect
-    /// clears the cache; every hit is bound to the full request fingerprint.
-    action_results: RemoteActionResultCache,
+    /// Generation-local action outcomes survive same-lease transport resume.
+    /// Dropping the generation owner clears them; every hit is fingerprint-bound.
+    action_results: std::sync::Arc<RemoteActionResultCache>,
+    business_epoch: std::sync::Arc<AtomicU64>,
 }
 
 /// Narrow port over the generation-bound Relay lane. Keeps the registration
@@ -1000,7 +1002,8 @@ impl ControlledRelayWorker {
             handshake: Some(handshake),
             channel,
             business,
-            action_results: RemoteActionResultCache::default(),
+            action_results: std::sync::Arc::new(RemoteActionResultCache::default()),
+            business_epoch: std::sync::Arc::new(AtomicU64::new(0)),
         };
         tauri::async_runtime::spawn(async move {
             let result = worker.register_pairing().await;
@@ -1115,9 +1118,10 @@ impl ControlledRelayWorker {
         };
         let mut driver = ControlledHandshakeDriver::new(keys);
         let mut joined = false;
-        let mut heartbeat = ControlledHeartbeat::default();
+        let mut heartbeat = super::controlled_heartbeat::ControlledHeartbeat::default();
         let mut evidence = LivenessEvidenceState::default();
         let mut resume = ControlledResumeAttempt::default();
+        let business_worker = self.business_worker();
         let mut poll =
             tokio::time::interval(std::time::Duration::from_millis(LIVENESS_EVIDENCE_POLL_MS));
         poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -1127,14 +1131,12 @@ impl ControlledRelayWorker {
                 biased;
                 _ = poll.tick() => {
                     if joined && !resume.is_active() {
-                        let manager = self.app.state::<ControlledDeviceManager>();
-                        if let Ok((lease, _)) = manager.liveness_runtime_context() {
-                            if let Some(frame) = heartbeat.next_frame(&lease) {
-                                if self.channel.try_send(frame).is_err() {
-                                    self.fail_runtime("desktop_relay_disconnected");
-                                    break 'serve;
-                                }
-                            }
+                        if let Err(code) = heartbeat.pump(
+                            self.app.state::<ControlledDeviceManager>().inner(),
+                            &self.operation, resume.is_active(), &self.channel,
+                        ) {
+                            self.fail_runtime(&code);
+                            break 'serve;
                         }
                         self.pump_liveness_evidence(&mut evidence);
                     }
@@ -1160,7 +1162,9 @@ impl ControlledRelayWorker {
                             ) {
                                 ControlledResumeOutcome::Failed => break 'serve,
                                 ControlledResumeOutcome::Completed => {
-                                    if heartbeat.install(&message).is_err() {
+                                    let epoch = message.get("liveness_epoch_b").and_then(Value::as_str).unwrap_or_default();
+                                    let Ok((lease, _)) = manager.liveness_runtime_context() else { break 'serve };
+                                    if heartbeat.install(lease, epoch).is_err() {
                                         self.fail_runtime(HANDSHAKE_FAILED);
                                         break 'serve;
                                     }
@@ -1178,7 +1182,15 @@ impl ControlledRelayWorker {
                         }
                         match message.get("type").and_then(Value::as_str) {
                             Some("encrypted_frame") => {
-                                self.dispatch_business_frame(&message).await;
+                                if let Some(job) = self.admit_business_frame(&message) {
+                                    if business_worker.try_submit(job).is_err() {
+                                        if let Ok(status) = self.app.state::<ControlledDeviceManager>()
+                                            .fail_operation(self.operation.clone(), "desktop_remote_business_queue_full".into()) {
+                                            emit_controlled_status(&self.app, &status);
+                                        }
+                                        break 'serve;
+                                    }
+                                }
                             }
                             // E2E-06：Relay 签名兜底证明 → 续期 B 的 watchdog。
                             Some("controller_liveness_attestation_a") => {
@@ -1210,7 +1222,18 @@ impl ControlledRelayWorker {
                                 if !connected {
                                     let manager = self.app.state::<ControlledDeviceManager>();
                                     let lane = self.app.state::<ControlledLaneState>();
-                                    lane.suspend();
+                                    // Do not abort a potentially executed remote action
+                                    // before it caches its result. Retain one executor so
+                                    // resumed retries cannot overtake it; discard only
+                                    // unstarted work and fence old-epoch response frames.
+                                    if manager.with_local_cancel_lease(|_| {
+                                        self.business_epoch.fetch_add(1, Ordering::AcqRel);
+                                        lane.suspend();
+                                    }).is_err() {
+                                        self.business_epoch.fetch_add(1, Ordering::AcqRel);
+                                        lane.suspend();
+                                    }
+                                    business_worker.clear_pending();
                                     if !begin_controlled_resume(
                                         &self.channel,
                                         manager.inner(),
@@ -1246,7 +1269,10 @@ impl ControlledRelayWorker {
                         Some("controller_joined") => {
                             match self.complete_handshake(&message, &mut driver) {
                                 Ok(()) => {
-                                    if heartbeat.install(&message).is_err() {
+                                    let manager = self.app.state::<ControlledDeviceManager>();
+                                    let Ok((lease, _)) = manager.liveness_runtime_context() else { return };
+                                    let epoch = message.get("liveness_epoch_b").and_then(Value::as_str).unwrap_or_default();
+                                    if heartbeat.install(lease, epoch).is_err() {
                                         self.fail_runtime(HANDSHAKE_FAILED);
                                         return;
                                     }
@@ -1288,6 +1314,7 @@ impl ControlledRelayWorker {
                 }
             }
         }
+        drop(business_worker);
         // 通道关闭（stop/refresh/断线）时丢弃出站旁路，避免旧 generation 继续回传。
         self.app
             .state::<ControlledOutboundState>()
@@ -1543,7 +1570,7 @@ impl ControlledRelayWorker {
     /// 已认证业务帧：解密 → 派发 → 用同一通道加密回包。任何一层不符（无活租约、
     /// 解密/校验失败、业务拒绝）都不产生副作用；业务拒绝时回传有界错误的
     /// `task_status` 由命令层决定（这里只负责通道语义）。
-    async fn dispatch_business_frame(&self, frame: &Value) {
+    fn admit_business_frame(&self, frame: &Value) -> Option<ControlledBusinessJob> {
         let is_task_submit =
             frame.get("payload_kind").and_then(Value::as_str) == Some("task_submit");
         if is_task_submit {
@@ -1552,27 +1579,84 @@ impl ControlledRelayWorker {
         let manager = self.app.state::<ControlledDeviceManager>();
         let Ok((lease, capabilities)) = manager.live_runtime_context() else {
             log_controlled_event("business_frame_dropped", "no_live_lease");
-            return;
+            return None;
         };
         let business = self.app.state::<ControlledLaneState>();
         let (payload_kind, payload) = match business.open(frame, &capabilities) {
             Ok(opened) => opened,
             Err(error) => {
                 log_controlled_event("business_frame_rejected", error.code());
-                return;
+                return None;
             }
         };
         if payload_kind == "task_submit" {
             log_controlled_event("task_submit_decrypted", "dispatching");
         }
-        let responses = match dispatch_decrypted_payload_cached(
-            self.business.as_ref(),
-            &self.action_results,
-            &lease,
-            &payload_kind,
-            &payload,
-        )
-        .await
+        Some(ControlledBusinessJob {
+            transport_epoch: self.business_epoch.load(Ordering::Acquire),
+            lease,
+            capabilities,
+            payload_kind: payload_kind.to_owned(),
+            payload,
+        })
+    }
+
+    fn business_worker(
+        &self,
+    ) -> super::business_worker::SerialBusinessWorker<ControlledBusinessJob> {
+        let app = self.app.clone();
+        let port = self.business.clone();
+        let cache = self.action_results.clone();
+        let sender = self.channel.sender();
+        let epoch = self.business_epoch.clone();
+        // Each validated plaintext is <=512KiB. Four queued jobs plus one
+        // in-flight job bound memory and retain one strictly sequential executor.
+        super::business_worker::SerialBusinessWorker::start(4, move |job| {
+            let app = app.clone();
+            let port = port.clone();
+            let cache = cache.clone();
+            let sender = sender.clone();
+            let epoch = epoch.clone();
+            async move {
+                dispatch_controlled_business_job(&app, port.as_ref(), &cache, &sender, &epoch, job)
+                    .await;
+            }
+        })
+    }
+}
+
+struct ControlledBusinessJob {
+    transport_epoch: u64,
+    lease: LeaseContext,
+    capabilities: Vec<String>,
+    payload_kind: String,
+    payload: Value,
+}
+
+async fn dispatch_controlled_business_job(
+    app: &AppHandle,
+    port: &dyn ControlledBusinessPort,
+    cache: &RemoteActionResultCache,
+    sender: &crate::features::remote_control::manager::ControllerRelaySender,
+    epoch: &AtomicU64,
+    job: ControlledBusinessJob,
+) {
+    let ControlledBusinessJob {
+        transport_epoch,
+        lease,
+        capabilities,
+        payload_kind,
+        payload,
+    } = job;
+    let manager = app.state::<ControlledDeviceManager>();
+    if epoch.load(Ordering::Acquire) != transport_epoch
+        || manager.with_current_business_lease(&lease, || ()).is_err()
+    {
+        return;
+    }
+    let is_task_submit = payload_kind == "task_submit";
+    let responses =
+        match dispatch_decrypted_payload_cached(port, cache, &lease, &payload_kind, &payload).await
         {
             Ok(responses) => responses,
             Err(error) => {
@@ -1583,9 +1667,17 @@ impl ControlledRelayWorker {
                 return;
             }
         };
-        if is_task_submit {
-            log_controlled_event("task_submit_dispatched", "accepted");
+    if is_task_submit {
+        log_controlled_event("task_submit_dispatched", "accepted");
+    }
+    // Async business may finish after stop/disconnect/re-pair. Seal/send while
+    // pinned to the same current live lease; no late response may enter a new
+    // transport cycle or resurrect suspended business authority.
+    let _ = manager.with_current_business_lease(&lease, || {
+        if epoch.load(Ordering::Acquire) != transport_epoch {
+            return;
         }
+        let business = app.state::<ControlledLaneState>();
         // 一条请求可能产出多帧（journal 回放），逐帧加密回传；单帧失败即停止。
         for (response_kind, response) in responses {
             let frame = match business.seal(response_kind, &response, &capabilities) {
@@ -1595,7 +1687,7 @@ impl ControlledRelayWorker {
                     return;
                 }
             };
-            if self.channel.try_send(frame).is_err() {
+            if sender.try_send(frame).is_err() {
                 log_controlled_event("business_response_send_failed", response_kind);
                 return;
             }
@@ -1609,7 +1701,7 @@ impl ControlledRelayWorker {
                 log_controlled_event("capability_response_sent", response_kind);
             }
         }
-    }
+    });
 }
 
 pub(crate) use super::liveness::{LIVENESS_ATTESTATION_ESCALATION_MS, LIVENESS_EVIDENCE_POLL_MS};
@@ -1653,67 +1745,6 @@ impl LivenessEvidenceState {
             return None;
         }
         self.attestation_sent_at_b
-    }
-}
-
-/// Socket-role evidence belongs to this verified joined/resumed lease. It
-/// never renews B's watchdog for A or emits while resume admission is closed.
-#[derive(Default)]
-struct ControlledHeartbeat {
-    lease: Option<LeaseContext>,
-    epoch: Option<String>,
-    sequence: u64,
-}
-
-impl ControlledHeartbeat {
-    fn install(&mut self, verified: &Value) -> Result<(), String> {
-        let epoch = verified
-            .get("liveness_epoch_b")
-            .and_then(Value::as_str)
-            .filter(|epoch| super::protocol::is_valid_identifier(epoch))
-            .ok_or_else(|| HANDSHAKE_FAILED.to_owned())?;
-        let lease = LeaseContext {
-            connection_id: verified["connection_id"]
-                .as_str()
-                .ok_or_else(|| HANDSHAKE_FAILED.to_owned())?
-                .to_owned(),
-            controller_lease_id: verified["controller_lease_id"]
-                .as_str()
-                .ok_or_else(|| HANDSHAKE_FAILED.to_owned())?
-                .to_owned(),
-            lease_epoch: verified["lease_epoch"]
-                .as_str()
-                .ok_or_else(|| HANDSHAKE_FAILED.to_owned())?
-                .to_owned(),
-            relay_epoch: verified["relay_epoch"]
-                .as_str()
-                .ok_or_else(|| HANDSHAKE_FAILED.to_owned())?
-                .to_owned(),
-            remote_control_generation: verified["remote_control_generation"]
-                .as_str()
-                .ok_or_else(|| HANDSHAKE_FAILED.to_owned())?
-                .to_owned(),
-        };
-        if self.epoch.as_deref() == Some(epoch) && self.lease.as_ref() == Some(&lease) {
-            return Ok(());
-        }
-        self.epoch = Some(epoch.to_owned());
-        self.lease = Some(lease);
-        self.sequence = 0;
-        Ok(())
-    }
-
-    fn next_frame(&mut self, lease: &LeaseContext) -> Option<Value> {
-        if self.lease.as_ref() != Some(lease) {
-            return None;
-        }
-        let epoch = self.epoch.as_deref()?;
-        let next = self.sequence.checked_add(1)?;
-        let frame =
-            super::liveness::build_controller_liveness(lease, SenderRole::ControlledB, epoch, next)
-                .ok()?;
-        self.sequence = next;
-        Some(frame)
     }
 }
 
@@ -2297,20 +2328,21 @@ pub(crate) fn handle_controlled_resume_frame<P: ControlledRelayPort + ?Sized>(
             resume.activation_id = Some(activation_id.to_owned());
             ControlledResumeOutcome::Progressed
         }
-        "encrypted_resume_confirm" => match lane.open_resume_confirm(message) {
-            Ok(()) => {
-                resume.peer_confirmed = true;
-                ControlledResumeOutcome::Progressed
+        "encrypted_resume_confirm" => {
+            if message.get("activation_id").and_then(Value::as_str)
+                != resume.activation_id.as_deref()
+                || lane.open_resume_confirm(message).is_err()
+                || resume.ack_sent
+            {
+                return ControlledResumeOutcome::Ignored;
             }
-            Err(_) => ControlledResumeOutcome::Ignored,
-        },
-        "controller_resume_activation_pending" => {
-            let Some(activation_id) = message.get("activation_id").and_then(Value::as_str) else {
+            let Some(activation_id) = resume.activation_id.as_deref() else {
                 return ControlledResumeOutcome::Ignored;
             };
-            if resume.ack_sent || !resume.peer_confirmed {
-                return ControlledResumeOutcome::Ignored;
-            }
+            // Relay cannot emit pending until B acknowledges activation. B's
+            // own confirm was queued first on this same FIFO socket; now the
+            // verified A confirm authorizes B's local acceptance and ACK.
+            resume.peer_confirmed = true;
             if !resume.confirmed {
                 if manager
                     .advance_resume(
@@ -2332,9 +2364,6 @@ pub(crate) fn handle_controlled_resume_frame<P: ControlledRelayPort + ?Sized>(
             ) else {
                 return ControlledResumeOutcome::Failed;
             };
-            if port.try_send(ack).is_err() {
-                return ControlledResumeOutcome::Failed;
-            }
             if manager
                 .advance_resume(
                     operation.clone(),
@@ -2345,7 +2374,19 @@ pub(crate) fn handle_controlled_resume_frame<P: ControlledRelayPort + ?Sized>(
             {
                 return ControlledResumeOutcome::Failed;
             }
+            if port.try_send(ack).is_err() {
+                return ControlledResumeOutcome::Failed;
+            }
             resume.ack_sent = true;
+            ControlledResumeOutcome::Progressed
+        }
+        "controller_resume_activation_pending" => {
+            let Some(activation_id) = message.get("activation_id").and_then(Value::as_str) else {
+                return ControlledResumeOutcome::Ignored;
+            };
+            if !resume.ack_sent || !resume.peer_confirmed || resume.liveness_sent {
+                return ControlledResumeOutcome::Ignored;
+            }
             if manager
                 .advance_resume(
                     operation,
@@ -2399,9 +2440,6 @@ pub(crate) fn handle_controlled_resume_frame<P: ControlledRelayPort + ?Sized>(
             ) else {
                 return ControlledResumeOutcome::Failed;
             };
-            if port.try_send(ready).is_err() {
-                return ControlledResumeOutcome::Failed;
-            }
             if manager
                 .advance_resume(
                     operation,
@@ -2412,11 +2450,19 @@ pub(crate) fn handle_controlled_resume_frame<P: ControlledRelayPort + ?Sized>(
             {
                 return ControlledResumeOutcome::Failed;
             }
+            if port.try_send(ready).is_err() {
+                return ControlledResumeOutcome::Failed;
+            }
             resume.ready_sent = true;
             ControlledResumeOutcome::Progressed
         }
         "controller_resumed" => {
             if !resume.ready_sent {
+                return ControlledResumeOutcome::Ignored;
+            }
+            if message.get("liveness_epoch_b").and_then(Value::as_str)
+                != Some(resume.liveness_epoch_b.as_str())
+            {
                 return ControlledResumeOutcome::Ignored;
             }
             let Some(activation_id) = message.get("activation_id").and_then(Value::as_str) else {
@@ -3550,9 +3596,12 @@ mod tests {
     /// 回 A 端的会话引用；未知类型与畸形载荷不产生任何动作。
     #[tokio::test]
     async fn decrypted_payloads_dispatch_and_rewrite_the_session_reference() {
+        use std::sync::Arc;
+
         #[derive(Default)]
         struct StubPort {
             action_calls: std::sync::atomic::AtomicUsize,
+            block: Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
         }
 
         #[async_trait::async_trait]
@@ -3566,6 +3615,10 @@ mod tests {
             ) -> Result<Value, String> {
                 self.action_calls
                     .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if let Some((started, release)) = &self.block {
+                    started.notify_one();
+                    release.notified().await;
+                }
                 Ok(json!({"applied": true}))
             }
             async fn capability_snapshot(
@@ -3771,6 +3824,84 @@ mod tests {
                 .unwrap_err(),
             "task_request_invalid"
         );
+
+        // A disconnect may occur after the side effect but before its result
+        // is cached. Keep this in-flight call on the same serial executor;
+        // the resumed retry must see the cache, never re-execute the action.
+        let started = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let blocking = Arc::new(StubPort {
+            action_calls: Default::default(),
+            block: Some((started.clone(), release.clone())),
+        });
+        let cache = Arc::new(RemoteActionResultCache::default());
+        let epoch = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let outputs = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let completions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let done = Arc::new(tokio::sync::Notify::new());
+        let worker = super::super::business_worker::SerialBusinessWorker::start(4, {
+            let port = blocking.clone();
+            let cache = cache.clone();
+            let epoch = epoch.clone();
+            let outputs = outputs.clone();
+            let completions = completions.clone();
+            let done = done.clone();
+            let lease = lease.clone();
+            move |(admitted_epoch, payload): (u64, Value)| {
+                let port = port.clone();
+                let cache = cache.clone();
+                let epoch = epoch.clone();
+                let outputs = outputs.clone();
+                let completions = completions.clone();
+                let done = done.clone();
+                let lease = lease.clone();
+                async move {
+                    let result = dispatch_decrypted_payload_cached(
+                        port.as_ref(),
+                        &cache,
+                        &lease,
+                        "remote_action_request",
+                        &payload,
+                    )
+                    .await
+                    .unwrap();
+                    if epoch.load(std::sync::atomic::Ordering::Acquire) == admitted_epoch {
+                        outputs.lock().push(result);
+                    }
+                    completions.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                    done.notify_one();
+                }
+            }
+        });
+        worker.try_submit((0, action.clone())).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), started.notified())
+            .await
+            .unwrap();
+        worker
+            .try_submit((0, json!({"request_id":"discard-queued"})))
+            .unwrap();
+        epoch.store(1, std::sync::atomic::Ordering::Release);
+        worker.clear_pending();
+        worker.try_submit((1, action)).unwrap();
+        release.notify_one();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while completions.load(std::sync::atomic::Ordering::Acquire) < 2 {
+                done.notified().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            blocking
+                .action_calls
+                .load(std::sync::atomic::Ordering::Acquire),
+            1
+        );
+        assert_eq!(
+            outputs.lock().len(),
+            1,
+            "only the resumed retry may publish its cached result"
+        );
     }
 
     /// E2E-05：B → A 的 journal_event 信封必须通过冻结运行时校验（角色 B +
@@ -3890,7 +4021,11 @@ mod tests {
                     transport_key_fingerprint: [2; 32],
                     controller_device_name: "Controller PC".into(),
                     connected_at_b: now_b,
-                    negotiated_capabilities: vec!["encrypted_frames_v1".into(), "resume_v1".into()],
+                    negotiated_capabilities: vec![
+                        "encrypted_frames_v1".into(),
+                        "resume_v1".into(),
+                        "role_liveness_v1".into(),
+                    ],
                 },
             )
             .unwrap();
@@ -3902,8 +4037,27 @@ mod tests {
             .unwrap();
 
         let port = FakePort::new(vec![], false);
+        let heartbeat_port =
+            super::super::controlled_heartbeat::test_support::CapturePort::default();
+        let mut heartbeat = super::super::controlled_heartbeat::ControlledHeartbeat::default();
+        heartbeat
+            .install(lease_context.clone(), "live-b-1")
+            .unwrap();
+        heartbeat
+            .pump(&manager, &operation, false, &heartbeat_port)
+            .unwrap();
+        assert_eq!(heartbeat_port.frames.lock()[0]["heartbeat_sequence"], "1");
         let mut resume = ControlledResumeAttempt::default();
+        lane.suspend();
         assert!(begin_controlled_resume(&port, &manager, &mut resume));
+        heartbeat
+            .pump(&manager, &operation, resume.is_active(), &heartbeat_port)
+            .unwrap();
+        assert_eq!(
+            heartbeat_port.frames.lock().len(),
+            1,
+            "recovery never emits role evidence"
+        );
         assert!(resume.is_active(), "恢复尝试必须处于进行中");
         let activation = "activation-0001";
 
@@ -3927,6 +4081,22 @@ mod tests {
             ControlledResumeOutcome::Progressed
         );
         // A 的 confirm（同一 resume 秘密）必须验签通过。
+        let mismatched_confirm = peer
+            .seal_resume_confirm("request-resume-wrong", "activation-wrong")
+            .unwrap();
+        let sent_before = port.sent.lock().unwrap().len();
+        assert_eq!(
+            handle_controlled_resume_frame(
+                &port,
+                &manager,
+                &lane,
+                &mut resume,
+                &mismatched_confirm
+            ),
+            ControlledResumeOutcome::Ignored
+        );
+        assert_eq!(port.sent.lock().unwrap().len(), sent_before);
+        assert!(!resume.peer_confirmed && !resume.ack_sent);
         let peer_confirm = peer
             .seal_resume_confirm("request-resume-peer", activation)
             .unwrap();
@@ -3934,6 +4104,20 @@ mod tests {
             handle_controlled_resume_frame(&port, &manager, &lane, &mut resume, &peer_confirm),
             ControlledResumeOutcome::Progressed
         );
+        assert!(
+            resume.ack_sent,
+            "B must send ACK before Relay can generate pending"
+        );
+        assert_eq!(
+            port.sent.lock().unwrap().last().unwrap()["type"],
+            "controller_resume_activation_ack"
+        );
+        let sent_before = port.sent.lock().unwrap().len();
+        assert_eq!(
+            handle_controlled_resume_frame(&port, &manager, &lane, &mut resume, &peer_confirm),
+            ControlledResumeOutcome::Ignored
+        );
+        assert_eq!(port.sent.lock().unwrap().len(), sent_before);
         // 审核回归：旧 generation 的恢复帧必须被丢弃且不影响相位。
         assert_eq!(
             handle_controlled_resume_frame(
@@ -3953,7 +4137,7 @@ mod tests {
             ),
             ControlledResumeOutcome::Ignored
         );
-        // activation_pending → activation_ack + post_activation_liveness。
+        // Relay pending follows B's ACK; now B sends post-activation liveness.
         assert_eq!(
             handle_controlled_resume_frame(
                 &port,
@@ -3993,33 +4177,57 @@ mod tests {
             ),
             ControlledResumeOutcome::Progressed
         );
+        let final_frame = json!({
+            "v": 1, "type": "controller_resumed", "request_id": "request-final-resume", "activation_id": activation,
+            "liveness_epoch_a": "live-a-2", "liveness_epoch_b": epoch_b,
+            "resume_deadline_ms": "1700000030000",
+            "new_resume_token_b64": base64::engine::general_purpose::STANDARD.encode([3_u8; 32]),
+            "connection_id": lease_context.connection_id,
+            "controller_lease_id": lease_context.controller_lease_id,
+            "lease_epoch": lease_context.lease_epoch,
+            "relay_epoch": lease_context.relay_epoch,
+            "remote_control_generation": lease_context.remote_control_generation,
+        });
+        super::super::protocol::validate_controller_runtime_message_json(
+            &final_frame.to_string(),
+            SenderRole::Relay,
+            Some(&super::super::protocol::RuntimeValidationContext {
+                lease: Some(lease_context.clone()),
+                negotiated_capabilities: vec![
+                    "encrypted_frames_v1".into(),
+                    "resume_v1".into(),
+                    "role_liveness_v1".into(),
+                ],
+            }),
+        )
+        .unwrap();
+        let mut wrong_epoch = final_frame.clone();
+        wrong_epoch["liveness_epoch_b"] = json!("live-b-foreign");
         assert_eq!(
-            handle_controlled_resume_frame(
-                &port,
-                &manager,
-                &lane,
-                &mut resume,
-                &json!({
-                    "type": "controller_resumed",
-                    "activation_id": activation,
-                    "liveness_epoch_a": "live-a-2",
-                    "liveness_epoch_b": epoch_b,
-                    "resume_deadline_ms": "1700000030000",
-                    "new_resume_token_b64": base64::engine::general_purpose::STANDARD
-                        .encode([3_u8; 32]),
-                    "connection_id": lease_context.connection_id,
-                    "controller_lease_id": lease_context.controller_lease_id,
-                    "lease_epoch": lease_context.lease_epoch,
-                    "relay_epoch": lease_context.relay_epoch,
-                    "remote_control_generation": lease_context.remote_control_generation,
-                }),
-            ),
+            handle_controlled_resume_frame(&port, &manager, &lane, &mut resume, &wrong_epoch),
+            ControlledResumeOutcome::Ignored
+        );
+        assert!(resume.is_active());
+        assert!(
+            lane.is_suspended(),
+            "foreign B epoch cannot reopen the lane or install heartbeat state"
+        );
+        assert_eq!(
+            handle_controlled_resume_frame(&port, &manager, &lane, &mut resume, &final_frame,),
             ControlledResumeOutcome::Completed
         );
         assert!(!resume.is_active());
         assert!(manager.live_lease().is_ok(), "恢复完成后必须回到 connected");
         assert_eq!(manager.live_liveness_epoch().as_deref(), Some("live-a-2"));
         assert!(!lane.is_suspended(), "恢复完成后业务通道必须重新打开");
+        heartbeat.install(lease_context.clone(), &epoch_b).unwrap();
+        heartbeat
+            .pump(&manager, &operation, resume.is_active(), &heartbeat_port)
+            .unwrap();
+        let heartbeat_frames = heartbeat_port.frames.lock();
+        assert_eq!(heartbeat_frames[1]["liveness_epoch"], epoch_b);
+        assert_eq!(heartbeat_frames[1]["heartbeat_sequence"], "1");
+        drop(heartbeat_frames);
         let now_b = controlled_monotonic_millis();
         manager.mark_transport_disconnected(now_b);
         let second = manager
@@ -4102,6 +4310,10 @@ mod tests {
 
     #[test]
     fn controlled_role_heartbeat_matches_relay_fixture_and_fences_replaced_lease() {
+        use super::super::controlled_heartbeat::{
+            ControlledHeartbeat,
+            test_support::{CapturePort, connect},
+        };
         let expected: Value = serde_json::from_str(include_str!(
             "../../../../../tests/fixtures/controller_role_b_heartbeat.json"
         ))
@@ -4113,25 +4325,58 @@ mod tests {
             relay_epoch: "epoch-test-1".into(),
             remote_control_generation: "generation-0001".into(),
         };
+        assert_eq!(
+            super::super::liveness::build_controller_liveness(
+                &lease,
+                SenderRole::ControlledB,
+                "live-b-1",
+                1,
+            )
+            .unwrap(),
+            expected,
+            "the shared production builder must match the Relay fixture exactly"
+        );
+        let manager = ControlledDeviceManager::default();
+        let operation = manager.start(None, Vec::new()).unwrap();
+        let mut owned_lease = lease;
+        owned_lease.remote_control_generation = operation.generation().into();
+        connect(
+            &manager,
+            &operation,
+            owned_lease.clone(),
+            "live-a-1",
+            vec!["role_liveness_v1".into()],
+        );
+        let port = CapturePort::default();
         let mut state = ControlledHeartbeat::default();
-        assert!(state.next_frame(&lease).is_none());
-        let mut joined = expected.clone();
-        joined["liveness_epoch_b"] = json!("live-b-1");
-        state.install(&joined).unwrap();
-        assert_eq!(state.next_frame(&lease).unwrap(), expected);
-        assert_eq!(state.next_frame(&lease).unwrap()["heartbeat_sequence"], "2");
-        state.install(&joined).unwrap();
-        assert_eq!(state.next_frame(&lease).unwrap()["heartbeat_sequence"], "3");
-        let mut replacement = lease.clone();
+        state.pump(&manager, &operation, false, &port).unwrap();
+        assert!(port.frames.lock().is_empty());
+        state.install(owned_lease.clone(), "live-b-1").unwrap();
+        state.pump(&manager, &operation, false, &port).unwrap();
+        let mut owned_expected = expected;
+        owned_expected["remote_control_generation"] = json!(operation.generation());
+        assert_eq!(port.frames.lock()[0], owned_expected);
+        state.pump(&manager, &operation, false, &port).unwrap();
+        assert_eq!(port.frames.lock()[1]["heartbeat_sequence"], "2");
+        state.install(owned_lease.clone(), "live-b-1").unwrap();
+        state.pump(&manager, &operation, false, &port).unwrap();
+        assert_eq!(port.frames.lock()[2]["heartbeat_sequence"], "3");
+        let mut replacement = owned_lease.clone();
         replacement.remote_control_generation = "generation-0002".into();
-        assert!(state.next_frame(&replacement).is_none());
-        joined["liveness_epoch_b"] = json!("live-b-2");
-        state.install(&joined).unwrap();
-        let resumed = state.next_frame(&lease).unwrap();
+        state.install(replacement, "live-b-1").unwrap();
+        assert!(state.pump(&manager, &operation, false, &port).is_err());
+        assert_eq!(port.frames.lock().len(), 3);
+        state.install(owned_lease, "live-b-2").unwrap();
+        state.pump(&manager, &operation, false, &port).unwrap();
+        let resumed = port.frames.lock()[3].clone();
         assert_eq!(resumed["liveness_epoch"], "live-b-2");
         assert_eq!(resumed["heartbeat_sequence"], "1");
-        state.sequence = u64::MAX;
-        assert!(state.next_frame(&lease).is_none());
+        manager.stop();
+        manager.start(None, Vec::new()).unwrap();
+        assert!(state.pump(&manager, &operation, false, &port).is_err());
+        assert_eq!(port.frames.lock().len(), 4);
+        // Sequence overflow and failed-enqueue retry are covered by the same
+        // producer's tests; do not reintroduce a weaker test-only builder.
     }
 
     #[test]
