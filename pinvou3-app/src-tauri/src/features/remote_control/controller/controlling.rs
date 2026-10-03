@@ -398,6 +398,26 @@ impl ControllingDeviceManager {
             .as_ref()
             .and_then(|gate| gate.resumed_liveness_epoch().map(str::to_owned))
             .unwrap_or_default();
+        // Disconnect clears transport admission. Reinstall only after the complete
+        // authenticated resume gate succeeds, before publishing Connected.
+        if let Some(transport) = inner.transport.as_ref() {
+            if transport.is_stopped()
+                || transport
+                    .install_authenticated_lease_after_resume(
+                        super::relay_transport::AuthenticatedLease {
+                            context: lease.context.clone(),
+                            negotiated_capabilities: lease.negotiated_capabilities.clone(),
+                        },
+                        activation_id,
+                    )
+                    .is_err()
+            {
+                clear_live_context(&mut inner);
+                inner.phase = ControllingStatusKind::Error;
+                inner.error_code = Some(RESUME_FAILED_ERROR);
+                return Err(ControllingStateError::new("controller_resume_failed"));
+            }
+        }
         inner.resume_gate = Some(ControllerResumeGate::new(
             ControllerRole::ControllerA,
             lease.context.clone(),
