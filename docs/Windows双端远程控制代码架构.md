@@ -47,7 +47,7 @@ B 的 Rust 权威枚举以 `features/remote_control/controller/controlled.rs` �
 
 架构守卫、前端契约、Session RemoteProxy 测试、controller crypto harness 与 Relay 套件共同验证各边界，不能只凭测试通过推断完整产品验收。构建使用项目 npm 命令；相关入口包括 `npm --prefix pinvou3-app test`、`npm --prefix pinvou3-app run build:ui`、`python3 scripts/architecture-guard.py` 和 `npm --prefix remote-control-relay test`。
 
-本轮传播的真实浏览器 smoke、双 Windows 已安装应用旅程、线上/公网部署及 DEV-25 发布验收仍未完成。GNU 本机诊断不替代正式 MSVC，条件跳过不计覆盖；CI 的窄范围审查/传播豁免不意味着全绿、Ready 或允许合并。当前 PR 中按 head 记录的实际验证结论优先，附录不充当验证证据。
+真实浏览器已加载构建后的 React 页面，以 mock Tauri 执行设置页 smoke（A17 当前 head 96 项通过）；这不等于真实 Tauri/WebView2、双 Windows 已安装应用旅程、线上/公网部署或 DEV-25 发布验收，后者仍未完成。GNU 本机诊断不替代正式 MSVC，条件跳过不计覆盖；CI 的窄范围审查/传播豁免不意味着全绿、Ready 或允许合并。当前 PR 中按 head 记录的实际验证结论优先，附录不充当验证证据。
 
 ## 历史设计附录（已被当前契约替代）
 

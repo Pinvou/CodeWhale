@@ -19,6 +19,8 @@
 
 `release:gate` 在开关开启时要求 `PINVOU_REMOTE_RELEASE_EVIDENCE` 与 `PINVOU_RELEASE_COMMIT_SHA`，重新校验 artifact 哈希、27 条旅程、敏感扫描、registry 覆盖率和旧 Relay 回滚预检；缺任何一项都失败。开关关闭时仍验证值只能为空或 `0`，不会删除 registry、pairing tombstone 或回退 state schema。
 
+开关关闭的普通发布包不包含已启用的桌面远控能力；该组合通过不代表桌面远控发布资格通过。公开发布本功能必须在 A/B/Relay 三端精确设为 `1`，并取得全部开启门禁的真实证据，不能以关闭开关的 CI 结果替代。
+
 开关开启的 CI 门禁必须在能读取受保护生产状态的发布 runner 上执行（通过 `PINVOU_REMOTE_RELEASE_RUNNER` 选择），并注入启用/关闭两份受保护环境文件、controller state、旧 endpoint inventory、已部署 gateway 配置、公网入口清单、固定签名证书与受信驱动/安装包哈希。这些生产文件不上传到 evidence artifact；门禁现场重算 inventory/gateway 指纹并与双机证据比对。任一变量、文件或跨 run artifact 不可用时，结果必须为 BLOCKED。
 
 跨 workflow 证据只接受 GitHub API 确认属于当前 commit、固定 workflow ID 与精确 path、当前 ref/repository、成功完成且 digest 与受保护期望值一致的 artifact。首版统一使用受保护远程签名服务与 Ed25519：orchestrator、A、B 分别声明 provider identity、公钥、互异 role/tenant policy 和独立 provider receipt，artifact 必须按 `machine_role` 选择对应 key 验签。provider 证明必须由独立 verifier 产生，绑定本次 nonce、角色/policy、provider/key ID、ACL、measurement、driver SHA 和新鲜时间，并通过 vendor 证书链、根/叶证书 allowlist 与签名校验；driver 不得循环自证。缺少真实 provider 证明时发布资格为 BLOCKED。
@@ -38,7 +40,7 @@ GitHub protected environment/self-hosted runner、runner OS 与同一 SID 进程
 1. 从受保护的旧 endpoint inventory 运行 `enrollment-migrate.js --coverage`；覆盖率未达 100% 不进入灰度。
 2. 官方环境由已认证旧 socket 完成 challenge/proof 认领，保留 endpoint ID/token/Web 链接；身份冲突必须重新分享。
 3. 自托管先 `--dry-run`，再用稳定 request ID 执行批量 allowlist/re-enroll；re-enroll 会明确使旧 Web 链接失效。
-4. 生产只允许 `NODE_ENV=production`，enrollment deployment 为 `official`（官方）或独立验证过的 `self_hosted`，且 `PINVOU_REMOTE_ENROLLMENT_DEVELOPMENT_TOFU=false`。TOFU 仅限开发端点，不能作为生产降级。
+4. 生产只允许 `NODE_ENV=production`、独立验证过的 `self_hosted`，且 `PINVOU_REMOTE_ENROLLMENT_DEVELOPMENT_TOFU=false`。当前 `official` live claim 尚未接线，预检及启动明确失败关闭；不得以开发 TOFU 作为生产降级。
 5. 先验证开关关闭组合门禁，再在 Relay、A、B 同时设为 `1`；按 registry 覆盖率和 endpoint allowlist 小范围灰度，而不是删除持久状态。
 6. 观察 DEV-24 固定枚举指标；任何敏感面哨兵、未 enrolled 注册、裸 v2 路由或旁路出现即停止。
 
@@ -110,3 +112,73 @@ validator 拒绝额外字段、敏感字段名、绝对/逃逸路径、缺文件
 - 信任模型明确假设 Relay 是受信认证控制面；端到端加密用于防被动抓包、日志/存储读取和旁路密钥替换，**不声称抵御恶意 Relay 的主动 MITM**。解决该风险需要独立设备认证或用户比较码，不属于首版。
 - 模型 endpoint 最终出站仍可能二次解析、使用代理或跟随重定向；按需求第 10.5 节登记并持续评审。
 - 当前开发工作站若缺两台隔离 Windows、生产等价 Relay、签名包或真实旧二进制，最终 release gate 应失败。这是正确的 blocked 状态，不得伪造 pass 或证据。
+## 附录：历史排期与部署快照
+
+> 以下仅保留前序波次的历史记录，不是当前发布许可、现行功能合同或最新验收结果。当前发布门禁以第 1～7 节的 27 条真实旅程和 evidence validator 为准；旧 21 条旅程、三面冒烟及未完成能力清单不能替代现行要求。未核验或修改线上状态。
+
+### 7.3 后续排期（不阻断首版灰度）
+
+| 项 | 说明 |
+|---|---|
+| 设备显示名 | 冻结协议 v1 的 `controller_joined`/`pairing_register` 不携带对端显示名，A 端用占位 `remote-device`、B 端留空由 UI 兜底；需协议扩展 |
+| B 回复非流式 | 首版在轮次结束后从 B 的 `SessionStore` 取文本，A 端看到的是整轮完成后的回复 |
+| A 端快照引导 | 首次收到 journal 事件时直接从该事件起算；完整快照引导属可选优化 |
+| 附件/成果事件回传 | wire `event_kind` 只用冻结闭集，进行中状态、附件与快照不回传（属后续任务） |
+| 跨 lease 任务清理语义 | B 端 `cancel` 只校验帧租约与任务存在性；旧 lease 遗留任务由 stop/refresh/远端断开的清理端口负责 |
+| `DesktopControlledCleanup` 适配器测试 | 仓库无 `mock_app` 先例，当前由 manager 侧三条路径用例覆盖触发面，Tauri 级测试列入后续 |
+| remote_control 之外的既有失败 | 全量 `cargo test --lib` 有 6～8 条与本功能无关的既有失败（进程树终止超时、marketplace 工具缺失等），属环境限制，已在任务文档登记 |
+
+## 8. 生产 controller lane 历史启用记录（2026-09-19，当时采用安全降级）
+
+> 以下为当时环境和操作的历史快照，不是当前生产部署授权或验收证据。A18 已移除生产预检的 development + TOFU 降级门禁：当前必须 `NODE_ENV=production`、`PINVOU_REMOTE_ENROLLMENT_DEPLOYMENT=self_hosted`、`PINVOU_REMOTE_ENROLLMENT_DEVELOPMENT_TOFU=false`。`official` live claim 尚未接线，预检及启动均明确失败关闭；存量端点清单、registry 迁移和不可旁路 gateway 仍为 [#1428](https://github.com/Pinvou/pinvou3/issues/1428) 的发布阻塞。本次只修复代码与文档，未核验或改变线上状态。
+
+### 8.1 变更内容
+
+1. 生产 Relay（`pinvou-remote-relay.service`，`/opt/pinvou-remote-relay`，端口 8787）升级到含 controller-v1 的版本（原先为 v2-only 旧代码）。
+2. 新增 drop-in `/etc/systemd/system/pinvou-remote-relay.service.d/40-controller.conf`，`EnvironmentFile=/etc/pinvou-remote-relay-controller.env`（**0600**，私钥不出主机）。
+3. 环境文件要点：`PINVOU_DESKTOP_CONTROLLER_ENABLED=1`、`NODE_ENV=development`、`PINVOU_REMOTE_ENROLLMENT_DEPLOYMENT=development`、`PINVOU_REMOTE_ENROLLMENT_DEVELOPMENT_TOFU=true`、enrollment/pairing HMAC 各一组、`PINVOU_REMOTE_RELAY_SIGNING_KEY_ID=prod-relay-key-1`、`PINVOU_REMOTE_CONTROLLER_STATE_PATH=/var/lib/pinvou-remote-relay/state/controller-state.json`（目录 0700）、`PINVOU_REMOTE_STATE_PATH=/opt/pinvou-remote-relay/data/relay-state.json`（沿用既有状态，未迁移）。
+4. 当前生产部署脚本必须拒绝环境文件符号链接，校验其为 `root:root`、`0600`，并严格验证本节开头的 production + self_hosted + TOFU=false 配置及两条状态路径，不再接纳第 3 项历史降级配置；脚本原子维护 `40-controller.conf`，在本机执行无状态变更的 controller-v1 路由烟测，并在本机与公网健康检查中确认 `desktop_controller_enabled=true`。任一检查失败都必须整体恢复旧版 JS 模块和 systemd drop-in，禁止以 Web v2 正常但桌面控制不可用或新旧模块混装的状态通过发布。
+
+### 8.2 当时为什么启用 TOFU（历史原因，不再作为生产例外）
+
+- 生产状态文件只有 `version` 与 `revoked_endpoints`，**没有端点清单**：存量端点只存在于内存，无法做「registry 覆盖率 100%」的迁移。
+- 一旦启用 controller runtime，v2 的 `desktop_endpoint_register` 也会先过 registry（`server.js:886`）；在 `official` 且无 TOFU 的模式下，全部存量端点重连会被 `enrollment_required` 拒绝。
+- 因此当时经用户确认，**历史生产配置采用 `development + TOFU`**：未登记客户端可自助注册。这是当时的安全降级记录，不是当前生产例外；正式发布前必须补齐端点清单与 registry 迁移，关闭 TOFU，不能以保留旧配置绕过门禁。
+
+### 8.3 信任根（公钥随包内置，私钥只在部署环境）
+
+| 项 | 值 |
+|---|---|
+| key id | `prod-relay-key-1` |
+| 公钥（原始 32 字节 ed25519，base64） | `nGlRK79H+YdNVhmZOwkI2T83uhiEBqfZeFbMrJ28LQM=` |
+| 客户端内置位置 | `manager::PRODUCTION_PROFILE`（提交 `225fa4cd`），用户无需再配置 `PINVOU_REMOTE_RELAY_SIGNING_*` |
+| 私钥 | 仅 `/etc/pinvou-remote-relay-controller.env`（0600），不入库、不入日志；轮换时需同步更新内置公钥并随客户端发版 |
+
+### 8.4 备份与回滚
+
+- 全量备份：`/root/pinvou-prod-backups/pinvou-remote-relay-20260919T134907Z.tgz`（代码 + unit + drop-ins，314 MB）。
+- 部署时快照：`/opt/pinvou-remote-relay/backups/20260919-224624`（旧代码/旧 web/dist/旧 package 文件，脚本自动写入）。
+- **最小回滚（关闭 controller lane，恢复 v2-only 行为）**：
+  ```bash
+  sudo rm -f /etc/systemd/system/pinvou-remote-relay.service.d/40-controller.conf
+  sudo systemctl daemon-reload && sudo systemctl restart pinvou-remote-relay.service
+  curl -fsS https://pinvou.com/pinvou3/remote/healthz   # 期望 200
+  ```
+- **彻底回滚代码**：用 `/opt/pinvou-remote-relay/backups/20260919-224624` 覆盖 `server.js`/`web/dist`/package 文件后重启（或解压全量备份 tarball）。
+- 关闭 controller lane 后，客户端配对会失败关闭为 `invalid_message`/`endpoint_offline`，属预期。
+
+### 8.5 验收证据（2026-09-19）
+
+| 检查 | 结果 |
+|---|---|
+| 服务 | `pinvou-remote-relay.service` active；启动日志 `protocol=v2+controller-v1` |
+| 公网 healthz | `https://pinvou.com/pinvou3/remote/healthz` → 200 `{ok:true}` |
+| 存量 v2 用户 | 重启后桌面端重连，`desktop_open` 由 3 回升到 8，`web_client_open=0` 与变更前一致，无注册被拒 |
+| controller lane（公网） | 从 `wss://pinvou.com/pinvou3/remote/ws` 发 `controller_pairing_claim` → 收到控制器族错误信封 `{"v":1,"type":"error","code":"invalid_message"}` |
+| 回滚路径 | 部署过程中真实触发过一次自动回滚（1s 健康检查误判），成功恢复旧版本；之后脚本已改为 30s 有界重试 |
+
+### 8.6 仍未完成（发布门禁）
+
+- 真实双机 21 条旅程、三面 UI 浏览器冒烟（见 7.1）——在取得证据前不得发布。
+- 端点清单与 registry 迁移、关闭 TOFU（见 8.2）。
+- 设置页「服务端点」下拉（生产/测试切换）尚未实现，当前切换靠 `PINVOU_REMOTE_ENDPOINT_PROFILE` 或 `~/.pinvou3/web-relay.json` 的 `profile` 字段。
