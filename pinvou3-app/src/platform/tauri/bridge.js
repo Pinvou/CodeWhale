@@ -3157,6 +3157,7 @@
       cancelRemoteTask: desktopRemoteControlFeature.cancelRemoteTask,
       abandonRemoteTask: desktopRemoteControlFeature.abandonRemoteTask,
       permissionList: desktopRemoteControlFeature.permissionList,
+      controlledPermissionList: desktopRemoteControlFeature.controlledPermissionList,
       permissionDecide: desktopRemoteControlFeature.permissionDecide,
       permissionDenyTask: desktopRemoteControlFeature.permissionDenyTask,
       attachmentBegin: desktopRemoteControlFeature.attachmentBegin,
