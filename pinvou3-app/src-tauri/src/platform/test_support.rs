@@ -28,14 +28,53 @@ pub(crate) fn with_temp_home(prefix: &str, f: impl FnOnce()) {
     let prev = std::env::var("PINVOU3_HOME").ok();
     // SAFETY: holding platform::paths::tests::ENV_LOCK; env writes serialized in-process.
     unsafe { std::env::set_var("PINVOU3_HOME", &dir) };
-    f();
-    match prev {
-        // SAFETY: holding platform::paths::tests::ENV_LOCK; env writes serialized in-process.
-        Some(v) => unsafe { std::env::set_var("PINVOU3_HOME", v) },
-        // SAFETY: holding platform::paths::tests::ENV_LOCK; env writes serialized in-process.
-        None => unsafe { std::env::remove_var("PINVOU3_HOME") },
+
+    // Restore through Drop, not straight-line code after `f()`. A failing
+    // assertion inside the closure unwinds, and with the restore written
+    // inline it would be skipped: the temp dir leaks AND PINVOU3_HOME stays
+    // pointed at it for every later test in this process, so one genuine
+    // failure cascades into a string of unrelated ones and the suite's red
+    // signal stops meaning anything. Same RAII contract as `EnvRestore` below.
+    struct TempHomeRestore {
+        previous: Option<OsString>,
+        dir: std::path::PathBuf,
     }
-    let _ = std::fs::remove_dir_all(&dir);
+    impl Drop for TempHomeRestore {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                // SAFETY: the caller still holds ENV_LOCK for this scope.
+                Some(v) => unsafe { std::env::set_var("PINVOU3_HOME", v) },
+                // SAFETY: the caller still holds ENV_LOCK for this scope.
+                None => unsafe { std::env::remove_var("PINVOU3_HOME") },
+            }
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+    // Declared after `_g` so it drops BEFORE the lock is released: no other
+    // test may observe the temporary value.
+    let _restore = TempHomeRestore {
+        previous: prev.map(OsString::from),
+        dir: dir.clone(),
+    };
+    f();
+}
+
+/// Take the crate-unique env lock and snapshot a set of env vars in one step:
+/// `let (_lock, _env) = locked_env(&["PINVOU3_HOME"]);`
+/// Not reentrant — never call while already holding ENV_LOCK. The guard
+/// releases the lock and restores the env when scope exits (including panic
+/// unwind). (`bridge.rs`'s test module still keeps a private
+/// `locked_env`/`EnvGuard` pair; its ~hundred call sites have not been
+/// migrated here — new code always uses this implementation so the old pair
+/// stops spreading.)
+#[cfg(test)]
+pub(crate) fn locked_env(
+    vars: &[&'static str],
+) -> (std::sync::MutexGuard<'static, ()>, EnvRestore) {
+    let lock = crate::platform::paths::tests::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    (lock, EnvRestore::capture(vars))
 }
 
 /// 连接器旧布局 bin 目录的测试入口：返回 `managed_connector_bin_dir()`；为
@@ -166,5 +205,43 @@ impl Drop for UnreadableDirForTest {
         {
             let _ = &self.dir;
         }
+    }
+}
+
+/// POSIX mode bits of `path`, or `None` where the platform has none.
+///
+/// Permission assertions belong to the platform layer: a feature test that
+/// writes its own `#[cfg(unix)]` block puts an OS conditional outside an
+/// adapter (architecture guard `rust_target_cfg_outside_adapter`), and every
+/// such copy drifts on its own. Callers assert `Some(0o600)` and skip on
+/// `None`.
+#[cfg(test)]
+pub(crate) fn permission_bits(path: &std::path::Path) -> Option<u32> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        Some(std::fs::metadata(path).ok()?.permissions().mode() & 0o777)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        None
+    }
+}
+
+/// Loosens `path` to 0644 the way a pre-hardening build's umask left it, so a
+/// test can prove the next write tightens it. No-op (and reports `false`)
+/// where the platform has no mode bits.
+#[cfg(test)]
+pub(crate) fn loosen_to_world_readable_for_test(path: &std::path::Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o644)).is_ok()
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        false
     }
 }

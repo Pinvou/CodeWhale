@@ -266,17 +266,13 @@ fn version_from_probe(probe: CliVersionProbe) -> Option<String> {
 pub(super) fn command_version_output(executable: &Path) -> Option<String> {
     version_from_probe(command_version_probe(executable))
 }
-
-pub(super) fn probe_cli_version(executable: &Path) -> CliVersionProbe {
-    command_version_probe(executable)
-}
 pub(super) fn probe_cli(backend: AgentBackend, path: Option<PathBuf>) -> Option<ResolvedCli> {
     let path = path?;
     // 官方 CLI 首次经过系统安全扫描时也可能偶发超过单次自检上限。仅超时
     // 时补一次重试；缺失或明确失败不额外 spawn。
-    let probe = probe_cli_version(&path);
+    let probe = command_version_probe(&path);
     let probe = if matches!(probe, CliVersionProbe::TimedOut) {
-        probe_cli_version(&path)
+        command_version_probe(&path)
     } else {
         probe
     };
@@ -710,7 +706,7 @@ async fn run_managed_install(
         .stderr(Stdio::piped());
     let (mut child, process_tree) = crate::platform::process::spawn_managed_tokio(command)
         .with_context(|| stage.spawn_context.clone())?;
-    // spawn 后登记 pid 供取消命令杀进程树；guard 在本函数任意出口注销。
+    // spawn 后登记进程树供取消命令终止；guard 在本函数任意出口注销。
     let _child_guard = InstallChildGuard::register(install_children, backend, process_tree.clone());
     // 取消可能发生在 spawn 与登记之间：登记后立即补检一次。
     if install_operations.lock().is_cancelled(backend) {
@@ -1570,12 +1566,6 @@ pub(super) fn fill_install_progress(
             status.install_command = (!info.command.is_empty()).then(|| info.command.clone());
             status.install_latest_line = info.latest_line.clone();
         }
-    }
-}
-
-pub(super) fn kill_install_process_tree(pid: u32) {
-    if let Err(error) = crate::platform::process::kill_process_tree(pid) {
-        eprintln!("[pinvou3-app] failed to kill install process tree {pid}: {error:#}");
     }
 }
 

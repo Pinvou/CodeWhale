@@ -116,7 +116,14 @@ pub(crate) fn skill_owner_package(skill_name: &str) -> String {
         return cli.to_string();
     }
     for tool in MarketplaceManager::new().available_tools() {
-        if tool.companion_skills.iter().any(|s| s == skill_name) {
+        // Case-folded like the builtin guards: on case-insensitive filesystems
+        // an on-disk `Session-Reader` directory resolves to the companion
+        // skill regardless of declared casing (review round-5 minor 4).
+        if tool
+            .companion_skills
+            .iter()
+            .any(|s| s.eq_ignore_ascii_case(skill_name))
+        {
             // V5「随包」认领：包本体已装才把技能归属到包（与 list_bundles 的认领
             // 条件一致）；未装时技能保留独立纯技能包形态（owner = 技能名自身）。
             // 保证 save 归一与物化排除跟 UI 展示的包形态对齐（二轮评审：scope
@@ -200,9 +207,9 @@ pub enum BundleKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct InvalidBundle;
 
-/// 就绪态（派生态，不进存储）。UI 消费 (installed, ready)。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+/// Ready state (derived state; never stored and not part of serde serialization).
+/// The UI consumes (installed, ready).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Readiness {
     Ready,
     /// 未就绪；reason 给前端提示（如缺凭据的 key 列表）
@@ -957,6 +964,11 @@ mod tests {
             python_dependencies: None,
             servers: vec![],
             companion_skills: vec![],
+            builtin: false,
+            visibility: String::new(),
+            security_level: String::new(),
+            data_access: vec![],
+            tool_features: Default::default(),
         };
         let creds = tool_credentials(&tool);
         assert_eq!(creds.len(), 2);
@@ -1024,6 +1036,11 @@ mod tests {
             python_dependencies: None,
             servers: vec![],
             companion_skills: vec![],
+            builtin: false,
+            visibility: String::new(),
+            security_level: String::new(),
+            data_access: vec![],
+            tool_features: Default::default(),
         };
         let fields = tool_config_fields(&tool);
         let creds = tool_credentials(&tool);

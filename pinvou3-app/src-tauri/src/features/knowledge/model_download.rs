@@ -1,9 +1,12 @@
 //! 知识库 embedding 模型（bge-m3）按需下载 + 校验 + 部署 + 热加载。
 //!
-//! 模型不再随安装包打包；用户在知识库页主动下载到 [`super::model_dir`]
-//! （`~/.pinvou3/knowledge/models/bge-m3`）。固定 revision 的五个文件由
-//! `pinvou-knowledge` 统一流式下载并逐文件校验。候选目录通过真实
-//! embedding 加载后才带回滚地替换托管模型并刷新工具门控，**免重启**即可建库/入库/检索。
+//! Models are no longer bundled with the installer; users download them
+//! from the knowledge page into `super::model_dir`
+//! (`~/.pinvou3/knowledge/models/bge-m3`). The five files at the pinned
+//! revision are streamed and per-file verified by `pinvou-knowledge`. Only
+//! after the candidate directory passes a real embedding load is the managed
+//! model replaced with rollback and the tool gating refreshed, so index
+//! building, ingestion, and search all gain the model **without a restart**.
 //!
 //! 进度事件 `kb_model:progress`：`{ stage: download|verify|prepare|done, downloaded, total, ready }`。
 
@@ -271,6 +274,7 @@ pub async fn kb_model_download(
         load_installed_embedder_unlocked(&service, &pool, configured_dir).await?;
         return Ok(current_status(&service));
     }
+    // Guard: DOWNLOADING is reset on any early exit (including `?` and cancels).
     if DOWNLOADING.swap(true, Ordering::SeqCst) {
         return Err("模型正在下载中".into());
     }
@@ -475,15 +479,10 @@ pub(crate) async fn load_installed_embedder(
 /// 知识库连接（与 tool_policy 的 kb_usable 同口径：远程连接存在即视为知识库
 /// 可用，宁可保守加载；远程检索本身在服务端嵌入，本地模型只为挂载校验与
 /// 可能的本地混检兜底）。两者皆无 → 首帧不加载。
+/// The check reuses the tool gating's [`KnowledgeService::kb_tools_usable`], so the two
+/// predicates cannot drift apart.
 fn knowledge_usage_present(service: &KnowledgeService) -> bool {
-    usage_present(service.has_indexed_content(), remote_has_connections())
-}
-
-/// usage_present 的纯函数核心（便于单测）：任一使用迹象存在即加载。判定与
-/// 工具门控的 [`KnowledgeService::kb_tools_usable`] 同口径，委托实现避免两份
-/// 谓词各自漂移。
-fn usage_present(indexed_content: bool, remote_connections: bool) -> bool {
-    KnowledgeService::kb_tools_usable(indexed_content, remote_connections)
+    KnowledgeService::kb_tools_usable(service.has_indexed_content(), remote_has_connections())
 }
 
 /// deferred_no_usage 的纯函数核心（便于单测）：只有「已安装、未就绪、最近一次
@@ -651,12 +650,12 @@ mod tests {
     #[test]
     fn first_frame_load_requires_local_content_or_remote_connections() {
         // 两者皆无 → 跳过加载（磁盘目录即使完整也不白占 ~570MB）。
-        assert!(!usage_present(false, false));
+        assert!(!KnowledgeService::kb_tools_usable(false, false));
         // 本地有已入库内容（含曾建库后仍有文档的用户）→ 加载。
-        assert!(usage_present(true, false));
+        assert!(KnowledgeService::kb_tools_usable(true, false));
         // 远程连接存在（远程检索要本地嵌入查询向量）→ 加载。
-        assert!(usage_present(false, true));
-        assert!(usage_present(true, true));
+        assert!(KnowledgeService::kb_tools_usable(false, true));
+        assert!(KnowledgeService::kb_tools_usable(true, true));
     }
 
     #[test]

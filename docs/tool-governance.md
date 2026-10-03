@@ -46,7 +46,27 @@ Pinvou disallowed_tools（模式、连接器、技能空态等动态拒绝）
 | 视觉与知识 | `image_analyze`、`kb_search`、`kb_open_source` | 知识工具还受索引/语义引擎就绪状态约束 |
 | MCP | `mcp_*`、`list_mcp_resources`、`list_mcp_resource_templates`、`read_mcp_resource` | `mcp_*` 是前缀规则；具体连接器停用集走 `disallowed_tools` |
 
-规则匹配大小写不敏感，尾部 `*` 表示前缀。新增白名单项必须同步更新 `tool_policy.rs` 的正反向测试和 fork guard。
+匹配规则（生产路径走 `tool_policy.rs` 的 `allowed_tool_names()`；`is_pinvou3_allowed` 是测试契约谓词，不参与生产判定）与 CodeWhale `allowed_tools` 语义一致：名称大小写不敏感，规则尾部 `*` 表示前缀匹配。由此：
+
+- `mcp_*` 放行全部标准 `mcp_` 命名空间的动态 MCP 工具；具体工具名由已启用连接器发现，连接器开关仍通过 `disallowed_tools` 施加更窄的拒绝。
+- 持久终端五个工具使用精确名而非 `terminal/*`：避免未来新增的执行原语仅凭共享前缀就自动穿透产品白名单（`tool_policy.rs:13-15` 注释；反向测试断言 `terminal/future-capability` 被拒，lib.rs）。
+- 大小写不敏感使隐藏回放名 `Bash` 能命中 `bash` 规则、在历史回放中继续可执行（新会话目录只教 canonical `bash`）；`File` 没有任何可命中的规则、不可执行（lib.rs `tool_allowlist_contract` 的对应断言）。
+
+`PINVOU3_ALWAYS_LOADED_TOOLS = ["request_user_input", "image_analyze"]`（`tool_policy.rs:52`）要求这两个工具首轮直接可见，不能依赖模型先调用 `tool_search`。
+
+新增白名单项必须同步更新白名单正反向测试（lib.rs `tool_allowlist_contract`、`multiagent_regression_tests.rs`）和 fork guard。
+
+## 3. canonical 工具面与隐藏兼容名
+
+v0.9.12 的模型侧名称以 model-visible canonical 名称为准（§2 白名单与之逐字一致）：
+
+| 模型侧名称 | 形态 | 说明 |
+|---|---|---|
+| `bash`、`read`、`write`、`edit` | 独立小契约工具 | 文件与前台 shell 从 v0.9.x action family 迁出；`write` 单次内容硬上限 64 KiB（`CodeWhale/crates/tui/src/tools/file_tool.rs` 工具描述与 `file/tests.rs` 边界测试） |
+| `list_dir`、`file_search`、`grep_files` | 独立小契约工具 | 重新作为独立 canonical 工具发布（`canonical_action.rs:209` "published standalone tools again"），不再是 `File` 家族的子动作 |
+| `Git`、`Web` | action family | 子动作经 `action` 参数分派，别名表见 `CANONICAL_ACTION_ALIASES`（`canonical_action.rs:19`） |
+| `terminal/run` 等 | 持久终端工具 | 精确名五件套，见 §2 |
+| `todo_write` | 进度工具 | 唯一模型可见的 canonical 进度名 |
 
 ## 3. canonical 工具族与旧名称
 

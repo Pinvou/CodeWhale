@@ -128,7 +128,7 @@ impl SessionStore {
         let mut matches = state
             .records
             .get(local_session_id)
-            .expect("checked")
+            .ok_or_else(|| anyhow::anyhow!("unknown RemoteProxy"))?
             .pending
             .iter()
             .filter(|pending| pending.task_id == task_id);
@@ -184,7 +184,7 @@ impl SessionStore {
         let mut record = state
             .records
             .get(local_session_id)
-            .expect("checked")
+            .ok_or_else(|| anyhow::anyhow!("unknown RemoteProxy"))?
             .clone();
         if let Some(previous) = record.projection.entries.iter().find(|old| {
             (old.journal_epoch == entry.journal_epoch && old.sequence == entry.sequence)
@@ -248,7 +248,7 @@ impl SessionStore {
         let mut record = state
             .records
             .get(local_session_id)
-            .expect("checked")
+            .ok_or_else(|| anyhow::anyhow!("unknown RemoteProxy"))?
             .clone();
         if record
             .retired_epochs
@@ -324,7 +324,7 @@ impl SessionStore {
         let mut record = state
             .records
             .get(local_session_id)
-            .expect("checked")
+            .ok_or_else(|| anyhow::anyhow!("unknown RemoteProxy"))?
             .clone();
         if let Some(previous) = record.projection.entries.iter().find(|old| {
             (old.journal_epoch == entry.journal_epoch && old.sequence == entry.sequence)
