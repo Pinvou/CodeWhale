@@ -497,7 +497,11 @@ function enforceLazyChunks() {
 //            #463 stay at 503,063 B and 501,866 B).
 // 514_000 keeps ~2.3 kB web headroom over the largest measured entry; the
 // next entry feature again needs a deliberate bump with fresh measurements.
-export const MAIN_ENTRY_BUDGET_BYTES = 514_000;
+// 2026-10-02 514_000 → 516_000 (#455 merged #1378 aux side chat via main,
+// measured): web 505,451 B → 514,164 B (+8,713 B, same feature riding the
+// main merge); desktop 503,063 B → 511,810 B. 516_000 keeps ~1.8 kB web
+// headroom; the next entry feature again needs a deliberate bump.
+export const MAIN_ENTRY_BUDGET_BYTES = 516_000;
 
 export function assertMainEntryBudget(bundle, budgetBytes = MAIN_ENTRY_BUDGET_BYTES) {
   const mainEntry = Object.values(bundle).find(output => (
