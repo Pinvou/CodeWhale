@@ -1791,7 +1791,7 @@
     if (buf) buf.artifacts = arts;
     else state.artifacts = arts;
     try {
-      try { await invoke("save_session_artifacts", { id: sid, paths: arts.map(function (a) { return a.path; }) }); } catch (_) {}
+      try { await invoke("save_session_artifacts", { id: sid, paths: rebaseArtifactPathsForRebind(sid, arts.map(function (a) { return a.path; })) }); } catch (_) {}
       if (isDefaultChatTitle(meta.title) || personaPlaceholderTitles[sid]) {
         var firstUser = msgs.find(function (m) { return m.role === "user"; });
         // 自动标题复用展示层过滤：内部信封/子智能体交接不参与命名，避免 XML 痕迹进
@@ -4709,10 +4709,164 @@
     return parts[parts.length - 1] || p;
   }
   function isAbsPath(p) {
-    return typeof p === "string" && (p.charAt(0) === "/" || /^[A-Za-z]:[\\/]/.test(p));
+    // UNC network-share paths (\\server\\share\...) are absolute too —
+    // validate_codex_project_workspace stores them after platform_compat_path,
+    // and without this arm the rebase transform returned them unmapped
+    // (review #463 round-20 minor 6; Windows network-share workspaces only).
+    return (
+      typeof p === "string"
+        && (p.charAt(0) === "/" || /^[A-Za-z]:[\\/]/.test(p) || /^\\\\[^\\]/.test(p))
+    );
   }
   function normalizedPath(p) {
     return String(p || "").replace(/\\/g, "/");
+  }
+  // Stamps the workspace_rebound mark the rebind command emits for the
+  // sessions whose persisted artifact paths its lanes rebased (rebound,
+  // failed AND post-busy ids — review #463 round-10 Major 2 + round-B
+  // Major 1). The mark carries the rebind geometry as an ordered SEGMENT
+  // CHAIN: the artifact reconcile's stale-absolute rebase arm is gated on it
+  // (view healing, freshness window), and the wholesale artifact saves
+  // rebase along the chain while the mark exists — a chat turn's buffer
+  // save must not durably revert the backend rebase. Chained rebinds
+  // APPEND a segment (A→B then B→C): the transform resolves in order, so
+  // an A-era path maps A→B→C while a buffer re-vintaged from the durable
+  // JSON between the two rebinds (B-era) still maps B→C — a composed
+  // single segment {A→C} would strand the B-era vintage (review #463
+  // round-D Major 1). Marks are memory-only and never pruned: the save
+  // transform is prefix-exact and must outlive the reconcile window for
+  // the whole process lifetime (a restart starts from the already-rebased
+  // JSON with no marks). Consumed by rebaseArtifactPathsForRebind /
+  // sessionRecentlyRebound below.
+  function applyWorkspaceReboundMark(payload) {
+    if (!payload || payload.action !== "workspace_rebound" || !payload.id || !payload.from || !payload.to) {
+      return;
+    }
+    state.reboundSessionIds = state.reboundSessionIds || {};
+    const existing = state.reboundSessionIds[payload.id];
+    const last = existing && existing.chain && existing.chain[existing.chain.length - 1];
+    if (existing && last && last.from === payload.from && last.to === payload.to) {
+      // Identical retry of the last segment: refresh the view-heal window
+      // only (an older vintage may still be buffered; the chain must
+      // survive).
+      existing.at = Date.now();
+    } else if (existing) {
+      // Chained (last.to === payload.from) or non-contiguous: append. A
+      // non-matching segment is inert for the ordered prefix transform, and
+      // appending keeps every older vintage resolvable (review #463 round-E
+      // minor — the previous replace branch dropped them).
+      existing.chain.push({ from: payload.from, to: payload.to });
+      existing.at = Date.now();
+    } else {
+      state.reboundSessionIds[payload.id] = {
+        at: Date.now(),
+        chain: [{ from: payload.from, to: payload.to }],
+      };
+    }
+  }
+  // Freshness window for the workspace_rebound mark's VIEW heal (the
+  // basename-based reconcile arm): generous enough to cover the rebind
+  // dialog's retry flow, short enough that an old mark cannot misfire the
+  // arm on an unrelated later basename collision. Deliberately does NOT
+  // delete the mark on expiry (review #463 round-C Major 2): the save-path
+  // transform (rebaseArtifactPathsForRebind) is prefix-exact and shares the
+  // mark, and its "whole process lifetime" contract requires the mark to
+  // survive while the session's buffer may still hold stale paths — pruning
+  // here re-armed the durable revert the transform exists to prevent.
+  var REBIND_RECONCILE_WINDOW_MS = 10 * 60 * 1000;
+  function sessionRecentlyRebound(sid) {
+    var marks = state.reboundSessionIds;
+    if (!marks || !sid) return false;
+    var mark = marks[sid];
+    if (!mark || !mark.at) return false;
+    return Date.now() - mark.at <= REBIND_RECONCILE_WINDOW_MS;
+  }
+  // Rebases absolute artifact paths along the session's rebind SEGMENT CHAIN
+  // while a workspace_rebound mark exists (review #463 round-B Major 1 + the
+  // round-D vintage fix): a post-rebind wholesale save of a chat turn's
+  // buffer would otherwise durably revert the backend lane's rebase of
+  // SavedSession.artifacts[].storage_path. Segments apply in order — an
+  // A-era path resolves A→B→C, a buffer re-vintaged from the durable JSON
+  // between chained rebinds (B-era) resolves B→C, a C-era path matches
+  // nothing. Prefix-exact on the folded normalized form; the suffix keeps
+  // the original casing. Relative paths already resolve against the CURRENT
+  // workspace and are untouched; marks are memory-only, so a restart starts
+  // from the already-rebased JSON with no marks and this is a no-op. Strips
+  // trailing separators without a regex (the ESLint deny gate flags the
+  // previous /\/+$/ form as super-linear).
+  function trimTrailingSlashes(p) {
+    var s = normalizedPath(p);
+    while (s.endsWith("/")) s = s.slice(0, -1);
+    return s;
+  }
+  // Locates the folded prefix match in the ORIGINAL string and returns the
+  // code-unit length to cut there, or -1 when no prefix of `original` folds
+  // to `foldedKey`. The fold is for the comparison only — the cut must NOT
+  // use the folded prefix's length: expanding case mappings (U+0130 "İ"
+  // lowercases to "i" + U+0307, two code units for one) make the folded form
+  // longer than the original prefix, and slicing the original at the folded
+  // length eats a character of the saved suffix (review #463 round-13:
+  // "/data/İstanbul/a.txt" used to save as "<to>a.txt"). Lowercasing never
+  // shrinks a string, so the scan can stop once the folded prefix outgrows
+  // the key.
+  function foldedPrefixCutLength(original, foldedKey) {
+    for (var cut = 0; cut <= original.length; cut++) {
+      var folded = original.slice(0, cut).toLowerCase();
+      if (folded === foldedKey) return cut;
+      if (folded.length >= foldedKey.length) return -1;
+    }
+    return -1;
+  }
+  function rebaseArtifactPathsForRebind(sid, paths) {
+    var marks = state.reboundSessionIds;
+    var mark = marks && sid ? marks[sid] : null;
+    if (!mark || !Array.isArray(mark.chain) || !mark.chain.length || !Array.isArray(paths)) {
+      return paths;
+    }
+    var segments = mark.chain
+      .map(function (segment) {
+        return {
+          // The case fold is unconditional (review #463 round-13): the
+          // bridges have no filesystem-case-sensitivity capability to gate
+          // it on — adding one would span the Rust capability surface, both
+          // lanes' platform wiring and this factory's deps, which is not a
+          // small change. On a case-sensitive filesystem two roots differing
+          // only in case are indistinguishable HERE while the POSIX backend
+          // identity key stays case-sensitive — the fold is this transform's
+          // own trade-off (the backend folds unconditionally only on
+          // Windows); reworded per round-24 minor 15, capability-gating
+          // stays the recorded later option.
+          fromKey: trimTrailingSlashes(segment.from).toLowerCase(),
+          toKey: trimTrailingSlashes(segment.to),
+        };
+      })
+      .filter(function (segment) { return segment.fromKey; });
+    if (!segments.length) return paths;
+    return paths.map(function (p) {
+      if (typeof p !== "string" || !isAbsPath(p)) return p;
+      var norm = normalizedPath(p);
+      var mapped = false;
+      for (var i = 0; i < segments.length; i++) {
+        var cut = foldedPrefixCutLength(norm, segments[i].fromKey);
+        if (cut >= 0 && (cut === norm.length || norm.charAt(cut) === "/")) {
+          norm = segments[i].toKey + norm.slice(cut);
+          mapped = true;
+        }
+      }
+      return mapped ? norm : p;
+    });
+  }
+  // Whether the path still points at a PRE-rebind location on this
+  // session's rebind chain (review #463 round-24 minor 3): the reconcile's
+  // stale-absolute heal arm is gated on it, so an unrelated live absolute
+  // entry whose basename collides cannot be taken over and the wrong path
+  // persisted.
+  function pathIsRebindStale(sid, path) {
+    var marks = state.reboundSessionIds;
+    var mark = marks && sid ? marks[sid] : null;
+    if (!mark || !Array.isArray(mark.chain) || !mark.chain.length) return false;
+    var mapped = rebaseArtifactPathsForRebind(sid, [path]);
+    return Array.isArray(mapped) && normalizedPath(mapped[0]) !== normalizedPath(path);
   }
   function noteArtifactChange(path, event, sessionId) {
     if (!path) return;
@@ -4895,11 +5049,19 @@
           if (!isDeliverable(p)) return;
           var na = { path: p, basename: bn }; state.artifacts.push(na); byName[bn] = na; added = true;
         }
-        else if (isAbsPath(p) && !isAbsPath(ex.path)) { ex.path = p; added = true; } // 相对→绝对,open 可靠
+        // Relative→absolute opens reliably; an absolute stale entry may
+        // take over the same-basename live workspace file ONLY inside the
+        // sessionRecentlyRebound window AND only when the stored entry is
+        // real stale rebind geometry (pathIsRebindStale — round-24 minor 3,
+        // the tauri artifact-tracker's identical heal arm: the mark alone
+        // let an unrelated live absolute entry whose basename collides be
+        // taken over and the wrong path persisted; review #463 round-20
+        // minor 9 records the never-called-condition history).
+        else if (isAbsPath(p) && (!isAbsPath(ex.path) || (normalizedPath(ex.path) !== normalizedPath(p) && sessionRecentlyRebound(sid) && pathIsRebindStale(sid, ex.path)))) { ex.path = p; added = true; }
       });
       if (added) {
         notify();
-        try { await invoke("save_session_artifacts", { id: sid, paths: state.artifacts.map(function (a) { return a.path; }) }); } catch (_) {}
+        try { await invoke("save_session_artifacts", { id: sid, paths: rebaseArtifactPathsForRebind(sid, state.artifacts.map(function (a) { return a.path; })) }); } catch (_) {}
       }
     } catch (e) { /* workspace 不存在(新 session)等,忽略 */ }
   }
@@ -6101,10 +6263,49 @@
   listen("session:deleted", function (e) {
     applyDeletedSession(e && e.payload && e.payload.id);
   });
-  listen("session:list_changed", function () {
-    refreshHistoryList().catch(function (error) {
-      console.error("[sessions] session:list_changed refresh failed", error);
-    });
+  // Burst coalescing (review #463 round-20 R3): the rebind command emits one
+  // session:list_changed per affected id, and each undebounced refresh costs
+  // an IPC round trip + an O(n) backend list_sessions + a React commit — a
+  // large rebind burst translated into hundreds of full history refreshes
+  // exactly while the report dialog opens. Leading + trailing: the first
+  // event refreshes immediately (single-event semantics unchanged), events
+  // inside the window set a pending flag collapsed into ONE trailing
+  // refresh. Harnesses without timers fall back to the immediate refresh.
+  var historyRefreshTimer = null;
+  var historyRefreshPending = false;
+  function scheduleHistoryRefresh() {
+    function runRefresh() {
+      refreshHistoryList().catch(function (error) {
+        console.error("[sessions] session:list_changed refresh failed", error);
+      });
+    }
+    if (typeof setTimeout !== "function") {
+      runRefresh();
+      return;
+    }
+    if (historyRefreshTimer) {
+      historyRefreshPending = true;
+      return;
+    }
+    runRefresh();
+    historyRefreshTimer = setTimeout(function () {
+      historyRefreshTimer = null;
+      if (historyRefreshPending) {
+        historyRefreshPending = false;
+        scheduleHistoryRefresh();
+      }
+    }, 200);
+  }
+  listen("session:list_changed", function (e) {
+    var payload = e && e.payload || {};
+    // The rebind command's mark (review #463 round-B Major 1 + round-C
+    // Major 1): consumed by rebaseArtifactPathsForRebind so the wholesale
+    // artifact saves of THIS host cannot durably revert the backend lane's
+    // rebase while a resident web-client buffer holds stale paths. Segment
+    // chain with append-on-chain / refresh-on-identical-retry semantics,
+    // memory-only and never pruned.
+    applyWorkspaceReboundMark(payload);
+    scheduleHistoryRefresh();
   });
   listen("session:model_changed", function (e) {
     var payload = e && e.payload || {};

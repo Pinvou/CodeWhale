@@ -1365,6 +1365,46 @@
     return true;
   }
 
+  // Stamps the workspace_rebound mark the rebind command emits for the
+  // sessions whose persisted artifact paths its lanes rebased (rebound,
+  // failed AND post-busy ids — review #463 round-10 Major 2 + round-B
+  // Major 1). The mark carries the rebind geometry as an ordered SEGMENT
+  // CHAIN consumed by bridge/artifact-tracker.js (rebaseArtifactPathsForRebind
+  // / sessionRecentlyRebound): the reconcile's stale-absolute heal arm and
+  // the wholesale artifact saves are gated on it, so a chat turn's buffer
+  // save cannot durably revert the backend rebase. Chained rebinds APPEND a
+  // segment (A→B then B→C); an identical retry of the last segment only
+  // refreshes the view-heal window. Marks are memory-only and never pruned —
+  // the save transform is prefix-exact and must outlive the reconcile window
+  // for the whole process lifetime (a restart starts from the already-rebased
+  // JSON with no marks).
+  function applyWorkspaceReboundMark(payload) {
+    if (!payload || payload.action !== "workspace_rebound" || !payload.id || !payload.from || !payload.to) {
+      return;
+    }
+    state.reboundSessionIds = state.reboundSessionIds || {};
+    var existing = state.reboundSessionIds[payload.id];
+    var last = existing && existing.chain && existing.chain[existing.chain.length - 1];
+    if (existing && last && last.from === payload.from && last.to === payload.to) {
+      // Identical retry of the last segment: refresh the view-heal window
+      // only (an older vintage may still be buffered; the chain must
+      // survive).
+      existing.at = Date.now();
+    } else if (existing) {
+      // Chained (last.to === payload.from) or non-contiguous: append. A
+      // non-matching segment is inert for the ordered prefix transform, and
+      // appending keeps every older vintage resolvable (review #463 round-E
+      // minor — the previous replace branch dropped them).
+      existing.chain.push({ from: payload.from, to: payload.to });
+      existing.at = Date.now();
+    } else {
+      state.reboundSessionIds[payload.id] = {
+        at: Date.now(),
+        chain: [{ from: payload.from, to: payload.to }],
+      };
+    }
+  }
+
   if (typeof listen === "function") {
     listen("session:deleted", function (event) {
       var payload = event && event.payload || {};
@@ -1372,10 +1412,51 @@
     }).catch(function (error) {
       console.error("[sessions] session:deleted listener failed", error);
     });
-    listen("session:list_changed", function () {
-      refreshHistoryList().catch(function (error) {
-        console.error("[sessions] session:list_changed refresh failed", error);
-      });
+    // Burst coalescing (review #463 round-20 R3): the rebind command emits one
+    // session:list_changed per affected id, and each undebounced refresh costs
+    // an IPC round trip + an O(n) backend list_sessions + a React commit — a
+    // large rebind burst translated into hundreds of full history refreshes
+    // exactly while the report dialog opens. Leading + trailing: the first
+    // event refreshes immediately (single-event semantics unchanged), events
+    // inside the window set a pending flag collapsed into ONE trailing
+    // refresh. Harnesses without timers fall back to the immediate refresh.
+    let historyRefreshTimer = null;
+    let historyRefreshPending = false;
+    function scheduleHistoryRefresh() {
+      function runRefresh() {
+        refreshHistoryList().catch(function (error) {
+          console.error("[sessions] session:list_changed refresh failed", error);
+        });
+      }
+      if (typeof setTimeout !== "function") {
+        runRefresh();
+        return;
+      }
+      if (historyRefreshTimer) {
+        historyRefreshPending = true;
+        return;
+      }
+      runRefresh();
+      historyRefreshTimer = setTimeout(function () {
+        historyRefreshTimer = null;
+        if (historyRefreshPending) {
+          historyRefreshPending = false;
+          scheduleHistoryRefresh();
+        }
+      }, 200);
+    }
+    listen("session:list_changed", function (event) {
+      const payload = event && event.payload || {};
+      // The rebind command stamps the sessions whose persisted artifact paths
+      // its lanes rebased (rebound, failed AND post-busy ids — review #463
+      // round-10 Major 2 + round-B Major 1). The mark carries the rebind
+      // geometry as an ordered segment chain consumed by
+      // bridge/artifact-tracker.js (rebaseArtifactPathsForRebind /
+      // sessionRecentlyRebound); the stamp/append/refresh semantics live in
+      // the shared applyWorkspaceReboundMark (round-13 — previously
+      // byte-duplicated with the web lane).
+      applyWorkspaceReboundMark(payload);
+      scheduleHistoryRefresh();
     }).catch(function (error) {
       console.error("[sessions] session:list_changed listener failed", error);
     });
@@ -1629,6 +1710,7 @@
       recentScheduledRunForSession: recentScheduledRunForSession,
       leaveSessionView: leaveSessionView,
       applyDeletedSession: applyDeletedSession,
+      applyWorkspaceReboundMark: applyWorkspaceReboundMark,
       onSessionDeleted: onSessionDeleted,
       deleteSession: deleteSession,
       renameSession: renameSession,
