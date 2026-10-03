@@ -436,7 +436,7 @@ impl ControlledDeviceManager {
             registration_request_id: inner
                 .registration_request_id
                 .clone()
-                .expect("generation reserves a registration ID"),
+                .ok_or_else(|| ControlledStateError::new("registration_request_unavailable"))?,
             sealed_code_b64: registration.sealed_code_b64,
             pairing_code: Zeroizing::new(registration.pairing_code),
             expires_at_ms: registration.expires_at_ms,
@@ -1673,6 +1673,31 @@ mod tests {
             .accept_liveness_attestation(&proof.to_string(), &trust, 4_000, 5_000)
             .unwrap();
         assert!(manager.status().watchdog_deadline_b.is_some());
+    }
+
+    #[test]
+    fn missing_registration_id_fails_without_installing_pairing_or_advancing_state() {
+        let manager = ControlledDeviceManager::default();
+        let operation = manager.start(Some("B"), Vec::new()).unwrap();
+        manager.inner.lock().registration_request_id = None;
+        let before = manager.status();
+        let observed_before = manager.inner.lock().last_observed_now_b;
+        let error = manager
+            .complete_registration(
+                operation,
+                ControlledRegistration {
+                    pairing_code: "2345678".into(),
+                    sealed_code_b64: "sealed".into(),
+                    expires_at_ms: 30_000,
+                },
+                1_000,
+            )
+            .unwrap_err();
+        assert_eq!(error.code, "registration_request_unavailable");
+        assert_eq!(manager.status(), before);
+        let inner = manager.inner.lock();
+        assert!(inner.pairing.is_none());
+        assert_eq!(inner.last_observed_now_b, observed_before);
     }
 
     #[test]

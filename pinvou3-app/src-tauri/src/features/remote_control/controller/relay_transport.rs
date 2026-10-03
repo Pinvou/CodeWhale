@@ -1508,6 +1508,32 @@ mod tests {
         assert!(!wait_reconnect(&token, &mut backoff).await);
     }
 
+    struct ControllerSubprotocolCallback;
+
+    // The upstream Callback trait owns the handshake ErrorResponse ABI.
+    // Implement that fixed interface directly; the test only accepts the
+    // controller subprotocol and retains the assertion on the real request.
+    impl tokio_tungstenite::tungstenite::handshake::server::Callback for ControllerSubprotocolCallback {
+        fn on_request(
+            self,
+            request: &tokio_tungstenite::tungstenite::handshake::server::Request,
+            mut response: tokio_tungstenite::tungstenite::handshake::server::Response,
+        ) -> std::result::Result<
+            tokio_tungstenite::tungstenite::handshake::server::Response,
+            tokio_tungstenite::tungstenite::handshake::server::ErrorResponse,
+        > {
+            assert_eq!(
+                request.headers().get(SEC_WEBSOCKET_PROTOCOL).unwrap(),
+                super::super::protocol::CONTROLLER_SUBPROTOCOL
+            );
+            response.headers_mut().insert(
+                SEC_WEBSOCKET_PROTOCOL,
+                HeaderValue::from_static(super::super::protocol::CONTROLLER_SUBPROTOCOL),
+            );
+            Ok(response)
+        }
+    }
+
     #[tokio::test]
     async fn websocket_reconnects_and_delivers_new_generation_frames() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1516,14 +1542,9 @@ mod tests {
             let mut requests = Vec::new();
             for _ in 0..2 {
                 let (stream, _) = listener.accept().await.unwrap();
-                let mut socket = accept_hdr_async(stream, |request: &tokio_tungstenite::tungstenite::handshake::server::Request,
-                    mut response: tokio_tungstenite::tungstenite::handshake::server::Response| {
-                    assert_eq!(request.headers().get(SEC_WEBSOCKET_PROTOCOL).unwrap(),
-                        super::super::protocol::CONTROLLER_SUBPROTOCOL);
-                    response.headers_mut().insert(SEC_WEBSOCKET_PROTOCOL,
-                        HeaderValue::from_static(super::super::protocol::CONTROLLER_SUBPROTOCOL));
-                    Ok(response)
-                }).await.unwrap();
+                let mut socket = accept_hdr_async(stream, ControllerSubprotocolCallback)
+                    .await
+                    .unwrap();
                 let message = socket.next().await.unwrap().unwrap();
                 let Message::Text(text) = message else {
                     panic!("expected controller text frame");

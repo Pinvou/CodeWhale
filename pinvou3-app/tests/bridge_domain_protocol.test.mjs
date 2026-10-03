@@ -164,7 +164,11 @@ const expectedProtocolHashes = {
   // Recomputed for the combined session archive and #445 workspace binding
   // surfaces while retaining Official's materialization behavior.
   sessions: '24c9d103bfa90094b02200441222d387d86131836d0c7029d96c5ec28d071ddc',
-  settings: 'd202460012a68b3a0c9cd929e47b2438061bb4b7e5c74c3a4af833c887084117',
+  // Recomputed for the builtin feature toggle hook: settings.js gains the
+  // list_builtin_features / set_builtin_feature_enabled invoke wrappers (the
+  // session-mention feature gate reads the list; the setter is the contract
+  // hook for the builtin plugin page).
+  settings: 'b8a388fdf028c539a3e8cc86030dcf7ca0c575a223d142821875db5969c3e3d0',
   updater: 'd603bbac5c51f3b53bf19272fbafd9c430786fd5e35a9b8da9aa67f4c2334e5f',
   // Official's bridge/voice.js is untouched by this backflow, so the hash
   // stays at the Official base value (the community value differs only via

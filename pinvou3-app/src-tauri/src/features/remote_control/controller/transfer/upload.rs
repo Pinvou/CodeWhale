@@ -294,6 +294,7 @@ impl AttachmentUploads {
         {
             return Err("transfer_attachment_ids_invalid".to_owned());
         }
+        let mut descriptors = Vec::with_capacity(handle_ids.len());
         for handle_id in handle_ids {
             let receipt = state
                 .completed
@@ -302,12 +303,14 @@ impl AttachmentUploads {
             if receipt.consumed || !binding_matches(&receipt.binding, live, session_id, task_id) {
                 return Err("transfer_binding_stale".to_owned());
             }
-        }
-        let mut descriptors = Vec::with_capacity(handle_ids.len());
-        for handle_id in handle_ids {
-            let receipt = state.completed.get_mut(handle_id).expect("checked above");
-            receipt.consumed = true;
             descriptors.push(receipt.descriptor.clone());
+        }
+        // All receipts and output descriptors are validated before mutation.
+        // Iterate the owned entries under the same lock without a second lookup.
+        for (handle_id, receipt) in &mut state.completed {
+            if handle_ids.contains(handle_id) {
+                receipt.consumed = true;
+            }
         }
         Ok(descriptors)
     }
@@ -984,7 +987,7 @@ mod tests {
             .unwrap();
         uploads
             .consume_completed(
-                &[second.handle_id.clone()],
+                std::slice::from_ref(&second.handle_id),
                 &lease(),
                 "session-0001",
                 "task-0001",

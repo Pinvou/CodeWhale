@@ -1,12 +1,4 @@
-const DEFAULT_BUILTIN_SKILLS = [
-  {
-    id: 'visual-design',
-    title: '视觉设计',
-    description: '设计系统直出网页/banner/海报/简历...',
-    // 设计期差量（后端 MODE_TABLE）：该技能在这些模式不提供，开关只读。
-    unavailableIn: ['code'],
-  },
-];
+import { isBuiltinPlugin, DEFAULT_BUILTIN_SKILLS } from '../tools/builtin-plugin-logic.js';
 
 function asArray(value) {
   if (Array.isArray(value)) return value;
@@ -43,7 +35,13 @@ function buildComposerToolMenuState({
     }));
 
   const toolRows = installedTools
-    .filter(tool => tool && !hidden.has(tool.id))
+    // docs/builtin-toolset-contract.md §3.2 configuration visibility: builtin
+    // plugins (e.g. session-reader) are hidden from the composer tool list via
+    // the shared isBuiltinPlugin judgement; execution visibility (ToolCard
+    // rendering in the chat timeline) is unaffected. Missing fields (old
+    // backend / regular plugins) pass through; the caller refreshToolsMenu
+    // forwards the raw list_marketplace_tools result.
+    .filter(tool => tool && !hidden.has(tool.id) && !isBuiltinPlugin(tool))
     .map(tool => ({
       id: tool.id,
       kind: 'tool',
@@ -135,4 +133,7 @@ function createToggleWriteGate() {
 // from the package-id space so an identically named package cannot collide with it.
 const TOGGLE_WRITE_KEY_PROJECT_SKILLS = '__project_skills__';
 
-export { DEFAULT_BUILTIN_SKILLS, buildComposerToolMenuState, createToggleWriteGate, TOGGLE_WRITE_KEY_PROJECT_SKILLS };
+/** Builtin skills whose availability is session-mode-controlled (backend
+ * MODE_TABLE delta): the builtin page's audit badge must agree with the
+ * store card for these instead of claiming "always on". */
+export { buildComposerToolMenuState, createToggleWriteGate, TOGGLE_WRITE_KEY_PROJECT_SKILLS };
