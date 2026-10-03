@@ -5198,6 +5198,8 @@ model = "gpt-5.5"
             saved_provider_model: None,
             base_url_override: None,
             limit_overrides: Vec::new(),
+
+            wire_override: None,
         })
         .expect("documented Zen model must resolve");
     assert_eq!(route.protocol(), crate::route::RequestProtocol::Responses);
@@ -8770,6 +8772,52 @@ fn resolved_runtime_options_mints_a_route_candidate() {
         .expect("RouteResolver is the runtime path");
     assert_eq!(route.provider_kind(), resolved.provider);
     assert_eq!(route.endpoint().base_url, resolved.base_url);
+}
+
+/// The runtime receipt for a custom table resolves that table's own `wire`
+/// dialect, so `codewhale model resolve` receipts and readiness surfaces read
+/// the same protocol the per-turn client binds. Deleting the receipt's
+/// `wire_override` must fail this pin.
+#[test]
+fn resolved_runtime_options_threads_the_custom_tables_wire() {
+    let resolved = |wire: &str| -> crate::route::ReadyRouteCandidate {
+        let config: ConfigToml = toml::from_str(&format!(
+            r#"
+provider = "custom"
+
+[providers.custom]
+wire = "{wire}"
+base_url = "https://relay.example/v1"
+api_key = "receipt-wire-test-key"
+model = "gpt-6-sol"
+"#
+        ))
+        .expect("custom table config parses");
+        config
+            .resolve_runtime_options(&CliRuntimeOverrides::default())
+            .route
+            .expect("RouteResolver is the runtime path")
+    };
+
+    let responses = resolved("responses");
+    assert_eq!(responses.protocol(), crate::provider::WireFormat::Responses);
+    assert_eq!(responses.endpoint().endpoint_key, "responses");
+    assert_eq!(responses.endpoint().base_url, "https://relay.example/v1");
+
+    let anthropic = resolved("anthropic");
+    assert_eq!(
+        anthropic.protocol(),
+        crate::provider::WireFormat::AnthropicMessages
+    );
+    assert_eq!(anthropic.endpoint().endpoint_key, "messages");
+
+    // Explicit chat (and unset) stay on the static Chat policy.
+    let chat = resolved("chat");
+    assert_eq!(
+        chat.protocol(),
+        crate::provider::WireFormat::ChatCompletions
+    );
+    assert_eq!(chat.endpoint().endpoint_key, "chat");
 }
 
 /// #5441: the runtime receipt carries the same source the surfaces print.

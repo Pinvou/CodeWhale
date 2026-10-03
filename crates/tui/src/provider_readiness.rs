@@ -397,6 +397,22 @@ pub(crate) fn route_is_valid_for_model(
                 .map(str::to_string)
         },
         limit_overrides: Vec::new(),
+
+        // Validate the same wire the per-turn route would mint: read the
+        // dialect of the same table `provider_config_for` resolves above (the
+        // ambient selection, which also supplies the base URL in every arm),
+        // so preflight cannot disagree with the client this readiness
+        // describes. Identity-pinned tables are validated by the route
+        // layer's identity-scoped resolution instead. Outcome-identical
+        // today (Custom validation is protocol-independent), pinned against
+        // future drift.
+        wire_override: (kind == codewhale_config::ProviderKind::Custom)
+            .then(|| {
+                configured.and_then(|entry| {
+                    codewhale_config::provider::wire_dialect_override(entry.wire.as_deref())
+                })
+            })
+            .flatten(),
     };
     RouteResolver::new()
         .resolve(&request)
@@ -743,6 +759,27 @@ mod tests {
             ),
             ResolvedProviderReadiness::SavedUnchecked
         );
+    }
+
+    /// A `wire = "responses"` custom table must keep validating through
+    /// `route_is_valid_for_model`: the wire threading must never turn into a
+    /// resolution failure. Outcome-identical with the override today
+    /// (validation is protocol-independent), pinned against future drift.
+    #[test]
+    fn custom_wire_tables_validate_through_the_route_resolver() {
+        let _lock = crate::test_support::lock_test_env();
+        let config = crate::test_support::custom_named_table_config(
+            "pinvou_responses",
+            Some("responses"),
+            "https://relay.example/v1",
+            "readiness-wire-test-key",
+            "gpt-6-sol",
+        );
+        assert!(route_is_valid_for_model(
+            &config,
+            ApiProvider::Custom,
+            Some("gpt-6-sol")
+        ));
     }
 
     #[test]

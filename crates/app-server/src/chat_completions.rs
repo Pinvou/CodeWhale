@@ -19,7 +19,7 @@ use codewhale_agent::ModelRegistry;
 use codewhale_config::{
     ConfigApiKeyValueKind, ConfigToml, ProviderKind, auth_mode_disables_api_key,
     classify_config_api_key_value, is_upstream_auth_header,
-    provider::WireFormat,
+    provider::{WireFormat, wire_dialect_override},
     provider_base_url_is_official, provider_preserves_custom_base_url_model,
     route::{LogicalModelRef, RouteError, RouteRequest, RouteResolver},
 };
@@ -118,6 +118,16 @@ fn resolve_endpoint(
         saved_provider_model: None,
         base_url_override: Some(base_url.clone()),
         limit_overrides: Vec::new(),
+        // The wire dialect rides the same literal `[providers.custom]` table
+        // that supplied the endpoint and key above (this ingress reads the
+        // legacy field, not the named-table map the tui route layer
+        // resolves), so a `wire = "responses"` table cannot be silently
+        // served as chat here: the resolver mints a Responses candidate and
+        // the handler's ChatCompletions-only guard rejects it (fail closed)
+        // instead of forwarding to `{base}/chat/completions`.
+        wire_override: (provider_kind == ProviderKind::Custom)
+            .then(|| wire_dialect_override(provider_cfg.wire.as_deref()))
+            .flatten(),
     })?;
     let model = route.wire_model_id().as_str().to_string();
 
@@ -1044,6 +1054,39 @@ api_key = {provider_api_key:?}
         ));
     }
 
+    /// A `wire = "responses"` custom table must reach this pass-through's
+    /// resolution: the endpoint then carries the Responses wire and the
+    /// handler's ChatCompletions-only guard rejects the request (fail closed)
+    /// instead of silently forwarding a chat body to `{base}/chat/completions`
+    /// — the same mis-route the runtime-route fix removed from per-turn
+    /// clients.
+    #[test]
+    fn custom_table_wire_override_reaches_the_app_route() {
+        let mut config = ConfigToml {
+            provider: ProviderKind::Custom,
+            ..ConfigToml::default()
+        };
+        config.providers.custom.base_url = Some("https://relay.example.test/v1".to_string());
+        config.providers.custom.model = Some("gpt-6-sol".to_string());
+        config.providers.custom.wire = Some("responses".to_string());
+
+        let endpoint = resolve_endpoint(&config, &ModelRegistry::default(), Some("gpt-6-sol"))
+            .expect("custom responses table resolves");
+        assert_eq!(endpoint.provider, ProviderKind::Custom);
+        assert_eq!(endpoint.model, "gpt-6-sol");
+        assert_eq!(
+            endpoint.wire_format,
+            WireFormat::Responses,
+            "the table's wire dialect rides the same provider_cfg as its endpoint"
+        );
+
+        // An ordinary chat table keeps the forwardable Chat wire.
+        config.providers.custom.wire = None;
+        let endpoint = resolve_endpoint(&config, &ModelRegistry::default(), Some("gpt-6-sol"))
+            .expect("custom chat table resolves");
+        assert_eq!(endpoint.wire_format, WireFormat::ChatCompletions);
+    }
+
     #[test]
     fn foreign_model_is_rejected_before_credentials_or_headers_can_cross() {
         let mut config = ConfigToml {
@@ -1482,25 +1525,119 @@ api_key = {provider_api_key:?}
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 
+    /// The headline fail-closed path for a `wire = "responses"` custom
+    /// table: the pass-through must reject with
+    /// `provider_wire_format_unsupported` instead of silently forwarding a
+    /// chat body to `{base}/chat/completions`. Posted through the real
+    /// router so the resolver→guard composite is pinned end to end.
     #[tokio::test]
-    async fn non_chat_completions_provider_rejected() {
-        // Use the test to verify WireFormat checks work for non-ChatCompletions providers.
-        // Anthropic's wire format is AnthropicMessages; OpenaiCodex is Responses.
-        let endpoint = ResolvedModelEndpoint {
-            provider: ProviderKind::Anthropic,
-            base_url: "https://api.anthropic.com".to_string(),
-            model: "claude-sonnet-4-20250514".to_string(),
-            api_key: Some("sk-ant-test".to_string()),
-            auth_disabled: false,
-            http_headers: BTreeMap::new(),
-            path_suffix: None,
-            insecure_skip_tls_verify: false,
-            wire_format: WireFormat::AnthropicMessages,
-        };
+    async fn custom_responses_wire_table_is_rejected_fail_closed() {
+        install_crypto_provider();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let config_path = tmp.path().join("config.toml");
+        // The base URL is never contacted: the guard fires before any
+        // upstream I/O.
+        fs::write(
+            &config_path,
+            r#"
+provider = "custom"
 
-        assert_ne!(endpoint.wire_format, WireFormat::ChatCompletions);
-        // The handler would reject this; we verify the wire format here.
-        assert_eq!(endpoint.wire_format, WireFormat::AnthropicMessages);
+[providers.custom]
+wire = "responses"
+base_url = "https://relay.example/v1"
+api_key = "custom-responses-key"
+model = "gpt-6-sol"
+"#,
+        )
+        .expect("write config");
+        let state = build_state(Some(config_path), None).expect("state");
+        let app = app_router(state, &[]);
+
+        let body = serde_json::json!({
+            "messages": [{"role": "user", "content": "hello"}]
+        });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/v1/chat/completions")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .expect("error body");
+        let payload: serde_json::Value = serde_json::from_slice(&bytes).expect("json error body");
+        assert_eq!(payload["error"]["code"], "provider_wire_format_unsupported");
+        assert_eq!(payload["error"]["type"], "unsupported_provider");
+        assert!(
+            payload["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("Responses")),
+            "the error names the offending dialect: {payload}"
+        );
+    }
+
+    /// Same fail-closed contract for the Anthropic dialect: a
+    /// `wire = "anthropic"` custom table resolves to a Messages-protocol
+    /// route and must be rejected by the Chat-Completions-only guard, not
+    /// forwarded a chat body.
+    #[tokio::test]
+    async fn custom_anthropic_wire_table_is_rejected_fail_closed() {
+        install_crypto_provider();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let config_path = tmp.path().join("config.toml");
+        // The base URL is never contacted: the guard fires before any
+        // upstream I/O.
+        fs::write(
+            &config_path,
+            r#"
+provider = "custom"
+
+[providers.custom]
+wire = "anthropic"
+base_url = "https://relay.example/v1"
+api_key = "custom-anthropic-key"
+model = "custom-claude"
+"#,
+        )
+        .expect("write config");
+        let state = build_state(Some(config_path), None).expect("state");
+        let app = app_router(state, &[]);
+
+        let body = serde_json::json!({
+            "messages": [{"role": "user", "content": "hello"}]
+        });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/v1/chat/completions")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .expect("error body");
+        let payload: serde_json::Value = serde_json::from_slice(&bytes).expect("json error body");
+        assert_eq!(payload["error"]["code"], "provider_wire_format_unsupported");
+        assert_eq!(payload["error"]["type"], "unsupported_provider");
+        assert!(
+            payload["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("AnthropicMessages")),
+            "the error names the offending dialect: {payload}"
+        );
     }
 
     #[test]

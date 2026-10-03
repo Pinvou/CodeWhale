@@ -159,9 +159,14 @@ pub struct ProviderConfigToml {
     pub context_window: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode: Option<String>,
-    /// Wire dialect preference for dual-protocol vendors (DeepSeek, MiniMax,
-    /// Model Studio): `openai` (Chat Completions, default) or `anthropic`
-    /// (Messages). Not a separate catalog provider — a power-user toggle.
+    /// Wire dialect override. Named custom-provider tables accept
+    /// `responses`, `anthropic` (or `messages`/`claude`), and `chat` or
+    /// `openai` (the Chat Completions default); dual-protocol built-in
+    /// vendors (DeepSeek, MiniMax, Model Studio) accept `openai` (default)
+    /// or `anthropic` (Messages). An unrecognized value falls back to the
+    /// default policy — custom tables log a warning as they degrade, while
+    /// a built-in vendor's dialect space is silently `openai`/`anthropic`.
+    /// Not a separate catalog provider — a power-user toggle.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -3385,6 +3390,12 @@ impl ConfigToml {
                 saved_provider_model: None,
                 base_url_override: Some(base_url.clone()),
                 limit_overrides: Vec::new(),
+                // provider_cfg above is the active custom table (named or
+                // legacy); its dialect is the same fact the tui route layer
+                // threads, so this receipt cannot disagree with the turn.
+                wire_override: (provider == ProviderKind::Custom)
+                    .then(|| provider::wire_dialect_override(provider_cfg.wire.as_deref()))
+                    .flatten(),
             })
             .ok();
 
@@ -4579,6 +4590,10 @@ fn moonshot_base_url_uses_kimi_code(base_url: &str) -> bool {
 }
 
 /// Dual-wire vendors: dialect is config (`wire`), not a separate ProviderKind.
+/// The `anthropic` alias tail is the canonical parse in
+/// [`provider::wire_dialect_prefers_anthropic`] — the built-in dialect space
+/// only ever branches openai/anthropic, so it shares that alias list rather
+/// than keeping a second one that can drift.
 fn wire_prefers_anthropic(kind: ProviderKind, wire: Option<&str>) -> bool {
     if matches!(
         kind,
@@ -4589,19 +4604,7 @@ fn wire_prefers_anthropic(kind: ProviderKind, wire: Option<&str>) -> bool {
     ) {
         return true;
     }
-    let Some(raw) = wire.map(str::trim).filter(|value| !value.is_empty()) else {
-        return false;
-    };
-    let normalized = raw.to_ascii_lowercase().replace(['_', ' '], "-");
-    matches!(
-        normalized.as_str(),
-        "anthropic"
-            | "anthropic-messages"
-            | "messages"
-            | "claude"
-            | "anthropic-compatible"
-            | "anthropic-compat"
-    )
+    provider::wire_dialect_prefers_anthropic(wire)
 }
 
 fn modelstudio_mode_is_coding_plan(kind: ProviderKind, mode: Option<&str>) -> bool {
