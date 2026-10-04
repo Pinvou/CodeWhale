@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/observability"
 	"github.com/google/uuid"
 )
 
@@ -172,7 +173,7 @@ func NewHTTPBillingClient(rawURL, serviceToken string) (*HTTPBillingClient, erro
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" || strings.TrimSpace(serviceToken) == "" {
 		return nil, errors.New("invalid Billing client configuration")
 	}
-	return &HTTPBillingClient{baseURL: parsed, serviceToken: serviceToken, client: &http.Client{Timeout: 10 * time.Second}}, nil
+	return &HTTPBillingClient{baseURL: parsed, serviceToken: serviceToken, client: observability.NewHTTPClient(10 * time.Second)}, nil
 }
 
 func (c *HTTPBillingClient) Price(ctx context.Context, model string) (PriceVersion, error) {

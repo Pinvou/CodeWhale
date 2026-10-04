@@ -1,0 +1,38 @@
+{{- if .Values.observability.prometheusRulesEnabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "pinvou.fullname" . }}
+  labels: {{ include "pinvou.labels" . | nindent 4 }}
+spec:
+  groups:
+    - name: account-platform.availability
+      rules:
+        - alert: PinvouAccountPlatformHighErrorRate
+          expr: sum by(service) (rate(pinvou_http_requests_total{status=~"5.."}[5m])) / clamp_min(sum by(service) (rate(pinvou_http_requests_total[5m])), 0.001) > 0.05
+          for: 10m
+          labels: { severity: p1 }
+          annotations: { summary: "Account Platform HTTP 5xx rate exceeds 5%" }
+        - alert: PinvouAccountPlatformSlowRequests
+          expr: histogram_quantile(0.95, sum by(service,le) (rate(pinvou_http_request_duration_seconds_bucket[5m]))) > 1
+          for: 10m
+          labels: { severity: p1 }
+          annotations: { summary: "Account Platform HTTP p95 exceeds one second" }
+    - name: account-platform.events
+      rules:
+        - alert: PinvouAccountPlatformEventRelayMissing
+          expr: (count(count by (source) (pinvou_outbox_pending_events{source=~"account|billing|token"})) or vector(0)) < 3
+          for: 5m
+          labels: { severity: p1 }
+          annotations: { summary: "One or more Account Platform event relays are not being scraped" }
+        - alert: PinvouAccountPlatformOutboxBacklog
+          expr: pinvou_outbox_oldest_pending_age_seconds > 300 or pinvou_outbox_pending_events > 1000
+          for: 5m
+          labels: { severity: p1 }
+          annotations: { summary: "Account Platform Outbox is not converging" }
+        - alert: PinvouAccountPlatformDeadLetter
+          expr: pinvou_outbox_dead_lettered_events > 0
+          for: 1m
+          labels: { severity: p1 }
+          annotations: { summary: "Account Platform has dead-lettered domain events" }
+{{- end }}

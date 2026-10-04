@@ -52,6 +52,8 @@ test('Billing and Token contracts match production JSON and HTTP validation resp
   assert.equal(fixtures.eligible.items.length, 1);
   assert.equal(eligible({ ...fixtures.eligible, membership_version: undefined }), false);
   const error = ajv.compile(common.components.schemas.Error);
+  assert.equal(fixtures.rate_limited.code, 'RATE_LIMITED');
+  assert.ok(error(fixtures.rate_limited), JSON.stringify(error.errors));
   for (const [code, response] of Object.entries(fixtures.token_errors)) {
     assert.equal(response.code, code);
     assert.ok(error(response), `${code}: ${JSON.stringify(error.errors)}`);

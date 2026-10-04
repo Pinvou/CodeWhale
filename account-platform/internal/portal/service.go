@@ -19,6 +19,7 @@ import (
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/api"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/observability"
 	"github.com/coreos/go-oidc/v3/oidc"
 )
 
@@ -67,8 +68,10 @@ func NewService(config Config, store Store) (*Service, error) {
 			}
 		}
 	}
-	client := &http.Client{Timeout: 15 * time.Second, CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }}
-	keyClient := &http.Client{Timeout: 5 * time.Second, CheckRedirect: client.CheckRedirect}
+	client := observability.NewHTTPClient(15 * time.Second)
+	client.CheckRedirect = func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }
+	keyClient := observability.NewHTTPClient(5 * time.Second)
+	keyClient.CheckRedirect = client.CheckRedirect
 	keyContext := oidc.ClientContext(context.Background(), keyClient)
 	verifier := oidc.NewVerifier(strings.TrimRight(config.IssuerURL.String(), "/"), oidc.NewRemoteKeySet(keyContext, config.JWKSURL.String()), &oidc.Config{ClientID: config.ClientID})
 	return &Service{config: config, store: store, client: client, verifier: verifier, now: func() time.Time { return time.Now().UTC() }}, nil
@@ -89,6 +92,12 @@ func (s *Service) Handler(static http.Handler) http.Handler {
 		w.Header().Set("Referrer-Policy", "no-referrer")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("X-Frame-Options", "DENY")
+		w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=()")
+		w.Header().Set("Cross-Origin-Opener-Policy", "same-origin")
+		w.Header().Set("Cross-Origin-Resource-Policy", "same-origin")
+		if s.config.SecureCookies {
+			w.Header().Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+		}
 		w.Header().Set("Content-Security-Policy", "default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
 		if strings.HasPrefix(r.URL.Path, "/api/") || strings.HasPrefix(r.URL.Path, "/auth/") {
 			w.Header().Set("Cache-Control", "no-store")

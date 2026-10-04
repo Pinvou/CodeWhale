@@ -433,6 +433,7 @@ export const lazyChunkContracts = {
   monitor: ['features/monitor/MonitorView.jsx', 'MonitorView'],
   search: ['features/search/SearchView.jsx', 'SearchView'],
   teamRelay: ['features/team-relay/TeamRelayView.jsx', 'TeamRelayView'],
+  accountPlatform: ['features/account-platform/AccountPlatformDesktopView.jsx', 'AccountPlatformDesktopView'],
   searchOverlay: ['features/search/SearchOverlay.jsx', 'SearchOverlay'],
   moveToProjectDialog: ['features/projects/MoveToProjectDialog.jsx', 'MoveToProjectDialog'],
   rebindFolderDialog: ['features/projects/RebindFolderDialog.jsx', 'RebindFolderDialog'],
@@ -501,7 +502,13 @@ function enforceLazyChunks() {
 // measured): web 505,451 B → 514,164 B (+8,713 B, same feature riding the
 // main merge); desktop 503,063 B → 511,810 B. 516_000 keeps ~1.8 kB web
 // headroom; the next entry feature again needs a deliberate bump.
-export const MAIN_ENTRY_BUDGET_BYTES = 516_000;
+// 2026-10-05 account-platform A03: 516_000 → 516_600, independently
+// reviewed after retaining desktop and compact More navigation. Compared with
+// the fixed A02 input: desktop 513,101 → 514,231 B; web 515,454 → 516,553 B.
+// Native client and account view share a lazy chunk; NavItem is reused. This
+// is the smallest 100-byte increment that retains those required entries,
+// leaves 47 B of measured web headroom, and authorizes no later increases.
+export const MAIN_ENTRY_BUDGET_BYTES = 516_600;
 
 export function assertMainEntryBudget(bundle, budgetBytes = MAIN_ENTRY_BUDGET_BYTES) {
   const mainEntry = Object.values(bundle).find(output => (

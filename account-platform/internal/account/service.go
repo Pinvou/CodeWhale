@@ -12,6 +12,7 @@ import (
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/api"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/identity"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/observability"
 	"github.com/google/uuid"
 )
 
@@ -359,7 +360,7 @@ func NewHTTPWalletProvisioner(rawURL, serviceToken string) (*HTTPWalletProvision
 	if strings.TrimSpace(serviceToken) == "" {
 		return nil, errors.New("INTERNAL_SERVICE_TOKEN is required")
 	}
-	return &HTTPWalletProvisioner{baseURL: parsed, serviceToken: serviceToken, client: &http.Client{Timeout: 5 * time.Second}}, nil
+	return &HTTPWalletProvisioner{baseURL: parsed, serviceToken: serviceToken, client: observability.NewHTTPClient(5 * time.Second)}, nil
 }
 
 func (p *HTTPWalletProvisioner) EnsurePersonalWallet(ctx context.Context, userID uuid.UUID) error {

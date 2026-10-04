@@ -18,6 +18,8 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/events"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/observability"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 )
@@ -336,12 +338,7 @@ func samePaymentTime(left, right time.Time) bool {
 }
 
 func enqueueRechargeEvent(ctx context.Context, tx pgx.Tx, order PaymentOrder, now time.Time) error {
-	payload, err := json.Marshal(map[string]any{"order_id": order.ID, "wallet_id": order.WalletID, "channel": order.Channel, "amount_fen": order.AmountFen, "credit_microcredits": order.CreditMicrocredits})
-	if err != nil {
-		return err
-	}
-	_, err = tx.Exec(ctx, `INSERT INTO outbox_events(event_id,event_type,aggregate_id,aggregate_version,payload,trace_id,occurred_at) VALUES($1,'billing.recharge.succeeded.v1',$2,1,$3,$4,$5)`, uuid.Must(uuid.NewV7()), order.ID, payload, order.ID.String(), now)
-	return err
+	return events.AppendOutbox(ctx, tx, "billing.recharge.succeeded.v1", order.ID, 1, map[string]any{"order_id": order.ID, "wallet_id": order.WalletID, "channel": order.Channel, "amount_fen": order.AmountFen, "credit_microcredits": order.CreditMicrocredits})
 }
 
 var ErrForbiddenPayment = errors.New("payment notification rejected")
@@ -389,7 +386,7 @@ func NewSimulatorProvider(raw, token string) (*SimulatorProvider, error) {
 	if e != nil || u.Host == "" || token == "" {
 		return nil, errors.New("invalid payment simulator configuration")
 	}
-	return &SimulatorProvider{u, token, &http.Client{Timeout: 5 * time.Second}}, nil
+	return &SimulatorProvider{u, token, observability.NewHTTPClient(5 * time.Second)}, nil
 }
 func (p *SimulatorProvider) Create(ctx context.Context, o PaymentOrder, callback string) (ProviderOrder, error) {
 	var result ProviderOrder

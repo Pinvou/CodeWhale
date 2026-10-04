@@ -22,12 +22,17 @@ func checkReady() error {
 		return err
 	}
 	client := http.Client{Timeout: 2 * time.Second}
-	response, err := client.Get("http://127.0.0.1" + cfg.Address + "/health/ready")
+	client.CheckRedirect = func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }
+	url := os.Getenv("HEALTHCHECK_URL")
+	if url == "" {
+		url = "http://127.0.0.1" + cfg.Address + "/health/ready"
+	}
+	response, err := client.Get(url)
 	if err != nil {
 		return err
 	}
 	defer response.Body.Close()
-	if response.StatusCode != http.StatusOK {
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		return fmt.Errorf("unexpected readiness status: %d", response.StatusCode)
 	}
 	return nil

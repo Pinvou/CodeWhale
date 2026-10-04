@@ -1,0 +1,115 @@
+{{- $root := . -}}
+{{- $fullname := include "pinvou.fullname" . -}}
+{{- $jwksURL := .Values.oidc.jwksUrl -}}
+{{- $oidcTokenURL := .Values.oidc.tokenUrl -}}
+{{- $localOIDC := has .Values.global.environment (list "development" "test") -}}
+{{- if and .Values.keycloak.enabled $localOIDC -}}
+{{- $jwksURL = printf "http://%s-keycloak:8080/realms/pinvou/protocol/openid-connect/certs" $fullname -}}
+{{- $oidcTokenURL = printf "http://%s-keycloak:8080/realms/pinvou/protocol/openid-connect/token" $fullname -}}
+{{- end -}}
+{{- if not $localOIDC -}}
+{{- $issuer := trimSuffix "/" .Values.oidc.issuer -}}
+{{- if or (not (hasPrefix "https://" $issuer)) (ne $jwksURL (printf "%s/protocol/openid-connect/certs" $issuer)) (ne $oidcTokenURL (printf "%s/protocol/openid-connect/token" $issuer)) -}}
+{{- fail "staging/production OIDC requires explicit HTTPS JWKS and token endpoints under the configured issuer" -}}
+{{- end -}}
+{{- end -}}
+{{- $apps := list
+  (dict "name" "account-service" "image" .Values.images.accountService "replicas" .Values.replicas.accountService)
+  (dict "name" "billing-service" "image" .Values.images.billingService "replicas" .Values.replicas.billingService)
+  (dict "name" "token-gateway" "image" .Values.images.tokenGateway "replicas" .Values.replicas.tokenGateway)
+  (dict "name" "token-portal" "image" .Values.images.tokenPortal "replicas" .Values.replicas.tokenPortal)
+-}}
+{{- range $app := $apps }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $fullname }}-{{ $app.name }}
+  labels:
+    {{- include "pinvou.labels" $root | nindent 4 }}
+    app.kubernetes.io/component: {{ $app.name }}
+spec:
+  replicas: {{ $app.replicas }}
+  selector:
+    matchLabels:
+      {{- include "pinvou.selector" $root | nindent 6 }}
+      app.kubernetes.io/component: {{ $app.name }}
+  template:
+    metadata:
+      annotations: { prometheus.io/scrape: "true", prometheus.io/path: "/metrics", prometheus.io/port: "9090" }
+      labels:
+        {{- include "pinvou.selector" $root | nindent 8 }}
+        app.kubernetes.io/component: {{ $app.name }}
+        {{- with $root.Values.global.podLabels }}{{ toYaml . | nindent 8 }}{{- end }}
+    spec:
+      serviceAccountName: {{ $fullname }}
+      automountServiceAccountToken: false
+      {{- with $root.Values.global.imagePullSecrets }}
+      imagePullSecrets: {{ toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext: { runAsNonRoot: true, seccompProfile: { type: RuntimeDefault } }
+      containers:
+        - name: {{ $app.name }}
+          image: "{{ $app.image.repository }}:{{ $app.image.tag }}"
+          imagePullPolicy: {{ $app.image.pullPolicy }}
+          ports: [{ name: http, containerPort: 8080 }, { name: metrics, containerPort: 9090 }]
+          securityContext: { allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: { drop: ["ALL"] } }
+          resources: {{ toYaml $root.Values.resources | nindent 12 }}
+          env:
+            - { name: APP_ENV, value: {{ $root.Values.global.environment | quote }} }
+            - { name: PORT, value: "8080" }
+            - { name: METRICS_ADDRESS, value: ":9090" }
+            - { name: RATE_LIMIT_RPS, value: {{ $root.Values.security.rateLimitRPS | quote }} }
+            - { name: RATE_LIMIT_BURST, value: {{ $root.Values.security.rateLimitBurst | quote }} }
+            - { name: OTEL_EXPORTER_OTLP_ENDPOINT, value: {{ $root.Values.observability.otlpEndpoint | quote }} }
+            {{- if ne $app.name "token-portal" }}
+            - name: DATABASE_URL
+              valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: {{ $app.name }}-database-url } }
+            {{- end }}
+            {{- if or (eq $app.name "account-service") (eq $app.name "token-gateway") }}
+            - { name: OIDC_ISSUER, value: {{ $root.Values.oidc.issuer | quote }} }
+            - { name: OIDC_JWKS_URL, value: {{ $jwksURL | quote }} }
+            - { name: OIDC_AUDIENCE, value: {{ $root.Values.oidc.audience | quote }} }
+            {{- end }}
+            {{- if ne $app.name "token-portal" }}
+            - name: INTERNAL_SERVICE_TOKEN
+              valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: internal-service-token } }
+            - { name: NATS_URL, value: {{ printf "nats://%s-nats:4222" $fullname | quote }} }
+            {{- end }}
+            {{- if eq $app.name "account-service" }}
+            - { name: BILLING_HTTP_URL, value: {{ printf "http://%s-billing-service:8080" $fullname | quote }} }
+            {{- else if eq $app.name "billing-service" }}
+            - name: PAYMENT_SIMULATOR_URL
+              valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: payment-provider-url } }
+            - { name: BILLING_PAYMENT_CALLBACK_URL, value: {{ $root.Values.public.paymentCallbackUrl | quote }} }
+            {{- range $channel := list "UNIONPAY" "ALIPAY" "WECHAT" }}
+            - name: PAYMENT_SIM_HMAC_{{ $channel }}
+              valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: {{ printf "payment-hmac-%s" ($channel | lower) }} } }
+            {{- end }}
+            {{- else if eq $app.name "token-gateway" }}
+            - { name: ACCOUNT_HTTP_URL, value: {{ printf "http://%s-account-service:8080" $fullname | quote }} }
+            - { name: BILLING_HTTP_URL, value: {{ printf "http://%s-billing-service:8080" $fullname | quote }} }
+            - { name: TOKEN_SECRET_PROVIDER, value: {{ $root.Values.tokenGateway.secretProvider | quote }} }
+            - { name: TOKEN_SECRET_KEY_ID, value: {{ $root.Values.tokenGateway.secretKeyId | quote }} }
+            - name: TOKEN_SECRET_PROVIDER_URL
+              valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: token-secret-provider-url } }
+            - name: TOKEN_SECRET_PROVIDER_TOKEN
+              valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: token-secret-provider-token } }
+            - { name: TOKEN_PROVIDER_ALLOWED_HOSTS, value: {{ join "," $root.Values.tokenGateway.providerAllowedHosts | quote }} }
+            - { name: TOKEN_GATEWAY_MAX_INPUT_TOKENS, value: {{ $root.Values.tokenGateway.maxInputTokens | quote }} }
+            {{- else if eq $app.name "token-portal" }}
+            - { name: REDIS_URL, value: {{ printf "redis://%s-redis:6379/0" $fullname | quote }} }
+            - { name: PORTAL_PUBLIC_URL, value: {{ $root.Values.public.portalUrl | quote }} }
+            - { name: PORTAL_OIDC_ISSUER, value: {{ $root.Values.oidc.issuer | quote }} }
+            - { name: PORTAL_OIDC_JWKS_URL, value: {{ $jwksURL | quote }} }
+            - { name: PORTAL_OIDC_AUTHORIZATION_URL, value: {{ printf "%s/protocol/openid-connect/auth" (trimSuffix "/" $root.Values.oidc.issuer) | quote }} }
+            - { name: PORTAL_OIDC_TOKEN_URL, value: {{ $oidcTokenURL | quote }} }
+            - { name: PORTAL_OIDC_CLIENT_ID, value: {{ $root.Values.oidc.portalClientId | quote }} }
+            - { name: ACCOUNT_HTTP_URL, value: {{ printf "http://%s-account-service:8080" $fullname | quote }} }
+            - { name: TOKEN_GATEWAY_HTTP_URL, value: {{ printf "http://%s-token-gateway:8080" $fullname | quote }} }
+            {{- end }}
+          readinessProbe: { httpGet: { path: /health/ready, port: http }, periodSeconds: 10, timeoutSeconds: 3 }
+          livenessProbe: { httpGet: { path: /health/live, port: http }, periodSeconds: 20, timeoutSeconds: 3 }
+          volumeMounts: [{ name: tmp, mountPath: /tmp }]
+      volumes: [{ name: tmp, emptyDir: { sizeLimit: 16Mi } }]
+{{- end }}

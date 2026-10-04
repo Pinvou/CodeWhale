@@ -80,6 +80,7 @@ const protocolSources = {
   voice: ['bridge/voice.js'],
   multiAgent: ['bridge/multiagent.js'],
   teamRelay: ['bridge/team-relay.js'],
+  accountPlatform: ['bridge/account-platform.js'],
   projects: ['bridge/projects.js'],
   computerUse: ['bridge/computer_use.js'],
 };
@@ -204,6 +205,7 @@ const expectedProtocolHashes = {
   voice: '8581b43940d101353fdd1468232dc778c2d1320854af5fdbbbc0326e5cdedbbb',
   // Official-only team-relay surface; unchanged by this backflow.
   teamRelay: '246f7cfd5a5ff4b730e2f3972fe9e74860b51a4781bd323bf10b3d795d24ed1d',
+  accountPlatform: 'b67a08c2d39ec89be8a8d3a0cad95686cbf0fda19bea9248b727ab8b8dcbba7f',
   // Recomputed for the rebind carryover feed-back (review #463 F-Major):
   // rebind_workspace_root gains the optional previousPostBusySessionIds
   // payload — the dialog's previous report fed back on retry, honored by the

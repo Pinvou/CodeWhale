@@ -1,0 +1,49 @@
+global:
+  environment: production-new
+  runtimeSecret: pinvou-account-platform-production-new
+
+images:
+  accountService: { repository: registry.example.com/pinvou/account-service, tag: 0.1.0, pullPolicy: IfNotPresent }
+  billingService: { repository: registry.example.com/pinvou/billing-service, tag: 0.1.0, pullPolicy: IfNotPresent }
+  tokenGateway: { repository: registry.example.com/pinvou/token-gateway, tag: 0.1.0, pullPolicy: IfNotPresent }
+  tokenPortal: { repository: registry.example.com/pinvou/token-portal, tag: 0.1.0, pullPolicy: IfNotPresent }
+  eventRelay: { repository: registry.example.com/pinvou/account-platform-event-relay, tag: 0.1.0, pullPolicy: IfNotPresent }
+  migrate: { repository: registry.example.com/pinvou/account-platform-migrate, tag: 0.1.0, pullPolicy: IfNotPresent }
+
+oidc:
+  issuer: https://accounts.example.com/realms/pinvou
+  jwksUrl: https://accounts.example.com/realms/pinvou/protocol/openid-connect/certs
+  tokenUrl: https://accounts.example.com/realms/pinvou/protocol/openid-connect/token
+  audience: pinvou-desktop
+  portalClientId: pinvou-token-portal
+
+public:
+  portalUrl: https://tokens.example.com
+  paymentCallbackUrl: https://billing.example.com/internal/payment/notifications
+
+observability:
+  otlpEndpoint: https://otel.example.com
+  prometheusRulesEnabled: true
+
+tokenGateway:
+  secretProvider: remote
+  secretKeyId: production-account-token-v1
+  providerAllowedHosts: [newapi.example.com]
+
+external:
+  oidcCidrs: [10.25.0.0/24]
+  postgresCidrs: [10.20.0.0/24]
+  paymentProviderCidrs: [10.21.0.0/24]
+  secretProviderCidrs: [10.22.0.0/24]
+  modelProviderCidrs: [10.23.0.0/24]
+  telemetryCollectorCidrs: [10.24.0.0/24]
+
+ingress:
+  enabled: true
+  portalHost: tokens.example.com
+  keycloakHost: accounts.example.com
+  billingHost: billing.example.com
+  tlsSecretName: pinvou-account-platform-production-tls
+
+keycloak:
+  hostname: https://accounts.example.com

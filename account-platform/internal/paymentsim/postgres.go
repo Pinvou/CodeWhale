@@ -356,7 +356,7 @@ RETURNING n.id, n.order_id, o.callback_url, o.channel, n.payload, n.signature, n
 		}
 		// Timestamp belongs to each signed delivery. Preserve the event ID and
 		// every payment fact while refreshing it after a delayed queue/retry.
-		// RawMessage preserves exact integer amounts when reading JSONB.
+		// RawMessage preserves exact integer amounts from the persisted JSON bytes.
 		var payload map[string]json.RawMessage
 		if err := json.Unmarshal(item.Payload, &payload); err != nil {
 			return nil, err
@@ -366,7 +366,7 @@ RETURNING n.id, n.order_id, o.callback_url, o.channel, n.payload, n.signature, n
 		if err != nil {
 			return nil, err
 		}
-		// JSONB reserializes the persisted payload. Sign the actual bytes sent,
+		// Refreshing a delivery timestamp changes bytes. Sign the actual bytes sent,
 		// preserving intentionally invalid signatures in the failure scenario.
 		item.Signature = sign(r.hmacSecrets[item.Channel], item.Payload)
 		if scenario == "BAD_SIGNATURE" {

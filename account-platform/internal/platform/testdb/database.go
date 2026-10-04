@@ -19,7 +19,7 @@ import (
 
 const DatabaseURLEnv = "PINVOU_ACCOUNT_TEST_DATABASE_URL"
 
-// Open applies the domain's unchanged migrations in a random, test-owned schema.
+// Open applies the domain's migrations in a random, test-owned schema.
 // All connections use only that schema and pg_catalog; public is never a fallback.
 // Tests opt in through DatabaseURLEnv, which must address a loopback PostgreSQL.
 func Open(t *testing.T, domain string) *pgxpool.Pool {

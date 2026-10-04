@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/events"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/identity"
 	"github.com/google/uuid"
@@ -313,6 +314,9 @@ func (r *PostgresRepository) CreateOrganization(ctx context.Context, principal i
 	if err := appendOutbox(ctx, tx, "account.organization.created.v1", organization.ID, 1, map[string]any{"organization_id": organization.ID, "status": "ACTIVE"}); err != nil {
 		return Organization{}, err
 	}
+	if err := appendMembershipChanged(ctx, tx, membershipID, organization.ID, userID, "ACTIVE", 1); err != nil {
+		return Organization{}, err
+	}
 	return organization, tx.Commit(ctx)
 }
 
@@ -607,7 +611,7 @@ func (r *PostgresRepository) RevokeMembership(ctx context.Context, principal ide
 	var membershipID uuid.UUID
 	var isOwner bool
 	err = tx.QueryRow(ctx, `
-SELECT m.id, EXISTS(SELECT 1 FROM role_bindings rb WHERE rb.membership_id = m.id AND rb.role = 'OWNER')
+SELECT m.id,EXISTS(SELECT 1 FROM role_bindings rb WHERE rb.membership_id = m.id AND rb.role = 'OWNER')
 FROM memberships m WHERE m.organization_id = $1 AND m.user_id = $2 AND m.status = 'ACTIVE' FOR UPDATE`, organizationID, targetUserID).Scan(&membershipID, &isOwner)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ErrNotFound
@@ -796,16 +800,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9, $10, now())`, uuid.Must(uuid.New
 }
 
 func appendOutbox(ctx context.Context, tx pgx.Tx, eventType string, aggregateID uuid.UUID, aggregateVersion int64, payload map[string]any) error {
-	body, err := json.Marshal(payload)
-	if err != nil {
-		return err
-	}
-	traceID := httpserver.RequestID(ctx)
-	if traceID == "" {
-		traceID = "internal"
-	}
-	_, err = tx.Exec(ctx, `INSERT INTO outbox_events(event_id, event_type, aggregate_id, aggregate_version, payload, trace_id, occurred_at) VALUES ($1, $2, $3, $4, $5, $6, now())`, uuid.Must(uuid.NewV7()), eventType, aggregateID, aggregateVersion, body, traceID)
-	return err
+	return events.AppendOutbox(ctx, tx, eventType, aggregateID, aggregateVersion, payload)
 }
 
 func appendMembershipChanged(ctx context.Context, tx pgx.Tx, membershipID, organizationID, userID uuid.UUID, status string, version int64) error {

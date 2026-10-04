@@ -214,7 +214,7 @@ func TestPostgresSimulatorToBillingSignedCallbackAndDelayedRetry(t *testing.T) {
 			}
 			// Simulate a queue entry whose original delivery signature expired,
 			// retaining the actual payment time and all financial facts.
-			if _, err := simPool.Exec(ctx, `UPDATE simulator_notifications SET payload=jsonb_set(payload,'{timestamp}',to_jsonb($1::bigint)),next_attempt_at=$2`, now.Add(-10*time.Minute).Unix(), now.Add(-time.Second)); err != nil {
+			if _, err := simPool.Exec(ctx, `UPDATE simulator_notifications SET payload=convert_to(jsonb_set(convert_from(payload,'UTF8')::jsonb,'{timestamp}',to_jsonb($1::bigint))::text,'UTF8'),next_attempt_at=$2`, now.Add(-10*time.Minute).Unix(), now.Add(-time.Second)); err != nil {
 				t.Fatal(err)
 			}
 			if err := simService.DeliverPending(ctx); err != nil {

@@ -964,7 +964,17 @@ jobs:
           docker compose \
             --env-file account-platform/deploy/compose/.env.example \
             -f account-platform/deploy/compose/compose.yaml \
-            build account-service billing-service token-gateway payment-simulator token-portal
+            build account-service billing-service token-gateway payment-simulator token-portal account-event-relay billing-event-relay token-event-relay account-migrate
+
+          docker run --rm -v "$PWD/account-platform/deploy/helm/account-platform:/chart:ro" alpine/helm:4.2.3 lint /chart -f /chart/values-staging.yaml
+          docker run --rm -v "$PWD/account-platform/deploy/helm/account-platform:/chart:ro" alpine/helm:4.2.3 lint /chart -f /chart/values-production-new.yaml
+          docker run --rm -v "$PWD/account-platform/deploy/helm/account-platform:/chart:ro" alpine/helm:4.2.3 template pinvou /chart -f /chart/values-production-new.yaml > /tmp/account-platform-production.yaml
+          ! grep -E 'payment-simulator|mock-newapi|TOKEN_LOCAL_KEK_BASE64|kind: Secret' /tmp/account-platform-production.yaml
+
+          rule_test_dir="$RUNNER_TEMP/account-platform-promtool"
+          node account-platform/test/integration/prometheus-rule-fixtures.mjs /tmp/account-platform-production.yaml "$rule_test_dir"
+          docker run --rm --network none --entrypoint /bin/promtool -v "$rule_test_dir:/test:ro" -w /test prom/prometheus:v3.13.3 check rules event-relay-rules.yaml
+          docker run --rm --network none --entrypoint /bin/promtool -v "$rule_test_dir:/test:ro" -w /test prom/prometheus:v3.13.3 test rules event-relay-missing.test.yaml
 
       - name: Go 与 Node 高危依赖审计
         run: |

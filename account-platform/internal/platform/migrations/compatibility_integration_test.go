@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -22,9 +23,13 @@ func TestPostgresMigrationCheckoutLineEndingsAndTamperProtection(t *testing.T) {
 	}
 	defer connection.Release()
 	directory := t.TempDir()
+	var version int64
+	if err := connection.QueryRow(ctx, `SELECT COALESCE(max(version),0)+1 FROM schema_migrations`).Scan(&version); err != nil {
+		t.Fatal(err)
+	}
 	lf := "CREATE TABLE eol_regression(id BIGINT PRIMARY KEY);\n-- original migration\n"
 	crlf := strings.ReplaceAll(lf, "\n", "\r\n")
-	file := filepath.Join(directory, "000003_eol_regression.up.sql")
+	file := filepath.Join(directory, fmt.Sprintf("%06d_eol_regression.up.sql", version))
 	load := func(sql string) []migrations.Migration {
 		t.Helper()
 		if err := os.WriteFile(file, []byte(sql), 0600); err != nil {
@@ -44,7 +49,7 @@ func TestPostgresMigrationCheckoutLineEndingsAndTamperProtection(t *testing.T) {
 		t.Fatal(err)
 	}
 	var newChecksum string
-	if err := connection.QueryRow(ctx, `SELECT checksum FROM schema_migrations WHERE version=3`).Scan(&newChecksum); err != nil {
+	if err := connection.QueryRow(ctx, `SELECT checksum FROM schema_migrations WHERE version=$1`, version).Scan(&newChecksum); err != nil {
 		t.Fatal(err)
 	}
 	digest := sha256.Sum256([]byte(lf))
@@ -54,7 +59,7 @@ func TestPostgresMigrationCheckoutLineEndingsAndTamperProtection(t *testing.T) {
 	for _, legacy := range []string{lf, crlf} {
 		legacyDigest := sha256.Sum256([]byte(legacy))
 		legacyChecksum := hex.EncodeToString(legacyDigest[:])
-		if _, err := connection.Exec(ctx, `UPDATE schema_migrations SET checksum=$1 WHERE version=3`, legacyChecksum); err != nil {
+		if _, err := connection.Exec(ctx, `UPDATE schema_migrations SET checksum=$1 WHERE version=$2`, legacyChecksum, version); err != nil {
 			t.Fatal(err)
 		}
 		for _, checkout := range []string{lf, crlf} {
@@ -66,7 +71,7 @@ func TestPostgresMigrationCheckoutLineEndingsAndTamperProtection(t *testing.T) {
 			t.Fatalf("real SQL tamper not rejected: %v", err)
 		}
 		var retained string
-		if err := connection.QueryRow(ctx, `SELECT checksum FROM schema_migrations WHERE version=3`).Scan(&retained); err != nil || retained != legacyChecksum {
+		if err := connection.QueryRow(ctx, `SELECT checksum FROM schema_migrations WHERE version=$1`, version).Scan(&retained); err != nil || retained != legacyChecksum {
 			t.Fatalf("legacy checksum rewritten: error=%v", err)
 		}
 	}

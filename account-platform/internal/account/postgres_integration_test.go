@@ -407,8 +407,11 @@ func TestPostgresMembershipEventCorrelationFitsExistingSchema(t *testing.T) {
 		if err := repository.pool.QueryRow(context.Background(), `SELECT trace_id FROM outbox_events WHERE event_type='account.membership.changed.v1' ORDER BY occurred_at DESC,event_id DESC LIMIT 1`).Scan(&traceID); err != nil {
 			t.Fatal(err)
 		}
-		if traceID == "" || !utf8.ValidString(traceID) || utf8.RuneCountInString(traceID) > 64 || traceID != response.Header().Get("X-Request-ID") || (supplied != "" && utf8.ValidString(supplied) && utf8.RuneCountInString(supplied) <= 64 && traceID != supplied) {
-			t.Fatalf("event correlation violates schema: trace length=%d response correlation equal=%v", utf8.RuneCountInString(traceID), traceID == response.Header().Get("X-Request-ID"))
+		if traceID == "" || !utf8.ValidString(traceID) || utf8.RuneCountInString(traceID) > 64 || traceID != response.Header().Get("X-Trace-ID") {
+			t.Fatalf("event correlation violates schema: trace length=%d response trace equal=%v", utf8.RuneCountInString(traceID), traceID == response.Header().Get("X-Trace-ID"))
+		}
+		if supplied != "" && utf8.ValidString(supplied) && utf8.RuneCountInString(supplied) <= 64 && response.Header().Get("X-Request-ID") != supplied {
+			t.Fatal("valid caller request correlation was not preserved")
 		}
 	}
 	assertMembershipEvents(t, repository)
@@ -480,5 +483,30 @@ func assertMembershipEvents(t *testing.T, repository *PostgresRepository) {
 		if err := repository.pool.QueryRow(context.Background(), `SELECT version FROM memberships WHERE id=$1`, membershipID).Scan(&stored); err != nil || stored != version {
 			t.Fatalf("latest event version=%d persisted=%d error=%v", version, stored, err)
 		}
+	}
+}
+
+func TestPostgresOrganizationOwnerMembershipEventsStartAtOne(t *testing.T) {
+	repository := accountDatabase(t)
+	owner, me := accountUser(t, repository)
+	organization := accountOrganization(t, repository, owner)
+	if _, err := repository.ReplaceMemberRoles(context.Background(), owner, organization.ID, me.UserID, []string{"MEMBER"}); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := repository.pool.Query(context.Background(), `SELECT e.aggregate_version FROM outbox_events e JOIN memberships m ON m.id=e.aggregate_id WHERE e.event_type='account.membership.changed.v1' AND m.organization_id=$1 AND m.user_id=$2 ORDER BY e.aggregate_version`, organization.ID, me.UserID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	versions := []int64{}
+	for rows.Next() {
+		var v int64
+		if err := rows.Scan(&v); err != nil {
+			t.Fatal(err)
+		}
+		versions = append(versions, v)
+	}
+	if rows.Err() != nil || !slices.Equal(versions, []int64{1, 2}) {
+		t.Fatalf("owner membership versions=%v error=%v", versions, rows.Err())
 	}
 }

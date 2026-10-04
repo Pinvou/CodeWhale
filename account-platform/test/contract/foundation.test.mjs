@@ -64,7 +64,9 @@ test('event schemas compile as JSON Schema 2020-12 and reject secrets', async ()
 });
 
 test('Compose keeps data stores private and simulator development-only', async () => {
-  const compose = await readYaml('deploy/compose/compose.yaml');
+  const composePath = path.join(root, 'deploy/compose/compose.yaml');
+  const composeRaw = await readFile(composePath, 'utf8');
+  const compose = YAML.parse(composeRaw);
   assert.equal(compose.networks.backend.internal, true);
   for (const service of ['postgres', 'redis', 'nats']) {
     assert.equal(compose.services[service].ports, undefined, `${service} must not publish ports`);
@@ -86,6 +88,17 @@ test('Compose keeps data stores private and simulator development-only', async (
     compose.services['billing-service'].environment.DATABASE_URL,
     compose.services['account-service'].environment.DATABASE_URL,
   );
+  for (const source of ['account', 'billing', 'token']) {
+    const relay = compose.services[`${source}-event-relay`];
+    assert.equal(relay.environment.EVENT_SOURCE, source);
+    assert.equal(relay.environment.NATS_URL, 'nats://nats:4222');
+    assert.equal(relay.environment.DATABASE_URL, compose.services[`${source === 'token' ? 'token-gateway' : `${source}-service`}`].environment.DATABASE_URL);
+  }
+  const example = await readFile(path.join(root, 'deploy/compose/.env.example'), 'utf8');
+  const names = new Set(example.split(/\r?\n/).filter(Boolean).map((line) => line.split('=', 1)[0]));
+  for (const match of composeRaw.matchAll(/\$\{([A-Z0-9_]+):\?/g)) {
+    assert.ok(names.has(match[1]), `${match[1]} is required by Compose but missing from .env.example`);
+  }
 });
 
 test('Compose environment template covers every required variable with placeholders', async () => {
@@ -138,4 +151,13 @@ test('every migration up script has a matching down script', async () => {
     assert.ok(up.length > 0, `${domain} must contain migrations`);
     for (const migration of up) assert.ok(down.has(migration), `${domain}/${migration} has no down migration`);
   }
+});
+
+test('payment simulator preserves the exact signed callback payload', async () => {
+  const migration = await readFile(
+    path.join(root, 'migrations/payment-simulator/000004_exact_notification_payload.up.sql'),
+    'utf8',
+  );
+  assert.match(migration, /ALTER COLUMN payload TYPE BYTEA/);
+  assert.doesNotMatch(migration, /ALTER COLUMN payload TYPE JSONB/);
 });

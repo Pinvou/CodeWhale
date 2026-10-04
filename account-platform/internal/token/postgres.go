@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/events"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -151,21 +152,33 @@ func (r *PostgresRepository) MarkUpstream(ctx context.Context, usageID uuid.UUID
 }
 
 func (r *PostgresRepository) MarkCommitted(ctx context.Context, usageID uuid.UUID, actual int64, snapshot map[string]any) error {
+	if usageID == uuid.Nil || actual < 0 {
+		return ErrForbidden
+	}
 	encoded, err := json.Marshal(snapshot)
 	if err != nil {
 		return err
 	}
-	now := r.now()
-	command, err := r.pool.Exec(ctx, `UPDATE usage_requests SET status='COMMITTED',actual_microcredits=$2,usage_snapshot=$3,error_class=NULL,terminal_at=$4,updated_at=$4 WHERE id=$1 AND status IN ('UPSTREAM_ACTIVE','SETTLEMENT_PENDING','REVIEW')`, usageID, actual, encoded, now)
+	tx, err := r.pool.Begin(ctx)
 	if err != nil {
 		return err
 	}
-	if command.RowsAffected() == 1 {
-		return nil
+	defer tx.Rollback(ctx)
+	now := r.now()
+	var walletID, tokenAccountID uuid.UUID
+	err = tx.QueryRow(ctx, `UPDATE usage_requests SET status='COMMITTED',actual_microcredits=$2,usage_snapshot=$3,error_class=NULL,terminal_at=$4,updated_at=$4 WHERE id=$1 AND status IN ('UPSTREAM_ACTIVE','SETTLEMENT_PENDING','REVIEW') RETURNING wallet_id,token_account_id`, usageID, actual, encoded, now).Scan(&walletID, &tokenAccountID)
+	if err == nil {
+		if err := events.AppendOutbox(ctx, tx, "token.usage.settled.v1", usageID, 1, map[string]any{"usage_request_id": usageID, "wallet_id": walletID, "token_account_id": tokenAccountID, "actual_microcredits": actual}); err != nil {
+			return err
+		}
+		return tx.Commit(ctx)
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return err
 	}
 	var status string
 	var storedActual *int64
-	if err := r.pool.QueryRow(ctx, `SELECT status,actual_microcredits FROM usage_requests WHERE id=$1`, usageID).Scan(&status, &storedActual); errors.Is(err, pgx.ErrNoRows) {
+	if err := tx.QueryRow(ctx, `SELECT status,actual_microcredits FROM usage_requests WHERE id=$1`, usageID).Scan(&status, &storedActual); errors.Is(err, pgx.ErrNoRows) {
 		return ErrNotFound
 	} else if err != nil {
 		return err
@@ -173,7 +186,7 @@ func (r *PostgresRepository) MarkCommitted(ctx context.Context, usageID uuid.UUI
 	if status != "COMMITTED" || storedActual == nil || *storedActual != actual {
 		return ErrForbidden
 	}
-	return nil
+	return tx.Commit(ctx)
 }
 
 func (r *PostgresRepository) MarkReleased(ctx context.Context, usageID uuid.UUID, reason string) error {

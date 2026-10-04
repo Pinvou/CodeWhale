@@ -27,6 +27,7 @@ pub use features::assistant::product_runtime::{agentic_task, headless_bridge};
 
 use crate::app::commands;
 use crate::features::{
+    account_platform::AccountPlatformState,
     assistant::{engine_pool::EnginePool, platform::bridge},
     connectors::{connector_cli, eip, zhidao},
     files::file_watcher,
@@ -1267,6 +1268,7 @@ pub fn run() {
                 .manage(pet_window::PetNavigationState::default());
             app.handle().manage(pet_window::PetReplyState::default());
             app.handle().manage(selected_pet::SelectedPetStore::load());
+            app.handle().manage(AccountPlatformState::new().map_err(std::io::Error::other)?);
 
             // CLI 连接器连接编排状态(按连接器 id 存长驻子进程 PID + 取消标志),
             // 飞书 / 企微共用,供 *_connect_begin / *_cancel 用。
@@ -1356,6 +1358,10 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::chat::chat,
+            commands::account_platform::account_platform_session,
+            commands::account_platform::account_platform_login,
+            commands::account_platform::account_platform_logout,
+            commands::account_platform::account_platform_request,
             commands::chat::steer_chat,
             commands::chat::withdraw_steer,
             commands::checkpoints::list_checkpoints,

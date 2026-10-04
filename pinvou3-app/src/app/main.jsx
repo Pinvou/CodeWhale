@@ -110,6 +110,7 @@ const LazyModelStoreView = lazy(() => VIEW_LOADERS.modelStore().then(m => ({ def
 const LazyMonitorView = lazy(() => VIEW_LOADERS.monitor().then(m => ({ default: m.MonitorView })));
 const LazySearchView = lazy(() => VIEW_LOADERS.search().then(m => ({ default: m.SearchView })));
 const LazyTeamRelayView = lazy(() => VIEW_LOADERS.teamRelay().then(m => ({ default: m.TeamRelayView })));
+const LazyAccountPlatformView = lazy(() => VIEW_LOADERS.accountPlatform().then(m => ({ default: m.AccountPlatformDesktopView })));
 const LazySearchOverlay = lazy(() => VIEW_LOADERS.searchOverlay().then(m => ({ default: m.SearchOverlay })));
 const LazyMoveToProjectDialog = lazy(() => VIEW_LOADERS.moveToProjectDialog().then(m => ({ default: m.MoveToProjectDialog })));
 const LazyRebindFolderDialog = lazy(() => VIEW_LOADERS.rebindFolderDialog().then(m => ({ default: m.RebindFolderDialog })));
@@ -1059,6 +1060,7 @@ const NAV_PREFETCH = {
       const showMegacubeSite = !!platformCapabilities.showMegacubeSite;
       const codexAcpSupported = usePlatformCapability('acpCodeMode') && (isWeb || !!platformCapabilities.codexAcpSupported);
       const teamRelayAvailable = teamRelayEnabled && platformCapabilities.teamRelaySupported === true;
+      const accountPlatformEnabled = platformCapabilities.accountPlatformEnabled === true;
       const teamRelayUnread = teamRelayHasUnread(bs && bs.teamRelay && bs.teamRelay.snapshot);
       const [codexSessions, setCodexSessions] = useState([]);
       const [codexDraftEpoch, setCodexDraftEpoch] = useState(0);
@@ -1626,7 +1628,7 @@ const NAV_PREFETCH = {
             if (!isCurrent()) return false;
             setActiveChat(nextSessionId);
             const publishedView = currentViewRef.current;
-            if (nextSessionId && publishedView !== 'codex' && publishedView !== 'monitor' && publishedView !== 'settings' && publishedView !== 'search' && publishedView !== 'scheduled' && publishedView !== 'browser') {
+            if (nextSessionId && publishedView !== 'codex' && publishedView !== 'monitor' && publishedView !== 'settings' && publishedView !== 'search' && publishedView !== 'scheduled' && publishedView !== 'browser' && publishedView !== 'accountPlatform') {
               // A normal bridge session must not inherit code-only sidebar/draft state.
               setCodeModeOn(false);
               setCurrentView('chat');
@@ -1736,8 +1738,10 @@ const NAV_PREFETCH = {
           setCurrentView('chat');
         } else if (!teamRelayAvailable && currentView === 'teamRelay') {
           setCurrentView('chat');
+        } else if (!accountPlatformEnabled && currentView === 'accountPlatform') {
+          setCurrentView('chat');
         }
-      }, [currentView, setCurrentView, teamRelayAvailable]);
+      }, [accountPlatformEnabled, currentView, setCurrentView, teamRelayAvailable]);
 
       // 草稿 vs 已保存基线 → 模型卡是否显示「保存并重启」操作条
       const savedModel = savedModelConfigRef.current;
@@ -3548,14 +3552,14 @@ const NAV_PREFETCH = {
         ? ((((chatHistory || []).find(c => c.id === activeChat)) || {}).title || 'PINVOU')
         : currentView === 'codex'
           ? ((((codexHistory || []).find(c => c.id === activeCodexId)) || {}).title || t.uiCodex.untitledSession)
-        : ({ search: t.searchChats, scheduled: t.scheduledPlans, monitor: t.monitor, cardpool: t.cardPool, toolStore: t.toolStore, teamRelay: t.teamRelay, outputs: t.outputs, knowledge: t.knowledge, modelStore: t.modelStore, settings: t.settings, browser: t.browser }[currentView] || 'PINVOU');
+        : ({ search: t.searchChats, scheduled: t.scheduledPlans, monitor: t.monitor, cardpool: t.cardPool, toolStore: t.toolStore, teamRelay: t.teamRelay, accountPlatform: t.uiAccountPlatform.title, outputs: t.outputs, knowledge: t.knowledge, modelStore: t.modelStore, settings: t.settings, browser: t.browser }[currentView] || 'PINVOU');
       const mobileNavigate = (view, beforeNavigate) => {
         setMobileMoreOpen(false);
         navigateFromScheduledRun(view, beforeNavigate);
       };
       // 模型商店只在有这个功能的平台上进「更多」列表,跟侧栏入口用同一个门(modelStoreAvailable),
       // 否则 Windows/macOS 的移动版「更多」会多出一项。
-      const mobileMoreViews = ['search', ...(teamRelayAvailable ? ['teamRelay'] : []), 'outputs', 'knowledge', 'toolStore', ...(modelStoreAvailable ? ['modelStore'] : []), 'settings', 'browser'];
+      const mobileMoreViews = ['search', ...(accountPlatformEnabled ? ['accountPlatform'] : []), ...(teamRelayAvailable ? ['teamRelay'] : []), 'outputs', 'knowledge', 'toolStore', ...(modelStoreAvailable ? ['modelStore'] : []), 'settings', 'browser'];
       const mobileMoreActive = mobileMoreViews.includes(currentView)
         || (currentView === 'scheduled' && !(bs && bs.scheduledRunContext));
 
@@ -4350,6 +4354,14 @@ const NAV_PREFETCH = {
 
             {/* Footer Profile */}
             <div className={`p-3 mt-auto ${isSidebarOpen ? 'space-y-2' : 'flex flex-col items-center gap-3 pb-6'}`}>
+              {accountPlatformEnabled && (
+                <div data-testid="account-platform-button">
+                  <NavItem nativeButton icon={<User size={18} />} label={t.uiAccountPlatform.title}
+                    active={currentView === 'accountPlatform'} theme={activeTheme} isSidebarOpen={isSidebarOpen}
+                    onClick={() => { setAccountPopoverOpen(false); navigateFromScheduledRun('accountPlatform'); }}
+                    onPointerEnter={() => prefetchView('accountPlatform')} onFocus={() => prefetchView('accountPlatform')} />
+                </div>
+              )}
               {llmAccountVisible && (
               <div className={`relative ${isSidebarOpen ? 'w-full' : ''}`}>
                 <button
@@ -4501,6 +4513,11 @@ const NAV_PREFETCH = {
             <ViewErrorBoundary t={t}>
               <Suspense fallback={<ViewFallback />}>
             {currentView === 'monitor' && <LazyMonitorView theme={activeTheme} t={t} bs={bs} />}
+            {accountPlatformEnabled && currentView === 'accountPlatform' && (
+              <LazyAccountPlatformView transport={bridge.accountPlatform} copy={t.uiAccountPlatform}
+                language={language} onLanguageChange={handleSetLanguage}
+                onClose={() => navigateFromScheduledRun('chat')} />
+            )}
             {currentView === 'settings' && (
               <ViewErrorBoundary heading={t.uiSettingsDetail.settingsLoadFailed} detail={t.uiSettingsDetail.settingsLoadFailedDetail} t={t}>
                 <LazySettingsView
@@ -4809,6 +4826,8 @@ const NAV_PREFETCH = {
               ...(SCHEDULED_TASKS_ENTRY_ENABLED ? [{ key: 'scheduled', label: t.scheduledPlans, icon: <Clock size={18} />,
                 active: currentView === 'scheduled', dot: scheduledUnread,
                 onClick: () => mobileNavigate('scheduled') }] : []),
+              ...(accountPlatformEnabled ? [{ key: 'accountPlatform', label: t.uiAccountPlatform.title, icon: <User size={18} />,
+                active: currentView === 'accountPlatform', onClick: () => mobileNavigate('accountPlatform') }] : []),
               ...(teamRelayAvailable ? [{ key: 'teamRelay', label: t.teamRelay, icon: <Users size={18} />,
                 active: currentView === 'teamRelay', dot: teamRelayUnread, onClick: () => mobileNavigate('teamRelay') }] : []),
               { key: 'outputs', label: t.outputs, icon: <Package size={18} />,

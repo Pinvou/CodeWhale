@@ -99,6 +99,16 @@ command_protocol!(
 );
 command_protocol!(attachments_protocol, "attachments.rs", []);
 command_protocol!(
+    account_platform_protocol,
+    "account_platform.rs",
+    [
+        "account_platform_session",
+        "account_platform_login",
+        "account_platform_logout",
+        "account_platform_request"
+    ]
+);
+command_protocol!(
     assistant_response_protocol,
     "assistant_response.rs",
     ["export_assistant_response", "open_assistant_share_target"]

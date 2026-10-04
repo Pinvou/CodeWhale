@@ -1,0 +1,161 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "required": ["global", "images", "oidc", "public", "observability", "security", "tokenGateway", "external", "ingress", "networkPolicy"],
+  "properties": {
+    "global": {
+      "type": "object",
+      "required": ["environment", "runtimeSecret"],
+      "properties": {
+        "environment": { "enum": ["development", "test", "staging", "production-new"] },
+        "runtimeSecret": { "type": "string", "minLength": 1 }
+      }
+    },
+    "images": {
+      "type": "object",
+      "required": ["accountService", "billingService", "tokenGateway", "tokenPortal", "eventRelay", "migrate", "keycloak", "redis", "nats"],
+      "additionalProperties": false,
+      "properties": {
+        "accountService": { "$ref": "#/definitions/image" },
+        "billingService": { "$ref": "#/definitions/image" },
+        "tokenGateway": { "$ref": "#/definitions/image" },
+        "tokenPortal": { "$ref": "#/definitions/image" },
+        "eventRelay": { "$ref": "#/definitions/image" },
+        "migrate": { "$ref": "#/definitions/image" },
+        "keycloak": { "$ref": "#/definitions/image" },
+        "redis": { "$ref": "#/definitions/image" },
+        "nats": { "$ref": "#/definitions/image" }
+      }
+    },
+    "oidc": {
+      "type": "object",
+      "required": ["issuer", "jwksUrl", "tokenUrl", "audience", "portalClientId"],
+      "properties": {
+        "issuer": { "type": "string", "format": "uri" },
+        "jwksUrl": { "type": "string" },
+        "tokenUrl": { "type": "string" },
+        "audience": { "type": "string", "minLength": 1 },
+        "portalClientId": { "type": "string", "minLength": 1 }
+      }
+    },
+    "public": {
+      "type": "object",
+      "required": ["portalUrl", "paymentCallbackUrl"],
+      "properties": {
+        "portalUrl": { "type": "string", "format": "uri" },
+        "paymentCallbackUrl": { "type": "string", "format": "uri" }
+      }
+    },
+    "observability": {
+      "type": "object",
+      "required": ["otlpEndpoint", "prometheusRulesEnabled"],
+      "properties": { "otlpEndpoint": { "type": "string" }, "prometheusRulesEnabled": { "type": "boolean" } }
+    },
+    "security": {
+      "type": "object",
+      "required": ["rateLimitRPS", "rateLimitBurst"],
+      "properties": {
+        "rateLimitRPS": { "type": "number", "exclusiveMinimum": 0, "maximum": 100000 },
+        "rateLimitBurst": { "type": "integer", "minimum": 1, "maximum": 1000000 }
+      }
+    },
+    "tokenGateway": {
+      "type": "object",
+      "required": ["secretProvider", "secretKeyId", "providerAllowedHosts", "maxInputTokens"],
+      "properties": {
+        "secretProvider": { "enum": ["local", "remote"] },
+        "secretKeyId": { "type": "string" },
+        "providerAllowedHosts": { "type": "array", "uniqueItems": true, "items": { "type": "string", "minLength": 1 } },
+        "maxInputTokens": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "external": {
+      "type": "object",
+      "required": ["oidcCidrs", "postgresCidrs", "paymentProviderCidrs", "secretProviderCidrs", "modelProviderCidrs", "telemetryCollectorCidrs"],
+      "properties": {
+        "oidcCidrs": { "$ref": "#/definitions/cidrs" },
+        "postgresCidrs": { "$ref": "#/definitions/cidrs" },
+        "paymentProviderCidrs": { "$ref": "#/definitions/cidrs" },
+        "secretProviderCidrs": { "$ref": "#/definitions/cidrs" },
+        "modelProviderCidrs": { "$ref": "#/definitions/cidrs" },
+        "telemetryCollectorCidrs": { "$ref": "#/definitions/cidrs" }
+      }
+    },
+    "ingress": { "type": "object", "required": ["enabled"], "properties": { "enabled": { "type": "boolean" } } },
+    "networkPolicy": { "type": "object", "required": ["enabled"], "properties": { "enabled": { "type": "boolean" } } }
+  },
+  "definitions": {
+    "image": {
+      "type": "object",
+      "required": ["repository", "tag", "pullPolicy"],
+      "properties": {
+        "repository": { "type": "string", "minLength": 1 },
+        "tag": { "type": "string", "minLength": 1 },
+        "pullPolicy": { "enum": ["Always", "IfNotPresent", "Never"] }
+      }
+    },
+    "cidrs": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "allOf": [
+          { "pattern": "^.+/.+$" },
+          { "not": { "enum": ["0.0.0.0/0", "::/0"] } }
+        ]
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "global": { "type": "object", "properties": { "environment": { "enum": ["staging", "production-new"] } } } } },
+      "then": {
+        "properties": {
+          "oidc": {
+            "type": "object",
+            "properties": {
+              "issuer": { "type": "string", "format": "uri", "pattern": "^https://[^/?#@]+(/[^?#]*)?$" },
+              "jwksUrl": { "type": "string", "format": "uri", "pattern": "^https://[^/?#@]+/[^?#]*$" },
+              "tokenUrl": { "type": "string", "format": "uri", "pattern": "^https://[^/?#@]+/[^?#]*$" }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "global": { "type": "object", "properties": { "environment": { "const": "production-new" } } } } },
+      "then": {
+        "properties": {
+          "tokenGateway": {
+            "type": "object",
+            "properties": {
+              "secretProvider": { "const": "remote" },
+              "secretKeyId": { "type": "string", "minLength": 1 },
+              "providerAllowedHosts": { "type": "array", "minItems": 1 }
+            }
+          },
+          "images": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "object",
+              "properties": { "tag": { "type": "string", "not": { "enum": ["latest", "dev", "release-required"] } } }
+            }
+          },
+          "external": {
+            "type": "object",
+            "properties": {
+              "postgresCidrs": { "type": "array", "minItems": 1 },
+              "paymentProviderCidrs": { "type": "array", "minItems": 1 },
+              "secretProviderCidrs": { "type": "array", "minItems": 1 },
+              "modelProviderCidrs": { "type": "array", "minItems": 1 },
+              "telemetryCollectorCidrs": { "type": "array", "minItems": 1 }
+            }
+          },
+          "observability": { "type": "object", "properties": { "otlpEndpoint": { "type": "string", "pattern": "^https://" }, "prometheusRulesEnabled": { "const": true } } },
+          "ingress": { "type": "object", "properties": { "enabled": { "type": "boolean", "const": true } } },
+          "networkPolicy": { "type": "object", "properties": { "enabled": { "type": "boolean", "const": true } } }
+        }
+      }
+    }
+  ]
+}

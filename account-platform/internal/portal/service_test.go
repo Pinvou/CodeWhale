@@ -193,3 +193,18 @@ func TestPortalProxyExcludesModelDataPlane(t *testing.T) {
 		t.Fatal("external post-login redirects must be rejected")
 	}
 }
+
+func TestSecurePortalSetsIsolationHeaders(t *testing.T) {
+	response := httptest.NewRecorder()
+	testService(t, newMemoryStore()).Handler(nil).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/", nil))
+	for header, expected := range map[string]string{
+		"Cross-Origin-Opener-Policy":   "same-origin",
+		"Cross-Origin-Resource-Policy": "same-origin",
+		"Strict-Transport-Security":    "max-age=31536000; includeSubDomains",
+		"X-Frame-Options":              "DENY",
+	} {
+		if response.Header().Get(header) != expected {
+			t.Fatalf("%s = %q, want %q", header, response.Header().Get(header), expected)
+		}
+	}
+}

@@ -31,7 +31,7 @@ services:
       - postgres-data:/var/lib/postgresql/data
       - ./init-databases.sh:/docker-entrypoint-initdb.d/10-init-databases.sh:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U account_platform_admin -d postgres"]
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U account_platform_admin -d postgres"] # Wait for final TCP readiness, not the init-only Unix socket.
       interval: 5s
       timeout: 3s
       retries: 20
@@ -195,6 +195,48 @@ services:
     networks:
       - backend
       - frontend
+
+  account-event-relay:
+    <<: *service-defaults
+    build:
+      <<: *service-build
+      args: { SERVICE: event-relay }
+    environment:
+      EVENT_SOURCE: account
+      HEALTHCHECK_URL: http://127.0.0.1:9090/health/live
+      DATABASE_URL: postgresql://account_service:${ACCOUNT_DB_PASSWORD}@postgres:5432/account_platform_account?sslmode=disable
+      NATS_URL: nats://nats:4222
+    depends_on:
+      account-migrate: { condition: service_completed_successfully }
+      nats: { condition: service_healthy }
+
+  billing-event-relay:
+    <<: *service-defaults
+    build:
+      <<: *service-build
+      args: { SERVICE: event-relay }
+    environment:
+      EVENT_SOURCE: billing
+      HEALTHCHECK_URL: http://127.0.0.1:9090/health/live
+      DATABASE_URL: postgresql://billing_service:${BILLING_DB_PASSWORD}@postgres:5432/account_platform_billing?sslmode=disable
+      NATS_URL: nats://nats:4222
+    depends_on:
+      billing-migrate: { condition: service_completed_successfully }
+      nats: { condition: service_healthy }
+
+  token-event-relay:
+    <<: *service-defaults
+    build:
+      <<: *service-build
+      args: { SERVICE: event-relay }
+    environment:
+      EVENT_SOURCE: token
+      HEALTHCHECK_URL: http://127.0.0.1:9090/health/live
+      DATABASE_URL: postgresql://token_gateway:${TOKEN_DB_PASSWORD}@postgres:5432/account_platform_token?sslmode=disable
+      NATS_URL: nats://nats:4222
+    depends_on:
+      token-migrate: { condition: service_completed_successfully }
+      nats: { condition: service_healthy }
 
   token-portal:
     <<: *service-defaults

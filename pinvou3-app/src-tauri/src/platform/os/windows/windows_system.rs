@@ -77,12 +77,8 @@ pub fn read_clipboard_image(_app: &tauri::AppHandle) -> Option<Vec<u8>> {
 }
 
 pub fn open_target(target: impl AsRef<OsStr>, label: &str) -> Result<(), String> {
-    HiddenCommand::new("cmd")
-        .args(["/C", "start", ""])
-        .arg(target.as_ref())
-        .spawn()
-        .map_err(|e| format!("系统打开失败({label}): {e}"))?;
-    Ok(())
+    super::windows_open::open_target(target.as_ref())
+        .map_err(|e| format!("系统打开失败({label}): {e}"))
 }
 
 pub fn reveal_target(target: &Path) -> Result<(), String> {

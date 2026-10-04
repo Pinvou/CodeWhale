@@ -37,3 +37,23 @@ func TestInvalidReadinessPort(t *testing.T) {
 		t.Fatalf("invalid port was not rejected: %v", err)
 	}
 }
+
+func TestRelayHealthURLAndRedirectRejection(t *testing.T) {
+	for _, status := range []int{204, 302, 503} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/health/live" {
+					t.Errorf("unexpected relay path")
+				}
+				w.Header().Set("Location", "/unexpected")
+				w.WriteHeader(status)
+			}))
+			defer server.Close()
+			t.Setenv("HEALTHCHECK_URL", server.URL+"/health/live")
+			t.Setenv("PORT", "")
+			if err := checkReady(); (err == nil) != (status == 204) {
+				t.Fatalf("status=%d error=%v", status, err)
+			}
+		})
+	}
+}

@@ -211,6 +211,38 @@ try {
     assert.match(await page.$eval('.ap-payment img', image => image.src), /^data:image\/png;base64,/);
   }, 'en', true);
 
+  for (const language of ['zh', 'en', 'ja']) {
+    await runCase('desktop login forwards ' + language + ' copy, locks controls and logs out without reload', 'desktop-login', async page => {
+      assert.equal(await page.$$eval('a[href="/auth/login"]', items => items.length), 0);
+      await page.click('.ap-login .ap-primary');
+      await waitPending(page, 'nativeLogin');
+      assert.equal(await page.$eval('.ap-login .ap-primary', button => button.disabled), true);
+      assert.equal(await page.$eval('.ap-login .ap-close', button => button.disabled), true);
+      assert.deepEqual(await page.evaluate(() => window.__accountReview.calls.find(call => call.path === 'nativeLogin').callbackCopy),
+        await page.evaluate(() => window.__accountReview.copy.callbackPage));
+      await page.evaluate(() => window.__accountReview.settle('nativeLogin'));
+      await page.waitForSelector('.ap-sidebar-foot button');
+      let navigations = 0;
+      page.on('framenavigated', frame => { if (frame === page.mainFrame()) navigations += 1; });
+      await page.click('.ap-sidebar-foot button');
+      await page.waitForSelector('.ap-login .ap-primary');
+      assert.equal(await page.$$eval('nav', items => items.length), 0);
+      assert.equal(navigations, 0);
+      assert.equal(await page.evaluate(() => window.__accountReview.calls.filter(call => call.path === 'nativeLogout').length), 1);
+      await page.click('.ap-login .ap-close');
+      assert.equal(await page.evaluate(() => window.__accountReview.calls.filter(call => call.path === 'nativeClose').length), 1);
+    }, language);
+  }
+  await runCase('temporary desktop login failure remains recoverable and never exposes provider details', 'desktop-login-failure', async page => {
+    await page.click('.ap-login .ap-primary');
+    await page.waitForSelector('[role=alert]');
+    assert.equal(await page.$$eval('nav', items => items.length), 0);
+    assert.equal(await page.$eval('.ap-login .ap-primary', button => button.disabled), false);
+    assert.equal(await page.$eval('[role=alert]', item => item.textContent),
+      await page.evaluate(() => window.__accountReview.copy.errors.oidc_token_endpoint_unavailable));
+    assert.equal(await page.evaluate(() => document.body.textContent.includes('PRIVATE_PROVIDER_DETAIL')), false);
+  });
+
   console.log(`Account UI: ${passed} PASS, ${failures.length} FAIL, 0 SKIP. Controlled API responses; real React/client/QR; not BFF/PG or Safari E2E.`);
   assert.equal(failures.length, 0, `Failing scenarios: ${failures.join(', ')}`);
 } finally {

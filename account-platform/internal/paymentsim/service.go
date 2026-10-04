@@ -12,6 +12,7 @@ import (
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/api"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/observability"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/serviceauth"
 )
 
@@ -22,7 +23,7 @@ type Service struct {
 }
 
 func NewService(repository Repository) *Service {
-	return &Service{repository: repository, client: &http.Client{Timeout: 5 * time.Second}, now: func() time.Time { return time.Now().UTC() }}
+	return &Service{repository: repository, client: observability.NewHTTPClient(5 * time.Second), now: func() time.Time { return time.Now().UTC() }}
 }
 
 func (s *Service) Handler(serviceToken string) http.Handler {

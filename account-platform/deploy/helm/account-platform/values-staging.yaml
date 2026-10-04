@@ -1,0 +1,47 @@
+global:
+  environment: staging
+  runtimeSecret: pinvou-account-platform-staging
+
+replicas:
+  accountService: 1
+  billingService: 1
+  tokenGateway: 1
+  tokenPortal: 1
+
+oidc:
+  issuer: https://accounts.staging.example.com/realms/pinvou
+  jwksUrl: https://accounts.staging.example.com/realms/pinvou/protocol/openid-connect/certs
+  tokenUrl: https://accounts.staging.example.com/realms/pinvou/protocol/openid-connect/token
+  audience: pinvou-desktop-staging
+  portalClientId: pinvou-token-portal-staging
+
+public:
+  portalUrl: https://tokens.staging.example.com
+  paymentCallbackUrl: https://billing.staging.example.com/internal/payment/notifications
+
+observability:
+  otlpEndpoint: https://otel.staging.example.com
+  prometheusRulesEnabled: true
+
+tokenGateway:
+  secretProvider: remote
+  secretKeyId: staging-account-token-v1
+  providerAllowedHosts: [newapi.staging.example.com]
+
+external:
+  oidcCidrs: [10.125.0.0/24]
+  postgresCidrs: [10.120.0.0/24]
+  paymentProviderCidrs: [10.121.0.0/24]
+  secretProviderCidrs: [10.122.0.0/24]
+  modelProviderCidrs: [10.123.0.0/24]
+  telemetryCollectorCidrs: [10.124.0.0/24]
+
+ingress:
+  enabled: true
+  portalHost: tokens.staging.example.com
+  keycloakHost: accounts.staging.example.com
+  billingHost: billing.staging.example.com
+  tlsSecretName: pinvou-account-platform-staging-tls
+
+keycloak:
+  hostname: https://accounts.staging.example.com

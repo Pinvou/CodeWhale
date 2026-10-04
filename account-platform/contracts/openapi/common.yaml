@@ -13,6 +13,7 @@ components:
         code:
           type: string
           enum:
+            - RATE_LIMITED
             - AUTH_REQUIRED
             - ACTIVE_ORG_FORBIDDEN
             - MEMBERSHIP_REVOKED

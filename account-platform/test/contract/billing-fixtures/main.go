@@ -48,7 +48,21 @@ func eligibleProbe(repository token.Repository, contexts token.ContextResolver) 
 	return response.Body.Bytes()
 }
 
+func rateLimitProbe() json.RawMessage {
+	handler := httpserver.HandlerWithApplication(config.Config{ServiceName: "contract-rate", RateLimitRPS: 0.001, RateLimitBurst: 1}, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(204) }), nil)
+	handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/business", nil))
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/business", nil))
+	if response.Code != 429 || response.Header().Get("Retry-After") != "1" {
+		panic("rate limit middleware did not return its production 429 contract")
+	}
+	return response.Body.Bytes()
+}
+
 func main() {
+	// Keep production HTTP JSON logs separate from the single fixture document.
+	output := os.Stdout
+	os.Stdout = os.Stderr
 	id := uuid.New()
 	paidAt := time.Now().UTC()
 	transaction := "test-transaction"
@@ -76,7 +90,7 @@ func main() {
 	for code, cause := range map[string]error{"TOKEN_ACCOUNT_NOT_FOUND": token.ErrNotFound, "TOKEN_FORBIDDEN": token.ErrForbidden, "TOKEN_ROUTE_AMBIGUOUS": token.ErrAmbiguousRoute, "TOKEN_ROUTE_UNAVAILABLE": token.ErrNoEligibleRoute} {
 		errors[code] = eligibleProbe(nil, contractContext{err: cause})
 	}
-	if err := json.NewEncoder(os.Stdout).Encode(map[string]any{"product": product, "paid": order, "created": created, "wallet": wallet, "routes": routes, "eligible": eligible, "token_errors": errors, "recent_created": map[string]any{"order": created}, "recent_empty": map[string]any{"order": nil}}); err != nil {
+	if err := json.NewEncoder(output).Encode(map[string]any{"product": product, "paid": order, "created": created, "wallet": wallet, "routes": routes, "eligible": eligible, "token_errors": errors, "rate_limited": rateLimitProbe(), "recent_created": map[string]any{"order": created}, "recent_empty": map[string]any{"order": nil}}); err != nil {
 		panic(err)
 	}
 }

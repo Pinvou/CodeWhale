@@ -1,0 +1,27 @@
+{{- if .Values.ingress.enabled }}
+{{- if ne .Values.public.paymentCallbackUrl (printf "https://%s/internal/payment/notifications" .Values.ingress.billingHost) }}
+{{- fail "enabled ingress requires paymentCallbackUrl to match its HTTPS billing host and exact notification path" }}
+{{- end }}
+{{- if and (has .Values.global.environment (list "staging" "production-new")) (empty .Values.ingress.tlsSecretName) }}
+{{- fail "staging/production ingress requires an environment-provisioned TLS secret" }}
+{{- end }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "pinvou.fullname" . }}
+  labels: {{ include "pinvou.labels" . | nindent 4 }}
+spec:
+  {{- with .Values.ingress.className }}ingressClassName: {{ . }}{{- end }}
+  {{- with .Values.ingress.tlsSecretName }}
+  tls:
+    - secretName: {{ . }}
+      hosts: [{{ $.Values.ingress.portalHost | quote }}, {{ $.Values.ingress.keycloakHost | quote }}, {{ $.Values.ingress.billingHost | quote }}]
+  {{- end }}
+  rules:
+    - host: {{ .Values.ingress.portalHost | quote }}
+      http: { paths: [{ path: /, pathType: Prefix, backend: { service: { name: {{ include "pinvou.fullname" . }}-token-portal, port: { number: 8080 } } } }] }
+    - host: {{ .Values.ingress.keycloakHost | quote }}
+      http: { paths: [{ path: /, pathType: Prefix, backend: { service: { name: {{ include "pinvou.fullname" . }}-keycloak, port: { number: 8080 } } } }] }
+    - host: {{ .Values.ingress.billingHost | quote }}
+      http: { paths: [{ path: /internal/payment/notifications, pathType: Exact, backend: { service: { name: {{ include "pinvou.fullname" . }}-billing-service, port: { number: 8080 } } } }] }
+{{- end }}

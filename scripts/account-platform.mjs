@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { randomBytes } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -41,7 +42,38 @@ function run(command, args, options = {}) {
     shell: false,
   });
   if (result.error) throw result.error;
-  if (result.status !== 0) process.exit(result.status ?? 1);
+  if (result.status !== 0) {
+    const error = new Error(`${command} exited with status ${result.status ?? 1}`);
+    error.exitCode = result.status ?? 1;
+    throw error;
+  }
+}
+
+function commandAvailable(command, args = ['--version']) {
+  const result = spawnSync(command, args, { cwd: repositoryRoot, env: process.env, stdio: 'ignore', shell: false });
+  return !result.error && result.status === 0;
+}
+
+function generatedComposeEnvironment() {
+  const secret = (bytes = 32) => randomBytes(bytes).toString('base64url');
+  return {
+    COMPOSE_PROJECT_NAME: `pinvou-account-platform-test-${process.pid}`,
+    ACCOUNT_PLATFORM_POSTGRES_PASSWORD: secret(),
+    ACCOUNT_DB_PASSWORD: secret(),
+    BILLING_DB_PASSWORD: secret(),
+    TOKEN_DB_PASSWORD: secret(),
+    PAYMENT_SIM_DB_PASSWORD: secret(),
+    KEYCLOAK_DB_PASSWORD: secret(),
+    KEYCLOAK_ADMIN_USERNAME: `pinvou-test-${randomBytes(8).toString('hex')}`,
+    KEYCLOAK_ADMIN_PASSWORD: secret(),
+    PAYMENT_SIM_HMAC_UNIONPAY: secret(),
+    PAYMENT_SIM_HMAC_ALIPAY: secret(),
+    PAYMENT_SIM_HMAC_WECHAT: secret(),
+    INTERNAL_SERVICE_TOKEN: secret(48),
+    PAYMENT_SIM_PAY_TOKEN_SECRET: secret(48),
+    TOKEN_LOCAL_KEK_BASE64: randomBytes(32).toString('base64'),
+    MOCK_NEWAPI_KEY: secret(48),
+  };
 }
 
 function ensureNodeModules() {
@@ -66,6 +98,53 @@ function compose(action) {
   run('docker', ['compose', '--env-file', composeEnv, '-f', composeFile, action, ...(action === 'up' ? ['--build', '-d', '--wait'] : [])]);
 }
 
+function composeTest(testFiles) {
+  if (!commandAvailable('docker', ['version'])) throw new Error('Docker is required for integration tests');
+  const environment = generatedComposeEnvironment();
+  const args = ['compose', '--env-file', `${composeEnv}.example`, '-f', composeFile];
+  let failure;
+  try {
+    run('docker', [...args, 'up', '--build', '-d', '--wait'], { env: environment });
+    for (const testFile of testFiles) {
+      run(process.execPath, [path.join(platformRoot, 'test', 'integration', testFile)], {
+        env: {
+          ...environment,
+          PINVOU_TEST_COMPOSE_FILE: composeFile,
+          PINVOU_TEST_COMPOSE_ENV_FILE: `${composeEnv}.example`,
+        },
+      });
+    }
+  } catch (error) {
+    failure = error;
+  } finally {
+    try {
+      run('docker', [...args, 'down', '--volumes', '--remove-orphans'], { env: environment });
+    } catch (cleanupError) {
+      if (!failure) throw cleanupError;
+      console.error(`[account-platform] cleanup failed: ${cleanupError.message}`);
+    }
+  }
+  if (failure) throw failure;
+}
+
+function integration() {
+  composeTest(['compose-smoke.mjs']);
+}
+
+function e2e() {
+  composeTest(['compose-smoke.mjs', 'compose-acceptance.mjs']);
+}
+
+function fault() {
+  composeTest(['compose-smoke.mjs', 'compose-fault.mjs']);
+}
+
+function security() {
+  ensureNodeModules();
+  run(executable('go'), ['run', 'golang.org/x/vuln/cmd/govulncheck@v1.8.0', './...'], { cwd: platformRoot });
+  runNpm(['audit', '--registry=https://registry.npmjs.org', '--audit-level=high'], { cwd: platformRoot });
+}
+
 const [scope, action] = process.argv.slice(2);
 try {
   if (scope === 'verify' && action === undefined) verify();
@@ -75,10 +154,14 @@ try {
   else if (scope === 'test' && action === 'contract') {
     ensureNodeModules();
     runNpm(['test'], { cwd: platformRoot });
-  } else {
-    throw new Error('usage: account-platform.mjs verify | dev <up|down> | test <unit|contract>');
+  } else if (scope === 'test' && action === 'integration') integration();
+  else if (scope === 'test' && action === 'e2e') e2e();
+  else if (scope === 'test' && action === 'fault') fault();
+  else if (scope === 'test' && action === 'security') security();
+  else {
+    throw new Error('usage: account-platform.mjs verify | dev <up|down> | test <unit|contract|integration|e2e|fault|security>');
   }
 } catch (error) {
   console.error(`[account-platform] ${error.message}`);
-  process.exit(1);
+  process.exitCode = error.exitCode || 1;
 }

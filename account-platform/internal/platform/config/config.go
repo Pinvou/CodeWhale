@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"strconv"
 	"strings"
@@ -16,6 +17,8 @@ type Config struct {
 	Environment     string
 	Address         string
 	ShutdownTimeout time.Duration
+	RateLimitRPS    float64
+	RateLimitBurst  int
 }
 
 func Load(serviceName string) (Config, error) {
@@ -46,11 +49,29 @@ func Load(serviceName string) (Config, error) {
 		}
 		shutdownTimeout = parsed
 	}
+	rateLimitRPS := 100.0
+	if raw := strings.TrimSpace(os.Getenv("RATE_LIMIT_RPS")); raw != "" {
+		parsed, err := strconv.ParseFloat(raw, 64)
+		if err != nil || math.IsNaN(parsed) || math.IsInf(parsed, 0) || parsed <= 0 || parsed > 100000 {
+			return Config{}, fmt.Errorf("invalid RATE_LIMIT_RPS %q", raw)
+		}
+		rateLimitRPS = parsed
+	}
+	rateLimitBurst := 200
+	if raw := strings.TrimSpace(os.Getenv("RATE_LIMIT_BURST")); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed < 1 || parsed > 1000000 {
+			return Config{}, fmt.Errorf("invalid RATE_LIMIT_BURST %q", raw)
+		}
+		rateLimitBurst = parsed
+	}
 
 	return Config{
 		ServiceName:     serviceName,
 		Environment:     environment,
 		Address:         fmt.Sprintf(":%d", port),
 		ShutdownTimeout: shutdownTimeout,
+		RateLimitRPS:    rateLimitRPS,
+		RateLimitBurst:  rateLimitBurst,
 	}, nil
 }

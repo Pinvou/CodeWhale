@@ -4,6 +4,7 @@ import React from 'react';
 import { createRoot } from 'react-dom/client';
 import { AccountPlatformView } from '../../src/features/account-platform/AccountPlatformView.jsx';
 import { AccountPlatformBffClient } from '../../src/features/account-platform/bff-client.js';
+import { AccountPlatformDesktopClient } from '../../src/features/account-platform/desktop-client.js';
 import { dict, ensureLanguage } from '../../src/shared/i18n.js';
 
 const query = new URLSearchParams(location.search);
@@ -57,6 +58,7 @@ window.__accountReview = {
     if (!item) throw new Error(`Unknown fixture request: ${key}`);
     pending.delete(key);
     if (outcome === 'abort') item.reject(new DOMException('Fixture body aborted', 'AbortError'));
+    else if (key === 'nativeLogin') item.resolve({ authenticated: true });
     else if (key === 'balance') item.resolve(json(wallet(333, '')));
     else if (key === 'eligible') item.resolve(json({ items: [{
       token_account_id: ids.personalToken, name: 'Eligible Personal Token',
@@ -128,9 +130,27 @@ globalThis.fetch = async (input, options = {}) => {
 
 async function mount() {
   if (!await ensureLanguage(language)) throw new Error('Fixture language failed to load');
+  const desktop = scenario?.startsWith('desktop-');
+  const client = desktop ? new AccountPlatformDesktopClient({
+    session: async () => ({ authenticated: false }),
+    login: async callbackCopy => {
+      calls.push({ path: 'nativeLogin', method: 'LOCAL', callbackCopy });
+      if (scenario === 'desktop-login-failure') throw 'oidc_token_endpoint_unavailable: PRIVATE_PROVIDER_DETAIL';
+      return defer('nativeLogin');
+    },
+    logout: async () => { calls.push({ path: 'nativeLogout', method: 'LOCAL' }); return { authenticated: false }; },
+    request: async request => {
+      const response = await fetch('/api/' + request.area + request.resource, {
+        method: request.method, body: request.body === undefined ? undefined : JSON.stringify(request.body),
+        headers: request.idempotencyKey ? { 'Idempotency-Key': request.idempotencyKey } : {},
+      });
+      return { status: response.status, body: await response.json() };
+    },
+  }) : new AccountPlatformBffClient();
   createRoot(document.getElementById('account-root')).render(<AccountPlatformView
-    client={new AccountPlatformBffClient()} copy={dict[language].uiAccountPlatform}
-    language={language} onLanguageChange={() => {}} portal
+    client={client} copy={dict[language].uiAccountPlatform}
+    language={language} onLanguageChange={() => {}} portal={!desktop}
+    onClose={desktop ? () => calls.push({ path: 'nativeClose', method: 'LOCAL' }) : undefined}
   />);
 }
 

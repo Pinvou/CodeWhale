@@ -70,6 +70,8 @@ tokio = { version = "1.49", features = ["test-util"] }
 # computer_use retention test ages a crash-orphaned atomic-write temp past
 # the sweep threshold; pinned to the version already in the lock graph (tar).
 filetime = "0.2.29"
+# Generate ephemeral signing keys in OIDC tests; reuse the existing rustls backend.
+aws-lc-rs = "=1.18.0"
 
 [dependencies]
 pinvou-knowledge = { path = "../../pinvou-knowledge", default-features = false, features = ["client", "discovery"] }
@@ -77,6 +79,8 @@ pinvou-knowledge = { path = "../../pinvou-knowledge", default-features = false, 
 include_dir = "0.7"
 serde_json = "1.0"
 serde = { version = "1.0", features = ["derive"] }
+# Mature JWT/JWK verification; no handwritten signature implementation or PEM parser.
+jsonwebtoken = { version = "=10.3.0", default-features = false, features = ["aws_lc_rs"] }
 semver = "1"
 toml = "1"
 log = "0.4"
@@ -130,7 +134,7 @@ codewhale-execpolicy = { path = "../../CodeWhale/crates/execpolicy" }
 # Windows 系统代理设置(非环境变量)。此前 default-features=false 把它关掉,
 # 导致用「系统代理」模式(非 TUN)的用户模型请求直连而被代理工具的路由规则
 # 绕过。显式启用后,reqwest 在 Client::build() 时自动注入系统代理 matcher。
-reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "blocking", "stream", "query", "multipart", "system-proxy"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "blocking", "stream", "query", "form", "multipart", "system-proxy"] }
 wait-timeout = "0.2"
 
 # rustls 直依赖:仅为在启动时调 aws_lc_rs::default_provider().install_default()
@@ -294,7 +298,7 @@ objc2-screen-capture-kit = { version = "0.3", default-features = false, features
 # desktop DC directly — xcap 0.9.8's capture_monitor leaks one GDI bitmap per
 # call (DeleteObject runs while the bitmap is still selected into the memory
 # DC) and its selection is never restored.
-windows-sys = { version = "0.61", features = ["Wdk_Storage_FileSystem", "Win32_Foundation", "Win32_Globalization", "Win32_Graphics_Gdi", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_Performance", "Win32_System_Registry", "Win32_System_SystemInformation", "Win32_System_Threading", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging"] }
+windows-sys = { version = "0.61", features = ["Wdk_Storage_FileSystem", "Win32_Foundation", "Win32_Globalization", "Win32_Graphics_Gdi", "Win32_Storage_FileSystem", "Win32_System_Com", "Win32_System_IO", "Win32_System_Performance", "Win32_System_Registry", "Win32_System_SystemInformation", "Win32_System_Threading", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 webview2-com = "0.38.2"
 # Native Outlook .msg parsing (ingest_email.rs; same gating the retired
 # os::msg_native_supported() predicate provided). Windows-only compile:

@@ -240,6 +240,7 @@
       localVllmSupported: false,
       codexAcpSupported: false,
       teamRelaySupported: true,
+      accountPlatformEnabled: false,
       browserNativeDisplay: false,
     },
     settings: null,
@@ -2735,6 +2736,7 @@
     if (!selected) return [];
     return Array.isArray(selected) ? selected : [selected];
   }
+  var accountPlatformFeature = installBridgeFeature("account-platform", { invoke: invoke });
   var teamRelayFeature = installBridgeFeature("team-relay", {
     state: state,
     notify: notify,
@@ -3163,6 +3165,12 @@
     dependencies: {
       checkDependencies: checkDependencies,
       installDependencies: installDependencies,
+    },
+    accountPlatform: {
+      session: accountPlatformFeature.session,
+      login: accountPlatformFeature.login,
+      logout: accountPlatformFeature.logout,
+      request: accountPlatformFeature.request,
     },
     teamRelay: {
       load: loadTeamRelay,

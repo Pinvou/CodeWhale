@@ -150,6 +150,10 @@
   ["getStatus", "refreshStatus", "grant", "revoke", "stop", "confirm", "deny", "setEnabled", "requestPermissions"]
     .forEach(function (name) { computerUseStubs[name] = computerUseUnsupported; });
 
+  function unsupportedAccountPlatform() {
+    return Promise.reject(new Error("Account Platform desktop authentication is unavailable in this web host"));
+  }
+
   window.TauriBridge = {
     available: true,
     lifecycle: { init: flat.init },
@@ -189,6 +193,12 @@
     memory: domain(["loadMemoryOverview", "saveMemoryProfilePatch", "deleteMemoryPreference", "updateMemoryItem", "deleteMemoryItem", "archiveRecentWorkMemory", "confirmMemoryCandidate", "ignoreMemoryCandidate", "neverMemoryCandidate", "organizeMemory", "loadOrganizeHistory"]),
     updater: domain(["checkForUpdate", "downloadAndInstallUpdate", "cancelUpdate", "restartApp"]),
     dependencies: domain(["checkDependencies", "installDependencies"]),
+    accountPlatform: {
+      session: function () { return Promise.resolve({ enabled: false, configured: false, authenticated: false, errorCode: "unsupported_platform" }); },
+      login: unsupportedAccountPlatform,
+      logout: unsupportedAccountPlatform,
+      request: unsupportedAccountPlatform,
+    },
     teamRelay: {
       load: unsupportedTeamRelay,
       refresh: unsupportedTeamRelay,

@@ -1,0 +1,15 @@
+{
+  "title": "Pinvou Account Platform Overview",
+  "uid": "pinvou-account-platform",
+  "schemaVersion": 39,
+  "refresh": "30s",
+  "time": { "from": "now-6h", "to": "now" },
+  "templating": { "list": [{ "name": "service", "type": "query", "query": "label_values(pinvou_http_requests_total, service)", "includeAll": true, "multi": true }] },
+  "panels": [
+    { "id": 1, "type": "timeseries", "title": "HTTP requests / second", "targets": [{ "expr": "sum by(service) (rate(pinvou_http_requests_total{service=~\"$service\"}[5m]))", "legendFormat": "{{service}}" }], "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 } },
+    { "id": 2, "type": "timeseries", "title": "HTTP p95 latency", "targets": [{ "expr": "histogram_quantile(0.95, sum by(service,le) (rate(pinvou_http_request_duration_seconds_bucket{service=~\"$service\"}[5m])))", "legendFormat": "{{service}}" }], "fieldConfig": { "defaults": { "unit": "s" } }, "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 } },
+    { "id": 3, "type": "timeseries", "title": "Outbox pending", "targets": [{ "expr": "pinvou_outbox_pending_events", "legendFormat": "{{source}}" }], "gridPos": { "h": 8, "w": 8, "x": 0, "y": 8 } },
+    { "id": 4, "type": "timeseries", "title": "Oldest Outbox event", "targets": [{ "expr": "pinvou_outbox_oldest_pending_age_seconds", "legendFormat": "{{source}}" }], "fieldConfig": { "defaults": { "unit": "s" } }, "gridPos": { "h": 8, "w": 8, "x": 8, "y": 8 } },
+    { "id": 5, "type": "stat", "title": "Dead-lettered events", "targets": [{ "expr": "sum(pinvou_outbox_dead_lettered_events)" }], "gridPos": { "h": 8, "w": 8, "x": 16, "y": 8 } }
+  ]
+}

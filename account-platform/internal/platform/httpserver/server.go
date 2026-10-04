@@ -6,21 +6,36 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 	"unicode/utf8"
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/config"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/observability"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+	"go.opentelemetry.io/otel/propagation"
+	oteltrace "go.opentelemetry.io/otel/trace"
 )
 
 type requestIDContextKey struct{}
+type traceIDContextKey struct{}
 
 func RequestID(ctx context.Context) string {
 	value, _ := ctx.Value(requestIDContextKey{}).(string)
+	return value
+}
+
+func TraceID(ctx context.Context) string {
+	if traceID := oteltrace.SpanContextFromContext(ctx).TraceID(); traceID.IsValid() {
+		return traceID.String()
+	}
+	value, _ := ctx.Value(traceIDContextKey{}).(string)
 	return value
 }
 
@@ -44,7 +59,13 @@ func Handler(cfg config.Config) http.Handler {
 // request-correlation and cache-safety middleware. A readiness check should
 // verify only dependencies required for safe request handling.
 func HandlerWithApplication(cfg config.Config, application http.Handler, ready func(context.Context) error) http.Handler {
+	handler, _ := handlerWithMetrics(cfg, application, ready)
+	return handler
+}
+
+func handlerWithMetrics(cfg config.Config, application http.Handler, ready func(context.Context) error) (http.Handler, *httpMetrics) {
 	mux := http.NewServeMux()
+	metrics := newHTTPMetrics(cfg.ServiceName)
 	status := func(state string, check func(context.Context) error) http.HandlerFunc {
 		return func(w http.ResponseWriter, _ *http.Request) {
 			w.Header().Set("Cache-Control", "no-store")
@@ -73,7 +94,23 @@ func HandlerWithApplication(cfg config.Config, application http.Handler, ready f
 	if application != nil {
 		mux.Handle("/", application)
 	}
-	return withRequestID(mux)
+	observed := metrics.middleware(withRateLimit(cfg, mux), newLogger(cfg))
+	return otelhttp.NewHandler(withRequestID(withSecurityHeaders(cfg, observed)), cfg.ServiceName), metrics
+}
+
+func withSecurityHeaders(cfg config.Config, next http.Handler) http.Handler {
+	production := cfg.Environment == "production" || cfg.Environment == "production-new"
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("X-Frame-Options", "DENY")
+		w.Header().Set("Referrer-Policy", "no-referrer")
+		w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+		w.Header().Set("Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'; base-uri 'none'")
+		if production {
+			w.Header().Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func Run(serviceName string) error {
@@ -86,40 +123,69 @@ func RunWithApplication(serviceName string, application http.Handler, ready func
 		return err
 	}
 
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{})).With(
-		"service", cfg.ServiceName,
-		"environment", cfg.Environment,
-	)
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	shutdownTracing, err := observability.SetupTracing(ctx, observability.Config{Service: cfg.ServiceName, Environment: cfg.Environment, Version: version, Commit: commit})
+	if err != nil {
+		return err
+	}
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = shutdownTracing(shutdownCtx)
+	}()
+	logger := newLogger(cfg)
+	applicationHandler, metrics := handlerWithMetrics(cfg, application, ready)
 	server := &http.Server{
 		Addr:              cfg.Address,
-		Handler:           HandlerWithApplication(cfg, application, ready),
+		Handler:           applicationHandler,
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       30 * time.Second,
 		WriteTimeout:      30 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}
+	metricsAddress := strings.TrimSpace(os.Getenv("METRICS_ADDRESS"))
+	if metricsAddress == "" {
+		metricsAddress = ":9090"
+	}
+	metricsServer := &http.Server{Addr: metricsAddress, Handler: metrics.handler(), ReadHeaderTimeout: 3 * time.Second, IdleTimeout: 30 * time.Second}
 
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
-
-	errCh := make(chan error, 1)
+	type serverError struct {
+		name string
+		err  error
+	}
+	errCh := make(chan serverError, 2)
 	go func() {
 		logger.Info("service listening", "address", cfg.Address)
-		errCh <- server.ListenAndServe()
+		errCh <- serverError{name: "application", err: server.ListenAndServe()}
+	}()
+	go func() {
+		logger.Info("metrics listening", "address", metricsAddress)
+		errCh <- serverError{name: "metrics", err: metricsServer.ListenAndServe()}
 	}()
 
 	select {
-	case err := <-errCh:
-		if errors.Is(err, http.ErrServerClosed) {
+	case result := <-errCh:
+		if errors.Is(result.err, http.ErrServerClosed) {
 			return nil
 		}
-		return err
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
+		defer cancel()
+		_ = server.Shutdown(shutdownCtx)
+		_ = metricsServer.Shutdown(shutdownCtx)
+		return fmt.Errorf("%s server: %w", result.name, result.err)
 	case <-ctx.Done():
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
 		defer cancel()
 		logger.Info("service shutting down")
-		return server.Shutdown(shutdownCtx)
+		applicationErr := server.Shutdown(shutdownCtx)
+		metricsErr := metricsServer.Shutdown(shutdownCtx)
+		return errors.Join(applicationErr, metricsErr)
 	}
+}
+
+func newLogger(cfg config.Config) *slog.Logger {
+	return slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{})).With("service", cfg.ServiceName, "environment", cfg.Environment, "version", version, "commit", commit)
 }
 
 func withRequestID(next http.Handler) http.Handler {
@@ -130,9 +196,28 @@ func withRequestID(next http.Handler) http.Handler {
 		if requestID == "" || !utf8.ValidString(requestID) || utf8.RuneCountInString(requestID) > 64 {
 			requestID = newRequestID()
 		}
+		traceID := TraceID(r.Context())
+		if traceID == "" {
+			traceID = traceIDFromParent(r.Header.Get("traceparent"))
+		}
+		if traceID == "" {
+			traceID = newRequestID()
+		}
 		w.Header().Set("X-Request-ID", requestID)
-		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), requestIDContextKey{}, requestID)))
+		w.Header().Set("X-Trace-ID", traceID)
+		ctx := context.WithValue(r.Context(), requestIDContextKey{}, requestID)
+		ctx = context.WithValue(ctx, traceIDContextKey{}, traceID)
+		next.ServeHTTP(w, r.WithContext(ctx))
 	})
+}
+
+func traceIDFromParent(value string) string {
+	ctx := propagation.TraceContext{}.Extract(context.Background(), propagation.HeaderCarrier(http.Header{"Traceparent": []string{value}}))
+	parent := oteltrace.SpanContextFromContext(ctx)
+	if !parent.IsValid() {
+		return ""
+	}
+	return parent.TraceID().String()
 }
 
 func newRequestID() string {

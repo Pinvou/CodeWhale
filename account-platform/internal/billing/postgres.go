@@ -395,6 +395,16 @@ type queryable interface {
 	QueryRow(context.Context, string, ...any) pgx.Row
 }
 
+// lockTransactionKey serializes the first insert for an idempotency scope.
+// SELECT ... FOR UPDATE cannot lock a row that does not exist yet, so without
+// this transaction-scoped lock concurrent first requests can all pass the
+// lookup and then race on a unique constraint.
+func lockTransactionKey(ctx context.Context, tx pgx.Tx, scope, key string) error {
+	lockKey := fmt.Sprintf("%d:%s%s", len(scope), scope, key)
+	_, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, lockKey)
+	return err
+}
+
 func getWallet(ctx context.Context, database queryable, walletID uuid.UUID, lock bool) (Wallet, error) {
 	query := `SELECT id, owner_type, owner_id, status, posted_microcredits, reserved_microcredits, posted_microcredits - reserved_microcredits, version FROM wallets WHERE id = $1`
 	if lock {
