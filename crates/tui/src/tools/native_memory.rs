@@ -284,11 +284,14 @@ mod tests {
                 "first workspace note",
             )
             .unwrap();
+        // The fixture word must not trip the sensitive-content gate the
+        // write path enforces; the test is about scope boundaries, not
+        // content screening.
         let second_hit = store
             .remember(
                 crate::native_memory::MemoryScope::Workspace,
                 Some(&second_id),
-                "second workspace secret",
+                "second workspace exclusion",
             )
             .unwrap();
 
@@ -298,7 +301,7 @@ mod tests {
             .await
             .unwrap();
         assert!(result.content.contains("first workspace note"));
-        assert!(!result.content.contains("second workspace secret"));
+        assert!(!result.content.contains("second workspace exclusion"));
 
         let error = MemoryGetTool
             .execute(json!({"id": second_hit.id}), &context)
