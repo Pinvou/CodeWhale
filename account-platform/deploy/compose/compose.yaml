@@ -1,0 +1,300 @@
+name: pinvou-account-platform
+
+x-service-defaults: &service-defaults
+  restart: unless-stopped
+  read_only: true
+  tmpfs:
+    - /tmp:size=16m,mode=1777
+  security_opt:
+    - no-new-privileges:true
+  networks:
+    - backend
+
+x-service-build: &service-build
+  context: ../..
+  dockerfile: Dockerfile
+
+services:
+  postgres:
+    image: postgres:17-bookworm
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: postgres
+      POSTGRES_USER: account_platform_admin
+      POSTGRES_PASSWORD: ${ACCOUNT_PLATFORM_POSTGRES_PASSWORD:?set ACCOUNT_PLATFORM_POSTGRES_PASSWORD}
+      ACCOUNT_DB_PASSWORD: ${ACCOUNT_DB_PASSWORD:?set ACCOUNT_DB_PASSWORD}
+      BILLING_DB_PASSWORD: ${BILLING_DB_PASSWORD:?set BILLING_DB_PASSWORD}
+      TOKEN_DB_PASSWORD: ${TOKEN_DB_PASSWORD:?set TOKEN_DB_PASSWORD}
+      PAYMENT_SIM_DB_PASSWORD: ${PAYMENT_SIM_DB_PASSWORD:?set PAYMENT_SIM_DB_PASSWORD}
+      KEYCLOAK_DB_PASSWORD: ${KEYCLOAK_DB_PASSWORD:?set KEYCLOAK_DB_PASSWORD}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./init-databases.sh:/docker-entrypoint-initdb.d/10-init-databases.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U account_platform_admin -d postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks:
+      - backend
+
+  redis:
+    image: redis:8.2-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks:
+      - backend
+
+  nats:
+    image: nats:2.11-alpine
+    restart: unless-stopped
+    command: ["--jetstream", "--store_dir=/data", "--http_port=8222"]
+    volumes:
+      - nats-data:/data
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8222/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks:
+      - backend
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.7.0
+    restart: unless-stopped
+    command: ["start-dev", "--import-realm", "--health-enabled=true"]
+    environment:
+      KC_DB: postgres
+      KC_HOSTNAME: http://127.0.0.1:18080
+      KC_DB_URL: jdbc:postgresql://postgres:5432/account_platform_keycloak
+      KC_DB_USERNAME: keycloak
+      KC_DB_PASSWORD: ${KEYCLOAK_DB_PASSWORD:?set KEYCLOAK_DB_PASSWORD}
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN_USERNAME:?set KEYCLOAK_ADMIN_USERNAME}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:?set KEYCLOAK_ADMIN_PASSWORD}
+    volumes:
+      - ../keycloak/pinvou-dev-realm.json:/opt/keycloak/data/import/pinvou-realm.json:ro
+    healthcheck:
+      test:
+        - CMD
+        - bash
+        - -ec
+        - |
+          exec 3<>/dev/tcp/127.0.0.1/9000
+          printf 'HEAD /health/ready HTTP/1.0\r\n\r\n' >&3
+          IFS= read -r status <&3
+          [[ "$$status" == HTTP/*' 200 '* ]]
+      interval: 5s
+      timeout: 3s
+      start_period: 30s
+      retries: 30
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:18080:8080"
+    networks:
+      - backend
+      - frontend
+
+  account-service:
+    <<: *service-defaults
+    build:
+      <<: *service-build
+      args:
+        SERVICE: account-service
+    environment:
+      APP_ENV: development
+      PORT: 8080
+      DATABASE_URL: postgresql://account_service:${ACCOUNT_DB_PASSWORD}@postgres:5432/account_platform_account?sslmode=disable
+      OIDC_ISSUER: http://127.0.0.1:18080/realms/pinvou
+      OIDC_JWKS_URL: http://keycloak:8080/realms/pinvou/protocol/openid-connect/certs
+      OIDC_AUDIENCE: pinvou-desktop-dev
+      BILLING_HTTP_URL: http://billing-service:8080
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?set INTERNAL_SERVICE_TOKEN}
+      NATS_URL: nats://nats:4222
+    depends_on:
+      postgres:
+        condition: service_healthy
+      account-migrate:
+        condition: service_completed_successfully
+      nats:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:18101:8080"
+    networks:
+      - backend
+      - frontend
+
+  billing-service:
+    <<: *service-defaults
+    build:
+      <<: *service-build
+      args:
+        SERVICE: billing-service
+    environment:
+      APP_ENV: development
+      PORT: 8080
+      DATABASE_URL: postgresql://billing_service:${BILLING_DB_PASSWORD}@postgres:5432/account_platform_billing?sslmode=disable
+      NATS_URL: nats://nats:4222
+      PAYMENT_SIMULATOR_URL: http://payment-simulator:8080
+      BILLING_PAYMENT_CALLBACK_URL: http://billing-service:8080/internal/payment/notifications
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?set INTERNAL_SERVICE_TOKEN}
+      PAYMENT_SIM_HMAC_UNIONPAY: ${PAYMENT_SIM_HMAC_UNIONPAY:?set PAYMENT_SIM_HMAC_UNIONPAY}
+      PAYMENT_SIM_HMAC_ALIPAY: ${PAYMENT_SIM_HMAC_ALIPAY:?set PAYMENT_SIM_HMAC_ALIPAY}
+      PAYMENT_SIM_HMAC_WECHAT: ${PAYMENT_SIM_HMAC_WECHAT:?set PAYMENT_SIM_HMAC_WECHAT}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      billing-migrate:
+        condition: service_completed_successfully
+      nats:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:18102:8080"
+    networks:
+      - backend
+      - frontend
+
+  token-gateway:
+    <<: *service-defaults
+    build:
+      <<: *service-build
+      args:
+        SERVICE: token-gateway
+    environment:
+      APP_ENV: development
+      PORT: 8080
+      DATABASE_URL: postgresql://token_gateway:${TOKEN_DB_PASSWORD}@postgres:5432/account_platform_token?sslmode=disable
+      OIDC_ISSUER: http://127.0.0.1:18080/realms/pinvou
+      OIDC_JWKS_URL: http://keycloak:8080/realms/pinvou/protocol/openid-connect/certs
+      OIDC_AUDIENCE: pinvou-desktop-dev
+      ACCOUNT_HTTP_URL: http://account-service:8080
+      BILLING_HTTP_URL: http://billing-service:8080
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?set INTERNAL_SERVICE_TOKEN}
+      TOKEN_SECRET_PROVIDER: local
+      TOKEN_SECRET_KEY_ID: pinvou-development-local-v1
+      TOKEN_LOCAL_KEK_BASE64: ${TOKEN_LOCAL_KEK_BASE64:?set TOKEN_LOCAL_KEK_BASE64}
+      TOKEN_GATEWAY_MAX_INPUT_TOKENS: "128000"
+      TOKEN_PROVIDER_ALLOWED_HOSTS: mock-newapi
+      NATS_URL: nats://nats:4222
+    depends_on:
+      postgres:
+        condition: service_healthy
+      token-migrate:
+        condition: service_completed_successfully
+      nats:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:18103:8080"
+    networks:
+      - backend
+      - frontend
+
+  mock-newapi:
+    <<: *service-defaults
+    build:
+      <<: *service-build
+      args:
+        SERVICE: mock-newapi
+    environment:
+      APP_ENV: development
+      PORT: 8080
+      MOCK_NEWAPI_KEY: ${MOCK_NEWAPI_KEY:?set MOCK_NEWAPI_KEY}
+  payment-simulator:
+    <<: *service-defaults
+    build:
+      <<: *service-build
+      args:
+        SERVICE: payment-simulator
+    environment:
+      APP_ENV: development
+      PORT: 8080
+      DATABASE_URL: postgresql://payment_simulator:${PAYMENT_SIM_DB_PASSWORD}@postgres:5432/account_platform_payment_sim?sslmode=disable
+      BILLING_CALLBACK_URL: http://billing-service:8080/internal/payment/notifications
+      PAYMENT_SIM_PUBLIC_URL: http://127.0.0.1:18104
+      PAYMENT_SIM_PAY_TOKEN_SECRET: ${PAYMENT_SIM_PAY_TOKEN_SECRET:?set PAYMENT_SIM_PAY_TOKEN_SECRET}
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?set INTERNAL_SERVICE_TOKEN}
+      PAYMENT_SIM_HMAC_UNIONPAY: ${PAYMENT_SIM_HMAC_UNIONPAY:?set PAYMENT_SIM_HMAC_UNIONPAY}
+      PAYMENT_SIM_HMAC_ALIPAY: ${PAYMENT_SIM_HMAC_ALIPAY:?set PAYMENT_SIM_HMAC_ALIPAY}
+      PAYMENT_SIM_HMAC_WECHAT: ${PAYMENT_SIM_HMAC_WECHAT:?set PAYMENT_SIM_HMAC_WECHAT}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      payment-simulator-migrate:
+        condition: service_completed_successfully
+    ports:
+      - "127.0.0.1:18104:8080"
+    networks:
+      - backend
+      - frontend
+
+  account-migrate:
+    <<: *service-defaults
+    restart: "no"
+    build:
+      <<: *service-build
+      args:
+        SERVICE: migrate
+    command: ["--dir", "/migrations/account"]
+    environment:
+      DATABASE_URL: postgresql://account_service:${ACCOUNT_DB_PASSWORD}@postgres:5432/account_platform_account?sslmode=disable
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  billing-migrate:
+    <<: *service-defaults
+    restart: "no"
+    build:
+      <<: *service-build
+      args:
+        SERVICE: migrate
+    command: ["--dir", "/migrations/billing"]
+    environment:
+      DATABASE_URL: postgresql://billing_service:${BILLING_DB_PASSWORD}@postgres:5432/account_platform_billing?sslmode=disable
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  token-migrate:
+    <<: *service-defaults
+    restart: "no"
+    build:
+      <<: *service-build
+      args:
+        SERVICE: migrate
+    command: ["--dir", "/migrations/token"]
+    environment:
+      DATABASE_URL: postgresql://token_gateway:${TOKEN_DB_PASSWORD}@postgres:5432/account_platform_token?sslmode=disable
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  payment-simulator-migrate:
+    <<: *service-defaults
+    restart: "no"
+    build:
+      <<: *service-build
+      args:
+        SERVICE: migrate
+    command: ["--dir", "/migrations/payment-simulator"]
+    environment:
+      DATABASE_URL: postgresql://payment_simulator:${PAYMENT_SIM_DB_PASSWORD}@postgres:5432/account_platform_payment_sim?sslmode=disable
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+networks:
+  backend:
+    internal: true
+  frontend:
+    driver: bridge
+
+volumes:
+  postgres-data:
+  nats-data:

@@ -1,0 +1,121 @@
+package identity
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"net/http"
+	"net/url"
+	"strings"
+	"time"
+
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/api"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
+	"github.com/coreos/go-oidc/v3/oidc"
+)
+
+type Principal struct {
+	Issuer      string
+	Subject     string
+	SessionID   string
+	Email       string
+	DisplayName string
+}
+
+type VerifyFunc func(context.Context, string) (Principal, error)
+
+type principalContextKey struct{}
+
+func FromContext(ctx context.Context) (Principal, bool) {
+	principal, ok := ctx.Value(principalContextKey{}).(Principal)
+	return principal, ok
+}
+
+func NewOIDCVerifyFunc(ctx context.Context, issuer, audience, environment, jwksURL string) (VerifyFunc, error) {
+	issuer = strings.TrimRight(strings.TrimSpace(issuer), "/")
+	audience = strings.TrimSpace(audience)
+	parsed, err := url.Parse(issuer)
+	if err != nil || parsed.Host == "" || (parsed.Scheme != "https" && parsed.Scheme != "http") {
+		return nil, errors.New("OIDC_ISSUER must be an absolute HTTP(S) URL")
+	}
+	if environment != "development" && environment != "test" && parsed.Scheme != "https" {
+		return nil, errors.New("OIDC_ISSUER must use HTTPS outside development and test")
+	}
+	if audience == "" {
+		return nil, errors.New("OIDC_AUDIENCE is required")
+	}
+	jwksURL = strings.TrimSpace(jwksURL)
+	if jwksURL == "" {
+		jwksURL = issuer + "/protocol/openid-connect/certs"
+	}
+	keys, err := url.Parse(jwksURL)
+	if err != nil || keys.Host == "" || (keys.Scheme != "https" && keys.Scheme != "http") || keys.User != nil || keys.Fragment != "" {
+		return nil, errors.New("OIDC_JWKS_URL must be an absolute HTTP(S) URL without credentials or fragment")
+	}
+	if environment != "development" && environment != "test" && keys.Scheme != "https" {
+		return nil, errors.New("OIDC_JWKS_URL must use HTTPS outside development and test")
+	}
+
+	// RemoteKeySet shares a fetch under its startup context across verifications.
+	// Bound that fetch itself so a stalled issuer cannot pin every future caller.
+	keyContext := oidc.ClientContext(ctx, &http.Client{Timeout: 5 * time.Second})
+	keySet := oidc.NewRemoteKeySet(keyContext, jwksURL)
+	verifier := oidc.NewVerifier(issuer, keySet, &oidc.Config{ClientID: audience})
+	return func(ctx context.Context, raw string) (Principal, error) {
+		token, err := verifier.Verify(ctx, raw)
+		if err != nil {
+			return Principal{}, fmt.Errorf("verify access token: %w", err)
+		}
+		var claims struct {
+			TokenType     string `json:"typ"`
+			SessionID     string `json:"sid"`
+			SessionState  string `json:"session_state"`
+			Email         string `json:"email"`
+			Name          string `json:"name"`
+			PreferredName string `json:"preferred_username"`
+		}
+		if err := token.Claims(&claims); err != nil {
+			return Principal{}, fmt.Errorf("decode access token claims: %w", err)
+		}
+		// Keycloak signs ID and refresh tokens with the same realm keys. Their
+		// valid signature and client audience do not make them API access tokens.
+		if claims.TokenType != "Bearer" {
+			return Principal{}, errors.New("an access token is required")
+		}
+		sessionID := claims.SessionID
+		if sessionID == "" {
+			sessionID = claims.SessionState
+		}
+		if token.Subject == "" || sessionID == "" {
+			return Principal{}, errors.New("access token is missing subject or session identifier")
+		}
+		displayName := claims.Name
+		if displayName == "" {
+			displayName = claims.PreferredName
+		}
+		return Principal{
+			Issuer:      issuer,
+			Subject:     token.Subject,
+			SessionID:   sessionID,
+			Email:       claims.Email,
+			DisplayName: displayName,
+		}, nil
+	}, nil
+}
+
+func Middleware(verify VerifyFunc, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		header := r.Header.Get("Authorization")
+		parts := strings.Fields(header)
+		if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") || strings.TrimSpace(parts[1]) == "" {
+			api.WriteError(w, http.StatusUnauthorized, "AUTH_REQUIRED", "a valid bearer token is required", httpserver.RequestID(r.Context()))
+			return
+		}
+		principal, err := verify(r.Context(), parts[1])
+		if err != nil {
+			api.WriteError(w, http.StatusUnauthorized, "AUTH_REQUIRED", "the bearer token is invalid", httpserver.RequestID(r.Context()))
+			return
+		}
+		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), principalContextKey{}, principal)))
+	})
+}

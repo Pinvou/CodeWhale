@@ -105,3 +105,9 @@ pinvou3-app/src-tauri/resources/platforms/macos/.codex-bridge-build.*/
 
 # 可选的本地 Windows 私有规则目录
 /.agents/rules/windows-private/
+# Account Platform local environment and generated artifacts
+account-platform/deploy/compose/.env
+!account-platform/deploy/compose/.env.example
+account-platform/contracts/generated/
+account-platform/.tools/
+account-platform/coverage/

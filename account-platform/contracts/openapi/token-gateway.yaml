@@ -1,0 +1,525 @@
+openapi: 3.1.0
+info:
+  title: Pinvou Token Gateway API
+  version: 0.1.0
+  license:
+    name: MIT
+    identifier: MIT
+servers:
+  - url: /v1
+security:
+  - oidc: []
+paths:
+  /token-accounts:
+    post:
+      operationId: createTokenAccount
+      summary: Create a personal or organization Token account
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [owner_type, owner_id, name, share_scope]
+              properties:
+                owner_type:
+                  type: string
+                  enum: [USER, ORG, ORG_UNIT]
+                owner_id:
+                  type: string
+                  format: uuid
+                owner_organization_id:
+                  type: [string, "null"]
+                  format: uuid
+                owner_unit_id:
+                  type: [string, "null"]
+                  format: uuid
+                name:
+                  type: string
+                  minLength: 1
+                  maxLength: 120
+                share_scope:
+                  type: string
+                  enum: [OWNER_UNIT_ONLY, OWNER_SUBTREE, ORG_ALL, EXPLICIT_MEMBERS]
+                default_priority:
+                  type: integer
+                  minimum: 0
+                  maximum: 10000
+      responses:
+        "201":
+          description: Token account created
+        "403":
+          $ref: "#/components/responses/Error"
+  /token-accounts/{token_account_id}/credentials:
+    post:
+      operationId: rotateProviderCredential
+      summary: Validate and atomically activate a new provider credential
+      parameters:
+        - name: token_account_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [provider, base_url, secret, allowed_models]
+              properties:
+                provider:
+                  type: string
+                base_url:
+                  type: string
+                  format: uri
+                secret:
+                  type: string
+                  minLength: 8
+                  writeOnly: true
+                allowed_models:
+                  type: array
+                  minItems: 1
+                  uniqueItems: true
+                  items:
+                    type: string
+      responses:
+        "201":
+          description: Credential validated and activated
+        "422":
+          $ref: "#/components/responses/Error"
+  /token-accounts/{token_account_id}/status:
+    patch:
+      operationId: setTokenAccountStatus
+      summary: Disable or reactivate an owned Token account with an audit reason
+      parameters:
+        - $ref: "#/components/parameters/TokenAccountId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [status, reason]
+              properties:
+                status:
+                  type: string
+                  enum: [ACTIVE, DISABLED]
+                reason:
+                  type: string
+                  minLength: 1
+      responses:
+        "200":
+          description: Updated Token account
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TokenAccount"
+        "403":
+          $ref: "#/components/responses/Error"
+  /token-accounts/{token_account_id}/sharing:
+    put:
+      operationId: replaceTokenSharingPolicy
+      summary: Atomically replace the sharing scope and explicit-member set
+      parameters:
+        - $ref: "#/components/parameters/TokenAccountId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [share_scope, explicit_user_ids]
+              properties:
+                share_scope:
+                  $ref: "#/components/schemas/ShareScope"
+                explicit_user_ids:
+                  type: array
+                  uniqueItems: true
+                  items:
+                    type: string
+                    format: uuid
+      responses:
+        "200":
+          description: Updated sharing policy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TokenAccount"
+        "403":
+          $ref: "#/components/responses/Error"
+  /token-accounts/{token_account_id}/routes:
+    put:
+      operationId: upsertTokenRoute
+      summary: Configure deterministic routing for one allowed model
+      parameters:
+        - $ref: "#/components/parameters/TokenAccountId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RoutePolicy"
+      responses:
+        "200":
+          description: Updated route policy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RoutePolicy"
+        "404":
+          $ref: "#/components/responses/Error"
+  /token-accounts/{token_account_id}/credentials/{credential_id}/revoke:
+    post:
+      operationId: revokeProviderCredential
+      summary: Irreversibly revoke an active or retired provider credential
+      parameters:
+        - $ref: "#/components/parameters/TokenAccountId"
+        - name: credential_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [reason]
+              properties:
+                reason:
+                  type: string
+                  minLength: 1
+      responses:
+        "200":
+          description: Revoked credential metadata; secret material is never returned
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProviderCredential"
+        "404":
+          $ref: "#/components/responses/Error"
+  /token-accounts/eligible:
+    get:
+      operationId: listEligibleTokenAccounts
+      summary: List Token accounts authorized for the active context
+      parameters:
+        - name: model
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Eligible Token accounts
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [items, membership_version]
+                properties:
+                  membership_version:
+                    type: integer
+                    minimum: 1
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/EligibleTokenAccount"
+        "403":
+          $ref: "#/components/responses/Error"
+  /chat/completions:
+    post:
+      operationId: createChatCompletion
+      summary: Authorize, reserve, proxy once, and settle an OpenAI-compatible model request
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema:
+            type: string
+            minLength: 16
+            maxLength: 128
+        - name: X-Pinvou-Token-Account-ID
+          in: header
+          required: false
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [model, messages]
+              properties:
+                model:
+                  type: string
+                messages:
+                  type: array
+                  items: {}
+                stream:
+                  type: boolean
+                max_completion_tokens:
+                  type: integer
+                  minimum: 1
+              additionalProperties: true
+      responses:
+        "200":
+          description: OpenAI-compatible JSON or SSE response
+          headers:
+            X-Pinvou-Usage-Request-ID:
+              required: true
+              schema:
+                type: string
+                format: uuid
+        "402":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+  /recharge/products:
+    get:
+      operationId: listRechargeProducts
+      summary: Proxy the Billing recharge catalog
+      responses:
+        "200":
+          description: Billing recharge catalog
+        "401":
+          $ref: "#/components/responses/Error"
+  /recharge/orders:
+    post:
+      operationId: createRechargeOrder
+      summary: Create a recharge order for the current permitted wallet
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema:
+            type: string
+            minLength: 16
+            maxLength: 128
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [product_id, channel]
+              properties:
+                product_id:
+                  type: string
+                  enum: [CNY_1, CNY_10, CNY_100, CNY_200]
+                channel:
+                  type: string
+                  enum: [UNIONPAY, ALIPAY, WECHAT]
+      responses:
+        "201":
+          description: Recharge order created by Billing Service
+          headers:
+            Cache-Control:
+              required: true
+              schema:
+                type: string
+                const: no-store
+        "422":
+          $ref: "#/components/responses/Error"
+  /recharge/orders/{order_id}:
+    get:
+      operationId: getRechargeOrder
+      summary: Read only a recharge order owned by the current user
+      parameters:
+        - name: order_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Recharge order
+          headers:
+            Cache-Control:
+              required: true
+              schema:
+                type: string
+                const: no-store
+        "404":
+          $ref: "#/components/responses/Error"
+  /recharge/orders/{order_id}/close:
+    post:
+      operationId: closeRechargeOrder
+      summary: Close only a pending recharge order owned by the current user
+      parameters:
+        - name: order_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Closed recharge order
+        "404":
+          $ref: "#/components/responses/Error"
+  /me/balance:
+    get:
+      operationId: getMyBalance
+      summary: Read the active context wallet directly from Billing
+      parameters:
+        - name: consistency
+          in: query
+          schema:
+            type: string
+            const: strong
+      responses:
+        "200":
+          description: Strongly consistent active-context balance
+        "401":
+          $ref: "#/components/responses/Error"
+        "503":
+          $ref: "#/components/responses/Error"
+components:
+  securitySchemes:
+    oidc:
+      type: openIdConnect
+      openIdConnectUrl: https://identity.example.invalid/realms/pinvou/.well-known/openid-configuration
+  responses:
+    Error:
+      description: Stable error response
+      content:
+        application/json:
+          schema:
+            $ref: "common.yaml#/components/schemas/Error"
+  parameters:
+    TokenAccountId:
+      name: token_account_id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+  schemas:
+    ShareScope:
+      type: string
+      enum: [OWNER_UNIT_ONLY, OWNER_SUBTREE, ORG_ALL, EXPLICIT_MEMBERS]
+    TokenAccount:
+      type: object
+      additionalProperties: false
+      required: [token_account_id, owner_type, owner_id, wallet_id, name, status, share_scope, default_priority]
+      properties:
+        token_account_id:
+          type: string
+          format: uuid
+        owner_type:
+          type: string
+          enum: [USER, ORG, ORG_UNIT]
+        owner_id:
+          type: string
+          format: uuid
+        owner_organization_id:
+          type: string
+          format: uuid
+        owner_unit_id:
+          type: string
+          format: uuid
+        wallet_id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        status:
+          type: string
+          enum: [ACTIVE, DISABLED, FROZEN]
+        share_scope:
+          $ref: "#/components/schemas/ShareScope"
+        default_priority:
+          type: integer
+          minimum: 0
+          maximum: 10000
+    ProviderCredential:
+      type: object
+      additionalProperties: false
+      required: [credential_id, token_account_id, provider, base_url, fingerprint, version, status, allowed_models]
+      properties:
+        credential_id:
+          type: string
+          format: uuid
+        token_account_id:
+          type: string
+          format: uuid
+        provider:
+          type: string
+        base_url:
+          type: string
+          format: uri
+        fingerprint:
+          type: string
+        version:
+          type: integer
+          minimum: 1
+        status:
+          type: string
+          enum: [PENDING, ACTIVE, RETIRED, REVOKED]
+        allowed_models:
+          type: array
+          items:
+            type: string
+        validated_at:
+          type: string
+          format: date-time
+    RoutePolicy:
+      type: object
+      additionalProperties: false
+      required: [model, priority, default_scope, health_status]
+      properties:
+        token_account_id:
+          type: string
+          format: uuid
+          readOnly: true
+        model:
+          type: string
+          minLength: 1
+        priority:
+          type: integer
+          minimum: 0
+          maximum: 10000
+        default_scope:
+          type: string
+          enum: [NONE, UNIT, ORG]
+        health_status:
+          type: string
+          enum: [HEALTHY, DEGRADED, UNHEALTHY]
+        updated_at:
+          type: string
+          format: date-time
+          readOnly: true
+    EligibleTokenAccount:
+      type: object
+      additionalProperties: false
+      required: [token_account_id, name, owner_type, allowed_models]
+      properties:
+        token_account_id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        owner_type:
+          type: string
+          enum: [USER, ORG, ORG_UNIT]
+        allowed_models:
+          type: array
+          items:
+            type: string
+        health_status:
+          type: string
+          enum: [HEALTHY, DEGRADED]

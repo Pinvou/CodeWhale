@@ -376,6 +376,7 @@ class CiGatePolicyTests(unittest.TestCase):
             "relay",
             "team_relay_hub",
             "update_release_console",
+            "account_platform",
             "acp_runtime",
             "windows_codex",
             "windows_runtime",
@@ -398,6 +399,7 @@ class CiGatePolicyTests(unittest.TestCase):
         for job in (
             "team-relay-hub-test",
             "update-release-console-test",
+            "account-platform-test",
             "backflow-portability",
             "release-contract-test",
             "windows-runtime-test",
@@ -461,6 +463,18 @@ class CiGatePolicyTests(unittest.TestCase):
             console_job,
         )
         self.assertIn("always() && matrix.node-version == '20'", console_job)
+        account_job = self.workflow.split(
+            "\n  account-platform-test:", maxsplit=1
+        )[1].split("\n  release-contract-test:", maxsplit=1)[0]
+        self.assertIn("needs.changes.outputs.account_platform == 'true'", account_job)
+        self.assertIn("postgres:17-alpine", account_job)
+        self.assertIn("go test -mod=readonly -race ./...", account_job)
+        self.assertIn("PINVOU_ACCOUNT_TEST_DATABASE_URL", account_job)
+        self.assertIn('CREATE DATABASE $database', account_job)
+        self.assertIn('SELECT EXISTS(SELECT 1 FROM schema_migrations)', account_job)
+        self.assertIn('for round in 1 2; do', account_job)
+        self.assertIn("buf lint account-platform/contracts/proto", account_job)
+        self.assertIn("docker compose", account_job)
 
     def test_trusted_backflow_has_parallel_three_platform_light_gate(self):
         portability = self.workflow.split(

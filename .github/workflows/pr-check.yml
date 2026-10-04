@@ -9,6 +9,7 @@ name: PR Check
 # - frontend-test:Draft 跑 lint/build/逻辑测试；Ready PR 与 Merge Queue 按实际
 #   base/head diff 选择浏览器 smoke；未知或共享路径保守执行全部 smoke。
 # - team-relay-hub-test:Hub 或迁移变化时使用隔离 PostgreSQL 跑完整测试与依赖审计。
+# - account-platform-test:账号平台变化时验证 Go、API/事件契约、迁移和 Compose 构建。
 # - release-contract-test:发布链路改动只跑配置/脚本契约,不在 PR 构建安装包。
 # - knowledge-rust:独立 pinvou-knowledge crate/部署入口改动跑 fmt/clippy/test 与 shell
 #   语法检查；依赖或策略改动时追加 cargo-deny，不依赖 Tauri workspace 间接覆盖。
@@ -162,6 +163,7 @@ jobs:
       relay: ${{ steps.filter.outputs.relay }}
       team_relay_hub: ${{ steps.filter.outputs.team_relay_hub }}
       update_release_console: ${{ steps.filter.outputs.update_release_console }}
+      account_platform: ${{ steps.filter.outputs.account_platform }}
       acp_runtime: ${{ steps.filter.outputs.acp_runtime }}
       windows_codex: ${{ steps.filter.outputs.windows_codex }}
       windows_runtime: ${{ steps.filter.outputs.windows_runtime }}
@@ -390,6 +392,12 @@ jobs:
               - 'deploy/nginx-pinvou3-updates.conf'
               - 'docs/windows-static-update-release.md'
               - 'docs/windows-update-release-console.md'
+              - '.github/workflows/pr-check.yml'
+            account_platform:
+              - 'account-platform/**'
+              - 'scripts/account-platform.mjs'
+              - 'docs/账号组织Token与计费系统-架构设计.md'
+              - 'docs/账号组织Token与计费系统-实施任务与验证计划.md'
               - '.github/workflows/pr-check.yml'
             acp_runtime:
               - 'pinvou3-app/scripts/codex-bridge-runtime/**'
@@ -851,6 +859,105 @@ jobs:
         env:
           PINVOU_UPDATE_ADMIN_TOKEN: ci-only-token-that-is-at-least-32-characters
         run: docker compose --file update-release-console/deploy/compose.yaml down --volumes --remove-orphans
+  account-platform-test:
+    name: account-platform-test
+    needs: changes
+    if: ${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.account_platform == 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group') }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: account_platform_test
+          POSTGRES_PASSWORD: account_platform_test
+          POSTGRES_DB: account_platform_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U account_platform_test -d account_platform_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up zram and swap
+        # 内存扩容为尽力而为:超时/失败只告警不阻断(回退 runner 默认内存)。
+        run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup 未完成,继续使用 runner 默认内存"
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.26.6'
+          cache-dependency-path: account-platform/go.sum
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: account-platform/package-lock.json
+
+      - uses: bufbuild/buf-setup-action@v1
+        with:
+          version: '1.57.0'
+
+      - name: 安装契约测试依赖
+        run: npm --prefix account-platform ci --prefer-offline --no-audit
+
+      - name: Go 格式、测试与静态检查
+        working-directory: account-platform
+        env:
+          PINVOU_ACCOUNT_TEST_DATABASE_URL: postgresql://account_platform_test:account_platform_test@127.0.0.1:5432/account_platform_test?sslmode=disable
+        run: |
+          test -z "$(gofmt -l .)"
+          go test -mod=readonly -race ./...
+          go vet -mod=readonly ./...
+
+      - name: OpenAPI、事件与迁移契约
+        run: |
+          npm --prefix account-platform test
+          buf lint account-platform/contracts/proto
+
+      - name: PostgreSQL 迁移正反向验证
+        working-directory: account-platform
+        env:
+          DATABASE_URL: postgresql://account_platform_test:account_platform_test@127.0.0.1:5432/account_platform_test?sslmode=disable
+        run: |
+          for domain in account billing token payment-simulator; do
+            database="account_platform_migration_${domain//-/_}"
+            psql "$DATABASE_URL" --set ON_ERROR_STOP=1 --command "CREATE DATABASE $database"
+            domain_url="postgresql://account_platform_test:account_platform_test@127.0.0.1:5432/$database?sslmode=disable"
+            for round in 1 2; do
+              DATABASE_URL="$domain_url" go run -mod=readonly ./cmd/migrate --dir "migrations/$domain"
+              while true; do
+                remaining=$(psql "$domain_url" --set ON_ERROR_STOP=1 --tuples-only --no-align --command "SELECT EXISTS(SELECT 1 FROM schema_migrations)")
+                case "$remaining" in
+                  t) DATABASE_URL="$domain_url" go run -mod=readonly ./cmd/migrate --dir "migrations/$domain" --direction down ;;
+                  f) break ;;
+                  *) echo "Unexpected migration ledger result: $remaining" >&2; exit 1 ;;
+                esac
+              done
+              test "$(psql "$domain_url" --set ON_ERROR_STOP=1 --tuples-only --no-align --command "SELECT count(*) FROM schema_migrations")" = 0
+            done
+            psql "$DATABASE_URL" --set ON_ERROR_STOP=1 --command "DROP DATABASE $database"
+          done
+
+      - name: Compose 配置和服务镜像构建
+        run: |
+          docker compose \
+            --env-file account-platform/deploy/compose/.env.example \
+            -f account-platform/deploy/compose/compose.yaml \
+            config --quiet
+          docker compose \
+            --env-file account-platform/deploy/compose/.env.example \
+            -f account-platform/deploy/compose/compose.yaml \
+            build account-service billing-service token-gateway payment-simulator
+
+      - name: Go 与 Node 高危依赖审计
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@v1.8.0
+          (cd account-platform && govulncheck ./...)
+          npm --prefix account-platform audit --registry=https://registry.npmjs.org --audit-level=high
 
   release-contract-test:
     name: release-contract-test
@@ -2227,6 +2334,7 @@ jobs:
       - relay-test
       - team-relay-hub-test
       - update-release-console-test
+      - account-platform-test
       - release-contract-test
       - knowledge-rust
       - rust-lint
@@ -2261,6 +2369,7 @@ jobs:
           RELAY_RESULT: ${{ needs.relay-test.result }}
           TEAM_RELAY_HUB_RESULT: ${{ needs.team-relay-hub-test.result }}
           UPDATE_RELEASE_CONSOLE_RESULT: ${{ needs.update-release-console-test.result }}
+          ACCOUNT_PLATFORM_RESULT: ${{ needs.account-platform-test.result }}
           RELEASE_CONTRACT_RESULT: ${{ needs.release-contract-test.result }}
           KNOWLEDGE_RUST_RESULT: ${{ needs.knowledge-rust.result }}
           RUST_LINT_RESULT: ${{ needs.rust-lint.result }}
@@ -2300,6 +2409,7 @@ jobs:
             "relay-test:$RELAY_RESULT" \
             "team-relay-hub-test:$TEAM_RELAY_HUB_RESULT" \
             "update-release-console-test:$UPDATE_RELEASE_CONSOLE_RESULT" \
+            "account-platform-test:$ACCOUNT_PLATFORM_RESULT" \
             "release-contract-test:$RELEASE_CONTRACT_RESULT" \
             "knowledge-rust:$KNOWLEDGE_RUST_RESULT" \
             "rust-lint:$RUST_LINT_RESULT" \

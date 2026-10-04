@@ -1,0 +1,76 @@
+openapi: 3.1.0
+info:
+  title: Pinvou Account Platform Common Types
+  version: 0.1.0
+paths: {}
+components:
+  schemas:
+    Error:
+      type: object
+      additionalProperties: false
+      required: [code, message, request_id]
+      properties:
+        code:
+          type: string
+          enum:
+            - AUTH_REQUIRED
+            - ACTIVE_ORG_FORBIDDEN
+            - MEMBERSHIP_REVOKED
+            - TOKEN_ACCOUNT_NOT_ELIGIBLE
+            - IDEMPOTENCY_CONFLICT
+            - CONTEXT_CHANGED
+            - ORDER_PRODUCT_INVALID
+            - ORDER_EXPIRED
+            - WALLET_INSUFFICIENT
+            - USAGE_ALREADY_SETTLED
+            - PAYMENT_PROVIDER_UNAVAILABLE
+            - BILLING_UNAVAILABLE
+            - INVALID_REQUEST
+            - NOT_FOUND
+            - ACCOUNT_FORBIDDEN
+            - ACCOUNT_CONFLICT
+            - LAST_OWNER_REQUIRED
+            - ORG_UNIT_HIERARCHY_INVALID
+            - INVITATION_EXPIRED
+            - SERVICE_AUTH_REQUIRED
+            - BILLING_CONFLICT
+            - WALLET_UNAVAILABLE
+            - INTERNAL_ERROR
+            - PAYMENT_CONFLICT
+            - PAYMENT_NOTIFICATION_REJECTED
+            - TOKEN_ACCOUNT_NOT_FOUND
+            - TOKEN_FORBIDDEN
+            - TOKEN_ROUTE_AMBIGUOUS
+            - TOKEN_ROUTE_UNAVAILABLE
+            - CREDENTIAL_VALIDATION_FAILED
+            - RECHARGE_CREATE_FAILED
+            - RECHARGE_ORDER_NOT_FOUND
+            - STREAM_UNAVAILABLE
+            - REQUEST_TOO_LARGE
+            - PRICING_UNAVAILABLE
+            - PRICE_INVALID
+            - IDEMPOTENCY_KEY_REQUIRED
+            - USAGE_REPLAY_BLOCKED
+            - WALLET_RESERVE_FAILED
+            - UPSTREAM_RESULT_UNKNOWN
+        message:
+          type: string
+        request_id:
+          type: string
+        details:
+          type: object
+          additionalProperties: true
+    Context:
+      type: object
+      additionalProperties: false
+      required: [context_type, membership_version]
+      properties:
+        context_type:
+          type: string
+          enum: [PERSONAL, ORGANIZATION]
+        organization_id:
+          type: [string, "null"]
+          format: uuid
+        membership_version:
+          type: integer
+          minimum: 1

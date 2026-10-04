@@ -1,0 +1,5 @@
+.git
+deploy
+test
+web
+**/*_test.go

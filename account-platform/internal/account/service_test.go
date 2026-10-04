@@ -1,0 +1,130 @@
+package account
+
+import (
+	"context"
+	"errors"
+	"testing"
+	"time"
+
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/identity"
+	"github.com/google/uuid"
+)
+
+type fakeRepository struct {
+	me            Me
+	activateCalls int
+}
+
+func (f *fakeRepository) Bootstrap(context.Context, identity.Principal) (Me, bool, error) {
+	return f.me, true, nil
+}
+func (f *fakeRepository) ActivateUser(_ context.Context, userID uuid.UUID) error {
+	if userID != f.me.UserID {
+		return errors.New("unexpected user")
+	}
+	f.activateCalls++
+	f.me.Status = "ACTIVE"
+	return nil
+}
+func (f *fakeRepository) GetMe(context.Context, identity.Principal) (Me, error) {
+	return f.me, nil
+}
+func (*fakeRepository) ResolveAuthorizationContext(context.Context, identity.Principal) (AuthorizationContext, error) {
+	panic("not used")
+}
+func (*fakeRepository) ListOrganizations(context.Context, identity.Principal) ([]Organization, error) {
+	panic("not used")
+}
+func (*fakeRepository) SetActiveContext(context.Context, identity.Principal, *uuid.UUID) (Context, error) {
+	panic("not used")
+}
+func (*fakeRepository) CreateOrganization(context.Context, identity.Principal, string) (Organization, error) {
+	panic("not used")
+}
+func (*fakeRepository) ListUnits(context.Context, identity.Principal, uuid.UUID) ([]Unit, error) {
+	panic("not used")
+}
+func (*fakeRepository) ListMembers(context.Context, identity.Principal, uuid.UUID) ([]Member, error) {
+	panic("not used")
+}
+func (*fakeRepository) ReplaceMemberRoles(context.Context, identity.Principal, uuid.UUID, uuid.UUID, []string) (Member, error) {
+	panic("not used")
+}
+func (*fakeRepository) CreateUnit(context.Context, identity.Principal, uuid.UUID, *uuid.UUID, string) (Unit, error) {
+	panic("not used")
+}
+func (*fakeRepository) MoveUnit(context.Context, identity.Principal, uuid.UUID, uuid.UUID, *uuid.UUID, int64) (Unit, error) {
+	panic("not used")
+}
+func (*fakeRepository) CreateInvitation(context.Context, identity.Principal, uuid.UUID, string, []string, time.Time) (Invitation, error) {
+	panic("not used")
+}
+func (*fakeRepository) AcceptInvitation(context.Context, identity.Principal, string) (Organization, error) {
+	panic("not used")
+}
+func (*fakeRepository) RevokeMembership(context.Context, identity.Principal, uuid.UUID, uuid.UUID) error {
+	panic("not used")
+}
+func (*fakeRepository) TransferOwnership(context.Context, identity.Principal, uuid.UUID, uuid.UUID) error {
+	panic("not used")
+}
+func (*fakeRepository) Ping(context.Context) error { return nil }
+func (*fakeRepository) Close()                     {}
+
+type fakeWalletProvisioner struct {
+	err   error
+	calls int
+}
+
+func (f *fakeWalletProvisioner) EnsurePersonalWallet(context.Context, uuid.UUID) error {
+	f.calls++
+	return f.err
+}
+
+func TestBootstrapActivatesOnlyAfterWalletProvisioning(t *testing.T) {
+	userID := uuid.Must(uuid.NewV7())
+	repository := &fakeRepository{me: Me{UserID: userID, Status: "PROVISIONING", ActiveContext: Context{Type: "PERSONAL", MembershipVersion: 1}}}
+	wallets := &fakeWalletProvisioner{}
+	me, err := NewService(repository, wallets).Bootstrap(context.Background(), identity.Principal{Issuer: "issuer", Subject: "subject", SessionID: "session"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if me.Status != "ACTIVE" || wallets.calls != 1 || repository.activateCalls != 1 {
+		t.Fatalf("me=%+v wallet calls=%d activate calls=%d", me, wallets.calls, repository.activateCalls)
+	}
+}
+
+func TestBootstrapRemainsProvisioningWhenBillingIsUnavailable(t *testing.T) {
+	repository := &fakeRepository{me: Me{UserID: uuid.Must(uuid.NewV7()), Status: "PROVISIONING", ActiveContext: Context{Type: "PERSONAL", MembershipVersion: 1}}}
+	wallets := &fakeWalletProvisioner{err: errors.New("unavailable")}
+	me, err := NewService(repository, wallets).Bootstrap(context.Background(), identity.Principal{})
+	if !errors.Is(err, ErrWalletProvisioning) {
+		t.Fatalf("error = %v, want ErrWalletProvisioning", err)
+	}
+	if me.Status != "PROVISIONING" || repository.activateCalls != 0 {
+		t.Fatalf("me=%+v activate calls=%d", me, repository.activateCalls)
+	}
+}
+
+func TestInvitationRolesAreRestrictedAndMemberIsImplicit(t *testing.T) {
+	roles, err := validateInvitationRoles([]string{"AUDITOR", "AUDITOR"})
+	if err != nil || len(roles) != 2 || roles[0] != "AUDITOR" || roles[1] != "MEMBER" {
+		t.Fatalf("roles=%v error=%v", roles, err)
+	}
+	if _, err := validateInvitationRoles([]string{"OWNER"}); err == nil {
+		t.Fatal("owner must be transferred, not invited")
+	}
+}
+
+func TestManagedRolesCannotGrantOwnership(t *testing.T) {
+	roles, err := validateManagedRoles([]string{"AUDITOR", "AUDITOR"})
+	if err != nil || len(roles) != 2 || roles[0] != "AUDITOR" || roles[1] != "MEMBER" {
+		t.Fatalf("roles=%v error=%v", roles, err)
+	}
+	if _, err := validateManagedRoles([]string{"OWNER"}); !errors.Is(err, ErrConflict) {
+		t.Fatalf("owner grant must use ownership transfer: %v", err)
+	}
+	if _, err := validateManagedRoles([]string{"UNIT_ADMIN"}); !errors.Is(err, ErrConflict) {
+		t.Fatalf("unit admin requires a scoped assignment workflow: %v", err)
+	}
+}
