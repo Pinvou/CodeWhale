@@ -156,13 +156,58 @@ repository with an `origin` remote (the scope id is a hash of it).
 Memory is for **durable** signal. Things that should NOT live there:
 
 - **Secrets** — no API keys, tokens, passwords. The files are plain
-  text on disk and entries are injected into the system prompt.
+  text on disk and entries are injected into the system prompt. This
+  one is enforced, not advisory — see below.
 - **Transient task state** — "I'm currently working on the parser"
   changes every session; it doesn't belong in cross-session memory.
 - **Conversation snippets** — quote-style notes belong in the notes
   tool (`note`), not memory.
 - **Long instructions** — anything over a few sentences should live
   in `AGENTS.md` (project-level) or in a skill.
+
+## Enforced sensitive-content refusal
+
+Since this gate landed, the write path does not rely on the model's
+judgement about secrets. `NativeMemoryStore::remember` and the `to`
+half of
+`revise` run every normalized note through heuristic screens
+(`crates/tui/src/native_memory.rs`, `looks_sensitive` and its helpers,
+ported from the Pinvou embedder where they filter captured memory in
+production):
+
+- a run of 11+ digits (CN mobile numbers are 11, resident ID cards 18;
+  dates and version numbers never form one),
+- credential needles — `api_key`, `apikey`, `api key`, `secret`,
+  `private key`, and the Chinese markers 身份证 / 手机号 / 密码 /
+  口令 / 密钥 / 私钥, which are the real-world secret markers in the
+  locales the source heuristics run in,
+- `token` or another credential word tied to an assignment
+  (`=`, `:`, 是, 为),
+- AWS access-key IDs (`AKIA`/`ASIA` + 16 uppercase alphanumerics) and
+  PEM private-key armor,
+- URLs, email addresses, and home-directory-style paths, refused
+  wholesale: a durable preference rarely needs one and they are the
+  classic channel for `user:password@host` and home-directory leaks.
+
+A note that trips the screen is refused fail-closed — never written,
+never silently dropped — with a stable, model-actionable error:
+
+```text
+memory note refused: it looks like it contains sensitive data such as
+a credential, token, password, phone or ID number. Memory files are
+plain text on disk and are injected verbatim into future prompts, so
+never store secrets there. Restate the durable fact without the
+sensitive values, or keep the secret in a dedicated credential store
+instead.
+```
+
+The screen covers only what enters the store. Retrieval
+(`memory_search`, `memory_get`) is read-only and untouched, and
+`retire` plus the revise source are never screened, so a sensitive
+note that predates the gate can always be revised away or retired.
+The heuristics are a net, not a parser: they err closed because a
+false positive costs one rephrased note while a false negative leaks
+a secret into plain-text files injected into every future prompt.
 
 ## Privacy and scope
 

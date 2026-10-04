@@ -5,6 +5,7 @@
 //! or network dependency: callers decide when a note is reviewed and written.
 
 use std::collections::{HashMap, HashSet};
+use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -196,7 +197,10 @@ impl NativeMemoryStore {
     }
 
     /// Append a reviewed note to the selected Markdown source and refresh its
-    /// index. The note is treated as data, never as an instruction.
+    /// index. The note is treated as data, never as an instruction, and is
+    /// refused outright when it looks like a secret or other sensitive
+    /// personal data — the memory files are plain text on disk and are
+    /// injected verbatim into future prompts.
     pub fn remember(
         &self,
         scope: MemoryScope,
@@ -204,6 +208,7 @@ impl NativeMemoryStore {
         note: &str,
     ) -> Result<MemoryHit> {
         let note = normalize_note(note)?;
+        refuse_sensitive_note(&note)?;
         let path = match scope {
             MemoryScope::Global => self.global_path(),
             MemoryScope::Workspace => self.workspace_path(
@@ -257,6 +262,13 @@ impl NativeMemoryStore {
         evidence: &str,
     ) -> Result<MemoryHit> {
         let to = normalize_note(to)?;
+        // The gate runs on the replacement only. `from` matches a note that
+        // is already in the store — possibly written before this gate
+        // existed — so refusing it would make an already-stored sensitive
+        // note impossible to revise away. `retire` is ungated for the same
+        // reason, and evidence is journal-only text that is never indexed
+        // or injected.
+        refuse_sensitive_note(&to)?;
         let evidence = normalize_evidence(evidence)?;
         let from_needle = normalize_note(from)?;
         let path = self.scope_path(scope, workspace_id)?;
@@ -891,6 +903,198 @@ fn normalize_note(note: &str) -> Result<String> {
         bail!("memory note exceeds {MAX_NOTE_BYTES} bytes");
     }
     Ok(note.trim_start_matches('-').trim().to_string())
+}
+
+/// Stable, model-actionable refusal for note content that looks like a
+/// secret or other sensitive personal data. The string is part of the
+/// contract: the `remember` tool surfaces it verbatim so the model can act
+/// on it (rephrase without the sensitive values, or store nothing).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SensitiveNoteRefusal;
+
+const SENSITIVE_NOTE_REASON: &str = "memory note refused: it looks like it contains sensitive \
+     data such as a credential, token, password, phone or ID number. Memory files are plain \
+     text on disk and are injected verbatim into future prompts, so never store secrets \
+     there. Restate the durable fact without the sensitive values, or keep the secret in a \
+     dedicated credential store instead.";
+
+impl fmt::Display for SensitiveNoteRefusal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(SENSITIVE_NOTE_REASON)
+    }
+}
+
+impl std::error::Error for SensitiveNoteRefusal {}
+
+/// Fail-closed gate on the memory write path: a note that trips any
+/// sensitive-content heuristic is refused with [`SensitiveNoteRefusal`]
+/// instead of being written. Nothing is silently dropped.
+fn refuse_sensitive_note(note: &str) -> Result<()> {
+    if looks_sensitive(note) {
+        return Err(SensitiveNoteRefusal.into());
+    }
+    Ok(())
+}
+
+/// Sensitive-content heuristics for the memory write path, ported from the
+/// Pinvou embedder's production gate (`features/memory/util.rs::
+/// looks_sensitive` and its helpers), where they have filtered captured
+/// memory notes since before this store existed. This is a heuristic net,
+/// not a parser, and it errs closed: false positives cost a rephrased note,
+/// false negatives leak a secret into plain-text files that are injected
+/// into every future prompt.
+///
+/// Refused families:
+/// - a run of 11 or more ASCII digits — CN mobile numbers are 11 digits,
+///   resident ID cards 18, so ordinary dates and version numbers never trip
+///   it while phone/ID/card captures do (adapted from the embedder's
+///   total-digit count because CodeWhale notes are full sentences where a
+///   total across the text false-positives on ordinary date/version-heavy
+///   notes; a contiguous run still covers the shapes the embedder gate was
+///   proven against)
+/// - credential needles, including the Chinese markers 身份证 / 手机号 /
+///   密码 / 口令 / 密钥 / 私钥 — kept deliberately: they are the real-world
+///   secret markers in the locales the source heuristics run in production
+/// - `token` (or another credential word) tied to an assignment marker
+///   (`=`, `:`, the CJK copulas 是/为, and — an adaptation for English
+///   notes — the copula " is ", the mirror of 是/为 in the source
+///   heuristics; without it "the password is hunter2" walks through)
+/// - AWS access-key IDs (`AKIA`/`ASIA` + 16 uppercase alphanumerics) —
+///   added on top of the port so a bare key is refused even with no
+///   assignment or needle around it
+/// - PEM private-key armor (`-----BEGIN ... PRIVATE KEY-----`) —
+///   `private key` is likewise an addition to the ported needle list
+/// - URLs, email addresses, and home-directory-style paths — ported as-is
+///   from the embedder, which refuses them wholesale because a durable
+///   preference rarely needs one and they are the classic channel for
+///   `user:password@host` and home-directory leakage
+///
+/// The gate runs only where content enters the store: append and the
+/// revise replacement. Retrieval (`search`, `get`) is read-only and never
+/// gated; `retire` and the revise source are never gated so a sensitive
+/// note that predates the gate can always be removed again.
+const SENSITIVE_NEEDLES: [&str; 14] = [
+    "身份证",
+    "手机号",
+    "手机号码",
+    "电话号码",
+    "联系电话",
+    "密码",
+    "口令",
+    "密钥",
+    "私钥",
+    "api_key",
+    "apikey",
+    "api key",
+    "secret",
+    "private key",
+];
+
+fn looks_sensitive(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    if has_digit_run(value, 11) {
+        return true;
+    }
+    if SENSITIVE_NEEDLES
+        .iter()
+        .any(|needle| lower.contains(needle))
+    {
+        return true;
+    }
+    if looks_like_aws_access_key_id(value) {
+        return true;
+    }
+    if lower.contains("token") && has_assignment_marker(&lower, value) {
+        return true;
+    }
+    looks_like_url(&lower)
+        || looks_like_email(value)
+        || looks_like_filesystem_path(value)
+        || looks_like_credential_assignment(value)
+}
+
+fn has_digit_run(value: &str, min_run: usize) -> bool {
+    let mut run = 0;
+    for ch in value.chars() {
+        if ch.is_ascii_digit() {
+            run += 1;
+            if run >= min_run {
+                return true;
+            }
+        } else {
+            run = 0;
+        }
+    }
+    false
+}
+
+/// AWS access-key IDs are a fixed, unambiguous credential shape: four
+/// uppercase letters starting `AKIA` (long-lived) or `ASIA` (temporary),
+/// then 16 uppercase letters or digits.
+fn looks_like_aws_access_key_id(value: &str) -> bool {
+    value
+        .split(|ch: char| !ch.is_ascii_uppercase() && !ch.is_ascii_digit())
+        .any(|token| token.len() == 20 && (token.starts_with("AKIA") || token.starts_with("ASIA")))
+}
+
+fn looks_like_url(lower: &str) -> bool {
+    lower.contains("http://") || lower.contains("https://")
+}
+
+fn looks_like_email(value: &str) -> bool {
+    value
+        .split(|c: char| {
+            c.is_whitespace()
+                || matches!(
+                    c,
+                    '，' | '。' | '；' | ';' | ',' | '<' | '>' | '"' | '\'' | '(' | ')' | '[' | ']'
+                )
+        })
+        .any(|token| {
+            let Some((left, right)) = token.split_once('@') else {
+                return false;
+            };
+            !left.is_empty() && right.contains('.') && right.len() >= 3
+        })
+}
+
+fn looks_like_filesystem_path(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    let trimmed = lower.trim();
+    let unix_roots = ["/home/", "/tmp/", "/users/", "/var/", "/etc/", "/opt/"];
+    if unix_roots.iter().any(|root| lower.contains(root)) {
+        return true;
+    }
+    trimmed.starts_with("~/")
+        || lower.contains("c:\\")
+        || lower.contains("c:/")
+        || lower.contains("\\users\\")
+        || lower.contains("\\appdata\\")
+}
+
+/// An assignment-shaped join between a credential word and a value: symbol
+/// assignment (`=`, `:`), the CJK copulas 是/为, or the English copula
+/// " is ". Shared by the token rule and the credential-assignment rule so
+/// the two cannot drift. " is " is safe to substring-match because notes
+/// arrive whitespace-collapsed from `normalize_note`.
+fn has_assignment_marker(lower: &str, value: &str) -> bool {
+    lower.contains('=')
+        || lower.contains(':')
+        || value.contains('是')
+        || value.contains('为')
+        || lower.contains(" is ")
+}
+
+fn looks_like_credential_assignment(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    let has_assignment = has_assignment_marker(&lower, value);
+    has_assignment
+        && [
+            "token", "api_key", "apikey", "api key", "secret", "password", "passwd", "密钥",
+            "私钥", "口令", "密码",
+        ]
+        .iter()
+        .any(|needle| lower.contains(needle))
 }
 
 fn validate_query(query: &str) -> Result<&str> {

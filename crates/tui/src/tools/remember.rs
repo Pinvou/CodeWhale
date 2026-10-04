@@ -17,6 +17,18 @@ use serde_json::{Value, json};
 use super::spec::{
     ApprovalRequirement, ToolCapability, ToolContext, ToolError, ToolResult, ToolSpec, required_str,
 };
+use crate::native_memory::SensitiveNoteRefusal;
+
+/// Map a native store failure to a tool error. A sensitive-content refusal
+/// is input the model can fix, so its stable reason string is surfaced as
+/// invalid input instead of a generic execution failure.
+fn write_error(error: anyhow::Error, failure: &str) -> ToolError {
+    if error.downcast_ref::<SensitiveNoteRefusal>().is_some() {
+        ToolError::invalid_input(error.to_string())
+    } else {
+        ToolError::execution_failed(format!("{failure}: {error}"))
+    }
+}
 
 /// Tool that appends one bullet to the user memory file.
 pub struct RememberTool;
@@ -181,17 +193,11 @@ impl ToolSpec for RememberTool {
                 let evidence = required_str(&input, "evidence")?;
                 store
                     .revise(scope, workspace_id.as_deref(), replaces, &note, evidence)
-                    .map_err(|error| {
-                        ToolError::execution_failed(format!("failed to revise memory: {error}"))
-                    })?
+                    .map_err(|error| write_error(error, "failed to revise memory"))?
             } else {
                 store
                     .remember(scope, workspace_id.as_deref(), &note)
-                    .map_err(|error| {
-                        ToolError::execution_failed(format!(
-                            "failed to write native memory: {error}"
-                        ))
-                    })?
+                    .map_err(|error| write_error(error, "failed to write native memory"))?
             };
             let verb = if action == "revise" {
                 "revised"
@@ -444,5 +450,43 @@ mod tests {
         let tool = RememberTool;
         let err = tool.execute(json!({}), &ctx).await.unwrap_err();
         assert!(err.to_string().to_lowercase().contains("note"), "{err}");
+    }
+
+    /// The store refuses sensitive-looking notes fail-closed; the tool surfaces
+    /// that as invalid input carrying the stable refusal reason, not as a
+    /// generic execution failure, and writes nothing.
+    #[tokio::test]
+    async fn sensitive_notes_are_refused_with_a_stable_reason() {
+        let tmp = tempdir().unwrap();
+        let root = tmp.path().join("memory");
+        let mut ctx = ToolContext::new(tmp.path());
+        ctx.memory_path = Some(root.join("global/MEMORY.md"));
+
+        let err = RememberTool
+            .execute(
+                json!({"note": "aws key AKIAIOSFODNN7EXAMPLE belongs to the ci account"}),
+                &ctx,
+            )
+            .await
+            .unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.contains("memory note refused"),
+            "refusal must carry the stable reason: {message}"
+        );
+        assert!(
+            message.contains("never store secrets"),
+            "refusal must be model-actionable: {message}"
+        );
+        assert!(
+            !root.join("global/MEMORY.md").exists(),
+            "a refused note must not be written"
+        );
+
+        let result = RememberTool
+            .execute(json!({"note": "Use 4-space indentation"}), &ctx)
+            .await
+            .expect("the store must stay usable after a refusal");
+        assert!(result.success);
     }
 }
