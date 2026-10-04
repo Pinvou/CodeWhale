@@ -35,24 +35,23 @@ use persistence::{
     acknowledge_pending_revocation, acquire_process_lock, apply_runtime_relay_override,
     atomic_write_private_json, eligible_pending_revocations, fresh_config, load_config,
     load_or_initialize_rpc_ledger, load_pending_revocations, load_relay_settings, new_stream_epoch,
-    normalize_relay_address, pairing_info, pending_revocation_ack, pending_revocation_key,
-    persist_config, persist_rpc_ledger, process_lock_path, public_url, queue_pending_revocation,
+    normalize_relay_address, pairing_info, pending_revocation_key, persist_config,
+    persist_rpc_ledger, process_lock_path, public_url, queue_pending_revocation,
     relay_settings_path, remote_public_base_url, remote_relay_ws_url, remove_config,
     remove_private_file, remove_rpc_ledger, validate_config,
 };
 
 // RPC admission, response shaping, scope validation, and the stream/event
 // protocol message builders live in `rpc`. The facade dispatches against the
-// enums (`RpcRequestAction`, `RpcReadyAction`, `EventSource`, ...) and calls
+// enums (`RpcRequestAction`, `EventSource`, ...) and calls
 // the pure helpers, so the whole surface is imported by name.
 use rpc::{
-    EventSource, NewRpcAdmission, ReplayMessageContext, RpcReadyAction, RpcRequestAction,
-    bounded_rpc_completion, enqueue_stream_reset, event_message, prepare_bridge_generation,
-    prepare_new_rpc_admission, prune_rpc_cache, request_conflict_completion,
-    rpc_admission_rejection, rpc_error_completion, rpc_fingerprint, rpc_in_flight_expired,
-    rpc_response, snapshot_message, stream_reset_message, subscription_filtered_replay_messages,
-    tombstone_completion, try_enqueue_message_batch, validate_bridge_generation,
-    validate_rpc_command, validate_web_rpc_scope,
+    EventSource, NewRpcAdmission, ReplayMessageContext, RpcRequestAction, bounded_rpc_completion,
+    enqueue_stream_reset, event_message, prepare_bridge_generation, prepare_new_rpc_admission,
+    prune_rpc_cache, request_conflict_completion, rpc_admission_rejection, rpc_error_completion,
+    rpc_fingerprint, rpc_in_flight_expired, rpc_response, snapshot_message, stream_reset_message,
+    subscription_filtered_replay_messages, tombstone_completion, try_enqueue_message_batch,
+    validate_bridge_generation, validate_rpc_command, validate_web_rpc_scope,
 };
 
 // The transfer buffer helpers mutate `Inner` through borrowed guards. They are
@@ -114,6 +113,18 @@ fn validate_multi_agent_session_web_scope(
     command: &str,
     session_id: &str,
 ) -> Result<(), String> {
+    // Documented exception (round-34 minor 7): the three aux commands are
+    // NOT in the denylist even when the MAIN session runs multi-agent — an
+    // aux conversation on a multi-agent main stays fully usable over the
+    // relay. Intended: the aux engine is the isolated pure-Q&A config
+    // (zero tools, no subagents — the denylist's threat model never
+    // applies to it), the desktop offers the same entry, and blocking it
+    // would break the side chat for exactly the heaviest users. The
+    // denylist's "web is read-only" promise is scoped to the multi-agent
+    // EXECUTION surface, not to its side chat.
+    if crate::features::sessions::is_aux_session_id(session_id) {
+        return Ok(());
+    }
     if !MULTI_AGENT_WEB_EXECUTION_DENYLIST.contains(&command) {
         return Ok(());
     }
@@ -1011,7 +1022,12 @@ impl RemoteControlManager {
                 while let Some(inbound) = receiver.recv().await {
                     if let RelayInbound::Message(text) = inbound {
                         match serde_json::from_str::<Value>(&text) {
-                            Ok(value) if pending_revocation_ack(&value, &pending.endpoint_id) => {
+                            Ok(value)
+                                if relay_client::terminal_relay_message(
+                                    &value,
+                                    &pending.endpoint_id,
+                                ) =>
+                            {
                                 acknowledged = true;
                                 break;
                             }
@@ -1589,17 +1605,19 @@ impl RemoteControlManager {
         let mut first_error = None;
         for action in actions {
             match action {
-                RpcReadyAction::Dispatch(dispatch) => {
+                RpcRequestAction::Dispatch(dispatch) => {
                     if let Err(error) = self.emit_rpc_dispatch(dispatch) {
                         first_error.get_or_insert(error);
                     }
                 }
-                RpcReadyAction::Respond(sender, response) => {
+                RpcRequestAction::Respond(sender, response) => {
                     if sender.try_send(RelayOutbound::Message(response)).is_err() {
                         first_error
                             .get_or_insert_with(|| "Web access relay task has stopped".to_string());
                     }
                 }
+                // `prepare_bridge_generation` never emits the None variant.
+                RpcRequestAction::None => {}
             }
         }
         // The browser may reconnect and subscribe before a restarted desktop
@@ -2784,7 +2802,7 @@ mod tests {
         acknowledge_pending_revocation_at, load_config_from, load_pending_revocations_from,
         queue_pending_revocation_at,
     };
-    use super::rpc::{WebSessionScope, web_session_scope};
+    use super::rpc::{WebSessionScope, web_scope_admits_absent_session, web_session_scope};
     use super::*;
 
     const TEST_ENDPOINT_ID: &str = "ep_test";
@@ -3314,7 +3332,6 @@ mod tests {
             "uninstall_marketplace_skill",
             "uninstall_marketplace_tool",
             "install_voice_asr",
-            "save_settings_and_restart",
             "artifact_info",
             "read_artifact_text",
             "write_artifact_text",
@@ -3385,6 +3402,21 @@ mod tests {
             assert!(
                 policy.commands.contains(command),
                 "{command} must be Web-scoped"
+            );
+        }
+        // The auxiliary conversation (aux session) commands: the WebUI
+        // auxChat domain (bridge.js auxChatEnsure/auxChatDiscard/auxChatReset)
+        // depends on them directly; once allowed, the central validator's
+        // Required("sessionId") scope constraint pins them to an explicit
+        // session.
+        for command in [
+            "get_or_create_aux_session",
+            "discard_aux_session",
+            "reset_aux_session",
+        ] {
+            assert!(
+                policy.commands.contains(command),
+                "{command} must be allowed on Web (aux chat)"
             );
         }
         assert!(!policy.commands.contains("list_sessions"));
@@ -3504,7 +3536,7 @@ mod tests {
         assert_eq!(first.len(), 1);
         assert!(matches!(
             &first[0],
-            RpcReadyAction::Dispatch(dispatch)
+            RpcRequestAction::Dispatch(dispatch)
                 if dispatch.request_id == "queued"
                     && dispatch.command == "chat"
                     && dispatch.bridge_generation == "generation-new"
@@ -3702,6 +3734,9 @@ mod tests {
             ("cancel_user_input", "sessionId"),
             ("cancel_generation", "sessionId"),
             ("web_access_chat", "sessionId"),
+            ("get_or_create_aux_session", "sessionId"),
+            ("discard_aux_session", "sessionId"),
+            ("reset_aux_session", "sessionId"),
             ("delete_session", "id"),
             ("rename_session", "id"),
             ("set_session_model", "sessionId"),
@@ -3724,6 +3759,27 @@ mod tests {
             web_session_scope("get_effective_model_config"),
             Some(WebSessionScope::Optional("sessionId"))
         );
+    }
+
+    #[test]
+    fn discard_aux_session_admits_an_absent_main_session() {
+        // Round-24 minor-10: desktop `discard_aux_session` is idempotent on an
+        // unmapped main id (a deleted main leaves no mapping and the command
+        // returns Ok(())), so the central validator must skip its
+        // `store.load` admission for it — the Web lane otherwise fails with
+        // `web_session_unavailable` exactly where desktop succeeds. Only the
+        // discard leg: the create leg needs the parent record, and every
+        // other command acts on the session itself.
+        assert!(web_scope_admits_absent_session("discard_aux_session"));
+        assert!(!web_scope_admits_absent_session(
+            "get_or_create_aux_session"
+        ));
+        // M6: reset CREATES the fresh session itself, so like the create leg
+        // it needs the parent record and must fail admission on an absent
+        // main — only the idempotent discard leg skips the load.
+        assert!(!web_scope_admits_absent_session("reset_aux_session"));
+        assert!(!web_scope_admits_absent_session("web_access_chat"));
+        assert!(!web_scope_admits_absent_session("delete_session"));
     }
 
     #[test]
@@ -4133,25 +4189,25 @@ mod tests {
 
     #[test]
     fn only_explicit_terminal_relay_messages_acknowledge_a_revocation() {
-        assert!(pending_revocation_ack(
+        assert!(relay_client::terminal_relay_message(
             &json!({
                 "type": "desktop_endpoint_revoked",
                 "endpoint_id": "ep_retired"
             }),
             "ep_retired"
         ));
-        assert!(pending_revocation_ack(
+        assert!(relay_client::terminal_relay_message(
             &json!({
                 "type": "desktop_endpoint_replaced",
                 "endpoint_id": "ep_retired"
             }),
             "ep_retired"
         ));
-        assert!(pending_revocation_ack(
+        assert!(relay_client::terminal_relay_message(
             &json!({ "type": "error", "code": "endpoint_not_found" }),
             "ep_retired"
         ));
-        assert!(!pending_revocation_ack(
+        assert!(!relay_client::terminal_relay_message(
             &json!({
                 "type": "desktop_endpoint_revoked",
                 "endpoint_id": "ep_other"

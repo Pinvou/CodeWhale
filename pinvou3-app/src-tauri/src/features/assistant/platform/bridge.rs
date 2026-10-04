@@ -820,10 +820,11 @@ impl Pinvou3Bridge {
         // the incoming value itself, no replacement needed). Scope follows
         // mode — a plain session with a bound
         // working directory still belongs to the plain scope and never borrows the
-        // code scope. Note that on this fork an uninitialized plain scope = AllowAll
-        // (connectors/bundles on by default): bound sessions compensate with
-        // Plan-first plus a one-shot YOLO confirm card; DenyAll tightening is
-        // tracked separately.
+        // code scope. An uninitialized plain scope falls back to DenyAll (after
+        // the review #455 full convergence it matches the code posture: external
+        // capabilities off by default, enabled explicitly); plain sessions with
+        // a bound working directory still layer Plan-first plus a one-shot YOLO
+        // confirm card as the execution-plane defense.
         let scope = policy.mode();
         if scope != SessionMode::Plain {
             let plain_connector = crate::features::marketplace::unavailable_tool_names();
@@ -2248,6 +2249,18 @@ impl Pinvou3Bridge {
         }
     }
 
+    /// The whole instruction stack an auxiliary (`aux-`) engine ever sees.
+    /// Deliberately minimal: the main session stack (shared skeleton +
+    /// work/code layer, project `AGENTS.md`, the user's global instructions,
+    /// the memory runtime prompt) mandates or describes tool use — the
+    /// deliverable-card rule orders `mcp_pinvou3_present_artifact` — which is
+    /// the root cause of tool-trained models emitting invoke markup as aux
+    /// answer text (round-31 M8). Mirrors the foundation's isolated-chat
+    /// choice of replacing the instruction stack outright; the per-turn
+    /// zero-tool boundary (`AUX_ZERO_TOOL_REMINDER`) rides the reminder
+    /// channel on top of this static statement.
+    pub(crate) const AUX_SESSION_INSTRUCTIONS: &str = "# pinvou3 辅助对话\n\n你是 pinvou3 的辅助对话：主任务之外的一条独立纯问答会话。你没有工具——不读写文件、不运行命令、不访问主任务的执行与上下文，只基于对话内容和自身知识直接作答。需要实际操作才能满足请求时，说明用户可以如何自行完成。回答渲染在 GUI 富文本中，代码块 / 列表 / 表格随意使用。";
+
     /// Build a session config with the ordinary per-session workspace.
     ///
     /// [`build_engine_config`]: Self::build_engine_config
@@ -2267,13 +2280,24 @@ impl Pinvou3Bridge {
         session_id: &str,
         roots: SessionRoots,
     ) -> EngineConfig {
+        let is_aux = crate::features::sessions::is_aux_session_id(session_id);
         let mut cfg = self.build_engine_config();
         let _ = std::fs::create_dir_all(&roots.execution);
         let _ = std::fs::create_dir_all(&roots.ledger);
         cfg.workspace = roots.execution;
         cfg.session_id = Some(session_id.to_string());
         cfg.subagent_state_root = Some(roots.ledger);
-        cfg.instructions = self.session_instructions(session_id);
+        // Aux sessions skip the main instruction stack entirely: the aux
+        // branch below replaces it with the minimal persona, while
+        // session_instructions walks the AGENTS.md ancestors and writes the
+        // runtime-prompt file — work that would be assembled only to be
+        // discarded, and a stray write into the aux workspace at that
+        // (round-32 review minor 9).
+        cfg.instructions = if is_aux {
+            Vec::new()
+        } else {
+            self.session_instructions(session_id)
+        };
         // The skill discovery root points at the composed directory per
         // session (skill dual-scope governance: directory content = the
         // enabled skill set of that session's scope). Pre-spawn
@@ -2294,10 +2318,49 @@ impl Pinvou3Bridge {
         cfg.exec_policy_engine = codewhale_execpolicy::ExecPolicyEngine::with_rulesets(vec![
             self.scope_deny_ruleset(session_id),
         ]);
+        // An auxiliary conversation (aux- prefix) is a pure Q&A session: its
+        // engine is isolated, mirroring the foundation's isolated-chat field
+        // set (runtime_threads.rs), not merely tool-denied.
+        //   - allowed_tools = Some(empty): the zero-tool backstop for
+        //     Op::EditLastTurn resends, which carry no tool surface and reuse
+        //     the engine config's allowed_tools directly (SendMessage's
+        //     per-turn allowlist cannot reach them). The per-turn enforcement
+        //     for regular sends lives in EnginePool::send_reserved_user_message
+        //     (turn_restrict_tools); both share the same rule.
+        //   - instructions: the aux-only minimal persona replaces the main
+        //     session stack, which mandates tool calls (see
+        //     AUX_SESSION_INSTRUCTIONS). AUX_ZERO_TOOL_REMINDER stays as
+        //     defense-in-depth on the per-turn reminder channel: emitting
+        //     invoke markup is trained model behavior, and the reminder
+        //     restates the boundary next to the user message at a small fixed
+        //     token cost.
+        //   - subagents/memory/vision off, tools = None: no delegation,
+        //     memory, or image_analyze surface behind the empty catalog
+        //     (memory/tools are already off in the base config; pinned here
+        //     so a future base-config default change cannot re-open them for
+        //     aux only).
+        //   - Feature::Mcp disabled: the foundation's start_mcp_session_boot
+        //     gates on Feature::Mcp, never on allowed_tools — without this
+        //     every aux spawn would boot the full MCP server set
+        //     (subprocesses + network) and discard 100% of their tools.
+        if is_aux {
+            cfg.allowed_tools = Some(Vec::new());
+            cfg.instructions = vec![InstructionSource::Inline {
+                name: "pinvou3:aux-instructions".to_string(),
+                content: Self::AUX_SESSION_INSTRUCTIONS.to_string(),
+            }];
+            cfg.subagents_enabled = false;
+            cfg.memory_enabled = false;
+            cfg.vision_config = None;
+            cfg.tools = None;
+            cfg.features.disable(deepseek_tui::features::Feature::Mcp);
+        }
         // Native Code-mode and external ACP sessions do not expose Browser MCP tools. They
         // fall back to global mcp.json, which has no browser entry. System instructions and
-        // tool registration share this gate.
-        if !self.exposes_browser_mcp(session_id) {
+        // tool registration share this gate. Aux engines never boot MCP (Feature::Mcp
+        // disabled above); they also take the global path so the per-session
+        // browser-wrapper config file is not even written.
+        if is_aux || !self.exposes_browser_mcp(session_id) {
             cfg.mcp_config_path = crate::platform::paths::mcp_config_path();
         } else {
             // A Work-mode session uses its own browser-wrapper configuration, pinning the
@@ -2437,6 +2500,11 @@ impl Pinvou3Bridge {
                 .into_iter()
                 .collect();
         names.sort();
+        // Round-28 nit (review #455): `find_skill_dir` per disabled name costs
+        // a full manifest walk each (via `skill_owner_package`), not one stat
+        // per pack — O(names x catalog) per ruleset rebuild. Accepted bound:
+        // disabled-skill counts are small and rebuilds are infrequent; a
+        // per-call owner snapshot would be the next hoist if that changes.
         for name in names {
             let Some(dir) = manager.find_skill_dir(&name) else {
                 continue; // not installed / already excluded from materialization: no script to intercept
@@ -2993,6 +3061,14 @@ impl Pinvou3Bridge {
     }
 
     fn ensure_session_skills_for_send(&self, session_id: &str) {
+        // Aux sessions have no skill surface: their engine is isolated (empty
+        // tool catalog, minimal instructions), so materializing the composed
+        // directory would only feed a `## Skills` block the zero-tool turn
+        // cannot act on. Spawn-time materialization and the toggle hot
+        // refresh skip aux for the same reason (engine_pool).
+        if crate::features::sessions::is_aux_session_id(session_id) {
+            return;
+        }
         // Send-path self-healing (skill dual-scope governance §2.3.3): rebuild the
         // composed directory from the current mode scope when missing (a microsecond
         // stat) so a manual deletion is not silently lost; no full comparison every
@@ -3047,6 +3123,15 @@ impl Pinvou3Bridge {
             AppMode::Plan => (true, true),
             AppMode::Operate => (self.allow_shell(), false),
         };
+        // Aux turns are tool-less Q&A: the sudo status and the marketplace MCP
+        // inventory are tool-affordance signals, and each re-reads disk
+        // (is_enabled() / the installation and scope toggles) — assembling
+        // them only to retract them with the zero-tool reminder reads them
+        // for nothing (round-31 M8). Aux keeps only the persona channel,
+        // which is where the merged AUX_ZERO_TOOL_REMINDER arrives. The swarm
+        // expert candidates are sub-agent affordances (subagents are pinned
+        // off for aux), skipped on the same rule.
+        let is_aux = crate::features::sessions::is_aux_session_id(session_id);
         // The super-permission state is injected live every turn (is_enabled()
         // reads disk each time), working around "toggling the switch has no
         // effect" caused by the refresh_all_instructions no-op — the static
@@ -3056,7 +3141,6 @@ impl Pinvou3Bridge {
         // read-only with no exec_shell (the foundation's read-only toolset),
         // so sudo is meaningless to it and injecting would waste ~110
         // chars/turn.
-        let sudo = crate::platform::super_permission::turn_reminder();
         // The mode-dimension per-turn reminder (after PlanPhase was cut, only
         // the mode dimension remains): Plan's is produced by the session
         // policy (D-2; this phase's two modes share the same text); other
@@ -3069,47 +3153,64 @@ impl Pinvou3Bridge {
         // match's `Some(r) => format!(…sudo)` branch required Some and
         // mode≠Plan and could never hit, so the branches were merged into a
         // single match to eliminate the dead one.
-        let mut reminder_body = match mode {
-            // Plan: read-only with no exec; only inject the mode reminder (no
-            // sudo mixed in).
-            AppMode::Plan => policy
-                .plan_reminder()
-                .map(str::to_string)
-                .unwrap_or_else(|| sudo.to_string()),
-            // Other modes: no per-turn reminder; only inject the dynamic sudo
-            // state.
-            AppMode::Agent | AppMode::Operate => sudo.to_string(),
+        let mut reminder_body = if is_aux {
+            String::new()
+        } else {
+            let sudo = crate::platform::super_permission::turn_reminder();
+            let mut body = match mode {
+                // Plan: read-only with no exec; only inject the mode reminder
+                // (no sudo mixed in).
+                AppMode::Plan => policy
+                    .plan_reminder()
+                    .map(str::to_string)
+                    .unwrap_or_else(|| sudo.to_string()),
+                // Other modes: no per-turn reminder; only inject the dynamic
+                // sudo state.
+                AppMode::Agent | AppMode::Operate => sudo.to_string(),
+            };
+            let mcp_inventory =
+                crate::features::assistant::mcp_inventory::turn_reminder(policy.mode());
+            body.push_str("\n\n");
+            body.push_str(&mcp_inventory);
+            body
         };
         // Re-read installation and scope toggles for every turn, including live sessions.
         // Plan receives the snapshot too because users can inspect installed applications
         // while planning, and its enabled flag is scoped independently from execution mode.
         // Only the compact JSON snapshot is repeated; its interpretation lives in the
         // static session prompt.
-        let mcp_inventory = crate::features::assistant::mcp_inventory::turn_reminder(policy.mode());
-        reminder_body.push_str("\n\n");
-        reminder_body.push_str(&mcp_inventory);
         // Card pool: when this session has an expert persona attached, inject the persona identity every turn (sticky identity).
         if let Some(persona) = persona_reminder {
-            reminder_body = format!("{reminder_body}\n\n{persona}");
+            if reminder_body.is_empty() {
+                reminder_body = persona;
+            } else {
+                reminder_body = format!("{reminder_body}\n\n{persona}");
+            }
         }
         // 蜂群每轮动态内容只剩候选专家行（≤ 上限条）；契约本体在 spawn 级
         // instructions（swarm::SWARM_CONTRACT），不再逐轮改写用户消息。多智能体
         // 轮没有匹配候选时兜底一句名册提示——零候选轮对模型可见，发现通道不落空；
-        // 普通会话（无快照）不注入任何专家内容。
-        let expert_section = match crate::features::assistant::swarm::expert_candidates_reminder(
-            expert_candidates,
-        ) {
-            Some(section) => Some(section),
-            None if expert_snapshot.is_some() => {
-                Some(crate::features::assistant::swarm::expert_roster_hint_reminder())
+        // 普通会话（无快照）不注入任何专家内容。Aux turns carry no expert
+        // content either (sub-agents are pinned off for aux).
+        if !is_aux {
+            let expert_section = match crate::features::assistant::swarm::expert_candidates_reminder(
+                expert_candidates,
+            ) {
+                Some(section) => Some(section),
+                None if expert_snapshot.is_some() => {
+                    Some(crate::features::assistant::swarm::expert_roster_hint_reminder())
+                }
+                None => None,
+            };
+            if let Some(section) = expert_section {
+                reminder_body = format!("{reminder_body}\n\n{section}");
             }
-            None => None,
-        };
-        if let Some(section) = expert_section {
-            reminder_body = format!("{reminder_body}\n\n{section}");
         }
-        let full_content =
-            format!("<system-reminder>\n{reminder_body}\n</system-reminder>\n\n{content}");
+        let full_content = if reminder_body.is_empty() {
+            content
+        } else {
+            format!("<system-reminder>\n{reminder_body}\n</system-reminder>\n\n{content}")
+        };
         let model = self.model();
         // Approval parameters come from the session policy (R-2), the same
         // policy source as the reminder.
@@ -3631,8 +3732,8 @@ mod tests {
         bridge.set_code_session_predicate(std::sync::Arc::new(|_session_id: &str| false));
 
         // Mode identity stays Plain; connector/skill scopes follow the mode (no
-        // borrowing the code scope; on this fork uninitialized plain = AllowAll,
-        // DenyAll tightening tracked separately).
+        // borrowing the code scope; uninitialized plain falls back to DenyAll —
+        // same posture as code since the #455 convergence).
         assert_eq!(
             bridge.session_policy("sess-plain-bound").mode(),
             SessionMode::Plain
@@ -4068,10 +4169,27 @@ mod tests {
         );
         // MarketplaceManager::list_tools still reads installed.json for MCP
         // installation state; bundles.json supplies source and display metadata.
+        // Builtin plugins (§3.1) surface in the inventory regardless of
+        // installed.json, so the assertions count non-builtin entries only.
+        // §3.2 truth-source inversion: the store record keeps weather listed
+        // even with installed.json rewritten, so remove it there too.
+        store.remove("weather").unwrap();
         std::fs::write(&installed, r#"["qcc"]"#).unwrap();
-        assert_eq!(inventory("plain").as_array().unwrap().len(), 1);
+        let plain_now = inventory("plain").as_array().unwrap().clone();
+        assert_eq!(
+            plain_now.iter().filter(|e| e["builtin"] != true).count(),
+            1,
+            "exactly qcc beyond the builtin session-reader"
+        );
+        // The store record keeps qcc listed too, so delist it there as well
+        // before asserting the empty inventory.
+        store.remove("qcc").unwrap();
         std::fs::write(&installed, "[]").unwrap();
-        assert!(inventory("plain").as_array().unwrap().is_empty());
+        let plain_now = inventory("plain").as_array().unwrap().clone();
+        assert!(
+            plain_now.iter().all(|e| e["builtin"] == true),
+            "non-builtin entries must all be gone; got {plain_now:?}"
+        );
         let Op::SendMessage { content, .. } = bridge
             .build_send_message_op(
                 "plain",
@@ -4251,13 +4369,14 @@ mod tests {
     }
 
     /// CLI hard-interception ruleset (the execpolicy channel of the scope
-    /// gate): per the session scope's disabled
-    /// Binary deny rules generated for scope-disabled CLI connectors — with code
-    /// uninitialized, all 4 built-in CLI binaries are denied by default (external
-    /// capability must be enabled explicitly); plain is allow-by-default and only
-    /// explicitly disabled ones remain denied. Also pins the base execution
-    /// semantics: deny hard-blocks direct, chained, and wrapper forms (even
-    /// AskForApproval::Never is intercepted).
+    /// gate): binary deny rules generated for the session scope's disabled
+    /// CLI connectors — an uninitialized plain scope falls back to DenyAll
+    /// (all off by default; same posture as code after the review #455
+    /// convergence); uninitialized code denies all 4 built-in CLI binaries
+    /// by default (external capability must be enabled explicitly); once
+    /// enabled explicitly, only the disabled ones remain. Also pins the base
+    /// execution semantics: deny hard-blocks direct, chained, and wrapper
+    /// forms (even AskForApproval::Never is intercepted).
     #[test]
     fn cli_deny_ruleset_follows_scope_disabled_connectors() {
         let (_lock, _env) = locked_env(&["PINVOU3_HOME"]);
@@ -4274,25 +4393,55 @@ mod tests {
         }));
 
         use crate::features::marketplace::ConnectorScope;
-        // plain has no disables → no rules.
-        let rs = bridge.scope_deny_ruleset_with("sess-plain", Vec::new());
-        assert!(rs.ask_rules.is_empty(), "plain 默认无 CLI deny 规则");
+        // Deny command list when all 4 built-in CLI binaries are denied (bare
+        // name plus one .exe/.cmd variant each, R4).
+        let all_four_cli_denied = [
+            "dws",
+            "dws.cmd",
+            "dws.exe",
+            "lark-cli",
+            "lark-cli.cmd",
+            "lark-cli.exe",
+            "tmeet",
+            "tmeet.cmd",
+            "tmeet.exe",
+            "wecom-cli",
+            "wecom-cli.cmd",
+            "wecom-cli.exe",
+        ];
+        fn denied_bins(rs: &codewhale_execpolicy::Ruleset) -> Vec<&str> {
+            let mut bins: Vec<&str> = rs
+                .ask_rules
+                .iter()
+                .filter_map(|r| r.command.as_deref())
+                .collect();
+            bins.sort_unstable();
+            bins
+        }
 
-        // plain disables feishu → only the lark-cli deny (bare name + one
-        // .exe/.cmd variant each, R4).
-        crate::features::marketplace::save_disabled_connectors_for(
+        // plain uninitialized → after the DenyAll convergence, same semantics as
+        // code: all 4 built-in CLIs denied by default. Goes through the
+        // production composition entry (review: `cli_deny_ruleset` was deleted
+        // as a test-facing helper); the empty safety injection plus an empty
+        // temp home (no installed bundle skills) leaves CLI rules only.
+        let rs = bridge.scope_deny_ruleset_with("sess-plain", Vec::new());
+        assert_eq!(
+            denied_bins(&rs),
+            all_four_cli_denied,
+            "an uninitialized plain denies the built-in CLI packs by default (the DenyAll convergence)"
+        );
+
+        // plain explicitly disables only feishu → just the lark-cli deny remains.
+        crate::features::marketplace::save_disabled_bundles_for(
             ConnectorScope::Plain,
             &["feishu".to_string()],
         )
         .unwrap();
         let rs = bridge.scope_deny_ruleset_with("sess-plain", Vec::new());
-        let mut cmds: Vec<&str> = rs
-            .ask_rules
-            .iter()
-            .filter_map(|r| r.command.as_deref())
-            .collect();
-        cmds.sort_unstable();
-        assert_eq!(cmds, ["lark-cli", "lark-cli.cmd", "lark-cli.exe"]);
+        assert_eq!(
+            denied_bins(&rs),
+            ["lark-cli", "lark-cli.cmd", "lark-cli.exe"]
+        );
         assert!(
             rs.ask_rules
                 .iter()
@@ -4303,29 +4452,7 @@ mod tests {
         // same semantics as the connector toggle default), each binary emitting
         // the bare name + .exe/.cmd variants, 3 rules in total.
         let rs = bridge.scope_deny_ruleset_with("sess-code", Vec::new());
-        let mut bins: Vec<&str> = rs
-            .ask_rules
-            .iter()
-            .filter_map(|r| r.command.as_deref())
-            .collect();
-        bins.sort_unstable();
-        assert_eq!(
-            bins,
-            [
-                "dws",
-                "dws.cmd",
-                "dws.exe",
-                "lark-cli",
-                "lark-cli.cmd",
-                "lark-cli.exe",
-                "tmeet",
-                "tmeet.cmd",
-                "tmeet.exe",
-                "wecom-cli",
-                "wecom-cli.cmd",
-                "wecom-cli.exe"
-            ]
-        );
+        assert_eq!(denied_bins(&rs), all_four_cli_denied);
         assert!(
             rs.ask_rules
                 .iter()
@@ -4501,11 +4628,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Channel 3 data source: script directories of scope-disabled skills generate
-    /// deny rules (code uninitialized denies all by default; on this fork
-    /// uninitialized plain = AllowAll, producing no deny rules — DenyAll tightening
-    /// is tracked separately); rules disappear once the skill is enabled; shares one
-    /// ruleset with the CLI binary deny.
+    /// Channel 3 data source: script directories of scope-disabled skills
+    /// (plain/code uninitialized both deny all by default) generate deny
+    /// rules; the rules disappear once the skill is enabled; they coexist with
+    /// the CLI binary deny in the same ruleset.
     #[test]
     fn scope_deny_ruleset_covers_disabled_skill_scripts() {
         let (_lock, _env) = locked_env(&["PINVOU3_HOME"]);
@@ -4557,32 +4683,40 @@ mod tests {
         }));
         use crate::features::marketplace::ConnectorScope;
 
-        // With no scope disablement: no CLI binary rules, no skill script
-        // rules (`run.py` style). Safety-net rules (command-only since the
-        // v3 rollback removed the File path face) are always present;
-        // covered by the safety_deny_rules tests.
-        let plain_ruleset = bridge.scope_deny_ruleset("sess-plain");
+        // After the all-mode DenyAll convergence, plain's disabled-skill →
+        // script deny rules match the code semantics. Drive it here with
+        // explicit initialization (expanding the uninitialized DenyAll
+        // fallback depends on when the process env is read, which is
+        // non-deterministic under the parallel suite; the fallback semantics
+        // themselves are covered by the marketplace plain_deny_all_* tests).
+        crate::features::marketplace::scope::save_disabled_bundles_for(
+            ConnectorScope::Plain,
+            &["my-skill".to_string()],
+        )
+        .unwrap();
+        let rs = bridge.scope_deny_ruleset("sess-plain");
         assert!(
-            plain_ruleset
-                .ask_rules
+            rs.ask_rules
                 .iter()
-                .all(|r| !r.command.as_deref().is_some_and(|c| c.contains("run.py")))
+                .any(|r| r.command.as_deref().is_some_and(|c| c.contains("run.py"))),
+            "after plain disables an installed skill, the script deny ruleset must be present"
         );
+        // Since the v3 rollback, safety-net rules are command-only (the File
+        // path face was removed): mkfs-style fallback denies are always
+        // present, coexisting with the script rules in the same ruleset.
         assert!(
-            plain_ruleset.ask_rules.iter().any(|r| r.path.is_none()
+            rs.ask_rules.iter().any(|r| r.path.is_none()
                 && r.action == codewhale_execpolicy::PermissionAction::Deny
                 && r.command.as_deref().is_some_and(|c| c.starts_with("mkfs"))),
             "safety-net command rules should always be present"
         );
-        // The same ruleset must also carry the safety face on the promoted
-        // (denied_prefixes) channel — the channel that actually matches the
-        // wildcard/flag rules at runtime. Pins rule presence AND promotion
-        // independently, so a promotion regression gets its own signal here.
+        // The promotion channel (denied_prefixes) must carry the safety-net
+        // rules too — it is the channel that actually matches wildcard/flag
+        // rules at runtime; rule presence and promotion are each pinned
+        // separately so a promotion regression gets an independent signal
+        // (assertions kept from the #445 version, review #455 R9 nit).
         assert!(
-            plain_ruleset
-                .denied_prefixes
-                .iter()
-                .any(|p| p.starts_with("mkfs")),
+            rs.denied_prefixes.iter().any(|p| p.starts_with("mkfs")),
             "safety-net rules should be promoted into denied_prefixes"
         );
 
@@ -6357,6 +6491,190 @@ mod tests {
             Some(crate::features::assistant::tool_policy::allowed_tool_names()),
             "code 会话未限制时必须恢复 Pinvou 基础白名单"
         );
+    }
+
+    /// PR #433 review (MAJOR): both server-side enforcement paths for
+    /// aux-session zero-tools must hold simultaneously —
+    /// ① spawn config `allowed_tools=Some(empty list)`: the foundation's
+    /// `Op::EditLastTurn` resend carries no tool surface and directly reuses
+    /// the engine config — this is the tool-surface source for edit-resends
+    /// (including the window of "the first operation after restart/reclaim is
+    /// an edit"); ② per-turn sends go through `turn_restrict_tools` (the same
+    /// decision function as `EnginePool::send_reserved_user_message`), and a
+    /// caller passing `restrict_tools=false` is still pressed to an empty
+    /// allowlist by the `aux-` prefix. Ordinary sessions are enforced on
+    /// neither side.
+    #[test]
+    fn aux_session_is_tool_free_on_spawn_config_and_send_op() {
+        // Vision-capable fixture: the aux `vision_config = None` assertion
+        // below only has teeth when the main-session value is `Some`.
+        let mut bridge = fixture_bridge();
+        set_active_model(
+            &mut bridge,
+            ModelPreset::Deepseek,
+            "deepseek-v4-pro",
+            "https://api.deepseek.com",
+            "sk-main",
+        );
+        push_vision_model(&mut bridge, "vision-1", "gpt-4o", "sk-vision");
+        bridge.prefs.advanced.saved_models[0].vision_model_id = Some("vision-1".to_string());
+        let root = std::env::temp_dir().join(format!(
+            "pinvou3-aux-tool-free-{}-{:p}",
+            std::process::id(),
+            &bridge
+        ));
+        let roots = |name: &str| SessionRoots {
+            execution: root.join(format!("{name}-exec")),
+            ledger: root.join(format!("{name}-ledger")),
+            bound: false,
+        };
+
+        // ① spawn config: edit_last_turn resends reuse this allowed_tools.
+        let aux_cfg = bridge.build_engine_config_for_session_roots("aux-xyz", roots("aux"));
+        assert_eq!(
+            aux_cfg.allowed_tools,
+            Some(Vec::new()),
+            "aux session spawn config must be zero-tools (empty allowed_tools), covering edit_last_turn resends"
+        );
+        // ①-b M8 isolation: the aux engine mirrors the foundation's
+        // isolated-chat field set instead of being a merely tool-denied main
+        // engine. Each assertion below is the mutation pin for its field:
+        // reverting the field to the main-session value must turn this red.
+        assert_eq!(
+            aux_cfg.instructions.len(),
+            1,
+            "aux instructions must be the aux-only minimal persona, not the main session stack"
+        );
+        match &aux_cfg.instructions[0] {
+            InstructionSource::Inline { name, content } => {
+                assert_eq!(name, "pinvou3:aux-instructions");
+                assert_eq!(content, Pinvou3Bridge::AUX_SESSION_INSTRUCTIONS);
+            }
+            InstructionSource::File(path) => {
+                panic!("aux instructions must be inline, got file {path:?}")
+            }
+        }
+        assert!(
+            !aux_cfg.subagents_enabled,
+            "aux engines must not delegate (subagents disabled)"
+        );
+        assert!(
+            !aux_cfg.memory_enabled,
+            "aux engines must stay out of the memory pipeline"
+        );
+        assert!(
+            aux_cfg.vision_config.is_none(),
+            "aux engines must not register image_analyze (vision_config dropped)"
+        );
+        assert!(
+            aux_cfg.tools.is_none(),
+            "aux engines must not carry a native-tool catalog config"
+        );
+        assert!(
+            !aux_cfg
+                .features
+                .enabled(deepseek_tui::features::Feature::Mcp),
+            "aux engines must skip the MCP boot (start_mcp_session_boot gates on Feature::Mcp, not allowed_tools)"
+        );
+        assert_eq!(
+            aux_cfg.mcp_config_path,
+            crate::platform::paths::mcp_config_path(),
+            "aux engines must use the global mcp config path (no per-session browser-wrapper file)"
+        );
+
+        // ② per-turn send: a caller restrict=false is still forced to an
+        // empty list (the web_access_chat bypass surface).
+        let restrict =
+            crate::features::assistant::engine_pool::turn_restrict_tools("aux-xyz", false, false);
+        let op = bridge
+            .build_send_message_op("aux-xyz", "hi".to_string(), AppMode::Agent, None, restrict)
+            .expect("resolve test route");
+        match op {
+            Op::SendMessage {
+                allowed_tools,
+                content,
+                ..
+            } => {
+                assert_eq!(
+                    allowed_tools,
+                    Some(Vec::new()),
+                    "aux turns must be zero-tools (empty allowlist), regardless of the caller's value"
+                );
+                // M8: the aux turn's <system-reminder> assembly skips the
+                // tool-affordance sections (sudo status, marketplace MCP
+                // inventory) — with no persona/reminder input the user text
+                // goes out bare.
+                assert_eq!(
+                    content, "hi",
+                    "aux turns must not read/prepend the sudo status or the MCP inventory"
+                );
+            }
+            other => panic!("expected SendMessage, got {other:?}"),
+        }
+        // The persona channel stays: a reminder input (the merged
+        // AUX_ZERO_TOOL_REMINDER arrives through it) is still wrapped and
+        // prepended, and nothing else joins it.
+        let op = bridge
+            .build_send_message_op(
+                "aux-xyz",
+                "hi".to_string(),
+                AppMode::Agent,
+                Some("persona anchor".to_string()),
+                restrict,
+            )
+            .expect("resolve test route");
+        match op {
+            Op::SendMessage { content, .. } => assert_eq!(
+                content, "<system-reminder>\npersona anchor\n</system-reminder>\n\nhi",
+                "aux turns keep only the persona/reminder channel in the system-reminder assembly"
+            ),
+            other => panic!("expected SendMessage, got {other:?}"),
+        }
+
+        // Control: ordinary sessions' spawn config and reminder assembly keep
+        // the main-session values, unharmed by the aux rule.
+        let normal_cfg = bridge.build_engine_config_for_session_roots("sess-plain", roots("plain"));
+        assert_eq!(
+            normal_cfg.allowed_tools,
+            Some(crate::features::assistant::tool_policy::allowed_tool_names()),
+            "ordinary sessions' spawn config must keep the Pinvou base allowlist"
+        );
+        assert!(
+            normal_cfg.subagents_enabled,
+            "ordinary sessions keep delegation enabled"
+        );
+        assert!(
+            normal_cfg.vision_config.is_some(),
+            "ordinary sessions keep the resolved vision config"
+        );
+        assert!(
+            normal_cfg
+                .features
+                .enabled(deepseek_tui::features::Feature::Mcp),
+            "ordinary sessions keep the MCP feature enabled"
+        );
+        match &normal_cfg.instructions[0] {
+            InstructionSource::Inline { name, .. } => {
+                assert_eq!(
+                    name, "pinvou3:instructions",
+                    "ordinary sessions keep the main instruction stack"
+                )
+            }
+            InstructionSource::File(path) => {
+                panic!("ordinary session instructions must start inline, got {path:?}")
+            }
+        }
+        let normal_op = bridge
+            .build_send_message_op("sess-plain", "hi".to_string(), AppMode::Agent, None, false)
+            .expect("resolve test route");
+        match normal_op {
+            Op::SendMessage { content, .. } => assert!(
+                content.starts_with("<system-reminder>\n"),
+                "ordinary turns keep the sudo/MCP-inventory system-reminder assembly"
+            ),
+            other => panic!("expected SendMessage, got {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[cfg(feature = "benchmark-hooks")]

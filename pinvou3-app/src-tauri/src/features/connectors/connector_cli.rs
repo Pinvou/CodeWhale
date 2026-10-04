@@ -4,7 +4,8 @@
 //! 取消"逻辑收口在此;各连接器(`feishu.rs` / `wecom.rs`)只持有自己的 [`CliCtx`]
 //! 薄声明 + 一段连接编排函数,调本模块的公共件。
 //!
-//! **drain 多态性说明**:[`drain_for_url`] 只发 URL(`String`),供飞书/企微共享。
+//! **drain 多态性说明**:[`drain_for_url`] 每行发 `(URL, 脱敏安全行)` 二元组,
+//! 供飞书/企微共享(URL 出二维码,安全行进失败原因缓冲)。
 //! tmeet/dingtalk 有各自的私有 drain(`drain_for_auth_url`/`drain_for_auth_event`),
 //! 因为它们在同一管道里额外抓取安全日志行 / user_code,channel 元素类型分别为
 //! `(Option<String>, Option<String>)` 和 `AuthEvent` enum。这是真实业务差异,
@@ -475,11 +476,15 @@ pub fn png_data_url(bytes: &[u8]) -> Option<String> {
     Some(format!("data:image/png;base64,{}", b64(bytes)))
 }
 
-/// 后台线程:逐行排空一个管道(防写满阻塞),抓到首个本连接器 URL 经 channel 送回。
+/// 后台线程:逐行排空一个管道(防写满阻塞),每行经 channel 送回
+/// `(首个本连接器 URL, 脱敏安全行)` 二元组。URL 供二维码;安全行(已按
+/// [`safe_auth_log_line`] 脱敏 + 截断)供连接器收进失败原因环形缓冲。
+/// bare-"token" 兜底关闭:飞书/企微 CLI 的正常输出行可能含含 token 字样的
+/// 字段名,开启会把非敏感行整体吞成占位符,失败原因就没了(与 dingtalk 同款取舍)。
 pub fn drain_for_url<R: std::io::Read + Send + 'static>(
     ctx: CliCtx,
     r: R,
-    tx: mpsc::Sender<String>,
+    tx: mpsc::Sender<(Option<String>, Option<String>)>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         for line in BufReader::new(r).lines() {
@@ -491,11 +496,55 @@ pub fn drain_for_url<R: std::io::Read + Send + 'static>(
                     break;
                 }
             };
-            if let Some(u) = ctx.extract_url(&line) {
-                let _ = tx.send(u);
-            }
+            let safe = safe_auth_log_line(&line, false);
+            let url = ctx.extract_url(&line);
+            let _ = tx.send((url, safe));
         }
     })
+}
+
+/// 失败原因环形缓冲的推送(容量 32,超出丢最旧)。`line` 必须是
+/// [`safe_auth_log_line`] 过滤后的行或 `None`;这里只负责容量与入队。
+pub fn remember_auth_line(
+    auth_lines: &mut std::collections::VecDeque<String>,
+    line: Option<String>,
+) {
+    if let Some(line) = line {
+        if auth_lines.len() >= 32 {
+            auth_lines.pop_front();
+        }
+        auth_lines.push_back(line);
+    }
+}
+
+/// 从排空得到的安全行里挑失败原因拼进 fallback(倒序找 failed/error/timeout/
+/// lock/失败 行,兜底取最后一行;没有任何安全行时原样返回 fallback)。
+/// 卡片只显示本地化类目文案,这里拼出的串走 `*:error` 的 message 字段与
+/// stderr/log 诊断轨迹——没有它,最常见的「CLI 打了原因再退出」在日志里
+/// 只剩应用侧的兜底话术,用户报告后无从诊断(tmeet/dingtalk 各自同款)。
+pub fn auth_failure_reason(
+    auth_lines: &std::collections::VecDeque<String>,
+    fallback: &str,
+) -> String {
+    let last_line = auth_lines
+        .iter()
+        .rev()
+        .find(|line| {
+            let l = line.to_ascii_lowercase();
+            l.contains("failed")
+                || l.contains("error")
+                || l.contains("timeout")
+                || l.contains("lock")
+                || line.contains("失败")
+        })
+        .cloned()
+        .or_else(|| auth_lines.back().cloned())
+        .unwrap_or_default();
+    if last_line.is_empty() {
+        fallback.to_string()
+    } else {
+        format!("{fallback}：{last_line}")
+    }
 }
 
 /// tree-kill 一个 PID,连其子进程(.cmd 拉起的 node)一起。
@@ -520,14 +569,45 @@ pub struct ConnectorConn {
 struct Slot {
     pid: Option<u32>,
     cancelled: bool,
+    /// Bumped by every connect_begin; lets a flow thread recognize it was
+    /// superseded by a newer round.
+    generation: u64,
 }
 
 impl ConnectorConn {
-    /// 开始一轮连接前清掉该连接器的取消标志。
-    pub fn reset(&self, id: &'static str) {
-        if let Ok(mut m) = self.slots.lock() {
-            m.entry(id).or_default().cancelled = false;
+    /// Clears the connector's cancel flag before a new round and returns the
+    /// new round's generation.
+    pub fn reset(&self, id: &'static str) -> u64 {
+        match self.slots.lock() {
+            Ok(mut m) => {
+                let s = m.entry(id).or_default();
+                s.cancelled = false;
+                s.generation = s.generation.wrapping_add(1);
+                s.generation
+            }
+            Err(_) => {
+                // Poisoned slot mutex: mint generation 0, which flow_stale
+                // always treats as stale (its lock fails there too, so it
+                // defaults to stale), making a poisoned connector fail silent
+                // — no QR/error emits at all — instead of one round's events
+                // landing on another round's card. A live slot never hands
+                // out 0: reset always bumps before returning.
+                0
+            }
         }
+    }
+
+    /// Self-check for a flow thread before emitting: reset() clears the
+    /// cancelled flag, so the flag alone cannot stop a late emit in the
+    /// "cancel then immediately reconnect" window — the old round's failure
+    /// would land on the new round's fresh card. A generation mismatch means
+    /// stale.
+    pub fn flow_stale(&self, id: &str, generation: u64) -> bool {
+        self.slots
+            .lock()
+            .ok()
+            .and_then(|m| m.get(id).map(|s| s.generation != generation))
+            .unwrap_or(true)
     }
 
     /// 置取消标志,返回当前长驻 PID(供 tree-kill)。
@@ -554,6 +634,20 @@ impl ConnectorConn {
         }
     }
 
+    /// Clears the slot's pid only when it still holds `pid`. A superseded flow
+    /// thread finishing its own cleanup must not clear the pid a newer round
+    /// has registered — cancel's tree-kill and kill_all_pids would miss the
+    /// live child.
+    pub fn clear_pid_if(&self, id: &'static str, pid: u32) {
+        if let Ok(mut m) = self.slots.lock() {
+            if let Some(s) = m.get_mut(id) {
+                if s.pid == Some(pid) {
+                    s.pid = None;
+                }
+            }
+        }
+    }
+
     /// 退出收割（lib.rs RunEvent::Exit 调）：杀掉所有槽位登记的长驻子进程树。
     /// 这些 CLI 子进程（.cmd 拉起的 node）没有 kill_on_drop 兜底，宿主进程
     /// 退出后若不显式清理会变孤儿进程继续驻留。
@@ -570,11 +664,18 @@ impl ConnectorConn {
 
 #[derive(Debug, Serialize)]
 pub struct ConnectorAuthGateRefresh {
-    feishu_visible: bool,
-    wecom_visible: bool,
-    dingtalk_visible: bool,
-    tmeet_visible: bool,
     elapsed_ms: u64,
+}
+
+/// 每个门控的静态描述表项：id（结果标记 / consent-sync 的包 id）、停用标志
+/// 文件名（经 [`skill_gate::ConnectorSkillGate`] 的默认实现落 `~/.pinvou3/`）、
+/// 展示名（错误文案）、连接探测与技能目录落盘（各自连接器模块的实现）。
+/// Official 的 trait 设计下以静态表驱动启动刷新（上游 `skill_gate::GATES`
+/// 的同构等价物，review #455 round-32 minor 9 的归因循环按本表运行）。
+struct GateEntry {
+    id: &'static str,
+    display_name: &'static str,
+    probe_and_apply: fn() -> Result<bool, String>,
 }
 
 /// 首屏提交后刷新飞书 / 企微 / 钉钉 / 腾讯会议鉴权门控。外部 CLI 在 blocking 线程池并行执行，
@@ -583,56 +684,88 @@ pub async fn refresh_connector_auth_gates() -> Result<ConnectorAuthGateRefresh, 
     let started = Instant::now();
     crate::platform::startup::mark("connector_auth_refresh:start");
 
-    let feishu = tokio::task::spawn_blocking(|| {
-        let show = crate::features::connectors::feishu::feishu_skills_should_show();
-        crate::features::runtime_bundle::platform::Pinvou3Bundle::paths()
-            .apply_feishu_skills(show)
-            .map_err(|e| format!("刷新飞书技能门控失败: {e}"))?;
-        Ok::<bool, String>(show)
-    });
-    let wecom = tokio::task::spawn_blocking(|| {
-        let show = crate::features::connectors::wecom::wecom_skills_should_show();
-        crate::features::runtime_bundle::platform::Pinvou3Bundle::paths()
-            .apply_wecom_skills(show)
-            .map_err(|e| format!("刷新企微技能门控失败: {e}"))?;
-        Ok::<bool, String>(show)
-    });
-    let dingtalk = tokio::task::spawn_blocking(|| {
-        let show = crate::features::connectors::dingtalk::dingtalk_skills_should_show();
-        crate::features::runtime_bundle::platform::Pinvou3Bundle::paths()
-            .apply_dingtalk_skills(show)
-            .map_err(|e| format!("刷新钉钉技能门控失败: {e}"))?;
-        Ok::<bool, String>(show)
-    });
-    let tmeet = tokio::task::spawn_blocking(|| {
-        let show = crate::features::connectors::tmeet::tmeet_skills_should_show();
-        crate::features::runtime_bundle::platform::Pinvou3Bundle::paths()
-            .apply_tmeet_skills(show)
-            .map_err(|e| format!("刷新腾讯会议技能门控失败: {e}"))?;
-        Ok::<bool, String>(show)
-    });
+    let gates: &[GateEntry] = &[
+        GateEntry {
+            id: "feishu",
+            display_name: "飞书",
+            probe_and_apply: crate::features::connectors::feishu::feishu_gate_step,
+        },
+        GateEntry {
+            id: "wecom",
+            display_name: "企业微信",
+            probe_and_apply: crate::features::connectors::wecom::wecom_gate_step,
+        },
+        GateEntry {
+            id: "dingtalk",
+            display_name: "钉钉",
+            probe_and_apply: crate::features::connectors::dingtalk::dingtalk_gate_step,
+        },
+        GateEntry {
+            id: "tmeet",
+            display_name: "腾讯会议",
+            probe_and_apply: crate::features::connectors::tmeet::tmeet_gate_step,
+        },
+    ];
 
-    let (feishu_result, wecom_result, dingtalk_result, tmeet_result) =
-        tokio::join!(feishu, wecom, dingtalk, tmeet);
-    let feishu_visible = feishu_result.map_err(|e| format!("飞书鉴权探测任务失败: {e}"))??;
-    let wecom_visible = wecom_result.map_err(|e| format!("企微鉴权探测任务失败: {e}"))??;
-    let dingtalk_visible = dingtalk_result.map_err(|e| format!("钉钉鉴权探测任务失败: {e}"))??;
-    let tmeet_visible = tmeet_result.map_err(|e| format!("腾讯会议鉴权探测任务失败: {e}"))??;
+    let tasks: Vec<_> = gates
+        .iter()
+        .map(|gate| {
+            let step = gate.probe_and_apply;
+            tokio::task::spawn_blocking(move || step())
+        })
+        .collect();
+
+    // Round-32 minor 9 (review #455): the loop must attribute EVERY gate —
+    // the old zip-`??` short-circuited on the first failure, dropping the
+    // remaining gates' `visible=` marks and the whole `done` mark, so one
+    // broken gate blinded startup observability for the other three (this
+    // PR's ledger-gated refresh supplies the loop's first realistic error
+    // source). All four tasks always run to completion; the marks record
+    // every outcome, the `done` mark is always emitted, and the first gate
+    // error is returned after the bookkeeping.
+    let mut outcomes = Vec::with_capacity(tasks.len());
+    for (gate, task) in gates.iter().zip(tasks) {
+        let result = task
+            .await
+            .map_err(|e| format!("{}鉴权探测任务失败: {e}", gate.display_name));
+        outcomes.push((gate.id.to_string(), result));
+    }
+    let (visible_marks, first_error) = collect_refresh_outcomes(outcomes);
     let elapsed_ms = started.elapsed().as_millis() as u64;
     crate::platform::startup::mark_with_detail(
         "rust",
         "connector_auth_refresh:done",
-        &format!(
-            "elapsed_ms={elapsed_ms} feishu_visible={feishu_visible} wecom_visible={wecom_visible} dingtalk_visible={dingtalk_visible} tmeet_visible={tmeet_visible}"
-        ),
+        &format!("elapsed_ms={elapsed_ms} {}", visible_marks.join(" ")),
     );
-    Ok(ConnectorAuthGateRefresh {
-        feishu_visible,
-        wecom_visible,
-        dingtalk_visible,
-        tmeet_visible,
-        elapsed_ms,
-    })
+    match first_error {
+        Some(error) => Err(error),
+        None => Ok(ConnectorAuthGateRefresh { elapsed_ms }),
+    }
+}
+
+/// Round-32 minor 9 (review #455): pure attribution builder for
+/// [`refresh_connector_auth_gates`] — one `visible=` mark per gate (in gate
+/// order, `error` for a failed gate) plus the first gate error, so a broken
+/// gate no longer blinds the rest. Testable without real CLI probes.
+fn collect_refresh_outcomes(
+    outcomes: Vec<(String, Result<Result<bool, String>, String>)>,
+) -> (Vec<String>, Option<String>) {
+    let mut marks = Vec::with_capacity(outcomes.len());
+    let mut first_error: Option<String> = None;
+    for (id, result) in outcomes {
+        match result {
+            Ok(Ok(visible)) => marks.push(format!("{id}_visible={visible}")),
+            Ok(Err(e)) => {
+                marks.push(format!("{id}_visible=error"));
+                first_error.get_or_insert(e);
+            }
+            Err(e) => {
+                marks.push(format!("{id}_visible=error"));
+                first_error.get_or_insert(e);
+            }
+        }
+    }
+    (marks, first_error)
 }
 
 // ─────────────── BundleStore 镜像（marketplace-unification Phase 2）───────────────
@@ -647,17 +780,18 @@ pub async fn refresh_connector_auth_gates() -> Result<ConnectorAuthGateRefresh, 
 pub fn bundle_store_on_connected(id: &str) {
     use crate::features::marketplace::bundle;
     use crate::features::marketplace::store::{
-        ASSET_KIND_CLI, AssetRef, BundleRecord, BundleSource, BundleStore,
+        ASSET_KIND_CLI, AssetEntry, AssetRef, BundleRecord, BundleSource, BundleStore,
     };
     let mut record = BundleRecord::installed_now(id, BundleSource::Builtin);
     if let Some(bin) = bundle::cli_bundle_bin(id) {
         if let Some(pin) = crate::platform::connector_lock::artifact_pin(bin) {
-            record.assets.push(AssetRef {
+            record.assets.push(AssetEntry::Ref(AssetRef {
                 kind: ASSET_KIND_CLI.to_string(),
                 name: bin.to_string(),
                 version: pin.version,
                 sha256: pin.binary_sha256,
-            });
+                ..AssetRef::default()
+            }));
         }
     }
     if let Err(e) = BundleStore::new().upsert_preserving(record) {
@@ -681,6 +815,41 @@ pub fn bundle_store_on_disconnected(id: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Round-32 minor 9 (review #455): the attribution builder records every
+    /// gate even when one fails — a broken gate must not blind the rest, and
+    /// the first error is only returned after the bookkeeping.
+    #[test]
+    fn refresh_outcomes_attribute_every_gate_on_partial_failure() {
+        let outcomes = vec![
+            ("feishu".to_string(), Ok(Ok(true))),
+            (
+                "wecom".to_string(),
+                Ok(Err("刷新企微技能门控失败: boom".to_string())),
+            ),
+            (
+                "dingtalk".to_string(),
+                Err("钉钉鉴权探测任务失败: join".to_string()),
+            ),
+            ("tmeet".to_string(), Ok(Ok(false))),
+        ];
+        let (marks, first_error) = collect_refresh_outcomes(outcomes);
+        assert_eq!(
+            marks,
+            vec![
+                "feishu_visible=true".to_string(),
+                "wecom_visible=error".to_string(),
+                "dingtalk_visible=error".to_string(),
+                "tmeet_visible=false".to_string(),
+            ],
+            "every gate keeps its attribution mark, failed or not"
+        );
+        assert_eq!(
+            first_error.as_deref(),
+            Some("刷新企微技能门控失败: boom"),
+            "the first gate error wins, after the marks are recorded"
+        );
+    }
 
     const TEST_CTX: CliCtx = CliCtx {
         cli_bin: "test-cli",
@@ -724,6 +893,46 @@ mod tests {
         assert_eq!(rotated.len(), 2048);
         assert!(rotated.iter().all(|&b| b == b'b'), "{rotated:?}");
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// Every reset bumps the generation: once a new round starts, a flow
+    /// thread holding the old generation is treated as stale while the new
+    /// one passes the self-check — the guarantee that keeps an old round's
+    /// failure off the new round's card.
+    #[test]
+    fn generation_marks_superseded_flows_stale() {
+        let conn = ConnectorConn::default();
+        let gen1 = conn.reset("test-connector");
+        assert!(!conn.flow_stale("test-connector", gen1));
+        let gen2 = conn.reset("test-connector");
+        assert!(conn.flow_stale("test-connector", gen1));
+        assert!(!conn.flow_stale("test-connector", gen2));
+        // Cancel does not bump the generation: post-cancel silence stays the
+        // cancelled flag's job.
+        conn.cancel("test-connector");
+        assert!(!conn.flow_stale("test-connector", gen2));
+        // An unregistered connector is treated as stale (conservative:
+        // silence over a wrong card).
+        assert!(conn.flow_stale("other-connector", gen1));
+    }
+
+    /// clear_pid_if must be a compare-and-set: a superseded thread's cleanup
+    /// drops only its own pid, never the pid a newer round has registered.
+    #[test]
+    fn clear_pid_if_only_clears_its_own_pid() {
+        let conn = ConnectorConn::default();
+        let _ = conn.reset("test-connector");
+        conn.set_pid("test-connector", Some(111));
+        // A different pid (e.g. registered by a newer round) is left alone.
+        conn.clear_pid_if("test-connector", 222);
+        conn.cancel("test-connector"); // cancel returns the still-registered pid
+        assert_eq!(conn.cancel("test-connector"), Some(111));
+        // The owning pid clears.
+        conn.clear_pid_if("test-connector", 111);
+        assert_eq!(conn.cancel("test-connector"), None);
+        // Clearing again is a no-op.
+        conn.clear_pid_if("test-connector", 111);
+        assert_eq!(conn.cancel("test-connector"), None);
     }
 
     /// extract_url three-branch matrix: whitelisted domain hits truncate at
@@ -770,6 +979,27 @@ mod tests {
         let (tx, _rx) = mpsc::channel();
         let handle = drain_for_url(TEST_CTX, ReadErrorThenPanic { failed: false }, tx);
         assert!(handle.join().is_ok(), "读取错误后应退出排空线程");
+    }
+
+    /// The failure trail must prefer a failure-ish captured line over the
+    /// bare fallback, fall back to the last line when nothing matches, and
+    /// return the fallback untouched when nothing was captured — otherwise
+    /// the most common register/auth failures stay undiagnosable from the
+    /// log (the app-authored fallback is all there is).
+    #[test]
+    fn auth_failure_reason_prefers_failure_line_then_last_line() {
+        let mut lines = std::collections::VecDeque::new();
+        assert_eq!(auth_failure_reason(&lines, "fallback"), "fallback");
+        lines.push_back("config init started".to_string());
+        assert_eq!(
+            auth_failure_reason(&lines, "fallback"),
+            "fallback：config init started"
+        );
+        lines.push_back("Error: login endpoint unreachable".to_string());
+        assert_eq!(
+            auth_failure_reason(&lines, "fallback"),
+            "fallback：Error: login endpoint unreachable"
+        );
     }
 
     /// A 30s probe timeout must NOT read as "CLI not installed": the ensure

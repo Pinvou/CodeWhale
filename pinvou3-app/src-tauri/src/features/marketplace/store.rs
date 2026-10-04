@@ -13,6 +13,8 @@
 //!   roundtrip，新 schema 字段在老版本二进制上不丢数据（前向兼容）。
 //! - 损坏 JSON fail loud：bundles.json 是唯一真相源，静默重建会掩盖数据损坏，
 //!   损坏时返回 Err 且绝不回写。
+//!
+// architecture-guard: allow-target-cfg -- the unix regression test in this file (the round-23 MAJOR 3 legacy-import gate latch) needs an unreadable (0o000) installed.json fixture; test-only inline cfg(unix)+PermissionsExt (same exemption precedent as scope.rs / package_export.rs, review #455); a real read() probe guards against running as root, Windows is covered by link checks.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
@@ -114,12 +116,28 @@ impl<'de> Deserialize<'de> for BundleSource {
 
 /// 外部资产引用（§3.1：name + version + sha256；kind 区分 CLI 二进制 / 后续 pip 等）。
 /// kind 用 String 而非枚举：新资产种类在老版本二进制上应能无损 roundtrip。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AssetRef {
     pub kind: String,
     pub name: String,
     pub version: String,
     pub sha256: String,
+    /// Keys this binary does not model round-trip unchanged.
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
+}
+
+/// One `BundleRecord.assets` entry. An entry that does not parse as an
+/// [`AssetRef`] (a shape written by another version, a missing field, a
+/// non-string value) is kept verbatim as `Unrecognized`: it must neither fail
+/// the whole `bundles.json` load nor be dropped by the next write. The
+/// retained value is endpoint-authored data: render it as data, never as
+/// markup, wherever a future consumer surfaces it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum AssetEntry {
+    Ref(AssetRef),
+    Unrecognized(serde_json::Value),
 }
 
 /// 存储层包记录（§3.1：bundles.json 里唯一可写的部分）。
@@ -134,9 +152,12 @@ pub struct BundleRecord {
     /// 由后续完整性校验/统一管线填写。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content_fingerprint: Option<String>,
-    /// 外部资产引用（CLI 二进制等，包只引用不拥有）
+    /// External asset references (CLI binaries and the like); the package
+    /// references them but does not own them. Tolerance is per entry only:
+    /// a missing key defaults to empty, but a `null`/non-array value fails
+    /// the whole load by the file's fail-loud rule (never silently rebuilt).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub assets: Vec<AssetRef>,
+    pub assets: Vec<AssetEntry>,
     /// 凭据引用（只有 key；凭据本体在 keyring，永不落盘 —— §4 规则 3）
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub credential_keys: Vec<String>,
@@ -280,6 +301,16 @@ impl BundleStore {
     /// `extra`（前向兼容/用户字段）与 `content_fingerprint`（完整性校验层的数据），
     /// 其余字段以新值为准。安装/连接成功的镜像写统一走这里 —— 重装、重复连接
     /// 不应冲掉首次安装时间，也不应丢老版本二进制不认识的字段。
+    /// `assets` takes the new list when it is non-empty and otherwise keeps the
+    /// existing one, so a writer that does not track assets must not wipe refs
+    /// another writer recorded while a pin writer can still replace a stale
+    /// pin. The flip side: "unpin all" is not expressible through this
+    /// variant — a writer that genuinely wants an empty list must fall to
+    /// plain `upsert`, which replaces the whole record. No code records pins
+    /// yet; the rule exists so the first pin writer cannot silently wipe, and
+    /// its protection is per-process: each process merges against its own
+    /// load-time snapshot, so cross-process writers remain last-writer-wins
+    /// on the whole file.
     pub fn upsert_preserving(&self, record: BundleRecord) -> Result<(), String> {
         let _guard = file_lock();
         let mut file = load_locked(&self.file)?;
@@ -291,7 +322,11 @@ impl BundleStore {
                 content_fingerprint: record
                     .content_fingerprint
                     .or_else(|| existing.content_fingerprint.clone()),
-                assets: record.assets,
+                assets: if record.assets.is_empty() {
+                    existing.assets.clone()
+                } else {
+                    record.assets
+                },
                 credential_keys: record.credential_keys,
                 installed_at: existing.installed_at.clone(),
                 degraded: record.degraded,
@@ -341,19 +376,19 @@ impl BundleStore {
     /// 局部更新：置 `Degraded` 原因（§3.2：登记在、资源缺），供 CLI 修复/断开
     /// 路径用。id 不存在 → Ok(false)；原因未变 → Ok(true) 但不写盘。
     pub fn mark_degraded(&self, id: &str, reason: &str) -> Result<bool, String> {
-        self.set_degraded(id, Some(reason.to_string()))
+        self.set_degraded(id, reason.to_string())
     }
 
-    fn set_degraded(&self, id: &str, reason: Option<String>) -> Result<bool, String> {
+    fn set_degraded(&self, id: &str, reason: String) -> Result<bool, String> {
         let _guard = file_lock();
         let mut file = load_locked(&self.file)?;
         let Some(record) = file.records.iter_mut().find(|r| r.id == id) else {
             return Ok(false);
         };
-        if record.degraded == reason {
+        if record.degraded.as_deref() == Some(reason.as_str()) {
             return Ok(true);
         }
-        record.degraded = reason;
+        record.degraded = Some(reason);
         save_locked(&self.file, &file)?;
         Ok(true)
     }
@@ -449,7 +484,11 @@ impl BundleStore {
     ///   已存在的记录永远保留（用户/新管线写入的赢）。
     /// - **非破坏性**：只读旧布局、只写 bundles.json；目录搬移与同名残留清理由
     ///   connectors 侧 `migrate_legacy_binary` 按 lock 校验执行（boot 序列在
-    ///   本 import 之后）。
+    ///   本 import 之后；#608）。
+    /// - **注册表不可读 = 不导入、不落闸**（review #455 round-23 MAJOR 3）：
+    ///   installed.json 存在但不可读时整体报错返回，`legacy_imported` 不置位——
+    ///   宁可下次启动重试，也不把一次吞错读取得来的不完整镜像永久烘焙进
+    ///   bundles.json（与 round-20 MAJOR A 的 reconcile 转换同类）。
     /// - 全程持 FILE_LOCK（"读到即迁移"必须持锁，§9.4 / #287 竞态教训前置）。
     pub fn import_legacy(&self) -> Result<LegacyImportReport, String> {
         let _guard = file_lock();
@@ -459,7 +498,7 @@ impl BundleStore {
             report.already_imported = true;
             return Ok(report);
         }
-        for candidate in collect_legacy_records() {
+        for candidate in collect_legacy_records()? {
             if file.records.iter().any(|r| r.id == candidate.id) {
                 report.kept_existing.push(candidate.id);
                 continue;
@@ -637,15 +676,50 @@ pub(crate) fn upload_display_name(record: &BundleRecord, fallback: &str) -> Stri
 /// 内层读：与取锁包装分离，已持锁的 import/upsert 直接调用，避免 Mutex 重入。
 fn load_locked(path: &Path) -> Result<BundlesFile, String> {
     match std::fs::read_to_string(path) {
-        Ok(content) => serde_json::from_str(&content).map_err(|e| {
-            format!(
-                "解析 {} 失败: {e}（bundles.json 是唯一真相源，损坏时 fail loud，不静默重建）",
-                path.display()
-            )
-        }),
+        Ok(content) => {
+            let file: BundlesFile = serde_json::from_str(&content).map_err(|e| {
+                format!(
+                    "解析 {} 失败: {e}（bundles.json 是唯一真相源，损坏时 fail loud，不静默重建）",
+                    path.display()
+                )
+            })?;
+            warn_unrecognized_assets(path, &file);
+            Ok(file)
+        }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(BundlesFile::default()),
         Err(e) => Err(format!("读取 {} 失败: {e}", path.display())),
     }
+}
+
+/// Unparsable `assets` entries are kept verbatim per the `AssetEntry`
+/// contract, but a silent degrade hides data-quality problems (a `sha_256`
+/// misspelling from a future pin writer, for example). Report them once per
+/// load so the anomaly is diagnosable instead of just invisible.
+fn warn_unrecognized_assets(path: &Path, file: &BundlesFile) {
+    let flagged = unrecognized_asset_record_ids(file);
+    if !flagged.is_empty() {
+        log::warn!(
+            "[marketplace] {}: unreadable assets entries kept verbatim in {}",
+            path.display(),
+            flagged.join(", ")
+        );
+    }
+}
+
+/// Record ids carrying at least one entry this binary cannot read; split
+/// from `warn_unrecognized_assets` so the targeting rule is testable
+/// without capturing log output.
+fn unrecognized_asset_record_ids(file: &BundlesFile) -> Vec<String> {
+    file.records
+        .iter()
+        .filter(|record| {
+            record
+                .assets
+                .iter()
+                .any(|entry| !matches!(entry, AssetEntry::Ref(_)))
+        })
+        .map(|record| record.id.clone())
+        .collect()
 }
 
 /// 内层写：tmp + rename 原子替换（底座 `write_atomic`，含 Windows 替换重试），
@@ -665,34 +739,43 @@ fn save_locked(path: &Path, file: &BundlesFile) -> Result<(), String> {
 // 旧布局反推（只读旧文件，不动包内容）
 // ---------------------------------------------------------------------------
 
-/// 安装时间戳：RFC3339/ISO8601 UTC，对齐 SessionMetadata.updated_at 的 chrono 惯例。
-fn now_iso8601() -> String {
+/// Install/recycle timestamps: RFC3339/ISO8601 UTC, following the same chrono convention
+/// as SessionMetadata.updated_at. recycle_bin.rs reuses this implementation so the two
+/// timestamp formats cannot drift apart.
+pub(super) fn now_iso8601() -> String {
     chrono::Utc::now().to_rfc3339()
 }
 
-fn collect_legacy_records() -> Vec<BundleRecord> {
-    let mut out = legacy_mcp_records();
-    out.extend(legacy_skill_records());
+/// 旧布局扫描 → 预置包记录。MCP 安装态读走 `try_installed_ids`（review #455
+/// round-23 MAJOR 3）：installed.json 存在但不可读时整体报错，调用方据此跳过
+/// 本次导入且不落 `legacy_imported` 闸，避免把不完整镜像永久烘焙进 bundles.json。
+fn collect_legacy_records() -> Result<Vec<BundleRecord>, String> {
+    let mut out = legacy_mcp_records()?;
+    // Round-24 minor 2: the skill/CLI scan legs propagate a scan-root read
+    // error the same way the registry leg does — a degraded scan latching the
+    // one-shot gate would bake an incomplete mirror in permanently (the same
+    // class the registry conversion closed). A missing legacy dir stays the
+    // common Ok(empty) case; only an existing-but-unreadable root errors.
+    out.extend(legacy_skill_records()?);
     out.extend(legacy_cli_records());
     // id 去重（保序留先）：MCP 包与其同名 companion 技能（pptx↔pptx）会各扫到一次，
     // 终态模型里它们是同一个包（§5.2「一个包 = 一张卡」），MCP 侧记录含凭据声明，
     // 信息更全，故排在前面的 MCP 记录优先。
     let mut seen = std::collections::HashSet::new();
     out.retain(|r| seen.insert(r.id.clone()));
-    out
+    Ok(out)
 }
 
-/// installed.json（MCP 安装态）→ 预置包记录；凭据 key 从 manifest 现算收敛
-/// （与查询层 `bundle::tool_credentials` 同一推导，keyring 本体不动）。
-fn legacy_mcp_records() -> Vec<BundleRecord> {
+/// installed.json（MCP 安装态）→ 预置包记录。读失败报 Err（不塌缩为空集）。
+fn legacy_mcp_records() -> Result<Vec<BundleRecord>, String> {
     let manager = MarketplaceManager::new();
-    let installed = manager.installed_ids();
+    let installed = manager.try_installed_ids()?;
     if installed.is_empty() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
     let manifests = manager.available_tools();
     let now = now_iso8601();
-    installed
+    Ok(installed
         .into_iter()
         .map(|id| {
             let credential_keys = manifests
@@ -717,26 +800,48 @@ fn legacy_mcp_records() -> Vec<BundleRecord> {
                 extra: serde_json::Map::new(),
             }
         })
-        .collect()
+        .collect())
 }
 
 /// `bundle/skills/*/.installed-from` 标记 → 技能包记录：
 /// `pinvou3-marketplace:<id>` → 预置技能包；`upload:<zip名>` → 上传技能包。
 /// 无标记目录（内置 visual-design、CLI companion 技能）不在此登记 —— CLI
 /// companion 由 [`legacy_cli_records`] 归并到所属 CLI 包。
-fn legacy_skill_records() -> Vec<BundleRecord> {
+fn legacy_skill_records() -> Result<Vec<BundleRecord>, String> {
     let skills_dir = paths::bundle_skills_dir();
-    let Ok(rd) = std::fs::read_dir(&skills_dir) else {
-        return Vec::new();
+    // Round-24 minor 2: a missing legacy dir is the common fresh case; an
+    // existing-but-unreadable root propagates so the import aborts before the
+    // gate latches (same fail-closed as the registry leg).
+    let rd = match std::fs::read_dir(&skills_dir) {
+        Ok(rd) => rd,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(format!("读取旧布局技能目录失败: {e}")),
     };
     let now = now_iso8601();
     let mut out = Vec::new();
-    for entry in rd.flatten() {
+    // Round-30 m6 (review #455): `flatten()` silently drops mid-scan
+    // iteration errors — the one-shot `legacy_imported` gate could latch
+    // over an incomplete mirror (records permanently skipped). Propagate
+    // like the root read above and the per-entry markers below: the last
+    // leg of the round-23 MAJOR-3 class in this function.
+    for entry in rd {
+        let entry = entry.map_err(|e| format!("遍历旧布局技能目录失败: {e}"))?;
         let dir = entry.path();
         if !dir.is_dir() {
             continue;
         }
-        let Ok(marker) = std::fs::read_to_string(dir.join(".installed-from")) else {
+        // Round-29 m4 (review #455): NotFound is the common no-marker skip,
+        // but an EXISTS-but-unreadable marker must abort the import exactly
+        // like the unreadable root above — the one-shot `legacy_imported`
+        // gate must not latch over an incomplete mirror (round-23 MAJOR-3 /
+        // round-24 m2 class, per-entry form).
+        let marker_path = dir.join(".installed-from");
+        let marker = if marker_path.exists() {
+            match std::fs::read_to_string(&marker_path) {
+                Ok(marker) => marker,
+                Err(e) => return Err(format!("读取 {} 失败: {e}", marker_path.display())),
+            }
+        } else {
             continue;
         };
         let marker = marker.trim();
@@ -764,14 +869,19 @@ fn legacy_skill_records() -> Vec<BundleRecord> {
             extra: serde_json::Map::new(),
         });
     }
-    out
+    Ok(out)
 }
 
 /// 内置 CLI 连接器 → Builtin 包记录。安装态判定：companion 技能目录在盘
 /// （连接时才解包）或 CLI 二进制在盘。存量二进制对照 lock 表验 SHA-256：
 /// 匹配 → 正常登记；不匹配/无法校验 → 记 `degraded`（§9.3，
 /// 修复动作 = 重新下载；旧布局搬移与同名残留清理由 connectors 侧
-/// `migrate_legacy_binary` 按 lock 校验执行）。
+/// `migrate_legacy_binary` 按 lock 校验执行（#608））。
+/// CLI 腿只做 `is_file` 存在性探测（无 read_dir 根可失败）——#608 移除了
+/// 仅为与另两腿签名对称而保留的空壳 `Result`（round-24 minor 2 的对称性
+/// 理由随空壳一并失效）；另两腿（registry / skill 扫描）保留 `Result`，
+/// 其 fail-closed 传播是 review #455 round-23 MAJOR 3 / round-29 m4 /
+/// round-30 m6 的契约。
 fn legacy_cli_records() -> Vec<BundleRecord> {
     let skills_dir = paths::bundle_skills_dir();
     let now = now_iso8601();
@@ -784,7 +894,7 @@ fn legacy_cli_records() -> Vec<BundleRecord> {
         let mut degraded = None;
         if let Some(bin) = bundle::cli_bundle_bin(id) {
             match cli_asset_state(bin) {
-                CliAssetState::Verified(asset) => assets.push(asset),
+                CliAssetState::Verified(asset) => assets.push(AssetEntry::Ref(asset)),
                 CliAssetState::Mismatch(reason) => degraded = Some(reason),
                 CliAssetState::Absent => {}
             }
@@ -832,12 +942,13 @@ fn cli_asset_state(bin: &str) -> CliAssetState {
             "lock 表无 {bin} 条目，存量二进制无法校验，待重新下载"
         ));
     };
-    match connector_lock::file_sha256_hex(&path) {
+    match crate::platform::hashing::sha256_file(&path) {
         Ok(actual) if actual == pin.binary_sha256 => CliAssetState::Verified(AssetRef {
             kind: ASSET_KIND_CLI.to_string(),
             name: bin.to_string(),
             version: pin.version,
             sha256: pin.binary_sha256,
+            ..AssetRef::default()
         }),
         Ok(actual) => CliAssetState::Mismatch(format!(
             "CLI 二进制 SHA-256 与 lock 表不符（expected {}, got {actual}），待重新下载",
@@ -850,32 +961,7 @@ fn cli_asset_state(bin: &str) -> CliAssetState {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// 把 PINVOU3_HOME 指到干净临时目录跑闭包，跑完恢复并清理。
-    /// 借 `platform::paths::tests::ENV_LOCK` 与其它 mutate PINVOU3_HOME 的测试串行。
-    fn with_temp_home<F: FnOnce()>(f: F) {
-        let _g = crate::platform::paths::tests::ENV_LOCK
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
-        let dir = std::env::temp_dir().join(format!(
-            "pinvou3-store-test-{}-{}",
-            std::process::id(),
-            crate::platform::paths::tests::unique_suffix()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let prev = std::env::var("PINVOU3_HOME").ok();
-        // SAFETY: holding platform::paths::tests::ENV_LOCK; env writes serialized in-process.
-        unsafe { std::env::set_var("PINVOU3_HOME", &dir) };
-        f();
-        match prev {
-            // SAFETY: holding platform::paths::tests::ENV_LOCK; env writes serialized in-process.
-            Some(v) => unsafe { std::env::set_var("PINVOU3_HOME", v) },
-            // SAFETY: holding platform::paths::tests::ENV_LOCK; env writes serialized in-process.
-            None => unsafe { std::env::remove_var("PINVOU3_HOME") },
-        }
-        let _ = std::fs::remove_dir_all(&dir);
-    }
+    use crate::platform::test_support::with_temp_home;
 
     fn record(id: &str, source: BundleSource) -> BundleRecord {
         BundleRecord {
@@ -893,7 +979,7 @@ mod tests {
 
     #[test]
     fn empty_store_loads_missing_file_as_empty() {
-        with_temp_home(|| {
+        with_temp_home("pinvou3-store-test", || {
             let store = BundleStore::new();
             let file = store.load().unwrap();
             assert!(file.records.is_empty());
@@ -904,16 +990,17 @@ mod tests {
 
     #[test]
     fn save_load_roundtrip_preserves_all_fields() {
-        with_temp_home(|| {
+        with_temp_home("pinvou3-store-test", || {
             let store = BundleStore::new();
             let mut full = record("feishu", BundleSource::Builtin);
             full.content_fingerprint = Some("abc123".to_string());
-            full.assets = vec![AssetRef {
+            full.assets = vec![AssetEntry::Ref(AssetRef {
                 kind: ASSET_KIND_CLI.to_string(),
                 name: "lark-cli".to_string(),
                 version: "1.2.3".to_string(),
                 sha256: "deadbeef".to_string(),
-            }];
+                ..AssetRef::default()
+            })];
             full.credential_keys = vec!["LARK_APP_ID".to_string()];
             full.degraded = Some("reason".to_string());
             store.upsert(full.clone()).unwrap();
@@ -940,7 +1027,7 @@ mod tests {
 
     #[test]
     fn atomic_write_leaves_no_tmp_files() {
-        with_temp_home(|| {
+        with_temp_home("pinvou3-store-test", || {
             let store = BundleStore::new();
             store.upsert(record("a", BundleSource::Preset)).unwrap();
             let dir = paths::pinvou3_home().join("marketplace");
@@ -962,7 +1049,7 @@ mod tests {
     /// （老版本二进制读写新 schema 文件不丢数据）。
     #[test]
     fn unknown_keys_survive_roundtrip() {
-        with_temp_home(|| {
+        with_temp_home("pinvou3-store-test", || {
             let store = BundleStore::new();
             let path = store.file_path();
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -1010,7 +1097,7 @@ mod tests {
     /// 损坏 JSON 必须 fail loud：报错且绝不回写（真相源不静默重建）。
     #[test]
     fn corrupt_json_fails_loud_without_overwrite() {
-        with_temp_home(|| {
+        with_temp_home("pinvou3-store-test", || {
             let store = BundleStore::new();
             let path = store.file_path();
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -1026,11 +1113,66 @@ mod tests {
         });
     }
 
+    /// Round-23 MAJOR 3: an unreadable installed.json must fail the legacy
+    /// import WITHOUT latching the one-shot `legacy_imported` gate and without
+    /// writing bundles.json — a swallowed read here would bake an incomplete
+    /// mirror into the store permanently (no later boot can repair it). After
+    /// the permissions are restored, the same call imports and latches.
+    #[cfg(unix)]
+    #[test]
+    fn legacy_import_unreadable_registry_fails_without_latching_gate() {
+        use std::os::unix::fs::PermissionsExt;
+        with_temp_home("pinvou3-store-test", || {
+            let store = BundleStore::new();
+            let home = paths::pinvou3_home();
+            let installed_path = home.join("marketplace/installed.json");
+            std::fs::create_dir_all(installed_path.parent().unwrap()).unwrap();
+            std::fs::write(&installed_path, r#"["gongwen"]"#).unwrap();
+            std::fs::set_permissions(&installed_path, std::fs::Permissions::from_mode(0o000))
+                .unwrap();
+            // Root probe (mode bits are no-ops for root): if the file is still
+            // readable, the unreadable-read branch never runs — skip loudly.
+            if std::fs::read(&installed_path).is_ok() {
+                std::fs::set_permissions(&installed_path, std::fs::Permissions::from_mode(0o644))
+                    .unwrap();
+                eprintln!(
+                    "ROOT-SKIP[legacy_import_unreadable_registry_fails_without_latching_gate]: running as root - the unreadable-file fixture stays readable; NOT exercised"
+                );
+                return;
+            }
+
+            assert!(
+                store.import_legacy().is_err(),
+                "an unreadable registry must fail the import (fail loud, not swallow)"
+            );
+            let file = store.load().unwrap();
+            assert!(
+                !file.legacy_imported,
+                "the one-shot gate must stay unset so a later boot retries the import"
+            );
+            assert!(
+                file.records.is_empty(),
+                "no incomplete mirror may be persisted off a failed read"
+            );
+
+            // Permissions restored: the same call now imports and latches.
+            std::fs::set_permissions(&installed_path, std::fs::Permissions::from_mode(0o644))
+                .unwrap();
+            let report = store.import_legacy().unwrap();
+            assert_eq!(report.imported, vec!["gongwen".to_string()]);
+            let file = store.load().unwrap();
+            assert!(
+                file.legacy_imported,
+                "the successful import latches the gate"
+            );
+        });
+    }
+
     /// 首启导入：MCP（installed.json + manifest 凭据）、预置/上传技能标记、
     /// CLI 连接器（companion 技能在盘 + 存量二进制对照 lock 表）全部归位。
     #[test]
     fn import_legacy_collects_mcp_skills_and_cli() {
-        with_temp_home(|| {
+        with_temp_home("pinvou3-store-test", || {
             let home = paths::pinvou3_home();
             let write = |rel: &str, content: &str| {
                 let p = home.join(rel);
@@ -1038,8 +1180,9 @@ mod tests {
                 std::fs::write(p, content).unwrap();
             };
             write("marketplace/installed.json", r#"["gongwen"]"#);
-            // MCP manifest 已迁按包聚合新布局：`legacy_mcp_records` 经 available_tools()
-            // 读 `bundles/<id>/mcp/manifest.json`（+ 内嵌），凭据 key 从现算收敛。
+            // MCP manifest 已迁按包聚合新布局：`legacy_mcp_records` 经
+            // try_installed_ids() 读登记 id（manifest 本体现在只影响 kind/凭据查询，
+            // 不进记录）。
             write(
                 "bundles/gongwen/mcp/manifest.json",
                 r#"{"id":"gongwen","name":"公文写作","description":"d","version":"1.0.0","icon":"","category":"office","mcp_tools":[],"command":"","args":[],"config_fields":[{"key":"GONGWEN_KEY","label":"k","required":true}]}"#,
@@ -1138,7 +1281,7 @@ mod tests {
     /// 闸一次性置位，错过即永久错过）。
     #[test]
     fn import_legacy_registers_wecom_by_new_skill_dirs() {
-        with_temp_home(|| {
+        with_temp_home("pinvou3-store-test", || {
             let legacy = paths::bundle_skills_dir();
             // 只放 1.1.0 新名（0.1.9 旧 7 名表覆盖不到的名字）
             let dir = legacy.join("wecomcli-calendar");
@@ -1163,7 +1306,7 @@ mod tests {
     /// 导入幂等：二次调用直接跳过；已有同 id 记录永远保留，不被反推结果覆盖。
     #[test]
     fn import_legacy_is_idempotent_and_never_overwrites_existing() {
-        with_temp_home(|| {
+        with_temp_home("pinvou3-store-test", || {
             let home = paths::pinvou3_home();
             let marketplace = home.join("marketplace");
             std::fs::create_dir_all(&marketplace).unwrap();
@@ -1200,9 +1343,55 @@ mod tests {
         });
     }
 
+    /// Round-29 m4 (review #455): an EXISTS-but-unreadable `.installed-from`
+    /// marker must abort the legacy import (Err) instead of being silently
+    /// skipped — the one-shot `legacy_imported` gate must not latch over an
+    /// incomplete mirror (round-23 MAJOR-3 / round-24 m2 class, per-entry
+    /// form). A no-marker dir stays a plain skip.
+    #[cfg(unix)]
+    #[test]
+    fn legacy_import_unreadable_marker_aborts_before_gate_latches() {
+        use std::os::unix::fs::PermissionsExt;
+        with_temp_home("pinvou3-store-test", || {
+            let skills = paths::bundle_skills_dir();
+            let good = skills.join("good");
+            std::fs::create_dir_all(&good).unwrap();
+            std::fs::write(good.join(".installed-from"), "pinvou3-marketplace:legacy-a").unwrap();
+            let sealed = skills.join("sealed");
+            std::fs::create_dir_all(&sealed).unwrap();
+            std::fs::write(
+                sealed.join(".installed-from"),
+                "pinvou3-marketplace:legacy-b",
+            )
+            .unwrap();
+            let sealed_marker = sealed.join(".installed-from");
+            std::fs::set_permissions(&sealed_marker, std::fs::Permissions::from_mode(0o000))
+                .unwrap();
+            if std::fs::read_to_string(&sealed_marker).is_ok() {
+                eprintln!(
+                    "ROOT-SKIP[legacy_import_unreadable_marker_aborts_before_gate_latches]: unreadable-file fixture not effective (root); NOT exercised"
+                );
+                return;
+            }
+            // 无标记目录仍是普通跳过，不得触发任何错误路径。
+            std::fs::create_dir_all(skills.join("bare")).unwrap();
+
+            let store = BundleStore::new();
+            let err = store.import_legacy().unwrap_err();
+            assert!(
+                err.contains(".installed-from") || err.contains("读取"),
+                "the unreadable marker must abort the import: {err}"
+            );
+            assert!(
+                !store.load().unwrap().legacy_imported,
+                "the one-shot gate must not latch over an aborted import"
+            );
+        });
+    }
+
     #[test]
     fn remove_deletes_record_and_missing_id_is_false() {
-        with_temp_home(|| {
+        with_temp_home("pinvou3-store-test", || {
             let store = BundleStore::new();
             store
                 .upsert(record("weather", BundleSource::Preset))
@@ -1222,7 +1411,7 @@ mod tests {
 
     #[test]
     fn mark_and_clear_degraded_roundtrip() {
-        with_temp_home(|| {
+        with_temp_home("pinvou3-store-test", || {
             let store = BundleStore::new();
             store
                 .upsert(record("feishu", BundleSource::Builtin))
@@ -1233,12 +1422,8 @@ mod tests {
                 store.get("feishu").unwrap().unwrap().degraded,
                 Some("二进制缺失".to_string())
             );
-            // 清除路径走私有 set_degraded(id, None)（公开包装已随死代码清理删除）
-            assert!(store.set_degraded("feishu", None).unwrap());
-            assert_eq!(store.get("feishu").unwrap().unwrap().degraded, None);
             // 不存在的 id：Ok(false)，不误建记录
             assert!(!store.mark_degraded("ghost", "x").unwrap());
-            assert!(!store.set_degraded("ghost", None).unwrap());
             assert!(store.get("ghost").unwrap().is_none());
         });
     }
@@ -1246,7 +1431,7 @@ mod tests {
     /// 镜像写路径的语义：重装/重复连接不得冲掉首次安装时间、extra 与既有指纹。
     #[test]
     fn upsert_preserving_keeps_first_install_metadata() {
-        with_temp_home(|| {
+        with_temp_home("pinvou3-store-test", || {
             let store = BundleStore::new();
             let mut first = record("gongwen", BundleSource::Preset);
             first.installed_at = "2026-01-01T00:00:00+00:00".to_string();
@@ -1270,12 +1455,147 @@ mod tests {
         });
     }
 
+    fn cli_asset(version: &str) -> AssetEntry {
+        AssetEntry::Ref(AssetRef {
+            kind: ASSET_KIND_CLI.to_string(),
+            name: "lark-cli".to_string(),
+            version: version.to_string(),
+            sha256: "ab".repeat(32),
+            ..AssetRef::default()
+        })
+    }
+
+    #[test]
+    fn upsert_preserving_keeps_assets_unless_the_new_record_carries_some() {
+        with_temp_home("pinvou3-store-test", || {
+            let store = BundleStore::new();
+            let mut first = record("feishu", BundleSource::Builtin);
+            first.assets = vec![cli_asset("1.0.0")];
+            store.upsert(first).unwrap();
+
+            // A writer that does not track assets (the GUI connector mirror)
+            // must not wipe them.
+            store
+                .upsert_preserving(BundleRecord::installed_now("feishu", BundleSource::Builtin))
+                .unwrap();
+            assert_eq!(
+                store.get("feishu").unwrap().unwrap().assets,
+                vec![cli_asset("1.0.0")]
+            );
+
+            // A writer that does track them can replace a stale pin.
+            let mut repinned = BundleRecord::installed_now("feishu", BundleSource::Builtin);
+            repinned.assets = vec![cli_asset("1.1.0")];
+            store.upsert_preserving(repinned).unwrap();
+            assert_eq!(
+                store.get("feishu").unwrap().unwrap().assets,
+                vec![cli_asset("1.1.0")]
+            );
+        });
+    }
+
+    #[test]
+    fn unreadable_asset_entries_neither_fail_the_load_nor_get_dropped() {
+        with_temp_home("pinvou3-store-test", || {
+            let store = BundleStore::new();
+            let path = store.file_path();
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let assets = serde_json::json!([
+                {"kind": "cli", "name": "lark-cli", "version": "1.0.0",
+                 "sha256": "abc", "platforms": ["darwin"]},
+                {"kind": "cli", "name": "wecom-cli", "version": 2},
+                {"kind": "pip", "name": "requests"},
+                "not-an-object",
+            ]);
+            let file = serde_json::json!({
+                "schema_version": 1,
+                "legacy_imported": true,
+                "records": [{"id": "feishu", "source": "builtin", "installed": true,
+                             "installed_at": "2026-08-14T00:00:00Z", "assets": assets}],
+            });
+            std::fs::write(&path, file.to_string()).unwrap();
+
+            let loaded = store.get("feishu").unwrap().unwrap();
+            let AssetEntry::Ref(first) = &loaded.assets[0] else {
+                panic!("a well-formed entry must parse as a typed ref");
+            };
+            assert_eq!(first.name, "lark-cli");
+            assert_eq!(
+                first.extra.get("platforms"),
+                Some(&serde_json::json!(["darwin"]))
+            );
+            assert!(
+                loaded.assets[1..]
+                    .iter()
+                    .all(|entry| matches!(entry, AssetEntry::Unrecognized(_))),
+                "entries this binary cannot read must stay unrecognized, not fail the load"
+            );
+
+            // A read-modify-write preserves every entry as an equal JSON
+            // value: unrecognized entries round-trip verbatim, recognized
+            // ones re-serialize canonically with their unknown fields kept.
+            // Not byte-exact — object key order is normalized on save, and
+            // the whole file is re-pretty-printed, before and after this PR.
+            store.mark_degraded("feishu", "probe").unwrap();
+            let value: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            assert_eq!(value["records"][0]["assets"], assets);
+        });
+    }
+
+    /// The `assets` container itself stays fail-loud (see the field doc):
+    /// a record whose `assets` is not an array fails the whole load like
+    /// corrupt JSON rather than reading as "no assets" — only the
+    /// per-entry degrade is tolerant.
+    #[test]
+    fn unreadable_assets_container_fails_the_load_loud() {
+        with_temp_home("pinvou3-store-test", || {
+            let store = BundleStore::new();
+            let path = store.file_path();
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            for bad in ["null", "\"pins\"", "{\"kind\": \"cli\"}"] {
+                // `installed_at` is present so the assets container is the
+                // ONLY thing that can fail this load — otherwise a missing
+                // required field fails it first and the assertion passes
+                // while blind to the rule it guards.
+                let file = format!(
+                    r#"{{"schema_version": 1, "records": [{{"id": "feishu", "source": "builtin", "installed": true, "installed_at": "2026-09-30T00:00:00Z", "assets": {bad}}}]}}"#
+                );
+                std::fs::write(&path, file).unwrap();
+                assert!(
+                    store.load().is_err(),
+                    "`assets: {bad}` must fail the whole load, not read as empty"
+                );
+            }
+        });
+    }
+
+    /// The load's unreadable-entry announcement targets exactly the records
+    /// that carry an unrecognized entry — not clean records, and not
+    /// records that merely have no assets at all.
+    #[test]
+    fn unrecognized_asset_announce_targets_the_right_records() {
+        let mut flagged = record("feishu", BundleSource::Builtin);
+        flagged.assets = vec![AssetEntry::Unrecognized(serde_json::json!("not-an-object"))];
+        let mut clean = record("gongwen", BundleSource::Builtin);
+        clean.assets = vec![cli_asset("1.0.0")];
+        let pinless = record("dingtalk", BundleSource::Builtin);
+        let file = BundlesFile {
+            records: vec![flagged, clean, pinless],
+            ..BundlesFile::default()
+        };
+        assert_eq!(
+            unrecognized_asset_record_ids(&file),
+            vec!["feishu".to_string()]
+        );
+    }
+
     /// 回归（四轮评审 BLOCKER 1）：既有记录的来源必须保留 —— 上传包重装时
     /// install 镜像写带的是 Preset，若覆盖 source，下次卸载会把 Upload 误判为
     /// 可删目录（用户上传内容无其他副本）。source 只在无旧记录时取新值。
     #[test]
     fn upsert_preserving_keeps_existing_source() {
-        with_temp_home(|| {
+        with_temp_home("pinvou3-store-test", || {
             let store = BundleStore::new();
             store
                 .upsert(record("up", BundleSource::Upload("pkg.zip".to_string())))
@@ -1306,7 +1626,7 @@ mod tests {
     /// 镜像写（upsert_preserving）不得丢 extra 里的展示覆盖。
     #[test]
     fn set_display_meta_roundtrip_and_clear() {
-        with_temp_home(|| {
+        with_temp_home("pinvou3-store-test", || {
             let store = BundleStore::new();
             store
                 .upsert(record("up", BundleSource::Upload("pkg.zip".to_string())))
@@ -1394,7 +1714,7 @@ mod tests {
     /// 展示覆盖的写入门禁：记录不存在 / 非 Upload 来源 / 超长一律 Err 且不写盘。
     #[test]
     fn set_display_meta_rejects_invalid_targets_and_lengths() {
-        with_temp_home(|| {
+        with_temp_home("pinvou3-store-test", || {
             let store = BundleStore::new();
             store
                 .upsert(record("weather", BundleSource::Preset))
@@ -1510,7 +1830,7 @@ mod tests {
     /// （upsert_preserving 对不存在的 id 直接插入），而整个套件仍全绿。
     #[test]
     fn update_content_fingerprint_does_not_resurrect_removed_record() {
-        with_temp_home(|| {
+        with_temp_home("pinvou3-store-test", || {
             let store = BundleStore::new();
             store
                 .upsert(record("up", BundleSource::Upload("pkg.zip".to_string())))
@@ -1529,7 +1849,7 @@ mod tests {
     /// upsert_preserving 保留。
     #[test]
     fn skill_desc_backup_roundtrip_and_gates() {
-        with_temp_home(|| {
+        with_temp_home("pinvou3-store-test", || {
             let store = BundleStore::new();
             store
                 .upsert(record("up", BundleSource::Upload("pkg.zip".to_string())))

@@ -37,7 +37,7 @@ const javascriptFiles = fs.readdirSync(testsRoot)
   .filter((name) => /\.(?:js|mjs)$/u.test(name))
   .sort();
 const nodeTests = javascriptFiles.filter((name) => /\.test\.(?:js|mjs)$/u.test(name));
-const browserSmokes = javascriptFiles.filter((name) => /_smoke\.(?:js|mjs)$/u.test(name));
+const browserSmokes = javascriptFiles.filter((name) => /(?:_|\.)smoke\.(?:js|mjs)$/u.test(name));
 
 function collectScriptSmokeFiles(scriptName, collected, visiting = new Set()) {
   if (visiting.has(scriptName)) {
@@ -52,7 +52,7 @@ function collectScriptSmokeFiles(scriptName, collected, visiting = new Set()) {
   }
   for (const match of command.matchAll(/\bnode(?:\s+--[^\s&]+)*\s+([^\s&]+)/gu)) {
     const filename = path.basename(match[1]);
-    if (/_smoke\.(?:js|mjs)$/u.test(filename)) collected.add(filename);
+    if (/(?:_|\.)smoke\.(?:js|mjs)$/u.test(filename)) collected.add(filename);
     for (const child of browserGateChildren.get(filename) || []) collected.add(child);
   }
 }
@@ -62,7 +62,7 @@ function fullSuiteSmokeFiles() {
   for (const item of FULL_FRONTEND_SMOKES) {
     if (item.kind === "node") {
       const filename = path.basename(item.target);
-      if (/_smoke\.(?:js|mjs)$/u.test(filename)) collected.add(filename);
+      if (/(?:_|\.)smoke\.(?:js|mjs)$/u.test(filename)) collected.add(filename);
     } else if (item.kind === "npm") {
       collectScriptSmokeFiles(item.target, collected);
     }

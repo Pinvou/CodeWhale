@@ -616,7 +616,7 @@ fn direct_skill_install_uninstall_scope_state_roundtrip() {
     );
 
     uninstall_marketplace_skill_sync("visualizer").unwrap();
-    // 卸载清除两个 scope 禁用集残留（与连接器同语义）→ 重装后默认启用。
+    // Uninstall clears the pack's residue from both scope disabled sets (same semantics as connectors).
     assert!(
         !sm::load_disabled_skills_for(ConnectorScope::Plain)
             .iter()
@@ -624,11 +624,15 @@ fn direct_skill_install_uninstall_scope_state_roundtrip() {
         "卸载应从禁用集清除残留 id"
     );
     install_marketplace_skill_sync("visualizer").unwrap();
+    // With every mode DenyAll (tool switches default-off), a reinstall counts
+    // as a fresh install: initialized scopes keep it off by default until the
+    // user explicitly enables it (matching the connectors' fresh-install
+    // default-off semantics).
     assert!(
-        sm::enabled_skills_for(ConnectorScope::Plain, None)
+        crate::features::marketplace::load_disabled_bundles_for(ConnectorScope::Plain)
             .iter()
-            .any(|(n, _)| n == "visualizer"),
-        "卸载清除残留后重装默认启用（与连接器卸载语义一致）"
+            .any(|id| id == "visualizer"),
+        "after reinstall the plain scope is disabled by default (DenyAll convergence semantics)"
     );
 
     match previous {
@@ -1737,9 +1741,17 @@ fn external_allowlist_allows_known_targets_rejects_lookalikes() {
     assert!(url_in_external_allowlist(
         "https://work.weixin.qq.com/ai/qc/c?s=abc&for_native=true"
     ));
+    // WeCom developer docs site (the wecom-bot config dialog "view docs" button)
+    assert!(url_in_external_allowlist(
+        "https://developer.work.weixin.qq.com/document/path/91770"
+    ));
     // DingTalk device authorization login page (printed by `dws auth login --device`, carries user_code)
     assert!(url_in_external_allowlist(
         "https://login.dingtalk.com/device?user_code=ABCDEF"
+    ));
+    // H3C SSO login page (printed by `eip auth login` / `zhidao login`, carries sessionId)
+    assert!(url_in_external_allowlist(
+        "https://sso.h3c.com/login?sessionId=test-session"
     ));
     assert!(url_in_external_allowlist("http://localhost:8080/"));
     assert!(url_in_external_allowlist("https://127.0.0.1:8443/preview"));
@@ -1765,7 +1777,13 @@ fn external_allowlist_allows_known_targets_rejects_lookalikes() {
         "https://work.weixin.qq.com.evil.com/ai/qc/gen"
     ));
     assert!(!url_in_external_allowlist(
+        "https://developer.work.weixin.qq.com.evil.com/document/path/91770"
+    ));
+    assert!(!url_in_external_allowlist(
         "https://login.dingtalk.com.evil.com/device"
+    ));
+    assert!(!url_in_external_allowlist(
+        "https://sso.h3c.com.evil.com/login?sessionId=test-session"
     ));
     assert!(!url_in_external_allowlist(
         "https://dingtalk.com.evil.com/device"
@@ -2624,4 +2642,400 @@ fn e2e_build_llm_cases() {
         let prompt = build_message_with_attachments(q.to_string(), vec![r], &ws);
         std::fs::write(out, prompt).expect("写 prompt");
     }
+}
+
+// ---------------------------------------------------------------------------
+// Round-23 MAJOR 1c (review #455): regression pins for the consent-sync /
+// validation ordering in the tool install. The behavior shipped inside merge
+// `de04d54a9` with zero test pins; `install_marketplace_tool_post_install`
+// (the verbatim extraction of the command's post-install legs) makes the
+// ordering drivable without a Tauri harness. The fixture pack requires remote
+// validation against an unparsable URL, so `validate_remote_connection` fails
+// fast offline.
+// ---------------------------------------------------------------------------
+
+/// Writes the yuandian-mcp fixture with `validate_on_install` enabled so the
+/// install's validation leg actually runs (and fails fast on the bad URL).
+fn write_test_validating_marketplace_files(server_name: &str) {
+    let manifest = serde_json::json!({
+        "id": "yuandian-mcp",
+        "name": "华宇元典法律数据",
+        "description": "test",
+        "version": "1.0.0",
+        "icon": "BookOpen",
+        "category": "kb",
+        "validate_on_install": true,
+        "mcp_tools": [],
+        "command": "",
+        "args": [],
+        "servers": [{
+            "name": server_name,
+            "url": "not-a-url",
+            "scopes": ["legal"],
+            "oauth": { "client_id": "test-client" }
+        }]
+    });
+    write_json(
+        &crate::features::marketplace::mcp_catalog::package_mcp_dir("yuandian-mcp")
+            .join("manifest.json"),
+        manifest,
+    );
+    write_json(
+        &crate::platform::paths::pinvou3_home()
+            .join("marketplace")
+            .join("installed.json"),
+        serde_json::json!(["yuandian-mcp"]),
+    );
+    write_json(
+        &crate::platform::paths::mcp_config_path(),
+        serde_json::json!({ "servers": { server_name: {
+            "url": "not-a-url",
+            "scopes": ["legal"],
+            "oauth": { "client_id": "test-client" }
+        } } }),
+    );
+}
+
+fn disabled_file_ids() -> (Vec<String>, Vec<String>, Vec<String>) {
+    let file = crate::features::marketplace::scope::load_disabled_bundles_file();
+    (
+        file.scopes.values().flatten().cloned().collect(),
+        file.hidden_scopes.values().flatten().cloned().collect(),
+        file.default_off_scopes
+            .values()
+            .flatten()
+            .cloned()
+            .collect(),
+    )
+}
+
+fn disabled_file_ledger() -> Vec<String> {
+    crate::features::marketplace::scope::load_disabled_bundles_file().install_default_synced
+}
+
+/// Pin 1: a validation failure's rollback uninstall must leave NO rows,
+/// markers, or ledger entries for the pack anywhere in
+/// `disabled_bundles.json` — the consent sync ran before validation and
+/// wrote rows; the rollback's teardown (the exact form,
+/// `remove_bundle_from_disabled_scopes_exact`, required because the pack
+/// directory is already gone when it runs) removes them again, so the
+/// pack ends up neither installed nor consent-stranded. Fails if the
+/// teardown is dropped from the rollback path (round-32 minor 2: the pin
+/// now reads all four sets the teardown clears, ledger included).
+#[tokio::test]
+async fn install_validation_failure_rollback_leaves_no_consent_rows() {
+    let _g = crate::platform::paths::tests::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let _home = TempPinvou3Home::new("install-validation-rollback");
+    write_test_validating_marketplace_files("yuandian-rollback-test");
+
+    // Seed consent rows exactly where the pre-validation sync writes them:
+    // `save_disabled_bundles_for` initializes both scopes with the pack
+    // stored-off (the same store, rows and teardown the sync/rollback pair
+    // exercises).
+    crate::features::marketplace::scope::save_disabled_bundles_for(
+        crate::features::marketplace::ConnectorScope::Plain,
+        &["yuandian-mcp".to_string()],
+    )
+    .unwrap();
+    crate::features::marketplace::scope::save_disabled_bundles_for(
+        crate::features::marketplace::ConnectorScope::Code,
+        &["yuandian-mcp".to_string()],
+    )
+    .unwrap();
+    let (dis, _hid, _def) = disabled_file_ids();
+    assert!(
+        dis.contains(&"yuandian-mcp".to_string()),
+        "fixture precondition: the pack is stored-off before the rollback"
+    );
+
+    let err = install_marketplace_tool_post_install("yuandian-mcp".to_string())
+        .await
+        .unwrap_err();
+    assert!(
+        !err.contains("installed, but persisting their default-off consent state failed"),
+        "the failure is the validation leg, not the consent-sync leg: {err}"
+    );
+
+    // The rollback uninstall consumed the install...
+    assert!(
+        !crate::features::marketplace::MarketplaceManager::new()
+            .installed_ids()
+            .contains(&"yuandian-mcp".to_string()),
+        "the failed validation must roll the pack back out of installed.json"
+    );
+    // ...and its teardown must leave no consent rows or markers behind.
+    let (dis, hid, def) = disabled_file_ids();
+    assert!(
+        !dis.contains(&"yuandian-mcp".to_string()),
+        "rollback teardown must remove the disabled rows the sync wrote: {dis:?}"
+    );
+    assert!(
+        !hid.contains(&"yuandian-mcp".to_string()),
+        "rollback teardown must remove hidden rows too: {hid:?}"
+    );
+    assert!(
+        !def.contains(&"yuandian-mcp".to_string()),
+        "rollback teardown must remove install-default markers too: {def:?}"
+    );
+    // Round-32 minor 2 (review #455): the ledger is the fourth set the exact
+    // teardown clears — a stranded `plain:yuandian-mcp` entry would keep the
+    // startup refresh from ever re-syncing default-off for a same-id
+    // reinstall.
+    let ledger = disabled_file_ledger();
+    assert!(
+        ledger.iter().all(|entry| !entry.ends_with(":yuandian-mcp")),
+        "rollback teardown must clear the pack's ledger entries too: {ledger:?}"
+    );
+}
+
+/// Pin 2: a consent-sync persist failure fails the install with the honest
+/// no-rollback copy (round-22 MAJOR 1) while `installed.json` and mcp.json
+/// still hold the pack — no silent half-consented rollback on this arm.
+/// Order-sensitive: under the pre-round-21 ordering (validation first) the
+/// bad URL would produce the validation error instead, so this pin also
+/// guards the sync-before-validation reorder itself.
+#[tokio::test]
+async fn install_consent_sync_persist_failure_is_honest_and_keeps_pack() {
+    let _g = crate::platform::paths::tests::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let _home = TempPinvou3Home::new("install-sync-persist-fail");
+    write_test_validating_marketplace_files("yuandian-syncfail-test");
+    // Pre-warm the store so the first-boot freeze persist (inside the sync's
+    // read path) consumes nothing — the failpoint must be consumed by the
+    // sync's own write. The freeze's own failure mode is already memoized
+    // in-process (round-11 M4), which is exactly what the pre-warm settles.
+    let _ = crate::features::marketplace::scope::load_disabled_bundles_file();
+    let _failpoint =
+        crate::features::marketplace::scope::fail_next_disabled_bundles_write_for_test();
+
+    let err = install_marketplace_tool_post_install("yuandian-mcp".to_string())
+        .await
+        .unwrap_err();
+    assert!(
+        err.contains("installed, but persisting their default-off consent state failed"),
+        "the consent-sync persist failure must surface the honest sibling copy: {err}"
+    );
+
+    // No rollback runs on this arm: the pack stays installed and registered.
+    assert!(
+        crate::features::marketplace::MarketplaceManager::new()
+            .installed_ids()
+            .contains(&"yuandian-mcp".to_string()),
+        "the pack must stay in installed.json — the honest copy says so"
+    );
+    let mcp: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(crate::platform::paths::mcp_config_path()).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        mcp["servers"].get("yuandian-syncfail-test").is_some(),
+        "the mcp.json server must survive the consent-sync failure"
+    );
+    // And the failed write persisted nothing — ledger included (round-32
+    // minor 2).
+    let (dis, hid, def) = disabled_file_ids();
+    assert!(
+        dis.is_empty() && hid.is_empty() && def.is_empty(),
+        "a failed consent persist must not strand rows: {dis:?} {hid:?} {def:?}"
+    );
+    assert!(
+        disabled_file_ledger().is_empty(),
+        "a failed consent persist must not strand ledger entries either"
+    );
+}
+
+// ---- model deletion ordering (delete_model saves prefs before the keyring) ----
+
+fn model_deletion_test_model(id: &str, with_credential: bool) -> SavedModel {
+    let mut json = serde_json::json!({
+        "id": id,
+        "name": format!("Model {id}"),
+        "preset": "deepseek",
+        "model": "deepseek-v4-pro",
+        "base_url": "https://api.deepseek.com"
+    });
+    if with_credential {
+        json["credential_ref"] = serde_json::json!({
+            "service": "pinvou3-model-api-key",
+            "account": format!("model:{id}"),
+            "version": 1
+        });
+        json["credential_state"] = serde_json::json!("configured");
+        json["has_secret"] = serde_json::json!(true);
+    }
+    serde_json::from_value(json).expect("deserialize fixture model")
+}
+
+fn seed_model_deletion_prefs(models: &[SavedModel]) {
+    UserPrefs::update_transaction(|prefs| {
+        prefs.advanced.saved_models.clear();
+        for model in models {
+            prefs.advanced.saved_models.push(model.clone());
+        }
+        Ok(())
+    })
+    .expect("seed model deletion prefs");
+}
+
+#[test]
+fn delete_model_persists_prefs_before_touching_the_keyring() {
+    let _g = crate::platform::paths::tests::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let _home = TempPinvou3Home::new("delete-model-order");
+    seed_model_deletion_prefs(&[
+        model_deletion_test_model("m-keep", false),
+        model_deletion_test_model("m-drop", true),
+    ]);
+    let store = crate::platform::credential_store::RecordingCredentialStore::new();
+    store.fail_delete();
+
+    // With the keyring delete failing, Ok + a persisted removal is only
+    // reachable when the prefs save commits BEFORE the delete attempt: the
+    // reverted ordering (delete first) would have failed the command and
+    // left the model in place.
+    super::settings::delete_model_inner("m-drop", &store).expect("delete must succeed");
+
+    let prefs = UserPrefs::load();
+    assert!(
+        prefs.model_by_id("m-drop").is_none(),
+        "the model must be removed from the persisted prefs"
+    );
+    assert!(prefs.model_by_id("m-keep").is_some());
+    let ops = store.ops();
+    assert_eq!(ops.len(), 1, "exactly one keyring call: {ops:?}");
+    assert!(
+        ops[0].starts_with("delete:"),
+        "the keyring delete must be attempted for the removed model: {ops:?}"
+    );
+}
+
+#[test]
+fn delete_model_keyring_success_removes_the_secret() {
+    let _g = crate::platform::paths::tests::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let _home = TempPinvou3Home::new("delete-model-ok");
+    seed_model_deletion_prefs(&[
+        model_deletion_test_model("m-keep", false),
+        model_deletion_test_model("m-drop", true),
+    ]);
+    let store = crate::platform::credential_store::RecordingCredentialStore::new();
+
+    super::settings::delete_model_inner("m-drop", &store).expect("delete must succeed");
+
+    assert_eq!(
+        store.ops(),
+        vec!["delete:pinvou3-model-api-key:model:m-drop".to_string()],
+        "the deferred keyring delete must target the removed model's credential"
+    );
+    assert!(UserPrefs::load().model_by_id("m-drop").is_none());
+}
+
+#[test]
+fn delete_model_rejects_the_last_model_without_touching_the_keyring() {
+    let _g = crate::platform::paths::tests::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let _home = TempPinvou3Home::new("delete-model-last");
+    // Official 适配：load 路径的 `ensure_builtin_account_platform_model` 会在每次事务前
+    // 自动补回 builtin Account Platform 模型，纯用户模型永远不可能是「最后一个」；可稳定
+    // 触发的拒绝路径是 builtin 守卫（内置模型不可删除）。夹具给该 builtin 模型
+    // 挂上 credential_ref，钉住「拒绝先于任何钥匙串交互」这一来源语义。
+    seed_model_deletion_prefs(&[model_deletion_test_model(
+        crate::platform::prefs::BUILTIN_ACCOUNT_PLATFORM_MODEL_ID,
+        true,
+    )]);
+    let store = crate::platform::credential_store::RecordingCredentialStore::new();
+
+    let error = super::settings::delete_model_inner(
+        crate::platform::prefs::BUILTIN_ACCOUNT_PLATFORM_MODEL_ID,
+        &store,
+    )
+    .expect_err("the last (builtin) model must not be deletable");
+
+    assert!(error.contains("delete_model"));
+    assert!(
+        store.ops().is_empty(),
+        "a rejected deletion must not reach the keyring: {:?}",
+        store.ops()
+    );
+    assert!(
+        UserPrefs::load()
+            .model_by_id(crate::platform::prefs::BUILTIN_ACCOUNT_PLATFORM_MODEL_ID)
+            .is_some()
+    );
+}
+
+#[test]
+fn save_model_delete_action_defers_the_keyring_delete() {
+    let _g = crate::platform::paths::tests::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let _home = TempPinvou3Home::new("save-model-defer");
+    let mut model = model_deletion_test_model("m-edit", true);
+    model.credential_action = Some(CredentialEditAction::Delete);
+    let store = crate::platform::credential_store::RecordingCredentialStore::new();
+
+    let (model, deferred) = super::settings::apply_model_credential(model, None, &store)
+        .expect("the delete action must not fail");
+
+    assert!(
+        deferred.is_some(),
+        "the delete action must return a deferred credential delete"
+    );
+    assert_eq!(
+        model.credential_state,
+        CredentialState::Missing,
+        "the saved record must carry the missing state"
+    );
+    assert!(
+        store.ops().is_empty(),
+        "no keyring call may run before the prefs save committed: {:?}",
+        store.ops()
+    );
+}
+
+#[test]
+fn save_model_inner_commits_prefs_before_the_deferred_delete() {
+    let _g = crate::platform::paths::tests::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let _home = TempPinvou3Home::new("save-model-order");
+    seed_model_deletion_prefs(&[
+        model_deletion_test_model("m-keep", false),
+        model_deletion_test_model("m-edit", true),
+    ]);
+    let mut model = model_deletion_test_model("m-edit", true);
+    model.credential_action = Some(CredentialEditAction::Delete);
+    let store = crate::platform::credential_store::RecordingCredentialStore::new();
+    store.fail_delete();
+
+    // With the keyring delete failing, Ok + a committed Missing edit is only
+    // reachable when the prefs save landed BEFORE the delete attempt: a
+    // delete-inside-the-transaction ordering would have failed the command
+    // and left the stale credential reference in place.
+    super::settings::save_model_inner(model, &store).expect("the save must succeed");
+
+    let prefs = UserPrefs::load();
+    let saved = prefs
+        .model_by_id("m-edit")
+        .expect("the edited model must stay in prefs");
+    assert_eq!(
+        saved.credential_state,
+        CredentialState::Missing,
+        "the delete edit must persist the missing state"
+    );
+    assert!(
+        saved.credential_ref.is_none(),
+        "the cleared reference must not survive in prefs"
+    );
+    assert_eq!(
+        store.ops(),
+        vec!["delete:pinvou3-model-api-key:model:m-edit".to_string()],
+        "exactly one deferred keyring delete, attempted after the commit"
+    );
 }

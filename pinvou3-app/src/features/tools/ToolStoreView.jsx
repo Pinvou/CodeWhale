@@ -6,11 +6,12 @@ import { EmptyState } from '../../components/EmptyState.jsx';
 import { Spinner } from '../../components/Spinner.jsx';
 import { resolveOAuthInstallOutcome } from './oauth-marketplace-logic.js';
 import { notifyComposerToolsChanged } from './tool-events.js';
-import { localizeTool, mergeConfigFields, TsActionBtn, tsCategories, tsSkillIconByName, tsSkillsData, tsToolsData, tsToolWelcomeData, TOOL_TYPE_GROUPS, getToolTypeGroup, TOOL_BUSINESS_GROUPS, getToolBusinessGroup } from './tool-common.jsx';
+import { localizeTool, mergeConfigFields, TsActionBtn, BuiltinPluginCard, tsCategories, tsSkillIconByName, tsSkillsData, tsToolsData, tsToolWelcomeData, TOOL_TYPE_GROUPS, getToolTypeGroup, TOOL_BUSINESS_GROUPS, getToolBusinessGroup } from './tool-common.jsx';
+import { isBuiltinPlugin } from './builtin-plugin-logic.js';
 import { MAX_SKILL_ZIP_BYTES, pickSkillDrop, fileToBase64 } from './skill-import-logic.js';
 import { invokeTauri, isTauriAvailable, tauriEvents } from '../../platform/tauri/client.js';
 import { can, isWeb } from '../../shared/platform.js';
-import { applyConnectorFailure, connectorFailure, connectorUiStep, localizeConnectorAlert, releaseBusy } from './connector-ui-state.js';
+import { applyConnectorFailure, CONSENT_SYNC_FAILURE_MARKER, connectorErrorCopy, connectorFailure, connectorUiStep, localizeConnectorAlert, releaseBusy } from './connector-ui-state.js';
 import { ConnectorSsoDialog } from './ConnectorSsoDialog.jsx';
 import { isImeComposing } from '../../shared/ime-guard.mjs';
 import { pathBasename } from '../../shared/path-utils.js';
@@ -50,7 +51,8 @@ const toolPositionBucket = (index) => {
   if (index < 10) return '4_10';
   return '11_plus';
 };
-
+// Log connector failures by code and step only: raw backend errors can carry
+// URLs, device codes or account details that do not belong in the console.
 const reportConnectorFailure = (connector, value, phase) => {
   const failure = connectorFailure(value, phase);
   console.error('connector failed:', {
@@ -272,7 +274,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
               <div className="rounded-xl border border-rose-200 dark:border-rose-500/30 bg-rose-50 dark:bg-rose-500/10 p-3">
                 <div className="text-[13px] font-medium text-rose-700 dark:text-rose-300 mb-1.5">{copy.connectionIncomplete}</div>
                 <div className="text-[12px] leading-relaxed text-rose-800/80 dark:text-rose-200/70">
-                  {errors[flow.errorCode] || errors.unknown || copy.connectionIncomplete}
+                  {connectorErrorCopy(errors, flow.errorCode) || errors.unknown || copy.connectionIncomplete}
                 </div>
                 <div className="flex gap-2 mt-3 justify-end">
                   <button onClick={onCancel} className="px-3 py-1.5 rounded-lg bg-slate-200 dark:bg-white/10 text-slate-700 dark:text-slate-100 text-[13px]">{copy.close}</button>
@@ -340,6 +342,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
     const createConnectorFlow = (cfg) => {
       const conn = cfg.conn;
       // Backend connection events register only once (idempotent; no duplicate registration across repeated ToolStoreView mounts).
+      // Failures are stored as error codes and localized at render time, so a language switch after the first install still applies.
       const ensureListeners = () => {
         if (conn.listenersReady) return;
         const ev = isTauriAvailable() ? tauriEvents : null;
@@ -349,12 +352,18 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
           const p = e.payload || {};
           conn.stopTick();
           if (cfg.openAuthUrl && p.url) {
-            invokeTauri('open_external_url', { url: p.url }).catch(err => {
-              console.error('open tmeet auth url failed:', err);
+            // Log without the error: the rejection carries the full auth URL (device-code-bearing),
+            // which must not land in the console; reopening stays available via the card's button.
+            invokeTauri('open_external_url', { url: p.url }).catch(() => {
+              console.error('open tmeet auth url failed');
             });
           }
+          // Flow null = the card was closed (cancel/close) before the event landed;
+          // a late QR would fabricate a fresh card (and re-open wecom's modal) that
+          // the backend generation guards cannot cover across a reconnect.
           conn.setFlow(f => {
-            const prev = (f && f.steps) || {};
+            if (!f) return f;
+            const prev = f.steps || {};
             return {
               ...f, phase: 'qr', active: 'qr',
               steps: { ...prev, runtime: prev.runtime || 'done', cli: prev.cli === 'active' ? 'done' : (prev.cli || 'done'), ...(cfg.qrStepsExtra), qr: 'active' },
@@ -364,11 +373,39 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
         });
         ev.listen(cfg.events.connected, cfg.connectedMode === 'apply' ? () => {
           conn.stopTick();
-          conn.setFlow(f => ({ ...f, phase: 'done', steps: { ...(f && f.steps), qr: 'done' } }));
+          // Flow null = the card was closed (cancel) before the event landed;
+          // writing would resurrect a zombie "done" card.
+          conn.setFlow(f => (f ? { ...f, phase: 'done', steps: { ...f.steps, qr: 'done' } } : f));
           // Connected → write skills per the rules (enabled by default) + broadcast refresh; view-independent, so it lives in the global listener.
-          invokeTauri(cfg.commands.applySkills).catch(() => {});
-          // Auto-collapse the flow card later (the detail dialog's "Connected" state is now driven by derived connection state)
-          setTimeout(() => conn.setFlow(null), 1800);
+          // Round-33 MAJOR 2 + round-35 MAJOR 1 (review #455): the fire-and-forget write is consent-critical — a lost
+          // row leaves the connector live with zero consent until the next boot's ledger-gated backfill, silently. The
+          // failure is surfaced ON THE CARD via applyConnectorFailure (the console-only reportConnectorFailure call was
+          // the round-35 review's finding — success toast + connected card while only the console saw the error): the
+          // backend message carries the shared consent marker (CONSENT_SYNC_FAILURE_MARKER, pinned on both sides —
+          // ima-pattern substring match) → the dedicated consent_persist_failed copy; anything else keeps the step's
+          // localized copy.
+          // Round-37 F2 (review #455): the collapse timer is armed only AFTER the write settles — arming it
+          // synchronously let a failure resolving after 1.8s land on a nulled flow (the null guard no-op'ing),
+          // re-creating the silent-failure state. A slow write keeps the done card up until it resolves; a failed
+          // write swaps in the error card and stays (no auto-collapse on errors, same as the awaited branch).
+          invokeTauri(cfg.commands.applySkills).then(
+            () => {
+              // Auto-collapse the flow card later (the detail dialog's "Connected" state is now driven by derived
+              // connection state). The collapse must only close a card that already reached 'done': a stale timer
+              // from the previous round must not destroy a card the user re-opened within the window (and strand the
+              // busy slot with it).
+              setTimeout(() => conn.setFlow(f => (f && f.phase === 'done' ? null : f)), 1800);
+            },
+            (e) => {
+              const msg = String(e && e.message ? e.message : e);
+              const failure = msg.includes(CONSENT_SYNC_FAILURE_MARKER)
+                ? { code: 'consent_persist_failed' }
+                : { code: 'skills_enable_failed' };
+              reportConnectorFailure(cfg.key, failure, 'cli');
+              // Same null guard as the awaited branch: a failure landing after the card was closed must not fabricate one.
+              conn.setFlow(f => (f ? applyConnectorFailure(f, failure, 'cli') : f));
+            },
+          );
         } : async () => {
           conn.stopTick();
           try {
@@ -382,20 +419,37 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
               }
             }
             await invokeTauri(cfg.commands.applySkills);
-            conn.setFlow(f => ({ ...f, phase: 'done', steps: { ...(f && f.steps), qr: 'done' } }));
-            setTimeout(() => conn.setFlow(null), 1800);
+            // Same null guard as above: the awaited apply gives cancel a wide window.
+            conn.setFlow(f => (f ? { ...f, phase: 'done', steps: { ...f.steps, qr: 'done' } } : f));
+            // Same done-only collapse guard as the apply-mode listener above: a
+            // stale timer must not close a freshly re-opened card.
+            setTimeout(() => conn.setFlow(f => (f && f.phase === 'done' ? null : f)), 1800);
           } catch (e) {
-            // dingtalk (applyAwait) reports a fixed skills_enable_failed; tmeet (readinessAwait) passes the original error (auth_failed included) — both go through the errorCode-driven localized connector errors
-            const failure = cfg.connectedMode === 'applyAwait' ? { code: 'skills_enable_failed' } : e;
+            // readinessAwait (tmeet) passes the readiness re-check's auth_failed through; a consent-persist failure
+            // (the backend copy carries the shared marker) reports consent_persist_failed — "Try again" cannot fix a
+            // persist failure; every other failure after authorization completed (dingtalk's awaited apply, tmeet's
+            // own skill write) reports skills_enable_failed — the sign-in demonstrably succeeded on those paths.
+            // Round-35 MAJOR 1 (review #455): without this classification the consent_persist_failed catalog entry
+            // was unreachable for every connector.
+            const authIncomplete = cfg.connectedMode !== 'applyAwait' && e && e.code === 'auth_failed';
+            const msg = String(e && e.message ? e.message : e);
+            const failure = authIncomplete
+              ? e
+              : msg.includes(CONSENT_SYNC_FAILURE_MARKER)
+                ? { code: 'consent_persist_failed' }
+                : { code: 'skills_enable_failed' };
             reportConnectorFailure(cfg.key, failure, 'qr');
-            conn.setFlow(f => applyConnectorFailure(f, failure, 'qr'));
+            // Same null guard: a failure landing after the card was closed must not fabricate one.
+            conn.setFlow(f => (f ? applyConnectorFailure(f, failure, 'qr') : f));
           }
         });
         ev.listen(cfg.events.error, (e) => {
           const p = e.payload || {};
           reportConnectorFailure(cfg.key, p, p.phase);
           conn.stopTick();
-          conn.setFlow(f => applyConnectorFailure(f, p, p.phase));
+          // Flow null = the card was closed (cancel/close) before the event landed;
+          // applyConnectorFailure would resurrect a fresh error card from nothing.
+          conn.setFlow(f => (f ? applyConnectorFailure(f, p, p.phase) : f));
         });
       };
       // Component-side quartet handlers: deps are injected from the component closure at call time (same semantics
@@ -417,6 +471,11 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
           // ① Ensure CLI (installed online on first use)
           conn.setFlow(f => ({ ...f, active: 'cli', pct: 0, log: detailCopy.flow.installStarting, steps: { ...(f && f.steps), runtime: 'done', cli: 'active' } }));
           await invokeTauri(cfg.commands.ensureCli);
+          // A cancel/close during the (potentially long) CLI install closed the
+          // card; resetFlow already stopped the tick and released the busy slot.
+          // Starting a backend round now would run invisibly and emit onto
+          // nothing — stop instead of connecting for a dismissed card.
+          if (!conn.flow) return;
           conn.setFlow(cfg.twoStep
             // ② Connection orchestration (two-stage: advance the connect step; the backend emits qr / connected / error)
             ? f => ({ ...f, active: 'connect', pct: 100, steps: { ...(f && f.steps), cli: 'done', connect: 'active' } })
@@ -430,6 +489,9 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
           // 失败收尾只释放自己的槽位:异步期间 busyId 可能已易主(同 releaseBusy 纪律)。
           setBusyId(busy => releaseBusy(busy, cfg.key));
           conn.setFlow(f => applyConnectorFailure(f, e, stage));
+          // Same null guard as the listeners: a rejection landing after the card
+          // was closed (cancel during ensureCli/begin) must not fabricate one.
+          conn.setFlow(f => (f ? applyConnectorFailure(f, e, stage) : f));
         }
       };
       // Cancel/close the flow card: mark cancelled + kill child processes + clear state.
@@ -465,46 +527,42 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
     };
 
     const feishuFlowApi = createConnectorFlow({
-      key: 'feishu', conn: feishuConn, twoStep: true,
+      key: 'feishu', conn: feishuConn, twoStep: true, beginStage: 'register',
       events: { qr: 'feishu:qr', connected: 'feishu:connected', error: 'feishu:error' },
       commands: { ensureCli: 'feishu_ensure_cli', begin: 'feishu_connect_begin', cancel: 'feishu_cancel', logout: 'feishu_logout', applySkills: 'feishu_apply_skills' },
       qrStepsExtra: { connect: 'done' },
       connectedMode: 'apply',
-      beginStage: 'register',
       disconnectedTitle: ({ storeCopy }) => storeCopy.disconnectedTool(storeCopy.toolNames.feishu),
     });
     const ensureFeishuListeners = feishuFlowApi.ensureListeners;
 
     const wecomFlowApi = createConnectorFlow({
-      key: 'wecom', conn: wecomConn, twoStep: false,
+      key: 'wecom', conn: wecomConn, twoStep: false, beginStage: 'authorize',
       events: { qr: 'wecom:qr', connected: 'wecom:connected', error: 'wecom:error' },
       commands: { ensureCli: 'wecom_ensure_cli', begin: 'wecom_connect_begin', cancel: 'wecom_cancel', logout: 'wecom_logout', applySkills: 'wecom_apply_skills' },
       connectedMode: 'apply',
-      beginStage: 'authorize',
       disconnectedTitle: ({ storeCopy }) => storeCopy.disconnectedTool(storeCopy.toolNames.wecom),
     });
     const ensureWecomListeners = wecomFlowApi.ensureListeners;
 
     const dingtalkFlowApi = createConnectorFlow({
-      key: 'dingtalk', conn: dingtalkConn, twoStep: false,
+      key: 'dingtalk', conn: dingtalkConn, twoStep: false, beginStage: 'authorize',
       events: { qr: 'dingtalk:qr', connected: 'dingtalk:connected', error: 'dingtalk:error' },
       commands: { ensureCli: 'dingtalk_ensure_cli', begin: 'dingtalk_connect_begin', cancel: 'dingtalk_cancel', logout: 'dingtalk_logout', applySkills: 'dingtalk_apply_skills' },
       qrPayloadExtra: p => ({ userCode: p.user_code }),
       connectedMode: 'applyAwait',
-      beginStage: 'authorize',
       disconnectedTitle: ({ storeCopy }) => storeCopy.disconnectedTool(storeCopy.toolNames.dingtalk),
     });
     const ensureDingtalkListeners = dingtalkFlowApi.ensureListeners;
 
     const tmeetFlowApi = createConnectorFlow({
-      key: 'tmeet', conn: tmeetConn, twoStep: false,
+      key: 'tmeet', conn: tmeetConn, twoStep: false, beginStage: 'authorize',
       events: { qr: 'tmeet:qr', connected: 'tmeet:connected', error: 'tmeet:error' },
       commands: { ensureCli: 'tmeet_ensure_cli', begin: 'tmeet_connect_begin', cancel: 'tmeet_cancel', logout: 'tmeet_logout', applySkills: 'tmeet_apply_skills' },
       qrPayloadExtra: () => ({ browserAuth: true }),
       openAuthUrl: true,
       connectedMode: 'readinessAwait',
       readiness: { bundleId: 'tmeet' },
-      beginStage: 'authorize',
       disconnectedTitle: ({ detailCopy }) => detailCopy.actions.disconnectedTmeet,
     });
     const ensureTmeetListeners = tmeetFlowApi.ensureListeners;
@@ -517,6 +575,13 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
     // refresh). The real listeners/stopwatch live in the module-level conn singleton, surviving view switches.
     // tmeet's done toast uses a detailCopy phrase via doneTitle; others pass evaluated storeCopy.connectedTool(...).
     const useConnectorFlowSubscription = ({ enabled, conn, ensureListeners, setFlow, detailCopy, setBusyId, loadBackendState, setAlert, doneTitle, toolId, finishToolConfiguration: finishCfg }) => {
+      // The subscription effect runs once per enabled state; the toast copy goes
+      // through a latest-ref so a "connected" toast raised after a mid-flow
+      // language switch uses the current language, like the failure card does.
+      const toastCopyRef = useRef(null);
+      useEffect(() => {
+        toastCopyRef.current = { doneTitle, enabledSubtitle: detailCopy.actions.enabled };
+      });
       useEffect(() => {
         if (!enabled) return;
         ensureListeners();
@@ -530,7 +595,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
               // 只释放自己的槽位(见 releaseBusy):完成事件可能晚到,彼时 busyId 已易主。
               setBusyId(busy => releaseBusy(busy, toolId));
               loadBackendState();
-              setAlert({ visible: true, loading: false, title: doneTitle, subtitle: detailCopy.actions.enabled, isInstall: true, isError: false, toolId });
+              setAlert({ visible: true, loading: false, title: toastCopyRef.current && toastCopyRef.current.doneTitle, subtitle: toastCopyRef.current && toastCopyRef.current.enabledSubtitle, isInstall: true, isError: false, toolId });
               notifyComposerToolsChanged();
             } else if (ph === 'error') {
               if (finishCfg) finishCfg(toolId, false);
@@ -541,7 +606,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
         });
         setFlow(conn.flow); // hydrate the current progress on (re)mount
         return unsub;
-      // eslint-disable-next-line react-hooks/exhaustive-deps -- subscription mounts/unmounts only with externalAuthAvailable; the closure reads current deps on demand, so resubscribing is unnecessary
+      // eslint-disable-next-line react-hooks/exhaustive-deps -- subscription mounts/unmounts only with externalAuthAvailable; failures are stored as error codes and localized at render time, so resubscribing on copy changes is unnecessary
       }, [enabled]);
     };
 
@@ -641,7 +706,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
     };
 
     // API Key 配置弹窗（需要 config_fields 的工具安装前弹出）
-    const TsConfigDialog = ({ config, theme, onConfirm, onCancel, copy }) => {
+    const TsConfigDialog = ({ config, theme, onConfirm, onCancel, copy, onOpenError }) => {
       const [values, setValues] = useState({});
       if (!config) return null;
       const fields = config.fields || [];
@@ -664,7 +729,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
               )}
               {config.configDocUrl && (
                 <button
-                  onClick={() => invokeTauri('open_external_url', { url: config.configDocUrl })}
+                  onClick={() => invokeTauri('open_external_url', { url: config.configDocUrl }).catch(onOpenError)}
                   className={`text-[13px] mb-4 inline-block text-[#007AFF] dark:text-[#0A84FF] hover:underline`}
                 >
                   {config.configDocLabel || copy.configDocDefault} →
@@ -673,7 +738,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
               {/* 引导链接放最上,不夹在输入框中间 */}
               {fields.find(f => f.helpUrl) && (
                 <button
-                  onClick={() => invokeTauri('open_external_url', { url: fields.find(f => f.helpUrl).helpUrl })}
+                  onClick={() => invokeTauri('open_external_url', { url: fields.find(f => f.helpUrl).helpUrl }).catch(onOpenError)}
                   className={`text-[13px] mb-4 inline-block text-[#007AFF] dark:text-[#0A84FF] hover:underline`}
                 >
                   {copy.configHelpFeishu}
@@ -924,6 +989,9 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
     const ToolStoreView = ({ theme, t, onNewChat }) => {
       const storeCopy = t.uiToolStore;
       const detailCopy = t.uiToolDetails;
+      // Copy for the read-only builtin plugins page (docs/builtin-toolset-contract.md §3.1);
+      // BuiltinPluginCard falls back to the zh dictionary when copy is missing.
+      const builtinCopy = t.uiBuiltinPlugins;
       // 数据文件(tool-common.jsx)里技能/分类/精选的中文 label/title/subtitle/desc:
       // 按 localizeTool() 同款 overlay 模式,从 uiToolStore 词条做三语覆盖,数据文件本身不改。
       const storeData = storeCopy.storeData || {};
@@ -1048,6 +1116,11 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
       // 回收站：用户上传的插件卸载后进入回收站，可恢复或彻底删除
       // （list 为只读命令，Web 端可看列表；恢复/删除挂 toolStoreMutations 能力门）。
       const [showRecycleBin, setShowRecycleBin] = useState(false);
+      // Dedicated builtin-plugins subpage (docs/builtin-toolset-contract.md §3.1):
+      // entered from the toolbar "Builtin Plugins" button, rendered fully read-only;
+      // it reuses builtinPluginCards (list_marketplace_tools is already fetched when
+      // the main list loads — no extra request needed).
+      const [showBuiltinPlugins, setShowBuiltinPlugins] = useState(false);
       const [recycledPlugins, setRecycledPlugins] = useState([]);
       // 加载态：进入子页到首包返回之间不得闪「回收站是空的」空态；recycledLoaded
       // 标记首次加载完成（成功或失败都算，失败由 alert 提示），加载中渲染 spinner。
@@ -1534,7 +1607,11 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
       // preset（市场预置/手写自定义 MCP 迁移登记）卸载保留目录、不进回收站；
       // source 缺失（旧后端）取 false——宁可少提示「移入回收站」，不说谎。
       const customMcpTools = toolBackend
-        .filter(x => !tsToolsData.some(t => t.backendId === x.id))
+        // Builtin plugins (docs/builtin-toolset-contract.md §3.1, via the shared
+        // isBuiltinPlugin judgement) stay out of the regular store card flow —
+        // builtinPluginCards below renders them as a separate read-only section
+        // (visibility: system semantics).
+        .filter(x => !isBuiltinPlugin(x) && tsToolsData.every(t => t.backendId !== x.id))
         .map(x => {
           const bs = bundleStates[x.id] || null;
           // 卡面标题/说明优先取 readiness bundle 的生效值（后端已应用 extra
@@ -1554,6 +1631,44 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
           return localizeTool(base, t);
         });
       const tools = [...builtinTools, ...customMcpTools];
+      // Builtin plugins section data (docs/builtin-toolset-contract.md §3.1 read-only
+      // audit window): entries matching the shared isBuiltinPlugin judgement form a
+      // separate section, excluded from the regular card flow / search / category
+      // filters (visibility: system semantics). The displayed facts (mcp_tools tool
+      // list, security level, data access scopes, bundle version) all come from
+      // list_marketplace_tools; name/description go through the existing
+      // localizeTool overlay.
+      const builtinMcpCards = toolBackend
+        .filter(isBuiltinPlugin)
+        .map(x => localizeTool({
+          id: 'builtin-' + x.id, backendId: x.id, builtin: true,
+          title: x.name || x.id, subtitle: '', desc: x.description || '',
+          icon: Package, color: 'bg-gradient-to-b from-slate-400 to-slate-600',
+          securityLevel: x.security_level || null,
+          dataAccess: Array.isArray(x.data_access) ? x.data_access : [],
+          mcpTools: Array.isArray(x.mcp_tools) ? x.mcp_tools : [],
+          bundleVersion: x.bundle_version ? String(x.bundle_version).replace(/^v/i, '') : null,
+        }, t));
+      // Builtin skills (visual design is the only builtin === true entry in
+      // tsSkillsData) also live on the builtin-plugins page: the store keeps its
+      // feature card (that is its entry point); this page is the transparency
+      // window. A skill is a pure prompt capability — no tool list / security
+      // level / data access — so it declares facts with a kind row and a version
+      // row. Copy goes through the same overlay as the store skill cards
+      // (localizeSkill → uiToolStore.storeData.skills, keyed by the backendId
+      // 'visual-design'), so en/ja render the localized title/subtitle/desc/
+      // version.
+      const builtinSkillCards = tsSkillsData
+        .filter(x => x.builtin === true)
+        .map(x => {
+          const s = localizeSkill(x);
+          return {
+            ...s, id: 'builtin-skill-' + x.id,
+            kindLabel: (storeCopy.typeGroups || {})[String(s.type).toLowerCase()] || s.type,
+            versionText: s.version || null,
+          };
+        });
+      const builtinPluginCards = [...builtinMcpCards, ...builtinSkillCards];
       // 按 backendId 取已 localize 的工具卡;兜底分支也走 localizeTool,避免 en/ja 下漏出中文原文。
       const findLocalizedTool = (backendId) =>
         tools.find(x => x.backendId === backendId) || localizeTool(tsToolsData.find(x => x.backendId === backendId), t);
@@ -2168,7 +2283,25 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
           succeeded = true;
         } catch (e) {
           reportConnectorFailure('ima', e, 'connect');
-          setAlert({ visible: true, loading: false, title: detailCopy.actions.imaFailed, subtitle: detailCopy.actions.operationFailed, isInstall: false, isError: true });
+          // Round-25 minor 5 + round-30 m9 (review #455), merged with #615's
+          // reportConnectorFailure routing: the consent-sync failure copy
+          // (with its "turn them off in the tools list" guidance) must still
+          // surface through the localized template — the generic
+          // operationFailed copy would swallow actionable guidance. The
+          // matcher keys on the backend marker pinned by
+          // ima::consent_failure_message_keeps_the_frontend_marker.
+          const msg = String(e && e.message ? e.message : e);
+          const consentFailure = msg.includes(CONSENT_SYNC_FAILURE_MARKER);
+          setAlert({
+            visible: true, loading: false,
+            title: detailCopy.actions.imaFailed,
+            subtitle: consentFailure
+              ? detailCopy.actions.imaSkillsFailed(
+                detailCopy.showRawErrors ? msg.slice(0, 220) : detailCopy.actions.operationFailed,
+              )
+              : detailCopy.actions.operationFailed,
+            isInstall: false, isError: true,
+          });
         } finally {
           finishToolConfiguration('ima', succeeded);
           setBusyId(busy => releaseBusy(busy, 'ima'));
@@ -2446,6 +2579,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
             key={(externalAuthAvailable && configDialog?.backendId) || 'closed'}
             config={externalAuthAvailable ? configDialog : null}
             copy={storeCopy}
+            onOpenError={browserOpenFailed}
             onCancel={() => { if (configDialog?.backendId) finishToolConfiguration(configDialog.backendId, false); setConfigDialog(null); }}
             onConfirm={(values) => { const bid = configDialog.backendId; setConfigDialog(null); if (bid === 'ima') connectIma(values); else doInstall(bid, values); }}
           />, document.body)}
@@ -2502,11 +2636,11 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
             ), document.body);
           })()}
           <ConnectorSsoDialog state={eipSso} name={storeCopy.toolNames.eip} copy={storeCopy}
-            onOpen={() => { if (eipSso.url) invokeTauri('open_external_url', { url: eipSso.url }); }}
+            onOpen={() => { if (eipSso.url) invokeTauri('open_external_url', { url: eipSso.url }).catch(browserOpenFailed); }}
             onDismiss={() => { setEipSso(null); setBusyId(busy => releaseBusy(busy, 'eip')); }}
             onCancel={() => { finishToolConfiguration('eip', false); invokeTauri('eip_cancel').catch(() => {}); setEipSso(null); setBusyId(busy => releaseBusy(busy, 'eip')); }} />
           <ConnectorSsoDialog state={zhidaoSso} name={storeCopy.toolNames.zhidao} copy={storeCopy}
-            onOpen={() => { if (zhidaoSso.url) invokeTauri('open_external_url', { url: zhidaoSso.url }); }}
+            onOpen={() => { if (zhidaoSso.url) invokeTauri('open_external_url', { url: zhidaoSso.url }).catch(browserOpenFailed); }}
             onDismiss={() => { setZhidaoSso(null); setBusyId(busy => releaseBusy(busy, 'zhidao')); }}
             onCancel={() => { finishToolConfiguration('zhidao', false); invokeTauri('zhidao_cancel').catch(() => {}); setZhidaoSso(null); setBusyId(busy => releaseBusy(busy, 'zhidao')); }} />
           {/* 上传包展示名/说明编辑弹窗（edit_display 动作触发；条件挂载，state 初值即当前覆盖值）。
@@ -2626,7 +2760,43 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
             </main>
           </div>
           )}
-          {!showRecycleBin && (
+          {/* Builtin plugins subpage (docs/builtin-toolset-contract.md §3.1
+              transparency/audit window): fully read-only; shows the tool list,
+              security level, version (upgraded with the app) and data access
+              scopes; no uninstall, no toggles. Same structure as the recycle-bin
+              subpage: the back button returns to the main list. */}
+          {showBuiltinPlugins && (
+          <div className="flex-1 flex flex-col bg-white dark:bg-[#131314] text-slate-900 dark:text-white transition-colors duration-300 font-sans overflow-y-auto custom-scrollbar p-4 sm:p-6 lg:p-10">
+
+            <header className="z-30 bg-white/80 dark:bg-[#131314]/80 backdrop-blur-2xl transition-colors">
+              <div className="max-w-[1400px] mx-auto border-b border-slate-200/50 pb-6 dark:border-white/10">
+                <div className="flex items-center gap-3">
+                  <button type="button" data-testid="builtin-plugins-back" onClick={() => setShowBuiltinPlugins(false)} title={storeCopy.back} aria-label={storeCopy.back}
+                    className="w-9 h-9 rounded-full bg-slate-100 dark:bg-white/10 hover:bg-slate-200 dark:hover:bg-white/20 flex items-center justify-center text-slate-600 dark:text-slate-300 transition-colors shrink-0">
+                    <ChevronLeft size={20} />
+                  </button>
+                  <h1 className="shrink-0 text-[26px] font-normal tracking-tight">{(builtinCopy || {}).sectionTitle}</h1>
+                </div>
+                {(builtinCopy || {}).pageIntro && (
+                  <p className="mt-3 text-[13px] text-slate-500 dark:text-slate-400 leading-relaxed">{builtinCopy.pageIntro}</p>
+                )}
+              </div>
+            </header>
+
+            <main className="flex-1">
+              <div className="max-w-[1400px] mx-auto pt-5 pb-8">
+                <ul data-testid="builtin-plugin-list" className="flex flex-col">
+                  {builtinPluginCards.map((tool) => (
+                    <li key={tool.id}>
+                      <BuiltinPluginCard tool={tool} copy={builtinCopy} />
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            </main>
+          </div>
+          )}
+          {!showRecycleBin && !showBuiltinPlugins && (
           <div className="flex-1 flex flex-col bg-white dark:bg-[#131314] text-slate-900 dark:text-white transition-colors duration-300 font-sans overflow-y-auto custom-scrollbar p-4 sm:p-6 lg:p-10">
 
             {/* Header */}
@@ -2746,6 +2916,15 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
                             <Trash2 size={14} className="mr-1.5 opacity-70" />
                             <span>{storeCopy.recycleBin}</span>
                           </button>
+                          {/* Builtin plugins entry (docs/builtin-toolset-contract.md §3.1):
+                              a dedicated read-only subpage, kept out of the regular card flow */}
+                          {builtinPluginCards.length > 0 && (
+                            <button type="button" data-testid="tool-store-builtin-plugins" onClick={() => setShowBuiltinPlugins(true)} title={(builtinCopy || {}).sectionTitle}
+                              className="h-9 whitespace-nowrap shrink-0 inline-flex items-center rounded-full px-3.5 text-[13px] font-semibold transition-colors bg-[#F2F2F7] text-[#000] hover:bg-slate-200 dark:bg-[#2C2C2E] dark:text-[#fff] dark:hover:bg-[#3A3A3C]">
+                              <Package size={14} className="mr-1.5 opacity-70" />
+                              <span>{(builtinCopy || {}).sectionTitle}</span>
+                            </button>
+                          )}
                           <span className="shrink-0 hidden sm:flex items-center gap-1.5 text-[12px] text-slate-400 dark:text-slate-500 pl-1">
                             {storeCopy.guide.dragHintShort}
                             <button onClick={() => setShowGuide(true)} aria-label={storeCopy.guide.title} title={storeCopy.guide.title}
@@ -2800,10 +2979,20 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
                                       return (
                                         <div className="flex flex-col items-start gap-1" onClick={(e) => e.stopPropagation()}>
                                           {[{ key: 'plain', label: storeCopy.modePlain }, { key: 'code', label: storeCopy.modeCode }].map((m) => {
-                                            // 无 backendId 的卡（占位卡/内置 s5）不参与可见性配置：禁用勾选；
-                                            // 可见性读取未成功（visibilityLoaded=false）时同样禁用——handler 虽有
-                                            // 早退，但可点而无反馈的勾选框会误导用户以为配置已生效（四轮评审）。
-                                            const checkDisabled = !tool.backendId || !visibilityLoaded;
+                                            // Placeholder cards (no backendId) and builtin skill cards (the
+                                            // builtin flag, e.g. visual-design) take no part in visibility
+                                            // configuration: their checkboxes stay disabled. backendId alone is
+                                            // not enough — round-5 M3 gave the builtin skill a backendId, and
+                                            // its hide write carries no MCP catalog id, passes the backend
+                                            // guard, and would silently drop the builtin skill from that
+                                            // mode's composer/model while the composer's builtin row ignores
+                                            // `hidden` and keeps presenting it as always-on (UI/model
+                                            // divergence, §3.1 gap — round-6 M2). A failed visibility read
+                                            // (visibilityLoaded=false) disables the checkboxes too: the
+                                            // handler exits early, but a clickable checkbox with no feedback
+                                            // misleads the user into thinking the change took effect
+                                            // (review round 4).
+                                            const checkDisabled = !tool.backendId || tool.builtin || !visibilityLoaded;
                                             // 读回比对与写入同口径：后端 hidden 集按包 id 返回，companion 卡先经
                                             // skillToMcp 映射为所属包 id；同时回退比对原始技能 id，兼容历史版本
                                             // 按独立技能 id 落库的条目（未装→装边界）（五轮评审）。
@@ -2969,7 +3158,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
                     <FeishuFlowCard flow={dingtalkFlow} steps={storeCopy.dingtalkSteps} name={storeCopy.toolNames.dingtalk} copy={detailCopy.flow} errors={storeCopy.connectorErrors} twoStep={false} onRetry={() => retryConnector('dingtalk')} onCancel={() => resetConnectorFlow('dingtalk')} onBrowserOpenError={browserOpenFailed} />
                   )}
                   {externalAuthAvailable && selectedTool.tmeetCli && tmeetFlow && (
-                    <FeishuFlowCard flow={tmeetFlow.phase === 'error' && !detailCopy.showRawErrors ? { ...tmeetFlow, err: detailCopy.actions.operationFailed } : tmeetFlow} steps={detailCopy.tmeetSteps} name={detailCopy.tools.tmeet.title} copy={detailCopy.flow} errors={storeCopy.connectorErrors} twoStep={false} browserAuth={!!tmeetFlow.browserAuth} onRetry={() => retryConnector('tmeet')} onCancel={() => resetConnectorFlow('tmeet')} onBrowserOpenError={browserOpenFailed} />
+                    <FeishuFlowCard flow={tmeetFlow} steps={detailCopy.tmeetSteps} name={detailCopy.tools.tmeet.title} copy={detailCopy.flow} errors={storeCopy.connectorErrors} twoStep={false} browserAuth={!!tmeetFlow.browserAuth} onRetry={() => retryConnector('tmeet')} onCancel={() => resetConnectorFlow('tmeet')} onBrowserOpenError={browserOpenFailed} />
                   )}
                   {connectedBanners.filter(b => b.show).map((banner, i) => (
                     <div key={`connected-banner-${i}`} className="mb-8 flex items-center gap-3 p-4 rounded-2xl bg-emerald-50 dark:bg-emerald-500/10 border border-emerald-200 dark:border-emerald-500/30">

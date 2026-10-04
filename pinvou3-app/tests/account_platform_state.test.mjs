@@ -258,7 +258,7 @@ test('admin portal navigation groups and URL state remain deterministic', () => 
     { key: 'identity', sections: ['users', 'roles', 'organizations', 'myorg'] },
     { key: 'finance', sections: ['billing', 'payments', 'products'] },
     { key: 'models', sections: ['tokens'] },
-    { key: 'governance', sections: ['approvals', 'audit', 'system', 'settings'] },
+    { key: 'governance', sections: ['operations', 'approvals', 'audit', 'system', 'settings'] },
   ]);
   const location = { pathname: '/admin.html', search: '?trace=kept&section=users', hash: '#focus' };
   assert.equal(readAdminSection(location), 'users');

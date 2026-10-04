@@ -1,5 +1,18 @@
 import { errorCode, localizedErrorMessage } from '../../shared/user-facing-error.js';
 
+// Round-37 F3 (review #455): the ONE consent-failure marker string, mirroring
+// `scope::CONSENT_SYNC_FAILURE_MARKER` on the Rust side (both pinned by
+// consent_marker_frontend.test.mjs + the Rust emitter pins). The three JS
+// matchers import this instead of hardcoding the literal, so one-site drift
+// cannot survive the pin.
+export const CONSENT_SYNC_FAILURE_MARKER =
+  'persisting their default-off consent state failed';
+
+// Fallback code per flow step when the backend did not attach a code. The map
+// covers the flow card's whole step vocabulary: `runtime` / `connect` cannot
+// fail today (nothing runs while only those steps are active), but the total
+// mapping keeps future failure points on a specific message instead of the
+// generic `unknown` copy.
 const STEP_ERROR_CODES = {
   runtime: 'runtime_prepare_failed',
   cli: 'cli_install_failed',
@@ -19,6 +32,17 @@ function connectorFailure(value, step) {
   };
 }
 
+// Own-key lookup for the flow card's copy. A bare `errors[code]` would resolve
+// Object.prototype members (`constructor`, `toString`, `valueOf` all pass the
+// snake_case pattern) to inherited functions — truthy, and crashing React when
+// rendered. Codes only ever come from this repo's emitters today; this keeps
+// the render safe if a future source ever forwards an outside string.
+function connectorErrorCopy(errors, code) {
+  if (!errors || typeof code !== 'string' || !Object.prototype.hasOwnProperty.call(errors, code)) return '';
+  const copy = errors[code];
+  return typeof copy === 'string' ? copy : '';
+}
+
 function connectorUiStep(flow, phase) {
   const active = String((flow && flow.active) || '').trim().toLowerCase();
   const normalizedPhase = String(phase || '').trim().toLowerCase();
@@ -35,8 +59,7 @@ function applyConnectorFailure(flow, value, phase) {
     ...current,
     phase: 'error',
     ...connectorFailure(value, phase || step),
-    errStep: step,
-    steps: { ...(current.steps || {}), [step]: 'error' },
+    steps: { ...current.steps, [step]: 'error' },
   };
 }
 
@@ -92,4 +115,4 @@ function localizeConnectorAlert(alert, storeCopy, detailCopy) {
   };
 }
 
-export { applyConnectorFailure, connectorErrorCodeForStep, connectorFailure, connectorUiStep, localizeConnectorAlert, releaseBusy };
+export { applyConnectorFailure, connectorErrorCopy, connectorErrorCodeForStep, connectorFailure, connectorUiStep, localizeConnectorAlert, releaseBusy };

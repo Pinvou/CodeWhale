@@ -56,10 +56,6 @@ benchmark-hooks = ["dep:agent-backend-api", "deepseek-tui/benchmark-eval-control
 # target. Keeping those tests out of the monolithic lib-test harness bounds
 # rustc/ThinLTO memory without exposing the adapters in release builds.
 behavior-telemetry-test = []
-# Isolated macOS BrowserCore build for physical-device acceptance. Production release is
-# controlled only by `platform::capabilities::MACOS_BROWSER_RELEASED`; this feature is never
-# included in the default feature set.
-browser-macos-preview = []
 
 [build-dependencies]
 tauri-build = { version = "2.6.1", features = [] }

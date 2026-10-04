@@ -406,27 +406,37 @@ pub(super) fn upsert_recent_work_unlocked(patch: RecentWorkPatch) -> io::Result<
     Ok(item)
 }
 
+/// Archive `id` wherever it appears: the legacy recent-work store and both
+/// timed stores (`current_focus`, `recent_activity`). Returns whether any
+/// item changed, so an id that is absent or already archived everywhere
+/// reports `false`. Note the archived buckets are cap-compacted on every
+/// write (oldest `last_hit` first), so with a full bucket the row just
+/// archived can itself be evicted: `true` says the flip happened, not that
+/// the row is still stored. A write fault partway through can leave the
+/// stores written earlier already flipped; the operation is idempotent, so
+/// retrying after the fault archives only the remainder.
 pub fn archive_recent_work(id: &str) -> io::Result<bool> {
     let _guard = write_lock().lock();
     let id = clean_id(id);
     let now = Utc::now().to_rfc3339();
     let mut items = load_recent_work()?;
-    let mut changed = false;
+    let mut archived_work = false;
     for item in &mut items {
         if item.id == id && item.status != "archived" {
             item.status = "archived".to_string();
             item.updated_at = now.clone();
-            changed = true;
+            archived_work = true;
         }
     }
-    if changed {
+    if archived_work {
         write_recent_work_unlocked(&items)?;
     }
-    if !changed {
-        changed = archive_timed_memory_unlocked("current_focus", &id)?
-            || archive_timed_memory_unlocked("recent_activity", &id)?;
-    }
-    Ok(changed)
+    // Unconditional fan-out: a match in one store must not short-circuit the
+    // others, or an id shared by the legacy store and a timed store would
+    // stay active in the latter.
+    let archived_focus = archive_timed_memory_unlocked("current_focus", &id)?;
+    let archived_activity = archive_timed_memory_unlocked("recent_activity", &id)?;
+    Ok(archived_work || archived_focus || archived_activity)
 }
 
 fn resolve_topic_authorities<T: Clone>(
@@ -1573,6 +1583,14 @@ pub fn never_pending_memory(
     let Some(item) = items.iter_mut().find(|item| item.id == id) else {
         return Ok(None);
     };
+    // Deliberately *not* mirroring ignore_pending_memory's decided short-circuit.
+    // That guard exists because `ignore` has an automated caller (organize delete)
+    // that can act on a snapshot taken before the user confirmed. `never` has no
+    // automated caller — both hosts reach it only from an explicit user click
+    // (`reason: "user_selected"`) — and blacklisting the content is precisely what
+    // that click asks for, confirmed or not. Short-circuiting here would return
+    // Ok(None), which the command maps to the same success payload as a real write,
+    // so the user would be shown "不再提示" while nothing was blacklisted.
     let now = Utc::now().to_rfc3339();
     item.status = PENDING_STATUS_IGNORED.to_string();
     item.updated_at = now.clone();

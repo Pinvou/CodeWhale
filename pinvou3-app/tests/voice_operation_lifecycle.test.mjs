@@ -219,7 +219,7 @@ test('composer adapters preserve explicit metadata and authoritative native owne
   const native = read('src/features/codex/CodexAcpView.jsx');
   assert.match(hook, /deliverVoiceTask\(current, next, \{ \.\.\.preview\.context, mode: 'edit'/);
   assert.match(chat, /sendChatMessage\(constrained\.text, \{ \.\.\.context, draftOwner: owner \}\)/);
-  assert.match(native, /sendTask: async \(outgoing, context\) => send\(outgoing, context\)/);
+  assert.match(native, /sendTask: async \(outgoing, context\) => send\(outgoing, \{ voiceOperationId: context\?\.operationId \}\)/);
   assert.match(native, /nativeControlsSessionRef\.current === activeId \? nativeControls\.modelId : null/);
   assert.match(native, /completeVoiceSubmission\(voiceOperationId, targetId, true\)/);
   assert.match(native, /ownerKind: isNativeAgent \? 'native' : 'acp'/);
@@ -261,6 +261,10 @@ test('stale edit preview is abandoned, while applying a valid edit retains prove
           abandonVoiceResult: () => h.api.trackVoiceTerminal('voice_cancelled', operation, {}),
         } },
       } },
+      // applyVoiceEditPreview ends the unsent operation through the shared
+      // dismiss helper; route it to the same dismiss bookkeeping the adapter
+      // stub above exposes so the assertions observe one terminal path.
+      dismissVoice: () => h.api.dismissVoiceInput(),
     });
     const discard = hook.slice(hook.indexOf('  const discardVoiceResult ='), hook.indexOf('  const cancelVoiceEditPreview ='));
     const apply = hook.slice(hook.indexOf('  const applyVoiceEditPreview ='), hook.indexOf('  const clearStaleVoiceState ='));
@@ -429,7 +433,14 @@ for (const lane of ['desktop', 'web']) {
           createDocumentWritingMessageMeta: () => ({ pinvouScene: 'work:document-writing' }),
           requiredCapabilitiesForMeta, prepareSceneCapabilities, canPrepareSceneCapabilities: () => true,
           isWeb: lane === 'web', can: () => true, setSceneCapabilityStatus() {},
-          t: { uiChatScenes: { documentWriting: { preparing: 'preparing', failure: 'failed' } } },
+          // #455 backflow: the merged send path reads the welcome-opt-in copy
+          // and the opt-in outcome copy keys; the sandbox pins them alongside
+          // the scene copy it already provided.
+          t: { uiChatScenes: { documentWriting: { preparing: 'preparing', failure: 'failed' },
+            switchedOffPacks: ids => `switched off: ${ids}`,
+            notAppliedPacks: ids => `not applied: ${ids}`,
+            missingCapabilities: ids => `missing: ${ids}` },
+            uiChat: { welcomeOptInFailed: 'welcome opt-in failed' } },
           invokeTauri: async command => { await gate; return command === 'list_marketplace_tools'
             ? [{ id: 'gongwen', installed: true }] : [{ id: 'government-writing', installed: true }]; },
           setInputTextState() {}, setInputLimitReached() {}, constrainChatInput: text => ({ text: String(text), truncated: false }),
@@ -440,6 +451,18 @@ for (const lane of ['desktop', 'web']) {
           ensureSession: async () => { await gate; return null; },
           notify: () => { prefillPending ||= !!h.state.composerPrefill.text; draftSyncPending = true; },
           console: { warn() {} }, setTimeout() {}, composerRef: { current: null },
+          // #455 backflow: the merged dispatchChatMessage wires the welcome
+          // opt-in and session-keyed scene status; the sandbox pins those
+          // bindings so the slice stays runnable without the module graph
+          // (neutral stubs: opt-in succeeds, status resolution shows nothing).
+          welcomeOptInAttemptRef: { current: null },
+          welcomeToolIdRef: { current: null },
+          setWelcomeToolId() {},
+          sceneReadyToastEpochRef: { current: 0 },
+          sceneStatusKey: (sid, epoch) => `${sid || ''}:${epoch || ''}`,
+          runSharedWelcomeOptIn: async () => ({ failed: false, blocked: [] }),
+          resolveSendCapabilityStatus: () => null,
+          consumeWelcomeOptIn: async () => ({}),
           onPrefillConsumed: () => { h.state.composerPrefill.text = ''; },
           normalizeMode: mode => mode, trimDraft: text => String(text || '').trim(),
           clearStaleVoiceState() {}, discardVoiceResult() {}, isActiveVoiceTarget: () => true,

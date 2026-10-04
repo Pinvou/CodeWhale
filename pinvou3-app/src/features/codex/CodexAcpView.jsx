@@ -2,12 +2,15 @@ import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useSta
 import { createPortal } from 'react-dom';
 import { isImeComposing } from '../../shared/ime-guard.mjs';
 import {
-  Brain, Check, ChevronDown, FileText, FolderOpen, GitBranch, Monitor, Paperclip,
+  Brain, Check, ChevronDown, FileText, FolderOpen, GitBranch, MessageSquare, Monitor, Paperclip,
   Plus, RefreshCw, Send, Sparkles, StopCircle, Upload, User,
 } from '../../components/icons.jsx';
 import { AcpAgentLogo } from './AcpAgentLogo.jsx';
 import { CodexWorkspacePanel } from './CodexWorkspacePanel.jsx';
 import { SubagentTranscriptPanel } from '../multiagent/SubagentTranscriptPanel.jsx';
+import { AuxChatPanel } from '../aux-chat/AuxChatPanel.jsx';
+import { AuxQuoteSelection } from '../aux-chat/AuxQuoteSelection.jsx';
+import { ViewErrorBoundary } from '../../shared/ViewErrorBoundary.jsx';
 import { RunningAgentsOverlay } from '../multiagent/RunningAgentsOverlay.jsx';
 import {
   refreshAcpAgentCatalog,
@@ -1203,6 +1206,42 @@ export function CodexAcpView({
     rememberScrollBeforeRightPanelChange();
     setWorkspaceOpen(false);
   }, [rememberScrollBeforeRightPanelChange]);
+  // Aux chat panel: the same persistent, Q&A-only, one-per-task conversation
+  // as the work-mode task page (bridge.auxChat, restrictTools; it never
+  // touches the code session's execution or context). Unlike subagentPanel:
+  // it does not close when switching code sessions — the panel rebinds itself
+  // by sessionId; in draft state (no activeSession) the panel hides with its
+  // mount condition and restores automatically once the session is ready.
+  // auxChatDockActive is the panel's real visibility in the dock (same as
+  // workspaceDockActive): when covered by the workspace panel the entry
+  // button does not highlight, and clicking it again brings the panel to
+  // the front.
+  const [auxChatPanel, setAuxChatPanel] = useState(null);
+  const [auxChatDockActive, setAuxChatDockActive] = useState(false);
+  const openAuxChatPanel = useCallback(() => {
+    rememberScrollBeforeRightPanelChange();
+    setAuxChatPanel(current => ({ openTick: (current?.openTick || 0) + 1 }));
+  }, [rememberScrollBeforeRightPanelChange]);
+  const closeAuxChatPanel = useCallback(() => {
+    rememberScrollBeforeRightPanelChange();
+    setAuxChatPanel(null);
+  }, [rememberScrollBeforeRightPanelChange]);
+  // When the mount condition (auxChatPanel && activeSession && isNativeAgent
+  // && bridge.available && bridge.auxChat, see the panel mount point below)
+  // goes away, the panel unmounts outright,
+  // and RightDockPanel's onActiveChange has no unmount cleanup, so the
+  // highlight would linger; reset it synchronously here when the mount
+  // condition drops, and once the session is back the panel re-mounts and
+  // reports its real visibility again. isNativeAgent is part of the condition:
+  // switching to an external-ACP agent must unmount the panel, not leave it
+  // rebound to a session the side chat must not answer on. The bridge
+  // conjuncts keep the gate identical to the entry button and the sessionId
+  // prop (round-25 minor consistency note).
+  useEffect(() => {
+    if (auxChatPanel && activeSession && isNativeAgent && bridge.available && bridge.auxChat) return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- synchronously reset dock highlight when the panel unmounts; one-shot mirror, same pattern as the subagent reset below
+    setAuxChatDockActive(false);
+  }, [auxChatPanel, activeSession, isNativeAgent]);
   useLayoutEffect(() => {
     const snapshot = rightPanelScrollRef.current;
     if (!snapshot) return;
@@ -1216,7 +1255,7 @@ export function CodexAcpView({
       autoScrollRef.current = true;
       setShowScrollBottom(false);
     }
-  }, [subagentPanel, workspaceDockActivation, workspaceOpen]);
+  }, [auxChatPanel, subagentPanel, workspaceDockActivation, workspaceOpen]);
   useEffect(() => {
     setSubagentPanel(null);
     setRewindTarget(null);
@@ -2055,16 +2094,20 @@ export function CodexAcpView({
       // The composer moves to the new draft. Browser attachment handles are
       // one-shot resources, so retaining a second owner on the old session
       // would let a consumed handle reappear when the user switches back.
-      setAttachmentDrafts(current => {
-        const next = { ...current, [DRAFT_ATTACHMENT_KEY]: current[activeId] || [] };
-        delete next[activeId];
-        return next;
-      });
-      setWorkspaceReferenceDrafts(current => {
-        const next = { ...current, [DRAFT_ATTACHMENT_KEY]: current[activeId] || [] };
-        delete next[activeId];
-        return next;
-      });
+      setAttachmentDrafts(current => transferAcpDraftItems(
+        current,
+        activeId,
+        DRAFT_ATTACHMENT_KEY,
+        current[activeId] || [],
+        attachment => attachment.id,
+      ));
+      setWorkspaceReferenceDrafts(current => transferAcpDraftItems(
+        current,
+        activeId,
+        DRAFT_ATTACHMENT_KEY,
+        current[activeId] || [],
+        reference => reference,
+      ));
     }
     setEvents([]);
     setPending([]);
@@ -2314,7 +2357,7 @@ export function CodexAcpView({
     },
     canStart: () => !busy && !working && !activeRuntimeBusy,
     canSendTask: canSendNativeVoiceTask,
-    sendTask: async (outgoing, context) => send(outgoing, context),
+    sendTask: async (outgoing, context) => send(outgoing, { voiceOperationId: context?.operationId }),
   });
   const handleNativeVoiceTrigger = nativeVoice.triggerVoice;
 
@@ -2599,18 +2642,10 @@ export function CodexAcpView({
   }, [draftEpoch]);
 
   useEffect(() => {
-    if (!activeStatus?.login_in_progress) return undefined;
-    let cancelled = false;
-    let timer = null;
-    const poll = async () => {
-      await refreshStatus(activeAgentId).catch(() => {});
-      if (!cancelled) timer = window.setTimeout(poll, 750);
-    };
-    timer = window.setTimeout(poll, 750);
-    return () => {
-      cancelled = true;
-      if (timer !== null) window.clearTimeout(timer);
-    };
+    if (!activeStatus?.login_in_progress) return;
+    const stopPolling = startSerialStatusPolling(() => refreshStatus(activeAgentId), 750, 750);
+    return () => { void stopPolling(); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- poll only on the login-in-progress edge; refreshStatus reference changes must not restart the poll chain
   }, [activeAgentId, activeStatus?.login_in_progress]);
 
   // 切会话/回草稿时关掉记忆弹层（徽标内容按新会话 lane 自动切换）。
@@ -2829,7 +2864,12 @@ export function CodexAcpView({
           shouldActivate: () => canApplyAcpSendOperation(operation),
         });
         targetId = created.id;
-        if (voiceOperationId) bridge.voice.beginVoiceSubmission(voiceOperationId, targetId);
+        // First-turn materialization: the voice operation's submission gate
+        // binds to the really created session (shared voice bookkeeping; ACP
+        // itself never reports a chat task attempt).
+        if (voiceOperationId && bridge.voice && typeof bridge.voice.beginVoiceSubmission === 'function') {
+          bridge.voice.beginVoiceSubmission(voiceOperationId, targetId);
+        }
         if (created.activated && activeIdRef.current === targetId) {
           acpSendOperationTracker.switchSession(targetId);
           operation = beginAcpSendOperation(targetId);
@@ -2886,7 +2926,9 @@ export function CodexAcpView({
       // Voice sendTask treats === false as failure: a real acceptance must explicitly report success.
       return true;
     } catch (err) {
-      if (voiceOperationId) bridge.voice.completeVoiceSubmission(voiceOperationId, targetId, false);
+      if (voiceOperationId && bridge.voice?.completeVoiceSubmission) {
+        bridge.voice.completeVoiceSubmission(voiceOperationId, targetId || null, false);
+      }
       if (canApplyAcpSendOperation(operation)) {
         showError(err);
         setDraft(message);
@@ -3199,7 +3241,7 @@ export function CodexAcpView({
         <ConversationMarkdown
           text={item.legacyItem.text}
           streaming={item.status === 'in_progress'}
-          onOpenExternal={(url) => invoke('open_user_external_url', { url }).catch(showError)}
+          onOpenExternal={(url) => openAcpExternalUrl(url).catch(showError)}
           onOpenResource={isWeb ? undefined : openWorkspaceResource}
         />
       );
@@ -3417,6 +3459,29 @@ export function CodexAcpView({
               swarmOn={nativeMultiAgentEnabled}
             />
           )}
+          {/* Aux chat answers on Pinvou's internal engine, so the entry is
+              native-agent-only: on an external-ACP task the side chat would
+              silently answer on the default model while the panel copy
+              implies the task's own assistant (round-18 must-land; the quote
+              popover and the panel mount suppress on external ACP for the
+              same reason). */}
+          {activeSession && isNativeAgent && bridge.available && bridge.auxChat && (
+            <button
+              type="button"
+              data-testid="aux-chat-open"
+              aria-label={t.uiAuxChat.openLabel}
+              title={t.uiAuxChat.openLabel}
+              onClick={openAuxChatPanel}
+              className={`h-8 px-2.5 rounded-lg inline-flex items-center gap-1.5 text-[11px] transition-colors ${
+                auxChatPanel && auxChatDockActive
+                  ? 'bg-blue-500/10 text-blue-600 dark:text-blue-300'
+                  : 'text-gray-500 dark:text-gray-400 hover:bg-black/[0.04] dark:hover:bg-white/[0.06]'
+              }`}
+            >
+              <MessageSquare size={14} />
+              <span>{t.uiAuxChat.openLabel}</span>
+            </button>
+          )}
           <button
             type="button"
             onClick={toggleWorkspacePanel}
@@ -3470,7 +3535,8 @@ export function CodexAcpView({
         <div className="flex-1 min-h-0 flex">
         <div className="relative min-w-0 flex-1 min-h-0 flex flex-col">
         <div ref={scroller} className="flex-1 min-h-0 overflow-y-auto custom-scrollbar" style={{ overflowAnchor: 'none' }}>
-          <div ref={conversationContentRef} className="w-full max-w-[920px] min-h-full mx-auto px-6 py-6 flex flex-col gap-7">
+          {/* relative: the AuxQuoteSelection chip is absolutely positioned inside this column, clamped to its rect. */}
+          <div ref={conversationContentRef} className="relative w-full max-w-[920px] min-h-full mx-auto px-6 py-6 flex flex-col gap-7">
             {workspaceUnavailable ? (
               <div
                 data-testid="codex-workspace-unavailable"
@@ -3630,6 +3696,20 @@ export function CodexAcpView({
                 onOpen={(state) => { setRewindUndoError(''); setRewindUndoEntry({ ...state, reloadFailed: false }); }}
               />
             )}
+            {/* Selection quotes: select text in the code-lane conversation
+                timeline → stage it as a quote of this session's aux chat and
+                open the panel. Availability matches the header aux-chat
+                entry: external ACP sessions get no quote popover (the aux
+                chat answers on Pinvou's internal engine, see the entry
+                comment; the round-18 boundary previously landed on the entry
+                button only, and the quote selection and panel mount could
+                bypass it). */}
+            <AuxQuoteSelection
+              containerRef={conversationContentRef}
+              sessionId={activeSession && isNativeAgent && bridge.available && bridge.auxChat ? activeSession.id : null}
+              copy={t.uiAuxChat}
+              onQuote={openAuxChatPanel}
+            />
           </div>
         </div>
 
@@ -4391,6 +4471,18 @@ export function CodexAcpView({
             theme={theme}
             onClose={closeSubagentPanel}
           />
+        )}
+        {auxChatPanel && activeSession && isNativeAgent && bridge.available && bridge.auxChat && (
+          <ViewErrorBoundary t={t} variant="panel">
+            <AuxChatPanel
+              sessionId={activeSession.id}
+              activationKey={auxChatPanel.openTick}
+              onActiveChange={setAuxChatDockActive}
+              t={t}
+              theme={theme}
+              onClose={closeAuxChatPanel}
+            />
+          </ViewErrorBoundary>
         )}
         </div>
     </div>

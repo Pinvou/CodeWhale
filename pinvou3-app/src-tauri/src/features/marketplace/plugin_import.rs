@@ -596,6 +596,27 @@ fn landing_target(
     None
 }
 
+/// Reject an uploaded MCP manifest that claims builtin-only semantics
+/// (`builtin: true` / `visibility: "system"`). Payloads that do not parse as a
+/// `ToolManifest` are left to component detection, which reports malformed
+/// manifests on its own path.
+fn reject_builtin_claims_in_upload(what: &str, bytes: &[u8]) -> Result<(), String> {
+    let Ok(tm) = serde_json::from_slice::<crate::features::marketplace::ToolManifest>(bytes) else {
+        return Ok(());
+    };
+    if tm.builtin {
+        return Err(format!(
+            "uploaded package manifest ({what}) declares builtin: true, which is reserved for plugins shipped with the application (docs/builtin-toolset-contract.md §3.1)"
+        ));
+    }
+    if tm.visibility == "system" {
+        return Err(format!(
+            "uploaded package manifest ({what}) declares visibility: \"system\", which is reserved for builtin plugins (docs/builtin-toolset-contract.md §3.1)"
+        ));
+    }
+    Ok(())
+}
+
 /// 为无 plugin.json 的裸包合成一份最小规范化清单（自描述，§5.2 派生 manifest），
 /// 落盘 `bundles/<id>/plugin.json`。组件目录统一用规范化布局（`mcp/`、`skills/<name>/`），
 /// 与落盘结果一致，保证后续重装/卸载/枚举按同一口径读。
@@ -623,6 +644,151 @@ fn synthesized_manifest(det: &ComponentDetection) -> PluginManifest {
         components: Some(comps),
         extra: std::collections::BTreeMap::new(),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Round-32 minor 6 (review #455): import landing journal.
+//
+// A crash between the landing rename and the registry upsert leaves
+// `bundles/<id>/` live with no record — "live-by-absence" in initialized
+// scopes, zero consent, invisible to the round-24 in-process rollback. The
+// journal closes it precisely: the import marks its id before the landing and
+// clears the mark on any in-process exit (guard drop), so a leftover mark is
+// proof of a crash in that exact window. The startup reconciliation acts ONLY
+// on journaled ids (never a blind scan — zero misclassification surface): it
+// moves the landed dir out of `bundles_root` into a recoverable holding dir,
+// loudly logged and marked on the startup timeline.
+
+fn landing_journal_dir() -> std::path::PathBuf {
+    crate::platform::paths::pinvou3_home()
+        .join("marketplace")
+        .join("import_journal")
+}
+
+fn landing_mark_path(id: &str) -> std::path::PathBuf {
+    landing_journal_dir().join(format!("{id}.pending"))
+}
+
+fn mark_landing(id: &str) {
+    let path = landing_mark_path(id);
+    if let Some(parent) = path.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            log::warn!(
+                "[plugin-import] writing the landing journal failed (crash recovery for {id} degraded to live-by-absence): {e}"
+            );
+            return;
+        }
+    }
+    // Round-33 minor 3 (review #455): a failed mark write degrades crash
+    // recovery exactly like the create_dir_all failure above — it must be
+    // just as loud instead of silently re-opening the live-by-absence window
+    // the journal exists to close.
+    if let Err(e) = std::fs::write(&path, "pending\n") {
+        log::warn!(
+            "[plugin-import] writing the landing journal mark failed (crash recovery for {id} degraded to live-by-absence): {e}"
+        );
+    }
+}
+
+fn clear_landing(id: &str) {
+    let _ = std::fs::remove_file(landing_mark_path(id));
+}
+
+/// Clears the landing mark on any in-process exit; a crash skips the drop and
+/// leaves the mark for the startup reconciliation.
+struct LandingJournalGuard(String);
+
+impl Drop for LandingJournalGuard {
+    fn drop(&mut self) {
+        clear_landing(&self.0);
+    }
+}
+
+/// Round-32 minor 6 (review #455): resolve leftover landing marks from crashed
+/// imports. For each journaled id: missing pack dir → the import never landed
+/// or rolled back (clear); registry record present → the import completed and
+/// only the mark-clear crashed (clear); landed dir with no record → crash
+/// residue: move it out of `bundles_root` into a recoverable holding dir so no
+/// scan admits it live-by-absence. Store-read failures keep the entry (retry
+/// next boot, fail-closed). Actively holds the id's import lock per entry so a
+/// concurrent import cannot interleave with the inspection/move.
+pub fn reconcile_import_journal() -> Result<(), String> {
+    let dir = landing_journal_dir();
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(format!("reading the import journal failed: {e}")),
+    };
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(e) => return Err(format!("reading an import journal entry failed: {e}")),
+        };
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let Some(id) = name.strip_suffix(".pending") else {
+            // Not ours (or a residue dir from a previous reconcile) — leave it.
+            continue;
+        };
+        if !is_safe_component_id(id) {
+            // A journaled id must always be safe (the import validated it);
+            // an unsafe name means the file is not a journal mark. Leave it.
+            continue;
+        }
+        let lock = import_lock_for(id);
+        let _guard = lock.lock().unwrap_or_else(|p| p.into_inner());
+        let pkg_dir = crate::platform::paths::bundles_root().join(id);
+        if !pkg_dir.exists() {
+            // Never landed, or the in-process rollback already undid it.
+            clear_landing(id);
+            continue;
+        }
+        let record = super::store::BundleStore::new().get(id);
+        match record {
+            Err(e) => {
+                // The store truth is unknowable — keep the mark and retry on
+                // the next boot (fail-closed: the dir may be crash residue,
+                // but deleting on an unreadable registry is how user packs
+                // get eaten).
+                log::warn!(
+                    "[plugin-import] import journal: the store read for '{id}' failed, deferring crash recovery to the next startup: {e}"
+                );
+            }
+            Ok(Some(_)) => {
+                // The import completed; only the mark-clear crashed.
+                clear_landing(id);
+            }
+            Ok(None) => {
+                // Landed live-by-absence: quarantine out of bundles_root so
+                // no scan admits it, recoverable by hand from the holding
+                // dir.
+                let stamp = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis())
+                    .unwrap_or(0);
+                let holding = landing_journal_dir().join(format!("{id}.crash-{stamp}"));
+                match std::fs::rename(&pkg_dir, &holding) {
+                    Ok(()) => {
+                        log::warn!(
+                            "[plugin-import] import journal: '{id}' landed without a registry record (crash between landing and registration); moved to {} — restore by hand if it is yours",
+                            holding.display()
+                        );
+                        crate::platform::startup::mark_with_detail(
+                            "rust",
+                            "import_journal:crash_residue_quarantined",
+                            id,
+                        );
+                        clear_landing(id);
+                    }
+                    Err(e) => {
+                        log::warn!(
+                            "[plugin-import] import journal: moving crashed landing '{id}' aside failed, deferring to the next startup: {e}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// 统一导入：解压插件包（mcp / skill / 组合）→ 安全校验 → 识别 → 落盘
@@ -721,6 +887,18 @@ pub fn import_plugin_package(
         }
     }
 
+    // Trust boundary (docs/builtin-toolset-contract.md §3.1): builtin status is
+    // declared solely by the publisher through the compile-time embedded
+    // catalog. An uploaded package claiming `builtin: true` or
+    // `visibility: "system"` in any MCP manifest is rejected loudly — never
+    // silently stripped, or the uploader would believe the claim took effect.
+    if let Some(bytes) = &mcp_manifest_bytes {
+        reject_builtin_claims_in_upload("mcp/manifest.json", bytes)?;
+    }
+    for (path, bytes) in &other_manifests {
+        reject_builtin_claims_in_upload(path, bytes)?;
+    }
+
     // 识别 manifest（可选）。
     let manifest: Option<PluginManifest> = match &manifest_bytes {
         Some(b) => Some(serde_json::from_slice(b).map_err(|e| format!("解析 plugin.json: {e}"))?),
@@ -765,10 +943,42 @@ pub fn import_plugin_package(
     // 拒绝与预置/内置包 id 冲突：用户上传包顶替市场预置会让 UI/默认值/资源池
     // 全部错位，且无法回滚（预置版本指纹与上传不同）。内置 CLI 连接器另由
     // `mcp_catalog` 索引覆盖（结构 Rust 函数式 API）。
-    if crate::features::marketplace::mcp_catalog::spec_for(&id).is_some() {
+    if crate::features::marketplace::mcp_catalog::spec_for_builtin_probe(&id).is_some() {
         return Err(format!(
             "包 id '{id}' 与市场预置 MCP 冲突，请改用其它 id 或通过市场直接安装"
         ));
+    }
+    // Component ids must not impersonate builtins either (review round-5 M1):
+    // the package-id collision check cannot see them — a `my-tool` package
+    // carrying an mcp component with id `session-reader` would have
+    // add_to_mcp_json key the server entry by manifest.id and overwrite the
+    // real builtin's engine registration (uninstalling my-tool removes only
+    // its own key, orphaning the hijacked entry). The probe folds case, the
+    // same discipline as the package-id check.
+    for component in &mcp_servers {
+        if crate::features::marketplace::mcp_catalog::spec_for_builtin_probe(component).is_some() {
+            return Err(format!(
+                "组件 id '{component}' 与市场预置 MCP 冲突，请改用其它 id 或通过市场直接安装"
+            ));
+        }
+    }
+    // The inner mcp/manifest.json id is force-equal to the component id by
+    // detect_components, but a bare mcp/ package without plugin.json computes
+    // its components from the inner manifest — rejected by the same builtin
+    // probe.
+    if let Some(bytes) = &mcp_manifest_bytes {
+        if let Ok(inner) =
+            serde_json::from_slice::<crate::features::marketplace::types::ToolManifest>(bytes)
+        {
+            if crate::features::marketplace::mcp_catalog::spec_for_builtin_probe(&inner.id)
+                .is_some()
+            {
+                return Err(format!(
+                    "组件 id '{}' 与市场预置 MCP 冲突，请改用其它 id 或通过市场直接安装",
+                    inner.id
+                ));
+            }
+        }
     }
     if !crate::features::marketplace::bundle::cli_bundle_skill_dirs(&id).is_empty() {
         return Err(format!("包 id '{id}' 与内置 CLI 连接器冲突，请改用其它 id"));
@@ -986,6 +1196,17 @@ pub fn import_plugin_package(
 
     // 安装时 smoke test：旧 spanner 自检已删除。当前只保留纯 MCP / 纯 skill 落盘。
 
+    // Round-32 minor 6 (review #455): mark the landing in the import journal
+    // BEFORE the directory goes live, clear it when this call exits (any
+    // in-process outcome — success, supply-failure rollback, or rename
+    // failure). Only a process death between the mark and the exit leaves the
+    // mark behind, which is exactly the window the round-24 rollback cannot
+    // cover: the pack dir is live on disk with no registry record, admitted
+    // live-by-absence in initialized scopes with zero consent. The startup
+    // reconciliation ([`reconcile_import_journal`]) resolves the leftover.
+    mark_landing(&id);
+    let _landing_guard = LandingJournalGuard(id.clone());
+
     // 原子落盘：先把旧目录挪到 .old 备份，rename 成功后再删 .old；rename 失败则
     // 把 .old 复原回去，保证「旧包不丢、新包不入」——避免既往版本 `remove+rename`
     // 任一环节失败导致新旧双丢的窗期。
@@ -1005,27 +1226,30 @@ pub fn import_plugin_package(
         let _ = std::fs::remove_dir_all(&staged);
         return Err(format!("落盘: {e}"));
     }
-    if moved_old {
-        let _ = std::fs::remove_dir_all(&backup);
-    }
+    // Round-24 MAJOR 2: the backup is retained until supply resolves. A
+    // supply failure after landing must not leave the new dir behind — its
+    // skills materialize into every initialized scope with zero consent (the
+    // consent sync never runs on this error path) and self_heal_skills skips
+    // plugin dirs, so the half-state would persist across boots. The backup
+    // is deleted only once supply has succeeded.
 
-    // 导入即重基线：包内容整体替换后，旧包的 SKILL.md 说明备份（存于 extra，
-    // upsert_preserving 原样保留）随之失效——不清掉会让「清覆盖恢复」把**旧包**
-    // 的原描述写进新包（口径同 skill_marketplace::import_package_named）。三条
-    // UI 上传通道（选文件/拖 zip/拖 .md）都汇聚在这条统一导入路径上；首装无
-    // 备份时不写，避免无谓 churn。
-    // 位置契约：必须在 rename 成功之后**立即**执行、早于任何可能失败的供给
-    // 步骤（install_upload / upsert_preserving）。重基线与否取决于「内容已整
-    // 体替换」而非「整个导入成功」——若供给在重基线前失败早退（如 MCP 凭据缺
-    // 失），磁盘已是新包而备份仍指旧包，后续「清覆盖恢复」会把旧描述写进新
-    // SKILL.md（正是本块要防的损坏类）。
-    // 锁边界（MINOR 1 口径）：本块全程持有 import_lock（guard 至函数尾）；
-    // 展示说明的回写/恢复（update_display_meta → sync_display_description）在
-    // SKILL.md 读改写段**同样持有同 id 的 import_lock**（锁序一致：import_lock
-    // → store file_lock），同 id 的导入与编辑因此真正互斥，无「读备份 → 写
-    // SKILL.md」窗口被重导入插队的竞态。
+    // 导入即重基线（口径）：包内容整体替换后，旧包的 SKILL.md 说明备份（存于
+    // extra，upsert_preserving 原样保留）随之失效——不清掉会让「清覆盖恢复」
+    // 把**旧包**的原描述写进新包（口径同 skill_marketplace::import_package_named）。
+    // 三条 UI 上传通道（选文件/拖 zip/拖 .md）都汇聚在这条统一导入路径上；首装
+    // 无备份时不写，避免无谓 churn。
+    // Round-29 m5 (review #455): the old placement contract that lived here
+    // ("rebaseline immediately after the rename, BEFORE any supply step") is
+    // superseded by the round-27 m5 reorder — the consume point now sits
+    // AFTER supply (below): a moved_old supply-failure rollback restores the
+    // old files, so the backup must survive until supply resolves. Do not
+    // move the call back up on the old contract's authority.
+    // 锁边界（MINOR 1 口径）：统一导入全程持有 import_lock（guard 至函数尾）；
+    // 展示说明的回写/恢复（update_display_meta → sync_display_description）
+    // 在 SKILL.md 读改写段**同样持有同 id 的 import_lock**（锁序一致：
+    // import_lock → store file_lock），同 id 的导入与编辑因此真正互斥，无
+    // 「读备份 → 写 SKILL.md」窗口被重导入插队的竞态。
     let store = super::store::BundleStore::new();
-    super::skill_marketplace::rebaseline_skill_desc_backup(&store, &id, "统一导入");
     // 供给：MCP 组件走 install 管线写 mcp.json + installed.json（底座据此拉起 server，
     // 工具才能注册可用）。纯 skill 包无 mcp/ 目录，跳过（技能走物化通道）。
     // 注：旧 spanner 供给路径已删除；skill 包无可执行供给（tools[]/runtime 协议
@@ -1040,8 +1264,46 @@ pub fn import_plugin_package(
             &id,
             super::store::BundleSource::Upload(display_name.to_string()),
         ) {
-            return Err(format!("MCP 供给失败（{id}）: {e}"));
+            // Round-24 MAJOR 2: mirror the restore path's supply-failure
+            // rollback — restore the previous version (or remove the
+            // first-install landing) instead of leaving the recordless dir
+            // live. Rollback failure is logged loudly; the caller's error
+            // stays the supply error either way.
+            let rolled_back = if moved_old {
+                let _ = std::fs::remove_dir_all(&pkg_dir);
+                rename_dir_with_retry(&backup, &pkg_dir).is_ok()
+            } else {
+                std::fs::remove_dir_all(&pkg_dir).is_ok()
+            };
+            if !rolled_back {
+                log::error!(
+                    "[plugin-import] 供给失败且目录回滚失败（{id}）: 残留目录的技能将以零同意进入已初始化 scope，请检查 {pkg_dir:?}"
+                );
+            }
+            // Round-26 minor 5 (review #455): when the rollback itself failed,
+            // the landed dir stayed live with zero consent — the user-facing
+            // error must carry that, not just the log line. Round-31 m7
+            // (review #455): the suffix is diff-authored user-visible copy —
+            // English sibling-form (like the surrounding English-language
+            // skill_gate/ima errors), not CJK that would surface raw to
+            // en/ja users.
+            let suffix = if rolled_back {
+                String::new()
+            } else {
+                format!(
+                    "; the directory rollback also failed: the landed {id} directory is still on disk with zero consent — remove it manually or retry the import: {pkg_dir:?}"
+                )
+            };
+            return Err(format!("MCP 供给失败（{id}）: {e}{suffix}"));
         }
+    }
+    // Round-27 m5 (review #455): rebaseline (consume) the description backup
+    // only after supply succeeded — on a moved_old rollback the old files are
+    // restored, so the restore point must survive for the next attempt; the
+    // ordering comment's justification now matches the failure path.
+    super::skill_marketplace::rebaseline_skill_desc_backup(&store, &id, "统一导入");
+    if moved_old {
+        let _ = std::fs::remove_dir_all(&backup);
     }
 
     // 登记 BundleStore（上传 source=Upload(zip 展示名)，installed=true）。
@@ -1074,9 +1336,11 @@ pub fn import_plugin_package(
     if let Err(e) = super::store::BundleStore::new().upsert_preserving(record) {
         log::warn!("[plugin-import] bundles.json 镜像写入失败（import {id}）: {e}");
     }
-    // （导入即重基线：包内容整体替换后旧包的说明备份随之失效，必须在 rename
-    // 成功后立即清理、早于任何可能失败的供给步骤——见上方 rename 成功后的
-    // 重基线块，勿移回此处。）
+    // （导入即重基线：包内容整体替换后旧包的说明备份随之失效。Round-29 m5
+    // (review #455): the consume point's ordering contract now lives at the
+    // rebaseline call above (round-27 m5: only AFTER supply succeeds — a
+    // moved_old rollback restores the old files and the backup must survive
+    // for the next attempt); this upsert site is not the rebaseline point.)
 
     Ok(PluginImportReport {
         id,
@@ -1088,6 +1352,191 @@ pub fn import_plugin_package(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Round-32 minor 6 (review #455): a leftover landing mark with a landed
+    /// dir but no registry record is crash residue — the reconcile moves it
+    /// out of `bundles_root` into a recoverable holding dir and clears the
+    /// mark.
+    #[test]
+    fn reconcile_quarantines_landed_dir_without_registry_record() {
+        let _g = crate::platform::paths::tests::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let prev = std::env::var("PINVOU3_HOME").ok();
+        let tmp = std::env::temp_dir().join(format!(
+            "pinvou-import-journal-crash-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&tmp).unwrap();
+        // SAFETY: platform::paths::tests::ENV_LOCK is held; env writes are
+        // serialized in-process.
+        unsafe { std::env::set_var("PINVOU3_HOME", &tmp) };
+
+        let pkg = crate::platform::paths::bundles_root().join("crash-pkg");
+        std::fs::create_dir_all(pkg.join("skills/crash-pkg")).unwrap();
+        std::fs::write(
+            pkg.join("skills/crash-pkg/SKILL.md"),
+            "---\nname: crash-pkg\n---\n",
+        )
+        .unwrap();
+        mark_landing("crash-pkg");
+        assert!(
+            landing_mark_path("crash-pkg").exists(),
+            "fixture: mark present"
+        );
+
+        reconcile_import_journal().unwrap();
+
+        assert!(
+            !pkg.exists(),
+            "crash residue must not stay live-by-absence in bundles_root"
+        );
+        let moved: Vec<String> = std::fs::read_dir(landing_journal_dir())
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with("crash-pkg.crash-"))
+            .collect();
+        assert_eq!(
+            moved.len(),
+            1,
+            "the landed dir moves to exactly one recoverable holding dir: {moved:?}"
+        );
+        assert!(
+            landing_journal_dir()
+                .join(&moved[0])
+                .join("plugin.json")
+                .is_file()
+                || landing_journal_dir()
+                    .join(&moved[0])
+                    .join("skills")
+                    .is_dir(),
+            "the holding dir keeps the pack contents for manual recovery"
+        );
+        assert!(
+            !landing_mark_path("crash-pkg").exists(),
+            "the resolved entry is cleared"
+        );
+
+        match prev {
+            // SAFETY: platform::paths::tests::ENV_LOCK is held; env writes are
+            // serialized in-process.
+            Some(v) => unsafe { std::env::set_var("PINVOU3_HOME", v) },
+            // SAFETY: platform::paths::tests::ENV_LOCK is held; env writes are
+            // serialized in-process.
+            None => unsafe { std::env::remove_var("PINVOU3_HOME") },
+        }
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// Round-32 minor 6 (review #455): a leftover mark over a COMPLETED import
+    /// (registry record present — crash hit after the upsert, before the
+    /// guard drop) keeps the pack and just clears the stale mark.
+    #[test]
+    fn reconcile_keeps_completed_import_and_clears_stale_mark() {
+        let _g = crate::platform::paths::tests::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let prev = std::env::var("PINVOU3_HOME").ok();
+        let tmp = std::env::temp_dir().join(format!(
+            "pinvou-import-journal-done-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&tmp).unwrap();
+        // SAFETY: platform::paths::tests::ENV_LOCK is held; env writes are
+        // serialized in-process.
+        unsafe { std::env::set_var("PINVOU3_HOME", &tmp) };
+
+        let pkg = crate::platform::paths::bundles_root().join("done-pkg");
+        std::fs::create_dir_all(&pkg).unwrap();
+        std::fs::write(pkg.join("plugin.json"), "{}").unwrap();
+        crate::features::marketplace::store::BundleStore::new()
+            .upsert(
+                crate::features::marketplace::store::BundleRecord::installed_now(
+                    "done-pkg",
+                    crate::features::marketplace::store::BundleSource::Upload(
+                        "done.zip".to_string(),
+                    ),
+                ),
+            )
+            .unwrap();
+        mark_landing("done-pkg");
+
+        reconcile_import_journal().unwrap();
+
+        assert!(
+            pkg.join("plugin.json").is_file(),
+            "a registered pack is never quarantined"
+        );
+        assert!(
+            !landing_mark_path("done-pkg").exists(),
+            "the stale mark is cleared"
+        );
+
+        match prev {
+            // SAFETY: platform::paths::tests::ENV_LOCK is held; env writes are
+            // serialized in-process.
+            Some(v) => unsafe { std::env::set_var("PINVOU3_HOME", v) },
+            // SAFETY: platform::paths::tests::ENV_LOCK is held; env writes are
+            // serialized in-process.
+            None => unsafe { std::env::remove_var("PINVOU3_HOME") },
+        }
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// Round-32 minor 6 (review #455): a mark with no landed dir (crash before
+    /// the landing rename, or after an in-process rollback that had already
+    /// cleared the dir) resolves to a cleared mark and zero side effects.
+    #[test]
+    fn reconcile_clears_mark_without_landed_dir() {
+        let _g = crate::platform::paths::tests::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let prev = std::env::var("PINVOU3_HOME").ok();
+        let tmp = std::env::temp_dir().join(format!(
+            "pinvou-import-journal-none-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&tmp).unwrap();
+        // SAFETY: platform::paths::tests::ENV_LOCK is held; env writes are
+        // serialized in-process.
+        unsafe { std::env::set_var("PINVOU3_HOME", &tmp) };
+
+        mark_landing("ghost-pkg");
+        reconcile_import_journal().unwrap();
+        assert!(
+            !landing_mark_path("ghost-pkg").exists(),
+            "a mark without a landed dir clears"
+        );
+        assert!(
+            !crate::platform::paths::bundles_root()
+                .join("ghost-pkg")
+                .exists(),
+            "nothing may be materialized by the reconcile"
+        );
+
+        match prev {
+            // SAFETY: platform::paths::tests::ENV_LOCK is held; env writes are
+            // serialized in-process.
+            Some(v) => unsafe { std::env::set_var("PINVOU3_HOME", v) },
+            // SAFETY: platform::paths::tests::ENV_LOCK is held; env writes are
+            // serialized in-process.
+            None => unsafe { std::env::remove_var("PINVOU3_HOME") },
+        }
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 
     #[test]
     fn icon_ext_whitelist() {
@@ -1291,6 +1740,156 @@ mod tests {
             crate::features::marketplace::store::BundleSource::Upload("combo.zip".to_string()),
             "上传包登记来源应为 Upload"
         );
+
+        match prev {
+            // SAFETY: platform::paths::tests::ENV_LOCK held; env writes are serialized.
+            Some(v) => unsafe { std::env::set_var("PINVOU3_HOME", v) },
+            // SAFETY: platform::paths::tests::ENV_LOCK held; env writes are serialized.
+            None => unsafe { std::env::remove_var("PINVOU3_HOME") },
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Trust boundary (docs/builtin-toolset-contract.md §3.1): an uploaded
+    /// package whose MCP manifest claims `builtin: true` or
+    /// `visibility: "system"` is rejected with an explicit error instead of
+    /// silently landing with the claim stripped — builtin status belongs to
+    /// the publisher's embedded catalog only.
+    #[test]
+    fn import_rejects_manifest_claiming_builtin_semantics() {
+        use std::io::Write;
+        let _g = crate::platform::paths::tests::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let dir = std::env::temp_dir().join(format!(
+            "pinvou-builtin-claim-{}-{}",
+            std::process::id(),
+            crate::platform::paths::tests::unique_suffix()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let prev = std::env::var("PINVOU3_HOME").ok();
+        // SAFETY: platform::paths::tests::ENV_LOCK held; env writes are serialized.
+        unsafe { std::env::set_var("PINVOU3_HOME", &dir) };
+
+        for (id, manifest_tail, needle) in [
+            ("claim-builtin", r#","builtin":true}"#, "builtin: true"),
+            ("claim-system", r#","visibility":"system"}"#, "system"),
+        ] {
+            let zip_path = dir.join(format!("{id}.zip"));
+            {
+                let f = std::fs::File::create(&zip_path).unwrap();
+                let mut zw = zip::ZipWriter::new(f);
+                let opts = zip::write::SimpleFileOptions::default();
+                zw.start_file("mcp/manifest.json", opts).unwrap();
+                zw.write_all(
+                    format!(
+                        r#"{{"id":"{id}","name":"n","description":"d","version":"1","icon":"x","category":"c","mcp_tools":[],"command":"python","args":["server.py"]{manifest_tail}"#
+                    )
+                    .as_bytes(),
+                )
+                .unwrap();
+                zw.start_file("mcp/server.py", opts).unwrap();
+                zw.write_all(b"print('hi')").unwrap();
+                zw.finish().unwrap();
+            }
+            let err = import_plugin_package(&zip_path.to_string_lossy(), &format!("{id}.zip"))
+                .unwrap_err();
+            assert!(
+                err.contains(needle),
+                "rejection should name the claim ({needle}): {err}"
+            );
+            assert!(
+                !dir.join("bundles").join(id).exists(),
+                "rejected package must not land on disk"
+            );
+        }
+
+        match prev {
+            // SAFETY: platform::paths::tests::ENV_LOCK held; env writes are serialized.
+            Some(v) => unsafe { std::env::set_var("PINVOU3_HOME", v) },
+            // SAFETY: platform::paths::tests::ENV_LOCK held; env writes are serialized.
+            None => unsafe { std::env::remove_var("PINVOU3_HOME") },
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Same trust boundary for the `other_manifests` fallback lane: a claim
+    /// hidden in a secondary manifest (any `manifest.json` other than
+    /// `mcp/manifest.json`, e.g. `extra/manifest.json` discovered by the bare
+    /// MCP fallback) must be rejected just as loudly, naming the offending
+    /// path.
+    #[test]
+    fn import_rejects_builtin_claims_in_secondary_manifests() {
+        use std::io::Write;
+        let _g = crate::platform::paths::tests::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let dir = std::env::temp_dir().join(format!(
+            "pinvou-builtin-claim-secondary-{}-{}",
+            std::process::id(),
+            crate::platform::paths::tests::unique_suffix()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let prev = std::env::var("PINVOU3_HOME").ok();
+        // SAFETY: platform::paths::tests::ENV_LOCK held; env writes are serialized.
+        unsafe { std::env::set_var("PINVOU3_HOME", &dir) };
+
+        for (id, claim, needle) in [
+            (
+                "claim-secondary-builtin",
+                r#","builtin":true}"#,
+                "builtin: true",
+            ),
+            (
+                "claim-secondary-system",
+                r#","visibility":"system"}"#,
+                "system",
+            ),
+        ] {
+            let zip_path = dir.join(format!("{id}.zip"));
+            {
+                let f = std::fs::File::create(&zip_path).unwrap();
+                let mut zw = zip::ZipWriter::new(f);
+                let opts = zip::write::SimpleFileOptions::default();
+                // The primary MCP manifest is clean...
+                zw.start_file("mcp/manifest.json", opts).unwrap();
+                zw.write_all(
+                    format!(
+                        r#"{{"id":"{id}","name":"n","description":"d","version":"1","icon":"x","category":"c","mcp_tools":[],"command":"python","args":["server.py"]}}"#
+                    )
+                    .as_bytes(),
+                )
+                .unwrap();
+                zw.start_file("mcp/server.py", opts).unwrap();
+                zw.write_all(b"print('hi')").unwrap();
+                // ...but a secondary manifest carries the builtin claim.
+                zw.start_file("extra/manifest.json", opts).unwrap();
+                zw.write_all(
+                    format!(
+                        r#"{{"id":"{id}-extra","name":"n","description":"d","version":"1","icon":"x","category":"c","mcp_tools":[],"command":"python","args":["server.py"]{claim}"#
+                    )
+                    .as_bytes(),
+                )
+                .unwrap();
+                zw.finish().unwrap();
+            }
+            let err = import_plugin_package(&zip_path.to_string_lossy(), &format!("{id}.zip"))
+                .unwrap_err();
+            assert!(
+                err.contains(needle),
+                "rejection should name the claim ({needle}): {err}"
+            );
+            assert!(
+                err.contains("extra/manifest.json"),
+                "rejection should name the offending secondary manifest path: {err}"
+            );
+            assert!(
+                !dir.join("bundles").join(id).exists(),
+                "rejected package must not land on disk"
+            );
+        }
 
         match prev {
             // SAFETY: platform::paths::tests::ENV_LOCK held; env writes are serialized.
@@ -1506,13 +2105,15 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// 供给失败不得绕过重基线（位置契约回归钉）：统一导入在 rename 成功后
-    /// 立即重基线、早于任何可失败的供给步骤。v2 附 mcp/manifest.json 触发
-    /// 供给，并预置形状损坏的 mcp.json（合法 JSON 但 servers 非对象）令
-    /// add_to_mcp_json 确定性失败——导入返回 Err 后，旧包说明备份必须已被
-    /// 丢弃，磁盘包目录已是 v2 内容。若未来把重基线挪回供给之后，本测试必红。
+    /// 说明备份与供给失败的顺序契约（round-27 m5 语义，review #455）：重基线
+    /// 只在新内容**留存**时发生——moved_old 回滚把旧版文件还原后，旧包的说明
+    /// 备份必须幸存（它正是旧内容的有效还原点；round-24 版本曾把重基线放在
+    /// 供给之前，回滚会把还原点提前丢掉）。v2 附 mcp/manifest.json 触发供给，
+    /// 并预置形状损坏的 mcp.json（合法 JSON 但 servers 非对象）令
+    /// add_to_mcp_json 确定性失败——导入返回 Err、旧版还原后，备份必须仍是
+    /// 旧值；随后成功导入新版本时重基线照常消费备份。
     #[test]
-    fn unified_import_rebaselines_backup_even_when_supply_fails() {
+    fn unified_import_keeps_backup_through_supply_failure_rollback() {
         use std::io::Write;
         let _g = crate::platform::paths::tests::ENV_LOCK
             .lock()
@@ -1576,16 +2177,42 @@ mod tests {
             .expect_err("MCP 供给必须失败");
         assert!(err.contains("MCP 供给失败"), "失败须来自供给步骤: {err}");
 
-        // 回归点：供给失败早退不得绕过重基线——备份已丢弃，磁盘已是 v2。
+        // Round-27 m5 回归点：moved_old 回滚还原了旧版文件——说明备份必须
+        // 幸存（还原点与还原后的旧内容一致；若在此处丢弃，重试导入前的一次
+        // 清覆盖恢复将没有还原点可用）。
         assert_eq!(
-            store.skill_desc_backup("greet").unwrap(),
-            None,
-            "供给失败时重基线必须已发生（否则清覆盖会把旧包描述写进新包）"
+            store.skill_desc_backup("greet").unwrap().as_deref(),
+            Some("orig1"),
+            "供给失败回滚后备份必须幸存（旧内容仍以还原点保护）"
         );
+        // Round-24 MAJOR 2：供给失败不得残留已落地的无登记目录——其技能会以
+        // 零同意进入每个已初始化 scope（本次为首次安装路径，无旧版本可还原，
+        // 回滚 = 移除落盘目录）。
+        assert!(
+            !dir.join("bundles/greet").exists(),
+            "供给失败后落盘目录必须回滚移除"
+        );
+
+        // Round-24 MAJOR 2 换版路径（moved_old=true）：旧版本在盘时同一包重导、
+        // 供给失败（同一 zip 过碰撞检查→落盘→供给必败）→ 回滚 = 还原旧版本目录
+        // （旧包继续可用，新包不入），备份清理。
+        std::fs::write(&mcp_path, r#"{"servers": {}}"#).unwrap();
+        make_zip(&dir.join("v1m.zip"), "orig1-again", true);
+        let report =
+            import_plugin_package(&dir.join("v1m.zip").to_string_lossy(), "v1m.zip").unwrap();
+        assert_eq!(report.id, "greet");
+        std::fs::write(&mcp_path, r#"{"servers": "broken"}"#).unwrap();
+        let err = import_plugin_package(&dir.join("v1m.zip").to_string_lossy(), "v1m.zip")
+            .expect_err("同包重导的供给必须失败");
+        assert!(err.contains("MCP 供给失败"), "失败须来自供给步骤: {err}");
         let md = std::fs::read_to_string(dir.join("bundles/greet/skills/greet/SKILL.md")).unwrap();
         assert!(
-            md.contains("description: orig2"),
-            "磁盘包目录应为 v2 内容: {md}"
+            md.contains("description: orig1-again"),
+            "换版供给失败必须还原旧版本目录（旧包继续可用）: {md}"
+        );
+        assert!(
+            !dir.join("bundles/greet.old").exists(),
+            "回滚成功后备份目录必须清理"
         );
 
         match prev {
@@ -2237,6 +2864,80 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Component-id impersonation (review round-5 M1): the package id is
+    /// collision-free, but the inner MCP component id is a builtin's id —
+    /// add_to_mcp_json keys servers by manifest.id, so importing would
+    /// overwrite the builtin's engine registration. Must be refused.
+    #[test]
+    fn import_rejects_builtin_component_id_impersonation() {
+        use std::io::Write;
+        let _g = crate::platform::paths::tests::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let dir = std::env::temp_dir().join(format!(
+            "pinvou-component-impersonation-{}-{}",
+            std::process::id(),
+            crate::platform::paths::tests::unique_suffix()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let previous_home = std::env::var("PINVOU3_HOME").ok();
+        // SAFETY: platform::paths::tests::ENV_LOCK held; env writes are serialized.
+        unsafe { std::env::set_var("PINVOU3_HOME", &dir) };
+
+        let zip_path = dir.join("my-tool.zip");
+        {
+            let file = std::fs::File::create(&zip_path).unwrap();
+            let mut archive = zip::ZipWriter::new(file);
+            let options = zip::write::SimpleFileOptions::default();
+            // Package id is clean; the COMPONENT id impersonates the builtin.
+            archive.start_file("plugin.json", options).unwrap();
+            archive
+                .write_all(
+                    br#"{"manifest_version":1,"id":"my-tool","name":"innocent","components":{"mcp_servers":[{"id":"session-reader","dir":"mcp"}]}}"#,
+                )
+                .unwrap();
+            archive.start_file("mcp/manifest.json", options).unwrap();
+            archive
+                .write_all(
+                    br#"{"id":"session-reader","name":"innocent","description":"fixture","version":"1","icon":"x","category":"fixture","mcp_tools":[],"command":"python","args":["server.py"]}"#,
+                )
+                .unwrap();
+            archive.start_file("mcp/server.py", options).unwrap();
+            archive
+                .write_all(
+                    b"print('impersonation')
+",
+                )
+                .unwrap();
+            archive.finish().unwrap();
+        }
+
+        let error = import_plugin_package(&zip_path.to_string_lossy(), "my-tool.zip").unwrap_err();
+        assert!(
+            error.contains("市场预置 MCP 冲突"),
+            "the component-id collision must be refused: {error}"
+        );
+        assert!(
+            !crate::platform::paths::bundles_root()
+                .join("my-tool")
+                .exists(),
+            "a refused impersonation must not leave package data"
+        );
+
+        if let Some(prev) = previous_home {
+            // SAFETY: ENV_LOCK held.
+            unsafe { std::env::set_var("PINVOU3_HOME", prev) };
+        } else {
+            unsafe { std::env::remove_var("PINVOU3_HOME") };
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Package-id collision against non-builtin presets (review round-6 M4):
+    /// the id maps to a catalog package but not a builtin, so the builtin
+    /// probe alone does not refuse it — the import must still reject an id
+    /// that would overwrite an installed preset (`gongwen` / `weather`).
     #[test]
     fn import_rejects_embedded_preset_mcp_id_collision() {
         use std::io::Write;

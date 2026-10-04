@@ -383,6 +383,20 @@
     return await invoke("test_search_provider", { provider: provider, apiKey: apiKey || null });
   }
 
+  // ── Builtin feature toggles (docs/builtin-toolset-contract.md hook) ──────
+  // list_builtin_features is consumed by ChatView (the session-mention feature
+  // gate, PR #586); set_builtin_feature_enabled only wraps the command channel
+  // for future per-feature settings pages — no consumer yet, no UI.
+  async function listBuiltinFeatures() {
+    return invoke("list_builtin_features");
+  }
+  // The Rust command takes `feature_id` (app/commands/builtin.rs); Tauri v2
+  // converts camelCase JS keys to snake_case, so the payload must use
+  // `featureId` — same convention as get_effective_model_config({ sessionId }).
+  async function setBuiltinFeatureEnabled(id, enabled) {
+    return invoke("set_builtin_feature_enabled", { featureId: id, enabled });
+  }
+
     return {
       loadSettings: loadSettings,
       loadBehaviorTelemetryStatus: loadBehaviorTelemetryStatus,
@@ -409,7 +423,9 @@
       testModelConnection: testModelConnection,
       testImageInputCapability: testImageInputCapability,
       probeLocalServerKind: probeLocalServerKind,
-      testSearchProvider: testSearchProvider
+      testSearchProvider: testSearchProvider,
+      listBuiltinFeatures: listBuiltinFeatures,
+      setBuiltinFeatureEnabled: setBuiltinFeatureEnabled,
     };
   };
 })(window);

@@ -188,13 +188,13 @@ const isolatedRust = configureIsolatedWindowsRustToolchain({
   env: isolatedRustEnv,
   architecture: "x64",
 });
-assert.equal(isolatedRust.channel, "1.98.0");
+assert.equal(isolatedRust.channel, "stable");
 assert.equal(isolatedRust.hostTriple, "x86_64-pc-windows-msvc");
 assert.equal(isolatedRustEnv.RUSTUP_HOME, isolatedRust.rustupHome);
 assert.equal(isolatedRustEnv.PINVOU3_MANAGED_RUSTUP, "1");
 assert.match(
   isolatedRust.rustupHome.replaceAll("\\", "/"),
-  /\/\.cache\/rustup\/1\.98\.0-x86_64-pc-windows-msvc$/u,
+  /\/\.cache\/rustup\/stable-x86_64-pc-windows-msvc$/u,
 );
 
 const customRustEnv = { PINVOU3_RUSTUP_HOME: "custom-rustup" };
@@ -229,7 +229,7 @@ const accountRustCheck = ensureWindowsRustToolchain({
   assert.equal(accountRustInvocations[0].args.at(-1), "-CheckOnly");
   assert.equal(accountRustInvocations[0].options.env.PINVOU3_MANAGED_RUSTUP, undefined);
   assert.equal(accountRustEnv.RUSTUP_HOME, undefined);
-  assert.equal(accountRustEnv.RUSTUP_TOOLCHAIN, "1.98.0");
+  assert.equal(accountRustEnv.RUSTUP_TOOLCHAIN, "stable");
 });
 
 const isolatedRustInvocations = [];
@@ -246,7 +246,7 @@ const fallbackRustCheck = ensureWindowsRustToolchain({
   assert.equal(isolatedRustInvocations[1].options.env.PINVOU3_MANAGED_RUSTUP, "1");
   assert.match(
     isolatedRustInvocations[1].options.env.RUSTUP_HOME.replaceAll("\\", "/"),
-    /\/\.cache\/rustup\/1\.98\.0-x86_64-pc-windows-msvc$/u,
+    /\/\.cache\/rustup\/stable-x86_64-pc-windows-msvc$/u,
   );
 });
 
@@ -678,19 +678,19 @@ assert.deepEqual(
   "macOS dev must receive the platform overlay (native titlebar) to match packaged output",
 );
 assert.deepEqual(
-  prepareTauriArgs(["dev", "--features", "browser-macos-preview"], { platform: "darwin" }),
+  prepareTauriArgs(["dev", "--features", "benchmark-hooks"], { platform: "darwin" }),
   [
     "dev",
     "--config",
     platformConfigPath("darwin"),
     "--features",
-    "browser-macos-preview",
+    "benchmark-hooks",
   ],
-  "the isolated macOS BrowserCore preview feature must reach the Tauri Cargo build unchanged",
+  "opt-in Cargo features must reach the Tauri Cargo build unchanged",
 );
 assert.deepEqual(
   prepareTauriArgs(
-    ["build", "--features", "browser-macos-preview", "--target", "universal-apple-darwin"],
+    ["build", "--features", "benchmark-hooks", "--target", "universal-apple-darwin"],
     { platform: "darwin" },
   ),
   [
@@ -698,11 +698,11 @@ assert.deepEqual(
     "--config",
     platformConfigPath("darwin"),
     "--features",
-    "browser-macos-preview",
+    "benchmark-hooks",
     "--target",
     "universal-apple-darwin",
   ],
-  "preview packaging must remain an explicit opt-in instead of changing normal macOS builds",
+  "opt-in features must stay caller-supplied instead of being baked into normal macOS builds",
 );
 assert.deepEqual(
   configSpecs(prepareTauriArgs(["dev", "-c", explicitOverlay], { platform: "darwin" })),
