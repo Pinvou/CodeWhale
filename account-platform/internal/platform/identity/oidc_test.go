@@ -49,3 +49,9 @@ func TestOIDCVerifierRejectsHTTPInProduction(t *testing.T) {
 		t.Fatal("expected insecure issuer to be rejected")
 	}
 }
+
+func TestOIDCVerifierRejectsInsecureJWKSOverrideInProduction(t *testing.T) {
+	if _, err := NewOIDCVerifyFunc(context.Background(), "https://identity.example", "audience", "production", "http://identity.internal/certs"); err == nil {
+		t.Fatal("expected insecure JWKS URL to be rejected")
+	}
+}

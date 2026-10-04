@@ -69,6 +69,8 @@ type PostgresRepository struct {
 type Repository interface {
 	CreateAccount(context.Context, CreateAccountRequest) (TokenAccount, error)
 	GetAccount(context.Context, uuid.UUID) (TokenAccount, error)
+	ListManagedAccounts(context.Context, AuthorizationContext) ([]TokenAccount, error)
+	ListCredentials(context.Context, uuid.UUID) ([]Credential, error)
 	RotateCredential(context.Context, uuid.UUID, uuid.UUID, string, string, []byte, []string) (Credential, error)
 	SetAccountStatus(context.Context, uuid.UUID, string, uuid.UUID, string) (TokenAccount, error)
 	RevokeCredential(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, string) (Credential, error)
@@ -114,6 +116,16 @@ func (r *PostgresRepository) BeginUsage(ctx context.Context, request UsageReques
 		return UsageRequest{}, false, err
 	}
 	return request, true, tx.Commit(ctx)
+}
+
+func (r *PostgresRepository) GetUsage(ctx context.Context, usageID uuid.UUID) (UsageRequest, error) {
+	query := `SELECT id,idempotency_key,user_id,session_id,organization_id,token_account_id,credential_id,wallet_id,price_version_id,hold_id,model,status,maximum_microcredits,actual_microcredits,error_class,started_at,updated_at FROM usage_requests WHERE id=$1`
+	var usage UsageRequest
+	err := r.pool.QueryRow(ctx, query, usageID).Scan(&usage.ID, &usage.IdempotencyKey, &usage.UserID, &usage.SessionID, &usage.OrganizationID, &usage.TokenAccountID, &usage.CredentialID, &usage.WalletID, &usage.PriceVersionID, &usage.HoldID, &usage.Model, &usage.Status, &usage.MaximumMicrocredits, &usage.ActualMicrocredits, &usage.ErrorClass, &usage.StartedAt, &usage.UpdatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return UsageRequest{}, ErrNotFound
+	}
+	return usage, err
 }
 
 func (r *PostgresRepository) MarkReserved(ctx context.Context, usageID, holdID, priceVersionID uuid.UUID) error {
@@ -181,7 +193,12 @@ func (r *PostgresRepository) MarkReview(ctx context.Context, usageID uuid.UUID, 
 	if err != nil {
 		return err
 	}
-	_, err = r.pool.Exec(ctx, `UPDATE usage_requests SET status='REVIEW',error_class=$2,usage_snapshot=$3,updated_at=$4 WHERE id=$1 AND status NOT IN ('COMMITTED','RELEASED')`, usageID, strings.TrimSpace(reason), encoded, r.now())
+	reason = strings.TrimSpace(reason)
+	status := "REVIEW"
+	if reason == "settlement_pending" || reason == "local_commit_record_pending" {
+		status = "SETTLEMENT_PENDING"
+	}
+	_, err = r.pool.Exec(ctx, `UPDATE usage_requests SET status=$2,error_class=$3,usage_snapshot=$4,updated_at=$5 WHERE id=$1 AND status NOT IN ('COMMITTED','RELEASED')`, usageID, status, reason, encoded, r.now())
 	return err
 }
 
@@ -201,12 +218,12 @@ func (r *PostgresRepository) ensureUsageState(ctx context.Context, usageID uuid.
 func getUsageByIdempotency(ctx context.Context, database interface {
 	QueryRow(context.Context, string, ...any) pgx.Row
 }, key string, lock bool) (UsageRequest, error) {
-	query := `SELECT id,idempotency_key,user_id,session_id,organization_id,token_account_id,credential_id,wallet_id,price_version_id,hold_id,model,status,maximum_microcredits,actual_microcredits,started_at FROM usage_requests WHERE idempotency_key=$1`
+	query := `SELECT id,idempotency_key,user_id,session_id,organization_id,token_account_id,credential_id,wallet_id,price_version_id,hold_id,model,status,maximum_microcredits,actual_microcredits,error_class,started_at,updated_at FROM usage_requests WHERE idempotency_key=$1`
 	if lock {
 		query += ` FOR UPDATE`
 	}
 	var usage UsageRequest
-	err := database.QueryRow(ctx, query, key).Scan(&usage.ID, &usage.IdempotencyKey, &usage.UserID, &usage.SessionID, &usage.OrganizationID, &usage.TokenAccountID, &usage.CredentialID, &usage.WalletID, &usage.PriceVersionID, &usage.HoldID, &usage.Model, &usage.Status, &usage.MaximumMicrocredits, &usage.ActualMicrocredits, &usage.StartedAt)
+	err := database.QueryRow(ctx, query, key).Scan(&usage.ID, &usage.IdempotencyKey, &usage.UserID, &usage.SessionID, &usage.OrganizationID, &usage.TokenAccountID, &usage.CredentialID, &usage.WalletID, &usage.PriceVersionID, &usage.HoldID, &usage.Model, &usage.Status, &usage.MaximumMicrocredits, &usage.ActualMicrocredits, &usage.ErrorClass, &usage.StartedAt, &usage.UpdatedAt)
 	return usage, err
 }
 
@@ -260,6 +277,48 @@ func (r *PostgresRepository) GetAccount(ctx context.Context, accountID uuid.UUID
 		return TokenAccount{}, ErrNotFound
 	}
 	return account, err
+}
+
+func (r *PostgresRepository) ListManagedAccounts(ctx context.Context, resolved AuthorizationContext) ([]TokenAccount, error) {
+	var rows pgx.Rows
+	var err error
+	if resolved.ContextType == "PERSONAL" {
+		rows, err = r.pool.Query(ctx, `SELECT ta.id,ta.owner_type,ta.owner_id,ta.owner_organization_id,ta.owner_unit_id,ta.wallet_id,ta.name,ta.status,sp.scope,ta.default_priority FROM token_accounts ta JOIN token_share_policies sp ON sp.token_account_id=ta.id WHERE ta.owner_type='USER' AND ta.owner_id=$1 ORDER BY ta.name,ta.id`, resolved.UserID)
+	} else if resolved.ContextType == "ORGANIZATION" && resolved.OrganizationID != nil && (slices.Contains(resolved.Roles, "OWNER") || slices.Contains(resolved.Roles, "ORG_ADMIN")) {
+		rows, err = r.pool.Query(ctx, `SELECT ta.id,ta.owner_type,ta.owner_id,ta.owner_organization_id,ta.owner_unit_id,ta.wallet_id,ta.name,ta.status,sp.scope,ta.default_priority FROM token_accounts ta JOIN token_share_policies sp ON sp.token_account_id=ta.id WHERE ta.owner_organization_id=$1 ORDER BY ta.name,ta.id`, *resolved.OrganizationID)
+	} else {
+		return []TokenAccount{}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := make([]TokenAccount, 0)
+	for rows.Next() {
+		var item TokenAccount
+		if err := rows.Scan(&item.ID, &item.OwnerType, &item.OwnerID, &item.OwnerOrganization, &item.OwnerUnit, &item.WalletID, &item.Name, &item.Status, &item.ShareScope, &item.DefaultPriority); err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+func (r *PostgresRepository) ListCredentials(ctx context.Context, accountID uuid.UUID) ([]Credential, error) {
+	rows, err := r.pool.Query(ctx, `SELECT id,token_account_id,provider,base_url,fingerprint,version,status,allowed_models,validated_at FROM provider_credentials WHERE token_account_id=$1 ORDER BY version DESC`, accountID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := make([]Credential, 0)
+	for rows.Next() {
+		var item Credential
+		if err := rows.Scan(&item.ID, &item.TokenAccountID, &item.Provider, &item.BaseURL, &item.Fingerprint, &item.Version, &item.Status, &item.AllowedModels, &item.ValidatedAt); err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
 }
 
 func (r *PostgresRepository) RotateCredential(ctx context.Context, accountID, actorID uuid.UUID, provider, baseURL string, secret []byte, models []string) (Credential, error) {

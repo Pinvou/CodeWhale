@@ -81,6 +81,40 @@ paths:
           $ref: "#/components/responses/Error"
         "422":
           $ref: "#/components/responses/Error"
+  /recharge/orders/recent:
+    servers:
+      - url: /internal/v1
+    get:
+      operationId: getRecentRechargeOrder
+      summary: Read the newest recharge order for one requester and wallet
+      parameters:
+        - name: requester_id
+          in: query
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: wallet_id
+          in: query
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: The newest order, or null when the context has no order
+          headers:
+            Cache-Control:
+              required: true
+              schema:
+                type: string
+                const: no-store
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RecentRechargeOrder"
+        "400":
+          $ref: "#/components/responses/Error"
   /recharge/orders/{order_id}:
     servers:
       - url: /internal/v1
@@ -247,6 +281,15 @@ components:
         expires_at:
           type: string
           format: date-time
+    RecentRechargeOrder:
+      type: object
+      additionalProperties: false
+      required: [order]
+      properties:
+        order:
+          oneOf:
+            - $ref: "#/components/schemas/RechargeOrder"
+            - type: "null"
     WalletBalance:
       type: object
       additionalProperties: false

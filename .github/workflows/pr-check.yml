@@ -670,6 +670,9 @@ jobs:
       - name: Vite web build (remote relay)
         run: npm run build:web
 
+      - name: Vite Account Portal build
+        run: npm run build:account-portal && npm run audit:account-portal
+
       # Dist-layer compatibility audit (a marked@16-style lookbehind parse
       # regression is caught by exactly this layer); build:ui above already
       # produced dist/, while the contract test only covers static/inline layers.
@@ -866,6 +869,15 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 20
     services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
       postgres:
         image: postgres:17-alpine
         env:
@@ -908,6 +920,7 @@ jobs:
         working-directory: account-platform
         env:
           PINVOU_ACCOUNT_TEST_DATABASE_URL: postgresql://account_platform_test:account_platform_test@127.0.0.1:5432/account_platform_test?sslmode=disable
+          PINVOU_PORTAL_TEST_REDIS_URL: redis://127.0.0.1:6379/0
         run: |
           test -z "$(gofmt -l .)"
           go test -mod=readonly -race ./...
@@ -951,7 +964,7 @@ jobs:
           docker compose \
             --env-file account-platform/deploy/compose/.env.example \
             -f account-platform/deploy/compose/compose.yaml \
-            build account-service billing-service token-gateway payment-simulator
+            build account-service billing-service token-gateway payment-simulator token-portal
 
       - name: Go 与 Node 高危依赖审计
         run: |

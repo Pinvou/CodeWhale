@@ -54,20 +54,50 @@ func NewService(repository Repository, contexts ContextResolver, wallets WalletR
 
 func (s *Service) Handler(verify identity.VerifyFunc) http.Handler {
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /v1/token-accounts", s.listManagedTokenAccounts)
 	mux.HandleFunc("POST /v1/token-accounts", s.createTokenAccount)
 	mux.HandleFunc("PATCH /v1/token-accounts/{token_account_id}/status", s.setTokenAccountStatus)
 	mux.HandleFunc("PUT /v1/token-accounts/{token_account_id}/sharing", s.updateTokenSharing)
 	mux.HandleFunc("PUT /v1/token-accounts/{token_account_id}/routes", s.upsertTokenRoute)
 	mux.HandleFunc("POST /v1/token-accounts/{token_account_id}/credentials", s.rotateCredential)
+	mux.HandleFunc("GET /v1/token-accounts/{token_account_id}/credentials", s.listCredentials)
 	mux.HandleFunc("POST /v1/token-accounts/{token_account_id}/credentials/{credential_id}/revoke", s.revokeCredential)
 	mux.HandleFunc("GET /v1/token-accounts/eligible", s.listEligible)
+	mux.HandleFunc("GET /v1/usage-requests/{usage_request_id}", s.getUsageRequest)
 	mux.HandleFunc("POST /v1/chat/completions", s.chatCompletions)
 	mux.HandleFunc("GET /v1/recharge/products", s.rechargeProducts)
 	mux.HandleFunc("POST /v1/recharge/orders", s.createRechargeOrder)
+	mux.HandleFunc("GET /v1/recharge/orders/recent", s.getRecentRechargeOrder)
 	mux.HandleFunc("GET /v1/recharge/orders/{order_id}", s.getRechargeOrder)
 	mux.HandleFunc("POST /v1/recharge/orders/{order_id}/close", s.closeRechargeOrder)
 	mux.HandleFunc("GET /v1/me/balance", s.getBalance)
 	return identity.Middleware(verify, mux)
+}
+
+func (s *Service) listManagedTokenAccounts(w http.ResponseWriter, r *http.Request) {
+	resolved, ok := s.resolveContext(w, r)
+	if !ok {
+		return
+	}
+	items, err := s.repository.ListManagedAccounts(r.Context(), resolved)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	api.WriteJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
+func (s *Service) listCredentials(w http.ResponseWriter, r *http.Request) {
+	_, account, ok := s.resolveOwnedAccount(w, r)
+	if !ok {
+		return
+	}
+	items, err := s.repository.ListCredentials(r.Context(), account.ID)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	api.WriteJSON(w, http.StatusOK, map[string]any{"items": items})
 }
 
 func (s *Service) setTokenAccountStatus(w http.ResponseWriter, r *http.Request) {
@@ -242,6 +272,24 @@ func (s *Service) getRechargeOrder(w http.ResponseWriter, r *http.Request) {
 	writeRawNoStore(w, http.StatusOK, payload)
 }
 
+func (s *Service) getRecentRechargeOrder(w http.ResponseWriter, r *http.Request) {
+	resolved, ok := s.resolveContext(w, r)
+	if !ok {
+		return
+	}
+	walletID, err := s.activeWallet(r.Context(), resolved)
+	if err != nil {
+		api.WriteError(w, http.StatusServiceUnavailable, "BILLING_UNAVAILABLE", "the active wallet is unavailable", httpserver.RequestID(r.Context()))
+		return
+	}
+	payload, err := s.billing.RecentRechargeOrder(r.Context(), resolved.UserID, walletID)
+	if err != nil {
+		api.WriteError(w, http.StatusServiceUnavailable, "BILLING_UNAVAILABLE", "the recent recharge order is unavailable", httpserver.RequestID(r.Context()))
+		return
+	}
+	writeRawNoStore(w, http.StatusOK, payload)
+}
+
 func (s *Service) closeRechargeOrder(w http.ResponseWriter, r *http.Request) {
 	resolved, ok := s.resolveContext(w, r)
 	if !ok {
@@ -404,6 +452,59 @@ func (s *Service) listEligible(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	api.WriteJSON(w, http.StatusOK, map[string]any{"items": items, "membership_version": resolved.MembershipVersion})
+}
+
+func (s *Service) getUsageRequest(w http.ResponseWriter, r *http.Request) {
+	resolved, ok := s.resolveContext(w, r)
+	if !ok {
+		return
+	}
+	usageID, err := uuid.Parse(r.PathValue("usage_request_id"))
+	if err != nil {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid usage request", httpserver.RequestID(r.Context()))
+		return
+	}
+	usage, err := s.repository.GetUsage(r.Context(), usageID)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	if !usageContextMatches(resolved, usage) {
+		s.writeError(w, r, ErrNotFound)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	api.WriteJSON(w, http.StatusOK, map[string]any{
+		"usage_request_id": usage.ID, "status": usage.Status, "display_status": usageDisplayStatus(usage),
+		"token_account_id": usage.TokenAccountID, "wallet_id": usage.WalletID, "model": usage.Model,
+		"maximum_microcredits": usage.MaximumMicrocredits, "actual_microcredits": usage.ActualMicrocredits,
+		"started_at": usage.StartedAt, "updated_at": usage.UpdatedAt,
+	})
+}
+
+func usageContextMatches(context AuthorizationContext, usage UsageRequest) bool {
+	if usage.UserID != context.UserID || usage.SessionID != context.SessionID {
+		return false
+	}
+	if context.ContextType == "PERSONAL" {
+		return usage.OrganizationID == nil
+	}
+	return context.ContextType == "ORGANIZATION" && context.OrganizationID != nil && usage.OrganizationID != nil && *context.OrganizationID == *usage.OrganizationID
+}
+
+func usageDisplayStatus(usage UsageRequest) string {
+	switch usage.Status {
+	case "CREATED", "RESERVED", "UPSTREAM_ACTIVE":
+		return "IN_PROGRESS"
+	case "COMMITTED":
+		return "SETTLED"
+	case "SETTLEMENT_PENDING":
+		return "SETTLEMENT_PENDING"
+	case "RELEASED":
+		return "RELEASED"
+	default:
+		return "MANUAL_REVIEW"
+	}
 }
 
 func (s *Service) resolveContext(w http.ResponseWriter, r *http.Request) (AuthorizationContext, bool) {

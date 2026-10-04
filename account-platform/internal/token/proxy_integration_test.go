@@ -694,11 +694,12 @@ func TestPostgresReviewConvergesAfterConfirmedBillingTerminal(t *testing.T) {
 				t.Fatal("initial unknown result not reviewed")
 			}
 			var id, holdID uuid.UUID
-			if err := repo.pool.QueryRow(context.Background(), `SELECT id,hold_id FROM usage_requests`).Scan(&id, &holdID); err != nil {
+			var maximum int64
+			if err := repo.pool.QueryRow(context.Background(), `SELECT id,hold_id,maximum_microcredits FROM usage_requests`).Scan(&id, &holdID, &maximum); err != nil {
 				t.Fatal(err)
 			}
 			if terminal == "COMMITTED" {
-				s.settle(context.Background(), id, holdID, PriceVersion{InputPerMillion: 1_000_000, OutputPerMillion: 1_000_000}, Usage{InputTokens: 2, OutputTokens: 3})
+				s.settle(context.Background(), id, holdID, maximum, PriceVersion{InputPerMillion: 1_000_000, OutputPerMillion: 1_000_000}, Usage{InputTokens: 2, OutputTokens: 3})
 				if bill.commitCount() != 1 {
 					t.Fatal("Billing not confirmed committed")
 				}

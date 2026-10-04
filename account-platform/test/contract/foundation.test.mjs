@@ -36,6 +36,19 @@ test('billing products are server-authoritative and fixed to the approved catalo
   assert.deepEqual(createProperties.channel.$ref, '#/components/schemas/PaymentChannel');
 });
 
+test('recent recharge lookup is wallet-scoped internally and context-scoped publicly', async () => {
+  const billing = await readYaml('contracts/openapi/billing.yaml');
+  const gateway = await readYaml('contracts/openapi/token-gateway.yaml');
+  const internalParameters = billing.paths['/recharge/orders/recent'].get.parameters.map(({ name }) => name).sort();
+  assert.deepEqual(internalParameters, ['requester_id', 'wallet_id']);
+  assert.deepEqual(billing.paths['/recharge/orders/recent'].servers, [{ url: '/internal/v1' }]);
+  assert.equal(gateway.paths['/recharge/orders/recent'].get.parameters, undefined);
+  assert.equal(
+    gateway.paths['/recharge/orders/recent'].get.responses['200'].content['application/json'].schema.$ref,
+    'billing.yaml#/components/schemas/RecentRechargeOrder',
+  );
+});
+
 test('event schemas compile as JSON Schema 2020-12 and reject secrets', async () => {
   const directory = path.join(root, 'contracts/events');
   const files = (await readdir(directory)).filter((name) => name.endsWith('.schema.json'));
@@ -58,7 +71,7 @@ test('Compose keeps data stores private and simulator development-only', async (
     assert.deepEqual(compose.services[service].networks, ['backend'], `${service} must remain on the private network`);
   }
   assert.notEqual(compose.networks.frontend.internal, true, 'published services need a reachable bridge network');
-  for (const service of ['keycloak', 'account-service', 'billing-service', 'token-gateway', 'payment-simulator']) {
+  for (const service of ['keycloak', 'account-service', 'billing-service', 'token-gateway', 'payment-simulator', 'token-portal']) {
     assert.deepEqual(compose.services[service].networks, ['backend', 'frontend'], service);
     assert.ok(compose.services[service].ports.length > 0, `${service} must have a local entry point`);
     for (const port of compose.services[service].ports) {
@@ -110,6 +123,10 @@ test('Compose browser issuer and server key retrieval preserve the identity boun
     assert.equal(environment.OIDC_ISSUER, browserIssuer);
     assert.equal(environment.OIDC_JWKS_URL, 'http://keycloak:8080/realms/pinvou/protocol/openid-connect/certs');
   }
+  const portal = compose.services['token-portal'];
+  assert.equal(portal.environment.PORTAL_OIDC_ISSUER, browserIssuer);
+  assert.equal(portal.environment.PORTAL_OIDC_JWKS_URL, 'http://keycloak:8080/realms/pinvou/protocol/openid-connect/certs');
+  assert.equal(portal.depends_on.keycloak.condition, 'service_healthy');
 });
 
 test('every migration up script has a matching down script', async () => {

@@ -22,12 +22,12 @@ test('Billing and Token contracts match production JSON and HTTP validation resp
   ajv.addFormat('int64', { type: 'number', validate: Number.isInteger });
   const schemas = JSON.parse(JSON.stringify(document.components.schemas).replaceAll('#/components/schemas/', '#/$defs/'));
   ajv.addSchema({ $id: 'urn:pinvou:billing-runtime', $defs: schemas });
-  for (const [name, schema] of [['product', 'RechargeProduct'], ['paid', 'RechargeOrder'], ['created', 'RechargeOrder'], ['wallet', 'WalletBalance']]) {
+  for (const [name, schema] of [['product', 'RechargeProduct'], ['paid', 'RechargeOrder'], ['created', 'RechargeOrder'], ['wallet', 'WalletBalance'], ['recent_created', 'RecentRechargeOrder'], ['recent_empty', 'RecentRechargeOrder']]) {
     const validate = ajv.compile({ $ref: `urn:pinvou:billing-runtime#/$defs/${schema}` });
     assert.ok(validate(fixtures[name]), `${name}: ${JSON.stringify(validate.errors)}`);
     assert.equal(validate({ ...fixtures[name], unexpected: true }), false, 'unknown response fields remain forbidden');
   }
-  for (const [operation, template] of [['post', '/recharge/orders'], ['get', '/recharge/orders/{order_id}']]) {
+  for (const [operation, template] of [['post', '/recharge/orders'], ['get', '/recharge/orders/{order_id}'], ['get', '/recharge/orders/recent']]) {
     const item = document.paths[template];
     const base = (item.servers ?? document.servers)[0].url;
     const route = `${operation.toUpperCase()} ${base}${template.replace('{order_id}', fixtures.paid.order_id)}`;

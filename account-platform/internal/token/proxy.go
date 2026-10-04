@@ -191,7 +191,7 @@ func (s *Service) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	copySafeHeaders(w.Header(), response.Header)
 	w.WriteHeader(response.StatusCode)
 	if request.Stream || strings.Contains(response.Header.Get("Content-Type"), "text/event-stream") {
-		s.proxyStream(w, r, usageRequest.ID, hold.ID, price, response.Body)
+		s.proxyStream(w, r, usageRequest.ID, hold.ID, price, usageRequest.MaximumMicrocredits, response.Body)
 		return
 	}
 	const maximumResponseBytes = 32 << 20
@@ -212,7 +212,7 @@ func (s *Service) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		_ = s.repository.MarkReview(context.WithoutCancel(r.Context()), usageRequest.ID, "usage_missing", map[string]any{"response_received": true})
 		return
 	}
-	s.settle(context.WithoutCancel(r.Context()), usageRequest.ID, hold.ID, price, usage)
+	s.settle(context.WithoutCancel(r.Context()), usageRequest.ID, hold.ID, usageRequest.MaximumMicrocredits, price, usage)
 }
 
 func (s *Service) handleUpstreamFailure(w http.ResponseWriter, r *http.Request, usageID, holdID uuid.UUID, response *http.Response) {
@@ -227,7 +227,7 @@ func (s *Service) handleUpstreamFailure(w http.ResponseWriter, r *http.Request, 
 	_, _ = w.Write(payload)
 }
 
-func (s *Service) proxyStream(w http.ResponseWriter, r *http.Request, usageID, holdID uuid.UUID, price PriceVersion, body io.Reader) {
+func (s *Service) proxyStream(w http.ResponseWriter, r *http.Request, usageID, holdID uuid.UUID, price PriceVersion, maximumMicrocredits int64, body io.Reader) {
 	flusher, _ := w.(http.Flusher)
 	scanner := bufio.NewScanner(body)
 	scanner.Buffer(make([]byte, 64*1024), 2<<20)
@@ -270,13 +270,17 @@ func (s *Service) proxyStream(w http.ResponseWriter, r *http.Request, usageID, h
 		_ = s.repository.MarkReview(background, usageID, "stream_usage_missing", map[string]any{"stream_error": scanner.Err() != nil || streamFailed, "done_received": doneFound})
 		return
 	}
-	s.settle(background, usageID, holdID, price, usage)
+	s.settle(background, usageID, holdID, maximumMicrocredits, price, usage)
 }
 
-func (s *Service) settle(ctx context.Context, usageID, holdID uuid.UUID, price PriceVersion, usage Usage) {
+func (s *Service) settle(ctx context.Context, usageID, holdID uuid.UUID, maximumMicrocredits int64, price PriceVersion, usage Usage) {
 	actual, err := Cost(price, usage)
 	if err != nil {
 		_ = s.repository.MarkReview(ctx, usageID, "usage_invalid", map[string]any{"usage": usage})
+		return
+	}
+	if actual > maximumMicrocredits {
+		_ = s.repository.MarkReview(ctx, usageID, "usage_exceeds_reservation", map[string]any{"usage": usage, "actual_microcredits": actual, "maximum_microcredits": maximumMicrocredits})
 		return
 	}
 	if err := s.billing.Commit(ctx, usageID, holdID, actual, usage); err != nil {

@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 import postcss from 'postcss';
 import tailwindcss from 'tailwindcss';
 
-import { auditDistPresenceProblems, runAudit } from '../scripts/audit-compat.mjs';
+import { auditDistPresenceProblems, auditPortal, runAudit } from '../scripts/audit-compat.mjs';
 import { staticRuntimeScripts } from '../vite.config.mjs';
 
 // WebView compatibility contract: the desktop minimum is macOS 11
@@ -31,6 +31,24 @@ const noDesktopDist = path.join(appRoot, '.compat-test-no-dist');
 const noWebDist = path.join(appRoot, '.compat-test-no-web-dist');
 const hermeticAudit = (options = {}) => runAudit({ distDir: noDesktopDist, webDistDir: noWebDist, ...options });
 const { browserslistToTargets, transform: transformCss } = createRequire(import.meta.url)('lightningcss');
+
+test('Portal audit fails on absent artifacts and unpolyfilled newer APIs', t => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'pinvou-portal-compat-'));
+  t.after(() => {
+    const resolved = path.resolve(temp);
+    assert.ok(resolved.startsWith(`${path.resolve(os.tmpdir())}${path.sep}`) &&
+      path.basename(resolved).startsWith('pinvou-portal-compat-'));
+    fs.rmSync(resolved, { recursive: true, force: true });
+  });
+  assert.ok(auditPortal(temp).some(problem => problem.includes('not found')));
+  fs.mkdirSync(path.join(temp, 'assets'));
+  fs.writeFileSync(path.join(temp, 'account.html'), '<html><body></body></html>');
+  fs.writeFileSync(path.join(temp, 'assets', 'entry.css'), 'body{color:black}');
+  fs.writeFileSync(path.join(temp, 'assets', 'entry.js'), 'console.log([1].at(0));');
+  assert.ok(auditPortal(temp).some(problem => problem.includes('Safari 15.4')));
+  fs.writeFileSync(path.join(temp, 'assets', 'entry.js'), 'console.log([1][0]);');
+  assert.deepEqual(auditPortal(temp), []);
+});
 
 test('static runtime scripts and HTML inline scripts stay within the Safari 14 baseline', () => {
   assert.deepEqual(hermeticAudit(), []);

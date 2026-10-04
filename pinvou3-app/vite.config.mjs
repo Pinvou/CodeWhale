@@ -530,6 +530,7 @@ function enforceMainEntryBudget() {
 
 export default defineConfig(({ mode }) => {
   const webBuild = mode === 'web';
+  const accountPortalBuild = mode === 'account-portal';
   return {
   root: 'src',
   // The Relay and Vite build intentionally share one deployment variable;
@@ -543,14 +544,16 @@ export default defineConfig(({ mode }) => {
   },
   plugins: [
     react(),
+    ...(accountPortalBuild ? [] : [
     copyRuntimeAssets(),
     enforceLazyChunks(),
     enforceMainEntryBudget(),
     conditionalPlatformScripts(webBuild),
     bundleClassicStartup(webBuild),
+    ]),
   ],
   build: {
-    outDir: webBuild ? '../../remote-control-relay/web/dist' : '../dist',
+    outDir: accountPortalBuild ? '../../account-platform/internal/portal/static' : webBuild ? '../../remote-control-relay/web/dist' : '../dist',
     emptyOutDir: true,
     // Minimum supported WebViews: macOS 11 WKWebView is Safari 14.0 — the
     // default "baseline-widely-available" target emits syntax it cannot parse
@@ -563,7 +566,9 @@ export default defineConfig(({ mode }) => {
     target: 'safari14',
     cssTarget: 'safari14',
     rolldownOptions: {
-      input: webBuild
+      input: accountPortalBuild
+        ? { account: resolve(sourceRoot, 'account.html') }
+        : webBuild
         ? { main: resolve(sourceRoot, 'index.html') }
         : {
             main: resolve(sourceRoot, 'index.html'),

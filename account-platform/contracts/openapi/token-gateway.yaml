@@ -11,6 +11,25 @@ security:
   - oidc: []
 paths:
   /token-accounts:
+    get:
+      operationId: listManagedTokenAccounts
+      summary: List Token accounts managed in the active personal or organization context
+      responses:
+        "200":
+          description: Managed Token accounts
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/TokenAccount"
+        "403":
+          $ref: "#/components/responses/Error"
     post:
       operationId: createTokenAccount
       summary: Create a personal or organization Token account
@@ -52,6 +71,32 @@ paths:
         "403":
           $ref: "#/components/responses/Error"
   /token-accounts/{token_account_id}/credentials:
+    get:
+      operationId: listProviderCredentials
+      summary: List credential metadata without secret material
+      parameters:
+        - name: token_account_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Credential metadata newest first
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/ProviderCredential"
+        "403":
+          $ref: "#/components/responses/Error"
     post:
       operationId: rotateProviderCredential
       summary: Validate and atomically activate a new provider credential
@@ -236,6 +281,32 @@ paths:
                       $ref: "#/components/schemas/EligibleTokenAccount"
         "403":
           $ref: "#/components/responses/Error"
+  /usage-requests/{usage_request_id}:
+    get:
+      operationId: getUsageRequestStatus
+      summary: Read settlement state for a usage request in the same session and active context
+      parameters:
+        - name: usage_request_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Context-bound usage and settlement status
+          headers:
+            Cache-Control:
+              required: true
+              schema:
+                type: string
+                const: no-store
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UsageRequestStatus"
+        "404":
+          $ref: "#/components/responses/Error"
   /chat/completions:
     post:
       operationId: createChatCompletion
@@ -332,6 +403,27 @@ paths:
                 type: string
                 const: no-store
         "422":
+          $ref: "#/components/responses/Error"
+  /recharge/orders/recent:
+    get:
+      operationId: getRecentRechargeOrder
+      summary: Restore the newest recharge order in the active wallet context
+      responses:
+        "200":
+          description: The newest active-context order, or null when none exists
+          headers:
+            Cache-Control:
+              required: true
+              schema:
+                type: string
+                const: no-store
+          content:
+            application/json:
+              schema:
+                $ref: "billing.yaml#/components/schemas/RecentRechargeOrder"
+        "401":
+          $ref: "#/components/responses/Error"
+        "503":
           $ref: "#/components/responses/Error"
   /recharge/orders/{order_id}:
     get:
@@ -523,3 +615,39 @@ components:
         health_status:
           type: string
           enum: [HEALTHY, DEGRADED]
+    UsageRequestStatus:
+      type: object
+      additionalProperties: false
+      required: [usage_request_id, status, display_status, token_account_id, wallet_id, model, maximum_microcredits, started_at, updated_at]
+      properties:
+        usage_request_id:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [CREATED, RESERVED, UPSTREAM_ACTIVE, SETTLEMENT_PENDING, COMMITTED, RELEASED, REVIEW]
+        display_status:
+          type: string
+          enum: [IN_PROGRESS, SETTLED, SETTLEMENT_PENDING, RELEASED, MANUAL_REVIEW]
+        token_account_id:
+          type: string
+          format: uuid
+        wallet_id:
+          type: string
+          format: uuid
+        model:
+          type: string
+        maximum_microcredits:
+          type: integer
+          format: int64
+          minimum: 1
+        actual_microcredits:
+          type: [integer, "null"]
+          format: int64
+          minimum: 0
+        started_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time

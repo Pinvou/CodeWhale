@@ -36,6 +36,7 @@ const appRoot = resolve(fileURLToPath(import.meta.url), '../..');
 const sourceRoot = join(appRoot, 'src');
 const distRoot = join(appRoot, 'dist');
 const webDistRoot = resolve(appRoot, '../remote-control-relay/web/dist');
+const portalDistRoot = resolve(appRoot, '../account-platform/internal/portal/static');
 
 // APIs the startup polyfill (src/shared/legacy-polyfills.js) installs in every
 // HTML entry before any other script runs. Once the contract test pins that
@@ -298,6 +299,27 @@ function auditDistCss(assetsDir) {
   return violations;
 }
 
+export function auditPortal(portalDir = portalDistRoot) {
+  const problems = [];
+  const assetsDir = join(portalDir, 'assets');
+  if (!existsSync(join(portalDir, 'account.html')) || !existsSync(assetsDir)) {
+    return ['audit-compat: Account Portal assets not found — run `npm run build:account-portal` first'];
+  }
+  const names = readdirSync(assetsDir);
+  if (!names.some(name => name.endsWith('.js')) || !names.some(name => name.endsWith('.css'))) {
+    problems.push('audit-compat: Account Portal JS/CSS assets are incomplete');
+  }
+  for (const name of names) {
+    if (!name.endsWith('.js')) continue;
+    // The Portal does not install the desktop at/hasOwn polyfills, so enforce
+    // the same strict API checks used for the polyfill bootstrap itself.
+    problems.push(...auditSource(`portal:${name}`, readFileSync(join(assetsDir, name), 'utf8'), { isPolyfillScript: true }));
+  }
+  problems.push(...auditDistCss(assetsDir));
+  problems.push(...auditHtmlInlineScripts(join(portalDir, 'account.html'), 'portal:account.html'));
+  return problems;
+}
+
 export function runAudit({ distDir = distRoot, webDistDir = webDistRoot } = {}) {
   const violations = [];
 
@@ -412,8 +434,9 @@ export function auditDistPresenceProblems({
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  const violations = runAudit();
-  for (const problem of auditDistPresenceProblems()) {
+  const portalOnly = process.argv.includes('--account-portal');
+  const violations = portalOnly ? auditPortal() : runAudit();
+  for (const problem of portalOnly ? [] : auditDistPresenceProblems()) {
     console.error(problem);
     process.exitCode = 1;
   }

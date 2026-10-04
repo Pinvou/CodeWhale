@@ -1,0 +1,230 @@
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { createContextRequestGuard, eligibleForContext, rechargePollDelay } from './context-guard.js';
+import { accountErrorMessage, needsAccountLogin } from './errors.js';
+import './account-platform.css';
+
+const terminalOrderStates = new Set(['PAID', 'PAID_LATE', 'CLOSED', 'FAILED', 'PARTIALLY_REFUNDED', 'REFUNDED', 'MANUAL_REVIEW']);
+const idempotencyKey = prefix => {
+  const bytes = globalThis.crypto.getRandomValues(new Uint8Array(16));
+  return `${prefix}-${Array.from(bytes, value => value.toString(16).padStart(2, '0')).join('')}`;
+};
+
+function Field({ label, children }) {
+  return <label className="ap-field"><span>{label}</span>{children}</label>;
+}
+
+function Empty({ children }) { return <div className="ap-empty">{children}</div>; }
+
+export function AccountPlatformView({ client, copy, language, onLanguageChange, portal = false }) {
+  const [auth, setAuth] = useState('loading');
+  const [me, setMe] = useState(null);
+  const [organizations, setOrganizations] = useState([]);
+  const [units, setUnits] = useState([]);
+  const [members, setMembers] = useState([]);
+  const [products, setProducts] = useState([]);
+  const [balance, setBalance] = useState(null);
+  const [billingUnavailable, setBillingUnavailable] = useState(false);
+  const [tokens, setTokens] = useState([]);
+  const [section, setSection] = useState('overview');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
+  const [order, setOrder] = useState(null);
+  const [qrData, setQrData] = useState('');
+  const guardRef = useRef(createContextRequestGuard());
+  const activeOrganizationId = me?.active_context?.organization_id || '';
+  const activeOrganization = organizations.find(item => item.organization_id === activeOrganizationId);
+
+  const fail = useCallback(reason => {
+    if (needsAccountLogin(reason)) {
+      guardRef.current.cancel();
+      setMe(null); setOrganizations([]); setBalance(null); setTokens([]);
+      setUnits([]); setMembers([]); setProducts([]); setOrder(null);
+      setBillingUnavailable(false); setNotice(''); setError('');
+      setAuth('guest');
+      return;
+    }
+    setError(accountErrorMessage(reason, copy));
+  }, [copy]);
+
+  const loadContext = async (nextMe = me) => {
+    const request = guardRef.current.begin();
+    setError('');
+    const organizationId = nextMe?.active_context?.organization_id;
+    try {
+      const results = await Promise.allSettled([
+        client.organizations(request.signal), client.products(request.signal), client.balance(request.signal), client.managedTokens(request.signal),
+        client.recentRechargeOrder(request.signal),
+        organizationId ? client.units(organizationId, request.signal) : Promise.resolve({ items: [] }),
+        organizationId ? client.members(organizationId, request.signal) : Promise.resolve({ items: [] }),
+      ]);
+      if (!guardRef.current.isCurrent(request.generation)) return;
+      const unauthorized = results.find(result => result.status === 'rejected' && needsAccountLogin(result.reason));
+      if (unauthorized) { fail(unauthorized.reason); return; }
+      const value = index => results[index].status === 'fulfilled' ? results[index].value : null;
+      setOrganizations(value(0)?.items || []);
+      setProducts(value(1)?.items || []);
+      setBalance(value(2));
+      setTokens(value(3)?.items || []);
+      setOrder(value(4)?.order || null);
+      setUnits(value(5)?.items || []);
+      setMembers(value(6)?.items || []);
+      const billingFailed = [1, 2, 4].some(index => results[index].status === 'rejected');
+      setBillingUnavailable(billingFailed);
+      const failed = [0, 3, 5, 6].find(index => results[index].status === 'rejected');
+      if (failed !== undefined) fail(results[failed].reason);
+    } catch (reason) {
+      if (reason?.name !== 'AbortError' && guardRef.current.isCurrent(request.generation)) fail(reason);
+    }
+  };
+
+  useEffect(() => {
+    let active = true;
+    (async () => {
+      try {
+        const session = await client.session();
+        if (!active) return;
+        if (!session.authenticated) { setAuth('guest'); return; }
+        const account = await client.bootstrap();
+        if (!active) return;
+        setMe(account);
+        setAuth('ready');
+        await loadContext(account);
+      } catch (reason) {
+        if (active) {
+          if (needsAccountLogin(reason)) fail(reason);
+          else { setAuth('error'); fail(reason); }
+        }
+      }
+    })();
+    return () => { active = false; guardRef.current.cancel(); };
+  }, [client]);
+
+  useEffect(() => {
+    const paymentURL = order?.payment_url || order?.qr_content || '';
+    if (!paymentURL) { setQrData(''); return; }
+    let active = true;
+    import('qrcode').then(({ default: QRCode }) => QRCode.toDataURL(paymentURL, { width: 240, margin: 2, errorCorrectionLevel: 'M' })).then(value => active && setQrData(value)).catch(() => active && setQrData(''));
+    return () => { active = false; };
+  }, [order?.payment_url, order?.qr_content]);
+
+  useEffect(() => {
+    if (!order?.order_id || terminalOrderStates.has(order.status) || new Date(order.expires_at).getTime() <= Date.now()) return undefined;
+    let stopped = false;
+    let timer;
+    let attempt = 0;
+    const poll = async () => {
+      try {
+        const latest = await client.rechargeOrder(order.order_id);
+        if (stopped) return;
+        if (latest.status === 'PAID' || latest.status === 'PAID_LATE') {
+          const latestBalance = await client.balance();
+          if (stopped) return;
+          setOrder(latest);
+          setBalance(latestBalance);
+          setNotice(copy.paymentReceived);
+          return;
+        }
+        setOrder(latest);
+        if (!terminalOrderStates.has(latest.status) && new Date(latest.expires_at).getTime() > Date.now()) {
+          timer = setTimeout(poll, rechargePollDelay(attempt++));
+        }
+      } catch (reason) {
+        if (stopped) return;
+        if (needsAccountLogin(reason)) { fail(reason); return; }
+        timer = setTimeout(poll, rechargePollDelay(attempt++));
+      }
+    };
+    timer = setTimeout(poll, rechargePollDelay(attempt++));
+    return () => { stopped = true; clearTimeout(timer); };
+  }, [order?.order_id, order?.status, me?.active_context?.context_type, activeOrganizationId, fail]);
+
+  const run = async action => {
+    if (busy) return;
+    setBusy(true); setError(''); setNotice('');
+    try { await action(); } catch (reason) { fail(reason); }
+    finally { setBusy(false); }
+  };
+
+  const switchContext = value => run(async () => {
+    guardRef.current.cancel();
+    setBalance(null); setTokens([]); setUnits([]); setMembers([]); setOrder(null); setBillingUnavailable(false);
+    const organizationId = value || null;
+    const context = await client.switchContext(organizationId ? 'ORGANIZATION' : 'PERSONAL', organizationId);
+    const updated = { ...me, active_context: context };
+    setMe(updated);
+    await loadContext(updated);
+  });
+
+  if (auth === 'loading') return <div className="ap-centered"><div className="ap-spinner" />{copy.loading}</div>;
+  if (auth === 'guest') return <div className="ap-login"><div><p className="ap-eyebrow">PINVOU ACCOUNT PLATFORM</p><h1>{copy.title}</h1><p>{copy.loginIntro}</p><a className="ap-primary" href="/auth/login">{copy.login}</a></div></div>;
+  if (auth === 'error') return <div className="ap-centered" role="alert">{error || copy.requestFailed}<button onClick={() => window.location.reload()}>{copy.retry}</button></div>;
+
+  return <div className="ap-app">
+    <aside className="ap-sidebar">
+      <div><p className="ap-eyebrow">PINVOU</p><h1>{copy.title}</h1></div>
+      <nav>{['overview', 'organization', 'wallet', 'tokens'].map(key => <button key={key} className={section === key ? 'active' : ''} onClick={() => setSection(key)}>{copy.sections[key]}</button>)}</nav>
+      <div className="ap-sidebar-foot">
+        <select aria-label={copy.language} value={language} onChange={event => onLanguageChange(event.target.value)}><option value="zh">简体中文</option><option value="en">English</option><option value="ja">日本語</option></select>
+        {portal && <button disabled={busy} onClick={() => run(async () => { await client.logout(); window.location.reload(); })}>{copy.logout}</button>}
+      </div>
+    </aside>
+    <main className="ap-main">
+      <header className="ap-header"><div><span>{copy.activeContext}</span><select value={activeOrganizationId} onChange={event => switchContext(event.target.value)} disabled={busy}><option value="">{copy.personal}</option>{organizations.map(item => <option key={item.organization_id} value={item.organization_id}>{item.name}</option>)}</select></div><div className="ap-balance"><span>{copy.balance}</span><strong>{balance ? balance.available_microcredits.toLocaleString() : '—'}</strong></div></header>
+      {error && <div role="alert" className="ap-alert error">{error}</div>}{notice && <div className="ap-alert success">{notice}</div>}
+      {section === 'overview' && <Overview copy={copy} me={me} organizations={organizations} tokens={tokens} activeOrganization={activeOrganization} onCreate={name => run(async () => { await client.createOrganization(name); await loadContext(me); setNotice(copy.organizationCreated); })} busy={busy} />}
+      {section === 'organization' && <Organization copy={copy} organization={activeOrganization} units={units} members={members} busy={busy} onCreateUnit={(name, parentId) => run(async () => { await client.createUnit(activeOrganizationId, name, parentId); await loadContext(me); })} onInvite={(email, roles) => run(async () => { const invite = await client.invite(activeOrganizationId, email, roles); setNotice(`${copy.invitationCreated} ${invite.token}`); })} />}
+      {section === 'wallet' && <Wallet copy={copy} products={products} balance={balance} billingUnavailable={billingUnavailable} order={order} qrData={qrData} busy={busy} onRecharge={(productId, channel) => run(async () => setOrder(await client.createRecharge(productId, channel, idempotencyKey('recharge'))))} />}
+      {section === 'tokens' && <Tokens copy={copy} client={client} onError={fail} me={me} organization={activeOrganization} tokens={tokens} balance={balance} billingUnavailable={billingUnavailable} busy={busy} run={run} reload={() => loadContext(me)} />}
+    </main>
+  </div>;
+}
+
+function Overview({ copy, me, organizations, tokens, activeOrganization, onCreate, busy }) {
+  const [name, setName] = useState('');
+  return <section><p className="ap-eyebrow">{copy.sections.overview}</p><h2>{copy.welcome(me?.display_name || copy.user)}</h2><p className="ap-lead">{activeOrganization ? copy.organizationContext(activeOrganization.name) : copy.personalContext}</p><div className="ap-metrics"><article><span>{copy.organizations}</span><strong>{organizations.length}</strong></article><article><span>{copy.managedTokens}</span><strong>{tokens.length}</strong></article><article><span>{copy.accountStatus}</span><strong>{me?.status || '—'}</strong></article></div><form className="ap-inline" onSubmit={event => { event.preventDefault(); if (name.trim()) onCreate(name.trim()).then?.(() => setName('')); }}><input value={name} onChange={event => setName(event.target.value)} placeholder={copy.organizationName} maxLength={120} /><button className="ap-primary" disabled={busy || !name.trim()}>{copy.createOrganization}</button></form></section>;
+}
+
+function Organization({ copy, organization, units, members, busy, onCreateUnit, onInvite }) {
+  const [unitName, setUnitName] = useState(''); const [parentId, setParentId] = useState(''); const [email, setEmail] = useState('');
+  if (!organization) return <Empty>{copy.chooseOrganization}</Empty>;
+  return <section><p className="ap-eyebrow">{copy.sections.organization}</p><h2>{organization.name}</h2><div className="ap-grid"><article className="ap-card"><h3>{copy.organizationTree}</h3>{units.length ? <ul className="ap-list">{units.map(unit => <li key={unit.unit_id}><span>{unit.name}</span><small>{unit.parent_id ? copy.childUnit : copy.rootUnit}</small></li>)}</ul> : <Empty>{copy.noUnits}</Empty>}<form className="ap-stack" onSubmit={event => { event.preventDefault(); if (unitName.trim()) onCreateUnit(unitName.trim(), parentId || null).then?.(() => setUnitName('')); }}><Field label={copy.unitName}><input value={unitName} onChange={event => setUnitName(event.target.value)} /></Field><Field label={copy.parentUnit}><select value={parentId} onChange={event => setParentId(event.target.value)}><option value="">{copy.rootUnit}</option>{units.map(unit => <option key={unit.unit_id} value={unit.unit_id}>{unit.name}</option>)}</select></Field><button disabled={busy || !unitName.trim()}>{copy.createUnit}</button></form></article><article className="ap-card"><h3>{copy.members}</h3>{members.length ? <ul className="ap-list">{members.map(member => <li key={member.user_id}><span>{member.display_name || member.email || member.user_id}</span><small>{member.roles.join(' · ')}</small></li>)}</ul> : <Empty>{copy.noMembers}</Empty>}<form className="ap-stack" onSubmit={event => { event.preventDefault(); if (email.trim()) onInvite(email.trim(), ['MEMBER']).then?.(() => setEmail('')); }}><Field label={copy.memberEmail}><input type="email" value={email} onChange={event => setEmail(event.target.value)} /></Field><button disabled={busy || !email.trim()}>{copy.createInvitation}</button></form></article></div></section>;
+}
+
+function Wallet({ copy, products, balance, billingUnavailable, order, qrData, busy, onRecharge }) {
+  const [productId, setProductId] = useState(''); const [channel, setChannel] = useState('ALIPAY');
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => { if (!productId && products[0]) setProductId(products[0].product_id); }, [products, productId]);
+  useEffect(() => {
+    if (!order || terminalOrderStates.has(order.status)) return undefined;
+    setNow(Date.now());
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [order?.order_id, order?.status]);
+  const selected = products.find(item => item.product_id === productId);
+  const remainingSeconds = order ? Math.max(0, Math.ceil((new Date(order.expires_at).getTime() - now) / 1000)) : 0;
+  const displayStatus = order && remainingSeconds === 0 && !terminalOrderStates.has(order.status) ? 'EXPIRED' : order?.status;
+  const countdown = `${String(Math.floor(remainingSeconds / 60)).padStart(2, '0')}:${String(remainingSeconds % 60).padStart(2, '0')}`;
+  return <section><p className="ap-eyebrow">{copy.sections.wallet}</p><h2>{copy.walletTitle}</h2>{billingUnavailable && <div role="alert" className="ap-alert error">{copy.billingUnavailable}</div>}<div className="ap-balance-hero"><span>{copy.availableCredits}</span><strong>{balance ? balance.available_microcredits.toLocaleString() : '—'}</strong><small>{copy.reservedCredits}: {balance ? balance.reserved_microcredits.toLocaleString() : '—'}</small></div><div className="ap-card"><div className="ap-product-grid">{products.map(product => <button key={product.product_id} className={productId === product.product_id ? 'selected' : ''} onClick={() => setProductId(product.product_id)}><strong>¥{(product.amount_fen / 100).toFixed(2)}</strong><span>{product.display_points.toLocaleString()} {copy.points}</span></button>)}</div><div className="ap-inline"><select value={channel} onChange={event => setChannel(event.target.value)}>{['UNIONPAY', 'ALIPAY', 'WECHAT'].map(item => <option key={item} value={item}>{copy.channels[item]}</option>)}</select><button className="ap-primary" disabled={busy || billingUnavailable || !selected} onClick={() => onRecharge(productId, channel)}>{copy.createRecharge}</button></div>{order && <div className="ap-payment"><div>{qrData && <img src={qrData} alt={copy.paymentQR} />}</div><div><span className="ap-status">{copy.orderStatuses[displayStatus] || displayStatus}</span><h3>¥{(order.amount_fen / 100).toFixed(2)} · {copy.scanToPay}</h3><p>{remainingSeconds > 0 ? copy.countdown(countdown) : copy.orderExpires(new Date(order.expires_at).toLocaleTimeString())}</p>{remainingSeconds > 0 && (order.payment_url || order.qr_content) && <a href={order.payment_url || order.qr_content} target="_blank" rel="noreferrer">{copy.openPayment}</a>}</div></div>}</div></section>;
+}
+
+function Tokens({ copy, client, onError, me, organization, tokens, balance, billingUnavailable, busy, run, reload }) {
+  const [name, setName] = useState(''); const [selected, setSelected] = useState(''); const [baseURL, setBaseURL] = useState(''); const [secret, setSecret] = useState(''); const [models, setModels] = useState(''); const [credentials, setCredentials] = useState([]); const [model, setModel] = useState(''); const [eligible, setEligible] = useState(null); const [chosen, setChosen] = useState(''); const [usageID, setUsageID] = useState(''); const [usageStatus, setUsageStatus] = useState(null);
+  const active = tokens.find(item => item.token_account_id === selected);
+  useEffect(() => { if (!tokens.some(item => item.token_account_id === selected)) setSelected(tokens[0]?.token_account_id || ''); }, [tokens, selected]);
+  useEffect(() => { setEligible(null); setChosen(''); setModel(''); setUsageID(''); setUsageStatus(null); setSecret(''); setBaseURL(''); setModels(''); }, [organization?.organization_id, me?.active_context?.context_type]);
+  useEffect(() => {
+    setCredentials([]);
+    if (!selected || !tokens.some(item => item.token_account_id === selected)) return undefined;
+    let current = true;
+    const controller = new window.AbortController();
+    client.credentials(selected, controller.signal)
+      .then(value => { if (current) setCredentials(value.items || []); })
+      .catch(reason => { if (current) { setCredentials([]); onError(reason); } });
+    return () => { current = false; controller.abort(); };
+  }, [client, selected, tokens, onError]);
+  const owner = organization ? { owner_type: 'ORG', owner_id: organization.organization_id, owner_organization_id: organization.organization_id, owner_unit_id: null, share_scope: 'ORG_ALL' } : { owner_type: 'USER', owner_id: me.user_id, owner_organization_id: null, owner_unit_id: null, share_scope: 'OWNER_UNIT_ONLY' };
+  const usable = eligibleForContext(eligible?.items, organization?.organization_id);
+  const ready = chosen && usable.some(item => item.token_account_id === chosen) && !billingUnavailable && balance?.available_microcredits > 0;
+  return <section><p className="ap-eyebrow">{copy.sections.tokens}</p><h2>{copy.tokensTitle}</h2><article className="ap-card ap-consumption"><h3>{copy.consumptionReadiness}</h3><div className="ap-inline"><Field label={copy.modelToUse}><input value={model} disabled={busy} onChange={event => { setModel(event.target.value); setEligible(null); setChosen(''); }} placeholder="model-name" /></Field><button disabled={busy || !model.trim()} onClick={() => run(async () => { const result = await client.eligibleTokens(model.trim()); const items = eligibleForContext(result.items, organization?.organization_id); setEligible(result); if (items.length === 1) setChosen(items[0].token_account_id); })}>{copy.checkAvailability}</button></div><dl className="ap-facts"><div><dt>{copy.paymentWallet}</dt><dd>{balance?.wallet_id || '—'}</dd></div><div><dt>{copy.availableCredits}</dt><dd>{balance ? balance.available_microcredits.toLocaleString() : '—'}</dd></div></dl>{billingUnavailable && <div role="alert" className="ap-alert error">{copy.billingUnavailable}</div>}{balance?.available_microcredits === 0 && <div role="alert" className="ap-alert error">{copy.insufficientBalance}</div>}{eligible && usable.length === 0 && <div role="alert" className="ap-alert error">{copy.noEligibleToken}</div>}{usable.length > 1 && <div className="ap-alert">{copy.chooseExplicitToken}</div>}{usable.length > 0 && <div className="ap-token-list">{usable.map(item => <button className={chosen === item.token_account_id ? 'selected' : ''} key={item.token_account_id} onClick={() => setChosen(item.token_account_id)}><span>{item.name}</span><small>{item.owner_type} · {item.health_status} · {item.allowed_models.join(', ')}</small></button>)}</div>}{ready && <div className="ap-alert success">{copy.tokenReady}</div>}<h3 className="ap-subheading">{copy.usageStatusTitle}</h3><div className="ap-inline"><Field label={copy.usageRequestID}><input value={usageID} disabled={busy} onChange={event => { setUsageID(event.target.value); setUsageStatus(null); }} placeholder="00000000-0000-0000-0000-000000000000" /></Field><button disabled={busy || !usageID.trim()} onClick={() => run(async () => setUsageStatus(await client.usageRequest(usageID.trim())))}>{copy.checkUsageStatus}</button></div>{usageStatus && <div className={`ap-alert ${usageStatus.display_status === 'SETTLED' ? 'success' : ''}`}><strong>{copy.usageStatuses[usageStatus.display_status] || usageStatus.display_status}</strong><br />{usageStatus.model} · {usageStatus.actual_microcredits ?? '—'} / {usageStatus.maximum_microcredits}{usageStatus.display_status === 'SETTLEMENT_PENDING' && <><br />{copy.settlementPendingHelp}</>}</div>}</article><div className="ap-grid"><article className="ap-card"><h3>{copy.managedTokens}</h3>{tokens.length ? <div className="ap-token-list">{tokens.map(token => <button disabled={busy} className={selected === token.token_account_id ? 'selected' : ''} key={token.token_account_id} onClick={() => setSelected(token.token_account_id)}><span>{token.name}</span><small>{token.status} · {token.share_scope}</small></button>)}</div> : <Empty>{copy.noTokens}</Empty>}<form className="ap-stack" onSubmit={event => { event.preventDefault(); run(async () => { const created = await client.createTokenAccount({ ...owner, name: name.trim(), default_priority: 100 }); setName(''); await reload(); setSelected(created.token_account_id); }); }}><Field label={copy.tokenName}><input value={name} onChange={event => setName(event.target.value)} maxLength={120} /></Field><button disabled={busy || !name.trim()}>{copy.createToken}</button></form></article><article className="ap-card"><h3>{copy.credentials}</h3>{active && <><ul className="ap-list">{credentials.map(item => <li key={item.credential_id}><span>{item.provider}</span><small>{item.status} · v{item.version} · {item.fingerprint.slice(0, 12)}</small></li>)}</ul><form className="ap-stack" onSubmit={event => { event.preventDefault(); run(async () => { await client.rotateCredential(active.token_account_id, { provider: 'new-api', base_url: baseURL.trim(), secret, allowed_models: models.split(',').map(value => value.trim()).filter(Boolean) }); setSecret(''); setCredentials((await client.credentials(active.token_account_id)).items || []); }); }}><Field label={copy.providerURL}><input type="url" value={baseURL} onChange={event => setBaseURL(event.target.value)} /></Field><Field label={copy.providerSecret}><input type="password" autoComplete="new-password" value={secret} onChange={event => setSecret(event.target.value)} /></Field><Field label={copy.allowedModels}><input value={models} onChange={event => setModels(event.target.value)} placeholder="model-a, model-b" /></Field><button disabled={busy || !baseURL.trim() || secret.length < 8 || !models.trim()}>{copy.rotateCredential}</button></form></>}</article></div></section>;
+}

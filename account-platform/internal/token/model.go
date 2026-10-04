@@ -65,10 +65,13 @@ type UsageRequest struct {
 	Status              string
 	MaximumMicrocredits int64
 	ActualMicrocredits  *int64
+	ErrorClass          *string
 	StartedAt           time.Time
+	UpdatedAt           time.Time
 }
 
 type UsageStore interface {
+	GetUsage(context.Context, uuid.UUID) (UsageRequest, error)
 	BeginUsage(context.Context, UsageRequest, map[string]any) (UsageRequest, bool, error)
 	MarkReserved(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) error
 	MarkUpstream(context.Context, uuid.UUID) error

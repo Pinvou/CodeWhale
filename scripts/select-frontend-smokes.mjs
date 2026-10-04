@@ -5,6 +5,7 @@ import { pathToFileURL } from "node:url";
 const command = (kind, target) => ({ kind, target });
 
 export const FULL_FRONTEND_SMOKES = Object.freeze([
+  command("npm", "test:account-platform-ui"),
   command("npm", "test:bridge-smoke"),
   command("npm", "test:conversation-virtualization"),
   command("npm", "test:code-viewer-ui"),
@@ -30,6 +31,7 @@ export const FULL_FRONTEND_SMOKES = Object.freeze([
 
 const CORE_SMOKE = command("npm", "test:ui-smoke");
 const FEATURE_COMMANDS = new Map([
+  ["account-platform", [command("npm", "test:account-platform-ui")]],
   ["knowledge", [command("npm", "test:kb-smoke")]],
   ["pet", [command("node", "tests/pet_selector_ui_smoke.js")]],
   ["scheduled", [command("node", "tests/scheduled_tasks_smoke.js")]],

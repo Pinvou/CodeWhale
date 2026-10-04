@@ -62,6 +62,7 @@ func main() {
 	routes := map[string]int{}
 	for _, probe := range []struct{ method, path string }{
 		{http.MethodPost, "/internal/v1/recharge/orders"},
+		{http.MethodGet, "/internal/v1/recharge/orders/recent"},
 		{http.MethodGet, "/internal/v1/recharge/orders/" + id.String()},
 	} {
 		request := httptest.NewRequest(probe.method, probe.path, strings.NewReader(`{}`))
@@ -75,7 +76,7 @@ func main() {
 	for code, cause := range map[string]error{"TOKEN_ACCOUNT_NOT_FOUND": token.ErrNotFound, "TOKEN_FORBIDDEN": token.ErrForbidden, "TOKEN_ROUTE_AMBIGUOUS": token.ErrAmbiguousRoute, "TOKEN_ROUTE_UNAVAILABLE": token.ErrNoEligibleRoute} {
 		errors[code] = eligibleProbe(nil, contractContext{err: cause})
 	}
-	if err := json.NewEncoder(os.Stdout).Encode(map[string]any{"product": product, "paid": order, "created": created, "wallet": wallet, "routes": routes, "eligible": eligible, "token_errors": errors}); err != nil {
+	if err := json.NewEncoder(os.Stdout).Encode(map[string]any{"product": product, "paid": order, "created": created, "wallet": wallet, "routes": routes, "eligible": eligible, "token_errors": errors, "recent_created": map[string]any{"order": created}, "recent_empty": map[string]any{"order": nil}}); err != nil {
 		panic(err)
 	}
 }
