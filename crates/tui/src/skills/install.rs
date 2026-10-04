@@ -17,6 +17,13 @@
 //!   `NetworkDenied(host)`. The `NeedsApproval` variant is returned without
 //!   side effects so the caller (slash-command, runtime API, etc.) can route
 //!   through its own approval flow.
+//! * The safety primitives — [`is_safe_path`], [`entry_type_is_link`],
+//!   [`add_entry_size`], [`validate_skill_name_segment`], and the
+//!   [`InstalledFromMarker`] schema behind [`INSTALLED_FROM_MARKER`] — are the
+//!   embedder-reuse contract: importers that keep their own archives should
+//!   call these instead of maintaining comment-aligned copies of the checks
+//!   (the in-tree plugin installer already does; see
+//!   `crate::plugins::install`).
 //!
 //! # Hard rules
 //!
@@ -86,6 +93,10 @@ const SYNC_REGISTRY_CONCURRENCY: usize = 8;
 
 /// File written under each installed skill so [`update`] / [`uninstall`] can
 /// recover the original [`InstallSource`] without re-parsing user input.
+///
+/// Embedder-reuse contract: embedders that honor ownership-marked installs
+/// must reference this constant rather than restating the marker name, so a
+/// rename or format change here cannot silently desynchronize their copies.
 pub const INSTALLED_FROM_MARKER: &str = ".installed-from";
 
 /// File written under each trusted skill. Currently advisory (the install path
@@ -878,24 +889,34 @@ async fn sync_one_skill(
 // Internal helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// On-disk schema of the [`INSTALLED_FROM_MARKER`] JSON file.
+///
+/// v1 wrote `spec` + `checksum`; schema v2 (see [`write_installed_from_v2`])
+/// adds `schema_version`, `source_checksum`, `content_digest`, and
+/// `installed_name`. Unknown fields are ignored on read, so newer writers stay
+/// forward-compatible with older readers.
+///
+/// Embedder-reuse contract: embedders reading a marker file deserialize
+/// through this struct rather than redefining the schema.
 #[derive(Debug, Deserialize)]
-pub(crate) struct InstalledFromMarker {
-    pub(crate) spec: String,
+pub struct InstalledFromMarker {
+    /// Install spec the skill was installed from (e.g. `github:owner/repo`).
+    pub spec: String,
     /// v1 download checksum field.
     #[serde(default)]
-    checksum: String,
+    pub checksum: String,
     #[serde(default)]
-    source_checksum: Option<String>,
+    pub source_checksum: Option<String>,
     #[serde(default)]
-    #[allow(dead_code)]
-    schema_version: Option<u32>,
+    pub schema_version: Option<u32>,
     #[serde(default)]
-    #[allow(dead_code)]
-    content_digest: Option<String>,
+    pub content_digest: Option<String>,
 }
 
 impl InstalledFromMarker {
-    pub(crate) fn source_checksum(&self) -> &str {
+    /// Preferred checksum: the v2 `source_checksum` when present, else the v1
+    /// `checksum` field.
+    pub fn source_checksum(&self) -> &str {
         self.source_checksum
             .as_deref()
             .filter(|s| !s.is_empty())
@@ -1270,10 +1291,7 @@ fn scan_tarball(bytes: &[u8], max_size: u64) -> Result<TarballScan> {
         // self-describing so this is reliable for non-malicious inputs and
         // catches the gzip-bomb case.
         if let Ok(size) = header.size() {
-            total_size = total_size.saturating_add(size);
-            if total_size > max_size {
-                return Err(InstallError::OversizedTarball { limit: max_size }.into());
-            }
+            total_size = add_entry_size(total_size, size, max_size)?;
         }
 
         // Detect prefix from the first entry. GitHub archives wrap everything
@@ -1297,7 +1315,7 @@ fn scan_tarball(bytes: &[u8], max_size: u64) -> Result<TarballScan> {
             }
         }
 
-        if entry_type.is_symlink() || entry_type.is_hard_link() {
+        if entry_type_is_link(entry_type) {
             link_paths.push(path_str);
             continue;
         }
@@ -1464,7 +1482,7 @@ fn extract_into(scan: &TarballScan, bytes: &[u8], dest: &Path, max_size: u64) ->
         if !is_safe_path(stripped_path) {
             return Err(InstallError::PathTraversal(stripped).into());
         }
-        if entry_type.is_symlink() || entry_type.is_hard_link() {
+        if entry_type_is_link(entry_type) {
             return Err(InstallError::SymlinkRejected.into());
         }
 
@@ -1494,10 +1512,7 @@ fn extract_into(scan: &TarballScan, bytes: &[u8], dest: &Path, max_size: u64) ->
             entry
                 .read_to_end(&mut buf)
                 .with_context(|| format!("failed to read {}", path.display()))?;
-            total_size = total_size.saturating_add(buf.len() as u64);
-            if total_size > max_size {
-                return Err(InstallError::OversizedTarball { limit: max_size }.into());
-            }
+            total_size = add_entry_size(total_size, buf.len() as u64, max_size)?;
             let mut out = fs::OpenOptions::new()
                 .create_new(true)
                 .write(true)
@@ -1528,8 +1543,15 @@ fn is_within_selected_root(path: &str, prefix: &str, skill_root: &str) -> bool {
     path == root || path.starts_with(&format!("{root}/"))
 }
 
-/// Ensure a tar path has no `..` segments and is not absolute.
-pub(crate) fn is_safe_path(path: &Path) -> bool {
+/// Whether an archive entry path is safe to join under a destination
+/// directory: rejects absolute paths, Windows prefixes / root components, and
+/// any `..` segment (path traversal).
+///
+/// Embedder-reuse contract: this predicate is the single source of truth for
+/// "does this entry escape its destination". Importers of any archive format
+/// (tar, zip) call this on each entry path instead of keeping comment-aligned
+/// copies of the check.
+pub fn is_safe_path(path: &Path) -> bool {
     if path.is_absolute() {
         return false;
     }
@@ -1543,12 +1565,51 @@ pub(crate) fn is_safe_path(path: &Path) -> bool {
     true
 }
 
+/// Whether a tar entry carries link semantics (symbolic or hard link). Such
+/// entries inside the selected install subtree are rejected — a SKILL.md
+/// bundle has no use for them and they are a notorious escape foothold
+/// (see the module hard rules). Entries outside the subtree are ignored.
+///
+/// Embedder-reuse contract: the symlink-rejection judgment for tar-based
+/// importers; zip-based importers apply the same judgment through the entry's
+/// unix-mode file-type bits.
+pub fn entry_type_is_link(entry_type: tar::EntryType) -> bool {
+    entry_type.is_symlink() || entry_type.is_hard_link()
+}
+
+/// Accumulate one entry's size into the running uncompressed total, rejecting
+/// the archive once the total would exceed `max_size` (the gzip-bomb bound).
+///
+/// Saturates rather than overflowing, and `total == max_size` is still
+/// allowed — only strictly-greater totals reject as
+/// [`InstallError::OversizedTarball`].
+///
+/// Embedder-reuse contract: the size-bound half of the archive-entry safety
+/// checks. Callers pass the header-declared size while scanning and the bytes
+/// actually read while extracting, so a forged header cannot skip the real
+/// measurement.
+pub fn add_entry_size(total: u64, added: u64, max_size: u64) -> Result<u64> {
+    let total = total.saturating_add(added);
+    if total > max_size {
+        return Err(InstallError::OversizedTarball { limit: max_size }.into());
+    }
+    Ok(total)
+}
+
 fn skill_target_path(name: &str, skills_dir: &Path) -> Result<PathBuf> {
     let name = validate_skill_name_segment(name)?;
     Ok(skills_dir.join(name))
 }
 
-pub(crate) fn validate_skill_name_segment(name: &str) -> Result<&str> {
+/// Whether a skill name is a single path-safe segment, safe to join under a
+/// skills/plugins directory. Rejects empty and whitespace-containing names,
+/// `.` / `..`, and any separator (`/`, `\`) or multi-component path.
+///
+/// Embedder-reuse contract: every consumer that turns a user- or
+/// archive-supplied name into an on-disk directory (skill update/uninstall,
+/// plugin stage/place, SKILL.md frontmatter `name:`) funnels through this
+/// validator so the judgment cannot drift between copies.
+pub fn validate_skill_name_segment(name: &str) -> Result<&str> {
     if name.is_empty() || name.trim() != name || name.chars().any(char::is_whitespace) {
         bail!("skill name must be a single path-safe segment (got '{name}')");
     }
@@ -1767,6 +1828,33 @@ mod tests {
         assert!(!is_safe_path(Path::new("/etc/passwd")));
         assert!(is_safe_path(Path::new("foo/bar/baz")));
         assert!(is_safe_path(Path::new("SKILL.md")));
+    }
+
+    #[test]
+    fn entry_type_is_link_accepts_only_link_entries() {
+        assert!(entry_type_is_link(tar::EntryType::Symlink));
+        assert!(entry_type_is_link(tar::EntryType::Link));
+        assert!(!entry_type_is_link(tar::EntryType::Regular));
+        assert!(!entry_type_is_link(tar::EntryType::Directory));
+    }
+
+    #[test]
+    fn add_entry_size_rejects_entries_past_the_cap() {
+        assert_eq!(add_entry_size(0, 4, 5).unwrap(), 4);
+        // Exactly at the cap is still allowed (the check is `>`, not `>=`).
+        assert_eq!(add_entry_size(4, 1, 5).unwrap(), 5);
+        // One byte past the cap rejects with the oversized error.
+        let err = add_entry_size(5, 1, 5).unwrap_err();
+        assert!(matches!(
+            err.downcast_ref::<InstallError>(),
+            Some(InstallError::OversizedTarball { limit: 5 })
+        ));
+        // Saturating: a huge entry must trip the cap, not wrap past it.
+        let err = add_entry_size(u64::MAX, 1, 5).unwrap_err();
+        assert!(matches!(
+            err.downcast_ref::<InstallError>(),
+            Some(InstallError::OversizedTarball { limit: 5 })
+        ));
     }
 
     #[test]
