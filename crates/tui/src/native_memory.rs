@@ -5,6 +5,7 @@
 //! or network dependency: callers decide when a note is reviewed and written.
 
 use std::collections::{HashMap, HashSet};
+use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -177,6 +178,15 @@ impl NativeMemoryStore {
 
     /// Import the pre-v0.9.2 single memory file without removing or mutating
     /// it. An existing native source wins so repeated startup is idempotent.
+    ///
+    /// Content is screened like any other store entry: a legacy file written
+    /// under the advisory-only regime may hold captured secrets, and import
+    /// must not bulk-inject them into every future prompt. The file is
+    /// screened as a whole — not line by line — so a secret split across
+    /// lines (`the password is\nhunter2`) cannot slip between per-line
+    /// checks. One tripping note refuses the whole import: nothing
+    /// partially migrates, and the legacy file is left untouched so it can
+    /// be cleaned and imported again.
     pub fn import_legacy(&self, legacy_path: &Path) -> Result<bool> {
         self.with_write_lock(|| {
             if !legacy_path.is_file() || self.global_path().exists() {
@@ -187,6 +197,7 @@ impl NativeMemoryStore {
             if content.trim().is_empty() {
                 return Ok(false);
             }
+            refuse_sensitive_note(&content)?;
             let target = self.global_path();
             ensure_memory_file(&target)?;
             fs::write(&target, content)?;
@@ -196,7 +207,10 @@ impl NativeMemoryStore {
     }
 
     /// Append a reviewed note to the selected Markdown source and refresh its
-    /// index. The note is treated as data, never as an instruction.
+    /// index. The note is treated as data, never as an instruction, and is
+    /// refused outright when it looks like a secret or other sensitive
+    /// personal data — the memory files are plain text on disk and are
+    /// injected verbatim into future prompts.
     pub fn remember(
         &self,
         scope: MemoryScope,
@@ -204,6 +218,7 @@ impl NativeMemoryStore {
         note: &str,
     ) -> Result<MemoryHit> {
         let note = normalize_note(note)?;
+        refuse_sensitive_note(&note)?;
         let path = match scope {
             MemoryScope::Global => self.global_path(),
             MemoryScope::Workspace => self.workspace_path(
@@ -257,6 +272,13 @@ impl NativeMemoryStore {
         evidence: &str,
     ) -> Result<MemoryHit> {
         let to = normalize_note(to)?;
+        // The gate runs on the replacement only. `from` matches a note that
+        // is already in the store — possibly written before this gate
+        // existed — so refusing it would make an already-stored sensitive
+        // note impossible to revise away. `retire` is ungated for the same
+        // reason, and evidence is journal-only text that is never indexed
+        // or injected.
+        refuse_sensitive_note(&to)?;
         let evidence = normalize_evidence(evidence)?;
         let from_needle = normalize_note(from)?;
         let path = self.scope_path(scope, workspace_id)?;
@@ -891,6 +913,277 @@ fn normalize_note(note: &str) -> Result<String> {
         bail!("memory note exceeds {MAX_NOTE_BYTES} bytes");
     }
     Ok(note.trim_start_matches('-').trim().to_string())
+}
+
+/// Stable, model-actionable refusal for note content that looks like a
+/// secret or other sensitive personal data. The string is part of the
+/// contract: the `remember` tool surfaces it verbatim so the model can act
+/// on it (rephrase without the sensitive values, or store nothing).
+#[derive(Debug, Clone)]
+pub struct SensitiveNoteRefusal;
+
+const SENSITIVE_NOTE_REASON: &str = "memory note refused: it looks like it contains sensitive \
+     data such as a credential, token, password, phone or ID number. Memory files are plain \
+     text on disk and are injected verbatim into future prompts, so never store secrets \
+     there. Restate the durable fact without the sensitive values, or keep the secret in a \
+     dedicated credential store instead.";
+
+impl fmt::Display for SensitiveNoteRefusal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(SENSITIVE_NOTE_REASON)
+    }
+}
+
+impl std::error::Error for SensitiveNoteRefusal {}
+
+/// Fail-closed gate on the memory write path: a note that trips any
+/// sensitive-content heuristic is refused with [`SensitiveNoteRefusal`]
+/// instead of being written. Nothing is silently dropped.
+fn refuse_sensitive_note(note: &str) -> Result<()> {
+    if looks_sensitive(note) {
+        return Err(SensitiveNoteRefusal.into());
+    }
+    Ok(())
+}
+
+/// Sensitive-content heuristics for the memory write path, ported from the
+/// app-side embedder's production gate (`features/memory/util.rs::
+/// looks_sensitive` and its helpers), where they have filtered captured
+/// memory notes since before this store existed. This is a heuristic net,
+/// not a parser, and it errs closed: false positives cost a rephrased note,
+/// false negatives leak a secret into plain-text files that are injected
+/// into every future prompt. Matching runs on a whitespace-collapsed
+/// projection ([`collapse_whitespace`]): `normalize_note` joins lines but
+/// preserves whitespace inside a line, and a tab or NBSP must not split a
+/// needle or an assignment marker. One deviation from the source is
+/// disclosed here: the embedder screens a 500-character `clean_text`
+/// projection, while this gate screens the full note — strictly more, in
+/// the same err-closed direction.
+///
+/// Refused families:
+/// - a run of 11 or more ASCII digits, bridging the separators grouped
+///   numbers are conventionally written with (spaces, hyphen/dash variants,
+///   and dots) — CN mobile numbers are 11 digits and resident ID cards 18,
+///   while ordinary dates and version numbers stay under it (`2024-02-01`
+///   bridges to 8) (adapted from the embedder's total-digit count, which
+///   false-positives on date/version-heavy full-sentence notes)
+/// - credential needles, including the Chinese markers 身份证 / 手机号 /
+///   密码 / 口令 / 密钥 / 私钥 — kept deliberately: they are the real-world
+///   secret markers in the locales the source heuristics run in production;
+///   `api-key` (the HTTP header spelling), the `private_key` underscore
+///   spelling, and the compound key kinds `ssh key` / `deploy key` /
+///   `access key` are additions on top of the port
+/// - `token` (or another credential word) tied to an assignment marker
+///   (`=`, `:`, the full-width `：`, the CJK copulas 是/为, and —
+///   adaptations for English notes — the copulas " is " / " was " and the
+///   arrow `->`; without them "the password is hunter2" walks through)
+/// - AWS access-key IDs (`AKIA`/`ASIA` + 16 uppercase alphanumerics,
+///   matched case-insensitively so a lowercased spelling cannot walk
+///   through) — added on top of the port so a bare key is refused even with
+///   no assignment or needle around it
+/// - PEM private-key armor (`-----BEGIN ... PRIVATE KEY-----`) —
+///   `private key` is likewise an addition to the ported needle list
+/// - URLs with any scheme (`scheme://`, not just web) and email addresses —
+///   a durable preference rarely needs either and credentialed URLs are the
+///   classic `user:password@host` leak; the embedder matched only http(s),
+///   which missed `postgres://user:pw@db/app`
+/// - filesystem paths — unix roots `/home/ /root/ /tmp/ /users/ /var/
+///   /etc/ /opt/` and `~/` anywhere in the note, `\users\` / `\appdata\`,
+///   and any Windows drive root (`c:\`, `d:/keys`); the embedder refused
+///   only sentence-initial `~/` and the `c:` drive
+///
+/// Known slack, accepted because the net errs closed and the refusal
+/// message says how to restate: a bare token with no credential word or
+/// assignment around it (a GitHub PAT, a JWT, a PEM body without its armor
+/// line) passes, as do homoglyph, full-width digit, and invisible-format
+/// character spellings, and so does a generic "… key is …" shape with no
+/// compound kind (`the database key is …`). The net also over-refuses on
+/// purpose: sharing a documentation link, mentioning `/tmp/` caches, or
+/// naming a server trips the URL, path, and digit rules, as do
+/// space-separated number lists (ports, backoffs), IPv4 addresses with 11+
+/// digits (`192.168.100.100`), and a credential word anywhere near an
+/// unrelated colon (`rotate the github token every 90 days: set a
+/// reminder`); long order or epoch-millisecond numbers trip the digit rule.
+///
+/// The gate runs where content enters the store: append, the revise
+/// replacement, and `import_legacy` (screened as a whole, refusing
+/// wholesale). Retrieval (`search`, `get`) is read-only and never gated;
+/// `retire` and the revise source are never gated so a sensitive note that
+/// predates the gate can always be removed again — note that both still
+/// record the original text in the plaintext journal (`JOURNAL.md`), which
+/// is never indexed or injected but is not scrubbed. Writes through the
+/// approval-gated file tools are out of scope: with the user approving
+/// each write, they carry the same trust as hand-editing the file.
+const SENSITIVE_NEEDLES: [&str; 19] = [
+    "身份证",
+    "手机号",
+    "手机号码",
+    "电话号码",
+    "联系电话",
+    "密码",
+    "口令",
+    "密钥",
+    "私钥",
+    "api_key",
+    "apikey",
+    "api key",
+    "api-key",
+    "secret",
+    "private key",
+    "private_key",
+    "ssh key",
+    "deploy key",
+    "access key",
+];
+
+fn looks_sensitive(value: &str) -> bool {
+    // Matching runs on the whitespace-canonical projection: `normalize_note`
+    // joins lines but preserves whitespace inside a line, and a tab or NBSP
+    // in "the password<tab>is hunter2" must not split a needle or the
+    // " is " copula. Folding only removes whitespace variation, so nothing
+    // that matches on the raw note can match less on the projection.
+    let value = collapse_whitespace(value);
+    let lower = value.to_ascii_lowercase();
+    if has_digit_run(&value, 11) {
+        return true;
+    }
+    if SENSITIVE_NEEDLES
+        .iter()
+        .any(|needle| lower.contains(needle))
+    {
+        return true;
+    }
+    if looks_like_aws_access_key_id(&value) {
+        return true;
+    }
+    if lower.contains("token") && has_assignment_marker(&lower, &value) {
+        return true;
+    }
+    looks_like_url(&lower)
+        || looks_like_email(&value)
+        || looks_like_filesystem_path(&value)
+        || looks_like_credential_assignment(&value)
+}
+
+/// Collapse every Unicode whitespace run to a single ASCII space.
+fn collapse_whitespace(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Digits forming a run of `min_run`, bridging the separators grouped
+/// numbers are conventionally written with (spaces, hyphen/dash variants,
+/// dots). Any other character breaks the run, so punctuation between
+/// unrelated numbers does not accumulate: `2024-02-01` bridges to 8
+/// digits, and a comma-separated list stays flat.
+const DIGIT_RUN_SEPARATORS: [char; 6] = [' ', '-', '－', '–', '—', '.'];
+
+fn has_digit_run(value: &str, min_run: usize) -> bool {
+    let mut run = 0;
+    for ch in value.chars() {
+        if ch.is_ascii_digit() {
+            run += 1;
+            if run >= min_run {
+                return true;
+            }
+        } else if !DIGIT_RUN_SEPARATORS.contains(&ch) {
+            run = 0;
+        }
+    }
+    false
+}
+
+/// AWS access-key IDs are a fixed, unambiguous credential shape: four
+/// letters starting `AKIA` (long-lived) or `ASIA` (temporary), then 16
+/// uppercase letters or digits. Matched case-insensitively: a lowercased
+/// spelling (`akia…`) is the same credential, and no prose word is
+/// 20 alphanumeric characters long.
+fn looks_like_aws_access_key_id(value: &str) -> bool {
+    let upper = value.to_ascii_uppercase();
+    upper
+        .split(|ch: char| !ch.is_ascii_uppercase() && !ch.is_ascii_digit())
+        .any(|token| token.len() == 20 && (token.starts_with("AKIA") || token.starts_with("ASIA")))
+}
+
+/// Any scheme, not just web URLs: `postgres://user:pw@db/app` and
+/// `redis://:pass@host` are credentialed-URL shapes too, and a durable
+/// preference rarely needs a scheme'd link at all.
+fn looks_like_url(lower: &str) -> bool {
+    lower.contains("://")
+}
+
+fn looks_like_email(value: &str) -> bool {
+    value
+        .split(|c: char| {
+            c.is_whitespace()
+                || matches!(
+                    c,
+                    '，' | '。' | '；' | ';' | ',' | '<' | '>' | '"' | '\'' | '(' | ')' | '[' | ']'
+                )
+        })
+        .any(|token| {
+            let Some((left, right)) = token.split_once('@') else {
+                return false;
+            };
+            !left.is_empty() && right.contains('.') && right.len() >= 3
+        })
+}
+
+fn looks_like_filesystem_path(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    let unix_roots = [
+        "/home/", "/root/", "/tmp/", "/users/", "/var/", "/etc/", "/opt/",
+    ];
+    if unix_roots.iter().any(|root| lower.contains(root)) {
+        return true;
+    }
+    lower.contains("~/")
+        || lower.contains("\\users\\")
+        || lower.contains("\\appdata\\")
+        || has_windows_drive(&lower)
+}
+
+/// A Windows drive root with any ASCII drive letter (`c:\users`,
+/// `d:/keys`), not just `c:`. Byte-window matching is UTF-8 safe: the
+/// pattern is pure ASCII and ASCII bytes never occur inside a multi-byte
+/// char.
+fn has_windows_drive(lower: &str) -> bool {
+    lower
+        .as_bytes()
+        .windows(3)
+        .any(|w| w[0].is_ascii_alphabetic() && w[1] == b':' && (w[2] == b'\\' || w[2] == b'/'))
+}
+
+/// An assignment-shaped join between a credential word and a value: symbol
+/// assignment (`=`, `:`, the full-width `：`), the CJK copulas 是/为, or —
+/// for English notes — the copulas " is " / " was " and the arrow `->`.
+/// Shared by the token rule and the credential-assignment rule so the two
+/// cannot drift. The substring markers are safe to match because matching
+/// runs on the whitespace-collapsed projection (see
+/// [`collapse_whitespace`]).
+fn has_assignment_marker(lower: &str, value: &str) -> bool {
+    lower.contains('=')
+        || lower.contains(':')
+        || lower.contains('：')
+        || lower.contains("->")
+        || value.contains('是')
+        || value.contains('为')
+        || lower.contains(" is ")
+        || lower.contains(" was ")
+}
+
+fn looks_like_credential_assignment(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    let has_assignment = has_assignment_marker(&lower, value);
+    // Words that are bare needles above (`api_key`, `secret`, 密钥, …) are
+    // repeated here on purpose: this must stay the full credential-word
+    // view so the rule stays correct even if either list changes alone.
+    has_assignment
+        && [
+            "token", "api_key", "apikey", "api key", "secret", "password", "passwd", "pwd",
+            "passcode", "密钥", "私钥", "口令", "密码",
+        ]
+        .iter()
+        .any(|needle| lower.contains(needle))
 }
 
 fn validate_query(query: &str) -> Result<&str> {
