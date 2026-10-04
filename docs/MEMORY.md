@@ -156,13 +156,85 @@ repository with an `origin` remote (the scope id is a hash of it).
 Memory is for **durable** signal. Things that should NOT live there:
 
 - **Secrets** — no API keys, tokens, passwords. The files are plain
-  text on disk and entries are injected into the system prompt.
+  text on disk and entries are injected into the system prompt. This
+  one is enforced, not advisory — see below.
 - **Transient task state** — "I'm currently working on the parser"
   changes every session; it doesn't belong in cross-session memory.
 - **Conversation snippets** — quote-style notes belong in the notes
   tool (`note`), not memory.
 - **Long instructions** — anything over a few sentences should live
   in `AGENTS.md` (project-level) or in a skill.
+
+## Enforced sensitive-content refusal
+
+Since this gate landed, the write path does not rely on the model's
+judgement about secrets. `NativeMemoryStore::remember`, the `to` half
+of `revise`, and `import_legacy` (screened as a whole, so a secret
+split across lines cannot slip through; one tripping note refuses the
+whole import) run every note through heuristic screens
+(`crates/tui/src/native_memory.rs`, `looks_sensitive` and its helpers,
+ported from the app-side embedder where they filter captured memory in
+production). Matching runs on a whitespace-collapsed projection of the
+note, so tabs or full-width spaces cannot split a needle or a marker:
+
+- a run of 11+ digits, bridging the spaces, hyphens, dashes, and dots
+  grouped numbers are conventionally written with (CN mobile numbers
+  are 11, resident ID cards 18; dates and version numbers stay under
+  it — `2024-02-01` bridges to 8),
+- credential needles — `api_key`, `apikey`, `api key`, `api-key`,
+  `secret`, `private key`, `private_key`, the compound key kinds
+  `ssh key` / `deploy key` / `access key`, and the Chinese markers
+  身份证 / 手机号 / 手机号码 / 电话号码 / 联系电话 / 密码 / 口令 / 密钥 /
+  私钥, which are the real-world secret markers in the locales the
+  source heuristics run in,
+- `token` or another credential word (including `password`, `passwd`,
+  `pwd`, `passcode`) tied to an assignment (`=`, `:`, `：`, `->`, 是,
+  为, or the English copulas " is " / " was "),
+- AWS access-key IDs (`AKIA`/`ASIA` + 16 uppercase alphanumerics,
+  matched case-insensitively) and PEM private-key armor,
+- URLs with any scheme and email addresses: a durable preference rarely
+  needs one, and credentialed URLs are the classic `user:password@host`
+  leak — `postgres://user:pw@db/app` is refused like `https://...`,
+- filesystem paths — `/home/`, `/root/`, `/tmp/`, `/users/`, `/var/`,
+  `/etc/`, `/opt/` and `~/` anywhere in the note, plus `\users\`,
+  `\appdata\`, and any Windows drive root (`c:\`, `d:/keys`).
+
+A note that trips the screen is refused fail-closed — never written,
+never silently dropped — with a stable, model-actionable error:
+
+```text
+memory note refused: it looks like it contains sensitive data such as
+a credential, token, password, phone or ID number. Memory files are
+plain text on disk and are injected verbatim into future prompts, so
+never store secrets there. Restate the durable fact without the
+sensitive values, or keep the secret in a dedicated credential store
+instead.
+```
+
+The screen covers what enters the store. Retrieval (`memory_search`,
+`memory_get`) is read-only and untouched, and `retire` plus the revise
+source are never screened, so a sensitive note that predates the gate
+can always be revised away or retired — note that both still record
+the original note text in the plaintext journal (`JOURNAL.md`), which
+is never indexed or injected but is not scrubbed. Writes through the
+approval-gated file tools are out of scope: with the user approving
+each write, they carry the same trust as hand-editing the file.
+
+The heuristics are a net, not a parser: they err closed because a
+false positive costs one rephrased note while a false negative leaks
+a secret into plain-text files injected into every future prompt.
+Known slack, accepted in that direction: a bare token with no
+credential word or assignment around it (a GitHub PAT, a JWT, a PEM
+body without its armor line) passes, as do homoglyph, full-width
+digit, and invisible-character spellings, and so does a generic
+"… key is …" shape with no compound kind (`the database key is …`).
+The net also over-refuses on purpose: sharing a documentation link,
+mentioning `/tmp/` caches, or naming a server trips the URL, path,
+and digit rules, as do space-separated number lists (ports,
+backoffs), IPv4 addresses with 11+ digits (`192.168.100.100`), and a
+credential word anywhere near an unrelated colon (`rotate the github
+token every 90 days: set a reminder`); long order or
+epoch-millisecond numbers trip the digit rule.
 
 ## Privacy and scope
 

@@ -315,3 +315,243 @@ fn corrupt_or_old_cache_rebuilds_from_markdown() {
     .unwrap();
     assert_eq!(store.search("recoverable", 10).unwrap().len(), 1);
 }
+
+/// Secrets must never reach the plain-text memory files: the write path
+/// refuses sensitive-looking notes with the stable refusal reason instead
+/// of writing or silently dropping them.
+#[test]
+fn sensitive_notes_are_refused_at_the_write_path() {
+    let tmp = TempDir::new().unwrap();
+    let store = NativeMemoryStore::new(tmp.path());
+    for note in [
+        "aws key AKIAIOSFODNN7EXAMPLE belongs to the ci account",
+        "rotate it from -----BEGIN RSA PRIVATE KEY----- in the vault",
+        "her 身份证 is 110105194912310021",
+        "密码：hunter2",
+        "password：hunter2",
+        "the service expects api_key=sk-live-abc123",
+        "the X-API-Key header carries hunter2",
+        "token: ghp_0123456789abcdef",
+        "rotate the k8s secret monthly",
+        "call her at 13812345678",
+        "call her at 138-1234-5678",
+        "his number is 138 1234 5678 these days",
+        "order id 100000000001",
+        "the password\tis hunter2",
+        "postgres://user:hunter2@db:5432/app",
+        "docs at https://user:hunter2@example.test/internal",
+        "docs live at https://intranet.example.test/notes",
+        "my email is alice.smith@example.org",
+        "ssh keys sit in /root/.ssh/id_rsa",
+        "her dotfiles live in the ~/notes folder",
+        "backups land on D:/keys/archive",
+        "call her at 138.1234.5678",
+        "the card number is 4111.1111.1111.1111",
+        "lowercase akiaiosfodnn7example also leaks",
+        "the private_key field holds the signing material",
+        "the deploy key is hunter2horse",
+        "the ssh key is hunter2horse",
+        "her access key is hunter2horse",
+        "the old password was hunter2",
+        "password -> hunter2",
+    ] {
+        let result = store.remember(MemoryScope::Global, None, note);
+        let error = result.expect_err(&format!("must refuse: {note}"));
+        assert!(
+            error.to_string().contains("memory note refused"),
+            "unexpected refusal reason for {note}: {error}"
+        );
+    }
+    // The gate is scope-independent: workspace capture is screened too.
+    let error = store
+        .remember(
+            MemoryScope::Workspace,
+            Some("origin-hash"),
+            "token: ghp_0123456789abcdef",
+        )
+        .unwrap_err();
+    assert!(error.to_string().contains("memory note refused"), "{error}");
+    assert!(
+        fs::read_to_string(store.global_path())
+            .unwrap_or_default()
+            .trim()
+            .is_empty(),
+        "a refused note must leave no trace in the store"
+    );
+}
+
+/// The net errs closed but must stay livable: ordinary notes with dates,
+/// version numbers, and short or grouped numbers pass untouched.
+#[test]
+fn ordinary_notes_still_pass_the_sensitivity_gate() {
+    let tmp = TempDir::new().unwrap();
+    let store = NativeMemoryStore::new(tmp.path());
+    for note in [
+        "Use 4-space indentation in this repo",
+        "Deploys run on Tuesdays",
+        "Release 2024.01.15 was reviewed on 2024-02-01 at 14:30",
+        "Use Node 20.11.1 and pnpm 9.4.2 for builds",
+        "The user prefers pytest over unittest",
+        "415-555-1234 is the front desk line",
+        "retry backoff seconds: 30 60 120 300",
+        // Bare "key" is not a needle (keybindings, key-value stores): only
+        // the compound kinds are refused on sight.
+        "the key insight is that builds are cached",
+    ] {
+        store
+            .remember(MemoryScope::Global, None, note)
+            .unwrap_or_else(|error| panic!("must accept {note}: {error}"));
+    }
+}
+
+/// The import path is part of the store surface: a legacy file written
+/// under the advisory-only regime must not bulk-inject a captured secret,
+/// and a refused import leaves both files untouched.
+#[test]
+fn import_legacy_refuses_sensitive_content_wholesale() {
+    let tmp = TempDir::new().unwrap();
+    let legacy = tmp.path().join("memory.md");
+    fs::write(
+        &legacy,
+        "keep this legacy note\n- legacy api_key=sk-live-abc123\n",
+    )
+    .unwrap();
+    let store = NativeMemoryStore::new(tmp.path().join("native"));
+    let error = store.import_legacy(&legacy).unwrap_err();
+    assert!(error.to_string().contains("memory note refused"), "{error}");
+    assert!(
+        !store.global_path().exists(),
+        "a refused import must write nothing"
+    );
+    assert_eq!(
+        fs::read_to_string(&legacy).unwrap(),
+        "keep this legacy note\n- legacy api_key=sk-live-abc123\n",
+        "the legacy file is never mutated"
+    );
+}
+
+/// The import screen runs on the whole file, not per line: a secret split
+/// across lines must not walk through between the per-line checks.
+#[test]
+fn import_legacy_refuses_secrets_split_across_lines() {
+    let tmp = TempDir::new().unwrap();
+    let legacy = tmp.path().join("memory.md");
+    fs::write(&legacy, "keep this legacy note\nthe password is\nhunter2\n").unwrap();
+    let store = NativeMemoryStore::new(tmp.path().join("native"));
+    let error = store.import_legacy(&legacy).unwrap_err();
+    assert!(error.to_string().contains("memory note refused"), "{error}");
+    assert!(
+        !store.global_path().exists(),
+        "a refused import must write nothing"
+    );
+    assert_eq!(
+        fs::read_to_string(&legacy).unwrap(),
+        "keep this legacy note\nthe password is\nhunter2\n",
+        "the legacy file is never mutated"
+    );
+}
+
+/// The empty and oversize bounds predate the sensitivity gate and are
+/// unchanged by it.
+#[test]
+fn empty_and_oversize_bounds_are_unchanged() {
+    let tmp = TempDir::new().unwrap();
+    let store = NativeMemoryStore::new(tmp.path());
+    let empty = store
+        .remember(MemoryScope::Global, None, "   \r\n  ")
+        .unwrap_err();
+    assert!(
+        empty.to_string().contains("memory note is empty"),
+        "{empty}"
+    );
+    let oversize = store
+        .remember(MemoryScope::Global, None, &"x".repeat(64 * 1024 + 1))
+        .unwrap_err();
+    assert!(
+        oversize.to_string().contains("exceeds 65536 bytes"),
+        "{oversize}"
+    );
+    // Precedence: the bounds run before the sensitivity screen, so an
+    // oversize note reports the bound even when it also trips the gate.
+    let oversize_sensitive = store
+        .remember(
+            MemoryScope::Global,
+            None,
+            &format!("the secret is {}", "x".repeat(64 * 1024)),
+        )
+        .unwrap_err();
+    assert!(
+        oversize_sensitive
+            .to_string()
+            .contains("exceeds 65536 bytes"),
+        "{oversize_sensitive}"
+    );
+}
+
+/// The gate covers what enters the store, not what leaves it: a sensitive
+/// replacement is refused, while a sensitive note that predates the gate
+/// (written directly to the Markdown source here) can still be revised
+/// away.
+#[test]
+fn revise_refuses_sensitive_replacements_but_can_still_remove_stored_ones() {
+    let tmp = TempDir::new().unwrap();
+    let store = NativeMemoryStore::new(tmp.path());
+    store
+        .remember(MemoryScope::Global, None, "Deploys run on Tuesdays")
+        .unwrap();
+
+    let error = store
+        .revise(
+            MemoryScope::Global,
+            None,
+            "Deploys run on Tuesdays",
+            "deploy password is hunter2",
+            "schedule changed",
+        )
+        .unwrap_err();
+    assert!(error.to_string().contains("memory note refused"), "{error}");
+    assert_eq!(
+        store.search("Deploys", 10).unwrap()[0].text,
+        "Deploys run on Tuesdays",
+        "a refused replacement must leave the store untouched"
+    );
+
+    let path = store.global_path();
+    ensure_memory_file(&path).unwrap();
+    fs::write(&path, "- legacy api_key=sk-live-abc123\n").unwrap();
+    store
+        .revise(
+            MemoryScope::Global,
+            None,
+            "legacy api_key=sk-live-abc123",
+            "legacy credentials were rotated out of memory",
+            "gate cleanup",
+        )
+        .unwrap_or_else(|error| panic!("retiring stored sensitive notes must work: {error}"));
+    assert_eq!(
+        store.search("legacy", 10).unwrap()[0].text,
+        "legacy credentials were rotated out of memory"
+    );
+}
+
+/// Removal stays possible for content that predates the gate: `retire` is
+/// never sensitivity-gated, or the gate would preserve the very leak it
+/// exists to prevent.
+#[test]
+fn retire_is_never_gated_by_the_sensitivity_check() {
+    let tmp = TempDir::new().unwrap();
+    let store = NativeMemoryStore::new(tmp.path());
+    let path = store.global_path();
+    ensure_memory_file(&path).unwrap();
+    fs::write(&path, "- the old 密码 is 123456\n").unwrap();
+
+    store
+        .retire(
+            MemoryScope::Global,
+            None,
+            "the old 密码 is 123456",
+            "secret removed from the store",
+        )
+        .unwrap_or_else(|error| panic!("retire must not be gated: {error}"));
+    assert!(store.search("密码", 10).unwrap().is_empty());
+}
