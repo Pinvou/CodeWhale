@@ -1401,6 +1401,9 @@ impl Engine {
         // failure to the user. `StreamRetryBudget` enforces that bound in
         // mechanism — `authorize()` is the only way to spend a resume.
         let mut stream_retry_budget = StreamRetryBudget::default();
+        // A completed response consumes a logical call. Transport resumes
+        // retain its ID only while the actual outbound facts remain equal.
+        let mut model_operation: Option<(String, uuid::Uuid)> = None;
 
         loop {
             if self.cancel_token.is_cancelled() {
@@ -2049,6 +2052,17 @@ impl Engine {
             // first call) so we can resend it on a transparent retry below
             // when the wire dies before any content was streamed (#103).
             let stream_request = request;
+            let operation_identity = match client.stream_operation_identity(&stream_request) {
+                Ok(identity) => identity,
+                Err(error) => {
+                    return (TurnOutcomeStatus::Failed, Some(error.to_string()));
+                }
+            };
+            let operation_id = match &model_operation {
+                Some((identity, id)) if identity == &operation_identity => *id,
+                _ => uuid::Uuid::new_v4(),
+            };
+            model_operation = Some((operation_identity, operation_id));
             let _ = self
                 .tx_event
                 .send(Event::ToolRequestSnapshot {
@@ -2078,7 +2092,7 @@ impl Engine {
                     let _ = self.tx_event.send(Event::status("Request cancelled")).await;
                     return (TurnOutcomeStatus::Interrupted, None);
                 }
-                result = client.create_message_stream(stream_request.clone()) => result,
+                result = client.create_message_stream_for_operation(stream_request.clone(), operation_id) => result,
             };
             let stream = match stream_result {
                 Ok(s) => {
@@ -2153,6 +2167,7 @@ impl Engine {
                     client.as_ref(),
                     stream,
                     &stream_request,
+                    operation_id,
                     request_dispatched_at,
                     stream_retry_budget.spent(),
                 )
@@ -2423,6 +2438,9 @@ impl Engine {
                 // state from a previous bad round.
                 stream_retry_budget.reset();
             }
+            // All later continuations (including a reasoning-only response
+            // or tool follow-up) are new calls, even with an identical body.
+            model_operation = None;
             if turn_end_child_coordination_responses_remaining > 0 {
                 turn_end_child_coordination_responses_remaining =
                     turn_end_child_coordination_responses_remaining.saturating_sub(1);
@@ -5104,6 +5122,7 @@ impl Engine {
         client: &dyn crate::core::model_client::ModelClient,
         stream: crate::llm_client::StreamEventBox,
         stream_request: &crate::models::MessageRequest,
+        operation_id: uuid::Uuid,
         mut request_dispatched_at: Instant,
         drop_resumes_spent: u32,
     ) -> StreamOutcome {
@@ -5305,7 +5324,7 @@ impl Engine {
                         let retry_stream_result = tokio::select! {
                             biased;
                             () = self.cancel_token.cancelled() => break,
-                            result = client.create_message_stream(stream_request.clone()) => result,
+                            result = client.create_message_stream_for_operation(stream_request.clone(), operation_id) => result,
                         };
                         match retry_stream_result {
                             Ok(fresh) => {

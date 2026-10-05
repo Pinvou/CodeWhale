@@ -1289,8 +1289,8 @@ impl DeepSeekClient {
                         self.http1_fallback_client(),
                         policy,
                     );
-                    Ok(client
-                        .post(url)
+                    Ok(self
+                        .with_operation_header(client.post(url))
                         .header(reqwest::header::CONTENT_TYPE, "application/json")
                         .json(body)
                         .send()

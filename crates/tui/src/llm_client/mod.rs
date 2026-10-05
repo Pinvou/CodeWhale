@@ -72,6 +72,35 @@ pub trait LlmClient: Send + Sync {
         request: MessageRequest,
     ) -> impl Future<Output = Result<StreamEventBox>> + Send;
 
+    /// Dispatch one logical call. Retry owners reuse the ID; a new call gets
+    /// a new ID even when its prompt is identical. Existing providers retain
+    /// their behavior unless they explicitly opt into transport idempotency.
+    fn create_message_for_operation(
+        &self,
+        request: MessageRequest,
+        _operation_id: Uuid,
+    ) -> impl Future<Output = Result<MessageResponse>> + Send {
+        self.create_message(request)
+    }
+
+    fn create_message_stream_for_operation(
+        &self,
+        request: MessageRequest,
+        _operation_id: Uuid,
+    ) -> impl Future<Output = Result<StreamEventBox>> + Send {
+        self.create_message_stream(request)
+    }
+
+    /// Compare outbound facts, never a session or prompt alone. Concrete
+    /// transports override this with their prepared wire body and endpoint.
+    fn stream_operation_identity(&self, request: &MessageRequest) -> Result<String> {
+        Ok(crate::hashing::sha256_hex(&serde_json::to_vec(&(
+            self.provider_name(),
+            self.billing_base_url(),
+            request,
+        ))?))
+    }
+
     /// Optional health check to verify API connectivity
     fn health_check(&self) -> impl Future<Output = Result<bool>> + Send {
         async { Ok(true) }

@@ -982,6 +982,9 @@ async fn auto_route_inventory_recommendation(
     allow_response_cache: bool,
 ) -> Result<Option<InventoryAutoRouteRecommendation>> {
     let mut router_config = config.clone();
+    if config.api_provider() != inventory.router_provider {
+        router_config.request_idempotency_header = None;
+    }
     // The classifier runs on the inventory's router route: the explicit
     // [auto.router] route when configured, else the DeepSeek flash default.
     router_config.provider = Some(inventory.router_provider.as_str().to_string());

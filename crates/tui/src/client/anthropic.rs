@@ -219,8 +219,7 @@ impl DeepSeekClient {
         // non-streaming completion; without it a provider that accepts and
         // stalls - or trickles the body - wedged the caller indefinitely.
         let response = self
-            .http_client
-            .post(&url)
+            .with_operation_header(self.http_client.post(&url))
             .header("Accept", "text/event-stream")
             .timeout(crate::client::NON_STREAMING_REQUEST_ENVELOPE)
             .json(body)
@@ -272,8 +271,7 @@ impl DeepSeekClient {
                     self.http1_fallback_client(),
                     policy,
                 );
-                client
-                    .post(&url)
+                self.with_operation_header(client.post(&url))
                     .header("Accept", "text/event-stream")
                     .json(body)
                     .send()

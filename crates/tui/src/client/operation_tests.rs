@@ -1,0 +1,234 @@
+//! Loopback production-transport receipts for logical-call idempotency.
+use super::*;
+use crate::models::StreamEvent;
+use serde_json::json;
+use wiremock::matchers::method;
+use wiremock::{Mock, MockServer, ResponseTemplate};
+
+fn request() -> MessageRequest {
+    MessageRequest {
+        model: "deepseek-v4-pro".into(),
+        messages: vec![Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: "same user prompt".into(),
+                cache_control: None,
+            }],
+        }],
+        max_tokens: 64,
+        system: None,
+        tools: None,
+        tool_choice: None,
+        metadata: None,
+        thinking: None,
+        reasoning_effort: Some("off".into()),
+        stream: Some(false),
+        temperature: None,
+        top_p: None,
+    }
+}
+
+fn config(base: &str, header: Option<&str>) -> Config {
+    Config {
+        provider: Some("deepseek".into()),
+        api_key: Some("owned-test-key".into()),
+        base_url: Some(base.into()),
+        default_text_model: Some("deepseek-v4-pro".into()),
+        request_idempotency_header: header.map(str::to_owned),
+        ..Config::default()
+    }
+}
+
+#[tokio::test]
+async fn forkguard_model_operation_http_retry_and_new_calls() {
+    let server = MockServer::start().await;
+    let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let seen = count.clone();
+    Mock::given(method("POST"))
+        .respond_with(move |_: &wiremock::Request| {
+            if seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                ResponseTemplate::new(503)
+            } else {
+                ResponseTemplate::new(200).set_body_json(json!({"model":"deepseek-v4-pro",
+                "choices":[{"message":{"role":"assistant","content":"done"}}]}))
+            }
+        })
+        .mount(&server)
+        .await;
+    let mut client = DeepSeekClient::new(&config(&server.uri(), Some("Idempotency-Key"))).unwrap();
+    client.retry.enabled = true;
+    client.retry.max_retries = 1;
+    client.retry.initial_delay = 0.001;
+    client.retry.max_delay = 0.001;
+    client.isolated_request_state = true;
+    let operation = uuid::Uuid::new_v4();
+    let mut deterministic_request = request();
+    deterministic_request.temperature = Some(0.0);
+    client
+        .create_message_for_operation(deterministic_request.clone(), operation)
+        .await
+        .unwrap();
+    // A second transport dispatch belonging to the same logical call retains
+    // its ID; a separate user action with identical prompt gets a fresh one.
+    client
+        .create_message_for_operation(deterministic_request.clone(), operation)
+        .await
+        .unwrap();
+    client
+        .create_message(deterministic_request.clone())
+        .await
+        .unwrap();
+    client.create_message(deterministic_request).await.unwrap();
+    let receipts = server.received_requests().await.unwrap();
+    assert_eq!(receipts.len(), 5);
+    let ids: Vec<_> = receipts
+        .iter()
+        .map(|r| r.headers.get("idempotency-key").unwrap().to_str().unwrap())
+        .collect();
+    assert_eq!(ids[0], operation.to_string());
+    assert_eq!(ids[0], ids[1]);
+    assert_eq!(ids[1], ids[2]);
+    assert_ne!(ids[2], ids[3]);
+    assert_ne!(ids[3], ids[4]);
+    assert!(receipts.windows(2).all(|pair| pair[0].body == pair[1].body));
+}
+
+#[tokio::test]
+async fn forkguard_model_operation_opt_in_and_wire_identity() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(
+                json!({"choices":[{"message":{"role":"assistant","content":"done"}}]}),
+            ),
+        )
+        .mount(&server)
+        .await;
+    let ordinary = DeepSeekClient::new(&config(&server.uri(), None)).unwrap();
+    ordinary.create_message(request()).await.unwrap();
+    assert!(
+        !server.received_requests().await.unwrap()[0]
+            .headers
+            .contains_key("idempotency-key")
+    );
+    let mut deterministic_request = request();
+    deterministic_request.temperature = Some(0.0);
+    ordinary
+        .create_message(deterministic_request.clone())
+        .await
+        .unwrap();
+    ordinary
+        .create_message(deterministic_request)
+        .await
+        .unwrap();
+    let ordinary_receipts = server.received_requests().await.unwrap();
+    assert_eq!(
+        ordinary_receipts.len(),
+        2,
+        "ordinary body cache is retained"
+    );
+    assert!(
+        ordinary_receipts
+            .iter()
+            .all(|receipt| !receipt.headers.contains_key("idempotency-key"))
+    );
+    let enabled = DeepSeekClient::new(&config(&server.uri(), Some("idempotency-key"))).unwrap();
+    let identity = enabled.stream_operation_identity(&request()).unwrap();
+    let mut changed = request();
+    changed.max_tokens += 1;
+    assert_ne!(
+        identity,
+        enabled.stream_operation_identity(&changed).unwrap()
+    );
+    let mut metadata = request();
+    metadata.metadata = Some(json!({"local_schedule":"changed"}));
+    // Chat shaping drops this caller-local metadata: the sent facts match.
+    assert_eq!(
+        identity,
+        enabled.stream_operation_identity(&metadata).unwrap()
+    );
+    let another =
+        DeepSeekClient::new(&config("http://127.0.0.1:18999", Some("idempotency-key"))).unwrap();
+    assert_ne!(
+        identity,
+        another.stream_operation_identity(&request()).unwrap()
+    );
+    let mut scoped = config(&server.uri(), Some("idempotency-key"));
+    scoped.http_headers = Some(std::collections::HashMap::from([
+        ("X-Pinvou-Context-Type".into(), "ORG".into()),
+        ("X-Pinvou-Context-Id".into(), "owned-org-one".into()),
+        ("X-Pinvou-Token-Account-Id".into(), "owned-token-one".into()),
+    ]));
+    let first = DeepSeekClient::new(&scoped)
+        .unwrap()
+        .stream_operation_identity(&request())
+        .unwrap();
+    scoped
+        .http_headers
+        .as_mut()
+        .unwrap()
+        .insert("X-Pinvou-Token-Account-Id".into(), "owned-token-two".into());
+    assert_ne!(
+        first,
+        DeepSeekClient::new(&scoped)
+            .unwrap()
+            .stream_operation_identity(&request())
+            .unwrap()
+    );
+    for invalid in ["Authorization", "Content-Type", "Cookie", "x\r\nbad"] {
+        assert!(DeepSeekClient::new(&config(&server.uri(), Some(invalid))).is_err());
+    }
+    let parsed: Config =
+        serde_json::from_value(json!({"request_idempotency_header":"idempotency-key"})).unwrap();
+    assert!(parsed.request_idempotency_header.is_none());
+    let ordinary_route =
+        crate::route_runtime::resolve_runtime_route(&scoped, ApiProvider::Openai, Some("gpt-5.5"))
+            .unwrap();
+    assert!(ordinary_route.config.request_idempotency_header.is_none());
+}
+
+#[tokio::test]
+async fn forkguard_model_operation_http1_stream_keeps_id() {
+    use futures_util::StreamExt;
+    let _lock = crate::test_support::lock_test_env();
+    let _http1 = crate::test_support::EnvVarGuard::set("CODEWHALE_FORCE_HTTP1", "1");
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).insert_header("content-type", "text/event-stream")
+            .set_body_string(concat!(
+                "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"done\"},\"finish_reason\":null}]}\n\n",
+                "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+                "data: [DONE]\n\n",
+            )))
+        .mount(&server).await;
+    let client = DeepSeekClient::new(&config(&server.uri(), Some("idempotency-key"))).unwrap();
+    let id = uuid::Uuid::new_v4();
+    for _ in 0..2 {
+        let mut stream = client
+            .create_message_stream_for_operation(request(), id)
+            .await
+            .unwrap();
+        let mut text = String::new();
+        while let Some(event) = stream.next().await {
+            if let StreamEvent::ContentBlockDelta {
+                delta: crate::models::Delta::TextDelta { text: part },
+                ..
+            } = event.unwrap()
+            {
+                text.push_str(&part);
+            }
+        }
+        assert_eq!(text, "done");
+    }
+    let receipts = server.received_requests().await.unwrap();
+    assert_eq!(receipts.len(), 2);
+    assert!(receipts.iter().all(|receipt| {
+        receipt
+            .headers
+            .get("idempotency-key")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            == id.to_string()
+    }));
+}

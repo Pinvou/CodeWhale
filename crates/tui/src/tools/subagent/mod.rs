@@ -11150,6 +11150,9 @@ async fn request_subagent_model_response_with_retries(
 > {
     let mut transient_failures = 0u32;
     let mut timeout_failures = 0u32;
+    // One child model round, including transport and agent timeout retries.
+    // A later tool follow-up invokes this function again and gets a new ID.
+    let operation_id = uuid::Uuid::new_v4();
 
     loop {
         // Billing time is the immutable wire-dispatch boundary, not worker
@@ -11167,7 +11170,9 @@ async fn request_subagent_model_response_with_retries(
         }
         match tokio::time::timeout(
             runtime.step_api_timeout,
-            runtime.client.create_message(request.clone()),
+            runtime
+                .client
+                .create_message_for_operation(request.clone(), operation_id),
         )
         .await
         {

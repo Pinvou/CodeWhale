@@ -1,5 +1,8 @@
 use super::*;
 
+#[path = "operation_tests.rs"]
+mod operation_tests;
+
 use super::context::COMPACTION_SUMMARY_MARKER;
 use super::streaming::{TOOL_CALL_END_MARKERS, TOOL_CALL_MARKER_PAIRS};
 use super::turn_loop::{

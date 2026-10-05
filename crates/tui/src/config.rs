@@ -2959,6 +2959,10 @@ pub struct Config {
     /// Optional extra HTTP headers sent to model API requests.
     #[serde(alias = "httpHeaders")]
     pub http_headers: Option<HashMap<String, String>>,
+    /// Host-only, route-scoped opt-in to logical model-call idempotency.
+    /// Never persisted or accepted from provider configuration files.
+    #[serde(skip)]
+    pub request_idempotency_header: Option<String>,
     /// Optional user-facing tab/window title shown as `[title] …` in front of
     /// the terminal window title (the `Codewhale` / `reasoning…` / `done.`
     /// states). This is the default for every session in this config scope;
@@ -5504,6 +5508,9 @@ impl Config {
     /// otherwise capture the table. Removing it from the scoped clone keeps
     /// the root endpoint authoritative without mutating the live registry.
     pub(crate) fn scope_to_provider_identity(&mut self, identity: &ProviderIdentity) {
+        if self.provider_identity_for(self.api_provider()) != identity.key {
+            self.request_idempotency_header = None;
+        }
         self.migrated_legacy_ollama_cloud_route = identity.migrated_legacy_ollama_cloud_route;
         self.provider = Some(identity.key.clone());
         if identity.provider == ApiProvider::Custom
@@ -10470,6 +10477,9 @@ fn merge_config(base: Config, override_cfg: Config) -> Config {
         api_key: override_cfg.api_key.or(base.api_key),
         base_url: override_cfg.base_url.or(base.base_url),
         http_headers: override_cfg.http_headers.or(base.http_headers),
+        request_idempotency_header: override_cfg
+            .request_idempotency_header
+            .or(base.request_idempotency_header),
         default_text_model: override_cfg.default_text_model.or(base.default_text_model),
         auth_mode: override_cfg.auth_mode.or(base.auth_mode),
         reasoning_effort: override_cfg.reasoning_effort.or(base.reasoning_effort),
