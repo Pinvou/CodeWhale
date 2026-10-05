@@ -201,6 +201,8 @@
       precheckMobileRegistration: unsupportedAccountPlatform,
       sendSms: unsupportedAccountPlatform,
       registerMobile: unsupportedAccountPlatform,
+      registrationStatus: unsupportedAccountPlatform,
+      resetPassword: unsupportedAccountPlatform,
       loginSms: unsupportedAccountPlatform,
       logout: unsupportedAccountPlatform,
       request: unsupportedAccountPlatform,

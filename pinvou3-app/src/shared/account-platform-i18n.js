@@ -726,3 +726,156 @@ export const accountPlatformCopy = {
     }
   }
 };
+
+Object.assign(accountPlatformCopy.zh, {"registrationConflict": "本次注册信息与已验证的信息不一致，请恢复原流程或重新开始。",
+"registrationRestartRequired": "原注册操作已结束，请重新开始注册。",
+"registrationRecoveryUnavailable": "暂时无法查询注册进度，请稍后重试；不要重复注册。",
+"registrationAccountCreating": "身份已验证，账号正在创建",
+"registrationRepairing": "注册正在修复，无需重复注册",
+"registrationDoNotRepeat": "系统会自动恢复并按建议时间重试，请勿重新发送短信或创建新注册。",
+"accountProvisioning": "账号已创建，服务初始化中",
+"accountProvisioningRepair": "账号已创建，初始化需要处理",
+"accountProvisioningCapabilities": "你仍可登录、退出和管理账号资料；平台模型与充值会在初始化完成后开放。",
+"authModes": {"password": "密码登录", "sms": "短信登录", "register": "手机注册", "forgot": "忘记密码"},
+"passwordInvalid": "密码须为 8-128 位可打印 ASCII 字符，包含字母和数字。",
+"passwordEdgeSpace": "密码首尾不能包含半角空格；中间可以使用半角空格。",
+"registrationPrecheckExpired": "注册密码预检已失效，请重新检查后获取验证码。",
+"resetPassword": "重置密码",
+"passwordResetComplete": "密码已重置，全部旧会话已撤销，请重新登录。",
+"profileSettings": "资料与安全",
+"changeUsername": "修改用户名",
+"changeMobile": "修改手机号",
+"currentPassword": "当前密码（用于重新认证）",
+"continueChange": "验证并继续",
+"confirmChange": "确认修改",
+"profileChangeComplete": "资料已更新，旧会话已撤销，请重新登录。",
+"recentAuthenticationRequired": "请重新输入当前密码后再修改资料。",
+"profileChangeConflict": "另一项资料修改或账号更新与本次请求冲突，请刷新后重试。",
+"mobileVerificationRequired": "请先验证新手机号。",
+"profileChangeNotFound": "该资料修改请求不存在或已失效。",
+"profileChangeRecovering": "资料修改正在安全恢复中，请勿重复提交。",
+"userCode": "用户编码",
+"basePoints": "基础积分（BASE）",
+"bonusPoints": "赠送积分（BONUS）",
+"componentTypes": {"BASE": "基础积分（BASE）", "BONUS": "赠送积分（BONUS）"},
+"entitlementSource": "权益来源",
+"expiredPoints": "已过期积分",
+"revokedPoints": "已撤销积分",
+"expiryReminder": "到期提醒",
+"expiryReminderAt": value=>`${value} 到期；到期后不可再用于新消费。`,
+"consumptionOrder": "消费顺序：优先使用最早到期的权益；同一天到期时先用 BONUS，再用 BASE；同类型按到账时间和编号顺序使用。",
+"refundCompositionNotice": "BONUS 不产生现金退款金额，但普通退款成功时该支付产生的未消费关联 BONUS 将随 BASE 一并撤销。"});
+
+Object.assign(accountPlatformCopy.en, {"registrationConflict": "This registration no longer matches the verified details. Resume the original flow or start again when allowed.",
+"registrationRestartRequired": "The previous registration operation has ended. Start registration again.",
+"registrationRecoveryUnavailable": "Registration progress is temporarily unavailable. Try again later and do not register again.",
+"registrationAccountCreating": "Identity verified; creating your account",
+"registrationRepairing": "Registration is being repaired; no need to register again",
+"registrationDoNotRepeat": "Recovery continues automatically using the suggested retry time. Do not resend the SMS or create another registration.",
+"accountProvisioning": "Account created; services are initializing",
+"accountProvisioningRepair": "Account created; initialization needs attention",
+"accountProvisioningCapabilities": "You can still sign in, sign out, and manage your profile. Platform models and recharge become available after initialization.",
+"authModes": {"password": "Password", "sms": "SMS", "register": "Register", "forgot": "Forgot"},
+"passwordInvalid": "Use 8-128 printable ASCII characters with at least one letter and one digit.",
+"passwordEdgeSpace": "A password cannot start or end with a space; spaces are allowed in the middle.",
+"registrationPrecheckExpired": "The password precheck expired. Check the registration details again before requesting a code.",
+"resetPassword": "Reset password",
+"passwordResetComplete": "Password reset. All previous sessions were revoked; sign in again.",
+"profileSettings": "Profile & security",
+"changeUsername": "Change username",
+"changeMobile": "Change mobile",
+"currentPassword": "Current password (reauthentication)",
+"continueChange": "Verify and continue",
+"confirmChange": "Confirm change",
+"profileChangeComplete": "Profile updated. Previous sessions were revoked; sign in again.",
+"recentAuthenticationRequired": "Enter your current password again before changing profile details.",
+"profileChangeConflict": "Another profile or account update conflicts with this request. Refresh and try again.",
+"mobileVerificationRequired": "Verify the new mobile number first.",
+"profileChangeNotFound": "This profile change no longer exists.",
+"profileChangeRecovering": "The profile change is recovering safely. Do not submit another request.",
+"userCode": "User code",
+"basePoints": "Base points (BASE)",
+"bonusPoints": "Bonus points (BONUS)",
+"componentTypes": {"BASE": "Base points (BASE)", "BONUS": "Bonus points (BONUS)"},
+"entitlementSource": "Benefit source",
+"expiredPoints": "Expired points",
+"revokedPoints": "Revoked points",
+"expiryReminder": "Expiry reminder",
+"expiryReminderAt": value=>`Expires ${value}; it cannot fund new usage after expiry.`,
+"consumptionOrder": "Consumption order: earliest expiry first; for the same expiry date, BONUS before BASE; then credit time and stable ID.",
+"refundCompositionNotice": "BONUS has no cash refund value. When a normal refund succeeds, all unconsumed BONUS associated with that payment is revoked together with BASE."});
+
+Object.assign(accountPlatformCopy.ja, {"registrationConflict": "この登録内容は確認済みの情報と一致しません。元の手順を再開するか、許可後にやり直してください。",
+"registrationRestartRequired": "以前の登録処理は終了しました。登録を最初からやり直してください。",
+"registrationRecoveryUnavailable": "登録状況を一時的に確認できません。重複登録せず、後でもう一度お試しください。",
+"registrationAccountCreating": "本人確認が完了し、アカウントを作成中です",
+"registrationRepairing": "登録を修復中です。再登録は不要です",
+"registrationDoNotRepeat": "推奨された時刻に自動で再試行します。SMS の再送信や新しい登録を行わないでください。",
+"accountProvisioning": "アカウントは作成済みで、サービスを初期化中です",
+"accountProvisioningRepair": "アカウントは作成済みですが、初期化に対応が必要です",
+"accountProvisioningCapabilities": "ログイン、ログアウト、プロフィール管理は利用できます。プラットフォームモデルとチャージは初期化完了後に利用できます。",
+"authModes": {"password": "パスワード", "sms": "SMS", "register": "新規登録", "forgot": "パスワード再設定"},
+"passwordInvalid": "8～128文字の印字可能 ASCII 文字で、英字と数字を1文字以上含めてください。",
+"passwordEdgeSpace": "パスワードの先頭と末尾に半角スペースは使えません。途中には使用できます。",
+"registrationPrecheckExpired": "パスワードの事前確認が期限切れです。認証コード取得前に再確認してください。",
+"resetPassword": "パスワードを再設定",
+"passwordResetComplete": "パスワードを再設定し、以前のセッションをすべて無効化しました。再度ログインしてください。",
+"profileSettings": "プロフィールとセキュリティ",
+"changeUsername": "ユーザー名を変更",
+"changeMobile": "携帯番号を変更",
+"currentPassword": "現在のパスワード（再認証）",
+"continueChange": "確認して続行",
+"confirmChange": "変更を確定",
+"profileChangeComplete": "プロフィールを更新し、以前のセッションを無効化しました。再度ログインしてください。",
+"recentAuthenticationRequired": "プロフィールを変更する前に、現在のパスワードをもう一度入力してください。",
+"profileChangeConflict": "別のプロフィールまたはアカウント更新と競合しています。更新して再試行してください。",
+"mobileVerificationRequired": "先に新しい携帯番号を確認してください。",
+"profileChangeNotFound": "このプロフィール変更は存在しないか、期限切れです。",
+"profileChangeRecovering": "プロフィール変更を安全に復旧しています。重複して送信しないでください。",
+"userCode": "ユーザーコード",
+"basePoints": "基本ポイント（BASE）",
+"bonusPoints": "ボーナスポイント（BONUS）",
+"componentTypes": {"BASE": "基本ポイント（BASE）", "BONUS": "ボーナスポイント（BONUS）"},
+"entitlementSource": "特典の付与元",
+"expiredPoints": "期限切れポイント",
+"revokedPoints": "取消済みポイント",
+"expiryReminder": "期限のお知らせ",
+"expiryReminderAt": value=>`${value} に期限切れとなり、それ以降は新しい利用に使用できません。`,
+"consumptionOrder": "消費順序：期限が早い特典を優先し、同じ期限では BONUS、BASE の順、同種では付与日時と固定 ID の順に使用します。",
+"refundCompositionNotice": "BONUS は現金返金額を生みません。通常返金が成功すると、その支払いに紐づく未消費の BONUS は BASE とともに取り消されます。"});
+
+accountPlatformCopy.zh.myRoleBindings = {"title": "我的角色授权", "lead": "这里只展示你本人的平台与组织角色，以及授权来源和有效期。", "role": "角色", "scope": "范围", "validity": "有效期", "source": "来源", "status": "状态", "none": "暂无角色授权", "forever": "永久", "failed": "暂时无法读取角色授权。"};
+
+accountPlatformCopy.en.myRoleBindings = {"title": "My role grants", "lead": "Only your own platform and organization roles, grant sources, and validity are shown here.", "role": "Role", "scope": "Scope", "validity": "Validity", "source": "Source", "status": "Status", "none": "No role grants", "forever": "No expiry", "failed": "Role grants are temporarily unavailable."};
+
+accountPlatformCopy.ja.myRoleBindings = {"title": "自分のロール付与", "lead": "ここには本人のプラットフォーム／組織ロール、付与元、有効期間のみ表示されます。", "role": "ロール", "scope": "スコープ", "validity": "有効期間", "source": "付与元", "status": "状態", "none": "ロール付与はありません", "forever": "無期限", "failed": "ロール付与を一時的に取得できません。"};
+
+Object.assign(accountPlatformCopy.zh.sections, { myRoles:"我的角色", profile:"资料与安全" });
+accountPlatformCopy.zh.noExpiry="无期限";
+
+Object.assign(accountPlatformCopy.en.sections, { myRoles:"My roles", profile:"Profile and security" });
+accountPlatformCopy.en.noExpiry="No expiry";
+
+Object.assign(accountPlatformCopy.ja.sections, { myRoles:"自分のロール", profile:"プロフィールとセキュリティ" });
+accountPlatformCopy.ja.noExpiry="無期限";
+
+accountPlatformCopy.zh.registrationRecoveryMemoryOnly='查询凭据仅保留在本次应用进程中。请保持应用运行；重新启动后无法自动恢复此注册查询。';
+accountPlatformCopy.en.registrationRecoveryMemoryOnly='The query credential is available only in this app process. Keep the app running; this registration query cannot recover automatically after a restart.';
+accountPlatformCopy.ja.registrationRecoveryMemoryOnly='照会資格情報は現在のアプリプロセス内にのみ保持されています。アプリを終了しないでください。再起動後はこの登録照会を自動復旧できません。';
+
+for (const copy of Object.values(accountPlatformCopy)) {
+  Object.assign(copy.errors, {
+    RECENT_AUTHENTICATION_REQUIRED:copy.recentAuthenticationRequired,
+    PROFILE_CHANGE_CONFLICT:copy.profileChangeConflict,
+    PROFILE_CHANGE_NOT_FOUND:copy.profileChangeNotFound,
+    MOBILE_VERIFICATION_REQUIRED:copy.mobileVerificationRequired,
+    PASSWORD_REFERENCE_INVALID:copy.registrationPrecheckExpired,
+    PASSWORD_REFERENCE_CONFLICT:copy.registrationConflict,
+    PASSWORD_EDGE_SPACE_NOT_ALLOWED:copy.passwordEdgeSpace,
+    REGISTRATION_IDEMPOTENCY_CONFLICT:copy.registrationConflict,
+  });
+}
+
+accountPlatformCopy.zh.profileChangeStates={PENDING:"等待确认",VERIFIED:"验证完成",IDENTITY_UPDATED:"身份资料已更新",ACCOUNT_COMMITTED:"账号资料已更新",COMPLETED:"修改完成",RETRY:"正在恢复",REPAIR_REQUIRED:"需要恢复"};
+accountPlatformCopy.en.profileChangeStates={PENDING:"Awaiting confirmation",VERIFIED:"Verified",IDENTITY_UPDATED:"Identity updated",ACCOUNT_COMMITTED:"Account updated",COMPLETED:"Completed",RETRY:"Recovering",REPAIR_REQUIRED:"Recovery required"};
+accountPlatformCopy.ja.profileChangeStates={PENDING:"確認待ち",VERIFIED:"検証済み",IDENTITY_UPDATED:"認証情報更新済み",ACCOUNT_COMMITTED:"アカウント更新済み",COMPLETED:"完了",RETRY:"復旧中",REPAIR_REQUIRED:"復旧が必要"};

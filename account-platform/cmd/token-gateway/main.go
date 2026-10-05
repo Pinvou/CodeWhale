@@ -11,6 +11,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/approvalpolicy"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/authorization"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/config"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/identity"
@@ -18,6 +20,9 @@ import (
 )
 
 func main() {
+	if err := approvalpolicy.ValidateAll(map[string]approvalpolicy.Mode{"TOKEN_USAGE_RECONCILE": approvalpolicy.AuditOnly}); err != nil {
+		log.Fatal(err)
+	}
 	ctx := context.Background()
 	cfg, err := config.Load("token-gateway")
 	if err != nil {
@@ -44,6 +49,10 @@ func main() {
 		log.Fatal(err)
 	}
 	contexts, err := token.NewHTTPContextResolver(os.Getenv("ACCOUNT_HTTP_URL"))
+	if err != nil {
+		log.Fatal(err)
+	}
+	authorizer, err := authorization.NewClient(os.Getenv("ACCOUNT_HTTP_URL"), os.Getenv("INTERNAL_SERVICE_TOKEN"))
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -108,7 +117,7 @@ func main() {
 	workerContext, stopWorker := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stopWorker()
 	go token.NewUsageReconciler(repository, billingClient, evidenceClient, reconciliationInterval).Run(workerContext)
-	service := token.NewService(repository, contexts, wallets, token.NewHTTPModelValidator(providerURLPolicy), providerURLPolicy, billingClient, token.NewHTTPUpstreamClient(), maximumInputTokens).WithDefaultRoutes(defaultRoutes).WithWaivers(os.Getenv("INTERNAL_SERVICE_TOKEN"))
+	service := token.NewService(repository, contexts, wallets, token.NewHTTPModelValidator(providerURLPolicy), providerURLPolicy, billingClient, token.NewHTTPUpstreamClient(), maximumInputTokens).WithDefaultRoutes(defaultRoutes).WithWaivers(os.Getenv("INTERNAL_SERVICE_TOKEN")).WithAuthorizer(authorizer)
 	if _, err := service.WithNewAPIStatus(reconciliationURL); err != nil {
 		log.Fatal("New API system status is not configured")
 	}

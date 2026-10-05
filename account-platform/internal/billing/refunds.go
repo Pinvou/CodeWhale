@@ -278,6 +278,13 @@ func (p *PaymentCoordinator) finishRefund(ctx context.Context, requested Refund,
 		_, err = tx.Exec(ctx, `UPDATE credit_lots SET remaining_microcredits=remaining_microcredits-$2 WHERE id=$1 AND remaining_microcredits >= $2`, lotID, refund.CreditMicrocredits)
 	}
 	if err == nil {
+		command, updateErr := tx.Exec(ctx, `UPDATE entitlement_components SET available_microcredits=available_microcredits-$2,revoked_microcredits=revoked_microcredits+$2,status=CASE WHEN available_microcredits=$2 AND reserved_microcredits=0 THEN 'REVOKED' ELSE status END,updated_at=$3 WHERE credit_lot_id=$1 AND available_microcredits>=$2`, lotID, refund.CreditMicrocredits, now)
+		err = updateErr
+		if err == nil && command.RowsAffected() != 1 {
+			err = ErrConflict
+		}
+	}
+	if err == nil {
 		_, err = tx.Exec(ctx, `UPDATE wallets SET posted_microcredits=posted_microcredits-$2,reserved_microcredits=reserved_microcredits-$2,version=version+1,updated_at=$3 WHERE id=$1`, order.WalletID, refund.CreditMicrocredits, now)
 	}
 	if err == nil {

@@ -7,6 +7,7 @@ import { createAdminMutationOwner } from './admin-operation-scope.js';
 import { AdminMutationContext, useAdminMutationOwner } from './admin-mutation-context.js';
 import { auditCSV } from './audit-csv.js';
 import './admin-platform.css';
+import { AdminRoleBindings, AdminRegistrationRepair, AdminApprovals } from './AdminOperations.jsx';
 
 const NAV_ICONS = { overview:'⌂', organizations:'▦', users:'◎', billing:'◇', tokens:'↗', system:'◉', audit:'≡', identity:'⚿' };
 const okStatuses = new Set(['ACTIVE', 'PAID', 'SETTLED', 'HEALTHY', 'APPROVED', 'SUCCESS']);
@@ -45,6 +46,7 @@ function Tabs({ items, active, onChange }) {
 export function AdminPlatformView({ client, copy, language, onLanguageChange }) {
   const [auth, setAuth] = useState('loading');
   const [section, setSection] = useState('overview');
+  const [approvalTarget, setApprovalTarget] = useState('');
   const [data, setData] = useState({});
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
@@ -59,48 +61,43 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
   authorizationRef.current = auth === 'ready' && !loggingOut;
   const handleAuthorizationError = useCallback(reason => {
     if (reason?.status !== 401 && reason?.status !== 403) return false;
+    if (reason.status === 403 && reason.code !== 'CSRF_REJECTED') { setError(copy.denied); return true; }
     authorizationRef.current = false;
     guardRef.current.cancel();
     setData({}); setUpdatedAt(null); setLoading(false);
     setAuth(reason.status === 401 ? 'guest' : reason.code === 'CSRF_REJECTED' ? 'error' : 'denied');
     return true;
-  }, []);
+  }, [copy.denied]);
 
-  const load = useCallback(async (target, signal) => {
+  const load = useCallback(async (target, signal, preservePermissionDenial = false) => {
     const request = guardRef.current.begin();
     const isCurrent = () => guardRef.current.isCurrent(request.generation) && !request.signal.aborted && !signal?.aborted;
-    setLoading(true); setError('');
+    setLoading(true);
+    setError(current => preservePermissionDenial && current === copy.denied ? current : '');
     try {
-      let next = {};
-      if (target === 'overview') {
-        const [account, billing, token] = await Promise.all([client.accountOverview(request.signal), client.billingOverview(request.signal), client.tokenOverview(request.signal)]);
-        next = { accountOverview:account, billingOverview:billing, tokenOverview:token };
-      } else if (target === 'organizations') {
-        const [users, organizations, roles] = await Promise.all([client.users('', request.signal), client.organizations('', request.signal), client.roles(signal)]);
-        next = { users:users.items || [], organizations:organizations.items || [], roles:roles.items || [] };
-      } else if (target === 'users') {
-        const [users, roles] = await Promise.all([client.users('', request.signal), client.roles(signal)]);
-        next = { users:users.items || [], roles:roles.items || [] };
-      } else if (target === 'billing') {
-        const [wallets, prices, orders, adjustments, holds, reconciliations, overview] = await Promise.all([client.wallets(request.signal), client.priceVersions(request.signal), client.paymentOrders(billingFilters.current, request.signal), client.adjustments(request.signal), client.holds(request.signal), client.reconciliationRuns(request.signal), client.billingOverview(request.signal)]);
-        next = { wallets:wallets.items || [], prices:prices.items || [], orders:orders.items || [], adjustments:adjustments.items || [], holds:holds.items || [], reconciliations:reconciliations.items || [], billingOverview:overview };
-      } else if (target === 'tokens') {
-        const [accounts, usage] = await Promise.all([client.tokenAccounts(request.signal), client.usageRequests(request.signal)]);
-        next = { tokenAccounts:accounts.items || [], usage:usage.items || [] };
-      } else if (target === 'system') {
-        next = { systemStatus:await client.systemStatus(request.signal) };
-      } else if (target === 'audit') {
-        const audits = await client.audits({}, request.signal); next = { audits:audits.items || [] };
-      } else {
-        return;
-      }
+      const resources = target === 'overview' ? {
+        accountOverview:client.accountOverview(request.signal), billingOverview:client.billingOverview(request.signal), tokenOverview:client.tokenOverview(request.signal),
+      } : target === 'organizations' ? {
+        users:client.users('', request.signal), organizations:client.organizations('', request.signal), roles:client.roles(request.signal),
+      } : target === 'users' ? {
+        users:client.users('', request.signal), roles:client.roles(request.signal),
+      } : target === 'billing' ? billingResources(client, request.signal, billingFilters.current) : target === 'tokens' ? {
+        tokenAccounts:client.tokenAccounts(request.signal), usage:client.usageRequests(request.signal),
+      } : target === 'system' ? { systemStatus:client.systemStatus(request.signal) } : target === 'audit' ? {
+        audits:client.audits({}, request.signal),
+      } : null;
+      if (!resources) return;
+      const next = await readAdminResources(resources);
       if (!isCurrent()) return;
-      setData(current => ({ ...current, ...next })); setUpdatedAt(new Date()); setAuth('ready');
+      setData(current => mergeAdminResources(current, next));
+      const resourceError = Object.values(next.resourceErrors).includes('denied') ? copy.denied : Object.keys(next.resourceErrors).length ? copy.failed : '';
+      setError(current => resourceError || (preservePermissionDenial && current === copy.denied ? current : ''));
+      setUpdatedAt(Object.keys(next).some(key => key !== 'resourceErrors' && next[key] !== undefined) ? new Date() : null); setAuth('ready');
     } catch (reason) {
       if (reason?.name === 'AbortError' || !isCurrent()) return;
       if (!handleAuthorizationError(reason)) { setAuth(current => current === 'loading' ? 'error' : current); setError(copy.failed); }
     } finally { if (isCurrent()) setLoading(false); }
-  }, [client, copy.failed, handleAuthorizationError, billingFilters]);
+  }, [client, copy.failed, copy.denied, handleAuthorizationError, billingFilters]);
 
   const currentViewRef = useRef(null);
   currentViewRef.current = { section, load, mutationOwner };
@@ -110,7 +107,7 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
     if (!fields.length) return;
     setData(current => ({ ...current, ...Object.fromEntries(fields.map(key => [key, undefined])) }));
     const target = currentViewRef.current.section;
-    if ((event.area === 'billing' && target === 'billing') || (event.area === 'token' && target === 'tokens') || (event.area === 'account' && ['organizations','users'].includes(target))) void currentViewRef.current.load(target);
+    if ((event.area === 'billing' && target === 'billing') || (event.area === 'token' && target === 'tokens') || (event.area === 'account' && ['organizations','users'].includes(target))) void currentViewRef.current.load(target, undefined, true);
   }), [mutationOwner]);
 
   useEffect(() => {
@@ -118,13 +115,15 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
     client.session(controller.signal).then(session => {
       if (controller.signal.aborted) return;
       if (!session.authenticated) { setAuth('guest'); return; }
+      setAuth('ready');
       load('overview', controller.signal);
     }).catch(reason => { if (!controller.signal.aborted && reason?.name !== 'AbortError') { setAuth('error'); setError(copy.failed); } });
     return () => { controller.abort(); guardRef.current.cancel(); };
   }, [client, copy.failed, load]);
 
-  const navigate = key => {
-    setSection(key);
+  const navigate = (key, target = '') => {
+    setApprovalTarget(key === 'approvals' ? target : '');
+    setSection(key); setError('');
     if (!sectionHasData(key, data)) void load(key);
     else { guardRef.current.cancel(); setLoading(false); }
   };
@@ -153,23 +152,53 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
       <div className="adm-sidebar-foot"><span>{copy.readOnly}</span><select aria-label={copy.language} value={language} onChange={event => onLanguageChange(event.target.value)}><option value="zh">简体中文</option><option value="en">English</option><option value="ja">日本語</option></select></div>
     </aside>
     <main className="adm-main">
-      <header className="adm-topbar"><div><span className="adm-eyebrow">{copy.product}</span><h1>{copy.nav[section]}</h1></div><div className="adm-actions">{updatedAt && section !== 'identity' && <small>{copy.updated} {updatedAt.toLocaleTimeString()}</small>}{section !== 'identity' && <button onClick={() => load(section)} disabled={busy}>{copy.refresh}</button>}<div className="adm-admin"><span>PA</span><div><strong>{copy.administrator}</strong><button onClick={logout} disabled={loggingOut}>{copy.logout}</button></div></div></div></header>
+      <header className="adm-topbar"><div><span className="adm-eyebrow">{copy.product}</span><h1>{copy.nav[section]}</h1></div><div className="adm-actions">{updatedAt && !['identity','roleBindings','registrationRepair','approvals'].includes(section) && <small>{copy.updated} {updatedAt.toLocaleTimeString()}</small>}{!['identity','roleBindings','registrationRepair','approvals'].includes(section) && <button onClick={() => load(section)} disabled={busy}>{copy.refresh}</button>}<div className="adm-admin"><span>PA</span><div><strong>{copy.administrator}</strong><button onClick={logout} disabled={loggingOut}>{copy.logout}</button></div></div></div></header>
       {error && <div role="alert" className="adm-alert">{error}</div>}
       {busy && <div className="adm-progress" />}
-      {section === 'overview' && <Overview copy={copy} language={language} data={data} />}
-      {section === 'organizations' && <AccountDirectory section="organizations" copy={copy} data={data} client={client} setData={setData} onAuthorizationError={handleAuthorizationError} />}
-      {section === 'users' && <AccountDirectory section="users" copy={copy} data={data} client={client} setData={setData} onAuthorizationError={handleAuthorizationError} />}
-      {section === 'billing' && <Billing copy={copy} language={language} data={data} client={client} filters={billingFilters} setData={setData} onAuthorizationError={handleAuthorizationError} />}
+      {section === 'overview' && !data.resourceErrors?.accountOverview && !data.resourceErrors?.billingOverview && !data.resourceErrors?.tokenOverview && !loading && <Overview copy={copy} language={language} data={data} />}
+      {section === 'organizations' && !data.resourceErrors?.organizations && !loading && <AccountDirectory section="organizations" copy={copy} data={data} client={client} setData={setData} onAuthorizationError={handleAuthorizationError} />}
+      {section === 'users' && !data.resourceErrors?.users && !loading && <AccountDirectory section="users" copy={copy} data={data} client={client} setData={setData} onAuthorizationError={handleAuthorizationError} />}
+      {section === 'billing' && <Billing copy={copy} language={language} data={data} client={client} filters={billingFilters} setData={setData} onAuthorizationError={handleAuthorizationError} onApproval={item => navigate('approvals', item.adjustment_id)} />}
       {section === 'tokens' && <Tokens copy={copy} language={language} data={data} client={client} setData={setData} onAuthorizationError={handleAuthorizationError} />}
-      {section === 'system' && <SystemStatus copy={copy} data={data} />}
-      {section === 'audit' && <Audit copy={copy} data={data} client={client} setData={setData} onAuthorizationError={handleAuthorizationError} />}
+      {section === 'system' && !data.resourceErrors?.systemStatus && !loading && <SystemStatus copy={copy} data={data} />}
+      {section === 'audit' && !data.resourceErrors?.audits && !loading && <Audit copy={copy} data={data} client={client} setData={setData} onAuthorizationError={handleAuthorizationError} />}
+      {section === 'roleBindings' && <AdminRoleBindings client={client} copy={copy} onAuthorizationError={handleAuthorizationError} />}
+      {section === 'registrationRepair' && <AdminRegistrationRepair client={client} copy={copy} onAuthorizationError={handleAuthorizationError} />}
+      {section === 'approvals' && <AdminApprovals client={client} copy={copy} onAuthorizationError={handleAuthorizationError} initialTarget={approvalTarget} />}
       {section === 'identity' && <IdentitySecurity copy={copy} />}
     </main>
   </div></AdminMutationContext.Provider>;
 }
 
+// An independently authorized resource must remain usable when another resource
+// in the same screen is denied. Session and CSRF failures still end the whole operation.
+async function readAdminResources(resources) {
+  const entries = Object.entries(resources);
+  const results = await Promise.allSettled(entries.map(([, value]) => value));
+  const next = { resourceErrors:{} };
+  for (let index = 0; index < entries.length; index += 1) {
+    const [key] = entries[index]; const result = results[index];
+    if (result.status === 'rejected') {
+      const reason = result.reason;
+      if (reason?.name === 'AbortError' || reason?.status === 401 || (reason?.status === 403 && reason.code === 'CSRF_REJECTED')) throw reason;
+      next[key] = undefined; next.resourceErrors[key] = reason?.status === 403 ? 'denied' : 'failed';
+    } else if (key.endsWith('Overview') || key === 'systemStatus') next[key] = result.value;
+    else if (Array.isArray(result.value?.items)) next[key] = result.value.items;
+    else { next[key] = undefined; next.resourceErrors[key] = 'failed'; }
+  }
+  return next;
+}
+function mergeAdminResources(current, next) {
+  const resourceErrors = { ...current.resourceErrors };
+  for (const key of Object.keys(next)) if (key !== 'resourceErrors') delete resourceErrors[key];
+  return { ...current, ...next, resourceErrors:{ ...resourceErrors, ...next.resourceErrors } };
+}
+function billingResources(client, signal, filters) {
+  return { wallets:client.wallets(signal), prices:client.priceVersions(signal), orders:client.paymentOrders(filters, signal), adjustments:client.adjustments(signal), holds:client.holds(signal), reconciliations:client.reconciliationRuns(signal), billingOverview:client.billingOverview(signal) };
+}
+
 function sectionHasData(section, data) {
-  return section === 'identity' || (section === 'overview' ? data.accountOverview : section === 'organizations' ? data.organizations : section === 'users' ? data.users : section === 'billing' ? data.wallets : section === 'tokens' ? data.tokenAccounts : section === 'system' ? data.systemStatus : data.audits);
+  return ['identity','roleBindings','registrationRepair','approvals'].includes(section) || (section === 'overview' ? data.accountOverview : section === 'organizations' ? data.organizations : section === 'users' ? data.users : section === 'billing' ? data.wallets : section === 'tokens' ? data.tokenAccounts : section === 'system' ? data.systemStatus : data.audits);
 }
 
 function StatePage({ copy, kind, onRetry }) {
@@ -216,7 +245,7 @@ function AccountDirectory({ section, copy, data, client, setData, onAuthorizatio
     const isCurrent = () => searchGuardRef.current.isCurrent(request.generation) && !request.signal.aborted;
     try {
       const result = isUserSection
-        ? await client.users(search, request.signal)
+        ? (/^USR/i.test(search.trim().replaceAll('-', '')) ? { items:[await client.userByCode(search.trim(), request.signal)] } : await client.users(search, request.signal))
         : await client.organizations(search, request.signal);
       if (!isCurrent()) return;
       setData(current => ({ ...current, [section]:result.items || [], accountOverview:undefined }));
@@ -256,7 +285,7 @@ function AccountDirectory({ section, copy, data, client, setData, onAuthorizatio
     return <div className="adm-row-actions">{buttons}</div>;
   };
   const columns = isUserSection ? [
-    { key:'username', label:copy.username, render:item => <button className="adm-name-link" onClick={() => setSelectedUser(item)}>{userLabel(item)}</button> }, { key:'display_name', label:copy.accounts.displayName }, { key:'email', label:copy.accounts.email }, { key:'status', label:copy.accounts.status, render:item => <Status value={item.status} /> }, { key:'organization_count', label:copy.accounts.memberships }, { key:'last_seen_at', label:copy.accounts.lastSeen, render:item => formatDate(item.last_seen_at) }, { key:'actions', label:copy.accounts.actions, render:item => actionButtons(item, true) },
+    { key:'username', label:copy.username, render:item => <button className="adm-name-link" onClick={() => setSelectedUser(item)}>{userLabel(item)}</button> }, { key:'user_code', label:copy.accounts.userCode, render:item => <code>{item.user_code || '—'}</code> }, { key:'display_name', label:copy.accounts.displayName }, { key:'email', label:copy.accounts.email }, { key:'status', label:copy.accounts.status, render:item => <Status value={item.status} /> }, { key:'organization_count', label:copy.accounts.memberships }, { key:'last_seen_at', label:copy.accounts.lastSeen, render:item => formatDate(item.last_seen_at) }, { key:'actions', label:copy.accounts.actions, render:item => actionButtons(item, true) },
   ] : [
     { key:'name', label:copy.accounts.organization, render:item => <button className="adm-name-link" onClick={() => setSelectedOrganization(item)}>{item.name}</button> }, { key:'organization_id', label:'ID', render:item => <code title={item.organization_id}>{shortID(item.organization_id)}</code> }, { key:'status', label:copy.accounts.status, render:item => <Status value={item.status} /> }, { key:'member_count', label:copy.accounts.members }, { key:'created_at', label:copy.accounts.created, render:item => formatDate(item.created_at) }, { key:'actions', label:copy.accounts.actions, render:item => actionButtons(item, false) },
   ];
@@ -492,7 +521,7 @@ function UnitBranch({ unit, copy, disabled, addDisabled, onAddChild, onRename, o
   return <div className="adm-unit-branch"><div className="adm-unit-node">{editing ? <form className="adm-unit-rename" onSubmit={submit}><input value={name} onChange={event => setName(event.target.value)} maxLength={120} aria-label={copy.accounts.unitName} autoFocus /><button disabled={disabled || !name.trim()}>{copy.accounts.save}</button><button type="button" onClick={() => { setName(unit.name); setEditing(false); }}>{copy.accounts.cancel}</button></form> : <div><strong>{unit.name}</strong><Status value={unit.status} /></div>}<div className="adm-unit-actions"><button type="button" disabled={disabled || addDisabled || unit.status !== 'ACTIVE'} onClick={() => onAddChild(unit.unit_id)}>{copy.accounts.addChild}</button><button type="button" disabled={disabled || unit.status !== 'ACTIVE'} onClick={() => setEditing(true)}>{copy.accounts.rename}</button><button type="button" className="danger" title={unit.children.length ? copy.accounts.deleteUnitBlocked : undefined} disabled={disabled || unit.status !== 'ACTIVE' || unit.children.length > 0} onClick={() => onDelete(unit)}>{copy.accounts.delete}</button></div></div>{unit.children.length > 0 && <div className="adm-unit-children">{unit.children.map(child => <UnitBranch key={child.unit_id} unit={child} copy={copy} disabled={disabled} addDisabled={addDisabled} onAddChild={onAddChild} onRename={onRename} onDelete={onDelete} />)}</div>}</div>;
 }
 
-function Billing({ copy, language, data, client, filters, setData, onAuthorizationError }) {
+function Billing({ copy, language, data, client, filters, setData, onAuthorizationError, onApproval }) {
   const [tab, setTab] = useState('wallets'); const items = data[tab] || [];
   const ops = useAdminOperation(onAuthorizationError, 'billing');
   const { busy } = ops;
@@ -511,8 +540,8 @@ function Billing({ copy, language, data, client, filters, setData, onAuthorizati
   const hasLimitedPaymentCapabilities = paymentCapabilities.provider && (!paymentCapabilities.refund_supported || !paymentCapabilities.close_supported || !paymentCapabilities.notification_supported || !paymentCapabilities.reconciliation_supported);
   const changeTab = key => { ops.invalidate(); setInvalidAmount(false); setLedger(null); setCases(null); setTab(key); };
   const reload = async ({ signal, isCurrent }) => {
-    const [wallets, prices, orders, adjustments, holds, reconciliations, overview] = await Promise.all([client.wallets(signal), client.priceVersions(signal), client.paymentOrders(filters.current, signal), client.adjustments(signal), client.holds(signal), client.reconciliationRuns(signal), client.billingOverview(signal)]);
-    if (isCurrent()) setData(current => ({ ...current, wallets:wallets.items || [], prices:prices.items || [], orders:orders.items || [], adjustments:adjustments.items || [], holds:holds.items || [], reconciliations:reconciliations.items || [], billingOverview:overview }));
+    const next = await readAdminResources(billingResources(client, signal, filters.current));
+    if (isCurrent()) setData(current => mergeAdminResources(current, next));
   };
   const perform = action => {
     setInvalidAmount(false);
@@ -537,7 +566,7 @@ function Billing({ copy, language, data, client, filters, setData, onAuthorizati
     void perform(async ({ isCurrent }) => { await client.createPriceVersion(input); if (isCurrent()) setPrice({ model:'', input:'', output:'', cached:'' }); });
   };
   const showLedger = wallet => ops.run(async ({ signal, isCurrent }) => { const result = await client.walletLedger(wallet.wallet_id, signal); if (isCurrent()) setLedger({ wallet, items:result.items || [] }); });
-  const decide = (item, decision) => { if (busy) return; const reason = promptReason(copy.billing.decisionReason); if (reason) void perform(() => client.decideAdjustment(item.adjustment_id, decision, reason)); };
+  const reject = item => { if (busy) return; const reason = promptReason(copy.billing.decisionReason); if (reason) void perform(() => client.decideAdjustment(item.adjustment_id, 'reject', reason)); };
   const refund = item => {
     if (busy || !refundSupported) return;
     const amount = window.prompt(copy.billing.refundAmount);
@@ -556,13 +585,14 @@ function Billing({ copy, language, data, client, filters, setData, onAuthorizati
     wallets:[{key:'owner_id',label:copy.billing.owner,render:item => <code title={item.owner_id}>{item.owner_type} · {shortID(item.owner_id)}</code>},{key:'status',label:copy.accounts.status,render:item => <Status value={item.status} />},{key:'available_microcredits',label:copy.billing.available,render:item => formatPoints(item.available_microcredits, language)},{key:'posted_microcredits',label:copy.billing.posted,render:item => formatPoints(item.posted_microcredits, language)},{key:'reserved_microcredits',label:copy.billing.reserved,render:item => formatPoints(item.reserved_microcredits, language)},{key:'actions',label:copy.accounts.actions,render:item => <button disabled={busy} onClick={() => showLedger(item)}>{copy.billing.viewLedger}</button>}],
     prices:[{key:'model',label:copy.tokens.model,render:item => <strong>{item.model}</strong>},{key:'input_per_million',label:copy.billing.inputPrice,render:item => formatPoints(item.input_per_million, language)},{key:'output_per_million',label:copy.billing.outputPrice,render:item => formatPoints(item.output_per_million, language)},{key:'cached_input_per_million',label:copy.billing.cachedPrice,render:item => formatPoints(item.cached_input_per_million, language)},{key:'effective_from',label:copy.billing.effectiveFrom,render:item => formatDate(item.effective_from)},{key:'effective_to',label:copy.billing.effectiveTo,render:item => item.effective_to ? formatDate(item.effective_to) : <Status value="ACTIVE" />}],
     orders:[{key:'merchant_order_no',label:copy.billing.order,render:item => <span><code>{item.merchant_order_no}</code><br/><small>{copy.billing.pinvouOrder}: {shortID(item.order_id)}</small></span>},{key:'provider_sku',label:copy.billing.product,render:item => <span>{item.product_id}<br/><code>{item.provider_sku || '—'}</code></span>},{key:'channel_transaction_id',label:copy.billing.paymentReference,render:item => <span><code>{item.channel_transaction_id || '—'}</code><br/><small>{item.mobile_masked || '—'}</small></span>},{key:'channel',label:copy.billing.channel},{key:'amount_fen',label:copy.billing.paymentAmount,render:item => formatMoney(item.amount_fen, language)},{key:'status',label:copy.accounts.status,render:item => <Status value={item.status} />},{key:'fulfillment_status',label:copy.billing.fulfillment,render:item => <Status value={item.fulfillment_status} />},{key:'updated_at',label:copy.billing.updated,render:item => formatDate(item.updated_at)},{key:'actions',label:copy.accounts.actions,render:item => <div className="adm-row-actions"><button disabled={busy} onClick={() => perform(() => client.syncPaymentOrder(item.order_id))}>{copy.billing.sync}</button><button title={!repairSupported ? copy.billing.providerUnsupported : undefined} disabled={busy || !repairSupported || item.status !== 'MANUAL_REVIEW' || item.fulfillment_status !== 'MANUAL_REVIEW'} onClick={() => repair(item)}>{copy.billing.repair}</button><button title={!refundSupported ? copy.billing.providerUnsupported : undefined} disabled={busy || !refundSupported || !['PAID','PAID_LATE','PARTIALLY_REFUNDED'].includes(item.status)} onClick={() => refund(item)}>{copy.billing.refund}</button></div>}],
-    adjustments:[{key:'wallet_id',label:copy.tokens.wallet,render:item => <code title={item.wallet_id}>{shortID(item.wallet_id)}</code>},{key:'amount_microcredits',label:copy.billing.amount,render:item => formatPoints(item.amount_microcredits, language)},{key:'reason',label:copy.billing.reason},{key:'requested_by',label:copy.billing.requestedBy,render:item => <code title={item.requested_by}>{shortID(item.requested_by)}</code>},{key:'status',label:copy.accounts.status,render:item => <Status value={item.status} />},{key:'actions',label:copy.accounts.actions,render:item => item.status === 'PENDING_APPROVAL' ? <div className="adm-row-actions"><button disabled={busy} onClick={() => decide(item, 'approve')}>{copy.billing.approve}</button><button className="danger" disabled={busy} onClick={() => decide(item, 'reject')}>{copy.billing.reject}</button></div> : '—'}],
+    adjustments:[{key:'wallet_id',label:copy.tokens.wallet,render:item => <code title={item.wallet_id}>{shortID(item.wallet_id)}</code>},{key:'amount_microcredits',label:copy.billing.amount,render:item => formatPoints(item.amount_microcredits, language)},{key:'reason',label:copy.billing.reason},{key:'requested_by',label:copy.billing.requestedBy,render:item => <code title={item.requested_by}>{shortID(item.requested_by)}</code>},{key:'status',label:copy.accounts.status,render:item => <Status value={item.status} />},{key:'actions',label:copy.accounts.actions,render:item => item.status === 'PENDING_APPROVAL' ? <div className="adm-row-actions"><button disabled={busy} onClick={() => onApproval(item)}>{copy.billing.reviewApproval}</button><button className="danger" disabled={busy} onClick={() => reject(item)}>{copy.billing.reject}</button></div> : '—'}],
     holds:[{key:'usage_request_id',label:copy.tokens.usageID,render:item => <code title={item.usage_request_id}>{shortID(item.usage_request_id)}</code>},{key:'status',label:copy.accounts.status,render:item => <Status value={item.status} />},{key:'max_microcredits',label:copy.billing.maximum,render:item => formatPoints(item.max_microcredits, language)},{key:'actual_microcredits',label:copy.billing.actual,render:item => formatPoints(item.actual_microcredits, language)},{key:'expires_at',label:copy.billing.expires,render:item => formatDate(item.expires_at)},{key:'actions',label:copy.accounts.actions,render:item => ['ACTIVE','REVIEW'].includes(item.status) ? <button className="danger" disabled={busy} onClick={() => release(item)}>{copy.billing.release}</button> : '—'}],
     reconciliations:[{key:'business_date',label:copy.billing.businessDate},{key:'channel',label:copy.billing.channel},{key:'status',label:copy.accounts.status,render:item => <Status value={item.status} />},{key:'provider_row_count',label:copy.billing.providerRows},{key:'case_count',label:copy.billing.cases},{key:'started_at',label:copy.billing.updated,render:item => formatDate(item.started_at)},{key:'actions',label:copy.accounts.actions,render:item => <button disabled={busy} onClick={() => showCases(item)}>{copy.billing.viewCases}</button>}],
   };
   if (ledger) return <BillingDetail copy={copy} title={`${copy.billing.ledger} · ${shortID(ledger.wallet.wallet_id)}`} items={ledger.items} columns={[{key:'entry_type',label:copy.billing.type},{key:'business_reference',label:copy.billing.reference,render:item => <code>{item.business_reference}</code>},{key:'description',label:copy.billing.description},{key:'delta_microcredits',label:copy.billing.amount,render:item => formatPoints(item.delta_microcredits, language)},{key:'created_at',label:copy.accounts.created,render:item => formatDate(item.created_at)}]} rowKey="posting_id" onBack={() => { ops.invalidate(); setLedger(null); }} />;
   if (cases) return <BillingDetail copy={copy} title={`${copy.billing.cases} · ${cases.run.business_date}`} items={cases.items} columns={[{key:'merchant_order_no',label:copy.billing.order},{key:'case_type',label:copy.billing.caseType},{key:'status',label:copy.accounts.status,render:item => <Status value={item.status} />},{key:'created_at',label:copy.accounts.created,render:item => formatDate(item.created_at)}]} rowKey="case_id" onBack={() => { ops.invalidate(); setCases(null); }} />;
-  return <section className="adm-panel"><SectionHeader title={copy.billing.title} count={items.length} copy={copy} /><Tabs active={tab} onChange={changeTab} items={['wallets','prices','orders','adjustments','holds','reconciliations'].map(key => ({key,label:copy.billing[key]}))} />{tab === 'orders' && <form className="adm-ops-form" onSubmit={searchOrders}><input value={orderFilter.q} onChange={event => setOrderFilter(current => ({ ...current, q:event.target.value }))} maxLength={160} placeholder={copy.billing.orderSearch} /><select value={orderFilter.status} onChange={event => setOrderFilter(current => ({ ...current, status:event.target.value }))}><option value="">{copy.billing.allStatuses}</option>{['CREATED','PENDING','PAID','PAID_LATE','FAILED','CLOSED','PARTIALLY_REFUNDED','REFUNDED','MANUAL_REVIEW'].map(status => <option key={status}>{status}</option>)}</select><button disabled={busy}>{copy.searchAction}</button></form>}{tab === 'prices' && <form className="adm-ops-form" onSubmit={createPrice}><input placeholder={copy.tokens.model} value={price.model} onChange={event => setPrice(current => ({ ...current, model:event.target.value }))} /><input type="number" min="0" step="0.0001" placeholder={copy.billing.inputPrice} value={price.input} onChange={event => setPrice(current => ({ ...current, input:event.target.value }))} /><input type="number" min="0" step="0.0001" placeholder={copy.billing.outputPrice} value={price.output} onChange={event => setPrice(current => ({ ...current, output:event.target.value }))} /><input type="number" min="0" step="0.0001" placeholder={copy.billing.cachedPrice} value={price.cached} onChange={event => setPrice(current => ({ ...current, cached:event.target.value }))} /><button disabled={busy}>{copy.billing.activatePrice}</button></form>}{hasLimitedPaymentCapabilities && <div className="adm-inline-message">{copy.billing.capabilityLimitations}</div>}{tab === 'reconciliations' && reconciliationSupported && <form className="adm-ops-form" onSubmit={event => { event.preventDefault(); void perform(() => client.runReconciliation(reconciliation.channel, reconciliation.businessDate)); }}><select value={reconciliation.channel} onChange={event => setReconciliation(current => ({ ...current, channel:event.target.value }))}><option>ALIPAY</option><option>WECHAT</option><option>UNIONPAY</option></select><input type="date" value={reconciliation.businessDate} onChange={event => setReconciliation(current => ({ ...current, businessDate:event.target.value }))} /><button disabled={busy}>{copy.billing.runReconciliation}</button></form>}{notice && <div className="adm-inline-message ok">{notice}</div>}{error && <div className="adm-inline-message error">{error}</div>}<Table columns={columns[tab]} items={items} copy={copy} rowKey={{ wallets:'wallet_id', prices:'price_version_id', orders:'order_id', adjustments:'adjustment_id', holds:'hold_id', reconciliations:'reconciliation_run_id' }[tab]} /></section>;
+  const resourceError = data.resourceErrors?.[tab];
+  return <section className="adm-panel"><SectionHeader title={copy.billing.title} count={items.length} copy={copy} /><Tabs active={tab} onChange={changeTab} items={['wallets','prices','orders','adjustments','holds','reconciliations'].map(key => ({key,label:copy.billing[key]}))} />{!resourceError && tab === 'orders' && <form className="adm-ops-form" onSubmit={searchOrders}><input value={orderFilter.q} onChange={event => setOrderFilter(current => ({ ...current, q:event.target.value }))} maxLength={160} placeholder={copy.billing.orderSearch} /><select value={orderFilter.status} onChange={event => setOrderFilter(current => ({ ...current, status:event.target.value }))}><option value="">{copy.billing.allStatuses}</option>{['CREATED','PENDING','PAID','PAID_LATE','FAILED','CLOSED','PARTIALLY_REFUNDED','REFUNDED','MANUAL_REVIEW'].map(status => <option key={status}>{status}</option>)}</select><button disabled={busy}>{copy.searchAction}</button></form>}{!resourceError && tab === 'prices' && <form className="adm-ops-form" onSubmit={createPrice}><input placeholder={copy.tokens.model} value={price.model} onChange={event => setPrice(current => ({ ...current, model:event.target.value }))} /><input type="number" min="0" step="0.0001" placeholder={copy.billing.inputPrice} value={price.input} onChange={event => setPrice(current => ({ ...current, input:event.target.value }))} /><input type="number" min="0" step="0.0001" placeholder={copy.billing.outputPrice} value={price.output} onChange={event => setPrice(current => ({ ...current, output:event.target.value }))} /><input type="number" min="0" step="0.0001" placeholder={copy.billing.cachedPrice} value={price.cached} onChange={event => setPrice(current => ({ ...current, cached:event.target.value }))} /><button disabled={busy}>{copy.billing.activatePrice}</button></form>}{hasLimitedPaymentCapabilities && <div className="adm-inline-message">{copy.billing.capabilityLimitations}</div>}{!resourceError && tab === 'reconciliations' && reconciliationSupported && <form className="adm-ops-form" onSubmit={event => { event.preventDefault(); void perform(() => client.runReconciliation(reconciliation.channel, reconciliation.businessDate)); }}><select value={reconciliation.channel} onChange={event => setReconciliation(current => ({ ...current, channel:event.target.value }))}><option>ALIPAY</option><option>WECHAT</option><option>UNIONPAY</option></select><input type="date" value={reconciliation.businessDate} onChange={event => setReconciliation(current => ({ ...current, businessDate:event.target.value }))} /><button disabled={busy}>{copy.billing.runReconciliation}</button></form>}{notice && <div className="adm-inline-message ok">{notice}</div>}{error && <div className="adm-inline-message error">{error}</div>}{resourceError ? <p role="alert">{resourceError === 'denied' ? copy.denied : copy.failed}</p> : <Table columns={columns[tab]} items={items} copy={copy} rowKey={{ wallets:'wallet_id', prices:'price_version_id', orders:'order_id', adjustments:'adjustment_id', holds:'hold_id', reconciliations:'reconciliation_run_id' }[tab]} />}</section>;
 }
 
 function BillingDetail({ copy, title, items, columns, rowKey, onBack }) {
@@ -636,7 +666,7 @@ function Tokens({ copy, language, data, client, setData, onAuthorizationError })
   ] : [
     {key:'id',label:copy.tokens.usageID,render:item => <button className="adm-name-link" title={item.usage_request_id} disabled={busy} onClick={() => openUsage(item)}>{shortID(item.usage_request_id)}</button>},{key:'model',label:copy.tokens.model},{key:'status',label:copy.accounts.status,render:item => <Status value={item.status} />},{key:'maximum_microcredits',label:copy.tokens.maximum,render:item => formatPoints(item.maximum_microcredits, language)},{key:'actual_microcredits',label:copy.tokens.actual,render:item => formatPoints(item.actual_microcredits, language)},{key:'newapi_request_id',label:copy.tokens.newAPIRequest,render:item => <code title={item.newapi_request_id}>{shortID(item.newapi_request_id)}</code>},{key:'error_class',label:copy.tokens.error},{key:'started_at',label:copy.tokens.started,render:item => formatDate(item.started_at)},
   ];
-  return <section className="adm-panel"><SectionHeader title={copy.tokens.title} count={items.length} copy={copy} /><Tabs active={tab} onChange={changeTab} items={[{key:'tokenAccounts',label:copy.tokens.accounts},{key:'usage',label:copy.tokens.usage}]} />{notice && <div className="adm-inline-message ok">{notice}</div>}{error && <div className="adm-inline-message error">{error}</div>}<Table columns={columns} items={items} copy={copy} rowKey={tab === 'tokenAccounts' ? 'token_account_id' : 'usage_request_id'} /></section>;
+  return <section className="adm-panel"><SectionHeader title={copy.tokens.title} count={items.length} copy={copy} /><Tabs active={tab} onChange={changeTab} items={[{key:'tokenAccounts',label:copy.tokens.accounts},{key:'usage',label:copy.tokens.usage}]} />{notice && <div className="adm-inline-message ok">{notice}</div>}{error && <div className="adm-inline-message error">{error}</div>}{data.resourceErrors?.[tab] ? <p role="alert">{data.resourceErrors[tab] === 'denied' ? copy.denied : copy.failed}</p> : <Table columns={columns} items={items} copy={copy} rowKey={tab === 'tokenAccounts' ? 'token_account_id' : 'usage_request_id'} />}</section>;
 }
 
 function TokenAccountDetail({ copy, account, route, setRoute, busy, notice, error, onBack, onStatus, onSaveRoute, onDeleteRoute, onValidate }) {

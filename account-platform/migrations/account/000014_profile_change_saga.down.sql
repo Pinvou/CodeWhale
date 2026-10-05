@@ -1,0 +1,11 @@
+DELETE FROM role_permissions WHERE permission_code='platform.profile-changes.repair';
+DELETE FROM permissions WHERE code='platform.profile-changes.repair';
+DROP TABLE password_reset_operations;
+DROP TABLE profile_change_requests;
+ALTER TABLE sms_send_attempts DROP CONSTRAINT sms_send_attempts_purpose_check;
+ALTER TABLE sms_send_attempts ADD CONSTRAINT sms_send_attempts_purpose_check CHECK (purpose IN ('REGISTER', 'LOGIN'));
+ALTER TABLE slider_captcha_challenges DROP CONSTRAINT slider_captcha_challenges_purpose_check;
+ALTER TABLE slider_captcha_challenges ADD CONSTRAINT slider_captcha_challenges_purpose_check CHECK (purpose IN ('REGISTER', 'LOGIN'));
+ALTER TABLE sms_challenges DROP CONSTRAINT sms_challenges_purpose_check;
+ALTER TABLE sms_challenges ADD CONSTRAINT sms_challenges_purpose_check CHECK (purpose IN ('REGISTER', 'LOGIN'));
+ALTER TABLE users DROP COLUMN profile_version;

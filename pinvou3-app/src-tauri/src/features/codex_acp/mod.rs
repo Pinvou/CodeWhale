@@ -6253,7 +6253,7 @@ mod tests {
 
     #[test]
     fn rebind_acp_production_closures_read_prompt_pending() {
-        let src = include_str!("mod.rs");
+        let src = include_str!("mod.rs").replace("\r\n", "\n");
         // Round-26 MAJOR-3: cut at the test module exactly like projects.rs's
         // `production_source` (round-18) — an unanchored find over the WHOLE
         // file lands on this probe's own string argument once the production

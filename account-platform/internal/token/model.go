@@ -9,11 +9,13 @@ import (
 )
 
 var (
-	ErrNotFound        = errors.New("token account not found")
-	ErrForbidden       = errors.New("token account is not authorized")
-	ErrAmbiguousRoute  = errors.New("token route is ambiguous")
-	ErrNoEligibleRoute = errors.New("no eligible token route")
-	ErrInvalidSecret   = errors.New("invalid token secret configuration")
+	ErrNotFound              = errors.New("token account not found")
+	ErrForbidden             = errors.New("token account is not authorized")
+	ErrAmbiguousRoute        = errors.New("token route is ambiguous")
+	ErrNoEligibleRoute       = errors.New("no eligible token route")
+	ErrInvalidSecret         = errors.New("invalid token secret configuration")
+	ErrAccountProvisioning   = errors.New("account is provisioning")
+	ErrAccountRepairRequired = errors.New("account provisioning requires repair")
 )
 
 type AuthorizationContext struct {
@@ -27,7 +29,6 @@ type AuthorizationContext struct {
 	Roles             []string
 	Mobile            *string
 	MobileVerified    bool
-	MallSyncStatus    string
 }
 
 type Candidate struct {

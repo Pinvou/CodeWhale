@@ -17,6 +17,8 @@ import (
 	"unicode/utf8"
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/api"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/approvalpolicy"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/authorization"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/identity"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/observability"
@@ -26,6 +28,10 @@ import (
 
 type ContextResolver interface {
 	Resolve(context.Context, string) (AuthorizationContext, error)
+}
+
+type CommerceCustomerResolver interface {
+	ResolveCommerceCustomer(context.Context, string) (string, error)
 }
 
 type WalletResolver interface {
@@ -39,6 +45,7 @@ type CredentialValidator interface {
 type Service struct {
 	repository             Repository
 	contexts               ContextResolver
+	commerceCustomers      CommerceCustomerResolver
 	wallets                WalletResolver
 	validator              CredentialValidator
 	providerURLs           ProviderURLPolicy
@@ -51,6 +58,7 @@ type Service struct {
 	newAPIStatusURL        *url.URL
 	newAPIStatusClient     *http.Client
 	waiverServiceToken     string
+	authorizer             *authorization.Client
 }
 
 func (s *Service) WithDefaultRoutes(provisioner DefaultRouteProvisioner) *Service {
@@ -58,11 +66,20 @@ func (s *Service) WithDefaultRoutes(provisioner DefaultRouteProvisioner) *Servic
 	return s
 }
 
+func (s *Service) WithAuthorizer(authorizer *authorization.Client) *Service {
+	s.authorizer = authorizer
+	return s
+}
+
 func NewService(repository Repository, contexts ContextResolver, wallets WalletResolver, validator CredentialValidator, providerURLs ProviderURLPolicy, billing BillingClient, upstream UpstreamClient, maximumInputTokens int64) *Service {
 	if maximumInputTokens <= 0 {
 		maximumInputTokens = 128_000
 	}
-	return &Service{repository: repository, contexts: contexts, wallets: wallets, validator: validator, providerURLs: providerURLs, billing: billing, upstream: upstream, maximumInputTokens: maximumInputTokens, defaultMaxOutputTokens: 4096, maximumOutputTokens: 128_000}
+	service := &Service{repository: repository, contexts: contexts, wallets: wallets, validator: validator, providerURLs: providerURLs, billing: billing, upstream: upstream, maximumInputTokens: maximumInputTokens, defaultMaxOutputTokens: 4096, maximumOutputTokens: 128_000}
+	if resolver, ok := contexts.(CommerceCustomerResolver); ok {
+		service.commerceCustomers = resolver
+	}
+	return service
 }
 
 func (s *Service) Handler(verify identity.VerifyFunc) http.Handler {
@@ -90,18 +107,19 @@ func (s *Service) Handler(verify identity.VerifyFunc) http.Handler {
 	router.GET("/v1/me/balance", httpserver.AdaptFunc(s.getBalance))
 	router.GET("/v1/me/entitlement-packages", httpserver.AdaptFunc(s.getEntitlementPackages))
 	admin := router.Group("/admin/v1")
-	admin.Use(identity.RequireRealmRoleGin("platform-admin"))
-	admin.GET("/system/newapi-status", httpserver.AdaptFunc(s.adminNewAPIStatus))
-	admin.GET("/overview", httpserver.AdaptFunc(s.adminOverview))
-	admin.GET("/token-accounts", httpserver.AdaptFunc(s.adminTokenAccounts))
-	admin.GET("/token-accounts/:token_account_id", httpserver.AdaptFunc(s.adminTokenAccount))
-	admin.PATCH("/token-accounts/:token_account_id/status", httpserver.AdaptFunc(s.adminSetTokenAccountStatus))
-	admin.PUT("/token-accounts/:token_account_id/routes", httpserver.AdaptFunc(s.adminUpsertTokenRoute))
-	admin.DELETE("/token-accounts/:token_account_id/routes", httpserver.AdaptFunc(s.adminDeleteTokenRoute))
-	admin.POST("/token-accounts/:token_account_id/credentials/:credential_id/validate", httpserver.AdaptFunc(s.adminValidateCredential))
-	admin.GET("/usage-requests", httpserver.AdaptFunc(s.adminUsageRequests))
-	admin.GET("/usage-requests/:usage_request_id", httpserver.AdaptFunc(s.adminUsageRequest))
-	admin.POST("/usage-requests/:usage_request_id/retry-reconciliation", httpserver.AdaptFunc(s.adminRetryReconciliation))
+	if s.authorizer != nil {
+		admin.GET("/system/newapi-status", s.authorizer.Require("platform.system.status.read"), httpserver.AdaptFunc(s.adminNewAPIStatus))
+		admin.GET("/overview", s.authorizer.Require("platform.system.status.read"), httpserver.AdaptFunc(s.adminOverview))
+		admin.GET("/token-accounts", s.authorizer.Require("platform.tokens.read"), httpserver.AdaptFunc(s.adminTokenAccounts))
+		admin.GET("/token-accounts/:token_account_id", s.authorizer.Require("platform.tokens.read"), httpserver.AdaptFunc(s.adminTokenAccount))
+		admin.PATCH("/token-accounts/:token_account_id/status", s.authorizer.Require("platform.tokens.manage"), approvalpolicy.Require("TOKEN_ACCOUNT_STATUS_CHANGE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminSetTokenAccountStatus))
+		admin.PUT("/token-accounts/:token_account_id/routes", s.authorizer.Require("platform.tokens.manage"), approvalpolicy.Require("TOKEN_ROUTE_UPSERT", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminUpsertTokenRoute))
+		admin.DELETE("/token-accounts/:token_account_id/routes", s.authorizer.Require("platform.tokens.manage"), approvalpolicy.Require("TOKEN_ROUTE_DELETE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminDeleteTokenRoute))
+		admin.POST("/token-accounts/:token_account_id/credentials/:credential_id/validate", s.authorizer.Require("platform.tokens.credentials.validate"), approvalpolicy.Require("TOKEN_CREDENTIAL_VALIDATE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminValidateCredential))
+		admin.GET("/usage-requests", s.authorizer.Require("platform.usage.read"), httpserver.AdaptFunc(s.adminUsageRequests))
+		admin.GET("/usage-requests/:usage_request_id", s.authorizer.Require("platform.usage.read"), httpserver.AdaptFunc(s.adminUsageRequest))
+		admin.POST("/usage-requests/:usage_request_id/retry-reconciliation", s.authorizer.Require("platform.usage.reconcile.retry"), approvalpolicy.Require("TOKEN_USAGE_RECONCILIATION_RETRY", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminRetryReconciliation))
+	}
 	mux := http.NewServeMux()
 	mux.Handle("POST /internal/v1/usage-waivers", serviceauth.Middleware(s.waiverServiceToken, http.HandlerFunc(s.adminWaiver)))
 	mux.Handle("/", router)
@@ -304,8 +322,15 @@ func (s *Service) createRechargeOrder(w http.ResponseWriter, r *http.Request) {
 	}
 	// Commerce adapters require a verified, synchronized mobile. The community
 	// simulator does not: send no commerce identity unless Account proves it.
+	commerceStatus := "NOT_CONFIGURED"
+	if s.commerceCustomers != nil {
+		status, err := s.commerceCustomers.ResolveCommerceCustomer(r.Context(), r.Header.Get("Authorization"))
+		if err == nil {
+			commerceStatus = status
+		}
+	}
 	mobile := ""
-	if resolved.MobileVerified && resolved.Mobile != nil && resolved.MallSyncStatus == "SYNCED" {
+	if resolved.MobileVerified && resolved.Mobile != nil {
 		mobile = *resolved.Mobile
 	}
 	var body struct {
@@ -329,8 +354,12 @@ func (s *Service) createRechargeOrder(w http.ResponseWriter, r *http.Request) {
 		api.WriteError(w, http.StatusServiceUnavailable, "BILLING_UNAVAILABLE", "the active wallet is unavailable", httpserver.RequestID(r.Context()))
 		return
 	}
-	payload, err := s.billing.CreateRechargeOrder(r.Context(), resolved.UserID, walletID, body.ProductID, strings.ToUpper(body.Channel), mobile, r.Header.Get("Idempotency-Key"))
+	payload, err := s.billing.CreateRechargeOrder(r.Context(), resolved.UserID, walletID, body.ProductID, strings.ToUpper(body.Channel), mobile, commerceStatus, r.Header.Get("Idempotency-Key"))
 	if err != nil {
+		if errors.Is(err, ErrCommerceCustomerNotReady) {
+			api.WriteError(w, http.StatusConflict, "COMMERCE_CUSTOMER_NOT_READY", "the payment provider requires a ready Commerce Customer mapping", httpserver.RequestID(r.Context()))
+			return
+		}
 		api.WriteError(w, http.StatusBadGateway, "RECHARGE_CREATE_FAILED", "the recharge order could not be created", httpserver.RequestID(r.Context()))
 		return
 	}
@@ -713,6 +742,10 @@ func (s *Service) writeError(w http.ResponseWriter, r *http.Request, err error) 
 		status, code, message = http.StatusConflict, "TOKEN_ROUTE_AMBIGUOUS", "multiple token routes have the same priority"
 	case errors.Is(err, ErrNoEligibleRoute):
 		status, code, message = http.StatusUnprocessableEntity, "TOKEN_ROUTE_UNAVAILABLE", "no eligible token route is available"
+	case errors.Is(err, ErrAccountProvisioning):
+		status, code, message = http.StatusConflict, "ACCOUNT_PROVISIONING", "the account is still provisioning"
+	case errors.Is(err, ErrAccountRepairRequired):
+		status, code, message = http.StatusConflict, "ACCOUNT_REPAIR_REQUIRED", "the account initialization requires repair"
 	}
 	api.WriteError(w, status, code, message, httpserver.RequestID(r.Context()))
 }
@@ -737,10 +770,12 @@ type HTTPContextResolver struct {
 
 func NewHTTPContextResolver(rawURL string) (*HTTPContextResolver, error) {
 	parsed, err := url.Parse(strings.TrimRight(strings.TrimSpace(rawURL), "/"))
-	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
 		return nil, errors.New("ACCOUNT_HTTP_URL must be an absolute URL")
 	}
-	return &HTTPContextResolver{baseURL: parsed, client: observability.NewHTTPClient(5 * time.Second)}, nil
+	client := observability.NewHTTPClient(5 * time.Second)
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	return &HTTPContextResolver{baseURL: parsed, client: client}, nil
 }
 
 func (r *HTTPContextResolver) Resolve(ctx context.Context, authorization string) (AuthorizationContext, error) {
@@ -755,10 +790,20 @@ func (r *HTTPContextResolver) Resolve(ctx context.Context, authorization string)
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
+		var problem struct {
+			Code string `json:"code"`
+		}
+		_ = decodeAccountAuthority(response.Body, 64<<10, &problem)
+		if problem.Code == "ACCOUNT_PROVISIONING" {
+			return AuthorizationContext{}, ErrAccountProvisioning
+		}
+		if problem.Code == "ACCOUNT_REPAIR_REQUIRED" {
+			return AuthorizationContext{}, ErrAccountRepairRequired
+		}
 		if response.StatusCode == http.StatusUnauthorized || response.StatusCode == http.StatusForbidden {
 			return AuthorizationContext{}, ErrForbidden
 		}
-		return AuthorizationContext{}, fmt.Errorf("Account authorization context returned HTTP %d", response.StatusCode)
+		return AuthorizationContext{}, errors.New("Account authorization context unavailable")
 	}
 	var body struct {
 		UserID            uuid.UUID   `json:"user_id"`
@@ -771,7 +816,6 @@ func (r *HTTPContextResolver) Resolve(ctx context.Context, authorization string)
 		Roles             []string    `json:"roles"`
 		Mobile            *string     `json:"mobile"`
 		MobileVerified    bool        `json:"mobile_verified"`
-		MallSyncStatus    string      `json:"mall_sync_status"`
 	}
 	if err := decodeAccountAuthority(response.Body, 1<<20, &body); err != nil {
 		return AuthorizationContext{}, err
@@ -782,7 +826,38 @@ func (r *HTTPContextResolver) Resolve(ctx context.Context, authorization string)
 		(body.ContextType == "PERSONAL" && body.OrganizationID != nil) {
 		return AuthorizationContext{}, errors.New("Account authorization context has no valid identity or active context")
 	}
-	return AuthorizationContext{UserID: body.UserID, SessionID: body.SessionID, ContextType: body.ContextType, OrganizationID: body.OrganizationID, MembershipVersion: body.MembershipVersion, UnitIDs: body.UnitIDs, AncestorUnitIDs: body.AncestorUnitIDs, Roles: body.Roles, Mobile: body.Mobile, MobileVerified: body.MobileVerified, MallSyncStatus: body.MallSyncStatus}, nil
+	return AuthorizationContext{UserID: body.UserID, SessionID: body.SessionID, ContextType: body.ContextType, OrganizationID: body.OrganizationID, MembershipVersion: body.MembershipVersion, UnitIDs: body.UnitIDs, AncestorUnitIDs: body.AncestorUnitIDs, Roles: body.Roles, Mobile: body.Mobile, MobileVerified: body.MobileVerified}, nil
+}
+
+func (r *HTTPContextResolver) ResolveCommerceCustomer(ctx context.Context, authorization string) (string, error) {
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, r.baseURL.String()+"/v1/me/commerce-customer-mapping", nil)
+	if err != nil {
+		return "", err
+	}
+	request.Header.Set("Authorization", authorization)
+	response, err := r.client.Do(request)
+	if err != nil {
+		return "", err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		if response.StatusCode == http.StatusUnauthorized || response.StatusCode == http.StatusForbidden {
+			return "", ErrForbidden
+		}
+		return "", errors.New("Account commerce customer authority unavailable")
+	}
+	var body struct {
+		Status string `json:"status"`
+	}
+	if err := decodeAccountAuthority(response.Body, 64<<10, &body); err != nil {
+		return "", err
+	}
+	switch body.Status {
+	case "NOT_CONFIGURED", "PENDING", "IN_PROGRESS", "READY", "RETRY", "REPAIR_REQUIRED", "DETACHED":
+		return body.Status, nil
+	default:
+		return "", errors.New("Account commerce customer authority has no valid status")
+	}
 }
 
 // Consume the complete bounded authority response. A decoder reading only the

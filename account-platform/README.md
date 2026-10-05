@@ -17,18 +17,19 @@
 ## 服务
 
 - `account-service`：用户、组织、成员、角色和活动上下文。
+- `identity-service`：注册密码策略、短期不透明引用和身份供应商管理协议。
 - `billing-service`：钱包、账本、支付、预占、退款和对账。
 - `token-gateway`：Token 授权、路由、New API 代理和计费编排。
 - `token-portal`：OIDC Authorization Code + PKCE、Redis 服务端会话和同源 CSRF 保护的 Web BFF；OIDC Token 不进入浏览器 JavaScript。
 - `payment-simulator`：仅开发/测试使用的三渠道支付模拟器。
 
-组织只能由持有效 Keycloak `platform-admin` Realm 角色的后台管理员创建，并指定初始 Owner；普通用户没有自建组织入口。业务用户禁用或删除不自动撤销后台 Realm 角色，需另外撤销该角色完成后台停权。
+组织只能由具备 Account 平台组织创建权限的后台管理员创建，并指定初始 Owner；普通用户没有自建组织入口。Keycloak Realm Role 不授予业务权限，Account 用户状态及当前有效授权共同约束后台访问。
 
 ## Web Portal
 
 已继承的后台财务读取和个人用量明细以十进制字符串返回金额，避免浏览器 JSON number 丢失 BIGINT 精度；未知用量金额仍为 `null`。原有内部余额和用量状态接口保持原契约。后台用量输出显式字段，与管理页面的 snake_case 字段一致。
 
-后台权限由有效的 Keycloak `platform-admin` Realm role 决定。Account 的业务用户禁用或删除不自动撤销该管理角色；停止后台权限需要在身份服务撤销管理角色。后台成员变更与对应版本的成员事件在同一事务中提交。
+后台权限由 Account 原子权限码及明确的平台/组织作用域决定；授权起止、撤销和最后有效超级管理员保护由 Account 持久事实约束。后台成员变更与对应版本的成员事件在同一事务中提交。
 
 自动用量补偿仅处理已持久化的 `SETTLEMENT_PENDING` 和 `REVIEW`。补偿回写绑定本次 claim 的代次与租约，过期批次项不再执行，外部调用截止于当前租约期限；没有明确消费证据时继续保护预占，超额证据保留人工核对。New API 的单渠道错误日志不能证明整个请求最终未消费。代理已持久化的明确释放意图可重试原 Billing 释放；Billing 已确认释放而本地记录失败时，只补齐本地终态。开发 mock 不提供真实 New API 消费日志，其模型输出不能代替真实供应商的补偿证据验收。
 
@@ -42,14 +43,21 @@
 
 ## 桌面端 OIDC
 
-A06 的账号入口曾由 `PINVOU_ACCOUNT_PLATFORM_ENABLED` 显式开启。本波计划把内置模型迁移到账户 Gateway 并退役旧入口/开关；迁移是否完成须依据最终固定客户端及实际测试，不能依赖旧开关重新启用旧路径。本地独立模型继续保留。账号路径需配置：
+A07 已把内置模型迁移到账户 Gateway 并退役旧入口及 `PINVOU_ACCOUNT_PLATFORM_ENABLED` 开关；本波保全该已审行为。本地独立模型继续保留。账号路径需配置：
 
 - `PINVOU_ACCOUNT_OIDC_ISSUER`，或配置 `PINVOU_ACCOUNT_OIDC_TOKEN_URL`；
 - `PINVOU_ACCOUNT_OIDC_CLIENT_ID`（公开客户端，桌面内登录必须启用 Direct Access Grants；Web Portal 仍使用 Authorization Code + PKCE）；
 - `PINVOU_ACCOUNT_SERVICE_URL`；
+- `PINVOU_IDENTITY_SERVICE_URL`；
 - `PINVOU_TOKEN_GATEWAY_URL`。
 
-远程端点必须使用 HTTPS；仅开发和测试环境允许受控 HTTP 端点。桌面端支持原有账号/密码、中国大陆手机号/密码和手机号/短信验证码登录；新注册必须填写唯一用户名，先完成用户名、手机号和密码规则预检，再通过一次性滑块挑战及短信验证。短信可配置通用 HTTP 适配器或阿里云适配器；社区功能不要求企业商城。未配置商城时注册仍可激活本地账号和真实钱包，并使用开发支付模拟器；配置商城时独立同步任务完成后才向商城提供已验证手机号。同一手机号的短信请求至少间隔 60 秒，不区分注册或登录用途。HTTP 通用协议没有权威未接受响应，失败保留冷却；Aliyun 只有完整官方前置拒绝、显式 Success=false 且没有送达标识时解除冷却，超时或坏响应不代表未发送。密码允许英文大小写字母、数字和常用英文符号，要求 8 至 128 位且至少包含一个字母和一个数字；密码不持久化、不写日志。Refresh Token 只写入系统凭据存储，存储不可用时明确拒绝登录。内置模型运行时使用同一 OIDC 会话的 Access Token 调用 `PINVOU_TOKEN_GATEWAY_URL/v1/chat/completions`。WebView 只接收登录状态和经过路由白名单限制的业务 JSON。
+远程端点必须使用 HTTPS；开发和测试服务可使用明确受控的 HTTP 例外，桌面 HTTP 入口限回环地址。桌面端支持原有账号/密码、中国大陆手机号/密码和手机号/短信验证码登录；新注册必须填写与原有账号体系共用的唯一用户名，先由 Identity Adapter 完成密码规则预检并取得短期不透明引用，再通过一次性滑块挑战及可配置短信 Provider 验证。Account 和短信 API 不接收原始密码。密码按原始 8 至 128 位可打印 ASCII 序列校验，至少包含一个字母和一个数字，允许中间半角空格但明确拒绝首尾空格；不 trim、不规范化、不转换大小写。密码不持久化、不写日志，Identity 创建完成或短期引用过期后释放。
+
+注册操作、唯一值预约和恢复阶段持久保存；桌面 Rust 优先将查询凭据写入系统凭据库，成功持久化后可跨重启继续轮询。持久化失败时仅保留绑定注册事实和会话代次的进程内恢复记录，并明确提示重启后无法恢复；查询令牌不进入 WebView，也不写设置文件。Identity/Account 成功即返回可登录的 `PROVISIONING`，钱包由后台异步初始化，超过 SLA 转入 `REPAIR_REQUIRED`。钱包完成前禁止平台模型与充值，本地独立模型不受影响。
+
+Refresh Token 只写入 macOS Keychain、Windows Credential Manager 或 Linux Secret Service；系统凭据存储不可用时明确拒绝登录，不降级写入设置文件。内置模型运行时使用同一 OIDC 会话的 Access Token 调用 `PINVOU_TOKEN_GATEWAY_URL/v1/chat/completions`。WebView 只接收登录状态和经过路由白名单限制的业务 JSON。企业商城是可选能力，未配置时不阻断注册、钱包或模型；配置时由独立客户映射任务同步已验证手机号，映射未就绪只关闭依赖它的新支付。
+
+短信保留 `http` 的 `/send`、`/verify` 及服务 Token 契约；`aliyun`/`aliyun-managed` 使用厂商托管验证码，`http-generated` 显式启用平台生成及 HMAC 核验。同一手机号发送冷却跨用途共享。发送结果未知保留冷却；只有 Aliyun 完整官方前置拒绝、明确 `Success=false` 且无送达标识时解除冷却。
 
 ## Token Gateway 安全默认值
 
@@ -94,7 +102,7 @@ node scripts/account-platform.mjs test security
 
 真实 New API 和真实支付测试需要明确 opt-in，普通测试不读取真实凭据或访问生产服务。
 
-本地验证需要 Go 1.26.6 和 Node.js；契约测试检查生产 Go 类型序列化、注册路由请求校验及 Token eligible/错误响应。Token 仓储和上下文使用 fixture，这部分不执行付款或数据库端到端链路。设置 `PINVOU_ACCOUNT_TEST_DATABASE_URL` 可启用真实 PostgreSQL 回归，连接必须指向 loopback 测试实例；每个测试创建并清理独占随机 schema。未设置时这些数据库用例会明确跳过，不能将其算作数据库验证通过。CI 配置了该变量，实际执行这些用例。
+本地验证需要 Go 1.26.6 和 Node.js；契约测试检查生产 Go 类型序列化、注册路由请求校验及 Token eligible/错误响应。Token 仓储和上下文使用 fixture，这部分不执行付款或数据库端到端链路。设置 `PINVOU_ACCOUNT_TEST_DATABASE_URL` 可启用真实 PostgreSQL 回归，连接必须指向 loopback 测试实例，测试角色须有 `CREATEDB` 权限；每个夹具从 `template0` 创建并清理独占随机数据库，内部仅使用自身 schema 与 `pg_catalog`，避免数据库级扩展被其他夹具的清理删除。未设置时这些数据库用例会明确跳过，不能将其算作数据库验证通过。CI 配置了该变量，实际执行这些用例。
 
 设置 `PINVOU_PORTAL_TEST_REDIS_URL` 可启用真实 Redis 的一次性登录流、会话期限、刷新锁、退出竞态及连接中断回归。测试仅清理自己的随机键；未配置时明确跳过，CI 提供独立 Redis 并实际执行。
 

@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"path"
@@ -25,20 +26,21 @@ import (
 )
 
 type Config struct {
-	Environment       string
-	IssuerURL         *url.URL
-	JWKSURL           *url.URL
-	PublicURL         *url.URL
-	AuthorizationURL  *url.URL
-	TokenURL          *url.URL
-	ClientID          string
-	AccountURL        *url.URL
-	BillingURL        *url.URL
-	TokenGatewayURL   *url.URL
-	SecureCookies     bool
-	KeycloakStatusURL *url.URL
-	NATSStatusURL     *url.URL
-	RelayURLs         map[string]*url.URL
+	SourceAuthorizationToken string
+	Environment              string
+	IssuerURL                *url.URL
+	JWKSURL                  *url.URL
+	PublicURL                *url.URL
+	AuthorizationURL         *url.URL
+	TokenURL                 *url.URL
+	ClientID                 string
+	AccountURL               *url.URL
+	BillingURL               *url.URL
+	TokenGatewayURL          *url.URL
+	SecureCookies            bool
+	KeycloakStatusURL        *url.URL
+	NATSStatusURL            *url.URL
+	RelayURLs                map[string]*url.URL
 }
 
 type Service struct {
@@ -299,6 +301,13 @@ func (s *Service) proxy(w http.ResponseWriter, r *http.Request, upstream *url.UR
 	}
 	request.Header.Set("Authorization", "Bearer "+session.AccessToken)
 	request.Header.Set("Accept", "application/json")
+	request.Header.Set("X-Pinvou-Client-Source", portalClientSource(r))
+	if upstream == s.config.AccountURL && s.config.SourceAuthorizationToken != "" {
+		request.Header.Set("X-Pinvou-Client-Source-Authorization", s.config.SourceAuthorizationToken)
+	}
+	// A scoped digest correlates this BFF session without forwarding its cookie secret.
+	device := sha256.Sum256([]byte("pinvou-portal-device:" + session.ID))
+	request.Header.Set("X-Device-ID", fmt.Sprintf("%x", device))
 	if contentType := r.Header.Get("Content-Type"); contentType != "" {
 		request.Header.Set("Content-Type", contentType)
 	}
@@ -613,17 +622,57 @@ func safeProxyPathID(value string) bool {
 	}) == -1
 }
 
+func portalClientSource(r *http.Request) string {
+	// No trusted-proxy contract is configured for this service. Caller-supplied
+	// forwarding headers cannot become authoritative audit or rate-limit facts.
+	if host, _, err := net.SplitHostPort(strings.TrimSpace(r.RemoteAddr)); err == nil {
+		if ip := net.ParseIP(host); ip != nil {
+			return ip.String()
+		}
+	}
+	if ip := net.ParseIP(strings.TrimSpace(r.RemoteAddr)); ip != nil {
+		return ip.String()
+	}
+	return ""
+}
+
 func accountAdminPathAllowed(method, resource string) bool {
-	if adminReadPathAllowed(method, resource, "/admin/v1/overview", "/admin/v1/roles", "/admin/v1/users", "/admin/v1/organizations", "/admin/v1/audit-logs") {
+	if adminReadPathAllowed(method, resource, "/admin/v1/overview", "/admin/v1/roles", "/admin/v1/role-bindings", "/admin/v1/users", "/admin/v1/organizations", "/admin/v1/audit-logs", "/admin/v1/registration-operations", "/admin/v1/approval-policies", "/admin/v1/approval-requests") {
 		return true
 	}
 	if method == http.MethodPost && resource == "/admin/v1/organizations" {
+		return true
+	}
+	if method == http.MethodPost && resource == "/admin/v1/role-bindings" {
+		return true
+	}
+	if resource == "/admin/v1/approval-requests" && method == http.MethodPost {
 		return true
 	}
 	if strings.Contains(resource, "..") {
 		return false
 	}
 	parts := strings.Split(strings.Trim(resource, "/"), "/")
+	if len(parts) >= 4 && parts[0] == "admin" && parts[1] == "v1" && parts[2] == "approval-requests" {
+		if _, err := uuid.Parse(parts[3]); err != nil {
+			return false
+		}
+		if len(parts) == 4 {
+			return method == http.MethodGet || method == http.MethodPut
+		}
+		return len(parts) == 6 && parts[4] == "actions" && (parts[5] == "submit" || parts[5] == "withdraw" || parts[5] == "decide") && method == http.MethodPost
+	}
+	if len(parts) == 4 && parts[0] == "admin" && parts[1] == "v1" && parts[2] == "role-bindings" && method == http.MethodDelete {
+		_, err := uuid.Parse(parts[3])
+		return err == nil
+	}
+	if len(parts) == 6 && parts[0] == "admin" && parts[1] == "v1" && parts[2] == "registration-operations" && parts[4] == "actions" && (parts[5] == "retry" || parts[5] == "compensate") {
+		_, err := uuid.Parse(parts[3])
+		return err == nil && method == http.MethodPost
+	}
+	if len(parts) == 4 && parts[0] == "admin" && parts[1] == "v1" && parts[2] == "user-code-lookups" {
+		return method == http.MethodGet && safeProxyPathID(parts[3])
+	}
 	if len(parts) == 4 && parts[0] == "admin" && parts[1] == "v1" && parts[2] == "audit-logs" && method == http.MethodGet {
 		_, err := uuid.Parse(parts[3])
 		return err == nil
@@ -683,7 +732,7 @@ func billingAdminPathAllowed(method, resource string) bool {
 	if adminReadPathAllowed(method, resource, "/admin/v1/overview", "/admin/v1/wallets", "/admin/v1/pricing-versions", "/admin/v1/payment-orders", "/admin/v1/adjustments", "/admin/v1/usage-holds", "/admin/v1/reconciliation-runs") {
 		return true
 	}
-	if (resource == "/admin/v1/pricing-versions" || resource == "/admin/v1/reconciliation-runs") && method == http.MethodPost {
+	if (resource == "/admin/v1/pricing-versions" || resource == "/admin/v1/reconciliation-runs" || resource == "/admin/v1/adjustments") && method == http.MethodPost {
 		return true
 	}
 	if strings.Contains(resource, "..") {

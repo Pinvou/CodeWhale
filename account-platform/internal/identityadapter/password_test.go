@@ -1,0 +1,187 @@
+package identityadapter
+
+import (
+	"context"
+	"errors"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/google/uuid"
+)
+
+type directoryFake struct {
+	password         string
+	creates          int
+	operationID      uuid.UUID
+	username, mobile string
+	sets, revokes    int
+	revokeError      error
+}
+
+func (f *directoryFake) CreateMobileUser(_ context.Context, operationID uuid.UUID, username, mobile, password string, _ bool) (RegistrationIdentity, error) {
+	f.password, f.creates, f.operationID = password, f.creates+1, operationID
+	f.username, f.mobile = username, mobile
+	return RegistrationIdentity{OperationID: operationID, Subject: "identity-subject", Username: username, Mobile: mobile}, nil
+}
+func (f *directoryFake) FindMobileUserByRegistrationOperation(_ context.Context, operationID uuid.UUID, _ bool) (RegistrationIdentity, bool, error) {
+	return RegistrationIdentity{OperationID: operationID, Subject: "identity-subject", Username: f.username, Mobile: f.mobile, PasswordPreserved: true}, f.operationID == operationID, nil
+}
+func (*directoryFake) DeleteUser(context.Context, string) error                        { return nil }
+func (*directoryFake) DisableUserAndConfirm(context.Context, string) error             { return nil }
+func (*directoryFake) UpdateUsername(context.Context, string, uuid.UUID, string) error { return nil }
+func (*directoryFake) UpdateMobile(context.Context, string, uuid.UUID, string) error   { return nil }
+func (f *directoryFake) SetPassword(_ context.Context, _, password string) error {
+	f.sets++
+	f.password = password
+	return nil
+}
+func (f *directoryFake) RevokeSessions(context.Context, string) error {
+	f.revokes++
+	return f.revokeError
+}
+
+func TestPasswordPolicyPreservesExactPrintableASCII(t *testing.T) {
+	for _, password := range []string{"pinvou2026", "Pinvou 2026", "Pinvou2026@*+-&"} {
+		if err := ValidatePassword(password); err != nil {
+			t.Fatalf("password %q: %v", password, err)
+		}
+	}
+	for _, password := range []string{"password", "12345678", "a1", "Pinvou\t2026", "Pinvou\n2026", "密碼Pinvou2026"} {
+		if !errors.Is(ValidatePassword(password), ErrPasswordInvalid) {
+			t.Fatalf("password %q must be invalid", password)
+		}
+	}
+	for _, password := range []string{" Pinvou2026", "Pinvou2026 "} {
+		if !errors.Is(ValidatePassword(password), ErrPasswordEdgeSpace) {
+			t.Fatalf("password %q must report edge space", password)
+		}
+	}
+}
+
+func TestPasswordReferenceBindsRegistrationAndCreatesExactlyOnce(t *testing.T) {
+	directory := &directoryFake{}
+	vault, err := NewPasswordVault([]byte(strings.Repeat("k", 32)), directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reference, err := vault.Precheck("Pinvou middle 2026")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := vault.ValidateReference(uuid.Nil, reference.Handle, reference.PolicyVersion, "pinvou", "+8613800138000"); err != nil {
+		t.Fatal(err)
+	}
+	if err := vault.ValidateReference(uuid.Nil, reference.Handle, reference.PolicyVersion, "other", "+8613800138000"); !errors.Is(err, ErrReferenceConflict) {
+		t.Fatalf("binding conflict=%v", err)
+	}
+	operationID := uuid.New()
+	if err := vault.ValidateReference(operationID, reference.Handle, reference.PolicyVersion, "pinvou", "+8613800138000"); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		subject, createErr := vault.CreateMobileUser(context.Background(), operationID, "", reference.PolicyVersion, "pinvou", "+8613800138000", false, false)
+		if createErr != nil || subject.Subject != "identity-subject" {
+			t.Fatalf("subject=%+v err=%v", subject, createErr)
+		}
+	}
+	if directory.creates != 1 || directory.password != "Pinvou middle 2026" {
+		t.Fatalf("creates=%d password=%q", directory.creates, directory.password)
+	}
+	if err := vault.ValidateReference(operationID, reference.Handle, reference.PolicyVersion, "pinvou", "+8613800138000"); err != nil {
+		t.Fatalf("completed operation must retain its keyed fingerprint until expiry: %v", err)
+	}
+}
+
+func TestExpiredPasswordReferenceCannotCreateIdentity(t *testing.T) {
+	vault, err := NewPasswordVault([]byte(strings.Repeat("k", 32)), &directoryFake{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 8, 23, 0, 0, 0, 0, time.UTC)
+	vault.now = func() time.Time { return now }
+	reference, err := vault.Precheck("Pinvou2026")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(16 * time.Minute)
+	if _, err := vault.CreateMobileUser(context.Background(), uuid.New(), reference.Handle, reference.PolicyVersion, "pinvou", "+8613800138000", false, false); !errors.Is(err, ErrReferenceInvalid) {
+		t.Fatalf("expired reference=%v", err)
+	}
+}
+
+func TestPasswordReferenceBindsOperationToPasswordFingerprint(t *testing.T) {
+	vault, err := NewPasswordVault([]byte(strings.Repeat("k", 32)), &directoryFake{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := vault.Precheck("Password123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := vault.Precheck("Changed456")
+	if err != nil {
+		t.Fatal(err)
+	}
+	operationID := uuid.New()
+	if err := vault.ValidateReference(operationID, first.Handle, first.PolicyVersion, "pinvou", "+8613800138000"); err != nil {
+		t.Fatal(err)
+	}
+	if err := vault.ValidateReference(operationID, second.Handle, second.PolicyVersion, "pinvou", "+8613800138000"); !errors.Is(err, ErrReferenceConflict) {
+		t.Fatalf("expected operation password conflict, got %v", err)
+	}
+}
+
+func TestRegistrationRecoveryRejectsChangedFactsAndPreservesFirstPassword(t *testing.T) {
+	directory := &directoryFake{}
+	vault, err := NewPasswordVault([]byte(strings.Repeat("k", 32)), directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref, err := vault.Precheck("FirstPassword123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	op := uuid.New()
+	first, err := vault.CreateMobileUser(context.Background(), op, ref.Handle, ref.PolicyVersion, "first", "+8613800138000", false, false)
+	if err != nil || first.PasswordPreserved {
+		t.Fatalf("first=%+v err=%v", first, err)
+	}
+	second, err := vault.CreateMobileUser(context.Background(), op, "", "", "first", "+8613800138000", false, false)
+	if err != nil || !second.PasswordPreserved || directory.creates != 1 || directory.password != "FirstPassword123" {
+		t.Fatalf("recovery=%+v err=%v creates=%d", second, err, directory.creates)
+	}
+	for _, facts := range [][2]string{{"other", "+8613800138000"}, {"first", "+8613900139000"}} {
+		if _, err := vault.CreateMobileUser(context.Background(), op, "", "", facts[0], facts[1], false, false); !errors.Is(err, ErrReferenceConflict) {
+			t.Fatalf("changed facts accepted: %v", err)
+		}
+	}
+}
+
+func TestResetPasswordRetriesRevocationWithoutResettingPassword(t *testing.T) {
+	directory := &directoryFake{revokeError: errors.New("lost revoke response")}
+	vault, err := NewPasswordVault([]byte(strings.Repeat("k", 32)), directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref, err := vault.Precheck("ResetPassword123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	op := uuid.New()
+	if err := vault.ResetPassword(context.Background(), op, ref.Handle, ref.PolicyVersion, "subject", "+8613800138000"); err == nil {
+		t.Fatal("revocation failure must not report reset completion")
+	}
+	directory.revokeError = nil
+	for range 2 {
+		if err := vault.ResetPassword(context.Background(), op, ref.Handle, ref.PolicyVersion, "subject", "+8613800138000"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if directory.sets != 1 || directory.revokes != 2 {
+		t.Fatalf("sets=%d revokes=%d", directory.sets, directory.revokes)
+	}
+	if err := vault.ResetPassword(context.Background(), uuid.New(), ref.Handle, ref.PolicyVersion, "subject", "+8613800138000"); !errors.Is(err, ErrReferenceConflict) {
+		t.Fatalf("different operation reused consumed password: %v", err)
+	}
+}

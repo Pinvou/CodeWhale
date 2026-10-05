@@ -221,12 +221,19 @@ try {
     await page.waitForSelector(".adm-state a");
     assert.equal(await page.$$("nav").then((x) => x.length), 0);
   });
-  await run("nested_mutation_403_closes_business_view", "normal", async (page) => {
+  await run("nested_mutation_403_preserves_other_authorized_views", "normal", async (page) => {
     await nav(page, 3);
     await page.waitForSelector(".adm-row-actions");
+    const originalStatus = await page.$eval(".adm-status", (element) => element.textContent);
     await page.click(".adm-row-actions button");
-    await page.waitForSelector(".adm-state");
-    assert.equal(await page.$$("nav").then((x) => x.length), 0);
+    await page.waitForSelector("[role=alert]");
+    assert.equal(await page.$$("nav").then((x) => x.length), 1);
+    assert.equal(await page.$eval(".adm-status", (element) => element.textContent), originalStatus);
+    assert.equal(await page.$$(".adm-inline-message.ok").then((x) => x.length), 0);
+    await nav(page, 1);
+    await page.waitForSelector(".adm-metrics");
+    assert.equal(await page.$$("nav").then((x) => x.length), 1);
+    assert.equal(await page.$$(".adm-state").then((x) => x.length), 0);
   });
   await run("latest_search_result_preserved", "search-race", async (page) => {
     await nav(page, 3);

@@ -128,8 +128,8 @@ type UsageEvidenceClient interface {
 
 type ReconciliationBilling interface {
 	PriceByID(context.Context, uuid.UUID) (PriceVersion, error)
-	Commit(context.Context, uuid.UUID, uuid.UUID, int64, Usage) error
-	Release(context.Context, uuid.UUID, uuid.UUID, string) error
+	Commit(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, int64, Usage) error
+	Release(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, string) error
 }
 
 type NewAPIUsageEvidenceClient struct {
@@ -342,7 +342,7 @@ func (r *UsageReconciler) reconcile(ctx context.Context, item ReconciliationItem
 			if !snapshot.BillingReleased {
 				return fmt.Errorf("%w: Billing release was not confirmed", errManualReconciliationRequired)
 			}
-		} else if err := r.billing.Release(ctx, item.ID, snapshot.HoldID, snapshot.ReleaseReason); err != nil {
+		} else if err := r.billing.Release(ctx, item.ID, snapshot.HoldID, item.WalletID, snapshot.ReleaseReason); err != nil {
 			return err
 		}
 		return r.store.MarkReleased(ctx, item.ID, snapshot.ReleaseReason)
@@ -392,7 +392,7 @@ func (r *UsageReconciler) commit(ctx context.Context, item ReconciliationItem, u
 	if expectedActual != nil && actual != *expectedActual {
 		return fmt.Errorf("%w: settlement snapshot does not match historical pricing", errManualReconciliationRequired)
 	}
-	if err := r.billing.Commit(ctx, item.ID, *item.HoldID, actual, usage); err != nil {
+	if err := r.billing.Commit(ctx, item.ID, *item.HoldID, item.WalletID, actual, usage); err != nil {
 		return err
 	}
 	return r.store.MarkCommitted(ctx, item.ID, actual, map[string]any{"usage": usage, "reconciled": true})

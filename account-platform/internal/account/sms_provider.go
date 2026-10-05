@@ -18,29 +18,18 @@ import (
 // SMSProviderConfig keeps authentication independent of a specific SMS vendor.
 // HTTP adapters are operator-owned services which deliver and verify codes;
 // codes are never returned by the Account API or written to logs.
-type SMSProviderConfig struct {
-	Provider      string
-	Endpoint      string
-	ServiceToken  string
-	AllowInsecure bool
-	Aliyun        AliyunSMSConfig
+func newHTTPManagedSMSProvider(config SMSProviderConfig) (SMSProvider, error) {
+	endpoint, err := url.Parse(strings.TrimSpace(config.Endpoint))
+	if err != nil || endpoint.Host == "" || endpoint.User != nil || endpoint.RawQuery != "" || endpoint.Fragment != "" || (endpoint.Scheme != "https" && !(config.AllowInsecure && endpoint.Scheme == "http")) || len(config.ServiceToken) < 32 {
+		return nil, errors.New("SMS HTTP adapter requires an HTTPS endpoint and service token; HTTP is limited to development or test")
+	}
+	client := observability.NewHTTPClient(10 * time.Second)
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	return &httpSMSProvider{endpoint: endpoint, token: config.ServiceToken, client: client}, nil
 }
 
-func NewSMSProvider(config SMSProviderConfig) (SMSProvider, error) {
-	switch strings.ToLower(strings.TrimSpace(config.Provider)) {
-	case "aliyun":
-		return NewAliyunSMSProvider(config.Aliyun)
-	case "http":
-		endpoint, err := url.Parse(strings.TrimSpace(config.Endpoint))
-		if err != nil || endpoint.Host == "" || endpoint.User != nil || endpoint.RawQuery != "" || endpoint.Fragment != "" || (endpoint.Scheme != "https" && !(config.AllowInsecure && endpoint.Scheme == "http")) || len(config.ServiceToken) < 32 {
-			return nil, errors.New("SMS HTTP adapter requires an HTTPS endpoint and service token; HTTP is limited to development or test")
-		}
-		client := observability.NewHTTPClient(10 * time.Second)
-		client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-		return &httpSMSProvider{endpoint: endpoint, token: config.ServiceToken, client: client}, nil
-	default:
-		return nil, errors.New("SMS_PROVIDER must be http or aliyun when mobile authentication is enabled")
-	}
+func (*httpSMSProvider) Descriptor() SMSProviderDescriptor {
+	return SMSProviderDescriptor{ID: "http", AdapterVersion: "v1"}
 }
 
 type httpSMSProvider struct {
@@ -76,21 +65,24 @@ func (p *httpSMSProvider) call(ctx context.Context, action string, input, output
 	return nil
 }
 
-func (p *httpSMSProvider) SendCode(ctx context.Context, mobile string, purpose SMSPurpose, challengeID uuid.UUID) (string, error) {
+func (p *httpSMSProvider) SendCode(ctx context.Context, mobile string, purpose SMSPurpose, challengeID uuid.UUID) (SMSDelivery, error) {
 	var result struct {
 		MessageID string `json:"message_id"`
 	}
 	err := p.call(ctx, "send", map[string]any{"mobile": mobile, "purpose": purpose, "challenge_id": challengeID}, &result)
 	if err != nil {
-		return "", err
+		return SMSDelivery{}, err
 	}
 	if result.MessageID == "" || len(result.MessageID) > 128 {
-		return "", ErrSMSUnavailable
+		return SMSDelivery{}, ErrSMSUnavailable
 	}
-	return result.MessageID, nil
+	return SMSDelivery{MessageID: result.MessageID}, nil
 }
 
-func (p *httpSMSProvider) VerifyCode(ctx context.Context, mobile string, challengeID uuid.UUID, code string) (bool, error) {
+func (p *httpSMSProvider) VerifyCode(ctx context.Context, mobile string, challengeID uuid.UUID, verification SMSVerificationData, code string) (bool, error) {
+	if verification.Provider != p.Descriptor() {
+		return false, ErrSMSInvalid
+	}
 	var result struct {
 		Verified *bool `json:"verified"`
 	}

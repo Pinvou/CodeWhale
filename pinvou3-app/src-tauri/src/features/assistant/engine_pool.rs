@@ -8480,7 +8480,7 @@ mod scheduled_model_tests {
 
     #[test]
     fn rebind_engine_take_production_closure_reads_turn_and_scheduled_state() {
-        let src = include_str!("engine_pool.rs");
+        let src = include_str!("engine_pool.rs").replace("\r\n", "\n");
         // Round-26 MAJOR-3: cut at the test module exactly like projects.rs's
         // `production_source` (round-18) — an unanchored find over the WHOLE
         // file lands on this probe's own string argument once the production

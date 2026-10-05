@@ -2,14 +2,17 @@ package account
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
 	"time"
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/api"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/approvalpolicy"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/identity"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/observability"
@@ -23,8 +26,14 @@ type Service struct {
 	repository   Repository
 	wallets      WalletProvisioner
 	mobileAuth   *MobileAuthService
+	profiles     *ProfileChangeService
 	serviceToken string
 	now          func() time.Time
+}
+
+func (s *Service) WithProfileChanges(profiles *ProfileChangeService) *Service {
+	s.profiles = profiles
+	return s
 }
 
 func NewService(repository Repository, wallets WalletProvisioner) *Service {
@@ -33,52 +42,59 @@ func NewService(repository Repository, wallets WalletProvisioner) *Service {
 
 func (s *Service) WithMobileAuth(auth *MobileAuthService, serviceToken string) *Service {
 	s.mobileAuth = auth
+	return s.WithServiceToken(serviceToken)
+}
+
+func (s *Service) WithServiceToken(serviceToken string) *Service {
 	s.serviceToken = strings.TrimSpace(serviceToken)
 	return s
 }
 
 func (s *Service) Bootstrap(ctx context.Context, principal identity.Principal) (Me, error) {
 	me, _, err := s.repository.Bootstrap(ctx, principal)
-	if err != nil {
-		return Me{}, err
-	}
-	if me.Status == "ACTIVE" {
-		return me, nil
-	}
-	if me.Status != "PROVISIONING" {
-		return me, ErrForbidden
-	}
-	if err := s.wallets.EnsurePersonalWallet(ctx, me.UserID); err != nil {
-		return me, fmt.Errorf("%w: %v", ErrWalletProvisioning, err)
-	}
-	if err := s.repository.ActivateUser(ctx, me.UserID); err != nil {
-		return me, err
-	}
-	return s.repository.GetMe(ctx, principal)
+	return me, err
 }
 
 func (s *Service) Handler(verify identity.VerifyFunc) http.Handler {
 	router := httpserver.NewRouter()
+	internal := router.Group("/internal/v1")
+	internal.Use(serviceauth.GinMiddleware(s.serviceToken))
+	internal.POST("/authorization/check", httpserver.AdaptFunc(s.checkPermission))
+	internal.POST("/approval-requests/:approval_request_id/executions", approvalpolicy.Require("APPROVAL_EXECUTION_BEGIN", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.beginApprovalExecution))
+	internal.POST("/approval-requests/:approval_request_id/executions/complete", approvalpolicy.Require("APPROVAL_EXECUTION_COMPLETE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.completeApprovalExecution))
 	if s.mobileAuth != nil {
 		router.POST("/v1/auth/registration/precheck", httpserver.AdaptFunc(s.precheckMobileRegistration))
 		router.POST("/v1/auth/captcha/challenges", httpserver.AdaptFunc(s.createSliderCaptcha))
 		router.POST("/v1/auth/sms/challenges", httpserver.AdaptFunc(s.sendSMSChallenge))
 		router.POST("/v1/auth/register", httpserver.AdaptFunc(s.registerMobile))
-		internal := router.Group("/internal/v1/auth")
-		internal.Use(serviceauth.GinMiddleware(s.serviceToken))
-		internal.POST("/sms/verify", httpserver.AdaptFunc(s.verifyLoginSMS))
-		internal.POST("/mobile/identity", httpserver.AdaptFunc(s.resolveMobileIdentity))
+		router.GET("/v1/auth/registration-operations/:operation_id", httpserver.AdaptFunc(s.registrationOperationStatus))
+		internal.POST("/auth/sms/verify", httpserver.AdaptFunc(s.verifyLoginSMS))
+		internal.POST("/auth/mobile/identity", httpserver.AdaptFunc(s.resolveMobileIdentity))
+		if s.profiles != nil {
+			router.POST("/v1/auth/password-resets", httpserver.AdaptFunc(s.resetForgottenPassword))
+		}
 	}
 	protected := router.Group("")
 	protected.Use(identity.GinMiddleware(verify))
 	protected.POST("/v1/account/bootstrap", httpserver.AdaptFunc(s.bootstrap))
 	protected.GET("/v1/me", httpserver.AdaptFunc(s.getMe))
+	protected.GET("/v1/me/commerce-customer-mapping", httpserver.AdaptFunc(s.getCommerceCustomerMapping))
+	if s.profiles != nil {
+		protected.POST("/v1/me/profile-change-requests", httpserver.AdaptFunc(s.createProfileChange))
+		protected.POST("/v1/me/profile-change-requests/:request_id/mobile-challenges", httpserver.AdaptFunc(s.sendProfileMobileChallenge))
+		protected.POST("/v1/me/profile-change-requests/:request_id/actions/complete", httpserver.AdaptFunc(s.completeProfileChange))
+		protected.GET("/v1/me/profile-change-requests/:request_id", httpserver.AdaptFunc(s.getProfileChange))
+	}
 	protected.GET("/v1/me/authorization-context", httpserver.AdaptFunc(s.getAuthorizationContext))
+	protected.GET("/v1/me/role-bindings", httpserver.AdaptFunc(s.listMyRoleBindings))
 	protected.GET("/v1/me/organizations", httpserver.AdaptFunc(s.listOrganizations))
 	protected.POST("/v1/sessions/current/active-context", httpserver.AdaptFunc(s.setActiveContext))
 	protected.GET("/v1/organizations/:organization_id/units", httpserver.AdaptFunc(s.listUnits))
 	protected.POST("/v1/organizations/:organization_id/units", httpserver.AdaptFunc(s.createUnit))
 	protected.GET("/v1/organizations/:organization_id/members", httpserver.AdaptFunc(s.listMembers))
+	protected.GET("/v1/organizations/:organization_id/role-bindings", httpserver.AdaptFunc(s.listOrganizationRoleBindings))
+	protected.POST("/v1/organizations/:organization_id/role-bindings", httpserver.AdaptFunc(s.grantOrganizationRoleBinding))
+	protected.DELETE("/v1/organizations/:organization_id/role-bindings/:binding_id", httpserver.AdaptFunc(s.revokeOrganizationRoleBinding))
 	protected.PUT("/v1/organizations/:organization_id/members/:user_id/roles", httpserver.AdaptFunc(s.replaceMemberRoles))
 	protected.PATCH("/v1/organizations/:organization_id/units/:unit_id/parent", httpserver.AdaptFunc(s.moveUnit))
 	protected.POST("/v1/organizations/:organization_id/invitations", httpserver.AdaptFunc(s.createInvitation))
@@ -86,29 +102,47 @@ func (s *Service) Handler(verify identity.VerifyFunc) http.Handler {
 	protected.DELETE("/v1/organizations/:organization_id/members/:user_id", httpserver.AdaptFunc(s.revokeMembership))
 	protected.POST("/v1/organizations/:organization_id/ownership", httpserver.AdaptFunc(s.transferOwnership))
 	admin := protected.Group("/admin/v1")
-	admin.Use(identity.RequireRealmRoleGin("platform-admin"))
-	admin.GET("/overview", httpserver.AdaptFunc(s.adminOverview))
-	admin.GET("/roles", httpserver.AdaptFunc(s.adminRoles))
-	admin.GET("/users", httpserver.AdaptFunc(s.adminUsers))
-	admin.GET("/users/:user_id/memberships", httpserver.AdaptFunc(s.adminUserMemberships))
-	admin.PATCH("/users/:user_id/status", httpserver.AdaptFunc(s.adminSetUserStatus))
-	admin.DELETE("/users/:user_id", httpserver.AdaptFunc(s.adminDeleteUser))
-	admin.GET("/organizations", httpserver.AdaptFunc(s.adminOrganizations))
-	admin.POST("/organizations", httpserver.AdaptFunc(s.adminCreateOrganization))
-	admin.PATCH("/organizations/:organization_id", httpserver.AdaptFunc(s.adminRenameOrganization))
-	admin.PATCH("/organizations/:organization_id/status", httpserver.AdaptFunc(s.adminSetOrganizationStatus))
-	admin.DELETE("/organizations/:organization_id", httpserver.AdaptFunc(s.adminDeleteOrganization))
-	admin.GET("/organizations/:organization_id/units", httpserver.AdaptFunc(s.adminUnits))
-	admin.GET("/organizations/:organization_id/members", httpserver.AdaptFunc(s.adminMembers))
-	admin.POST("/organizations/:organization_id/members", httpserver.AdaptFunc(s.adminAddMember))
-	admin.PUT("/organizations/:organization_id/members/:user_id/roles", httpserver.AdaptFunc(s.adminReplaceMemberRoles))
-	admin.DELETE("/organizations/:organization_id/members/:user_id", httpserver.AdaptFunc(s.adminRemoveMember))
-	admin.POST("/organizations/:organization_id/ownership", httpserver.AdaptFunc(s.adminTransferOwnership))
-	admin.POST("/organizations/:organization_id/units", httpserver.AdaptFunc(s.adminCreateUnit))
-	admin.PATCH("/organizations/:organization_id/units/:unit_id", httpserver.AdaptFunc(s.adminRenameUnit))
-	admin.DELETE("/organizations/:organization_id/units/:unit_id", httpserver.AdaptFunc(s.adminDeleteUnit))
-	admin.GET("/audit-logs", httpserver.AdaptFunc(s.adminAuditLogs))
-	admin.GET("/audit-logs/:audit_id", httpserver.AdaptFunc(s.adminAuditLog))
+	admin.GET("/overview", s.requirePermission(PermissionPlatformSystemStatusRead), httpserver.AdaptFunc(s.adminOverview))
+	admin.GET("/roles", s.requirePermission(PermissionPlatformRolesRead), httpserver.AdaptFunc(s.adminRoles))
+	admin.GET("/role-bindings", s.requirePermission(PermissionPlatformRolesRead), httpserver.AdaptFunc(s.adminRoleBindings))
+	admin.POST("/role-bindings", s.requirePermission(PermissionPlatformRolesAssign), approvalpolicy.Require("ACCOUNT_ROLE_BINDING_GRANT", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminGrantRoleBinding))
+	admin.DELETE("/role-bindings/:binding_id", s.requirePermission(PermissionPlatformRolesAssign), approvalpolicy.Require("ACCOUNT_ROLE_BINDING_REVOKE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminRevokeRoleBinding))
+	admin.GET("/users", s.requirePermission(PermissionPlatformUsersRead), httpserver.AdaptFunc(s.adminUsers))
+	admin.GET("/user-code-lookups/:user_code", httpserver.AdaptFunc(s.adminUserByCode))
+	admin.GET("/users/:user_id/memberships", s.requirePermission(PermissionPlatformUsersRead), httpserver.AdaptFunc(s.adminUserMemberships))
+	admin.PATCH("/users/:user_id/status", s.requirePermission(PermissionPlatformUsersStatusManage), approvalpolicy.Require("ACCOUNT_USER_STATUS_CHANGE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminSetUserStatus))
+	admin.DELETE("/users/:user_id", s.requirePermission(PermissionPlatformUsersStatusManage), approvalpolicy.Require("ACCOUNT_USER_DELETE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminDeleteUser))
+	admin.GET("/organizations", s.requirePermission(PermissionPlatformOrganizationsRead), httpserver.AdaptFunc(s.adminOrganizations))
+	admin.POST("/organizations", s.requirePermission(PermissionPlatformOrganizationsCreate), approvalpolicy.Require("ACCOUNT_ORGANIZATION_CREATE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminCreateOrganization))
+	admin.PATCH("/organizations/:organization_id", s.requirePermission(PermissionPlatformOrganizationsStatusManage), approvalpolicy.Require("ACCOUNT_ORGANIZATION_RENAME", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminRenameOrganization))
+	admin.PATCH("/organizations/:organization_id/status", s.requirePermission(PermissionPlatformOrganizationsStatusManage), approvalpolicy.Require("ACCOUNT_ORGANIZATION_STATUS_CHANGE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminSetOrganizationStatus))
+	admin.DELETE("/organizations/:organization_id", s.requirePermission(PermissionPlatformOrganizationsDelete), approvalpolicy.Require("ACCOUNT_ORGANIZATION_DELETE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminDeleteOrganization))
+	admin.GET("/organizations/:organization_id/units", s.requirePermission(PermissionPlatformOrganizationsRead), httpserver.AdaptFunc(s.adminUnits))
+	admin.GET("/organizations/:organization_id/members", s.requirePermission(PermissionPlatformOrganizationsRead), httpserver.AdaptFunc(s.adminMembers))
+	admin.POST("/organizations/:organization_id/members", s.requirePermission(PermissionPlatformOrganizationsStatusManage), approvalpolicy.Require("ACCOUNT_MEMBER_ADD", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminAddMember))
+	admin.PUT("/organizations/:organization_id/members/:user_id/roles", s.requirePermission(PermissionPlatformOrganizationsStatusManage), approvalpolicy.Require("ACCOUNT_MEMBER_ROLES_REPLACE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminReplaceMemberRoles))
+	admin.DELETE("/organizations/:organization_id/members/:user_id", s.requirePermission(PermissionPlatformOrganizationsStatusManage), approvalpolicy.Require("ACCOUNT_MEMBER_REMOVE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminRemoveMember))
+	admin.POST("/organizations/:organization_id/ownership", s.requirePermission(PermissionPlatformOrganizationsOwnerTransfer), approvalpolicy.Require("ACCOUNT_OWNERSHIP_TRANSFER", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminTransferOwnership))
+	admin.POST("/organizations/:organization_id/units", s.requirePermission(PermissionPlatformOrganizationsStatusManage), approvalpolicy.Require("ACCOUNT_UNIT_CREATE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminCreateUnit))
+	admin.PATCH("/organizations/:organization_id/units/:unit_id", s.requirePermission(PermissionPlatformOrganizationsStatusManage), approvalpolicy.Require("ACCOUNT_UNIT_RENAME", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminRenameUnit))
+	admin.DELETE("/organizations/:organization_id/units/:unit_id", s.requirePermission(PermissionPlatformOrganizationsStatusManage), approvalpolicy.Require("ACCOUNT_UNIT_DELETE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminDeleteUnit))
+	admin.GET("/audit-logs", s.requirePermission(PermissionPlatformAuditRead), httpserver.AdaptFunc(s.adminAuditLogs))
+	admin.GET("/audit-logs/:audit_id", s.requirePermission(PermissionPlatformAuditRead), httpserver.AdaptFunc(s.adminAuditLog))
+	admin.GET("/approval-policies", s.requirePermission(PermissionPlatformRolesRead), httpserver.AdaptFunc(s.adminApprovalPolicies))
+	admin.GET("/approval-requests", httpserver.AdaptFunc(s.adminApprovalRequests))
+	admin.POST("/approval-requests", approvalpolicy.Require("APPROVAL_DRAFT_CREATE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminCreateApprovalDraft))
+	admin.GET("/approval-requests/:approval_request_id", httpserver.AdaptFunc(s.adminApprovalRequest))
+	admin.PUT("/approval-requests/:approval_request_id", approvalpolicy.Require("APPROVAL_DRAFT_UPDATE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminUpdateApprovalDraft))
+	admin.POST("/approval-requests/:approval_request_id/actions/submit", approvalpolicy.Require("APPROVAL_REQUEST_SUBMIT", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminSubmitApprovalRequest))
+	admin.POST("/approval-requests/:approval_request_id/actions/withdraw", approvalpolicy.Require("APPROVAL_REQUEST_WITHDRAW", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminWithdrawApprovalRequest))
+	admin.POST("/approval-requests/:approval_request_id/actions/decide", approvalpolicy.Require("APPROVAL_REQUEST_DECIDE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminDecideApprovalRequest))
+	admin.GET("/registration-operations", s.requirePermission(PermissionPlatformRegistrationsRepair), httpserver.AdaptFunc(s.adminRegistrationOperations))
+	admin.POST("/registration-operations/:operation_id/actions/retry", s.requirePermission(PermissionPlatformRegistrationsRepair), approvalpolicy.Require("ACCOUNT_REGISTRATION_RETRY", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminRetryRegistration))
+	admin.POST("/registration-operations/:operation_id/actions/compensate", s.requirePermission(PermissionPlatformRegistrationsRepair), approvalpolicy.Require("ACCOUNT_REGISTRATION_COMPENSATE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminCompensateRegistration))
+	if s.profiles != nil {
+		admin.GET("/profile-change-requests", s.requirePermission(PermissionPlatformProfileChangesRepair), httpserver.AdaptFunc(s.adminProfileChanges))
+		admin.POST("/profile-change-requests/:request_id/actions/retry", s.requirePermission(PermissionPlatformProfileChangesRepair), approvalpolicy.Require("ACCOUNT_PROFILE_CHANGE_RETRY", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminRetryProfileChange))
+	}
 	return router
 }
 
@@ -138,6 +172,77 @@ func (s *Service) listMembers(w http.ResponseWriter, r *http.Request) {
 	api.WriteJSON(w, http.StatusOK, map[string]any{"items": members})
 }
 
+func (s *Service) listMyRoleBindings(w http.ResponseWriter, r *http.Request) {
+	items, err := s.repository.ListMyRoleBindings(r.Context(), mustPrincipal(r.Context()))
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	api.WriteJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
+func (s *Service) listOrganizationRoleBindings(w http.ResponseWriter, r *http.Request) {
+	organizationID, ok := pathUUID(w, r, "organization_id")
+	if !ok {
+		return
+	}
+	items, err := s.repository.ListOrganizationRoleBindings(r.Context(), mustPrincipal(r.Context()), organizationID)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	api.WriteJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
+type roleBindingGrantBody struct {
+	UserID         uuid.UUID  `json:"user_id"`
+	RoleCode       string     `json:"role_code"`
+	OrganizationID *uuid.UUID `json:"organization_id"`
+	UnitID         *uuid.UUID `json:"unit_id"`
+	StartsAt       *time.Time `json:"starts_at"`
+	ExpiresAt      *time.Time `json:"expires_at"`
+	IdempotencyKey string     `json:"idempotency_key"`
+}
+
+func (s *Service) grantOrganizationRoleBinding(w http.ResponseWriter, r *http.Request) {
+	organizationID, ok := pathUUID(w, r, "organization_id")
+	if !ok {
+		return
+	}
+	var body roleBindingGrantBody
+	if err := api.DecodeJSON(w, r, &body); err != nil {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "request body is invalid", httpserver.RequestID(r.Context()))
+		return
+	}
+	item, err := s.repository.GrantOrganizationRoleBinding(r.Context(), mustPrincipal(r.Context()), RoleBindingGrant{UserID: body.UserID, RoleCode: body.RoleCode, OrganizationID: &organizationID, UnitID: body.UnitID, StartsAt: body.StartsAt, ExpiresAt: body.ExpiresAt, IdempotencyKey: body.IdempotencyKey})
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	api.WriteJSON(w, http.StatusCreated, item)
+}
+
+func (s *Service) revokeOrganizationRoleBinding(w http.ResponseWriter, r *http.Request) {
+	organizationID, ok := pathUUID(w, r, "organization_id")
+	if !ok {
+		return
+	}
+	bindingID, ok := pathUUID(w, r, "binding_id")
+	if !ok {
+		return
+	}
+	item, err := s.repository.RevokeOrganizationRoleBinding(r.Context(), mustPrincipal(r.Context()), organizationID, bindingID)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	api.WriteJSON(w, http.StatusOK, item)
+}
+
 func (s *Service) replaceMemberRoles(w http.ResponseWriter, r *http.Request) {
 	organizationID, ok := pathUUID(w, r, "organization_id")
 	if !ok {
@@ -164,12 +269,6 @@ func (s *Service) replaceMemberRoles(w http.ResponseWriter, r *http.Request) {
 
 func (s *Service) bootstrap(w http.ResponseWriter, r *http.Request) {
 	me, err := s.Bootstrap(r.Context(), mustPrincipal(r.Context()))
-	if errors.Is(err, ErrWalletProvisioning) {
-		api.WriteJSON(w, http.StatusServiceUnavailable, map[string]any{
-			"code": "BILLING_UNAVAILABLE", "message": "the account is provisioning; retry this request", "request_id": httpserver.RequestID(r.Context()), "account": me,
-		})
-		return
-	}
 	if err != nil {
 		s.writeError(w, r, err)
 		return
@@ -184,6 +283,16 @@ func (s *Service) getMe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	api.WriteJSON(w, http.StatusOK, me)
+}
+
+func (s *Service) getCommerceCustomerMapping(w http.ResponseWriter, r *http.Request) {
+	mapping, err := s.repository.GetCommerceCustomerMapping(r.Context(), mustPrincipal(r.Context()))
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	api.WriteJSON(w, http.StatusOK, mapping)
 }
 
 func (s *Service) getAuthorizationContext(w http.ResponseWriter, r *http.Request) {
@@ -352,10 +461,24 @@ func (s *Service) writeError(w http.ResponseWriter, r *http.Request, err error) 
 		status, code, message = http.StatusConflict, "ACCOUNT_CONFLICT", "the account resource changed or conflicts with existing data"
 	case errors.Is(err, ErrLastOwner):
 		status, code, message = http.StatusConflict, "LAST_OWNER_REQUIRED", "the organization must retain at least one owner"
+	case errors.Is(err, ErrLastActiveSuperAdmin):
+		status, code, message = http.StatusConflict, "LAST_ACTIVE_SUPER_ADMIN", "another active user must become super administrator first"
 	case errors.Is(err, ErrInvalidHierarchy):
 		status, code, message = http.StatusUnprocessableEntity, "ORG_UNIT_HIERARCHY_INVALID", "the requested organization hierarchy is invalid"
 	case errors.Is(err, ErrInvitationExpired):
 		status, code, message = http.StatusGone, "INVITATION_EXPIRED", "the invitation has expired"
+	case errors.Is(err, ErrAccountProvisioning):
+		status, code, message = http.StatusConflict, "ACCOUNT_PROVISIONING", "the account is still provisioning"
+	case errors.Is(err, ErrAccountRepairRequired):
+		status, code, message = http.StatusConflict, "ACCOUNT_REPAIR_REQUIRED", "the account initialization requires repair"
+	case errors.Is(err, ErrBootstrapPending):
+		status, code, message = http.StatusForbidden, "ADMIN_BOOTSTRAP_PENDING", "the first administrator must complete secure activation"
+	case errors.Is(err, ErrApprovalSelfDecision):
+		status, code, message = http.StatusConflict, "APPROVAL_SELF_DECISION_FORBIDDEN", "the requester cannot decide their own approval request"
+	case errors.Is(err, ErrApprovalExpired):
+		status, code, message = http.StatusGone, "APPROVAL_REQUEST_EXPIRED", "the approval request has expired"
+	case errors.Is(err, ErrApprovalInvalidated):
+		status, code, message = http.StatusConflict, "APPROVAL_REQUEST_INVALIDATED", "the approval request no longer matches current policy, authorization, or resource facts"
 	}
 	api.WriteError(w, status, code, message, httpserver.RequestID(r.Context()))
 }
@@ -385,16 +508,21 @@ type HTTPWalletProvisioner struct {
 
 func NewHTTPWalletProvisioner(rawURL, serviceToken string) (*HTTPWalletProvisioner, error) {
 	parsed, err := url.Parse(strings.TrimRight(strings.TrimSpace(rawURL), "/"))
-	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
 		return nil, errors.New("BILLING_HTTP_URL must be an absolute URL")
 	}
 	if strings.TrimSpace(serviceToken) == "" {
 		return nil, errors.New("INTERNAL_SERVICE_TOKEN is required")
 	}
-	return &HTTPWalletProvisioner{baseURL: parsed, serviceToken: serviceToken, client: observability.NewHTTPClient(5 * time.Second)}, nil
+	client := observability.NewHTTPClient(5 * time.Second)
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	return &HTTPWalletProvisioner{baseURL: parsed, serviceToken: serviceToken, client: client}, nil
 }
 
 func (p *HTTPWalletProvisioner) EnsurePersonalWallet(ctx context.Context, userID uuid.UUID) error {
+	if userID == uuid.Nil {
+		return errors.New("wallet owner identity is missing")
+	}
 	endpoint := *p.baseURL
 	endpoint.Path = strings.TrimRight(endpoint.Path, "/") + "/internal/v1/wallets/ensure"
 	body := strings.NewReader(fmt.Sprintf(`{"owner_type":"PERSONAL","owner_id":%q}`, userID.String()))
@@ -407,11 +535,21 @@ func (p *HTTPWalletProvisioner) EnsurePersonalWallet(ctx context.Context, userID
 	request.Header.Set("Idempotency-Key", "personal-wallet:"+userID.String())
 	response, err := p.client.Do(request)
 	if err != nil {
-		return err
+		return errors.New("billing wallet provisioning is unavailable")
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK && response.StatusCode != http.StatusCreated {
 		return fmt.Errorf("billing wallet provisioning returned HTTP %d", response.StatusCode)
+	}
+	data, err := io.ReadAll(io.LimitReader(response.Body, (64<<10)+1))
+	var wallet struct {
+		ID        uuid.UUID `json:"wallet_id"`
+		OwnerType string    `json:"owner_type"`
+		OwnerID   uuid.UUID `json:"owner_id"`
+		Status    string    `json:"status"`
+	}
+	if err != nil || len(data) > 64<<10 || json.Unmarshal(data, &wallet) != nil || wallet.ID == uuid.Nil || wallet.OwnerType != "PERSONAL" || wallet.OwnerID != userID || wallet.Status != "ACTIVE" {
+		return errors.New("billing wallet provisioning returned invalid authority facts")
 	}
 	return nil
 }

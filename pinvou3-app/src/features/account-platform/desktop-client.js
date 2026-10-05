@@ -29,6 +29,10 @@ function sessionStatus(value) {
 
 const mobileErrorCodes = new Set([
   'USERNAME_INVALID', 'USERNAME_ALREADY_REGISTERED', 'PASSWORD_INVALID',
+  'PASSWORD_EDGE_SPACE_NOT_ALLOWED', 'PASSWORD_REFERENCE_INVALID', 'PASSWORD_REFERENCE_CONFLICT',
+  'REGISTRATION_IDEMPOTENCY_CONFLICT', 'REGISTRATION_RESTART_REQUIRED', 'REGISTRATION_OPERATION_NOT_FOUND',
+  'RECENT_AUTHENTICATION_REQUIRED', 'PROFILE_CHANGE_CONFLICT', 'PROFILE_CHANGE_NOT_FOUND', 'PROFILE_CHANGE_FAILED',
+  'MOBILE_VERIFICATION_REQUIRED',
   'MOBILE_INVALID', 'MOBILE_ALREADY_REGISTERED', 'CAPTCHA_INVALID',
   'SMS_RATE_LIMITED', 'SMS_UNAVAILABLE', 'SMS_CODE_INVALID', 'AUTH_INTERNAL_ERROR', 'INVALID_REQUEST',
 ]);
@@ -62,6 +66,21 @@ function nativeError(value) {
   error.code = safeCode;
   if (safeCode === 'authentication_required') error.status = 401;
   return error;
+}
+
+function boundedSecret(value) { return typeof value === 'string' && value.length > 0 && value.length <= 4096 && !/[\u0000-\u001f\u007f]/u.test(value); }
+function validTime(value) { return typeof value === 'string' && Number.isFinite(Date.parse(value)); }
+function validPasswordReference(value) { return boundedSecret(value.password_handle) && boundedSecret(value.password_policy_version) && validTime(value.expires_at) && Date.parse(value.expires_at) > Date.now(); }
+const registrationStates = new Set(['SMS_PENDING','REGISTRATION_IN_PROGRESS','IDENTITY_CREATING','IDENTITY_CREATED','ACCOUNT_COMMITTING','ACCOUNT_COMMITTED','PROVISIONING','ACTIVE','REPAIR_REQUIRED','COMPENSATION_PENDING','COMPENSATED','EXPIRED']);
+function registrationResult(value, expectedID) {
+  if (!validID(value.registration_operation_id) || (expectedID && value.registration_operation_id !== expectedID)
+    || !registrationStates.has(value.status) || typeof value.password_preserved !== 'boolean'
+    || (value.user_id != null && !validID(value.user_id))
+    || (value.username != null && (typeof value.username !== 'string' || !/^[A-Za-z][A-Za-z0-9._-]{2,31}$/.test(value.username)))) throw nativeError('account_platform_request_failed');
+  const result = { registration_operation_id:value.registration_operation_id, status:value.status, password_preserved:value.password_preserved };
+  for (const key of ['user_id','username','user_code']) if (typeof value[key] === 'string') result[key] = value[key];
+  if (value.next_retry_at != null) { if (!validTime(value.next_retry_at)) throw nativeError('account_platform_request_failed'); result.next_retry_at = value.next_retry_at; }
+  return result;
 }
 
 /**
@@ -102,24 +121,42 @@ export class AccountPlatformDesktopClient {
   }
   async precheckMobileRegistration(username, mobile, password, signal) {
     const value = mobilePayload(await this.call(() => this.transport.precheckMobileRegistration({ username, mobile, password }), signal));
-    if (value.available !== true || typeof value.username !== 'string' || !/^[A-Za-z][A-Za-z0-9._-]{2,31}$/.test(value.username)) throw nativeError('account_platform_request_failed');
-    return { username: value.username, available: true };
+    if (value.available !== true || value.username !== username.trim() || !validPasswordReference(value)) throw nativeError('account_platform_request_failed');
+    return { username: value.username, available: true, password_handle:value.password_handle,
+      password_policy_version:value.password_policy_version, expires_at:value.expires_at };
   }
-  async sendSms(username, mobile, password, purpose, captchaId, captchaOffset, signal) {
+  async sendSms(username, mobile, reference, purpose, captchaId, captchaOffset, signal) {
     const value = mobilePayload(await this.call(() => this.transport.sendSms({
-      username, mobile, password, purpose, captcha_id: captchaId, captcha_offset: captchaOffset,
+      username, mobile, password_handle:reference?.password_handle || '', password_policy_version:reference?.password_policy_version || '',
+      purpose, captcha_id: captchaId, captcha_offset: captchaOffset,
     }), signal));
     if (!validID(value.challenge_id) || !Number.isInteger(value.retry_after_seconds) || value.retry_after_seconds < 1 || value.retry_after_seconds > 86400
-      || typeof value.expires_at !== 'string' || !Number.isFinite(Date.parse(value.expires_at))) throw nativeError('account_platform_request_failed');
-    return { challenge_id: value.challenge_id, retry_after_seconds: value.retry_after_seconds, expires_at: value.expires_at };
+      || !validTime(value.expires_at)) throw nativeError('account_platform_request_failed');
+    const result = { challenge_id:value.challenge_id, retry_after_seconds:value.retry_after_seconds, expires_at:value.expires_at };
+    if (purpose === 'REGISTER') {
+      if (!validID(value.registration_operation_id) || !validTime(value.registration_query_token_expires_at)
+        || typeof value.recovery_persisted !== 'boolean'
+        || Object.prototype.hasOwnProperty.call(value,'registration_query_token')) throw nativeError('account_platform_request_failed');
+      Object.assign(result, { registration_operation_id:value.registration_operation_id,
+        registration_query_token_expires_at:value.registration_query_token_expires_at, recovery_persisted:value.recovery_persisted });
+    }
+    return result;
   }
-  async registerMobile(username, mobile, challengeId, code, password, signal) {
+  async registerMobile(username, mobile, challengeId, code, reference, recovery, signal) {
     const value = mobilePayload(await this.call(() => this.transport.registerMobile({
-      username, mobile, challenge_id: challengeId, code, password,
+      username, mobile, challenge_id: challengeId, code,
+      password_handle:reference?.password_handle, password_policy_version:reference?.password_policy_version,
+      registration_operation_id:recovery?.registration_operation_id,
     }), signal));
-    if (!validID(value.user_id) || typeof value.username !== 'string' || !/^[A-Za-z][A-Za-z0-9._-]{2,31}$/.test(value.username)
-      || value.status !== 'PROVISIONING' || typeof value.password_preserved !== 'boolean') throw nativeError('account_platform_request_failed');
-    return { user_id: value.user_id, username: value.username, status: value.status, password_preserved: value.password_preserved };
+    return registrationResult(value, recovery?.registration_operation_id);
+  }
+  async registrationStatus(signal) {
+    const value = await this.call(() => this.transport.registrationStatus(), signal);
+    return value === null ? null : registrationResult(mobilePayload(value));
+  }
+  async resetPassword(mobile, challengeId, code, password, signal) {
+    const value = mobilePayload(await this.call(() => this.transport.resetPassword({ mobile, challenge_id:challengeId, code, password }), signal));
+    return value;
   }
   async loginSms(mobile, challengeId, code, signal) {
     const status = sessionStatus(await this.call(() => this.transport.loginSms({
@@ -180,6 +217,11 @@ export class AccountPlatformDesktopClient {
   createTokenAccount(body) { return this.request('token', '/v1/token-accounts', { method: 'POST', body }); }
   credentials(accountId, signal) { return this.request('token', `/v1/token-accounts/${accountId}/credentials`, { signal }); }
   rotateCredential(accountId, body) { return this.request('token', `/v1/token-accounts/${accountId}/credentials`, { method: 'POST', body }); }
+  myRoleBindings(signal) { return this.request('account', '/v1/me/role-bindings', { signal }); }
+  createProfileChange(field, value) { return this.request('account', '/v1/me/profile-change-requests', { method:'POST', body:{ field, value } }); }
+  sendProfileMobileChallenge(requestId, captchaId, captchaOffset) { return this.request('account', `/v1/me/profile-change-requests/${requestId}/mobile-challenges`, { method:'POST', body:{ captcha_id:captchaId, captcha_offset:captchaOffset } }); }
+  completeProfileChange(requestId, code = '') { return this.request('account', `/v1/me/profile-change-requests/${requestId}/actions/complete`, { method:'POST', body:{ code } }); }
+  profileChangeStatus(requestId, signal) { return this.request('account', `/v1/me/profile-change-requests/${requestId}`, { signal }); }
   usageHistory(cursor = '', signal) {
     const next = cursor ? `&cursor=${encodeURIComponent(cursor)}` : '';
     return this.request('token', `/v1/me/usage-requests?limit=20${next}`, { signal });

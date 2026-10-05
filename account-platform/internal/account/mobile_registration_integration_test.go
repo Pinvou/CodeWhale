@@ -91,15 +91,22 @@ func TestPostgresRegistrationRecoversOnlyItsOwnIntentWithoutResettingPassword(t 
 				}
 			}))
 			defer server.Close()
-			provisioner, err := NewKeycloakProvisioner(server.URL, server.URL+"/token", "pinvou", "controlled", strings.Repeat("s", 32))
-			if err != nil {
-				t.Fatal(err)
-			}
+			provisioner, vault := newIdentityBoundaryForTest(t, server.URL, strings.Repeat("s", 32))
 			sms, err := NewSMSProvider(SMSProviderConfig{Provider: "http", Endpoint: server.URL + "/sms", ServiceToken: strings.Repeat("s", 32), AllowInsecure: true})
 			if err != nil {
 				t.Fatal(err)
 			}
-			auth, err := NewMobileAuthService(repo, sms, provisioner, issuer)
+			auth, err := NewMobileAuthService(repo, sms, provisioner, issuer, registrationTokensForTest(t))
+			if err != nil {
+				t.Fatal(err)
+			}
+			// Reproduce the durable pre-saga A06 intent rather than treating an
+			// arbitrary PROVISIONING user as a registration recovery authority.
+			pending, err := repo.PrepareMobileRegistration(ctx, issuer, username, mobile)
+			if err != nil {
+				t.Fatal(err)
+			}
+			firstReference, err := vault.Precheck("FirstPassword1")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -123,9 +130,9 @@ func TestPostgresRegistrationRecoversOnlyItsOwnIntentWithoutResettingPassword(t 
 				}
 				return data
 			}
-			challenge := func(password string) uuid.UUID {
+			challenge := func(handle, policy string) SMSChallenge {
 				t.Helper()
-				post("/v1/auth/registration/precheck", map[string]any{"username": username, "mobile": mobile, "password": password}, 200)
+				post("/v1/auth/registration/precheck", map[string]any{"username": username, "mobile": mobile, "password_handle": handle, "password_policy_version": policy}, 200)
 				var captcha SliderCaptchaResponse
 				if err := json.Unmarshal(post("/v1/auth/captcha/challenges", map[string]any{"mobile": mobile, "purpose": "REGISTER"}, 201), &captcha); err != nil {
 					t.Fatal(err)
@@ -137,25 +144,28 @@ func TestPostgresRegistrationRecoversOnlyItsOwnIntentWithoutResettingPassword(t 
 					t.Fatal(err)
 				}
 				var smsChallenge SMSChallenge
-				if err := json.Unmarshal(post("/v1/auth/sms/challenges", map[string]any{"username": username, "mobile": mobile, "password": password, "purpose": "REGISTER", "captcha_id": captcha.ID, "captcha_offset": offset}, 202), &smsChallenge); err != nil {
+				if err := json.Unmarshal(post("/v1/auth/sms/challenges", map[string]any{"username": username, "mobile": mobile, "password_handle": handle, "password_policy_version": policy, "purpose": "REGISTER", "captcha_id": captcha.ID, "captcha_offset": offset}, 202), &smsChallenge); err != nil {
 					t.Fatal(err)
 				}
-				return smsChallenge.ID
+				return smsChallenge
 			}
 			if fault == "local_identity_write" {
 				if _, err := repo.pool.Exec(ctx, `CREATE FUNCTION fail_registration_identity() RETURNS trigger LANGUAGE plpgsql AS $$BEGIN RAISE EXCEPTION 'controlled identity fault'; END$$; CREATE TRIGGER fail_registration_identity BEFORE INSERT ON identities FOR EACH ROW EXECUTE FUNCTION fail_registration_identity()`); err != nil {
 					t.Fatal(err)
 				}
 			}
-			post("/v1/auth/register", map[string]any{"username": username, "mobile": mobile, "challenge_id": challenge("FirstPassword1"), "code": "123456", "password": "FirstPassword1"}, 500)
-			pending, err := repo.PendingMobileRegistration(ctx, issuer, username, mobile)
-			if err != nil || pending.UserID == uuid.Nil {
-				t.Fatal("durable registration intent missing")
+			firstChallenge := challenge(firstReference.Handle, firstReference.PolicyVersion)
+			registerBody := func(handle string) map[string]any {
+				return map[string]any{"username": username, "mobile": mobile, "challenge_id": firstChallenge.ID, "code": "123456", "password_handle": handle, "password_policy_version": firstReference.PolicyVersion, "registration_operation_id": firstChallenge.RegistrationOperationID, "registration_query_token": firstChallenge.RegistrationQueryToken}
+			}
+			post("/v1/auth/register", registerBody(firstReference.Handle), 202)
+			if firstChallenge.RegistrationOperationID != pending.UserID {
+				t.Fatal("legacy intent marker was not preserved")
 			}
 			if _, err := repo.MobileIdentitySubject(ctx, issuer, mobile); !errors.Is(err, pgx.ErrNoRows) {
 				t.Fatal("uncompleted registration exposed an identity")
 			}
-			if _, err := auth.PrecheckRegistration(ctx, username, mobile, "DifferentPassword2"); err != nil {
+			if _, err := auth.PrecheckRegistration(ctx, username, mobile, firstReference.Handle, firstReference.PolicyVersion); err != nil {
 				t.Fatal("owned pending registration cannot recover")
 			}
 			if fault == "local_identity_write" {
@@ -167,9 +177,9 @@ func TestPostgresRegistrationRecoversOnlyItsOwnIntentWithoutResettingPassword(t 
 			failLookup = false
 			mu.Unlock()
 			now = now.Add(61 * time.Second)
-			var result MobileRegistrationResult
-			err = json.Unmarshal(post("/v1/auth/register", map[string]any{"username": username, "mobile": mobile, "challenge_id": challenge("DifferentPassword2"), "code": "123456", "password": "DifferentPassword2"}, 201), &result)
-			if err != nil || result.UserID != pending.UserID || !result.PasswordPreserved {
+			var result RegistrationResult
+			err = json.Unmarshal(post("/v1/auth/register", registerBody("unused-retry-reference"), 201), &result)
+			if err != nil || result.UserID == nil || *result.UserID != pending.UserID || !result.PasswordPreserved {
 				t.Fatal("registration did not recover its exact identity")
 			}
 			mu.Lock()
@@ -227,7 +237,7 @@ func TestPostgresRegistrationCaptchaOnlyAllowsItsUnfinishedIssuerIntent(t *testi
 			if err != nil {
 				t.Fatal(err)
 			}
-			auth, err := NewMobileAuthService(repo, &smsProviderFake{}, &identityProvisionerFake{}, issuer)
+			auth, err := NewMobileAuthService(repo, &smsProviderFake{}, &identityProvisionerFake{}, issuer, registrationTokensForTest(t))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -344,11 +354,8 @@ func TestKeycloakRegistrationRejectsForeignMarkerFactsAndAmbiguousSubjects(t *te
 				}
 			}))
 			defer server.Close()
-			p, err := NewKeycloakProvisioner(server.URL, server.URL+"/token", "pinvou", "controlled", strings.Repeat("s", 32))
-			if err != nil {
-				t.Fatal(err)
-			}
-			if _, _, err := p.CreateMobileUser(context.Background(), registration, "ControlledPassword1"); err == nil {
+			p, _ := newIdentityBoundaryForTest(t, server.URL, strings.Repeat("s", 32))
+			if _, _, err := p.FindMobileUserByRegistrationOperation(context.Background(), registration.UserID, registration.Username, registration.Mobile, true); err == nil {
 				t.Fatal("foreign or ambiguous identity was accepted")
 			}
 		})
@@ -360,6 +367,9 @@ func TestPostgresMobileRegistrationFaultsRollbackTypedFactsAndCompletion(t *test
 		t.Run(stage, func(t *testing.T) {
 			repo := accountDatabase(t)
 			ctx := context.Background()
+			if err := repo.ConfigureCommerceProvider("controlled", "v1"); err != nil {
+				t.Fatal(err)
+			}
 			issuer := "https://identity.example.test"
 			username := "atomic" + uuid.NewString()[:8]
 			mobile := "+8613800138000"
@@ -376,7 +386,7 @@ func TestPostgresMobileRegistrationFaultsRollbackTypedFactsAndCompletion(t *test
 				condition = "NEW.action='account.mobile.registration.complete'"
 			}
 			if stage == "commerce_job" {
-				table = "mall_user_sync_jobs"
+				table = "commerce_customer_sync_jobs"
 				condition = "TRUE"
 			}
 			if _, err := repo.pool.Exec(ctx, `CREATE FUNCTION fail_registration_stage() RETURNS trigger LANGUAGE plpgsql AS $$BEGIN IF `+condition+` THEN RAISE EXCEPTION 'controlled registration stage fault'; END IF; RETURN NEW; END$$; CREATE TRIGGER fail_registration_stage BEFORE INSERT ON `+table+` FOR EACH ROW EXECUTE FUNCTION fail_registration_stage()`); err != nil {
@@ -391,7 +401,7 @@ func TestPostgresMobileRegistrationFaultsRollbackTypedFactsAndCompletion(t *test
 				t.Fatal("complete failure was hidden")
 			}
 			var users, ids, jobs int
-			if err := repo.pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM users),(SELECT count(*) FROM identities),(SELECT count(*) FROM mall_user_sync_jobs)`).Scan(&users, &ids, &jobs); err != nil {
+			if err := repo.pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM users),(SELECT count(*) FROM identities),(SELECT count(*) FROM commerce_customer_sync_jobs)`).Scan(&users, &ids, &jobs); err != nil {
 				t.Fatal(err)
 			}
 			expectedUsers := 1
@@ -417,7 +427,7 @@ func TestPostgresMobileRegistrationFaultsRollbackTypedFactsAndCompletion(t *test
 			if err := repo.CompleteMobileRegistration(ctx, issuer, registration, subject, true); err != nil {
 				t.Fatal(err)
 			}
-			if err := repo.pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM identities),(SELECT count(*) FROM mall_user_sync_jobs)`).Scan(&ids, &jobs); err != nil || ids != 1 || jobs != 1 {
+			if err := repo.pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM identities),(SELECT count(*) FROM commerce_customer_sync_jobs)`).Scan(&ids, &jobs); err != nil || ids != 1 || jobs != 1 {
 				t.Fatal("completion retry duplicated identity or commerce job")
 			}
 		})
@@ -492,14 +502,18 @@ func TestPostgresHTTPBootstrapWalletFailureRetainsCompleteMobileDefaults(t *test
 	request := httptest.NewRequest("POST", "/v1/account/bootstrap", strings.NewReader("{}"))
 	request.Header.Set("Authorization", "Bearer controlled")
 	handler.ServeHTTP(response, request)
-	var body struct {
-		Account Me `json:"account"`
-	}
-	if response.Code != 503 || json.Unmarshal(response.Body.Bytes(), &body) != nil || body.Account.Status != "PROVISIONING" || body.Account.MobileVerified || body.Account.Mobile != nil || body.Account.MallSyncStatus != "NOT_CONFIGURED" {
+	var body Me
+	if response.Code != 200 || json.Unmarshal(response.Body.Bytes(), &body) != nil || body.Status != "PROVISIONING" || body.MobileVerified || body.Mobile != nil || body.CommerceCustomerStatus != "NOT_CONFIGURED" {
 		t.Fatal("wallet failure emitted incomplete mobile account defaults")
 	}
+	if err := NewWalletProvisioningWorker(repo, wallets, time.Second).RunOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
 	var status string
-	if err := repo.pool.QueryRow(context.Background(), `SELECT status FROM users WHERE id=$1`, body.Account.UserID).Scan(&status); err != nil || status != "PROVISIONING" {
+	if err := repo.pool.QueryRow(context.Background(), `SELECT status FROM users WHERE id=$1`, body.UserID).Scan(&status); err != nil || status != "PROVISIONING" {
 		t.Fatal("wallet failure activated account")
+	}
+	if err := repo.pool.QueryRow(context.Background(), `SELECT status FROM wallet_provisioning_jobs WHERE user_id=$1`, body.UserID).Scan(&status); err != nil || status != "RETRY" {
+		t.Fatal("wallet failure lost its durable retry")
 	}
 }

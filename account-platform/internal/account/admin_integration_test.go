@@ -13,14 +13,21 @@ import (
 	"github.com/google/uuid"
 )
 
-func fixturePlatformAdmin() identity.Principal {
-	return identity.Principal{Issuer: "https://identity.example.test", Subject: uuid.NewString(), SessionID: uuid.NewString(), RealmRoles: []string{"platform-admin"}}
+func fixturePlatformAdmin(t *testing.T, repo *PostgresRepository) identity.Principal {
+	t.Helper()
+	principal, me := accountUser(t, repo)
+	principal.RealmRoles = []string{"platform-admin"}
+	_, err := repo.pool.Exec(context.Background(), `INSERT INTO role_assignments(id,user_id,role_code,source,created_at) VALUES($1,$2,'PLATFORM_SUPER_ADMIN','TEST',statement_timestamp())`, uuid.New(), me.UserID)
+	if err != nil {
+		t.Fatal("platform authority fixture could not be created")
+	}
+	return principal
 }
 
 func TestPostgresHTTPOnlyRealmAdministratorCreatesOrganizationWithInitialOwner(t *testing.T) {
 	repo := accountDatabase(t)
 	owner, me := accountUser(t, repo)
-	admin := fixturePlatformAdmin()
+	admin := fixturePlatformAdmin(t, repo)
 	server := httptest.NewServer(NewService(repo, nil).Handler(func(_ context.Context, bearer string) (identity.Principal, error) {
 		if bearer == "fixture-admin" {
 			return admin, nil
@@ -76,7 +83,7 @@ func assertMembershipEventVersion(t *testing.T, repository *PostgresRepository, 
 func TestPostgresAdminCreationPublishesInitialOwnerMembership(t *testing.T) {
 	r := accountDatabase(t)
 	_, owner := accountUser(t, r)
-	organization, err := r.AdminCreateOrganization(context.Background(), fixturePlatformAdmin(), owner.UserID, "admin-created organization")
+	organization, err := r.AdminCreateOrganization(context.Background(), fixturePlatformAdmin(t, r), owner.UserID, "admin-created organization")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -89,7 +96,7 @@ func TestPostgresAdminOwnershipTransferPreservesPreviousMemberAndEvents(t *testi
 	target, targetMe := accountUser(t, r)
 	organization := accountOrganization(t, r, owner)
 	accountInvitation(t, r, owner, target, organization.ID, []string{"MEMBER"})
-	if err := r.AdminTransferOwnership(context.Background(), fixturePlatformAdmin(), organization.ID, targetMe.UserID); err != nil {
+	if err := r.AdminTransferOwnership(context.Background(), fixturePlatformAdmin(t, r), organization.ID, targetMe.UserID); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := r.SetActiveContext(context.Background(), owner, &organization.ID); err != nil {
@@ -107,7 +114,7 @@ func TestPostgresAdminOrganizationStatusAndDeletionPublishEachMembershipVersion(
 	r := accountDatabase(t)
 	owner, ownerMe := accountUser(t, r)
 	organization := accountOrganization(t, r, owner)
-	admin := fixturePlatformAdmin()
+	admin := fixturePlatformAdmin(t, r)
 	for _, state := range []struct{ organization, membership string }{{"DISABLED", "SUSPENDED"}, {"ACTIVE", "ACTIVE"}} {
 		if err := r.AdminSetOrganizationStatus(context.Background(), admin, organization.ID, state.organization); err != nil {
 			t.Fatal(err)
@@ -128,7 +135,7 @@ func TestPostgresAdminLeafDeletionClearsGrantsAndPublishesMemberVersion(t *testi
 	accountInvitation(t, r, owner, member, organization.ID, []string{"MEMBER"})
 	unit := accountUnit(t, r, owner, organization.ID, nil, "leaf")
 	accountExec(t, r, `INSERT INTO membership_units(membership_id,unit_id,created_at) SELECT id,$1,now() FROM memberships WHERE organization_id=$2 AND user_id=$3`, unit.ID, organization.ID, memberMe.UserID)
-	if err := r.AdminDeleteUnit(context.Background(), fixturePlatformAdmin(), organization.ID, unit.ID); err != nil {
+	if err := r.AdminDeleteUnit(context.Background(), fixturePlatformAdmin(t, r), organization.ID, unit.ID); err != nil {
 		t.Fatal(err)
 	}
 	assertMembershipEventVersion(t, r, organization.ID, memberMe.UserID, "ACTIVE")
@@ -144,7 +151,7 @@ func TestPostgresAdminUserDeletionPublishesRevocation(t *testing.T) {
 	member, memberMe := accountUser(t, r)
 	organization := accountOrganization(t, r, owner)
 	accountInvitation(t, r, owner, member, organization.ID, []string{"MEMBER"})
-	if err := r.AdminDeleteUser(context.Background(), fixturePlatformAdmin(), memberMe.UserID); err != nil {
+	if err := r.AdminDeleteUser(context.Background(), fixturePlatformAdmin(t, r), memberMe.UserID); err != nil {
 		t.Fatal(err)
 	}
 	assertMembershipEventVersion(t, r, organization.ID, memberMe.UserID, "REVOKED")
@@ -155,7 +162,7 @@ func TestPostgresAdminMembershipMutationRollsBackWhenEventCannotPersist(t *testi
 	owner, ownerMe := accountUser(t, r)
 	organization := accountOrganization(t, r, owner)
 	accountExec(t, r, `ALTER TABLE outbox_events ADD CONSTRAINT fixture_admin_outbox_fail CHECK(event_type<>'account.membership.changed.v1') NOT VALID`)
-	if err := r.AdminSetOrganizationStatus(context.Background(), fixturePlatformAdmin(), organization.ID, "DISABLED"); err == nil {
+	if err := r.AdminSetOrganizationStatus(context.Background(), fixturePlatformAdmin(t, r), organization.ID, "DISABLED"); err == nil {
 		t.Fatal("admin mutation committed without its membership event")
 	}
 	var organizationStatus, membershipStatus string
@@ -171,7 +178,7 @@ func TestPostgresHTTPAdminRejectsInvalidJSONWithoutMutation(t *testing.T) {
 	owner, me := accountUser(t, repo)
 	org := accountOrganization(t, repo, owner)
 	unit := accountUnit(t, repo, owner, org.ID, nil, "fixture leaf")
-	admin := fixturePlatformAdmin()
+	admin := fixturePlatformAdmin(t, repo)
 	server := httptest.NewServer(NewService(repo, nil).Handler(func(context.Context, string) (identity.Principal, error) { return admin, nil }))
 	defer server.Close()
 	routes := []struct{ name, method, path, valid, invalidType string }{

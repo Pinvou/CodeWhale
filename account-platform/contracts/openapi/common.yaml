@@ -72,6 +72,11 @@ components:
             - MOBILE_ALREADY_REGISTERED
             - MOBILE_INVALID
             - PASSWORD_INVALID
+            - PASSWORD_EDGE_SPACE_NOT_ALLOWED
+            - PASSWORD_REFERENCE_INVALID
+            - PASSWORD_REFERENCE_CONFLICT
+            - IDENTITY_CREATE_NOT_DISPATCHED
+            - IDENTITY_INTERNAL_ERROR
             - PAYMENT_UNAVAILABLE
             - PERSONAL_RECHARGE_ONLY
             - SESSION_UNAVAILABLE
@@ -81,6 +86,35 @@ components:
             - UPSTREAM_UNAVAILABLE
             - USERNAME_ALREADY_REGISTERED
             - USERNAME_INVALID
+            - AUTHORIZATION_UNAVAILABLE
+            - PERMISSION_DENIED
+            - APPROVAL_UNAVAILABLE
+            - INVALID_APPROVAL_FILTER
+            - APPROVAL_EXECUTION_UNAVAILABLE
+            - APPROVAL_SELF_DECISION_FORBIDDEN
+            - APPROVAL_REQUEST_EXPIRED
+            - APPROVAL_REQUEST_INVALIDATED
+            - APPROVAL_WORKFLOW_REQUIRED
+            - APPROVAL_NOT_EXECUTABLE
+            - COMMAND_POLICY_UNAVAILABLE
+            - REGISTRATION_OPERATION_NOT_FOUND
+            - REGISTRATION_IDEMPOTENCY_CONFLICT
+            - REGISTRATION_REPAIR_UNAVAILABLE
+            - REGISTRATION_COMPENSATION_FORBIDDEN
+            - PROFILE_CHANGE_FAILED
+            - RECENT_AUTHENTICATION_REQUIRED
+            - PROFILE_CHANGE_CONFLICT
+            - MOBILE_VERIFICATION_REQUIRED
+            - PROFILE_CHANGE_NOT_FOUND
+            - LAST_ACTIVE_SUPER_ADMIN
+            - ACCOUNT_PROVISIONING
+            - ACCOUNT_REPAIR_REQUIRED
+            - ADMIN_BOOTSTRAP_PENDING
+            - LOOKUP_RATE_LIMITED
+            - USER_NOT_FOUND
+            - ADJUSTMENT_REQUEST_UNAVAILABLE
+            - USAGE_PLATFORM_LOSS_REVIEW
+            - COMMERCE_CUSTOMER_NOT_READY
         message:
           type: string
         request_id:
@@ -91,7 +125,7 @@ components:
     Context:
       type: object
       additionalProperties: false
-      required: [context_type, membership_version]
+      required: [context_type, membership_version, context_version, authorization_version]
       properties:
         context_type:
           type: string
@@ -100,5 +134,11 @@ components:
           type: [string, "null"]
           format: uuid
         membership_version:
+          type: integer
+          minimum: 1
+        context_version:
+          type: integer
+          minimum: 1
+        authorization_version:
           type: integer
           minimum: 1

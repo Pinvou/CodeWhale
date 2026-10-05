@@ -1,6 +1,6 @@
 # 短信验证后端可替换设计
 
-> 状态：后续设计规划；现有 HTTP/Aliyun Adapter 与目标扩展分别说明
+> 状态：当前支持 HTTP 托管、Aliyun 托管及显式平台生成模式；下文通用扩展设计与已实现端口分别说明
 >
 > 日期：2026-08-22
 >
@@ -16,26 +16,23 @@
 - 支持“供应商生成并核验验证码”和“平台生成验证码、供应商只发送短信”两类方案。
 - 风控、挑战状态、一次性消费、反枚举和审计始终由品悟业务层控制，不能交给某一家供应商成为唯一事实源。
 
-## 2. 当前实现与差距
+## 2. 当前实现
 
-当前代码已经有一个初步接口：
+当前代码通过供应商中立接口提供托管与平台生成两类验证码所有权模式：
 
 ```text
-SMSProvider.SendCode(...)
+SMSProvider.Descriptor() -> provider_id + adapter_version
+SMSProvider.SendCode(...) -> message_id + opaque_verification_data
 SMSProvider.VerifyCode(...)
 ```
 
-但仍存在耦合：
+`SMS_PROVIDER` 在启动时选择 `http`、`aliyun`、`aliyun-managed` 或 `http-generated`。`http` 保留既有受鉴权的 `/send` 与 `/verify` 协议；`aliyun`/`aliyun-managed` 由阿里云生成并核验验证码；`http-generated` 使用密码学安全随机源在 Adapter 中生成验证码，通过通用 HTTPS 发送端点投递，并向 Account 返回带独立密钥的 HMAC 校验数据。`http` 不会被隐式改成平台生成模式。核心挑战状态机不判断厂商。`sms_challenges` 保存创建时的 Provider ID 和 Adapter 版本，`sms_send_attempts` 只保存手机号、来源和设备的单向摘要用于限流审计。注册、登录、改手机号和找回密码通过同一用途端口接入；真实短信供应商及用途模板仍须各部署独立验收。
 
-1. 现有接口要求同一个 Provider 发送和核验，已同时支持通用 HTTP `/send`、`/verify` 和 Aliyun 托管验证码；平台生成并本地核验模式仍属后续目标。
-2. `account-service` 已由 `NewSMSProvider` 按显式 `SMS_PROVIDER=http|aliyun` 选择，并拒绝未知值；不再直接构造唯一 Aliyun 实现。生产端点受 HTTPS 校验。
-3. 阿里云 Action、签名、模板和验证码参数与 Account 包放在一起。
-4. 挑战记录没有稳定的后端类型/版本，切换 Provider 后，切换前已发送的验证码无法可靠路由到原后端核验。
-5. 当前用途只有注册和登录；改手机号、找回密码接入后容易继续复制供应商分支。
-
-当前已形成两种供应商 Adapter 的发送/核验端口，但没有目标的生成模式、挑战版本路由和无缝迁移。发送不确定时保留冷却；通用协议不新增未经定义的权威 negative 字段，Aliyun 仅对完整明确的官方前置拒绝解除计数。后文新接口和模式是规划，不能作为本波交付或修改既有公开 SMS 契约的授权。
+发送结果不确定时保留冷却。通用 HTTP 协议没有权威的未接受响应；Aliyun 只有完整返回五类官方前置拒绝、`Success=false` 且没有请求或投递标识时才解除冷却。不能把错误文本、超时或截断 JSON 解释为未发送。
 
 ## 3. 分层架构
+
+下文第 3–13 节保留更完整的目标扩展设计和验收建议。`VerificationBackend`、多后端注册表、无中断轮换、额外目录与配置名不是当前已交付接口；当前实现使用第 2 节的 `SMSProvider` 和部署文档中的配置。挑战会核对创建时的 Provider ID/版本，当前只装配一个 Adapter；更换 Provider 后旧挑战不会由新 Adapter 接管，运维须等待旧挑战终止，不能把拒绝错后端核验称为无中断迁移。
 
 ```mermaid
 flowchart LR
@@ -117,7 +114,7 @@ VerificationBackend.Verify(VerifyChallenge) -> PASS | REJECT | UNAVAILABLE
 4. 用户提交验证码后，Adapter 调用供应商核验接口。
 5. 品悟根据统一结果原子消费 Challenge。
 
-当前 `SendSmsVerifyCode`/`CheckSmsVerifyCode` 逻辑迁入 `aliyun_number_auth` Adapter，业务服务不再直接引用它。
+当前 `SendSmsVerifyCode`/`CheckSmsVerifyCode` 逻辑位于 Account 包内独立的 Aliyun Adapter；核心挑战服务通过端口调用，不直接判断厂商协议。图中的更细模块命名为扩展设计，不能声称仓库存在同名组件。
 
 ### 4.2 仅发送短信
 

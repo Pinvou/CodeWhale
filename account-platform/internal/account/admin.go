@@ -29,6 +29,7 @@ type AdminOverview struct {
 
 type AdminUser struct {
 	ID                uuid.UUID  `json:"user_id"`
+	UserCode          string     `json:"user_code"`
 	Username          *string    `json:"username,omitempty"`
 	DisplayName       *string    `json:"display_name,omitempty"`
 	Email             *string    `json:"email,omitempty"`
@@ -49,10 +50,11 @@ type AdminOrganization struct {
 }
 
 type AdminRoleDefinition struct {
-	Code        string `json:"code"`
-	Scope       string `json:"scope"`
-	Assignable  bool   `json:"assignable"`
-	Description string `json:"description"`
+	Code        string   `json:"code"`
+	Scope       string   `json:"scope"`
+	Assignable  bool     `json:"assignable"`
+	Description string   `json:"description"`
+	Permissions []string `json:"permissions"`
 }
 
 type AdminUserMembership struct {
@@ -90,6 +92,9 @@ type AdminAuditFilter struct {
 
 type adminRepository interface {
 	AdminOverview(context.Context) (AdminOverview, error)
+	AdminRoleBindings(context.Context, *uuid.UUID, *uuid.UUID) ([]RoleBinding, error)
+	AdminGrantRoleBinding(context.Context, identity.Principal, RoleBindingGrant) (RoleBinding, error)
+	AdminRevokeRoleBinding(context.Context, identity.Principal, uuid.UUID) (RoleBinding, error)
 	AdminUsers(context.Context, string, int) ([]AdminUser, error)
 	AdminUserMemberships(context.Context, uuid.UUID) ([]AdminUserMembership, error)
 	AdminSetUserStatus(context.Context, identity.Principal, uuid.UUID, string) error
@@ -145,14 +150,90 @@ func (s *Service) adminOverview(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Service) adminRoles(w http.ResponseWriter, r *http.Request) {
-	api.WriteJSON(w, http.StatusOK, map[string]any{"items": []AdminRoleDefinition{
-		{Code: "OWNER", Scope: "ORGANIZATION", Assignable: false, Description: "Organization owner; transfer ownership to change this role."},
-		{Code: "ORG_ADMIN", Scope: "ORGANIZATION", Assignable: true, Description: "Manage organization members, roles and units."},
-		{Code: "BILLING_ADMIN", Scope: "ORGANIZATION", Assignable: true, Description: "Manage organization billing and usage."},
-		{Code: "UNIT_ADMIN", Scope: "UNIT", Assignable: true, Description: "Manage one or more assigned organization units."},
-		{Code: "MEMBER", Scope: "ORGANIZATION", Assignable: false, Description: "Base role automatically retained for every active member."},
-		{Code: "AUDITOR", Scope: "ORGANIZATION", Assignable: true, Description: "Read organization activity and billing records."},
-	}})
+	repository, ok := s.repository.(authorizationRepository)
+	if !ok {
+		api.WriteError(w, http.StatusServiceUnavailable, "AUTHORIZATION_UNAVAILABLE", "authorization is unavailable", httpserver.RequestID(r.Context()))
+		return
+	}
+	items, err := repository.RoleDefinitions(r.Context())
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	api.WriteJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
+func (s *Service) adminRoleBindings(w http.ResponseWriter, r *http.Request) {
+	repository, ok := s.requireAdminRepository(w, r)
+	if !ok {
+		return
+	}
+	userID, err := optionalQueryUUID(r, "user_id")
+	if err != nil {
+		s.writeError(w, r, ErrConflict)
+		return
+	}
+	organizationID, err := optionalQueryUUID(r, "organization_id")
+	if err != nil {
+		s.writeError(w, r, ErrConflict)
+		return
+	}
+	items, err := repository.AdminRoleBindings(r.Context(), userID, organizationID)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	api.WriteJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
+func optionalQueryUUID(r *http.Request, name string) (*uuid.UUID, error) {
+	value := strings.TrimSpace(r.URL.Query().Get(name))
+	if value == "" {
+		return nil, nil
+	}
+	parsed, err := uuid.Parse(value)
+	if err != nil {
+		return nil, err
+	}
+	return &parsed, nil
+}
+
+func (s *Service) adminGrantRoleBinding(w http.ResponseWriter, r *http.Request) {
+	repository, ok := s.requireAdminRepository(w, r)
+	if !ok {
+		return
+	}
+	var body roleBindingGrantBody
+	if err := api.DecodeJSON(w, r, &body); err != nil {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "request body is invalid", httpserver.RequestID(r.Context()))
+		return
+	}
+	item, err := repository.AdminGrantRoleBinding(r.Context(), mustPrincipal(r.Context()), RoleBindingGrant{UserID: body.UserID, RoleCode: body.RoleCode, OrganizationID: body.OrganizationID, UnitID: body.UnitID, StartsAt: body.StartsAt, ExpiresAt: body.ExpiresAt, IdempotencyKey: body.IdempotencyKey})
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	api.WriteJSON(w, http.StatusCreated, item)
+}
+
+func (s *Service) adminRevokeRoleBinding(w http.ResponseWriter, r *http.Request) {
+	repository, ok := s.requireAdminRepository(w, r)
+	if !ok {
+		return
+	}
+	bindingID, ok := pathUUID(w, r, "binding_id")
+	if !ok {
+		return
+	}
+	item, err := repository.AdminRevokeRoleBinding(r.Context(), mustPrincipal(r.Context()), bindingID)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	api.WriteJSON(w, http.StatusOK, item)
 }
 
 func (s *Service) adminUsers(w http.ResponseWriter, r *http.Request) {
@@ -606,7 +687,7 @@ SELECT
 func (r *PostgresRepository) AdminUsers(ctx context.Context, search string, limit int) ([]AdminUser, error) {
 	pattern := "%" + strings.ToLower(search) + "%"
 	rows, err := r.pool.Query(ctx, `
-SELECT u.id,u.username,u.display_name,u.email,u.status,
+SELECT u.id,u.user_code,u.username,u.display_name,u.email,u.status,
        (SELECT count(*) FROM memberships m WHERE m.user_id=u.id AND m.status='ACTIVE'),
        (SELECT max(s.last_seen_at) FROM user_sessions s WHERE s.user_id=u.id),
        u.created_at,u.updated_at
@@ -620,9 +701,10 @@ ORDER BY u.updated_at DESC,u.id LIMIT $3`, strings.ToLower(search), pattern, lim
 	items := make([]AdminUser, 0)
 	for rows.Next() {
 		var item AdminUser
-		if err := rows.Scan(&item.ID, &item.Username, &item.DisplayName, &item.Email, &item.Status, &item.OrganizationCount, &item.LastSeenAt, &item.CreatedAt, &item.UpdatedAt); err != nil {
+		if err := rows.Scan(&item.ID, &item.UserCode, &item.Username, &item.DisplayName, &item.Email, &item.Status, &item.OrganizationCount, &item.LastSeenAt, &item.CreatedAt, &item.UpdatedAt); err != nil {
 			return nil, err
 		}
+		item.UserCode = FormatUserCode(item.UserCode)
 		items = append(items, item)
 	}
 	return items, rows.Err()
@@ -638,8 +720,8 @@ func (r *PostgresRepository) AdminUserMemberships(ctx context.Context, userID uu
 	}
 	rows, err := r.pool.Query(ctx, `
 SELECT o.id,o.name,m.status,
-       ARRAY(SELECT DISTINCT rb.role FROM role_bindings rb WHERE rb.membership_id=m.id ORDER BY rb.role),
-       ARRAY(SELECT rb.unit_id FROM role_bindings rb WHERE rb.membership_id=m.id AND rb.role='UNIT_ADMIN' ORDER BY rb.unit_id)
+       ARRAY(SELECT DISTINCT rb.role FROM role_bindings rb WHERE rb.membership_id=m.id AND rb.revoked_at IS NULL AND rb.starts_at<=now() AND (rb.expires_at IS NULL OR rb.expires_at>now()) ORDER BY rb.role),
+       ARRAY(SELECT rb.unit_id FROM role_bindings rb WHERE rb.membership_id=m.id AND rb.role='UNIT_ADMIN' AND rb.revoked_at IS NULL AND rb.starts_at<=now() AND (rb.expires_at IS NULL OR rb.expires_at>now()) ORDER BY rb.unit_id)
 FROM memberships m JOIN organizations o ON o.id=m.organization_id
 WHERE m.user_id=$1 AND m.status<>'REVOKED' AND o.status<>'DELETED'
 ORDER BY lower(o.name),o.id`, userID)
@@ -714,7 +796,7 @@ func (r *PostgresRepository) AdminCreateOrganization(ctx context.Context, princi
 	if _, err := tx.Exec(ctx, `INSERT INTO memberships(id,organization_id,user_id,status,joined_at,updated_at) VALUES($1,$2,$3,'ACTIVE',$4,$4)`, membershipID, organization.ID, ownerUserID, now); err != nil {
 		return Organization{}, mapConstraintError(err)
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO role_bindings(id,membership_id,role,created_by,created_at) VALUES($1,$2,'OWNER',$3,$4)`, uuid.Must(uuid.NewV7()), membershipID, ownerUserID, now); err != nil {
+	if _, err := tx.Exec(ctx, `INSERT INTO role_bindings(id,membership_id,role,created_by,created_at,grant_source) VALUES($1,$2,'OWNER',$3,$4,'ORGANIZATION_CREATION')`, uuid.Must(uuid.NewV7()), membershipID, ownerUserID, now); err != nil {
 		return Organization{}, mapConstraintError(err)
 	}
 	if _, err := tx.Exec(ctx, `UPDATE users SET membership_version=membership_version+1,updated_at=$2 WHERE id=$1`, ownerUserID, now); err != nil {
@@ -800,12 +882,12 @@ func (r *PostgresRepository) AdminMembers(ctx context.Context, organizationID uu
 	}
 	rows, err := r.pool.Query(ctx, `
 SELECT m.id,m.user_id,u.display_name,u.email,m.status,m.version,m.joined_at,
-       ARRAY(SELECT DISTINCT rb.role FROM role_bindings rb WHERE rb.membership_id=m.id ORDER BY rb.role),
+       ARRAY(SELECT DISTINCT rb.role FROM role_bindings rb WHERE rb.membership_id=m.id AND rb.revoked_at IS NULL AND rb.starts_at<=now() AND (rb.expires_at IS NULL OR rb.expires_at>now()) ORDER BY rb.role),
        ARRAY(SELECT mu.unit_id FROM membership_units mu WHERE mu.membership_id=m.id ORDER BY mu.unit_id),
-       ARRAY(SELECT rb.unit_id FROM role_bindings rb WHERE rb.membership_id=m.id AND rb.role='UNIT_ADMIN' ORDER BY rb.unit_id)
+       ARRAY(SELECT rb.unit_id FROM role_bindings rb WHERE rb.membership_id=m.id AND rb.role='UNIT_ADMIN' AND rb.revoked_at IS NULL AND rb.starts_at<=now() AND (rb.expires_at IS NULL OR rb.expires_at>now()) ORDER BY rb.unit_id)
 FROM memberships m JOIN users u ON u.id=m.user_id
 WHERE m.organization_id=$1 AND m.status<>'REVOKED' AND u.status='ACTIVE'
-ORDER BY CASE WHEN EXISTS(SELECT 1 FROM role_bindings rb WHERE rb.membership_id=m.id AND rb.role='OWNER') THEN 0 ELSE 1 END,
+ORDER BY CASE WHEN EXISTS(SELECT 1 FROM role_bindings rb WHERE rb.membership_id=m.id AND rb.role='OWNER' AND rb.revoked_at IS NULL AND rb.starts_at<=now() AND (rb.expires_at IS NULL OR rb.expires_at>now())) THEN 0 ELSE 1 END,
          lower(COALESCE(u.display_name,u.email,'')),m.user_id`, organizationID)
 	if err != nil {
 		return nil, err
@@ -867,16 +949,16 @@ func validateAdminUnits(ctx context.Context, tx pgx.Tx, organizationID uuid.UUID
 }
 
 func replaceAdminMemberRoles(ctx context.Context, tx pgx.Tx, membershipID, userID, actorID uuid.UUID, roles []string, unitAdminIDs []uuid.UUID, now time.Time, advanceVersion bool) (int64, error) {
-	if _, err := tx.Exec(ctx, `DELETE FROM role_bindings WHERE membership_id=$1 AND role<>'OWNER'`, membershipID); err != nil {
+	if _, err := tx.Exec(ctx, `UPDATE role_bindings SET revoked_at=$2,revoked_by=$3 WHERE membership_id=$1 AND role<>'OWNER' AND revoked_at IS NULL`, membershipID, now, actorID); err != nil {
 		return 0, err
 	}
 	for _, role := range roles {
-		if _, err := tx.Exec(ctx, `INSERT INTO role_bindings(id,membership_id,role,created_by,created_at) VALUES($1,$2,$3,$4,$5)`, uuid.Must(uuid.NewV7()), membershipID, role, actorID, now); err != nil {
+		if _, err := tx.Exec(ctx, `INSERT INTO role_bindings(id,membership_id,role,created_by,created_at,grant_source) VALUES($1,$2,$3,$4,$5,'ADMIN')`, uuid.Must(uuid.NewV7()), membershipID, role, actorID, now); err != nil {
 			return 0, mapConstraintError(err)
 		}
 	}
 	for _, unitID := range unitAdminIDs {
-		if _, err := tx.Exec(ctx, `INSERT INTO role_bindings(id,membership_id,role,unit_id,created_by,created_at) VALUES($1,$2,'UNIT_ADMIN',$3,$4,$5)`, uuid.Must(uuid.NewV7()), membershipID, unitID, actorID, now); err != nil {
+		if _, err := tx.Exec(ctx, `INSERT INTO role_bindings(id,membership_id,role,unit_id,created_by,created_at,grant_source) VALUES($1,$2,'UNIT_ADMIN',$3,$4,$5,'ADMIN')`, uuid.Must(uuid.NewV7()), membershipID, unitID, actorID, now); err != nil {
 			return 0, mapConstraintError(err)
 		}
 	}
@@ -1024,7 +1106,7 @@ func (r *PostgresRepository) AdminRemoveMember(ctx context.Context, principal id
 	var membershipID uuid.UUID
 	var version int64
 	var owner bool
-	err = tx.QueryRow(ctx, `SELECT m.id,m.version,EXISTS(SELECT 1 FROM role_bindings rb WHERE rb.membership_id=m.id AND rb.role='OWNER') FROM memberships m WHERE m.organization_id=$1 AND m.user_id=$2 AND m.status='ACTIVE' FOR UPDATE`, organizationID, userID).Scan(&membershipID, &version, &owner)
+	err = tx.QueryRow(ctx, `SELECT m.id,m.version,EXISTS(SELECT 1 FROM role_bindings rb WHERE rb.membership_id=m.id AND rb.role='OWNER' AND rb.revoked_at IS NULL AND rb.starts_at<=statement_timestamp() AND (rb.expires_at IS NULL OR rb.expires_at>statement_timestamp())) FROM memberships m WHERE m.organization_id=$1 AND m.user_id=$2 AND m.status='ACTIVE' FOR UPDATE`, organizationID, userID).Scan(&membershipID, &version, &owner)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ErrNotFound
 	}
@@ -1036,7 +1118,7 @@ func (r *PostgresRepository) AdminRemoveMember(ctx context.Context, principal id
 	}
 	now := r.now()
 	version++
-	if _, err := tx.Exec(ctx, `DELETE FROM role_bindings WHERE membership_id=$1`, membershipID); err != nil {
+	if _, err := tx.Exec(ctx, `UPDATE role_bindings SET revoked_at=$2,revoked_by=$3 WHERE membership_id=$1 AND revoked_at IS NULL`, membershipID, now, actorID); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(ctx, `DELETE FROM membership_units WHERE membership_id=$1`, membershipID); err != nil {
@@ -1097,7 +1179,7 @@ FOR UPDATE OF m,u`, organizationID, targetUserID).Scan(&targetMembership)
 	}
 	rows, err := tx.Query(ctx, `
 SELECT m.id,m.user_id FROM memberships m JOIN role_bindings rb ON rb.membership_id=m.id
-WHERE m.organization_id=$1 AND m.status='ACTIVE' AND rb.role='OWNER'
+WHERE m.organization_id=$1 AND m.status='ACTIVE' AND rb.role='OWNER' AND rb.revoked_at IS NULL AND rb.starts_at<=statement_timestamp() AND (rb.expires_at IS NULL OR rb.expires_at>statement_timestamp())
 FOR UPDATE OF m,rb`, organizationID)
 	if err != nil {
 		return err
@@ -1121,19 +1203,19 @@ FOR UPDATE OF m,rb`, organizationID)
 	if len(previousOwners) == 1 && previousOwners[0] == targetUserID {
 		return tx.Commit(ctx)
 	}
-	if _, err := tx.Exec(ctx, `DELETE FROM role_bindings rb USING memberships m WHERE rb.membership_id=m.id AND m.organization_id=$1 AND rb.role='OWNER'`, organizationID); err != nil {
-		return err
-	}
 	createdBy := targetUserID
 	if actorID != nil {
 		createdBy = *actorID
 	}
 	now := r.now()
-	if _, err := tx.Exec(ctx, `INSERT INTO role_bindings(id,membership_id,role,created_by,created_at) VALUES($1,$2,'OWNER',$3,$4)`, uuid.Must(uuid.NewV7()), targetMembership, createdBy, now); err != nil {
+	if _, err := tx.Exec(ctx, `UPDATE role_bindings rb SET revoked_at=$2,revoked_by=$3 FROM memberships m WHERE rb.membership_id=m.id AND m.organization_id=$1 AND rb.role='OWNER' AND rb.revoked_at IS NULL AND rb.starts_at<=statement_timestamp() AND (rb.expires_at IS NULL OR rb.expires_at>statement_timestamp())`, organizationID, now, createdBy); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO role_bindings(id,membership_id,role,created_by,created_at,grant_source) VALUES($1,$2,'OWNER',$3,$4,'OWNERSHIP_TRANSFER')`, uuid.Must(uuid.NewV7()), targetMembership, createdBy, now); err != nil {
 		return mapConstraintError(err)
 	}
 	// A former owner remains a member when no other role survives the transfer.
-	if _, err := tx.Exec(ctx, `INSERT INTO role_bindings(id,membership_id,role,created_by,created_at) SELECT gen_random_uuid(),m.id,'MEMBER',$2,$3 FROM memberships m WHERE m.id=ANY($1) AND NOT EXISTS(SELECT 1 FROM role_bindings rb WHERE rb.membership_id=m.id)`, ownerMemberships, createdBy, now); err != nil {
+	if _, err := tx.Exec(ctx, `INSERT INTO role_bindings(id,membership_id,role,created_by,created_at) SELECT gen_random_uuid(),m.id,'MEMBER',$2,$3 FROM memberships m WHERE m.id=ANY($1) AND NOT EXISTS(SELECT 1 FROM role_bindings rb WHERE rb.membership_id=m.id AND rb.revoked_at IS NULL AND rb.starts_at<=statement_timestamp() AND (rb.expires_at IS NULL OR rb.expires_at>statement_timestamp()))`, ownerMemberships, createdBy, now); err != nil {
 		return err
 	}
 	affectedMemberships := append(ownerMemberships, targetMembership)
@@ -1402,6 +1484,11 @@ func (r *PostgresRepository) AdminSetUserStatus(ctx context.Context, principal i
 	if (status == "ACTIVE" && currentStatus != "DISABLED") || (status == "DISABLED" && currentStatus != "ACTIVE" && currentStatus != "PROVISIONING") {
 		return ErrConflict
 	}
+	if status == "DISABLED" {
+		if err := assertNotLastActiveSuperAdmin(ctx, tx, userID); err != nil {
+			return err
+		}
+	}
 	now := r.now()
 	if _, err := tx.Exec(ctx, `UPDATE users SET status=$2,version=version+1,membership_version=membership_version+1,updated_at=$3 WHERE id=$1`, userID, status, now); err != nil {
 		return err
@@ -1445,11 +1532,15 @@ SELECT EXISTS(
   JOIN role_bindings rb ON rb.membership_id=m.id AND rb.role='OWNER'
   JOIN organizations o ON o.id=m.organization_id AND o.status<>'DELETED'
   WHERE m.user_id=$1 AND m.status IN ('ACTIVE','SUSPENDED')
+    AND rb.revoked_at IS NULL AND rb.starts_at<=statement_timestamp() AND (rb.expires_at IS NULL OR rb.expires_at>statement_timestamp())
 )`, userID).Scan(&ownsOrganization); err != nil {
 		return err
 	}
 	if ownsOrganization {
 		return ErrLastOwner
+	}
+	if err := assertNotLastActiveSuperAdmin(ctx, tx, userID); err != nil {
+		return err
 	}
 	now := r.now()
 	if _, err := updateAdminMemberships(ctx, tx, `UPDATE memberships SET status='REVOKED',version=version+1,updated_at=$2 WHERE user_id=$1 AND status<>'REVOKED' RETURNING id,organization_id,user_id,status,version`, userID, now); err != nil {

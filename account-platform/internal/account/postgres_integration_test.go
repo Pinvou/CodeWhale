@@ -22,7 +22,7 @@ import (
 
 func accountDatabase(t *testing.T) *PostgresRepository {
 	t.Helper()
-	return &PostgresRepository{pool: testdb.Open(t, "account"), now: func() time.Time { return time.Now().UTC() }}
+	return &PostgresRepository{pool: testdb.Open(t, "account"), now: func() time.Time { return time.Now().UTC() }, walletPolicyVersion: walletProvisioningPolicyVersion, walletProvisioningSLA: walletProvisioningSLA}
 }
 
 func accountUser(t *testing.T, repository *PostgresRepository) (identity.Principal, Me) {

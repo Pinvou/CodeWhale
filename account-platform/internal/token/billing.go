@@ -32,19 +32,26 @@ type Usage struct {
 }
 
 type BillingHold struct {
-	ID             uuid.UUID `json:"hold_id"`
-	UsageRequestID uuid.UUID `json:"usage_request_id"`
-	Status         string    `json:"status"`
+	ID                 uuid.UUID  `json:"hold_id"`
+	UsageRequestID     uuid.UUID  `json:"usage_request_id"`
+	Status             string     `json:"status"`
+	WalletID           uuid.UUID  `json:"wallet_id"`
+	PriceVersionID     *uuid.UUID `json:"price_version_id,omitempty"`
+	MaxMicrocredits    *int64     `json:"max_microcredits"`
+	ActualMicrocredits *int64     `json:"actual_microcredits,omitempty"`
+	ExpiresAt          time.Time  `json:"expires_at"`
 }
+
+var ErrCommerceCustomerNotReady = errors.New("commerce customer mapping is not ready")
 
 type BillingClient interface {
 	Price(context.Context, string) (PriceVersion, error)
 	PriceByID(context.Context, uuid.UUID) (PriceVersion, error)
 	Reserve(context.Context, uuid.UUID, uuid.UUID, int64, uuid.UUID) (BillingHold, error)
-	Commit(context.Context, uuid.UUID, uuid.UUID, int64, Usage) error
-	Release(context.Context, uuid.UUID, uuid.UUID, string) error
+	Commit(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, int64, Usage) error
+	Release(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, string) error
 	Products(context.Context) (json.RawMessage, error)
-	CreateRechargeOrder(context.Context, uuid.UUID, uuid.UUID, string, string, string, string) (json.RawMessage, error)
+	CreateRechargeOrder(context.Context, uuid.UUID, uuid.UUID, string, string, string, string, string) (json.RawMessage, error)
 	RechargeOrders(context.Context, uuid.UUID, uuid.UUID) (json.RawMessage, error)
 	RecentRechargeOrder(context.Context, uuid.UUID, uuid.UUID) (json.RawMessage, error)
 	RechargeOrder(context.Context, uuid.UUID, uuid.UUID) (json.RawMessage, error)
@@ -68,8 +75,8 @@ func (c *HTTPBillingClient) Products(ctx context.Context) (json.RawMessage, erro
 	return c.raw(ctx, http.MethodGet, "/v1/recharge/products", nil, "")
 }
 
-func (c *HTTPBillingClient) CreateRechargeOrder(ctx context.Context, requesterID, walletID uuid.UUID, productID, channel, mobile, idempotencyKey string) (json.RawMessage, error) {
-	return c.raw(ctx, http.MethodPost, "/internal/v1/recharge/orders", map[string]any{"requester_id": requesterID, "wallet_id": walletID, "product_id": productID, "channel": channel, "mobile": mobile}, idempotencyKey)
+func (c *HTTPBillingClient) CreateRechargeOrder(ctx context.Context, requesterID, walletID uuid.UUID, productID, channel, mobile, commerceCustomerStatus, idempotencyKey string) (json.RawMessage, error) {
+	return c.raw(ctx, http.MethodPost, "/internal/v1/recharge/orders", map[string]any{"requester_id": requesterID, "wallet_id": walletID, "product_id": productID, "channel": channel, "mobile": mobile, "commerce_customer_status": commerceCustomerStatus}, idempotencyKey)
 }
 
 func (c *HTTPBillingClient) RechargeOrders(ctx context.Context, requesterID, walletID uuid.UUID) (json.RawMessage, error) {
@@ -132,6 +139,12 @@ func (c *HTTPBillingClient) raw(ctx context.Context, method, path string, input 
 		return nil, errors.New("Billing response exceeds the allowed size")
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		var problem struct {
+			Code string `json:"code"`
+		}
+		if json.Unmarshal(payload, &problem) == nil && problem.Code == "COMMERCE_CUSTOMER_NOT_READY" {
+			return nil, ErrCommerceCustomerNotReady
+		}
 		return nil, fmt.Errorf("Billing HTTP %d: %s", response.StatusCode, payload)
 	}
 	return json.RawMessage(payload), nil
@@ -197,36 +210,87 @@ type HTTPBillingClient struct {
 
 func NewHTTPBillingClient(rawURL, serviceToken string) (*HTTPBillingClient, error) {
 	parsed, err := url.Parse(strings.TrimRight(strings.TrimSpace(rawURL), "/"))
-	if err != nil || parsed.Scheme == "" || parsed.Host == "" || strings.TrimSpace(serviceToken) == "" {
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" || parsed.Hostname() == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" || strings.TrimSpace(serviceToken) == "" {
 		return nil, errors.New("invalid Billing client configuration")
 	}
 	return &HTTPBillingClient{baseURL: parsed, serviceToken: serviceToken, client: observability.NewHTTPClient(10 * time.Second)}, nil
 }
 
 func (c *HTTPBillingClient) Price(ctx context.Context, model string) (PriceVersion, error) {
-	var price PriceVersion
-	err := c.call(ctx, http.MethodGet, "/internal/v1/pricing/current?model="+url.QueryEscape(model), nil, &price)
-	return price, err
+	price, err := c.readPrice(ctx, "/internal/v1/pricing/current?model="+url.QueryEscape(model))
+	if err == nil && price.Model != model {
+		err = errors.New("Billing price does not match requested model")
+	}
+	if err != nil {
+		return PriceVersion{}, err
+	}
+	return price, nil
 }
 
 func (c *HTTPBillingClient) PriceByID(ctx context.Context, priceID uuid.UUID) (PriceVersion, error) {
-	var price PriceVersion
-	err := c.call(ctx, http.MethodGet, "/internal/v1/pricing/"+priceID.String(), nil, &price)
-	return price, err
+	price, err := c.readPrice(ctx, "/internal/v1/pricing/"+priceID.String())
+	if err == nil && price.ID != priceID {
+		err = errors.New("Billing price does not match requested version")
+	}
+	if err != nil {
+		return PriceVersion{}, err
+	}
+	return price, nil
+}
+
+func (c *HTTPBillingClient) readPrice(ctx context.Context, path string) (PriceVersion, error) {
+	var wire struct {
+		ID     uuid.UUID `json:"price_version_id"`
+		Model  string    `json:"model"`
+		Input  *int64    `json:"input_per_million"`
+		Output *int64    `json:"output_per_million"`
+		Cached *int64    `json:"cached_input_per_million"`
+	}
+	if err := c.call(ctx, http.MethodGet, path, nil, &wire); err != nil {
+		return PriceVersion{}, err
+	}
+	if wire.ID == uuid.Nil || strings.TrimSpace(wire.Model) == "" || wire.Input == nil || wire.Output == nil || wire.Cached == nil || *wire.Input < 0 || *wire.Output < 0 || *wire.Cached < 0 {
+		return PriceVersion{}, errors.New("Billing price response is incomplete or invalid")
+	}
+	return PriceVersion{ID: wire.ID, Model: wire.Model, InputPerMillion: *wire.Input, OutputPerMillion: *wire.Output, CachedInputPerMillion: *wire.Cached}, nil
 }
 
 func (c *HTTPBillingClient) Reserve(ctx context.Context, usageID, walletID uuid.UUID, maximum int64, priceID uuid.UUID) (BillingHold, error) {
 	var hold BillingHold
 	err := c.call(ctx, http.MethodPost, "/internal/v1/holds/reserve", map[string]any{"usage_request_id": usageID, "wallet_id": walletID, "maximum_microcredits": maximum, "price_version_id": priceID, "lease_seconds": 900}, &hold)
-	return hold, err
+	if err != nil {
+		return BillingHold{}, err
+	}
+	if !hold.matches(usageID, walletID) || hold.Status != "ACTIVE" || hold.PriceVersionID == nil || *hold.PriceVersionID != priceID || *hold.MaxMicrocredits != maximum || hold.ActualMicrocredits != nil {
+		return BillingHold{}, errors.New("Billing reservation facts do not match")
+	}
+	return hold, nil
 }
 
-func (c *HTTPBillingClient) Commit(ctx context.Context, usageID, holdID uuid.UUID, actual int64, usage Usage) error {
-	return c.call(ctx, http.MethodPost, "/internal/v1/holds/commit", map[string]any{"usage_request_id": usageID, "hold_id": holdID, "actual_microcredits": actual, "usage_snapshot": usage}, nil)
+func (h BillingHold) matches(usageID, walletID uuid.UUID) bool {
+	return usageID != uuid.Nil && walletID != uuid.Nil && h.ID != uuid.Nil && h.UsageRequestID == usageID && h.WalletID == walletID && h.MaxMicrocredits != nil && *h.MaxMicrocredits >= 0 && !h.ExpiresAt.IsZero()
 }
 
-func (c *HTTPBillingClient) Release(ctx context.Context, usageID, holdID uuid.UUID, reason string) error {
-	return c.call(ctx, http.MethodPost, "/internal/v1/holds/release", map[string]any{"usage_request_id": usageID, "hold_id": holdID, "reason": reason}, nil)
+func (c *HTTPBillingClient) Commit(ctx context.Context, usageID, holdID, walletID uuid.UUID, actual int64, usage Usage) error {
+	var hold BillingHold
+	if err := c.call(ctx, http.MethodPost, "/internal/v1/holds/commit", map[string]any{"usage_request_id": usageID, "hold_id": holdID, "actual_microcredits": actual, "usage_snapshot": usage}, &hold); err != nil {
+		return err
+	}
+	if !hold.matches(usageID, walletID) || hold.ID != holdID || hold.Status != "COMMITTED" || hold.ActualMicrocredits == nil || *hold.ActualMicrocredits != actual || actual < 0 || actual > *hold.MaxMicrocredits {
+		return errors.New("Billing settlement facts do not match")
+	}
+	return nil
+}
+
+func (c *HTTPBillingClient) Release(ctx context.Context, usageID, holdID, walletID uuid.UUID, reason string) error {
+	var hold BillingHold
+	if err := c.call(ctx, http.MethodPost, "/internal/v1/holds/release", map[string]any{"usage_request_id": usageID, "hold_id": holdID, "reason": reason}, &hold); err != nil {
+		return err
+	}
+	if !hold.matches(usageID, walletID) || hold.ID != holdID || hold.Status != "RELEASED" || (hold.ActualMicrocredits != nil && *hold.ActualMicrocredits != 0) {
+		return errors.New("Billing release facts do not match")
+	}
+	return nil
 }
 
 func (c *HTTPBillingClient) call(ctx context.Context, method, path string, input, output any) error {
@@ -251,14 +315,20 @@ func (c *HTTPBillingClient) call(ctx context.Context, method, path string, input
 		return err
 	}
 	defer response.Body.Close()
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		data, _ := io.ReadAll(io.LimitReader(response.Body, 2048))
-		return fmt.Errorf("Billing HTTP %d: %s", response.StatusCode, data)
+	payload, err := io.ReadAll(io.LimitReader(response.Body, (2<<20)+1))
+	if err != nil {
+		return err
+	}
+	if len(payload) > 2<<20 {
+		return errors.New("Billing response exceeds the allowed size")
+	}
+	if response.StatusCode != http.StatusOK {
+		return fmt.Errorf("Billing HTTP %d", response.StatusCode)
 	}
 	if output == nil {
-		return nil
+		return errors.New("Billing response destination is required")
 	}
-	return json.NewDecoder(io.LimitReader(response.Body, 2<<20)).Decode(output)
+	return json.Unmarshal(payload, output)
 }
 
 func MaximumUsage(maxInputTokens, maxOutputTokens int64) Usage {

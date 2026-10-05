@@ -170,6 +170,7 @@ impl HttpFixture {
             jwks_url: self.base.join("certs").unwrap(),
             token_url: self.base.join("token").unwrap(),
             client_id: "desktop-client".into(),
+            identity_url: None,
             account_url: self.base.clone(),
             token_gateway_url: self.base.clone(),
         }
@@ -957,6 +958,16 @@ async fn business_proxy_reads_json_and_preserves_http_failure_without_returning_
     let response = response_to_api(state.send(&prepared, "access-value").await.unwrap())
         .await
         .unwrap();
+    let request = String::from_utf8(http.requests.lock().unwrap()[0].clone()).unwrap();
+    assert!(request.lines().any(|line| {
+        line.split_once(':').is_some_and(|(name, value)| {
+            name.eq_ignore_ascii_case("X-Device-ID") && value.trim() == state.device_id
+        })
+    }));
+    assert!(
+        !request.contains("x-pinvou-client-source:")
+            && !request.contains("registration_query_token")
+    );
     assert_eq!(response.status, 403);
     let value = serde_json::to_value(response).unwrap();
     assert_eq!(value["body"]["code"], "FORBIDDEN");
@@ -970,3 +981,85 @@ mod runtime_tests;
 
 #[path = "login_tests.rs"]
 mod login_tests;
+
+#[test]
+fn profile_completion_uses_shared_canonical_request_fact() {
+    let id = "4c947809-a2e8-4ef4-851b-f424984d1825";
+    for (resource, expected) in [
+        (
+            format!("/v1/me/profile-change-requests/{id}/actions/complete"),
+            true,
+        ),
+        (
+            format!("/v1/me/./profile-change-requests/{id}/actions/complete"),
+            true,
+        ),
+        (
+            format!("/v1/me/unused/../profile-change-requests/{id}/actions/complete"),
+            true,
+        ),
+        (
+            format!("/v1/me/profile-change-requests/{id}/actions/complete?unexpected=1"),
+            false,
+        ),
+        (
+            "/v1/me/profile-change-requests/not-a-uuid/actions/complete".to_string(),
+            true,
+        ),
+        (
+            format!("/v1/me/profile-change-requests/{id}/actions/complete#fragment"),
+            false,
+        ),
+        (
+            "/v1/me/profile-change-requests/invalid/id/actions/complete".to_string(),
+            false,
+        ),
+    ] {
+        let request = ApiRequest {
+            area: "account".into(),
+            resource,
+            method: "POST".into(),
+            body: Some(json!({})),
+            idempotency_key: None,
+        };
+        assert_eq!(profile_completion_requested(&request), expected);
+        assert_eq!(
+            profile_completion_requested(&ApiRequest {
+                area: "token".into(),
+                method: "POST".into(),
+                resource: request.resource.clone(),
+                body: None,
+                idempotency_key: None
+            }),
+            false
+        );
+    }
+}
+
+#[test]
+fn profile_status_get_uses_same_completion_invalidation_predicate() {
+    for (resource, expected) in [
+        ("/v1/me/./profile-change-requests/fixture-id", true),
+        (
+            "/v1/me/profile-change-requests/fixture-id?anything=1",
+            false,
+        ),
+        (
+            "/v1/me/profile-change-requests/fixture-id/mobile-challenges",
+            false,
+        ),
+        (
+            "/v1/me/profile-change-requests/fixture-id/actions/complete",
+            false,
+        ),
+    ] {
+        let request = ApiRequest {
+            area: "account".into(),
+            method: "GET".into(),
+            resource: resource.into(),
+            body: None,
+            idempotency_key: None,
+        };
+        assert_eq!(profile_completion_requested(&request), expected);
+    }
+}

@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/api"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/approvalpolicy"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/authorization"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/identity"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/serviceauth"
@@ -16,10 +18,12 @@ import (
 )
 
 type Service struct {
-	repository Repository
-	payments   *PaymentCoordinator
-	waivers    WaiverCoordinator
-	now        func() time.Time
+	repository   Repository
+	payments     *PaymentCoordinator
+	waivers      WaiverCoordinator
+	authorizer   *authorization.Client
+	approvalGate ApprovalExecutionGate
+	now          func() time.Time
 }
 
 func NewService(repository Repository) *Service {
@@ -28,6 +32,16 @@ func NewService(repository Repository) *Service {
 
 func (s *Service) WithPayments(payments *PaymentCoordinator) *Service {
 	s.payments = payments
+	return s
+}
+
+func (s *Service) WithAuthorizer(authorizer *authorization.Client) *Service {
+	s.authorizer = authorizer
+	return s
+}
+
+func (s *Service) WithApprovalExecutionGate(gate ApprovalExecutionGate) *Service {
+	s.approvalGate = gate
 	return s
 }
 
@@ -45,7 +59,7 @@ func (s *Service) Handler(serviceToken string, adminVerify ...identity.VerifyFun
 	protected.GET("/internal/v1/pricing/current", httpserver.AdaptFunc(s.currentPrice))
 	protected.GET("/internal/v1/pricing/:price_version_id", httpserver.AdaptFunc(s.priceByID))
 	protected.POST("/internal/v1/adjustments", httpserver.AdaptFunc(s.requestAdjustment))
-	protected.POST("/internal/v1/adjustments/:adjustment_id/approve", httpserver.AdaptFunc(s.approveAdjustment))
+	protected.POST("/internal/v1/adjustments/:adjustment_id/execute-approved", httpserver.AdaptFunc(s.executeApprovedAdjustment))
 	protected.POST("/internal/v1/adjustments/:adjustment_id/reject", httpserver.AdaptFunc(s.rejectAdjustment))
 	protected.GET("/v1/recharge/products", httpserver.AdaptFunc(s.listProducts))
 	protected.GET("/internal/v1/recharge/products", httpserver.AdaptFunc(s.listOrganizationProducts))
@@ -61,26 +75,27 @@ func (s *Service) Handler(serviceToken string, adminVerify ...identity.VerifyFun
 		protected.POST("/internal/v1/reconciliation/runs", httpserver.AdaptFunc(s.runReconciliation))
 		router.POST("/internal/payment/notifications", httpserver.AdaptFunc(s.paymentNotification))
 	}
-	if len(adminVerify) > 0 && adminVerify[0] != nil {
+	if len(adminVerify) > 0 && adminVerify[0] != nil && s.authorizer != nil {
 		admin := router.Group("/admin/v1")
-		admin.Use(identity.GinMiddleware(adminVerify[0]), identity.RequireRealmRoleGin("platform-admin"))
-		admin.GET("/overview", httpserver.AdaptFunc(s.adminOverview))
-		admin.GET("/wallets", httpserver.AdaptFunc(s.adminWallets))
-		admin.GET("/wallets/:wallet_id/ledger", httpserver.AdaptFunc(s.adminWalletLedger))
-		admin.GET("/pricing-versions", httpserver.AdaptFunc(s.adminPriceVersions))
-		admin.POST("/pricing-versions", httpserver.AdaptFunc(s.adminCreatePriceVersion))
-		admin.GET("/payment-orders", httpserver.AdaptFunc(s.adminPaymentOrders))
-		admin.POST("/payment-orders/:order_id/sync", httpserver.AdaptFunc(s.adminSyncPaymentOrder))
-		admin.POST("/payment-orders/:order_id/repair", httpserver.AdaptFunc(s.adminRepairPaymentOrder))
-		admin.POST("/payment-orders/:order_id/refunds", httpserver.AdaptFunc(s.adminRefundPaymentOrder))
-		admin.GET("/adjustments", httpserver.AdaptFunc(s.adminAdjustments))
-		admin.POST("/adjustments/:adjustment_id/approve", httpserver.AdaptFunc(s.adminApproveAdjustment))
-		admin.POST("/adjustments/:adjustment_id/reject", httpserver.AdaptFunc(s.adminRejectAdjustment))
-		admin.GET("/usage-holds", httpserver.AdaptFunc(s.adminUsageHolds))
-		admin.POST("/usage-holds/:hold_id/release", httpserver.AdaptFunc(s.adminReleaseUsageHold))
-		admin.GET("/reconciliation-runs", httpserver.AdaptFunc(s.adminReconciliationRuns))
-		admin.POST("/reconciliation-runs", httpserver.AdaptFunc(s.adminRunReconciliation))
-		admin.GET("/reconciliation-runs/:run_id/cases", httpserver.AdaptFunc(s.adminReconciliationCases))
+		admin.Use(identity.GinMiddleware(adminVerify[0]))
+		admin.GET("/overview", s.authorizer.Require("platform.system.status.read"), httpserver.AdaptFunc(s.adminOverview))
+		admin.GET("/wallets", s.authorizer.Require("platform.billing.wallets.read"), httpserver.AdaptFunc(s.adminWallets))
+		admin.GET("/wallets/:wallet_id/ledger", s.authorizer.Require("platform.billing.ledger.read"), httpserver.AdaptFunc(s.adminWalletLedger))
+		admin.GET("/pricing-versions", s.authorizer.Require("platform.pricing.read"), httpserver.AdaptFunc(s.adminPriceVersions))
+		admin.POST("/pricing-versions", s.authorizer.Require("platform.pricing.manage"), approvalpolicy.Require("BILLING_PRICE_VERSION_CREATE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminCreatePriceVersion))
+		admin.GET("/payment-orders", s.authorizer.Require("platform.billing.wallets.read"), httpserver.AdaptFunc(s.adminPaymentOrders))
+		admin.POST("/payment-orders/:order_id/sync", s.authorizer.Require("platform.billing.orders.sync"), approvalpolicy.Require("BILLING_PAYMENT_ORDER_SYNC", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminSyncPaymentOrder))
+		admin.POST("/payment-orders/:order_id/repair", s.authorizer.Require("platform.billing.repairs.request"), approvalpolicy.Require("BILLING_PAYMENT_ORDER_EVIDENCE_REPAIR", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminRepairPaymentOrder))
+		admin.POST("/payment-orders/:order_id/refunds", s.authorizer.Require("platform.billing.repairs.request"), approvalpolicy.Require("BILLING_NORMAL_REFUND", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminRefundPaymentOrder))
+		admin.GET("/adjustments", s.authorizer.Require("platform.billing.wallets.read"), httpserver.AdaptFunc(s.adminAdjustments))
+		admin.POST("/adjustments", s.authorizer.Require("platform.billing.repairs.request"), approvalpolicy.Require("BILLING_ADJUSTMENT_REQUEST", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminRequestAdjustment))
+		admin.POST("/adjustments/:adjustment_id/approve", s.authorizer.Require("platform.billing.adjustments.approve"), approvalpolicy.Require("WALLET_ADJUSTMENT", approvalpolicy.ApprovalRequired), httpserver.AdaptFunc(s.adminApproveAdjustment))
+		admin.POST("/adjustments/:adjustment_id/reject", s.authorizer.Require("platform.billing.adjustments.approve"), approvalpolicy.Require("BILLING_ADJUSTMENT_REJECT", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminRejectAdjustment))
+		admin.GET("/usage-holds", s.authorizer.Require("platform.usage.read"), httpserver.AdaptFunc(s.adminUsageHolds))
+		admin.POST("/usage-holds/:hold_id/release", s.authorizer.Require("platform.billing.holds.release"), approvalpolicy.Require("BILLING_USAGE_HOLD_SAFE_RELEASE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminReleaseUsageHold))
+		admin.GET("/reconciliation-runs", s.authorizer.Require("platform.usage.read"), httpserver.AdaptFunc(s.adminReconciliationRuns))
+		admin.POST("/reconciliation-runs", s.authorizer.Require("platform.usage.reconcile.retry"), approvalpolicy.Require("BILLING_RECONCILIATION_RUN", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminRunReconciliation))
+		admin.GET("/reconciliation-runs/:run_id/cases", s.authorizer.Require("platform.usage.read"), httpserver.AdaptFunc(s.adminReconciliationCases))
 	}
 	return router
 }
@@ -141,24 +156,6 @@ func (s *Service) requestAdjustment(w http.ResponseWriter, r *http.Request) {
 	api.WriteJSON(w, http.StatusCreated, adjustment)
 }
 
-func (s *Service) approveAdjustment(w http.ResponseWriter, r *http.Request) {
-	adjustmentID, err := uuid.Parse(r.PathValue("adjustment_id"))
-	var body struct {
-		ApprovedBy     uuid.UUID `json:"approved_by"`
-		DecisionReason string    `json:"decision_reason"`
-	}
-	if decodeErr := api.DecodeJSON(w, r, &body); err != nil || decodeErr != nil || body.ApprovedBy == uuid.Nil || strings.TrimSpace(body.DecisionReason) == "" {
-		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid adjustment approval", httpserver.RequestID(r.Context()))
-		return
-	}
-	adjustment, err := s.repository.ApproveAdjustment(r.Context(), adjustmentID, body.ApprovedBy, body.DecisionReason)
-	if err != nil {
-		s.writeError(w, r, err)
-		return
-	}
-	api.WriteJSON(w, http.StatusOK, adjustment)
-}
-
 func (s *Service) rejectAdjustment(w http.ResponseWriter, r *http.Request) {
 	adjustmentID, err := uuid.Parse(r.PathValue("adjustment_id"))
 	var body struct {
@@ -179,14 +176,19 @@ func (s *Service) rejectAdjustment(w http.ResponseWriter, r *http.Request) {
 
 func (s *Service) createRechargeOrder(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		RequesterID uuid.UUID `json:"requester_id"`
-		WalletID    uuid.UUID `json:"wallet_id"`
-		ProductID   string    `json:"product_id"`
-		Channel     string    `json:"channel"`
-		Mobile      string    `json:"mobile"`
+		RequesterID            uuid.UUID `json:"requester_id"`
+		WalletID               uuid.UUID `json:"wallet_id"`
+		ProductID              string    `json:"product_id"`
+		Channel                string    `json:"channel"`
+		Mobile                 string    `json:"mobile"`
+		CommerceCustomerStatus string    `json:"commerce_customer_status"`
 	}
 	if err := api.DecodeJSON(w, r, &body); err != nil || body.RequesterID == uuid.Nil || body.WalletID == uuid.Nil || body.ProductID == "" {
 		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid recharge order", httpserver.RequestID(r.Context()))
+		return
+	}
+	if s.payments.Capabilities().CommerceCustomerRequired && body.CommerceCustomerStatus != "READY" {
+		s.writeError(w, r, ErrCommerceCustomerNotReady)
 		return
 	}
 	order, created, err := s.payments.CreateMobileOrder(r.Context(), body.RequesterID, body.WalletID, body.ProductID, body.Channel, body.Mobile, r.Header.Get("Idempotency-Key"))
@@ -532,8 +534,12 @@ func (s *Service) writeError(w http.ResponseWriter, r *http.Request, err error) 
 		status, code, message = http.StatusLocked, "WALLET_UNAVAILABLE", "the wallet is not active"
 	case errors.Is(err, ErrUsageAlreadyTerminal):
 		status, code, message = http.StatusConflict, "USAGE_ALREADY_SETTLED", "the usage hold is already terminal"
+	case errors.Is(err, ErrUsagePlatformLossReview):
+		status, code, message = http.StatusConflict, "USAGE_PLATFORM_LOSS_REVIEW", "the usage was reported after its entitlement expired and requires platform-loss review"
 	case errors.Is(err, ErrPaymentProvider):
 		status, code, message = http.StatusBadGateway, "PAYMENT_PROVIDER_UNAVAILABLE", "the payment provider request could not be completed"
+	case errors.Is(err, ErrCommerceCustomerNotReady):
+		status, code, message = http.StatusConflict, "COMMERCE_CUSTOMER_NOT_READY", "the payment provider requires a ready Commerce Customer mapping"
 	}
 	api.WriteError(w, status, code, message, httpserver.RequestID(r.Context()))
 }

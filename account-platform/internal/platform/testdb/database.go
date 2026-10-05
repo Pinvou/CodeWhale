@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -19,9 +20,11 @@ import (
 
 const DatabaseURLEnv = "PINVOU_ACCOUNT_TEST_DATABASE_URL"
 
-// Open applies the domain's migrations in a random, test-owned schema.
+// Open applies the domain's migrations in a random, test-owned database/schema.
 // All connections use only that schema and pg_catalog; public is never a fallback.
 // Tests opt in through DatabaseURLEnv, which must address a loopback PostgreSQL.
+// The configured role must have CREATEDB. Database-wide extensions must never
+// belong to another fixture's schema, whose cleanup could remove their functions.
 func Open(t *testing.T, domain string) *pgxpool.Pool {
 	t.Helper()
 	switch domain {
@@ -62,6 +65,7 @@ func Open(t *testing.T, domain string) *pgxpool.Pool {
 		t.Fatal("connect to loopback test database failed")
 	}
 	var schema string
+	var database string
 	var pool *pgxpool.Pool
 	t.Cleanup(func() {
 		if pool != nil {
@@ -70,9 +74,9 @@ func Open(t *testing.T, domain string) *pgxpool.Pool {
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cleanupCancel()
 		defer admin.Close(cleanupCtx)
-		if schema != "" {
-			if _, err := admin.Exec(cleanupCtx, "DROP SCHEMA "+pgx.Identifier{schema}.Sanitize()+" CASCADE"); err != nil {
-				t.Error("remove test-owned database schema failed")
+		if database != "" {
+			if _, err := admin.Exec(cleanupCtx, "DROP DATABASE "+pgx.Identifier{database}.Sanitize()); err != nil {
+				t.Error("remove test-owned database failed")
 			}
 		}
 	})
@@ -85,13 +89,20 @@ func Open(t *testing.T, domain string) *pgxpool.Pool {
 		t.Fatal("generate isolated test schema name failed")
 	}
 	name := "pinvou_a01_" + strings.ReplaceAll(domain, "-", "_") + "_" + hex.EncodeToString(nonce)
-	if _, err := admin.Exec(ctx, "CREATE SCHEMA "+pgx.Identifier{name}.Sanitize()); err != nil {
-		t.Fatal("create isolated test schema failed")
+	if _, err := admin.Exec(ctx, "CREATE DATABASE "+pgx.Identifier{name}.Sanitize()+" TEMPLATE template0"); err != nil {
+		t.Fatal("create isolated test database failed; configured role needs CREATEDB")
 	}
 	// Register ownership only after CREATE succeeds: a collision must never clean
-	// up a schema created by another test or user.
+	// up a database created by another test or user.
+	database = name
 	schema = name
-	config.ConnConfig.RuntimeParams["search_path"] = pgx.Identifier{schema}.Sanitize() + ",pg_catalog"
+	// Reparse the owned address rather than mutating only exported fields: pgx
+	// ConnString otherwise keeps the original configured database/search_path,
+	// so a second repository constructed from it would escape this fixture.
+	config, err = pgxpool.ParseConfig(fixtureConnectionString(dsn, database, pgx.Identifier{schema}.Sanitize()+",pg_catalog"))
+	if err != nil {
+		t.Fatal("parse isolated test database configuration failed")
+	}
 	config.MaxConns = 4
 	pool, err = pgxpool.NewWithConfig(ctx, config)
 	if err != nil {
@@ -102,11 +113,29 @@ func Open(t *testing.T, domain string) *pgxpool.Pool {
 		t.Fatal("acquire isolated test database connection failed")
 	}
 	defer connection.Release()
+	if _, err := connection.Exec(ctx, "CREATE SCHEMA "+pgx.Identifier{schema}.Sanitize()); err != nil {
+		t.Fatal("create isolated test schema failed")
+	}
 	defer migrations.Unlock(ctx, connection.Conn())
 	if err := migrations.Up(ctx, connection.Conn(), loaded); err != nil {
 		t.Fatalf("apply %s test migrations: %v", domain, err)
 	}
 	return pool
+}
+
+func fixtureConnectionString(dsn, database, searchPath string) string {
+	if parsed, err := url.Parse(dsn); err == nil && (parsed.Scheme == "postgres" || parsed.Scheme == "postgresql") {
+		parsed.Path = "/" + database
+		parsed.RawPath = ""
+		query := parsed.Query()
+		query.Del("dbname")
+		query.Set("search_path", searchPath)
+		parsed.RawQuery = query.Encode()
+		return parsed.String()
+	}
+	// Database/schema names are generated from fixed ASCII prefixes and hex,
+	// not caller input. Libpq keyword duplicates use the last occurrence.
+	return dsn + " dbname=" + database + " search_path='" + searchPath + "'"
 }
 
 func loopbackHost(host string) bool {

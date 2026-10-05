@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readFile, readdir } from 'node:fs/promises';
 import path from 'node:path';
 import test from 'node:test';
+import { pathToFileURL } from 'node:url';
 
 import Ajv2020 from 'ajv/dist/2020.js';
 import addFormats from 'ajv-formats';
@@ -13,8 +14,32 @@ async function readYaml(relative) {
   return YAML.parse(await readFile(path.join(root, relative), 'utf8'));
 }
 
+test('the finite common error contract covers literal production error responses', async () => {
+  const document = await readYaml('contracts/openapi/common.yaml');
+  const ajv = new Ajv2020({ strict: true, allErrors: true });
+  const validate = ajv.compile(document.components.schemas.Error);
+  const errors = new Map();
+  const walk = async relative => {
+    for (const entry of await readdir(path.join(root, relative), { withFileTypes: true })) {
+      const file = path.join(relative, entry.name);
+      if (entry.isDirectory()) await walk(file);
+      else if (entry.name.endsWith('.go') && !entry.name.endsWith('_test.go')) {
+        const source = await readFile(path.join(root, file), 'utf8');
+        for (const pattern of [/api\.WriteError\([^\n]*?,\s*"([A-Z][A-Z0-9_]+)"/g, /status,\s*code,\s*message\s*:?=\s*[^\n]*?,\s*"([A-Z][A-Z0-9_]+)"/g]) {
+          for (const match of source.matchAll(pattern)) errors.set(match[1], file);
+        }
+      }
+    }
+  };
+  for (const feature of ['account', 'billing', 'token', 'identityadapter', 'portal', 'platform']) await walk(`internal/${feature}`);
+  assert.ok(errors.size > 50, 'the guard must inspect the production HTTP error writers');
+  for (const [code, file] of errors) assert.ok(validate({ code, message: 'fixture', request_id: 'fixture' }), `${file}: ${code}: ${JSON.stringify(validate.errors)}`);
+  assert.equal(validate({ code: 'UNKNOWN_UNDOCUMENTED_ERROR', message: 'fixture', request_id: 'fixture' }), false);
+  assert.equal(validate({ code: 'INVALID_REQUEST', message: 'fixture', request_id: 'fixture', unexpected: true }), false);
+});
+
 test('OpenAPI contracts expose stable versions and no inline credentials', async () => {
-  const files = ['account.yaml', 'billing.yaml', 'token-gateway.yaml', 'admin.yaml'];
+  const files = ['account.yaml', 'identity.yaml', 'billing.yaml', 'token-gateway.yaml', 'admin.yaml'];
   for (const file of files) {
     const raw = await readFile(path.join(root, 'contracts/openapi', file), 'utf8');
     const document = YAML.parse(raw);
@@ -66,6 +91,75 @@ test('recent recharge lookup is wallet-scoped internally and context-scoped publ
   );
 });
 
+test('registration passwords cross only the Identity Adapter boundary', async () => {
+  const accountRaw = await readFile(path.join(root, 'contracts/openapi/account.yaml'), 'utf8');
+  const identity = await readYaml('contracts/openapi/identity.yaml');
+  assert.doesNotMatch(accountRaw, /^\s+password:/m);
+  assert.equal(identity.paths['/registration/password-prechecks'].post.requestBody.content['application/json'].schema.properties.password.writeOnly, true);
+  const account = await readYaml('contracts/openapi/account.yaml');
+  for (const pathName of ['/auth/registration/precheck', '/auth/register']) {
+    const reference = account.paths[pathName].post.requestBody.content['application/json'].schema;
+    const schema = reference.$ref ? account.components.schemas[reference.$ref.split('/').at(-1)] : reference;
+    assert.ok(schema.required.includes('password_handle'));
+    assert.ok(schema.required.includes('password_policy_version'));
+  }
+  const accountHandler = await readFile(path.join(root, 'internal/account/mobile_auth_http.go'), 'utf8');
+  const desktopBridge = (await Promise.all(['mod.rs', 'mobile.rs'].map(file => readFile(path.join(root, '../pinvou3-app/src-tauri/src/features/account_platform', file), 'utf8')))).join('\n');
+  assert.doesNotMatch(accountHandler, /json:"password"/);
+  assert.match(desktopBridge, /password_precheck\(&config, input\.password\)/);
+  assert.match(desktopBridge, /"password_handle": reference\.password_handle/);
+});
+
+test('registration recovery is persistent, proof-gated, and wallet provisioning stays asynchronous', async () => {
+  const migration = await readFile(path.join(root, 'migrations/account/000013_registration_saga.up.sql'), 'utf8');
+  const saga = await readFile(path.join(root, 'internal/account/registration_saga.go'), 'utf8');
+  const mobileAuth = await readFile(path.join(root, 'internal/account/mobile_auth.go'), 'utf8');
+  const identityVault = await readFile(path.join(root, 'internal/identityadapter/password.go'), 'utf8');
+  const repair = (await Promise.all(['registration_admin.go', 'registration_admin_http.go'].map((file) => readFile(path.join(root, 'internal/account', file), 'utf8')))).join('\n');
+  const desktop = (await Promise.all([
+    '../pinvou3-app/src-tauri/src/features/account_platform/mod.rs',
+    '../pinvou3-app/src-tauri/src/features/account_platform/registration.rs',
+    '../pinvou3-app/src-tauri/src/platform/credential_store.rs',
+  ].map((file) => readFile(path.join(root, file), 'utf8')))).join('\n');
+  const account = await readYaml('contracts/openapi/account.yaml');
+  const admin = await readYaml('contracts/openapi/admin.yaml');
+  const { dict } = await import(pathToFileURL(path.join(root, '../pinvou3-app/tests/helpers/i18n-all.js')).href);
+  const repairCopies = Object.fromEntries(['zh', 'en', 'ja'].map(language => [language, dict[language].uiAdminPlatform.registrationRepair]));
+
+  assert.match(migration, /CREATE TABLE registration_operations/);
+  assert.match(migration, /registration_operations_active_username_idx/);
+  assert.match(migration, /registration_operations_active_mobile_idx/);
+  assert.match(migration, /CREATE TABLE wallet_provisioning_jobs/);
+  assert.doesNotMatch(migration, /password_handle/);
+  assert.match(saga, /account\.wallet\.provisioning\.requested\.v1/);
+  assert.doesNotMatch(mobileAuth, /DeleteUser\(/);
+  assert.match(mobileAuth, /FindMobileUserByRegistrationOperation/);
+  assert.match(identityVault, /operations\s+map\[uuid\.UUID\]operationPasswordBinding/);
+  assert.match(repair, /DisableUserAndConfirm/);
+  assert.match(repair, /account_outbox_absent/);
+  assert.match(repair, /identity_created_at\+interval '30 minutes'/);
+  assert.match(desktop, /pending-registration/);
+  assert.ok(account.paths['/auth/registration-operations/{registration_operation_id}']);
+  assert.ok(admin.paths['/account/admin/v1/registration-operations']);
+  assert.deepEqual(Object.keys(repairCopies.zh).sort(), Object.keys(repairCopies.en).sort());
+  assert.deepEqual(Object.keys(repairCopies.zh).sort(), Object.keys(repairCopies.ja).sort());
+});
+
+test('SMS adapters support both code ownership modes with versioned risk evidence', async () => {
+  const factory = await readFile(path.join(root, 'internal/account/sms_factory.go'), 'utf8');
+  const migration = await readFile(path.join(root, 'migrations/account/000012_sms_risk_dimensions.up.sql'), 'utf8');
+  const mobileAuth = await readFile(path.join(root, 'internal/account/mobile_auth.go'), 'utf8');
+  assert.match(factory, /case "aliyun", "aliyun-managed"/);
+  assert.match(factory, /case "http":/);
+  assert.match(factory, /case "http-generated"/);
+  assert.match(migration, /ADD COLUMN provider_id/);
+  assert.match(migration, /ADD COLUMN adapter_version/);
+  assert.match(migration, /CREATE TABLE sms_send_attempts/);
+  assert.match(migration, /source_hash BYTEA/);
+  assert.match(migration, /device_hash BYTEA/);
+  assert.doesNotMatch(mobileAuth, /AliyunSMSProvider|HTTPGeneratedSMSProvider/);
+});
+
 test('personal usage history exposes only user-facing fields', async () => {
   const gateway = await readYaml('contracts/openapi/token-gateway.yaml');
   const operation = gateway.paths['/me/usage-requests'].get;
@@ -99,25 +193,29 @@ test('paid plan orders create independent thirty-day entitlement packages', asyn
   const payments = await readFile(path.join(root, 'internal/billing/payments.go'), 'utf8');
   assert.match(migration, /payment_order_id UUID NOT NULL UNIQUE/);
   assert.match(migration, /points_reserved \+ points_used \+ points_remaining = points_total/);
-  assert.match(payments, /validFrom, validUntil := now, now\.AddDate\(0, 0, product\.ValidityDays\)/);
+  assert.match(payments, /if !legacy[\s\S]*now\.AddDate\(0, 0, product\.ValidityDays\)/);
   assert.match(payments, /INSERT INTO entitlement_packages/);
   assert.match(payments, /refundable,expires_at/);
 });
 
-test('usage holds reserve and settle entitlement packages in earliest-expiry order', async () => {
-  const migration = await readFile(path.join(root, 'migrations/billing/000012_package_hold_allocations.up.sql'), 'utf8');
-  const postgres = await readFile(path.join(root, 'internal/billing/postgres.go'), 'utf8');
-  assert.match(migration, /CREATE TABLE usage_hold_allocations/);
-  assert.match(postgres, /ORDER BY p\.valid_until,p\.credited_at,p\.id FOR UPDATE OF p/);
-  assert.match(postgres, /points_remaining=points_remaining-\$2,points_reserved=points_reserved\+\$2/);
-  assert.match(postgres, /released_microcredits=reserved_microcredits/);
+test('usage holds reserve and settle components in deterministic earliest-expiry order', async () => {
+	const migration = await readFile(path.join(root, 'migrations/billing/000016_entitlement_components.up.sql'), 'utf8');
+	const postgres = await readFile(path.join(root, 'internal/billing/postgres.go'), 'utf8');
+	assert.match(migration, /ALTER TABLE usage_hold_allocations ADD COLUMN component_id/);
+	assert.match(postgres, /ORDER BY component\.expires_at NULLS LAST,CASE component\.component_type WHEN 'BONUS' THEN 0 ELSE 1 END,component\.credited_at,component\.id FOR UPDATE/);
+	assert.match(postgres, /available_microcredits=available_microcredits-\$2,reserved_microcredits=reserved_microcredits\+\$2/);
+	assert.match(postgres, /released_microcredits=reserved_microcredits/);
 });
 
 test('entitlement packages expire locally and remain queryable by the personal user', async () => {
   const gateway = await readYaml('contracts/openapi/token-gateway.yaml');
   const packages = await readFile(path.join(root, 'internal/billing/packages.go'), 'utf8');
   assert.ok(gateway.paths['/me/entitlement-packages']);
-  assert.match(packages, /status='ACTIVE' AND valid_until<=\$1 AND points_reserved=0/);
+	assert.match(packages, /status='ACTIVE' AND valid_until<=\$1 AND points_reserved=0 ORDER BY valid_until,credited_at,id LIMIT 1/);
+	assert.match(packages, /lockTransactionKey\(ctx, tx, "entitlement\.expire"/);
+  assert.doesNotMatch(packages, /UPDATE usage_holds SET status='RELEASED'/,
+    'component expiry must not automatically waive uncertain consumption');
+	assert.match(packages, /expired_microcredits=expired_microcredits\+\$2/);
   assert.match(packages, /"EXPIRE", "expire:"\+packageID\.String\(\)/);
 });
 
@@ -203,7 +301,7 @@ test('Compose keeps data stores private and simulator development-only', async (
     assert.deepEqual(compose.services[service].networks, ['backend'], `${service} must remain on the private network`);
   }
   assert.notEqual(compose.networks.frontend.internal, true, 'published services need a reachable bridge network');
-  for (const service of ['keycloak', 'account-service', 'billing-service', 'token-gateway', 'payment-simulator', 'token-portal']) {
+  for (const service of ['keycloak', 'account-service', 'identity-service', 'billing-service', 'token-gateway', 'payment-simulator', 'token-portal']) {
     assert.deepEqual(compose.services[service].networks, ['backend', 'frontend'], service);
     assert.ok(compose.services[service].ports.length > 0, `${service} must have a local entry point`);
     for (const port of compose.services[service].ports) {
@@ -281,6 +379,58 @@ test('Keycloak development client enables password login without enabling implic
   assert.match(provisioning, /PINVOU_ADMIN_PASSWORD:\?set PINVOU_ADMIN_PASSWORD/);
   assert.match(provisioning, /--rolename "\$ROLE"/);
   assert.doesNotMatch(provisioning, /PINVOU_ADMIN_PASSWORD=['"][^$]/);
+});
+
+test('business authorization is owned by Account permission codes rather than Realm roles', async () => {
+  const migration = await readFile(path.join(root, 'migrations/account/000010_authorization_rbac.up.sql'), 'utf8');
+  const accountService = await readFile(path.join(root, 'internal/account/service.go'), 'utf8');
+  const billingService = await readFile(path.join(root, 'internal/billing/service.go'), 'utf8');
+  const tokenService = await readFile(path.join(root, 'internal/token/service.go'), 'utf8');
+  const authorizer = await readFile(path.join(root, 'internal/platform/authorization/client.go'), 'utf8');
+  for (const table of ['permissions', 'roles', 'role_permissions', 'role_assignments', 'authorization_versions']) {
+    assert.match(migration, new RegExp(`CREATE TABLE ${table} \\(`));
+  }
+  assert.match(migration, /PLATFORM_SUPER_ADMIN/);
+  assert.match(migration, /platform\.tokens\.credentials\.validate/);
+  assert.match(migration, /org\.roles\.assign/);
+  assert.match(accountService, /Group\("\/internal\/v1"\)/);
+  assert.match(accountService, /POST\("\/authorization\/check"/);
+  assert.match(authorizer, /INTERNAL_SERVICE_TOKEN is required/);
+  for (const source of [accountService, billingService, tokenService]) {
+    assert.doesNotMatch(source, /RequireRealmRoleGin|HasRealmRole/);
+  }
+  assert.match(billingService, /platform\.billing\.wallets\.read/);
+  assert.match(tokenService, /platform\.tokens\.read/);
+});
+
+test('permanent user codes are random, immutable, displayable, and exact-query only', async () => {
+  const migration = await readFile(path.join(root, 'migrations/account/000011_permanent_user_codes.up.sql'), 'utf8');
+  const generator = await readFile(path.join(root, 'internal/account/user_code.go'), 'utf8');
+  const lookup = await readFile(path.join(root, 'internal/account/user_code_lookup.go'), 'utf8');
+  const account = await readYaml('contracts/openapi/account.yaml');
+  const admin = await readYaml('contracts/openapi/admin.yaml');
+
+  assert.match(migration, /ALTER COLUMN user_code SET NOT NULL/);
+  assert.match(migration, /users_user_code_unique UNIQUE \(user_code\)/);
+  assert.match(migration, /CREATE TABLE user_code_registry/);
+  assert.match(migration, /BEFORE UPDATE OR DELETE ON users/);
+  assert.match(migration, /BEFORE TRUNCATE ON users/);
+  assert.match(migration, /BEFORE TRUNCATE ON user_code_registry/);
+  assert.match(migration, /user code registry entries are permanent and immutable/);
+  assert.match(generator, /crypto\/rand/);
+  assert.match(generator, /0123456789ABCDEFGHJKMNPQRSTVWXYZ/);
+  assert.doesNotMatch(generator, /username|mobile|UserID|NewV7/);
+  assert.match(lookup, /WHERE u\.user_code=\$1/);
+  assert.doesNotMatch(lookup, /ILIKE|LIKE|similarity|prefix/i);
+  for (const dimension of ['actor_user_id', 'source_hash', 'device_hash', 'target_code_hash']) assert.match(lookup, new RegExp(dimension));
+  assert.match(lookup, /recordUserCodeLookup/);
+
+  assert.ok(account.components.schemas.Me.required.includes('user_code'));
+  assert.equal(account.components.schemas.Me.properties.user_code.$ref, '#/components/schemas/UserCode');
+  const exact = admin.paths['/account/admin/v1/user-code-lookups/{user_code}'].get;
+  assert.equal(exact.parameters[0].$ref, '#/components/parameters/UserCode');
+  assert.equal(exact.responses['200'].headers['Cache-Control'].schema.const, 'no-store');
+  assert.equal(admin.paths['/account/admin/v1/users'].get.parameters.length, 2);
 });
 
 test('mobile authentication provisioning works in the minimal Keycloak image', async () => {

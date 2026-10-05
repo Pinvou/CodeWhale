@@ -54,7 +54,7 @@ async function runCase(name, scenario, check, language = 'en', legacyCrypto = fa
     console.log(`PASS ${name}`);
   } catch (error) {
     failures.push(name);
-    console.error(`FAIL ${name}: ${error.message}`);
+    console.error(`FAIL ${name}: ${error.message}; browser=${JSON.stringify(pageErrors)}`);
   } finally { await page.close(); }
 }
 
@@ -117,7 +117,7 @@ try {
   }
   for (const locale of ['zh', 'en', 'ja']) {
   await runCase('personal center has localized settled usage and no self-service organization creation in ' + locale, 'normal', async page => {
-    assert.equal(await page.$$eval('nav button', items => items.length), 7);
+    assert.equal(await page.$$eval('nav button', items => items.length), 9);
     assert.equal(await page.$$eval('main form', items => items.length), 0);
     await page.evaluate(() => Array.from(document.querySelectorAll('nav button')).find(el => el.textContent === window.__accountReview.copy.sections.usage).click());
     await page.waitForSelector('.ap-usage-row');
@@ -207,16 +207,16 @@ try {
     await waitPending(page, 'balance');
     const organization = await page.evaluate(() => window.__accountReview.ids.organization);
     await page.select('.ap-context-card select', organization);
-    await page.waitForFunction(() => document.querySelector('.ap-metrics article:nth-child(2) strong').textContent === '222');
+    await page.waitForFunction(() => [...document.querySelectorAll('.ap-metrics article')].find(item => item.querySelector('span')?.textContent === window.__accountReview.copy.availableCredits)?.querySelector('strong')?.textContent === '222');
     await settle(page, 'balance');
     // A subsequent DOM task observes completion without depending on a network timing sleep.
     await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
     assert.equal(await page.$eval('.ap-context-card select', el => el.value), organization);
-    assert.equal(await page.$eval('.ap-metrics article:nth-child(2) strong', el => el.textContent), '222');
+    assert.equal(await page.evaluate(() => [...document.querySelectorAll('.ap-metrics article')].find(item => item.querySelector('span')?.textContent === window.__accountReview.copy.availableCredits)?.querySelector('strong')?.textContent), '222');
   });
   await runCase('paid order refreshes same-context balance', 'balance-paid', async page => {
     await waitPending(page, 'balance'); await settle(page, 'balance');
-    await page.waitForFunction(() => document.querySelector('.ap-metrics article:nth-child(2) strong').textContent === '333');
+    await page.waitForFunction(() => [...document.querySelectorAll('.ap-metrics article')].find(item => item.querySelector('span')?.textContent === window.__accountReview.copy.availableCredits)?.querySelector('strong')?.textContent === '333');
     assert.ok(await page.evaluate(() => document.body.textContent.includes(window.__accountReview.copy.paymentReceived)));
   });
   for (const scenario of ['action-401', 'context-401', 'poll-401']) {
@@ -536,7 +536,7 @@ try {
   await runCase('users without organizations retain wallet, personal history and managed Tokens', 'no-organization', async page => {
     const labels = await page.$$eval('nav button', elements => elements.map(element => element.textContent));
     const copy = await page.evaluate(() => window.__accountReview.copy.sections);
-    assert.deepEqual(labels, [copy.overview, copy.wallet, copy.orders, copy.invoice, copy.usage, copy.tokens]);
+    assert.deepEqual(labels, [copy.overview, copy.wallet, copy.orders, copy.invoice, copy.usage, copy.tokens, copy.myRoles, copy.profile]);
   });
   for (const locale of ['zh', 'en', 'ja']) {
     await runCase('personal plan/history keeps exact amounts and authority scope in ' + locale, 'entitlement-history', async page => {
@@ -551,7 +551,7 @@ try {
       const before = await page.evaluate(() => window.__accountReview.calls.filter(item => item.path === '/api/token/v1/me/entitlement-packages' || (item.path === '/api/token/v1/recharge/orders' && item.method === 'GET')).length);
       await page.evaluate(() => Array.from(document.querySelectorAll('nav button')).find(element => element.textContent === window.__accountReview.copy.sections.overview).click());
       await page.select('.ap-context-card select', '00000000-0000-4000-8000-000000000002');
-      await page.waitForFunction(() => document.querySelector('.ap-metrics article:nth-child(2) strong').textContent === '222');
+      await page.waitForFunction(() => [...document.querySelectorAll('.ap-metrics article')].find(item => item.querySelector('span')?.textContent === window.__accountReview.copy.availableCredits)?.querySelector('strong')?.textContent === '222');
       assert.equal(await page.evaluate(() => window.__accountReview.calls.filter(item => item.path === '/api/token/v1/me/entitlement-packages' || (item.path === '/api/token/v1/recharge/orders' && item.method === 'GET')).length), before);
       const labels = await page.$$eval('nav button', elements => elements.map(element => element.textContent));
       const copy = await page.evaluate(() => window.__accountReview.copy.sections);
@@ -571,6 +571,211 @@ try {
     });
   }
 
+  for (const locale of ['zh','en','ja']) {
+    await runCase('own role grants and nullable validity localize in '+locale,'a08-my-roles',async page => {
+      await page.evaluate(()=>[...document.querySelectorAll('nav button')].find(el=>el.textContent===window.__accountReview.copy.sections.myRoles).click());
+      await page.waitForFunction(()=>document.querySelector('main')?.textContent.includes('MEMBER'));
+      assert.ok(await page.evaluate(()=>document.querySelector('main').textContent.includes(window.__accountReview.copy.myRoleBindings.forever)));
+      const calls=await page.evaluate(()=>window.__accountReview.calls.filter(item=>item.path.endsWith('/role-bindings')));
+      assert.equal(calls.length,1);assert.equal(calls[0].path,'/api/account/v1/me/role-bindings');
+    },locale);
+    await runCase('profile recent-auth denial is translated in '+locale,'a08-profile-recent',async page => {
+      await page.evaluate(()=>[...document.querySelectorAll('nav button')].find(el=>el.textContent===window.__accountReview.copy.sections.profile).click());
+      await page.type('main form input','ChangedUser');await page.click('main form button');
+      await page.waitForFunction(()=>[...document.querySelectorAll('[role="alert"]')].some(el=>el.textContent===window.__accountReview.copy.recentAuthenticationRequired));
+      assert.equal(await page.evaluate(()=>document.body.textContent.includes('RECENT_AUTHENTICATION_REQUIRED')),false);
+    },locale);
+    await runCase('restored registration retains first-password truth in '+locale,'popover-mobile-restored-active',async page=>{
+      await page.waitForFunction(()=>document.querySelector('[role="alert"]')?.textContent===window.__accountReview.copy.registrationRecovered);
+      assert.equal(await page.$eval(panel+' input[autocomplete="username"]',el=>el.value),'FixtureUser');
+      assert.equal(await page.$eval(panel+' input[type="password"]',el=>el.value),'');
+      assert.equal(await page.evaluate(()=>window.__accountReview.calls.filter(item=>item.path==='nativeLogin'||item.path==='nativeRegister').length),0);
+    },locale);
+    await runCase('component decimal strings and absent expiry remain exact in '+locale,'entitlement-history',async page=>{
+      await page.evaluate(()=>[...document.querySelectorAll('nav button')].find(el=>el.textContent===window.__accountReview.copy.sections.wallet).click());
+      await page.waitForSelector('.ap-entitlements .ap-trace-card .ap-card');
+      const text=await page.$eval('.ap-entitlements .ap-trace-card .ap-card',el=>el.textContent);
+      assert.ok(text.includes('9,007,199,254,740,993'));assert.ok(text.includes('9,007,199,254,740,992'));
+      assert.ok(await page.evaluate(()=>document.querySelector('.ap-entitlements').textContent.includes(window.__accountReview.copy.noExpiry)));
+      assert.equal(text.includes('1970'),false);
+    },locale);
+  }
+  for (const scenario of ['a08-profile-username','a08-profile-retry']) {
+    await runCase('profile completion clears old identity '+scenario,scenario,async page=>{
+      await page.evaluate(()=>[...document.querySelectorAll('nav button')].find(el=>el.textContent===window.__accountReview.copy.sections.profile).click());
+      await page.type('main form input','ChangedUser');await page.click('main form button');
+      await page.waitForFunction(()=>document.querySelector('main').textContent.includes('ChangedUser'));
+      await page.click('main .ap-primary');await page.waitForSelector('.ap-login');
+      assert.equal(await page.$$eval('nav',els=>els.length),0);
+      assert.equal(await page.evaluate(()=>document.body.textContent.includes('Fixture User')),false);
+    });
+  }
+  await runCase('profile worker intermediate states keep polling without duplicate completion','a08-profile-worker',async page=>{
+    await page.evaluate(()=>[...document.querySelectorAll('nav button')].find(el=>el.textContent===window.__accountReview.copy.sections.profile).click());
+    await page.type('main form input','ChangedUser'); await page.click('main form button');
+    await page.waitForFunction(()=>document.querySelector('main').textContent.includes('ChangedUser'));
+    await page.waitForFunction(()=>document.querySelector('main .ap-primary') && !document.querySelector('main .ap-primary').disabled); await page.click('main .ap-primary');
+    for (const state of ['VERIFIED','IDENTITY_UPDATED','ACCOUNT_COMMITTED']) {
+      await page.waitForFunction(status=>window.__accountReview.calls.filter(call=>call.path.endsWith(window.__accountReview.ids.usage)).length >= ['VERIFIED','IDENTITY_UPDATED','ACCOUNT_COMMITTED'].indexOf(status)+1,{},state);
+      assert.equal(await page.$$eval('main .ap-primary',els=>els.length),0);
+    }
+    await page.waitForSelector('.ap-login',{timeout:20000});
+    const calls=await page.evaluate(()=>window.__accountReview.calls);
+    assert.equal(calls.filter(call=>call.path.endsWith('/actions/complete')).length,1);
+    assert.equal(calls.filter(call=>call.path==='/api/logout').length,1);
+    const requestID=await page.evaluate(()=>window.__accountReview.ids.usage);
+    assert.equal(calls.filter(call=>call.path.endsWith(requestID)).length,4);
+  });
+  await runCase('profile completion waits for actual portal logout and retries a failed deletion','a08-profile-logout-retry',async page=>{
+    await page.evaluate(()=>[...document.querySelectorAll('nav button')].find(el=>el.textContent===window.__accountReview.copy.sections.profile).click());
+    await page.type('main form input','ChangedUser'); await page.click('main form button');
+    await page.waitForFunction(()=>document.querySelector('main').textContent.includes('ChangedUser'));
+    await page.waitForFunction(()=>document.querySelector('main .ap-primary') && !document.querySelector('main .ap-primary').disabled); await page.click('main .ap-primary');
+    await page.waitForSelector('main [role=alert]');
+    assert.equal(await page.$$eval('.ap-login',els=>els.length),0);
+    await page.evaluate(()=>[...document.querySelectorAll('main button')].find(el=>el.textContent===window.__accountReview.copy.logout).click());
+    await page.waitForSelector('.ap-login');
+    const calls=await page.evaluate(()=>window.__accountReview.calls);
+    assert.equal(calls.filter(call=>call.path.endsWith('/actions/complete')).length,1);
+    assert.equal(calls.filter(call=>call.path==='/api/logout').length,2);
+  });
+  await runCase('profile mobile uses owned change and challenge before clearing session','a08-profile-mobile',async page=>{
+    await page.evaluate(()=>[...document.querySelectorAll('nav button')].find(el=>el.textContent===window.__accountReview.copy.sections.profile).click());
+    await page.select('main form select','MOBILE');await page.type('main form input','13900000000');await page.click('main form button');
+    await page.waitForFunction(()=>document.querySelector('main').textContent.includes('13900000000'));
+    await page.evaluate(()=>[...document.querySelectorAll('main button')].find(el=>el.textContent===window.__accountReview.copy.sendCode).click());
+    await page.waitForSelector('main input[type="range"]');
+    await page.evaluate(()=>[...document.querySelectorAll('main button')].find(el=>el.textContent===window.__accountReview.copy.captchaConfirm).click());
+    await page.waitForFunction(()=>!document.querySelector('main input[autocomplete="one-time-code"]').disabled);
+    await page.type('main input[autocomplete="one-time-code"]','123456');await page.click('main .ap-primary');await page.waitForSelector('.ap-login');
+    const calls=await page.evaluate(()=>window.__accountReview.calls);
+    assert.ok(calls.some(item=>item.path.endsWith('/mobile-challenges')&&item.body.captcha_id));
+    assert.equal(calls.find(item=>item.path.endsWith('/actions/complete')).body.code,'123456');
+  });
+  await runCase('pending restored registration blocks repeated sends and creates','popover-mobile-restored-pending',async page=>{
+    await page.waitForFunction(()=>document.body.textContent.includes(window.__accountReview.copy.registrationDoNotRepeat));
+    await enterRegistration(page);await waitRegistration(page);await clickCopy(page,'sendCode');
+    assert.equal(await page.evaluate(()=>window.__accountReview.calls.filter(item=>item.path==='nativeRegister'||item.path==='nativeSendSMS').length),0);
+  });
+  await runCase('unavailable OS persistence keeps process-only recovery disclosure','popover-mobile-memory-only',async page=>{
+    await enterRegistration(page);await waitRegistration(page);await solveCaptcha(page);
+    await page.waitForFunction(()=>document.body.textContent.includes(window.__accountReview.copy.registrationRecoveryMemoryOnly));
+    assert.equal(await page.evaluate(()=>JSON.stringify(window.__accountReview.calls).includes('registration_query_token')),false);
+  });
+  await runCase('forgot password confirms new password and returns to login','popover-mobile-forgot',async page=>{
+    await authMode(page,'forgot');await enterPhone(page);
+    const inputs=await page.$$(panel+' input[type="password"]');await inputs[0].type('ChangedPassword123');await inputs[1].type('ChangedPassword123');
+    await solveCaptcha(page);await page.waitForFunction(()=>!document.querySelector('[role="dialog"]'));
+    await page.type(panel+' input[autocomplete="one-time-code"]','123456');await page.click(panel+' button[type="submit"]');
+    await page.waitForFunction(()=>document.querySelector('[role="alert"]')?.textContent===window.__accountReview.copy.passwordResetComplete);
+    const calls=await page.evaluate(()=>window.__accountReview.calls);assert.equal(calls.filter(item=>item.path==='nativeResetPassword').length,1);
+    assert.equal(calls.some(item=>item.path==='nativeLogin'),false);assert.equal(await page.$eval(panel+' input[type="password"]',el=>el.value),'');
+  });
+  await runCase('forgot password uncertain reply retries the original challenge after retyping secrets','popover-mobile-forgot-retry',async page=>{
+    await authMode(page,'forgot'); await enterPhone(page);
+    const retype = async () => { const inputs=await page.$$(panel+' input[type="password"]'); await inputs[0].type('ChangedPassword123'); await inputs[1].type('ChangedPassword123'); };
+    await retype(); await solveCaptcha(page); await page.waitForFunction(()=>!document.querySelector('[role="dialog"]'));
+    await page.type(panel+' input[autocomplete="one-time-code"]','123456'); await page.click(panel+' button[type="submit"]');
+    await page.waitForSelector(panel+' [role="alert"]');
+    assert.equal(await page.$$eval(panel+' input[type="password"]',els=>els.every(el=>el.value==='')),true);
+    await retype();
+    assert.equal(await page.$$eval(panel+' input[autocomplete="one-time-code"]',els=>els.length),1);
+    await page.type(panel+' input[autocomplete="one-time-code"]','123456'); await page.click(panel+' button[type="submit"]');
+    await page.waitForFunction(()=>document.querySelector('[role="alert"]')?.textContent===window.__accountReview.copy.passwordResetComplete);
+    const calls=await page.evaluate(()=>window.__accountReview.calls); const resets=calls.filter(call=>call.path==='nativeResetPassword');
+    assert.equal(resets.length,2); assert.deepEqual(resets[0].input,resets[1].input);
+    assert.equal(calls.filter(call=>call.path==='nativeSendSMS').length,1);
+    assert.equal(calls.some(call=>call.path==='nativeLogin'),false);
+  });
+  for (const locale of ['zh','en','ja']) {
+    await runCase('admin role grant retries same facts once and preserves fixed roles in '+locale,'admin-a08-role-retry',async page=>{
+      await page.evaluate(()=>[...document.querySelectorAll('nav button')].find(el=>el.textContent.includes(window.__accountReview.adminCopy.nav.roleBindings)).click());
+      await page.waitForSelector('main tbody tr');assert.equal(await page.$$eval('main tbody button',els=>els.length),0);
+      await page.type('main form input', '00000000-0000-4000-8000-000000000001');
+      await page.select('main form select','ORG_ADMIN');
+      await page.type('main form label:nth-child(3) input','00000000-0000-4000-8000-000000000002');
+      await page.click('main form button');await page.waitForSelector('main [role="alert"]');
+      await page.click('main form button');await page.waitForSelector('main tbody button');
+      const requests=await page.evaluate(()=>window.__accountReview.calls.filter(item=>item.path.endsWith('/role-bindings')&&item.method==='POST'));
+      assert.equal(requests.length,2);assert.equal(requests[0].body.idempotency_key,requests[1].body.idempotency_key);assert.ok(requests.every(item=>item.csrf));
+    },locale,true);
+  }
+  for(const scenario of ['admin-a08-approval','admin-a08-approval-malformed']) {
+    await runCase('approval submission validates exact Billing facts '+scenario,scenario,async page=>{
+      await page.evaluate(()=>[...document.querySelectorAll('nav button')].find(el=>el.textContent.includes(window.__accountReview.adminCopy.nav.approvals)).click());
+      await page.waitForSelector('main form:nth-of-type(2)');
+      await page.type('main form:nth-of-type(2) input:nth-of-type(1)','00000000-0000-4000-8000-000000000005');
+      const inputs=await page.$$('main form:nth-of-type(2) input');await inputs[1].type('10000');await inputs[2].type('Controlled financial reason');
+      await page.click('main form:nth-of-type(2) button');
+      if(scenario.endsWith('malformed')) {await page.waitForSelector('main [role="alert"]');assert.equal(await page.evaluate(()=>window.__accountReview.calls.some(item=>item.path.endsWith('/approval-requests')&&item.method==='POST')),false);}
+      else {await page.waitForSelector('main tbody tr');const calls=await page.evaluate(()=>window.__accountReview.calls);const command=calls.find(item=>item.path.endsWith('/approval-requests')&&item.method==='POST').body;assert.equal(command.normalized_command.amount_microcredits,10000);assert.equal(command.normalized_command.requested_by,'00000000-0000-4000-8000-000000000001');assert.equal(calls.filter(item=>item.path.endsWith('/actions/submit')).length,1);}
+    },'en',true);
+  }
+  for (const [status,locale] of [['APPROVED','zh'],['EXECUTING','en'],['EXECUTED','ja'],['REJECTED','en'],['EXECUTION_FAILED','en'],['WITHDRAWN','en'],['EXPIRED','en'],['INVALIDATED','en'],['SUBMITTED','en']]) {
+    await runCase('approval retry recovers existing '+status+' in '+locale,'admin-a08-approval-replay-'+status,async page=>{
+      await page.evaluate(()=>[...document.querySelectorAll('nav button')].find(el=>el.textContent.includes(window.__accountReview.adminCopy.nav.approvals)).click());
+      await page.waitForSelector('main form:nth-of-type(2)');
+      const inputs=await page.$$('main form:nth-of-type(2) input');await inputs[0].type('00000000-0000-4000-8000-000000000005');await inputs[1].type('10000');await inputs[2].type('Controlled financial reason');
+      await page.click('main form:nth-of-type(2) button');await page.waitForSelector('main [role="alert"]');
+      await page.click('main form:nth-of-type(2) button');
+      await page.waitForFunction(()=>[...document.querySelectorAll('main form:nth-of-type(2) input')].every(el=>el.value===''),{timeout:3000});
+      assert.equal(await page.evaluate(()=>typeof window.__accountReview.adminCopy.approvals.existing==='string' && window.__accountReview.adminCopy.approvals.existing.length>0),true);
+      assert.equal(await page.$('main [role="alert"]'),null);
+      await page.waitForFunction(status=>document.querySelector('main tbody')?.textContent.includes(status),{},status);
+      const calls=await page.evaluate(()=>window.__accountReview.calls);
+      const drafts=calls.filter(call=>call.path.endsWith('/approval-requests')&&call.method==='POST');
+      assert.equal(drafts.length,2);assert.deepEqual(drafts[0].body,drafts[1].body);
+      assert.equal(calls.filter(call=>call.path.endsWith('/adjustments')&&call.method==='POST').length,1);
+      assert.equal(calls.filter(call=>call.path.endsWith('/actions/submit')).length,1);
+      assert.equal(await page.$$eval('main form:nth-of-type(2) input',els=>els.every(el=>el.value==='')),true);
+      // A new user action with changed facts is independent of the recovered request.
+      const next=await page.$$('main form:nth-of-type(2) input');await next[0].type('00000000-0000-4000-8000-000000000005');await next[1].type('20000');await next[2].type('Different financial reason');
+      await page.click('main form:nth-of-type(2) button');
+      await page.waitForFunction(()=>window.__accountReview.calls.filter(call=>call.path.endsWith('/adjustments')&&call.method==='POST').length===2);
+      const adjustments=await page.evaluate(()=>window.__accountReview.calls.filter(call=>call.path.endsWith('/adjustments')&&call.method==='POST'));
+      assert.notEqual(adjustments[0].body.idempotency_key,adjustments[1].body.idempotency_key);
+    },locale,true);
+  }
+  for(const locale of ['zh','en','ja']) {
+    await runCase('pending Billing adjustment opens existing approval queue in '+locale,'admin-a08-adjustment-workflow',async page=>{
+      page.on('dialog',dialog=>void dialog.accept('Controlled decision reason'));
+      await page.evaluate(()=>[...document.querySelectorAll('nav button')].find(el=>el.textContent.includes(window.__accountReview.adminCopy.nav.billing)).click());
+      await page.waitForSelector('.adm-tabs');
+      await page.evaluate(()=>[...document.querySelectorAll('.adm-tabs button')].find(el=>el.textContent===window.__accountReview.adminCopy.billing.adjustments).click());
+      await page.waitForSelector('main tbody button');await page.click('main tbody button');
+      await page.waitForFunction(()=>window.__accountReview.calls.some(call=>call.path.endsWith('/approval-requests')&&call.method==='GET'),{timeout:3000});
+      const calls=await page.evaluate(()=>window.__accountReview.calls);
+      assert.equal(calls.some(call=>call.method==='POST'&&(call.path.endsWith('/approve')||call.path.endsWith('/adjustments')||call.path.endsWith('/approval-requests'))),false);
+      assert.equal(await page.$eval('main form label:nth-child(5) input',el=>el.value),'00000000-0000-4000-8000-000000000005');
+    },locale,true);
+  }
+  await runCase('pending Billing adjustment retains permitted direct rejection','admin-a08-adjustment-workflow-reject',async page=>{
+    page.on('dialog',dialog=>void dialog.accept('Controlled rejection reason'));
+    await page.evaluate(()=>[...document.querySelectorAll('nav button')].find(el=>el.textContent.includes(window.__accountReview.adminCopy.nav.billing)).click());await page.waitForSelector('.adm-tabs');
+    await page.evaluate(()=>[...document.querySelectorAll('.adm-tabs button')].find(el=>el.textContent===window.__accountReview.adminCopy.billing.adjustments).click());
+    await page.waitForSelector('main tbody button');await page.click('main tbody button.danger');
+    await page.waitForFunction(()=>document.querySelector('main tbody')?.textContent.includes('REJECTED'));
+    const calls=await page.evaluate(()=>window.__accountReview.calls);assert.equal(calls.filter(call=>call.path.endsWith('/reject')&&call.method==='POST').length,1);assert.equal(calls.some(call=>call.path.endsWith('/approve')),false);
+  },'en',true);
+  for (const locale of ['zh','en','ja']) {
+    await runCase('granular admin permissions retain authorized screens in '+locale,'admin-a08-limited',async page=>{
+      await page.waitForSelector('nav'); await page.waitForSelector('main [role="alert"]');
+      assert.equal(await page.$$eval('.adm-metric',items=>items.length),0);
+      await page.evaluate(()=>[...document.querySelectorAll('nav button')].find(el=>el.textContent.includes(window.__accountReview.adminCopy.nav.users)).click());
+      await page.waitForFunction(()=>document.querySelector('main tbody')?.textContent.includes('AuthorizedIdentity'));
+      await page.evaluate(()=>[...document.querySelectorAll('nav button')].find(el=>el.textContent.includes(window.__accountReview.adminCopy.nav.billing)).click());
+      await page.waitForSelector('main tbody tr');
+      await page.evaluate(()=>[...document.querySelectorAll('.adm-tabs button')].find(el=>el.textContent===window.__accountReview.adminCopy.billing.prices).click());
+      await page.waitForFunction(()=>[...document.querySelectorAll('main [role="alert"]')].some(el=>el.textContent===window.__accountReview.adminCopy.denied));
+      assert.equal(await page.$$eval('main form',items=>items.length),0);
+      await page.evaluate(()=>[...document.querySelectorAll('.adm-tabs button')].find(el=>el.textContent===window.__accountReview.adminCopy.billing.wallets).click());
+      await page.waitForSelector('main tbody tr');
+      await page.evaluate(()=>[...document.querySelectorAll('nav button')].find(el=>el.textContent.includes(window.__accountReview.adminCopy.nav.roleBindings)).click());
+      await page.waitForFunction(()=>[...(document.querySelector('main form select')?.options || [])].some(option=>option.value==='PLATFORM_BILLING_OPERATOR'));
+      const options=await page.$$eval('main form select option',items=>items.map(el=>el.value));
+      assert.deepEqual(options,['PLATFORM_BILLING_OPERATOR','ORG_ADMIN']);
+    },locale);
+  }
   console.log(`Account UI: ${passed} PASS, ${failures.length} FAIL, 0 SKIP. Controlled API responses; real React/client/QR; not BFF/PG or Safari E2E.`);
   assert.equal(failures.length, 0, `Failing scenarios: ${failures.join(', ')}`);
 } finally {

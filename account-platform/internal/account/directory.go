@@ -21,7 +21,7 @@ func (r *PostgresRepository) ListUnits(ctx context.Context, principal identity.P
 	if err != nil {
 		return nil, err
 	}
-	if err := requireOrganizationMember(ctx, tx, actorID, organizationID); err != nil {
+	if err := requireOrganizationPermission(ctx, tx, actorID, organizationID, nil, PermissionOrganizationUnitsRead); err != nil {
 		return nil, err
 	}
 	rows, err := tx.Query(ctx, `SELECT id,organization_id,parent_id,name,status,version FROM organization_units WHERE organization_id=$1 AND status='ACTIVE' ORDER BY parent_id NULLS FIRST,name,id`, organizationID)
@@ -53,14 +53,14 @@ func (r *PostgresRepository) ListMembers(ctx context.Context, principal identity
 	if err != nil {
 		return nil, err
 	}
-	if err := requireOrganizationMember(ctx, tx, actorID, organizationID); err != nil {
+	if err := requireOrganizationPermission(ctx, tx, actorID, organizationID, nil, PermissionOrganizationMembersRead); err != nil {
 		return nil, err
 	}
 	rows, err := tx.Query(ctx, `
 SELECT m.id,u.id,u.display_name,u.email,m.status,m.version,m.joined_at,
-       ARRAY(SELECT DISTINCT rb.role FROM role_bindings rb WHERE rb.membership_id=m.id ORDER BY rb.role),
+       ARRAY(SELECT DISTINCT rb.role FROM role_bindings rb WHERE rb.membership_id=m.id AND rb.revoked_at IS NULL AND rb.starts_at<=statement_timestamp() AND (rb.expires_at IS NULL OR rb.expires_at>statement_timestamp()) ORDER BY rb.role),
        ARRAY(SELECT mu.unit_id FROM membership_units mu WHERE mu.membership_id=m.id ORDER BY mu.unit_id),
-       ARRAY(SELECT rb.unit_id FROM role_bindings rb WHERE rb.membership_id=m.id AND rb.role='UNIT_ADMIN' ORDER BY rb.unit_id)
+       ARRAY(SELECT rb.unit_id FROM role_bindings rb WHERE rb.membership_id=m.id AND rb.role='UNIT_ADMIN' AND rb.revoked_at IS NULL AND rb.starts_at<=statement_timestamp() AND (rb.expires_at IS NULL OR rb.expires_at>statement_timestamp()) ORDER BY rb.unit_id)
 FROM memberships m JOIN users u ON u.id=m.user_id
 WHERE m.organization_id=$1 AND m.status='ACTIVE'
 ORDER BY COALESCE(u.display_name,u.email,u.id::text),u.id`, organizationID)
@@ -96,7 +96,7 @@ func (r *PostgresRepository) ReplaceMemberRoles(ctx context.Context, principal i
 	if err != nil {
 		return Member{}, err
 	}
-	if err := requireOrganizationAdmin(ctx, tx, actorID, organizationID, nil); err != nil {
+	if err := requireOrganizationPermission(ctx, tx, actorID, organizationID, nil, PermissionOrganizationRolesAssign); err != nil {
 		return Member{}, err
 	}
 	var membershipID uuid.UUID
@@ -109,11 +109,11 @@ func (r *PostgresRepository) ReplaceMemberRoles(ctx context.Context, principal i
 		return Member{}, err
 	}
 	now := r.now()
-	if _, err := tx.Exec(ctx, `DELETE FROM role_bindings WHERE membership_id=$1 AND role IN ('ORG_ADMIN','BILLING_ADMIN','MEMBER','AUDITOR')`, membershipID); err != nil {
+	if _, err := tx.Exec(ctx, `UPDATE role_bindings SET revoked_at=$2,revoked_by=$3 WHERE membership_id=$1 AND role IN ('ORG_ADMIN','BILLING_ADMIN','MEMBER','AUDITOR') AND revoked_at IS NULL`, membershipID, now, actorID); err != nil {
 		return Member{}, err
 	}
 	for _, role := range roles {
-		if _, err := tx.Exec(ctx, `INSERT INTO role_bindings(id,membership_id,role,created_by,created_at) VALUES($1,$2,$3,$4,$5)`, uuid.Must(uuid.NewV7()), membershipID, role, actorID, now); err != nil {
+		if _, err := tx.Exec(ctx, `INSERT INTO role_bindings(id,membership_id,role,created_by,created_at,grant_source) VALUES($1,$2,$3,$4,$5,'ORGANIZATION_ADMIN')`, uuid.Must(uuid.NewV7()), membershipID, role, actorID, now); err != nil {
 			return Member{}, err
 		}
 	}
@@ -176,9 +176,9 @@ func getMember(ctx context.Context, database pgx.Tx, membershipID uuid.UUID) (Me
 	var item Member
 	err := database.QueryRow(ctx, `
 SELECT m.id,u.id,u.display_name,u.email,m.status,m.version,m.joined_at,
-       ARRAY(SELECT DISTINCT rb.role FROM role_bindings rb WHERE rb.membership_id=m.id ORDER BY rb.role),
+       ARRAY(SELECT DISTINCT rb.role FROM role_bindings rb WHERE rb.membership_id=m.id AND rb.revoked_at IS NULL AND rb.starts_at<=statement_timestamp() AND (rb.expires_at IS NULL OR rb.expires_at>statement_timestamp()) ORDER BY rb.role),
        ARRAY(SELECT mu.unit_id FROM membership_units mu WHERE mu.membership_id=m.id ORDER BY mu.unit_id),
-       ARRAY(SELECT rb.unit_id FROM role_bindings rb WHERE rb.membership_id=m.id AND rb.role='UNIT_ADMIN' ORDER BY rb.unit_id)
+       ARRAY(SELECT rb.unit_id FROM role_bindings rb WHERE rb.membership_id=m.id AND rb.role='UNIT_ADMIN' AND rb.revoked_at IS NULL AND rb.starts_at<=statement_timestamp() AND (rb.expires_at IS NULL OR rb.expires_at>statement_timestamp()) ORDER BY rb.unit_id)
 FROM memberships m JOIN users u ON u.id=m.user_id WHERE m.id=$1`, membershipID).Scan(&item.MembershipID, &item.UserID, &item.DisplayName, &item.Email, &item.Status, &item.Version, &item.JoinedAt, &item.Roles, &item.UnitIDs, &item.UnitAdminIDs)
 	return item, err
 }

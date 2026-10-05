@@ -90,9 +90,9 @@ func TestPostgresAdminUsageListKeepsOperationsEvidenceAndExactMoney(t *testing.T
 	if _, err := repo.pool.Exec(ctx, `UPDATE usage_requests SET reconciliation_last_error='payment provider unavailable',maximum_microcredits=9007199254740993 WHERE id=$1`, usage.ID); err != nil {
 		t.Fatal(err)
 	}
-	s := NewService(repo, nil, nil, nil, ProviderURLPolicy{}, nil, nil, 100)
+	s := NewService(repo, nil, nil, nil, ProviderURLPolicy{}, nil, nil, 100).WithAuthorizer(tokenTestAuthorizer(t))
 	handler := s.Handler(func(context.Context, string) (identity.Principal, error) {
-		return identity.Principal{RealmRoles: []string{"platform-admin"}}, nil
+		return identity.Principal{Issuer: "https://fixture-authority.invalid", Subject: "fixture-platform-operator", RealmRoles: []string{"platform-admin"}}, nil
 	})
 	for _, path := range []string{"/admin/v1/usage-requests", "/admin/v1/usage-requests/" + usage.ID.String()} {
 		request := httptest.NewRequest("GET", path, nil)
@@ -114,6 +114,7 @@ func TestPostgresAdminUsageListKeepsOperationsEvidenceAndExactMoney(t *testing.T
 
 func TestPostgresTokenAdminInvalidJSONReturns400WithoutAudit(t *testing.T) {
 	s, repo, _ := proxyFixture(t, "http://127.0.0.1:1")
+	s.WithAuthorizer(tokenTestAuthorizer(t))
 	ctx := context.Background()
 	candidates, err := repo.ListCandidates(ctx, "model-test")
 	if err != nil {
@@ -121,7 +122,7 @@ func TestPostgresTokenAdminInvalidJSONReturns400WithoutAudit(t *testing.T) {
 	}
 	id := candidates[0].TokenAccountID.String()
 	handler := s.Handler(func(context.Context, string) (identity.Principal, error) {
-		return identity.Principal{RealmRoles: []string{"platform-admin"}}, nil
+		return identity.Principal{Issuer: "https://fixture-authority.invalid", Subject: "fixture-platform-operator", RealmRoles: []string{"platform-admin"}}, nil
 	})
 	for _, route := range []struct{ method, path string }{{"PATCH", "/admin/v1/token-accounts/" + id + "/status"}, {"PUT", "/admin/v1/token-accounts/" + id + "/routes"}, {"DELETE", "/admin/v1/token-accounts/" + id + "/routes"}, {"POST", "/admin/v1/usage-requests/" + uuid.NewString() + "/retry-reconciliation"}} {
 		for _, body := range []string{"{", `{"unexpected":true}`, `{"model":[]}`, `{} {}`, `{"reason":"` + strings.Repeat("x", 1<<20) + `"}`} {

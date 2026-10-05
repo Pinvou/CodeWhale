@@ -7,6 +7,8 @@
 pub(crate) mod client_migration;
 mod mobile;
 mod models;
+mod password_reset;
+mod registration;
 pub use models::BuiltinModelsView;
 mod oidc;
 mod platform;
@@ -14,7 +16,7 @@ mod runtime;
 pub(crate) mod runtime_model;
 
 pub use mobile::{
-    MobileRegistration, MobileRegistrationPrecheck, SMSLoginCredentials, SMSRequest,
+    MobileRegistration, MobileRegistrationPrecheck, PasswordReset, SMSLoginCredentials, SMSRequest,
     SliderCaptchaRequest,
 };
 
@@ -44,6 +46,7 @@ const TOKEN_URL_ENV: &str = "PINVOU_ACCOUNT_OIDC_TOKEN_URL";
 const JWKS_URL_ENV: &str = "PINVOU_ACCOUNT_OIDC_JWKS_URL";
 const CLIENT_ID_ENV: &str = "PINVOU_ACCOUNT_OIDC_CLIENT_ID";
 const ACCOUNT_URL_ENV: &str = "PINVOU_ACCOUNT_SERVICE_URL";
+const IDENTITY_URL_ENV: &str = "PINVOU_IDENTITY_SERVICE_URL";
 const TOKEN_GATEWAY_URL_ENV: &str = "PINVOU_TOKEN_GATEWAY_URL";
 const MAX_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 const MAX_REQUEST_BODY_BYTES: usize = 64 * 1024;
@@ -57,6 +60,7 @@ struct AccountPlatformConfig {
     token_url: Url,
     client_id: String,
     account_url: Url,
+    identity_url: Option<Url>,
     token_gateway_url: Url,
 }
 
@@ -91,6 +95,9 @@ impl AccountPlatformConfig {
             token_url,
             client_id,
             account_url: parse_service_base(ACCOUNT_URL_ENV, &required_env(ACCOUNT_URL_ENV)?)?,
+            identity_url: optional_env(IDENTITY_URL_ENV)
+                .map(|value| parse_service_base(IDENTITY_URL_ENV, &value))
+                .transpose()?,
             token_gateway_url: parse_service_base(
                 TOKEN_GATEWAY_URL_ENV,
                 &required_env(TOKEN_GATEWAY_URL_ENV)?,
@@ -250,6 +257,37 @@ pub struct ApiResponse {
     pub body: Value,
 }
 
+// Share the same canonical request fact between session clearing and EnginePool
+// invalidation. This predicate grants no access; prepare_request remains authoritative.
+pub(crate) fn profile_completion_requested(input: &ApiRequest) -> bool {
+    if input.area != "account" || !matches!(input.method.as_str(), "POST" | "GET") {
+        return false;
+    }
+    let Ok(parsed) = Url::parse(&format!("http://desktop.invalid{}", input.resource)) else {
+        return false;
+    };
+    let Ok(method) = Method::from_bytes(input.method.as_bytes()) else {
+        return false;
+    };
+    if parsed.host_str() != Some("desktop.invalid")
+        || parsed.fragment().is_some()
+        || !route_allowed(&input.area, &method, parsed.path(), parsed.query())
+    {
+        return false;
+    }
+    let Some(resource) = parsed
+        .path()
+        .strip_prefix("/v1/me/profile-change-requests/")
+    else {
+        return false;
+    };
+    match method {
+        Method::POST => resource.ends_with("/actions/complete"),
+        Method::GET => !resource.is_empty() && !resource.contains('/'),
+        _ => false,
+    }
+}
+
 pub struct AccountPlatformState {
     session: Mutex<Option<RuntimeSession>>,
     login_guard: Mutex<()>,
@@ -259,6 +297,12 @@ pub struct AccountPlatformState {
     session_epoch: AtomicU64,
     session_generation: AtomicU64,
     client: reqwest::Client,
+    registration_guard: Mutex<()>,
+    registration_credentials: Arc<dyn DesktopCredentials>,
+    registration_memory: Mutex<Option<registration::PendingMemory>>,
+    registration_epoch: AtomicU64,
+    device_id: String,
+    password_reset_memory: Mutex<Option<password_reset::PendingReset>>,
 }
 
 impl AccountPlatformState {
@@ -280,6 +324,14 @@ impl AccountPlatformState {
             session_epoch: AtomicU64::new(0),
             session_generation: AtomicU64::new(0),
             client,
+            registration_guard: Mutex::new(()),
+            registration_memory: Mutex::new(None),
+            registration_epoch: AtomicU64::new(0),
+            registration_credentials: Arc::new(DefaultKeyringStore::new(
+                CredentialReference::for_account_platform_registration().service,
+            )),
+            device_id: random_urlsafe(24),
+            password_reset_memory: Mutex::new(None),
         })
     }
 
@@ -414,6 +466,20 @@ impl AccountPlatformState {
         })
     }
 
+    // A completed request may clear only the identity epoch that dispatched it.
+    // The refresh lock also excludes a new login while deleting its credential.
+    async fn logout_if_epoch(&self, expected: u64) -> Result<(), String> {
+        let _refresh = self.refresh_guard.lock().await;
+        self.session_epoch
+            .compare_exchange(expected, expected + 1, Ordering::SeqCst, Ordering::SeqCst)
+            .map_err(|_| "authentication_required: account session changed".to_string())?;
+        *self.session.lock().await = None;
+        self.credentials
+            .delete(REFRESH_TOKEN_KEY)
+            .map_err(|_| "credential_store_failed".to_string())?;
+        Ok(())
+    }
+
     pub async fn request(&self, input: ApiRequest) -> Result<ApiResponse, String> {
         self.request_with(&AccountPlatformConfig::from_env()?, input)
             .await
@@ -425,6 +491,7 @@ impl AccountPlatformState {
         input: ApiRequest,
     ) -> Result<ApiResponse, String> {
         let account_area = input.area == "account";
+        let completes_profile = profile_completion_requested(&input);
         let prepared = prepare_request(config, input)?;
         // Serialize the canonical allowlisted route, including paths normalized
         // by Url, rather than relying on the caller's spelling of the resource.
@@ -457,6 +524,12 @@ impl AccountPlatformState {
         if is_bootstrap && (200..300).contains(&response.status) {
             self.remember_account_identity(config, &token, bootstrap_user_id(&response.body)?)
                 .await?;
+        }
+        if completes_profile
+            && (200..300).contains(&response.status)
+            && response.body.get("status").and_then(Value::as_str) == Some("COMPLETED")
+        {
+            self.logout_if_epoch(epoch).await?;
         }
         Ok(response)
     }
@@ -625,6 +698,7 @@ impl AccountPlatformState {
             .request(request.method.clone(), request.url.clone())
             .bearer_auth(access_token)
             .header("Accept", "application/json")
+            .header("X-Device-ID", &self.device_id)
             .header("X-Request-ID", random_urlsafe(18));
         if let Some(key) = request.idempotency_key.as_ref() {
             builder = builder.header("Idempotency-Key", key);
@@ -753,7 +827,9 @@ fn route_allowed(area: &str, method: &Method, path: &str, query: Option<&str>) -
             usage_history_query_allowed(query)
         }
         ("account", &Method::POST, ["v1", "account", "bootstrap"], None)
+        | ("account", &Method::POST, ["v1", "me", "profile-change-requests"], None)
         | ("account", &Method::GET, ["v1", "me", "organizations"], None)
+        | ("account", &Method::GET, ["v1", "me", "role-bindings"], None)
         | ("account", &Method::POST, ["v1", "sessions", "current", "active-context"], None)
         | ("token", &Method::GET, ["v1", "models"], None)
         | ("token", &Method::GET, ["v1", "recharge", "products"], None)
@@ -763,6 +839,32 @@ fn route_allowed(area: &str, method: &Method, path: &str, query: Option<&str>) -
         | ("token", &Method::GET, ["v1", "recharge", "orders", "recent"], None)
         | ("token", &Method::GET, ["v1", "token-accounts"], None)
         | ("token", &Method::POST, ["v1", "token-accounts"], None) => true,
+        ("account", &Method::GET, ["v1", "me", "profile-change-requests", id], None)
+        | (
+            "account",
+            &Method::POST,
+            [
+                "v1",
+                "me",
+                "profile-change-requests",
+                id,
+                "mobile-challenges",
+            ],
+            None,
+        )
+        | (
+            "account",
+            &Method::POST,
+            [
+                "v1",
+                "me",
+                "profile-change-requests",
+                id,
+                "actions",
+                "complete",
+            ],
+            None,
+        ) => safe_id(id),
         ("account", &Method::GET, ["v1", "organizations", id, "units"], None)
         | ("account", &Method::POST, ["v1", "organizations", id, "units"], None)
         | ("account", &Method::GET, ["v1", "organizations", id, "members"], None)
@@ -806,6 +908,7 @@ mod tests {
             jwks_url: Url::parse("https://id.example.test/certs").unwrap(),
             token_url: Url::parse("https://id.example.test/token").unwrap(),
             client_id: "desktop-client".to_string(),
+            identity_url: None,
             account_url: Url::parse("https://account.example.test/").unwrap(),
             token_gateway_url: Url::parse("https://token.example.test/").unwrap(),
         }

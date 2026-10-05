@@ -4,7 +4,7 @@
 >
 > 校准日期：2026-10-06
 >
-> 继承实现基线：A06 `c5f0a2bfab58287bac880ea1bb198ef73b50e39d`。旧 `75a29f8` 目标审计另见实现状态中的历史矩阵；本波客户端迁移以最终固定提交为准。
+> 继承实现基线：已审 A07 `d31f5f23668d72fd1800232add80006c3a6b890a`；本波原始历史终点为 `0636238c3854f04f1ea3c52396fabac1d7ca0ff5`。本文件描述二者合并后的实现边界，验证结论以本波最终固定提交的审核记录为准。
 >
 > 文档版本：以本文件所在 Git 提交为准
 >
@@ -14,15 +14,16 @@
 
 当前代码已经形成身份、业务账号、资金账务和模型访问四个服务边界，但部分目标能力仍停留在需求模型，不能按目标架构宣称已完成：
 
-- Keycloak 是登录身份、密码、OIDC 会话和当前 `platform-admin` Realm 角色的事实源。
-- Account Service 是业务用户、组织树、成员、组织角色和活动上下文的事实源；当前活动上下文按 OIDC Session 保存，不是用户级全局上下文。
-- Billing Service 是钱包、平衡账本、充值订单、聚合权益包、固定三元组定价和 Hold 的事实源。
+- Keycloak 是登录身份、密码和 OIDC 会话的事实源；OIDC Claim 只证明主体，不决定业务权限。迁移期保留的 `platform-admin` Realm Role 不再参与业务授权。
+- Identity Adapter 是注册密码预检、策略版本、短期密码材料和 Keycloak 管理协议的唯一边界；Account 只接收不透明密码引用。
+- Account Service 是永久内部用户 ID、独立用户编码、平台/组织角色、权限码、组织树、成员、管理命令审批策略/请求和活动上下文的事实源；当前活动上下文按 OIDC Session 保存，不是用户级全局上下文。
+- Billing Service 是钱包、平衡账本、充值订单、BASE/BONUS 组成级权益、固定三元组定价、Hold 和已批准财务命令领域执行结果的事实源。
 - Token Gateway 是 Token Account、加密凭据、共享/路由策略和模型用量请求的事实源；当前模型推理协议仅支持 `/v1/chat/completions`。
 - New API 是模型数据面和上游用量证据源，不承载品悟用户、组织或钱包真相。
 - Token Portal 是个人中心和运营后台的 Web BFF，采用 OIDC Authorization Code + PKCE、Redis 服务端会话和 CSRF 防护。
-- 桌面端账户 Gateway 路径使用与登录相同的 OIDC Access Token。A06 仍有旧内置模型入口，本波负责迁移；是否完成旧路径退役、孤立引用转换、凭据清理及失败恢复，必须依据本波最终固定源码与实际测试，不能从原审计推断已通过。
+- 桌面端账户 Gateway 路径使用与登录相同的 OIDC Access Token。A07 已完成旧内置模型入口迁移、孤立引用转换、凭据清理和失败恢复的本地审核；本波必须保全这些行为。生产安装与发布验收仍须另行执行。
 
-当前代码尚未实现的关键目标包括：注册钱包 Outbox Saga、用户级全局上下文、平台业务 RBAC、托管路由 Provisioning 状态机、模型目录/协议/公式版本、模型结果重放、组成级 BASE/BONUS 权益、目标退款模型、应收/拒付/强制退款状态机和账号注销 Saga。
+当前代码尚未实现的关键目标包括：用户级全局上下文、托管路由 Provisioning 状态机、模型目录/协议/公式版本、模型结果重放、组成级组织授予、目标退款模型、应收/拒付/强制退款状态机和账号注销 Saga。超级管理员安全恢复已有仓库实现但仍待生产等价演练。
 
 ## 2. 逻辑拓扑
 
@@ -33,22 +34,25 @@ flowchart LR
     Proxy["HTTPS 反向代理"]
     Portal["Token Portal\nWeb BFF"]
     KC["Keycloak\nOIDC 身份"]
+    Identity["Identity Adapter\n密码策略、短期引用、身份管理"]
     Account["Account Service\n用户、组织、角色、Session 上下文"]
     Billing["Billing Service\n钱包、账本、支付、定价、Hold"]
     Gateway["Token Gateway\n账号、凭据、路由、模型用量"]
     NewAPI["独立 New API\n模型数据面"]
     Provider["真实模型供应商"]
-    Aliyun["短信 Adapter\n通用 HTTP / 阿里云"]
+    SMS["SMS Provider Adapter\n厂商托管或平台生成"]
+    Aliyun["短信供应商"]
     Mall["新华三商城"]
     PG[("PostgreSQL\n按服务分库分用户")]
     Redis[("Redis\nPortal 会话")]
     NATS[("NATS JetStream")]
     Relays["Account / Billing / Token\nEvent Relay"]
 
-    Desktop -->|"登录、注册（当前含密码）、业务 API"| Proxy
+    Desktop -->|"登录、注册、业务 API"| Proxy
     Browser --> Proxy
     Proxy --> Portal
     Proxy --> KC
+    Proxy -->|"仅密码预检公开路径"| Identity
     Proxy --> Account
     Proxy --> Gateway
     Portal --> KC
@@ -56,17 +60,20 @@ flowchart LR
     Portal --> Billing
     Portal --> Gateway
     Desktop -->|"OIDC Bearer + chat/completions"| Gateway
-    Account -->|"身份创建/删除（当前含注册密码）"| KC
+    Desktop -->|"原始注册密码"| Identity
+    Account -->|"不透明引用、身份创建/删除"| Identity
+    Identity -->|"厂商管理协议"| KC
     KC -->|"短信 Direct Grant 验证"| Account
-    Account --> Aliyun
+    Account --> SMS
+    SMS --> Aliyun
     Account -->|"仅配置企业商城时"| Mall
-    Account -->|"账号 bootstrap 确保钱包"| Billing
+    Account -->|"后台钱包初始化任务"| Billing
     Billing -->|"显式管理员免单协调"| Gateway
     Gateway --> Account
     Gateway --> Billing
     Gateway --> NewAPI
     NewAPI --> Provider
-    Billing --> Mall
+    Billing -->|"显式选择商城支付时"| Mall
     Account --> PG
     Billing --> PG
     Gateway --> PG
@@ -80,16 +87,17 @@ flowchart LR
 
 仓库配置要求反向代理只公开认证、账号、Gateway 和 Portal 的受控路径。PostgreSQL、Redis、NATS、Relay、Billing 内部 API 和 New API 管理面保持在内部网络；这属于配置和代码基线，本次审计没有取得实际生产环境与版本证据。
 
-当前注册密码信任边界尚未达到后续目标设计：桌面端把原始密码提交给 Account 的注册预检、短信挑战和注册接口，Account 在进程内校验后把密码传给 Keycloak Adapter 创建身份。Account 不持久化密码，但仍实际接收并处理原始密码；目标要求原始密码和密码策略只进入 Identity 边界。反向方向上，Keycloak 的短信 Direct Grant Authenticator 携带内部服务凭据调用 Account `/internal/v1/auth/sms/verify`，并按 Account `/internal/v1/auth/mobile/identity` 返回的当前权威 subject 登录，不按同手机号任选旧身份。
+当前注册密码先通过 TLS 进入 Identity Adapter 的公开预检路径，取得 15 分钟有效的不透明引用和冻结的 `password_policy_version`；Account 的预检、短信和注册 API 只接收该引用，最终身份创建由 Identity Adapter 使用原始序列再次权威校验。短期原文与带独立密钥的 HMAC 仅保存在 Identity 进程内，成功创建后清除原文，过期时删除记录。Identity 还把服务端生成的注册操作 ID 绑定到密码 HMAC 指纹，并把该 ID 作为 Keycloak 用户属性保存，Account 可先按该关联查询再幂等创建，避免不确定结果下重复建号。A06 遗留未完成意图只有经本地持久审计证明后才使用其原命名空间；不按用户名或手机号猜测身份。反向方向上，Keycloak 的短信 Direct Grant Authenticator 携带内部服务凭据调用 Account `/internal/v1/auth/sms/verify`，并按 `/internal/v1/auth/mobile/identity` 返回的当前权威 subject 登录。
 
 ## 3. 服务边界
 
 | 组件 | 当前职责 | 当前自有状态 | 主要目标差距 |
 |---|---|---|---|
-| Keycloak | 用户认证、密码、OIDC Token/Session、`platform-admin` Realm 角色、身份创建删除 | Keycloak 数据库 | 当前注册原始密码先经过 Account；密码策略、原始密码处理与注册幂等需收敛到 Identity 边界；平台业务角色不应继续依赖 Realm Role |
-| Account Service | 用户/身份映射、手机注册及当前密码编排、商城账号同步、组织/节点、成员/角色、Session 上下文、邀请、审计 | Account 数据库 | 移除原始密码处理、注册 Saga、全局上下文、平台 RBAC、注销 Saga、标识预约与恢复 |
-| Billing Service | 钱包、账本、聚合权益包、充值、固定定价、Hold、人工调整、支付修复和对账 | Billing 数据库 | 组成级权益、版本化单位/公式、目标支付退款状态机、应收与组织购买 |
-| Token Gateway | Token Account、加密凭据、共享策略、路由、聊天代理、用量和 New API 核对 | Token 数据库 | 版本化模型目录、协议能力、托管 Provisioning、请求重放、持久派发和取消 |
+| Keycloak | 用户认证、密码、OIDC Token/Session；迁移期 Realm Role 不参与业务授权 | Keycloak 数据库 | 生产部署和后续密码重置/资料同步/会话撤销端口仍待环境及任务验证 |
+| Identity Adapter | 密码原始字符校验、策略版本、短期引用/HMAC、注册操作关联查询、Keycloak 用户创建/资料更新/密码重置/会话撤销及受控停用协议 | 进程内 15 分钟短期密码记录；Keycloak 持久身份与操作关联 | MFA 和账号申诉仍不在当前闭环 |
+| Account Service | 永久用户 ID/编码、用户/身份映射、平台/组织 RBAC、绑定有效期/撤销/自动回收、权限解析、持久注册 Saga、短信挑战、异步钱包初始化、商城账号同步、组织/节点、成员/角色、Session 上下文、安全管理员生命周期、邀请、审计 | Account 数据库 | 全局上下文、注销 Saga；安全恢复仍需生产等价演练 |
+| Billing Service | 钱包、账本、BASE/BONUS 组成级权益、充值、固定定价、Hold、人工调整、到期/损失复核、支付修复和对账 | Billing 数据库 | 组成级组织授予、版本化单位/公式、目标支付退款状态机、应收与组织购买 |
+| Token Gateway | Token Account、加密凭据、共享策略、路由、聊天代理、用量和 New API 核对 | Token 数据库 | 模型目录、协议能力、托管 Provisioning、请求重放、持久派发和取消 |
 | Token Portal | OIDC PKCE、Redis Session、CSRF、个人中心、运营后台和路径白名单代理 | Redis Session | 目标后台权限模型、缺失业务页面和发布级三语门禁 |
 | Event Relay ×3 | 事务 Outbox 投递、重试和死信 | 各服务 Outbox/Inbox | 现有事件有限，不能替代缺失的跨域 Saga |
 | New API | OpenAI 兼容代理、供应商调用日志和用量证据 | 独立数据库 | 仍需通过 Adapter 契约补齐协议、取消和证据能力 |
@@ -109,32 +117,49 @@ flowchart LR
 
 当前迁移包含：
 
-- `users`、`identities`：业务用户及 OIDC 身份映射；用户状态包括 `PROVISIONING`、`ACTIVE`、`DISABLED`、`DELETED`。
+- `users`、`identities`：业务用户及 OIDC 身份映射；`users.id` 使用 UUIDv7，`user_code` 使用密码学安全随机载荷与 SHA-256 校验码，二者由数据库触发器禁止修改或物理删除；用户状态包括 `PROVISIONING`、`ACTIVE`、`DISABLED`、`DELETED`。
+- `user_code_registry`：永久占用已经提交的用户编码，注销后也不释放；`user_code_lookup_attempts`：只保存操作者及来源、设备、目标编码的摘要维度，用于精确查询的限流和审计，不形成公开目录。
 - `organizations`、`organization_units`、`organization_unit_closure`：组织及树形闭包。
-- `memberships`、`membership_units`、`role_bindings`：成员、节点范围和组织角色。
+- `permissions`、`roles`、`role_permissions`、`role_assignments`、`authorization_versions`：平台/组织原子权限、内置角色、带起止/撤销/来源的授权投影、作用域和单调授权版本。
+- `memberships`、`membership_units`、`role_bindings`：成员和节点范围；`role_bindings` 是组织成员角色生命周期写模型，通过数据库触发器投影到 `role_assignments`，授权查询不直接读取写模型。
 - `invitations`：当前邀请使用电子邮箱和一次性 Token，不支持需求目标中的手机号/用户名邀请。
 - `user_sessions`：按 issuer + OIDC Session 保存当前上下文。
-- `slider_captcha_challenges`、`sms_challenges`：滑块和短信挑战元数据。
-- `mall_user_sync_jobs`：新华三商城用户同步任务。
+- `slider_captcha_challenges`、`sms_challenges`：滑块和短信挑战元数据；平台生成验证码模式只保存带密钥校验数据，不保存明文。
+- `sms_send_attempts`：手机号、来源和设备的单向摘要、用途、结果与时间，用于短信多维限流和反枚举审计。
+- `profile_change_requests`：用户名/手机号变更的旧值、新值、独立资料版本、短信验证和 Identity/Account/会话阶段；活跃请求对用户字段及新值分别唯一预约。
+- `password_reset_operations`：只保存已验证挑战、稳定用户/Identity 引用及完成事实，不保存密码、密码摘要或验证码。
+- `commerce_customer_mappings`：用户/组织到外部客户的供应商中立映射，只保存 Provider ID、Adapter 版本、脱敏外部引用和通用状态；不参与认证或业务授权。
+- `commerce_customer_sync_jobs`、`commerce_customer_sync_evidence`：客户开通/资料同步任务及不可变结果证据；任务冻结主体、Provider、Adapter 版本和类别，Provider 原始协议与错误不会进入核心表或公开 API。
 - `audit_logs`、`outbox_events`、`inbox_messages`、`inbox_aggregate_versions`：审计和可靠事件。
 
-手机注册接口先在 Account 事务中准备稳定用户 ID 与恢复意图，再在 Keycloak 创建或恢复唯一标记 Identity，最后在 Account 事务完成身份关联与 `PROVISIONING` 状态；成功返回 `201`，注册响应不调用 Billing。首次注册的桌面流程随后单独登录，恢复响应须按 `password_preserved` 提示使用首次提交的密码。登录后的 `/v1/account/bootstrap` 会先确保 Account Session，再同步调用 Billing `EnsurePersonalWallet`，成功后把用户激活为 `ACTIVE`。Billing 失败会阻断本次 bootstrap/激活，但不会把已经成功的注册响应改为失败，也不会删除已提交的 Identity 或 Account。
+手机注册在发送短信前原子创建服务端注册操作、5 分钟唯一值预约和挑战；短信核验成功后把预约提升为 30 分钟注册租约。Account 持久保存非秘密阶段事实，先按稳定操作 ID 查询 Identity，再幂等创建；Identity 成功后预约不再按 TTL 自动释放。Account 提交以候选 UUIDv7 用户 ID 为稳定主键，在一个串行事务内写入用户、永久用户编码、身份映射、Commerce Customer Mapping/同步任务、钱包初始化任务、Outbox 和审计，随后返回可登录的 `PROVISIONING`。
 
-当前注册使用 users 中的业务事实和专用 prepare/complete 审计意图预先固定注册 ID；Keycloak 创建携带该不透明标记。远端接受但响应丢失或本地完成失败时，重新滑块/SMS 后只恢复同一意图、完整事实和唯一 subject，不猜测用户名/手机号、不删除或重置已接受的身份。恢复响应 `password_preserved=true` 表示首次密码保留。这个闭环不等同于目标中所有预约、注销或异步钱包 Saga；注册钱包 Outbox、后台重试、SLA 和 `REPAIR_REQUIRED` 仍未实现。
+钱包初始化由后台任务使用稳定幂等键调用 Billing；成功后才把用户和注册操作激活为 `ACTIVE`，短暂失败按退避重试，超过快照化 SLA 后进入 `REPAIR_REQUIRED`。`PROVISIONING` 与 `REPAIR_REQUIRED` 均允许登录和资料管理，但 Token Gateway 与充值入口按稳定原因码拒绝平台模型和支付；本地独立模型不受影响。`/v1/account/bootstrap` 不再同步调用 Billing，也不把钱包故障改写为注册失败。
+
+客户端使用操作 ID 与 48 小时签名查询令牌恢复轮询；桌面由 Rust 管理查询凭据，优先写入系统凭据库，写入失败时仅保留绑定当前会话代次、服务地址及注册事实的进程内记录，界面提示不能跨重启恢复。查询令牌不进入 WebView。运营修复入口由 `platform.registrations.repair` 保护，只返回脱敏阶段、责任域、重试和 SLA 元数据。Identity 孤儿默认向前恢复；只有 Identity 创建满 24 小时，且串行事务证明候选 Account 用户、正式映射、钱包任务和 Account Outbox 均不存在时，才能先停用 Identity、撤销会话并确认不可认证，再复核事实并释放预约，不提供直接删除捷径。这里的跨域无事实证明来自封闭发布边界：候选 ID 在 Account 提交前不会通过用户表或 Outbox 发布，Billing/Token/成员/授予/订单入口均不能引用未提交用户；任一 Account 发布事实存在都会使证明失败。远端创建结果未知时，即使密码引用失效也不能当作从未创建而释放预约。
+
+用户名和手机号修改由 `profile_change_requests` 持久 Saga 编排。客户端必须先通过密码 Direct Grant 取得五分钟内的 `auth_time`；Account 保存 `PENDING` 请求并预约规范化新值，手机号再绑定专用滑块/SMS 挑战。Identity Adapter 幂等更新同一 Keycloak subject 后，Account 以独立 `profile_version` CAS 提交；Identity 已更新而 Account 未提交时只向前重试。提交后撤销 Keycloak Refresh Token/会话并清除 Account Session 投影；手机号同时为当前 Commerce Provider 递增 Mapping 版本并创建 `PROFILE_SYNC` 任务。旧版本迟到结果只追加证据，不能覆盖新映射；同步失败不回滚登录或模型能力，但继续阻止依赖该映射的新支付。30 分钟仍未收敛的请求进入 `REPAIR_REQUIRED`。
+
+资料变更首次撤销会话前，Account 持久占用调用权并冻结当时的 Account 会话身份集合；迟到的本地投影只清理该集合，保留用户后来建立的新登录。Identity Adapter 按资料变更 ID 和 subject 保存独立的进程内撤销确认：已经确认的操作只回复成功，不能再次撤销远端会话；调用结果未知、或重启后非首次请求缺少确认时，不猜测执行结果或自动重新撤销，而进入既有 `REPAIR_REQUIRED`。确认记录保留至该服务进程退出，不属于密码预检记录，也不提供跨重启的远端完成证明。
+
+忘记密码沿用同一密码隔离边界：未登录端只获得 Identity 进程内短期密码引用，Account 的 `PASSWORD_RESET` 短信路径对已知和未知手机号保持同形响应；验证成功后 Account 只把不透明引用和稳定 subject 交给 Identity Adapter，由其重置 Keycloak 密码并撤销全部既有会话。Account 数据库只记录验证和完成事实。
+
+Commerce Customer worker 只依赖 `CustomerAdapter` 端口，当前 H3C 实现位于平台 Adapter；核心任务不识别厂商 Action、响应或错误文本。状态统一为 `PENDING / IN_PROGRESS / READY / RETRY / REPAIR_REQUIRED / DETACHED`，连续失败达到上限后停止自动重试并保留脱敏修复原因。Account 的授权上下文不返回 Mapping；充值入口另行读取 `/v1/me/commerce-customer-mapping`，因此 Mapping 非 `READY` 只关闭依赖外部客户的下单，不影响登录、平台模型、组织管理或其他授权决策。
 
 ### 4.2 Billing 域
 
 当前迁移实际包含：
 
 - `wallets`、`ledger_accounts`、`journal_entries`、`ledger_postings`：钱包缓存余额和平衡账本；数据库触发器保护分录平衡和已入账记录不可变。
-- `credit_lots`、`entitlement_packages`、`usage_hold_allocations`：批次、聚合权益包和 Hold 分配。
+- `credit_lots`、`entitlement_packages`、`entitlement_components`、`usage_hold_allocations`：批次、兼容聚合投影、BASE/BONUS 组成事实和组成级 Hold 分配。
+- `usage_loss_reviews`：已经显式释放的到期 Hold 收到迟到真实用量时，保存平台损失复核证据；到期本身不自动释放消费不确定的 Hold。
 - `recharge_products`、`pricing_versions`：商品以及固定 `input/output/cached_input` 三元组价格。
 - `usage_holds`、`idempotency_records`：预占/结算和通用幂等记录。
 - `payment_orders`、`payment_transactions`、`refunds`、`payment_notifications`：当前支付和退款模型。
 - `manual_adjustments`、`payment_order_repairs`、`reconciliation_runs`、`reconciliation_cases`：运营调整、修复和对账。
 - Billing 自有 Outbox/Inbox 表。
 
-当前权益包以 `payment_order_id` 关联订单，只保存总积分，不保存 BASE/BONUS 组成及各自累计消费。`payment_transactions` 对 `payment_order_id` 有唯一约束，实际是订单一对一支付流水；这与目标的一对多流水及“每个成功流水独立权益包”不同。
+权益入账按冻结商品快照把总 `microcredit` 拆为且仅拆为 BASE/BONUS 组成，舍入余数归 BONUS。`entitlement_components` 保存可用、Hold、已用、有效/暂停授予、过期与撤销互斥桶并由数据库强制守恒；`entitlement_packages` 的合计字段只是触发器维护的兼容投影。当前包仍以 `payment_order_id` 关联订单，且 `payment_transactions` 对 `payment_order_id` 有唯一约束，实际是订单一对一支付流水；这与目标的一对多流水及“每个成功流水独立权益包”仍不同。
 
 当前没有 `metering_unit_definitions`、`protocol_reservation_formula_versions`、`pricing_version_unit_rates`、`model_usage_requests`、`stream_response_events`、`upstream_dispatch_attempts`、`refund_requests`、`refund_amount_reservations`、`chargeback_cases`、`forced_refund_cases`、`payment_evidence` 或独立应收表。这些名称属于目标模型，不是现有数据结构。
 
@@ -159,9 +184,16 @@ flowchart LR
 
 ### 5.1 当前权限模型
 
-- 平台运营后台当前直接依赖 Keycloak `platform-admin` Realm Role，尚未实现目标中的 Account 平台角色、临时有效期、授权版本和 Break-glass 恢复机制。
-- `OWNER`、`ORG_ADMIN`、`BILLING_ADMIN`、`UNIT_ADMIN`、`MEMBER`、`AUDITOR` 是 Account 域组织角色，通过 `role_bindings` 关联成员。
-- 组织所有者具备普通接口保护，但“禁止最后一个有效超级管理员主动注销”无法由当前业务模型完整执行，因为用户主动注销和平台超级管理员生命周期均未实现。目标上 Break-glass 只能用于管理员异常失联后的恢复，不能作为主动注销绕过手段。
+- 平台运营后台使用 Account 平台角色和原子权限码；Account、Billing、Token Gateway 都默认拒绝，并分别按接口所需权限调用 Account 授权解析。Keycloak `platform-admin` Realm Role 不能绕过拒绝。
+- 本人资料接口返回格式化 `user_code`，桌面与 Web 不展示内部 `user_id`。运营端用户列表/详情展示编码；编码查询是单独的完整等值接口，先校验格式和校验码，再检查 `platform.users.read`，并按操作者、来源 IP、设备和目标编码摘要限流。不存在、无权和输入无效对调用方使用不泄露存在性的结果；编码不是登录、找回、会话或授权凭据。
+- `OWNER`、`ORG_ADMIN`、`BILLING_ADMIN`、`UNIT_ADMIN`、`MEMBER`、`AUDITOR` 是 Account 域组织角色，通过 `role_assignments` 解析权限和组织/节点作用域；旧 `role_bindings` 仅作为迁移期写入兼容投影。
+- 平台/组织角色绑定支持开始/到期时间、来源、单绑定幂等撤销和自动回收。所有权限解析都直接按数据库时间过滤未来、过期或已撤销绑定；数据库触发器维护单调 `authorization_versions`，Account 同时递增用户/Session 上下文版本，worker 将到期事实固化并写审计与 Outbox。组织 `role_bindings` 是写模型，平台直接授权写入 `role_assignments`。
+- 普通授权接口拒绝 `OWNER`、基础 `MEMBER` 和平台角色；运营通用接口拒绝 `PLATFORM_SUPER_ADMIN` 与 `OWNER`。超级管理员由专用安全生命周期维护：数据库同时保护最后一个有效超级管理员的角色绑定和用户状态，停用、删除及注销预检统一返回 `LAST_ACTIVE_SUPER_ADMIN`。旧管理员仍须按 `deploy/runbooks/account-rbac-migration.md` 明确映射，不能自动全部升级为超级管理员。
+- 首个 `admin` 身份由主机/集群受控的 `account-security` 离线命令幂等创建，业务用户在正式密码安全激活前保持 `BOOTSTRAP_PENDING`，Identity 身份保持禁用且没有超级管理员绑定。正式密码只进入 CLI 与 Identity Adapter；Account 数据库只保存一次性凭据的用途/部署代次绑定 SHA-256 校验值和生命周期事实。
+- Break-glass 与普通角色交接分离：仓库不提供公网恢复 API；离线命令必须记录“全部超级管理员异常失联”的显式确认、运维工作负载身份、事故理由、证据摘要、目标和最长 60 分钟有效期，并立即产生不可变审计与 CRITICAL 告警。它不能绕过最后管理员主动注销门禁。
+- 注销 Saga 尚由 APT-014 实现；Account 已提供 ACC-48 的所有者/最后管理员预检和全量角色撤销原语，在 Identity 清理前使有效及未来绑定失效、递增授权/用户版本并清除 Account Session。跨 Identity Refresh Token 撤销仍由注销协调器完成。
+- 后台写命令必须经 `approvalpolicy` 的版本化 `command_type` 注册表分类；当前九类直接改写财务事实的命令固定为 `APPROVAL_REQUIRED`，普通退款、组织删除、治理配置和确定性任务固定为 `AUDIT_ONLY`，未知命令或分类冲突失败关闭。审批申请、不可变快照、决定、状态事件和执行记录归 Account 所有，禁止申请人按稳定用户 ID 自审。
+- 批准事务只写 `account.approval-command.authorized.v1` Outbox，不直接改写账本。Billing 的 `billing-command-executor` 首次进入 `EXECUTING` 前向 Account 强一致复核申请人/审批人的当前绑定、权限、有效期、授权版本、策略和关键资源版本，再以 `approval_request_id + command_type + command_fingerprint` 派生稳定执行键；已经进入 `EXECUTING` 的重投沿用同一 JobRun 和已冻结执行事实，不因后续撤权改写已开始的资金执行。人工钱包调整的领域事务保存申请 ID/执行键并由数据库触发器拒绝新的直接入账，完成回执必须核对冻结命令和执行结果。九类命令先完整占用稳定分类，当前只有已存在领域语义的 `WALLET_ADJUSTMENT` 可创建申请；其他类型在对应资金领域任务交付执行器前拒绝创建，不能进入永远无法执行的批准状态。当前服务间认证仍使用共享长期令牌，APT-047 负责替换为短期工作负载身份，不改变审批/执行所有权边界。
 
 ### 5.2 当前上下文
 
@@ -186,7 +218,7 @@ flowchart LR
 当前边界和目标差距：
 
 - 路由已有确定性优先级、显式账号失败不回退、上下文/共享策略检查，但没有独立模型目录和 `CATALOG_VISIBLE → Provisioning READY → CONTEXT_ELIGIBLE → RESERVABLE` 状态管线。
-- Hold 在上游调用前创建，并按较早到期权益包分配；未知消费或到期进入 REVIEW 并保留预占，不能自动免单。没有组成级消费顺序、追加预占或长调用续租。显式最终免单的跨域协调继续保留实际 usage/成本证据，并通过持久意图恢复。
+- Hold 在上游调用前创建，并按组成到期时间（无期限组成最后）、同一到期时间 BONUS→BASE、入账时间和稳定组件 ID 分配及结算。未知消费或到期进入 `REVIEW` 并保留预占，不能自动免单；组成到期任务跳过预占部分。显式最终免单须核实终态和没有活动上游，并保留真实 usage/成本证据及唯一财务结果。仍没有追加预占、长调用续租和完整派发不确定状态机。
 - 定价只支持输入、输出、缓存输入三元组；没有协议公式、版本化计量单位、显式零价/配置缺失区分和逐单位来源快照。
 - 幂等键必须由客户端按每次逻辑调用提供，缺键拒绝；同调用重试复用键，新调用使用新键，不按用户/Session/body 派生永久键。重复请求返回 `USAGE_REPLAY_BLOCKED`/409，不回放结果；版本化规范指纹、流事件存储、结果/墓碑分层保留及 `410` 属后续目标。
 - 流式响应直接转发给客户端，未先持久化；请求上下文取消可能中止上游，不具备断线继续执行和按序重放。
@@ -205,13 +237,13 @@ flowchart LR
 
 新华三 Adapter 当前只支持支付宝下单、订单查询/同步和人工修复，不支持主动退款、关单、回调或账单。客户端关闭二维码页后，Billing 后台仍可继续查询。仓库中的非生产测试 Provider 支持更多动作，但只用于开发/测试，不能扩张生产能力声明。
 
-商城确认支付成功后，Billing 幂等创建一个聚合权益包和账本分录。虽然商品保存 BASE/BONUS 数值，履约后只保存合计额度，因此无法执行目标中的 BONUS 优先消费、组成级授予或精确退款撤销。
+商城确认支付成功后，Billing 幂等创建一个权益包、BASE/BONUS 组成及逐组成账本分录；Hold 与人工扣减使用确定的组成级消费顺序。新个人 PLAN 保持 30 天有效期及不可退款；已有 LEGACY 额度迁移保留原可用、预占、已用和撤销事实，没有原期限的额度不新增期限。现有退款同步更新组成与聚合余额；组成级组织授予和目标全 BASE 退款规则仍未实现。
 
 现有普通退款是兼容旧模型的订单级、可输入金额的部分退款：
 
 - 请求绑定 `payment_order_id`，接受 `amount_fen`，按订单聚合积分比例计算撤销量，并包含 `PARTIALLY_REFUNDED`。
 - 本地事务会先预约退款/额度，再调用 Provider；但没有退款 Outbox 恢复，也没有支付流水 + 权益包目标锁定。
-- 没有“任一 BASE/BONUS 已消费即拒绝”的累计消费证据，也无法在成功后精确撤销该支付产生的全部未消费 BASE 和关联 BONUS。
+- 组成表已保存 BASE/BONUS 各自累计已用与剩余证据，但现有退款流程尚未用该证据执行“任一组成已消费即拒绝”，也尚未在成功后原子撤销全部未消费 BASE 和关联 BONUS。
 
 上述全 BASE 退款与 BONUS 撤销是后续目标，不改变当前已审行为：新个人 PLAN 不可退款，原 LEGACY/普通余额继续走既有退款流程。首次观察到 Provider 部分或全额退款而本地尚未入账时，同事务进入 `MANUAL_REVIEW`，创建、查询、关闭和迟到成功回调均不能再自动入账；不据此猜测原额/净额积分。退款模型变更须另行确认与迁移，不在本波实现。
 
@@ -223,7 +255,7 @@ flowchart LR
 - `billing.recharge.succeeded.v1`
 - `token.usage.settled.v1`
 
-本地业务状态与对应 Outbox 写入具备事务原子性；Relay 以至少一次语义重试投递，默认达到 12 次失败后进入死信，需审计后人工重新入队。因此该机制保留并重试事件，但业务最终收敛仍依赖死信处置，不能无条件宣称最终投递。现有事件集也没有实现注册钱包初始化、账号注销、目标退款和托管路由 Provisioning 等 Saga。
+本地业务状态与对应 Outbox 写入具备事务原子性；Relay 以至少一次语义重试投递，默认达到 12 次失败后进入死信，需审计后人工重新入队。因此该机制保留并重试事件，但业务最终收敛仍依赖死信处置，不能无条件宣称最终投递。注册 Account 提交会原子写入 `account.wallet.provisioning.requested.v1`，钱包成功写入 `account.wallet.provisioning.completed.v1`；财务审批成功写入绑定命令指纹、策略、目标和关键版本的 `account.approval-command.authorized.v1`，Billing 重复消费使用同一领域执行键。账号注销、目标退款和托管路由 Provisioning 等 Saga 仍未实现。
 
 ## 9. 客户端与 Portal
 
@@ -238,7 +270,7 @@ flowchart LR
 
 - 远程用户入口要求 HTTPS；开发态 HTTP 仅限 loopback。
 - Portal 内部服务凭据不下发浏览器或桌面端；桌面 OIDC Token 不进入 WebView JavaScript。
-- 当前注册原始密码会进入 Account 的预检、短信挑战和注册处理，再传给 Keycloak Adapter；虽然不落 Account 数据库，但该信任边界仍需按目标收敛到 Identity Adapter，且不得 trim、记录或跨越无关业务层。
+- 注册原始密码只进入 Identity Adapter 的预检和最终创建边界；Account、短信、Billing、Commerce、事件和普通可观测链路只接收不透明引用或非秘密注册事实。Identity 不 trim、规范化、转换或截断密码，并在创建完成或引用到期后清除短期原文。
 - Provider 地址使用 HTTPS 和主机白名单；生产密钥目标为 KMS/Vault，本地 KEK 只用于开发/测试。
 - Keycloak `/admin/` 应限制在受控网络或隧道内。
 - 日志不得记录密码、短信验证码、OIDC Token、供应商密钥或支付密钥。
@@ -248,17 +280,17 @@ flowchart LR
 以下是原 `75a29f8` 文档审计列出的历史验证，不表示本波重跑；当前固定提交、执行日志和限制另由本地分波审核记录给出：
 
 - `node scripts/account-platform.mjs test unit`：所有 Go 包测试通过（项目内置 Go 工具链，`nomsgpack` 标签）。
-- `npm test`（`account-platform/`）：OpenAPI lint 和 36 个合同测试通过。
+- `npm test`（`account-platform/`）：OpenAPI lint 和 37 个合同测试通过。
 - `node --test tests/account_platform_state.test.mjs tests/ui_language_coverage.test.mjs tests/scheduled_tasks_unit.test.js`（`pinvou3-app/`）：39 个测试通过。
 - `node scripts/account-platform.mjs verify`：Go 单测与 Vet、合同测试、架构守卫和差异检查通过。
 
 | 项目 | 当前事实 | 风险/下一步 |
 |---|---|---|
-| 部署 | Compose/Helm 模板及 A06 隔离运行证据；无生产环境验收 | 不得宣称生产部署、HA、备份或 RPO/RTO 已完成 |
-| 注册 | 注册成功返回 `PROVISIONING` 且不依赖 Billing；后续 bootstrap 同步确保钱包，Billing 故障会阻断激活 | 改为持久 Saga、Outbox 初始化、后台重试和 `REPAIR_REQUIRED` 可恢复状态 |
-| 权限 | 平台后台依赖 Keycloak Realm Role | 建立 Account 平台 RBAC、临时授权、最后超级管理员保护和受限 Break-glass |
+| 部署 | Compose/Helm 模板及 A06 隔离运行证据；本波改变的输入需重新验证 | 不得宣称生产部署、HA、备份或 RPO/RTO 已完成 |
+| 注册 | 唯一值预约、持久恢复、Identity 关联查询、异步钱包任务、SLA、`REPAIR_REQUIRED` 和证明门禁补偿已闭环 | Identity 短期密码材料仍为单副本内存能力；生产运行和故障注入证据待部署补齐 |
+| 权限与审批 | 平台和组织接口使用 Account 原子权限码、显式作用域、绑定有效期、单条撤销、自动回收和默认拒绝；最后超级管理员保护、安全恢复及版本化管理命令审批/幂等执行已有仓库实现 | 补注销 Saga 集成、短期工作负载身份和生产等价安全恢复/审批故障演练 |
 | 模型调用 | Hold 前置和事后核对已有基础 | 补目录/公式/Provisioning、派发持久化、重放和取消 |
-| 权益 | 权益包仅聚合总额 | 重构为 BASE/BONUS 组成和守恒约束后才能实现目标退款 |
+| 权益 | BASE/BONUS 组成、确定消费/到期和守恒约束已实现 | 补组织授予，并让目标退款/拒付/注销回收复用组成级事务边界 |
 | 支付 | 新华三只有下单与查询；数据模型是一单一流水 | 目标一对多流水、独立状态机、退款/拒付/应收和证据模型均待实现 |
 | 客户端切换 | 本波迁移实现须按最终固定输入独立审核与实测 | 不把旧快照、源码存在或开发测试作为发布/安装准入及制品回滚证明 |
 | 测试 | A06 已实际执行真 PG/NATS/Redis、Keycloak 扩展、Compose devup/E2E/fault/auth 与真实 NewAPI HTTP 健康 | A07 同输入才可继承；改变输入须重验。模拟支付/模型/短信、离线 Helm/TLS 测试不代表真实供应商、生产 TLS、Kubernetes 或发布验收 |

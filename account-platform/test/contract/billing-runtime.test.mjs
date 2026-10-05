@@ -17,7 +17,10 @@ test('Billing and Token contracts match production JSON and HTTP validation resp
   assert.equal(result.status, 0, result.stderr);
   const fixtures = JSON.parse(result.stdout);
   const document = YAML.parse(await readFile(path.join(root, 'contracts/openapi/billing.yaml'), 'utf8'));
-  const ajv = new Ajv2020({ strict: true, allErrors: true });
+  // Conditional required fields are defined by the enclosing OpenAPI schema.
+  const ajv = new Ajv2020({ strict: true, strictRequired: false, allErrors: true });
+  // OpenAPI's singular example is an annotation, not a validation constraint.
+  ajv.addKeyword({ keyword: 'example', valid: true });
   addFormats(ajv);
   ajv.addFormat('int64', { type: 'number', validate: Number.isInteger });
   const schemas = JSON.parse(JSON.stringify(document.components.schemas).replaceAll('#/components/schemas/', '#/$defs/'));
@@ -77,8 +80,8 @@ test('Billing and Token contracts match production JSON and HTTP validation resp
   assert.equal(fixtures.eligible.items.length, 1);
   assert.equal(eligible({ ...fixtures.eligible, membership_version: undefined }), false);
   const error = ajv.compile(common.components.schemas.Error);
-  for (const response of Object.values(fixtures.mobile_errors)) {
-    assert.equal(response.code, 'INVALID_REQUEST');
+  for (const [route, response] of Object.entries(fixtures.mobile_errors)) {
+    assert.equal(response.code, route === 'profile_not_found' ? 'PROFILE_CHANGE_NOT_FOUND' : 'INVALID_REQUEST');
     assert.ok(error(response), JSON.stringify(error.errors));
   }
   assert.equal(fixtures.rate_limited.code, 'RATE_LIMITED');
@@ -143,18 +146,19 @@ test('Billing and Token contracts match production JSON and HTTP validation resp
   ajv.addSchema({ $id: 'urn:pinvou:account-runtime', $defs: accountSchemas });
   const me = ajv.compile({ $ref: 'urn:pinvou:account-runtime#/$defs/Me' });
   assert.ok(me(fixtures.me), JSON.stringify(me.errors));
-  assert.ok(me({ ...fixtures.me, mobile: '+8613800000000', mobile_verified: true, mall_sync_status: 'SYNCED' }), JSON.stringify(me.errors));
+  assert.ok(me({ ...fixtures.me, mobile: '+8613800000000', mobile_verified: true, commerce_customer_status: 'READY' }), JSON.stringify(me.errors));
+  assert.equal(me({ ...fixtures.me, mall_sync_status: 'SYNCED' }), false, 'unpublished draft fields do not form a second compatibility contract');
   assert.equal(me({ ...fixtures.me, mobile_verified: undefined }), false);
-  assert.equal(me({ ...fixtures.me, mobile: 'invalid-mobile' }), false);
-  const registration = ajv.compile(account.paths['/auth/register'].post.responses['201'].content['application/json'].schema);
+  assert.equal(me({ ...fixtures.me, mobile: 13800000000 }), false);
+  const registration = ajv.compile({ $ref: 'urn:pinvou:account-runtime#/$defs/RegistrationStatus' });
   assert.ok(registration(fixtures.mobile_registration), JSON.stringify(registration.errors));
   assert.ok(registration({ ...fixtures.mobile_registration, password_preserved: true }));
   assert.equal(registration({ ...fixtures.mobile_registration, password_preserved: undefined }), false);
   assert.equal(registration({ ...fixtures.mobile_registration, password_preserved: 'true' }), false);
   assert.equal(registration({ ...fixtures.mobile_registration, unexpected: true }), false);
   const captchaRequest = { mobile: '+8613800000000', purpose: 'REGISTER' };
-  const smsRequest = { ...captchaRequest, username: 'fixtureuser', password: 'FixturePassword1', captcha_id: fixtures.slider_captcha.captcha_id, captcha_offset: 72 };
-  const registrationRequest = { username: 'fixtureuser', mobile: captchaRequest.mobile, challenge_id: smsRequest.captcha_id, code: '123456', password: smsRequest.password };
+  const smsRequest = { ...captchaRequest, username: 'fixtureuser', password_handle: 'A'.repeat(43), password_policy_version: 'user-v1', captcha_id: fixtures.slider_captcha.captcha_id, captcha_offset: 72 };
+  const registrationRequest = { username: 'fixtureuser', mobile: captchaRequest.mobile, challenge_id: smsRequest.captcha_id, code: '123456', password_handle: smsRequest.password_handle, password_policy_version: smsRequest.password_policy_version, registration_operation_id: fixtures.slider_captcha.captcha_id, registration_query_token: 'A'.repeat(100) };
   for (const [route, schemaName, valid] of [
     ['/auth/captcha/challenges', 'SliderCaptchaRequest', captchaRequest],
     ['/auth/sms/challenges', 'SMSChallengeRequest', smsRequest],
@@ -175,8 +179,9 @@ test('Billing and Token contracts match production JSON and HTTP validation resp
   }
   const smsRequestValidator = ajv.compile({ $ref: 'urn:pinvou:account-runtime#/$defs/SMSChallengeRequest' });
   assert.equal(smsRequestValidator({ ...smsRequest, username: undefined }), false);
-  assert.equal(smsRequestValidator({ ...smsRequest, password: undefined }), false);
-  assert.ok(smsRequestValidator({ ...smsRequest, purpose: 'LOGIN', username: undefined, password: undefined }));
+  assert.equal(smsRequestValidator({ ...smsRequest, password_handle: undefined }), false);
+  assert.equal(smsRequestValidator({ ...smsRequest, password: 'UnexpectedPassword1' }), false);
+  assert.ok(smsRequestValidator({ ...smsRequest, purpose: 'LOGIN', username: undefined, password_handle: undefined, password_policy_version: undefined }));
   const captchaResponse = ajv.compile({ $ref: 'urn:pinvou:account-runtime#/$defs/SliderCaptchaResponse' });
   assert.ok(captchaResponse(fixtures.slider_captcha), JSON.stringify(captchaResponse.errors));
   assert.equal(captchaResponse({ ...fixtures.slider_captcha, piece_y: '14' }), false);
@@ -194,6 +199,23 @@ test('Billing and Token contracts match production JSON and HTTP validation resp
     for (const field of fields) assert.equal(validate({ ...fixtures[name], [field]: 9007199254740993 }), false);
   }
   assert.deepEqual(document.paths['/entitlement-packages'].servers, [{ url: '/internal/v1' }]);
+	for (const namespace of ['billing', 'token']) {
+	  const validate = ajv.compile({ $ref: `urn:pinvou:${namespace}-runtime#/$defs/EntitlementPackage` });
+	  for (const name of ['entitlement_no_expiry', 'entitlement_manual']) {
+	    const item = fixtures[name];
+	    assert.equal(item.valid_until, null);
+	    assert.equal(item.components[0].expires_at, null);
+	    assert.ok(validate(item), `${namespace}/${name}: ${JSON.stringify(validate.errors)}`);
+	    assert.equal(validate({ ...item, valid_until: undefined }), false, 'nullable expiry remains required');
+	    assert.equal(validate({ ...item, valid_until: 'invalid-date' }), false, 'non-null expiry retains date-time validation');
+	    const missing = structuredClone(item);
+	    delete missing.components[0].expires_at;
+	    assert.equal(validate(missing), false, 'component nullable expiry remains required');
+	    const malformed = structuredClone(item);
+	    malformed.components[0].expires_at = 'invalid-date';
+	    assert.equal(validate(malformed), false, 'component non-null expiry retains date-time validation');
+	  }
+	}
   assert.equal(fixtures.routes['GET /internal/v1/entitlement-packages'], 400);
   const member = ajv.compile(account.components.schemas.OrganizationMember);
   assert.ok(member(fixtures.organization_member), JSON.stringify(member.errors));

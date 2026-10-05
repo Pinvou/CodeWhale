@@ -67,6 +67,32 @@ test('admin organization client uses protected organization, member, and unit en
   } finally { globalThis.fetch = originalFetch; }
 });
 
+test('user code is displayed to its owner and resolved through a dedicated exact admin endpoint', async () => {
+  const calls = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    calls.push(url);
+    return new Response(JSON.stringify({ user_id:'user-id', user_code:'USR-0123-4567-89AB-CDEF-MV', status:'ACTIVE' }), { status:200, headers:{ 'Content-Type':'application/json' } });
+  };
+  try {
+    const client = new AdminPlatformClient('/portal');
+    await client.userByCode('usr-0123-4567-89ab-cdef-mv');
+    assert.deepEqual(calls, ['/portal/api/admin/account/admin/v1/user-code-lookups/usr-0123-4567-89ab-cdef-mv']);
+  } finally { globalThis.fetch = originalFetch; }
+
+  const personal = await readFile(new URL('../src/features/account-platform/AccountPlatformView.jsx', import.meta.url), 'utf8');
+  const popover = await readFile(new URL('../src/features/account-platform/AccountPlatformPopover.jsx', import.meta.url), 'utf8');
+  const admin = await readFile(new URL('../src/features/account-platform/AdminPlatformView.jsx', import.meta.url), 'utf8');
+  assert.match(personal, /me\?\.user_code/);
+  assert.match(popover, /me\?\.user_code/);
+  assert.match(admin, /client\.userByCode/);
+  assert.match(admin, /key:'user_code'/);
+  // Internal context keys may bind the user's UUID, while the public overview
+  // must show the stable user code instead of exposing that internal UUID.
+  assert.doesNotMatch(personal.slice(personal.indexOf('function Overview'),personal.indexOf('function Organization')), /me\?\.user_id/);
+  for (const locale of ['zh', 'en', 'ja']) assert.ok(accountPlatformCopy[locale].userCode);
+});
+
 test('admin organization units form a nested management tree', () => {
   const roots = buildUnitTree([
     { unit_id:'child', parent_id:'root', name:'Child' },
@@ -230,7 +256,7 @@ test('desktop sign-in renders inside the popover and never opens a browser', asy
   const bridge = await readFile(new URL('../src/platform/tauri/bridge/account-platform.js', import.meta.url), 'utf8');
   const backend = await readFile(new URL('../src-tauri/src/features/account_platform/mod.rs', import.meta.url), 'utf8');
   assert.match(popover, /type="password"/);
-  assert.match(popover, /autoComplete=\{loginMode === 'register' \? 'new-password' : 'current-password'\}/);
+  assert.match(popover, /autoComplete=\{loginMode === 'password' \? 'current-password' : 'new-password'\}/);
   assert.match(popover, /await client\.login\(loginAccount, loginPassword\)/);
   assert.match(bridge, /invoke\("account_platform_login", \{ credentials: credentials \}\)/);
   assert.doesNotMatch(backend, /open_target|authorization_request|TcpListener/);
@@ -334,9 +360,11 @@ test('personal center and desktop chat share one account identity lifecycle', as
   assert.match(runtime, /session\.account_user_id\.as_deref\(\) == Some\(user_id\.as_str\(\)\)/);
   assert.equal(
     (commands.match(/pool\.mark_model_updated\(BUILTIN_ACCOUNT_PLATFORM_MODEL_ID\)/g) || []).length,
-    4,
+    6,
   );
   assert.match(commands, /account_platform_set_default_model[\s\S]*pool\.mark_model_updated\(BUILTIN_ACCOUNT_PLATFORM_MODEL_ID\)/);
+  assert.match(commands, /account_platform_reset_password[\s\S]*pool\.mark_model_updated\(BUILTIN_ACCOUNT_PLATFORM_MODEL_ID\)/);
+  assert.match(commands, /completes_profile[\s\S]*COMPLETED[\s\S]*pool\.mark_model_updated\(BUILTIN_ACCOUNT_PLATFORM_MODEL_ID\)/);
 });
 
 test('desktop account restoration starts behind the lazy sidebar without blocking startup', async () => {

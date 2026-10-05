@@ -15,6 +15,19 @@ type h3cMallStub struct {
 	createErr error
 }
 
+func TestPaymentProviderDeclaresCommerceCustomerRequirement(t *testing.T) {
+	provider, err := NewH3CMallProvider(&h3cMallStub{}, map[string]ExternalProduct{"points-100": {SKU: "sku-100", AmountFen: 100}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !provider.Capabilities().CommerceCustomerRequired {
+		t.Fatal("H3C payment must require a ready Commerce Customer mapping")
+	}
+	if (&SimulatorProvider{}).Capabilities().CommerceCustomerRequired {
+		t.Fatal("the development simulator must not require an external Commerce Customer")
+	}
+}
+
 func (s *h3cMallStub) CreateOrder(_ context.Context, orderKey, mobile, sku string) error {
 	s.created = []string{orderKey, mobile, sku}
 	return s.createErr

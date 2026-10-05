@@ -41,12 +41,12 @@ func TestAdminNewAPIStatusUsesOnlyConfiguredProviderAndStaticResult(t *testing.T
 			if err != nil {
 				t.Fatal(err)
 			}
-			s := NewService(nil, nil, nil, nil, policy, nil, nil, 100)
+			s := NewService(nil, nil, nil, nil, policy, nil, nil, 100).WithAuthorizer(tokenTestAuthorizer(t))
 			if _, err := s.WithNewAPIStatus(upstream.URL); err != nil {
 				t.Fatal(err)
 			}
 			handler := s.Handler(func(context.Context, string) (identity.Principal, error) {
-				return identity.Principal{RealmRoles: []string{"platform-admin"}}, nil
+				return identity.Principal{Issuer: "https://fixture-authority.invalid", Subject: "fixture-platform-operator", RealmRoles: []string{"platform-admin"}}, nil
 			})
 			request := httptest.NewRequest("GET", "/admin/v1/system/newapi-status?target=http://untrusted.example", nil)
 			request.Header.Set("Authorization", "Bearer fixture-admin")
@@ -69,7 +69,7 @@ func TestAdminNewAPIStatusUsesOnlyConfiguredProviderAndStaticResult(t *testing.T
 		})
 	}
 	policy, _ := NewProviderURLPolicy("production-new", []string{"newapi"})
-	s := NewService(nil, nil, nil, nil, policy, nil, nil, 100)
+	s := NewService(nil, nil, nil, nil, policy, nil, nil, 100).WithAuthorizer(tokenTestAuthorizer(t))
 	for _, raw := range []string{"http://newapi:8080", "https://untrusted.example", "https://newapi:8443?target=x", "https://newapi:8443#fragment"} {
 		if _, err := s.WithNewAPIStatus(raw); err == nil {
 			t.Fatal("status configuration bypassed the production URL boundary")

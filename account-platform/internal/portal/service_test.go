@@ -270,13 +270,20 @@ func TestPortalProxyExcludesModelDataPlane(t *testing.T) {
 }
 
 func TestAdminProxyAllowsOnlyDocumentedManagementEndpoints(t *testing.T) {
-	if !accountAdminPathAllowed(http.MethodGet, "/admin/v1/users") || !accountAdminPathAllowed(http.MethodGet, "/admin/v1/roles") || !billingAdminPathAllowed(http.MethodGet, "/admin/v1/wallets") || !tokenAdminPathAllowed(http.MethodGet, "/admin/v1/token-accounts") {
+	if !accountAdminPathAllowed(http.MethodGet, "/admin/v1/users") || !accountAdminPathAllowed(http.MethodGet, "/admin/v1/roles") || !accountAdminPathAllowed(http.MethodGet, "/admin/v1/role-bindings") || !billingAdminPathAllowed(http.MethodGet, "/admin/v1/wallets") || !tokenAdminPathAllowed(http.MethodGet, "/admin/v1/token-accounts") {
 		t.Fatal("admin portal must expose the documented management APIs")
 	}
 	userID := "0198fbf7-c3ba-7bc4-8849-c157740963de"
 	organizationID := "0198fbf7-c3ba-7bc4-8849-c157740963df"
 	unitID := "0198fbf7-c3ba-7bc4-8849-c157740963e0"
 	memberID := "0198fbf7-c3ba-7bc4-8849-c157740963e1"
+	bindingID := "0198fbf7-c3ba-7bc4-8849-c157740963e2"
+	if !accountAdminPathAllowed(http.MethodPost, "/admin/v1/role-bindings") || !accountAdminPathAllowed(http.MethodDelete, "/admin/v1/role-bindings/"+bindingID) {
+		t.Fatal("admin portal must expose role binding grant and single-binding revoke")
+	}
+	if !accountAdminPathAllowed(http.MethodGet, "/admin/v1/user-code-lookups/USR-0123-4567-89AB-CDEF-MV") {
+		t.Fatal("admin portal must expose complete user-code lookup")
+	}
 	if !accountAdminPathAllowed(http.MethodPatch, "/admin/v1/users/"+userID+"/status") || !accountAdminPathAllowed(http.MethodDelete, "/admin/v1/users/"+userID) || !accountAdminPathAllowed(http.MethodPost, "/admin/v1/organizations") || !accountAdminPathAllowed(http.MethodPatch, "/admin/v1/organizations/"+organizationID) || !accountAdminPathAllowed(http.MethodPatch, "/admin/v1/organizations/"+organizationID+"/status") || !accountAdminPathAllowed(http.MethodDelete, "/admin/v1/organizations/"+organizationID) || !accountAdminPathAllowed(http.MethodGet, "/admin/v1/organizations/"+organizationID+"/members") || !accountAdminPathAllowed(http.MethodPost, "/admin/v1/organizations/"+organizationID+"/ownership") || !accountAdminPathAllowed(http.MethodGet, "/admin/v1/organizations/"+organizationID+"/units") || !accountAdminPathAllowed(http.MethodPost, "/admin/v1/organizations/"+organizationID+"/units") || !accountAdminPathAllowed(http.MethodPatch, "/admin/v1/organizations/"+organizationID+"/units/"+unitID) || !accountAdminPathAllowed(http.MethodDelete, "/admin/v1/organizations/"+organizationID+"/units/"+unitID) {
 		t.Fatal("admin portal must expose account lifecycle mutations")
 	}
@@ -286,14 +293,44 @@ func TestAdminProxyAllowsOnlyDocumentedManagementEndpoints(t *testing.T) {
 	if !accountAdminPathAllowed(http.MethodGet, "/admin/v1/audit-logs/"+userID) {
 		t.Fatal("admin portal must expose audit event details")
 	}
-	if !billingAdminPathAllowed(http.MethodPost, "/admin/v1/pricing-versions") || !billingAdminPathAllowed(http.MethodGet, "/admin/v1/wallets/"+userID+"/ledger") || !billingAdminPathAllowed(http.MethodPost, "/admin/v1/payment-orders/"+userID+"/sync") || !billingAdminPathAllowed(http.MethodPost, "/admin/v1/adjustments/"+userID+"/approve") || !billingAdminPathAllowed(http.MethodPost, "/admin/v1/usage-holds/"+userID+"/release") || !billingAdminPathAllowed(http.MethodPost, "/admin/v1/reconciliation-runs") || !billingAdminPathAllowed(http.MethodGet, "/admin/v1/reconciliation-runs/"+userID+"/cases") {
+	if !accountAdminPathAllowed(http.MethodGet, "/admin/v1/registration-operations") || !accountAdminPathAllowed(http.MethodPost, "/admin/v1/registration-operations/"+userID+"/actions/retry") || !accountAdminPathAllowed(http.MethodPost, "/admin/v1/registration-operations/"+userID+"/actions/compensate") {
+		t.Fatal("admin portal must expose proof-gated registration repair operations")
+	}
+	if !billingAdminPathAllowed(http.MethodPost, "/admin/v1/pricing-versions") || !billingAdminPathAllowed(http.MethodPost, "/admin/v1/adjustments") || !billingAdminPathAllowed(http.MethodGet, "/admin/v1/wallets/"+userID+"/ledger") || !billingAdminPathAllowed(http.MethodPost, "/admin/v1/payment-orders/"+userID+"/sync") || !billingAdminPathAllowed(http.MethodPost, "/admin/v1/adjustments/"+userID+"/approve") || !billingAdminPathAllowed(http.MethodPost, "/admin/v1/usage-holds/"+userID+"/release") || !billingAdminPathAllowed(http.MethodPost, "/admin/v1/reconciliation-runs") || !billingAdminPathAllowed(http.MethodGet, "/admin/v1/reconciliation-runs/"+userID+"/cases") {
 		t.Fatal("admin portal must expose documented billing operations")
+	}
+	if !accountAdminPathAllowed(http.MethodGet, "/admin/v1/approval-policies") || !accountAdminPathAllowed(http.MethodGet, "/admin/v1/approval-requests") || !accountAdminPathAllowed(http.MethodPost, "/admin/v1/approval-requests") || !accountAdminPathAllowed(http.MethodPut, "/admin/v1/approval-requests/"+userID) || !accountAdminPathAllowed(http.MethodPost, "/admin/v1/approval-requests/"+userID+"/actions/decide") {
+		t.Fatal("approval workflow paths must be allowlisted")
 	}
 	if !tokenAdminPathAllowed(http.MethodGet, "/admin/v1/token-accounts/"+userID) || !tokenAdminPathAllowed(http.MethodPatch, "/admin/v1/token-accounts/"+userID+"/status") || !tokenAdminPathAllowed(http.MethodPut, "/admin/v1/token-accounts/"+userID+"/routes") || !tokenAdminPathAllowed(http.MethodDelete, "/admin/v1/token-accounts/"+userID+"/routes") || !tokenAdminPathAllowed(http.MethodPost, "/admin/v1/token-accounts/"+userID+"/credentials/"+memberID+"/validate") || !tokenAdminPathAllowed(http.MethodGet, "/admin/v1/usage-requests/"+userID) || !tokenAdminPathAllowed(http.MethodPost, "/admin/v1/usage-requests/"+userID+"/retry-reconciliation") {
 		t.Fatal("admin portal must expose documented Token Gateway operations")
 	}
-	if accountAdminPathAllowed(http.MethodPost, "/admin/v1/users") || accountAdminPathAllowed(http.MethodDelete, "/admin/v1/users/not-a-uuid") || accountAdminPathAllowed(http.MethodPost, "/admin/v1/organizations/"+organizationID+"/members/"+memberID) || accountAdminPathAllowed(http.MethodGet, "/admin/v1/organizations/"+organizationID+"/ownership") || accountAdminPathAllowed(http.MethodDelete, "/admin/v1/organizations/"+organizationID+"/units/not-a-uuid") || billingAdminPathAllowed(http.MethodGet, "/internal/wallets") || tokenAdminPathAllowed(http.MethodGet, "/v1/chat/completions") {
+	if accountAdminPathAllowed(http.MethodPost, "/admin/v1/users") || accountAdminPathAllowed(http.MethodDelete, "/admin/v1/users/not-a-uuid") || accountAdminPathAllowed(http.MethodPost, "/admin/v1/registration-operations/"+userID+"/actions/force-complete") || accountAdminPathAllowed(http.MethodPost, "/admin/v1/organizations/"+organizationID+"/members/"+memberID) || accountAdminPathAllowed(http.MethodGet, "/admin/v1/organizations/"+organizationID+"/ownership") || accountAdminPathAllowed(http.MethodDelete, "/admin/v1/organizations/"+organizationID+"/units/not-a-uuid") || billingAdminPathAllowed(http.MethodGet, "/internal/wallets") || tokenAdminPathAllowed(http.MethodGet, "/v1/chat/completions") {
 		t.Fatal("admin portal must not expose undocumented mutations, internal APIs, or the model data plane")
+	}
+}
+
+func TestPortalClientSourceUsesPeerAndRejectsUntrustedProxyHeaders(t *testing.T) {
+	request := httptest.NewRequest(http.MethodGet, "/", nil)
+	request.RemoteAddr = "10.0.0.8:4321"
+	if source := portalClientSource(request); source != "10.0.0.8" {
+		t.Fatalf("source=%q", source)
+	}
+	request.Header.Set("X-Forwarded-For", "192.0.2.20, 10.0.0.8")
+	if source := portalClientSource(request); source != "10.0.0.8" {
+		t.Fatalf("forwarded source=%q", source)
+	}
+	request.Header.Set("X-Real-IP", "198.51.100.9")
+	if source := portalClientSource(request); source != "10.0.0.8" {
+		t.Fatalf("real source=%q", source)
+	}
+	for _, peer := range []struct{ address, expected string }{
+		{"[2001:db8::1]:4321", "2001:db8::1"}, {"127.0.0.1", "127.0.0.1"}, {"invalid-peer", ""}, {"", ""},
+	} {
+		request.RemoteAddr = peer.address
+		if source := portalClientSource(request); source != peer.expected {
+			t.Fatalf("peer source=%q, expected=%q", source, peer.expected)
+		}
 	}
 }
 

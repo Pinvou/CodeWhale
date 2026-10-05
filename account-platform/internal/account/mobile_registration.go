@@ -78,7 +78,10 @@ func (r *PostgresRepository) PrepareMobileRegistration(ctx context.Context, issu
 	}
 	registration = MobileRegistration{UserID: uuid.Must(uuid.NewV7()), Username: username, Mobile: mobile}
 	now := r.now()
-	if _, err := tx.Exec(ctx, `INSERT INTO users(id,status,username,display_name,mobile_e164,mobile_verified_at,created_at,updated_at) VALUES($1,'PROVISIONING',$2,$2,$3,$4,$4,$4)`, registration.UserID, username, mobile, now); err != nil {
+	if _, err := insertUserWithGeneratedCode(ctx, tx, func(database pgx.Tx, code string) error {
+		_, err := database.Exec(ctx, `INSERT INTO users(id,user_code,status,username,display_name,mobile_e164,mobile_verified_at,created_at,updated_at) VALUES($1,$2,'PROVISIONING',$3,$3,$4,$5,$5,$5)`, registration.UserID, code, username, mobile, now)
+		return err
+	}); err != nil {
 		return MobileRegistration{}, err
 	}
 	if err := appendAudit(ctx, tx, registration.UserID, "registration", nil, "account.mobile.registration.prepare", "mobile_registration", registration.UserID.String(), "SUCCEEDED", map[string]any{"issuer_digest": registrationIssuerDigest(issuer)}); err != nil {
@@ -129,7 +132,7 @@ func (r *PostgresRepository) CompleteMobileRegistration(ctx context.Context, iss
 		return err
 	}
 	if commerce {
-		if _, err := tx.Exec(ctx, `INSERT INTO mall_user_sync_jobs(user_id,mobile_e164,status,next_attempt_at,created_at,updated_at) VALUES($1,$2,'PENDING',$3,$3,$3)`, registration.UserID, registration.Mobile, now); err != nil {
+		if err := enqueueCommerceCustomerSync(ctx, tx, "USER", registration.UserID, registration.Mobile, r.commerceProviderID, r.commerceAdapterVersion, "CUSTOMER_PROVISIONING", now); err != nil {
 			return err
 		}
 	}

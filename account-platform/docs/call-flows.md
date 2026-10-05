@@ -2,11 +2,11 @@
 
 > 状态：当前实现基线
 >
-> 校准日期：2026-10-06；继承契约为 A06 `c5f0a2bf`，本波客户端迁移以最终固定源为准
+> 校准日期：2026-10-06；继承已审 A07 `d31f5f23`，本波实现与验证以最终固定源码为准
 >
 > 说明：本文描述业务调用顺序和失败收敛方式；具体字段以 `contracts/openapi/` 和事件 Schema 为准。
 >
-> 目标变更提示：本文仍描述当前按 Session 上下文、同步 bootstrap、固定 Token 预占和新华三轮询流程。目标注册流程在 Identity 与 Account 成功后持久进入 `PROVISIONING`，钱包通过 Outbox 异步初始化；钱包完成前可登录和管理资料但不能调用平台模型或充值，超过 SLA 才进入 `REPAIR_REQUIRED`，Billing 短暂不可用不得删除已验证身份。其他已确认但尚未实现的用户级全局上下文、版本化计量单位、每协议预占公式、公式缺省参数为 0、Hold 续租/追加、支付回调主收敛、完整退款/四方对账、组织在线购买权益及资料变更 Saga 以 `requirements.md` 和 `role-system-design.md` 为准。
+> 本波注册在 Identity 与 Account 成功后持久进入 `PROVISIONING`，通过后台持久任务异步初始化钱包；钱包完成前可登录和管理资料但不能调用平台模型或充值，超过 SLA 进入 `REPAIR_REQUIRED`，Billing 短暂不可用不得删除已验证身份。用户名/手机号资料变更及密码重置使用独立 Identity 端口。本波仍按 Session 保存上下文，使用固定 Token 预占和新华三轮询。用户级全局上下文、版本化计量单位、每协议公式、Hold 续租/追加、目标退款/四方对账和组成级组织授予仍属后续目标。
 
 ## 1. 入口与凭据
 
@@ -41,7 +41,7 @@ sequenceDiagram
             KC-->>Rust: Access Token + 新 Refresh Token
             Rust->>Store: 原子更新 Refresh Token
             Rust->>A: POST /v1/account/bootstrap
-            A-->>Rust: 用户、个人钱包和上下文
+            A-->>Rust: 用户、开通状态和上下文
             Rust-->>UI: 已登录业务状态
         else 刷新返回 400 invalid_grant
             KC-->>Rust: 权威凭据无效
@@ -71,7 +71,7 @@ sequenceDiagram
 2. React 只做必填和长度提示，将数据通过 Tauri 命令交给 Rust。
 3. Rust 调用 Keycloak Direct Access Grant；密码只在该请求期间存在。
 4. Keycloak 校验账号状态和密码，返回 OIDC Token 或标准 OAuth 错误。
-5. 成功后 Rust 调用 Account bootstrap，确保业务用户、身份映射、个人钱包和当前会话上下文存在。
+5. 成功后 Rust 调用 Account bootstrap，确保业务用户、身份映射和当前会话上下文存在；钱包由后台任务独立初始化。
 6. Rust 将 Refresh Token 写入系统凭据库；UI 只收到用户展示信息、余额和上下文。
 7. 密码错误、账号停用或 bootstrap 失败不允许用本地旧用户数据伪装登录成功。
 
@@ -112,11 +112,13 @@ sequenceDiagram
 
 ## 5. 手机注册
 
-> 当前注册已支持同一持久意图恢复；完整预约、注销与异步钱包 Saga 仍为后续目标。不能为恢复注册而删除已接受的 Keycloak 用户或重置首次密码。
+> 注册使用同一持久操作恢复，不能为恢复而删除已接受的 Keycloak 用户或重置首次密码；账号注销 Saga 仍未实现。
 
 ```mermaid
 sequenceDiagram
     participant UI as 桌面注册弹层
+    participant R as 桌面 Rust
+    participant I as Identity Adapter
     participant A as Account Service
     participant SMS as 配置的短信 Adapter
     participant KC as Keycloak
@@ -124,22 +126,31 @@ sequenceDiagram
     participant M as 商城同步 Worker
     participant Mall as 新华三商城
 
-    UI->>A: POST /v1/auth/registration/precheck<br/>用户名、手机号、密码
+    UI->>R: 用户名、手机号、原始密码
+    R->>I: POST /v1/registration/password-prechecks<br/>原始密码
+    I-->>R: 15分钟引用 + 密码策略版本
+    R->>A: POST /v1/auth/registration/precheck<br/>用户名、手机号、不透明引用
     A->>A: 校验格式和唯一性
     A-->>UI: 可注册
     UI->>A: 获取并完成滑块挑战
-    UI->>A: POST /v1/auth/sms/challenges (REGISTER)
+    R->>A: POST /v1/auth/sms/challenges (REGISTER)
+    A->>DB: 注册操作 + 5分钟唯一值预约 + 短信挑战
     A->>SMS: 发送注册验证码
     SMS-->>A: 挑战元数据
-    UI->>A: POST /v1/auth/register<br/>用户名、手机号、验证码、密码
+    A-->>R: 挑战、操作 ID 与签名查询凭据
+    R->>R: OS凭据库或仅当前进程恢复记录
+    R->>A: POST /v1/auth/register<br/>用户名、手机号、验证码、引用、操作证明
     A->>SMS: 核验验证码
-    A->>DB: prepare 同意图 user ID 与不透明标记
-    A->>KC: 创建或严格恢复同一标记与完整事实的唯一 subject
-    A->>DB: complete 事务写 identity、完成审计、可选商城任务
+    A->>DB: 验证并提升预约租约；持久化阶段事实
+    A->>I: 精确查询或创建同操作、用户名及手机号的身份
+    I->>KC: 唯一标记及完整身份事实核验
+    A->>DB: 同事务写用户、编码、Identity、钱包任务、Mapping、Outbox及审计
     alt 远端响应丢失或 complete 事务失败
-        A-->>UI: 未完成；重新滑块/SMS 后恢复同一意图
+        A-->>R: 查询同一操作并向前恢复
     else 成功
-        A-->>UI: PROVISIONING + password_preserved
+        A-->>R: PROVISIONING + password_preserved
+        R-->>UI: 安全状态 DTO（不含查询令牌）
+        A->>A: 后台钱包任务调用Billing，成功后ACTIVE
         opt 已配置企业商城
             M->>Mall: 按同一手机号确保商城账号
             Mall-->>M: 商城用户结果
@@ -152,10 +163,10 @@ sequenceDiagram
 
 - 仅支持中国大陆手机号，统一规范化为 `+86` 身份。
 - 用户名 3–32 位，以英文字母开头，后续可使用字母、数字、点、下划线和连字符；服务端按规范化值唯一。
-- 密码 8–128 位可打印 ASCII，至少一个英文字母和一个数字；前端两次输入必须一致，后端不信任前端结果。
+- 密码 8–128 位可打印 ASCII，至少一个英文字母和一个数字；允许中间空格、拒绝首尾空格，不 trim 或规范化。前端两次输入必须一致，Identity 执行权威校验。
 - 预检用于减少短信浪费，但最终提交仍必须在数据库唯一约束和事务中再次校验，防止并发注册竞争。
 - `password_preserved=true` 时使用首次提交的密码登录，不自动用此次重试密码登录；恢复仍须新滑块/SMS，并精确匹配已持久化的用户名、手机号、issuer 和唯一标记。
-- 商城仅在显式配置时创建同步任务；未配置商城不阻止社区注册、钱包或模拟充值。只有企业商城下单要求已验证且同步的手机号，不泛化为所有 Provider 或组织 LEGACY 充值门禁。
+- 商城 worker 仅在显式配置时启动；未配置时待处理 Mapping 不阻止社区注册、钱包或模拟充值。只有依赖该客户映射的企业支付要求已验证且同步的手机号，不泛化为所有 Provider 或组织 LEGACY 充值门禁。
 
 ## 6. Portal 登录与页面调用
 
@@ -164,7 +175,7 @@ sequenceDiagram
 3. 回调由 Portal 服务端交换 Token，并将会话保存在 Redis；浏览器仅持有 HttpOnly 会话 Cookie。
 4. 浏览器调用同源 `/api/*`，写操作携带 CSRF 证明。
 5. Portal 只代理白名单内的 Account、Billing 和 Gateway API。
-6. `/admin.html` 还要求 OIDC 声明包含 `platform-admin`；普通组织角色不能进入平台后台。
+6. `/admin.html` 只复用 OIDC 主体；Account、Billing 和 Token Gateway 分别向 Account 权限系统校验当前操作的原子平台权限，迁移期 `platform-admin` Claim 不能授予或绕过权限。
 7. Portal 登出删除 Redis 会话并结束浏览器身份会话。
 
 ## 7. 账号 Bootstrap 与活动上下文
@@ -175,7 +186,7 @@ sequenceDiagram
 
 1. Account 通过 OIDC issuer + subject 查找身份映射。
 2. 幂等确保业务用户存在并更新最近活动信息。
-3. 通过内部接口要求 Billing 幂等确保个人钱包。
+3. 幂等确保持久钱包初始化任务；不在 bootstrap 请求内调用 Billing，返回当前开通状态。
 4. 确保当前 OIDC Session 有合法活动上下文；默认个人上下文。
 5. 返回用户展示信息、组织摘要和当前上下文。
 
@@ -327,7 +338,7 @@ sequenceDiagram
 
 注册成功后 Account 的商城同步 Worker：
 
-仅在显式配置企业商城时创建任务；没有商城配置的社区注册不进入此流程。
+注册提交建立供应商中立 Mapping/任务；只有显式配置当前 Adapter 时启动 worker。没有商城配置的社区注册不等待此流程。
 
 1. 读取待同步任务和规范化手机号。
 2. 调用商城用户查询/创建能力，确保一一对应账号。
@@ -352,7 +363,7 @@ sequenceDiagram
 ## 11. 管理后台调用流程
 
 1. 管理员通过 Token Portal 登录 Keycloak。
-2. Portal 和下游服务都检查 `platform-admin` Realm 角色，不能只依赖前端隐藏页签。
+2. Portal 只代理 OIDC Access Token；Account、Billing 和 Token Gateway 对每个后台接口向 Account 权限系统校验原子权限，默认拒绝，不能只依赖前端隐藏页签或 Identity Provider 角色 Claim。
 3. 用户/组织操作进入 Account Admin API；资金操作进入 Billing Admin API；Token/用量操作进入 Gateway Admin API。
 4. Portal 的“系统运行”聚合各服务健康、Keycloak、New API、NATS 和 Relay 指标，不把基础设施凭据传给浏览器。
 5. 所有变更记录操作者、资源、动作、结果、Request ID 和时间；高风险资金操作保留审批或人工修复记录。
@@ -399,9 +410,9 @@ sequenceDiagram
 | 用户现象 | 首查组件 | 关键证据 |
 |---|---|---|
 | 密码/短信登录失败 | Keycloak、Account | OIDC 错误码、短信挑战状态、身份映射、同一 Trace ID |
-| 注册后用户名被占用但无法登录 | Account、Keycloak | 持久 prepare/complete 意图、唯一远端标记、`identities` 映射与 password_preserved；不删除或重置远端身份 |
+| 注册后用户名被占用但无法登录 | Account、Identity、Keycloak | 持久操作及遗留意图证明、精确远端标记、`identities` 映射与 password_preserved；不删除或重置远端身份 |
 | 获取验证码失败 | Account、短信 Adapter | 滑块是否消费、冷却/小时上限、供应商结果是否权威；不得记录验证码或凭据 |
-| 个人中心与聊天身份不一致 | 桌面 Rust 配置、Gateway | 功能开关、OIDC issuer/audience、请求 subject/session |
+| 个人中心与聊天身份不一致 | 桌面 Rust 配置、Gateway | OIDC issuer/audience、请求 subject/session及会话代次 |
 | 对话余额不足 | Gateway、Billing | 最大预占、当前价格、可用积分、其他有效 Hold |
 | 对话返回但未结算 | Gateway、New API | usage 是否存在、上游请求 ID、Reconciler 尝试历史 |
 | 二维码金额与商品不一致 | Billing、商城 | product_id 到 SKU 目录、商城订单返回金额；不要信客户端显示 |

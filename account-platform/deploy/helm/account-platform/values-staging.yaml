@@ -4,6 +4,7 @@ global:
 
 replicas:
   accountService: 1
+  identityService: 1
   billingService: 1
   tokenGateway: 1
   tokenPortal: 1
@@ -41,6 +42,7 @@ ingress:
   portalHost: tokens.staging.example.com
   keycloakHost: accounts.staging.example.com
   billingHost: billing.staging.example.com
+  identityHost: identity.staging.example.com
   tlsSecretName: pinvou-account-platform-staging-tls
 
 keycloak:

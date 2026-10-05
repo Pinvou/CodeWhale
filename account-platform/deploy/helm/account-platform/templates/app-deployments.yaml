@@ -15,6 +15,7 @@
 {{- end -}}
 {{- $apps := list
   (dict "name" "account-service" "image" .Values.images.accountService "replicas" .Values.replicas.accountService)
+  (dict "name" "identity-service" "image" .Values.images.identityService "replicas" .Values.replicas.identityService)
   (dict "name" "billing-service" "image" .Values.images.billingService "replicas" .Values.replicas.billingService)
   (dict "name" "token-gateway" "image" .Values.images.tokenGateway "replicas" .Values.replicas.tokenGateway)
   (dict "name" "token-portal" "image" .Values.images.tokenPortal "replicas" .Values.replicas.tokenPortal)
@@ -62,7 +63,7 @@ spec:
             - { name: RATE_LIMIT_RPS, value: {{ $root.Values.security.rateLimitRPS | quote }} }
             - { name: RATE_LIMIT_BURST, value: {{ $root.Values.security.rateLimitBurst | quote }} }
             - { name: OTEL_EXPORTER_OTLP_ENDPOINT, value: {{ $root.Values.observability.otlpEndpoint | quote }} }
-            {{- if ne $app.name "token-portal" }}
+            {{- if or (eq $app.name "account-service") (eq $app.name "billing-service") (eq $app.name "token-gateway") }}
             - name: DATABASE_URL
               valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: {{ $app.name }}-database-url } }
             {{- end }}
@@ -71,9 +72,9 @@ spec:
             - { name: OIDC_JWKS_URL, value: {{ $jwksURL | quote }} }
             - { name: OIDC_AUDIENCE, value: {{ $root.Values.oidc.audience | quote }} }
             {{- end }}
-            {{- if ne $app.name "token-portal" }}
             - name: INTERNAL_SERVICE_TOKEN
               valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: internal-service-token } }
+            {{- if or (eq $app.name "account-service") (eq $app.name "billing-service") (eq $app.name "token-gateway") }}
             - { name: NATS_URL, value: {{ printf "nats://%s-nats:4222" $fullname | quote }} }
             {{- end }}
             {{- if eq $app.name "account-service" }}
@@ -82,15 +83,14 @@ spec:
             {{- if $root.Values.mobileAuth.enabled }}
             - { name: SMS_PROVIDER, value: {{ $root.Values.mobileAuth.smsProvider | quote }} }
             - { name: SMS_HTTP_ENDPOINT, value: {{ $root.Values.mobileAuth.smsEndpoint | quote }} }
-            - { name: KEYCLOAK_ADMIN_API_URL, value: {{ $root.Values.mobileAuth.keycloakAdminApiUrl | quote }} }
-            - { name: KEYCLOAK_PROVISIONER_TOKEN_URL, value: {{ $root.Values.mobileAuth.keycloakProvisionerTokenUrl | quote }} }
-            - { name: KEYCLOAK_REALM, value: {{ $root.Values.mobileAuth.keycloakRealm | quote }} }
-            - { name: KEYCLOAK_PROVISIONER_CLIENT_ID, value: {{ $root.Values.mobileAuth.keycloakProvisionerClientId | quote }} }
-            - name: KEYCLOAK_PROVISIONER_CLIENT_SECRET
-              valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: keycloak-provisioner-client-secret } }
             {{- if eq $root.Values.mobileAuth.smsProvider "http" }}
             - name: SMS_HTTP_SERVICE_TOKEN
               valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: sms-http-service-token } }
+            {{- else if eq $root.Values.mobileAuth.smsProvider "http-generated" }}
+            - name: SMS_HTTP_BEARER_TOKEN
+              valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: sms-http-bearer-token } }
+            - name: SMS_VERIFICATION_HMAC_KEY_BASE64
+              valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: sms-verification-hmac-key-base64 } }
             {{- else }}
             - { name: ALIYUN_SMS_ENDPOINT, value: {{ $root.Values.mobileAuth.aliyunEndpoint | quote }} }
             - { name: ALIYUN_SMS_REGISTER_TEMPLATE, value: {{ $root.Values.mobileAuth.aliyunRegisterTemplate | quote }} }
@@ -101,10 +101,32 @@ spec:
             {{- end }}
             {{- end }}
             {{- end }}
+            - { name: IDENTITY_HTTP_URL, value: {{ printf "http://%s-identity-service:8080" $fullname | quote }} }
+            - { name: WALLET_PROVISIONING_POLICY_VERSION, value: {{ $root.Values.account.walletProvisioningPolicyVersion | quote }} }
+            - { name: WALLET_PROVISIONING_SLA_MINUTES, value: {{ $root.Values.account.walletProvisioningSlaMinutes | quote }} }
+            - { name: COMMERCE_PROVIDER_ID, value: {{ $root.Values.account.commerceProviderId | quote }} }
+            - { name: COMMERCE_ADAPTER_VERSION, value: {{ $root.Values.account.commerceAdapterVersion | quote }} }
+            {{- if $root.Values.mobileAuth.enabled }}
+            - name: REGISTRATION_QUERY_HMAC_KEY_BASE64
+              valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: registration-query-hmac-key-base64 } }
+            {{- end }}
+            {{- else if eq $app.name "identity-service" }}
+            - { name: MOBILE_AUTH_ENABLED, value: {{ $root.Values.mobileAuth.enabled | quote }} }
+            {{- if $root.Values.mobileAuth.enabled }}
+            - { name: KEYCLOAK_ADMIN_API_URL, value: {{ $root.Values.mobileAuth.keycloakAdminApiUrl | quote }} }
+            - { name: KEYCLOAK_PROVISIONER_TOKEN_URL, value: {{ $root.Values.mobileAuth.keycloakProvisionerTokenUrl | quote }} }
+            - { name: KEYCLOAK_REALM, value: {{ $root.Values.mobileAuth.keycloakRealm | quote }} }
+            - { name: KEYCLOAK_PROVISIONER_CLIENT_ID, value: {{ $root.Values.mobileAuth.keycloakProvisionerClientId | quote }} }
+            - name: KEYCLOAK_PROVISIONER_CLIENT_SECRET
+              valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: keycloak-provisioner-client-secret } }
+            - name: IDENTITY_PASSWORD_HMAC_KEY_BASE64
+              valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: identity-password-hmac-key-base64 } }
+            {{- end }}
             {{- else if eq $app.name "billing-service" }}
             - { name: TOKEN_GATEWAY_HTTP_URL, value: {{ printf "http://%s-token-gateway:8080" $fullname | quote }} }
             - { name: BILLING_PAYMENT_PROVIDER, value: {{ $root.Values.billing.paymentProvider | quote }} }
             - { name: BILLING_ALLOW_TENTATIVE_PRICES, value: {{ $root.Values.billing.allowTentativePrices | quote }} }
+            - { name: ACCOUNT_HTTP_URL, value: {{ printf "http://%s-account-service:8080" $fullname | quote }} }
             - name: PAYMENT_SIMULATOR_URL
               valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: payment-provider-url } }
             - { name: BILLING_PAYMENT_CALLBACK_URL, value: {{ $root.Values.public.paymentCallbackUrl | quote }} }

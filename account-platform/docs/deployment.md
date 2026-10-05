@@ -2,7 +2,7 @@
 
 > 状态：部署模板与运维规划；当前隔离测试不能替代生产部署证明
 >
-> 校准日期：2026-10-06；继承已审 A06 契约
+> 校准日期：2026-10-06；继承已审 A07 契约并核验 A08 新增部署接线
 >
 > 安全要求：本文只列配置名称和占位符，不保存真实域名、IP、账号、密码、AccessKey、Token 或商城密钥。
 
@@ -33,6 +33,7 @@ Compose 的宿主机端口均绑定回环地址，供本机反向代理或运维
 |---|---:|---|
 | Keycloak | 18080 | 只公开 Realm 登录和静态资源路径；不公开 `/admin/` |
 | Account Service | 18101 | 仅反代桌面注册/账号所需路径 |
+| Identity Adapter | 18107 | 只公开密码预检路径；内部身份管理路径不公开 |
 | Billing Service | 18102 | 不直接公开；通过 Portal/Gateway BFF |
 | Token Gateway | 18103 | 反代 OIDC 保护的模型和用户业务入口 |
 | Token Portal | 18105 | 公开个人中心、管理后台及同源 `/api/*` |
@@ -49,6 +50,7 @@ Compose 的宿主机端口均绑定回环地址，供本机反向代理或运维
 生产业务服务：
 
 - `account-service`
+- `identity-service`
 - `billing-service`
 - `token-gateway`
 - `token-portal`
@@ -110,6 +112,7 @@ Compose 的宿主机端口均绑定回环地址，供本机反向代理或运维
 - Secret 通过主机 Secret 文件、Docker Secret、Vault/KMS 或平台 Secret 管理注入；不能进入 Git。
 - 发布前有足够空间保存新镜像、数据库备份和上一个可回滚版本。
 - 已明确发布负责人、数据库负责人、支付尾单负责人和回滚决策人。
+- Account 数据库允许迁移用户安装 `pgcrypto` 扩展；若由 DBA 预装，发布前核验 `digest` 与 `gen_random_bytes` 可用。
 
 ## 6. 配置清单
 
@@ -139,26 +142,49 @@ Compose 的宿主机端口均绑定回环地址，供本机反向代理或运维
 ### 6.3 手机认证
 
 - `MOBILE_AUTH_ENABLED`
-- `SMS_PROVIDER=http` 或 `aliyun`
+- `SMS_PROVIDER=http|aliyun|aliyun-managed|http-generated`（`http` 是既有发送/核验协议；`aliyun` 与 `aliyun-managed` 均为厂商托管）
 - `SMS_HTTP_ENDPOINT`、`SMS_HTTP_SERVICE_TOKEN`（通用 HTTP Adapter）
+- `IDENTITY_HTTP_URL`
+- `IDENTITY_PASSWORD_HMAC_KEY_BASE64`（Identity Adapter 专用、至少 32 随机字节的无填充标准 Base64）
+- `REGISTRATION_QUERY_HMAC_KEY_BASE64`（Account 专用、至少 32 随机字节，与密码和短信 HMAC 密钥隔离）
+- `WALLET_PROVISIONING_POLICY_VERSION`
+- `WALLET_PROVISIONING_SLA_MINUTES`（默认 15 分钟，创建任务时快照）
 - `ALIYUN_SMS_ACCESS_KEY_ID`
 - `ALIYUN_SMS_ACCESS_KEY_SECRET`
 - `ALIYUN_SMS_SIGN_NAME`
 - `ALIYUN_SMS_REGISTER_TEMPLATE`
 - `ALIYUN_SMS_LOGIN_TEMPLATE`
 - `ALIYUN_SMS_ENDPOINT`
+- `SMS_VERIFICATION_HMAC_KEY_BASE64`（仅平台生成验证码模式，独立密钥）
+- `SMS_HTTP_ENDPOINT`、`SMS_HTTP_BEARER_TOKEN`（仅平台生成验证码的通用发送 Adapter）
 
-仅 Aliyun Adapter 需要 RAM 配置，且只授予发送和核验验证码的最小权限。通用 Adapter 必须使用受控 HTTPS 服务，开发/测试 HTTP 例外由配置环境校验。AccessKey、服务 Token 不写入命令行、历史或日志；泄露后立即轮换。
+`http` 继续使用受控服务的 `/send` 与 `/verify`，由 `SMS_HTTP_SERVICE_TOKEN` 鉴权；该协议不新增权威未接受字段。`aliyun`/`aliyun-managed` 由供应商生成并核验验证码；`http-generated` 由 Adapter 使用密码学安全随机源生成六位验证码，Account 只持久化带独立密钥的 HMAC 校验数据，再以 `SMS_HTTP_BEARER_TOKEN` 向通用 HTTPS 发送端点投递。不能把既有 `http` 配置默认为平台生成模式。模式由启动配置和依赖注入选择，Account 挑战状态机不包含厂商判断。只有 Aliyun 完整官方前置拒绝且 `Success=false`、无送达标识时可解除冷却；超时或坏响应保留冷却。RAM 用户只授予所选模式所需的最小权限。AccessKey、服务 Token 和 HMAC 密钥不写入命令行参数、Shell 历史或日志；泄露后立即轮换。
+
+当前 Identity Adapter 的注册密码引用及操作 ID 到密码 HMAC 的短期绑定只存在于单进程内存，Helm 的 schema 强制 `replicas.identityService: 1`；重启会使尚未完成的引用失效。只有持久事实证明未尝试远端创建时才可走创建前补偿；创建结果未知或已经成功时仍须按 Keycloak 中的精确操作标记恢复，不能仅因引用过期而释放预约。不得通过普通 Redis/业务数据库复制原始密码来扩副本；Identity 高可用需要专门的受保护短期材料方案和安全评审。
+
+单副本配置不能代替注册收尾的持久栅栏。创建前安全终止须同时核对持久首次尝试 CAS、Identity 对该次请求明确尚未派发的结果和 Account 当前 attempt version；后续尝试改变版本后，旧响应不能释放唯一值预约。旧注册意图及未知结果继续恢复或进入人工修复，不因密码引用失效自动注销。
+
+Portal 使用现有 `INTERNAL_SERVICE_TOKEN` 向固定 Account 上游证明其从实际连接计算的来源地址；该证明不转给浏览器及其他服务。Account 仅在证明有效时采用来源头，否则使用连接地址。设备标识仅用于限速关联，手机号与已认证用户的限额仍独立生效。
+
+Account 启动注册恢复、资料变更恢复、钱包初始化、角色绑定到期和审批期限 worker。发布前必须确认 `registration_operations`、`profile_change_requests`、`password_reset_operations`、`wallet_provisioning_jobs` 以及 Account `000016_role_binding_lifecycle`、`000018_approval_commands` 和 Billing `000017_approval_execution` 迁移完成，注册查询 HMAC 密钥在同一部署周期内稳定，且 Billing 内部钱包接口可用。角色 worker 每分钟固化已到期的组织与平台授权；即使 worker 短暂延迟，授权查询也会按数据库 `now()` 立即拒绝过期绑定。运维应监控仍满足 `revoked_at IS NULL AND expires_at <= now()` 的绑定积压、`account.role-binding.changed.v1` Outbox 和 `role.binding.expire` 审计；不得通过直接改表延长临时/紧急授权。
+
+财务审批发布后，Billing Service 同时以 durable `billing-command-executor-v1` 消费 `account.approval-command.authorized.v1`。上线顺序必须先完成两库迁移，再启动 Account 与 Account Relay，最后滚动 Billing；Billing 必须能访问内部 NATS 和 Account 内部执行复核端点。监控应覆盖批准后五分钟仍未进入 `EXECUTING`、`EXECUTION_FAILED`、消费者重复投递和 `account-platform.dead-letter.account.approval-command.authorized.v1`。重放只能使用原事件和原指纹，禁止修改消息体、直接调用账本 SQL 或恢复旧 `/adjustments/:id/approve` 路径。当前内部调用仍依赖 `INTERNAL_SERVICE_TOKEN`；切换 APT-047 短期工作负载身份前必须保持令牌仅在 Secret 管理系统中分发且 Billing/Account/NATS 均不公开。
+
+Keycloak provisioner 服务账号还必须具备读取/更新用户、重置密码和撤销用户会话的最小管理权限；缺少任一权限会使资料或密码操作进入稳定失败/修复状态，不得临时扩大为 realm-admin。轮换查询密钥会使尚未完成注册的旧查询令牌失效，必须采用覆盖最长 48 小时令牌窗口的双读或维护窗口方案；当前实现不提供双密钥读取，因此不得无计划直接轮换。运维应监控 `REPAIR_REQUIRED`、`COMPENSATION_PENDING`、钱包 SLA 超时和 `next_retry_at` 积压；人工补偿只能通过受权限保护的命令执行，禁止直接改表或直接删除 Identity。
+
+Account 的 Commerce Customer worker 还要求显式冻结 `COMMERCE_PROVIDER_ID` 与 `COMMERCE_ADAPTER_VERSION`。两者会写入 Mapping、同步任务和证据，升级 Adapter 时不能用新版本解释旧任务；切换 Provider 后服务启动会为全部已验证手机号且尚无当前 Provider Mapping 的用户幂等补建任务。未配置对应 Adapter 连接时注册和模型能力保持可用，Mapping 留在待处理/重试状态，只有依赖该 Mapping 的支付被拒绝。发布前确认 `commerce_customer_mappings`、`commerce_customer_sync_jobs`、`commerce_customer_sync_evidence` 已迁移，并监控 `RETRY`、`REPAIR_REQUIRED` 及待执行任务积压。
 
 ### 6.4 新华三商城
 
+- `COMMERCE_PROVIDER_ID=h3c_mall`
+- `COMMERCE_ADAPTER_VERSION=h3c-mall-v1`
 - `H3C_MALL_BASE_URL`
 - `H3C_MALL_APP_KEY`
 - `H3C_MALL_APP_SECRET`
 - `BILLING_PAYMENT_PROVIDER=h3c_mall`
 - `BILLING_ALLOW_TENTATIVE_PRICES`
 
-企业商城是可选配置；无商城时不产生商城同步任务。开发/测试默认 simulator 可使用明确标识的暂定测试目录；`h3c_mall` 的 UAT 暂定目录仍需显式开关。正式环境必须冻结商品后关闭该开关，特殊状态只由 H3C Adapter 处理，不能绕过服务端商品目录。
+企业商城是可选配置；未配置 Adapter 时不启动商城 worker，待处理 Mapping/任务不阻断登录、钱包或模型能力。开发/测试默认 simulator 可使用明确标识的暂定测试目录；`h3c_mall` 的 UAT 暂定目录仍需显式开关。正式环境必须冻结商品后关闭该开关，特殊状态只由 H3C Adapter 处理，不能绕过服务端商品目录。
 
 ### 6.5 Token Gateway 与 New API
 
@@ -181,10 +207,11 @@ Compose 的宿主机端口均绑定回环地址，供本机反向代理或运维
 
 ### 6.6 桌面端
 
-- 旧版本使用 `PINVOU_ACCOUNT_PLATFORM_ENABLED`；本波内置模型迁移计划退役该开关，最终配置以受审客户端为准，不能依赖它重新启用旧内置路径。
+- A07 已退役旧 `PINVOU_ACCOUNT_PLATFORM_ENABLED` 开关；不能依赖它重新启用旧内置模型路径。
 - `PINVOU_ACCOUNT_OIDC_ISSUER` 或显式 Token URL
 - `PINVOU_ACCOUNT_OIDC_CLIENT_ID`
 - `PINVOU_ACCOUNT_SERVICE_URL`
+- `PINVOU_IDENTITY_SERVICE_URL`
 - `PINVOU_TOKEN_GATEWAY_URL`
 
 开发态 `npm run dev` 不需要每次生成安装包。远程端点必须 HTTPS，只有 `127.0.0.1`/`localhost` 允许 HTTP。
@@ -264,7 +291,7 @@ node scripts/account-platform.mjs test security
 
 ```text
 docker compose --env-file <secret-env> <compose-files> build \
-  account-service billing-service token-gateway token-portal \
+  account-service identity-service billing-service token-gateway token-portal \
   account-event-relay billing-event-relay token-event-relay \
   account-migrate billing-migrate token-migrate
 ```
@@ -280,6 +307,8 @@ docker compose --env-file <secret-env> <compose-files> build \
 3. `token-migrate`
 
 每个迁移任务必须退出码为 0，再继续下一个。迁移器记录版本和校验和；已应用迁移文件不得修改，只能新增更高版本。迁移器可兼容仅换行符不同的旧校验和，但不接受语义内容变化。
+
+Account `000011_permanent_user_codes` 会为历史用户回填永久编码并建立不可变触发器。迁移后必须核验：所有用户均有格式与校验码有效的唯一编码、`user_code_registry` 与用户一一对应、更新 `users.id/user_code` 和物理删除用户均被拒绝。不得通过禁用触发器、清空登记表或回滚迁移来“释放”已发放编码。
 
 不要默认执行 down migration。涉及破坏性 Schema 的发布必须先提供前向兼容阶段和单独数据迁移方案。
 
@@ -317,7 +346,9 @@ docker compose --env-file <secret-env> <compose-files> exec \
   sh /opt/keycloak/data/import/provision-platform-admin.sh
 ```
 
-脚本确保用户和 `platform-admin` Realm 角色存在。密码不能写入仓库、共享聊天、部署日志或永久 Shell 配置。
+脚本确保登录用户和迁移期 `platform-admin` Realm 角色存在，但 Realm Role 不再授予任何 Account 业务权限。密码不能写入仓库、共享聊天、部署日志或永久 Shell 配置。
+
+完成数据库迁移并让目标用户至少 bootstrap 一次后，必须按 [`deploy/runbooks/account-rbac-migration.md`](../deploy/runbooks/account-rbac-migration.md) 使用经审批清单把 `issuer + subject` 明确映射到具体 Account 平台角色。不得把全部旧 `platform-admin` 自动升级为超级管理员；开放后台流量前至少核验一名 `PLATFORM_SUPER_ADMIN`，并验证职责分离的允许/拒绝矩阵。
 
 ### 9.2 手机认证 Flow
 
@@ -349,7 +380,7 @@ docker compose --env-file <secret-env> <compose-files> exec keycloak \
 - 任何非生产 Payment Simulator、测试支付页面和 Mock New API。
 - 服务独立 Metrics 端口。
 
-反向代理必须传递可信的 `X-Forwarded-Proto`/Host，限制请求体大小，并为 SSE 禁用代理缓冲和配置合理的长连接超时。不要让客户端覆盖内部身份头或服务凭据头。
+反向代理必须覆盖并传递可信的 `X-Forwarded-Proto`、Host、`X-Real-IP`/`X-Forwarded-For`，限制请求体大小，并为 SSE 禁用代理缓冲和配置合理的长连接超时。Portal 会把经过该边界确认的客户端来源传给内部 Account 查询限流；不得让客户端覆盖转发头、内部身份头或服务凭据头。
 
 ## 11. 发布后验证
 
@@ -375,7 +406,7 @@ docker compose --env-file <secret-env> <compose-files> exec keycloak \
 4. Account bootstrap、个人信息、无组织时隐藏组织页签。
 5. 余额、权益包和用量列表。
 6. 验证内置模型使用受信配置、当前上下文授权与账户 Gateway；只读目录不应创建 Hold 或用量。TOK-37 是尚未交付的发布准入目标，不能作为现有可调用接口。若验证非流式/流式推理，只使用隔离合成身份和测试路由，记录实际 Hold/结算效果，不使用真实用户或组织资金，也不把 Mock 推理称为真实模型验收。
-7. 管理后台只有 `platform-admin` 可访问，凭据只显示元数据。
+7. 管理后台按 Account 原子平台权限访问，旧 `platform-admin` Claim 不能绕过拒绝；凭据只显示元数据，且只有独立模型运营权限可以访问 Token Account、路由和凭据操作。
 8. 系统运行页的服务、NATS、Relay 和 New API 状态可信。
 
 ### 11.3 支付烟测
@@ -395,6 +426,45 @@ UAT 只使用明确的测试商品和测试商城账号：
 2. **安装门禁**：更新器验证包签名、TOK-37 生成且绑定制品/环境/服务版本的短时签名准入证明，并在暂存副本完成兼容性和迁移预检后，才原子提交应用与配置；失败保持或恢复旧二进制和旧配置的匹配组合。桌面端不得持有内部 readiness 工作负载凭据。
 3. **运行门禁**：已经安装的新版本只运行账号平台和 Token Gateway 路径；平台不可用时显示原因与修复动作，不调用旧模型后台。
 4. 三层门禁分别保存构建版本、服务版本、配置 schema、检查结果和脱敏证据。不得以开发机手工调用真实用户付费模型代替任何一层门禁。
+
+### 11.5 首个超级管理员安全激活
+
+数据库迁移和 Identity 管理私网准备完成后，只能从受控主机或集群运维工作负载运行 `account-security`；该命令不是常驻服务，不得配置 Ingress、Service 或公网路由。先提供 `DATABASE_URL`、`OIDC_ISSUER` 及 Keycloak Provisioner 的受控连接配置，再显式选择一种模式：
+
+```text
+# 终端直接设置正式密码；命令无回显读取两次，不接受密码参数或密码环境变量
+account-security bootstrap --mode INTERACTIVE_SET_PASSWORD \
+  --deployment-identity <deployment-workload>
+
+# 一次性引导；凭据只写入受控描述符 3，不写 stdout/stderr
+account-security bootstrap --mode ONE_TIME_BOOTSTRAP \
+  --deployment-identity <deployment-workload> --ttl 15m --delivery-fd 3
+
+# 兑换时，引导凭据由描述符 3 输入，正式密码由终端无回显输入两次
+account-security redeem --deployment-identity <deployment-workload> --credential-fd 3
+```
+
+非终端自动化必须通过 `--password-fd` 传入两行完全一致的正式密码；禁止把正式密码或引导凭据放入参数、环境变量、Compose/Helm values、普通标准输出、日志或部署制品。一次性凭据默认 256 bit、43 字符无填充 Base64URL、15 分钟有效，最长 60 分钟；第 5 次失败锁定并产生 CRITICAL 告警。重新签发会先使同一部署身份的旧代次失效。
+
+激活验收必须确认：`admin` 业务状态从 `BOOTSTRAP_PENDING` 变为 `ACTIVE`；Identity 用户只在正式密码设置成功后启用；只有一个有效 `PLATFORM_SUPER_ADMIN` 绑定；旧 Session 已撤销；服务端校验值已删除；安全审计存在且不能更新、删除或截断。任何一步失败都不得开放后台流量；Identity 已激活但 Account 提交失败时命令会补偿禁用 Identity。
+
+### 11.6 Break-glass 异常失联恢复
+
+Break-glass 只用于凭据丢失、意外停用或 Identity 故障导致全部超级管理员均无法有效登录的事故。计划内交接必须走正常超级管理员授权/审批，不得使用本命令；该命令也不能让最后一个有效超级管理员主动注销。
+
+```text
+account-security break-glass \
+  --workload-identity <incident-workload> \
+  --target-username <existing-user> \
+  --reason "<至少20字符的事故原因>" \
+  --evidence-file <controlled-incident-evidence> \
+  --confirm ALL_SUPER_ADMINS_UNREACHABLE \
+  --duration 30m
+```
+
+命令从终端无回显读取并确认正式密码；非终端场景使用 `--password-fd`。持续时间必须在 5–60 分钟内。执行后必须立即核对 `BREAK_GLASS_ACTIVATED` CRITICAL 告警、`security.break-glass.activated` 不可变审计、工作负载身份、目标、原因、证据 SHA-256 和到期时间，并在 Identity 恢复后通过正常流程完成长期管理员交接。仓库没有 Break-glass HTTP API。
+
+当前仍缺生产等价环境的并发兑换、Keycloak/数据库提交故障补偿、告警投递和完整事故演练证据，因此 ADM-01/ADM-02 保持 `NOT_DEPLOYED`，APT-007 标记 `BLOCKED_EXTERNAL`。
 
 ## 12. 日志与可观测性
 

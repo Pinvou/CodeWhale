@@ -41,3 +41,32 @@ func TestStaticHandlerServesStableAssetsWithRevalidation(t *testing.T) {
 		}
 	}
 }
+
+func TestStaticHandlerServesRegistrationRepairConsole(t *testing.T) {
+	handler := testService(t, newMemoryStore()).Handler(StaticHandler())
+	page := httptest.NewRecorder()
+	handler.ServeHTTP(page, httptest.NewRequest(http.MethodGet, "/admin.html", nil))
+	if page.Code != http.StatusOK || !strings.Contains(page.Body.String(), `id="admin-root"`) {
+		t.Fatal("expected the modern admin application root")
+	}
+	for _, asset := range []string{"/assets/admin.js", "/assets/admin.css"} {
+		if !strings.Contains(page.Body.String(), `"`+asset+`"`) {
+			t.Fatal("admin HTML omitted its canonical asset")
+		}
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, asset, nil))
+		if response.Code != http.StatusOK || response.Body.Len() == 0 || response.Header().Get("Cache-Control") != "no-cache" {
+			t.Fatal("expected revalidated embedded admin asset")
+		}
+		if strings.HasSuffix(asset, ".js") && !strings.Contains(response.Body.String(), "registration-operations") {
+			t.Fatal("built admin entry omitted the registration repair API")
+		}
+	}
+	for _, retired := range []string{"/assets/registration-repair.js", "/assets/registration-repair-i18n.js", "/assets/registration-repair.css"} {
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, retired, nil))
+		if response.Code != http.StatusNotFound {
+			t.Fatal("retired parallel repair implementation was revived")
+		}
+	}
+}

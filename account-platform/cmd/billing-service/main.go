@@ -12,13 +12,19 @@ import (
 	"time"
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/billing"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/approvalpolicy"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/authorization"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/config"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/events"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/h3cmall"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/identity"
 )
 
 func main() {
+	if err := approvalpolicy.ValidateAll(map[string]approvalpolicy.Mode{"BILLING_PAYMENT_EXPIRY_RECONCILE": approvalpolicy.AuditOnly, "BILLING_ENTITLEMENT_PACKAGE_EXPIRE": approvalpolicy.AuditOnly}); err != nil {
+		log.Fatal(err)
+	}
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 	cfg, err := config.Load("billing-service")
@@ -34,7 +40,15 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	service := billing.NewService(repository).WithPayments(payments)
+	authorizer, err := authorization.NewClient(os.Getenv("ACCOUNT_HTTP_URL"), os.Getenv("INTERNAL_SERVICE_TOKEN"))
+	if err != nil {
+		log.Fatal(err)
+	}
+	approvalGate, err := billing.NewHTTPApprovalExecutionGate(os.Getenv("ACCOUNT_HTTP_URL"), os.Getenv("INTERNAL_SERVICE_TOKEN"))
+	if err != nil {
+		log.Fatal(err)
+	}
+	service := billing.NewService(repository).WithPayments(payments).WithAuthorizer(authorizer).WithApprovalExecutionGate(approvalGate)
 	waivers, err := billing.NewHTTPWaiverCoordinator(os.Getenv("TOKEN_GATEWAY_HTTP_URL"), os.Getenv("INTERNAL_SERVICE_TOKEN"))
 	if err != nil {
 		log.Fatal("Token waiver coordinator is not configured")
@@ -58,6 +72,16 @@ func main() {
 		}
 		reconciliationInterval = time.Duration(seconds) * time.Second
 	}
+	broker, err := events.NewNATSBroker(ctx, os.Getenv("NATS_URL"), "billing-command-executor")
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer broker.Close()
+	stopApprovalConsumer, err := broker.Consume(ctx, "billing-command-executor-v1", "account.approval-command.authorized.v1", billing.NewApprovalCommandConsumer(service).Handle)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer stopApprovalConsumer()
 	paymentExpiryDone := make(chan struct{})
 	go func() {
 		defer close(paymentExpiryDone)

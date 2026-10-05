@@ -42,8 +42,8 @@ func TestPostgresAdminReconciliationSnapshotReadsPreserveExactFinancialStrings(t
 	if err != nil {
 		t.Fatal(err)
 	}
-	handler := NewService(p.repository).WithPayments(p).Handler(strings.Repeat("f", 32), func(context.Context, string) (identity.Principal, error) {
-		return identity.Principal{RealmRoles: []string{"platform-admin"}}, nil
+	handler := NewService(p.repository).WithAuthorizer(billingTestAuthorizer(t)).WithPayments(p).Handler(strings.Repeat("f", 32), func(context.Context, string) (identity.Principal, error) {
+		return identity.Principal{Issuer: "https://fixture-authority.invalid", Subject: "fixture-platform-operator", RealmRoles: []string{"platform-admin"}}, nil
 	})
 	request := httptest.NewRequest("GET", "/admin/v1/reconciliation-runs/"+run.ID.String()+"/cases", nil)
 	request.Header.Set("Authorization", "Bearer fixture-admin")
@@ -83,8 +83,8 @@ func TestPostgresAdminLedgerRetainsDistinctPostingsFromOneJournal(t *testing.T) 
 	if _, err := repo.Commit(ctx, hold.UsageRequestID, hold.ID, 150, map[string]any{"fixture": true}); err != nil {
 		t.Fatal(err)
 	}
-	handler := NewService(repo).Handler(strings.Repeat("f", 32), func(context.Context, string) (identity.Principal, error) {
-		return identity.Principal{RealmRoles: []string{"platform-admin"}}, nil
+	handler := NewService(repo).WithAuthorizer(billingTestAuthorizer(t)).Handler(strings.Repeat("f", 32), func(context.Context, string) (identity.Principal, error) {
+		return identity.Principal{Issuer: "https://fixture-authority.invalid", Subject: "fixture-platform-operator", RealmRoles: []string{"platform-admin"}}, nil
 	})
 	request := httptest.NewRequest("GET", "/admin/v1/wallets/"+wallet.ID.String()+"/ledger", nil)
 	request.Header.Set("Authorization", "Bearer fixture-admin")
@@ -144,8 +144,8 @@ func TestPostgresAdminRefundReusesLogicalKeyAfterProviderResponseLoss(t *testing
 	provider := &adminRefundProvider{recoverableProvider: &recoverableProvider{}, refunds: map[string]ProviderRefund{}, loseResponse: true}
 	p.provider = provider
 	order := creditedOrder(t, p, w, user, uuid.NewString())
-	handler := NewService(p.repository).WithPayments(p).Handler(strings.Repeat("f", 32), func(context.Context, string) (identity.Principal, error) {
-		return identity.Principal{RealmRoles: []string{"platform-admin"}}, nil
+	handler := NewService(p.repository).WithAuthorizer(billingTestAuthorizer(t)).WithPayments(p).Handler(strings.Repeat("f", 32), func(context.Context, string) (identity.Principal, error) {
+		return identity.Principal{Issuer: "https://fixture-authority.invalid", Subject: "fixture-platform-operator", RealmRoles: []string{"platform-admin"}}, nil
 	})
 	body := `{"amount_fen":1,"reason":"controlled refund"}`
 	invoke := func(key, body string) *httptest.ResponseRecorder {
@@ -195,8 +195,8 @@ func TestPostgresBillingOperationsKeepExactMoneyAndRejectInvalidJSON(t *testing.
 	if _, err := repo.Credit(context.Background(), wallet.ID, "operations-funding", amount, true); err != nil {
 		t.Fatal(err)
 	}
-	handler := NewService(repo).Handler(strings.Repeat("f", 32), func(context.Context, string) (identity.Principal, error) {
-		return identity.Principal{RealmRoles: []string{"platform-admin"}}, nil
+	handler := NewService(repo).WithAuthorizer(billingTestAuthorizer(t)).Handler(strings.Repeat("f", 32), func(context.Context, string) (identity.Principal, error) {
+		return identity.Principal{Issuer: "https://fixture-authority.invalid", Subject: "fixture-platform-operator", RealmRoles: []string{"platform-admin"}}, nil
 	})
 	request := httptest.NewRequest("POST", "/admin/v1/pricing-versions", strings.NewReader(`{"model":"operations-model","input_per_million":9007199254740993,"output_per_million":1,"cached_input_per_million":2}`))
 	request.Header.Set("Authorization", "Bearer fixture-auth")

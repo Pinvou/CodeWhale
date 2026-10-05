@@ -20,8 +20,12 @@ import (
 )
 
 type PostgresRepository struct {
-	pool *pgxpool.Pool
-	now  func() time.Time
+	pool                   *pgxpool.Pool
+	now                    func() time.Time
+	walletPolicyVersion    string
+	walletProvisioningSLA  time.Duration
+	commerceProviderID     string
+	commerceAdapterVersion string
 }
 
 func NewPostgresRepository(ctx context.Context, databaseURL string) (*PostgresRepository, error) {
@@ -36,12 +40,24 @@ func NewPostgresRepository(ctx context.Context, databaseURL string) (*PostgresRe
 	if err != nil {
 		return nil, fmt.Errorf("open account database: %w", err)
 	}
-	repository := &PostgresRepository{pool: pool, now: func() time.Time { return time.Now().UTC() }}
+	repository := &PostgresRepository{
+		pool: pool, now: func() time.Time { return time.Now().UTC() },
+		walletPolicyVersion: walletProvisioningPolicyVersion, walletProvisioningSLA: walletProvisioningSLA,
+	}
 	if err := repository.Ping(ctx); err != nil {
 		pool.Close()
 		return nil, err
 	}
 	return repository, nil
+}
+
+func (r *PostgresRepository) ConfigureWalletProvisioning(policyVersion string, sla time.Duration) error {
+	policyVersion = strings.TrimSpace(policyVersion)
+	if policyVersion == "" || sla < time.Minute || sla > 24*time.Hour {
+		return errors.New("wallet provisioning policy requires a version and a 1 minute to 24 hour SLA")
+	}
+	r.walletPolicyVersion, r.walletProvisioningSLA = policyVersion, sla
+	return nil
 }
 
 func (r *PostgresRepository) Ping(ctx context.Context) error { return r.pool.Ping(ctx) }
@@ -62,15 +78,15 @@ func (r *PostgresRepository) Bootstrap(ctx context.Context, principal identity.P
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, string(lockKey)); err != nil {
 		return Me{}, false, err
 	}
-	user, err := loadUserByIdentity(ctx, tx, principal)
+	user, err := loadUserByIdentity(ctx, tx, principal, r.commerceProviderID)
 	created := false
 	if errors.Is(err, pgx.ErrNoRows) {
 		created = true
 		now := r.now()
 		user.UserID = uuid.Must(uuid.NewV7())
 		user.Status = "PROVISIONING"
-		user.MallSyncStatus = "NOT_CONFIGURED"
-		user.ActiveContext = Context{Type: "PERSONAL", MembershipVersion: 1}
+		user.CommerceCustomerStatus = "NOT_CONFIGURED"
+		user.ActiveContext = Context{Type: "PERSONAL", MembershipVersion: 1, ContextVersion: 1, AuthorizationVersion: 1}
 		if username := strings.TrimSpace(principal.Username); username != "" {
 			user.Username = &username
 		}
@@ -78,10 +94,15 @@ func (r *PostgresRepository) Bootstrap(ctx context.Context, principal identity.P
 			name := principal.DisplayName
 			user.DisplayName = &name
 		}
-		_, err = tx.Exec(ctx, `
-INSERT INTO users(id, status, username, display_name, email, created_at, updated_at)
-VALUES ($1, 'PROVISIONING', NULLIF($2, ''), NULLIF($3, ''), NULLIF($4, ''), $5, $5)`,
-			user.UserID, strings.TrimSpace(principal.Username), principal.DisplayName, normalizeEmail(principal.Email), now)
+		var userCode string
+		userCode, err = insertUserWithGeneratedCode(ctx, tx, func(database pgx.Tx, candidate string) error {
+			_, insertErr := database.Exec(ctx, `
+INSERT INTO users(id, user_code, status, username, display_name, email, created_at, updated_at)
+VALUES ($1, $2, 'PROVISIONING', NULLIF($3, ''), NULLIF($4, ''), NULLIF($5, ''), $6, $6)`,
+				user.UserID, candidate, strings.TrimSpace(principal.Username), principal.DisplayName, normalizeEmail(principal.Email), now)
+			return insertErr
+		})
+		user.UserCode = FormatUserCode(userCode)
 		if err == nil {
 			_, err = tx.Exec(ctx, `
 INSERT INTO identities(issuer, subject, user_id, created_at, last_seen_at)
@@ -99,6 +120,9 @@ VALUES ($1, $2, $3, $4, $4)`, principal.Issuer, principal.Subject, user.UserID, 
 			return Me{}, false, err
 		}
 		user.Username = &username
+	}
+	if user.Status == "BOOTSTRAP_PENDING" {
+		return Me{}, false, ErrBootstrapPending
 	}
 
 	now := r.now()
@@ -127,10 +151,25 @@ WHERE user_sessions.user_id = EXCLUDED.user_id`,
 			return Me{}, false, err
 		}
 	}
+	if user.Status == "PROVISIONING" {
+		if err := r.ensureWalletProvisioningJob(ctx, tx, user.UserID, nil, now); err != nil {
+			return Me{}, false, err
+		}
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return Me{}, false, err
 	}
 	return user, created, nil
+}
+
+func (r *PostgresRepository) ensureWalletProvisioningJob(ctx context.Context, tx pgx.Tx, userID uuid.UUID, operationID *uuid.UUID, now time.Time) error {
+	command, err := tx.Exec(ctx, `
+INSERT INTO wallet_provisioning_jobs(user_id,registration_operation_id,status,policy_version,sla_expires_at,next_attempt_at,created_at,updated_at)
+VALUES($1,$2,'PENDING',$3,$4,$5,$5,$5) ON CONFLICT (user_id) DO NOTHING`, userID, operationID, r.walletPolicyVersion, now.Add(r.walletProvisioningSLA), now)
+	if err != nil || command.RowsAffected() == 0 {
+		return err
+	}
+	return appendOutbox(ctx, tx, "account.wallet.provisioning.requested.v1", userID, 1, map[string]any{"user_id": userID, "policy_version": r.walletPolicyVersion})
 }
 
 func (r *PostgresRepository) ActivateUser(ctx context.Context, userID uuid.UUID) error {
@@ -156,19 +195,22 @@ func (r *PostgresRepository) GetMe(ctx context.Context, principal identity.Princ
 	var me Me
 	var organizationID *uuid.UUID
 	err := r.pool.QueryRow(ctx, `
-SELECT u.id, u.status, u.username, u.display_name, u.mobile_e164, u.mobile_verified_at IS NOT NULL,
-       COALESCE(ms.status,'NOT_CONFIGURED'), s.active_context_type, s.active_organization_id, u.membership_version
+SELECT u.id, u.user_code, u.status, u.username, u.display_name, u.mobile_e164, u.mobile_verified_at IS NOT NULL,
+       COALESCE(cm.status,'NOT_CONFIGURED'), s.active_context_type, s.active_organization_id, u.membership_version,
+       COALESCE((SELECT av.version FROM authorization_versions av WHERE av.user_id=u.id AND av.scope=CASE WHEN s.active_organization_id IS NULL THEN 'PLATFORM' ELSE 'ORGANIZATION' END AND av.scope_id=COALESCE(s.active_organization_id,'00000000-0000-0000-0000-000000000000'::uuid)),1)
 FROM identities i
 JOIN users u ON u.id = i.user_id
 JOIN user_sessions s ON s.user_id = u.id AND s.issuer = i.issuer AND s.session_id = $3
-LEFT JOIN mall_user_sync_jobs ms ON ms.user_id=u.id
-WHERE i.issuer = $1 AND i.subject = $2`, principal.Issuer, principal.Subject, principal.SessionID).Scan(
-		&me.UserID, &me.Status, &me.Username, &me.DisplayName, &me.Mobile, &me.MobileVerified, &me.MallSyncStatus, &me.ActiveContext.Type, &organizationID, &me.ActiveContext.MembershipVersion,
+LEFT JOIN commerce_customer_mappings cm ON cm.subject_type='USER' AND cm.subject_id=u.id AND cm.provider_id=$4
+WHERE i.issuer = $1 AND i.subject = $2`, principal.Issuer, principal.Subject, principal.SessionID, r.commerceProviderID).Scan(
+		&me.UserID, &me.UserCode, &me.Status, &me.Username, &me.DisplayName, &me.Mobile, &me.MobileVerified, &me.CommerceCustomerStatus, &me.ActiveContext.Type, &organizationID, &me.ActiveContext.MembershipVersion, &me.ActiveContext.AuthorizationVersion,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Me{}, ErrNotFound
 	}
 	me.ActiveContext.OrganizationID = organizationID
+	me.UserCode = FormatUserCode(me.UserCode)
+	me.ActiveContext.ContextVersion = me.ActiveContext.MembershipVersion
 	return me, err
 }
 
@@ -178,23 +220,33 @@ func (r *PostgresRepository) ResolveAuthorizationContext(ctx context.Context, pr
 SELECT u.id,s.session_id,s.active_context_type,s.active_organization_id,u.membership_version,
        COALESCE(array_agg(DISTINCT mu.unit_id) FILTER (WHERE mu.unit_id IS NOT NULL),'{}'),
        COALESCE(array_agg(DISTINCT c.ancestor_id) FILTER (WHERE c.ancestor_id IS NOT NULL),'{}'),
-       COALESCE(array_agg(DISTINCT rb.role) FILTER (WHERE rb.role IS NOT NULL),'{}'),
-       u.mobile_e164,u.mobile_verified_at IS NOT NULL,COALESCE(ms.status,'NOT_CONFIGURED')
+       COALESCE((SELECT array_agg(DISTINCT ra.role_code ORDER BY ra.role_code) FROM role_assignments ra WHERE ra.user_id=u.id AND ra.organization_id=s.active_organization_id AND ra.revoked_at IS NULL AND ra.starts_at<=statement_timestamp() AND (ra.expires_at IS NULL OR ra.expires_at>statement_timestamp())),'{}'),
+       COALESCE((SELECT array_agg(DISTINCT rp.permission_code ORDER BY rp.permission_code) FROM role_assignments ra JOIN role_permissions rp ON rp.role_code=ra.role_code WHERE ra.user_id=u.id AND ra.organization_id=s.active_organization_id AND ra.revoked_at IS NULL AND ra.starts_at<=statement_timestamp() AND (ra.expires_at IS NULL OR ra.expires_at>statement_timestamp())),'{}'),
+       COALESCE((SELECT array_agg(DISTINCT ra.role_code ORDER BY ra.role_code) FROM role_assignments ra WHERE ra.user_id=u.id AND ra.organization_id IS NULL AND ra.revoked_at IS NULL AND ra.starts_at<=statement_timestamp() AND (ra.expires_at IS NULL OR ra.expires_at>statement_timestamp())),'{}'),
+       COALESCE((SELECT array_agg(DISTINCT rp.permission_code ORDER BY rp.permission_code) FROM role_assignments ra JOIN role_permissions rp ON rp.role_code=ra.role_code WHERE ra.user_id=u.id AND ra.organization_id IS NULL AND ra.revoked_at IS NULL AND ra.starts_at<=statement_timestamp() AND (ra.expires_at IS NULL OR ra.expires_at>statement_timestamp())),'{}'),
+       COALESCE((SELECT av.version FROM authorization_versions av WHERE av.user_id=u.id AND av.scope=CASE WHEN s.active_organization_id IS NULL THEN 'PLATFORM' ELSE 'ORGANIZATION' END AND av.scope_id=COALESCE(s.active_organization_id,'00000000-0000-0000-0000-000000000000'::uuid)),1),
+       u.mobile_e164,u.mobile_verified_at IS NOT NULL
 FROM identities i
 JOIN users u ON u.id=i.user_id AND u.status='ACTIVE'
 JOIN user_sessions s ON s.user_id=u.id AND s.issuer=i.issuer AND s.session_id=$3
-LEFT JOIN mall_user_sync_jobs ms ON ms.user_id=u.id
 LEFT JOIN organizations o ON o.id=s.active_organization_id
 LEFT JOIN memberships m ON m.user_id=u.id AND m.organization_id=s.active_organization_id AND m.status='ACTIVE'
   AND EXISTS(SELECT 1 FROM organizations o WHERE o.id=m.organization_id AND o.status='ACTIVE')
 LEFT JOIN membership_units mu ON mu.membership_id=m.id
 LEFT JOIN organization_unit_closure c ON c.organization_id=m.organization_id AND c.descendant_id=mu.unit_id
-LEFT JOIN role_bindings rb ON rb.membership_id=m.id
 WHERE i.issuer=$1 AND i.subject=$2 AND (s.active_organization_id IS NULL OR o.status='ACTIVE')
-GROUP BY u.id,s.session_id,s.active_context_type,s.active_organization_id,u.membership_version,ms.status`, principal.Issuer, principal.Subject, principal.SessionID).Scan(
-		&resolved.UserID, &resolved.SessionID, &resolved.ContextType, &resolved.OrganizationID, &resolved.MembershipVersion, &resolved.UnitIDs, &resolved.AncestorUnitIDs, &resolved.Roles, &resolved.Mobile, &resolved.MobileVerified, &resolved.MallSyncStatus,
+GROUP BY u.id,s.session_id,s.active_context_type,s.active_organization_id,s.membership_version`, principal.Issuer, principal.Subject, principal.SessionID).Scan(
+		&resolved.UserID, &resolved.SessionID, &resolved.ContextType, &resolved.OrganizationID, &resolved.MembershipVersion, &resolved.UnitIDs, &resolved.AncestorUnitIDs, &resolved.Roles, &resolved.Permissions, &resolved.PlatformRoles, &resolved.PlatformPermissions, &resolved.AuthorizationVersion, &resolved.Mobile, &resolved.MobileVerified,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
+		var status string
+		statusErr := r.pool.QueryRow(ctx, `SELECT u.status FROM identities i JOIN users u ON u.id=i.user_id WHERE i.issuer=$1 AND i.subject=$2`, principal.Issuer, principal.Subject).Scan(&status)
+		if statusErr == nil && status == "PROVISIONING" {
+			return AuthorizationContext{}, ErrAccountProvisioning
+		}
+		if statusErr == nil && status == "REPAIR_REQUIRED" {
+			return AuthorizationContext{}, ErrAccountRepairRequired
+		}
 		return AuthorizationContext{}, ErrNotFound
 	}
 	if err != nil {
@@ -212,6 +264,19 @@ GROUP BY u.id,s.session_id,s.active_context_type,s.active_organization_id,u.memb
 	if resolved.Roles == nil {
 		resolved.Roles = []string{}
 	}
+	resolved.ContextVersion = resolved.MembershipVersion
+	if resolved.AuthorizationVersion < 1 {
+		resolved.AuthorizationVersion = 1
+	}
+	if resolved.Permissions == nil {
+		resolved.Permissions = []string{}
+	}
+	if resolved.PlatformRoles == nil {
+		resolved.PlatformRoles = []string{}
+	}
+	if resolved.PlatformPermissions == nil {
+		resolved.PlatformPermissions = []string{}
+	}
 	return resolved, nil
 }
 
@@ -221,7 +286,7 @@ SELECT o.id, o.name, o.status, o.version, array_agg(DISTINCT rb.role ORDER BY rb
 FROM identities i
 JOIN memberships m ON m.user_id = i.user_id AND m.status = 'ACTIVE'
 JOIN organizations o ON o.id = m.organization_id AND o.status = 'ACTIVE'
-JOIN role_bindings rb ON rb.membership_id = m.id
+JOIN role_bindings rb ON rb.membership_id = m.id AND rb.revoked_at IS NULL AND rb.starts_at<=statement_timestamp() AND (rb.expires_at IS NULL OR rb.expires_at>statement_timestamp())
 WHERE i.issuer = $1 AND i.subject = $2
 GROUP BY o.id, o.name, o.status, o.version
 ORDER BY o.name, o.id`, principal.Issuer, principal.Subject)
@@ -291,7 +356,12 @@ WHERE issuer = $1 AND session_id = $2 AND user_id = $3`,
 	if err := tx.Commit(ctx); err != nil {
 		return Context{}, err
 	}
-	return Context{Type: contextType, OrganizationID: organizationID, MembershipVersion: version}, nil
+	var authorizationVersion int64
+	err = r.pool.QueryRow(ctx, `SELECT COALESCE((SELECT version FROM authorization_versions WHERE user_id=$1 AND scope=CASE WHEN $2::uuid IS NULL THEN 'PLATFORM' ELSE 'ORGANIZATION' END AND scope_id=COALESCE($2::uuid,'00000000-0000-0000-0000-000000000000'::uuid)),1)`, userID, organizationID).Scan(&authorizationVersion)
+	if err != nil {
+		return Context{}, err
+	}
+	return Context{Type: contextType, OrganizationID: organizationID, MembershipVersion: version, ContextVersion: version, AuthorizationVersion: authorizationVersion}, nil
 }
 
 func (r *PostgresRepository) CreateOrganization(ctx context.Context, principal identity.Principal, name string) (Organization, error) {
@@ -350,7 +420,7 @@ func (r *PostgresRepository) CreateUnit(ctx context.Context, principal identity.
 	if err != nil {
 		return Unit{}, err
 	}
-	if err := requireOrganizationAdmin(ctx, tx, userID, organizationID, parentID); err != nil {
+	if err := requireOrganizationPermission(ctx, tx, userID, organizationID, parentID, PermissionOrganizationUnitsManage); err != nil {
 		return Unit{}, err
 	}
 	if parentID != nil {
@@ -397,7 +467,7 @@ func (r *PostgresRepository) MoveUnit(ctx context.Context, principal identity.Pr
 	if err != nil {
 		return Unit{}, err
 	}
-	if err := requireOrganizationAdmin(ctx, tx, userID, organizationID, &unitID); err != nil {
+	if err := requireOrganizationPermission(ctx, tx, userID, organizationID, &unitID, PermissionOrganizationUnitsManage); err != nil {
 		return Unit{}, err
 	}
 	var unit Unit
@@ -484,7 +554,7 @@ func (r *PostgresRepository) CreateInvitation(ctx context.Context, principal ide
 	if err != nil {
 		return Invitation{}, err
 	}
-	if err := requireOrganizationAdmin(ctx, tx, userID, organizationID, nil); err != nil {
+	if err := requireOrganizationPermission(ctx, tx, userID, organizationID, nil, PermissionOrganizationMembersManage); err != nil {
 		return Invitation{}, err
 	}
 	tokenBytes := make([]byte, 32)
@@ -571,7 +641,7 @@ WHERE i.token_hash=$1 FOR UPDATE OF i`, hash[:]).Scan(&invitationID, &organizati
 	if err == nil && previousStatus != "ACTIVE" {
 		// Rejoining is a new grant. Revoked/suspended bindings are not an
 		// authority source for the new invitation.
-		if _, err := tx.Exec(ctx, `DELETE FROM role_bindings WHERE membership_id=$1`, membershipID); err != nil {
+		if _, err := tx.Exec(ctx, `UPDATE role_bindings SET revoked_at=$2,revoked_by=$3 WHERE membership_id=$1 AND revoked_at IS NULL`, membershipID, now, userID); err != nil {
 			return Organization{}, err
 		}
 		if _, err := tx.Exec(ctx, `DELETE FROM membership_units WHERE membership_id=$1`, membershipID); err != nil {
@@ -589,7 +659,7 @@ RETURNING id,version`, membershipID, organizationID, userID, now).Scan(&membersh
 		return Organization{}, err
 	}
 	for _, role := range roles {
-		_, err = tx.Exec(ctx, `INSERT INTO role_bindings(id, membership_id, role, created_by, created_at) VALUES ($1, $2, $3, $4, $5) ON CONFLICT DO NOTHING`, uuid.Must(uuid.NewV7()), membershipID, role, userID, now)
+		_, err = tx.Exec(ctx, `INSERT INTO role_bindings(id, membership_id, role, created_by, created_at, grant_source) VALUES ($1, $2, $3, $4, $5, 'INVITATION') ON CONFLICT DO NOTHING`, uuid.Must(uuid.NewV7()), membershipID, role, userID, now)
 		if err != nil {
 			return Organization{}, err
 		}
@@ -624,13 +694,13 @@ func (r *PostgresRepository) RevokeMembership(ctx context.Context, principal ide
 	if err != nil {
 		return err
 	}
-	if err := requireOrganizationAdmin(ctx, tx, actorID, organizationID, nil); err != nil {
+	if err := requireOrganizationPermission(ctx, tx, actorID, organizationID, nil, PermissionOrganizationMembersManage); err != nil {
 		return err
 	}
 	var membershipID uuid.UUID
 	var isOwner bool
 	err = tx.QueryRow(ctx, `
-SELECT m.id,EXISTS(SELECT 1 FROM role_bindings rb WHERE rb.membership_id = m.id AND rb.role = 'OWNER')
+SELECT m.id,EXISTS(SELECT 1 FROM role_bindings rb WHERE rb.membership_id = m.id AND rb.role = 'OWNER' AND rb.revoked_at IS NULL AND rb.starts_at<=statement_timestamp() AND (rb.expires_at IS NULL OR rb.expires_at>statement_timestamp()))
 FROM memberships m WHERE m.organization_id = $1 AND m.user_id = $2 AND m.status = 'ACTIVE' FOR UPDATE`, organizationID, targetUserID).Scan(&membershipID, &isOwner)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ErrNotFound
@@ -640,7 +710,7 @@ FROM memberships m WHERE m.organization_id = $1 AND m.user_id = $2 AND m.status 
 	}
 	if isOwner {
 		var owners int
-		if err := tx.QueryRow(ctx, `SELECT count(*) FROM role_bindings rb JOIN memberships m ON m.id = rb.membership_id WHERE m.organization_id = $1 AND m.status = 'ACTIVE' AND rb.role = 'OWNER'`, organizationID).Scan(&owners); err != nil {
+		if err := tx.QueryRow(ctx, `SELECT count(*) FROM role_bindings rb JOIN memberships m ON m.id = rb.membership_id WHERE m.organization_id = $1 AND m.status = 'ACTIVE' AND rb.role = 'OWNER' AND rb.revoked_at IS NULL AND rb.starts_at<=statement_timestamp() AND (rb.expires_at IS NULL OR rb.expires_at>statement_timestamp())`, organizationID).Scan(&owners); err != nil {
 			return err
 		}
 		if owners <= 1 {
@@ -682,7 +752,16 @@ func (r *PostgresRepository) TransferOwnership(ctx context.Context, principal id
 		return err
 	}
 	var actorMembership, targetMembership uuid.UUID
-	err = tx.QueryRow(ctx, `SELECT m.id FROM memberships m JOIN role_bindings rb ON rb.membership_id = m.id WHERE m.organization_id = $1 AND m.user_id = $2 AND m.status = 'ACTIVE' AND rb.role = 'OWNER' FOR UPDATE OF m`, organizationID, actorID).Scan(&actorMembership)
+	err = tx.QueryRow(ctx, `
+SELECT m.id FROM memberships m
+WHERE m.organization_id=$1 AND m.user_id=$2 AND m.status='ACTIVE'
+  AND EXISTS(
+    SELECT 1 FROM role_assignments ra JOIN role_permissions rp ON rp.role_code=ra.role_code
+    WHERE ra.user_id=m.user_id AND ra.organization_id=m.organization_id
+      AND ra.revoked_at IS NULL AND ra.starts_at<=statement_timestamp() AND (ra.expires_at IS NULL OR ra.expires_at>statement_timestamp())
+      AND ra.unit_id IS NULL AND rp.permission_code=$3
+  )
+FOR UPDATE OF m`, organizationID, actorID, PermissionOrganizationOwnerTransfer).Scan(&actorMembership)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ErrForbidden
 	}
@@ -700,12 +779,12 @@ func (r *PostgresRepository) TransferOwnership(ctx context.Context, principal id
 		return nil
 	}
 	now := r.now()
-	_, err = tx.Exec(ctx, `DELETE FROM role_bindings WHERE membership_id = $1 AND role = 'OWNER'`, actorMembership)
+	_, err = tx.Exec(ctx, `UPDATE role_bindings SET revoked_at=$2,revoked_by=$3 WHERE membership_id=$1 AND role='OWNER' AND revoked_at IS NULL`, actorMembership, now, actorID)
 	if err == nil {
-		_, err = tx.Exec(ctx, `INSERT INTO role_bindings(id,membership_id,role,created_by,created_at) VALUES($1,$2,'MEMBER',$3,$4) ON CONFLICT DO NOTHING`, uuid.Must(uuid.NewV7()), actorMembership, actorID, now)
+		_, err = tx.Exec(ctx, `INSERT INTO role_bindings(id,membership_id,role,created_by,created_at,grant_source) VALUES($1,$2,'MEMBER',$3,$4,'OWNERSHIP_TRANSFER') ON CONFLICT DO NOTHING`, uuid.Must(uuid.NewV7()), actorMembership, actorID, now)
 	}
 	if err == nil {
-		_, err = tx.Exec(ctx, `INSERT INTO role_bindings(id, membership_id, role, created_by, created_at) VALUES ($1, $2, 'OWNER', $3, $4) ON CONFLICT DO NOTHING`, uuid.Must(uuid.NewV7()), targetMembership, actorID, now)
+		_, err = tx.Exec(ctx, `INSERT INTO role_bindings(id, membership_id, role, created_by, created_at, grant_source) VALUES ($1, $2, 'OWNER', $3, $4, 'OWNERSHIP_TRANSFER') ON CONFLICT DO NOTHING`, uuid.Must(uuid.NewV7()), targetMembership, actorID, now)
 	}
 	if err == nil {
 		_, err = tx.Exec(ctx, `UPDATE users SET membership_version = membership_version + 1, updated_at = $2 WHERE id = ANY($1)`, []uuid.UUID{actorID, targetUserID}, now)
@@ -728,10 +807,13 @@ func (r *PostgresRepository) TransferOwnership(ctx context.Context, principal id
 	return tx.Commit(ctx)
 }
 
-func loadUserByIdentity(ctx context.Context, tx pgx.Tx, principal identity.Principal) (Me, error) {
+func loadUserByIdentity(ctx context.Context, tx pgx.Tx, principal identity.Principal, commerceProviderID string) (Me, error) {
 	var me Me
-	err := tx.QueryRow(ctx, `SELECT u.id,u.status,u.username,u.display_name,u.mobile_e164,u.mobile_verified_at IS NOT NULL,COALESCE(ms.status,'NOT_CONFIGURED'),u.membership_version FROM identities i JOIN users u ON u.id=i.user_id LEFT JOIN mall_user_sync_jobs ms ON ms.user_id=u.id WHERE i.issuer=$1 AND i.subject=$2`, principal.Issuer, principal.Subject).Scan(&me.UserID, &me.Status, &me.Username, &me.DisplayName, &me.Mobile, &me.MobileVerified, &me.MallSyncStatus, &me.ActiveContext.MembershipVersion)
+	err := tx.QueryRow(ctx, `SELECT u.id,u.user_code,u.status,u.username,u.display_name,u.mobile_e164,u.mobile_verified_at IS NOT NULL,COALESCE(cm.status,'NOT_CONFIGURED'),u.membership_version FROM identities i JOIN users u ON u.id=i.user_id LEFT JOIN commerce_customer_mappings cm ON cm.subject_type='USER' AND cm.subject_id=u.id AND cm.provider_id=$3 WHERE i.issuer=$1 AND i.subject=$2`, principal.Issuer, principal.Subject, commerceProviderID).Scan(&me.UserID, &me.UserCode, &me.Status, &me.Username, &me.DisplayName, &me.Mobile, &me.MobileVerified, &me.CommerceCustomerStatus, &me.ActiveContext.MembershipVersion)
 	me.ActiveContext.Type = "PERSONAL"
+	me.UserCode = FormatUserCode(me.UserCode)
+	me.ActiveContext.ContextVersion = me.ActiveContext.MembershipVersion
+	me.ActiveContext.AuthorizationVersion = 1
 	return me, err
 }
 
@@ -745,30 +827,8 @@ func activeUserID(ctx context.Context, tx pgx.Tx, principal identity.Principal) 
 }
 
 func requireOrganizationAdmin(ctx context.Context, tx pgx.Tx, userID, organizationID uuid.UUID, unitID *uuid.UUID) error {
-	var allowed bool
-	err := tx.QueryRow(ctx, `
-SELECT EXISTS(
-  SELECT 1 FROM memberships m
-  JOIN organizations o ON o.id=m.organization_id AND o.status='ACTIVE'
-  JOIN role_bindings rb ON rb.membership_id = m.id
-  WHERE m.organization_id = $1 AND m.user_id = $2 AND m.status = 'ACTIVE'
-    AND (
-      rb.role IN ('OWNER', 'ORG_ADMIN')
-      OR ($3::uuid IS NOT NULL AND rb.role = 'UNIT_ADMIN' AND EXISTS(
-        SELECT 1 FROM organization_unit_closure c
-        WHERE c.organization_id = $1 AND c.ancestor_id = rb.unit_id AND c.descendant_id = $3
-      ))
-    )
-)`, organizationID, userID, unitID).Scan(&allowed)
-	if err != nil {
-		return err
-	}
-	if !allowed {
-		return ErrForbidden
-	}
-	return nil
+	return requireOrganizationPermission(ctx, tx, userID, organizationID, unitID, PermissionOrganizationUnitsManage)
 }
-
 func loadOrganization(ctx context.Context, tx pgx.Tx, organizationID uuid.UUID) (Organization, error) {
 	var organization Organization
 	err := tx.QueryRow(ctx, `SELECT id, name, status, version FROM organizations WHERE id = $1`, organizationID).Scan(&organization.ID, &organization.Name, &organization.Status, &organization.Version)

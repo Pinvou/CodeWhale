@@ -120,10 +120,17 @@ func (r *PostgresRepository) ResolveUsageWaiver(ctx context.Context, holdID, usa
 	defer tx.Rollback(ctx)
 	var result WaiverAuthority
 	h := &result.Hold
-	err = tx.QueryRow(ctx, `SELECT id,usage_request_id,wallet_id,status,max_microcredits,actual_microcredits,expires_at,updated_at,COALESCE(usage_snapshot,'{}'::jsonb) FROM usage_holds WHERE id=$1 FOR UPDATE`, holdID).Scan(&h.ID, &h.UsageRequestID, &h.WalletID, &h.Status, &h.MaxMicrocredits, &h.ActualMicrocredits, &h.ExpiresAt, &h.UpdatedAt, &result.UsageSnapshot)
+	err = tx.QueryRow(ctx, `SELECT id,usage_request_id,wallet_id,status,max_microcredits,actual_microcredits,expires_at,updated_at,COALESCE(usage_snapshot,'{}'::jsonb) FROM usage_holds WHERE id=$1`, holdID).Scan(&h.ID, &h.UsageRequestID, &h.WalletID, &h.Status, &h.MaxMicrocredits, &h.ActualMicrocredits, &h.ExpiresAt, &h.UpdatedAt, &result.UsageSnapshot)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return result, ErrNotFound
 	}
+	if err != nil {
+		return result, err
+	}
+	if _, err := getWallet(ctx, tx, h.WalletID, true); err != nil {
+		return result, err
+	}
+	err = tx.QueryRow(ctx, `SELECT id,usage_request_id,wallet_id,status,max_microcredits,actual_microcredits,expires_at,updated_at,COALESCE(usage_snapshot,'{}'::jsonb) FROM usage_holds WHERE id=$1 FOR UPDATE`, holdID).Scan(&h.ID, &h.UsageRequestID, &h.WalletID, &h.Status, &h.MaxMicrocredits, &h.ActualMicrocredits, &h.ExpiresAt, &h.UpdatedAt, &result.UsageSnapshot)
 	if err != nil {
 		return result, err
 	}

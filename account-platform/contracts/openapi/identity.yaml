@@ -1,0 +1,60 @@
+openapi: 3.1.0
+info:
+  title: Pinvou Identity Adapter API
+  version: 0.1.0
+  description: Password-bearing registration and recovery boundary. Account and SMS APIs accept only the returned opaque reference.
+  license:
+    name: MIT
+    identifier: MIT
+servers:
+  - url: /v1
+security: []
+paths:
+  /registration/password-prechecks:
+    post:
+      operationId: precheckRegistrationPassword
+      summary: Validate an exact registration or replacement password and create a short-lived opaque reference
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [password]
+              properties:
+                password:
+                  type: string
+                  minLength: 8
+                  maxLength: 128
+                  writeOnly: true
+      responses:
+        "201":
+          description: Password accepted
+          headers:
+            Cache-Control:
+              schema: { type: string, const: no-store }
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [password_handle, password_policy_version, expires_at]
+                properties:
+                  password_handle: { type: string, minLength: 43, maxLength: 43 }
+                  password_policy_version: { type: string, const: user-v1 }
+                  expires_at: { type: string, format: date-time }
+        "400": { $ref: "#/components/responses/Error" }
+components:
+  responses:
+    Error:
+      description: Stable identity error
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [code, message, request_id]
+            properties:
+              code: { type: string }
+              message: { type: string }
+              request_id: { type: string }

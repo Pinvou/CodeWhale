@@ -72,11 +72,12 @@ func TestPostgresHTTPCommunityMobileRegistrationWithoutCommerceActivatesRealWall
 	if err != nil {
 		t.Fatal(err)
 	}
-	provisioner, err := NewKeycloakProvisioner(adapter.URL, adapter.URL+"/token", "pinvou", "controlled-client", serviceToken)
+	provisioner, vault := newIdentityBoundaryForTest(t, adapter.URL, serviceToken)
+	passwordReference, err := vault.Precheck("ControlledAa1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	auth, err := NewMobileAuthService(repository, sms, provisioner, issuer)
+	auth, err := NewMobileAuthService(repository, sms, provisioner, issuer, registrationTokensForTest(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -122,7 +123,7 @@ func TestPostgresHTTPCommunityMobileRegistrationWithoutCommerceActivatesRealWall
 	}
 	username := "community" + uuid.NewString()[:8]
 	mobile := "+8613800138000"
-	post("/v1/auth/registration/precheck", map[string]any{"username": username, "mobile": mobile, "password": "ControlledAa1"}, 200)
+	post("/v1/auth/registration/precheck", map[string]any{"username": username, "mobile": mobile, "password_handle": passwordReference.Handle, "password_policy_version": passwordReference.PolicyVersion}, 200)
 	var captcha SliderCaptchaResponse
 	if err := json.Unmarshal(post("/v1/auth/captcha/challenges", map[string]any{"mobile": mobile, "purpose": "REGISTER"}, 201), &captcha); err != nil {
 		t.Fatal(err)
@@ -134,24 +135,27 @@ func TestPostgresHTTPCommunityMobileRegistrationWithoutCommerceActivatesRealWall
 		t.Fatal(err)
 	}
 	var challenge SMSChallenge
-	if err := json.Unmarshal(post("/v1/auth/sms/challenges", map[string]any{"username": username, "mobile": mobile, "password": "ControlledAa1", "purpose": "REGISTER", "captcha_id": captcha.ID, "captcha_offset": offset}, 202), &challenge); err != nil {
+	if err := json.Unmarshal(post("/v1/auth/sms/challenges", map[string]any{"username": username, "mobile": mobile, "password_handle": passwordReference.Handle, "password_policy_version": passwordReference.PolicyVersion, "purpose": "REGISTER", "captcha_id": captcha.ID, "captcha_offset": offset}, 202), &challenge); err != nil {
 		t.Fatal(err)
 	}
 	var registration struct {
 		UserID uuid.UUID `json:"user_id"`
 	}
-	if err := json.Unmarshal(post("/v1/auth/register", map[string]any{"username": username, "mobile": mobile, "password": "ControlledAa1", "challenge_id": challenge.ID, "code": "123456"}, 201), &registration); err != nil {
+	if err := json.Unmarshal(post("/v1/auth/register", map[string]any{"username": username, "mobile": mobile, "password_handle": passwordReference.Handle, "password_policy_version": passwordReference.PolicyVersion, "challenge_id": challenge.ID, "code": "123456", "registration_operation_id": challenge.RegistrationOperationID, "registration_query_token": challenge.RegistrationQueryToken}, 201), &registration); err != nil {
 		t.Fatal(err)
 	}
 	var me Me
+	if err := NewWalletProvisioningWorker(repository, wallets, time.Second).RunOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
 	if err := json.Unmarshal(post("/v1/account/bootstrap", map[string]any{}, 200), &me); err != nil {
 		t.Fatal(err)
 	}
-	if me.UserID != registration.UserID || me.Status != "ACTIVE" || !me.MobileVerified || me.MallSyncStatus != "NOT_CONFIGURED" {
+	if me.UserID != registration.UserID || me.Status != "ACTIVE" || !me.MobileVerified || me.CommerceCustomerStatus != "NOT_CONFIGURED" {
 		t.Fatal("community registration failed to activate without commerce")
 	}
 	var jobs, walletCount int
-	if err := repository.pool.QueryRow(ctx, `SELECT count(*) FROM mall_user_sync_jobs WHERE user_id=$1`, me.UserID).Scan(&jobs); err != nil {
+	if err := repository.pool.QueryRow(ctx, `SELECT count(*) FROM commerce_customer_sync_jobs WHERE subject_type='USER' AND subject_id=$1`, me.UserID).Scan(&jobs); err != nil {
 		t.Fatal(err)
 	}
 	if err := billingPool.QueryRow(ctx, `SELECT count(*) FROM wallets WHERE owner_type='PERSONAL' AND owner_id=$1 AND status='ACTIVE'`, me.UserID).Scan(&walletCount); err != nil {
@@ -201,13 +205,16 @@ func TestSMSAndKeycloakResponsesRequireCompleteBoundedJSONAndPositiveTTL(t *test
 		{"valid", `{"access_token":"controlled","expires_in":3600}`},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, test.body) }))
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/token" {
+					io.WriteString(w, test.body)
+				} else {
+					io.WriteString(w, "[]")
+				}
+			}))
 			defer server.Close()
-			provisioner, err := NewKeycloakProvisioner(server.URL, server.URL, "pinvou", "controlled", "controlled-secret")
-			if err != nil {
-				t.Fatal(err)
-			}
-			_, err = provisioner.accessToken(context.Background())
+			provisioner, _ := newIdentityBoundaryForTest(t, server.URL, strings.Repeat("s", 32))
+			_, _, err := provisioner.FindMobileUserByRegistrationOperation(context.Background(), uuid.New(), "controlled.user", "+8613800138000", false)
 			if (err == nil) != (test.name == "valid") {
 				t.Fatal("provider TTL/body acceptance mismatch")
 			}
@@ -252,7 +259,7 @@ func TestSMSAndKeycloakResponsesRequireCompleteBoundedJSONAndPositiveTTL(t *test
 					sms = p
 				}
 				_, sendErr := sms.SendCode(context.Background(), "+8613800138000", SMSPurposeRegister, uuid.New())
-				_, verifyErr := sms.VerifyCode(context.Background(), "+8613800138000", uuid.New(), "123456")
+				_, verifyErr := sms.VerifyCode(context.Background(), "+8613800138000", uuid.New(), SMSVerificationData{Provider: sms.Descriptor()}, "123456")
 				if mode == "valid" {
 					if sendErr != nil || verifyErr != nil {
 						t.Fatal("valid provider response rejected")
@@ -272,7 +279,7 @@ func TestPostgresSMSAttemptWriteFailureCannotMasqueradeAsConsumedLimit(t *testin
 	if err := repository.CreateSMSChallenge(ctx, challenge); err != nil {
 		t.Fatal(err)
 	}
-	if err := repository.MarkSMSChallengeSent(ctx, challenge.ID, "controlled"); err != nil {
+	if err := repository.MarkSMSChallengeSent(ctx, challenge.ID, "controlled", nil); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := repository.pool.Exec(ctx, `CREATE FUNCTION reject_sms_attempt() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'controlled fixture'; END $$; CREATE TRIGGER reject_sms_attempt BEFORE UPDATE ON sms_challenges FOR EACH ROW EXECUTE FUNCTION reject_sms_attempt()`); err != nil {

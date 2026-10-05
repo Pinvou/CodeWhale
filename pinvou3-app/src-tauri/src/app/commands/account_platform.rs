@@ -2,7 +2,7 @@ use tauri::State;
 
 use crate::features::account_platform::{
     AccountPlatformState, ApiRequest, ApiResponse, LoginCredentials, MobileRegistration,
-    MobileRegistrationPrecheck, SMSLoginCredentials, SMSRequest, SessionStatus,
+    MobileRegistrationPrecheck, PasswordReset, SMSLoginCredentials, SMSRequest, SessionStatus,
     SliderCaptchaRequest,
 };
 use crate::features::assistant::engine_pool::EnginePool;
@@ -13,6 +13,17 @@ pub async fn account_platform_session(
     state: State<'_, AccountPlatformState>,
 ) -> Result<SessionStatus, String> {
     Ok(state.status().await)
+}
+
+#[tauri::command]
+pub async fn account_platform_reset_password(
+    input: PasswordReset,
+    state: State<'_, AccountPlatformState>,
+    pool: State<'_, EnginePool>,
+) -> Result<serde_json::Value, String> {
+    let result = state.reset_password(input).await?;
+    pool.mark_model_updated(BUILTIN_ACCOUNT_PLATFORM_MODEL_ID);
+    Ok(result)
 }
 
 #[tauri::command]
@@ -59,6 +70,13 @@ pub async fn account_platform_register_mobile(
 }
 
 #[tauri::command]
+pub async fn account_platform_registration_status(
+    state: State<'_, AccountPlatformState>,
+) -> Result<serde_json::Value, String> {
+    state.registration_status().await
+}
+
+#[tauri::command]
 pub async fn account_platform_login_sms(
     input: SMSLoginCredentials,
     state: State<'_, AccountPlatformState>,
@@ -83,8 +101,22 @@ pub async fn account_platform_logout(
 pub async fn account_platform_request(
     request: ApiRequest,
     state: State<'_, AccountPlatformState>,
+    pool: State<'_, EnginePool>,
 ) -> Result<ApiResponse, String> {
-    state.request(request).await
+    let completes_profile =
+        crate::features::account_platform::profile_completion_requested(&request);
+    let response = state.request(request).await?;
+    if completes_profile
+        && (200..300).contains(&response.status)
+        && response
+            .body
+            .get("status")
+            .and_then(serde_json::Value::as_str)
+            == Some("COMPLETED")
+    {
+        pool.mark_model_updated(BUILTIN_ACCOUNT_PLATFORM_MODEL_ID);
+    }
+    Ok(response)
 }
 
 #[tauri::command]

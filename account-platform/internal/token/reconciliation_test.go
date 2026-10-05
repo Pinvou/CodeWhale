@@ -145,11 +145,11 @@ type reconciliationBillingFake struct {
 func (b *reconciliationBillingFake) PriceByID(context.Context, uuid.UUID) (PriceVersion, error) {
 	return b.price, nil
 }
-func (b *reconciliationBillingFake) Commit(_ context.Context, usageID, _ uuid.UUID, actual int64, _ Usage) error {
+func (b *reconciliationBillingFake) Commit(_ context.Context, usageID, _, _ uuid.UUID, actual int64, _ Usage) error {
 	b.committedUsageID, b.committedActual = usageID, actual
 	return nil
 }
-func (b *reconciliationBillingFake) Release(_ context.Context, usageID, _ uuid.UUID, _ string) error {
+func (b *reconciliationBillingFake) Release(_ context.Context, usageID, _, _ uuid.UUID, _ string) error {
 	b.releasedID = usageID
 	return nil
 }

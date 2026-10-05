@@ -24,7 +24,7 @@ func TestPostgresAdminScopedRolesPreserveOwnerAndTransactionalMembershipEvents(t
 	otherOrg := accountOrganization(t, repo, owner)
 	foreignUnit := accountUnit(t, repo, owner, otherOrg.ID, nil, "foreign scope")
 	ctx := context.Background()
-	admin := fixturePlatformAdmin()
+	admin := fixturePlatformAdmin(t, repo)
 	if _, err := repo.AdminAddMember(ctx, admin, org.ID, memberMe.UserID, nil, []uuid.UUID{foreignUnit.ID}); !errors.Is(err, ErrNotFound) {
 		t.Fatal("cross-organization unit role was accepted")
 	}
@@ -118,7 +118,7 @@ func TestPostgresAdministratorMembershipLifecycleEventsApplyToInboxOnce(t *testi
 	owner, _ := accountUser(t, repo)
 	_, user := accountUser(t, repo)
 	org := accountOrganization(t, repo, owner)
-	admin := fixturePlatformAdmin()
+	admin := fixturePlatformAdmin(t, repo)
 	member, err := repo.AdminAddMember(ctx, admin, org.ID, user.UserID, nil, nil)
 	if err != nil {
 		t.Fatal(err)

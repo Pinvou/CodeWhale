@@ -6,7 +6,8 @@ use super::*;
 pub struct SMSRequest {
     pub username: String,
     pub mobile: String,
-    pub password: String,
+    pub password_handle: String,
+    pub password_policy_version: String,
     pub purpose: String,
     pub captcha_id: String,
     pub captcha_offset: u16,
@@ -38,6 +39,16 @@ pub struct MobileRegistration {
     pub mobile: String,
     pub challenge_id: String,
     pub code: String,
+    pub password_handle: String,
+    pub password_policy_version: String,
+    pub registration_operation_id: String,
+}
+
+#[derive(Deserialize)]
+pub struct PasswordReset {
+    pub mobile: String,
+    pub challenge_id: String,
+    pub code: String,
     pub password: String,
 }
 
@@ -63,7 +74,7 @@ fn mobile_number(value: &str) -> Result<&str, String> {
 fn purpose(value: &str) -> Result<String, String> {
     let value = value.trim().to_ascii_uppercase();
     match value.as_str() {
-        "REGISTER" | "LOGIN" => Ok(value),
+        "REGISTER" | "LOGIN" | "PASSWORD_RESET" | "PROFILE_MOBILE" => Ok(value),
         _ => Err(invalid_request()),
     }
 }
@@ -99,7 +110,7 @@ fn sms_code(value: &str) -> Result<&str, String> {
     Ok(value)
 }
 
-fn public_error(body: &Value) -> String {
+pub(super) fn public_error(body: &Value) -> String {
     let code = match body.get("code").and_then(Value::as_str) {
         Some(
             code @ ("INVALID_REQUEST"
@@ -108,6 +119,17 @@ fn public_error(body: &Value) -> String {
             | "USERNAME_INVALID"
             | "USERNAME_ALREADY_REGISTERED"
             | "PASSWORD_INVALID"
+            | "PASSWORD_EDGE_SPACE_NOT_ALLOWED"
+            | "PASSWORD_REFERENCE_INVALID"
+            | "PASSWORD_REFERENCE_CONFLICT"
+            | "REGISTRATION_IDEMPOTENCY_CONFLICT"
+            | "REGISTRATION_RESTART_REQUIRED"
+            | "REGISTRATION_OPERATION_NOT_FOUND"
+            | "RECENT_AUTHENTICATION_REQUIRED"
+            | "PROFILE_CHANGE_CONFLICT"
+            | "PROFILE_CHANGE_NOT_FOUND"
+            | "PROFILE_CHANGE_FAILED"
+            | "MOBILE_VERIFICATION_REQUIRED"
             | "CAPTCHA_INVALID"
             | "SMS_RATE_LIMITED"
             | "SMS_CODE_INVALID"
@@ -165,22 +187,38 @@ pub(super) fn classify_mobile_grant_error(
 impl AccountPlatformState {
     pub async fn send_sms(&self, input: SMSRequest) -> Result<Value, String> {
         let purpose = purpose(&input.purpose)?;
+        if purpose == "PROFILE_MOBILE" {
+            return Err(invalid_request());
+        }
         let mobile = mobile_number(&input.mobile)?;
         let captcha_id = challenge_id(&input.captcha_id)?;
-        if input.username.len() > 320 || input.password.len() > 4096 {
+        if input.username.len() > 320 || input.username.chars().any(char::is_control) {
             return Err(invalid_request());
         }
         if purpose == "REGISTER" {
-            registration_fields(&input.username, &input.password)?;
+            registration::password_reference(
+                &input.password_handle,
+                &input.password_policy_version,
+            )?;
         }
-        self.public_account_request(
-            &AccountPlatformConfig::from_env()?,
-            "v1/auth/sms/challenges",
+        let _registration = self.registration_guard.lock().await;
+        let epoch = self.session_epoch.load(Ordering::SeqCst);
+        let config = AccountPlatformConfig::from_env()?;
+        let mut result = self.public_account_request(&config, "v1/auth/sms/challenges",
             serde_json::json!({"username": input.username.trim(), "mobile": mobile,
-                "password": input.password, "purpose": purpose, "captcha_id": captcha_id,
-                "captcha_offset": input.captcha_offset}),
-        )
-        .await
+                "password_handle": input.password_handle, "password_policy_version": input.password_policy_version,
+                "purpose": purpose, "captcha_id": captcha_id, "captcha_offset": input.captcha_offset})).await?;
+        if purpose == "REGISTER" {
+            self.remember_pending_registration(
+                &config,
+                &input.username,
+                mobile,
+                epoch,
+                &mut result,
+            )
+            .await?;
+        }
+        Ok(result)
     }
 
     pub async fn create_slider_captcha(
@@ -196,17 +234,48 @@ impl AccountPlatformState {
         input: MobileRegistrationPrecheck,
     ) -> Result<Value, String> {
         registration_fields(&input.username, &input.password)?;
-        self.public_account_request(&AccountPlatformConfig::from_env()?, "v1/auth/registration/precheck",
+        let config = AccountPlatformConfig::from_env()?;
+        let reference = self.password_precheck(&config, input.password).await?;
+        let mut result = self.public_account_request(&config, "v1/auth/registration/precheck",
             serde_json::json!({"username": input.username.trim(), "mobile": mobile_number(&input.mobile)?,
-                "password": input.password})).await
+                "password_handle": reference.password_handle, "password_policy_version": reference.password_policy_version})).await?;
+        let object = result.as_object_mut().ok_or_else(invalid_request)?;
+        object.insert(
+            "password_handle".into(),
+            Value::String(reference.password_handle),
+        );
+        object.insert(
+            "password_policy_version".into(),
+            Value::String(reference.password_policy_version),
+        );
+        object.insert("expires_at".into(), Value::String(reference.expires_at));
+        Ok(result)
     }
 
     pub async fn register_mobile(&self, input: MobileRegistration) -> Result<Value, String> {
-        registration_fields(&input.username, &input.password)?;
-        self.public_account_request(&AccountPlatformConfig::from_env()?, "v1/auth/register",
-            serde_json::json!({"username": input.username.trim(), "mobile": mobile_number(&input.mobile)?,
+        registration::password_reference(&input.password_handle, &input.password_policy_version)?;
+        let _registration = self.registration_guard.lock().await;
+        let config = AccountPlatformConfig::from_env()?;
+        let operation_id = challenge_id(&input.registration_operation_id)?;
+        let mobile = mobile_number(&input.mobile)?;
+        let pending = self
+            .pending_registration(&config)
+            .await?
+            .ok_or_else(|| "registration_recovery_missing".to_string())?;
+        if pending.operation_id != operation_id
+            || pending.username != input.username.trim()
+            || pending.mobile != mobile
+        {
+            return Err("registration_recovery_conflict".into());
+        }
+        let query_token = pending.query_token;
+        let result = self.public_account_request(&config, "v1/auth/register",
+            serde_json::json!({"username": input.username.trim(), "mobile": mobile,
                 "challenge_id": challenge_id(&input.challenge_id)?, "code": sms_code(&input.code)?,
-                "password": input.password})).await
+                "password_handle": input.password_handle, "password_policy_version": input.password_policy_version,
+                "registration_operation_id": operation_id, "registration_query_token": query_token})).await?;
+        registration::validate_result(&result, &operation_id)?;
+        Ok(result)
     }
 
     pub async fn login_sms(
@@ -260,6 +329,24 @@ impl AccountPlatformState {
         self.complete_login(config, tokens, None, epoch).await
     }
 
+    pub async fn reset_password(&self, input: PasswordReset) -> Result<Value, String> {
+        self.reset_password_with(&AccountPlatformConfig::from_env()?, input)
+            .await
+    }
+
+    pub(super) async fn reset_password_with(
+        &self,
+        config: &AccountPlatformConfig,
+        input: PasswordReset,
+    ) -> Result<Value, String> {
+        registration_fields("reset", &input.password)?;
+        let mobile = mobile_number(&input.mobile)?.to_string();
+        let challenge = challenge_id(&input.challenge_id)?.to_string();
+        let code = sms_code(&input.code)?.to_string();
+        self.reset_password_operation(config, input.password, mobile, challenge, code)
+            .await
+    }
+
     pub(super) async fn public_account_request(
         &self,
         config: &AccountPlatformConfig,
@@ -277,6 +364,7 @@ impl AccountPlatformState {
             .post(url)
             .header("Accept", "application/json")
             .header("X-Request-ID", random_urlsafe(18))
+            .header("X-Device-ID", &self.device_id)
             .json(&body)
             .send()
             .await
@@ -284,6 +372,12 @@ impl AccountPlatformState {
         let response = response_to_api(response).await?;
         if !(200..300).contains(&response.status) {
             return Err(public_error(&response.body));
+        }
+        if path == "v1/auth/password-resets" {
+            if response.status == 204 && response.body.is_null() {
+                return Ok(serde_json::json!({}));
+            }
+            return Err("account_platform_response_invalid".into());
         }
         if !response.body.is_object() {
             return Err("account_platform_response_invalid".into());

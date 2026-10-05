@@ -43,7 +43,7 @@
         var url = new URL('http://desktop.invalid' + request.resource);
         if (url.hostname !== 'desktop.invalid' || url.href.includes('?') || url.href.includes('#')) return false;
         var route = url.pathname.replace(/^\/+|\/+$/g, '');
-        return route === 'v1/sessions/current/active-context' || route === 'v1/account/bootstrap';
+        return route === 'v1/sessions/current/active-context' || route === 'v1/account/bootstrap' || /^v1\/me\/profile-change-requests\/[^/]+\/actions\/complete$/.test(route);
       } catch (_) { return false; }
     }
     return {
@@ -60,11 +60,26 @@
       precheckMobileRegistration: function (input) { return invoke("account_platform_precheck_mobile_registration", { input: input }); },
       sendSms: function (input) { return invoke("account_platform_send_sms", { input: input }); },
       registerMobile: function (input) { return invoke("account_platform_register_mobile", { input: input }); },
+      registrationStatus: function () { return invoke("account_platform_registration_status"); },
+      resetPassword: function (input) { return identityOperation(function () { return invoke("account_platform_reset_password", { input: input }); }); },
       loginSms: function (input) { return identityOperation(function () { return invoke("account_platform_login_sms", { input: input }); }); },
       logout: function () { return identityOperation(function () { return invoke("account_platform_logout"); }); },
       request: function (request) {
         var operation = function () { return invoke("account_platform_request", { request: request }); };
-        return changesIdentity(request) ? identityOperation(operation) : observedOperation(operation);
+        if (changesIdentity(request)) return identityOperation(operation);
+        return observedOperation(async function () {
+          var response = await operation();
+          if (request && request.area === 'account' && request.method === 'GET'
+              && response && response.status >= 200 && response.status < 300
+              && response.body && response.body.status === 'COMPLETED') {
+            try {
+              var url = new URL('http://desktop.invalid' + request.resource);
+              if (url.hostname === 'desktop.invalid' && !url.href.includes('?') && !url.href.includes('#')
+                  && /^\/v1\/me\/profile-change-requests\/[A-Za-z0-9_-]{1,128}$/.test(url.pathname)) identityChanged();
+            } catch (_) {}
+          }
+          return response;
+        });
       },
     };
   };

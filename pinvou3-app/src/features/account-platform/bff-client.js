@@ -96,6 +96,12 @@ export class AccountPlatformBffClient {
   createTokenAccount(body) { return this.request('token', '/v1/token-accounts', { method: 'POST', body }); }
   credentials(accountId, signal) { return this.request('token', `/v1/token-accounts/${accountId}/credentials`, { signal }); }
   rotateCredential(accountId, body) { return this.request('token', `/v1/token-accounts/${accountId}/credentials`, { method: 'POST', body }); }
+  myRoleBindings(signal) { return this.request('account', '/v1/me/role-bindings', { signal }); }
+  createSliderCaptcha(mobile, purpose, signal) { return this.request('account', '/v1/auth/captcha/challenges', { method:'POST', body:{ mobile, purpose }, signal }); }
+  createProfileChange(field, value) { return this.request('account', '/v1/me/profile-change-requests', { method:'POST', body:{ field,value } }); }
+  sendProfileMobileChallenge(requestId, captchaId, captchaOffset) { return this.request('account', `/v1/me/profile-change-requests/${requestId}/mobile-challenges`, { method:'POST', body:{ captcha_id:captchaId,captcha_offset:captchaOffset } }); }
+  completeProfileChange(requestId, code = '') { return this.request('account', `/v1/me/profile-change-requests/${requestId}/actions/complete`, { method:'POST', body:{ code } }); }
+  profileChangeStatus(requestId, signal) { return this.request('account', `/v1/me/profile-change-requests/${requestId}`, { signal }); }
   async logout() {
     const response = await fetch(`${this.baseURL}/api/logout`, { method: 'POST', headers: { 'X-CSRF-Token': this.csrfToken }, credentials: 'same-origin' });
     if (!response.ok) throw errorFromResponse(response, await readPayload(response));

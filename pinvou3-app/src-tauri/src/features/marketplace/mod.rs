@@ -2739,6 +2739,8 @@ mod tests {
     #[test]
     fn reconcile_rebuilds_dead_local_entry_and_keeps_unknown_entries() {
         with_temp_home(|| {
+            let missing_script = paths::pinvou3_home().join("missing-script.py");
+            assert!(missing_script.is_absolute() && !missing_script.exists());
             write_local_tool_fixture("weather-x", true);
             write_installed_ids(&["weather-x".to_string()]);
             let manager = MarketplaceManager::with_store(MemoryCredentialStore::default());
@@ -2751,13 +2753,16 @@ mod tests {
                 .unwrap();
             let unknown = serde_json::json!({"command": "node", "args": ["/opt/user-tool/run.js"]});
             let mcp_path = seed_mcp_json(serde_json::json!({
-                "weather-x": {"command": "python3", "args": ["/x/w.py"]},
+                "weather-x": {"command": "python3", "args": [missing_script]},
                 "user-own-tool": unknown,
             }));
 
             let actions = manager.reconcile_installed_mcp_entries().unwrap();
             assert_eq!(actions.len(), 1, "{actions:?}");
-            assert!(actions[0].contains("weather-x") && actions[0].contains("/x/w.py"));
+            assert!(
+                actions[0].contains("weather-x")
+                    && actions[0].contains(missing_script.to_string_lossy().as_ref())
+            );
 
             let mcp = read_mcp_json();
             let entry = &mcp["servers"]["weather-x"];
@@ -3319,13 +3324,15 @@ mod tests {
     #[test]
     fn reconcile_rebuild_preserves_user_configured_fields() {
         with_temp_home(|| {
+            let missing_script = paths::pinvou3_home().join("missing-script.py");
+            assert!(missing_script.is_absolute() && !missing_script.exists());
             write_local_tool_fixture("toggle-x", false);
             write_installed_ids(&["toggle-x".to_string()]);
             let manager = MarketplaceManager::with_store(MemoryCredentialStore::default());
             let mcp_path = seed_mcp_json(serde_json::json!({
                 "toggle-x": {
                     "command": "python3",
-                    "args": ["/x/w.py"],
+                    "args": [missing_script],
                     "enabled": false,
                     "timeout_ms": 4200,
                     "custom_hint": "keep"
@@ -3375,14 +3382,16 @@ mod tests {
     #[test]
     fn reconcile_refuses_rebuild_when_manifest_command_is_dead() {
         with_temp_home(|| {
-            let manifest = r#"{
+            let missing_command = paths::pinvou3_home().join("missing-binary");
+            assert!(missing_command.is_absolute() && !missing_command.exists());
+            let manifest = serde_json::json!({
                 "id":"deadbin","name":"deadbin","description":"d","version":"1","icon":"x","category":"c",
-                "mcp_tools":[],"command":"/opt/dead/binary","args":[]
-            }"#;
-            write_tool_manifest("deadbin", manifest);
+                "mcp_tools":[],"command":missing_command,"args":[]
+            });
+            write_tool_manifest("deadbin", &manifest.to_string());
             write_installed_ids(&["deadbin".to_string()]);
             let mcp_path = seed_mcp_json(serde_json::json!({
-                "deadbin": {"command": "/opt/dead/binary"}
+                "deadbin": {"command": missing_command}
             }));
             let manager = MarketplaceManager::with_store(MemoryCredentialStore::default());
 
@@ -3390,7 +3399,8 @@ mod tests {
             let actions = manager.reconcile_installed_mcp_entries().unwrap();
             assert_eq!(actions.len(), 1, "{actions:?}");
             assert!(
-                actions[0].contains("not rebuilt") && actions[0].contains("/opt/dead/binary"),
+                actions[0].contains("not rebuilt")
+                    && actions[0].contains(missing_command.to_string_lossy().as_ref()),
                 "{actions:?}"
             );
             assert_eq!(
@@ -3463,12 +3473,14 @@ mod tests {
     #[test]
     fn reconcile_rebuilds_local_tool_with_unresolvable_secret() {
         with_temp_home(|| {
+            let missing_script = paths::pinvou3_home().join("missing-script.py");
+            assert!(missing_script.is_absolute() && !missing_script.exists());
             write_local_tool_fixture("lostkey-x", true);
             write_installed_ids(&["lostkey-x".to_string()]);
             let manager = MarketplaceManager::with_store(MemoryCredentialStore::default());
             // No credential-store entry for AMAP_KEY.
             let mcp_path = seed_mcp_json(serde_json::json!({
-                "lostkey-x": {"command": "python3", "args": ["/x/w.py"]}
+                "lostkey-x": {"command": "python3", "args": [missing_script]}
             }));
 
             let actions = manager.reconcile_installed_mcp_entries().unwrap();
@@ -4049,7 +4061,7 @@ mod tests {
             let _failure = fail_next_installed_write_for_test();
             let manager = MarketplaceManager::with_store(MemoryCredentialStore::default());
             let error = manager
-                .install("trusted-lock", &std::collections::HashMap::new())
+                .install_with_python("trusted-lock", &std::collections::HashMap::new(), &python)
                 .unwrap_err();
             // 只认注入的 installed.json 写失败：任何更早环节的失败都说明该测试没有
             // 走到回滚路径（is_err() 会掩盖真实错误并把注入标志泄漏给后续测试）。
@@ -7368,7 +7380,9 @@ mod tests {
                 .unwrap_or_default()
                 .to_string();
             assert!(
-                command.contains("bundles/session-reader/mcp")
+                command
+                    .replace('\\', "/")
+                    .contains("bundles/session-reader/mcp")
                     && !command.contains("Session-Reader"),
                 "args must point at the real released dir: {command}"
             );
@@ -8169,6 +8183,16 @@ mod tests {
             )
             .unwrap();
             mgr.uninstall("up-pip-reinstall").unwrap();
+            assert!(!mcp_catalog::package_mcp_dir("up-pip-reinstall").exists());
+
+            write_tool_manifest(
+                "up-pip-reinstall",
+                r#"{
+                    "id":"up-pip-reinstall","name":"Up","description":"d","version":"1","icon":"x","category":"c",
+                    "mcp_tools":[],"command":"python","args":["server.py"],
+                    "pip_dependencies":["pinvou3-nonexistent-pkg-xyz"]
+                }"#,
+            );
 
             let error = mgr
                 .install("up-pip-reinstall", &std::collections::HashMap::new())

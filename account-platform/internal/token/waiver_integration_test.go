@@ -82,7 +82,7 @@ func newWaiverFixture(t *testing.T, active bool) *waiverFixture {
 	}
 	token := strings.Repeat("w", 32)
 	f := &waiverFixture{token: repo, billing: billing, billingPool: pool, usage: usage, hold: hold, wallet: wallet, commitEntered: make(chan struct{}), commitContinue: make(chan struct{}), intent: WaiverIntent{UsageID: usage.ID, HoldID: hold.ID, Reason: "operator final waiver", Actor: "fixture-issuer|fixture-admin"}}
-	service := billingdomain.NewService(billing)
+	service := billingdomain.NewService(billing).WithAuthorizer(tokenTestAuthorizer(t))
 	verify := func(context.Context, string) (identity.Principal, error) {
 		return identity.Principal{Issuer: "fixture-issuer", Subject: "fixture-admin", RealmRoles: []string{"platform-admin"}}, nil
 	}
@@ -104,7 +104,7 @@ func newWaiverFixture(t *testing.T, active bool) *waiverFixture {
 		t.Fatal(err)
 	}
 	f.client = client
-	tokenService := NewService(repo, nil, nil, nil, ProviderURLPolicy{}, client, nil, 1).WithWaivers(token)
+	tokenService := NewService(repo, nil, nil, nil, ProviderURLPolicy{}, client, nil, 1).WithAuthorizer(tokenTestAuthorizer(t)).WithWaivers(token)
 	f.internal = tokenService.Handler(verify)
 	tokenServer := httptest.NewServer(f.internal)
 	t.Cleanup(tokenServer.Close)
@@ -158,7 +158,7 @@ func TestPostgresHTTPAdminWaiverPreservesEvidenceAndLateSettlementCannotCharge(t
 		t.Fatal("waiver/replay did not complete")
 	}
 	f.assertTerminal(t, "RELEASED", 0)
-	if err := f.client.Commit(ctx, f.usage.ID, f.hold.ID, 9, Usage{InputTokens: 9}); err == nil {
+	if err := f.client.Commit(ctx, f.usage.ID, f.hold.ID, f.wallet.ID, 9, Usage{InputTokens: 9}); err == nil {
 		t.Fatal("late consumption charged a waived hold")
 	}
 	if err := f.token.MarkReview(ctx, f.usage.ID, "settlement_pending", map[string]any{"usage": Usage{InputTokens: 9}, "actual_microcredits": int64(9)}); err != nil {
@@ -189,7 +189,7 @@ func TestPostgresHTTPAdminWaiverRejectsActiveAndCommitWinner(t *testing.T) {
 	})
 	t.Run("commit-before-local-projection", func(t *testing.T) {
 		f := newWaiverFixture(t, false)
-		if err := f.client.Commit(context.Background(), f.usage.ID, f.hold.ID, 5, Usage{InputTokens: 5}); err != nil {
+		if err := f.client.Commit(context.Background(), f.usage.ID, f.hold.ID, f.wallet.ID, 5, Usage{InputTokens: 5}); err != nil {
 			t.Fatal(err)
 		}
 		if f.release(t, f.intent.Reason) != 409 {
@@ -292,7 +292,7 @@ func TestPostgresHTTPAdminWaiverHandlesNormalReleaseRaceAndMissingLocalHold(t *t
 				t.Fatal(err)
 			}
 			if scenario == "normal-release-wins" {
-				if err = f.client.Release(ctx, f.usage.ID, f.hold.ID, "upstream_not_started"); err != nil {
+				if err = f.client.Release(ctx, f.usage.ID, f.hold.ID, f.wallet.ID, "upstream_not_started"); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -321,7 +321,7 @@ func TestPostgresHTTPConcurrentAdminWaiverAndCommitHaveOneFinancialWinner(t *tes
 			if i%2 == 0 {
 				f.release(t, f.intent.Reason)
 			} else {
-				_ = f.client.Commit(ctx, f.usage.ID, f.hold.ID, 5, Usage{InputTokens: 5})
+				_ = f.client.Commit(ctx, f.usage.ID, f.hold.ID, f.wallet.ID, 5, Usage{InputTokens: 5})
 			}
 		}()
 	}
@@ -471,7 +471,7 @@ func TestPostgresAdminWaiverDoesNotReportUnboundOrChargedCoordinatorResultAsSucc
 			}
 			// A deliberately corrupt coordinator result tests the public handler's
 			// contract; this fixture does not claim that any financial write occurred.
-			handler := billingdomain.NewService(f.billing).WithWaiverCoordinator(unboundWaiverCoordinator{hold: current}).Handler(strings.Repeat("w", 32), func(context.Context, string) (identity.Principal, error) {
+			handler := billingdomain.NewService(f.billing).WithAuthorizer(tokenTestAuthorizer(t)).WithWaiverCoordinator(unboundWaiverCoordinator{hold: current}).Handler(strings.Repeat("w", 32), func(context.Context, string) (identity.Principal, error) {
 				return identity.Principal{Issuer: "fixture-issuer", Subject: "fixture-admin", RealmRoles: []string{"platform-admin"}}, nil
 			})
 			request := httptest.NewRequest("POST", "/admin/v1/usage-holds/"+f.hold.ID.String()+"/release", strings.NewReader(`{"reason":"fixture"}`))

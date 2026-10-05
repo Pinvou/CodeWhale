@@ -48,8 +48,14 @@ func runLedgerRestoreAudit(t *testing.T, repo *PostgresRepository) map[string]in
 			t.Fatal(err)
 		}
 	}
-	if len(checks) != 5 {
-		t.Fatal("runbook did not execute all five audit queries")
+	expected := []string{"unbalanced_journal_entries", "wallet_posted_snapshot_mismatch", "wallet_reserved_snapshot_mismatch", "entitlement_component_conservation_mismatch", "entitlement_component_lot_mismatch", "entitlement_package_projection_mismatch", "entitlement_hold_allocation_mismatch", "expired_active_holds", "paid_orders_not_credited"}
+	if len(checks) != len(expected) {
+		t.Fatal("runbook did not execute all expected audit queries")
+	}
+	for _, name := range expected {
+		if _, exists := checks[name]; !exists {
+			t.Fatalf("runbook did not execute %s", name)
+		}
 	}
 	return checks
 }

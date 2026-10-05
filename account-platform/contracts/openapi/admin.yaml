@@ -2,7 +2,7 @@ openapi: 3.1.0
 info:
   title: Pinvou Operations Console API
   version: 0.2.0
-  description: Platform operations API. Every operation requires the platform-admin Keycloak Realm role; mutations are audited.
+  description: Platform operations API. Every operation requires its documented Account permission code; OIDC proves identity only and mutations are audited.
   license:
     name: MIT
     identifier: MIT
@@ -34,13 +34,64 @@ paths:
       responses:
         "200": { $ref: "#/components/responses/Collection" }
         "403": { $ref: "#/components/responses/Error" }
+  /account/admin/v1/user-code-lookups/{user_code}:
+    get:
+      operationId: getAdminUserByCode
+      summary: Resolve one authorized user by a complete, checksum-valid user code
+      description: Requires platform.users.read. Prefix, substring, fuzzy, range, autocomplete, and batch code lookup are not supported.
+      parameters: [{ $ref: "#/components/parameters/UserCode" }]
+      responses:
+        "200":
+          description: Authorized exact-match result
+          headers:
+            Cache-Control:
+              required: true
+              schema: { type: string, const: no-store }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AdminUser" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/Error" }
   /account/admin/v1/roles:
     get:
       operationId: listAdminRoleDefinitions
-      summary: List organization role definitions and assignment scopes
+      summary: List platform and organization role definitions, scopes, and permission codes
       responses:
         "200": { $ref: "#/components/responses/Collection" }
         "403": { $ref: "#/components/responses/Error" }
+  /account/admin/v1/role-bindings:
+    get:
+      operationId: listAdminRoleBindings
+      summary: List platform and organization role associations with validity, grant source, and lifecycle state
+      parameters:
+        - { name: user_id, in: query, schema: { type: string, format: uuid } }
+        - { name: organization_id, in: query, schema: { type: string, format: uuid } }
+      responses:
+        "200": { $ref: "#/components/responses/Collection" }
+        "403": { $ref: "#/components/responses/Error" }
+    post:
+      operationId: grantAdminRoleBinding
+      summary: Idempotently grant a non-owner, non-super-admin role with an optional validity window
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RoleBindingGrant" }
+      responses:
+        "201": { description: Role binding created or idempotent original returned }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /account/admin/v1/role-bindings/{binding_id}:
+    delete:
+      operationId: revokeAdminRoleBinding
+      summary: Idempotently revoke one ordinary role binding and invalidate authorization caches
+      parameters: [{ name: binding_id, in: path, required: true, schema: { type: string, format: uuid } }]
+      responses:
+        "200": { description: Revoked binding or already revoked original }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
   /account/admin/v1/users/{user_id}/memberships:
     get:
       operationId: listAdminUserMemberships
@@ -288,6 +339,73 @@ paths:
         "200": { $ref: "#/components/responses/Overview" }
         "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
+  /account/admin/v1/registration-operations:
+    get:
+      operationId: listRegistrationRepairQueue
+      summary: List redacted registration and wallet provisioning operations requiring repair
+      description: Requires platform.registrations.repair. Passwords, password fingerprints, SMS codes, mobile numbers, usernames, provider text, and Identity subjects are never returned.
+      parameters:
+        - { $ref: "#/components/parameters/Limit" }
+        - name: status
+          in: query
+          schema: { type: string, enum: [REPAIR_REQUIRED, COMPENSATION_PENDING] }
+        - name: stage
+          in: query
+          description: Failed or pending recovery stage derived from persisted operation facts.
+          schema: { type: string, enum: [IDENTITY_CREATING, ACCOUNT_COMMITTING, WALLET_PROVISIONING, COMPENSATION] }
+        - name: responsibility
+          in: query
+          schema: { type: string, enum: [IDENTITY, ACCOUNT, BILLING] }
+        - name: older_than_minutes
+          in: query
+          schema: { type: integer, minimum: 0, maximum: 43200 }
+        - name: sla
+          in: query
+          schema: { type: string, enum: [OVERDUE, WITHIN] }
+      responses:
+        "200": { $ref: "#/components/responses/Collection" }
+        "403": { $ref: "#/components/responses/Error" }
+  /account/admin/v1/registration-operations/{registration_operation_id}/actions/retry:
+    post:
+      operationId: retryRegistrationRepair
+      summary: Idempotently retry the current proven registration or wallet provisioning stage
+      parameters: [{ $ref: "#/components/parameters/RegistrationOperationID" }]
+      responses:
+        "202": { $ref: "#/components/responses/Overview" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /account/admin/v1/registration-operations/{registration_operation_id}/actions/compensate:
+    post:
+      operationId: compensateOrphanRegistration
+      summary: Disable an orphan Identity and release its reservation only after the 24-hour no-facts proof gate
+      parameters: [{ $ref: "#/components/parameters/RegistrationOperationID" }]
+      responses:
+        "204": { description: Identity is confirmed non-authenticating and the reservation is released }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /account/admin/v1/profile-change-requests:
+    get:
+      operationId: listProfileChangeRepairQueue
+      summary: List redacted retry and repair-required profile changes
+      description: Requires platform.profile-changes.repair. Old/new identifiers, Identity subjects, SMS details, and provider errors are never returned.
+      responses:
+        "200": { $ref: "#/components/responses/Collection" }
+        "403": { $ref: "#/components/responses/Error" }
+  /account/admin/v1/profile-change-requests/{request_id}/actions/retry:
+    post:
+      operationId: retryProfileChangeRepair
+      summary: Return one repair-required profile change to the forward-only recovery worker
+      parameters:
+        - name: request_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "202": { $ref: "#/components/responses/Overview" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
   /billing/admin/v1/overview:
     get:
       operationId: getAdminBillingOverview
@@ -399,6 +517,19 @@ paths:
       responses:
         "200": { description: Adjustment collection, content: { application/json: { schema: { $ref: "#/components/schemas/AdjustmentCollection" } } } }
         "403": { $ref: "#/components/responses/Error" }
+    post:
+      operationId: createAdminAdjustmentRequest
+      summary: Create an idempotent pending adjustment before submitting its immutable approval command
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AdjustmentRequestCreate" }
+      responses:
+        "201": { description: Pending manual adjustment created }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
   /billing/admin/v1/adjustments/{adjustment_id}/approve:
     post:
       operationId: approveAdminAdjustment
@@ -592,6 +723,126 @@ paths:
         "400": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
+  /account/admin/v1/approval-policies:
+    get:
+      operationId: listAdminApprovalPolicies
+      summary: List the immutable command classifications for the active policy version
+      responses:
+        "200":
+          description: Active command policy registry
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [policy_version, items]
+                properties:
+                  policy_version: { type: integer, format: int64, minimum: 1 }
+                  items: { type: array, items: { $ref: "#/components/schemas/ApprovalPolicy" } }
+        "403": { $ref: "#/components/responses/Error" }
+  /account/admin/v1/approval-requests:
+    get:
+      operationId: listAdminApprovalRequests
+      summary: Search approval requests visible to the requester or an authorized approver
+      parameters:
+        - { $ref: "#/components/parameters/Limit" }
+        - { name: command_type, in: query, schema: { type: string } }
+        - { name: status, in: query, schema: { $ref: "#/components/schemas/ApprovalStatus" } }
+        - { name: risk_class, in: query, schema: { type: string } }
+        - { name: requester_user_id, in: query, schema: { type: string, format: uuid } }
+        - { name: target, in: query, schema: { type: string, maxLength: 160 } }
+        - { name: submitted_from, in: query, schema: { type: string, format: date-time } }
+        - { name: submitted_to, in: query, schema: { type: string, format: date-time } }
+        - { name: expires_from, in: query, schema: { type: string, format: date-time } }
+        - { name: expires_to, in: query, schema: { type: string, format: date-time } }
+      responses:
+        "200":
+          description: Approval requests with server-authorized actions
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [items]
+                properties:
+                  items: { type: array, maxItems: 200, items: { $ref: "#/components/schemas/ApprovalRequest" } }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+    post:
+      operationId: createAdminApprovalDraft
+      summary: Create an idempotent draft for a command classified as approval-required
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ApprovalDraft" }
+      responses:
+        "201":
+          description: Approval draft created
+          content: { application/json: { schema: { $ref: "#/components/schemas/ApprovalRequest" } } }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /account/admin/v1/approval-requests/{approval_request_id}:
+    get:
+      operationId: getAdminApprovalRequest
+      summary: Get one immutable approval command and its current allowed actions
+      parameters: [{ $ref: "#/components/parameters/ApprovalRequestID" }]
+      responses:
+        "200": { description: Approval request, content: { application/json: { schema: { $ref: "#/components/schemas/ApprovalRequest" } } } }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+    put:
+      operationId: updateAdminApprovalDraft
+      summary: Replace a draft before submission using optimistic concurrency
+      parameters: [{ $ref: "#/components/parameters/ApprovalRequestID" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ApprovalDraftUpdate" }
+      responses:
+        "200": { description: Updated approval draft, content: { application/json: { schema: { $ref: "#/components/schemas/ApprovalRequest" } } } }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /account/admin/v1/approval-requests/{approval_request_id}/actions/submit:
+    post:
+      operationId: submitAdminApprovalRequest
+      summary: Freeze and submit a draft for independent approval
+      parameters: [{ $ref: "#/components/parameters/ApprovalRequestID" }]
+      requestBody: { $ref: "#/components/requestBodies/VersionTransition" }
+      responses:
+        "200": { description: Submitted approval request, content: { application/json: { schema: { $ref: "#/components/schemas/ApprovalRequest" } } } }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /account/admin/v1/approval-requests/{approval_request_id}/actions/withdraw:
+    post:
+      operationId: withdrawAdminApprovalRequest
+      summary: Withdraw the requester's own submitted approval request
+      parameters: [{ $ref: "#/components/parameters/ApprovalRequestID" }]
+      requestBody: { $ref: "#/components/requestBodies/VersionTransition" }
+      responses:
+        "200": { description: Withdrawn approval request, content: { application/json: { schema: { $ref: "#/components/schemas/ApprovalRequest" } } } }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /account/admin/v1/approval-requests/{approval_request_id}/actions/decide:
+    post:
+      operationId: decideAdminApprovalRequest
+      summary: Approve or reject using an independent current authorization binding
+      parameters: [{ $ref: "#/components/parameters/ApprovalRequestID" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ApprovalDecision" }
+      responses:
+        "200": { description: Decided approval request, content: { application/json: { schema: { $ref: "#/components/schemas/ApprovalRequest" } } } }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
 components:
   securitySchemes:
     oidc:
@@ -618,6 +869,15 @@ components:
       in: path
       required: true
       schema: { type: string, format: uuid }
+    UserCode:
+      name: user_code
+      in: path
+      required: true
+      description: Complete user code; ASCII hyphens and letter case are ignored before validation.
+      schema:
+        type: string
+        minLength: 21
+        maxLength: 26
     OrganizationID:
       name: organization_id
       in: path
@@ -673,6 +933,16 @@ components:
       in: path
       required: true
       schema: { type: string, format: uuid }
+    RegistrationOperationID:
+      name: registration_operation_id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    ApprovalRequestID:
+      name: approval_request_id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
   requestBodies:
     Decision:
       required: true
@@ -684,6 +954,16 @@ components:
             required: [reason]
             properties:
               reason: { type: string, minLength: 1, maxLength: 500 }
+    VersionTransition:
+      required: true
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: false
+            required: [expected_version]
+            properties:
+              expected_version: { type: integer, format: int64, minimum: 1 }
   schemas:
     DecimalMoney:
       type: string
@@ -696,7 +976,7 @@ components:
         payment_capabilities:
           type: object
           additionalProperties: false
-          required: [provider, order_sync_supported, refund_supported, close_supported, notification_supported, reconciliation_supported, manual_repair_supported]
+          required: [provider, order_sync_supported, refund_supported, close_supported, notification_supported, reconciliation_supported, manual_repair_supported, commerce_customer_required]
           properties:
             provider: { type: string }
             order_sync_supported: { type: boolean }
@@ -705,6 +985,7 @@ components:
             notification_supported: { type: boolean }
             reconciliation_supported: { type: boolean }
             manual_repair_supported: { type: boolean }
+            commerce_customer_required: { type: boolean }
         posted_microcredits: { $ref: "#/components/schemas/DecimalMoney" }
         reserved_microcredits: { $ref: "#/components/schemas/DecimalMoney" }
       additionalProperties: { type: integer, format: int64, minimum: 0 }
@@ -883,6 +1164,132 @@ components:
               error_class: { type: [string, "null"] }
               started_at: { type: string, format: date-time }
               updated_at: { type: string, format: date-time }
+    ApprovalStatus:
+      type: string
+      enum: [DRAFT, SUBMITTED, APPROVED, REJECTED, WITHDRAWN, EXPIRED, INVALIDATED, EXECUTING, EXECUTED, EXECUTION_FAILED]
+    ApprovalPolicy:
+      type: object
+      additionalProperties: false
+      required: [command_type, approval_mode, requester_permission, risk_class, approval_count, self_approval_forbidden, snapshot_schema_version, critical_resource_fields, expires_after_nanoseconds, execution_window_nanoseconds, executor_identity]
+      properties:
+        command_type: { type: string }
+        approval_mode: { type: string, enum: [APPROVAL_REQUIRED, AUDIT_ONLY] }
+        requester_permission: { type: string }
+        approver_permission: { type: string }
+        risk_class: { type: string }
+        approval_count: { type: integer, minimum: 0 }
+        self_approval_forbidden: { type: boolean }
+        snapshot_schema_version: { type: integer, minimum: 1 }
+        critical_resource_fields: { type: array, items: { type: string } }
+        expires_after_nanoseconds: { type: integer, format: int64, minimum: 1 }
+        execution_window_nanoseconds: { type: integer, format: int64, minimum: 1 }
+        executor_identity: { type: string }
+    ApprovalDraft:
+      type: object
+      additionalProperties: false
+      required: [command_type, idempotency_key, normalized_command, target_resource_type, target_resource_id, reason, critical_resource_versions, financial_snapshot]
+      properties:
+        command_type: { type: string }
+        idempotency_key: { type: string, minLength: 8, maxLength: 120 }
+        normalized_command: { type: object, additionalProperties: true }
+        target_resource_type: { type: string, minLength: 1, maxLength: 80 }
+        target_resource_id: { type: string, minLength: 1, maxLength: 160 }
+        reason: { type: string, minLength: 10, maxLength: 2000 }
+        redacted_evidence: { type: [array, object] }
+        expected_impact: { type: object, additionalProperties: true }
+        critical_resource_versions: { type: object, additionalProperties: true }
+        financial_snapshot: { type: object, additionalProperties: true }
+        supersedes_request_id: { type: string, format: uuid }
+    ApprovalDraftUpdate:
+      type: object
+      additionalProperties: false
+      required: [expected_version, command_type, idempotency_key, normalized_command, target_resource_type, target_resource_id, reason, critical_resource_versions, financial_snapshot]
+      properties:
+        expected_version: { type: integer, format: int64, minimum: 1 }
+        command_type: { $ref: "#/components/schemas/ApprovalDraft/properties/command_type" }
+        idempotency_key: { $ref: "#/components/schemas/ApprovalDraft/properties/idempotency_key" }
+        normalized_command: { $ref: "#/components/schemas/ApprovalDraft/properties/normalized_command" }
+        target_resource_type: { $ref: "#/components/schemas/ApprovalDraft/properties/target_resource_type" }
+        target_resource_id: { $ref: "#/components/schemas/ApprovalDraft/properties/target_resource_id" }
+        reason: { $ref: "#/components/schemas/ApprovalDraft/properties/reason" }
+        redacted_evidence: { $ref: "#/components/schemas/ApprovalDraft/properties/redacted_evidence" }
+        expected_impact: { $ref: "#/components/schemas/ApprovalDraft/properties/expected_impact" }
+        critical_resource_versions: { $ref: "#/components/schemas/ApprovalDraft/properties/critical_resource_versions" }
+        financial_snapshot: { $ref: "#/components/schemas/ApprovalDraft/properties/financial_snapshot" }
+        supersedes_request_id: { $ref: "#/components/schemas/ApprovalDraft/properties/supersedes_request_id" }
+    ApprovalDecision:
+      type: object
+      additionalProperties: false
+      required: [expected_version, decision, reason, observed_versions]
+      properties:
+        expected_version: { type: integer, format: int64, minimum: 1 }
+        decision: { type: string, enum: [APPROVE, REJECT] }
+        reason: { type: string, minLength: 3, maxLength: 2000 }
+        observed_versions: { type: object, additionalProperties: true }
+    ApprovalRequest:
+      type: object
+      additionalProperties: true
+      required: [approval_request_id, command_type, policy_version, approval_mode, risk_class, requester_user_id, normalized_command, command_fingerprint, target_resource_type, target_resource_id, reason, status, version, expires_at, created_at, updated_at, critical_resource_versions, financial_snapshot, policy_snapshot, allowed_actions]
+      properties:
+        approval_request_id: { type: string, format: uuid }
+        command_type: { type: string }
+        policy_version: { type: integer, format: int64, minimum: 1 }
+        approval_mode: { type: string, enum: [APPROVAL_REQUIRED] }
+        risk_class: { type: string }
+        requester_user_id: { type: string, format: uuid }
+        requester_binding_id: { type: string, format: uuid }
+        requester_authorization_version: { type: integer, format: int64, minimum: 1 }
+        normalized_command: { type: object, additionalProperties: true }
+        command_fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
+        target_resource_type: { type: string }
+        target_resource_id: { type: string }
+        reason: { type: string }
+        redacted_evidence: { type: [array, object] }
+        expected_impact: { type: object, additionalProperties: true }
+        status: { $ref: "#/components/schemas/ApprovalStatus" }
+        version: { type: integer, format: int64, minimum: 1 }
+        supersedes_request_id: { type: string, format: uuid }
+        expires_at: { type: string, format: date-time }
+        execution_deadline: { type: string, format: date-time }
+        invalidation_code: { type: string }
+        invalidation_details: { type: object, additionalProperties: true }
+        submitted_at: { type: string, format: date-time }
+        decided_at: { type: string, format: date-time }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        critical_resource_versions: { type: object, additionalProperties: true }
+        financial_snapshot: { type: object, additionalProperties: true }
+        policy_snapshot: { type: object, additionalProperties: true }
+        allowed_actions: { type: array, uniqueItems: true, items: { type: string, enum: [EDIT, SUBMIT, WITHDRAW, APPROVE, REJECT] } }
+    RoleBindingGrant:
+      type: object
+      additionalProperties: false
+      required: [user_id, role_code, idempotency_key]
+      properties:
+        user_id: { type: string, format: uuid }
+        role_code: { type: string }
+        organization_id: { type: string, format: uuid }
+        unit_id: { type: string, format: uuid }
+        starts_at: { type: string, format: date-time }
+        expires_at: { type: string, format: date-time }
+        idempotency_key: { type: string, minLength: 8, maxLength: 120 }
+    AdminUser:
+      type: object
+      additionalProperties: false
+      required: [user_id, user_code, status, organization_count, created_at, updated_at]
+      properties:
+        user_id: { type: string, format: uuid }
+        user_code:
+          type: string
+          pattern: '^USR-[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{2}$'
+        username: { type: [string, "null"] }
+        display_name: { type: [string, "null"] }
+        email: { type: [string, "null"] }
+        status: { type: string, enum: [PROVISIONING, ACTIVE, DISABLED, DELETED] }
+        organization_count: { type: integer, format: int64, minimum: 0 }
+        last_seen_at: { type: [string, "null"], format: date-time }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
     NameChange:
       type: object
       additionalProperties: false
@@ -996,6 +1403,15 @@ components:
       properties:
         amount_fen: { type: integer, format: int64, minimum: 1 }
         reason: { type: string, minLength: 1, maxLength: 500 }
+    AdjustmentRequestCreate:
+      type: object
+      additionalProperties: false
+      required: [wallet_id, amount_microcredits, reason, idempotency_key]
+      properties:
+        wallet_id: { type: string, format: uuid }
+        amount_microcredits: { type: integer, format: int64, not: { const: 0 } }
+        reason: { type: string, minLength: 10, maxLength: 2000 }
+        idempotency_key: { type: string, minLength: 8, maxLength: 120 }
     ReconciliationCreate:
       type: object
       additionalProperties: false

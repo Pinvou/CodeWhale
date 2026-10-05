@@ -16,6 +16,11 @@ function localizedError(copy, reason) {
   const code = typeof reason === 'string' ? reason : reason.code;
   const mobile = {
     USERNAME_INVALID: 'usernameInvalid', USERNAME_ALREADY_REGISTERED: 'usernameAlreadyRegistered',
+    PASSWORD_EDGE_SPACE_NOT_ALLOWED:'passwordEdgeSpace', PASSWORD_REFERENCE_INVALID:'registrationPrecheckExpired',
+    PASSWORD_REFERENCE_CONFLICT:'registrationConflict', REGISTRATION_IDEMPOTENCY_CONFLICT:'registrationConflict',
+    REGISTRATION_RESTART_REQUIRED:'registrationRestartRequired', REGISTRATION_OPERATION_NOT_FOUND:'registrationRecoveryUnavailable',
+    RECENT_AUTHENTICATION_REQUIRED:'recentAuthenticationRequired', PROFILE_CHANGE_CONFLICT:'profileChangeConflict',
+    PROFILE_CHANGE_NOT_FOUND:'profileChangeNotFound', MOBILE_VERIFICATION_REQUIRED:'mobileVerificationRequired',
     PASSWORD_INVALID: 'passwordInvalid', MOBILE_INVALID: 'mobileInvalid',
     MOBILE_ALREADY_REGISTERED: 'mobileAlreadyRegistered', CAPTCHA_INVALID: 'captchaInvalid',
     SMS_RATE_LIMITED: 'smsRateLimited', SMS_UNAVAILABLE: 'smsUnavailable',
@@ -29,7 +34,8 @@ function localizedError(copy, reason) {
 function registrationInputError(username, mobile, password, confirmation) {
   if (!/^[A-Za-z][A-Za-z0-9._-]{2,31}$/u.test(username.trim())) return 'usernameInvalid';
   if (!/^1[3-9]\d{9}$/u.test(mobile.trim().replace(/^\+?86/u, ''))) return 'mobileInvalid';
-  if (password.length < 8 || password.length > 128 || !/[A-Za-z]/u.test(password) || !/\d/u.test(password) || !/^[!-~]+$/u.test(password)) return 'passwordInvalid';
+  if (password.length < 8 || password.length > 128 || !/[A-Za-z]/u.test(password) || !/\d/u.test(password) || !/^[ -~]+$/u.test(password)) return 'passwordInvalid';
+  if (password.startsWith(' ') || password.endsWith(' ')) return 'passwordEdgeSpace';
   if (password !== confirmation) return 'passwordMismatch';
   return '';
 }
@@ -223,6 +229,10 @@ export function AccountPlatformPopover({ open, client, copy, language, theme, co
   const [smsNow, setSmsNow] = useState(Date.now());
   const [captcha, setCaptcha] = useState(null);
   const [captchaOffset, setCaptchaOffset] = useState(0);
+  const [passwordReference, setPasswordReference] = useState(null);
+  const [registrationRecovery, setRegistrationRecovery] = useState(null);
+  const [registrationStatus, setRegistrationStatus] = useState(null);
+  const registrationPollRef = useRef(0);
   const [registrationCheck, setRegistrationCheck] = useState('idle');
   const [mobileLoading, setMobileLoading] = useState(false);
   const [password, setPassword] = useState('');
@@ -240,6 +250,7 @@ export function AccountPlatformPopover({ open, client, copy, language, theme, co
   const [rechargeNotice, setRechargeNotice] = useState('');
   const busy = loading || mutating || rechargeLoading;
   const rechargeBusy = busy;
+  const registrationPending = registrationStatus && !['SMS_PENDING','ACTIVE','PROVISIONING','ACCOUNT_COMMITTED','COMPENSATED','EXPIRED'].includes(registrationStatus.status);
   const authBusy = busy || mobileLoading;
   const smsCooldown = Math.max(0, Math.ceil((smsRetryAt - smsNow) / 1000));
   useEffect(() => {
@@ -261,7 +272,7 @@ export function AccountPlatformPopover({ open, client, copy, language, theme, co
     authInputRef.current += 1;
     cancelMobileRead();
     setSmsChallenge(''); setSmsCode(''); setCaptcha(null); setCaptchaOffset(0);
-    setRegistrationCheck('idle');
+    setRegistrationCheck('idle'); setPasswordReference(null);
   }, [cancelMobileRead]);
   const cancelAccountRead = useCallback(() => {
     requestRef.current.controller?.abort();
@@ -295,7 +306,7 @@ export function AccountPlatformPopover({ open, client, copy, language, theme, co
     cancelAccountRead(); resetOrder();
     rechargeRef.current.view = 'account';
     setView('account'); setMe(null); setBalance(null); setProducts([]);
-    setPassword(''); setPasswordConfirmation(''); setMobile(''); resetSMSVerification(); setSmsRetryAt(0); setLoading(false); setErrorReason(null);
+    setPassword(''); setPasswordConfirmation(''); setMobile(''); resetSMSVerification(); setSmsRetryAt(0); setLoading(false); setErrorReason(null); setRegistrationRecovery(null); setRegistrationStatus(null); registrationPollRef.current += 1;
     setMutating(Boolean(mutationRef.current));
     if (open) setAuth('loading');
     return () => {
@@ -350,6 +361,33 @@ export function AccountPlatformPopover({ open, client, copy, language, theme, co
     if (open) void loadAccount();
     return cancelAccountRead;
   }, [open, loadAccount, cancelAccountRead]);
+
+  useEffect(() => {
+    if (!open || !['guest', 'error'].includes(auth) || typeof client.registrationStatus !== 'function') return undefined;
+    const generation = ++registrationPollRef.current;
+    const controller = new globalThis.AbortController();
+    const life = lifecycleRef.current.generation;
+    let timer;
+    const current = () => !controller.signal.aborted && lifecycleRef.current.active && lifecycleRef.current.generation === life && registrationPollRef.current === generation;
+    const poll = async () => {
+      try {
+        const status = await client.registrationStatus(controller.signal);
+        if (!current()) return;
+        if (!status) return;
+        setRegistrationStatus(status);
+        if (['ACTIVE','PROVISIONING','ACCOUNT_COMMITTED'].includes(status.status)) {
+          setAccount(status.username || ''); setLoginMode('password'); setPassword(''); setPasswordConfirmation('');
+          setErrorReason({ copyKey:'registrationRecovered' }); return;
+        }
+        if (['COMPENSATED','EXPIRED'].includes(status.status)) { setErrorReason({ copyKey:'registrationRestartRequired' }); return; }
+        if (status.status !== 'SMS_PENDING') timer = window.setTimeout(poll, 3000);
+      } catch (reason) {
+        if (current() && reason?.name !== 'AbortError') setErrorReason({ copyKey:'registrationRecoveryUnavailable' });
+      }
+    };
+    void poll();
+    return () => { controller.abort(); window.clearTimeout(timer); };
+  }, [open, auth, client, registrationStatus?.registration_operation_id, registrationRecovery]);
 
   const loadRecharge = useCallback(async () => {
     if (!lifecycleRef.current.active || rechargeRef.current.view !== 'recharge' || mutationRef.current) return;
@@ -500,15 +538,15 @@ export function AccountPlatformPopover({ open, client, copy, language, theme, co
     setRegistrationCheck('checking');
     const result = await client.precheckMobileRegistration(account.trim(), mobile.trim(), password, signal);
     if (!isCurrent()) return false;
-    setAccount(result.username); setRegistrationCheck('ready');
+    setAccount(result.username); setPasswordReference(result); setRegistrationCheck('ready');
     return true;
   };
   const precheckRegistration = () => readMobile(precheck);
   const openSliderCaptcha = () => {
-    if (authBusy || !mobile.trim() || smsCooldown > 0) return;
+    if ((loginMode === 'register' && registrationPending) || authBusy || !mobile.trim() || smsCooldown > 0) return;
     void readMobile(async (isCurrent, signal) => {
       if (loginMode === 'register' && !(await precheck(isCurrent, signal))) return;
-      const result = await client.createSliderCaptcha(mobile.trim(), loginMode === 'register' ? 'REGISTER' : 'LOGIN', signal);
+      const result = await client.createSliderCaptcha(mobile.trim(), loginMode === 'register' ? 'REGISTER' : loginMode === 'forgot' ? 'PASSWORD_RESET' : 'LOGIN', signal);
       if (isCurrent()) { setCaptcha(result); setCaptchaOffset(0); }
     });
   };
@@ -522,8 +560,9 @@ export function AccountPlatformPopover({ open, client, copy, language, theme, co
       const isCurrent = () => isAlive() && authInputRef.current === input;
       try {
         const result = await client.sendSms(loginMode === 'register' ? account.trim() : '', mobile.trim(),
-          loginMode === 'register' ? password : '', loginMode === 'register' ? 'REGISTER' : 'LOGIN', captcha.captcha_id, captchaOffset);
+          loginMode === 'register' ? passwordReference : null, loginMode === 'register' ? 'REGISTER' : loginMode === 'forgot' ? 'PASSWORD_RESET' : 'LOGIN', captcha.captcha_id, captchaOffset);
         if (!isCurrent()) return;
+        if (loginMode === 'register') { setRegistrationRecovery({ ...result,username:account.trim(),mobile:mobile.trim() }); setRegistrationStatus(null); }
         setSmsChallenge(result.challenge_id); setSmsCode('');
         setSmsNow(Date.now()); setSmsRetryAt(Date.now() + result.retry_after_seconds * 1000);
         setCaptcha(null); setCaptchaOffset(0);
@@ -538,22 +577,32 @@ export function AccountPlatformPopover({ open, client, copy, language, theme, co
   };
   const submitLogin = async event => {
     event.preventDefault();
-    if (authBusy || mutationRef.current) return;
+    if (authBusy || mutationRef.current || (loginMode === 'register' && registrationPending)) return;
     const mode = loginMode;
-    if (mode === 'register') {
-      const invalid = registrationInputError(account, mobile, password, passwordConfirmation);
+    if (mode === 'register' || mode === 'forgot') {
+      const invalid = registrationInputError(mode === 'forgot' ? 'reset' : account, mobile, password, passwordConfirmation);
       if (invalid) { setRegistrationCheck('error'); setErrorReason({ copyKey: invalid }); return; }
     }
     if (mode === 'password' ? !account.trim() || !password : !mobile.trim() || !smsChallenge || !smsCode.trim()) return;
     const loginAccount = account.trim().replace(/^\+?86(?=1\d{10}$)/u, '');
     const loginMobile = mobile.trim(); const loginPassword = password;
     const challenge = smsChallenge; const code = smsCode.trim();
+    const reference = passwordReference; const recovery = registrationRecovery;
+    if (mode === 'register' && (!reference || Date.parse(reference.expires_at) <= Date.now() || !recovery)) { setErrorReason({ copyKey:'registrationPrecheckExpired' }); return; }
     setPassword(''); setPasswordConfirmation(''); setSmsCode('');
     await runMutation(async isCurrent => {
       if (mode === 'sms') await client.loginSms(loginMobile, challenge, code);
-      else if (mode === 'register') {
-        const registration = await client.registerMobile(account.trim(), loginMobile, challenge, code, loginPassword);
+      else if (mode === 'forgot') {
+        await client.resetPassword(loginMobile, challenge, code, loginPassword);
+        if (isCurrent()) { clearProtected(); setLoginMode('password'); setErrorReason({ copyKey:'passwordResetComplete' }); }
+        return;
+      } else if (mode === 'register') {
+        const registration = await client.registerMobile(account.trim(), loginMobile, challenge, code, reference, recovery);
         if (currentClientRef.current !== client) return;
+        if (!['ACTIVE', 'PROVISIONING', 'ACCOUNT_COMMITTED'].includes(registration.status)) {
+          if (isCurrent()) { setRegistrationStatus(registration); setErrorReason(null); }
+          return;
+        }
         if (registration.password_preserved) {
           // A recovered registration retained the first submitted password.
           // This typed password must not be attempted against that identity.
@@ -647,17 +696,19 @@ export function AccountPlatformPopover({ open, client, copy, language, theme, co
 
       {(auth === 'guest' || auth === 'error') && (
         <form className={`space-y-3 rounded-2xl border p-3 ${cardTheme}`} onSubmit={event => void submitLogin(event)}>
-          <div className="grid grid-cols-3 gap-1 rounded-xl bg-black/5 p-1">{['password', 'sms', 'register'].map(mode => <button key={mode} type="button" disabled={busy} onClick={() => { setLoginMode(mode); setPassword(''); setPasswordConfirmation(''); resetSMSVerification(); setErrorReason(null); }} className={`h-7 rounded-lg text-[11px] ${loginMode === mode ? 'bg-white shadow-sm' : mutedText}`}>{copy.authModes[mode]}</button>)}</div>
-          {loginMode !== 'sms' && <input value={account} onChange={event => { setAccount(event.target.value); setRegistrationCheck('idle'); resetSMSVerification(); }} onBlur={() => { if (loginMode === 'register' && account.trim() && mobile.trim() && password && passwordConfirmation) void precheckRegistration(); }} disabled={busy} placeholder={loginMode === 'register' ? copy.registrationUsername : copy.mobileOrAccount} aria-label={loginMode === 'register' ? copy.username : copy.mobileOrAccount} autoComplete="username" className={`h-9 w-full rounded-xl border px-3 text-[13px] outline-none ${controlTheme}`} />}
+          {registrationPending && <div role="status" className={`text-[12px] ${mutedText}`}>{copy.registrationRepairing}<p>{copy.registrationDoNotRepeat}</p></div>}
+          {registrationRecovery?.recovery_persisted === false && <p role="status" className={`text-[12px] ${mutedText}`}>{copy.registrationRecoveryMemoryOnly}</p>}
+          <div className="grid grid-cols-2 gap-1 rounded-xl bg-black/5 p-1">{['password', 'sms', 'register', 'forgot'].map(mode => <button key={mode} type="button" disabled={busy} onClick={() => { setLoginMode(mode); setPassword(''); setPasswordConfirmation(''); resetSMSVerification(); setErrorReason(null); }} className={`h-7 rounded-lg text-[11px] ${loginMode === mode ? 'bg-white shadow-sm' : mutedText}`}>{copy.authModes[mode]}</button>)}</div>
+          {(loginMode === 'password' || loginMode === 'register') && <input value={account} onChange={event => { setAccount(event.target.value); setRegistrationCheck('idle'); resetSMSVerification(); }} onBlur={() => { if (loginMode === 'register' && account.trim() && mobile.trim() && password && passwordConfirmation) void precheckRegistration(); }} disabled={busy} placeholder={loginMode === 'register' ? copy.registrationUsername : copy.mobileOrAccount} aria-label={loginMode === 'register' ? copy.username : copy.mobileOrAccount} autoComplete="username" className={`h-9 w-full rounded-xl border px-3 text-[13px] outline-none ${controlTheme}`} />}
           {loginMode !== 'password' && <input value={mobile} onChange={event => { setMobile(event.target.value); setRegistrationCheck('idle'); resetSMSVerification(); }} onBlur={() => { if (loginMode === 'register' && account.trim() && mobile.trim() && password && passwordConfirmation) void precheckRegistration(); }} disabled={busy} placeholder={copy.mobile} aria-label={copy.mobile} inputMode="tel" autoComplete="tel-national" className={`h-9 w-full rounded-xl border px-3 text-[13px] outline-none ${controlTheme}`} />}
-          {loginMode !== 'sms' && <input value={password} onChange={event => { setPassword(event.target.value); setRegistrationCheck('idle'); setErrorReason(null); resetSMSVerification(); }} onBlur={() => { if (loginMode === 'register' && account.trim() && mobile.trim() && password && passwordConfirmation) void precheckRegistration(); }} disabled={busy} placeholder={copy.password} aria-label={copy.password} type="password" autoComplete={loginMode === 'register' ? 'new-password' : 'current-password'} className={`h-9 w-full rounded-xl border px-3 text-[13px] outline-none ${controlTheme}`} />}
-          {loginMode === 'register' && <input value={passwordConfirmation} onChange={event => { setPasswordConfirmation(event.target.value); setRegistrationCheck('idle'); setErrorReason(null); resetSMSVerification(); }} onBlur={() => { if (account.trim() && mobile.trim() && password && passwordConfirmation) void precheckRegistration(); }} disabled={busy} placeholder={copy.confirmPassword} aria-label={copy.confirmPassword} type="password" autoComplete="new-password" className={`h-9 w-full rounded-xl border px-3 text-[13px] outline-none ${controlTheme}`} />}
+          {loginMode !== 'sms' && <input value={password} onChange={event => { setPassword(event.target.value); setRegistrationCheck('idle'); setErrorReason(null); if (loginMode !== 'forgot') resetSMSVerification(); }} onBlur={() => { if (loginMode === 'register' && account.trim() && mobile.trim() && password && passwordConfirmation) void precheckRegistration(); }} disabled={busy} placeholder={copy.password} aria-label={copy.password} type="password" autoComplete={loginMode === 'password' ? 'current-password' : 'new-password'} className={`h-9 w-full rounded-xl border px-3 text-[13px] outline-none ${controlTheme}`} />}
+          {(loginMode === 'register' || loginMode === 'forgot') && <input value={passwordConfirmation} onChange={event => { setPasswordConfirmation(event.target.value); setRegistrationCheck('idle'); setErrorReason(null); if (loginMode !== 'forgot') resetSMSVerification(); }} onBlur={() => { if (loginMode === 'register' && account.trim() && mobile.trim() && password && passwordConfirmation) void precheckRegistration(); }} disabled={busy} placeholder={copy.confirmPassword} aria-label={copy.confirmPassword} type="password" autoComplete="new-password" className={`h-9 w-full rounded-xl border px-3 text-[13px] outline-none ${controlTheme}`} />}
           {loginMode === 'register' && registrationCheck === 'checking' && <div className={`text-[11px] ${mutedText}`}>{copy.registrationPrechecking}</div>}
           {loginMode === 'register' && registrationCheck === 'ready' && <div className="text-[11px] text-[#07966F]">{copy.registrationReady}</div>}
           {loginMode !== 'password' && <div className="flex gap-2"><input value={smsCode} onChange={event => setSmsCode(event.target.value)} disabled={busy} placeholder={copy.smsCode} aria-label={copy.smsCode} inputMode="numeric" autoComplete="one-time-code" className={`h-9 min-w-0 flex-1 rounded-xl border px-3 text-[13px] outline-none ${controlTheme}`} /><button type="button" disabled={authBusy || registrationCheck === 'checking' || smsCooldown > 0 || !mobile.trim() || (loginMode === 'register' && (!account.trim() || !password || !passwordConfirmation || password !== passwordConfirmation))} onClick={() => void openSliderCaptcha()} className="h-9 shrink-0 rounded-xl bg-[#10B981]/10 px-3 text-[11px] font-semibold text-[#07966F] disabled:opacity-40">{smsCooldown > 0 ? copy.resendCountdown(smsCooldown) : smsChallenge ? copy.resendCode : copy.sendCode}</button></div>}
           {auth === 'error' && <button type="button" disabled={authBusy} onClick={() => void loadAccount()}>{copy.retry}</button>}
           {error && <div role="alert" className="break-words text-[12px] leading-snug text-[#EA4335]">{error}</div>}
-          <button type="submit" disabled={authBusy || (loginMode === 'password' ? !account.trim() || !password : !mobile.trim() || !smsChallenge || !smsCode.trim() || (loginMode === 'register' && (!account.trim() || !password || !passwordConfirmation || password !== passwordConfirmation || registrationCheck !== 'ready')))} className="h-9 w-full rounded-xl bg-[#10B981] text-[13px] font-semibold text-white transition-opacity disabled:opacity-40">{authBusy ? copy.signingIn : loginMode === 'register' ? copy.register : copy.login}</button>
+          <button type="submit" disabled={authBusy || (loginMode === 'password' ? !account.trim() || !password : !mobile.trim() || !smsChallenge || !smsCode.trim() || (loginMode === 'register' && (!account.trim() || !password || !passwordConfirmation || password !== passwordConfirmation || registrationCheck !== 'ready')))} className="h-9 w-full rounded-xl bg-[#10B981] text-[13px] font-semibold text-white transition-opacity disabled:opacity-40">{authBusy ? copy.signingIn : loginMode === 'register' ? copy.register : loginMode === 'forgot' ? copy.resetPassword : copy.login}</button>
         </form>
       )}
 
@@ -670,7 +721,8 @@ export function AccountPlatformPopover({ open, client, copy, language, theme, co
       {auth === 'ready' && view === 'account' && (
         <div className="space-y-2.5">
           {error && <div role="alert" className="break-words rounded-xl bg-[#EA4335]/10 px-3 py-2 text-[12px] leading-snug text-[#EA4335]">{error}</div>}
-          <div className={`rounded-2xl border p-3 ${cardTheme}`}>
+           <div className={`rounded-2xl border p-3 ${cardTheme}`}>
+             <div className={`text-[12px] ${mutedText}`}>{copy.userCode}: <span>{me?.user_code || '—'}</span></div>
             <div className="flex items-center justify-between gap-3">
               <div className={`text-[12px] ${mutedText}`}>{copy.balance}</div>
               <button type="button" disabled={busy} onClick={openRecharge} className="flex h-7 items-center gap-1 rounded-lg bg-[#10B981]/10 px-2 text-[11px] font-semibold text-[#07966F] transition-colors hover:bg-[#10B981]/20"><Plus size={13} />{copy.recharge}</button>

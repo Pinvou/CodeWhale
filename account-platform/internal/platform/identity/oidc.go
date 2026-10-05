@@ -17,15 +17,16 @@ import (
 )
 
 type Principal struct {
-	Issuer        string
-	Subject       string
-	SessionID     string
-	Email         string
-	DisplayName   string
-	Username      string
-	PhoneNumber   string
-	PhoneVerified bool
-	RealmRoles    []string
+	Issuer          string
+	Subject         string
+	SessionID       string
+	Email           string
+	DisplayName     string
+	Username        string
+	PhoneNumber     string
+	PhoneVerified   bool
+	AuthenticatedAt time.Time
+	RealmRoles      []string
 }
 
 type VerifyFunc func(context.Context, string) (Principal, error)
@@ -74,6 +75,7 @@ func NewOIDCVerifyFunc(ctx context.Context, issuer, audience, environment, jwksU
 		}
 		var claims struct {
 			TokenType     string `json:"typ"`
+			AuthTime      int64  `json:"auth_time"`
 			SessionID     string `json:"sid"`
 			SessionState  string `json:"session_state"`
 			Email         string `json:"email"`
@@ -104,16 +106,21 @@ func NewOIDCVerifyFunc(ctx context.Context, issuer, audience, environment, jwksU
 		if displayName == "" {
 			displayName = claims.PreferredName
 		}
+		var authenticatedAt time.Time
+		if claims.AuthTime > 0 {
+			authenticatedAt = time.Unix(claims.AuthTime, 0).UTC()
+		}
 		return Principal{
-			Issuer:        issuer,
-			Subject:       token.Subject,
-			SessionID:     sessionID,
-			Email:         claims.Email,
-			DisplayName:   displayName,
-			Username:      claims.PreferredName,
-			PhoneNumber:   claims.PhoneNumber,
-			PhoneVerified: claims.PhoneVerified,
-			RealmRoles:    slices.Clone(claims.RealmAccess.Roles),
+			Issuer:          issuer,
+			Subject:         token.Subject,
+			SessionID:       sessionID,
+			Email:           claims.Email,
+			DisplayName:     displayName,
+			Username:        claims.PreferredName,
+			PhoneNumber:     claims.PhoneNumber,
+			PhoneVerified:   claims.PhoneVerified,
+			AuthenticatedAt: authenticatedAt,
+			RealmRoles:      slices.Clone(claims.RealmAccess.Roles),
 		}, nil
 	}, nil
 }

@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pinvou.example/contracts/events/account.profile.changed.v1.schema.json",
+  "title": "account.profile.changed.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["event_id", "event_type", "aggregate_id", "aggregate_version", "occurred_at", "trace_id", "payload"],
+  "properties": {
+    "event_id": { "type": "string", "format": "uuid" },
+    "event_type": { "const": "account.profile.changed.v1" },
+    "aggregate_id": { "type": "string", "format": "uuid" },
+    "aggregate_version": { "type": "integer", "minimum": 1 },
+    "occurred_at": { "type": "string", "format": "date-time" },
+    "trace_id": { "type": "string", "minLength": 1, "maxLength": 64 },
+    "payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["user_id", "field", "profile_version"],
+      "properties": {
+        "user_id": { "type": "string", "format": "uuid" },
+        "field": { "type": "string", "enum": ["USERNAME", "MOBILE"] },
+        "profile_version": { "type": "integer", "minimum": 1 }
+      }
+    }
+  }
+}

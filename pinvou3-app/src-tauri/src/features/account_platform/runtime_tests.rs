@@ -356,6 +356,7 @@ fn history_and_chat_routes_preserve_existing_management_and_reject_unknown_queri
         jwks_url: Url::parse("https://id.example.test/certs").unwrap(),
         token_url: Url::parse("https://id.example.test/token").unwrap(),
         client_id: "desktop-client".into(),
+        identity_url: None,
         account_url: Url::parse("https://account.example.test/").unwrap(),
         token_gateway_url: Url::parse("https://token.example.test/").unwrap(),
     };
@@ -721,4 +722,234 @@ async fn model_selection_and_normalized_context_mutations_are_serialized() {
     assert_eq!(setter.await.unwrap().unwrap().default_model, "allowed-wire");
     assert_eq!(mutation.await.unwrap().unwrap().status, 200);
     assert_eq!(http.calls.load(Ordering::SeqCst), 3);
+}
+
+#[tokio::test]
+async fn password_reset_requires_exact_authoritative_no_content_and_keeps_session_on_other_success()
+{
+    for status in [200, 201, 204] {
+        let http = HttpFixture::new().await;
+        let state = state();
+        let mut config = http.config();
+        config.identity_url = Some(http.base.clone());
+        save_record(&state, &config);
+        let epoch = state.session_epoch.load(Ordering::SeqCst);
+        http.enqueue(200,json!({"password_handle":"fixture-handle","password_policy_version":"v1","expires_at":"2099-01-01T00:00:00Z"}));
+        http.responses.lock().unwrap().push((
+            status,
+            if status == 204 {
+                Vec::new()
+            } else {
+                b"{}".to_vec()
+            },
+            None,
+        ));
+        let result = state
+            .reset_password_with(
+                &config,
+                mobile::PasswordReset {
+                    mobile: "13800000000".into(),
+                    challenge_id: "4c947809-a2e8-4ef4-851b-f424984d1825".into(),
+                    code: "123456".into(),
+                    password: "FixturePassword123".into(),
+                },
+            )
+            .await;
+        assert_eq!(result.is_ok(), status == 204);
+        assert_eq!(
+            state.credentials.get(REFRESH_TOKEN_KEY).unwrap().is_none(),
+            status == 204
+        );
+        assert_eq!(
+            state.session_epoch.load(Ordering::SeqCst),
+            epoch + u64::from(status == 204)
+        );
+        let requests = http.requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        let request = String::from_utf8(requests[1].clone()).unwrap();
+        assert!(!request.contains("FixturePassword123") && request.contains("fixture-handle"));
+    }
+}
+
+#[tokio::test]
+async fn delayed_password_reset_cannot_clear_a_new_identity_epoch() {
+    let http = HttpFixture::new().await;
+    let state = Arc::new(state());
+    let mut config = http.config();
+    config.identity_url = Some(http.base.clone());
+    save_record(&state, &config);
+    http.enqueue(200,json!({"password_handle":"fixture-handle","password_policy_version":"v1","expires_at":"2099-01-01T00:00:00Z"}));
+    let (release, gate) = tokio::sync::oneshot::channel();
+    http.responses
+        .lock()
+        .unwrap()
+        .push((204, Vec::new(), Some(gate)));
+    let pending = {
+        let state = state.clone();
+        tokio::spawn(async move {
+            state
+                .reset_password_with(
+                    &config,
+                    mobile::PasswordReset {
+                        mobile: "13800000000".into(),
+                        challenge_id: "4c947809-a2e8-4ef4-851b-f424984d1825".into(),
+                        code: "123456".into(),
+                        password: "FixturePassword123".into(),
+                    },
+                )
+                .await
+        })
+    };
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while http.calls.load(Ordering::SeqCst) < 2 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    // Model the already-owned new-login installation under the same credential lock;
+    // provider authentication is covered separately by the signed-token regressions.
+    {
+        let _guard = state.refresh_guard.lock().await;
+        state.session_epoch.fetch_add(1, Ordering::SeqCst);
+        state
+            .credentials
+            .set(REFRESH_TOKEN_KEY, "new-identity-owned-record")
+            .unwrap();
+    }
+    release.send(()).unwrap();
+    assert_eq!(
+        pending.await.unwrap().unwrap_err(),
+        "authentication_required: account session changed"
+    );
+    assert_eq!(
+        state.credentials.get(REFRESH_TOKEN_KEY).unwrap().as_deref(),
+        Some("new-identity-owned-record")
+    );
+}
+
+#[tokio::test]
+async fn password_reset_uncertain_reply_reuses_first_reference_without_resending_password() {
+    let http = HttpFixture::new().await;
+    let state = state();
+    let mut config = http.config();
+    config.identity_url = Some(http.base.clone());
+    save_record(&state, &config);
+    let input = || mobile::PasswordReset {
+        mobile: "13800000000".into(),
+        challenge_id: "4c947809-a2e8-4ef4-851b-f424984d1825".into(),
+        code: "123456".into(),
+        password: "FixturePassword123".into(),
+    };
+    http.enqueue(200,json!({"password_handle":"first-reference","password_policy_version":"v1","expires_at":"2099-01-01T00:00:00Z"}));
+    http.enqueue(503, json!({"code":"PROFILE_CHANGE_FAILED"}));
+    assert!(state.reset_password_with(&config, input()).await.is_err());
+    assert!(state.credentials.get(REFRESH_TOKEN_KEY).unwrap().is_some());
+    http.responses.lock().unwrap().push((204, Vec::new(), None));
+    state.reset_password_with(&config, input()).await.unwrap();
+    let requests = http.requests.lock().unwrap();
+    assert_eq!(requests.len(), 3);
+    let body = |index: usize| {
+        let bytes = &requests[index];
+        let end = bytes
+            .windows(4)
+            .position(|item| item == b"\r\n\r\n")
+            .unwrap()
+            + 4;
+        serde_json::from_slice::<Value>(&bytes[end..]).unwrap()
+    };
+    assert_eq!(body(1), body(2));
+    assert_eq!(
+        body(2).get("password_handle").and_then(Value::as_str),
+        Some("first-reference")
+    );
+    assert!(body(2).get("password").is_none());
+    assert!(state.password_reset_memory.lock().await.is_none());
+    assert!(state.credentials.get(REFRESH_TOKEN_KEY).unwrap().is_none());
+}
+
+#[tokio::test]
+async fn password_reset_different_password_or_challenge_never_reuses_an_old_reference() {
+    for changed_password in [false, true] {
+        let http = HttpFixture::new().await;
+        let state = state();
+        let mut config = http.config();
+        config.identity_url = Some(http.base.clone());
+        for round in 0..2 {
+            http.enqueue(200,json!({"password_handle":format!("reference-{round}"),"password_policy_version":"v1","expires_at":"2099-01-01T00:00:00Z"}));
+            http.enqueue(503, json!({"code":"PROFILE_CHANGE_FAILED"}));
+            let input = mobile::PasswordReset {
+                mobile: "13800000000".into(),
+                challenge_id: if round == 1 && !changed_password {
+                    "6cd9468a-c0e4-45c1-a0e3-65329d71c520"
+                } else {
+                    "4c947809-a2e8-4ef4-851b-f424984d1825"
+                }
+                .into(),
+                code: "123456".into(),
+                password: if round == 1 && changed_password {
+                    "DifferentFixturePassword"
+                } else {
+                    "FixturePassword123"
+                }
+                .into(),
+            };
+            assert!(state.reset_password_with(&config, input).await.is_err());
+        }
+        let requests = http.requests.lock().unwrap();
+        assert_eq!(requests.len(), 4);
+        assert!(String::from_utf8_lossy(&requests[1]).contains("reference-0"));
+        assert!(String::from_utf8_lossy(&requests[3]).contains("reference-1"));
+    }
+}
+
+#[tokio::test]
+async fn profile_get_completion_clears_native_session_only_after_authoritative_completed() {
+    for status in [
+        "VERIFIED",
+        "IDENTITY_UPDATED",
+        "ACCOUNT_COMMITTED",
+        "RETRY",
+        "COMPLETED",
+    ] {
+        let http = HttpFixture::new().await;
+        let state = state();
+        let config = http.config();
+        save_record(&state, &config);
+        state
+            .install_tokens(tokens(None), None, binding(&config, "isolated-subject"))
+            .await
+            .unwrap();
+        let epoch = state.session_epoch.load(Ordering::SeqCst);
+        http.enqueue(200, json!({"status":status}));
+        let result = state
+            .request_with(
+                &config,
+                ApiRequest {
+                    area: "account".into(),
+                    method: "GET".into(),
+                    resource:
+                        "/v1/me/./profile-change-requests/4c947809-a2e8-4ef4-851b-f424984d1825"
+                            .into(),
+                    body: None,
+                    idempotency_key: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            result.body.get("status").and_then(Value::as_str),
+            Some(status)
+        );
+        assert_eq!(state.session.lock().await.is_none(), status == "COMPLETED");
+        assert_eq!(
+            state.credentials.get(REFRESH_TOKEN_KEY).unwrap().is_none(),
+            status == "COMPLETED"
+        );
+        assert_eq!(
+            state.session_epoch.load(Ordering::SeqCst),
+            epoch + u64::from(status == "COMPLETED")
+        );
+        assert_eq!(http.calls.load(Ordering::SeqCst), 1);
+    }
 }

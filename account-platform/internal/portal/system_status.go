@@ -65,14 +65,14 @@ func (s *Service) adminSystemStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	authorizationContext, cancelAuthorization := context.WithTimeout(r.Context(), 5*time.Second)
-	authorized, available := s.hasPlatformAdminRole(authorizationContext, session.AccessToken)
+	authorized, available := s.hasSystemStatusPermission(authorizationContext, session.AccessToken)
 	cancelAuthorization()
 	if !available {
 		api.WriteError(w, http.StatusServiceUnavailable, "ADMIN_AUTH_UNAVAILABLE", "administrator authorization could not be verified", httpserver.RequestID(r.Context()))
 		return
 	}
 	if !authorized {
-		api.WriteError(w, http.StatusForbidden, "ADMIN_REQUIRED", "platform administrator access is required", httpserver.RequestID(r.Context()))
+		api.WriteError(w, http.StatusForbidden, "PERMISSION_DENIED", "platform system status permission is required", httpserver.RequestID(r.Context()))
 		return
 	}
 	statusContext, cancelStatus := context.WithTimeout(r.Context(), 8*time.Second)
@@ -82,7 +82,7 @@ func (s *Service) adminSystemStatus(w http.ResponseWriter, r *http.Request) {
 	api.WriteJSON(w, http.StatusOK, result)
 }
 
-func (s *Service) hasPlatformAdminRole(ctx context.Context, accessToken string) (bool, bool) {
+func (s *Service) hasSystemStatusPermission(ctx context.Context, accessToken string) (bool, bool) {
 	targets := []*url.URL{s.config.AccountURL, s.config.BillingURL, s.config.TokenGatewayURL}
 	type result struct{ status int }
 	results := make(chan result, len(targets))

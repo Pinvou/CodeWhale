@@ -344,7 +344,7 @@ func TestPostgresPendingRefundProtectsOriginalLot(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if _, err := p.repository.ApproveAdjustment(ctx, adjustment.ID, uuid.New(), "independent review"); err != nil {
+				if _, err := p.repository.ExecuteApprovedAdjustment(ctx, adjustment.ID, uuid.New(), "approved-original-lot", uuid.New(), "independent review", adjustment.Version); err != nil {
 					t.Fatal(err)
 				}
 			}

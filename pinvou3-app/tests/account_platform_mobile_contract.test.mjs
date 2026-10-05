@@ -6,27 +6,29 @@ import { safePNGImage } from '../src/features/account-platform/bff-client.js';
 const id = '00000000-0000-4000-8000-000000000001';
 const png = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg==';
 const expiry = '2099-01-01T00:00:00Z';
+const reference = { password_handle:'fixture-handle', password_policy_version:'v1', expires_at:expiry };
+const recovery = { registration_operation_id:id, registration_query_token_expires_at:expiry, recovery_persisted:true };
 const challenge = { captcha_id: id, background_image: png, piece_image: png, width: 280, height: 120, piece_width: 44, piece_height: 44, piece_y: 30, expires_at: expiry };
 
 test('mobile transport preserves the finite contract and omits unknown response fields', async () => {
   const calls = [];
   const client = new AccountPlatformDesktopClient({
     createSliderCaptcha: async input => { calls.push(input); return { ...challenge, unexpected: 'discard-me' }; },
-    precheckMobileRegistration: async input => { calls.push(input); return { username: 'PublicUser', available: true, token: 'discard-me' }; },
-    sendSms: async input => { calls.push(input); return { challenge_id: id, expires_at: expiry, retry_after_seconds: 60 }; },
-    registerMobile: async input => { calls.push(input); return { user_id: id, username: 'PublicUser', status: 'PROVISIONING', password_preserved: false, unexpected: 'discard-me' }; },
+    precheckMobileRegistration: async input => { calls.push(input); return { username: 'PublicUser', available: true, ...reference, token: 'discard-me' }; },
+    sendSms: async input => { calls.push(input); return { challenge_id: id, expires_at: expiry, retry_after_seconds: 60, ...recovery }; },
+    registerMobile: async input => { calls.push(input); return { registration_operation_id:id, user_id: id, username: 'PublicUser', status: 'PROVISIONING', password_preserved: false, unexpected: 'discard-me' }; },
     loginSms: async input => { calls.push(input); return { enabled: true, configured: true, authenticated: true, errorCode: null }; },
   });
   assert.deepEqual(await client.createSliderCaptcha('13800000000', 'REGISTER'), challenge);
-  assert.deepEqual(await client.precheckMobileRegistration('PublicUser', '13800000000', 'PublicPassword123'), { username: 'PublicUser', available: true });
-  assert.deepEqual(await client.sendSms('PublicUser', '13800000000', 'PublicPassword123', 'REGISTER', id, 20), { challenge_id: id, expires_at: expiry, retry_after_seconds: 60 });
-  assert.deepEqual(await client.registerMobile('PublicUser', '13800000000', id, '123456', 'PublicPassword123'), { user_id: id, username: 'PublicUser', status: 'PROVISIONING', password_preserved: false });
+  assert.deepEqual(await client.precheckMobileRegistration('PublicUser', '13800000000', 'PublicPassword123'), { username: 'PublicUser', available: true, ...reference });
+  assert.deepEqual(await client.sendSms('PublicUser', '13800000000', reference, 'REGISTER', id, 20), { challenge_id: id, expires_at: expiry, retry_after_seconds: 60, ...recovery });
+  assert.deepEqual(await client.registerMobile('PublicUser', '13800000000', id, '123456', reference, recovery), { registration_operation_id:id, user_id: id, username: 'PublicUser', status: 'PROVISIONING', password_preserved: false });
   assert.equal((await client.loginSms('13800000000', id, '123456')).authenticated, true);
   assert.deepEqual(calls, [
     { mobile: '13800000000', purpose: 'REGISTER' },
     { username: 'PublicUser', mobile: '13800000000', password: 'PublicPassword123' },
-    { username: 'PublicUser', mobile: '13800000000', password: 'PublicPassword123', purpose: 'REGISTER', captcha_id: id, captcha_offset: 20 },
-    { username: 'PublicUser', mobile: '13800000000', challenge_id: id, code: '123456', password: 'PublicPassword123' },
+    { username: 'PublicUser', mobile: '13800000000', password_handle:reference.password_handle,password_policy_version:reference.password_policy_version, purpose: 'REGISTER', captcha_id: id, captcha_offset: 20 },
+    { username: 'PublicUser', mobile: '13800000000', challenge_id: id, code: '123456',password_handle:reference.password_handle,password_policy_version:reference.password_policy_version,registration_operation_id:id },
     { mobile: '13800000000', challenge_id: id, code: '123456' },
   ]);
 });
@@ -83,13 +85,30 @@ test('new personal read routes preserve decimal-string facts without introducing
 });
 
 test('registration requires an explicit preserved-password fact and omits unknown fields', async () => {
-  const dto = { user_id: id, username: 'PublicUser', status: 'PROVISIONING' };
+  const dto = { registration_operation_id:id, user_id: id, username: 'PublicUser', status: 'PROVISIONING' };
   for (const password_preserved of [undefined, null, 'true', 'false', 0, 1, {}, []]) {
     const client = new AccountPlatformDesktopClient({ registerMobile: async () => ({ ...dto, password_preserved }) });
-    await assert.rejects(client.registerMobile('PublicUser', '13800000000', id, '123456', 'PublicPassword123'), { code: 'account_platform_request_failed' });
+    await assert.rejects(client.registerMobile('PublicUser', '13800000000', id, '123456', reference, recovery), { code: 'account_platform_request_failed' });
   }
   for (const password_preserved of [false, true]) {
     const client = new AccountPlatformDesktopClient({ registerMobile: async () => ({ ...dto, password_preserved, unexpected: 'discard-me' }) });
-    assert.deepEqual(await client.registerMobile('PublicUser', '13800000000', id, '123456', 'PublicPassword123'), { ...dto, password_preserved });
+    assert.deepEqual(await client.registerMobile('PublicUser', '13800000000', id, '123456', reference, recovery), { ...dto, password_preserved });
   }
+});
+
+test('registration progress rejects unknown states, wrong operations and every nonboolean preservation fact', async () => {
+  const dto = { registration_operation_id:id, status:'IDENTITY_CREATING', password_preserved:true };
+  for (const bad of [{ status:'PREPARED' },{ registration_operation_id:'nil' },{ password_preserved:undefined },{ password_preserved:'true' },{ next_retry_at:'bad' }]) {
+    const client = new AccountPlatformDesktopClient({ registrationStatus:async () => ({ ...dto,...bad }) });
+    await assert.rejects(client.registrationStatus(),{ code:'account_platform_request_failed' });
+  }
+  const client = new AccountPlatformDesktopClient({ registrationStatus:async () => ({ ...dto,token:'discard' }) });
+  assert.deepEqual(await client.registrationStatus(),dto);
+});
+test('query credentials never cross the native reply even when only process recovery is available', async () => {
+  const dto = { challenge_id:id,expires_at:expiry,retry_after_seconds:60,...recovery,recovery_persisted:false };
+  let client = new AccountPlatformDesktopClient({ sendSms:async () => dto });
+  assert.equal((await client.sendSms('PublicUser','13800000000',reference,'REGISTER',id,20)).recovery_persisted,false);
+  client = new AccountPlatformDesktopClient({ sendSms:async () => ({ ...dto,registration_query_token:'untrusted-proof' }) });
+  await assert.rejects(client.sendSms('PublicUser','13800000000',reference,'REGISTER',id,20),{ code:'account_platform_request_failed' });
 });

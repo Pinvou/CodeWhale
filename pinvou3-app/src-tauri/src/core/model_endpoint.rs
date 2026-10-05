@@ -1279,23 +1279,62 @@ pub(crate) mod models_mock {
             // requests and the finalize wiring tests also go through the kind
             // probe (7 parallel candidates), so leave headroom; this also
             // bounds thread leaks.
-            for stream in listener.incoming().take(32) {
+            'connections: for stream in listener.incoming().take(32) {
                 let Ok(mut stream) = stream else { continue };
+                // This controlled HTTP fixture must consume the complete request before
+                // closing its response socket: an unread POST body can cause a reset.
+                // Bounds apply only to synthetic test requests, not production policy.
+                let timeout = Some(std::time::Duration::from_secs(5));
+                stream.set_read_timeout(timeout).expect("mock read timeout");
+                stream
+                    .set_write_timeout(timeout)
+                    .expect("mock write timeout");
                 let mut buf = Vec::new();
                 let mut chunk = [0u8; 1024];
-                loop {
+                let header_end = loop {
                     let Ok(n) = std::io::Read::read(&mut stream, &mut chunk) else {
-                        break;
+                        continue 'connections;
                     };
                     if n == 0 {
-                        break;
+                        continue 'connections;
                     }
                     buf.extend_from_slice(&chunk[..n]);
-                    if buf.windows(4).any(|window| window == b"\r\n\r\n") {
-                        break;
+                    if buf.len() > 64 * 1024 {
+                        continue 'connections;
+                    }
+                    if let Some(index) = buf.windows(4).position(|window| window == b"\r\n\r\n") {
+                        break index + 4;
+                    }
+                };
+                let request = String::from_utf8_lossy(&buf[..header_end]).into_owned();
+                let mut content_length = None;
+                for line in request.lines().skip(1) {
+                    let Some((name, value)) = line.split_once(':') else {
+                        continue;
+                    };
+                    if name.eq_ignore_ascii_case("transfer-encoding") {
+                        continue 'connections;
+                    }
+                    if name.eq_ignore_ascii_case("content-length") {
+                        let Ok(length) = value.trim().parse::<usize>() else {
+                            continue 'connections;
+                        };
+                        if content_length.replace(length).is_some() || length > 2 * 1024 * 1024 {
+                            continue 'connections;
+                        }
                     }
                 }
-                let request = String::from_utf8_lossy(&buf);
+                let expected_length = header_end + content_length.unwrap_or(0);
+                while buf.len() < expected_length {
+                    let remaining = (expected_length - buf.len()).min(chunk.len());
+                    let Ok(n) = std::io::Read::read(&mut stream, &mut chunk[..remaining]) else {
+                        continue 'connections;
+                    };
+                    if n == 0 {
+                        continue 'connections;
+                    }
+                    buf.extend_from_slice(&chunk[..n]);
+                }
                 let path = request
                     .split_whitespace()
                     .nth(1)
@@ -2584,7 +2623,11 @@ mod tests {
     /// response.
     #[tokio::test]
     async fn post_anthropic_messages_surfaces_stop_reason() {
-        let client = reqwest::Client::new();
+        // Synthetic loopback requests must not inherit the user's system proxy.
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("controlled loopback client");
         // 多 text 块拼接 + stop_reason == "max_tokens"（截断）。
         let truncated = models_mock::spawn(&[(
             "/v1/messages",
@@ -2603,6 +2646,7 @@ mod tests {
         )
         .await
         .expect("mock messages response should parse");
+        assert_eq!(truncated.hits_for("/v1/messages"), 1);
         assert_eq!(completion.text, "{\"a\":1}");
         assert_eq!(
             completion.stop_reason.as_deref(),
@@ -2628,6 +2672,7 @@ mod tests {
         )
         .await
         .expect("mock messages response should parse");
+        assert_eq!(complete.hits_for("/v1/messages"), 1);
         assert_eq!(completion.text, "done");
         assert_eq!(completion.stop_reason.as_deref(), Some("end_turn"));
 
@@ -2649,6 +2694,7 @@ mod tests {
         )
         .await
         .expect("a response without stop_reason must still parse");
+        assert_eq!(missing.hits_for("/v1/messages"), 1);
         assert_eq!(completion.text, "legacy");
         assert!(
             completion.stop_reason.is_none(),
@@ -2784,7 +2830,11 @@ mod tests {
             let _ = stream.write_all(resp.as_bytes()).await;
             let _ = stream.shutdown().await;
         });
-        let client = reqwest::Client::new();
+        // Synthetic loopback requests must not inherit the user's system proxy.
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("controlled loopback client");
         let resp = client
             .post(format!("http://{addr}/chat/completions"))
             .json(&serde_json::json!({"model": "k3"}))
@@ -2825,7 +2875,11 @@ mod tests {
             let _ = stream.write_all(resp.as_bytes()).await;
             let _ = stream.shutdown().await;
         });
-        let client = reqwest::Client::new();
+        // Synthetic loopback requests must not inherit the user's system proxy.
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("controlled loopback client");
         let resp = client
             .post(format!("http://{addr}/chat/completions"))
             .json(&serde_json::json!({"model": "k3"}))
@@ -2855,7 +2909,11 @@ mod tests {
             let _ = stream.write_all(resp.as_bytes()).await;
             let _ = stream.shutdown().await;
         });
-        let client = reqwest::Client::new();
+        // Synthetic loopback requests must not inherit the user's system proxy.
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("controlled loopback client");
         let resp = client
             .post(format!("http://{addr}/chat/completions"))
             .json(&serde_json::json!({"model": "k3"}))
@@ -2894,7 +2952,11 @@ mod tests {
             let _ = stream.write_all(resp.as_bytes()).await;
             let _ = stream.shutdown().await;
         });
-        let client = reqwest::Client::new();
+        // Synthetic loopback requests must not inherit the user's system proxy.
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("controlled loopback client");
         let resp = client
             .post(format!("http://{addr}/chat/completions"))
             .json(&serde_json::json!({"model": "k3"}))
@@ -2962,7 +3024,11 @@ mod tests {
             }
             client_went_away
         });
-        let client = reqwest::Client::new();
+        // Synthetic loopback requests must not inherit the user's system proxy.
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("controlled loopback client");
         let resp = client
             .post(format!("http://{addr}/chat/completions"))
             .json(&serde_json::json!({"model": "k3"}))
@@ -3020,7 +3086,11 @@ mod tests {
                 }
             }
         });
-        let client = reqwest::Client::new();
+        // Synthetic loopback requests must not inherit the user's system proxy.
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("controlled loopback client");
         let resp = client
             .post(format!("http://{addr}/chat/completions"))
             .json(&serde_json::json!({"model": "k3"}))

@@ -371,6 +371,10 @@ components:
           enum: [CNY_1, CNY_10, CNY_100, CNY_200, PLAN_TRIAL, PLAN_STANDARD, PLAN_ADVANCED, PLAN_FLAGSHIP]
         channel:
           $ref: "#/components/schemas/PaymentChannel"
+        commerce_customer_status:
+          type: string
+          enum: [NOT_CONFIGURED, PENDING, IN_PROGRESS, READY, RETRY, REPAIR_REQUIRED, DETACHED]
+          description: Trusted Account Mapping projection; only enforced when the selected Payment Provider declares commerce_customer_required.
     RechargeOrder:
       type: object
       additionalProperties: false
@@ -495,10 +499,26 @@ components:
       additionalProperties: false
       required:
         - available_microcredits
+        - base_available_microcredits
+        - bonus_available_microcredits
+        - reserved_microcredits
+        - used_microcredits
         - active_package_count
         - next_expiry_microcredits
       properties:
         available_microcredits:
+          type: string
+          pattern: ^(0|[1-9][0-9]*)$
+        base_available_microcredits:
+          type: string
+          pattern: ^(0|[1-9][0-9]*)$
+        bonus_available_microcredits:
+          type: string
+          pattern: ^(0|[1-9][0-9]*)$
+        reserved_microcredits:
+          type: string
+          pattern: ^(0|[1-9][0-9]*)$
+        used_microcredits:
           type: string
           pattern: ^(0|[1-9][0-9]*)$
         active_package_count:
@@ -513,76 +533,50 @@ components:
     EntitlementPackage:
       type: object
       additionalProperties: false
-      required:
-        - package_id
-        - pinvou_order_id
-        - mall_order_id
-        - plan_id
-        - plan_name
-        - sku_code
-        - amount_fen
-        - points_total_microcredits
-        - points_reserved_microcredits
-        - points_used_microcredits
-        - points_remaining_microcredits
-        - credited_at
-        - valid_from
-        - valid_until
-        - status
+      required: [package_id, mall_order_id, source_type, source_reference, plan_id, plan_name, sku_code, amount_fen, points_total_microcredits, points_reserved_microcredits, points_used_microcredits, points_remaining_microcredits, points_expired_microcredits, points_revoked_microcredits, credited_at, valid_from, valid_until, status, components]
       properties:
-        package_id:
-          type: string
-          format: uuid
-        user_id:
-          type: string
-          format: uuid
-        wallet_id:
-          type: string
-          format: uuid
-        pinvou_order_id:
-          type: string
-          format: uuid
-        mall_order_id:
-          type: string
-        plan_id:
-          type: string
-        plan_name:
-          type: string
-        sku_code:
-          type: string
-        amount_fen:
-          type: string
-          pattern: ^(0|[1-9][0-9]*)$
-        points_total_microcredits:
-          type: string
-          pattern: ^(0|[1-9][0-9]*)$
-        points_reserved_microcredits:
-          type: string
-          pattern: ^(0|[1-9][0-9]*)$
-        points_used_microcredits:
-          type: string
-          pattern: ^(0|[1-9][0-9]*)$
-        points_remaining_microcredits:
-          type: string
-          pattern: ^(0|[1-9][0-9]*)$
-        credited_at:
-          type: string
-          format: date-time
-        valid_from:
-          type: string
-          format: date-time
-        valid_until:
-          type: string
-          format: date-time
-        status:
-          type: string
-          enum:
-            - ACTIVE
-            - CONSUMED
-            - EXPIRED
-            - CREDIT_FAILED
-            - REPAIRED
-            - FROZEN
+        package_id: { type: string, format: uuid }
+        user_id: { type: string, format: uuid }
+        wallet_id: { type: string, format: uuid }
+        pinvou_order_id: { type: string, format: uuid }
+        mall_order_id: { type: string }
+        source_type: { type: string, enum: [PAYMENT, MANUAL_ADJUSTMENT, SYSTEM] }
+        source_reference: { type: string, minLength: 1 }
+        plan_id: { type: string }
+        plan_name: { type: string }
+        sku_code: { type: string }
+        amount_fen: { type: string, pattern: '^(0|[1-9][0-9]*)$' }
+        points_total_microcredits: { type: string, pattern: '^(0|[1-9][0-9]*)$' }
+        points_reserved_microcredits: { type: string, pattern: '^(0|[1-9][0-9]*)$' }
+        points_used_microcredits: { type: string, pattern: '^(0|[1-9][0-9]*)$' }
+        points_remaining_microcredits: { type: string, pattern: '^(0|[1-9][0-9]*)$' }
+        points_expired_microcredits: { type: string, pattern: '^(0|[1-9][0-9]*)$' }
+        points_revoked_microcredits: { type: string, pattern: '^(0|[1-9][0-9]*)$' }
+        credited_at: { type: string, format: date-time }
+        valid_from: { type: string, format: date-time }
+        valid_until: { type: [string, 'null'], format: date-time }
+        status: { type: string, enum: [ACTIVE, CONSUMED, EXPIRED, CREDIT_FAILED, REPAIRED, FROZEN] }
+        components:
+          type: array
+          items: { $ref: "#/components/schemas/EntitlementComponent" }
+    EntitlementComponent:
+      type: object
+      additionalProperties: false
+      required: [component_id, component_type, original_microcredits, available_microcredits, reserved_microcredits, used_microcredits, active_grant_microcredits, suspended_grant_microcredits, expired_microcredits, revoked_microcredits, credited_at, expires_at, status]
+      properties:
+        component_id: { type: string, format: uuid }
+        component_type: { type: string, enum: [BASE, BONUS] }
+        original_microcredits: { type: string, pattern: '^[1-9][0-9]*$' }
+        available_microcredits: { type: string, pattern: '^(0|[1-9][0-9]*)$' }
+        reserved_microcredits: { type: string, pattern: '^(0|[1-9][0-9]*)$' }
+        used_microcredits: { type: string, pattern: '^(0|[1-9][0-9]*)$' }
+        active_grant_microcredits: { type: string, pattern: '^(0|[1-9][0-9]*)$' }
+        suspended_grant_microcredits: { type: string, pattern: '^(0|[1-9][0-9]*)$' }
+        expired_microcredits: { type: string, pattern: '^(0|[1-9][0-9]*)$' }
+        revoked_microcredits: { type: string, pattern: '^(0|[1-9][0-9]*)$' }
+        credited_at: { type: string, format: date-time }
+        expires_at: { type: [string, 'null'], format: date-time }
+        status: { type: string, enum: [ACTIVE, CONSUMED, EXPIRED, REVOKED, FROZEN] }
     WalletBalance:
       type: object
       additionalProperties: false

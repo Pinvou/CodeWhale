@@ -52,13 +52,44 @@ test('Helm values schema rejects unsafe production-new overrides', async () => {
   assert.equal(validate({ ...values, newApi: { ...values.newApi, tls: { ...values.newApi.tls, caSecretName: '' } } }), false);
   assert.equal(validate({ ...values, newApi: { ...values.newApi, tls: { ...values.newApi.tls, insecureSkipVerify: true } } }), false);
   assert.equal(validate({ ...values, keycloak: { hostname: values.keycloak.hostname } }), false);
+  assert.equal(validate({ ...values, replicas: { ...values.replicas, identityService: 2 } }), false,
+    'process-local password references require a single Identity replica');
+});
+
+test('Helm SMS configuration preserves managed HTTP and applies TLS to generated delivery', async () => {
+  const schema = JSON.parse(await readFile(path.join(chart, 'values.schema.json'), 'utf8'));
+  const values = YAML.parse(await readFile(path.join(chart, 'values.yaml'), 'utf8'));
+  const ajv = new Ajv({ allErrors: true, strict: true });
+  addFormats(ajv);
+  const validate = ajv.compile(schema);
+  const mobile = {
+    ...values.mobileAuth, enabled: true,
+    smsEndpoint: 'https://sms.example.com',
+    keycloakAdminApiUrl: 'https://identity.example.com',
+    keycloakProvisionerTokenUrl: 'https://identity.example.com/realms/pinvou/protocol/openid-connect/token',
+  };
+  const configured = {
+    ...values, global: { ...values.global, environment: 'staging' },
+    oidc: { ...values.oidc, issuer: 'https://identity.example.com/realms/pinvou',
+      jwksUrl: 'https://identity.example.com/realms/pinvou/protocol/openid-connect/certs',
+      tokenUrl: 'https://identity.example.com/realms/pinvou/protocol/openid-connect/token' },
+    images: { ...values.images, keycloak: { ...values.images.keycloak, repository: 'pinvou/keycloak-spi' } },
+    external: { ...values.external, smsProviderCidrs: ['192.0.2.0/24'] },
+  };
+  for (const smsProvider of ['http', 'http-generated']) {
+    const candidate = { ...configured, mobileAuth: { ...mobile, smsProvider, aliyunRegisterTemplate: '', aliyunLoginTemplate: '' } };
+    assert.equal(validate(candidate), true, JSON.stringify(validate.errors));
+    assert.equal(validate({ ...candidate, mobileAuth: { ...candidate.mobileAuth, smsEndpoint: 'http://sms.example.com' } }), false,
+      `${smsProvider} must require HTTPS outside development and test`);
+    assert.equal(validate({ ...candidate, mobileAuth: { ...candidate.mobileAuth, smsEndpoint: '' } }), false);
+  }
 });
 
 test('Helm chart includes required workloads, migration hooks, and deny-by-default policy', async () => {
   const templateDirectory = path.join(chart, 'templates');
   const files = await readdir(templateDirectory);
   const combined = (await Promise.all(files.map(name => readFile(path.join(templateDirectory, name), 'utf8')))).join('\n');
-  for (const component of ['account-service', 'billing-service', 'token-gateway', 'token-portal', 'new-api', 'keycloak', 'redis', 'nats']) {
+  for (const component of ['account-service', 'identity-service', 'billing-service', 'token-gateway', 'token-portal', 'new-api', 'keycloak', 'redis', 'nats']) {
     assert.match(combined, new RegExp(component));
   }
   assert.match(combined, /pre-install,pre-upgrade/);
@@ -75,11 +106,12 @@ test('Helm chart includes required workloads, migration hooks, and deny-by-defau
   assert.doesNotMatch(combined, /kind:\s*Secret/);
 });
 
-test('Helm exposes only Keycloak authentication paths and keeps administration tunneled', async () => {
+test('Helm exposes only public authentication paths and keeps Keycloak administration tunneled', async () => {
   const ingress = await readFile(path.join(chart, 'templates/ingress.yaml'), 'utf8');
   const keycloakRule = ingress.slice(ingress.indexOf('- host: {{ .Values.ingress.keycloakHost'));
   assert.match(ingress, /^\s*- path: \/realms\s*$/m);
   assert.match(ingress, /^\s*- path: \/resources\s*$/m);
   assert.doesNotMatch(keycloakRule, /path:\s*\/(?=\s*[,}\n])/);
   assert.doesNotMatch(keycloakRule, /\/admin/);
+  assert.match(ingress, /path: \/v1\/registration\/password-prechecks/);
 });

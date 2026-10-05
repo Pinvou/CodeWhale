@@ -132,17 +132,20 @@ services:
       SMS_PROVIDER: ${SMS_PROVIDER:-http}
       SMS_HTTP_ENDPOINT: ${SMS_HTTP_ENDPOINT:-}
       SMS_HTTP_SERVICE_TOKEN: ${SMS_HTTP_SERVICE_TOKEN:-}
+      IDENTITY_HTTP_URL: http://identity-service:8080
+      SMS_VERIFICATION_HMAC_KEY_BASE64: ${SMS_VERIFICATION_HMAC_KEY_BASE64:-}
+      SMS_HTTP_BEARER_TOKEN: ${SMS_HTTP_BEARER_TOKEN:-}
+      REGISTRATION_QUERY_HMAC_KEY_BASE64: ${REGISTRATION_QUERY_HMAC_KEY_BASE64:-}
+      WALLET_PROVISIONING_POLICY_VERSION: ${WALLET_PROVISIONING_POLICY_VERSION:-wallet-provisioning-v1}
+      WALLET_PROVISIONING_SLA_MINUTES: ${WALLET_PROVISIONING_SLA_MINUTES:-15}
+      COMMERCE_PROVIDER_ID: ${COMMERCE_PROVIDER_ID:-h3c_mall}
+      COMMERCE_ADAPTER_VERSION: ${COMMERCE_ADAPTER_VERSION:-h3c-mall-v1}
       ALIYUN_SMS_ACCESS_KEY_ID: ${ALIYUN_SMS_ACCESS_KEY_ID:-}
       ALIYUN_SMS_ACCESS_KEY_SECRET: ${ALIYUN_SMS_ACCESS_KEY_SECRET:-}
       ALIYUN_SMS_SIGN_NAME: ${ALIYUN_SMS_SIGN_NAME:-}
       ALIYUN_SMS_REGISTER_TEMPLATE: ${ALIYUN_SMS_REGISTER_TEMPLATE:-}
       ALIYUN_SMS_LOGIN_TEMPLATE: ${ALIYUN_SMS_LOGIN_TEMPLATE:-}
       ALIYUN_SMS_ENDPOINT: ${ALIYUN_SMS_ENDPOINT:-https://dypnsapi.aliyuncs.com}
-      KEYCLOAK_ADMIN_API_URL: http://keycloak:8080
-      KEYCLOAK_PROVISIONER_TOKEN_URL: http://keycloak:8080/realms/pinvou/protocol/openid-connect/token
-      KEYCLOAK_REALM: pinvou
-      KEYCLOAK_PROVISIONER_CLIENT_ID: ${KEYCLOAK_PROVISIONER_CLIENT_ID:-pinvou-account-provisioner}
-      KEYCLOAK_PROVISIONER_CLIENT_SECRET: ${KEYCLOAK_PROVISIONER_CLIENT_SECRET:-}
       H3C_MALL_BASE_URL: ${H3C_MALL_BASE_URL:-}
       H3C_MALL_APP_KEY: ${H3C_MALL_APP_KEY:-}
       H3C_MALL_APP_SECRET: ${H3C_MALL_APP_SECRET:-}
@@ -153,8 +156,36 @@ services:
         condition: service_completed_successfully
       nats:
         condition: service_healthy
+      identity-service:
+        condition: service_started
     ports:
       - "127.0.0.1:18101:8080"
+    networks:
+      - backend
+      - frontend
+
+  identity-service:
+    <<: *service-defaults
+    build:
+      <<: *service-build
+      args:
+        SERVICE: identity-service
+    environment:
+      APP_ENV: development
+      PORT: 8080
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?set INTERNAL_SERVICE_TOKEN}
+      MOBILE_AUTH_ENABLED: ${MOBILE_AUTH_ENABLED:-false}
+      IDENTITY_PASSWORD_HMAC_KEY_BASE64: ${IDENTITY_PASSWORD_HMAC_KEY_BASE64:-}
+      KEYCLOAK_ADMIN_API_URL: http://keycloak:8080
+      KEYCLOAK_PROVISIONER_TOKEN_URL: http://keycloak:8080/realms/pinvou/protocol/openid-connect/token
+      KEYCLOAK_REALM: pinvou
+      KEYCLOAK_PROVISIONER_CLIENT_ID: ${KEYCLOAK_PROVISIONER_CLIENT_ID:-pinvou-account-provisioner}
+      KEYCLOAK_PROVISIONER_CLIENT_SECRET: ${KEYCLOAK_PROVISIONER_CLIENT_SECRET:-}
+    depends_on:
+      keycloak:
+        condition: service_started
+    ports:
+      - "127.0.0.1:18107:8080"
     networks:
       - backend
       - frontend
@@ -169,6 +200,7 @@ services:
       APP_ENV: development
       PORT: 8080
       DATABASE_URL: postgresql://billing_service:${BILLING_DB_PASSWORD}@postgres:5432/account_platform_billing?sslmode=disable
+      ACCOUNT_HTTP_URL: http://account-service:8080
       OIDC_ISSUER: http://127.0.0.1:18080/realms/pinvou
       OIDC_JWKS_URL: http://keycloak:8080/realms/pinvou/protocol/openid-connect/certs
       OIDC_AUDIENCE: pinvou-desktop-dev
@@ -301,6 +333,7 @@ services:
       PORTAL_OIDC_CLIENT_ID: pinvou-desktop-dev
       PORTAL_OIDC_ISSUER: http://127.0.0.1:18080/realms/pinvou
       PORTAL_OIDC_JWKS_URL: http://keycloak:8080/realms/pinvou/protocol/openid-connect/certs
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?set INTERNAL_SERVICE_TOKEN}
       ACCOUNT_HTTP_URL: http://account-service:8080
       BILLING_HTTP_URL: http://billing-service:8080
       TOKEN_GATEWAY_HTTP_URL: http://token-gateway:8080

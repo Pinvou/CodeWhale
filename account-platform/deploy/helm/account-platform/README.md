@@ -1,6 +1,6 @@
 # Account Platform Helm Chart
 
-This chart deploys Account Service, Billing Service, Token Gateway, Token Portal,
+This chart deploys Account Service, Identity Adapter, Billing Service, Token Gateway, Token Portal,
 Keycloak, Redis, and NATS. PostgreSQL and payment/model providers stay external so
 their backup, certificate, and merchant controls remain environment-owned.
 
@@ -10,8 +10,20 @@ database URLs (`account-service-database-url`, `billing-service-database-url`,
 token, payment adapter URL/HMAC keys, the environment-specific external
 secret-provider material, `token-default-provider-api-key`, and the New API
 reconciliation credentials (`token-reconciliation-newapi-admin-token` and
-`token-reconciliation-newapi-admin-user-id`). Never place those values in a
+`token-reconciliation-newapi-admin-user-id`). Mobile registration additionally
+requires `registration-query-hmac-key-base64`, isolated from the Identity password
+and SMS verification HMAC keys, and `identity-password-hmac-key-base64` for the
+Identity workload. Identity password references are process-local, so the schema
+requires exactly one `replicas.identityService`; a restart invalidates pending
+references. Unknown remote creation must still recover by its exact marker rather
+than treating reference expiry as proof that no identity exists. Never place those values in a
 values file.
+
+Portal also reads the existing internal service token, solely to authenticate its
+server-derived client source to Account. Account ignores an unproved source
+header and uses the peer address. The proof is never returned to the browser or
+forwarded to Billing, Token Gateway, or arbitrary upstreams. Device identifiers
+are rate-limit correlation fields and do not replace user/mobile authorization.
 
 New API's private entry point is HTTPS on port 8443. Build the project-owned
 `newapi-tls` image using the existing Dockerfile with `SERVICE=newapi-tls` and
@@ -51,6 +63,11 @@ payment adapter can reach it. The handler accepts POST and verifies the channel
 header, HMAC, timestamp window, merchant/order facts, and notification idempotency.
 Wallet, hold, pricing, reconciliation, and admin routes have no ingress path.
 
+The Identity ingress on `ingress.identityHost` exposes only the exact
+`/v1/registration/password-prechecks` path. Include this host in the configured
+TLS certificate. Its internal identity creation, profile, password reset and
+administration paths are never exposed by ingress.
+
 ```sh
 helm lint deploy/helm/account-platform \
   -f deploy/helm/account-platform/values-production-new.yaml
@@ -80,11 +97,17 @@ JSON requests. Configure `mobileAuth.smsEndpoint`, the Keycloak administrator
 and token URLs, `sms-http-service-token` and
 `keycloak-provisioner-client-secret` in the referenced runtime Secret. The
 optional Aliyun adapter uses its three Secret keys and reviewed template names.
+`aliyun` and `aliyun-managed` both select vendor-managed verification. Explicit
+`http-generated` uses the send-only endpoint with `sms-http-bearer-token` and a
+separate `sms-verification-hmac-key-base64` Secret; it does not reuse the managed
+HTTP service Token or require Aliyun templates. Existing `http` configurations
+retain their send/verify semantics.
 Outside development/test these credential-bearing endpoints require HTTPS and
 `external.smsProviderCidrs`; only Account receives the added port-443 egress.
 
-Commerce is optional. Community registration and wallet activation require no
-enterprise service or commerce job. Selecting `billing.paymentProvider=h3c_mall`
+Commerce is optional. Community registration and wallet activation do not wait
+for an enterprise service; unconfigured Mapping jobs stay pending without an
+active worker. Selecting `billing.paymentProvider=h3c_mall`
 requires `commerce.enabled`, a reviewed HTTPS `commerce.baseUrl`, its runtime
 Secret credentials and `external.commerceProviderCidrs`. Only Account and Billing
 receive those additional port-443 destinations. Tentative PLAN prices remain
@@ -93,6 +116,11 @@ disabled outside the development simulator unless explicitly approved through
 certificate or production-price acceptance. The four original LEGACY organization
 offers remain available through the development simulator only; personal sales
 of retired LEGACY offers are not reopened.
+
+`account.commerceProviderId` and `account.commerceAdapterVersion` freeze the
+provider identity of each Mapping and job; the existing `commerce.baseUrl` remains
+the single adapter URL configuration. Wallet jobs snapshot
+`account.walletProvisioningPolicyVersion` and `account.walletProvisioningSlaMinutes`.
 
 If a remote registration creation was accepted but its response or local
 completion failed, retry the same username and phone with a new verified SMS.

@@ -14,6 +14,7 @@ import (
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/account"
 	"github.com/Pinvou/pinvou3/account-platform/internal/billing"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/authorization"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/config"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/identity"
@@ -101,12 +102,36 @@ func (adminBillingRepository) AdminReconciliationCases(context.Context, uuid.UUI
 	return nil, errors.New("fixture operation not implemented")
 }
 
-func financialReadProbes() map[string]json.RawMessage {
-	verify := func(context.Context, string) (identity.Principal, error) {
-		return identity.Principal{RealmRoles: []string{"platform-admin"}}, nil
+// The controlled authority grants only the permissions exercised by these
+// serialization probes. Account's real role/binding checks run in PG tests.
+func fixtureAuthorizer() (*authorization.Client, func()) {
+	permissions := map[string]bool{"platform.system.status.read": true, "platform.billing.wallets.read": true, "platform.billing.ledger.read": true, "platform.pricing.read": true, "platform.usage.read": true, "platform.billing.repairs.request": true, "platform.billing.holds.release": true}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request struct{ Issuer, Subject, Permission string }
+		if r.Method != http.MethodPost || r.URL.Path != "/internal/v1/authorization/check" || r.Header.Get("Authorization") != "Bearer fixture-service-token" || json.NewDecoder(r.Body).Decode(&request) != nil || request.Issuer != "fixture-issuer" || request.Subject != "fixture-actor" {
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
+		if err := json.NewEncoder(w).Encode(map[string]any{"allowed": permissions[request.Permission], "user_id": uuid.MustParse("00000000-0000-4000-8000-000000000001")}); err != nil {
+			panic(err)
+		}
+	}))
+	client, err := authorization.NewClient(server.URL, "fixture-service-token")
+	if err != nil {
+		server.Close()
+		panic(err)
 	}
-	billingHandler := billing.NewService(adminBillingRepository{}).Handler("fixture-service-token", verify)
-	tokenHandler := token.NewService(contractRepository{}, contractContext{value: token.AuthorizationContext{UserID: uuid.New(), ContextType: "PERSONAL"}}, nil, nil, token.ProviderURLPolicy{}, nil, nil, 100).Handler(verify)
+	return client, server.Close
+}
+
+func financialReadProbes() map[string]json.RawMessage {
+	authorizer, closeAuthority := fixtureAuthorizer()
+	defer closeAuthority()
+	verify := func(context.Context, string) (identity.Principal, error) {
+		return identity.Principal{Issuer: "fixture-issuer", Subject: "fixture-actor"}, nil
+	}
+	billingHandler := billing.NewService(adminBillingRepository{}).WithAuthorizer(authorizer).Handler("fixture-service-token", verify)
+	tokenHandler := token.NewService(contractRepository{}, contractContext{value: token.AuthorizationContext{UserID: uuid.New(), ContextType: "PERSONAL"}}, nil, nil, token.ProviderURLPolicy{}, nil, nil, 100).WithAuthorizer(authorizer).Handler(verify)
 	results := map[string]json.RawMessage{}
 	for name, handler := range map[string]http.Handler{"billing": billingHandler, "token": tokenHandler} {
 		paths := []string{"/admin/v1/overview", "/admin/v1/wallets", "/admin/v1/payment-orders", "/admin/v1/adjustments", "/admin/v1/usage-holds", "/admin/v1/pricing-versions", "/admin/v1/wallets/" + uuid.NewString() + "/ledger"}
@@ -151,8 +176,10 @@ func (c waiverReadCoordinator) Release(_ context.Context, holdID, usageID uuid.U
 	return c.hold, nil
 }
 func publicWaiverProbe(hold billing.AdminHold) json.RawMessage {
-	handler := billing.NewService(waiverReadRepository{hold: hold}).WithWaiverCoordinator(waiverReadCoordinator{hold: hold}).Handler("fixture-service-token", func(context.Context, string) (identity.Principal, error) {
-		return identity.Principal{Issuer: "fixture-issuer", Subject: "fixture-actor", RealmRoles: []string{"platform-admin"}}, nil
+	authorizer, closeAuthority := fixtureAuthorizer()
+	defer closeAuthority()
+	handler := billing.NewService(waiverReadRepository{hold: hold}).WithAuthorizer(authorizer).WithWaiverCoordinator(waiverReadCoordinator{hold: hold}).Handler("fixture-service-token", func(context.Context, string) (identity.Principal, error) {
+		return identity.Principal{Issuer: "fixture-issuer", Subject: "fixture-actor"}, nil
 	})
 	request := httptest.NewRequest("POST", "/admin/v1/usage-holds/"+hold.ID.String()+"/release", strings.NewReader(`{"reason":"fixture-waiver"}`))
 	request.Header.Set("Authorization", "Bearer fixture-admin")
@@ -239,10 +266,21 @@ func main() {
 	created.PaymentURL, created.ChannelTransactionID, created.PaidAt = "", nil, nil
 	product := billing.Product{ProductID: "CNY_1", AmountFen: 100, CreditMicrocredits: 1000000, DisplayPoints: 100, Currency: "CNY", Channels: []string{"ALIPAY"}, CatalogVersion: 1, PriceStatus: "LEGACY"}
 	order.QRData = "fixture-qr"
-	me := account.Me{UserID: id, Status: "ACTIVE", MobileVerified: false, MallSyncStatus: "NOT_CONFIGURED", ActiveContext: account.Context{Type: "PERSONAL", MembershipVersion: 1}}
-	plan := billing.EntitlementPackage{ID: id, UserID: id, WalletID: id, PaymentOrderID: id, ProductID: "PLAN_TRIAL", AmountFen: 9007199254740993, PointsTotal: 9007199254740993, CreditedAt: paidAt, ValidFrom: paidAt, ValidUntil: paidAt.Add(time.Hour), Status: "ACTIVE"}
+	userCode, err := account.GenerateUserCode()
+	if err != nil {
+		panic(err)
+	}
+	me := account.Me{UserID: id, UserCode: account.FormatUserCode(userCode), Status: "ACTIVE", MobileVerified: false, CommerceCustomerStatus: "PENDING", ActiveContext: account.Context{Type: "PERSONAL", MembershipVersion: 1, ContextVersion: 1, AuthorizationVersion: 1}}
+	validUntil := paidAt.Add(time.Hour)
+	plan := billing.EntitlementPackage{ID: id, UserID: &id, WalletID: id, PaymentOrderID: &id, SourceType: "PAYMENT", SourceReference: id.String(), ProductID: "PLAN_TRIAL", AmountFen: 9007199254740993, PointsTotal: 9007199254740993, PointsRemaining: 9007199254740993, CreditedAt: paidAt, ValidFrom: paidAt, ValidUntil: &validUntil, Status: "ACTIVE", Components: []billing.EntitlementComponent{{ID: id, ComponentType: "BASE", OriginalMicrocredits: 9007199254740993, AvailableMicrocredits: 9007199254740993, CreditedAt: paidAt, ExpiresAt: &validUntil, Status: "ACTIVE"}}}
 	history := billing.PaymentOrderHistoryItem{ID: id, PinvouOrderID: id, ProductID: "CNY_1", OrderType: "LEGACY", AmountFen: 9007199254740993, DisplayPoints: 9007199254740993, Channel: "ALIPAY", Status: "PAID", FulfillmentStatus: "CREDITED", ExpiresAt: paidAt.Add(time.Hour), CreatedAt: paidAt, InvoiceStatus: "NOT_SUPPORTED"}
 	mobileErrors := map[string]json.RawMessage{}
+	legacy := plan
+	legacy.ProductID, legacy.PlanName, legacy.ValidUntil = "CNY_1", "Legacy fixture", nil
+	legacy.Components = append([]billing.EntitlementComponent(nil), plan.Components...)
+	legacy.Components[0].ExpiresAt = nil
+	manual := legacy
+	manual.SourceType, manual.SourceReference, manual.PaymentOrderID = "MANUAL_ADJUSTMENT", "adjustment:"+id.String(), nil
 	mobileHandler := httpserver.HandlerWithApplication(config.Config{ServiceName: "contract-mobile"}, account.NewService(nil, nil).WithMobileAuth(&account.MobileAuthService{}, "fixture-service-token").Handler(nil), nil)
 	for _, route := range []string{"/v1/auth/registration/precheck", "/v1/auth/captcha/challenges", "/v1/auth/sms/challenges"} {
 		request := httptest.NewRequest(http.MethodPost, route, strings.NewReader(`{"unexpected":true}`))
@@ -253,6 +291,17 @@ func main() {
 		}
 		mobileErrors[route] = response.Body.Bytes()
 	}
+	profileHandler := httpserver.HandlerWithApplication(config.Config{ServiceName: "contract-profile"}, account.NewService(nil, nil).WithProfileChanges(&account.ProfileChangeService{}).Handler(func(context.Context, string) (identity.Principal, error) {
+		return identity.Principal{Issuer: "https://fixture-authority.invalid", Subject: "fixture-subject"}, nil
+	}), nil)
+	profileRequest := httptest.NewRequest(http.MethodGet, "/v1/me/profile-change-requests/not-a-uuid", nil)
+	profileRequest.Header.Set("Authorization", "Bearer fixture-profile-token")
+	profileResponse := httptest.NewRecorder()
+	profileHandler.ServeHTTP(profileResponse, profileRequest)
+	if profileResponse.Code != http.StatusNotFound {
+		panic("invalid profile ID did not reach production not-found response")
+	}
+	mobileErrors["profile_not_found"] = profileResponse.Body.Bytes()
 	wallet := billing.Wallet{ID: id, OwnerType: "PERSONAL", OwnerID: id, Status: "ACTIVE", PostedMicrocredits: 1000000, ReservedMicrocredits: 1000, AvailableMicrocredits: 999000, Version: 1}
 	handler := billing.NewService(nil).WithPayments(&billing.PaymentCoordinator{}).Handler("fixture-only-service-token")
 	routes := map[string]int{}
@@ -275,7 +324,7 @@ func main() {
 	}
 	errors["MODEL_CATALOG_UNAVAILABLE"] = catalogProbe(contractRepository{catalogUnavailable: true}, contractContext{value: token.AuthorizationContext{UserID: id, ContextType: "PERSONAL"}}, http.StatusServiceUnavailable)
 	catalog := catalogProbe(contractRepository{candidate: token.Candidate{TokenAccountID: id, OwnerType: "USER", OwnerID: id, Status: "ACTIVE", HealthStatus: "HEALTHY", CredentialID: id, WalletID: id, AllowedModels: []string{"fixture-model"}}}, contractContext{value: token.AuthorizationContext{UserID: id, ContextType: "PERSONAL"}}, http.StatusOK)
-	if err := json.NewEncoder(output).Encode(map[string]any{"slider_captcha": account.SliderCaptchaResponse{ID: id, BackgroundImage: "fixture-background", PieceImage: "fixture-piece", Width: 280, Height: 120, PieceWidth: 44, PieceHeight: 44, PieceY: 14, ExpiresAt: paidAt}, "mobile_registration": account.MobileRegistrationResult{UserID: id, Username: "fixtureuser", Status: "PROVISIONING", PasswordPreserved: false}, "mobile_errors": mobileErrors, "me": me, "entitlement": plan, "package_summary": billing.PackageSummary{AvailableMicrocredits: "9007199254740993", ActivePackageCount: 1, NextExpiryMicrocredits: "9007199254740993"}, "order_history": history, "waiver_public": publicWaiverProbe(waiver.Hold), "waiver_authority": waiver, "waiver_intent": map[string]any{"hold_id": id, "usage_request_id": id, "reason": "fixture-waiver", "actor": "fixture-actor"}, "product": product, "paid": order, "created": created, "wallet": wallet, "routes": routes, "eligible": eligible, "token_errors": errors, "model_catalog": catalog, "rate_limited": rateLimitProbe(), "recent_created": map[string]any{"order": created}, "recent_empty": map[string]any{"order": nil}, "financial_reads": financialReadProbes(), "organization_member": account.Member{MembershipID: id, UserID: id, Status: "ACTIVE", Version: 1, Roles: []string{"MEMBER", "UNIT_ADMIN"}, UnitIDs: []uuid.UUID{}, UnitAdminIDs: []uuid.UUID{id}, JoinedAt: paidAt}}); err != nil {
+	if err := json.NewEncoder(output).Encode(map[string]any{"slider_captcha": account.SliderCaptchaResponse{ID: id, BackgroundImage: "fixture-background", PieceImage: "fixture-piece", Width: 280, Height: 120, PieceWidth: 44, PieceHeight: 44, PieceY: 14, ExpiresAt: paidAt}, "mobile_registration": account.RegistrationResult{OperationID: id, UserID: &id, UserCode: account.FormatUserCode(userCode), Username: "fixtureuser", Status: "PROVISIONING", PasswordPreserved: false}, "mobile_errors": mobileErrors, "me": me, "entitlement": plan, "entitlement_no_expiry": legacy, "entitlement_manual": manual, "package_summary": billing.PackageSummary{AvailableMicrocredits: "9007199254740993", BaseAvailableMicrocredits: "9007199254740993", BonusAvailableMicrocredits: "0", ReservedMicrocredits: "0", UsedMicrocredits: "0", ActivePackageCount: 1, NextExpiryMicrocredits: "9007199254740993"}, "order_history": history, "waiver_public": publicWaiverProbe(waiver.Hold), "waiver_authority": waiver, "waiver_intent": map[string]any{"hold_id": id, "usage_request_id": id, "reason": "fixture-waiver", "actor": "fixture-actor"}, "product": product, "paid": order, "created": created, "wallet": wallet, "routes": routes, "eligible": eligible, "token_errors": errors, "model_catalog": catalog, "rate_limited": rateLimitProbe(), "recent_created": map[string]any{"order": created}, "recent_empty": map[string]any{"order": nil}, "financial_reads": financialReadProbes(), "organization_member": account.Member{MembershipID: id, UserID: id, Status: "ACTIVE", Version: 1, Roles: []string{"MEMBER", "UNIT_ADMIN"}, UnitIDs: []uuid.UUID{}, UnitAdminIDs: []uuid.UUID{id}, JoinedAt: paidAt}}); err != nil {
 		panic(err)
 	}
 }

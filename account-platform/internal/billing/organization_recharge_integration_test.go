@@ -149,7 +149,7 @@ func TestPostgresHTTPOrganizationLegacyRechargeAndPersonalPlanBoundaries(t *test
 		t.Fatal("organization wallet credited more than once")
 	}
 	var packages int
-	if err := r.pool.QueryRow(ctx, `SELECT count(*) FROM entitlement_packages WHERE wallet_id=$1`, order.WalletID).Scan(&packages); err != nil || packages != 0 {
+	if err := r.pool.QueryRow(ctx, `SELECT count(*) FROM entitlement_packages WHERE wallet_id=$1 AND valid_until IS NOT NULL AND user_id IS NOT NULL`, order.WalletID).Scan(&packages); err != nil || packages != 0 {
 		t.Fatal("organization legacy recharge issued personal package")
 	}
 	for _, role := range []string{"BILLING_ADMIN", "MEMBER"} {

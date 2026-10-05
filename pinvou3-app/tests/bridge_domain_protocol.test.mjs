@@ -205,7 +205,7 @@ const expectedProtocolHashes = {
   voice: '8581b43940d101353fdd1468232dc778c2d1320854af5fdbbbc0326e5cdedbbb',
   // Official-only team-relay surface; unchanged by this backflow.
   teamRelay: '246f7cfd5a5ff4b730e2f3972fe9e74860b51a4781bd323bf10b3d795d24ed1d',
-  accountPlatform: '8797cfaff0a98edff324b98c3c89848680b3af090b0d77faea960e933228881a',
+  accountPlatform: 'a282a0dc724363f11ea30305d08ebf1e9d4cf9a25ca74c9451ffde8503acb5ef',
   // Recomputed for the rebind carryover feed-back (review #463 F-Major):
   // rebind_workspace_root gains the optional previousPostBusySessionIds
   // payload — the dialog's previous report fed back on retry, honored by the
@@ -377,6 +377,7 @@ for (const [method, command] of [
   ['precheckMobileRegistration', 'account_platform_precheck_mobile_registration'],
   ['sendSms', 'account_platform_send_sms'],
   ['registerMobile', 'account_platform_register_mobile'],
+  ['resetPassword', 'account_platform_reset_password'],
   ['loginSms', 'account_platform_login_sms'],
 ]) {
   const input = { mobile: 'public-synthetic', purpose: 'LOGIN' };
@@ -385,3 +386,22 @@ for (const [method, command] of [
   assert.equal(accountCalls.at(-1).payload.input, input);
   assert.deepEqual(Object.keys(accountCalls.at(-1).payload), ['input']);
 }
+assert.equal(await accountTransport.registrationStatus(), 'ok');
+assert.equal(accountCalls.at(-1).command, 'account_platform_registration_status');
+assert.equal(accountCalls.at(-1).payload, undefined, 'Registration query proof must remain Native-only');
+
+// A read observes terminal profile completion after the background worker.
+// Only that canonical allowlisted completion invalidates the shared catalog.
+const completionWindow = {};
+const completionContext = vm.createContext({ window:completionWindow, URL });
+vm.runInContext(read('bridge/account-platform.js'),completionContext);
+let completionReply = {status:200,body:{status:'IDENTITY_UPDATED'}};
+const completionTransport = completionWindow.__PINVOU_TAURI_BRIDGE_FEATURES__['account-platform']({invoke:async()=>completionReply});
+const completionEvents=[];
+completionTransport.subscribeIdentityChange(pending=>completionEvents.push(pending));
+const profileGet={area:'account',method:'GET',resource:'/v1/me/./profile-change-requests/fixture-id'};
+await completionTransport.request(profileGet); assert.deepEqual(completionEvents,[false]);
+completionReply={status:200,body:{status:'COMPLETED'}};
+await completionTransport.request(profileGet); assert.deepEqual(completionEvents,[false,false]);
+for (const resource of ['/v1/me/profile-change-requests/fixture-id?unexpected=1','/v1/me/role-bindings']) await completionTransport.request({...profileGet,resource});
+assert.deepEqual(completionEvents,[false,false]);

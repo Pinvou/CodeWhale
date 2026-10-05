@@ -164,6 +164,50 @@ func TestJWKSConfigurationFailsClosed(t *testing.T) {
 	}
 }
 
+func TestSignedAccessTokenAuthenticationTimePreservesAbsence(t *testing.T) {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"keys": []any{map[string]any{
+			"kty": "RSA", "use": "sig", "alg": "RS256", "kid": "test-key",
+			"n": base64.RawURLEncoding.EncodeToString(key.N.Bytes()), "e": "AQAB",
+		}}})
+	}))
+	defer server.Close()
+	issuer := server.URL + "/realm"
+	verify, err := NewOIDCVerifyFunc(context.Background(), issuer, "test-audience", "test", server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, scenario := range []struct {
+		name    string
+		value   any
+		present bool
+	}{
+		{"missing", nil, false}, {"null", nil, true}, {"zero", int64(0), true}, {"negative", int64(-1), true}, {"positive", int64(1720000000), true},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			claims := map[string]any{"iss": issuer, "aud": "test-audience", "sub": "subject", "sid": "session", "typ": "Bearer", "exp": time.Now().Add(time.Hour).Unix()}
+			if scenario.present {
+				claims["auth_time"] = scenario.value
+			}
+			principal, err := verify(context.Background(), signAccessTestToken(t, key, claims))
+			if err != nil {
+				t.Fatal(err)
+			} // absence is not a new rejection policy for every access token
+			if scenario.name == "positive" {
+				if !principal.AuthenticatedAt.Equal(time.Unix(1720000000, 0)) {
+					t.Fatal("signed positive authentication time not retained")
+				}
+			} else if !principal.AuthenticatedAt.IsZero() {
+				t.Fatal("absent authentication time was fabricated into a human-authentication fact")
+			}
+		})
+	}
+}
+
 func signAccessTestToken(t *testing.T, key *rsa.PrivateKey, claims map[string]any) string {
 	t.Helper()
 	header, err := json.Marshal(map[string]string{"alg": "RS256", "kid": "test-key", "typ": "JWT"})

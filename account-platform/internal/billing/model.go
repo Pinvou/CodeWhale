@@ -9,11 +9,13 @@ import (
 )
 
 var (
-	ErrNotFound             = errors.New("billing resource not found")
-	ErrConflict             = errors.New("billing resource conflict")
-	ErrInsufficientBalance  = errors.New("wallet has insufficient available credits")
-	ErrWalletUnavailable    = errors.New("wallet is unavailable")
-	ErrUsageAlreadyTerminal = errors.New("usage hold is already terminal")
+	ErrNotFound                 = errors.New("billing resource not found")
+	ErrConflict                 = errors.New("billing resource conflict")
+	ErrInsufficientBalance      = errors.New("wallet has insufficient available credits")
+	ErrWalletUnavailable        = errors.New("wallet is unavailable")
+	ErrUsageAlreadyTerminal     = errors.New("usage hold is already terminal")
+	ErrUsagePlatformLossReview  = errors.New("usage arrived after entitlement expiry and requires platform-loss review")
+	ErrCommerceCustomerNotReady = errors.New("commerce customer mapping is not ready")
 )
 
 type Wallet struct {
@@ -56,23 +58,44 @@ type Hold struct {
 }
 
 type EntitlementPackage struct {
-	ID              uuid.UUID `json:"package_id"`
-	UserID          uuid.UUID `json:"user_id"`
-	WalletID        uuid.UUID `json:"wallet_id"`
-	PaymentOrderID  uuid.UUID `json:"pinvou_order_id"`
-	MallOrderID     string    `json:"mall_order_id"`
-	ProductID       string    `json:"plan_id"`
-	PlanName        string    `json:"plan_name"`
-	SKUCode         string    `json:"sku_code"`
-	AmountFen       int64     `json:"amount_fen,string"`
-	PointsTotal     int64     `json:"points_total_microcredits,string"`
-	PointsReserved  int64     `json:"points_reserved_microcredits,string"`
-	PointsUsed      int64     `json:"points_used_microcredits,string"`
-	PointsRemaining int64     `json:"points_remaining_microcredits,string"`
-	CreditedAt      time.Time `json:"credited_at"`
-	ValidFrom       time.Time `json:"valid_from"`
-	ValidUntil      time.Time `json:"valid_until"`
-	Status          string    `json:"status"`
+	ID              uuid.UUID              `json:"package_id"`
+	UserID          *uuid.UUID             `json:"user_id,omitempty"`
+	WalletID        uuid.UUID              `json:"wallet_id"`
+	PaymentOrderID  *uuid.UUID             `json:"pinvou_order_id,omitempty"`
+	MallOrderID     string                 `json:"mall_order_id"`
+	SourceType      string                 `json:"source_type"`
+	SourceReference string                 `json:"source_reference"`
+	ProductID       string                 `json:"plan_id"`
+	PlanName        string                 `json:"plan_name"`
+	SKUCode         string                 `json:"sku_code"`
+	AmountFen       int64                  `json:"amount_fen,string"`
+	PointsTotal     int64                  `json:"points_total_microcredits,string"`
+	PointsReserved  int64                  `json:"points_reserved_microcredits,string"`
+	PointsUsed      int64                  `json:"points_used_microcredits,string"`
+	PointsRemaining int64                  `json:"points_remaining_microcredits,string"`
+	PointsExpired   int64                  `json:"points_expired_microcredits,string"`
+	PointsRevoked   int64                  `json:"points_revoked_microcredits,string"`
+	CreditedAt      time.Time              `json:"credited_at"`
+	ValidFrom       time.Time              `json:"valid_from"`
+	ValidUntil      *time.Time             `json:"valid_until"`
+	Status          string                 `json:"status"`
+	Components      []EntitlementComponent `json:"components"`
+}
+
+type EntitlementComponent struct {
+	ID                         uuid.UUID  `json:"component_id"`
+	ComponentType              string     `json:"component_type"`
+	OriginalMicrocredits       int64      `json:"original_microcredits,string"`
+	AvailableMicrocredits      int64      `json:"available_microcredits,string"`
+	ReservedMicrocredits       int64      `json:"reserved_microcredits,string"`
+	UsedMicrocredits           int64      `json:"used_microcredits,string"`
+	ActiveGrantMicrocredits    int64      `json:"active_grant_microcredits,string"`
+	SuspendedGrantMicrocredits int64      `json:"suspended_grant_microcredits,string"`
+	ExpiredMicrocredits        int64      `json:"expired_microcredits,string"`
+	RevokedMicrocredits        int64      `json:"revoked_microcredits,string"`
+	CreditedAt                 time.Time  `json:"credited_at"`
+	ExpiresAt                  *time.Time `json:"expires_at"`
+	Status                     string     `json:"status"`
 }
 
 type PriceVersion struct {
@@ -85,19 +108,23 @@ type PriceVersion struct {
 }
 
 type ManualAdjustment struct {
-	ID                 uuid.UUID  `json:"adjustment_id"`
-	WalletID           uuid.UUID  `json:"wallet_id"`
-	AmountMicrocredits int64      `json:"amount_microcredits"`
-	Reason             string     `json:"reason"`
-	RequestedBy        uuid.UUID  `json:"requested_by"`
-	ApprovedBy         *uuid.UUID `json:"approved_by,omitempty"`
-	RejectedBy         *uuid.UUID `json:"rejected_by,omitempty"`
-	Status             string     `json:"status"`
-	JournalEntryID     *uuid.UUID `json:"journal_entry_id,omitempty"`
-	DecisionReason     *string    `json:"decision_reason,omitempty"`
-	CreatedAt          time.Time  `json:"created_at"`
-	UpdatedAt          time.Time  `json:"updated_at"`
-	DecidedAt          *time.Time `json:"decided_at,omitempty"`
+	ID                      uuid.UUID  `json:"adjustment_id"`
+	WalletID                uuid.UUID  `json:"wallet_id"`
+	AmountMicrocredits      int64      `json:"amount_microcredits"`
+	Reason                  string     `json:"reason"`
+	RequestedBy             uuid.UUID  `json:"requested_by"`
+	ApprovedBy              *uuid.UUID `json:"approved_by,omitempty"`
+	RejectedBy              *uuid.UUID `json:"rejected_by,omitempty"`
+	Status                  string     `json:"status"`
+	Version                 int64      `json:"version"`
+	RequestIdempotencyKey   *string    `json:"request_idempotency_key,omitempty"`
+	ApprovalRequestID       *uuid.UUID `json:"approval_request_id,omitempty"`
+	ExecutionIdempotencyKey *string    `json:"execution_idempotency_key,omitempty"`
+	JournalEntryID          *uuid.UUID `json:"journal_entry_id,omitempty"`
+	DecisionReason          *string    `json:"decision_reason,omitempty"`
+	CreatedAt               time.Time  `json:"created_at"`
+	UpdatedAt               time.Time  `json:"updated_at"`
+	DecidedAt               *time.Time `json:"decided_at,omitempty"`
 }
 
 type Repository interface {
@@ -112,7 +139,6 @@ type Repository interface {
 	Release(context.Context, uuid.UUID, uuid.UUID, string) (Hold, error)
 	ExpireHolds(context.Context, int) (int, error)
 	RequestAdjustment(context.Context, uuid.UUID, int64, string, uuid.UUID) (ManualAdjustment, error)
-	ApproveAdjustment(context.Context, uuid.UUID, uuid.UUID, string) (ManualAdjustment, error)
 	RejectAdjustment(context.Context, uuid.UUID, uuid.UUID, string) (ManualAdjustment, error)
 	Ping(context.Context) error
 	Close()

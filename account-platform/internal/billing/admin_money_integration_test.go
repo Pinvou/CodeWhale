@@ -31,8 +31,8 @@ func TestPostgresAdminFinancialReadsKeepExactDecimalStringsAndOldBalanceNumbers(
 		t.Fatal(err)
 	}
 	serviceToken := strings.Repeat("f", 32)
-	server := httptest.NewServer(NewService(repo).Handler(serviceToken, func(context.Context, string) (identity.Principal, error) {
-		return identity.Principal{RealmRoles: []string{"platform-admin"}}, nil
+	server := httptest.NewServer(NewService(repo).WithAuthorizer(billingTestAuthorizer(t)).Handler(serviceToken, func(context.Context, string) (identity.Principal, error) {
+		return identity.Principal{Issuer: "https://fixture-authority.invalid", Subject: "fixture-platform-operator", RealmRoles: []string{"platform-admin"}}, nil
 	}))
 	defer server.Close()
 	read := func(path string) map[string]any {
@@ -102,8 +102,8 @@ func TestPostgresAdminOverviewTotalsMayExceedOneWalletInt64(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	server := httptest.NewServer(NewService(repo).Handler(strings.Repeat("f", 32), func(context.Context, string) (identity.Principal, error) {
-		return identity.Principal{RealmRoles: []string{"platform-admin"}}, nil
+	server := httptest.NewServer(NewService(repo).WithAuthorizer(billingTestAuthorizer(t)).Handler(strings.Repeat("f", 32), func(context.Context, string) (identity.Principal, error) {
+		return identity.Principal{Issuer: "https://fixture-authority.invalid", Subject: "fixture-platform-operator", RealmRoles: []string{"platform-admin"}}, nil
 	}))
 	defer server.Close()
 	request, _ := http.NewRequest(http.MethodGet, server.URL+"/admin/v1/overview", nil)

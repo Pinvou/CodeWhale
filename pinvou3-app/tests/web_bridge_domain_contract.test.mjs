@@ -88,7 +88,7 @@ vm.runInContext(read('bridge/domain-adapter.js'), context, { filename: 'platform
 const api = windowObject.TauriBridge;
 const expectedApi = expectedWebBridgeApi();
 
-for (const method of ['login', 'createSliderCaptcha', 'precheckMobileRegistration', 'sendSms', 'registerMobile', 'loginSms', 'logout', 'request']) {
+for (const method of ['login', 'createSliderCaptcha', 'precheckMobileRegistration', 'sendSms', 'registerMobile', 'resetPassword', 'loginSms', 'logout', 'request']) {
   await assert.rejects(api.accountPlatform[method]({}), /desktop authentication is unavailable/);
 }
 assert.deepEqual(JSON.parse(JSON.stringify(await api.accountPlatform.session())), {

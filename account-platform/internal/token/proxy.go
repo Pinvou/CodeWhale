@@ -301,7 +301,12 @@ func (s *Service) settle(ctx context.Context, usageID, holdID uuid.UUID, maximum
 		_ = s.repository.MarkReview(ctx, usageID, "usage_exceeds_reservation", map[string]any{"usage": usage, "actual_microcredits": actual, "maximum_microcredits": maximumMicrocredits})
 		return
 	}
-	if err := s.billing.Commit(ctx, usageID, holdID, actual, usage); err != nil {
+	stored, storedErr := s.repository.GetUsage(ctx, usageID)
+	if storedErr != nil {
+		_ = s.repository.MarkReview(ctx, usageID, "settlement_pending", map[string]any{"usage": usage, "actual_microcredits": actual})
+		return
+	}
+	if err := s.billing.Commit(ctx, usageID, holdID, stored.WalletID, actual, usage); err != nil {
 		_ = s.repository.MarkReview(ctx, usageID, "settlement_pending", map[string]any{"usage": usage, "actual_microcredits": actual})
 		return
 	}
@@ -337,7 +342,14 @@ func (s *Service) releaseUnused(ctx context.Context, usageID, holdID uuid.UUID, 
 	background := context.WithoutCancel(ctx)
 	ctx, cancel := context.WithTimeout(background, 15*time.Second)
 	defer cancel()
-	if err := s.billing.Release(ctx, usageID, holdID, reason); err != nil {
+	stored, storedErr := s.repository.GetUsage(ctx, usageID)
+	var releaseErr error
+	if storedErr != nil {
+		releaseErr = storedErr
+	} else {
+		releaseErr = s.billing.Release(ctx, usageID, holdID, stored.WalletID, reason)
+	}
+	if releaseErr != nil {
 		recordCtx, recordCancel := context.WithTimeout(background, 5*time.Second)
 		defer recordCancel()
 		_ = s.repository.MarkReview(recordCtx, usageID, "release_pending", map[string]any{"hold_id": holdID, "release_reason": reason, "upstream_started": reason == "upstream_rejected"})

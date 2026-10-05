@@ -50,7 +50,7 @@ func (f *fixtureBilling) Reserve(_ context.Context, usageID, wallet uuid.UUID, m
 	f.maximum = maximum
 	return BillingHold{ID: f.holdID, UsageRequestID: usageID, Status: "ACTIVE"}, nil
 }
-func (f *fixtureBilling) Commit(_ context.Context, _, _ uuid.UUID, actual int64, _ Usage) error {
+func (f *fixtureBilling) Commit(_ context.Context, _, _, _ uuid.UUID, actual int64, _ Usage) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.commits++
@@ -60,7 +60,7 @@ func (f *fixtureBilling) Commit(_ context.Context, _, _ uuid.UUID, actual int64,
 	f.actual = actual
 	return nil
 }
-func (f *fixtureBilling) Release(context.Context, uuid.UUID, uuid.UUID, string) error {
+func (f *fixtureBilling) Release(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.releases++

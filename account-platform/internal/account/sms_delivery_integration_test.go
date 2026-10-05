@@ -67,7 +67,7 @@ func TestPostgresSMSUnknownDeliveryRetainsCooldownAndExplicitRejectionAllowsRetr
 					configured.client = providerHTTP.Client()
 					provider = configured
 				}
-				auth, err := NewMobileAuthService(repo, provider, &identityProvisionerFake{}, "https://identity.example.test")
+				auth, err := NewMobileAuthService(repo, provider, &identityProvisionerFake{}, "https://identity.example.test", registrationTokensForTest(t))
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -104,7 +104,7 @@ func TestPostgresSMSUnknownDeliveryRetainsCooldownAndExplicitRejectionAllowsRetr
 					if attempt == 1 && outcome != "explicit_rejection" {
 						expected = 429
 					}
-					data := post("/v1/auth/sms/challenges", map[string]any{"username": "controlled.user", "mobile": "13800138000", "password": "ControlledPassword1", "purpose": "REGISTER", "captcha_id": captcha.ID, "captcha_offset": offset}, expected)
+					data := post("/v1/auth/sms/challenges", map[string]any{"username": "controlled.user", "mobile": "13800138000", "password_handle": "controlled-reference", "password_policy_version": "user-v1", "purpose": "REGISTER", "captcha_id": captcha.ID, "captcha_offset": offset}, expected)
 					var result struct {
 						Code string `json:"code"`
 					}

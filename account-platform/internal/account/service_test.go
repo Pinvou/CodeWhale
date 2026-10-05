@@ -17,6 +17,9 @@ type fakeRepository struct {
 	me            Me
 	activateCalls int
 	adminCalls    []string
+	deny          bool
+	lookupResult  AdminUser
+	lookupErr     error
 }
 
 func (f *fakeRepository) Bootstrap(context.Context, identity.Principal) (Me, bool, error) {
@@ -36,6 +39,20 @@ func (f *fakeRepository) GetMe(context.Context, identity.Principal) (Me, error) 
 func (*fakeRepository) ResolveAuthorizationContext(context.Context, identity.Principal) (AuthorizationContext, error) {
 	panic("not used")
 }
+
+func (*fakeRepository) GetCommerceCustomerMapping(context.Context, identity.Principal) (CommerceCustomerMapping, error) {
+	return CommerceCustomerMapping{Status: "READY"}, nil
+}
+func (f *fakeRepository) Authorize(_ context.Context, _ identity.Principal, permission string, organizationID, _ *uuid.UUID) (AuthorizationDecision, error) {
+	return AuthorizationDecision{Allowed: !f.deny, Permission: permission, OrganizationID: organizationID, ContextVersion: 1, AuthorizationVersion: 1}, nil
+}
+func (*fakeRepository) RoleDefinitions(context.Context) ([]AdminRoleDefinition, error) {
+	return []AdminRoleDefinition{{Code: "PLATFORM_SUPER_ADMIN", Scope: "PLATFORM", Permissions: []string{PermissionPlatformRolesRead}}}, nil
+}
+func (f *fakeRepository) LookupUserByCode(_ context.Context, _ identity.Principal, code, source, device string) (AdminUser, error) {
+	f.adminCalls = append(f.adminCalls, "user-code:"+code+":"+source+":"+device)
+	return f.lookupResult, f.lookupErr
+}
 func (*fakeRepository) ListOrganizations(context.Context, identity.Principal) ([]Organization, error) {
 	panic("not used")
 }
@@ -47,6 +64,18 @@ func (*fakeRepository) ListUnits(context.Context, identity.Principal, uuid.UUID)
 }
 func (*fakeRepository) ListMembers(context.Context, identity.Principal, uuid.UUID) ([]Member, error) {
 	panic("not used")
+}
+func (*fakeRepository) ListMyRoleBindings(context.Context, identity.Principal) ([]RoleBinding, error) {
+	return []RoleBinding{}, nil
+}
+func (*fakeRepository) ListOrganizationRoleBindings(context.Context, identity.Principal, uuid.UUID) ([]RoleBinding, error) {
+	return []RoleBinding{}, nil
+}
+func (*fakeRepository) GrantOrganizationRoleBinding(context.Context, identity.Principal, RoleBindingGrant) (RoleBinding, error) {
+	return RoleBinding{}, nil
+}
+func (*fakeRepository) RevokeOrganizationRoleBinding(context.Context, identity.Principal, uuid.UUID, uuid.UUID) (RoleBinding, error) {
+	return RoleBinding{}, nil
 }
 func (*fakeRepository) ReplaceMemberRoles(context.Context, identity.Principal, uuid.UUID, uuid.UUID, []string) (Member, error) {
 	panic("not used")
@@ -71,6 +100,15 @@ func (*fakeRepository) TransferOwnership(context.Context, identity.Principal, uu
 }
 func (*fakeRepository) AdminOverview(context.Context) (AdminOverview, error) {
 	return AdminOverview{}, nil
+}
+func (*fakeRepository) AdminRoleBindings(context.Context, *uuid.UUID, *uuid.UUID) ([]RoleBinding, error) {
+	return []RoleBinding{}, nil
+}
+func (*fakeRepository) AdminGrantRoleBinding(context.Context, identity.Principal, RoleBindingGrant) (RoleBinding, error) {
+	return RoleBinding{}, nil
+}
+func (*fakeRepository) AdminRevokeRoleBinding(context.Context, identity.Principal, uuid.UUID) (RoleBinding, error) {
+	return RoleBinding{}, nil
 }
 func (*fakeRepository) AdminUsers(context.Context, string, int) ([]AdminUser, error) { return nil, nil }
 func (*fakeRepository) AdminUserMemberships(context.Context, uuid.UUID) ([]AdminUserMembership, error) {
@@ -162,7 +200,7 @@ func (f *fakeWalletProvisioner) EnsurePersonalWallet(context.Context, uuid.UUID)
 	return f.err
 }
 
-func TestBootstrapActivatesOnlyAfterWalletProvisioning(t *testing.T) {
+func TestBootstrapReturnsProvisioningWithoutCallingBilling(t *testing.T) {
 	userID := uuid.Must(uuid.NewV7())
 	repository := &fakeRepository{me: Me{UserID: userID, Status: "PROVISIONING", ActiveContext: Context{Type: "PERSONAL", MembershipVersion: 1}}}
 	wallets := &fakeWalletProvisioner{}
@@ -170,20 +208,20 @@ func TestBootstrapActivatesOnlyAfterWalletProvisioning(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if me.Status != "ACTIVE" || wallets.calls != 1 || repository.activateCalls != 1 {
+	if me.Status != "PROVISIONING" || wallets.calls != 0 || repository.activateCalls != 0 {
 		t.Fatalf("me=%+v wallet calls=%d activate calls=%d", me, wallets.calls, repository.activateCalls)
 	}
 }
 
-func TestBootstrapRemainsProvisioningWhenBillingIsUnavailable(t *testing.T) {
+func TestBootstrapDoesNotDependOnBillingAvailability(t *testing.T) {
 	repository := &fakeRepository{me: Me{UserID: uuid.Must(uuid.NewV7()), Status: "PROVISIONING", ActiveContext: Context{Type: "PERSONAL", MembershipVersion: 1}}}
 	wallets := &fakeWalletProvisioner{err: errors.New("unavailable")}
 	me, err := NewService(repository, wallets).Bootstrap(context.Background(), identity.Principal{})
-	if !errors.Is(err, ErrWalletProvisioning) {
-		t.Fatalf("error = %v, want ErrWalletProvisioning", err)
+	if err != nil {
+		t.Fatalf("error = %v", err)
 	}
-	if me.Status != "PROVISIONING" || repository.activateCalls != 0 {
-		t.Fatalf("me=%+v activate calls=%d", me, repository.activateCalls)
+	if me.Status != "PROVISIONING" || wallets.calls != 0 || repository.activateCalls != 0 {
+		t.Fatalf("me=%+v wallet calls=%d activate calls=%d", me, wallets.calls, repository.activateCalls)
 	}
 }
 
@@ -191,8 +229,8 @@ func TestBootstrapDoesNotReactivateDisabledUser(t *testing.T) {
 	repository := &fakeRepository{me: Me{UserID: uuid.Must(uuid.NewV7()), Status: "DISABLED", ActiveContext: Context{Type: "PERSONAL", MembershipVersion: 1}}}
 	wallets := &fakeWalletProvisioner{}
 	me, err := NewService(repository, wallets).Bootstrap(context.Background(), identity.Principal{})
-	if !errors.Is(err, ErrForbidden) {
-		t.Fatalf("error = %v, want ErrForbidden", err)
+	if err != nil {
+		t.Fatalf("error = %v", err)
 	}
 	if me.Status != "DISABLED" || wallets.calls != 0 || repository.activateCalls != 0 {
 		t.Fatalf("me=%+v wallet calls=%d activate calls=%d", me, wallets.calls, repository.activateCalls)
@@ -214,10 +252,51 @@ func TestPersonalUsersCannotCreateOrganizations(t *testing.T) {
 	}
 }
 
+func TestLegacyRealmRoleCannotBypassAccountPermissionDenial(t *testing.T) {
+	repository := &fakeRepository{deny: true}
+	verify := func(context.Context, string) (identity.Principal, error) {
+		return identity.Principal{Issuer: "https://issuer.example", Subject: "legacy-admin", SessionID: "session", RealmRoles: []string{"platform-admin"}}, nil
+	}
+	request := httptest.NewRequest(http.MethodGet, "/admin/v1/users", nil)
+	request.Header.Set("Authorization", "Bearer valid")
+	response := httptest.NewRecorder()
+	NewService(repository, &fakeWalletProvisioner{}).Handler(verify).ServeHTTP(response, request)
+	if response.Code != http.StatusForbidden || !strings.Contains(response.Body.String(), "PERMISSION_DENIED") {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestAdminUserCodeLookupUsesDedicatedExactRouteAndNoLeakage(t *testing.T) {
+	verify := func(context.Context, string) (identity.Principal, error) {
+		return identity.Principal{Issuer: "https://issuer.example", Subject: "operator", SessionID: "session"}, nil
+	}
+	code := "USR-0123-4567-89AB-CDEF-MV"
+	repository := &fakeRepository{lookupResult: AdminUser{ID: uuid.Must(uuid.NewV7()), UserCode: code, Status: "ACTIVE"}}
+	request := httptest.NewRequest(http.MethodGet, "/admin/v1/user-code-lookups/"+code, nil)
+	request.RemoteAddr = "192.0.2.10:1234"
+	request.Header.Set("Authorization", "Bearer valid")
+	request.Header.Set("X-Device-ID", "device-1")
+	response := httptest.NewRecorder()
+	NewService(repository, &fakeWalletProvisioner{}).Handler(verify).ServeHTTP(response, request)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), code) {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	if got := repository.adminCalls[len(repository.adminCalls)-1]; got != "user-code:"+code+":192.0.2.10:device-1" {
+		t.Fatalf("lookup=%q", got)
+	}
+
+	repository.lookupErr = ErrNotFound
+	response = httptest.NewRecorder()
+	NewService(repository, &fakeWalletProvisioner{}).Handler(verify).ServeHTTP(response, request)
+	if response.Code != http.StatusNotFound || strings.Contains(response.Body.String(), code) {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
 func TestAdminLifecycleRoutesDispatchProtectedMutations(t *testing.T) {
 	repository := &fakeRepository{}
 	verify := func(context.Context, string) (identity.Principal, error) {
-		return identity.Principal{Issuer: "https://issuer.example", Subject: "admin", SessionID: "session", RealmRoles: []string{"platform-admin"}}, nil
+		return identity.Principal{Issuer: "https://issuer.example", Subject: "admin", SessionID: "session"}, nil
 	}
 	handler := NewService(repository, &fakeWalletProvisioner{}).Handler(verify)
 	userID := uuid.Must(uuid.NewV7())
@@ -252,7 +331,7 @@ func TestAdminLifecycleRoutesDispatchProtectedMutations(t *testing.T) {
 func TestAdminOrganizationManagementRoutesCreateOrganizationsAndUnits(t *testing.T) {
 	repository := &fakeRepository{}
 	verify := func(context.Context, string) (identity.Principal, error) {
-		return identity.Principal{Issuer: "https://issuer.example", Subject: "admin", SessionID: "session", RealmRoles: []string{"platform-admin"}}, nil
+		return identity.Principal{Issuer: "https://issuer.example", Subject: "admin", SessionID: "session"}, nil
 	}
 	handler := NewService(repository, &fakeWalletProvisioner{}).Handler(verify)
 	ownerID := uuid.Must(uuid.NewV7())
@@ -309,6 +388,23 @@ func TestManagedRolesCannotGrantOwnership(t *testing.T) {
 	}
 	if _, err := validateManagedRoles([]string{"UNIT_ADMIN"}); !errors.Is(err, ErrConflict) {
 		t.Fatalf("unit admin requires a scoped assignment workflow: %v", err)
+	}
+}
+
+func TestRoleBindingGrantNormalizesValidityAndIdempotency(t *testing.T) {
+	now := time.Date(2026, time.August, 23, 10, 0, 0, 0, time.UTC)
+	organizationID := uuid.Must(uuid.NewV7())
+	expiresAt := now.Add(time.Hour)
+	request, err := normalizeRoleBindingGrant(RoleBindingGrant{UserID: uuid.Must(uuid.NewV7()), OrganizationID: &organizationID, RoleCode: " auditor ", ExpiresAt: &expiresAt, IdempotencyKey: " grant-123 "}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if request.RoleCode != "AUDITOR" || request.IdempotencyKey != "grant-123" || request.StartsAt == nil || !request.StartsAt.Equal(now) {
+		t.Fatalf("unexpected normalized grant: %#v", request)
+	}
+	invalidExpiry := now.Add(-time.Second)
+	if _, err := normalizeRoleBindingGrant(RoleBindingGrant{UserID: request.UserID, OrganizationID: &organizationID, RoleCode: "AUDITOR", ExpiresAt: &invalidExpiry, IdempotencyKey: "grant-456"}, now); !errors.Is(err, ErrConflict) {
+		t.Fatalf("expected invalid validity window conflict, got %v", err)
 	}
 }
 

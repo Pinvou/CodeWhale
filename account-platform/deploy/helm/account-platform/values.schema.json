@@ -16,7 +16,9 @@
     "keycloak",
     "networkPolicy",
     "mobileAuth",
-    "commerce"
+    "commerce",
+    "account",
+    "replicas"
   ],
   "properties": {
     "global": {
@@ -53,7 +55,8 @@
         "keycloak",
         "redis",
         "nats",
-        "newApiTls"
+        "newApiTls",
+        "identityService"
       ],
       "additionalProperties": false,
       "properties": {
@@ -88,6 +91,9 @@
           "$ref": "#/definitions/image"
         },
         "newApiTls": {
+          "$ref": "#/definitions/image"
+        },
+        "identityService": {
           "$ref": "#/definitions/image"
         }
       }
@@ -339,11 +345,16 @@
     "ingress": {
       "type": "object",
       "required": [
-        "enabled"
+        "enabled",
+        "identityHost"
       ],
       "properties": {
         "enabled": {
           "type": "boolean"
+        },
+        "identityHost": {
+          "type": "string",
+          "minLength": 1
         }
       }
     },
@@ -397,7 +408,9 @@
         "smsProvider": {
           "enum": [
             "http",
-            "aliyun"
+            "aliyun",
+            "aliyun-managed",
+            "http-generated"
           ]
         },
         "smsEndpoint": {
@@ -442,6 +455,49 @@
         },
         "baseUrl": {
           "type": "string"
+        }
+      }
+    },
+    "account": {
+      "type": "object",
+      "required": [
+        "walletProvisioningPolicyVersion",
+        "walletProvisioningSlaMinutes",
+        "commerceProviderId",
+        "commerceAdapterVersion"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "walletProvisioningPolicyVersion": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "walletProvisioningSlaMinutes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1440
+        },
+        "commerceProviderId": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,79}$"
+        },
+        "commerceAdapterVersion": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        }
+      }
+    },
+    "replicas": {
+      "type": "object",
+      "required": [
+        "identityService"
+      ],
+      "properties": {
+        "identityService": {
+          "type": "integer",
+          "const": 1
         }
       }
     }
@@ -740,7 +796,10 @@
                   "type": "object",
                   "properties": {
                     "smsProvider": {
-                      "const": "http"
+                      "enum": [
+                        "http",
+                        "http-generated"
+                      ]
                     }
                   }
                 }
@@ -934,7 +993,10 @@
                   "type": "object",
                   "properties": {
                     "smsProvider": {
-                      "const": "http"
+                      "enum": [
+                        "http",
+                        "http-generated"
+                      ]
                     }
                   }
                 }

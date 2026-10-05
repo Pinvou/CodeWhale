@@ -21,22 +21,42 @@ import (
 type SMSPurpose string
 
 const (
-	SMSPurposeRegister SMSPurpose = "REGISTER"
-	SMSPurposeLogin    SMSPurpose = "LOGIN"
+	SMSPurposeRegister      SMSPurpose = "REGISTER"
+	SMSPurposeLogin         SMSPurpose = "LOGIN"
+	SMSPurposeProfileMobile SMSPurpose = "PROFILE_MOBILE"
+	SMSPurposePasswordReset SMSPurpose = "PASSWORD_RESET"
 )
 
 type SMSProvider interface {
-	SendCode(context.Context, string, SMSPurpose, uuid.UUID) (string, error)
-	VerifyCode(context.Context, string, uuid.UUID, string) (bool, error)
+	Descriptor() SMSProviderDescriptor
+	SendCode(context.Context, string, SMSPurpose, uuid.UUID) (SMSDelivery, error)
+	VerifyCode(context.Context, string, uuid.UUID, SMSVerificationData, string) (bool, error)
+}
+
+type SMSProviderDescriptor struct {
+	ID             string
+	AdapterVersion string
+}
+
+type SMSVerificationData struct {
+	Provider SMSProviderDescriptor
+	Opaque   []byte
+}
+
+type SMSDelivery struct {
+	MessageID        string
+	VerificationData []byte
 }
 
 type AliyunSMSConfig struct {
-	AccessKeyID      string
-	AccessKeySecret  string
-	SignName         string
-	RegisterTemplate string
-	LoginTemplate    string
-	Endpoint         string
+	AccessKeyID           string
+	AccessKeySecret       string
+	SignName              string
+	RegisterTemplate      string
+	LoginTemplate         string
+	ProfileMobileTemplate string
+	PasswordResetTemplate string
+	Endpoint              string
 }
 
 type AliyunSMSProvider struct {
@@ -45,12 +65,18 @@ type AliyunSMSProvider struct {
 	now    func() time.Time
 }
 
+func (*AliyunSMSProvider) Descriptor() SMSProviderDescriptor {
+	return SMSProviderDescriptor{ID: "aliyun-managed", AdapterVersion: "v1"}
+}
+
 func NewAliyunSMSProvider(config AliyunSMSConfig) (*AliyunSMSProvider, error) {
 	config.AccessKeyID = strings.TrimSpace(config.AccessKeyID)
 	config.AccessKeySecret = strings.TrimSpace(config.AccessKeySecret)
 	config.SignName = strings.TrimSpace(config.SignName)
 	config.RegisterTemplate = strings.TrimSpace(config.RegisterTemplate)
 	config.LoginTemplate = strings.TrimSpace(config.LoginTemplate)
+	config.ProfileMobileTemplate = strings.TrimSpace(config.ProfileMobileTemplate)
+	config.PasswordResetTemplate = strings.TrimSpace(config.PasswordResetTemplate)
 	config.Endpoint = strings.TrimSpace(config.Endpoint)
 	if config.Endpoint == "" {
 		config.Endpoint = "https://dypnsapi.aliyuncs.com"
@@ -69,10 +95,21 @@ func NewAliyunSMSProvider(config AliyunSMSConfig) (*AliyunSMSProvider, error) {
 	return &AliyunSMSProvider{config: config, client: client, now: func() time.Time { return time.Now().UTC() }}, nil
 }
 
-func (p *AliyunSMSProvider) SendCode(ctx context.Context, mobile string, purpose SMSPurpose, challengeID uuid.UUID) (string, error) {
+func (p *AliyunSMSProvider) SendCode(ctx context.Context, mobile string, purpose SMSPurpose, challengeID uuid.UUID) (SMSDelivery, error) {
 	template := p.config.LoginTemplate
-	if purpose == SMSPurposeRegister {
+	switch purpose {
+	case SMSPurposeRegister:
 		template = p.config.RegisterTemplate
+	case SMSPurposeProfileMobile:
+		template = p.config.ProfileMobileTemplate
+	case SMSPurposePasswordReset:
+		template = p.config.PasswordResetTemplate
+	case SMSPurposeLogin:
+	default:
+		return SMSDelivery{}, ErrSMSUnavailable
+	}
+	if template == "" {
+		return SMSDelivery{}, ErrSMSUnavailable
 	}
 	parameters := url.Values{
 		"PhoneNumber":      {strings.TrimPrefix(mobile, "+86")},
@@ -91,11 +128,11 @@ func (p *AliyunSMSProvider) SendCode(ctx context.Context, mobile string, purpose
 	}
 	request, err := p.signedRequest(ctx, "SendSmsVerifyCode", parameters)
 	if err != nil {
-		return "", err
+		return SMSDelivery{}, err
 	}
 	response, err := p.client.Do(request)
 	if err != nil {
-		return "", ErrSMSUnavailable
+		return SMSDelivery{}, ErrSMSUnavailable
 	}
 	defer response.Body.Close()
 	var body struct {
@@ -109,7 +146,7 @@ func (p *AliyunSMSProvider) SendCode(ctx context.Context, mobile string, purpose
 		} `json:"Model"`
 	}
 	if err := decodeSMSResponse(response.Body, &body); err != nil {
-		return "", errors.New("Aliyun SMS returned an invalid response")
+		return SMSDelivery{}, errors.New("Aliyun SMS returned an invalid response")
 	}
 	// These documented HTTP 400 errors reject the request before delivery.
 	// Other errors, missing fields, or an inconsistent delivery identifier are
@@ -118,22 +155,25 @@ func (p *AliyunSMSProvider) SendCode(ctx context.Context, mobile string, purpose
 	if response.StatusCode == http.StatusBadRequest && body.Success != nil && !*body.Success && body.Model.BizID == "" && body.Model.RequestID == "" {
 		switch body.Code {
 		case "MOBILE_NUMBER_ILLEGAL", "BUSINESS_LIMIT_CONTROL", "FREQUENCY_FAIL", "INVALID_PARAMETERS", "FUNCTION_NOT_OPENED":
-			return "", ErrSMSRejected
+			return SMSDelivery{}, ErrSMSRejected
 		}
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 || body.Code != "OK" || body.Success == nil || !*body.Success {
-		return "", fmt.Errorf("Aliyun SMS rejected the request: %s", sanitizeProviderCode(body.Code))
+		return SMSDelivery{}, fmt.Errorf("Aliyun SMS rejected the request: %s", sanitizeProviderCode(body.Code))
 	}
 	if body.Model.BizID != "" {
-		return body.Model.BizID, nil
+		return SMSDelivery{MessageID: body.Model.BizID}, nil
 	}
 	if body.Model.RequestID != "" {
-		return body.Model.RequestID, nil
+		return SMSDelivery{MessageID: body.Model.RequestID}, nil
 	}
-	return body.RequestID, nil
+	return SMSDelivery{MessageID: body.RequestID}, nil
 }
 
-func (p *AliyunSMSProvider) VerifyCode(ctx context.Context, mobile string, challengeID uuid.UUID, code string) (bool, error) {
+func (p *AliyunSMSProvider) VerifyCode(ctx context.Context, mobile string, challengeID uuid.UUID, verification SMSVerificationData, code string) (bool, error) {
+	if verification.Provider != p.Descriptor() {
+		return false, errors.New("SMS challenge belongs to a different provider adapter")
+	}
 	parameters := url.Values{
 		"PhoneNumber": {strings.TrimPrefix(mobile, "+86")},
 		"CountryCode": {"86"},

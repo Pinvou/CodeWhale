@@ -1,4 +1,4 @@
-function newRequestUUID() {
+export function newRequestUUID() {
   const bytes = globalThis.crypto.getRandomValues(new Uint8Array(16));
   bytes[6] = (bytes[6] & 0x0f) | 0x40;
   bytes[8] = (bytes[8] & 0x3f) | 0x80;
@@ -86,6 +86,7 @@ export class AdminPlatformClient {
   accountOverview(signal) { return this.request('account', '/admin/v1/overview', signal); }
   roles(signal) { return this.request('account', '/admin/v1/roles', signal); }
   users(search, signal) { return this.request('account', `/admin/v1/users?limit=100&q=${encodeURIComponent(search || '')}`, signal); }
+  userByCode(userCode, signal) { return this.request('account', `/admin/v1/user-code-lookups/${encodeURIComponent(userCode)}`, signal); }
   userMemberships(userID, signal) { return this.request('account', `/admin/v1/users/${encodeURIComponent(userID)}/memberships`, signal); }
   setUserStatus(userID, status) { return this.mutate('account', `/admin/v1/users/${encodeURIComponent(userID)}/status`, 'PATCH', { status }); }
   deleteUser(userID) { return this.mutate('account', `/admin/v1/users/${encodeURIComponent(userID)}`, 'DELETE'); }
@@ -153,6 +154,30 @@ export class AdminPlatformClient {
   usageRequest(usageRequestID, signal) { return this.request('token', `/admin/v1/usage-requests/${encodeURIComponent(usageRequestID)}`, signal); }
   retryUsageReconciliation(usageRequestID, reason) { return this.mutate('token', `/admin/v1/usage-requests/${encodeURIComponent(usageRequestID)}/retry-reconciliation`, 'POST', { reason }); }
   systemStatus(signal) { return this.request('system', '/status', signal); }
+
+  roleBindings(signal) { return this.request('account', '/admin/v1/role-bindings', signal); }
+  grantRole(input) { return this.mutate('account', '/admin/v1/role-bindings', 'POST', input); }
+  revokeRole(bindingID) { return this.mutate('account', `/admin/v1/role-bindings/${encodeURIComponent(bindingID)}`, 'DELETE'); }
+  registrationOperations(filters, signal) {
+    const query = new URLSearchParams();
+    for (const key of ['status','stage','responsibility','sla','older_than_minutes']) if (filters[key] !== '') query.set(key, filters[key]);
+    return this.request('account', `/admin/v1/registration-operations?${query}`, signal);
+  }
+  repairRegistration(operationID, action) {
+    if (!['retry','compensate'].includes(action)) throw new TypeError('invalid registration action');
+    return this.mutate('account', `/admin/v1/registration-operations/${encodeURIComponent(operationID)}/actions/${action}`, 'POST');
+  }
+  approvalRequests(filters, signal) {
+    const query = new URLSearchParams({ limit:'100' });
+    for (const key of ['command_type','status','risk_class','requester_user_id','target','submitted_from','submitted_to','expires_from','expires_to']) if (filters[key]) query.set(key, filters[key]);
+    return this.request('account', `/admin/v1/approval-requests?${query}`, signal);
+  }
+  createAdjustment(input) { return this.mutate('billing', '/admin/v1/adjustments', 'POST', input); }
+  createApproval(input) { return this.mutate('account', '/admin/v1/approval-requests', 'POST', input); }
+  approvalAction(id, action, input) {
+    if (!['submit','withdraw','decide'].includes(action)) throw new TypeError('invalid approval action');
+    return this.mutate('account', `/admin/v1/approval-requests/${encodeURIComponent(id)}/actions/${action}`, 'POST', input);
+  }
 
   async logout() {
     const response = await fetch(`${this.baseURL}/api/logout`, {
