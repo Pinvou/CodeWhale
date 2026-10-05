@@ -88,6 +88,10 @@ ON CONFLICT(owner_type,owner_id,name) DO NOTHING`, accountID, ownerType, ownerID
 		}
 	} else if err != nil {
 		return err
+	} else {
+		// Provision only once. Existing platform account, route and credential
+		// states belong to the administrator, including explicit disable/delete.
+		return tx.Commit(ctx)
 	}
 	if _, err := tx.Exec(ctx, `UPDATE token_accounts SET wallet_id=$2,status='ACTIVE',default_priority=$3,updated_at=$4 WHERE id=$1`, accountID, walletID, p.config.Priority, now); err != nil {
 		return err
@@ -118,12 +122,12 @@ ON CONFLICT(token_account_id) DO UPDATE SET scope=EXCLUDED.scope,owner_organizat
 		if err := tx.QueryRow(ctx, `SELECT COALESCE(max(version),0)+1 FROM provider_credentials WHERE token_account_id=$1`, accountID).Scan(&version); err != nil {
 			return err
 		}
-		_, err = tx.Exec(ctx, `INSERT INTO provider_credentials(id,token_account_id,provider,base_url,ciphertext,key_id,fingerprint,version,status,allowed_models,validated_at,activated_at,created_by,created_at)
-VALUES($1,$2,$3,$4,$5,$6,$7,$8,'ACTIVE',$9,$10,$10,$11,$10)`, credentialID, accountID, p.config.Provider, p.config.BaseURL, ciphertext, p.repository.secrets.KeyID(), fingerprint, version, p.config.Models, now, resolved.UserID)
+		_, err = tx.Exec(ctx, `INSERT INTO provider_credentials(id,token_account_id,provider,base_url,ciphertext,key_id,fingerprint,version,status,allowed_models,validated_at,activated_at,created_by,created_at,validation_status,validation_checked_by)
+VALUES($1,$2,$3,$4,$5,$6,$7,$8,'ACTIVE',$9,$10,$10,$11,$10,'VALID',$11)`, credentialID, accountID, p.config.Provider, p.config.BaseURL, ciphertext, p.repository.secrets.KeyID(), fingerprint, version, p.config.Models, now, resolved.UserID)
 	} else if err != nil {
 		return err
 	} else {
-		_, err = tx.Exec(ctx, `UPDATE provider_credentials SET provider=$2,base_url=$3,ciphertext=$4,key_id=$5,status='ACTIVE',allowed_models=$6,validated_at=$7,activated_at=$7,retired_at=NULL WHERE id=$1 AND status<>'REVOKED'`, credentialID, p.config.Provider, p.config.BaseURL, ciphertext, p.repository.secrets.KeyID(), p.config.Models, now)
+		_, err = tx.Exec(ctx, `UPDATE provider_credentials SET provider=$2,base_url=$3,ciphertext=$4,key_id=$5,status='ACTIVE',allowed_models=$6,validated_at=$7,activated_at=$7,retired_at=NULL,validation_status='VALID',validation_checked_by=$8 WHERE id=$1 AND status<>'REVOKED'`, credentialID, p.config.Provider, p.config.BaseURL, ciphertext, p.repository.secrets.KeyID(), p.config.Models, now, resolved.UserID)
 	}
 	if err != nil {
 		return err

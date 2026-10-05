@@ -25,17 +25,20 @@ import (
 )
 
 type Config struct {
-	Environment      string
-	IssuerURL        *url.URL
-	JWKSURL          *url.URL
-	PublicURL        *url.URL
-	AuthorizationURL *url.URL
-	TokenURL         *url.URL
-	ClientID         string
-	AccountURL       *url.URL
-	BillingURL       *url.URL
-	TokenGatewayURL  *url.URL
-	SecureCookies    bool
+	Environment       string
+	IssuerURL         *url.URL
+	JWKSURL           *url.URL
+	PublicURL         *url.URL
+	AuthorizationURL  *url.URL
+	TokenURL          *url.URL
+	ClientID          string
+	AccountURL        *url.URL
+	BillingURL        *url.URL
+	TokenGatewayURL   *url.URL
+	SecureCookies     bool
+	KeycloakStatusURL *url.URL
+	NATSStatusURL     *url.URL
+	RelayURLs         map[string]*url.URL
 }
 
 type Service struct {
@@ -58,6 +61,15 @@ func NewService(config Config, store Store) (*Service, error) {
 	for _, endpoint := range []*url.URL{config.PublicURL, config.AuthorizationURL, config.TokenURL, config.AccountURL, config.BillingURL, config.TokenGatewayURL, config.IssuerURL, config.JWKSURL} {
 		if endpoint.Host == "" || (endpoint.Scheme != "https" && endpoint.Scheme != "http") || endpoint.User != nil || endpoint.Fragment != "" {
 			return nil, errors.New("portal endpoints must be absolute HTTP(S) URLs without credentials or fragments")
+		}
+	}
+	statusEndpoints := []*url.URL{config.KeycloakStatusURL, config.NATSStatusURL}
+	for _, endpoint := range config.RelayURLs {
+		statusEndpoints = append(statusEndpoints, endpoint)
+	}
+	for _, endpoint := range statusEndpoints {
+		if endpoint != nil && (endpoint.Host == "" || (endpoint.Scheme != "http" && endpoint.Scheme != "https") || endpoint.User != nil || endpoint.Fragment != "" || endpoint.RawQuery != "") {
+			return nil, errors.New("status endpoints must be HTTP(S) URLs without credentials, query or fragments")
 		}
 	}
 	if !development {
@@ -90,6 +102,7 @@ func (s *Service) Handler(static http.Handler) http.Handler {
 	router.Any("/api/admin/account/*resource", httpserver.AdaptFunc(s.proxyAdminAccount))
 	router.Any("/api/admin/billing/*resource", httpserver.AdaptFunc(s.proxyAdminBilling))
 	router.Any("/api/admin/token/*resource", httpserver.AdaptFunc(s.proxyAdminToken))
+	router.GET("/api/admin/system/status", httpserver.AdaptFunc(s.adminSystemStatus))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Referrer-Policy", "no-referrer")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
@@ -601,7 +614,7 @@ func safeProxyPathID(value string) bool {
 }
 
 func accountAdminPathAllowed(method, resource string) bool {
-	if adminReadPathAllowed(method, resource, "/admin/v1/overview", "/admin/v1/users", "/admin/v1/organizations", "/admin/v1/audit-logs") {
+	if adminReadPathAllowed(method, resource, "/admin/v1/overview", "/admin/v1/roles", "/admin/v1/users", "/admin/v1/organizations", "/admin/v1/audit-logs") {
 		return true
 	}
 	if method == http.MethodPost && resource == "/admin/v1/organizations" {
@@ -611,6 +624,10 @@ func accountAdminPathAllowed(method, resource string) bool {
 		return false
 	}
 	parts := strings.Split(strings.Trim(resource, "/"), "/")
+	if len(parts) == 4 && parts[0] == "admin" && parts[1] == "v1" && parts[2] == "audit-logs" && method == http.MethodGet {
+		_, err := uuid.Parse(parts[3])
+		return err == nil
+	}
 	if len(parts) < 4 || parts[0] != "admin" || parts[1] != "v1" || (parts[2] != "users" && parts[2] != "organizations") {
 		return false
 	}
@@ -620,6 +637,9 @@ func accountAdminPathAllowed(method, resource string) bool {
 	if method == http.MethodDelete && len(parts) == 4 {
 		return true
 	}
+	if parts[2] == "users" && len(parts) == 5 && parts[4] == "memberships" {
+		return method == http.MethodGet
+	}
 	if method == http.MethodPatch && len(parts) == 4 && parts[2] == "organizations" {
 		return true
 	}
@@ -627,7 +647,19 @@ func accountAdminPathAllowed(method, resource string) bool {
 		return true
 	}
 	if parts[2] == "organizations" && len(parts) == 5 && parts[4] == "members" {
-		return method == http.MethodGet
+		return method == http.MethodGet || method == http.MethodPost
+	}
+	if parts[2] == "organizations" && len(parts) == 7 && parts[4] == "members" {
+		if _, err := uuid.Parse(parts[5]); err != nil || parts[6] != "roles" {
+			return false
+		}
+		return method == http.MethodPut
+	}
+	if parts[2] == "organizations" && len(parts) == 6 && parts[4] == "members" {
+		if _, err := uuid.Parse(parts[5]); err != nil {
+			return false
+		}
+		return method == http.MethodDelete
 	}
 	if parts[2] == "organizations" && len(parts) == 5 && parts[4] == "ownership" {
 		return method == http.MethodPost
@@ -648,11 +680,75 @@ func accountAdminPathAllowed(method, resource string) bool {
 }
 
 func billingAdminPathAllowed(method, resource string) bool {
-	return adminReadPathAllowed(method, resource, "/admin/v1/overview", "/admin/v1/wallets", "/admin/v1/payment-orders", "/admin/v1/adjustments", "/admin/v1/usage-holds")
+	if adminReadPathAllowed(method, resource, "/admin/v1/overview", "/admin/v1/wallets", "/admin/v1/pricing-versions", "/admin/v1/payment-orders", "/admin/v1/adjustments", "/admin/v1/usage-holds", "/admin/v1/reconciliation-runs") {
+		return true
+	}
+	if (resource == "/admin/v1/pricing-versions" || resource == "/admin/v1/reconciliation-runs") && method == http.MethodPost {
+		return true
+	}
+	if strings.Contains(resource, "..") {
+		return false
+	}
+	parts := strings.Split(strings.Trim(resource, "/"), "/")
+	if len(parts) != 5 || parts[0] != "admin" || parts[1] != "v1" {
+		return false
+	}
+	if _, err := uuid.Parse(parts[3]); err != nil {
+		return false
+	}
+	switch parts[2] {
+	case "wallets":
+		return method == http.MethodGet && parts[4] == "ledger"
+	case "payment-orders":
+		return method == http.MethodPost && (parts[4] == "sync" || parts[4] == "refunds")
+	case "adjustments":
+		return method == http.MethodPost && (parts[4] == "approve" || parts[4] == "reject")
+	case "usage-holds":
+		return method == http.MethodPost && parts[4] == "release"
+	case "reconciliation-runs":
+		return method == http.MethodGet && parts[4] == "cases"
+	default:
+		return false
+	}
 }
 
 func tokenAdminPathAllowed(method, resource string) bool {
-	return adminReadPathAllowed(method, resource, "/admin/v1/overview", "/admin/v1/token-accounts", "/admin/v1/usage-requests")
+	if adminReadPathAllowed(method, resource, "/admin/v1/overview", "/admin/v1/token-accounts", "/admin/v1/usage-requests") {
+		return true
+	}
+	if strings.Contains(resource, "..") {
+		return false
+	}
+	parts := strings.Split(strings.Trim(resource, "/"), "/")
+	if len(parts) < 4 || parts[0] != "admin" || parts[1] != "v1" {
+		return false
+	}
+	if _, err := uuid.Parse(parts[3]); err != nil {
+		return false
+	}
+	if parts[2] == "usage-requests" {
+		return (len(parts) == 4 && method == http.MethodGet) ||
+			(len(parts) == 5 && parts[4] == "retry-reconciliation" && method == http.MethodPost)
+	}
+	if parts[2] != "token-accounts" {
+		return false
+	}
+	if len(parts) == 4 {
+		return method == http.MethodGet
+	}
+	if len(parts) == 5 {
+		switch parts[4] {
+		case "status":
+			return method == http.MethodPatch
+		case "routes":
+			return method == http.MethodPut || method == http.MethodDelete
+		}
+	}
+	if len(parts) == 7 && parts[4] == "credentials" && parts[6] == "validate" && method == http.MethodPost {
+		_, err := uuid.Parse(parts[5])
+		return err == nil
+	}
+	return false
 }
 
 func adminReadPathAllowed(method, resource string, allowed ...string) bool {

@@ -334,12 +334,12 @@ try {
   });
 
   for (const [kind, navigation, tab, cell, labels, attribute] of [
-    ["orders", 4, 2, 0, ["Order A", "Order B", "Order C"]],
-    ["adjustments", 4, 3, 2, ["Adjustment A", "Adjustment B", "Adjustment C"]],
+    ["orders", 4, 3, 0, ["Order A", "Order B", "Order C"]],
+    ["adjustments", 4, 4, 2, ["Adjustment A", "Adjustment B", "Adjustment C"]],
     [
       "holds",
       4,
-      4,
+      5,
       0,
       [
         "00000000-0000-4000-8000-000000000801",
@@ -349,7 +349,7 @@ try {
       "title",
     ],
     ["tokens", 5, 1, 0, ["Token A", "Token B", "Token C"]],
-    ["audits", 6, null, 0, ["Audit A", "Audit B", "Audit C"]],
+    ["audits", 7, null, 0, ["Audit A", "Audit B", "Audit C"]],
   ]) {
     await run(
       `${kind} retain three distinct rows while shared owners are reordered`,

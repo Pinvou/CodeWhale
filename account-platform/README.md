@@ -49,7 +49,7 @@
 - `production`/`production-new` 会拒绝本地密钥 Provider，必须接入 KMS/Vault 实现。
 - `TOKEN_PROVIDER_ALLOWED_HOSTS` 是逗号分隔的精确主机白名单；生产环境同时强制 HTTPS。
 - Gateway 不重试模型调用。上游结果不确定、流式断开或缺失 usage 时保留 Hold 并进入 `REVIEW`。
-- Hold 到期进入 `REVIEW` 并保留预占；明确的用量结算或未消费释放才能结束该预占。
+- Hold 到期进入 `REVIEW` 并保留预占；自动超时不代表免单。平台管理员可对非执行中的调用明确作最终免单：Token 先持久化 actor/reason/hold 意图，Billing 行锁裁决免单或既有扣费的唯一赢家，Token 按权威结果收尾。执行中的 `UPSTREAM_ACTIVE` 拒绝免单，已扣费返回冲突。成功免单的两个领域均为 `RELEASED`，收费为零，真实用量与原计算证据保留，后续消费证据不能重扣同一调用。跨服务故障通过原补偿 worker 重试持久意图，普通自动释放不会自行生成管理员免单。
 - `TOKEN_GATEWAY_MAX_INPUT_TOKENS` 是计算预占的输入规模假设，当前不执行 tokenizer 计数。省略输出上限时 Gateway 会向上游补入默认 `max_tokens`；若实际用量费用超过预占，结算进入 `REVIEW`，不会超额扣款。真实模型的输入规模仍需后续供应商验收确认。
 - Keycloak API 凭据须为 `typ=Bearer` 的已验签 access token；ID/Refresh token 不可代替。共享 JWKS 获取最多等待 5 秒，失败后可重新获取。
 - 桌面聊天由客户端按每次逻辑调用发送 `Idempotency-Key`；同一次调用的网络重试复用原键，重新发起或重新生成使用新键。Gateway 拒绝缺键请求，不自动生成键。
@@ -61,6 +61,12 @@
 真实模型数据面使用独立部署的官方 New API。开发命令启用 `real-newapi` Compose profile，生产 Helm 以固定版本和镜像摘要部署仅供 Token Gateway 私网访问的 New API；初始化与升级流程见 [`deploy/runbooks/newapi-deployment.md`](deploy/runbooks/newapi-deployment.md)。
 
 Token Gateway 在个人或组织上下文第一次调用尚无可用路由的受支持模型时，会幂等创建平台托管的默认 Token Account、加密凭据与路由。该账号不会出现在普通用户的 Token 管理接口中，也不能由普通用户修改；显式指定 Token Account 的请求不会触发默认路由回退。
+
+默认配置只用于首次创建。后台已经持久化的账号禁用、凭据验证失败、路由降级或删除不会被后续模型调用自动覆盖；配置变更也不会自动重写已创建的账号。重新启用或调整已存在的账号应通过后台运营入口完成。
+
+后台充值退款必须携带至少 16 字符的 `Idempotency-Key`：客户端为每次逻辑退款生成独立键，响应未知时以同一金额、原因和键重试。新增后台价格、台账和对账快照的金额读取均为精确十进制字符串；台账以 `posting_id` 标识每笔 posting，同一 journal 可以包含多笔钱包 posting。
+
+运行状态中的 NewAPI 探针经既有 Token Gateway 管理鉴权中介调用配置内的精确 `GET /api/status`，沿用 Gateway 的 HTTPS、主机允许列表与 CA 信任。Portal 不获取 NewAPI 管理密钥或 CA，也不增加到其数据端口的网络权限。补偿计数或最近错误无法读取时，现有错误列表明确披露不可读取，不能据零计数判断任务已经全部收尾。
 
 模型调用必须携带每次逻辑调用的 `Idempotency-Key`（16–128 个 UTF-8 字符）。同一次调用的网络重试复用原键；用户重新发起或重新生成同一提示词时使用新键。缺键返回 400，重复键返回 409 且不重复请求模型或结算，不再按用户、会话和请求体推导永久键。
 
@@ -85,3 +91,5 @@ node scripts/account-platform.mjs test security
 设置 `PINVOU_PORTAL_TEST_REDIS_URL` 可启用真实 Redis 的一次性登录流、会话期限、刷新锁、退出竞态及连接中断回归。测试仅清理自己的随机键；未配置时明确跳过，CI 提供独立 Redis 并实际执行。
 
 Integration 使用独立 Compose project 并在结束后删除测试卷；不得指向开发或生产 project。`e2e` 进一步执行三种模拟支付渠道、并发幂等、Hold 结算、部分退款和对账旅程；`fault` 验证 Billing 在支付回调期间重启后自动收敛，以及 NATS 停止期间本地账本事务不丢失。三者都在每次运行时只在内存中生成 Compose 凭据，不会写入仓库。真实 New API 和真实支付测试需要明确 opt-in，普通测试不读取真实凭据或访问生产服务。运维入口见 [`deploy/runbooks/`](deploy/runbooks/README.md)。
+
+首次观察到渠道部分或全额退款而本地尚未入账的充值进入 `MANUAL_REVIEW`，不猜测原额或净额积分。创建恢复、主动同步、关闭返回及迟到成功通知都遵守该状态；已入账订单保留既有退款流程。

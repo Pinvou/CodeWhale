@@ -47,6 +47,11 @@ test('actual production render confines TLS, CA, routes and network access', () 
   assert.notEqual(serverTLS.optional, true);
   const gatewayContainer = gateway.spec.template.spec.containers[0];
   const environment = Object.fromEntries(gatewayContainer.env.filter(item => item.value !== undefined).map(item => [item.name, item.value]));
+
+  const billing = object('Deployment', `${name}-billing-service`).spec.template.spec.containers[0];
+  assert.equal(billing.env.find(item => item.name === 'TOKEN_GATEWAY_HTTP_URL').value, `http://${name}-token-gateway:8080`);
+  assert.ok(billing.env.some(item => item.name === 'INTERNAL_SERVICE_TOKEN' && item.valueFrom.secretKeyRef.key === 'internal-service-token'));
+  assert.ok(gatewayContainer.env.some(item => item.name === 'INTERNAL_SERVICE_TOKEN' && item.valueFrom.secretKeyRef.key === 'internal-service-token'));
   assert.equal(environment.SSL_CERT_DIR, '/etc/ssl/certs:/etc/newapi-ca');
   assert.equal(environment.TOKEN_DEFAULT_PROVIDER_BASE_URL, 'https://newapi:8443');
   assert.equal(environment.TOKEN_RECONCILIATION_NEWAPI_BASE_URL, 'https://newapi:8443');

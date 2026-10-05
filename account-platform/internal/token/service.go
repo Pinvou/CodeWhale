@@ -20,6 +20,7 @@ import (
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/identity"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/observability"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/serviceauth"
 	"github.com/google/uuid"
 )
 
@@ -47,6 +48,9 @@ type Service struct {
 	defaultMaxOutputTokens int64
 	maximumOutputTokens    int64
 	defaultRoutes          DefaultRouteProvisioner
+	newAPIStatusURL        *url.URL
+	newAPIStatusClient     *http.Client
+	waiverServiceToken     string
 }
 
 func (s *Service) WithDefaultRoutes(provisioner DefaultRouteProvisioner) *Service {
@@ -84,10 +88,21 @@ func (s *Service) Handler(verify identity.VerifyFunc) http.Handler {
 	router.GET("/v1/me/balance", httpserver.AdaptFunc(s.getBalance))
 	admin := router.Group("/admin/v1")
 	admin.Use(identity.RequireRealmRoleGin("platform-admin"))
+	admin.GET("/system/newapi-status", httpserver.AdaptFunc(s.adminNewAPIStatus))
 	admin.GET("/overview", httpserver.AdaptFunc(s.adminOverview))
 	admin.GET("/token-accounts", httpserver.AdaptFunc(s.adminTokenAccounts))
+	admin.GET("/token-accounts/:token_account_id", httpserver.AdaptFunc(s.adminTokenAccount))
+	admin.PATCH("/token-accounts/:token_account_id/status", httpserver.AdaptFunc(s.adminSetTokenAccountStatus))
+	admin.PUT("/token-accounts/:token_account_id/routes", httpserver.AdaptFunc(s.adminUpsertTokenRoute))
+	admin.DELETE("/token-accounts/:token_account_id/routes", httpserver.AdaptFunc(s.adminDeleteTokenRoute))
+	admin.POST("/token-accounts/:token_account_id/credentials/:credential_id/validate", httpserver.AdaptFunc(s.adminValidateCredential))
 	admin.GET("/usage-requests", httpserver.AdaptFunc(s.adminUsageRequests))
-	return router
+	admin.GET("/usage-requests/:usage_request_id", httpserver.AdaptFunc(s.adminUsageRequest))
+	admin.POST("/usage-requests/:usage_request_id/retry-reconciliation", httpserver.AdaptFunc(s.adminRetryReconciliation))
+	mux := http.NewServeMux()
+	mux.Handle("POST /internal/v1/usage-waivers", serviceauth.Middleware(s.waiverServiceToken, http.HandlerFunc(s.adminWaiver)))
+	mux.Handle("/", router)
+	return mux
 }
 
 func (s *Service) listManagedTokenAccounts(w http.ResponseWriter, r *http.Request) {

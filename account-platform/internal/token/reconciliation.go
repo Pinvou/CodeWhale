@@ -99,6 +99,7 @@ func (r *PostgresRepository) StopReconciliation(ctx context.Context, item Reconc
 	command, err := r.pool.Exec(ctx, `UPDATE usage_requests
 SET status='REVIEW',error_class='automatic_reconciliation_exhausted',reconciliation_next_at=NULL,reconciliation_lease_until=NULL,reconciliation_last_error=$2,reconciliation_stopped_at=$3,updated_at=$3
 WHERE id=$1 AND status IN ('SETTLEMENT_PENDING','REVIEW') AND reconciliation_stopped_at IS NULL
+  AND NOT COALESCE(usage_snapshot,'{}'::jsonb) ? 'admin_waiver_intent'
   AND reconciliation_lease_until=$4 AND reconciliation_attempts=$5 AND reconciliation_lease_until>$3`, item.ID, truncateReconciliationError(reason), now, item.LeaseUntil, item.Attempts)
 	if err != nil {
 		return err
@@ -111,8 +112,8 @@ WHERE id=$1 AND status IN ('SETTLEMENT_PENDING','REVIEW') AND reconciliation_sto
 
 func truncateReconciliationError(value string) string {
 	value = strings.TrimSpace(value)
-	if len(value) > 500 {
-		return value[:500]
+	if runes := []rune(value); len(runes) > 500 {
+		return string(runes[:500])
 	}
 	return value
 }
@@ -294,7 +295,11 @@ func (r *UsageReconciler) runOnce(ctx context.Context) {
 		cancel()
 		if err != nil {
 			r.logger.Warn("request reconciliation deferred", "usage_request_id", item.ID, "attempt", item.Attempts, "error", err)
-			if errors.Is(err, errManualReconciliationRequired) || r.now().Sub(item.StartedAt) >= r.maxAge {
+			var waiver struct {
+				Intent *WaiverIntent `json:"admin_waiver_intent"`
+			}
+			_ = json.Unmarshal(item.UsageSnapshot, &waiver)
+			if (errors.Is(err, errManualReconciliationRequired) || r.now().Sub(item.StartedAt) >= r.maxAge) && waiver.Intent == nil {
 				_ = r.store.StopReconciliation(ctx, item, "automatic reconciliation exhausted: "+err.Error())
 				continue
 			}
@@ -304,6 +309,24 @@ func (r *UsageReconciler) runOnce(ctx context.Context) {
 }
 
 func (r *UsageReconciler) reconcile(ctx context.Context, item ReconciliationItem) error {
+	var waiver struct {
+		Intent *WaiverIntent `json:"admin_waiver_intent"`
+	}
+	if json.Unmarshal(item.UsageSnapshot, &waiver) == nil && waiver.Intent != nil {
+		billing, ok := r.billing.(WaiverBilling)
+		store, storeOK := r.store.(WaiverStore)
+		if !ok || !storeOK {
+			return errors.New("usage waiver coordinator unavailable")
+		}
+		if item.HoldID == nil || *item.HoldID != waiver.Intent.HoldID {
+			return errors.New("invalid persisted usage waiver")
+		}
+		authority, err := billing.ResolveWaiver(ctx, item.ID, *waiver.Intent)
+		if err != nil {
+			return err
+		}
+		return store.FinishWaiver(ctx, item.ID, *waiver.Intent, authority)
+	}
 	// Only the proxy's persisted, definite release decision can be retried.
 	// Channel error logs and missing consumption evidence never authorize release.
 	if item.Status == "REVIEW" && item.ErrorClass != nil && (*item.ErrorClass == "release_pending" || *item.ErrorClass == "local_release_record_pending") {

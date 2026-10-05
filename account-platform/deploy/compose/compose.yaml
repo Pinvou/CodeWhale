@@ -148,11 +148,13 @@ services:
       OIDC_AUDIENCE: pinvou-desktop-dev
       NATS_URL: nats://nats:4222
       PAYMENT_SIMULATOR_URL: http://payment-simulator:8080
+      TOKEN_GATEWAY_HTTP_URL: http://token-gateway:8080
       BILLING_PAYMENT_CALLBACK_URL: http://billing-service:8080/internal/payment/notifications
       INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?set INTERNAL_SERVICE_TOKEN}
       PAYMENT_SIM_HMAC_UNIONPAY: ${PAYMENT_SIM_HMAC_UNIONPAY:?set PAYMENT_SIM_HMAC_UNIONPAY}
       PAYMENT_SIM_HMAC_ALIPAY: ${PAYMENT_SIM_HMAC_ALIPAY:?set PAYMENT_SIM_HMAC_ALIPAY}
       PAYMENT_SIM_HMAC_WECHAT: ${PAYMENT_SIM_HMAC_WECHAT:?set PAYMENT_SIM_HMAC_WECHAT}
+      BILLING_PAYMENT_EXPIRY_INTERVAL_SECONDS: "15"
     depends_on:
       postgres:
         condition: service_healthy
@@ -271,6 +273,11 @@ services:
       ACCOUNT_HTTP_URL: http://account-service:8080
       BILLING_HTTP_URL: http://billing-service:8080
       TOKEN_GATEWAY_HTTP_URL: http://token-gateway:8080
+      SYSTEM_KEYCLOAK_STATUS_URL: http://keycloak:8080/realms/pinvou/.well-known/openid-configuration
+      SYSTEM_NATS_STATUS_URL: http://nats:8222/healthz
+      SYSTEM_ACCOUNT_RELAY_URL: http://account-event-relay:9090
+      SYSTEM_BILLING_RELAY_URL: http://billing-event-relay:9090
+      SYSTEM_TOKEN_RELAY_URL: http://token-event-relay:9090
     depends_on:
       redis:
         condition: service_healthy

@@ -17,6 +17,7 @@ import (
 type Service struct {
 	repository Repository
 	payments   *PaymentCoordinator
+	waivers    WaiverCoordinator
 	now        func() time.Time
 }
 
@@ -38,6 +39,7 @@ func (s *Service) Handler(serviceToken string, adminVerify ...identity.VerifyFun
 	protected.POST("/internal/v1/holds/reserve", httpserver.AdaptFunc(s.reserve))
 	protected.POST("/internal/v1/holds/commit", httpserver.AdaptFunc(s.commit))
 	protected.POST("/internal/v1/holds/release", httpserver.AdaptFunc(s.release))
+	protected.POST("/internal/v1/holds/waiver", httpserver.AdaptFunc(s.resolveUsageWaiver))
 	protected.GET("/internal/v1/pricing/current", httpserver.AdaptFunc(s.currentPrice))
 	protected.GET("/internal/v1/pricing/:price_version_id", httpserver.AdaptFunc(s.priceByID))
 	protected.POST("/internal/v1/adjustments", httpserver.AdaptFunc(s.requestAdjustment))
@@ -60,9 +62,20 @@ func (s *Service) Handler(serviceToken string, adminVerify ...identity.VerifyFun
 		admin.Use(identity.GinMiddleware(adminVerify[0]), identity.RequireRealmRoleGin("platform-admin"))
 		admin.GET("/overview", httpserver.AdaptFunc(s.adminOverview))
 		admin.GET("/wallets", httpserver.AdaptFunc(s.adminWallets))
+		admin.GET("/wallets/:wallet_id/ledger", httpserver.AdaptFunc(s.adminWalletLedger))
+		admin.GET("/pricing-versions", httpserver.AdaptFunc(s.adminPriceVersions))
+		admin.POST("/pricing-versions", httpserver.AdaptFunc(s.adminCreatePriceVersion))
 		admin.GET("/payment-orders", httpserver.AdaptFunc(s.adminPaymentOrders))
+		admin.POST("/payment-orders/:order_id/sync", httpserver.AdaptFunc(s.adminSyncPaymentOrder))
+		admin.POST("/payment-orders/:order_id/refunds", httpserver.AdaptFunc(s.adminRefundPaymentOrder))
 		admin.GET("/adjustments", httpserver.AdaptFunc(s.adminAdjustments))
+		admin.POST("/adjustments/:adjustment_id/approve", httpserver.AdaptFunc(s.adminApproveAdjustment))
+		admin.POST("/adjustments/:adjustment_id/reject", httpserver.AdaptFunc(s.adminRejectAdjustment))
 		admin.GET("/usage-holds", httpserver.AdaptFunc(s.adminUsageHolds))
+		admin.POST("/usage-holds/:hold_id/release", httpserver.AdaptFunc(s.adminReleaseUsageHold))
+		admin.GET("/reconciliation-runs", httpserver.AdaptFunc(s.adminReconciliationRuns))
+		admin.POST("/reconciliation-runs", httpserver.AdaptFunc(s.adminRunReconciliation))
+		admin.GET("/reconciliation-runs/:run_id/cases", httpserver.AdaptFunc(s.adminReconciliationCases))
 	}
 	return router
 }

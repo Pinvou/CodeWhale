@@ -9,7 +9,9 @@
 
 `real-newapi` profile 的 New API 同时连接私有 `backend` 和可出站的 `frontend` 桥，仅在宿主机回环地址发布 `18106`，以支持本地初始化与上游模型连接。数据库、Redis、NATS 仍仅连接私有网络；这不构成真实模型或生产网络验收。
 
-平台管理台位于 Token Portal 的 `/admin.html`，复用 Keycloak 登录，并只接受带有 `platform-admin` Realm 角色的用户。管理台提供 Account、Billing 和 Token Gateway 的运营视图；账务与密钥数据保持只读，账号与组织支持受审计的启用、禁用和软删除操作。
+平台管理台位于 Token Portal 的 `/admin.html`，复用 Keycloak 登录，并只接受带有 `platform-admin` Realm 角色的用户。管理台提供 Account、Billing、Token Gateway、系统运行与审计等受保护的运营功能。供应商凭据只展示状态、指纹和更新时间等元数据，真实密钥不会返回浏览器。
+
+远程部署只向公网开放 Keycloak 的 `/realms/` 与 `/resources/` 登录所需路径，管理控制台 `/admin/` 必须通过受限网络或本地隧道访问，具体见 [`../runbooks/keycloak-admin-access.md`](../runbooks/keycloak-admin-access.md)。
 
 首次部署或已有 Keycloak 数据卷升级后，在本机通过环境变量提供平台管理员账号和密码，再运行初始化脚本。密码不得写入仓库中的 `.env.example`、命令历史或部署日志：
 

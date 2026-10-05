@@ -121,6 +121,8 @@ test('Compose keeps data stores private and simulator development-only', async (
   assert.match(compose.services['billing-service'].environment.DATABASE_URL, /account_platform_billing/);
   assert.equal(compose.services['billing-service'].environment.OIDC_AUDIENCE, compose.services['account-service'].environment.OIDC_AUDIENCE);
   assert.equal(compose.services['token-portal'].environment.BILLING_HTTP_URL, 'http://billing-service:8080');
+  assert.equal(compose.services['token-portal'].environment.SYSTEM_NATS_STATUS_URL, 'http://nats:8222/healthz');
+  assert.equal(compose.services['token-portal'].environment.SYSTEM_ACCOUNT_RELAY_URL, 'http://account-event-relay:9090');
   assert.match(compose.services['account-service'].environment.DATABASE_URL, /account_platform_account/);
   assert.match(compose.services['token-gateway'].environment.DATABASE_URL, /account_platform_token/);
   assert.notEqual(
@@ -132,6 +134,7 @@ test('Compose keeps data stores private and simulator development-only', async (
     assert.equal(relay.environment.EVENT_SOURCE, source);
     assert.equal(relay.environment.NATS_URL, 'nats://nats:4222');
     assert.equal(relay.environment.DATABASE_URL, compose.services[`${source === 'token' ? 'token-gateway' : `${source}-service`}`].environment.DATABASE_URL);
+    assert.equal(relay.ports, undefined, `${source} relay metrics must remain internal`);
   }
   const example = await readFile(path.join(root, 'deploy/compose/.env.example'), 'utf8');
   const names = new Set(example.split(/\r?\n/).filter(Boolean).map((line) => line.split('=', 1)[0]));
@@ -175,6 +178,19 @@ test('Keycloak development client enables password login without enabling implic
   assert.doesNotMatch(provisioning, /PINVOU_ADMIN_PASSWORD=['"][^$]/);
 });
 
+test('remote Keycloak administration is available only through a controlled local channel', async () => {
+  const proxy = await readFile(path.join(root, 'deploy/nginx/account-platform.conf.template'), 'utf8');
+  const remoteCompose = await readFile(path.join(root, 'deploy/compose/compose.remote.yaml'), 'utf8');
+  const runbook = await readFile(path.join(root, 'deploy/runbooks/keycloak-admin-access.md'), 'utf8');
+  assert.match(proxy, /location \/realms\//);
+  assert.match(proxy, /location \/resources\//);
+  assert.doesNotMatch(proxy, /location \/admin\/?/);
+  assert.match(remoteCompose, /KC_HOSTNAME_ADMIN: \$\{KEYCLOAK_ADMIN_BASE_URL:-http:\/\/127\.0\.0\.1:18081\}/);
+  assert.match(runbook, /127\.0\.0\.1:18081\/admin\//);
+  assert.match(runbook, /ssh -N -T/);
+  assert.match(runbook, /kubectl[\s\S]*port-forward/);
+});
+
 test('organization creation is reserved for platform administrators', async () => {
   const account = await readYaml('contracts/openapi/account.yaml');
   const admin = await readYaml('contracts/openapi/admin.yaml');
@@ -182,27 +198,47 @@ test('organization creation is reserved for platform administrators', async () =
   assert.deepEqual(Object.keys(admin.paths['/account/admin/v1/organizations']), ['get', 'post']);
 });
 
-test('operations API is role protected and limits mutations to account lifecycle management', async () => {
+test('operations API is role protected and limits mutations to documented management workflows', async () => {
   const admin = await readYaml('contracts/openapi/admin.yaml');
   assert.deepEqual(admin.security, [{ oidc: [] }]);
   for (const [pathName, pathItem] of Object.entries(admin.paths)) {
-    assert.match(pathName, /^\/(account|billing|token)\/admin\/v1\//);
+    assert.match(pathName, /^(\/system\/status|\/(account|billing|token)\/admin\/v1\/)/);
     for (const operation of Object.values(pathItem)) {
       assert.ok(operation.responses['403'], `${pathName} must document role denial`);
     }
-  }
-  for (const [pathName, pathItem] of Object.entries(admin.paths).filter(([name]) => name.startsWith('/billing/') || name.startsWith('/token/'))) {
-    assert.deepEqual(Object.keys(pathItem), ['get'], `${pathName} must remain read-only`);
   }
   assert.deepEqual(Object.keys(admin.paths['/account/admin/v1/users/{user_id}/status']), ['patch']);
   assert.deepEqual(Object.keys(admin.paths['/account/admin/v1/users/{user_id}']), ['delete']);
   assert.deepEqual(Object.keys(admin.paths['/account/admin/v1/organizations']), ['get', 'post']);
   assert.deepEqual(Object.keys(admin.paths['/account/admin/v1/organizations/{organization_id}/units']), ['get', 'post']);
   assert.deepEqual(Object.keys(admin.paths['/account/admin/v1/organizations/{organization_id}/units/{unit_id}']), ['patch', 'delete']);
-  assert.deepEqual(Object.keys(admin.paths['/account/admin/v1/organizations/{organization_id}/members']), ['get']);
+  assert.deepEqual(Object.keys(admin.paths['/account/admin/v1/organizations/{organization_id}/members']), ['get', 'post']);
+  assert.deepEqual(Object.keys(admin.paths['/account/admin/v1/organizations/{organization_id}/members/{user_id}']), ['delete']);
+  assert.deepEqual(Object.keys(admin.paths['/account/admin/v1/organizations/{organization_id}/members/{user_id}/roles']), ['put']);
+  assert.deepEqual(Object.keys(admin.paths['/account/admin/v1/users/{user_id}/memberships']), ['get']);
+  assert.deepEqual(Object.keys(admin.paths['/account/admin/v1/audit-logs/{audit_id}']), ['get']);
   assert.deepEqual(Object.keys(admin.paths['/account/admin/v1/organizations/{organization_id}/ownership']), ['post']);
   assert.deepEqual(Object.keys(admin.paths['/account/admin/v1/organizations/{organization_id}/status']), ['patch']);
   assert.deepEqual(Object.keys(admin.paths['/account/admin/v1/organizations/{organization_id}']), ['patch', 'delete']);
+  assert.deepEqual(Object.keys(admin.paths['/billing/admin/v1/pricing-versions']), ['get', 'post']);
+  assert.deepEqual(Object.keys(admin.paths['/billing/admin/v1/payment-orders/{order_id}/refunds']), ['post']);
+  assert.deepEqual(Object.keys(admin.paths['/billing/admin/v1/usage-holds/{hold_id}/release']), ['post']);
+  assert.deepEqual(Object.keys(admin.paths['/billing/admin/v1/reconciliation-runs']), ['get', 'post']);
+  assert.deepEqual(Object.keys(admin.paths['/token/admin/v1/token-accounts/{token_account_id}']), ['get']);
+  assert.deepEqual(Object.keys(admin.paths['/token/admin/v1/token-accounts/{token_account_id}/status']), ['patch']);
+  assert.deepEqual(Object.keys(admin.paths['/token/admin/v1/token-accounts/{token_account_id}/routes']), ['put', 'delete']);
+  assert.deepEqual(Object.keys(admin.paths['/token/admin/v1/token-accounts/{token_account_id}/credentials/{credential_id}/validate']), ['post']);
+  assert.deepEqual(Object.keys(admin.paths['/token/admin/v1/usage-requests/{usage_request_id}']), ['get']);
+  assert.deepEqual(Object.keys(admin.paths['/token/admin/v1/usage-requests/{usage_request_id}/retry-reconciliation']), ['post']);
+});
+
+test('Token operations expose credential metadata without provider secrets', async () => {
+  const source = await readFile(path.join(root, 'internal/token/admin.go'), 'utf8');
+  const metadata = source.match(/type AdminCredentialMetadata struct \{([\s\S]*?)\n\}/)?.[1] || '';
+  assert.match(metadata, /Fingerprint/);
+  assert.match(metadata, /ValidationStatus/);
+  assert.match(metadata, /UpdatedAt/);
+  assert.doesNotMatch(metadata, /BaseURL|Secret|Ciphertext|KeyID/);
 });
 
 test('Compose browser issuer and server key retrieval preserve the identity boundary', async () => {

@@ -83,7 +83,8 @@ func newHandler(upstream *url.URL) http.Handler {
 		// These are the only existing Gateway and deployment acceptance routes.
 		allowed := (path == "/v1/chat/completions" && r.Method == http.MethodPost) ||
 			(path == "/api/log/" && r.Method == http.MethodGet) ||
-			(path == "/v1/models" && r.Method == http.MethodGet)
+			(path == "/v1/models" && r.Method == http.MethodGet) ||
+			(path == "/api/status" && r.Method == http.MethodGet)
 		if !allowed {
 			http.NotFound(w, r)
 			return

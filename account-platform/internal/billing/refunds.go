@@ -74,7 +74,13 @@ func (p *PaymentCoordinator) CloseOrder(ctx context.Context, orderID, requesterI
 	if err != nil {
 		return PaymentOrder{}, fmt.Errorf("%w: %v", ErrPaymentProvider, err)
 	}
-	if providerOrder.Status != "CLOSED" || !providerOrderMatches(order, providerOrder) {
+	if !providerOrderMatches(order, providerOrder) {
+		return PaymentOrder{}, ErrConflict
+	}
+	if providerOrder.Status == "SUCCESS" || providerOrder.Status == "PARTIALLY_REFUNDED" || providerOrder.Status == "REFUNDED" {
+		return p.applyQueriedPayment(ctx, order.ID, providerOrder)
+	}
+	if providerOrder.Status != "CLOSED" {
 		return PaymentOrder{}, ErrConflict
 	}
 	now := p.now()

@@ -5,12 +5,14 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"strings"
 	"time"
 
+	"github.com/Pinvou/pinvou3/account-platform/internal/account"
 	"github.com/Pinvou/pinvou3/account-platform/internal/billing"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/config"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
@@ -31,13 +33,33 @@ func (contractRepository) AdminOverview(context.Context) (token.AdminOverview, e
 func (contractRepository) AdminTokenAccounts(context.Context, int) ([]token.AdminTokenAccount, error) {
 	return []token.AdminTokenAccount{}, nil
 }
-func (contractRepository) AdminUsageRequests(context.Context, int) ([]token.UsageRequest, error) {
+func (contractRepository) AdminUsageRequests(context.Context, int) ([]token.AdminUsageRequest, error) {
 	amount := int64(9007199254740993)
-	return []token.UsageRequest{{ID: uuid.New(), Model: "fixture-model", Status: "COMMITTED", MaximumMicrocredits: amount, ActualMicrocredits: &amount, StartedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}}, nil
+	requestID, lastError := "fixture-newapi-request", "fixture-reconciliation-error"
+	return []token.AdminUsageRequest{{UserID: uuid.New(), TokenAccountID: uuid.New(), CredentialID: uuid.New(), WalletID: uuid.New(), NewAPIRequestID: &requestID, ReconciliationLastError: &lastError, ID: uuid.New(), Model: "fixture-model", Status: "COMMITTED", MaximumMicrocredits: amount, ActualMicrocredits: &amount, StartedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}}, nil
 }
 func (contractRepository) ListUsageForContext(context.Context, token.AuthorizationContext, int, *token.UsageHistoryCursor) ([]token.UserUsageRecord, error) {
 	amount := int64(9007199254740993)
 	return []token.UserUsageRecord{{UsageRequestID: uuid.New(), Model: "fixture-model", DisplayStatus: "SETTLED", ActualMicrocredits: &amount, StartedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}}, nil
+}
+
+func (contractRepository) AdminTokenAccount(context.Context, uuid.UUID) (token.AdminTokenAccountDetail, error) {
+	return token.AdminTokenAccountDetail{}, errors.New("fixture operation not implemented")
+}
+func (contractRepository) AdminDeleteRoute(context.Context, uuid.UUID, string, uuid.UUID) error {
+	return errors.New("fixture operation not implemented")
+}
+func (contractRepository) AdminCredentialMetadata(context.Context, uuid.UUID, uuid.UUID) (token.AdminCredentialMetadata, error) {
+	return token.AdminCredentialMetadata{}, errors.New("fixture operation not implemented")
+}
+func (contractRepository) AdminRecordCredentialValidation(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, bool) (token.AdminCredentialMetadata, error) {
+	return token.AdminCredentialMetadata{}, errors.New("fixture operation not implemented")
+}
+func (contractRepository) AdminUsageRequest(context.Context, uuid.UUID) (token.AdminUsageRequest, error) {
+	return token.AdminUsageRequest{}, errors.New("fixture operation not implemented")
+}
+func (contractRepository) AdminRetryReconciliation(context.Context, uuid.UUID, string, uuid.UUID) (token.AdminUsageRequest, error) {
+	return token.AdminUsageRequest{}, errors.New("fixture operation not implemented")
 }
 
 type adminBillingRepository struct{ billing.Repository }
@@ -59,6 +81,25 @@ func (adminBillingRepository) AdminUsageHolds(context.Context, int) ([]billing.A
 	return []billing.AdminHold{{MaxMicrocredits: amount, ActualMicrocredits: &amount}}, nil
 }
 
+func (adminBillingRepository) AdminPriceVersions(context.Context, int) ([]billing.AdminPriceVersion, error) {
+	return []billing.AdminPriceVersion{{ID: uuid.New(), Model: "fixture-model", InputPerMillion: 9007199254740993, OutputPerMillion: 1, CachedInputPerMillion: 2, EffectiveFrom: time.Now().UTC(), CreatedAt: time.Now().UTC()}}, nil
+}
+func (adminBillingRepository) AdminCreatePriceVersion(context.Context, string, int64, int64, int64) (billing.AdminPriceVersion, error) {
+	return billing.AdminPriceVersion{}, errors.New("fixture operation not implemented")
+}
+func (adminBillingRepository) AdminWalletLedger(context.Context, uuid.UUID, int) ([]billing.AdminLedgerEntry, error) {
+	return []billing.AdminLedgerEntry{{PostingID: uuid.New(), JournalEntryID: uuid.New(), DeltaMicrocredit: -9007199254740993, CreatedAt: time.Now().UTC()}}, nil
+}
+func (adminBillingRepository) AdminPaymentOrder(context.Context, uuid.UUID) (billing.AdminPaymentOrder, error) {
+	return billing.AdminPaymentOrder{}, errors.New("fixture operation not implemented")
+}
+func (adminBillingRepository) AdminReconciliationRuns(context.Context, int) ([]billing.ReconciliationRun, error) {
+	return nil, errors.New("fixture operation not implemented")
+}
+func (adminBillingRepository) AdminReconciliationCases(context.Context, uuid.UUID, int) ([]billing.AdminReconciliationCase, error) {
+	return nil, errors.New("fixture operation not implemented")
+}
+
 func financialReadProbes() map[string]json.RawMessage {
 	verify := func(context.Context, string) (identity.Principal, error) {
 		return identity.Principal{RealmRoles: []string{"platform-admin"}}, nil
@@ -67,7 +108,7 @@ func financialReadProbes() map[string]json.RawMessage {
 	tokenHandler := token.NewService(contractRepository{}, contractContext{value: token.AuthorizationContext{UserID: uuid.New(), ContextType: "PERSONAL"}}, nil, nil, token.ProviderURLPolicy{}, nil, nil, 100).Handler(verify)
 	results := map[string]json.RawMessage{}
 	for name, handler := range map[string]http.Handler{"billing": billingHandler, "token": tokenHandler} {
-		paths := []string{"/admin/v1/overview", "/admin/v1/wallets", "/admin/v1/payment-orders", "/admin/v1/adjustments", "/admin/v1/usage-holds"}
+		paths := []string{"/admin/v1/overview", "/admin/v1/wallets", "/admin/v1/payment-orders", "/admin/v1/adjustments", "/admin/v1/usage-holds", "/admin/v1/pricing-versions", "/admin/v1/wallets/" + uuid.NewString() + "/ledger"}
 		if name == "token" {
 			paths = []string{"/admin/v1/usage-requests", "/v1/me/usage-requests"}
 		}
@@ -79,10 +120,47 @@ func financialReadProbes() map[string]json.RawMessage {
 			if response.Code != http.StatusOK {
 				panic("financial read probe did not reach production response")
 			}
-			results[name+path] = response.Body.Bytes()
+			key := name + path
+			if strings.HasSuffix(path, "/ledger") {
+				key = "billing/admin/v1/wallets/fixture/ledger"
+			}
+			results[key] = response.Body.Bytes()
 		}
 	}
 	return results
+}
+
+// Controlled dependencies, with the actual public administration handler.
+// Real cross-domain PostgreSQL/HTTP financial effects are tested separately.
+type waiverReadRepository struct {
+	adminBillingRepository
+	hold billing.AdminHold
+}
+
+func (r waiverReadRepository) AdminUsageHold(context.Context, uuid.UUID) (billing.AdminHold, error) {
+	return r.hold, nil
+}
+
+type waiverReadCoordinator struct{ hold billing.AdminHold }
+
+func (c waiverReadCoordinator) Release(_ context.Context, holdID, usageID uuid.UUID, reason, actor string) (billing.AdminHold, error) {
+	if c.hold.ID != holdID || c.hold.UsageRequestID != usageID || reason == "" || actor == "" {
+		return billing.AdminHold{}, billing.ErrConflict
+	}
+	return c.hold, nil
+}
+func publicWaiverProbe(hold billing.AdminHold) json.RawMessage {
+	handler := billing.NewService(waiverReadRepository{hold: hold}).WithWaiverCoordinator(waiverReadCoordinator{hold: hold}).Handler("fixture-service-token", func(context.Context, string) (identity.Principal, error) {
+		return identity.Principal{Issuer: "fixture-issuer", Subject: "fixture-actor", RealmRoles: []string{"platform-admin"}}, nil
+	})
+	request := httptest.NewRequest("POST", "/admin/v1/usage-holds/"+hold.ID.String()+"/release", strings.NewReader(`{"reason":"fixture-waiver"}`))
+	request.Header.Set("Authorization", "Bearer fixture-admin")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != 200 {
+		panic("public waiver probe did not reach the production success contract")
+	}
+	return response.Body.Bytes()
 }
 
 func (r contractRepository) ListCandidates(context.Context, string) ([]token.Candidate, error) {
@@ -128,6 +206,8 @@ func main() {
 	gin.DefaultErrorWriter = os.Stderr
 	id := uuid.New()
 	paidAt := time.Now().UTC()
+	zero := int64(0)
+	waiver := billing.WaiverAuthority{Hold: billing.AdminHold{ID: id, UsageRequestID: id, WalletID: id, Status: "RELEASED", MaxMicrocredits: 9007199254740993, ActualMicrocredits: &zero, ExpiresAt: paidAt.Add(time.Hour), UpdatedAt: paidAt}, UsageSnapshot: json.RawMessage(`{"admin_waiver":true,"admin_actor":"fixture-actor","admin_release_reason":"fixture-waiver","usage":{"input_tokens":7,"output_tokens":0,"cached_input_tokens":0}}`)}
 	transaction := "test-transaction"
 	order := billing.PaymentOrder{ID: id, MerchantOrderNo: "test-order", RequesterID: id, WalletID: id, ProductID: "CNY_1", Channel: "ALIPAY", AmountFen: 100, Currency: "CNY", CreditMicrocredits: 1000000, Status: "PAID", FulfillmentStatus: "CREDITED", PaymentURL: "http://127.0.0.1/test-payment", ChannelTransactionID: &transaction, ExpiresAt: paidAt.Add(time.Minute), PaidAt: &paidAt}
 	created := order
@@ -153,7 +233,7 @@ func main() {
 	for code, cause := range map[string]error{"TOKEN_ACCOUNT_NOT_FOUND": token.ErrNotFound, "TOKEN_FORBIDDEN": token.ErrForbidden, "TOKEN_ROUTE_AMBIGUOUS": token.ErrAmbiguousRoute, "TOKEN_ROUTE_UNAVAILABLE": token.ErrNoEligibleRoute} {
 		errors[code] = eligibleProbe(nil, contractContext{err: cause})
 	}
-	if err := json.NewEncoder(output).Encode(map[string]any{"product": product, "paid": order, "created": created, "wallet": wallet, "routes": routes, "eligible": eligible, "token_errors": errors, "rate_limited": rateLimitProbe(), "recent_created": map[string]any{"order": created}, "recent_empty": map[string]any{"order": nil}, "financial_reads": financialReadProbes()}); err != nil {
+	if err := json.NewEncoder(output).Encode(map[string]any{"waiver_public": publicWaiverProbe(waiver.Hold), "waiver_authority": waiver, "waiver_intent": map[string]any{"hold_id": id, "usage_request_id": id, "reason": "fixture-waiver", "actor": "fixture-actor"}, "product": product, "paid": order, "created": created, "wallet": wallet, "routes": routes, "eligible": eligible, "token_errors": errors, "rate_limited": rateLimitProbe(), "recent_created": map[string]any{"order": created}, "recent_empty": map[string]any{"order": nil}, "financial_reads": financialReadProbes(), "organization_member": account.Member{MembershipID: id, UserID: id, Status: "ACTIVE", Version: 1, Roles: []string{"MEMBER", "UNIT_ADMIN"}, UnitIDs: []uuid.UUID{}, UnitAdminIDs: []uuid.UUID{id}, JoinedAt: paidAt}}); err != nil {
 		panic(err)
 	}
 }

@@ -120,7 +120,7 @@ func TestTLSProxyExactRoutesQueryAndHeaderBoundary(t *testing.T) {
 	}))
 	client := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: roots}}}
 	t.Cleanup(client.CloseIdleConnections)
-	for _, route := range []struct{ method, path string }{{"POST", "/v1/chat/completions"}, {"GET", "/api/log/?request_id=fixture-request&type=2&p=1&page_size=2"}, {"GET", "/v1/models"}} {
+	for _, route := range []struct{ method, path string }{{"POST", "/v1/chat/completions"}, {"GET", "/api/log/?request_id=fixture-request&type=2&p=1&page_size=2"}, {"GET", "/v1/models"}, {"GET", "/api/status"}} {
 		request, _ := http.NewRequest(route.method, server.URL+route.path, strings.NewReader(`{"model":"fixture"}`))
 		request.Header.Set("Authorization", "Bearer fixture-auth")
 		request.Header.Set("X-Request-ID", "fixture-correlation")
@@ -138,7 +138,7 @@ func TestTLSProxyExactRoutesQueryAndHeaderBoundary(t *testing.T) {
 			t.Fatal("TLS hop changed permitted response or exposed browser state")
 		}
 	}
-	for _, route := range []struct{ method, path string }{{"GET", "/api/setup"}, {"GET", "/api/user"}, {"GET", "/api/log/self"}, {"GET", "/api/log"}, {"GET", "/api/log%2f"}, {"POST", "/api/log/"}, {"GET", "/v1/chat/completions"}, {"POST", "/v1/chat/completions/other"}} {
+	for _, route := range []struct{ method, path string }{{"HEAD", "/api/status"}, {"POST", "/api/status"}, {"GET", "/api/status/extra"}, {"GET", "/api%2fstatus"}, {"GET", "/api/setup"}, {"GET", "/api/user"}, {"GET", "/api/log/self"}, {"GET", "/api/log"}, {"GET", "/api/log%2f"}, {"POST", "/api/log/"}, {"GET", "/v1/chat/completions"}, {"POST", "/v1/chat/completions/other"}} {
 		request, _ := http.NewRequest(route.method, server.URL+route.path, nil)
 		response, err := client.Do(request)
 		if err != nil {
@@ -162,7 +162,7 @@ func TestTLSProxyExactRoutesQueryAndHeaderBoundary(t *testing.T) {
 			}
 		}
 	}
-	if calls.Load() != 3 {
+	if calls.Load() != 4 {
 		t.Fatal("rejected or static health routes reached the upstream")
 	}
 }

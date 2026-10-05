@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -182,6 +183,75 @@ func TestSessionEndpointDoesNotExposeOIDCTokens(t *testing.T) {
 	}
 }
 
+func TestSystemStatusAggregatesInternalHealthWithoutExposingEndpoints(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/admin/v1/overview":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"reconciliation_pending":2,"reconciliation_stopped":1}`)
+		case "/admin/v1/usage-requests":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"items":[{"usage_request_id":"usage-a","reconciliation_last_error":"evidence lookup failed","updated_at":"2026-08-19T01:02:03Z"}]}`)
+		case "/metrics":
+			_, _ = io.WriteString(w, "pinvou_outbox_pending_events{source=\"account\"} 3\npinvou_outbox_dead_lettered_events{source=\"account\"} 0\npinvou_outbox_oldest_pending_age_seconds{source=\"account\"} 12.5\n")
+		default:
+			w.WriteHeader(http.StatusNoContent)
+		}
+	}))
+	defer upstream.Close()
+	parsed, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := newMemoryStore()
+	service, err := NewService(Config{
+		Environment:       "test",
+		IssuerURL:         parsed,
+		JWKSURL:           parsed,
+		PublicURL:         parsed,
+		AuthorizationURL:  parsed,
+		TokenURL:          parsed,
+		ClientID:          "portal",
+		AccountURL:        parsed,
+		BillingURL:        parsed,
+		TokenGatewayURL:   parsed,
+		KeycloakStatusURL: endpoint(parsed, "/keycloak"),
+		NATSStatusURL:     endpoint(parsed, "/nats"),
+		RelayURLs:         map[string]*url.URL{"account-event-relay": parsed, "billing-event-relay": parsed, "token-event-relay": parsed},
+	}, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	session := Session{ID: "system-session", AccessToken: "admin-access", RefreshToken: "refresh", AccessExpiresAt: time.Now().Add(time.Hour), RefreshExpiresAt: time.Now().Add(2 * time.Hour), CSRFToken: strings.Repeat("s", 32)}
+	if err := store.SaveSession(context.Background(), session); err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "/api/admin/system/status", nil)
+	request.AddCookie(&http.Cookie{Name: service.sessionCookieName(), Value: session.ID})
+	response := httptest.NewRecorder()
+	service.Handler(nil).ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("system status = %d %s", response.Code, response.Body.String())
+	}
+	body := response.Body.String()
+	if !strings.Contains(body, `"pending":2`) || !strings.Contains(body, `"pending_events":3`) || !strings.Contains(body, "evidence lookup failed") {
+		t.Fatalf("missing system status data: %s", body)
+	}
+	if strings.Contains(body, upstream.URL) || strings.Contains(body, "admin-access") {
+		t.Fatalf("system status exposed an internal endpoint or access token: %s", body)
+	}
+}
+
+func TestParseRelayMetricsRequiresAllBacklogSignals(t *testing.T) {
+	metrics, err := parseRelayMetrics(strings.NewReader("pinvou_outbox_pending_events 4\npinvou_outbox_dead_lettered_events 1\npinvou_outbox_oldest_pending_age_seconds 8.5\n"))
+	if err != nil || metrics["pinvou_outbox_pending_events"] != 4 || metrics["pinvou_outbox_oldest_pending_age_seconds"] != 8.5 {
+		t.Fatalf("unexpected relay metrics: %#v, %v", metrics, err)
+	}
+	if _, err := parseRelayMetrics(strings.NewReader("pinvou_outbox_pending_events 1\n")); err == nil {
+		t.Fatal("incomplete relay metrics must be rejected")
+	}
+}
+
 func TestPortalProxyExcludesModelDataPlane(t *testing.T) {
 	if tokenPathAllowed(http.MethodPost, "/v1/chat/completions") {
 		t.Fatal("Portal BFF must not expose the model data plane")
@@ -200,16 +270,29 @@ func TestPortalProxyExcludesModelDataPlane(t *testing.T) {
 }
 
 func TestAdminProxyAllowsOnlyDocumentedManagementEndpoints(t *testing.T) {
-	if !accountAdminPathAllowed(http.MethodGet, "/admin/v1/users") || !billingAdminPathAllowed(http.MethodGet, "/admin/v1/wallets") || !tokenAdminPathAllowed(http.MethodGet, "/admin/v1/token-accounts") {
+	if !accountAdminPathAllowed(http.MethodGet, "/admin/v1/users") || !accountAdminPathAllowed(http.MethodGet, "/admin/v1/roles") || !billingAdminPathAllowed(http.MethodGet, "/admin/v1/wallets") || !tokenAdminPathAllowed(http.MethodGet, "/admin/v1/token-accounts") {
 		t.Fatal("admin portal must expose the documented management APIs")
 	}
 	userID := "0198fbf7-c3ba-7bc4-8849-c157740963de"
 	organizationID := "0198fbf7-c3ba-7bc4-8849-c157740963df"
 	unitID := "0198fbf7-c3ba-7bc4-8849-c157740963e0"
+	memberID := "0198fbf7-c3ba-7bc4-8849-c157740963e1"
 	if !accountAdminPathAllowed(http.MethodPatch, "/admin/v1/users/"+userID+"/status") || !accountAdminPathAllowed(http.MethodDelete, "/admin/v1/users/"+userID) || !accountAdminPathAllowed(http.MethodPost, "/admin/v1/organizations") || !accountAdminPathAllowed(http.MethodPatch, "/admin/v1/organizations/"+organizationID) || !accountAdminPathAllowed(http.MethodPatch, "/admin/v1/organizations/"+organizationID+"/status") || !accountAdminPathAllowed(http.MethodDelete, "/admin/v1/organizations/"+organizationID) || !accountAdminPathAllowed(http.MethodGet, "/admin/v1/organizations/"+organizationID+"/members") || !accountAdminPathAllowed(http.MethodPost, "/admin/v1/organizations/"+organizationID+"/ownership") || !accountAdminPathAllowed(http.MethodGet, "/admin/v1/organizations/"+organizationID+"/units") || !accountAdminPathAllowed(http.MethodPost, "/admin/v1/organizations/"+organizationID+"/units") || !accountAdminPathAllowed(http.MethodPatch, "/admin/v1/organizations/"+organizationID+"/units/"+unitID) || !accountAdminPathAllowed(http.MethodDelete, "/admin/v1/organizations/"+organizationID+"/units/"+unitID) {
 		t.Fatal("admin portal must expose account lifecycle mutations")
 	}
-	if accountAdminPathAllowed(http.MethodPost, "/admin/v1/users") || accountAdminPathAllowed(http.MethodDelete, "/admin/v1/users/not-a-uuid") || accountAdminPathAllowed(http.MethodPost, "/admin/v1/organizations/"+organizationID+"/members") || accountAdminPathAllowed(http.MethodGet, "/admin/v1/organizations/"+organizationID+"/ownership") || accountAdminPathAllowed(http.MethodDelete, "/admin/v1/organizations/"+organizationID+"/units/not-a-uuid") || billingAdminPathAllowed(http.MethodGet, "/internal/wallets") || tokenAdminPathAllowed(http.MethodGet, "/v1/chat/completions") {
+	if !accountAdminPathAllowed(http.MethodGet, "/admin/v1/users/"+userID+"/memberships") || !accountAdminPathAllowed(http.MethodPost, "/admin/v1/organizations/"+organizationID+"/members") || !accountAdminPathAllowed(http.MethodPut, "/admin/v1/organizations/"+organizationID+"/members/"+memberID+"/roles") || !accountAdminPathAllowed(http.MethodDelete, "/admin/v1/organizations/"+organizationID+"/members/"+memberID) {
+		t.Fatal("admin portal must expose documented membership and role operations")
+	}
+	if !accountAdminPathAllowed(http.MethodGet, "/admin/v1/audit-logs/"+userID) {
+		t.Fatal("admin portal must expose audit event details")
+	}
+	if !billingAdminPathAllowed(http.MethodPost, "/admin/v1/pricing-versions") || !billingAdminPathAllowed(http.MethodGet, "/admin/v1/wallets/"+userID+"/ledger") || !billingAdminPathAllowed(http.MethodPost, "/admin/v1/payment-orders/"+userID+"/sync") || !billingAdminPathAllowed(http.MethodPost, "/admin/v1/adjustments/"+userID+"/approve") || !billingAdminPathAllowed(http.MethodPost, "/admin/v1/usage-holds/"+userID+"/release") || !billingAdminPathAllowed(http.MethodPost, "/admin/v1/reconciliation-runs") || !billingAdminPathAllowed(http.MethodGet, "/admin/v1/reconciliation-runs/"+userID+"/cases") {
+		t.Fatal("admin portal must expose documented billing operations")
+	}
+	if !tokenAdminPathAllowed(http.MethodGet, "/admin/v1/token-accounts/"+userID) || !tokenAdminPathAllowed(http.MethodPatch, "/admin/v1/token-accounts/"+userID+"/status") || !tokenAdminPathAllowed(http.MethodPut, "/admin/v1/token-accounts/"+userID+"/routes") || !tokenAdminPathAllowed(http.MethodDelete, "/admin/v1/token-accounts/"+userID+"/routes") || !tokenAdminPathAllowed(http.MethodPost, "/admin/v1/token-accounts/"+userID+"/credentials/"+memberID+"/validate") || !tokenAdminPathAllowed(http.MethodGet, "/admin/v1/usage-requests/"+userID) || !tokenAdminPathAllowed(http.MethodPost, "/admin/v1/usage-requests/"+userID+"/retry-reconciliation") {
+		t.Fatal("admin portal must expose documented Token Gateway operations")
+	}
+	if accountAdminPathAllowed(http.MethodPost, "/admin/v1/users") || accountAdminPathAllowed(http.MethodDelete, "/admin/v1/users/not-a-uuid") || accountAdminPathAllowed(http.MethodPost, "/admin/v1/organizations/"+organizationID+"/members/"+memberID) || accountAdminPathAllowed(http.MethodGet, "/admin/v1/organizations/"+organizationID+"/ownership") || accountAdminPathAllowed(http.MethodDelete, "/admin/v1/organizations/"+organizationID+"/units/not-a-uuid") || billingAdminPathAllowed(http.MethodGet, "/internal/wallets") || tokenAdminPathAllowed(http.MethodGet, "/v1/chat/completions") {
 		t.Fatal("admin portal must not expose undocumented mutations, internal APIs, or the model data plane")
 	}
 }

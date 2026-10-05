@@ -31,9 +31,9 @@ func TestPostgresSchemaIsolationAndCleanup(t *testing.T) {
 		domain  string
 		version int64
 	}{
-		{"account", 4},
-		{"billing", 6},
-		{"token", 6},
+		{"account", 5},
+		{"billing", 7},
+		{"token", 7},
 		{"payment-simulator", 4},
 	} {
 		t.Run(test.domain, func(t *testing.T) {

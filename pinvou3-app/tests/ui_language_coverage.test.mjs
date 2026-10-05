@@ -127,6 +127,14 @@ for (const language of ['zh', 'en', 'ja']) {
     23,
     `${language}.uiAuxChat must hold exactly the 23 pinned keys`,
   );
+  for (const key of [
+    'recharge', 'rechargeTitle', 'backToAccount', 'selectAmount', 'paymentMethod',
+    'createRecharge', 'scanToPay', 'paymentQR', 'qrGenerating', 'qrFailed',
+    'rechargeUnavailable', 'retry', 'chooseAgain', 'rechargeAgain', 'done',
+    'paymentStatusUnavailable', 'paymentConfirmed', 'balanceRefreshFailed', 'orderNoLongerPayable', 'paymentReceived',
+  ]) {
+    assert.ok(dict[language].uiAccountPlatform[key], `${language}.uiAccountPlatform.${key} must exist`);
+  }
   assert.ok(dict[language].uiSettings.providers, `${language}.uiSettings.providers must exist`);
   for (const key of [
     'addProvider', 'switch', 'official', 'current', 'export', 'import',

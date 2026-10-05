@@ -503,7 +503,7 @@ components:
     OrganizationMember:
       type: object
       additionalProperties: false
-      required: [membership_id, user_id, status, version, roles, unit_ids, joined_at]
+      required: [membership_id, user_id, status, version, roles, unit_ids, unit_admin_unit_ids, joined_at]
       properties:
         membership_id:
           type: string
@@ -537,6 +537,12 @@ components:
         joined_at:
           type: string
           format: date-time
+        unit_admin_unit_ids:
+          type: array
+          uniqueItems: true
+          items:
+            type: string
+            format: uuid
     Invitation:
       type: object
       additionalProperties: false

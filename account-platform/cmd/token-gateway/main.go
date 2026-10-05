@@ -108,7 +108,10 @@ func main() {
 	workerContext, stopWorker := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stopWorker()
 	go token.NewUsageReconciler(repository, billingClient, evidenceClient, reconciliationInterval).Run(workerContext)
-	service := token.NewService(repository, contexts, wallets, token.NewHTTPModelValidator(providerURLPolicy), providerURLPolicy, billingClient, token.NewHTTPUpstreamClient(), maximumInputTokens).WithDefaultRoutes(defaultRoutes)
+	service := token.NewService(repository, contexts, wallets, token.NewHTTPModelValidator(providerURLPolicy), providerURLPolicy, billingClient, token.NewHTTPUpstreamClient(), maximumInputTokens).WithDefaultRoutes(defaultRoutes).WithWaivers(os.Getenv("INTERNAL_SERVICE_TOKEN"))
+	if _, err := service.WithNewAPIStatus(reconciliationURL); err != nil {
+		log.Fatal("New API system status is not configured")
+	}
 	if err := httpserver.RunWithApplication("token-gateway", service.Handler(verify), repository.Ping); err != nil {
 		log.Fatal(err)
 	}

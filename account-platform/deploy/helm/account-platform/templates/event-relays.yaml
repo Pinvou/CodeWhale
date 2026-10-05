@@ -2,6 +2,19 @@
 {{- $fullname := include "pinvou.fullname" . -}}
 {{- range $source := list "account" "billing" "token" }}
 ---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $fullname }}-{{ $source }}-event-relay
+  labels:
+    {{- include "pinvou.labels" $root | nindent 4 }}
+    app.kubernetes.io/component: {{ $source }}-event-relay
+spec:
+  selector:
+    {{- include "pinvou.selector" $root | nindent 4 }}
+    app.kubernetes.io/component: {{ $source }}-event-relay
+  ports: [{ name: metrics, port: 9090, targetPort: metrics }]
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:

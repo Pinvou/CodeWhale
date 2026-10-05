@@ -175,6 +175,8 @@ func TestPostgresHTTPAdminRejectsInvalidJSONWithoutMutation(t *testing.T) {
 	server := httptest.NewServer(NewService(repo, nil).Handler(func(context.Context, string) (identity.Principal, error) { return admin, nil }))
 	defer server.Close()
 	routes := []struct{ name, method, path, valid, invalidType string }{
+		{"add-member", "POST", "/admin/v1/organizations/" + org.ID.String() + "/members", `{}`, `{"user_id":"invalid-uuid"}`},
+		{"replace-roles", "PUT", "/admin/v1/organizations/" + org.ID.String() + "/members/" + me.UserID.String() + "/roles", `{}`, `{"unit_admin_unit_ids":["invalid-uuid"]}`},
 		{"create-organization", "POST", "/admin/v1/organizations", "{\"name\":\"fixture name\",\"owner_user_id\":\"" + me.UserID.String() + "\"}", "{\"owner_user_id\":\"invalid-uuid\"}"},
 		{"rename-organization", "PATCH", "/admin/v1/organizations/" + org.ID.String(), "{\"name\":\"fixture name\"}", "{\"name\":[]}"},
 		{"transfer-owner", "POST", "/admin/v1/organizations/" + org.ID.String() + "/ownership", "{\"new_owner_user_id\":\"" + me.UserID.String() + "\"}", "{\"new_owner_user_id\":\"invalid-uuid\"}"},

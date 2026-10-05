@@ -16,4 +16,7 @@ spec:
     - name: http
       port: {{ if eq $component "redis" }}6379{{ else if eq $component "nats" }}4222{{ else }}8080{{ end }}
       targetPort: {{ if eq $component "redis" }}redis{{ else if eq $component "nats" }}client{{ else }}http{{ end }}
+    {{ if eq $component "nats" }}
+    - { name: monitor, port: 8222, targetPort: monitor }
+    {{ end }}
 {{- end }}

@@ -67,6 +67,7 @@ type Member struct {
 	Version      int64       `json:"version"`
 	Roles        []string    `json:"roles"`
 	UnitIDs      []uuid.UUID `json:"unit_ids"`
+	UnitAdminIDs []uuid.UUID `json:"unit_admin_unit_ids"`
 	JoinedAt     time.Time   `json:"joined_at"`
 	MembershipID uuid.UUID   `json:"membership_id"`
 }

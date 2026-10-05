@@ -101,9 +101,12 @@ func (c *HTTPBillingClient) raw(ctx context.Context, method, path string, input 
 		return nil, err
 	}
 	defer response.Body.Close()
-	payload, readErr := io.ReadAll(io.LimitReader(response.Body, 2<<20))
+	payload, readErr := io.ReadAll(io.LimitReader(response.Body, (2<<20)+1))
 	if readErr != nil {
 		return nil, readErr
+	}
+	if len(payload) > 2<<20 {
+		return nil, errors.New("Billing response exceeds the allowed size")
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		return nil, fmt.Errorf("Billing HTTP %d: %s", response.StatusCode, payload)

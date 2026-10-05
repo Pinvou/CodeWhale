@@ -1,5 +1,16 @@
 export const MICROCREDITS_PER_POINT = 10_000;
 
+// Parse the existing decimal UI units without binary floating-point rounding.
+// Admin APIs take JSON integers, so unsafe numbers must never be submitted.
+export function parseScaledAmount(value, digits) {
+  if (typeof value !== 'string' || !Number.isInteger(digits) || digits < 0 || digits > 4) return null;
+  const match = /^(?:(\d+)(?:\.(\d*))?|\.(\d+))$/u.exec(value.trim());
+  const fraction = match?.[2] || match?.[3] || '';
+  if (!match || fraction.length > digits) return null;
+  const integer = BigInt(match[1] || '0') * (10n ** BigInt(digits)) + BigInt(fraction.padEnd(digits, '0') || '0');
+  return integer <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(integer) : null;
+}
+
 const locales = {
   zh: 'zh-CN',
   en: 'en-US',

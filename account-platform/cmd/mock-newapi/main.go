@@ -24,6 +24,10 @@ func main() {
 		log.Fatal("MOCK_NEWAPI_KEY must contain at least 16 characters")
 	}
 	router := httpserver.NewRouter()
+	router.GET("/api/status", httpserver.AdaptFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]bool{"success": true})
+	}))
 	router.Use(authenticate(apiKey))
 	router.GET("/v1/models", httpserver.AdaptFunc(listModels))
 	router.POST("/v1/chat/completions", httpserver.AdaptFunc(chatCompletions))

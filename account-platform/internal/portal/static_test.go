@@ -21,24 +21,23 @@ func TestStaticHandlerServesBuiltPortalAtRoot(t *testing.T) {
 	}
 }
 
-func TestStaticHandlerServesHashedAssets(t *testing.T) {
+func TestStaticHandlerServesStableAssetsWithRevalidation(t *testing.T) {
+	handler := testService(t, newMemoryStore()).Handler(StaticHandler())
 	request := httptest.NewRequest(http.MethodGet, "/", nil)
 	recorder := httptest.NewRecorder()
-	StaticHandler().ServeHTTP(recorder, request)
-	assetStart := strings.Index(recorder.Body.String(), "/assets/account-")
-	if assetStart < 0 {
-		t.Fatal("expected a hashed account asset reference")
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK || recorder.Header().Get("Cache-Control") != "no-cache" {
+		t.Fatal("stable portal HTML did not retain revalidation")
 	}
-	assetEnd := strings.Index(recorder.Body.String()[assetStart:], `"`)
-	if assetEnd < 0 {
-		t.Fatal("expected the asset URL to be quoted")
-	}
-	assetURL := recorder.Body.String()[assetStart : assetStart+assetEnd]
-
-	assetRequest := httptest.NewRequest(http.MethodGet, assetURL, nil)
-	assetRecorder := httptest.NewRecorder()
-	StaticHandler().ServeHTTP(assetRecorder, assetRequest)
-	if assetRecorder.Code != http.StatusOK || assetRecorder.Body.Len() == 0 {
-		t.Fatalf("expected embedded asset %q, got HTTP %d", assetURL, assetRecorder.Code)
+	for _, assetURL := range []string{"/assets/account.js", "/assets/account.css"} {
+		if !strings.Contains(recorder.Body.String(), `"`+assetURL+`"`) {
+			t.Fatal("canonical portal omitted its stable account asset")
+		}
+		assetRequest := httptest.NewRequest(http.MethodGet, assetURL, nil)
+		assetRecorder := httptest.NewRecorder()
+		handler.ServeHTTP(assetRecorder, assetRequest)
+		if assetRecorder.Code != http.StatusOK || assetRecorder.Body.Len() == 0 || assetRecorder.Header().Get("Cache-Control") != "no-cache" {
+			t.Fatal("stable asset was missing or cached without revalidation")
+		}
 	}
 }

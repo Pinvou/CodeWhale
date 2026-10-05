@@ -10,6 +10,21 @@ servers:
 security:
   - serviceToken: []
 paths:
+  /holds/waiver:
+    servers: [{ url: /internal/v1 }]
+    post:
+      operationId: resolveInternalUsageWaiver
+      summary: Resolve an explicit Token-prepared operator waiver against the authoritative hold-row financial winner
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/UsageWaiverIntent" } } }
+      responses:
+        "200": { description: Authoritative RELEASED waiver or already COMMITTED financial winner, content: { application/json: { schema: { $ref: "#/components/schemas/UsageWaiverAuthority" } } } }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "500": { $ref: "#/components/responses/Error" }
   /recharge/products:
     get:
       operationId: listRechargeProducts
@@ -185,6 +200,34 @@ components:
           schema:
             $ref: "common.yaml#/components/schemas/Error"
   schemas:
+    UsageWaiverIntent:
+      type: object
+      additionalProperties: false
+      required: [hold_id, usage_request_id, reason, actor]
+      properties:
+        hold_id: { type: string, format: uuid }
+        usage_request_id: { type: string, format: uuid }
+        reason: { type: string, minLength: 1 }
+        actor: { type: string, minLength: 1 }
+    UsageWaiverAuthority:
+      type: object
+      additionalProperties: false
+      required: [hold, usage_snapshot]
+      properties:
+        hold:
+          type: object
+          additionalProperties: false
+          required: [hold_id, usage_request_id, wallet_id, status, max_microcredits, actual_microcredits, expires_at, updated_at]
+          properties:
+            hold_id: { type: string, format: uuid }
+            usage_request_id: { type: string, format: uuid }
+            wallet_id: { type: string, format: uuid }
+            status: { type: string, enum: [COMMITTED, RELEASED] }
+            max_microcredits: { type: string, pattern: '^[1-9][0-9]*$' }
+            actual_microcredits: { type: string, pattern: '^(0|[1-9][0-9]*)$' }
+            expires_at: { type: string, format: date-time }
+            updated_at: { type: string, format: date-time }
+        usage_snapshot: { type: object, additionalProperties: true }
     PaymentChannel:
       type: string
       enum: [UNIONPAY, ALIPAY, WECHAT]

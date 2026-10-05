@@ -1,18 +1,175 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ChevronRight, RefreshCw, User, X } from '../../components/icons.jsx';
-import { formatPoints } from './credit-units.js';
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { ArrowLeft, CheckCircle2, ChevronRight, Plus, RefreshCw, User, X } from '../../components/icons.jsx';
+import { formatMoney, formatPoints } from './credit-units.js';
 import { AccountPlatformDesktopClient } from './desktop-client.js';
 import { accountErrorMessage, needsAccountLogin } from './errors.js';
+import { rechargePollDelay } from './context-guard.js';
+
+const terminalOrderStates = new Set(['PAID', 'PAID_LATE', 'CLOSED', 'FAILED', 'EXPIRED', 'PARTIALLY_REFUNDED', 'REFUNDED', 'MANUAL_REVIEW']);
+const paidOrderStates = new Set(['PAID', 'PAID_LATE']);
+const fallbackChannels = ['UNIONPAY', 'ALIPAY', 'WECHAT'];
 
 function localizedError(copy, reason) {
+  if (!reason) return '';
+  if (reason.copyKey) return copy[reason.copyKey] || copy.requestFailed;
   return accountErrorMessage(typeof reason === 'string' ? { code: reason } : reason, copy);
+}
+
+function newIdempotencyKey() {
+  const bytes = globalThis.crypto.getRandomValues(new Uint8Array(16));
+  return `desktop-recharge-${Array.from(bytes, value => value.toString(16).padStart(2, '0')).join('')}`;
+}
+
+function orderRemainingSeconds(order, now) {
+  const expiresAt = new Date(order?.expires_at).getTime();
+  if (!Number.isFinite(expiresAt)) return 0;
+  return Math.max(0, Math.ceil((expiresAt - now) / 1000));
+}
+
+function formatCountdown(seconds) {
+  return `${String(Math.floor(seconds / 60)).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}`;
+}
+
+function RechargePanel({
+  copy, language, products, balance, order, qrData, qrError, loading, busy, error, notice,
+  cardTheme, controlTheme, mutedText, isDark, onCreate, onRetryLoad, onRetryQR, onRefreshBalance, onResetOrder, onDone,
+}) {
+  const [productId, setProductId] = useState('');
+  const [channel, setChannel] = useState('ALIPAY');
+  const [now, setNow] = useState(Date.now());
+  const selected = products.find(product => product.product_id === productId);
+  const channels = selected?.channels?.length ? selected.channels : fallbackChannels;
+  const remainingSeconds = orderRemainingSeconds(order, now);
+  const paid = paidOrderStates.has(order?.status);
+  const terminal = terminalOrderStates.has(order?.status);
+  const displayStatus = order && !terminal && remainingSeconds === 0 ? 'EXPIRED' : order?.status;
+  const canScan = Boolean(order && !terminal && remainingSeconds > 0);
+  const inactiveHint = displayStatus === 'EXPIRED'
+    ? copy.orderExpires(new Date(order?.expires_at).toLocaleTimeString())
+    : copy.orderNoLongerPayable;
+
+  useEffect(() => {
+    if (!selected && products[0]) setProductId(products[0].product_id);
+  }, [products, selected]);
+
+  useEffect(() => {
+    if (channels.length && !channels.includes(channel)) setChannel(channels[0]);
+  }, [channel, channels]);
+
+  useEffect(() => {
+    if (!canScan) return undefined;
+    setNow(Date.now());
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [canScan, order?.order_id]);
+
+  if (loading) {
+    return <div className={`flex min-h-56 items-center justify-center gap-2 rounded-2xl border text-[13px] ${cardTheme} ${mutedText}`}><RefreshCw size={15} className="animate-spin" />{copy.loading}</div>;
+  }
+
+  if (paid) {
+    return (
+      <div className="space-y-2.5">
+        {error && <div role="alert" className="break-words rounded-xl bg-[#EA4335]/10 px-3 py-2 text-[12px] leading-snug text-[#EA4335]">{error}</div>}
+        <div className={`flex flex-col items-center rounded-2xl border px-4 py-5 text-center ${cardTheme}`}>
+          <CheckCircle2 size={38} className="text-[#10B981]" />
+          <div className="mt-3 text-[15px] font-semibold">{copy.orderStatuses[order.status]}</div>
+          <div className={`mt-1 text-[12px] leading-relaxed ${mutedText}`}>{notice || (error ? copy.paymentConfirmed : copy.paymentReceived)}</div>
+          <div className="mt-4 text-[24px] font-semibold tabular-nums">{formatPoints(balance?.available_microcredits, language)}</div>
+          <div className={`text-[11px] ${mutedText}`}>{copy.balance}</div>
+        </div>
+        {error && <button type="button" disabled={busy} onClick={onRefreshBalance} className="flex h-9 w-full items-center justify-center gap-2 rounded-xl bg-[#10B981]/10 text-[12px] font-semibold text-[#07966F] disabled:opacity-40">{busy && <RefreshCw size={13} className="animate-spin" />}{copy.retry}</button>}
+        <div className="grid grid-cols-2 gap-2">
+          <button type="button" disabled={busy} onClick={onResetOrder} className={`h-9 rounded-xl text-[12px] font-medium transition-colors ${isDark ? 'bg-white/5 hover:bg-white/10' : 'bg-black/5 hover:bg-black/10'}`}>{copy.rechargeAgain}</button>
+          <button type="button" disabled={busy} onClick={onDone} className="h-9 rounded-xl bg-[#10B981] text-[12px] font-semibold text-white">{copy.done}</button>
+        </div>
+      </div>
+    );
+  }
+
+  if (order) {
+    return (
+      <div className="space-y-2.5">
+        {error && <div role="alert" className="break-words rounded-xl bg-[#EA4335]/10 px-3 py-2 text-[12px] leading-snug text-[#EA4335]">{error}</div>}
+        <div className={`rounded-2xl border p-3 ${cardTheme}`}>
+          <div className="flex items-center justify-between gap-3">
+            <span className={`rounded-full px-2 py-1 text-[11px] font-medium ${canScan ? 'bg-[#10B981]/10 text-[#07966F]' : 'bg-[#EA4335]/10 text-[#D93025]'}`}>{copy.orderStatuses[displayStatus] || displayStatus}</span>
+            <strong className="text-[15px] tabular-nums">{formatMoney(order.amount_fen, language)}</strong>
+          </div>
+          {canScan ? (
+            <>
+              <div className="mt-3 flex min-h-[190px] items-center justify-center rounded-2xl bg-white p-2">
+                {qrData && <img src={qrData} alt={copy.paymentQR} className="h-[180px] w-[180px]" />}
+                {!qrData && !qrError && <div className="flex items-center gap-2 text-[12px] text-[#6F7378]"><RefreshCw size={14} className="animate-spin" />{copy.qrGenerating}</div>}
+                {qrError && <div className="px-4 text-center text-[12px] text-[#D93025]"><p>{copy.qrFailed}</p><button type="button" disabled={busy} onClick={onRetryQR} className="mt-2 rounded-lg bg-[#D93025]/10 px-3 py-1.5 font-medium">{copy.retry}</button></div>}
+              </div>
+              <div className="mt-3 text-center text-[13px] font-medium">{copy.scanToPay}</div>
+              <div className={`mt-1 text-center text-[11px] tabular-nums ${mutedText}`}>{copy.countdown(formatCountdown(remainingSeconds))}</div>
+            </>
+          ) : (
+            <div className={`py-8 text-center text-[12px] ${mutedText}`}>{inactiveHint}</div>
+          )}
+        </div>
+        {!canScan && <button type="button" disabled={busy} onClick={onResetOrder} className="h-9 w-full rounded-xl bg-[#10B981] text-[12px] font-semibold text-white">{copy.chooseAgain}</button>}
+      </div>
+    );
+  }
+
+  if (!products.length) {
+    return (
+      <div className={`rounded-2xl border p-4 text-center ${cardTheme}`}>
+        <p className={`text-[12px] leading-relaxed ${mutedText}`}>{error || copy.rechargeUnavailable}</p>
+        <button type="button" disabled={busy} onClick={onRetryLoad} className="mt-3 h-8 rounded-xl bg-[#10B981] px-4 text-[12px] font-semibold text-white">{copy.retry}</button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-2.5">
+      {error && <div role="alert" className="break-words rounded-xl bg-[#EA4335]/10 px-3 py-2 text-[12px] leading-snug text-[#EA4335]">{error}</div>}
+      <div className={`rounded-2xl border p-3 ${cardTheme}`}>
+        <div className="flex items-end justify-between gap-3">
+          <div><div className={`text-[11px] ${mutedText}`}>{copy.balance}</div><div className="mt-0.5 text-[20px] font-semibold tabular-nums">{formatPoints(balance?.available_microcredits, language)}</div></div>
+          <div className={`text-[11px] ${mutedText}`}>{copy.points}</div>
+        </div>
+      </div>
+      <div>
+        <div className={`mb-1.5 px-1 text-[11px] font-medium ${mutedText}`}>{copy.selectAmount}</div>
+        <div className="grid grid-cols-2 gap-2">
+          {products.map(product => (
+            <button
+              key={product.product_id}
+              type="button"
+              aria-pressed={product.product_id === productId}
+              disabled={busy} onClick={() => setProductId(product.product_id)}
+              className={`rounded-xl border px-2 py-2.5 text-left transition-colors ${product.product_id === productId ? 'border-[#10B981] bg-[#10B981]/10' : cardTheme}`}
+            >
+              <strong className="block text-[15px] tabular-nums">{formatMoney(product.amount_fen, language)}</strong>
+              <span className={`mt-0.5 block text-[11px] ${mutedText}`}>{product.display_points.toLocaleString()} {copy.points}</span>
+            </button>
+          ))}
+        </div>
+      </div>
+      <label className="block">
+        <span className={`mb-1.5 block px-1 text-[11px] font-medium ${mutedText}`}>{copy.paymentMethod}</span>
+        <select disabled={busy} value={channel} onChange={event => setChannel(event.target.value)} className={`h-9 w-full rounded-xl border px-3 text-[12px] outline-none ${controlTheme}`}>
+          {channels.map(item => <option key={item} value={item}>{copy.channels[item] || item}</option>)}
+        </select>
+      </label>
+      <button type="button" disabled={busy || !selected} onClick={() => onCreate(productId, channel)} className="flex h-9 w-full items-center justify-center gap-2 rounded-xl bg-[#10B981] text-[12px] font-semibold text-white transition-opacity disabled:opacity-40">{busy && <RefreshCw size={13} className="animate-spin" />}{copy.createRecharge}</button>
+    </div>
+  );
 }
 
 export function AccountPlatformPopover({ open, client, copy, language, theme, collapsed, onClose, onOpenCenter }) {
   const panelRef = useRef(null);
   const requestRef = useRef({ generation: 0, controller: null });
+  const rechargeRequestRef = useRef({ generation: 0, controller: null });
+  const pollRef = useRef({ controller: null, timer: null });
   const lifecycleRef = useRef({ generation: 0, active: false });
-  const mutationRef = useRef(false);
+  const rechargeRef = useRef({ generation: 0, view: 'account' });
+  const mutationRef = useRef(null);
+  const currentClientRef = useRef(client);
   const [auth, setAuth] = useState('loading');
   const [me, setMe] = useState(null);
   const [balance, setBalance] = useState(null);
@@ -20,118 +177,287 @@ export function AccountPlatformPopover({ open, client, copy, language, theme, co
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
   const [mutating, setMutating] = useState(false);
-  const [error, setError] = useState('');
-  const busy = loading || mutating;
+  const [errorReason, setErrorReason] = useState(null);
+  const [view, setView] = useState('account');
+  const [products, setProducts] = useState([]);
+  const [order, setOrder] = useState(null);
+  const [qrData, setQrData] = useState('');
+  const [qrError, setQrError] = useState(false);
+  const [qrRetry, setQrRetry] = useState(0);
+  const [rechargeLoading, setRechargeLoading] = useState(false);
+  const [rechargeErrorReason, setRechargeErrorReason] = useState(null);
+  const [rechargeNotice, setRechargeNotice] = useState('');
+  const busy = loading || mutating || rechargeLoading;
+  const rechargeBusy = busy;
+  const error = localizedError(copy, errorReason);
+  const rechargeError = localizedError(copy, rechargeErrorReason);
   const isDark = theme === 'dark';
 
-  useEffect(() => {
-    const life = lifecycleRef.current;
-    life.generation += 1;
-    life.active = open;
-    if (!open) setPassword('');
-    return () => {
-      life.active = false;
-      life.generation += 1;
-      requestRef.current.controller?.abort();
-      requestRef.current.generation += 1;
-    };
-  }, [open, client]);
-
-  const clearProtected = useCallback(() => {
-    setAuth('guest'); setMe(null); setBalance(null);
-  }, []);
-
-  const loadAccount = useCallback(async () => {
+  const cancelAccountRead = useCallback(() => {
     requestRef.current.controller?.abort();
+    requestRef.current.generation += 1;
+  }, []);
+  const cancelRechargeReads = useCallback(() => {
+    rechargeRequestRef.current.controller?.abort();
+    rechargeRequestRef.current.generation += 1;
+    pollRef.current.controller?.abort();
+    window.clearTimeout(pollRef.current.timer);
+  }, []);
+  const resetOrder = useCallback(() => {
+    rechargeRef.current.generation += 1;
+    cancelRechargeReads();
+    setRechargeLoading(false); setOrder(null); setQrData(''); setQrError(false);
+    setRechargeErrorReason(null); setRechargeNotice('');
+  }, [cancelRechargeReads]);
+  const clearProtected = useCallback(() => {
+    lifecycleRef.current.generation += 1;
+    cancelAccountRead(); resetOrder();
+    rechargeRef.current.view = 'account';
+    setView('account'); setAuth('guest'); setMe(null); setBalance(null);
+    setProducts([]); setPassword(''); setLoading(false);
+  }, [cancelAccountRead, resetOrder]);
+
+  // A closed or replaced client owns no UI writes, even if native work finishes later.
+  useLayoutEffect(() => {
+    currentClientRef.current = client;
+    const life = lifecycleRef.current;
+    life.generation += 1; life.active = open;
+    cancelAccountRead(); resetOrder();
+    rechargeRef.current.view = 'account';
+    setView('account'); setMe(null); setBalance(null); setProducts([]);
+    setPassword(''); setLoading(false); setErrorReason(null);
+    setMutating(Boolean(mutationRef.current));
+    if (open) setAuth('loading');
+    return () => {
+      life.active = false; life.generation += 1;
+      rechargeRef.current.generation += 1;
+      cancelAccountRead(); cancelRechargeReads();
+    };
+  }, [open, client, cancelAccountRead, cancelRechargeReads, resetOrder]);
+
+  // Locale changes render stored reasons with the new copy; they do not restart work.
+  const loadAccount = useCallback(async () => {
+    if (!lifecycleRef.current.active) return;
+    cancelAccountRead();
     const controller = new window.AbortController();
     const generation = requestRef.current.generation + 1;
+    const life = lifecycleRef.current.generation;
     requestRef.current = { generation, controller };
-    const isCurrent = () => requestRef.current.generation === generation && !controller.signal.aborted;
-    setLoading(true); setError('');
+    const isCurrent = () => lifecycleRef.current.active && lifecycleRef.current.generation === life &&
+      requestRef.current.generation === generation && !controller.signal.aborted;
+    setLoading(true); setErrorReason(null);
     try {
       const session = await client.session(controller.signal);
       if (!isCurrent()) return;
       if (!session.authenticated) {
         clearProtected();
-        if (session.errorCode && session.errorCode !== 'account_platform_disabled') setError(localizedError(copy, session.errorCode));
+        if (session.errorCode && session.errorCode !== 'account_platform_disabled') setErrorReason(session.errorCode);
         return;
       }
-      const account = await client.bootstrap(controller.signal);
+      const nextAccount = await client.bootstrap(controller.signal);
       if (!isCurrent()) return;
       const results = await Promise.allSettled([client.balance(controller.signal)]);
       if (!isCurrent()) return;
-      const denied = results.find(result => result.status === 'rejected' && needsAccountLogin(result.reason));
-      if (denied) { clearProtected(); setError(localizedError(copy, denied.reason)); return; }
-      setMe(account);
-      setBalance(results[0].status === 'fulfilled' ? results[0].value : null);
+      const failed = results.find(result => result.status === 'rejected');
+      if (failed && needsAccountLogin(failed.reason)) {
+        clearProtected(); setErrorReason(failed.reason); return;
+      }
+      setMe(nextAccount); setBalance(results[0].status === 'fulfilled' ? results[0].value : null);
       setAuth('ready');
-      if (results[0].status === 'rejected') setError(copy.billingUnavailable);
+      if (failed) setErrorReason({ copyKey: 'billingUnavailable' });
     } catch (reason) {
       if (reason?.name !== 'AbortError' && isCurrent()) {
-        setMe(null); setBalance(null);
-        setAuth(needsAccountLogin(reason) ? 'guest' : 'error');
-        setError(localizedError(copy, reason));
+        if (needsAccountLogin(reason)) clearProtected();
+        else { setMe(null); setBalance(null); setAuth('error'); }
+        setErrorReason(reason);
       }
     } finally {
       if (isCurrent()) setLoading(false);
     }
-  }, [client, copy, clearProtected]);
+  }, [client, clearProtected, cancelAccountRead]);
 
   useEffect(() => {
-    if (open) {
-      setMutating(mutationRef.current); setAuth('loading');
-      void loadAccount();
-    } else {
-      requestRef.current.controller?.abort();
-      requestRef.current.generation += 1;
+    if (open) void loadAccount();
+    return cancelAccountRead;
+  }, [open, loadAccount, cancelAccountRead]);
+
+  const loadRecharge = useCallback(async () => {
+    if (!lifecycleRef.current.active || rechargeRef.current.view !== 'recharge' || mutationRef.current) return;
+    cancelRechargeReads();
+    const controller = new window.AbortController();
+    const generation = rechargeRequestRef.current.generation + 1;
+    const life = lifecycleRef.current.generation;
+    const recharge = rechargeRef.current.generation;
+    rechargeRequestRef.current = { generation, controller };
+    const isCurrent = () => lifecycleRef.current.active && lifecycleRef.current.generation === life &&
+      rechargeRef.current.view === 'recharge' && rechargeRef.current.generation === recharge &&
+      rechargeRequestRef.current.generation === generation && !controller.signal.aborted;
+    setRechargeLoading(true); setRechargeErrorReason(null); setRechargeNotice('');
+    try {
+      const results = await Promise.allSettled([client.products(controller.signal), client.balance(controller.signal)]);
+      if (!isCurrent()) return;
+      const denied = results.find(result => result.status === 'rejected' && needsAccountLogin(result.reason));
+      if (denied) { clearProtected(); setErrorReason(denied.reason); return; }
+      setProducts(results[0].status === 'fulfilled' ? results[0].value.items || [] : []);
+      if (results[1].status === 'fulfilled') setBalance(results[1].value);
+      if (results.some(result => result.status === 'rejected')) setRechargeErrorReason({ copyKey: 'billingUnavailable' });
+    } catch (reason) {
+      if (reason?.name !== 'AbortError' && isCurrent()) {
+        if (needsAccountLogin(reason)) { clearProtected(); setErrorReason(reason); }
+        else setRechargeErrorReason(reason);
+      }
+    } finally {
+      if (isCurrent()) setRechargeLoading(false);
     }
-    return () => { requestRef.current.controller?.abort(); requestRef.current.generation += 1; };
-  }, [open, loadAccount]);
+  }, [client, cancelRechargeReads, clearProtected]);
+
+  useEffect(() => {
+    const paymentContent = order?.payment_url || order?.qr_content || '';
+    if (!open || auth !== 'ready' || view !== 'recharge' || !paymentContent) {
+      setQrData(''); setQrError(false); return undefined;
+    }
+    let active = true;
+    const life = lifecycleRef.current.generation;
+    const recharge = rechargeRef.current.generation;
+    const isCurrent = () => active && lifecycleRef.current.active && lifecycleRef.current.generation === life &&
+      rechargeRef.current.view === 'recharge' && rechargeRef.current.generation === recharge;
+    setQrData(''); setQrError(false);
+    import('qrcode')
+      .then(({ default: QRCode }) => QRCode.toDataURL(paymentContent, { width: 220, margin: 2, errorCorrectionLevel: 'M' }))
+      .then(value => { if (isCurrent()) setQrData(value); })
+      .catch(() => { if (isCurrent()) setQrError(true); });
+    return () => { active = false; };
+  }, [open, auth, view, client, order?.payment_url, order?.qr_content, qrRetry]);
+
+  // Both a just-created paid order and a polled paid order need the same balance refresh.
+  const acceptOrder = useCallback(async (latest, isCurrent, signal) => {
+    if (!isCurrent()) return;
+    if (paidOrderStates.has(latest.status)) {
+      try {
+        const refreshedBalance = await client.balance(signal);
+        if (!isCurrent()) return;
+        setBalance(refreshedBalance); setRechargeNotice('paymentReceived'); setRechargeErrorReason(null);
+      } catch (reason) {
+        if (!isCurrent()) return;
+        if (needsAccountLogin(reason)) { clearProtected(); setErrorReason(reason); return; }
+        setRechargeNotice(''); setRechargeErrorReason({ copyKey: 'balanceRefreshFailed' });
+      }
+    }
+    if (isCurrent()) setOrder(latest);
+  }, [client, clearProtected]);
+
+  useEffect(() => {
+    if (!open || auth !== 'ready' || view !== 'recharge' || busy || !order?.order_id ||
+      terminalOrderStates.has(order.status) || orderRemainingSeconds(order, Date.now()) === 0) return undefined;
+    const controller = new window.AbortController();
+    const life = lifecycleRef.current.generation;
+    const recharge = rechargeRef.current.generation;
+    let stopped = false; let attempt = 0;
+    const isCurrent = () => !stopped && !controller.signal.aborted && lifecycleRef.current.active &&
+      lifecycleRef.current.generation === life && rechargeRef.current.view === 'recharge' &&
+      rechargeRef.current.generation === recharge;
+    const schedule = () => { pollRef.current.timer = window.setTimeout(poll, rechargePollDelay(attempt++)); };
+    const poll = async () => {
+      try {
+        const latest = await client.rechargeOrder(order.order_id, controller.signal);
+        if (!isCurrent()) return;
+        await acceptOrder(latest, isCurrent, controller.signal);
+        if (!isCurrent() || paidOrderStates.has(latest.status)) return;
+        setRechargeErrorReason(null);
+        if (!terminalOrderStates.has(latest.status) && orderRemainingSeconds(latest, Date.now()) > 0) schedule();
+      } catch (reason) {
+        if (!isCurrent()) return;
+        if (needsAccountLogin(reason)) { clearProtected(); setErrorReason(reason); return; }
+        setRechargeErrorReason({ copyKey: 'paymentStatusUnavailable' });
+        if (orderRemainingSeconds(order, Date.now()) > 0) schedule();
+      }
+    };
+    pollRef.current.controller = controller; schedule();
+    return () => { stopped = true; controller.abort(); window.clearTimeout(pollRef.current.timer); };
+  }, [open, auth, view, busy, client, order?.order_id, order?.status, order?.expires_at, clearProtected, acceptOrder]);
 
   useEffect(() => {
     if (!open) return undefined;
     const handleMouseDown = event => { if (panelRef.current && !panelRef.current.contains(event.target)) onClose?.(); };
     const handleKeyDown = event => { if (event.key === 'Escape') onClose?.(); };
-    window.addEventListener('mousedown', handleMouseDown);
-    window.addEventListener('keydown', handleKeyDown);
+    window.addEventListener('mousedown', handleMouseDown); window.addEventListener('keydown', handleKeyDown);
     return () => { window.removeEventListener('mousedown', handleMouseDown); window.removeEventListener('keydown', handleKeyDown); };
   }, [open, onClose]);
 
   const runMutation = async action => {
-    if (mutationRef.current || loading) return;
-    mutationRef.current = true;
+    if (mutationRef.current || loading || rechargeLoading || !lifecycleRef.current.active) return;
+    const owner = {};
+    mutationRef.current = owner;
     const generation = lifecycleRef.current.generation;
     const isCurrent = () => lifecycleRef.current.active && lifecycleRef.current.generation === generation;
-    requestRef.current.controller?.abort(); requestRef.current.generation += 1;
-    setLoading(false); setMutating(true); setError('');
+    cancelAccountRead(); cancelRechargeReads();
+    setLoading(false); setRechargeLoading(false); setMutating(true); setErrorReason(null);
     try { await action(isCurrent); }
     catch (reason) {
       if (isCurrent()) {
         if (needsAccountLogin(reason)) clearProtected();
-        setError(localizedError(copy, reason));
+        setErrorReason(reason);
       }
     } finally {
-      mutationRef.current = false;
-      if (lifecycleRef.current.active) setMutating(false);
+      if (mutationRef.current === owner) {
+        mutationRef.current = null;
+        if (lifecycleRef.current.active) setMutating(false);
+      }
     }
   };
-
   const submitLogin = async event => {
     event.preventDefault();
     if (!account.trim() || !password || mutationRef.current || loading) return;
     const loginAccount = account.trim(); const loginPassword = password;
     setPassword('');
-    await runMutation(async isCurrent => {
+    await runMutation(async () => {
       await client.login(loginAccount, loginPassword);
-      if (isCurrent()) await loadAccount();
+      // Auth success belongs to this client even if the same popup was reopened.
+      // Fetch a fresh session under the current lifecycle; never reuse an old read.
+      if (lifecycleRef.current.active && currentClientRef.current === client) await loadAccount();
     });
   };
-  const logout = () => runMutation(async isCurrent => {
+  const logout = () => runMutation(async () => {
     await client.logout();
-    if (!isCurrent()) return;
-    requestRef.current.controller?.abort(); requestRef.current.generation += 1;
-    clearProtected();
+    // A completed logout is authoritative for a reopened view of the same client.
+    // A replaced client owns a different identity and must remain untouched.
+    if (lifecycleRef.current.active && currentClientRef.current === client) clearProtected();
   });
+  const backToAccount = () => { resetOrder(); rechargeRef.current.view = 'account'; setView('account'); };
+  const openRecharge = () => {
+    if (busy || mutationRef.current || auth !== 'ready') return;
+    resetOrder(); rechargeRef.current.view = 'recharge'; setView('recharge'); void loadRecharge();
+  };
+  const createRecharge = (productId, channel) => {
+    const recharge = rechargeRef.current.generation;
+    return runMutation(async isAlive => {
+      const isCurrent = () => isAlive() && rechargeRef.current.view === 'recharge' && rechargeRef.current.generation === recharge;
+      setRechargeErrorReason(null); setRechargeNotice('');
+      try {
+        const nextOrder = await client.createRecharge(productId, channel, newIdempotencyKey());
+        await acceptOrder(nextOrder, isCurrent);
+      } catch (reason) {
+        if (!isCurrent()) return;
+        if (needsAccountLogin(reason)) { clearProtected(); setErrorReason(reason); }
+        else setRechargeErrorReason(reason);
+      }
+    });
+  };
+  const refreshRechargeBalance = () => {
+    const recharge = rechargeRef.current.generation;
+    return runMutation(async isAlive => {
+      const isCurrent = () => isAlive() && rechargeRef.current.view === 'recharge' && rechargeRef.current.generation === recharge;
+      try {
+        const nextBalance = await client.balance();
+        if (!isCurrent()) return;
+        setBalance(nextBalance); setRechargeErrorReason(null); setRechargeNotice('paymentReceived');
+      } catch (reason) {
+        if (!isCurrent()) return;
+        if (needsAccountLogin(reason)) { clearProtected(); setErrorReason(reason); }
+        else { setRechargeErrorReason({ copyKey: 'balanceRefreshFailed' }); setRechargeNotice(''); }
+      }
+    });
+  };
 
   if (!open) return null;
   const displayName = me?.display_name || copy.user;
@@ -142,15 +468,15 @@ export function AccountPlatformPopover({ open, client, copy, language, theme, co
   const controlTheme = isDark ? 'bg-[#202124] border-white/10 text-[#E3E3E3] placeholder:text-[#6F7378]' : 'bg-white border-black/10 text-[#1F1F1F] placeholder:text-[#9AA0A6]';
 
   return (
-    <div
-      ref={panelRef}
-      data-testid="account-platform-popover"
-      className={`absolute ${panelPosition} z-[90] w-[320px] max-w-[calc(100vw-24px)] rounded-[22px] border p-3 shadow-2xl backdrop-blur-xl ${panelTheme}`}
-    >
+    <div ref={panelRef} data-testid="account-platform-popover" className={`absolute ${panelPosition} z-[90] max-h-[calc(100vh-24px)] w-[336px] max-w-[calc(100vw-24px)] overflow-y-auto rounded-[22px] border p-3 shadow-2xl backdrop-blur-xl ${panelTheme}`}>
       <div className="flex items-center gap-3 px-1.5 pb-3">
-        <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-gradient-to-br from-[#19D3A2] to-[#0B57D0] text-white shadow-lg shadow-emerald-500/20"><User size={20} /></div>
+        {view === 'recharge' && auth === 'ready' ? (
+          <button type="button" disabled={busy} onClick={backToAccount} className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-full transition-colors ${isDark ? 'hover:bg-white/10' : 'hover:bg-black/5'}`} title={copy.backToAccount}><ArrowLeft size={17} /></button>
+        ) : (
+          <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-gradient-to-br from-[#19D3A2] to-[#0B57D0] text-white shadow-lg shadow-emerald-500/20"><User size={20} /></div>
+        )}
         <div className="min-w-0 flex-1">
-          <div className="truncate text-[15px] font-semibold">{auth === 'ready' ? displayName : copy.title}</div>
+          <div className="truncate text-[15px] font-semibold">{view === 'recharge' && auth === 'ready' ? copy.rechargeTitle : auth === 'ready' ? displayName : copy.title}</div>
           {auth !== 'ready' && <div className={`truncate text-[11px] ${mutedText}`}>PINVOU ACCOUNT PLATFORM</div>}
         </div>
         <button type="button" onClick={onClose} className={`flex h-8 w-8 items-center justify-center rounded-full transition-colors ${isDark ? 'hover:bg-white/10' : 'hover:bg-black/5'}`} title={copy.close}><X size={16} /></button>
@@ -160,42 +486,56 @@ export function AccountPlatformPopover({ open, client, copy, language, theme, co
 
       {(auth === 'guest' || auth === 'error') && (
         <form className={`space-y-3 rounded-2xl border p-3 ${cardTheme}`} onSubmit={event => void submitLogin(event)}>
-          <input
-            value={account}
-            onChange={event => setAccount(event.target.value)}
-            disabled={busy}
-            placeholder={copy.account}
-            aria-label={copy.account}
-            autoComplete="username"
-            className={`h-9 w-full rounded-xl border px-3 text-[13px] outline-none ${controlTheme}`}
-          />
-          <input
-            value={password}
-            onChange={event => setPassword(event.target.value)}
-            disabled={busy}
-            placeholder={copy.password}
-            aria-label={copy.password}
-            type="password"
-            autoComplete="current-password"
-            className={`h-9 w-full rounded-xl border px-3 text-[13px] outline-none ${controlTheme}`}
-          />
+          <input value={account} onChange={event => setAccount(event.target.value)} disabled={busy} placeholder={copy.account} aria-label={copy.account} autoComplete="username" className={`h-9 w-full rounded-xl border px-3 text-[13px] outline-none ${controlTheme}`} />
+          <input value={password} onChange={event => setPassword(event.target.value)} disabled={busy} placeholder={copy.password} aria-label={copy.password} type="password" autoComplete="current-password" className={`h-9 w-full rounded-xl border px-3 text-[13px] outline-none ${controlTheme}`} />
           {error && <div role="alert" className="break-words text-[12px] leading-snug text-[#EA4335]">{error}</div>}
           {auth === 'error' && <button type="button" disabled={busy} onClick={() => void loadAccount()}>{copy.retry}</button>}
           <button type="submit" disabled={busy || !account.trim() || !password} className="h-9 w-full rounded-xl bg-[#10B981] text-[13px] font-semibold text-white transition-opacity disabled:opacity-40">{busy ? copy.signingIn : copy.login}</button>
         </form>
       )}
 
-      {auth === 'ready' && (
+      {auth === 'ready' && view === 'account' && (
         <div className="space-y-2.5">
           {error && <div role="alert" className="break-words rounded-xl bg-[#EA4335]/10 px-3 py-2 text-[12px] leading-snug text-[#EA4335]">{error}</div>}
           <div className={`rounded-2xl border p-3 ${cardTheme}`}>
-            <div className="flex items-end justify-between gap-3"><div><div className={`text-[12px] ${mutedText}`}>{copy.balance}</div><div className="mt-1 text-[22px] font-semibold tabular-nums">{formatPoints(balance?.available_microcredits, language)}</div></div><div className={`text-right text-[11px] ${mutedText}`}>{copy.reservedCredits}<div className="mt-1 text-[13px] font-medium tabular-nums">{formatPoints(balance?.reserved_microcredits, language)}</div></div></div>
+            <div className="flex items-center justify-between gap-3">
+              <div className={`text-[12px] ${mutedText}`}>{copy.balance}</div>
+              <button type="button" disabled={busy} onClick={openRecharge} className="flex h-7 items-center gap-1 rounded-lg bg-[#10B981]/10 px-2 text-[11px] font-semibold text-[#07966F] transition-colors hover:bg-[#10B981]/20"><Plus size={13} />{copy.recharge}</button>
+            </div>
+            <div className="mt-1 flex items-end justify-between gap-3">
+              <div className="text-[22px] font-semibold tabular-nums">{formatPoints(balance?.available_microcredits, language)}</div>
+              <div className={`text-right text-[11px] ${mutedText}`}>{copy.reservedCredits}<div className="mt-1 text-[13px] font-medium tabular-nums">{formatPoints(balance?.reserved_microcredits, language)}</div></div>
+            </div>
           </div>
-
           {onOpenCenter && <button type="button" disabled={busy} onClick={onOpenCenter} className="h-9 w-full rounded-xl text-[12px] font-medium">{copy.title}</button>}
-
           <button type="button" onClick={() => void logout()} disabled={busy} className={`h-9 w-full rounded-xl text-[12px] font-medium transition-colors disabled:opacity-40 ${isDark ? 'bg-white/5 hover:bg-white/10' : 'bg-black/5 hover:bg-black/10'}`}>{copy.logout}</button>
         </div>
+      )}
+
+      {auth === 'ready' && view === 'recharge' && (
+        <RechargePanel
+          copy={copy}
+          language={language}
+          products={products}
+          balance={balance}
+          order={order}
+          qrData={qrData}
+          qrError={qrError}
+          loading={rechargeLoading}
+          busy={rechargeBusy}
+          error={rechargeError}
+          notice={rechargeNotice ? copy[rechargeNotice] : ''}
+          cardTheme={cardTheme}
+          controlTheme={controlTheme}
+          mutedText={mutedText}
+          isDark={isDark}
+          onCreate={(productId, channel) => void createRecharge(productId, channel)}
+          onRetryLoad={() => void loadRecharge()}
+          onRetryQR={() => setQrRetry(value => value + 1)}
+          onRefreshBalance={() => void refreshRechargeBalance()}
+          onResetOrder={resetOrder}
+          onDone={backToAccount}
+        />
       )}
     </div>
   );

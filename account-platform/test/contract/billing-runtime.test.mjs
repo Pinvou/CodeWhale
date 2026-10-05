@@ -40,7 +40,26 @@ test('Billing and Token contracts match production JSON and HTTP validation resp
   assert.ok(request(valid), JSON.stringify(request.errors));
   assert.equal(request({ ...valid, requester_id: undefined, requester_user_id: valid.requester_id }), false);
 
+  const waiver = ajv.compile({ $ref: 'urn:pinvou:billing-runtime#/$defs/UsageWaiverAuthority' });
+  assert.ok(waiver(fixtures.waiver_authority), JSON.stringify(waiver.errors));
+  assert.equal(fixtures.waiver_authority.hold.max_microcredits, '9007199254740993');
+  assert.equal(fixtures.waiver_authority.hold.actual_microcredits, '0');
+  for (const field of ['usage_request_id', 'wallet_id', 'actual_microcredits']) {
+    const malformed = structuredClone(fixtures.waiver_authority);
+    delete malformed.hold[field];
+    assert.equal(waiver(malformed), false, `waiver authority requires ${field}`);
+  }
+  const numeric = structuredClone(fixtures.waiver_authority);
+  numeric.hold.actual_microcredits = 0;
+  assert.equal(waiver(numeric), false, 'waiver keeps the exact financial wire');
+  const intent = ajv.compile({ $ref: 'urn:pinvou:billing-runtime#/$defs/UsageWaiverIntent' });
+  assert.ok(intent(fixtures.waiver_intent));
+  assert.equal(intent({ ...fixtures.waiver_intent, usage_request_id: undefined }), false);
+
   const token = YAML.parse(await readFile(path.join(root, 'contracts/openapi/token-gateway.yaml'), 'utf8'));
+
+  assert.deepEqual(token.paths['/internal/v1/usage-waivers'].post.security, [{ serviceToken: [] }]);
+  assert.deepEqual(token.paths['/internal/v1/usage-waivers'].servers, [{ url: '/' }]);
   const common = YAML.parse(await readFile(path.join(root, 'contracts/openapi/common.yaml'), 'utf8'));
   const tokenSchemas = JSON.parse(JSON.stringify(token.components.schemas).replaceAll('#/components/schemas/', '#/$defs/'));
   ajv.addSchema({ $id: 'urn:pinvou:token-runtime', $defs: tokenSchemas });
@@ -61,12 +80,20 @@ test('Billing and Token contracts match production JSON and HTTP validation resp
   const admin = YAML.parse(await readFile(path.join(root, 'contracts/openapi/admin.yaml'), 'utf8'));
   const adminSchemas = JSON.parse(JSON.stringify(admin.components.schemas).replaceAll('#/components/schemas/', '#/$defs/'));
   ajv.addSchema({ $id: 'urn:pinvou:admin-runtime', $defs: adminSchemas });
+  const publicWaiverSchema = JSON.parse(JSON.stringify(admin.paths['/billing/admin/v1/usage-holds/{hold_id}/release'].post.responses['200'].content['application/json'].schema)
+    .replaceAll('billing.yaml#/components/schemas/', 'urn:pinvou:billing-runtime#/$defs/'));
+  const publicWaiver = ajv.compile(publicWaiverSchema);
+  assert.ok(publicWaiver(fixtures.waiver_public), JSON.stringify(publicWaiver.errors));
+  assert.equal(publicWaiver({ ...fixtures.waiver_public, status: 'COMMITTED', actual_microcredits: '7' }), false, 'a charged authority is never public waiver success');
+  assert.equal(publicWaiver({ ...fixtures.waiver_public, actual_microcredits: '1' }), false);
   const financialSchemas = [
     ['billing/admin/v1/overview', 'BillingOverview', ['posted_microcredits', 'reserved_microcredits']],
     ['billing/admin/v1/wallets', 'WalletCollection', ['posted_microcredits', 'reserved_microcredits', 'available_microcredits']],
     ['billing/admin/v1/payment-orders', 'PaymentOrderCollection', ['amount_fen', 'credit_microcredits']],
     ['billing/admin/v1/adjustments', 'AdjustmentCollection', ['amount_microcredits']],
     ['billing/admin/v1/usage-holds', 'HoldCollection', ['max_microcredits', 'actual_microcredits']],
+    ['billing/admin/v1/pricing-versions', 'PriceVersionCollection', ['input_per_million', 'output_per_million', 'cached_input_per_million']],
+    ['billing/admin/v1/wallets/fixture/ledger', 'LedgerCollection', ['delta_microcredits']],
     ['token/admin/v1/usage-requests', 'UsageCollection', ['maximum_microcredits', 'actual_microcredits']],
   ];
   for (const [route, schema, fields] of financialSchemas) {
@@ -81,6 +108,26 @@ test('Billing and Token contracts match production JSON and HTTP validation resp
       assert.equal(validate(malformed), false, `${route} must reject rounded money numbers`);
     }
   }
+  const adminUsage = fixtures.financial_reads['token/admin/v1/usage-requests'].items[0];
+  assert.equal(adminUsage.newapi_request_id, 'fixture-newapi-request');
+  assert.equal(adminUsage.reconciliation_last_error, 'fixture-reconciliation-error');
+  const refundKey = admin.components.parameters.RefundIdempotencyKey;
+  assert.deepEqual([refundKey.in, refundKey.name, refundKey.required, refundKey.schema.minLength], ['header', 'Idempotency-Key', true, 16]);
+  assert.equal(refundKey.schema.maxLength, undefined, 'preserve the existing refund key contract');
+  assert.ok(admin.paths['/billing/admin/v1/payment-orders/{order_id}/refunds'].post.parameters.some((entry) => entry.$ref === '#/components/parameters/RefundIdempotencyKey'));
+  const newAPIStatus = ajv.compile({ $ref: 'urn:pinvou:token-runtime#/$defs/NewAPIStatus' });
+  assert.ok(newAPIStatus({ success: true }));
+  assert.equal(newAPIStatus({ success: true, private_detail: 'unexposed' }), false);
+  assert.ok(token.paths['/admin/v1/system/newapi-status'].get.responses['503']);
+  const snapshot = ajv.compile({ $ref: 'urn:pinvou:admin-runtime#/$defs/FinancialSnapshot' });
+  assert.ok(snapshot({ amount_fen: '9007199254740993', credit_microcredits: '100' }));
+  assert.equal(snapshot({ amount_fen: 9007199254740993 }), false);
+  assert.ok(snapshot(null));
+  const account = YAML.parse(await readFile(path.join(root, 'contracts/openapi/account.yaml'), 'utf8'));
+  const member = ajv.compile(account.components.schemas.OrganizationMember);
+  assert.ok(member(fixtures.organization_member), JSON.stringify(member.errors));
+  assert.equal(member({ ...fixtures.organization_member, unit_admin_unit_ids: undefined }), false);
+  assert.equal(member({ ...fixtures.organization_member, unit_admin_unit_ids: ['not-a-uuid'] }), false);
   const history = ajv.compile({ $ref: 'urn:pinvou:token-runtime#/$defs/UserUsageRecord' });
   const historyItem = fixtures.financial_reads['token/v1/me/usage-requests'].items[0];
   assert.ok(history(historyItem), JSON.stringify(history.errors));

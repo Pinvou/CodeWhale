@@ -41,6 +41,9 @@ func (r *PostgresRepository) SetAccountStatus(ctx context.Context, accountID uui
 			return TokenAccount{}, ErrForbidden
 		}
 		account.Status = status
+		if err := recordTokenAudit(ctx, tx, actorID, "TOKEN_ACCOUNT_STATUS_CHANGED", "TOKEN_ACCOUNT", accountID, map[string]any{"status": status, "reason": reason}); err != nil {
+			return TokenAccount{}, err
+		}
 	}
 	return account, tx.Commit(ctx)
 }
@@ -142,7 +145,7 @@ func (r *PostgresRepository) UpsertRoute(ctx context.Context, accountID uuid.UUI
 		return RoutingPolicy{}, ErrForbidden
 	}
 	var allowed bool
-	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM provider_credentials WHERE token_account_id=$1 AND status='ACTIVE' AND $2=ANY(allowed_models))`, accountID, model).Scan(&allowed); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM provider_credentials WHERE token_account_id=$1 AND status='ACTIVE' AND validation_status='VALID' AND $2=ANY(allowed_models))`, accountID, model).Scan(&allowed); err != nil {
 		return RoutingPolicy{}, err
 	}
 	if !allowed {
@@ -152,6 +155,9 @@ func (r *PostgresRepository) UpsertRoute(ctx context.Context, accountID uuid.UUI
 	policy := RoutingPolicy{TokenAccountID: accountID, Model: model, Priority: priority, DefaultScope: defaultScope, HealthStatus: healthStatus, UpdatedAt: now}
 	_, err = tx.Exec(ctx, `INSERT INTO routing_policies(id,token_account_id,model,priority,default_scope,health_status,updated_at,updated_by) VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT(token_account_id,model) DO UPDATE SET priority=EXCLUDED.priority,default_scope=EXCLUDED.default_scope,health_status=EXCLUDED.health_status,updated_at=EXCLUDED.updated_at,updated_by=EXCLUDED.updated_by`, uuid.Must(uuid.NewV7()), accountID, model, priority, defaultScope, healthStatus, now, actorID)
 	if err != nil {
+		return RoutingPolicy{}, err
+	}
+	if err := recordTokenAudit(ctx, tx, actorID, "TOKEN_ROUTE_UPSERTED", "TOKEN_ACCOUNT", accountID, map[string]any{"model": model, "priority": priority, "default_scope": defaultScope, "health_status": healthStatus}); err != nil {
 		return RoutingPolicy{}, err
 	}
 	return policy, tx.Commit(ctx)

@@ -278,7 +278,7 @@ func (r *PostgresRepository) MarkReleased(ctx context.Context, usageID uuid.UUID
 	defer tx.Rollback(ctx)
 	reason = strings.TrimSpace(reason)
 	now := r.now()
-	command, err := tx.Exec(ctx, `UPDATE usage_requests SET status='RELEASED',error_class=$2,terminal_at=$3,updated_at=$3,reconciliation_next_at=NULL,reconciliation_lease_until=NULL,reconciliation_last_error=NULL,reconciliation_stopped_at=NULL WHERE id=$1 AND status IN ('CREATED','RESERVED','UPSTREAM_ACTIVE','SETTLEMENT_PENDING','REVIEW')`, usageID, reason, now)
+	command, err := tx.Exec(ctx, `UPDATE usage_requests SET status='RELEASED',error_class=$2,terminal_at=$3,updated_at=$3,reconciliation_next_at=NULL,reconciliation_lease_until=NULL,reconciliation_last_error=NULL,reconciliation_stopped_at=NULL WHERE id=$1 AND status IN ('CREATED','RESERVED','UPSTREAM_ACTIVE','SETTLEMENT_PENDING','REVIEW') AND NOT COALESCE(usage_snapshot,'{}'::jsonb) ? 'admin_waiver_intent'`, usageID, reason, now)
 	if err != nil {
 		return err
 	}
@@ -298,6 +298,9 @@ func (r *PostgresRepository) MarkReleased(ctx context.Context, usageID uuid.UUID
 		// while also ensuring the attempt's terminal bookkeeping is complete.
 		if storedReason != nil {
 			reason = *storedReason
+		}
+		if reason == "admin_waiver" {
+			return tx.Commit(ctx)
 		}
 		if endedAt != nil {
 			now = *endedAt
@@ -320,7 +323,14 @@ func (r *PostgresRepository) MarkReview(ctx context.Context, usageID uuid.UUID, 
 	if reason == "settlement_pending" || reason == "local_commit_record_pending" {
 		status = "SETTLEMENT_PENDING"
 	}
-	_, err = r.pool.Exec(ctx, `UPDATE usage_requests SET status=$2,error_class=$3,usage_snapshot=$4,reconciliation_next_at=$5,reconciliation_lease_until=NULL,reconciliation_last_error=NULL,reconciliation_stopped_at=NULL,updated_at=$5 WHERE id=$1 AND status NOT IN ('COMMITTED','RELEASED')`, usageID, status, reason, encoded, r.now())
+	_, err = r.pool.Exec(ctx, `UPDATE usage_requests SET status=$2,error_class=$3,usage_snapshot=$4,reconciliation_next_at=$5,reconciliation_lease_until=NULL,reconciliation_last_error=NULL,reconciliation_stopped_at=NULL,updated_at=$5 WHERE id=$1 AND status NOT IN ('COMMITTED','RELEASED') AND NOT COALESCE(usage_snapshot,'{}'::jsonb) ? 'admin_waiver_intent'`, usageID, status, reason, encoded, r.now())
+	if err != nil {
+		return err
+	}
+	// A late settlement observation is evidence, not permission to undo an
+	// operator decision. Keep its measured tokens/calculated cost independently
+	// of the zero charged amount and the immutable waiver intent.
+	_, err = r.pool.Exec(ctx, `UPDATE usage_requests SET usage_snapshot=COALESCE(usage_snapshot,'{}'::jsonb)||jsonb_strip_nulls(jsonb_build_object('usage',$2::jsonb->'usage','calculated_microcredits',$2::jsonb->'actual_microcredits')),updated_at=$3 WHERE id=$1 AND COALESCE(usage_snapshot,'{}'::jsonb) ? 'admin_waiver_intent' AND status IN ('REVIEW','RELEASED')`, usageID, encoded, r.now())
 	return err
 }
 
@@ -472,7 +482,7 @@ func (r *PostgresRepository) RotateCredential(ctx context.Context, accountID, ac
 	}
 	now := r.now()
 	credential := Credential{ID: credentialID, TokenAccountID: accountID, Provider: provider, BaseURL: baseURL, Fingerprint: Fingerprint(secret), Version: nextVersion, Status: "ACTIVE", AllowedModels: models, ValidatedAt: &now}
-	_, err = tx.Exec(ctx, `INSERT INTO provider_credentials(id,token_account_id,provider,base_url,ciphertext,key_id,fingerprint,version,status,allowed_models,validated_at,created_by,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,'PENDING',$9,$10,$11,$10)`, credential.ID, accountID, provider, baseURL, ciphertext, r.secrets.KeyID(), credential.Fingerprint, nextVersion, models, now, actorID)
+	_, err = tx.Exec(ctx, `INSERT INTO provider_credentials(id,token_account_id,provider,base_url,ciphertext,key_id,fingerprint,version,status,allowed_models,validated_at,created_by,created_at,validation_status,validation_checked_by) VALUES($1,$2,$3,$4,$5,$6,$7,$8,'PENDING',$9,$10,$11,$10,'VALID',$11)`, credential.ID, accountID, provider, baseURL, ciphertext, r.secrets.KeyID(), credential.Fingerprint, nextVersion, models, now, actorID)
 	if err == nil {
 		_, err = tx.Exec(ctx, `UPDATE provider_credentials SET status='RETIRED',retired_at=$2 WHERE token_account_id=$1 AND status='ACTIVE'`, accountID, now)
 	}
@@ -499,7 +509,7 @@ SELECT ta.id,ta.name,ta.owner_type,ta.owner_id,ta.owner_organization_id,ta.owner
        rp.default_scope,rp.priority,rp.health_status,pc.id
 FROM token_accounts ta
 JOIN token_share_policies sp ON sp.token_account_id=ta.id
-JOIN provider_credentials pc ON pc.token_account_id=ta.id AND pc.status='ACTIVE'
+JOIN provider_credentials pc ON pc.token_account_id=ta.id AND pc.status='ACTIVE' AND pc.validation_status='VALID'
 JOIN routing_policies rp ON rp.token_account_id=ta.id AND rp.model=$1
 WHERE ta.status='ACTIVE'
 ORDER BY rp.priority DESC,ta.id`, model)

@@ -2,13 +2,18 @@ package billing
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/api"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/identity"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 )
 
 type AdminOverview struct {
@@ -16,6 +21,7 @@ type AdminOverview struct {
 	PostedMicrocredits       string `json:"posted_microcredits"`
 	ReservedMicrocredits     string `json:"reserved_microcredits"`
 	PendingPaymentOrders     int64  `json:"pending_payment_orders"`
+	ExpiredPaymentOrders     int64  `json:"expired_payment_orders"`
 	ReviewPaymentOrders      int64  `json:"review_payment_orders"`
 	PendingAdjustments       int64  `json:"pending_adjustments"`
 	ActiveOrReviewUsageHolds int64  `json:"active_or_review_usage_holds"`
@@ -47,16 +53,69 @@ type AdminHold struct {
 	UpdatedAt          time.Time `json:"updated_at"`
 }
 
+type AdminPriceVersion struct {
+	ID                    uuid.UUID  `json:"price_version_id"`
+	Model                 string     `json:"model"`
+	InputPerMillion       int64      `json:"input_per_million,string"`
+	OutputPerMillion      int64      `json:"output_per_million,string"`
+	CachedInputPerMillion int64      `json:"cached_input_per_million,string"`
+	EffectiveFrom         time.Time  `json:"effective_from"`
+	EffectiveTo           *time.Time `json:"effective_to,omitempty"`
+	CreatedAt             time.Time  `json:"created_at"`
+}
+
+type AdminLedgerEntry struct {
+	PostingID        uuid.UUID `json:"posting_id"`
+	JournalEntryID   uuid.UUID `json:"journal_entry_id"`
+	EntryType        string    `json:"entry_type"`
+	BusinessRef      string    `json:"business_reference"`
+	Description      string    `json:"description"`
+	DeltaMicrocredit int64     `json:"delta_microcredits,string"`
+	CreatedAt        time.Time `json:"created_at"`
+}
+
+type AdminReconciliationCase struct {
+	ID               uuid.UUID       `json:"case_id"`
+	RunID            uuid.UUID       `json:"reconciliation_run_id"`
+	PaymentOrderID   *uuid.UUID      `json:"payment_order_id,omitempty"`
+	MerchantOrderNo  string          `json:"merchant_order_no"`
+	CaseType         string          `json:"case_type"`
+	Status           string          `json:"status"`
+	ProviderSnapshot json.RawMessage `json:"provider_snapshot,omitempty"`
+	InternalSnapshot json.RawMessage `json:"internal_snapshot,omitempty"`
+	Resolution       *string         `json:"resolution,omitempty"`
+	CreatedAt        time.Time       `json:"created_at"`
+	ResolvedAt       *time.Time      `json:"resolved_at,omitempty"`
+}
+
 type adminRepository interface {
 	AdminOverview(context.Context) (AdminOverview, error)
 	AdminWallets(context.Context, int) ([]Wallet, error)
 	AdminPaymentOrders(context.Context, int) ([]AdminPaymentOrder, error)
 	AdminAdjustments(context.Context, int) ([]ManualAdjustment, error)
 	AdminUsageHolds(context.Context, int) ([]AdminHold, error)
+	AdminPriceVersions(context.Context, int) ([]AdminPriceVersion, error)
+	AdminCreatePriceVersion(context.Context, string, int64, int64, int64) (AdminPriceVersion, error)
+	AdminWalletLedger(context.Context, uuid.UUID, int) ([]AdminLedgerEntry, error)
+	AdminPaymentOrder(context.Context, uuid.UUID) (AdminPaymentOrder, error)
+	AdminReconciliationRuns(context.Context, int) ([]ReconciliationRun, error)
+	AdminReconciliationCases(context.Context, uuid.UUID, int) ([]AdminReconciliationCase, error)
 }
 
 // Admin DTOs preserve exact financial integers without changing the existing
 // internal wallet and adjustment contracts used by domain clients.
+type adminSynchronizedOrder struct {
+	PaymentOrder
+	AmountFen          int64 `json:"amount_fen,string"`
+	CreditMicrocredits int64 `json:"credit_microcredits,string"`
+}
+
+type adminRefund struct {
+	Refund
+	AmountFen          int64 `json:"amount_fen,string"`
+	CreditMicrocredits int64 `json:"credit_microcredits,string"`
+}
+
 type adminWallet struct {
 	Wallet
 	PostedMicrocredits    int64 `json:"posted_microcredits,string"`
@@ -148,6 +207,245 @@ func (s *Service) adminUsageHolds(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func adminActor(principal identity.Principal) uuid.UUID {
+	if actor, err := uuid.Parse(principal.Subject); err == nil {
+		return actor
+	}
+	return uuid.NewSHA1(uuid.NameSpaceURL, []byte(principal.Issuer+"|"+principal.Subject))
+}
+
+func adminPrincipal(r *http.Request) identity.Principal {
+	principal, _ := identity.FromContext(r.Context())
+	return principal
+}
+
+func (s *Service) adminPriceVersions(w http.ResponseWriter, r *http.Request) {
+	s.writeAdminCollection(w, r, func(repository adminRepository, limit int) (any, error) {
+		return repository.AdminPriceVersions(r.Context(), limit)
+	})
+}
+
+func (s *Service) adminCreatePriceVersion(w http.ResponseWriter, r *http.Request) {
+	repository, ok := s.requireAdminRepository(w, r)
+	if !ok {
+		return
+	}
+	var body struct {
+		Model                 string `json:"model"`
+		InputPerMillion       int64  `json:"input_per_million"`
+		OutputPerMillion      int64  `json:"output_per_million"`
+		CachedInputPerMillion int64  `json:"cached_input_per_million"`
+	}
+	if err := api.DecodeJSON(w, r, &body); err != nil {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid administration request", httpserver.RequestID(r.Context()))
+		return
+	}
+	price, err := repository.AdminCreatePriceVersion(r.Context(), body.Model, body.InputPerMillion, body.OutputPerMillion, body.CachedInputPerMillion)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	api.WriteJSON(w, http.StatusCreated, price)
+}
+
+func (s *Service) adminWalletLedger(w http.ResponseWriter, r *http.Request) {
+	repository, ok := s.requireAdminRepository(w, r)
+	if !ok {
+		return
+	}
+	walletID, err := uuid.Parse(r.PathValue("wallet_id"))
+	if err != nil {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid wallet", httpserver.RequestID(r.Context()))
+		return
+	}
+	items, err := repository.AdminWalletLedger(r.Context(), walletID, billingAdminLimit(r))
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	api.WriteJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
+func (s *Service) adminDecideAdjustment(w http.ResponseWriter, r *http.Request, approve bool) {
+	adjustmentID, err := uuid.Parse(r.PathValue("adjustment_id"))
+	var body struct {
+		Reason string `json:"reason"`
+	}
+	if decodeErr := api.DecodeJSON(w, r, &body); err != nil || decodeErr != nil || strings.TrimSpace(body.Reason) == "" {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "decision reason is required", httpserver.RequestID(r.Context()))
+		return
+	}
+	actor := adminActor(adminPrincipal(r))
+	var adjustment ManualAdjustment
+	if approve {
+		adjustment, err = s.repository.ApproveAdjustment(r.Context(), adjustmentID, actor, body.Reason)
+	} else {
+		adjustment, err = s.repository.RejectAdjustment(r.Context(), adjustmentID, actor, body.Reason)
+	}
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	api.WriteJSON(w, http.StatusOK, adminAdjustment{ManualAdjustment: adjustment, AmountMicrocredits: adjustment.AmountMicrocredits})
+}
+
+func (s *Service) adminApproveAdjustment(w http.ResponseWriter, r *http.Request) {
+	s.adminDecideAdjustment(w, r, true)
+}
+func (s *Service) adminRejectAdjustment(w http.ResponseWriter, r *http.Request) {
+	s.adminDecideAdjustment(w, r, false)
+}
+
+func (s *Service) adminSyncPaymentOrder(w http.ResponseWriter, r *http.Request) {
+	orderID, err := uuid.Parse(r.PathValue("order_id"))
+	if err != nil {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid payment order", httpserver.RequestID(r.Context()))
+		return
+	}
+	if s.payments == nil {
+		api.WriteError(w, http.StatusServiceUnavailable, "PAYMENT_UNAVAILABLE", "payment operations are unavailable", httpserver.RequestID(r.Context()))
+		return
+	}
+	order, err := s.payments.SyncOrder(r.Context(), orderID)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	api.WriteJSON(w, http.StatusOK, adminSynchronizedOrder{PaymentOrder: order, AmountFen: order.AmountFen, CreditMicrocredits: order.CreditMicrocredits})
+}
+
+func (s *Service) adminRefundPaymentOrder(w http.ResponseWriter, r *http.Request) {
+	repository, ok := s.requireAdminRepository(w, r)
+	if !ok {
+		return
+	}
+	orderID, err := uuid.Parse(r.PathValue("order_id"))
+	var body struct {
+		AmountFen int64  `json:"amount_fen"`
+		Reason    string `json:"reason"`
+	}
+	if decodeErr := api.DecodeJSON(w, r, &body); err != nil || decodeErr != nil || body.AmountFen <= 0 || strings.TrimSpace(body.Reason) == "" || s.payments == nil {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "refund amount and reason are required", httpserver.RequestID(r.Context()))
+		return
+	}
+	order, err := repository.AdminPaymentOrder(r.Context(), orderID)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	idempotencyKey := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
+	if !validIdempotencyKey(idempotencyKey, 0) {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "a valid refund Idempotency-Key is required", httpserver.RequestID(r.Context()))
+		return
+	}
+	refund, _, err := s.payments.CreateRefund(r.Context(), orderID, order.RequesterID, body.AmountFen, idempotencyKey, body.Reason)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	api.WriteJSON(w, http.StatusCreated, adminRefund{Refund: refund, AmountFen: refund.AmountFen, CreditMicrocredits: refund.CreditMicrocredits})
+}
+
+func (s *Service) adminReleaseUsageHold(w http.ResponseWriter, r *http.Request) {
+	_, ok := s.requireAdminRepository(w, r)
+	if !ok {
+		return
+	}
+	holdID, err := uuid.Parse(r.PathValue("hold_id"))
+	var body struct {
+		Reason string `json:"reason"`
+	}
+	if decodeErr := api.DecodeJSON(w, r, &body); err != nil || decodeErr != nil || strings.TrimSpace(body.Reason) == "" {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "release reason is required", httpserver.RequestID(r.Context()))
+		return
+	}
+	principal := adminPrincipal(r)
+	if s.waivers == nil {
+		api.WriteError(w, 503, "INTERNAL_ERROR", "usage waiver coordinator unavailable", httpserver.RequestID(r.Context()))
+		return
+	}
+	lookup, ok := s.repository.(interface {
+		AdminUsageHold(context.Context, uuid.UUID) (AdminHold, error)
+	})
+	if !ok {
+		api.WriteError(w, 503, "INTERNAL_ERROR", "usage waiver unavailable", httpserver.RequestID(r.Context()))
+		return
+	}
+	current, err := lookup.AdminUsageHold(r.Context(), holdID)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	hold, err := s.waivers.Release(r.Context(), holdID, current.UsageRequestID, body.Reason, principal.Issuer+"|"+principal.Subject)
+	if err != nil {
+		if !errors.Is(err, ErrUsageAlreadyTerminal) {
+			api.WriteError(w, 503, "INTERNAL_ERROR", "usage waiver awaiting authoritative resolution", httpserver.RequestID(r.Context()))
+			return
+		}
+		s.writeError(w, r, err)
+		return
+	}
+	if hold.ID != current.ID || hold.UsageRequestID != current.UsageRequestID || hold.WalletID != current.WalletID || hold.MaxMicrocredits != current.MaxMicrocredits {
+		api.WriteError(w, 503, "INTERNAL_ERROR", "invalid usage waiver authority", httpserver.RequestID(r.Context()))
+		return
+	}
+	if hold.Status == "COMMITTED" {
+		s.writeError(w, r, ErrUsageAlreadyTerminal)
+		return
+	}
+	if hold.Status != "RELEASED" || hold.ActualMicrocredits == nil || *hold.ActualMicrocredits != 0 {
+		api.WriteError(w, 503, "INTERNAL_ERROR", "invalid usage waiver authority", httpserver.RequestID(r.Context()))
+		return
+	}
+	api.WriteJSON(w, http.StatusOK, hold)
+}
+
+func (s *Service) adminReconciliationRuns(w http.ResponseWriter, r *http.Request) {
+	s.writeAdminCollection(w, r, func(repository adminRepository, limit int) (any, error) {
+		return repository.AdminReconciliationRuns(r.Context(), limit)
+	})
+}
+
+func (s *Service) adminRunReconciliation(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Channel      string `json:"channel"`
+		BusinessDate string `json:"business_date"`
+	}
+	if err := api.DecodeJSON(w, r, &body); err != nil {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid administration request", httpserver.RequestID(r.Context()))
+		return
+	}
+	date, err := time.Parse("2006-01-02", body.BusinessDate)
+	if err != nil || s.payments == nil {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "valid channel and business date are required", httpserver.RequestID(r.Context()))
+		return
+	}
+	run, err := s.payments.RunReconciliation(r.Context(), body.Channel, date)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	api.WriteJSON(w, http.StatusOK, run)
+}
+
+func (s *Service) adminReconciliationCases(w http.ResponseWriter, r *http.Request) {
+	repository, ok := s.requireAdminRepository(w, r)
+	if !ok {
+		return
+	}
+	runID, err := uuid.Parse(r.PathValue("run_id"))
+	if err != nil {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid reconciliation run", httpserver.RequestID(r.Context()))
+		return
+	}
+	items, err := repository.AdminReconciliationCases(r.Context(), runID, billingAdminLimit(r))
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	api.WriteJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
 func (r *PostgresRepository) AdminOverview(ctx context.Context) (AdminOverview, error) {
 	var result AdminOverview
 	err := r.pool.QueryRow(ctx, `
@@ -155,12 +453,13 @@ SELECT
   (SELECT count(*) FROM wallets),
   (SELECT COALESCE(sum(posted_microcredits),0)::text FROM wallets),
   (SELECT COALESCE(sum(reserved_microcredits),0)::text FROM wallets),
-  (SELECT count(*) FROM payment_orders WHERE status IN ('CREATED','PENDING')),
+  (SELECT count(*) FROM payment_orders WHERE status IN ('CREATED','PENDING') AND expires_at > now()),
+  (SELECT count(*) FROM payment_orders WHERE status IN ('CREATED','PENDING') AND expires_at <= now()),
   (SELECT count(*) FROM payment_orders WHERE status='MANUAL_REVIEW' OR fulfillment_status='MANUAL_REVIEW'),
   (SELECT count(*) FROM manual_adjustments WHERE status='PENDING_APPROVAL'),
   (SELECT count(*) FROM usage_holds WHERE status IN ('ACTIVE','REVIEW'))`).Scan(
 		&result.Wallets, &result.PostedMicrocredits, &result.ReservedMicrocredits,
-		&result.PendingPaymentOrders, &result.ReviewPaymentOrders, &result.PendingAdjustments,
+		&result.PendingPaymentOrders, &result.ExpiredPaymentOrders, &result.ReviewPaymentOrders, &result.PendingAdjustments,
 		&result.ActiveOrReviewUsageHolds,
 	)
 	return result, err
@@ -232,4 +531,154 @@ func (r *PostgresRepository) AdminUsageHolds(ctx context.Context, limit int) ([]
 		items = append(items, item)
 	}
 	return items, rows.Err()
+}
+
+func (r *PostgresRepository) AdminPriceVersions(ctx context.Context, limit int) ([]AdminPriceVersion, error) {
+	rows, err := r.pool.Query(ctx, `SELECT id,model,input_per_million,output_per_million,cached_input_per_million,effective_from,effective_to,created_at FROM pricing_versions ORDER BY effective_from DESC,id LIMIT $1`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := make([]AdminPriceVersion, 0)
+	for rows.Next() {
+		var item AdminPriceVersion
+		if err := rows.Scan(&item.ID, &item.Model, &item.InputPerMillion, &item.OutputPerMillion, &item.CachedInputPerMillion, &item.EffectiveFrom, &item.EffectiveTo, &item.CreatedAt); err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+func (r *PostgresRepository) AdminCreatePriceVersion(ctx context.Context, model string, input, output, cached int64) (AdminPriceVersion, error) {
+	model = strings.TrimSpace(model)
+	if model == "" || len(model) > 160 || input < 0 || output < 0 || cached < 0 {
+		return AdminPriceVersion{}, ErrConflict
+	}
+	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
+	if err != nil {
+		return AdminPriceVersion{}, err
+	}
+	defer tx.Rollback(ctx)
+	now := r.now()
+	var currentFrom time.Time
+	err = tx.QueryRow(ctx, `SELECT effective_from FROM pricing_versions WHERE model=$1 AND effective_to IS NULL FOR UPDATE`, model).Scan(&currentFrom)
+	if err == nil {
+		if !now.After(currentFrom) {
+			now = currentFrom.Add(time.Microsecond)
+		}
+		if _, err := tx.Exec(ctx, `UPDATE pricing_versions SET effective_to=$2 WHERE model=$1 AND effective_to IS NULL`, model, now); err != nil {
+			return AdminPriceVersion{}, err
+		}
+	} else if !errors.Is(err, pgx.ErrNoRows) {
+		return AdminPriceVersion{}, err
+	}
+	item := AdminPriceVersion{ID: uuid.Must(uuid.NewV7()), Model: model, InputPerMillion: input, OutputPerMillion: output, CachedInputPerMillion: cached, EffectiveFrom: now, CreatedAt: now}
+	if _, err := tx.Exec(ctx, `INSERT INTO pricing_versions(id,model,input_per_million,output_per_million,cached_input_per_million,effective_from,created_at) VALUES($1,$2,$3,$4,$5,$6,$6)`, item.ID, model, input, output, cached, now); err != nil {
+		return AdminPriceVersion{}, err
+	}
+	return item, tx.Commit(ctx)
+}
+
+func (r *PostgresRepository) AdminWalletLedger(ctx context.Context, walletID uuid.UUID, limit int) ([]AdminLedgerEntry, error) {
+	var exists bool
+	if err := r.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM wallets WHERE id=$1)`, walletID).Scan(&exists); err != nil {
+		return nil, err
+	}
+	if !exists {
+		return nil, ErrNotFound
+	}
+	rows, err := r.pool.Query(ctx, `
+SELECT lp.id,je.id,je.entry_type,je.business_reference,je.description,lp.delta_microcredits,lp.created_at
+FROM ledger_postings lp JOIN journal_entries je ON je.id=lp.journal_entry_id JOIN ledger_accounts la ON la.id=lp.ledger_account_id
+WHERE la.wallet_id=$1 ORDER BY lp.created_at DESC,lp.id LIMIT $2`, walletID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := make([]AdminLedgerEntry, 0)
+	for rows.Next() {
+		var item AdminLedgerEntry
+		if err := rows.Scan(&item.PostingID, &item.JournalEntryID, &item.EntryType, &item.BusinessRef, &item.Description, &item.DeltaMicrocredit, &item.CreatedAt); err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+func (r *PostgresRepository) AdminPaymentOrder(ctx context.Context, orderID uuid.UUID) (AdminPaymentOrder, error) {
+	var item AdminPaymentOrder
+	err := r.pool.QueryRow(ctx, `SELECT id,merchant_order_no,requester_id,wallet_id,channel,amount_fen,credit_microcredits,status,fulfillment_status,paid_at,created_at,updated_at FROM payment_orders WHERE id=$1`, orderID).Scan(&item.ID, &item.MerchantOrderNo, &item.RequesterID, &item.WalletID, &item.Channel, &item.AmountFen, &item.CreditMicrocredits, &item.Status, &item.FulfillmentStatus, &item.PaidAt, &item.CreatedAt, &item.UpdatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return AdminPaymentOrder{}, ErrNotFound
+	}
+	return item, err
+}
+
+func (r *PostgresRepository) AdminReconciliationRuns(ctx context.Context, limit int) ([]ReconciliationRun, error) {
+	rows, err := r.pool.Query(ctx, `SELECT id,channel,business_date,status,provider_row_count,case_count,started_at,COALESCE(completed_at,started_at) FROM reconciliation_runs ORDER BY started_at DESC,id LIMIT $1`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := make([]ReconciliationRun, 0)
+	for rows.Next() {
+		var item ReconciliationRun
+		var businessDate time.Time
+		if err := rows.Scan(&item.ID, &item.Channel, &businessDate, &item.Status, &item.ProviderRowCount, &item.CaseCount, &item.StartedAt, &item.CompletedAt); err != nil {
+			return nil, err
+		}
+		item.BusinessDate = businessDate.Format("2006-01-02")
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+func (r *PostgresRepository) AdminReconciliationCases(ctx context.Context, runID uuid.UUID, limit int) ([]AdminReconciliationCase, error) {
+	rows, err := r.pool.Query(ctx, `SELECT id,reconciliation_run_id,payment_order_id,merchant_order_no,case_type,status,provider_snapshot,internal_snapshot,resolution,created_at,resolved_at FROM reconciliation_cases WHERE reconciliation_run_id=$1 ORDER BY created_at,id LIMIT $2`, runID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := make([]AdminReconciliationCase, 0)
+	for rows.Next() {
+		var item AdminReconciliationCase
+		if err := rows.Scan(&item.ID, &item.RunID, &item.PaymentOrderID, &item.MerchantOrderNo, &item.CaseType, &item.Status, &item.ProviderSnapshot, &item.InternalSnapshot, &item.Resolution, &item.CreatedAt, &item.ResolvedAt); err != nil {
+			return nil, err
+		}
+		item.ProviderSnapshot, err = adminFinancialSnapshot(item.ProviderSnapshot)
+		if err == nil {
+			item.InternalSnapshot, err = adminFinancialSnapshot(item.InternalSnapshot)
+		}
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+// Only this new Admin read contract stringifies known persisted financial
+// integers. Existing reconciliation snapshots and domain APIs stay unchanged.
+func adminFinancialSnapshot(snapshot json.RawMessage) (json.RawMessage, error) {
+	if len(snapshot) == 0 || string(snapshot) == "null" {
+		return snapshot, nil
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(snapshot, &fields); err != nil {
+		return nil, err
+	}
+	for _, name := range []string{"amount_fen", "credit_microcredits"} {
+		value, exists := fields[name]
+		if !exists {
+			continue
+		}
+		amount, err := strconv.ParseInt(string(value), 10, 64)
+		if err != nil {
+			return nil, errors.New("invalid financial reconciliation snapshot")
+		}
+		fields[name], _ = json.Marshal(strconv.FormatInt(amount, 10))
+	}
+	return json.Marshal(fields)
 }

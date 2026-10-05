@@ -60,6 +60,9 @@ const client = {
     return { items: [user] };
   },
   organizations: async () => ({ items: [organization] }),
+  roles: async () => ({ items: [] }),
+  priceVersions: async () => ({ items: [] }),
+  reconciliationRuns: async () => ({ items: [] }),
   wallets: async () => (scenario === "navigation" ? delayed("wallets") : { items: [] }),
   paymentOrders: async () =>
     orderedRows("orders", (index, letter) => ({

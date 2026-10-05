@@ -11,6 +11,14 @@ servers:
 security:
   - oidc: []
 paths:
+  /system/status:
+    get:
+      operationId: getAdminSystemStatus
+      summary: Get internal service health, event backlog, reconciliation state, and recent errors
+      responses:
+        "200": { $ref: "#/components/responses/SystemStatus" }
+        "403": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
   /account/admin/v1/overview:
     get:
       operationId: getAdminAccountOverview
@@ -26,6 +34,22 @@ paths:
       responses:
         "200": { $ref: "#/components/responses/Collection" }
         "403": { $ref: "#/components/responses/Error" }
+  /account/admin/v1/roles:
+    get:
+      operationId: listAdminRoleDefinitions
+      summary: List organization role definitions and assignment scopes
+      responses:
+        "200": { $ref: "#/components/responses/Collection" }
+        "403": { $ref: "#/components/responses/Error" }
+  /account/admin/v1/users/{user_id}/memberships:
+    get:
+      operationId: listAdminUserMemberships
+      summary: List a user's organization memberships and roles
+      parameters: [{ $ref: "#/components/parameters/UserID" }]
+      responses:
+        "200": { $ref: "#/components/responses/Collection" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
   /account/admin/v1/users/{user_id}/status:
     patch:
       operationId: setAdminUserStatus
@@ -115,6 +139,47 @@ paths:
         "200": { $ref: "#/components/responses/Collection" }
         "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
+    post:
+      operationId: addAdminOrganizationMember
+      summary: Add or reactivate a platform user as an organization member
+      parameters: [{ $ref: "#/components/parameters/OrganizationID" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/MemberRoleChange" }
+      responses:
+        "201": { description: Member added }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /account/admin/v1/organizations/{organization_id}/members/{user_id}:
+    delete:
+      operationId: removeAdminOrganizationMember
+      summary: Revoke a non-owner organization membership
+      parameters: [{ $ref: "#/components/parameters/OrganizationID" }, { $ref: "#/components/parameters/UserID" }]
+      responses:
+        "204": { description: Member removed }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /account/admin/v1/organizations/{organization_id}/members/{user_id}/roles:
+    put:
+      operationId: replaceAdminOrganizationMemberRoles
+      summary: Replace assignable organization roles and unit administrator scopes
+      parameters: [{ $ref: "#/components/parameters/OrganizationID" }, { $ref: "#/components/parameters/UserID" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/MemberRoleChange" }
+      responses:
+        "200": { description: Member roles updated }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
   /account/admin/v1/organizations/{organization_id}/ownership:
     post:
       operationId: transferAdminOrganizationOwnership
@@ -201,11 +266,28 @@ paths:
   /account/admin/v1/audit-logs:
     get:
       operationId: listAdminAuditLogs
-      summary: List recent account audit events
-      parameters: [{ $ref: "#/components/parameters/Limit" }]
+      summary: Filter recent account audit events by actor, resource, action, time, and result
+      parameters:
+        - { $ref: "#/components/parameters/Limit" }
+        - { name: actor, in: query, schema: { type: string, maxLength: 320 } }
+        - { name: action, in: query, schema: { type: string, maxLength: 160 } }
+        - { name: resource, in: query, schema: { type: string, maxLength: 320 } }
+        - { name: result, in: query, schema: { type: string, enum: [SUCCEEDED, DENIED, FAILED] } }
+        - { name: from, in: query, schema: { type: string, format: date-time } }
+        - { name: to, in: query, schema: { type: string, format: date-time } }
       responses:
         "200": { $ref: "#/components/responses/Collection" }
+        "400": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
+  /account/admin/v1/audit-logs/{audit_id}:
+    get:
+      operationId: getAdminAuditLog
+      summary: Get one audit event with its change summary
+      parameters: [{ $ref: "#/components/parameters/AuditID" }]
+      responses:
+        "200": { $ref: "#/components/responses/Overview" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
   /billing/admin/v1/overview:
     get:
       operationId: getAdminBillingOverview
@@ -221,6 +303,35 @@ paths:
       responses:
         "200": { description: Wallet collection, content: { application/json: { schema: { $ref: "#/components/schemas/WalletCollection" } } } }
         "403": { $ref: "#/components/responses/Error" }
+  /billing/admin/v1/wallets/{wallet_id}/ledger:
+    get:
+      operationId: listAdminWalletLedger
+      summary: List immutable wallet ledger entries
+      parameters: [{ $ref: "#/components/parameters/WalletID" }, { $ref: "#/components/parameters/Limit" }]
+      responses:
+        "200": { description: Exact wallet ledger collection, content: { application/json: { schema: { $ref: "#/components/schemas/LedgerCollection" } } } }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /billing/admin/v1/pricing-versions:
+    get:
+      operationId: listAdminPricingVersions
+      summary: List current and historical model prices
+      responses:
+        "200": { description: Exact pricing version collection, content: { application/json: { schema: { $ref: "#/components/schemas/PriceVersionCollection" } } } }
+        "403": { $ref: "#/components/responses/Error" }
+    post:
+      operationId: createAdminPricingVersion
+      summary: Activate a new model price while retaining price history
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PricingVersionCreate" }
+      responses:
+        "201": { description: Pricing version activated, content: { application/json: { schema: { $ref: "#/components/schemas/PriceVersion" } } } }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
   /billing/admin/v1/payment-orders:
     get:
       operationId: listAdminPaymentOrders
@@ -229,6 +340,32 @@ paths:
       responses:
         "200": { description: Payment order collection, content: { application/json: { schema: { $ref: "#/components/schemas/PaymentOrderCollection" } } } }
         "403": { $ref: "#/components/responses/Error" }
+  /billing/admin/v1/payment-orders/{order_id}/sync:
+    post:
+      operationId: syncAdminPaymentOrder
+      summary: Query the payment provider and converge an order
+      parameters: [{ $ref: "#/components/parameters/OrderID" }]
+      responses:
+        "200": { description: Synchronized payment order, content: { application/json: { schema: { $ref: "#/components/schemas/ExactPaymentOrder" } } } }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /billing/admin/v1/payment-orders/{order_id}/refunds:
+    post:
+      operationId: createAdminPaymentRefund
+      summary: Refund a settled payment order subject to refundable balance
+      parameters: [{ $ref: "#/components/parameters/OrderID" }, { $ref: "#/components/parameters/RefundIdempotencyKey" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RefundCreate" }
+      responses:
+        "201": { description: Refund created, content: { application/json: { schema: { $ref: "#/components/schemas/ExactRefund" } } } }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
   /billing/admin/v1/adjustments:
     get:
       operationId: listAdminAdjustments
@@ -237,6 +374,28 @@ paths:
       responses:
         "200": { description: Adjustment collection, content: { application/json: { schema: { $ref: "#/components/schemas/AdjustmentCollection" } } } }
         "403": { $ref: "#/components/responses/Error" }
+  /billing/admin/v1/adjustments/{adjustment_id}/approve:
+    post:
+      operationId: approveAdminAdjustment
+      summary: Approve and post a pending manual adjustment
+      parameters: [{ $ref: "#/components/parameters/AdjustmentID" }]
+      requestBody: { $ref: "#/components/requestBodies/Decision" }
+      responses:
+        "200": { description: Adjustment approved, content: { application/json: { schema: { $ref: "#/components/schemas/ExactAdjustment" } } } }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /billing/admin/v1/adjustments/{adjustment_id}/reject:
+    post:
+      operationId: rejectAdminAdjustment
+      summary: Reject a pending manual adjustment
+      parameters: [{ $ref: "#/components/parameters/AdjustmentID" }]
+      requestBody: { $ref: "#/components/requestBodies/Decision" }
+      responses:
+        "200": { description: Adjustment rejected, content: { application/json: { schema: { $ref: "#/components/schemas/ExactAdjustment" } } } }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
   /billing/admin/v1/usage-holds:
     get:
       operationId: listAdminUsageHolds
@@ -245,6 +404,57 @@ paths:
       responses:
         "200": { description: Hold collection, content: { application/json: { schema: { $ref: "#/components/schemas/HoldCollection" } } } }
         "403": { $ref: "#/components/responses/Error" }
+  /billing/admin/v1/usage-holds/{hold_id}/release:
+    post:
+      operationId: releaseAdminUsageHold
+      summary: Finally waive this call with an audit reason; active upstream execution is rejected and a prior commit cannot be waived
+      parameters: [{ $ref: "#/components/parameters/HoldID" }]
+      requestBody: { $ref: "#/components/requestBodies/Decision" }
+      responses:
+        "200":
+          description: Billing and Token confirm final zero charge
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "billing.yaml#/components/schemas/UsageWaiverAuthority/properties/hold"
+                  - type: object
+                    properties:
+                      status: { const: RELEASED }
+                      actual_microcredits: { const: "0" }
+        "503": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /billing/admin/v1/reconciliation-runs:
+    get:
+      operationId: listAdminReconciliationRuns
+      summary: List recent payment reconciliation runs
+      responses:
+        "200": { $ref: "#/components/responses/Collection" }
+        "403": { $ref: "#/components/responses/Error" }
+    post:
+      operationId: runAdminReconciliation
+      summary: Reconcile one payment channel and business date
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ReconciliationCreate" }
+      responses:
+        "200": { description: Reconciliation completed }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /billing/admin/v1/reconciliation-runs/{run_id}/cases:
+    get:
+      operationId: listAdminReconciliationCases
+      summary: List differences found by a reconciliation run
+      parameters: [{ $ref: "#/components/parameters/RunID" }, { $ref: "#/components/parameters/Limit" }]
+      responses:
+        "200": { description: Reconciliation evidence with exact financial strings, content: { application/json: { schema: { $ref: "#/components/schemas/ReconciliationCaseCollection" } } } }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
   /token/admin/v1/overview:
     get:
       operationId: getAdminTokenOverview
@@ -260,6 +470,71 @@ paths:
       responses:
         "200": { $ref: "#/components/responses/Collection" }
         "403": { $ref: "#/components/responses/Error" }
+  /token/admin/v1/token-accounts/{token_account_id}:
+    get:
+      operationId: getAdminTokenAccount
+      summary: Get a Token account with routes and credential metadata only
+      parameters: [{ $ref: "#/components/parameters/TokenAccountID" }]
+      responses:
+        "200": { $ref: "#/components/responses/Overview" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /token/admin/v1/token-accounts/{token_account_id}/status:
+    patch:
+      operationId: setAdminTokenAccountStatus
+      summary: Enable or disable a Token account
+      parameters: [{ $ref: "#/components/parameters/TokenAccountID" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/TokenAccountStatusChange" }
+      responses:
+        "200": { $ref: "#/components/responses/Overview" }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /token/admin/v1/token-accounts/{token_account_id}/routes:
+    put:
+      operationId: upsertAdminTokenRoute
+      summary: Create or replace a model routing policy
+      parameters: [{ $ref: "#/components/parameters/TokenAccountID" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/TokenRouteChange" }
+      responses:
+        "200": { $ref: "#/components/responses/Overview" }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+    delete:
+      operationId: deleteAdminTokenRoute
+      summary: Delete a model routing policy
+      parameters: [{ $ref: "#/components/parameters/TokenAccountID" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [model]
+              properties: { model: { type: string } }
+      responses:
+        "204": { description: Route deleted }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /token/admin/v1/token-accounts/{token_account_id}/credentials/{credential_id}/validate:
+    post:
+      operationId: validateAdminProviderCredential
+      summary: Validate a provider credential without returning its secret, ciphertext, or endpoint
+      parameters: [{ $ref: "#/components/parameters/TokenAccountID" }, { $ref: "#/components/parameters/CredentialID" }]
+      responses:
+        "200": { $ref: "#/components/responses/Overview" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
   /token/admin/v1/usage-requests:
     get:
       operationId: listAdminUsageRequests
@@ -268,12 +543,42 @@ paths:
       responses:
         "200": { description: Usage collection, content: { application/json: { schema: { $ref: "#/components/schemas/UsageCollection" } } } }
         "403": { $ref: "#/components/responses/Error" }
+  /token/admin/v1/usage-requests/{usage_request_id}:
+    get:
+      operationId: getAdminUsageRequest
+      summary: Get settlement, attempt, and NewAPI correlation metadata without conversation content
+      parameters: [{ $ref: "#/components/parameters/UsageRequestID" }]
+      responses:
+        "200": { $ref: "#/components/responses/Overview" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /token/admin/v1/usage-requests/{usage_request_id}/retry-reconciliation:
+    post:
+      operationId: retryAdminUsageReconciliation
+      summary: Reschedule a failed automatic usage reconciliation
+      parameters: [{ $ref: "#/components/parameters/UsageRequestID" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/Reason" }
+      responses:
+        "200": { $ref: "#/components/responses/Overview" }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
 components:
   securitySchemes:
     oidc:
       type: openIdConnect
       openIdConnectUrl: /realms/pinvou/.well-known/openid-configuration
   parameters:
+    RefundIdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: One stable identity per logical refund; retries reuse the same facts and key.
+      schema: { type: string, minLength: 16 }
     Search:
       name: q
       in: query
@@ -298,6 +603,62 @@ components:
       in: path
       required: true
       schema: { type: string, format: uuid }
+    WalletID:
+      name: wallet_id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    OrderID:
+      name: order_id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    AdjustmentID:
+      name: adjustment_id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    HoldID:
+      name: hold_id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    RunID:
+      name: run_id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    TokenAccountID:
+      name: token_account_id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    CredentialID:
+      name: credential_id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    UsageRequestID:
+      name: usage_request_id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    AuditID:
+      name: audit_id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+  requestBodies:
+    Decision:
+      required: true
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: false
+            required: [reason]
+            properties:
+              reason: { type: string, minLength: 1, maxLength: 500 }
   schemas:
     DecimalMoney:
       type: string
@@ -366,6 +727,84 @@ components:
             properties:
               max_microcredits: { $ref: "#/components/schemas/DecimalMoney" }
               actual_microcredits: { $ref: "#/components/schemas/DecimalMoney" }
+    PriceVersion:
+      type: object
+      required: [price_version_id, model, input_per_million, output_per_million, cached_input_per_million, effective_from, created_at]
+      properties:
+        price_version_id: { type: string, format: uuid }
+        model: { type: string }
+        input_per_million: { $ref: "#/components/schemas/DecimalMoney" }
+        output_per_million: { $ref: "#/components/schemas/DecimalMoney" }
+        cached_input_per_million: { $ref: "#/components/schemas/DecimalMoney" }
+        effective_from: { type: string, format: date-time }
+        effective_to: { type: string, format: date-time }
+        created_at: { type: string, format: date-time }
+    PriceVersionCollection:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          maxItems: 200
+          items: { $ref: "#/components/schemas/PriceVersion" }
+    LedgerCollection:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          maxItems: 200
+          items:
+            type: object
+            required: [posting_id, journal_entry_id, delta_microcredits]
+            properties:
+              posting_id: { type: string, format: uuid }
+              journal_entry_id: { type: string, format: uuid }
+              delta_microcredits: { $ref: "#/components/schemas/DecimalMoney" }
+    ExactPaymentOrder:
+      type: object
+      required: [order_id, amount_fen, credit_microcredits]
+      properties:
+        order_id: { type: string, format: uuid }
+        amount_fen: { $ref: "#/components/schemas/DecimalMoney" }
+        credit_microcredits: { $ref: "#/components/schemas/DecimalMoney" }
+    ExactRefund:
+      type: object
+      required: [refund_id, amount_fen, credit_microcredits]
+      properties:
+        refund_id: { type: string, format: uuid }
+        amount_fen: { $ref: "#/components/schemas/DecimalMoney" }
+        credit_microcredits: { $ref: "#/components/schemas/DecimalMoney" }
+    ExactAdjustment:
+      type: object
+      required: [amount_microcredits]
+      properties:
+        amount_microcredits: { $ref: "#/components/schemas/DecimalMoney" }
+    FinancialSnapshot:
+      type: [object, "null"]
+      properties:
+        amount_fen: { $ref: "#/components/schemas/DecimalMoney" }
+        credit_microcredits: { $ref: "#/components/schemas/DecimalMoney" }
+    ReconciliationCaseCollection:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          maxItems: 200
+          items:
+            type: object
+            required: [case_id, reconciliation_run_id, case_type, status]
+            properties:
+              case_id: { type: string, format: uuid }
+              reconciliation_run_id: { type: string, format: uuid }
+              case_type: { type: string }
+              status: { type: string }
+              provider_snapshot: { $ref: "#/components/schemas/FinancialSnapshot" }
+              internal_snapshot: { $ref: "#/components/schemas/FinancialSnapshot" }
     UsageCollection:
       type: object
       additionalProperties: false
@@ -379,6 +818,23 @@ components:
             additionalProperties: false
             required: [usage_request_id, model, status, maximum_microcredits, actual_microcredits, error_class, started_at, updated_at]
             properties:
+              user_id: { type: string, format: uuid }
+              session_id: { type: string }
+              organization_id: { type: string, format: uuid }
+              token_account_id: { type: string, format: uuid }
+              credential_id: { type: string, format: uuid }
+              wallet_id: { type: string, format: uuid }
+              price_version_id: { type: string, format: uuid }
+              hold_id: { type: string, format: uuid }
+              newapi_request_id: { type: string }
+              provider_request_id: { type: string }
+              attempt_status: { type: string }
+              input_tokens: { type: integer }
+              output_tokens: { type: integer }
+              cached_input_tokens: { type: integer }
+              reconciliation_attempts: { type: integer, minimum: 0 }
+              reconciliation_last_error: { type: string }
+              reconciliation_stopped_at: { type: string, format: date-time }
               usage_request_id: { type: string, format: uuid }
               model: { type: string }
               status: { type: string, enum: [CREATED, RESERVED, UPSTREAM_ACTIVE, SETTLEMENT_PENDING, COMMITTED, RELEASED, REVIEW] }
@@ -409,6 +865,20 @@ components:
       required: [new_owner_user_id]
       properties:
         new_owner_user_id: { type: string, format: uuid }
+    MemberRoleChange:
+      type: object
+      additionalProperties: false
+      required: [roles, unit_admin_unit_ids]
+      properties:
+        user_id: { type: string, format: uuid }
+        roles:
+          type: array
+          uniqueItems: true
+          items: { type: string, enum: [ORG_ADMIN, BILLING_ADMIN, MEMBER, AUDITOR] }
+        unit_admin_unit_ids:
+          type: array
+          uniqueItems: true
+          items: { type: string, format: uuid }
     OrganizationUnitCreate:
       type: object
       additionalProperties: false
@@ -451,7 +921,66 @@ components:
       required: [status]
       properties:
         status: { type: string, enum: [ACTIVE, DISABLED] }
+    TokenAccountStatusChange:
+      type: object
+      additionalProperties: false
+      required: [status, reason]
+      properties:
+        status: { type: string, enum: [ACTIVE, DISABLED] }
+        reason: { type: string, minLength: 1, maxLength: 500 }
+    TokenRouteChange:
+      type: object
+      additionalProperties: false
+      required: [model, priority, default_scope, health_status]
+      properties:
+        model: { type: string, minLength: 1, maxLength: 160 }
+        priority: { type: integer, minimum: 0, maximum: 10000 }
+        default_scope: { type: string, enum: [NONE, UNIT, ORG] }
+        health_status: { type: string, enum: [HEALTHY, DEGRADED, UNHEALTHY] }
+    Reason:
+      type: object
+      additionalProperties: false
+      required: [reason]
+      properties:
+        reason: { type: string, minLength: 1, maxLength: 500 }
+    PricingVersionCreate:
+      type: object
+      additionalProperties: false
+      required: [model, input_per_million, output_per_million, cached_input_per_million]
+      properties:
+        model: { type: string, minLength: 1, maxLength: 160 }
+        input_per_million: { type: integer, format: int64, minimum: 0 }
+        output_per_million: { type: integer, format: int64, minimum: 0 }
+        cached_input_per_million: { type: integer, format: int64, minimum: 0 }
+    RefundCreate:
+      type: object
+      additionalProperties: false
+      required: [amount_fen, reason]
+      properties:
+        amount_fen: { type: integer, format: int64, minimum: 1 }
+        reason: { type: string, minLength: 1, maxLength: 500 }
+    ReconciliationCreate:
+      type: object
+      additionalProperties: false
+      required: [channel, business_date]
+      properties:
+        channel: { type: string, enum: [UNIONPAY, ALIPAY, WECHAT] }
+        business_date: { type: string, format: date }
   responses:
+    SystemStatus:
+      description: Aggregated internal operational status without internal endpoint addresses
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: true
+            required: [checked_at, services, relays, reconciliation, recent_errors]
+            properties:
+              checked_at: { type: string, format: date-time }
+              services: { type: array, items: { type: object, additionalProperties: true } }
+              relays: { type: array, items: { type: object, additionalProperties: true } }
+              reconciliation: { type: object, additionalProperties: true }
+              recent_errors: { type: array, items: { type: object, additionalProperties: true } }
     Overview:
       description: Service overview counters
       content:

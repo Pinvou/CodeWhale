@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -30,6 +32,180 @@ type ReconciliationRun struct {
 	CompletedAt      time.Time `json:"completed_at"`
 }
 
+type ExpiredPaymentCandidate struct {
+	OrderID    uuid.UUID
+	Attempts   int
+	LeaseUntil time.Time
+}
+
+type ExpiredPaymentStore interface {
+	ClaimExpiredPaymentOrders(context.Context, int, time.Duration) ([]ExpiredPaymentCandidate, error)
+	RescheduleExpiredPaymentOrder(context.Context, ExpiredPaymentCandidate, string, time.Time) error
+}
+
+type PaymentOrderSynchronizer interface {
+	SyncOrder(context.Context, uuid.UUID) (PaymentOrder, error)
+}
+
+type ExpiredPaymentReconciler struct {
+	store        ExpiredPaymentStore
+	synchronizer PaymentOrderSynchronizer
+	interval     time.Duration
+	lease        time.Duration
+	batchSize    int
+	now          func() time.Time
+	logger       *slog.Logger
+}
+
+func NewExpiredPaymentReconciler(store ExpiredPaymentStore, synchronizer PaymentOrderSynchronizer, interval time.Duration) *ExpiredPaymentReconciler {
+	if interval < time.Second {
+		interval = 15 * time.Second
+	}
+	return &ExpiredPaymentReconciler{
+		store:        store,
+		synchronizer: synchronizer,
+		interval:     interval,
+		lease:        5 * time.Minute,
+		batchSize:    20,
+		now:          func() time.Time { return time.Now().UTC() },
+		logger:       slog.Default().With("component", "expired-payment-reconciler"),
+	}
+}
+
+func (r *ExpiredPaymentReconciler) Run(ctx context.Context) {
+	r.runOnce(ctx)
+	ticker := time.NewTicker(r.interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			r.runOnce(ctx)
+		}
+	}
+}
+
+func (r *ExpiredPaymentReconciler) runOnce(ctx context.Context) {
+	items, err := r.store.ClaimExpiredPaymentOrders(ctx, r.batchSize, r.lease)
+	if err != nil {
+		r.logger.Error("claim expired payment orders failed")
+		return
+	}
+	for _, item := range items {
+		remaining := item.LeaseUntil.Sub(r.now())
+		if remaining <= 0 {
+			continue
+		}
+		itemCtx, cancel := context.WithTimeout(ctx, remaining)
+		order, syncErr := r.synchronizer.SyncOrder(itemCtx, item.OrderID)
+		cancel()
+		if syncErr == nil && (order.Status == "CREATED" || order.Status == "PENDING") {
+			syncErr = errors.New("payment provider did not return a terminal state")
+		}
+		if syncErr == nil {
+			continue
+		}
+		if ctx.Err() != nil {
+			return
+		}
+		retryReason := safePaymentReconciliationError(syncErr)
+		nextAt := r.now().Add(paymentReconciliationBackoff(item.Attempts))
+		if err := r.store.RescheduleExpiredPaymentOrder(ctx, item, retryReason, nextAt); err != nil {
+			r.logger.Error("reschedule expired payment order failed")
+			continue
+		}
+		r.logger.Warn("expired payment order reconciliation deferred", "order_id", item.OrderID, "attempt", item.Attempts, "reason", retryReason)
+	}
+}
+
+func safePaymentReconciliationError(err error) string {
+	switch {
+	case errors.Is(err, ErrPaymentProvider):
+		return "payment provider unavailable"
+	case errors.Is(err, ErrConflict):
+		return "payment provider state conflict"
+	default:
+		return "payment order synchronization failed"
+	}
+}
+
+func paymentReconciliationBackoff(attempt int) time.Duration {
+	if attempt < 1 {
+		attempt = 1
+	}
+	delay := 15 * time.Second
+	for i := 1; i < attempt && delay < 5*time.Minute; i++ {
+		delay *= 2
+	}
+	if delay > 5*time.Minute {
+		return 5 * time.Minute
+	}
+	return delay
+}
+
+func (r *PostgresRepository) ClaimExpiredPaymentOrders(ctx context.Context, limit int, lease time.Duration) ([]ExpiredPaymentCandidate, error) {
+	if limit < 1 || limit > 100 || lease < 30*time.Second || lease > 10*time.Minute {
+		return nil, ErrConflict
+	}
+	now := r.now()
+	rows, err := r.pool.Query(ctx, `
+WITH candidates AS (
+    SELECT id
+    FROM payment_orders
+    WHERE status IN ('CREATED','PENDING')
+      AND expires_at <= $1
+      AND (reconciliation_next_at IS NULL OR reconciliation_next_at <= $1)
+      AND (reconciliation_lease_until IS NULL OR reconciliation_lease_until <= $1)
+    ORDER BY COALESCE(reconciliation_next_at, expires_at), expires_at, id
+    FOR UPDATE SKIP LOCKED
+    LIMIT $2
+)
+UPDATE payment_orders payment
+SET reconciliation_attempts = payment.reconciliation_attempts + 1,
+    reconciliation_lease_until = $3,
+    reconciliation_last_error = NULL,
+    updated_at = $1
+FROM candidates
+WHERE payment.id = candidates.id
+RETURNING payment.id, payment.reconciliation_attempts, payment.reconciliation_lease_until`, now, limit, now.Add(lease))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := make([]ExpiredPaymentCandidate, 0)
+	for rows.Next() {
+		var item ExpiredPaymentCandidate
+		if err := rows.Scan(&item.OrderID, &item.Attempts, &item.LeaseUntil); err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+func (r *PostgresRepository) RescheduleExpiredPaymentOrder(ctx context.Context, item ExpiredPaymentCandidate, lastError string, nextAt time.Time) error {
+	command, err := r.pool.Exec(ctx, `UPDATE payment_orders
+SET reconciliation_next_at=$2,reconciliation_lease_until=NULL,reconciliation_last_error=$3,updated_at=$4
+WHERE id=$1 AND status IN ('CREATED','PENDING')
+  AND reconciliation_lease_until=$5 AND reconciliation_attempts=$6 AND reconciliation_lease_until>$4`, item.OrderID, nextAt.UTC(), truncatePaymentReconciliationError(lastError), r.now(), item.LeaseUntil, item.Attempts)
+	if err != nil {
+		return err
+	}
+	if command.RowsAffected() == 0 {
+		return ErrConflict
+	}
+	return nil
+}
+
+func truncatePaymentReconciliationError(value string) string {
+	value = strings.TrimSpace(value)
+	if runes := []rune(value); len(runes) > 500 {
+		return string(runes[:500])
+	}
+	return value
+}
+
 func (p *PaymentCoordinator) SyncOrder(ctx context.Context, orderID uuid.UUID) (PaymentOrder, error) {
 	order, err := getPaymentOrderByID(ctx, p.repository.pool, orderID, false)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -49,34 +225,52 @@ func (p *PaymentCoordinator) SyncOrder(ctx context.Context, orderID uuid.UUID) (
 		return p.applyQueriedPayment(ctx, order.ID, providerOrder)
 	}
 	if providerOrder.Status == "CLOSED" || providerOrder.Status == "FAILED" {
-		if _, err := p.repository.pool.Exec(ctx, `UPDATE payment_orders SET status=$2,updated_at=$3 WHERE id=$1 AND status IN ('CREATED','PENDING')`, order.ID, providerOrder.Status, p.now()); err != nil {
-			return PaymentOrder{}, err
-		}
-		return getPaymentOrderByID(ctx, p.repository.pool, order.ID, false)
+		return p.applyProviderTerminalStatus(ctx, order, providerOrder.Status)
 	}
 	if (order.Status == "CREATED" || order.Status == "PENDING") && !order.ExpiresAt.After(p.now()) && providerOrder.Status == "PENDING" {
 		closed, closeErr := p.provider.Close(ctx, order.MerchantOrderNo)
 		if closeErr != nil {
 			return PaymentOrder{}, errors.Join(ErrPaymentProvider, closeErr)
 		}
-		if !providerOrderMatches(order, closed) {
+		if closed.MerchantOrderNo != order.MerchantOrderNo || closed.Channel != order.Channel || closed.AmountFen != order.AmountFen || closed.Currency != order.Currency {
 			return PaymentOrder{}, ErrConflict
 		}
-		if closed.Status == "CLOSED" {
-			_, err = p.repository.pool.Exec(ctx, `UPDATE payment_orders SET status='CLOSED',updated_at=$2 WHERE id=$1 AND status IN ('CREATED','PENDING')`, order.ID, p.now())
-			if err != nil {
-				return PaymentOrder{}, err
-			}
-			return getPaymentOrderByID(ctx, p.repository.pool, order.ID, false)
+		switch closed.Status {
+		case "SUCCESS":
+			return p.applyQueriedPayment(ctx, order.ID, closed)
+		case "PARTIALLY_REFUNDED", "REFUNDED":
+			return p.applyQueriedPayment(ctx, order.ID, closed)
+		case "CLOSED", "FAILED":
+			return p.applyProviderTerminalStatus(ctx, order, closed.Status)
 		}
 	}
 	return order, nil
 }
 
-func (p *PaymentCoordinator) applyQueriedPayment(ctx context.Context, orderID uuid.UUID, provider ProviderOrder) (PaymentOrder, error) {
-	if provider.ChannelTransactionID == nil || strings.TrimSpace(*provider.ChannelTransactionID) == "" || provider.PaidAt == nil || provider.PaidAt.IsZero() {
-		return PaymentOrder{}, ErrConflict
+func (p *PaymentCoordinator) applyProviderReviewStatus(ctx context.Context, order PaymentOrder) (PaymentOrder, error) {
+	_, err := p.repository.pool.Exec(ctx, `UPDATE payment_orders
+SET status='MANUAL_REVIEW',fulfillment_status='MANUAL_REVIEW',reconciliation_next_at=NULL,reconciliation_lease_until=NULL,reconciliation_last_error=NULL,updated_at=$2
+WHERE id=$1 AND status IN ('CREATED','PENDING') AND fulfillment_status='PENDING'`, order.ID, p.now())
+	if err != nil {
+		return PaymentOrder{}, err
 	}
+	return getPaymentOrderByID(ctx, p.repository.pool, order.ID, false)
+}
+
+func (p *PaymentCoordinator) applyProviderTerminalStatus(ctx context.Context, order PaymentOrder, status string) (PaymentOrder, error) {
+	if status != "CLOSED" && status != "FAILED" {
+		return PaymentOrder{}, fmt.Errorf("unsupported provider terminal status %q", status)
+	}
+	_, err := p.repository.pool.Exec(ctx, `UPDATE payment_orders
+SET status=$2,reconciliation_next_at=NULL,reconciliation_lease_until=NULL,reconciliation_last_error=NULL,updated_at=$3
+WHERE id=$1 AND status IN ('CREATED','PENDING')`, order.ID, status, p.now())
+	if err != nil {
+		return PaymentOrder{}, err
+	}
+	return getPaymentOrderByID(ctx, p.repository.pool, order.ID, false)
+}
+
+func (p *PaymentCoordinator) applyQueriedPayment(ctx context.Context, orderID uuid.UUID, provider ProviderOrder) (PaymentOrder, error) {
 	tx, err := p.repository.pool.Begin(ctx)
 	if err != nil {
 		return PaymentOrder{}, err
@@ -87,6 +281,22 @@ func (p *PaymentCoordinator) applyQueriedPayment(ctx context.Context, orderID uu
 		return PaymentOrder{}, err
 	}
 	if provider.MerchantOrderNo != order.MerchantOrderNo || provider.Channel != order.Channel || provider.AmountFen != order.AmountFen || provider.Currency != order.Currency {
+		return PaymentOrder{}, ErrConflict
+	}
+	// A refunded first observation cannot establish the amount to credit. The
+	// order lock makes this decision durable against later SUCCESS deliveries.
+	if order.FulfillmentStatus != "CREDITED" && order.FulfillmentStatus != "REFUNDED" && (provider.Status == "PARTIALLY_REFUNDED" || provider.Status == "REFUNDED") {
+		_, err = tx.Exec(ctx, `UPDATE payment_orders SET status='MANUAL_REVIEW',fulfillment_status='MANUAL_REVIEW',reconciliation_next_at=NULL,reconciliation_lease_until=NULL,reconciliation_last_error=NULL,updated_at=$2 WHERE id=$1`, order.ID, p.now())
+		if err != nil {
+			return PaymentOrder{}, err
+		}
+		order.Status, order.FulfillmentStatus = "MANUAL_REVIEW", "MANUAL_REVIEW"
+		return order, tx.Commit(ctx)
+	}
+	if order.FulfillmentStatus == "MANUAL_REVIEW" {
+		return order, tx.Commit(ctx)
+	}
+	if provider.ChannelTransactionID == nil || strings.TrimSpace(*provider.ChannelTransactionID) == "" || provider.PaidAt == nil || provider.PaidAt.IsZero() {
 		return PaymentOrder{}, ErrConflict
 	}
 	if order.FulfillmentStatus == "CREDITED" || order.FulfillmentStatus == "REFUNDED" {

@@ -10,6 +10,31 @@ servers:
 security:
   - oidc: []
 paths:
+  /internal/v1/usage-waivers:
+    servers: [{ url: / }]
+    post:
+      security: [{ serviceToken: [] }]
+      operationId: coordinateInternalUsageWaiver
+      summary: Persist operator intent, reject active upstream execution, and project Billing's authoritative terminal; not exposed by Portal
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "billing.yaml#/components/schemas/UsageWaiverIntent" } } }
+      responses:
+        "200": { description: Final zero-charge operator waiver, content: { application/json: { schema: { $ref: "billing.yaml#/components/schemas/UsageWaiverAuthority" } } } }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { description: Active upstream or committed financial winner, content: { application/json: { schema: { $ref: "common.yaml#/components/schemas/Error" } } } }
+        "503": { $ref: "#/components/responses/Error" }
+  /admin/v1/system/newapi-status:
+    servers: [{ url: / }]
+    get:
+      operationId: getAdminNewAPIStatus
+      summary: Internal platform-admin business status probe for the configured NewAPI; not a Portal proxy route
+      responses:
+        "200": { description: NewAPI is healthy, content: { application/json: { schema: { $ref: "#/components/schemas/NewAPIStatus" } } } }
+        "503": { description: NewAPI status is unavailable or invalid, content: { application/json: { schema: { $ref: "#/components/schemas/NewAPIStatus" } } } }
+        "403": { $ref: "#/components/responses/Error" }
   /token-accounts:
     get:
       operationId: listManagedTokenAccounts
@@ -528,6 +553,9 @@ paths:
           $ref: "#/components/responses/Error"
 components:
   securitySchemes:
+    serviceToken:
+      type: http
+      scheme: bearer
     oidc:
       type: openIdConnect
       openIdConnectUrl: https://identity.example.invalid/realms/pinvou/.well-known/openid-configuration
@@ -547,6 +575,12 @@ components:
         type: string
         format: uuid
   schemas:
+    NewAPIStatus:
+      type: object
+      additionalProperties: false
+      required: [success]
+      properties:
+        success: { type: boolean }
     ShareScope:
       type: string
       enum: [OWNER_UNIT_ONLY, OWNER_SUBTREE, ORG_ALL, EXPLICIT_MEMBERS]
@@ -713,7 +747,7 @@ components:
         actual_microcredits:
           type: [string, "null"]
           pattern: '^(0|[1-9][0-9]*)$'
-          description: Exact decimal microcredits; null while the amount is unknown.
+          description: Exact charged decimal microcredits; zero for a final operator waiver, independently of observed model tokens; null while the charged amount is unknown.
         input_tokens:
           type: [integer, "null"]
           format: int64

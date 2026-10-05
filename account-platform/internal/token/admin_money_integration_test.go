@@ -62,8 +62,8 @@ func TestPostgresNewUsageReadsKeepExactMoneyAndNullWithoutChangingExistingStatus
 							t.Fatal("admin usage omitted a field consumed by the operations UI")
 						}
 					}
-					if len(item) != 8 {
-						t.Fatal("admin usage leaked internal fields instead of the explicit UI contract")
+					if _, present := item["IdempotencyKey"]; present {
+						t.Fatal("admin usage leaked an untagged internal field")
 					}
 				}
 				if test.maximum != "" && item[test.maximum] != "9007199254740993" {

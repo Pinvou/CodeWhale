@@ -21,7 +21,14 @@ spec:
     - host: {{ .Values.ingress.portalHost | quote }}
       http: { paths: [{ path: /, pathType: Prefix, backend: { service: { name: {{ include "pinvou.fullname" . }}-token-portal, port: { number: 8080 } } } }] }
     - host: {{ .Values.ingress.keycloakHost | quote }}
-      http: { paths: [{ path: /, pathType: Prefix, backend: { service: { name: {{ include "pinvou.fullname" . }}-keycloak, port: { number: 8080 } } } }] }
+      http:
+        paths:
+          - path: /realms
+            pathType: Prefix
+            backend: { service: { name: {{ include "pinvou.fullname" . }}-keycloak, port: { number: 8080 } } }
+          - path: /resources
+            pathType: Prefix
+            backend: { service: { name: {{ include "pinvou.fullname" . }}-keycloak, port: { number: 8080 } } }
     - host: {{ .Values.ingress.billingHost | quote }}
       http: { paths: [{ path: /internal/payment/notifications, pathType: Exact, backend: { service: { name: {{ include "pinvou.fullname" . }}-billing-service, port: { number: 8080 } } } }] }
 {{- end }}

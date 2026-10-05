@@ -22,8 +22,10 @@ func TestPostgresA04AccountUpgradePreservesExistingIdentityOrganizationAndEventG
 	}
 	defer connection.Release()
 	defer connection.Conn().Close(ctx)
-	if err := migrations.DownOne(ctx, connection.Conn(), loaded); err != nil {
-		t.Fatal(err)
+	for range 2 {
+		if err := migrations.DownOne(ctx, connection.Conn(), loaded); err != nil {
+			t.Fatal(err)
+		}
 	}
 	var version int64
 	if err := connection.QueryRow(ctx, `SELECT max(version) FROM schema_migrations`).Scan(&version); err != nil || version != 3 {

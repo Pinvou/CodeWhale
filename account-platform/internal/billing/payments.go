@@ -203,24 +203,34 @@ func (p *PaymentCoordinator) activatePreparedOrder(ctx context.Context, prepared
 	if err != nil {
 		return order, created, errors.Join(ErrPaymentProvider, err)
 	}
-	if provider.MerchantOrderNo != order.MerchantOrderNo || provider.Channel != order.Channel || provider.AmountFen != order.AmountFen || provider.Currency != order.Currency || provider.PaymentURL == "" {
+	refunded := provider.Status == "PARTIALLY_REFUNDED" || provider.Status == "REFUNDED"
+	if provider.MerchantOrderNo != order.MerchantOrderNo || provider.Channel != order.Channel || provider.AmountFen != order.AmountFen || provider.Currency != order.Currency || (provider.PaymentURL == "" && !refunded) {
 		return order, created, ErrConflict
 	}
 	order.Status, order.PaymentURL = "PENDING", provider.PaymentURL
 	switch provider.Status {
 	case "CLOSED", "FAILED":
 		order.Status = provider.Status
-	case "PENDING", "SUCCESS", "PARTIALLY_REFUNDED", "REFUNDED":
+	case "PARTIALLY_REFUNDED", "REFUNDED":
+		// Record the first refunded fact before releasing the existing order
+		// lock; a delayed SUCCESS notification cannot win a gap between txs.
+		order.Status, order.FulfillmentStatus = "MANUAL_REVIEW", "MANUAL_REVIEW"
+	case "PENDING", "SUCCESS":
 	default:
 		return order, created, ErrConflict
 	}
-	if _, err := tx.Exec(ctx, `UPDATE payment_orders SET status=$2,payment_url=$3,updated_at=$4 WHERE id=$1`, order.ID, order.Status, order.PaymentURL, p.now()); err != nil {
+	if _, err := tx.Exec(ctx, `UPDATE payment_orders
+SET status=$2,payment_url=$3,updated_at=$4,fulfillment_status=$5,
+    reconciliation_next_at=CASE WHEN $2='MANUAL_REVIEW' THEN NULL ELSE reconciliation_next_at END,
+    reconciliation_lease_until=CASE WHEN $2='MANUAL_REVIEW' THEN NULL ELSE reconciliation_lease_until END,
+    reconciliation_last_error=CASE WHEN $2='MANUAL_REVIEW' THEN NULL ELSE reconciliation_last_error END
+WHERE id=$1`, order.ID, order.Status, order.PaymentURL, p.now(), order.FulfillmentStatus); err != nil {
 		return order, created, err
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return order, created, err
 	}
-	if provider.Status == "SUCCESS" || provider.Status == "PARTIALLY_REFUNDED" || provider.Status == "REFUNDED" {
+	if provider.Status == "SUCCESS" {
 		order, err = p.applyQueriedPayment(ctx, order.ID, provider)
 	}
 	return order, created, err
@@ -285,6 +295,14 @@ func (p *PaymentCoordinator) ProcessNotification(ctx context.Context, channel, s
 	}
 	if notification.MerchantID != p.merchantID || notification.Channel != order.Channel || channel != order.Channel || notification.AmountFen != order.AmountFen || notification.Currency != order.Currency || notification.Status != "SUCCESS" {
 		return ErrForbiddenPayment
+	}
+	if order.FulfillmentStatus == "MANUAL_REVIEW" {
+		// Keep the authenticated receipt, but do not turn a delayed SUCCESS
+		// delivery into gross credit after a refunded first observation.
+		if _, err := tx.Exec(ctx, `UPDATE payment_notifications SET result='PROCESSED',processed_at=$2 WHERE notification_id=$1`, notification.NotificationID, p.now()); err != nil {
+			return err
+		}
+		return tx.Commit(ctx)
 	}
 	if order.FulfillmentStatus == "CREDITED" || order.FulfillmentStatus == "REFUNDED" {
 		if order.ChannelTransactionID == nil || *order.ChannelTransactionID != notification.ChannelTransaction || order.PaidAt == nil || !samePaymentTime(*order.PaidAt, notification.PaidAt) {
