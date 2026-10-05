@@ -1,6 +1,31 @@
+const isObject = value => value !== null && typeof value === 'object' && !Array.isArray(value);
+
+function requestFailed() {
+  const error = new Error('REQUEST_FAILED');
+  error.code = 'REQUEST_FAILED';
+  return error;
+}
+
+async function readPayload(response, required = false) {
+  let payload;
+  try { payload = await response.json(); }
+  catch (reason) {
+    if (reason?.name === 'AbortError') throw reason;
+    if (required) throw requestFailed();
+    return null;
+  }
+  if (!isObject(payload)) {
+    if (required) throw requestFailed();
+    return null;
+  }
+  return payload;
+}
+
 function errorFromResponse(response, payload) {
-  const error = new Error(payload && payload.message ? payload.message : `HTTP ${response.status}`);
-  error.code = payload && payload.code ? payload.code : 'REQUEST_FAILED';
+  const code = typeof payload?.code === 'string' && /^[A-Za-z][A-Za-z0-9_]{0,127}$/u.test(payload.code)
+    ? payload.code : 'REQUEST_FAILED';
+  const error = new Error(code);
+  error.code = code;
   error.status = response.status;
   return error;
 }
@@ -12,11 +37,14 @@ export class AccountPlatformBffClient {
   }
 
   async session(signal) {
+    this.csrfToken = '';
     const response = await fetch(`${this.baseURL}/api/session`, { credentials: 'same-origin', cache: 'no-store', signal });
     if (response.status === 401) { this.csrfToken = ''; return { authenticated: false }; }
-    if (!response.ok) throw errorFromResponse(response, await response.json().catch(() => ({})));
-    const payload = await response.json();
-    this.csrfToken = payload.csrf_token || '';
+    if (!response.ok) throw errorFromResponse(response, await readPayload(response));
+    const payload = await readPayload(response, true);
+    if (typeof payload.authenticated !== 'boolean' ||
+      (payload.authenticated && (typeof payload.csrf_token !== 'string' || !payload.csrf_token))) throw requestFailed();
+    this.csrfToken = payload.authenticated ? payload.csrf_token : '';
     return payload;
   }
 
@@ -34,7 +62,7 @@ export class AccountPlatformBffClient {
       signal: options.signal,
     });
     if (response.status === 204) return null;
-    const payload = await response.json().catch(() => ({}));
+    const payload = await readPayload(response, response.ok);
     if (!response.ok) {
       if (response.status === 401) this.csrfToken = '';
       throw errorFromResponse(response, payload);
@@ -47,7 +75,6 @@ export class AccountPlatformBffClient {
   switchContext(contextType, organizationId, signal) {
     return this.request('account', '/v1/sessions/current/active-context', { method: 'POST', body: { context_type: contextType, organization_id: organizationId || null }, signal });
   }
-  createOrganization(name) { return this.request('account', '/v1/organizations', { method: 'POST', body: { name } }); }
   units(organizationId, signal) { return this.request('account', `/v1/organizations/${organizationId}/units`, { signal }); }
   members(organizationId, signal) { return this.request('account', `/v1/organizations/${organizationId}/members`, { signal }); }
   createUnit(organizationId, name, parentId = null) { return this.request('account', `/v1/organizations/${organizationId}/units`, { method: 'POST', body: { name, parent_id: parentId } }); }
@@ -57,6 +84,10 @@ export class AccountPlatformBffClient {
   createRecharge(productId, channel, key) { return this.request('token', '/v1/recharge/orders', { method: 'POST', headers: { 'Idempotency-Key': key }, body: { product_id: productId, channel } }); }
   recentRechargeOrder(signal) { return this.request('token', '/v1/recharge/orders/recent', { signal }); }
   rechargeOrder(orderId, signal) { return this.request('token', `/v1/recharge/orders/${orderId}`, { signal }); }
+  usageHistory(cursor = '', signal) {
+    const next = cursor ? `&cursor=${encodeURIComponent(cursor)}` : '';
+    return this.request('token', `/v1/me/usage-requests?limit=20${next}`, { signal });
+  }
   managedTokens(signal) { return this.request('token', '/v1/token-accounts', { signal }); }
   eligibleTokens(model, signal) { return this.request('token', `/v1/token-accounts/eligible?model=${encodeURIComponent(model)}`, { signal }); }
   usageRequest(usageRequestId, signal) { return this.request('token', `/v1/usage-requests/${encodeURIComponent(usageRequestId)}`, { signal }); }
@@ -65,7 +96,7 @@ export class AccountPlatformBffClient {
   rotateCredential(accountId, body) { return this.request('token', `/v1/token-accounts/${accountId}/credentials`, { method: 'POST', body }); }
   async logout() {
     const response = await fetch(`${this.baseURL}/api/logout`, { method: 'POST', headers: { 'X-CSRF-Token': this.csrfToken }, credentials: 'same-origin' });
-    if (!response.ok) throw errorFromResponse(response, await response.json().catch(() => ({})));
+    if (!response.ok) throw errorFromResponse(response, await readPayload(response));
     this.csrfToken = '';
   }
 }

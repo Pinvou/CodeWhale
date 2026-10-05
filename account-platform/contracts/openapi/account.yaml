@@ -131,34 +131,6 @@ paths:
                 $ref: "common.yaml#/components/schemas/Context"
         "403":
           $ref: "#/components/responses/Error"
-  /organizations:
-    post:
-      operationId: createOrganization
-      summary: Create an organization owned by the current user
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              additionalProperties: false
-              required: [name]
-              properties:
-                name:
-                  type: string
-                  minLength: 1
-                  maxLength: 120
-      responses:
-        "201":
-          description: Created organization
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Organization"
-        "400":
-          $ref: "#/components/responses/Error"
-        "403":
-          $ref: "#/components/responses/Error"
   /organizations/{organization_id}/units:
     get:
       operationId: listOrganizationUnits

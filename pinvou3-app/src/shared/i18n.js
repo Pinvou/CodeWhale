@@ -9,6 +9,13 @@ import { dictZh } from './i18n/zh.js';
 
 const dict = { zh: dictZh };
 
+// Classic bridge scripts cannot import this module. Reuse only the already
+// loaded central dictionary; language loading remains owned by the UI entry.
+globalThis.PinvouAccountPlatformErrorCopy = function (language) {
+  const lang = language === 'en' ? 'en' : language === 'ja' ? 'ja' : 'zh';
+  return dict[lang]?.uiAccountPlatform || null;
+};
+
 // UI 语言 ↔ 后端 UserPrefs language(BCP 47 tag)映射。加语言时三处同步:
 // 这里 / dict / Rust prefs.rs Language 枚举
 const LANG_TO_TAG = { zh: 'zh-Hans', en: 'en', ja: 'ja' };

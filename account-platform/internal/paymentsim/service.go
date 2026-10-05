@@ -27,17 +27,17 @@ func NewService(repository Repository) *Service {
 }
 
 func (s *Service) Handler(serviceToken string) http.Handler {
-	root := http.NewServeMux()
-	management := http.NewServeMux()
-	management.HandleFunc("POST /internal/v1/orders", s.createOrder)
-	management.HandleFunc("GET /internal/v1/orders/{merchant_order_no}", s.getOrder)
-	management.HandleFunc("POST /internal/v1/orders/{merchant_order_no}/close", s.closeOrder)
-	management.HandleFunc("POST /internal/v1/orders/{merchant_order_no}/refunds", s.refundOrder)
-	management.HandleFunc("GET /internal/v1/bills/{business_date}", s.getBill)
-	root.Handle("/internal/", serviceauth.Middleware(serviceToken, management))
-	root.HandleFunc("GET /pay/{token}", s.paymentPage)
-	root.HandleFunc("POST /pay/{token}/complete", s.completePayment)
-	return root
+	router := httpserver.NewRouter()
+	management := router.Group("/internal")
+	management.Use(serviceauth.GinMiddleware(serviceToken))
+	management.POST("/v1/orders", httpserver.AdaptFunc(s.createOrder))
+	management.GET("/v1/orders/:merchant_order_no", httpserver.AdaptFunc(s.getOrder))
+	management.POST("/v1/orders/:merchant_order_no/close", httpserver.AdaptFunc(s.closeOrder))
+	management.POST("/v1/orders/:merchant_order_no/refunds", httpserver.AdaptFunc(s.refundOrder))
+	management.GET("/v1/bills/:business_date", httpserver.AdaptFunc(s.getBill))
+	router.GET("/pay/:token", httpserver.AdaptFunc(s.paymentPage))
+	router.POST("/pay/:token/complete", httpserver.AdaptFunc(s.completePayment))
+	return router
 }
 
 func (s *Service) createOrder(w http.ResponseWriter, r *http.Request) {

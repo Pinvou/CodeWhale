@@ -11,6 +11,8 @@ images:
   tokenPortal: { repository: pinvou/token-portal, tag: dev, pullPolicy: IfNotPresent }
   eventRelay: { repository: pinvou/account-platform-event-relay, tag: dev, pullPolicy: IfNotPresent }
   migrate: { repository: pinvou/account-platform-migrate, tag: dev, pullPolicy: IfNotPresent }
+  newApi: { repository: calciumion/new-api, tag: v1.0.0-rc.11, digest: sha256:bd30213d808857bb569ef47d3c9209d061a66ea089c2472ef46ce51e75517f19, pullPolicy: IfNotPresent }
+  newApiTls: { repository: pinvou/newapi-tls, tag: dev, pullPolicy: IfNotPresent }
   keycloak: { repository: quay.io/keycloak/keycloak, tag: "26.7.0", pullPolicy: IfNotPresent }
   redis: { repository: redis, tag: "8.2-alpine", pullPolicy: IfNotPresent }
   nats: { repository: nats, tag: "2.11-alpine", pullPolicy: IfNotPresent }
@@ -21,6 +23,16 @@ replicas:
   tokenGateway: 2
   tokenPortal: 2
   eventRelay: 1
+
+newApi:
+  enabled: true
+  serviceName: newapi
+  replicas: 1
+  nodeType: master
+  trustedProxies: none
+  tls:
+    serverSecretName: pinvou-account-platform-newapi-server-tls
+    caSecretName: pinvou-account-platform-newapi-ca
 
 oidc:
   issuer: https://accounts.example.invalid/realms/pinvou
@@ -46,6 +58,12 @@ tokenGateway:
   secretKeyId: ""
   providerAllowedHosts: []
   maxInputTokens: 128000
+  defaultProvider: new-api
+  defaultProviderBaseUrl: https://newapi:8443
+  defaultProviderModels: [deepseek-v4-flash]
+  defaultRoutePriority: 10
+  reconciliationNewApiBaseUrl: https://newapi:8443
+  reconciliationIntervalSeconds: 15
 
 external:
   oidcCidrs: []

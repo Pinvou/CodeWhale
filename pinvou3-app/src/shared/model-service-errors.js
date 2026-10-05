@@ -485,6 +485,8 @@
   }
 
   function redactTechnicalDetail(raw, language) {
+    const accountMessage = accountRuntimeErrorMessage(raw, language);
+    if (accountMessage) return accountMessage;
     const sensitive = SENSITIVE_PLACEHOLDERS[languageTag(language)];
     let text = String(raw || "");
     const keepPrefix = (prefix) => prefix + sensitive;
@@ -604,6 +606,33 @@
     text = text.replaceAll(/\b(eyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]*)/g, () => sensitive);
     if (text.length > 2000) text = [...text].slice(0, 2000).join("") + "...";
     return text;
+  }
+
+  // Only native runtime rejections with an exact, finite static code enter
+  // this branch. Provider bodies mentioning a code keep their existing path.
+  // Never retain a native suffix: it may contain diagnostic-only details.
+  function accountRuntimeErrorMessage(raw, language) {
+    const text = String(raw && raw.message ? raw.message : raw || "");
+    const match = text.match(/^(?:Error: )?(?:send_user_message failed: )?account_platform: ([a-z_]+)(?::[\s\S]*)?$/);
+    if (!match) return "";
+    const code = match[1];
+    const known = [
+      "authentication_required", "account_platform_configuration_missing",
+      "account_platform_configuration_invalid", "account_platform_service_unavailable",
+      "account_platform_account_unavailable", "account_platform_response_invalid",
+      "credential_store_failed", "credential_store_unavailable", "unsupported_platform",
+      "oidc_credentials_invalid", "oidc_direct_grant_disabled", "oidc_login_failed",
+      "oidc_token_endpoint_unavailable", "oidc_token_exchange_failed",
+      "oidc_token_response_invalid", "oidc_refresh_token_missing",
+      "oidc_id_token_invalid", "oidc_jwks_unavailable",
+    ];
+    if (!known.includes(code)) return "";
+    const getter = globalThis.PinvouAccountPlatformErrorCopy;
+    const copy = typeof getter === "function" ? getter(language) : null;
+    if (!copy) return "";
+    if (code === "authentication_required") return copy.loginRequired;
+    return Object.prototype.hasOwnProperty.call(copy.errors || {}, code)
+      ? copy.errors[code] : copy.requestFailed;
   }
 
   function providerLabelFrom(value, language) {

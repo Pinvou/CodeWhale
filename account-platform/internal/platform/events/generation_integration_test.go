@@ -107,10 +107,28 @@ func TestPostgresPublicationGenerationMigrationDownAndUp(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer connection.Release()
-			if err := migrations.DownOne(ctx, connection.Conn(), loaded); err != nil {
-				t.Fatal(err)
+			// Later waves add migrations after event delivery. Roll back through the
+			// actual delivery version so this still exercises generation removal.
+			deliveryVersion := int64(3)
+			if domain == "billing" {
+				deliveryVersion = 6
 			}
-			migrations.Unlock(ctx, connection.Conn())
+			if domain == "token" {
+				deliveryVersion = 4
+			}
+			for {
+				var current int64
+				if err := connection.QueryRow(ctx, `SELECT COALESCE(max(version),0) FROM schema_migrations`).Scan(&current); err != nil {
+					t.Fatal(err)
+				}
+				if current < deliveryVersion {
+					break
+				}
+				if err := migrations.DownOne(ctx, connection.Conn(), loaded); err != nil {
+					t.Fatal(err)
+				}
+				migrations.Unlock(ctx, connection.Conn())
+			}
 			var count int
 			if err := connection.QueryRow(ctx, `SELECT count(*) FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='outbox_events' AND column_name='publication_generation'`).Scan(&count); err != nil || count != 0 {
 				t.Fatal("rollback did not remove publication generation")

@@ -21,6 +21,7 @@ function AccountPortalApp({ initialLanguage: languageAtMount }) {
     switchLanguage(value, () => {
       try { localStorage.setItem('pinvou.account.language', value); } catch { /* Preferences are optional. */ }
       document.documentElement.lang = value === 'zh' ? 'zh-CN' : value === 'ja' ? 'ja-JP' : 'en';
+      document.title = dict[value].uiAccountPlatform.title;
       setLanguage(value);
     });
   };
@@ -31,6 +32,7 @@ async function mountAccountPortal() {
   const preferred = initialLanguage();
   const language = await ensureLanguage(preferred) ? preferred : 'zh';
   document.documentElement.lang = language === 'zh' ? 'zh-CN' : language === 'ja' ? 'ja-JP' : 'en';
+  document.title = dict[language].uiAccountPlatform.title;
   createRoot(document.getElementById('account-root')).render(<AccountPortalApp initialLanguage={language} />);
 }
 

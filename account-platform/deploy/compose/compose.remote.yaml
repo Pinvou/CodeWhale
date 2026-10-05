@@ -9,6 +9,10 @@ services:
     environment:
       OIDC_ISSUER: ${PUBLIC_BASE_URL:?set PUBLIC_BASE_URL}/realms/pinvou
 
+  billing-service:
+    environment:
+      OIDC_ISSUER: ${PUBLIC_BASE_URL:?set PUBLIC_BASE_URL}/realms/pinvou
+
   token-gateway:
     environment:
       OIDC_ISSUER: ${PUBLIC_BASE_URL:?set PUBLIC_BASE_URL}/realms/pinvou

@@ -1,6 +1,7 @@
 // Controlled public test data. This exercises the real React view and BFF client,
 // not a running BFF, PostgreSQL, identity provider, or payment service.
-import React from 'react';
+import React, { useState } from 'react';
+import { AccountPlatformPopover, AccountPlatformSidebarEntry } from '../../src/features/account-platform/AccountPlatformPopover.jsx';
 import { createRoot } from 'react-dom/client';
 import { AccountPlatformView } from '../../src/features/account-platform/AccountPlatformView.jsx';
 import { AccountPlatformBffClient } from '../../src/features/account-platform/bff-client.js';
@@ -19,7 +20,10 @@ const ids = {
   usage: '00000000-0000-4000-8000-000000000006',
 };
 let organizationId = '';
+const createdTokens = [];
+let rotated = false;
 let balanceRequests = 0;
+let nativeAuthenticated = scenario?.startsWith('popover-') && !scenario.startsWith('popover-login');
 const calls = [];
 const pending = new Map();
 const json = (body, status = 200) => new Response(JSON.stringify(body), {
@@ -51,6 +55,7 @@ function defer(key) {
 
 window.__accountReview = {
   ids, calls,
+  titleCopy(scope, locale) { return dict[locale]?.[scope === "admin" ? "uiAdminPlatform" : "uiAccountPlatform"]?.title; },
   get pending() { return [...pending.keys()]; },
   get copy() { return dict[language].uiAccountPlatform; },
   settle(key, outcome) {
@@ -58,8 +63,11 @@ window.__accountReview = {
     if (!item) throw new Error(`Unknown fixture request: ${key}`);
     pending.delete(key);
     if (outcome === 'abort') item.reject(new DOMException('Fixture body aborted', 'AbortError'));
-    else if (key === 'nativeLogin') item.resolve({ authenticated: true });
-    else if (key === 'balance') item.resolve(json(wallet(333, '')));
+    else if (key === 'nativeLogin') { nativeAuthenticated = true; item.resolve({ enabled: true, configured: true, authenticated: true, errorCode: null }); }
+    else if (key === 'nativeLogout') { nativeAuthenticated = false; item.resolve({ enabled: true, configured: true, authenticated: false, errorCode: null }); }
+    else if (key === 'bootstrap') item.resolve(json({ user_id: ids.user, display_name: 'Late account', active_context: { context_type: 'PERSONAL' } }));
+    else if (key === 'balance') item.resolve(json(wallet(3330000, '')));
+    else if (key === 'rotation') { rotated = true; item.resolve(json({ credential_id: 'public-fixture-credential-v2', status: 'ACTIVE', version: 2 })); }
     else if (key === 'eligible') item.resolve(json({ items: [{
       token_account_id: ids.personalToken, name: 'Eligible Personal Token',
       owner_type: 'USER', allowed_models: ['model-a'], health_status: 'HEALTHY',
@@ -85,7 +93,9 @@ globalThis.fetch = async (input, options = {}) => {
   if (path === '/api/session') return scenario === 'session-unavailable'
     ? failed('UPSTREAM_UNAVAILABLE', 503)
     : json({ authenticated: true, csrf_token: 'public-fixture-csrf-token-00000000' });
+  if (path.startsWith('/api/admin/') && scenario === 'portal-title-admin') return json({});
   if (path === '/api/logout') return failed('LOGOUT_UNAVAILABLE', 503);
+  if (path === '/api/account/v1/account/bootstrap' && scenario === 'popover-stale-read') return defer('bootstrap');
   if (path === '/api/account/v1/account/bootstrap') return scenario === 'bootstrap-error'
     ? failed('UPSTREAM_UNAVAILABLE', 503)
     : json({ user_id: ids.user, display_name: 'Fixture User', active_context: { context_type: 'PERSONAL' } });
@@ -100,6 +110,7 @@ globalThis.fetch = async (input, options = {}) => {
     return failed(scenario === 'action-401' ? 'LOGIN_REQUIRED' : 'PERMISSION_DENIED',
       scenario === 'action-401' ? 401 : 403);
   }
+  if (path.startsWith('/api/account/v1/organizations/') && method === 'POST') return failed(scenario === 'action-401' ? 'LOGIN_REQUIRED' : 'PERMISSION_DENIED', scenario === 'action-401' ? 401 : 403);
   if (path.startsWith('/api/account/v1/organizations/')) return json({ items: [] });
   if (path === '/api/token/v1/recharge/products') return scenario === 'context-401'
     ? failed('LOGIN_REQUIRED', 401)
@@ -107,15 +118,23 @@ globalThis.fetch = async (input, options = {}) => {
       channels: ['UNIONPAY', 'ALIPAY', 'WECHAT'] }] });
   if (path === '/api/token/v1/me/balance') {
     balanceRequests += 1;
+    if (scenario === 'popover-balance-401') return failed('LOGIN_REQUIRED', 401);
     if (['balance-context', 'balance-paid'].includes(scenario) && balanceRequests === 2) return defer('balance');
-    return json(wallet(organizationId ? 222 : 111));
+    return json(wallet(organizationId ? 2220000 : 1110000));
   }
-  if (path === '/api/token/v1/token-accounts') return json({ items: [token()] });
+  if (path === '/api/token/v1/me/usage-requests') return json({ items: [{ usage_request_id: ids.usage, display_status: 'SETTLED', model: 'model-a', actual_microcredits: '1000000', started_at: '2026-10-01T00:00:00Z', input_tokens: 2, output_tokens: 3, cached_input_tokens: 0 }], next_cursor: null });
+  if (path === '/api/token/v1/token-accounts' && method === 'POST') {
+    calls[calls.length - 1].body = body;
+    const created = { ...body, token_account_id: ids.usage, status: 'ACTIVE' };
+    createdTokens.push(created); return json(created, 201);
+  }
+  if (path === '/api/token/v1/token-accounts') return json({ items: [token(), ...createdTokens.filter(item => item.owner_id === (organizationId || ids.user))] });
   if (path.endsWith('/credentials')) {
+    if (method === 'POST') { calls[calls.length - 1].body = body; return defer('rotation'); }
     if (scenario === 'credential-late' && path.includes(ids.personalToken)) return defer('credential');
     return json({ items: [{ credential_id: 'public-fixture-credential',
       provider: organizationId ? 'organization-provider' : 'personal-provider',
-      status: 'ACTIVE', version: 1, fingerprint: '0123456789abcdef' }] });
+      status: 'ACTIVE', version: rotated ? 2 : 1, fingerprint: '0123456789abcdef' }] });
   }
   if (path === '/api/token/v1/token-accounts/eligible') return defer('eligible');
   if (path.startsWith('/api/token/v1/usage-requests/')) return defer('usage');
@@ -130,15 +149,23 @@ globalThis.fetch = async (input, options = {}) => {
 
 async function mount() {
   if (!await ensureLanguage(language)) throw new Error('Fixture language failed to load');
-  const desktop = scenario?.startsWith('desktop-');
+  if (scenario?.startsWith('portal-title-')) {
+    const scope = scenario.endsWith('admin') ? 'admin' : 'account';
+    localStorage.setItem('pinvou.' + scope + '.language', language);
+    if (scope === 'admin') { document.getElementById('account-root').id = 'admin-root'; await import('../../src/app/admin-main.jsx'); }
+    else await import('../../src/app/account-main.jsx');
+    return;
+  }
+  const popover = scenario?.startsWith('popover-');
+  const desktop = scenario?.startsWith('desktop-') || scenario?.startsWith('sidebar-') || popover;
   const client = desktop ? new AccountPlatformDesktopClient({
-    session: async () => ({ authenticated: false }),
-    login: async callbackCopy => {
-      calls.push({ path: 'nativeLogin', method: 'LOCAL', callbackCopy });
-      if (scenario === 'desktop-login-failure') throw 'oidc_token_endpoint_unavailable: PRIVATE_PROVIDER_DETAIL';
+    session: async () => { calls.push({ path: 'nativeSession', method: 'LOCAL' }); return { enabled: true, configured: true, authenticated: nativeAuthenticated, errorCode: null }; },
+    login: async credentials => {
+      calls.push({ path: 'nativeLogin', method: 'LOCAL', credentials });
+      if (scenario === 'desktop-login-failure' || scenario === 'popover-login-failure') throw 'oidc_token_endpoint_unavailable: PRIVATE_PROVIDER_DETAIL';
       return defer('nativeLogin');
     },
-    logout: async () => { calls.push({ path: 'nativeLogout', method: 'LOCAL' }); return { authenticated: false }; },
+    logout: async () => { calls.push({ path: 'nativeLogout', method: 'LOCAL' }); if (scenario === 'popover-logout-delay') return defer('nativeLogout'); nativeAuthenticated = false; return { enabled: true, configured: true, authenticated: false, errorCode: null }; },
     request: async request => {
       const response = await fetch('/api/' + request.area + request.resource, {
         method: request.method, body: request.body === undefined ? undefined : JSON.stringify(request.body),
@@ -147,6 +174,23 @@ async function mount() {
       return { status: response.status, body: await response.json() };
     },
   }) : new AccountPlatformBffClient();
+  function PopoverFixture() {
+    const [open, setOpen] = useState(true);
+    const [locale, setLocale] = useState(language);
+    window.__accountReview.setOpen = setOpen;
+    window.__accountReview.changeLanguage = async next => { await ensureLanguage(next); setLocale(next); };
+    return <AccountPlatformPopover open={open} client={client} copy={dict[locale].uiAccountPlatform}
+      language={locale} theme="light" collapsed={false}
+      onClose={() => { calls.push({ path: 'popoverClose', method: 'LOCAL' }); setOpen(false); }} />;
+  }
+  if (scenario?.startsWith('sidebar-')) {
+    createRoot(document.getElementById('account-root')).render(<AccountPlatformSidebarEntry transport={client.transport}
+      copy={dict[language].uiAccountPlatform} language={language} theme="light" collapsed={false}
+      onOpen={() => calls.push({ path: 'sidebarOpen', method: 'LOCAL' })}
+      onOpenCenter={() => calls.push({ path: 'openAccountCenter', method: 'LOCAL' })} />);
+    return;
+  }
+  if (popover) { createRoot(document.getElementById('account-root')).render(<PopoverFixture />); return; }
   createRoot(document.getElementById('account-root')).render(<AccountPlatformView
     client={client} copy={dict[language].uiAccountPlatform}
     language={language} onLanguageChange={() => {}} portal={!desktop}

@@ -37,6 +37,52 @@ const RUST_TOOLCHAIN_SCRIPT_PATH = path.join(
   "ensure-rust-toolchain.ps1",
 );
 const RUSTC_STACK_WRAPPER_SCRIPTS_PATH = path.join(APP_ROOT, "src-tauri", "scripts");
+const DEVELOPMENT_ENV_FILES = [
+  ".env",
+  ".env.local",
+  ".env.development",
+  ".env.development.local",
+];
+
+function parseEnvironmentFile(content) {
+  const parsed = {};
+  for (const sourceLine of content.replace(/^\uFEFF/u, "").split(/\r?\n/u)) {
+    const line = sourceLine.trim();
+    if (!line || line.startsWith("#")) continue;
+    const match = line.match(/^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/u);
+    if (!match) continue;
+    let value = match[2].trim();
+    const quote = value[0];
+    const quoted = (quote === '"' || quote === "'")
+      ? value.match(quote === '"' ? /^"((?:\\.|[^"\\])*)"\s*(?:#.*)?$/u : /^'([^']*)'\s*(?:#.*)?$/u)
+      : null;
+    if (quoted) {
+      value = quoted[1];
+    } else {
+      value = value.replace(/\s+#.*$/u, "").trimEnd();
+    }
+    parsed[match[1]] = value;
+  }
+  return parsed;
+}
+
+function loadDevelopmentEnvironment(
+  environment = process.env,
+  { appRoot = APP_ROOT, log = console.log } = {},
+) {
+  const fileEnvironment = {};
+  const loadedFiles = [];
+  for (const fileName of DEVELOPMENT_ENV_FILES) {
+    const filePath = path.join(appRoot, fileName);
+    if (!fs.existsSync(filePath)) continue;
+    Object.assign(fileEnvironment, parseEnvironmentFile(fs.readFileSync(filePath, "utf8")));
+    loadedFiles.push(fileName);
+  }
+  if (loadedFiles.length > 0) {
+    log(`[build] Loaded development environment: ${loadedFiles.join(", ")}`);
+  }
+  return { ...fileEnvironment, ...environment };
+}
 
 function pinnedRustToolchainChannel(configPath = RUST_TOOLCHAIN_CONFIG_PATH) {
   const config = fs.readFileSync(configPath, "utf8");
@@ -839,9 +885,10 @@ async function main() {
     );
   }
 
+  const runtimeEnvironment = tauriRuntimeEnvironment(windowsRuntime || windowsDevRuntime);
   const tauriEnvironment = chromeDevtoolsMcpEnvironment(
     isDev,
-    tauriRuntimeEnvironment(windowsRuntime || windowsDevRuntime),
+    isDev ? loadDevelopmentEnvironment(runtimeEnvironment) : runtimeEnvironment,
   );
   prepareWindowsRustcStackWrapper({ environment: tauriEnvironment });
   return runTauri(preparedArgs, { environment: tauriEnvironment });
@@ -870,9 +917,11 @@ module.exports = {
   chromeDevtoolsMcpEnvironment,
   ensureWindowsRustToolchain,
   formatElapsed,
+  loadDevelopmentEnvironment,
   main,
   prepareChromeDevtoolsMcp,
   prepareChromeDevtoolsMcpForPlatform,
+  parseEnvironmentFile,
   prepareCodexBridge,
   prepareKnowledgeHost,
   prepareLinuxAsrRuntime,

@@ -3,6 +3,7 @@ package token
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -44,6 +46,12 @@ type Service struct {
 	maximumInputTokens     int64
 	defaultMaxOutputTokens int64
 	maximumOutputTokens    int64
+	defaultRoutes          DefaultRouteProvisioner
+}
+
+func (s *Service) WithDefaultRoutes(provisioner DefaultRouteProvisioner) *Service {
+	s.defaultRoutes = provisioner
+	return s
 }
 
 func NewService(repository Repository, contexts ContextResolver, wallets WalletResolver, validator CredentialValidator, providerURLs ProviderURLPolicy, billing BillingClient, upstream UpstreamClient, maximumInputTokens int64) *Service {
@@ -54,25 +62,32 @@ func NewService(repository Repository, contexts ContextResolver, wallets WalletR
 }
 
 func (s *Service) Handler(verify identity.VerifyFunc) http.Handler {
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /v1/token-accounts", s.listManagedTokenAccounts)
-	mux.HandleFunc("POST /v1/token-accounts", s.createTokenAccount)
-	mux.HandleFunc("PATCH /v1/token-accounts/{token_account_id}/status", s.setTokenAccountStatus)
-	mux.HandleFunc("PUT /v1/token-accounts/{token_account_id}/sharing", s.updateTokenSharing)
-	mux.HandleFunc("PUT /v1/token-accounts/{token_account_id}/routes", s.upsertTokenRoute)
-	mux.HandleFunc("POST /v1/token-accounts/{token_account_id}/credentials", s.rotateCredential)
-	mux.HandleFunc("GET /v1/token-accounts/{token_account_id}/credentials", s.listCredentials)
-	mux.HandleFunc("POST /v1/token-accounts/{token_account_id}/credentials/{credential_id}/revoke", s.revokeCredential)
-	mux.HandleFunc("GET /v1/token-accounts/eligible", s.listEligible)
-	mux.HandleFunc("GET /v1/usage-requests/{usage_request_id}", s.getUsageRequest)
-	mux.HandleFunc("POST /v1/chat/completions", s.chatCompletions)
-	mux.HandleFunc("GET /v1/recharge/products", s.rechargeProducts)
-	mux.HandleFunc("POST /v1/recharge/orders", s.createRechargeOrder)
-	mux.HandleFunc("GET /v1/recharge/orders/recent", s.getRecentRechargeOrder)
-	mux.HandleFunc("GET /v1/recharge/orders/{order_id}", s.getRechargeOrder)
-	mux.HandleFunc("POST /v1/recharge/orders/{order_id}/close", s.closeRechargeOrder)
-	mux.HandleFunc("GET /v1/me/balance", s.getBalance)
-	return identity.Middleware(verify, mux)
+	router := httpserver.NewRouter()
+	router.Use(identity.GinMiddleware(verify))
+	router.GET("/v1/token-accounts", httpserver.AdaptFunc(s.listManagedTokenAccounts))
+	router.POST("/v1/token-accounts", httpserver.AdaptFunc(s.createTokenAccount))
+	router.PATCH("/v1/token-accounts/:token_account_id/status", httpserver.AdaptFunc(s.setTokenAccountStatus))
+	router.PUT("/v1/token-accounts/:token_account_id/sharing", httpserver.AdaptFunc(s.updateTokenSharing))
+	router.PUT("/v1/token-accounts/:token_account_id/routes", httpserver.AdaptFunc(s.upsertTokenRoute))
+	router.POST("/v1/token-accounts/:token_account_id/credentials", httpserver.AdaptFunc(s.rotateCredential))
+	router.GET("/v1/token-accounts/:token_account_id/credentials", httpserver.AdaptFunc(s.listCredentials))
+	router.POST("/v1/token-accounts/:token_account_id/credentials/:credential_id/revoke", httpserver.AdaptFunc(s.revokeCredential))
+	router.GET("/v1/token-accounts/eligible", httpserver.AdaptFunc(s.listEligible))
+	router.GET("/v1/usage-requests/:usage_request_id", httpserver.AdaptFunc(s.getUsageRequest))
+	router.GET("/v1/me/usage-requests", httpserver.AdaptFunc(s.listMyUsageRequests))
+	router.POST("/v1/chat/completions", httpserver.AdaptFunc(s.chatCompletions))
+	router.GET("/v1/recharge/products", httpserver.AdaptFunc(s.rechargeProducts))
+	router.POST("/v1/recharge/orders", httpserver.AdaptFunc(s.createRechargeOrder))
+	router.GET("/v1/recharge/orders/recent", httpserver.AdaptFunc(s.getRecentRechargeOrder))
+	router.GET("/v1/recharge/orders/:order_id", httpserver.AdaptFunc(s.getRechargeOrder))
+	router.POST("/v1/recharge/orders/:order_id/close", httpserver.AdaptFunc(s.closeRechargeOrder))
+	router.GET("/v1/me/balance", httpserver.AdaptFunc(s.getBalance))
+	admin := router.Group("/admin/v1")
+	admin.Use(identity.RequireRealmRoleGin("platform-admin"))
+	admin.GET("/overview", httpserver.AdaptFunc(s.adminOverview))
+	admin.GET("/token-accounts", httpserver.AdaptFunc(s.adminTokenAccounts))
+	admin.GET("/usage-requests", httpserver.AdaptFunc(s.adminUsageRequests))
+	return router
 }
 
 func (s *Service) listManagedTokenAccounts(w http.ResponseWriter, r *http.Request) {
@@ -202,7 +217,7 @@ func (s *Service) resolveOwnedAccount(w http.ResponseWriter, r *http.Request) (A
 		return AuthorizationContext{}, TokenAccount{}, false
 	}
 	account, err := s.repository.GetAccount(r.Context(), accountID)
-	if err != nil || !s.ownerAllowed(r, resolved, account.OwnerType, account.OwnerID, account.OwnerOrganization, account.OwnerUnit) {
+	if err != nil || account.ManagementMode == "PLATFORM" || !s.ownerAllowed(r, resolved, account.OwnerType, account.OwnerID, account.OwnerOrganization, account.OwnerUnit) {
 		s.writeError(w, r, ErrForbidden)
 		return AuthorizationContext{}, TokenAccount{}, false
 	}
@@ -403,7 +418,7 @@ func (s *Service) rotateCredential(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	account, err := s.repository.GetAccount(r.Context(), accountID)
-	if err != nil || !s.ownerAllowed(r, resolved, account.OwnerType, account.OwnerID, account.OwnerOrganization, account.OwnerUnit) {
+	if err != nil || account.ManagementMode == "PLATFORM" || !s.ownerAllowed(r, resolved, account.OwnerType, account.OwnerID, account.OwnerOrganization, account.OwnerUnit) {
 		s.writeError(w, r, ErrForbidden)
 		return
 	}
@@ -481,6 +496,76 @@ func (s *Service) getUsageRequest(w http.ResponseWriter, r *http.Request) {
 		"maximum_microcredits": usage.MaximumMicrocredits, "actual_microcredits": usage.ActualMicrocredits,
 		"started_at": usage.StartedAt, "updated_at": usage.UpdatedAt,
 	})
+}
+
+func (s *Service) listMyUsageRequests(w http.ResponseWriter, r *http.Request) {
+	resolved, ok := s.resolveContext(w, r)
+	if !ok {
+		return
+	}
+	limit := 20
+	if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed < 1 || parsed > 100 {
+			api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "limit must be between 1 and 100", httpserver.RequestID(r.Context()))
+			return
+		}
+		limit = parsed
+	}
+	var cursor *UsageHistoryCursor
+	if raw := strings.TrimSpace(r.URL.Query().Get("cursor")); raw != "" {
+		parsed, err := decodeUsageCursor(raw)
+		if err != nil {
+			api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "cursor is invalid", httpserver.RequestID(r.Context()))
+			return
+		}
+		cursor = &parsed
+	}
+	usageRequests, err := s.repository.ListUsageForContext(r.Context(), resolved, limit+1, cursor)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	var nextCursor *string
+	if len(usageRequests) > limit {
+		last := usageRequests[limit-1]
+		encoded := encodeUsageCursor(UsageHistoryCursor{StartedAt: last.StartedAt, ID: last.UsageRequestID})
+		nextCursor = &encoded
+		usageRequests = usageRequests[:limit]
+	}
+	for index := range usageRequests {
+		usageRequests[index].DisplayStatus = usageDisplayStatus(UsageRequest{Status: usageRequests[index].status})
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	api.WriteJSON(w, http.StatusOK, map[string]any{"items": usageRequests, "next_cursor": nextCursor})
+}
+
+func encodeUsageCursor(cursor UsageHistoryCursor) string {
+	payload := cursor.StartedAt.UTC().Format(time.RFC3339Nano) + "|" + cursor.ID.String()
+	return base64.RawURLEncoding.EncodeToString([]byte(payload))
+}
+
+func decodeUsageCursor(raw string) (UsageHistoryCursor, error) {
+	if len(raw) > 256 {
+		return UsageHistoryCursor{}, ErrForbidden
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(raw)
+	if err != nil {
+		return UsageHistoryCursor{}, err
+	}
+	parts := strings.SplitN(string(payload), "|", 2)
+	if len(parts) != 2 {
+		return UsageHistoryCursor{}, ErrForbidden
+	}
+	startedAt, err := time.Parse(time.RFC3339Nano, parts[0])
+	if err != nil {
+		return UsageHistoryCursor{}, err
+	}
+	id, err := uuid.Parse(parts[1])
+	if err != nil {
+		return UsageHistoryCursor{}, err
+	}
+	return UsageHistoryCursor{StartedAt: startedAt, ID: id}, nil
 }
 
 func usageContextMatches(context AuthorizationContext, usage UsageRequest) bool {

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/config"
@@ -58,6 +59,38 @@ func TestReadinessFailureIsUnavailable(t *testing.T) {
 	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/health/ready", nil))
 	if response.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status code = %d, want 503", response.Code)
+	}
+}
+
+func TestHEADHealthPreservesTCPResponseAndDependencyChecks(t *testing.T) {
+	var checks atomic.Int64
+	handler := HandlerWithApplication(config.Config{ServiceName: "head-health", RateLimitRPS: 0.001, RateLimitBurst: 1}, nil, func(context.Context) error {
+		checks.Add(1)
+		return errors.New("fixture dependency unavailable")
+	})
+	server := httptest.NewServer(handler)
+	defer server.Close()
+	for _, test := range []struct {
+		path   string
+		status int
+	}{{"/health/live", 200}, {"/health/ready", 503}, {"/health/ready", 503}} {
+		request, err := http.NewRequest(http.MethodHead, server.URL+test.path, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		response, err := server.Client().Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var body [1]byte
+		n, _ := response.Body.Read(body[:])
+		response.Body.Close()
+		if response.StatusCode != test.status || response.Header.Get("Cache-Control") != "no-store" || n != 0 {
+			t.Fatal("HEAD health lost readiness semantics or sent a response body")
+		}
+	}
+	if checks.Load() != 2 {
+		t.Fatal("HEAD readiness bypassed the actual dependency")
 	}
 }
 

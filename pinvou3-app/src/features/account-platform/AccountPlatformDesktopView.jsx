@@ -7,3 +7,6 @@ export function AccountPlatformDesktopView({ transport, ...props }) {
   const client = useMemo(() => new AccountPlatformDesktopClient(transport), [transport]);
   return <AccountPlatformView {...props} client={client} />;
 }
+
+// Both desktop account surfaces share the existing feature lazy boundary.
+export { AccountPlatformSidebarEntry } from './AccountPlatformPopover.jsx';

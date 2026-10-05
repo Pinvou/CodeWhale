@@ -9,12 +9,18 @@ import (
 	"time"
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/billing"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/config"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/identity"
 )
 
 func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
+	cfg, err := config.Load("billing-service")
+	if err != nil {
+		log.Fatal(err)
+	}
 	repository, err := billing.NewPostgresRepository(ctx, os.Getenv("DATABASE_URL"))
 	if err != nil {
 		log.Fatal(err)
@@ -27,13 +33,17 @@ func main() {
 		log.Fatal(err)
 	}
 	service := billing.NewService(repository).WithPayments(payments)
+	verify, err := identity.NewOIDCVerifyFunc(ctx, os.Getenv("OIDC_ISSUER"), os.Getenv("OIDC_AUDIENCE"), cfg.Environment, os.Getenv("OIDC_JWKS_URL"))
+	if err != nil {
+		log.Fatal(err)
+	}
 	expiryDone := make(chan struct{})
 	go func() {
 		defer close(expiryDone)
 		service.RunHoldExpiry(ctx, time.Minute, func(error) { log.Print("hold expiry review failed; reservations retained") })
 	}()
 	defer func() { cancel(); <-expiryDone }()
-	if err := httpserver.RunWithApplication("billing-service", service.Handler(os.Getenv("INTERNAL_SERVICE_TOKEN")), repository.Ping); err != nil {
+	if err := httpserver.RunWithApplication("billing-service", service.Handler(os.Getenv("INTERNAL_SERVICE_TOKEN"), verify), repository.Ping); err != nil {
 		log.Fatal(err)
 	}
 }

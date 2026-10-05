@@ -31,6 +31,7 @@ pub struct RuntimeModelRequest {
 #[derive(Clone, PartialEq, Eq)]
 pub struct RuntimeModelCredential {
     api_key: String,
+    request_idempotency_header: Option<String>,
 }
 
 impl RuntimeModelCredential {
@@ -39,7 +40,22 @@ impl RuntimeModelCredential {
         if api_key.trim().is_empty() {
             anyhow::bail!("runtime model API key must not be empty");
         }
-        Ok(Self { api_key })
+        Ok(Self {
+            api_key,
+            request_idempotency_header: None,
+        })
+    }
+
+    /// Account Gateway requires one operation key that the foundation generates
+    /// and reuses across retries. Ordinary provider credentials do not opt in.
+    pub(crate) fn account_platform_access_token(access_token: String) -> Result<Self> {
+        let mut credential = Self::api_key(access_token)?;
+        credential.request_idempotency_header = Some("Idempotency-Key".into());
+        Ok(credential)
+    }
+
+    pub(crate) fn request_idempotency_header(&self) -> Option<&str> {
+        self.request_idempotency_header.as_deref()
     }
 
     pub(crate) fn expose_api_key(&self) -> &str {
@@ -181,6 +197,21 @@ mod tests {
         assert!(!rendered.contains("runtime-secret"));
         // Official 构造器带非空校验；空/空白 key 必须被拒绝。
         assert!(RuntimeModelCredential::api_key("  ").is_err());
+    }
+
+    #[test]
+    fn account_gateway_operation_header_is_transient_and_affects_runtime_identity() {
+        let ordinary = credential("same-in-memory-value");
+        let account =
+            RuntimeModelCredential::account_platform_access_token("same-in-memory-value".into())
+                .unwrap();
+        assert!(ordinary.request_idempotency_header().is_none());
+        assert_eq!(
+            account.request_idempotency_header(),
+            Some("Idempotency-Key")
+        );
+        assert!(ordinary != account);
+        assert_eq!(format!("{account:?}"), "RuntimeModelCredential([REDACTED])");
     }
 
     #[test]

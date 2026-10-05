@@ -77,6 +77,7 @@ for (const language of ['zh', 'en', 'ja']) {
     'uiAccount',
     'uiChatWorkspace',
     'artifactPreview',
+    'uiAccountPlatform',
     'uiToolStore',
     'uiModelStore',
     'uiPet',
@@ -312,6 +313,13 @@ assert.match(viewLoaders, new RegExp("codex: \\(\\) => import\\('\\.\\./features
 // The main window renders codex through the LazyCodexAcpView wrapper (which
 // internally consumes the same view-loaders chunk); its error fallback copy
 // still flows through i18n.
+assert.match(main, /<LazyAccountPlatformSidebarEntry[\s\S]{0,400}copy=\{t\.uiAccountPlatform\}/);
+const accountPlatformPopover = source('features/account-platform/AccountPlatformPopover.jsx');
+assert.match(accountPlatformPopover, /copy\.balance/);
+assert.match(accountPlatformPopover, /copy\.reservedCredits/);
+assert.doesNotMatch(accountPlatformPopover, />可用余额</);
+assert.equal(dict.zh.uiAccountPlatform.balance, '可用积分');
+assert.equal(dict.zh.uiAccountPlatform.reservedCredits, '使用中积分');
 assert.match(main, /<CodexAcpView[^>]*t=\{t\}/);
 // The settings error boundary has been merged into the shared ViewErrorBoundary; its title flows through i18n via the heading prop, and the settings boundary keeps its friendly detail copy (never the raw error message).
 const viewErrorBoundary = source('shared/ViewErrorBoundary.jsx');

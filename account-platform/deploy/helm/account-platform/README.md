@@ -7,8 +7,24 @@ their backup, certificate, and merchant controls remain environment-owned.
 Create the referenced runtime Secret before install. It must contain separate
 database URLs (`account-service-database-url`, `billing-service-database-url`,
 `token-gateway-database-url`, and Keycloak database keys), the internal service
-token, payment adapter URL/HMAC keys, and the environment-specific external
-secret-provider material. Never place those values in a values file.
+token, payment adapter URL/HMAC keys, the environment-specific external
+secret-provider material, `token-default-provider-api-key`, and the New API
+reconciliation credentials (`token-reconciliation-newapi-admin-token` and
+`token-reconciliation-newapi-admin-user-id`). Never place those values in a
+values file.
+
+New API's private entry point is HTTPS on port 8443. Build the project-owned
+`newapi-tls` image using the existing Dockerfile with `SERVICE=newapi-tls` and
+set `images.newApiTls`. The same-pod TLS front end forwards only the exact
+chat-completions, model-list and reconciliation-log routes to loopback HTTP
+8080; no New API ingress or cross-pod HTTP service is exposed. Create the
+referenced server TLS Secret (`tls.crt`, `tls.key`) and a separate CA Secret
+(`ca.crt`) before installation. Its certificate DNS SAN must match
+`newApi.serviceName`. Only the front end mounts the private key; Gateway mounts
+the CA and keeps system roots through `SSL_CERT_DIR`. Provider/reconciliation
+URLs must both equal `https://<serviceName>:8443`. Missing certificate Secrets
+prevent startup and incorrect CA/SAN/expiry fails TLS verification. Rotate
+certificates by restarting the front end and Gateway; do not disable validation.
 
 Production-new deliberately excludes Payment Simulator and Mock New API. Use the
 dedicated production values only after the real payment adapter, real New API,

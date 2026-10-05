@@ -12,3 +12,4 @@
 | [ADR-006](ADR-006-payment-state.md) | 支付状态、迟到支付和退款 |
 | [ADR-007](ADR-007-payment-simulator.md) | 模拟支付与真实支付隔离 |
 | [ADR-008](ADR-008-newapi-cutover.md) | 新旧 New API 隔离与切换 |
+| [ADR-009](ADR-009-gin-http-framework.md) | 服务端 HTTP 框架统一为 Gin |

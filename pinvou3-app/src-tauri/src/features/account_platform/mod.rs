@@ -6,6 +6,11 @@
 
 mod oidc;
 mod platform;
+mod runtime;
+
+use crate::platform::credential_store::CredentialReference;
+pub(crate) use runtime::ChatRuntimeAuthorization;
+use runtime::{bootstrap_user_id, session_error_code, usage_history_query_allowed};
 
 use std::{
     sync::{
@@ -22,35 +27,24 @@ use rand::Rng as _;
 use reqwest::{Method, StatusCode, Url};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sha2::{Digest, Sha256};
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    net::TcpListener,
-    sync::Mutex,
-};
+use tokio::sync::Mutex;
 
 const ENABLED_ENV: &str = "PINVOU_ACCOUNT_PLATFORM_ENABLED";
 const ISSUER_ENV: &str = "PINVOU_ACCOUNT_OIDC_ISSUER";
-const AUTHORIZATION_URL_ENV: &str = "PINVOU_ACCOUNT_OIDC_AUTHORIZATION_URL";
 const TOKEN_URL_ENV: &str = "PINVOU_ACCOUNT_OIDC_TOKEN_URL";
 const JWKS_URL_ENV: &str = "PINVOU_ACCOUNT_OIDC_JWKS_URL";
 const CLIENT_ID_ENV: &str = "PINVOU_ACCOUNT_OIDC_CLIENT_ID";
 const ACCOUNT_URL_ENV: &str = "PINVOU_ACCOUNT_SERVICE_URL";
 const TOKEN_GATEWAY_URL_ENV: &str = "PINVOU_TOKEN_GATEWAY_URL";
-const CALLBACK_TIMEOUT: Duration = Duration::from_secs(180);
-const MAX_CALLBACK_BYTES: usize = 8 * 1024;
 const MAX_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 const MAX_REQUEST_BODY_BYTES: usize = 64 * 1024;
-const MAX_CALLBACK_TITLE_BYTES: usize = 256;
-const MAX_CALLBACK_MESSAGE_BYTES: usize = 1024;
-const OIDC_CREDENTIAL_SERVICE: &str = "pinvou3-account-platform-oidc";
+const MAX_CHAT_REQUEST_BODY_BYTES: usize = 4 * 1024 * 1024;
 const REFRESH_TOKEN_KEY: &str = "desktop-refresh-token";
 
 #[derive(Debug, Clone)]
 struct AccountPlatformConfig {
     issuer: String,
     jwks_url: Url,
-    authorization_url: Url,
     token_url: Url,
     client_id: String,
     account_url: Url,
@@ -69,9 +63,6 @@ impl AccountPlatformConfig {
         }
 
         let issuer = optional_env(ISSUER_ENV);
-        let authorization_url = optional_env(AUTHORIZATION_URL_ENV)
-            .or_else(|| issuer.as_ref().map(|value| oidc_endpoint(value, "auth")))
-            .ok_or_else(|| missing_config(AUTHORIZATION_URL_ENV, ISSUER_ENV))?;
         let token_url = optional_env(TOKEN_URL_ENV)
             .or_else(|| issuer.as_ref().map(|value| oidc_endpoint(value, "token")))
             .ok_or_else(|| missing_config(TOKEN_URL_ENV, ISSUER_ENV))?;
@@ -82,8 +73,8 @@ impl AccountPlatformConfig {
             ));
         }
 
-        let authorization_url = parse_endpoint(AUTHORIZATION_URL_ENV, &authorization_url)?;
-        let issuer = resolve_issuer(issuer, &authorization_url)?;
+        let token_url = parse_endpoint(TOKEN_URL_ENV, &token_url)?;
+        let issuer = resolve_issuer(issuer, &token_url)?;
         let jwks_url = parse_endpoint(
             JWKS_URL_ENV,
             &optional_env(JWKS_URL_ENV).unwrap_or_else(|| oidc_endpoint(&issuer, "certs")),
@@ -91,8 +82,7 @@ impl AccountPlatformConfig {
         Ok(Self {
             issuer,
             jwks_url,
-            authorization_url,
-            token_url: parse_endpoint(TOKEN_URL_ENV, &token_url)?,
+            token_url,
             client_id,
             account_url: parse_service_base(ACCOUNT_URL_ENV, &required_env(ACCOUNT_URL_ENV)?)?,
             token_gateway_url: parse_service_base(
@@ -103,18 +93,18 @@ impl AccountPlatformConfig {
     }
 }
 
-fn resolve_issuer(explicit: Option<String>, authorization_url: &Url) -> Result<String, String> {
+fn resolve_issuer(explicit: Option<String>, token_url: &Url) -> Result<String, String> {
     let issuer = match explicit {
         Some(value) => value,
         None => {
-            let path = authorization_url
+            let path = token_url
                 .path()
-                .strip_suffix("/protocol/openid-connect/auth")
+                .strip_suffix("/protocol/openid-connect/token")
                 .ok_or_else(|| {
                     "account_platform_configuration_missing: explicit issuer is required"
                         .to_string()
                 })?;
-            let mut derived = authorization_url.clone();
+            let mut derived = token_url.clone();
             derived.set_path(path);
             derived.set_query(None);
             derived.to_string().trim_end_matches('/').to_string()
@@ -202,6 +192,8 @@ struct RuntimeSession {
     access_token: String,
     expires_at: Instant,
     identity: IdentityBinding,
+    generation: u64,
+    account_user_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -213,28 +205,23 @@ pub struct SessionStatus {
     pub error_code: Option<&'static str>,
 }
 
-/// Localized UI text provided by the application's central language dictionary.
-/// Authorization codes, provider errors and OAuth tokens never enter this DTO.
+/// The password exists only for this explicit sign-in request, never in the
+/// credential record, command response or debug output.
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CallbackCopy {
-    pub success_title: String,
-    pub success_message: String,
-    pub error_title: String,
-    pub error_message: String,
+pub struct LoginCredentials {
+    pub account: String,
+    pub password: String,
 }
-
-impl CallbackCopy {
+impl LoginCredentials {
     fn validate(&self) -> Result<(), String> {
-        for (value, max) in [
-            (&self.success_title, MAX_CALLBACK_TITLE_BYTES),
-            (&self.error_title, MAX_CALLBACK_TITLE_BYTES),
-            (&self.success_message, MAX_CALLBACK_MESSAGE_BYTES),
-            (&self.error_message, MAX_CALLBACK_MESSAGE_BYTES),
-        ] {
-            if value.trim().is_empty() || value.len() > max {
-                return Err("account_platform_request_invalid: callback copy invalid".into());
-            }
+        let account = self.account.trim();
+        if account.is_empty()
+            || account.len() > 320
+            || self.password.is_empty()
+            || self.password.len() > 4096
+            || account.chars().any(char::is_control)
+        {
+            return Err("oidc_credentials_invalid: account or password is invalid".into());
         }
         Ok(())
     }
@@ -272,6 +259,7 @@ pub struct AccountPlatformState {
     refresh_guard: Mutex<()>,
     credentials: Arc<dyn DesktopCredentials>,
     session_epoch: AtomicU64,
+    session_generation: AtomicU64,
     client: reqwest::Client,
 }
 
@@ -287,8 +275,11 @@ impl AccountPlatformState {
             session: Mutex::new(None),
             login_guard: Mutex::new(()),
             refresh_guard: Mutex::new(()),
-            credentials: Arc::new(DefaultKeyringStore::new(OIDC_CREDENTIAL_SERVICE)),
+            credentials: Arc::new(DefaultKeyringStore::new(
+                CredentialReference::for_account_platform_refresh_token().service,
+            )),
             session_epoch: AtomicU64::new(0),
+            session_generation: AtomicU64::new(0),
             client,
         })
     }
@@ -334,122 +325,135 @@ impl AccountPlatformState {
                 error_code: Some("credential_store_unavailable"),
             };
         }
-        let in_memory = self
-            .session
-            .lock()
-            .await
-            .as_ref()
-            .is_some_and(|session| session.identity.matches(&config));
-        let persisted = match self.credentials.get(REFRESH_TOKEN_KEY) {
-            Ok(value) => {
-                value.is_some_and(|value| CredentialRecord::parse(&value, &config).is_ok())
-            }
-            Err(_) => {
+        let restored = match self.ensure_restored(&config).await {
+            Ok(authenticated) => authenticated,
+            Err(error) => {
                 return SessionStatus {
                     enabled: true,
                     configured: true,
                     authenticated: false,
-                    error_code: Some("credential_store_failed"),
+                    error_code: Some(session_error_code(&error)),
                 };
             }
         };
         SessionStatus {
             enabled: true,
             configured: true,
-            authenticated: in_memory || persisted,
+            authenticated: restored,
             error_code: None,
         }
     }
 
-    pub async fn login(&self, callback_copy: CallbackCopy) -> Result<SessionStatus, String> {
-        callback_copy.validate()?;
+    pub async fn login(&self, credentials: LoginCredentials) -> Result<SessionStatus, String> {
+        credentials.validate()?;
+        let before_login = self.session_epoch.load(Ordering::SeqCst);
         let _login = self.login_guard.lock().await;
-        let epoch = self.session_epoch.load(Ordering::SeqCst);
+        self.require_session_epoch(before_login)?;
         let config = AccountPlatformConfig::from_env()?;
+        self.login_with(&config, credentials).await?;
+        Ok(SessionStatus {
+            enabled: true,
+            configured: true,
+            authenticated: true,
+            error_code: None,
+        })
+    }
+
+    async fn login_with(
+        &self,
+        config: &AccountPlatformConfig,
+        credentials: LoginCredentials,
+    ) -> Result<(), String> {
+        credentials.validate()?;
+        let before_login = self.session_epoch.load(Ordering::SeqCst);
         self.credentials
             .probe()
             .map_err(|_| "credential_store_unavailable".to_string())?;
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .await
-            .map_err(|_| "oidc_loopback_unavailable".to_string())?;
-        let port = listener
-            .local_addr()
-            .map_err(|_| "oidc_loopback_unavailable".to_string())?
-            .port();
-        let redirect_uri = format!("http://127.0.0.1:{port}/callback");
-        let (verifier, challenge) = create_pkce();
-        let oauth_state = random_urlsafe(32);
-        let nonce = random_urlsafe(32);
-        let authorization_url =
-            authorization_url(&config, &redirect_uri, &oauth_state, &challenge, &nonce)?;
-
-        crate::platform::os::open_target(authorization_url.as_str(), "Pinvou account login")
-            .map_err(|_| "oidc_browser_open_failed".to_string())?;
-        let code = wait_for_callback(listener, &oauth_state, &callback_copy).await?;
-        let tokens = self
-            .exchange_code(&config, &code, &redirect_uri, &verifier)
-            .await?;
-        self.complete_login(&config, tokens, &nonce, epoch).await?;
-        Ok(self.status().await)
-    }
-
-    async fn complete_login(
-        &self,
-        config: &AccountPlatformConfig,
-        tokens: TokenResponse,
-        nonce: &str,
-        epoch: u64,
-    ) -> Result<(), String> {
+        // Change identity only inside the same refresh/credential ownership lock.
+        // Logout increments the epoch before awaiting this lock, fencing a late login.
         let _refresh = self.refresh_guard.lock().await;
-        if self.session_epoch.load(Ordering::SeqCst) != epoch {
-            return Err("authentication_required".into());
-        }
-        let identity =
-            oidc::verify_identity(&self.client, config, &tokens, None, Some(nonce)).await?;
-        self.install_tokens(tokens, None, identity).await?;
-        Ok(())
-    }
-
-    pub async fn logout(&self) -> Result<SessionStatus, String> {
-        let _refresh = self.refresh_guard.lock().await;
-        self.session_epoch.fetch_add(1, Ordering::SeqCst);
+        self.require_session_epoch(before_login)?;
+        let epoch = self.session_epoch.fetch_add(1, Ordering::SeqCst) + 1;
         *self.session.lock().await = None;
         self.credentials
             .delete(REFRESH_TOKEN_KEY)
             .map_err(|_| "credential_store_failed".to_string())?;
-        Ok(self.status().await)
+        let form = [
+            ("grant_type", "password"),
+            ("client_id", config.client_id.as_str()),
+            ("username", credentials.account.trim()),
+            ("password", credentials.password.as_str()),
+            ("scope", "openid profile email offline_access"),
+        ];
+        let tokens = self.token_request(config, &form).await?;
+        self.complete_login(config, tokens, None, epoch).await
+    }
+
+    // Caller owns refresh_guard. No initial login can install an unsigned or
+    // previously bound ID token; ROPC has no authorization-request nonce.
+    async fn complete_login(
+        &self,
+        config: &AccountPlatformConfig,
+        tokens: TokenResponse,
+        nonce: Option<&str>,
+        epoch: u64,
+    ) -> Result<(), String> {
+        self.require_session_epoch(epoch)?;
+        let identity = oidc::verify_identity(&self.client, config, &tokens, None, nonce).await?;
+        self.require_session_epoch(epoch)?;
+        self.install_tokens(tokens, None, identity).await?;
+        self.require_session_epoch(epoch)?;
+        Ok(())
+    }
+
+    pub async fn logout(&self) -> Result<SessionStatus, String> {
+        self.session_epoch.fetch_add(1, Ordering::SeqCst);
+        let _refresh = self.refresh_guard.lock().await;
+        *self.session.lock().await = None;
+        self.credentials
+            .delete(REFRESH_TOKEN_KEY)
+            .map_err(|_| "credential_store_failed".to_string())?;
+        // Do not call restoring status while owning refresh_guard, or reload a
+        // persisted credential after a failed delete and falsely report logout.
+        Ok(SessionStatus {
+            enabled: account_platform_enabled(),
+            configured: AccountPlatformConfig::from_env().is_ok(),
+            authenticated: false,
+            error_code: None,
+        })
     }
 
     pub async fn request(&self, input: ApiRequest) -> Result<ApiResponse, String> {
-        let config = AccountPlatformConfig::from_env()?;
-        let prepared = prepare_request(&config, input)?;
-        let token = self.access_token(&config, None).await?;
-        let mut response = self.send(&prepared, &token).await?;
-        if response.status() == StatusCode::UNAUTHORIZED {
-            let refreshed = self.access_token(&config, Some(&token)).await?;
-            response = self.send(&prepared, &refreshed).await?;
-        }
-        response_to_api(response).await
+        self.request_with(&AccountPlatformConfig::from_env()?, input)
+            .await
     }
 
-    async fn exchange_code(
+    async fn request_with(
         &self,
         config: &AccountPlatformConfig,
-        code: &str,
-        redirect_uri: &str,
-        verifier: &str,
-    ) -> Result<TokenResponse, String> {
-        self.token_request(
-            config,
-            &[
-                ("grant_type", "authorization_code"),
-                ("client_id", config.client_id.as_str()),
-                ("code", code),
-                ("redirect_uri", redirect_uri),
-                ("code_verifier", verifier),
-            ],
-        )
-        .await
+        input: ApiRequest,
+    ) -> Result<ApiResponse, String> {
+        let epoch = self.session_epoch.load(Ordering::SeqCst);
+        let is_bootstrap = input.area == "account"
+            && input.method == "POST"
+            && input.resource == "/v1/account/bootstrap";
+        let prepared = prepare_request(config, input)?;
+        let mut token = self.access_token(config, None).await?;
+        self.require_session_epoch(epoch)?;
+        let mut response = self.send(&prepared, &token).await?;
+        self.require_session_epoch(epoch)?;
+        if response.status() == StatusCode::UNAUTHORIZED {
+            token = self.access_token(config, Some(&token)).await?;
+            self.require_session_epoch(epoch)?;
+            response = self.send(&prepared, &token).await?;
+        }
+        let response = response_to_api(response).await?;
+        self.require_session_epoch(epoch)?;
+        if is_bootstrap && (200..300).contains(&response.status) {
+            self.remember_account_identity(config, &token, bootstrap_user_id(&response.body)?)
+                .await?;
+        }
+        Ok(response)
     }
 
     async fn token_request(
@@ -474,8 +478,26 @@ impl AccountPlatformState {
             let invalid_grant = serde_json::from_slice::<Value>(&bytes)
                 .ok()
                 .is_some_and(|v| v.get("error").and_then(Value::as_str) == Some("invalid_grant"));
-            if is_refresh && status == StatusCode::BAD_REQUEST && invalid_grant {
-                return Err("authentication_required".into());
+            if status == StatusCode::BAD_REQUEST && invalid_grant {
+                return Err(if is_refresh {
+                    "authentication_required"
+                } else {
+                    "oidc_credentials_invalid"
+                }
+                .into());
+            }
+            if !is_refresh
+                && status.is_client_error()
+                && serde_json::from_slice::<Value>(&bytes)
+                    .ok()
+                    .is_some_and(|body| {
+                        matches!(
+                            body.get("error").and_then(Value::as_str),
+                            Some("unauthorized_client" | "unsupported_grant_type")
+                        )
+                    })
+            {
+                return Err("oidc_direct_grant_disabled".into());
             }
             return Err("oidc_token_exchange_failed".into());
         }
@@ -510,10 +532,22 @@ impl AccountPlatformState {
             .set(REFRESH_TOKEN_KEY, &record)
             .map_err(|_| "credential_store_failed".to_string())?;
         let access_token = tokens.access_token;
-        *self.session.lock().await = Some(RuntimeSession {
+        let mut current = self.session.lock().await;
+        let account_user_id = current
+            .as_ref()
+            .filter(|old| {
+                old.identity.subject == identity.subject
+                    && old.identity.issuer == identity.issuer
+                    && old.identity.client_id == identity.client_id
+                    && old.identity.token_url == identity.token_url
+            })
+            .and_then(|old| old.account_user_id.clone());
+        *current = Some(RuntimeSession {
             access_token: access_token.clone(),
             expires_at,
             identity,
+            account_user_id,
+            generation: self.session_generation.fetch_add(1, Ordering::SeqCst) + 1,
         });
         Ok(access_token)
     }
@@ -530,7 +564,9 @@ impl AccountPlatformState {
                 return Ok(session.access_token.clone());
             }
         }
+        let epoch = self.session_epoch.load(Ordering::SeqCst);
         let _refresh = self.refresh_guard.lock().await;
+        self.require_session_epoch(epoch)?;
         if let Some(session) = self.session.lock().await.as_ref() {
             if session.identity.matches(config)
                 && access_token_is_usable(session, rejected_access_token)
@@ -553,6 +589,7 @@ impl AccountPlatformState {
             Ok(tokens) => tokens,
             Err(error) => {
                 if error == "authentication_required" {
+                    self.session_epoch.fetch_add(1, Ordering::SeqCst);
                     *self.session.lock().await = None;
                     if self.credentials.delete(REFRESH_TOKEN_KEY).is_err() {
                         return Err("authentication_required: credential_cleanup_failed".into());
@@ -561,9 +598,11 @@ impl AccountPlatformState {
                 return Err(error);
             }
         };
+        self.require_session_epoch(epoch)?;
         let identity =
             oidc::verify_identity(&self.client, config, &tokens, Some(&record.identity), None)
                 .await?;
+        self.require_session_epoch(epoch)?;
         self.install_tokens(tokens, Some(&record.refresh_token), identity)
             .await
     }
@@ -597,210 +636,12 @@ fn access_token_is_usable(session: &RuntimeSession, rejected: Option<&str>) -> b
         && rejected.is_none_or(|token| token != session.access_token)
 }
 
-fn authorization_url(
-    config: &AccountPlatformConfig,
-    redirect_uri: &str,
-    state: &str,
-    challenge: &str,
-    nonce: &str,
-) -> Result<Url, String> {
-    let mut url = config.authorization_url.clone();
-    {
-        let mut query = url.query_pairs_mut();
-        query
-            .clear()
-            .append_pair("response_type", "code")
-            .append_pair("client_id", &config.client_id)
-            .append_pair("redirect_uri", redirect_uri)
-            .append_pair("scope", "openid profile email offline_access")
-            .append_pair("state", state)
-            .append_pair("nonce", nonce)
-            .append_pair("code_challenge", challenge)
-            .append_pair("code_challenge_method", "S256");
-    }
-    Ok(url)
-}
-
 fn random_urlsafe(bytes: usize) -> String {
     let mut value = vec![0_u8; bytes];
     rand::rng().fill_bytes(&mut value);
     URL_SAFE_NO_PAD.encode(value)
 }
 
-fn create_pkce() -> (String, String) {
-    let verifier = random_urlsafe(48);
-    let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
-    (verifier, challenge)
-}
-
-async fn wait_for_callback(
-    listener: TcpListener,
-    expected_state: &str,
-    copy: &CallbackCopy,
-) -> Result<String, String> {
-    wait_for_callback_with_timeout(listener, expected_state, copy, CALLBACK_TIMEOUT).await
-}
-
-async fn wait_for_callback_with_timeout(
-    listener: TcpListener,
-    expected_state: &str,
-    copy: &CallbackCopy,
-    timeout: Duration,
-) -> Result<String, String> {
-    let deadline = Instant::now() + timeout;
-    loop {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            return Err("oidc_callback_timeout: browser login did not complete".to_string());
-        }
-        let accepted = tokio::time::timeout(remaining, listener.accept())
-            .await
-            .map_err(|_| "oidc_callback_timeout: browser login did not complete".to_string())?
-            .map_err(|_| "oidc_callback_failed".to_string())?;
-        let (mut stream, _) = accepted;
-        let io_timeout =
-            Duration::from_secs(5).min(deadline.saturating_duration_since(Instant::now()));
-        let request =
-            match tokio::time::timeout(io_timeout, read_callback_request(&mut stream)).await {
-                Ok(Ok(request)) => request,
-                _ => continue,
-            };
-        match parse_callback_request(&request, expected_state) {
-            Ok(code) => {
-                let _ = tokio::time::timeout(
-                    deadline.saturating_duration_since(Instant::now()),
-                    write_callback_response(&mut stream, true, copy),
-                )
-                .await;
-                return Ok(code);
-            }
-            Err(error) => {
-                let _ = tokio::time::timeout(
-                    io_timeout.min(deadline.saturating_duration_since(Instant::now())),
-                    write_callback_response(&mut stream, false, copy),
-                )
-                .await;
-                if error.starts_with("oidc_authorization_") {
-                    return Err(error);
-                }
-            }
-        }
-    }
-}
-
-async fn read_callback_request(stream: &mut tokio::net::TcpStream) -> std::io::Result<String> {
-    let mut request = Vec::with_capacity(1024);
-    let mut chunk = [0_u8; 1024];
-    loop {
-        let read = stream.read(&mut chunk).await?;
-        if read == 0 {
-            break;
-        }
-        request.extend_from_slice(&chunk[..read]);
-        if request.len() > MAX_CALLBACK_BYTES {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "callback request exceeds 8 KiB",
-            ));
-        }
-        if request.windows(4).any(|window| window == b"\r\n\r\n")
-            || request.windows(2).any(|window| window == b"\n\n")
-        {
-            break;
-        }
-    }
-    String::from_utf8(request)
-        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
-}
-
-fn parse_callback_request(request: &str, expected_state: &str) -> Result<String, String> {
-    if !request.ends_with("\r\n\r\n") {
-        return Err("oidc_callback_invalid: incomplete headers".into());
-    }
-    let first = request
-        .lines()
-        .next()
-        .ok_or_else(|| "oidc_callback_invalid: missing request line".to_string())?;
-    let mut parts = first.split_whitespace();
-    if parts.next() != Some("GET") {
-        return Err("oidc_callback_invalid: callback must use GET".to_string());
-    }
-    let target = parts
-        .next()
-        .ok_or_else(|| "oidc_callback_invalid: missing callback target".to_string())?;
-    if !matches!(parts.next(), Some("HTTP/1.0" | "HTTP/1.1"))
-        || parts.next().is_some()
-        || !target.starts_with("/callback?")
-        || target.contains('\\')
-    {
-        return Err("oidc_callback_invalid: invalid request target".into());
-    }
-    let url = Url::parse(&format!("http://127.0.0.1{target}"))
-        .map_err(|_| "oidc_callback_invalid: malformed callback target".to_string())?;
-    if url.path() != "/callback" || url.fragment().is_some() {
-        return Err("oidc_callback_invalid: unexpected callback path".to_string());
-    }
-    let mut query = std::collections::HashMap::new();
-    for (key, value) in url.query_pairs().into_owned() {
-        if query.insert(key, value).is_some() {
-            return Err("oidc_callback_invalid: duplicate parameter".into());
-        }
-    }
-    if query.get("state").map(String::as_str) != Some(expected_state) {
-        return Err("oidc_callback_invalid: state mismatch".to_string());
-    }
-    if query.contains_key("error") {
-        if query.contains_key("code") {
-            return Err("oidc_callback_invalid: contradictory response".into());
-        }
-        return Err("oidc_authorization_failed".into());
-    }
-    query
-        .get("code")
-        .filter(|code| !code.is_empty() && code.len() <= 4096)
-        .cloned()
-        .ok_or_else(|| "oidc_callback_invalid: authorization code is missing".to_string())
-}
-
-fn escape_html(value: &str) -> String {
-    let mut escaped = String::with_capacity(value.len());
-    for character in value.chars() {
-        match character {
-            '&' => escaped.push_str("&amp;"),
-            '<' => escaped.push_str("&lt;"),
-            '>' => escaped.push_str("&gt;"),
-            '"' => escaped.push_str("&quot;"),
-            '\'' => escaped.push_str("&#39;"),
-            _ => escaped.push(character),
-        }
-    }
-    escaped
-}
-
-async fn write_callback_response(
-    stream: &mut tokio::net::TcpStream,
-    success: bool,
-    copy: &CallbackCopy,
-) {
-    let (status, title, message) = if success {
-        ("200 OK", &copy.success_title, &copy.success_message)
-    } else {
-        ("400 Bad Request", &copy.error_title, &copy.error_message)
-    };
-    let title = escape_html(title);
-    let message = escape_html(message);
-    let body = format!(
-        "<!doctype html><meta charset=utf-8><meta name=referrer content=no-referrer><title>{title}</title><h1>{title}</h1><p>{message}</p>"
-    );
-    let response = format!(
-        "HTTP/1.1 {status}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Security-Policy: default-src 'none'; style-src 'unsafe-inline'\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}",
-        body.len()
-    );
-    let _ = stream.write_all(response.as_bytes()).await;
-    let _ = stream.shutdown().await;
-}
-
-#[derive(Debug)]
 struct PreparedRequest {
     method: Method,
     url: Url,
@@ -842,18 +683,37 @@ fn prepare_request(
         let size = serde_json::to_vec(body)
             .map_err(|_| "account_platform_request_invalid: invalid JSON body".to_string())?
             .len();
-        if size > MAX_REQUEST_BODY_BYTES {
+        let limit = if input.area == "token" && parsed.path() == "/v1/chat/completions" {
+            if body
+                .get("stream")
+                .is_some_and(|value| value != &Value::Bool(false))
+            {
+                return Err(
+                    "account_platform_request_denied: streaming is handled by the model runtime"
+                        .into(),
+                );
+            }
+            MAX_CHAT_REQUEST_BODY_BYTES
+        } else {
+            MAX_REQUEST_BODY_BYTES
+        };
+        if size > limit {
             return Err("account_platform_request_invalid: request body is too large".to_string());
         }
     }
-    if input.idempotency_key.is_some() && parsed.path() != "/v1/recharge/orders" {
+    if input.idempotency_key.is_some()
+        && !matches!(
+            parsed.path(),
+            "/v1/recharge/orders" | "/v1/chat/completions"
+        )
+    {
         return Err(
             "account_platform_request_denied: idempotency key is not allowed for this route"
                 .to_string(),
         );
     }
     if let Some(key) = input.idempotency_key.as_ref() {
-        if key.is_empty()
+        if key.len() < 16
             || key.len() > 128
             || !key
                 .bytes()
@@ -880,10 +740,13 @@ fn route_allowed(area: &str, method: &Method, path: &str, query: Option<&str>) -
                 .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
     };
     match (area, method, segments.as_slice(), query) {
+        ("token", &Method::POST, ["v1", "chat", "completions"], None) => true,
+        ("token", &Method::GET, ["v1", "me", "usage-requests"], query) => {
+            usage_history_query_allowed(query)
+        }
         ("account", &Method::POST, ["v1", "account", "bootstrap"], None)
         | ("account", &Method::GET, ["v1", "me", "organizations"], None)
         | ("account", &Method::POST, ["v1", "sessions", "current", "active-context"], None)
-        | ("account", &Method::POST, ["v1", "organizations"], None)
         | ("token", &Method::GET, ["v1", "recharge", "products"], None)
         | ("token", &Method::POST, ["v1", "recharge", "orders"], None)
         | ("token", &Method::GET, ["v1", "recharge", "orders", "recent"], None)
@@ -930,40 +793,11 @@ mod tests {
         AccountPlatformConfig {
             issuer: "https://id.example.test".into(),
             jwks_url: Url::parse("https://id.example.test/certs").unwrap(),
-            authorization_url: Url::parse("https://id.example.test/authorize").unwrap(),
             token_url: Url::parse("https://id.example.test/token").unwrap(),
             client_id: "desktop-client".to_string(),
             account_url: Url::parse("https://account.example.test/").unwrap(),
             token_gateway_url: Url::parse("https://token.example.test/").unwrap(),
         }
-    }
-
-    #[test]
-    fn pkce_uses_s256_and_does_not_reveal_verifier() {
-        let (verifier, challenge) = create_pkce();
-        assert!(verifier.len() >= 43);
-        assert_ne!(verifier, challenge);
-        assert_eq!(
-            challenge,
-            URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()))
-        );
-        let url = authorization_url(
-            &config(),
-            "http://127.0.0.1:49152/callback",
-            "state-value",
-            &challenge,
-            "nonce-value",
-        )
-        .unwrap();
-        assert!(!url.as_str().contains(&verifier));
-        assert!(url.as_str().contains("code_challenge_method=S256"));
-        let query: std::collections::HashMap<_, _> = url.query_pairs().into_owned().collect();
-        assert_eq!(
-            query.get("scope").map(String::as_str),
-            Some("openid profile email offline_access")
-        );
-        assert_eq!(query.get("nonce").map(String::as_str), Some("nonce-value"));
-        assert_eq!(query.get("state").map(String::as_str), Some("state-value"));
     }
 
     #[test]
@@ -973,24 +807,6 @@ mod tests {
         assert!(!enabled_value(Some("0")));
         assert!(enabled_value(Some("true")));
         assert!(enabled_value(Some(" ON ")));
-    }
-
-    #[test]
-    fn callback_requires_exact_path_and_state() {
-        let request = "GET /callback?code=abc&state=expected HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n";
-        assert_eq!(parse_callback_request(request, "expected").unwrap(), "abc");
-        assert!(
-            parse_callback_request(request, "other")
-                .unwrap_err()
-                .contains("state mismatch")
-        );
-        assert!(
-            parse_callback_request(
-                "GET /other?code=abc&state=expected HTTP/1.1\r\n\r\n",
-                "expected"
-            )
-            .is_err()
-        );
     }
 
     #[test]

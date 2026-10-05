@@ -5,7 +5,12 @@ use aws_lc_rs::{
 };
 use codewhale_secrets::InMemoryKeyringStore;
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use std::time::{SystemTime, UNIX_EPOCH};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::TcpListener,
+};
 
 struct SigningFixture {
     key: KeyPair,
@@ -42,10 +47,13 @@ impl SigningFixture {
     }
 }
 
+type FixtureResponse = (u16, Vec<u8>, Option<tokio::sync::oneshot::Receiver<()>>);
+
 struct HttpFixture {
     base: Url,
-    responses: Arc<std::sync::Mutex<Vec<(u16, Vec<u8>)>>>,
+    responses: Arc<std::sync::Mutex<Vec<FixtureResponse>>>,
     calls: Arc<AtomicU64>,
+    requests: Arc<std::sync::Mutex<Vec<Vec<u8>>>>,
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -59,8 +67,14 @@ impl HttpFixture {
     async fn new() -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = Url::parse(&format!("http://{}/", listener.local_addr().unwrap())).unwrap();
-        let responses = Arc::new(std::sync::Mutex::new(Vec::<(u16, Vec<u8>)>::new()));
+        let redirect_header = format!(
+            "Location: http://{}/redirect-target\r\n",
+            listener.local_addr().unwrap()
+        );
+        let responses = Arc::new(std::sync::Mutex::new(Vec::<FixtureResponse>::new()));
         let calls = Arc::new(AtomicU64::new(0));
+        let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded = requests.clone();
         let queue = responses.clone();
         let counter = calls.clone();
         let task = tokio::spawn(async move {
@@ -94,10 +108,19 @@ impl HttpFixture {
                         break;
                     }
                 }
+                recorded.lock().unwrap().push(bytes);
                 counter.fetch_add(1, Ordering::SeqCst);
-                let (status, body) = queue.lock().unwrap().remove(0);
+                let (status, body, gate) = queue.lock().unwrap().remove(0);
+                if let Some(gate) = gate {
+                    let _ = gate.await;
+                }
+                let location = if status == 302 {
+                    redirect_header.as_str()
+                } else {
+                    ""
+                };
                 let header = format!(
-                    "HTTP/1.1 {status} Test\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    "HTTP/1.1 {status} Test\r\n{location}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                     body.len()
                 );
                 stream.write_all(header.as_bytes()).await.unwrap();
@@ -109,6 +132,7 @@ impl HttpFixture {
             base,
             responses,
             calls,
+            requests,
             task,
         }
     }
@@ -117,7 +141,27 @@ impl HttpFixture {
         self.responses
             .lock()
             .unwrap()
-            .push((status, serde_json::to_vec(&body).unwrap()));
+            .push((status, serde_json::to_vec(&body).unwrap(), None));
+    }
+
+    fn enqueue_delayed(&self, status: u16, body: Value) -> tokio::sync::oneshot::Sender<()> {
+        let (release, wait) = tokio::sync::oneshot::channel();
+        self.responses.lock().unwrap().push((
+            status,
+            serde_json::to_vec(&body).unwrap(),
+            Some(wait),
+        ));
+        release
+    }
+
+    async fn wait_for_calls(&self, expected: u64) {
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while self.calls.load(Ordering::SeqCst) < expected {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
     }
 
     fn config(&self) -> AccountPlatformConfig {
@@ -125,7 +169,6 @@ impl HttpFixture {
             issuer: "https://issuer.example.test/realms/test".into(),
             jwks_url: self.base.join("certs").unwrap(),
             token_url: self.base.join("token").unwrap(),
-            authorization_url: self.base.join("authorize").unwrap(),
             client_id: "desktop-client".into(),
             account_url: self.base.clone(),
             token_gateway_url: self.base.clone(),
@@ -150,102 +193,6 @@ fn tokens(id_token: Option<String>) -> TokenResponse {
         token_type: "Bearer".into(),
         id_token,
         received_at: Instant::now(),
-    }
-}
-
-fn callback_copy() -> CallbackCopy {
-    CallbackCopy {
-        success_title: "Authorization received".into(),
-        success_message: "Return to Pinvou to finish signing in.".into(),
-        error_title: "Authorization not accepted".into(),
-        error_message: "Return to Pinvou and try again.".into(),
-    }
-}
-
-#[tokio::test]
-async fn callback_copy_requires_all_localized_fields_and_bounded_utf8_before_login() {
-    let state = state();
-    for field in [
-        "successTitle",
-        "successMessage",
-        "errorTitle",
-        "errorMessage",
-    ] {
-        let mut json = json!({"successTitle":"title","successMessage":"message","errorTitle":"title","errorMessage":"message"});
-        json.as_object_mut().unwrap().remove(field);
-        assert!(serde_json::from_value::<CallbackCopy>(json).is_err());
-    }
-    for (title, message) in [
-        (" ".to_string(), "message".to_string()),
-        ("title".to_string(), "".to_string()),
-        ("字".repeat(86), "message".to_string()),
-        ("title".to_string(), "字".repeat(342)),
-    ] {
-        let mut copy = callback_copy();
-        copy.success_title = title;
-        copy.success_message = message;
-        assert_eq!(
-            state.login(copy).await.unwrap_err(),
-            "account_platform_request_invalid: callback copy invalid"
-        );
-    }
-    let mut copy = callback_copy();
-    copy.success_title = "t".repeat(MAX_CALLBACK_TITLE_BYTES);
-    copy.error_title = copy.success_title.clone();
-    copy.success_message = "m".repeat(MAX_CALLBACK_MESSAGE_BYTES);
-    copy.error_message = copy.success_message.clone();
-    assert!(copy.validate().is_ok());
-    copy.error_title.push('t');
-    assert!(copy.validate().is_err());
-    copy.error_title.pop();
-    copy.error_message.push('m');
-    assert!(copy.validate().is_err());
-}
-
-#[tokio::test]
-async fn callback_page_escapes_localized_text_and_only_claims_authorization_received() {
-    for success in [true, false] {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let task = tokio::spawn(async move {
-            let (mut stream, _) = listener.accept().await.unwrap();
-            let copy = CallbackCopy {
-                success_title: "授权已接收 <script> & \" '".into(),
-                success_message: "ログインを完了するには Pinvou に戻ってください。".into(),
-                error_title: "<img src=x onerror=alert(1)>".into(),
-                error_message: "& < > \" '".into(),
-            };
-            copy.validate().unwrap();
-            write_callback_response(&mut stream, success, &copy).await;
-        });
-        let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
-        let mut bytes = Vec::new();
-        stream.read_to_end(&mut bytes).await.unwrap();
-        task.await.unwrap();
-        let response = String::from_utf8(bytes).unwrap();
-        let (headers, body) = response.split_once("\r\n\r\n").unwrap();
-        let length: usize = headers
-            .lines()
-            .find_map(|line| {
-                line.strip_prefix("Content-Length: ")
-                    .and_then(|v| v.parse().ok())
-            })
-            .unwrap();
-        assert_eq!(length, body.len());
-        assert!(
-            !body.contains("<script>")
-                && !body.contains("<img")
-                && !body.contains("Login complete")
-        );
-        if success {
-            assert!(headers.starts_with("HTTP/1.1 200 OK"));
-            assert!(body.contains("授权已接收 &lt;script&gt; &amp; &quot; &#39;"));
-            assert!(body.contains("ログインを完了するには Pinvou に戻ってください。"));
-        } else {
-            assert!(headers.starts_with("HTTP/1.1 400 Bad Request"));
-            assert!(body.contains("&lt;img src=x onerror=alert(1)&gt;"));
-            assert!(body.contains("&amp; &lt; &gt; &quot; &#39;"));
-        }
     }
 }
 
@@ -324,7 +271,7 @@ async fn credential_backend_failures_do_not_install_new_session_or_claim_success
         client_id: config.client_id.clone(),
         token_url: config.token_url.to_string(),
         subject: "subject".into(),
-        nonce: "nonce".into(),
+        nonce: Some("nonce".into()),
     };
     let raw = serde_json::to_string(&CredentialRecord {
         refresh_token: "original-refresh".into(),
@@ -371,7 +318,7 @@ async fn confirmed_invalid_grant_is_auth_required_even_when_native_cleanup_fails
         client_id: config.client_id.clone(),
         token_url: config.token_url.to_string(),
         subject: "subject".into(),
-        nonce: "nonce".into(),
+        nonce: Some("nonce".into()),
     };
     let raw = serde_json::to_string(&CredentialRecord {
         refresh_token: "rejected-refresh".into(),
@@ -383,6 +330,8 @@ async fn confirmed_invalid_grant_is_auth_required_even_when_native_cleanup_fails
         access_token: "expired-access".into(),
         expires_at: Instant::now(),
         identity,
+        generation: 1,
+        account_user_id: None,
     });
     store.fail.store(3, Ordering::SeqCst);
     http.enqueue(400, json!({"error":"invalid_grant"}));
@@ -556,9 +505,10 @@ fn token_contract_rejects_missing_empty_type_and_expiry_overflow() {
 }
 
 #[test]
-fn issuer_inference_only_accepts_exact_keycloak_authorization_shape() {
+fn issuer_inference_only_accepts_exact_keycloak_token_shape() {
     let keycloak =
-        Url::parse("https://issuer.example.test/realms/test/protocol/openid-connect/auth").unwrap();
+        Url::parse("https://issuer.example.test/realms/test/protocol/openid-connect/token")
+            .unwrap();
     assert_eq!(
         resolve_issuer(None, &keycloak).unwrap(),
         "https://issuer.example.test/realms/test"
@@ -597,91 +547,6 @@ fn token_lifetime_is_anchored_at_receipt_and_never_extended_by_verification() {
 }
 
 #[tokio::test]
-async fn callback_ignores_malformed_disconnected_wrong_state_then_accepts_valid_request() {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
-    let task = tokio::spawn(async move {
-        wait_for_callback_with_timeout(
-            listener,
-            "expected",
-            &callback_copy(),
-            Duration::from_secs(2),
-        )
-        .await
-    });
-    for request in [
-        "",
-        "POST /callback?code=x&state=expected HTTP/1.1\r\n\r\n",
-        "GET /callback?error=access_denied&state=wrong HTTP/1.1\r\n\r\n",
-        "GET /callback?code=x&state=expected&state=wrong HTTP/1.1\r\n\r\n",
-    ] {
-        let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
-        stream.write_all(request.as_bytes()).await.unwrap();
-        stream.shutdown().await.unwrap();
-        let mut response = Vec::new();
-        let _ = stream.read_to_end(&mut response).await;
-    }
-    let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
-    stream
-        .write_all(b"GET /callback?code=final-code&state=expected HTTP/1.1\r\n\r\n")
-        .await
-        .unwrap();
-    let mut response = Vec::new();
-    stream.read_to_end(&mut response).await.unwrap();
-    assert!(response.starts_with(b"HTTP/1.1 200"));
-    assert_eq!(task.await.unwrap().unwrap(), "final-code");
-}
-
-#[tokio::test]
-async fn callback_slow_partial_request_does_not_exceed_whole_flow_deadline() {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
-    let task = tokio::spawn(async move {
-        wait_for_callback_with_timeout(
-            listener,
-            "expected",
-            &callback_copy(),
-            Duration::from_millis(80),
-        )
-        .await
-    });
-    let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
-    stream.write_all(b"GET /callback?").await.unwrap();
-    let result = tokio::time::timeout(Duration::from_secs(1), task)
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(result.unwrap_err().starts_with("oidc_callback_timeout"));
-}
-
-#[test]
-fn callback_error_can_cancel_only_after_matching_state() {
-    assert!(
-        parse_callback_request(
-            "GET /callback?error=private-data&state=wrong HTTP/1.1\r\n\r\n",
-            "expected"
-        )
-        .unwrap_err()
-        .starts_with("oidc_callback_invalid")
-    );
-    assert_eq!(
-        parse_callback_request(
-            "GET /callback?error=private-data&state=expected HTTP/1.1\r\n\r\n",
-            "expected"
-        )
-        .unwrap_err(),
-        "oidc_authorization_failed"
-    );
-    for request in [
-        "GET /callback?code=x&state=expected HTTP/1.1",
-        "GET /callback?code=x&state=expected#fragment HTTP/1.1\r\n\r\n",
-        "GET /callback?code=x&state=expected HTTP/1.1 extra\r\n\r\n",
-    ] {
-        assert!(parse_callback_request(request, "expected").is_err());
-    }
-}
-
-#[tokio::test]
 async fn mismatched_or_legacy_credentials_are_not_sent_or_erased() {
     let http = HttpFixture::new().await;
     let config = http.config();
@@ -695,7 +560,7 @@ async fn mismatched_or_legacy_credentials_are_not_sent_or_erased() {
                 client_id: config.client_id.clone(),
                 token_url: config.token_url.to_string(),
                 subject: "subject".into(),
-                nonce: "nonce".into(),
+                nonce: Some("nonce".into()),
             },
         })
         .unwrap(),
@@ -728,7 +593,7 @@ async fn refresh_temporary_failure_preserves_record_invalid_grant_clears_it() {
             client_id: config.client_id.clone(),
             token_url: config.token_url.to_string(),
             subject: "subject".into(),
-            nonce: "nonce".into(),
+            nonce: Some("nonce".into()),
         },
     })
     .unwrap();
@@ -757,17 +622,17 @@ async fn refresh_temporary_failure_preserves_record_invalid_grant_clears_it() {
 }
 
 #[tokio::test]
-async fn logout_fences_previously_started_browser_login_without_provider_request() {
+async fn logout_fences_previously_started_login_without_provider_request() {
     let http = HttpFixture::new().await;
     let state = state();
     let epoch = state.session_epoch.load(Ordering::SeqCst);
     state.logout().await.unwrap();
     assert_eq!(
         state
-            .complete_login(&http.config(), tokens(None), "nonce", epoch)
+            .complete_login(&http.config(), tokens(None), Some("nonce"), epoch)
             .await
             .unwrap_err(),
-        "authentication_required"
+        "authentication_required: account session changed"
     );
     assert!(state.session.lock().await.is_none());
     assert!(state.credentials.get(REFRESH_TOKEN_KEY).unwrap().is_none());
@@ -784,7 +649,7 @@ async fn refresh_success_rotates_native_record_without_new_id_token_or_local_lif
         client_id: config.client_id.clone(),
         token_url: config.token_url.to_string(),
         subject: "subject".into(),
-        nonce: "nonce".into(),
+        nonce: Some("nonce".into()),
     };
     let raw = serde_json::to_string(&CredentialRecord {
         refresh_token: "original-refresh".into(),
@@ -801,7 +666,9 @@ async fn refresh_success_rotates_native_record_without_new_id_token_or_local_lif
     let updated = state.credentials.get(REFRESH_TOKEN_KEY).unwrap().unwrap();
     let record = CredentialRecord::parse(&updated, &config).unwrap();
     assert!(record.refresh_token == "rotated-refresh");
-    assert!(record.identity.subject == "subject" && record.identity.nonce == "nonce");
+    assert!(
+        record.identity.subject == "subject" && record.identity.nonce.as_deref() == Some("nonce")
+    );
     let session = state.session.lock().await;
     let remaining = session
         .as_ref()
@@ -958,3 +825,9 @@ async fn business_proxy_reads_json_and_preserves_http_failure_without_returning_
         assert!(value.get(key).is_none() && value["body"].get(key).is_none());
     }
 }
+
+#[path = "runtime_tests.rs"]
+mod runtime_tests;
+
+#[path = "login_tests.rs"]
+mod login_tests;

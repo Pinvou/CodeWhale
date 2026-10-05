@@ -115,7 +115,7 @@ func testService(t *testing.T, store Store) *Service {
 		}
 		return parsed
 	}
-	service, err := NewService(Config{Environment: "test", IssuerURL: parse("https://identity.example"), JWKSURL: parse("https://identity.internal/keys"), PublicURL: parse("https://portal.example"), AuthorizationURL: parse("https://identity.example/auth"), TokenURL: parse("https://identity.internal/token"), ClientID: "portal", AccountURL: parse("https://account.internal"), TokenGatewayURL: parse("https://token.internal"), SecureCookies: true}, store)
+	service, err := NewService(Config{Environment: "test", IssuerURL: parse("https://identity.example"), JWKSURL: parse("https://identity.internal/keys"), PublicURL: parse("https://portal.example"), AuthorizationURL: parse("https://identity.example/auth"), TokenURL: parse("https://identity.internal/token"), ClientID: "portal", AccountURL: parse("https://account.internal"), BillingURL: parse("https://billing.internal"), TokenGatewayURL: parse("https://token.internal"), SecureCookies: true}, store)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -186,11 +186,31 @@ func TestPortalProxyExcludesModelDataPlane(t *testing.T) {
 	if tokenPathAllowed(http.MethodPost, "/v1/chat/completions") {
 		t.Fatal("Portal BFF must not expose the model data plane")
 	}
-	if !tokenPathAllowed(http.MethodGet, "/v1/me/balance") || !accountPathAllowed(http.MethodGet, "/v1/me") {
+	if !tokenPathAllowed(http.MethodGet, "/v1/me/balance") || !tokenPathAllowed(http.MethodGet, "/v1/me/usage-requests") || !accountPathAllowed(http.MethodGet, "/v1/me") {
 		t.Fatal("Portal BFF must expose the documented management APIs")
+	}
+	for _, resource := range []string{"/v1/token-accounts", "/v1/token-accounts/id/credentials", "/v1/token-accounts/eligible", "/v1/usage-requests/id"} {
+		if !tokenPathAllowed(http.MethodGet, resource) {
+			t.Fatalf("Portal BFF must preserve user-managed Token route %s", resource)
+		}
 	}
 	if safeReturnTo("//evil.example") != "/" || safeReturnTo("https://evil.example") != "/" {
 		t.Fatal("external post-login redirects must be rejected")
+	}
+}
+
+func TestAdminProxyAllowsOnlyDocumentedManagementEndpoints(t *testing.T) {
+	if !accountAdminPathAllowed(http.MethodGet, "/admin/v1/users") || !billingAdminPathAllowed(http.MethodGet, "/admin/v1/wallets") || !tokenAdminPathAllowed(http.MethodGet, "/admin/v1/token-accounts") {
+		t.Fatal("admin portal must expose the documented management APIs")
+	}
+	userID := "0198fbf7-c3ba-7bc4-8849-c157740963de"
+	organizationID := "0198fbf7-c3ba-7bc4-8849-c157740963df"
+	unitID := "0198fbf7-c3ba-7bc4-8849-c157740963e0"
+	if !accountAdminPathAllowed(http.MethodPatch, "/admin/v1/users/"+userID+"/status") || !accountAdminPathAllowed(http.MethodDelete, "/admin/v1/users/"+userID) || !accountAdminPathAllowed(http.MethodPost, "/admin/v1/organizations") || !accountAdminPathAllowed(http.MethodPatch, "/admin/v1/organizations/"+organizationID) || !accountAdminPathAllowed(http.MethodPatch, "/admin/v1/organizations/"+organizationID+"/status") || !accountAdminPathAllowed(http.MethodDelete, "/admin/v1/organizations/"+organizationID) || !accountAdminPathAllowed(http.MethodGet, "/admin/v1/organizations/"+organizationID+"/members") || !accountAdminPathAllowed(http.MethodPost, "/admin/v1/organizations/"+organizationID+"/ownership") || !accountAdminPathAllowed(http.MethodGet, "/admin/v1/organizations/"+organizationID+"/units") || !accountAdminPathAllowed(http.MethodPost, "/admin/v1/organizations/"+organizationID+"/units") || !accountAdminPathAllowed(http.MethodPatch, "/admin/v1/organizations/"+organizationID+"/units/"+unitID) || !accountAdminPathAllowed(http.MethodDelete, "/admin/v1/organizations/"+organizationID+"/units/"+unitID) {
+		t.Fatal("admin portal must expose account lifecycle mutations")
+	}
+	if accountAdminPathAllowed(http.MethodPost, "/admin/v1/users") || accountAdminPathAllowed(http.MethodDelete, "/admin/v1/users/not-a-uuid") || accountAdminPathAllowed(http.MethodPost, "/admin/v1/organizations/"+organizationID+"/members") || accountAdminPathAllowed(http.MethodGet, "/admin/v1/organizations/"+organizationID+"/ownership") || accountAdminPathAllowed(http.MethodDelete, "/admin/v1/organizations/"+organizationID+"/units/not-a-uuid") || billingAdminPathAllowed(http.MethodGet, "/internal/wallets") || tokenAdminPathAllowed(http.MethodGet, "/v1/chat/completions") {
+		t.Fatal("admin portal must not expose undocumented mutations, internal APIs, or the model data plane")
 	}
 }
 

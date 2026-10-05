@@ -966,10 +966,20 @@ jobs:
             -f account-platform/deploy/compose/compose.yaml \
             build account-service billing-service token-gateway payment-simulator token-portal account-event-relay billing-event-relay token-event-relay account-migrate
 
+          docker build --file account-platform/Dockerfile --build-arg SERVICE=newapi-tls --tag pinvou/newapi-tls:dev account-platform
+
           docker run --rm -v "$PWD/account-platform/deploy/helm/account-platform:/chart:ro" alpine/helm:4.2.3 lint /chart -f /chart/values-staging.yaml
           docker run --rm -v "$PWD/account-platform/deploy/helm/account-platform:/chart:ro" alpine/helm:4.2.3 lint /chart -f /chart/values-production-new.yaml
           docker run --rm -v "$PWD/account-platform/deploy/helm/account-platform:/chart:ro" alpine/helm:4.2.3 template pinvou /chart -f /chart/values-production-new.yaml > /tmp/account-platform-production.yaml
           ! grep -E 'payment-simulator|mock-newapi|TOKEN_LOCAL_KEK_BASE64|kind: Secret' /tmp/account-platform-production.yaml
+
+          helm_wrapper="$RUNNER_TEMP/account-platform-real-helm"
+          cat > "$helm_wrapper" <<'HELM_WRAPPER'
+          #!/bin/sh
+          exec docker run --rm --network none -v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE:ro" -w "$GITHUB_WORKSPACE" alpine/helm:4.2.3 "$@"
+          HELM_WRAPPER
+          chmod 700 "$helm_wrapper"
+          PINVOU_HELM_EXECUTABLE="$helm_wrapper" node --test account-platform/test/ops/helm-tls-render.test.mjs
 
           rule_test_dir="$RUNNER_TEMP/account-platform-promtool"
           node account-platform/test/integration/prometheus-rule-fixtures.mjs /tmp/account-platform-production.yaml "$rule_test_dir"

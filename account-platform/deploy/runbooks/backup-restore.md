@@ -43,6 +43,10 @@ pg_restore --exit-on-error --single-transaction --no-owner \
    Inbox。事件依赖 `event_id` 去重，禁止清空 Inbox 后重放。
 8. 对过期 Hold 先审阅清单，再小批执行：
 
+先用 `usage_request_id` 与 Token 数据库交叉核对。Token 侧仍为
+`UPSTREAM_ACTIVE`、`SETTLEMENT_PENDING` 或 `REVIEW` 的 Hold 不得按“超时未消费”
+直接释放，必须等待自动核对完成或取得人工复核证据。
+
 Build or select the approved operations image from this repository with
 `SERVICE=hold-recovery`, then run its `/service --limit 100 --confirm` entrypoint
 as a short-lived Job whose Secret only grants Billing database access.

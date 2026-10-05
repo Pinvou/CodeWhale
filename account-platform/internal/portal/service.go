@@ -21,6 +21,7 @@ import (
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/observability"
 	"github.com/coreos/go-oidc/v3/oidc"
+	"github.com/google/uuid"
 )
 
 type Config struct {
@@ -32,6 +33,7 @@ type Config struct {
 	TokenURL         *url.URL
 	ClientID         string
 	AccountURL       *url.URL
+	BillingURL       *url.URL
 	TokenGatewayURL  *url.URL
 	SecureCookies    bool
 }
@@ -46,14 +48,14 @@ type Service struct {
 
 func NewService(config Config, store Store) (*Service, error) {
 	config.ClientID = strings.TrimSpace(config.ClientID)
-	if config.PublicURL == nil || config.AuthorizationURL == nil || config.TokenURL == nil || config.AccountURL == nil || config.TokenGatewayURL == nil || config.IssuerURL == nil || config.JWKSURL == nil || strings.TrimSpace(config.ClientID) == "" || store == nil {
+	if config.PublicURL == nil || config.AuthorizationURL == nil || config.TokenURL == nil || config.AccountURL == nil || config.BillingURL == nil || config.TokenGatewayURL == nil || config.IssuerURL == nil || config.JWKSURL == nil || strings.TrimSpace(config.ClientID) == "" || store == nil {
 		return nil, errors.New("invalid portal configuration")
 	}
 	if config.PublicURL.Scheme != "https" && config.SecureCookies {
 		return nil, errors.New("secure portal cookies require an HTTPS public URL")
 	}
 	development := config.Environment == "development" || config.Environment == "test"
-	for _, endpoint := range []*url.URL{config.PublicURL, config.AuthorizationURL, config.TokenURL, config.AccountURL, config.TokenGatewayURL, config.IssuerURL, config.JWKSURL} {
+	for _, endpoint := range []*url.URL{config.PublicURL, config.AuthorizationURL, config.TokenURL, config.AccountURL, config.BillingURL, config.TokenGatewayURL, config.IssuerURL, config.JWKSURL} {
 		if endpoint.Host == "" || (endpoint.Scheme != "https" && endpoint.Scheme != "http") || endpoint.User != nil || endpoint.Fragment != "" {
 			return nil, errors.New("portal endpoints must be absolute HTTP(S) URLs without credentials or fragments")
 		}
@@ -78,16 +80,16 @@ func NewService(config Config, store Store) (*Service, error) {
 }
 
 func (s *Service) Handler(static http.Handler) http.Handler {
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /auth/login", s.login)
-	mux.HandleFunc("GET /auth/callback", s.callback)
-	mux.HandleFunc("GET /api/session", s.sessionStatus)
-	mux.HandleFunc("POST /api/logout", s.logout)
-	mux.HandleFunc("/api/account/{resource...}", s.proxyAccount)
-	mux.HandleFunc("/api/token/{resource...}", s.proxyToken)
-	if static != nil {
-		mux.Handle("/", static)
-	}
+	router := httpserver.NewRouter()
+	router.GET("/auth/login", httpserver.AdaptFunc(s.login))
+	router.GET("/auth/callback", httpserver.AdaptFunc(s.callback))
+	router.GET("/api/session", httpserver.AdaptFunc(s.sessionStatus))
+	router.POST("/api/logout", httpserver.AdaptFunc(s.logout))
+	router.Any("/api/account/*resource", httpserver.AdaptFunc(s.proxyAccount))
+	router.Any("/api/token/*resource", httpserver.AdaptFunc(s.proxyToken))
+	router.Any("/api/admin/account/*resource", httpserver.AdaptFunc(s.proxyAdminAccount))
+	router.Any("/api/admin/billing/*resource", httpserver.AdaptFunc(s.proxyAdminBilling))
+	router.Any("/api/admin/token/*resource", httpserver.AdaptFunc(s.proxyAdminToken))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Referrer-Policy", "no-referrer")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
@@ -104,7 +106,11 @@ func (s *Service) Handler(static http.Handler) http.Handler {
 		} else {
 			w.Header().Set("Cache-Control", "no-cache")
 		}
-		mux.ServeHTTP(w, r)
+		if strings.HasPrefix(r.URL.Path, "/api/") || strings.HasPrefix(r.URL.Path, "/auth/") || static == nil {
+			router.ServeHTTP(w, r)
+			return
+		}
+		static.ServeHTTP(w, r)
 	})
 }
 
@@ -228,6 +234,18 @@ func (s *Service) proxyAccount(w http.ResponseWriter, r *http.Request) {
 
 func (s *Service) proxyToken(w http.ResponseWriter, r *http.Request) {
 	s.proxy(w, r, s.config.TokenGatewayURL, "/"+r.PathValue("resource"), tokenPathAllowed)
+}
+
+func (s *Service) proxyAdminAccount(w http.ResponseWriter, r *http.Request) {
+	s.proxy(w, r, s.config.AccountURL, "/"+r.PathValue("resource"), accountAdminPathAllowed)
+}
+
+func (s *Service) proxyAdminBilling(w http.ResponseWriter, r *http.Request) {
+	s.proxy(w, r, s.config.BillingURL, "/"+r.PathValue("resource"), billingAdminPathAllowed)
+}
+
+func (s *Service) proxyAdminToken(w http.ResponseWriter, r *http.Request) {
+	s.proxy(w, r, s.config.TokenGatewayURL, "/"+r.PathValue("resource"), tokenAdminPathAllowed)
 }
 
 func (s *Service) proxy(w http.ResponseWriter, r *http.Request, upstream *url.URL, resource string, allowed func(string, string) bool) {
@@ -536,8 +554,115 @@ func accountPathAllowed(method, resource string) bool {
 }
 
 func tokenPathAllowed(method, resource string) bool {
-	if !strings.HasPrefix(resource, "/v1/") || resource == "/v1/chat/completions" || strings.Contains(resource, "..") {
+	if method == http.MethodGet {
+		switch resource {
+		case "/v1/recharge/products", "/v1/recharge/orders/recent", "/v1/me/balance", "/v1/me/usage-requests", "/v1/token-accounts", "/v1/token-accounts/eligible":
+			return true
+		}
+		if orderID, ok := strings.CutPrefix(resource, "/v1/recharge/orders/"); ok {
+			return safeProxyPathID(orderID)
+		}
+		if usageID, ok := strings.CutPrefix(resource, "/v1/usage-requests/"); ok {
+			return safeProxyPathID(usageID)
+		}
+	}
+	if method == http.MethodPost && (resource == "/v1/recharge/orders" || resource == "/v1/token-accounts") {
+		return true
+	}
+	if method == http.MethodPost {
+		if orderID, ok := strings.CutPrefix(resource, "/v1/recharge/orders/"); ok {
+			id, close := strings.CutSuffix(orderID, "/close")
+			return close && safeProxyPathID(id)
+		}
+	}
+	// Preserve the existing user/organization-owner management surface, without
+	// exposing Gateway administration, internal endpoints or model dispatch.
+	parts := strings.Split(resource, "/")
+	if len(parts) < 5 || parts[0] != "" || parts[1] != "v1" || parts[2] != "token-accounts" || !safeProxyPathID(parts[3]) {
 		return false
 	}
-	return method == http.MethodGet || method == http.MethodPost || method == http.MethodPut || method == http.MethodPatch
+	if len(parts) == 5 {
+		switch parts[4] {
+		case "status":
+			return method == http.MethodPatch
+		case "sharing", "routes":
+			return method == http.MethodPut
+		case "credentials":
+			return method == http.MethodGet || method == http.MethodPost
+		}
+	}
+	return len(parts) == 7 && parts[4] == "credentials" && safeProxyPathID(parts[5]) && parts[6] == "revoke" && method == http.MethodPost
+}
+
+func safeProxyPathID(value string) bool {
+	return value != "" && len(value) <= 128 && !strings.Contains(value, "/") && strings.IndexFunc(value, func(char rune) bool {
+		return !((char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z') || (char >= '0' && char <= '9') || char == '-' || char == '_')
+	}) == -1
+}
+
+func accountAdminPathAllowed(method, resource string) bool {
+	if adminReadPathAllowed(method, resource, "/admin/v1/overview", "/admin/v1/users", "/admin/v1/organizations", "/admin/v1/audit-logs") {
+		return true
+	}
+	if method == http.MethodPost && resource == "/admin/v1/organizations" {
+		return true
+	}
+	if strings.Contains(resource, "..") {
+		return false
+	}
+	parts := strings.Split(strings.Trim(resource, "/"), "/")
+	if len(parts) < 4 || parts[0] != "admin" || parts[1] != "v1" || (parts[2] != "users" && parts[2] != "organizations") {
+		return false
+	}
+	if _, err := uuid.Parse(parts[3]); err != nil {
+		return false
+	}
+	if method == http.MethodDelete && len(parts) == 4 {
+		return true
+	}
+	if method == http.MethodPatch && len(parts) == 4 && parts[2] == "organizations" {
+		return true
+	}
+	if method == http.MethodPatch && len(parts) == 5 && parts[4] == "status" {
+		return true
+	}
+	if parts[2] == "organizations" && len(parts) == 5 && parts[4] == "members" {
+		return method == http.MethodGet
+	}
+	if parts[2] == "organizations" && len(parts) == 5 && parts[4] == "ownership" {
+		return method == http.MethodPost
+	}
+	if parts[2] != "organizations" || len(parts) < 5 || parts[4] != "units" {
+		return false
+	}
+	if len(parts) == 5 {
+		return method == http.MethodGet || method == http.MethodPost
+	}
+	if len(parts) == 6 {
+		if _, err := uuid.Parse(parts[5]); err != nil {
+			return false
+		}
+		return method == http.MethodPatch || method == http.MethodDelete
+	}
+	return false
+}
+
+func billingAdminPathAllowed(method, resource string) bool {
+	return adminReadPathAllowed(method, resource, "/admin/v1/overview", "/admin/v1/wallets", "/admin/v1/payment-orders", "/admin/v1/adjustments", "/admin/v1/usage-holds")
+}
+
+func tokenAdminPathAllowed(method, resource string) bool {
+	return adminReadPathAllowed(method, resource, "/admin/v1/overview", "/admin/v1/token-accounts", "/admin/v1/usage-requests")
+}
+
+func adminReadPathAllowed(method, resource string, allowed ...string) bool {
+	if method != http.MethodGet || strings.Contains(resource, "..") {
+		return false
+	}
+	for _, prefix := range allowed {
+		if resource == prefix {
+			return true
+		}
+	}
+	return false
 }

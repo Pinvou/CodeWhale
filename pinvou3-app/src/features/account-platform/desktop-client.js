@@ -5,11 +5,23 @@ function abortError() {
 }
 
 function responseError(response) {
-  const payload = response?.body || {};
-  const error = new Error(payload.message || `HTTP ${response?.status || 500}`);
-  error.code = payload.code || 'REQUEST_FAILED';
-  error.status = response?.status || 500;
+  const code = response?.body?.code;
+  const safeCode = typeof code === 'string' && /^[A-Za-z][A-Za-z0-9_]{1,80}$/.test(code) ? code : 'REQUEST_FAILED';
+  const error = new Error(safeCode);
+  error.code = safeCode;
+  error.status = Number.isInteger(response?.status) ? response.status : 500;
   return error;
+}
+
+function sessionStatus(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)
+    || typeof value.enabled !== 'boolean' || typeof value.configured !== 'boolean'
+    || typeof value.authenticated !== 'boolean'
+    || (value.authenticated && (!value.enabled || !value.configured))
+    || (value.errorCode != null && typeof value.errorCode !== 'string')) {
+    throw nativeError('account_platform_request_failed');
+  }
+  return value;
 }
 
 function nativeError(value) {
@@ -34,9 +46,17 @@ export class AccountPlatformDesktopClient {
     this.transport = transport;
   }
 
-  session(signal) { return this.call(() => this.transport.session(), signal); }
-  login(callbackCopy, signal) { return this.call(() => this.transport.login(callbackCopy), signal); }
-  logout(signal) { return this.call(() => this.transport.logout(), signal); }
+  async session(signal) { return sessionStatus(await this.call(() => this.transport.session(), signal)); }
+  async login(account, password, signal) {
+    const status = sessionStatus(await this.call(() => this.transport.login({ account, password }), signal));
+    if (!status.authenticated) throw nativeError(status.errorCode || 'authentication_required');
+    return status;
+  }
+  async logout(signal) {
+    const status = sessionStatus(await this.call(() => this.transport.logout(), signal));
+    if (status.authenticated) throw nativeError('account_platform_request_failed');
+    return status;
+  }
 
   async call(action, signal) {
     if (signal?.aborted) throw abortError();
@@ -59,14 +79,14 @@ export class AccountPlatformDesktopClient {
       body: options.body,
       idempotencyKey: options.idempotencyKey,
     }), options.signal);
-    if (response.status < 200 || response.status >= 300) throw responseError(response);
+    if (!response || !Number.isInteger(response.status) || response.status < 200 || response.status >= 300) throw responseError(response);
+    if (response.status !== 204 && (!response.body || typeof response.body !== 'object' || Array.isArray(response.body))) throw responseError({ status: 500 });
     return response.body;
   }
 
   bootstrap(signal) { return this.request('account', '/v1/account/bootstrap', { method: 'POST', body: {}, signal }); }
   organizations(signal) { return this.request('account', '/v1/me/organizations', { signal }); }
   switchContext(contextType, organizationId, signal) { return this.request('account', '/v1/sessions/current/active-context', { method: 'POST', body: { context_type: contextType, organization_id: organizationId || null }, signal }); }
-  createOrganization(name) { return this.request('account', '/v1/organizations', { method: 'POST', body: { name } }); }
   units(organizationId, signal) { return this.request('account', `/v1/organizations/${organizationId}/units`, { signal }); }
   members(organizationId, signal) { return this.request('account', `/v1/organizations/${organizationId}/members`, { signal }); }
   createUnit(organizationId, name, parentId = null) { return this.request('account', `/v1/organizations/${organizationId}/units`, { method: 'POST', body: { name, parent_id: parentId } }); }
@@ -82,4 +102,8 @@ export class AccountPlatformDesktopClient {
   createTokenAccount(body) { return this.request('token', '/v1/token-accounts', { method: 'POST', body }); }
   credentials(accountId, signal) { return this.request('token', `/v1/token-accounts/${accountId}/credentials`, { signal }); }
   rotateCredential(accountId, body) { return this.request('token', `/v1/token-accounts/${accountId}/credentials`, { method: 'POST', body }); }
+  usageHistory(cursor = '', signal) {
+    const next = cursor ? `&cursor=${encodeURIComponent(cursor)}` : '';
+    return this.request('token', `/v1/me/usage-requests?limit=20${next}`, { signal });
+  }
 }

@@ -1,0 +1,418 @@
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { createContextRequestGuard } from './context-guard.js';
+import { buildUnitTree } from './admin-organization-tree.js';
+import { formatMoney, formatPoints, subtractMicrocredits } from './credit-units.js';
+import './admin-platform.css';
+
+const NAV_ICONS = { overview:'⌂', organizations:'▦', users:'◎', billing:'◇', tokens:'↗', audit:'≡' };
+const okStatuses = new Set(['ACTIVE', 'PAID', 'SETTLED', 'HEALTHY', 'APPROVED', 'SUCCESS']);
+const warnStatuses = new Set(['PENDING', 'CREATED', 'SETTLEMENT_PENDING', 'REVIEW', 'MANUAL_REVIEW', 'PENDING_APPROVAL']);
+
+function formatNumber(value) { return Number(value || 0).toLocaleString(); }
+function formatDate(value) { return value ? new Date(value).toLocaleString() : '—'; }
+function shortID(value) { const text = String(value || ''); return text.length > 16 ? `${text.slice(0, 8)}…${text.slice(-5)}` : text || '—'; }
+
+function Status({ value }) {
+  const status = String(value || '—');
+  const tone = okStatuses.has(status) ? 'ok' : warnStatuses.has(status) ? 'warn' : status === '—' ? '' : 'neutral';
+  return <span className={`adm-status ${tone}`}>{status}</span>;
+}
+
+function Metric({ label, value, tone = '', formatter = formatNumber }) {
+  return <article className={`adm-metric ${tone}`}><span>{label}</span><strong>{formatter(value)}</strong></article>;
+}
+
+function Empty({ copy }) { return <div className="adm-empty">{copy.noData}</div>; }
+
+function Table({ columns, items, copy, rowKey }) {
+  if (!items?.length) return <Empty copy={copy} />;
+  return <div className="adm-table-wrap"><table className="adm-table"><thead><tr>{columns.map(column => <th key={column.key}>{column.label}</th>)}</tr></thead><tbody>{items.map((item, index) => <tr key={item[rowKey] ?? index}>{columns.map(column => <td key={column.key}>{column.render ? column.render(item) : item[column.key] ?? '—'}</td>)}</tr>)}</tbody></table></div>;
+}
+
+function SectionHeader({ title, count, copy, children }) {
+  return <header className="adm-section-head"><div><h2>{title}</h2>{count !== undefined && <span>{copy.items(count)}</span>}</div>{children}</header>;
+}
+
+function Tabs({ items, active, onChange }) {
+  return <div className="adm-tabs">{items.map(item => <button key={item.key} className={active === item.key ? 'active' : ''} onClick={() => onChange(item.key)}>{item.label}</button>)}</div>;
+}
+
+export function AdminPlatformView({ client, copy, language, onLanguageChange }) {
+  const [auth, setAuth] = useState('loading');
+  const [section, setSection] = useState('overview');
+  const [data, setData] = useState({});
+  const [error, setError] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [loggingOut, setLoggingOut] = useState(false);
+  const busy = loading || loggingOut;
+  const [updatedAt, setUpdatedAt] = useState(null);
+  const guardRef = useRef(createContextRequestGuard());
+  const handleAuthorizationError = useCallback(reason => {
+    if (reason?.status !== 401 && reason?.status !== 403) return false;
+    guardRef.current.cancel();
+    setData({}); setUpdatedAt(null); setLoading(false);
+    setAuth(reason.status === 401 ? 'guest' : reason.code === 'CSRF_REJECTED' ? 'error' : 'denied');
+    return true;
+  }, []);
+
+  const load = useCallback(async (target, signal) => {
+    const request = guardRef.current.begin();
+    const isCurrent = () => guardRef.current.isCurrent(request.generation) && !request.signal.aborted && !signal?.aborted;
+    setLoading(true); setError('');
+    try {
+      let next = {};
+      if (target === 'overview') {
+        const [account, billing, token] = await Promise.all([client.accountOverview(request.signal), client.billingOverview(request.signal), client.tokenOverview(request.signal)]);
+        next = { accountOverview:account, billingOverview:billing, tokenOverview:token };
+      } else if (target === 'organizations') {
+        const [users, organizations] = await Promise.all([client.users('', request.signal), client.organizations('', request.signal)]);
+        next = { users:users.items || [], organizations:organizations.items || [] };
+      } else if (target === 'users') {
+        const users = await client.users('', request.signal);
+        next = { users:users.items || [] };
+      } else if (target === 'billing') {
+        const [wallets, orders, adjustments, holds] = await Promise.all([client.wallets(request.signal), client.paymentOrders(request.signal), client.adjustments(request.signal), client.holds(request.signal)]);
+        next = { wallets:wallets.items || [], orders:orders.items || [], adjustments:adjustments.items || [], holds:holds.items || [] };
+      } else if (target === 'tokens') {
+        const [accounts, usage] = await Promise.all([client.tokenAccounts(request.signal), client.usageRequests(request.signal)]);
+        next = { tokenAccounts:accounts.items || [], usage:usage.items || [] };
+      } else {
+        const audits = await client.audits(request.signal); next = { audits:audits.items || [] };
+      }
+      if (!isCurrent()) return;
+      setData(current => ({ ...current, ...next })); setUpdatedAt(new Date()); setAuth('ready');
+    } catch (reason) {
+      if (reason?.name === 'AbortError' || !isCurrent()) return;
+      if (!handleAuthorizationError(reason)) { setAuth(current => current === 'loading' ? 'error' : current); setError(copy.failed); }
+    } finally { if (isCurrent()) setLoading(false); }
+  }, [client, copy.failed, handleAuthorizationError]);
+
+  useEffect(() => {
+    const controller = new globalThis.AbortController();
+    client.session(controller.signal).then(session => {
+      if (controller.signal.aborted) return;
+      if (!session.authenticated) { setAuth('guest'); return; }
+      load('overview', controller.signal);
+    }).catch(reason => { if (!controller.signal.aborted && reason?.name !== 'AbortError') { setAuth('error'); setError(copy.failed); } });
+    return () => { controller.abort(); guardRef.current.cancel(); };
+  }, [client, copy.failed, load]);
+
+  const navigate = key => {
+    setSection(key);
+    if (!sectionHasData(key, data)) void load(key);
+    else { guardRef.current.cancel(); setLoading(false); }
+  };
+  const logout = async () => {
+    guardRef.current.cancel(); setLoggingOut(true); setError('');
+    try {
+      await client.logout();
+      guardRef.current.cancel(); setLoading(false);
+      setData({}); setUpdatedAt(null); setAuth('guest');
+      window.location.assign('/admin.html');
+    } catch (reason) {
+      if (!handleAuthorizationError(reason)) setError(copy.failed);
+    } finally { setLoggingOut(false); }
+  };
+
+  if (auth === 'loading') return <StatePage copy={copy} kind="loading" />;
+  if (auth === 'guest') return <StatePage copy={copy} kind="guest" />;
+  if (auth === 'denied') return <StatePage copy={copy} kind="denied" />;
+  if (auth === 'error') return <StatePage copy={copy} kind="error" onRetry={() => window.location.reload()} />;
+
+  return <div className="adm-shell">
+    <aside className="adm-sidebar">
+      <div className="adm-brand"><div className="adm-mark">P</div><div><strong>{copy.title}</strong><span>{copy.product}</span></div></div>
+      <nav>{Object.keys(copy.nav).map(key => <button key={key} className={section === key ? 'active' : ''} onClick={() => navigate(key)}><span>{NAV_ICONS[key]}</span>{copy.nav[key]}</button>)}</nav>
+      <div className="adm-sidebar-foot"><span>{copy.readOnly}</span><select aria-label={copy.language} value={language} onChange={event => onLanguageChange(event.target.value)}><option value="zh">简体中文</option><option value="en">English</option><option value="ja">日本語</option></select></div>
+    </aside>
+    <main className="adm-main">
+      <header className="adm-topbar"><div><span className="adm-eyebrow">{copy.product}</span><h1>{copy.nav[section]}</h1></div><div className="adm-actions">{updatedAt && <small>{copy.updated} {updatedAt.toLocaleTimeString()}</small>}<button onClick={() => load(section)} disabled={busy}>{copy.refresh}</button><div className="adm-admin"><span>PA</span><div><strong>{copy.administrator}</strong><button onClick={logout} disabled={loggingOut}>{copy.logout}</button></div></div></div></header>
+      {error && <div role="alert" className="adm-alert">{error}</div>}
+      {busy && <div className="adm-progress" />}
+      {section === 'overview' && <Overview copy={copy} language={language} data={data} />}
+      {section === 'organizations' && <AccountDirectory section="organizations" copy={copy} data={data} client={client} setData={setData} onAuthorizationError={handleAuthorizationError} />}
+      {section === 'users' && <AccountDirectory section="users" copy={copy} data={data} client={client} setData={setData} onAuthorizationError={handleAuthorizationError} />}
+      {section === 'billing' && <Billing copy={copy} language={language} data={data} />}
+      {section === 'tokens' && <Tokens copy={copy} language={language} data={data} />}
+      {section === 'audit' && <Audit copy={copy} data={data} />}
+    </main>
+  </div>;
+}
+
+function sectionHasData(section, data) {
+  return section === 'overview' ? data.accountOverview : section === 'organizations' ? data.organizations : section === 'users' ? data.users : section === 'billing' ? data.wallets : section === 'tokens' ? data.tokenAccounts : data.audits;
+}
+
+function StatePage({ copy, kind, onRetry }) {
+  const loading = kind === 'loading';
+  const title = kind === 'guest' ? copy.loginTitle : kind === 'denied' ? copy.deniedTitle : kind === 'error' ? copy.failed : copy.loading;
+  const body = kind === 'guest' ? copy.loginIntro : kind === 'denied' ? copy.denied : '';
+  return <main className="adm-state"><div className="adm-state-mark">P</div><span className="adm-eyebrow">{copy.product}</span><h1>{title}</h1>{body && <p>{body}</p>}{loading && <div className="adm-spinner" />}{kind === 'guest' && <a href="/auth/login?return_to=/admin.html">{copy.login}</a>}{kind === 'error' && <button onClick={onRetry}>{copy.retry}</button>}</main>;
+}
+
+function Overview({ copy, language, data }) {
+  const a = data.accountOverview || {}, b = data.billingOverview || {}, t = data.tokenOverview || {};
+  const alerts = [[copy.overview.disabledUsers,a.disabled_users],[copy.overview.invitations,a.pending_invitations],[copy.overview.paymentReview,b.review_payment_orders],[copy.overview.pendingAdjustments,b.pending_adjustments],[copy.overview.usageReview,t.review_usage_requests]];
+  return <section><div className="adm-hero"><div><h2>{copy.overview.title}</h2><p>{copy.overview.lead}</p></div><Status value="ACTIVE" /></div><div className="adm-metrics"><Metric label={copy.overview.users} value={a.users} /><Metric label={copy.overview.organizations} value={a.organizations} /><Metric label={copy.overview.available} value={subtractMicrocredits(b.posted_microcredits, b.reserved_microcredits)} tone="accent" formatter={value => formatPoints(value, language)} /><Metric label={copy.overview.reserved} value={b.reserved_microcredits} formatter={value => formatPoints(value, language)} /><Metric label={copy.overview.tokenAccounts} value={t.token_accounts} /><Metric label={copy.overview.usageRequests} value={t.usage_requests} /></div><div className="adm-overview-grid"><article className="adm-panel"><SectionHeader title={copy.overview.attention} copy={copy} /><div className="adm-attention">{alerts.map(([label,value]) => <div key={label}><span>{label}</span><strong className={Number(value) ? 'has-value' : ''}>{formatNumber(value)}</strong></div>)}</div></article><article className="adm-panel adm-health"><span>{copy.overview.healthyRoutes}</span><strong>{formatNumber(t.healthy_routes)}</strong><small>/ {formatNumber(t.token_accounts)} {copy.overview.tokenAccounts}</small><div><i style={{ width:`${Math.min(100, Number(t.token_accounts) ? Number(t.healthy_routes) / Number(t.token_accounts) * 100 : 0)}%` }} /></div></article></div></section>;
+}
+
+function AccountDirectory({ section, copy, data, client, setData, onAuthorizationError }) {
+  const [search, setSearch] = useState('');
+  const [actionKey, setActionKey] = useState('');
+  const [notice, setNotice] = useState('');
+  const [actionError, setActionError] = useState('');
+  const [selectedOrganization, setSelectedOrganization] = useState(null);
+  const [organizationName, setOrganizationName] = useState('');
+  const [ownerUserID, setOwnerUserID] = useState('');
+  const searchGuardRef = useRef(createContextRequestGuard());
+  const lifecycleRef = useRef(0);
+  useEffect(() => {
+    setActionKey(''); setNotice(''); setActionError('');
+    return () => { lifecycleRef.current += 1; searchGuardRef.current.cancel(); };
+  }, [section, selectedOrganization?.organization_id]);
+  const captureContext = () => {
+    const generation = lifecycleRef.current;
+    return () => generation === lifecycleRef.current;
+  };
+  const isUserSection = section === 'users';
+  const items = isUserSection ? data.users || [] : data.organizations || [];
+  const activeUsers = useMemo(() => (data.users || []).filter(user => user.status === 'ACTIVE'), [data.users]);
+  useEffect(() => {
+    if (!activeUsers.some(user => user.user_id === ownerUserID)) setOwnerUserID(activeUsers[0]?.user_id || '');
+  }, [activeUsers, ownerUserID]);
+  const reload = async () => {
+    const request = searchGuardRef.current.begin();
+    const isCurrent = () => searchGuardRef.current.isCurrent(request.generation) && !request.signal.aborted;
+    try {
+      const result = isUserSection
+        ? await client.users(search, request.signal)
+        : await client.organizations(search, request.signal);
+      if (!isCurrent()) return;
+      setData(current => ({ ...current, [section]:result.items || [], accountOverview:undefined }));
+    } catch (reason) {
+      if (isCurrent() && reason?.name !== 'AbortError') throw reason;
+    }
+  };
+  const perform = async (item, action) => {
+    const isUser = isUserSection;
+    const id = isUser ? item.user_id : item.organization_id;
+    const label = isUser ? item.display_name || item.email || shortID(id) : item.name;
+    if (action === 'delete' && !window.confirm(isUser ? copy.accounts.confirmUser(label) : copy.accounts.confirmOrganization(label))) return;
+    const isCurrent = captureContext();
+    setActionKey(`${section}:${id}:${action}`); setNotice(''); setActionError('');
+    try {
+      if (isUser) {
+        if (action === 'delete') await client.deleteUser(id);
+        else await client.setUserStatus(id, action === 'enable' ? 'ACTIVE' : 'DISABLED');
+      } else if (action === 'delete') await client.deleteOrganization(id);
+      else await client.setOrganizationStatus(id, action === 'enable' ? 'ACTIVE' : 'DISABLED');
+      if (!isCurrent()) return;
+      await reload(); if (isCurrent()) setNotice(copy.accounts.updated);
+    } catch (reason) {
+      if (!isCurrent()) return;
+      onAuthorizationError(reason);
+      setActionError(reason?.code === 'LAST_OWNER_REQUIRED' ? copy.accounts.ownerRequired : reason?.code === 'ACCOUNT_CONFLICT' ? copy.accounts.conflict : copy.accounts.actionFailed);
+    } finally { if (isCurrent()) setActionKey(''); }
+  };
+  const actionButtons = (item, isUser) => {
+    const id = isUser ? item.user_id : item.organization_id;
+    const prefix = `${isUser ? 'users' : 'organizations'}:${id}:`;
+    const buttons = [];
+    if (item.status === 'DISABLED') buttons.push(<button key="enable" disabled={Boolean(actionKey)} onClick={() => perform(item, 'enable')}>{copy.accounts.enable}</button>);
+    if (item.status === 'ACTIVE' || (isUser && item.status === 'PROVISIONING')) buttons.push(<button key="disable" disabled={Boolean(actionKey)} onClick={() => perform(item, 'disable')}>{copy.accounts.disable}</button>);
+    buttons.push(<button key="delete" className="danger" disabled={Boolean(actionKey)} onClick={() => perform(item, 'delete')}>{actionKey === `${prefix}delete` ? '…' : copy.accounts.delete}</button>);
+    return <div className="adm-row-actions">{buttons}</div>;
+  };
+  const columns = isUserSection ? [
+    { key:'display_name', label:copy.accounts.displayName, render:item => <strong>{item.display_name || '—'}</strong> }, { key:'email', label:copy.accounts.email }, { key:'status', label:copy.accounts.status, render:item => <Status value={item.status} /> }, { key:'organization_count', label:copy.accounts.memberships }, { key:'last_seen_at', label:copy.accounts.lastSeen, render:item => formatDate(item.last_seen_at) }, { key:'actions', label:copy.accounts.actions, render:item => actionButtons(item, true) },
+  ] : [
+    { key:'name', label:copy.accounts.organization, render:item => <button className="adm-name-link" onClick={() => setSelectedOrganization(item)}>{item.name}</button> }, { key:'organization_id', label:'ID', render:item => <code title={item.organization_id}>{shortID(item.organization_id)}</code> }, { key:'status', label:copy.accounts.status, render:item => <Status value={item.status} /> }, { key:'member_count', label:copy.accounts.members }, { key:'created_at', label:copy.accounts.created, render:item => formatDate(item.created_at) }, { key:'actions', label:copy.accounts.actions, render:item => actionButtons(item, false) },
+  ];
+  const submit = async event => {
+    event.preventDefault(); setActionError('');
+    try { await reload(); } catch (reason) {
+      onAuthorizationError(reason); setActionError(copy.accounts.actionFailed);
+    }
+  };
+  const createOrganization = async event => {
+    event.preventDefault();
+    if (!organizationName.trim() || !ownerUserID || actionKey) return;
+    const isCurrent = captureContext();
+    setActionKey('organization:create'); setNotice(''); setActionError('');
+    try {
+      await client.createOrganization(organizationName.trim(), ownerUserID);
+      if (!isCurrent()) return;
+      setOrganizationName('');
+      await reload();
+      if (isCurrent()) setNotice(copy.accounts.organizationCreated);
+    } catch (reason) {
+      if (isCurrent()) { onAuthorizationError(reason); setActionError(copy.accounts.actionFailed); }
+    } finally { if (isCurrent()) setActionKey(''); }
+  };
+  if (selectedOrganization) return <OrganizationDetail copy={copy} organization={selectedOrganization} client={client} onAuthorizationError={onAuthorizationError} onBack={() => setSelectedOrganization(null)} onRenamed={name => { setSelectedOrganization(current => current?.organization_id === selectedOrganization.organization_id ? { ...current, name } : current); setData(current => ({ ...current, organizations:(current.organizations || []).map(item => item.organization_id === selectedOrganization.organization_id ? { ...item, name } : item) })); }} />;
+  return <section className="adm-panel"><SectionHeader title={copy.accounts[section]} count={items.length} copy={copy}><form className="adm-search" onSubmit={submit}><input value={search} onChange={event => setSearch(event.target.value)} placeholder={isUserSection ? copy.search : copy.accounts.organizationSearch} /><button>{copy.searchAction}</button></form></SectionHeader>{!isUserSection && <form className="adm-create-row" onSubmit={createOrganization}><input value={organizationName} onChange={event => setOrganizationName(event.target.value)} placeholder={copy.accounts.organizationNamePlaceholder} maxLength={120} /><select value={ownerUserID} onChange={event => setOwnerUserID(event.target.value)} aria-label={copy.accounts.initialOwner}><option value="">{copy.accounts.chooseOwner}</option>{activeUsers.map(user => <option key={user.user_id} value={user.user_id}>{user.display_name || user.email || shortID(user.user_id)}</option>)}</select><button disabled={!organizationName.trim() || !ownerUserID || Boolean(actionKey)}>{copy.accounts.createOrganization}</button>{activeUsers.length === 0 && <small>{copy.accounts.noActiveOwner}</small>}</form>}{notice && <div className="adm-inline-message ok" role="status">{notice}</div>}{actionError && <div className="adm-inline-message error" role="alert">{actionError}</div>}<Table columns={columns} items={items} copy={copy} rowKey={isUserSection ? 'user_id' : 'organization_id'} /></section>;
+}
+
+function OrganizationDetail({ copy, organization, client, onBack, onRenamed, onAuthorizationError }) {
+  const [units, setUnits] = useState([]);
+  const [members, setMembers] = useState([]);
+  const [name, setName] = useState('');
+  const [organizationName, setOrganizationName] = useState(organization.name);
+  const [editingOrganizationName, setEditingOrganizationName] = useState(false);
+  const [parentID, setParentID] = useState('');
+  const [newOwnerUserID, setNewOwnerUserID] = useState('');
+  const [loading, setLoading] = useState(true);
+  const [mutating, setMutating] = useState(false);
+  const busy = loading || mutating;
+  const [notice, setNotice] = useState('');
+  const [error, setError] = useState('');
+  const loadGuardRef = useRef(createContextRequestGuard());
+  const lifecycleRef = useRef(0);
+  useEffect(() => {
+    setMutating(false);
+    return () => { lifecycleRef.current += 1; };
+  }, [organization.organization_id]);
+  const captureContext = () => {
+    const generation = lifecycleRef.current;
+    return () => generation === lifecycleRef.current;
+  };
+  const load = useCallback(async signal => {
+    const request = loadGuardRef.current.begin();
+    const isCurrent = () => loadGuardRef.current.isCurrent(request.generation) && !request.signal.aborted && !signal?.aborted;
+    setLoading(true); setError('');
+    try {
+      const [unitResult, memberResult] = await Promise.all([
+        client.organizationUnits(organization.organization_id, request.signal),
+        client.organizationMembers(organization.organization_id, request.signal),
+      ]);
+      if (!isCurrent()) return;
+      setUnits(unitResult.items || []);
+      setMembers(memberResult.items || []);
+    } catch (reason) {
+      if (reason?.name !== 'AbortError' && isCurrent()) { onAuthorizationError(reason); setError(copy.accounts.actionFailed); }
+    } finally { if (isCurrent()) setLoading(false); }
+  }, [client, copy.accounts.actionFailed, organization.organization_id, onAuthorizationError]);
+  useEffect(() => {
+    const controller = new globalThis.AbortController();
+    void load(controller.signal);
+    return () => { controller.abort(); loadGuardRef.current.cancel(); };
+  }, [load]);
+  useEffect(() => setOrganizationName(organization.name), [organization.name]);
+  const roots = useMemo(() => buildUnitTree(units), [units]);
+  const owners = useMemo(() => members.filter(member => (member.roles || []).includes('OWNER')), [members]);
+  const transferCandidates = useMemo(() => members.filter(member => member.status === 'ACTIVE' && !(member.roles || []).includes('OWNER')), [members]);
+  const memberLabel = member => member.display_name || member.email || shortID(member.user_id);
+  const refreshUnits = async isCurrent => {
+    const result = await client.organizationUnits(organization.organization_id);
+    if (isCurrent()) setUnits(result.items || []);
+  };
+  const refreshMembers = async isCurrent => {
+    const result = await client.organizationMembers(organization.organization_id);
+    if (isCurrent()) setMembers(result.items || []);
+  };
+  const renameOrganization = async event => {
+    event.preventDefault();
+    const nextName = organizationName.trim();
+    if (!nextName || nextName === organization.name || busy) return;
+    const isCurrent = captureContext();
+    setMutating(true); setNotice(''); setError('');
+    try {
+      await client.renameOrganization(organization.organization_id, nextName);
+      if (!isCurrent()) return;
+      onRenamed(nextName); setEditingOrganizationName(false); setNotice(copy.accounts.organizationRenamed);
+    } catch (reason) { if (!isCurrent()) return; onAuthorizationError(reason); setError(copy.accounts.actionFailed); }
+    finally { if (isCurrent()) setMutating(false); }
+  };
+  const createUnit = async event => {
+    event.preventDefault();
+    if (!name.trim() || busy || organization.status !== 'ACTIVE') return;
+    const isCurrent = captureContext();
+    setMutating(true); setNotice(''); setError('');
+    try {
+      await client.createOrganizationUnit(organization.organization_id, name.trim(), parentID || null);
+      if (!isCurrent()) return;
+      setName(''); setParentID('');
+      await refreshUnits(isCurrent); if (!isCurrent()) return; setNotice(copy.accounts.unitCreated);
+    } catch (reason) { if (!isCurrent()) return; onAuthorizationError(reason); setError(copy.accounts.actionFailed); }
+    finally { if (isCurrent()) setMutating(false); }
+  };
+  const transferOwnership = async event => {
+    event.preventDefault();
+    const target = transferCandidates.find(member => member.user_id === newOwnerUserID);
+    if (!target || busy || organization.status !== 'ACTIVE' || !window.confirm(copy.accounts.confirmOwnership(memberLabel(target)))) return;
+    const isCurrent = captureContext();
+    setMutating(true); setNotice(''); setError('');
+    try {
+      await client.transferOrganizationOwnership(organization.organization_id, target.user_id);
+      if (!isCurrent()) return;
+      await refreshMembers(isCurrent); if (!isCurrent()) return; setNewOwnerUserID(''); setNotice(copy.accounts.ownershipTransferred);
+    } catch (reason) { if (!isCurrent()) return; onAuthorizationError(reason); setError(copy.accounts.actionFailed); }
+    finally { if (isCurrent()) setMutating(false); }
+  };
+  const renameUnit = async (unit, nextName) => {
+    const trimmed = nextName.trim();
+    if (!trimmed || trimmed === unit.name || busy) return trimmed === unit.name;
+    const isCurrent = captureContext();
+    setMutating(true); setNotice(''); setError('');
+    try {
+      await client.renameOrganizationUnit(organization.organization_id, unit.unit_id, trimmed);
+      if (!isCurrent()) return;
+      await refreshUnits(isCurrent); if (!isCurrent()) return; setNotice(copy.accounts.unitRenamed); return true;
+    } catch (reason) { if (!isCurrent()) return; onAuthorizationError(reason); setError(copy.accounts.actionFailed); return false; }
+    finally { if (isCurrent()) setMutating(false); }
+  };
+  const deleteUnit = async unit => {
+    if (busy || !window.confirm(copy.accounts.confirmUnit(unit.name))) return;
+    const isCurrent = captureContext();
+    setMutating(true); setNotice(''); setError('');
+    try {
+      await client.deleteOrganizationUnit(organization.organization_id, unit.unit_id);
+      if (!isCurrent()) return;
+      await refreshUnits(isCurrent); if (!isCurrent()) return; setNotice(copy.accounts.unitDeleted);
+    } catch (reason) {
+      if (!isCurrent()) return;
+      onAuthorizationError(reason);
+      setError(reason?.code === 'ORG_UNIT_HIERARCHY_INVALID' ? copy.accounts.deleteUnitBlocked : copy.accounts.actionFailed);
+    } finally { if (isCurrent()) setMutating(false); }
+  };
+  return <section className="adm-panel adm-org-detail"><button className="adm-back" onClick={onBack}>← {copy.accounts.backToOrganizations}</button><div className="adm-org-title"><div><span className="adm-eyebrow">{copy.accounts.organizationManagement}</span>{editingOrganizationName ? <form className="adm-org-rename" onSubmit={renameOrganization}><input value={organizationName} onChange={event => setOrganizationName(event.target.value)} maxLength={120} aria-label={copy.accounts.organizationName} autoFocus /><button disabled={busy || !organizationName.trim() || organizationName.trim() === organization.name}>{copy.accounts.save}</button><button type="button" className="secondary" disabled={busy} onClick={() => { setOrganizationName(organization.name); setEditingOrganizationName(false); }}>{copy.accounts.cancel}</button></form> : <div className="adm-org-name-display"><h2>{organization.name}</h2><button type="button" disabled={busy} onClick={() => setEditingOrganizationName(true)}>{copy.accounts.rename}</button></div>}</div><Status value={organization.status} /></div>{organization.status !== 'ACTIVE' && <div className="adm-inline-message error">{copy.accounts.organizationDisabled}</div>}<div className="adm-owner-card"><div><span>{copy.accounts.organizationOwner}</span><strong>{owners.length ? owners.map(memberLabel).join(' · ') : '—'}</strong></div><form onSubmit={transferOwnership}><select value={newOwnerUserID} onChange={event => setNewOwnerUserID(event.target.value)} aria-label={copy.accounts.chooseNewOwner}><option value="">{copy.accounts.chooseNewOwner}</option>{transferCandidates.map(member => <option key={member.user_id} value={member.user_id}>{memberLabel(member)}</option>)}</select><button disabled={busy || organization.status !== 'ACTIVE' || !newOwnerUserID}>{copy.accounts.transferOwner}</button></form>{!busy && transferCandidates.length === 0 && <small>{copy.accounts.noTransferCandidate}</small>}</div><form className="adm-unit-form" onSubmit={createUnit}><input value={name} onChange={event => setName(event.target.value)} placeholder={copy.accounts.unitName} maxLength={120} /><select value={parentID} onChange={event => setParentID(event.target.value)} aria-label={copy.accounts.parentUnit}><option value="">{copy.accounts.organizationRoot}</option>{units.filter(unit => unit.status === 'ACTIVE').map(unit => <option key={unit.unit_id} value={unit.unit_id}>{unit.name}</option>)}</select><button disabled={busy || organization.status !== 'ACTIVE' || !name.trim()}>{copy.accounts.createUnit}</button></form>{notice && <div className="adm-inline-message ok" role="status">{notice}</div>}{error && <div className="adm-inline-message error" role="alert">{error}</div>}<div className="adm-unit-head"><h3>{copy.accounts.unitHierarchy}</h3><span>{copy.items(units.length)}</span></div>{busy && units.length === 0 ? <div className="adm-empty">{copy.accounts.loadingUnits}</div> : roots.length === 0 ? <Empty copy={copy} /> : <div className="adm-unit-tree">{roots.map(unit => <UnitBranch key={unit.unit_id} unit={unit} copy={copy} disabled={busy} addDisabled={organization.status !== 'ACTIVE'} onAddChild={id => { setParentID(id); setName(''); }} onRename={renameUnit} onDelete={deleteUnit} />)}</div>}</section>;
+}
+
+function UnitBranch({ unit, copy, disabled, addDisabled, onAddChild, onRename, onDelete }) {
+  const [editing, setEditing] = useState(false);
+  const [name, setName] = useState(unit.name);
+  useEffect(() => setName(unit.name), [unit.name]);
+  const submit = async event => {
+    event.preventDefault();
+    if (await onRename(unit, name)) setEditing(false);
+  };
+  return <div className="adm-unit-branch"><div className="adm-unit-node">{editing ? <form className="adm-unit-rename" onSubmit={submit}><input value={name} onChange={event => setName(event.target.value)} maxLength={120} aria-label={copy.accounts.unitName} autoFocus /><button disabled={disabled || !name.trim()}>{copy.accounts.save}</button><button type="button" onClick={() => { setName(unit.name); setEditing(false); }}>{copy.accounts.cancel}</button></form> : <div><strong>{unit.name}</strong><Status value={unit.status} /></div>}<div className="adm-unit-actions"><button type="button" disabled={disabled || addDisabled || unit.status !== 'ACTIVE'} onClick={() => onAddChild(unit.unit_id)}>{copy.accounts.addChild}</button><button type="button" disabled={disabled || unit.status !== 'ACTIVE'} onClick={() => setEditing(true)}>{copy.accounts.rename}</button><button type="button" className="danger" title={unit.children.length ? copy.accounts.deleteUnitBlocked : undefined} disabled={disabled || unit.status !== 'ACTIVE' || unit.children.length > 0} onClick={() => onDelete(unit)}>{copy.accounts.delete}</button></div></div>{unit.children.length > 0 && <div className="adm-unit-children">{unit.children.map(child => <UnitBranch key={child.unit_id} unit={child} copy={copy} disabled={disabled} addDisabled={addDisabled} onAddChild={onAddChild} onRename={onRename} onDelete={onDelete} />)}</div>}</div>;
+}
+
+function Billing({ copy, language, data }) {
+  const [tab, setTab] = useState('wallets'); const items = data[tab] || [];
+  const columns = useMemo(() => ({
+    wallets:[{key:'owner_id',label:copy.billing.owner,render:item => <code title={item.owner_id}>{item.owner_type} · {shortID(item.owner_id)}</code>},{key:'status',label:copy.accounts.status,render:item => <Status value={item.status} />},{key:'available_microcredits',label:copy.billing.available,render:item => formatPoints(item.available_microcredits, language)},{key:'posted_microcredits',label:copy.billing.posted,render:item => formatPoints(item.posted_microcredits, language)},{key:'reserved_microcredits',label:copy.billing.reserved,render:item => formatPoints(item.reserved_microcredits, language)}],
+    orders:[{key:'merchant_order_no',label:copy.billing.order,render:item => <code>{item.merchant_order_no}</code>},{key:'channel',label:copy.billing.channel},{key:'amount_fen',label:copy.billing.paymentAmount,render:item => formatMoney(item.amount_fen, language)},{key:'status',label:copy.accounts.status,render:item => <Status value={item.status} />},{key:'fulfillment_status',label:copy.billing.fulfillment,render:item => <Status value={item.fulfillment_status} />},{key:'updated_at',label:copy.billing.updated,render:item => formatDate(item.updated_at)}],
+    adjustments:[{key:'wallet_id',label:copy.tokens.wallet,render:item => <code title={item.wallet_id}>{shortID(item.wallet_id)}</code>},{key:'amount_microcredits',label:copy.billing.amount,render:item => formatPoints(item.amount_microcredits, language)},{key:'reason',label:copy.billing.reason},{key:'requested_by',label:copy.billing.requestedBy,render:item => <code title={item.requested_by}>{shortID(item.requested_by)}</code>},{key:'status',label:copy.accounts.status,render:item => <Status value={item.status} />}],
+    holds:[{key:'usage_request_id',label:'Usage ID',render:item => <code title={item.usage_request_id}>{shortID(item.usage_request_id)}</code>},{key:'status',label:copy.accounts.status,render:item => <Status value={item.status} />},{key:'max_microcredits',label:copy.billing.maximum,render:item => formatPoints(item.max_microcredits, language)},{key:'actual_microcredits',label:copy.billing.actual,render:item => formatPoints(item.actual_microcredits, language)},{key:'expires_at',label:copy.billing.expires,render:item => formatDate(item.expires_at)}],
+  }), [copy, language]);
+  return <section className="adm-panel"><SectionHeader title={copy.billing.title} count={items.length} copy={copy} /><Tabs active={tab} onChange={setTab} items={['wallets','orders','adjustments','holds'].map(key => ({key,label:copy.billing[key]}))} /><Table columns={columns[tab]} items={items} copy={copy} rowKey={{ wallets:'wallet_id', orders:'order_id', adjustments:'adjustment_id', holds:'hold_id' }[tab]} /></section>;
+}
+
+function Tokens({ copy, language, data }) {
+  const [tab, setTab] = useState('tokenAccounts'); const items = data[tab] || [];
+  const columns = tab === 'tokenAccounts' ? [
+    {key:'name',label:copy.tokens.name,render:item => <strong>{item.name}</strong>},{key:'owner_id',label:copy.tokens.owner,render:item => <code title={item.owner_id}>{item.owner_type} · {shortID(item.owner_id)}</code>},{key:'status',label:copy.accounts.status,render:item => <Status value={item.status} />},{key:'share_scope',label:copy.tokens.sharing},{key:'active_credential_count',label:copy.tokens.credentials},{key:'route_count',label:copy.tokens.routes},{key:'updated_at',label:copy.billing.updated,render:item => formatDate(item.updated_at)},
+  ] : [
+    {key:'id',label:'Usage ID',render:item => <code title={item.usage_request_id || item.id}>{shortID(item.usage_request_id || item.id)}</code>},{key:'model',label:copy.tokens.model},{key:'status',label:copy.accounts.status,render:item => <Status value={item.status} />},{key:'maximum_microcredits',label:copy.tokens.maximum,render:item => formatPoints(item.maximum_microcredits, language)},{key:'actual_microcredits',label:copy.tokens.actual,render:item => formatPoints(item.actual_microcredits, language)},{key:'error_class',label:copy.tokens.error},{key:'started_at',label:copy.tokens.started,render:item => formatDate(item.started_at)},
+  ];
+  return <section className="adm-panel"><SectionHeader title={copy.tokens.title} count={items.length} copy={copy} /><Tabs active={tab} onChange={setTab} items={[{key:'tokenAccounts',label:copy.tokens.accounts},{key:'usage',label:copy.tokens.usage}]} /><Table columns={columns} items={items} copy={copy} rowKey={tab === 'tokenAccounts' ? 'token_account_id' : 'usage_request_id'} /></section>;
+}
+
+function Audit({ copy, data }) {
+  const items = data.audits || []; const columns = [
+    {key:'action',label:copy.audit.action,render:item => <strong>{item.action}</strong>},{key:'resource_type',label:copy.audit.resource,render:item => <span>{item.resource_type}<br /><code title={item.resource_id}>{shortID(item.resource_id)}</code></span>},{key:'actor_user_id',label:copy.audit.actor,render:item => <code title={item.actor_user_id}>{shortID(item.actor_user_id)}</code>},{key:'result',label:copy.audit.result,render:item => <Status value={item.result} />},{key:'request_id',label:copy.audit.request,render:item => <code title={item.request_id}>{shortID(item.request_id)}</code>},{key:'occurred_at',label:copy.audit.occurred,render:item => formatDate(item.occurred_at)},
+  ];
+  return <section className="adm-panel"><SectionHeader title={copy.audit.title} count={items.length} copy={copy} /><Table columns={columns} items={items} copy={copy} rowKey="audit_id" /></section>;
+}

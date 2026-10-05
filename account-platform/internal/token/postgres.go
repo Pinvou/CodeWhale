@@ -26,6 +26,7 @@ type TokenAccount struct {
 	Status            string     `json:"status"`
 	ShareScope        string     `json:"share_scope"`
 	DefaultPriority   int        `json:"default_priority"`
+	ManagementMode    string     `json:"-"`
 }
 
 type Credential struct {
@@ -79,6 +80,7 @@ type Repository interface {
 	UpsertRoute(context.Context, uuid.UUID, string, int, string, string, uuid.UUID) (RoutingPolicy, error)
 	ListCandidates(context.Context, string) ([]Candidate, error)
 	CredentialSecret(context.Context, uuid.UUID, uuid.UUID) (Credential, []byte, error)
+	ListUsageForContext(context.Context, AuthorizationContext, int, *UsageHistoryCursor) ([]UserUsageRecord, error)
 	UsageStore
 	Ping(context.Context) error
 	Close()
@@ -129,6 +131,64 @@ func (r *PostgresRepository) GetUsage(ctx context.Context, usageID uuid.UUID) (U
 	return usage, err
 }
 
+func (r *PostgresRepository) ListUsageForContext(ctx context.Context, resolved AuthorizationContext, limit int, cursor *UsageHistoryCursor) ([]UserUsageRecord, error) {
+	if resolved.UserID == uuid.Nil || limit < 1 || limit > 101 {
+		return nil, ErrForbidden
+	}
+	query := `SELECT id,model,status,actual_microcredits,usage_snapshot,started_at,terminal_at,updated_at
+FROM usage_requests
+WHERE user_id=$1 AND organization_id IS NULL
+ORDER BY started_at DESC,id DESC LIMIT $2`
+	arguments := []any{resolved.UserID, limit}
+	if cursor != nil {
+		query = `SELECT id,model,status,actual_microcredits,usage_snapshot,started_at,terminal_at,updated_at
+FROM usage_requests
+WHERE user_id=$1 AND organization_id IS NULL AND (started_at,id)<($2,$3)
+ORDER BY started_at DESC,id DESC LIMIT $4`
+		arguments = []any{resolved.UserID, cursor.StartedAt, cursor.ID, limit}
+	}
+	if resolved.ContextType == "ORGANIZATION" && resolved.OrganizationID != nil {
+		query = `SELECT id,model,status,actual_microcredits,usage_snapshot,started_at,terminal_at,updated_at
+FROM usage_requests
+WHERE user_id=$1 AND organization_id=$2
+ORDER BY started_at DESC,id DESC LIMIT $3`
+		arguments = []any{resolved.UserID, *resolved.OrganizationID, limit}
+		if cursor != nil {
+			query = `SELECT id,model,status,actual_microcredits,usage_snapshot,started_at,terminal_at,updated_at
+FROM usage_requests
+WHERE user_id=$1 AND organization_id=$2 AND (started_at,id)<($3,$4)
+ORDER BY started_at DESC,id DESC LIMIT $5`
+			arguments = []any{resolved.UserID, *resolved.OrganizationID, cursor.StartedAt, cursor.ID, limit}
+		}
+	} else if resolved.ContextType != "PERSONAL" {
+		return nil, ErrForbidden
+	}
+	rows, err := r.pool.Query(ctx, query, arguments...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := make([]UserUsageRecord, 0)
+	for rows.Next() {
+		var item UserUsageRecord
+		var snapshot []byte
+		if err := rows.Scan(&item.UsageRequestID, &item.Model, &item.status, &item.ActualMicrocredits, &snapshot, &item.StartedAt, &item.CompletedAt, &item.UpdatedAt); err != nil {
+			return nil, err
+		}
+		if len(snapshot) > 0 {
+			var payload struct {
+				Usage *Usage `json:"usage"`
+			}
+			if json.Unmarshal(snapshot, &payload) == nil && payload.Usage != nil {
+				input, output, cached := payload.Usage.InputTokens, payload.Usage.OutputTokens, payload.Usage.CachedInputTokens
+				item.InputTokens, item.OutputTokens, item.CachedInputTokens = &input, &output, &cached
+			}
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
 func (r *PostgresRepository) MarkReserved(ctx context.Context, usageID, holdID, priceVersionID uuid.UUID) error {
 	command, err := r.pool.Exec(ctx, `UPDATE usage_requests SET status='RESERVED',hold_id=$2,price_version_id=$3,updated_at=$4 WHERE id=$1 AND status='CREATED'`, usageID, holdID, priceVersionID, r.now())
 	if err != nil {
@@ -151,6 +211,24 @@ func (r *PostgresRepository) MarkUpstream(ctx context.Context, usageID uuid.UUID
 	return nil
 }
 
+func (r *PostgresRepository) RecordUpstreamRequest(ctx context.Context, usageID uuid.UUID, newAPIRequestID string) error {
+	newAPIRequestID = strings.TrimSpace(newAPIRequestID)
+	if usageID == uuid.Nil || newAPIRequestID == "" || len(newAPIRequestID) > 128 {
+		return ErrForbidden
+	}
+	command, err := r.pool.Exec(ctx, `INSERT INTO usage_attempts(id,usage_request_id,newapi_request_id,status,started_at)
+VALUES($1,$2,$3,'STARTED',$4)
+ON CONFLICT(usage_request_id) DO UPDATE SET newapi_request_id=EXCLUDED.newapi_request_id
+WHERE usage_attempts.newapi_request_id=EXCLUDED.newapi_request_id`, uuid.Must(uuid.NewV7()), usageID, newAPIRequestID, r.now())
+	if err != nil {
+		return err
+	}
+	if command.RowsAffected() == 0 {
+		return ErrForbidden
+	}
+	return nil
+}
+
 func (r *PostgresRepository) MarkCommitted(ctx context.Context, usageID uuid.UUID, actual int64, snapshot map[string]any) error {
 	if usageID == uuid.Nil || actual < 0 {
 		return ErrForbidden
@@ -166,7 +244,10 @@ func (r *PostgresRepository) MarkCommitted(ctx context.Context, usageID uuid.UUI
 	defer tx.Rollback(ctx)
 	now := r.now()
 	var walletID, tokenAccountID uuid.UUID
-	err = tx.QueryRow(ctx, `UPDATE usage_requests SET status='COMMITTED',actual_microcredits=$2,usage_snapshot=$3,error_class=NULL,terminal_at=$4,updated_at=$4 WHERE id=$1 AND status IN ('UPSTREAM_ACTIVE','SETTLEMENT_PENDING','REVIEW') RETURNING wallet_id,token_account_id`, usageID, actual, encoded, now).Scan(&walletID, &tokenAccountID)
+	err = tx.QueryRow(ctx, `UPDATE usage_requests SET status='COMMITTED',actual_microcredits=$2,usage_snapshot=$3,error_class=NULL,terminal_at=$4,updated_at=$4,reconciliation_next_at=NULL,reconciliation_lease_until=NULL,reconciliation_last_error=NULL,reconciliation_stopped_at=NULL WHERE id=$1 AND status IN ('UPSTREAM_ACTIVE','SETTLEMENT_PENDING','REVIEW') RETURNING wallet_id,token_account_id`, usageID, actual, encoded, now).Scan(&walletID, &tokenAccountID)
+	if err == nil {
+		_, err = tx.Exec(ctx, `UPDATE usage_attempts SET status='SUCCEEDED',ended_at=$2 WHERE usage_request_id=$1 AND status IN ('STARTED','STREAMING')`, usageID, now)
+	}
 	if err == nil {
 		if err := events.AppendOutbox(ctx, tx, "token.usage.settled.v1", usageID, 1, map[string]any{"usage_request_id": usageID, "wallet_id": walletID, "token_account_id": tokenAccountID, "actual_microcredits": actual}); err != nil {
 			return err
@@ -190,15 +271,43 @@ func (r *PostgresRepository) MarkCommitted(ctx context.Context, usageID uuid.UUI
 }
 
 func (r *PostgresRepository) MarkReleased(ctx context.Context, usageID uuid.UUID, reason string) error {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	reason = strings.TrimSpace(reason)
 	now := r.now()
-	command, err := r.pool.Exec(ctx, `UPDATE usage_requests SET status='RELEASED',error_class=$2,terminal_at=$3,updated_at=$3 WHERE id=$1 AND status IN ('CREATED','RESERVED','UPSTREAM_ACTIVE','REVIEW')`, usageID, strings.TrimSpace(reason), now)
+	command, err := tx.Exec(ctx, `UPDATE usage_requests SET status='RELEASED',error_class=$2,terminal_at=$3,updated_at=$3,reconciliation_next_at=NULL,reconciliation_lease_until=NULL,reconciliation_last_error=NULL,reconciliation_stopped_at=NULL WHERE id=$1 AND status IN ('CREATED','RESERVED','UPSTREAM_ACTIVE','SETTLEMENT_PENDING','REVIEW')`, usageID, reason, now)
 	if err != nil {
 		return err
 	}
 	if command.RowsAffected() == 0 {
-		return r.ensureUsageState(ctx, usageID, "RELEASED")
+		var status string
+		var storedReason *string
+		var endedAt *time.Time
+		if err := tx.QueryRow(ctx, `SELECT status,error_class,terminal_at FROM usage_requests WHERE id=$1 FOR UPDATE`, usageID).Scan(&status, &storedReason, &endedAt); errors.Is(err, pgx.ErrNoRows) {
+			return ErrNotFound
+		} else if err != nil {
+			return err
+		}
+		if status != "RELEASED" {
+			return ErrForbidden
+		}
+		// Repeated release keeps the authoritative original terminal metadata
+		// while also ensuring the attempt's terminal bookkeeping is complete.
+		if storedReason != nil {
+			reason = *storedReason
+		}
+		if endedAt != nil {
+			now = *endedAt
+		}
 	}
-	return nil
+	_, err = tx.Exec(ctx, `UPDATE usage_attempts SET status='FAILED',error_class=$2,ended_at=$3 WHERE usage_request_id=$1 AND status IN ('STARTED','STREAMING')`, usageID, reason, now)
+	if err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 func (r *PostgresRepository) MarkReview(ctx context.Context, usageID uuid.UUID, reason string, snapshot map[string]any) error {
@@ -211,7 +320,7 @@ func (r *PostgresRepository) MarkReview(ctx context.Context, usageID uuid.UUID, 
 	if reason == "settlement_pending" || reason == "local_commit_record_pending" {
 		status = "SETTLEMENT_PENDING"
 	}
-	_, err = r.pool.Exec(ctx, `UPDATE usage_requests SET status=$2,error_class=$3,usage_snapshot=$4,updated_at=$5 WHERE id=$1 AND status NOT IN ('COMMITTED','RELEASED')`, usageID, status, reason, encoded, r.now())
+	_, err = r.pool.Exec(ctx, `UPDATE usage_requests SET status=$2,error_class=$3,usage_snapshot=$4,reconciliation_next_at=$5,reconciliation_lease_until=NULL,reconciliation_last_error=NULL,reconciliation_stopped_at=NULL,updated_at=$5 WHERE id=$1 AND status NOT IN ('COMMITTED','RELEASED')`, usageID, status, reason, encoded, r.now())
 	return err
 }
 
@@ -285,7 +394,7 @@ func (r *PostgresRepository) CreateAccount(ctx context.Context, request CreateAc
 
 func (r *PostgresRepository) GetAccount(ctx context.Context, accountID uuid.UUID) (TokenAccount, error) {
 	var account TokenAccount
-	err := r.pool.QueryRow(ctx, `SELECT ta.id,ta.owner_type,ta.owner_id,ta.owner_organization_id,ta.owner_unit_id,ta.wallet_id,ta.name,ta.status,sp.scope,ta.default_priority FROM token_accounts ta JOIN token_share_policies sp ON sp.token_account_id=ta.id WHERE ta.id=$1`, accountID).Scan(&account.ID, &account.OwnerType, &account.OwnerID, &account.OwnerOrganization, &account.OwnerUnit, &account.WalletID, &account.Name, &account.Status, &account.ShareScope, &account.DefaultPriority)
+	err := r.pool.QueryRow(ctx, `SELECT ta.id,ta.owner_type,ta.owner_id,ta.owner_organization_id,ta.owner_unit_id,ta.wallet_id,ta.name,ta.status,sp.scope,ta.default_priority,ta.management_mode FROM token_accounts ta JOIN token_share_policies sp ON sp.token_account_id=ta.id WHERE ta.id=$1`, accountID).Scan(&account.ID, &account.OwnerType, &account.OwnerID, &account.OwnerOrganization, &account.OwnerUnit, &account.WalletID, &account.Name, &account.Status, &account.ShareScope, &account.DefaultPriority, &account.ManagementMode)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return TokenAccount{}, ErrNotFound
 	}
@@ -296,9 +405,9 @@ func (r *PostgresRepository) ListManagedAccounts(ctx context.Context, resolved A
 	var rows pgx.Rows
 	var err error
 	if resolved.ContextType == "PERSONAL" {
-		rows, err = r.pool.Query(ctx, `SELECT ta.id,ta.owner_type,ta.owner_id,ta.owner_organization_id,ta.owner_unit_id,ta.wallet_id,ta.name,ta.status,sp.scope,ta.default_priority FROM token_accounts ta JOIN token_share_policies sp ON sp.token_account_id=ta.id WHERE ta.owner_type='USER' AND ta.owner_id=$1 ORDER BY ta.name,ta.id`, resolved.UserID)
+		rows, err = r.pool.Query(ctx, `SELECT ta.id,ta.owner_type,ta.owner_id,ta.owner_organization_id,ta.owner_unit_id,ta.wallet_id,ta.name,ta.status,sp.scope,ta.default_priority,ta.management_mode FROM token_accounts ta JOIN token_share_policies sp ON sp.token_account_id=ta.id WHERE ta.owner_type='USER' AND ta.owner_id=$1 AND ta.management_mode='USER' ORDER BY ta.name,ta.id`, resolved.UserID)
 	} else if resolved.ContextType == "ORGANIZATION" && resolved.OrganizationID != nil && (slices.Contains(resolved.Roles, "OWNER") || slices.Contains(resolved.Roles, "ORG_ADMIN")) {
-		rows, err = r.pool.Query(ctx, `SELECT ta.id,ta.owner_type,ta.owner_id,ta.owner_organization_id,ta.owner_unit_id,ta.wallet_id,ta.name,ta.status,sp.scope,ta.default_priority FROM token_accounts ta JOIN token_share_policies sp ON sp.token_account_id=ta.id WHERE ta.owner_organization_id=$1 ORDER BY ta.name,ta.id`, *resolved.OrganizationID)
+		rows, err = r.pool.Query(ctx, `SELECT ta.id,ta.owner_type,ta.owner_id,ta.owner_organization_id,ta.owner_unit_id,ta.wallet_id,ta.name,ta.status,sp.scope,ta.default_priority,ta.management_mode FROM token_accounts ta JOIN token_share_policies sp ON sp.token_account_id=ta.id WHERE ta.owner_organization_id=$1 AND ta.management_mode='USER' ORDER BY ta.name,ta.id`, *resolved.OrganizationID)
 	} else {
 		return []TokenAccount{}, nil
 	}
@@ -309,7 +418,7 @@ func (r *PostgresRepository) ListManagedAccounts(ctx context.Context, resolved A
 	items := make([]TokenAccount, 0)
 	for rows.Next() {
 		var item TokenAccount
-		if err := rows.Scan(&item.ID, &item.OwnerType, &item.OwnerID, &item.OwnerOrganization, &item.OwnerUnit, &item.WalletID, &item.Name, &item.Status, &item.ShareScope, &item.DefaultPriority); err != nil {
+		if err := rows.Scan(&item.ID, &item.OwnerType, &item.OwnerID, &item.OwnerOrganization, &item.OwnerUnit, &item.WalletID, &item.Name, &item.Status, &item.ShareScope, &item.DefaultPriority, &item.ManagementMode); err != nil {
 			return nil, err
 		}
 		items = append(items, item)

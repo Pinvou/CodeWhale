@@ -39,6 +39,7 @@ type BillingHold struct {
 
 type BillingClient interface {
 	Price(context.Context, string) (PriceVersion, error)
+	PriceByID(context.Context, uuid.UUID) (PriceVersion, error)
 	Reserve(context.Context, uuid.UUID, uuid.UUID, int64, uuid.UUID) (BillingHold, error)
 	Commit(context.Context, uuid.UUID, uuid.UUID, int64, Usage) error
 	Release(context.Context, uuid.UUID, uuid.UUID, string) error
@@ -179,6 +180,12 @@ func NewHTTPBillingClient(rawURL, serviceToken string) (*HTTPBillingClient, erro
 func (c *HTTPBillingClient) Price(ctx context.Context, model string) (PriceVersion, error) {
 	var price PriceVersion
 	err := c.call(ctx, http.MethodGet, "/internal/v1/pricing/current?model="+url.QueryEscape(model), nil, &price)
+	return price, err
+}
+
+func (c *HTTPBillingClient) PriceByID(ctx context.Context, priceID uuid.UUID) (PriceVersion, error) {
+	var price PriceVersion
+	err := c.call(ctx, http.MethodGet, "/internal/v1/pricing/"+priceID.String(), nil, &price)
 	return price, err
 }
 

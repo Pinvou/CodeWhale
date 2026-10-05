@@ -86,6 +86,7 @@ const LLMAPI_TOKEN_SERVICE: &str = "pinvou3-llmapi-token";
 const LLMAPI_ADMIN_SERVICE: &str = "pinvou3-llmapi-admin";
 const LLMAPI_USER_SESSION_SERVICE: &str = "pinvou3-llmapi-user-session";
 const LLMAPI_USER_PASSWORD_SERVICE: &str = "pinvou3-llmapi-user-password";
+const ACCOUNT_PLATFORM_REFRESH_TOKEN_SERVICE: &str = "pinvou3-account-platform-oidc";
 const IMA_SECRET_SERVICE: &str = "pinvou3-ima-secret";
 const ACP_PROVIDER_KEY_SERVICE: &str = "pinvou3-acp-provider-key";
 const TEAM_RELAY_DEVICE_SERVICE: &str = "pinvou3-team-relay-device";
@@ -151,6 +152,16 @@ impl CredentialReference {
         Self {
             service: LLMAPI_USER_PASSWORD_SERVICE.to_string(),
             account: format!("llmapi-password:{pinvou_user_id}:{device_binding_id}"),
+            version: 1,
+        }
+    }
+
+    pub fn for_account_platform_refresh_token() -> Self {
+        Self {
+            service: ACCOUNT_PLATFORM_REFRESH_TOKEN_SERVICE.to_string(),
+            // Keep the verified native OIDC record in its existing OS keyring
+            // namespace; account-platform does not use the file fallback.
+            account: "desktop-refresh-token".to_string(),
             version: 1,
         }
     }
@@ -675,6 +686,14 @@ pub fn is_secret_like(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn account_platform_reference_keeps_verified_native_record_namespace() {
+        let reference = CredentialReference::for_account_platform_refresh_token();
+        assert_eq!(reference.service, "pinvou3-account-platform-oidc");
+        assert_eq!(reference.account, "desktop-refresh-token");
+        assert_eq!(reference.version, 1);
+    }
 
     /// 内存 `KeyringStore` 兼 spy:记录 `get` 调用次数,用于断言"命中缓存后不再触底层"。
     /// 仅用于测试;不触碰真实 Keychain。

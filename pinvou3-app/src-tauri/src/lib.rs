@@ -1128,7 +1128,9 @@ pub fn run() {
                 tool_factory,
                 tool_policy,
                 std::sync::Arc::new(
-                    crate::features::llmapi_hub::runtime_model::LlmApiRuntimeModelProvider,
+                    crate::features::llmapi_hub::runtime_model::LlmApiRuntimeModelProvider::new(
+                        handle.clone(),
+                    ),
                 ),
             ) {
                 Ok(mut pool) => {

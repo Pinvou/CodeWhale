@@ -7,6 +7,7 @@
 /* eslint-disable sonarjs/no-nested-template-literals, sonarjs/no-unenclosed-multiline-block -- compact i18n dictionary: nested templates mirror the copy structure one-to-one; credential field names are false-positive secrets */
 import { browserEn } from './browser.js';
 import { accountPlatformCopy } from '../account-platform-i18n.js';
+import { adminPlatformCopy } from '../admin-platform-i18n.js';
 
 const conversationEn = {
   completed:'Completed', failed:'Failed', interrupted:'Interrupted', cancelled:'Cancelled', limitReached:'Limit reached', processing:'Processing', processingActive:'Processing',
@@ -184,7 +185,7 @@ const acpProvidersEn = {
 };
 
 export const dictEn = {
-  uiAccountPlatform: accountPlatformCopy.en,
+  uiAdminPlatform: adminPlatformCopy.en, uiAccountPlatform: accountPlatformCopy.en,
   ...browserEn,
         langTag: 'en',
         acpAgent: 'ACP Agent',

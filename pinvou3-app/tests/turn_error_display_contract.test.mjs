@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import vm from 'node:vm';
 import { fileURLToPath } from 'node:url';
+import { dict, ensureLanguage } from '../src/shared/i18n.js';
 
 // Regression for the turn-error display chain: stable backend error codes
 // (session_model_binding_stale:<id>, image_input_unsupported) must reach the
@@ -213,6 +214,48 @@ for (const [language, { marker, tail }] of Object.entries(LOCALE_MARKERS)) {
       assert.equal(desktopContext.displayDesktopError(new Error(input)), displayTurnError(new Error(input)),
         `${language}: actual desktop and web blocks agree with the real helper loaded`);
       assert.equal(desktopContext.displayDesktopError(input), displayTurnError(input));
+    }
+  });
+}
+
+// The native account runtime returns these exact static prefixes through
+// chat.rs, including send_user_message's wrapper. Exercise both shipped
+// desktop and web display functions with the real central lazy dictionaries.
+context.PinvouAccountPlatformErrorCopy = globalThis.PinvouAccountPlatformErrorCopy;
+const ACCOUNT_CODES = [
+  'authentication_required', 'oidc_jwks_unavailable', 'oidc_id_token_invalid',
+  'credential_store_failed', 'account_platform_service_unavailable',
+  'account_platform_account_unavailable', 'account_platform_response_invalid',
+];
+for (const language of ['zh-Hans', 'en', 'ja']) {
+  const lang = language === 'zh-Hans' ? 'zh' : language;
+  assert.equal(await ensureLanguage(lang), true);
+  const copy = dict[lang].uiAccountPlatform;
+  await withLanguage(language, () => {
+    desktopContext.state.settings.language = language;
+    for (const code of ACCOUNT_CODES) {
+      const expected = code === 'authentication_required' ? copy.loginRequired
+        : copy.errors[code] || copy.requestFailed;
+      for (const prefix of ['', 'send_user_message failed: ', 'Error: send_user_message failed: ']) {
+        const raw = `${prefix}account_platform: ${code}: fixture diagnostic must not be displayed`;
+        for (const input of [raw, new Error(raw)]) {
+          assert.equal(displayTurnError(input), expected);
+          assert.equal(desktopContext.displayDesktopError(input), expected);
+        }
+      }
+    }
+    for (const raw of [
+      'provider error: authentication_required: fixture diagnosis',
+      'send_user_message failed: account_platform: oidc_jwks_unavailable_extra',
+      'disk full',
+      'HTTP 503: provider said oidc_jwks_unavailable',
+      'authentication_required: unrelated provider sign-in',
+      'unsupported_platform',
+      'credential_store_failed: unrelated connector storage',
+      'send_user_message failed: authentication_required: ordinary provider',
+    ]) {
+      assert.equal(displayTurnError(raw), raw, 'ordinary provider/local errors are not account rejections');
+      assert.equal(desktopContext.displayDesktopError(raw), raw);
     }
   });
 }

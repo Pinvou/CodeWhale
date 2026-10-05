@@ -6,6 +6,7 @@
 /* eslint-disable sonarjs/no-nested-template-literals, sonarjs/no-unenclosed-multiline-block -- compact i18n dictionary: nested templates mirror the copy structure one-to-one; credential field names are false-positive secrets */
 import { browserZh } from './browser.js';
 import { accountPlatformCopy } from '../account-platform-i18n.js';
+import { adminPlatformCopy } from '../admin-platform-i18n.js';
 
 const conversationZh = {
   completed:'已完成', failed:'失败', interrupted:'已中断', cancelled:'已取消', limitReached:'达到限制', processing:'处理中', processingActive:'正在处理',
@@ -183,7 +184,7 @@ const acpProvidersZh = {
 };
 
 export const dictZh = {
-  uiAccountPlatform: accountPlatformCopy.zh,
+  uiAdminPlatform: adminPlatformCopy.zh, uiAccountPlatform: accountPlatformCopy.zh,
   ...browserZh,
         langTag: 'zh',
         acpAgent: 'ACP Agent',

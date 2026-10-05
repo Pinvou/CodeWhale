@@ -15,7 +15,7 @@ pub(super) struct IdentityBinding {
     pub client_id: String,
     pub token_url: String,
     pub subject: String,
-    pub nonce: String,
+    pub nonce: Option<String>,
 }
 
 impl IdentityBinding {
@@ -24,7 +24,7 @@ impl IdentityBinding {
             && self.client_id == config.client_id
             && self.token_url == config.token_url.as_str()
             && !self.subject.is_empty()
-            && !self.nonce.is_empty()
+            && self.nonce.as_ref().is_none_or(|nonce| !nonce.is_empty())
     }
 }
 
@@ -195,20 +195,27 @@ pub(super) async fn verify_identity(
         Some(identity) => {
             if !identity.matches(config)
                 || identity.subject != claims.sub
-                || claims.nonce.as_deref().is_some_and(|v| v != identity.nonce)
+                || claims
+                    .nonce
+                    .as_deref()
+                    .is_some_and(|v| Some(v) != identity.nonce.as_deref())
             {
                 return Err(invalid());
             }
             identity.nonce.clone()
         }
         None => {
-            let expected = login_nonce
-                .filter(|value| !value.is_empty())
-                .ok_or_else(invalid)?;
-            if claims.nonce.as_deref() != Some(expected) {
-                return Err(invalid());
+            // ROPC has no authorization request and sends no nonce. If a caller
+            // supplies one, it must be present and exact in the signed token.
+            match login_nonce {
+                Some(expected)
+                    if !expected.is_empty() && claims.nonce.as_deref() == Some(expected) =>
+                {
+                    Some(expected.to_string())
+                }
+                None if claims.nonce.is_none() => None,
+                _ => return Err(invalid()),
             }
-            expected.to_string()
         }
     };
     if let Some(hash) = claims.at_hash {

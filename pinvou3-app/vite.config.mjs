@@ -574,7 +574,7 @@ export default defineConfig(({ mode }) => {
     cssTarget: 'safari14',
     rolldownOptions: {
       input: accountPortalBuild
-        ? { account: resolve(sourceRoot, 'account.html') }
+        ? { account: resolve(sourceRoot, 'account.html'), admin: resolve(sourceRoot, 'admin.html') }
         : webBuild
         ? { main: resolve(sourceRoot, 'index.html') }
         : {
@@ -582,7 +582,13 @@ export default defineConfig(({ mode }) => {
             pet: resolve(sourceRoot, 'pet.html'),
             reader: resolve(sourceRoot, 'reader.html'),
           },
-      output: webBuild
+      output: accountPortalBuild
+        ? {
+            entryFileNames: 'assets/[name].js',
+            chunkFileNames: 'assets/[name].js',
+            assetFileNames: 'assets/[name][extname]',
+          }
+        : webBuild
         ? {
             // Single-entry web build has no multi-entry sharing, so react-dom/
             // react/scheduler would stay inlined in main and trip the 500 kB

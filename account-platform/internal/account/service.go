@@ -36,6 +36,9 @@ func (s *Service) Bootstrap(ctx context.Context, principal identity.Principal) (
 	if me.Status == "ACTIVE" {
 		return me, nil
 	}
+	if me.Status != "PROVISIONING" {
+		return me, ErrForbidden
+	}
 	if err := s.wallets.EnsurePersonalWallet(ctx, me.UserID); err != nil {
 		return me, fmt.Errorf("%w: %v", ErrWalletProvisioning, err)
 	}
@@ -46,23 +49,41 @@ func (s *Service) Bootstrap(ctx context.Context, principal identity.Principal) (
 }
 
 func (s *Service) Handler(verify identity.VerifyFunc) http.Handler {
-	mux := http.NewServeMux()
-	mux.HandleFunc("POST /v1/account/bootstrap", s.bootstrap)
-	mux.HandleFunc("GET /v1/me", s.getMe)
-	mux.HandleFunc("GET /v1/me/authorization-context", s.getAuthorizationContext)
-	mux.HandleFunc("GET /v1/me/organizations", s.listOrganizations)
-	mux.HandleFunc("POST /v1/sessions/current/active-context", s.setActiveContext)
-	mux.HandleFunc("POST /v1/organizations", s.createOrganization)
-	mux.HandleFunc("GET /v1/organizations/{organization_id}/units", s.listUnits)
-	mux.HandleFunc("POST /v1/organizations/{organization_id}/units", s.createUnit)
-	mux.HandleFunc("GET /v1/organizations/{organization_id}/members", s.listMembers)
-	mux.HandleFunc("PUT /v1/organizations/{organization_id}/members/{user_id}/roles", s.replaceMemberRoles)
-	mux.HandleFunc("PATCH /v1/organizations/{organization_id}/units/{unit_id}/parent", s.moveUnit)
-	mux.HandleFunc("POST /v1/organizations/{organization_id}/invitations", s.createInvitation)
-	mux.HandleFunc("POST /v1/invitations/accept", s.acceptInvitation)
-	mux.HandleFunc("DELETE /v1/organizations/{organization_id}/members/{user_id}", s.revokeMembership)
-	mux.HandleFunc("POST /v1/organizations/{organization_id}/ownership", s.transferOwnership)
-	return identity.Middleware(verify, mux)
+	router := httpserver.NewRouter()
+	router.Use(identity.GinMiddleware(verify))
+	router.POST("/v1/account/bootstrap", httpserver.AdaptFunc(s.bootstrap))
+	router.GET("/v1/me", httpserver.AdaptFunc(s.getMe))
+	router.GET("/v1/me/authorization-context", httpserver.AdaptFunc(s.getAuthorizationContext))
+	router.GET("/v1/me/organizations", httpserver.AdaptFunc(s.listOrganizations))
+	router.POST("/v1/sessions/current/active-context", httpserver.AdaptFunc(s.setActiveContext))
+	router.GET("/v1/organizations/:organization_id/units", httpserver.AdaptFunc(s.listUnits))
+	router.POST("/v1/organizations/:organization_id/units", httpserver.AdaptFunc(s.createUnit))
+	router.GET("/v1/organizations/:organization_id/members", httpserver.AdaptFunc(s.listMembers))
+	router.PUT("/v1/organizations/:organization_id/members/:user_id/roles", httpserver.AdaptFunc(s.replaceMemberRoles))
+	router.PATCH("/v1/organizations/:organization_id/units/:unit_id/parent", httpserver.AdaptFunc(s.moveUnit))
+	router.POST("/v1/organizations/:organization_id/invitations", httpserver.AdaptFunc(s.createInvitation))
+	router.POST("/v1/invitations/accept", httpserver.AdaptFunc(s.acceptInvitation))
+	router.DELETE("/v1/organizations/:organization_id/members/:user_id", httpserver.AdaptFunc(s.revokeMembership))
+	router.POST("/v1/organizations/:organization_id/ownership", httpserver.AdaptFunc(s.transferOwnership))
+	admin := router.Group("/admin/v1")
+	admin.Use(identity.RequireRealmRoleGin("platform-admin"))
+	admin.GET("/overview", httpserver.AdaptFunc(s.adminOverview))
+	admin.GET("/users", httpserver.AdaptFunc(s.adminUsers))
+	admin.PATCH("/users/:user_id/status", httpserver.AdaptFunc(s.adminSetUserStatus))
+	admin.DELETE("/users/:user_id", httpserver.AdaptFunc(s.adminDeleteUser))
+	admin.GET("/organizations", httpserver.AdaptFunc(s.adminOrganizations))
+	admin.POST("/organizations", httpserver.AdaptFunc(s.adminCreateOrganization))
+	admin.PATCH("/organizations/:organization_id", httpserver.AdaptFunc(s.adminRenameOrganization))
+	admin.PATCH("/organizations/:organization_id/status", httpserver.AdaptFunc(s.adminSetOrganizationStatus))
+	admin.DELETE("/organizations/:organization_id", httpserver.AdaptFunc(s.adminDeleteOrganization))
+	admin.GET("/organizations/:organization_id/units", httpserver.AdaptFunc(s.adminUnits))
+	admin.GET("/organizations/:organization_id/members", httpserver.AdaptFunc(s.adminMembers))
+	admin.POST("/organizations/:organization_id/ownership", httpserver.AdaptFunc(s.adminTransferOwnership))
+	admin.POST("/organizations/:organization_id/units", httpserver.AdaptFunc(s.adminCreateUnit))
+	admin.PATCH("/organizations/:organization_id/units/:unit_id", httpserver.AdaptFunc(s.adminRenameUnit))
+	admin.DELETE("/organizations/:organization_id/units/:unit_id", httpserver.AdaptFunc(s.adminDeleteUnit))
+	admin.GET("/audit-logs", httpserver.AdaptFunc(s.adminAuditLogs))
+	return router
 }
 
 func (s *Service) listUnits(w http.ResponseWriter, r *http.Request) {
@@ -173,22 +194,6 @@ func (s *Service) setActiveContext(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	api.WriteJSON(w, http.StatusOK, context)
-}
-
-func (s *Service) createOrganization(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		Name string `json:"name"`
-	}
-	if err := api.DecodeJSON(w, r, &body); err != nil {
-		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid organization request", httpserver.RequestID(r.Context()))
-		return
-	}
-	organization, err := s.repository.CreateOrganization(r.Context(), mustPrincipal(r.Context()), body.Name)
-	if err != nil {
-		s.writeError(w, r, err)
-		return
-	}
-	api.WriteJSON(w, http.StatusCreated, organization)
 }
 
 func (s *Service) createUnit(w http.ResponseWriter, r *http.Request) {

@@ -1,8 +1,10 @@
 use tauri::State;
 
 use crate::features::account_platform::{
-    AccountPlatformState, ApiRequest, ApiResponse, CallbackCopy, SessionStatus,
+    AccountPlatformState, ApiRequest, ApiResponse, LoginCredentials, SessionStatus,
 };
+use crate::features::assistant::engine_pool::EnginePool;
+use crate::platform::prefs::BUILTIN_LLMAPI_MODEL_ID;
 
 #[tauri::command]
 pub async fn account_platform_session(
@@ -13,17 +15,23 @@ pub async fn account_platform_session(
 
 #[tauri::command]
 pub async fn account_platform_login(
-    callback_copy: CallbackCopy,
+    credentials: LoginCredentials,
     state: State<'_, AccountPlatformState>,
+    pool: State<'_, EnginePool>,
 ) -> Result<SessionStatus, String> {
-    state.login(callback_copy).await
+    let status = state.login(credentials).await?;
+    pool.mark_model_updated(BUILTIN_LLMAPI_MODEL_ID);
+    Ok(status)
 }
 
 #[tauri::command]
 pub async fn account_platform_logout(
     state: State<'_, AccountPlatformState>,
+    pool: State<'_, EnginePool>,
 ) -> Result<SessionStatus, String> {
-    state.logout().await
+    let status = state.logout().await?;
+    pool.mark_model_updated(BUILTIN_LLMAPI_MODEL_ID);
+    Ok(status)
 }
 
 #[tauri::command]

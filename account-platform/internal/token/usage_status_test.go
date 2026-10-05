@@ -82,6 +82,22 @@ func TestUsageDisplayStatusKeepsSettlementPendingDistinct(t *testing.T) {
 	}
 }
 
+func TestUsageHistoryCursorRoundTripAndRejectsInvalidInput(t *testing.T) {
+	want := UsageHistoryCursor{
+		StartedAt: time.Date(2026, time.August, 18, 9, 30, 0, 123, time.UTC),
+		ID:        uuid.MustParse("0198f8e3-2d27-7a2b-93aa-4f1a8f796e8c"),
+	}
+	got, err := decodeUsageCursor(encodeUsageCursor(want))
+	if err != nil || !got.StartedAt.Equal(want.StartedAt) || got.ID != want.ID {
+		t.Fatalf("cursor round trip = %#v, %v", got, err)
+	}
+	for _, invalid := range []string{"not-base64!", "YWJj", string(make([]byte, 257))} {
+		if _, err := decodeUsageCursor(invalid); err == nil {
+			t.Fatalf("accepted invalid cursor %q", invalid)
+		}
+	}
+}
+
 func TestUsageStatusRequiresSameSessionAndActiveContext(t *testing.T) {
 	userID := uuid.New()
 	organizationID := uuid.New()

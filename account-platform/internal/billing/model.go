@@ -78,6 +78,7 @@ type Repository interface {
 	GetWallet(context.Context, uuid.UUID) (Wallet, error)
 	ListProducts(context.Context, string, string) ([]Product, error)
 	CurrentPrice(context.Context, string) (PriceVersion, error)
+	PriceByID(context.Context, uuid.UUID) (PriceVersion, error)
 	Credit(context.Context, uuid.UUID, string, int64, bool) (Wallet, error)
 	Reserve(context.Context, uuid.UUID, uuid.UUID, int64, *uuid.UUID, time.Time) (Hold, error)
 	Commit(context.Context, uuid.UUID, uuid.UUID, int64, map[string]any) (Hold, error)

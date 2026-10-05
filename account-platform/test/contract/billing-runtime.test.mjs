@@ -58,5 +58,34 @@ test('Billing and Token contracts match production JSON and HTTP validation resp
     assert.equal(response.code, code);
     assert.ok(error(response), `${code}: ${JSON.stringify(error.errors)}`);
   }
+  const admin = YAML.parse(await readFile(path.join(root, 'contracts/openapi/admin.yaml'), 'utf8'));
+  const adminSchemas = JSON.parse(JSON.stringify(admin.components.schemas).replaceAll('#/components/schemas/', '#/$defs/'));
+  ajv.addSchema({ $id: 'urn:pinvou:admin-runtime', $defs: adminSchemas });
+  const financialSchemas = [
+    ['billing/admin/v1/overview', 'BillingOverview', ['posted_microcredits', 'reserved_microcredits']],
+    ['billing/admin/v1/wallets', 'WalletCollection', ['posted_microcredits', 'reserved_microcredits', 'available_microcredits']],
+    ['billing/admin/v1/payment-orders', 'PaymentOrderCollection', ['amount_fen', 'credit_microcredits']],
+    ['billing/admin/v1/adjustments', 'AdjustmentCollection', ['amount_microcredits']],
+    ['billing/admin/v1/usage-holds', 'HoldCollection', ['max_microcredits', 'actual_microcredits']],
+    ['token/admin/v1/usage-requests', 'UsageCollection', ['maximum_microcredits', 'actual_microcredits']],
+  ];
+  for (const [route, schema, fields] of financialSchemas) {
+    const validate = ajv.compile({ $ref: `urn:pinvou:admin-runtime#/$defs/${schema}` });
+    const response = fixtures.financial_reads[route];
+    assert.ok(validate(response), `${route}: ${JSON.stringify(validate.errors)}`);
+    const item = response.items?.[0] ?? response;
+    for (const field of fields) {
+      assert.equal(typeof item[field], 'string', `${route} ${field} must remain exact`);
+      const malformed = structuredClone(response);
+      (malformed.items?.[0] ?? malformed)[field] = Number(item[field]);
+      assert.equal(validate(malformed), false, `${route} must reject rounded money numbers`);
+    }
+  }
+  const history = ajv.compile({ $ref: 'urn:pinvou:token-runtime#/$defs/UserUsageRecord' });
+  const historyItem = fixtures.financial_reads['token/v1/me/usage-requests'].items[0];
+  assert.ok(history(historyItem), JSON.stringify(history.errors));
+  assert.equal(historyItem.actual_microcredits, '9007199254740993');
+  assert.equal(history({ ...historyItem, actual_microcredits: 9007199254740993 }), false);
+  assert.ok(history({ ...historyItem, actual_microcredits: null }), JSON.stringify(history.errors));
   assert.equal(error({ ...Object.values(fixtures.token_errors)[0], code: 'UNDECLARED_ERROR' }), false);
 });

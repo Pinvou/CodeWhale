@@ -26,6 +26,7 @@ services:
       BILLING_DB_PASSWORD: ${BILLING_DB_PASSWORD:?set BILLING_DB_PASSWORD}
       TOKEN_DB_PASSWORD: ${TOKEN_DB_PASSWORD:?set TOKEN_DB_PASSWORD}
       PAYMENT_SIM_DB_PASSWORD: ${PAYMENT_SIM_DB_PASSWORD:?set PAYMENT_SIM_DB_PASSWORD}
+      NEWAPI_DB_PASSWORD: ${NEWAPI_DB_PASSWORD:?set NEWAPI_DB_PASSWORD}
       KEYCLOAK_DB_PASSWORD: ${KEYCLOAK_DB_PASSWORD:?set KEYCLOAK_DB_PASSWORD}
     volumes:
       - postgres-data:/var/lib/postgresql/data
@@ -79,6 +80,7 @@ services:
       KC_HOSTNAME_BACKCHANNEL_DYNAMIC: "true"
     volumes:
       - ../keycloak/pinvou-dev-realm.json:/opt/keycloak/data/import/pinvou-realm.json:ro
+      - ../keycloak/provision-platform-admin.sh:/opt/keycloak/data/import/provision-platform-admin.sh:ro
     healthcheck:
       test:
         - CMD
@@ -141,6 +143,9 @@ services:
       APP_ENV: development
       PORT: 8080
       DATABASE_URL: postgresql://billing_service:${BILLING_DB_PASSWORD}@postgres:5432/account_platform_billing?sslmode=disable
+      OIDC_ISSUER: http://127.0.0.1:18080/realms/pinvou
+      OIDC_JWKS_URL: http://keycloak:8080/realms/pinvou/protocol/openid-connect/certs
+      OIDC_AUDIENCE: pinvou-desktop-dev
       NATS_URL: nats://nats:4222
       PAYMENT_SIMULATOR_URL: http://payment-simulator:8080
       BILLING_PAYMENT_CALLBACK_URL: http://billing-service:8080/internal/payment/notifications
@@ -181,7 +186,16 @@ services:
       TOKEN_SECRET_KEY_ID: pinvou-development-local-v1
       TOKEN_LOCAL_KEK_BASE64: ${TOKEN_LOCAL_KEK_BASE64:?set TOKEN_LOCAL_KEK_BASE64}
       TOKEN_GATEWAY_MAX_INPUT_TOKENS: "128000"
-      TOKEN_PROVIDER_ALLOWED_HOSTS: mock-newapi
+      TOKEN_PROVIDER_ALLOWED_HOSTS: mock-newapi,newapi
+      TOKEN_DEFAULT_PROVIDER: new-api
+      TOKEN_DEFAULT_PROVIDER_BASE_URL: ${TOKEN_DEFAULT_PROVIDER_BASE_URL:?set TOKEN_DEFAULT_PROVIDER_BASE_URL}
+      TOKEN_DEFAULT_PROVIDER_API_KEY: ${TOKEN_DEFAULT_PROVIDER_API_KEY:?set TOKEN_DEFAULT_PROVIDER_API_KEY}
+      TOKEN_DEFAULT_PROVIDER_MODELS: ${TOKEN_DEFAULT_PROVIDER_MODELS:-deepseek-v4-flash}
+      TOKEN_DEFAULT_ROUTE_PRIORITY: "10"
+      TOKEN_RECONCILIATION_NEWAPI_BASE_URL: ${TOKEN_DEFAULT_PROVIDER_BASE_URL:?set TOKEN_DEFAULT_PROVIDER_BASE_URL}
+      TOKEN_RECONCILIATION_NEWAPI_ADMIN_TOKEN: ${TOKEN_RECONCILIATION_NEWAPI_ADMIN_TOKEN:?set TOKEN_RECONCILIATION_NEWAPI_ADMIN_TOKEN}
+      TOKEN_RECONCILIATION_NEWAPI_ADMIN_USER_ID: ${TOKEN_RECONCILIATION_NEWAPI_ADMIN_USER_ID:?set TOKEN_RECONCILIATION_NEWAPI_ADMIN_USER_ID}
+      TOKEN_RECONCILIATION_INTERVAL_SECONDS: "15"
       NATS_URL: nats://nats:4222
     depends_on:
       postgres:
@@ -255,6 +269,7 @@ services:
       PORTAL_OIDC_ISSUER: http://127.0.0.1:18080/realms/pinvou
       PORTAL_OIDC_JWKS_URL: http://keycloak:8080/realms/pinvou/protocol/openid-connect/certs
       ACCOUNT_HTTP_URL: http://account-service:8080
+      BILLING_HTTP_URL: http://billing-service:8080
       TOKEN_GATEWAY_HTTP_URL: http://token-gateway:8080
     depends_on:
       redis:
@@ -281,6 +296,45 @@ services:
       APP_ENV: development
       PORT: 8080
       MOCK_NEWAPI_KEY: ${MOCK_NEWAPI_KEY:?set MOCK_NEWAPI_KEY}
+
+  newapi:
+    <<: *service-defaults
+    profiles: [real-newapi]
+    image: calciumion/new-api:v1.0.0-rc.11@sha256:bd30213d808857bb569ef47d3c9209d061a66ea089c2472ef46ce51e75517f19
+    user: "65532:65532"
+    cap_drop: [ALL]
+    tmpfs:
+      - /tmp:size=16m,mode=1777,uid=65532,gid=65532
+      - /data:size=64m,mode=0700,uid=65532,gid=65532
+    environment:
+      PORT: 3000
+      TZ: Asia/Shanghai
+      GIN_MODE: release
+      SQL_DSN: postgresql://new_api:${NEWAPI_DB_PASSWORD:?set NEWAPI_DB_PASSWORD}@postgres:5432/account_platform_newapi?sslmode=disable
+      REDIS_CONN_STRING: redis://redis:6379/1
+      SESSION_SECRET: ${NEWAPI_SESSION_SECRET:?set NEWAPI_SESSION_SECRET}
+      CRYPTO_SECRET: ${NEWAPI_CRYPTO_SECRET:?set NEWAPI_CRYPTO_SECRET}
+      TRUSTED_PROXIES: none
+      NODE_TYPE: master
+      BATCH_UPDATE_ENABLED: "true"
+      ERROR_LOG_ENABLED: "true"
+      STREAMING_TIMEOUT: "300"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:3000/api/status | grep -q '\"success\":true'"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+    ports:
+      - "127.0.0.1:18106:3000"
+    networks:
+      - backend
+      - frontend
+
   payment-simulator:
     <<: *service-defaults
     build:

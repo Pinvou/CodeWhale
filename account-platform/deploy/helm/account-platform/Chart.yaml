@@ -1,6 +1,6 @@
 apiVersion: v2
 name: pinvou-account-platform
-description: Pinvou account, billing, Token gateway, portal, and identity infrastructure
+description: Pinvou account, billing, Token gateway, real New API data plane, portal, and identity infrastructure
 type: application
 version: 0.1.0
 appVersion: "0.1.0"

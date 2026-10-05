@@ -16,12 +16,73 @@ import (
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/identity"
 	"github.com/Pinvou/pinvou3/account-platform/internal/token"
+	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 )
 
 type contractRepository struct {
 	token.Repository
 	candidate token.Candidate
+}
+
+func (contractRepository) AdminOverview(context.Context) (token.AdminOverview, error) {
+	return token.AdminOverview{}, nil
+}
+func (contractRepository) AdminTokenAccounts(context.Context, int) ([]token.AdminTokenAccount, error) {
+	return []token.AdminTokenAccount{}, nil
+}
+func (contractRepository) AdminUsageRequests(context.Context, int) ([]token.UsageRequest, error) {
+	amount := int64(9007199254740993)
+	return []token.UsageRequest{{ID: uuid.New(), Model: "fixture-model", Status: "COMMITTED", MaximumMicrocredits: amount, ActualMicrocredits: &amount, StartedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}}, nil
+}
+func (contractRepository) ListUsageForContext(context.Context, token.AuthorizationContext, int, *token.UsageHistoryCursor) ([]token.UserUsageRecord, error) {
+	amount := int64(9007199254740993)
+	return []token.UserUsageRecord{{UsageRequestID: uuid.New(), Model: "fixture-model", DisplayStatus: "SETTLED", ActualMicrocredits: &amount, StartedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}}, nil
+}
+
+type adminBillingRepository struct{ billing.Repository }
+
+func (adminBillingRepository) AdminOverview(context.Context) (billing.AdminOverview, error) {
+	return billing.AdminOverview{PostedMicrocredits: "9007199254740993", ReservedMicrocredits: "1"}, nil
+}
+func (adminBillingRepository) AdminWallets(context.Context, int) ([]billing.Wallet, error) {
+	return []billing.Wallet{{PostedMicrocredits: 9007199254740993, ReservedMicrocredits: 1, AvailableMicrocredits: 9007199254740992}}, nil
+}
+func (adminBillingRepository) AdminPaymentOrders(context.Context, int) ([]billing.AdminPaymentOrder, error) {
+	return []billing.AdminPaymentOrder{{AmountFen: 9007199254740993, CreditMicrocredits: 9007199254740993}}, nil
+}
+func (adminBillingRepository) AdminAdjustments(context.Context, int) ([]billing.ManualAdjustment, error) {
+	return []billing.ManualAdjustment{{AmountMicrocredits: -9007199254740993}}, nil
+}
+func (adminBillingRepository) AdminUsageHolds(context.Context, int) ([]billing.AdminHold, error) {
+	amount := int64(9007199254740993)
+	return []billing.AdminHold{{MaxMicrocredits: amount, ActualMicrocredits: &amount}}, nil
+}
+
+func financialReadProbes() map[string]json.RawMessage {
+	verify := func(context.Context, string) (identity.Principal, error) {
+		return identity.Principal{RealmRoles: []string{"platform-admin"}}, nil
+	}
+	billingHandler := billing.NewService(adminBillingRepository{}).Handler("fixture-service-token", verify)
+	tokenHandler := token.NewService(contractRepository{}, contractContext{value: token.AuthorizationContext{UserID: uuid.New(), ContextType: "PERSONAL"}}, nil, nil, token.ProviderURLPolicy{}, nil, nil, 100).Handler(verify)
+	results := map[string]json.RawMessage{}
+	for name, handler := range map[string]http.Handler{"billing": billingHandler, "token": tokenHandler} {
+		paths := []string{"/admin/v1/overview", "/admin/v1/wallets", "/admin/v1/payment-orders", "/admin/v1/adjustments", "/admin/v1/usage-holds"}
+		if name == "token" {
+			paths = []string{"/admin/v1/usage-requests", "/v1/me/usage-requests"}
+		}
+		for _, path := range paths {
+			request := httptest.NewRequest(http.MethodGet, path, nil)
+			request.Header.Set("Authorization", "Bearer fixture-only-token")
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			if response.Code != http.StatusOK {
+				panic("financial read probe did not reach production response")
+			}
+			results[name+path] = response.Body.Bytes()
+		}
+	}
+	return results
 }
 
 func (r contractRepository) ListCandidates(context.Context, string) ([]token.Candidate, error) {
@@ -63,6 +124,8 @@ func main() {
 	// Keep production HTTP JSON logs separate from the single fixture document.
 	output := os.Stdout
 	os.Stdout = os.Stderr
+	gin.DefaultWriter = os.Stderr
+	gin.DefaultErrorWriter = os.Stderr
 	id := uuid.New()
 	paidAt := time.Now().UTC()
 	transaction := "test-transaction"
@@ -90,7 +153,7 @@ func main() {
 	for code, cause := range map[string]error{"TOKEN_ACCOUNT_NOT_FOUND": token.ErrNotFound, "TOKEN_FORBIDDEN": token.ErrForbidden, "TOKEN_ROUTE_AMBIGUOUS": token.ErrAmbiguousRoute, "TOKEN_ROUTE_UNAVAILABLE": token.ErrNoEligibleRoute} {
 		errors[code] = eligibleProbe(nil, contractContext{err: cause})
 	}
-	if err := json.NewEncoder(output).Encode(map[string]any{"product": product, "paid": order, "created": created, "wallet": wallet, "routes": routes, "eligible": eligible, "token_errors": errors, "rate_limited": rateLimitProbe(), "recent_created": map[string]any{"order": created}, "recent_empty": map[string]any{"order": nil}}); err != nil {
+	if err := json.NewEncoder(output).Encode(map[string]any{"product": product, "paid": order, "created": created, "wallet": wallet, "routes": routes, "eligible": eligible, "token_errors": errors, "rate_limited": rateLimitProbe(), "recent_created": map[string]any{"order": created}, "recent_empty": map[string]any{"order": nil}, "financial_reads": financialReadProbes()}); err != nil {
 		panic(err)
 	}
 }

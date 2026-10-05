@@ -60,6 +60,11 @@ func (s *Service) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	idempotencyKey := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
+	if !validIdempotencyKey(idempotencyKey) {
+		api.WriteError(w, http.StatusBadRequest, "IDEMPOTENCY_KEY_REQUIRED", "Idempotency-Key must contain 16 to 128 UTF-8 characters", httpserver.RequestID(r.Context()))
+		return
+	}
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 4<<20))
 	if err != nil {
 		api.WriteError(w, http.StatusRequestEntityTooLarge, "REQUEST_TOO_LARGE", "the model request is too large", httpserver.RequestID(r.Context()))
@@ -108,6 +113,20 @@ func (s *Service) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		explicit = &parsed
 	}
 	route, err := SelectRoute(resolved, RouteRequest{Model: request.Model, ExplicitTokenAccountID: explicit}, candidates)
+	if errors.Is(err, ErrNoEligibleRoute) && explicit == nil && s.defaultRoutes != nil {
+		walletID, provisionErr := s.activeWallet(r.Context(), resolved)
+		if provisionErr == nil {
+			provisionErr = s.defaultRoutes.Ensure(r.Context(), resolved, walletID, request.Model)
+		}
+		if provisionErr == nil {
+			candidates, provisionErr = s.repository.ListCandidates(r.Context(), request.Model)
+		}
+		if provisionErr == nil {
+			route, err = SelectRoute(resolved, RouteRequest{Model: request.Model}, candidates)
+		} else if !errors.Is(provisionErr, ErrNoEligibleRoute) {
+			err = provisionErr
+		}
+	}
 	if err != nil {
 		s.writeError(w, r, err)
 		return
@@ -129,11 +148,6 @@ func (s *Service) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	maximumCost, err := MaximumCost(price, s.maximumInputTokens, maximumOutput)
 	if err != nil || maximumCost <= 0 {
 		api.WriteError(w, http.StatusUnprocessableEntity, "PRICE_INVALID", "the model request cannot be priced", httpserver.RequestID(r.Context()))
-		return
-	}
-	idempotencyKey := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
-	if !validIdempotencyKey(idempotencyKey) {
-		api.WriteError(w, http.StatusBadRequest, "IDEMPOTENCY_KEY_REQUIRED", "Idempotency-Key must contain 16 to 128 UTF-8 characters", httpserver.RequestID(r.Context()))
 		return
 	}
 	usageID := uuid.Must(uuid.NewV7())
@@ -184,6 +198,9 @@ func (s *Service) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer response.Body.Close()
+	if newAPIRequestID := response.Header.Get("X-Oneapi-Request-Id"); newAPIRequestID != "" {
+		_ = s.repository.RecordUpstreamRequest(context.WithoutCancel(r.Context()), usageRequest.ID, newAPIRequestID)
+	}
 	w.Header().Set("X-Pinvou-Usage-Request-ID", usageRequest.ID.String())
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		s.handleUpstreamFailure(w, r, usageRequest.ID, hold.ID, response)
@@ -323,7 +340,7 @@ func (s *Service) releaseUnused(ctx context.Context, usageID, holdID uuid.UUID, 
 	if err := s.billing.Release(ctx, usageID, holdID, reason); err != nil {
 		recordCtx, recordCancel := context.WithTimeout(background, 5*time.Second)
 		defer recordCancel()
-		_ = s.repository.MarkReview(recordCtx, usageID, "release_pending", map[string]any{"hold_id": holdID, "release_reason": reason, "upstream_started": false})
+		_ = s.repository.MarkReview(recordCtx, usageID, "release_pending", map[string]any{"hold_id": holdID, "release_reason": reason, "upstream_started": reason == "upstream_rejected"})
 		return
 	}
 	if err := s.repository.MarkReleased(ctx, usageID, reason); err != nil {

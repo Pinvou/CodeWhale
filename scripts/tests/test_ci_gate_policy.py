@@ -481,6 +481,32 @@ class CiGatePolicyTests(unittest.TestCase):
         self.assertIn("govulncheck@v1.8.0", account_job)
         self.assertIn("docker compose", account_job)
 
+    def test_account_platform_builds_tls_and_runs_real_helm_security_cases(self):
+        account_job = self.workflow.split(
+            "\n  account-platform-test:", maxsplit=1
+        )[1].split("\n  release-contract-test:", maxsplit=1)[0]
+        self.assertIn(
+            "docker build --file account-platform/Dockerfile --build-arg "
+            "SERVICE=newapi-tls --tag pinvou/newapi-tls:dev account-platform",
+            account_job,
+        )
+        self.assertIn('helm_wrapper="$RUNNER_TEMP/account-platform-real-helm"', account_job)
+        self.assertIn(
+            'exec docker run --rm --network none '
+            '-v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE:ro" '
+            '-w "$GITHUB_WORKSPACE" alpine/helm:4.2.3 "$@"',
+            account_job,
+        )
+        self.assertIn(
+            'PINVOU_HELM_EXECUTABLE="$helm_wrapper" node --test '
+            'account-platform/test/ops/helm-tls-render.test.mjs',
+            account_job,
+        )
+        self.assertIn("prometheus-rule-fixtures.mjs", account_job)
+        self.assertIn("check rules event-relay-rules.yaml", account_job)
+        self.assertIn("test rules event-relay-missing.test.yaml", account_job)
+        self.assertNotRegex(account_job, r"(?m)^\s*docker (?:push|buildx.*--push)\b")
+
     def test_trusted_backflow_has_parallel_three_platform_light_gate(self):
         portability = self.workflow.split(
             "\n  backflow-portability:", maxsplit=1

@@ -307,6 +307,51 @@ paths:
                 $ref: "#/components/schemas/UsageRequestStatus"
         "404":
           $ref: "#/components/responses/Error"
+  /me/usage-requests:
+    get:
+      operationId: listMyUsageRequests
+      summary: List the current user's model usage in the active personal or organization context
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+        - name: cursor
+          in: query
+          required: false
+          description: Opaque cursor returned by the previous page.
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 256
+      responses:
+        "200":
+          description: User-facing usage history without routing or credential identifiers
+          headers:
+            Cache-Control:
+              required: true
+              schema:
+                type: string
+                const: no-store
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [items, next_cursor]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/UserUsageRecord"
+                  next_cursor:
+                    type: [string, "null"]
+        "403":
+          $ref: "#/components/responses/Error"
   /chat/completions:
     post:
       operationId: createChatCompletion
@@ -315,6 +360,7 @@ paths:
         - name: Idempotency-Key
           in: header
           required: true
+          description: Unique key for each logical model invocation. Network retries reuse the same key and request facts; a new invocation requires a new key.
           schema:
             type: string
             minLength: 16
@@ -647,6 +693,44 @@ components:
           minimum: 0
         started_at:
           type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    UserUsageRecord:
+      type: object
+      additionalProperties: false
+      required: [usage_request_id, model, display_status, actual_microcredits, input_tokens, output_tokens, cached_input_tokens, started_at, completed_at, updated_at]
+      properties:
+        usage_request_id:
+          type: string
+          format: uuid
+        model:
+          type: string
+        display_status:
+          type: string
+          enum: [IN_PROGRESS, SETTLED, SETTLEMENT_PENDING, RELEASED, MANUAL_REVIEW]
+        actual_microcredits:
+          type: [string, "null"]
+          pattern: '^(0|[1-9][0-9]*)$'
+          description: Exact decimal microcredits; null while the amount is unknown.
+        input_tokens:
+          type: [integer, "null"]
+          format: int64
+          minimum: 0
+        output_tokens:
+          type: [integer, "null"]
+          format: int64
+          minimum: 0
+        cached_input_tokens:
+          type: [integer, "null"]
+          format: int64
+          minimum: 0
+        started_at:
+          type: string
+          format: date-time
+        completed_at:
+          type: [string, "null"]
           format: date-time
         updated_at:
           type: string

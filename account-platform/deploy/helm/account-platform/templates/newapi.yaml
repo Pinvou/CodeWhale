@@ -1,0 +1,94 @@
+{{- if .Values.newApi.enabled }}
+{{- $root := . -}}
+{{- $fullname := include "pinvou.fullname" . -}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $fullname }}-new-api
+  labels:
+    {{- include "pinvou.labels" . | nindent 4 }}
+    app.kubernetes.io/component: new-api
+spec:
+  replicas: {{ .Values.newApi.replicas }}
+  selector:
+    matchLabels:
+      {{- include "pinvou.selector" . | nindent 6 }}
+      app.kubernetes.io/component: new-api
+  template:
+    metadata:
+      labels:
+        {{- include "pinvou.selector" . | nindent 8 }}
+        app.kubernetes.io/component: new-api
+        pinvou.io/newapi-data-plane: "true"
+        {{- with .Values.global.podLabels }}{{ toYaml . | nindent 8 }}{{- end }}
+    spec:
+      serviceAccountName: {{ $fullname }}
+      automountServiceAccountToken: false
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets: {{ toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext: { runAsNonRoot: true, runAsUser: 65532, runAsGroup: 65532, fsGroup: 65532, seccompProfile: { type: RuntimeDefault } }
+      containers:
+        - name: new-api
+          image: "{{ .Values.images.newApi.repository }}@{{ .Values.images.newApi.digest }}"
+          imagePullPolicy: {{ .Values.images.newApi.pullPolicy }}
+          ports: [{ name: http, containerPort: 8080 }]
+          securityContext: { allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: { drop: ["ALL"] } }
+          resources: {{ toYaml .Values.resources | nindent 12 }}
+          env:
+            - { name: PORT, value: "8080" }
+            - { name: TZ, value: "Asia/Shanghai" }
+            - { name: GIN_MODE, value: "release" }
+            - { name: NODE_TYPE, value: {{ .Values.newApi.nodeType | quote }} }
+            - { name: TRUSTED_PROXIES, value: {{ .Values.newApi.trustedProxies | quote }} }
+            - { name: REDIS_CONN_STRING, value: {{ printf "redis://%s-redis:6379/1" $fullname | quote }} }
+            - { name: BATCH_UPDATE_ENABLED, value: "true" }
+            - { name: ERROR_LOG_ENABLED, value: "true" }
+            - { name: STREAMING_TIMEOUT, value: "300" }
+            - name: SQL_DSN
+              valueFrom: { secretKeyRef: { name: {{ .Values.global.runtimeSecret }}, key: newapi-database-url } }
+            - name: SESSION_SECRET
+              valueFrom: { secretKeyRef: { name: {{ .Values.global.runtimeSecret }}, key: newapi-session-secret } }
+            - name: CRYPTO_SECRET
+              valueFrom: { secretKeyRef: { name: {{ .Values.global.runtimeSecret }}, key: newapi-crypto-secret } }
+          readinessProbe: { httpGet: { path: /api/status, port: http }, initialDelaySeconds: 5, periodSeconds: 10, timeoutSeconds: 3 }
+          livenessProbe: { httpGet: { path: /api/status, port: http }, initialDelaySeconds: 20, periodSeconds: 20, timeoutSeconds: 3 }
+          volumeMounts:
+            - { name: data, mountPath: /data }
+            - { name: tmp, mountPath: /tmp }
+        - name: newapi-tls
+          image: "{{ .Values.images.newApiTls.repository }}:{{ .Values.images.newApiTls.tag }}"
+          imagePullPolicy: {{ .Values.images.newApiTls.pullPolicy }}
+          ports: [{ name: https, containerPort: 8443 }]
+          securityContext: { allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: { drop: ["ALL"] } }
+          resources: {{ toYaml .Values.resources | nindent 12 }}
+          env:
+            - { name: NEWAPI_TLS_CERT_FILE, value: /etc/newapi-tls/tls.crt }
+            - { name: NEWAPI_TLS_KEY_FILE, value: /etc/newapi-tls/tls.key }
+          readinessProbe: { httpGet: { scheme: HTTPS, path: /health/ready, port: https }, periodSeconds: 10, timeoutSeconds: 3 }
+          livenessProbe: { httpGet: { scheme: HTTPS, path: /health/live, port: https }, periodSeconds: 20, timeoutSeconds: 3 }
+          volumeMounts:
+            - { name: newapi-server-tls, mountPath: /etc/newapi-tls, readOnly: true }
+      volumes:
+        - { name: data, emptyDir: { sizeLimit: 256Mi } }
+        - { name: tmp, emptyDir: { sizeLimit: 16Mi } }
+        - name: newapi-server-tls
+          secret:
+            secretName: {{ .Values.newApi.tls.serverSecretName }}
+            defaultMode: 288
+            items: [{ key: tls.crt, path: tls.crt }, { key: tls.key, path: tls.key }]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Values.newApi.serviceName }}
+  labels:
+    {{- include "pinvou.labels" . | nindent 4 }}
+    app.kubernetes.io/component: new-api
+spec:
+  selector:
+    {{- include "pinvou.selector" . | nindent 4 }}
+    app.kubernetes.io/component: new-api
+  ports: [{ name: https, port: 8443, targetPort: https }]
+{{- end }}

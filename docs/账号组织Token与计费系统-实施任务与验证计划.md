@@ -12,7 +12,7 @@
 按架构文档完成一个独立于当前生产 New API 的新系统，形成以下真实业务闭环：
 
 1. 用户通过 Keycloak 注册和登录，自动建立个人上下文和个人钱包。
-2. 用户创建或加入多个组织，在单个会话内激活个人或一个组织上下文。
+2. 平台管理员创建组织并指定初始 Owner；用户可加入多个组织，在单个会话内激活个人或一个组织上下文。
 3. 组织支持部门、内部子组织、邀请、成员、角色、撤权和审计。
 4. 个人、组织和组织单元可持有不同 Token 账号，并按显式共享范围授权。
 5. Token Gateway 在调用新 New API 前进行授权和积分预占，调用后按实际用量结算。
@@ -241,14 +241,14 @@ flowchart TD
 交付：
 
 - Realm、桌面公开客户端、Web BFF 机密客户端和服务客户端配置。
-- Authorization Code + PKCE、Refresh Token Rotation、MFA、精确 Redirect URI。
+- Web Authorization Code + PKCE、桌面 Direct Access Grant、Refresh Token Rotation、MFA 和精确 Redirect URI。
 - 开发 Realm 可重复导入；生产配置只含引用，不含密钥。
 
 测试：
 
 - 注册、登录、刷新、退出、刷新令牌重放和会话撤销。
 - 错误 issuer、audience、签名、过期时间和 redirect URI 均拒绝。
-- 桌面端不使用密码模式和 Implicit Flow。
+- 桌面公开客户端允许 Direct Access Grant，但禁用 Implicit Flow；密码不持久化、不记录日志。
 
 #### T21 用户开户与个人上下文
 
@@ -522,11 +522,11 @@ flowchart TD
 
 ### 任务组 6：品悟桌面端和 Token Web Portal
 
-#### T60 桌面端 OIDC 与兼容开关
+#### T60 桌面端身份登录与兼容开关
 
 交付：
 
-- `account-platform` feature、Tauri/Web Bridge、OIDC 系统浏览器 + PKCE、系统凭据存储。
+- `account-platform` feature、Tauri/Web Bridge、应用内账号密码登录、系统凭据存储。
 - `PINVOU_ACCOUNT_PLATFORM_ENABLED` 或等价服务端能力开关，默认不影响旧 `llmapi_hub`。
 - 新账号模式启用时不再以 BIOS SN 或 New API 用户名密码作为业务身份。
 
@@ -534,14 +534,14 @@ flowchart TD
 
 - 开关关闭时现有账号和模型路径行为不变。
 - 开关开启时登录、刷新、退出、令牌过期恢复正常。
-- Refresh Token 不进入前端 JS、日志或普通设置文件。
+- 密码不持久化、不进入日志；Refresh Token 不进入前端 JS、日志或普通设置文件。
 - Windows、macOS、Linux 对不支持状态给出明确错误。
 
 #### T61 账号和组织 UI
 
 交付：
 
-- 个人资料、组织列表、组织切换、创建组织、组织树、成员、邀请和角色页面。
+- 个人资料、组织列表、组织切换、组织树、成员、邀请和角色页面；组织创建仅在 `platform-admin` 后台提供，并指定初始 Owner，普通用户无自建入口。
 - 切换上下文时清空旧上下文余额、Token 和请求缓存。
 - 中文、英文、日文文案全部进入 `shared/i18n.js`。
 
@@ -682,7 +682,7 @@ flowchart TD
 核心旅程：
 
 1. Alice 注册，个人钱包建立。
-2. Alice 创建 ACME 和组织结构，邀请 Bob/Carol。
+2. 平台管理员创建 ACME 并指定 Alice 为初始 Owner；Alice 管理组织结构，邀请 Bob/Carol。
 3. Alice 为个人钱包模拟充值并使用个人 Token。
 4. Alice 为组织钱包模拟充值并设置组织公共 Token。
 5. Bob 激活 ACME，使用研发 Token，费用从组织钱包扣除。
@@ -907,7 +907,7 @@ cargo test --manifest-path pinvou3-app/src-tauri/Cargo.toml --lib -- --test-thre
 
 自动化通过后至少执行：
 
-1. 用桌面端真实系统浏览器完成 Keycloak 登录。
+1. 用桌面端应用内账号密码表单完成 Keycloak 登录，并确认密码不被保存。
 2. 在两个设备/两个会话激活不同组织，确认互不覆盖。
 3. 手机扫描三个模拟渠道二维码并付款。
 4. 付款前关闭品悟，确认后台仍入账，重开后余额正确。

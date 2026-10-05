@@ -9,7 +9,9 @@
 
 ## 决策
 
-Keycloak 负责注册、登录、密码、MFA、会话、OIDC 和令牌签发。Account Service 以 `issuer + subject` 映射业务用户，并拥有组织、角色和业务状态。客户端使用 Authorization Code + PKCE；禁用 Implicit 与密码模式。
+Keycloak 负责注册、登录、密码、MFA、会话、OIDC 和令牌签发。Account Service 以 `issuer + subject` 映射业务用户，并拥有组织、角色和业务状态。Web 客户端使用 Authorization Code + PKCE；桌面客户端使用仅对公开桌面 client 开启的 Direct Access Grant，在应用内完成基础账号密码登录。所有客户端禁用 Implicit。
+
+桌面密码只在一次 Tauri IPC 和 HTTPS Token 请求中存在，不持久化、不写日志；仅 Refresh Token 进入系统凭据存储。Direct Access Grant 不承担注册、找回密码、第三方身份或复杂 MFA，这些能力必须走独立的受控流程。
 
 JWT 只携带稳定身份、会话和粗粒度上下文，不携带余额、组织树或完整资源授权。高风险操作实时回源 Account Service。
 
@@ -21,4 +23,4 @@ JWT 只携带稳定身份、会话和粗粒度上下文，不携带余额、组�
 
 ## 影响与回滚
 
-Keycloak 不可用会阻止新登录，但已签发短令牌可按服务策略继续。回滚只可切换 IdP 配置，不能回退为设备身份。
+Keycloak 不可用会阻止新登录，但已签发短令牌可按服务策略继续。若撤销应用内密码登录，应先恢复桌面 Authorization Code + PKCE 入口，再关闭该 client 的 Direct Access Grant；不能回退为设备身份。

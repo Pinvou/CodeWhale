@@ -73,3 +73,30 @@ func TestRecentRechargeOrderIsScopedToRequesterAndWallet(t *testing.T) {
 		t.Fatalf("unexpected payload %s", payload)
 	}
 }
+
+func TestHistoricalPriceLookupUsesImmutableIdentifier(t *testing.T) {
+	priceID := uuid.New()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/internal/v1/pricing/"+priceID.String() || r.URL.RawQuery != "" {
+			t.Fatalf("unexpected historical price lookup %q", r.URL.String())
+		}
+		if r.Header.Get("Authorization") != "Bearer service-token" {
+			t.Fatal("missing service authentication")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"price_version_id":"` + priceID.String() + `","model":"example-model","input_per_million":1,"output_per_million":2,"cached_input_per_million":0}`))
+	}))
+	defer server.Close()
+
+	client, err := NewHTTPBillingClient(server.URL, "service-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	price, err := client.PriceByID(context.Background(), priceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if price.ID != priceID || price.Model != "example-model" {
+		t.Fatalf("unexpected historical price: %#v", price)
+	}
+}

@@ -6,12 +6,14 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/api"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
 	"github.com/coreos/go-oidc/v3/oidc"
+	"github.com/gin-gonic/gin"
 )
 
 type Principal struct {
@@ -20,6 +22,8 @@ type Principal struct {
 	SessionID   string
 	Email       string
 	DisplayName string
+	Username    string
+	RealmRoles  []string
 }
 
 type VerifyFunc func(context.Context, string) (Principal, error)
@@ -73,6 +77,9 @@ func NewOIDCVerifyFunc(ctx context.Context, issuer, audience, environment, jwksU
 			Email         string `json:"email"`
 			Name          string `json:"name"`
 			PreferredName string `json:"preferred_username"`
+			RealmAccess   struct {
+				Roles []string `json:"roles"`
+			} `json:"realm_access"`
 		}
 		if err := token.Claims(&claims); err != nil {
 			return Principal{}, fmt.Errorf("decode access token claims: %w", err)
@@ -99,8 +106,26 @@ func NewOIDCVerifyFunc(ctx context.Context, issuer, audience, environment, jwksU
 			SessionID:   sessionID,
 			Email:       claims.Email,
 			DisplayName: displayName,
+			Username:    claims.PreferredName,
+			RealmRoles:  slices.Clone(claims.RealmAccess.Roles),
 		}, nil
 	}, nil
+}
+
+func HasRealmRole(principal Principal, role string) bool {
+	return slices.Contains(principal.RealmRoles, strings.TrimSpace(role))
+}
+
+func RequireRealmRoleGin(role string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		principal, ok := FromContext(c.Request.Context())
+		if !ok || !HasRealmRole(principal, role) {
+			api.WriteError(c.Writer, http.StatusForbidden, "ADMIN_REQUIRED", "platform administrator access is required", httpserver.RequestID(c.Request.Context()))
+			c.Abort()
+			return
+		}
+		c.Next()
+	}
 }
 
 func Middleware(verify VerifyFunc, next http.Handler) http.Handler {
@@ -118,4 +143,24 @@ func Middleware(verify VerifyFunc, next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), principalContextKey{}, principal)))
 	})
+}
+
+func GinMiddleware(verify VerifyFunc) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		header := c.Request.Header.Get("Authorization")
+		parts := strings.Fields(header)
+		if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") || strings.TrimSpace(parts[1]) == "" {
+			api.WriteError(c.Writer, http.StatusUnauthorized, "AUTH_REQUIRED", "a valid bearer token is required", httpserver.RequestID(c.Request.Context()))
+			c.Abort()
+			return
+		}
+		principal, err := verify(c.Request.Context(), parts[1])
+		if err != nil {
+			api.WriteError(c.Writer, http.StatusUnauthorized, "AUTH_REQUIRED", "the bearer token is invalid", httpserver.RequestID(c.Request.Context()))
+			c.Abort()
+			return
+		}
+		c.Request = c.Request.WithContext(context.WithValue(c.Request.Context(), principalContextKey{}, principal))
+		c.Next()
+	}
 }

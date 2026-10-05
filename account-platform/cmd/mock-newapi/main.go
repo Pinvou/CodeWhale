@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
+	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 )
 
@@ -22,23 +23,24 @@ func main() {
 	if len(apiKey) < 16 {
 		log.Fatal("MOCK_NEWAPI_KEY must contain at least 16 characters")
 	}
-	mux := http.NewServeMux()
-	mux.Handle("GET /v1/models", authenticate(apiKey, http.HandlerFunc(listModels)))
-	mux.Handle("POST /v1/chat/completions", authenticate(apiKey, http.HandlerFunc(chatCompletions)))
-	if err := httpserver.RunWithApplication("mock-newapi", mux, func(context.Context) error { return nil }); err != nil {
+	router := httpserver.NewRouter()
+	router.Use(authenticate(apiKey))
+	router.GET("/v1/models", httpserver.AdaptFunc(listModels))
+	router.POST("/v1/chat/completions", httpserver.AdaptFunc(chatCompletions))
+	if err := httpserver.RunWithApplication("mock-newapi", router, func(context.Context) error { return nil }); err != nil {
 		log.Fatal(err)
 	}
 }
 
-func authenticate(apiKey string, next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		provided := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+func authenticate(apiKey string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		provided := strings.TrimPrefix(c.Request.Header.Get("Authorization"), "Bearer ")
 		if len(provided) != len(apiKey) || subtle.ConstantTimeCompare([]byte(provided), []byte(apiKey)) != 1 {
-			http.Error(w, `{"error":{"message":"unauthorized"}}`, http.StatusUnauthorized)
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": gin.H{"message": "unauthorized"}})
 			return
 		}
-		next.ServeHTTP(w, r)
-	})
+		c.Next()
+	}
 }
 
 func listModels(w http.ResponseWriter, _ *http.Request) {

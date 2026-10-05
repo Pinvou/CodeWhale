@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/events"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
@@ -36,13 +37,13 @@ func (metrics *relayMetrics) record(stats events.OutboxStats) {
 }
 
 func (metrics *relayMetrics) server(address string) *http.Server {
-	mux := http.NewServeMux()
-	mux.Handle("GET /metrics", promhttp.HandlerFor(metrics.registry, promhttp.HandlerOpts{EnableOpenMetrics: true}))
-	mux.HandleFunc("GET /health/live", func(w http.ResponseWriter, _ *http.Request) {
+	router := httpserver.NewRouter()
+	router.GET("/metrics", httpserver.Adapt(promhttp.HandlerFor(metrics.registry, promhttp.HandlerOpts{EnableOpenMetrics: true})))
+	router.GET("/health/live", httpserver.AdaptFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		w.WriteHeader(http.StatusNoContent)
-	})
-	return &http.Server{Addr: address, Handler: mux, ReadHeaderTimeout: 3 * time.Second, IdleTimeout: 30 * time.Second}
+	}))
+	return &http.Server{Addr: address, Handler: router, ReadHeaderTimeout: 3 * time.Second, IdleTimeout: 30 * time.Second}
 }
 
 func shutdownServer(server *http.Server) {

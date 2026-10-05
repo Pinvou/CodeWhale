@@ -6,6 +6,7 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -34,6 +35,112 @@ func settlementFixture(t *testing.T) (*PostgresRepository, UsageRequest) {
 		t.Fatal(err)
 	}
 	return repo, u
+}
+
+func TestPostgresReleaseAndAttemptTerminalAreAtomicAndIdempotent(t *testing.T) {
+	ctx := context.Background()
+	repo, usage := settlementFixture(t)
+	if err := repo.RecordUpstreamRequest(ctx, usage.ID, "fixture-release-request"); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.MarkReview(ctx, usage.ID, "fixture_uncertain", map[string]any{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.pool.Exec(ctx, `CREATE FUNCTION fixture_fail_attempt_update() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'fixture attempt update failure'; END $$; CREATE TRIGGER fixture_fail_attempt_update BEFORE UPDATE ON usage_attempts FOR EACH ROW EXECUTE FUNCTION fixture_fail_attempt_update()`); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.MarkReleased(ctx, usage.ID, "fixture-release"); err == nil {
+		t.Fatal("attempt failure did not fail release")
+	}
+	stored, err := repo.GetUsage(ctx, usage.ID)
+	if err != nil || stored.Status != "REVIEW" {
+		t.Fatal("attempt failure committed the usage terminal")
+	}
+	var attemptStatus string
+	if err := repo.pool.QueryRow(ctx, `SELECT status FROM usage_attempts WHERE usage_request_id=$1`, usage.ID).Scan(&attemptStatus); err != nil || attemptStatus != "STARTED" {
+		t.Fatal("attempt failure did not roll back both records")
+	}
+	if _, err := repo.pool.Exec(ctx, `DROP TRIGGER fixture_fail_attempt_update ON usage_attempts; DROP FUNCTION fixture_fail_attempt_update()`); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.MarkReleased(ctx, usage.ID, "fixture-release"); err != nil {
+		t.Fatal(err)
+	}
+	var ended time.Time
+	var attemptReason string
+	if err := repo.pool.QueryRow(ctx, `SELECT status,error_class,ended_at FROM usage_attempts WHERE usage_request_id=$1`, usage.ID).Scan(&attemptStatus, &attemptReason, &ended); err != nil || attemptStatus != "FAILED" || attemptReason != "fixture-release" {
+		t.Fatal("release retry did not complete the attempt terminal")
+	}
+	if err := repo.MarkReleased(ctx, usage.ID, "a different repeated reason"); err != nil {
+		t.Fatal(err)
+	}
+	var terminalAt, attemptEnded time.Time
+	var usageReason string
+	if err := repo.pool.QueryRow(ctx, `SELECT u.error_class,u.terminal_at,a.ended_at FROM usage_requests u JOIN usage_attempts a ON a.usage_request_id=u.id WHERE u.id=$1`, usage.ID).Scan(&usageReason, &terminalAt, &attemptEnded); err != nil || usageReason != "fixture-release" || !terminalAt.Equal(ended) || !attemptEnded.Equal(ended) {
+		t.Fatal("repeated release changed terminal metadata")
+	}
+	start := make(chan struct{})
+	failures := make(chan error, 8)
+	var workers sync.WaitGroup
+	for range 8 {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			<-start
+			failures <- repo.MarkReleased(ctx, usage.ID, "concurrent repeated reason")
+		}()
+	}
+	close(start)
+	workers.Wait()
+	close(failures)
+	for err := range failures {
+		if err != nil {
+			t.Fatal("concurrent release replay did not remain idempotent")
+		}
+	}
+	if err := repo.pool.QueryRow(ctx, `SELECT u.error_class,u.terminal_at,a.ended_at FROM usage_requests u JOIN usage_attempts a ON a.usage_request_id=u.id WHERE u.id=$1`, usage.ID).Scan(&usageReason, &terminalAt, &attemptEnded); err != nil || usageReason != "fixture-release" || !terminalAt.Equal(ended) || !attemptEnded.Equal(ended) {
+		t.Fatal("concurrent release changed terminal metadata")
+	}
+}
+
+func TestPostgresCommitRollsBackUsageAttemptAndEventOnAttemptUpdateFailure(t *testing.T) {
+	ctx := context.Background()
+	repo, usage := settlementFixture(t)
+	if err := repo.RecordUpstreamRequest(ctx, usage.ID, "fixture-commit-request"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.pool.Exec(ctx, `CREATE FUNCTION fixture_fail_attempt_update() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'fixture attempt update failure'; END $$; CREATE TRIGGER fixture_fail_attempt_update BEFORE UPDATE ON usage_attempts FOR EACH ROW EXECUTE FUNCTION fixture_fail_attempt_update()`); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.MarkCommitted(ctx, usage.ID, 5, map[string]any{"usage": Usage{InputTokens: 5}}); err == nil {
+		t.Fatal("attempt failure did not fail commit")
+	}
+	stored, err := repo.GetUsage(ctx, usage.ID)
+	if err != nil || stored.Status != "UPSTREAM_ACTIVE" || stored.ActualMicrocredits != nil {
+		t.Fatal("attempt failure committed usage settlement")
+	}
+	var status string
+	var events int
+	if err := repo.pool.QueryRow(ctx, `SELECT status FROM usage_attempts WHERE usage_request_id=$1`, usage.ID).Scan(&status); err != nil || status != "STARTED" {
+		t.Fatal("attempt failure did not preserve its prior state")
+	}
+	if err := repo.pool.QueryRow(ctx, `SELECT count(*) FROM outbox_events WHERE aggregate_id=$1 AND event_type='token.usage.settled.v1'`, usage.ID).Scan(&events); err != nil || events != 0 {
+		t.Fatal("attempt failure emitted a settlement event")
+	}
+	if _, err := repo.pool.Exec(ctx, `DROP TRIGGER fixture_fail_attempt_update ON usage_attempts; DROP FUNCTION fixture_fail_attempt_update()`); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if err := repo.MarkCommitted(ctx, usage.ID, 5, map[string]any{"usage": Usage{InputTokens: 5}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := repo.pool.QueryRow(ctx, `SELECT status FROM usage_attempts WHERE usage_request_id=$1`, usage.ID).Scan(&status); err != nil || status != "SUCCEEDED" {
+		t.Fatal("commit retry did not complete attempt terminal")
+	}
+	if err := repo.pool.QueryRow(ctx, `SELECT count(*) FROM outbox_events WHERE aggregate_id=$1 AND event_type='token.usage.settled.v1'`, usage.ID).Scan(&events); err != nil || events != 1 {
+		t.Fatal("commit retry duplicated its settlement event")
+	}
 }
 
 func TestPostgresSettlementOutboxAtomicAndConcurrentIdempotent(t *testing.T) {

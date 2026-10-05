@@ -2,6 +2,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
 use async_trait::async_trait;
+use tauri::{AppHandle, Manager};
 
 use crate::features::assistant::runtime_model::{
     ModelCredentialMode, PreparedRuntimeModel, RuntimeModelCredential, RuntimeModelProvider,
@@ -16,8 +17,44 @@ const PREPARE_TIMEOUT: Duration = Duration::from_secs(25);
 ///
 /// 公共 EnginePool 只认识 RuntimeModelProvider；账户开通、凭据读取和内置模型路由
 /// 都封装在这里，避免聊天、定时任务和 bridge 各自维护一套专用分支。
-#[derive(Debug, Default)]
-pub(crate) struct LlmApiRuntimeModelProvider;
+#[derive(Clone, Default)]
+pub(crate) struct LlmApiRuntimeModelProvider {
+    app: Option<AppHandle>,
+}
+
+impl LlmApiRuntimeModelProvider {
+    pub(crate) fn new(app: AppHandle) -> Self {
+        Self { app: Some(app) }
+    }
+
+    async fn prepare_account_model(&self, mut model: SavedModel) -> Result<PreparedRuntimeModel> {
+        let result: Result<PreparedRuntimeModel> = async {
+            let account = self
+                .app
+                .as_ref()
+                .context("account_platform_service_unavailable")?
+                .try_state::<crate::features::account_platform::AccountPlatformState>()
+                .context("account_platform_service_unavailable")?;
+            let authorization: crate::features::account_platform::ChatRuntimeAuthorization =
+                account
+                    .chat_runtime_authorization()
+                    .await
+                    .map_err(|error| anyhow!(error))?;
+            model.base_url = authorization.base_url;
+            Ok(PreparedRuntimeModel {
+                model,
+                credential: Some(RuntimeModelCredential::account_platform_access_token(
+                    authorization.access_token,
+                )?),
+                revision: Some(authorization.revision),
+            })
+        }
+        .await;
+        // This source boundary distinguishes account-runtime failures from
+        // identical static codes produced by ordinary providers/connectors.
+        result.context("account_platform")
+    }
+}
 
 fn prepare_builtin_model() -> Result<PreparedRuntimeModel> {
     crate::features::llmapi_hub::provisioning::ensure_binding_for_current_user()
@@ -60,6 +97,10 @@ impl RuntimeModelProvider for LlmApiRuntimeModelProvider {
     async fn prepare(&self, request: RuntimeModelRequest) -> Result<PreparedRuntimeModel> {
         if !request.model.is_builtin_llmapi() {
             return Ok(PreparedRuntimeModel::unchanged(request.model));
+        }
+
+        if crate::features::account_platform::account_platform_enabled() {
+            return self.prepare_account_model(request.model).await;
         }
 
         let started_at = Instant::now();
@@ -120,7 +161,7 @@ mod tests {
 
     #[test]
     fn builtin_model_uses_backend_managed_credentials() {
-        let provider = LlmApiRuntimeModelProvider;
+        let provider = LlmApiRuntimeModelProvider::default();
         assert_eq!(
             provider.credential_mode(&SavedModel::builtin_llmapi(), true),
             ModelCredentialMode::BackendManaged
@@ -133,7 +174,7 @@ mod tests {
 
     #[tokio::test]
     async fn ordinary_model_does_not_touch_private_provisioning() {
-        let provider = LlmApiRuntimeModelProvider;
+        let provider = LlmApiRuntimeModelProvider::default();
         let prepared = provider
             .prepare(RuntimeModelRequest {
                 session_id: "session-1".to_string(),
@@ -146,5 +187,18 @@ mod tests {
         assert_eq!(prepared.model.id, "ordinary");
         assert!(prepared.credential.is_none());
         assert!(prepared.revision.is_none());
+    }
+
+    #[tokio::test]
+    async fn account_runtime_error_keeps_source_and_static_code_for_chat_localization() {
+        let error = LlmApiRuntimeModelProvider::default()
+            .prepare_account_model(SavedModel::builtin_llmapi())
+            .await
+            .err()
+            .expect("an absent app runtime cannot prepare account credentials");
+        assert_eq!(
+            format!("{error:#}"),
+            "account_platform: account_platform_service_unavailable"
+        );
     }
 }

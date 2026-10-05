@@ -111,6 +111,7 @@ const LazyMonitorView = lazy(() => VIEW_LOADERS.monitor().then(m => ({ default: 
 const LazySearchView = lazy(() => VIEW_LOADERS.search().then(m => ({ default: m.SearchView })));
 const LazyTeamRelayView = lazy(() => VIEW_LOADERS.teamRelay().then(m => ({ default: m.TeamRelayView })));
 const LazyAccountPlatformView = lazy(() => VIEW_LOADERS.accountPlatform().then(m => ({ default: m.AccountPlatformDesktopView })));
+const LazyAccountPlatformSidebarEntry = lazy(() => VIEW_LOADERS.accountPlatform().then(m => ({ default: m.AccountPlatformSidebarEntry })));
 const LazySearchOverlay = lazy(() => VIEW_LOADERS.searchOverlay().then(m => ({ default: m.SearchOverlay })));
 const LazyMoveToProjectDialog = lazy(() => VIEW_LOADERS.moveToProjectDialog().then(m => ({ default: m.MoveToProjectDialog })));
 const LazyRebindFolderDialog = lazy(() => VIEW_LOADERS.rebindFolderDialog().then(m => ({ default: m.RebindFolderDialog })));
@@ -502,7 +503,7 @@ const NAV_PREFETCH = {
       const systemDark = useSystemDarkMode();
       const [colorScheme, setColorScheme] = useState('system');
       const activeTheme = resolveTheme(colorScheme, systemDark);
-      const [accountPopoverOpen, setAccountPopoverOpen] = useState(false);
+      const [llmAccountPopoverOpen, setLlmAccountPopoverOpen] = useState(false);
       const [llmApiLoading, setLlmApiLoading] = useState(false);
       const [llmApiErrorCode, setLlmApiErrorCode] = useState(null);
       const [teamRelayEnabled, setTeamRelayEnabled] = useState(() => loadTeamRelayAccess());
@@ -1551,12 +1552,12 @@ const NAV_PREFETCH = {
       }, []);
 
       useEffect(() => {
-        if (accountPopoverOpen) refreshLlmApiStatus();
-      }, [accountPopoverOpen, refreshLlmApiStatus]);
+        if (llmAccountPopoverOpen) refreshLlmApiStatus();
+      }, [llmAccountPopoverOpen, refreshLlmApiStatus]);
 
       useEffect(() => {
-        if (accountPopoverOpen && !llmAccountVisible) setAccountPopoverOpen(false);
-      }, [accountPopoverOpen, llmAccountVisible]);
+        if (llmAccountPopoverOpen && !llmAccountVisible) setLlmAccountPopoverOpen(false);
+      }, [llmAccountPopoverOpen, llmAccountVisible]);
 
       const isWebAccessConnected = !!(bs && bs.webAccess && bs.webAccess.web_client_connected);
       function handleOpenWebAccess() {
@@ -4354,20 +4355,18 @@ const NAV_PREFETCH = {
 
             {/* Footer Profile */}
             <div className={`p-3 mt-auto ${isSidebarOpen ? 'space-y-2' : 'flex flex-col items-center gap-3 pb-6'}`}>
-              {accountPlatformEnabled && (
-                <div data-testid="account-platform-button">
-                  <NavItem nativeButton icon={<User size={18} />} label={t.uiAccountPlatform.title}
-                    active={currentView === 'accountPlatform'} theme={activeTheme} isSidebarOpen={isSidebarOpen}
-                    onClick={() => { setAccountPopoverOpen(false); navigateFromScheduledRun('accountPlatform'); }}
-                    onPointerEnter={() => prefetchView('accountPlatform')} onFocus={() => prefetchView('accountPlatform')} />
-                </div>
-              )}
+              {accountPlatformEnabled && <ViewErrorBoundary t={t}><Suspense fallback={null}>
+                <LazyAccountPlatformSidebarEntry transport={bridge.accountPlatform} copy={t.uiAccountPlatform}
+                  language={language} theme={activeTheme} collapsed={!isSidebarOpen}
+                  onOpen={() => setLlmAccountPopoverOpen(false)}
+                  onOpenCenter={() => navigateFromScheduledRun('accountPlatform')} />
+              </Suspense></ViewErrorBoundary>}
               {llmAccountVisible && (
               <div className={`relative ${isSidebarOpen ? 'w-full' : ''}`}>
                 <button
                   type="button"
                   data-testid="llmapi-account-button"
-                  onClick={() => setAccountPopoverOpen(v => !v)}
+                  onClick={() => setLlmAccountPopoverOpen(v => !v)}
                   title={llmAccountUsername || llmAccountName}
                   className={`flex items-center rounded-xl transition-colors ${isSidebarOpen ? 'w-full px-2 py-1.5 gap-3 text-left' : 'justify-center w-10 h-10'} ${activeTheme === 'dark' ? 'hover:bg-[#333537] active:bg-[#3A3C3E]' : 'hover:bg-[#E1E5EA] active:bg-[#D8DCE1]'}`}
                 >
@@ -4383,14 +4382,14 @@ const NAV_PREFETCH = {
                   {isSidebarOpen && <ChevronRight size={16} className="shrink-0 opacity-60" />}
                 </button>
                 <AccountPopover
-                  open={accountPopoverOpen}
+                  open={llmAccountPopoverOpen}
                   theme={activeTheme}
                   t={t}
                   llmApiStatus={bs && bs.llmApiStatus}
                   loading={llmApiLoading}
                   accountErrorCode={llmApiErrorCode}
                   collapsed={!isSidebarOpen}
-                  onClose={() => setAccountPopoverOpen(false)}
+                  onClose={() => setLlmAccountPopoverOpen(false)}
                   onRefresh={refreshLlmApiStatus}
                   onLogin={loginLlmApiUser}
                 />

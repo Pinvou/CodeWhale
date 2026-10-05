@@ -1,97 +1,391 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "type": "object",
-  "required": ["global", "images", "oidc", "public", "observability", "security", "tokenGateway", "external", "ingress", "networkPolicy"],
+  "required": [
+    "global",
+    "images",
+    "newApi",
+    "oidc",
+    "public",
+    "observability",
+    "security",
+    "tokenGateway",
+    "external",
+    "ingress",
+    "networkPolicy"
+  ],
   "properties": {
     "global": {
       "type": "object",
-      "required": ["environment", "runtimeSecret"],
+      "required": [
+        "environment",
+        "runtimeSecret"
+      ],
       "properties": {
-        "environment": { "enum": ["development", "test", "staging", "production-new"] },
-        "runtimeSecret": { "type": "string", "minLength": 1 }
+        "environment": {
+          "enum": [
+            "development",
+            "test",
+            "staging",
+            "production-new"
+          ]
+        },
+        "runtimeSecret": {
+          "type": "string",
+          "minLength": 1
+        }
       }
     },
     "images": {
       "type": "object",
-      "required": ["accountService", "billingService", "tokenGateway", "tokenPortal", "eventRelay", "migrate", "keycloak", "redis", "nats"],
+      "required": [
+        "accountService",
+        "billingService",
+        "tokenGateway",
+        "tokenPortal",
+        "eventRelay",
+        "migrate",
+        "newApi",
+        "keycloak",
+        "redis",
+        "nats",
+        "newApiTls"
+      ],
       "additionalProperties": false,
       "properties": {
-        "accountService": { "$ref": "#/definitions/image" },
-        "billingService": { "$ref": "#/definitions/image" },
-        "tokenGateway": { "$ref": "#/definitions/image" },
-        "tokenPortal": { "$ref": "#/definitions/image" },
-        "eventRelay": { "$ref": "#/definitions/image" },
-        "migrate": { "$ref": "#/definitions/image" },
-        "keycloak": { "$ref": "#/definitions/image" },
-        "redis": { "$ref": "#/definitions/image" },
-        "nats": { "$ref": "#/definitions/image" }
+        "accountService": {
+          "$ref": "#/definitions/image"
+        },
+        "billingService": {
+          "$ref": "#/definitions/image"
+        },
+        "tokenGateway": {
+          "$ref": "#/definitions/image"
+        },
+        "tokenPortal": {
+          "$ref": "#/definitions/image"
+        },
+        "eventRelay": {
+          "$ref": "#/definitions/image"
+        },
+        "migrate": {
+          "$ref": "#/definitions/image"
+        },
+        "newApi": {
+          "$ref": "#/definitions/imageWithDigest"
+        },
+        "keycloak": {
+          "$ref": "#/definitions/image"
+        },
+        "redis": {
+          "$ref": "#/definitions/image"
+        },
+        "nats": {
+          "$ref": "#/definitions/image"
+        },
+        "newApiTls": {
+          "$ref": "#/definitions/image"
+        }
+      }
+    },
+    "newApi": {
+      "type": "object",
+      "required": [
+        "enabled",
+        "serviceName",
+        "replicas",
+        "nodeType",
+        "trustedProxies",
+        "tls"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "serviceName": {
+          "type": "string",
+          "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$",
+          "maxLength": 63
+        },
+        "replicas": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10
+        },
+        "nodeType": {
+          "enum": [
+            "master",
+            "slave"
+          ]
+        },
+        "trustedProxies": {
+          "type": "string",
+          "minLength": 1
+        },
+        "tls": {
+          "type": "object",
+          "required": [
+            "serverSecretName",
+            "caSecretName"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "serverSecretName": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 253,
+              "pattern": "^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$"
+            },
+            "caSecretName": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 253,
+              "pattern": "^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$"
+            }
+          }
+        }
       }
     },
     "oidc": {
       "type": "object",
-      "required": ["issuer", "jwksUrl", "tokenUrl", "audience", "portalClientId"],
+      "required": [
+        "issuer",
+        "jwksUrl",
+        "tokenUrl",
+        "audience",
+        "portalClientId"
+      ],
       "properties": {
-        "issuer": { "type": "string", "format": "uri" },
-        "jwksUrl": { "type": "string" },
-        "tokenUrl": { "type": "string" },
-        "audience": { "type": "string", "minLength": 1 },
-        "portalClientId": { "type": "string", "minLength": 1 }
+        "issuer": {
+          "type": "string",
+          "format": "uri"
+        },
+        "jwksUrl": {
+          "type": "string"
+        },
+        "tokenUrl": {
+          "type": "string"
+        },
+        "audience": {
+          "type": "string",
+          "minLength": 1
+        },
+        "portalClientId": {
+          "type": "string",
+          "minLength": 1
+        }
       }
     },
     "public": {
       "type": "object",
-      "required": ["portalUrl", "paymentCallbackUrl"],
+      "required": [
+        "portalUrl",
+        "paymentCallbackUrl"
+      ],
       "properties": {
-        "portalUrl": { "type": "string", "format": "uri" },
-        "paymentCallbackUrl": { "type": "string", "format": "uri" }
+        "portalUrl": {
+          "type": "string",
+          "format": "uri"
+        },
+        "paymentCallbackUrl": {
+          "type": "string",
+          "format": "uri"
+        }
       }
     },
     "observability": {
       "type": "object",
-      "required": ["otlpEndpoint", "prometheusRulesEnabled"],
-      "properties": { "otlpEndpoint": { "type": "string" }, "prometheusRulesEnabled": { "type": "boolean" } }
+      "required": [
+        "otlpEndpoint",
+        "prometheusRulesEnabled"
+      ],
+      "properties": {
+        "otlpEndpoint": {
+          "type": "string"
+        },
+        "prometheusRulesEnabled": {
+          "type": "boolean"
+        }
+      }
     },
     "security": {
       "type": "object",
-      "required": ["rateLimitRPS", "rateLimitBurst"],
+      "required": [
+        "rateLimitRPS",
+        "rateLimitBurst"
+      ],
       "properties": {
-        "rateLimitRPS": { "type": "number", "exclusiveMinimum": 0, "maximum": 100000 },
-        "rateLimitBurst": { "type": "integer", "minimum": 1, "maximum": 1000000 }
+        "rateLimitRPS": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 100000
+        },
+        "rateLimitBurst": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000000
+        }
       }
     },
     "tokenGateway": {
       "type": "object",
-      "required": ["secretProvider", "secretKeyId", "providerAllowedHosts", "maxInputTokens"],
+      "required": [
+        "secretProvider",
+        "secretKeyId",
+        "providerAllowedHosts",
+        "maxInputTokens",
+        "defaultProviderBaseUrl",
+        "reconciliationNewApiBaseUrl"
+      ],
       "properties": {
-        "secretProvider": { "enum": ["local", "remote"] },
-        "secretKeyId": { "type": "string" },
-        "providerAllowedHosts": { "type": "array", "uniqueItems": true, "items": { "type": "string", "minLength": 1 } },
-        "maxInputTokens": { "type": "integer", "minimum": 1 }
+        "secretProvider": {
+          "enum": [
+            "local",
+            "remote"
+          ]
+        },
+        "secretKeyId": {
+          "type": "string"
+        },
+        "providerAllowedHosts": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "maxInputTokens": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "defaultProviderBaseUrl": {
+          "type": "string",
+          "format": "uri"
+        },
+        "reconciliationNewApiBaseUrl": {
+          "type": "string",
+          "format": "uri"
+        }
       }
     },
     "external": {
       "type": "object",
-      "required": ["oidcCidrs", "postgresCidrs", "paymentProviderCidrs", "secretProviderCidrs", "modelProviderCidrs", "telemetryCollectorCidrs"],
+      "required": [
+        "oidcCidrs",
+        "postgresCidrs",
+        "paymentProviderCidrs",
+        "secretProviderCidrs",
+        "modelProviderCidrs",
+        "telemetryCollectorCidrs"
+      ],
       "properties": {
-        "oidcCidrs": { "$ref": "#/definitions/cidrs" },
-        "postgresCidrs": { "$ref": "#/definitions/cidrs" },
-        "paymentProviderCidrs": { "$ref": "#/definitions/cidrs" },
-        "secretProviderCidrs": { "$ref": "#/definitions/cidrs" },
-        "modelProviderCidrs": { "$ref": "#/definitions/cidrs" },
-        "telemetryCollectorCidrs": { "$ref": "#/definitions/cidrs" }
+        "oidcCidrs": {
+          "$ref": "#/definitions/cidrs"
+        },
+        "postgresCidrs": {
+          "$ref": "#/definitions/cidrs"
+        },
+        "paymentProviderCidrs": {
+          "$ref": "#/definitions/cidrs"
+        },
+        "secretProviderCidrs": {
+          "$ref": "#/definitions/cidrs"
+        },
+        "modelProviderCidrs": {
+          "$ref": "#/definitions/cidrs"
+        },
+        "telemetryCollectorCidrs": {
+          "$ref": "#/definitions/cidrs"
+        }
       }
     },
-    "ingress": { "type": "object", "required": ["enabled"], "properties": { "enabled": { "type": "boolean" } } },
-    "networkPolicy": { "type": "object", "required": ["enabled"], "properties": { "enabled": { "type": "boolean" } } }
+    "ingress": {
+      "type": "object",
+      "required": [
+        "enabled"
+      ],
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        }
+      }
+    },
+    "networkPolicy": {
+      "type": "object",
+      "required": [
+        "enabled"
+      ],
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        }
+      }
+    }
   },
   "definitions": {
     "image": {
       "type": "object",
-      "required": ["repository", "tag", "pullPolicy"],
+      "required": [
+        "repository",
+        "tag",
+        "pullPolicy"
+      ],
       "properties": {
-        "repository": { "type": "string", "minLength": 1 },
-        "tag": { "type": "string", "minLength": 1 },
-        "pullPolicy": { "enum": ["Always", "IfNotPresent", "Never"] }
+        "repository": {
+          "type": "string",
+          "minLength": 1
+        },
+        "tag": {
+          "type": "string",
+          "minLength": 1
+        },
+        "pullPolicy": {
+          "enum": [
+            "Always",
+            "IfNotPresent",
+            "Never"
+          ]
+        }
+      }
+    },
+    "imageWithDigest": {
+      "type": "object",
+      "required": [
+        "repository",
+        "tag",
+        "digest",
+        "pullPolicy"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "repository": {
+          "type": "string",
+          "minLength": 1
+        },
+        "tag": {
+          "type": "string",
+          "minLength": 1,
+          "not": {
+            "enum": [
+              "latest",
+              "dev",
+              "release-required"
+            ]
+          }
+        },
+        "digest": {
+          "type": "string",
+          "pattern": "^sha256:[a-f0-9]{64}$"
+        },
+        "pullPolicy": {
+          "enum": [
+            "Always",
+            "IfNotPresent",
+            "Never"
+          ]
+        }
       }
     },
     "cidrs": {
@@ -100,60 +394,190 @@
       "items": {
         "type": "string",
         "allOf": [
-          { "pattern": "^.+/.+$" },
-          { "not": { "enum": ["0.0.0.0/0", "::/0"] } }
+          {
+            "pattern": "^.+/.+$"
+          },
+          {
+            "not": {
+              "enum": [
+                "0.0.0.0/0",
+                "::/0"
+              ]
+            }
+          }
         ]
       }
     }
   },
   "allOf": [
     {
-      "if": { "properties": { "global": { "type": "object", "properties": { "environment": { "enum": ["staging", "production-new"] } } } } },
+      "if": {
+        "properties": {
+          "global": {
+            "type": "object",
+            "properties": {
+              "environment": {
+                "enum": [
+                  "staging",
+                  "production-new"
+                ]
+              }
+            }
+          }
+        }
+      },
       "then": {
         "properties": {
           "oidc": {
             "type": "object",
             "properties": {
-              "issuer": { "type": "string", "format": "uri", "pattern": "^https://[^/?#@]+(/[^?#]*)?$" },
-              "jwksUrl": { "type": "string", "format": "uri", "pattern": "^https://[^/?#@]+/[^?#]*$" },
-              "tokenUrl": { "type": "string", "format": "uri", "pattern": "^https://[^/?#@]+/[^?#]*$" }
+              "issuer": {
+                "type": "string",
+                "format": "uri",
+                "pattern": "^https://[^/?#@]+(/[^?#]*)?$"
+              },
+              "jwksUrl": {
+                "type": "string",
+                "format": "uri",
+                "pattern": "^https://[^/?#@]+/[^?#]*$"
+              },
+              "tokenUrl": {
+                "type": "string",
+                "format": "uri",
+                "pattern": "^https://[^/?#@]+/[^?#]*$"
+              }
+            }
+          },
+          "tokenGateway": {
+            "type": "object",
+            "properties": {
+              "defaultProviderBaseUrl": {
+                "type": "string",
+                "format": "uri",
+                "pattern": "^https://[^/?#@]+(:[0-9]+)?$"
+              },
+              "reconciliationNewApiBaseUrl": {
+                "type": "string",
+                "format": "uri",
+                "pattern": "^https://[^/?#@]+(:[0-9]+)?$"
+              }
             }
           }
         }
       }
     },
     {
-      "if": { "properties": { "global": { "type": "object", "properties": { "environment": { "const": "production-new" } } } } },
+      "if": {
+        "properties": {
+          "global": {
+            "type": "object",
+            "properties": {
+              "environment": {
+                "const": "production-new"
+              }
+            }
+          }
+        }
+      },
       "then": {
         "properties": {
           "tokenGateway": {
             "type": "object",
             "properties": {
-              "secretProvider": { "const": "remote" },
-              "secretKeyId": { "type": "string", "minLength": 1 },
-              "providerAllowedHosts": { "type": "array", "minItems": 1 }
+              "secretProvider": {
+                "const": "remote"
+              },
+              "secretKeyId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "providerAllowedHosts": {
+                "type": "array",
+                "minItems": 1
+              }
+            }
+          },
+          "newApi": {
+            "type": "object",
+            "properties": {
+              "enabled": {
+                "const": true
+              }
             }
           },
           "images": {
             "type": "object",
             "additionalProperties": {
               "type": "object",
-              "properties": { "tag": { "type": "string", "not": { "enum": ["latest", "dev", "release-required"] } } }
+              "properties": {
+                "tag": {
+                  "type": "string",
+                  "not": {
+                    "enum": [
+                      "latest",
+                      "dev",
+                      "release-required"
+                    ]
+                  }
+                }
+              }
             }
           },
           "external": {
             "type": "object",
             "properties": {
-              "postgresCidrs": { "type": "array", "minItems": 1 },
-              "paymentProviderCidrs": { "type": "array", "minItems": 1 },
-              "secretProviderCidrs": { "type": "array", "minItems": 1 },
-              "modelProviderCidrs": { "type": "array", "minItems": 1 },
-              "telemetryCollectorCidrs": { "type": "array", "minItems": 1 }
+              "postgresCidrs": {
+                "type": "array",
+                "minItems": 1
+              },
+              "paymentProviderCidrs": {
+                "type": "array",
+                "minItems": 1
+              },
+              "secretProviderCidrs": {
+                "type": "array",
+                "minItems": 1
+              },
+              "modelProviderCidrs": {
+                "type": "array",
+                "minItems": 1
+              },
+              "telemetryCollectorCidrs": {
+                "type": "array",
+                "minItems": 1
+              }
             }
           },
-          "observability": { "type": "object", "properties": { "otlpEndpoint": { "type": "string", "pattern": "^https://" }, "prometheusRulesEnabled": { "const": true } } },
-          "ingress": { "type": "object", "properties": { "enabled": { "type": "boolean", "const": true } } },
-          "networkPolicy": { "type": "object", "properties": { "enabled": { "type": "boolean", "const": true } } }
+          "observability": {
+            "type": "object",
+            "properties": {
+              "otlpEndpoint": {
+                "type": "string",
+                "pattern": "^https://"
+              },
+              "prometheusRulesEnabled": {
+                "const": true
+              }
+            }
+          },
+          "ingress": {
+            "type": "object",
+            "properties": {
+              "enabled": {
+                "type": "boolean",
+                "const": true
+              }
+            }
+          },
+          "networkPolicy": {
+            "type": "object",
+            "properties": {
+              "enabled": {
+                "type": "boolean",
+                "const": true
+              }
+            }
+          }
         }
       }
     }

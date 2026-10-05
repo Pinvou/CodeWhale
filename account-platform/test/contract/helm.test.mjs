@@ -15,6 +15,8 @@ test('Helm production-new values contain references, not secret material or simu
   assert.equal(values.global.environment, 'production-new');
   assert.match(values.global.runtimeSecret, /production-new/);
   assert.equal(values.tokenGateway.secretProvider, 'remote');
+  assert.equal(values.tokenGateway.providerAllowedHosts.includes('newapi'), true);
+  assert.match(values.images.newApi.digest, /^sha256:[a-f0-9]{64}$/);
   assert.ok(values.tokenGateway.providerAllowedHosts.every(host => !/mock|localhost|127\.0\.0\.1/i.test(host)));
   for (const cidrs of Object.values(values.external)) {
     assert.ok(cidrs.length > 0);
@@ -36,23 +38,32 @@ test('Helm values schema rejects unsafe production-new overrides', async () => {
   assert.equal(validate(values), true, JSON.stringify(validate.errors));
   assert.equal(validate({ ...values, networkPolicy: { ...values.networkPolicy, enabled: false } }), false);
   assert.equal(validate({ ...values, tokenGateway: { ...values.tokenGateway, secretProvider: 'local' } }), false);
+  assert.equal(validate({ ...values, newApi: { ...values.newApi, enabled: false } }), false);
+  assert.equal(validate({ ...values, images: { ...values.images, newApi: { ...values.images.newApi, digest: '' } } }), false);
   assert.equal(validate({ ...values, external: { ...values.external, postgresCidrs: ['0.0.0.0/0'] } }), false);
   assert.equal(validate({ ...values, oidc: { ...values.oidc, jwksUrl: 'http://keycloak:8080/realms/pinvou/protocol/openid-connect/certs' } }), false);
   assert.equal(validate({ ...values, oidc: { ...values.oidc, tokenUrl: '' } }), false);
   assert.equal(validate({ ...values, oidc: { ...values.oidc, issuer: 'https://user@accounts.example.com/realms/pinvou' } }), false);
   assert.equal(validate({ ...values, external: { ...values.external, oidcCidrs: ['::/0'] } }), false);
+  assert.equal(validate({ ...values, tokenGateway: { ...values.tokenGateway, defaultProviderBaseUrl: 'http://newapi:8080' } }), false);
+  assert.equal(validate({ ...values, tokenGateway: { ...values.tokenGateway, reconciliationNewApiBaseUrl: 'http://newapi:8080' } }), false);
+  assert.equal(validate({ ...values, newApi: { ...values.newApi, tls: { ...values.newApi.tls, serverSecretName: '' } } }), false);
+  assert.equal(validate({ ...values, newApi: { ...values.newApi, tls: { ...values.newApi.tls, caSecretName: '' } } }), false);
+  assert.equal(validate({ ...values, newApi: { ...values.newApi, tls: { ...values.newApi.tls, insecureSkipVerify: true } } }), false);
 });
 
 test('Helm chart includes required workloads, migration hooks, and deny-by-default policy', async () => {
   const templateDirectory = path.join(chart, 'templates');
   const files = await readdir(templateDirectory);
   const combined = (await Promise.all(files.map(name => readFile(path.join(templateDirectory, name), 'utf8')))).join('\n');
-  for (const component of ['account-service', 'billing-service', 'token-gateway', 'token-portal', 'keycloak', 'redis', 'nats']) {
+  for (const component of ['account-service', 'billing-service', 'token-gateway', 'token-portal', 'new-api', 'keycloak', 'redis', 'nats']) {
     assert.match(combined, new RegExp(component));
   }
   assert.match(combined, /pre-install,pre-upgrade/);
   assert.match(combined, /default-deny/);
   assert.match(combined, /pinvou\.io\/newapi-data-plane/);
   assert.match(combined, /app\.kubernetes\.io\/component: token-gateway/);
+  assert.match(combined, /newapi-database-url/);
+  assert.match(combined, /newapi-session-secret/);
   assert.doesNotMatch(combined, /kind:\s*Secret/);
 });

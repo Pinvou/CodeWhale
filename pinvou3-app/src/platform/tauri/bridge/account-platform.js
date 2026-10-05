@@ -7,7 +7,7 @@
     var invoke = context.invoke;
     return {
       session: function () { return invoke("account_platform_session"); },
-      login: function (callbackCopy) { return invoke("account_platform_login", { callbackCopy: callbackCopy }); },
+      login: function (credentials) { return invoke("account_platform_login", { credentials: credentials }); },
       logout: function () { return invoke("account_platform_logout"); },
       request: function (request) {
         return invoke("account_platform_request", { request: request });

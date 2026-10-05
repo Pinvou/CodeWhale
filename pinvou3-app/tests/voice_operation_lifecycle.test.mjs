@@ -6,7 +6,8 @@ import vm from 'node:vm';
 import { prepareSceneCapabilities, requiredCapabilitiesForMeta } from '../src/features/chat/scene-capabilities.js';
 
 const root = path.resolve(import.meta.dirname, '..');
-const read = file => fs.readFileSync(path.join(root, file), 'utf8');
+// Extract the actual functions/effects with the same boundaries on LF/CRLF checkouts.
+const read = file => fs.readFileSync(path.join(root, file), 'utf8').replace(/\r\n?/g, '\n');
 const sources = {
   desktop: read('src/platform/tauri/bridge/voice.js'),
   web: read('src/platform/web/bridge.js'),

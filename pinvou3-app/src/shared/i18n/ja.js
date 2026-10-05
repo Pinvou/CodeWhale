@@ -6,6 +6,7 @@
 import { dictEn } from './en.js';
 import { browserJa } from './browser.js';
 import { accountPlatformCopy } from '../account-platform-i18n.js';
+import { adminPlatformCopy } from '../admin-platform-i18n.js';
 
 const conversationJa = {
   completed:'完了', failed:'失敗', interrupted:'中断', cancelled:'キャンセル済み', limitReached:'上限に到達', processing:'処理中', processingActive:'処理中',
@@ -781,7 +782,7 @@ const jaBase = {
 };
 
 // ja 漏翻的 key 回落英文，避免新增文案后显示 undefined
-export const dictJa = { ...dictEn, ...jaBase, uiAccountPlatform: accountPlatformCopy.ja };
+export const dictJa = { ...dictEn, ...jaBase, uiAdminPlatform: adminPlatformCopy.ja, uiAccountPlatform: accountPlatformCopy.ja };
 
 dictJa.uiToolDetails.flow = {
   incomplete:name=>`${name} の接続が未完了`, connected:name=>`${name} に接続済み`, connecting:name=>`${name} に接続中`,

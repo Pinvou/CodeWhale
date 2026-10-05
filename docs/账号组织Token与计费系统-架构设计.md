@@ -156,13 +156,13 @@ flowchart LR
 
 ### 6.1 登录与开户
 
-1. 客户端通过 Keycloak 使用 OIDC Authorization Code + PKCE 登录。
+1. Web 客户端通过 Keycloak 使用 OIDC Authorization Code + PKCE 登录；桌面客户端通过 Rust 调用 Keycloak Direct Access Grant，在应用内完成基础账号密码登录。
 2. 首次登录调用 `POST /v1/account/bootstrap`。
 3. Account Service 以 `issuer + subject` 幂等创建用户和个人上下文。
 4. Account Service 同步调用 Billing Service 的 `EnsureWallet`，创建个人钱包；同时写 Outbox 事件用于补偿。
 5. 钱包成功后用户状态从 `PROVISIONING` 变为 `ACTIVE`。未完成时不得充值或调用 Token，客户端展示可重试状态。
 
-Web 端采用 BFF + `HttpOnly; Secure; SameSite` Cookie；Tauri 端使用系统浏览器、PKCE 和系统安全凭据存储，不把长期令牌写入 `localStorage` 或普通配置文件。
+Web 端采用 BFF + `HttpOnly; Secure; SameSite` Cookie；Tauri 端只通过 Rust 接收并一次性提交密码，不持久化密码，只把 Refresh Token 写入系统安全凭据存储，不把长期令牌写入 `localStorage` 或普通配置文件。注册、找回密码、第三方身份和复杂 MFA 仍使用独立流程。
 
 ### 6.2 当前激活组织
 
@@ -540,13 +540,15 @@ POST /v1/sessions/current/active-context
 组织管理：
 
 ```http
-POST /v1/organizations
+POST /admin/v1/organizations
 POST /v1/organizations/{org_id}/units
 POST /v1/organizations/{org_id}/invitations
 POST /v1/invitations/{token}/accept
 PUT  /v1/organizations/{org_id}/members/{member_id}/roles
 DELETE /v1/organizations/{org_id}/members/{member_id}
 ```
+
+组织创建只允许持有效 Keycloak `platform-admin` Realm 角色的后台管理员调用，创建时必须指定初始 `owner_user_id`；普通用户不提供自建组织入口。组织内的单元、成员、邀请和角色管理继续按组织权限授权。业务账号禁用或删除不自动撤销 Keycloak 管理角色，后台停权须另行撤销该 Realm 角色。
 
 #### Token 与充值 BFF
 
@@ -702,7 +704,8 @@ Billing Service：
 
 ### 13.1 认证与会话
 
-- Keycloak 使用 OIDC Authorization Code + PKCE，禁用 Implicit 和 Resource Owner Password Credentials。
+- Keycloak 的 Web 客户端使用 OIDC Authorization Code + PKCE；公开桌面客户端按产品要求启用 Direct Access Grant，禁用 Implicit。
+- 桌面密码只允许经 Tauri IPC 进入 Rust，并通过 HTTPS Token Endpoint 一次性提交；禁止持久化、日志记录或传入业务服务。
 - 生产回调地址使用精确白名单和 HTTPS。
 - Access Token 建议 10 分钟，Refresh Token 启用轮换和重用检测。
 - JWT 必须验证 `iss`、`aud`、签名、有效期和授权上下文；不把余额、完整组织树或 Token 权限列表写入 JWT。

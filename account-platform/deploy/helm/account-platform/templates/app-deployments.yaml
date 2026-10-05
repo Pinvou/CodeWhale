@@ -66,7 +66,7 @@ spec:
             - name: DATABASE_URL
               valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: {{ $app.name }}-database-url } }
             {{- end }}
-            {{- if or (eq $app.name "account-service") (eq $app.name "token-gateway") }}
+            {{- if or (eq $app.name "account-service") (eq $app.name "billing-service") (eq $app.name "token-gateway") }}
             - { name: OIDC_ISSUER, value: {{ $root.Values.oidc.issuer | quote }} }
             - { name: OIDC_JWKS_URL, value: {{ $jwksURL | quote }} }
             - { name: OIDC_AUDIENCE, value: {{ $root.Values.oidc.audience | quote }} }
@@ -87,6 +87,9 @@ spec:
               valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: {{ printf "payment-hmac-%s" ($channel | lower) }} } }
             {{- end }}
             {{- else if eq $app.name "token-gateway" }}
+            {{- if $root.Values.newApi.enabled }}
+            - { name: SSL_CERT_DIR, value: "/etc/ssl/certs:/etc/newapi-ca" }
+            {{- end }}
             - { name: ACCOUNT_HTTP_URL, value: {{ printf "http://%s-account-service:8080" $fullname | quote }} }
             - { name: BILLING_HTTP_URL, value: {{ printf "http://%s-billing-service:8080" $fullname | quote }} }
             - { name: TOKEN_SECRET_PROVIDER, value: {{ $root.Values.tokenGateway.secretProvider | quote }} }
@@ -97,6 +100,18 @@ spec:
               valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: token-secret-provider-token } }
             - { name: TOKEN_PROVIDER_ALLOWED_HOSTS, value: {{ join "," $root.Values.tokenGateway.providerAllowedHosts | quote }} }
             - { name: TOKEN_GATEWAY_MAX_INPUT_TOKENS, value: {{ $root.Values.tokenGateway.maxInputTokens | quote }} }
+            - { name: TOKEN_DEFAULT_PROVIDER, value: {{ $root.Values.tokenGateway.defaultProvider | quote }} }
+            - { name: TOKEN_DEFAULT_PROVIDER_BASE_URL, value: {{ $root.Values.tokenGateway.defaultProviderBaseUrl | quote }} }
+            - { name: TOKEN_DEFAULT_PROVIDER_MODELS, value: {{ join "," $root.Values.tokenGateway.defaultProviderModels | quote }} }
+            - { name: TOKEN_DEFAULT_ROUTE_PRIORITY, value: {{ $root.Values.tokenGateway.defaultRoutePriority | quote }} }
+            - name: TOKEN_DEFAULT_PROVIDER_API_KEY
+              valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: token-default-provider-api-key } }
+            - { name: TOKEN_RECONCILIATION_NEWAPI_BASE_URL, value: {{ $root.Values.tokenGateway.reconciliationNewApiBaseUrl | quote }} }
+            - name: TOKEN_RECONCILIATION_NEWAPI_ADMIN_TOKEN
+              valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: token-reconciliation-newapi-admin-token } }
+            - name: TOKEN_RECONCILIATION_NEWAPI_ADMIN_USER_ID
+              valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: token-reconciliation-newapi-admin-user-id } }
+            - { name: TOKEN_RECONCILIATION_INTERVAL_SECONDS, value: {{ $root.Values.tokenGateway.reconciliationIntervalSeconds | quote }} }
             {{- else if eq $app.name "token-portal" }}
             - { name: REDIS_URL, value: {{ printf "redis://%s-redis:6379/0" $fullname | quote }} }
             - { name: PORTAL_PUBLIC_URL, value: {{ $root.Values.public.portalUrl | quote }} }
@@ -106,10 +121,22 @@ spec:
             - { name: PORTAL_OIDC_TOKEN_URL, value: {{ $oidcTokenURL | quote }} }
             - { name: PORTAL_OIDC_CLIENT_ID, value: {{ $root.Values.oidc.portalClientId | quote }} }
             - { name: ACCOUNT_HTTP_URL, value: {{ printf "http://%s-account-service:8080" $fullname | quote }} }
+            - { name: BILLING_HTTP_URL, value: {{ printf "http://%s-billing-service:8080" $fullname | quote }} }
             - { name: TOKEN_GATEWAY_HTTP_URL, value: {{ printf "http://%s-token-gateway:8080" $fullname | quote }} }
             {{- end }}
           readinessProbe: { httpGet: { path: /health/ready, port: http }, periodSeconds: 10, timeoutSeconds: 3 }
           livenessProbe: { httpGet: { path: /health/live, port: http }, periodSeconds: 20, timeoutSeconds: 3 }
-          volumeMounts: [{ name: tmp, mountPath: /tmp }]
-      volumes: [{ name: tmp, emptyDir: { sizeLimit: 16Mi } }]
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+            {{- if and (eq $app.name "token-gateway") $root.Values.newApi.enabled }}
+            - { name: newapi-ca, mountPath: /etc/newapi-ca, readOnly: true }
+            {{- end }}
+      volumes:
+        - { name: tmp, emptyDir: { sizeLimit: 16Mi } }
+        {{- if and (eq $app.name "token-gateway") $root.Values.newApi.enabled }}
+        - name: newapi-ca
+          secret:
+            secretName: {{ $root.Values.newApi.tls.caSecretName }}
+            items: [{ key: ca.crt, path: ca.crt }]
+        {{- end }}
 {{- end }}

@@ -1,10 +1,12 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readFileSync as readSourceFileSync } from 'node:fs';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+// Source shape and literal newline pins are independent of checkout line endings.
+const readFileSync = (...args) => readSourceFileSync(...args).replace(/\r\n?/g, '\n');
 const browserView = readFileSync(
   path.join(projectRoot, 'src', 'features', 'browser', 'BrowserView.jsx'),
   'utf8',

@@ -16,7 +16,15 @@
 
 当前已实现账号/组织与会话授权、钱包与平衡账本、预占结算、三渠道支付模拟、退款与对账基础、Token 凭据加密轮换、确定性路由、OpenAI 兼容 JSON/SSE 代理、Web Portal、桌面端 OIDC、领域事件投递、可观测性、Helm 和恢复 Runbook。真实支付、真实 New API 和生产集群演练仍按后续门禁推进。
 
+组织只能由持有效 Keycloak `platform-admin` Realm 角色的后台管理员创建，并指定初始 Owner；普通用户没有自建组织入口。业务用户禁用或删除不自动撤销后台 Realm 角色，需另外撤销该角色完成后台停权。
+
 ## Web Portal
+
+本波新增的后台财务读取和个人用量明细以十进制字符串返回金额，避免浏览器 JSON number 丢失 BIGINT 精度；未知用量金额仍为 `null`。原有内部余额和用量状态接口保持原契约。后台用量输出显式字段，与管理页面的 snake_case 字段一致。
+
+后台权限由有效的 Keycloak `platform-admin` Realm role 决定。Account 的业务用户禁用或删除不自动撤销该管理角色；停止后台权限需要在身份服务撤销管理角色。后台成员变更与对应版本的成员事件在同一事务中提交。
+
+自动用量补偿仅处理已持久化的 `SETTLEMENT_PENDING` 和 `REVIEW`。补偿回写绑定本次 claim 的代次与租约，过期批次项不再执行，外部调用截止于当前租约期限；没有明确消费证据时继续保护预占，超额证据保留人工核对。New API 的单渠道错误日志不能证明整个请求最终未消费。代理已持久化的明确释放意图可重试原 Billing 释放；Billing 已确认释放而本地记录失败时，只补齐本地终态。开发 mock 不提供真实 New API 消费日志，其模型输出不能代替真实供应商的补偿证据验收。
 
 开发 Compose 启动后访问 `http://127.0.0.1:18105/`。登录使用普通在线 OIDC 会话（`openid profile email`），不请求 `offline_access`；服务端 Redis 会话和浏览器 Cookie 的期限遵循身份服务返回的刷新有效期。ID Token 经签名、issuer、audience、nonce 和身份绑定校验，浏览器仅收到不透明会话及 CSRF Cookie。
 
@@ -28,12 +36,12 @@
 
 新账号入口由 `PINVOU_ACCOUNT_PLATFORM_ENABLED` 显式开启，默认关闭，关闭时原有 `llmapi_hub` 入口和模型路径不变。开启时还需配置：
 
-- `PINVOU_ACCOUNT_OIDC_ISSUER`，或分别配置 `PINVOU_ACCOUNT_OIDC_AUTHORIZATION_URL` 与 `PINVOU_ACCOUNT_OIDC_TOKEN_URL`；
-- `PINVOU_ACCOUNT_OIDC_CLIENT_ID`（公开客户端，必须启用 Authorization Code、PKCE S256 和 loopback redirect）；
+- `PINVOU_ACCOUNT_OIDC_ISSUER`，或配置 `PINVOU_ACCOUNT_OIDC_TOKEN_URL`；
+- `PINVOU_ACCOUNT_OIDC_CLIENT_ID`（公开客户端，桌面内登录必须启用 Direct Access Grants；Web Portal 仍使用 Authorization Code + PKCE）；
 - `PINVOU_ACCOUNT_SERVICE_URL`；
 - `PINVOU_TOKEN_GATEWAY_URL`。
 
-远程端点必须使用 HTTPS；仅本机开发允许 `http://127.0.0.1`/`localhost`。桌面端使用系统浏览器和临时 loopback 回调，Refresh Token 只写入 macOS Keychain、Windows Credential Manager 或 Linux Secret Service；系统凭据存储不可用时会明确拒绝登录，不降级写入设置文件。WebView 只接收登录状态和经过路由白名单限制的业务 JSON。
+远程端点必须使用 HTTPS；仅本机开发允许 `http://127.0.0.1`/`localhost`。桌面端在应用内收集账号密码并通过 Rust 一次性提交给 Keycloak Token Endpoint；密码不持久化、不写日志，完成请求后即释放。Refresh Token 只写入 macOS Keychain、Windows Credential Manager 或 Linux Secret Service；系统凭据存储不可用时会明确拒绝登录，不降级写入设置文件。启用账号平台后，内置模型运行时直接使用同一 OIDC 会话的 Access Token 调用 `PINVOU_TOKEN_GATEWAY_URL/v1/chat/completions`，不会再把 New API 用户 Token 当作聊天身份。WebView 只接收登录状态和经过路由白名单限制的业务 JSON。注册、找回密码、第三方身份和复杂 MFA 不经过该密码接口，需使用相应的独立流程。
 
 ## Token Gateway 安全默认值
 
@@ -44,10 +52,17 @@
 - Hold 到期进入 `REVIEW` 并保留预占；明确的用量结算或未消费释放才能结束该预占。
 - `TOKEN_GATEWAY_MAX_INPUT_TOKENS` 是计算预占的输入规模假设，当前不执行 tokenizer 计数。省略输出上限时 Gateway 会向上游补入默认 `max_tokens`；若实际用量费用超过预占，结算进入 `REVIEW`，不会超额扣款。真实模型的输入规模仍需后续供应商验收确认。
 - Keycloak API 凭据须为 `typ=Bearer` 的已验签 access token；ID/Refresh token 不可代替。共享 JWKS 获取最多等待 5 秒，失败后可重新获取。
+- 桌面聊天由客户端按每次逻辑调用发送 `Idempotency-Key`；同一次调用的网络重试复用原键，重新发起或重新生成使用新键。Gateway 拒绝缺键请求，不自动生成键。
 - 支付回调地址由 Billing 的 `BILLING_PAYMENT_CALLBACK_URL` 固定配置，客户端不能提交回调 URL。
 - 模拟支付重试保持通知 ID 和付款事实不变，仅刷新签名时间；Billing 保留 5 分钟验签窗口，重复通知只允许 `timestamp` 改变。
 
 `mock-newapi` 只属于开发 Compose 后端网络，不发布宿主机端口；可用于验证正常、限流、断流和缺失 usage 场景。
+
+真实模型数据面使用独立部署的官方 New API。开发命令启用 `real-newapi` Compose profile，生产 Helm 以固定版本和镜像摘要部署仅供 Token Gateway 私网访问的 New API；初始化与升级流程见 [`deploy/runbooks/newapi-deployment.md`](deploy/runbooks/newapi-deployment.md)。
+
+Token Gateway 在个人或组织上下文第一次调用尚无可用路由的受支持模型时，会幂等创建平台托管的默认 Token Account、加密凭据与路由。该账号不会出现在普通用户的 Token 管理接口中，也不能由普通用户修改；显式指定 Token Account 的请求不会触发默认路由回退。
+
+模型调用必须携带每次逻辑调用的 `Idempotency-Key`（16–128 个 UTF-8 字符）。同一次调用的网络重试复用原键；用户重新发起或重新生成同一提示词时使用新键。缺键返回 400，重复键返回 409 且不重复请求模型或结算，不再按用户、会话和请求体推导永久键。
 
 ## 本地命令
 

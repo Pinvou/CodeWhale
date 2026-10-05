@@ -9,6 +9,7 @@ import (
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/api"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/identity"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/serviceauth"
 	"github.com/google/uuid"
 )
@@ -28,32 +29,42 @@ func (s *Service) WithPayments(payments *PaymentCoordinator) *Service {
 	return s
 }
 
-func (s *Service) Handler(serviceToken string) http.Handler {
-	root := http.NewServeMux()
-	mux := http.NewServeMux()
-	mux.HandleFunc("POST /internal/v1/wallets/ensure", s.ensureWallet)
-	mux.HandleFunc("GET /internal/v1/wallets/{wallet_id}/balance", s.getBalance)
-	mux.HandleFunc("POST /internal/v1/holds/reserve", s.reserve)
-	mux.HandleFunc("POST /internal/v1/holds/commit", s.commit)
-	mux.HandleFunc("POST /internal/v1/holds/release", s.release)
-	mux.HandleFunc("GET /internal/v1/pricing/current", s.currentPrice)
-	mux.HandleFunc("POST /internal/v1/adjustments", s.requestAdjustment)
-	mux.HandleFunc("POST /internal/v1/adjustments/{adjustment_id}/approve", s.approveAdjustment)
-	mux.HandleFunc("POST /internal/v1/adjustments/{adjustment_id}/reject", s.rejectAdjustment)
-	mux.HandleFunc("GET /v1/recharge/products", s.listProducts)
-	mux.HandleFunc("GET /v1/wallets/{wallet_id}/balance", s.getBalance)
+func (s *Service) Handler(serviceToken string, adminVerify ...identity.VerifyFunc) http.Handler {
+	router := httpserver.NewRouter()
+	protected := router.Group("")
+	protected.Use(serviceauth.GinMiddleware(serviceToken))
+	protected.POST("/internal/v1/wallets/ensure", httpserver.AdaptFunc(s.ensureWallet))
+	protected.GET("/internal/v1/wallets/:wallet_id/balance", httpserver.AdaptFunc(s.getBalance))
+	protected.POST("/internal/v1/holds/reserve", httpserver.AdaptFunc(s.reserve))
+	protected.POST("/internal/v1/holds/commit", httpserver.AdaptFunc(s.commit))
+	protected.POST("/internal/v1/holds/release", httpserver.AdaptFunc(s.release))
+	protected.GET("/internal/v1/pricing/current", httpserver.AdaptFunc(s.currentPrice))
+	protected.GET("/internal/v1/pricing/:price_version_id", httpserver.AdaptFunc(s.priceByID))
+	protected.POST("/internal/v1/adjustments", httpserver.AdaptFunc(s.requestAdjustment))
+	protected.POST("/internal/v1/adjustments/:adjustment_id/approve", httpserver.AdaptFunc(s.approveAdjustment))
+	protected.POST("/internal/v1/adjustments/:adjustment_id/reject", httpserver.AdaptFunc(s.rejectAdjustment))
+	protected.GET("/v1/recharge/products", httpserver.AdaptFunc(s.listProducts))
+	protected.GET("/v1/wallets/:wallet_id/balance", httpserver.AdaptFunc(s.getBalance))
 	if s.payments != nil {
-		mux.HandleFunc("POST /internal/v1/recharge/orders", s.createRechargeOrder)
-		mux.HandleFunc("GET /internal/v1/recharge/orders/recent", s.getRecentRechargeOrder)
-		mux.HandleFunc("GET /internal/v1/recharge/orders/{order_id}", s.getRechargeOrder)
-		mux.HandleFunc("POST /internal/v1/recharge/orders/{order_id}/close", s.closeRechargeOrder)
-		mux.HandleFunc("POST /internal/v1/recharge/orders/{order_id}/refunds", s.createRefund)
-		mux.HandleFunc("POST /internal/v1/recharge/orders/{order_id}/sync", s.syncRechargeOrder)
-		mux.HandleFunc("POST /internal/v1/reconciliation/runs", s.runReconciliation)
-		root.HandleFunc("POST /internal/payment/notifications", s.paymentNotification)
+		protected.POST("/internal/v1/recharge/orders", httpserver.AdaptFunc(s.createRechargeOrder))
+		protected.GET("/internal/v1/recharge/orders/recent", httpserver.AdaptFunc(s.getRecentRechargeOrder))
+		protected.GET("/internal/v1/recharge/orders/:order_id", httpserver.AdaptFunc(s.getRechargeOrder))
+		protected.POST("/internal/v1/recharge/orders/:order_id/close", httpserver.AdaptFunc(s.closeRechargeOrder))
+		protected.POST("/internal/v1/recharge/orders/:order_id/refunds", httpserver.AdaptFunc(s.createRefund))
+		protected.POST("/internal/v1/recharge/orders/:order_id/sync", httpserver.AdaptFunc(s.syncRechargeOrder))
+		protected.POST("/internal/v1/reconciliation/runs", httpserver.AdaptFunc(s.runReconciliation))
+		router.POST("/internal/payment/notifications", httpserver.AdaptFunc(s.paymentNotification))
 	}
-	root.Handle("/", serviceauth.Middleware(serviceToken, mux))
-	return root
+	if len(adminVerify) > 0 && adminVerify[0] != nil {
+		admin := router.Group("/admin/v1")
+		admin.Use(identity.GinMiddleware(adminVerify[0]), identity.RequireRealmRoleGin("platform-admin"))
+		admin.GET("/overview", httpserver.AdaptFunc(s.adminOverview))
+		admin.GET("/wallets", httpserver.AdaptFunc(s.adminWallets))
+		admin.GET("/payment-orders", httpserver.AdaptFunc(s.adminPaymentOrders))
+		admin.GET("/adjustments", httpserver.AdaptFunc(s.adminAdjustments))
+		admin.GET("/usage-holds", httpserver.AdaptFunc(s.adminUsageHolds))
+	}
+	return router
 }
 
 func (s *Service) requestAdjustment(w http.ResponseWriter, r *http.Request) {
@@ -324,6 +335,20 @@ func (s *Service) currentPrice(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	price, err := s.repository.CurrentPrice(r.Context(), model)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	api.WriteJSON(w, http.StatusOK, price)
+}
+
+func (s *Service) priceByID(w http.ResponseWriter, r *http.Request) {
+	priceID, err := uuid.Parse(r.PathValue("price_version_id"))
+	if err != nil {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid price version identifier", httpserver.RequestID(r.Context()))
+		return
+	}
+	price, err := s.repository.PriceByID(r.Context(), priceID)
 	if err != nil {
 		s.writeError(w, r, err)
 		return
