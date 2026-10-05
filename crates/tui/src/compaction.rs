@@ -305,19 +305,31 @@ pub(crate) fn compaction_checkpoint_message(prompt: &SystemPrompt) -> Message {
 /// The anchor and the deletion prefer the provenance-stamped carrier: its
 /// second text block is engine-written, so a pasted user turn that merely
 /// starts with the summary header can neither steal the insertion position
-/// nor be deleted as the carrier. The loose predicate applies only when no
-/// stamped carrier exists — a structural condition, not a session age: it
-/// covers saves from before the provenance block and equally histories that
-/// never compacted. There a pasted header is indistinguishable from a real
-/// bare carrier on content alone (or there is no carrier to anchor on at
-/// all), so the historical replace-in-place applies and a pasted header can
-/// still be dropped. The same loose predicate also backs the keep/recompaction
-/// filters in `compaction/last_round.rs` — same recognition family,
-/// explicitly out of scope here.
+/// nor be deleted as the carrier. The loose predicate applies only when a
+/// checkpoint is actually being restored and no stamped carrier exists —
+/// covering saves from before the provenance block. There a pasted header is
+/// indistinguishable from a real bare carrier on content alone, so the
+/// historical replace-in-place applies and a pasted header can still be
+/// dropped. A restore without a checkpoint (a never-compacted session) scans
+/// nothing and deletes nothing: with no summary to reinsert, the loose
+/// scan's pasted-header risk would be pure loss; topology relocation still
+/// runs. The same loose predicate also backs the keep/recompaction filters
+/// in `compaction/last_round.rs` — same recognition family, explicitly out
+/// of scope here.
 pub(crate) fn restore_compaction_checkpoint(
     mut messages: Vec<Message>,
     checkpoint: Option<&SystemPrompt>,
 ) -> Vec<Message> {
+    let Some(checkpoint) = checkpoint else {
+        // Nothing to reinsert, so there is nothing to repair. The loose
+        // legacy scan below cannot tell a pre-provenance carrier from a user
+        // turn that pastes the whole summary header, and deleting such a turn
+        // would lose real user content on every load of a never-compacted
+        // session. Topology relocation is still safe: it only moves stamped
+        // carriers, never deletes.
+        crate::runtime_handoff::relocate_restored_compaction_topology(&mut messages);
+        return messages;
+    };
     let provenance_anchor = messages.iter().position(is_generated_compaction_checkpoint);
     let carrier: fn(&Message) -> bool = if provenance_anchor.is_some() {
         is_generated_compaction_checkpoint
@@ -327,10 +339,8 @@ pub(crate) fn restore_compaction_checkpoint(
     let checkpoint_index =
         provenance_anchor.or_else(|| messages.iter().position(is_compaction_checkpoint_message));
     messages.retain(|message| !carrier(message));
-    if let Some(checkpoint) = checkpoint {
-        let index = checkpoint_index.unwrap_or(messages.len());
-        messages.insert(index, compaction_checkpoint_message(checkpoint));
-    }
+    let index = checkpoint_index.unwrap_or(messages.len());
+    messages.insert(index, compaction_checkpoint_message(checkpoint));
     crate::runtime_handoff::relocate_restored_compaction_topology(&mut messages);
     messages
 }
@@ -2054,6 +2064,69 @@ mod tests {
             "the saved single-block summary must be replaced, not stacked"
         );
         assert!(is_generated_compaction_checkpoint(restored.last().unwrap()));
+    }
+
+    #[test]
+    fn forkguard_restore_without_checkpoint_keeps_pasted_summary_turn() {
+        // A never-compacted history has no summary to reinsert, so restore
+        // must not delete anything. The loose legacy scan cannot tell a
+        // pre-provenance carrier from a user turn that pastes the whole
+        // summary, and dropping that turn loses real user content on every
+        // load of such a session.
+        let pasted_text = build_compaction_summary_block_text("someone else's handoff", "");
+        let pasted = Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: pasted_text.clone(),
+                cache_control: None,
+            }],
+        };
+        assert!(
+            !is_generated_compaction_checkpoint(&pasted),
+            "the pasted turn carries no provenance"
+        );
+        let messages = vec![msg("user", "hello"), pasted];
+
+        let restored = restore_compaction_checkpoint(messages, None);
+
+        assert_eq!(
+            restored.len(),
+            2,
+            "restore without a checkpoint keeps the whole history: {restored:?}"
+        );
+        assert!(
+            restored
+                .iter()
+                .any(|message| user_text_of(message).as_deref() == Some(pasted_text.as_str())),
+            "the pasted summary turn must survive an unrestorable load: {restored:?}"
+        );
+    }
+
+    #[test]
+    fn forkguard_restore_without_checkpoint_keeps_the_saved_carrier() {
+        // Same contract for the stamped carrier: deletion only happens as
+        // part of a repair that reinserts a checkpoint, never on a bare
+        // restore.
+        let text = build_compaction_summary_block_text("handoff", "");
+        let messages = vec![
+            msg("user", "Run the suite."),
+            compaction_checkpoint_message(&SystemPrompt::Text(text)),
+        ];
+
+        let restored = restore_compaction_checkpoint(messages, None);
+
+        assert_eq!(
+            restored.len(),
+            2,
+            "the saved carrier must survive a checkpoint-less restore: {restored:?}"
+        );
+        assert_eq!(
+            restored
+                .iter()
+                .filter(|message| is_generated_compaction_checkpoint(message))
+                .count(),
+            1
+        );
     }
 
     #[tokio::test]
