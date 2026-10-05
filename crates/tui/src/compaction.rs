@@ -310,10 +310,10 @@ pub(crate) fn compaction_checkpoint_message(prompt: &SystemPrompt) -> Message {
 /// covering saves from before the provenance block. There a pasted header is
 /// indistinguishable from a real bare carrier on content alone, so the
 /// historical replace-in-place applies and a pasted header can still be
-/// dropped. A restore without a checkpoint (a never-compacted session) scans
-/// nothing and deletes nothing: with no summary to reinsert, the loose
-/// scan's pasted-header risk would be pure loss; topology relocation still
-/// runs. The same loose predicate also backs the keep/recompaction filters
+/// dropped. A restore without a checkpoint runs no carrier-deletion scan and
+/// deletes nothing: with no summary to reinsert, the loose scan's
+/// pasted-header risk would be pure loss; topology relocation still runs.
+/// The same loose predicate also backs the keep/recompaction filters
 /// in `compaction/last_round.rs` — same recognition family, explicitly out
 /// of scope here.
 pub(crate) fn restore_compaction_checkpoint(
@@ -324,9 +324,12 @@ pub(crate) fn restore_compaction_checkpoint(
         // Nothing to reinsert, so there is nothing to repair. The loose
         // legacy scan below cannot tell a pre-provenance carrier from a user
         // turn that pastes the whole summary header, and deleting such a turn
-        // would lose real user content on every load of a never-compacted
-        // session. Topology relocation is still safe: it only moves stamped
-        // carriers, never deletes.
+        // would lose real user content on every checkpoint-less load — not
+        // only never-compacted sessions: the stable system prefix never
+        // carries the summary, so a compacted session resumed from its
+        // session file lands here with the genuine saved carrier at stake.
+        // Topology relocation is still safe: it only reorders Agent-topology
+        // sidecars to their placement anchors, never deletes.
         crate::runtime_handoff::relocate_restored_compaction_topology(&mut messages);
         return messages;
     };
@@ -2126,6 +2129,46 @@ mod tests {
                 .filter(|message| is_generated_compaction_checkpoint(message))
                 .count(),
             1
+        );
+    }
+
+    #[test]
+    fn forkguard_restore_without_checkpoint_still_relocates_topology_sidecars() {
+        // The None arm keeps topology relocation: a pre-placement-fix save
+        // appends the Agent-topology sidecar after its round's tool result,
+        // and a checkpoint-less restore must still move it to its anchor even
+        // though there is no checkpoint to reinsert.
+        let mut messages: Vec<Message> = serde_json::from_value(serde_json::json!([
+            {"role":"user","content":[{"type":"text","text":"Analyze the data"}]},
+            {"role":"assistant","content":[{"type":"tool_use","id":"call_1","name":"read","input":{"path":"a.txt"}}]},
+            {"role":"user","content":[{"type":"tool_result","tool_use_id":"call_1","content":"ready"}]}
+        ]))
+        .unwrap();
+        let mut empty: Vec<Message> = Vec::new();
+        crate::runtime_handoff::replace_agent_topology_checkpoint(&mut empty, &[]);
+        messages.push(empty.remove(0));
+
+        let restored = restore_compaction_checkpoint(
+            crate::runtime_handoff::project_messages_for_restore(&messages),
+            None,
+        );
+
+        assert_eq!(
+            restored.len(),
+            4,
+            "a checkpoint-less restore never drops messages: {restored:?}"
+        );
+        let sidecar_index = restored
+            .iter()
+            .position(|message| {
+                crate::runtime_handoff::is_agent_topology_checkpoint(message)
+                    || crate::runtime_handoff::restored_subagent_checkpoint_display(message)
+                        .is_some()
+            })
+            .unwrap_or_else(|| panic!("the sidecar must survive: {restored:?}"));
+        assert_eq!(
+            sidecar_index, 1,
+            "the sidecar must sit at its anchor, directly after the prompt, not on the trailing tool result: {restored:?}"
         );
     }
 
