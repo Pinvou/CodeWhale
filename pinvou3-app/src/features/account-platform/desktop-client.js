@@ -1,4 +1,5 @@
 import { safePNGImage } from './bff-client.js';
+import { builtinModelCatalog } from '../../shared/model-options.js';
 
 function abortError() {
   const error = new Error('The operation was aborted');
@@ -73,6 +74,16 @@ export class AccountPlatformDesktopClient {
     this.transport = transport;
   }
 
+  async getModelCatalog(signal) {
+    return builtinModelCatalog(await this.call(() => this.transport.getModelCatalog(), signal));
+  }
+  async setDefaultModel(model, signal) {
+    const result = builtinModelCatalog(await this.call(() => this.transport.setDefaultModel(model), signal));
+    if (result.default_model !== model || !result.available_models.includes(model)) {
+      throw nativeError('account_platform_request_failed');
+    }
+    return result;
+  }
   async session(signal) { return sessionStatus(await this.call(() => this.transport.session(), signal)); }
   async login(account, password, signal) {
     const status = sessionStatus(await this.call(() => this.transport.login({ account, password }), signal));

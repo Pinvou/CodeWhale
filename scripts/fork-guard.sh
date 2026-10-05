@@ -59,6 +59,10 @@ fi
 bold "── 第 1 层：登记主题与父仓适配指纹 ──"
 # 格式：主题|说明|文件（相对父仓根）|grep -F 固定串
 fingerprints=(
+  "T2|历史 r6 容器修复现行生产实现       |CodeWhale/crates/tui/src/core/engine/dispatch.rs|pub(super) fn normalize_schema_json_containers("
+  "T2|历史 r6 容器修复现行工具执行接线   |CodeWhale/crates/tui/src/core/engine/turn_loop.rs|normalize_schema_json_containers("
+  "T2|现行嵌套容器真实工具校验回归       |CodeWhale/crates/tui/src/core/engine/dispatch.rs|fn decodes_nested_containers_and_passes_tool_validation()"
+  "T2|现行原语错误类型及超限保护回归     |CodeWhale/crates/tui/src/core/engine/dispatch.rs|fn leaves_primitives_wrong_types_and_unbounded_strings_unchanged()"
   "T1|宿主模型调用幂等仅显式路由启用    |CodeWhale/crates/tui/src/config.rs|pub request_idempotency_header: Option<String>"
   "T1|模型调用身份跨传输重试边界         |CodeWhale/crates/tui/src/core/runtime_contract/model.rs|async fn create_message_stream_for_operation("
   "T1|模型调用身份按实际 wire 事实区分   |CodeWhale/crates/tui/src/client.rs|fn stream_operation_identity("

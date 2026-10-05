@@ -177,7 +177,7 @@ const path = require("node:path");
 const BUILD_SCRIPT_SOURCE = fs.readFileSync(
   path.join(__dirname, "..", "scripts", "tauri", "build.js"),
   "utf8",
-);
+).replace(/\r\n/g, "\n");
 
 test("两个跳过开关由 main() 算一次再显式传下去", () => {
   // 闸门和 overlay 摘除必须用同一份结论。原先 main() 和 prepareTauriArgs 各读一次

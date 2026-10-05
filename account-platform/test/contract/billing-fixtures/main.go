@@ -24,7 +24,8 @@ import (
 
 type contractRepository struct {
 	token.Repository
-	candidate token.Candidate
+	candidate          token.Candidate
+	catalogUnavailable bool
 }
 
 func (contractRepository) AdminOverview(context.Context) (token.AdminOverview, error) {
@@ -167,6 +168,29 @@ func (r contractRepository) ListCandidates(context.Context, string) ([]token.Can
 	return []token.Candidate{r.candidate}, nil
 }
 
+func (r contractRepository) ListModelCandidates(context.Context, token.AuthorizationContext) ([]token.Candidate, error) {
+	if r.catalogUnavailable {
+		return nil, errors.New("controlled repository unavailable")
+	}
+	return []token.Candidate{r.candidate}, nil
+}
+
+// Production catalog HTTP output; the repository is controlled here, while
+// real PostgreSQL routing and authority failures have separate domain tests.
+func catalogProbe(repository token.Repository, contexts token.ContextResolver, expectedStatus int) json.RawMessage {
+	service := token.NewService(repository, contexts, nil, nil, token.ProviderURLPolicy{}, nil, nil, 100)
+	application := service.Handler(func(context.Context, string) (identity.Principal, error) { return identity.Principal{}, nil })
+	handler := httpserver.HandlerWithApplication(config.Config{ServiceName: "contract-catalog"}, application, nil)
+	request := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	request.Header.Set("Authorization", "Bearer fixture-only-access-token")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != expectedStatus {
+		panic("catalog probe did not reach the production response contract")
+	}
+	return response.Body.Bytes()
+}
+
 type contractContext struct {
 	value token.AuthorizationContext
 	err   error
@@ -249,7 +273,9 @@ func main() {
 	for code, cause := range map[string]error{"TOKEN_ACCOUNT_NOT_FOUND": token.ErrNotFound, "TOKEN_FORBIDDEN": token.ErrForbidden, "TOKEN_ROUTE_AMBIGUOUS": token.ErrAmbiguousRoute, "TOKEN_ROUTE_UNAVAILABLE": token.ErrNoEligibleRoute} {
 		errors[code] = eligibleProbe(nil, contractContext{err: cause})
 	}
-	if err := json.NewEncoder(output).Encode(map[string]any{"slider_captcha": account.SliderCaptchaResponse{ID: id, BackgroundImage: "fixture-background", PieceImage: "fixture-piece", Width: 280, Height: 120, PieceWidth: 44, PieceHeight: 44, PieceY: 14, ExpiresAt: paidAt}, "mobile_registration": account.MobileRegistrationResult{UserID: id, Username: "fixtureuser", Status: "PROVISIONING", PasswordPreserved: false}, "mobile_errors": mobileErrors, "me": me, "entitlement": plan, "package_summary": billing.PackageSummary{AvailableMicrocredits: "9007199254740993", ActivePackageCount: 1, NextExpiryMicrocredits: "9007199254740993"}, "order_history": history, "waiver_public": publicWaiverProbe(waiver.Hold), "waiver_authority": waiver, "waiver_intent": map[string]any{"hold_id": id, "usage_request_id": id, "reason": "fixture-waiver", "actor": "fixture-actor"}, "product": product, "paid": order, "created": created, "wallet": wallet, "routes": routes, "eligible": eligible, "token_errors": errors, "rate_limited": rateLimitProbe(), "recent_created": map[string]any{"order": created}, "recent_empty": map[string]any{"order": nil}, "financial_reads": financialReadProbes(), "organization_member": account.Member{MembershipID: id, UserID: id, Status: "ACTIVE", Version: 1, Roles: []string{"MEMBER", "UNIT_ADMIN"}, UnitIDs: []uuid.UUID{}, UnitAdminIDs: []uuid.UUID{id}, JoinedAt: paidAt}}); err != nil {
+	errors["MODEL_CATALOG_UNAVAILABLE"] = catalogProbe(contractRepository{catalogUnavailable: true}, contractContext{value: token.AuthorizationContext{UserID: id, ContextType: "PERSONAL"}}, http.StatusServiceUnavailable)
+	catalog := catalogProbe(contractRepository{candidate: token.Candidate{TokenAccountID: id, OwnerType: "USER", OwnerID: id, Status: "ACTIVE", HealthStatus: "HEALTHY", CredentialID: id, WalletID: id, AllowedModels: []string{"fixture-model"}}}, contractContext{value: token.AuthorizationContext{UserID: id, ContextType: "PERSONAL"}}, http.StatusOK)
+	if err := json.NewEncoder(output).Encode(map[string]any{"slider_captcha": account.SliderCaptchaResponse{ID: id, BackgroundImage: "fixture-background", PieceImage: "fixture-piece", Width: 280, Height: 120, PieceWidth: 44, PieceHeight: 44, PieceY: 14, ExpiresAt: paidAt}, "mobile_registration": account.MobileRegistrationResult{UserID: id, Username: "fixtureuser", Status: "PROVISIONING", PasswordPreserved: false}, "mobile_errors": mobileErrors, "me": me, "entitlement": plan, "package_summary": billing.PackageSummary{AvailableMicrocredits: "9007199254740993", ActivePackageCount: 1, NextExpiryMicrocredits: "9007199254740993"}, "order_history": history, "waiver_public": publicWaiverProbe(waiver.Hold), "waiver_authority": waiver, "waiver_intent": map[string]any{"hold_id": id, "usage_request_id": id, "reason": "fixture-waiver", "actor": "fixture-actor"}, "product": product, "paid": order, "created": created, "wallet": wallet, "routes": routes, "eligible": eligible, "token_errors": errors, "model_catalog": catalog, "rate_limited": rateLimitProbe(), "recent_created": map[string]any{"order": created}, "recent_empty": map[string]any{"order": nil}, "financial_reads": financialReadProbes(), "organization_member": account.Member{MembershipID: id, UserID: id, Status: "ACTIVE", Version: 1, Roles: []string{"MEMBER", "UNIT_ADMIN"}, UnitIDs: []uuid.UUID{}, UnitAdminIDs: []uuid.UUID{id}, JoinedAt: paidAt}}); err != nil {
 		panic(err)
 	}
 }

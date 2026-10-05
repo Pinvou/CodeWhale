@@ -106,7 +106,7 @@ window.addEventListener('pinvou:chat-round-committed', (event) => {
           setMultiAgentBusy(false);
         }
       }
-      const savedModels = selectableModels((bs && bs.savedModels) || [], bs && bs.llmApiStatus);
+      const savedModels = selectableModels((bs && bs.savedModels) || []);
       const activeSessionId = sessionIdProp !== undefined ? sessionIdProp : (bs ? bs.activeSessionId : null);
       const activeModelId = bs && bs.activeModelId;
       const currentSessionModelId = sessionModelIdProp !== undefined ? sessionModelIdProp : (bs && bs.currentSessionModelId);

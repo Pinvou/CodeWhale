@@ -1,5 +1,12 @@
 # CodeWhale Fork 修改清单
 
+## A07 历史 r6 与现行底座的合入边界
+
+- 原波次指向 [0.9.5-r6 修复提交](https://github.com/Pinvou/CodeWhale/commit/3bbf8421ebdb16bff71f83dac4d42c8fb65f0f02)，本轮保留现行 `8b5a863908bf4178a8c5876c11c5884919119615`，不退回旧底座。原父仓提交历史通过普通 merge 保留；旧子模块对象未在本地完整取得，不能声称其为当前 gitlink 的祖先。
+- r6 的 schema 声明 object/array 字符串修复已被现行上游吸收：`core/engine/dispatch.rs::normalize_schema_json_containers` 仍限制为严格 JSON、正确容器类型、64 KiB 以内及 schema 子属性；`turn_loop.rs` 在生产工具执行前调用。现行 `schema_json_container_tests` 两条结果测试分别覆盖嵌套工具校验与错误类型、原语及超限输入不变；guard 登记这些现行生产及测试入口。指纹存在不代表测试已执行，实际执行结果由本波验证记录披露。
+- r6 为当时重复调用及连续工具错误新增的运行提示，依赖旧工具循环的计数和降级分支。当前 0.9.12 已退役这些旧分支，本波不恢复旧计数策略。当前 `process_tool_results` 将成功和错误写入带原 tool-use ID 的 `ToolResult`，通过 `tool_result_message_content` 生成结果内容；不借历史提示另插独立 user 轮次。保留的是现行底座及已审出站角色边界，不能将旧六条回归称为在新底座上执行或逐条等价验收。
+- 本波未新增子模块行为补丁；A04 的模型调用幂等补丁及公开可达性限制继续按现行登记处理。这里的历史映射不能替代公开子模块门禁、真实模型验收或外部审核。
+
 ## 已合入维护分支：压缩检查点角色兼容性
 
 - T7：将带类型的 Agent 拓扑检查点放到最近一次真实用户输入之后、该轮 assistant/tool 链之前，包括压缩摘要位于链尾的情况。Chat Completions 发送前把结构化识别的当前格式摘要移到其保留轮次之前，并把该摘要与拓扑检查点合并进这条 user 出站消息；普通用户引用摘要标记不会触发重排。修复范围是压缩流程自身产生的尾部 `tool -> user`，客户报错原文为 `SSE stream request failed: HTTP 400 Bad Request: response_role: "user"`（SSE 载体）；存储历史及工具调用/结果 ID 不变，会话固定的系统前缀也不变。

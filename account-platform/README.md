@@ -1,10 +1,18 @@
 # Pinvou Account Platform
 
-账号平台是独立于当前生产 New API 的新服务集合。架构与实施基线见：
+账号平台是独立于 New API 模型数据面的账号、组织、计费与模型访问控制服务集合。目标规划与当前实现分开维护：
 
-- [`../docs/账号组织Token与计费系统-架构设计.md`](../docs/账号组织Token与计费系统-架构设计.md)
-- [`../docs/账号组织Token与计费系统-实施任务与验证计划.md`](../docs/账号组织Token与计费系统-实施任务与验证计划.md)
-- [`docs/adr/`](docs/adr/)
+- [文档索引](docs/README.md)
+- [当前架构](docs/architecture.md)
+- [目标需求规划](docs/requirements.md)
+- [历史实现审计与当前边界](docs/implementation-status.md)
+- [角色设计规划](docs/role-system-design.md)
+- [短信供应商设计规划](docs/sms-verification-provider-design.md)
+- [调用流程](docs/call-flows.md)
+- [部署与运维](docs/deployment.md)
+- [架构决策记录](docs/adr/)
+
+父目录的原架构设计与实施计划保留方案背景。规划中的任务、部署目标和验收条件不能替代当前可执行契约，也不表示本波全部实现或已发布。
 
 ## 服务
 
@@ -14,13 +22,11 @@
 - `token-portal`：OIDC Authorization Code + PKCE、Redis 服务端会话和同源 CSRF 保护的 Web BFF；OIDC Token 不进入浏览器 JavaScript。
 - `payment-simulator`：仅开发/测试使用的三渠道支付模拟器。
 
-当前已实现账号/组织与会话授权、钱包与平衡账本、预占结算、三渠道支付模拟、退款与对账基础、Token 凭据加密轮换、确定性路由、OpenAI 兼容 JSON/SSE 代理、Web Portal、桌面端 OIDC、领域事件投递、可观测性、Helm 和恢复 Runbook。真实支付、真实 New API 和生产集群演练仍按后续门禁推进。
-
 组织只能由持有效 Keycloak `platform-admin` Realm 角色的后台管理员创建，并指定初始 Owner；普通用户没有自建组织入口。业务用户禁用或删除不自动撤销后台 Realm 角色，需另外撤销该角色完成后台停权。
 
 ## Web Portal
 
-本波新增的后台财务读取和个人用量明细以十进制字符串返回金额，避免浏览器 JSON number 丢失 BIGINT 精度；未知用量金额仍为 `null`。原有内部余额和用量状态接口保持原契约。后台用量输出显式字段，与管理页面的 snake_case 字段一致。
+已继承的后台财务读取和个人用量明细以十进制字符串返回金额，避免浏览器 JSON number 丢失 BIGINT 精度；未知用量金额仍为 `null`。原有内部余额和用量状态接口保持原契约。后台用量输出显式字段，与管理页面的 snake_case 字段一致。
 
 后台权限由有效的 Keycloak `platform-admin` Realm role 决定。Account 的业务用户禁用或删除不自动撤销该管理角色；停止后台权限需要在身份服务撤销管理角色。后台成员变更与对应版本的成员事件在同一事务中提交。
 
@@ -32,18 +38,18 @@
 
 前端统一执行 `npm --prefix pinvou3-app run build:account-portal`；生成资源嵌入 `token-portal`。`npm --prefix pinvou3-app run test:account-platform-ui` 使用已安装的 Chrome、Chromium 或 Edge（可用 `CHROME` 指定路径），验证真实 React、BFF 客户端及二维码，API 响应受控；不能替代真实服务或 Safari 验收。
 
-当前已实现账号/组织与会话授权、钱包与平衡账本、预占结算、三渠道支付模拟、新华三商城支付宝下单与支付查询、Token 凭据加密轮换、确定性路由、OpenAI 兼容 JSON/SSE 代理、独立 Web Portal、桌面端 OIDC、可靠领域事件、OpenTelemetry/Prometheus 可观测性、生产 Helm 和恢复 Runbook。新华三待支付订单由 Billing 在服务端持续查询，客户端关闭二维码页面后仍可按商城事实完成入账。商城合同暂未提供的退款、关闭、支付回调与账单对账接口保持关闭，运营台同步禁用这些操作，不以本地模拟冒充真实能力。
+当前已实现账号/组织与会话授权、钱包与平衡账本、预占结算、三渠道支付模拟、新华三商城支付宝下单与支付查询、Token 凭据加密轮换、确定性路由、OpenAI 兼容 JSON/SSE 代理、独立 Web Portal、桌面端 OIDC、可靠领域事件、OpenTelemetry/Prometheus 可观测性、Helm 模板和恢复 Runbook。新华三待支付订单由 Billing 在服务端持续查询，客户端关闭二维码页面后仍可按商城事实完成入账。商城合同暂未提供的退款、关闭、支付回调与账单对账接口保持关闭，运营台同步禁用这些操作，不以本地模拟冒充真实能力。
 
 ## 桌面端 OIDC
 
-新账号入口由 `PINVOU_ACCOUNT_PLATFORM_ENABLED` 显式开启，默认关闭，关闭时原有 `llmapi_hub` 入口和模型路径不变。开启时还需配置：
+A06 的账号入口曾由 `PINVOU_ACCOUNT_PLATFORM_ENABLED` 显式开启。本波计划把内置模型迁移到账户 Gateway 并退役旧入口/开关；迁移是否完成须依据最终固定客户端及实际测试，不能依赖旧开关重新启用旧路径。本地独立模型继续保留。账号路径需配置：
 
 - `PINVOU_ACCOUNT_OIDC_ISSUER`，或配置 `PINVOU_ACCOUNT_OIDC_TOKEN_URL`；
 - `PINVOU_ACCOUNT_OIDC_CLIENT_ID`（公开客户端，桌面内登录必须启用 Direct Access Grants；Web Portal 仍使用 Authorization Code + PKCE）；
 - `PINVOU_ACCOUNT_SERVICE_URL`；
 - `PINVOU_TOKEN_GATEWAY_URL`。
 
-远程端点必须使用 HTTPS；仅开发和测试环境允许受控 HTTP 端点。桌面端支持原有账号/密码、中国大陆手机号/密码和手机号/短信验证码登录；新注册必须填写唯一用户名，先完成用户名、手机号和密码规则预检，再通过一次性滑块挑战及短信验证。短信可配置通用 HTTP 适配器或阿里云适配器；社区功能不要求企业商城。未配置商城时注册仍可激活本地账号和真实钱包，并使用开发支付模拟器；配置商城时独立同步任务完成后才向商城提供已验证手机号。同一手机号的短信请求至少间隔 60 秒，不区分注册或登录用途；供应商明确发送失败的请求不占用该冷却时间。密码允许英文大小写字母、数字和常用英文符号，要求 8 至 128 位且至少包含一个字母和一个数字；密码不持久化、不写日志。Refresh Token 只写入系统凭据存储，存储不可用时明确拒绝登录。内置模型运行时使用同一 OIDC 会话的 Access Token 调用 `PINVOU_TOKEN_GATEWAY_URL/v1/chat/completions`。WebView 只接收登录状态和经过路由白名单限制的业务 JSON。
+远程端点必须使用 HTTPS；仅开发和测试环境允许受控 HTTP 端点。桌面端支持原有账号/密码、中国大陆手机号/密码和手机号/短信验证码登录；新注册必须填写唯一用户名，先完成用户名、手机号和密码规则预检，再通过一次性滑块挑战及短信验证。短信可配置通用 HTTP 适配器或阿里云适配器；社区功能不要求企业商城。未配置商城时注册仍可激活本地账号和真实钱包，并使用开发支付模拟器；配置商城时独立同步任务完成后才向商城提供已验证手机号。同一手机号的短信请求至少间隔 60 秒，不区分注册或登录用途。HTTP 通用协议没有权威未接受响应，失败保留冷却；Aliyun 只有完整官方前置拒绝、显式 Success=false 且没有送达标识时解除冷却，超时或坏响应不代表未发送。密码允许英文大小写字母、数字和常用英文符号，要求 8 至 128 位且至少包含一个字母和一个数字；密码不持久化、不写日志。Refresh Token 只写入系统凭据存储，存储不可用时明确拒绝登录。内置模型运行时使用同一 OIDC 会话的 Access Token 调用 `PINVOU_TOKEN_GATEWAY_URL/v1/chat/completions`。WebView 只接收登录状态和经过路由白名单限制的业务 JSON。
 
 ## Token Gateway 安全默认值
 

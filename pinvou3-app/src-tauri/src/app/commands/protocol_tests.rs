@@ -110,7 +110,9 @@ command_protocol!(
         "account_platform_register_mobile",
         "account_platform_login_sms",
         "account_platform_logout",
-        "account_platform_request"
+        "account_platform_request",
+        "account_platform_models",
+        "account_platform_set_default_model"
     ]
 );
 command_protocol!(
@@ -276,22 +278,6 @@ command_protocol!(
         "kb_model_download"
     ]
 );
-command_protocol!(
-    llmapi_protocol,
-    "llmapi.rs",
-    [
-        "ensure_llmapi_binding",
-        "login_llmapi_user",
-        "save_llmapi_user_session",
-        "get_llmapi_status",
-        "get_llmapi_models",
-        "set_llmapi_default_model",
-        "retry_llmapi_provisioning",
-        "set_llmapi_user_enabled",
-        "get_llmapi_admin_overview"
-    ]
-);
-
 #[test]
 fn preinstalled_model_startup_commands_are_not_registered() {
     let app_entrypoint = include_str!("../../lib.rs");

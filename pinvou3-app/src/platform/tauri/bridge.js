@@ -260,8 +260,6 @@
       runtime: null,
       snapshot_path: "",
     },
-    llmApiStatus: null,
-    llmApiModels: null,
     // 「添加模型」方案:已保存模型列表 + 全局默认 id + 当前会话绑定的模型 id
     savedModels: [],
     activeModelId: null,
@@ -1649,7 +1647,6 @@
     monitor: ["monitor", "monitorError"],
     settings: ["settings", "selectedPet", "behaviorTelemetry"],
     models: ["activeModelId", "currentSessionModelId", "effectiveModelConfig", "savedModels"],
-    llmapi: ["llmApiModels", "llmApiStatus"],
     vllm: [],
     interaction: ["pinvouModal", "pinvouReviews", "pinvouSummoning", "superPermEnabled"],
     computerUse: ["computerUse"],
@@ -2490,17 +2487,6 @@
   var loadEffectiveModelConfig = settingsFeature.loadEffectiveModelConfig;
   var saveSettings = settingsFeature.saveSettings;
   var saveSettingsAndRestart = settingsFeature.saveSettingsAndRestart;
-  var refreshLlmApiOnStartup = settingsFeature.refreshLlmApiOnStartup;
-  var refreshLlmApi = settingsFeature.refreshLlmApi;
-  var getLlmApiStatus = settingsFeature.getLlmApiStatus;
-  var getLlmApiModels = settingsFeature.getLlmApiModels;
-  var setLlmApiDefaultModel = settingsFeature.setLlmApiDefaultModel;
-  var ensureLlmApiBinding = settingsFeature.ensureLlmApiBinding;
-  var loginLlmApiUser = settingsFeature.loginLlmApiUser;
-  var saveLlmApiUserSession = settingsFeature.saveLlmApiUserSession;
-  var retryLlmApiProvisioning = settingsFeature.retryLlmApiProvisioning;
-  var setLlmApiUserEnabled = settingsFeature.setLlmApiUserEnabled;
-  var getLlmApiAdminOverview = settingsFeature.getLlmApiAdminOverview;
   var saveSearchSettings = settingsFeature.saveSearchSettings;
   var saveSearchSettingsAndRestart = settingsFeature.saveSearchSettingsAndRestart;
   var submitFeedback = settingsFeature.submitFeedback;
@@ -2819,9 +2805,6 @@
       parallelLoads.push(startupAwait("bridge:refresh_super_permission", refreshSuperPerm));
     }
     await Promise.all(parallelLoads);
-    refreshLlmApiOnStartup()
-      .catch(function (e) { console.warn("load llmapi account/models failed", e); });
-    startupMark("bridge:llmapi_refresh_started");
     // 分离会话必须在同一初始化链内绑定目标 id。此前 DetachedShell 的独立 effect
     // 会与这里的 enterDraft() 并发，慢初始化时已加载的原会话会被重置成空白草稿。
     if (isDetachedWindow && detachedWindowKind === "session" && detachedWindowSessionId) {
@@ -3013,18 +2996,6 @@
       setBuiltinFeatureEnabled: setBuiltinFeatureEnabled,
     },
     feedback: { submitFeedback: submitFeedback },
-    llmapi: {
-      refreshLlmApi: refreshLlmApi,
-      getLlmApiStatus: getLlmApiStatus,
-      getLlmApiModels: getLlmApiModels,
-      setLlmApiDefaultModel: setLlmApiDefaultModel,
-      ensureLlmApiBinding: ensureLlmApiBinding,
-      loginLlmApiUser: loginLlmApiUser,
-      saveLlmApiUserSession: saveLlmApiUserSession,
-      retryLlmApiProvisioning: retryLlmApiProvisioning,
-      setLlmApiUserEnabled: setLlmApiUserEnabled,
-      getLlmApiAdminOverview: getLlmApiAdminOverview,
-    },
     vllm: {
       discoverLocalVllm: discoverLocalVllm,
     },
@@ -3167,6 +3138,9 @@
       installDependencies: installDependencies,
     },
     accountPlatform: {
+      subscribeIdentityChange: accountPlatformFeature.subscribeIdentityChange,
+      getModelCatalog: accountPlatformFeature.getModelCatalog,
+      setDefaultModel: accountPlatformFeature.setDefaultModel,
       session: accountPlatformFeature.session,
       login: accountPlatformFeature.login,
       createSliderCaptcha: accountPlatformFeature.createSliderCaptcha,

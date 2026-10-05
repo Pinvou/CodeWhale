@@ -25,9 +25,7 @@ import { groupSessionsWithProjects, resolveSessionProjectId, needsAddFolderConfi
 import { ProjectGroupHeader } from '../features/projects/ProjectGroupHeader.jsx';
 import { classifyRebindError, mergeRebindCarryoverIds } from '../features/projects/rebindErrors.js';
 import { runSessionBatch } from '../shared/session-management.js';
-import { isLlmApiAccountVisible } from '../shared/model-options.js';
 import { can, isWeb } from '../shared/platform.js';
-import { errorCode, localizedErrorMessage } from '../shared/user-facing-error.js';
 import { installGlobalMarkdownRenderer } from '../shared/markdown-renderer.js';
 import {
   acquireNativeSurfaceTransitionHide,
@@ -142,7 +140,7 @@ let appFirstRenderMarked = false;
 
 const APP_BRIDGE_STATE_DOMAINS = [
   'platform', 'sessions', 'chat', 'voice', 'knowledge', 'scheduled', 'monitor',
-  'settings', 'models', 'llmapi', 'vllm', 'interaction', 'personas',
+  'settings', 'models', 'vllm', 'interaction', 'personas',
   'memory', 'remoteControl', 'updater', 'dependencies', 'teamRelay',
   'projects', 'computerUse',
 ];
@@ -173,189 +171,6 @@ function workspaceDisplayName(path) {
   const parts = String(path || '').split(/[\\/]/).filter(Boolean);
   return parts[parts.length - 1] || String(path || '');
 }
-
-    const formatQuotaTokens = (value, language) => {
-      if (value == null || !Number.isFinite(Number(value))) return '—';
-      return `${Number(value).toLocaleString(language || 'en', { notation: 'compact', maximumFractionDigits: 2 })} tokens`;
-    };
-
-    const shortBackendUsername = (value, copy) => {
-      const name = String(value || '').trim();
-      if (!name) return copy.backendUser;
-      return name;
-    };
-
-    const llmStatusText = (status, error, copy) => {
-      if (error) return copy.status.unavailable;
-      return copy.status[status] || copy.status.unknown;
-    };
-
-    const AccountPopover = ({ open, theme, t, llmApiStatus, loading, accountErrorCode, onClose, onRefresh, onLogin, collapsed }) => {
-      const ref = useRef(null);
-      const [loginUsername, setLoginUsername] = useState('');
-      const [loginPassword, setLoginPassword] = useState('');
-      const [loginErrorCode, setLoginErrorCode] = useState(null);
-      const [loggingIn, setLoggingIn] = useState(false);
-      const isDark = theme === 'dark';
-      const accountCopy = t.uiAccount;
-      const backendUsername = (llmApiStatus && llmApiStatus.backend_username) || '';
-      const backendDisplayName = (llmApiStatus && llmApiStatus.backend_display_name) || '';
-      const displayName = shortBackendUsername(backendDisplayName || backendUsername, accountCopy);
-      const displayId = backendUsername || accountCopy.backendAccount;
-      const accountErrorMessage = accountErrorCode
-        ? localizedErrorMessage({ code: accountErrorCode }, accountCopy.errors, accountCopy.syncFailed)
-        : '';
-      const loginErrorMessage = loginErrorCode
-        ? localizedErrorMessage({ code: loginErrorCode }, accountCopy.errors, accountCopy.builtinLoginFailed)
-        : '';
-      useEffect(() => {
-        if (!open) return;
-        const onMouseDown = (e) => {
-          if (ref.current && !ref.current.contains(e.target)) onClose && onClose();
-        };
-        const onKey = (e) => { if (e.key === 'Escape') onClose && onClose(); };
-        window.addEventListener('mousedown', onMouseDown);
-        window.addEventListener('keydown', onKey);
-        return () => {
-          window.removeEventListener('mousedown', onMouseDown);
-          window.removeEventListener('keydown', onKey);
-        };
-      }, [open, onClose]);
-      useEffect(() => {
-        if (open && backendUsername) setLoginUsername(prev => prev || backendUsername);
-      }, [open, backendUsername]);
-      if (!open) return null;
-
-      const quota = llmApiStatus && llmApiStatus.quota;
-      const status = llmApiStatus && llmApiStatus.provisioning_status;
-      const remaining = quota ? quota.remaining_tokens : null;
-      const limit = quota ? quota.limit_tokens : null;
-      const used = quota ? quota.used_tokens : null;
-      const pct = limit ? Math.max(0, Math.min(100, Math.round((Number(remaining || 0) / Number(limit)) * 100))) : 0;
-      const panelPos = collapsed ? 'left-full bottom-0 ml-3' : 'left-0 bottom-full mb-2';
-      const needsLogin = !!(llmApiStatus && llmApiStatus.auto_login_failed && onLogin);
-      const submitLogin = async (e) => {
-        e.preventDefault();
-        if (!onLogin || loggingIn) return;
-        setLoginErrorCode(null);
-        setLoggingIn(true);
-        try {
-          await onLogin(loginUsername, loginPassword);
-          setLoginPassword('');
-        } catch (err) {
-          setLoginErrorCode(errorCode(err) || 'unknown');
-        } finally {
-          setLoggingIn(false);
-        }
-      };
-
-      return (
-        <div
-          ref={ref}
-          className={`absolute ${panelPos} w-[268px] rounded-[22px] p-3 shadow-2xl z-[80] border backdrop-blur-xl ${
-            isDark ? 'bg-[#202124]/95 border-white/10 text-[#E3E3E3]' : 'bg-white/95 border-black/10 text-[#1F1F1F]'
-          }`}
-        >
-          <div className="flex items-center gap-3 px-1.5 pb-3">
-            <div className="w-11 h-11 rounded-2xl bg-gradient-to-br from-[#19D3A2] to-[#0B57D0] flex items-center justify-center text-white shadow-lg shadow-emerald-500/20">
-              <User size={20} />
-            </div>
-            <div className="min-w-0 flex-1">
-              <div className="text-[15px] font-semibold truncate">{displayName}</div>
-              <div className={`text-[12px] truncate ${isDark ? 'text-[#9AA0A6]' : 'text-[#6F7378]'}`}>{displayId}</div>
-            </div>
-            <button
-              type="button"
-              onClick={onClose}
-              className={`w-8 h-8 rounded-full flex items-center justify-center transition-colors ${isDark ? 'hover:bg-white/10' : 'hover:bg-black/5'}`}
-              title={accountCopy.close}
-            >
-              <X size={16} />
-            </button>
-          </div>
-
-          <div className={`rounded-2xl border p-3 ${isDark ? 'bg-[#131314] border-white/10' : 'bg-[#F8FAFD] border-black/5'}`}>
-            <div className="flex items-center justify-between gap-3">
-              <div className="flex items-center gap-2 min-w-0">
-                <Sparkles size={17} className="text-[#10B981] shrink-0" />
-                <span className="text-[14px] font-medium truncate">{accountCopy.availableQuota}</span>
-              </div>
-              <button
-                type="button"
-                onClick={onRefresh}
-                disabled={loading}
-                className={`w-7 h-7 rounded-full flex items-center justify-center transition-colors ${isDark ? 'hover:bg-white/10 disabled:text-[#5F6368]' : 'hover:bg-black/5 disabled:text-[#C4C7C5]'}`}
-                title={accountCopy.refreshQuota}
-              >
-                <RefreshCw size={14} className={loading ? 'animate-spin' : ''} />
-              </button>
-            </div>
-            {quota ? (
-              <div className="mt-3 space-y-1.5 text-[13px]">
-                {[
-                  [accountCopy.monthlyQuota, formatQuotaTokens(limit, t.langTag)],
-                  [accountCopy.used, formatQuotaTokens(used, t.langTag)],
-                  [accountCopy.remaining, formatQuotaTokens(remaining, t.langTag)],
-                ].map(([label, value]) => (
-                  <div key={label} className="flex items-center justify-between gap-3">
-                    <span className={isDark ? 'text-[#9AA0A6]' : 'text-[#6F7378]'}>{label}</span>
-                    <span className="font-medium tabular-nums text-right">{value}</span>
-                  </div>
-                ))}
-              </div>
-            ) : (
-              <div className={`mt-3 text-[13px] ${isDark ? 'text-[#9AA0A6]' : 'text-[#6F7378]'}`}>
-                {loading ? accountCopy.syncing : llmStatusText(status, accountErrorCode, accountCopy)}
-              </div>
-            )}
-            {needsLogin && (
-              <form className="mt-3 space-y-2" onSubmit={submitLogin}>
-                <input
-                  value={loginUsername}
-                  onChange={(e) => setLoginUsername(e.target.value)}
-                  disabled={loading || loggingIn}
-                  placeholder={accountCopy.username}
-                  autoComplete="username"
-                  className={`w-full h-9 rounded-xl px-3 text-[13px] outline-none border ${
-                    isDark ? 'bg-[#202124] border-white/10 text-[#E3E3E3] placeholder:text-[#6F7378]' : 'bg-white border-black/10 text-[#1F1F1F] placeholder:text-[#9AA0A6]'
-                  }`}
-                />
-                <input
-                  value={loginPassword}
-                  onChange={(e) => setLoginPassword(e.target.value)}
-                  disabled={loading || loggingIn}
-                  placeholder={accountCopy.password}
-                  type="password"
-                  autoComplete="current-password"
-                  className={`w-full h-9 rounded-xl px-3 text-[13px] outline-none border ${
-                    isDark ? 'bg-[#202124] border-white/10 text-[#E3E3E3] placeholder:text-[#6F7378]' : 'bg-white border-black/10 text-[#1F1F1F] placeholder:text-[#9AA0A6]'
-                  }`}
-                />
-                {(accountErrorMessage || loginErrorMessage) && (
-                  <div className="text-[12px] leading-snug text-[#EA4335] break-words">
-                    {loginErrorMessage || accountErrorMessage}
-                  </div>
-                )}
-                <button
-                  type="submit"
-                  disabled={loading || loggingIn || !loginUsername.trim() || !loginPassword}
-                  className={`w-full h-9 rounded-xl text-[13px] font-semibold transition-colors ${
-                    isDark ? 'bg-[#10B981] text-white disabled:bg-white/10 disabled:text-[#6F7378]' : 'bg-[#10B981] text-white disabled:bg-black/5 disabled:text-[#9AA0A6]'
-                  }`}
-                >
-                  {loggingIn ? accountCopy.loggingIn : accountCopy.loginAndSync}
-                </button>
-              </form>
-            )}
-            {quota && (
-              <div className={`mt-3 h-2 rounded-full overflow-hidden ${isDark ? 'bg-white/10' : 'bg-black/10'}`}>
-                <div className="h-full rounded-full bg-[#10B981]" style={{ width: pct + '%' }} />
-              </div>
-            )}
-          </div>
-        </div>
-      );
-    };
 
 // Per-item callback cache behind the RecentItem memo: sidebar task items
 // (item) are derived by useMemo and keep stable references while the
@@ -503,9 +318,6 @@ const NAV_PREFETCH = {
       const systemDark = useSystemDarkMode();
       const [colorScheme, setColorScheme] = useState('system');
       const activeTheme = resolveTheme(colorScheme, systemDark);
-      const [llmAccountPopoverOpen, setLlmAccountPopoverOpen] = useState(false);
-      const [llmApiLoading, setLlmApiLoading] = useState(false);
-      const [llmApiErrorCode, setLlmApiErrorCode] = useState(null);
       const [teamRelayEnabled, setTeamRelayEnabled] = useState(() => loadTeamRelayAccess());
       // Browser state is scoped to workspace sessions: switching chats only shows
       // that chat's WebView2. The login profile remains globally shared by the
@@ -1506,59 +1318,11 @@ const NAV_PREFETCH = {
         window.PinvouHostFilePickerStrings = misc.hostFilePicker;
         // platform/web/bootstrap.js 的 invoke 拒绝错误文案（web bootstrap 内置中文兜底）。
         window.PinvouWebClientStrings = misc.webClientErrors;
-        // platform/tauri/bridge 下的非模块脚本通过同一入口读取当前语言。
-        window.PinvouTauriBridgeStrings = misc.tauriBridge;
       }, [t]);
       // 有可用新版 → 侧边栏设置图标亮红点（不弹窗不打断）
       const hasUpdate = !!(bs && bs.updateInfo && bs.updateInfo.available);
       const updateNoticePreviewEnabled = !bridge.available
         && !!window.UpdateNoticeLogic?.previewEnabled?.(window.location);
-      const llmAccountStatus = bs && bs.llmApiStatus;
-      const llmAccountVisible = isLlmApiAccountVisible(llmAccountStatus);
-      const llmAccountUsername = llmAccountStatus && llmAccountStatus.backend_username;
-      const llmAccountDisplayName = llmAccountStatus && llmAccountStatus.backend_display_name;
-      const llmAccountName = shortBackendUsername(llmAccountDisplayName || llmAccountUsername, t.uiAccount);
-      const refreshLlmApiStatus = useCallback(async () => {
-        if (!bridge.available || !bridge.llmapi.getLlmApiStatus) return;
-        setLlmApiLoading(true);
-        setLlmApiErrorCode(null);
-        try {
-          await bridge.llmapi.getLlmApiStatus();
-        } catch (e) {
-          const code = errorCode(e) || 'unknown';
-          console.error('llm api quota refresh failed:', code);
-          setLlmApiErrorCode(code);
-        } finally {
-          setLlmApiLoading(false);
-        }
-      }, []);
-      const loginLlmApiUser = useCallback(async (username, password) => {
-        if (!bridge.available || !bridge.llmapi.loginLlmApiUser) {
-          const error = new Error('login_unavailable');
-          error.code = 'login_unavailable';
-          throw error;
-        }
-        setLlmApiLoading(true);
-        setLlmApiErrorCode(null);
-        try {
-          await bridge.llmapi.loginLlmApiUser(username, password);
-          if (bridge.llmapi.getLlmApiStatus) await bridge.llmapi.getLlmApiStatus();
-        } catch (e) {
-          console.error('llm api login failed:', errorCode(e) || 'unknown');
-          throw e;
-        } finally {
-          setLlmApiLoading(false);
-        }
-      }, []);
-
-      useEffect(() => {
-        if (llmAccountPopoverOpen) refreshLlmApiStatus();
-      }, [llmAccountPopoverOpen, refreshLlmApiStatus]);
-
-      useEffect(() => {
-        if (llmAccountPopoverOpen && !llmAccountVisible) setLlmAccountPopoverOpen(false);
-      }, [llmAccountPopoverOpen, llmAccountVisible]);
-
       const isWebAccessConnected = !!(bs && bs.webAccess && bs.webAccess.web_client_connected);
       function handleOpenWebAccess() {
         if (!can('webAccessAdmin')) return;
@@ -4358,43 +4122,8 @@ const NAV_PREFETCH = {
               {accountPlatformEnabled && <ViewErrorBoundary t={t}><Suspense fallback={null}>
                 <LazyAccountPlatformSidebarEntry transport={bridge.accountPlatform} copy={t.uiAccountPlatform}
                   language={language} theme={activeTheme} collapsed={!isSidebarOpen}
-                  onOpen={() => setLlmAccountPopoverOpen(false)}
                   onOpenCenter={() => navigateFromScheduledRun('accountPlatform')} />
               </Suspense></ViewErrorBoundary>}
-              {llmAccountVisible && (
-              <div className={`relative ${isSidebarOpen ? 'w-full' : ''}`}>
-                <button
-                  type="button"
-                  data-testid="llmapi-account-button"
-                  onClick={() => setLlmAccountPopoverOpen(v => !v)}
-                  title={llmAccountUsername || llmAccountName}
-                  className={`flex items-center rounded-xl transition-colors ${isSidebarOpen ? 'w-full px-2 py-1.5 gap-3 text-left' : 'justify-center w-10 h-10'} ${activeTheme === 'dark' ? 'hover:bg-[#333537] active:bg-[#3A3C3E]' : 'hover:bg-[#E1E5EA] active:bg-[#D8DCE1]'}`}
-                >
-                  <span className="w-8 h-8 shrink-0 rounded-lg bg-gradient-to-br from-[#19D3A2] to-[#0B57D0] flex items-center justify-center text-white">
-                    <User size={17} />
-                  </span>
-                  {isSidebarOpen && (
-                    <span className="min-w-0 flex-1">
-                      <span className="block text-[14px] font-medium leading-none truncate">{llmAccountName}</span>
-                      <span className={`block text-[11px] mt-1 truncate ${activeTheme === 'dark' ? 'text-[#9AA0A6]' : 'text-[#6F7378]'}`}>{t.uiAccount.viewQuota}</span>
-                    </span>
-                  )}
-                  {isSidebarOpen && <ChevronRight size={16} className="shrink-0 opacity-60" />}
-                </button>
-                <AccountPopover
-                  open={llmAccountPopoverOpen}
-                  theme={activeTheme}
-                  t={t}
-                  llmApiStatus={bs && bs.llmApiStatus}
-                  loading={llmApiLoading}
-                  accountErrorCode={llmApiErrorCode}
-                  collapsed={!isSidebarOpen}
-                  onClose={() => setLlmAccountPopoverOpen(false)}
-                  onRefresh={refreshLlmApiStatus}
-                  onLogin={loginLlmApiUser}
-                />
-              </div>
-              )}
               <div className={`${isSidebarOpen ? 'flex items-center justify-between gap-2' : 'flex flex-col items-center gap-3'}`}>
                 {!isSidebarOpen && (
                   <>

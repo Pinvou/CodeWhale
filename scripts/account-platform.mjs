@@ -93,6 +93,8 @@ function ensureNodeModules() {
 
 function verify() {
   ensureNodeModules();
+  run(process.execPath, ['--test', path.join(repositoryRoot, 'scripts', 'tests', 'check-account-platform-tasks.test.mjs')]);
+  run(process.execPath, [path.join(repositoryRoot, 'scripts', 'check-account-platform-tasks.mjs')]);
   run(executable('go'), ['test', '-tags=nomsgpack', './...'], { cwd: platformRoot });
   run(executable('go'), ['vet', '-tags=nomsgpack', './...'], { cwd: platformRoot });
   runNpm(['test'], { cwd: platformRoot });
@@ -104,7 +106,7 @@ function compose(action) {
   if (!existsSync(composeEnv)) {
     throw new Error(`Compose environment is missing: copy ${composeEnv}.example to ${composeEnv} and replace every placeholder`);
   }
-  run('docker', ['compose', '--env-file', composeEnv, '-f', composeFile, ...(action === 'up' ? ['--profile', 'real-newapi'] : []), action, ...(action === 'up' ? ['--build', '-d', '--wait'] : [])]);
+  run('docker', ['compose', '--env-file', composeEnv, '-f', composeFile, '--profile', 'real-newapi', action, ...(action === 'up' ? ['--build', '-d', '--wait'] : [])]);
 }
 
 function composeTest(testFiles) {

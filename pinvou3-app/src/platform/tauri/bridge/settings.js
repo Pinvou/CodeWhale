@@ -10,7 +10,6 @@
   var notify = context.notify;
   var invoke = context.invoke;
   var listen = context.listen;
-  var authoritativeAccountRevision = 0;
   var behaviorTelemetryStatusPollTimer = null;
 
   function behaviorTelemetryControlPending(status) {
@@ -39,80 +38,9 @@
       }
     }, delay);
   }
-  function isBuiltinLlmApiModelId(modelId) {
-    if (modelId === "builtin_llmapi") return true;
-    return (state.savedModels || []).some(function (model) {
-      return model && model.id === modelId && model.kind === "builtin_llmapi";
-    });
-  }
-
-  function selectedModelIdForSession(sessionId) {
-    if (!sessionId || sessionId === state.activeSessionId) {
-      return state.currentSessionModelId || state.activeModelId || null;
-    }
-    return state.activeModelId || null;
-  }
-
-  function llmApiAccountIsAuthoritativelyUnavailable(status) {
-    if (!status || status.stale === true) return false;
-    return status.backend_user_state === "not_exists"
-      || status.enabled === false
-      || String(status.provisioning_status || "").trim().toLowerCase() === "disabled";
-  }
-
-  function modelAvailabilityError(sessionId) {
-    if (!llmApiAccountIsAuthoritativelyUnavailable(state.llmApiStatus)) return null;
-    if (!isBuiltinLlmApiModelId(selectedModelIdForSession(sessionId))) return null;
-    var copy = root.PinvouTauriBridgeStrings || {};
-    return copy.builtinModelUnavailable || "当前账户的内置模型已不可用，请先选择其他模型";
-  }
-
-  function authoritativeLlmApiErrorCode(error) {
-    if (error && typeof error === "object" && (error.code === "service_disabled" || error.code === "user_not_found")) {
-      return error.code;
-    }
-    var parts = [];
-    if (typeof error === "string") parts.push(error);
-    if (error && typeof error === "object") {
-      if (error.message) parts.push(error.message);
-      try { parts.push(JSON.stringify(error)); } catch (_) {}
-    }
-    var match = parts.join(" ").toLowerCase().match(/\b(service_disabled|user_not_found)\s*:/);
-    return match ? match[1] : null;
-  }
-
-  function commandCanReportLlmApiAccountError(command) {
-    if (String(command || "").indexOf("llmapi") >= 0) return true;
-    return isBuiltinLlmApiModelId(selectedModelIdForSession(state.activeSessionId));
-  }
-
-  function applyAuthoritativeLlmApiError(error, command) {
-    var code = authoritativeLlmApiErrorCode(error);
-    if (!code || !commandCanReportLlmApiAccountError(command)) return false;
-    authoritativeAccountRevision += 1;
-    var previous = state.llmApiStatus || {};
-    state.llmApiStatus = Object.assign({}, previous, {
-      backend_user_exists: false,
-      backend_user_state: "not_exists",
-      stale: false,
-      backend_username: null,
-      backend_display_name: null,
-      quota: null,
-      auto_login_failed: true,
-      last_error_code: code,
-      last_error_message: String(error && error.message ? error.message : error || ""),
-    });
-    state.llmApiModels = null;
-    if (isBuiltinLlmApiModelId(selectedModelIdForSession(state.activeSessionId))) {
-      state.effectiveModelConfig = null;
-    }
-    notify();
-    return true;
-  }
-
-  function observeInvokeError(error, command) {
-    return applyAuthoritativeLlmApiError(error, command);
-  }
+  // Native preparation verifies Account Platform authorization per request.
+  function modelAvailabilityError() { return null; }
+  function observeInvokeError() { return false; }
   // ── Settings ─────────────────────────────────────────────────────
   // 桌宠开关由 Rust set_pet_enabled 直接写盘(设置页/宠物右键/快捷图标共用),
   // 这里同步进内存副本，保证设置界面立即反映专用命令返回的桌宠状态。
@@ -260,219 +188,6 @@
     });
   }
 
-  function llmApiBackendUserState(status) {
-    if (!status) return "unknown";
-    if (status.stale === true) return "unknown";
-    if (status.backend_user_state === "exists" || status.backend_user_state === "not_exists" || status.backend_user_state === "unknown") {
-      return status.backend_user_state;
-    }
-    return status.backend_user_exists ? "exists" : "not_exists";
-  }
-
-  function llmApiAccountKnownExists(status) {
-    return llmApiBackendUserState(status) === "exists";
-  }
-
-  function llmApiAccountStateIsKnown(status) {
-    var backendUserState = llmApiBackendUserState(status);
-    return backendUserState === "exists" || backendUserState === "not_exists";
-  }
-
-  function llmApiBuiltinIsReady(status) {
-    return llmApiAccountKnownExists(status)
-      && status.stale !== true
-      && status.enabled === true
-      && String(status.provisioning_status || "").trim().toLowerCase() === "ready";
-  }
-
-  var LLMAPI_STARTUP_RETRY_DELAYS_MS = [2000, 5000, 10000, 30000];
-
-  function llmApiStartupRetryDelay(attempt) {
-    return LLMAPI_STARTUP_RETRY_DELAYS_MS[
-      Math.min(attempt, LLMAPI_STARTUP_RETRY_DELAYS_MS.length - 1)
-    ];
-  }
-
-  function waitForLlmApiStartupRetry(delayMs) {
-    return new Promise(function (resolve) { setTimeout(resolve, delayMs); });
-  }
-
-  async function refreshLlmApiState(options) {
-    options = options || {};
-    var refreshModels = options.refreshModels !== false;
-    var refreshSavedModels = !!options.refreshSavedModels;
-    var status = null;
-    var models = null;
-    var refreshRevision = authoritativeAccountRevision;
-    try {
-      status = await invoke("get_llmapi_status");
-      if (llmApiAccountIsAuthoritativelyUnavailable(status)) {
-        authoritativeAccountRevision += 1;
-        refreshRevision = authoritativeAccountRevision;
-      } else if (refreshRevision !== authoritativeAccountRevision) {
-        return { status: state.llmApiStatus, models: null, superseded: true };
-      }
-      // Preserve an established identity across transient failures, but expose
-      // authentication failures so the account recovery form remains reachable.
-      if (status.stale === true && status.auto_login_failed === true && llmApiAccountKnownExists(state.llmApiStatus)) {
-        status = Object.assign({}, state.llmApiStatus, status, {
-          backend_user_exists: true,
-          backend_user_state: "exists",
-        });
-        state.llmApiStatus = status;
-        state.effectiveModelConfig = null;
-      } else if (llmApiAccountStateIsKnown(status) || !llmApiAccountStateIsKnown(state.llmApiStatus)) {
-        state.llmApiStatus = status;
-        if (llmApiAccountIsAuthoritativelyUnavailable(status)) {
-          state.llmApiModels = null;
-          state.effectiveModelConfig = null;
-        } else if (modelAvailabilityError(state.activeSessionId)) {
-          state.effectiveModelConfig = null;
-        }
-      }
-    } catch (e) {
-      console.warn("get llmapi status failed", e);
-      // Keep the last known account state. A transport failure is not proof
-      // that the backend account disappeared.
-      notify();
-      throw e;
-    }
-    if (refreshModels && llmApiBuiltinIsReady(status)) {
-      try {
-        var modelsRevision = authoritativeAccountRevision;
-        models = await invoke("get_llmapi_models");
-        if (modelsRevision === authoritativeAccountRevision && llmApiBuiltinIsReady(state.llmApiStatus)) {
-          state.llmApiModels = models;
-        }
-      } catch (e) {
-        console.warn("get llmapi models failed", e);
-        // Preserve the last successfully synchronized model list.
-        notify();
-        throw e;
-      }
-    } else if (llmApiAccountIsAuthoritativelyUnavailable(status)) {
-      state.llmApiModels = null;
-    }
-    if (refreshSavedModels) await loadModels();
-    notify();
-    return { status: status, models: models };
-  }
-
-  async function getLlmApiStatus() {
-    var result = await refreshLlmApiState({ refreshModels: false });
-    return result.status;
-  }
-
-  async function getLlmApiModels() {
-    if (!llmApiBuiltinIsReady(state.llmApiStatus)) {
-      state.llmApiModels = null;
-      notify();
-      return null;
-    }
-    var modelsRevision = authoritativeAccountRevision;
-    var models = await invoke("get_llmapi_models");
-    if (modelsRevision === authoritativeAccountRevision && llmApiBuiltinIsReady(state.llmApiStatus)) {
-      state.llmApiModels = models;
-    }
-    notify();
-    return models;
-  }
-
-  async function refreshLlmApi() {
-    return await refreshLlmApiState({ refreshModels: true, refreshSavedModels: true });
-  }
-
-  async function refreshLlmApiOnStartup() {
-    var retryAttempt = 0;
-    while (true) {
-      var status = null;
-      try {
-        status = await getLlmApiStatus();
-      } catch (e) {
-        console.warn("load llmapi account status failed", e);
-      }
-
-      if (llmApiAccountStateIsKnown(status)) {
-        if (llmApiBuiltinIsReady(status)) {
-          try {
-            await getLlmApiModels();
-          } catch (e) {
-            console.warn("load llmapi models failed", e);
-          }
-        }
-        try {
-          await loadModels();
-        } catch (e) {
-          console.warn("reload saved models after llmapi account refresh failed", e);
-        }
-        return status;
-      }
-
-      var retryDelayMs = llmApiStartupRetryDelay(retryAttempt);
-      retryAttempt += 1;
-      console.warn("llmapi account status is unknown; retrying in " + retryDelayMs + "ms");
-      await waitForLlmApiStartupRetry(retryDelayMs);
-    }
-  }
-
-  async function setLlmApiDefaultModel(model) {
-    var models = await invoke("set_llmapi_default_model", { model: model });
-    state.llmApiModels = models;
-    await loadSettings();
-    await loadModels();
-    notify();
-    return models;
-  }
-
-  async function ensureLlmApiBinding() {
-    var result = await invoke("ensure_llmapi_binding");
-    await refreshLlmApiState({ refreshSavedModels: true });
-    return result;
-  }
-
-  async function prepareBackendManagedModel(modelId) {
-    if (!isBuiltinLlmApiModelId(modelId)) return;
-    try {
-      await ensureLlmApiBinding();
-    } catch (error) {
-      // 选择动作已经生效；发送消息时会再次执行权威校验并把可读错误返回给用户。
-      console.warn("prepare built-in model credential after selection failed", error);
-    }
-  }
-
-  async function loginLlmApiUser(username, password) {
-    var result = await invoke("login_llmapi_user", { username: username, password: password });
-    await refreshLlmApiState({ refreshSavedModels: true });
-    return result;
-  }
-
-  async function saveLlmApiUserSession(userId, accessToken) {
-    var result = await invoke("save_llmapi_user_session", { userId: userId, accessToken: accessToken });
-    await refreshLlmApiState({ refreshSavedModels: true });
-    return result;
-  }
-
-  async function retryLlmApiProvisioning(pinvouUserId, deviceBindingId) {
-    var result = await invoke("retry_llmapi_provisioning", { pinvouUserId: pinvouUserId, deviceBindingId: deviceBindingId });
-    await refreshLlmApiState({ refreshSavedModels: true });
-    return result;
-  }
-
-  async function setLlmApiUserEnabled(pinvouUserId, enabled) {
-    var result = await invoke("set_llmapi_user_enabled", { pinvouUserId: pinvouUserId, enabled: enabled });
-    await refreshLlmApiState({ refreshSavedModels: true });
-    return result;
-  }
-
-  async function getLlmApiAdminOverview(query, status, limit, offset) {
-    return await invoke("get_llmapi_admin_overview", {
-      query: query || null,
-      status: status || null,
-      limit: limit == null ? null : limit,
-      offset: offset == null ? null : offset,
-    });
-  }
-
   async function submitFeedback(request) {
     return await invoke("submit_feedback", { request: request });
   }
@@ -527,7 +242,7 @@
  }
  function hasConfiguredUserModel() {
    return (state.savedModels || []).some(item => {
-     if (item && item.kind === 'builtin_llmapi') return false;
+     if (item && item.kind === 'builtin_account_platform') return false;
      const credential = item.credential_state || (item.has_secret ? 'configured' : 'missing');
      return credential === 'configured' || credential === 'env_override';
    });
@@ -587,7 +302,6 @@
     await loadModels();
     await loadSettings();
     await loadEffectiveModelConfig();
-    await prepareBackendManagedModel(id);
   }
   // 读某会话当前绑定的模型 id(切会话时刷新 chip)。
   async function loadSessionModel(sessionId) {
@@ -608,7 +322,6 @@
     if (sessionId) {
       await invoke("set_session_model", { sessionId: sessionId, modelId: modelId });
       await loadSessionModel(sessionId);
-      await prepareBackendManagedModel(modelId);
     } else {
       await setActiveModel(modelId);
     }
@@ -665,17 +378,6 @@
       saveSettingsAndRestart: saveSettingsAndRestart,
       observeInvokeError: observeInvokeError,
       modelAvailabilityError: modelAvailabilityError,
-      refreshLlmApiOnStartup: refreshLlmApiOnStartup,
-      refreshLlmApi: refreshLlmApi,
-      getLlmApiStatus: getLlmApiStatus,
-      getLlmApiModels: getLlmApiModels,
-      setLlmApiDefaultModel: setLlmApiDefaultModel,
-      ensureLlmApiBinding: ensureLlmApiBinding,
-      loginLlmApiUser: loginLlmApiUser,
-      saveLlmApiUserSession: saveLlmApiUserSession,
-      retryLlmApiProvisioning: retryLlmApiProvisioning,
-      setLlmApiUserEnabled: setLlmApiUserEnabled,
-      getLlmApiAdminOverview: getLlmApiAdminOverview,
       saveSearchSettings: saveSearchSettings,
       saveSearchSettingsAndRestart: saveSearchSettingsAndRestart,
       submitFeedback: submitFeedback,

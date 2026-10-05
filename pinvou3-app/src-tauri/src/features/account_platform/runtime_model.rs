@@ -1,6 +1,4 @@
-use std::time::{Duration, Instant};
-
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
 use tauri::{AppHandle, Manager};
 
@@ -8,26 +6,23 @@ use crate::features::assistant::runtime_model::{
     ModelCredentialMode, PreparedRuntimeModel, RuntimeModelCredential, RuntimeModelProvider,
     RuntimeModelRequest,
 };
-use crate::platform::credential_store::{CredentialStore, SystemCredentialStore};
 use crate::platform::prefs::SavedModel;
-
-const PREPARE_TIMEOUT: Duration = Duration::from_secs(25);
 
 /// Official 内置模型的运行时提供器。
 ///
 /// 公共 EnginePool 只认识 RuntimeModelProvider；账户开通、凭据读取和内置模型路由
 /// 都封装在这里，避免聊天、定时任务和 bridge 各自维护一套专用分支。
 #[derive(Clone, Default)]
-pub(crate) struct LlmApiRuntimeModelProvider {
+pub(crate) struct AccountPlatformRuntimeModelProvider {
     app: Option<AppHandle>,
 }
 
-impl LlmApiRuntimeModelProvider {
+impl AccountPlatformRuntimeModelProvider {
     pub(crate) fn new(app: AppHandle) -> Self {
         Self { app: Some(app) }
     }
 
-    async fn prepare_account_model(&self, mut model: SavedModel) -> Result<PreparedRuntimeModel> {
+    async fn prepare_account_model(&self, model: SavedModel) -> Result<PreparedRuntimeModel> {
         let result: Result<PreparedRuntimeModel> = async {
             let account = self
                 .app
@@ -40,14 +35,7 @@ impl LlmApiRuntimeModelProvider {
                     .chat_runtime_authorization()
                     .await
                     .map_err(|error| anyhow!(error))?;
-            model.base_url = authorization.base_url;
-            Ok(PreparedRuntimeModel {
-                model,
-                credential: Some(RuntimeModelCredential::account_platform_access_token(
-                    authorization.access_token,
-                )?),
-                revision: Some(authorization.revision),
-            })
+            prepare_authorized_model(model, authorization)
         }
         .await;
         // This source boundary distinguishes account-runtime failures from
@@ -56,36 +44,29 @@ impl LlmApiRuntimeModelProvider {
     }
 }
 
-fn prepare_builtin_model() -> Result<PreparedRuntimeModel> {
-    crate::features::llmapi_hub::provisioning::ensure_binding_for_current_user()
-        .map_err(|error| anyhow!(error.to_tauri_error()))?;
-    let model =
-        crate::features::llmapi_hub::provisioning::ready_saved_model_from_local_binding_system()
-            .map_err(|error| anyhow!(error.to_tauri_error()))?;
-    let reference = model
-        .credential_ref
-        .clone()
-        .context("内置模型凭据引用缺失")?;
-    let api_key = SystemCredentialStore::new()
-        .get(&reference)?
-        .context("内置模型凭据缺失，请重试开通")?;
-    let credential = RuntimeModelCredential::api_key(api_key)?;
-
+/// Final mapping used by the production provider after verified authorization.
+pub(super) fn prepare_authorized_model(
+    mut model: SavedModel,
+    authorization: super::ChatRuntimeAuthorization,
+) -> Result<PreparedRuntimeModel> {
+    model.base_url = authorization.base_url;
     Ok(PreparedRuntimeModel {
         model,
-        credential: Some(credential),
-        revision: Some(format!("credential-v{}", reference.version)),
+        credential: Some(RuntimeModelCredential::account_platform_access_token(
+            authorization.access_token,
+        )?),
+        revision: Some(authorization.revision),
     })
 }
 
 #[async_trait]
-impl RuntimeModelProvider for LlmApiRuntimeModelProvider {
+impl RuntimeModelProvider for AccountPlatformRuntimeModelProvider {
     fn credential_mode(
         &self,
         model: &SavedModel,
         user_api_key_required: bool,
     ) -> ModelCredentialMode {
-        if model.is_builtin_llmapi() {
+        if model.is_builtin_account_platform() {
             ModelCredentialMode::BackendManaged
         } else if user_api_key_required {
             ModelCredentialMode::UserManaged
@@ -95,40 +76,16 @@ impl RuntimeModelProvider for LlmApiRuntimeModelProvider {
     }
 
     async fn prepare(&self, request: RuntimeModelRequest) -> Result<PreparedRuntimeModel> {
-        if !request.model.is_builtin_llmapi() {
+        if !request.model.is_builtin_account_platform() {
             return Ok(PreparedRuntimeModel::unchanged(request.model));
         }
-
-        if crate::features::account_platform::account_platform_enabled() {
-            return self.prepare_account_model(request.model).await;
-        }
-
-        let started_at = Instant::now();
-        log::info!(
-            "[pinvou3][runtime_model] builtin preparation start sid={} scheduled_unattended={}",
-            request.session_id,
-            request.scheduled_unattended
-        );
-        let task = tokio::task::spawn_blocking(prepare_builtin_model);
-        let prepared = match tokio::time::timeout(PREPARE_TIMEOUT, task).await {
-            Ok(Ok(result)) => result,
-            Ok(Err(error)) => Err(anyhow!("内置模型凭据准备任务失败：{error}")),
-            Err(_) => {
-                bail!("内置模型凭据准备超时，请稍后重试");
-            }
-        }?;
-        log::info!(
-            "[pinvou3][runtime_model] builtin preparation ok sid={} elapsed_ms={}",
-            request.session_id,
-            started_at.elapsed().as_millis()
-        );
-        Ok(prepared)
+        self.prepare_account_model(request.model).await
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::LlmApiRuntimeModelProvider;
+    use super::AccountPlatformRuntimeModelProvider;
     use crate::features::assistant::runtime_model::{
         ModelCredentialMode, RuntimeModelProvider, RuntimeModelRequest,
     };
@@ -161,9 +118,9 @@ mod tests {
 
     #[test]
     fn builtin_model_uses_backend_managed_credentials() {
-        let provider = LlmApiRuntimeModelProvider::default();
+        let provider = AccountPlatformRuntimeModelProvider::default();
         assert_eq!(
-            provider.credential_mode(&SavedModel::builtin_llmapi(), true),
+            provider.credential_mode(&SavedModel::builtin_account_platform(), true),
             ModelCredentialMode::BackendManaged
         );
         assert_eq!(
@@ -173,8 +130,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ordinary_model_does_not_touch_private_provisioning() {
-        let provider = LlmApiRuntimeModelProvider::default();
+    async fn ordinary_model_does_not_touch_account_platform() {
+        let provider = AccountPlatformRuntimeModelProvider::default();
         let prepared = provider
             .prepare(RuntimeModelRequest {
                 session_id: "session-1".to_string(),
@@ -191,8 +148,8 @@ mod tests {
 
     #[tokio::test]
     async fn account_runtime_error_keeps_source_and_static_code_for_chat_localization() {
-        let error = LlmApiRuntimeModelProvider::default()
-            .prepare_account_model(SavedModel::builtin_llmapi())
+        let error = AccountPlatformRuntimeModelProvider::default()
+            .prepare_account_model(SavedModel::builtin_account_platform())
             .await
             .err()
             .expect("an absent app runtime cannot prepare account credentials");

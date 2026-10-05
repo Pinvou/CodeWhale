@@ -43,6 +43,7 @@ components:
             - TOKEN_FORBIDDEN
             - TOKEN_ROUTE_AMBIGUOUS
             - TOKEN_ROUTE_UNAVAILABLE
+            - MODEL_CATALOG_UNAVAILABLE
             - CREDENTIAL_VALIDATION_FAILED
             - RECHARGE_CREATE_FAILED
             - RECHARGE_ORDER_NOT_FOUND

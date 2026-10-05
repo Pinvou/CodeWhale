@@ -129,6 +129,23 @@ async fn native_chat_bootstraps_account_and_only_returns_credentials_inside_rust
         .unwrap();
     assert_eq!(cached.revision, authorized.revision);
     assert_eq!(http.calls.load(Ordering::SeqCst), 1);
+    let prepared = super::super::runtime_model::prepare_authorized_model(
+        crate::platform::prefs::SavedModel::builtin_account_platform(),
+        authorized,
+    )
+    .unwrap();
+    assert_eq!(
+        prepared.model.base_url,
+        config.token_gateway_url.join("v1").unwrap().to_string()
+    );
+    assert_eq!(prepared.revision.as_deref(), Some(cached.revision.as_str()));
+    let credential = prepared.credential.unwrap();
+    assert_eq!(
+        credential.request_idempotency_header(),
+        Some("Idempotency-Key")
+    );
+    assert_eq!(credential.expose_api_key(), "access-value");
+    assert!(!format!("{credential:?}").contains("access-value"));
 }
 
 #[tokio::test]
@@ -509,4 +526,199 @@ async fn management_bootstrap_remembers_only_the_current_verified_account() {
         format!("{}v1", config.token_gateway_url)
     );
     assert_eq!(http.calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn current_context_model_catalog_uses_authenticated_gateway_and_rejects_late_logout() {
+    let http = HttpFixture::new().await;
+    let config = http.config();
+    let state = Arc::new(state());
+    state
+        .install_tokens(tokens(None), None, binding(&config, "subject-a"))
+        .await
+        .unwrap();
+    http.enqueue(
+        200,
+        json!({"user_id":"11111111-1111-1111-1111-111111111111"}),
+    );
+    http.enqueue(200, json!({"data":[{"id":"permitted-model"}]}));
+    assert_eq!(
+        state.model_catalog_with(&config).await.unwrap(),
+        vec!["permitted-model"]
+    );
+    assert_eq!(http.calls.load(Ordering::SeqCst), 2);
+    let release = http.enqueue_delayed(200, json!({"data":[{"id":"old-context-model"}]}));
+    let task_state = state.clone();
+    let task_config = http.config();
+    let pending = tokio::spawn(async move { task_state.model_catalog_with(&task_config).await });
+    http.wait_for_calls(3).await;
+    state.logout().await.unwrap();
+    release.send(()).unwrap();
+    assert!(
+        pending
+            .await
+            .unwrap()
+            .unwrap_err()
+            .starts_with("authentication_required")
+    );
+    assert!(state.session.lock().await.is_none());
+}
+
+struct ModelPrefsHome {
+    path: std::path::PathBuf,
+    previous: Option<std::ffi::OsString>,
+}
+impl ModelPrefsHome {
+    fn new() -> Self {
+        let path = std::env::temp_dir().join(format!(
+            "pinvou-owned-model-catalog-{}-{}",
+            std::process::id(),
+            crate::platform::paths::tests::unique_suffix()
+        ));
+        std::fs::create_dir(&path).unwrap();
+        let previous = std::env::var_os("PINVOU3_HOME");
+        unsafe {
+            std::env::set_var("PINVOU3_HOME", &path);
+        }
+        Self { path, previous }
+    }
+}
+impl Drop for ModelPrefsHome {
+    fn drop(&mut self) {
+        match self.previous.take() {
+            Some(value) => unsafe { std::env::set_var("PINVOU3_HOME", value) },
+            None => unsafe { std::env::remove_var("PINVOU3_HOME") },
+        }
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
+
+#[tokio::test]
+async fn builtin_model_selection_revalidates_catalog_and_persists_only_authorized_wire_name() {
+    let _env_lock = crate::platform::paths::tests::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let home = ModelPrefsHome::new();
+    let prefs = crate::platform::prefs::UserPrefs::load();
+    prefs.save().unwrap();
+    let old = prefs.advanced.account_platform_default_model.clone();
+    let http = HttpFixture::new().await;
+    let config = http.config();
+    let state = state();
+    state
+        .install_tokens(tokens(None), None, binding(&config, "subject-a"))
+        .await
+        .unwrap();
+    http.enqueue(
+        200,
+        json!({"user_id":"11111111-1111-1111-1111-111111111111"}),
+    );
+    http.enqueue(200, json!({"data":[{"id":"allowed-wire-model"}]}));
+    let before = std::fs::read(home.path.join("settings.json")).unwrap();
+    assert_eq!(
+        state
+            .set_builtin_default_model_with(&config, "arbitrary-model".into())
+            .await
+            .unwrap_err(),
+        "account_platform_model_not_available"
+    );
+    assert_eq!(
+        std::fs::read(home.path.join("settings.json")).unwrap(),
+        before
+    );
+    assert_eq!(
+        crate::platform::prefs::UserPrefs::load()
+            .advanced
+            .account_platform_default_model,
+        old
+    );
+    http.enqueue(200, json!({"data":[{"id":"allowed-wire-model"}]}));
+    let result = state
+        .set_builtin_default_model_with(&config, "allowed-wire-model".into())
+        .await
+        .unwrap();
+    assert_eq!(result.default_model, "allowed-wire-model");
+    assert_eq!(result.available_models, vec!["allowed-wire-model"]);
+    let persisted = crate::platform::prefs::UserPrefs::load();
+    assert_eq!(
+        persisted.advanced.account_platform_default_model.as_deref(),
+        Some("allowed-wire-model")
+    );
+    assert_eq!(
+        persisted
+            .model_by_id(crate::platform::prefs::BUILTIN_ACCOUNT_PLATFORM_MODEL_ID)
+            .unwrap()
+            .model,
+        "allowed-wire-model"
+    );
+    http.enqueue(503, json!({"message":"isolated unavailable"}));
+    assert_eq!(
+        state
+            .set_builtin_default_model_with(&config, "allowed-wire-model".into())
+            .await
+            .unwrap_err(),
+        "account_platform_model_catalog_unavailable"
+    );
+    assert_eq!(
+        crate::platform::prefs::UserPrefs::load()
+            .advanced
+            .account_platform_default_model
+            .as_deref(),
+        Some("allowed-wire-model")
+    );
+}
+
+#[tokio::test]
+async fn model_selection_and_normalized_context_mutations_are_serialized() {
+    let _env_lock = crate::platform::paths::tests::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let _home = ModelPrefsHome::new();
+    crate::platform::prefs::UserPrefs::load();
+    let http = HttpFixture::new().await;
+    let config = http.config();
+    let state = Arc::new(state());
+    state
+        .install_tokens(tokens(None), None, binding(&config, "subject-a"))
+        .await
+        .unwrap();
+    http.enqueue(
+        200,
+        json!({"user_id":"11111111-1111-1111-1111-111111111111"}),
+    );
+    state
+        .chat_runtime_authorization_with(&config)
+        .await
+        .unwrap();
+    let release = http.enqueue_delayed(200, json!({"data":[{"id":"allowed-wire"}]}));
+    let setter_state = state.clone();
+    let setter_config = config.clone();
+    let setter = tokio::spawn(async move {
+        setter_state
+            .set_builtin_default_model_with(&setter_config, "allowed-wire".into())
+            .await
+    });
+    http.wait_for_calls(2).await;
+    http.enqueue(200, json!({"context_type":"PERSONAL"}));
+    let mutation_state = state.clone();
+    let mutation = tokio::spawn(async move {
+        mutation_state
+            .request_with(
+                &config,
+                ApiRequest {
+                    area: "account".into(),
+                    method: "POST".into(),
+                    resource: "/v1/sessions/current/ignored/../active-context".into(),
+                    body: Some(json!({"context_type":"PERSONAL"})),
+                    idempotency_key: None,
+                },
+            )
+            .await
+    });
+    tokio::time::sleep(Duration::from_millis(25)).await;
+    assert_eq!(http.calls.load(Ordering::SeqCst), 2);
+    release.send(()).unwrap();
+    assert_eq!(setter.await.unwrap().unwrap().default_model, "allowed-wire");
+    assert_eq!(mutation.await.unwrap().unwrap().status, 200);
+    assert_eq!(http.calls.load(Ordering::SeqCst), 3);
 }

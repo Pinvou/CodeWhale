@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { Check, ChevronDown, ChevronLeft, ChevronRight, Code, Cpu, Database, Globe, MessageSquare, Plus, RefreshCw, Search, Sparkles, User, Users, Wrench, X } from '../../components/icons.jsx';
 import { ArchivedDeleteConfirmDialog } from '../sessions/ArchiveConfirmDialog.jsx';
@@ -8,7 +8,9 @@ import { DEFAULT_PET_ID } from '../pet/pet-registry.js';
 import { TeamRelayAccessSettings } from '../team-relay/TeamRelayAccessSettings.jsx';
 import { bridge, isLocalModel, useBridgeState } from '../../hooks/useBridge.js';
 import { formatSessionDate } from '../../shared/date-utils.js';
-import { isBuiltInLlmApiModel, selectableModels } from '../../shared/model-options.js';
+import { isBuiltInAccountPlatformModel, selectableModels } from '../../shared/model-options.js';
+import { AccountPlatformDesktopClient } from '../account-platform/desktop-client.js';
+import { accountErrorMessage } from '../account-platform/errors.js';
 import { can, isWeb } from '../../shared/platform.js';
 import qwenIcon from '../../brand-icons/qwen.svg';
 import {
@@ -1756,13 +1758,60 @@ const formatMemoryTime = (item, copy) => {
       const [feedbackStatus, setFeedbackStatus] = useState({ state: 'idle', message: '', receipt: null });
       const [feedbackNotice, setFeedbackNotice] = useState('');
       const [archivedDeleteConfirm, setArchivedDeleteConfirm] = useState(null);
-      const [llmApiModelBusy, setLlmApiModelBusy] = useState(false);
+      const [builtinModelBusy, setBuiltinModelBusy] = useState(false);
+      const [builtinIdentityBusy, setBuiltinIdentityBusy] = useState(false);
+      const builtinIdentityBusyRef = useRef(false);
+      const [builtinModelError, setBuiltinModelError] = useState(null);
+      const [builtinModelCatalog, setBuiltinModelCatalog] = useState(null);
+      const builtinModelOperation = useRef(null);
+      const builtinModelClient = useMemo(() => bridge.accountPlatform
+        ? new AccountPlatformDesktopClient(bridge.accountPlatform) : null, []);
+      useEffect(() => () => {
+        builtinModelOperation.current?.abort();
+        builtinModelOperation.current = null;
+      }, []);
+      useEffect(() => builtinModelClient?.transport.subscribeIdentityChange?.(pending => {
+        builtinIdentityBusyRef.current = pending;
+        builtinModelOperation.current?.abort();
+        builtinModelOperation.current = null;
+        setBuiltinModelCatalog(null);
+        setBuiltinModelError(null);
+        setBuiltinModelBusy(false);
+        setBuiltinIdentityBusy(pending);
+      }), [builtinModelClient]);
+      const runBuiltinModelOperation = async (model) => {
+        if (!builtinModelClient || builtinModelOperation.current || builtinIdentityBusyRef.current) return;
+        const controller = new AbortController();
+        builtinModelOperation.current = controller;
+        setBuiltinModelBusy(true);
+        setBuiltinModelError(null);
+        try {
+          const result = model === undefined
+            ? await builtinModelClient.getModelCatalog(controller.signal)
+            : await builtinModelClient.setDefaultModel(model, controller.signal);
+          if (builtinModelOperation.current !== controller || controller.signal.aborted) return;
+          setBuiltinModelCatalog(result);
+          if (model !== undefined) {
+            // Native owns authorization, preference installation and Engine invalidation.
+            await bridge.models.loadModels();
+          }
+        } catch (error) {
+          if (builtinModelOperation.current === controller && !controller.signal.aborted) {
+            if (error?.status === 401) setBuiltinModelCatalog(null);
+            setBuiltinModelError(error);
+          }
+        } finally {
+          if (builtinModelOperation.current === controller && !controller.signal.aborted) {
+            builtinModelOperation.current = null;
+            setBuiltinModelBusy(false);
+          }
+        }
+      };
       const [behaviorTelemetryBusy, setBehaviorTelemetryBusy] = useState(false);
       const [behaviorTelemetryError, setBehaviorTelemetryError] = useState('');
       const [feedbackCloseConfirm, setFeedbackCloseConfirm] = useState(false);
-      const llmApiModels = (bs && bs.llmApiModels) || {};
-      const builtinAvailableModels = llmApiModels.available_models || [];
-      const builtinDefaultModel = llmApiModels.default_model || (((bs && bs.settings && bs.settings.advanced && bs.settings.advanced.builtin_llmapi_default_model) || '') || '');
+      const builtinAvailableModels = builtinModelCatalog?.available_models || [];
+      const builtinDefaultModel = builtinModelCatalog?.default_model ?? '';
       const versionUpdateRef = useRef(null);
       const hasUpdate = !!(bs && bs.updateInfo && bs.updateInfo.available);
       const archivedSessions = (bs && bs.archivedSessions) || [];
@@ -1983,16 +2032,6 @@ const formatMemoryTime = (item, copy) => {
         setArchivedDeleteConfirm(null);
         if (id && onDeleteArchived) onDeleteArchived(id);
       };
-      const refreshBuiltinModels = async () => {
-        if (!bridge.available || !bridge.llmapi.refreshLlmApi) return;
-        setLlmApiModelBusy(true);
-        try { await bridge.llmapi.refreshLlmApi(); } finally { setLlmApiModelBusy(false); }
-      };
-      const setBuiltinDefaultModel = async model => {
-        if (!bridge.available || !bridge.llmapi.setLlmApiDefaultModel || !model) return;
-        setLlmApiModelBusy(true);
-        try { await bridge.llmapi.setLlmApiDefaultModel(model); } finally { setLlmApiModelBusy(false); }
-      };
       // 进设置页自动体检一次可选依赖装齐没; 之后用户可手动「重新检测」
       useEffect(() => {
         if (!canInstallDependencies || !bridge.available || (bs && (bs.deps || bs.depsChecking))) return;
@@ -2016,9 +2055,9 @@ const formatMemoryTime = (item, copy) => {
         if (tone === 'red') return 'text-[#FF3B30] hover:bg-[#FF3B30]/10';
         return 'text-[#007AFF] hover:bg-[#007AFF]/10';
       };
-      const userModels = selectableModels(savedModels || [], bs && bs.llmApiStatus)
+      const userModels = selectableModels(savedModels || [])
         .slice()
-        .sort((a, b) => Number(isBuiltInLlmApiModel(b)) - Number(isBuiltInLlmApiModel(a)));
+        .sort((a, b) => Number(isBuiltInAccountPlatformModel(b)) - Number(isBuiltInAccountPlatformModel(a)));
       const searchOptions = [
         { key: 'bing', label: 'Bing', desc: settingsCopy.searchDescriptions.bing },
         { key: 'metaso', label: t.uiSettingsView.searchProviderMetaso, desc: settingsCopy.searchDescriptions.metaso },
@@ -2233,30 +2272,32 @@ const formatMemoryTime = (item, copy) => {
               <div className="flex items-center gap-2 min-w-0">
                 <span className={`text-[15px] leading-5 font-normal truncate text-[#1C1C1E] dark:text-[#F2F2F7]`}>{title}</span>
                 {isLocal && <Tag tone="gray">{settingsCopy.localModel}</Tag>}
-                {isBuiltInLlmApiModel(m) && <Tag tone="gray">{settingsCopy.builtinModel}</Tag>}
+                {isBuiltInAccountPlatformModel(m) && <Tag tone="gray">{settingsCopy.builtinModel}</Tag>}
                 {codingPlan && <Tag tone="gray">Coding Plan</Tag>}
                 {isActive && <Tag>{settingsCopy.defaultTag}</Tag>}
               </div>
               <div className="mt-0.5 text-[12px] leading-[17px] truncate text-[#8A8A8E] dark:text-[#98989D]">{providerLabel} · {m.model}</div>
-              {isBuiltInLlmApiModel(m) && (
-                <div className="mt-2 flex items-center gap-2 flex-wrap">
-                  <span className="text-[12px] text-[#8A8A8E] dark:text-[#98989D]">{t.builtinModelSelect}</span>
-                  <select
-                    value={builtinDefaultModel || m.model || ''}
-                    disabled={llmApiModelBusy || builtinAvailableModels.length === 0}
-                    onChange={e => setBuiltinDefaultModel(e.target.value)}
-                    className="min-w-[220px] max-w-full rounded-lg border px-3 py-1.5 text-[12px] outline-none bg-white border-black/[0.12] text-[#1C1C1E] dark:bg-[#1E1F20] dark:border-white/[0.10] dark:text-[#F2F2F7]"
-                  >
-                    {builtinAvailableModels.length === 0 ? (
-                      <option value={m.model || ''}>{t.builtinModelEmpty}</option>
-                    ) : builtinAvailableModels.map(model => <option key={model} value={model}>{model}</option>)}
+              {isBuiltInAccountPlatformModel(m) && <div className="mt-2 flex flex-wrap items-center gap-2">
+                <label className="text-[12px] text-[#8A8A8E] dark:text-[#98989D]">
+                  {t.builtinModelSelect}
+                  <select data-testid="builtin-model-select" aria-label={t.builtinModelSelect}
+                    className="ml-2 rounded border bg-white text-black dark:bg-[#2C2C2E] dark:text-white"
+                    value={builtinDefaultModel} disabled={builtinModelBusy || builtinIdentityBusy || !builtinAvailableModels.length}
+                    onChange={event => { void runBuiltinModelOperation(event.target.value); }}>
+                    {!builtinAvailableModels.includes(builtinDefaultModel) && <option value={builtinDefaultModel} disabled>
+                      {builtinDefaultModel || t.builtinModelChoose}
+                    </option>}
+                    {builtinAvailableModels.map(model => <option key={model} value={model}>{model}</option>)}
                   </select>
-                  <button onClick={refreshBuiltinModels} disabled={llmApiModelBusy}
-                    className={`min-h-8 px-3 rounded-full text-[14px] font-medium disabled:opacity-50 ${actionButton('blue')}`}>
-                    {llmApiModelBusy ? t.builtinModelLoading : t.builtinModelRefresh}
-                  </button>
-                </div>
-              )}
+                </label>
+                <button type="button" data-testid="builtin-model-refresh" disabled={builtinModelBusy || builtinIdentityBusy}
+                  onClick={() => { void runBuiltinModelOperation(); }} className={`min-h-8 px-3 rounded-full text-[14px] ${actionButton('blue')}`}>
+                  {builtinModelBusy ? t.builtinModelLoading : t.builtinModelRefresh}
+                </button>
+                {builtinModelError && <span role="alert" data-testid="builtin-model-error" className="text-[12px] text-red-500">
+                  {accountErrorMessage(builtinModelError, t.uiAccountPlatform)}
+                </span>}
+              </div>}
             </div>
             <div className="shrink-0 flex items-center gap-2">
               {!isReadonly && <button onClick={() => setEditingModel({ ...m, __scope: isLocal ? 'local' : 'cloud' })} className={`min-h-8 px-3 rounded-full text-[14px] font-medium ${actionButton('blue')}`}>{settingsCopy.edit}</button>}

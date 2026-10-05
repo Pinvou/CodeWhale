@@ -57,6 +57,12 @@ test('Billing and Token contracts match production JSON and HTTP validation resp
   assert.equal(intent({ ...fixtures.waiver_intent, usage_request_id: undefined }), false);
 
   const token = YAML.parse(await readFile(path.join(root, 'contracts/openapi/token-gateway.yaml'), 'utf8'));
+  const catalog = ajv.compile(token.paths['/models'].get.responses['200'].content['application/json'].schema);
+  assert.ok(catalog(fixtures.model_catalog), JSON.stringify(catalog.errors));
+  assert.deepEqual(fixtures.model_catalog, { data: [{ id: 'fixture-model' }] });
+  assert.equal(catalog({ ...fixtures.model_catalog, account_id: 'unexpected' }), false);
+  assert.equal(catalog({ data: [{ id: 'fixture-model', credential: 'unexpected' }] }), false);
+  assert.ok(catalog({ data: [] }), 'an empty authorized catalog remains valid');
 
   assert.deepEqual(token.paths['/internal/v1/usage-waivers'].post.security, [{ serviceToken: [] }]);
   assert.deepEqual(token.paths['/internal/v1/usage-waivers'].servers, [{ url: '/' }]);
@@ -81,6 +87,8 @@ test('Billing and Token contracts match production JSON and HTTP validation resp
     assert.equal(response.code, code);
     assert.ok(error(response), `${code}: ${JSON.stringify(error.errors)}`);
   }
+  assert.equal(fixtures.token_errors.MODEL_CATALOG_UNAVAILABLE.code, 'MODEL_CATALOG_UNAVAILABLE');
+  assert.ok(error(fixtures.token_errors.MODEL_CATALOG_UNAVAILABLE), JSON.stringify(error.errors));
   const admin = YAML.parse(await readFile(path.join(root, 'contracts/openapi/admin.yaml'), 'utf8'));
   const adminSchemas = JSON.parse(JSON.stringify(admin.components.schemas).replaceAll('#/components/schemas/', '#/$defs/'));
   ajv.addSchema({ $id: 'urn:pinvou:admin-runtime', $defs: adminSchemas });

@@ -678,7 +678,7 @@
   // identity takes precedence over the current default, as with provider labels.
   function isManagedModel(state) {
     const id = state && (state.currentSessionModelId || state.activeModelId);
-    return id === "builtin_llmapi";
+    return id === "builtin_account_platform";
   }
 
   const MANAGED_MODEL_COPY = {

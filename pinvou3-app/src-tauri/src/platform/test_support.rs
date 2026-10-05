@@ -245,3 +245,25 @@ pub(crate) fn loosen_to_world_readable_for_test(path: &std::path::Path) -> bool 
         false
     }
 }
+
+/// Hold a file open without delete sharing to exercise actual Windows atomic
+/// replacement failures. Other platforms have no equivalent share-mode lock.
+#[cfg(test)]
+pub(crate) fn deny_atomic_replacement_for_test(path: &std::path::Path) -> Option<std::fs::File> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        Some(
+            std::fs::OpenOptions::new()
+                .read(true)
+                .share_mode(1)
+                .open(path)
+                .expect("lock own fixture"),
+        )
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = path;
+        None
+    }
+}

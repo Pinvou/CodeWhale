@@ -37,33 +37,22 @@ pub enum ModelPreset {
     Xai,
 }
 
-pub const BUILTIN_LLMAPI_MODEL_ID: &str = "builtin_llmapi";
-pub const BUILTIN_LLMAPI_MODEL_NAME: &str = "内置模型";
-pub const BUILTIN_LLMAPI_DEFAULT_CHAT_BASE_URL: &str = "https://llmapi.pinvou.com/v1";
-pub const BUILTIN_LLMAPI_DEFAULT_MODEL: &str = "deepseek-v4-flash";
+pub const BUILTIN_ACCOUNT_PLATFORM_MODEL_ID: &str = "builtin_account_platform";
+pub const LEGACY_BUILTIN_LLMAPI_MODEL_ID: &str = "builtin_llmapi";
+pub const BUILTIN_ACCOUNT_PLATFORM_MODEL_NAME: &str = "内置模型";
+/// Runtime preparation always replaces this non-routable placeholder with the
+/// configured Token Gateway URL. Keeping a `.invalid` endpoint prevents an
+/// accidental direct request if preparation is bypassed by a future caller.
+pub const BUILTIN_ACCOUNT_PLATFORM_PLACEHOLDER_BASE_URL: &str =
+    "https://account-platform.invalid/v1";
+pub const BUILTIN_ACCOUNT_PLATFORM_DEFAULT_MODEL: &str = "deepseek-v4-flash";
 
-pub fn select_builtin_llmapi_model(
-    available_models: &[String],
-    configured_default: Option<&str>,
-) -> String {
-    let configured = configured_default
+pub fn select_builtin_account_platform_model(configured_default: Option<&str>) -> String {
+    configured_default
         .map(str::trim)
-        .filter(|value| !value.is_empty());
-    if let Some(configured) = configured {
-        if available_models.iter().any(|model| model == configured) {
-            return configured.to_string();
-        }
-    }
-    if available_models
-        .iter()
-        .any(|model| model == BUILTIN_LLMAPI_DEFAULT_MODEL)
-    {
-        return BUILTIN_LLMAPI_DEFAULT_MODEL.to_string();
-    }
-    available_models
-        .first()
-        .cloned()
-        .unwrap_or_else(|| BUILTIN_LLMAPI_DEFAULT_MODEL.to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or(BUILTIN_ACCOUNT_PLATFORM_DEFAULT_MODEL)
+        .to_string()
 }
 
 pub const MODEL_PROVIDER_KIND_CODING_PLAN: &str = "coding_plan";

@@ -402,54 +402,22 @@ vm.runInNewContext(
   modelOptionsSandbox
 );
 const selectableModelFixture = [
-  { id: 'builtin_llmapi', kind: 'builtin_llmapi', name: '内置模型' },
+  { id: 'builtin_account_platform', kind: 'builtin_account_platform', name: '内置模型' },
   { id: 'user-model', name: '用户模型' },
 ];
 assert.deepStrictEqual(
-  Array.from(modelOptionsSandbox.selectableModels(selectableModelFixture, {
-    backend_user_exists: true,
-    backend_user_state: 'exists',
-    enabled: true,
-    provisioning_status: 'ready',
-  }), model => model.id),
-  ['builtin_llmapi', 'user-model'],
-  'a confirmed ready backend account should expose the built-in model in every model selector'
+  Array.from(modelOptionsSandbox.selectableModels(selectableModelFixture), model => model.id),
+  ['builtin_account_platform', 'user-model'],
+  'catalog visibility must not depend on cached login or credit state'
 );
-const recoverableStaleStatus = {
-  backend_user_exists: true,
-  backend_user_state: 'exists',
-  stale: true,
-  auto_login_failed: true,
-  enabled: true,
-  provisioning_status: 'ready',
-};
 assert.equal(
-  modelOptionsSandbox.isLlmApiAccountVisible(recoverableStaleStatus),
+  modelOptionsSandbox.isBuiltInAccountPlatformModel(selectableModelFixture[0]),
   true,
-  'an authentication failure should preserve the only manual login recovery entry'
+  'the new built-in model must use the account-platform identity'
 );
-assert.equal(
-  modelOptionsSandbox.isBuiltInLlmApiAvailable(recoverableStaleStatus),
-  false,
-  'a recoverable stale account must not make the built-in model selectable before re-authentication'
-);
-for (const unavailableStatus of [
-  null,
-  { backend_user_exists: true, backend_user_state: 'exists', stale: true, enabled: true, provisioning_status: 'ready' },
-  { backend_user_exists: false, backend_user_state: 'not_exists', enabled: false, provisioning_status: 'not_started' },
-  { backend_user_exists: false, backend_user_state: 'unknown', enabled: true, provisioning_status: 'ready' },
-  { backend_user_exists: true, backend_user_state: 'exists', enabled: false, provisioning_status: 'disabled' },
-  { backend_user_exists: true, backend_user_state: 'exists', enabled: true, provisioning_status: 'failed' },
-]) {
-  assert.deepStrictEqual(
-    Array.from(modelOptionsSandbox.selectableModels(selectableModelFixture, unavailableStatus), model => model.id),
-    ['user-model'],
-    'the built-in model should only be selectable after account existence and service readiness are confirmed'
-  );
-}
 assert.ok(
-  /selectableModels\(appState\.savedModels \|\| \[\], appState\.llmApiStatus\)/.test(indexHtml) &&
-    /selectableModels\(\(bs && bs\.savedModels\) \|\| \[\], bs && bs\.llmApiStatus\)/.test(composerSharedSource),
+  /selectableModels\(appState\.savedModels \|\| \[\]\)/.test(indexHtml) &&
+    /selectableModels\(\(bs && bs\.savedModels\) \|\| \[\]\)/.test(composerSharedSource),
   'chat, settings, and scheduled tasks should share availability-based model selection without the old hiding rules'
 );
 assert.ok(
@@ -778,9 +746,6 @@ function createBridgeHarness(sharedStorage, runtimeOptions) {
         cmd === "list_scheduled_runs") return [];
     if (cmd === "get_mode_state") return { mode: "yolo" };
     if (cmd === "get_memory_overview") return {};
-    if (cmd === "get_llmapi_status") {
-      return { backend_user_exists: false, backend_user_state: "not_exists", stale: false };
-    }
     if (cmd === "session_mounted_collections_snapshot") return { revision: 0, collections: [] };
     if (cmd === "session_mounted_collections") return [];
     if (cmd === "session_mounted_collection" || cmd === "get_active_persona" ||
@@ -1918,110 +1883,19 @@ async function deepSeekTurnTimelineLifecycleBehavior() {
   assert.strictEqual(completed[3].error, "模型失败");
 }
 
-async function llmApiStartupRetryBehavior() {
-  var timers = [];
-  var harness = createBridgeHarness(null, {
-    setTimeout: function (callback, delay) {
-      timers.push({ callback: callback, delay: delay });
-      return timers.length;
-    },
-    clearTimeout: function () {},
-  });
-  var statusCalls = 0;
-  var modelCalls = 0;
-  harness.handlers.get_llmapi_status = function () {
-    statusCalls += 1;
-    if (statusCalls === 1) {
-      return { backend_user_exists: false, backend_user_state: "unknown", stale: true };
-    }
-    if (statusCalls === 2) throw new Error("temporary network failure");
-    return {
-      backend_user_exists: true,
-      backend_user_state: "exists",
-      stale: false,
-      enabled: true,
-      provisioning_status: "ready",
-    };
-  };
-  harness.handlers.get_llmapi_models = function () {
-    modelCalls += 1;
-    return { available_models: ["deepseek-v4-flash"], default_model: "deepseek-v4-flash" };
-  };
-
+async function accountPlatformModelTransportBehavior() {
+  const harness = createBridgeHarness();
+  const view = { available_models: ['wire-a', 'wire-b'], default_model: 'wire-a' };
+  harness.handlers.account_platform_models = () => view;
+  harness.handlers.account_platform_set_default_model = args => ({ ...view, default_model: args.model });
   await harness.bridge.lifecycle.init();
-  await tick();
-  assert.strictEqual(statusCalls, 1, "startup should query the built-in account immediately");
-  var firstRetry = timers.find(function (timer) { return timer.delay === 2000; });
-  assert.ok(firstRetry, "an unknown account result should schedule the first retry");
-
-  firstRetry.callback();
-  await tick();
-  await tick();
-  assert.strictEqual(statusCalls, 2, "a transport failure should keep the startup retry active");
-  var secondRetry = timers.find(function (timer) { return timer.delay === 5000; });
-  assert.ok(secondRetry, "startup retries should back off after another inconclusive result");
-
-  secondRetry.callback();
-  await tick();
-  await tick();
-  assert.strictEqual(statusCalls, 3, "startup should retry until the account result is authoritative");
-  assert.strictEqual(modelCalls, 1, "a known existing account should refresh built-in models once");
-  assert.strictEqual(harness.bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).llmApiStatus.backend_user_state, "exists");
-  assert.strictEqual(harness.bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).llmApiModels.default_model, "deepseek-v4-flash");
-  assert.strictEqual(
-    timers.filter(function (timer) { return timer.delay === 10000; }).length,
-    0,
-    "startup retries should stop after an existing account is confirmed"
-  );
-
-  var missingTimers = [];
-  var missingHarness = createBridgeHarness(null, {
-    setTimeout: function (callback, delay) {
-      missingTimers.push({ callback: callback, delay: delay });
-      return missingTimers.length;
-    },
-    clearTimeout: function () {},
-  });
-  var missingStatusCalls = 0;
-  missingHarness.handlers.get_llmapi_status = function () {
-    missingStatusCalls += 1;
-    return { backend_user_exists: false, backend_user_state: "not_exists", stale: false };
-  };
-
-  await missingHarness.bridge.lifecycle.init();
-  await tick();
-  await tick();
-  assert.strictEqual(missingStatusCalls, 1, "a confirmed missing account should not be retried");
-  assert.strictEqual(missingHarness.bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).llmApiStatus.backend_user_state, "not_exists");
-  assert.strictEqual(
-    missingTimers.filter(function (timer) { return timer.delay === 2000; }).length,
-    0,
-    "startup retries should stop after account absence is confirmed"
-  );
-
-  var disabledHarness = createBridgeHarness();
-  var disabledModelCalls = 0;
-  disabledHarness.handlers.get_llmapi_status = function () {
-    return {
-      backend_user_exists: true,
-      backend_user_state: "exists",
-      stale: false,
-      enabled: false,
-      provisioning_status: "disabled",
-    };
-  };
-  disabledHarness.handlers.get_llmapi_models = function () {
-    disabledModelCalls += 1;
-    return { available_models: ["must-not-be-used"] };
-  };
-  await disabledHarness.bridge.lifecycle.init();
-  await tick();
-  assert.strictEqual(disabledModelCalls, 0, "a disabled account must not refresh built-in models during startup");
-  assert.strictEqual(
-    disabledHarness.bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).llmApiModels,
-    null,
-    "a disabled account must clear the built-in model cache"
-  );
+  assert.strictEqual(harness.bridge.llmapi, undefined, 'retired account commands must not be exposed');
+  assert.strictEqual((await harness.bridge.accountPlatform.getModelCatalog()).default_model, 'wire-a');
+  assert.strictEqual((await harness.bridge.accountPlatform.setDefaultModel('wire-b')).default_model, 'wire-b');
+  harness.handlers.account_platform_models = () => { throw new Error('authentication_required'); };
+  const before = JSON.stringify(harness.bridge.state.get('models'));
+  await assert.rejects(harness.bridge.accountPlatform.getModelCatalog());
+  assert.strictEqual(JSON.stringify(harness.bridge.state.get('models')), before, 'directory failure cannot rewrite ordinary model state');
 }
 async function internalSubagentHandoffStaysOutOfPresentation(bridgeKind) {
   var harness = createBridgeHarness(null, { bridgeKind: bridgeKind });
@@ -2455,7 +2329,7 @@ async function scheduledRunUnreadBehavior() {
   assert.strictEqual(JSON.stringify(marks.map(function (call) { return call.args; })), JSON.stringify([
     { automationId: task.id, runId: "run-1" },
   ]));
-  var afterFirst = bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']);
+  var afterFirst = bridge.state.getMany(['sessions', 'chat', 'scheduled']);
   assert.strictEqual(afterFirst.scheduledTaskRuns[0].unread, false, "the opened run should become viewed");
   assert.strictEqual(afterFirst.scheduledTaskRuns[1].unread, true, "sibling runs remain independently unread");
   assert.strictEqual(afterFirst.scheduledTaskRecentRuns[0].unread, false, "the opened sidebar run should lose its dot immediately");
@@ -2465,7 +2339,7 @@ async function scheduledRunUnreadBehavior() {
 
   assert.strictEqual(await bridge.scheduled.exitScheduledRunChat(), true);
   assert.strictEqual(await bridge.scheduled.openScheduledRunChat(runs[1], task), true);
-  var afterSecond = bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']);
+  var afterSecond = bridge.state.getMany(['sessions', 'chat', 'scheduled']);
   assert.ok(afterSecond.scheduledTaskRuns.every(function (run) { return run.unread === false; }));
   assert.ok(afterSecond.scheduledTaskRecentRuns.every(function (run) { return run.unread === false; }));
   assert.strictEqual(afterSecond.scheduledTasks[0].hasUnreadRuns, false, "task dot clears only after every child run was opened");
@@ -2512,29 +2386,29 @@ async function scheduledRunUnreadBehavior() {
     loadCount + 1,
     "a running conversation should hydrate its durable prompt without replacing the live buffer"
   );
-  assert.strictEqual(bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).activeSessionId, "sched-running");
+  assert.strictEqual(bridge.state.getMany(['sessions', 'chat', 'scheduled']).activeSessionId, "sched-running");
   assert.ok(
-    bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).chatItems.some(function (item) {
+    bridge.state.getMany(['sessions', 'chat', 'scheduled']).chatItems.some(function (item) {
       return String(item.text || item.html || "").includes("partial live output");
     }),
     "the normal chat transcript should expose buffered live output"
   );
   assert.ok(
-    JSON.stringify(bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).chatItems).includes("durable scheduled prompt"),
+    JSON.stringify(bridge.state.getMany(['sessions', 'chat', 'scheduled']).chatItems).includes("durable scheduled prompt"),
     "the normal chat transcript should also include the durable user prompt"
   );
-  var visibleScheduledTranscript = JSON.stringify(bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).chatItems);
+  var visibleScheduledTranscript = JSON.stringify(bridge.state.getMany(['sessions', 'chat', 'scheduled']).chatItems);
   assert.ok(!visibleScheduledTranscript.includes("system-reminder"), "scheduled bubbles must hide the internal reminder");
   assert.ok(!visibleScheduledTranscript.includes("turn_meta"), "scheduled bubbles must hide turn metadata");
   assert.ok(!visibleScheduledTranscript.includes("sudo/apt/systemctl/pkexec"), "scheduled bubbles must hide internal policy text");
   assert.ok(!visibleScheduledTranscript.includes("Current workspace"), "scheduled bubbles must hide internal workspace metadata");
   assert.ok(!visibleScheduledTranscript.includes("Tool calls have failed"), "runtime recovery hints must not render as user bubbles");
   assert.ok(
-    JSON.stringify(bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).messages).includes("<system-reminder>"),
+    JSON.stringify(bridge.state.getMany(['sessions', 'chat', 'scheduled']).messages).includes("<system-reminder>"),
     "the raw scheduled message must remain intact for model context"
   );
   assert.ok(
-    JSON.stringify(bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).messages).includes("Tool calls have failed"),
+    JSON.stringify(bridge.state.getMany(['sessions', 'chat', 'scheduled']).messages).includes("Tool calls have failed"),
     "runtime recovery hints must remain intact in raw model context"
   );
   assert.strictEqual(await bridge.scheduled.exitScheduledRunChat(), true);
@@ -2629,7 +2503,7 @@ async function scheduledRunningHydrationRaceBehavior() {
     artifacts: [],
   });
   assert.strictEqual(await opening, true);
-  var hydratedItems = bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).chatItems;
+  var hydratedItems = bridge.state.getMany(['sessions', 'chat', 'scheduled']).chatItems;
   var rendered = JSON.stringify(hydratedItems);
   assert.ok(rendered.includes("persisted scheduled prompt"), "durable history should survive live hydration");
   assert.ok(rendered.includes("delta received during durable load"), "live deltas received during load should survive hydration");
@@ -2638,7 +2512,7 @@ async function scheduledRunningHydrationRaceBehavior() {
   });
   assert.strictEqual(overlappingAssistantItems.length, 1, "durable and live overlap should render once");
   assert.strictEqual(
-    bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).chatItems.filter(function (item) {
+    bridge.state.getMany(['sessions', 'chat', 'scheduled']).chatItems.filter(function (item) {
       return item.type === "tool" && item.toolId === "tool-hydrate";
     }).length,
     1,
@@ -2668,7 +2542,7 @@ async function openingRunningMarksBusyBeforeHydration() {
   await tick();
 
   assert.strictEqual(
-    bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).sessionBusy["sched-opening-busy"],
+    bridge.state.getMany(['sessions', 'chat', 'scheduled']).sessionBusy["sched-opening-busy"],
     true,
     "a queued/running scheduled buffer must be busy before durable hydration starts"
   );
@@ -2745,7 +2619,7 @@ async function followupQueuedUntilScheduledInitialTurnTerminal() {
   harness.emit("chat:done", { session_id: "sched-followup" });
   await tick();
   await tick();
-  var flushed = bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']);
+  var flushed = bridge.state.getMany(['sessions', 'chat', 'scheduled']);
   assert.strictEqual(flushed.queued.length, 0);
   assert.strictEqual(
     harness.calls.filter(function (call) { return call.cmd === "chat"; }).length,
@@ -5636,7 +5510,7 @@ async function terminalEventWinsStaleRunningOpen() {
     messages: [], artifacts: [],
   });
   assert.strictEqual(await opening, true);
-  assert.strictEqual(bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).busy, false, "terminal event should clear initial busy after hydration");
+  assert.strictEqual(bridge.state.getMany(['sessions', 'chat', 'scheduled']).busy, false, "terminal event should clear initial busy after hydration");
 
   assert.strictEqual(await bridge.scheduled.exitScheduledRunChat(), true);
   assert.strictEqual(await bridge.scheduled.openScheduledRunChat(staleRun, {
@@ -5644,7 +5518,7 @@ async function terminalEventWinsStaleRunningOpen() {
     name: "Terminal wins task",
   }), true);
   assert.strictEqual(
-    bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).busy,
+    bridge.state.getMany(['sessions', 'chat', 'scheduled']).busy,
     false,
     "a stale running DTO must not move a terminal scheduled buffer back to active"
   );
@@ -5697,12 +5571,12 @@ async function scheduledDoneBeforeBufferCreatesTerminalTombstone() {
     unread: false,
   }, { id: "automation-done-before-buffer", name: "Done first task" }), true);
   assert.strictEqual(
-    bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).busy,
+    bridge.state.getMany(['sessions', 'chat', 'scheduled']).busy,
     false,
     "a scheduled terminal event received before buffer creation must beat a later stale running DTO"
   );
   await bridge.chat.sendMessage("continue after done-first run");
-  assert.strictEqual(bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).queued.length, 0, "done-first terminal state must not strand follow-up input");
+  assert.strictEqual(bridge.state.getMany(['sessions', 'chat', 'scheduled']).queued.length, 0, "done-first terminal state must not strand follow-up input");
   assert.strictEqual(
     harness.calls.filter(function (call) { return call.cmd === "chat"; }).length,
     1,
@@ -5712,7 +5586,7 @@ async function scheduledDoneBeforeBufferCreatesTerminalTombstone() {
   harness.emit("chat:done", { session_id: "ordinary-done-without-buffer" });
   await tick();
   assert.ok(
-    !Object.prototype.hasOwnProperty.call(bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).sessionBusy, "ordinary-done-without-buffer"),
+    !Object.prototype.hasOwnProperty.call(bridge.state.getMany(['sessions', 'chat', 'scheduled']).sessionBusy, "ordinary-done-without-buffer"),
     "an ordinary unknown chat:done must not create a background session buffer"
   );
 }
@@ -6931,9 +6805,9 @@ async function failedRunningOpenRollsBackOnlyItsProvisionalBusy() {
     sessionId: "sched-open-load-fails",
     status: "running",
   }, { name: "Load failure task" }), false);
-  assert.strictEqual(failedLoadHarness.bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).activeSessionId, "chat-origin");
+  assert.strictEqual(failedLoadHarness.bridge.state.getMany(['sessions', 'chat', 'scheduled']).activeSessionId, "chat-origin");
   assert.ok(
-    !failedLoadHarness.bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).sessionBusy["sched-open-load-fails"],
+    !failedLoadHarness.bridge.state.getMany(['sessions', 'chat', 'scheduled']).sessionBusy["sched-open-load-fails"],
     "a failed running open must roll back the provisional busy flag it introduced"
   );
 
@@ -6957,9 +6831,9 @@ async function failedRunningOpenRollsBackOnlyItsProvisionalBusy() {
     messages: [], artifacts: [],
   });
   assert.strictEqual(await staleOpening, false);
-  assert.strictEqual(staleRequestHarness.bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).activeSessionId, "chat-other");
+  assert.strictEqual(staleRequestHarness.bridge.state.getMany(['sessions', 'chat', 'scheduled']).activeSessionId, "chat-other");
   assert.ok(
-    !staleRequestHarness.bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).sessionBusy["sched-open-stale-request"],
+    !staleRequestHarness.bridge.state.getMany(['sessions', 'chat', 'scheduled']).sessionBusy["sched-open-stale-request"],
     "an invalidated running open must roll back only its provisional busy flag"
   );
 
@@ -6980,7 +6854,7 @@ async function failedRunningOpenRollsBackOnlyItsProvisionalBusy() {
   };
   assert.strictEqual(await liveHarness.bridge.scheduled.openScheduledRunChat(liveRun, { name: "Live task" }), false);
   assert.strictEqual(
-    liveHarness.bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).sessionBusy[liveRun.sessionId],
+    liveHarness.bridge.state.getMany(['sessions', 'chat', 'scheduled']).sessionBusy[liveRun.sessionId],
     true,
     "failure rollback must not clear a busy phase that existed before this open attempt"
   );
@@ -7011,7 +6885,7 @@ async function concurrentFailedRunningOpensShareRollback() {
   assert.deepStrictEqual(results, [false, false]);
   assert.strictEqual(loadCalls, 1, "concurrent opens for one scheduled session must share one durable load");
   assert.ok(
-    !bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).sessionBusy[run.sessionId],
+    !bridge.state.getMany(['sessions', 'chat', 'scheduled']).sessionBusy[run.sessionId],
     "the shared failed open must roll back provisional busy after its final caller settles"
   );
 }
@@ -7042,9 +6916,9 @@ async function scheduledOwnerRegistryIsBoundedAndProtectsLive() {
   };
   bridge.scheduled.selectScheduledTask("automation-owner-history");
   await bridge.scheduled.loadScheduledTaskRuns("automation-owner-history", 80);
-  assert.strictEqual(bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).activeSessionId, liveRun.sessionId);
+  assert.strictEqual(bridge.state.getMany(['sessions', 'chat', 'scheduled']).activeSessionId, liveRun.sessionId);
   assert.ok(
-    JSON.stringify(bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).chatItems).includes("protected owner live output"),
+    JSON.stringify(bridge.state.getMany(['sessions', 'chat', 'scheduled']).chatItems).includes("protected owner live output"),
     "owner pruning must preserve the current live scheduled conversation"
   );
   assert.strictEqual(await bridge.scheduled.exitScheduledRunChat(), true);
@@ -7058,7 +6932,7 @@ async function scheduledOwnerRegistryIsBoundedAndProtectsLive() {
     status: "running",
   }, { name: "Pruned owner task" }), true);
   assert.strictEqual(
-    bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).busy,
+    bridge.state.getMany(['sessions', 'chat', 'scheduled']).busy,
     true,
     "hard cap must evict lower-priority visible owners once current/context consume registry slots"
   );
@@ -7071,7 +6945,7 @@ async function scheduledOwnerRegistryIsBoundedAndProtectsLive() {
     status: "running",
   }, { name: "Visible owner task" }), true);
   assert.strictEqual(
-    bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).busy,
+    bridge.state.getMany(['sessions', 'chat', 'scheduled']).busy,
     false,
     "the most recent visible terminal run owner must survive registry pruning"
   );
@@ -7096,7 +6970,7 @@ async function scheduledOwnerRegistryIsBoundedAndProtectsLive() {
     status: "running",
   }, { name: "Busy owner 0" }), true);
   assert.strictEqual(
-    busyHarness.bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).busy,
+    busyHarness.bridge.state.getMany(['sessions', 'chat', 'scheduled']).busy,
     false,
     "a live buffer must remain recognizable after its separate owner registry entry is hard-capped"
   );
@@ -7162,7 +7036,7 @@ async function scheduledBufferLruNeverEvictsLive() {
     unread: false,
   }, { id: "automation-lru-cold", name: "LRU cold task" }), true);
   assert.ok(
-    !JSON.stringify(bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).chatItems).includes("cold buffer should be evicted"),
+    !JSON.stringify(bridge.state.getMany(['sessions', 'chat', 'scheduled']).chatItems).includes("cold buffer should be evicted"),
     "an inactive scheduled buffer older than the 64-entry cap should be evicted"
   );
   assert.strictEqual(await bridge.scheduled.exitScheduledRunChat(), true);
@@ -7174,7 +7048,7 @@ async function scheduledBufferLruNeverEvictsLive() {
     status: "running",
     unread: false,
   }, { id: "automation-lru-live", name: "LRU live task" }), true);
-  var live = bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']);
+  var live = bridge.state.getMany(['sessions', 'chat', 'scheduled']);
   assert.ok(
     JSON.stringify(live.chatItems).includes("live buffer must survive"),
     "LRU must never evict a busy scheduled buffer"
@@ -7207,7 +7081,7 @@ async function scheduledBufferLruNeverEvictsLive() {
     status: "running",
   }, { name: "New protected task" }), true);
   assert.strictEqual(
-    saturatedHarness.bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).busy,
+    saturatedHarness.bridge.state.getMany(['sessions', 'chat', 'scheduled']).busy,
     true,
     "when all 64 older buffers are live, LRU must retain the newly opened running buffer too"
   );
@@ -7245,7 +7119,7 @@ async function scheduledTemplateSourcePersistenceBehavior() {
   };
   await second.bridge.scheduled.loadScheduledTasks();
   assert.strictEqual(
-    second.bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).scheduledTasks[0].templateId,
+    second.bridge.state.getMany(['sessions', 'chat', 'scheduled']).scheduledTasks[0].templateId,
     "weekly-review",
     "template source must survive a bridge reload even when every visible template field was customized"
   );
@@ -7280,12 +7154,12 @@ async function scheduledUnreadPollingRaceBehavior() {
   await tick();
 
   assert.strictEqual(await bridge.scheduled.openScheduledRunChat(run, task), true);
-  assert.strictEqual(bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).scheduledTaskRuns[0].unread, false);
+  assert.strictEqual(bridge.state.getMany(['sessions', 'chat', 'scheduled']).scheduledTaskRuns[0].unread, false);
   staleTasks.resolve([Object.assign({}, task)]);
   staleDetail.resolve(Object.assign({}, task));
   staleRuns.resolve([Object.assign({}, run)]);
   await staleRefresh;
-  var finalState = bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']);
+  var finalState = bridge.state.getMany(['sessions', 'chat', 'scheduled']);
   assert.strictEqual(finalState.scheduledTaskRuns[0].unread, false, "an older poll must not resurrect a viewed run dot");
   assert.strictEqual(finalState.scheduledTasks[0].hasUnreadRuns, false, "an older poll must not resurrect the task aggregate dot");
   assert.strictEqual(finalState.scheduledTaskDetail.hasUnreadRuns, false);
@@ -7319,7 +7193,7 @@ async function scheduledRunNavigationBehavior() {
   var editCalls = harness.calls.filter(function (call) { return call.cmd === "edit_last_turn"; });
   assert.strictEqual(editCalls.length, editCallsBefore + 1);
   assert.strictEqual(editCalls[editCalls.length - 1].args.sessionId, "sched-run-1");
-  var opened = bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']);
+  var opened = bridge.state.getMany(['sessions', 'chat', 'scheduled']);
   assert.strictEqual(opened.activeSessionId, "sched-run-1");
   assert.deepStrictEqual(opened.scheduledRunContext, {
     sessionId: "sched-run-1",
@@ -7332,7 +7206,7 @@ async function scheduledRunNavigationBehavior() {
   });
 
   assert.strictEqual(await bridge.scheduled.exitScheduledRunChat(), true);
-  var restored = bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']);
+  var restored = bridge.state.getMany(['sessions', 'chat', 'scheduled']);
   assert.strictEqual(restored.activeSessionId, "chat-origin");
   assert.strictEqual(restored.scheduledRunContext, null);
   assert.strictEqual(restored.selectedScheduledTaskId, "automation-1");
@@ -7344,8 +7218,8 @@ async function scheduledRunNavigationBehavior() {
     { id: "automation-1", name: "Nightly report" }
   );
   await bridge.sessions.createNewSession();
-  assert.strictEqual(bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).activeSessionId, null);
-  assert.strictEqual(bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).scheduledRunContext, null);
+  assert.strictEqual(bridge.state.getMany(['sessions', 'chat', 'scheduled']).activeSessionId, null);
+  assert.strictEqual(bridge.state.getMany(['sessions', 'chat', 'scheduled']).scheduledRunContext, null);
 
   await bridge.sessions.switchToSession("chat-origin");
   await bridge.scheduled.openScheduledRunChat(
@@ -7353,7 +7227,7 @@ async function scheduledRunNavigationBehavior() {
     { id: "automation-1", name: "Nightly report", model: "/locked-model", mode: "plan" }
   );
   await bridge.sessions.switchToSession("chat-origin");
-  assert.strictEqual(bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).scheduledRunContext, null);
+  assert.strictEqual(bridge.state.getMany(['sessions', 'chat', 'scheduled']).scheduledRunContext, null);
 
   harness.handlers.load_session = function (args) {
     if (args.id === "sched-missing") throw new Error("missing scheduled session");
@@ -7363,7 +7237,7 @@ async function scheduledRunNavigationBehavior() {
       artifacts: [],
     };
   };
-  var chatItemsBeforeFailure = JSON.stringify(bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).chatItems);
+  var chatItemsBeforeFailure = JSON.stringify(bridge.state.getMany(['sessions', 'chat', 'scheduled']).chatItems);
   assert.strictEqual(
     await bridge.scheduled.openScheduledRunChat(
       { id: "run-missing", automationId: "automation-1", sessionId: "sched-missing", status: "completed" },
@@ -7371,13 +7245,13 @@ async function scheduledRunNavigationBehavior() {
     ),
     false
   );
-  var failedOpen = bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']);
+  var failedOpen = bridge.state.getMany(['sessions', 'chat', 'scheduled']);
   assert.strictEqual(failedOpen.activeSessionId, "chat-origin");
   assert.strictEqual(failedOpen.scheduledRunContext, null);
   assert.ok(String(failedOpen.scheduledTaskError).includes("missing scheduled session"));
   assert.strictEqual(JSON.stringify(failedOpen.chatItems), chatItemsBeforeFailure, "scheduled load errors must not pollute chat");
   assert.strictEqual(await bridge.scheduled.openScheduledRunChat({ id: "no-session", status: "completed" }, {}), false);
-  assert.ok(bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).scheduledTaskError, "missing run sessions should expose a scheduled-scoped error");
+  assert.ok(bridge.state.getMany(['sessions', 'chat', 'scheduled']).scheduledTaskError, "missing run sessions should expose a scheduled-scoped error");
 }
 
 async function scheduledSelectionGenerationBehavior() {
@@ -7396,10 +7270,10 @@ async function scheduledSelectionGenerationBehavior() {
   var tasksB = harness.bridge.scheduled.loadScheduledTasks();
   listB.resolve([{ id: "automation-b", name: "B" }]);
   await tasksB;
-  assert.strictEqual(harness.bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).scheduledTaskLoading, false, "an old task-list generation must not keep the current selection loading");
+  assert.strictEqual(harness.bridge.state.getMany(['sessions', 'chat', 'scheduled']).scheduledTaskLoading, false, "an old task-list generation must not keep the current selection loading");
   listA.resolve([{ id: "automation-a", name: "A" }]);
   await tasksA;
-  var state = harness.bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']);
+  var state = harness.bridge.state.getMany(['sessions', 'chat', 'scheduled']);
   assert.strictEqual(state.selectedScheduledTaskId, "automation-b");
   assert.strictEqual(state.scheduledTasks[0].id, "automation-b", "a stale task list must not replace the current generation");
 
@@ -7423,11 +7297,11 @@ async function scheduledSelectionGenerationBehavior() {
   detailB.resolve({ id: "automation-b", name: "B detail" });
   runsB.resolve([{ id: "run-b", automationId: "automation-b" }]);
   await Promise.all([readB, loadRunsB]);
-  assert.strictEqual(harness.bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).scheduledTaskLoading, false, "old detail/run requests must not keep the current selection loading");
+  assert.strictEqual(harness.bridge.state.getMany(['sessions', 'chat', 'scheduled']).scheduledTaskLoading, false, "old detail/run requests must not keep the current selection loading");
   detailA.resolve({ id: "automation-a", name: "A detail" });
   runsA.resolve([{ id: "run-a", automationId: "automation-a" }]);
   await Promise.all([readA, loadRunsA]);
-  state = harness.bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']);
+  state = harness.bridge.state.getMany(['sessions', 'chat', 'scheduled']);
   assert.strictEqual(state.selectedScheduledTaskId, "automation-b");
   assert.strictEqual(state.scheduledTaskDetail.id, "automation-b");
   assert.strictEqual(state.scheduledTaskRuns[0].id, "run-b");
@@ -7455,7 +7329,7 @@ async function scheduledSelectionGenerationBehavior() {
   await new Promise(function (resolve) { setTimeout(resolve, 450); });
   await tick();
   assert.strictEqual(listCalls, 3, "burst run events should debounce to one global task refresh");
-  assert.strictEqual(harness.bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).scheduledTasks[0].hasUnreadRuns, true, "the unselected task unread summary should enter global state");
+  assert.strictEqual(harness.bridge.state.getMany(['sessions', 'chat', 'scheduled']).scheduledTasks[0].hasUnreadRuns, true, "the unselected task unread summary should enter global state");
   assert.strictEqual(refreshes, 1, "the selected task detail should refresh once after the event burst");
   assert.strictEqual(aggregateRefreshes, 1, "the global scheduled-run sidebar should refresh once after the event burst");
 }
@@ -7500,19 +7374,19 @@ async function scheduledMutationErrorBehavior() {
     var entry = cases[i];
     harness.handlers[entry[1]] = function () { throw new Error("visible scheduled failure"); };
     await assert.rejects(function () { return harness.bridge.scheduled[entry[0]].apply(null, entry[2]); }, /visible scheduled failure/);
-    var state = harness.bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']);
+    var state = harness.bridge.state.getMany(['sessions', 'chat', 'scheduled']);
     assert.ok(String(state.scheduledTaskError).includes("visible scheduled failure"), entry[0] + " should expose its error");
     assert.strictEqual(state.scheduledTaskBusyAction, null, entry[0] + " should clear busy after failure");
     harness.bridge.scheduled.dismissScheduledTaskError();
-    assert.strictEqual(harness.bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).scheduledTaskError, null, entry[0] + " errors should be dismissible");
+    assert.strictEqual(harness.bridge.state.getMany(['sessions', 'chat', 'scheduled']).scheduledTaskError, null, entry[0] + " errors should be dismissible");
   }
 
   var chatHarness = createBridgeHarness();
   chatHarness.handlers.scheduled_task_chat_prompt = function () { throw new Error("chat creation failed"); };
   await assert.rejects(function () { return chatHarness.bridge.scheduled.startScheduledTaskChat(); }, /chat creation failed/);
-  assert.ok(String(chatHarness.bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).scheduledTaskError).includes("chat creation failed"));
-  assert.strictEqual(chatHarness.bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).activeSessionId, null, "failed chat creation must not change sessions");
-  assert.strictEqual(chatHarness.bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).scheduledTaskBusyAction, null);
+  assert.ok(String(chatHarness.bridge.state.getMany(['sessions', 'chat', 'scheduled']).scheduledTaskError).includes("chat creation failed"));
+  assert.strictEqual(chatHarness.bridge.state.getMany(['sessions', 'chat', 'scheduled']).activeSessionId, null, "failed chat creation must not change sessions");
+  assert.strictEqual(chatHarness.bridge.state.getMany(['sessions', 'chat', 'scheduled']).scheduledTaskBusyAction, null);
 }
 
 async function scheduledDeletePreservesHistoryAndSessionBuffers() {
@@ -7582,7 +7456,7 @@ async function scheduledDeletePreservesHistoryAndSessionBuffers() {
     status: "running",
   }, { id: "automation-other", name: "Sibling task" }), true);
   assert.ok(
-    JSON.stringify(bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).chatItems).includes("retain this sibling buffer"),
+    JSON.stringify(bridge.state.getMany(['sessions', 'chat', 'scheduled']).chatItems).includes("retain this sibling buffer"),
     "deleting one task must not guess at or purge unreported scheduled session ids"
   );
 
@@ -7647,7 +7521,7 @@ async function scheduledRecentRunsIgnoreStaleAggregate() {
   }]);
   await loading;
   assert.strictEqual(
-    harness.bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).scheduledTaskRecentRuns.length,
+    harness.bridge.state.getMany(['sessions', 'chat', 'scheduled']).scheduledTaskRecentRuns.length,
     0,
     "an older aggregate response must not overwrite the post-delete history snapshot"
   );
@@ -7716,9 +7590,9 @@ async function scheduledRunRecordSessionActionsBehavior() {
   await bridge.scheduled.loadScheduledTasks();
   await bridge.scheduled.loadScheduledTaskRecentRuns();
 
-  assert.strictEqual(bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).scheduledTaskRecentRuns[0].sessionId, sessionId);
+  assert.strictEqual(bridge.state.getMany(['sessions', 'chat', 'scheduled']).scheduledTaskRecentRuns[0].sessionId, sessionId);
   await bridge.sessions.renameSession(sessionId, "重命名后的定时任务记录");
-  assert.strictEqual(bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).scheduledTaskRecentRuns[0].sessionTitle, "重命名后的定时任务记录");
+  assert.strictEqual(bridge.state.getMany(['sessions', 'chat', 'scheduled']).scheduledTaskRecentRuns[0].sessionTitle, "重命名后的定时任务记录");
   assert.strictEqual(
     harness.calls.some(function (call) {
       return call.cmd === "rename_session" && call.args.id === sessionId;
@@ -7728,7 +7602,7 @@ async function scheduledRunRecordSessionActionsBehavior() {
   );
 
   await bridge.sessions.toggleSessionPinned(sessionId, true);
-  assert.strictEqual(bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).scheduledTaskRecentRuns[0].pinned, true);
+  assert.strictEqual(bridge.state.getMany(['sessions', 'chat', 'scheduled']).scheduledTaskRecentRuns[0].pinned, true);
   assert.strictEqual(
     harness.calls.some(function (call) {
       return call.cmd === "set_session_pinned" && call.args.id === sessionId && call.args.pinned === true;
@@ -7739,7 +7613,7 @@ async function scheduledRunRecordSessionActionsBehavior() {
 
   await bridge.sessions.archiveSession(sessionId);
   assert.strictEqual(
-    bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).scheduledTaskRecentRuns.some(function (run) { return run.sessionId === sessionId; }),
+    bridge.state.getMany(['sessions', 'chat', 'scheduled']).scheduledTaskRecentRuns.some(function (run) { return run.sessionId === sessionId; }),
     false,
     "archiving a scheduled run record should remove it from the sidebar shortcut list"
   );
@@ -7753,17 +7627,17 @@ async function scheduledRunRecordSessionActionsBehavior() {
   // 归档后的运行不再回流侧边栏(archived 由后端 run DTO 携带)。
   await bridge.scheduled.loadScheduledTaskRecentRuns();
   assert.strictEqual(
-    bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).scheduledTaskRecentRuns.some(function (run) { return run.sessionId === sessionId; }),
+    bridge.state.getMany(['sessions', 'chat', 'scheduled']).scheduledTaskRecentRuns.some(function (run) { return run.sessionId === sessionId; }),
     false,
     "archived scheduled runs must stay out of the sidebar list after a reload"
   );
   await bridge.sessions.restoreArchivedSession(sessionId);
 
   await bridge.scheduled.loadScheduledTaskRecentRuns();
-  assert.strictEqual(bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).scheduledTaskRecentRuns[0].sessionId, sessionId);
+  assert.strictEqual(bridge.state.getMany(['sessions', 'chat', 'scheduled']).scheduledTaskRecentRuns[0].sessionId, sessionId);
   await bridge.sessions.deleteSession(sessionId);
   assert.strictEqual(
-    bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).scheduledTaskRecentRuns.some(function (run) { return run.sessionId === sessionId; }),
+    bridge.state.getMany(['sessions', 'chat', 'scheduled']).scheduledTaskRecentRuns.some(function (run) { return run.sessionId === sessionId; }),
     false,
     "deleting a scheduled run record should remove it from the sidebar shortcut list"
   );
@@ -7826,7 +7700,7 @@ async function scheduledDraftModelBehavior() {
   await harness.bridge.lifecycle.init();
   await harness.bridge.scheduled.startScheduledTaskChat();
   await harness.bridge.chat.sendMessage("Create a report schedule");
-  var sessionId = harness.bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).activeSessionId;
+  var sessionId = harness.bridge.state.getMany(['sessions', 'chat', 'scheduled']).activeSessionId;
   harness.emit("chat:delta", {
     session_id: sessionId,
     text: "```scheduled-task-draft\n{\"name\":\"Report\",\"prompt\":\"Run report\",\"rrule\":\"FREQ=DAILY\"}\n```",
@@ -7834,10 +7708,10 @@ async function scheduledDraftModelBehavior() {
   harness.emit("chat:done", { session_id: sessionId });
   await tick();
   await tick();
-  assert.strictEqual(harness.bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).scheduledTaskDraft, null, "chat-generated parameters must not create a confirmation-card state");
-  assert.ok(String(harness.bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).scheduledTaskError).includes("cannot create scheduled draft"));
+  assert.strictEqual(harness.bridge.state.getMany(['sessions', 'chat', 'scheduled']).scheduledTaskDraft, null, "chat-generated parameters must not create a confirmation-card state");
+  assert.ok(String(harness.bridge.state.getMany(['sessions', 'chat', 'scheduled']).scheduledTaskError).includes("cannot create scheduled draft"));
   assert.ok(
-    harness.bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).chatItems.some(function (item) {
+    harness.bridge.state.getMany(['sessions', 'chat', 'scheduled']).chatItems.some(function (item) {
       return item.type === "system" && String(item.text || "").includes("cannot create scheduled draft");
     }),
     "automatic creation failures must remain visible in the creation chat"
@@ -7851,7 +7725,7 @@ async function scheduledDraftModelBehavior() {
   rejectCreate = false;
   await harness.bridge.scheduled.startScheduledTaskChat();
   await harness.bridge.chat.sendMessage("Create the edited report schedule");
-  sessionId = harness.bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).activeSessionId;
+  sessionId = harness.bridge.state.getMany(['sessions', 'chat', 'scheduled']).activeSessionId;
   harness.emit("chat:delta", {
     session_id: sessionId,
     text: "```scheduled-task-draft\n{\"name\":\"Edited report\",\"prompt\":\"Run the edited report\",\"rrule\":\"FREQ=DAILY\",\"cwds\":[\"D:/workspace\"],\"mode\":\"plan\",\"allowShell\":true}\n```",
@@ -7868,8 +7742,8 @@ async function scheduledDraftModelBehavior() {
   assert.strictEqual(capturedInput.model, "/wire-active");
   assert.strictEqual(capturedInput.modelId, "model-active");
   assert.ok(!Object.prototype.hasOwnProperty.call(capturedInput, "sourceSessionId"));
-  assert.strictEqual(harness.bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).selectedScheduledTaskId, "automation-created");
-  assert.strictEqual(harness.bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).scheduledTaskAutoOpenId, "automation-created");
+  assert.strictEqual(harness.bridge.state.getMany(['sessions', 'chat', 'scheduled']).selectedScheduledTaskId, "automation-created");
+  assert.strictEqual(harness.bridge.state.getMany(['sessions', 'chat', 'scheduled']).scheduledTaskAutoOpenId, "automation-created");
 }
 
 async function completedRunReopenPreservesStreamingFollowup() {
@@ -7915,14 +7789,14 @@ async function completedRunReopenPreservesStreamingFollowup() {
     session_id: run.sessionId,
     text: "partial follow-up output",
   });
-  assert.strictEqual(bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).busy, true);
+  assert.strictEqual(bridge.state.getMany(['sessions', 'chat', 'scheduled']).busy, true);
 
   assert.strictEqual(await bridge.scheduled.exitScheduledRunChat(), true);
   assert.strictEqual(await bridge.scheduled.openScheduledRunChat(run, {
     id: run.automationId,
     name: "Streaming follow-up task",
   }), true);
-  var reopened = bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']);
+  var reopened = bridge.state.getMany(['sessions', 'chat', 'scheduled']);
   assert.strictEqual(
     scheduledSessionLoads,
     1,
@@ -8035,14 +7909,14 @@ async function scheduledRunNowSidebarLinkBehavior() {
   await bridge.scheduled.runScheduledTaskNow(task.id);
   await tick();
   assert.strictEqual(
-    bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).scheduledTaskRecentRuns.some(function (run) { return run && run.id === "run-now-1"; }),
+    bridge.state.getMany(['sessions', 'chat', 'scheduled']).scheduledTaskRecentRuns.some(function (run) { return run && run.id === "run-now-1"; }),
     false,
     "a run without a sessionId must not enter the sidebar list"
   );
   linked = true;
   await new Promise(function (resolve) { setTimeout(resolve, 1300); });
   assert.strictEqual(
-    bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).scheduledTaskRecentRuns[0] && bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).scheduledTaskRecentRuns[0].sessionId,
+    bridge.state.getMany(['sessions', 'chat', 'scheduled']).scheduledTaskRecentRuns[0] && bridge.state.getMany(['sessions', 'chat', 'scheduled']).scheduledTaskRecentRuns[0].sessionId,
     "sched-run-now-1",
     "once the run links its session it must appear in the sidebar list"
   );
@@ -8130,7 +8004,7 @@ async function scheduledCreateListRefreshBehavior() {
   staleResolve([]);
   await stale;
   assert.ok(
-    bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).scheduledTasks.some(function (task) { return task.id === "automation-fresh"; }),
+    bridge.state.getMany(['sessions', 'chat', 'scheduled']).scheduledTasks.some(function (task) { return task.id === "automation-fresh"; }),
     "a stale in-flight task list response must not clobber the newly created task"
   );
 
@@ -8145,7 +8019,7 @@ async function scheduledCreateListRefreshBehavior() {
   }
   assert.strictEqual(threw, true, "a create response without a real id must be treated as a failure");
   assert.ok(
-    !bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).scheduledTasks.some(function (task) { return task.id === undefined || task.id === null; }),
+    !bridge.state.getMany(['sessions', 'chat', 'scheduled']).scheduledTasks.some(function (task) { return task.id === undefined || task.id === null; }),
     "failed creations must not leave phantom tasks in the list"
   );
 }
@@ -8277,30 +8151,30 @@ async function scheduledRunViewExitBehavior() {
     await harness.bridge.scheduled.loadScheduledTasks();
     await harness.bridge.scheduled.loadScheduledTaskRecentRuns();
     assert.strictEqual(await harness.bridge.scheduled.openScheduledRunChat(run, task), true);
-    assert.strictEqual(harness.bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).scheduledRunContext.sessionId, run.sessionId);
-    assert.strictEqual(harness.bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).activeSessionId, run.sessionId);
+    assert.strictEqual(harness.bridge.state.getMany(['sessions', 'chat', 'scheduled']).scheduledRunContext.sessionId, run.sessionId);
+    assert.strictEqual(harness.bridge.state.getMany(['sessions', 'chat', 'scheduled']).activeSessionId, run.sessionId);
     return harness;
   }
 
   var deleting = await openedHarness();
   await deleting.bridge.sessions.deleteSession(run.sessionId);
   assert.strictEqual(
-    deleting.bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).scheduledRunContext,
+    deleting.bridge.state.getMany(['sessions', 'chat', 'scheduled']).scheduledRunContext,
     null,
     "删除正在查看的定时运行后必须清掉 scheduledRunContext,否则界面回不到定时任务列表"
   );
-  assert.strictEqual(deleting.bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).activeSessionId, null);
+  assert.strictEqual(deleting.bridge.state.getMany(['sessions', 'chat', 'scheduled']).activeSessionId, null);
 
   var archiving = await openedHarness();
   await archiving.bridge.sessions.archiveSession(run.sessionId);
   assert.strictEqual(
-    archiving.bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).scheduledRunContext,
+    archiving.bridge.state.getMany(['sessions', 'chat', 'scheduled']).scheduledRunContext,
     null,
     "收纳正在查看的定时运行后同样必须退出视图(与普通对话收纳一致)"
   );
-  assert.strictEqual(archiving.bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).activeSessionId, null);
+  assert.strictEqual(archiving.bridge.state.getMany(['sessions', 'chat', 'scheduled']).activeSessionId, null);
   assert.strictEqual(
-    archiving.bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).scheduledTaskRecentRuns.some(function (item) {
+    archiving.bridge.state.getMany(['sessions', 'chat', 'scheduled']).scheduledTaskRecentRuns.some(function (item) {
       return item && item.sessionId === run.sessionId;
     }),
     false,
@@ -8311,7 +8185,7 @@ async function scheduledRunViewExitBehavior() {
   var failing = await openedHarness();
   failing.handlers.set_session_archived = function () { throw new Error("archive failed"); };
   await failing.bridge.sessions.archiveSession(run.sessionId);
-  var rolledBack = failing.bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']);
+  var rolledBack = failing.bridge.state.getMany(['sessions', 'chat', 'scheduled']);
   assert.strictEqual(rolledBack.activeSessionId, run.sessionId, "收纳失败必须回到原会话");
   assert.ok(rolledBack.scheduledRunContext, "收纳失败必须恢复定时运行上下文");
   assert.strictEqual(rolledBack.scheduledRunContext.sessionId, run.sessionId);
@@ -8354,7 +8228,7 @@ async function scheduledRunNowPollStopsOnTerminalBehavior() {
     "run 进入终态且仍无会话时必须停止轮询(再等也不会有会话)"
   );
   assert.strictEqual(
-    bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).scheduledTaskRecentRuns.some(function (item) { return item && item.id === "run-terminal"; }),
+    bridge.state.getMany(['sessions', 'chat', 'scheduled']).scheduledTaskRecentRuns.some(function (item) { return item && item.id === "run-terminal"; }),
     false,
     "没有会话的运行不进侧边栏"
   );
@@ -9087,7 +8961,7 @@ Promise.resolve()
   .then(sessionDownloadCapabilityGraceExpiryFailsOnce)
   .then(sessionDownloadCapabilityGraceSupersededByDraftFailsSilently)
   .then(deepSeekTurnTimelineLifecycleBehavior)
-  .then(llmApiStartupRetryBehavior)
+  .then(accountPlatformModelTransportBehavior)
   .then(function () { return internalSubagentHandoffStaysOutOfPresentation("tauri"); })
   .then(function () { return internalSubagentHandoffStaysOutOfPresentation("web"); })
   .then(currentInternalProvenanceAndEnvelopeStayOutOfPresentation)

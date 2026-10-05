@@ -2941,14 +2941,14 @@ fn delete_model_rejects_the_last_model_without_touching_the_keyring() {
         .lock()
         .unwrap_or_else(|p| p.into_inner());
     let _home = TempPinvou3Home::new("delete-model-last");
-    // Official 适配：load 路径的 `ensure_builtin_llmapi_model` 会在每次事务前
-    // 自动补回 builtin llmapi 模型，纯用户模型永远不可能是「最后一个」；可稳定
+    // Official 适配：load 路径的 `ensure_builtin_account_platform_model` 会在每次事务前
+    // 自动补回 builtin Account Platform 模型，纯用户模型永远不可能是「最后一个」；可稳定
     // 触发的拒绝路径是 builtin 守卫（内置模型不可删除）。夹具给该 builtin 模型
     // 挂上 credential_ref，钉住「拒绝先于任何钥匙串交互」这一来源语义。
-    seed_model_deletion_prefs(&[model_deletion_test_model("builtin_llmapi", true)]);
+    seed_model_deletion_prefs(&[model_deletion_test_model("builtin_account_platform", true)]);
     let store = crate::platform::credential_store::RecordingCredentialStore::new();
 
-    let error = super::settings::delete_model_inner("builtin_llmapi", &store)
+    let error = super::settings::delete_model_inner("builtin_account_platform", &store)
         .expect_err("the last (builtin) model must not be deletable");
 
     assert!(error.contains("delete_model"));
@@ -2957,7 +2957,11 @@ fn delete_model_rejects_the_last_model_without_touching_the_keyring() {
         "a rejected deletion must not reach the keyring: {:?}",
         store.ops()
     );
-    assert!(UserPrefs::load().model_by_id("builtin_llmapi").is_some());
+    assert!(
+        UserPrefs::load()
+            .model_by_id("builtin_account_platform")
+            .is_some()
+    );
 }
 
 #[test]

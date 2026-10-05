@@ -8473,7 +8473,7 @@ mod tests {
             "DEEPSEEK_API_KEY",
         ]);
         let mut bridge = fixture_bridge();
-        let mut account_model = SavedModel::builtin_llmapi();
+        let mut account_model = SavedModel::builtin_account_platform();
         account_model.base_url = "https://gateway.example.test/v1".into();
         account_model.model = "prepared-account-model".into();
         bridge.session_model = Some(account_model);

@@ -2,8 +2,7 @@ package token
 
 import (
 	"context"
-	"encoding/json"
-	"io"
+	"errors"
 	"net/http"
 
 	"github.com/google/uuid"
@@ -36,8 +35,11 @@ func (r *HTTPContextResolver) UnitActive(ctx context.Context, authorization stri
 			Status         string    `json:"status"`
 		} `json:"items"`
 	}
-	if err := json.NewDecoder(io.LimitReader(response.Body, 2<<20)).Decode(&body); err != nil {
+	if err := decodeAccountAuthority(response.Body, 2<<20, &body); err != nil {
 		return false, err
+	}
+	if body.Items == nil {
+		return false, errors.New("Account unit authority has no unit list")
 	}
 	for _, unit := range body.Items {
 		if unit.ID == unitID && unit.OrganizationID == organizationID && unit.Status == "ACTIVE" {

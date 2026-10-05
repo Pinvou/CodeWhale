@@ -6,7 +6,7 @@ use crate::features::account_platform::{
     SliderCaptchaRequest,
 };
 use crate::features::assistant::engine_pool::EnginePool;
-use crate::platform::prefs::BUILTIN_LLMAPI_MODEL_ID;
+use crate::platform::prefs::BUILTIN_ACCOUNT_PLATFORM_MODEL_ID;
 
 #[tauri::command]
 pub async fn account_platform_session(
@@ -22,7 +22,7 @@ pub async fn account_platform_login(
     pool: State<'_, EnginePool>,
 ) -> Result<SessionStatus, String> {
     let status = state.login(credentials).await?;
-    pool.mark_model_updated(BUILTIN_LLMAPI_MODEL_ID);
+    pool.mark_model_updated(BUILTIN_ACCOUNT_PLATFORM_MODEL_ID);
     Ok(status)
 }
 
@@ -65,7 +65,7 @@ pub async fn account_platform_login_sms(
     pool: State<'_, EnginePool>,
 ) -> Result<SessionStatus, String> {
     let status = state.login_sms(input).await?;
-    pool.mark_model_updated(BUILTIN_LLMAPI_MODEL_ID);
+    pool.mark_model_updated(BUILTIN_ACCOUNT_PLATFORM_MODEL_ID);
     Ok(status)
 }
 
@@ -75,7 +75,7 @@ pub async fn account_platform_logout(
     pool: State<'_, EnginePool>,
 ) -> Result<SessionStatus, String> {
     let status = state.logout().await?;
-    pool.mark_model_updated(BUILTIN_LLMAPI_MODEL_ID);
+    pool.mark_model_updated(BUILTIN_ACCOUNT_PLATFORM_MODEL_ID);
     Ok(status)
 }
 
@@ -85,4 +85,22 @@ pub async fn account_platform_request(
     state: State<'_, AccountPlatformState>,
 ) -> Result<ApiResponse, String> {
     state.request(request).await
+}
+
+#[tauri::command]
+pub async fn account_platform_models(
+    state: State<'_, AccountPlatformState>,
+) -> Result<crate::features::account_platform::BuiltinModelsView, String> {
+    state.builtin_models().await
+}
+
+#[tauri::command]
+pub async fn account_platform_set_default_model(
+    model: String,
+    state: State<'_, AccountPlatformState>,
+    pool: State<'_, EnginePool>,
+) -> Result<crate::features::account_platform::BuiltinModelsView, String> {
+    let result = state.set_builtin_default_model(model).await?;
+    pool.mark_model_updated(BUILTIN_ACCOUNT_PLATFORM_MODEL_ID);
+    Ok(result)
 }

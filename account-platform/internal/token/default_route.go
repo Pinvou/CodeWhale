@@ -47,14 +47,16 @@ func (p *PostgresDefaultRouteProvisioner) Ensure(ctx context.Context, resolved A
 	if walletID == uuid.Nil || resolved.UserID == uuid.Nil || !slices.Contains(p.config.Models, model) {
 		return ErrNoEligibleRoute
 	}
-	ownerType, ownerID, shareScope, defaultScope := "USER", resolved.UserID, "OWNER_UNIT_ONLY", "NONE"
+	ownerType, ownerID, err := defaultRouteOwner(resolved)
+	if err != nil {
+		return err
+	}
+	shareScope, defaultScope := "OWNER_UNIT_ONLY", "NONE"
 	var ownerOrganization *uuid.UUID
-	if resolved.ContextType == "ORGANIZATION" && resolved.OrganizationID != nil {
-		ownerType, ownerID, shareScope, defaultScope = "ORG", *resolved.OrganizationID, "ORG_ALL", "ORG"
+	if ownerType == "ORG" {
+		shareScope, defaultScope = "ORG_ALL", "ORG"
 		organizationID := *resolved.OrganizationID
 		ownerOrganization = &organizationID
-	} else if resolved.ContextType != "PERSONAL" {
-		return ErrNoEligibleRoute
 	}
 
 	tx, err := p.repository.pool.Begin(ctx)

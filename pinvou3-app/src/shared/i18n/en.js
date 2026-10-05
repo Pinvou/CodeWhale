@@ -1985,6 +1985,7 @@ dictEn["uiTeamRelay"] = {
 };
 dictEn["kbOutWeekdays"] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 dictEn["builtinModelSelect"] = "Backend model";
+dictEn["builtinModelChoose"] = "Choose backend model";
 dictEn["builtinModelRefresh"] = "Refresh";
 dictEn["builtinModelLoading"] = "Syncing…";
 dictEn["builtinModelEmpty"] = "No backend models";

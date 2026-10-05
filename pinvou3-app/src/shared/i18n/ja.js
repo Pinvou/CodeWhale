@@ -1980,6 +1980,7 @@ dictJa["uiTeamRelay"] = {
 };
 dictJa["kbOutWeekdays"] = ["日", "月", "火", "水", "木", "金", "土"];
 dictJa["builtinModelSelect"] = "バックエンドモデル";
+dictJa["builtinModelChoose"] = "バックエンドモデルを選択";
 dictJa["builtinModelRefresh"] = "更新";
 dictJa["builtinModelLoading"] = "同期中…";
 dictJa["builtinModelEmpty"] = "利用可能なモデルなし";

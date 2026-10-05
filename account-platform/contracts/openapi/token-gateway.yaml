@@ -10,6 +10,32 @@ servers:
 security:
   - oidc: []
 paths:
+  /models:
+    get:
+      operationId: listAuthorizedModels
+      summary: Read models permitted by the active account context without provisioning routes or reserving credit
+      responses:
+        "200":
+          description: Sorted unique model identifiers; an empty catalog is valid. Execution independently rechecks authorization, route health and credit. The response is bounded to 2 MiB.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [data]
+                properties:
+                  data:
+                    type: array
+                    maxItems: 4096
+                    items:
+                      type: object
+                      additionalProperties: false
+                      required: [id]
+                      properties:
+                        id: { type: string, minLength: 1 }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "503": { description: Catalog unavailable or exceeds bounds; never a truncated success, content: { application/json: { schema: { $ref: "common.yaml#/components/schemas/Error" } } } }
   /internal/v1/usage-waivers:
     servers: [{ url: / }]
     post:

@@ -36,3 +36,28 @@ Tauri 命令按 `app/commands/<domain>.rs` 组织，`app/mod.rs` 与 `app/comman
 （`platform/connector_state.rs`、`platform/connector_skills.rs`）和路径安全策略
 （`platform/path_policy.rs`）属于跨功能基础设施，位于 `platform/`；内置资源 bundle
 的解包由 `features/runtime_bundle/` 承担。
+
+## 内置模型账号平台切换
+
+客户端内置模型只有一条平台托管路径：`AccountPlatformRuntimeModelProvider` 在每次请求前
+从账号平台取得当前 OIDC 访问令牌和 Token Gateway 地址，再交给 Engine 发起调用。内置
+模型持久化 ID 为 `builtin_account_platform`；本地模型和用户自行配置的第三方模型仍直接
+使用各自配置，不经过账号平台。
+
+应用启动时，`features/account_platform/client_migration.rs` 在会话存储初始化前执行一次
+版本化迁移：
+
+1. 将设置、历史会话模型映射和定时任务模型引用切换到新 ID，并保留旧设置与绑定文件备份。
+2. 删除已发现的旧设备账号、旧会话及旧模型凭据，不在迁移报告中记录凭据值。
+3. 写入 `~/.pinvou3/migrations/account-platform-model-v1.json`。只有状态为 `complete`
+   才会在后续启动跳过；凭据清理失败时写入 `cleanup_pending`，下次启动继续清理。
+
+客户端切换验收以以下不变量为准：内置模型运行时必须获得账号平台授权；源码注册链不得
+包含旧模型命令或运行时回退；旧模型 ID 仅用于迁移、兼容反序列化、持久引用的只读解析和相应回归
+测试；迁移重复执行不得再次改写业务数据。对应自动化覆盖位于
+`features/account_platform/client_migration.rs`、`platform/prefs/mod.rs` 和
+`tests/account_platform_state.test.mjs`。
+
+仍未能原子改写的历史会话或定时任务旧内置 ID，以只读方式解析到已迁移的账号平台内置模型。
+已存在的显式模型 ID 优先，新内置配置缺失仍报错；不恢复旧 Hub，不改变全局激活模型。
+下次迁移成功时才持久化新 ID。

@@ -1849,10 +1849,7 @@ impl EnginePool {
         let model = match model_id.filter(|id| !id.trim().is_empty()) {
             Some(id) => bridge
                 .prefs
-                .advanced
-                .saved_models
-                .iter()
-                .find(|model| model.id == id)
+                .model_by_id(id)
                 .cloned()
                 .context("Draft model binding is unavailable; select a model again")?,
             None => bridge
@@ -3993,9 +3990,7 @@ fn resolve_eval_model_selection_from(
     models: &[SavedModel],
     model_id: &str,
 ) -> Result<(SavedModel, ModelIdentity)> {
-    let saved = models
-        .iter()
-        .find(|model| model.id == model_id)
+    let saved = crate::platform::prefs::saved_model_by_persisted_id(models, model_id)
         .with_context(|| format!("evaluation model ID '{model_id}' was not found"))?;
     let identity = identity_for_saved_model(bridge, saved);
     Ok((saved.clone(), identity))
@@ -4116,9 +4111,7 @@ fn resolve_scheduled_model(
     profile: &ScheduledRunProfile,
 ) -> Result<SavedModel> {
     if let Some(model_id) = profile.model_id.as_deref() {
-        let selected = models
-            .iter()
-            .find(|model| model.id == model_id)
+        let selected = crate::platform::prefs::saved_model_by_persisted_id(models, model_id)
             .with_context(|| {
                 format!("此任务绑定的 AI 模型配置已失效，请重新选择 AI 模型并保存任务。缺失配置：{model_id}")
             })?;
@@ -4172,9 +4165,7 @@ fn resolve_spawn_model(
         // mints fresh ids), never fall back silently to the global active
         // model — the user picked A while the engine would run B. Fail loudly
         // so the user re-selects; the chain must not substitute silently.
-        let selected = models
-            .iter()
-            .find(|model| model.id == model_id)
+        let selected = crate::platform::prefs::saved_model_by_persisted_id(models, model_id)
             .cloned()
             .with_context(|| format!("{SESSION_MODEL_BINDING_STALE_ERROR}: {model_id}"))?;
         return Ok(Some(selected));
@@ -4257,7 +4248,7 @@ mod scheduled_model_tests {
             change_identity: false,
         };
         for selected in [
-            SavedModel::builtin_llmapi(),
+            SavedModel::builtin_account_platform(),
             model("custom-draft", "custom-wire"),
         ] {
             let expected_id = selected.id.clone();
@@ -4278,9 +4269,12 @@ mod scheduled_model_tests {
                 change_identity,
             };
             assert!(
-                super::prepare_draft_runtime_model(&provider, SavedModel::builtin_llmapi())
-                    .await
-                    .is_err()
+                super::prepare_draft_runtime_model(
+                    &provider,
+                    SavedModel::builtin_account_platform()
+                )
+                .await
+                .is_err()
             );
             assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
         }
@@ -4432,6 +4426,40 @@ mod scheduled_model_tests {
     /// restriction cannot rely on caller discipline — the `aux-` prefix
     /// forces zero tools at the pool send chokepoint, and a caller passing
     /// false is restricted all the same; ordinary sessions are unchanged.
+    #[test]
+    fn historical_session_and_scheduled_ids_resolve_only_to_the_migrated_gateway_model() {
+        use crate::platform::prefs::{
+            BUILTIN_ACCOUNT_PLATFORM_MODEL_ID, LEGACY_BUILTIN_LLMAPI_MODEL_ID, SavedModel,
+        };
+        let builtin = SavedModel::builtin_account_platform();
+        let models = vec![builtin.clone()];
+        let resolved =
+            resolve_spawn_model(&models, None, Some(LEGACY_BUILTIN_LLMAPI_MODEL_ID), false)
+                .unwrap()
+                .unwrap();
+        assert_eq!(resolved.id, BUILTIN_ACCOUNT_PLATFORM_MODEL_ID);
+        let mut profile = ScheduledRunProfile {
+            task_id: "owned-fixture-task".into(),
+            model: builtin.model.clone(),
+            model_id: Some(LEGACY_BUILTIN_LLMAPI_MODEL_ID.into()),
+            workspace: std::path::PathBuf::new(),
+            mode: crate::features::sessions::ScheduledRunMode::Agent,
+            allow_shell: false,
+            trust_mode: false,
+            auto_approve: false,
+        };
+        assert_eq!(
+            resolve_scheduled_model(&models, &profile).unwrap().id,
+            BUILTIN_ACCOUNT_PLATFORM_MODEL_ID
+        );
+        profile.model = "different-wire".into();
+        assert!(resolve_scheduled_model(&models, &profile).is_err());
+        assert!(
+            resolve_spawn_model(&[], None, Some(LEGACY_BUILTIN_LLMAPI_MODEL_ID), false).is_err()
+        );
+        assert!(resolve_scheduled_model(&[], &profile).is_err());
+    }
+
     #[test]
     fn aux_session_turn_is_tool_free_regardless_of_caller() {
         // aux session: caller passes false / true, with or without a meta

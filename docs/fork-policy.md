@@ -3,6 +3,7 @@
 > 最后更新：2026-10-02（r3 收口后过渡期：不可变 tag `pinvou-v0.9.12-r3` 仍钉在其收口 `61cb769be`，登记头随 CodeWhale#80 前进至 `44921cf02`，gitlink=维护分支头并领先 tag；`verify-public-submodule.sh` 以 `TRANSITION_BASELINE` 断言过渡期钉点）
 > A04 本地登记（2026-10-05）：gitlink 普通追加至 `8b5a863908bf4178a8c5876c11c5884919119615`，唯一父提交为公开维护头 `44921cf028f12ffed33beb4760621a8598de48fc`；该补丁尚未推送，公开维护分支与不可变 tag 不变。下述公开分支一致性和发布门禁要求保持，须在外部写入获授权、补丁公开可达并对齐维护头后验证；本地 fast guard 通过不代表公开门禁通过。
 > 配套：`docs/fork-modifications.md`、`scripts/fork-guard.sh`、`docs/底座升级验收清单.md`
+> A07 历史合入说明：原波次登记的 0.9.5-r6 `3bbf8421ebdb16bff71f83dac4d42c8fb65f0f02` 不覆盖当前已审 0.9.12 gitlink。其容器参数修复已在当前底座吸收；历史提示机制的适用边界和现行结果路径见修改清单的 A07 说明。原父仓提交由普通 merge 保留。
 
 ## 0. 当前基线
 

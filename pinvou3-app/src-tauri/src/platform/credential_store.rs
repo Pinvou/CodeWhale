@@ -82,10 +82,6 @@ fn key_lock_for(service: &str, account: &str) -> Arc<Mutex<()>> {
 }
 const SEARCH_API_KEY_SERVICE: &str = "pinvou3-search-api-key";
 const MCP_SECRET_SERVICE: &str = "pinvou3-mcp-secret";
-const LLMAPI_TOKEN_SERVICE: &str = "pinvou3-llmapi-token";
-const LLMAPI_ADMIN_SERVICE: &str = "pinvou3-llmapi-admin";
-const LLMAPI_USER_SESSION_SERVICE: &str = "pinvou3-llmapi-user-session";
-const LLMAPI_USER_PASSWORD_SERVICE: &str = "pinvou3-llmapi-user-password";
 const ACCOUNT_PLATFORM_REFRESH_TOKEN_SERVICE: &str = "pinvou3-account-platform-oidc";
 const IMA_SECRET_SERVICE: &str = "pinvou3-ima-secret";
 const ACP_PROVIDER_KEY_SERVICE: &str = "pinvou3-acp-provider-key";
@@ -124,38 +120,6 @@ impl CredentialReference {
             version: 1,
         }
     }
-    pub fn for_llmapi_token(pinvou_user_id: &str, device_binding_id: &str) -> Self {
-        Self {
-            service: LLMAPI_TOKEN_SERVICE.to_string(),
-            account: format!("llmapi:{pinvou_user_id}:{device_binding_id}"),
-            version: 1,
-        }
-    }
-
-    pub fn for_llmapi_admin() -> Self {
-        Self {
-            service: LLMAPI_ADMIN_SERVICE.to_string(),
-            account: "newapi-admin".to_string(),
-            version: 1,
-        }
-    }
-
-    pub fn for_llmapi_user_session(pinvou_user_id: &str, device_binding_id: &str) -> Self {
-        Self {
-            service: LLMAPI_USER_SESSION_SERVICE.to_string(),
-            account: format!("llmapi-session:{pinvou_user_id}:{device_binding_id}"),
-            version: 1,
-        }
-    }
-
-    pub fn for_llmapi_user_password(pinvou_user_id: &str, device_binding_id: &str) -> Self {
-        Self {
-            service: LLMAPI_USER_PASSWORD_SERVICE.to_string(),
-            account: format!("llmapi-password:{pinvou_user_id}:{device_binding_id}"),
-            version: 1,
-        }
-    }
-
     pub fn for_account_platform_refresh_token() -> Self {
         Self {
             service: ACCOUNT_PLATFORM_REFRESH_TOKEN_SERVICE.to_string(),
@@ -334,10 +298,7 @@ impl SystemCredentialStore {
     /// 默认降级成明文存储的理由；稳定签名可改善授权体验,安全默认值仍应保持 Keychain。
     fn secrets_for(&self, service: &str) -> Arc<Secrets> {
         let started_at = Instant::now();
-        log::info!(
-            "[credential_store] secrets_for lock wait start service={}",
-            service
-        );
+        log::info!("[credential_store] secrets_for lock wait start");
         // On a cache miss the backend is rebuilt and the entry replaced as a
         // whole, with no partial writes; poisoned-lock recovery keeps consistency.
         let mut cache = self
@@ -345,29 +306,23 @@ impl SystemCredentialStore {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         log::info!(
-            "[credential_store] secrets_for lock acquired service={} elapsed_ms={}",
-            service,
+            "[credential_store] secrets_for lock acquired elapsed_ms={}",
             started_at.elapsed().as_millis()
         );
         if let Some(existing) = cache.get(service) {
             log::info!(
-                "[credential_store] secrets_for cache hit service={} elapsed_ms={}",
-                service,
+                "[credential_store] secrets_for cache hit elapsed_ms={}",
                 started_at.elapsed().as_millis()
             );
             return existing.clone();
         }
-        log::info!(
-            "[credential_store] secrets_for cache miss service={}",
-            service
-        );
+        log::info!("[credential_store] secrets_for cache miss");
         let store = DefaultKeyringStore::new(service);
-        log::info!("[credential_store] keyring probe start service={}", service);
+        log::info!("[credential_store] keyring probe start");
         let secrets = match store.probe() {
             Ok(()) => {
                 log::info!(
-                    "[credential_store] keyring probe ok service={} elapsed_ms={}",
-                    service,
+                    "[credential_store] keyring probe ok elapsed_ms={}",
                     started_at.elapsed().as_millis()
                 );
                 // No `fallback_services.remove` here: a backend is probed and
@@ -378,14 +333,12 @@ impl SystemCredentialStore {
                 // re-probes.
                 Secrets::new(Arc::new(store))
             }
-            Err(err) => {
+            Err(_) => {
                 log::warn!(
-                    "[credential_store] keyring probe failed service={} elapsed_ms={} error={}",
-                    service,
+                    "[credential_store] keyring probe failed elapsed_ms={}",
                     started_at.elapsed().as_millis(),
-                    err
                 );
-                log::warn!("OS keyring 不可用({err}),改用文件回退凭证存储");
+                log::warn!("[credential_store] OS keyring unavailable; file fallback active");
                 self.fallback_services
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -397,8 +350,7 @@ impl SystemCredentialStore {
         let arc = Arc::new(secrets);
         cache.insert(service.to_string(), arc.clone());
         log::info!(
-            "[credential_store] secrets_for cached service={} elapsed_ms={}",
-            service,
+            "[credential_store] secrets_for cached elapsed_ms={}",
             started_at.elapsed().as_millis()
         );
         arc
@@ -418,11 +370,7 @@ impl CredentialStore for SystemCredentialStore {
         // macOS ad-hoc 签名下避免反复弹窗的关键(见 VALUE_CACHE 注释)。
         if let Ok(cache) = value_cache().lock() {
             if let Some(cached) = cache.get(&cache_key) {
-                log::info!(
-                    "[credential_store] get cache hit service={} account={}",
-                    reference.service,
-                    reference.account
-                );
+                log::info!("[credential_store] get cache hit");
                 return Ok(cached.clone());
             }
         }
@@ -433,32 +381,20 @@ impl CredentialStore for SystemCredentialStore {
         // double-check:另一线程可能刚把结果写入缓存,命中即避免重复访问 Keychain/重复弹窗。
         if let Ok(cache) = value_cache().lock() {
             if let Some(cached) = cache.get(&cache_key) {
-                log::info!(
-                    "[credential_store] get cache hit (double-check) service={} account={}",
-                    reference.service,
-                    reference.account
-                );
+                log::info!("[credential_store] get cache hit (double-check)");
                 return Ok(cached.clone());
             }
         }
         let started_at = Instant::now();
-        log::info!(
-            "[credential_store] get start service={} account={}",
-            reference.service,
-            reference.account
-        );
+        log::info!("[credential_store] get start");
         let secrets = self.secrets_for(&reference.service);
         log::info!(
-            "[credential_store] get backend ready service={} account={} elapsed_ms={}",
-            reference.service,
-            reference.account,
+            "[credential_store] get backend ready elapsed_ms={}",
             started_at.elapsed().as_millis()
         );
         let result = secrets.get(&reference.account).map_err(secrets_error);
         log::info!(
-            "[credential_store] get returned service={} account={} ok={} elapsed_ms={}",
-            reference.service,
-            reference.account,
+            "[credential_store] get returned ok={} elapsed_ms={}",
             result.is_ok(),
             started_at.elapsed().as_millis()
         );
@@ -473,11 +409,7 @@ impl CredentialStore for SystemCredentialStore {
 
     fn set(&self, reference: &CredentialReference, value: &str) -> Result<(), CredentialError> {
         let started_at = Instant::now();
-        log::info!(
-            "[credential_store] set start service={} account={}",
-            reference.service,
-            reference.account
-        );
+        log::info!("[credential_store] set start");
         // 持 per-key 锁覆盖"访问 Keychain + 回写值缓存"整段,与 get/delete 采用同一锁范围,
         // 串行化同一凭据的所有并发写。若仅在缓存回写时加锁而后端写入在锁外,并发 set 的
         // 后端完成顺序与缓存回写顺序可能错位,导致缓存值与 Keychain 不一致(lost-update)。
@@ -486,18 +418,14 @@ impl CredentialStore for SystemCredentialStore {
         let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
         let secrets = self.secrets_for(&reference.service);
         log::info!(
-            "[credential_store] set backend ready service={} account={} elapsed_ms={}",
-            reference.service,
-            reference.account,
+            "[credential_store] set backend ready elapsed_ms={}",
             started_at.elapsed().as_millis()
         );
         let result = secrets
             .set(&reference.account, value)
             .map_err(secrets_error);
         log::info!(
-            "[credential_store] set returned service={} account={} ok={} elapsed_ms={}",
-            reference.service,
-            reference.account,
+            "[credential_store] set returned ok={} elapsed_ms={}",
             result.is_ok(),
             started_at.elapsed().as_millis()
         );
@@ -515,11 +443,7 @@ impl CredentialStore for SystemCredentialStore {
 
     fn delete(&self, reference: &CredentialReference) -> Result<(), CredentialError> {
         let started_at = Instant::now();
-        log::info!(
-            "[credential_store] delete start service={} account={}",
-            reference.service,
-            reference.account
-        );
+        log::info!("[credential_store] delete start");
         // 持 per-key 锁覆盖"访问 Keychain + 回写值缓存"整段,锁范围与 get/set 一致
         // (见 VALUE_CACHE 并发正确性小节)。失败时不更新缓存。
         let lock = key_lock_for(&reference.service, &reference.account);
@@ -527,9 +451,7 @@ impl CredentialStore for SystemCredentialStore {
         let secrets = self.secrets_for(&reference.service);
         let result = secrets.delete(&reference.account).map_err(secrets_error);
         log::info!(
-            "[credential_store] delete returned service={} account={} ok={} elapsed_ms={}",
-            reference.service,
-            reference.account,
+            "[credential_store] delete returned ok={} elapsed_ms={}",
             result.is_ok(),
             started_at.elapsed().as_millis()
         );
@@ -566,10 +488,7 @@ impl CredentialStore for SystemCredentialStore {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .contains_key(&reference.service);
         if unreachable {
-            log::info!(
-                "[credential_store] os keyring unreachable for service={} (file fallback active)",
-                reference.service
-            );
+            log::info!("[credential_store] os keyring unreachable (file fallback active)");
         }
         unreachable
     }
@@ -686,6 +605,73 @@ pub fn is_secret_like(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn actual_owned_windows_keyring_operations_log_only_static_stages() {
+        struct CaptureLogger(Mutex<Vec<String>>);
+        impl log::Log for CaptureLogger {
+            fn enabled(&self, _: &log::Metadata<'_>) -> bool {
+                true
+            }
+            fn log(&self, record: &log::Record<'_>) {
+                if std::thread::current().name().is_some_and(|name| {
+                    name.ends_with("actual_owned_windows_keyring_operations_log_only_static_stages")
+                }) {
+                    self.0.lock().unwrap().push(format!("{}", record.args()));
+                }
+            }
+            fn flush(&self) {}
+        }
+        static LOGGER: CaptureLogger = CaptureLogger(Mutex::new(Vec::new()));
+        log::set_logger(&LOGGER).expect("install isolated test logger");
+        log::set_max_level(log::LevelFilter::Info);
+        let reference = CredentialReference {
+            service: format!(
+                "owned-log-probe-{}-{}",
+                std::process::id(),
+                crate::platform::paths::tests::unique_suffix()
+            ),
+            account: "public-account-marker".into(),
+            version: 1,
+        };
+        DefaultKeyringStore::new(&reference.service)
+            .probe()
+            .expect("actual Windows keyring must be reachable");
+        struct OwnedEntry(SystemCredentialStore, CredentialReference);
+        impl Drop for OwnedEntry {
+            fn drop(&mut self) {
+                let _ = self.0.delete(&self.1);
+            }
+        }
+        let owned = OwnedEntry(SystemCredentialStore::new(), reference);
+        assert!(owned.0.get(&owned.1).unwrap().is_none());
+        assert!(!owned.0.os_keyring_unreachable(&owned.1));
+        owned
+            .0
+            .set(&owned.1, "public-nonsecret-value-marker")
+            .unwrap();
+        assert_eq!(
+            owned.0.get(&owned.1).unwrap().as_deref(),
+            Some("public-nonsecret-value-marker")
+        );
+        owned.0.delete(&owned.1).unwrap();
+        assert!(owned.0.get(&owned.1).unwrap().is_none());
+        let records = LOGGER.0.lock().unwrap();
+        assert!(
+            records
+                .iter()
+                .any(|message| message.contains("[credential_store]"))
+        );
+        assert!(
+            records
+                .iter()
+                .all(|message| !message.contains(&owned.1.service)
+                    && !message.contains(&owned.1.account)
+                    && !message.contains("public-nonsecret-value-marker"))
+        );
+        drop(records);
+    }
 
     #[test]
     fn account_platform_reference_keeps_verified_native_record_namespace() {
@@ -1083,24 +1069,6 @@ mod tests {
         assert_eq!(reference.service, "pinvou3-search-api-key");
         assert_eq!(reference.account, "search:metaso");
         assert_eq!(reference.version, 1);
-    }
-
-    #[test]
-    fn llmapi_references_use_dedicated_services() {
-        let token = CredentialReference::for_llmapi_token("u_1", "dev_abc");
-        assert_eq!(token.service, "pinvou3-llmapi-token");
-        assert_eq!(token.account, "llmapi:u_1:dev_abc");
-        assert_eq!(token.version, 1);
-
-        let admin = CredentialReference::for_llmapi_admin();
-        assert_eq!(admin.service, "pinvou3-llmapi-admin");
-        assert_eq!(admin.account, "newapi-admin");
-        assert_eq!(admin.version, 1);
-
-        let password = CredentialReference::for_llmapi_user_password("u_1", "dev_abc");
-        assert_eq!(password.service, "pinvou3-llmapi-user-password");
-        assert_eq!(password.account, "llmapi-password:u_1:dev_abc");
-        assert_eq!(password.version, 1);
     }
 
     #[test]

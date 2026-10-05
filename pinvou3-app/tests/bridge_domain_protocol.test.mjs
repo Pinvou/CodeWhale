@@ -197,7 +197,7 @@ const expectedProtocolHashes = {
   // list_builtin_features / set_builtin_feature_enabled invoke wrappers (the
   // session-mention feature gate reads the list; the setter is the contract
   // hook for the builtin plugin page).
-  settings: 'b8a388fdf028c539a3e8cc86030dcf7ca0c575a223d142821875db5969c3e3d0',
+  settings: '421ea5ce604cdc0e885102116ab84558fcd9ffa5089f8641313d67d058cb3662',
   updater: 'd603bbac5c51f3b53bf19272fbafd9c430786fd5e35a9b8da9aa67f4c2334e5f',
   // Official's bridge/voice.js is untouched by this backflow, so the hash
   // stays at the Official base value (the community value differs only via
@@ -205,7 +205,7 @@ const expectedProtocolHashes = {
   voice: '8581b43940d101353fdd1468232dc778c2d1320854af5fdbbbc0326e5cdedbbb',
   // Official-only team-relay surface; unchanged by this backflow.
   teamRelay: '246f7cfd5a5ff4b730e2f3972fe9e74860b51a4781bd323bf10b3d795d24ed1d',
-  accountPlatform: 'd21e64c409b3a308b8da205672ac58f5ac5fd3b1908a9fa894424c0e65432cf1',
+  accountPlatform: '8797cfaff0a98edff324b98c3c89848680b3af090b0d77faea960e933228881a',
   // Recomputed for the rebind carryover feed-back (review #463 F-Major):
   // rebind_workspace_root gains the optional previousPostBusySessionIds
   // payload — the dialog's previous report fed back on retry, honored by the

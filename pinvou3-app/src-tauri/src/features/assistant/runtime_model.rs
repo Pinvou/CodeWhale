@@ -26,8 +26,9 @@ pub struct RuntimeModelRequest {
 ///
 /// 凭据只保存在内存中，不参与序列化；`Debug` 固定脱敏，避免 bridge 或测试日志
 /// 意外输出明文。存在时它是本次引擎配置的最终凭据，优先于环境变量和本地凭据库。
-/// The Community default preparation path is always passthrough (`credential` stays None; see
-/// engine_pool's `prepare_runtime_model`); the field is reserved for the enterprise seam.
+/// Ordinary provider preparation leaves this absent. The built-in Account
+/// Platform route supplies an ephemeral verified access token through the same
+/// EnginePool provider seam; it never persists that token in saved settings.
 #[derive(Clone, PartialEq, Eq)]
 pub struct RuntimeModelCredential {
     api_key: String,
@@ -127,7 +128,7 @@ mod tests {
     use crate::platform::credential_store::{CredentialEditAction, CredentialState};
     use crate::platform::prefs::{ModelPreset, SavedModel};
 
-    /// Official 仍提供带非空校验的公开构造器（llmapi_hub / bridge 层使用）；
+    /// Official 仍提供带非空校验的公开构造器（account_platform / bridge 层使用）；
     /// 测试统一经它构造，保持与生产路径一致。
     fn credential(api_key: &str) -> RuntimeModelCredential {
         RuntimeModelCredential::api_key(api_key).expect("runtime credential")

@@ -5,6 +5,10 @@
 3. Keycloak 开发入口为 `http://127.0.0.1:18080`；Account、Billing、Token Gateway、Payment Simulator 和 Token Portal 端口依次为 `18101` 至 `18105`。
 4. 真实 New API 通过 `real-newapi` profile 启动，仅绑定 `http://127.0.0.1:18106`；首次启动后需在本机完成管理员、上游 Channel 和最小权限 API Token 初始化，具体见 [`../runbooks/newapi-deployment.md`](../runbooks/newapi-deployment.md)。
 
+站点专用覆盖示例与单机部署注意事项见 [部署规划](../../docs/deployment.md)。基础 Compose 及 remote 覆盖不构成高可用生产或真实供应商验收；Payment Simulator 不得承接生产流量。
+
+`node scripts/account-platform.mjs dev down` 与启动命令对称启用 `real-newapi` profile，关闭开发项目的对应工作负载，不删除数据卷；不应用于生产或其他 Compose project。
+
 ## 平台管理台
 
 `real-newapi` profile 的 New API 同时连接私有 `backend` 和可出站的 `frontend` 桥，仅在宿主机回环地址发布 `18106`，以支持本地初始化与上游模型连接。数据库、Redis、NATS 仍仅连接私有网络；这不构成真实模型或生产网络验收。
@@ -30,7 +34,7 @@ docker compose --env-file account-platform/deploy/compose/.env \
 
 商城账号同步与手机认证相互独立。配置 `H3C_MALL_BASE_URL`、`H3C_MALL_APP_KEY` 和 `H3C_MALL_APP_SECRET` 后，Account Service 才为新注册用户创建商城同步任务；未配置时注册仍可用，状态为 `NOT_CONFIGURED`，不创建无法完成的商城任务。默认 `BILLING_PAYMENT_PROVIDER=simulator` 使用社区开发模拟器；开发和测试环境允许明确标注的暂定测试价格。仅显式选择 `h3c_mall` 才使用企业商城，暂定价仍需 `BILLING_ALLOW_TENTATIVE_PRICES=true` 明确启用。商品 SKU 来自数据库，不维护第二份环境变量商品目录。
 
-已有 Keycloak 数据卷升级后，还需要执行一次可重复运行的初始化脚本，以安装手机直登 Flow、服务账号权限和手机号 Token Claim：
+已有 Keycloak 数据卷升级后，先使用包含手机 Authenticator SPI 的当前 Keycloak 镜像，再执行可重复运行的初始化脚本安装手机直登 Flow、服务账号权限和手机号 Token Claim；初始化脚本不编译或安装扩展 JAR：
 
 ```sh
 docker compose --env-file account-platform/deploy/compose/.env \

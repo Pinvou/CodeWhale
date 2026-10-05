@@ -5,6 +5,8 @@
 > 架构依据：[账号、组织、Token 与计费系统架构设计](账号组织Token与计费系统-架构设计.md)<br>
 > 本轮范围：先定义任务、依赖、测试、校验和交付门禁，不开始业务代码实现。
 
+> **历史文档提示（2026-10-06）：** 本文保留实施前计划，不代表当前完成度。后续目标见 [`../account-platform/docs/requirements.md`](../account-platform/docs/requirements.md)，不要求本波实现全部目标；历史审计与当前 A06 校正见 [`../account-platform/docs/implementation-status.md`](../account-platform/docs/implementation-status.md)。管理员建组织并指定 Owner、会话上下文、自管 Token 保全、个人 PLAN 与组织 LEGACY、供应商中立短信、逻辑调用幂等键及最终免单均按已审代码和契约执行，不能因旧示例或未来设计重新改变。实际调用与部署请参阅同目录下的当前文档；测试/模板不是生产发布验收。
+
 ## 1. 实施结论与当前边界
 
 ### 1.1 本计划的完成目标

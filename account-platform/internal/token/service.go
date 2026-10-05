@@ -77,6 +77,7 @@ func (s *Service) Handler(verify identity.VerifyFunc) http.Handler {
 	router.GET("/v1/token-accounts/:token_account_id/credentials", httpserver.AdaptFunc(s.listCredentials))
 	router.POST("/v1/token-accounts/:token_account_id/credentials/:credential_id/revoke", httpserver.AdaptFunc(s.revokeCredential))
 	router.GET("/v1/token-accounts/eligible", httpserver.AdaptFunc(s.listEligible))
+	router.GET("/v1/models", httpserver.AdaptFunc(s.listModels))
 	router.GET("/v1/usage-requests/:usage_request_id", httpserver.AdaptFunc(s.getUsageRequest))
 	router.GET("/v1/me/usage-requests", httpserver.AdaptFunc(s.listMyUsageRequests))
 	router.POST("/v1/chat/completions", httpserver.AdaptFunc(s.chatCompletions))
@@ -754,7 +755,10 @@ func (r *HTTPContextResolver) Resolve(ctx context.Context, authorization string)
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
-		return AuthorizationContext{}, ErrForbidden
+		if response.StatusCode == http.StatusUnauthorized || response.StatusCode == http.StatusForbidden {
+			return AuthorizationContext{}, ErrForbidden
+		}
+		return AuthorizationContext{}, fmt.Errorf("Account authorization context returned HTTP %d", response.StatusCode)
 	}
 	var body struct {
 		UserID            uuid.UUID   `json:"user_id"`
@@ -769,10 +773,29 @@ func (r *HTTPContextResolver) Resolve(ctx context.Context, authorization string)
 		MobileVerified    bool        `json:"mobile_verified"`
 		MallSyncStatus    string      `json:"mall_sync_status"`
 	}
-	if err := json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&body); err != nil {
+	if err := decodeAccountAuthority(response.Body, 1<<20, &body); err != nil {
 		return AuthorizationContext{}, err
 	}
+	if body.UserID == uuid.Nil || strings.TrimSpace(body.SessionID) == "" ||
+		(body.ContextType != "PERSONAL" && body.ContextType != "ORGANIZATION") ||
+		(body.ContextType == "ORGANIZATION" && (body.OrganizationID == nil || *body.OrganizationID == uuid.Nil)) ||
+		(body.ContextType == "PERSONAL" && body.OrganizationID != nil) {
+		return AuthorizationContext{}, errors.New("Account authorization context has no valid identity or active context")
+	}
 	return AuthorizationContext{UserID: body.UserID, SessionID: body.SessionID, ContextType: body.ContextType, OrganizationID: body.OrganizationID, MembershipVersion: body.MembershipVersion, UnitIDs: body.UnitIDs, AncestorUnitIDs: body.AncestorUnitIDs, Roles: body.Roles, Mobile: body.Mobile, MobileVerified: body.MobileVerified, MallSyncStatus: body.MallSyncStatus}, nil
+}
+
+// Consume the complete bounded authority response. A decoder reading only the
+// first JSON value can accept trailing garbage or hide bytes beyond its limit.
+func decodeAccountAuthority(reader io.Reader, maximum int64, target any) error {
+	payload, err := io.ReadAll(io.LimitReader(reader, maximum+1))
+	if err != nil {
+		return err
+	}
+	if int64(len(payload)) > maximum {
+		return errors.New("Account authority response exceeds its bound")
+	}
+	return json.Unmarshal(payload, target)
 }
 
 type HTTPWalletResolver struct {

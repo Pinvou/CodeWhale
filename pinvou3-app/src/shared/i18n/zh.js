@@ -1968,6 +1968,7 @@ dictZh["uiTeamRelay"] = {
 };
 dictZh["kbOutWeekdays"] = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
 dictZh["builtinModelSelect"] = "后台模型";
+dictZh["builtinModelChoose"] = "选择后台模型";
 dictZh["builtinModelRefresh"] = "刷新";
 dictZh["builtinModelLoading"] = "同步中…";
 dictZh["builtinModelEmpty"] = "暂无后台模型";

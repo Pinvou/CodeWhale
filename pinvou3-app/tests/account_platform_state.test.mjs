@@ -1,13 +1,23 @@
 import { accountPlatformCopy } from '../src/shared/account-platform-i18n.js';
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { readFile } from 'node:fs/promises';
+import { readFile, readdir } from 'node:fs/promises';
 import { createContextRequestGuard, eligibleForContext, rechargePollDelay } from '../src/features/account-platform/context-guard.js';
 import { formatPoints, MICROCREDITS_PER_POINT, microcreditsToPoints } from '../src/features/account-platform/credit-units.js';
 import { AccountPlatformBffClient } from '../src/features/account-platform/bff-client.js';
 import { AccountPlatformDesktopClient } from '../src/features/account-platform/desktop-client.js';
 import { AdminPlatformClient } from '../src/features/account-platform/admin-client.js';
 import { buildUnitTree } from '../src/features/account-platform/admin-organization-tree.js';
+
+async function sourceFiles(root) {
+  const files = [];
+  for (const entry of await readdir(root, { withFileTypes: true })) {
+    const child = new URL(`${entry.name}${entry.isDirectory() ? '/' : ''}`, root);
+    if (entry.isDirectory()) files.push(...await sourceFiles(child));
+    else if (/\.(?:js|jsx|mjs|rs)$/.test(entry.name)) files.push(child);
+  }
+  return files;
+}
 
 test('account balances convert internal microcredits to display points', () => {
   assert.equal(MICROCREDITS_PER_POINT, 10_000);
@@ -200,13 +210,13 @@ test('personal usage history supports opaque pagination without exposing routing
   assert.doesNotMatch(view, /record\.(?:token_account_id|credential_id|wallet_id|provider)/);
 });
 
-test('desktop lazy sidebar preserves account center and legacy model controls', async () => {
+test('desktop lazy sidebar preserves account center while retiring the obsolete account entry', async () => {
   const source = await readFile(new URL('../src/app/main.jsx', import.meta.url), 'utf8');
   const sidebar = await readFile(new URL('../src/features/account-platform/AccountPlatformPopover.jsx', import.meta.url), 'utf8');
   assert.match(source, /LazyAccountPlatformSidebarEntry/); assert.match(source, /m\.AccountPlatformDesktopView/);
   assert.match(source, /navigateFromScheduledRun\('accountPlatform'\)/); assert.match(sidebar, /onOpenCenter/);
   assert.match(sidebar, /data-testid="account-platform-button"/);
-  assert.match(source, /data-testid="llmapi-account-button"/); assert.match(source, /<AccountPopover/);
+  assert.doesNotMatch(source, /data-testid="llmapi-account-button"|<AccountPopover|bridge\.llmapi/);
 });
 
 test('desktop account sidebar retains its monochrome icon and readable label', async () => {
@@ -278,7 +288,7 @@ test('desktop account persists only refresh credentials and clears them on logou
 
 test('built-in desktop chat uses the in-memory OIDC session and Token Gateway route', async () => {
   const accountBackend = await readFile(new URL('../src-tauri/src/features/account_platform/mod.rs', import.meta.url), 'utf8');
-  const runtimeProvider = await readFile(new URL('../src-tauri/src/features/llmapi_hub/runtime_model.rs', import.meta.url), 'utf8');
+  const runtimeProvider = await readFile(new URL('../src-tauri/src/features/account_platform/runtime_model.rs', import.meta.url), 'utf8');
   const runtime = await readFile(new URL('../src-tauri/src/features/account_platform/runtime.rs', import.meta.url), 'utf8');
   assert.match(runtime, /chat_runtime_authorization/);
   assert.match(runtime, /token_gateway_openai_base/);
@@ -286,6 +296,32 @@ test('built-in desktop chat uses the in-memory OIDC session and Token Gateway ro
   assert.match(runtimeProvider, /chat_runtime_authorization\(\)/);
   assert.match(runtimeProvider, /model\.base_url = authorization\.base_url/);
   assert.match(runtimeProvider, /RuntimeModelCredential::account_platform_access_token\([\s\S]*authorization\.access_token/);
+});
+
+test('retiring the old model binding preserves persisted session, schedule and preference migration', async () => {
+  const migration = await readFile(new URL('../src-tauri/src/features/account_platform/client_migration.rs', import.meta.url), 'utf8');
+  const prefs = await readFile(new URL('../src-tauri/src/platform/prefs/mod.rs', import.meta.url), 'utf8');
+  assert.match(migration, /sessions\/_session_models\.json/);
+  assert.match(migration, /scheduled-runs\/session-profiles\.json/);
+  assert.match(migration, /legacy-llmapi-bindings-v1\.json/);
+  assert.match(migration, /MigrationState::CleanupPending/);
+  assert.match(prefs, /migrate_account_platform_model_path/);
+  assert.match(prefs, /LEGACY_BUILTIN_LLMAPI_MODEL_ID/);
+  assert.match(prefs, /BUILTIN_ACCOUNT_PLATFORM_MODEL_ID/);
+  assert.match(prefs, /alias = "builtin_llmapi_default_model"/);
+});
+
+test('wire selection stays in the account domain while ordinary profiles remain on the models API', async () => {
+  const bridge = await readFile(new URL('../src/platform/tauri/bridge/account-platform.js', import.meta.url), 'utf8');
+  const settings = await readFile(new URL('../src/features/settings/SettingsView.jsx', import.meta.url), 'utf8');
+  assert.match(bridge, /getModelCatalog:[\s\S]*invoke\("account_platform_models"\)/);
+  assert.match(bridge, /setDefaultModel:[\s\S]*invoke\("account_platform_set_default_model", \{ model: model \}\)/);
+  assert.match(settings, /data-testid="builtin-model-select"/);
+  assert.match(settings, /data-testid="builtin-model-refresh"/);
+  assert.match(settings, /builtinModelOperation\.current !== controller/);
+  assert.match(settings, /builtinModelOperation\.current\?\.abort\(\)/);
+  assert.match(settings, /onSetActiveModel\(m\.id\)/);
+  assert.doesNotMatch(settings, /llmApiModels|builtin_llmapi_default_model/);
 });
 
 test('personal center and desktop chat share one account identity lifecycle', async () => {
@@ -297,9 +333,10 @@ test('personal center and desktop chat share one account identity lifecycle', as
   assert.match(runtime, /revision: format!\("oidc-session-\{\}"/);
   assert.match(runtime, /session\.account_user_id\.as_deref\(\) == Some\(user_id\.as_str\(\)\)/);
   assert.equal(
-    (commands.match(/pool\.mark_model_updated\(BUILTIN_LLMAPI_MODEL_ID\)/g) || []).length,
-    3,
+    (commands.match(/pool\.mark_model_updated\(BUILTIN_ACCOUNT_PLATFORM_MODEL_ID\)/g) || []).length,
+    4,
   );
+  assert.match(commands, /account_platform_set_default_model[\s\S]*pool\.mark_model_updated\(BUILTIN_ACCOUNT_PLATFORM_MODEL_ID\)/);
 });
 
 test('desktop account restoration starts behind the lazy sidebar without blocking startup', async () => {

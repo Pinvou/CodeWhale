@@ -4,10 +4,14 @@
 //! only a session summary and allowlisted business API responses; refresh
 //! tokens are persisted through the shared OS credential-store abstraction.
 
+pub(crate) mod client_migration;
 mod mobile;
+mod models;
+pub use models::BuiltinModelsView;
 mod oidc;
 mod platform;
 mod runtime;
+pub(crate) mod runtime_model;
 
 pub use mobile::{
     MobileRegistration, MobileRegistrationPrecheck, SMSLoginCredentials, SMSRequest,
@@ -35,7 +39,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::Mutex;
 
-const ENABLED_ENV: &str = "PINVOU_ACCOUNT_PLATFORM_ENABLED";
 const ISSUER_ENV: &str = "PINVOU_ACCOUNT_OIDC_ISSUER";
 const TOKEN_URL_ENV: &str = "PINVOU_ACCOUNT_OIDC_TOKEN_URL";
 const JWKS_URL_ENV: &str = "PINVOU_ACCOUNT_OIDC_JWKS_URL";
@@ -59,9 +62,6 @@ struct AccountPlatformConfig {
 
 impl AccountPlatformConfig {
     fn from_env() -> Result<Self, String> {
-        if !account_platform_enabled() {
-            return Err("account_platform_disabled: account platform is disabled".to_string());
-        }
         if !platform_supported() {
             return Err(
                 "unsupported_platform: desktop OIDC requires Windows, macOS, or Linux".to_string(),
@@ -178,16 +178,7 @@ fn parse_service_base(name: &str, value: &str) -> Result<Url, String> {
 }
 
 pub fn account_platform_enabled() -> bool {
-    enabled_value(optional_env(ENABLED_ENV).as_deref())
-}
-
-fn enabled_value(value: Option<&str>) -> bool {
-    value.is_some_and(|value| {
-        matches!(
-            value.trim().to_ascii_lowercase().as_str(),
-            "1" | "true" | "yes" | "on"
-        )
-    })
+    platform_supported()
 }
 
 const fn platform_supported() -> bool {
@@ -263,6 +254,7 @@ pub struct AccountPlatformState {
     session: Mutex<Option<RuntimeSession>>,
     login_guard: Mutex<()>,
     refresh_guard: Mutex<()>,
+    model_context_guard: Mutex<()>,
     credentials: Arc<dyn DesktopCredentials>,
     session_epoch: AtomicU64,
     session_generation: AtomicU64,
@@ -281,6 +273,7 @@ impl AccountPlatformState {
             session: Mutex::new(None),
             login_guard: Mutex::new(()),
             refresh_guard: Mutex::new(()),
+            model_context_guard: Mutex::new(()),
             credentials: Arc::new(DefaultKeyringStore::new(
                 CredentialReference::for_account_platform_refresh_token().service,
             )),
@@ -291,14 +284,6 @@ impl AccountPlatformState {
     }
 
     pub async fn status(&self) -> SessionStatus {
-        if !account_platform_enabled() {
-            return SessionStatus {
-                enabled: false,
-                configured: false,
-                authenticated: false,
-                error_code: Some("account_platform_disabled"),
-            };
-        }
         if !platform_supported() {
             return SessionStatus {
                 enabled: true,
@@ -439,11 +424,25 @@ impl AccountPlatformState {
         config: &AccountPlatformConfig,
         input: ApiRequest,
     ) -> Result<ApiResponse, String> {
-        let epoch = self.session_epoch.load(Ordering::SeqCst);
-        let is_bootstrap = input.area == "account"
-            && input.method == "POST"
-            && input.resource == "/v1/account/bootstrap";
+        let account_area = input.area == "account";
         let prepared = prepare_request(config, input)?;
+        // Serialize the canonical allowlisted route, including paths normalized
+        // by Url, rather than relying on the caller's spelling of the resource.
+        let _context = if account_area
+            && prepared.method == Method::POST
+            && prepared
+                .url
+                .path()
+                .ends_with("/v1/sessions/current/active-context")
+        {
+            Some(self.model_context_guard.lock().await)
+        } else {
+            None
+        };
+        let epoch = self.session_epoch.load(Ordering::SeqCst);
+        let is_bootstrap = account_area
+            && prepared.method == Method::POST
+            && prepared.url.path().ends_with("/v1/account/bootstrap");
         let mut token = self.access_token(config, None).await?;
         self.require_session_epoch(epoch)?;
         let mut response = self.send(&prepared, &token).await?;
@@ -756,6 +755,7 @@ fn route_allowed(area: &str, method: &Method, path: &str, query: Option<&str>) -
         ("account", &Method::POST, ["v1", "account", "bootstrap"], None)
         | ("account", &Method::GET, ["v1", "me", "organizations"], None)
         | ("account", &Method::POST, ["v1", "sessions", "current", "active-context"], None)
+        | ("token", &Method::GET, ["v1", "models"], None)
         | ("token", &Method::GET, ["v1", "recharge", "products"], None)
         | ("token", &Method::GET, ["v1", "recharge", "orders"], None)
         | ("token", &Method::GET, ["v1", "me", "entitlement-packages"], None)
@@ -812,12 +812,8 @@ mod tests {
     }
 
     #[test]
-    fn compatibility_flag_is_closed_by_default() {
-        assert!(!enabled_value(None));
-        assert!(!enabled_value(Some("false")));
-        assert!(!enabled_value(Some("0")));
-        assert!(enabled_value(Some("true")));
-        assert!(enabled_value(Some(" ON ")));
+    fn account_platform_is_the_only_supported_desktop_path() {
+        assert_eq!(account_platform_enabled(), platform_supported());
     }
 
     #[test]
