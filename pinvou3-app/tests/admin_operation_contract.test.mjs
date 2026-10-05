@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { randomFillSync } from 'node:crypto';
 import test from 'node:test';
 import { createAdminOperationScope, createAdminMutationOwner } from '../src/features/account-platform/admin-operation-scope.js';
 import { parseScaledAmount, formatMoney } from '../src/features/account-platform/credit-units.js';
@@ -110,9 +111,9 @@ test('refund retries preserve identity and payment facts; a known success starts
 });
 
 test('refund identity works when Safari 14 provides getRandomValues without randomUUID', t => {
-  const originalCrypto = globalThis.crypto;
-  t.mock.getter(globalThis, 'crypto', () => ({ getRandomValues: originalCrypto.getRandomValues.bind(originalCrypto) }));
-  assert.equal(globalThis.crypto.randomUUID, undefined);
+  const safariCrypto = { getRandomValues: randomFillSync };
+  t.mock.getter(globalThis, 'crypto', () => safariCrypto);
+  assert.equal(safariCrypto.randomUUID, undefined);
   const client = new AdminPlatformClient();
   const key = client.refundRequestKey('order', 29, 'reason');
   assert.match(key, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u);

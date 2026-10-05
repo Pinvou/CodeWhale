@@ -72,6 +72,7 @@ export class AdminPlatformClient {
       },
       credentials: 'same-origin',
       cache: 'no-store',
+      // oxlint-disable-next-line unicorn/no-invalid-fetch-options -- Callers supply POST/PUT/PATCH/DELETE; the rule treats a dynamic method as GET.
       body: body === undefined ? undefined : JSON.stringify(body),
     });
     const payload = await responsePayload(response);
