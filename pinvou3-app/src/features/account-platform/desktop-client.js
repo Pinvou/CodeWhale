@@ -1,3 +1,5 @@
+import { safePNGImage } from './bff-client.js';
+
 function abortError() {
   const error = new Error('The operation was aborted');
   error.name = 'AbortError';
@@ -24,9 +26,34 @@ function sessionStatus(value) {
   return value;
 }
 
+const mobileErrorCodes = new Set([
+  'USERNAME_INVALID', 'USERNAME_ALREADY_REGISTERED', 'PASSWORD_INVALID',
+  'MOBILE_INVALID', 'MOBILE_ALREADY_REGISTERED', 'CAPTCHA_INVALID',
+  'SMS_RATE_LIMITED', 'SMS_UNAVAILABLE', 'SMS_CODE_INVALID', 'AUTH_INTERNAL_ERROR', 'INVALID_REQUEST',
+]);
+
+function mobilePayload(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw nativeError('account_platform_request_failed');
+  return value;
+}
+
+function validID(value) {
+  return typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value)
+    && value !== '00000000-0000-0000-0000-000000000000';
+}
+
 function nativeError(value) {
   // Native errors carry stable codes only; provider bodies and credentials must
   // never become WebView error messages.
+  const mobile = typeof value === 'string'
+    ? /^mobile_auth_failed:([A-Z_]+)(?::([1-9][0-9]{0,4}))?$/.exec(value) : null;
+  if (mobile && mobileErrorCodes.has(mobile[1])
+    && (mobile[2] === undefined || (mobile[1] === 'SMS_RATE_LIMITED' && Number(mobile[2]) <= 86400))) {
+    const error = new Error(mobile[1]);
+    error.code = mobile[1];
+    if (mobile[2] !== undefined) error.retryAfterSeconds = Number(mobile[2]);
+    return error;
+  }
   const code = typeof value === 'string' ? value.split(':', 1)[0] : value?.code;
   const safeCode = typeof code === 'string' && /^[a-z][a-z0-9_]{1,80}$/.test(code)
     ? code : 'account_platform_request_failed';
@@ -49,6 +76,44 @@ export class AccountPlatformDesktopClient {
   async session(signal) { return sessionStatus(await this.call(() => this.transport.session(), signal)); }
   async login(account, password, signal) {
     const status = sessionStatus(await this.call(() => this.transport.login({ account, password }), signal));
+    if (!status.authenticated) throw nativeError(status.errorCode || 'authentication_required');
+    return status;
+  }
+  async createSliderCaptcha(mobile, purpose, signal) {
+    const value = mobilePayload(await this.call(() => this.transport.createSliderCaptcha({ mobile, purpose }), signal));
+    const sizes = ['width', 'height', 'piece_width', 'piece_height'];
+    if (!validID(value.captcha_id) || !sizes.every(key => Number.isInteger(value[key]) && value[key] > 0 && value[key] <= 4096)
+      || value.piece_width >= value.width || value.piece_height > value.height
+      || !Number.isInteger(value.piece_y) || value.piece_y < 0 || value.piece_y + value.piece_height > value.height
+      || !safePNGImage(value.background_image) || !safePNGImage(value.piece_image)
+      || typeof value.expires_at !== 'string' || !Number.isFinite(Date.parse(value.expires_at))) throw nativeError('account_platform_request_failed');
+    return Object.fromEntries(['captcha_id', 'background_image', 'piece_image', ...sizes, 'piece_y', 'expires_at'].map(key => [key, value[key]]));
+  }
+  async precheckMobileRegistration(username, mobile, password, signal) {
+    const value = mobilePayload(await this.call(() => this.transport.precheckMobileRegistration({ username, mobile, password }), signal));
+    if (value.available !== true || typeof value.username !== 'string' || !/^[A-Za-z][A-Za-z0-9._-]{2,31}$/.test(value.username)) throw nativeError('account_platform_request_failed');
+    return { username: value.username, available: true };
+  }
+  async sendSms(username, mobile, password, purpose, captchaId, captchaOffset, signal) {
+    const value = mobilePayload(await this.call(() => this.transport.sendSms({
+      username, mobile, password, purpose, captcha_id: captchaId, captcha_offset: captchaOffset,
+    }), signal));
+    if (!validID(value.challenge_id) || !Number.isInteger(value.retry_after_seconds) || value.retry_after_seconds < 1 || value.retry_after_seconds > 86400
+      || typeof value.expires_at !== 'string' || !Number.isFinite(Date.parse(value.expires_at))) throw nativeError('account_platform_request_failed');
+    return { challenge_id: value.challenge_id, retry_after_seconds: value.retry_after_seconds, expires_at: value.expires_at };
+  }
+  async registerMobile(username, mobile, challengeId, code, password, signal) {
+    const value = mobilePayload(await this.call(() => this.transport.registerMobile({
+      username, mobile, challenge_id: challengeId, code, password,
+    }), signal));
+    if (!validID(value.user_id) || typeof value.username !== 'string' || !/^[A-Za-z][A-Za-z0-9._-]{2,31}$/.test(value.username)
+      || value.status !== 'PROVISIONING' || typeof value.password_preserved !== 'boolean') throw nativeError('account_platform_request_failed');
+    return { user_id: value.user_id, username: value.username, status: value.status, password_preserved: value.password_preserved };
+  }
+  async loginSms(mobile, challengeId, code, signal) {
+    const status = sessionStatus(await this.call(() => this.transport.loginSms({
+      mobile, challenge_id: challengeId, code,
+    }), signal));
     if (!status.authenticated) throw nativeError(status.errorCode || 'authentication_required');
     return status;
   }
@@ -95,6 +160,8 @@ export class AccountPlatformDesktopClient {
   balance(signal) { return this.request('token', '/v1/me/balance?consistency=strong', { signal }); }
   createRecharge(productId, channel, key) { return this.request('token', '/v1/recharge/orders', { method: 'POST', idempotencyKey: key, body: { product_id: productId, channel } }); }
   recentRechargeOrder(signal) { return this.request('token', '/v1/recharge/orders/recent', { signal }); }
+  rechargeOrders(signal) { return this.request('token', '/v1/recharge/orders', { signal }); }
+  entitlementPackages(signal) { return this.request('token', '/v1/me/entitlement-packages', { signal }); }
   rechargeOrder(orderId, signal) { return this.request('token', `/v1/recharge/orders/${orderId}`, { signal }); }
   managedTokens(signal) { return this.request('token', '/v1/token-accounts', { signal }); }
   eligibleTokens(model, signal) { return this.request('token', `/v1/token-accounts/eligible?model=${encodeURIComponent(model)}`, { signal }); }

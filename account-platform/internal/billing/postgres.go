@@ -90,7 +90,9 @@ func (r *PostgresRepository) ListProducts(ctx context.Context, currency, channel
 	currency = strings.ToUpper(strings.TrimSpace(currency))
 	channel = strings.ToUpper(strings.TrimSpace(channel))
 	rows, err := r.pool.Query(ctx, `
-SELECT product_id, amount_fen, credit_microcredits, display_points, currency, channels, catalog_version
+SELECT product_id, plan_name, sku_code, amount_fen, credit_microcredits, display_points,
+       base_points, bonus_points, validity_days, price_status, invoice_product_name,
+       currency, channels, catalog_version
 FROM recharge_products
 WHERE enabled AND currency = $1 AND ($2 = '' OR $2 = ANY(channels))
 ORDER BY amount_fen`, currency, channel)
@@ -101,12 +103,36 @@ ORDER BY amount_fen`, currency, channel)
 	products := make([]Product, 0)
 	for rows.Next() {
 		var product Product
-		if err := rows.Scan(&product.ProductID, &product.AmountFen, &product.CreditMicrocredits, &product.DisplayPoints, &product.Currency, &product.Channels, &product.CatalogVersion); err != nil {
+		if err := rows.Scan(&product.ProductID, &product.PlanName, &product.SKUCode, &product.AmountFen, &product.CreditMicrocredits, &product.DisplayPoints, &product.BasePoints, &product.BonusPoints, &product.ValidityDays, &product.PriceStatus, &product.InvoiceProductName, &product.Currency, &product.Channels, &product.CatalogVersion); err != nil {
 			return nil, err
 		}
 		products = append(products, product)
 	}
 	return products, rows.Err()
+}
+
+func (r *PostgresRepository) ActiveExternalProducts(ctx context.Context) (map[string]ExternalProduct, error) {
+	rows, err := r.pool.Query(ctx, `SELECT product_id,sku_code,amount_fen FROM recharge_products WHERE enabled AND sku_code<>'' ORDER BY product_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	products := make(map[string]ExternalProduct)
+	for rows.Next() {
+		var productID string
+		var product ExternalProduct
+		if err := rows.Scan(&productID, &product.SKU, &product.AmountFen); err != nil {
+			return nil, err
+		}
+		products[productID] = product
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if len(products) == 0 {
+		return nil, errors.New("no enabled Mall products are configured")
+	}
+	return products, nil
 }
 
 func (r *PostgresRepository) CurrentPrice(ctx context.Context, model string) (PriceVersion, error) {
@@ -211,9 +237,68 @@ func (r *PostgresRepository) Reserve(ctx context.Context, usageRequestID, wallet
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return Hold{}, err
 	}
+	now := r.now()
+	wallet, err := getWallet(ctx, tx, walletID, true)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Hold{}, ErrNotFound
+	}
+	if err != nil {
+		return Hold{}, err
+	}
+	if wallet.Status != "ACTIVE" {
+		return Hold{}, ErrWalletUnavailable
+	}
+	if wallet.AvailableMicrocredits < maxAmount {
+		return Hold{}, ErrInsufficientBalance
+	}
+	type packageAllocation struct {
+		packageID uuid.UUID
+		amount    int64
+	}
+	rows, err := tx.Query(ctx, `SELECT p.id,GREATEST(p.points_remaining-COALESCE((SELECT sum(r.credit_microcredits) FROM refunds r JOIN credit_lots l ON l.source_reference='recharge:'||r.payment_order_id::text WHERE l.id=p.credit_lot_id AND r.status IN ('REQUESTED','MANUAL_REVIEW')),0),0)::bigint FROM entitlement_packages p WHERE p.wallet_id=$1 AND p.status='ACTIVE' AND p.valid_from<=$2 AND p.valid_until>$2 AND p.points_remaining>0 ORDER BY p.valid_until,p.credited_at,p.id FOR UPDATE OF p`, walletID, now)
+	if err != nil {
+		return Hold{}, err
+	}
+	remaining := maxAmount
+	allocations := make([]packageAllocation, 0)
+	for rows.Next() {
+		var packageID uuid.UUID
+		var available int64
+		if err := rows.Scan(&packageID, &available); err != nil {
+			rows.Close()
+			return Hold{}, err
+		}
+		amount := min(remaining, available)
+		if amount > 0 {
+			allocations = append(allocations, packageAllocation{packageID: packageID, amount: amount})
+			remaining -= amount
+		}
+		if remaining == 0 {
+			break
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return Hold{}, err
+	}
+	rows.Close()
+	if remaining != 0 {
+		// Existing direct credits and adjustments have no payment package. Keep
+		// those balances usable without assigning them a fabricated entitlement.
+		var ordinaryAvailable, ordinaryReserved int64
+		if err := tx.QueryRow(ctx, `SELECT COALESCE(sum(GREATEST(l.remaining_microcredits-COALESCE((SELECT sum(r.credit_microcredits) FROM refunds r WHERE r.status IN ('REQUESTED','MANUAL_REVIEW') AND l.source_reference='recharge:'||r.payment_order_id::text),0),0)),0)::bigint FROM credit_lots l WHERE l.wallet_id=$1 AND (l.expires_at IS NULL OR l.expires_at>$2) AND NOT EXISTS(SELECT 1 FROM entitlement_packages p WHERE p.credit_lot_id=l.id)`, walletID, now).Scan(&ordinaryAvailable); err != nil {
+			return Hold{}, err
+		}
+		if err := tx.QueryRow(ctx, `SELECT $2::bigint-COALESCE((SELECT sum(points_reserved) FROM entitlement_packages WHERE wallet_id=$1),0)::bigint-COALESCE((SELECT sum(r.credit_microcredits) FROM refunds r JOIN payment_orders o ON o.id=r.payment_order_id WHERE o.wallet_id=$1 AND r.status IN ('REQUESTED','MANUAL_REVIEW')),0)::bigint`, walletID, wallet.ReservedMicrocredits).Scan(&ordinaryReserved); err != nil {
+			return Hold{}, err
+		}
+		if ordinaryReserved < 0 || ordinaryAvailable-ordinaryReserved < remaining {
+			return Hold{}, ErrInsufficientBalance
+		}
+	}
 	command, err := tx.Exec(ctx, `
 UPDATE wallets SET reserved_microcredits = reserved_microcredits + $2, version = version + 1, updated_at = $3
-WHERE id = $1 AND status = 'ACTIVE' AND posted_microcredits - reserved_microcredits >= $2`, walletID, maxAmount, r.now())
+WHERE id = $1 AND status = 'ACTIVE' AND posted_microcredits - reserved_microcredits >= $2`, walletID, maxAmount, now)
 	if err != nil {
 		return Hold{}, err
 	}
@@ -227,11 +312,22 @@ WHERE id = $1 AND status = 'ACTIVE' AND posted_microcredits - reserved_microcred
 		}
 		return Hold{}, ErrInsufficientBalance
 	}
-	now := r.now()
 	hold := Hold{ID: uuid.Must(uuid.NewV7()), UsageRequestID: usageRequestID, WalletID: walletID, PriceVersionID: priceVersionID, Status: "ACTIVE", MaxMicrocredits: maxAmount, ExpiresAt: expiresAt.UTC()}
 	_, err = tx.Exec(ctx, `INSERT INTO usage_holds(id, usage_request_id, wallet_id, price_version_id, status, max_microcredits, expires_at, created_at, updated_at) VALUES ($1, $2, $3, $4, 'ACTIVE', $5, $6, $7, $7)`, hold.ID, usageRequestID, walletID, priceVersionID, maxAmount, hold.ExpiresAt, now)
 	if err != nil {
 		return Hold{}, err
+	}
+	for _, allocation := range allocations {
+		command, err := tx.Exec(ctx, `UPDATE entitlement_packages SET points_remaining=points_remaining-$2,points_reserved=points_reserved+$2,updated_at=$3 WHERE id=$1 AND points_remaining>=$2`, allocation.packageID, allocation.amount, now)
+		if err != nil || command.RowsAffected() != 1 {
+			if err == nil {
+				return Hold{}, ErrConflict
+			}
+			return Hold{}, err
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO usage_hold_allocations(hold_id,package_id,reserved_microcredits,created_at,updated_at) VALUES($1,$2,$3,$4,$4)`, hold.ID, allocation.packageID, allocation.amount, now); err != nil {
+			return Hold{}, err
+		}
 	}
 	return hold, tx.Commit(ctx)
 }
@@ -270,28 +366,85 @@ func (r *PostgresRepository) Commit(ctx context.Context, usageRequestID, holdID 
 		return Hold{}, ErrConflict
 	}
 	now := r.now()
+	entryID := uuid.Nil
+	var walletAccount uuid.UUID
 	if actual > 0 {
-		entryID := uuid.Must(uuid.NewV7())
+		entryID = uuid.Must(uuid.NewV7())
 		if err := insertJournal(ctx, tx, entryID, "USAGE", "usage:"+usageRequestID.String(), "settle model usage", now); err != nil {
 			return Hold{}, err
 		}
-		walletAccount, err := walletLedgerAccount(ctx, tx, hold.WalletID)
+		walletAccount, err = walletLedgerAccount(ctx, tx, hold.WalletID)
 		if err != nil {
 			return Hold{}, err
 		}
-		remaining := actual
+	}
+	type allocation struct {
+		packageID uuid.UUID
+		lotID     uuid.UUID
+		reserved  int64
+	}
+	rows, err := tx.Query(ctx, `SELECT allocation.package_id,package.credit_lot_id,allocation.reserved_microcredits FROM usage_hold_allocations allocation JOIN entitlement_packages package ON package.id=allocation.package_id WHERE allocation.hold_id=$1 ORDER BY package.valid_until,package.credited_at,package.id FOR UPDATE OF allocation,package`, hold.ID)
+	if err != nil {
+		return Hold{}, err
+	}
+	allocations := make([]allocation, 0)
+	for rows.Next() {
+		var item allocation
+		if err := rows.Scan(&item.packageID, &item.lotID, &item.reserved); err != nil {
+			rows.Close()
+			return Hold{}, err
+		}
+		allocations = append(allocations, item)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return Hold{}, err
+	}
+	rows.Close()
+	remaining := actual
+	for _, item := range allocations {
+		settled := min(remaining, item.reserved)
+		released := item.reserved - settled
+		if settled > 0 {
+			command, err := tx.Exec(ctx, `UPDATE credit_lots SET remaining_microcredits=remaining_microcredits-$2 WHERE id=$1 AND remaining_microcredits>=$2`, item.lotID, settled)
+			if err != nil || command.RowsAffected() != 1 {
+				if err == nil {
+					return Hold{}, ErrConflict
+				}
+				return Hold{}, err
+			}
+			if err := insertPosting(ctx, tx, entryID, walletAccount, -settled, &item.lotID, now); err != nil {
+				return Hold{}, err
+			}
+		}
+		command, err := tx.Exec(ctx, `UPDATE entitlement_packages SET points_reserved=points_reserved-$2,points_used=points_used+$3,points_remaining=points_remaining+$4,status=CASE WHEN points_reserved-$2=0 AND points_remaining+$4=0 THEN 'CONSUMED' ELSE 'ACTIVE' END,updated_at=$5 WHERE id=$1 AND points_reserved>=$2`, item.packageID, item.reserved, settled, released, now)
+		if err != nil || command.RowsAffected() != 1 {
+			if err == nil {
+				return Hold{}, ErrConflict
+			}
+			return Hold{}, err
+		}
+		if _, err := tx.Exec(ctx, `UPDATE usage_hold_allocations SET settled_microcredits=$2,released_microcredits=$3,updated_at=$4 WHERE hold_id=$1 AND package_id=$5`, hold.ID, settled, released, now, item.packageID); err != nil {
+			return Hold{}, err
+		}
+		remaining -= settled
+	}
+	if remaining != 0 {
+		// Legacy holds and direct credits do not have package allocations.
+		// Unallocated package points may also back a hold created before upgrade;
+		// reserved package points remain excluded from this generic lot query.
 		rows, err := tx.Query(ctx, availableLotsQuery, hold.WalletID, now)
 		if err != nil {
 			return Hold{}, err
 		}
 		type lot struct {
 			id        uuid.UUID
-			remaining int64
+			available int64
 		}
-		lots := make([]lot, 0)
+		var lots []lot
 		for rows.Next() {
 			var item lot
-			if err := rows.Scan(&item.id, &item.remaining); err != nil {
+			if err := rows.Scan(&item.id, &item.available); err != nil {
 				rows.Close()
 				return Hold{}, err
 			}
@@ -306,11 +459,11 @@ func (r *PostgresRepository) Commit(ctx context.Context, usageRequestID, holdID 
 			if remaining == 0 {
 				break
 			}
-			consume := min(remaining, item.remaining)
-			if consume == 0 {
+			consume := min(remaining, item.available)
+			if consume <= 0 {
 				continue
 			}
-			if _, err := tx.Exec(ctx, `UPDATE credit_lots SET remaining_microcredits = remaining_microcredits - $2 WHERE id = $1`, item.id, consume); err != nil {
+			if err := consumeAvailableLot(ctx, tx, item.id, consume, now); err != nil {
 				return Hold{}, err
 			}
 			if err := insertPosting(ctx, tx, entryID, walletAccount, -consume, &item.id, now); err != nil {
@@ -319,8 +472,10 @@ func (r *PostgresRepository) Commit(ctx context.Context, usageRequestID, holdID 
 			remaining -= consume
 		}
 		if remaining != 0 {
-			return Hold{}, errors.New("wallet balance is not backed by credit lots")
+			return Hold{}, ErrInsufficientBalance
 		}
+	}
+	if actual > 0 {
 		if err := insertPosting(ctx, tx, entryID, usageRevenueAccount, actual, nil, now); err != nil {
 			return Hold{}, err
 		}
@@ -361,6 +516,12 @@ func (r *PostgresRepository) Release(ctx context.Context, usageRequestID, holdID
 	}
 	now := r.now()
 	snapshot, _ := json.Marshal(map[string]string{"release_reason": strings.TrimSpace(reason)})
+	if _, err := getWallet(ctx, tx, hold.WalletID, true); err != nil {
+		return Hold{}, err
+	}
+	if err := releasePackageAllocations(ctx, tx, hold.ID, now); err != nil {
+		return Hold{}, err
+	}
 	command, err := tx.Exec(ctx, `UPDATE wallets SET reserved_microcredits = reserved_microcredits - $2, version = version + 1, updated_at = $3 WHERE id = $1 AND reserved_microcredits >= $2`, hold.WalletID, hold.MaxMicrocredits, now)
 	if err == nil && command.RowsAffected() != 1 {
 		return Hold{}, ErrConflict
@@ -373,6 +534,48 @@ func (r *PostgresRepository) Release(ctx context.Context, usageRequestID, holdID
 	}
 	hold.Status = "RELEASED"
 	return hold, tx.Commit(ctx)
+}
+
+func releasePackageAllocations(ctx context.Context, tx pgx.Tx, holdID uuid.UUID, now time.Time) error {
+	rows, err := tx.Query(ctx, `SELECT package_id,reserved_microcredits FROM usage_hold_allocations WHERE hold_id=$1 AND settled_microcredits=0 AND released_microcredits=0 ORDER BY package_id FOR UPDATE`, holdID)
+	if err != nil {
+		return err
+	}
+	type allocation struct {
+		packageID uuid.UUID
+		amount    int64
+	}
+	var allocations []allocation
+	for rows.Next() {
+		var item allocation
+		if err := rows.Scan(&item.packageID, &item.amount); err != nil {
+			rows.Close()
+			return err
+		}
+		allocations = append(allocations, item)
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return err
+	}
+	for _, item := range allocations {
+		command, err := tx.Exec(ctx, `UPDATE entitlement_packages SET points_reserved=points_reserved-$2,points_remaining=points_remaining+$2,updated_at=$3 WHERE id=$1 AND points_reserved>=$2`, item.packageID, item.amount, now)
+		if err != nil {
+			return err
+		}
+		if command.RowsAffected() != 1 {
+			return ErrConflict
+		}
+		command, err = tx.Exec(ctx, `UPDATE usage_hold_allocations SET released_microcredits=reserved_microcredits,updated_at=$3 WHERE hold_id=$1 AND package_id=$2 AND settled_microcredits=0 AND released_microcredits=0`, holdID, item.packageID, now)
+		if err != nil {
+			return err
+		}
+		if command.RowsAffected() != 1 {
+			return ErrConflict
+		}
+	}
+	return nil
 }
 
 func (r *PostgresRepository) ExpireHolds(ctx context.Context, limit int) (int, error) {
@@ -395,10 +598,39 @@ const availableLotsQuery = `SELECT l.id, GREATEST(l.remaining_microcredits - COA
 SELECT sum(r.credit_microcredits) FROM refunds r
 WHERE r.status IN ('REQUESTED','MANUAL_REVIEW')
 AND l.source_reference='recharge:' || r.payment_order_id::text
-),0),0)::bigint
+),0) - COALESCE((SELECT points_reserved FROM entitlement_packages p WHERE p.credit_lot_id=l.id),0),0)::bigint
 FROM credit_lots l WHERE l.wallet_id=$1 AND l.remaining_microcredits > 0
 AND (l.expires_at IS NULL OR l.expires_at > $2)
+AND NOT EXISTS(SELECT 1 FROM entitlement_packages p WHERE p.credit_lot_id=l.id AND (p.status<>'ACTIVE' OR p.valid_from>$2 OR p.valid_until<=$2))
 ORDER BY l.refundable DESC,l.created_at,l.id FOR UPDATE OF l`
+
+// Caller owns the wallet lock; every generic debit keeps its optional package
+// projection in the same ledger transaction instead of spending reserved points.
+func consumeAvailableLot(ctx context.Context, tx pgx.Tx, lotID uuid.UUID, amount int64, now time.Time) error {
+	command, err := tx.Exec(ctx, `UPDATE credit_lots SET remaining_microcredits=remaining_microcredits-$2 WHERE id=$1 AND remaining_microcredits>=$2`, lotID, amount)
+	if err != nil {
+		return err
+	}
+	if command.RowsAffected() != 1 {
+		return ErrConflict
+	}
+	var packageID uuid.UUID
+	err = tx.QueryRow(ctx, `SELECT id FROM entitlement_packages WHERE credit_lot_id=$1 FOR UPDATE`, lotID).Scan(&packageID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	command, err = tx.Exec(ctx, `UPDATE entitlement_packages SET points_remaining=points_remaining-$2,points_used=points_used+$2,status=CASE WHEN points_remaining=$2 AND points_reserved=0 THEN 'CONSUMED' ELSE status END,updated_at=$3 WHERE id=$1 AND status='ACTIVE' AND points_remaining>=$2`, packageID, amount, now)
+	if err != nil {
+		return err
+	}
+	if command.RowsAffected() != 1 {
+		return ErrConflict
+	}
+	return nil
+}
 
 type queryable interface {
 	QueryRow(context.Context, string, ...any) pgx.Row

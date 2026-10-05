@@ -19,6 +19,69 @@ function render(overrides = []) {
   return helm(['template', 'fixture', chart, '-f', production, ...overrides]);
 }
 
+const mobileSupplierValues = [
+  'mobileAuth.enabled=true', 'mobileAuth.smsProvider=http',
+  'mobileAuth.smsEndpoint=https://sms.example.test/adapter',
+  'mobileAuth.keycloakAdminApiUrl=https://identity.example.test',
+  'mobileAuth.keycloakProvisionerTokenUrl=https://identity.example.test/realms/pinvou/protocol/openid-connect/token',
+  'images.keycloak.repository=pinvou-account-platform-keycloak-mobile',
+  'external.smsProviderCidrs[0]=203.0.113.1/32',
+  'commerce.enabled=true', 'commerce.baseUrl=https://commerce.example.test',
+  'external.commerceProviderCidrs[0]=203.0.113.2/32', 'billing.paymentProvider=h3c_mall',
+];
+const setStrings = (values) => values.flatMap(value => [/=(true|false)$/.test(value) ? '--set' : '--set-string', value]);
+
+test('actual mobile and commerce render preserves component-scoped supplier access and secret references', () => {
+  const result = render(setStrings(mobileSupplierValues));
+  assert.equal(result.status, 0, 'mobile supplier configuration did not render');
+  const objects = YAML.parseAllDocuments(result.stdout).map(document => document.toJSON()).filter(Boolean);
+  const name = 'fixture-account-platform';
+  const object = (kind, suffix) => objects.find(item => item.kind === kind && item.metadata.name === `${name}-${suffix}`);
+  const environment = (component) => Object.fromEntries(object('Deployment', component).spec.template.spec.containers[0].env.map(item => [item.name, item]));
+  const account = environment('account-service');
+  const billing = environment('billing-service');
+  const keycloak = environment('keycloak');
+  assert.equal(account.MOBILE_AUTH_ENABLED.value, 'true');
+  assert.equal(account.SMS_HTTP_ENDPOINT.value, 'https://sms.example.test/adapter');
+  assert.equal(account.SMS_HTTP_SERVICE_TOKEN.valueFrom.secretKeyRef.key, 'sms-http-service-token');
+  assert.equal(account.KEYCLOAK_PROVISIONER_CLIENT_SECRET.valueFrom.secretKeyRef.key, 'keycloak-provisioner-client-secret');
+  assert.equal(billing.BILLING_PAYMENT_PROVIDER.value, 'h3c_mall');
+  assert.equal(billing.BILLING_ALLOW_TENTATIVE_PRICES.value, 'false');
+  assert.equal(keycloak.PINVOU_SMS_VERIFY_URL.value, `http://${name}-account-service:8080/internal/v1/auth/sms/verify`);
+  assert.equal(keycloak.PINVOU_MOBILE_IDENTITY_URL.value, `http://${name}-account-service:8080/internal/v1/auth/mobile/identity`);
+  assert.equal(keycloak.PINVOU_INTERNAL_SERVICE_TOKEN.valueFrom.secretKeyRef.key, 'internal-service-token');
+  for (const [supplier, components, cidr] of [['sms', ['account-service'], '203.0.113.1/32'], ['commerce', ['account-service', 'billing-service'], '203.0.113.2/32']]) {
+    const policy = object('NetworkPolicy', `${supplier}-egress`);
+    assert.deepEqual(policy.spec.podSelector.matchExpressions, [{ key: 'app.kubernetes.io/component', operator: 'In', values: components }]);
+    assert.deepEqual(policy.spec.egress, [{ to: [{ ipBlock: { cidr } }], ports: [{ protocol: 'TCP', port: 443 }] }]);
+  }
+  const general = object('NetworkPolicy', 'internal-and-approved-egress');
+  assert.equal(JSON.stringify(general).includes('203.0.113.1/32'), false);
+  assert.equal(JSON.stringify(general).includes('203.0.113.2/32'), false);
+  assert.equal(environment('token-portal').SMS_HTTP_SERVICE_TOKEN, undefined);
+  assert.equal(environment('token-portal').H3CMALL_APP_SECRET, undefined);
+});
+
+test('actual production supplier configuration fails closed on incomplete or insecure wiring', async (t) => {
+  for (const [name, override] of [
+    ['HTTP-SMS', 'mobileAuth.smsEndpoint=http://sms.example.test'],
+    ['HTTP-provisioner-admin', 'mobileAuth.keycloakAdminApiUrl=http://identity.example.test'],
+    ['HTTP-provisioner-token', 'mobileAuth.keycloakProvisionerTokenUrl=http://identity.example.test/token'],
+    ['official-image-without-SPI', 'images.keycloak.repository=quay.io/keycloak/keycloak'],
+    ['missing-SMS-CIDR', 'external.smsProviderCidrs=[]'],
+    ['HTTP-commerce', 'commerce.baseUrl=http://commerce.example.test'],
+    ['missing-commerce-CIDR', 'external.commerceProviderCidrs=[]'],
+    ['H3C-without-commerce', 'commerce.enabled=false'],
+  ]) {
+    await t.test(name, () => {
+      const index = mobileSupplierValues.findIndex(value => value.split('=')[0] === override.split('=')[0]);
+      const values = mobileSupplierValues.filter((_, position) => position !== index);
+      const base = override.endsWith('=[]') ? values.filter(value => !value.startsWith(override.split('=')[0] + '[')) : values;
+      assert.notEqual(render([...setStrings(base), ...(override.endsWith('=[]') ? ['--set-json', override] : setStrings([override]))]).status, 0, 'unsafe supplier settings rendered');
+    });
+  }
+});
+
 test('actual Helm lint accepts default and production TLS configurations', async (t) => {
   for (const [name, args] of [['default', []], ['production-new', ['-f', production]]]) {
     await t.test(name, () => assert.equal(helm(['lint', chart, ...args]).status, 0, 'Helm lint failed'));

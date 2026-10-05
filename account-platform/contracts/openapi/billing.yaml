@@ -10,6 +10,44 @@ servers:
 security:
   - serviceToken: []
 paths:
+  /internal/v1/recharge/products:
+    servers: [{ url: / }]
+    get:
+      operationId: listOrganizationRechargeProducts
+      summary: List the four original LEGACY organization products supported by the development simulator
+      parameters:
+        - { name: wallet_id, in: query, required: true, schema: { type: string, format: uuid } }
+        - { name: currency, in: query, schema: { type: string, const: CNY, default: CNY } }
+        - { name: channel, in: query, schema: { $ref: "#/components/schemas/PaymentChannel" } }
+      responses:
+        "200": { $ref: "#/paths/~1recharge~1products/get/responses/200" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /entitlement-packages:
+    servers: [{ url: /internal/v1 }]
+    get:
+      operationId: listInternalEntitlementPackages
+      summary: List packages bound to the requested personal user and wallet
+      parameters:
+        - { name: user_id, in: query, required: true, schema: { type: string, format: uuid } }
+        - { name: wallet_id, in: query, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200":
+          description: Exact package balances and expiry summary
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [items, summary]
+                properties:
+                  items: { type: array, items: { $ref: "#/components/schemas/EntitlementPackage" } }
+                  summary: { $ref: "#/components/schemas/EntitlementPackageSummary" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+
   /holds/waiver:
     servers: [{ url: /internal/v1 }]
     post:
@@ -62,6 +100,37 @@ paths:
   /recharge/orders:
     servers:
       - url: /internal/v1
+    get:
+      operationId: listRechargeOrders
+      summary: List recharge orders for one requester and wallet
+      parameters:
+        - name: requester_id
+          in: query
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: wallet_id
+          in: query
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Recharge order history
+          headers:
+            Cache-Control:
+              required: true
+              schema:
+                type: string
+                const: no-store
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RechargeOrderList"
+        "400":
+          $ref: "#/components/responses/Error"
     post:
       operationId: createRechargeOrder
       summary: Create or replay a recharge order
@@ -234,11 +303,15 @@ components:
     RechargeProduct:
       type: object
       additionalProperties: false
-      required: [product_id, amount_fen, credit_microcredits, display_points, currency, catalog_version, channels]
+      required: [product_id, amount_fen, credit_microcredits, display_points, currency, catalog_version, channels, plan_name, sku_code, base_points, bonus_points, validity_days, price_status, invoice_product_name]
       properties:
         product_id:
           type: string
-          enum: [CNY_1, CNY_10, CNY_100, CNY_200]
+          enum: [CNY_1, CNY_10, CNY_100, CNY_200, PLAN_TRIAL, PLAN_STANDARD, PLAN_ADVANCED, PLAN_FLAGSHIP]
+        plan_name:
+          type: string
+        sku_code:
+          type: string
         amount_fen:
           type: integer
           format: int64
@@ -258,6 +331,22 @@ components:
           type: integer
           format: int64
           minimum: 1
+        base_points:
+          type: integer
+          format: int64
+          minimum: 0
+        bonus_points:
+          type: integer
+          format: int64
+          minimum: 0
+        validity_days:
+          type: integer
+          minimum: 0
+        price_status:
+          type: string
+          enum: [LEGACY, UAT_TENTATIVE, FROZEN]
+        invoice_product_name:
+          type: string
         channels:
           type: array
           uniqueItems: true
@@ -268,6 +357,9 @@ components:
       additionalProperties: false
       required: [wallet_id, requester_id, product_id, channel]
       properties:
+        mobile:
+          type: string
+          description: Optional commerce identity, supplied only after Account confirms verified and synchronized mobile; empty for community simulator and ordinary organization recharge.
         wallet_id:
           type: string
           format: uuid
@@ -276,7 +368,7 @@ components:
           format: uuid
         product_id:
           type: string
-          enum: [CNY_1, CNY_10, CNY_100, CNY_200]
+          enum: [CNY_1, CNY_10, CNY_100, CNY_200, PLAN_TRIAL, PLAN_STANDARD, PLAN_ADVANCED, PLAN_FLAGSHIP]
         channel:
           $ref: "#/components/schemas/PaymentChannel"
     RechargeOrder:
@@ -316,6 +408,8 @@ components:
           $ref: "#/components/schemas/PaymentChannel"
         payment_url:
           type: string
+        qr_data:
+          type: string
         channel_transaction_id:
           type: string
         paid_at:
@@ -333,6 +427,162 @@ components:
           oneOf:
             - $ref: "#/components/schemas/RechargeOrder"
             - type: "null"
+    RechargeOrderHistoryItem:
+      type: object
+      additionalProperties: false
+      required: [order_id, pinvou_order_id, mall_order_id, product_id, plan_name, sku_code, order_type, amount_fen, display_points, channel, status, fulfillment_status, invoice_status, expires_at, created_at]
+      properties:
+        order_id:
+          type: string
+          format: uuid
+        pinvou_order_id:
+          type: string
+          format: uuid
+        mall_order_id:
+          type: string
+        product_id:
+          type: string
+        plan_name:
+          type: string
+        sku_code:
+          type: string
+        order_type:
+          type: string
+          enum: [PLAN, LEGACY]
+        amount_fen:
+          type: string
+          pattern: '^(0|[1-9][0-9]*)$'
+        display_points:
+          type: string
+          pattern: '^(0|[1-9][0-9]*)$'
+        channel:
+          $ref: "#/components/schemas/PaymentChannel"
+        status:
+          type: string
+          enum: [CREATED, PENDING, PAID, PAID_LATE, FAILED, CLOSED, PARTIALLY_REFUNDED, REFUNDED, MANUAL_REVIEW]
+        fulfillment_status:
+          type: string
+          enum: [PENDING, CREDITED, REFUNDED, MANUAL_REVIEW]
+        expires_at:
+          type: string
+          format: date-time
+        paid_at:
+          type: string
+          format: date-time
+        credited_at:
+          type: string
+          format: date-time
+        valid_until:
+          type: string
+          format: date-time
+        invoice_status:
+          type: string
+          enum: [NOT_SUPPORTED]
+        created_at:
+          type: string
+          format: date-time
+    RechargeOrderList:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/RechargeOrderHistoryItem"
+    EntitlementPackageSummary:
+      type: object
+      additionalProperties: false
+      required:
+        - available_microcredits
+        - active_package_count
+        - next_expiry_microcredits
+      properties:
+        available_microcredits:
+          type: string
+          pattern: ^(0|[1-9][0-9]*)$
+        active_package_count:
+          type: integer
+          minimum: 0
+        next_expiry_at:
+          type: string
+          format: date-time
+        next_expiry_microcredits:
+          type: string
+          pattern: ^(0|[1-9][0-9]*)$
+    EntitlementPackage:
+      type: object
+      additionalProperties: false
+      required:
+        - package_id
+        - pinvou_order_id
+        - mall_order_id
+        - plan_id
+        - plan_name
+        - sku_code
+        - amount_fen
+        - points_total_microcredits
+        - points_reserved_microcredits
+        - points_used_microcredits
+        - points_remaining_microcredits
+        - credited_at
+        - valid_from
+        - valid_until
+        - status
+      properties:
+        package_id:
+          type: string
+          format: uuid
+        user_id:
+          type: string
+          format: uuid
+        wallet_id:
+          type: string
+          format: uuid
+        pinvou_order_id:
+          type: string
+          format: uuid
+        mall_order_id:
+          type: string
+        plan_id:
+          type: string
+        plan_name:
+          type: string
+        sku_code:
+          type: string
+        amount_fen:
+          type: string
+          pattern: ^(0|[1-9][0-9]*)$
+        points_total_microcredits:
+          type: string
+          pattern: ^(0|[1-9][0-9]*)$
+        points_reserved_microcredits:
+          type: string
+          pattern: ^(0|[1-9][0-9]*)$
+        points_used_microcredits:
+          type: string
+          pattern: ^(0|[1-9][0-9]*)$
+        points_remaining_microcredits:
+          type: string
+          pattern: ^(0|[1-9][0-9]*)$
+        credited_at:
+          type: string
+          format: date-time
+        valid_from:
+          type: string
+          format: date-time
+        valid_until:
+          type: string
+          format: date-time
+        status:
+          type: string
+          enum:
+            - ACTIVE
+            - CONSUMED
+            - EXPIRED
+            - CREDIT_FAILED
+            - REPAIRED
+            - FROZEN
     WalletBalance:
       type: object
       additionalProperties: false

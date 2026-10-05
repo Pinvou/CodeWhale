@@ -37,29 +37,65 @@ type PaymentOrder struct {
 	Status               string     `json:"status"`
 	FulfillmentStatus    string     `json:"fulfillment_status"`
 	PaymentURL           string     `json:"payment_url,omitempty"`
+	QRData               string     `json:"qr_data,omitempty"`
 	ChannelTransactionID *string    `json:"channel_transaction_id,omitempty"`
 	ExpiresAt            time.Time  `json:"expires_at"`
 	PaidAt               *time.Time `json:"paid_at,omitempty"`
+	Mobile               string     `json:"-"`
+	ProviderSKU          string     `json:"-"`
+}
+
+type PaymentOrderHistoryItem struct {
+	ID                uuid.UUID  `json:"order_id"`
+	PinvouOrderID     uuid.UUID  `json:"pinvou_order_id"`
+	MallOrderID       string     `json:"mall_order_id"`
+	ProductID         string     `json:"product_id"`
+	PlanName          string     `json:"plan_name"`
+	SKUCode           string     `json:"sku_code"`
+	OrderType         string     `json:"order_type"`
+	AmountFen         int64      `json:"amount_fen,string"`
+	DisplayPoints     int64      `json:"display_points,string"`
+	Channel           string     `json:"channel"`
+	Status            string     `json:"status"`
+	FulfillmentStatus string     `json:"fulfillment_status"`
+	ExpiresAt         time.Time  `json:"expires_at"`
+	PaidAt            *time.Time `json:"paid_at,omitempty"`
+	CreditedAt        *time.Time `json:"credited_at,omitempty"`
+	ValidUntil        *time.Time `json:"valid_until,omitempty"`
+	InvoiceStatus     string     `json:"invoice_status"`
+	CreatedAt         time.Time  `json:"created_at"`
 }
 
 type PaymentCoordinator struct {
-	repository  *PostgresRepository
-	provider    PaymentProvider
-	secrets     map[string][]byte
-	merchantID  string
-	callbackURL string
-	now         func() time.Time
+	repository           *PostgresRepository
+	provider             PaymentProvider
+	secrets              map[string][]byte
+	merchantID           string
+	callbackURL          string
+	now                  func() time.Time
+	productSKUs          map[string]ExternalProduct
+	allowTentativePrices bool
 }
 
 type ProviderOrder struct {
 	MerchantOrderNo      string     `json:"merchant_order_no"`
 	PaymentURL           string     `json:"payment_url"`
+	QRData               string     `json:"qr_data,omitempty"`
 	Status               string     `json:"status"`
 	Channel              string     `json:"channel"`
 	AmountFen            int64      `json:"amount_fen"`
 	Currency             string     `json:"currency"`
 	ChannelTransactionID *string    `json:"channel_transaction_id,omitempty"`
 	PaidAt               *time.Time `json:"paid_at,omitempty"`
+	ProviderStatus       string     `json:"provider_status,omitempty"`
+	ProviderTraceID      string     `json:"provider_trace_id,omitempty"`
+	Mobile               string     `json:"-"`
+	ProviderSKU          string     `json:"-"`
+}
+
+type ExternalProduct struct {
+	SKU       string `json:"sku"`
+	AmountFen int64  `json:"amount_fen"`
 }
 
 type ProviderRefund struct {
@@ -77,6 +113,36 @@ type ProviderBillEntry struct {
 	Currency             string    `json:"currency"`
 	Status               string    `json:"status"`
 	PaidAt               time.Time `json:"paid_at"`
+}
+
+type PaymentCapabilities struct {
+	Provider                string `json:"provider"`
+	OrderSyncSupported      bool   `json:"order_sync_supported"`
+	RefundSupported         bool   `json:"refund_supported"`
+	CloseSupported          bool   `json:"close_supported"`
+	NotificationSupported   bool   `json:"notification_supported"`
+	ReconciliationSupported bool   `json:"reconciliation_supported"`
+	ManualRepairSupported   bool   `json:"manual_repair_supported"`
+}
+
+// PaymentPolicy describes provider-specific behavior that the generic billing
+// workflow must honor. Providers opt in explicitly; future providers keep the
+// conservative defaults without introducing provider-name branches here.
+type PaymentPolicy struct {
+	ReusePendingOrderAfterExpiry bool
+	ReviewLatePayment            bool
+}
+
+func (p PaymentPolicy) RequiresReview(expiresAt, paidAt time.Time) bool {
+	return p.ReviewLatePayment && !expiresAt.After(paidAt)
+}
+
+type paymentCapabilityProvider interface {
+	Capabilities() PaymentCapabilities
+}
+
+type paymentPolicyProvider interface {
+	Policy() PaymentPolicy
 }
 
 type PaymentProvider interface {
@@ -103,10 +169,70 @@ func NewPaymentCoordinator(repository *PostgresRepository, providerURL, serviceT
 	if err != nil || parsedCallback.Scheme == "" || parsedCallback.Host == "" {
 		return nil, errors.New("invalid Billing payment callback URL")
 	}
-	return &PaymentCoordinator{repository: repository, provider: provider, secrets: parsedSecrets, merchantID: merchantID, callbackURL: parsedCallback.String(), now: func() time.Time { return time.Now().UTC() }}, nil
+	return &PaymentCoordinator{repository: repository, provider: provider, secrets: parsedSecrets, merchantID: merchantID, callbackURL: parsedCallback.String(), now: func() time.Time { return time.Now().UTC() }, allowTentativePrices: true}, nil
+}
+
+func NewPaymentCoordinatorWithProvider(repository *PostgresRepository, provider PaymentProvider, products map[string]ExternalProduct) (*PaymentCoordinator, error) {
+	if repository == nil || provider == nil || len(products) == 0 {
+		return nil, errors.New("external payment provider and product mapping are required")
+	}
+	validated := make(map[string]ExternalProduct, len(products))
+	for productID, product := range products {
+		productID, product.SKU = strings.TrimSpace(productID), strings.TrimSpace(product.SKU)
+		if productID == "" || product.SKU == "" || product.AmountFen <= 0 {
+			return nil, errors.New("external payment product mapping is invalid")
+		}
+		validated[productID] = product
+	}
+	return &PaymentCoordinator{repository: repository, provider: provider, productSKUs: validated, now: func() time.Time { return time.Now().UTC() }}, nil
+}
+
+func (p *PaymentCoordinator) AllowTentativePrices(allowed bool) *PaymentCoordinator {
+	p.allowTentativePrices = allowed
+	return p
+}
+
+func (p *PaymentCoordinator) FilterProducts(products []Product) []Product {
+	filtered := make([]Product, 0, len(products))
+	for _, product := range products {
+		if product.PriceStatus != "FROZEN" && product.PriceStatus != "LEGACY" && !p.allowTentativePrices {
+			continue
+		}
+		if len(p.productSKUs) == 0 {
+			filtered = append(filtered, product)
+			continue
+		}
+		if external, ok := p.productSKUs[product.ProductID]; ok && external.AmountFen == product.AmountFen {
+			product.Channels = []string{"ALIPAY"}
+			filtered = append(filtered, product)
+		}
+	}
+	return filtered
+}
+
+func (p *PaymentCoordinator) Capabilities() PaymentCapabilities {
+	if provider, ok := p.provider.(paymentCapabilityProvider); ok {
+		return provider.Capabilities()
+	}
+	return PaymentCapabilities{Provider: "unknown", OrderSyncSupported: true}
+}
+
+func (p *PaymentCoordinator) Policy() PaymentPolicy {
+	if provider, ok := p.provider.(paymentPolicyProvider); ok {
+		return provider.Policy()
+	}
+	return PaymentPolicy{}
 }
 
 func (p *PaymentCoordinator) CreateOrder(ctx context.Context, requesterID, walletID uuid.UUID, productID, channel, idempotencyKey string) (PaymentOrder, bool, error) {
+	return p.createOrder(ctx, requesterID, walletID, productID, channel, "", idempotencyKey)
+}
+
+func (p *PaymentCoordinator) CreateMobileOrder(ctx context.Context, requesterID, walletID uuid.UUID, productID, channel, mobile, idempotencyKey string) (PaymentOrder, bool, error) {
+	return p.createOrder(ctx, requesterID, walletID, productID, channel, mobile, idempotencyKey)
+}
+
+func (p *PaymentCoordinator) createOrder(ctx context.Context, requesterID, walletID uuid.UUID, productID, channel, mobile, idempotencyKey string) (PaymentOrder, bool, error) {
 	channel = strings.ToUpper(channel)
 	if !validIdempotencyKey(idempotencyKey, 128) || !validPaymentChannel(channel) {
 		return PaymentOrder{}, false, ErrConflict
@@ -119,7 +245,14 @@ func (p *PaymentCoordinator) CreateOrder(ctx context.Context, requesterID, walle
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, "payment.create:"+idempotencyKey); err != nil {
 		return PaymentOrder{}, false, err
 	}
-	requestDigest := sha256.Sum256([]byte(requesterID.String() + "|" + walletID.String() + "|" + productID + "|" + channel))
+	if err := lockTransactionKey(ctx, tx, "payment.pending", requesterID.String()+"|"+walletID.String()+"|"+productID); err != nil {
+		return PaymentOrder{}, false, err
+	}
+	facts := requesterID.String() + "|" + walletID.String() + "|" + productID + "|" + channel
+	if len(p.productSKUs) > 0 {
+		facts += "|" + mobile
+	}
+	requestDigest := sha256.Sum256([]byte(facts))
 	requestHash := hex.EncodeToString(requestDigest[:])
 	var existingHash string
 	var existingBody []byte
@@ -144,25 +277,72 @@ func (p *PaymentCoordinator) CreateOrder(ctx context.Context, requesterID, walle
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return PaymentOrder{}, false, err
 	}
+	wallet, err := getWallet(ctx, tx, walletID, false)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return PaymentOrder{}, false, ErrNotFound
+	}
+	if err != nil {
+		return PaymentOrder{}, false, err
+	}
+	organizationLegacy := wallet.OwnerType == "ORGANIZATION" && p.Capabilities().Provider == "simulator"
 	var product Product
-	err = tx.QueryRow(ctx, `SELECT product_id, amount_fen, credit_microcredits, display_points, currency, channels, catalog_version FROM recharge_products WHERE product_id = $1 AND enabled AND $2 = ANY(channels)`, productID, channel).Scan(&product.ProductID, &product.AmountFen, &product.CreditMicrocredits, &product.DisplayPoints, &product.Currency, &product.Channels, &product.CatalogVersion)
+	err = tx.QueryRow(ctx, `SELECT product_id,plan_name,sku_code,amount_fen,credit_microcredits,display_points,base_points,bonus_points,validity_days,price_status,invoice_product_name,currency,channels,catalog_version FROM recharge_products WHERE product_id=$1 AND (enabled OR ($3 AND product_id IN ('CNY_1','CNY_10','CNY_100','CNY_200') AND price_status='LEGACY')) AND $2=ANY(channels)`, productID, channel, organizationLegacy).Scan(&product.ProductID, &product.PlanName, &product.SKUCode, &product.AmountFen, &product.CreditMicrocredits, &product.DisplayPoints, &product.BasePoints, &product.BonusPoints, &product.ValidityDays, &product.PriceStatus, &product.InvoiceProductName, &product.Currency, &product.Channels, &product.CatalogVersion)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return PaymentOrder{}, false, ErrConflict
 	}
 	if err != nil {
 		return PaymentOrder{}, false, err
 	}
-	wallet, err := getWallet(ctx, tx, walletID, false)
-	if err != nil {
-		return PaymentOrder{}, false, ErrNotFound
+	if organizationLegacy && !originalOrganizationProduct(product) {
+		return PaymentOrder{}, false, ErrConflict
 	}
 	if wallet.Status != "ACTIVE" {
 		return PaymentOrder{}, false, ErrWalletUnavailable
 	}
+	// The new entitlement catalog is personal. Legacy order recovery is handled
+	// before current catalog lookup above and retains its original wallet facts.
+	if product.PriceStatus != "LEGACY" && (wallet.OwnerType != "PERSONAL" || wallet.OwnerID != requesterID) {
+		return PaymentOrder{}, false, ErrConflict
+	}
+	if product.PriceStatus != "LEGACY" && product.PriceStatus != "FROZEN" && !p.allowTentativePrices {
+		return PaymentOrder{}, false, ErrConflict
+	}
 	now := p.now()
-	order := PaymentOrder{ID: uuid.Must(uuid.NewV7()), MerchantOrderNo: "pv-" + uuid.Must(uuid.NewV7()).String(), RequesterID: requesterID, WalletID: walletID, ProductID: productID, Channel: channel, AmountFen: product.AmountFen, Currency: product.Currency, CreditMicrocredits: product.CreditMicrocredits, Status: "CREATED", FulfillmentStatus: "PENDING", ExpiresAt: now.Add(15 * time.Minute)}
+	policy := p.Policy()
+	// Pending-plan reuse is a new plan policy. Preserve the original legacy
+	// recharge contract: distinct logical checkout keys may create distinct orders.
+	var existing PaymentOrder
+	err = pgx.ErrNoRows
+	if product.PriceStatus != "LEGACY" {
+		existing, err = getPendingPlanOrderForUpdate(ctx, tx, requesterID, walletID, productID, channel, now, policy.ReusePendingOrderAfterExpiry)
+	}
+	if err == nil {
+		if policy.ReusePendingOrderAfterExpiry && !existing.ExpiresAt.After(now) {
+			existing.ExpiresAt = now.Add(15 * time.Minute)
+			if _, err := tx.Exec(ctx, `UPDATE payment_orders SET expires_at=$2,reconciliation_next_at=$3,reconciliation_attempts=0,reconciliation_last_error=NULL,updated_at=$3 WHERE id=$1`, existing.ID, existing.ExpiresAt, now); err != nil {
+				return PaymentOrder{}, false, err
+			}
+		}
+		responseBody, _ := json.Marshal(existing)
+		if _, err := tx.Exec(ctx, `INSERT INTO idempotency_records(scope,idempotency_key,request_hash,response_status,response_body,created_at,expires_at) VALUES('payment.create',$1,$2,200,$3,$4,$5)`, idempotencyKey, requestHash, responseBody, now, now.Add(24*time.Hour)); err != nil {
+			return PaymentOrder{}, false, err
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return PaymentOrder{}, false, err
+		}
+		return p.activatePreparedOrder(ctx, existing, false)
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return PaymentOrder{}, false, err
+	}
+	external := p.productSKUs[productID]
+	if len(p.productSKUs) > 0 && (channel != "ALIPAY" || mobile == "" || external.SKU == "" || external.AmountFen != product.AmountFen) {
+		return PaymentOrder{}, false, ErrConflict
+	}
+	merchantDigest := sha256.Sum256([]byte(requesterID.String() + "|" + idempotencyKey))
+	order := PaymentOrder{ID: uuid.Must(uuid.NewV7()), MerchantOrderNo: "pv-" + hex.EncodeToString(merchantDigest[:16]), RequesterID: requesterID, WalletID: walletID, ProductID: productID, Channel: channel, AmountFen: product.AmountFen, Currency: product.Currency, CreditMicrocredits: product.CreditMicrocredits, Status: "CREATED", FulfillmentStatus: "PENDING", ExpiresAt: now.Add(15 * time.Minute), Mobile: mobile, ProviderSKU: external.SKU}
 	snapshot, _ := json.Marshal(product)
-	_, err = tx.Exec(ctx, `INSERT INTO payment_orders(id, merchant_order_no, requester_id, wallet_id, product_id, product_snapshot, channel, amount_fen, currency, credit_microcredits, status, fulfillment_status, expires_at, created_at, updated_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'CREATED','PENDING',$11,$12,$12)`, order.ID, order.MerchantOrderNo, requesterID, walletID, productID, snapshot, channel, order.AmountFen, order.Currency, order.CreditMicrocredits, order.ExpiresAt, now)
+	_, err = tx.Exec(ctx, `INSERT INTO payment_orders(id, merchant_order_no, requester_id, wallet_id, product_id, product_snapshot, channel, amount_fen, currency, credit_microcredits, status, fulfillment_status, expires_at, created_at, updated_at, mobile_e164, provider_sku) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'CREATED','PENDING',$11,$12,$12,NULLIF($13,''),NULLIF($14,''))`, order.ID, order.MerchantOrderNo, requesterID, walletID, productID, snapshot, channel, order.AmountFen, order.Currency, order.CreditMicrocredits, order.ExpiresAt, now, mobile, external.SKU)
 	if err != nil {
 		return PaymentOrder{}, false, err
 	}
@@ -204,10 +384,10 @@ func (p *PaymentCoordinator) activatePreparedOrder(ctx context.Context, prepared
 		return order, created, errors.Join(ErrPaymentProvider, err)
 	}
 	refunded := provider.Status == "PARTIALLY_REFUNDED" || provider.Status == "REFUNDED"
-	if provider.MerchantOrderNo != order.MerchantOrderNo || provider.Channel != order.Channel || provider.AmountFen != order.AmountFen || provider.Currency != order.Currency || (provider.PaymentURL == "" && !refunded) {
+	if !providerOrderMatches(order, provider) || (provider.PaymentURL == "" && len(p.productSKUs) == 0 && !refunded) {
 		return order, created, ErrConflict
 	}
-	order.Status, order.PaymentURL = "PENDING", provider.PaymentURL
+	order.Status, order.PaymentURL, order.QRData = "PENDING", provider.PaymentURL, provider.QRData
 	switch provider.Status {
 	case "CLOSED", "FAILED":
 		order.Status = provider.Status
@@ -224,7 +404,8 @@ SET status=$2,payment_url=$3,updated_at=$4,fulfillment_status=$5,
     reconciliation_next_at=CASE WHEN $2='MANUAL_REVIEW' THEN NULL ELSE reconciliation_next_at END,
     reconciliation_lease_until=CASE WHEN $2='MANUAL_REVIEW' THEN NULL ELSE reconciliation_lease_until END,
     reconciliation_last_error=CASE WHEN $2='MANUAL_REVIEW' THEN NULL ELSE reconciliation_last_error END
-WHERE id=$1`, order.ID, order.Status, order.PaymentURL, p.now(), order.FulfillmentStatus); err != nil {
+    ,qr_data=NULLIF($6,''),provider_status=NULLIF($7,''),provider_trace_id=NULLIF($8,'')
+WHERE id=$1`, order.ID, order.Status, order.PaymentURL, p.now(), order.FulfillmentStatus, order.QRData, provider.ProviderStatus, provider.ProviderTraceID); err != nil {
 		return order, created, err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -236,9 +417,15 @@ WHERE id=$1`, order.ID, order.Status, order.PaymentURL, p.now(), order.Fulfillme
 	return order, created, err
 }
 
+func getPendingPlanOrderForUpdate(ctx context.Context, tx pgx.Tx, requesterID, walletID uuid.UUID, productID, channel string, now time.Time, includeExpired bool) (PaymentOrder, error) {
+	var order PaymentOrder
+	err := tx.QueryRow(ctx, `SELECT id,merchant_order_no,requester_id,wallet_id,product_id,channel,amount_fen,currency,credit_microcredits,status,fulfillment_status,COALESCE(payment_url,''),COALESCE(qr_data,''),channel_transaction_id,expires_at,paid_at,COALESCE(mobile_e164,''),COALESCE(provider_sku,'') FROM payment_orders WHERE requester_id=$1 AND wallet_id=$2 AND product_id=$3 AND channel=$4 AND status IN ('CREATED','PENDING') AND ($6 OR expires_at>$5) ORDER BY created_at DESC,id DESC LIMIT 1 FOR UPDATE`, requesterID, walletID, productID, channel, now, includeExpired).Scan(&order.ID, &order.MerchantOrderNo, &order.RequesterID, &order.WalletID, &order.ProductID, &order.Channel, &order.AmountFen, &order.Currency, &order.CreditMicrocredits, &order.Status, &order.FulfillmentStatus, &order.PaymentURL, &order.QRData, &order.ChannelTransactionID, &order.ExpiresAt, &order.PaidAt, &order.Mobile, &order.ProviderSKU)
+	return order, err
+}
+
 func (p *PaymentCoordinator) ProcessNotification(ctx context.Context, channel, signature string, body []byte) error {
 	channel = strings.ToUpper(channel)
-	if !validPaymentChannel(channel) {
+	if !validPaymentChannel(channel) || len(p.secrets[channel]) < 32 || p.merchantID == "" {
 		return ErrForbiddenPayment
 	}
 	secret := p.secrets[channel]
@@ -328,11 +515,22 @@ func (p *PaymentCoordinator) ProcessNotification(ctx context.Context, channel, s
 			return ErrConflict
 		}
 	}
+	if p.Policy().RequiresReview(order.ExpiresAt, notification.PaidAt) {
+		_, err = tx.Exec(ctx, `UPDATE payment_orders SET status='MANUAL_REVIEW',fulfillment_status='MANUAL_REVIEW',channel_transaction_id=$2,paid_at=$3,reconciliation_next_at=NULL,reconciliation_lease_until=NULL,reconciliation_last_error=NULL,updated_at=$4 WHERE id=$1`, order.ID, notification.ChannelTransaction, notification.PaidAt, p.now())
+		if err != nil {
+			return err
+		}
+		_, err = tx.Exec(ctx, `UPDATE payment_notifications SET result='MANUAL_REVIEW',processed_at=$2 WHERE notification_id=$1`, notification.NotificationID, p.now())
+		if err != nil {
+			return err
+		}
+		return tx.Commit(ctx)
+	}
 	_, err = tx.Exec(ctx, `UPDATE payment_orders SET status=$2, fulfillment_status='CREDITED', channel_transaction_id=$3, paid_at=$4, updated_at=$5 WHERE id=$1`, order.ID, status, notification.ChannelTransaction, notification.PaidAt, p.now())
 	if err != nil {
 		return err
 	}
-	if err := creditWithinTransaction(ctx, tx, order.WalletID, "recharge:"+order.ID.String(), order.CreditMicrocredits, p.now()); err != nil {
+	if _, err := issuePackageWithinTransaction(ctx, tx, order, p.now(), false); err != nil {
 		return err
 	}
 	if err := enqueueRechargeEvent(ctx, tx, order, p.now()); err != nil {
@@ -346,7 +544,7 @@ func (p *PaymentCoordinator) ProcessNotification(ctx context.Context, channel, s
 }
 
 func providerOrderMatches(order PaymentOrder, provider ProviderOrder) bool {
-	return provider.MerchantOrderNo == order.MerchantOrderNo && provider.Channel == order.Channel && provider.AmountFen == order.AmountFen && provider.Currency == order.Currency
+	return provider.MerchantOrderNo == order.MerchantOrderNo && provider.Channel == order.Channel && provider.AmountFen == order.AmountFen && provider.Currency == order.Currency && (order.ProviderSKU == "" || (provider.ProviderSKU == order.ProviderSKU && provider.Mobile == order.Mobile))
 }
 
 func samePaymentTime(left, right time.Time) bool {
@@ -361,35 +559,70 @@ func enqueueRechargeEvent(ctx context.Context, tx pgx.Tx, order PaymentOrder, no
 
 var ErrForbiddenPayment = errors.New("payment notification rejected")
 
-func creditWithinTransaction(ctx context.Context, tx pgx.Tx, walletID uuid.UUID, reference string, amount int64, now time.Time) error {
-	wallet, err := getWallet(ctx, tx, walletID, true)
+func issuePackageWithinTransaction(ctx context.Context, tx pgx.Tx, order PaymentOrder, now time.Time, repair bool) (uuid.UUID, error) {
+	wallet, err := getWallet(ctx, tx, order.WalletID, true)
 	if err != nil || wallet.Status != "ACTIVE" {
-		return ErrWalletUnavailable
+		return uuid.Nil, ErrWalletUnavailable
 	}
+	var snapshot []byte
+	if err := tx.QueryRow(ctx, `SELECT product_snapshot FROM payment_orders WHERE id=$1`, order.ID).Scan(&snapshot); err != nil {
+		return uuid.Nil, err
+	}
+	var product Product
+	if err := json.Unmarshal(snapshot, &product); err != nil {
+		return uuid.Nil, ErrConflict
+	}
+	legacy := product.PriceStatus == "LEGACY" || (product.PriceStatus == "" && product.ValidityDays == 0 && product.PlanName == "" && product.SKUCode == "")
+	if product.ValidityDays <= 0 && !legacy {
+		return uuid.Nil, ErrConflict
+	}
+	if product.PlanName == "" {
+		product.PlanName = order.ProductID
+	}
+	if product.SKUCode == "" {
+		product.SKUCode = order.ProviderSKU
+	}
+	journalType, reference, description := "RECHARGE", "recharge:"+order.ID.String(), "payment recharge"
+	if repair {
+		journalType, reference, description = "REPAIR_CREDIT", "repair:"+order.ID.String(), "verified payment repair credit"
+	}
+	amount := order.CreditMicrocredits
 	entryID, lotID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
-	if err := insertJournal(ctx, tx, entryID, "RECHARGE", reference, "payment recharge", now); err != nil {
-		return err
+	if err := insertJournal(ctx, tx, entryID, journalType, reference, description, now); err != nil {
+		return uuid.Nil, err
 	}
-	accountID, err := walletLedgerAccount(ctx, tx, walletID)
+	accountID, err := walletLedgerAccount(ctx, tx, order.WalletID)
 	if err != nil {
-		return err
+		return uuid.Nil, err
 	}
-	if _, err = tx.Exec(ctx, `INSERT INTO credit_lots(id,wallet_id,source_type,source_reference,original_microcredits,remaining_microcredits,refundable,created_at) VALUES ($1,$2,'RECHARGE',$3,$4,$4,true,$5)`, lotID, walletID, reference, amount, now); err != nil {
-		return err
+	validFrom, validUntil := now, now.AddDate(0, 0, product.ValidityDays)
+	var expiresAt *time.Time
+	if !legacy {
+		expiresAt = &validUntil
+	}
+	if _, err = tx.Exec(ctx, `INSERT INTO credit_lots(id,wallet_id,source_type,source_reference,original_microcredits,remaining_microcredits,refundable,expires_at,created_at) VALUES ($1,$2,'RECHARGE',$3,$4,$4,$5,$6,$7)`, lotID, order.WalletID, reference, amount, legacy, expiresAt, now); err != nil {
+		return uuid.Nil, err
+	}
+	packageID := uuid.Nil
+	if !legacy {
+		packageID = uuid.Must(uuid.NewV7())
+		if _, err = tx.Exec(ctx, `INSERT INTO entitlement_packages(id,user_id,wallet_id,payment_order_id,credit_lot_id,product_id,plan_name,sku_code,amount_fen,points_total,points_remaining,credited_at,valid_from,valid_until,status,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$10,$11,$12,$13,'ACTIVE',$11,$11)`, packageID, order.RequesterID, order.WalletID, order.ID, lotID, order.ProductID, product.PlanName, product.SKUCode, order.AmountFen, amount, now, validFrom, validUntil); err != nil {
+			return uuid.Nil, err
+		}
 	}
 	if err = insertPosting(ctx, tx, entryID, accountID, amount, &lotID, now); err != nil {
-		return err
+		return uuid.Nil, err
 	}
 	if err = insertPosting(ctx, tx, entryID, paymentClearingAccount, -amount, nil, now); err != nil {
-		return err
+		return uuid.Nil, err
 	}
-	_, err = tx.Exec(ctx, `UPDATE wallets SET posted_microcredits=posted_microcredits+$2,version=version+1,updated_at=$3 WHERE id=$1`, walletID, amount, now)
-	return err
+	_, err = tx.Exec(ctx, `UPDATE wallets SET posted_microcredits=posted_microcredits+$2,version=version+1,updated_at=$3 WHERE id=$1`, order.WalletID, amount, now)
+	return packageID, err
 }
 
 func getPaymentOrderForUpdate(ctx context.Context, tx pgx.Tx, merchant string) (PaymentOrder, error) {
 	var o PaymentOrder
-	err := tx.QueryRow(ctx, `SELECT id,merchant_order_no,requester_id,wallet_id,product_id,channel,amount_fen,currency,credit_microcredits,status,fulfillment_status,COALESCE(payment_url,''),channel_transaction_id,expires_at,paid_at FROM payment_orders WHERE merchant_order_no=$1 FOR UPDATE`, merchant).Scan(&o.ID, &o.MerchantOrderNo, &o.RequesterID, &o.WalletID, &o.ProductID, &o.Channel, &o.AmountFen, &o.Currency, &o.CreditMicrocredits, &o.Status, &o.FulfillmentStatus, &o.PaymentURL, &o.ChannelTransactionID, &o.ExpiresAt, &o.PaidAt)
+	err := tx.QueryRow(ctx, `SELECT id,merchant_order_no,requester_id,wallet_id,product_id,channel,amount_fen,currency,credit_microcredits,status,fulfillment_status,COALESCE(payment_url,''),COALESCE(qr_data,''),channel_transaction_id,expires_at,paid_at,COALESCE(mobile_e164,''),COALESCE(provider_sku,'') FROM payment_orders WHERE merchant_order_no=$1 FOR UPDATE`, merchant).Scan(&o.ID, &o.MerchantOrderNo, &o.RequesterID, &o.WalletID, &o.ProductID, &o.Channel, &o.AmountFen, &o.Currency, &o.CreditMicrocredits, &o.Status, &o.FulfillmentStatus, &o.PaymentURL, &o.QRData, &o.ChannelTransactionID, &o.ExpiresAt, &o.PaidAt, &o.Mobile, &o.ProviderSKU)
 	return o, err
 }
 
@@ -397,6 +630,13 @@ type SimulatorProvider struct {
 	base   *url.URL
 	token  string
 	client *http.Client
+}
+
+func (p *SimulatorProvider) Capabilities() PaymentCapabilities {
+	return PaymentCapabilities{
+		Provider: "simulator", OrderSyncSupported: true, RefundSupported: true,
+		CloseSupported: true, NotificationSupported: true, ReconciliationSupported: true,
+	}
 }
 
 func NewSimulatorProvider(raw, token string) (*SimulatorProvider, error) {

@@ -13,19 +13,28 @@ import (
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/identity"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/observability"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/serviceauth"
 	"github.com/google/uuid"
 )
 
 var ErrWalletProvisioning = errors.New("personal wallet provisioning is incomplete")
 
 type Service struct {
-	repository Repository
-	wallets    WalletProvisioner
-	now        func() time.Time
+	repository   Repository
+	wallets      WalletProvisioner
+	mobileAuth   *MobileAuthService
+	serviceToken string
+	now          func() time.Time
 }
 
 func NewService(repository Repository, wallets WalletProvisioner) *Service {
 	return &Service{repository: repository, wallets: wallets, now: func() time.Time { return time.Now().UTC() }}
+}
+
+func (s *Service) WithMobileAuth(auth *MobileAuthService, serviceToken string) *Service {
+	s.mobileAuth = auth
+	s.serviceToken = strings.TrimSpace(serviceToken)
+	return s
 }
 
 func (s *Service) Bootstrap(ctx context.Context, principal identity.Principal) (Me, error) {
@@ -50,22 +59,33 @@ func (s *Service) Bootstrap(ctx context.Context, principal identity.Principal) (
 
 func (s *Service) Handler(verify identity.VerifyFunc) http.Handler {
 	router := httpserver.NewRouter()
-	router.Use(identity.GinMiddleware(verify))
-	router.POST("/v1/account/bootstrap", httpserver.AdaptFunc(s.bootstrap))
-	router.GET("/v1/me", httpserver.AdaptFunc(s.getMe))
-	router.GET("/v1/me/authorization-context", httpserver.AdaptFunc(s.getAuthorizationContext))
-	router.GET("/v1/me/organizations", httpserver.AdaptFunc(s.listOrganizations))
-	router.POST("/v1/sessions/current/active-context", httpserver.AdaptFunc(s.setActiveContext))
-	router.GET("/v1/organizations/:organization_id/units", httpserver.AdaptFunc(s.listUnits))
-	router.POST("/v1/organizations/:organization_id/units", httpserver.AdaptFunc(s.createUnit))
-	router.GET("/v1/organizations/:organization_id/members", httpserver.AdaptFunc(s.listMembers))
-	router.PUT("/v1/organizations/:organization_id/members/:user_id/roles", httpserver.AdaptFunc(s.replaceMemberRoles))
-	router.PATCH("/v1/organizations/:organization_id/units/:unit_id/parent", httpserver.AdaptFunc(s.moveUnit))
-	router.POST("/v1/organizations/:organization_id/invitations", httpserver.AdaptFunc(s.createInvitation))
-	router.POST("/v1/invitations/accept", httpserver.AdaptFunc(s.acceptInvitation))
-	router.DELETE("/v1/organizations/:organization_id/members/:user_id", httpserver.AdaptFunc(s.revokeMembership))
-	router.POST("/v1/organizations/:organization_id/ownership", httpserver.AdaptFunc(s.transferOwnership))
-	admin := router.Group("/admin/v1")
+	if s.mobileAuth != nil {
+		router.POST("/v1/auth/registration/precheck", httpserver.AdaptFunc(s.precheckMobileRegistration))
+		router.POST("/v1/auth/captcha/challenges", httpserver.AdaptFunc(s.createSliderCaptcha))
+		router.POST("/v1/auth/sms/challenges", httpserver.AdaptFunc(s.sendSMSChallenge))
+		router.POST("/v1/auth/register", httpserver.AdaptFunc(s.registerMobile))
+		internal := router.Group("/internal/v1/auth")
+		internal.Use(serviceauth.GinMiddleware(s.serviceToken))
+		internal.POST("/sms/verify", httpserver.AdaptFunc(s.verifyLoginSMS))
+		internal.POST("/mobile/identity", httpserver.AdaptFunc(s.resolveMobileIdentity))
+	}
+	protected := router.Group("")
+	protected.Use(identity.GinMiddleware(verify))
+	protected.POST("/v1/account/bootstrap", httpserver.AdaptFunc(s.bootstrap))
+	protected.GET("/v1/me", httpserver.AdaptFunc(s.getMe))
+	protected.GET("/v1/me/authorization-context", httpserver.AdaptFunc(s.getAuthorizationContext))
+	protected.GET("/v1/me/organizations", httpserver.AdaptFunc(s.listOrganizations))
+	protected.POST("/v1/sessions/current/active-context", httpserver.AdaptFunc(s.setActiveContext))
+	protected.GET("/v1/organizations/:organization_id/units", httpserver.AdaptFunc(s.listUnits))
+	protected.POST("/v1/organizations/:organization_id/units", httpserver.AdaptFunc(s.createUnit))
+	protected.GET("/v1/organizations/:organization_id/members", httpserver.AdaptFunc(s.listMembers))
+	protected.PUT("/v1/organizations/:organization_id/members/:user_id/roles", httpserver.AdaptFunc(s.replaceMemberRoles))
+	protected.PATCH("/v1/organizations/:organization_id/units/:unit_id/parent", httpserver.AdaptFunc(s.moveUnit))
+	protected.POST("/v1/organizations/:organization_id/invitations", httpserver.AdaptFunc(s.createInvitation))
+	protected.POST("/v1/invitations/accept", httpserver.AdaptFunc(s.acceptInvitation))
+	protected.DELETE("/v1/organizations/:organization_id/members/:user_id", httpserver.AdaptFunc(s.revokeMembership))
+	protected.POST("/v1/organizations/:organization_id/ownership", httpserver.AdaptFunc(s.transferOwnership))
+	admin := protected.Group("/admin/v1")
 	admin.Use(identity.RequireRealmRoleGin("platform-admin"))
 	admin.GET("/overview", httpserver.AdaptFunc(s.adminOverview))
 	admin.GET("/roles", httpserver.AdaptFunc(s.adminRoles))

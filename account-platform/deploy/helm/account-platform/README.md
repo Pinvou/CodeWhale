@@ -16,7 +16,7 @@ values file.
 New API's private entry point is HTTPS on port 8443. Build the project-owned
 `newapi-tls` image using the existing Dockerfile with `SERVICE=newapi-tls` and
 set `images.newApiTls`. The same-pod TLS front end forwards only the exact
-chat-completions, model-list and reconciliation-log routes to loopback HTTP
+chat-completions, model-list, reconciliation-log and exact `GET /api/status` routes to loopback HTTP
 8080; no New API ingress or cross-pod HTTP service is exposed. Create the
 referenced server TLS Secret (`tls.crt`, `tls.key`) and a separate CA Secret
 (`ca.crt`) before installation. Its certificate DNS SAN must match
@@ -65,3 +65,38 @@ the selected storage driver must support volume ownership or provide these
 permissions before startup. Bundled Keycloak requires the reviewed realm/client
 configuration to be provisioned separately; installing workloads alone is not
 an authentication or production-release acceptance.
+
+Mobile registration is opt-in (`mobileAuth.enabled`). Use the project Keycloak
+SPI image built from `deploy/keycloak/Dockerfile`, set `images.keycloak`, then run
+its `provision-mobile-auth.sh` through the controlled administrator channel.
+Provisioning must finish with the three service-account roles read back and the
+managed, administrator-only phone and opaque registration attributes present.
+The bundled Keycloak calls the Account service's authenticated POST identity
+and SMS-verification routes; it never selects the first realm user sharing a
+phone. Disabling a business account does not itself revoke a realm admin role.
+
+The neutral `http` SMS adapter accepts authenticated `/send` and `/verify`
+JSON requests. Configure `mobileAuth.smsEndpoint`, the Keycloak administrator
+and token URLs, `sms-http-service-token` and
+`keycloak-provisioner-client-secret` in the referenced runtime Secret. The
+optional Aliyun adapter uses its three Secret keys and reviewed template names.
+Outside development/test these credential-bearing endpoints require HTTPS and
+`external.smsProviderCidrs`; only Account receives the added port-443 egress.
+
+Commerce is optional. Community registration and wallet activation require no
+enterprise service or commerce job. Selecting `billing.paymentProvider=h3c_mall`
+requires `commerce.enabled`, a reviewed HTTPS `commerce.baseUrl`, its runtime
+Secret credentials and `external.commerceProviderCidrs`. Only Account and Billing
+receive those additional port-443 destinations. Tentative PLAN prices remain
+disabled outside the development simulator unless explicitly approved through
+`billing.allowTentativePrices`; rendering does not constitute supplier, merchant,
+certificate or production-price acceptance. The four original LEGACY organization
+offers remain available through the development simulator only; personal sales
+of retired LEGACY offers are not reopened.
+
+If a remote registration creation was accepted but its response or local
+completion failed, retry the same username and phone with a new verified SMS.
+Only the exact opaque Account registration marker may recover that identity.
+`password_preserved=true` means its first submitted password remains in effect;
+recovery does not reset a password, adopt another realm user or remove a retained
+identity. Deleted identities continue to reserve their realm usernames.

@@ -24,6 +24,26 @@ docker compose --env-file account-platform/deploy/compose/.env \
 
 部署时应将 `provision-platform-admin.sh` 以只读方式挂载到容器，或复制脚本内容到受控的运维环境执行。脚本可重复运行，并会确保用户拥有 `platform-admin` 角色。
 
+## 手机注册、登录与商城支付
+
+开启 `MOBILE_AUTH_ENABLED=true` 前，选择供应商中立的 `SMS_PROVIDER=http`，或显式选择 `SMS_PROVIDER=aliyun`。仅阿里云适配器需要号码认证服务 AccessKey、系统赠送签名和系统赠送模板（登录/注册模板 CODE 为 `100001`）；该适配器由阿里云生成验证码并通过 `CheckSmsVerifyCode` 核验。HTTP 适配器使用下文的 `/send` 和 `/verify` 契约。Account Service 不生成、保存或记录明文验证码；所有密钥仅放在部署环境的 Secret 中。
+
+商城账号同步与手机认证相互独立。配置 `H3C_MALL_BASE_URL`、`H3C_MALL_APP_KEY` 和 `H3C_MALL_APP_SECRET` 后，Account Service 才为新注册用户创建商城同步任务；未配置时注册仍可用，状态为 `NOT_CONFIGURED`，不创建无法完成的商城任务。默认 `BILLING_PAYMENT_PROVIDER=simulator` 使用社区开发模拟器；开发和测试环境允许明确标注的暂定测试价格。仅显式选择 `h3c_mall` 才使用企业商城，暂定价仍需 `BILLING_ALLOW_TENTATIVE_PRICES=true` 明确启用。商品 SKU 来自数据库，不维护第二份环境变量商品目录。
+
+已有 Keycloak 数据卷升级后，还需要执行一次可重复运行的初始化脚本，以安装手机直登 Flow、服务账号权限和手机号 Token Claim：
+
+```sh
+docker compose --env-file account-platform/deploy/compose/.env \
+  -f account-platform/deploy/compose/compose.yaml exec keycloak \
+  sh /opt/keycloak/data/import/provision-mobile-auth.sh
+```
+
+该脚本还会将 Keycloak 用户资料规则调整为适配手机注册：邮箱、姓、名保持可选，手机号及其验证状态仅允许账号服务写入。脚本可重复执行，并会同步更新既有 Realm，避免新账号已创建却因资料不完整而无法在应用内登录。
+
+设置 `MOBILE_AUTH_ENABLED=true` 后，可用 `SMS_PROVIDER=http` 接入供应商中立的短信服务（配置 HTTPS `SMS_HTTP_ENDPOINT` 和随机 `SMS_HTTP_SERVICE_TOKEN`），也可显式配置阿里云适配器。通用服务的 `/send` 接收手机号、用途和挑战 ID 并返回 `message_id`；`/verify` 接收手机号、挑战 ID 和验证码并返回布尔 `verified`。该通用协议没有权威的未接受响应，失败或发送结果不确定时保留短信冷却；阿里云仅完整返回官方明确的前置拒绝时解除冷却，网络中断、超时和无效响应均不代表未发送。验证码、手机号和服务凭据不得写入日志。社区注册、钱包激活和开发支付模拟器不依赖商城。企业商城支付要求已验证且同步的手机号；二维码只使用商城返回值，查询到权威 `PAID` 才记入权益。
+
+当前商城合同没有关闭订单、退款、支付回调和对账单接口，因此这些能力不会伪造：订单关闭跟随商城的 `PAY_CLOSED`，退款和渠道账单会明确返回“供应商能力不可用”。上线退款前需补充商城退款合同。
+
 确定性集成烟测使用独立 project：`node scripts/account-platform.mjs test integration`。命令会启动完整栈、验证五个 Readiness、请求/Trace 关联头和 Portal 安全头，然后仅删除该测试 project 的卷。
 
 数据库、Redis、NATS 和服务间网络不对公网开放。Compose 是开发/测试拓扑，不是生产部署模板。Payment Simulator 不得进入生产环境。

@@ -54,6 +54,32 @@ components:
             - USAGE_REPLAY_BLOCKED
             - WALLET_RESERVE_FAILED
             - UPSTREAM_RESULT_UNKNOWN
+            - ADMIN_AUTH_UNAVAILABLE
+            - ADMIN_REQUIRED
+            - ADMIN_UNAVAILABLE
+            - AUTH_INTERNAL_ERROR
+            - CAPTCHA_INVALID
+            - CONFLICT
+            - CSRF_REJECTED
+            - INVALID_FILTER
+            - LOGIN_EXCHANGE_FAILED
+            - LOGIN_REQUIRED
+            - LOGIN_SESSION_FAILED
+            - LOGIN_STATE_INVALID
+            - LOGIN_UNAVAILABLE
+            - LOGOUT_UNAVAILABLE
+            - MOBILE_ALREADY_REGISTERED
+            - MOBILE_INVALID
+            - PASSWORD_INVALID
+            - PAYMENT_UNAVAILABLE
+            - PERSONAL_RECHARGE_ONLY
+            - SESSION_UNAVAILABLE
+            - SMS_CODE_INVALID
+            - SMS_RATE_LIMITED
+            - SMS_UNAVAILABLE
+            - UPSTREAM_UNAVAILABLE
+            - USERNAME_ALREADY_REGISTERED
+            - USERNAME_INVALID
         message:
           type: string
         request_id:

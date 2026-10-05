@@ -83,6 +83,15 @@ spec:
             - { name: KC_HOSTNAME_ADMIN, value: {{ .Values.keycloak.adminHostname | quote }} }
             - { name: KC_PROXY_HEADERS, value: xforwarded }
             - { name: KC_DB, value: postgres }
+            {{- if .Values.mobileAuth.enabled }}
+            - { name: PINVOU_SMS_VERIFY_URL, value: {{ printf "http://%s-account-service:8080/internal/v1/auth/sms/verify" $fullname | quote }} }
+            - { name: PINVOU_MOBILE_IDENTITY_URL, value: {{ printf "http://%s-account-service:8080/internal/v1/auth/mobile/identity" $fullname | quote }} }
+            - name: PINVOU_INTERNAL_SERVICE_TOKEN
+              valueFrom: { secretKeyRef: { name: {{ .Values.global.runtimeSecret }}, key: internal-service-token } }
+            - { name: KEYCLOAK_PROVISIONER_CLIENT_ID, value: {{ .Values.mobileAuth.keycloakProvisionerClientId | quote }} }
+            - name: KEYCLOAK_PROVISIONER_CLIENT_SECRET
+              valueFrom: { secretKeyRef: { name: {{ .Values.global.runtimeSecret }}, key: keycloak-provisioner-client-secret } }
+            {{- end }}
             - name: KC_DB_URL
               valueFrom: { secretKeyRef: { name: {{ .Values.global.runtimeSecret }}, key: keycloak-database-url } }
             - name: KC_DB_USERNAME

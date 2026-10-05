@@ -1,6 +1,7 @@
 package billing
 
 import (
+	"context"
 	"errors"
 	"io"
 	"net/http"
@@ -36,6 +37,7 @@ func (s *Service) Handler(serviceToken string, adminVerify ...identity.VerifyFun
 	protected.Use(serviceauth.GinMiddleware(serviceToken))
 	protected.POST("/internal/v1/wallets/ensure", httpserver.AdaptFunc(s.ensureWallet))
 	protected.GET("/internal/v1/wallets/:wallet_id/balance", httpserver.AdaptFunc(s.getBalance))
+	protected.GET("/internal/v1/entitlement-packages", httpserver.AdaptFunc(s.listEntitlementPackages))
 	protected.POST("/internal/v1/holds/reserve", httpserver.AdaptFunc(s.reserve))
 	protected.POST("/internal/v1/holds/commit", httpserver.AdaptFunc(s.commit))
 	protected.POST("/internal/v1/holds/release", httpserver.AdaptFunc(s.release))
@@ -46,9 +48,11 @@ func (s *Service) Handler(serviceToken string, adminVerify ...identity.VerifyFun
 	protected.POST("/internal/v1/adjustments/:adjustment_id/approve", httpserver.AdaptFunc(s.approveAdjustment))
 	protected.POST("/internal/v1/adjustments/:adjustment_id/reject", httpserver.AdaptFunc(s.rejectAdjustment))
 	protected.GET("/v1/recharge/products", httpserver.AdaptFunc(s.listProducts))
+	protected.GET("/internal/v1/recharge/products", httpserver.AdaptFunc(s.listOrganizationProducts))
 	protected.GET("/v1/wallets/:wallet_id/balance", httpserver.AdaptFunc(s.getBalance))
 	if s.payments != nil {
 		protected.POST("/internal/v1/recharge/orders", httpserver.AdaptFunc(s.createRechargeOrder))
+		protected.GET("/internal/v1/recharge/orders", httpserver.AdaptFunc(s.listRechargeOrders))
 		protected.GET("/internal/v1/recharge/orders/recent", httpserver.AdaptFunc(s.getRecentRechargeOrder))
 		protected.GET("/internal/v1/recharge/orders/:order_id", httpserver.AdaptFunc(s.getRechargeOrder))
 		protected.POST("/internal/v1/recharge/orders/:order_id/close", httpserver.AdaptFunc(s.closeRechargeOrder))
@@ -67,6 +71,7 @@ func (s *Service) Handler(serviceToken string, adminVerify ...identity.VerifyFun
 		admin.POST("/pricing-versions", httpserver.AdaptFunc(s.adminCreatePriceVersion))
 		admin.GET("/payment-orders", httpserver.AdaptFunc(s.adminPaymentOrders))
 		admin.POST("/payment-orders/:order_id/sync", httpserver.AdaptFunc(s.adminSyncPaymentOrder))
+		admin.POST("/payment-orders/:order_id/repair", httpserver.AdaptFunc(s.adminRepairPaymentOrder))
 		admin.POST("/payment-orders/:order_id/refunds", httpserver.AdaptFunc(s.adminRefundPaymentOrder))
 		admin.GET("/adjustments", httpserver.AdaptFunc(s.adminAdjustments))
 		admin.POST("/adjustments/:adjustment_id/approve", httpserver.AdaptFunc(s.adminApproveAdjustment))
@@ -78,6 +83,43 @@ func (s *Service) Handler(serviceToken string, adminVerify ...identity.VerifyFun
 		admin.GET("/reconciliation-runs/:run_id/cases", httpserver.AdaptFunc(s.adminReconciliationCases))
 	}
 	return router
+}
+
+func (s *Service) listRechargeOrders(w http.ResponseWriter, r *http.Request) {
+	requesterID, requesterErr := uuid.Parse(r.URL.Query().Get("requester_id"))
+	walletID, walletErr := uuid.Parse(r.URL.Query().Get("wallet_id"))
+	if requesterErr != nil || walletErr != nil {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid recharge order list", httpserver.RequestID(r.Context()))
+		return
+	}
+	items, err := s.payments.ListOrders(r.Context(), requesterID, walletID, 50)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	api.WriteJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
+type entitlementPackageRepository interface {
+	ListPackages(context.Context, uuid.UUID, uuid.UUID, int) ([]EntitlementPackage, PackageSummary, error)
+}
+
+func (s *Service) listEntitlementPackages(w http.ResponseWriter, r *http.Request) {
+	userID, userErr := uuid.Parse(r.URL.Query().Get("user_id"))
+	walletID, walletErr := uuid.Parse(r.URL.Query().Get("wallet_id"))
+	repository, ok := s.repository.(entitlementPackageRepository)
+	if userErr != nil || walletErr != nil || !ok {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid entitlement package lookup", httpserver.RequestID(r.Context()))
+		return
+	}
+	items, summary, err := repository.ListPackages(r.Context(), userID, walletID, 100)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	api.WriteJSON(w, http.StatusOK, map[string]any{"summary": summary, "items": items})
 }
 
 func (s *Service) requestAdjustment(w http.ResponseWriter, r *http.Request) {
@@ -141,12 +183,13 @@ func (s *Service) createRechargeOrder(w http.ResponseWriter, r *http.Request) {
 		WalletID    uuid.UUID `json:"wallet_id"`
 		ProductID   string    `json:"product_id"`
 		Channel     string    `json:"channel"`
+		Mobile      string    `json:"mobile"`
 	}
 	if err := api.DecodeJSON(w, r, &body); err != nil || body.RequesterID == uuid.Nil || body.WalletID == uuid.Nil || body.ProductID == "" {
 		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid recharge order", httpserver.RequestID(r.Context()))
 		return
 	}
-	order, created, err := s.payments.CreateOrder(r.Context(), body.RequesterID, body.WalletID, body.ProductID, body.Channel, r.Header.Get("Idempotency-Key"))
+	order, created, err := s.payments.CreateMobileOrder(r.Context(), body.RequesterID, body.WalletID, body.ProductID, body.Channel, body.Mobile, r.Header.Get("Idempotency-Key"))
 	if err != nil {
 		s.writeError(w, r, err)
 		return
@@ -166,7 +209,13 @@ func (s *Service) getRechargeOrder(w http.ResponseWriter, r *http.Request) {
 		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid recharge order lookup", httpserver.RequestID(r.Context()))
 		return
 	}
+	// Authorize against the local order before making a provider request. This
+	// keeps an authenticated caller from using guessed order IDs to trigger
+	// Mall lookups for another account.
 	order, err := s.payments.GetOrder(r.Context(), orderID, requesterID)
+	if err == nil {
+		order, err = s.payments.SyncOrder(r.Context(), order.ID)
+	}
 	if err != nil {
 		s.writeError(w, r, err)
 		return
@@ -323,14 +372,51 @@ func (s *Service) getBalance(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Service) listProducts(w http.ResponseWriter, r *http.Request) {
+	s.listRechargeCatalog(w, r, false)
+}
+
+func (s *Service) listOrganizationProducts(w http.ResponseWriter, r *http.Request) {
+	s.listRechargeCatalog(w, r, true)
+}
+
+func (s *Service) listRechargeCatalog(w http.ResponseWriter, r *http.Request, organization bool) {
 	currency := r.URL.Query().Get("currency")
 	if currency == "" {
 		currency = "CNY"
 	}
-	products, err := s.repository.ListProducts(r.Context(), currency, r.URL.Query().Get("channel"))
+	var products []Product
+	var err error
+	if organization {
+		rawWallet := r.URL.Query().Get("wallet_id")
+		walletID, parseErr := uuid.Parse(rawWallet)
+		if parseErr != nil {
+			s.writeError(w, r, ErrConflict)
+			return
+		}
+		wallet, walletErr := s.repository.GetWallet(r.Context(), walletID)
+		if walletErr != nil {
+			s.writeError(w, r, walletErr)
+			return
+		}
+		if wallet.OwnerType != "ORGANIZATION" || wallet.Status != "ACTIVE" {
+			s.writeError(w, r, ErrConflict)
+			return
+		}
+		products = []Product{}
+		if s.payments != nil && s.payments.Capabilities().Provider == "simulator" {
+			if repository, ok := s.repository.(*PostgresRepository); ok {
+				products, err = repository.organizationProducts(r.Context(), currency, r.URL.Query().Get("channel"))
+			}
+		}
+	} else {
+		products, err = s.repository.ListProducts(r.Context(), currency, r.URL.Query().Get("channel"))
+	}
 	if err != nil {
 		s.writeError(w, r, err)
 		return
+	}
+	if s.payments != nil {
+		products = s.payments.FilterProducts(products)
 	}
 	var version int64
 	for _, product := range products {

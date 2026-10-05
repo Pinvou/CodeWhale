@@ -195,7 +195,9 @@ func TestPostgresSimulatorToBillingSignedCallbackAndDelayedRetry(t *testing.T) {
 			})
 			billingServer.Start()
 			defer billingServer.Close()
-			wallet, _, err := repo.EnsureWallet(ctx, "PERSONAL", uuid.New())
+			// Keep exercising ordinary CNY credit and callback recovery through
+			// the retained organization catalog, rather than a retired personal SKU.
+			wallet, _, err := repo.EnsureWallet(ctx, "ORGANIZATION", uuid.New())
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -323,7 +325,7 @@ func TestPostgresPaymentActivationRecoversProviderTerminalOverHTTP(t *testing.T)
 			if err != nil {
 				t.Fatal(err)
 			}
-			wallet, _, err := repo.EnsureWallet(ctx, "PERSONAL", uuid.New())
+			wallet, _, err := repo.EnsureWallet(ctx, "ORGANIZATION", uuid.New())
 			if err != nil {
 				t.Fatal(err)
 			}

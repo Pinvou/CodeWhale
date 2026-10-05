@@ -1,7 +1,23 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "type": "object",
-  "required": ["global", "images", "newApi", "oidc", "public", "observability", "security", "billing", "tokenGateway", "external", "ingress", "keycloak", "networkPolicy"],
+  "required": [
+    "global",
+    "images",
+    "newApi",
+    "oidc",
+    "public",
+    "observability",
+    "security",
+    "billing",
+    "tokenGateway",
+    "external",
+    "ingress",
+    "keycloak",
+    "networkPolicy",
+    "mobileAuth",
+    "commerce"
+  ],
   "properties": {
     "global": {
       "type": "object",
@@ -218,10 +234,27 @@
     },
     "billing": {
       "type": "object",
-      "required": ["paymentExpiryIntervalSeconds"],
+      "required": [
+        "paymentExpiryIntervalSeconds",
+        "paymentProvider",
+        "allowTentativePrices"
+      ],
       "additionalProperties": false,
       "properties": {
-        "paymentExpiryIntervalSeconds": { "type": "integer", "minimum": 1, "maximum": 300 }
+        "paymentExpiryIntervalSeconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 300
+        },
+        "paymentProvider": {
+          "enum": [
+            "simulator",
+            "h3c_mall"
+          ]
+        },
+        "allowTentativePrices": {
+          "type": "boolean"
+        }
       }
     },
     "tokenGateway": {
@@ -294,19 +327,124 @@
         },
         "telemetryCollectorCidrs": {
           "$ref": "#/definitions/cidrs"
+        },
+        "smsProviderCidrs": {
+          "$ref": "#/definitions/cidrs"
+        },
+        "commerceProviderCidrs": {
+          "$ref": "#/definitions/cidrs"
         }
       }
     },
-    "ingress": { "type": "object", "required": ["enabled"], "properties": { "enabled": { "type": "boolean" } } },
-    "keycloak": {
+    "ingress": {
       "type": "object",
-      "required": ["hostname", "adminHostname"],
+      "required": [
+        "enabled"
+      ],
       "properties": {
-        "hostname": { "type": "string", "format": "uri" },
-        "adminHostname": { "type": "string", "format": "uri" }
+        "enabled": {
+          "type": "boolean"
+        }
       }
     },
-    "networkPolicy": { "type": "object", "required": ["enabled"], "properties": { "enabled": { "type": "boolean" } } }
+    "keycloak": {
+      "type": "object",
+      "required": [
+        "hostname",
+        "adminHostname"
+      ],
+      "properties": {
+        "hostname": {
+          "type": "string",
+          "format": "uri"
+        },
+        "adminHostname": {
+          "type": "string",
+          "format": "uri"
+        }
+      }
+    },
+    "networkPolicy": {
+      "type": "object",
+      "required": [
+        "enabled"
+      ],
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        }
+      }
+    },
+    "mobileAuth": {
+      "type": "object",
+      "required": [
+        "enabled",
+        "smsProvider",
+        "smsEndpoint",
+        "keycloakAdminApiUrl",
+        "keycloakProvisionerTokenUrl",
+        "keycloakRealm",
+        "keycloakProvisionerClientId",
+        "aliyunEndpoint",
+        "aliyunRegisterTemplate",
+        "aliyunLoginTemplate"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "smsProvider": {
+          "enum": [
+            "http",
+            "aliyun"
+          ]
+        },
+        "smsEndpoint": {
+          "type": "string"
+        },
+        "keycloakAdminApiUrl": {
+          "type": "string"
+        },
+        "keycloakProvisionerTokenUrl": {
+          "type": "string"
+        },
+        "keycloakRealm": {
+          "type": "string",
+          "minLength": 1
+        },
+        "keycloakProvisionerClientId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "aliyunEndpoint": {
+          "type": "string",
+          "pattern": "^https://[^/@?#]+(?:/[^?#]*)?$"
+        },
+        "aliyunRegisterTemplate": {
+          "type": "string"
+        },
+        "aliyunLoginTemplate": {
+          "type": "string"
+        }
+      }
+    },
+    "commerce": {
+      "type": "object",
+      "required": [
+        "enabled",
+        "baseUrl"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "baseUrl": {
+          "type": "string"
+        }
+      }
+    }
   },
   "definitions": {
     "image": {
@@ -559,6 +697,309 @@
               "enabled": {
                 "type": "boolean",
                 "const": true
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "mobileAuth": {
+            "type": "object",
+            "properties": {
+              "enabled": {
+                "const": true
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "mobileAuth": {
+            "type": "object",
+            "properties": {
+              "keycloakAdminApiUrl": {
+                "type": "string",
+                "pattern": "^https?://[^/@?#]+(?:/[^?#]*)?$"
+              },
+              "keycloakProvisionerTokenUrl": {
+                "type": "string",
+                "pattern": "^https?://[^/@?#]+(?:/[^?#]*)?$"
+              }
+            }
+          }
+        },
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "mobileAuth": {
+                  "type": "object",
+                  "properties": {
+                    "smsProvider": {
+                      "const": "http"
+                    }
+                  }
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "mobileAuth": {
+                  "type": "object",
+                  "properties": {
+                    "smsEndpoint": {
+                      "type": "string",
+                      "pattern": "^https?://[^/@?#]+(?:/[^?#]*)?$"
+                    }
+                  }
+                }
+              }
+            },
+            "else": {
+              "properties": {
+                "mobileAuth": {
+                  "type": "object",
+                  "properties": {
+                    "aliyunRegisterTemplate": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "aliyunLoginTemplate": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  }
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "mobileAuth": {
+            "type": "object",
+            "properties": {
+              "enabled": {
+                "const": true
+              }
+            }
+          },
+          "keycloak": {
+            "type": "object",
+            "properties": {
+              "enabled": {
+                "const": true
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "images": {
+            "type": "object",
+            "properties": {
+              "keycloak": {
+                "type": "object",
+                "properties": {
+                  "repository": {
+                    "type": "string",
+                    "not": {
+                      "const": "quay.io/keycloak/keycloak"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "commerce": {
+            "type": "object",
+            "properties": {
+              "enabled": {
+                "const": true
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "commerce": {
+            "type": "object",
+            "properties": {
+              "baseUrl": {
+                "type": "string",
+                "pattern": "^https?://[^/@?#]+(?:/[^?#]*)?$"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "billing": {
+            "type": "object",
+            "properties": {
+              "paymentProvider": {
+                "const": "h3c_mall"
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "commerce": {
+            "type": "object",
+            "properties": {
+              "enabled": {
+                "const": true
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "global": {
+            "type": "object",
+            "properties": {
+              "environment": {
+                "not": {
+                  "enum": [
+                    "development",
+                    "test"
+                  ]
+                }
+              }
+            }
+          },
+          "mobileAuth": {
+            "type": "object",
+            "properties": {
+              "enabled": {
+                "const": true
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "mobileAuth": {
+            "type": "object",
+            "properties": {
+              "keycloakAdminApiUrl": {
+                "type": "string",
+                "pattern": "^https://[^/@?#]+(?:/[^?#]*)?$"
+              },
+              "keycloakProvisionerTokenUrl": {
+                "type": "string",
+                "pattern": "^https://[^/@?#]+(?:/[^?#]*)?$"
+              }
+            }
+          },
+          "external": {
+            "type": "object",
+            "properties": {
+              "smsProviderCidrs": {
+                "type": "array",
+                "minItems": 1
+              }
+            }
+          }
+        },
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "mobileAuth": {
+                  "type": "object",
+                  "properties": {
+                    "smsProvider": {
+                      "const": "http"
+                    }
+                  }
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "mobileAuth": {
+                  "type": "object",
+                  "properties": {
+                    "smsEndpoint": {
+                      "type": "string",
+                      "pattern": "^https://[^/@?#]+(?:/[^?#]*)?$"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "global": {
+            "type": "object",
+            "properties": {
+              "environment": {
+                "not": {
+                  "enum": [
+                    "development",
+                    "test"
+                  ]
+                }
+              }
+            }
+          },
+          "commerce": {
+            "type": "object",
+            "properties": {
+              "enabled": {
+                "const": true
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "commerce": {
+            "type": "object",
+            "properties": {
+              "baseUrl": {
+                "type": "string",
+                "pattern": "^https://[^/@?#]+(?:/[^?#]*)?$"
+              }
+            }
+          },
+          "external": {
+            "type": "object",
+            "properties": {
+              "commerceProviderCidrs": {
+                "type": "array",
+                "minItems": 1
               }
             }
           }

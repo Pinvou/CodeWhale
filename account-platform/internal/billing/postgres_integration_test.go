@@ -15,6 +15,12 @@ import (
 func billingFixture(t *testing.T) (*PostgresRepository, Wallet) {
 	t.Helper()
 	r := &PostgresRepository{pool: testdb.Open(t, "billing"), now: func() time.Time { return time.Now().UTC() }}
+	// Historical payment tests exercise the still-supported legacy contract.
+	// A06 disables these offers for new production sales, so enable them only
+	// in this isolated test schema rather than altering the catalog migrations.
+	if _, err := r.pool.Exec(context.Background(), `UPDATE recharge_products SET enabled=true WHERE price_status='LEGACY'`); err != nil {
+		t.Fatal(err)
+	}
 	w, _, err := r.EnsureWallet(context.Background(), "PERSONAL", uuid.New())
 	if err != nil {
 		t.Fatal(err)
@@ -248,7 +254,7 @@ func TestPostgresPaymentCreateRecoversExternalOutcomeAndConcurrentReplay(t *test
 	provider := &recoverableProvider{failFirst: true}
 	p.provider = provider
 	var product string
-	if err := p.repository.pool.QueryRow(ctx, `SELECT product_id FROM recharge_products LIMIT 1`).Scan(&product); err != nil {
+	if err := p.repository.pool.QueryRow(ctx, `SELECT product_id FROM recharge_products WHERE price_status='LEGACY' AND enabled ORDER BY amount_fen LIMIT 1`).Scan(&product); err != nil {
 		t.Fatal(err)
 	}
 	key := "payment-recovery-key-001"
@@ -295,7 +301,7 @@ func creditedOrder(t *testing.T, p *PaymentCoordinator, w Wallet, user uuid.UUID
 	t.Helper()
 	ctx := context.Background()
 	var product string
-	if err := p.repository.pool.QueryRow(ctx, `SELECT product_id FROM recharge_products ORDER BY amount_fen LIMIT 1`).Scan(&product); err != nil {
+	if err := p.repository.pool.QueryRow(ctx, `SELECT product_id FROM recharge_products WHERE price_status='LEGACY' AND enabled ORDER BY amount_fen LIMIT 1`).Scan(&product); err != nil {
 		t.Fatal(err)
 	}
 	o, _, err := p.CreateOrder(ctx, user, w.ID, product, "ALIPAY", key)
@@ -437,6 +443,10 @@ type closeReplyProvider struct {
 	*recoverableProvider
 	order  ProviderOrder
 	closed ProviderOrder
+}
+
+func (*closeReplyProvider) Capabilities() PaymentCapabilities {
+	return PaymentCapabilities{CloseSupported: true, OrderSyncSupported: true}
 }
 
 func (p *closeReplyProvider) Get(context.Context, string) (ProviderOrder, error) { return p.order, nil }

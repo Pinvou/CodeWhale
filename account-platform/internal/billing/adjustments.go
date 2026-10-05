@@ -206,7 +206,7 @@ func consumeAdjustmentLots(ctx context.Context, tx pgx.Tx, entryID, walletAccoun
 		if consume == 0 {
 			continue
 		}
-		if _, err := tx.Exec(ctx, `UPDATE credit_lots SET remaining_microcredits=remaining_microcredits-$2 WHERE id=$1`, item.id, consume); err != nil {
+		if err := consumeAvailableLot(ctx, tx, item.id, consume, now); err != nil {
 			return err
 		}
 		if err := insertPosting(ctx, tx, entryID, walletAccount, -consume, &item.id, now); err != nil {

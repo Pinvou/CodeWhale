@@ -4,9 +4,15 @@
 //! only a session summary and allowlisted business API responses; refresh
 //! tokens are persisted through the shared OS credential-store abstraction.
 
+mod mobile;
 mod oidc;
 mod platform;
 mod runtime;
+
+pub use mobile::{
+    MobileRegistration, MobileRegistrationPrecheck, SMSLoginCredentials, SMSRequest,
+    SliderCaptchaRequest,
+};
 
 use crate::platform::credential_store::CredentialReference;
 pub(crate) use runtime::ChatRuntimeAuthorization;
@@ -478,6 +484,9 @@ impl AccountPlatformState {
             let invalid_grant = serde_json::from_slice::<Value>(&bytes)
                 .ok()
                 .is_some_and(|v| v.get("error").and_then(Value::as_str) == Some("invalid_grant"));
+            if let Some(error) = mobile::classify_mobile_grant_error(form, status, &bytes) {
+                return Err(error.into());
+            }
             if status == StatusCode::BAD_REQUEST && invalid_grant {
                 return Err(if is_refresh {
                     "authentication_required"
@@ -748,6 +757,8 @@ fn route_allowed(area: &str, method: &Method, path: &str, query: Option<&str>) -
         | ("account", &Method::GET, ["v1", "me", "organizations"], None)
         | ("account", &Method::POST, ["v1", "sessions", "current", "active-context"], None)
         | ("token", &Method::GET, ["v1", "recharge", "products"], None)
+        | ("token", &Method::GET, ["v1", "recharge", "orders"], None)
+        | ("token", &Method::GET, ["v1", "me", "entitlement-packages"], None)
         | ("token", &Method::POST, ["v1", "recharge", "orders"], None)
         | ("token", &Method::GET, ["v1", "recharge", "orders", "recent"], None)
         | ("token", &Method::GET, ["v1", "token-accounts"], None)

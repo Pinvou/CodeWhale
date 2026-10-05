@@ -155,6 +155,12 @@ func (r *PostgresRepository) ResolveUsageWaiver(ctx context.Context, holdID, usa
 	}
 	now := r.now()
 	if h.Status != "RELEASED" {
+		if _, err := getWallet(ctx, tx, h.WalletID, true); err != nil {
+			return result, err
+		}
+		if err := releasePackageAllocations(ctx, tx, h.ID, now); err != nil {
+			return result, err
+		}
 		command, err := tx.Exec(ctx, `UPDATE wallets SET reserved_microcredits=reserved_microcredits-$2,version=version+1,updated_at=$3 WHERE id=$1 AND reserved_microcredits >= $2`, h.WalletID, h.MaxMicrocredits, now)
 		if err != nil {
 			return result, err

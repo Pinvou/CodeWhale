@@ -47,8 +47,9 @@ async function eventually(label, operation, predicate, timeoutMs = 15_000) {
   assert.fail(`${label} did not converge`);
 }
 
-async function products(channel) {
-  const catalog = await requestJSON(`/v1/recharge/products?currency=CNY&channel=${channel}`);
+async function products(channel, walletID) {
+  const endpoint = walletID ? `/internal/v1/recharge/products?wallet_id=${walletID}&currency=CNY&channel=${channel}` : `/v1/recharge/products?currency=CNY&channel=${channel}`;
+  const catalog = await requestJSON(endpoint);
   assert.ok(Array.isArray(catalog.items) && catalog.items.length >= 4, `${channel} recharge catalog must expose four products`);
   return catalog.items;
 }
@@ -78,14 +79,15 @@ async function completePayment(paymentURL) {
 const requesterID = randomUUID();
 const wallet = await requestJSON('/internal/v1/wallets/ensure', {
   method: 'POST',
-  body: { owner_type: 'PERSONAL', owner_id: requesterID },
+  body: { owner_type: 'ORGANIZATION', owner_id: randomUUID() },
   statuses: [200, 201],
 });
 assert.equal(wallet.status, 'ACTIVE');
 
 const paidOrders = [];
 for (const channel of ['UNIONPAY', 'ALIPAY', 'WECHAT']) {
-  const catalog = await products(channel);
+  const catalog = await products(channel, wallet.wallet_id);
+  assert.ok(catalog.every((product) => ['CNY_1', 'CNY_10', 'CNY_100', 'CNY_200'].includes(product.product_id) && product.validity_days === 0 && product.sku_code === ''), 'organization refund journey must use the four ordinary legacy products');
   const product = catalog.toSorted((left, right) => left.amount_fen - right.amount_fen)[0];
   const idempotencyKey = `e2e-${channel.toLowerCase()}-${randomUUID()}`;
   const attempts = channel === 'UNIONPAY' ? 100 : 1;
@@ -162,6 +164,35 @@ const refund = await requestJSON(`/internal/v1/recharge/orders/${refundableOrder
   statuses: [200, 201],
 });
 assert.equal(refund.status, 'SUCCEEDED', 'an unconsumed portion of a recharge lot must be refundable');
+
+// Personal PLAN credit has a separate, non-refundable entitlement lifecycle.
+const personalRequester = randomUUID();
+const personalWallet = await requestJSON('/internal/v1/wallets/ensure', {
+  method: 'POST', body: { owner_type: 'PERSONAL', owner_id: personalRequester }, statuses: [200, 201],
+});
+const personalProduct = (await products('ALIPAY')).find((product) => product.product_id === 'PLAN_TRIAL');
+assert.ok(personalProduct, 'development simulator must expose its personal PLAN fixture');
+const personalKey = `e2e-personal-plan-${randomUUID()}`;
+const personalOrder = await createOrder(personalRequester, personalWallet.wallet_id, personalProduct.product_id, 'ALIPAY', personalKey);
+await completePayment(personalOrder.payment_url);
+const personalCredited = await eventually('personal PLAN credit', () => getOrder(personalOrder.order_id, personalRequester), (candidate) => candidate.fulfillment_status === 'CREDITED');
+const personalReplay = await createOrder(personalRequester, personalWallet.wallet_id, personalProduct.product_id, 'ALIPAY', personalKey);
+assert.equal(personalReplay.order_id, personalOrder.order_id);
+const packages = await requestJSON(`/internal/v1/entitlement-packages?user_id=${personalRequester}&wallet_id=${personalWallet.wallet_id}`);
+assert.equal(packages.items.length, 1);
+assert.equal(packages.items[0].pinvou_order_id, personalOrder.order_id);
+assert.equal(packages.items[0].plan_id, personalProduct.product_id);
+assert.equal(BigInt(packages.summary.available_microcredits), BigInt(personalCredited.credit_microcredits));
+const personalBalance = await requestJSON(`/internal/v1/wallets/${personalWallet.wallet_id}/balance`);
+assert.equal(personalBalance.posted_microcredits, personalCredited.credit_microcredits);
+const deniedRefund = await requestJSON(`/internal/v1/recharge/orders/${personalOrder.order_id}/refunds`, {
+  method: 'POST', body: { requester_id: personalRequester, amount_fen: 1, reason: 'automated PLAN refund rejection acceptance' },
+  headers: { 'idempotency-key': `e2e-plan-refund-${randomUUID()}` }, statuses: [402],
+});
+assert.equal(deniedRefund.code, 'WALLET_INSUFFICIENT', 'personal PLAN has no refundable source lot');
+const personalAfterRefund = await requestJSON(`/internal/v1/wallets/${personalWallet.wallet_id}/balance`);
+assert.equal(personalAfterRefund.posted_microcredits, personalBalance.posted_microcredits);
+assert.equal(personalAfterRefund.reserved_microcredits, 0);
 
 const businessDate = new Date().toISOString().slice(0, 10);
 for (const channel of ['UNIONPAY', 'ALIPAY', 'WECHAT']) {

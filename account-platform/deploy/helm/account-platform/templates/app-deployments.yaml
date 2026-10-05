@@ -78,8 +78,33 @@ spec:
             {{- end }}
             {{- if eq $app.name "account-service" }}
             - { name: BILLING_HTTP_URL, value: {{ printf "http://%s-billing-service:8080" $fullname | quote }} }
+            - { name: MOBILE_AUTH_ENABLED, value: {{ $root.Values.mobileAuth.enabled | quote }} }
+            {{- if $root.Values.mobileAuth.enabled }}
+            - { name: SMS_PROVIDER, value: {{ $root.Values.mobileAuth.smsProvider | quote }} }
+            - { name: SMS_HTTP_ENDPOINT, value: {{ $root.Values.mobileAuth.smsEndpoint | quote }} }
+            - { name: KEYCLOAK_ADMIN_API_URL, value: {{ $root.Values.mobileAuth.keycloakAdminApiUrl | quote }} }
+            - { name: KEYCLOAK_PROVISIONER_TOKEN_URL, value: {{ $root.Values.mobileAuth.keycloakProvisionerTokenUrl | quote }} }
+            - { name: KEYCLOAK_REALM, value: {{ $root.Values.mobileAuth.keycloakRealm | quote }} }
+            - { name: KEYCLOAK_PROVISIONER_CLIENT_ID, value: {{ $root.Values.mobileAuth.keycloakProvisionerClientId | quote }} }
+            - name: KEYCLOAK_PROVISIONER_CLIENT_SECRET
+              valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: keycloak-provisioner-client-secret } }
+            {{- if eq $root.Values.mobileAuth.smsProvider "http" }}
+            - name: SMS_HTTP_SERVICE_TOKEN
+              valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: sms-http-service-token } }
+            {{- else }}
+            - { name: ALIYUN_SMS_ENDPOINT, value: {{ $root.Values.mobileAuth.aliyunEndpoint | quote }} }
+            - { name: ALIYUN_SMS_REGISTER_TEMPLATE, value: {{ $root.Values.mobileAuth.aliyunRegisterTemplate | quote }} }
+            - { name: ALIYUN_SMS_LOGIN_TEMPLATE, value: {{ $root.Values.mobileAuth.aliyunLoginTemplate | quote }} }
+            {{- range $setting := list (dict "name" "ALIYUN_SMS_ACCESS_KEY_ID" "key" "aliyun-sms-access-key-id") (dict "name" "ALIYUN_SMS_ACCESS_KEY_SECRET" "key" "aliyun-sms-access-key-secret") (dict "name" "ALIYUN_SMS_SIGN_NAME" "key" "aliyun-sms-sign-name") }}
+            - name: {{ $setting.name }}
+              valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: {{ $setting.key }} } }
+            {{- end }}
+            {{- end }}
+            {{- end }}
             {{- else if eq $app.name "billing-service" }}
             - { name: TOKEN_GATEWAY_HTTP_URL, value: {{ printf "http://%s-token-gateway:8080" $fullname | quote }} }
+            - { name: BILLING_PAYMENT_PROVIDER, value: {{ $root.Values.billing.paymentProvider | quote }} }
+            - { name: BILLING_ALLOW_TENTATIVE_PRICES, value: {{ $root.Values.billing.allowTentativePrices | quote }} }
             - name: PAYMENT_SIMULATOR_URL
               valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: payment-provider-url } }
             - { name: BILLING_PAYMENT_CALLBACK_URL, value: {{ $root.Values.public.paymentCallbackUrl | quote }} }
@@ -88,6 +113,7 @@ spec:
             - name: PAYMENT_SIM_HMAC_{{ $channel }}
               valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: {{ printf "payment-hmac-%s" ($channel | lower) }} } }
             {{- end }}
+
             {{- else if eq $app.name "token-gateway" }}
             {{- if $root.Values.newApi.enabled }}
             - { name: SSL_CERT_DIR, value: "/etc/ssl/certs:/etc/newapi-ca" }
@@ -130,6 +156,13 @@ spec:
             - { name: SYSTEM_ACCOUNT_RELAY_URL, value: {{ printf "http://%s-account-event-relay:9090" $fullname | quote }} }
             - { name: SYSTEM_BILLING_RELAY_URL, value: {{ printf "http://%s-billing-event-relay:9090" $fullname | quote }} }
             - { name: SYSTEM_TOKEN_RELAY_URL, value: {{ printf "http://%s-token-event-relay:9090" $fullname | quote }} }
+            {{- end }}
+            {{- if and $root.Values.commerce.enabled (or (eq $app.name "account-service") (eq $app.name "billing-service")) }}
+            - { name: H3C_MALL_BASE_URL, value: {{ $root.Values.commerce.baseUrl | quote }} }
+            - name: H3C_MALL_APP_KEY
+              valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: commerce-app-key } }
+            - name: H3C_MALL_APP_SECRET
+              valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: commerce-app-secret } }
             {{- end }}
           readinessProbe: { httpGet: { path: /health/ready, port: http }, periodSeconds: 10, timeoutSeconds: 3 }
           livenessProbe: { httpGet: { path: /health/live, port: http }, periodSeconds: 20, timeoutSeconds: 3 }

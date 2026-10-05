@@ -69,15 +69,19 @@ func (r *PostgresRepository) Bootstrap(ctx context.Context, principal identity.P
 		now := r.now()
 		user.UserID = uuid.Must(uuid.NewV7())
 		user.Status = "PROVISIONING"
+		user.MallSyncStatus = "NOT_CONFIGURED"
 		user.ActiveContext = Context{Type: "PERSONAL", MembershipVersion: 1}
+		if username := strings.TrimSpace(principal.Username); username != "" {
+			user.Username = &username
+		}
 		if principal.DisplayName != "" {
 			name := principal.DisplayName
 			user.DisplayName = &name
 		}
 		_, err = tx.Exec(ctx, `
-INSERT INTO users(id, status, display_name, email, created_at, updated_at)
-VALUES ($1, 'PROVISIONING', NULLIF($2, ''), NULLIF($3, ''), $4, $4)`,
-			user.UserID, principal.DisplayName, normalizeEmail(principal.Email), now)
+INSERT INTO users(id, status, username, display_name, email, created_at, updated_at)
+VALUES ($1, 'PROVISIONING', NULLIF($2, ''), NULLIF($3, ''), NULLIF($4, ''), $5, $5)`,
+			user.UserID, strings.TrimSpace(principal.Username), principal.DisplayName, normalizeEmail(principal.Email), now)
 		if err == nil {
 			_, err = tx.Exec(ctx, `
 INSERT INTO identities(issuer, subject, user_id, created_at, last_seen_at)
@@ -88,6 +92,13 @@ VALUES ($1, $2, $3, $4, $4)`, principal.Issuer, principal.Subject, user.UserID, 
 	}
 	if err != nil {
 		return Me{}, false, err
+	}
+	if !created && user.Username == nil && strings.TrimSpace(principal.Username) != "" {
+		username := strings.TrimSpace(principal.Username)
+		if _, err = tx.Exec(ctx, `UPDATE users SET username=$2,updated_at=$3 WHERE id=$1 AND username IS NULL`, user.UserID, username, r.now()); err != nil {
+			return Me{}, false, err
+		}
+		user.Username = &username
 	}
 
 	now := r.now()
@@ -145,12 +156,14 @@ func (r *PostgresRepository) GetMe(ctx context.Context, principal identity.Princ
 	var me Me
 	var organizationID *uuid.UUID
 	err := r.pool.QueryRow(ctx, `
-SELECT u.id, u.status, u.display_name, s.active_context_type, s.active_organization_id, u.membership_version
+SELECT u.id, u.status, u.username, u.display_name, u.mobile_e164, u.mobile_verified_at IS NOT NULL,
+       COALESCE(ms.status,'NOT_CONFIGURED'), s.active_context_type, s.active_organization_id, u.membership_version
 FROM identities i
 JOIN users u ON u.id = i.user_id
 JOIN user_sessions s ON s.user_id = u.id AND s.issuer = i.issuer AND s.session_id = $3
+LEFT JOIN mall_user_sync_jobs ms ON ms.user_id=u.id
 WHERE i.issuer = $1 AND i.subject = $2`, principal.Issuer, principal.Subject, principal.SessionID).Scan(
-		&me.UserID, &me.Status, &me.DisplayName, &me.ActiveContext.Type, &organizationID, &me.ActiveContext.MembershipVersion,
+		&me.UserID, &me.Status, &me.Username, &me.DisplayName, &me.Mobile, &me.MobileVerified, &me.MallSyncStatus, &me.ActiveContext.Type, &organizationID, &me.ActiveContext.MembershipVersion,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Me{}, ErrNotFound
@@ -165,10 +178,12 @@ func (r *PostgresRepository) ResolveAuthorizationContext(ctx context.Context, pr
 SELECT u.id,s.session_id,s.active_context_type,s.active_organization_id,u.membership_version,
        COALESCE(array_agg(DISTINCT mu.unit_id) FILTER (WHERE mu.unit_id IS NOT NULL),'{}'),
        COALESCE(array_agg(DISTINCT c.ancestor_id) FILTER (WHERE c.ancestor_id IS NOT NULL),'{}'),
-       COALESCE(array_agg(DISTINCT rb.role) FILTER (WHERE rb.role IS NOT NULL),'{}')
+       COALESCE(array_agg(DISTINCT rb.role) FILTER (WHERE rb.role IS NOT NULL),'{}'),
+       u.mobile_e164,u.mobile_verified_at IS NOT NULL,COALESCE(ms.status,'NOT_CONFIGURED')
 FROM identities i
 JOIN users u ON u.id=i.user_id AND u.status='ACTIVE'
 JOIN user_sessions s ON s.user_id=u.id AND s.issuer=i.issuer AND s.session_id=$3
+LEFT JOIN mall_user_sync_jobs ms ON ms.user_id=u.id
 LEFT JOIN organizations o ON o.id=s.active_organization_id
 LEFT JOIN memberships m ON m.user_id=u.id AND m.organization_id=s.active_organization_id AND m.status='ACTIVE'
   AND EXISTS(SELECT 1 FROM organizations o WHERE o.id=m.organization_id AND o.status='ACTIVE')
@@ -176,8 +191,8 @@ LEFT JOIN membership_units mu ON mu.membership_id=m.id
 LEFT JOIN organization_unit_closure c ON c.organization_id=m.organization_id AND c.descendant_id=mu.unit_id
 LEFT JOIN role_bindings rb ON rb.membership_id=m.id
 WHERE i.issuer=$1 AND i.subject=$2 AND (s.active_organization_id IS NULL OR o.status='ACTIVE')
-GROUP BY u.id,s.session_id,s.active_context_type,s.active_organization_id,u.membership_version`, principal.Issuer, principal.Subject, principal.SessionID).Scan(
-		&resolved.UserID, &resolved.SessionID, &resolved.ContextType, &resolved.OrganizationID, &resolved.MembershipVersion, &resolved.UnitIDs, &resolved.AncestorUnitIDs, &resolved.Roles,
+GROUP BY u.id,s.session_id,s.active_context_type,s.active_organization_id,u.membership_version,ms.status`, principal.Issuer, principal.Subject, principal.SessionID).Scan(
+		&resolved.UserID, &resolved.SessionID, &resolved.ContextType, &resolved.OrganizationID, &resolved.MembershipVersion, &resolved.UnitIDs, &resolved.AncestorUnitIDs, &resolved.Roles, &resolved.Mobile, &resolved.MobileVerified, &resolved.MallSyncStatus,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return AuthorizationContext{}, ErrNotFound
@@ -715,7 +730,7 @@ func (r *PostgresRepository) TransferOwnership(ctx context.Context, principal id
 
 func loadUserByIdentity(ctx context.Context, tx pgx.Tx, principal identity.Principal) (Me, error) {
 	var me Me
-	err := tx.QueryRow(ctx, `SELECT u.id, u.status, u.display_name, u.membership_version FROM identities i JOIN users u ON u.id = i.user_id WHERE i.issuer = $1 AND i.subject = $2`, principal.Issuer, principal.Subject).Scan(&me.UserID, &me.Status, &me.DisplayName, &me.ActiveContext.MembershipVersion)
+	err := tx.QueryRow(ctx, `SELECT u.id,u.status,u.username,u.display_name,u.mobile_e164,u.mobile_verified_at IS NOT NULL,COALESCE(ms.status,'NOT_CONFIGURED'),u.membership_version FROM identities i JOIN users u ON u.id=i.user_id LEFT JOIN mall_user_sync_jobs ms ON ms.user_id=u.id WHERE i.issuer=$1 AND i.subject=$2`, principal.Issuer, principal.Subject).Scan(&me.UserID, &me.Status, &me.Username, &me.DisplayName, &me.Mobile, &me.MobileVerified, &me.MallSyncStatus, &me.ActiveContext.MembershipVersion)
 	me.ActiveContext.Type = "PERSONAL"
 	return me, err
 }

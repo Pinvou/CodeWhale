@@ -104,6 +104,11 @@ command_protocol!(
     [
         "account_platform_session",
         "account_platform_login",
+        "account_platform_send_sms",
+        "account_platform_create_slider_captcha",
+        "account_platform_precheck_mobile_registration",
+        "account_platform_register_mobile",
+        "account_platform_login_sms",
         "account_platform_logout",
         "account_platform_request"
     ]

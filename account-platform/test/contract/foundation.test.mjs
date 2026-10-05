@@ -28,7 +28,14 @@ test('OpenAPI contracts expose stable versions and no inline credentials', async
 test('billing products are server-authoritative and fixed to the approved catalog', async () => {
   const billing = await readYaml('contracts/openapi/billing.yaml');
   const productIDs = billing.components.schemas.RechargeProduct.properties.product_id.enum;
-  assert.deepEqual(productIDs, ['CNY_1', 'CNY_10', 'CNY_100', 'CNY_200']);
+  assert.deepEqual(productIDs, ['CNY_1', 'CNY_10', 'CNY_100', 'CNY_200', 'PLAN_TRIAL', 'PLAN_STANDARD', 'PLAN_ADVANCED', 'PLAN_FLAGSHIP']);
+  assert.deepEqual(billing.components.schemas.CreateRechargeOrderRequest.properties.product_id.enum, productIDs,
+    'disabled legacy products remain valid request facts for recovery of existing orders');
+
+  const product = billing.components.schemas.RechargeProduct;
+  for (const field of ['plan_name', 'sku_code', 'base_points', 'bonus_points', 'validity_days', 'price_status', 'invoice_product_name']) {
+    assert.ok(product.required.includes(field), field);
+  }
 
   const createProperties = billing.components.schemas.CreateRechargeOrderRequest.properties;
   assert.equal(createProperties.amount_fen, undefined);
@@ -79,6 +86,97 @@ test('personal usage history exposes only user-facing fields', async () => {
   for (const internalField of ['token_account_id', 'credential_id', 'wallet_id', 'provider']) {
     assert.equal(record.properties[internalField], undefined);
   }
+});
+
+test('personal plans cannot be purchased into organization wallets', async () => {
+  const source = await readFile(path.join(root, 'internal/token/service.go'), 'utf8');
+  assert.match(source, /resolved\.ContextType != "PERSONAL"/);
+  assert.match(source, /PERSONAL_RECHARGE_ONLY/);
+});
+
+test('paid plan orders create independent thirty-day entitlement packages', async () => {
+  const migration = await readFile(path.join(root, 'migrations/billing/000011_entitlement_packages.up.sql'), 'utf8');
+  const payments = await readFile(path.join(root, 'internal/billing/payments.go'), 'utf8');
+  assert.match(migration, /payment_order_id UUID NOT NULL UNIQUE/);
+  assert.match(migration, /points_reserved \+ points_used \+ points_remaining = points_total/);
+  assert.match(payments, /validFrom, validUntil := now, now\.AddDate\(0, 0, product\.ValidityDays\)/);
+  assert.match(payments, /INSERT INTO entitlement_packages/);
+  assert.match(payments, /refundable,expires_at/);
+});
+
+test('usage holds reserve and settle entitlement packages in earliest-expiry order', async () => {
+  const migration = await readFile(path.join(root, 'migrations/billing/000012_package_hold_allocations.up.sql'), 'utf8');
+  const postgres = await readFile(path.join(root, 'internal/billing/postgres.go'), 'utf8');
+  assert.match(migration, /CREATE TABLE usage_hold_allocations/);
+  assert.match(postgres, /ORDER BY p\.valid_until,p\.credited_at,p\.id FOR UPDATE OF p/);
+  assert.match(postgres, /points_remaining=points_remaining-\$2,points_reserved=points_reserved\+\$2/);
+  assert.match(postgres, /released_microcredits=reserved_microcredits/);
+});
+
+test('entitlement packages expire locally and remain queryable by the personal user', async () => {
+  const gateway = await readYaml('contracts/openapi/token-gateway.yaml');
+  const packages = await readFile(path.join(root, 'internal/billing/packages.go'), 'utf8');
+  assert.ok(gateway.paths['/me/entitlement-packages']);
+  assert.match(packages, /status='ACTIVE' AND valid_until<=\$1 AND points_reserved=0/);
+  assert.match(packages, /"EXPIRE", "expire:"\+packageID\.String\(\)/);
+});
+
+test('repeated purchase clicks reuse one pending order for the same personal plan', async () => {
+  const payments = await readFile(path.join(root, 'internal/billing/payments.go'), 'utf8');
+  assert.match(payments, /lockTransactionKey\(ctx, tx, "payment\.pending"/);
+  assert.match(payments, /getPendingPlanOrderForUpdate/);
+  assert.match(payments, /status IN \('CREATED','PENDING'\)/);
+	assert.match(payments, /policy\.ReusePendingOrderAfterExpiry && !existing\.ExpiresAt\.After\(now\)/);
+	assert.match(payments, /UPDATE payment_orders SET expires_at=\$2/);
+});
+
+test('personal recharge orders expose a normal history list', async () => {
+  const billing = await readYaml('contracts/openapi/billing.yaml');
+  const gateway = await readYaml('contracts/openapi/token-gateway.yaml');
+  const service = await readFile(path.join(root, 'internal/token/service.go'), 'utf8');
+  const history = billing.components.schemas.RechargeOrderHistoryItem;
+  const entitlement = gateway.components.schemas.EntitlementPackage;
+  assert.ok(billing.paths['/recharge/orders'].get);
+  assert.ok(gateway.paths['/recharge/orders'].get);
+  assert.ok(['pinvou_order_id', 'mall_order_id', 'sku_code', 'credited_at', 'valid_until', 'invoice_status'].every(field => history.properties[field]));
+  assert.ok(['package_id', 'pinvou_order_id', 'mall_order_id', 'sku_code', 'credited_at', 'valid_until'].every(field => entitlement.properties[field]));
+  assert.match(service, /resolved\.ContextType != "PERSONAL"/);
+  assert.match(service, /RechargeOrders\(r\.Context\(\), resolved\.UserID, walletID\)/);
+});
+
+test('late Mall payments require audited operator repair before fulfillment', async () => {
+  const admin = await readYaml('contracts/openapi/admin.yaml');
+  const migration = await readFile(path.join(root, 'migrations/billing/000014_payment_repairs.up.sql'), 'utf8');
+  const reconciliation = await readFile(path.join(root, 'internal/billing/reconciliation.go'), 'utf8');
+  assert.ok(admin.paths['/billing/admin/v1/payment-orders/{order_id}/repair']);
+  assert.match(migration, /CREATE TABLE payment_order_repairs/);
+  assert.match(migration, /payment_order_id UUID NOT NULL UNIQUE/);
+  assert.match(reconciliation, /p\.Policy\(\)\.ReviewLatePayment/);
+  assert.match(reconciliation, /provider\.Status != "SUCCESS"/);
+  assert.match(reconciliation, /INSERT INTO payment_order_repairs/);
+  assert.match(reconciliation, /issuePackageWithinTransaction/);
+  assert.match(reconciliation, /wallet_balance_before,wallet_balance_after/);
+  assert.match(await readFile(path.join(root, 'internal/billing/payments.go'), 'utf8'), /"REPAIR_CREDIT", "repair:"/);
+});
+
+test('provider-specific payment rules remain inside the provider adapter', async () => {
+  const adapter = await readFile(path.join(root, 'internal/billing/h3c_mall.go'), 'utf8');
+  const genericFiles = await Promise.all(['payments.go', 'reconciliation.go', 'refunds.go', 'admin.go'].map(file => readFile(path.join(root, 'internal/billing', file), 'utf8')));
+  assert.match(adapter, /ReusePendingOrderAfterExpiry:\s+true/);
+  assert.match(adapter, /ReviewLatePayment:\s+true/);
+  for (const source of genericFiles) assert.doesNotMatch(source, /h3c_mall|H3C Mall|新华三/i);
+});
+
+test('payment operations can locate repair candidates by user and order references', async () => {
+  const admin = await readYaml('contracts/openapi/admin.yaml');
+  const billingAdmin = await readFile(path.join(root, 'internal/billing/admin.go'), 'utf8');
+  const parameters = admin.paths['/billing/admin/v1/payment-orders'].get.parameters;
+  assert.ok(parameters.some(parameter => parameter.name === 'q'));
+  assert.ok(parameters.some(parameter => parameter.name === 'status'));
+  for (const field of ['mobile_e164', 'merchant_order_no', 'channel_transaction_id', 'provider_sku']) {
+    assert.match(billingAdmin, new RegExp(field));
+  }
+  assert.match(billingAdmin, /maskAdminMobile/);
 });
 
 test('event schemas compile as JSON Schema 2020-12 and reject secrets', async () => {
@@ -144,7 +242,8 @@ test('Compose keeps data stores private and simulator development-only', async (
 });
 
 test('Compose environment template covers every required variable with placeholders', async () => {
-  const compose = await readFile(path.join(root, 'deploy/compose/compose.yaml'), 'utf8');
+  const compose = (await Promise.all(['compose.yaml', 'compose.remote.yaml'].map(name =>
+    readFile(path.join(root, 'deploy/compose', name), 'utf8')))).join('\n');
   const template = await readFile(path.join(root, 'deploy/compose/.env.example'), 'utf8');
   const entries = new Map(template.split(/\r?\n/).filter((line) => line && !line.startsWith('#'))
     .map((line) => {
@@ -157,7 +256,13 @@ test('Compose environment template covers every required variable with placehold
   assert.ok(required.size > 0);
   for (const name of required) assert.ok(entries.has(name), `${name} must have a template placeholder`);
   for (const name of entries.keys()) assert.ok(referenced.has(name), `${name} must be consumed by Compose`);
-  for (const [name, value] of entries) assert.match(value, /^replace-with-/, name);
+  for (const name of required) {
+    if (name === 'PUBLIC_BASE_URL') assert.match(entries.get(name), /^https:\/\/[^/@]+$/, name);
+    else assert.match(entries.get(name), /^replace-with-/, name);
+  }
+  for (const name of ['SMS_HTTP_SERVICE_TOKEN', 'H3C_MALL_APP_KEY', 'H3C_MALL_APP_SECRET']) {
+    assert.equal(entries.get(name), '', `${name} remains unconfigured until the optional provider is enabled`);
+  }
 });
 
 test('Keycloak development client enables password login without enabling implicit flow', async () => {
@@ -176,6 +281,32 @@ test('Keycloak development client enables password login without enabling implic
   assert.match(provisioning, /PINVOU_ADMIN_PASSWORD:\?set PINVOU_ADMIN_PASSWORD/);
   assert.match(provisioning, /--rolename "\$ROLE"/);
   assert.doesNotMatch(provisioning, /PINVOU_ADMIN_PASSWORD=['"][^$]/);
+});
+
+test('mobile authentication provisioning works in the minimal Keycloak image', async () => {
+  const provisioning = await readFile(path.join(root, 'deploy/keycloak/provision-mobile-auth.sh'), 'utf8');
+  const authenticator = await readFile(path.join(root, 'deploy/keycloak/mobile-authenticator/src/main/java/com/pinvou/identity/MobileDirectGrantAuthenticator.java'), 'utf8');
+  const factory = await readFile(path.join(root, 'deploy/keycloak/mobile-authenticator/src/main/java/com/pinvou/identity/MobileDirectGrantAuthenticatorFactory.java'), 'utf8');
+  assert.match(factory, /getReferenceCategory\(\)\s*\{\s*return PasswordCredentialModel\.TYPE;/);
+  assert.doesNotMatch(provisioning, /\bawk\b/);
+  assert.match(provisioning, /authentication\/flows\/\$FLOW\/executions/);
+  assert.match(provisioning, /-s requirement=REQUIRED -n/);
+  assert.match(provisioning, /update users\/profile -r "\$REALM" -f -/);
+  const profileSource = provisioning.match(/<<'PINVOU_MOBILE_USER_PROFILE'\r?\n([\s\S]*?)\r?\nPINVOU_MOBILE_USER_PROFILE/)?.[1];
+  assert.ok(profileSource, 'mobile user profile JSON must be embedded in the idempotent provisioning script');
+  const profile = JSON.parse(profileSource);
+  for (const name of ['email', 'firstName', 'lastName']) {
+    const attribute = profile.attributes.find((candidate) => candidate.name === name);
+    assert.ok(attribute, `${name} must remain available as an optional profile field`);
+    assert.equal(attribute.required, undefined, `${name} must not block mobile-only login`);
+  }
+  for (const name of ['phone_number', 'phone_number_verified']) {
+    const attribute = profile.attributes.find((candidate) => candidate.name === name);
+    assert.deepEqual(attribute.permissions.edit, ['admin'], `${name} must be managed by the account service`);
+  }
+  assert.match(authenticator, /firstValue\("X-Pinvou-Identity-Subject"\)/);
+  assert.match(authenticator, /getUserById\(context\.getRealm\(\), value\)/);
+  assert.match(authenticator, /if \(smsLogin\) \{[\s\S]*verifySMS\(mobile, challenge, code\)[\s\S]*getUserById/);
 });
 
 test('remote Keycloak administration is available only through a controlled local channel', async () => {

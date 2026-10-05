@@ -44,19 +44,37 @@ type BillingClient interface {
 	Commit(context.Context, uuid.UUID, uuid.UUID, int64, Usage) error
 	Release(context.Context, uuid.UUID, uuid.UUID, string) error
 	Products(context.Context) (json.RawMessage, error)
-	CreateRechargeOrder(context.Context, uuid.UUID, uuid.UUID, string, string, string) (json.RawMessage, error)
+	CreateRechargeOrder(context.Context, uuid.UUID, uuid.UUID, string, string, string, string) (json.RawMessage, error)
+	RechargeOrders(context.Context, uuid.UUID, uuid.UUID) (json.RawMessage, error)
 	RecentRechargeOrder(context.Context, uuid.UUID, uuid.UUID) (json.RawMessage, error)
 	RechargeOrder(context.Context, uuid.UUID, uuid.UUID) (json.RawMessage, error)
 	CloseRechargeOrder(context.Context, uuid.UUID, uuid.UUID) (json.RawMessage, error)
 	Balance(context.Context, uuid.UUID) (json.RawMessage, error)
 }
 
+type EntitlementPackageBillingClient interface {
+	Packages(context.Context, uuid.UUID, uuid.UUID) (json.RawMessage, error)
+}
+
+type OrganizationProductBillingClient interface {
+	ProductsForOrganization(context.Context, uuid.UUID) (json.RawMessage, error)
+}
+
+func (c *HTTPBillingClient) ProductsForOrganization(ctx context.Context, walletID uuid.UUID) (json.RawMessage, error) {
+	return c.raw(ctx, http.MethodGet, "/internal/v1/recharge/products?wallet_id="+url.QueryEscape(walletID.String()), nil, "")
+}
+
 func (c *HTTPBillingClient) Products(ctx context.Context) (json.RawMessage, error) {
 	return c.raw(ctx, http.MethodGet, "/v1/recharge/products", nil, "")
 }
 
-func (c *HTTPBillingClient) CreateRechargeOrder(ctx context.Context, requesterID, walletID uuid.UUID, productID, channel, idempotencyKey string) (json.RawMessage, error) {
-	return c.raw(ctx, http.MethodPost, "/internal/v1/recharge/orders", map[string]any{"requester_id": requesterID, "wallet_id": walletID, "product_id": productID, "channel": channel}, idempotencyKey)
+func (c *HTTPBillingClient) CreateRechargeOrder(ctx context.Context, requesterID, walletID uuid.UUID, productID, channel, mobile, idempotencyKey string) (json.RawMessage, error) {
+	return c.raw(ctx, http.MethodPost, "/internal/v1/recharge/orders", map[string]any{"requester_id": requesterID, "wallet_id": walletID, "product_id": productID, "channel": channel, "mobile": mobile}, idempotencyKey)
+}
+
+func (c *HTTPBillingClient) RechargeOrders(ctx context.Context, requesterID, walletID uuid.UUID) (json.RawMessage, error) {
+	query := "?requester_id=" + url.QueryEscape(requesterID.String()) + "&wallet_id=" + url.QueryEscape(walletID.String())
+	return c.raw(ctx, http.MethodGet, "/internal/v1/recharge/orders"+query, nil, "")
 }
 
 func (c *HTTPBillingClient) RecentRechargeOrder(ctx context.Context, requesterID, walletID uuid.UUID) (json.RawMessage, error) {
@@ -74,6 +92,11 @@ func (c *HTTPBillingClient) CloseRechargeOrder(ctx context.Context, orderID, req
 
 func (c *HTTPBillingClient) Balance(ctx context.Context, walletID uuid.UUID) (json.RawMessage, error) {
 	return c.raw(ctx, http.MethodGet, "/internal/v1/wallets/"+walletID.String()+"/balance", nil, "")
+}
+
+func (c *HTTPBillingClient) Packages(ctx context.Context, userID, walletID uuid.UUID) (json.RawMessage, error) {
+	query := "?user_id=" + url.QueryEscape(userID.String()) + "&wallet_id=" + url.QueryEscape(walletID.String())
+	return c.raw(ctx, http.MethodGet, "/internal/v1/entitlement-packages"+query, nil, "")
 }
 
 func (c *HTTPBillingClient) raw(ctx context.Context, method, path string, input any, idempotencyKey string) (json.RawMessage, error) {

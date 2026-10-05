@@ -9,10 +9,13 @@ services:
   account-service:
     environment:
       OIDC_ISSUER: ${PUBLIC_BASE_URL:?set PUBLIC_BASE_URL}/realms/pinvou
+      MOBILE_AUTH_ENABLED: ${MOBILE_AUTH_ENABLED:-false}
 
   billing-service:
     environment:
       OIDC_ISSUER: ${PUBLIC_BASE_URL:?set PUBLIC_BASE_URL}/realms/pinvou
+      BILLING_PAYMENT_PROVIDER: ${BILLING_PAYMENT_PROVIDER:-simulator}
+      BILLING_ALLOW_TENTATIVE_PRICES: ${BILLING_ALLOW_TENTATIVE_PRICES:-false}
 
   token-gateway:
     environment:
@@ -25,5 +28,6 @@ services:
       PORTAL_OIDC_AUTHORIZATION_URL: ${PUBLIC_BASE_URL:?set PUBLIC_BASE_URL}/realms/pinvou/protocol/openid-connect/auth
 
   payment-simulator:
+    profiles: [development-simulator]
     environment:
       PAYMENT_SIM_PUBLIC_URL: ${PUBLIC_BASE_URL:?set PUBLIC_BASE_URL}

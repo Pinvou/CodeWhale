@@ -11,6 +11,7 @@ const pending = new Map();
 const counts = {};
 let unhandled = 0;
 let mutations = 0;
+const orderQueries = [];
 window.addEventListener("unhandledrejection", (event) => {
   unhandled += 1;
   event.preventDefault();
@@ -49,7 +50,7 @@ const client = {
     const request = nextCall("overview");
     return { users: scenario === "logout-busy" && request > 1 ? 7 : 1 };
   },
-  billingOverview: async () => ({ posted_microcredits: "10000", reserved_microcredits: "0" }),
+  billingOverview: async () => ({ posted_microcredits: "10000", reserved_microcredits: "0", payment_capabilities: { provider: "controlled-public", refund_supported: scenario !== "limited-payment", reconciliation_supported: scenario !== "limited-payment", close_supported: false, notification_supported: false, manual_repair_supported: scenario !== "limited-payment" } }),
   tokenOverview: async () => ({}),
   users: async (search) => {
     const request = nextCall("users");
@@ -64,19 +65,26 @@ const client = {
   priceVersions: async () => ({ items: [] }),
   reconciliationRuns: async () => ({ items: [] }),
   wallets: async () => (scenario === "navigation" ? delayed("wallets") : { items: [] }),
-  paymentOrders: async () =>
-    orderedRows("orders", (index, letter) => ({
+  paymentOrders: async (filters = {}) => {
+    orderQueries.push({ ...filters });
+    if (scenario === "order-search-auth" && filters.q) throw failure(401);
+    const result = orderedRows("orders", (index, letter) => ({
       order_id: entityID(1, index),
       wallet_id: ids.wallet,
       requester_id: ids.user,
       merchant_order_no: `Order ${letter}`,
-      channel: "ALIPAY",
+      channel: ["ALIPAY", "WECHAT", "UNIONPAY"][index - 1],
       amount_fen: "100",
       credit_microcredits: "10000",
-      status: "CREATED",
-      fulfillment_status: "PENDING",
+      status: scenario === "payment-repair" || scenario === "limited-payment" ? "MANUAL_REVIEW" : "CREATED",
+      fulfillment_status: scenario === "payment-repair" || scenario === "limited-payment" ? "MANUAL_REVIEW" : "PENDING",
       updated_at: timestamp,
-    })),
+    }));
+    if (scenario === "order-filter-completion" && filters.q) result.items = result.items.filter(item => item.merchant_order_no === filters.q);
+    return result;
+  },
+  syncPaymentOrder: async () => { mutations += 1; return delayed("payment-sync"); },
+  repairPaymentOrder: async () => { mutations += 1; return delayed("repair"); },
   adjustments: async () =>
     orderedRows("adjustments", (index, letter) => ({
       adjustment_id: entityID(2, index),
@@ -154,6 +162,7 @@ window.__adminReview = {
   pending: () => Array.from(pending.keys()),
   unhandled: () => unhandled,
   mutations: () => mutations,
+  orderQueries: () => orderQueries,
   settle(key, status, name) {
     const task = pending.get(key);
     if (!task) throw new Error("Fixture task is not pending");

@@ -32,6 +32,8 @@
 
 前端统一执行 `npm --prefix pinvou3-app run build:account-portal`；生成资源嵌入 `token-portal`。`npm --prefix pinvou3-app run test:account-platform-ui` 使用已安装的 Chrome、Chromium 或 Edge（可用 `CHROME` 指定路径），验证真实 React、BFF 客户端及二维码，API 响应受控；不能替代真实服务或 Safari 验收。
 
+当前已实现账号/组织与会话授权、钱包与平衡账本、预占结算、三渠道支付模拟、新华三商城支付宝下单与支付查询、Token 凭据加密轮换、确定性路由、OpenAI 兼容 JSON/SSE 代理、独立 Web Portal、桌面端 OIDC、可靠领域事件、OpenTelemetry/Prometheus 可观测性、生产 Helm 和恢复 Runbook。新华三待支付订单由 Billing 在服务端持续查询，客户端关闭二维码页面后仍可按商城事实完成入账。商城合同暂未提供的退款、关闭、支付回调与账单对账接口保持关闭，运营台同步禁用这些操作，不以本地模拟冒充真实能力。
+
 ## 桌面端 OIDC
 
 新账号入口由 `PINVOU_ACCOUNT_PLATFORM_ENABLED` 显式开启，默认关闭，关闭时原有 `llmapi_hub` 入口和模型路径不变。开启时还需配置：
@@ -41,7 +43,7 @@
 - `PINVOU_ACCOUNT_SERVICE_URL`；
 - `PINVOU_TOKEN_GATEWAY_URL`。
 
-远程端点必须使用 HTTPS；仅本机开发允许 `http://127.0.0.1`/`localhost`。桌面端在应用内收集账号密码并通过 Rust 一次性提交给 Keycloak Token Endpoint；密码不持久化、不写日志，完成请求后即释放。Refresh Token 只写入 macOS Keychain、Windows Credential Manager 或 Linux Secret Service；系统凭据存储不可用时会明确拒绝登录，不降级写入设置文件。启用账号平台后，内置模型运行时直接使用同一 OIDC 会话的 Access Token 调用 `PINVOU_TOKEN_GATEWAY_URL/v1/chat/completions`，不会再把 New API 用户 Token 当作聊天身份。WebView 只接收登录状态和经过路由白名单限制的业务 JSON。注册、找回密码、第三方身份和复杂 MFA 不经过该密码接口，需使用相应的独立流程。
+远程端点必须使用 HTTPS；仅开发和测试环境允许受控 HTTP 端点。桌面端支持原有账号/密码、中国大陆手机号/密码和手机号/短信验证码登录；新注册必须填写唯一用户名，先完成用户名、手机号和密码规则预检，再通过一次性滑块挑战及短信验证。短信可配置通用 HTTP 适配器或阿里云适配器；社区功能不要求企业商城。未配置商城时注册仍可激活本地账号和真实钱包，并使用开发支付模拟器；配置商城时独立同步任务完成后才向商城提供已验证手机号。同一手机号的短信请求至少间隔 60 秒，不区分注册或登录用途；供应商明确发送失败的请求不占用该冷却时间。密码允许英文大小写字母、数字和常用英文符号，要求 8 至 128 位且至少包含一个字母和一个数字；密码不持久化、不写日志。Refresh Token 只写入系统凭据存储，存储不可用时明确拒绝登录。内置模型运行时使用同一 OIDC 会话的 Access Token 调用 `PINVOU_TOKEN_GATEWAY_URL/v1/chat/completions`。WebView 只接收登录状态和经过路由白名单限制的业务 JSON。
 
 ## Token Gateway 安全默认值
 
@@ -93,3 +95,7 @@ node scripts/account-platform.mjs test security
 Integration 使用独立 Compose project 并在结束后删除测试卷；不得指向开发或生产 project。`e2e` 进一步执行三种模拟支付渠道、并发幂等、Hold 结算、部分退款和对账旅程；`fault` 验证 Billing 在支付回调期间重启后自动收敛，以及 NATS 停止期间本地账本事务不丢失。三者都在每次运行时只在内存中生成 Compose 凭据，不会写入仓库。真实 New API 和真实支付测试需要明确 opt-in，普通测试不读取真实凭据或访问生产服务。运维入口见 [`deploy/runbooks/`](deploy/runbooks/README.md)。
 
 首次观察到渠道部分或全额退款而本地尚未入账的充值进入 `MANUAL_REVIEW`，不猜测原额或净额积分。创建恢复、主动同步、关闭返回及迟到成功通知都遵守该状态；已入账订单保留既有退款流程。
+
+新个人 PLAN 的期限和积分按订单冻结的商品快照，从实际入账时起算；原 LEGACY 订单和普通余额不被补加期限。组织 OWNER/BILLING_ADMIN 的原四档普通充值在开发支付模拟器中保留，个人停售旧商品不重新开放，个人 PLAN 不可发放至组织钱包；企业支付适配器不被宣称支持原组织商品。
+
+注册创建响应丢失或本地完成失败时，可用相同用户名和手机号重新完成滑块及短信验证。服务只按已持久化的专用注册意图及远端唯一标记恢复，不按用户名或手机号接管其他 Keycloak 用户。注册响应始终包含 `password_preserved` 布尔值；为 `true` 时保留首次提交的密码，本次重试密码不生效，请通过普通密码登录。软删除保留 Keycloak 身份与角色，因此旧用户名仍占用；手机号可以配新用户名注册，手机号密码及短信登录按当前 Account 身份解析，不选择同手机号的任意旧身份。

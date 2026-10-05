@@ -335,10 +335,19 @@ paths:
   /billing/admin/v1/payment-orders:
     get:
       operationId: listAdminPaymentOrders
-      summary: List recently updated payment orders
-      parameters: [{ $ref: "#/components/parameters/Limit" }]
+      summary: Search recently updated payment orders
+      parameters:
+        - { $ref: "#/components/parameters/Limit" }
+        - name: q
+          in: query
+          description: Mobile, Pinvou order ID, Mall order ID, payment transaction ID, or SKU
+          schema: { type: string, maxLength: 160 }
+        - name: status
+          in: query
+          schema: { type: string, enum: [CREATED, PENDING, PAID, PAID_LATE, FAILED, CLOSED, PARTIALLY_REFUNDED, REFUNDED, MANUAL_REVIEW] }
       responses:
         "200": { description: Payment order collection, content: { application/json: { schema: { $ref: "#/components/schemas/PaymentOrderCollection" } } } }
+        "400": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
   /billing/admin/v1/payment-orders/{order_id}/sync:
     post:
@@ -347,6 +356,22 @@ paths:
       parameters: [{ $ref: "#/components/parameters/OrderID" }]
       responses:
         "200": { description: Synchronized payment order, content: { application/json: { schema: { $ref: "#/components/schemas/ExactPaymentOrder" } } } }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /billing/admin/v1/payment-orders/{order_id}/repair:
+    post:
+      operationId: repairAdminPaymentOrder
+      summary: Re-verify and fulfill a late payment held for manual review
+      parameters: [{ $ref: "#/components/parameters/OrderID" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/Reason" }
+      responses:
+        "200": { description: Repaired and fulfilled payment order }
+        "400": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
@@ -668,6 +693,18 @@ components:
       type: object
       required: [posted_microcredits, reserved_microcredits]
       properties:
+        payment_capabilities:
+          type: object
+          additionalProperties: false
+          required: [provider, order_sync_supported, refund_supported, close_supported, notification_supported, reconciliation_supported, manual_repair_supported]
+          properties:
+            provider: { type: string }
+            order_sync_supported: { type: boolean }
+            refund_supported: { type: boolean }
+            close_supported: { type: boolean }
+            notification_supported: { type: boolean }
+            reconciliation_supported: { type: boolean }
+            manual_repair_supported: { type: boolean }
         posted_microcredits: { $ref: "#/components/schemas/DecimalMoney" }
         reserved_microcredits: { $ref: "#/components/schemas/DecimalMoney" }
       additionalProperties: { type: integer, format: int64, minimum: 0 }

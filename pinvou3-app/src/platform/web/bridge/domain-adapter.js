@@ -196,6 +196,11 @@
     accountPlatform: {
       session: function () { return Promise.resolve({ enabled: false, configured: false, authenticated: false, errorCode: "unsupported_platform" }); },
       login: unsupportedAccountPlatform,
+      createSliderCaptcha: unsupportedAccountPlatform,
+      precheckMobileRegistration: unsupportedAccountPlatform,
+      sendSms: unsupportedAccountPlatform,
+      registerMobile: unsupportedAccountPlatform,
+      loginSms: unsupportedAccountPlatform,
       logout: unsupportedAccountPlatform,
       request: unsupportedAccountPlatform,
     },

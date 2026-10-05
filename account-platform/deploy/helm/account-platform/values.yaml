@@ -55,6 +55,24 @@ security:
 
 billing:
   paymentExpiryIntervalSeconds: 15
+  paymentProvider: simulator
+  allowTentativePrices: false
+
+mobileAuth:
+  enabled: false
+  smsProvider: http
+  smsEndpoint: ""
+  keycloakAdminApiUrl: ""
+  keycloakProvisionerTokenUrl: ""
+  keycloakRealm: pinvou
+  keycloakProvisionerClientId: pinvou-account-provisioner
+  aliyunEndpoint: https://dypnsapi.aliyuncs.com
+  aliyunRegisterTemplate: ""
+  aliyunLoginTemplate: ""
+
+commerce:
+  enabled: false
+  baseUrl: ""
 
 tokenGateway:
   secretProvider: remote
@@ -75,6 +93,8 @@ external:
   secretProviderCidrs: []
   modelProviderCidrs: []
   telemetryCollectorCidrs: []
+  smsProviderCidrs: []
+  commerceProviderCidrs: []
 
 ingress:
   enabled: false

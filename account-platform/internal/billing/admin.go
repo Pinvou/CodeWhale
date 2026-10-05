@@ -17,19 +17,24 @@ import (
 )
 
 type AdminOverview struct {
-	Wallets                  int64  `json:"wallets"`
-	PostedMicrocredits       string `json:"posted_microcredits"`
-	ReservedMicrocredits     string `json:"reserved_microcredits"`
-	PendingPaymentOrders     int64  `json:"pending_payment_orders"`
-	ExpiredPaymentOrders     int64  `json:"expired_payment_orders"`
-	ReviewPaymentOrders      int64  `json:"review_payment_orders"`
-	PendingAdjustments       int64  `json:"pending_adjustments"`
-	ActiveOrReviewUsageHolds int64  `json:"active_or_review_usage_holds"`
+	Wallets                  int64               `json:"wallets"`
+	PostedMicrocredits       string              `json:"posted_microcredits"`
+	ReservedMicrocredits     string              `json:"reserved_microcredits"`
+	PendingPaymentOrders     int64               `json:"pending_payment_orders"`
+	ExpiredPaymentOrders     int64               `json:"expired_payment_orders"`
+	ReviewPaymentOrders      int64               `json:"review_payment_orders"`
+	PendingAdjustments       int64               `json:"pending_adjustments"`
+	ActiveOrReviewUsageHolds int64               `json:"active_or_review_usage_holds"`
+	PaymentCapabilities      PaymentCapabilities `json:"payment_capabilities"`
 }
 
 type AdminPaymentOrder struct {
 	ID                 uuid.UUID  `json:"order_id"`
 	MerchantOrderNo    string     `json:"merchant_order_no"`
+	ProductID          string     `json:"product_id"`
+	ProviderSKU        string     `json:"provider_sku"`
+	ChannelTransaction string     `json:"channel_transaction_id"`
+	MobileMasked       string     `json:"mobile_masked"`
 	RequesterID        uuid.UUID  `json:"requester_id"`
 	WalletID           uuid.UUID  `json:"wallet_id"`
 	Channel            string     `json:"channel"`
@@ -40,6 +45,11 @@ type AdminPaymentOrder struct {
 	PaidAt             *time.Time `json:"paid_at,omitempty"`
 	CreatedAt          time.Time  `json:"created_at"`
 	UpdatedAt          time.Time  `json:"updated_at"`
+}
+
+type AdminPaymentOrderFilter struct {
+	Query  string
+	Status string
 }
 
 type AdminHold struct {
@@ -91,7 +101,7 @@ type AdminReconciliationCase struct {
 type adminRepository interface {
 	AdminOverview(context.Context) (AdminOverview, error)
 	AdminWallets(context.Context, int) ([]Wallet, error)
-	AdminPaymentOrders(context.Context, int) ([]AdminPaymentOrder, error)
+	AdminPaymentOrders(context.Context, AdminPaymentOrderFilter, int) ([]AdminPaymentOrder, error)
 	AdminAdjustments(context.Context, int) ([]ManualAdjustment, error)
 	AdminUsageHolds(context.Context, int) ([]AdminHold, error)
 	AdminPriceVersions(context.Context, int) ([]AdminPriceVersion, error)
@@ -170,6 +180,9 @@ func (s *Service) adminOverview(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, err)
 		return
 	}
+	if s.payments != nil {
+		result.PaymentCapabilities = s.payments.Capabilities()
+	}
 	api.WriteJSON(w, http.StatusOK, result)
 }
 
@@ -185,9 +198,30 @@ func (s *Service) adminWallets(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Service) adminPaymentOrders(w http.ResponseWriter, r *http.Request) {
-	s.writeAdminCollection(w, r, func(repository adminRepository, limit int) (any, error) {
-		return repository.AdminPaymentOrders(r.Context(), limit)
-	})
+	repository, ok := s.requireAdminRepository(w, r)
+	if !ok {
+		return
+	}
+	filter := AdminPaymentOrderFilter{Query: strings.TrimSpace(r.URL.Query().Get("q")), Status: strings.TrimSpace(r.URL.Query().Get("status"))}
+	if len(filter.Query) > 160 || (filter.Status != "" && !validAdminPaymentStatus(filter.Status)) {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_FILTER", "payment order filter is invalid", httpserver.RequestID(r.Context()))
+		return
+	}
+	items, err := repository.AdminPaymentOrders(r.Context(), filter, billingAdminLimit(r))
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	api.WriteJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
+func validAdminPaymentStatus(status string) bool {
+	switch status {
+	case "CREATED", "PENDING", "PAID", "PAID_LATE", "FAILED", "CLOSED", "PARTIALLY_REFUNDED", "REFUNDED", "MANUAL_REVIEW":
+		return true
+	default:
+		return false
+	}
 }
 
 func (s *Service) adminAdjustments(w http.ResponseWriter, r *http.Request) {
@@ -307,6 +341,27 @@ func (s *Service) adminSyncPaymentOrder(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	order, err := s.payments.SyncOrder(r.Context(), orderID)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	api.WriteJSON(w, http.StatusOK, adminSynchronizedOrder{PaymentOrder: order, AmountFen: order.AmountFen, CreditMicrocredits: order.CreditMicrocredits})
+}
+
+func (s *Service) adminRepairPaymentOrder(w http.ResponseWriter, r *http.Request) {
+	orderID, err := uuid.Parse(r.PathValue("order_id"))
+	var body struct {
+		Reason string `json:"reason"`
+	}
+	if decodeErr := api.DecodeJSON(w, r, &body); err != nil || decodeErr != nil || strings.TrimSpace(body.Reason) == "" {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "a repair reason is required", httpserver.RequestID(r.Context()))
+		return
+	}
+	if s.payments == nil {
+		api.WriteError(w, http.StatusServiceUnavailable, "PAYMENT_UNAVAILABLE", "payment operations are unavailable", httpserver.RequestID(r.Context()))
+		return
+	}
+	order, err := s.payments.RepairReviewedOrder(r.Context(), orderID, adminActor(adminPrincipal(r)), body.Reason)
 	if err != nil {
 		s.writeError(w, r, err)
 		return
@@ -482,8 +537,12 @@ func (r *PostgresRepository) AdminWallets(ctx context.Context, limit int) ([]Wal
 	return items, rows.Err()
 }
 
-func (r *PostgresRepository) AdminPaymentOrders(ctx context.Context, limit int) ([]AdminPaymentOrder, error) {
-	rows, err := r.pool.Query(ctx, `SELECT id,merchant_order_no,requester_id,wallet_id,channel,amount_fen,credit_microcredits,status,fulfillment_status,paid_at,created_at,updated_at FROM payment_orders ORDER BY updated_at DESC,id LIMIT $1`, limit)
+func (r *PostgresRepository) AdminPaymentOrders(ctx context.Context, filter AdminPaymentOrderFilter, limit int) ([]AdminPaymentOrder, error) {
+	rows, err := r.pool.Query(ctx, `SELECT id,merchant_order_no,product_id,COALESCE(provider_sku,''),COALESCE(channel_transaction_id,''),COALESCE(mobile_e164,''),requester_id,wallet_id,channel,amount_fen,credit_microcredits,status,fulfillment_status,paid_at,created_at,updated_at
+		FROM payment_orders
+		WHERE ($1='' OR id::text ILIKE '%'||$1||'%' OR merchant_order_no ILIKE '%'||$1||'%' OR COALESCE(channel_transaction_id,'') ILIKE '%'||$1||'%' OR COALESCE(mobile_e164,'') ILIKE '%'||$1||'%' OR COALESCE(provider_sku,'') ILIKE '%'||$1||'%')
+		AND ($2='' OR status=$2)
+		ORDER BY updated_at DESC,id LIMIT $3`, filter.Query, filter.Status, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -491,12 +550,21 @@ func (r *PostgresRepository) AdminPaymentOrders(ctx context.Context, limit int) 
 	items := make([]AdminPaymentOrder, 0)
 	for rows.Next() {
 		var item AdminPaymentOrder
-		if err := rows.Scan(&item.ID, &item.MerchantOrderNo, &item.RequesterID, &item.WalletID, &item.Channel, &item.AmountFen, &item.CreditMicrocredits, &item.Status, &item.FulfillmentStatus, &item.PaidAt, &item.CreatedAt, &item.UpdatedAt); err != nil {
+		var mobile string
+		if err := rows.Scan(&item.ID, &item.MerchantOrderNo, &item.ProductID, &item.ProviderSKU, &item.ChannelTransaction, &mobile, &item.RequesterID, &item.WalletID, &item.Channel, &item.AmountFen, &item.CreditMicrocredits, &item.Status, &item.FulfillmentStatus, &item.PaidAt, &item.CreatedAt, &item.UpdatedAt); err != nil {
 			return nil, err
 		}
+		item.MobileMasked = maskAdminMobile(mobile)
 		items = append(items, item)
 	}
 	return items, rows.Err()
+}
+
+func maskAdminMobile(mobile string) string {
+	if len(mobile) < 7 {
+		return mobile
+	}
+	return mobile[:3] + "****" + mobile[len(mobile)-4:]
 }
 
 func (r *PostgresRepository) AdminAdjustments(ctx context.Context, limit int) ([]ManualAdjustment, error) {

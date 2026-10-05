@@ -117,9 +117,9 @@ try {
   }
   for (const locale of ['zh', 'en', 'ja']) {
   await runCase('personal center has localized settled usage and no self-service organization creation in ' + locale, 'normal', async page => {
-    assert.equal(await page.$$eval('nav button', items => items.length), 5);
+    assert.equal(await page.$$eval('nav button', items => items.length), 7);
     assert.equal(await page.$$eval('main form', items => items.length), 0);
-    await page.click('nav button:nth-child(4)');
+    await page.evaluate(() => Array.from(document.querySelectorAll('nav button')).find(el => el.textContent === window.__accountReview.copy.sections.usage).click());
     await page.waitForSelector('.ap-usage-row');
     assert.equal(await page.$$eval('.ap-usage-row', items => items.length), 1);
     assert.ok(await page.$eval('.ap-usage-row', item => item.textContent.includes('model-a')));
@@ -133,7 +133,7 @@ try {
         await page.select('.ap-context-card select', await page.evaluate(() => window.__accountReview.ids.organization));
         await page.waitForFunction(() => !document.querySelector('.ap-context-card select').disabled);
       }
-      await page.click('nav button:nth-child(5)');
+      await page.evaluate(() => Array.from(document.querySelectorAll('nav button')).find(el => el.textContent === window.__accountReview.copy.sections.tokens).click());
       await page.waitForFunction(() => document.querySelectorAll('main .ap-grid form').length === 2);
       assert.equal(await page.$eval('main h2', el => el.textContent), await page.evaluate(() => window.__accountReview.copy.tokensTitle));
       await page.type('main .ap-grid form input[maxlength="120"]', 'Public fixture owned token');
@@ -162,11 +162,11 @@ try {
     }, locale);
   }
   await runCase('previous credentials cannot clear the next organization Token', 'credential-late', async page => {
-    await page.click('nav button:nth-child(5)'); await waitPending(page, 'credential');
+    await page.evaluate(() => Array.from(document.querySelectorAll('nav button')).find(el => el.textContent === window.__accountReview.copy.sections.tokens).click()); await waitPending(page, 'credential');
     await page.click('nav button:nth-child(1)');
     await page.select('.ap-context-card select', await page.evaluate(() => window.__accountReview.ids.organization));
     await page.waitForFunction(() => !document.querySelector('.ap-context-card select').disabled);
-    await page.click('nav button:nth-child(5)'); await page.waitForFunction(() => document.body.textContent.includes('organization-provider'));
+    await page.evaluate(() => Array.from(document.querySelectorAll('nav button')).find(el => el.textContent === window.__accountReview.copy.sections.tokens).click()); await page.waitForFunction(() => document.body.textContent.includes('organization-provider'));
     await settle(page, 'credential', 'abort');
     await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
     assert.ok(await page.evaluate(() => document.body.textContent.includes('organization-provider')));
@@ -177,16 +177,16 @@ try {
     ['usage', '.ap-consumption input[placeholder="00000000-0000-0000-0000-000000000000"]', 1, '00000000-0000-4000-8000-000000000006'],
   ]) {
     await runCase('restored ' + scenario + ' query is locked and shows its completed result', scenario, async page => {
-      await page.click('nav button:nth-child(5)'); await page.type(selector, value);
+      await page.evaluate(() => Array.from(document.querySelectorAll('nav button')).find(el => el.textContent === window.__accountReview.copy.sections.tokens).click()); await page.type(selector, value);
       await page.evaluate(index => document.querySelectorAll('.ap-consumption .ap-inline button')[index].click(), index);
       await waitPending(page, scenario); assert.equal(await page.$eval(selector, el => el.disabled), true);
       await settle(page, scenario); await page.waitForFunction(selector => !document.querySelector(selector).disabled, {}, selector);
       assert.ok(await page.evaluate(key => document.body.textContent.includes(window.__accountReview.copy[key]), scenario === 'eligible' ? 'tokenReady' : 'settlementPendingHelp'));
     });
     await runCase('restored ' + scenario + ' late completion cannot revive a closed Token panel', scenario, async page => {
-      await page.click('nav button:nth-child(5)'); await page.type(selector, value);
+      await page.evaluate(() => Array.from(document.querySelectorAll('nav button')).find(el => el.textContent === window.__accountReview.copy.sections.tokens).click()); await page.type(selector, value);
       await page.evaluate(index => document.querySelectorAll('.ap-consumption .ap-inline button')[index].click(), index);
-      await waitPending(page, scenario); await page.click('nav button:nth-child(4)');
+      await waitPending(page, scenario); await page.evaluate(() => Array.from(document.querySelectorAll('nav button')).find(el => el.textContent === window.__accountReview.copy.sections.usage).click());
       await settle(page, scenario); await page.waitForFunction(() => !document.querySelector('.ap-sidebar-foot button').disabled);
       assert.equal(await page.$$eval('.ap-consumption', items => items.length), 0);
       assert.equal(await page.$$eval('.ap-usage-row', items => items.length), 1);
@@ -353,6 +353,223 @@ try {
     assert.equal(await page.evaluate(() => document.body.textContent.includes('Fixture User')), false);
     assert.equal(await page.evaluate(() => window.__accountReview.calls.filter(call => call.path === 'nativeLogout').length), 1);
   });
+
+
+  const authMode = async (page, mode) => page.evaluate(mode => {
+    const copy = window.__accountReview.copy;
+    Array.from(document.querySelectorAll('[data-testid="account-platform-popover"] form button'))
+      .find(element => element.textContent === copy.authModes[mode]).click();
+  }, mode);
+  const clickCopy = async (page, key) => page.evaluate(key => {
+    const text = window.__accountReview.copy[key];
+    const button = Array.from(document.querySelectorAll('button')).find(element => element.textContent === text);
+    if (!button || button.disabled) throw new Error('Controlled action is unavailable: ' + key);
+    button.click();
+  }, key);
+  const enterPhone = async page => page.type(panel + ' input[autocomplete="tel-national"]', '13800000000');
+  const enterRegistration = async page => {
+    await authMode(page, 'register');
+    await page.type(panel + ' input[autocomplete="username"]', 'FixtureUser');
+    await enterPhone(page);
+    const passwords = await page.$$(panel + ' input[type="password"]');
+    await passwords[0].type('PublicPassword123');
+    await passwords[1].type('PublicPassword123');
+    await passwords[1].evaluate(element => element.blur());
+  };
+  const waitRegistration = async page => page.waitForFunction(() => {
+    const copy = window.__accountReview.copy;
+    return document.querySelector('[data-testid="account-platform-popover"]').textContent.includes(copy.registrationReady);
+  });
+  const solveCaptcha = async page => {
+    await clickCopy(page, 'sendCode');
+    await page.waitForSelector('[role="dialog"] input[type="range"]');
+    await page.$eval('[role="dialog"] input[type="range"]', element => {
+      element.value = '20'; element.dispatchEvent(new Event('input', { bubbles: true }));
+      element.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    await clickCopy(page, 'captchaConfirm');
+  };
+  for (const locale of ['zh', 'en', 'ja']) {
+    await runCase('mobile SMS login uses validated challenge and localized form in ' + locale, 'popover-mobile-login', async page => {
+      await authMode(page, 'sms'); await enterPhone(page); await solveCaptcha(page);
+      await page.waitForFunction(() => !document.querySelector('[role="dialog"]'));
+      await page.type(panel + ' input[autocomplete="one-time-code"]', '123456');
+      await page.click(panel + ' button[type="submit"]');
+      await page.waitForFunction(selector => document.querySelector(selector)?.textContent.includes('Fixture User'), {}, panel);
+      const requests = await page.evaluate(() => window.__accountReview.calls);
+      assert.equal(requests.filter(item => item.path === 'nativeSMSLogin').length, 1);
+      assert.equal(requests.some(item => item.path === 'nativeLogin'), false);
+      assert.deepEqual(requests.find(item => item.path === 'nativeSMSLogin').input,
+        { mobile: '13800000000', challenge_id: '00000000-0000-4000-8000-000000000006', code: '123456' });
+    }, locale);
+    await runCase('registration login failure preserves successful registration truth in ' + locale, 'popover-mobile-register-login-failure', async page => {
+      await enterRegistration(page); await waitRegistration(page); await solveCaptcha(page);
+      await page.waitForFunction(() => !document.querySelector('[role="dialog"]'));
+      await page.type(panel + ' input[autocomplete="one-time-code"]', '123456');
+      await page.click(panel + ' button[type="submit"]');
+      await page.waitForFunction(() => document.querySelector('[role="alert"]')?.textContent === window.__accountReview.copy.registrationCompletedLoginFailed);
+      assert.equal(await page.$eval(panel + ' input[type="password"]', element => element.value), '');
+      assert.equal(await page.$eval(panel + ' input[autocomplete="username"]', element => element.value), 'FixtureUser');
+      assert.equal(await page.$$eval(panel + ' input[autocomplete="one-time-code"]', elements => elements.length), 0);
+      assert.equal(await page.evaluate(() => window.__accountReview.calls.filter(item => item.path === 'nativeRegister').length), 1);
+      assert.equal(await page.evaluate(() => document.body.textContent.includes('PRIVATE_PROVIDER_DETAIL')), false);
+    }, locale);
+    await runCase('provider SMS rate facts are finite and translated in ' + locale, 'popover-mobile-rate', async page => {
+      await authMode(page, 'sms'); await enterPhone(page); await solveCaptcha(page);
+      await page.waitForFunction(() => document.querySelector('[role="alert"]')?.textContent === window.__accountReview.copy.smsRateLimited);
+      assert.equal(await page.$$eval('[role="dialog"]', elements => elements.length), 0);
+      assert.equal(await page.$$eval(panel + ' form button', elements => elements.some(element => element.disabled && /\d{5}/u.test(element.textContent))), true);
+      assert.equal(await page.evaluate(() => document.body.textContent.includes('SMS_RATE_LIMITED')), false);
+    }, locale);
+  }
+  const submitRegistration = async page => {
+    await enterRegistration(page); await waitRegistration(page); await solveCaptcha(page);
+    await page.waitForFunction(() => !document.querySelector('[role="dialog"]'));
+    await page.type(panel + ' input[autocomplete="one-time-code"]', '123456');
+    await page.click(panel + ' button[type="submit"]');
+  };
+  const assertRecoveredGuest = async page => {
+    await page.waitForFunction(() => document.querySelector('[role="alert"]')?.textContent === window.__accountReview.copy.registrationRecovered);
+    assert.equal(await page.$eval(panel + ' input[autocomplete="username"]', element => element.value), 'FixtureUser');
+    assert.equal(await page.$eval(panel + ' input[type="password"]', element => element.value), '');
+    assert.equal(await page.$$eval(panel + ' input[autocomplete="one-time-code"], [role="dialog"]', elements => elements.length), 0);
+    assert.equal(await page.evaluate(() => window.__accountReview.calls.filter(item => item.path === 'nativeLogin').length), 0);
+    assert.equal(await page.evaluate(() => window.__accountReview.calls.filter(item => item.path === 'nativeRegister').length), 1);
+    assert.equal(await page.$$eval(panel + ' input[type="password"]', elements => elements.length), 1);
+  };
+  for (const locale of ['zh', 'en', 'ja']) {
+    await runCase('fresh registration still signs in with the submitted password in ' + locale, 'popover-mobile-register-fresh', async page => {
+      await submitRegistration(page); await waitPending(page, 'nativeLogin');
+      const credentials = await page.evaluate(() => window.__accountReview.calls.find(item => item.path === 'nativeLogin').credentials);
+      assert.deepEqual(credentials, { account: 'FixtureUser', password: 'PublicPassword123' });
+      await settle(page, 'nativeLogin');
+      await page.waitForFunction(selector => document.querySelector(selector)?.textContent.includes('Fixture User'), {}, panel);
+      assert.equal(await page.$(panel + ' input[type="password"]'), null);
+    }, locale);
+    await runCase('recovered registration preserves first-password truth without automatic sign-in in ' + locale, 'popover-mobile-recovered', async page => {
+      await submitRegistration(page); await assertRecoveredGuest(page);
+    }, locale);
+  }
+  await runCase('same-client reopened registration receives recovered truth without reviving SMS credentials', 'popover-mobile-recovered-late-reopen', async page => {
+    await submitRegistration(page); await waitPending(page, 'nativeRegister');
+    await page.evaluate(() => window.__accountReview.setOpen(false));
+    await page.waitForFunction(() => !document.querySelector('[data-testid="account-platform-popover"]'));
+    await page.evaluate(() => window.__accountReview.setOpen(true));
+    await page.waitForSelector(panel + ' form');
+    await settle(page, 'nativeRegister'); await assertRecoveredGuest(page);
+  });
+  await runCase('closed registration completion cannot sign in or restore secret fields', 'popover-mobile-recovered-late-closed', async page => {
+    await submitRegistration(page); await waitPending(page, 'nativeRegister');
+    await page.evaluate(() => window.__accountReview.setOpen(false));
+    await page.waitForFunction(() => !document.querySelector('[data-testid="account-platform-popover"]'));
+    await settle(page, 'nativeRegister');
+    assert.equal(await page.evaluate(() => window.__accountReview.calls.filter(item => item.path === 'nativeLogin').length), 0);
+    await page.evaluate(() => window.__accountReview.setOpen(true));
+    await page.waitForSelector(panel + ' form button:not(:disabled)');
+    assert.equal(await page.$$eval(panel + ' input[type="password"], ' + panel + ' input[autocomplete="one-time-code"]', elements => elements.every(element => element.value === '')), true);
+    assert.equal(await page.$('[role="dialog"]'), null);
+  });
+  await runCase('recovered registration on a replaced client cannot overwrite the current identity', 'popover-mobile-recovered-late-replacement', async page => {
+    await submitRegistration(page); await waitPending(page, 'nativeRegister');
+    await page.evaluate(() => window.__accountReview.replaceClient());
+    await page.waitForFunction(selector => document.querySelector(selector)?.textContent.includes('Other User'), {}, panel);
+    await settle(page, 'nativeRegister');
+    await page.waitForFunction(selector => !document.querySelector(selector + ' button:disabled'), {}, panel);
+    assert.equal(await page.$eval(panel, element => element.textContent.includes('Other User')), true);
+    assert.equal(await page.evaluate(() => window.__accountReview.calls.filter(item => item.path === 'nativeLogin').length), 0);
+    assert.equal(await page.$('[role="alert"]'), null);
+  });
+  await runCase('registration input edits fence a delayed precheck result', 'popover-mobile-precheck-late', async page => {
+    await enterRegistration(page); await waitPending(page, 'mobilePrecheck');
+    await page.$eval(panel + ' input[autocomplete="username"]', element => element.select());
+    await page.type(panel + ' input[autocomplete="username"]', 'ChangedUser');
+    await settle(page, 'mobilePrecheck');
+    assert.equal(await page.$eval(panel + ' input[autocomplete="username"]', element => element.value), 'ChangedUser');
+    assert.equal(await page.evaluate(() => document.body.textContent.includes(window.__accountReview.copy.registrationReady)), false);
+    assert.equal(await page.evaluate(() => window.__accountReview.calls.some(item => item.path === 'nativeCaptcha')), false);
+  });
+  await runCase('mode change discards a delayed captcha instead of reviving its dialog', 'popover-mobile-captcha-late', async page => {
+    await authMode(page, 'sms'); await enterPhone(page); await clickCopy(page, 'sendCode'); await waitPending(page, 'captcha');
+    await authMode(page, 'password'); await settle(page, 'captcha');
+    assert.equal(await page.$$eval('[role="dialog"]', elements => elements.length), 0);
+    assert.equal(await page.$$eval(panel + ' input[autocomplete="tel-national"]', elements => elements.length), 0);
+  });
+  await runCase('closing during SMS send cannot resurrect the challenge in a reopened form', 'popover-mobile-sms-late', async page => {
+    await authMode(page, 'sms'); await enterPhone(page); await solveCaptcha(page); await waitPending(page, 'sms');
+    await page.evaluate(() => window.__accountReview.setOpen(false));
+    await page.waitForFunction(() => !document.querySelector('[data-testid="account-platform-popover"]'));
+    await page.evaluate(() => window.__accountReview.setOpen(true));
+    await page.waitForSelector(panel + ' input[autocomplete="one-time-code"]');
+    assert.equal(await page.$eval(panel + ' button[type="submit"]', element => element.disabled), true);
+    await settle(page, 'sms');
+    await page.waitForFunction(() => !document.querySelector('[data-testid="account-platform-popover"] form button').disabled);
+    assert.equal(await page.$$eval('[role="dialog"]', elements => elements.length), 0);
+    assert.equal(await page.$eval(panel + ' button[type="submit"]', element => element.disabled), true);
+    assert.equal(await page.$eval(panel + ' input[autocomplete="one-time-code"]', element => element.value), '');
+  });
+  await runCase('unknown mobile rejection uses static fallback without provider detail', 'popover-mobile-unknown-error', async page => {
+    await authMode(page, 'sms'); await enterPhone(page); await solveCaptcha(page);
+    await page.waitForSelector('[role="alert"]');
+    assert.equal(await page.evaluate(() => document.body.textContent.includes('PRIVATE_PROVIDER_DETAIL')), false);
+    assert.equal(await page.evaluate(() => document.body.textContent.includes('SMS_UNAVAILABLE')), false);
+    const text = await page.$eval('[role="alert"]', element => element.textContent);
+    assert.ok(text.trim());
+    assert.notEqual(text, await page.evaluate(() => window.__accountReview.copy.smsUnavailable));
+  });
+  await runCase('same-client logout completion invalidates the reopened account summary', 'popover-logout-delay', async page => {
+    await page.waitForFunction(selector => document.querySelector(selector)?.textContent.includes('Fixture User'), {}, panel);
+    await clickCopy(page, 'logout'); await waitPending(page, 'nativeLogout');
+    await page.evaluate(() => window.__accountReview.setOpen(false));
+    await page.waitForFunction(() => !document.querySelector('[data-testid="account-platform-popover"]'));
+    await page.evaluate(() => window.__accountReview.setOpen(true));
+    await page.waitForFunction(selector => document.querySelector(selector)?.textContent.includes('Fixture User'), {}, panel);
+    await settle(page, 'nativeLogout'); await page.waitForSelector(panel + ' input[type="password"]');
+    assert.equal(await page.evaluate(() => document.body.textContent.includes('Fixture User')), false);
+  });
+  for (const scenario of ['entitlement-401', 'orders-401']) {
+    await runCase(scenario + ' clears every protected surface', scenario, async page => {
+      await page.waitForSelector('.ap-login');
+      assert.equal(await page.$$eval('nav', elements => elements.length), 0);
+      assert.equal(await page.evaluate(() => document.body.textContent.includes('Personal Token')), false);
+    });
+  }
+  await runCase('users without organizations retain wallet, personal history and managed Tokens', 'no-organization', async page => {
+    const labels = await page.$$eval('nav button', elements => elements.map(element => element.textContent));
+    const copy = await page.evaluate(() => window.__accountReview.copy.sections);
+    assert.deepEqual(labels, [copy.overview, copy.wallet, copy.orders, copy.invoice, copy.usage, copy.tokens]);
+  });
+  for (const locale of ['zh', 'en', 'ja']) {
+    await runCase('personal plan/history keeps exact amounts and authority scope in ' + locale, 'entitlement-history', async page => {
+      await page.evaluate(() => Array.from(document.querySelectorAll('nav button')).find(element => element.textContent === window.__accountReview.copy.sections.wallet).click());
+      await page.waitForSelector('.ap-entitlements .ap-trace-card');
+      const text = await page.$eval('.ap-entitlements', element => element.textContent);
+      assert.ok(text.includes('9,007,199,254,740,992'));
+      assert.ok(text.includes('90,071,992,547,409.93'));
+      await page.evaluate(() => Array.from(document.querySelectorAll('nav button')).find(element => element.textContent === window.__accountReview.copy.sections.orders).click());
+      await page.waitForSelector('.ap-trace-details');
+      assert.equal(await page.evaluate(() => document.querySelector('.ap-main').textContent.includes('1970')), false);
+      const before = await page.evaluate(() => window.__accountReview.calls.filter(item => item.path === '/api/token/v1/me/entitlement-packages' || (item.path === '/api/token/v1/recharge/orders' && item.method === 'GET')).length);
+      await page.evaluate(() => Array.from(document.querySelectorAll('nav button')).find(element => element.textContent === window.__accountReview.copy.sections.overview).click());
+      await page.select('.ap-context-card select', '00000000-0000-4000-8000-000000000002');
+      await page.waitForFunction(() => document.querySelector('.ap-metrics article:nth-child(2) strong').textContent === '222');
+      assert.equal(await page.evaluate(() => window.__accountReview.calls.filter(item => item.path === '/api/token/v1/me/entitlement-packages' || (item.path === '/api/token/v1/recharge/orders' && item.method === 'GET')).length), before);
+      const labels = await page.$$eval('nav button', elements => elements.map(element => element.textContent));
+      const copy = await page.evaluate(() => window.__accountReview.copy.sections);
+      assert.ok(labels.includes(copy.wallet)); assert.ok(labels.includes(copy.tokens));
+      assert.equal(labels.includes(copy.orders) || labels.includes(copy.invoice), false);
+    }, locale);
+  }
+  for (const scenario of ['qr-png', 'qr-invalid', 'qr-terminal']) {
+    await runCase('personal wallet QR boundary ' + scenario, scenario, async page => {
+      await page.evaluate(() => Array.from(document.querySelectorAll('nav button')).find(element => element.textContent === window.__accountReview.copy.sections.wallet).click());
+      await page.waitForSelector('.ap-payment');
+      if (scenario === 'qr-png') {
+        await page.waitForSelector('.ap-payment img');
+        assert.equal(await page.$eval('.ap-payment img', element => element.getAttribute('src').startsWith('data:image/png;base64,')), true);
+      } else assert.equal(await page.$$eval('.ap-payment img', elements => elements.length), 0);
+      if (scenario === 'qr-terminal') assert.equal(await page.evaluate(() => document.querySelector('.ap-payment').textContent.includes(window.__accountReview.copy.scanToPay)), false);
+    });
+  }
 
   console.log(`Account UI: ${passed} PASS, ${failures.length} FAIL, 0 SKIP. Controlled API responses; real React/client/QR; not BFF/PG or Safari E2E.`);
   assert.equal(failures.length, 0, `Failing scenarios: ${failures.join(', ')}`);

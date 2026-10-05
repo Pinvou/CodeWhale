@@ -22,7 +22,7 @@ func TestPostgresA04AccountUpgradePreservesExistingIdentityOrganizationAndEventG
 	}
 	defer connection.Release()
 	defer connection.Conn().Close(ctx)
-	for range 2 {
+	for range len(loaded) - 3 {
 		if err := migrations.DownOne(ctx, connection.Conn(), loaded); err != nil {
 			t.Fatal(err)
 		}

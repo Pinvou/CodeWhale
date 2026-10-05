@@ -205,7 +205,7 @@ const expectedProtocolHashes = {
   voice: '8581b43940d101353fdd1468232dc778c2d1320854af5fdbbbc0326e5cdedbbb',
   // Official-only team-relay surface; unchanged by this backflow.
   teamRelay: '246f7cfd5a5ff4b730e2f3972fe9e74860b51a4781bd323bf10b3d795d24ed1d',
-  accountPlatform: '5f85589efc2067521925989218fb02ff19f844f4d141391f452f078d2b1f8c35',
+  accountPlatform: 'd21e64c409b3a308b8da205672ac58f5ac5fd3b1908a9fa894424c0e65432cf1',
   // Recomputed for the rebind carryover feed-back (review #463 F-Major):
   // rebind_workspace_root gains the optional previousPostBusySessionIds
   // payload — the dialog's previous report fed back on retry, honored by the
@@ -362,3 +362,26 @@ assert.match(
   'desktop marketplace uninstall must not wait for the synchronous tool lock on the async runtime',
 );
 console.log('bridge domain API and protocol contracts passed');
+
+// Exercise the real mobile transport, including the native command's input
+// envelope. The general bridge API check above uses a feature stub.
+const accountWindow = {};
+const accountContext = vm.createContext({ window: accountWindow });
+vm.runInContext(read('bridge/account-platform.js'), accountContext);
+const accountCalls = [];
+const accountTransport = accountWindow.__PINVOU_TAURI_BRIDGE_FEATURES__['account-platform']({
+  invoke: async (command, payload) => { accountCalls.push({ command, payload }); return 'ok'; },
+});
+for (const [method, command] of [
+  ['createSliderCaptcha', 'account_platform_create_slider_captcha'],
+  ['precheckMobileRegistration', 'account_platform_precheck_mobile_registration'],
+  ['sendSms', 'account_platform_send_sms'],
+  ['registerMobile', 'account_platform_register_mobile'],
+  ['loginSms', 'account_platform_login_sms'],
+]) {
+  const input = { mobile: 'public-synthetic', purpose: 'LOGIN' };
+  assert.equal(await accountTransport[method](input), 'ok');
+  assert.equal(accountCalls.at(-1).command, command);
+  assert.equal(accountCalls.at(-1).payload.input, input);
+  assert.deepEqual(Object.keys(accountCalls.at(-1).payload), ['input']);
+}

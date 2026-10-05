@@ -70,7 +70,7 @@ func (adminBillingRepository) AdminOverview(context.Context) (billing.AdminOverv
 func (adminBillingRepository) AdminWallets(context.Context, int) ([]billing.Wallet, error) {
 	return []billing.Wallet{{PostedMicrocredits: 9007199254740993, ReservedMicrocredits: 1, AvailableMicrocredits: 9007199254740992}}, nil
 }
-func (adminBillingRepository) AdminPaymentOrders(context.Context, int) ([]billing.AdminPaymentOrder, error) {
+func (adminBillingRepository) AdminPaymentOrders(context.Context, billing.AdminPaymentOrderFilter, int) ([]billing.AdminPaymentOrder, error) {
 	return []billing.AdminPaymentOrder{{AmountFen: 9007199254740993, CreditMicrocredits: 9007199254740993}}, nil
 }
 func (adminBillingRepository) AdminAdjustments(context.Context, int) ([]billing.ManualAdjustment, error) {
@@ -213,7 +213,22 @@ func main() {
 	created := order
 	created.Status, created.FulfillmentStatus = "CREATED", "PENDING"
 	created.PaymentURL, created.ChannelTransactionID, created.PaidAt = "", nil, nil
-	product := billing.Product{ProductID: "CNY_1", AmountFen: 100, CreditMicrocredits: 1000000, DisplayPoints: 100, Currency: "CNY", Channels: []string{"ALIPAY"}, CatalogVersion: 1}
+	product := billing.Product{ProductID: "CNY_1", AmountFen: 100, CreditMicrocredits: 1000000, DisplayPoints: 100, Currency: "CNY", Channels: []string{"ALIPAY"}, CatalogVersion: 1, PriceStatus: "LEGACY"}
+	order.QRData = "fixture-qr"
+	me := account.Me{UserID: id, Status: "ACTIVE", MobileVerified: false, MallSyncStatus: "NOT_CONFIGURED", ActiveContext: account.Context{Type: "PERSONAL", MembershipVersion: 1}}
+	plan := billing.EntitlementPackage{ID: id, UserID: id, WalletID: id, PaymentOrderID: id, ProductID: "PLAN_TRIAL", AmountFen: 9007199254740993, PointsTotal: 9007199254740993, CreditedAt: paidAt, ValidFrom: paidAt, ValidUntil: paidAt.Add(time.Hour), Status: "ACTIVE"}
+	history := billing.PaymentOrderHistoryItem{ID: id, PinvouOrderID: id, ProductID: "CNY_1", OrderType: "LEGACY", AmountFen: 9007199254740993, DisplayPoints: 9007199254740993, Channel: "ALIPAY", Status: "PAID", FulfillmentStatus: "CREDITED", ExpiresAt: paidAt.Add(time.Hour), CreatedAt: paidAt, InvoiceStatus: "NOT_SUPPORTED"}
+	mobileErrors := map[string]json.RawMessage{}
+	mobileHandler := httpserver.HandlerWithApplication(config.Config{ServiceName: "contract-mobile"}, account.NewService(nil, nil).WithMobileAuth(&account.MobileAuthService{}, "fixture-service-token").Handler(nil), nil)
+	for _, route := range []string{"/v1/auth/registration/precheck", "/v1/auth/captcha/challenges", "/v1/auth/sms/challenges"} {
+		request := httptest.NewRequest(http.MethodPost, route, strings.NewReader(`{"unexpected":true}`))
+		response := httptest.NewRecorder()
+		mobileHandler.ServeHTTP(response, request)
+		if response.Code != http.StatusBadRequest {
+			panic("mobile malformed body did not reach production validation")
+		}
+		mobileErrors[route] = response.Body.Bytes()
+	}
 	wallet := billing.Wallet{ID: id, OwnerType: "PERSONAL", OwnerID: id, Status: "ACTIVE", PostedMicrocredits: 1000000, ReservedMicrocredits: 1000, AvailableMicrocredits: 999000, Version: 1}
 	handler := billing.NewService(nil).WithPayments(&billing.PaymentCoordinator{}).Handler("fixture-only-service-token")
 	routes := map[string]int{}
@@ -221,6 +236,7 @@ func main() {
 		{http.MethodPost, "/internal/v1/recharge/orders"},
 		{http.MethodGet, "/internal/v1/recharge/orders/recent"},
 		{http.MethodGet, "/internal/v1/recharge/orders/" + id.String()},
+		{http.MethodGet, "/internal/v1/entitlement-packages"},
 	} {
 		request := httptest.NewRequest(probe.method, probe.path, strings.NewReader(`{}`))
 		request.Header.Set("Authorization", "Bearer fixture-only-service-token")
@@ -233,7 +249,7 @@ func main() {
 	for code, cause := range map[string]error{"TOKEN_ACCOUNT_NOT_FOUND": token.ErrNotFound, "TOKEN_FORBIDDEN": token.ErrForbidden, "TOKEN_ROUTE_AMBIGUOUS": token.ErrAmbiguousRoute, "TOKEN_ROUTE_UNAVAILABLE": token.ErrNoEligibleRoute} {
 		errors[code] = eligibleProbe(nil, contractContext{err: cause})
 	}
-	if err := json.NewEncoder(output).Encode(map[string]any{"waiver_public": publicWaiverProbe(waiver.Hold), "waiver_authority": waiver, "waiver_intent": map[string]any{"hold_id": id, "usage_request_id": id, "reason": "fixture-waiver", "actor": "fixture-actor"}, "product": product, "paid": order, "created": created, "wallet": wallet, "routes": routes, "eligible": eligible, "token_errors": errors, "rate_limited": rateLimitProbe(), "recent_created": map[string]any{"order": created}, "recent_empty": map[string]any{"order": nil}, "financial_reads": financialReadProbes(), "organization_member": account.Member{MembershipID: id, UserID: id, Status: "ACTIVE", Version: 1, Roles: []string{"MEMBER", "UNIT_ADMIN"}, UnitIDs: []uuid.UUID{}, UnitAdminIDs: []uuid.UUID{id}, JoinedAt: paidAt}}); err != nil {
+	if err := json.NewEncoder(output).Encode(map[string]any{"slider_captcha": account.SliderCaptchaResponse{ID: id, BackgroundImage: "fixture-background", PieceImage: "fixture-piece", Width: 280, Height: 120, PieceWidth: 44, PieceHeight: 44, PieceY: 14, ExpiresAt: paidAt}, "mobile_registration": account.MobileRegistrationResult{UserID: id, Username: "fixtureuser", Status: "PROVISIONING", PasswordPreserved: false}, "mobile_errors": mobileErrors, "me": me, "entitlement": plan, "package_summary": billing.PackageSummary{AvailableMicrocredits: "9007199254740993", ActivePackageCount: 1, NextExpiryMicrocredits: "9007199254740993"}, "order_history": history, "waiver_public": publicWaiverProbe(waiver.Hold), "waiver_authority": waiver, "waiver_intent": map[string]any{"hold_id": id, "usage_request_id": id, "reason": "fixture-waiver", "actor": "fixture-actor"}, "product": product, "paid": order, "created": created, "wallet": wallet, "routes": routes, "eligible": eligible, "token_errors": errors, "rate_limited": rateLimitProbe(), "recent_created": map[string]any{"order": created}, "recent_empty": map[string]any{"order": nil}, "financial_reads": financialReadProbes(), "organization_member": account.Member{MembershipID: id, UserID: id, Status: "ACTIVE", Version: 1, Roles: []string{"MEMBER", "UNIT_ADMIN"}, UnitIDs: []uuid.UUID{}, UnitAdminIDs: []uuid.UUID{id}, JoinedAt: paidAt}}); err != nil {
 		panic(err)
 	}
 }

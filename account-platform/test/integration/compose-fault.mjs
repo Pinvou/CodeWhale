@@ -75,11 +75,12 @@ const wallet = await requestJSON('/internal/v1/wallets/ensure', {
   body: { owner_type: 'PERSONAL', owner_id: requesterID },
   statuses: [200, 201],
 });
-const catalog = await requestJSON('/v1/recharge/products?currency=CNY&channel=UNIONPAY');
-const product = catalog.items.toSorted((left, right) => left.amount_fen - right.amount_fen)[0];
+const catalog = await requestJSON('/v1/recharge/products?currency=CNY&channel=ALIPAY');
+const product = catalog.items.find((candidate) => candidate.product_id === 'PLAN_TRIAL');
+assert.ok(product, 'the personal fault journey requires its PLAN fixture');
 const order = await requestJSON('/internal/v1/recharge/orders', {
   method: 'POST',
-  body: { requester_id: requesterID, wallet_id: wallet.wallet_id, product_id: product.product_id, channel: 'UNIONPAY' },
+  body: { requester_id: requesterID, wallet_id: wallet.wallet_id, product_id: product.product_id, channel: 'ALIPAY' },
   headers: { 'idempotency-key': `fault-payment-${randomUUID()}` },
   statuses: [200, 201],
 });
@@ -104,6 +105,10 @@ const credited = await eventually(
   (candidate) => candidate.fulfillment_status === 'CREDITED',
 );
 assert.ok(['PAID', 'PAID_LATE'].includes(credited.status));
+const packages = await requestJSON(`/internal/v1/entitlement-packages?user_id=${requesterID}&wallet_id=${wallet.wallet_id}`);
+assert.equal(packages.items.length, 1, 'retried callback must issue only one personal entitlement package');
+assert.equal(packages.items[0].pinvou_order_id, order.order_id);
+assert.equal(BigInt(packages.summary.available_microcredits), BigInt(credited.credit_microcredits));
 
 compose('stop', 'nats');
 try {
@@ -129,5 +134,8 @@ compose('start', 'nats');
 const balance = await requestJSON(`/internal/v1/wallets/${wallet.wallet_id}/balance`);
 assert.equal(balance.posted_microcredits, credited.credit_microcredits);
 assert.equal(balance.reserved_microcredits, 0);
+const packagesAfterRelease = await requestJSON(`/internal/v1/entitlement-packages?user_id=${requesterID}&wallet_id=${wallet.wallet_id}`);
+assert.equal(packagesAfterRelease.items[0].points_reserved_microcredits, '0');
+assert.equal(BigInt(packagesAfterRelease.summary.available_microcredits), BigInt(credited.credit_microcredits));
 
 console.log('compose fault acceptance passed: callback retry after Billing restart and local settlement during NATS outage');

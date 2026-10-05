@@ -28,6 +28,7 @@ async function run() {
   const claims = JSON.parse(Buffer.from(tokenSet.access_token.split('.')[1], 'base64url').toString('utf8'));
   assert.ok(claims.sid || claims.session_state, 'access token must identify its login session');
   assert.ok(Array.isArray(claims.aud) ? claims.aud.includes(clientID) : claims.aud === clientID);
+  assert.ok(claims.realm_access?.roles?.includes('platform-admin'), 'the owned acceptance user requires the platform-admin fixture role');
 
   const authorization = `Bearer ${tokenSet.access_token}`;
   async function requestJSON(origin, path, { method = 'GET', body, headers = {}, statuses = [200] } = {}) {
@@ -47,8 +48,8 @@ async function run() {
   const { body: me } = await requestJSON(accountOrigin, '/v1/account/bootstrap', { method: 'POST', body: {} });
   assert.ok(me.user_id);
   assert.equal(me.status, 'ACTIVE');
-  const { body: organization } = await requestJSON(accountOrigin, '/v1/organizations', {
-    method: 'POST', body: { name: `Acceptance ${Date.now()}` }, statuses: [201],
+  const { body: organization } = await requestJSON(accountOrigin, '/admin/v1/organizations', {
+    method: 'POST', body: { name: `Acceptance ${Date.now()}`, owner_user_id: me.user_id }, statuses: [201],
   });
   assert.ok(organization.organization_id);
   const { body: unit } = await requestJSON(accountOrigin, `/v1/organizations/${organization.organization_id}/units`, {
@@ -80,7 +81,7 @@ async function run() {
 
   stage = 'recharge_callback_credit';
   const { body: order } = await requestJSON(tokenOrigin, '/v1/recharge/orders', {
-    method: 'POST', body: { product_id: 'CNY_1', channel: 'ALIPAY' },
+    method: 'POST', body: { product_id: 'PLAN_TRIAL', channel: 'ALIPAY' },
     headers: { 'idempotency-key': `auth-acceptance-recharge-${randomUUID()}` }, statuses: [201],
   });
   const publicPaymentURL = new URL(order.payment_url);
@@ -97,6 +98,9 @@ async function run() {
   }
   const { body: balanceBefore } = await requestJSON(tokenOrigin, '/v1/me/balance?consistency=strong');
   assert.ok(balanceBefore.available_microcredits > 0);
+  const { body: packagesBefore } = await requestJSON(tokenOrigin, '/v1/me/entitlement-packages');
+  assert.equal(packagesBefore.items.filter((item) => item.pinvou_order_id === order.order_id).length, 1, 'personal PLAN credit must create exactly one entitlement package');
+  assert.ok(BigInt(packagesBefore.summary.available_microcredits) > 0n);
 
   stage = 'mock_model_priced_settlement';
   const chatResponse = await fetch(`${tokenOrigin}/v1/chat/completions`, {

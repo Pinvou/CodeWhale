@@ -71,6 +71,10 @@ test('Billing and Token contracts match production JSON and HTTP validation resp
   assert.equal(fixtures.eligible.items.length, 1);
   assert.equal(eligible({ ...fixtures.eligible, membership_version: undefined }), false);
   const error = ajv.compile(common.components.schemas.Error);
+  for (const response of Object.values(fixtures.mobile_errors)) {
+    assert.equal(response.code, 'INVALID_REQUEST');
+    assert.ok(error(response), JSON.stringify(error.errors));
+  }
   assert.equal(fixtures.rate_limited.code, 'RATE_LIMITED');
   assert.ok(error(fixtures.rate_limited), JSON.stringify(error.errors));
   for (const [code, response] of Object.entries(fixtures.token_errors)) {
@@ -124,6 +128,65 @@ test('Billing and Token contracts match production JSON and HTTP validation resp
   assert.equal(snapshot({ amount_fen: 9007199254740993 }), false);
   assert.ok(snapshot(null));
   const account = YAML.parse(await readFile(path.join(root, 'contracts/openapi/account.yaml'), 'utf8'));
+  const accountSchemas = JSON.parse(JSON.stringify(account.components.schemas)
+    .replaceAll('common.yaml#/components/schemas/', 'urn:pinvou:common-runtime#/$defs/')
+    .replaceAll('#/components/schemas/', '#/$defs/'));
+  ajv.addSchema({ $id: 'urn:pinvou:common-runtime', $defs: common.components.schemas });
+  ajv.addSchema({ $id: 'urn:pinvou:account-runtime', $defs: accountSchemas });
+  const me = ajv.compile({ $ref: 'urn:pinvou:account-runtime#/$defs/Me' });
+  assert.ok(me(fixtures.me), JSON.stringify(me.errors));
+  assert.ok(me({ ...fixtures.me, mobile: '+8613800000000', mobile_verified: true, mall_sync_status: 'SYNCED' }), JSON.stringify(me.errors));
+  assert.equal(me({ ...fixtures.me, mobile_verified: undefined }), false);
+  assert.equal(me({ ...fixtures.me, mobile: 'invalid-mobile' }), false);
+  const registration = ajv.compile(account.paths['/auth/register'].post.responses['201'].content['application/json'].schema);
+  assert.ok(registration(fixtures.mobile_registration), JSON.stringify(registration.errors));
+  assert.ok(registration({ ...fixtures.mobile_registration, password_preserved: true }));
+  assert.equal(registration({ ...fixtures.mobile_registration, password_preserved: undefined }), false);
+  assert.equal(registration({ ...fixtures.mobile_registration, password_preserved: 'true' }), false);
+  assert.equal(registration({ ...fixtures.mobile_registration, unexpected: true }), false);
+  const captchaRequest = { mobile: '+8613800000000', purpose: 'REGISTER' };
+  const smsRequest = { ...captchaRequest, username: 'fixtureuser', password: 'FixturePassword1', captcha_id: fixtures.slider_captcha.captcha_id, captcha_offset: 72 };
+  const registrationRequest = { username: 'fixtureuser', mobile: captchaRequest.mobile, challenge_id: smsRequest.captcha_id, code: '123456', password: smsRequest.password };
+  for (const [route, schemaName, valid] of [
+    ['/auth/captcha/challenges', 'SliderCaptchaRequest', captchaRequest],
+    ['/auth/sms/challenges', 'SMSChallengeRequest', smsRequest],
+    ['/auth/register', 'MobileRegistrationRequest', registrationRequest],
+  ]) {
+    const operation = account.paths[route].post;
+    assert.equal(operation.requestBody.required, true);
+    assert.equal(operation.requestBody.content['application/json'].schema.$ref, `#/components/schemas/${schemaName}`);
+    const validate = ajv.compile({ $ref: `urn:pinvou:account-runtime#/$defs/${schemaName}` });
+    assert.ok(validate(valid), `${route}: ${JSON.stringify(validate.errors)}`);
+    assert.equal(validate({ ...valid, unexpected: true }), false);
+    for (const field of account.components.schemas[schemaName].required) {
+      assert.equal(validate({ ...valid, [field]: undefined }), false, `${route} requires ${field}`);
+    }
+    for (const field of ['captcha_id', 'challenge_id']) {
+      if (field in valid) assert.equal(validate({ ...valid, [field]: 'invalid-uuid' }), false);
+    }
+  }
+  const smsRequestValidator = ajv.compile({ $ref: 'urn:pinvou:account-runtime#/$defs/SMSChallengeRequest' });
+  assert.equal(smsRequestValidator({ ...smsRequest, username: undefined }), false);
+  assert.equal(smsRequestValidator({ ...smsRequest, password: undefined }), false);
+  assert.ok(smsRequestValidator({ ...smsRequest, purpose: 'LOGIN', username: undefined, password: undefined }));
+  const captchaResponse = ajv.compile({ $ref: 'urn:pinvou:account-runtime#/$defs/SliderCaptchaResponse' });
+  assert.ok(captchaResponse(fixtures.slider_captcha), JSON.stringify(captchaResponse.errors));
+  assert.equal(captchaResponse({ ...fixtures.slider_captcha, piece_y: '14' }), false);
+  const smsResponse = ajv.compile({ $ref: 'urn:pinvou:account-runtime#/$defs/SMSChallengeResponse' });
+  assert.ok(smsResponse({ challenge_id: smsRequest.captcha_id, expires_at: fixtures.slider_captcha.expires_at, retry_after_seconds: 60 }));
+  assert.deepEqual(account.paths['/internal/v1/auth/mobile/identity'].servers, [{ url: '/' }]);
+  assert.deepEqual(account.paths['/internal/v1/auth/mobile/identity'].post.security, [{ serviceToken: [] }]);
+  for (const [name, schema, fields] of [
+    ['entitlement', 'EntitlementPackage', ['amount_fen', 'points_total_microcredits', 'points_remaining_microcredits']],
+    ['package_summary', 'EntitlementPackageSummary', ['available_microcredits', 'next_expiry_microcredits']],
+    ['order_history', 'RechargeOrderHistoryItem', ['amount_fen', 'display_points']],
+  ]) {
+    const validate = ajv.compile({ $ref: `urn:pinvou:billing-runtime#/$defs/${schema}` });
+    assert.ok(validate(fixtures[name]), `${name}: ${JSON.stringify(validate.errors)}`);
+    for (const field of fields) assert.equal(validate({ ...fixtures[name], [field]: 9007199254740993 }), false);
+  }
+  assert.deepEqual(document.paths['/entitlement-packages'].servers, [{ url: '/internal/v1' }]);
+  assert.equal(fixtures.routes['GET /internal/v1/entitlement-packages'], 400);
   const member = ajv.compile(account.components.schemas.OrganizationMember);
   assert.ok(member(fixtures.organization_member), JSON.stringify(member.errors));
   assert.equal(member({ ...fixtures.organization_member, unit_admin_unit_ids: undefined }), false);

@@ -223,6 +223,145 @@ fn state() -> AccountPlatformState {
     state
 }
 
+fn sms_credentials() -> SMSLoginCredentials {
+    SMSLoginCredentials {
+        mobile: "+8613800138000".into(),
+        challenge_id: "4c947809-a2e8-4ef4-851b-f424984d1825".into(),
+        code: "123456".into(),
+    }
+}
+
+#[tokio::test]
+async fn sms_login_verifies_identity_and_keeps_secrets_native() {
+    let http = HttpFixture::new().await;
+    let config = http.config();
+    let state = state();
+    let signer = SigningFixture::new();
+    let mut sms_claims = claims(&config);
+    sms_claims.as_object_mut().unwrap().remove("nonce");
+    http.enqueue(
+        200,
+        json!({"access_token":"sms-access", "refresh_token":"sms-refresh",
+        "expires_in":300, "token_type":"Bearer", "id_token":signer.sign(&sms_claims)}),
+    );
+    http.enqueue(200, signer.jwks.clone());
+    state
+        .login_sms_with(&config, sms_credentials())
+        .await
+        .unwrap();
+    let session = state.session.lock().await;
+    assert_eq!(
+        session.as_ref().unwrap().identity.subject,
+        "isolated-subject"
+    );
+    assert_eq!(session.as_ref().unwrap().access_token, "sms-access");
+    let requests = http.requests.lock().unwrap();
+    let request = String::from_utf8_lossy(&requests[0]);
+    assert!(request.contains("username=13800138000"));
+    assert!(request.contains("sms_challenge_id=4c947809-a2e8-4ef4-851b-f424984d1825"));
+    assert!(request.contains("sms_code=123456"));
+    assert!(request.contains("scope=openid+profile+email+offline_access"));
+    assert!(!request.contains("password="));
+}
+
+#[tokio::test]
+async fn logout_fences_inflight_sms_login() {
+    let http = HttpFixture::new().await;
+    let config = http.config();
+    let state = Arc::new(state());
+    let release = http.enqueue_delayed(
+        200,
+        json!({"access_token":"sms-access", "refresh_token":"sms-refresh",
+        "expires_in":300, "token_type":"Bearer"}),
+    );
+    let login_state = state.clone();
+    let login =
+        tokio::spawn(async move { login_state.login_sms_with(&config, sms_credentials()).await });
+    http.wait_for_calls(1).await;
+    let logout_state = state.clone();
+    let logout = tokio::spawn(async move { logout_state.logout().await });
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while state.session_epoch.load(Ordering::SeqCst) != 2 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    release.send(()).unwrap();
+    assert_eq!(
+        login.await.unwrap().unwrap_err(),
+        "authentication_required: account session changed"
+    );
+    assert!(!logout.await.unwrap().unwrap().authenticated);
+    assert!(state.session.lock().await.is_none());
+    assert!(state.credentials.get(REFRESH_TOKEN_KEY).unwrap().is_none());
+    assert_eq!(http.calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn sms_login_rejects_unbound_identity_and_does_not_store_tokens() {
+    let http = HttpFixture::new().await;
+    let config = http.config();
+    let state = state();
+    for (id_token, expires_in, expected) in [
+        (Value::Null, 300, "oidc_token_response_invalid"),
+        (json!("unsigned-token"), 300, "oidc_id_token_invalid"),
+        (Value::Null, 0, "oidc_token_response_invalid"),
+    ] {
+        let mut body = json!({"access_token":"sms-access", "refresh_token":"sms-refresh",
+            "expires_in":expires_in, "token_type":"Bearer"});
+        if !id_token.is_null() {
+            body["id_token"] = id_token;
+        }
+        http.enqueue(200, body);
+        assert_eq!(
+            state
+                .login_sms_with(&config, sms_credentials())
+                .await
+                .unwrap_err(),
+            expected
+        );
+        assert!(state.session.lock().await.is_none());
+        assert!(state.credentials.get(REFRESH_TOKEN_KEY).unwrap().is_none());
+    }
+    assert_eq!(http.calls.load(Ordering::SeqCst), 3);
+}
+
+#[tokio::test]
+async fn public_mobile_requests_use_fixed_json_contract_without_bearer_or_provider_message() {
+    let http = HttpFixture::new().await;
+    let config = http.config();
+    let state = state();
+    http.enqueue(
+        429,
+        json!({"code":"SMS_RATE_LIMITED", "message":"private provider detail",
+        "details":{"retry_after_seconds":60}}),
+    );
+    assert_eq!(
+        state
+            .public_account_request(
+                &config,
+                "v1/auth/sms/challenges",
+                json!({"mobile":"13800138000"})
+            )
+            .await
+            .unwrap_err(),
+        "mobile_auth_failed:SMS_RATE_LIMITED:60"
+    );
+    let request = String::from_utf8(http.requests.lock().unwrap()[0].clone()).unwrap();
+    assert!(request.starts_with("POST /v1/auth/sms/challenges "));
+    assert!(!request.to_ascii_lowercase().contains("authorization:"));
+    assert!(request.to_ascii_lowercase().contains("x-request-id:"));
+    http.enqueue(200, Value::Null);
+    assert_eq!(
+        state
+            .public_account_request(&config, "v1/auth/register", json!({}))
+            .await
+            .unwrap_err(),
+        "account_platform_response_invalid"
+    );
+}
+
 struct FaultCredentials {
     inner: InMemoryKeyringStore,
     fail: AtomicU64,

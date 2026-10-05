@@ -29,9 +29,16 @@ type Wallet struct {
 
 type Product struct {
 	ProductID          string   `json:"product_id"`
+	PlanName           string   `json:"plan_name"`
+	SKUCode            string   `json:"sku_code"`
 	AmountFen          int64    `json:"amount_fen"`
 	CreditMicrocredits int64    `json:"credit_microcredits"`
 	DisplayPoints      int64    `json:"display_points"`
+	BasePoints         int64    `json:"base_points"`
+	BonusPoints        int64    `json:"bonus_points"`
+	ValidityDays       int      `json:"validity_days"`
+	PriceStatus        string   `json:"price_status"`
+	InvoiceProductName string   `json:"invoice_product_name"`
 	Currency           string   `json:"currency"`
 	Channels           []string `json:"channels"`
 	CatalogVersion     int64    `json:"catalog_version"`
@@ -46,6 +53,26 @@ type Hold struct {
 	MaxMicrocredits    int64      `json:"max_microcredits"`
 	ActualMicrocredits *int64     `json:"actual_microcredits,omitempty"`
 	ExpiresAt          time.Time  `json:"expires_at"`
+}
+
+type EntitlementPackage struct {
+	ID              uuid.UUID `json:"package_id"`
+	UserID          uuid.UUID `json:"user_id"`
+	WalletID        uuid.UUID `json:"wallet_id"`
+	PaymentOrderID  uuid.UUID `json:"pinvou_order_id"`
+	MallOrderID     string    `json:"mall_order_id"`
+	ProductID       string    `json:"plan_id"`
+	PlanName        string    `json:"plan_name"`
+	SKUCode         string    `json:"sku_code"`
+	AmountFen       int64     `json:"amount_fen,string"`
+	PointsTotal     int64     `json:"points_total_microcredits,string"`
+	PointsReserved  int64     `json:"points_reserved_microcredits,string"`
+	PointsUsed      int64     `json:"points_used_microcredits,string"`
+	PointsRemaining int64     `json:"points_remaining_microcredits,string"`
+	CreditedAt      time.Time `json:"credited_at"`
+	ValidFrom       time.Time `json:"valid_from"`
+	ValidUntil      time.Time `json:"valid_until"`
+	Status          string    `json:"status"`
 }
 
 type PriceVersion struct {

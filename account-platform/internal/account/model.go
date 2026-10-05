@@ -25,10 +25,14 @@ type Context struct {
 }
 
 type Me struct {
-	UserID        uuid.UUID `json:"user_id"`
-	Status        string    `json:"status"`
-	DisplayName   *string   `json:"display_name"`
-	ActiveContext Context   `json:"active_context"`
+	UserID         uuid.UUID `json:"user_id"`
+	Status         string    `json:"status"`
+	Username       *string   `json:"username"`
+	DisplayName    *string   `json:"display_name"`
+	Mobile         *string   `json:"mobile,omitempty"`
+	MobileVerified bool      `json:"mobile_verified"`
+	MallSyncStatus string    `json:"mall_sync_status"`
+	ActiveContext  Context   `json:"active_context"`
 }
 
 type AuthorizationContext struct {
@@ -40,6 +44,9 @@ type AuthorizationContext struct {
 	UnitIDs           []uuid.UUID `json:"unit_ids"`
 	AncestorUnitIDs   []uuid.UUID `json:"ancestor_unit_ids"`
 	Roles             []string    `json:"roles"`
+	Mobile            *string     `json:"mobile,omitempty"`
+	MobileVerified    bool        `json:"mobile_verified"`
+	MallSyncStatus    string      `json:"mall_sync_status"`
 }
 
 type Organization struct {

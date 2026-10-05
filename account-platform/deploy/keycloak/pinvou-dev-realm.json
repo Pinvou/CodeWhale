@@ -2,7 +2,7 @@
   "realm": "pinvou",
   "enabled": true,
   "displayName": "Pinvou Development",
-  "registrationAllowed": true,
+  "registrationAllowed": false,
   "registrationEmailAsUsername": false,
   "rememberMe": false,
   "verifyEmail": false,
@@ -46,6 +46,53 @@
             "included.client.audience": "pinvou-desktop-dev",
             "access.token.claim": "true"
           }
+        },
+        {
+          "name": "pinvou-phone-number",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-attribute-mapper",
+          "consentRequired": false,
+          "config": {
+            "user.attribute": "phone_number",
+            "claim.name": "phone_number",
+            "jsonType.label": "String",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "userinfo.token.claim": "true"
+          }
+        },
+        {
+          "name": "pinvou-phone-number-verified",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-attribute-mapper",
+          "consentRequired": false,
+          "config": {
+            "user.attribute": "phone_number_verified",
+            "claim.name": "phone_number_verified",
+            "jsonType.label": "boolean",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "userinfo.token.claim": "true"
+          }
+        }
+      ]
+    }
+  ],
+  "directGrantFlow": "pinvou-mobile-direct-grant",
+  "authenticationFlows": [
+    {
+      "alias": "pinvou-mobile-direct-grant",
+      "description": "Pinvou mobile password or SMS direct grant",
+      "providerId": "basic-flow",
+      "topLevel": true,
+      "builtIn": false,
+      "authenticationExecutions": [
+        {
+          "authenticator": "pinvou-mobile-direct-grant",
+          "authenticatorFlow": false,
+          "requirement": "REQUIRED",
+          "priority": 10,
+          "userSetupAllowed": false
         }
       ]
     }

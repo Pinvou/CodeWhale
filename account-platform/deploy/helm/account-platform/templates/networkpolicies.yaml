@@ -97,6 +97,24 @@ spec:
     - to: [{ ipBlock: { cidr: {{ $cidr | quote }} } }]
       ports: [{ protocol: TCP, port: 443 }]
     {{- end }}
+{{- range $supplier := list (dict "name" "sms" "components" (list "account-service") "cidrs" .Values.external.smsProviderCidrs) (dict "name" "commerce" "components" (list "account-service" "billing-service") "cidrs" .Values.external.commerceProviderCidrs) }}
+{{- if $supplier.cidrs }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: {{ include "pinvou.fullname" $ }}-{{ $supplier.name }}-egress }
+spec:
+  podSelector:
+    matchLabels: {{ include "pinvou.selector" $ | nindent 6 }}
+    matchExpressions: [{ key: app.kubernetes.io/component, operator: In, values: {{ toJson $supplier.components }} }]
+  policyTypes: [Egress]
+  egress:
+    {{- range $cidr := $supplier.cidrs }}
+    - to: [{ ipBlock: { cidr: {{ $cidr | quote }} } }]
+      ports: [{ protocol: TCP, port: 443 }]
+    {{- end }}
+{{- end }}
+{{- end }}
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy

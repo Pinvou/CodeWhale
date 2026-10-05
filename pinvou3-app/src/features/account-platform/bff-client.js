@@ -83,7 +83,9 @@ export class AccountPlatformBffClient {
   balance(signal) { return this.request('token', '/v1/me/balance?consistency=strong', { signal }); }
   createRecharge(productId, channel, key) { return this.request('token', '/v1/recharge/orders', { method: 'POST', headers: { 'Idempotency-Key': key }, body: { product_id: productId, channel } }); }
   recentRechargeOrder(signal) { return this.request('token', '/v1/recharge/orders/recent', { signal }); }
+  rechargeOrders(signal) { return this.request('token', '/v1/recharge/orders', { signal }); }
   rechargeOrder(orderId, signal) { return this.request('token', `/v1/recharge/orders/${orderId}`, { signal }); }
+  entitlementPackages(signal) { return this.request('token', '/v1/me/entitlement-packages', { signal }); }
   usageHistory(cursor = '', signal) {
     const next = cursor ? `&cursor=${encodeURIComponent(cursor)}` : '';
     return this.request('token', `/v1/me/usage-requests?limit=20${next}`, { signal });
@@ -99,4 +101,16 @@ export class AccountPlatformBffClient {
     if (!response.ok) throw errorFromResponse(response, await readPayload(response));
     this.csrfToken = '';
   }
+}
+
+// Commerce and slider QR endpoints return bounded PNG data, never remote images.
+export function safePNGImage(value) {
+  if (typeof value !== 'string' || value.length > 524288 || !/^data:image\/png;base64,[A-Za-z0-9+/]+={0,2}$/u.test(value)) return '';
+  try {
+    const bytes = globalThis.atob(value.slice('data:image/png;base64,'.length));
+    if (bytes.length < 33 || bytes.slice(0, 8) !== '\x89PNG\r\n\x1a\n' || bytes.slice(12, 16) !== 'IHDR') return '';
+    const read32 = offset => bytes.charCodeAt(offset) * 16777216 + bytes.charCodeAt(offset + 1) * 65536 + bytes.charCodeAt(offset + 2) * 256 + bytes.charCodeAt(offset + 3);
+    const width = read32(16); const height = read32(20);
+    return width > 0 && height > 0 && width <= 4096 && height <= 4096 ? value : '';
+  } catch { return ''; }
 }

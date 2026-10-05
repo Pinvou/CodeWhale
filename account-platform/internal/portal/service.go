@@ -569,7 +569,7 @@ func accountPathAllowed(method, resource string) bool {
 func tokenPathAllowed(method, resource string) bool {
 	if method == http.MethodGet {
 		switch resource {
-		case "/v1/recharge/products", "/v1/recharge/orders/recent", "/v1/me/balance", "/v1/me/usage-requests", "/v1/token-accounts", "/v1/token-accounts/eligible":
+		case "/v1/recharge/products", "/v1/recharge/orders", "/v1/recharge/orders/recent", "/v1/me/balance", "/v1/me/entitlement-packages", "/v1/me/usage-requests", "/v1/token-accounts", "/v1/token-accounts/eligible":
 			return true
 		}
 		if orderID, ok := strings.CutPrefix(resource, "/v1/recharge/orders/"); ok {
@@ -700,7 +700,7 @@ func billingAdminPathAllowed(method, resource string) bool {
 	case "wallets":
 		return method == http.MethodGet && parts[4] == "ledger"
 	case "payment-orders":
-		return method == http.MethodPost && (parts[4] == "sync" || parts[4] == "refunds")
+		return method == http.MethodPost && (parts[4] == "sync" || parts[4] == "repair" || parts[4] == "refunds")
 	case "adjustments":
 		return method == http.MethodPost && (parts[4] == "approve" || parts[4] == "reject")
 	case "usage-holds":

@@ -334,7 +334,7 @@ try {
   });
 
   for (const [kind, navigation, tab, cell, labels, attribute] of [
-    ["orders", 4, 3, 0, ["Order A", "Order B", "Order C"]],
+    ["orders", 4, 3, 0, ["Order APinvou order: 00000000…00101", "Order BPinvou order: 00000000…00102", "Order CPinvou order: 00000000…00103"]],
     ["adjustments", 4, 4, 2, ["Adjustment A", "Adjustment B", "Adjustment C"]],
     [
       "holds",
@@ -361,6 +361,7 @@ try {
           await page.click(`.adm-tabs button:nth-child(${tab})`);
         }
         await expectRows(page, cell, labels, attribute);
+        if (kind === "orders") await expectRows(page, 3, ["ALIPAY", "WECHAT", "UNIONPAY"]);
         for (const order of [
           [2, 0, 1],
           [1, 2, 0],
@@ -372,10 +373,51 @@ try {
             order.map((index) => labels[index]),
             attribute,
           );
+          if (kind === "orders") await expectRows(page, 3, order.map(index => ["ALIPAY", "WECHAT", "UNIONPAY"][index]));
         }
       },
     );
   }
+  await run("payment_capabilities_disable_unsupported_actions", "limited-payment", async page => {
+    await nav(page, 4); await page.waitForSelector(".adm-tabs"); await page.click(".adm-tabs button:nth-child(3)");
+    await page.waitForSelector("tbody tr");
+    assert.equal(await page.$$eval("tbody tr .adm-row-actions", rows => rows.every(row => !row.children[0].disabled && row.children[1].disabled && row.children[2].disabled)), true);
+    await page.click(".adm-tabs button:nth-child(6)");
+    assert.equal(await page.$(".adm-ops-form"), null);
+  });
+  await run("payment_repair_retains_owner_across_navigation", "payment-repair", async page => {
+    page.on("dialog", dialog => void dialog.accept("Public review reason"));
+    await nav(page, 4); await page.waitForSelector(".adm-tabs"); await page.click(".adm-tabs button:nth-child(3)");
+    await page.waitForSelector("tbody tr .adm-row-actions button:nth-child(2)");
+    await page.click("tbody tr .adm-row-actions button:nth-child(2)"); await pending(page, "repair");
+    await page.click("tbody tr .adm-row-actions button:nth-child(2)");
+    await nav(page, 3); await page.waitForSelector(".adm-search"); await nav(page, 4);
+    await page.waitForSelector(".adm-tabs"); await page.click(".adm-tabs button:nth-child(3)");
+    assert.equal(await page.$eval("tbody tr .adm-row-actions button:nth-child(2)", button => button.disabled), true);
+    assert.equal(await page.evaluate(() => window.__adminReview.mutations()), 1);
+    await settle(page, "repair", 503); await page.waitForFunction(() => !document.querySelector("tbody tr .adm-row-actions button:nth-child(2)").disabled);
+    assert.equal(await page.$(".adm-inline-message.error"), null, "departed repair cannot set new-view error");
+  });
+  await run("payment_order_search_preserves_filters_and_handles_auth", "order-search-auth", async page => {
+    await nav(page, 4); await page.waitForSelector(".adm-tabs"); await page.click(".adm-tabs button:nth-child(3)");
+    await page.$eval(".adm-ops-form input", element => { Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,"value").set.call(element,"Public order query"); element.dispatchEvent(new Event("input",{bubbles:true})); });
+    await page.select(".adm-ops-form select", "MANUAL_REVIEW"); await page.click(".adm-ops-form button");
+    await page.waitForFunction(() => !document.querySelector("nav"));
+    assert.deepEqual(await page.evaluate(() => window.__adminReview.orderQueries().at(-1)), {q:"Public order query",status:"MANUAL_REVIEW"});
+  });
+  await run("payment_order_filter_survives_completion_refresh_and_remount", "order-filter-completion", async page => {
+    await nav(page, 4); await page.waitForSelector(".adm-tabs"); await page.click(".adm-tabs button:nth-child(3)");
+    await page.$eval(".adm-ops-form input", element => { Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,"value").set.call(element,"Order A"); element.dispatchEvent(new Event("input",{bubbles:true})); });
+    await page.click(".adm-ops-form button"); await page.waitForFunction(() => document.querySelectorAll("tbody tr").length === 1);
+    await page.click("tbody tr .adm-row-actions button:first-child"); await pending(page, "payment-sync");
+    await settle(page, "payment-sync");
+    await page.waitForFunction(() => window.__adminReview.orderQueries().length >= 4 && document.querySelectorAll("tbody tr").length === 1);
+    assert.deepEqual(await page.evaluate(() => window.__adminReview.orderQueries().slice(1).map(query => query.q)), ["Order A", "Order A", "Order A"]);
+    await page.click(".adm-actions > button"); await page.waitForFunction(() => window.__adminReview.orderQueries().length >= 5 && document.querySelectorAll("tbody tr").length === 1);
+    await nav(page, 3); await page.waitForSelector(".adm-search"); await nav(page, 4); await page.waitForSelector(".adm-tabs"); await page.click(".adm-tabs button:nth-child(3)");
+    assert.equal(await page.$eval(".adm-ops-form input", input => input.value), "Order A");
+    assert.equal(await page.$$eval("tbody tr", rows => rows.length), 1);
+  });
   console.log(
     `Admin UI: ${passed} PASS, ${failures.length} FAIL, 0 SKIP. Real React/browser with controlled public clients; not BFF/PG/Keycloak, Safari, or production E2E.`,
   );

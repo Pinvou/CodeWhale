@@ -1,6 +1,8 @@
 package migrations
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"os"
 	"path/filepath"
 	"testing"
@@ -22,6 +24,37 @@ func TestLoadSortsAndPairsMigrations(t *testing.T) {
 	}
 	if loaded[0].DownSQL != "SELECT -1;" || loaded[0].Checksum == "" {
 		t.Fatalf("migration was not paired or hashed: %+v", loaded[0])
+	}
+}
+
+func TestLoadNormalizesLineEndingsForChecksum(t *testing.T) {
+	directory := t.TempDir()
+	writeMigration(t, directory, "000001_first.up.sql", "SELECT 1;\r\nSELECT 2;\r\n")
+
+	loaded, err := Load(directory)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+
+	digest := sha256.Sum256([]byte("SELECT 1;\nSELECT 2;\n"))
+	want := hex.EncodeToString(digest[:])
+	if got := loaded[0].Checksum; got != want {
+		t.Fatalf("Checksum = %q, want %q", got, want)
+	}
+}
+
+func TestChecksumMatchesLegacyLineEndingsOnly(t *testing.T) {
+	lf := "SELECT 1;\nSELECT 2;\n"
+	crlf := "SELECT 1;\r\nSELECT 2;\r\n"
+
+	if !matchesChecksum(checksum(crlf), lf) {
+		t.Fatal("checksumMatches rejected the equivalent legacy CRLF checksum")
+	}
+	if !matchesChecksum(checksum(lf), crlf) {
+		t.Fatal("checksumMatches rejected the equivalent normalized LF checksum")
+	}
+	if matchesChecksum(checksum("SELECT 3;\n"), lf) {
+		t.Fatal("checksumMatches accepted changed SQL")
 	}
 }
 

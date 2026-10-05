@@ -82,10 +82,12 @@ func (s *Service) Handler(verify identity.VerifyFunc) http.Handler {
 	router.POST("/v1/chat/completions", httpserver.AdaptFunc(s.chatCompletions))
 	router.GET("/v1/recharge/products", httpserver.AdaptFunc(s.rechargeProducts))
 	router.POST("/v1/recharge/orders", httpserver.AdaptFunc(s.createRechargeOrder))
+	router.GET("/v1/recharge/orders", httpserver.AdaptFunc(s.listRechargeOrders))
 	router.GET("/v1/recharge/orders/recent", httpserver.AdaptFunc(s.getRecentRechargeOrder))
 	router.GET("/v1/recharge/orders/:order_id", httpserver.AdaptFunc(s.getRechargeOrder))
 	router.POST("/v1/recharge/orders/:order_id/close", httpserver.AdaptFunc(s.closeRechargeOrder))
 	router.GET("/v1/me/balance", httpserver.AdaptFunc(s.getBalance))
+	router.GET("/v1/me/entitlement-packages", httpserver.AdaptFunc(s.getEntitlementPackages))
 	admin := router.Group("/admin/v1")
 	admin.Use(identity.RequireRealmRoleGin("platform-admin"))
 	admin.GET("/system/newapi-status", httpserver.AdaptFunc(s.adminNewAPIStatus))
@@ -103,6 +105,28 @@ func (s *Service) Handler(verify identity.VerifyFunc) http.Handler {
 	mux.Handle("POST /internal/v1/usage-waivers", serviceauth.Middleware(s.waiverServiceToken, http.HandlerFunc(s.adminWaiver)))
 	mux.Handle("/", router)
 	return mux
+}
+
+func (s *Service) listRechargeOrders(w http.ResponseWriter, r *http.Request) {
+	resolved, ok := s.resolveContext(w, r)
+	if !ok {
+		return
+	}
+	if resolved.ContextType != "PERSONAL" {
+		s.writeError(w, r, ErrForbidden)
+		return
+	}
+	walletID, err := s.wallets.Ensure(r.Context(), "PERSONAL", resolved.UserID)
+	if err != nil {
+		api.WriteError(w, http.StatusServiceUnavailable, "BILLING_UNAVAILABLE", "recharge orders are unavailable", httpserver.RequestID(r.Context()))
+		return
+	}
+	payload, err := s.billing.RechargeOrders(r.Context(), resolved.UserID, walletID)
+	if err != nil {
+		api.WriteError(w, http.StatusServiceUnavailable, "BILLING_UNAVAILABLE", "recharge orders are unavailable", httpserver.RequestID(r.Context()))
+		return
+	}
+	writeRawNoStore(w, http.StatusOK, payload)
 }
 
 func (s *Service) listManagedTokenAccounts(w http.ResponseWriter, r *http.Request) {
@@ -240,10 +264,27 @@ func (s *Service) resolveOwnedAccount(w http.ResponseWriter, r *http.Request) (A
 }
 
 func (s *Service) rechargeProducts(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.resolveContext(w, r); !ok {
+	resolved, ok := s.resolveContext(w, r)
+	if !ok {
 		return
 	}
-	payload, err := s.billing.Products(r.Context())
+	var payload json.RawMessage
+	var err error
+	if resolved.ContextType == "ORGANIZATION" {
+		client, supported := s.billing.(OrganizationProductBillingClient)
+		if !supported {
+			err = ErrForbidden
+		} else {
+			walletID, walletErr := s.activeWallet(r.Context(), resolved)
+			if walletErr != nil {
+				err = walletErr
+			} else {
+				payload, err = client.ProductsForOrganization(r.Context(), walletID)
+			}
+		}
+	} else {
+		payload, err = s.billing.Products(r.Context())
+	}
 	if err != nil {
 		api.WriteError(w, http.StatusServiceUnavailable, "BILLING_UNAVAILABLE", "the recharge catalog is unavailable", httpserver.RequestID(r.Context()))
 		return
@@ -260,12 +301,22 @@ func (s *Service) createRechargeOrder(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, ErrForbidden)
 		return
 	}
+	// Commerce adapters require a verified, synchronized mobile. The community
+	// simulator does not: send no commerce identity unless Account proves it.
+	mobile := ""
+	if resolved.MobileVerified && resolved.Mobile != nil && resolved.MallSyncStatus == "SYNCED" {
+		mobile = *resolved.Mobile
+	}
 	var body struct {
 		ProductID string `json:"product_id"`
 		Channel   string `json:"channel"`
 	}
 	if err := api.DecodeJSON(w, r, &body); err != nil {
 		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid request body", httpserver.RequestID(r.Context()))
+		return
+	}
+	if resolved.ContextType != "PERSONAL" && !legacyRechargeProduct(body.ProductID) {
+		api.WriteError(w, http.StatusForbidden, "PERSONAL_RECHARGE_ONLY", "personal plans can only be purchased in the personal context", httpserver.RequestID(r.Context()))
 		return
 	}
 	if !validIdempotencyKey(r.Header.Get("Idempotency-Key")) {
@@ -277,12 +328,21 @@ func (s *Service) createRechargeOrder(w http.ResponseWriter, r *http.Request) {
 		api.WriteError(w, http.StatusServiceUnavailable, "BILLING_UNAVAILABLE", "the active wallet is unavailable", httpserver.RequestID(r.Context()))
 		return
 	}
-	payload, err := s.billing.CreateRechargeOrder(r.Context(), resolved.UserID, walletID, body.ProductID, strings.ToUpper(body.Channel), r.Header.Get("Idempotency-Key"))
+	payload, err := s.billing.CreateRechargeOrder(r.Context(), resolved.UserID, walletID, body.ProductID, strings.ToUpper(body.Channel), mobile, r.Header.Get("Idempotency-Key"))
 	if err != nil {
 		api.WriteError(w, http.StatusBadGateway, "RECHARGE_CREATE_FAILED", "the recharge order could not be created", httpserver.RequestID(r.Context()))
 		return
 	}
 	writeRawNoStore(w, http.StatusCreated, payload)
+}
+
+func legacyRechargeProduct(productID string) bool {
+	switch productID {
+	case "CNY_1", "CNY_10", "CNY_100", "CNY_200":
+		return true
+	default:
+		return false
+	}
 }
 
 func (s *Service) getRechargeOrder(w http.ResponseWriter, r *http.Request) {
@@ -352,6 +412,29 @@ func (s *Service) getBalance(w http.ResponseWriter, r *http.Request) {
 	payload, err := s.billing.Balance(r.Context(), walletID)
 	if err != nil {
 		api.WriteError(w, http.StatusServiceUnavailable, "BILLING_UNAVAILABLE", "the balance is unavailable", httpserver.RequestID(r.Context()))
+		return
+	}
+	writeRawNoStore(w, http.StatusOK, payload)
+}
+
+func (s *Service) getEntitlementPackages(w http.ResponseWriter, r *http.Request) {
+	resolved, ok := s.resolveContext(w, r)
+	if !ok {
+		return
+	}
+	if resolved.ContextType != "PERSONAL" {
+		s.writeError(w, r, ErrForbidden)
+		return
+	}
+	walletID, err := s.wallets.Ensure(r.Context(), "PERSONAL", resolved.UserID)
+	client, supported := s.billing.(EntitlementPackageBillingClient)
+	if err != nil || !supported {
+		api.WriteError(w, http.StatusServiceUnavailable, "BILLING_UNAVAILABLE", "entitlement packages are unavailable", httpserver.RequestID(r.Context()))
+		return
+	}
+	payload, err := client.Packages(r.Context(), resolved.UserID, walletID)
+	if err != nil {
+		api.WriteError(w, http.StatusServiceUnavailable, "BILLING_UNAVAILABLE", "entitlement packages are unavailable", httpserver.RequestID(r.Context()))
 		return
 	}
 	writeRawNoStore(w, http.StatusOK, payload)
@@ -682,11 +765,14 @@ func (r *HTTPContextResolver) Resolve(ctx context.Context, authorization string)
 		UnitIDs           []uuid.UUID `json:"unit_ids"`
 		AncestorUnitIDs   []uuid.UUID `json:"ancestor_unit_ids"`
 		Roles             []string    `json:"roles"`
+		Mobile            *string     `json:"mobile"`
+		MobileVerified    bool        `json:"mobile_verified"`
+		MallSyncStatus    string      `json:"mall_sync_status"`
 	}
 	if err := json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&body); err != nil {
 		return AuthorizationContext{}, err
 	}
-	return AuthorizationContext{UserID: body.UserID, SessionID: body.SessionID, ContextType: body.ContextType, OrganizationID: body.OrganizationID, MembershipVersion: body.MembershipVersion, UnitIDs: body.UnitIDs, AncestorUnitIDs: body.AncestorUnitIDs, Roles: body.Roles}, nil
+	return AuthorizationContext{UserID: body.UserID, SessionID: body.SessionID, ContextType: body.ContextType, OrganizationID: body.OrganizationID, MembershipVersion: body.MembershipVersion, UnitIDs: body.UnitIDs, AncestorUnitIDs: body.AncestorUnitIDs, Roles: body.Roles, Mobile: body.Mobile, MobileVerified: body.MobileVerified, MallSyncStatus: body.MallSyncStatus}, nil
 }
 
 type HTTPWalletResolver struct {

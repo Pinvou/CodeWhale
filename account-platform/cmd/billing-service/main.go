@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log"
 	"os"
 	"os/signal"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/billing"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/config"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/h3cmall"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/identity"
 )
@@ -28,9 +30,7 @@ func main() {
 		log.Fatal(err)
 	}
 	defer repository.Close()
-	payments, err := billing.NewPaymentCoordinator(repository, os.Getenv("PAYMENT_SIMULATOR_URL"), os.Getenv("INTERNAL_SERVICE_TOKEN"), "pinvou-development", os.Getenv("BILLING_PAYMENT_CALLBACK_URL"), map[string]string{
-		"UNIONPAY": os.Getenv("PAYMENT_SIM_HMAC_UNIONPAY"), "ALIPAY": os.Getenv("PAYMENT_SIM_HMAC_ALIPAY"), "WECHAT": os.Getenv("PAYMENT_SIM_HMAC_WECHAT"),
-	})
+	payments, err := paymentCoordinator(ctx, repository, cfg.Environment)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -64,7 +64,49 @@ func main() {
 		billing.NewExpiredPaymentReconciler(repository, payments, reconciliationInterval).Run(ctx)
 	}()
 	defer func() { cancel(); <-paymentExpiryDone }()
+	packageExpiryDone := make(chan struct{})
+	go func() {
+		defer close(packageExpiryDone)
+		billing.NewPackageExpiryWorker(repository, time.Minute).Run(ctx)
+	}()
+	defer func() { cancel(); <-packageExpiryDone }()
 	if err := httpserver.RunWithApplication("billing-service", service.Handler(os.Getenv("INTERNAL_SERVICE_TOKEN"), verify), repository.Ping); err != nil {
 		log.Fatal(err)
+	}
+}
+
+func paymentCoordinator(ctx context.Context, repository *billing.PostgresRepository, environment string) (*billing.PaymentCoordinator, error) {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("BILLING_PAYMENT_PROVIDER"))) {
+	case "h3c_mall":
+		products, err := repository.ActiveExternalProducts(ctx)
+		if err != nil {
+			return nil, err
+		}
+		client, err := h3cmall.New(h3cmall.Config{BaseURL: os.Getenv("H3C_MALL_BASE_URL"), AppKey: os.Getenv("H3C_MALL_APP_KEY"), AppSecret: os.Getenv("H3C_MALL_APP_SECRET"), AllowInsecure: environment == "development" || environment == "test"})
+		if err != nil {
+			return nil, err
+		}
+		provider, err := billing.NewH3CMallProvider(client, products)
+		if err != nil {
+			return nil, err
+		}
+		coordinator, err := billing.NewPaymentCoordinatorWithProvider(repository, provider, products)
+		if err != nil {
+			return nil, err
+		}
+		return coordinator.AllowTentativePrices(strings.EqualFold(strings.TrimSpace(os.Getenv("BILLING_ALLOW_TENTATIVE_PRICES")), "true")), nil
+	case "", "simulator":
+		coordinator, err := billing.NewPaymentCoordinator(repository, os.Getenv("PAYMENT_SIMULATOR_URL"), os.Getenv("INTERNAL_SERVICE_TOKEN"), "pinvou-development", os.Getenv("BILLING_PAYMENT_CALLBACK_URL"), map[string]string{
+			"UNIONPAY": os.Getenv("PAYMENT_SIM_HMAC_UNIONPAY"), "ALIPAY": os.Getenv("PAYMENT_SIM_HMAC_ALIPAY"), "WECHAT": os.Getenv("PAYMENT_SIM_HMAC_WECHAT"),
+		})
+		if err != nil {
+			return nil, err
+		}
+		// Development simulator prices are test fixtures, not production quotes.
+		// An external production provider retains the explicit opt-in above.
+		development := environment == "development" || environment == "test"
+		return coordinator.AllowTentativePrices(development || strings.EqualFold(strings.TrimSpace(os.Getenv("BILLING_ALLOW_TENTATIVE_PRICES")), "true")), nil
+	default:
+		return nil, errors.New("BILLING_PAYMENT_PROVIDER must be simulator or h3c_mall")
 	}
 }

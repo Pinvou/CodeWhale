@@ -1,3 +1,4 @@
+import { accountPlatformCopy } from '../src/shared/account-platform-i18n.js';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { readFile } from 'node:fs/promises';
@@ -219,7 +220,7 @@ test('desktop sign-in renders inside the popover and never opens a browser', asy
   const bridge = await readFile(new URL('../src/platform/tauri/bridge/account-platform.js', import.meta.url), 'utf8');
   const backend = await readFile(new URL('../src-tauri/src/features/account_platform/mod.rs', import.meta.url), 'utf8');
   assert.match(popover, /type="password"/);
-  assert.match(popover, /autoComplete="current-password"/);
+  assert.match(popover, /autoComplete=\{loginMode === 'register' \? 'new-password' : 'current-password'\}/);
   assert.match(popover, /await client\.login\(loginAccount, loginPassword\)/);
   assert.match(bridge, /invoke\("account_platform_login", \{ credentials: credentials \}\)/);
   assert.doesNotMatch(backend, /open_target|authorization_request|TcpListener/);
@@ -297,7 +298,7 @@ test('personal center and desktop chat share one account identity lifecycle', as
   assert.match(runtime, /session\.account_user_id\.as_deref\(\) == Some\(user_id\.as_str\(\)\)/);
   assert.equal(
     (commands.match(/pool\.mark_model_updated\(BUILTIN_LLMAPI_MODEL_ID\)/g) || []).length,
-    2,
+    3,
   );
 });
 
@@ -322,9 +323,10 @@ test('personal center keeps context on overview and cannot create organizations'
   const styles = await readFile(new URL('../src/features/account-platform/account-platform.css', import.meta.url), 'utf8');
   const bffClient = await readFile(new URL('../src/features/account-platform/bff-client.js', import.meta.url), 'utf8');
   const desktopClient = await readFile(new URL('../src/features/account-platform/desktop-client.js', import.meta.url), 'utf8');
-  const i18n = await readFile(new URL('../src/shared/account-platform-i18n.js', import.meta.url), 'utf8');
-  assert.match(i18n, /title:'个人中心'/);
-  assert.match(i18n, /activeContext:'当前身份', switchContext:'切换身份', personal:'个人账号'/);
+  assert.equal(accountPlatformCopy.zh.title, '个人中心');
+  assert.equal(accountPlatformCopy.zh.activeContext, '当前身份');
+  assert.equal(accountPlatformCopy.zh.switchContext, '切换身份');
+  assert.equal(accountPlatformCopy.zh.personal, '个人账号');
   // Existing Token management copy remains alongside current identity copy.
   assert.match(view, /function Overview[\s\S]*copy\.activeContext/);
   assert.equal((view.match(/copy\.activeContext/g) || []).length, 1);
@@ -395,4 +397,87 @@ test('admin organization detail supports ownership transfer, rename, leaf deleti
   assert.match(view, /copy\.accounts\.organizationSearch/);
   assert.match(view, /editingOrganizationName \? <form/);
   assert.match(view, /setEditingOrganizationName\(true\)/);
+});
+
+test('desktop mobile registration confirms matching passwords before network requests', async () => {
+  const popover = await readFile(new URL('../src/features/account-platform/AccountPlatformPopover.jsx', import.meta.url), 'utf8');
+  assert.match(popover, /const \[passwordConfirmation, setPasswordConfirmation\] = useState\(''\)/);
+  assert.match(popover, /if \(password !== confirmation\) return 'passwordMismatch'/);
+  assert.match(popover, /registrationInputError\(account, mobile, password, passwordConfirmation\)/);
+  assert.match(popover, /placeholder=\{copy\.confirmPassword\}[\s\S]*?value=\{passwordConfirmation\}|value=\{passwordConfirmation\}[\s\S]*?placeholder=\{copy\.confirmPassword\}/);
+  assert.match(popover, /!passwordConfirmation \|\| password !== passwordConfirmation/);
+  assert.equal(accountPlatformCopy.zh.mobileOrAccount, '手机号码或用户名');
+  assert.equal(accountPlatformCopy.zh.password, '密码（至少 8 位，含字母和数字）');
+  assert.equal(accountPlatformCopy.zh.confirmPassword, '再次输入密码');
+  assert.equal(accountPlatformCopy.zh.passwordMismatch, '两次输入的密码不一致。');
+});
+
+
+test('slider verification overlays the login form without changing its layout height', async () => {
+  const popover = await readFile(new URL('../src/features/account-platform/AccountPlatformPopover.jsx', import.meta.url), 'utf8');
+  const loginForm = popover.match(/<form className=\{`space-y-3[\s\S]*?<\/form>/)?.[0] || '';
+  assert.doesNotMatch(loginForm, /<SliderCaptcha/);
+  assert.match(popover, /role="dialog" aria-modal="true"[\s\S]*?absolute inset-0 z-20/);
+  assert.match(popover, /onClose=\{\(\) => \{ if \(authBusy\) return; setCaptcha\(null\); setCaptchaOffset\(0\); \}\}/);
+  assert.match(popover, /if \(captcha && !authBusy\)[\s\S]*?setCaptcha\(null\)/);
+  assert.equal(accountPlatformCopy.zh.captchaClose, '关闭验证');
+});
+
+
+test('personal center hides the organization tab when the user has no organizations', async () => {
+  const view = await readFile(new URL('../src/features/account-platform/AccountPlatformView.jsx', import.meta.url), 'utf8');
+  assert.match(view, /organizations\.length \? \['organization'\] : \[\]/);
+  assert.match(view, /personalContext \? \['orders', 'invoice'\] : \[\]/);
+  assert.match(view, /!navigationSections\.includes\(section\)[\s\S]*setSection\('overview'\)/);
+  assert.match(view, /<nav>\{navigationSections\.map/);
+});
+
+
+test('payment capabilities isolate provider limitations and enable reviewed-order repair', async () => {
+  const view = await readFile(new URL('../src/features/account-platform/AdminPlatformView.jsx', import.meta.url), 'utf8');
+  const i18n = await readFile(new URL('../src/shared/admin-platform-i18n.js', import.meta.url), 'utf8');
+  const provider = await readFile(new URL('../../account-platform/internal/billing/h3c_mall.go', import.meta.url), 'utf8');
+  assert.match(provider, /Provider: "h3c_mall", OrderSyncSupported: true, ManualRepairSupported: true/);
+  assert.match(view, /refundSupported = paymentCapabilities\.refund_supported === true/);
+  assert.match(view, /reconciliationSupported = paymentCapabilities\.reconciliation_supported === true/);
+  assert.match(view, /repairSupported = paymentCapabilities\.manual_repair_supported === true/);
+  assert.match(view, /client\.repairPaymentOrder\(item\.order_id, reason\)/);
+  assert.doesNotMatch(view, /paymentCapabilities\.provider === 'h3c_mall'/);
+  assert.match(view, /disabled=\{busy \|\| !refundSupported/);
+  assert.match(view, /disabled=\{busy \|\| !repairSupported/);
+  assert.match(view, /tab === 'reconciliations' && reconciliationSupported && <form[\s\S]*?<button disabled=\{busy\}>\{copy\.billing\.runReconciliation\}/);
+  assert.match(i18n, /不支持的退款、主动关单、支付回调或日终账单对账操作已自动禁用/);
+});
+
+
+test('personal plan history shows traceable package and payment identifiers', async () => {
+  const view = await readFile(new URL('../src/features/account-platform/AccountPlatformView.jsx', import.meta.url), 'utf8');
+  for (const field of ['package_id', 'pinvou_order_id', 'mall_order_id', 'sku_code', 'credited_at', 'valid_until', 'invoice_status']) {
+    assert.match(view, new RegExp(`item\\.${field}`));
+  }
+  assert.match(view, /points_total_microcredits/);
+  assert.match(view, /points_used_microcredits/);
+  assert.match(view, /points_remaining_microcredits/);
+});
+
+
+test('billing operators can search repair candidates without provider-specific UI branches', async () => {
+  const view = await readFile(new URL('../src/features/account-platform/AdminPlatformView.jsx', import.meta.url), 'utf8');
+  const client = await readFile(new URL('../src/features/account-platform/admin-client.js', import.meta.url), 'utf8');
+  assert.match(view, /orderFilter/);
+  assert.match(view, /mobile_masked/);
+  assert.match(view, /channel_transaction_id/);
+  assert.match(client, /query\.set\('q', filters\.q\)/);
+  assert.match(client, /query\.set\('status', filters\.status\)/);
+  assert.doesNotMatch(view, /h3c|新华三/i);
+});
+
+
+test('billing order readers tolerate provider fields that are null before the first successful sync', async () => {
+  const payments = await readFile(new URL('../../account-platform/internal/billing/payments.go', import.meta.url), 'utf8');
+  const refunds = await readFile(new URL('../../account-platform/internal/billing/refunds.go', import.meta.url), 'utf8');
+  const reconciliation = await readFile(new URL('../../account-platform/internal/billing/reconciliation.go', import.meta.url), 'utf8');
+  assert.match(payments, /COALESCE\(payment_url,''\),COALESCE\(qr_data,''\)/);
+  assert.equal((refunds.match(/COALESCE\(payment_url,''\),COALESCE\(qr_data,''\)/g) || []).length, 2);
+  assert.match(reconciliation, /COALESCE\(payment_url,''\),channel_transaction_id/);
 });

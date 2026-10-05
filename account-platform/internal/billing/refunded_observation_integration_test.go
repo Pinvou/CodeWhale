@@ -47,7 +47,7 @@ func TestPostgresHTTPSimulatorFirstRefundObservationRequiresReviewAndLateSuccess
 			}
 			p.provider = provider
 			var product string
-			if err = p.repository.pool.QueryRow(ctx, `SELECT product_id FROM recharge_products ORDER BY amount_fen LIMIT 1`).Scan(&product); err != nil {
+			if err = p.repository.pool.QueryRow(ctx, `SELECT product_id FROM recharge_products WHERE price_status='LEGACY' AND enabled ORDER BY amount_fen LIMIT 1`).Scan(&product); err != nil {
 				t.Fatal(err)
 			}
 			order, _, err := p.CreateOrder(ctx, user, w.ID, product, "ALIPAY", uuid.NewString())
