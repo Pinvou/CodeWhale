@@ -8003,7 +8003,7 @@ fn run_sessions_export(
     let artifacts_dir = if skip_artifacts {
         None
     } else {
-        session_export::session_artifacts_dir(manager.sessions_dir(), &session.metadata.id)
+        session_export::session_artifacts_dir(manager.sessions_dir(), &session.metadata.id)?
     };
     let summary = write_session_archive(
         &session,
