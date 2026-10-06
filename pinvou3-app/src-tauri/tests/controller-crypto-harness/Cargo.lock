@@ -21,6 +21,7 @@ dependencies = [
  "cfg-if",
  "cipher",
  "cpufeatures 0.2.17",
+ "zeroize",
 ]
 
 [[package]]
@@ -35,6 +36,7 @@ dependencies = [
  "ctr",
  "ghash",
  "subtle",
+ "zeroize",
 ]
 
 [[package]]
@@ -397,6 +399,7 @@ checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 name = "pinvou-controller-crypto-harness"
 version = "0.0.0"
 dependencies = [
+ "aes",
  "aes-gcm",
  "base64",
  "hkdf",

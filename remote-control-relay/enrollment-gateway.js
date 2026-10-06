@@ -5,6 +5,7 @@ import { isIP } from "node:net";
 import { promisify } from "node:util";
 import { URL } from "node:url";
 import { WebSocket, WebSocketServer } from "ws";
+import { closeClientFromUpstream } from "./websocket-close.js";
 
 const MAX_FIRST_FRAME_BYTES = 16 * 1024;
 const DEFAULT_MAX_PAYLOAD_BYTES = 4 * 1024 * 1024;
@@ -314,7 +315,7 @@ export function createEnrollmentGateway({
         if (!authenticated) closePolicy(client, parsed.request_id);
       });
       upstream.once("close", (code, reason) => {
-        if (client.readyState === WebSocket.OPEN) client.close(code || 1011, reason.toString().slice(0, 123));
+        closeClientFromUpstream(client, code, reason);
       });
     });
     client.once("close", () => {

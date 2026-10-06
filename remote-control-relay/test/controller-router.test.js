@@ -38,13 +38,14 @@ function fixture({ clock = Date.now } = {}) {
   };
   let leaseAlive = true;
   const leases = {
-    claim: async () => reserved,
+    claimForDelivery: async () => ({ message: reserved, owns_initial_delivery: true }),
     acceptCommitment: ({ message, role }) => ({ message, target_role: role === "A" ? "B" : "A" }),
     forwardFinished: ({ message, role }) => ({ message, target_role: role === "A" ? "B" : "A" }),
     acceptReceipt: async ({ role }) => role === "A" ? joined : null,
     lease: (leaseId) => leaseAlive && leaseId === activeLease.controller_lease_id ? activeLease : null,
     terminateLease: async (input) => { leaseAlive = false; terminated.push(input); return true; },
     abortHandshakesBySocket: async () => 0,
+    isPendingHandshake: () => true,
     abortBySocket: async (input) => {
       leaseAlive = false;
       aborted.push(input);

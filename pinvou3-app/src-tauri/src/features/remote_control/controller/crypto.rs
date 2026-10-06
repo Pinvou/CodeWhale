@@ -3,6 +3,12 @@
 //! This module has no transport or connection-state ownership. Callers must
 //! first validate wire schemas in `protocol`; the types here bind already
 //! validated identities, roles, epochs and sequences to audited primitives.
+//!
+//! Both product and test harness enable aes/zeroize for expanded-key Drop
+//! cleanup and aes-gcm/zeroize for its temporary initialization GHASH key.
+//! This is not a guarantee that aes-gcm 0.10.3 zeroizes all internal GHASH
+//! state, registers, or compiler-generated copies. Expiry, rate limiting and
+//! authenticated Relay key provenance remain the caller's responsibility.
 
 use std::collections::{BTreeMap, HashSet};
 use std::fmt;
@@ -1310,6 +1316,12 @@ mod tests {
     use serde_json::Value;
 
     use super::super::protocol::parse_controller_pairing_transcript;
+
+    #[test]
+    fn aes_key_schedule_requires_zeroize_on_drop() {
+        fn assert_zeroize_on_drop<T: zeroize::ZeroizeOnDrop>() {}
+        assert_zeroize_on_drop::<aes_gcm::aes::Aes256>();
+    }
 
     fn fixture() -> Value {
         serde_json::from_str(include_str!(

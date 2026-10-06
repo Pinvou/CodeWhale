@@ -147,7 +147,10 @@ sha2 = "0.11"
 # Desktop-controller E2E primitives. These versions already exist in the locked
 # dependency graph through age/rustls; direct use is isolated in
 # features/remote_control/controller/crypto.rs.
-aes-gcm = "0.10.3"
+# aes-gcm's feature clears its temporary GHASH key only; explicitly enable
+# aes/zeroize as well so dropping the cipher clears its expanded AES keys.
+aes-gcm = { version = "0.10.3", features = ["zeroize"] }
+aes = { version = "0.8.4", features = ["zeroize"] }
 hkdf = "0.12.4"
 sha2_10 = { package = "sha2", version = "0.10.9" }
 x25519-dalek = { version = "2.0.1", features = ["static_secrets"] }

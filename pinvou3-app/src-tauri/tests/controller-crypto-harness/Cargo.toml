@@ -5,7 +5,8 @@ edition = "2024"
 publish = false
 
 [dependencies]
-aes-gcm = "0.10.3"
+aes-gcm = { version = "0.10.3", features = ["zeroize"] }
+aes = { version = "0.8.4", features = ["zeroize"] }
 base64 = "0.22"
 hkdf = "0.12.4"
 ring = "0.17.14"
