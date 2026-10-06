@@ -1233,7 +1233,15 @@ impl AutomationManager {
             );
         }
 
-        let terminal: Vec<AutomationRunRecord> = runs
+        // Archive before removing the live paths: `write_json_atomic` lands
+        // each record in the archive first (rename-atomic, not fsynced), so a
+        // process crash mid-delete leaves the history intact. A crash after
+        // the automation file is gone but before the live tree is dropped
+        // leaves that tree orphaned — invisible to listings and the scheduler
+        // (nothing reads it), but not cleaned up until it is removed by hand.
+        // Only the retained slice is written; the retention sweep below still
+        // bounds any leftovers from an interrupted earlier attempt.
+        let mut terminal: Vec<AutomationRunRecord> = runs
             .into_iter()
             .filter(|run| {
                 matches!(
@@ -1244,11 +1252,8 @@ impl AutomationManager {
                 )
             })
             .collect();
-        // Archive before removing the live paths: `write_json_atomic` lands
-        // each record in the archive first, so a crash mid-delete leaves the
-        // history intact (the leftover live copy is invisible once the
-        // automation is gone and is dropped with the live tree).
-        for run in &terminal {
+        terminal.sort_by_key(|run| std::cmp::Reverse(run.ended_at.unwrap_or(run.created_at)));
+        for run in terminal.iter().take(ARCHIVE_RETAINED_TERMINAL_RUNS) {
             write_json_atomic(&self.archive_run_path(run)?, run)?;
         }
         self.enforce_archive_retention(id)?;
