@@ -1258,14 +1258,12 @@ impl AutomationManager {
     /// Terminal runs archived for a deleted automation (see
     /// [`Self::delete_automation`]), newest-first by `ended_at` (falling back
     /// to `created_at`).
-    pub fn list_archived_runs(
-        &self,
-        automation_id: &str,
-    ) -> std::io::Result<Vec<AutomationRunRecord>> {
-        let entries = self
-            .read_archive_entries(automation_id)
-            .map_err(std::io::Error::other)?;
-        Ok(entries.into_iter().map(|(_, run)| run).collect())
+    pub fn list_archived_runs(&self, automation_id: &str) -> Result<Vec<AutomationRunRecord>> {
+        Ok(self
+            .read_archive_entries(automation_id)?
+            .into_iter()
+            .map(|(_, run)| run)
+            .collect())
     }
 
     /// Archived runs paired with their file paths, newest-first by `ended_at`
