@@ -3,8 +3,10 @@ package token
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -38,7 +40,7 @@ func TestNewAPIUsageEvidenceClientReadsConsumptionByRequestID(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if evidence.Usage == nil || *evidence.Usage != (Usage{InputTokens: 12, OutputTokens: 3, CachedInputTokens: 4}) {
+	if evidence.Usage == nil || *evidence.Usage != (Usage{InputTokens: 8, OutputTokens: 3, CachedInputTokens: 4}) {
 		t.Fatalf("unexpected evidence: %#v", evidence)
 	}
 }
@@ -49,12 +51,65 @@ func TestUsageReconcilerCommitsSettlementPendingWithHistoricalPrice(t *testing.T
 	billing := &reconciliationBillingFake{price: PriceVersion{ID: priceID, Model: "test-model", InputPerMillion: 1_000_000, OutputPerMillion: 2_000_000}}
 	reconciler := NewUsageReconciler(store, billing, nil, time.Second)
 	item := ReconciliationItem{UsageRequest: UsageRequest{ID: usageID, HoldID: &holdID, PriceVersionID: &priceID, Model: "test-model", Status: "SETTLEMENT_PENDING", MaximumMicrocredits: 100}, UsageSnapshot: []byte(`{"usage":{"input_tokens":3,"output_tokens":2,"cached_input_tokens":0},"actual_microcredits":7}`)}
+	item.RequestSnapshot = legacyRequestSnapshotForTest("test-model")
 
 	if err := reconciler.reconcile(context.Background(), item); err != nil {
 		t.Fatal(err)
 	}
 	if billing.committedActual != 7 || billing.committedUsageID != usageID || store.committedID != usageID || store.committedActual != 7 {
 		t.Fatalf("settlement was not repaired: billing=%#v store=%#v", billing, store)
+	}
+}
+
+func legacyRequestSnapshotForTest(model string) []byte {
+	raw, _ := json.Marshal(map[string]any{"request_sha256": strings.Repeat("a", 64), "model": model, "stream": false, "maximum_output_tokens": 4096})
+	return raw
+}
+
+func TestUsageReconcilerNormalizesOnlyProvenPersistedUsage(t *testing.T) {
+	priceID := uuid.New()
+	legacyPrice := PriceVersion{ID: priceID, Model: "test-model", InputPerMillion: 1_000_000, CachedInputPerMillion: 500_000, OutputPerMillion: 2_000_000}
+	currentPrice := versionedTestPrice(legacyPrice)
+	unprovenSource := versionedTestPrice(legacyPrice)
+	unprovenSource.Units[0].SourcePriceVersionID = uuid.New()
+	currentRaw, _ := json.Marshal(map[string]any{"usage_normalization_version": 2, "pricing_snapshot": currentPrice})
+	for _, scenario := range []struct {
+		name  string
+		raw   []byte
+		price PriceVersion
+		input int64
+		valid bool
+	}{
+		{"old-total", legacyRequestSnapshotForTest("test-model"), legacyPrice, 5, true},
+		{"old-upgraded-rich-price", legacyRequestSnapshotForTest("test-model"), currentPrice, 5, true},
+		{"old-unproven-rich-source", legacyRequestSnapshotForTest("test-model"), unprovenSource, 5, false},
+		{"current-exclusive", currentRaw, currentPrice, 3, true},
+		{"missing", nil, legacyPrice, 5, false},
+		{"null", []byte(`null`), legacyPrice, 5, false},
+		{"partial", []byte(`{"model":"test-model"}`), legacyPrice, 5, false},
+		{"foreign-version", []byte(`{"usage_normalization_version":3}`), legacyPrice, 5, false},
+		{"current-without-price", []byte(`{"usage_normalization_version":2}`), legacyPrice, 3, false},
+		{"legacy-wrong-model", legacyRequestSnapshotForTest("other-model"), legacyPrice, 5, false},
+		{"legacy-unproven-digest", []byte(`{"request_sha256":"missing","model":"test-model","stream":false,"maximum_output_tokens":4096}`), legacyPrice, 5, false},
+		{"legacy-null-stream", []byte(`{"request_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","model":"test-model","stream":null,"maximum_output_tokens":4096}`), legacyPrice, 5, false},
+		{"legacy-extra-field", []byte(`{"request_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","model":"test-model","stream":false,"maximum_output_tokens":4096,"usage_normalization_version":0}`), legacyPrice, 5, false},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			holdID := uuid.New()
+			item := ReconciliationItem{UsageRequest: UsageRequest{ID: uuid.New(), HoldID: &holdID, PriceVersionID: &priceID, Model: "test-model", MaximumMicrocredits: 100}, RequestSnapshot: scenario.raw}
+			store := &reconciliationStoreFake{}
+			billing := &reconciliationBillingFake{price: scenario.price}
+			reconciler := NewUsageReconciler(store, billing, nil, time.Second)
+			actual := int64(8) // Three exclusive input, two cached, two output.
+			err := reconciler.commit(context.Background(), item, Usage{InputTokens: scenario.input, CachedInputTokens: 2, OutputTokens: 2}, &actual)
+			if scenario.valid {
+				if err != nil || billing.committedActual != actual || billing.committedUsage.InputTokens != 3 || billing.committedUsage.CachedInputTokens != 2 || store.committedID != item.ID {
+					t.Fatalf("historical semantics were not preserved: error=%v usage=%+v", err, billing.committedUsage)
+				}
+			} else if !errors.Is(err, errManualReconciliationRequired) || billing.committedUsageID != uuid.Nil || store.committedID != uuid.Nil {
+				t.Fatal("unproven snapshot changed protected settlement facts")
+			}
+		})
 	}
 }
 
@@ -139,14 +194,15 @@ type reconciliationBillingFake struct {
 	price            PriceVersion
 	committedUsageID uuid.UUID
 	committedActual  int64
+	committedUsage   Usage
 	releasedID       uuid.UUID
 }
 
 func (b *reconciliationBillingFake) PriceByID(context.Context, uuid.UUID) (PriceVersion, error) {
 	return b.price, nil
 }
-func (b *reconciliationBillingFake) Commit(_ context.Context, usageID, _, _ uuid.UUID, actual int64, _ Usage) error {
-	b.committedUsageID, b.committedActual = usageID, actual
+func (b *reconciliationBillingFake) Commit(_ context.Context, usageID, _, _ uuid.UUID, actual int64, usage Usage) error {
+	b.committedUsageID, b.committedActual, b.committedUsage = usageID, actual, usage
 	return nil
 }
 func (b *reconciliationBillingFake) Release(_ context.Context, usageID, _, _ uuid.UUID, _ string) error {

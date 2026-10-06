@@ -30,6 +30,7 @@ type waiverFixture struct {
 	admin          http.Handler
 	internal       http.Handler
 	intent         WaiverIntent
+	logicalKey     string
 	blockCommit    atomic.Bool
 	commitEntered  chan struct{}
 	commitContinue chan struct{}
@@ -62,9 +63,7 @@ func newWaiverFixture(t *testing.T, active bool) *waiverFixture {
 		t.Fatal(err)
 	}
 	price := uuid.New()
-	if _, err = pool.Exec(ctx, `INSERT INTO pricing_versions(id,model,input_per_million,output_per_million,cached_input_per_million,effective_from,created_at) VALUES($1,$2,1000000,0,0,now()-interval '1 hour',now())`, price, usage.Model); err != nil {
-		t.Fatal(err)
-	}
+	migratedLegacyBillingPriceFixture(t, pool, PriceVersion{ID: price, Model: usage.Model, InputPerMillion: 1_000_000})
 	hold, err := billing.Reserve(ctx, usage.ID, wallet.ID, 100, &price, time.Now().Add(time.Hour))
 	if err != nil {
 		t.Fatal(err)
@@ -81,7 +80,7 @@ func newWaiverFixture(t *testing.T, active bool) *waiverFixture {
 		}
 	}
 	token := strings.Repeat("w", 32)
-	f := &waiverFixture{token: repo, billing: billing, billingPool: pool, usage: usage, hold: hold, wallet: wallet, commitEntered: make(chan struct{}), commitContinue: make(chan struct{}), intent: WaiverIntent{UsageID: usage.ID, HoldID: hold.ID, Reason: "operator final waiver", Actor: "fixture-issuer|fixture-admin"}}
+	f := &waiverFixture{logicalKey: uuid.NewString(), token: repo, billing: billing, billingPool: pool, usage: usage, hold: hold, wallet: wallet, commitEntered: make(chan struct{}), commitContinue: make(chan struct{}), intent: WaiverIntent{UsageID: usage.ID, HoldID: hold.ID, Reason: "operator final waiver", Actor: "fixture-issuer|fixture-admin"}}
 	service := billingdomain.NewService(billing).WithAuthorizer(tokenTestAuthorizer(t))
 	verify := func(context.Context, string) (identity.Principal, error) {
 		return identity.Principal{Issuer: "fixture-issuer", Subject: "fixture-admin", RealmRoles: []string{"platform-admin"}}, nil
@@ -122,6 +121,7 @@ func (f *waiverFixture) release(t *testing.T, reason string) int {
 	body, _ := json.Marshal(map[string]string{"reason": reason})
 	r := httptest.NewRequest("POST", "/admin/v1/usage-holds/"+f.hold.ID.String()+"/release", strings.NewReader(string(body)))
 	r.Header.Set("Authorization", "Bearer fixture-admin")
+	r.Header.Set("Idempotency-Key", f.logicalKey)
 	w := httptest.NewRecorder()
 	f.admin.ServeHTTP(w, r)
 	return w.Code
@@ -154,8 +154,11 @@ func (f *waiverFixture) assertTerminal(t *testing.T, status string, charged int6
 func TestPostgresHTTPAdminWaiverPreservesEvidenceAndLateSettlementCannotCharge(t *testing.T) {
 	f := newWaiverFixture(t, false)
 	ctx := context.Background()
-	if f.release(t, f.intent.Reason) != 200 || f.release(t, "different replay reason") != 200 {
+	if f.release(t, f.intent.Reason) != 200 || f.release(t, f.intent.Reason) != 200 {
 		t.Fatal("waiver/replay did not complete")
+	}
+	if f.release(t, "different replay reason") != http.StatusConflict {
+		t.Fatal("same logical waiver key accepted changed decision facts")
 	}
 	f.assertTerminal(t, "RELEASED", 0)
 	if err := f.client.Commit(ctx, f.usage.ID, f.hold.ID, f.wallet.ID, 9, Usage{InputTokens: 9}); err == nil {
@@ -447,7 +450,7 @@ func TestPostgresAdminWaiverDoesNotReportUnboundOrChargedCoordinatorResultAsSucc
 	f := newWaiverFixture(t, false)
 	for _, scenario := range []string{"wallet", "usage", "charged", "positive-release"} {
 		t.Run(scenario, func(t *testing.T) {
-			current, err := f.billing.AdminUsageHold(context.Background(), f.hold.ID)
+			current, err := f.billing.UsageHoldAuthority(context.Background(), f.hold.ID)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -476,6 +479,7 @@ func TestPostgresAdminWaiverDoesNotReportUnboundOrChargedCoordinatorResultAsSucc
 			})
 			request := httptest.NewRequest("POST", "/admin/v1/usage-holds/"+f.hold.ID.String()+"/release", strings.NewReader(`{"reason":"fixture"}`))
 			request.Header.Set("Authorization", "Bearer fixture-admin")
+			request.Header.Set("Idempotency-Key", uuid.NewString())
 			response := httptest.NewRecorder()
 			handler.ServeHTTP(response, request)
 			if response.Code != want {

@@ -156,6 +156,16 @@ func TestPostgresA09MigrationsPreserveA08IdentityMembershipAndGlobalContext(t *t
 	if err != nil {
 		t.Fatal(err)
 	}
+	const a08Version, a09Version = int64(18), int64(22)
+	var a09Migrations []migrations.Migration
+	for _, item := range items {
+		if item.Version <= a09Version {
+			a09Migrations = append(a09Migrations, item)
+		}
+	}
+	if len(a09Migrations) == 0 || a09Migrations[len(a09Migrations)-1].Version != a09Version || len(items) <= len(a09Migrations) {
+		t.Fatal("fixture requires the A09 boundary and subsequent account migrations")
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	conn, err := repository.pool.Acquire(ctx)
@@ -164,29 +174,35 @@ func TestPostgresA09MigrationsPreserveA08IdentityMembershipAndGlobalContext(t *t
 	}
 	defer conn.Release()
 	for round := 0; round < 2; round++ {
-		for range 4 {
+		for i := len(items) - 1; i >= 0 && items[i].Version > a08Version; i-- {
 			if err := applyMigrationSet(ctx, conn.Conn(), items, true); err != nil {
 				t.Fatal(err)
 			}
 		}
 		var version int64
-		if err := conn.QueryRow(ctx, `SELECT max(version) FROM schema_migrations`).Scan(&version); err != nil || version != 18 {
+		if err := conn.QueryRow(ctx, `SELECT max(version) FROM schema_migrations`).Scan(&version); err != nil || version != a08Version {
 			t.Fatal("fixture did not reach the preserved A08 schema")
 		}
 		var users, members, owners int
 		if err := conn.QueryRow(ctx, `SELECT (SELECT count(*) FROM users WHERE id=ANY($1)),(SELECT count(*) FROM memberships WHERE organization_id=$2 AND status='ACTIVE'),(SELECT count(*) FROM role_bindings rb JOIN memberships m ON m.id=rb.membership_id WHERE m.organization_id=$2 AND rb.role='OWNER' AND rb.revoked_at IS NULL)`, []uuid.UUID{ownerMe.UserID, memberMe.UserID}, organization.ID).Scan(&users, &members, &owners); err != nil || users != 2 || members != 2 || owners != 1 {
 			t.Fatal("rollback damaged inherited account or role facts")
 		}
-		if err := applyMigrationSet(ctx, conn.Conn(), items, false); err != nil {
-			t.Fatal(err)
-		}
-		current, err := repository.GetMe(ctx, member)
-		if err != nil || current.UserID != memberMe.UserID || current.Status != "ACTIVE" || current.ActiveContext.OrganizationID == nil || *current.ActiveContext.OrganizationID != organization.ID {
-			t.Fatal("upgrade lost existing identity or the audited global context")
-		}
-		resolved, err := repository.ResolveAuthorizationContext(ctx, member)
-		if err != nil || resolved.MemberVersion != 1 || !slices.Equal(resolved.Roles, []string{"MEMBER"}) {
-			t.Fatal("upgrade changed inherited membership authority")
+		// Verify A09 independently, then preserve the same facts through A10.
+		for _, target := range [][]migrations.Migration{a09Migrations, items} {
+			if err := applyMigrationSet(ctx, conn.Conn(), target, false); err != nil {
+				t.Fatal(err)
+			}
+			if err := conn.QueryRow(ctx, `SELECT max(version) FROM schema_migrations`).Scan(&version); err != nil || version != target[len(target)-1].Version {
+				t.Fatal("upgrade did not reach the requested account schema boundary")
+			}
+			current, err := repository.GetMe(ctx, member)
+			if err != nil || current.UserID != memberMe.UserID || current.Status != "ACTIVE" || current.ActiveContext.OrganizationID == nil || *current.ActiveContext.OrganizationID != organization.ID {
+				t.Fatal("upgrade lost existing identity or the audited global context")
+			}
+			resolved, err := repository.ResolveAuthorizationContext(ctx, member)
+			if err != nil || resolved.MemberVersion != 1 || !slices.Equal(resolved.Roles, []string{"MEMBER"}) {
+				t.Fatal("upgrade changed inherited membership authority")
+			}
 		}
 	}
 }

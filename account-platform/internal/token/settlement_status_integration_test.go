@@ -10,7 +10,6 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	billingdomain "github.com/Pinvou/pinvou3/account-platform/internal/billing"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/identity"
@@ -69,15 +68,17 @@ func TestPostgresSettlementStatusDistinguishesFixedBoundFromUnknownCommit(t *tes
 				t.Fatal(err)
 			}
 			price := PriceVersion{ID: uuid.New(), Model: "model-test", InputPerMillion: 1_000_000}
-			if _, err := pool.Exec(ctx, `INSERT INTO pricing_versions(id,model,input_per_million,output_per_million,cached_input_per_million,effective_from,created_at) VALUES($1,$2,$3,0,0,$4,$4)`, price.ID, price.Model, price.InputPerMillion, time.Now().Add(-time.Hour)); err != nil {
-				t.Fatal(err)
-			}
+			price = publishedBillingPriceFixture(t, billingRepo, price.Model, price.InputPerMillion, price.OutputPerMillion, price.CachedInputPerMillion)
 			if _, err := tokenRepo.pool.Exec(ctx, `UPDATE token_accounts SET wallet_id=$1`, wallet.ID); err != nil {
 				t.Fatal(err)
 			}
 			billingHandler := billingdomain.NewService(billingRepo).Handler(strings.Repeat("s", 32))
 			var commitCalls atomic.Int32
 			billingServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/internal/v1/holds/extend" && !test.loseCommitReply {
+					w.WriteHeader(http.StatusServiceUnavailable)
+					return
+				}
 				if r.URL.Path == "/internal/v1/holds/commit" {
 					call := commitCalls.Add(1)
 					if test.loseCommitReply && call == 1 {
@@ -101,7 +102,7 @@ func TestPostgresSettlementStatusDistinguishesFixedBoundFromUnknownCommit(t *tes
 			}
 			gateway := httptest.NewServer(s.Handler(func(context.Context, string) (identity.Principal, error) { return identity.Principal{}, nil }))
 			defer gateway.Close()
-			requestBody, _ := json.Marshal(map[string]any{"model": "model-test", "stream": test.stream})
+			requestBody, _ := json.Marshal(map[string]any{"model": "model-test", "stream": test.stream, "messages": []map[string]string{{"role": "user", "content": strings.Repeat("x", 400)}}})
 			request, _ := http.NewRequest(http.MethodPost, gateway.URL+"/v1/chat/completions", strings.NewReader(string(requestBody)))
 			request.Header.Set("Authorization", "Bearer test-only-access-token")
 			request.Header.Set("Idempotency-Key", uuid.NewString())
@@ -109,10 +110,17 @@ func TestPostgresSettlementStatusDistinguishesFixedBoundFromUnknownCommit(t *tes
 			if err != nil {
 				t.Fatal(err)
 			}
-			_, readErr := io.Copy(io.Discard, response.Body)
+			responseBody, readErr := io.ReadAll(response.Body)
 			response.Body.Close()
-			if readErr != nil || response.StatusCode != http.StatusOK {
+			wantResponse := http.StatusOK
+			if !test.loseCommitReply && !test.stream {
+				wantResponse = http.StatusServiceUnavailable
+			}
+			if readErr != nil || response.StatusCode != wantResponse {
 				t.Fatalf("model response status=%d read=%v", response.StatusCode, readErr)
+			}
+			if !test.loseCommitReply && (strings.Contains(string(responseBody), `"usage"`) || strings.Contains(string(responseBody), "[DONE]")) {
+				t.Fatal("failed extension exposed model completion evidence")
 			}
 			var usageID uuid.UUID
 			var holdID uuid.UUID
@@ -132,7 +140,7 @@ func TestPostgresSettlementStatusDistinguishesFixedBoundFromUnknownCommit(t *tes
 				if status != "SETTLEMENT_PENDING" || reason != "settlement_pending" || holdStatus != "COMMITTED" {
 					t.Fatal("unknown commit result did not remain settlement pending")
 				}
-			} else if status != "REVIEW" || reason != "usage_exceeds_reservation" || maximum != 100 || holdStatus != "ACTIVE" || commitCalls.Load() != 0 {
+			} else if status != "REVIEW" || reason != "additional_preauthorization_failed" || maximum != 100 || holdStatus != "ACTIVE" || commitCalls.Load() != 0 {
 				t.Fatal("fixed-bound violation was retried as an ordinary settlement or changed Billing funds")
 			}
 			statusRequest, _ := http.NewRequest(http.MethodGet, gateway.URL+"/v1/usage-requests/"+usageID.String(), nil)

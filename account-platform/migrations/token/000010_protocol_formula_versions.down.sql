@@ -1,0 +1,9 @@
+ALTER TABLE usage_requests DROP CONSTRAINT usage_requests_maximum_microcredits_check;
+ALTER TABLE usage_requests ADD CONSTRAINT usage_requests_maximum_microcredits_check CHECK (maximum_microcredits > 0);
+DROP TRIGGER protocol_formula_immutable ON protocol_formula_versions;
+DROP TRIGGER protocol_definition_immutable ON protocol_definitions;
+DROP FUNCTION reject_published_protocol_mutation();
+DROP TABLE token_formula_publication_intents;
+DROP TABLE token_governance_commands;
+DROP TABLE protocol_formula_versions;
+DROP TABLE protocol_definitions;

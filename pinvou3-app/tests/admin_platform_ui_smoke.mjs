@@ -99,6 +99,13 @@ async function search(page, value) {
   );
   await page.click(".adm-search button");
 }
+async function input(page, selector, value) {
+  await page.$eval(selector, (element, value) => {
+    const prototype = element.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+    Object.getOwnPropertyDescriptor(prototype, 'value').set.call(element, value);
+    element.dispatchEvent(new Event('input', { bubbles:true }));
+  }, value);
+}
 async function expectRows(page, cell, expected, attribute) {
   await page.waitForFunction(
     (cell, expected, attribute) => {
@@ -424,6 +431,132 @@ try {
     await nav(page, 3); await page.waitForSelector(".adm-search"); await nav(page, 4); await page.waitForSelector(".adm-tabs"); await page.click(".adm-tabs button:nth-child(3)");
     assert.equal(await page.$eval(".adm-ops-form input", input => input.value), "Order A");
     assert.equal(await page.$$eval("tbody tr", rows => rows.length), 1);
+  });
+  await run('metering_safe_integer_and_price_draft_real_form', 'metering', async page => {
+    await nav(page, 4); await page.waitForSelector('.adm-tabs'); await page.click('.adm-tabs button:nth-child(7)');
+    await page.waitForFunction(() => document.querySelectorAll('.adm-panel form').length === 4);
+    assert.equal(await page.evaluate(() => document.body.textContent.includes('00000000-0000-4000-8000-000000002001')), true, 'Published unit UUID must be available for formula version selection');
+    await input(page, '.adm-panel form:nth-of-type(1) input', 'OUTPUT');
+    await page.click('.adm-panel form:nth-of-type(1) button');
+    await page.waitForFunction(() => window.__adminReview.commands().some(item => item.kind === 'metering'));
+    assert.deepEqual(await page.evaluate(() => window.__adminReview.commands().find(item => item.kind === 'metering').input), { unit_code:'OUTPUT', minimum_precision:1, price_denominator:1000000, rounding_rule:'CEILING' });
+    const forms = await page.$$('.adm-panel form');
+    const priceForm = forms.at(-1);
+    await priceForm.$eval('input', element => { Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(element,'controlled-model'); element.dispatchEvent(new Event('input',{bubbles:true})); });
+    const formulaSelect = await priceForm.$('label:nth-child(3) select');
+    await formulaSelect.select('00000000-0000-4000-8000-000000002201');
+    await priceForm.$eval('input[type=date]', element => { Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(element,'2030-01-01'); element.dispatchEvent(new Event('input',{bubbles:true})); });
+    await priceForm.$eval('label:last-of-type input', element => { Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(element,'9007199254740992'); element.dispatchEvent(new Event('input',{bubbles:true})); });
+    await priceForm.$eval('button', element => element.click()); await page.waitForSelector('[role=alert]');
+    assert.equal(await page.evaluate(() => window.__adminReview.commands().filter(item => item.kind === 'pricing').length), 0);
+    await priceForm.$eval('label:last-of-type input', element => { Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(element,'0'); element.dispatchEvent(new Event('input',{bubbles:true})); });
+    await priceForm.$eval('button', element => element.click());
+    await page.waitForFunction(() => window.__adminReview.commands().some(item => item.kind === 'pricing'));
+    const draft = await page.evaluate(() => window.__adminReview.commands().find(item => item.kind === 'pricing').input);
+    assert.equal(draft.scope_id, 'controlled-model'); assert.equal(draft.units[0].fixed_price_per_denominator, 0); assert.equal(draft.expected_etag, 1);
+  });
+  await run('metering_partial_403_preserves_protocol_access', 'metering-denied', async page => {
+    await nav(page, 4); await page.waitForSelector('.adm-tabs'); await page.click('.adm-tabs button:nth-child(7)');
+    await page.waitForSelector('[role=alert]');
+    assert.equal(await page.$$('nav').then(value => value.length), 1);
+    assert.equal(await page.evaluate(() => document.body.textContent.includes('CHAT · v1')), true);
+    assert.equal(await page.$$eval('form', forms => forms.length), 3);
+  });
+  for (const [status, previewSource] of [[403, 'formula'], [503, 'formula'], [403, 'price']]) {
+    await run(`protocol_refresh_${status}_clears_formula_and_${previewSource}_preview`, `protocol-access-${previewSource}`, async page => {
+      await nav(page, 4); await page.waitForSelector('.adm-tabs'); await page.click('.adm-tabs button:nth-child(7)');
+      await page.waitForFunction(() => [...document.querySelectorAll('select option')].some(item => item.textContent.includes('PRIVATE_FORMULA_MARKER')));
+      await page.evaluate(() => {
+        const select = [...document.querySelectorAll('select')].find(item => [...item.options].some(option => option.value.endsWith('002201')));
+        select.value = [...select.options].find(option => option.value.endsWith('002201')).value;
+        select.dispatchEvent(new Event('change', { bubbles:true }));
+      });
+      await page.evaluate(source => {
+        const panels = [...document.querySelectorAll('.adm-panel > article')];
+        const panel = panels.find(item => item.querySelector('h3')?.textContent === (source === 'formula' ? 'Protocols and formulas' : 'Price versions'));
+        const button = [...panel.querySelectorAll('button')].find(item => item.textContent === 'Preview');
+        button.click();
+      }, previewSource);
+      await page.waitForSelector('.adm-panel > article > pre');
+      await page.evaluate(status => window.__adminReview.protocolAccess(status), status);
+      await page.click('.adm-section-head button');
+      await page.waitForSelector('[role=alert]');
+      assert.equal(await page.$$eval('select option', options => options.some(item => item.textContent.includes('PRIVATE_FORMULA_MARKER'))), false, 'Failed protocol read must remove cached formulas from price choices');
+      assert.equal(await page.$('.adm-panel > article > pre'), null, 'Related preview must not survive failed authority read');
+      assert.equal(await page.$$('nav').then(items => items.length), 1, 'Other authorized areas remain available');
+      assert.equal(await page.evaluate(() => window.__adminReview.commands().length), 0, 'Read failure must not issue a mutation');
+      await page.evaluate(() => window.__adminReview.protocolAccess(0));
+      await page.click('.adm-section-head button');
+      await page.waitForFunction(() => !document.querySelector('[role=alert]') && [...document.querySelectorAll('select option')].some(item => item.textContent.includes('PRIVATE_FORMULA_MARKER')));
+    });
+  }
+  await run('protocol_preview_from_left_view_cannot_restore_cached_data', 'protocol-access-late-preview', async page => {
+    await nav(page, 4); await page.waitForSelector('.adm-tabs'); await page.click('.adm-tabs button:nth-child(7)');
+    await page.waitForFunction(() => document.body.textContent.includes('PRIVATE_FORMULA_MARKER'));
+    await page.evaluate(() => [...document.querySelectorAll('button')].find(item => item.textContent === 'Preview').click());
+    await pending(page, 'formula-preview');
+    await page.click('.adm-tabs button:first-child');
+    await settle(page, 'formula-preview');
+    await page.click('.adm-tabs button:nth-child(7)');
+    await page.waitForFunction(() => document.body.textContent.includes('PRIVATE_FORMULA_MARKER'));
+    assert.equal(await page.$('.adm-panel > article > pre'), null, 'Late preview must not enter a new view lifetime');
+  });
+  await run('pricing_new_client_pending_does_not_display_prior_resources_or_preview', 'protocol-access-client', async page => {
+    await nav(page, 4); await page.waitForSelector('.adm-tabs'); await page.click('.adm-tabs button:nth-child(7)');
+    await page.waitForFunction(() => document.body.textContent.includes('PRIVATE_FORMULA_MARKER'));
+    await page.evaluate(() => [...document.querySelectorAll('button')].find(item => item.textContent === 'Preview').click());
+    await page.waitForSelector('.adm-panel > article > pre');
+    await page.evaluate(() => window.__adminReview.replaceClient());
+    await pending(page, 'next-client-protocols');
+    assert.equal(await page.evaluate(() => document.body.textContent.includes('PRIVATE_FORMULA_MARKER')), false, 'Prior client formulas/prices/preview must disappear before the next client replies');
+    assert.equal(await page.$('.adm-panel > article > pre'), null);
+    await settle(page, 'next-client-units'); await settle(page, 'next-client-prices'); await settle(page, 'next-client-protocols');
+    await page.waitForFunction(() => !document.querySelector('.adm-section-head button').disabled);
+    assert.equal(await page.evaluate(() => document.body.textContent.includes('PRIVATE_FORMULA_MARKER')), false);
+  });
+  await run('hold_evidence_keeps_exact_money_and_unknown_consumption', 'hold-evidence', async page => {
+    await nav(page, 4); await page.waitForSelector('.adm-tabs'); await page.click('.adm-tabs button:nth-child(5)');
+    await page.waitForSelector('tbody tr .adm-row-actions button'); await page.click('tbody tr .adm-row-actions button');
+    await page.waitForFunction(() => document.body.textContent.includes('9223372036854775808'));
+    assert.equal(await page.evaluate(() => document.body.textContent.includes('"actual_microcredits": null')), true);
+    assert.equal(await page.evaluate(() => document.body.textContent.includes('LEASE_EXPIRED')), true);
+  });
+  await run('late_review_shows_immutable_evidence_and_claims', 'late-review', async page => {
+    await nav(page, 4); await page.waitForSelector('.adm-tabs'); await page.click('.adm-tabs button:nth-child(10)');
+    await page.waitForSelector('tbody tr button'); await page.click('tbody tr button');
+    await page.waitForFunction(() => document.body.textContent.includes('public-controlled-evidence') && document.body.textContent.includes('ENTER_REVIEW'));
+    await page.click('.adm-row-actions button:first-child');
+    await page.waitForFunction(() => window.__adminReview.commands().some(item => item.kind === 'late-claim'));
+    assert.equal(await page.$$('nav').then(value => value.length), 1);
+  });
+  await run('reconciliation_command_retains_all_four_evidence_snapshots', 'reconciliation-cases', async page => {
+    page.on('dialog', dialog => void dialog.accept('Controlled review reason'));
+    await nav(page, 4); await page.waitForSelector('.adm-tabs'); await page.click('.adm-tabs button:nth-child(6)');
+    await page.waitForSelector('tbody tr button'); await page.click('tbody tr button');
+    await page.waitForSelector('.adm-row-actions button'); await page.click('.adm-row-actions button:first-child');
+    assert.equal(await page.evaluate(() => ['provider-evidence','internal-evidence','refund-evidence','ledger-evidence'].every(value => document.body.textContent.includes(value))), true);
+    await page.click('.adm-row-actions button:nth-child(2)');
+    await page.waitForFunction(() => window.__adminReview.commands().some(item => item.kind === 'reconciliation-command') && document.body.textContent.includes(window.__adminReview.ids.user));
+    const command = await page.evaluate(() => window.__adminReview.commands().find(item => item.kind === 'reconciliation-command'));
+    assert.deepEqual(command.input, { action:'CLAIM', reason:'Controlled review reason' });
+  });
+  await run('file_import_rejects_unsafe_money_and_uses_exact_import_receipt', 'reconciliation-file', async page => {
+    await nav(page, 4); await page.waitForSelector('.adm-tabs'); await page.click('.adm-tabs button:nth-child(6)');
+    await page.waitForSelector('textarea'); await input(page, '.adm-ops-form input[type=date]', '2030-01-01');
+    const setItems = async amount => page.$eval('textarea', (element, amount) => {
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value').set.call(element, JSON.stringify([{ amount_fen:amount }])); element.dispatchEvent(new Event('input',{bubbles:true}));
+    }, amount);
+    await setItems(9007199254740992); await page.click('.adm-ops-form button'); await page.waitForSelector('.adm-inline-message.error');
+    assert.equal(await page.evaluate(() => window.__adminReview.commands().filter(item => item.kind === 'bill-import').length), 0);
+    await setItems(100); await page.click('.adm-ops-form button');
+    await page.waitForFunction(() => document.querySelector('textarea').value === '[]');
+    const command = await page.evaluate(() => window.__adminReview.commands().find(item => item.kind === 'bill-import'));
+    assert.equal(command.channel, 'ALIPAY'); assert.equal(command.businessDate, '2030-01-01'); assert.deepEqual(command.items, [{ amount_fen:100 }]);
+  });
+  await run('degraded_query_is_not_described_as_supplier_bill_reconciliation', 'reconciliation-degraded', async page => {
+    await nav(page, 4); await page.waitForSelector('.adm-tabs'); await page.click('.adm-tabs button:nth-child(6)');
+    assert.equal(await page.evaluate(() => document.body.textContent.includes('QUERY_DEGRADED') && document.body.textContent.includes('supplier bill reconciliation is not claimed')), true);
+    assert.equal(await page.$('.adm-ops-form'), null);
   });
   console.log(
     `Admin UI: ${passed} PASS, ${failures.length} FAIL, 0 SKIP. Real React/browser with controlled public clients; not BFF/PG/Keycloak, Safari, or production E2E.`,

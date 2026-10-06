@@ -69,12 +69,20 @@ func (c *HTTPWaiverCoordinator) Release(ctx context.Context, holdID, usageID uui
 		return AdminHold{}, errors.New("Token waiver coordinator unavailable")
 	}
 	var result WaiverAuthority
+	var presence struct {
+		Hold struct {
+			Maximum *json.RawMessage `json:"max_microcredits"`
+		} `json:"hold"`
+	}
+	if json.Unmarshal(payload, &presence) != nil || presence.Hold.Maximum == nil {
+		return AdminHold{}, errors.New("invalid Token waiver authority")
+	}
 	var proof struct {
 		Waiver bool   `json:"admin_waiver"`
 		Actor  string `json:"admin_actor"`
 		Reason string `json:"admin_release_reason"`
 	}
-	if json.Unmarshal(payload, &result) != nil || result.Hold.ID != holdID || result.Hold.UsageRequestID != usageID || result.Hold.WalletID == uuid.Nil || result.Hold.MaxMicrocredits <= 0 || result.Hold.ExpiresAt.IsZero() || result.Hold.UpdatedAt.IsZero() || result.Hold.Status != "RELEASED" || result.Hold.ActualMicrocredits == nil || *result.Hold.ActualMicrocredits != 0 || json.Unmarshal(result.UsageSnapshot, &proof) != nil || !proof.Waiver || strings.TrimSpace(proof.Actor) == "" || strings.TrimSpace(proof.Reason) == "" {
+	if json.Unmarshal(payload, &result) != nil || result.Hold.ID != holdID || result.Hold.UsageRequestID != usageID || result.Hold.WalletID == uuid.Nil || result.Hold.MaxMicrocredits < 0 || result.Hold.ExpiresAt.IsZero() || result.Hold.UpdatedAt.IsZero() || result.Hold.Status != "RELEASED" || result.Hold.ActualMicrocredits == nil || *result.Hold.ActualMicrocredits != 0 || json.Unmarshal(result.UsageSnapshot, &proof) != nil || !proof.Waiver || proof.Actor != actor || proof.Reason != reason {
 		return AdminHold{}, errors.New("invalid Token waiver authority")
 	}
 	return result.Hold, nil
@@ -186,7 +194,7 @@ func (r *PostgresRepository) ResolveUsageWaiver(ctx context.Context, holdID, usa
 	return result, tx.Commit(ctx)
 }
 
-func (r *PostgresRepository) AdminUsageHold(ctx context.Context, holdID uuid.UUID) (AdminHold, error) {
+func (r *PostgresRepository) UsageHoldAuthority(ctx context.Context, holdID uuid.UUID) (AdminHold, error) {
 	var h AdminHold
 	err := r.pool.QueryRow(ctx, `SELECT id,usage_request_id,wallet_id,status,max_microcredits,actual_microcredits,expires_at,updated_at FROM usage_holds WHERE id=$1`, holdID).Scan(&h.ID, &h.UsageRequestID, &h.WalletID, &h.Status, &h.MaxMicrocredits, &h.ActualMicrocredits, &h.ExpiresAt, &h.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {

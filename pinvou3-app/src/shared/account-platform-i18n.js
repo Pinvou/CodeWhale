@@ -221,7 +221,7 @@ export const accountPlatformCopy = {
     "invoiceUnavailable": "当前支付渠道尚未开放发票申请与查询，因此此处仅展示说明，不提供不可用的操作按钮。",
     "packageId": "权益包编号",
     "pinvouOrder": "品悟订单号",
-    "mallOrder": "商城订单号",
+    "providerOrderReference": "支付方订单引用",
     "amount": "支付金额",
     "creditedAt": "到账时间",
     "validPeriod": "权益有效期",
@@ -463,7 +463,7 @@ export const accountPlatformCopy = {
     "invoiceUnavailable": "The current payment channel does not expose invoice application or lookup operations, so unavailable actions are not shown.",
     "packageId": "Package ID",
     "pinvouOrder": "Pinvou order",
-    "mallOrder": "Mall order",
+    "providerOrderReference": "Payment provider reference",
     "amount": "Amount paid",
     "creditedAt": "Credited at",
     "validPeriod": "Benefit validity",
@@ -705,7 +705,7 @@ export const accountPlatformCopy = {
     "invoiceUnavailable": "現在の決済チャネルでは請求書の申請・照会が公開されていないため、利用できない操作ボタンは表示しません。",
     "packageId": "特典パッケージ ID",
     "pinvouOrder": "品悟注文番号",
-    "mallOrder": "モール注文番号",
+    "providerOrderReference": "決済事業者注文参照",
     "amount": "支払金額",
     "creditedAt": "付与日時",
     "validPeriod": "特典有効期間",
@@ -981,3 +981,7 @@ for (const copy of Object.values(accountPlatformCopy)) {
     INVALID_REQUEST:copy.invalidInput,
   });
 }
+
+Object.assign(accountPlatformCopy.zh, { claimLatePayment:'提交支付复核说明', paymentClaimStatement:'支付情况说明', paymentClaimRecorded:'支付说明已记录供复核，不代表支付或到账已确认。' });
+Object.assign(accountPlatformCopy.en, { claimLatePayment:'Submit payment review statement', paymentClaimStatement:'Payment statement', paymentClaimRecorded:'The statement is recorded for review. Payment and credit are not confirmed.' });
+Object.assign(accountPlatformCopy.ja, { claimLatePayment:'支払い確認の説明を送信', paymentClaimStatement:'支払い状況の説明', paymentClaimRecorded:'説明を確認用に記録しました。支払い・付与の確定ではありません。' });

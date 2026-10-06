@@ -28,9 +28,11 @@ test('organization checkout schema keeps the existing single-order wire and requ
   const id = '11111111-1111-4111-8111-111111111111';
   const order = { order_id: id, merchant_order_no: 'owned-order', requester_id: id, wallet_id: id, beneficiary_organization_id: id,
     status: 'PENDING', fulfillment_status: 'PENDING', product_id: 'PLAN', amount_fen: 100, currency: 'CNY', credit_microcredits: 1000,
-    channel: 'ALIPAY', expires_at: '2026-10-06T00:00:00Z' };
+    channel: 'ALIPAY', expires_at: '2026-10-06T00:00:00Z',
+    provider_payable_until: '2026-10-06T00:00:00Z', late_review_boundary_at: '2026-10-09T00:00:00Z',
+    final_archive_eligible_at: '2026-11-06T00:00:00Z', archive_status: 'ACTIVE' };
   assert.ok(validate(order), JSON.stringify(validate.errors));
-  for (const field of ['beneficiary_organization_id', 'wallet_id']) {
+  for (const field of ['beneficiary_organization_id', 'wallet_id', 'provider_payable_until', 'late_review_boundary_at', 'final_archive_eligible_at', 'archive_status']) {
     const missing = { ...order }; delete missing[field]; assert.equal(validate(missing), false);
   }
   assert.equal(validate({ ...order, beneficiary_organization_id: 'foreign-shape' }), false);

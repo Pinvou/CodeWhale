@@ -2,6 +2,7 @@ package billing
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"time"
 
@@ -18,23 +19,31 @@ var (
 	ErrCommerceCustomerNotReady      = errors.New("commerce customer mapping is not ready")
 	ErrInsufficientComponentCapacity = errors.New("entitlement component has insufficient allocatable capacity")
 	ErrIdempotencyConflict           = errors.New("idempotency key was used with a different request")
+	ErrPriceMissing                  = errors.New("price is missing")
+	ErrPriceAmbiguous                = errors.New("price is ambiguous")
+	ErrPriceUnavailable              = errors.New("price is unavailable")
+	ErrPriceWindowConflict           = errors.New("price window conflicts with a published version")
+	ErrPriceETagConflict             = errors.New("price space etag conflict")
 )
 
 type Wallet struct {
-	ID                    uuid.UUID `json:"wallet_id"`
-	OwnerType             string    `json:"owner_type"`
-	OwnerID               uuid.UUID `json:"owner_id"`
-	Status                string    `json:"status"`
-	PostedMicrocredits    int64     `json:"posted_microcredits"`
-	ReservedMicrocredits  int64     `json:"reserved_microcredits"`
-	AvailableMicrocredits int64     `json:"available_microcredits"`
-	Version               int64     `json:"version"`
+	ID                     uuid.UUID `json:"wallet_id"`
+	OwnerType              string    `json:"owner_type"`
+	OwnerID                uuid.UUID `json:"owner_id"`
+	Status                 string    `json:"status"`
+	PostedMicrocredits     int64     `json:"posted_microcredits"`
+	ReservedMicrocredits   int64     `json:"reserved_microcredits"`
+	ReceivableMicrocredits int64     `json:"receivable_microcredits"`
+	AvailableMicrocredits  int64     `json:"available_microcredits"`
+	FinancialStatus        string    `json:"financial_status"`
+	FinancialFreezeReason  *string   `json:"financial_freeze_reason,omitempty"`
+	Version                int64     `json:"version"`
 }
 
 type Product struct {
 	ProductID          string   `json:"product_id"`
 	PlanName           string   `json:"plan_name"`
-	SKUCode            string   `json:"sku_code"`
+	SKUCode            string   `json:"-"`
 	AmountFen          int64    `json:"amount_fen"`
 	CreditMicrocredits int64    `json:"credit_microcredits"`
 	DisplayPoints      int64    `json:"display_points"`
@@ -59,29 +68,38 @@ type Hold struct {
 	ExpiresAt          time.Time  `json:"expires_at"`
 }
 
+type HoldPricingContext struct {
+	ModelID          string          `json:"model_id"`
+	ProtocolCode     string          `json:"protocol_code"`
+	FormulaVersionID uuid.UUID       `json:"formula_version_id"`
+	PricingSnapshot  json.RawMessage `json:"pricing_snapshot"`
+	RequestSnapshot  json.RawMessage `json:"request_snapshot"`
+}
+
 type EntitlementPackage struct {
-	ID              uuid.UUID              `json:"package_id"`
-	UserID          *uuid.UUID             `json:"user_id,omitempty"`
-	WalletID        uuid.UUID              `json:"wallet_id"`
-	PaymentOrderID  *uuid.UUID             `json:"pinvou_order_id,omitempty"`
-	MallOrderID     string                 `json:"mall_order_id"`
-	SourceType      string                 `json:"source_type"`
-	SourceReference string                 `json:"source_reference"`
-	ProductID       string                 `json:"plan_id"`
-	PlanName        string                 `json:"plan_name"`
-	SKUCode         string                 `json:"sku_code"`
-	AmountFen       int64                  `json:"amount_fen,string"`
-	PointsTotal     int64                  `json:"points_total_microcredits,string"`
-	PointsReserved  int64                  `json:"points_reserved_microcredits,string"`
-	PointsUsed      int64                  `json:"points_used_microcredits,string"`
-	PointsRemaining int64                  `json:"points_remaining_microcredits,string"`
-	PointsExpired   int64                  `json:"points_expired_microcredits,string"`
-	PointsRevoked   int64                  `json:"points_revoked_microcredits,string"`
-	CreditedAt      time.Time              `json:"credited_at"`
-	ValidFrom       time.Time              `json:"valid_from"`
-	ValidUntil      *time.Time             `json:"valid_until"`
-	Status          string                 `json:"status"`
-	Components      []EntitlementComponent `json:"components"`
+	ID                     uuid.UUID              `json:"package_id"`
+	UserID                 *uuid.UUID             `json:"user_id,omitempty"`
+	WalletID               uuid.UUID              `json:"wallet_id"`
+	PaymentOrderID         *uuid.UUID             `json:"pinvou_order_id,omitempty"`
+	PaymentTransactionID   *uuid.UUID             `json:"source_payment_transaction_id,omitempty"`
+	ProviderOrderReference string                 `json:"provider_order_reference"`
+	SourceType             string                 `json:"source_type"`
+	SourceReference        string                 `json:"source_reference"`
+	ProductID              string                 `json:"plan_id"`
+	PlanName               string                 `json:"plan_name"`
+	SKUCode                string                 `json:"sku_code"`
+	AmountFen              int64                  `json:"amount_fen,string"`
+	PointsTotal            int64                  `json:"points_total_microcredits,string"`
+	PointsReserved         int64                  `json:"points_reserved_microcredits,string"`
+	PointsUsed             int64                  `json:"points_used_microcredits,string"`
+	PointsRemaining        int64                  `json:"points_remaining_microcredits,string"`
+	PointsExpired          int64                  `json:"points_expired_microcredits,string"`
+	PointsRevoked          int64                  `json:"points_revoked_microcredits,string"`
+	CreditedAt             time.Time              `json:"credited_at"`
+	ValidFrom              time.Time              `json:"valid_from"`
+	ValidUntil             *time.Time             `json:"valid_until"`
+	Status                 string                 `json:"status"`
+	Components             []EntitlementComponent `json:"components"`
 }
 
 type EntitlementComponent struct {
@@ -136,12 +154,33 @@ type MemberQuotaAllocation struct {
 }
 
 type PriceVersion struct {
-	ID                    uuid.UUID `json:"price_version_id"`
-	Model                 string    `json:"model"`
-	InputPerMillion       int64     `json:"input_per_million"`
-	OutputPerMillion      int64     `json:"output_per_million"`
-	CachedInputPerMillion int64     `json:"cached_input_per_million"`
-	EffectiveFrom         time.Time `json:"effective_from"`
+	ID                    uuid.UUID           `json:"price_version_id"`
+	Model                 string              `json:"model"`
+	InputPerMillion       int64               `json:"input_per_million"`
+	OutputPerMillion      int64               `json:"output_per_million"`
+	CachedInputPerMillion int64               `json:"cached_input_per_million"`
+	ScopeType             string              `json:"scope_type"`
+	ProtocolCode          string              `json:"protocol_code"`
+	FormulaVersionID      uuid.UUID           `json:"formula_version_id"`
+	FormulaSnapshot       json.RawMessage     `json:"formula_snapshot"`
+	CreditUnit            string              `json:"credit_unit"`
+	EffectiveFrom         time.Time           `json:"effective_from"`
+	EffectiveTo           *time.Time          `json:"effective_to,omitempty"`
+	ResolvedAt            time.Time           `json:"resolved_at"`
+	Units                 []ResolvedUnitPrice `json:"units"`
+}
+
+type ResolvedUnitPrice struct {
+	UnitCode             string    `json:"unit_code"`
+	UnitDefinitionID     uuid.UUID `json:"unit_definition_id"`
+	UnitVersion          int64     `json:"unit_version"`
+	MinimumPrecision     int64     `json:"minimum_precision"`
+	PriceDenominator     int64     `json:"price_denominator"`
+	RoundingRule         string    `json:"rounding_rule"`
+	ResolvedPrice        int64     `json:"resolved_price"`
+	ConfigurationType    string    `json:"configuration_type"`
+	PriceSourceScope     string    `json:"price_source_scope"`
+	SourcePriceVersionID uuid.UUID `json:"source_price_version_id"`
 }
 
 type ManualAdjustment struct {

@@ -6,6 +6,10 @@ services:
       KC_HOSTNAME_BACKCHANNEL_DYNAMIC: "true"
       KC_PROXY_HEADERS: xforwarded
 
+  postgres:
+    environment:
+      ENABLE_PAYMENT_SIMULATOR_DB: "false"
+
   account-service:
     environment:
       OIDC_ISSUER: ${PUBLIC_BASE_URL:?set PUBLIC_BASE_URL}/realms/pinvou
@@ -31,3 +35,6 @@ services:
     profiles: [development-simulator]
     environment:
       PAYMENT_SIM_PUBLIC_URL: ${PUBLIC_BASE_URL:?set PUBLIC_BASE_URL}
+
+  payment-simulator-migrate:
+    profiles: [development-simulator]

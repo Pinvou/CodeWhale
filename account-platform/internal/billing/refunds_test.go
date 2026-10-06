@@ -7,29 +7,6 @@ import (
 	"github.com/google/uuid"
 )
 
-func TestProportionalCreditsRejectsInvalidOrFractionalValues(t *testing.T) {
-	tests := []struct {
-		name                    string
-		orderFen, credits, part int64
-		want                    int64
-		ok                      bool
-	}{
-		{name: "full", orderFen: 100, credits: 1_000_000, part: 100, want: 1_000_000, ok: true},
-		{name: "partial", orderFen: 100, credits: 1_000_000, part: 25, want: 250_000, ok: true},
-		{name: "fractional", orderFen: 3, credits: 10, part: 1, ok: false},
-		{name: "too much", orderFen: 100, credits: 1_000_000, part: 101, ok: false},
-		{name: "zero", orderFen: 100, credits: 1_000_000, part: 0, ok: false},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			got, ok := proportionalCredits(test.orderFen, test.credits, test.part)
-			if got != test.want || ok != test.ok {
-				t.Fatalf("proportionalCredits() = (%d, %v), want (%d, %v)", got, ok, test.want, test.ok)
-			}
-		})
-	}
-}
-
 func TestCompareReconciliationFindsRequiredDifferenceClasses(t *testing.T) {
 	paidAt := time.Date(2026, 8, 12, 1, 0, 0, 0, time.UTC)
 	internalA := PaymentOrder{ID: uuid.Must(uuid.NewV7()), MerchantOrderNo: "internal-only", AmountFen: 100, Currency: "CNY"}
@@ -49,5 +26,55 @@ func TestCompareReconciliationFindsRequiredDifferenceClasses(t *testing.T) {
 		if counts[kind] == 0 {
 			t.Fatalf("missing reconciliation case %s: %#v", kind, counts)
 		}
+	}
+}
+
+func TestCompareFourWayReconciliationIncludesRefundAndLedgerDifferences(t *testing.T) {
+	orderID := uuid.Must(uuid.NewV7())
+	provider := []ProviderBillEntry{
+		{EntryType: "PAYMENT", ProviderReferenceID: "payment-1", MerchantOrderNo: "order-1", AmountFen: 100, Currency: "CNY"},
+		{EntryType: "REFUND", ProviderReferenceID: "refund-1", MerchantOrderNo: "order-1", AmountFen: 50, Currency: "CNY"},
+	}
+	internal := []ReconciliationInternalFact{
+		{EntryType: "PAYMENT", ProviderReferenceID: "payment-1", MerchantOrderNo: "order-1", PaymentOrderID: orderID, AmountFen: 100, Currency: "CNY", LedgerPresent: false},
+		{EntryType: "REFUND", ProviderReferenceID: "refund-1", MerchantOrderNo: "order-1", PaymentOrderID: orderID, AmountFen: 40, Currency: "CNY", LedgerPresent: true},
+		{EntryType: "CHARGEBACK", ProviderReferenceID: "chargeback-1", MerchantOrderNo: "order-1", PaymentOrderID: orderID, AmountFen: 100, Currency: "CNY", LedgerPresent: true},
+	}
+	differences := CompareFourWayReconciliation(provider, internal)
+	counts := map[string]int{}
+	for _, difference := range differences {
+		counts[difference.CaseType]++
+	}
+	for _, kind := range []string{"PAYMENT_LEDGER_MISSING", "REFUND_AMOUNT_MISMATCH", "INTERNAL_CHARGEBACK_PROVIDER_MISSING"} {
+		if counts[kind] != 1 {
+			t.Fatalf("expected one %s case: %#v", kind, counts)
+		}
+	}
+}
+
+func TestForcedRefundProportionalCeiling(t *testing.T) {
+	tests := []struct {
+		original, refund, payment, want int64
+	}{
+		{100, 50, 100, 50},
+		{100, 1, 3, 34},
+		{101, 2, 3, 68},
+	}
+	for _, item := range tests {
+		got, err := proportionalCeiling(item.original, item.refund, item.payment)
+		if err != nil || got != item.want {
+			t.Fatalf("proportionalCeiling(%d,%d,%d) = %d, %v; want %d", item.original, item.refund, item.payment, got, err, item.want)
+		}
+	}
+}
+
+func TestReconciliationBusinessDateUsesShanghaiCalendarLabelAndRange(t *testing.T) {
+	date := reconciliationBusinessDate(time.Date(2026, 8, 23, 1, 0, 0, 0, time.UTC))
+	if got := date.Format("2006-01-02"); got != "2026-08-22" {
+		t.Fatalf("business date = %s", got)
+	}
+	start, end := reconciliationBusinessDateRange(date)
+	if start.UTC().Format(time.RFC3339) != "2026-08-21T16:00:00Z" || end.UTC().Format(time.RFC3339) != "2026-08-22T16:00:00Z" {
+		t.Fatalf("unexpected Shanghai range %s - %s", start.UTC(), end.UTC())
 	}
 }

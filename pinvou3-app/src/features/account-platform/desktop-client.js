@@ -244,6 +244,7 @@ export class AccountPlatformDesktopClient {
   rechargeOrders(signal) { return this.request('token', '/v1/recharge/orders', { signal }); }
   entitlementPackages(signal) { return this.request('token', '/v1/me/entitlement-packages', { signal }); }
   rechargeOrder(orderId, signal) { return this.request('token', `/v1/recharge/orders/${orderId}`, { signal }); }
+  claimLatePayment(orderId, statement) { return this.request('token', `/v1/recharge/orders/${orderId}/payment-claims`, { method:'POST', body:{ statement } }); }
   managedTokens(signal) { return this.request('token', '/v1/token-accounts', { signal }); }
   eligibleTokens(model, signal) { return this.request('token', `/v1/token-accounts/eligible?model=${encodeURIComponent(model)}`, { signal }); }
   usageRequest(usageRequestId, signal) { return this.request('token', `/v1/usage-requests/${encodeURIComponent(usageRequestId)}`, { signal }); }

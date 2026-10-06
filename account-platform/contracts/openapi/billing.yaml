@@ -198,6 +198,19 @@ paths:
         "404": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
         "500": { $ref: "#/components/responses/Error" }
+  /payment-capabilities:
+    get:
+      operationId: getPaymentCapabilities
+      summary: Discover the versioned behavior of the selected Payment Provider
+      responses:
+        "200":
+          description: Provider-neutral payment behavior used by API, UI, and background jobs
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PaymentCapabilities"
+        "401":
+          $ref: "#/components/responses/Error"
   /recharge/products:
     get:
       operationId: listRechargeProducts
@@ -382,6 +395,84 @@ paths:
                 $ref: "#/components/schemas/WalletBalance"
         "404":
           $ref: "#/components/responses/Error"
+  /internal/v1/recharge/orders/{order_id}/refunds:
+    post:
+      operationId: createTargetedRemainingRefund
+      summary: Refund the whole unconsumed remainder of exactly one payment transaction entitlement package
+      parameters:
+        - name: order_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/TargetedRefundRequest" }
+      responses:
+        "201":
+          description: Targeted whole-remaining refund created
+          content: { application/json: { schema: { $ref: "#/components/schemas/Refund" } } }
+        "409": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
+  /internal/v1/recharge/orders/{order_id}/payment-claims:
+    post:
+      operationId: addLatePaymentClaimInternal
+      summary: Append a requester-owned payment claim and wake an existing late-payment review
+      parameters:
+        - name: order_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [requester_id, statement]
+              properties:
+                requester_id: { type: string, format: uuid }
+                statement: { type: string, minLength: 10, maxLength: 1000 }
+      responses:
+        "201": { description: Immutable user evidence accepted }
+        "400": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /internal/v1/refunds/forced:
+    post:
+      operationId: recordForcedRefund
+      summary: Record a provider-initiated refund as separate immutable evidence and freeze its package for review
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ForcedRefundRequest" }
+      responses:
+        "200":
+          description: Forced refund review case
+          content: { application/json: { schema: { $ref: "#/components/schemas/ForcedRefundCase" } } }
+        "409": { $ref: "#/components/responses/Error" }
+  /internal/v1/chargebacks/confirmed:
+    post:
+      operationId: recordConfirmedChargeback
+      summary: Record immutable provider-confirmed chargeback evidence, freeze its exact package, and open review before accounting
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ConfirmedChargebackRequest"
+      responses:
+        "200":
+          description: Idempotent chargeback review case
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ChargebackCase"
+        "409":
+          $ref: "#/components/responses/Error"
 components:
   securitySchemes:
     serviceToken:
@@ -483,31 +574,70 @@ components:
         hold:
           type: object
           additionalProperties: false
-          required: [hold_id, usage_request_id, wallet_id, status, max_microcredits, actual_microcredits, expires_at, updated_at]
+          required: [hold_id, usage_request_id, wallet_id, status, anomaly_state, max_microcredits, actual_microcredits, expires_at, created_at, updated_at]
           properties:
             hold_id: { type: string, format: uuid }
             usage_request_id: { type: string, format: uuid }
             wallet_id: { type: string, format: uuid }
+            price_version_id: { type: string, format: uuid }
             status: { type: string, enum: [COMMITTED, RELEASED] }
-            max_microcredits: { type: string, pattern: '^[1-9][0-9]*$' }
+            anomaly_state: { type: string, enum: [NONE, REVIEW_REQUIRED, LEASE_EXPIRED, TERMINAL_ALLOCATION_REMAINS, ALLOCATION_MISMATCH] }
+            max_microcredits: { type: string, pattern: '^(0|[1-9][0-9]*)$' }
             actual_microcredits: { type: string, pattern: '^(0|[1-9][0-9]*)$' }
             expires_at: { type: string, format: date-time }
+            terminal_at: { type: string, format: date-time }
+            model_id: { type: string }
+            protocol_code: { type: string }
+            formula_version_id: { type: string, format: uuid }
+            pricing_snapshot: { type: object, additionalProperties: true }
+            request_snapshot: { type: object, additionalProperties: true }
+            usage_snapshot: { type: object, additionalProperties: true }
+            organization_id: { type: string, format: uuid }
+            member_user_id: { type: string, format: uuid }
+            membership_version: { type: integer, format: int64, minimum: 1 }
+            created_at: { type: string, format: date-time }
             updated_at: { type: string, format: date-time }
         usage_snapshot: { type: object, additionalProperties: true }
+    PaymentCapabilities:
+      type: object
+      additionalProperties: false
+      required: [provider_id, version, channels, order_query_supported, order_history_retention_seconds, minimum_query_interval_seconds, maximum_payable_window_seconds, maximum_late_confirmation_seconds, authoritative_unpaid_terminal, refund_supported, refund_idempotency_supported, close_supported, notification_supported, bill_supported, bill_file_import_supported, reconciliation_mode, formal_collection_admitted, manual_repair_supported, commerce_customer_required, reuse_pending_order_after_expiry, review_late_payment, test_only]
+      properties:
+        provider_id: { type: string, minLength: 1 }
+        version: { type: string, minLength: 1 }
+        channels: { type: array, minItems: 1, uniqueItems: true, items: { $ref: "#/components/schemas/PaymentChannel" } }
+        order_query_supported: { type: boolean }
+        order_history_retention_seconds: { type: integer, format: int64, minimum: 0 }
+        minimum_query_interval_seconds: { type: integer, format: int64, minimum: 0 }
+        maximum_payable_window_seconds: { type: integer, format: int64, minimum: 0 }
+        maximum_late_confirmation_seconds: { type: integer, format: int64, minimum: 0 }
+        authoritative_unpaid_terminal: { type: boolean }
+        refund_supported: { type: boolean }
+        refund_idempotency_supported: { type: boolean }
+        close_supported: { type: boolean }
+        notification_supported: { type: boolean }
+        bill_supported: { type: boolean }
+        bill_file_import_supported: { type: boolean }
+        reconciliation_mode: { type: string, enum: [API, FILE_IMPORT, QUERY_DEGRADED] }
+        formal_collection_admitted: { type: boolean }
+        manual_repair_supported: { type: boolean }
+        commerce_customer_required: { type: boolean }
+        reuse_pending_order_after_expiry: { type: boolean }
+        review_late_payment: { type: boolean }
+        test_only: { type: boolean }
     PaymentChannel:
       type: string
-      enum: [UNIONPAY, ALIPAY, WECHAT]
+      pattern: '^[A-Z0-9_]{1,32}$'
+      description: Runtime intersection of the product mapping and selected provider capability channels.
     RechargeProduct:
       type: object
       additionalProperties: false
-      required: [product_id, amount_fen, credit_microcredits, display_points, currency, catalog_version, channels, plan_name, sku_code, base_points, bonus_points, validity_days, price_status, invoice_product_name]
+      required: [product_id, amount_fen, credit_microcredits, display_points, currency, catalog_version, channels, plan_name, base_points, bonus_points, validity_days, price_status, invoice_product_name]
       properties:
         product_id:
           type: string
           enum: [CNY_1, CNY_10, CNY_100, CNY_200, PLAN_TRIAL, PLAN_STANDARD, PLAN_ADVANCED, PLAN_FLAGSHIP]
         plan_name:
-          type: string
-        sku_code:
           type: string
         amount_fen:
           type: integer
@@ -579,7 +709,7 @@ components:
     RechargeOrder:
       type: object
       additionalProperties: false
-      required: [order_id, merchant_order_no, requester_id, wallet_id, status, fulfillment_status, product_id, amount_fen, currency, credit_microcredits, channel, expires_at]
+      required: [order_id, merchant_order_no, requester_id, wallet_id, status, fulfillment_status, product_id, amount_fen, currency, credit_microcredits, channel, expires_at, provider_payable_until, late_review_boundary_at, final_archive_eligible_at, archive_status]
       properties:
         order_id:
           type: string
@@ -595,10 +725,10 @@ components:
           format: uuid
         status:
           type: string
-          enum: [CREATED, PENDING, PAID, PAID_LATE, FAILED, CLOSED, PARTIALLY_REFUNDED, REFUNDED, MANUAL_REVIEW]
+          enum: [CREATED, PENDING, PAID, PAID_LATE, FAILED, CLOSED, MANUAL_REVIEW]
         fulfillment_status:
           type: string
-          enum: [PENDING, CREDITED, REFUNDED, MANUAL_REVIEW]
+          enum: [PENDING, CREDITED, MANUAL_REVIEW]
         product_id:
           type: string
         amount_fen:
@@ -616,7 +746,7 @@ components:
           type: string
         qr_data:
           type: string
-        channel_transaction_id:
+        primary_provider_transaction_id:
           type: string
         paid_at:
           type: string
@@ -624,6 +754,10 @@ components:
         expires_at:
           type: string
           format: date-time
+        provider_payable_until: { type: string, format: date-time }
+        late_review_boundary_at: { type: string, format: date-time }
+        final_archive_eligible_at: { type: string, format: date-time }
+        archive_status: { type: string, enum: [ACTIVE, ARCHIVED_CONFIRMED_UNPAID] }
     RecentRechargeOrder:
       type: object
       additionalProperties: false
@@ -636,7 +770,7 @@ components:
     RechargeOrderHistoryItem:
       type: object
       additionalProperties: false
-      required: [order_id, pinvou_order_id, mall_order_id, product_id, plan_name, sku_code, order_type, amount_fen, display_points, channel, status, fulfillment_status, invoice_status, expires_at, created_at]
+      required: [order_id, pinvou_order_id, provider_order_reference, product_id, plan_name, sku_code, order_type, amount_fen, display_points, channel, status, fulfillment_status, invoice_status, expires_at, created_at]
       properties:
         order_id:
           type: string
@@ -647,8 +781,9 @@ components:
         pinvou_order_id:
           type: string
           format: uuid
-        mall_order_id:
+        provider_order_reference:
           type: string
+          description: Supplier-neutral external order correlation reference.
         product_id:
           type: string
         plan_name:
@@ -668,10 +803,10 @@ components:
           $ref: "#/components/schemas/PaymentChannel"
         status:
           type: string
-          enum: [CREATED, PENDING, PAID, PAID_LATE, FAILED, CLOSED, PARTIALLY_REFUNDED, REFUNDED, MANUAL_REVIEW]
+          enum: [CREATED, PENDING, PAID, PAID_LATE, FAILED, CLOSED, MANUAL_REVIEW]
         fulfillment_status:
           type: string
-          enum: [PENDING, CREDITED, REFUNDED, MANUAL_REVIEW]
+          enum: [PENDING, CREDITED, MANUAL_REVIEW]
         expires_at:
           type: string
           format: date-time
@@ -738,13 +873,14 @@ components:
     EntitlementPackage:
       type: object
       additionalProperties: false
-      required: [package_id, mall_order_id, source_type, source_reference, plan_id, plan_name, sku_code, amount_fen, points_total_microcredits, points_reserved_microcredits, points_used_microcredits, points_remaining_microcredits, points_expired_microcredits, points_revoked_microcredits, credited_at, valid_from, valid_until, status, components]
+      required: [package_id, provider_order_reference, source_type, source_reference, plan_id, plan_name, sku_code, amount_fen, points_total_microcredits, points_reserved_microcredits, points_used_microcredits, points_remaining_microcredits, points_expired_microcredits, points_revoked_microcredits, credited_at, valid_from, valid_until, status, components]
       properties:
         package_id: { type: string, format: uuid }
         user_id: { type: string, format: uuid }
         wallet_id: { type: string, format: uuid }
         pinvou_order_id: { type: string, format: uuid }
-        mall_order_id: { type: string }
+        provider_order_reference: { type: string, description: Supplier-neutral external order correlation reference. }
+        source_payment_transaction_id: { type: string, format: uuid }
         source_type: { type: string, enum: [PAYMENT, MANUAL_ADJUSTMENT, SYSTEM] }
         source_reference: { type: string, minLength: 1 }
         plan_id: { type: string }
@@ -785,7 +921,7 @@ components:
     WalletBalance:
       type: object
       additionalProperties: false
-      required: [wallet_id, owner_type, owner_id, status, posted_microcredits, reserved_microcredits, available_microcredits, version]
+      required: [wallet_id, owner_type, owner_id, status, posted_microcredits, reserved_microcredits, receivable_microcredits, available_microcredits, financial_status, version]
       properties:
         wallet_id:
           type: string
@@ -807,11 +943,113 @@ components:
           type: integer
           format: int64
           minimum: 0
-        available_microcredits:
+        receivable_microcredits:
           type: integer
           format: int64
           minimum: 0
+        available_microcredits:
+          type: integer
+          format: int64
+          description: Signed projection equal to posted minus reserved minus receivable.
+        financial_status:
+          type: string
+          enum: [CLEAR, RECEIVABLE_OPEN]
+        financial_freeze_reason:
+          type: string
         version:
           type: integer
           format: int64
           minimum: 0
+    ConfirmedChargebackRequest:
+      type: object
+      additionalProperties: false
+      required: [payment_transaction_id, provider_chargeback_id, payload_snapshot]
+      properties:
+        payment_transaction_id: { type: string, format: uuid }
+        provider_chargeback_id: { type: string, minLength: 1, maxLength: 200 }
+        payload_snapshot: { type: object, additionalProperties: true, description: Verified provider event snapshot; secrets must be redacted before ingestion. }
+    TargetedRefundRequest:
+      type: object
+      additionalProperties: false
+      required: [requester_id, payment_transaction_id, entitlement_package_id, reason]
+      properties:
+        requester_id: { type: string, format: uuid }
+        payment_transaction_id: { type: string, format: uuid }
+        entitlement_package_id: { type: string, format: uuid }
+        reason: { type: string, minLength: 1, maxLength: 500 }
+    Refund:
+      type: object
+      additionalProperties: false
+      required: [refund_id, payment_order_id, payment_transaction_id, entitlement_package_id, requester_id, merchant_refund_no, amount_fen, credit_microcredits, base_microcredits, bonus_microcredits, status, reason, created_at, updated_at]
+      properties:
+        refund_id: { type: string, format: uuid }
+        payment_order_id: { type: string, format: uuid }
+        payment_transaction_id: { type: string, format: uuid }
+        entitlement_package_id: { type: string, format: uuid }
+        requester_id: { type: string, format: uuid }
+        merchant_refund_no: { type: string }
+        channel_refund_id: { type: string }
+        amount_fen: { type: integer, format: int64, minimum: 1 }
+        credit_microcredits: { type: integer, format: int64, minimum: 1 }
+        base_microcredits: { type: integer, format: int64, minimum: 1 }
+        bonus_microcredits: { type: integer, format: int64, minimum: 0 }
+        status: { type: string, enum: [REQUESTED, SUCCEEDED, FAILED, MANUAL_REVIEW] }
+        reason: { type: string }
+        failure_reason: { type: string }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    ForcedRefundRequest:
+      type: object
+      additionalProperties: false
+      required: [payment_transaction_id, provider_refund_id, amount_fen, payload_snapshot]
+      properties:
+        payment_transaction_id: { type: string, format: uuid }
+        provider_refund_id: { type: string, minLength: 1, maxLength: 200 }
+        amount_fen: { type: integer, format: int64, minimum: 1 }
+        payload_snapshot: { type: object, additionalProperties: true, description: Verified provider evidence with secrets redacted. }
+    ForcedRefundCase:
+      type: object
+      additionalProperties: false
+      required: [forced_refund_case_id, payment_evidence_id, payment_order_id, payment_transaction_id, entitlement_package_id, wallet_id, provider_refund_id, amount_fen, status, entitlement_snapshot, revoked_base_microcredits, revoked_bonus_microcredits, version, created_at]
+      properties:
+        forced_refund_case_id: { type: string, format: uuid }
+        payment_evidence_id: { type: string, format: uuid }
+        payment_order_id: { type: string, format: uuid }
+        payment_transaction_id: { type: string, format: uuid }
+        entitlement_package_id: { type: string, format: uuid }
+        wallet_id: { type: string, format: uuid }
+        provider_refund_id: { type: string }
+        amount_fen: { type: integer, format: int64, minimum: 1 }
+        status: { type: string, enum: [REVIEW_REQUIRED, RESOLVED] }
+        entitlement_snapshot: { type: object, additionalProperties: true }
+        created_at: { type: string, format: date-time }
+        resolved_at: { type: string, format: date-time }
+        manual_review_case_id: { type: string, format: uuid }
+        resolution_code: { type: string }
+        resolution_reason: { type: string }
+        receivable_id: { type: string, format: uuid }
+        revoked_base_microcredits: { type: integer, format: int64, minimum: 0 }
+        revoked_bonus_microcredits: { type: integer, format: int64, minimum: 0 }
+        version: { type: integer, format: int64, minimum: 1 }
+    ChargebackCase:
+      type: object
+      additionalProperties: false
+      required: [chargeback_case_id, payment_evidence_id, payment_order_id, payment_transaction_id, entitlement_package_id, wallet_id, provider_chargeback_id, status, revoked_base_microcredits, revoked_bonus_microcredits, version, created_at]
+      properties:
+        chargeback_case_id: { type: string, format: uuid }
+        payment_evidence_id: { type: string, format: uuid }
+        payment_order_id: { type: string, format: uuid }
+        payment_transaction_id: { type: string, format: uuid }
+        entitlement_package_id: { type: string, format: uuid }
+        wallet_id: { type: string, format: uuid }
+        provider_chargeback_id: { type: string }
+        status: { type: string, enum: [REVIEW_REQUIRED, CONFIRMED, DISMISSED] }
+        revoked_base_microcredits: { type: integer, format: int64, minimum: 0 }
+        revoked_bonus_microcredits: { type: integer, format: int64, minimum: 0 }
+        receivable_id: { type: string, format: uuid }
+        created_at: { type: string, format: date-time }
+        resolved_at: { type: string, format: date-time }
+        manual_review_case_id: { type: string, format: uuid }
+        resolution_code: { type: string }
+        resolution_reason: { type: string }
+        version: { type: integer, format: int64, minimum: 1 }

@@ -154,6 +154,59 @@ func TestLoginCreatesServerSidePKCEFlow(t *testing.T) {
 	}
 }
 
+func TestMeteringFinancialAndProtocolProxyMethodsRemainFinite(t *testing.T) {
+	id := "12000000-0000-4000-8000-000000000001"
+	tests := []struct {
+		name, area, method, path string
+		allowed                  bool
+	}{
+		{"payment-detail", "billing", "GET", "/admin/v1/payment-orders/" + id, true},
+		{"payment-detail-no-post", "billing", "POST", "/admin/v1/payment-orders/" + id, false},
+		{"price-list", "billing", "GET", "/admin/v1/pricing", true},
+		{"price-draft", "billing", "POST", "/admin/v1/pricing/drafts", true},
+		{"price-edit", "billing", "PUT", "/admin/v1/pricing/" + id + "/draft", true},
+		{"price-preview", "billing", "GET", "/admin/v1/pricing/" + id + "/preview", true},
+		{"price-publish", "billing", "POST", "/admin/v1/pricing/" + id + "/publish", true},
+		{"price-transition", "billing", "POST", "/admin/v1/pricing/" + id + "/transition", true},
+		{"price-publish-no-get", "billing", "GET", "/admin/v1/pricing/" + id + "/publish", false},
+		{"price-unknown", "billing", "POST", "/admin/v1/pricing/" + id + "/delete", false},
+		{"unit-create", "billing", "POST", "/admin/v1/metering-units", true},
+		{"unit-deactivate", "billing", "POST", "/admin/v1/metering-units/" + id + "/deactivate", true},
+		{"receivable-allocation", "billing", "GET", "/admin/v1/receivables/" + id + "/allocations", true},
+		{"late-detail", "billing", "GET", "/admin/v1/late-payment-reviews/" + id, true},
+		{"late-query", "billing", "POST", "/admin/v1/late-payment-reviews/" + id + "/query", true},
+		{"late-no-get-mutation", "billing", "GET", "/admin/v1/late-payment-reviews/" + id + "/query", false},
+		{"late-no-arbitrary-get", "billing", "GET", "/admin/v1/late-payment-reviews/" + id + "/credentials", false},
+		{"late-no-extra-segment", "billing", "POST", "/admin/v1/late-payment-reviews/" + id + "/query/force", false},
+		{"anomaly-resolve", "billing", "POST", "/admin/v1/payment-anomalies/" + id + "/resolve", true},
+		{"anomaly-bad-id", "billing", "POST", "/admin/v1/payment-anomalies/not-an-id/resolve", false},
+		{"protocol-create", "token", "POST", "/admin/v1/protocols", true},
+		{"formula-create", "token", "POST", "/admin/v1/protocols/" + id + "/formulas", true},
+		{"formula-preview", "token", "GET", "/admin/v1/formulas/" + id + "/preview", true},
+		{"formula-publish", "token", "POST", "/admin/v1/formulas/" + id + "/publish", true},
+		{"formula-no-write-preview", "token", "POST", "/admin/v1/formulas/" + id + "/preview", false},
+		{"formula-extra-segment", "token", "GET", "/admin/v1/formulas/" + id + "/preview/credentials", false},
+		{"user-payment-claim", "public-token", "POST", "/v1/recharge/orders/" + id + "/payment-claims", true},
+		{"user-claim-no-read", "public-token", "GET", "/v1/recharge/orders/" + id + "/payment-claims", false},
+	}
+	for _, item := range tests {
+		t.Run(item.name, func(t *testing.T) {
+			var actual bool
+			switch item.area {
+			case "billing":
+				actual = billingAdminPathAllowed(item.method, item.path)
+			case "token":
+				actual = tokenAdminPathAllowed(item.method, item.path)
+			default:
+				actual = tokenPathAllowed(item.method, item.path)
+			}
+			if actual != item.allowed {
+				t.Fatalf("allowed = %t, want %t", actual, item.allowed)
+			}
+		})
+	}
+}
+
 func TestMutationRequiresExactOriginAndCSRF(t *testing.T) {
 	service := testService(t, newMemoryStore())
 	session := Session{CSRFToken: strings.Repeat("a", 32)}
@@ -260,11 +313,15 @@ func TestPortalProxyExcludesModelDataPlane(t *testing.T) {
 	}
 	organizationID := uuid.Must(uuid.NewV7()).String()
 	grantID := uuid.Must(uuid.NewV7()).String()
+	orderID := uuid.Must(uuid.NewV7()).String()
 	if !tokenPathAllowed(http.MethodPost, "/v1/organizations/"+organizationID+"/recharge/orders") || !tokenPathAllowed(http.MethodGet, "/v1/organizations/"+organizationID+"/quota-grants") || !tokenPathAllowed(http.MethodPost, "/v1/organizations/"+organizationID+"/quota-grants:batch") || !tokenPathAllowed(http.MethodPost, "/v1/organizations/"+organizationID+"/quota-grants/"+grantID+"/revoke") {
 		t.Fatal("organization billing paths must be allowlisted")
 	}
 	if !tokenPathAllowed(http.MethodGet, "/v1/me/balance") || !tokenPathAllowed(http.MethodGet, "/v1/me/usage-requests") || !accountPathAllowed(http.MethodGet, "/v1/me") {
 		t.Fatal("Portal BFF must expose the documented management APIs")
+	}
+	if !tokenPathAllowed(http.MethodPost, "/v1/recharge/orders/"+orderID+"/payment-claims") || tokenPathAllowed(http.MethodPost, "/v1/recharge/orders/invalid/payment-claims") {
+		t.Fatal("Portal BFF must expose payment claims only for a valid order path")
 	}
 	for _, resource := range []string{"/v1/token-accounts", "/v1/token-accounts/id/credentials", "/v1/token-accounts/eligible", "/v1/usage-requests/id"} {
 		if !tokenPathAllowed(http.MethodGet, resource) {
@@ -303,14 +360,20 @@ func TestAdminProxyAllowsOnlyDocumentedManagementEndpoints(t *testing.T) {
 	if !accountAdminPathAllowed(http.MethodGet, "/admin/v1/registration-operations") || !accountAdminPathAllowed(http.MethodPost, "/admin/v1/registration-operations/"+userID+"/actions/retry") || !accountAdminPathAllowed(http.MethodPost, "/admin/v1/registration-operations/"+userID+"/actions/compensate") {
 		t.Fatal("admin portal must expose proof-gated registration repair operations")
 	}
-	if !billingAdminPathAllowed(http.MethodPost, "/admin/v1/pricing-versions") || !billingAdminPathAllowed(http.MethodPost, "/admin/v1/adjustments") || !billingAdminPathAllowed(http.MethodGet, "/admin/v1/wallets/"+userID+"/ledger") || !billingAdminPathAllowed(http.MethodPost, "/admin/v1/payment-orders/"+userID+"/sync") || !billingAdminPathAllowed(http.MethodPost, "/admin/v1/adjustments/"+userID+"/approve") || !billingAdminPathAllowed(http.MethodPost, "/admin/v1/usage-holds/"+userID+"/release") || !billingAdminPathAllowed(http.MethodPost, "/admin/v1/reconciliation-runs") || !billingAdminPathAllowed(http.MethodGet, "/admin/v1/reconciliation-runs/"+userID+"/cases") {
+	if !billingAdminPathAllowed(http.MethodPost, "/admin/v1/pricing-versions") || !billingAdminPathAllowed(http.MethodPost, "/admin/v1/adjustments") || !billingAdminPathAllowed(http.MethodGet, "/admin/v1/refunds") || !billingAdminPathAllowed(http.MethodGet, "/admin/v1/wallets/"+userID+"/ledger") || !billingAdminPathAllowed(http.MethodPost, "/admin/v1/payment-orders/"+userID+"/sync") || !billingAdminPathAllowed(http.MethodPost, "/admin/v1/adjustments/"+userID+"/approve") || !billingAdminPathAllowed(http.MethodGet, "/admin/v1/usage-holds/"+userID) || !billingAdminPathAllowed(http.MethodPost, "/admin/v1/usage-holds/"+userID+"/release") || !billingAdminPathAllowed(http.MethodPost, "/admin/v1/reconciliation-runs") || !billingAdminPathAllowed(http.MethodGet, "/admin/v1/reconciliation-runs/"+userID+"/cases") || !billingAdminPathAllowed(http.MethodGet, "/admin/v1/late-payment-reviews") || !billingAdminPathAllowed(http.MethodGet, "/admin/v1/late-payment-reviews/"+userID) || !billingAdminPathAllowed(http.MethodPost, "/admin/v1/late-payment-reviews/"+userID+"/query") || !billingAdminPathAllowed(http.MethodPost, "/admin/v1/reconciliation-imports") {
 		t.Fatal("admin portal must expose documented billing operations")
+	}
+	if !billingAdminPathAllowed(http.MethodGet, "/admin/v1/metering-units") || !billingAdminPathAllowed(http.MethodPost, "/admin/v1/pricing/drafts") || !billingAdminPathAllowed(http.MethodPut, "/admin/v1/pricing/"+userID+"/draft") || !billingAdminPathAllowed(http.MethodGet, "/admin/v1/pricing/"+userID+"/preview") || !billingAdminPathAllowed(http.MethodPost, "/admin/v1/pricing/"+userID+"/publish") || !billingAdminPathAllowed(http.MethodPost, "/admin/v1/pricing/"+userID+"/transition") || !billingAdminPathAllowed(http.MethodPost, "/admin/v1/metering-units/"+userID+"/deactivate") {
+		t.Fatal("admin portal must expose versioned metering and pricing lifecycle operations")
 	}
 	if !accountAdminPathAllowed(http.MethodGet, "/admin/v1/approval-policies") || !accountAdminPathAllowed(http.MethodGet, "/admin/v1/approval-requests") || !accountAdminPathAllowed(http.MethodPost, "/admin/v1/approval-requests") || !accountAdminPathAllowed(http.MethodPut, "/admin/v1/approval-requests/"+userID) || !accountAdminPathAllowed(http.MethodPost, "/admin/v1/approval-requests/"+userID+"/actions/decide") {
 		t.Fatal("approval workflow paths must be allowlisted")
 	}
 	if !tokenAdminPathAllowed(http.MethodGet, "/admin/v1/token-accounts/"+userID) || !tokenAdminPathAllowed(http.MethodPatch, "/admin/v1/token-accounts/"+userID+"/status") || !tokenAdminPathAllowed(http.MethodPut, "/admin/v1/token-accounts/"+userID+"/routes") || !tokenAdminPathAllowed(http.MethodDelete, "/admin/v1/token-accounts/"+userID+"/routes") || !tokenAdminPathAllowed(http.MethodPost, "/admin/v1/token-accounts/"+userID+"/credentials/"+memberID+"/validate") || !tokenAdminPathAllowed(http.MethodGet, "/admin/v1/usage-requests/"+userID) || !tokenAdminPathAllowed(http.MethodPost, "/admin/v1/usage-requests/"+userID+"/retry-reconciliation") {
 		t.Fatal("admin portal must expose documented Token Gateway operations")
+	}
+	if !tokenAdminPathAllowed(http.MethodGet, "/admin/v1/protocols") || !tokenAdminPathAllowed(http.MethodPost, "/admin/v1/protocols") || !tokenAdminPathAllowed(http.MethodPost, "/admin/v1/protocols/"+userID+"/publish") || !tokenAdminPathAllowed(http.MethodPost, "/admin/v1/protocols/"+userID+"/formulas") || !tokenAdminPathAllowed(http.MethodPost, "/admin/v1/formulas/"+userID+"/publish") || !tokenAdminPathAllowed(http.MethodGet, "/admin/v1/formulas/"+userID+"/preview") {
+		t.Fatal("admin portal must expose protocol and formula lifecycle operations")
 	}
 	if accountAdminPathAllowed(http.MethodPost, "/admin/v1/users") || accountAdminPathAllowed(http.MethodDelete, "/admin/v1/users/not-a-uuid") || accountAdminPathAllowed(http.MethodPost, "/admin/v1/registration-operations/"+userID+"/actions/force-complete") || accountAdminPathAllowed(http.MethodPost, "/admin/v1/organizations/"+organizationID+"/members/"+memberID) || accountAdminPathAllowed(http.MethodGet, "/admin/v1/organizations/"+organizationID+"/ownership") || accountAdminPathAllowed(http.MethodDelete, "/admin/v1/organizations/"+organizationID+"/units/not-a-uuid") || billingAdminPathAllowed(http.MethodGet, "/internal/wallets") || tokenAdminPathAllowed(http.MethodGet, "/v1/chat/completions") {
 		t.Fatal("admin portal must not expose undocumented mutations, internal APIs, or the model data plane")

@@ -239,7 +239,7 @@ globalThis.fetch = async (input, options = {}) => {
   if (path === '/api/token/v1/recharge/products') return scenario === 'context-401'
     ? failed('LOGIN_REQUIRED', 401)
     : json({ items: [{ product_id: 'CNY_1', amount_fen: 100, display_points: 100,
-      channels: ['UNIONPAY', 'ALIPAY', 'WECHAT'] }] });
+      channels: ['a10-channel-missing','popover-a10-channel-missing'].includes(scenario) ? [] : ['UNIONPAY', 'ALIPAY', 'WECHAT'] }] });
   if (path === '/api/token/v1/me/balance') {
     balanceRequests += 1;
     if (scenario === 'popover-balance-401') return failed('LOGIN_REQUIRED', 401);
@@ -250,7 +250,7 @@ globalThis.fetch = async (input, options = {}) => {
     entitlementReads += 1;
     if (scenario === 'entitlement-401') return failed('LOGIN_REQUIRED', 401);
     return json({ summary: { available_microcredits: '90071992547409930000' }, items: scenario === 'entitlement-history' ? [{
-      package_id: ids.usage, pinvou_order_id: ids.order, mall_order_id: 'public-mall-order',
+      package_id: ids.usage, pinvou_order_id: ids.order, provider_order_reference: 'public-provider-order',
       plan_name: 'Public Plan', sku_code: 'PUBLIC_PLAN', status: 'ACTIVE',
       amount_fen: '9007199254740993', points_total_microcredits: '90071992547409930000',
       points_used_microcredits: '10000', points_remaining_microcredits: '90071992547409920000',
@@ -260,12 +260,18 @@ globalThis.fetch = async (input, options = {}) => {
   }
   if (path === '/api/token/v1/recharge/orders' && method === 'GET') {
     if (scenario === 'orders-401') return failed('LOGIN_REQUIRED', 401);
+    if (scenario.startsWith('a10-payment-claim')) return json({ items:[{ ...order(), created_at:new Date(Date.now() - 73 * 3600000).toISOString() }] });
     return json({ items: scenario === 'entitlement-history' ? [{
-      order_id: ids.order, pinvou_order_id: ids.order, mall_order_id: 'public-mall-order', plan_name: 'Public Plan',
+      order_id: ids.order, pinvou_order_id: ids.order, provider_order_reference: 'public-provider-order', plan_name: 'Public Plan',
       sku_code: 'PUBLIC_PLAN', channel: 'ALIPAY', status: 'PAID', amount_fen: '9007199254740993',
       created_at: '2026-10-01T00:00:00Z', paid_at: null, credited_at: null, valid_until: null,
       fulfillment_status: 'CREDITED', invoice_status: 'UNSUPPORTED',
     }] : [] });
+  }
+  if (path === `/api/token/v1/recharge/orders/${ids.order}/payment-claims` && method === 'POST') {
+    const attempts = calls.filter(item => item.path === path).length;
+    if (scenario === 'a10-payment-claim-unknown' && attempts === 1) return json({});
+    return json({ case_id:ids.usage, payment_order_id:ids.order, review_status:'REVIEW_REQUIRED_LATE_PAYMENT' });
   }
   if (path === '/api/token/v1/me/usage-requests') return json({ items: [{ usage_request_id: ids.usage, display_status: 'SETTLED', model: 'model-a', actual_microcredits: '1000000', started_at: '2026-10-01T00:00:00Z', input_tokens: 2, output_tokens: 3, cached_input_tokens: 0 }], next_cursor: null });
   if (path === '/api/token/v1/token-accounts' && method === 'POST') {
@@ -288,7 +294,13 @@ globalThis.fetch = async (input, options = {}) => {
   });
   if (path === `/api/token/v1/recharge/orders/${ids.order}`) return scenario === 'poll-401'
     ? failed('LOGIN_REQUIRED', 401) : json(order('PAID'));
-  if (path === '/api/token/v1/recharge/orders' && method === 'POST') return json(order(), 201);
+  if (path === '/api/token/v1/recharge/orders' && method === 'POST') {
+    const attempts = calls.filter(item => item.path === path && item.method === 'POST').length;
+    if (['a10-personal-payment-retry','popover-a10-payment-retry','a10-personal-payment-changed','popover-a10-payment-changed'].includes(scenario) && attempts === 1) return failed('SERVICE_UNAVAILABLE',503);
+    if (['a10-personal-payment-empty','popover-a10-payment-empty'].includes(scenario) && attempts === 1) return json({});
+    if (['a10-personal-payment-foreign','popover-a10-payment-foreign'].includes(scenario) && attempts === 1) return json({ ...order(), product_id:'FOREIGN_PRODUCT', channel:body.channel });
+    return json({ ...order(), product_id:body.product_id, channel:body.channel }, 201);
+  }
   throw new Error(`Unimplemented fixture route: ${method} ${path}`);
 };
 

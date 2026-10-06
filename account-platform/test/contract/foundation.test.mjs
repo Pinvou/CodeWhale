@@ -58,9 +58,10 @@ test('billing products are server-authoritative and fixed to the approved catalo
     'disabled legacy products remain valid request facts for recovery of existing orders');
 
   const product = billing.components.schemas.RechargeProduct;
-  for (const field of ['plan_name', 'sku_code', 'base_points', 'bonus_points', 'validity_days', 'price_status', 'invoice_product_name']) {
+  for (const field of ['plan_name', 'base_points', 'bonus_points', 'validity_days', 'price_status', 'invoice_product_name']) {
     assert.ok(product.required.includes(field), field);
   }
+  assert.equal(product.properties.sku_code, undefined);
 
   const createProperties = billing.components.schemas.CreateRechargeOrderRequest.properties;
   assert.equal(createProperties.amount_fen, undefined);
@@ -236,29 +237,33 @@ test('personal recharge orders expose a normal history list', async () => {
   const entitlement = gateway.components.schemas.EntitlementPackage;
   assert.ok(billing.paths['/recharge/orders'].get);
   assert.ok(gateway.paths['/recharge/orders'].get);
-  assert.ok(['pinvou_order_id', 'mall_order_id', 'sku_code', 'credited_at', 'valid_until', 'invoice_status'].every(field => history.properties[field]));
-  assert.ok(['package_id', 'pinvou_order_id', 'mall_order_id', 'sku_code', 'credited_at', 'valid_until'].every(field => entitlement.properties[field]));
+  assert.ok(['pinvou_order_id', 'provider_order_reference', 'sku_code', 'credited_at', 'valid_until', 'invoice_status'].every(field => history.properties[field]));
+  assert.ok(['package_id', 'pinvou_order_id', 'source_payment_transaction_id', 'provider_order_reference', 'sku_code', 'credited_at', 'valid_until'].every(field => entitlement.properties[field]));
   assert.match(service, /resolved\.ContextType != "PERSONAL"/);
   assert.match(service, /RechargeOrders\(r\.Context\(\), resolved\.UserID, walletID\)/);
 });
 
-test('late Mall payments require audited operator repair before fulfillment', async () => {
+test('late provider payments require audited operator repair before fulfillment', async () => {
   const admin = await readYaml('contracts/openapi/admin.yaml');
   const migration = await readFile(path.join(root, 'migrations/billing/000014_payment_repairs.up.sql'), 'utf8');
+  const lifecycleMigration = await readFile(path.join(root, 'migrations/billing/000024_payment_evidence_lifecycle.up.sql'), 'utf8');
   const reconciliation = await readFile(path.join(root, 'internal/billing/reconciliation.go'), 'utf8');
+  const merger = await readFile(path.join(root, 'internal/billing/payment_evidence.go'), 'utf8');
   assert.ok(admin.paths['/billing/admin/v1/payment-orders/{order_id}/repair']);
   assert.match(migration, /CREATE TABLE payment_order_repairs/);
   assert.match(migration, /payment_order_id UUID NOT NULL UNIQUE/);
-  assert.match(reconciliation, /p\.Policy\(\)\.ReviewLatePayment/);
+  assert.match(lifecycleMigration, /payment_order_repairs_payment_transaction_id_key UNIQUE/);
+  assert.match(merger, /classifyPaymentTransaction\(order\.ExpiresAt, \*provider\.PaidAt, p\.Policy\(\), priorTransactions, repair\)/);
+  assert.match(merger, /policy\.RequiresReview\(expiresAt, paidAt\)/);
   assert.match(reconciliation, /provider\.Status != "SUCCESS"/);
   assert.match(reconciliation, /INSERT INTO payment_order_repairs/);
-  assert.match(reconciliation, /issuePackageWithinTransaction/);
+  assert.match(merger, /issuePackageWithinTransaction/);
   assert.match(reconciliation, /wallet_balance_before,wallet_balance_after/);
-  assert.match(await readFile(path.join(root, 'internal/billing/payments.go'), 'utf8'), /"REPAIR_CREDIT", "repair:"/);
+  assert.match(await readFile(path.join(root, 'internal/billing/payments.go'), 'utf8'), /"REPAIR_CREDIT", "repair-payment-transaction:"/);
 });
 
 test('provider-specific payment rules remain inside the provider adapter', async () => {
-  const adapter = await readFile(path.join(root, 'internal/billing/h3c_mall.go'), 'utf8');
+  const adapter = await readFile(path.join(root, 'internal/platform/h3cpayment/provider.go'), 'utf8');
   const genericFiles = await Promise.all(['payments.go', 'reconciliation.go', 'refunds.go', 'admin.go'].map(file => readFile(path.join(root, 'internal/billing', file), 'utf8')));
   assert.match(adapter, /ReusePendingOrderAfterExpiry:\s+true/);
   assert.match(adapter, /ReviewLatePayment:\s+true/);
@@ -271,7 +276,7 @@ test('payment operations can locate repair candidates by user and order referenc
   const parameters = admin.paths['/billing/admin/v1/payment-orders'].get.parameters;
   assert.ok(parameters.some(parameter => parameter.name === 'q'));
   assert.ok(parameters.some(parameter => parameter.name === 'status'));
-  for (const field of ['mobile_e164', 'merchant_order_no', 'channel_transaction_id', 'provider_sku']) {
+  for (const field of ['mobile_e164', 'merchant_order_no', 'provider_transaction_id', 'provider_sku']) {
     assert.match(billingAdmin, new RegExp(field));
   }
   assert.match(billingAdmin, /maskAdminMobile/);

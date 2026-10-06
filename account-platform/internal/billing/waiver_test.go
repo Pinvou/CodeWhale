@@ -16,7 +16,7 @@ func TestHTTPWaiverCoordinatorRejectsMalformedAuthorityAndPreservesConflict(t *t
 	id, usage, wallet := uuid.New(), uuid.New(), uuid.New()
 	zero := int64(0)
 	now := time.Now().UTC()
-	for _, scenario := range []string{"valid", "wrong-usage", "missing-usage", "missing-wallet", "missing-maximum", "missing-time", "nonzero-charge", "missing-waiver-proof", "malformed", "redirect", "committed-conflict"} {
+	for _, scenario := range []string{"valid", "valid-zero", "wrong-usage", "missing-usage", "missing-wallet", "missing-maximum", "missing-time", "nonzero-charge", "missing-waiver-proof", "malformed", "redirect", "committed-conflict"} {
 		t.Run(scenario, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if r.Method != "POST" || r.URL.Path != "/internal/v1/usage-waivers" || r.Header.Get("Authorization") != "Bearer "+strings.Repeat("c", 32) {
@@ -38,8 +38,18 @@ func TestHTTPWaiverCoordinatorRejectsMalformedAuthorityAndPreservesConflict(t *t
 					result.Hold.UsageRequestID = uuid.Nil
 				case "missing-wallet":
 					result.Hold.WalletID = uuid.Nil
-				case "missing-maximum":
+				case "valid-zero":
 					result.Hold.MaxMicrocredits = 0
+				case "missing-maximum":
+					encoded, _ := json.Marshal(result)
+					var missing map[string]json.RawMessage
+					_ = json.Unmarshal(encoded, &missing)
+					var hold map[string]json.RawMessage
+					_ = json.Unmarshal(missing["hold"], &hold)
+					delete(hold, "max_microcredits")
+					missing["hold"], _ = json.Marshal(hold)
+					json.NewEncoder(w).Encode(missing)
+					return
 				case "missing-time":
 					result.Hold.UpdatedAt = time.Time{}
 				case "nonzero-charge":
@@ -65,7 +75,7 @@ func TestHTTPWaiverCoordinatorRejectsMalformedAuthorityAndPreservesConflict(t *t
 				t.Fatal(err)
 			}
 			_, err = client.Release(context.Background(), id, usage, "fixture", "fixture")
-			if scenario == "valid" {
+			if scenario == "valid" || scenario == "valid-zero" {
 				if err != nil {
 					t.Fatal(err)
 				}

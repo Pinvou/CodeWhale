@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/paymentsim"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/payment"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/paymentsimulator"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/testdb"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -41,7 +43,7 @@ func TestPostgresHTTPSimulatorFirstRefundObservationRequiresReviewAndLateSuccess
 			}
 			defer sim.Close()
 			app = paymentsim.NewService(sim).Handler(secret)
-			provider, err := NewSimulatorProvider(server.URL, secret)
+			provider, err := paymentsimulator.New(server.URL, secret)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -83,7 +85,7 @@ func TestPostgresHTTPSimulatorFirstRefundObservationRequiresReviewAndLateSuccess
 				t.Fatal(err)
 			}
 			prior.Status = "SUCCESS"
-			if _, err = p.applyQueriedPayment(ctx, order.ID, prior); err != nil {
+			if _, err = p.applyQueriedPayment(ctx, order.ID, prior, false); err != nil {
 				t.Fatal(err)
 			}
 			body, _ := json.Marshal(map[string]any{"notification_id": uuid.New(), "merchant_id": p.merchantID, "merchant_order_no": order.MerchantOrderNo, "channel_transaction_id": *prior.ChannelTransactionID, "channel": order.Channel, "status": "SUCCESS", "amount_fen": order.AmountFen, "currency": order.Currency, "paid_at": prior.PaidAt, "timestamp": p.now().Unix()})
@@ -116,7 +118,7 @@ type concurrentRefundNotificationProvider struct {
 	createCalls int
 }
 
-func (p *concurrentRefundNotificationProvider) Create(ctx context.Context, order PaymentOrder, callback string) (ProviderOrder, error) {
+func (p *concurrentRefundNotificationProvider) Create(ctx context.Context, order payment.Order, callback string) (ProviderOrder, error) {
 	p.createCalls++
 	paidAt := p.coordinator.now()
 	transaction := uuid.NewString()
@@ -143,17 +145,17 @@ func (p *concurrentRefundNotificationProvider) Create(ctx context.Context, order
 		}
 		p.delivery <- nil
 	}()
-	// Prove that the actual notification HTTP request has reached the order
-	// row lock while Create still owns it. No scheduler sleep assumes the race.
+	// Prove that the actual notification HTTP request has reached the wallet
+	// row gate while Create still owns it. No scheduler sleep assumes the race.
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		var waiting bool
-		err := p.coordinator.repository.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE application_name=$1 AND wait_event_type='Lock' AND query LIKE '%payment_orders%FOR UPDATE%')`, p.appName).Scan(&waiting)
+		err := p.coordinator.repository.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE application_name=$1 AND wait_event_type='Lock' AND query LIKE '%wallets%FOR UPDATE%')`, p.appName).Scan(&waiting)
 		if err != nil {
 			return ProviderOrder{}, err
 		}
 		if waiting {
-			return ProviderOrder{MerchantOrderNo: order.MerchantOrderNo, Channel: order.Channel, AmountFen: order.AmountFen, Currency: order.Currency, Status: "REFUNDED", PaymentURL: p.coordinator.callbackURL + "/pay"}, nil
+			return ProviderOrder{MerchantOrderNo: order.MerchantOrderNo, Channel: order.Channel, AmountFen: order.AmountFen, Currency: order.Currency, Mobile: order.Mobile, ProviderSKU: order.ExternalSKU, Status: "REFUNDED", PaymentURL: p.coordinator.callbackURL + "/pay"}, nil
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -238,7 +240,13 @@ type refundedFirstProvider struct {
 	emptyPaymentURL bool
 }
 
-func (p *refundedFirstProvider) Create(ctx context.Context, order PaymentOrder, callback string) (ProviderOrder, error) {
+func (p *refundedFirstProvider) Capabilities() payment.Capabilities {
+	caps := p.recoverableProvider.Capabilities()
+	caps.CloseSupported = true // This controlled provider implements the explicit Close path.
+	return caps
+}
+
+func (p *refundedFirstProvider) Create(ctx context.Context, order payment.Order, callback string) (ProviderOrder, error) {
 	fact, err := p.recoverableProvider.Create(ctx, order, callback)
 	fact.Status = p.status
 	if p.emptyPaymentURL {

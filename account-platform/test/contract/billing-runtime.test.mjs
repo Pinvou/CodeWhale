@@ -93,8 +93,35 @@ test('Billing and Token contracts match production JSON and HTTP validation resp
   assert.equal(fixtures.token_errors.MODEL_CATALOG_UNAVAILABLE.code, 'MODEL_CATALOG_UNAVAILABLE');
   assert.ok(error(fixtures.token_errors.MODEL_CATALOG_UNAVAILABLE), JSON.stringify(error.errors));
   const admin = YAML.parse(await readFile(path.join(root, 'contracts/openapi/admin.yaml'), 'utf8'));
-  const adminSchemas = JSON.parse(JSON.stringify(admin.components.schemas).replaceAll('#/components/schemas/', '#/$defs/'));
+  const adminSchemas = JSON.parse(JSON.stringify(admin.components.schemas)
+    .replaceAll('billing.yaml#/components/schemas/', 'urn:pinvou:billing-runtime#/$defs/')
+    .replaceAll('#/components/schemas/', '#/$defs/'));
   ajv.addSchema({ $id: 'urn:pinvou:admin-runtime', $defs: adminSchemas });
+  for (const [schema, response] of Object.entries(fixtures.a10_financial)) {
+    const validate = ajv.compile({ $ref: `urn:pinvou:admin-runtime#/$defs/${schema}` });
+    assert.ok(validate(response), `${schema}: ${JSON.stringify(validate.errors)}`);
+    const fields = Object.keys(response).filter(field => field === 'amount_fen' || field.endsWith('_microcredits'));
+    assert.ok(fields.length > 0, `${schema} must exercise monetary fields`);
+    for (const field of fields) {
+      assert.equal(typeof response[field], 'string', `${schema}.${field} must preserve the financial integer`);
+      if (!adminSchemas[schema].properties[field]) continue;
+      assert.equal(validate({ ...response, [field]: Number(response[field]) }), false,
+        `${schema}.${field} must reject a rounded JSON number`);
+      assert.equal(validate({ ...response, [field]: '-1' }), false,
+        `${schema}.${field} retains its nonnegative monetary bound`);
+    }
+  }
+  const orderDetail = ajv.compile({ $ref: 'urn:pinvou:admin-runtime#/$defs/PaymentOrderDetail' });
+  const receivable = ajv.compile({ $ref: 'urn:pinvou:admin-runtime#/$defs/Receivable' });
+  assert.ok(receivable({ ...fixtures.a10_financial.Receivable, source_type: 'FORCED_REFUND' }), JSON.stringify(receivable.errors));
+  assert.equal(receivable({ ...fixtures.a10_financial.Receivable, source_type: 'UNKNOWN_SOURCE' }), false);
+  const preciseDetail = fixtures.a10_financial.PaymentOrderDetail;
+  for (const [summary, field] of Object.entries({ payment_summary: 'paid_amount_fen', refund_summary: 'succeeded_amount_fen', chargeback_summary: 'lost_amount_fen' })) {
+    assert.equal(preciseDetail[summary][field], '9007199254740993');
+    for (const invalid of [9007199254740993, '-1']) {
+      assert.equal(orderDetail({ ...preciseDetail, [summary]: { ...preciseDetail[summary], [field]: invalid } }), false);
+    }
+  }
   const publicWaiverSchema = JSON.parse(JSON.stringify(admin.paths['/billing/admin/v1/usage-holds/{hold_id}/release'].post.responses['200'].content['application/json'].schema)
     .replaceAll('billing.yaml#/components/schemas/', 'urn:pinvou:billing-runtime#/$defs/'));
   const publicWaiver = ajv.compile(publicWaiverSchema);
@@ -103,7 +130,7 @@ test('Billing and Token contracts match production JSON and HTTP validation resp
   assert.equal(publicWaiver({ ...fixtures.waiver_public, actual_microcredits: '1' }), false);
   const financialSchemas = [
     ['billing/admin/v1/overview', 'BillingOverview', ['posted_microcredits', 'reserved_microcredits']],
-    ['billing/admin/v1/wallets', 'WalletCollection', ['posted_microcredits', 'reserved_microcredits', 'available_microcredits']],
+    ['billing/admin/v1/wallets', 'WalletCollection', ['posted_microcredits', 'reserved_microcredits', 'available_microcredits', 'receivable_microcredits']],
     ['billing/admin/v1/payment-orders', 'PaymentOrderCollection', ['amount_fen', 'credit_microcredits']],
     ['billing/admin/v1/adjustments', 'AdjustmentCollection', ['amount_microcredits']],
     ['billing/admin/v1/usage-holds', 'HoldCollection', ['max_microcredits', 'actual_microcredits']],
@@ -124,6 +151,7 @@ test('Billing and Token contracts match production JSON and HTTP validation resp
     }
   }
   const adminUsage = fixtures.financial_reads['token/admin/v1/usage-requests'].items[0];
+  assert.equal(fixtures.financial_reads['billing/admin/v1/wallets'].items[0].receivable_microcredits, '9007199254740993');
   assert.equal(adminUsage.newapi_request_id, 'fixture-newapi-request');
   assert.equal(adminUsage.reconciliation_last_error, 'fixture-reconciliation-error');
   const refundKey = admin.components.parameters.RefundIdempotencyKey;
@@ -228,4 +256,18 @@ test('Billing and Token contracts match production JSON and HTTP validation resp
   assert.equal(history({ ...historyItem, actual_microcredits: 9007199254740993 }), false);
   assert.ok(history({ ...historyItem, actual_microcredits: null }), JSON.stringify(history.errors));
   assert.equal(error({ ...Object.values(fixtures.token_errors)[0], code: 'UNDECLARED_ERROR' }), false);
+});
+
+test('New financial review commands declare their production-required logical key', async () => {
+  const admin = YAML.parse(await readFile(path.join(root, 'contracts/openapi/admin.yaml'), 'utf8'));
+  for (const route of ['/billing/admin/v1/payment-anomalies/{case_id}/claim', '/billing/admin/v1/payment-anomalies/{case_id}/resolve', '/billing/admin/v1/reconciliation-cases/{case_id}/commands']) {
+    const operation = admin.paths[route].post;
+    const parameters = operation.parameters.map(parameter => parameter.$ref
+      ? admin.components.parameters[parameter.$ref.split('/').at(-1)] : parameter);
+    const key = parameters.find(parameter => parameter.name === 'Idempotency-Key' && parameter.in === 'header');
+    assert.equal(key?.required, true, `${route} requires the key checked by its HTTP handler`);
+    assert.deepEqual(key.schema, { type: 'string', minLength: 8, maxLength: 120 });
+    assert.ok(operation.responses['400'], `${route} declares missing or invalid key errors`);
+  }
+  assert.notEqual(admin.components.parameters.IdempotencyKey.required, true, 'the shared optional parameter still describes its existing callers');
 });

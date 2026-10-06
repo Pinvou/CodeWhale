@@ -89,22 +89,23 @@ test('refund retries preserve identity and payment facts; a known success starts
   t.mock.method(globalThis, 'fetch', async (url, options) => {
     captured.push({ url, options });
     if (++attempt === 1) throw new Error('response lost');
-    return new Response(JSON.stringify({ refund_id:'test-refund' }), { status:200 });
+    return new Response(JSON.stringify({ refund_id:'12345678-1234-4234-8234-123456789abc', payment_order_id:'test-order', payment_transaction_id:'test-transaction', entitlement_package_id:'test-package', reason:'duplicate charge' }), { status:200 });
   });
-  const facts = ['test-order', 29, 'duplicate charge'];
+  const facts = ['test-order', 'test-transaction', 'test-package', 'duplicate charge'];
   const key = client.refundRequestKey(...facts);
   assert.match(key, /^[0-9a-f-]{36}$/u);
   await assert.rejects(client.refundPaymentOrder(...facts, key), /response lost/u);
   assert.equal(client.refundRequestKey(...facts), key);
-  assert.notEqual(client.refundRequestKey('another-order', 29, 'duplicate charge'), key);
-  assert.notEqual(client.refundRequestKey('test-order', 30, 'duplicate charge'), key);
-  assert.notEqual(client.refundRequestKey('test-order', 29, 'other reason'), key);
+  assert.notEqual(client.refundRequestKey('another-order', 'test-transaction', 'test-package', 'duplicate charge'), key);
+  assert.notEqual(client.refundRequestKey('test-order', 'another-transaction', 'test-package', 'duplicate charge'), key);
+  assert.notEqual(client.refundRequestKey('test-order', 'test-transaction', 'another-package', 'duplicate charge'), key);
+  assert.notEqual(client.refundRequestKey('test-order', 'test-transaction', 'test-package', 'other reason'), key);
   await client.refundPaymentOrder(...facts, key);
   for (const { url, options } of captured) {
     assert.equal(url, '/api/admin/billing/admin/v1/payment-orders/test-order/refunds');
     assert.equal(options.headers['Idempotency-Key'], key);
     assert.equal(options.headers['X-CSRF-Token'], 'test-csrf');
-    assert.deepEqual(JSON.parse(options.body), { amount_fen:29, reason:'duplicate charge' });
+    assert.deepEqual(JSON.parse(options.body), { payment_transaction_id:'test-transaction', entitlement_package_id:'test-package', reason:'duplicate charge' });
   }
   assert.notEqual(client.refundRequestKey(...facts), key);
   await assert.rejects(client.refundPaymentOrder(...facts, ''), /idempotency key required/u);
@@ -115,8 +116,8 @@ test('refund identity works when Safari 14 provides getRandomValues without rand
   t.mock.getter(globalThis, 'crypto', () => safariCrypto);
   assert.equal(safariCrypto.randomUUID, undefined);
   const client = new AdminPlatformClient();
-  const key = client.refundRequestKey('order', 29, 'reason');
+  const key = client.refundRequestKey('order', 'transaction', 'package', 'reason');
   assert.match(key, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u);
-  assert.equal(client.refundRequestKey('order', 29, 'reason'), key);
-  assert.notEqual(client.refundRequestKey('another-order', 29, 'reason'), key);
+  assert.equal(client.refundRequestKey('order', 'transaction', 'package', 'reason'), key);
+  assert.notEqual(client.refundRequestKey('another-order', 'transaction', 'package', 'reason'), key);
 });

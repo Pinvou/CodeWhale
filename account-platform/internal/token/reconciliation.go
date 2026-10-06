@@ -2,6 +2,7 @@ package token
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -20,6 +21,7 @@ import (
 type ReconciliationItem struct {
 	UsageRequest
 	UsageSnapshot   []byte
+	RequestSnapshot []byte
 	NewAPIRequestID *string
 	Attempts        int
 	LeaseUntil      time.Time
@@ -61,7 +63,7 @@ WHERE request.id = candidates.id
 RETURNING request.id,request.idempotency_key,request.user_id,request.session_id,request.organization_id,
           request.token_account_id,request.credential_id,request.wallet_id,request.price_version_id,request.hold_id,
           request.model,request.status,request.maximum_microcredits,request.actual_microcredits,request.error_class,
-          request.started_at,request.updated_at,request.usage_snapshot,candidates.newapi_request_id,request.reconciliation_attempts,request.reconciliation_lease_until`, now, limit, now.Add(lease))
+          request.started_at,request.updated_at,request.usage_snapshot,request.request_snapshot,candidates.newapi_request_id,request.reconciliation_attempts,request.reconciliation_lease_until`, now, limit, now.Add(lease))
 	if err != nil {
 		return nil, err
 	}
@@ -72,7 +74,7 @@ RETURNING request.id,request.idempotency_key,request.user_id,request.session_id,
 		if err := rows.Scan(&item.ID, &item.IdempotencyKey, &item.UserID, &item.SessionID, &item.OrganizationID,
 			&item.TokenAccountID, &item.CredentialID, &item.WalletID, &item.PriceVersionID, &item.HoldID,
 			&item.Model, &item.Status, &item.MaximumMicrocredits, &item.ActualMicrocredits, &item.ErrorClass,
-			&item.StartedAt, &item.UpdatedAt, &item.UsageSnapshot, &item.NewAPIRequestID, &item.Attempts, &item.LeaseUntil); err != nil {
+			&item.StartedAt, &item.UpdatedAt, &item.UsageSnapshot, &item.RequestSnapshot, &item.NewAPIRequestID, &item.Attempts, &item.LeaseUntil); err != nil {
 			return nil, err
 		}
 		items = append(items, item)
@@ -236,10 +238,10 @@ func (item newAPILog) usage() (Usage, error) {
 		}
 		cached = max(other.CacheTokens, other.CachedTokens)
 	}
-	usage := Usage{InputTokens: item.PromptTokens, OutputTokens: item.CompletionTokens, CachedInputTokens: cached}
-	if _, err := Cost(PriceVersion{}, usage); err != nil {
+	if item.PromptTokens < 0 || item.CompletionTokens < 0 || cached < 0 || cached > item.PromptTokens {
 		return Usage{}, errors.New("New API returned invalid token usage")
 	}
+	usage := Usage{InputTokens: item.PromptTokens - cached, OutputTokens: item.CompletionTokens, CachedInputTokens: cached}
 	return usage, nil
 }
 
@@ -378,12 +380,45 @@ func (r *UsageReconciler) reconcile(ctx context.Context, item ReconciliationItem
 }
 
 func (r *UsageReconciler) commit(ctx context.Context, item ReconciliationItem, usage Usage, expectedActual *int64) error {
-	price, err := r.billing.PriceByID(ctx, *item.PriceVersionID)
-	if err != nil {
-		return err
+	var snapshot struct {
+		PricingSnapshot           *PriceVersion `json:"pricing_snapshot"`
+		UsageNormalizationVersion int           `json:"usage_normalization_version"`
+	}
+	if len(item.RequestSnapshot) != 0 {
+		if err := json.Unmarshal(item.RequestSnapshot, &snapshot); err != nil {
+			return fmt.Errorf("%w: request snapshot is invalid", errManualReconciliationRequired)
+		}
+	}
+	var price PriceVersion
+	var err error
+	if snapshot.PricingSnapshot != nil {
+		price = *snapshot.PricingSnapshot
+		if ValidatePriceFormula(price) != nil {
+			return fmt.Errorf("%w: frozen pricing facts are incomplete", errManualReconciliationRequired)
+		}
+	} else {
+		price, err = r.billing.PriceByID(ctx, *item.PriceVersionID)
+		if err != nil {
+			return err
+		}
 	}
 	if price.ID != *item.PriceVersionID || price.Model != item.Model {
 		return fmt.Errorf("%w: historical price does not match usage request", errManualReconciliationRequired)
+	}
+	// Earlier pending snapshots stored total input including cached tokens.
+	// Fresh Provider evidence is already normalized by the evidence adapter.
+	if expectedActual != nil {
+		switch {
+		case snapshot.UsageNormalizationVersion == 2 && snapshot.PricingSnapshot != nil && ValidatePriceFormula(price) == nil:
+			// The current producer persisted exclusive input and its exact price.
+		case legacyUsageRequestSnapshot(item.RequestSnapshot, item.Model) && legacyPricePreservesRates(price):
+			if usage.InputTokens < 0 || usage.CachedInputTokens < 0 || usage.CachedInputTokens > usage.InputTokens {
+				return errManualReconciliationRequired
+			}
+			usage.InputTokens -= usage.CachedInputTokens
+		default:
+			return fmt.Errorf("%w: persisted usage semantics are unconfirmed", errManualReconciliationRequired)
+		}
 	}
 	actual, err := Cost(price, usage)
 	if err != nil || actual > item.MaximumMicrocredits {
@@ -396,6 +431,46 @@ func (r *UsageReconciler) commit(ctx context.Context, item ReconciliationItem, u
 		return err
 	}
 	return r.store.MarkCommitted(ctx, item.ID, actual, map[string]any{"usage": usage, "reconciled": true})
+}
+
+// This is the complete shape written by the previous proxy, before exclusive
+// input was introduced. Absence of a version alone does not prove old semantics.
+func legacyUsageRequestSnapshot(raw []byte, model string) bool {
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(raw, &fields) != nil || len(fields) != 4 {
+		return false
+	}
+	var digest, recordedModel string
+	var stream *bool
+	var maximumOutput int64
+	if json.Unmarshal(fields["request_sha256"], &digest) != nil || len(digest) != 64 ||
+		json.Unmarshal(fields["model"], &recordedModel) != nil || recordedModel != model ||
+		json.Unmarshal(fields["stream"], &stream) != nil || stream == nil ||
+		json.Unmarshal(fields["maximum_output_tokens"], &maximumOutput) != nil || maximumOutput <= 0 {
+		return false
+	}
+	_, err := hex.DecodeString(digest)
+	return err == nil
+}
+
+func legacyPricePreservesRates(price PriceVersion) bool {
+	if len(price.Units) == 0 {
+		return true
+	}
+	// Up22 maps pre-existing rates to these exact version-one definitions.
+	// A later rich price with different scaling or inherited sources cannot
+	// establish the legacy amount merely by sharing CHAT's unit labels.
+	if ValidatePriceFormula(price) != nil || price.ScopeType != "MODEL" || price.FormulaVersionID != uuid.MustParse("00000000-0000-7000-8200-000000000001") {
+		return false
+	}
+	rates := map[string]int64{"INPUT_TOKEN": price.InputPerMillion, "CACHED_INPUT_TOKEN": price.CachedInputPerMillion, "OUTPUT_TOKEN": price.OutputPerMillion}
+	ids := map[string]uuid.UUID{"INPUT_TOKEN": uuid.MustParse("00000000-0000-7000-8100-000000000001"), "CACHED_INPUT_TOKEN": uuid.MustParse("00000000-0000-7000-8100-000000000002"), "OUTPUT_TOKEN": uuid.MustParse("00000000-0000-7000-8100-000000000003")}
+	for _, unit := range price.Units {
+		if unit.UnitDefinitionID != ids[unit.UnitCode] || unit.UnitVersion != 1 || unit.MinimumPrecision != 1 || unit.PriceDenominator != 1_000_000 || unit.RoundingRule != "CEILING" || unit.ConfigurationType != "FIXED_PRICE" || unit.PriceSourceScope != "MODEL" || unit.SourcePriceVersionID != price.ID || unit.ResolvedPrice != rates[unit.UnitCode] {
+			return false
+		}
+	}
+	return true
 }
 
 func reconciliationBackoff(attempt int) time.Duration {

@@ -597,9 +597,16 @@ func tokenPathAllowed(method, resource string) bool {
 		return true
 	}
 	if method == http.MethodPost {
-		if orderID, ok := strings.CutPrefix(resource, "/v1/recharge/orders/"); ok {
-			id, close := strings.CutSuffix(orderID, "/close")
-			return close && safeProxyPathID(id)
+		if suffix, ok := strings.CutPrefix(resource, "/v1/recharge/orders/"); ok {
+			parts := strings.Split(suffix, "/")
+			if len(parts) != 2 {
+				return false
+			}
+			if parts[1] == "payment-claims" {
+				orderID, err := uuid.Parse(parts[0])
+				return err == nil && len(parts[0]) == 36 && orderID != uuid.Nil
+			}
+			return parts[1] == "close" && safeProxyPathID(parts[0])
 		}
 	}
 	organizationParts := strings.Split(resource, "/")
@@ -752,16 +759,23 @@ func accountAdminPathAllowed(method, resource string) bool {
 }
 
 func billingAdminPathAllowed(method, resource string) bool {
-	if adminReadPathAllowed(method, resource, "/admin/v1/overview", "/admin/v1/wallets", "/admin/v1/pricing-versions", "/admin/v1/payment-orders", "/admin/v1/adjustments", "/admin/v1/usage-holds", "/admin/v1/reconciliation-runs") {
+	if adminReadPathAllowed(method, resource, "/admin/v1/overview", "/admin/v1/wallets", "/admin/v1/receivables", "/admin/v1/pricing-versions", "/admin/v1/payment-orders", "/admin/v1/refunds", "/admin/v1/adjustments", "/admin/v1/usage-holds", "/admin/v1/reconciliation-runs", "/admin/v1/late-payment-reviews", "/admin/v1/payment-anomalies") {
 		return true
 	}
-	if (resource == "/admin/v1/pricing-versions" || resource == "/admin/v1/reconciliation-runs" || resource == "/admin/v1/adjustments") && method == http.MethodPost {
+	if (resource == "/admin/v1/pricing-versions" || resource == "/admin/v1/reconciliation-runs" || resource == "/admin/v1/reconciliation-imports" || resource == "/admin/v1/adjustments") && method == http.MethodPost {
+		return true
+	}
+	if (resource == "/admin/v1/pricing" || resource == "/admin/v1/metering-units") && method == http.MethodGet || (resource == "/admin/v1/pricing/drafts" || resource == "/admin/v1/metering-units") && method == http.MethodPost {
 		return true
 	}
 	if strings.Contains(resource, "..") {
 		return false
 	}
 	parts := strings.Split(strings.Trim(resource, "/"), "/")
+	if len(parts) == 4 && parts[0] == "admin" && parts[1] == "v1" && (parts[2] == "usage-holds" || parts[2] == "payment-orders" || parts[2] == "late-payment-reviews" || parts[2] == "payment-anomalies") {
+		_, err := uuid.Parse(parts[3])
+		return err == nil && method == http.MethodGet
+	}
 	if len(parts) != 5 || parts[0] != "admin" || parts[1] != "v1" {
 		return false
 	}
@@ -769,8 +783,14 @@ func billingAdminPathAllowed(method, resource string) bool {
 		return false
 	}
 	switch parts[2] {
+	case "pricing":
+		return (parts[4] == "publish" || parts[4] == "transition") && method == http.MethodPost || parts[4] == "draft" && method == http.MethodPut || parts[4] == "preview" && method == http.MethodGet
+	case "metering-units":
+		return parts[4] == "deactivate" && method == http.MethodPost
 	case "wallets":
 		return method == http.MethodGet && parts[4] == "ledger"
+	case "receivables":
+		return method == http.MethodGet && parts[4] == "allocations"
 	case "payment-orders":
 		return method == http.MethodPost && (parts[4] == "sync" || parts[4] == "repair" || parts[4] == "refunds")
 	case "adjustments":
@@ -779,6 +799,12 @@ func billingAdminPathAllowed(method, resource string) bool {
 		return method == http.MethodPost && parts[4] == "release"
 	case "reconciliation-runs":
 		return method == http.MethodGet && parts[4] == "cases"
+	case "late-payment-reviews":
+		return method == http.MethodPost && (parts[4] == "claim" || parts[4] == "query" || parts[4] == "schedule" || parts[4] == "archive" || parts[4] == "provider-blind")
+	case "payment-anomalies":
+		return method == http.MethodPost && (parts[4] == "claim" || parts[4] == "resolve")
+	case "reconciliation-cases":
+		return method == http.MethodPost && parts[4] == "commands"
 	default:
 		return false
 	}
@@ -791,6 +817,9 @@ func tokenAdminPathAllowed(method, resource string) bool {
 	if strings.Contains(resource, "..") {
 		return false
 	}
+	if resource == "/admin/v1/protocols" {
+		return method == http.MethodGet || method == http.MethodPost
+	}
 	parts := strings.Split(strings.Trim(resource, "/"), "/")
 	if len(parts) < 4 || parts[0] != "admin" || parts[1] != "v1" {
 		return false
@@ -801,6 +830,12 @@ func tokenAdminPathAllowed(method, resource string) bool {
 	if parts[2] == "usage-requests" {
 		return (len(parts) == 4 && method == http.MethodGet) ||
 			(len(parts) == 5 && parts[4] == "retry-reconciliation" && method == http.MethodPost)
+	}
+	if parts[2] == "protocols" {
+		return len(parts) == 5 && ((parts[4] == "publish" || parts[4] == "formulas") && method == http.MethodPost)
+	}
+	if parts[2] == "formulas" {
+		return len(parts) == 5 && (parts[4] == "publish" && method == http.MethodPost || parts[4] == "preview" && method == http.MethodGet)
 	}
 	if parts[2] != "token-accounts" {
 		return false

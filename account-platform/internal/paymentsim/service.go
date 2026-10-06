@@ -46,6 +46,8 @@ func (s *Service) createOrder(w http.ResponseWriter, r *http.Request) {
 		Channel          string `json:"channel"`
 		AmountFen        int64  `json:"amount_fen"`
 		Currency         string `json:"currency"`
+		Mobile           string `json:"mobile"`
+		ProviderSKU      string `json:"provider_sku"`
 		CallbackURL      string `json:"callback_url"`
 		Scenario         string `json:"scenario"`
 		ExpiresInSeconds int    `json:"expires_in_seconds"`
@@ -57,7 +59,7 @@ func (s *Service) createOrder(w http.ResponseWriter, r *http.Request) {
 	if body.ExpiresInSeconds == 0 {
 		body.ExpiresInSeconds = 900
 	}
-	order, created, err := s.repository.Create(r.Context(), CreateOrder{MerchantOrderNo: body.MerchantOrderNo, Channel: body.Channel, AmountFen: body.AmountFen, Currency: body.Currency, CallbackURL: body.CallbackURL, Scenario: body.Scenario, ExpiresAt: s.now().Add(time.Duration(body.ExpiresInSeconds) * time.Second)})
+	order, created, err := s.repository.Create(r.Context(), CreateOrder{MerchantOrderNo: body.MerchantOrderNo, Channel: body.Channel, AmountFen: body.AmountFen, Currency: body.Currency, Mobile: body.Mobile, ProviderSKU: body.ProviderSKU, CallbackURL: body.CallbackURL, Scenario: body.Scenario, ExpiresAt: s.now().Add(time.Duration(body.ExpiresInSeconds) * time.Second)})
 	if err != nil {
 		s.writeError(w, r, err)
 		return

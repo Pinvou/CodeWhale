@@ -23,7 +23,7 @@ func packageFixture(t *testing.T) (*PaymentCoordinator, Wallet, uuid.UUID, Payme
 		t.Fatal(err)
 	}
 	paidAt, transaction := p.now(), uuid.NewString()
-	order, err = p.applyQueriedPayment(ctx, order.ID, ProviderOrder{MerchantOrderNo: order.MerchantOrderNo, Channel: order.Channel, AmountFen: order.AmountFen, Currency: order.Currency, Status: "SUCCESS", PaidAt: &paidAt, ChannelTransactionID: &transaction})
+	order, err = p.applyQueriedPayment(ctx, order.ID, ProviderOrder{MerchantOrderNo: order.MerchantOrderNo, Channel: order.Channel, AmountFen: order.AmountFen, Currency: order.Currency, Mobile: order.Mobile, ProviderSKU: order.ProviderSKU, Status: "SUCCESS", PaidAt: &paidAt, ChannelTransactionID: &transaction}, false)
 	if err != nil {
 		t.Fatal(err)
 	}

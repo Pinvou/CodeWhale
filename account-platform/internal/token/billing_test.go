@@ -15,14 +15,14 @@ func TestCostUsesIntegerCeilingAndCachedRate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cost != 7 {
-		t.Fatalf("Cost = %d, want 7", cost)
+	if cost != 8 {
+		t.Fatalf("Cost = %d, want 8", cost)
 	}
 }
 
 func TestCostRejectsInvalidUsage(t *testing.T) {
-	if _, err := Cost(PriceVersion{}, Usage{InputTokens: 1, CachedInputTokens: 2}); err == nil {
-		t.Fatal("cached tokens greater than input were accepted")
+	if _, err := Cost(PriceVersion{}, Usage{InputTokens: -1, CachedInputTokens: 2}); err == nil {
+		t.Fatal("negative exclusive input tokens were accepted")
 	}
 }
 
@@ -34,7 +34,7 @@ func TestMaximumCostBoundsCachedPricesAndSplitCeilings(t *testing.T) {
 		}
 		for input := int64(0); input <= 100; input++ {
 			for cached := int64(0); cached <= input; cached++ {
-				actual, err := Cost(price, Usage{InputTokens: input, CachedInputTokens: cached, OutputTokens: 3})
+				actual, err := Cost(price, Usage{InputTokens: input - cached, CachedInputTokens: cached, OutputTokens: 3})
 				if err != nil || actual > bound {
 					t.Fatalf("bound=%d actual=%d input=%d cached=%d price=%+v err=%v", bound, actual, input, cached, price, err)
 				}

@@ -3,7 +3,7 @@ import { createContextRequestGuard, eligibleForContext, rechargePollDelay } from
 import { accountErrorMessage, needsAccountLogin } from './errors.js';
 import { safePNGImage } from './bff-client.js';
 import { formatMoney, formatPoints, parseScaledAmount } from './credit-units.js';
-import { performLogicalOperation, quotaBatchAcknowledged } from './logical-operation.js';
+import { performLogicalOperation, quotaBatchAcknowledged, requireRechargeAcknowledgement } from './logical-operation.js';
 import './account-platform.css';
 import { MyRoleBindings, AccountProfile } from './AccountProfile.jsx';
 
@@ -368,6 +368,12 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
     return performLogicalOperation(operationKeysRef.current, { kind, identity, createKey:idempotencyKey, action, acknowledged });
   };
 
+  const createRecharge = (productId, channel) => run(async isCurrent => {
+    const nextOrder = await withOperationKey('recharge', [productId, channel], async key =>
+      requireRechargeAcknowledgement(await client.createRecharge(productId, channel, key), productId, channel));
+    await acceptOrder(nextOrder, isCurrent);
+  });
+
   const purchaseOrganization = (productId, channel) => run(async isCurrent => {
     const organizationId = meRef.current?.active_context?.organization_id;
     const latest = await withOperationKey('org-recharge', [productId, channel], async key => {
@@ -421,6 +427,12 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
     setUsageCursor(page.next_cursor || null);
   });
 
+  const claimLatePayment = (orderID, statement) => run(async isCurrent => {
+    const result = await client.claimLatePayment(orderID, statement);
+    if (!validID(result?.case_id) || result.payment_order_id !== orderID) throw new Error('REQUEST_FAILED');
+    if (isCurrent()) setNotice('paymentClaimRecorded');
+  });
+
   if (auth === 'loading') return <div className={"ap-shell ap-centered " + (portal ? "ap-portal" : "ap-desktop")}><div className="ap-spinner" />{copy.loading}</div>;
   if (auth === 'guest') return <div className={"ap-shell ap-login " + (portal ? "ap-portal" : "ap-desktop")}><div><p className="ap-eyebrow">PINVOU ACCOUNT PLATFORM</p><h1>{copy.title}</h1><p>{portal ? copy.loginIntro : copy.desktopLoginIntro}</p>{portal ? <a className="ap-primary" href="/auth/login">{copy.login}</a> : <form className="ap-stack" onSubmit={event => { event.preventDefault(); void login(); }}><Field label={copy.account}><input value={loginAccount} onChange={event => setLoginAccount(event.target.value)} autoComplete="username" disabled={busy} /></Field><Field label={copy.password}><input type="password" value={loginPassword} onChange={event => setLoginPassword(event.target.value)} autoComplete="current-password" disabled={busy} /></Field><button className="ap-primary" disabled={busy || !loginAccount.trim() || !loginPassword}>{busy ? copy.signingIn : copy.login}</button></form>}{error && <div role="alert" className="ap-alert error">{error}</div>}{onClose && <button className="ap-close" disabled={busy} onClick={onClose}>{copy.close}</button>}</div></div>;
   if (auth === 'error') return <div className={"ap-shell ap-centered " + (portal ? "ap-portal" : "ap-desktop")} role="alert">{error || copy.requestFailed}<button onClick={() => window.location.reload()}>{copy.retry}</button>{onClose && <button onClick={onClose}>{copy.close}</button>}</div>;
@@ -444,9 +456,9 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
       {section === 'profile' && <AccountProfile key={`${me?.user_id}:${activeOrganizationId}`} client={client} copy={copy} me={me} portal={portal} busy={busy} run={run} onError={fail} onSignedOut={() => fail({ status:401 })} />}
       {section === 'overview' && <Overview copy={copy} language={language} me={me} organizations={organizations} balance={balance} activeOrganization={activeOrganization} activeOrganizationId={activeOrganizationId} busy={busy} onSwitchContext={switchContext} />}
       {section === 'organization' && <Organization copy={copy} organization={activeOrganization} units={units} members={members} busy={busy} onCreateUnit={createUnit} onInvite={(email, roles) => run(async isCurrent => { const invite = await client.invite(activeOrganizationId, email, roles); if (isCurrent()) setNotice({ copyKey: 'invitationCreated', value: invite.token }); })} />}
-      {section === 'credits' && <ResourceSection name="credits" personalContext={personalContext} copy={copy}><Wallet copy={copy} language={language} products={products} balance={balance} packages={packages} personalContext={personalContext} detailsUnavailable={billingDetailsUnavailable} billingUnavailable={billingUnavailable} order={order} qrData={qrData} busy={busy} onRecharge={(productId, channel) => run(async isCurrent => { const nextOrder = await client.createRecharge(productId, channel, idempotencyKey('recharge')); await acceptOrder(nextOrder, isCurrent); })} /></ResourceSection>}
-      {section === 'entitlements' && <ResourceSection name="entitlements" personalContext={personalContext} copy={copy}>{personalContext ? <Wallet copy={copy} language={language} products={products} balance={balance} packages={packages} personalContext={personalContext} detailsUnavailable={billingDetailsUnavailable} billingUnavailable={billingUnavailable} order={order} qrData={qrData} busy={busy} onRecharge={(productId, channel) => run(async isCurrent => { const nextOrder = await client.createRecharge(productId, channel, idempotencyKey('recharge')); await acceptOrder(nextOrder, isCurrent); })} /> : <OrganizationEntitlements key={activeOrganizationId} copy={copy} language={language} organizationId={activeOrganizationId} permissions={me?.active_context?.permissions || []} products={organizationProducts} packages={packages} members={quotaMembers} grants={quotaGrants} order={order} busy={busy} balance={balance} qrData={qrData} billingUnavailable={billingUnavailable} detailsUnavailable={billingDetailsUnavailable} onPurchase={purchaseOrganization} onAllocate={allocateQuota} onRevoke={revokeQuota} />}</ResourceSection>}
-      {section === 'orders' && personalContext && <Orders copy={copy} language={language} orders={orders} unavailable={billingDetailsUnavailable} />}
+      {section === 'credits' && <ResourceSection name="credits" personalContext={personalContext} copy={copy}><Wallet copy={copy} language={language} products={products} balance={balance} packages={packages} personalContext={personalContext} detailsUnavailable={billingDetailsUnavailable} billingUnavailable={billingUnavailable} order={order} qrData={qrData} busy={busy} onRecharge={createRecharge} /></ResourceSection>}
+      {section === 'entitlements' && <ResourceSection name="entitlements" personalContext={personalContext} copy={copy}>{personalContext ? <Wallet copy={copy} language={language} products={products} balance={balance} packages={packages} personalContext={personalContext} detailsUnavailable={billingDetailsUnavailable} billingUnavailable={billingUnavailable} order={order} qrData={qrData} busy={busy} onRecharge={createRecharge} /> : <OrganizationEntitlements key={activeOrganizationId} copy={copy} language={language} organizationId={activeOrganizationId} permissions={me?.active_context?.permissions || []} products={organizationProducts} packages={packages} members={quotaMembers} grants={quotaGrants} order={order} busy={busy} balance={balance} qrData={qrData} billingUnavailable={billingUnavailable} detailsUnavailable={billingDetailsUnavailable} onPurchase={purchaseOrganization} onAllocate={allocateQuota} onRevoke={revokeQuota} />}</ResourceSection>}
+      {section === 'orders' && personalContext && <Orders copy={copy} language={language} orders={orders} unavailable={billingDetailsUnavailable} busy={busy} onClaim={claimLatePayment} />}
       {section === 'invoice' && personalContext && <Invoice copy={copy} />}
       {section === 'tokens' && <Tokens key={`${me?.active_context?.context_type}:${activeOrganizationId}`} copy={copy} language={language} client={client} onError={fail} me={me} organization={activeOrganization} tokens={tokens} balance={balance} billingUnavailable={billingUnavailable} busy={busy} run={run} reload={() => loadContext(me)} />}
       {section === 'usage' && <Usage copy={copy} language={language} records={usageRecords} unavailable={usageUnavailable} hasMore={Boolean(usageCursor)} busy={busy} onLoadMore={loadMoreUsage} />}
@@ -504,14 +516,14 @@ function Wallet({ copy, language, products, balance, packages, personalContext, 
   const remainingSeconds = order ? Math.max(0, Math.ceil((new Date(order.expires_at).getTime() - now) / 1000)) : 0;
   const displayStatus = order && remainingSeconds === 0 && !terminalOrderStates.has(order.status) ? 'EXPIRED' : order?.status;
   const canScan = Boolean(order && !terminalOrderStates.has(order.status) && remainingSeconds > 0);
-  const channels = selected?.channels?.length ? selected.channels : ['UNIONPAY', 'ALIPAY', 'WECHAT'];
-  useEffect(() => { if (!channels.includes(channel)) setChannel(channels[0]); }, [channel, channels]);
+  const channels = Array.isArray(selected?.channels) ? selected.channels.filter(value => typeof value === 'string' && value.length > 0) : [];
+  useEffect(() => { if (!channels.includes(channel)) setChannel(channels[0] || ''); }, [channel, channels]);
   const countdown = `${String(Math.floor(remainingSeconds / 60)).padStart(2, '0')}:${String(remainingSeconds % 60).padStart(2, '0')}`;
-  return <section><p className="ap-eyebrow">{copy.sections.wallet}</p><h2>{hasPlans ? copy.walletTitle : copy.rechargeTitle}</h2>{hasPlans && <p className="ap-lead">{copy.walletLead}</p>}{billingUnavailable && <div role="alert" className="ap-alert error">{copy.billingUnavailable}</div>}<div className="ap-balance-hero"><span>{copy.availableCredits}</span><strong>{formatPoints(balance?.available_microcredits, language)}</strong><small>{copy.reservedCredits}: {formatPoints(balance?.reserved_microcredits, language)}</small></div><div className="ap-card"><h3>{hasPlans ? copy.availablePlans : copy.selectAmount}</h3><div className="ap-product-grid">{products.map(product => <button key={product.product_id} className={productId === product.product_id ? 'selected' : ''} disabled={busy} aria-pressed={productId === product.product_id} onClick={() => setProductId(product.product_id)}><strong>{product.plan_name || formatMoney(product.amount_fen, language)}</strong><span>{product.plan_name && <>{formatMoney(product.amount_fen, language)} · </>}{formatPoints(String(product.display_points) + '0000', language)} {copy.points}</span><small>{product.validity_days > 0 ? copy.validityDays(product.validity_days) : ''}{product.price_status === 'UAT_TENTATIVE' ? ` · ${copy.tentativePrice}` : ''}</small></button>)}</div><div className="ap-inline"><select disabled={busy} value={channel} onChange={event => setChannel(event.target.value)}>{channels.map(item => <option key={item} value={item}>{copy.channels[item] || item}</option>)}</select><button className="ap-primary" disabled={busy || billingUnavailable || !selected} onClick={() => onRecharge(productId, channel)}>{copy.createRecharge}</button></div>{order && <div className="ap-payment"><div>{canScan && qrData && <img src={qrData} alt={copy.paymentQR} />}</div><div><span className="ap-status">{copy.orderStatuses[displayStatus] || displayStatus}</span><h3>{formatMoney(order.amount_fen, language)}{canScan && <> · {copy.scanToPay}</>}</h3><p>{canScan ? copy.countdown(countdown) : copy.orderNoLongerPayable}</p>{canScan && /^https?:\/\//u.test(order.payment_url || '') && <a href={order.payment_url} target="_blank" rel="noreferrer">{copy.openPayment}</a>}</div></div>}</div>{personalContext && <div className="ap-card ap-entitlements"><h3>{copy.myEntitlements}</h3><p>{copy.consumptionOrder}</p><p>{copy.refundCompositionNotice}</p>{packages.summary && <div className="ap-metrics"><article><span>{copy.basePoints}</span><strong>{formatPoints(packages.summary.base_available_microcredits,language)}</strong></article><article><span>{copy.bonusPoints}</span><strong>{formatPoints(packages.summary.bonus_available_microcredits,language)}</strong></article></div>}{detailsUnavailable ? <div role="alert" className="ap-alert error">{copy.billingUnavailable}</div> : packages.items?.length ? <div className="ap-order-list">{packages.items.map(item => <article className="ap-trace-card" key={item.package_id}><header><div><strong>{item.plan_name}</strong><small>{item.sku_code}</small></div><div><strong>{formatPoints(item.points_remaining_microcredits, language)} {copy.points}</strong><span className="ap-status">{copy.packageStatuses[item.status] || item.status}</span></div></header><TraceDetails items={[
+  return <section><p className="ap-eyebrow">{copy.sections.wallet}</p><h2>{hasPlans ? copy.walletTitle : copy.rechargeTitle}</h2>{hasPlans && <p className="ap-lead">{copy.walletLead}</p>}{billingUnavailable && <div role="alert" className="ap-alert error">{copy.billingUnavailable}</div>}<div className="ap-balance-hero"><span>{copy.availableCredits}</span><strong>{formatPoints(balance?.available_microcredits, language)}</strong><small>{copy.reservedCredits}: {formatPoints(balance?.reserved_microcredits, language)}</small></div><div className="ap-card"><h3>{hasPlans ? copy.availablePlans : copy.selectAmount}</h3><div className="ap-product-grid">{products.map(product => <button key={product.product_id} className={productId === product.product_id ? 'selected' : ''} disabled={busy} aria-pressed={productId === product.product_id} onClick={() => setProductId(product.product_id)}><strong>{product.plan_name || formatMoney(product.amount_fen, language)}</strong><span>{product.plan_name && <>{formatMoney(product.amount_fen, language)} · </>}{formatPoints(String(product.display_points) + '0000', language)} {copy.points}</span><small>{product.validity_days > 0 ? copy.validityDays(product.validity_days) : ''}{product.price_status === 'UAT_TENTATIVE' ? ` · ${copy.tentativePrice}` : ''}</small></button>)}</div><div className="ap-inline"><select disabled={busy} value={channel} onChange={event => setChannel(event.target.value)}>{channels.map(item => <option key={item} value={item}>{copy.channels[item] || item}</option>)}</select><button className="ap-primary" disabled={busy || billingUnavailable || !selected || !channels.includes(channel)} onClick={() => onRecharge(productId, channel)}>{copy.createRecharge}</button></div>{order && <div className="ap-payment"><div>{canScan && qrData && <img src={qrData} alt={copy.paymentQR} />}</div><div><span className="ap-status">{copy.orderStatuses[displayStatus] || displayStatus}</span><h3>{formatMoney(order.amount_fen, language)}{canScan && <> · {copy.scanToPay}</>}</h3><p>{canScan ? copy.countdown(countdown) : copy.orderNoLongerPayable}</p>{canScan && /^https?:\/\//u.test(order.payment_url || '') && <a href={order.payment_url} target="_blank" rel="noreferrer">{copy.openPayment}</a>}</div></div>}</div>{personalContext && <div className="ap-card ap-entitlements"><h3>{copy.myEntitlements}</h3><p>{copy.consumptionOrder}</p><p>{copy.refundCompositionNotice}</p>{packages.summary && <div className="ap-metrics"><article><span>{copy.basePoints}</span><strong>{formatPoints(packages.summary.base_available_microcredits,language)}</strong></article><article><span>{copy.bonusPoints}</span><strong>{formatPoints(packages.summary.bonus_available_microcredits,language)}</strong></article></div>}{detailsUnavailable ? <div role="alert" className="ap-alert error">{copy.billingUnavailable}</div> : packages.items?.length ? <div className="ap-order-list">{packages.items.map(item => <article className="ap-trace-card" key={item.package_id}><header><div><strong>{item.plan_name}</strong><small>{item.sku_code}</small></div><div><strong>{formatPoints(item.points_remaining_microcredits, language)} {copy.points}</strong><span className="ap-status">{copy.packageStatuses[item.status] || item.status}</span></div></header><TraceDetails items={[
     [copy.packageId, item.package_id],
     [copy.entitlementSource, item.source_reference],
     [copy.pinvouOrder, item.pinvou_order_id],
-    [copy.mallOrder, item.mall_order_id],
+    [copy.providerOrderReference, item.provider_order_reference],
     [copy.amount, formatMoney(item.amount_fen, language)],
     [copy.creditedAt, formatUsageTime(item.credited_at, language)],
     [copy.validPeriod, `${formatUsageTime(item.valid_from, language)} — ${formatUsageTime(item.valid_until, language)}`],
@@ -525,17 +537,26 @@ function Wallet({ copy, language, products, balance, packages, personalContext, 
   ]} /></article>)}</div>}</article>)}</div> : <Empty>{copy.noEntitlements}</Empty>}</div>}</section>;
 }
 
-function Orders({ copy, language, orders, unavailable }) {
+function Orders({ copy, language, orders, unavailable, busy, onClaim }) {
   return <section><p className="ap-eyebrow">{copy.sections.orders}</p><h2>{copy.ordersTitle}</h2><p className="ap-lead">{copy.ordersLead}</p>{unavailable ? <div role="alert" className="ap-alert error">{copy.billingUnavailable}</div> : orders.length ? <div className="ap-order-list">{orders.map(item => <article className="ap-trace-card" key={item.order_id}><header><div><strong>{item.plan_name}</strong><small>{item.sku_code} · {copy.channels[item.channel] || item.channel}</small></div><div><strong>{formatMoney(item.amount_fen, language)}</strong><span className="ap-status">{copy.orderStatuses[item.status] || item.status}</span></div></header><TraceDetails items={[
     [copy.pinvouOrder, item.pinvou_order_id || item.order_id],
-    [copy.mallOrder, item.mall_order_id],
+    [copy.providerOrderReference, item.provider_order_reference],
     [copy.createdAt, formatUsageTime(item.created_at, language)],
     [copy.paidAt, formatUsageTime(item.paid_at, language)],
     [copy.creditedAt, formatUsageTime(item.credited_at, language)],
     [copy.validUntil, formatUsageTime(item.valid_until, language)],
     [copy.fulfillmentStatus, copy.fulfillmentStatuses?.[item.fulfillment_status] || item.fulfillment_status],
     [copy.invoiceStatus, copy.invoiceStatuses?.[item.invoice_status] || item.invoice_status],
-  ]} /></article>)}</div> : <Empty>{copy.noOrders}</Empty>}</section>;
+  ]} />{['CREATED','PENDING'].includes(item.status) && Date.now() - Date.parse(item.created_at) >= 72 * 3600000 && <PaymentClaim copy={copy} orderID={item.order_id} busy={busy} onClaim={onClaim} />}</article>)}</div> : <Empty>{copy.noOrders}</Empty>}</section>;
+}
+
+function PaymentClaim({ copy, orderID, busy, onClaim }) {
+  const [statement, setStatement] = useState('');
+  const length = [...statement.trim()].length;
+  return <form className="ap-stack" onSubmit={async event => { event.preventDefault(); if (length < 10 || length > 1000) return; if (await onClaim(orderID, statement.trim())) setStatement(''); }}>
+    <Field label={copy.paymentClaimStatement}><textarea disabled={busy} maxLength={2000} value={statement} onChange={event => setStatement(event.target.value)} /></Field>
+    <button disabled={busy || length < 10 || length > 1000}>{copy.claimLatePayment}</button>
+  </form>;
 }
 
 function TraceDetails({ items }) {

@@ -11,6 +11,7 @@ import (
 var (
 	ErrNotFound                      = errors.New("token account not found")
 	ErrForbidden                     = errors.New("token account is not authorized")
+	ErrUsageReplayConflict           = errors.New("logical model call conflicts with its original facts")
 	ErrAmbiguousRoute                = errors.New("token route is ambiguous")
 	ErrNoEligibleRoute               = errors.New("no eligible token route")
 	ErrInvalidSecret                 = errors.New("invalid token secret configuration")

@@ -473,6 +473,45 @@ paths:
         "200": { description: Exact wallet ledger collection, content: { application/json: { schema: { $ref: "#/components/schemas/LedgerCollection" } } } }
         "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
+  /billing/admin/v1/receivables:
+    get:
+      operationId: listAdminReceivables
+      summary: Query wallet receivables and their settlement state
+      parameters:
+        - { $ref: "#/components/parameters/Limit" }
+        - { name: wallet_id, in: query, schema: { type: string, format: uuid } }
+        - { name: status, in: query, schema: { type: string, enum: [OPEN, PARTIALLY_SETTLED, SETTLED, WRITTEN_OFF] } }
+      responses:
+        "200":
+          description: Receivable collection
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [items]
+                properties:
+                  items: { type: array, items: { $ref: "#/components/schemas/Receivable" } }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+  /billing/admin/v1/receivables/{receivable_id}/allocations:
+    get:
+      operationId: listAdminReceivableAllocations
+      summary: List immutable settlement allocations for one receivable
+      parameters:
+        - { name: receivable_id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200":
+          description: Immutable settlement allocation collection
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [items]
+                properties:
+                  items: { type: array, items: { $ref: "#/components/schemas/ReceivableAllocation" } }
+        "403": { $ref: "#/components/responses/Error" }
   /billing/admin/v1/pricing-versions:
     get:
       operationId: listAdminPricingVersions
@@ -493,6 +532,109 @@ paths:
         "400": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
+  /billing/admin/v1/metering-units:
+    get:
+      operationId: listAdminMeteringUnitVersions
+      summary: List immutable versioned metering unit definitions
+      responses:
+        "200": { $ref: "#/components/responses/Collection" }
+        "403": { $ref: "#/components/responses/Error" }
+    post:
+      operationId: createAdminMeteringUnitVersion
+      parameters: [{ $ref: "#/components/parameters/PricingOperationID" }]
+      summary: Create a new metering unit version
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/MeteringUnitCreate" } } }
+      responses:
+        "400": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+        "201": { description: Metering unit version created }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /billing/admin/v1/metering-units/{unit_definition_id}/deactivate:
+    post:
+      operationId: deactivateAdminMeteringUnitVersion
+      summary: Deactivate a metering unit version without deleting or changing its facts
+      parameters: [{ name: unit_definition_id, in: path, required: true, schema: { type: string, format: uuid } }]
+      responses:
+        "200": { description: Metering unit deactivated }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /billing/admin/v1/pricing:
+    get:
+      operationId: listAdminManagedPrices
+      summary: List price drafts and published lifecycle versions with derived status
+      parameters: [{ $ref: "#/components/parameters/Limit" }]
+      responses:
+        "200": { $ref: "#/components/responses/Collection" }
+        "403": { $ref: "#/components/responses/Error" }
+  /billing/admin/v1/pricing/drafts:
+    post:
+      operationId: createAdminPriceDraft
+      parameters: [{ $ref: "#/components/parameters/PricingOperationID" }]
+      summary: Create an ETag-protected global or model price draft
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/PriceDraft" } } }
+      responses:
+        "400": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+        "201": { description: Price draft created }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "412": { $ref: "#/components/responses/Error" }
+  /billing/admin/v1/pricing/{price_version_id}/draft:
+    put:
+      operationId: updateAdminPriceDraft
+      summary: Replace mutable draft facts before publication
+      parameters: [{ name: price_version_id, in: path, required: true, schema: { type: string, format: uuid } }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/PriceDraft" } } }
+      responses:
+        "409": { $ref: "#/components/responses/Error" }
+        "200": { description: Price draft updated }
+        "403": { $ref: "#/components/responses/Error" }
+        "412": { $ref: "#/components/responses/Error" }
+  /billing/admin/v1/pricing/{price_version_id}/preview:
+    get:
+      operationId: previewAdminPrice
+      summary: Resolve all inherited units and preview the exact immutable price snapshot
+      parameters: [{ name: price_version_id, in: path, required: true, schema: { type: string, format: uuid } }]
+      responses:
+        "200": { description: Resolved price preview }
+        "403": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
+  /billing/admin/v1/pricing/{price_version_id}/publish:
+    post:
+      operationId: publishAdminPrice
+      summary: Idempotently publish a non-overlapping price version with compare-and-swap
+      parameters:
+        - { name: price_version_id, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: Idempotency-Key, in: header, required: true, schema: { type: string, minLength: 16, maxLength: 128 } }
+      requestBody:
+        required: true
+        content: { application/json: { schema: { type: object, required: [expected_etag], properties: { expected_etag: { type: integer, format: int64, minimum: 1 } } } } }
+      responses:
+        "200": { description: Price published }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "412": { $ref: "#/components/responses/Error" }
+  /billing/admin/v1/pricing/{price_version_id}/transition:
+    post:
+      operationId: transitionAdminPriceLifecycle
+      summary: Cancel a future price or end an active price with continuation, global fallback, or explicit block
+      parameters:
+        - { name: price_version_id, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: Idempotency-Key, in: header, required: true, schema: { type: string, minLength: 16, maxLength: 128 } }
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/PriceTransition" } } }
+      responses:
+        "200": { description: Price lifecycle transitioned }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
   /billing/admin/v1/payment-orders:
     get:
       operationId: listAdminPaymentOrders
@@ -505,7 +647,7 @@ paths:
           schema: { type: string, maxLength: 160 }
         - name: status
           in: query
-          schema: { type: string, enum: [CREATED, PENDING, PAID, PAID_LATE, FAILED, CLOSED, PARTIALLY_REFUNDED, REFUNDED, MANUAL_REVIEW] }
+          schema: { type: string, enum: [CREATED, PENDING, PAID, PAID_LATE, FAILED, CLOSED, MANUAL_REVIEW] }
       responses:
         "200": { description: Payment order collection, content: { application/json: { schema: { $ref: "#/components/schemas/PaymentOrderCollection" } } } }
         "400": { $ref: "#/components/responses/Error" }
@@ -520,6 +662,17 @@ paths:
         "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
+  /billing/admin/v1/payment-orders/{order_id}:
+    get:
+      operationId: getAdminPaymentOrder
+      summary: Inspect an order with its independently versioned transactions, immutable evidence, and derived summaries
+      parameters: [{ $ref: "#/components/parameters/OrderID" }]
+      responses:
+        "200":
+          description: Payment order operations detail
+          content: { application/json: { schema: { $ref: "#/components/schemas/PaymentOrderDetail" } } }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
   /billing/admin/v1/payment-orders/{order_id}/repair:
     post:
       operationId: repairAdminPaymentOrder
@@ -539,7 +692,7 @@ paths:
   /billing/admin/v1/payment-orders/{order_id}/refunds:
     post:
       operationId: createAdminPaymentRefund
-      summary: Refund a settled payment order subject to refundable balance
+      summary: Refund the whole unconsumed remainder of a selected payment transaction entitlement package
       parameters: [{ $ref: "#/components/parameters/OrderID" }, { $ref: "#/components/parameters/RefundIdempotencyKey" }]
       requestBody:
         required: true
@@ -552,6 +705,14 @@ paths:
         "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
+  /billing/admin/v1/refunds:
+    get:
+      operationId: listAdminRefundOperations
+      summary: List targeted ordinary refund requests and isolated forced-refund review cases
+      parameters: [{ $ref: "#/components/parameters/Limit" }]
+      responses:
+        "200": { $ref: "#/components/responses/Collection" }
+        "403": { $ref: "#/components/responses/Error" }
   /billing/admin/v1/adjustments:
     get:
       operationId: listAdminAdjustments
@@ -603,11 +764,24 @@ paths:
       responses:
         "200": { description: Hold collection, content: { application/json: { schema: { $ref: "#/components/schemas/HoldCollection" } } } }
         "403": { $ref: "#/components/responses/Error" }
+  /billing/admin/v1/usage-holds/{hold_id}:
+    get:
+      operationId: getAdminUsageHold
+      summary: Read one hold with component, member, lease, and operator evidence
+      parameters: [{ $ref: "#/components/parameters/HoldID" }]
+      responses:
+        "200":
+          description: Complete hold operational evidence
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/UsageHoldDetail" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
   /billing/admin/v1/usage-holds/{hold_id}/release:
     post:
       operationId: releaseAdminUsageHold
       summary: Finally waive this call with an audit reason; active upstream execution is rejected and a prior commit cannot be waived
-      parameters: [{ $ref: "#/components/parameters/HoldID" }]
+      parameters: [{ $ref: "#/components/parameters/HoldID" }, { $ref: "#/components/parameters/ReleaseIdempotencyKey" }]
       requestBody: { $ref: "#/components/requestBodies/Decision" }
       responses:
         "200":
@@ -624,6 +798,127 @@ paths:
         "503": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /billing/admin/v1/late-payment-reviews:
+    get:
+      operationId: listAdminLatePaymentReviews
+      summary: Filter late-payment and provider-blind review cases without changing payment facts
+      parameters:
+        - { $ref: "#/components/parameters/Limit" }
+        - { name: status, in: query, schema: { type: string, enum: [REVIEW_REQUIRED_LATE_PAYMENT, PROVIDER_BLIND, ARCHIVED_CONFIRMED_UNPAID, RESOLVED_PAID] } }
+        - { name: provider_id, in: query, schema: { type: string } }
+        - { name: owner_id, in: query, schema: { type: string, format: uuid } }
+        - { name: entered_from, in: query, schema: { type: string, format: date-time } }
+        - { name: entered_to, in: query, schema: { type: string, format: date-time } }
+        - { name: next_review_before, in: query, schema: { type: string, format: date-time } }
+        - { name: overdue, in: query, schema: { type: boolean, default: false } }
+      responses:
+        "200": { $ref: "#/components/responses/Collection" }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+  /billing/admin/v1/late-payment-reviews/{case_id}:
+    get:
+      operationId: getAdminLatePaymentReview
+      summary: Read frozen Provider/policy snapshots and the immutable evidence and operator timeline
+      parameters: [{ $ref: "#/components/parameters/CaseID" }]
+      responses:
+        "200": { description: Late-payment review detail, content: { application/json: { schema: { $ref: "#/components/schemas/LatePaymentReviewDetail" } } } }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /billing/admin/v1/late-payment-reviews/{case_id}/claim:
+    post:
+      operationId: claimAdminLatePaymentReview
+      summary: Idempotently claim an unowned review without resetting its SLA clocks
+      parameters: [{ $ref: "#/components/parameters/CaseID" }]
+      responses:
+        "200": { description: Review claimed, content: { application/json: { schema: { $ref: "#/components/schemas/LatePaymentReviewCase" } } } }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /billing/admin/v1/late-payment-reviews/{case_id}/query:
+    post:
+      operationId: queryAdminLatePaymentReview
+      summary: Query the frozen Provider adapter and append the result as evidence
+      parameters: [{ $ref: "#/components/parameters/CaseID" }]
+      responses:
+        "200": { description: Review updated, content: { application/json: { schema: { $ref: "#/components/schemas/LatePaymentReviewCase" } } } }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /billing/admin/v1/late-payment-reviews/{case_id}/schedule:
+    post:
+      operationId: scheduleAdminLatePaymentReview
+      summary: Schedule the next evidence review without resetting SLA clocks
+      parameters: [{ $ref: "#/components/parameters/CaseID" }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/LatePaymentReviewSchedule" } } }
+      responses:
+        "200": { description: Review scheduled, content: { application/json: { schema: { $ref: "#/components/schemas/LatePaymentReviewCase" } } } }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /billing/admin/v1/late-payment-reviews/{case_id}/archive:
+    post:
+      operationId: archiveAdminLatePaymentReview
+      summary: Archive only after the policy horizon and a successful authoritative unpaid query
+      parameters: [{ $ref: "#/components/parameters/CaseID" }]
+      responses:
+        "200": { description: Confirmed-unpaid archive written, content: { application/json: { schema: { $ref: "#/components/schemas/LatePaymentReviewCase" } } } }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /billing/admin/v1/late-payment-reviews/{case_id}/provider-blind:
+    post:
+      operationId: escalateAdminProviderBlind
+      summary: Record a Provider fact blind spot and disable its new production orders
+      parameters: [{ $ref: "#/components/parameters/CaseID" }]
+      requestBody: { $ref: "#/components/requestBodies/Decision" }
+      responses:
+        "200": { description: Provider-blind escalation recorded, content: { application/json: { schema: { $ref: "#/components/schemas/LatePaymentReviewCase" } } } }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /billing/admin/v1/payment-anomalies:
+    get:
+      operationId: listAdminPaymentAnomalies
+      summary: List unified chargeback, forced-refund, duplicate-payment, late-conflict, refund-failure, and invalid-transition cases
+      description: Each case preserves immutable evidence, owner, review conclusion, and financial-action status while the source domain state remains independent.
+      parameters:
+        - { name: anomaly_type, in: query, schema: { type: string } }
+        - { name: status, in: query, schema: { type: string, enum: [OPEN, RESOLVED] } }
+        - { name: severity, in: query, schema: { type: string, enum: [P0, P1, P2] } }
+        - { name: owner_id, in: query, schema: { type: string, format: uuid } }
+        - { $ref: "#/components/parameters/Limit" }
+      responses:
+        "200": { $ref: "#/components/responses/Collection" }
+        "403": { $ref: "#/components/responses/Error" }
+  /billing/admin/v1/payment-anomalies/{case_id}:
+    get:
+      operationId: getAdminPaymentAnomaly
+      summary: Get immutable evidence snapshot and audited case timeline
+      parameters: [{ $ref: "#/components/parameters/CaseID" }]
+      responses:
+        "200": { description: Payment anomaly detail, content: { application/json: { schema: { $ref: "#/components/schemas/PaymentAnomalyDetail" } } } }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /billing/admin/v1/payment-anomalies/{case_id}/claim:
+    post:
+      operationId: claimAdminPaymentAnomaly
+      summary: Idempotently claim a payment anomaly without resetting its SLA clock
+      parameters: [{ $ref: "#/components/parameters/CaseID" }, { $ref: "#/components/parameters/FinancialActionIdempotencyKey" }]
+      responses:
+        "200": { description: Claimed case, content: { application/json: { schema: { $ref: "#/components/schemas/PaymentAnomalyCase" } } } }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /billing/admin/v1/payment-anomalies/{case_id}/resolve:
+    post:
+      operationId: resolveAdminPaymentAnomaly
+      summary: Record a constrained audited conclusion; arbitrary financial repairs remain approval-gated
+      parameters: [{ $ref: "#/components/parameters/CaseID" }, { $ref: "#/components/parameters/FinancialActionIdempotencyKey" }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/PaymentAnomalyResolution" } } }
+      responses:
+        "200": { description: Resolved case, content: { application/json: { schema: { $ref: "#/components/schemas/PaymentAnomalyCase" } } } }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
   /billing/admin/v1/reconciliation-runs:
     get:
@@ -645,6 +940,18 @@ paths:
         "400": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
+  /billing/admin/v1/reconciliation-imports:
+    post:
+      operationId: importAdminProviderBill
+      summary: Import an immutable bounded Provider bill when the frozen adapter declares file support
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/ReconciliationImport" } } }
+      responses:
+        "201": { description: File rows imported and reconciled }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
   /billing/admin/v1/reconciliation-runs/{run_id}/cases:
     get:
       operationId: listAdminReconciliationCases
@@ -654,6 +961,19 @@ paths:
         "200": { description: Reconciliation evidence with exact financial strings, content: { application/json: { schema: { $ref: "#/components/schemas/ReconciliationCaseCollection" } } } }
         "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
+  /billing/admin/v1/reconciliation-cases/{case_id}/commands:
+    post:
+      operationId: updateAdminReconciliationCase
+      summary: Idempotently claim, assign, plan, resolve, ignore, or reopen one immutable reconciliation difference
+      parameters: [{ $ref: "#/components/parameters/CaseID" }, { $ref: "#/components/parameters/FinancialActionIdempotencyKey" }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/ReconciliationCaseCommand" } } }
+      responses:
+        "200": { description: Updated reconciliation case, content: { application/json: { schema: { $ref: "#/components/schemas/ReconciliationCase" } } } }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
   /token/admin/v1/overview:
     get:
       operationId: getAdminTokenOverview
@@ -764,6 +1084,73 @@ paths:
       responses:
         "200": { $ref: "#/components/responses/Overview" }
         "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /token/admin/v1/protocols:
+    get:
+      operationId: listAdminProtocolsAndFormulas
+      summary: List versioned protocol definitions and safe formula versions
+      responses:
+        "200": { description: Protocol and formula versions }
+        "403": { $ref: "#/components/responses/Error" }
+    post:
+      operationId: createAdminProtocolDraft
+      summary: Create a new protocol definition draft version
+      parameters: [{ $ref: "#/components/parameters/GovernanceOperationID" }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/ProtocolDraft" } } }
+      responses:
+        "503": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "400": { $ref: "#/components/responses/Error" }
+        "201": { description: Protocol draft created }
+        "403": { $ref: "#/components/responses/Error" }
+  /token/admin/v1/protocols/{protocol_definition_id}/publish:
+    post:
+      operationId: publishAdminProtocol
+      summary: Publish an immutable protocol definition version
+      parameters: [{ name: protocol_definition_id, in: path, required: true, schema: { type: string, format: uuid } }, { $ref: "#/components/parameters/GovernanceOperationID" }]
+      responses:
+        "503": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "400": { $ref: "#/components/responses/Error" }
+        "200": { description: Protocol version published }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /token/admin/v1/protocols/{protocol_definition_id}/formulas:
+    post:
+      operationId: createAdminFormulaDraft
+      summary: Create a safe parameter-map formula draft bound to exact unit versions
+      parameters: [{ name: protocol_definition_id, in: path, required: true, schema: { type: string, format: uuid } }, { $ref: "#/components/parameters/GovernanceOperationID" }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/FormulaDraft" } } }
+      responses:
+        "503": { $ref: "#/components/responses/Error" }
+        "400": { $ref: "#/components/responses/Error" }
+        "201": { description: Formula draft created }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /token/admin/v1/formulas/{formula_version_id}/publish:
+    post:
+      operationId: publishAdminFormula
+      summary: Publish an immutable formula and synchronize its snapshot to Billing
+      parameters: [{ name: formula_version_id, in: path, required: true, schema: { type: string, format: uuid } }, { $ref: "#/components/parameters/GovernanceOperationID" }]
+      responses:
+        "409": { $ref: "#/components/responses/Error" }
+        "400": { $ref: "#/components/responses/Error" }
+        "200": { description: Formula published and synchronized }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /token/admin/v1/formulas/{formula_version_id}/preview:
+    get:
+      operationId: previewAdminFormula
+      summary: Validate and preview deterministic zero-default evaluation without executing arbitrary code
+      parameters: [{ name: formula_version_id, in: path, required: true, schema: { type: string, format: uuid } }]
+      responses:
+        "200": { description: Safe formula preview }
         "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
   /account/admin/v1/approval-policies:
@@ -915,6 +1302,30 @@ components:
       name: Idempotency-Key
       in: header
       schema: { type: string, minLength: 8, maxLength: 120 }
+    FinancialActionIdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: Retries of one financial review command reuse its immutable actor, target and decision facts.
+      schema: { type: string, minLength: 8, maxLength: 120 }
+    PricingOperationID:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: One identity per logical pricing creation; retries reuse the immutable actor and request facts.
+      schema: { type: string, minLength: 16, maxLength: 128 }
+    ReleaseIdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: One stable identity per logical terminal waiver; retries reuse the actor, hold and reason.
+      schema: { type: string, minLength: 16, maxLength: 120 }
+    GovernanceOperationID:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: Nonzero UUID per logical governance mutation; retries reuse the same immutable request facts and key.
+      schema: { type: string, format: uuid, not: { const: "00000000-0000-0000-0000-000000000000" } }
     UserID:
       name: user_id
       in: path
@@ -961,6 +1372,11 @@ components:
       schema: { type: string, format: uuid }
     RunID:
       name: run_id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    CaseID:
+      name: case_id
       in: path
       required: true
       schema: { type: string, format: uuid }
@@ -1020,23 +1436,20 @@ components:
       type: string
       pattern: '^-?(0|[1-9][0-9]*)$'
       description: Exact decimal integer in the named currency unit; never a JSON number.
+    NonnegativeDecimalMoney:
+      type: string
+      pattern: '^(0|[1-9][0-9]*)$'
+      description: Exact nonnegative financial integer; never a JSON number.
+    PositiveDecimalMoney:
+      type: string
+      pattern: '^[1-9][0-9]*$'
+      description: Exact positive financial integer; never a JSON number.
     BillingOverview:
       type: object
       required: [posted_microcredits, reserved_microcredits]
       properties:
         payment_capabilities:
-          type: object
-          additionalProperties: false
-          required: [provider, order_sync_supported, refund_supported, close_supported, notification_supported, reconciliation_supported, manual_repair_supported, commerce_customer_required]
-          properties:
-            provider: { type: string }
-            order_sync_supported: { type: boolean }
-            refund_supported: { type: boolean }
-            close_supported: { type: boolean }
-            notification_supported: { type: boolean }
-            reconciliation_supported: { type: boolean }
-            manual_repair_supported: { type: boolean }
-            commerce_customer_required: { type: boolean }
+          $ref: "billing.yaml#/components/schemas/PaymentCapabilities"
         posted_microcredits: { $ref: "#/components/schemas/DecimalMoney" }
         reserved_microcredits: { $ref: "#/components/schemas/DecimalMoney" }
       additionalProperties: { type: integer, format: int64, minimum: 0 }
@@ -1050,11 +1463,12 @@ components:
           maxItems: 200
           items:
             type: object
-            required: [posted_microcredits, reserved_microcredits, available_microcredits]
+            required: [posted_microcredits, reserved_microcredits, available_microcredits, receivable_microcredits]
             properties:
               posted_microcredits: { $ref: "#/components/schemas/DecimalMoney" }
               reserved_microcredits: { $ref: "#/components/schemas/DecimalMoney" }
               available_microcredits: { $ref: "#/components/schemas/DecimalMoney" }
+              receivable_microcredits: { $ref: "#/components/schemas/DecimalMoney" }
     PaymentOrderCollection:
       type: object
       additionalProperties: false
@@ -1215,6 +1629,103 @@ components:
               error_class: { type: [string, "null"] }
               started_at: { type: string, format: date-time }
               updated_at: { type: string, format: date-time }
+    UsageHold:
+      type: object
+      additionalProperties: true
+      required: [hold_id, usage_request_id, wallet_id, status, anomaly_state, max_microcredits, expires_at, created_at, updated_at]
+      properties:
+        hold_id: { type: string, format: uuid }
+        usage_request_id: { type: string, format: uuid }
+        wallet_id: { type: string, format: uuid }
+        status: { type: string, enum: [ACTIVE, COMMITTED, RELEASED, EXPIRED, REVIEW] }
+        anomaly_state: { type: string, enum: [NONE, REVIEW_REQUIRED, LEASE_EXPIRED, TERMINAL_ALLOCATION_REMAINS, ALLOCATION_MISMATCH] }
+        max_microcredits: { $ref: "#/components/schemas/NonnegativeDecimalMoney" }
+        actual_microcredits: { $ref: "#/components/schemas/NonnegativeDecimalMoney" }
+        expires_at: { type: string, format: date-time }
+        terminal_at: { type: string, format: date-time }
+        pricing_snapshot: { type: object, additionalProperties: true }
+        request_snapshot: { type: object, additionalProperties: true }
+        usage_snapshot: { type: object, additionalProperties: true }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    HoldComponentAllocation:
+      type: object
+      additionalProperties: true
+      required: [package_id, component_id, component_type, credit_lot_id, reserved_microcredits, settled_microcredits, released_microcredits, component_status]
+      properties:
+        package_id: { type: string, format: uuid }
+        component_id: { type: string, format: uuid }
+        component_type: { type: string, enum: [BASE, BONUS] }
+        credit_lot_id: { type: string, format: uuid }
+        reserved_microcredits: { $ref: "#/components/schemas/NonnegativeDecimalMoney" }
+        settled_microcredits: { $ref: "#/components/schemas/NonnegativeDecimalMoney" }
+        released_microcredits: { $ref: "#/components/schemas/NonnegativeDecimalMoney" }
+        component_status: { type: string }
+    HoldLeaseEvent:
+      type: object
+      additionalProperties: false
+      required: [lease_event_id, event_type, expires_at, previous_max_microcredits, max_microcredits, additional_microcredits, created_at]
+      properties:
+        lease_event_id: { type: string, format: uuid }
+        event_type: { type: string, enum: [CREATED, EXTENDED] }
+        previous_expires_at: { type: string, format: date-time }
+        expires_at: { type: string, format: date-time }
+        previous_max_microcredits: { $ref: "#/components/schemas/NonnegativeDecimalMoney" }
+        max_microcredits: { $ref: "#/components/schemas/NonnegativeDecimalMoney" }
+        additional_microcredits: { $ref: "#/components/schemas/NonnegativeDecimalMoney" }
+        created_at: { type: string, format: date-time }
+    UsageHoldDetail:
+      type: object
+      additionalProperties: false
+      required: [hold, component_allocations, member_allocations, lease_events, admin_actions]
+      properties:
+        hold: { $ref: "#/components/schemas/UsageHold" }
+        component_allocations:
+          type: array
+          items: { $ref: "#/components/schemas/HoldComponentAllocation" }
+        member_allocations:
+          type: array
+          items: { type: object, additionalProperties: true }
+        lease_events:
+          type: array
+          items: { $ref: "#/components/schemas/HoldLeaseEvent" }
+        admin_actions:
+          type: array
+          items: { type: object, additionalProperties: true }
+    Receivable:
+      type: object
+      additionalProperties: false
+      required: [receivable_id, wallet_id, source_type, source_reference, original_microcredits, settled_microcredits, outstanding_microcredits, status, version, created_at, updated_at]
+      properties:
+        receivable_id: { type: string, format: uuid }
+        wallet_id: { type: string, format: uuid }
+        source_type: { type: string, enum: [USAGE_OVERAGE, CHARGEBACK, FORCED_REFUND] }
+        source_reference: { type: string }
+        payment_order_id: { type: string, format: uuid }
+        payment_transaction_id: { type: string, format: uuid }
+        entitlement_package_id: { type: string, format: uuid }
+        usage_request_id: { type: string, format: uuid }
+        original_microcredits: { $ref: "#/components/schemas/PositiveDecimalMoney" }
+        settled_microcredits: { $ref: "#/components/schemas/NonnegativeDecimalMoney" }
+        outstanding_microcredits: { $ref: "#/components/schemas/NonnegativeDecimalMoney" }
+        status: { type: string, enum: [OPEN, PARTIALLY_SETTLED, SETTLED, WRITTEN_OFF] }
+        version: { type: integer, format: int64, minimum: 1 }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        settled_at: { type: string, format: date-time }
+    ReceivableAllocation:
+      type: object
+      additionalProperties: false
+      required: [allocation_id, receivable_id, wallet_id, source_type, source_reference, amount_microcredits, journal_entry_id, created_at]
+      properties:
+        allocation_id: { type: string, format: uuid }
+        receivable_id: { type: string, format: uuid }
+        wallet_id: { type: string, format: uuid }
+        source_type: { type: string, enum: [CASH_RECHARGE_BASE, REFUND_RECOVERY, APPROVED_MANUAL_REPAYMENT, APPROVED_WRITE_OFF] }
+        source_reference: { type: string }
+        amount_microcredits: { $ref: "#/components/schemas/PositiveDecimalMoney" }
+        journal_entry_id: { type: string, format: uuid }
+        created_at: { type: string, format: date-time }
     ApprovalStatus:
       type: string
       enum: [DRAFT, SUBMITTED, APPROVED, REJECTED, WITHDRAWN, EXPIRED, INVALIDATED, EXECUTING, EXECUTED, EXECUTION_FAILED]
@@ -1512,13 +2023,180 @@ components:
         input_per_million: { type: integer, format: int64, minimum: 0 }
         output_per_million: { type: integer, format: int64, minimum: 0 }
         cached_input_per_million: { type: integer, format: int64, minimum: 0 }
+    MeteringUnitCreate:
+      type: object
+      additionalProperties: false
+      required: [unit_code, minimum_precision, price_denominator, rounding_rule]
+      properties:
+        unit_code: { type: string, minLength: 1, maxLength: 80 }
+        minimum_precision: { type: integer, format: int64, minimum: 1 }
+        price_denominator: { type: integer, format: int64, minimum: 1 }
+        rounding_rule: { type: string, enum: [CEILING, FLOOR, HALF_UP] }
+    PriceUnitConfiguration:
+      type: object
+      additionalProperties: false
+      required: [unit_definition_id, config_type]
+      properties:
+        unit_definition_id: { type: string, format: uuid }
+        config_type: { type: string, enum: [FIXED_PRICE, INHERIT_GLOBAL] }
+        fixed_price_per_denominator: { type: [integer, "null"], format: int64, minimum: 0 }
+    PriceDraft:
+      type: object
+      additionalProperties: false
+      required: [scope_type, protocol_code, formula_version_id, credit_unit, effective_from, expected_etag, units]
+      properties:
+        scope_type: { type: string, enum: [GLOBAL, MODEL] }
+        scope_id: { type: [string, "null"], maxLength: 160 }
+        protocol_code: { type: string, minLength: 1 }
+        formula_version_id: { type: string, format: uuid }
+        credit_unit: { type: string, const: MICROCREDIT }
+        effective_from: { type: string, format: date-time, description: Asia/Shanghai full-day boundary }
+        effective_to: { type: [string, "null"], format: date-time, description: Exclusive Asia/Shanghai full-day boundary }
+        expected_etag: { type: integer, format: int64, minimum: 1 }
+        units: { type: array, minItems: 1, items: { $ref: "#/components/schemas/PriceUnitConfiguration" } }
+    PriceTransition:
+      type: object
+      additionalProperties: false
+      required: [action, reason]
+      properties:
+        action: { type: string, enum: [CANCEL, END] }
+        mode: { type: string, enum: [FALLBACK_GLOBAL, BLOCK, CONTINUATION] }
+        reason: { type: string, minLength: 1, maxLength: 500 }
+        replacement_price_version_id: { type: [string, "null"], format: uuid }
+    ProtocolDraft:
+      type: object
+      additionalProperties: false
+      required: [protocol_code, request_schema]
+      properties:
+        protocol_code: { type: string, minLength: 1, maxLength: 80 }
+        request_schema: { type: object, additionalProperties: true }
+    FormulaDraft:
+      type: object
+      additionalProperties: false
+      required: [required_unit_versions, expression]
+      properties:
+        required_unit_versions:
+          type: object
+          additionalProperties: { type: string, format: uuid }
+        expression:
+          type: object
+          additionalProperties: { type: string, enum: [estimated_input_tokens, cached_input_tokens, max_output_tokens, image_count, request_count, document_count] }
     RefundCreate:
       type: object
       additionalProperties: false
-      required: [amount_fen, reason]
+      required: [payment_transaction_id, entitlement_package_id, reason]
       properties:
-        amount_fen: { type: integer, format: int64, minimum: 1 }
+        payment_transaction_id: { type: string, format: uuid }
+        entitlement_package_id: { type: string, format: uuid }
         reason: { type: string, minLength: 1, maxLength: 500 }
+    PaymentTransaction:
+      type: object
+      additionalProperties: false
+      required: [payment_transaction_id, payment_order_id, provider_id, provider_version, provider_transaction_id, channel, status, fulfillment_status, amount_fen, currency, provider_status, verified_at]
+      properties:
+        payment_transaction_id: { type: string, format: uuid }
+        payment_order_id: { type: string, format: uuid }
+        provider_id: { type: string, minLength: 1 }
+        provider_version: { type: string, minLength: 1 }
+        provider_transaction_id: { type: string, minLength: 1 }
+        channel: { type: string, pattern: '^[A-Z0-9_]{1,32}$' }
+        status: { type: string, enum: [PAID, LATE_PAID, REVIEW_REQUIRED] }
+        fulfillment_status: { type: string, enum: [PENDING, CREDITED, REVIEW_REQUIRED] }
+        amount_fen: { $ref: "#/components/schemas/PositiveDecimalMoney" }
+        currency: { type: string, minLength: 3, maxLength: 3 }
+        provider_status: { type: string }
+        paid_at: { type: string, format: date-time }
+        verified_at: { type: string, format: date-time }
+        fulfilled_at: { type: string, format: date-time }
+    PaymentEvidence:
+      type: object
+      additionalProperties: false
+      required: [payment_evidence_id, payment_order_id, evidence_type, provider_id, provider_version, evidence_key, received_at, payload_digest, payload_snapshot, merge_result]
+      properties:
+        payment_evidence_id: { type: string, format: uuid }
+        payment_order_id: { type: string, format: uuid }
+        payment_transaction_id: { type: string, format: uuid }
+        evidence_type: { type: string, enum: [CALLBACK, QUERY, BILL, MANUAL_REPAIR, CHARGEBACK, FORCED_REFUND] }
+        provider_id: { type: string, minLength: 1 }
+        provider_version: { type: string, minLength: 1 }
+        evidence_key: { type: string, minLength: 1 }
+        provider_transaction_id: { type: string }
+        amount_fen: { $ref: "#/components/schemas/PositiveDecimalMoney" }
+        currency: { type: string }
+        provider_status: { type: string }
+        provider_event_at: { type: string, format: date-time }
+        received_at: { type: string, format: date-time }
+        payload_digest: { type: string, pattern: '^[0-9a-f]{64}$' }
+        payload_snapshot: { type: object, additionalProperties: true }
+        merge_result: { type: string, enum: [RECORDED, DUPLICATE, MERGED, REVIEW_REQUIRED] }
+    PaymentOrderDetail:
+      type: object
+      additionalProperties: true
+      required: [order_id, merchant_order_no, provider_id, provider_version, payer_user_id, wallet_id, payment_summary, refund_summary, chargeback_summary, attention_summary, summary_version, transactions, entitlement_packages, evidence]
+      properties:
+        order_id: { type: string, format: uuid }
+        merchant_order_no: { type: string }
+        provider_id: { type: string }
+        provider_version: { type: string }
+        payer_user_id: { type: string, format: uuid }
+        beneficiary_organization_id: { type: string, format: uuid }
+        wallet_id: { type: string, format: uuid }
+        amount_fen: { $ref: "#/components/schemas/PositiveDecimalMoney" }
+        credit_microcredits: { $ref: "#/components/schemas/NonnegativeDecimalMoney" }
+        payment_summary:
+          type: object
+          additionalProperties: true
+          properties:
+            paid_count: { type: integer, minimum: 0 }
+            paid_amount_fen: { $ref: "#/components/schemas/NonnegativeDecimalMoney" }
+            late_paid_count: { type: integer, minimum: 0 }
+            review_count: { type: integer, minimum: 0 }
+        refund_summary:
+          type: object
+          additionalProperties: true
+          properties:
+            succeeded_amount_fen: { $ref: "#/components/schemas/NonnegativeDecimalMoney" }
+            pending_count: { type: integer, minimum: 0 }
+            review_count: { type: integer, minimum: 0 }
+        chargeback_summary:
+          type: object
+          additionalProperties: true
+          properties:
+            open_count: { type: integer, minimum: 0 }
+            lost_amount_fen: { $ref: "#/components/schemas/NonnegativeDecimalMoney" }
+            review_count: { type: integer, minimum: 0 }
+        attention_summary: { type: string, enum: [NORMAL, PROCESSING, REVIEW_REQUIRED, RECEIVABLE_OPEN] }
+        summary_version: { type: integer, format: int64, minimum: 1 }
+        transactions: { type: array, items: { $ref: "#/components/schemas/PaymentTransaction" } }
+        entitlement_packages:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+            required: [package_id, source_payment_transaction_id, status, points_remaining_microcredits, components]
+            properties:
+              package_id: { type: string, format: uuid }
+              source_payment_transaction_id: { type: string, format: uuid }
+              status: { type: string, enum: [ACTIVE, CONSUMED, EXPIRED, CREDIT_FAILED, REPAIRED, FROZEN, REVOKED] }
+              points_remaining_microcredits: { $ref: "#/components/schemas/NonnegativeDecimalMoney" }
+              components:
+                type: array
+                items:
+                  type: object
+                  additionalProperties: true
+                  required: [component_id, component_type, available_microcredits, reserved_microcredits, used_microcredits, active_grant_microcredits, suspended_grant_microcredits, expired_microcredits, revoked_microcredits, status]
+                  properties:
+                    component_id: { type: string, format: uuid }
+                    component_type: { type: string, enum: [BASE, BONUS] }
+                    available_microcredits: { $ref: "#/components/schemas/NonnegativeDecimalMoney" }
+                    reserved_microcredits: { $ref: "#/components/schemas/NonnegativeDecimalMoney" }
+                    used_microcredits: { $ref: "#/components/schemas/NonnegativeDecimalMoney" }
+                    active_grant_microcredits: { $ref: "#/components/schemas/NonnegativeDecimalMoney" }
+                    suspended_grant_microcredits: { $ref: "#/components/schemas/NonnegativeDecimalMoney" }
+                    expired_microcredits: { $ref: "#/components/schemas/NonnegativeDecimalMoney" }
+                    revoked_microcredits: { $ref: "#/components/schemas/NonnegativeDecimalMoney" }
+                    status: { type: string }
+        evidence: { type: array, items: { $ref: "#/components/schemas/PaymentEvidence" } }
     AdjustmentRequestCreate:
       type: object
       additionalProperties: false
@@ -1533,8 +2211,189 @@ components:
       additionalProperties: false
       required: [channel, business_date]
       properties:
-        channel: { type: string, enum: [UNIONPAY, ALIPAY, WECHAT] }
+        channel: { type: string, pattern: '^[A-Z0-9_]{1,32}$' }
         business_date: { type: string, format: date }
+    PaymentAnomalyCase:
+      type: object
+      additionalProperties: false
+      required: [case_id, anomaly_type, severity, status, financial_action_status, resource_snapshot, claim_due_at, first_response_due_at, mitigation_due_at, resolution_due_at, version, created_at, updated_at]
+      properties:
+        case_id: { type: string, format: uuid }
+        anomaly_type: { type: string, enum: [CHARGEBACK, FORCED_REFUND, DUPLICATE_PAYMENT, LATE_PAYMENT_CONFLICT, REFUND_FAILURE, PAYMENT_FACT_CONFLICT, ILLEGAL_TRANSITION] }
+        severity: { type: string, enum: [P0, P1, P2] }
+        status: { type: string, enum: [OPEN, RESOLVED] }
+        owner_id: { type: string, format: uuid }
+        payment_order_id: { type: string, format: uuid }
+        payment_transaction_id: { type: string, format: uuid }
+        payment_evidence_id: { type: string, format: uuid }
+        refund_id: { type: string, format: uuid }
+        forced_refund_case_id: { type: string, format: uuid }
+        chargeback_case_id: { type: string, format: uuid }
+        resolution_code: { type: string }
+        resolution_reason: { type: string }
+        financial_action_status: { type: string, enum: [NONE, PENDING, APPLIED, FAILED] }
+        resource_snapshot: { type: object, additionalProperties: true }
+        claimed_at: { type: string, format: date-time }
+        claim_due_at: { type: string, format: date-time }
+        first_response_due_at: { type: string, format: date-time }
+        mitigation_due_at: { type: string, format: date-time }
+        resolution_due_at: { type: string, format: date-time }
+        version: { type: integer, format: int64, minimum: 1 }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        resolved_at: { type: string, format: date-time }
+    PaymentAnomalyDetail:
+      type: object
+      additionalProperties: false
+      required: [case, events]
+      properties:
+        case: { $ref: "#/components/schemas/PaymentAnomalyCase" }
+        events:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [event_id, event_type, details, created_at]
+            properties:
+              event_id: { type: string, format: uuid }
+              event_type: { type: string }
+              actor_id: { type: string, format: uuid }
+              details: { type: object, additionalProperties: true }
+              created_at: { type: string, format: date-time }
+    PaymentAnomalyResolution:
+      type: object
+      additionalProperties: false
+      required: [resolution, reason]
+      properties:
+        resolution: { type: string, enum: [CONFIRM_CHARGEBACK, CONFIRM_FORCED_REFUND, CONFIRM_PAYMENT, DISMISS, ESCALATE_FINANCIAL_REPAIR] }
+        reason: { type: string, minLength: 10, maxLength: 2000 }
+    ReconciliationCase:
+      type: object
+      additionalProperties: false
+      required: [case_id, reconciliation_run_id, merchant_order_no, case_type, status, severity, provider_snapshot, internal_snapshot, created_at, updated_at, version]
+      properties:
+        case_id: { type: string, format: uuid }
+        reconciliation_run_id: { type: string, format: uuid }
+        payment_order_id: { type: string, format: uuid }
+        merchant_order_no: { type: string }
+        case_type: { type: string }
+        status: { type: string, enum: [OPEN, IN_REVIEW, RESOLVED, IGNORED] }
+        severity: { type: string, enum: [P0, P1, P2] }
+        owner_id: { type: string, format: uuid }
+        repair_action: { type: string }
+        review_result: { type: string }
+        provider_snapshot: { type: object, additionalProperties: true }
+        internal_snapshot: { type: object, additionalProperties: true }
+        refund_snapshot: { type: object, additionalProperties: true }
+        ledger_snapshot: { type: object, additionalProperties: true }
+        resolution: { type: string }
+        created_at: { type: string, format: date-time }
+        resolved_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        version: { type: integer, format: int64, minimum: 1 }
+    ReconciliationCaseCommand:
+      type: object
+      additionalProperties: false
+      required: [action, reason]
+      properties:
+        action: { type: string, enum: [CLAIM, ASSIGN, SET_REPAIR_ACTION, RESOLVE, IGNORE, REOPEN] }
+        owner_id: { type: string, format: uuid }
+        repair_action: { type: string, maxLength: 500 }
+        review_result: { type: string, maxLength: 2000 }
+        reason: { type: string, minLength: 10, maxLength: 2000 }
+    LatePaymentReviewCase:
+      type: object
+      additionalProperties: false
+      required: [case_id, payment_order_id, review_status, severity, provider_id, provider_version, merchant_order_no, provider_capability_snapshot, policy_snapshot, evidence_summary, claim_due_at, first_response_due_at, mitigation_due_at, resolution_due_at, escalation_level, next_review_at, created_at, updated_at]
+      properties:
+        case_id: { type: string, format: uuid }
+        payment_order_id: { type: string, format: uuid }
+        review_status: { type: string, enum: [REVIEW_REQUIRED_LATE_PAYMENT, PROVIDER_BLIND, ARCHIVED_CONFIRMED_UNPAID, RESOLVED_PAID] }
+        severity: { type: string, enum: [P0, P1, P2] }
+        owner_id: { type: string, format: uuid }
+        provider_id: { type: string }
+        provider_version: { type: string }
+        merchant_order_no: { type: string }
+        provider_capability_snapshot: { type: object, additionalProperties: true }
+        policy_snapshot: { type: object, additionalProperties: true }
+        evidence_summary: { type: object, additionalProperties: true }
+        claimed_at: { type: string, format: date-time }
+        first_response_at: { type: string, format: date-time }
+        claim_due_at: { type: string, format: date-time }
+        first_response_due_at: { type: string, format: date-time }
+        mitigation_due_at: { type: string, format: date-time }
+        resolution_due_at: { type: string, format: date-time }
+        escalation_level: { type: integer, minimum: 0 }
+        last_escalated_at: { type: string, format: date-time }
+        last_query_at: { type: string, format: date-time }
+        last_query_result: { type: string }
+        next_review_at: { type: string, format: date-time }
+        blind_reason: { type: string }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        resolved_at: { type: string, format: date-time }
+    LatePaymentReviewDetail:
+      type: object
+      additionalProperties: false
+      required: [case, events, evidence]
+      properties:
+        case: { $ref: "#/components/schemas/LatePaymentReviewCase" }
+        events:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [event_id, event_type, details, created_at]
+            properties:
+              event_id: { type: string, format: uuid }
+              event_type: { type: string }
+              actor_id: { type: string, format: uuid }
+              details: { type: object, additionalProperties: true }
+              created_at: { type: string, format: date-time }
+        evidence:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [evidence_id, evidence_type, payload_digest, payload_snapshot, created_at]
+            properties:
+              evidence_id: { type: string, format: uuid }
+              evidence_type: { type: string, enum: [BOUNDARY_QUERY, MANUAL_QUERY, USER_PAYMENT_CLAIM, ARCHIVE_QUERY, PROVIDER_BLIND] }
+              payment_evidence_id: { type: string, format: uuid }
+              actor_id: { type: string, format: uuid }
+              payload_digest: { type: string, pattern: '^[0-9a-f]{64}$' }
+              payload_snapshot: { type: object, additionalProperties: true }
+              created_at: { type: string, format: date-time }
+    LatePaymentReviewSchedule:
+      type: object
+      additionalProperties: false
+      required: [next_review_at, reason]
+      properties:
+        next_review_at: { type: string, format: date-time }
+        reason: { type: string, minLength: 10, maxLength: 500 }
+    ReconciliationImport:
+      type: object
+      additionalProperties: false
+      required: [channel, business_date, items]
+      properties:
+        channel: { type: string, pattern: '^[A-Z0-9_]{1,32}$' }
+        business_date: { type: string, format: date }
+        items:
+          type: array
+          maxItems: 100000
+          items:
+            type: object
+            additionalProperties: false
+            required: [merchant_order_no, channel_transaction_id, amount_fen, currency, status, paid_at]
+            properties:
+              entry_type: { type: string, enum: [PAYMENT, REFUND, CHARGEBACK] }
+              provider_reference_id: { type: string }
+              merchant_order_no: { type: string, minLength: 1 }
+              channel_transaction_id: { type: string, minLength: 1 }
+              amount_fen: { type: integer, format: int64, minimum: 1 }
+              currency: { type: string, minLength: 3, maxLength: 3 }
+              status: { type: string, minLength: 1 }
+              paid_at: { type: string, format: date-time }
   responses:
     SystemStatus:
       description: Aggregated internal operational status without internal endpoint addresses

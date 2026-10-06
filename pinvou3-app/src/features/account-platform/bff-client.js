@@ -111,6 +111,7 @@ export class AccountPlatformBffClient {
   recentRechargeOrder(signal) { return this.request('token', '/v1/recharge/orders/recent', { signal }); }
   rechargeOrders(signal) { return this.request('token', '/v1/recharge/orders', { signal }); }
   rechargeOrder(orderId, signal) { return this.request('token', `/v1/recharge/orders/${orderId}`, { signal }); }
+  claimLatePayment(orderId, statement) { return this.request('token', `/v1/recharge/orders/${orderId}/payment-claims`, { method:'POST', body:{ statement } }); }
   entitlementPackages(signal) { return this.request('token', '/v1/me/entitlement-packages', { signal }); }
   usageHistory(cursor = '', signal) {
     const next = cursor ? `&cursor=${encodeURIComponent(cursor)}` : '';

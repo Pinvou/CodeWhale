@@ -2,7 +2,7 @@
 
 > 状态：部署模板与运维规划；当前隔离测试不能替代生产部署证明
 >
-> 校准日期：2026-10-06；继承已审 A07 契约并核验 A08 新增部署接线
+> 校准日期：2026-10-06；继承已审 A09 契约，本波原始 A10 历史终点为 `36ce0a72`。新增接线仍在本地审核，固定提交验证不能替代生产部署验收。
 >
 > 安全要求：本文只列配置名称和占位符，不保存真实域名、IP、账号、密码、AccessKey、Token 或商城密钥。
 
@@ -77,9 +77,9 @@ Compose 的宿主机端口均绑定回环地址，供本机反向代理或运维
 
 这些组件不属于产品服务边界。它们可以部署在与真实用户、真实钱包和真实 Provider 隔离的开发/测试环境；生产环境不得启动、路由或保留其数据库，生产 Helm 也不得包含对应工作负载。
 
-远程 Compose 覆盖已把 `payment-simulator` 主进程置于 `development-simulator` profile，但基础 Compose 的数据库初始化仍创建模拟器数据库和角色，`payment-simulator-migrate` 也尚未进入同一 profile。因此当前单机模板还没有完成“生产不保留测试数据库”的隔离，不能据此宣称生产清单已净化；应在部署前通过站点覆盖排除，并在后续代码变更中把初始化、迁移和主进程统一纳入非生产 profile。
+远程 Compose 覆盖把 `payment-simulator` 主进程和迁移置于 `development-simulator` profile，并通过 `ENABLE_PAYMENT_SIMULATOR_DB=false` 跳过测试角色和数据库初始化。只有显式启用该 profile 的隔离开发/测试环境才可创建这些资源；生产站点不得覆盖该保护。
 
-生产必须显式选择正式 Payment Provider 并失败关闭，不能沿用 Compose 的默认模拟路径。当前 Billing 启动和 Helm 模板仍使用 `PAYMENT_SIMULATOR_URL`、`PAYMENT_SIM_HMAC_*` 等历史命名承载部分 Provider 配置；在这些配置迁移为供应商中立名称前，部署验收必须证明 `BILLING_PAYMENT_PROVIDER=h3c_mall`、正式 Adapter 配置和路由均已生效，且 Simulator 分支不可达。历史命名和仍待隔离的测试数据库属于实现债务，不表示 Simulator 是生产依赖。
+正式收款必须显式选择通过能力门禁的 Payment Provider；`TestOnly` Provider 不得获得正式收款准入。配置选择值为 `BILLING_PAYMENT_PROVIDER=simulator/h3c_mall`，开发 Adapter 的能力身份为 `development_simulator`，两者不能混作配置别名。通知沿用 `PAYMENT_SIM_HMAC_UNIONPAY/ALIPAY/WECHAT`，`BILLING_ALLOW_TENTATIVE_PRICES` 默认关闭；Helm 按选定 Provider 注入对应配置，不部署 Simulator 工作负载。用户已确认 staging/生产可以启动 Billing，启动成功不授予 `TestOnly` Provider 正式收款能力。正式订单须有与 Adapter 版本匹配的 `FROZEN` 商品映射，不能回退测试商品。没有回调和账单能力的 Provider 还必须声明长期历史查询、有限支付/晚到窗口、权威未支付终态和足够证据保留期；任一条件不满足时不能创建正式订单。
 
 ## 4. 目录约定
 
@@ -154,9 +154,13 @@ Compose 的宿主机端口均绑定回环地址，供本机反向代理或运维
 - `ALIYUN_SMS_SIGN_NAME`
 - `ALIYUN_SMS_REGISTER_TEMPLATE`
 - `ALIYUN_SMS_LOGIN_TEMPLATE`
+- `ALIYUN_SMS_PROFILE_MOBILE_TEMPLATE`（换绑手机号使用的专属模板）
+- `ALIYUN_SMS_PASSWORD_RESET_TEMPLATE`（重置密码使用的专属模板）
 - `ALIYUN_SMS_ENDPOINT`
 - `SMS_VERIFICATION_HMAC_KEY_BASE64`（仅平台生成验证码模式，独立密钥）
 - `SMS_HTTP_ENDPOINT`、`SMS_HTTP_BEARER_TOKEN`（仅平台生成验证码的通用发送 Adapter）
+
+使用 Aliyun 的换绑手机号或重置密码功能时，分别配置对应的专属模板；缺失时保留现有失败关闭行为，不回退注册或登录模板。Compose 透传上述变量，Helm 使用 `mobileAuth.aliyunProfileMobileTemplate` 和 `mobileAuth.aliyunPasswordResetTemplate`。
 
 `http` 继续使用受控服务的 `/send` 与 `/verify`，由 `SMS_HTTP_SERVICE_TOKEN` 鉴权；该协议不新增权威未接受字段。`aliyun`/`aliyun-managed` 由供应商生成并核验验证码；`http-generated` 由 Adapter 使用密码学安全随机源生成六位验证码，Account 只持久化带独立密钥的 HMAC 校验数据，再以 `SMS_HTTP_BEARER_TOKEN` 向通用 HTTPS 发送端点投递。不能把既有 `http` 配置默认为平台生成模式。模式由启动配置和依赖注入选择，Account 挑战状态机不包含厂商判断。只有 Aliyun 完整官方前置拒绝且 `Success=false`、无送达标识时可解除冷却；超时或坏响应保留冷却。RAM 用户只授予所选模式所需的最小权限。AccessKey、服务 Token 和 HMAC 密钥不写入命令行参数、Shell 历史或日志；泄露后立即轮换。
 
@@ -166,7 +170,7 @@ Compose 的宿主机端口均绑定回环地址，供本机反向代理或运维
 
 Portal 使用现有 `INTERNAL_SERVICE_TOKEN` 向固定 Account 上游证明其从实际连接计算的来源地址；该证明不转给浏览器及其他服务。Account 仅在证明有效时采用来源头，否则使用连接地址。设备标识仅用于限速关联，手机号与已认证用户的限额仍独立生效。
 
-Account 启动注册恢复、资料变更恢复、钱包初始化、角色绑定到期和审批期限 worker。发布前必须确认 `registration_operations`、`profile_change_requests`、`password_reset_operations`、`wallet_provisioning_jobs` 以及 Account `000016_role_binding_lifecycle`、`000018_approval_commands`、`000019_organization_lifecycle`、`000020_organization_unit_lifecycle`、`000021_membership_governance`、`000022_global_active_context`，Billing `000017_approval_execution`、`000018_organization_lifecycle`、`000019_organization_unit_blockers`、`000020_organization_member_lifecycle`、`000021_organization_entitlement_grants` 和 Token `000008_organization_lifecycle`、`000009_organization_unit_blockers` 迁移完成，注册查询 HMAC 密钥在同一部署周期内稳定，且 Billing/Token 内部组织、节点及成员生命周期接口可用。角色 worker 每分钟固化已到期的组织与平台授权；即使 worker 短暂延迟，授权查询也会按数据库当前语句时间 `statement_timestamp()` 立即拒绝过期绑定。运维应监控仍满足 `revoked_at IS NULL AND expires_at <= now()` 的绑定积压、`account.role-binding.changed.v1` Outbox 和 `role.binding.expire` 审计；不得通过直接改表延长临时/紧急授权。
+Account 启动注册恢复、资料变更恢复、钱包初始化、角色绑定到期和审批期限 worker。发布前必须确认 `registration_operations`、`profile_change_requests`、`password_reset_operations`、`wallet_provisioning_jobs` 以及 Account `000023_payment_anomaly_commands`、`000016_role_binding_lifecycle`、`000018_approval_commands`、`000019_organization_lifecycle`、`000020_organization_unit_lifecycle`、`000021_membership_governance`、`000022_global_active_context`，Billing `000017_approval_execution`、`000018_organization_lifecycle`、`000019_organization_unit_blockers`、`000020_organization_member_lifecycle`、`000021_organization_entitlement_grants`、`000022_versioned_metering_pricing`、`000023_payment_provider_catalog`、`000024_payment_evidence_lifecycle`、`000025_receivables_and_context_freeze`、`000026_hold_operations_evidence`、`000027_targeted_refund_lifecycle`、`000028_late_payment_review_lifecycle`、`000029_payment_anomaly_reconciliation` 和 Token `000008_organization_lifecycle`、`000009_organization_unit_blockers`、`000010_protocol_formula_versions` 迁移完成，注册查询 HMAC 密钥在同一部署周期内稳定，且 Billing/Token 内部组织、节点及成员生命周期接口可用。角色 worker 每分钟固化已到期的组织与平台授权；即使 worker 短暂延迟，授权查询也会按数据库当前语句时钟 `statement_timestamp()` 立即拒绝过期绑定。运维应监控仍满足 `revoked_at IS NULL AND expires_at <= now()` 的绑定积压、`account.role-binding.changed.v1` Outbox 和 `role.binding.expire` 审计；不得通过直接改表延长临时/紧急授权。
 
 组织生命周期上线必须先检查现有活动组织名称在忽略大小写后无重复；若发现重复，须先由业务确认保留名称并完成审计化更名，不得绕过唯一索引。随后先迁移 Billing 与 Token，再迁移 Account，并先滚动 Billing/Token、再滚动 Account，确保 Account 开始调用两者的 `/internal/v1/organizations/{organization_id}/lifecycle` 时目标端点已经可用。上线后抽样验证：同一创建幂等键只产生一个组织；停用后组织钱包为 `FROZEN`、Token 组织投影为 `DISABLED`，且新充值/Hold/组织用量均被拒绝；余额、有效权益、未结算 Hold、支付/退款/差异、未终态用量或治理阻断任一存在时删除返回 `ORGANIZATION_LIFECYCLE_BLOCKED`；全部收敛后 Account、Billing、Token 分别为 `DELETED`、钱包 `CLOSED`、`DELETED`，历史账本、订单、用量和审计仍可按保留权限查询。远端超时或版本冲突只能保持或进入更严格状态，不得直接改表解冻或跳过预检。
 
@@ -178,11 +182,27 @@ Account 启动注册恢复、资料变更恢复、钱包初始化、角色绑定
 
 组织权益授予上线必须在新版 Token Gateway、Portal 和桌面开放入口前完成 Billing `000021_organization_entitlement_grants`，并确认组织生命周期、成员生命周期投影已经追平 Account。组织页面分别读取显式组织产品与权益包接口，普通充值接口仍保留原四档组织 LEGACY 目录，个人权益查询不混入组织包。抽样选择一个同时含 BASE/BONUS 的组织权益包：并发使用同一组织幂等键的同请求只能得到同一授予，同键异请求必须冲突；两个管理员竞争同一组成余额时成功总额不得超过该组成可用额；批量中一个无效成员或不足额项目不得回滚其他成功项。成员移除后授予应进入 SUSPENDED 且组织组成不回池，旧成员版本的 Hold 必须失败；更高版本重新加入后更新授予版本，但过期组成立即拒绝新的 Hold；到期资金由既有权益到期事务统一处理钱包、批次、组成和账本，未终态 Hold 仍受保护。普通撤回只允许不存在 Hold 且仍有可撤回未消费额的授予，并把当前全部可撤回额返回原包原组成；`ACCOUNT_CLOSED` 必须拒绝并等待专用回收流程。发布后监控授予/组成守恒约束错误、幂等指纹冲突、批量逐项失败率和 `member_quota_grant_audits` 连续性；禁止直接修改授予或组成余额桶。
 
+版本化计量与定价上线按 Billing、Token、Portal 的顺序滚动：先执行 Billing `000022_versioned_metering_pricing` 并启动新版 Billing，确认历史三元组价格已回填为发布版本且同一定价空间不存在重叠；再执行 Token `000010_protocol_formula_versions` 并启动新版 Gateway，确认 CHAT v1 协议公式已发布、Billing 中存在对应不可变公式绑定；最后发布后台管理页面。抽样验证模型覆盖优先、显式全局继承、固定零价和缺价/歧义错误；创建 Hold 后撤销、结束或替代价格，续租、追加预占与结算仍须使用原快照。长流式调用应在租约到期前续租，并在预计成本超过最大预占前追加额度，否则中止可控上游并进入复核。监控价格解析错误、发布冲突、Hold 续租/追加失败和公式同步失败。回滚应用时保留新增迁移和不可变历史；已有新版价格、公式或 Hold 快照后禁止执行 down migration。
+
 财务审批发布后，Billing Service 同时以 durable `billing-command-executor-v1` 消费 `account.approval-command.authorized.v1`。上线顺序必须先完成两库迁移，再启动 Account 与 Account Relay，最后滚动 Billing；Billing 必须能访问内部 NATS 和 Account 内部执行复核端点。监控应覆盖批准后五分钟仍未进入 `EXECUTING`、`EXECUTION_FAILED`、消费者重复投递和 `account-platform.dead-letter.account.approval-command.authorized.v1`。重放只能使用原事件和原指纹，禁止修改消息体、直接调用账本 SQL 或恢复旧 `/adjustments/:id/approve` 路径。当前内部调用仍依赖 `INTERNAL_SERVICE_TOKEN`；切换 APT-047 短期工作负载身份前必须保持令牌仅在 Secret 管理系统中分发且 Billing/Account/NATS 均不公开。
 
 Keycloak provisioner 服务账号还必须具备读取/更新用户、重置密码和撤销用户会话的最小管理权限；缺少任一权限会使资料或密码操作进入稳定失败/修复状态，不得临时扩大为 realm-admin。轮换查询密钥会使尚未完成注册的旧查询令牌失效，必须采用覆盖最长 48 小时令牌窗口的双读或维护窗口方案；当前实现不提供双密钥读取，因此不得无计划直接轮换。运维应监控 `REPAIR_REQUIRED`、`COMPENSATION_PENDING`、钱包 SLA 超时和 `next_retry_at` 积压；人工补偿只能通过受权限保护的命令执行，禁止直接改表或直接删除 Identity。
 
 Account 的 Commerce Customer worker 还要求显式冻结 `COMMERCE_PROVIDER_ID` 与 `COMMERCE_ADAPTER_VERSION`。两者会写入 Mapping、同步任务和证据，升级 Adapter 时不能用新版本解释旧任务；切换 Provider 后服务启动会为全部已验证手机号且尚无当前 Provider Mapping 的用户幂等补建任务。未配置对应 Adapter 连接时注册和模型能力保持可用，Mapping 留在待处理/重试状态，只有依赖该 Mapping 的支付被拒绝。发布前确认 `commerce_customer_mappings`、`commerce_customer_sync_jobs`、`commerce_customer_sync_evidence` 已迁移，并监控 `RETRY`、`REPAIR_REQUIRED` 及待执行任务积压。
+
+支付 Provider 中立化上线先执行 Billing `000023_payment_provider_catalog`，再滚动 Billing、Token Gateway 和 Portal/桌面。迁移把通用商品的旧 SKU 清空并写入 `TEST_ONLY` 版本映射；正式订单创建必须拒绝没有与 `BILLING_PAYMENT_PROVIDER` 及 Adapter 版本匹配的 `FROZEN` 映射的商品。Billing 可以在 staging/生产启动，`TestOnly` Provider 仍禁止正式收款，见第 3 节。发布后抽样核对 `/v1/payment-capabilities`、商品渠道交集和新订单的 Provider/映射/能力快照；没有回调和账单时还要核对正式收款准入字段，不能仅凭可查询能力放行。已有新版订单后禁止执行 down migration。
+
+一单多流水与支付证据上线紧随其后执行 Billing `000024_payment_evidence_lifecycle`，并在滚动 Billing 前完成数据库备份。迁移解除订单到流水及权益包的一对一约束，回填 Provider/版本、付款人、关闭状态、摘要和既有流水来源，新增不可变 `payment_evidence` 及流水到权益包、通知和人工修复的外键。发布后必须抽样验证：同一 Provider 流水重复回调/查询只入账一次；不同成功流水不共享权益包；金额、币种或订单归属冲突只追加证据并进入复核；退款和关单不改写 `PAID/LATE_PAID` 流水；组织订单的付款用户与受益组织分别正确。运营后台订单明细应能看到全部流水、证据和四类摘要。监控证据归并冲突、人工复核、重复流水唯一约束及权益包来源约束。已有多流水订单或按流水创建的多个权益包后，旧模型无法无损恢复，禁止执行 down migration；故障时保留迁移并前向修复应用。
+
+应收与上下文冻结随后执行 Billing `000025_receivables_and_context_freeze`。迁移新增钱包应收投影、独立应收、不可变清偿分配、拒付案件和应收/拒付账本科目；必须先完成迁移再滚动 Billing、Portal 和桌面运营制品。发布后抽样验证：实际费用超 Hold 时结算成功且只冻结目标钱包；现金充值只以 BASE 优先清偿最老应收，BONUS 不减少应收；同一确认拒付证据重复执行只生成一个案件，且只撤销目标支付流水权益包；其他个人或组织钱包仍可正常创建 Hold。运营后台应同时显示钱包财务状态、未清应收和分配明细。监控 `RECEIVABLE_OPEN` 钱包、长期部分清偿、拒付幂等冲突、账本不平和应收投影差异。存在任何新版应收、分配或拒付案件后禁止执行 down migration；故障时冻结相关写流量并前向修复，禁止直接改钱包或应收表清债。
+
+Hold 运营证据继续执行 Billing `000026_hold_operations_evidence`。迁移会为既有 Hold 回填一条 CREATED 租约事件，并创建不可变租约、操作意图和完成证据表；应先迁移 Billing，再滚动 Billing、Portal 和桌面运营制品。发布后抽样验证个人与组织 Hold 的创建、续租/追加预占都生成有效值历史，详情中的组成总额与 `usage_hold_allocations` 一致，组织 Hold 同时展示成员授予分配。安全释放必须先持久化原因、操作者、Hold 与 Idempotency-Key，再经 Token 无活动上游的终态免单和 Billing 唯一财务赢家确认；仅 REVIEW 或租约过期不授权释放。成功回执必须为同一 Hold 的 `RELEASED` 与零收费，完成证据快照组成和成员分配；同键同请求重放，异请求冲突，迟到 Commit 不得重新扣费。监控 `ALLOCATION_MISMATCH`、`TERMINAL_ALLOCATION_REMAINS`、长期 `REVIEW_REQUIRED` 和幂等冲突。已有新版租约或操作证据后禁止 down migration；故障时禁用异常释放入口并保留只读查询，禁止直接修改 Hold 或分配表。
+
+目标退款上线继续执行 Billing `000027_targeted_refund_lifecycle`。迁移前必须备份数据库，并确认每条历史退款都能唯一映射到一笔成功支付流水和一个来源权益包；存在零个或多个候选时迁移应失败并先由运营完成受审计的数据归并，禁止任意挑选。同一目标可以保留多条历史已成功部分退款记录，但这些记录会永久阻止再发起普通退款，必须通过人工复核处理，不能把历史部分退款余额自动升级成新版整笔退款；同一目标存在多个未终结历史退款时迁移失败。迁移会把历史订单级 `PARTIALLY_REFUNDED/REFUNDED` 摘要归一为 `PAID/PAID_LATE + CREDITED`，新增退款目标、组成/授予预约、渠道强制退款案件和 `REVOKED` 权益终态；支付成功流水本身不被退款覆盖。应先迁移 Billing，再滚动 Billing、Portal 和桌面运营制品。发布后抽样验证：请求不接受金额且必须精确指定支付流水和权益包；任一 BASE/关联 BONUS 已消费、存在 Hold/异常或目标不匹配时在调用 Provider 前拒绝；成功只退该流水全部现金金额并撤销该包全部 BASE/关联 BONUS，明确失败完整解冻，不确定结果保持冻结；同一目标和幂等键不会重复退款；不支持退款的 Provider 在用户和运营页面均无入口；Provider 主动强制退款只建立证据和复核案件，不改写支付成功事实。持续监控长期 `REQUESTED/MANUAL_REVIEW`、`FORCED_REFUND_REVIEW` 冻结、退款 Outbox 死信、目标唯一约束和账本守恒。写入新版预约、撤销终态或强制退款案件后禁止 down migration；故障时禁用新退款动作并保留查询/复核，禁止回退到订单级按金额部分退款或直接改表解冻。
+
+晚到支付复核上线继续执行 Billing `000028_late_payment_review_lifecycle`，再滚动 Billing、Token Gateway、Portal 和桌面运营制品。迁移为既有订单补齐支付期限、72小时边界和最终归档期限，并新增人工案件/不可变时间线、晚到证据、账单文件导入及 Provider 版本新单开关。发布前必须核对 Provider 能力的 `reconciliation_mode`、历史查询保留、支付/晚到窗口和权威未支付终态；H3C 当前为 `QUERY_DEGRADED` 且没有回调/账单，因此现有 `TEST_ONLY` 映射不能直接升级为正式映射。发布后抽样验证：72小时最终查询只创建一个 P2 案件；前7天每日、之后每周的复核计划不因认领或安排重置创建时钟；用户申诉只为本人订单追加不可变证据；严格归档要求期限后成功权威查询且无支付/冲突/未复核申诉；无法取得该事实时升级 `PROVIDER_BLIND` 并停用该 Provider 版本新单。恢复收款不得直接改 `payment_provider_controls`，应在修复和验证能力后发布新的 Provider/Adapter 版本与 `FROZEN` 映射。持续监控 `REVIEW_REQUIRED_LATE_PAYMENT`、`PROVIDER_BLIND`、人工 SLA 升级 Outbox、逾期未认领/未响应/未止损/未解决案件以及账单导入失败；文件导入仅对声明 `FILE_IMPORT` 的能力开放，单批最多 100,000 行。已有案件、证据或停单事实后禁止 down migration；故障时保留只读复核和证据，不得把订单直接改成未支付终态。
+
+支付异常与四方对账随后依次执行 Account `000023_payment_anomaly_commands` 和 Billing `000029_payment_anomaly_reconciliation`，再滚动 Billing、Portal 与桌面运营制品。Billing 迁移把既有未结强制退款和历史对账差异补入通用人工案件，新增不可变异常/差异证据、命令审计、Provider/Adapter 版本化独立对账运行，并解除旧的“渠道+日期只能有一次运行”约束；定时任务仍以 Provider、版本、渠道、业务日唯一，只允许手工重跑形成新运行。发布前确认数据库支持 `gen_random_uuid()`，并核对所有开启账单能力的 Provider 将 PAYMENT/REFUND/CHARGEBACK 映射为正金额、稳定外部引用和上海自然日时间；不支持账单的 Provider 不启动日终任务。发布后抽样验证：拒付和强制退款只冻结并冲销原支付流水权益包，异常录入端点不直接记账；明确退款失败、重复/晚到冲突和非法状态进入统一队列；同一结论命令重试不重复记账；定时任务在上海零点边界按前一自然日取数；Provider、订单/流水、退款/拒付和账本任一缺失或金额不一致均生成带严重度的差异；同日手工重跑保留前次证据，认领、修复计划和结论只追加命令/事件。持续监控开放 P0/P1 案件、`financial_action_status=PENDING/FAILED`、未分配对账差异、定时运行缺口和账本缺失差异。产生任何新版异常、命令、独立运行或差异后禁止 down migration；故障时停止新结论与对账调度、保留只读证据并前向修复，禁止直接更新钱包、权益、异常或对账表。
 
 ### 6.4 新华三商城
 
@@ -193,8 +213,10 @@ Account 的 Commerce Customer worker 还要求显式冻结 `COMMERCE_PROVIDER_ID
 - `H3C_MALL_APP_SECRET`
 - `BILLING_PAYMENT_PROVIDER=h3c_mall`
 - `BILLING_ALLOW_TENTATIVE_PRICES`
+- `BILLING_PAYMENT_EXPIRY_INTERVAL_SECONDS`（不得小于 Adapter 声明的最小查询间隔）
 
-企业商城是可选配置；未配置 Adapter 时不启动商城 worker，待处理 Mapping/任务不阻断登录、钱包或模型能力。开发/测试默认 simulator 可使用明确标识的暂定测试目录；`h3c_mall` 的 UAT 暂定目录仍需显式开关。正式环境必须冻结商品后关闭该开关，特殊状态只由 H3C Adapter 处理，不能绕过服务端商品目录。
+企业商城和正式支付 Adapter 仍按用户明确配置接入，社区开发路径使用测试 Provider，不以私有商城作为注册或账户使用前提。
+development/test 联调可显式允许 `TEST_ONLY` 暂定目录；正式环境必须由业务确认 SKU、金额、BASE/BONUS 权益、有效期和 Provider 映射，发布新的 `FROZEN` 映射后关闭该开关。已有映射不可原地修改，只能退休并发布更高版本；商城特殊状态映射由 H3C 适配层处理，不能通过通用环境变量绕过服务端商品目录。
 
 ### 6.5 Token Gateway 与 New API
 
@@ -310,6 +332,8 @@ docker compose --env-file <secret-env> <compose-files> build \
 
 ### 8.5 执行迁移
 
+> 本节的 A10 迁移步骤属于上线规划，不是本轮部署授权。用户已确认未发布的 LEGACY 普通退款采用定向整笔契约，移除旧的部分金额输入；固定审核通过前，不得据此执行目标退款迁移或切换正式接口。个人及显式组织 PLAN 不可退款的已定规则不变。
+
 迁移顺序：
 
 1. `account-migrate`
@@ -317,6 +341,8 @@ docker compose --env-file <secret-env> <compose-files> build \
 3. `token-migrate`
 
 每个迁移任务必须退出码为 0，再继续下一个。迁移器记录版本和校验和；已应用迁移文件不得修改，只能新增更高版本。迁移器可兼容仅换行符不同的旧校验和，但不接受语义内容变化。
+
+Billing `000027_targeted_refund_lifecycle` 升级前，须停止新增旧订单级退款，并在旧版本处理、核对所有 `REQUESTED`、`MANUAL_REVIEW` 退款至终态。迁移会锁定退款表并拒绝尚有未决旧退款的数据；失败时整项迁移回滚，原退款记录、钱包预留金额、账本和迁移版本保持不变。不得直接清预留金额或改退款状态绕过保护。已完成的旧退款历史仍按唯一支付流水和权益包回填；新整笔退款通过冻结权益包及其组件保护资金，钱包预留金额审计仅额外计入迁移明确标记的旧退款预留。
 
 Account `000011_permanent_user_codes` 会为历史用户回填永久编码并建立不可变触发器。迁移后必须核验：所有用户均有格式与校验码有效的唯一编码、`user_code_registry` 与用户一一对应、更新 `users.id/user_code` 和物理删除用户均被拒绝。不得通过禁用触发器、清空登记表或回滚迁移来“释放”已发放编码。
 
@@ -423,12 +449,15 @@ docker compose --env-file <secret-env> <compose-files> exec keycloak \
 
 UAT 只使用明确的测试商品和测试商城账号：
 
-1. 创建订单前确认商品金额、SKU、积分和有效期。
+1. 创建订单前确认 `/v1/payment-capabilities` 的 Provider/版本、渠道和动作与正式合同一致，并确认商品金额、映射 SKU、积分和有效期。
 2. 返回二维码和应付金额必须与商城事实一致。
 3. 客户端退出后，Billing 继续轮询。
 4. 商城 PAID 后仅入账一次，权益包与平衡账本一致。
 5. 重复查询、服务重启和晚到支付不重复入账。
-6. 退款、主动关单、回调和账单对账入口保持禁用/不支持。
+6. 退款、主动关单、回调和账单文件入口严格按能力声明启用；H3C 当前保持退款、关单、回调和账单不支持，并明确显示 `QUERY_DEGRADED`，不得把查询快照描述为渠道账单。
+7. 新订单必须保存 Provider/版本、商品映射 ID、映射快照和能力快照；历史订单不随 Adapter 或映射升级变化。
+8. 订单越过72小时边界后只产生一个晚到支付案件；认领、复核查询、安排、用户申诉、归档和 blind 升级均保留不可变时间线。
+9. 无回调无账单 Provider 只有在有限窗口、长期历史查询、权威未支付终态和证据保留均满足时才允许正式新单；blind 后同版本新单立即失败关闭。
 
 ### 11.4 后续客户端三层发布门禁目标（当前未交付）
 

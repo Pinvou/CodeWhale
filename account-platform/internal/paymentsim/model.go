@@ -15,6 +15,8 @@ var (
 )
 
 type CreateOrder struct {
+	Mobile          string
+	ProviderSKU     string
 	MerchantOrderNo string
 	Channel         string
 	AmountFen       int64
@@ -25,6 +27,8 @@ type CreateOrder struct {
 }
 
 type Order struct {
+	Mobile               string     `json:"mobile,omitempty"`
+	ProviderSKU          string     `json:"provider_sku,omitempty"`
 	ID                   uuid.UUID  `json:"order_id"`
 	MerchantOrderNo      string     `json:"merchant_order_no"`
 	Channel              string     `json:"channel"`

@@ -70,7 +70,7 @@ func (r *PostgresRepository) Create(ctx context.Context, request CreateOrder) (O
 	}
 	order, err := getOrderByMerchant(ctx, tx, request.MerchantOrderNo)
 	if err == nil {
-		if order.Channel != request.Channel || order.AmountFen != request.AmountFen || order.Currency != request.Currency || order.Scenario != request.Scenario {
+		if order.Channel != request.Channel || order.AmountFen != request.AmountFen || order.Currency != request.Currency || order.Scenario != request.Scenario || order.Mobile != request.Mobile || order.ProviderSKU != request.ProviderSKU {
 			return Order{}, false, ErrConflict
 		}
 		var callbackURL string
@@ -89,10 +89,10 @@ func (r *PostgresRepository) Create(ctx context.Context, request CreateOrder) (O
 	token := r.paymentToken(request.MerchantOrderNo)
 	hash := sha256.Sum256([]byte(token))
 	now := r.now()
-	order = Order{ID: uuid.Must(uuid.NewV7()), MerchantOrderNo: request.MerchantOrderNo, Channel: request.Channel, AmountFen: request.AmountFen, Currency: request.Currency, Status: "PENDING", Scenario: request.Scenario, PaymentURL: r.publicURL + "/pay/" + token, ExpiresAt: request.ExpiresAt.UTC()}
+	order = Order{ID: uuid.Must(uuid.NewV7()), MerchantOrderNo: request.MerchantOrderNo, Channel: request.Channel, AmountFen: request.AmountFen, Currency: request.Currency, Mobile: request.Mobile, ProviderSKU: request.ProviderSKU, Status: "PENDING", Scenario: request.Scenario, PaymentURL: r.publicURL + "/pay/" + token, ExpiresAt: request.ExpiresAt.UTC()}
 	_, err = tx.Exec(ctx, `
-INSERT INTO simulator_orders(id, merchant_order_no, channel, amount_fen, currency, status, scenario, pay_token_hash, callback_url, expires_at, created_at, updated_at)
-VALUES ($1, $2, $3, $4, $5, 'PENDING', $6, $7, $8, $9, $10, $10)`, order.ID, order.MerchantOrderNo, order.Channel, order.AmountFen, order.Currency, order.Scenario, hash[:], request.CallbackURL, order.ExpiresAt, now)
+INSERT INTO simulator_orders(id, merchant_order_no, channel, amount_fen, currency, status, scenario, pay_token_hash, callback_url, expires_at, created_at, updated_at,mobile,provider_sku)
+VALUES ($1, $2, $3, $4, $5, 'PENDING', $6, $7, $8, $9, $10, $10,$11,$12)`, order.ID, order.MerchantOrderNo, order.Channel, order.AmountFen, order.Currency, order.Scenario, hash[:], request.CallbackURL, order.ExpiresAt, now, order.Mobile, order.ProviderSKU)
 	if err != nil {
 		return Order{}, false, err
 	}
@@ -401,23 +401,23 @@ type queryable interface {
 
 func getOrderByMerchant(ctx context.Context, database queryable, merchantOrderNo string) (Order, error) {
 	var order Order
-	err := database.QueryRow(ctx, `SELECT id, merchant_order_no, channel, amount_fen, currency, status, scenario, channel_transaction_id, expires_at, paid_at, refunded_amount_fen FROM simulator_orders WHERE merchant_order_no = $1`, merchantOrderNo).Scan(&order.ID, &order.MerchantOrderNo, &order.Channel, &order.AmountFen, &order.Currency, &order.Status, &order.Scenario, &order.ChannelTransactionID, &order.ExpiresAt, &order.PaidAt, &order.RefundedAmountFen)
+	err := database.QueryRow(ctx, `SELECT id, merchant_order_no, channel, amount_fen, currency, status, scenario, channel_transaction_id, expires_at, paid_at, refunded_amount_fen,mobile,provider_sku FROM simulator_orders WHERE merchant_order_no = $1`, merchantOrderNo).Scan(&order.ID, &order.MerchantOrderNo, &order.Channel, &order.AmountFen, &order.Currency, &order.Status, &order.Scenario, &order.ChannelTransactionID, &order.ExpiresAt, &order.PaidAt, &order.RefundedAmountFen, &order.Mobile, &order.ProviderSKU)
 	return order, err
 }
 
 func getOrderByMerchantForUpdate(ctx context.Context, database queryable, merchantOrderNo string) (Order, error) {
 	var order Order
-	err := database.QueryRow(ctx, `SELECT id, merchant_order_no, channel, amount_fen, currency, status, scenario, channel_transaction_id, expires_at, paid_at, refunded_amount_fen FROM simulator_orders WHERE merchant_order_no = $1 FOR UPDATE`, merchantOrderNo).Scan(&order.ID, &order.MerchantOrderNo, &order.Channel, &order.AmountFen, &order.Currency, &order.Status, &order.Scenario, &order.ChannelTransactionID, &order.ExpiresAt, &order.PaidAt, &order.RefundedAmountFen)
+	err := database.QueryRow(ctx, `SELECT id, merchant_order_no, channel, amount_fen, currency, status, scenario, channel_transaction_id, expires_at, paid_at, refunded_amount_fen,mobile,provider_sku FROM simulator_orders WHERE merchant_order_no = $1 FOR UPDATE`, merchantOrderNo).Scan(&order.ID, &order.MerchantOrderNo, &order.Channel, &order.AmountFen, &order.Currency, &order.Status, &order.Scenario, &order.ChannelTransactionID, &order.ExpiresAt, &order.PaidAt, &order.RefundedAmountFen, &order.Mobile, &order.ProviderSKU)
 	return order, err
 }
 
 func getOrderByTokenHash(ctx context.Context, database queryable, hash []byte, lock bool) (Order, error) {
-	query := `SELECT id, merchant_order_no, channel, amount_fen, currency, status, scenario, channel_transaction_id, expires_at, paid_at, refunded_amount_fen FROM simulator_orders WHERE pay_token_hash = $1`
+	query := `SELECT id, merchant_order_no, channel, amount_fen, currency, status, scenario, channel_transaction_id, expires_at, paid_at, refunded_amount_fen,mobile,provider_sku FROM simulator_orders WHERE pay_token_hash = $1`
 	if lock {
 		query += ` FOR UPDATE`
 	}
 	var order Order
-	err := database.QueryRow(ctx, query, hash).Scan(&order.ID, &order.MerchantOrderNo, &order.Channel, &order.AmountFen, &order.Currency, &order.Status, &order.Scenario, &order.ChannelTransactionID, &order.ExpiresAt, &order.PaidAt, &order.RefundedAmountFen)
+	err := database.QueryRow(ctx, query, hash).Scan(&order.ID, &order.MerchantOrderNo, &order.Channel, &order.AmountFen, &order.Currency, &order.Status, &order.Scenario, &order.ChannelTransactionID, &order.ExpiresAt, &order.PaidAt, &order.RefundedAmountFen, &order.Mobile, &order.ProviderSKU)
 	return order, err
 }
 

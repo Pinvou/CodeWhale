@@ -123,8 +123,8 @@ ORDER BY amount_fen`, currency, channel)
 	return products, rows.Err()
 }
 
-func (r *PostgresRepository) ActiveExternalProducts(ctx context.Context) (map[string]ExternalProduct, error) {
-	rows, err := r.pool.Query(ctx, `SELECT product_id,sku_code,amount_fen FROM recharge_products WHERE enabled AND sku_code<>'' ORDER BY product_id`)
+func (r *PostgresRepository) ActiveExternalProducts(ctx context.Context, providerID, providerVersion string, allowTestOnly bool) (map[string]ExternalProduct, error) {
+	rows, err := r.pool.Query(ctx, `SELECT id,product_id,mapping_version,provider_id,provider_version,external_sku,amount_fen,currency,channels,status FROM payment_product_mappings WHERE provider_id=$1 AND provider_version=$2 AND effective_from<=now() AND (effective_to IS NULL OR effective_to>now()) AND (status='FROZEN' OR ($3 AND status='TEST_ONLY')) ORDER BY product_id,mapping_version DESC`, providerID, providerVersion, allowTestOnly)
 	if err != nil {
 		return nil, err
 	}
@@ -133,36 +133,60 @@ func (r *PostgresRepository) ActiveExternalProducts(ctx context.Context) (map[st
 	for rows.Next() {
 		var productID string
 		var product ExternalProduct
-		if err := rows.Scan(&productID, &product.SKU, &product.AmountFen); err != nil {
+		if err := rows.Scan(&product.MappingID, &productID, &product.MappingVersion, &product.ProviderID, &product.ProviderVersion, &product.SKU, &product.AmountFen, &product.Currency, &product.Channels, &product.Status); err != nil {
 			return nil, err
+		}
+		if _, duplicate := products[productID]; duplicate {
+			return nil, fmt.Errorf("multiple active payment product mappings for %s", productID)
 		}
 		products[productID] = product
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	if len(products) == 0 {
-		return nil, errors.New("no enabled Mall products are configured")
-	}
 	return products, nil
 }
 
 func (r *PostgresRepository) CurrentPrice(ctx context.Context, model string) (PriceVersion, error) {
-	var price PriceVersion
-	err := r.pool.QueryRow(ctx, `SELECT id,model,input_per_million,output_per_million,cached_input_per_million,effective_from FROM pricing_versions WHERE model=$1 AND effective_from <= $2 AND (effective_to IS NULL OR effective_to > $2) ORDER BY effective_from DESC LIMIT 1`, strings.TrimSpace(model), r.now()).Scan(&price.ID, &price.Model, &price.InputPerMillion, &price.OutputPerMillion, &price.CachedInputPerMillion, &price.EffectiveFrom)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return PriceVersion{}, ErrNotFound
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return PriceVersion{}, ErrConflict
 	}
-	return price, err
+	now := r.now()
+	var formulaID uuid.UUID
+	err := r.pool.QueryRow(ctx, `SELECT binding.formula_version_id FROM billing_protocol_formula_bindings binding WHERE binding.protocol_code='CHAT' AND EXISTS(SELECT 1 FROM pricing_versions price WHERE price.protocol_code=binding.protocol_code AND price.formula_version_id=binding.formula_version_id AND price.credit_unit='MICROCREDIT' AND price.lifecycle_status IN ('PUBLISHED','ACTIVE') AND price.published_at IS NOT NULL AND price.cancelled_at IS NULL AND price.effective_from<=$2 AND (price.effective_to IS NULL OR price.effective_to>$2) AND (price.scope_type='GLOBAL' OR price.scope_type='MODEL' AND price.scope_id=$1)) ORDER BY binding.published_at DESC,binding.formula_version_id DESC LIMIT 1`, model, now).Scan(&formulaID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return PriceVersion{}, ErrPriceMissing
+	}
+	if err != nil {
+		return PriceVersion{}, err
+	}
+	return r.ResolveCurrentPrice(ctx, model, "CHAT", formulaID, "MICROCREDIT", now)
 }
 
 func (r *PostgresRepository) PriceByID(ctx context.Context, priceID uuid.UUID) (PriceVersion, error) {
-	var price PriceVersion
-	err := r.pool.QueryRow(ctx, `SELECT id,model,input_per_million,output_per_million,cached_input_per_million,effective_from FROM pricing_versions WHERE id=$1`, priceID).Scan(&price.ID, &price.Model, &price.InputPerMillion, &price.OutputPerMillion, &price.CachedInputPerMillion, &price.EffectiveFrom)
+	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return PriceVersion{}, err
+	}
+	defer tx.Rollback(ctx)
+	var candidate priceCandidate
+	err = tx.QueryRow(ctx, `SELECT id,scope_type,COALESCE(scope_id,''),protocol_code,formula_version_id,credit_unit,effective_from,effective_to FROM pricing_versions WHERE id=$1 AND published_at IS NOT NULL`, priceID).Scan(&candidate.id, &candidate.scopeType, &candidate.model, &candidate.protocol, &candidate.formulaID, &candidate.creditUnit, &candidate.effectiveFrom, &candidate.effectiveTo)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return PriceVersion{}, ErrNotFound
 	}
-	return price, err
+	if err != nil {
+		return PriceVersion{}, err
+	}
+	model := candidate.model
+	if candidate.scopeType == "GLOBAL" {
+		model = "*"
+	}
+	price, err := resolvePriceCandidate(ctx, tx, candidate, model, candidate.effectiveFrom)
+	if err != nil {
+		return PriceVersion{}, err
+	}
+	return price, tx.Commit(ctx)
 }
 
 func (r *PostgresRepository) Credit(ctx context.Context, walletID uuid.UUID, businessReference string, amount int64, refundable bool) (Wallet, error) {
@@ -181,7 +205,7 @@ func (r *PostgresRepository) Credit(ctx context.Context, walletID uuid.UUID, bus
 	if err != nil {
 		return Wallet{}, err
 	}
-	if wallet.Status != "ACTIVE" {
+	if wallet.Status != "ACTIVE" || wallet.FinancialStatus != "CLEAR" {
 		return Wallet{}, ErrWalletUnavailable
 	}
 	var existingAmount int64
@@ -240,7 +264,18 @@ WHERE je.business_reference = $1 AND la.wallet_id = $2`, businessReference, wall
 }
 
 func (r *PostgresRepository) Reserve(ctx context.Context, usageRequestID, walletID uuid.UUID, maxAmount int64, priceVersionID *uuid.UUID, expiresAt time.Time) (Hold, error) {
-	if maxAmount <= 0 || !expiresAt.After(r.now()) {
+	return r.reserve(ctx, usageRequestID, walletID, maxAmount, priceVersionID, expiresAt, nil)
+}
+
+func (r *PostgresRepository) ReservePriced(ctx context.Context, usageRequestID, walletID uuid.UUID, maxAmount int64, priceVersionID *uuid.UUID, expiresAt time.Time, pricing *HoldPricingContext) (Hold, error) {
+	return r.reserve(ctx, usageRequestID, walletID, maxAmount, priceVersionID, expiresAt, pricing)
+}
+
+func (r *PostgresRepository) reserve(ctx context.Context, usageRequestID, walletID uuid.UUID, maxAmount int64, priceVersionID *uuid.UUID, expiresAt time.Time, pricing *HoldPricingContext) (Hold, error) {
+	if usageRequestID == uuid.Nil || walletID == uuid.Nil || maxAmount < 0 || (pricing == nil && maxAmount == 0) || !expiresAt.After(r.now()) {
+		return Hold{}, ErrConflict
+	}
+	if pricing != nil && (strings.TrimSpace(pricing.ModelID) == "" || strings.TrimSpace(pricing.ProtocolCode) == "" || pricing.FormulaVersionID == uuid.Nil || !json.Valid(pricing.PricingSnapshot) || !json.Valid(pricing.RequestSnapshot)) {
 		return Hold{}, ErrConflict
 	}
 	tx, err := r.pool.Begin(ctx)
@@ -254,6 +289,11 @@ func (r *PostgresRepository) Reserve(ctx context.Context, usageRequestID, wallet
 	existing, err := getHoldByUsage(ctx, tx, usageRequestID, true)
 	if err == nil {
 		if existing.WalletID != walletID || existing.MaxMicrocredits != maxAmount || !equalUUID(existing.PriceVersionID, priceVersionID) {
+			return Hold{}, ErrConflict
+		}
+		if same, err := sameHoldPricing(ctx, tx, existing.ID, pricing); err != nil {
+			return Hold{}, err
+		} else if !same {
 			return Hold{}, ErrConflict
 		}
 		var memberBacked bool
@@ -319,7 +359,7 @@ func (r *PostgresRepository) Reserve(ctx context.Context, usageRequestID, wallet
 	}
 	command, err := tx.Exec(ctx, `
 UPDATE wallets SET reserved_microcredits = reserved_microcredits + $2, version = version + 1, updated_at = $3
-WHERE id = $1 AND status = 'ACTIVE' AND posted_microcredits - reserved_microcredits >= $2`, walletID, maxAmount, now)
+WHERE id = $1 AND status = 'ACTIVE' AND receivable_microcredits=0 AND posted_microcredits - reserved_microcredits >= $2`, walletID, maxAmount, now)
 	if err != nil {
 		return Hold{}, err
 	}
@@ -334,8 +374,18 @@ WHERE id = $1 AND status = 'ACTIVE' AND posted_microcredits - reserved_microcred
 		return Hold{}, ErrInsufficientBalance
 	}
 	hold := Hold{ID: uuid.Must(uuid.NewV7()), UsageRequestID: usageRequestID, WalletID: walletID, PriceVersionID: priceVersionID, Status: "ACTIVE", MaxMicrocredits: maxAmount, ExpiresAt: expiresAt.UTC()}
-	_, err = tx.Exec(ctx, `INSERT INTO usage_holds(id, usage_request_id, wallet_id, price_version_id, status, max_microcredits, expires_at, created_at, updated_at) VALUES ($1, $2, $3, $4, 'ACTIVE', $5, $6, $7, $7)`, hold.ID, usageRequestID, walletID, priceVersionID, maxAmount, hold.ExpiresAt, now)
+	var modelID, protocolCode any
+	var formulaVersionID any
+	var pricingSnapshot, requestSnapshot any
+	if pricing != nil {
+		modelID, protocolCode, formulaVersionID = pricing.ModelID, pricing.ProtocolCode, pricing.FormulaVersionID
+		pricingSnapshot, requestSnapshot = []byte(pricing.PricingSnapshot), []byte(pricing.RequestSnapshot)
+	}
+	_, err = tx.Exec(ctx, `INSERT INTO usage_holds(id, usage_request_id, wallet_id, price_version_id, status, max_microcredits, expires_at, model_id, protocol_code, formula_version_id, pricing_snapshot, request_snapshot, created_at, updated_at) VALUES ($1, $2, $3, $4, 'ACTIVE', $5, $6, $7, $8, $9, $10, $11, $12, $12)`, hold.ID, usageRequestID, walletID, priceVersionID, maxAmount, hold.ExpiresAt, modelID, protocolCode, formulaVersionID, pricingSnapshot, requestSnapshot, now)
 	if err != nil {
+		return Hold{}, err
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO usage_hold_lease_events(id,hold_id,event_type,expires_at,previous_max_microcredits,max_microcredits,additional_microcredits,created_at) VALUES($1,$2,'CREATED',$3,0,$4,$4,$5)`, uuid.Must(uuid.NewV7()), hold.ID, hold.ExpiresAt, hold.MaxMicrocredits, now); err != nil {
 		return Hold{}, err
 	}
 	for _, allocation := range allocations {
@@ -410,10 +460,9 @@ func (r *PostgresRepository) Commit(ctx context.Context, usageRequestID, holdID 
 	if hold.Status != "ACTIVE" && hold.Status != "REVIEW" {
 		return Hold{}, ErrUsageAlreadyTerminal
 	}
-	if actual > hold.MaxMicrocredits {
-		return Hold{}, ErrConflict
-	}
 	now := r.now()
+	backedActual := min(actual, hold.MaxMicrocredits)
+	overage := actual - backedActual
 	entryID := uuid.Nil
 	var walletAccount uuid.UUID
 	if actual > 0 {
@@ -450,7 +499,7 @@ func (r *PostgresRepository) Commit(ctx context.Context, usageRequestID, holdID 
 		return Hold{}, err
 	}
 	rows.Close()
-	remaining := actual
+	remaining := backedActual
 	for _, item := range allocations {
 		settled := min(remaining, item.reserved)
 		released := item.reserved - settled
@@ -475,7 +524,7 @@ func (r *PostgresRepository) Commit(ctx context.Context, usageRequestID, holdID 
 				return Hold{}, err
 			}
 		} else {
-			command, err := tx.Exec(ctx, `UPDATE entitlement_components SET reserved_microcredits=reserved_microcredits-$2,used_microcredits=used_microcredits+$3,available_microcredits=available_microcredits+$4,status=CASE WHEN reserved_microcredits-$2=0 AND available_microcredits+$4+active_grant_microcredits+suspended_grant_microcredits=0 THEN 'CONSUMED' ELSE 'ACTIVE' END,updated_at=$5 WHERE id=$1 AND reserved_microcredits>=$2`, item.componentID, item.reserved, settled, released, now)
+			command, err := tx.Exec(ctx, `UPDATE entitlement_components SET reserved_microcredits=reserved_microcredits-$2,used_microcredits=used_microcredits+$3,available_microcredits=available_microcredits+$4,status=CASE WHEN status IN ('FROZEN','REVOKED') THEN status WHEN reserved_microcredits-$2=0 AND available_microcredits+$4+active_grant_microcredits+suspended_grant_microcredits=0 THEN 'CONSUMED' ELSE 'ACTIVE' END,updated_at=$5 WHERE id=$1 AND reserved_microcredits>=$2`, item.componentID, item.reserved, settled, released, now)
 			if err != nil {
 				return Hold{}, err
 			}
@@ -492,18 +541,26 @@ func (r *PostgresRepository) Commit(ctx context.Context, usageRequestID, holdID 
 		}
 		remaining -= settled
 	}
-	if _, err := tx.Exec(ctx, `UPDATE entitlement_packages package SET status=CASE WHEN EXISTS(SELECT 1 FROM entitlement_components component WHERE component.package_id=package.id AND (component.available_microcredits+component.reserved_microcredits+component.active_grant_microcredits+component.suspended_grant_microcredits)>0) THEN 'ACTIVE' ELSE 'CONSUMED' END,updated_at=$2 WHERE package.id IN (SELECT package_id FROM usage_hold_allocations WHERE hold_id=$1)`, hold.ID, now); err != nil {
+	if _, err := tx.Exec(ctx, `UPDATE entitlement_packages package SET status=CASE WHEN package.status IN ('FROZEN','REVOKED') THEN package.status WHEN EXISTS(SELECT 1 FROM entitlement_components component WHERE component.package_id=package.id AND (component.available_microcredits+component.reserved_microcredits+component.active_grant_microcredits+component.suspended_grant_microcredits)>0) THEN 'ACTIVE' ELSE 'CONSUMED' END,updated_at=$2 WHERE package.id IN (SELECT package_id FROM usage_hold_allocations WHERE hold_id=$1)`, hold.ID, now); err != nil {
 		return Hold{}, err
 	}
 	if remaining != 0 {
 		return Hold{}, ErrConflict
+	}
+	if overage > 0 {
+		if err := insertPosting(ctx, tx, entryID, receivableAccount, -overage, nil, now); err != nil {
+			return Hold{}, err
+		}
+		if _, err := createReceivableWithinTransaction(ctx, tx, hold.WalletID, "USAGE_OVERAGE", usageRequestID.String(), overage, nil, nil, nil, &usageRequestID, now); err != nil {
+			return Hold{}, err
+		}
 	}
 	if actual > 0 {
 		if err := insertPosting(ctx, tx, entryID, usageRevenueAccount, actual, nil, now); err != nil {
 			return Hold{}, err
 		}
 	}
-	command, err := tx.Exec(ctx, `UPDATE wallets SET posted_microcredits = posted_microcredits - $2, reserved_microcredits = reserved_microcredits - $3, version = version + 1, updated_at = $4 WHERE id = $1 AND reserved_microcredits >= $3 AND posted_microcredits >= $2`, hold.WalletID, actual, hold.MaxMicrocredits, now)
+	command, err := tx.Exec(ctx, `UPDATE wallets SET posted_microcredits = posted_microcredits - $2, reserved_microcredits = reserved_microcredits - $3, version = version + 1, updated_at = $4 WHERE id = $1 AND reserved_microcredits >= $3 AND posted_microcredits >= $2`, hold.WalletID, backedActual, hold.MaxMicrocredits, now)
 	if err == nil && command.RowsAffected() != 1 {
 		return Hold{}, ErrConflict
 	}
@@ -516,6 +573,123 @@ func (r *PostgresRepository) Commit(ctx context.Context, usageRequestID, holdID 
 	hold.Status = "COMMITTED"
 	hold.ActualMicrocredits = &actual
 	return hold, tx.Commit(ctx)
+}
+
+func (r *PostgresRepository) ExtendHold(ctx context.Context, usageRequestID, holdID uuid.UUID, expiresAt time.Time, additional int64) (Hold, error) {
+	if usageRequestID == uuid.Nil || holdID == uuid.Nil || additional < 0 || !expiresAt.After(r.now()) {
+		return Hold{}, ErrConflict
+	}
+	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
+	if err != nil {
+		return Hold{}, err
+	}
+	defer tx.Rollback(ctx)
+	hold, err := getHoldByUsage(ctx, tx, usageRequestID, false)
+	if err == nil {
+		// Match Commit/Release: acquire the wallet before the mutable hold.
+		if _, err = getWallet(ctx, tx, hold.WalletID, true); err == nil {
+			hold, err = getHoldByUsage(ctx, tx, usageRequestID, true)
+		}
+	}
+	if errors.Is(err, pgx.ErrNoRows) || (err == nil && hold.ID != holdID) {
+		return Hold{}, ErrNotFound
+	}
+	if err != nil {
+		return Hold{}, err
+	}
+	if hold.Status != "ACTIVE" {
+		return Hold{}, ErrUsageAlreadyTerminal
+	}
+	now := r.now()
+	previousExpiresAt, previousMaximum := hold.ExpiresAt, hold.MaxMicrocredits
+	if additional > 0 {
+		var organizationID, memberUserID *uuid.UUID
+		var membershipVersion *int64
+		if err := tx.QueryRow(ctx, `SELECT quota_organization_id,quota_member_user_id,quota_membership_version FROM usage_holds WHERE id=$1`, hold.ID).Scan(&organizationID, &memberUserID, &membershipVersion); err != nil {
+			return Hold{}, err
+		}
+		if organizationID != nil && memberUserID != nil && membershipVersion != nil {
+			if err := r.extendMemberQuotaHold(ctx, tx, hold, *organizationID, *memberUserID, *membershipVersion, additional, now); err != nil {
+				return Hold{}, err
+			}
+		} else if err := extendPersonalHold(ctx, tx, hold, additional, now); err != nil {
+			return Hold{}, err
+		}
+		hold.MaxMicrocredits += additional
+	}
+	if expiresAt.After(hold.ExpiresAt) {
+		hold.ExpiresAt = expiresAt.UTC()
+	}
+	if _, err := tx.Exec(ctx, `UPDATE usage_holds SET expires_at=$2,max_microcredits=$3,updated_at=$4 WHERE id=$1 AND status='ACTIVE'`, hold.ID, hold.ExpiresAt, hold.MaxMicrocredits, now); err != nil {
+		return Hold{}, err
+	}
+	if hold.ExpiresAt.After(previousExpiresAt) || hold.MaxMicrocredits != previousMaximum {
+		if _, err := tx.Exec(ctx, `INSERT INTO usage_hold_lease_events(id,hold_id,event_type,previous_expires_at,expires_at,previous_max_microcredits,max_microcredits,additional_microcredits,created_at) VALUES($1,$2,'EXTENDED',$3,$4,$5,$6,$7,$8)`, uuid.Must(uuid.NewV7()), hold.ID, previousExpiresAt, hold.ExpiresAt, previousMaximum, hold.MaxMicrocredits, hold.MaxMicrocredits-previousMaximum, now); err != nil {
+			return Hold{}, err
+		}
+	}
+	return hold, tx.Commit(ctx)
+}
+
+func extendPersonalHold(ctx context.Context, tx pgx.Tx, hold Hold, additional int64, now time.Time) error {
+	wallet, err := getWallet(ctx, tx, hold.WalletID, true)
+	if err != nil {
+		return err
+	}
+	if wallet.Status != "ACTIVE" || wallet.AvailableMicrocredits < additional {
+		return ErrInsufficientBalance
+	}
+	type allocation struct {
+		packageID, componentID uuid.UUID
+		amount                 int64
+	}
+	rows, err := tx.Query(ctx, `SELECT component.package_id,component.id,component.available_microcredits FROM entitlement_components component JOIN entitlement_packages package ON package.id=component.package_id WHERE package.wallet_id=$1 AND package.status='ACTIVE' AND package.valid_from<=$2 AND (component.expires_at IS NULL OR component.expires_at>$2) AND component.status='ACTIVE' AND component.available_microcredits>0 ORDER BY component.expires_at NULLS LAST,CASE component.component_type WHEN 'BONUS' THEN 0 ELSE 1 END,component.credited_at,component.id FOR UPDATE OF component`, hold.WalletID, now)
+	if err != nil {
+		return err
+	}
+	remaining := additional
+	items := make([]allocation, 0)
+	for rows.Next() {
+		var item allocation
+		var available int64
+		if err := rows.Scan(&item.packageID, &item.componentID, &available); err != nil {
+			rows.Close()
+			return err
+		}
+		item.amount = min(remaining, available)
+		if item.amount > 0 {
+			items = append(items, item)
+			remaining -= item.amount
+		}
+		if remaining == 0 {
+			break
+		}
+	}
+	rows.Close()
+	if remaining != 0 {
+		return ErrInsufficientBalance
+	}
+	command, err := tx.Exec(ctx, `UPDATE wallets SET reserved_microcredits=reserved_microcredits+$2,version=version+1,updated_at=$3 WHERE id=$1 AND status='ACTIVE' AND receivable_microcredits=0 AND posted_microcredits-reserved_microcredits>=$2`, hold.WalletID, additional, now)
+	if err != nil {
+		return err
+	}
+	if command.RowsAffected() != 1 {
+		return ErrInsufficientBalance
+	}
+	for _, item := range items {
+		command, err = tx.Exec(ctx, `UPDATE entitlement_components SET available_microcredits=available_microcredits-$2,reserved_microcredits=reserved_microcredits+$2,updated_at=$3 WHERE id=$1 AND available_microcredits>=$2`, item.componentID, item.amount, now)
+		if err != nil || command.RowsAffected() != 1 {
+			if err != nil {
+				return err
+			}
+			return ErrConflict
+		}
+		_, err = tx.Exec(ctx, `INSERT INTO usage_hold_allocations(hold_id,package_id,component_id,reserved_microcredits,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$5) ON CONFLICT(hold_id,component_id) DO UPDATE SET reserved_microcredits=usage_hold_allocations.reserved_microcredits+EXCLUDED.reserved_microcredits,updated_at=EXCLUDED.updated_at`, hold.ID, item.packageID, item.componentID, item.amount, now)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (r *PostgresRepository) Release(ctx context.Context, usageRequestID, holdID uuid.UUID, reason string) (Hold, error) {
@@ -642,7 +816,7 @@ WHERE allocation.hold_id=$1 AND allocation.settled_microcredits=0 AND allocation
 	if expected == 0 {
 		return ErrConflict
 	}
-	command, err := tx.Exec(ctx, `UPDATE entitlement_components component SET reserved_microcredits=component.reserved_microcredits-allocation.reserved_microcredits,available_microcredits=component.available_microcredits+allocation.reserved_microcredits,status='ACTIVE',updated_at=$2 FROM usage_hold_allocations allocation WHERE allocation.hold_id=$1 AND allocation.component_id=component.id AND allocation.settled_microcredits=0 AND allocation.released_microcredits=0 AND component.reserved_microcredits>=allocation.reserved_microcredits`, holdID, now)
+	command, err := tx.Exec(ctx, `UPDATE entitlement_components component SET reserved_microcredits=component.reserved_microcredits-allocation.reserved_microcredits,available_microcredits=component.available_microcredits+allocation.reserved_microcredits,status=CASE WHEN component.status IN ('FROZEN','REVOKED') THEN component.status ELSE 'ACTIVE' END,updated_at=$2 FROM usage_hold_allocations allocation WHERE allocation.hold_id=$1 AND allocation.component_id=component.id AND allocation.settled_microcredits=0 AND allocation.released_microcredits=0 AND component.reserved_microcredits>=allocation.reserved_microcredits`, holdID, now)
 	if err != nil {
 		return err
 	}
@@ -720,18 +894,18 @@ func lockTransactionKey(ctx context.Context, tx pgx.Tx, scope, key string) error
 }
 
 func getWallet(ctx context.Context, database queryable, walletID uuid.UUID, lock bool) (Wallet, error) {
-	query := `SELECT id, owner_type, owner_id, status, posted_microcredits, reserved_microcredits, posted_microcredits - reserved_microcredits, version FROM wallets WHERE id = $1`
+	query := `SELECT id,owner_type,owner_id,status,posted_microcredits,reserved_microcredits,receivable_microcredits,posted_microcredits-reserved_microcredits-receivable_microcredits,financial_status,financial_freeze_reason,version FROM wallets WHERE id=$1`
 	if lock {
 		query += ` FOR UPDATE`
 	}
 	var wallet Wallet
-	err := database.QueryRow(ctx, query, walletID).Scan(&wallet.ID, &wallet.OwnerType, &wallet.OwnerID, &wallet.Status, &wallet.PostedMicrocredits, &wallet.ReservedMicrocredits, &wallet.AvailableMicrocredits, &wallet.Version)
+	err := database.QueryRow(ctx, query, walletID).Scan(&wallet.ID, &wallet.OwnerType, &wallet.OwnerID, &wallet.Status, &wallet.PostedMicrocredits, &wallet.ReservedMicrocredits, &wallet.ReceivableMicrocredits, &wallet.AvailableMicrocredits, &wallet.FinancialStatus, &wallet.FinancialFreezeReason, &wallet.Version)
 	return wallet, err
 }
 
 func getWalletByOwner(ctx context.Context, database queryable, ownerType string, ownerID uuid.UUID) (Wallet, error) {
 	var wallet Wallet
-	err := database.QueryRow(ctx, `SELECT id, owner_type, owner_id, status, posted_microcredits, reserved_microcredits, posted_microcredits - reserved_microcredits, version FROM wallets WHERE owner_type = $1 AND owner_id = $2`, ownerType, ownerID).Scan(&wallet.ID, &wallet.OwnerType, &wallet.OwnerID, &wallet.Status, &wallet.PostedMicrocredits, &wallet.ReservedMicrocredits, &wallet.AvailableMicrocredits, &wallet.Version)
+	err := database.QueryRow(ctx, `SELECT id,owner_type,owner_id,status,posted_microcredits,reserved_microcredits,receivable_microcredits,posted_microcredits-reserved_microcredits-receivable_microcredits,financial_status,financial_freeze_reason,version FROM wallets WHERE owner_type=$1 AND owner_id=$2`, ownerType, ownerID).Scan(&wallet.ID, &wallet.OwnerType, &wallet.OwnerID, &wallet.Status, &wallet.PostedMicrocredits, &wallet.ReservedMicrocredits, &wallet.ReceivableMicrocredits, &wallet.AvailableMicrocredits, &wallet.FinancialStatus, &wallet.FinancialFreezeReason, &wallet.Version)
 	return wallet, err
 }
 

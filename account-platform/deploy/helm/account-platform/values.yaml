@@ -63,9 +63,9 @@ account:
   commerceAdapterVersion: h3c-mall-v1
 
 billing:
-  paymentExpiryIntervalSeconds: 15
   paymentProvider: simulator
   allowTentativePrices: false
+  paymentExpiryIntervalSeconds: 15
 
 mobileAuth:
   enabled: false
@@ -78,6 +78,8 @@ mobileAuth:
   aliyunEndpoint: https://dypnsapi.aliyuncs.com
   aliyunRegisterTemplate: ""
   aliyunLoginTemplate: ""
+  aliyunProfileMobileTemplate: ""
+  aliyunPasswordResetTemplate: ""
 
 commerce:
   enabled: false

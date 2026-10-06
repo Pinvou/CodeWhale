@@ -2,7 +2,9 @@ package billing
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -17,7 +19,18 @@ type memberHoldAllocation struct {
 }
 
 func (r *PostgresRepository) ReserveMemberQuota(ctx context.Context, usageRequestID, walletID, organizationID, memberUserID uuid.UUID, membershipVersion, maxAmount int64, priceVersionID *uuid.UUID, expiresAt time.Time) (Hold, error) {
-	if usageRequestID == uuid.Nil || walletID == uuid.Nil || organizationID == uuid.Nil || memberUserID == uuid.Nil || membershipVersion < 1 || maxAmount <= 0 || !expiresAt.After(r.now()) {
+	return r.reserveMemberQuota(ctx, usageRequestID, walletID, organizationID, memberUserID, membershipVersion, maxAmount, priceVersionID, expiresAt, nil)
+}
+
+func (r *PostgresRepository) ReserveMemberQuotaPriced(ctx context.Context, usageRequestID, walletID, organizationID, memberUserID uuid.UUID, membershipVersion, maxAmount int64, priceVersionID *uuid.UUID, expiresAt time.Time, pricing *HoldPricingContext) (Hold, error) {
+	return r.reserveMemberQuota(ctx, usageRequestID, walletID, organizationID, memberUserID, membershipVersion, maxAmount, priceVersionID, expiresAt, pricing)
+}
+
+func (r *PostgresRepository) reserveMemberQuota(ctx context.Context, usageRequestID, walletID, organizationID, memberUserID uuid.UUID, membershipVersion, maxAmount int64, priceVersionID *uuid.UUID, expiresAt time.Time, pricing *HoldPricingContext) (Hold, error) {
+	if organizationID == uuid.Nil || memberUserID == uuid.Nil || membershipVersion < 1 || usageRequestID == uuid.Nil || walletID == uuid.Nil || maxAmount < 0 || (pricing == nil && maxAmount == 0) || !expiresAt.After(r.now()) {
+		return Hold{}, ErrConflict
+	}
+	if pricing != nil && (strings.TrimSpace(pricing.ModelID) == "" || strings.TrimSpace(pricing.ProtocolCode) == "" || pricing.FormulaVersionID == uuid.Nil || !json.Valid(pricing.PricingSnapshot) || !json.Valid(pricing.RequestSnapshot)) {
 		return Hold{}, ErrConflict
 	}
 	tx, err := r.pool.Begin(ctx)
@@ -35,6 +48,11 @@ func (r *PostgresRepository) ReserveMemberQuota(ctx context.Context, usageReques
 	existing, err := getHoldByUsage(ctx, tx, usageRequestID, true)
 	if err == nil {
 		if existing.WalletID != walletID || existing.MaxMicrocredits != maxAmount || !equalUUID(existing.PriceVersionID, priceVersionID) {
+			return Hold{}, ErrConflict
+		}
+		if same, err := sameHoldPricing(ctx, tx, existing.ID, pricing); err != nil {
+			return Hold{}, err
+		} else if !same {
 			return Hold{}, ErrConflict
 		}
 		var sameAuthority bool
@@ -96,7 +114,7 @@ FOR UPDATE OF quota,component`, organizationID, memberUserID, membershipVersion,
 	if remaining != 0 {
 		return Hold{}, ErrInsufficientComponentCapacity
 	}
-	command, err := tx.Exec(ctx, `UPDATE wallets SET reserved_microcredits=reserved_microcredits+$2,version=version+1,updated_at=$3 WHERE id=$1 AND status='ACTIVE' AND posted_microcredits-reserved_microcredits>=$2`, walletID, maxAmount, now)
+	command, err := tx.Exec(ctx, `UPDATE wallets SET reserved_microcredits=reserved_microcredits+$2,version=version+1,updated_at=$3 WHERE id=$1 AND status='ACTIVE' AND receivable_microcredits=0 AND posted_microcredits-reserved_microcredits>=$2`, walletID, maxAmount, now)
 	if err != nil || command.RowsAffected() != 1 {
 		if err == nil {
 			err = ErrInsufficientBalance
@@ -104,7 +122,17 @@ FOR UPDATE OF quota,component`, organizationID, memberUserID, membershipVersion,
 		return Hold{}, err
 	}
 	hold := Hold{ID: uuid.Must(uuid.NewV7()), UsageRequestID: usageRequestID, WalletID: walletID, PriceVersionID: priceVersionID, Status: "ACTIVE", MaxMicrocredits: maxAmount, ExpiresAt: expiresAt.UTC()}
-	if _, err := tx.Exec(ctx, `INSERT INTO usage_holds(id,usage_request_id,wallet_id,price_version_id,status,max_microcredits,expires_at,created_at,updated_at,quota_organization_id,quota_member_user_id,quota_membership_version) VALUES($1,$2,$3,$4,'ACTIVE',$5,$6,$7,$7,$8,$9,$10)`, hold.ID, usageRequestID, walletID, priceVersionID, maxAmount, hold.ExpiresAt, now, organizationID, memberUserID, membershipVersion); err != nil {
+	var modelID, protocolCode any
+	var formulaVersionID any
+	var pricingSnapshot, requestSnapshot any
+	if pricing != nil {
+		modelID, protocolCode, formulaVersionID = pricing.ModelID, pricing.ProtocolCode, pricing.FormulaVersionID
+		pricingSnapshot, requestSnapshot = []byte(pricing.PricingSnapshot), []byte(pricing.RequestSnapshot)
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO usage_holds(id,usage_request_id,wallet_id,price_version_id,status,max_microcredits,expires_at,model_id,protocol_code,formula_version_id,pricing_snapshot,request_snapshot,quota_organization_id,quota_member_user_id,quota_membership_version,created_at,updated_at) VALUES($1,$2,$3,$4,'ACTIVE',$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$15)`, hold.ID, usageRequestID, walletID, priceVersionID, maxAmount, hold.ExpiresAt, modelID, protocolCode, formulaVersionID, pricingSnapshot, requestSnapshot, organizationID, memberUserID, membershipVersion, now); err != nil {
+		return Hold{}, err
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO usage_hold_lease_events(id,hold_id,event_type,expires_at,previous_max_microcredits,max_microcredits,additional_microcredits,created_at) VALUES($1,$2,'CREATED',$3,0,$4,$4,$5)`, uuid.Must(uuid.NewV7()), hold.ID, hold.ExpiresAt, hold.MaxMicrocredits, now); err != nil {
 		return Hold{}, err
 	}
 	componentAmounts := make(map[uuid.UUID]int64)
@@ -148,6 +176,96 @@ func hasMemberQuotaAllocations(ctx context.Context, tx pgx.Tx, holdID, component
 	var exists bool
 	err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM member_quota_hold_allocations WHERE hold_id=$1 AND component_id=$2)`, holdID, componentID).Scan(&exists)
 	return exists, err
+}
+
+func (r *PostgresRepository) extendMemberQuotaHold(ctx context.Context, tx pgx.Tx, hold Hold, organizationID, memberUserID uuid.UUID, membershipVersion, additional int64, now time.Time) error {
+	var lifecycleStatus string
+	var lifecycleVersion int64
+	if err := tx.QueryRow(ctx, `SELECT status,membership_version FROM organization_member_lifecycle_states WHERE organization_id=$1 AND user_id=$2 FOR UPDATE`, organizationID, memberUserID).Scan(&lifecycleStatus, &lifecycleVersion); err != nil || lifecycleStatus != "ACTIVE" || lifecycleVersion != membershipVersion {
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return err
+		}
+		return ErrConflict
+	}
+	wallet, err := getWallet(ctx, tx, hold.WalletID, true)
+	if err != nil {
+		return err
+	}
+	if wallet.Status != "ACTIVE" || wallet.OwnerType != "ORGANIZATION" || wallet.OwnerID != organizationID {
+		return ErrWalletUnavailable
+	}
+	if wallet.AvailableMicrocredits < additional {
+		return ErrInsufficientBalance
+	}
+	rows, err := tx.Query(ctx, `SELECT member_grant.id,member_grant.organization_id,member_grant.member_user_id,member_grant.package_id,member_grant.component_id,member_grant.component_type,member_grant.original_microcredits,member_grant.available_microcredits,member_grant.reserved_microcredits,member_grant.used_microcredits,member_grant.expired_microcredits,member_grant.revoked_microcredits,member_grant.status,member_grant.suspension_reason,member_grant.membership_version,member_grant.allocation_version,member_grant.created_by,member_grant.expires_at,member_grant.created_at,member_grant.updated_at FROM member_quota_grants member_grant JOIN entitlement_components component ON component.id=member_grant.component_id JOIN entitlement_packages package ON package.id=member_grant.package_id WHERE member_grant.organization_id=$1 AND member_grant.member_user_id=$2 AND member_grant.status='ACTIVE' AND member_grant.membership_version=$3 AND (member_grant.expires_at IS NULL OR member_grant.expires_at>$4) AND member_grant.available_microcredits>0 AND component.status='ACTIVE' AND package.status='ACTIVE' ORDER BY member_grant.expires_at NULLS LAST,CASE member_grant.component_type WHEN 'BONUS' THEN 0 ELSE 1 END,member_grant.component_id,member_grant.id FOR UPDATE OF member_grant,component`, organizationID, memberUserID, membershipVersion, now)
+	if err != nil {
+		return err
+	}
+	remaining := additional
+	items := make([]memberHoldAllocation, 0)
+	for rows.Next() {
+		var grant MemberQuotaGrant
+		if err := scanMemberQuotaGrant(rows, &grant); err != nil {
+			rows.Close()
+			return err
+		}
+		amount := min(remaining, grant.AvailableMicrocredits)
+		if amount > 0 {
+			items = append(items, memberHoldAllocation{grant: grant, amount: amount})
+			remaining -= amount
+		}
+		if remaining == 0 {
+			break
+		}
+	}
+	rows.Close()
+	if remaining != 0 {
+		return ErrInsufficientComponentCapacity
+	}
+	command, err := tx.Exec(ctx, `UPDATE wallets SET reserved_microcredits=reserved_microcredits+$2,version=version+1,updated_at=$3 WHERE id=$1 AND status='ACTIVE' AND receivable_microcredits=0 AND posted_microcredits-reserved_microcredits>=$2`, hold.WalletID, additional, now)
+	if err != nil {
+		return err
+	}
+	if command.RowsAffected() != 1 {
+		return ErrInsufficientBalance
+	}
+	componentAmounts := map[uuid.UUID]int64{}
+	componentPackages := map[uuid.UUID]uuid.UUID{}
+	for _, item := range items {
+		command, err = tx.Exec(ctx, `UPDATE member_quota_grants SET available_microcredits=available_microcredits-$2,reserved_microcredits=reserved_microcredits+$2,allocation_version=allocation_version+1,updated_at=$3 WHERE id=$1 AND status='ACTIVE' AND available_microcredits>=$2`, item.grant.ID, item.amount, now)
+		if err != nil || command.RowsAffected() != 1 {
+			if err != nil {
+				return err
+			}
+			return ErrConflict
+		}
+		command, err = tx.Exec(ctx, `UPDATE entitlement_components SET active_grant_microcredits=active_grant_microcredits-$2,reserved_microcredits=reserved_microcredits+$2,updated_at=$3 WHERE id=$1 AND active_grant_microcredits>=$2`, item.grant.ComponentID, item.amount, now)
+		if err != nil || command.RowsAffected() != 1 {
+			if err != nil {
+				return err
+			}
+			return ErrConflict
+		}
+		_, err = tx.Exec(ctx, `INSERT INTO member_quota_hold_allocations(hold_id,grant_id,component_id,reserved_microcredits,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$5) ON CONFLICT(hold_id,grant_id) DO UPDATE SET reserved_microcredits=member_quota_hold_allocations.reserved_microcredits+EXCLUDED.reserved_microcredits,updated_at=EXCLUDED.updated_at`, hold.ID, item.grant.ID, item.grant.ComponentID, item.amount, now)
+		if err != nil {
+			return err
+		}
+		componentAmounts[item.grant.ComponentID] += item.amount
+		componentPackages[item.grant.ComponentID] = item.grant.PackageID
+		item.grant.AvailableMicrocredits -= item.amount
+		item.grant.ReservedMicrocredits += item.amount
+		item.grant.AllocationVersion++
+		if err := appendMemberQuotaAudit(ctx, tx, item.grant, "HOLD_RESERVED", nil, item.amount, now); err != nil {
+			return err
+		}
+	}
+	for componentID, amount := range componentAmounts {
+		_, err = tx.Exec(ctx, `INSERT INTO usage_hold_allocations(hold_id,package_id,component_id,reserved_microcredits,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$5) ON CONFLICT(hold_id,component_id) DO UPDATE SET reserved_microcredits=usage_hold_allocations.reserved_microcredits+EXCLUDED.reserved_microcredits,updated_at=EXCLUDED.updated_at`, hold.ID, componentPackages[componentID], componentID, amount, now)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func settleMemberQuotaComponent(ctx context.Context, tx pgx.Tx, holdID, componentID uuid.UUID, settledTotal int64, now time.Time) error {

@@ -47,9 +47,7 @@ func TestPostgresHTTPReconciliationPreservesFundsAndUsesHistoricalPrice(t *testi
 				t.Fatal(err)
 			}
 			price := PriceVersion{ID: uuid.New(), Model: usage.Model, InputPerMillion: 1_000_000}
-			if _, err := pool.Exec(ctx, `INSERT INTO pricing_versions(id,model,input_per_million,output_per_million,cached_input_per_million,effective_from,created_at) VALUES($1,$2,$3,0,0,now()-interval '1 hour',now())`, price.ID, price.Model, price.InputPerMillion); err != nil {
-				t.Fatal(err)
-			}
+			migratedLegacyBillingPriceFixture(t, pool, price)
 			hold, err := billingRepo.Reserve(ctx, usage.ID, wallet.ID, 100, &price.ID, time.Now().Add(time.Hour))
 			if err != nil {
 				t.Fatal(err)

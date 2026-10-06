@@ -439,6 +439,12 @@
         },
         "aliyunLoginTemplate": {
           "type": "string"
+        },
+        "aliyunProfileMobileTemplate": {
+          "type": "string"
+        },
+        "aliyunPasswordResetTemplate": {
+          "type": "string"
         }
       }
     },
@@ -680,6 +686,14 @@
             "properties": {
               "enabled": {
                 "const": true
+              }
+            }
+          },
+          "billing": {
+            "type": "object",
+            "properties": {
+              "allowTentativePrices": {
+                "const": false
               }
             }
           },

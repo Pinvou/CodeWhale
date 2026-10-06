@@ -11,7 +11,7 @@
     "build:ui": "vite build",
     "build:web": "vite build --mode web",
     "build:account-portal": "vite build --mode account-portal",
-    "test:account-platform-ui": "node tests/account_platform_ui_smoke.mjs && node tests/admin_platform_ui_smoke.mjs && node tests/settings_builtin_model_smoke.mjs",
+    "test:account-platform-ui": "node tests/account_platform_ui_smoke.mjs && node tests/account_platform_payment_retry_ui_smoke.mjs && node tests/admin_platform_ui_smoke.mjs && node tests/settings_builtin_model_smoke.mjs",
     "audit:compat": "node scripts/audit-compat.mjs",
     "audit:account-portal": "node scripts/audit-compat.mjs --account-portal",
     "prepare:codex-bridge": "node scripts/tauri/codex-bridge.js",

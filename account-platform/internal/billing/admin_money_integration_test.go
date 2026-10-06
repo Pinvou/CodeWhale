@@ -27,7 +27,7 @@ func TestPostgresAdminFinancialReadsKeepExactDecimalStringsAndOldBalanceNumbers(
 	if _, err := repo.RequestAdjustment(ctx, wallet.ID, -amount, "fixture", uuid.New()); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := repo.pool.Exec(ctx, `INSERT INTO payment_orders(id,merchant_order_no,requester_id,wallet_id,product_id,product_snapshot,channel,amount_fen,currency,credit_microcredits,status,fulfillment_status,expires_at,created_at,updated_at) VALUES($1,$2,$3,$4,'fixture','{}','ALIPAY',$5,'CNY',$5,'CREATED','PENDING',now()+interval '1 hour',now(),now())`, uuid.New(), uuid.NewString(), uuid.New(), wallet.ID, amount); err != nil {
+	if _, err := repo.pool.Exec(ctx, `INSERT INTO payment_orders(id,merchant_order_no,requester_id,payer_user_id,wallet_id,product_id,product_snapshot,channel,amount_fen,currency,credit_microcredits,status,fulfillment_status,expires_at,provider_payable_until,late_review_boundary_at,final_archive_eligible_at,created_at,updated_at) VALUES($1,$2,$3,$3,$4,'fixture','{}','ALIPAY',$5,'CNY',$5,'CREATED','PENDING',now()+interval '1 hour',now()+interval '1 hour',now()+interval '72 hours',now()+interval '7 days',now(),now())`, uuid.New(), uuid.NewString(), uuid.New(), wallet.ID, amount); err != nil {
 		t.Fatal(err)
 	}
 	serviceToken := strings.Repeat("f", 32)

@@ -1,9 +1,12 @@
 package billing
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/paymentsimulator"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -36,7 +39,7 @@ func TestPostgresAdminReconciliationSnapshotReadsPreserveExactFinancialStrings(t
 	ctx := context.Background()
 	p, wallet, user := paymentFixture(t)
 	order := creditedOrder(t, p, wallet, user, uuid.NewString())
-	p.provider = financialSnapshotProvider{recoverableProvider: &recoverableProvider{}, entries: []ProviderBillEntry{{MerchantOrderNo: order.MerchantOrderNo, ChannelTransactionID: *order.ChannelTransactionID, Channel: order.Channel, AmountFen: 9007199254740993, Currency: order.Currency, Status: "SUCCESS", PaidAt: *order.PaidAt}}}
+	p.provider = financialSnapshotProvider{recoverableProvider: &recoverableProvider{}, entries: []ProviderBillEntry{{MerchantOrderNo: order.MerchantOrderNo, ChannelTransactionID: *order.PrimaryProviderTransactionID, Channel: order.Channel, AmountFen: 9007199254740993, Currency: order.Currency, Status: "SUCCESS", PaidAt: *order.PaidAt}}}
 	date := time.Date(order.PaidAt.Year(), order.PaidAt.Month(), order.PaidAt.Day(), 0, 0, 0, 0, time.UTC)
 	run, err := p.RunReconciliation(ctx, order.Channel, date)
 	if err != nil {
@@ -59,13 +62,42 @@ func TestPostgresAdminReconciliationSnapshotReadsPreserveExactFinancialStrings(t
 		t.Fatal("snapshot fixture did not reach the admin handler")
 	}
 	item := body.Items[0]
-	if item.Provider["amount_fen"] != "9007199254740993" || item.Internal["amount_fen"] != strconv.FormatInt(order.AmountFen, 10) || item.Internal["credit_microcredits"] != strconv.FormatInt(order.CreditMicrocredits, 10) {
+	if item.Provider["amount_fen"] != "9007199254740993" || item.Internal["payment_order"].(map[string]any)["amount_fen"] != strconv.FormatInt(order.AmountFen, 10) || item.Internal["payment_order"].(map[string]any)["credit_microcredits"] != strconv.FormatInt(order.CreditMicrocredits, 10) || item.Internal["payment_transaction"].(map[string]any)["amount_fen"] != strconv.FormatInt(order.AmountFen, 10) {
 		t.Fatal("admin reconciliation evidence lost exact money")
 	}
 	var providerType, internalType string
-	if err := p.repository.pool.QueryRow(ctx, `SELECT jsonb_typeof(provider_snapshot->'amount_fen'),jsonb_typeof(internal_snapshot->'amount_fen') FROM reconciliation_cases WHERE reconciliation_run_id=$1`, run.ID).Scan(&providerType, &internalType); err != nil || providerType != "number" || internalType != "number" {
+	if err := p.repository.pool.QueryRow(ctx, `SELECT jsonb_typeof(provider_snapshot->'amount_fen'),jsonb_typeof(internal_snapshot->'payment_order'->'amount_fen') FROM reconciliation_cases WHERE reconciliation_run_id=$1`, run.ID).Scan(&providerType, &internalType); err != nil || providerType != "number" || internalType != "number" {
 		t.Fatal("new read DTO rewrote the existing financial snapshot storage")
 	}
+	var identity struct {
+		Items []struct {
+			ID uuid.UUID `json:"case_id"`
+		}
+	}
+	if json.Unmarshal(response.Body.Bytes(), &identity) != nil || len(identity.Items) != 1 {
+		t.Fatal("case identity absent")
+	}
+	key := uuid.NewString()
+	for _, stage := range []string{"first", "replay"} {
+		t.Run(stage, func(t *testing.T) {
+			request := httptest.NewRequest("POST", "/admin/v1/reconciliation-cases/"+identity.Items[0].ID.String()+"/commands", strings.NewReader(`{"action":"CLAIM","reason":"controlled exact financial review"}`))
+			request.Header.Set("Authorization", "Bearer fixture-admin")
+			request.Header.Set("Idempotency-Key", key)
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			var result struct {
+				Provider map[string]any `json:"provider_snapshot"`
+				Internal map[string]any `json:"internal_snapshot"`
+			}
+			if response.Code != 200 || json.Unmarshal(response.Body.Bytes(), &result) != nil {
+				t.Fatal("command receipt unavailable")
+			}
+			if result.Provider["amount_fen"] != "9007199254740993" || result.Internal["payment_order"].(map[string]any)["amount_fen"] != strconv.FormatInt(order.AmountFen, 10) {
+				t.Fatal("command receipt lost exact read money")
+			}
+		})
+	}
+
 }
 
 func TestPostgresAdminLedgerRetainsDistinctPostingsFromOneJournal(t *testing.T) {
@@ -147,7 +179,15 @@ func TestPostgresAdminRefundReusesLogicalKeyAfterProviderResponseLoss(t *testing
 	handler := NewService(p.repository).WithAuthorizer(billingTestAuthorizer(t)).WithPayments(p).Handler(strings.Repeat("f", 32), func(context.Context, string) (identity.Principal, error) {
 		return identity.Principal{Issuer: "https://fixture-authority.invalid", Subject: "fixture-platform-operator", RealmRoles: []string{"platform-admin"}}, nil
 	})
-	body := `{"amount_fen":1,"reason":"controlled refund"}`
+	source, packageID := refundTargetFixture(t, p, order.ID)
+	encodeBody := func(reason string) string {
+		b, err := json.Marshal(map[string]any{"payment_transaction_id": source, "entitlement_package_id": packageID, "reason": reason})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(b)
+	}
+	body := encodeBody("controlled refund")
 	invoke := func(key, body string) *httptest.ResponseRecorder {
 		t.Helper()
 		request := httptest.NewRequest("POST", "/admin/v1/payment-orders/"+order.ID.String()+"/refunds", strings.NewReader(body))
@@ -167,20 +207,30 @@ func TestPostgresAdminRefundReusesLogicalKeyAfterProviderResponseLoss(t *testing
 		t.Fatal("invalid keys created refunds")
 	}
 	key := uuid.NewString()
-	if response := invoke(key, body); response.Code < 400 {
-		t.Fatal("controlled lost provider response was falsely accepted")
-	}
 	response := invoke(key, body)
 	var first map[string]any
-	if response.Code != 201 || json.Unmarshal(response.Body.Bytes(), &first) != nil || first["amount_fen"] != "1" {
+	if response.Code != 201 || json.Unmarshal(response.Body.Bytes(), &first) != nil || first["amount_fen"] != strconv.FormatInt(order.AmountFen, 10) {
 		t.Fatal("same-key recovery lost exact admin refund facts")
+	}
+	refundID, err := uuid.Parse(first["refund_id"].(string))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := p.ProcessRefund(context.Background(), refundID); !errors.Is(err, ErrPaymentProvider) {
+		t.Fatal("controlled lost provider response was not retained", err)
+	}
+	if err := p.ProcessRefund(context.Background(), refundID); err != nil {
+		t.Fatal("same merchant refund retry failed", err)
+	}
+	if err := p.ProcessRefund(context.Background(), refundID); err != nil {
+		t.Fatal("confirmed refund replay failed", err)
 	}
 	response = invoke(key, body)
 	var repeated map[string]any
 	if response.Code != 201 || json.Unmarshal(response.Body.Bytes(), &repeated) != nil || repeated["refund_id"] != first["refund_id"] {
 		t.Fatal("same logical retry created a second refund")
 	}
-	if response := invoke(key, `{"amount_fen":1,"reason":"different refund facts"}`); response.Code != 409 {
+	if response := invoke(key, encodeBody("different refund facts")); response.Code != 409 {
 		t.Fatal("different refund facts reused the same operation identity")
 	}
 	if err := p.repository.pool.QueryRow(context.Background(), `SELECT count(*) FROM refunds`).Scan(&count); err != nil || count != 1 || len(provider.refunds) != 1 {
@@ -234,4 +284,46 @@ func TestPostgresBillingOperationsKeepExactMoneyAndRejectInvalidJSON(t *testing.
 		t.Fatal("invalid JSON changed price versions")
 	}
 	assertBalanced(t, repo)
+}
+
+func TestAdminFinancialSnapshotRetainsExactNestedMoney(t *testing.T) {
+	body, err := adminFinancialSnapshot(json.RawMessage(`{"payment_order":{"amount_fen":9007199254740993,"credit_microcredits":9007199254740993,"summary":{"paid_amount_fen":"18446744073709551614"}},"postings":[{"delta_microcredits":-9007199254740993,"version":2}],"count":3}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var actual map[string]any
+	if err := json.Unmarshal(body, &actual); err != nil {
+		t.Fatal(err)
+	}
+	order := actual["payment_order"].(map[string]any)
+	posting := actual["postings"].([]any)[0].(map[string]any)
+	if order["amount_fen"] != "9007199254740993" || order["credit_microcredits"] != "9007199254740993" || order["summary"].(map[string]any)["paid_amount_fen"] != "18446744073709551614" || posting["delta_microcredits"] != "-9007199254740993" || posting["version"] != float64(2) || actual["count"] != float64(3) {
+		t.Fatal("nested financial facts were rounded or nonmoney fields changed")
+	}
+	if _, err := adminFinancialSnapshot(json.RawMessage(`{"nested":{"amount_fen":1.5}}`)); err == nil {
+		t.Fatal("invalid stored monetary integer was accepted")
+	}
+}
+
+func TestDailyPaymentWorkerDoesNotLogSupplierTransportAddress(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	address := server.URL
+	server.Close()
+	provider, err := paymentsimulator.New(address, "controlled-private-internal-test-token")
+	if err != nil {
+		t.Fatal("controlled constructor failed")
+	}
+	worker := NewDailyPaymentReconciliationWorker(&PaymentCoordinator{provider: provider})
+	var captured bytes.Buffer
+	worker.logger = slog.New(slog.NewTextHandler(&captured, nil))
+	worker.runOnce(context.Background())
+	if captured.Len() == 0 {
+		t.Fatal("real failed supplier Bill did not reach worker logging")
+	}
+	if strings.Contains(captured.String(), address) || strings.Contains(captured.String(), "controlled-private-internal-test-token") {
+		t.Fatal("worker exposed supplier transport details")
+	}
+	if !strings.Contains(captured.String(), "business_date") || !strings.Contains(captured.String(), "channel") {
+		t.Fatal("safe scheduling facts disappeared")
+	}
 }

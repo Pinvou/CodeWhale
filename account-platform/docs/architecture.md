@@ -4,7 +4,7 @@
 >
 > 校准日期：2026-10-06
 >
-> 继承实现基线：已审 A08 `e913579755912bbfc7656b32bbaef0c2e3a710c0`；本波原始历史终点为 `936418ad01645078c8ef1fa76df021356f5ccf44`。本文件描述二者合并后的实现边界，验证结论以本波最终固定提交的审核记录为准。
+> 继承实现基线：已审 A09 `0f296df2d4844959a413db793dd2a93454b4cbd4`；本波原始 A10 历史终点为 `36ce0a72e28887cb96c1c984c6374386d9acb112`。本文件描述本波待审实现边界，验证结论以最终固定提交的审核记录为准；代码存在不等于本地审核或生产验收通过。
 >
 > 文档版本：以本文件所在 Git 提交为准
 >
@@ -17,13 +17,13 @@
 - Keycloak 是登录身份、密码和 OIDC 会话的事实源；OIDC Claim 只证明主体，不决定业务权限。迁移期保留的 `platform-admin` Realm Role 不再参与业务授权。
 - Identity Adapter 是注册密码预检、策略版本、短期密码材料和 Keycloak 管理协议的唯一边界；Account 只接收不透明密码引用。
 - Account Service 是永久内部用户 ID、独立用户编码、平台/组织角色、权限码、组织树、成员、管理命令审批策略/请求和用户级全局活动上下文的事实源；OIDC Session 只证明当前登录，不拥有独立计费上下文。
-- Billing Service 是钱包、平衡账本、充值订单、BASE/BONUS 组成级权益、固定三元组定价、Hold 和已批准财务命令领域执行结果的事实源。
-- Token Gateway 是 Token Account、加密凭据、共享/路由策略和模型用量请求的事实源；当前模型推理协议仅支持 `/v1/chat/completions`。
+- Billing Service 是钱包、平衡账本、充值订单、BASE/BONUS 组成级权益、版本化计量单位、确定性价格生命周期、Hold 和已批准财务命令领域执行结果的事实源。
+- Token Gateway 是 Token Account、加密凭据、共享/路由策略、版本化协议/安全公式和模型用量请求的事实源；当前已接入的数据面协议仍仅支持 `/v1/chat/completions`。
 - New API 是模型数据面和上游用量证据源，不承载品悟用户、组织或钱包真相。
 - Token Portal 是个人中心和运营后台的 Web BFF，采用 OIDC Authorization Code + PKCE、Redis 服务端会话和 CSRF 防护。
 - 桌面端账户 Gateway 路径使用与登录相同的 OIDC Access Token。A07 已完成旧内置模型入口迁移、孤立引用转换、凭据清理和失败恢复的本地审核；本波必须保全这些行为。生产安装与发布验收仍须另行执行。
 
-当前代码尚未实现的关键目标包括：托管路由 Provisioning 状态机、模型目录/协议/公式版本、模型结果重放、目标退款模型、应收/拒付/强制退款状态机和账号注销 Saga。用户级全局上下文与组成级组织授予已在仓库闭环；超级管理员安全恢复已有仓库实现但仍待生产等价演练。
+当前代码尚未实现的关键目标包括：托管路由 Provisioning 状态机、独立模型目录、模型结果重放、账单逐行支付证据归并、完整关单中间态和账号注销 Saga。用户级全局上下文与组成级组织授予继承已审 A09；本波包含计量/公式/价格快照、目标普通退款、支付异常统一结案、独立应收/拒付会计链路、每日四方对账和晚到支付人工复核的待审实现。用户已确认未发布的 LEGACY 普通退款采用定向整笔契约，移除旧的部分金额输入，PLAN 不可退款；超级管理员安全恢复已有仓库实现但仍待生产等价演练。
 
 ## 2. 逻辑拓扑
 
@@ -96,8 +96,8 @@ flowchart LR
 | Keycloak | 用户认证、密码、OIDC Token/Session；迁移期 Realm Role 不参与业务授权 | Keycloak 数据库 | 生产部署和后续密码重置/资料同步/会话撤销端口仍待环境及任务验证 |
 | Identity Adapter | 密码原始字符校验、策略版本、短期引用/HMAC、注册操作关联查询、Keycloak 用户创建/资料更新/密码重置/会话撤销及受控停用协议 | 进程内 15 分钟短期密码记录；Keycloak 持久身份与操作关联 | MFA 和账号申诉仍不在当前闭环 |
 | Account Service | 永久用户 ID/编码、用户/身份映射、平台/组织 RBAC、绑定有效期/撤销/自动回收、权限解析、持久注册 Saga、短信挑战、异步钱包初始化、商城账号同步、组织/节点、成员/角色、用户级全局上下文、Session 登录观察、安全管理员生命周期、邀请、审计 | Account 数据库 | 注销 Saga；安全恢复仍需生产等价演练 |
-| Billing Service | 钱包、账本、BASE/BONUS 组成级权益、充值、组织购买与成员授予、固定定价、Hold、人工调整、到期/损失复核、支付修复和对账 | Billing 数据库 | 版本化单位/公式、目标支付退款状态机、应收及完整付款证据 |
-| Token Gateway | Token Account、加密凭据、共享策略、路由、聊天代理、用量和 New API 核对 | Token 数据库 | 模型目录、协议能力、托管 Provisioning、请求重放、持久派发和取消 |
+| Billing Service | 钱包、账本、BASE/BONUS 组成级权益、组织购买与成员授予、版本化计量单位、全局/模型价格解析、价格生命周期、Hold/组成分配/租约及异常处理证据、独立应收与清偿分配、单流水拒付冲销、供应商中立支付能力/商品映射、目标退款、晚到支付复核、人工调整、到期/损失复核、支付修复和对账 | Billing 数据库 | 统一拒付/强制退款结案实现待本波固定审核；正式商品业务冻结与生产验收、账单证据归并仍待完成 |
+| Token Gateway | Token Account、加密凭据、共享策略、路由、协议/公式版本、安全参数映射、动态预占、聊天代理、用量和 New API 核对 | Token 数据库 | 独立模型目录、更多数据面协议 Adapter、托管 Provisioning、请求重放、持久派发和取消 |
 | Token Portal | OIDC PKCE、Redis Session、CSRF、个人中心、运营后台和路径白名单代理 | Redis Session | 目标后台权限模型、缺失业务页面和发布级三语门禁 |
 | Event Relay ×3 | 事务 Outbox 投递、重试和死信 | 各服务 Outbox/Inbox | 现有事件有限，不能替代缺失的跨域 Saga |
 | New API | OpenAI 兼容代理、供应商调用日志和用量证据 | 独立数据库 | 仍需通过 Adapter 契约补齐协议、取消和证据能力 |
@@ -108,7 +108,7 @@ flowchart LR
 - `mock-newapi` 和 `payment-simulator` 是 Compose 中的非生产测试支撑组件，不属于产品服务边界或生产逻辑拓扑；其隔离和替换决策见 `adr/ADR-007-payment-simulator.md`。
 - Compose 包含上述测试支撑组件和可选真实 New API profile，供本地开发、合同测试、端到端验证和故障注入；生产 Helm 不部署这些工作负载。
 - 当前真实支付 Adapter 是新华三商城；其代码能力只有下单、查询/同步和人工修复。非生产测试 Provider 提供的退款、回调和账单能力不得归入新华三或生产能力。
-- 远程 Compose 已把 `payment-simulator` 主进程放入 `development-simulator` profile，但基础数据库初始化和 `payment-simulator-migrate` 尚未一并隔离；Billing 启动和 Helm 模板也仍保留 `PAYMENT_SIMULATOR_URL`、`PAYMENT_SIM_HMAC_*` 等模拟器命名的配置耦合。这些是待迁移为供应商中立 Payment Provider 配置并从生产清单彻底排除的实现债务，不代表模拟器属于生产架构。
+- 远程 Compose 将模拟器进程、迁移和数据库初始化统一置于显式开发配置后。开发 Provider 使用一组明确配置；正式环境的测试能力和资金门禁按实际生产接线验证，不把渲染成功当作启动或收款验收。
 - 生产部署状态仍未验证；A06 隔离 Compose 执行已有固定输入与环境证据，边界见 `implementation-status.md` 第 0 节。不能把历史矩阵中的 `NOT_DEPLOYED` 当作这些本地执行从未发生，也不能把本地执行升级为生产部署证明。
 
 ## 4. 当前数据所有权
@@ -159,16 +159,27 @@ Commerce Customer worker 只依赖 `CustomerAdapter` 端口，当前 H3C 实现�
 
 - `wallets`、`ledger_accounts`、`journal_entries`、`ledger_postings`：钱包缓存余额和平衡账本；数据库触发器保护分录平衡和已入账记录不可变。
 - `credit_lots`、`entitlement_packages`、`entitlement_components`、`usage_hold_allocations`：批次、兼容聚合投影、BASE/BONUS 组成事实和组成级 Hold 分配。
-- `usage_loss_reviews`：已经显式释放的到期 Hold 收到迟到真实用量时，保存平台损失复核证据；到期本身不自动释放消费不确定的 Hold。
-- `recharge_products`、`pricing_versions`：商品以及固定 `input/output/cached_input` 三元组价格。
-- `usage_holds`、`idempotency_records`：预占/结算和通用幂等记录。
-- `payment_orders`、`payment_transactions`、`refunds`、`payment_notifications`：当前支付和退款模型。
-- `manual_adjustments`、`payment_order_repairs`、`reconciliation_runs`、`reconciliation_cases`：运营调整、修复和对账。
+- `usage_hold_lease_events`、`usage_hold_admin_actions`：Hold 创建/续租的不可变有效值历史，以及只在 Token 权威终态免单、无活动上游及唯一财务胜者确认后的幂等安全释放证据；释放同时快照组成和成员分配结果。
+- `usage_loss_reviews`：已显式终态免单的到期 Hold 收到迟到真实用量时的平台损失复核证据；到期本身不自动释放不确定预占。
+- `recharge_products`：可售商品及冻结的权益组成快照。
+- `payment_product_mappings`：通用商品到 Provider/版本/外部 SKU 的不可变版本映射，保存金额、币种、渠道、状态和有效期；`TEST_ONLY` 映射在正式环境不可用。
+- `metering_unit_definitions`、`pricing_versions`、`pricing_version_unit_configs`、`pricing_space_versions`：版本化计量单位、全局/模型定价空间、逐单位固定价或显式继承，以及共享价格空间 ETag 的发布/编辑冲突控制。
+- `billing_protocol_formula_bindings`：Billing 保存 Token 已发布协议公式与所引用计量单位的不可变绑定；单位代码、版本 UUID 和表达式须精确对应，不能仅比较排序后的 UUID 集合。
+- `pricing_operation_commands`、`pricing_publish_commands`、`pricing_lifecycle_commands`、`pricing_audits`、`pricing_blocks`：创建/编辑、发布与撤销/结束的幂等命令、不可变原结果、审计和显式阻断窗口；丢失响应后的同请求重放先读取原回执，不因空间 ETag 后续变化重复执行。
+- `usage_holds`、`idempotency_records`：预占/结算和通用幂等记录；Hold 冻结请求上下文、协议/公式、估算器、逐单位价格及来源，后续续租、追加预占和结算不重新定价。
+- `payment_orders`、`payment_transactions`、`payment_evidence`、`refunds`、`refund_component_reservations`、`refund_grant_reservations`、`forced_refund_cases`、`payment_notifications`：当前支付和退款模型；订单冻结 Provider ID/版本、商品映射 ID、完整映射、能力声明、实际付款人及受益主体，后续不以新版本重新解释历史订单。一个订单可关联多笔不可变 Provider 支付流水；回调、查询、关单观察和人工修复先保存原始载荷摘要与快照，再归并流水状态。普通退款以支付流水和权益包为唯一目标，退款预约保存 BASE/BONUS 组成及授予快照；渠道强制退款保存独立外部资金事实并冻结目标权益包，不能覆盖支付成功事实。订单还冻结支付期限、晚到复核边界和最终归档期限。
+- `manual_review_cases`、`manual_review_case_events`、`late_payment_review_cases`、`late_payment_review_evidence`：Billing 人工案件基础、不可变时间线和晚到支付复核事实；本波接入晚到支付和支付异常队列，其他领域队列仍以各自实际实现为准。
+- `provider_bill_imports`、`provider_bill_import_rows`、`payment_provider_controls`：不可变账单文件批次/逐行记录以及 Provider 版本新单开关；事实盲区可原子停用新单，修复后通过新 Provider/Adapter 版本重新准入，不能直接改写历史能力快照。
+- `manual_adjustments`、`payment_order_repairs`：运营调整和支付修复。
+- `manual_review_cases`、`manual_review_case_events`、`payment_anomaly_cases`、`payment_anomaly_commands`、`payment_anomaly_resolution_intents`：跨拒付、强制退款、重复/晚到冲突、退款失败和非法迁移的统一责任人/SLA 投影、不可变证据时间线与幂等结论命令。结案先持久绑定操作者、逻辑键、结论、理由及目标快照，再执行独立资金事务；同键异事实或已结案的竞争请求在资金动作前拒绝。同事实重试使用原意图恢复并返回固定成功回执。支付、退款、拒付等原领域状态仍是各自事实源。
+- `reconciliation_runs`、`provider_bill_imports`、`reconciliation_cases`、`reconciliation_case_commands`：按 Provider/Adapter 版本和上海业务日保存的独立四方对账运行、文件证据、不可变差异快照及受审计处理命令；手工重跑不覆盖历史，定时任务仅对同 Provider 版本、渠道和日期幂等一次。
 - Billing 自有 Outbox/Inbox 表。
 
-权益入账按冻结商品快照把总 `microcredit` 拆为且仅拆为 BASE/BONUS 组成，舍入余数归 BONUS。组织购买订单另外冻结付款申请人和受益组织，履约再次校验组织钱包归属并只向该钱包创建组织权益包。`entitlement_components` 保存可用、Hold、已用、有效/暂停授予、过期与撤销互斥桶并由数据库强制守恒；成员授予从同包同组成可用桶转入活动/暂停授予桶，成员调用再同时占用授予和组织组成。分配、撤回、成员 Hold、结算、释放和到期均锁定精确组成/授予行，不允许跨钱包、跨包或跨组成补足。`entitlement_packages` 的合计字段只是触发器维护的兼容投影。当前包仍以 `payment_order_id` 关联订单，且 `payment_transactions` 对 `payment_order_id` 有唯一约束，实际是订单一对一支付流水；这与目标的一对多流水及“每个成功流水独立权益包”仍不同。
+权益入账按冻结商品快照把总 `microcredit` 拆为且仅拆为 BASE/BONUS 组成，舍入余数归 BONUS。组织购买订单另外冻结实际付款用户及其 Commerce Mapping 快照和受益组织，履约再次校验组织钱包归属并只向该钱包创建组织权益包。每个支付来源权益包同时保存 `payment_order_id` 和唯一 `source_payment_transaction_id`；同一流水重复证据只归并一次，不同成功流水分别进入独立履约或复核，不能追加到既有权益包。`entitlement_components` 保存可用、Hold、已用、有效/暂停授予、过期与撤销互斥桶并由数据库强制守恒；成员授予从同包同组成可用桶转入活动/暂停授予桶，成员调用再同时占用授予和组织组成。分配、撤回、成员 Hold、结算、释放和到期均锁定精确组成/授予行，不允许跨钱包、跨包或跨组成补足。`entitlement_packages` 的合计字段只是触发器维护的兼容投影。
 
-当前没有 `metering_unit_definitions`、`protocol_reservation_formula_versions`、`pricing_version_unit_rates`、`model_usage_requests`、`stream_response_events`、`upstream_dispatch_attempts`、`refund_requests`、`refund_amount_reservations`、`chargeback_cases`、`forced_refund_cases`、`payment_evidence` 或独立应收表。这些名称属于目标模型，不是现有数据结构。
+当前仍没有 `model_usage_requests`、`stream_response_events` 或 `upstream_dispatch_attempts`。Billing 已有目标化 `refunds`、组成/授予预约、独立 `forced_refund_cases`、`receivables`、不可变 `receivable_allocations` 和绑定证据/支付流水/订单/权益包的 `chargeback_cases`；用量超额与拒付缺口都通过账本和应收原子双记。Provider 账单可通过 API 或受控文件导入形成独立运行，并与订单/支付流水、退款/拒付和账本分录执行四方核对；账单行尚未逐条进入支付事实的统一证据归并器。强制退款与拒付先冻结确定权益包并进入 `payment_anomaly_cases`，只有匹配异常类型的受控结论才能幂等执行冲销或转入财务修复计划。本波包含 PAY-33/PAY-34/PAY-36 的统一异常结案和四方对账实现，完整闭环以固定输入的独立审核与实际验证为准；PAY-12～PAY-14 仍因账单证据归并和完整关单状态而部分实现。
+
+价格解析先在请求时间选择唯一模型覆盖版本；没有模型覆盖时才选择唯一全局版本。同一作用域缺失或歧义分别稳定返回 `PRICE_MISSING`、`PRICE_AMBIGUOUS`，不可用版本返回 `PRICE_UNAVAILABLE`。模型单位必须是 `FIXED_PRICE` 或 `INHERIT_GLOBAL`；固定零价是有效价格并阻止回退，缺少配置不能表达继承。发布在定价空间串行锁内校验 ETag、幂等指纹和未来时间区间，ACTIVE 版本只能通过显式阻断、全局继承接续或替代版本提前结束。既有 Hold 始终使用创建时冻结的价格事实。
 
 账本和额度使用整数 `microcredit`，当前换算为 `10,000 microcredits = 1 展示积分`；支付金额使用人民币分。
 
@@ -181,6 +192,7 @@ Commerce Customer worker 只依赖 `CustomerAdapter` 端口，当前 H3C 实现�
 - `token_accounts`、`provider_credentials`：模型访问账号和加密凭据；管理模式为 `USER` 或 `PLATFORM`。
 - `token_share_policies`、`token_explicit_members`、`routing_policies`：共享和路由策略。
 - `usage_requests`、`usage_attempts`：模型请求、上游关联、Hold 和结算状态。
+- `protocol_definitions`、`protocol_formula_versions`：版本化协议定义和已发布后不可变的安全预占公式；当前 CHAT v1 公式绑定版本化计量单位和确定性 UTF-8 估算器。
 - `authorization_cache_versions`、`token_audit_logs` 以及 Token 自有 Outbox/Inbox 表。
 
 当前没有 `managed_route_provisionings`。首次请求缺省路由时，Gateway 在请求内通过数据库 advisory lock 同步创建平台 Token Account 和默认路由；没有 `PENDING/READY/FAILED/REPAIR_REQUIRED` 代次、退避或人工修复状态机。
@@ -224,23 +236,23 @@ Commerce Customer worker 只依赖 `CustomerAdapter` 端口，当前 H3C 实现�
 
 1. 解析 OIDC 主体和 Account 用户级全局上下文，并冻结请求开始时的版本与钱包事实。
 2. 解析模型和最大输出 Token，列出并确定性选择可用路由；无缺省路由时同步确保平台路由。
-3. 从 Billing 读取固定三元组价格，以平台最大输入 Token 和请求最大输出 Token 计算最大费用。
-4. 创建 `usage_request`，向 Billing 创建 Hold。
+3. 按 CHAT 协议公式使用版本化 UTF-8 估算器计算请求输入和输出边界，从 Billing 解析唯一模型覆盖或全局价格，并冻结逐单位最终价格与来源。
+4. 创建 `usage_request`，向 Billing 创建 Hold；长调用定时续租，预计成本超过已授权最大值前按原快照追加预占。
 5. 解密所选凭据，记录上游尝试，调用 New API。
 6. 根据返回 usage 结算；证据不确定时进入 `REVIEW`，后台按 New API 请求日志核对，不自动重发模型请求。
 
 当前边界和目标差距：
 
 - 路由已有确定性优先级、显式账号失败不回退、上下文/共享策略检查，但没有独立模型目录和 `CATALOG_VISIBLE → Provisioning READY → CONTEXT_ELIGIBLE → RESERVABLE` 状态管线。
-- Hold 在上游调用前创建，并按组成到期时间（无期限组成最后）、同一到期时间 BONUS→BASE、入账时间和稳定组件 ID 分配及结算。未知消费或到期进入 `REVIEW` 并保留预占，不能自动免单；组成到期任务跳过预占部分。显式最终免单须核实终态和没有活动上游，并保留真实 usage/成本证据及唯一财务结果。仍没有追加预占、长调用续租和完整派发不确定状态机。
-- 定价只支持输入、输出、缓存输入三元组；没有协议公式、版本化计量单位、显式零价/配置缺失区分和逐单位来源快照。
-- 幂等键必须由客户端按每次逻辑调用提供，缺键拒绝；同调用重试复用键，新调用使用新键，不按用户/Session/body 派生永久键。重复请求返回 `USAGE_REPLAY_BLOCKED`/409，不回放结果；版本化规范指纹、流事件存储、结果/墓碑分层保留及 `410` 属后续目标。
+- Hold 在上游调用前创建，按组成到期时间（无期限最后）、同期限 BONUS→BASE、入账时间和稳定组件 ID 分配及结算。续租和追加预占复用冻结价格快照；失败时停止仍可控制的上游输出并进入复核。未知消费和到期仍保留预占，不自动免单；组成到期任务跳过预占部分。显式免单须由 Token 确认终态、无活动上游及唯一财务结果，并保留真实 usage/成本证据。完整派发不确定状态机仍属后续目标。
+- 当前协议/公式框架已覆盖 CHAT 及输入、缓存输入、输出单位；图片、请求和文档单位已有定义但尚无对应 Provider Adapter。跨 Provider 协议规范化由 APT-026 继续扩展。
+- 每次逻辑调用必须提供独立幂等键，同调用重试复用，新调用使用新键；不从用户、Session 或 body 派生永久键。重复请求仍返回 `USAGE_REPLAY_BLOCKED`/409，不回放结果；完整重放、墓碑和版本化规范指纹属于后续目标。
 - 流式响应直接转发给客户端，未先持久化；请求上下文取消可能中止上游，不具备断线继续执行和按序重放。
 - 没有持久派发租约/意图状态机，也没有模型请求取消命令及 Provider 取消能力契约。
 
 ## 7. 当前支付、权益与退款
 
-充值以 Billing `product_id` 为可信输入，金额、外部 SKU、BASE/BONUS 商品字段、展示积分和有效期由服务端目录派生。当前 UAT 目录为：
+充值以 Billing `product_id` 为可信输入。金额与 BASE/BONUS、展示积分、有效期来自通用商品目录；外部 SKU、Provider 金额/币种/渠道来自独立版本映射，两者与当前 Provider 能力取交集后才可售。当前 UAT 目录为：
 
 | 商品 | 商城 SKU | 金额 | 总展示积分 | 有效期 | 状态 |
 |---|---|---:|---:|---:|---|
@@ -249,18 +261,21 @@ Commerce Customer worker 只依赖 `CustomerAdapter` 端口，当前 H3C 实现�
 | 高级版 | `0502AJOR` | ¥30.00 | 9,000 | 30 天 | UAT 暂定 |
 | 旗舰版 | `0502AJOP` | ¥200.00 | 50,000 | 30 天 | UAT 暂定 |
 
-新华三 Adapter 当前只支持支付宝下单、订单查询/同步和人工修复，不支持主动退款、关单、回调或账单。客户端关闭二维码页后，Billing 后台仍可继续查询。仓库中的非生产测试 Provider 支持更多动作，但只用于开发/测试，不能扩张生产能力声明。
+`internal/platform/payment` 定义供应商中立端口和版本化能力；H3C 与开发 Simulator 分别位于 `internal/platform/h3cpayment`、`internal/platform/paymentsimulator`，Billing 不识别厂商状态或客户端。`/v1/payment-capabilities` 公开渠道、查询/保留/最小间隔、支付与晚到窗口、权威终态、关单、退款、通知、账单、对账模式和人工修复能力；用户/组织 UI、后台轮询及领域动作统一据此门禁，订单同时冻结能力快照。正式 `FROZEN` 映射若没有回调和账单，必须同时具备长期历史查询、有限支付/晚到窗口、权威未支付终态和覆盖归档期的证据保留，否则创建订单失败关闭。
 
-商城确认支付成功后，Billing 幂等创建一个权益包、BASE/BONUS 组成及逐组成账本分录；Hold 与人工扣减使用确定的组成级消费顺序。新个人 PLAN 保持 30 天有效期及不可退款；已有 LEGACY 额度迁移保留原可用、预占、已用和撤销事实，没有原期限的额度不新增期限。现有退款同步更新组成与聚合余额；目标全 BASE 退款规则仍未实现。
-组织购买在订单上明确受益组织并直接履约到组织钱包。具有原子权限的管理员可把组织权益的精确包/组成授予有效成员，批量逐项提交；成员移除时授予暂停且不回池，更高成员版本重新加入时才可在到期前恢复。组织用量 Hold、释放和结算同时维护成员授予与组织组成。目标退款尚未迁移到该组成模型。
+新华三 Adapter 当前只声明支付宝下单、订单查询/同步和人工修复，不声明主动退款、关单、回调或账单，对账模式为 `QUERY_DEGRADED`。客户端关闭二维码页后，Billing 后台按 Adapter 最小查询间隔继续查询；订单在72小时边界执行最后查询并转入唯一 P2 案件，前7天每日、此后每周复核。仓库中的非生产测试 Provider 可声明更多动作，但带 `test_only` 标记且只允许开发/测试环境，不能扩张生产能力。所有当前 H3C 和 Simulator 映射均为 `TEST_ONLY`；正式收款前必须由 APT-048 对 SKU、金额、权益和 Provider 映射取得业务确认并发布满足正式准入条件的 `FROZEN` 新版本，不能直接修改已有映射。
+新个人及显式组织 PLAN 保持 30 天期限和不可普通退款；原 LEGACY 额度保留原期限、可用、预占、已用及撤销事实。组织成员授予、移除暂停、更高局部版本恢复及组织钱包守恒继续沿用已审规则。
 
-现有普通退款是兼容旧模型的订单级、可输入金额的部分退款：
+Provider 确认支付成功后，Billing 以 Provider 流水为幂等边界创建独立权益包、BASE/BONUS 组成及逐组成账本分录；回调、主动查询和受审计修复复用同一归并器，金额、币种、归属或多次成功冲突保留证据并转人工复核。订单只保存可重建的支付、退款、拒付和关注摘要兼容投影，不以摘要覆盖支付流水的历史成功事实。72小时仍未收敛的订单进入带责任人和 SLA 的晚到复核；用户申诉只追加不可变证据，运营查询发现成功后仍经同一归并器履约。最终归档要求越过支付窗口、晚到窗口和七日宽限期，且期限后存在成功的权威未支付查询、没有流水/冲突/未复核申诉；否则案件升级 `PROVIDER_BLIND`，停用该 Provider 版本新订单，并继续保留处置队列。组织购买在订单上明确实际付款用户和受益组织并直接履约到组织钱包。具有原子权限的管理员可把组织权益的精确包/组成授予有效成员，批量逐项提交；成员移除时授予暂停且不回池，更高成员版本重新加入时才可在到期前恢复。组织用量 Hold、释放和结算同时维护成员授予与组织组成。实际费用超出原 Hold 时，受 Hold 支撑部分正常消费，超额以应收资产和独立应收同事务记录；未清应收只冻结对应钱包上下文。后续现金充值 BASE 先按最老应收分配，BONUS 不抵债。拒付和 Provider 强制退款先保留原支付成功事实并冻结目标权益包，再进入统一异常案件；确认结论仅撤销原流水唯一权益包的可撤销 BASE/关联 BONUS，现金 BASE 缺口转订单应收，驳回则恢复冻结前可恢复权益。Provider 账单每日按上海自然日与支付、退款/拒付及账本四方核对并保存独立差异证据；账单逐行支付证据归并仍待 PAY-12～PAY-14。
 
-- 请求绑定 `payment_order_id`，接受 `amount_fen`，按订单聚合积分比例计算撤销量，并包含 `PARTIALLY_REFUNDED`。
-- 本地事务会先预约退款/额度，再调用 Provider；但没有退款 Outbox 恢复，也没有支付流水 + 权益包目标锁定。
-- 组成表已保存 BASE/BONUS 各自累计已用与剩余证据，但现有退款流程尚未用该证据执行“任一组成已消费即拒绝”，也尚未在成功后原子撤销全部未消费 BASE 和关联 BONUS。
+普通退款已移除旧订单级按金额部分退款语义，并按以下边界执行：
 
-上述全 BASE 退款与 BONUS 撤销是后续目标，不改变当前已审行为：新个人 PLAN 不可退款，原 LEGACY/普通余额继续走既有退款流程。首次观察到 Provider 部分或全额退款而本地尚未入账时，同事务进入 `MANUAL_REVIEW`，创建、查询、关闭和迟到成功回调均不能再自动入账；不据此猜测原额/净额积分。退款模型变更须另行确认与迁移，不在本波实现。
+- 普通定向退款仅适用既有可退款 LEGACY 权益；新个人和显式组织 PLAN 不开放普通退款。首次观察到部分或全额外部退款、而本地尚未入账时，仍进入 `MANUAL_REVIEW`，不得猜测原额或净额自动履约。
+- 请求必须同时绑定 `payment_order_id`、`payment_transaction_id` 与 `entitlement_package_id`；金额由目标支付流水派生，调用方不能输入。
+- 创建意图在串行事务中锁定目标流水、权益包、组成和授予，拒绝任何已消费/预占/到期/撤销组成或未收敛资金异常，保存组成与授予预约、冻结权益并原子写 Outbox。
+- Provider 明确失败时按预约恢复权益；结果不确定时保持请求和冻结，不自动制造成功。确认成功后在一个 Billing 事务中撤销目标全部 BASE 与关联 BONUS、冲销对应 Credit Lot 和钱包负债、写平衡退款分录并把权益包置为 `REVOKED`。
+- 支付流水的 `PAID/LATE_PAID` 是不可变历史事实；历史 `PARTIALLY_REFUNDED/REFUNDED` 订单摘要在迁移时归一为支付成功摘要，退款终态只存在退款记录中。
+- Provider 主动产生的强制退款以独立证据和 `forced_refund_cases` 保存，不经过普通退款资格拒绝；目标权益包在复核前冻结，并由统一案件认领。`CONFIRM_FORCED_REFUND` 按退款现金占原流水现金的比例向上取整计算各 BASE/BONUS 组成的目标撤销量，只撤销原权益包可撤销余额，无法撤销的现金 BASE 形成应收；结论与会计动作均幂等留痕。
 
 ## 8. 一致性与事件
 
@@ -270,7 +285,7 @@ Commerce Customer worker 只依赖 `CustomerAdapter` 端口，当前 H3C 实现�
 - `billing.recharge.succeeded.v1`
 - `token.usage.settled.v1`
 
-本地业务状态与对应 Outbox 写入具备事务原子性；Relay 以至少一次语义重试投递，默认达到 12 次失败后进入死信，需审计后人工重新入队。因此该机制保留并重试事件，但业务最终收敛仍依赖死信处置，不能无条件宣称最终投递。注册 Account 提交会原子写入 `account.wallet.provisioning.requested.v1`，钱包成功写入 `account.wallet.provisioning.completed.v1`；财务审批成功写入绑定命令指纹、策略、目标和关键版本的 `account.approval-command.authorized.v1`，Billing 重复消费使用同一领域执行键。账号注销、目标退款和托管路由 Provisioning 等 Saga 仍未实现。
+本地业务状态与对应 Outbox 写入具备事务原子性；Relay 以至少一次语义重试投递，默认达到 12 次失败后进入死信，需审计后人工重新入队。因此该机制保留并重试事件，但业务最终收敛仍依赖死信处置，不能无条件宣称最终投递。注册 Account 提交会原子写入 `account.wallet.provisioning.requested.v1`，钱包成功写入 `account.wallet.provisioning.completed.v1`；财务审批成功写入绑定命令指纹、策略、目标和关键版本的 `account.approval-command.authorized.v1`，Billing 重复消费使用同一领域执行键。目标退款意图原子写入 `billing.refund.requested.v1`，明确成功或失败再写对应终态事件；Provider 不确定结果保持冻结并等待证据收敛。账号注销和托管路由 Provisioning 等 Saga 仍未实现。
 
 ## 9. 客户端与 Portal
 
@@ -295,8 +310,8 @@ Commerce Customer worker 只依赖 `CustomerAdapter` 端口，当前 H3C 实现�
 以下是原 `75a29f8` 文档审计列出的历史验证，不表示本波重跑；当前固定提交、执行日志和限制另由本地分波审核记录给出：
 
 - `node scripts/account-platform.mjs test unit`：所有 Go 包测试通过（项目内置 Go 工具链，`nomsgpack` 标签）。
-- `npm test`（`account-platform/`）：OpenAPI lint 和 37 个合同测试通过。
-- `node --test tests/account_platform_state.test.mjs tests/ui_language_coverage.test.mjs tests/scheduled_tasks_unit.test.js`（`pinvou3-app/`）：39 个测试通过。
+- `npm test`（`account-platform/`）：OpenAPI lint 和 92 个合同测试通过。
+- `node --test tests/account_platform_state.test.mjs tests/ui_language_coverage.test.mjs tests/scheduled_tasks_unit.test.js`（`pinvou3-app/`）：40 个测试通过。
 - `node scripts/account-platform.mjs verify`：Go 单测与 Vet、合同测试、架构守卫和差异检查通过。
 
 | 项目 | 当前事实 | 风险/下一步 |
@@ -304,8 +319,8 @@ Commerce Customer worker 只依赖 `CustomerAdapter` 端口，当前 H3C 实现�
 | 部署 | Compose/Helm 模板及 A06 隔离运行证据；本波改变的输入需重新验证 | 不得宣称生产部署、HA、备份或 RPO/RTO 已完成 |
 | 注册 | 唯一值预约、持久恢复、Identity 关联查询、异步钱包任务、SLA、`REPAIR_REQUIRED` 和证明门禁补偿已闭环 | Identity 短期密码材料仍为单副本内存能力；生产运行和故障注入证据待部署补齐 |
 | 权限与审批 | 平台和组织接口使用 Account 原子权限码、显式作用域、绑定有效期、单条撤销、自动回收和默认拒绝；最后超级管理员保护、安全恢复及版本化管理命令审批/幂等执行已有仓库实现 | 补注销 Saga 集成、短期工作负载身份和生产等价安全恢复/审批故障演练 |
-| 模型调用 | Hold 前置和事后核对已有基础 | 补目录/公式/Provisioning、派发持久化、重放和取消 |
-| 权益 | BASE/BONUS 组成、组织购买、精确成员授予、生命周期、确定消费/到期和守恒约束已实现 | 让目标退款、拒付和注销专用回收复用组成级事务边界，并补生产等价并发压力证据 |
-| 支付 | 新华三只有下单与查询；数据模型是一单一流水 | 目标一对多流水、独立状态机、退款/拒付/应收和证据模型均待实现 |
+| 模型调用 | 版本化公式、价格快照、Hold 前置/续租/追加和事后核对已有基础 | 补目录/Provisioning、派发持久化、重放和取消 |
+| 权益 | BASE/BONUS 组成、组织购买、精确成员授予、生命周期、确定消费/到期、目标退款与拒付定向撤销和守恒约束已实现 | 让注销专用回收复用组成级事务边界，并补生产等价并发压力证据 |
+| 支付 | 新华三仅声明下单、查询与人工修复并采用查询降级对账；订单支持多支付流水，回调/查询/修复证据不可变归并，每笔成功流水独立履约或复核；72小时晚到案件、统一支付异常案件、强制退款/拒付受控结论、每日四方对账、严格归档和 Provider blind 停单已实现 | 补 Provider 账单逐行证据归并和完整关单中间态；在生产等价环境验证真实账单、并发定时运行与财务故障恢复 |
 | 客户端切换 | 继承迁移的变化输入须按本波最终固定输入独立审核与实测 | 不把旧快照、源码存在或开发测试作为发布/安装准入及制品回滚证明 |
 | 测试 | A06 已实际执行真 PG/NATS/Redis、Keycloak 扩展、Compose devup/E2E/fault/auth 与真实 NewAPI HTTP 健康 | A07 同输入才可继承；改变输入须重验。模拟支付/模型/短信、离线 Helm/TLS 测试不代表真实供应商、生产 TLS、Kubernetes 或发布验收 |

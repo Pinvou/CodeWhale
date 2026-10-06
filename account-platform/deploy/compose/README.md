@@ -30,11 +30,11 @@ docker compose --env-file account-platform/deploy/compose/.env \
 
 ## 手机注册、登录与商城支付
 
-开启 `MOBILE_AUTH_ENABLED=true` 前，选择供应商中立的 `SMS_PROVIDER=http`，或显式选择 `SMS_PROVIDER=aliyun`。仅阿里云适配器需要号码认证服务 AccessKey、系统赠送签名和系统赠送模板（登录/注册模板 CODE 为 `100001`）；该适配器由阿里云生成验证码并通过 `CheckSmsVerifyCode` 核验。HTTP 适配器使用下文的 `/send` 和 `/verify` 契约。Account Service 不生成、保存或记录明文验证码；所有密钥仅放在部署环境的 Secret 中。
+开启 `MOBILE_AUTH_ENABLED=true` 前，明确选择 `SMS_PROVIDER=http`、`aliyun`/`aliyun-managed` 或 `http-generated`。阿里云适配器使用号码认证服务 AccessKey、签名及各用途的专属模板，由供应商生成验证码并通过 `CheckSmsVerifyCode` 核验；换绑手机号和重置密码分别配置 `ALIYUN_SMS_PROFILE_MOBILE_TEMPLATE`、`ALIYUN_SMS_PASSWORD_RESET_TEMPLATE`，不能回退登录或注册模板。既有 `http` 适配器使用下文的 `/send` 和 `/verify` 契约。这些供应商托管模式下 Account 不生成验证码；`http-generated` 则临时生成六位验证码并发送，仅持久化带独立密钥的 HMAC 摘要。所有模式均不持久化或记录明文验证码，密钥仅放在部署环境的 Secret 中。
 
-Commerce Customer 开通与手机认证相互独立。`COMMERCE_PROVIDER_ID` 和 `COMMERCE_ADAPTER_VERSION` 冻结任务所用 Provider/Adapter 身份；配置当前 H3C Adapter 的 `H3C_MALL_BASE_URL`、`H3C_MALL_APP_KEY` 和 `H3C_MALL_APP_SECRET` 后，Account Service 启动供应商中立同步 worker。未配置 Adapter 时注册、登录和模型调用仍可用，Mapping 保持待处理，只有依赖它的支付被关闭。启用商城支付时，Billing Service 直接读取数据库中已启用套餐的 SKU 和暂定 UAT 价格，避免额外环境变量形成第二份商品配置。
+Commerce Customer 开通与手机认证相互独立。`COMMERCE_PROVIDER_ID` 和 `COMMERCE_ADAPTER_VERSION` 冻结任务所用 Provider/Adapter 身份；配置当前 H3C Adapter 的 `H3C_MALL_BASE_URL`、`H3C_MALL_APP_KEY` 和 `H3C_MALL_APP_SECRET` 后，Account Service 启动供应商中立同步 worker。未配置 Adapter 时注册、登录和模型调用仍可用，Mapping 保持待处理，只有依赖它的支付被关闭。Billing 从 `payment_product_mappings` 读取商品与 Provider 版本对应的 SKU、金额、币种和渠道，订单保存不可变映射快照；正式订单必须使用通过准入的 `FROZEN` 映射，不能把测试商品或旧套餐字段当作正式商品配置。
 
-默认 `BILLING_PAYMENT_PROVIDER=simulator` 使用社区开发模拟器；开发和测试环境允许明确标注的暂定测试价格。仅显式选择 `h3c_mall` 才使用企业商城，其暂定价仍需 `BILLING_ALLOW_TENTATIVE_PRICES=true` 明确启用。
+开发 Compose 默认 `BILLING_PAYMENT_PROVIDER=simulator`，其能力明确标记 `TestOnly`，不能用于正式收款；开发和测试环境允许测试商品映射。`BILLING_ALLOW_TENTATIVE_PRICES` 默认关闭，用于控制 `h3c_mall` 分支的测试映射准入，不控制模拟器分支。用户已确认 staging/生产可以启动 Billing，`TestOnly` Provider 仍禁止正式收款；正式收款必须通过供应商能力和商品映射门禁。仅选择 `h3c_mall` 才连接企业商城；默认配置不代表生产准入。
 
 已有 Keycloak 数据卷升级后，先使用包含手机 Authenticator SPI 的当前 Keycloak 镜像，再执行可重复运行的初始化脚本安装手机直登 Flow、服务账号权限和手机号 Token Claim；初始化脚本不编译或安装扩展 JAR：
 
@@ -48,11 +48,11 @@ docker compose --env-file account-platform/deploy/compose/.env \
 
 设置 `MOBILE_AUTH_ENABLED=true` 后，可用 `SMS_PROVIDER=http` 接入供应商中立的短信服务（配置 HTTPS `SMS_HTTP_ENDPOINT` 和随机 `SMS_HTTP_SERVICE_TOKEN`），也可显式配置阿里云适配器。通用服务的 `/send` 接收手机号、用途和挑战 ID 并返回 `message_id`；`/verify` 接收手机号、挑战 ID 和验证码并返回布尔 `verified`。该通用协议没有权威的未接受响应，失败或发送结果不确定时保留短信冷却；阿里云仅完整返回官方明确的前置拒绝时解除冷却，网络中断、超时和无效响应均不代表未发送。验证码、手机号和服务凭据不得写入日志。社区注册、钱包激活和开发支付模拟器不依赖商城。企业商城支付要求已验证且同步的手机号；二维码只使用商城返回值，查询到权威 `PAID` 才记入权益。
 
-当前商城合同没有关闭订单、退款、支付回调和对账单接口，因此这些能力不会伪造：订单关闭跟随商城的 `PAY_CLOSED`，退款和渠道账单会明确返回“供应商能力不可用”。上线退款前需补充商城退款合同。
+当前商城合同没有关闭订单、退款、支付回调和对账单接口，因此这些能力不会伪造：订单关闭跟随商城查询到的 `PAY_CLOSED`，退款、回调和渠道账单明确返回“供应商能力不可用”，对账模式显示为 `QUERY_DEGRADED`。普通未支付订单在72小时最终查询后进入唯一 P2 晚到复核案件，前7天每日、之后每周人工查询；若超过最终归档期限仍无法取得成功的权威未支付查询，则升级 `PROVIDER_BLIND` 并停用该 Provider 版本新单。没有有限晚到窗口、长期历史查询、权威终态和足够保留期时不得把商城 `TEST_ONLY` 映射升级为正式 `FROZEN` 映射；查询快照不能冒充渠道账单。上线退款前仍需补充商城退款合同。
 
 确定性集成烟测使用独立 project：`node scripts/account-platform.mjs test integration`。命令会启动完整栈、验证五个 Readiness、请求/Trace 关联头和 Portal 安全头，然后仅删除该测试 project 的卷。
 
-数据库、Redis、NATS 和服务间网络不对公网开放。Compose 是开发/测试拓扑，不是生产部署模板。Payment Simulator 不得进入生产环境。
+数据库、Redis、NATS 和服务间网络不对公网开放。Compose 是开发/测试拓扑，不是生产部署模板。Payment Simulator 不得承接生产收款流量。
 
 数据存储和迁移容器仅连接隔离的 `backend` 网络；Keycloak、四个 API 服务与 Portal 同时连接 `frontend` 桥接网络，入口仅绑定 `127.0.0.1`。这些服务可通过 `frontend` 出站联网；不要将测试密钥或开发环境用于生产。Keycloak 就绪检查通过后，统一启动命令才会成功返回。
 

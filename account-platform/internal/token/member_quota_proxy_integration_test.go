@@ -65,9 +65,7 @@ func TestPostgresMemberQuotaProxyPreservesUnitWalletAndRejectsBypass(t *testing.
 			if _, err := billing.Credit(ctx, wallet.ID, "owned-unit-credit", 1000000, false); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := pool.Exec(ctx, `INSERT INTO pricing_versions(id,model,input_per_million,output_per_million,cached_input_per_million,effective_from,created_at) VALUES($1,'owned-model',1000000,1000000,1000000,$2,$2)`, uuid.New(), time.Now().Add(-time.Hour)); err != nil {
-				t.Fatal(err)
-			}
+			publishedBillingPriceFixture(t, billing, "owned-model", 1_000_000, 1_000_000, 1_000_000)
 			if mode == "organization-without-grant" || mode == "organization-with-grant" {
 				if _, err := billing.ApplyOrganizationMemberLifecycle(ctx, org, user, "ACTIVE", 3); err != nil {
 					t.Fatal(err)

@@ -1,3 +1,6 @@
+import { performLogicalOperation } from './logical-operation.js';
+import { requireAdminRecord, requireAdminFacts, requirePriceDraftAcknowledgement } from './admin-acknowledgements.js';
+
 export function newRequestUUID() {
   const bytes = globalThis.crypto.getRandomValues(new Uint8Array(16));
   bytes[6] = (bytes[6] & 0x0f) | 0x40;
@@ -32,6 +35,7 @@ export class AdminPlatformClient {
     this.baseURL = String(baseURL || '').replace(/\/$/, '');
     this.csrfToken = '';
     this.pendingRefunds = new Map();
+    this.pendingOperations = new Map();
   }
 
   async session(signal) {
@@ -83,6 +87,14 @@ export class AdminPlatformClient {
     return payload;
   }
 
+  logicalMutation(area, resource, body, validate) {
+    const identity = JSON.stringify([this.csrfToken, area, resource, body]);
+    return performLogicalOperation(this.pendingOperations, {
+      kind:`${area}:${resource}`, identity, createKey:newRequestUUID,
+      action:async key => validate(await this.mutate(area, resource, 'POST', body, key)),
+    });
+  }
+
   accountOverview(signal) { return this.request('account', '/admin/v1/overview', signal); }
   roles(signal) { return this.request('account', '/admin/v1/roles', signal); }
   users(search, signal) { return this.request('account', `/admin/v1/users?limit=100&q=${encodeURIComponent(search || '')}`, signal); }
@@ -113,7 +125,24 @@ export class AdminPlatformClient {
   billingOverview(signal) { return this.request('billing', '/admin/v1/overview', signal); }
   wallets(signal) { return this.request('billing', '/admin/v1/wallets?limit=100', signal); }
   walletLedger(walletID, signal) { return this.request('billing', `/admin/v1/wallets/${encodeURIComponent(walletID)}/ledger?limit=200`, signal); }
+  receivables(signal) { return this.request('billing', '/admin/v1/receivables?limit=100', signal); }
+  receivableAllocations(receivableID, signal) { return this.request('billing', `/admin/v1/receivables/${encodeURIComponent(receivableID)}/allocations`, signal); }
   priceVersions(signal) { return this.request('billing', '/admin/v1/pricing-versions?limit=100', signal); }
+  meteringUnits(signal) { return this.request('billing', '/admin/v1/metering-units', signal); }
+  createMeteringUnit(input) { return this.logicalMutation('billing', '/admin/v1/metering-units', input, value => requireAdminFacts(requireAdminRecord(value, 'unit_definition_id'), { ...input, status:'ACTIVE' })); }
+  deactivateMeteringUnit(unitID) { return this.mutate('billing', `/admin/v1/metering-units/${encodeURIComponent(unitID)}/deactivate`, 'POST', {}); }
+  managedPrices(signal) { return this.request('billing', '/admin/v1/pricing?limit=100', signal); }
+  createPriceDraft(input) { return this.logicalMutation('billing', '/admin/v1/pricing/drafts', input, value => requirePriceDraftAcknowledgement(value, input)); }
+  async updatePriceDraft(priceID, input) { return requirePriceDraftAcknowledgement(await this.mutate('billing', `/admin/v1/pricing/${encodeURIComponent(priceID)}/draft`, 'PUT', input), input, priceID); }
+  previewPrice(priceID, signal) { return this.request('billing', `/admin/v1/pricing/${encodeURIComponent(priceID)}/preview`, signal); }
+  publishPrice(priceID, expectedETag) { return this.logicalMutation('billing', `/admin/v1/pricing/${encodeURIComponent(priceID)}/publish`, { expected_etag:expectedETag }, value => requireAdminFacts(requireAdminRecord(value, 'price_version_id', priceID), { lifecycle_status:'PUBLISHED' })); }
+  transitionPrice(priceID, input) { return this.logicalMutation('billing', `/admin/v1/pricing/${encodeURIComponent(priceID)}/transition`, input, value => requireAdminFacts(requireAdminRecord(value, 'price_version_id', priceID), { lifecycle_status:input.action === 'CANCEL' ? 'CANCELLED' : 'ENDED', ...(input.mode === 'CONTINUATION' ? { successor_price_version_id:input.replacement_price_version_id } : {}) })); }
+  protocols(signal) { return this.request('token', '/admin/v1/protocols', signal); }
+  createProtocol(input) { return this.logicalMutation('token', '/admin/v1/protocols', input, value => requireAdminFacts(requireAdminRecord(value, 'protocol_definition_id'), { protocol_code:input.protocol_code, request_schema:input.request_schema, status:'DRAFT' })); }
+  publishProtocol(protocolID) { return this.logicalMutation('token', `/admin/v1/protocols/${encodeURIComponent(protocolID)}/publish`, {}, value => requireAdminFacts(requireAdminRecord(value, 'protocol_definition_id', protocolID), { status:'PUBLISHED' })); }
+  createFormula(protocolID, input) { return this.logicalMutation('token', `/admin/v1/protocols/${encodeURIComponent(protocolID)}/formulas`, input, value => requireAdminFacts(requireAdminRecord(value, 'formula_version_id'), { protocol_definition_id:protocolID, required_unit_versions:input.required_unit_versions, expression:input.expression, status:'DRAFT' })); }
+  publishFormula(formulaID) { return this.logicalMutation('token', `/admin/v1/formulas/${encodeURIComponent(formulaID)}/publish`, {}, value => requireAdminFacts(requireAdminRecord(value, 'formula_version_id', formulaID), { status:'PUBLISHED' })); }
+  previewFormula(formulaID, signal) { return this.request('token', `/admin/v1/formulas/${encodeURIComponent(formulaID)}/preview`, signal); }
   createPriceVersion(input) { return this.mutate('billing', '/admin/v1/pricing-versions', 'POST', input); }
   paymentOrders(filters = {}, signal) {
     const query = new URLSearchParams({ limit:'100' });
@@ -121,28 +150,54 @@ export class AdminPlatformClient {
     if (filters.status) query.set('status', filters.status);
     return this.request('billing', `/admin/v1/payment-orders?${query}`, signal);
   }
+  paymentOrder(orderID, signal) { return this.request('billing', `/admin/v1/payment-orders/${encodeURIComponent(orderID)}`, signal); }
+  refunds(signal) { return this.request('billing', '/admin/v1/refunds?limit=100', signal); }
   syncPaymentOrder(orderID) { return this.mutate('billing', `/admin/v1/payment-orders/${encodeURIComponent(orderID)}/sync`, 'POST', {}); }
   repairPaymentOrder(orderID, reason) { return this.mutate('billing', `/admin/v1/payment-orders/${encodeURIComponent(orderID)}/repair`, 'POST', { reason }); }
-  refundRequestKey(orderID, amountFen, reason) {
-    const facts = JSON.stringify([orderID, amountFen, reason]);
+  refundRequestKey(orderID, transactionID, packageID, reason) {
+    const facts = JSON.stringify([this.csrfToken, orderID, transactionID, packageID, reason]);
     if (!this.pendingRefunds.has(facts)) this.pendingRefunds.set(facts, newRequestUUID());
     return this.pendingRefunds.get(facts);
   }
 
-  async refundPaymentOrder(orderID, amountFen, reason, idempotencyKey) {
+  async refundPaymentOrder(orderID, transactionID, packageID, reason, idempotencyKey) {
     if (typeof idempotencyKey !== 'string' || idempotencyKey.length < 16) throw new TypeError('refund idempotency key required');
-    const result = await this.mutate('billing', `/admin/v1/payment-orders/${encodeURIComponent(orderID)}/refunds`, 'POST', { amount_fen:amountFen, reason }, idempotencyKey);
-    const facts = JSON.stringify([orderID, amountFen, reason]);
+    const result = requireAdminFacts(requireAdminRecord(await this.mutate('billing', `/admin/v1/payment-orders/${encodeURIComponent(orderID)}/refunds`, 'POST', { payment_transaction_id:transactionID, entitlement_package_id:packageID, reason }, idempotencyKey), 'refund_id'), { payment_order_id:orderID, payment_transaction_id:transactionID, entitlement_package_id:packageID, reason });
+    const facts = JSON.stringify([this.csrfToken, orderID, transactionID, packageID, reason]);
     if (this.pendingRefunds.get(facts) === idempotencyKey) this.pendingRefunds.delete(facts);
     return result;
   }
   adjustments(signal) { return this.request('billing', '/admin/v1/adjustments?limit=100', signal); }
   decideAdjustment(adjustmentID, decision, reason) { return this.mutate('billing', `/admin/v1/adjustments/${encodeURIComponent(adjustmentID)}/${decision}`, 'POST', { reason }); }
   holds(signal) { return this.request('billing', '/admin/v1/usage-holds?limit=100', signal); }
-  releaseHold(holdID, reason) { return this.mutate('billing', `/admin/v1/usage-holds/${encodeURIComponent(holdID)}/release`, 'POST', { reason }); }
+  hold(holdID, signal) { return this.request('billing', `/admin/v1/usage-holds/${encodeURIComponent(holdID)}`, signal); }
+  releaseHold(holdID, reason) { return this.logicalMutation('billing', `/admin/v1/usage-holds/${encodeURIComponent(holdID)}/release`, { reason }, value => requireAdminFacts(requireAdminRecord(value, 'hold_id', holdID), { status:'RELEASED', actual_microcredits:'0' })); }
   reconciliationRuns(signal) { return this.request('billing', '/admin/v1/reconciliation-runs?limit=100', signal); }
   runReconciliation(channel, businessDate) { return this.mutate('billing', '/admin/v1/reconciliation-runs', 'POST', { channel, business_date:businessDate }); }
+  importProviderBill(channel, businessDate, items) { return this.mutate('billing', '/admin/v1/reconciliation-imports', 'POST', { channel, business_date:businessDate, items }); }
   reconciliationCases(runID, signal) { return this.request('billing', `/admin/v1/reconciliation-runs/${encodeURIComponent(runID)}/cases?limit=200`, signal); }
+  updateReconciliationCase(caseID, command) { return this.logicalMutation('billing', `/admin/v1/reconciliation-cases/${encodeURIComponent(caseID)}/commands`, command, value => requireAdminRecord(value, 'case_id', caseID)); }
+  latePaymentReviews(filters = {}, signal) {
+    const query = new URLSearchParams({ limit:'100' });
+    for (const key of ['status','provider_id','owner_id']) if (filters[key]) query.set(key, filters[key]);
+    for (const key of ['entered_from','entered_to','next_review_before']) if (filters[key]) query.set(key, new Date(filters[key]).toISOString());
+    if (filters.overdue) query.set('overdue', 'true');
+    return this.request('billing', `/admin/v1/late-payment-reviews?${query}`, signal);
+  }
+  latePaymentReview(caseID, signal) { return this.request('billing', `/admin/v1/late-payment-reviews/${encodeURIComponent(caseID)}`, signal); }
+  claimLatePaymentReview(caseID) { return this.mutate('billing', `/admin/v1/late-payment-reviews/${encodeURIComponent(caseID)}/claim`, 'POST', {}); }
+  queryLatePaymentReview(caseID) { return this.mutate('billing', `/admin/v1/late-payment-reviews/${encodeURIComponent(caseID)}/query`, 'POST', {}); }
+  scheduleLatePaymentReview(caseID, nextReviewAt, reason) { return this.mutate('billing', `/admin/v1/late-payment-reviews/${encodeURIComponent(caseID)}/schedule`, 'POST', { next_review_at:new Date(nextReviewAt).toISOString(), reason }); }
+  archiveLatePaymentReview(caseID) { return this.mutate('billing', `/admin/v1/late-payment-reviews/${encodeURIComponent(caseID)}/archive`, 'POST', {}); }
+  escalateProviderBlind(caseID, reason) { return this.mutate('billing', `/admin/v1/late-payment-reviews/${encodeURIComponent(caseID)}/provider-blind`, 'POST', { reason }); }
+  paymentAnomalies(filters = {}, signal) {
+    const query = new URLSearchParams({ limit:'100' });
+    for (const key of ['anomaly_type','status','severity','owner_id']) if (filters[key]) query.set(key, filters[key]);
+    return this.request('billing', `/admin/v1/payment-anomalies?${query}`, signal);
+  }
+  paymentAnomaly(caseID, signal) { return this.request('billing', `/admin/v1/payment-anomalies/${encodeURIComponent(caseID)}`, signal); }
+  claimPaymentAnomaly(caseID) { return this.logicalMutation('billing', `/admin/v1/payment-anomalies/${encodeURIComponent(caseID)}/claim`, {}, value => requireAdminRecord(value, 'case_id', caseID)); }
+  resolvePaymentAnomaly(caseID, resolution, reason) { return this.logicalMutation('billing', `/admin/v1/payment-anomalies/${encodeURIComponent(caseID)}/resolve`, { resolution, reason }, value => requireAdminRecord(value, 'case_id', caseID)); }
   tokenOverview(signal) { return this.request('token', '/admin/v1/overview', signal); }
   tokenAccounts(signal) { return this.request('token', '/admin/v1/token-accounts?limit=100', signal); }
   tokenAccount(tokenAccountID, signal) { return this.request('token', `/admin/v1/token-accounts/${encodeURIComponent(tokenAccountID)}`, signal); }
@@ -189,5 +244,6 @@ export class AdminPlatformClient {
     if (!response.ok) throw errorFromResponse(response, await response.json().catch(() => ({})));
     this.csrfToken = '';
     this.pendingRefunds.clear();
+    this.pendingOperations.clear();
   }
 }

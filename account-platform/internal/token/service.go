@@ -59,6 +59,7 @@ type Service struct {
 	newAPIStatusClient     *http.Client
 	waiverServiceToken     string
 	authorizer             *authorization.Client
+	usageAuthorization     usageAuthorizationGates
 }
 
 func (s *Service) WithDefaultRoutes(provisioner DefaultRouteProvisioner) *Service {
@@ -104,6 +105,7 @@ func (s *Service) Handler(verify identity.VerifyFunc) http.Handler {
 	protected.GET("/v1/me/usage-requests", httpserver.AdaptFunc(s.listMyUsageRequests))
 	protected.POST("/v1/chat/completions", httpserver.AdaptFunc(s.chatCompletions))
 	protected.GET("/v1/recharge/products", httpserver.AdaptFunc(s.rechargeProducts))
+	protected.GET("/v1/payment-capabilities", httpserver.AdaptFunc(s.paymentCapabilities))
 	protected.POST("/v1/recharge/orders", httpserver.AdaptFunc(s.createRechargeOrder))
 	protected.POST("/v1/organizations/:organization_id/recharge/orders", httpserver.AdaptFunc(s.createOrganizationRechargeOrder))
 	protected.GET("/v1/organizations/:organization_id/recharge/products", httpserver.AdaptFunc(s.organizationEntitlementProducts))
@@ -115,6 +117,7 @@ func (s *Service) Handler(verify identity.VerifyFunc) http.Handler {
 	protected.GET("/v1/recharge/orders/recent", httpserver.AdaptFunc(s.getRecentRechargeOrder))
 	protected.GET("/v1/recharge/orders/:order_id", httpserver.AdaptFunc(s.getRechargeOrder))
 	protected.POST("/v1/recharge/orders/:order_id/close", httpserver.AdaptFunc(s.closeRechargeOrder))
+	protected.POST("/v1/recharge/orders/:order_id/payment-claims", httpserver.AdaptFunc(s.addLatePaymentClaim))
 	protected.GET("/v1/me/balance", httpserver.AdaptFunc(s.getBalance))
 	protected.GET("/v1/me/entitlement-packages", httpserver.AdaptFunc(s.getEntitlementPackages))
 	admin := protected.Group("/admin/v1")
@@ -130,6 +133,12 @@ func (s *Service) Handler(verify identity.VerifyFunc) http.Handler {
 		admin.GET("/usage-requests", s.authorizer.Require("platform.usage.read"), httpserver.AdaptFunc(s.adminUsageRequests))
 		admin.GET("/usage-requests/:usage_request_id", s.authorizer.Require("platform.usage.read"), httpserver.AdaptFunc(s.adminUsageRequest))
 		admin.POST("/usage-requests/:usage_request_id/retry-reconciliation", s.authorizer.Require("platform.usage.reconcile.retry"), approvalpolicy.Require("TOKEN_USAGE_RECONCILIATION_RETRY", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminRetryReconciliation))
+		admin.GET("/protocols", s.authorizer.Require("platform.pricing.read"), httpserver.AdaptFunc(s.adminProtocols))
+		admin.POST("/protocols", s.authorizer.Require("platform.pricing.manage"), approvalpolicy.Require("TOKEN_PROTOCOL_DRAFT_CREATE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminCreateProtocol))
+		admin.POST("/protocols/:protocol_definition_id/publish", s.authorizer.Require("platform.pricing.manage"), approvalpolicy.Require("TOKEN_PROTOCOL_PUBLISH", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminPublishProtocol))
+		admin.POST("/protocols/:protocol_definition_id/formulas", s.authorizer.Require("platform.pricing.manage"), approvalpolicy.Require("TOKEN_FORMULA_DRAFT_CREATE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminCreateFormula))
+		admin.POST("/formulas/:formula_version_id/publish", s.authorizer.Require("platform.pricing.manage"), approvalpolicy.Require("TOKEN_FORMULA_PUBLISH", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminPublishFormula))
+		admin.GET("/formulas/:formula_version_id/preview", s.authorizer.Require("platform.pricing.read"), httpserver.AdaptFunc(s.adminPreviewFormula))
 	}
 	mux := http.NewServeMux()
 	mux.Handle("POST /internal/v1/usage-waivers", serviceauth.Middleware(s.waiverServiceToken, http.HandlerFunc(s.adminWaiver)))
@@ -322,6 +331,23 @@ func (s *Service) rechargeProducts(w http.ResponseWriter, r *http.Request) {
 	writeRawNoStore(w, http.StatusOK, payload)
 }
 
+func (s *Service) paymentCapabilities(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.resolveContext(w, r); !ok {
+		return
+	}
+	client, ok := s.billing.(PaymentCapabilitiesBillingClient)
+	if !ok {
+		api.WriteError(w, http.StatusServiceUnavailable, "BILLING_UNAVAILABLE", "payment capabilities are unavailable", httpserver.RequestID(r.Context()))
+		return
+	}
+	payload, err := client.PaymentCapabilities(r.Context())
+	if err != nil {
+		api.WriteError(w, http.StatusServiceUnavailable, "BILLING_UNAVAILABLE", "payment capabilities are unavailable", httpserver.RequestID(r.Context()))
+		return
+	}
+	writeRawNoStore(w, http.StatusOK, payload)
+}
+
 func (s *Service) createRechargeOrder(w http.ResponseWriter, r *http.Request) {
 	resolved, ok := s.resolveContext(w, r)
 	if !ok {
@@ -438,6 +464,27 @@ func (s *Service) closeRechargeOrder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeRawNoStore(w, http.StatusOK, payload)
+}
+
+func (s *Service) addLatePaymentClaim(w http.ResponseWriter, r *http.Request) {
+	resolved, ok := s.resolveContext(w, r)
+	if !ok {
+		return
+	}
+	orderID, err := uuid.Parse(r.PathValue("order_id"))
+	var body struct {
+		Statement string `json:"statement"`
+	}
+	if decodeErr := api.DecodeJSON(w, r, &body); err != nil || decodeErr != nil || len(strings.TrimSpace(body.Statement)) < 10 {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "a valid order and payment statement are required", httpserver.RequestID(r.Context()))
+		return
+	}
+	payload, err := s.billing.AddLatePaymentClaim(r.Context(), orderID, resolved.UserID, body.Statement)
+	if err != nil {
+		api.WriteError(w, http.StatusConflict, "PAYMENT_CLAIM_REJECTED", "the payment claim cannot be added to this order", httpserver.RequestID(r.Context()))
+		return
+	}
+	writeRawNoStore(w, http.StatusCreated, payload)
 }
 
 func (s *Service) getBalance(w http.ResponseWriter, r *http.Request) {
@@ -747,6 +794,10 @@ func (s *Service) resolveContext(w http.ResponseWriter, r *http.Request) (Author
 func (s *Service) writeError(w http.ResponseWriter, r *http.Request, err error) {
 	status, code, message := http.StatusInternalServerError, "INTERNAL_ERROR", "the token request could not be completed"
 	switch {
+	case errors.Is(err, ErrUsageReplayConflict):
+		status, code, message = http.StatusConflict, "USAGE_REPLAY_BLOCKED", "this logical model call conflicts with its original facts and will not be sent twice"
+	case errors.Is(err, ErrGovernanceConflict):
+		status, code, message = http.StatusConflict, "CONFLICT", "the token governance operation conflicts with immutable facts"
 	case errors.Is(err, ErrNotFound):
 		status, code, message = http.StatusNotFound, "TOKEN_ACCOUNT_NOT_FOUND", "the token account was not found"
 	case errors.Is(err, ErrForbidden):

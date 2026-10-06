@@ -10,7 +10,6 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	billingdomain "github.com/Pinvou/pinvou3/account-platform/internal/billing"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/identity"
@@ -53,9 +52,7 @@ func TestPostgresHTTPLogicalModelCallsHaveDistinctKeysAndRetryOneSettlement(t *t
 	if _, err := repo.pool.Exec(ctx, "UPDATE token_accounts SET wallet_id=$1", wallet.ID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := pool.Exec(ctx, `INSERT INTO pricing_versions(id,model,input_per_million,output_per_million,cached_input_per_million,effective_from,created_at) VALUES($1,'model-test',1000000,0,0,$2,$2)`, uuid.New(), time.Now().Add(-time.Hour)); err != nil {
-		t.Fatal(err)
-	}
+	publishedBillingPriceFixture(t, billingRepo, "model-test", 1_000_000, 0, 0)
 	serviceToken := strings.Repeat("r", 32)
 	billingServer := httptest.NewServer(billingdomain.NewService(billingRepo).Handler(serviceToken))
 	defer billingServer.Close()
@@ -107,6 +104,9 @@ func TestPostgresHTTPLogicalModelCallsHaveDistinctKeysAndRetryOneSettlement(t *t
 	}
 	if call(first, `{"model":"model-test","messages":[{"role":"user","content":"changed prompt"}]}`) != http.StatusConflict {
 		t.Fatal("same-key changed request facts were accepted")
+	}
+	if call(first, `{"model":"model-test","messages":[{"role":"user","content":"same change"}]}`) != http.StatusConflict {
+		t.Fatal("same-key changed body with the same estimate was not blocked")
 	}
 	if upstreamCalls.Load() != 2 {
 		t.Fatal("retry or conflicting request sent duplicate upstream consumption")

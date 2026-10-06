@@ -4,13 +4,13 @@
 >
 > 需求与状态基线：`e5437902aea2558b78b8076f3645834611ea2514`
 >
-> 历史任务状态快照：原始 A08 终点 `0636238c3854f04f1ea3c52396fabac1d7ca0ff5`
+> 历史任务状态快照：原始 A10 终点 `36ce0a72e28887cb96c1c984c6374386d9acb112`；不是当前本地审核通过证明
 >
 > 约束边界：`architecture.md`、`role-system-design.md`、Accepted ADR 与本目录部署文档
 
 ## 1. 执行规则
 
-1. 本文为最初 275 个未完成目标保留可追溯任务；原分支历史快照把 APT-001～APT-006、APT-008～APT-013、APT-016～APT-017 与 APT-046 记为完成，APT-007 的仓库实现仍等待环境验收；该历史矩阵有 184 个状态为 `部分实现`、`未实现` 或 `降级实现` 的目标，每个未完成编号只能有一个主任务。这些状态不表示本波独立审核已经通过。开始未来任务前必须重新核验当前代码、已定行为和真实验收证据，不重复建设或扩展本波范围。
+1. 原 A10 提交的任务快照将 APT-001、APT-006、APT-008、APT-013、APT-016、APT-025 和 APT-046 标为仓库完成，APT-007 等待部署验收，并保留 117 个未完成矩阵目标。此为历史声明；每个后续目标保留单独追踪，不因矩阵状态重复建设或扩展本轮需求。开始后续任务前应重新核对当前源码、用户已定规则和实际验证；本轮通过以各波固定审核证据为准。
 2. 任务按稳定服务所有权、事务边界、公开契约和可独立验证能力划分，不按文件数量或代码行数机械拆分。
 3. 每个任务使用独立提交，提交必须同时包含该任务所需的代码、迁移、OpenAPI/事件契约、三语 UI、自动化测试、需求状态和相关架构/部署文档更新。
 4. 开始任务前先检查依赖任务已经完成；实现中发现不能独立交付时，必须先拆分任务并更新本文，不能把无关能力混入当前提交。
@@ -41,14 +41,14 @@
 | APT-015 | 注销资料清理、标识墓碑、Commerce/邀请收敛及组织授予隔离回收 | ACC-11, ACC-46, ACC-47, ACC-49, ACC-50, BILL-39, BILL-40, NFR-13 | APT-014, APT-016, APT-017, APT-019, APT-025 | CODE | PENDING |
 | APT-016 | BASE/BONUS 组成级权益、消费顺序、到期与守恒约束 | CORE-04, BILL-05, BILL-06, BILL-14, BILL-16–BILL-19, BILL-36, UI-08 | 无 | CODE | DONE |
 | APT-017 | 组织购买权益后的组成级成员授予、暂停、撤回和并发约束 | BILL-07–BILL-13, BILL-37, BILL-38, UI-11 | APT-006, APT-009–APT-012, APT-016 | CODE | DONE |
-| APT-018 | 版本化计量单位、协议公式、动态预占和确定性价格生命周期 | ACC-37, TOK-17–TOK-21, TOK-23, BILL-20, BILL-22–BILL-25, BILL-41–BILL-45, ADM-12, ADM-13, ADM-23, ADM-24 | APT-012, APT-016 | CODE | PENDING |
-| APT-019 | 应收、拒付冲销、清偿分配和上下文冻结 | BILL-29–BILL-33, ADM-16 | APT-016, APT-023 | CODE | PENDING |
-| APT-020 | 钱包、组成级账本和 Hold 运营证据查询 | BILL-27, ADM-18 | APT-016, APT-018 | CODE | PENDING |
-| APT-021 | 普通退款目标锁定、全 BASE 退款、关联 BONUS 撤销与强制退款隔离 | BILL-28, PAY-24–PAY-32, ADM-20, UI-12 | APT-016, APT-019, APT-023 | CODE | PENDING |
-| APT-022 | Payment Provider/渠道/商品映射中立化及生产测试隔离 | PAY-01–PAY-05, NFR-17 | APT-005 | CODE | PENDING |
-| APT-023 | 一单多流水、不可变支付证据、独立状态机和组织付款履约 | CORE-06, PAY-11–PAY-15, PAY-20–PAY-23, ADM-19, NFR-16 | APT-016, APT-022 | CODE | PENDING |
-| APT-024 | 晚到支付、无回调/账单降级、人工案件和事实盲区处置 | PAY-17–PAY-19, PAY-35, PAY-37–PAY-40, ADM-33, NFR-45 | APT-022, APT-023 | CODE | PENDING |
-| APT-025 | 拒付/异常复核、四方对账和受审计修复 | PAY-33, PAY-34, PAY-36, ADM-21 | APT-019, APT-023, APT-024 | CODE | PENDING |
+| APT-018 | 版本化计量单位、协议公式、动态预占和确定性价格生命周期 | ACC-37, TOK-17–TOK-21, TOK-23, BILL-20, BILL-22–BILL-25, BILL-41–BILL-45, ADM-12, ADM-13, ADM-23, ADM-24 | APT-012, APT-016 | CODE | DONE |
+| APT-019 | 应收、拒付冲销、清偿分配和上下文冻结 | BILL-29–BILL-33, ADM-16 | APT-016, APT-023 | CODE | DONE |
+| APT-020 | 钱包、组成级账本和 Hold 运营证据查询 | BILL-27, ADM-18 | APT-016, APT-018 | CODE | DONE |
+| APT-021 | 普通退款目标锁定、全 BASE 退款、关联 BONUS 撤销与强制退款隔离 | BILL-28, PAY-24–PAY-32, ADM-20, UI-12 | APT-016, APT-019, APT-023 | CODE | DONE |
+| APT-022 | Payment Provider/渠道/商品映射中立化及生产测试隔离 | PAY-01–PAY-04, NFR-17 | APT-005 | CODE | DONE |
+| APT-023 | 一单多流水、统一回调/查询证据、逐流水履约和组织付款快照 | PAY-11, PAY-15, PAY-20–PAY-23, ADM-19, NFR-16 | APT-016, APT-022 | CODE | DONE |
+| APT-024 | 晚到支付、无回调/账单降级、人工案件和事实盲区处置 | PAY-17–PAY-19, PAY-35, PAY-37–PAY-40, ADM-33 | APT-022, APT-023 | CODE | DONE |
+| APT-025 | 拒付/异常复核、四方对账和受审计修复 | PAY-33, PAY-34, PAY-36, ADM-21 | APT-019, APT-023, APT-024 | CODE | DONE |
 | APT-026 | 供应商中立模型网关协议和用量证据 Adapter | TOK-04, TOK-05, NFR-18 | 无 | CODE | PENDING |
 | APT-027 | 独立模型目录、稳定模型身份、版本/弃用/下架/回滚生命周期 | TOK-06, TOK-07, TOK-42–TOK-47 | APT-026 | CODE | PENDING |
 | APT-028 | 平台托管路由 Provisioning、资格管线及运营修复 | TOK-09, TOK-10, TOK-12, TOK-16, ADM-11, ADM-28–ADM-30 | APT-006, APT-026, APT-027 | CODE | PENDING |
@@ -71,6 +71,10 @@
 | APT-045 | 全域审计、幂等指纹、Outbox/Inbox 收敛和死信恢复闭环 | CORE-07, NFR-05–NFR-07 | APT-003–APT-034, APT-046, APT-047 | CODE | PENDING |
 | APT-046 | 普通组织角色绑定的展示、有效期、授权撤销和缓存失效 | ACC-30–ACC-32, ADM-05, ADM-06 | APT-006 | CODE | DONE |
 | APT-047 | 服务账号、后台任务和 Event Relay 的短期工作负载身份与最小 Subject 权限 | ADM-03, NFR-12 | APT-006 | CODE+ENV | PENDING |
+| APT-048 | 正式充值商品 SKU、金额、权益及 Provider 映射的业务冻结与生产准入 | PAY-05 | APT-022 | CODE+ENV | BLOCKED_EXTERNAL |
+| APT-049 | 账单支付证据、完整关单状态、拒付事实与订单派生摘要收敛 | PAY-12–PAY-14 | APT-019, APT-023, APT-024 | CODE | PENDING |
+| APT-050 | 模型派发不确定、流式结果与支付证据统一收敛边界 | CORE-06 | APT-029, APT-030, APT-049 | CODE | PENDING |
+| APT-051 | 全域人工案件 P0/P1/P2 统一 SLA、转派时钟与自动止损评估 | NFR-45 | APT-003, APT-019, APT-021, APT-024, APT-025, APT-030 | CODE | PENDING |
 
 ## 3. 独立提交验收模板
 

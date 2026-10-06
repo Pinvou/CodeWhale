@@ -5,10 +5,10 @@ import { formatMoney, formatPoints } from './credit-units.js';
 import { AccountPlatformDesktopClient } from './desktop-client.js';
 import { accountErrorMessage, needsAccountLogin } from './errors.js';
 import { rechargePollDelay } from './context-guard.js';
+import { performLogicalOperation, requireRechargeAcknowledgement } from './logical-operation.js';
 
-const terminalOrderStates = new Set(['PAID', 'PAID_LATE', 'CLOSED', 'FAILED', 'EXPIRED', 'PARTIALLY_REFUNDED', 'REFUNDED', 'MANUAL_REVIEW']);
+const terminalOrderStates = new Set(['PAID', 'PAID_LATE', 'CLOSED', 'FAILED', 'EXPIRED', 'MANUAL_REVIEW']);
 const paidOrderStates = new Set(['PAID', 'PAID_LATE']);
-const fallbackChannels = ['UNIONPAY', 'ALIPAY', 'WECHAT'];
 
 function localizedError(copy, reason) {
   if (!reason) return '';
@@ -82,7 +82,7 @@ function RechargePanel({
   const [channel, setChannel] = useState('ALIPAY');
   const [now, setNow] = useState(Date.now());
   const selected = products.find(product => product.product_id === productId);
-  const channels = selected?.channels?.length ? selected.channels : fallbackChannels;
+  const channels = Array.isArray(selected?.channels) ? selected.channels.filter(value => typeof value === 'string' && value) : [];
   const remainingSeconds = orderRemainingSeconds(order, now);
   const paid = paidOrderStates.has(order?.status);
   const terminal = terminalOrderStates.has(order?.status);
@@ -200,7 +200,7 @@ function RechargePanel({
           {channels.map(item => <option key={item} value={item}>{copy.channels[item] || item}</option>)}
         </select>
       </label>
-      <button type="button" disabled={busy || !selected} onClick={() => onCreate(productId, channel)} className="flex h-9 w-full items-center justify-center gap-2 rounded-xl bg-[#10B981] text-[12px] font-semibold text-white transition-opacity disabled:opacity-40">{busy && <RefreshCw size={13} className="animate-spin" />}{copy.createRecharge}</button>
+      <button type="button" disabled={busy || !selected || !channels.includes(channel)} onClick={() => onCreate(productId, channel)} className="flex h-9 w-full items-center justify-center gap-2 rounded-xl bg-[#10B981] text-[12px] font-semibold text-white transition-opacity disabled:opacity-40">{busy && <RefreshCw size={13} className="animate-spin" />}{copy.createRecharge}</button>
     </div>
   );
 }
@@ -212,6 +212,7 @@ export function AccountPlatformPopover({ open, client, copy, language, theme, co
   const requestRef = useRef({ generation: 0, controller: null });
   const rechargeRequestRef = useRef({ generation: 0, controller: null });
   const pollRef = useRef({ controller: null, timer: null });
+  const rechargeKeysRef = useRef(new Map());
   const lifecycleRef = useRef({ generation: 0, active: false });
   const rechargeRef = useRef({ generation: 0, view: 'account' });
   const mutationRef = useRef(null);
@@ -295,7 +296,7 @@ export function AccountPlatformPopover({ open, client, copy, language, theme, co
   }, [cancelRechargeReads]);
   const clearProtected = useCallback(() => {
     lifecycleRef.current.generation += 1;
-    cancelAccountRead(); resetOrder();
+    cancelAccountRead(); resetOrder(); rechargeKeysRef.current.clear();
     rechargeRef.current.view = 'account';
     accountContextRef.current = null;
     setView('account'); setAuth('guest'); setMe(null); setBalance(null);
@@ -304,6 +305,7 @@ export function AccountPlatformPopover({ open, client, copy, language, theme, co
 
   // A closed or replaced client owns no UI writes, even if native work finishes later.
   useLayoutEffect(() => {
+    if (currentClientRef.current !== client) rechargeKeysRef.current.clear();
     currentClientRef.current = client;
     accountContextRef.current = null; contextSyncRef.current = { loading: false, pending: false };
     const life = lifecycleRef.current;
@@ -676,7 +678,9 @@ export function AccountPlatformPopover({ open, client, copy, language, theme, co
       const isCurrent = () => isAlive() && rechargeRef.current.view === 'recharge' && rechargeRef.current.generation === recharge;
       setRechargeErrorReason(null); setRechargeNotice('');
       try {
-        const nextOrder = await client.createRecharge(productId, channel, newIdempotencyKey());
+        const identity = JSON.stringify([me?.user_id, me?.active_context?.organization_id || null, productId, channel]);
+        const nextOrder = await performLogicalOperation(rechargeKeysRef.current, { kind:'recharge', identity, createKey:newIdempotencyKey,
+          action:async key => requireRechargeAcknowledgement(await client.createRecharge(productId, channel, key), productId, channel) });
         await acceptOrder(nextOrder, isCurrent);
       } catch (reason) {
         if (!isCurrent()) return;

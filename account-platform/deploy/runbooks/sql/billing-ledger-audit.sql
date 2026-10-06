@@ -28,9 +28,42 @@ LEFT JOIN (
     SELECT payment.wallet_id,refund.credit_microcredits AS amount
     FROM refunds refund JOIN payment_orders payment ON payment.id=refund.payment_order_id
     WHERE refund.status IN ('REQUESTED','MANUAL_REVIEW')
+      -- Migration 27 preserves legacy wallet reservations. New targeted
+      -- refunds freeze entitlement components without reserving the wallet.
+      AND refund.entitlement_snapshot->>'migration_source'='LEGACY_ORDER_REFUND'
   ) reservations GROUP BY wallet_id
 ) holds ON holds.wallet_id=wallet.id
 WHERE wallet.reserved_microcredits <> COALESCE(holds.actual,0);
+
+SELECT 'wallet_receivable_snapshot_mismatch' AS check_name, count(*) AS violations
+FROM wallets wallet
+LEFT JOIN (
+  SELECT wallet_id,sum(outstanding_microcredits) AS actual
+  FROM receivables WHERE outstanding_microcredits>0 GROUP BY wallet_id
+) receivable ON receivable.wallet_id=wallet.id
+WHERE wallet.receivable_microcredits <> COALESCE(receivable.actual,0)
+   OR (wallet.financial_status='RECEIVABLE_OPEN') <> (COALESCE(receivable.actual,0)>0);
+
+SELECT 'receivable_amount_mismatch' AS check_name, count(*) AS violations
+FROM receivables
+WHERE original_microcredits <> settled_microcredits + outstanding_microcredits
+   OR (status IN ('SETTLED','WRITTEN_OFF')) <> (outstanding_microcredits=0);
+
+SELECT 'receivable_allocation_mismatch' AS check_name, count(*) AS violations
+FROM receivables receivable
+LEFT JOIN (
+  SELECT receivable_id,sum(amount_microcredits) AS actual
+  FROM receivable_allocations GROUP BY receivable_id
+) allocation ON allocation.receivable_id=receivable.id
+WHERE receivable.settled_microcredits <> COALESCE(allocation.actual,0);
+
+SELECT 'chargeback_package_mismatch' AS check_name, count(*) AS violations
+FROM chargeback_cases chargeback
+JOIN payment_transactions transaction ON transaction.id=chargeback.payment_transaction_id
+JOIN entitlement_packages package ON package.id=chargeback.entitlement_package_id
+WHERE transaction.payment_order_id<>chargeback.payment_order_id
+   OR package.source_payment_transaction_id<>chargeback.payment_transaction_id
+   OR package.wallet_id<>chargeback.wallet_id;
 
 SELECT 'entitlement_component_conservation_mismatch' AS check_name, count(*) AS violations
 FROM entitlement_components
@@ -74,6 +107,24 @@ WHERE component.reserved_microcredits <> COALESCE(allocation.reserved,0);
 
 SELECT 'expired_active_holds' AS check_name, count(*) AS violations
 FROM usage_holds WHERE status='ACTIVE' AND expires_at <= now();
+
+SELECT 'usage_hold_allocation_mismatch' AS check_name, count(*) AS violations
+FROM usage_holds hold
+LEFT JOIN (
+  SELECT hold_id,sum(reserved_microcredits-settled_microcredits-released_microcredits) outstanding
+  FROM usage_hold_allocations GROUP BY hold_id
+) allocation ON allocation.hold_id=hold.id
+WHERE (hold.status IN ('ACTIVE','REVIEW') AND COALESCE(allocation.outstanding,0)<>hold.max_microcredits)
+   OR (hold.status IN ('COMMITTED','RELEASED','EXPIRED') AND COALESCE(allocation.outstanding,0)<>0);
+
+SELECT 'usage_hold_latest_lease_mismatch' AS check_name, count(*) AS violations
+FROM usage_holds hold
+LEFT JOIN LATERAL (
+  SELECT expires_at,max_microcredits FROM usage_hold_lease_events event
+  WHERE event.hold_id=hold.id ORDER BY event.created_at DESC,event.id DESC LIMIT 1
+) latest ON true
+WHERE latest.expires_at IS NULL
+   OR (latest.expires_at,latest.max_microcredits)<>(hold.expires_at,hold.max_microcredits);
 
 SELECT 'paid_orders_not_credited' AS check_name, count(*) AS violations
 FROM payment_orders

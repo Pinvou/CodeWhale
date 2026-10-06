@@ -37,8 +37,13 @@ func TestPostgresComponentMigrationPreservesConsumedLegacyAndReviewHold(t *testi
 	conn.Release()
 	now := time.Now().UTC()
 	repo := &PostgresRepository{pool: pool, now: func() time.Time { return now }}
-	wallet, _, err := repo.EnsureWallet(ctx, "PERSONAL", uuid.New())
-	if err != nil {
+	// The immutable version-15 schema predates receivables and lifecycle columns.
+	// Seed its actual wallet/account facts directly, then run the real Up files.
+	wallet := Wallet{ID: uuid.New(), OwnerType: "PERSONAL", OwnerID: uuid.New(), Status: "ACTIVE", Version: 1}
+	if _, err = pool.Exec(ctx, `INSERT INTO wallets(id,owner_type,owner_id,status,created_at,updated_at) VALUES($1,'PERSONAL',$2,'ACTIVE',$3,$3)`, wallet.ID, wallet.OwnerID, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = pool.Exec(ctx, `INSERT INTO ledger_accounts(id,wallet_id,code,account_type,created_at) VALUES($1,$2,$3,'WALLET_LIABILITY',$4)`, uuid.New(), wallet.ID, "wallet:"+wallet.ID.String(), now); err != nil {
 		t.Fatal(err)
 	}
 	lotID, usageID, holdID := uuid.New(), uuid.New(), uuid.New()

@@ -18,6 +18,7 @@ import (
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/config"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/identity"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/paymentsimulator"
 	"github.com/Pinvou/pinvou3/account-platform/internal/token"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -72,13 +73,23 @@ func (contractRepository) AdminRetryReconciliation(context.Context, uuid.UUID, s
 	return token.AdminUsageRequest{}, errors.New("fixture operation not implemented")
 }
 
-type adminBillingRepository struct{ billing.Repository }
+// Unexercised methods are deliberately backed by a nil production repository;
+// every method reached by the controlled HTTP probes is overridden below.
+type adminBillingRepository struct{ *billing.PostgresRepository }
 
 func (adminBillingRepository) AdminOverview(context.Context) (billing.AdminOverview, error) {
-	return billing.AdminOverview{PostedMicrocredits: "9007199254740993", ReservedMicrocredits: "1"}, nil
+	provider := &paymentsimulator.Provider{}
+	facts := provider.Capabilities()
+	coordinator, err := billing.NewPaymentCoordinatorWithProvider(&billing.PostgresRepository{}, provider, map[string]billing.ExternalProduct{
+		"CNY_1": {MappingID: uuid.MustParse("00000000-0000-4000-8000-000000000003"), MappingVersion: 1, ProviderID: facts.ProviderID, ProviderVersion: facts.Version, SKU: "fixture-sku", AmountFen: 100, Currency: "CNY", Channels: []string{"ALIPAY"}, Status: "TEST_ONLY"},
+	}, "test")
+	if err != nil {
+		return billing.AdminOverview{}, err
+	}
+	return billing.AdminOverview{PostedMicrocredits: "9007199254740993", ReservedMicrocredits: "1", PaymentCapabilities: coordinator.Capabilities()}, nil
 }
 func (adminBillingRepository) AdminWallets(context.Context, int) ([]billing.Wallet, error) {
-	return []billing.Wallet{{PostedMicrocredits: 9007199254740993, ReservedMicrocredits: 1, AvailableMicrocredits: 9007199254740992}}, nil
+	return []billing.Wallet{{PostedMicrocredits: 18014398509481987, ReservedMicrocredits: 1, ReceivableMicrocredits: 9007199254740993, AvailableMicrocredits: 9007199254740993, FinancialStatus: "RECEIVABLE_OPEN"}}, nil
 }
 func (adminBillingRepository) AdminPaymentOrders(context.Context, billing.AdminPaymentOrderFilter, int) ([]billing.AdminPaymentOrder, error) {
 	return []billing.AdminPaymentOrder{{AmountFen: 9007199254740993, CreditMicrocredits: 9007199254740993}}, nil
@@ -171,8 +182,19 @@ type waiverReadRepository struct {
 	hold billing.AdminHold
 }
 
-func (r waiverReadRepository) AdminUsageHold(context.Context, uuid.UUID) (billing.AdminHold, error) {
+func (r waiverReadRepository) UsageHoldAuthority(context.Context, uuid.UUID) (billing.AdminHold, error) {
 	return r.hold, nil
+}
+
+func (r waiverReadRepository) PrepareAdminUsageWaiver(_ context.Context, id uuid.UUID, reason, actor, key string) (billing.AdminHold, error) {
+	if id != r.hold.ID || reason == "" || actor == "" || key != "fixture-waiver-logical-key" {
+		return billing.AdminHold{}, billing.ErrConflict
+	}
+	return r.hold, nil
+}
+
+func (r waiverReadRepository) RecordAdminUsageWaiver(ctx context.Context, id uuid.UUID, reason, actor, key string) (billing.AdminHold, error) {
+	return r.PrepareAdminUsageWaiver(ctx, id, reason, actor, key)
 }
 
 type waiverReadCoordinator struct{ hold billing.AdminHold }
@@ -191,6 +213,7 @@ func publicWaiverProbe(hold billing.AdminHold) json.RawMessage {
 	})
 	request := httptest.NewRequest("POST", "/admin/v1/usage-holds/"+hold.ID.String()+"/release", strings.NewReader(`{"reason":"fixture-waiver"}`))
 	request.Header.Set("Authorization", "Bearer fixture-admin")
+	request.Header.Set("Idempotency-Key", "fixture-waiver-logical-key")
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 	if response.Code != 200 {
@@ -266,12 +289,16 @@ func main() {
 	id := uuid.New()
 	paidAt := time.Now().UTC()
 	zero := int64(0)
-	waiver := billing.WaiverAuthority{Hold: billing.AdminHold{ID: id, UsageRequestID: id, WalletID: id, Status: "RELEASED", MaxMicrocredits: 9007199254740993, ActualMicrocredits: &zero, ExpiresAt: paidAt.Add(time.Hour), UpdatedAt: paidAt}, UsageSnapshot: json.RawMessage(`{"admin_waiver":true,"admin_actor":"fixture-actor","admin_release_reason":"fixture-waiver","usage":{"input_tokens":7,"output_tokens":0,"cached_input_tokens":0}}`)}
+	waiver := billing.WaiverAuthority{Hold: billing.AdminHold{ID: id, UsageRequestID: id, WalletID: id, Status: "RELEASED", AnomalyState: "NONE", MaxMicrocredits: 9007199254740993, ActualMicrocredits: &zero, ExpiresAt: paidAt.Add(time.Hour), CreatedAt: paidAt, UpdatedAt: paidAt}, UsageSnapshot: json.RawMessage(`{"admin_waiver":true,"admin_actor":"fixture-actor","admin_release_reason":"fixture-waiver","usage":{"input_tokens":7,"output_tokens":0,"cached_input_tokens":0}}`)}
 	transaction := "test-transaction"
-	order := billing.PaymentOrder{ID: id, MerchantOrderNo: "test-order", RequesterID: id, WalletID: id, ProductID: "CNY_1", Channel: "ALIPAY", AmountFen: 100, Currency: "CNY", CreditMicrocredits: 1000000, Status: "PAID", FulfillmentStatus: "CREDITED", PaymentURL: "http://127.0.0.1/test-payment", ChannelTransactionID: &transaction, ExpiresAt: paidAt.Add(time.Minute), PaidAt: &paidAt}
+	order := billing.PaymentOrder{ID: id, MerchantOrderNo: "test-order", RequesterID: id, WalletID: id, ProductID: "CNY_1", Channel: "ALIPAY", AmountFen: 100, Currency: "CNY", CreditMicrocredits: 1000000, Status: "PAID", FulfillmentStatus: "CREDITED", PaymentURL: "http://127.0.0.1/test-payment", PrimaryProviderTransactionID: &transaction, ExpiresAt: paidAt.Add(time.Minute), PaidAt: &paidAt}
+	order.ProviderPayableUntil = order.ExpiresAt
+	order.LateReviewBoundaryAt = order.ExpiresAt.Add(time.Hour)
+	order.FinalArchiveEligibleAt = order.LateReviewBoundaryAt.Add(time.Hour)
+	order.ArchiveStatus = "ACTIVE"
 	created := order
 	created.Status, created.FulfillmentStatus = "CREATED", "PENDING"
-	created.PaymentURL, created.ChannelTransactionID, created.PaidAt = "", nil, nil
+	created.PaymentURL, created.PrimaryProviderTransactionID, created.PaidAt = "", nil, nil
 	product := billing.Product{ProductID: "CNY_1", AmountFen: 100, CreditMicrocredits: 1000000, DisplayPoints: 100, Currency: "CNY", Channels: []string{"ALIPAY"}, CatalogVersion: 1, PriceStatus: "LEGACY"}
 	order.QRData = "fixture-qr"
 	userCode, err := account.GenerateUserCode()
@@ -310,7 +337,7 @@ func main() {
 		panic("invalid profile ID did not reach production not-found response")
 	}
 	mobileErrors["profile_not_found"] = profileResponse.Body.Bytes()
-	wallet := billing.Wallet{ID: id, OwnerType: "PERSONAL", OwnerID: id, Status: "ACTIVE", PostedMicrocredits: 1000000, ReservedMicrocredits: 1000, AvailableMicrocredits: 999000, Version: 1}
+	wallet := billing.Wallet{ID: id, OwnerType: "PERSONAL", OwnerID: id, Status: "ACTIVE", PostedMicrocredits: 1000000, ReservedMicrocredits: 1000, AvailableMicrocredits: 999000, FinancialStatus: "CLEAR", Version: 1}
 	handler := billing.NewService(nil).WithPayments(&billing.PaymentCoordinator{}).Handler("fixture-only-service-token")
 	routes := map[string]int{}
 	for _, probe := range []struct{ method, path string }{
@@ -332,7 +359,7 @@ func main() {
 	}
 	errors["MODEL_CATALOG_UNAVAILABLE"] = catalogProbe(contractRepository{catalogUnavailable: true}, contractContext{value: token.AuthorizationContext{UserID: id, ContextType: "PERSONAL"}}, http.StatusServiceUnavailable)
 	catalog := catalogProbe(contractRepository{candidate: token.Candidate{TokenAccountID: id, OwnerType: "USER", OwnerID: id, Status: "ACTIVE", HealthStatus: "HEALTHY", CredentialID: id, WalletID: id, AllowedModels: []string{"fixture-model"}}}, contractContext{value: token.AuthorizationContext{UserID: id, ContextType: "PERSONAL"}}, http.StatusOK)
-	if err := json.NewEncoder(output).Encode(map[string]any{"slider_captcha": account.SliderCaptchaResponse{ID: id, BackgroundImage: "fixture-background", PieceImage: "fixture-piece", Width: 280, Height: 120, PieceWidth: 44, PieceHeight: 44, PieceY: 14, ExpiresAt: paidAt}, "mobile_registration": account.RegistrationResult{OperationID: id, UserID: &id, UserCode: account.FormatUserCode(userCode), Username: "fixtureuser", Status: "PROVISIONING", PasswordPreserved: false}, "mobile_errors": mobileErrors, "me": me, "entitlement": plan, "entitlement_no_expiry": legacy, "entitlement_manual": manual, "package_summary": billing.PackageSummary{AvailableMicrocredits: "9007199254740993", BaseAvailableMicrocredits: "9007199254740993", BonusAvailableMicrocredits: "0", ReservedMicrocredits: "0", UsedMicrocredits: "0", ActivePackageCount: 1, NextExpiryMicrocredits: "9007199254740993"}, "order_history": history, "waiver_public": publicWaiverProbe(waiver.Hold), "waiver_authority": waiver, "waiver_intent": map[string]any{"hold_id": id, "usage_request_id": id, "reason": "fixture-waiver", "actor": "fixture-actor"}, "product": product, "paid": order, "created": created, "wallet": wallet, "routes": routes, "eligible": eligible, "token_errors": errors, "model_catalog": catalog, "rate_limited": rateLimitProbe(), "recent_created": map[string]any{"order": created}, "recent_empty": map[string]any{"order": nil}, "financial_reads": financialReadProbes(), "organization_member": account.Member{MembershipID: id, UserID: id, Status: "ACTIVE", Version: 1, Roles: []string{"MEMBER", "UNIT_ADMIN"}, UnitIDs: []uuid.UUID{}, UnitAdminIDs: []uuid.UUID{id}, JoinedAt: paidAt}}); err != nil {
+	if err := json.NewEncoder(output).Encode(map[string]any{"a10_financial": financialV2Fixtures(), "slider_captcha": account.SliderCaptchaResponse{ID: id, BackgroundImage: "fixture-background", PieceImage: "fixture-piece", Width: 280, Height: 120, PieceWidth: 44, PieceHeight: 44, PieceY: 14, ExpiresAt: paidAt}, "mobile_registration": account.RegistrationResult{OperationID: id, UserID: &id, UserCode: account.FormatUserCode(userCode), Username: "fixtureuser", Status: "PROVISIONING", PasswordPreserved: false}, "mobile_errors": mobileErrors, "me": me, "entitlement": plan, "entitlement_no_expiry": legacy, "entitlement_manual": manual, "package_summary": billing.PackageSummary{AvailableMicrocredits: "9007199254740993", BaseAvailableMicrocredits: "9007199254740993", BonusAvailableMicrocredits: "0", ReservedMicrocredits: "0", UsedMicrocredits: "0", ActivePackageCount: 1, NextExpiryMicrocredits: "9007199254740993"}, "order_history": history, "waiver_public": publicWaiverProbe(waiver.Hold), "waiver_authority": waiver, "waiver_intent": map[string]any{"hold_id": id, "usage_request_id": id, "reason": "fixture-waiver", "actor": "fixture-actor"}, "product": product, "paid": order, "created": created, "wallet": wallet, "routes": routes, "eligible": eligible, "token_errors": errors, "model_catalog": catalog, "rate_limited": rateLimitProbe(), "recent_created": map[string]any{"order": created}, "recent_empty": map[string]any{"order": nil}, "financial_reads": financialReadProbes(), "organization_member": account.Member{MembershipID: id, UserID: id, Status: "ACTIVE", Version: 1, Roles: []string{"MEMBER", "UNIT_ADMIN"}, UnitIDs: []uuid.UUID{}, UnitAdminIDs: []uuid.UUID{id}, JoinedAt: paidAt}}); err != nil {
 		panic(err)
 	}
 }

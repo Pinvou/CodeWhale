@@ -889,6 +889,9 @@ fn route_allowed(area: &str, method: &Method, path: &str, query: Option<&str>) -
                 .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
     };
     match (area, method, segments.as_slice(), query) {
+        ("token", &Method::POST, ["v1", "recharge", "orders", id, "payment-claims"], None) => {
+            uuid::Uuid::parse_str(id).is_ok_and(|id| !id.is_nil())
+        }
         ("token", &Method::POST, ["v1", "chat", "completions"], None) => true,
         ("token", &Method::GET, ["v1", "me", "usage-requests"], query) => {
             usage_history_query_allowed(query)

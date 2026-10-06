@@ -907,6 +907,51 @@ try {
       assert.equal(calls.length,2);assert.equal(calls[0].idempotencyKey,calls[1].idempotencyKey);assert.deepEqual(calls[0].body,calls[1].body);
     });
   }
+  for (const locale of ['zh','en','ja']) {
+    await runCase('late payment statement records evidence without claiming paid in '+locale,'a10-payment-claim',async page => {
+      await page.evaluate(() => [...document.querySelectorAll('nav button')].find(element => element.textContent === window.__accountReview.copy.sections.orders).click());
+      await page.waitForSelector('.ap-trace-card textarea'); await page.type('.ap-trace-card textarea','Controlled payment statement');
+      await page.click('.ap-trace-card form button');
+      await page.waitForFunction(() => document.body.textContent.includes(window.__accountReview.copy.paymentClaimRecorded));
+      assert.equal(await page.$eval('.ap-trace-card textarea',element => element.value),'');
+      const call = await page.evaluate(() => window.__accountReview.calls.find(item => item.path.endsWith('/payment-claims')));
+      assert.deepEqual(call.body,{statement:'Controlled payment statement'});
+    },locale);
+  }
+  await runCase('payment statement counts Unicode code points within the actual provider-independent bound','a10-payment-claim',async page => {
+    await page.evaluate(() => [...document.querySelectorAll('nav button')].find(element => element.textContent === window.__accountReview.copy.sections.orders).click());
+    await page.waitForSelector('.ap-trace-card textarea');
+    const setStatement = async statement => page.$eval('.ap-trace-card textarea', (element, value) => {
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(element, value);
+      element.dispatchEvent(new Event('input', { bubbles:true }));
+    }, statement);
+    await setStatement('😀'.repeat(9));
+    assert.equal(await page.$eval('.ap-trace-card form button', element => element.disabled), true);
+    await setStatement('😀'.repeat(1001));
+    assert.equal(await page.$eval('.ap-trace-card form button', element => element.disabled), true);
+    const statement = '😀'.repeat(1000);
+    await setStatement(statement);
+    assert.equal(await page.$eval('.ap-trace-card form button', element => element.disabled), false);
+    await page.click('.ap-trace-card form button');
+    await page.waitForFunction(() => document.querySelector('.ap-trace-card textarea').value === '');
+    const calls = await page.evaluate(() => window.__accountReview.calls.filter(item => item.path.endsWith('/payment-claims')));
+    assert.equal(calls.length, 1); assert.deepEqual(calls[0].body, { statement });
+  });
+  await runCase('unknown payment claim acknowledgement preserves the statement for exact retry','a10-payment-claim-unknown',async page => {
+    await page.evaluate(() => [...document.querySelectorAll('nav button')].find(element => element.textContent === window.__accountReview.copy.sections.orders).click());
+    await page.waitForSelector('.ap-trace-card textarea'); await page.type('.ap-trace-card textarea','Controlled retry statement'); await page.click('.ap-trace-card form button');
+    await page.waitForSelector('main > [role=alert]'); assert.equal(await page.$eval('.ap-trace-card textarea',element => element.value),'Controlled retry statement');
+    await page.click('.ap-trace-card form button'); await page.waitForFunction(() => document.querySelector('.ap-trace-card textarea').value === '');
+    const calls = await page.evaluate(() => window.__accountReview.calls.filter(item => item.path.endsWith('/payment-claims')));
+    assert.equal(calls.length,2); assert.deepEqual(calls[0].body,calls[1].body);
+  });
+  await runCase('missing actual provider channels cannot fabricate a recharge channel','a10-channel-missing',async page => {
+    await page.evaluate(() => [...document.querySelectorAll('nav button')].find(element => element.textContent === window.__accountReview.copy.sections.credits).click());
+    await page.waitForSelector('.ap-product-grid');
+    assert.equal(await page.$$eval('.ap-inline select option',elements => elements.length),0);
+    assert.equal(await page.$eval('.ap-inline button',element => element.disabled),true);
+    assert.equal(await page.evaluate(() => window.__accountReview.calls.filter(item => item.method === 'POST' && item.path === '/api/token/v1/recharge/orders').length),0);
+  });
   console.log(`Account UI: ${passed} PASS, ${failures.length} FAIL, 0 SKIP. Controlled API responses; real React/client/QR; not BFF/PG or Safari E2E.`);
   assert.equal(failures.length, 0, `Failing scenarios: ${failures.join(', ')}`);
 } finally {

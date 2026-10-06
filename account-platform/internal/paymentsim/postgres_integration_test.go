@@ -172,7 +172,7 @@ func TestPostgresSimulatorToBillingSignedCallbackAndDelayedRetry(t *testing.T) {
 			}
 			defer repo.Close()
 			billingServer := httptest.NewUnstartedServer(nil)
-			coordinator, err := billing.NewPaymentCoordinator(repo, simServer.URL, serviceToken, "pinvou-development", "http://"+billingServer.Listener.Addr().String()+"/internal/payment/notifications", secrets)
+			coordinator, err := newMappedSimulatorCoordinatorForTest(t, repo, simServer.URL, serviceToken, "http://"+billingServer.Listener.Addr().String()+"/internal/payment/notifications", secrets)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -244,8 +244,12 @@ func TestPostgresSimulatorToBillingSignedCallbackAndDelayedRetry(t *testing.T) {
 			if err := simPool.QueryRow(ctx, `SELECT notification_id,attempts,status FROM simulator_notifications`).Scan(&finalID, &attempts, &state); err != nil || finalID != notificationID || attempts != 2 || state != "DELIVERED" {
 				t.Fatalf("retry changed event %v %v %d %s %v", notificationID, finalID, attempts, state, err)
 			}
-			var credits, events, notifications int
-			if err := billingPool.QueryRow(ctx, `SELECT (SELECT count(*) FROM journal_entries WHERE business_reference=$1),(SELECT count(*) FROM outbox_events WHERE aggregate_id=$2),(SELECT count(*) FROM payment_notifications WHERE notification_id=$3)`, "recharge:"+order.ID.String(), order.ID, notificationID).Scan(&credits, &events, &notifications); err != nil || credits != 1 || events != 1 || notifications != 1 {
+			var credits, events, notifications, transactions int
+			var transactionID uuid.UUID
+			if err := billingPool.QueryRow(ctx, `SELECT id FROM payment_transactions WHERE payment_order_id=$1`, order.ID).Scan(&transactionID); err != nil {
+				t.Fatal("callback did not persist exactly one payment transaction", err)
+			}
+			if err := billingPool.QueryRow(ctx, `SELECT (SELECT count(*) FROM journal_entries WHERE business_reference=$1),(SELECT count(*) FROM outbox_events WHERE aggregate_id=$2),(SELECT count(*) FROM payment_notifications WHERE notification_id=$3),(SELECT count(*) FROM payment_transactions WHERE payment_order_id=$4)`, "payment-transaction:"+transactionID.String(), transactionID, notificationID, order.ID).Scan(&credits, &events, &notifications, &transactions); err != nil || credits != 1 || events != 1 || notifications != 1 || transactions != 1 {
 				t.Fatalf("duplicate financial effects: %d %d %d %v", credits, events, notifications, err)
 			}
 		})
@@ -321,7 +325,7 @@ func TestPostgresPaymentActivationRecoversProviderTerminalOverHTTP(t *testing.T)
 			}
 			defer repo.Close()
 			secret := "test-only-payment-hmac-thirty-two-chars"
-			coordinator, err := billing.NewPaymentCoordinator(repo, simServer.URL, token, "pinvou-development", "http://127.0.0.1/unused-notification", map[string]string{"ALIPAY": secret, "UNIONPAY": secret, "WECHAT": secret})
+			coordinator, err := newMappedSimulatorCoordinatorForTest(t, repo, simServer.URL, token, "http://127.0.0.1/unused-notification", map[string]string{"ALIPAY": secret, "UNIONPAY": secret, "WECHAT": secret})
 			if err != nil {
 				t.Fatal(err)
 			}

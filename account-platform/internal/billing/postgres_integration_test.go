@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/payment"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/testdb"
 	"github.com/google/uuid"
 )
@@ -211,7 +212,7 @@ type recoverableProvider struct {
 	failFirst bool
 }
 
-func (p *recoverableProvider) Create(_ context.Context, o PaymentOrder, _ string) (ProviderOrder, error) {
+func (p *recoverableProvider) Create(_ context.Context, o payment.Order, _ string) (ProviderOrder, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.orders == nil {
@@ -220,13 +221,16 @@ func (p *recoverableProvider) Create(_ context.Context, o PaymentOrder, _ string
 	if result, ok := p.orders[o.MerchantOrderNo]; ok {
 		return result, nil
 	}
-	result := ProviderOrder{MerchantOrderNo: o.MerchantOrderNo, Channel: o.Channel, AmountFen: o.AmountFen, Currency: o.Currency, PaymentURL: "https://payment.example/order/" + o.MerchantOrderNo, Status: "PENDING"}
+	result := ProviderOrder{MerchantOrderNo: o.MerchantOrderNo, Channel: o.Channel, AmountFen: o.AmountFen, Currency: o.Currency, Mobile: o.Mobile, ProviderSKU: o.ExternalSKU, PaymentURL: "https://payment.example/order/" + o.MerchantOrderNo, Status: "PENDING"}
 	p.orders[o.MerchantOrderNo] = result
 	if p.failFirst {
 		p.failFirst = false
 		return ProviderOrder{}, errors.New("response lost after external creation")
 	}
 	return result, nil
+}
+func (*recoverableProvider) Capabilities() payment.Capabilities {
+	return payment.Capabilities{ProviderID: "development_simulator", Version: "development-simulator-v1", Channels: []string{"ALIPAY", "UNIONPAY", "WECHAT"}, OrderQuerySupported: true, MinimumQueryIntervalSeconds: 1, MaximumPayableWindowSeconds: 900, MaximumLateConfirmationSeconds: 60, OrderHistoryRetentionSeconds: 7776000, NotificationSupported: true, RefundSupported: true, RefundIdempotencySupported: true, BillSupported: true, TestOnly: true}
 }
 func (*recoverableProvider) Get(context.Context, string) (ProviderOrder, error) {
 	return ProviderOrder{}, errors.New("unused")
@@ -244,7 +248,18 @@ func (*recoverableProvider) Bill(context.Context, string, time.Time) ([]Provider
 func paymentFixture(t *testing.T) (*PaymentCoordinator, Wallet, uuid.UUID) {
 	t.Helper()
 	r, w := billingFixture(t)
-	p := &PaymentCoordinator{repository: r, provider: &recoverableProvider{}, now: r.now, merchantID: "pinvou-development", callbackURL: "https://billing.example/callback", secrets: map[string][]byte{"ALIPAY": []byte("test-only-notification-secret-32-chars")}}
+	mappings, err := r.ActiveExternalProducts(context.Background(), "development_simulator", "development-simulator-v1", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := NewPaymentCoordinatorWithProvider(r, &recoverableProvider{}, mappings, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.now = r.now
+	if err := p.ConfigureNotifications("pinvou-development", "https://billing.example/callback", map[string]string{"ALIPAY": "test-only-notification-secret-32-chars", "UNIONPAY": "test-only-notification-secret-32-chars", "WECHAT": "test-only-notification-secret-32-chars"}); err != nil {
+		t.Fatal(err)
+	}
 	return p, w, w.OwnerID
 }
 
@@ -310,7 +325,7 @@ func creditedOrder(t *testing.T, p *PaymentCoordinator, w Wallet, user uuid.UUID
 	}
 	paidAt := p.now()
 	txn := "transaction-" + o.ID.String()
-	o, err = p.applyQueriedPayment(ctx, o.ID, ProviderOrder{MerchantOrderNo: o.MerchantOrderNo, Channel: o.Channel, AmountFen: o.AmountFen, Currency: o.Currency, Status: "SUCCESS", PaidAt: &paidAt, ChannelTransactionID: &txn})
+	o, err = p.applyQueriedPayment(ctx, o.ID, ProviderOrder{MerchantOrderNo: o.MerchantOrderNo, Channel: o.Channel, AmountFen: o.AmountFen, Currency: o.Currency, Mobile: o.Mobile, ProviderSKU: o.ProviderSKU, Status: "SUCCESS", PaidAt: &paidAt, ChannelTransactionID: &txn}, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -324,11 +339,12 @@ func TestPostgresPendingRefundProtectsOriginalLot(t *testing.T) {
 			ctx := context.Background()
 			a := creditedOrder(t, p, w, user, "recharge-order-first")
 			b := creditedOrder(t, p, w, user, "recharge-order-second")
-			refund, _, err := p.reserveRefund(ctx, a.ID, user, a.AmountFen, "refund-original-lot", "hash-original", "full unused lot")
+			source, packageID := refundTargetFixture(t, p, a.ID)
+			refund, _, err := p.reserveRefund(ctx, a.ID, user, source, packageID, "refund-original-lot", "hash-original", "full unused lot")
 			if err != nil {
 				t.Fatal(err)
 			}
-			if _, _, err := p.reserveRefund(ctx, a.ID, user, a.AmountFen, "refund-duplicate-lot", "another-hash", "second full refund"); !errors.Is(err, ErrInsufficientBalance) {
+			if _, _, err := p.reserveRefund(ctx, a.ID, user, source, packageID, "refund-duplicate-lot", "another-hash", "second full refund"); !errors.Is(err, ErrConflict) {
 				t.Fatalf("oversubscribed source lot: %v", err)
 			}
 			if debit == "usage" {
@@ -349,7 +365,7 @@ func TestPostgresPendingRefundProtectsOriginalLot(t *testing.T) {
 				}
 			}
 			var remaining int64
-			if err := p.repository.pool.QueryRow(ctx, `SELECT remaining_microcredits FROM credit_lots WHERE source_reference=$1`, "recharge:"+a.ID.String()).Scan(&remaining); err != nil || remaining != a.CreditMicrocredits {
+			if err := p.repository.pool.QueryRow(ctx, `SELECT lot.remaining_microcredits FROM entitlement_packages package JOIN credit_lots lot ON lot.id=package.credit_lot_id WHERE package.payment_order_id=$1`, a.ID).Scan(&remaining); err != nil || remaining != a.CreditMicrocredits {
 				t.Fatalf("refund lot consumed: %d %v", remaining, err)
 			}
 			result, _, err := p.finishRefund(ctx, refund, ProviderRefund{MerchantRefundNo: refund.MerchantRefundNo, ChannelRefundID: "refund-channel-id", AmountFen: refund.AmountFen, Status: "SUCCESS"}, true)
@@ -369,7 +385,8 @@ func TestPostgresRechargeNotificationAfterFullRefundIsIdempotent(t *testing.T) {
 	p, w, user := paymentFixture(t)
 	ctx := context.Background()
 	o := creditedOrder(t, p, w, user, "recharge-callback-test")
-	ref, _, err := p.reserveRefund(ctx, o.ID, user, o.AmountFen, "refund-callback-test", "hash", "unused refund")
+	source, packageID := refundTargetFixture(t, p, o.ID)
+	ref, _, err := p.reserveRefund(ctx, o.ID, user, source, packageID, "refund-callback-test", "hash", "unused refund")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -377,13 +394,13 @@ func TestPostgresRechargeNotificationAfterFullRefundIsIdempotent(t *testing.T) {
 		t.Fatal(err)
 	}
 	for range 2 {
-		body, _ := json.Marshal(map[string]any{"notification_id": uuid.New(), "merchant_id": p.merchantID, "merchant_order_no": o.MerchantOrderNo, "channel_transaction_id": *o.ChannelTransactionID, "channel": o.Channel, "status": "SUCCESS", "amount_fen": o.AmountFen, "currency": o.Currency, "paid_at": o.PaidAt, "timestamp": p.now().Unix()})
+		body, _ := json.Marshal(map[string]any{"notification_id": uuid.New(), "merchant_id": p.merchantID, "merchant_order_no": o.MerchantOrderNo, "channel_transaction_id": *o.PrimaryProviderTransactionID, "channel": o.Channel, "status": "SUCCESS", "amount_fen": o.AmountFen, "currency": o.Currency, "paid_at": o.PaidAt, "timestamp": p.now().Unix()})
 		if err := p.ProcessNotification(ctx, o.Channel, paymentSignature(p.secrets[o.Channel], body), body); err != nil {
 			t.Fatal(err)
 		}
 	}
 	var events int
-	if err := p.repository.pool.QueryRow(ctx, `SELECT count(*) FROM outbox_events WHERE aggregate_id=$1 AND event_type='billing.recharge.succeeded.v1'`, o.ID).Scan(&events); err != nil || events != 1 {
+	if err := p.repository.pool.QueryRow(ctx, `SELECT count(*) FROM outbox_events WHERE aggregate_id=$1 AND event_type='billing.recharge.succeeded.v1'`, source).Scan(&events); err != nil || events != 1 {
 		t.Fatalf("events %d %v", events, err)
 	}
 	wallet, err := p.repository.GetWallet(ctx, w.ID)
@@ -400,7 +417,7 @@ func TestPostgresNotificationRetryOnlyTimestampMayChange(t *testing.T) {
 	now := p.now()
 	p.now = func() time.Time { return now }
 	id := uuid.New()
-	body, _ := json.Marshal(map[string]any{"notification_id": id, "merchant_id": p.merchantID, "merchant_order_no": o.MerchantOrderNo, "channel_transaction_id": *o.ChannelTransactionID, "channel": o.Channel, "status": "SUCCESS", "amount_fen": o.AmountFen, "currency": o.Currency, "paid_at": o.PaidAt, "timestamp": now.Unix()})
+	body, _ := json.Marshal(map[string]any{"notification_id": id, "merchant_id": p.merchantID, "merchant_order_no": o.MerchantOrderNo, "channel_transaction_id": *o.PrimaryProviderTransactionID, "channel": o.Channel, "status": "SUCCESS", "amount_fen": o.AmountFen, "currency": o.Currency, "paid_at": o.PaidAt, "timestamp": now.Unix()})
 	if err := p.ProcessNotification(ctx, o.Channel, paymentSignature(p.secrets[o.Channel], body), body); err != nil {
 		t.Fatal(err)
 	}
@@ -446,7 +463,9 @@ type closeReplyProvider struct {
 }
 
 func (*closeReplyProvider) Capabilities() PaymentCapabilities {
-	return PaymentCapabilities{CloseSupported: true, OrderSyncSupported: true}
+	caps := (&recoverableProvider{}).Capabilities()
+	caps.CloseSupported = true
+	return caps
 }
 
 func (p *closeReplyProvider) Get(context.Context, string) (ProviderOrder, error) { return p.order, nil }
@@ -594,8 +613,12 @@ func TestPostgresConcurrentCallbacksCreditAndEmitOnlyOnce(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
+			var source uuid.UUID
+			if err := p.repository.pool.QueryRow(ctx, `SELECT id FROM payment_transactions WHERE payment_order_id=$1`, o.ID).Scan(&source); err != nil {
+				t.Fatal(err)
+			}
 			var entries, events int
-			if err := p.repository.pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM journal_entries WHERE business_reference=$1),(SELECT count(*) FROM outbox_events WHERE aggregate_id=$2)`, "recharge:"+o.ID.String(), o.ID).Scan(&entries, &events); err != nil || entries != 1 || events != 1 {
+			if err := p.repository.pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM journal_entries WHERE business_reference=$1),(SELECT count(*) FROM outbox_events WHERE aggregate_id=$2 AND event_type='billing.recharge.succeeded.v1')`, "payment-transaction:"+source.String(), source).Scan(&entries, &events); err != nil || entries != 1 || events != 1 {
 				t.Fatalf("duplicate effects %d %d %v", entries, events, err)
 			}
 			wallet, err := p.repository.GetWallet(ctx, w.ID)
@@ -612,7 +635,7 @@ func TestPostgresNotificationRouteChannelCannotReplayOrPersistUnknownChannel(t *
 	ctx := context.Background()
 	o := creditedOrder(t, p, w, user, "channel-notification-key")
 	p.secrets["WECHAT"] = p.secrets["ALIPAY"]
-	body, _ := json.Marshal(map[string]any{"notification_id": uuid.New(), "merchant_id": p.merchantID, "merchant_order_no": o.MerchantOrderNo, "channel_transaction_id": *o.ChannelTransactionID, "channel": o.Channel, "status": "SUCCESS", "amount_fen": o.AmountFen, "currency": o.Currency, "paid_at": o.PaidAt, "timestamp": p.now().Unix()})
+	body, _ := json.Marshal(map[string]any{"notification_id": uuid.New(), "merchant_id": p.merchantID, "merchant_order_no": o.MerchantOrderNo, "channel_transaction_id": *o.PrimaryProviderTransactionID, "channel": o.Channel, "status": "SUCCESS", "amount_fen": o.AmountFen, "currency": o.Currency, "paid_at": o.PaidAt, "timestamp": p.now().Unix()})
 	if err := p.ProcessNotification(ctx, o.Channel, paymentSignature(p.secrets[o.Channel], body), body); err != nil {
 		t.Fatal(err)
 	}
@@ -671,4 +694,14 @@ func TestPostgresUnavailableWalletCannotCreateProviderPayment(t *testing.T) {
 			}
 		})
 	}
+}
+
+// The targeted refund command binds an actual paid transaction and its package.
+func refundTargetFixture(t *testing.T, p *PaymentCoordinator, orderID uuid.UUID) (uuid.UUID, uuid.UUID) {
+	t.Helper()
+	var source, packageID uuid.UUID
+	if err := p.repository.pool.QueryRow(context.Background(), `SELECT source_payment_transaction_id,id FROM entitlement_packages WHERE payment_order_id=$1`, orderID).Scan(&source, &packageID); err != nil {
+		t.Fatal(err)
+	}
+	return source, packageID
 }

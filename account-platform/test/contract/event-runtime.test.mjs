@@ -8,13 +8,13 @@ import addFormats from 'ajv-formats';
 
 const root = path.resolve(import.meta.dirname, '../..');
 
-test('registration and profile schemas accept the actual production event envelope', async () => {
+test('registration, profile, and payment schemas accept the actual production event envelope', async () => {
   const result = spawnSync(process.env.PINVOU_ACCOUNT_GO_EXECUTABLE || (process.platform === 'win32' ? 'go.exe' : 'go'),
     ['run', '-mod=readonly', './test/contract/event-fixtures'], { cwd: root, encoding: 'utf8', timeout: 120000 });
   assert.ifError(result.error);
   assert.equal(result.status, 0, result.stderr);
   const fixtures = JSON.parse(result.stdout);
-  assert.equal(Object.keys(fixtures).length, 3);
+  assert.equal(Object.keys(fixtures).length, 7);
   const ajv = new Ajv2020({ strict: true, allErrors: true });
   addFormats(ajv);
   for (const [name, event] of Object.entries(fixtures)) {

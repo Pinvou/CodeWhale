@@ -16,6 +16,7 @@ import (
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/paymentsim"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/identity"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/paymentsimulator"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/testdb"
 	"github.com/Pinvou/pinvou3/account-platform/internal/token"
 	"github.com/google/uuid"
@@ -53,8 +54,20 @@ func TestPostgresHTTPOrganizationLegacyRechargeAndPersonalPlanBoundaries(t *test
 	}
 	defer sim.Close()
 	simHandler = paymentsim.NewService(sim).Handler(secret)
-	p, err := NewPaymentCoordinator(r, simServer.URL, secret, "controlled-merchant", "http://127.0.0.1/controlled-callback", map[string]string{"UNIONPAY": secret, "ALIPAY": secret, "WECHAT": secret})
+	provider, err := paymentsimulator.New(simServer.URL, secret)
 	if err != nil {
+		t.Fatal(err)
+	}
+	mappings, err := r.ActiveExternalProducts(ctx, "development_simulator", "development-simulator-v1", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := NewPaymentCoordinatorWithProvider(r, provider, mappings, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.AllowTentativePrices(true) // Controlled test-only PLAN catalog; production defaults remain restrictive.
+	if err := p.ConfigureNotifications("controlled-merchant", "http://127.0.0.1/controlled-callback", map[string]string{"UNIONPAY": secret, "ALIPAY": secret, "WECHAT": secret}); err != nil {
 		t.Fatal(err)
 	}
 	server := httptest.NewServer(NewService(r).WithPayments(p).Handler(secret))

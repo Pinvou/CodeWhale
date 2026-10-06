@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -30,25 +31,51 @@ type fixtureBilling struct {
 	BillingClient
 	mu                sync.Mutex
 	releaseErr        error
+	extendErr         error
 	commits, releases int
 	actual            int64
 	maximum           int64
 	price             *PriceVersion
 	holdID            uuid.UUID
+	usageID, walletID uuid.UUID
 }
 
-func (f *fixtureBilling) Price(context.Context, string) (PriceVersion, error) {
+func (f *fixtureBilling) Price(_ context.Context, model string) (PriceVersion, error) {
 	if f.price != nil {
-		return *f.price, nil
+		price := *f.price
+		price.Model = model
+		return versionedTestPrice(price), nil
 	}
-	return PriceVersion{ID: uuid.New(), InputPerMillion: 1_000_000, OutputPerMillion: 1_000_000, CachedInputPerMillion: 1_000_000}, nil
+	return versionedTestPrice(PriceVersion{ID: uuid.New(), Model: model, InputPerMillion: 1_000_000, OutputPerMillion: 1_000_000, CachedInputPerMillion: 1_000_000}), nil
 }
 func (f *fixtureBilling) Reserve(_ context.Context, usageID, wallet uuid.UUID, maximum int64, price uuid.UUID) (BillingHold, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.holdID = uuid.New()
+	f.usageID, f.walletID = usageID, wallet
 	f.maximum = maximum
-	return BillingHold{ID: f.holdID, UsageRequestID: usageID, Status: "ACTIVE"}, nil
+	return BillingHold{ID: f.holdID, UsageRequestID: usageID, WalletID: wallet, PriceVersionID: &price, MaxMicrocredits: &maximum, Status: "ACTIVE", ExpiresAt: time.Now().Add(time.Minute)}, nil
+}
+
+func (f *fixtureBilling) ReservePriced(ctx context.Context, usageID, wallet uuid.UUID, maximum int64, price uuid.UUID, pricing HoldPricingContext) (BillingHold, error) {
+	var snapshot PriceVersion
+	if json.Unmarshal(pricing.PricingSnapshot, &snapshot) != nil || ValidatePriceFormula(snapshot) != nil || snapshot.ID != price || snapshot.FormulaVersionID != pricing.FormulaVersionID {
+		return BillingHold{}, ErrForbidden
+	}
+	return f.Reserve(ctx, usageID, wallet, maximum, price)
+}
+
+func (f *fixtureBilling) Extend(_ context.Context, usageID, holdID, walletID uuid.UUID, maximum, additional int64) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.extendErr != nil {
+		return f.extendErr
+	}
+	if usageID != f.usageID || holdID != f.holdID || walletID != f.walletID || maximum != f.maximum || additional < 0 || f.maximum > math.MaxInt64-additional {
+		return ErrForbidden
+	}
+	f.maximum += additional
+	return nil
 }
 func (f *fixtureBilling) Commit(_ context.Context, _, _, _ uuid.UUID, actual int64, _ Usage) error {
 	f.mu.Lock()
@@ -149,9 +176,7 @@ func TestPostgresProxyDoneSettlesWithoutTransportEOF(t *testing.T) {
 				t.Fatal(err)
 			}
 			price := PriceVersion{ID: uuid.New(), Model: "model-test", InputPerMillion: 1_000_000, CachedInputPerMillion: 2_000_000}
-			if _, err = billingPool.Exec(ctx, `INSERT INTO pricing_versions(id,model,input_per_million,output_per_million,cached_input_per_million,effective_from,created_at) VALUES($1,$2,$3,$4,$5,$6,$6)`, price.ID, price.Model, price.InputPerMillion, price.OutputPerMillion, price.CachedInputPerMillion, time.Now().Add(-time.Hour)); err != nil {
-				t.Fatal(err)
-			}
+			price = publishedBillingPriceFixture(t, billingRepo, price.Model, price.InputPerMillion, price.OutputPerMillion, price.CachedInputPerMillion)
 			if _, err = tokenRepo.pool.Exec(ctx, `UPDATE token_accounts SET wallet_id=$1`, wallet.ID); err != nil {
 				t.Fatal(err)
 			}
@@ -275,8 +300,8 @@ func TestPostgresProxyExplicitZeroUsageSettlesAndBoundsOutput(t *testing.T) {
 	if usageStatus(t, repo) != "COMMITTED" || bill.commitCount() != 1 || bill.charge() != 0 {
 		t.Fatal("explicit zero usage was not settled")
 	}
-	if !bytes.Contains(upstreamBody, []byte(`"max_tokens":4096`)) || !bytes.Contains(upstreamBody, []byte(`9007199254740993`)) {
-		t.Fatalf("upstream bounds/precision: %s", upstreamBody)
+	if bytes.Contains(upstreamBody, []byte(`"max_tokens"`)) || bytes.Contains(upstreamBody, []byte(`"max_completion_tokens"`)) || !bytes.Contains(upstreamBody, []byte(`9007199254740993`)) {
+		t.Fatalf("upstream missing-output/precision: %s", upstreamBody)
 	}
 }
 

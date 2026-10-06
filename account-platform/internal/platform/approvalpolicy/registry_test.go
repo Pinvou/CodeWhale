@@ -40,3 +40,14 @@ func TestNormalRefundAndOrganizationDeleteAreAuditOnly(t *testing.T) {
 		}
 	}
 }
+
+func TestProtocolAndFormulaGovernanceUseExistingPricingPermission(t *testing.T) {
+	for _, commandType := range []string{"TOKEN_PROTOCOL_DRAFT_CREATE", "TOKEN_PROTOCOL_PUBLISH", "TOKEN_FORMULA_DRAFT_CREATE", "TOKEN_FORMULA_PUBLISH"} {
+		t.Run(commandType, func(t *testing.T) {
+			policy, err := Lookup(commandType)
+			if err != nil || policy.Mode != AuditOnly || policy.RequesterPermission != "platform.pricing.manage" || policy.ApprovalCount != 0 || policy.ExecutorIdentity != "requesting-domain-service" {
+				t.Fatalf("governance route policy must preserve the existing pricing permission and normal-state audit: %#v %v", policy, err)
+			}
+		})
+	}
+}

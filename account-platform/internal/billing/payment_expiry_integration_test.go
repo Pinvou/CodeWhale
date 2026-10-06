@@ -82,7 +82,7 @@ func (s *deadlinePaymentSynchronizer) SyncOrder(ctx context.Context, id uuid.UUI
 func TestExpiredPaymentReconcilerSkipsExpiredBatchItemsAndBoundsActiveWork(t *testing.T) {
 	now := time.Now()
 	expired, active := uuid.New(), uuid.New()
-	store := &expiredPaymentStoreStub{items: []ExpiredPaymentCandidate{{OrderID: expired, Attempts: 1, LeaseUntil: now}, {OrderID: active, Attempts: 1, LeaseUntil: now.Add(time.Second)}}, rescheduled: map[uuid.UUID]time.Time{}, errors: map[uuid.UUID]string{}}
+	store := &expiredPaymentStoreStub{items: []ExpiredPaymentCandidate{{OrderID: expired, Attempts: 1, LeaseUntil: now}, {OrderID: active, Attempts: 1, LeaseUntil: now.Add(time.Second), LateReviewBoundaryAt: now.Add(time.Hour)}}, rescheduled: map[uuid.UUID]time.Time{}, errors: map[uuid.UUID]string{}, escalated: map[uuid.UUID]string{}}
 	syncer := &deadlinePaymentSynchronizer{}
 	reconciler := NewExpiredPaymentReconciler(store, syncer, time.Second)
 	reconciler.now = func() time.Time { return now }

@@ -289,7 +289,11 @@ test('desktop sign-in renders inside the popover and never opens a browser', asy
 
 test('desktop account popover does not expose the internal user id', async () => {
   const popover = await readFile(new URL('../src/features/account-platform/AccountPlatformPopover.jsx', import.meta.url), 'utf8');
-  assert.doesNotMatch(popover, /me\?\.user_id/);
+  // Private identity facts may bind retry keys; the rendered account and payment
+  // panels must continue to omit the internal identifier.
+  const rendered = popover.slice(popover.indexOf('if (!open) return null;'));
+  const paymentPanel = popover.slice(popover.indexOf('function RechargePanel'), popover.indexOf('export function AccountPlatformPopover'));
+  assert.doesNotMatch(rendered + paymentPanel, /me\?\.user_id/);
 });
 
 test('desktop account popover only loads the user and balance summary', async () => {
@@ -309,7 +313,8 @@ test('desktop recharge completes inside the account popover without opening a we
   assert.doesNotMatch(popover, /client\.recentRechargeOrder/);
   assert.match(popover, /const openRecharge = \(\) => \{[^}]*resetOrder\(\)/);
   assert.match(popover, /const resetOrder = useCallback\(\(\) => \{[^}]*setOrder\(null\)/);
-  assert.match(popover, /client\.createRecharge\(productId, channel, newIdempotencyKey\(\)\)/);
+  assert.match(popover, /performLogicalOperation\(rechargeKeysRef\.current/);
+  assert.match(popover, /requireRechargeAcknowledgement\(await client\.createRecharge\(productId, channel, key\), productId, channel\)/);
   assert.match(popover, /import\('qrcode'\)/);
   assert.match(popover, /client\.rechargeOrder\(order\.order_id, controller\.signal\)/);
   assert.match(popover, /const acceptOrder = useCallback\(async \(latest, isCurrent, signal\) => \{[\s\S]*?refreshedBalance = await client\.balance\(signal\)/);
@@ -529,23 +534,43 @@ test('personal center hides the organization tab when the user has no organizati
 test('payment capabilities isolate provider limitations and enable reviewed-order repair', async () => {
   const view = await readFile(new URL('../src/features/account-platform/AdminPlatformView.jsx', import.meta.url), 'utf8');
   const i18n = await readFile(new URL('../src/shared/admin-platform-i18n.js', import.meta.url), 'utf8');
-  const provider = await readFile(new URL('../../account-platform/internal/billing/h3c_mall.go', import.meta.url), 'utf8');
-  assert.match(provider, /Provider: "h3c_mall", OrderSyncSupported: true, ManualRepairSupported: true/);
+  const financial = await readFile(new URL('../src/features/account-platform/AdminFinancialOperations.jsx', import.meta.url), 'utf8');
+  const provider = await readFile(new URL('../../account-platform/internal/platform/h3cpayment/provider.go', import.meta.url), 'utf8');
+  assert.match(provider, /ProviderID: "h3c_mall"/);
+  assert.match(provider, /OrderQuerySupported: true/);
+  assert.match(provider, /ManualRepairSupported: true/);
   assert.match(view, /refundSupported = paymentCapabilities\.refund_supported === true/);
-  assert.match(view, /reconciliationSupported = paymentCapabilities\.reconciliation_supported === true/);
+  assert.match(view, /reconciliationSupported = paymentCapabilities\.bill_supported === true/);
+  assert.match(view, /reconciliationImportSupported = paymentCapabilities\.bill_file_import_supported === true/);
   assert.match(view, /repairSupported = paymentCapabilities\.manual_repair_supported === true/);
   assert.match(view, /client\.repairPaymentOrder\(item\.order_id, reason\)/);
   assert.doesNotMatch(view, /paymentCapabilities\.provider === 'h3c_mall'/);
-  assert.match(view, /disabled=\{busy \|\| !refundSupported/);
+  assert.match(view, /<AdminPaymentOrderDetail[\s\S]*refundSupported=\{refundSupported\}/);
+  assert.match(financial, /disabled=\{busy \|\| !refundSupported \|\| !selected\?\.source_payment_transaction_id\}/);
+  assert.match(financial, /onRefund\(selected\.source_payment_transaction_id, selected\.package_id, reason\.trim\(\)\)/);
   assert.match(view, /disabled=\{busy \|\| !repairSupported/);
   assert.match(view, /tab === 'reconciliations' && reconciliationSupported && <form[\s\S]*?<button disabled=\{busy\}>\{copy\.billing\.runReconciliation\}/);
   assert.match(i18n, /不支持的退款、主动关单、支付回调或日终账单对账操作已自动禁用/);
 });
 
+test('late-payment review operations expose filters, evidence, and audited commands', async () => {
+  const view = await readFile(new URL('../src/features/account-platform/AdminPlatformView.jsx', import.meta.url), 'utf8');
+  const financial = await readFile(new URL('../src/features/account-platform/AdminFinancialOperations.jsx', import.meta.url), 'utf8');
+  const client = await readFile(new URL('../src/features/account-platform/admin-client.js', import.meta.url), 'utf8');
+  const i18n = await readFile(new URL('../src/shared/admin-platform-i18n.js', import.meta.url), 'utf8');
+  assert.match(view, /<AdminFinancialOperations/);
+  for (const field of ['provider_id','owner_id','entered_from','entered_to','next_review_before','overdue']) assert.match(financial, new RegExp(`${field}:`));
+  for (const method of ['claimLatePaymentReview','queryLatePaymentReview','scheduleLatePaymentReview','archiveLatePaymentReview','escalateProviderBlind']) assert.match(financial, new RegExp(`client\\.${method}`));
+  assert.match(financial, /detail\.value\.evidence/);
+  assert.match(financial, /detail\.value\.events/);
+  assert.match(client, /\/admin\/v1\/late-payment-reviews/);
+  assert.match(i18n, /晚到支付复核/);
+  assert.doesNotMatch(view + financial, /paid_status|markPaid|手工.*已支付/);
+});
 
 test('personal plan history shows traceable package and payment identifiers', async () => {
   const view = await readFile(new URL('../src/features/account-platform/AccountPlatformView.jsx', import.meta.url), 'utf8');
-  for (const field of ['package_id', 'pinvou_order_id', 'mall_order_id', 'sku_code', 'credited_at', 'valid_until', 'invoice_status']) {
+  for (const field of ['package_id', 'pinvou_order_id', 'provider_order_reference', 'sku_code', 'credited_at', 'valid_until', 'invoice_status']) {
     assert.match(view, new RegExp(`item\\.${field}`));
   }
   assert.match(view, /points_total_microcredits/);
@@ -559,7 +584,7 @@ test('billing operators can search repair candidates without provider-specific U
   const client = await readFile(new URL('../src/features/account-platform/admin-client.js', import.meta.url), 'utf8');
   assert.match(view, /orderFilter/);
   assert.match(view, /mobile_masked/);
-  assert.match(view, /channel_transaction_id/);
+  assert.match(view, /primary_provider_transaction_id/);
   assert.match(client, /query\.set\('q', filters\.q\)/);
   assert.match(client, /query\.set\('status', filters\.status\)/);
   assert.doesNotMatch(view, /h3c|新华三/i);
@@ -572,5 +597,5 @@ test('billing order readers tolerate provider fields that are null before the fi
   const reconciliation = await readFile(new URL('../../account-platform/internal/billing/reconciliation.go', import.meta.url), 'utf8');
   assert.match(payments, /COALESCE\(payment_url,''\),COALESCE\(qr_data,''\)/);
   assert.equal((refunds.match(/COALESCE\(payment_url,''\),COALESCE\(qr_data,''\)/g) || []).length, 2);
-  assert.match(reconciliation, /COALESCE\(payment_url,''\),channel_transaction_id/);
+  assert.match(reconciliation, /COALESCE\(payment_url,''\),primary_provider_transaction_id/);
 });

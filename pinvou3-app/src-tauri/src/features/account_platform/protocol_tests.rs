@@ -12,6 +12,32 @@ use tokio::{
     net::TcpListener,
 };
 
+#[test]
+fn payment_claim_bridge_allows_only_the_exact_token_post_for_a_nonzero_order() {
+    let id = "01962000-0000-7000-8000-000000000001";
+    let path = format!("/v1/recharge/orders/{id}/payment-claims");
+    assert!(route_allowed("token", &Method::POST, &path, None));
+    for method in [Method::GET, Method::PUT, Method::PATCH, Method::DELETE] {
+        assert!(!route_allowed("token", &method, &path, None));
+    }
+    assert!(!route_allowed("account", &Method::POST, &path, None));
+    assert!(!route_allowed(
+        "token",
+        &Method::POST,
+        &path,
+        Some("unexpected=1")
+    ));
+    for invalid in [
+        "/v1/recharge/orders/not-an-order/payment-claims".to_owned(),
+        "/v1/recharge/orders/00000000-0000-0000-0000-000000000000/payment-claims".to_owned(),
+        format!("/v1/recharge/orders/{id}/payment-claims/extra"),
+        format!("/v1/recharge/orders/{id}/payment-claims%2Fextra"),
+        format!("/v1/organizations/{id}/recharge/orders/{id}/payment-claims"),
+    ] {
+        assert!(!route_allowed("token", &Method::POST, &invalid, None));
+    }
+}
+
 struct SigningFixture {
     key: KeyPair,
     jwks: Value,
