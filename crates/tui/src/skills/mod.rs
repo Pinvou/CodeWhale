@@ -17,8 +17,9 @@ mod system;
 #[allow(unused_imports)]
 pub use install::{
     DEFAULT_MAX_SIZE_BYTES, DEFAULT_REGISTRY_URL, INSTALLED_FROM_MARKER, InstallOutcome,
-    InstallSource, InstalledSkill, RegistryDocument, RegistryEntry, RegistryFetchResult,
-    SkillSyncOutcome, SyncResult, UpdateResult, default_cache_skills_dir,
+    InstallSource, InstalledFromMarker, InstalledSkill, RegistryDocument, RegistryEntry,
+    RegistryFetchResult, SkillSyncOutcome, SyncResult, UpdateResult, add_entry_size,
+    default_cache_skills_dir, entry_type_is_link, is_safe_path, validate_skill_name_segment,
 };
 #[allow(unused_imports)]
 pub use roots::{
