@@ -173,6 +173,120 @@ test("production modes reject anonymous registration and development TOFU", asyn
   })), (error) => error?.code === "development_tofu_forbidden");
 });
 
+test("manual development enrollment never claims TOFU admission", async (t) => {
+  for (const tofu of ["false", "true"]) {
+    const { registry, store } = await openRegistry(t, {
+      env: environment({
+        PINVOU_REMOTE_ENROLLMENT_DEPLOYMENT: "development",
+        PINVOU_REMOTE_ENROLLMENT_DEVELOPMENT_TOFU: tofu,
+      }),
+    });
+    await registry.enroll({ endpointId: "manual-development", credential: FIRST_CREDENTIAL });
+    assert.equal(store.readNamespace(ENROLLMENT_NAMESPACE).value.entries[0].audit.source, "development");
+    await registry.rotateCredential({ endpointId: "manual-development", currentCredential: FIRST_CREDENTIAL,
+      newCredential: SECOND_CREDENTIAL, expectedEndpointRevision: "1" });
+    await registry.revoke({ endpointId: "manual-development", expectedEndpointRevision: "2" });
+    assert.equal(store.readNamespace(ENROLLMENT_NAMESPACE).value.entries[0].audit.source, "development");
+  }
+});
+
+test("public enrollment bounds and idempotence reject without mutating state", async (t) => {
+  let now = 0;
+  const { registry, store, statePath } = await openRegistry(t, { clock: () => now });
+  const enrolled = await registry.enroll({ endpointId: "bounds", credential: "x".repeat(32) });
+  const before = store.readNamespace(ENROLLMENT_NAMESPACE);
+  const primary = await fs.readFile(statePath);
+  for (const endpointId of ["", "_bad", "a".repeat(129), "a/b", "端点"]) {
+    await rejectsCode(registry.enroll({ endpointId, credential: FIRST_CREDENTIAL }), "endpoint_id_invalid");
+  }
+  for (const credential of [null, "x".repeat(31), "x".repeat(4097), "x".repeat(32) + "\ud800"]) {
+    await rejectsCode(registry.enroll({ endpointId: "new-bounds", credential }), "enrollment_credential_invalid");
+  }
+  await rejectsCode(registry.authorizeRegistration({ endpointId: "bounds", credential: "x".repeat(32),
+    purpose: "unknown" }), "registration_purpose_invalid");
+  await rejectsCode(registry.enroll({ endpointId: "bounds", credential: SECOND_CREDENTIAL }), "endpoint_already_enrolled");
+  assert.deepEqual(await registry.enroll({ endpointId: "bounds", credential: "x".repeat(32) }), enrolled);
+  for (now of [-1, NaN, 0.5, 8_640_000_000_000_001]) {
+    await rejectsCode(registry.enroll({ endpointId: "clock-bounds", credential: FIRST_CREDENTIAL }), "enrollment_clock_invalid");
+  }
+  assert.deepEqual(store.readNamespace(ENROLLMENT_NAMESPACE), before);
+  assert.deepEqual(await fs.readFile(statePath), primary);
+  assert.deepEqual(await fs.readFile(`${statePath}.bak`), primary);
+  now = 0;
+  await registry.enroll({ endpointId: "a".repeat(128), credential: "x".repeat(4096) });
+  const registryValue = store.readNamespace(ENROLLMENT_NAMESPACE);
+  registryValue.value.entries.find((entry) => entry.endpoint_id === "bounds").revision = "18446744073709551615";
+  await store.compareAndSwap(ENROLLMENT_NAMESPACE, registryValue.namespace_revision, registryValue.value);
+  const exhausted = store.readNamespace(ENROLLMENT_NAMESPACE);
+  await rejectsCode(registry.revoke({ endpointId: "bounds", expectedEndpointRevision: "18446744073709551615" }),
+    "endpoint_revision_exhausted");
+  assert.deepEqual(store.readNamespace(ENROLLMENT_NAMESPACE), exhausted);
+});
+
+test("byte-cap rejection leaves durable bytes, revisions and later smaller CAS usable", async (t) => {
+  const { store, statePath, registry } = await openRegistry(t, { storeOptions: { maxBytes: 1024 } });
+  await registry.enroll({ endpointId: "capacity-existing", credential: FIRST_CREDENTIAL });
+  await store.compareAndSwap("shared_budget", "0", { payload: "x".repeat(200) });
+  const before = store.readNamespace(ENROLLMENT_NAMESPACE);
+  const primary = await fs.readFile(statePath);
+  const backup = await fs.readFile(`${statePath}.bak`);
+  await rejectsCode(store.compareAndSwap("byte_cap", "0", { payload: "x".repeat(1024) }),
+    "relay_state_capacity_reached");
+  await rejectsCode(registry.enroll({ endpointId: "capacity-new-" + "x".repeat(110), credential: FIRST_CREDENTIAL }),
+    "enrollment_registry_capacity_reached");
+  assert.deepEqual(store.readNamespace(ENROLLMENT_NAMESPACE), before);
+  assert.equal(registry.getStatus("capacity-existing").revision, "1");
+  assert.deepEqual(await fs.readFile(statePath), primary);
+  assert.deepEqual(await fs.readFile(`${statePath}.bak`), backup);
+  assert.equal(store.readNamespace("byte_cap").value, null);
+  await store.compareAndSwap("byte_cap", "0", {});
+  assert.equal(store.readNamespace("byte_cap").namespace_revision, "1");
+});
+
+test("registry write retains typed validation and capacity failures", async (t) => {
+  const { store, statePath, registry } = await openRegistry(t);
+  await registry.enroll({ endpointId: "template", credential: FIRST_CREDENTIAL });
+  const template = store.readNamespace(ENROLLMENT_NAMESPACE).value.entries[0];
+  const entries = Array.from({ length: 100_000 }, (_, index) => ({ ...template,
+    endpoint_id: `endpoint-${String(index).padStart(6, "0")}` }));
+  let writes = 0;
+  const boundedStore = {
+    getPathPolicy: () => store.getPathPolicy(),
+    readNamespace: () => ({ namespace_revision: "1", value: {
+      schema: "pinvou-endpoint-enrollment-registry", version: 1, entries,
+    } }),
+    compareAndSwap: async () => { writes += 1; throw new Error("must not write"); },
+  };
+  const bounded = EnrollmentRegistry.open({ stateStore: boundedStore, config: configForState(statePath) });
+  await rejectsCode(bounded.enroll({ endpointId: "new-endpoint", credential: FIRST_CREDENTIAL }),
+    "enrollment_registry_capacity_reached");
+  assert.equal(writes, 0);
+  assert.equal(bounded.getStatus("endpoint-000000").revision, "1");
+});
+
+test("unsupported lock versions are never stolen even with future fields or a dead PID", async (t) => {
+  const statePath = await temporaryState(t);
+  const store = await openStateStore(statePath);
+  await store.close();
+  const primary = await fs.readFile(statePath);
+  const backup = await fs.readFile(`${statePath}.bak`);
+  for (const extra of [{}, { future_field: "future-owner" }]) {
+    const contents = JSON.stringify({ ...lockRecord({ pid: 2147483647 }), version: 2, ...extra });
+    await fs.writeFile(lockPath(statePath), contents, { mode: 0o600 });
+    const identity = await fs.stat(lockPath(statePath), { bigint: true });
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      await rejectsCode(openStateStore(statePath, { sleep: async () => {},
+        processIdentity: async (pid) => pid === process.pid ? `test-process:${pid}` : null }),
+        "relay_state_lock_unsupported");
+      assert.equal(await fs.readFile(lockPath(statePath), "utf8"), contents);
+      assert.equal((await fs.stat(lockPath(statePath), { bigint: true })).ino, identity.ino);
+      assert.deepEqual(await fs.readFile(statePath), primary);
+      assert.deepEqual(await fs.readFile(`${statePath}.bak`), backup);
+    }
+    await fs.unlink(lockPath(statePath));
+  }
+});
+
 test("explicit non-production mode can opt into temporary TOFU", async (t) => {
   const { registry, store } = await openRegistry(t, {
     env: environment({
