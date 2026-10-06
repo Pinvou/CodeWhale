@@ -409,7 +409,19 @@ fn forkguard_shell_catalog_guidance_matches_execution() {
     assert_eq!(tool.name(), "Bash");
     assert!(tool.description().contains("background=true"));
     let readonly = BashTool::read_only("Bash");
-    assert!(readonly.description().contains("never through a shell"));
+    // Forkguard: the read-only description must match execution — argv for
+    // single commands, and the shell only for the explicitly disclosed
+    // pipeline exception (pipefail).
+    assert!(
+        readonly
+            .description()
+            .contains("Single commands run directly as argv")
+    );
+    assert!(
+        readonly
+            .description()
+            .contains("runs through the shell with pipefail")
+    );
     assert!(
         !readonly
             .input_schema()

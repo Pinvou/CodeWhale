@@ -4520,7 +4520,7 @@ impl ToolSpec for LowercaseBashTool {
     }
 
     fn description(&self) -> &'static str {
-        "Execute a shell command in the workspace and return stdout and stderr. Output keeps the last 2000 lines or 50KB. An optional timeout is expressed in seconds; when omitted the command is killed after 120 seconds, so pass an explicit timeout for work expected to take longer. In Ask, after a sandbox denial, retry the exact command once with sandbox_permissions (the narrowest wider mode that suffices) and a one-sentence justification; the approval prompt asks the user."
+        "Execute a shell command in the workspace and return stdout and stderr. The command runs in the detected platform shell — bash/zsh on Unix, PowerShell (pwsh 7 or Windows PowerShell 5.1) or cmd.exe on Windows — so avoid bash-only syntax such as `&&` when the platform shell is PowerShell or cmd. Output keeps the last 2000 lines or 50KB. An optional timeout is expressed in seconds; when omitted the command is killed after 120 seconds, so pass an explicit timeout for work expected to take longer. In Ask, after a sandbox denial, retry the exact command once with sandbox_permissions (the narrowest wider mode that suffices) and a one-sentence justification; the approval prompt asks the user."
     }
 
     fn input_schema(&self) -> serde_json::Value {
@@ -4699,7 +4699,7 @@ impl ToolSpec for BashTool {
 
     fn description(&self) -> &'static str {
         if self.read_only {
-            "Inspect the workspace with the bounded read-only command subset. Commands run directly as argv, never through a shell; only action=run plus command, cwd, and timeout_ms are accepted."
+            "Inspect the workspace with the bounded read-only command subset. Single commands run directly as argv; a pipeline (`a | b`) is the one exception and runs through the shell with pipefail. Only action=run plus command, cwd, and timeout_ms are accepted."
         } else {
             guidance::description()
         }
