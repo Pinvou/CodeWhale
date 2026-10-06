@@ -743,6 +743,10 @@ struct McpServerActionReceipt {
 #[derive(Debug, Deserialize)]
 struct AutomationRunsQuery {
     limit: Option<usize>,
+    /// Serve the terminal-run archive kept for deleted automations instead of
+    /// the live run history.
+    #[serde(default)]
+    archived: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -833,57 +837,6 @@ fn open_runtime_threads_for_server(
     Ok((manager, workshop_activation))
 }
 
-/// Build the task manager config for the runtime API server.
-///
-/// This is where the server opts its tasks into answerable human waits:
-/// the tasks it runs are served by this server's HTTP decision endpoints
-/// (`/v1/approvals/`, `/v1/user-input/`), so a pending prompt on
-/// them is a human-paced wait the wall clock may pause for — see
-/// [`TaskManagerConfig::human_waits_answerable`].
-#[must_use]
-pub fn server_task_config(
-    config: &Config,
-    workspace: PathBuf,
-    workers: usize,
-) -> TaskManagerConfig {
-    let mut task_cfg = TaskManagerConfig::from_runtime(
-        config,
-        workspace,
-        Some(config.default_model()),
-        Some(workers),
-    );
-    task_cfg.human_waits_answerable = true;
-    task_cfg
-}
-
-/// Open the runtime threads and the task manager the server serves, wiring
-/// the server's answerable human-wait opt-in ([`server_task_config`]) into
-/// the task executor.
-///
-/// This is the single wiring point for that opt-in: `run_http_server` builds
-/// its runtime here, and the wiring pin reads the flag where it lands — the
-/// executor the manager runs tasks on — so dropping the opt-in, or its
-/// forward into the executor, turns the pin red instead of silently keeping
-/// every served task's wall clock running through prompts.
-pub(crate) async fn open_server_task_runtime(
-    config: &Config,
-    workspace: &FsPath,
-    plugin_registry: Arc<crate::plugins::PluginRegistry>,
-    workers: usize,
-) -> Result<(SharedRuntimeThreadManager, SharedTaskManager)> {
-    let task_cfg = server_task_config(config, workspace.to_path_buf(), workers);
-    let (runtime_threads, _workshop_activation) = open_runtime_threads_for_server(
-        config,
-        workspace.to_path_buf(),
-        RuntimeThreadManagerConfig::from_task_data_dir(task_cfg.data_dir.clone()),
-        plugin_registry,
-    )?;
-    let task_manager =
-        TaskManager::start_with_runtime_manager(task_cfg, config.clone(), runtime_threads.clone())
-            .await?;
-    Ok((runtime_threads, task_manager))
-}
-
 /// Start the runtime API server.
 pub async fn run_http_server(
     config: Config,
@@ -893,13 +846,22 @@ pub async fn run_http_server(
 ) -> Result<()> {
     validate_runtime_listener_security(&options)?;
 
-    let (runtime_threads, task_manager) = open_server_task_runtime(
+    let task_default_model = config.default_model();
+    let task_cfg = TaskManagerConfig::from_runtime(
         &config,
-        &workspace,
+        workspace.clone(),
+        Some(task_default_model),
+        Some(options.workers),
+    );
+    let (runtime_threads, _workshop_activation) = open_runtime_threads_for_server(
+        &config,
+        workspace.clone(),
+        RuntimeThreadManagerConfig::from_task_data_dir(task_cfg.data_dir.clone()),
         plugin_discovery.registry_for_workspace(&workspace),
-        options.workers,
-    )
-    .await?;
+    )?;
+    let task_manager =
+        TaskManager::start_with_runtime_manager(task_cfg, config.clone(), runtime_threads.clone())
+            .await?;
     let automations = Arc::new(Mutex::new(AutomationManager::default_location()?));
     runtime_threads.attach_automation_manager(automations.clone());
     let scheduler_cancel = CancellationToken::new();
@@ -4061,9 +4023,19 @@ async fn list_automation_runs(
     Query(query): Query<AutomationRunsQuery>,
 ) -> Result<Json<Vec<AutomationRunRecord>>, ApiError> {
     let manager = state.automations.lock().await;
-    let runs = manager
-        .list_runs(&id, query.limit)
-        .map_err(map_automation_err)?;
+    let runs = if query.archived {
+        let mut runs = manager
+            .list_archived_runs(&id)
+            .map_err(map_automation_err)?;
+        if let Some(limit) = query.limit {
+            runs.truncate(limit);
+        }
+        runs
+    } else {
+        manager
+            .list_runs(&id, query.limit)
+            .map_err(map_automation_err)?
+    };
     Ok(Json(runs))
 }
 
@@ -4473,11 +4445,7 @@ async fn patch_undo_thread_turn(
         .get_thread(&id)
         .await
         .map_err(map_thread_err)?;
-    let patch_result = patch_undo_workspace_files(
-        &thread.workspace,
-        &thread.workspace_roots,
-        thread.session_id.as_deref(),
-    );
+    let patch_result = patch_undo_workspace_files(&thread.workspace, thread.session_id.as_deref());
 
     // Step 2: Remove the last conversation turn (undo_conversation).
     let (forked_thread, original_user_text) = state
@@ -4500,7 +4468,6 @@ async fn patch_undo_thread_turn(
 /// current workspace — same target selection as the TUI's `patch_undo`.
 fn patch_undo_workspace_files(
     workspace: &FsPath,
-    workspace_roots: &[std::path::PathBuf],
     current_session_id: Option<&str>,
 ) -> PatchUndoResult {
     let repo = match crate::snapshot::SnapshotRepo::open_or_init(workspace) {
@@ -4570,21 +4537,13 @@ fn patch_undo_workspace_files(
     });
 
     let short = &target.id.as_str()[..target.id.as_str().len().min(8)];
-    // Snapshots are primary-bound: with attached roots in the thread set,
-    // name the rollback boundary instead of implying a full revert.
-    let boundary_note = if crate::snapshot::restore_covers_primary_only(workspace, workspace_roots)
-    {
-        format!("\n{}", crate::snapshot::ATTACHED_ROOTS_NOT_REVERTED_NOTE)
-    } else {
-        String::new()
-    };
     let summary = match diff_stat {
         Some(ref stat) => format!(
-            "Restored snapshot '{}' ({}). Files affected:\n{stat}{boundary_note}",
+            "Restored snapshot '{}' ({}). Files affected:\n{stat}",
             target.label, short
         ),
         None => format!(
-            "Restored snapshot '{}' ({}). No diff changes detected.{boundary_note}",
+            "Restored snapshot '{}' ({}). No diff changes detected.",
             target.label, short
         ),
     };
@@ -5654,10 +5613,6 @@ fn map_compat_stream_event(event: &crate::runtime_threads::RuntimeEventRecord) -
                     "decision": payload.get("decision"),
                     "remember": payload.get("remember"),
                     "auto": payload.get("auto"),
-                    // Explains an execution-policy denial to compat
-                    // clients; null for plain decisions. The raw
-                    // event stream has always carried it.
-                    "posture": payload.get("posture"),
                     // `timeout` only ever arrives from legacy journal
                     // replays: current producers resolve pending approvals
                     // through deny + `interrupted` instead.
@@ -5917,104 +5872,34 @@ async fn restore_snapshot(
     State(state): State<RuntimeApiState>,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
-    // Round-23 SF23-1 + B23-2: every read happens BEFORE the mutating
-    // restore (a thread-store failure must not turn a completed rollback
-    // into a 500), and the boundary decision no longer depends on the
-    // snapshot's `[sid=...]` tag matching a live thread record — `PUT
-    // /v1/sessions` re-keys the thread to a new session handle, so the
-    // exact join silently dropped the clause through an ordinary,
-    // disclosed-API sequence.
-    let snapshot = snapshot_for_workspace(&state.workspace, &id)?;
-    let mut payload = json!({ "restored": id });
-    let mut boundary = false;
-    // Snapshots are primary-bound: with attached roots in the owning
-    // thread's set, name the rollback boundary instead of implying a full
-    // revert (review #484/CodeWhale round-22 B22-4). An untagged (legacy)
-    // snapshot has no owner to consult and stays unchanged; a TAGGED
-    // snapshot always names the boundary — fail-safe by construction:
-    // a matching multi-root thread proves it, and a tagged snapshot whose
-    // owner no longer matches (the PUT re-key sequence) proves an
-    // interactive owner existed while proving nothing about the roots
-    // (round-23 B23-2).
-    if snapshot.session_id.is_some() {
-        match state
-            .runtime_threads
-            .list_threads(ThreadListFilter::IncludeArchived, None)
-            .await
-        {
-            Ok(threads) => {
-                let matched = threads
-                    .iter()
-                    .find(|thread| thread.session_id.as_deref() == snapshot.session_id.as_deref());
-                boundary = match matched {
-                    Some(thread) => crate::snapshot::restore_covers_primary_only(
-                        &thread.workspace,
-                        &thread.workspace_roots,
-                    ),
-                    None => true,
-                };
-            }
-            // A thread-store read failure degrades to the conservative
-            // clause (naming the boundary) rather than a 500 after the
-            // rollback, and without leaking the store error text.
-            Err(err) => {
-                eprintln!(
-                    "[runtime_api] restore boundary lookup failed; naming the boundary conservatively: {err}"
-                );
-                boundary = true;
-            }
-        }
-    }
-    if boundary {
-        payload["boundary"] = json!({
-            "attached_roots_not_reverted": true,
-            "note": crate::snapshot::ATTACHED_ROOTS_NOT_REVERTED_NOTE,
-        });
-    }
-    restore_snapshot_for_workspace(&state.workspace, &snapshot)?;
-    Ok(Json(payload))
+    restore_snapshot_for_workspace(&state.workspace, &id)?;
+    Ok(Json(json!({
+        "restored": id,
+    })))
 }
 
-/// Round-23 B23-2/SF23-1: the read half of the restore — find and return
-/// the snapshot WITHOUT mutating, so callers can compute the response
-/// before the rollback runs.
-fn snapshot_for_workspace(
-    workspace: &FsPath,
-    id: &str,
-) -> Result<crate::snapshot::Snapshot, ApiError> {
+fn restore_snapshot_for_workspace(workspace: &FsPath, id: &str) -> Result<(), ApiError> {
     let repo = crate::snapshot::SnapshotRepo::open_or_init(workspace)
         .map_err(|e| ApiError::internal(format!("Snapshot repo init failed: {e}")))?;
-    let known = repo
+    // The id arrives from the request path and is handed to git as a
+    // treeish, so it is accepted only if the side repo actually knows it —
+    // anything else is a 404 rather than an arbitrary string on a git
+    // command line. The membership check also marks the id as validated
+    // for command-line-injection scanners (an allowlist `contains` is
+    // their modeled trust boundary), so the pre-existing, accepted flow
+    // stops re-flagging when call sites are refactored.
+    let known_ids: Vec<String> = repo
         .list(usize::MAX)
-        .map_err(|e| ApiError::internal(format!("Failed to list snapshots: {e}")))?;
-    known
-        .iter()
-        .find(|snapshot| snapshot.id.as_str() == id)
-        .cloned()
-        .ok_or_else(|| ApiError::not_found(format!("no such snapshot: {id}")))
-}
-
-fn restore_snapshot_for_workspace(
-    workspace: &FsPath,
-    snapshot: &crate::snapshot::Snapshot,
-) -> Result<(), ApiError> {
-    // Round-24 P3 perf: the already-fetched membership-checked snapshot is
-    // threaded through instead of re-listing the store a second time per
-    // restore request (the read half above already proved the id belongs to
-    // this repo).
-    let repo = crate::snapshot::SnapshotRepo::open_or_init(workspace)
-        .map_err(|e| ApiError::internal(format!("Snapshot repo init failed: {e}")))?;
-    // The id arrived from the request path and is handed to git as a
-    // treeish; it reached this fn only through the side repo's own
-    // membership list, so anything else was already answered 404 rather
-    // than an arbitrary string on a git command line. The membership check
-    // also marks the id as validated for command-line-injection scanners
-    // (an allowlist `contains` is their modeled trust boundary), so the
-    // pre-existing, accepted flow stops re-flagging when call sites are
-    // refactored.
-    repo.restore(&snapshot.id)
-        .map_err(|e| ApiError::internal(format!("Snapshot restore failed: {e}")))?;
-    Ok(())
+        .map_err(|e| ApiError::internal(format!("Failed to list snapshots: {e}")))?
+        .into_iter()
+        .map(|snapshot| snapshot.id.as_str().to_string())
+        .collect();
+    if !known_ids.contains(&id.to_string()) {
+        return Err(ApiError::not_found(format!("no such snapshot: {id}")));
+    }
+    let snapshot_id = crate::snapshot::SnapshotId(id.to_string());
+    repo.restore(&snapshot_id)
+        .map_err(|e| ApiError::internal(format!("Snapshot restore failed: {e}")))
 }
 
 fn snapshot_entries_for_workspace(
