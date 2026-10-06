@@ -922,6 +922,36 @@ ready ACKs. Only then are tokens atomically consumed and rotated and business
 frames reopened. Any timeout, missing ACK, Relay restart or ambiguous result
 terminates the candidate and prevents reuse of both old and proposed material.
 
+On transport loss, clients revoke runtime/TX authority and retain the old full
+lease tuple only as a recovery binding. Only the explicit resume-control family
+may use that binding; ordinary liveness and business frames remain closed.
+The strictly validated final `controller_resumed` grants one local installation
+proof bound to the receiving socket epoch, role, request ID, activation ID and
+old tuple. A further disconnect, stop or ordinary lease installation invalidates
+that proof. The domain resume state machine must independently validate the
+E2E activation before consuming it; the transport proof is not E2E trust.
+Only `encrypted_controller_liveness_a` uses the frozen three-field routing
+exception, and only with an active authenticated lease.
+
+Relay retains one completed-attempt tombstone per live lease: at most eight
+canonical accepted-message digests bound to type, role, request and socket.
+No old token or ciphertext is retained in the tombstone. Exact retries on the
+current role's socket are empty no-ops, not a second activation or a timer
+extension; changed or cross-socket retired traffic is rejected and has no
+cleanup authority over the new revision. New resume attempts replace the
+tombstone only after successful commit.
+
+Final deliveries precede the Relay's atomic token/epoch rotation so a failed
+delivery can still abort the old revision. This is not an atomic distributed
+commit: one peer may have seen a final before the other delivery fails. Any such
+uncertainty terminates the lease rather than opening business on the Relay.
+Accepted-result cleanup is fenced to the exact immutable lease revision; once
+router post-processing finishes, that result's abort authority is retired.
+Authoritative termination releases the interaction slot, clears all lease peer
+links and notifies stateful hooks even if replacement notification fails. Hook
+cleanup is owner-fenced, including a bounded immediate predecessor during a
+partial post-rotation hook installation.
+
 ### Errors, legacy Web conflict and logging
 
 Controller error envelopes use only these codes: `pairing_code_invalid`,

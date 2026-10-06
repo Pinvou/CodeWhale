@@ -5,3 +5,8 @@ mod core;
 
 #[path = "../../../src/features/remote_control/controller/transfer/limits.rs"]
 mod limits;
+
+pub(crate) use core::{TransferDirection, TransferRegistry};
+
+#[path = "../../../src/features/remote_control/controller/transfer/upload.rs"]
+mod upload;
