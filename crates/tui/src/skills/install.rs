@@ -21,9 +21,12 @@
 //!   [`add_entry_size`], [`validate_skill_name_segment`], and the
 //!   [`InstalledFromMarker`] schema behind [`INSTALLED_FROM_MARKER`] — are the
 //!   embedder-reuse contract: importers that keep their own archives should
-//!   call these instead of maintaining comment-aligned copies of the checks
-//!   (the in-tree plugin installer already does; see
-//!   `crate::plugins::install`).
+//!   call these instead of maintaining comment-aligned copies of the checks.
+//!   The in-tree plugin installer consumes the judgments verbatim. An
+//!   importer whose sanitizer has deliberately different verdict semantics
+//!   (zip's normalize-and-accept traversal, say) keeps that judgment local
+//!   and registers the divergence with tests rather than restating an
+//!   "aligned" copy.
 //!
 //! # Hard rules
 //!
@@ -237,8 +240,10 @@ pub enum UpdateResult {
 }
 
 /// Errors that can happen during install. Most variants are flattened into
-/// `anyhow::Error` at the public boundary; this enum is used internally so
-/// tests can pattern-match without parsing strings.
+/// `anyhow::Error` at the public boundary. In-tree code and tests
+/// pattern-match to avoid parsing strings, and embedders consuming the
+/// exported safety primitives (e.g. [`add_entry_size`]) downcast through
+/// `anyhow::Error` to recover the typed variant.
 #[derive(Debug, Error)]
 pub enum InstallError {
     #[error("entry escapes destination directory: {0}")]
@@ -891,10 +896,13 @@ async fn sync_one_skill(
 
 /// On-disk schema of the [`INSTALLED_FROM_MARKER`] JSON file.
 ///
-/// v1 wrote `spec` + `checksum`; schema v2 (see [`write_installed_from_v2`])
-/// adds `schema_version`, `source_checksum`, `content_digest`, and
-/// `installed_name`. Unknown fields are ignored on read, so newer writers stay
-/// forward-compatible with older readers.
+/// v1 wrote `spec`, `url`, and `checksum`; schema v2 (see
+/// [`write_installed_from_v2`]) keeps those and adds `schema_version`,
+/// `source_checksum`, `content_digest`, `installed_name`, and
+/// `registry_version`. This struct models only the keys an installer or
+/// reader acts on: `url`, `installed_name`, and `registry_version` are
+/// intentionally not modeled. Unknown fields are ignored on read, so newer
+/// writers stay forward-compatible with older readers.
 ///
 /// Embedder-reuse contract: embedders reading a marker file deserialize
 /// through this struct rather than redefining the schema.
@@ -914,8 +922,11 @@ pub struct InstalledFromMarker {
 }
 
 impl InstalledFromMarker {
-    /// Preferred checksum: the v2 `source_checksum` when present, else the v1
-    /// `checksum` field.
+    /// Preferred checksum: the v2 `source_checksum` when present and
+    /// non-empty, else the v1 `checksum` field verbatim. A malformed v1
+    /// marker can hold an empty string here; callers comparing against a
+    /// freshly computed digest read that as "changed", the fail-safe
+    /// direction.
     pub fn source_checksum(&self) -> &str {
         self.source_checksum
             .as_deref()
@@ -1547,10 +1558,12 @@ fn is_within_selected_root(path: &str, prefix: &str, skill_root: &str) -> bool {
 /// directory: rejects absolute paths, Windows prefixes / root components, and
 /// any `..` segment (path traversal).
 ///
-/// Embedder-reuse contract: this predicate is the single source of truth for
-/// "does this entry escape its destination". Importers of any archive format
-/// (tar, zip) call this on each entry path instead of keeping comment-aligned
-/// copies of the check.
+/// Embedder-reuse contract: this predicate is the reviewable home of the
+/// "does this entry escape its destination" judgment. Archive importers whose
+/// reject semantics match it call it on each entry path instead of keeping
+/// comment-aligned copies; sanitizers with different verdict semantics (zip's
+/// normalize-and-accept, say) keep theirs local and register the divergence
+/// with tests.
 pub fn is_safe_path(path: &Path) -> bool {
     if path.is_absolute() {
         return false;
@@ -1566,13 +1579,16 @@ pub fn is_safe_path(path: &Path) -> bool {
 }
 
 /// Whether a tar entry carries link semantics (symbolic or hard link). Such
-/// entries inside the selected install subtree are rejected — a SKILL.md
+/// entries are rejected inside the selected install subtree — a SKILL.md
 /// bundle has no use for them and they are a notorious escape foothold
-/// (see the module hard rules). Entries outside the subtree are ignored.
+/// (see the module hard rules). This predicate is only the judgment; whether
+/// an entry is considered at all (the scanner skips entries outside the
+/// subtree) is caller policy.
 ///
-/// Embedder-reuse contract: the symlink-rejection judgment for tar-based
-/// importers; zip-based importers apply the same judgment through the entry's
-/// unix-mode file-type bits.
+/// Embedder-reuse contract: the link-rejection judgment for tar-based
+/// importers. Zip entries have no entry type, so zip-based importers keep
+/// the unix-mode file-type-bits face of the same judgment and pin both faces
+/// with tests.
 pub fn entry_type_is_link(entry_type: tar::EntryType) -> bool {
     entry_type.is_symlink() || entry_type.is_hard_link()
 }
@@ -1605,10 +1621,11 @@ fn skill_target_path(name: &str, skills_dir: &Path) -> Result<PathBuf> {
 /// skills/plugins directory. Rejects empty and whitespace-containing names,
 /// `.` / `..`, and any separator (`/`, `\`) or multi-component path.
 ///
-/// Embedder-reuse contract: every consumer that turns a user- or
-/// archive-supplied name into an on-disk directory (skill update/uninstall,
-/// plugin stage/place, SKILL.md frontmatter `name:`) funnels through this
-/// validator so the judgment cannot drift between copies.
+/// Embedder-reuse contract: consumers that turn a user- or archive-supplied
+/// name into an on-disk directory (skill update/uninstall, plugin
+/// stage/place, SKILL.md frontmatter `name:`) funnel through this validator
+/// so the judgments stay reviewable in one place. An embedder may layer a
+/// stricter allowlist on top; that is caller policy, not drift.
 pub fn validate_skill_name_segment(name: &str) -> Result<&str> {
     if name.is_empty() || name.trim() != name || name.chars().any(char::is_whitespace) {
         bail!("skill name must be a single path-safe segment (got '{name}')");
@@ -1834,8 +1851,25 @@ mod tests {
     fn entry_type_is_link_accepts_only_link_entries() {
         assert!(entry_type_is_link(tar::EntryType::Symlink));
         assert!(entry_type_is_link(tar::EntryType::Link));
-        assert!(!entry_type_is_link(tar::EntryType::Regular));
-        assert!(!entry_type_is_link(tar::EntryType::Directory));
+        // The judgment is an exact match on the two link flavors; pin every
+        // other named variant so a future tar-crate reclassification cannot
+        // silently widen it. GNULongLink in particular is a metadata header
+        // ("long link name"), not a link entry.
+        for other in [
+            tar::EntryType::Regular,
+            tar::EntryType::Directory,
+            tar::EntryType::Char,
+            tar::EntryType::Block,
+            tar::EntryType::Fifo,
+            tar::EntryType::Continuous,
+            tar::EntryType::GNULongName,
+            tar::EntryType::GNULongLink,
+            tar::EntryType::GNUSparse,
+            tar::EntryType::XHeader,
+            tar::EntryType::XGlobalHeader,
+        ] {
+            assert!(!entry_type_is_link(other), "{other:?} must not be a link");
+        }
     }
 
     #[test]
