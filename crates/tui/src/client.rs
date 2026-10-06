@@ -11992,6 +11992,63 @@ mod tests {
         );
     }
 
+    /// A wire-bound Custom client's engine-internal re-resolutions must pin
+    /// the transport's own wire: `rebound_for_model_protocol` and
+    /// `bind_request_to_protocol` feed `pinned_wire_override` back into the
+    /// resolver, so a model switch rebinds on the same Responses transport
+    /// instead of letting the fresh resolution fall back to Custom's static
+    /// Chat policy and downgrade the client mid-session. Deleting either
+    /// plumb fails exactly this pin (the rebind rebuilds as Chat, the
+    /// per-request route bails on the protocol mismatch).
+    #[test]
+    fn forkguard_wire_bound_client_rebinds_without_downgrading_the_wire() {
+        let _env_lock = crate::test_support::lock_test_env();
+        let config = crate::test_support::custom_named_table_config(
+            "pinvou_responses",
+            Some("responses"),
+            "https://wire-rebind.example/v1",
+            "custom-responses-key",
+            "gpt-6-sol",
+        );
+        let route = crate::route_runtime::resolve_runtime_route(
+            &config,
+            ApiProvider::Custom,
+            Some("gpt-6-sol"),
+        )
+        .expect("named table resolves");
+        let client = DeepSeekClient::from_candidate(&route.config, &route.candidate)
+            .expect("per-turn client builds");
+        assert_eq!(client.wire_format, WireFormat::Responses);
+
+        // Engine-internal rebind on a different model: same Responses
+        // transport, same endpoint, new wire model.
+        let rebound = client
+            .rebound_for_model_protocol(Some(&route.config), "gpt-6-mini")
+            .expect("alternate model resolves")
+            .expect("model change requires a rebound");
+        assert_eq!(
+            rebound.wire_format,
+            WireFormat::Responses,
+            "the rebind must not downgrade the endpoint-scoped wire"
+        );
+        assert_eq!(rebound.base_url, "https://wire-rebind.example/v1");
+        assert_eq!(rebound.default_model, "gpt-6-mini");
+        assert!(
+            client
+                .rebound_for_model_protocol(Some(&route.config), "gpt-6-sol")
+                .expect("same-model rebind resolves")
+                .is_none(),
+            "a matching binding must not rebuild the client"
+        );
+
+        // Per-request routing on the same client: the bound wire survives a
+        // model switch instead of bailing on a protocol mismatch.
+        let (request, _) = client
+            .bind_request_to_protocol(minimal_zen_request("gpt-6-mini"))
+            .expect("per-request routing keeps the bound wire");
+        assert_eq!(request.model, "gpt-6-mini");
+    }
+
     /// A `wire = "anthropic"` Custom table must reach a real
     /// Messages-protocol transport: the per-turn client
     /// (resolve_runtime_route → from_candidate) POSTs `{base}/v1/messages`
