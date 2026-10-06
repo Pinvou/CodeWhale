@@ -7,16 +7,13 @@
  * is gated by the intent sequence and generation/lease epoch held in
  * `features/remote-control/remote-control-state.js`.
  *
- * No API key, credential reference or `SavedModel` body ever crosses this file:
- * model listing returns opaque descriptors and task submission only passes the
- * selected model ID plus the task binding.
- *
- * Status DTOs are projected unchanged through the same state functions for
- * invoke responses and events. A07 is an adapter/state-machine stage, not an
- * end-to-end task delivery: ACP approval dispatch, temporary model credentials,
- * artifact indexing and task/model/permission wire integration remain A08's
- * responsibility. In particular selectedModelId/permissionRequest forwarding
- * alone does not mean the current Rust submit command consumes those fields.
+ * A07 exposes lifecycle/capability/status and B-local stop adapters. Model export,
+ * permission decisions and history mutation are deliberately absent from the
+ * renderer surface until A08 binds them to authenticated Rust transport.
+ * Transfer inputs also stay closed until a bounded task/receipt consumer owns
+ * completed files; a successful staging write alone is not task delivery.
+ * Task/session admission is also closed until authenticated Rust dispatch.
+ * These kernels are not claimed as end-to-end product functionality here.
  */
 (function (root) {
   "use strict";
@@ -233,54 +230,6 @@
       });
     }
 
-    function listExportableModels() {
-      ensureAvailable();
-      return invoke("desktop_remote_model_list_exportable", {}).then(function (models) {
-        publish(logic.applyModels(current(), models || []));
-        return models || [];
-      });
-    }
-
-    function openRemoteSession(remoteSessionRef, title, codeMode) {
-      ensureAvailable();
-      return invoke("desktop_remote_task_open_session", {
-        remoteSessionRef: remoteSessionRef,
-        title: title,
-        codeMode: !!codeMode,
-      });
-    }
-
-    function switchRemoteSession(remoteSessionRef, sessionId) {
-      ensureAvailable();
-      return invoke("desktop_remote_task_switch_session", {
-        remoteSessionRef: remoteSessionRef,
-        sessionId: sessionId,
-      });
-    }
-
-    /**
-     * Submits one task. `payload` must be the already-built protocol payload
-     * (binding + input digest); `modelId` is only forwarded when the task uses
-     * an A-side temporary model, because Rust resolves the credential itself.
-     */
-    function submitRemoteTask(payload, selectedModelId, permissionRequest) {
-      ensureAvailable();
-      var body = payload && typeof payload === "object" ? payload : {};
-      if (!logic.matchesLiveContext(current(), body)) {
-        var stale = new Error("task_binding_stale");
-        stale.code = "task_binding_stale";
-        return Promise.reject(stale);
-      }
-      return invoke("desktop_remote_task_submit", {
-        payload: body,
-        selectedModelId: selectedModelId || null,
-        permissionRequest: permissionRequest || null,
-      }).then(function (result) {
-        publish(logic.applyTaskEvent(current(), result || {}));
-        return result;
-      });
-    }
-
     function cancelRemoteTask(taskId) {
       ensureAvailable();
       return invoke("desktop_remote_task_cancel", { taskId: taskId }).then(function (result) {
@@ -292,126 +241,6 @@
     function remoteTaskStatus(taskId) {
       ensureAvailable();
       return invoke("desktop_remote_task_status", { taskId: taskId });
-    }
-
-    function permissionList(taskId) {
-      ensureAvailable();
-      return invoke("desktop_remote_permission_list", { taskId: taskId });
-    }
-
-    function permissionDecide(taskId, permissionRequestId, decision) {
-      ensureAvailable();
-      return invoke("desktop_remote_permission_decide", {
-        taskId: taskId,
-        permissionRequestId: permissionRequestId,
-        decision: decision,
-      });
-    }
-
-    function permissionDenyTask(taskId, reason) {
-      ensureAvailable();
-      return invoke("desktop_remote_permission_deny_task", { taskId: taskId, reason: reason || "b_stop" });
-    }
-
-    function attachmentBegin(request) {
-      ensureAvailable();
-      return invoke("desktop_remote_attachment_begin", request || {});
-    }
-
-    function attachmentChunk(transferId, chunkIndex, chunkB64, chunkBytes) {
-      ensureAvailable();
-      return invoke("desktop_remote_attachment_chunk", {
-        transferId: transferId,
-        chunkIndex: chunkIndex,
-        chunkB64: chunkB64,
-        chunkBytes: chunkBytes,
-      });
-    }
-
-    function attachmentAbort(transferId) {
-      ensureAvailable();
-      return invoke("desktop_remote_attachment_abort", { transferId: transferId });
-    }
-
-    function artifactIndex(sessionId) {
-      ensureAvailable();
-      return invoke("desktop_remote_artifact_index", { sessionId: sessionId });
-    }
-
-    function artifactPreview(sessionId, artifactId) {
-      ensureAvailable();
-      return invoke("desktop_remote_artifact_preview", { sessionId: sessionId, artifactId: artifactId });
-    }
-
-    function artifactDownloadBegin(sessionId, taskId, artifactId) {
-      ensureAvailable();
-      return invoke("desktop_remote_artifact_download_begin", {
-        sessionId: sessionId,
-        taskId: taskId,
-        artifactId: artifactId,
-      });
-    }
-
-    function artifactDownloadChunk(sessionId, artifactId, transferId, chunkIndex) {
-      ensureAvailable();
-      return invoke("desktop_remote_artifact_download_chunk", {
-        sessionId: sessionId,
-        artifactId: artifactId,
-        transferId: transferId,
-        chunkIndex: chunkIndex,
-      });
-    }
-
-    function artifactDownloadAbort(transferId) {
-      ensureAvailable();
-      return invoke("desktop_remote_artifact_download_abort", { transferId: transferId });
-    }
-
-    function historyList() {
-      ensureAvailable();
-      return invoke("desktop_remote_history_list", {}).then(function (records) {
-        publish(logic.applyHistories(current(), records || []));
-        return records || [];
-      });
-    }
-
-    function historyLoad(historyId) {
-      ensureAvailable();
-      return invoke("desktop_remote_history_load", { historyId: historyId });
-    }
-
-    function historyDelete(historyId) {
-      ensureAvailable();
-      return invoke("desktop_remote_history_delete", { historyId: historyId }).then(function (deleted) {
-        if (deleted) {
-          var next = shallow(current());
-          next.remoteHistories = (next.remoteHistories || []).filter(function (record) {
-            return record.historyId !== historyId;
-          });
-          publish(next);
-        }
-        return deleted;
-      });
-    }
-
-    function historyMarkOffline(historyId) {
-      ensureAvailable();
-      return invoke("desktop_remote_history_mark_offline", { historyId: historyId }).then(function (record) {
-        var next = shallow(current());
-        next.remoteHistories = (next.remoteHistories || []).map(function (entry) {
-          if (entry.historyId !== historyId) return entry;
-          return {
-            historyId: entry.historyId,
-            title: entry.title,
-            deviceDisplayName: entry.deviceDisplayName,
-            state: "offline_copy",
-            lastSequence: entry.lastSequence,
-            lastTerminalStatus: entry.lastTerminalStatus,
-          };
-        });
-        publish(next);
-        return record;
-      });
     }
 
     function journalReplay(epoch, sequence) {
@@ -458,27 +287,8 @@
       controllerListHistory: controllerListHistory,
       controllerCreateHistory: controllerCreateHistory,
       capabilitiesSnapshot: capabilitiesSnapshot,
-      listExportableModels: listExportableModels,
-      openRemoteSession: openRemoteSession,
-      switchRemoteSession: switchRemoteSession,
-      submitRemoteTask: submitRemoteTask,
       cancelRemoteTask: cancelRemoteTask,
       remoteTaskStatus: remoteTaskStatus,
-      permissionList: permissionList,
-      permissionDecide: permissionDecide,
-      permissionDenyTask: permissionDenyTask,
-      attachmentBegin: attachmentBegin,
-      attachmentChunk: attachmentChunk,
-      attachmentAbort: attachmentAbort,
-      artifactIndex: artifactIndex,
-      artifactPreview: artifactPreview,
-      artifactDownloadBegin: artifactDownloadBegin,
-      artifactDownloadChunk: artifactDownloadChunk,
-      artifactDownloadAbort: artifactDownloadAbort,
-      historyList: historyList,
-      historyLoad: historyLoad,
-      historyDelete: historyDelete,
-      historyMarkOffline: historyMarkOffline,
       journalReplay: journalReplay,
       journalSnapshot: journalSnapshot,
       journalAcknowledge: journalAcknowledge,

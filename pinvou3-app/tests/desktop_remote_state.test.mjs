@@ -337,7 +337,14 @@ test('bridge feature gates every desktop call behind the Windows capability', ()
   assert.ok(!/api_key|apiKey|credential_ref|credentialRef/.test(feature));
   // Every desktop command it forwards is a desktop_remote_* command.
   const invokes = [...feature.matchAll(/invoke\("([^"]+)"/g)].map((match) => match[1]);
-  assert.ok(invokes.length > 20);
+  const expected = [
+    'controlled_start', 'controlled_refresh', 'controlled_stop', 'controlled_disconnect_now',
+    'controlled_status', 'controlled_list_workspaces', 'controlled_authorize_workspace',
+    'controller_connect', 'controller_disconnect', 'controller_status',
+    'controller_list_history', 'controller_create_history', 'capabilities_snapshot',
+    'task_cancel', 'task_status', 'journal_replay', 'journal_snapshot', 'journal_acknowledge',
+  ].map(name => `desktop_remote_${name}`);
+  assert.deepEqual([...new Set(invokes)].sort(), expected.sort());
   for (const command of invokes) {
     assert.ok(
       command.startsWith('desktop_remote_'),

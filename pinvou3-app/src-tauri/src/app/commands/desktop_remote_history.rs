@@ -1,19 +1,16 @@
 //! Windows remote history and journal commands (DEV-19).
 //!
-//! A consumes authenticated journal events or a snapshot; only then does the
-//! independent history store accept them. Deleting a history entry never
-//! touches B's session, and the list projection stays event-free.
+//! The journal is published by the actual task owner. A07 has no renderer
+//! persistent/raw B-history write ingress: authenticated history projection
+//! is an A08 boundary. A-local controller history has a separate adapter.
 
 use std::sync::Arc;
 
 use serde::Serialize;
-use serde_json::Value;
 use tauri::State;
 
 use crate::features::remote_control::controller::controlled::ControlledDeviceManager;
-use crate::features::remote_control::controller::history::{
-    RemoteHistoryRecord, RemoteHistoryStore,
-};
+use crate::features::remote_control::controller::history::RemoteHistoryStore;
 use crate::features::remote_control::controller::journal::{
     JournalEvent, JournalSnapshot, RemoteJournal, ReplayOutcome,
 };
@@ -92,120 +89,6 @@ fn ensure_supported(controlled: &ControlledDeviceManager) -> Result<(), String> 
     } else {
         Err(UNSUPPORTED.to_owned())
     }
-}
-
-fn monotonic_millis() -> u64 {
-    use std::sync::OnceLock;
-    use std::time::Instant;
-    static ORIGIN: OnceLock<Instant> = OnceLock::new();
-    let origin = ORIGIN.get_or_init(Instant::now);
-    u64::try_from(origin.elapsed().as_millis()).unwrap_or(u64::MAX)
-}
-
-#[tauri::command]
-pub fn desktop_remote_history_list(
-    controlled: State<'_, ControlledDeviceManager>,
-    runtime: HistoryState<'_>,
-) -> Result<Vec<RemoteHistoryRecord>, String> {
-    ensure_supported(&controlled)?;
-    Ok(runtime.store().list())
-}
-
-#[tauri::command]
-pub fn desktop_remote_history_load(
-    history_id: String,
-    controlled: State<'_, ControlledDeviceManager>,
-    runtime: HistoryState<'_>,
-) -> Result<RemoteHistoryRecord, String> {
-    ensure_supported(&controlled)?;
-    runtime
-        .store()
-        .load(&history_id)
-        .map_err(|error| error.code.to_owned())
-}
-
-#[tauri::command]
-pub fn desktop_remote_history_delete(
-    history_id: String,
-    controlled: State<'_, ControlledDeviceManager>,
-    runtime: HistoryState<'_>,
-) -> Result<bool, String> {
-    ensure_supported(&controlled)?;
-    runtime
-        .store()
-        .delete(&history_id)
-        .map_err(|error| error.code.to_owned())
-}
-
-#[tauri::command]
-pub fn desktop_remote_history_create(
-    title: String,
-    device_display_name: String,
-    session_ref: String,
-    controlled: State<'_, ControlledDeviceManager>,
-    runtime: HistoryState<'_>,
-) -> Result<String, String> {
-    ensure_supported(&controlled)?;
-    runtime
-        .store()
-        .create(
-            &title,
-            &device_display_name,
-            &session_ref,
-            monotonic_millis(),
-        )
-        .map_err(|error| error.code.to_owned())
-}
-
-#[tauri::command]
-pub fn desktop_remote_history_mark_offline(
-    history_id: String,
-    controlled: State<'_, ControlledDeviceManager>,
-    runtime: HistoryState<'_>,
-) -> Result<RemoteHistoryRecord, String> {
-    ensure_supported(&controlled)?;
-    runtime
-        .store()
-        .mark_offline(&history_id, monotonic_millis())
-        .map_err(|error| error.code.to_owned())?;
-    runtime
-        .store()
-        .load(&history_id)
-        .map_err(|error| error.code.to_owned())
-}
-
-/// Applies one authenticated event to the A copy.
-#[tauri::command]
-pub fn desktop_remote_history_apply_event(
-    history_id: String,
-    event: Value,
-    controlled: State<'_, ControlledDeviceManager>,
-    runtime: HistoryState<'_>,
-) -> Result<bool, String> {
-    ensure_supported(&controlled)?;
-    let event: JournalEvent =
-        serde_json::from_value(event).map_err(|_| "history_event_invalid".to_owned())?;
-    runtime
-        .store()
-        .append_authenticated(&history_id, &event, monotonic_millis())
-        .map_err(|error| error.code.to_owned())
-}
-
-/// Applies an authoritative snapshot atomically.
-#[tauri::command]
-pub fn desktop_remote_history_apply_snapshot(
-    history_id: String,
-    snapshot: Value,
-    controlled: State<'_, ControlledDeviceManager>,
-    runtime: HistoryState<'_>,
-) -> Result<usize, String> {
-    ensure_supported(&controlled)?;
-    let snapshot: JournalSnapshot =
-        serde_json::from_value(snapshot).map_err(|_| "history_snapshot_invalid".to_owned())?;
-    runtime
-        .store()
-        .apply_snapshot(&history_id, &snapshot, monotonic_millis())
-        .map_err(|error| error.code.to_owned())
 }
 
 #[tauri::command]

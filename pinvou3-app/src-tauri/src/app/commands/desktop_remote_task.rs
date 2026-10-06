@@ -1,28 +1,22 @@
-//! Windows remote task commands (DEV-13).
+//! B-local remote task status and stop commands, plus private task owners.
 //!
-//! The command layer is a thin adapter: it re-validates the wire payload
-//! against the live lease and the negotiated capabilities, resolves the opaque
-//! workspace reference through the DEV-12 snapshot, and hands the request to
-//! the B task owner. DEV-20 owns final handler registration.
+//! A07 deliberately exposes no renderer task/session admission. A08 must
+//! authenticate the sender and full binding before connecting the private
+//! engine/session kernels; a renderer-supplied payload cannot assert A's role.
 
 use std::sync::Arc;
 use std::time::Instant;
 
 use serde_json::Value;
 use tauri::{AppHandle, Emitter, State};
-use tokio_util::sync::CancellationToken;
 
 use crate::features::assistant::engine_pool::EnginePool;
 use crate::features::assistant::remote_turn::{EnginePoolChatEngine, EnginePoolChatTurnPort};
 use crate::features::codex_acp::AcpPool;
 use crate::features::codex_acp::remote_turn::{AcpPoolCodeTurnPort, RemoteWorkspaceAuthorizations};
-use crate::features::remote_control::controller::capabilities::CapabilitySnapshotManager;
 use crate::features::remote_control::controller::controlled::ControlledDeviceManager;
-use crate::features::remote_control::controller::protocol::{
-    LeaseContext, RuntimeValidationContext, SenderRole, validate_controller_runtime_payload_json,
-};
 use crate::features::remote_control::controller::task::{
-    AdmissionOutcome, CancelOutcome, ChatTurnExecutor, CodeTurnExecutor, ControllerTaskEventSink,
+    CancelOutcome, ChatTurnExecutor, CodeTurnExecutor, ControllerTaskEventSink,
     RemoteSessionProvisioner, RemoteTaskEvent, RemoteTaskEventSink, RemoteTaskHooks,
     RemoteTaskLedger, RemoteTaskService, TASK_MODE_CHAT, TASK_MODE_CODE,
 };
@@ -31,14 +25,6 @@ use crate::features::sessions::SessionStore;
 const UNSUPPORTED: &str = "desktop_remote_control_unsupported";
 const TASK_EVENT: &str = "desktop-remote-task-status";
 const TASK_STATUS_EVENT: &str = "desktop-remote-task-event";
-const NEGOTIATED_CAPABILITIES: &[&str] = &[
-    "pairing_v1",
-    "encrypted_frames_v1",
-    "finished_receipt_v1",
-    "role_liveness_v1",
-    "resume_v1",
-    "task_v1",
-];
 
 fn monotonic_millis() -> u64 {
     use std::sync::OnceLock;
@@ -184,12 +170,6 @@ fn ensure_supported(controlled: &ControlledDeviceManager) -> Result<(), String> 
     }
 }
 
-fn live_context(controlled: &ControlledDeviceManager) -> Result<LeaseContext, String> {
-    controlled
-        .live_lease()
-        .map_err(|error| error.code.to_owned())
-}
-
 fn sanitized_reason(reason: &str) -> String {
     let sanitized: String = reason
         .chars()
@@ -203,53 +183,6 @@ fn sanitized_reason(reason: &str) -> String {
     }
 }
 
-fn validated_task_payload(payload: &Value, lease: &LeaseContext) -> Result<Value, String> {
-    let encoded = serde_json::to_string(payload).map_err(|_| "task_request_invalid".to_owned())?;
-    let context = RuntimeValidationContext {
-        lease: Some(lease.clone()),
-        negotiated_capabilities: NEGOTIATED_CAPABILITIES
-            .iter()
-            .map(|value| (*value).to_owned())
-            .collect(),
-    };
-    let validated =
-        validate_controller_runtime_payload_json(&encoded, SenderRole::ControllerA, Some(&context))
-            .map_err(|error| format!("task_payload_{}", error.code))?;
-    if validated.get("type").and_then(Value::as_str) != Some("task_submit") {
-        return Err("task_request_invalid".to_owned());
-    }
-    Ok(validated)
-}
-
-#[tauri::command]
-pub fn desktop_remote_task_open_session(
-    remote_session_ref: String,
-    title: String,
-    code_mode: bool,
-    controlled: State<'_, ControlledDeviceManager>,
-    runtime: RuntimeState<'_>,
-) -> Result<String, String> {
-    ensure_supported(&controlled)?;
-    runtime
-        .service()
-        .open_remote_session(&remote_session_ref, &title, code_mode)
-        .map_err(|error| error.code.to_owned())
-}
-
-#[tauri::command]
-pub fn desktop_remote_task_switch_session(
-    remote_session_ref: String,
-    session_id: String,
-    controlled: State<'_, ControlledDeviceManager>,
-    runtime: RuntimeState<'_>,
-) -> Result<String, String> {
-    ensure_supported(&controlled)?;
-    runtime
-        .service()
-        .switch_remote_session(&remote_session_ref, &session_id)
-        .map_err(|error| error.code.to_owned())
-}
-
 #[tauri::command]
 pub fn desktop_remote_task_close_session(
     remote_session_ref: String,
@@ -261,91 +194,6 @@ pub fn desktop_remote_task_close_session(
         .service()
         .close_remote_session(&remote_session_ref)
         .map_err(|error| error.code.to_owned())
-}
-
-#[tauri::command]
-pub fn desktop_remote_task_submit(
-    app: AppHandle,
-    payload: Value,
-    controlled: State<'_, ControlledDeviceManager>,
-    capabilities: State<'_, CapabilitySnapshotManager>,
-    runtime: RuntimeState<'_>,
-) -> Result<Value, String> {
-    ensure_supported(&controlled)?;
-    let lease = live_context(&controlled)?;
-    let validated = validated_task_payload(&payload, &lease)?;
-    let now_b = monotonic_millis();
-    let session_id = validated
-        .get("session_id")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "task_request_invalid".to_owned())?
-        .to_owned();
-    if runtime.service().is_remote_session(&session_id) {
-        // The remote session map is the only authority for "this B session is
-        // currently owned by a remote controller".
-    } else {
-        return Err("task_session_not_found".to_owned());
-    }
-    let mode = validated
-        .get("mode")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "task_request_invalid".to_owned())?
-        .to_owned();
-    if mode == TASK_MODE_CODE {
-        let workspace_id = validated
-            .get("input")
-            .and_then(|input| input.get("workspace_id"))
-            .and_then(Value::as_str)
-            .ok_or_else(|| "task_workspace_required".to_owned())?
-            .to_owned();
-        let revision = validated
-            .get("capability_revision")
-            .and_then(Value::as_str)
-            .ok_or_else(|| "task_request_invalid".to_owned())?;
-        // The snapshot is a hint; admitting the task still rechecks the live B
-        // policy through the bounded ACP authorization registry below.
-        capabilities
-            .workspace_for_task(revision, &lease, &workspace_id, now_b)
-            .map_err(|error| error.code.to_owned())?;
-        if !runtime
-            .authorizations()
-            .authorize(&session_id, &workspace_id)
-        {
-            return Err("task_workspace_capacity".to_owned());
-        }
-    }
-
-    let service = runtime.service();
-    let outcome = service
-        .submit(&lease, &validated, now_b)
-        .map_err(|error| error.code.to_owned())?;
-    match outcome {
-        AdmissionOutcome::Replay(record) => service
-            .status_payload(&record.task_id)
-            .map_err(|error| error.code.to_owned()),
-        AdmissionOutcome::Admitted(ticket) => {
-            let task_id = ticket.record.task_id.clone();
-            let status = service
-                .status_payload(&task_id)
-                .map_err(|error| error.code.to_owned())?;
-            let events: Arc<dyn ControllerTaskEventSink> =
-                Arc::new(TaskEventBridge { app: app.clone() });
-            let dispatch_service = Arc::clone(&service);
-            tauri::async_runtime::spawn(async move {
-                if let Err(error) = dispatch_service
-                    .dispatch(ticket, events, CancellationToken::new(), monotonic_millis())
-                    .await
-                {
-                    eprintln!(
-                        "[remote-control] remote task dispatch rejected: {}",
-                        error.code
-                    );
-                }
-            });
-            let _ = app.emit(TASK_EVENT, &status);
-            Ok(status)
-        }
-    }
 }
 
 #[tauri::command]
@@ -407,7 +255,6 @@ mod tests {
         assert_eq!(UNSUPPORTED, "desktop_remote_control_unsupported");
         assert_eq!(TASK_EVENT, "desktop-remote-task-status");
         assert_eq!(TASK_STATUS_EVENT, "desktop-remote-task-event");
-        assert!(NEGOTIATED_CAPABILITIES.contains(&"task_v1"));
     }
 
     #[test]

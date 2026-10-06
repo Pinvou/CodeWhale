@@ -73,13 +73,22 @@
 
   async function loadPlatformCapabilities() {
     try {
+      var detected = await invoke("get_platform_capabilities");
       state.platformCapabilities = Object.assign(
         {},
         state.platformCapabilities,
-        await invoke("get_platform_capabilities"),
-        { loaded: true }
+        detected,
+        {
+          loaded: true,
+          desktopRemoteControl: !!detected && detected.os === "windows" &&
+            detected.desktopRemoteControlSupported === true,
+        }
       );
     } catch (error) {
+      state.platformCapabilities = Object.assign({}, state.platformCapabilities, {
+        loaded: false,
+        desktopRemoteControl: false,
+      });
       console.warn("[platform] capability detection failed", error);
     }
     notify();
@@ -1681,7 +1690,8 @@
     var fields = STATE_SLICE_FIELDS[domain];
     if (!fields) throw new Error("Unknown Tauri bridge state slice: " + domain);
     var slice = {};
-    for (var i = 0; i < fields.length; i++) slice[fields[i]] = state[fields[i]];
+    var source = domain === "desktopRemoteControl" ? state.desktopRemoteControl : state;
+    for (var i = 0; i < fields.length; i++) slice[fields[i]] = source && source[fields[i]];
     if (typeof structuredClone === "function") {
       try { return structuredClone(slice); } catch (_) {} // safari14-ok: typeof-guarded with JSON fallback
     }
@@ -1787,8 +1797,9 @@
     var cached = subscriptionSliceCache[domain];
     if (cached && cached.revision === subscriptionSliceRevision) return cached.snapshot;
     var current = {};
+    var source = domain === "desktopRemoteControl" ? state.desktopRemoteControl : state;
     for (var i = 0; i < fields.length; i++) {
-      current[fields[i]] = state[fields[i]];
+      current[fields[i]] = source && source[fields[i]];
     }
     var snapshot = subscriptionStateValue(current, cached && cached.snapshot);
     subscriptionSliceCache[domain] = { revision: subscriptionSliceRevision, snapshot: snapshot };
@@ -3117,27 +3128,8 @@
       controllerListHistory: desktopRemoteControlFeature.controllerListHistory,
       controllerCreateHistory: desktopRemoteControlFeature.controllerCreateHistory,
       capabilitiesSnapshot: desktopRemoteControlFeature.capabilitiesSnapshot,
-      listExportableModels: desktopRemoteControlFeature.listExportableModels,
-      openRemoteSession: desktopRemoteControlFeature.openRemoteSession,
-      switchRemoteSession: desktopRemoteControlFeature.switchRemoteSession,
-      submitRemoteTask: desktopRemoteControlFeature.submitRemoteTask,
       cancelRemoteTask: desktopRemoteControlFeature.cancelRemoteTask,
       remoteTaskStatus: desktopRemoteControlFeature.remoteTaskStatus,
-      permissionList: desktopRemoteControlFeature.permissionList,
-      permissionDecide: desktopRemoteControlFeature.permissionDecide,
-      permissionDenyTask: desktopRemoteControlFeature.permissionDenyTask,
-      attachmentBegin: desktopRemoteControlFeature.attachmentBegin,
-      attachmentChunk: desktopRemoteControlFeature.attachmentChunk,
-      attachmentAbort: desktopRemoteControlFeature.attachmentAbort,
-      artifactIndex: desktopRemoteControlFeature.artifactIndex,
-      artifactPreview: desktopRemoteControlFeature.artifactPreview,
-      artifactDownloadBegin: desktopRemoteControlFeature.artifactDownloadBegin,
-      artifactDownloadChunk: desktopRemoteControlFeature.artifactDownloadChunk,
-      artifactDownloadAbort: desktopRemoteControlFeature.artifactDownloadAbort,
-      historyList: desktopRemoteControlFeature.historyList,
-      historyLoad: desktopRemoteControlFeature.historyLoad,
-      historyDelete: desktopRemoteControlFeature.historyDelete,
-      historyMarkOffline: desktopRemoteControlFeature.historyMarkOffline,
       journalReplay: desktopRemoteControlFeature.journalReplay,
       journalSnapshot: desktopRemoteControlFeature.journalSnapshot,
       journalAcknowledge: desktopRemoteControlFeature.journalAcknowledge,

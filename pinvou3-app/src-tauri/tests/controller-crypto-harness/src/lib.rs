@@ -3,10 +3,11 @@
 //! Actual production modules are compiled below without linking the full
 //! Tauri/CodeWhale graph. The actual controller and legacy Relay transports
 //! are compiled, including their loopback WebSocket and queue admission tests.
-//! The platform capability projection is also a test double, not OS coverage.
-//! Transfer tests compile the actual byte-budget and retry-evidence core; they
-//! cover the upload identity port, but not real staging files, command
-//! admission or production transfer wiring.
+//! Capability detection is a host seam, not complete OS/Tauri coverage. Task,
+//! journal, byte-budget, transfer lifecycle, anchored private filesystem and
+//! real staging tests compile their actual production modules. The periodic
+//! reaper is exercised with a controlled clock and real Tokio interval.
+//! Native command registration/startup is not linked by this harness.
 //! The full product compile and native transport tests remain separate gates.
 
 #![allow(dead_code)]
@@ -66,8 +67,4 @@ mod features {
     }
 }
 
-mod platform {
-    pub(crate) fn desktop_control_supported() -> bool {
-        cfg!(target_os = "windows")
-    }
-}
+mod platform;
