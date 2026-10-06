@@ -375,6 +375,28 @@ async fn test_grep_files_streaming_stops_at_max_results() {
         json!(["needle 6", "needle 7"]),
         "last match must keep after-context lines"
     );
+    // The walk stopped at the cap, so the caller must see the
+    // truncation signal.
+    assert_eq!(parsed["truncated"], json!(true));
+}
+
+#[tokio::test]
+async fn test_grep_files_truncated_false_below_cap() {
+    let tmp = tempdir().expect("tempdir");
+    let ctx = ToolContext::new(tmp.path().to_path_buf());
+
+    fs::write(tmp.path().join("a.txt"), "needle once\n").expect("write");
+
+    let tool = GrepFilesTool;
+    let result = tool
+        .execute(json!({"pattern": "needle", "max_results": 100}), &ctx)
+        .await
+        .expect("execute");
+
+    assert!(result.success);
+    let parsed: Value = serde_json::from_str(&result.content).unwrap();
+    assert_eq!(parsed["total_matches"].as_u64().unwrap(), 1);
+    assert_eq!(parsed["truncated"], json!(false));
 }
 
 #[tokio::test]
