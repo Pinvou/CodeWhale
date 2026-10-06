@@ -29,14 +29,17 @@ impl RegisterCommand for RelayCmd {
 
 /// Ask the active model to write a compact relay artifact for the next thread.
 ///
-/// The visible command is `/relay` (with `/接力` for Chinese users), but the
-/// durable file path remains `.deepseek/handoff.md` for compatibility with
-/// existing sessions and startup prompt loading.
+/// The visible command is `/relay` (with `/接力` for Chinese users). The
+/// durable file path is `.codewhale/handoff.md` — the primary path the
+/// startup prompt loads. Legacy `.deepseek/handoff.md` files are still read
+/// as a fallback, but writing the legacy path directly would be shadowed by
+/// any existing primary artifact, so `/relay` must keep targeting the
+/// primary.
 pub fn relay(app: &mut App, arg: Option<&str>) -> CommandResult {
     let focus = arg.map(str::trim).filter(|value| !value.is_empty());
     let message = build_relay_instruction(app, focus);
     CommandResult::with_message_and_action(
-        "Preparing session relay at .deepseek/handoff.md...",
+        "Preparing session relay at .codewhale/handoff.md...",
         AppAction::SendMessage(message),
     )
 }
@@ -48,10 +51,10 @@ fn build_relay_instruction(app: &App, focus: Option<&str>) -> String {
         "Create a compact session relay (接力) for a future Codewhale thread."
     );
     let _ = writeln!(out);
-    let _ = writeln!(out, "Write or update `.deepseek/handoff.md`.");
+    let _ = writeln!(out, "Write or update `.codewhale/handoff.md`.");
     let _ = writeln!(
         out,
-        "Keep the existing file path for compatibility, but title the artifact `# Session relay`."
+        "Write the primary path so the next session loads it (a legacy `.deepseek/handoff.md` is only read as a fallback), and title the artifact `# Session relay`."
     );
     let _ = writeln!(out);
     let _ = writeln!(out, "Use this relay structure:");

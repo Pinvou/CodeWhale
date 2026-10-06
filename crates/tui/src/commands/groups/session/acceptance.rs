@@ -607,7 +607,7 @@ fn codewhale_sends_session_relay_instruction_focused_on(
         other => panic!("expected relay SendMessage action, got {other:?}"),
     };
 
-    assert!(message.contains("Write or update `.deepseek/handoff.md`."));
+    assert!(message.contains("Write or update `.codewhale/handoff.md`."));
     assert!(message.contains("# Session relay"));
     assert!(message.contains("## Verification"));
     assert!(
@@ -616,7 +616,7 @@ fn codewhale_sends_session_relay_instruction_focused_on(
     );
     assert_eq!(
         world.last_message.as_deref(),
-        Some("Preparing session relay at .deepseek/handoff.md...")
+        Some("Preparing session relay at .codewhale/handoff.md...")
     );
 }
 

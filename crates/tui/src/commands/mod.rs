@@ -772,14 +772,14 @@ mod tests {
                 .message
                 .as_deref()
                 .unwrap_or_default()
-                .contains(".deepseek/handoff.md")
+                .contains(".codewhale/handoff.md")
         );
         let Some(AppAction::SendMessage(message)) = result.action else {
             panic!("expected SendMessage action");
         };
         assert!(message.contains("session relay"));
         assert!(message.contains("接力"));
-        assert!(message.contains("Write or update `.deepseek/handoff.md`"));
+        assert!(message.contains("Write or update `.codewhale/handoff.md`"));
         assert!(message.contains("# Session relay"));
         assert!(message.contains("Requested relay focus: verify install"));
         assert!(message.contains("Goal objective: Unify the work surface"));

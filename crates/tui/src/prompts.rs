@@ -110,8 +110,9 @@ Only output English for:\n\
 - Code identifiers (variable names, function names, file paths)\n\
 - Technical terms that lack a standard translation in {target_language}\n\
 - Code blocks the user explicitly requests in English\n\n\
-This is a hard display requirement: the user does not read English, \
-so any English prose in your response will block their decision-making. \
+This is a hard display requirement for this session: every turn is \
+translated for a {target_language}-reading audience, so English prose in your \
+response will reach the user untranslated. \
 This overrides the ## Language rule for this session."
     )
 }
@@ -310,8 +311,15 @@ fn load_handoff_block(workspace: &Path) -> Option<String> {
     if trimmed.is_empty() {
         return None;
     }
+    // Name the path that was actually read: the legacy fallback would
+    // otherwise point the model at a file that does not exist.
+    let shown = path
+        .strip_prefix(workspace)
+        .unwrap_or(&path)
+        .to_string_lossy()
+        .into_owned();
     Some(format!(
-        "## Previous Session Relay\n\nThe previous session in this workspace left a relay artifact at `{HANDOFF_RELATIVE_PATH}`. Consider it the first artifact to read on this turn — open blockers, in-flight changes, and recent decisions live there. Update or rewrite it before exiting if state changes materially.\n\n{trimmed}"
+        "## Previous Session Relay\n\nThe previous session in this workspace left a relay artifact at `{shown}`. Consider it the first artifact to read on this turn — open blockers, in-flight changes, and recent decisions live there. Update or rewrite it before exiting if state changes materially.\n\n{trimmed}"
     ))
 }
 
@@ -1478,7 +1486,10 @@ mod tests {
 
     /// Discriminator unique to the injected relay block (not present in the
     /// agent prompt's own discussion of the convention).
-    const HANDOFF_BLOCK_MARKER: &str = "left a relay artifact at `.codewhale/handoff.md`";
+    // Path-agnostic prefix: the block names whichever path the loader
+    // actually read (primary or legacy fallback); the exact-path asserts
+    // live in the per-fixture tests below.
+    const HANDOFF_BLOCK_MARKER: &str = "left a relay artifact at `";
 
     /// The recap points at the bundled `### Whose word wins` section; an
     /// embedder composer that owns the static prefix retires that section,
@@ -3027,6 +3038,29 @@ mod tests {
         assert!(prompt.contains(HANDOFF_BLOCK_MARKER));
         assert!(prompt.contains("Finish #32."));
         assert!(prompt.contains("write the basic version"));
+        // The block must name the path that was actually read, not the
+        // primary path — the legacy fallback is otherwise invisible and
+        // the model is sent to a file that does not exist.
+        assert!(prompt.contains("relay artifact at `.deepseek/handoff.md`"));
+        assert!(!prompt.contains("relay artifact at `.codewhale/handoff.md`"));
+    }
+
+    #[test]
+    fn handoff_block_names_primary_path_when_present() {
+        let tmp = tempdir().expect("tempdir");
+        let workspace = tmp.path();
+        let handoff_dir = workspace.join(".codewhale");
+        std::fs::create_dir_all(&handoff_dir).unwrap();
+        std::fs::write(
+            handoff_dir.join("handoff.md"),
+            "# Session relay\n\nprimary\n",
+        )
+        .unwrap();
+
+        let prompt = system_prompt_flat_text(&system_prompt_for_mode_with_context(workspace, None));
+
+        assert!(prompt.contains(HANDOFF_BLOCK_MARKER));
+        assert!(prompt.contains("relay artifact at `.codewhale/handoff.md`"));
     }
 
     #[test]
