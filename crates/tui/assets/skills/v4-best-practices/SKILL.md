@@ -24,12 +24,13 @@ on hallucinated symbols.
 
 ## 2. Spawn a verifier sub-agent before multi-file execution
 
-Before executing a plan that touches 3+ files, spawn a `deepseek-v4-flash`
+Before executing a plan that touches 3+ files, spawn a read-only verifier
 sub-agent (thinking off) to read the target files and confirm path/symbol
-assumptions still hold.
+assumptions still hold. Prefer operator `model_strength` routing over
+hardcoded model ids in the call:
 
 ```
-agent type="verifier" model="deepseek-v4-flash"
+agent action="start" type="verifier" thinking="off"
   prompt: "Read these files and confirm: [list assumptions]. Report mismatches."
 ```
 

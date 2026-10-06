@@ -32,27 +32,26 @@ Do not delegate tiny one-step tasks, ambiguous product decisions, destructive op
 
 Use `agent` for a focused child run. Launch independent children together so they can run in parallel.
 
-Prefer provider-neutral `model_strength` over hardcoded model ids. Children inherit the active model by default (`model_strength: "same"`), including `type: "scout"`, so pass `model_strength: "faster"` explicitly to get the cheaper same-family sibling for read-only exploration:
+Children inherit the active model by default, including `type: "scout"`; prefer provider-neutral routing (operator `model_strength` configuration) over hardcoded model ids in prompts or Fleet config:
 
 ```json
 {
+  "action": "start",
   "name": "config_audit",
   "prompt": "Inspect crates/tui/src/config.rs and crates/tui/src/settings.rs for duplicate model-default logic. Return file/line findings only; do not edit files.",
-  "type": "scout",
-  "model_strength": "faster",
-  "cwd": "."
+  "type": "scout"
 }
 ```
 
-For code changes, give the child a precise write boundary and tell it not to revert unrelated edits. Keep implementation children capable with `model_strength: "same"`:
+For code changes, give the child a precise write boundary and tell it not to revert unrelated edits:
 
 ```json
 {
+  "action": "start",
   "name": "docs_patch",
   "prompt": "Update only docs/configuration.md to document the new [statusline] keys. Match the surrounding style. Do not edit other files.",
   "type": "builder",
-  "model_strength": "same",
-  "cwd": "."
+  "write_roots": ["docs/configuration.md"]
 }
 ```
 

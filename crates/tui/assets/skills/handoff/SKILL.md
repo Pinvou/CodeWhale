@@ -57,10 +57,14 @@ Invocation: `model+user`
    ```
 
 3. **Persist it.** Always write `.codewhale/handoff.md` in the workspace — that
-   is the only path the runtime reads back. On the next session's first turn it
-   is injected as the "## Previous Session Relay" block
-   (`HANDOFF_RELATIVE_PATH`, `crates/tui/src/prompts.rs:85`; loader at
-   `prompts.rs:301-315`). A handoff written anywhere else is never picked up,
+   is the primary path the runtime reads back (`HANDOFF_RELATIVE_PATH` in
+   `crates/tui/src/prompts.rs`; see `load_handoff_block` in the same file).
+   On the next session's first turn it is injected as the
+   "## Previous Session Relay" block, naming the path it actually read. A
+   legacy `.deepseek/handoff.md` is still read as a fallback, but writing the
+   primary path is the only way to guarantee a fresh relay wins once a
+   `.codewhale/handoff.md` exists. A handoff written anywhere else is never
+   picked up,
    so the next session starts cold no matter how good the note is.
 
    Optionally also write a human-discoverable copy:

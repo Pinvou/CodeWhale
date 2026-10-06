@@ -5,10 +5,13 @@ description: Scaffold a local Codewhale plugin bundle with a versioned manifest,
 
 # Plugin Creator
 
-Use this skill when a user wants a local Codewhale plugin bundle. Codewhale
-v0.9.1 has a deliberately bounded loader: trusted and enabled bundles may add
+Use this skill when a user wants a local Codewhale plugin bundle. The
+plugin loader is deliberately bounded: trusted and enabled bundles may add
 declarative Skills and MCP servers through the existing engines. Other
-component kinds are inventory-only.
+component kinds are inventory-only. `plugin.json` is the native Agent
+Plugins manifest (`plugin.toml` is the legacy Codewhale format and stays
+readable); distribution goes through `/plugin marketplace add|install`, not
+a bundle-carried downloader.
 
 ## Workflow
 
@@ -54,6 +57,8 @@ path = "skills"
    content but does not activate it; enablement rebuilds the current
    workspace's Skill/MCP catalogue immediately.
 
-Every user and workspace bundle starts untrusted and disabled. Do not add a
-marketplace, downloader, updater, compatibility scan, executable extension
-runtime, or automatic trust flow; those surfaces are outside v0.9.1.
+Every user and workspace bundle starts untrusted and disabled. A bundle
+must not carry its own downloader, updater, compatibility scan, executable
+extension runtime, or automatic trust flow — discovery and installation are
+the engine's job (`/plugin marketplace ...`, `/plugin install|update|
+uninstall`), and trust stays a user decision.

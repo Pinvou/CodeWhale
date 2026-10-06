@@ -81,14 +81,13 @@ Run what CI runs, not a paraphrase of it:
 
 ```
 cargo fmt --all -- --check
-cargo clippy --workspace --all-features --locked -- \
+cargo clippy --workspace --all-targets --all-features --locked -- \
   -D warnings \
   -A clippy::uninlined_format_args \
   -A clippy::too_many_arguments \
-  -A clippy::unnecessary_map_or \
-  -A clippy::collapsible_if \
-  -A clippy::assertions_on_constants
-cargo test --workspace
+  -A clippy::unnecessary_map_or
+cargo nextest run --workspace --all-features --locked --profile ci
+cargo test --workspace --all-features --locked --doc
 ```
 
 These are copied from `.github/workflows/ci.yml`. If that file changes, this
