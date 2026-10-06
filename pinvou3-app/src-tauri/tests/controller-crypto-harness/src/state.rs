@@ -8,11 +8,17 @@ pub(crate) mod controlled;
 #[path = "../../../src/features/remote_control/controller/controlling.rs"]
 pub(crate) mod controlling;
 
+#[path = "../../../src/features/remote_control/controller/controlling_handshake.rs"]
+pub(crate) mod controlling_handshake;
+
+#[path = "../../../src/features/remote_control/controller/controlled_handshake.rs"]
+pub(crate) mod controlled_handshake;
+
 #[path = "../../../src/features/remote_control/controller/controlling_session.rs"]
 mod controlling_session;
 
 #[path = "../../../src/features/remote_control/controller/permission.rs"]
-mod permission;
+pub(crate) mod permission;
 
 // Compile the real task producer and journal consumer together: a fabricated
 // event sequence cannot prove that production transitions reach the journal.
@@ -21,3 +27,5 @@ pub(crate) mod task;
 
 #[path = "../../../src/features/remote_control/controller/journal.rs"]
 pub(crate) mod journal;
+
+pub(crate) use crate::transfer;

@@ -74,7 +74,7 @@ test('real getMany and subscribeMany expose the nested remote-control domain', a
   const current = h.api.state.getMany(['desktopRemoteControl']);
   assert.equal(current.controllerConnection.connectionId, 'connection-0001');
   assert.equal(current.controllerConnection.status, 'connected');
-  assert.ok(Array.isArray(current.tasks));
+  assert.ok(Array.isArray(current.controlledTasks));
   assert.equal(snapshots.at(-1).controllerConnection.connectionId, 'connection-0001');
   assert.ok(Object.isFrozen(snapshots.at(-1)));
   const stable = snapshots.at(-1);
@@ -83,18 +83,17 @@ test('real getMany and subscribeMany expose the nested remote-control domain', a
   off();
 });
 
-test('unfinished sensitive renderer entries remain unregistered until authenticated wiring', () => {
+test('obsolete unauthenticated native entries stay closed after authenticated A08 wiring', () => {
   const h = host();
-  for (const name of ['listExportableModels', 'permissionList', 'permissionDecide', 'permissionDenyTask',
-    'historyList', 'historyLoad', 'historyDelete', 'historyMarkOffline',
-    'artifactDownloadAbort', 'artifactDownloadBegin', 'artifactDownloadChunk', 'artifactIndex', 'artifactPreview',
-    'attachmentAbort', 'attachmentBegin', 'attachmentChunk',
+  for (const name of ['historyList', 'historyLoad', 'historyDelete', 'historyMarkOffline',
     'openRemoteSession', 'switchRemoteSession', 'submitRemoteTask']) {
     assert.equal(name in h.api.desktopRemoteControl, false, name);
   }
   const native = fs.readFileSync(path.join(root, 'src-tauri/src/lib.rs'), 'utf8');
-  assert.doesNotMatch(native, /commands::desktop_remote_(?:model::desktop_remote_model_(?:list_exportable|install|release|active)|permission::desktop_remote_permission_(?:request|decide|list|deny_task)|history::desktop_remote_history_(?:list|load|delete|create|mark_offline|apply_event|apply_snapshot)),/);
+  assert.doesNotMatch(native, /commands::desktop_remote_(?:model::desktop_remote_model_(?:install|release|active)|permission::desktop_remote_permission_(?:request|decide|list)|history::desktop_remote_history_(?:list|load|delete|create|mark_offline|apply_event|apply_snapshot)),/);
   assert.doesNotMatch(native, /commands::desktop_remote_(?:attachment::desktop_remote_attachment_(?:begin|chunk|abort)|artifact::desktop_remote_artifact_(?:index|preview|download_begin|download_chunk|download_abort)|task::desktop_remote_task_(?:submit|open_session|switch_session)),/);
+  assert.match(native, /commands::desktop_remote_action::desktop_remote_action_a,/);
+  assert.match(native, /commands::desktop_remote_permission::desktop_remote_permission_list_b,/);
   const commands = path.join(root, 'src-tauri/src/app/commands');
   for (const file of ['desktop_remote_attachment.rs', 'desktop_remote_artifact.rs', 'desktop_remote_task.rs']) {
     assert.doesNotMatch(fs.readFileSync(path.join(commands, file), 'utf8'), /pub\s+(?:async\s+)?fn\s+desktop_remote_(?:attachment_(?:begin|chunk|abort)|artifact_(?:index|preview|download_begin|download_chunk|download_abort)|task_(?:submit|open_session|switch_session))\b/);
@@ -102,5 +101,10 @@ test('unfinished sensitive renderer entries remain unregistered until authentica
   const controlled = fs.readFileSync(path.join(root, 'src-tauri/src/features/remote_control/controller/controlled.rs'), 'utf8');
   assert.doesNotMatch(controlled, /\bwith_live_lease\b/, 'no manager lock is held across synchronous transfer I/O');
   const bridge = fs.readFileSync(path.join(root, 'src/platform/tauri/bridge/desktop-remote-control.js'), 'utf8');
-  assert.doesNotMatch(bridge, /permissionRequest:|selectedModelId:/, 'unconsumed placeholders are not submitted');
+  assert.doesNotMatch(bridge, /permissionRequest:/, 'no unbound self-approval placeholder is submitted');
+  assert.doesNotMatch(bridge, /invoke\("desktop_remote_(?:attachment|artifact|permission_decide|permission_request)/);
+  const model = fs.readFileSync(path.join(commands, 'desktop_remote_model.rs'), 'utf8');
+  assert.match(model, /let credentials = SystemCredentialStore::new\(\);/);
+  assert.match(model, /prepare_export_models\(&prefs, model\.clone\(\), &credentials\)/);
+  assert.doesNotMatch(model, /pub fn desktop_remote_model_(?:install|release|active)\b/);
 });

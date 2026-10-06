@@ -2029,19 +2029,25 @@ test("deterministic migration failure is terminal and schema corruption fails cl
 
 // DEV-01 boundary guard: `enroll()` creates an active enrollment without a
 // purpose check, so production dispatch must never reach it directly. DEV-06
-// owns the dispatcher wiring and is expected to use `authorizeRegistration`
+// owns the dispatcher wiring and must use the role-specific registration APIs
 // (which fails closed for un-enrolled / revoked / unknown-key endpoints).
 // A runtime assertion cannot observe this boundary — the two functions are
 // indistinguishable from the outside — so this guard scans the dispatcher
 // source. If a future task legitimately needs a direct provisioning call in
 // `server.js`, it must land together with an explicit authorization step in
 // this same test rather than deleting the guard.
-test("the relay dispatcher never bypasses authorizeRegistration via enroll", async () => {
+test("the relay dispatcher uses role-specific authorization and never directly enrolls", async () => {
   const relayRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/u, "$1")), "..");
   const dispatcher = await fs.readFile(path.join(relayRoot, "server.js"), "utf8");
-  assert.doesNotMatch(
-    dispatcher,
-    /\.enroll\s*\(/u,
-    "server.js must authorize registrations through authorizeRegistration(), not enroll()",
-  );
+  const gateway = await fs.readFile(path.join(relayRoot, "enrollment-gateway.js"), "utf8");
+  for (const source of [dispatcher, gateway]) {
+    assert.doesNotMatch(source, /\.enroll\s*\(/u, "registration entrypoints must authorize, not directly enroll");
+    assert.doesNotMatch(source, /\.authorizeRegistration\s*\(/u);
+  }
+  for (const method of ["authorizeDesktopRegistration", "authorizePairingRegistration"]) {
+    assert.match(dispatcher, new RegExp(`\\.${method}\\s*\\(`, "u"));
+  }
+  for (const method of ["authorizeWebRegistration", "authorizeDesktopRegistration"]) {
+    assert.match(gateway, new RegExp(`\\.${method}\\s*\\(`, "u"));
+  }
 });

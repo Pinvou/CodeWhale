@@ -2359,6 +2359,7 @@ Object.assign(dictJa.controlledDevice, {
 });
 
 dictJa["controllerConnection"] = {
+  modelSourceDevice: "端末のモデル",
   entry: "リモート端末に接続",
   title: "リモート端末に接続",
   desc: "相手の端末に表示されている 7 桁の接続コードを入力すると接続できます。相手の再確認は不要です。",

@@ -97,10 +97,7 @@ impl TaskTelemetryDedupe {
             self.tasks
                 .insert(event.task_id.clone(), TaskTelemetryState::default());
         }
-        let state = self
-            .tasks
-            .get_mut(&event.task_id)
-            .expect("task telemetry state inserted");
+        let state = self.tasks.entry(event.task_id.clone()).or_default();
         let first = match lifecycle {
             TaskTelemetryLifecycle::Admitted if !state.admitted && !state.terminal => {
                 state.admitted = true;
@@ -647,9 +644,8 @@ fn journal_candidate(
         return Err("remote_projection_ref_mismatch".into());
     }
     let display = display_event(event)?;
-    let candidate = match event.terminal_status.as_deref() {
-        Some("succeeded" | "failed" | "cancelled" | "interrupted") if pending.is_some() => {
-            let pending = pending.expect("matched guard");
+    let candidate = match (event.terminal_status.as_deref(), pending) {
+        (Some("succeeded" | "failed" | "cancelled" | "interrupted"), Some(pending)) => {
             if pending.task_id != display.task_id() {
                 return Err("remote_projection_terminal_correlation_mismatch".into());
             }
@@ -658,7 +654,7 @@ fn journal_candidate(
                 Some("failed") => TerminalStatus::Failed,
                 Some("cancelled") => TerminalStatus::Cancelled,
                 Some("interrupted") => TerminalStatus::Interrupted,
-                _ => unreachable!(),
+                _ => return Err("remote_projection_terminal_status_invalid".into()),
             };
             let terminal = TerminalDisplay::new(
                 display,
@@ -670,10 +666,9 @@ fn journal_candidate(
             ProxyEventCandidate::terminal(binding, terminal)
         }
         // Unknown is a displayable status, not a final outcome proof.
-        Some("succeeded" | "failed" | "cancelled" | "interrupted" | "result_unknown") | None => {
-            ProxyEventCandidate::journal(binding, display)
-        }
-        Some(_) => return Err("remote_projection_terminal_status_invalid".into()),
+        (Some("succeeded" | "failed" | "cancelled" | "interrupted" | "result_unknown"), _)
+        | (None, _) => ProxyEventCandidate::journal(binding, display),
+        (Some(_), _) => return Err("remote_projection_terminal_status_invalid".into()),
     };
     candidate.map_err(|_| "remote_projection_candidate_invalid".to_owned())
 }

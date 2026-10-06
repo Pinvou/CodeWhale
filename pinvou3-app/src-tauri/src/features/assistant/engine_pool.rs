@@ -4059,10 +4059,6 @@ impl EnginePool {
             .as_ref()
             .map(crate::features::personas::equip_anchor);
         let persona_conversational = active_card.as_ref().is_some_and(|c| c.conversational_only);
-        let restrict_tools = active_card
-            .as_ref()
-            .map_or(false, |c| c.conversational_only);
-        let restrict_tools = restrict_tools || restrict_tools_for_turn;
         let explicit_credential = model_override
             .as_ref()
             .map(|model| RuntimeModelCredential::api_key(model.api_key.clone()))

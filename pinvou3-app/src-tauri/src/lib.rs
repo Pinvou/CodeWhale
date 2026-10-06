@@ -1346,7 +1346,6 @@ pub fn run() {
                             .hooks()
                             .set_artifact_scope(desktop_artifacts.clone());
                         handle.state::<ControlledDeviceManager>().register_cleanup_sink(desktop_attachments.cleanup_sink());
-                        let history_path = crate::platform::paths::sessions_root()
                         let desktop_history =
                             commands::desktop_remote_journal::DesktopRemoteJournalRuntime::journal_only(
                                 format!("boot-{}", std::process::id()),

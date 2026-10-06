@@ -1613,7 +1613,7 @@ impl AppEngine {
     ///
     /// [`build_engine_config_for_session`]: crate::features::assistant::platform::bridge::Pinvou3Bridge::build_engine_config_for_session
     /// [`EnginePool`]: crate::features::assistant::engine_pool::EnginePool
-    pub(crate) async fn spawn_for_session(
+    pub(crate) fn spawn_for_session(
         app: AppHandle,
         store: SessionStore,
         bridge: Pinvou3Bridge,
@@ -2228,17 +2228,31 @@ impl AppEngine {
     /// 都是 disk-API-限制的副作用,现在彻底走掉。
     pub async fn sync_session(&self, session_id: String, messages: Vec<Message>) -> Result<()> {
         self.handle
-            .send(Op::SyncSession {
-                session_id: Some(session_id),
-                messages,
-                system_prompt: None,
-                system_prompt_override: false,
-                model: self.bridge.model(),
-                workspace: self.workspace.clone(),
-                mode: AppMode::Agent,
-            })
+            .send(self.sync_session_op(session_id, messages))
             .await?;
         Ok(())
+    }
+
+    /// Queue mandatory identity/history in a fresh mailbox before publication.
+    pub(crate) fn try_sync_new_session(
+        &self,
+        session_id: String,
+        messages: Vec<Message>,
+    ) -> Result<()> {
+        self.handle
+            .try_send(self.sync_session_op(session_id, messages))
+    }
+
+    fn sync_session_op(&self, session_id: String, messages: Vec<Message>) -> Op {
+        Op::SyncSession {
+            session_id: Some(session_id),
+            messages,
+            system_prompt: None,
+            system_prompt_override: false,
+            model: self.bridge.model(),
+            workspace: self.workspace.clone(),
+            mode: AppMode::Agent,
+        }
     }
 }
 
