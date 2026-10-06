@@ -743,6 +743,10 @@ struct McpServerActionReceipt {
 #[derive(Debug, Deserialize)]
 struct AutomationRunsQuery {
     limit: Option<usize>,
+    /// Serve the terminal-run archive kept for deleted automations instead of
+    /// the live run history.
+    #[serde(default)]
+    archived: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -4019,9 +4023,19 @@ async fn list_automation_runs(
     Query(query): Query<AutomationRunsQuery>,
 ) -> Result<Json<Vec<AutomationRunRecord>>, ApiError> {
     let manager = state.automations.lock().await;
-    let runs = manager
-        .list_runs(&id, query.limit)
-        .map_err(map_automation_err)?;
+    let runs = if query.archived {
+        let mut runs = manager
+            .list_archived_runs(&id)
+            .map_err(map_automation_err)?;
+        if let Some(limit) = query.limit {
+            runs.truncate(limit);
+        }
+        runs
+    } else {
+        manager
+            .list_runs(&id, query.limit)
+            .map_err(map_automation_err)?
+    };
     Ok(Json(runs))
 }
 
