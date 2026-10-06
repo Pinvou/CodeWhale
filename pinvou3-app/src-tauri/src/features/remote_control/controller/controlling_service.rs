@@ -951,10 +951,14 @@ fn handle_resume_frame(
             let Ok(fingerprint) = business.resume_fingerprint(activation_id) else {
                 return ResumeOutcome::Failed;
             };
+            let Some(resume_request_id) = frame.get("request_id").and_then(Value::as_str) else {
+                return ResumeOutcome::Failed;
+            };
             if manager
                 .complete_resumed(
                     operation,
                     activation_id,
+                    resume_request_id,
                     now_b,
                     (liveness_epoch_a, liveness_epoch_b),
                     token,

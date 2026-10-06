@@ -36,7 +36,9 @@ use crate::features::remote_control::controller::task::{
 use crate::features::remote_control::controller::transfer::core::{
     TransferContext, TransferDirection, TransferMetadata,
 };
-use crate::features::remote_control::controller::transfer::upload::UploadProgress;
+use crate::features::remote_control::controller::transfer::upload::{
+    UploadProgress, decode_upload_chunk,
+};
 use crate::features::sessions::application::ports::{UseCaseError, UseCaseFuture};
 use crate::features::sessions::application::submit_controlled::{
     ControlledInput, ControlledSubmission, ControlledSubmissionPort, ControlledSubmissionResult,
@@ -965,12 +967,9 @@ impl DesktopControlledBusiness {
                         if operation == "attachment_abort" {
                             return Ok(json!({"aborted": runtime.uploads().abort(field("transfer_id")?)}));
                         }
-                        let bytes = base64::engine::general_purpose::STANDARD
-                            .decode(field("chunk_b64")?)
-                            .map_err(|_| "transfer_chunk_invalid".to_owned())?;
-                        if bytes.len() as u64 != number("chunk_bytes")? {
-                            return Err("transfer_chunk_invalid".to_owned());
-                        }
+                        let bytes = decode_upload_chunk(
+                            field("chunk_b64")?, number("chunk_bytes")?, runtime.uploads().chunk_bytes(),
+                        )?;
                         let progress = runtime.uploads().accept_chunk(
                             field("transfer_id")?, number("chunk_index")?,
                             &bytes, now,

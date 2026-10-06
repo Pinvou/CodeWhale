@@ -254,6 +254,29 @@ cannot register a desktop or pair. Development TOFU may create an access-only
 record for a Web request, or both roles atomically for a desktop request; a
 pairing request can never invent a desktop digest from a single credential.
 
+`enrollment_registry_capacity_reached` identifies entry-count or shared byte-budget
+rejection, not an infrastructure outage. Capacity validation runs before durable
+writes: primary/backup bytes and revisions stay unchanged, and the store remains
+usable for smaller writes. Actual persistence failures still degrade the store
+and fail closed. Other typed registry validation errors retain their codes.
+Batch operation entry-count rejection retains its explicit
+`enrollment_capacity_reached` code; it is not an infrastructure outage either.
+
+Audit sources describe admission: explicit development enrollment records
+`development`, even with TOFU enabled; only automatic first-registration admission
+records `development_tofu`. Rotation and revocation preserve that source.
+Endpoint IDs are identifiers, not secrets: unknown, revoked and invalid-credential
+errors can reveal enrollment status. Official/self-hosted registration and
+development registration with TOFU disabled require an existing active enrollment
+and a valid credential. Only explicitly enabled non-production development TOFU
+may admit a first registration; callers must apply the protocol layer's rate
+limits before exposure.
+
+Recognized lock schemas with an unsupported positive version fail closed with
+`relay_state_lock_unsupported`, even with added fields or an apparently dead PID.
+They are never quarantined or stolen; use a compatible Relay version or an
+operator-controlled offline upgrade. Empty/truncated crash-lock recovery is unchanged.
+
 For `revoke`, the expected endpoint revision is syntax-checked for every call
 and compared before an active-to-revoked transition. An already revoked entry
 is a read-only idempotent result even if a retry supplies an old or future
@@ -305,6 +328,11 @@ under the same ID conflicts. A failed request may persist a secret-free failed
 ledger row, but no endpoint-operation prefix can persist. Backup restore accepts
 only the current strict registry format and executes as a stable migration
 request while preserving the monotonic request ledger.
+The ledger has a separate 100,000-request safety ceiling and shares the store's
+16 MiB default byte budget with other namespaces; byte capacity can be reached
+first. There is no automatic ledger pruning. Never delete terminal IDs merely
+to free space: that would permit old operations to execute again. Capacity,
+safe archival and warning policy are tracked in #1371.
 `--restore --input PRIVATE_BACKUP --request-id RESTORE_OPERATION_ID` requires an
 explicit operation ID. A first applied restore returns `applied: true`,
 `restored: true`, `replayed: false`; response-loss retries with the same ID return
@@ -313,6 +341,12 @@ If records subsequently change, the old ID still only replays its sealed outcome
 and does not restore those changed records. Use a new explicit operation ID to
 intentionally apply the same backup again. Reusing an ID with another backup is
 a conflict. Do not generate a fresh ID automatically on each retry.
+Restore intentionally replaces endpoint records, not just missing entries.
+It currently has no backup/current-revision fence: a stale backup can remove
+enrollments created since that backup. Review that destructive scope explicitly
+before a maintenance restore; the durable request ledger alone does not protect
+newer endpoint records. A reused-ID conflict is currently exposed as
+`migration_restore_failed` with its original conflict retained as the cause.
 `re_enroll` rotates the access token and therefore explicitly invalidates old
 Web links. Backup files contain keyed digests, not credentials, and still need
 mode 0600/private ACL storage. The CLI rejects symlink/reparse-point ancestors,

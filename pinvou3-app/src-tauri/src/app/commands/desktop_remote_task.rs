@@ -1,9 +1,8 @@
-//! Windows remote task commands (DEV-13).
+//! B-local remote task status and stop commands, plus private task owners.
 //!
-//! The command layer is a thin adapter: it re-validates the wire payload
-//! against the live lease and the negotiated capabilities, resolves the opaque
-//! workspace reference through the DEV-12 snapshot, and hands the request to
-//! the B task owner. DEV-20 owns final handler registration.
+//! A07 deliberately exposes no renderer task/session admission. A08 must
+//! authenticate the sender and full binding before connecting the private
+//! engine/session kernels; a renderer-supplied payload cannot assert A's role.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -499,12 +498,6 @@ fn ensure_supported(controlled: &ControlledDeviceManager) -> Result<(), String> 
         .ok_or_else(|| UNSUPPORTED.to_owned())
 }
 
-fn live_context(controlled: &ControlledDeviceManager) -> Result<LeaseContext, String> {
-    controlled
-        .live_lease()
-        .map_err(|error| error.code.to_owned())
-}
-
 fn sanitized_reason(reason: &str) -> String {
     let sanitized: String = reason
         .chars()
@@ -734,9 +727,11 @@ fn local_controlled_attachments(
                 .map_err(|_| "task_attachment_unavailable".to_owned())?;
             let read_owner = match crate::platform::filesystem::publish_private_read_path(
                 directory,
-                std::ffi::OsStr::new(&super::desktop_remote_attachment::safe_file_name(
-                    &display_name,
-                )),
+                std::ffi::OsStr::new(
+                    &crate::features::remote_control::controller::transfer::staging::safe_file_name(
+                        &display_name,
+                    ),
+                ),
                 &bytes,
             ) {
                 Ok(owner) => Arc::new(owner),

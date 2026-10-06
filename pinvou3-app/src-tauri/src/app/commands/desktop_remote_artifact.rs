@@ -133,25 +133,30 @@ impl DesktopRemoteArtifactRuntime {
         })
     }
 
-    pub(crate) fn with_default_registry(tasks: Arc<RemoteTaskService>) -> Arc<Self> {
+    pub(crate) fn with_registry(
+        tasks: Arc<RemoteTaskService>,
+        registry: Arc<TransferRegistry>,
+    ) -> Arc<Self> {
         let runtime = Self::new(
-            ArtifactDownloads::new(
-                Arc::new(TransferRegistry::default()),
-                Arc::new(ArtifactIndex::default()),
-            ),
+            ArtifactDownloads::new(registry, Arc::new(ArtifactIndex::default())),
             tasks,
         );
         // DEV-18 审核修复：未完成下载同样周期性回收（RC-F-003 下载侧）。
-        let reaper_runtime = Arc::clone(&runtime);
+        let weak = Arc::downgrade(&runtime);
         tauri::async_runtime::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
-                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
-                let expired = reaper_runtime.downloads.expire(monotonic_millis());
-                if expired > 0 {
-                    crate::features::remote_control::controller::relay_runtime::log_controlled_event(
-                        "artifact_downloads_expired",
-                        "expired",
-                    );
+                interval.tick().await;
+                let Some(owner) = weak.upgrade() else {
+                    break;
+                };
+                let now = monotonic_millis();
+                if tokio::task::spawn_blocking(move || owner.downloads.expire(now))
+                    .await
+                    .is_err()
+                {
+                    eprintln!("[remote-control] artifact_reaper_failed");
                 }
             }
         });

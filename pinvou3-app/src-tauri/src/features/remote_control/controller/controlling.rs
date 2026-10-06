@@ -411,6 +411,7 @@ impl ControllingDeviceManager {
         &self,
         operation: ControllerOperation,
         activation_id: &str,
+        resume_request_id: &str,
         now_b: u64,
         liveness_epochs: (&str, &str),
         resume_token: [u8; 32],
@@ -468,6 +469,7 @@ impl ControllingDeviceManager {
                             negotiated_capabilities: lease.negotiated_capabilities.clone(),
                         },
                         activation_id,
+                        resume_request_id,
                     )
                     .is_err()
             {
@@ -1580,6 +1582,7 @@ mod tests {
             .complete_resumed(
                 operation,
                 activation,
+                "request-resume-final",
                 7_000,
                 ("live:a-2", "live-b-2"),
                 [3; 32],
@@ -1652,6 +1655,7 @@ mod tests {
                     .complete_resumed(
                         operation,
                         activation,
+                        "request-resume-final",
                         12_000,
                         (epoch, "live-b-2"),
                         [3; 32],

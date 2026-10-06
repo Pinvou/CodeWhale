@@ -6,6 +6,7 @@ import { promisify } from "node:util";
 import { URL } from "node:url";
 import { WebSocket, WebSocketServer } from "ws";
 import { CONTROLLER_SUBPROTOCOL, parseLegacyWebWireJson } from "./protocol-controller.js";
+import { closeClientFromUpstream } from "./websocket-close.js";
 
 const MAX_FIRST_FRAME_BYTES = 16 * 1024;
 const DEFAULT_MAX_PAYLOAD_BYTES = 4 * 1024 * 1024;
@@ -306,7 +307,7 @@ export function createEnrollmentGateway({
         else if (client.readyState === WebSocket.OPEN) client.close(1011, "upstream unavailable");
       });
       upstream.once("close", (code, reason) => {
-        if (client.readyState === WebSocket.OPEN) client.close(code || 1011, reason.toString().slice(0, 123));
+        closeClientFromUpstream(client, code, reason);
       });
     };
     const ingress = { started_at: Date.now(), messages: 0, bytes: 0 };
