@@ -19,7 +19,7 @@ This is read-and-recommend. You do NOT merge, close, tag, or publish. You surfac
 
 1. **Inventory the queue.** One call, structured:
    ```
-   gh pr list --repo Hmbown/CodeWhale --state open \
+   gh pr list --repo codewhale-hq/Codewhale --state open \
      --json number,title,author,headRefName,baseRefName,isDraft,mergeStateStatus,statusCheckRollup
    ```
    Note `mergeStateStatus` (CLEAN / BLOCKED / DIRTY / UNKNOWN) but treat it as a hint only — it is computed against `main`, and the real landing target is usually a different branch.
@@ -33,9 +33,9 @@ This is read-and-recommend. You do NOT merge, close, tag, or publish. You surfac
 
 3. **Read each candidate from code, not title.** For every non-trivial PR:
    ```
-   gh pr view <N> --repo Hmbown/CodeWhale \
+   gh pr view <N> --repo codewhale-hq/Codewhale \
      --json files,additions,deletions,statusCheckRollup,body,comments
-   gh pr diff <N> --repo Hmbown/CodeWhale
+   gh pr diff <N> --repo codewhale-hq/Codewhale
    ```
    Read the diff. A "fix(exec): ..." can be a no-op or a regression; a "chore" can be the real fix. Judge the change, the tests it adds, and any review comments.
 
@@ -59,9 +59,9 @@ This is read-and-recommend. You do NOT merge, close, tag, or publish. You surfac
    - **HARVEST** — the change is good but conflicts, needs fmt/rebase, or is entangled with the release work. Reimplement on the release branch and credit with trailers (cherry-pick is not preserving authorship here):
      ```
      Co-authored-by: Name <email>
-     Harvested-from: PR #<N> by @handle
+     Harvested from PR #<N> by @handle
      ```
-     The `Harvested-from:` trailer lets the auto-close-at-main workflow close the PR with credit once the change reaches main.
+     The `Harvested from PR #<N> by @handle` line lets the `auto-close-harvested.yml` workflow close the PR with credit once the change reaches main.
    - **DEFER** — sound but blocked by an open question, missing tests, or a release freeze. Leave a positive, specific comment; do not close.
    - **CLOSE-WITH-NOTE** — superseded, duplicated, or out of scope. Propose the close to the maintainer with a crediting, appreciative note; never close it yourself.
 
@@ -72,7 +72,7 @@ This is read-and-recommend. You do NOT merge, close, tag, or publish. You surfac
 - **Don't judge by title.** "fix(...)" / "feat(...)" / emoji-prefixed test PRs prove nothing. Open the diff every time.
 - **Don't trust `mergeStateStatus` for the real target.** CLEAN/BLOCKED/DIRTY are vs `main`; always confirm with `git merge-tree <release> <pr-head>`.
 - **Don't conflate trivial and real check failures.** A fmt-only `Lint` red is harvestable; a failing `Test (...)` is not — read the log.
-- **Don't drop credit.** Every harvest carries `Co-authored-by:` + `Harvested-from:`; every cherry-pick keeps the original author. No silent reimplementation.
+- **Don't drop credit.** Every harvest carries `Co-authored-by:` + `Harvested from PR #N`; every cherry-pick keeps the original author. No silent reimplementation.
 - **Don't merge, close, retarget, tag, publish, or release.** Recommend; the maintainer decides.
 - **Don't post negative or nitpicking comments.** GitHub-facing comments are positive and crediting; keep critique in your internal report to the maintainer.
 - **Don't modify the working tree or any branch.** `git merge-tree --write-tree` is the only "write" allowed — it touches the object store only.

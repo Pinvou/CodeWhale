@@ -31,8 +31,8 @@ noise; concrete ones become fixes with credit.
 2. **Check for duplicates / related work.** Search open issues and PRs before
    filing; if one exists, comment there instead, or cross-link as `Related: #N`.
    ```bash
-   gh issue list --repo Hmbown/CodeWhale --state all --search "keyword in:title,body" --limit 30
-   gh pr list --repo Hmbown/CodeWhale --state all --search "keyword" --limit 20
+   gh issue list --repo codewhale-hq/Codewhale --state all --search "keyword in:title,body" --limit 30
+   gh pr list --repo codewhale-hq/Codewhale --state all --search "keyword" --limit 20
    ```
 3. **Write a title that names the gap**, not the vibe. Match the house pattern
    `vX.Y.Z: <imperative gap>`, e.g. `v0.8.62: Isolate provider/model selection
@@ -55,15 +55,18 @@ noise; concrete ones become fixes with credit.
    labels: `bug`, `enhancement`, `documentation`. Area labels e.g. `tui`,
    `tools`, `security`, `sandbox`, `context`, `subagents`, `responses-api`,
    `workflow-runtime`. Severity `release-blocker` only when it truly blocks the
-   next release. The current target milestone is `v0.8.62`.
+   next release. Discover the target milestone at runtime: pick the smallest
+   open version from
+   `gh api repos/codewhale-hq/Codewhale/milestones --jq '.[] | select(.state=="open") | .title'`,
+   and confirm with the maintainer if ambiguous.
    ```bash
-   gh label list --repo Hmbown/CodeWhale --limit 100
-   gh api repos/Hmbown/CodeWhale/milestones --jq '.[] | "\(.title)\topen:\(.open_issues)"'
+   gh label list --repo codewhale-hq/Codewhale --limit 100
+   gh api repos/codewhale-hq/Codewhale/milestones --jq '.[] | "\(.title)\topen:\(.open_issues)"'
    ```
 6. **Create the issue.** Pipe the body from stdin (this skill writes no files);
    `--milestone` and repeatable `--label` take live names verbatim:
    ```bash
-   gh issue create --repo Hmbown/CodeWhale \
+   gh issue create --repo codewhale-hq/Codewhale \
      --title "v0.8.62: Isolate provider/model selection per TUI session" \
      --label bug --label tui --label reliability \
      --milestone "v0.8.62" \
