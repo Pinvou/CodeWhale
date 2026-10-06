@@ -438,6 +438,11 @@ function fileIdentity(metadata) {
 }
 
 function exactLock(value) {
+  // A future writer may add fields. Never classify its lock as recoverable corruption.
+  if (value?.schema === LOCK_SCHEMA && Number.isSafeInteger(value.version)
+    && value.version > 0 && value.version !== LOCK_VERSION) {
+    fail("relay_state_lock_unsupported");
+  }
   const lock = exactObject(value, ["schema", "version", "pid", "process_identity", "owner_id"], "relay_state_lock");
   if (lock.schema !== LOCK_SCHEMA || lock.version !== LOCK_VERSION
     || !Number.isSafeInteger(lock.pid) || lock.pid <= 0
@@ -1028,6 +1033,7 @@ export class RelayStateStore {
       const text = await this.#readBoundedFile(this.#lockPath, 4096, "relay_state_lock_malformed", false);
       let owner;
       try { owner = exactLock(JSON.parse(text)); } catch (error) {
+        if (error?.code === "relay_state_lock_unsupported") throw error;
         if (error instanceof RelayStateStoreError) return { kind: "malformed", text };
         return { kind: "malformed", text };
       }
