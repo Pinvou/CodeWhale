@@ -41,6 +41,12 @@
 //! even textual mentions (`grep "cat /etc/shadow" notes.txt` — the expander
 //! strips quotes before matching). Allowances live outside this ruleset by
 //! construction, not by configuration.
+//!
+//! One more over-block worth knowing: the deny face folds ASCII case on
+//! every platform, like every prefix rule, so `rm -rf ~/.SSH` is denied even
+//! where the filesystem is case-sensitive and `.SSH` is an unrelated
+//! directory. [`contains`] and [`has_sensitive_component`] fold case only on
+//! platforms whose filesystems fold it.
 
 use std::path::Path;
 
@@ -50,9 +56,11 @@ use crate::{Ruleset, parse_path_for_matching_with_case, platform_paths_are_case_
 ///
 /// Home-relative spellings; an entry may itself be nested (`.config/gcloud`).
 /// A path with any of these as a component is sensitive — see [`contains`]
-/// for the component-boundary check. The single-component entries also form
-/// the directory half of [`SENSITIVE_COMPONENT_NAMES`], the component-anywhere
-/// face for callers that cannot resolve the home root.
+/// for the component-boundary check. The bare-directory members of
+/// [`SENSITIVE_COMPONENT_NAMES`] are carried here too, at their home-root
+/// spelling. `.azure` is the one exception, ruleset-face only: the ingest
+/// gate's component blocklist this module carries does not name it, so a
+/// nested `.azure` checkout is inventory-visible only through [`contains`].
 pub const SENSITIVE_DIRECTORY_NAMES: &[&str] = &[
     // OpenSSH home: private keys, authorized_keys, config.
     ".ssh",
@@ -77,8 +85,11 @@ pub const SENSITIVE_DIRECTORY_NAMES: &[&str] = &[
     // pass(1) password store.
     ".password-store",
     // Application credential stores contributed by the motivating embedder
-    // (Pinvou-specific); split out to embedder-supplied input when this
-    // module is proposed upstream, per the fork's upstream-hygiene scan.
+    // (Pinvou-specific); they move to embedder-supplied input (a builder
+    // parameter) when this module is proposed upstream, per the fork
+    // policy's upstream-decision table. Carried in SENSITIVE_COMPONENT_NAMES
+    // too: the hook this module replaces matched them as a component
+    // anywhere, not only under the home root.
     ".dws",
     ".tmeet",
 ];
@@ -160,14 +171,23 @@ pub const SENSITIVE_COMPONENT_NAMES: &[&str] = &[
     // Credential file names sensitive as a component anywhere.
     "credentials.json",
     ".env",
+    // Embedder-contributed application credential stores (Pinvou-specific):
+    // the migrated hook matched these as a component anywhere, so they ride
+    // this face like the bare directories above.
+    ".dws",
+    ".tmeet",
 ];
 
 /// Absolute path prefixes outside any home that must not be touched.
 ///
-/// An entry ending in `/` is a directory prefix (its whole subtree is
-/// sensitive). A slash-less entry is exact-token on this crate's channels —
-/// the source ingest gate's string-prefix behavior does not carry over,
-/// which is why the primary `auth.log` spelling is enumerated explicitly.
+/// An entry ending in `/` is a directory prefix: its whole subtree is
+/// sensitive to [`contains`]. The ruleset channel only emits the bare,
+/// trailing-slash, and glob token spellings (see [`builtin_safety_ruleset`]),
+/// so a descendant like `/proc/self/environ` still needs containment
+/// matching or corpus enumeration. A slash-less entry is exact-token on this
+/// crate's channels — the source ingest gate's string-prefix behavior does
+/// not carry over, which is why the primary `auth.log` spelling is
+/// enumerated explicitly.
 pub const SENSITIVE_ABSOLUTE_PREFIXES: &[&str] = &[
     // Login password hashes; "-" and ".bak" are the editor/aging backups.
     "/etc/shadow",
@@ -316,17 +336,32 @@ fn has_sensitive_component_with_case(path: &Path, case_insensitive: bool) -> boo
 /// call site that holds real paths. Home-relative entries are emitted only in
 /// the `~/` spelling; `$HOME`-style, Windows, and resolved-home spellings are
 /// further enumeration the same containment gap forces. Both enumerations
-/// collapse once rule evaluation gains containment matching.
+/// collapse once rule evaluation gains containment matching. The union
+/// carries the POSIX faces of the three inventories; the source ruleset's
+/// Windows-native DPAPI credential dirs (`%appdata%\microsoft\credentials`
+/// and its `protect`/`vault` siblings) stay in the embedder's Windows-native
+/// list — env-var-relative spellings this home-relative inventory cannot
+/// carry, and which that list continues to cover.
 ///
-/// The token channel also keeps the engine's raw-token matching, so three
+/// The token channel also keeps the engine's raw-token matching, so several
 /// bypass families stay open here: kernel-normalized spellings of the same
 /// path (`cat /etc//shadow`, `cat /etc/./shadow`, `cat /etc/ssh/../shadow`
-/// are different tokens), paths glued into a larger token (`dd
-/// if=/etc/shadow`, `curl -F file=@/etc/shadow`), and remote specs
-/// (`scp host:~/.ssh/id_rsa .`). The crate's path parsing folds the first
-/// family, so callers holding real paths via [`contains`] are covered;
-/// closing any of them on the token channel is rule-evaluation work, not
-/// inventory work.
+/// are different tokens); paths glued into a larger token (`dd
+/// if=/etc/shadow`, `curl -F file=@/etc/shadow`, the glued redirect `done
+/// </etc/shadow`, an interpreter payload `python3 -c "open('/etc/shadow')"`);
+/// remote specs (`scp host:~/.ssh/id_rsa .`); variable indirection
+/// (`x=/etc/shadow; cat $x` — the expander models quoting and substitution
+/// but deliberately leaves `$VAR` literal, so the indirection ships and the
+/// shell resolves it); command-side glob expansion (`cat /etc/shado\[w\]` — a
+/// real shell glob-resolves before exec, the matcher does not);
+/// cwd-relative composition (`cd /etc && cat shadow`, `tar -C /etc -cf
+/// x.tar shadow` — no token ever names an inventory spelling); and aliased
+/// home spellings (`cat ~root/.bashrc` — its expansion is an inventory
+/// face, but no rule names the alias). Command-native reads with no path
+/// token at all (`getent shadow`) are outside a path inventory's scope
+/// entirely. The crate's path parsing folds the first family, so callers
+/// holding real paths via [`contains`] are covered; closing the rest on the
+/// token channel is rule-evaluation work, not inventory work.
 ///
 /// Install the result with [`crate::ExecPolicyEngine::with_rulesets`] or
 /// `add_ruleset`; `set_ruleset` replaces a whole layer, so a second
@@ -427,6 +462,15 @@ mod tests {
             // `..` is rejected rather than collapsed: fail closed.
             ("/home/u", "/home/u/../u2/x", false),
             ("..", "/home/u", false),
+            // `.` components and repeated separators fold, so kernel-normalized
+            // spellings of the same directory compare equal.
+            ("/etc/./ssh", "/etc/ssh/x", true),
+            ("/etc//ssh", "/etc/ssh/x", true),
+            // A dir that normalizes to no components contains every candidate
+            // of the same rootedness — the documented over-block edge.
+            (".", "x", true),
+            // Drive-relative spellings are rejected outright, both sides.
+            ("C:foo", "C:foo/bar", false),
             // Empty and mixed relative/absolute forms match nothing.
             ("/home/u", "", false),
             ("/home/u", ".ssh/id_rsa", false),
@@ -482,6 +526,10 @@ mod tests {
             ("/srv/work/.ssh/config", true),
             ("~/notes/credentials.json", true),
             ("id_rsa", true),
+            // The component faces of .env and the embedder store entries.
+            ("/srv/app/.env", true),
+            ("/srv/work/.dws/state", true),
+            ("notes/.tmeet/x", true),
             // Whole-component equality only.
             ("~/keys/id_rsa_backup", false),
             ("~/notes/id_ring", false),
@@ -526,6 +574,13 @@ mod tests {
             // The absolute trailing-slash and glob faces of a directory entry.
             "rm -rf /etc/ssh/",
             "rm /etc/ssh/*",
+            // The same faces for /root/, plus the home-rooted FILE face: each
+            // inventory entry must yield real deny rules, so a generator
+            // regression (dropped `~/`, lost slash) cannot ship green.
+            "rm -rf /root/",
+            "rm /root/*",
+            "cat ~/.netrc",
+            "cat ~/.env",
             "cat /var/log/auth.log",
             "cp /etc/shadow /tmp/exfil",
             "grep root /etc/shadow",
@@ -567,6 +622,109 @@ mod tests {
             ),
             "user-layer allowance must not un-deny the builtin deny: {decision:?}"
         );
+    }
+
+    #[test]
+    fn builtin_ruleset_enumerates_every_inventory_entry() {
+        // Every entry must yield its token faces, so a generator regression
+        // (dropped `~/`, lost slash, missing glob face) cannot ship green.
+        let denied = &builtin_safety_ruleset().denied_prefixes;
+        for prefix in SENSITIVE_ABSOLUTE_PREFIXES {
+            let base = prefix.trim_end_matches('/');
+            assert!(
+                denied.contains(&format!("* {base}")),
+                "bare face missing for {prefix:?}"
+            );
+            if prefix.ends_with('/') {
+                assert!(
+                    denied.contains(&format!("* {prefix}")),
+                    "trailing-slash face missing for {prefix:?}"
+                );
+                assert!(
+                    denied.contains(&format!("* {prefix}*")),
+                    "glob face missing for {prefix:?}"
+                );
+            }
+        }
+        for dir in SENSITIVE_DIRECTORY_NAMES {
+            for face in [
+                format!("* ~/{dir}"),
+                format!("* ~/{dir}/"),
+                format!("* ~/{dir}/*"),
+            ] {
+                assert!(denied.contains(&face), "directory face missing: {face:?}");
+            }
+        }
+        for file in SENSITIVE_FILE_NAMES {
+            assert!(
+                denied.contains(&format!("* ~/{file}")),
+                "file face missing for {file:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn component_face_and_directory_inventory_agree_on_bare_names() {
+        // Every bare directory on the component face is carried in the
+        // directory inventory at its home-root spelling, and every
+        // single-component directory except `.azure` rides the component
+        // face — `.azure` is ruleset-face only, because the ingest gate's
+        // component blocklist does not name it. Pinned in both directions so
+        // drift across the two faces cannot ship silently (this seam is how
+        // the `.dws`/`.tmeet` component face was lost round one).
+        for name in SENSITIVE_DIRECTORY_NAMES {
+            if !name.contains('/') && *name != ".azure" {
+                assert!(
+                    SENSITIVE_COMPONENT_NAMES.contains(name),
+                    "{name:?} is a single-component directory missing from SENSITIVE_COMPONENT_NAMES"
+                );
+            }
+        }
+        for name in SENSITIVE_COMPONENT_NAMES {
+            if name.starts_with('.') && !name.contains('/') && *name != ".env" {
+                assert!(
+                    SENSITIVE_DIRECTORY_NAMES.contains(name),
+                    "{name:?} is a bare directory on the component face but missing from SENSITIVE_DIRECTORY_NAMES"
+                );
+            }
+        }
+        assert!(!SENSITIVE_COMPONENT_NAMES.contains(&".azure"));
+        for name in ["credentials.json", ".env"] {
+            assert!(
+                SENSITIVE_COMPONENT_NAMES.contains(&name),
+                "{name:?} is documented as a member of both the file and component faces"
+            );
+        }
+    }
+
+    #[test]
+    fn no_approval_mode_weakens_the_builtin_denies() {
+        // The deny scan returns Forbidden before any mode logic runs; pin the
+        // builtin ruleset against every mode, not just the Never fast path.
+        let engine = ExecPolicyEngine::with_rulesets(vec![builtin_safety_ruleset()]);
+        let modes = [
+            AskForApproval::Never,
+            AskForApproval::UnlessTrusted,
+            AskForApproval::OnRequest,
+            AskForApproval::OnFailure,
+            AskForApproval::Reject {
+                sandbox_approval: false,
+                rules: false,
+                mcp_elicitations: false,
+            },
+        ];
+        for mode in modes {
+            let mut context = ctx("cat /etc/shadow");
+            context.ask_for_approval = mode.clone();
+            let decision = engine.check(context).unwrap();
+            assert!(
+                matches!(
+                    decision.requirement,
+                    ExecApprovalRequirement::Forbidden { .. }
+                ),
+                "mode {mode:?} must not weaken the builtin deny: {decision:?}"
+            );
+        }
     }
 
     #[test]
