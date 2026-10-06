@@ -5,7 +5,8 @@
 //! root (`~/.codewhale/plugins/<name>/`). This module deliberately mirrors
 //! [`crate::skills::install`]: the download, network-gating, traversal
 //! rejection, and marker machinery is *reused* from there (`fetch_tarball`,
-//! `is_safe_path`, `write_installed_from_v2`, `INSTALLED_FROM_MARKER`), while
+//! `is_safe_path`, `entry_type_is_link`, `validate_skill_name_segment`,
+//! `write_installed_from_v2`, `INSTALLED_FROM_MARKER`), while
 //! the scan/extract step is plugin-shaped (a bundle is rooted at the single
 //! supported plugin manifest in the tree, not at a `SKILL.md`).
 //!
