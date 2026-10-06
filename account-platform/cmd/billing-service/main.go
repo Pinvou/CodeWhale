@@ -82,6 +82,11 @@ func main() {
 		log.Fatal(err)
 	}
 	defer stopApprovalConsumer()
+	stopMembershipConsumer, err := broker.Consume(ctx, "billing-member-lifecycle-v1", "account.membership.changed.v1", billing.NewMemberLifecycleConsumer(repository).Handle)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer stopMembershipConsumer()
 	paymentExpiryDone := make(chan struct{})
 	go func() {
 		defer close(paymentExpiryDone)

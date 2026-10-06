@@ -71,12 +71,76 @@ func (c *HTTPBillingClient) ProductsForOrganization(ctx context.Context, walletI
 	return c.raw(ctx, http.MethodGet, "/internal/v1/recharge/products?wallet_id="+url.QueryEscape(walletID.String()), nil, "")
 }
 
+type OrganizationBillingClient interface {
+	OrganizationProducts(context.Context, uuid.UUID, uuid.UUID) (json.RawMessage, error)
+	OrganizationPackages(context.Context, uuid.UUID, uuid.UUID) (json.RawMessage, error)
+	CreateOrganizationRechargeOrder(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, string, string, string, string, string) (json.RawMessage, error)
+	OrganizationQuotaGrants(context.Context, uuid.UUID, *uuid.UUID) (json.RawMessage, error)
+	AllocateOrganizationQuotaBatch(context.Context, uuid.UUID, uuid.UUID, json.RawMessage, string) (json.RawMessage, error)
+	RevokeOrganizationQuota(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, string, string) (json.RawMessage, error)
+	ReserveMemberQuota(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, uuid.UUID, int64, int64, uuid.UUID) (BillingHold, error)
+}
+
+func (c *HTTPBillingClient) OrganizationProducts(ctx context.Context, organizationID, walletID uuid.UUID) (json.RawMessage, error) {
+	return c.organizationRead(ctx, "/internal/v1/organizations/"+organizationID.String()+"/recharge/products?wallet_id="+url.QueryEscape(walletID.String()))
+}
+
+func (c *HTTPBillingClient) OrganizationPackages(ctx context.Context, organizationID, walletID uuid.UUID) (json.RawMessage, error) {
+	return c.organizationRead(ctx, "/internal/v1/organizations/"+organizationID.String()+"/entitlement-packages?wallet_id="+url.QueryEscape(walletID.String()))
+}
+
+func (c *HTTPBillingClient) organizationRead(ctx context.Context, path string) (json.RawMessage, error) {
+	return c.organizationResponse(ctx, http.MethodGet, path, nil, "", true, http.StatusOK)
+}
+
+func (c *HTTPBillingClient) organizationResponse(ctx context.Context, method, path string, input any, key string, requireItems bool, statuses ...int) (json.RawMessage, error) {
+	response, err := c.rawPolicy(ctx, method, path, input, key, statuses)
+	if err != nil {
+		return nil, err
+	}
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(response, &object); err != nil || object == nil {
+		return nil, errors.New("Billing organization response is invalid")
+	}
+	if requireItems {
+		var items []json.RawMessage
+		if json.Unmarshal(object["items"], &items) != nil || items == nil {
+			return nil, errors.New("Billing organization response has no valid items")
+		}
+	}
+	return response, nil
+}
+
 func (c *HTTPBillingClient) Products(ctx context.Context) (json.RawMessage, error) {
 	return c.raw(ctx, http.MethodGet, "/v1/recharge/products", nil, "")
 }
 
 func (c *HTTPBillingClient) CreateRechargeOrder(ctx context.Context, requesterID, walletID uuid.UUID, productID, channel, mobile, commerceCustomerStatus, idempotencyKey string) (json.RawMessage, error) {
 	return c.raw(ctx, http.MethodPost, "/internal/v1/recharge/orders", map[string]any{"requester_id": requesterID, "wallet_id": walletID, "product_id": productID, "channel": channel, "mobile": mobile, "commerce_customer_status": commerceCustomerStatus}, idempotencyKey)
+}
+
+func (c *HTTPBillingClient) CreateOrganizationRechargeOrder(ctx context.Context, requesterID, walletID, organizationID uuid.UUID, productID, channel, mobile, commerceCustomerStatus, idempotencyKey string) (json.RawMessage, error) {
+	return c.organizationResponse(ctx, http.MethodPost, "/internal/v1/recharge/orders", map[string]any{"requester_id": requesterID, "beneficiary_organization_id": organizationID, "wallet_id": walletID, "product_id": productID, "channel": channel, "mobile": mobile, "commerce_customer_status": commerceCustomerStatus}, idempotencyKey, false, http.StatusOK, http.StatusCreated)
+}
+
+func (c *HTTPBillingClient) OrganizationQuotaGrants(ctx context.Context, organizationID uuid.UUID, memberUserID *uuid.UUID) (json.RawMessage, error) {
+	path := "/internal/v1/organizations/" + organizationID.String() + "/quota-grants"
+	if memberUserID != nil {
+		path += "?member_user_id=" + url.QueryEscape(memberUserID.String())
+	}
+	return c.organizationResponse(ctx, http.MethodGet, path, nil, "", true, http.StatusOK)
+}
+
+func (c *HTTPBillingClient) AllocateOrganizationQuotaBatch(ctx context.Context, organizationID, actorUserID uuid.UUID, items json.RawMessage, idempotencyKey string) (json.RawMessage, error) {
+	var decoded []json.RawMessage
+	if err := json.Unmarshal(items, &decoded); err != nil {
+		return nil, err
+	}
+	return c.organizationResponse(ctx, http.MethodPost, "/internal/v1/organizations/"+organizationID.String()+"/quota-grants:batch", map[string]any{"created_by": actorUserID, "items": decoded}, idempotencyKey, true, http.StatusMultiStatus)
+}
+
+func (c *HTTPBillingClient) RevokeOrganizationQuota(ctx context.Context, organizationID, grantID, actorUserID uuid.UUID, reason, idempotencyKey string) (json.RawMessage, error) {
+	return c.organizationResponse(ctx, http.MethodPost, "/internal/v1/organizations/"+organizationID.String()+"/quota-grants/"+grantID.String()+"/revoke", map[string]any{"actor_user_id": actorUserID, "reason": reason}, idempotencyKey, false, http.StatusOK)
 }
 
 func (c *HTTPBillingClient) RechargeOrders(ctx context.Context, requesterID, walletID uuid.UUID) (json.RawMessage, error) {
@@ -107,6 +171,10 @@ func (c *HTTPBillingClient) Packages(ctx context.Context, userID, walletID uuid.
 }
 
 func (c *HTTPBillingClient) raw(ctx context.Context, method, path string, input any, idempotencyKey string) (json.RawMessage, error) {
+	return c.rawPolicy(ctx, method, path, input, idempotencyKey, nil)
+}
+
+func (c *HTTPBillingClient) rawPolicy(ctx context.Context, method, path string, input any, idempotencyKey string, statuses []int) (json.RawMessage, error) {
 	var reader io.Reader
 	if input != nil {
 		encoded, err := json.Marshal(input)
@@ -126,7 +194,11 @@ func (c *HTTPBillingClient) raw(ctx context.Context, method, path string, input 
 	if idempotencyKey != "" {
 		request.Header.Set("Idempotency-Key", idempotencyKey)
 	}
-	response, err := c.client.Do(request)
+	client := *c.client
+	if len(statuses) > 0 {
+		client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	}
+	response, err := client.Do(request)
 	if err != nil {
 		return nil, err
 	}
@@ -138,12 +210,24 @@ func (c *HTTPBillingClient) raw(ctx context.Context, method, path string, input 
 	if len(payload) > 2<<20 {
 		return nil, errors.New("Billing response exceeds the allowed size")
 	}
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
+	accepted := response.StatusCode >= 200 && response.StatusCode < 300
+	if len(statuses) > 0 {
+		accepted = false
+		for _, status := range statuses {
+			if response.StatusCode == status {
+				accepted = true
+			}
+		}
+	}
+	if !accepted {
 		var problem struct {
 			Code string `json:"code"`
 		}
 		if json.Unmarshal(payload, &problem) == nil && problem.Code == "COMMERCE_CUSTOMER_NOT_READY" {
 			return nil, ErrCommerceCustomerNotReady
+		}
+		if len(statuses) > 0 {
+			return nil, fmt.Errorf("Billing HTTP %d", response.StatusCode)
 		}
 		return nil, fmt.Errorf("Billing HTTP %d: %s", response.StatusCode, payload)
 	}
@@ -258,6 +342,18 @@ func (c *HTTPBillingClient) readPrice(ctx context.Context, path string) (PriceVe
 func (c *HTTPBillingClient) Reserve(ctx context.Context, usageID, walletID uuid.UUID, maximum int64, priceID uuid.UUID) (BillingHold, error) {
 	var hold BillingHold
 	err := c.call(ctx, http.MethodPost, "/internal/v1/holds/reserve", map[string]any{"usage_request_id": usageID, "wallet_id": walletID, "maximum_microcredits": maximum, "price_version_id": priceID, "lease_seconds": 900}, &hold)
+	if err != nil {
+		return BillingHold{}, err
+	}
+	if !hold.matches(usageID, walletID) || hold.Status != "ACTIVE" || hold.PriceVersionID == nil || *hold.PriceVersionID != priceID || *hold.MaxMicrocredits != maximum || hold.ActualMicrocredits != nil {
+		return BillingHold{}, errors.New("Billing reservation facts do not match")
+	}
+	return hold, nil
+}
+
+func (c *HTTPBillingClient) ReserveMemberQuota(ctx context.Context, usageID, walletID, organizationID, memberUserID uuid.UUID, membershipVersion, maximum int64, priceID uuid.UUID) (BillingHold, error) {
+	var hold BillingHold
+	err := c.call(ctx, http.MethodPost, "/internal/v1/holds/reserve", map[string]any{"usage_request_id": usageID, "wallet_id": walletID, "organization_id": organizationID, "member_user_id": memberUserID, "membership_version": membershipVersion, "maximum_microcredits": maximum, "price_version_id": priceID, "lease_seconds": 900}, &hold)
 	if err != nil {
 		return BillingHold{}, err
 	}

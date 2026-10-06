@@ -28,6 +28,7 @@ type Context struct {
 	MembershipVersion    int64      `json:"membership_version"`
 	ContextVersion       int64      `json:"context_version"`
 	AuthorizationVersion int64      `json:"authorization_version"`
+	Permissions          []string   `json:"permissions"`
 }
 
 type Me struct {
@@ -48,6 +49,7 @@ type AuthorizationContext struct {
 	ContextType          string      `json:"context_type"`
 	OrganizationID       *uuid.UUID  `json:"organization_id,omitempty"`
 	MembershipVersion    int64       `json:"membership_version"`
+	MemberVersion        int64       `json:"member_version,omitempty"`
 	ContextVersion       int64       `json:"context_version"`
 	AuthorizationVersion int64       `json:"authorization_version"`
 	UnitIDs              []uuid.UUID `json:"unit_ids"`
@@ -77,6 +79,17 @@ type Unit struct {
 	Version        int64      `json:"version"`
 }
 
+type UnitMutationResult struct {
+	Unit             Unit  `json:"unit"`
+	StructureVersion int64 `json:"structure_version"`
+	Replayed         bool  `json:"replayed"`
+}
+
+type UnitTree struct {
+	Items            []Unit `json:"items"`
+	StructureVersion int64  `json:"structure_version"`
+}
+
 type Member struct {
 	UserID       uuid.UUID   `json:"user_id"`
 	DisplayName  *string     `json:"display_name"`
@@ -90,13 +103,47 @@ type Member struct {
 	MembershipID uuid.UUID   `json:"membership_id"`
 }
 
+type QuotaMember struct {
+	UserID      uuid.UUID `json:"user_id"`
+	DisplayName *string   `json:"display_name"`
+	Version     int64     `json:"version"`
+}
+
 type Invitation struct {
-	ID             uuid.UUID `json:"invitation_id"`
+	ID             uuid.UUID  `json:"invitation_id"`
+	OrganizationID uuid.UUID  `json:"organization_id"`
+	TargetType     string     `json:"target_type"`
+	TargetHint     string     `json:"target_hint,omitempty"`
+	Roles          []string   `json:"roles"`
+	Status         string     `json:"status"`
+	Version        int64      `json:"version"`
+	ExpiresAt      time.Time  `json:"expires_at"`
+	AcceptedAt     *time.Time `json:"accepted_at,omitempty"`
+	RevokedAt      *time.Time `json:"revoked_at,omitempty"`
+	Token          string     `json:"token,omitempty"`
+	Replayed       bool       `json:"replayed"`
+}
+
+type InvitationCreateRequest struct {
+	TargetType     string
+	Target         string
+	Roles          []string
+	ExpiresInHours int
+	IdempotencyKey string
+}
+
+type MembershipMutationResult struct {
 	OrganizationID uuid.UUID `json:"organization_id"`
-	Email          string    `json:"email"`
-	Roles          []string  `json:"roles"`
-	ExpiresAt      time.Time `json:"expires_at"`
-	Token          string    `json:"token,omitempty"`
+	Member         Member    `json:"member"`
+	Replayed       bool      `json:"replayed"`
+}
+
+type OwnershipTransferResult struct {
+	OrganizationID     uuid.UUID `json:"organization_id"`
+	PreviousOwnerID    uuid.UUID `json:"previous_owner_user_id"`
+	NewOwnerID         uuid.UUID `json:"new_owner_user_id"`
+	NewOwnerMembership Member    `json:"new_owner_membership"`
+	Replayed           bool      `json:"replayed"`
 }
 
 type Repository interface {
@@ -106,20 +153,23 @@ type Repository interface {
 	ResolveAuthorizationContext(context.Context, identity.Principal) (AuthorizationContext, error)
 	GetCommerceCustomerMapping(context.Context, identity.Principal) (CommerceCustomerMapping, error)
 	ListOrganizations(context.Context, identity.Principal) ([]Organization, error)
-	SetActiveContext(context.Context, identity.Principal, *uuid.UUID) (Context, error)
-	ListUnits(context.Context, identity.Principal, uuid.UUID) ([]Unit, error)
+	SetActiveContext(context.Context, identity.Principal, *uuid.UUID, int64) (Context, error)
+	ListUnits(context.Context, identity.Principal, uuid.UUID) (UnitTree, error)
 	ListMembers(context.Context, identity.Principal, uuid.UUID) ([]Member, error)
+	ListQuotaMembers(context.Context, identity.Principal, uuid.UUID) ([]QuotaMember, error)
 	ListMyRoleBindings(context.Context, identity.Principal) ([]RoleBinding, error)
 	ListOrganizationRoleBindings(context.Context, identity.Principal, uuid.UUID) ([]RoleBinding, error)
 	GrantOrganizationRoleBinding(context.Context, identity.Principal, RoleBindingGrant) (RoleBinding, error)
 	RevokeOrganizationRoleBinding(context.Context, identity.Principal, uuid.UUID, uuid.UUID) (RoleBinding, error)
 	ReplaceMemberRoles(context.Context, identity.Principal, uuid.UUID, uuid.UUID, []string) (Member, error)
-	CreateUnit(context.Context, identity.Principal, uuid.UUID, *uuid.UUID, string) (Unit, error)
-	MoveUnit(context.Context, identity.Principal, uuid.UUID, uuid.UUID, *uuid.UUID, int64) (Unit, error)
-	CreateInvitation(context.Context, identity.Principal, uuid.UUID, string, []string, time.Time) (Invitation, error)
-	AcceptInvitation(context.Context, identity.Principal, string) (Organization, error)
-	RevokeMembership(context.Context, identity.Principal, uuid.UUID, uuid.UUID) error
-	TransferOwnership(context.Context, identity.Principal, uuid.UUID, uuid.UUID) error
+	CreateUnit(context.Context, identity.Principal, uuid.UUID, *uuid.UUID, string, string) (UnitMutationResult, error)
+	MoveUnit(context.Context, identity.Principal, uuid.UUID, uuid.UUID, *uuid.UUID, int64, string) (UnitMutationResult, error)
+	CreateInvitation(context.Context, identity.Principal, uuid.UUID, InvitationCreateRequest) (Invitation, error)
+	ListMyInvitations(context.Context, identity.Principal) ([]Invitation, error)
+	RevokeInvitation(context.Context, identity.Principal, uuid.UUID, uuid.UUID) (Invitation, error)
+	AcceptInvitation(context.Context, identity.Principal, string, *uuid.UUID) (MembershipMutationResult, error)
+	RevokeMembership(context.Context, identity.Principal, uuid.UUID, uuid.UUID, string) (MembershipMutationResult, error)
+	TransferOwnership(context.Context, identity.Principal, uuid.UUID, uuid.UUID, string) (OwnershipTransferResult, error)
 	Ping(context.Context) error
 	Close()
 }

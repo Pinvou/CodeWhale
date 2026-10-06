@@ -150,6 +150,32 @@ func (s *Service) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		api.WriteError(w, http.StatusUnprocessableEntity, "PRICE_INVALID", "the model request cannot be priced", httpserver.RequestID(r.Context()))
 		return
 	}
+	if resolved.ContextType == "ORGANIZATION" {
+		if resolved.OrganizationID == nil || resolved.MemberVersion < 1 || s.wallets == nil {
+			s.writeError(w, r, ErrForbidden)
+			return
+		}
+		walletOwnerType := ""
+		switch route.OwnerType {
+		case "ORG":
+			if route.OwnerID == *resolved.OrganizationID {
+				walletOwnerType = "ORGANIZATION"
+			}
+		case "ORG_UNIT":
+			if route.OwnerUnit != nil && route.OwnerID == *route.OwnerUnit {
+				walletOwnerType = "ORG_UNIT"
+			}
+		}
+		if walletOwnerType == "" {
+			s.writeError(w, r, ErrForbidden)
+			return
+		}
+		expectedWallet, err := s.wallets.Ensure(r.Context(), walletOwnerType, route.OwnerID)
+		if err != nil || expectedWallet != route.WalletID {
+			s.writeError(w, r, ErrForbidden)
+			return
+		}
+	}
 	usageID := uuid.Must(uuid.NewV7())
 	digest := sha256.Sum256(body)
 	usageRequest := UsageRequest{ID: usageID, IdempotencyKey: idempotencyKey, UserID: resolved.UserID, SessionID: resolved.SessionID, OrganizationID: resolved.OrganizationID, TokenAccountID: route.TokenAccountID, CredentialID: route.CredentialID, WalletID: route.WalletID, Model: request.Model, MaximumMicrocredits: maximumCost}
@@ -162,7 +188,17 @@ func (s *Service) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		api.WriteError(w, http.StatusConflict, "USAGE_REPLAY_BLOCKED", "this model request already exists and will not be sent twice", httpserver.RequestID(r.Context()))
 		return
 	}
-	hold, err := s.billing.Reserve(r.Context(), usageRequest.ID, route.WalletID, maximumCost, price.ID)
+	var hold BillingHold
+	if route.OwnerType == "ORG" && resolved.ContextType == "ORGANIZATION" && resolved.OrganizationID != nil {
+		organizationBilling, supported := s.billing.(OrganizationBillingClient)
+		if !supported {
+			s.writeError(w, r, ErrForbidden)
+			return
+		}
+		hold, err = organizationBilling.ReserveMemberQuota(r.Context(), usageRequest.ID, route.WalletID, *resolved.OrganizationID, resolved.UserID, resolved.MemberVersion, maximumCost, price.ID)
+	} else {
+		hold, err = s.billing.Reserve(r.Context(), usageRequest.ID, route.WalletID, maximumCost, price.ID)
+	}
 	if err != nil {
 		// A timeout can occur after Billing durably reserved the wallet.
 		_ = s.repository.MarkReview(context.WithoutCancel(r.Context()), usageRequest.ID, "reserve_result_unknown", map[string]any{"upstream_started": false})

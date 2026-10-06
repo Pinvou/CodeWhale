@@ -84,29 +84,40 @@ func NewService(repository Repository, contexts ContextResolver, wallets WalletR
 
 func (s *Service) Handler(verify identity.VerifyFunc) http.Handler {
 	router := httpserver.NewRouter()
-	router.Use(identity.GinMiddleware(verify))
-	router.GET("/v1/token-accounts", httpserver.AdaptFunc(s.listManagedTokenAccounts))
-	router.POST("/v1/token-accounts", httpserver.AdaptFunc(s.createTokenAccount))
-	router.PATCH("/v1/token-accounts/:token_account_id/status", httpserver.AdaptFunc(s.setTokenAccountStatus))
-	router.PUT("/v1/token-accounts/:token_account_id/sharing", httpserver.AdaptFunc(s.updateTokenSharing))
-	router.PUT("/v1/token-accounts/:token_account_id/routes", httpserver.AdaptFunc(s.upsertTokenRoute))
-	router.POST("/v1/token-accounts/:token_account_id/credentials", httpserver.AdaptFunc(s.rotateCredential))
-	router.GET("/v1/token-accounts/:token_account_id/credentials", httpserver.AdaptFunc(s.listCredentials))
-	router.POST("/v1/token-accounts/:token_account_id/credentials/:credential_id/revoke", httpserver.AdaptFunc(s.revokeCredential))
-	router.GET("/v1/token-accounts/eligible", httpserver.AdaptFunc(s.listEligible))
-	router.GET("/v1/models", httpserver.AdaptFunc(s.listModels))
-	router.GET("/v1/usage-requests/:usage_request_id", httpserver.AdaptFunc(s.getUsageRequest))
-	router.GET("/v1/me/usage-requests", httpserver.AdaptFunc(s.listMyUsageRequests))
-	router.POST("/v1/chat/completions", httpserver.AdaptFunc(s.chatCompletions))
-	router.GET("/v1/recharge/products", httpserver.AdaptFunc(s.rechargeProducts))
-	router.POST("/v1/recharge/orders", httpserver.AdaptFunc(s.createRechargeOrder))
-	router.GET("/v1/recharge/orders", httpserver.AdaptFunc(s.listRechargeOrders))
-	router.GET("/v1/recharge/orders/recent", httpserver.AdaptFunc(s.getRecentRechargeOrder))
-	router.GET("/v1/recharge/orders/:order_id", httpserver.AdaptFunc(s.getRechargeOrder))
-	router.POST("/v1/recharge/orders/:order_id/close", httpserver.AdaptFunc(s.closeRechargeOrder))
-	router.GET("/v1/me/balance", httpserver.AdaptFunc(s.getBalance))
-	router.GET("/v1/me/entitlement-packages", httpserver.AdaptFunc(s.getEntitlementPackages))
-	admin := router.Group("/admin/v1")
+	internal := router.Group("/internal/v1")
+	internal.Use(serviceauth.GinMiddleware(s.waiverServiceToken))
+	internal.PUT("/organizations/:organization_id/lifecycle", approvalpolicy.Require("TOKEN_ORGANIZATION_LIFECYCLE_APPLY", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.applyOrganizationLifecycle))
+	internal.PUT("/organizations/:organization_id/units/:unit_id/lifecycle", approvalpolicy.Require("TOKEN_ORGANIZATION_UNIT_LIFECYCLE_APPLY", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.organizationUnitDeletionBlockers))
+	protected := router.Group("")
+	protected.Use(identity.GinMiddleware(verify))
+	protected.GET("/v1/token-accounts", httpserver.AdaptFunc(s.listManagedTokenAccounts))
+	protected.POST("/v1/token-accounts", httpserver.AdaptFunc(s.createTokenAccount))
+	protected.PATCH("/v1/token-accounts/:token_account_id/status", httpserver.AdaptFunc(s.setTokenAccountStatus))
+	protected.PUT("/v1/token-accounts/:token_account_id/sharing", httpserver.AdaptFunc(s.updateTokenSharing))
+	protected.PUT("/v1/token-accounts/:token_account_id/routes", httpserver.AdaptFunc(s.upsertTokenRoute))
+	protected.POST("/v1/token-accounts/:token_account_id/credentials", httpserver.AdaptFunc(s.rotateCredential))
+	protected.GET("/v1/token-accounts/:token_account_id/credentials", httpserver.AdaptFunc(s.listCredentials))
+	protected.POST("/v1/token-accounts/:token_account_id/credentials/:credential_id/revoke", httpserver.AdaptFunc(s.revokeCredential))
+	protected.GET("/v1/token-accounts/eligible", httpserver.AdaptFunc(s.listEligible))
+	protected.GET("/v1/models", httpserver.AdaptFunc(s.listModels))
+	protected.GET("/v1/usage-requests/:usage_request_id", httpserver.AdaptFunc(s.getUsageRequest))
+	protected.GET("/v1/me/usage-requests", httpserver.AdaptFunc(s.listMyUsageRequests))
+	protected.POST("/v1/chat/completions", httpserver.AdaptFunc(s.chatCompletions))
+	protected.GET("/v1/recharge/products", httpserver.AdaptFunc(s.rechargeProducts))
+	protected.POST("/v1/recharge/orders", httpserver.AdaptFunc(s.createRechargeOrder))
+	protected.POST("/v1/organizations/:organization_id/recharge/orders", httpserver.AdaptFunc(s.createOrganizationRechargeOrder))
+	protected.GET("/v1/organizations/:organization_id/recharge/products", httpserver.AdaptFunc(s.organizationEntitlementProducts))
+	protected.GET("/v1/organizations/:organization_id/entitlement-packages", httpserver.AdaptFunc(s.organizationEntitlementPackages))
+	protected.GET("/v1/organizations/:organization_id/quota-grants", httpserver.AdaptFunc(s.listOrganizationQuotaGrants))
+	protected.POST("/v1/organizations/:organization_id/quota-grants:batch", httpserver.AdaptFunc(s.allocateOrganizationQuotaBatch))
+	protected.POST("/v1/organizations/:organization_id/quota-grants/:grant_id/revoke", httpserver.AdaptFunc(s.revokeOrganizationQuotaGrant))
+	protected.GET("/v1/recharge/orders", httpserver.AdaptFunc(s.listRechargeOrders))
+	protected.GET("/v1/recharge/orders/recent", httpserver.AdaptFunc(s.getRecentRechargeOrder))
+	protected.GET("/v1/recharge/orders/:order_id", httpserver.AdaptFunc(s.getRechargeOrder))
+	protected.POST("/v1/recharge/orders/:order_id/close", httpserver.AdaptFunc(s.closeRechargeOrder))
+	protected.GET("/v1/me/balance", httpserver.AdaptFunc(s.getBalance))
+	protected.GET("/v1/me/entitlement-packages", httpserver.AdaptFunc(s.getEntitlementPackages))
+	admin := protected.Group("/admin/v1")
 	if s.authorizer != nil {
 		admin.GET("/system/newapi-status", s.authorizer.Require("platform.system.status.read"), httpserver.AdaptFunc(s.adminNewAPIStatus))
 		admin.GET("/overview", s.authorizer.Require("platform.system.status.read"), httpserver.AdaptFunc(s.adminOverview))
@@ -131,11 +142,11 @@ func (s *Service) listRechargeOrders(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if resolved.ContextType != "PERSONAL" {
+	if resolved.ContextType == "ORGANIZATION" && !hasPermission(resolved, "org.wallet.read") && !hasPermission(resolved, "org.quota.allocate") && !hasPermission(resolved, "org.entitlements.purchase") {
 		s.writeError(w, r, ErrForbidden)
 		return
 	}
-	walletID, err := s.wallets.Ensure(r.Context(), "PERSONAL", resolved.UserID)
+	walletID, err := s.activeWallet(r.Context(), resolved)
 	if err != nil {
 		api.WriteError(w, http.StatusServiceUnavailable, "BILLING_UNAVAILABLE", "recharge orders are unavailable", httpserver.RequestID(r.Context()))
 		return
@@ -728,6 +739,8 @@ func (s *Service) resolveContext(w http.ResponseWriter, r *http.Request) (Author
 		s.writeError(w, r, err)
 		return AuthorizationContext{}, false
 	}
+	w.Header().Set("X-Context-Version", strconv.FormatInt(resolved.ContextVersion, 10))
+	w.Header().Set("X-Authorization-Version", strconv.FormatInt(resolved.AuthorizationVersion, 10))
 	return resolved, true
 }
 
@@ -746,6 +759,8 @@ func (s *Service) writeError(w http.ResponseWriter, r *http.Request, err error) 
 		status, code, message = http.StatusConflict, "ACCOUNT_PROVISIONING", "the account is still provisioning"
 	case errors.Is(err, ErrAccountRepairRequired):
 		status, code, message = http.StatusConflict, "ACCOUNT_REPAIR_REQUIRED", "the account initialization requires repair"
+	case errors.Is(err, ErrOrganizationLifecycleConflict):
+		status, code, message = http.StatusConflict, "ORGANIZATION_LIFECYCLE_CONFLICT", "the organization lifecycle version or state conflicts with current facts"
 	}
 	api.WriteError(w, status, code, message, httpserver.RequestID(r.Context()))
 }
@@ -806,27 +821,31 @@ func (r *HTTPContextResolver) Resolve(ctx context.Context, authorization string)
 		return AuthorizationContext{}, errors.New("Account authorization context unavailable")
 	}
 	var body struct {
-		UserID            uuid.UUID   `json:"user_id"`
-		SessionID         string      `json:"session_id"`
-		ContextType       string      `json:"context_type"`
-		OrganizationID    *uuid.UUID  `json:"organization_id"`
-		MembershipVersion int64       `json:"membership_version"`
-		UnitIDs           []uuid.UUID `json:"unit_ids"`
-		AncestorUnitIDs   []uuid.UUID `json:"ancestor_unit_ids"`
-		Roles             []string    `json:"roles"`
-		Mobile            *string     `json:"mobile"`
-		MobileVerified    bool        `json:"mobile_verified"`
+		UserID               uuid.UUID   `json:"user_id"`
+		SessionID            string      `json:"session_id"`
+		ContextType          string      `json:"context_type"`
+		OrganizationID       *uuid.UUID  `json:"organization_id"`
+		MembershipVersion    int64       `json:"membership_version"`
+		MemberVersion        int64       `json:"member_version"`
+		ContextVersion       int64       `json:"context_version"`
+		AuthorizationVersion int64       `json:"authorization_version"`
+		UnitIDs              []uuid.UUID `json:"unit_ids"`
+		AncestorUnitIDs      []uuid.UUID `json:"ancestor_unit_ids"`
+		Roles                []string    `json:"roles"`
+		Permissions          []string    `json:"permissions"`
+		Mobile               *string     `json:"mobile"`
+		MobileVerified       bool        `json:"mobile_verified"`
 	}
 	if err := decodeAccountAuthority(response.Body, 1<<20, &body); err != nil {
 		return AuthorizationContext{}, err
 	}
-	if body.UserID == uuid.Nil || strings.TrimSpace(body.SessionID) == "" ||
+	if body.UserID == uuid.Nil || strings.TrimSpace(body.SessionID) == "" || body.ContextVersion < 1 || body.AuthorizationVersion < 1 ||
 		(body.ContextType != "PERSONAL" && body.ContextType != "ORGANIZATION") ||
-		(body.ContextType == "ORGANIZATION" && (body.OrganizationID == nil || *body.OrganizationID == uuid.Nil)) ||
+		(body.ContextType == "ORGANIZATION" && (body.OrganizationID == nil || *body.OrganizationID == uuid.Nil || body.MemberVersion < 1)) ||
 		(body.ContextType == "PERSONAL" && body.OrganizationID != nil) {
 		return AuthorizationContext{}, errors.New("Account authorization context has no valid identity or active context")
 	}
-	return AuthorizationContext{UserID: body.UserID, SessionID: body.SessionID, ContextType: body.ContextType, OrganizationID: body.OrganizationID, MembershipVersion: body.MembershipVersion, UnitIDs: body.UnitIDs, AncestorUnitIDs: body.AncestorUnitIDs, Roles: body.Roles, Mobile: body.Mobile, MobileVerified: body.MobileVerified}, nil
+	return AuthorizationContext{UserID: body.UserID, SessionID: body.SessionID, ContextType: body.ContextType, OrganizationID: body.OrganizationID, MembershipVersion: body.MembershipVersion, MemberVersion: body.MemberVersion, ContextVersion: body.ContextVersion, AuthorizationVersion: body.AuthorizationVersion, UnitIDs: body.UnitIDs, AncestorUnitIDs: body.AncestorUnitIDs, Roles: body.Roles, Permissions: body.Permissions, Mobile: body.Mobile, MobileVerified: body.MobileVerified}, nil
 }
 
 func (r *HTTPContextResolver) ResolveCommerceCustomer(ctx context.Context, authorization string) (string, error) {

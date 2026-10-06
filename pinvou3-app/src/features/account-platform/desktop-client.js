@@ -1,3 +1,4 @@
+import { createContextVersionTracker } from './context-version.js';
 import { safePNGImage } from './bff-client.js';
 import { builtinModelCatalog } from '../../shared/model-options.js';
 
@@ -91,6 +92,13 @@ export class AccountPlatformDesktopClient {
   constructor(transport) {
     if (!transport) throw new Error('Account Platform desktop bridge is unavailable');
     this.transport = transport;
+    this.contextVersions = createContextVersionTracker();
+  }
+
+  get contextVersion() { return this.contextVersions.contextVersion; }
+  onContextVersion(listener) { return this.contextVersions.subscribe(listener); }
+  observeContextVersion(value, authorization, epoch = this.contextVersions.epoch) {
+    this.contextVersions.observe(value, authorization, epoch);
   }
 
   async getModelCatalog(signal) {
@@ -103,10 +111,17 @@ export class AccountPlatformDesktopClient {
     }
     return result;
   }
-  async session(signal) { return sessionStatus(await this.call(() => this.transport.session(), signal)); }
+  async session(signal) {
+    const epoch = this.contextVersions.epoch;
+    const status = sessionStatus(await this.call(() => this.transport.session(), signal));
+    if (epoch !== this.contextVersions.epoch) throw abortError();
+    if (!status.authenticated) this.contextVersions.reset();
+    return status;
+  }
   async login(account, password, signal) {
     const status = sessionStatus(await this.call(() => this.transport.login({ account, password }), signal));
     if (!status.authenticated) throw nativeError(status.errorCode || 'authentication_required');
+    this.contextVersions.reset();
     return status;
   }
   async createSliderCaptcha(mobile, purpose, signal) {
@@ -163,11 +178,13 @@ export class AccountPlatformDesktopClient {
       mobile, challenge_id: challengeId, code,
     }), signal));
     if (!status.authenticated) throw nativeError(status.errorCode || 'authentication_required');
+    this.contextVersions.reset();
     return status;
   }
   async logout(signal) {
     const status = sessionStatus(await this.call(() => this.transport.logout(), signal));
     if (status.authenticated) throw nativeError('account_platform_request_failed');
+    this.contextVersions.reset();
     return status;
   }
 
@@ -185,6 +202,7 @@ export class AccountPlatformDesktopClient {
   }
 
   async request(area, resource, options = {}) {
+    const epoch = this.contextVersions.epoch;
     const response = await this.call(() => this.transport.request({
       area,
       resource,
@@ -192,21 +210,36 @@ export class AccountPlatformDesktopClient {
       body: options.body,
       idempotencyKey: options.idempotencyKey,
     }), options.signal);
-    if (!response || !Number.isInteger(response.status) || response.status < 200 || response.status >= 300) throw responseError(response);
+    if (response && response.status !== 401 && !(area === 'account' && resource === '/v1/account/bootstrap')) this.observeContextVersion(response.contextVersion, response.authorizationVersion, epoch);
+    if (!response || !Number.isInteger(response.status) || response.status < 200 || response.status >= 300) {
+      if (response?.status === 401 && epoch === this.contextVersions.epoch) this.contextVersions.reset();
+      throw responseError(response);
+    }
     if (response.status !== 204 && (!response.body || typeof response.body !== 'object' || Array.isArray(response.body))) throw responseError({ status: 500 });
+    const isBootstrap = area === 'account' && resource === '/v1/account/bootstrap';
+    if (!isBootstrap || this.contextVersions.bindUser(response.body?.user_id, epoch)) {
+      this.observeContextVersion(response.contextVersion, response.authorizationVersion, isBootstrap ? this.contextVersions.epoch : epoch);
+    }
     return response.body;
   }
 
   bootstrap(signal) { return this.request('account', '/v1/account/bootstrap', { method: 'POST', body: {}, signal }); }
   organizations(signal) { return this.request('account', '/v1/me/organizations', { signal }); }
-  switchContext(contextType, organizationId, signal) { return this.request('account', '/v1/sessions/current/active-context', { method: 'POST', body: { context_type: contextType, organization_id: organizationId || null }, signal }); }
+  switchContext(contextType, organizationId, expectedContextVersion, signal) { return this.request('account', '/v1/me/active-context', { method: 'PUT', body: { context_type: contextType, organization_id: organizationId || null, expected_context_version: expectedContextVersion }, signal }); }
   units(organizationId, signal) { return this.request('account', `/v1/organizations/${organizationId}/units`, { signal }); }
+  quotaMembers(organizationId, signal) { return this.request('account', `/v1/organizations/${organizationId}/quota-members`, { signal }); }
   members(organizationId, signal) { return this.request('account', `/v1/organizations/${organizationId}/members`, { signal }); }
-  createUnit(organizationId, name, parentId = null) { return this.request('account', `/v1/organizations/${organizationId}/units`, { method: 'POST', body: { name, parent_id: parentId } }); }
+  createUnit(organizationId, name, parentId = null, key) { return this.request('account', `/v1/organizations/${organizationId}/units`, { method: 'POST', idempotencyKey:key, body: { name, parent_id: parentId } }); }
   invite(organizationId, email, roles) { return this.request('account', `/v1/organizations/${organizationId}/invitations`, { method: 'POST', body: { email, roles, expires_in_hours: 72 } }); }
   products(signal) { return this.request('token', '/v1/recharge/products', { signal }); }
   balance(signal) { return this.request('token', '/v1/me/balance?consistency=strong', { signal }); }
   createRecharge(productId, channel, key) { return this.request('token', '/v1/recharge/orders', { method: 'POST', idempotencyKey: key, body: { product_id: productId, channel } }); }
+  purchaseOrganizationEntitlements(organizationId, productId, channel, key) { return this.request('token', `/v1/organizations/${organizationId}/recharge/orders`, { method: 'POST', idempotencyKey: key, body: { product_id: productId, channel } }); }
+  organizationProducts(organizationId, signal) { return this.request('token', `/v1/organizations/${organizationId}/recharge/products`, { signal }); }
+  organizationEntitlementPackages(organizationId, signal) { return this.request('token', `/v1/organizations/${organizationId}/entitlement-packages`, { signal }); }
+  organizationQuotaGrants(organizationId, signal) { return this.request('token', `/v1/organizations/${organizationId}/quota-grants`, { signal }); }
+  allocateOrganizationQuota(organizationId, items, key) { return this.request('token', `/v1/organizations/${organizationId}/quota-grants:batch`, { method: 'POST', idempotencyKey: key, body: { items } }); }
+  revokeOrganizationQuota(organizationId, grantId, reason, key) { return this.request('token', `/v1/organizations/${organizationId}/quota-grants/${grantId}/revoke`, { method: 'POST', idempotencyKey: key, body: { reason } }); }
   recentRechargeOrder(signal) { return this.request('token', '/v1/recharge/orders/recent', { signal }); }
   rechargeOrders(signal) { return this.request('token', '/v1/recharge/orders', { signal }); }
   entitlementPackages(signal) { return this.request('token', '/v1/me/entitlement-packages', { signal }); }

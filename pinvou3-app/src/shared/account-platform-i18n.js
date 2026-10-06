@@ -879,3 +879,105 @@ for (const copy of Object.values(accountPlatformCopy)) {
 accountPlatformCopy.zh.profileChangeStates={PENDING:"等待确认",VERIFIED:"验证完成",IDENTITY_UPDATED:"身份资料已更新",ACCOUNT_COMMITTED:"账号资料已更新",COMPLETED:"修改完成",RETRY:"正在恢复",REPAIR_REQUIRED:"需要恢复"};
 accountPlatformCopy.en.profileChangeStates={PENDING:"Awaiting confirmation",VERIFIED:"Verified",IDENTITY_UPDATED:"Identity updated",ACCOUNT_COMMITTED:"Account updated",COMPLETED:"Completed",RETRY:"Recovering",REPAIR_REQUIRED:"Recovery required"};
 accountPlatformCopy.ja.profileChangeStates={PENDING:"確認待ち",VERIFIED:"検証済み",IDENTITY_UPDATED:"認証情報更新済み",ACCOUNT_COMMITTED:"アカウント更新済み",COMPLETED:"完了",RETRY:"復旧中",REPAIR_REQUIRED:"復旧が必要"};
+
+// A09 resource navigation extends the centralized dictionary without retiring
+// existing profile, roles, Token management or registration recovery copy.
+Object.assign(accountPlatformCopy.zh, {
+  "creditsTitle": "额度",
+  "creditsLead": "查看当前身份的可用与使用中额度；个人身份可在此购买套餐。",
+  "entitlementsTitle": "权益",
+  "entitlementsLead": "查看当前身份可见的独立权益包、组成和有效期。",
+  "organizationPurchase": "为组织购买权益",
+  "organizationPurchaseLead": "订单记录实际付款管理员和受益组织，支付成功后权益只进入当前组织。",
+  "purchaseForOrganization": "为当前组织购买",
+  "organizationOrderCreated": "组织订单已创建",
+  "allocateMemberQuota": "分配成员额度",
+  "allocateMemberQuotaLead": "选择具体权益包及 BASE/BONUS 组成；每次提交创建新授予，不支持原地改额。",
+  "member": "成员",
+  "entitlementPackage": "权益包",
+  "entitlementComponent": "权益组成",
+  "quotaAmount": "分配积分",
+  "allocateQuota": "分配额度",
+  "memberQuotaGrants": "成员额度授予",
+  "noMemberQuotaGrants": "暂无成员额度授予。",
+  "revokeQuota": "撤回未消费额度",
+  "grantStatuses": {
+    "ACTIVE": "有效",
+    "SUSPENDED": "已暂停",
+    "REVOKED": "已撤回",
+    "EXPIRED": "已过期",
+    "ACCOUNT_CLOSED": "账号已注销",
+    "RECLAIMED_ACCOUNT_CLOSED": "注销额度已回收"
+  }
+});
+Object.assign(accountPlatformCopy.zh.sections, {"credits": "额度", "entitlements": "权益"});
+Object.assign(accountPlatformCopy.en, {
+  "creditsTitle": "Credits",
+  "creditsLead": "Review available and in-use credits for the current identity. Personal identities can purchase plans here.",
+  "entitlementsTitle": "Benefits",
+  "entitlementsLead": "Review the independent benefit packages, composition, and expiry visible to the current identity.",
+  "organizationPurchase": "Purchase organization benefits",
+  "organizationPurchaseLead": "The order records the paying administrator and beneficiary organization; credited benefits go only to this organization.",
+  "purchaseForOrganization": "Purchase for this organization",
+  "organizationOrderCreated": "Organization order created",
+  "allocateMemberQuota": "Allocate member quota",
+  "allocateMemberQuotaLead": "Choose an exact package and BASE/BONUS component. Each submission creates a new grant; grants cannot be edited in place.",
+  "member": "Member",
+  "entitlementPackage": "Benefit package",
+  "entitlementComponent": "Benefit component",
+  "quotaAmount": "Points to allocate",
+  "allocateQuota": "Allocate quota",
+  "memberQuotaGrants": "Member quota grants",
+  "noMemberQuotaGrants": "No member quota grants.",
+  "revokeQuota": "Revoke unconsumed quota",
+  "grantStatuses": {
+    "ACTIVE": "Active",
+    "SUSPENDED": "Suspended",
+    "REVOKED": "Revoked",
+    "EXPIRED": "Expired",
+    "ACCOUNT_CLOSED": "Account closed",
+    "RECLAIMED_ACCOUNT_CLOSED": "Closed-account quota reclaimed"
+  }
+});
+Object.assign(accountPlatformCopy.en.sections, {"credits": "Credits", "entitlements": "Benefits"});
+Object.assign(accountPlatformCopy.ja, {
+  "creditsTitle": "ポイント",
+  "creditsLead": "現在の ID の利用可能・使用中ポイントを確認します。個人 ID ではプランも購入できます。",
+  "entitlementsTitle": "特典",
+  "entitlementsLead": "現在の ID で参照できる特典パッケージの内訳と有効期限を確認します。",
+  "organizationPurchase": "組織特典を購入",
+  "organizationPurchaseLead": "注文には支払管理者と受益組織が記録され、付与された特典は現在の組織だけに入ります。",
+  "purchaseForOrganization": "この組織向けに購入",
+  "organizationOrderCreated": "組織注文を作成しました",
+  "allocateMemberQuota": "メンバー枠を割り当て",
+  "allocateMemberQuotaLead": "対象パッケージと BASE/BONUS 内訳を明示します。割り当ては毎回新規作成され、金額の直接変更はできません。",
+  "member": "メンバー",
+  "entitlementPackage": "特典パッケージ",
+  "entitlementComponent": "特典内訳",
+  "quotaAmount": "割り当てポイント",
+  "allocateQuota": "枠を割り当て",
+  "memberQuotaGrants": "メンバー枠の付与",
+  "noMemberQuotaGrants": "メンバー枠の付与はありません。",
+  "revokeQuota": "未使用枠を撤回",
+  "grantStatuses": {
+    "ACTIVE": "有効",
+    "SUSPENDED": "一時停止",
+    "REVOKED": "撤回済み",
+    "EXPIRED": "期限切れ",
+    "ACCOUNT_CLOSED": "アカウント解約済み",
+    "RECLAIMED_ACCOUNT_CLOSED": "解約枠を回収済み"
+  }
+});
+Object.assign(accountPlatformCopy.ja.sections, {"credits": "ポイント", "entitlements": "特典"});
+
+// Batch item codes have no outer HTTP error status; reuse each language's
+// existing error vocabulary rather than displaying provider messages.
+for (const copy of Object.values(accountPlatformCopy)) {
+  Object.assign(copy.errors, {
+    PERMISSION_DENIED:copy.permissionDenied,
+    ACCOUNT_CONFLICT:copy.stateConflict,
+    BILLING_CONFLICT:copy.stateConflict,
+    IDEMPOTENCY_CONFLICT:copy.stateConflict,
+    INVALID_REQUEST:copy.invalidInput,
+  });
+}

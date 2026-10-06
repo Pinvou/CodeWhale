@@ -2,9 +2,6 @@ package account
 
 import (
 	"context"
-	"crypto/rand"
-	"crypto/sha256"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -86,7 +83,7 @@ func (r *PostgresRepository) Bootstrap(ctx context.Context, principal identity.P
 		user.UserID = uuid.Must(uuid.NewV7())
 		user.Status = "PROVISIONING"
 		user.CommerceCustomerStatus = "NOT_CONFIGURED"
-		user.ActiveContext = Context{Type: "PERSONAL", MembershipVersion: 1, ContextVersion: 1, AuthorizationVersion: 1}
+		user.ActiveContext = Context{Type: "PERSONAL", MembershipVersion: 1, ContextVersion: 1, AuthorizationVersion: 1, Permissions: []string{}}
 		if username := strings.TrimSpace(principal.Username); username != "" {
 			user.Username = &username
 		}
@@ -126,6 +123,12 @@ VALUES ($1, $2, $3, $4, $4)`, principal.Issuer, principal.Subject, user.UserID, 
 	}
 
 	now := r.now()
+	_, err = tx.Exec(ctx, `
+INSERT INTO user_active_contexts(user_id,context_type,organization_id,context_version,updated_at)
+VALUES($1,'PERSONAL',NULL,1,$2) ON CONFLICT(user_id) DO NOTHING`, user.UserID, now)
+	if err != nil {
+		return Me{}, false, err
+	}
 	command, err := tx.Exec(ctx, `
 INSERT INTO user_sessions(issuer, session_id, user_id, active_context_type, membership_version, last_seen_at, created_at)
 VALUES ($1, $2, $3, 'PERSONAL', $4, $5, $5)
@@ -139,7 +142,16 @@ WHERE user_sessions.user_id = EXCLUDED.user_id`,
 	if command.RowsAffected() != 1 {
 		return Me{}, false, ErrForbidden
 	}
-	if err := tx.QueryRow(ctx, `SELECT active_context_type, active_organization_id FROM user_sessions WHERE issuer=$1 AND session_id=$2 AND user_id=$3`, principal.Issuer, principal.SessionID, user.UserID).Scan(&user.ActiveContext.Type, &user.ActiveContext.OrganizationID); err != nil {
+	if err = tx.QueryRow(ctx, `
+SELECT context.context_type,context.organization_id,context.context_version,u.membership_version,
+       COALESCE((SELECT version FROM authorization_versions WHERE user_id=u.id
+         AND scope=CASE WHEN context.organization_id IS NULL THEN 'PLATFORM' ELSE 'ORGANIZATION' END
+         AND scope_id=COALESCE(context.organization_id,'00000000-0000-0000-0000-000000000000'::uuid)),1),
+       COALESCE((SELECT array_agg(DISTINCT rp.permission_code ORDER BY rp.permission_code) FROM role_assignments ra JOIN role_permissions rp ON rp.role_code=ra.role_code WHERE ra.user_id=u.id AND ra.organization_id=context.organization_id AND ra.revoked_at IS NULL AND ra.starts_at<=statement_timestamp() AND (ra.expires_at IS NULL OR ra.expires_at>statement_timestamp())),'{}')
+FROM users u JOIN user_active_contexts context ON context.user_id=u.id WHERE u.id=$1`, user.UserID).Scan(
+		&user.ActiveContext.Type, &user.ActiveContext.OrganizationID, &user.ActiveContext.ContextVersion,
+		&user.ActiveContext.MembershipVersion, &user.ActiveContext.AuthorizationVersion, &user.ActiveContext.Permissions,
+	); err != nil {
 		return Me{}, false, err
 	}
 	_, err = tx.Exec(ctx, `UPDATE identities SET last_seen_at = $3 WHERE issuer = $1 AND subject = $2`, principal.Issuer, principal.Subject, now)
@@ -196,47 +208,54 @@ func (r *PostgresRepository) GetMe(ctx context.Context, principal identity.Princ
 	var organizationID *uuid.UUID
 	err := r.pool.QueryRow(ctx, `
 SELECT u.id, u.user_code, u.status, u.username, u.display_name, u.mobile_e164, u.mobile_verified_at IS NOT NULL,
-       COALESCE(cm.status,'NOT_CONFIGURED'), s.active_context_type, s.active_organization_id, u.membership_version,
-       COALESCE((SELECT av.version FROM authorization_versions av WHERE av.user_id=u.id AND av.scope=CASE WHEN s.active_organization_id IS NULL THEN 'PLATFORM' ELSE 'ORGANIZATION' END AND av.scope_id=COALESCE(s.active_organization_id,'00000000-0000-0000-0000-000000000000'::uuid)),1)
+       COALESCE(cm.status,'NOT_CONFIGURED'), context.context_type, context.organization_id,
+       u.membership_version,context.context_version,
+       COALESCE((SELECT av.version FROM authorization_versions av WHERE av.user_id=u.id AND av.scope=CASE WHEN context.organization_id IS NULL THEN 'PLATFORM' ELSE 'ORGANIZATION' END AND av.scope_id=COALESCE(context.organization_id,'00000000-0000-0000-0000-000000000000'::uuid)),1),
+       COALESCE((SELECT array_agg(DISTINCT rp.permission_code ORDER BY rp.permission_code)
+         FROM role_assignments ra JOIN role_permissions rp ON rp.role_code=ra.role_code
+         WHERE ra.user_id=u.id AND ra.organization_id=context.organization_id AND u.status='ACTIVE'
+           AND ra.revoked_at IS NULL AND ra.starts_at<=statement_timestamp()
+           AND (ra.expires_at IS NULL OR ra.expires_at>statement_timestamp())),'{}')
 FROM identities i
 JOIN users u ON u.id = i.user_id
 JOIN user_sessions s ON s.user_id = u.id AND s.issuer = i.issuer AND s.session_id = $3
+JOIN user_active_contexts context ON context.user_id=u.id
 LEFT JOIN commerce_customer_mappings cm ON cm.subject_type='USER' AND cm.subject_id=u.id AND cm.provider_id=$4
 WHERE i.issuer = $1 AND i.subject = $2`, principal.Issuer, principal.Subject, principal.SessionID, r.commerceProviderID).Scan(
-		&me.UserID, &me.UserCode, &me.Status, &me.Username, &me.DisplayName, &me.Mobile, &me.MobileVerified, &me.CommerceCustomerStatus, &me.ActiveContext.Type, &organizationID, &me.ActiveContext.MembershipVersion, &me.ActiveContext.AuthorizationVersion,
+		&me.UserID, &me.UserCode, &me.Status, &me.Username, &me.DisplayName, &me.Mobile, &me.MobileVerified, &me.CommerceCustomerStatus, &me.ActiveContext.Type, &organizationID, &me.ActiveContext.MembershipVersion, &me.ActiveContext.ContextVersion, &me.ActiveContext.AuthorizationVersion, &me.ActiveContext.Permissions,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Me{}, ErrNotFound
 	}
 	me.ActiveContext.OrganizationID = organizationID
 	me.UserCode = FormatUserCode(me.UserCode)
-	me.ActiveContext.ContextVersion = me.ActiveContext.MembershipVersion
 	return me, err
 }
 
 func (r *PostgresRepository) ResolveAuthorizationContext(ctx context.Context, principal identity.Principal) (AuthorizationContext, error) {
 	var resolved AuthorizationContext
 	err := r.pool.QueryRow(ctx, `
-SELECT u.id,s.session_id,s.active_context_type,s.active_organization_id,u.membership_version,
+SELECT u.id,s.session_id,active.context_type,active.organization_id,u.membership_version,COALESCE(m.version,0),active.context_version,
        COALESCE(array_agg(DISTINCT mu.unit_id) FILTER (WHERE mu.unit_id IS NOT NULL),'{}'),
        COALESCE(array_agg(DISTINCT c.ancestor_id) FILTER (WHERE c.ancestor_id IS NOT NULL),'{}'),
-       COALESCE((SELECT array_agg(DISTINCT ra.role_code ORDER BY ra.role_code) FROM role_assignments ra WHERE ra.user_id=u.id AND ra.organization_id=s.active_organization_id AND ra.revoked_at IS NULL AND ra.starts_at<=statement_timestamp() AND (ra.expires_at IS NULL OR ra.expires_at>statement_timestamp())),'{}'),
-       COALESCE((SELECT array_agg(DISTINCT rp.permission_code ORDER BY rp.permission_code) FROM role_assignments ra JOIN role_permissions rp ON rp.role_code=ra.role_code WHERE ra.user_id=u.id AND ra.organization_id=s.active_organization_id AND ra.revoked_at IS NULL AND ra.starts_at<=statement_timestamp() AND (ra.expires_at IS NULL OR ra.expires_at>statement_timestamp())),'{}'),
+       COALESCE((SELECT array_agg(DISTINCT ra.role_code ORDER BY ra.role_code) FROM role_assignments ra WHERE ra.user_id=u.id AND ra.organization_id=active.organization_id AND ra.revoked_at IS NULL AND ra.starts_at<=statement_timestamp() AND (ra.expires_at IS NULL OR ra.expires_at>statement_timestamp())),'{}'),
+       COALESCE((SELECT array_agg(DISTINCT rp.permission_code ORDER BY rp.permission_code) FROM role_assignments ra JOIN role_permissions rp ON rp.role_code=ra.role_code WHERE ra.user_id=u.id AND ra.organization_id=active.organization_id AND ra.revoked_at IS NULL AND ra.starts_at<=statement_timestamp() AND (ra.expires_at IS NULL OR ra.expires_at>statement_timestamp())),'{}'),
        COALESCE((SELECT array_agg(DISTINCT ra.role_code ORDER BY ra.role_code) FROM role_assignments ra WHERE ra.user_id=u.id AND ra.organization_id IS NULL AND ra.revoked_at IS NULL AND ra.starts_at<=statement_timestamp() AND (ra.expires_at IS NULL OR ra.expires_at>statement_timestamp())),'{}'),
        COALESCE((SELECT array_agg(DISTINCT rp.permission_code ORDER BY rp.permission_code) FROM role_assignments ra JOIN role_permissions rp ON rp.role_code=ra.role_code WHERE ra.user_id=u.id AND ra.organization_id IS NULL AND ra.revoked_at IS NULL AND ra.starts_at<=statement_timestamp() AND (ra.expires_at IS NULL OR ra.expires_at>statement_timestamp())),'{}'),
-       COALESCE((SELECT av.version FROM authorization_versions av WHERE av.user_id=u.id AND av.scope=CASE WHEN s.active_organization_id IS NULL THEN 'PLATFORM' ELSE 'ORGANIZATION' END AND av.scope_id=COALESCE(s.active_organization_id,'00000000-0000-0000-0000-000000000000'::uuid)),1),
+       COALESCE((SELECT av.version FROM authorization_versions av WHERE av.user_id=u.id AND av.scope=CASE WHEN active.organization_id IS NULL THEN 'PLATFORM' ELSE 'ORGANIZATION' END AND av.scope_id=COALESCE(active.organization_id,'00000000-0000-0000-0000-000000000000'::uuid)),1),
        u.mobile_e164,u.mobile_verified_at IS NOT NULL
 FROM identities i
 JOIN users u ON u.id=i.user_id AND u.status='ACTIVE'
 JOIN user_sessions s ON s.user_id=u.id AND s.issuer=i.issuer AND s.session_id=$3
-LEFT JOIN organizations o ON o.id=s.active_organization_id
-LEFT JOIN memberships m ON m.user_id=u.id AND m.organization_id=s.active_organization_id AND m.status='ACTIVE'
+JOIN user_active_contexts active ON active.user_id=u.id
+LEFT JOIN organizations o ON o.id=active.organization_id
+LEFT JOIN memberships m ON m.user_id=u.id AND m.organization_id=active.organization_id AND m.status='ACTIVE'
   AND EXISTS(SELECT 1 FROM organizations o WHERE o.id=m.organization_id AND o.status='ACTIVE')
 LEFT JOIN membership_units mu ON mu.membership_id=m.id
 LEFT JOIN organization_unit_closure c ON c.organization_id=m.organization_id AND c.descendant_id=mu.unit_id
-WHERE i.issuer=$1 AND i.subject=$2 AND (s.active_organization_id IS NULL OR o.status='ACTIVE')
-GROUP BY u.id,s.session_id,s.active_context_type,s.active_organization_id,s.membership_version`, principal.Issuer, principal.Subject, principal.SessionID).Scan(
-		&resolved.UserID, &resolved.SessionID, &resolved.ContextType, &resolved.OrganizationID, &resolved.MembershipVersion, &resolved.UnitIDs, &resolved.AncestorUnitIDs, &resolved.Roles, &resolved.Permissions, &resolved.PlatformRoles, &resolved.PlatformPermissions, &resolved.AuthorizationVersion, &resolved.Mobile, &resolved.MobileVerified,
+WHERE i.issuer=$1 AND i.subject=$2 AND (active.organization_id IS NULL OR o.status='ACTIVE')
+GROUP BY u.id,s.session_id,active.context_type,active.organization_id,active.context_version,m.version`, principal.Issuer, principal.Subject, principal.SessionID).Scan(
+		&resolved.UserID, &resolved.SessionID, &resolved.ContextType, &resolved.OrganizationID, &resolved.MembershipVersion, &resolved.MemberVersion, &resolved.ContextVersion, &resolved.UnitIDs, &resolved.AncestorUnitIDs, &resolved.Roles, &resolved.Permissions, &resolved.PlatformRoles, &resolved.PlatformPermissions, &resolved.AuthorizationVersion, &resolved.Mobile, &resolved.MobileVerified,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		var status string
@@ -252,7 +271,7 @@ GROUP BY u.id,s.session_id,s.active_context_type,s.active_organization_id,s.memb
 	if err != nil {
 		return AuthorizationContext{}, err
 	}
-	if resolved.ContextType == "ORGANIZATION" && resolved.OrganizationID != nil && len(resolved.Roles) == 0 {
+	if resolved.ContextType == "ORGANIZATION" && resolved.OrganizationID != nil && (resolved.MemberVersion < 1 || len(resolved.Roles) == 0) {
 		return AuthorizationContext{}, ErrForbidden
 	}
 	if resolved.UnitIDs == nil {
@@ -264,7 +283,6 @@ GROUP BY u.id,s.session_id,s.active_context_type,s.active_organization_id,s.memb
 	if resolved.Roles == nil {
 		resolved.Roles = []string{}
 	}
-	resolved.ContextVersion = resolved.MembershipVersion
 	if resolved.AuthorizationVersion < 1 {
 		resolved.AuthorizationVersion = 1
 	}
@@ -305,23 +323,34 @@ ORDER BY o.name, o.id`, principal.Issuer, principal.Subject)
 	return organizations, rows.Err()
 }
 
-func (r *PostgresRepository) SetActiveContext(ctx context.Context, principal identity.Principal, organizationID *uuid.UUID) (Context, error) {
-	tx, err := r.pool.Begin(ctx)
+func (r *PostgresRepository) SetActiveContext(ctx context.Context, principal identity.Principal, organizationID *uuid.UUID, expectedVersion int64) (Context, error) {
+	if expectedVersion < 1 {
+		return Context{}, ErrConflict
+	}
+	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
 	if err != nil {
 		return Context{}, err
 	}
 	defer tx.Rollback(ctx)
 	var userID uuid.UUID
-	var version int64
+	var membershipVersion, contextVersion int64
+	var currentOrganizationID *uuid.UUID
+	var currentType string
 	err = tx.QueryRow(ctx, `
-SELECT u.id, u.membership_version
-FROM identities i JOIN users u ON u.id = i.user_id
-WHERE i.issuer = $1 AND i.subject = $2 AND u.status = 'ACTIVE'`, principal.Issuer, principal.Subject).Scan(&userID, &version)
+SELECT u.id,u.membership_version,active.context_type,active.organization_id,active.context_version
+FROM identities i JOIN users u ON u.id=i.user_id
+JOIN user_sessions session ON session.user_id=u.id AND session.issuer=i.issuer AND session.session_id=$3
+JOIN user_active_contexts active ON active.user_id=u.id
+WHERE i.issuer=$1 AND i.subject=$2 AND u.status='ACTIVE'
+FOR UPDATE OF active`, principal.Issuer, principal.Subject, principal.SessionID).Scan(&userID, &membershipVersion, &currentType, &currentOrganizationID, &contextVersion)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Context{}, ErrForbidden
 	}
 	if err != nil {
 		return Context{}, err
+	}
+	if contextVersion != expectedVersion {
+		return Context{}, ErrConflict
 	}
 	contextType := "PERSONAL"
 	if organizationID != nil {
@@ -339,174 +368,205 @@ SELECT EXISTS(
 		}
 		contextType = "ORGANIZATION"
 	}
-	command, err := tx.Exec(ctx, `
-UPDATE user_sessions
-SET active_context_type = $4, active_organization_id = $5, membership_version = $6, last_seen_at = $7
-WHERE issuer = $1 AND session_id = $2 AND user_id = $3`,
-		principal.Issuer, principal.SessionID, userID, contextType, organizationID, version, r.now())
-	if err != nil {
-		return Context{}, err
-	}
-	if command.RowsAffected() != 1 {
-		return Context{}, ErrNotFound
-	}
-	if err := appendAudit(ctx, tx, userID, principal.SessionID, organizationID, "session.active_context.set", "session", principal.SessionID, "SUCCEEDED", map[string]any{"context_type": contextType}); err != nil {
-		return Context{}, err
+	changed := currentType != contextType || !uuidPointerEqual(currentOrganizationID, organizationID)
+	now := r.now()
+	if changed {
+		contextVersion++
+		if _, err := tx.Exec(ctx, `UPDATE user_active_contexts SET context_type=$2,organization_id=$3,context_version=$4,updated_at=$5 WHERE user_id=$1`, userID, contextType, organizationID, contextVersion, now); err != nil {
+			return Context{}, err
+		}
+		if _, err := tx.Exec(ctx, `UPDATE user_sessions SET active_context_type=$2,active_organization_id=$3,membership_version=$4,last_seen_at=CASE WHEN issuer=$5 AND session_id=$6 THEN $7 ELSE last_seen_at END WHERE user_id=$1`, userID, contextType, organizationID, membershipVersion, principal.Issuer, principal.SessionID, now); err != nil {
+			return Context{}, err
+		}
+		if err := appendAudit(ctx, tx, userID, principal.SessionID, organizationID, "user.active_context.set", "user_active_context", userID.String(), "SUCCEEDED", map[string]any{"context_type": contextType, "previous_context_type": currentType, "context_version": contextVersion}); err != nil {
+			return Context{}, err
+		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return Context{}, err
 	}
 	var authorizationVersion int64
-	err = r.pool.QueryRow(ctx, `SELECT COALESCE((SELECT version FROM authorization_versions WHERE user_id=$1 AND scope=CASE WHEN $2::uuid IS NULL THEN 'PLATFORM' ELSE 'ORGANIZATION' END AND scope_id=COALESCE($2::uuid,'00000000-0000-0000-0000-000000000000'::uuid)),1)`, userID, organizationID).Scan(&authorizationVersion)
+	var permissions []string
+	err = r.pool.QueryRow(ctx, `SELECT COALESCE((SELECT version FROM authorization_versions WHERE user_id=$1 AND scope=CASE WHEN $2::uuid IS NULL THEN 'PLATFORM' ELSE 'ORGANIZATION' END AND scope_id=COALESCE($2::uuid,'00000000-0000-0000-0000-000000000000'::uuid)),1),COALESCE((SELECT array_agg(DISTINCT rp.permission_code ORDER BY rp.permission_code) FROM role_assignments ra JOIN role_permissions rp ON rp.role_code=ra.role_code WHERE ra.user_id=$1 AND ra.organization_id=$2 AND ra.revoked_at IS NULL AND ra.starts_at<=now() AND (ra.expires_at IS NULL OR ra.expires_at>now())),'{}')`, userID, organizationID).Scan(&authorizationVersion, &permissions)
 	if err != nil {
 		return Context{}, err
 	}
-	return Context{Type: contextType, OrganizationID: organizationID, MembershipVersion: version, ContextVersion: version, AuthorizationVersion: authorizationVersion}, nil
+	return Context{Type: contextType, OrganizationID: organizationID, MembershipVersion: membershipVersion, ContextVersion: contextVersion, AuthorizationVersion: authorizationVersion, Permissions: permissions}, nil
 }
 
-func (r *PostgresRepository) CreateOrganization(ctx context.Context, principal identity.Principal, name string) (Organization, error) {
-	name = strings.TrimSpace(name)
-	if name == "" || len([]rune(name)) > 120 {
-		return Organization{}, ErrConflict
-	}
-	tx, err := r.pool.Begin(ctx)
-	if err != nil {
-		return Organization{}, err
-	}
-	defer tx.Rollback(ctx)
-	userID, err := activeUserID(ctx, tx, principal)
-	if err != nil {
-		return Organization{}, err
-	}
-	now := r.now()
-	organization := Organization{ID: uuid.Must(uuid.NewV7()), Name: name, Status: "ACTIVE", Version: 1, Roles: []string{"OWNER"}}
-	membershipID := uuid.Must(uuid.NewV7())
-	_, err = tx.Exec(ctx, `INSERT INTO organizations(id, name, status, created_by, created_at, updated_at) VALUES ($1, $2, 'ACTIVE', $3, $4, $4)`, organization.ID, name, userID, now)
-	if err == nil {
-		_, err = tx.Exec(ctx, `INSERT INTO memberships(id, organization_id, user_id, status, joined_at, updated_at) VALUES ($1, $2, $3, 'ACTIVE', $4, $4)`, membershipID, organization.ID, userID, now)
-	}
-	if err == nil {
-		_, err = tx.Exec(ctx, `INSERT INTO role_bindings(id, membership_id, role, created_by, created_at) VALUES ($1, $2, 'OWNER', $3, $4)`, uuid.Must(uuid.NewV7()), membershipID, userID, now)
-	}
-	if err == nil {
-		_, err = tx.Exec(ctx, `UPDATE users SET membership_version = membership_version + 1, updated_at = $2 WHERE id = $1`, userID, now)
-	}
-	if err != nil {
-		return Organization{}, mapConstraintError(err)
-	}
-	if err := appendAudit(ctx, tx, userID, principal.SessionID, &organization.ID, "organization.create", "organization", organization.ID.String(), "SUCCEEDED", map[string]any{"name": name}); err != nil {
-		return Organization{}, err
-	}
-	if err := appendOutbox(ctx, tx, "account.organization.created.v1", organization.ID, 1, map[string]any{"organization_id": organization.ID, "status": "ACTIVE"}); err != nil {
-		return Organization{}, err
-	}
-	if err := appendMembershipChanged(ctx, tx, membershipID, organization.ID, userID, "ACTIVE", 1); err != nil {
-		return Organization{}, err
-	}
-	return organization, tx.Commit(ctx)
+func uuidPointerEqual(left, right *uuid.UUID) bool {
+	return left == nil && right == nil || left != nil && right != nil && *left == *right
 }
 
-func (r *PostgresRepository) CreateUnit(ctx context.Context, principal identity.Principal, organizationID uuid.UUID, parentID *uuid.UUID, name string) (Unit, error) {
+func (r *PostgresRepository) CreateUnit(ctx context.Context, principal identity.Principal, organizationID uuid.UUID, parentID *uuid.UUID, name, idempotencyKey string) (UnitMutationResult, error) {
 	name = strings.TrimSpace(name)
-	if name == "" || len([]rune(name)) > 120 {
-		return Unit{}, ErrConflict
+	idempotencyKey = strings.TrimSpace(idempotencyKey)
+	if name == "" || len([]rune(name)) > 120 || !validOrganizationUnitIdempotencyKey(idempotencyKey) {
+		return UnitMutationResult{}, ErrConflict
 	}
 	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
 	if err != nil {
-		return Unit{}, err
+		return UnitMutationResult{}, err
 	}
 	defer tx.Rollback(ctx)
 	userID, err := activeUserID(ctx, tx, principal)
 	if err != nil {
-		return Unit{}, err
+		return UnitMutationResult{}, err
 	}
 	if err := requireOrganizationPermission(ctx, tx, userID, organizationID, parentID, PermissionOrganizationUnitsManage); err != nil {
-		return Unit{}, err
+		return UnitMutationResult{}, err
+	}
+	requestHash := organizationUnitRequestHash("CREATE", uuid.Nil, parentID, name, 0)
+	replayed, err := lockOrganizationUnitCommand(ctx, tx, userID, organizationID, "CREATE", idempotencyKey, requestHash)
+	if err != nil {
+		return UnitMutationResult{}, err
+	}
+	if replayed != nil {
+		return *replayed, tx.Commit(ctx)
+	}
+	var organizationStatus string
+	if err := tx.QueryRow(ctx, `SELECT status FROM organizations WHERE id=$1 FOR UPDATE`, organizationID).Scan(&organizationStatus); err != nil {
+		return UnitMutationResult{}, err
+	}
+	if organizationStatus != "ACTIVE" {
+		return UnitMutationResult{}, ErrConflict
 	}
 	if parentID != nil {
 		var found bool
 		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM organization_units WHERE organization_id = $1 AND id = $2 AND status = 'ACTIVE')`, organizationID, *parentID).Scan(&found); err != nil {
-			return Unit{}, err
+			return UnitMutationResult{}, err
 		}
 		if !found {
-			return Unit{}, ErrInvalidHierarchy
+			return UnitMutationResult{}, ErrInvalidHierarchy
 		}
+	}
+	// Command and organization locks may outlive the authority checked above.
+	// An existing receipt is already returned; only a new write needs this check.
+	if err := requireOrganizationMutationPermission(ctx, tx, userID, organizationID, parentID, PermissionOrganizationUnitsManage); err != nil {
+		return UnitMutationResult{}, err
 	}
 	now := r.now()
 	unit := Unit{ID: uuid.Must(uuid.NewV7()), OrganizationID: organizationID, ParentID: parentID, Name: name, Status: "ACTIVE", Version: 1}
 	if _, err := tx.Exec(ctx, `INSERT INTO organization_units(id, organization_id, parent_id, name, status, created_at, updated_at) VALUES ($1, $2, $3, $4, 'ACTIVE', $5, $5)`, unit.ID, organizationID, parentID, name, now); err != nil {
-		return Unit{}, mapConstraintError(err)
+		return UnitMutationResult{}, mapConstraintError(err)
 	}
 	if _, err := tx.Exec(ctx, `INSERT INTO organization_unit_closure(organization_id, ancestor_id, descendant_id, depth) VALUES ($1, $2, $2, 0)`, organizationID, unit.ID); err != nil {
-		return Unit{}, err
+		return UnitMutationResult{}, err
 	}
 	if parentID != nil {
 		if _, err := tx.Exec(ctx, `
 INSERT INTO organization_unit_closure(organization_id, ancestor_id, descendant_id, depth)
 SELECT organization_id, ancestor_id, $3, depth + 1
-FROM organization_unit_closure WHERE organization_id = $1 AND descendant_id = $2`, organizationID, *parentID, unit.ID); err != nil {
-			return Unit{}, err
+		FROM organization_unit_closure WHERE organization_id = $1 AND descendant_id = $2`, organizationID, *parentID, unit.ID); err != nil {
+			return UnitMutationResult{}, err
 		}
 	}
-	if err := appendAudit(ctx, tx, userID, principal.SessionID, &organizationID, "organization_unit.create", "organization_unit", unit.ID.String(), "SUCCEEDED", map[string]any{"parent_id": parentID}); err != nil {
-		return Unit{}, err
+	structureVersion, err := nextOrganizationStructureVersion(ctx, tx, organizationID, now)
+	if err != nil {
+		return UnitMutationResult{}, err
 	}
-	return unit, tx.Commit(ctx)
+	result := UnitMutationResult{Unit: unit, StructureVersion: structureVersion}
+	if err := saveOrganizationUnitCommand(ctx, tx, userID, organizationID, "CREATE", idempotencyKey, requestHash, result, now); err != nil {
+		return UnitMutationResult{}, err
+	}
+	if err := appendAudit(ctx, tx, userID, principal.SessionID, &organizationID, "organization_unit.create", "organization_unit", unit.ID.String(), "SUCCEEDED", map[string]any{"parent_id": parentID, "idempotency_key": idempotencyKey, "structure_version": structureVersion}); err != nil {
+		return UnitMutationResult{}, err
+	}
+	return result, tx.Commit(ctx)
 }
 
-func (r *PostgresRepository) MoveUnit(ctx context.Context, principal identity.Principal, organizationID, unitID uuid.UUID, newParentID *uuid.UUID, expectedVersion int64) (Unit, error) {
+func (r *PostgresRepository) MoveUnit(ctx context.Context, principal identity.Principal, organizationID, unitID uuid.UUID, newParentID *uuid.UUID, expectedStructureVersion int64, idempotencyKey string) (UnitMutationResult, error) {
+	idempotencyKey = strings.TrimSpace(idempotencyKey)
+	if expectedStructureVersion < 1 || !validOrganizationUnitIdempotencyKey(idempotencyKey) {
+		return UnitMutationResult{}, ErrConflict
+	}
 	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
 	if err != nil {
-		return Unit{}, err
+		return UnitMutationResult{}, err
 	}
 	defer tx.Rollback(ctx)
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, organizationID.String()); err != nil {
-		return Unit{}, err
+		return UnitMutationResult{}, err
 	}
 	userID, err := activeUserID(ctx, tx, principal)
 	if err != nil {
-		return Unit{}, err
+		return UnitMutationResult{}, err
 	}
 	if err := requireOrganizationPermission(ctx, tx, userID, organizationID, &unitID, PermissionOrganizationUnitsManage); err != nil {
-		return Unit{}, err
+		return UnitMutationResult{}, err
+	}
+	requestHash := organizationUnitRequestHash("MOVE", unitID, newParentID, "", expectedStructureVersion)
+	replayed, err := lockOrganizationUnitCommand(ctx, tx, userID, organizationID, "MOVE", idempotencyKey, requestHash)
+	if err != nil {
+		return UnitMutationResult{}, err
+	}
+	if replayed != nil {
+		return *replayed, tx.Commit(ctx)
+	}
+	var organizationStatus string
+	var structureVersion int64
+	if err := tx.QueryRow(ctx, `SELECT status,structure_version FROM organizations WHERE id=$1 FOR UPDATE`, organizationID).Scan(&organizationStatus, &structureVersion); err != nil {
+		return UnitMutationResult{}, err
+	}
+	if organizationStatus != "ACTIVE" || structureVersion != expectedStructureVersion {
+		return UnitMutationResult{}, ErrConflict
 	}
 	var unit Unit
 	err = tx.QueryRow(ctx, `SELECT id, organization_id, parent_id, name, status, version FROM organization_units WHERE organization_id = $1 AND id = $2 FOR UPDATE`, organizationID, unitID).Scan(&unit.ID, &unit.OrganizationID, &unit.ParentID, &unit.Name, &unit.Status, &unit.Version)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return Unit{}, ErrNotFound
+		return UnitMutationResult{}, ErrNotFound
 	}
 	if err != nil {
-		return Unit{}, err
-	}
-	if unit.Version != expectedVersion {
-		return Unit{}, ErrConflict
+		return UnitMutationResult{}, err
 	}
 	if unit.Status != "ACTIVE" {
-		return Unit{}, ErrInvalidHierarchy
+		return UnitMutationResult{}, ErrInvalidHierarchy
 	}
 	// Moving a subtree also changes the destination. A unit administrator may
 	// not escape the authorized subtree by moving into another branch or root.
 	if err := requireOrganizationAdmin(ctx, tx, userID, organizationID, newParentID); err != nil {
-		return Unit{}, err
+		return UnitMutationResult{}, err
 	}
 	if newParentID != nil {
 		var active bool
 		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM organization_units WHERE organization_id=$1 AND id=$2 AND status='ACTIVE')`, organizationID, *newParentID).Scan(&active); err != nil {
-			return Unit{}, err
+			return UnitMutationResult{}, err
 		}
 		if !active {
-			return Unit{}, ErrInvalidHierarchy
+			return UnitMutationResult{}, ErrInvalidHierarchy
 		}
 		if *newParentID == unitID {
-			return Unit{}, ErrInvalidHierarchy
+			return UnitMutationResult{}, ErrInvalidHierarchy
 		}
 		var isDescendant bool
 		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM organization_unit_closure WHERE organization_id = $1 AND ancestor_id = $2 AND descendant_id = $3)`, organizationID, unitID, *newParentID).Scan(&isDescendant); err != nil {
-			return Unit{}, err
+			return UnitMutationResult{}, err
 		}
 		if isDescendant {
-			return Unit{}, ErrInvalidHierarchy
+			return UnitMutationResult{}, ErrInvalidHierarchy
 		}
+		var parentActive bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM organization_units WHERE organization_id=$1 AND id=$2 AND status='ACTIVE')`, organizationID, *newParentID).Scan(&parentActive); err != nil {
+			return UnitMutationResult{}, err
+		}
+		if !parentActive {
+			return UnitMutationResult{}, ErrInvalidHierarchy
+		}
+	}
+	// Both sides of a move must remain authorized after the locks and hierarchy
+	// checks. The destination grant alone cannot authorize an expired source.
+	if err := requireOrganizationMutationPermission(ctx, tx, userID, organizationID, &unitID, PermissionOrganizationUnitsManage); err != nil {
+		return UnitMutationResult{}, err
+	}
+	if err := requireOrganizationMutationPermission(ctx, tx, userID, organizationID, newParentID, PermissionOrganizationUnitsManage); err != nil {
+		return UnitMutationResult{}, err
+	}
+	if (unit.ParentID == nil && newParentID == nil) || (unit.ParentID != nil && newParentID != nil && *unit.ParentID == *newParentID) {
+		result := UnitMutationResult{Unit: unit, StructureVersion: structureVersion}
+		if err := saveOrganizationUnitCommand(ctx, tx, userID, organizationID, "MOVE", idempotencyKey, requestHash, result, r.now()); err != nil {
+			return UnitMutationResult{}, err
+		}
+		return result, tx.Commit(ctx)
 	}
 	_, err = tx.Exec(ctx, `
 DELETE FROM organization_unit_closure c
@@ -514,7 +574,7 @@ WHERE c.organization_id = $1
   AND c.descendant_id IN (SELECT descendant_id FROM organization_unit_closure WHERE organization_id = $1 AND ancestor_id = $2)
   AND c.ancestor_id NOT IN (SELECT descendant_id FROM organization_unit_closure WHERE organization_id = $1 AND ancestor_id = $2)`, organizationID, unitID)
 	if err != nil {
-		return Unit{}, err
+		return UnitMutationResult{}, err
 	}
 	if newParentID != nil {
 		_, err = tx.Exec(ctx, `
@@ -525,286 +585,27 @@ CROSS JOIN organization_unit_closure subtree
 WHERE parent_path.organization_id = $1 AND parent_path.descendant_id = $3
   AND subtree.organization_id = $1 AND subtree.ancestor_id = $2`, organizationID, unitID, *newParentID)
 		if err != nil {
-			return Unit{}, err
+			return UnitMutationResult{}, err
 		}
 	}
+	now := r.now()
 	unit.ParentID = newParentID
 	unit.Version++
-	if _, err := tx.Exec(ctx, `UPDATE organization_units SET parent_id = $3, version = version + 1, updated_at = $4 WHERE organization_id = $1 AND id = $2`, organizationID, unitID, newParentID, r.now()); err != nil {
-		return Unit{}, mapConstraintError(err)
+	if _, err := tx.Exec(ctx, `UPDATE organization_units SET parent_id = $3, version = version + 1, updated_at = $4 WHERE organization_id = $1 AND id = $2`, organizationID, unitID, newParentID, now); err != nil {
+		return UnitMutationResult{}, mapConstraintError(err)
 	}
-	if err := appendAudit(ctx, tx, userID, principal.SessionID, &organizationID, "organization_unit.move", "organization_unit", unitID.String(), "SUCCEEDED", map[string]any{"new_parent_id": newParentID}); err != nil {
-		return Unit{}, err
-	}
-	return unit, tx.Commit(ctx)
-}
-
-func (r *PostgresRepository) CreateInvitation(ctx context.Context, principal identity.Principal, organizationID uuid.UUID, email string, roles []string, expiresAt time.Time) (Invitation, error) {
-	email = normalizeEmail(email)
-	roles, err := validateInvitationRoles(roles)
-	if err != nil || email == "" || !expiresAt.After(r.now()) || expiresAt.After(r.now().Add(30*24*time.Hour)) {
-		return Invitation{}, ErrConflict
-	}
-	tx, err := r.pool.Begin(ctx)
+	structureVersion, err = nextOrganizationStructureVersion(ctx, tx, organizationID, now)
 	if err != nil {
-		return Invitation{}, err
+		return UnitMutationResult{}, err
 	}
-	defer tx.Rollback(ctx)
-	userID, err := activeUserID(ctx, tx, principal)
-	if err != nil {
-		return Invitation{}, err
+	result := UnitMutationResult{Unit: unit, StructureVersion: structureVersion}
+	if err := saveOrganizationUnitCommand(ctx, tx, userID, organizationID, "MOVE", idempotencyKey, requestHash, result, now); err != nil {
+		return UnitMutationResult{}, err
 	}
-	if err := requireOrganizationPermission(ctx, tx, userID, organizationID, nil, PermissionOrganizationMembersManage); err != nil {
-		return Invitation{}, err
+	if err := appendAudit(ctx, tx, userID, principal.SessionID, &organizationID, "organization_unit.move", "organization_unit", unitID.String(), "SUCCEEDED", map[string]any{"new_parent_id": newParentID, "idempotency_key": idempotencyKey, "structure_version": structureVersion}); err != nil {
+		return UnitMutationResult{}, err
 	}
-	tokenBytes := make([]byte, 32)
-	if _, err := rand.Read(tokenBytes); err != nil {
-		return Invitation{}, err
-	}
-	token := base64.RawURLEncoding.EncodeToString(tokenBytes)
-	hash := sha256.Sum256([]byte(token))
-	rolesJSON, _ := json.Marshal(roles)
-	now := r.now()
-	invitation := Invitation{ID: uuid.Must(uuid.NewV7()), OrganizationID: organizationID, Email: email, Roles: roles, ExpiresAt: expiresAt.UTC(), Token: token}
-	_, err = tx.Exec(ctx, `
-INSERT INTO invitations(id, organization_id, email_normalized, token_hash, status, roles, invited_by, expires_at, created_at, updated_at)
-VALUES ($1, $2, $3, $4, 'PENDING', $5, $6, $7, $8, $8)`, invitation.ID, organizationID, email, hash[:], rolesJSON, userID, invitation.ExpiresAt, now)
-	if err != nil {
-		return Invitation{}, mapConstraintError(err)
-	}
-	if err := appendAudit(ctx, tx, userID, principal.SessionID, &organizationID, "invitation.create", "invitation", invitation.ID.String(), "SUCCEEDED", map[string]any{"roles": roles, "expires_at": invitation.ExpiresAt}); err != nil {
-		return Invitation{}, err
-	}
-	return invitation, tx.Commit(ctx)
-}
-
-func (r *PostgresRepository) AcceptInvitation(ctx context.Context, principal identity.Principal, token string) (Organization, error) {
-	hash := sha256.Sum256([]byte(strings.TrimSpace(token)))
-	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
-	if err != nil {
-		return Organization{}, err
-	}
-	defer tx.Rollback(ctx)
-	userID, err := activeUserID(ctx, tx, principal)
-	if err != nil {
-		return Organization{}, err
-	}
-	var invitationID, organizationID uuid.UUID
-	var email, status string
-	var rolesJSON []byte
-	var expiresAt time.Time
-	var acceptedBy *uuid.UUID
-	err = tx.QueryRow(ctx, `
-SELECT i.id,i.organization_id,i.email_normalized,i.status,i.roles,i.expires_at,i.accepted_by
-FROM invitations i JOIN organizations o ON o.id=i.organization_id AND o.status='ACTIVE'
-WHERE i.token_hash=$1 FOR UPDATE OF i`, hash[:]).Scan(&invitationID, &organizationID, &email, &status, &rolesJSON, &expiresAt, &acceptedBy)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return Organization{}, ErrNotFound
-	}
-	if err != nil {
-		return Organization{}, err
-	}
-	var organizationActive bool
-	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM organizations WHERE id=$1 AND status='ACTIVE')`, organizationID).Scan(&organizationActive); err != nil {
-		return Organization{}, err
-	}
-	if !organizationActive {
-		return Organization{}, ErrForbidden
-	}
-	if status == "ACCEPTED" && acceptedBy != nil && *acceptedBy == userID {
-		return loadOrganization(ctx, tx, organizationID)
-	}
-	if status != "PENDING" {
-		return Organization{}, ErrConflict
-	}
-	if !expiresAt.After(r.now()) {
-		_, _ = tx.Exec(ctx, `UPDATE invitations SET status = 'EXPIRED', updated_at = $2 WHERE id = $1`, invitationID, r.now())
-		if commitErr := tx.Commit(ctx); commitErr != nil {
-			return Organization{}, commitErr
-		}
-		return Organization{}, ErrInvitationExpired
-	}
-	if normalizeEmail(principal.Email) == "" || normalizeEmail(principal.Email) != email {
-		return Organization{}, ErrForbidden
-	}
-	var roles []string
-	if err := json.Unmarshal(rolesJSON, &roles); err != nil {
-		return Organization{}, err
-	}
-	now := r.now()
-	membershipID := uuid.Must(uuid.NewV7())
-	var previousStatus string
-	err = tx.QueryRow(ctx, `SELECT id,status FROM memberships WHERE organization_id=$1 AND user_id=$2 FOR UPDATE`, organizationID, userID).Scan(&membershipID, &previousStatus)
-	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
-		return Organization{}, err
-	}
-	if err == nil && previousStatus != "ACTIVE" {
-		// Rejoining is a new grant. Revoked/suspended bindings are not an
-		// authority source for the new invitation.
-		if _, err := tx.Exec(ctx, `UPDATE role_bindings SET revoked_at=$2,revoked_by=$3 WHERE membership_id=$1 AND revoked_at IS NULL`, membershipID, now, userID); err != nil {
-			return Organization{}, err
-		}
-		if _, err := tx.Exec(ctx, `DELETE FROM membership_units WHERE membership_id=$1`, membershipID); err != nil {
-			return Organization{}, err
-		}
-	}
-	var membershipVersion int64
-	err = tx.QueryRow(ctx, `
-INSERT INTO memberships(id, organization_id, user_id, status, joined_at, updated_at)
-VALUES ($1, $2, $3, 'ACTIVE', $4, $4)
-ON CONFLICT (organization_id, user_id) DO UPDATE
-SET status = 'ACTIVE', version = memberships.version + 1, updated_at = EXCLUDED.updated_at
-RETURNING id,version`, membershipID, organizationID, userID, now).Scan(&membershipID, &membershipVersion)
-	if err != nil {
-		return Organization{}, err
-	}
-	for _, role := range roles {
-		_, err = tx.Exec(ctx, `INSERT INTO role_bindings(id, membership_id, role, created_by, created_at, grant_source) VALUES ($1, $2, $3, $4, $5, 'INVITATION') ON CONFLICT DO NOTHING`, uuid.Must(uuid.NewV7()), membershipID, role, userID, now)
-		if err != nil {
-			return Organization{}, err
-		}
-	}
-	_, err = tx.Exec(ctx, `UPDATE invitations SET status = 'ACCEPTED', accepted_by = $2, updated_at = $3 WHERE id = $1`, invitationID, userID, now)
-	if err == nil {
-		_, err = tx.Exec(ctx, `UPDATE users SET membership_version = membership_version + 1, updated_at = $2 WHERE id = $1`, userID, now)
-	}
-	if err != nil {
-		return Organization{}, err
-	}
-	if err := appendAudit(ctx, tx, userID, principal.SessionID, &organizationID, "invitation.accept", "invitation", invitationID.String(), "SUCCEEDED", nil); err != nil {
-		return Organization{}, err
-	}
-	if err := appendMembershipChanged(ctx, tx, membershipID, organizationID, userID, "ACTIVE", membershipVersion); err != nil {
-		return Organization{}, err
-	}
-	organization, err := loadOrganization(ctx, tx, organizationID)
-	if err != nil {
-		return Organization{}, err
-	}
-	return organization, tx.Commit(ctx)
-}
-
-func (r *PostgresRepository) RevokeMembership(ctx context.Context, principal identity.Principal, organizationID, targetUserID uuid.UUID) error {
-	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback(ctx)
-	actorID, err := activeUserID(ctx, tx, principal)
-	if err != nil {
-		return err
-	}
-	if err := requireOrganizationPermission(ctx, tx, actorID, organizationID, nil, PermissionOrganizationMembersManage); err != nil {
-		return err
-	}
-	var membershipID uuid.UUID
-	var isOwner bool
-	err = tx.QueryRow(ctx, `
-SELECT m.id,EXISTS(SELECT 1 FROM role_bindings rb WHERE rb.membership_id = m.id AND rb.role = 'OWNER' AND rb.revoked_at IS NULL AND rb.starts_at<=statement_timestamp() AND (rb.expires_at IS NULL OR rb.expires_at>statement_timestamp()))
-FROM memberships m WHERE m.organization_id = $1 AND m.user_id = $2 AND m.status = 'ACTIVE' FOR UPDATE`, organizationID, targetUserID).Scan(&membershipID, &isOwner)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return ErrNotFound
-	}
-	if err != nil {
-		return err
-	}
-	if isOwner {
-		var owners int
-		if err := tx.QueryRow(ctx, `SELECT count(*) FROM role_bindings rb JOIN memberships m ON m.id = rb.membership_id WHERE m.organization_id = $1 AND m.status = 'ACTIVE' AND rb.role = 'OWNER' AND rb.revoked_at IS NULL AND rb.starts_at<=statement_timestamp() AND (rb.expires_at IS NULL OR rb.expires_at>statement_timestamp())`, organizationID).Scan(&owners); err != nil {
-			return err
-		}
-		if owners <= 1 {
-			return ErrLastOwner
-		}
-	}
-	now := r.now()
-	var membershipVersion int64
-	err = tx.QueryRow(ctx, `UPDATE memberships SET status = 'REVOKED', version = version + 1, updated_at = $2 WHERE id = $1 RETURNING version`, membershipID, now).Scan(&membershipVersion)
-	if err == nil {
-		_, err = tx.Exec(ctx, `UPDATE users SET membership_version = membership_version + 1, updated_at = $2 WHERE id = $1`, targetUserID, now)
-	}
-	if err == nil {
-		_, err = tx.Exec(ctx, `UPDATE user_sessions SET active_context_type = 'PERSONAL', active_organization_id = NULL, membership_version = membership_version + 1, last_seen_at = $3 WHERE user_id = $1 AND active_organization_id = $2`, targetUserID, organizationID, now)
-	}
-	if err != nil {
-		return err
-	}
-	if err := appendAudit(ctx, tx, actorID, principal.SessionID, &organizationID, "membership.revoke", "membership", membershipID.String(), "SUCCEEDED", map[string]any{"target_user_id": targetUserID}); err != nil {
-		return err
-	}
-	if err := appendMembershipChanged(ctx, tx, membershipID, organizationID, targetUserID, "REVOKED", membershipVersion); err != nil {
-		return err
-	}
-	return tx.Commit(ctx)
-}
-
-func (r *PostgresRepository) TransferOwnership(ctx context.Context, principal identity.Principal, organizationID, targetUserID uuid.UUID) error {
-	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback(ctx)
-	actorID, err := activeUserID(ctx, tx, principal)
-	if err != nil {
-		return err
-	}
-	if err := requireOrganizationMember(ctx, tx, actorID, organizationID); err != nil {
-		return err
-	}
-	var actorMembership, targetMembership uuid.UUID
-	err = tx.QueryRow(ctx, `
-SELECT m.id FROM memberships m
-WHERE m.organization_id=$1 AND m.user_id=$2 AND m.status='ACTIVE'
-  AND EXISTS(
-    SELECT 1 FROM role_assignments ra JOIN role_permissions rp ON rp.role_code=ra.role_code
-    WHERE ra.user_id=m.user_id AND ra.organization_id=m.organization_id
-      AND ra.revoked_at IS NULL AND ra.starts_at<=statement_timestamp() AND (ra.expires_at IS NULL OR ra.expires_at>statement_timestamp())
-      AND ra.unit_id IS NULL AND rp.permission_code=$3
-  )
-FOR UPDATE OF m`, organizationID, actorID, PermissionOrganizationOwnerTransfer).Scan(&actorMembership)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return ErrForbidden
-	}
-	if err != nil {
-		return err
-	}
-	err = tx.QueryRow(ctx, `SELECT id FROM memberships WHERE organization_id = $1 AND user_id = $2 AND status = 'ACTIVE' FOR UPDATE`, organizationID, targetUserID).Scan(&targetMembership)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return ErrNotFound
-	}
-	if err != nil {
-		return err
-	}
-	if actorID == targetUserID {
-		return nil
-	}
-	now := r.now()
-	_, err = tx.Exec(ctx, `UPDATE role_bindings SET revoked_at=$2,revoked_by=$3 WHERE membership_id=$1 AND role='OWNER' AND revoked_at IS NULL`, actorMembership, now, actorID)
-	if err == nil {
-		_, err = tx.Exec(ctx, `INSERT INTO role_bindings(id,membership_id,role,created_by,created_at,grant_source) VALUES($1,$2,'MEMBER',$3,$4,'OWNERSHIP_TRANSFER') ON CONFLICT DO NOTHING`, uuid.Must(uuid.NewV7()), actorMembership, actorID, now)
-	}
-	if err == nil {
-		_, err = tx.Exec(ctx, `INSERT INTO role_bindings(id, membership_id, role, created_by, created_at, grant_source) VALUES ($1, $2, 'OWNER', $3, $4, 'OWNERSHIP_TRANSFER') ON CONFLICT DO NOTHING`, uuid.Must(uuid.NewV7()), targetMembership, actorID, now)
-	}
-	if err == nil {
-		_, err = tx.Exec(ctx, `UPDATE users SET membership_version = membership_version + 1, updated_at = $2 WHERE id = ANY($1)`, []uuid.UUID{actorID, targetUserID}, now)
-	}
-	if err != nil {
-		return err
-	}
-	for _, change := range []struct{ membershipID, userID uuid.UUID }{{actorMembership, actorID}, {targetMembership, targetUserID}} {
-		var version int64
-		if err := tx.QueryRow(ctx, `UPDATE memberships SET version=version+1,updated_at=$2 WHERE id=$1 RETURNING version`, change.membershipID, now).Scan(&version); err != nil {
-			return err
-		}
-		if err := appendMembershipChanged(ctx, tx, change.membershipID, organizationID, change.userID, "ACTIVE", version); err != nil {
-			return err
-		}
-	}
-	if err := appendAudit(ctx, tx, actorID, principal.SessionID, &organizationID, "organization.ownership.transfer", "organization", organizationID.String(), "SUCCEEDED", map[string]any{"new_owner_user_id": targetUserID}); err != nil {
-		return err
-	}
-	return tx.Commit(ctx)
+	return result, tx.Commit(ctx)
 }
 
 func loadUserByIdentity(ctx context.Context, tx pgx.Tx, principal identity.Principal, commerceProviderID string) (Me, error) {

@@ -1063,3 +1063,129 @@ fn profile_status_get_uses_same_completion_invalidation_predicate() {
         assert_eq!(profile_completion_requested(&request), expected);
     }
 }
+
+#[test]
+fn global_context_and_organization_entitlements_use_exact_allowlisted_methods() {
+    let config = AccountPlatformConfig {
+        issuer: "https://issuer.example/realms/test".into(),
+        jwks_url: Url::parse("https://issuer.example/certs").unwrap(),
+        client_id: "controlled-client".into(),
+        identity_url: None,
+        token_url: Url::parse("https://issuer.example/token").unwrap(),
+        account_url: Url::parse("https://account.example").unwrap(),
+        token_gateway_url: Url::parse("https://gateway.example").unwrap(),
+    };
+    for resource in ["/v1/me/active-context", "/v1/me/ignored/../active-context"] {
+        let input = ApiRequest {
+            area: "account".into(),
+            resource: resource.into(),
+            method: "PUT".into(),
+            body: Some(
+                json!({"context_type":"PERSONAL", "organization_id":null, "expected_context_version":3}),
+            ),
+            idempotency_key: None,
+        };
+        assert!(active_context_change_requested(&input));
+        assert!(prepare_request(&config, input).is_ok());
+    }
+    for (method, resource) in [
+        ("POST", "/v1/sessions/current/active-context"),
+        ("POST", "/v1/me/active-context"),
+        ("PUT", "/v1/me/active-context/extra"),
+    ] {
+        let input = ApiRequest {
+            area: "account".into(),
+            resource: resource.into(),
+            method: method.into(),
+            body: None,
+            idempotency_key: None,
+        };
+        assert!(!active_context_change_requested(&input));
+        assert!(prepare_request(&config, input).is_err());
+    }
+    for path in ["recharge/products", "entitlement-packages", "quota-grants"] {
+        let input = ApiRequest {
+            area: "token".into(),
+            resource: format!("/v1/organizations/owned-org/{path}"),
+            method: "GET".into(),
+            body: None,
+            idempotency_key: None,
+        };
+        assert!(prepare_request(&config, input).is_ok());
+    }
+    for (area, resource) in [
+        ("account", "/v1/organizations/owned-org/units"),
+        ("token", "/v1/organizations/owned-org/recharge/orders"),
+        ("token", "/v1/organizations/owned-org/quota-grants:batch"),
+        (
+            "token",
+            "/v1/organizations/owned-org/quota-grants/owned-grant/revoke",
+        ),
+    ] {
+        let prepared = prepare_request(
+            &config,
+            ApiRequest {
+                area: area.into(),
+                resource: resource.into(),
+                method: "POST".into(),
+                body: Some(json!({})),
+                idempotency_key: Some("logical-operation-1234".into()),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            prepared.idempotency_key.as_deref(),
+            Some("logical-operation-1234")
+        );
+    }
+    for (area, method, resource) in [
+        ("account", "PUT", "/v1/me/active-context"),
+        ("account", "POST", "/v1/account/bootstrap"),
+        ("account", "GET", "/v1/organizations/owned-org/units"),
+        ("token", "GET", "/v1/organizations/owned-org/quota-grants"),
+        (
+            "token",
+            "POST",
+            "/v1/organizations/owned-org/quota-grants/owned-grant/revoke/extra",
+        ),
+    ] {
+        assert!(
+            prepare_request(
+                &config,
+                ApiRequest {
+                    area: area.into(),
+                    resource: resource.into(),
+                    method: method.into(),
+                    body: None,
+                    idempotency_key: Some("logical-operation-1234".into()),
+                }
+            )
+            .is_err()
+        );
+    }
+}
+
+#[tokio::test]
+async fn context_versions_are_read_from_real_http_without_exposing_private_headers() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/versions", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut request = [0u8; 4096];
+        stream.read(&mut request).await.unwrap();
+        stream.write_all(b"HTTP/1.1 409 Conflict\r\nContent-Length: 27\r\nContent-Type: application/json\r\nX-Context-Version: 9\r\nX-Authorization-Version: 11\r\nX-Private-Token: controlled-secret\r\nConnection: close\r\n\r\n{\"code\":\"ACCOUNT_CONFLICT\"}").await.unwrap();
+    });
+    let response = response_to_api(reqwest::get(url).await.unwrap())
+        .await
+        .unwrap();
+    server.await.unwrap();
+    assert_eq!(response.status, 409);
+    assert_eq!(response.context_version, Some(9));
+    assert_eq!(response.authorization_version, Some(11));
+    assert_eq!(response.body, json!({"code":"ACCOUNT_CONFLICT"}));
+    assert!(
+        !serde_json::to_string(&response)
+            .unwrap()
+            .contains("controlled-secret")
+    );
+}

@@ -18,7 +18,7 @@ import (
 func TestPostgresModelCatalogContextFailureIsNotPermissionDenial(t *testing.T) {
 	s, _, bill := proxyFixture(t, "http://127.0.0.1:1")
 	resolved, _ := s.contexts.Resolve(context.Background(), "")
-	validContext, err := json.Marshal(map[string]any{"user_id": resolved.UserID, "session_id": "fixture", "context_type": "PERSONAL"})
+	validContext, err := json.Marshal(map[string]any{"user_id": resolved.UserID, "session_id": "fixture", "context_type": "PERSONAL", "context_version": 1, "authorization_version": 1})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -143,7 +143,7 @@ func TestPostgresModelCatalogFirstUseIsReadOnlyAndBoundToOwner(t *testing.T) {
 		t.Fatal("first execution provisioning changed discovery contract")
 	}
 	// A different authenticated owner gets only its own first-use projection.
-	s.contexts = fixtureContexts{AuthorizationContext{UserID: uuid.New(), ContextType: "PERSONAL"}}
+	s.contexts = fixtureContexts{AuthorizationContext{UserID: uuid.New(), ContextType: "PERSONAL", ContextVersion: 1, AuthorizationVersion: 1}}
 	w, ids = catalogResponse(t, s)
 	if w.Code != 200 || !slices.Equal(ids, []string{"a-model", "z-model"}) {
 		t.Fatal("catalog leaked another user's personal route")
@@ -233,7 +233,7 @@ func TestPostgresModelCatalogOrganizationSharingUsesCurrentAuthority(t *testing.
 	active.Store(true)
 	accountServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/v1/me/authorization-context" {
-			json.NewEncoder(w).Encode(map[string]any{"user_id": user, "session_id": "fixture", "context_type": "ORGANIZATION", "organization_id": org, "unit_ids": []uuid.UUID{unit}, "ancestor_unit_ids": []uuid.UUID{unit}})
+			json.NewEncoder(w).Encode(map[string]any{"user_id": user, "session_id": "fixture", "context_type": "ORGANIZATION", "member_version": 1, "context_version": 1, "authorization_version": 1, "organization_id": org, "unit_ids": []uuid.UUID{unit}, "ancestor_unit_ids": []uuid.UUID{unit}})
 			return
 		}
 		unitChecks.Add(1)

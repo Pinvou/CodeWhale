@@ -708,9 +708,9 @@ async fn model_selection_and_normalized_context_mutations_are_serialized() {
                 &config,
                 ApiRequest {
                     area: "account".into(),
-                    method: "POST".into(),
-                    resource: "/v1/sessions/current/ignored/../active-context".into(),
-                    body: Some(json!({"context_type":"PERSONAL"})),
+                    method: "PUT".into(),
+                    resource: "/v1/me/ignored/../active-context".into(),
+                    body: Some(json!({"context_type":"PERSONAL", "organization_id":null, "expected_context_version":1})),
                     idempotency_key: None,
                 },
             )
@@ -952,4 +952,59 @@ async fn profile_get_completion_clears_native_session_only_after_authoritative_c
         );
         assert_eq!(http.calls.load(Ordering::SeqCst), 1);
     }
+}
+
+#[test]
+fn version_observation_invalidates_models_only_for_current_session_and_new_authority() {
+    let state = state();
+    let response = |context, authorization| ApiResponse {
+        status: 200,
+        body: json!({}),
+        context_version: Some(context),
+        authorization_version: Some(authorization),
+    };
+    state.observe_context_versions(&response(3, 7), 0);
+    assert_eq!(state.context_revision(), 1);
+    state.observe_context_versions(&response(2, 7), 0);
+    assert_eq!(state.context_revision(), 1);
+    state.observe_context_versions(&response(3, 8), 0);
+    assert_eq!(state.context_revision(), 2);
+    state.session_epoch.store(1, Ordering::SeqCst);
+    state.observe_context_versions(&response(200, 200), 0);
+    assert_eq!(state.context_revision(), 2);
+    state.observe_context_versions(&response(1, 1), 1);
+    assert_eq!(state.context_revision(), 3);
+    state.observe_context_versions(&response(1, 1), 1);
+    assert_eq!(state.context_revision(), 3);
+}
+
+#[test]
+fn context_authorization_pair_is_scoped_and_atomic_under_late_responses() {
+    let state = std::sync::Arc::new(state());
+    let response = |context, authorization| ApiResponse {
+        status: 200,
+        body: json!({}),
+        context_version: Some(context),
+        authorization_version: Some(authorization),
+    };
+    state.observe_context_versions(&response(7, 100), 0);
+    state.observe_context_versions(&response(8, 1), 0);
+    state.observe_context_versions(&response(8, 2), 0);
+    state.observe_context_versions(&response(8, 1), 0);
+    assert_eq!(*state.observed_context.lock().unwrap(), (0, 8, 1));
+    assert_eq!(state.context_revision(), 4);
+    std::thread::scope(|scope| {
+        for _ in 0..16 {
+            let state = &state;
+            scope.spawn(move || state.observe_context_versions(&response(7, 200), 0));
+        }
+        let state = &state;
+        scope.spawn(move || state.observe_context_versions(&response(9, 3), 0));
+    });
+    assert_eq!(*state.observed_context.lock().unwrap(), (0, 9, 3));
+    assert_eq!(state.context_revision(), 5);
+    state.observe_context_versions(&response(9, 0), 0);
+    state.observe_context_versions(&response(0, 200), 0);
+    assert_eq!(*state.observed_context.lock().unwrap(), (0, 9, 3));
+    assert_eq!(state.context_revision(), 5);
 }

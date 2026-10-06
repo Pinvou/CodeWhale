@@ -101,6 +101,7 @@ spec:
             {{- end }}
             {{- end }}
             {{- end }}
+            - { name: TOKEN_GATEWAY_HTTP_URL, value: {{ printf "http://%s-token-gateway:8080" $fullname | quote }} }
             - { name: IDENTITY_HTTP_URL, value: {{ printf "http://%s-identity-service:8080" $fullname | quote }} }
             - { name: WALLET_PROVISIONING_POLICY_VERSION, value: {{ $root.Values.account.walletProvisioningPolicyVersion | quote }} }
             - { name: WALLET_PROVISIONING_SLA_MINUTES, value: {{ $root.Values.account.walletProvisioningSlaMinutes | quote }} }

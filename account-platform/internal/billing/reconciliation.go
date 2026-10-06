@@ -509,7 +509,7 @@ func (p *PaymentCoordinator) RunReconciliation(ctx context.Context, channel stri
 }
 
 func (p *PaymentCoordinator) listPaidOrders(ctx context.Context, channel string, start, end time.Time) ([]PaymentOrder, error) {
-	rows, err := p.repository.pool.Query(ctx, `SELECT id,merchant_order_no,requester_id,wallet_id,product_id,channel,amount_fen,currency,credit_microcredits,status,fulfillment_status,COALESCE(payment_url,''),channel_transaction_id,expires_at,paid_at FROM payment_orders WHERE channel=$1 AND paid_at >= $2 AND paid_at < $3 AND fulfillment_status IN ('CREDITED','REFUNDED') ORDER BY paid_at,merchant_order_no`, channel, start, end)
+	rows, err := p.repository.pool.Query(ctx, `SELECT id,merchant_order_no,requester_id,beneficiary_organization_id,wallet_id,product_id,channel,amount_fen,currency,credit_microcredits,status,fulfillment_status,COALESCE(payment_url,''),channel_transaction_id,expires_at,paid_at FROM payment_orders WHERE channel=$1 AND paid_at >= $2 AND paid_at < $3 AND fulfillment_status IN ('CREDITED','REFUNDED') ORDER BY paid_at,merchant_order_no`, channel, start, end)
 	if err != nil {
 		return nil, err
 	}
@@ -517,7 +517,7 @@ func (p *PaymentCoordinator) listPaidOrders(ctx context.Context, channel string,
 	items := make([]PaymentOrder, 0)
 	for rows.Next() {
 		var item PaymentOrder
-		if err := rows.Scan(&item.ID, &item.MerchantOrderNo, &item.RequesterID, &item.WalletID, &item.ProductID, &item.Channel, &item.AmountFen, &item.Currency, &item.CreditMicrocredits, &item.Status, &item.FulfillmentStatus, &item.PaymentURL, &item.ChannelTransactionID, &item.ExpiresAt, &item.PaidAt); err != nil {
+		if err := rows.Scan(&item.ID, &item.MerchantOrderNo, &item.RequesterID, &item.BeneficiaryOrganizationID, &item.WalletID, &item.ProductID, &item.Channel, &item.AmountFen, &item.Currency, &item.CreditMicrocredits, &item.Status, &item.FulfillmentStatus, &item.PaymentURL, &item.ChannelTransactionID, &item.ExpiresAt, &item.PaidAt); err != nil {
 			return nil, err
 		}
 		items = append(items, item)

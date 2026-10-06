@@ -23,12 +23,30 @@ import (
 var ErrWalletProvisioning = errors.New("personal wallet provisioning is incomplete")
 
 type Service struct {
-	repository   Repository
-	wallets      WalletProvisioner
-	mobileAuth   *MobileAuthService
-	profiles     *ProfileChangeService
-	serviceToken string
-	now          func() time.Time
+	repository                  Repository
+	wallets                     WalletProvisioner
+	mobileAuth                  *MobileAuthService
+	profiles                    *ProfileChangeService
+	organizationLifecycle       []OrganizationLifecycleClient
+	organizationUnitLifecycle   []OrganizationUnitLifecycleClient
+	organizationMemberLifecycle []OrganizationMemberLifecycleClient
+	serviceToken                string
+	now                         func() time.Time
+}
+
+func (s *Service) WithOrganizationLifecycle(clients ...OrganizationLifecycleClient) *Service {
+	s.organizationLifecycle = append([]OrganizationLifecycleClient(nil), clients...)
+	return s
+}
+
+func (s *Service) WithOrganizationUnitLifecycle(clients ...OrganizationUnitLifecycleClient) *Service {
+	s.organizationUnitLifecycle = append([]OrganizationUnitLifecycleClient(nil), clients...)
+	return s
+}
+
+func (s *Service) WithOrganizationMemberLifecycle(clients ...OrganizationMemberLifecycleClient) *Service {
+	s.organizationMemberLifecycle = append([]OrganizationMemberLifecycleClient(nil), clients...)
+	return s
 }
 
 func (s *Service) WithProfileChanges(profiles *ProfileChangeService) *Service {
@@ -76,6 +94,7 @@ func (s *Service) Handler(verify identity.VerifyFunc) http.Handler {
 	}
 	protected := router.Group("")
 	protected.Use(identity.GinMiddleware(verify))
+	protected.Use(s.contextVersionHeaders())
 	protected.POST("/v1/account/bootstrap", httpserver.AdaptFunc(s.bootstrap))
 	protected.GET("/v1/me", httpserver.AdaptFunc(s.getMe))
 	protected.GET("/v1/me/commerce-customer-mapping", httpserver.AdaptFunc(s.getCommerceCustomerMapping))
@@ -88,16 +107,19 @@ func (s *Service) Handler(verify identity.VerifyFunc) http.Handler {
 	protected.GET("/v1/me/authorization-context", httpserver.AdaptFunc(s.getAuthorizationContext))
 	protected.GET("/v1/me/role-bindings", httpserver.AdaptFunc(s.listMyRoleBindings))
 	protected.GET("/v1/me/organizations", httpserver.AdaptFunc(s.listOrganizations))
-	protected.POST("/v1/sessions/current/active-context", httpserver.AdaptFunc(s.setActiveContext))
+	protected.PUT("/v1/me/active-context", httpserver.AdaptFunc(s.setActiveContext))
 	protected.GET("/v1/organizations/:organization_id/units", httpserver.AdaptFunc(s.listUnits))
 	protected.POST("/v1/organizations/:organization_id/units", httpserver.AdaptFunc(s.createUnit))
 	protected.GET("/v1/organizations/:organization_id/members", httpserver.AdaptFunc(s.listMembers))
+	protected.GET("/v1/organizations/:organization_id/quota-members", httpserver.AdaptFunc(s.listQuotaMembers))
 	protected.GET("/v1/organizations/:organization_id/role-bindings", httpserver.AdaptFunc(s.listOrganizationRoleBindings))
 	protected.POST("/v1/organizations/:organization_id/role-bindings", httpserver.AdaptFunc(s.grantOrganizationRoleBinding))
 	protected.DELETE("/v1/organizations/:organization_id/role-bindings/:binding_id", httpserver.AdaptFunc(s.revokeOrganizationRoleBinding))
 	protected.PUT("/v1/organizations/:organization_id/members/:user_id/roles", httpserver.AdaptFunc(s.replaceMemberRoles))
 	protected.PATCH("/v1/organizations/:organization_id/units/:unit_id/parent", httpserver.AdaptFunc(s.moveUnit))
 	protected.POST("/v1/organizations/:organization_id/invitations", httpserver.AdaptFunc(s.createInvitation))
+	protected.GET("/v1/me/invitations", httpserver.AdaptFunc(s.listMyInvitations))
+	protected.DELETE("/v1/organizations/:organization_id/invitations/:invitation_id", httpserver.AdaptFunc(s.revokeInvitation))
 	protected.POST("/v1/invitations/accept", httpserver.AdaptFunc(s.acceptInvitation))
 	protected.DELETE("/v1/organizations/:organization_id/members/:user_id", httpserver.AdaptFunc(s.revokeMembership))
 	protected.POST("/v1/organizations/:organization_id/ownership", httpserver.AdaptFunc(s.transferOwnership))
@@ -151,12 +173,12 @@ func (s *Service) listUnits(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	units, err := s.repository.ListUnits(r.Context(), mustPrincipal(r.Context()), organizationID)
+	tree, err := s.repository.ListUnits(r.Context(), mustPrincipal(r.Context()), organizationID)
 	if err != nil {
 		s.writeError(w, r, err)
 		return
 	}
-	api.WriteJSON(w, http.StatusOK, map[string]any{"items": units})
+	api.WriteJSON(w, http.StatusOK, tree)
 }
 
 func (s *Service) listMembers(w http.ResponseWriter, r *http.Request) {
@@ -169,6 +191,20 @@ func (s *Service) listMembers(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, err)
 		return
 	}
+	api.WriteJSON(w, http.StatusOK, map[string]any{"items": members})
+}
+
+func (s *Service) listQuotaMembers(w http.ResponseWriter, r *http.Request) {
+	organizationID, ok := pathUUID(w, r, "organization_id")
+	if !ok {
+		return
+	}
+	members, err := s.repository.ListQuotaMembers(r.Context(), mustPrincipal(r.Context()), organizationID)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
 	api.WriteJSON(w, http.StatusOK, map[string]any{"items": members})
 }
 
@@ -273,6 +309,8 @@ func (s *Service) bootstrap(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, err)
 		return
 	}
+	w.Header().Set("X-Context-Version", stringInt64(me.ActiveContext.ContextVersion))
+	w.Header().Set("X-Authorization-Version", stringInt64(me.ActiveContext.AuthorizationVersion))
 	api.WriteJSON(w, http.StatusOK, me)
 }
 
@@ -316,18 +354,21 @@ func (s *Service) listOrganizations(w http.ResponseWriter, r *http.Request) {
 
 func (s *Service) setActiveContext(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		ContextType    string     `json:"context_type"`
-		OrganizationID *uuid.UUID `json:"organization_id"`
+		ContextType            string     `json:"context_type"`
+		OrganizationID         *uuid.UUID `json:"organization_id"`
+		ExpectedContextVersion int64      `json:"expected_context_version"`
 	}
-	if err := api.DecodeJSON(w, r, &body); err != nil || (body.ContextType != "PERSONAL" && body.ContextType != "ORGANIZATION") || (body.ContextType == "PERSONAL" && body.OrganizationID != nil) || (body.ContextType == "ORGANIZATION" && body.OrganizationID == nil) {
+	if err := api.DecodeJSON(w, r, &body); err != nil || body.ExpectedContextVersion < 1 || (body.ContextType != "PERSONAL" && body.ContextType != "ORGANIZATION") || (body.ContextType == "PERSONAL" && body.OrganizationID != nil) || (body.ContextType == "ORGANIZATION" && body.OrganizationID == nil) {
 		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid active context", httpserver.RequestID(r.Context()))
 		return
 	}
-	context, err := s.repository.SetActiveContext(r.Context(), mustPrincipal(r.Context()), body.OrganizationID)
+	context, err := s.repository.SetActiveContext(r.Context(), mustPrincipal(r.Context()), body.OrganizationID, body.ExpectedContextVersion)
 	if err != nil {
 		s.writeError(w, r, err)
 		return
 	}
+	w.Header().Set("X-Context-Version", stringInt64(context.ContextVersion))
+	w.Header().Set("X-Authorization-Version", stringInt64(context.AuthorizationVersion))
 	api.WriteJSON(w, http.StatusOK, context)
 }
 
@@ -337,19 +378,33 @@ func (s *Service) createUnit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		ParentID *uuid.UUID `json:"parent_id"`
-		Name     string     `json:"name"`
+		ParentID       *uuid.UUID `json:"parent_id"`
+		Name           string     `json:"name"`
+		IdempotencyKey string     `json:"idempotency_key"`
 	}
 	if err := api.DecodeJSON(w, r, &body); err != nil {
 		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid organization unit request", httpserver.RequestID(r.Context()))
 		return
 	}
-	unit, err := s.repository.CreateUnit(r.Context(), mustPrincipal(r.Context()), organizationID, body.ParentID, body.Name)
+	idempotencyKey := organizationUnitIdempotencyKey(r, body.IdempotencyKey, "unit-create:"+organizationID.String()+":"+strings.TrimSpace(body.Name)+":"+fmt.Sprint(body.ParentID))
+	if !validOrganizationUnitIdempotencyKey(idempotencyKey) {
+		api.WriteError(w, http.StatusBadRequest, "IDEMPOTENCY_KEY_REQUIRED", "an idempotency key between 8 and 120 characters is required", httpserver.RequestID(r.Context()))
+		return
+	}
+	result, err := s.repository.CreateUnit(r.Context(), mustPrincipal(r.Context()), organizationID, body.ParentID, body.Name, idempotencyKey)
 	if err != nil {
 		s.writeError(w, r, err)
 		return
 	}
-	api.WriteJSON(w, http.StatusCreated, unit)
+	if ready, err := s.synchronizeCreatedUnitLifecycle(r.Context(), organizationID, result.Unit.ID); err != nil || !ready {
+		api.WriteError(w, http.StatusServiceUnavailable, "ORGANIZATION_UNIT_LIFECYCLE_UNAVAILABLE", "the unit was created but dependent lifecycle activation must be retried with the same idempotency key", httpserver.RequestID(r.Context()))
+		return
+	}
+	status := http.StatusCreated
+	if result.Replayed {
+		status = http.StatusOK
+	}
+	api.WriteJSON(w, status, result)
 }
 
 func (s *Service) moveUnit(w http.ResponseWriter, r *http.Request) {
@@ -362,19 +417,29 @@ func (s *Service) moveUnit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		ParentID        *uuid.UUID `json:"parent_id"`
-		ExpectedVersion int64      `json:"expected_version"`
+		ParentID                 *uuid.UUID `json:"parent_id"`
+		ExpectedStructureVersion int64      `json:"expected_structure_version"`
+		ExpectedVersion          int64      `json:"expected_version"`
+		IdempotencyKey           string     `json:"idempotency_key"`
 	}
-	if err := api.DecodeJSON(w, r, &body); err != nil || body.ExpectedVersion < 1 {
+	if err := api.DecodeJSON(w, r, &body); err != nil {
 		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid unit move request", httpserver.RequestID(r.Context()))
 		return
 	}
-	unit, err := s.repository.MoveUnit(r.Context(), mustPrincipal(r.Context()), organizationID, unitID, body.ParentID, body.ExpectedVersion)
+	if body.ExpectedStructureVersion == 0 {
+		body.ExpectedStructureVersion = body.ExpectedVersion
+	}
+	idempotencyKey := organizationUnitIdempotencyKey(r, body.IdempotencyKey, "unit-move:"+organizationID.String()+":"+unitID.String()+":"+fmt.Sprint(body.ParentID)+":"+fmt.Sprint(body.ExpectedStructureVersion))
+	if body.ExpectedStructureVersion < 1 || !validOrganizationUnitIdempotencyKey(idempotencyKey) {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "expected_structure_version and a valid idempotency key are required", httpserver.RequestID(r.Context()))
+		return
+	}
+	result, err := s.repository.MoveUnit(r.Context(), mustPrincipal(r.Context()), organizationID, unitID, body.ParentID, body.ExpectedStructureVersion, idempotencyKey)
 	if err != nil {
 		s.writeError(w, r, err)
 		return
 	}
-	api.WriteJSON(w, http.StatusOK, unit)
+	api.WriteJSON(w, http.StatusOK, result)
 }
 
 func (s *Service) createInvitation(w http.ResponseWriter, r *http.Request) {
@@ -383,15 +448,22 @@ func (s *Service) createInvitation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
+		TargetType     string   `json:"target_type"`
+		Target         string   `json:"target"`
 		Email          string   `json:"email"`
 		Roles          []string `json:"roles"`
 		ExpiresInHours int      `json:"expires_in_hours"`
+		IdempotencyKey string   `json:"idempotency_key"`
 	}
 	if err := api.DecodeJSON(w, r, &body); err != nil || body.ExpiresInHours < 1 || body.ExpiresInHours > 24*30 {
 		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid invitation request", httpserver.RequestID(r.Context()))
 		return
 	}
-	invitation, err := s.repository.CreateInvitation(r.Context(), mustPrincipal(r.Context()), organizationID, body.Email, body.Roles, s.now().Add(time.Duration(body.ExpiresInHours)*time.Hour))
+	if strings.TrimSpace(body.TargetType) == "" && strings.TrimSpace(body.Email) != "" {
+		body.TargetType, body.Target = "EMAIL", body.Email
+	}
+	idempotencyKey := organizationUnitIdempotencyKey(r, body.IdempotencyKey, "invitation-create:"+organizationID.String()+":"+strings.ToUpper(strings.TrimSpace(body.TargetType))+":"+strings.TrimSpace(body.Target))
+	invitation, err := s.repository.CreateInvitation(r.Context(), mustPrincipal(r.Context()), organizationID, InvitationCreateRequest{TargetType: body.TargetType, Target: body.Target, Roles: body.Roles, ExpiresInHours: body.ExpiresInHours, IdempotencyKey: idempotencyKey})
 	if err != nil {
 		s.writeError(w, r, err)
 		return
@@ -399,20 +471,51 @@ func (s *Service) createInvitation(w http.ResponseWriter, r *http.Request) {
 	api.WriteJSON(w, http.StatusCreated, invitation)
 }
 
-func (s *Service) acceptInvitation(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		Token string `json:"token"`
-	}
-	if err := api.DecodeJSON(w, r, &body); err != nil || strings.TrimSpace(body.Token) == "" {
-		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid invitation token", httpserver.RequestID(r.Context()))
-		return
-	}
-	organization, err := s.repository.AcceptInvitation(r.Context(), mustPrincipal(r.Context()), body.Token)
+func (s *Service) listMyInvitations(w http.ResponseWriter, r *http.Request) {
+	items, err := s.repository.ListMyInvitations(r.Context(), mustPrincipal(r.Context()))
 	if err != nil {
 		s.writeError(w, r, err)
 		return
 	}
-	api.WriteJSON(w, http.StatusOK, organization)
+	api.WriteJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
+func (s *Service) revokeInvitation(w http.ResponseWriter, r *http.Request) {
+	organizationID, ok := pathUUID(w, r, "organization_id")
+	if !ok {
+		return
+	}
+	invitationID, ok := pathUUID(w, r, "invitation_id")
+	if !ok {
+		return
+	}
+	invitation, err := s.repository.RevokeInvitation(r.Context(), mustPrincipal(r.Context()), organizationID, invitationID)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	api.WriteJSON(w, http.StatusOK, invitation)
+}
+
+func (s *Service) acceptInvitation(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Token        string     `json:"token"`
+		InvitationID *uuid.UUID `json:"invitation_id"`
+	}
+	if err := api.DecodeJSON(w, r, &body); err != nil || (strings.TrimSpace(body.Token) == "") == (body.InvitationID == nil) {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid invitation token", httpserver.RequestID(r.Context()))
+		return
+	}
+	result, err := s.repository.AcceptInvitation(r.Context(), mustPrincipal(r.Context()), body.Token, body.InvitationID)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	if err := s.applyOrganizationMemberLifecycle(r.Context(), result, "ACTIVE"); err != nil {
+		api.WriteError(w, http.StatusServiceUnavailable, "ORGANIZATION_MEMBER_LIFECYCLE_UNAVAILABLE", "the invitation was accepted locally but grant activation must be retried", httpserver.RequestID(r.Context()))
+		return
+	}
+	api.WriteJSON(w, http.StatusOK, result)
 }
 
 func (s *Service) revokeMembership(w http.ResponseWriter, r *http.Request) {
@@ -424,11 +527,17 @@ func (s *Service) revokeMembership(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if err := s.repository.RevokeMembership(r.Context(), mustPrincipal(r.Context()), organizationID, userID); err != nil {
+	idempotencyKey := organizationUnitIdempotencyKey(r, r.URL.Query().Get("idempotency_key"), "membership-remove:"+organizationID.String()+":"+userID.String())
+	result, err := s.repository.RevokeMembership(r.Context(), mustPrincipal(r.Context()), organizationID, userID, idempotencyKey)
+	if err != nil {
 		s.writeError(w, r, err)
 		return
 	}
-	w.WriteHeader(http.StatusNoContent)
+	if err := s.applyOrganizationMemberLifecycle(r.Context(), result, "REVOKED"); err != nil {
+		api.WriteError(w, http.StatusServiceUnavailable, "ORGANIZATION_MEMBER_LIFECYCLE_UNAVAILABLE", "the membership was revoked locally but grant suspension must be retried with the same idempotency key", httpserver.RequestID(r.Context()))
+		return
+	}
+	api.WriteJSON(w, http.StatusOK, result)
 }
 
 func (s *Service) transferOwnership(w http.ResponseWriter, r *http.Request) {
@@ -438,16 +547,19 @@ func (s *Service) transferOwnership(w http.ResponseWriter, r *http.Request) {
 	}
 	var body struct {
 		NewOwnerUserID uuid.UUID `json:"new_owner_user_id"`
+		IdempotencyKey string    `json:"idempotency_key"`
 	}
 	if err := api.DecodeJSON(w, r, &body); err != nil || body.NewOwnerUserID == uuid.Nil {
 		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid ownership transfer request", httpserver.RequestID(r.Context()))
 		return
 	}
-	if err := s.repository.TransferOwnership(r.Context(), mustPrincipal(r.Context()), organizationID, body.NewOwnerUserID); err != nil {
+	idempotencyKey := organizationUnitIdempotencyKey(r, body.IdempotencyKey, "ownership-transfer:"+organizationID.String()+":"+body.NewOwnerUserID.String())
+	result, err := s.repository.TransferOwnership(r.Context(), mustPrincipal(r.Context()), organizationID, body.NewOwnerUserID, idempotencyKey)
+	if err != nil {
 		s.writeError(w, r, err)
 		return
 	}
-	w.WriteHeader(http.StatusNoContent)
+	api.WriteJSON(w, http.StatusOK, result)
 }
 
 func (s *Service) writeError(w http.ResponseWriter, r *http.Request, err error) {

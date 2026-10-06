@@ -33,6 +33,14 @@ components:
             - LAST_OWNER_REQUIRED
             - ORG_UNIT_HIERARCHY_INVALID
             - INVITATION_EXPIRED
+            - INVALID_ORGANIZATION_FILTER
+            - ORGANIZATION_LIFECYCLE_UNAVAILABLE
+            - ORGANIZATION_MEMBER_LIFECYCLE_UNAVAILABLE
+            - ORGANIZATION_UNIT_LIFECYCLE_UNAVAILABLE
+            - ORGANIZATION_LIFECYCLE_CONFLICT
+            - INSUFFICIENT_COMPONENT_CAPACITY
+            - QUOTA_ALLOCATION_FAILED
+            - QUOTA_REVOKE_FAILED
             - SERVICE_AUTH_REQUIRED
             - BILLING_CONFLICT
             - WALLET_UNAVAILABLE
@@ -125,7 +133,7 @@ components:
     Context:
       type: object
       additionalProperties: false
-      required: [context_type, membership_version, context_version, authorization_version]
+      required: [context_type, membership_version, context_version, authorization_version, permissions]
       properties:
         context_type:
           type: string
@@ -142,3 +150,8 @@ components:
         authorization_version:
           type: integer
           minimum: 1
+        permissions:
+          type: array
+          uniqueItems: true
+          items:
+            type: string

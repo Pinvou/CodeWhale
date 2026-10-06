@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -67,7 +68,7 @@ func TestPostgresHTTPOrganizationLegacyRechargeAndPersonalPlanBoundaries(t *test
 		t.Fatal(err)
 	}
 	user, org := uuid.New(), uuid.New()
-	contexts := &organizationContextFixture{context: token.AuthorizationContext{UserID: user, ContextType: "ORGANIZATION", OrganizationID: &org, Roles: []string{"OWNER"}}}
+	contexts := &organizationContextFixture{context: token.AuthorizationContext{UserID: user, ContextType: "ORGANIZATION", ContextVersion: 1, AuthorizationVersion: 1, OrganizationID: &org, Roles: []string{"OWNER"}}}
 	gateway := httptest.NewServer(token.NewService(nil, contexts, wallets, nil, token.ProviderURLPolicy{}, client, nil, 1).Handler(func(context.Context, string) (identity.Principal, error) {
 		return identity.Principal{Subject: "controlled", SessionID: "controlled"}, nil
 	}))
@@ -152,6 +153,91 @@ func TestPostgresHTTPOrganizationLegacyRechargeAndPersonalPlanBoundaries(t *test
 	if err := r.pool.QueryRow(ctx, `SELECT count(*) FROM entitlement_packages WHERE wallet_id=$1 AND valid_until IS NOT NULL AND user_id IS NOT NULL`, order.WalletID).Scan(&packages); err != nil || packages != 0 {
 		t.Fatal("organization legacy recharge issued personal package")
 	}
+	t.Run("explicit-organization-plan-and-pool", func(t *testing.T) {
+		contexts.mu.Lock()
+		contexts.context.Permissions = []string{"org.entitlements.purchase", "org.wallet.read", "org.quota.read.self", "org.quota.read.all", "org.quota.allocate"}
+		contexts.mu.Unlock()
+		prefix := "/v1/organizations/" + org.String()
+		status, data := request(prefix+"/recharge/products", nil, "")
+		var products struct {
+			Items []Product `json:"items"`
+		}
+		if status != http.StatusOK || json.Unmarshal(data, &products) != nil {
+			t.Fatal("organization catalog was not reachable")
+		}
+		var selected Product
+		for _, item := range products.Items {
+			if item.ProductID == "PLAN_TRIAL" {
+				selected = item
+			}
+		}
+		if selected.ProductID == "" || selected.ValidityDays != 30 {
+			t.Fatal("authorized organization PLAN facts were lost")
+		}
+		key := uuid.NewString()
+		body := map[string]any{"product_id": selected.ProductID, "channel": "ALIPAY"}
+		status, data = request(prefix+"/recharge/orders", body, key)
+		var plan PaymentOrder
+		if status != http.StatusCreated || json.Unmarshal(data, &plan) != nil || plan.BeneficiaryOrganizationID == nil || *plan.BeneficiaryOrganizationID != org || plan.WalletID != order.WalletID {
+			t.Fatal("explicit organization purchase was not bound to its wallet")
+		}
+		status, data = request(prefix+"/recharge/orders", body, key)
+		var repeated PaymentOrder
+		if status != http.StatusCreated || json.Unmarshal(data, &repeated) != nil || repeated.ID != plan.ID {
+			t.Fatal("organization PLAN replay changed the payment order")
+		}
+		paidResponse, err := http.Post(plan.PaymentURL+"/complete", "application/x-www-form-urlencoded", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		io.Copy(io.Discard, paidResponse.Body)
+		paidResponse.Body.Close()
+		if paidResponse.StatusCode != http.StatusOK {
+			t.Fatal("controlled simulator did not complete the organization PLAN")
+		}
+		for range 2 {
+			if paid, err := p.SyncOrder(ctx, plan.ID); err != nil || paid.FulfillmentStatus != "CREDITED" {
+				t.Fatal("organization PLAN did not credit exactly once", err)
+			}
+		}
+		status, data = request(prefix+"/entitlement-packages", nil, "")
+		var pool struct {
+			Items   []EntitlementPackage `json:"items"`
+			Summary PackageSummary       `json:"summary"`
+		}
+		if status != http.StatusOK || json.Unmarshal(data, &pool) != nil || len(pool.Items) != 2 {
+			t.Fatal("organization pool did not retain PLAN and non-expiring LEGACY packages")
+		}
+		var planPackage EntitlementPackage
+		for _, item := range pool.Items {
+			if item.UserID != nil || item.WalletID != order.WalletID {
+				t.Fatal("organization pool exposed another owner")
+			}
+			if item.ProductID == selected.ProductID {
+				planPackage = item
+			}
+		}
+		if planPackage.ValidUntil == nil || planPackage.ValidUntil.Sub(planPackage.ValidFrom) != 30*24*time.Hour || len(planPackage.Components) == 0 {
+			t.Fatal("organization PLAN changed its exact 30-day component contract")
+		}
+		var refundable bool
+		if err := r.pool.QueryRow(ctx, `SELECT refundable FROM credit_lots WHERE id=$1`, planPackage.Components[0].ID).Scan(&refundable); err != nil || refundable {
+			t.Fatal("organization PLAN became refundable", err)
+		}
+		wallet, err := r.GetWallet(ctx, order.WalletID)
+		if err != nil || wallet.PostedMicrocredits != 1000000+selected.CreditMicrocredits {
+			t.Fatal("organization plan replay credited twice", err)
+		}
+		if _, _, err := r.ListOrganizationPackages(ctx, uuid.New(), wallet.ID, 100); !errors.Is(err, ErrConflict) {
+			t.Fatal("foreign organization read was permitted")
+		}
+		if status, _ := request("/v1/organizations/"+uuid.NewString()+"/entitlement-packages", nil, ""); status != http.StatusForbidden {
+			t.Fatal("foreign organization context was permitted")
+		}
+		if status, _ := request("/v1/me/entitlement-packages", nil, ""); status != http.StatusForbidden {
+			t.Fatal("organization pool leaked through the personal package endpoint")
+		}
+	})
 	for _, role := range []string{"BILLING_ADMIN", "MEMBER"} {
 		contexts.mu.Lock()
 		contexts.context.Roles = []string{role}

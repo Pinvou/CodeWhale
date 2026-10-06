@@ -26,7 +26,7 @@ func TestPostgresNewUsageReadsKeepExactMoneyAndNullWithoutChangingExistingStatus
 	if _, created, err := repo.BeginUsage(ctx, pending, map[string]any{}); err != nil || !created {
 		t.Fatal("missing unknown-amount usage fixture")
 	}
-	service := NewService(repo, fixtureContexts{AuthorizationContext{UserID: usage.UserID, SessionID: usage.SessionID, ContextType: "PERSONAL"}}, nil, nil, ProviderURLPolicy{}, nil, nil, 100).WithAuthorizer(tokenTestAuthorizer(t))
+	service := NewService(repo, fixtureContexts{AuthorizationContext{UserID: usage.UserID, SessionID: usage.SessionID, ContextType: "PERSONAL", ContextVersion: 1, AuthorizationVersion: 1}}, nil, nil, ProviderURLPolicy{}, nil, nil, 100).WithAuthorizer(tokenTestAuthorizer(t))
 	server := httptest.NewServer(service.Handler(func(context.Context, string) (identity.Principal, error) {
 		return identity.Principal{Issuer: "https://fixture-authority.invalid", Subject: "fixture-platform-operator", RealmRoles: []string{"platform-admin"}}, nil
 	}))

@@ -207,6 +207,8 @@ function RechargePanel({
 
 export function AccountPlatformPopover({ open, client, copy, language, theme, collapsed, onClose, onOpenCenter }) {
   const panelRef = useRef(null);
+  const accountContextRef = useRef(null);
+  const contextSyncRef = useRef({ loading: false, pending: false });
   const requestRef = useRef({ generation: 0, controller: null });
   const rechargeRequestRef = useRef({ generation: 0, controller: null });
   const pollRef = useRef({ controller: null, timer: null });
@@ -277,6 +279,7 @@ export function AccountPlatformPopover({ open, client, copy, language, theme, co
   const cancelAccountRead = useCallback(() => {
     requestRef.current.controller?.abort();
     requestRef.current.generation += 1;
+    contextSyncRef.current.loading = false;
   }, []);
   const cancelRechargeReads = useCallback(() => {
     rechargeRequestRef.current.controller?.abort();
@@ -294,6 +297,7 @@ export function AccountPlatformPopover({ open, client, copy, language, theme, co
     lifecycleRef.current.generation += 1;
     cancelAccountRead(); resetOrder();
     rechargeRef.current.view = 'account';
+    accountContextRef.current = null;
     setView('account'); setAuth('guest'); setMe(null); setBalance(null);
     setProducts([]); setPassword(''); setPasswordConfirmation(''); resetSMSVerification(); setLoading(false);
   }, [cancelAccountRead, resetOrder, resetSMSVerification]);
@@ -301,6 +305,7 @@ export function AccountPlatformPopover({ open, client, copy, language, theme, co
   // A closed or replaced client owns no UI writes, even if native work finishes later.
   useLayoutEffect(() => {
     currentClientRef.current = client;
+    accountContextRef.current = null; contextSyncRef.current = { loading: false, pending: false };
     const life = lifecycleRef.current;
     life.generation += 1; life.active = open;
     cancelAccountRead(); resetOrder();
@@ -322,10 +327,11 @@ export function AccountPlatformPopover({ open, client, copy, language, theme, co
     cancelAccountRead();
     const controller = new window.AbortController();
     const generation = requestRef.current.generation + 1;
-    const life = lifecycleRef.current.generation;
+    let life = lifecycleRef.current.generation;
     requestRef.current = { generation, controller };
     const isCurrent = () => lifecycleRef.current.active && lifecycleRef.current.generation === life &&
       requestRef.current.generation === generation && !controller.signal.aborted;
+    contextSyncRef.current.loading = true;
     setLoading(true); setErrorReason(null);
     try {
       const session = await client.session(controller.signal);
@@ -337,6 +343,14 @@ export function AccountPlatformPopover({ open, client, copy, language, theme, co
       }
       const nextAccount = await client.bootstrap(controller.signal);
       if (!isCurrent()) return;
+      const previous = accountContextRef.current;
+      const next = { userId: nextAccount.user_id, contextVersion: nextAccount.active_context?.context_version, authorizationVersion: nextAccount.active_context?.authorization_version };
+      if (previous && (previous.userId !== next.userId || previous.contextVersion !== next.contextVersion || previous.authorizationVersion !== next.authorizationVersion)) {
+        lifecycleRef.current.generation += 1; life = lifecycleRef.current.generation;
+        resetOrder(); setProducts([]); setBalance(null);
+        rechargeRef.current.view = 'account'; setView('account');
+      }
+      accountContextRef.current = next;
       const results = await Promise.allSettled([client.balance(controller.signal)]);
       if (!isCurrent()) return;
       const failed = results.find(result => result.status === 'rejected');
@@ -353,14 +367,32 @@ export function AccountPlatformPopover({ open, client, copy, language, theme, co
         setErrorReason(reason);
       }
     } finally {
-      if (isCurrent()) setLoading(false);
+      if (isCurrent()) {
+        setLoading(false); contextSyncRef.current.loading = false;
+        if (contextSyncRef.current.pending) { contextSyncRef.current.pending = false; void loadAccount(); }
+      }
     }
-  }, [client, clearProtected, cancelAccountRead]);
+  }, [client, clearProtected, cancelAccountRead, resetOrder]);
 
   useEffect(() => {
     if (open) void loadAccount();
     return cancelAccountRead;
   }, [open, loadAccount, cancelAccountRead]);
+
+  useEffect(() => {
+    if (!open) return undefined;
+    const requestRefresh = () => {
+      if (!accountContextRef.current) return;
+      if (contextSyncRef.current.loading) { contextSyncRef.current.pending = true; return; }
+      void loadAccount();
+    };
+    const unsubscribe = client.onContextVersion?.((contextVersion, authorizationVersion) => {
+      const current = accountContextRef.current;
+      if (current && (contextVersion > (current.contextVersion || 0) || (contextVersion === current.contextVersion && authorizationVersion > 0 && authorizationVersion !== current.authorizationVersion))) requestRefresh();
+    });
+    globalThis.addEventListener?.('focus', requestRefresh);
+    return () => { unsubscribe?.(); globalThis.removeEventListener?.('focus', requestRefresh); };
+  }, [client, open, loadAccount]);
 
   useEffect(() => {
     if (!open || !['guest', 'error'].includes(auth) || typeof client.registrationStatus !== 'function') return undefined;

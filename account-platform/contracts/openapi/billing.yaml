@@ -10,6 +10,141 @@ servers:
 security:
   - serviceToken: []
 paths:
+  /internal/v1/organizations/{organization_id}/recharge/products:
+    servers: [{ url: / }]
+    get:
+      operationId: listInternalOrganizationEntitlementProducts
+      summary: List plan products for the exact organization wallet
+      parameters:
+        - { name: organization_id, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: wallet_id, in: query, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200": { $ref: "#/paths/~1recharge~1products/get/responses/200" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /internal/v1/organizations/{organization_id}/entitlement-packages:
+    servers: [{ url: / }]
+    get:
+      operationId: listInternalOrganizationEntitlementPackages
+      summary: List entitlement packages for the exact organization wallet
+      parameters:
+        - { name: organization_id, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: wallet_id, in: query, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200": { $ref: "#/paths/~1entitlement-packages/get/responses/200" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /internal/v1/organizations/{organization_id}/members/{user_id}/lifecycle:
+    servers: [{ url: / }]
+    put:
+      operationId: applyInternalOrganizationMemberLifecycle
+      summary: Apply the trusted organization member lifecycle snapshot
+      parameters:
+        - { name: organization_id, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: user_id, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [status, membership_version]
+              properties:
+                status: { type: string, enum: [ACTIVE, SUSPENDED, REVOKED] }
+                membership_version: { type: integer, format: int64, minimum: 1 }
+      responses:
+        "200":
+          description: Authoritative member lifecycle projection
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [organization_id, user_id, status, membership_version]
+                properties:
+                  organization_id: { type: string, format: uuid }
+                  user_id: { type: string, format: uuid }
+                  status: { type: string, enum: [ACTIVE, SUSPENDED, REVOKED] }
+                  membership_version: { type: integer, format: int64, minimum: 1 }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /internal/v1/organizations/{organization_id}/quota-grants:
+    servers: [{ url: / }]
+    get:
+      operationId: listInternalOrganizationQuotaGrants
+      summary: List organization member grants using trusted service-provided filters
+      description: The Gateway authorizes the caller; this internal route requires service authentication.
+      parameters:
+        - { name: organization_id, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: member_user_id, in: query, schema: { type: string, format: uuid } }
+      responses:
+        "200":
+          description: Component-bound member grants
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [items]
+                properties:
+                  items: { type: array, items: { $ref: "#/components/schemas/MemberQuotaGrant" } }
+        "403": { $ref: "#/components/responses/Error" }
+  /internal/v1/organizations/{organization_id}/quota-grants:batch:
+    servers: [{ url: / }]
+    post:
+      operationId: allocateInternalOrganizationQuotaBatch
+      summary: Allocate exact package components using independent per-item transactions and stable derived idempotency keys
+      parameters:
+        - { name: organization_id, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: Idempotency-Key, in: header, required: true, schema: { type: string, minLength: 16, maxLength: 128 } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [created_by, items]
+              properties:
+                created_by: { type: string, format: uuid }
+                items:
+                  type: array
+                  minItems: 1
+                  maxItems: 200
+                  items: { $ref: "#/components/schemas/MemberQuotaAllocation" }
+      responses:
+        "207": { description: "Per-item success, replay, or stable failure result", content: { application/json: { schema: { $ref: "#/components/schemas/MemberQuotaBatchResponse" } } } }
+        "403": { $ref: "#/components/responses/Error" }
+  /internal/v1/organizations/{organization_id}/quota-grants/{grant_id}/revoke:
+    servers: [{ url: / }]
+    post:
+      operationId: revokeInternalOrganizationQuotaGrant
+      summary: Revoke the unconsumed and unheld remainder back to its original component
+      parameters:
+        - { name: organization_id, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: grant_id, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: Idempotency-Key, in: header, required: true, schema: { type: string, minLength: 16, maxLength: 128 } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [actor_user_id, reason]
+              properties:
+                actor_user_id: { type: string, format: uuid }
+                reason: { type: string, minLength: 1, maxLength: 500 }
+      responses:
+        "200": { description: Grant revoked without changing consumed or held amounts, content: { application/json: { schema: { $ref: "#/components/schemas/MemberQuotaGrant" } } } }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
   /internal/v1/recharge/products:
     servers: [{ url: / }]
     get:
@@ -269,6 +404,68 @@ components:
           schema:
             $ref: "common.yaml#/components/schemas/Error"
   schemas:
+    MemberQuotaAllocation:
+      type: object
+      additionalProperties: false
+      required: [member_user_id, package_id, component_id, component_type, amount_microcredits, membership_version]
+      properties:
+        member_user_id: { type: string, format: uuid }
+        package_id: { type: string, format: uuid }
+        component_id: { type: string, format: uuid }
+        component_type: { type: string, enum: [BASE, BONUS] }
+        amount_microcredits: { type: integer, format: int64, minimum: 1 }
+        membership_version: { type: integer, format: int64, minimum: 1 }
+    MemberQuotaBatchResponse:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          minItems: 1
+          maxItems: 200
+          items:
+            oneOf:
+              - type: object
+                additionalProperties: false
+                required: [index, status, grant]
+                properties:
+                  index: { type: integer, minimum: 0, maximum: 199 }
+                  status: { const: SUCCEEDED }
+                  created: { type: boolean }
+                  grant: { $ref: "#/components/schemas/MemberQuotaGrant" }
+              - type: object
+                additionalProperties: false
+                required: [index, status, code]
+                properties:
+                  index: { type: integer, minimum: 0, maximum: 199 }
+                  status: { const: FAILED }
+                  code: { type: string, enum: [INSUFFICIENT_COMPONENT_CAPACITY, IDEMPOTENCY_CONFLICT, NOT_FOUND, BILLING_CONFLICT, INTERNAL_ERROR] }
+    MemberQuotaGrant:
+      type: object
+      additionalProperties: false
+      required: [grant_id, organization_id, member_user_id, package_id, component_id, component_type, original_microcredits, available_microcredits, reserved_microcredits, used_microcredits, expired_microcredits, revoked_microcredits, status, membership_version, allocation_version, created_by, expires_at, created_at, updated_at]
+      properties:
+        grant_id: { type: string, format: uuid }
+        organization_id: { type: string, format: uuid }
+        member_user_id: { type: string, format: uuid }
+        package_id: { type: string, format: uuid }
+        component_id: { type: string, format: uuid }
+        component_type: { type: string, enum: [BASE, BONUS] }
+        original_microcredits: { type: string, pattern: '^[1-9][0-9]*$' }
+        available_microcredits: { type: string, pattern: '^[0-9]+$' }
+        reserved_microcredits: { type: string, pattern: '^[0-9]+$' }
+        used_microcredits: { type: string, pattern: '^[0-9]+$' }
+        expired_microcredits: { type: string, pattern: '^[0-9]+$' }
+        revoked_microcredits: { type: string, pattern: '^[0-9]+$' }
+        status: { type: string, enum: [ACTIVE, SUSPENDED, REVOKED, EXPIRED, RECLAIMED_ACCOUNT_CLOSED] }
+        suspension_reason: { type: [string, "null"], enum: [MEMBER_REMOVED, ACCOUNT_CLOSED, null] }
+        membership_version: { type: integer, format: int64, minimum: 1 }
+        allocation_version: { type: integer, format: int64, minimum: 1 }
+        created_by: { type: string, format: uuid }
+        expires_at: { type: [string, "null"], format: date-time }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
     UsageWaiverIntent:
       type: object
       additionalProperties: false
@@ -366,6 +563,10 @@ components:
         requester_id:
           type: string
           format: uuid
+        beneficiary_organization_id:
+          type: string
+          format: uuid
+          description: When present, the wallet must belong to this organization and the fulfilled package has no personal user owner.
         product_id:
           type: string
           enum: [CNY_1, CNY_10, CNY_100, CNY_200, PLAN_TRIAL, PLAN_STANDARD, PLAN_ADVANCED, PLAN_FLAGSHIP]
@@ -388,6 +589,7 @@ components:
         requester_id:
           type: string
           format: uuid
+        beneficiary_organization_id: { type: string, format: uuid }
         wallet_id:
           type: string
           format: uuid
@@ -437,6 +639,9 @@ components:
       required: [order_id, pinvou_order_id, mall_order_id, product_id, plan_name, sku_code, order_type, amount_fen, display_points, channel, status, fulfillment_status, invoice_status, expires_at, created_at]
       properties:
         order_id:
+          type: string
+          format: uuid
+        beneficiary_organization_id:
           type: string
           format: uuid
         pinvou_order_id:

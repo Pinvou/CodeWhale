@@ -1,0 +1,1 @@
+DROP TABLE organization_member_lifecycle_states;

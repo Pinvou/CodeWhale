@@ -1,6 +1,6 @@
 # 账号平台历史实现审计、当前边界与后续差距
 
-> 状态：原始 A08 终点 `0636238c3854f04f1ea3c52396fabac1d7ca0ff5` 的历史目标审计矩阵；当前集成边界另列，不能替代发布验收
+> 状态：原始 A09 终点 `936418ad01645078c8ef1fa76df021356f5ccf44` 的历史目标审计矩阵；当前集成边界另列，不能替代发布验收
 >
 > 历史校准日期：2026-08-23；集成本地边界校正：2026-10-06
 >
@@ -10,34 +10,35 @@
 
 ## 0. 状态证据规则
 
-本文保留原功能分支在 A08 历史终点的实现判断和差距，供后续规划及任务覆盖检查使用。原审计逐项记录 331 个目标编号；其源码快照为 `0636238c3854f04f1ea3c52396fabac1d7ca0ff5`。下方证据表保留当时逐次实施的报告，测试计数、状态和部署判断不覆盖随后集成的修复，也不能用作当前发布证明。更早的 `75a29f8` 矩阵已被该历史终点更新。
+本文保留原功能分支在 A09 历史终点的实现判断和差距，供后续规划及任务覆盖检查使用。原审计逐项记录 331 个目标编号；其源码快照为 `936418ad01645078c8ef1fa76df021356f5ccf44`。下方证据表保留当时逐次实施的报告，测试计数、状态和部署判断不覆盖随后集成的修复，也不能用作当前发布证明。更早的 `75a29f8` 矩阵已被该历史终点更新。
 
-当前继承实现基线为已审 A07 `d31f5f23668d72fd1800232add80006c3a6b890a`。本波保全前序已审行为并合入 A08 原始历史；本波是否通过以最终固定源码、实际执行和独立审核记录为准，不能由下列历史矩阵推断。当前必须保全的边界如下：
+当前继承实现基线为已审 A08 `e913579755912bbfc7656b32bbaef0c2e3a710c0`。本波保全前序已审行为并合入 A09 原始历史；本波是否通过以最终固定源码、实际执行和独立审核记录为准，不能由下列历史矩阵推断。当前必须保全的边界如下：
 
 - 短信保留通用 HTTP 发送/核验与 Aliyun 托管 Adapter，新增平台生成模式须显式选择；结果未知保留冷却，只有完整、权威的明确未接受响应可解除冷却。没有企业商城也可注册、异步初始化钱包和使用开发模拟器。
 - 注册使用持久操作、唯一值预约、Identity 精确标记恢复和异步钱包任务；丢失响应不猜测身份，不回滚已接受的账号事实。继承的 A06 未完成意图仅经持久审计证明后恢复；首次密码保留由 `password_preserved` 披露。钱包超出冻结 SLA 进入 `REPAIR_REQUIRED`；账号注销 Saga 仍未实现。
 - 新个人 PLAN 按付款快照从入账起计有效期且不可退款；旧 LEGACY/普通 Credit 不追加期限，原四档组织模拟充值继续保留。首次退款未入账的订单保持 `MANUAL_REVIEW`，迟到成功不自动入账。
 - 模型请求必须携带每逻辑调用的键，不按用户/Session/body 自动生成；Gateway 不自动重发模型请求。未知消费继续保护预占，管理员明确最终免单须经持久意图和 Billing 唯一赢家裁决，保留真实 usage/原成本证据。
 - 普通自管 Token/credentials/eligible/单笔 usage 和平台托管权限边界是既有能力。新内置模型迁移不能因旧 SCOPE-02 文字删去已审功能。
-- 本波后台授权改用 Account 平台/组织原子权限，Realm Role 不能绕过拒绝；支持授权起止、撤销及最后有效超级管理员保护。软删除仍保留 Keycloak 身份与原用户名占用，手机号可在新用户名下重新注册。BASE/BONUS 组成迁移须守恒并保全 LEGACY 期限及不确定 Hold；全局上下文、目标组织授予、目标退款和发布/安装门禁仍属后续目标。
+- 本波后台授权改用 Account 平台/组织原子权限，Realm Role 不能绕过拒绝；支持授权起止、撤销及最后有效超级管理员保护。软删除仍保留 Keycloak 身份与原用户名占用，手机号可在新用户名下重新注册。BASE/BONUS 组成迁移须守恒并保全 LEGACY 期限及不确定 Hold；A09 新增全局上下文与组成级组织授予，须按本波固定源码及真实验证审查；目标退款和发布/安装门禁仍属后续目标。
+- 全局 `context_version` 与按用户/作用域分别计数的 `authorization_version` 必须分开观察。客户端不能跨组织取授权版本最大值；同一当前上下文的非零授权版本变化需要重读权威上下文，旧上下文迟到响应不能覆盖当前观察。下方历史矩阵的“递增版本”描述保留其原审计措辞，不替代当前作用域边界。
 - A06 已有真 PG/NATS/Redis、Keycloak 扩展、Compose devup/E2E/fault/auth 和真实 NewAPI HTTP 健康的隔离执行证据。同输入才可继承，变化输入须重验；这不表示真实银行、短信商、模型定价、生产 NewAPI TLS、Kubernetes 或发布验收通过。
 
 下表“当前状态”是原审计在其基线上的状态字段，不表示当前波实现进度；任务检查只证明编号、字段、归属和依赖一致，不证明功能或部署完成。代码存在性、静态配置和自动化测试也不能替代生产验收：
 
 | 字段 | 要求 |
 |---|---|
-| `source_commit` | 历史矩阵快照为 `0636238c3854f04f1ea3c52396fabac1d7ca0ff5`；表中的 `AUDIT_HEAD` 与 `DOC_CURRENT` 均指该历史快照，不代表本波最终固定提交，也不表示所有实现由单个提交引入 |
+| `source_commit` | 历史矩阵快照为 `936418ad01645078c8ef1fa76df021356f5ccf44`；表中的 `AUDIT_HEAD` 与 `DOC_CURRENT` 均指该历史快照，不代表本波最终固定提交，也不表示所有实现由单个提交引入 |
 | `tests` | 覆盖正常、权限拒绝、幂等、异常与恢复路径的测试名称或报告 |
 | `deployment_version` | 已验证的部署版本、环境和验证时间；未部署写 `NOT_DEPLOYED` |
 | `known_gaps` | 与目标需求的剩余差异、Provider 降级和未验证风险 |
 
 各历史矩阵中的“当前实现/边界”是原 `known_gaps` 的展开说明。原审计使用下列共享证据编号，未取得生产部署、制品版本或验证时间证据，其 `deployment_version=NOT_DEPLOYED` 原样保留；上面的 A06 隔离测试不是生产部署记录。
 
-历史矩阵汇总：`已实现 113`、`部分实现 75`、`未实现 139`、`降级实现 2`、`移除 1`、`非当前范围 1`，合计 `331` 项；不是本波执行或交付计数。
+历史矩阵汇总：`已实现 145`、`部分实现 60`、`未实现 122`、`降级实现 2`、`移除 1`、`非当前范围 1`，合计 `331` 项；不是本波执行或交付计数。
 
 | 证据编号 | 审计内容 | 结果 |
 |---|---|---|
-| `AUDIT_HEAD` | 原始 A08 终点的代码、数据库迁移、OpenAPI、Compose/Helm 和客户端实现；快照 `0636238c3854f04f1ea3c52396fabac1d7ca0ff5` | 历史代码审阅报告；不覆盖本波集成修复或证明生产部署 |
+| `AUDIT_HEAD` | 原始 A09 终点的代码、数据库迁移、OpenAPI、Compose/Helm 和客户端实现；快照 `936418ad01645078c8ef1fa76df021356f5ccf44` | 历史代码审阅报告；不覆盖本波集成修复或证明生产部署 |
 | `CODE-AUDIT` | 逐项检查路由、领域实现、迁移、配置、客户端调用和测试覆盖；确认目标能力存在、部分存在或缺失 | 331/331 个唯一目标编号均有结论 |
 | `DOC-COVERAGE` | 对比 `requirements.md` 全部稳定编号与本节规范证据行 | 331 个唯一编号一一覆盖，无缺失、无额外编号 |
 | `GO-UNIT` | `node scripts/account-platform.mjs test unit` | 所有 Go 包测试通过（项目内置 Go，`nomsgpack`） |
@@ -51,8 +52,14 @@
 | `ROLE-BINDING-LIFECYCLE` | 本人/组织/平台绑定视图、起止时间、幂等授权、单条幂等撤销、自动到期、授权版本刷新、审计/Outbox 和三语 Portal | Account/Portal Go 单元测试、OpenAPI lint、角色生命周期合同和静态资源检查通过；数据库运行级迁移、真实并发授权及 worker 故障恢复待部署 |
 | `SECURITY-RECOVERY` | `BOOTSTRAP_PENDING` 首管安全激活、256 bit 一次性凭据、5 次锁定、代次失效、最后管理员门禁、ACC-48 撤权原语和离线 Break-glass | Go 单元测试、CLI/迁移合同与全量静态验证通过；生产等价 Keycloak/数据库并发、故障补偿、告警投递和事故演练待执行 |
 | `APPROVAL-COMMANDS` | 版本化命令分类、不可逆审批状态机、不可变快照、独立审批、强一致授权复核、Outbox 授权和 Billing 幂等领域执行 | Account/Billing/Portal Go 单元测试、OpenAPI lint、47 个合同测试与全量静态验证通过；生产工作负载身份由 APT-047 继续替换共享服务令牌 |
-| `DESKTOP-39` | 在 `pinvou3-app/` 执行账号平台状态、三语覆盖、计划任务定向测试 | 39 个测试通过 |
-| `VERIFY-ALL` | `node scripts/account-platform.mjs verify` | Go 单测与 Vet、OpenAPI/47 个合同测试、任务覆盖、架构守卫和差异检查全部通过 |
+| `ORGANIZATION-LIFECYCLE` | 顶层组织创建幂等、状态/游标搜索、启停投影、组织钱包冻结以及 Account/Billing/Token 删除阻断事实强校验 | Account/Billing/Token Go 单元测试、OpenAPI lint、组织生命周期合同测试与全量静态验证通过；数据库运行级迁移和生产故障注入待部署 |
+| `ORGANIZATION-UNIT-LIFECYCLE` | 节点命令指纹幂等、组织结构版本、闭包树移动以及 Account/Billing/Token 限制态预检和逻辑删除 | Account/Billing/Token Go 单元测试、OpenAPI lint、节点生命周期合同测试与全量静态验证通过；数据库运行级迁移、真实并发和跨服务故障注入待部署 |
+| `MEMBERSHIP-GOVERNANCE` | 多目标邀请反枚举、成员命令幂等、即时撤权/上下文回退、Billing 限制投影和单 OWNER 数据库约束 | Account/Billing Go 单元测试、OpenAPI lint、成员治理合同测试与全量静态验证通过；数据库运行级迁移、真实并发、通知通道和跨服务故障注入待部署 |
+| `GLOBAL-CONTEXT` | 用户级唯一活动上下文、CAS 版本切换、跨端刷新、失效回退及 Account/Token/Portal 版本传播 | Account/Token/Portal Go 单元测试、OpenAPI lint、全局上下文合同、桌面 40 项状态测试和 Portal 构建通过；数据库运行级迁移、真实多端并发和生产缓存传播待部署 |
+| `PERSONAL-CENTER-IA` | 个人中心概览、额度、权益、用量和按成员关系显示的组织导航，以及个人/组织资源显示边界 | 桌面账户状态测试、UI ESLint 和 Portal 构建通过；组织成员权益仅按活动组织及原子权限展示，个人权益不回退到组织视图 |
+| `ORGANIZATION-MEMBER-QUOTA` | 组织购买、精确 BASE/BONUS 组成授予、逐项批量、成员生命周期、Hold/结算及权限化 UI | Go 单测、OpenAPI、组织额度合同、桌面状态测试及 Portal 构建通过；真实 PostgreSQL 并发竞争和生产迁移仍待部署验证 |
+| `DESKTOP-39` | 在 `pinvou3-app/` 执行账号平台状态、三语覆盖、计划任务定向测试 | 40 个测试通过 |
+| `VERIFY-ALL` | `node scripts/account-platform.mjs verify` | Go 单测与 Vet、OpenAPI/56 个合同测试、任务覆盖、架构守卫和差异检查全部通过 |
 
 ### 0.1 target_requirement_id 规则
 
@@ -67,7 +74,7 @@
 | REQ-ID-02 | 已实现 | DOC_CURRENT | DOC-COVERAGE | NOT_APPLICABLE | 331 个规范状态行均包含状态、源码基线、验证证据、部署版本和已知差距字段 |
 | REQ-ID-03 | 已实现 | DOC_CURRENT | DOC-COVERAGE | NOT_APPLICABLE | 规范性表格和补充规则均复用稳定 target_requirement_id；重复出现作为同一能力的补充验收条件 |
 | CORE-01 | 已实现 | AUDIT_HEAD | GO-UNIT; IDENTITY-SMS | NOT_DEPLOYED | Keycloak 是持久身份/会话事实源，独立 Identity Adapter 管理密码策略和厂商协议，Account 只保存业务映射；生产部署待验证 |
-| CORE-02 | 部分实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36; RBAC-AUTH | NOT_DEPLOYED | Account 自有用户、平台/组织角色权限、组织和 Session 上下文；活动上下文仍按 Session 保存，尚未收敛为用户级全局事实 |
+| CORE-02 | 已实现 | DOC_CURRENT | GO-UNIT; RBAC-AUTH; GLOBAL-CONTEXT | NOT_DEPLOYED | Account 独立拥有用户、平台/组织授权和以 user_id 唯一的活动上下文；OIDC Session 只证明当前登录，会话之间不再分别拥有计费上下文 |
 | CORE-03 | 已实现 | AUDIT_HEAD | GO-UNIT; COMMERCE-MAPPING | NOT_DEPLOYED | Commerce Mapping 只维护用户/组织与外部客户的 Provider、Adapter 版本、脱敏引用及状态；授权上下文不读取 Mapping，生产部署待验证 |
 | CORE-04 | 已实现 | AUDIT_HEAD | GO-UNIT; ENTITLEMENT-COMPONENTS | NOT_DEPLOYED | 平衡不可变账本及组成级守恒事实已实现；后续应收和支付流水任务必须继续通过同一账本扩展，数据库运行级验证待部署 |
 | CORE-05 | 已实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | Provider 凭据加密持久化且只在 Gateway 使用时解密；生产 KMS/Vault 待部署证明 |
@@ -84,24 +91,24 @@
 | ACC-02 | 已实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | Identity 与 Account 创建成功后，注册接口返回稳定 `user_id` 和 `PROVISIONING`，不调用 Billing；部署证据待补 |
 | ACC-03 | 已实现 | AUDIT_HEAD | GO-UNIT; REGISTRATION-SAGA | NOT_DEPLOYED | `PROVISIONING`/`REPAIR_REQUIRED` 可登录并管理资料；Token Gateway 与充值按稳定状态原因拒绝，本地独立模型不受影响 |
 | ACC-04 | 已实现 | AUDIT_HEAD | GO-UNIT; REGISTRATION-SAGA | NOT_DEPLOYED | 钱包任务快照策略版本与 SLA，SLA 内退避重试，超时进入 `REPAIR_REQUIRED` 并支持受审计人工重试 |
-| ACC-15 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; RBAC-AUTH | NOT_DEPLOYED | 已有 Account 原子权限保护的平台创建接口/UI、字段校验、串行事务和审计/Outbox；缺稳定幂等键 |
-| ACC-16 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; RBAC-AUTH | NOT_DEPLOYED | 已有 Account 原子权限保护、按名称或 ID 搜索及稳定更新时间排序；缺状态筛选和游标分页 |
-| ACC-17 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 已有 DISABLED→ACTIVE 幂等转换、成员/授权版本更新和审计；缺跨 Billing 恢复条件检查 |
-| ACC-18 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 已有 ACTIVE→DISABLED、成员暂停、Session 回退和审计；未阻止 Billing 购买、分配和既有 Hold |
-| ACC-20 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 已有 DELETED 状态、成员撤销、Session 回退和资料脱敏；未执行 ACC-19 全量预检，重复删除返回未找到而非幂等原结果 |
-| ACC-21 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 已有显式目标组织、父节点状态校验、同组织闭包写入和审计；缺稳定幂等键 |
-| ACC-23 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39; RBAC-AUTH | NOT_DEPLOYED | 已有原子权限保护的独立重命名接口、显式编辑 UI、名称校验、节点 ID/层级保持和审计；缺稳定幂等键 |
-| ACC-24 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 已有同组织移动、防自身/后代成环、串行事务和版本更新；缺稳定幂等键及独立结构版本契约 |
-| ACC-25 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 已有叶节点检查和审计，但当前物理删除节点并删除成员/角色关联，未按目标对授予、路由和任务执行阻断后逻辑删除 |
-| ACC-27 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 已有用户/组织状态、重复成员、角色边界、授权版本和 Outbox；重复有效成员返回冲突而非幂等原结果 |
-| ACC-28 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 已有成员撤销、角色清理、授权版本和 Outbox；管理端路径未自动回退活动上下文，也未处理 BILL-13 授予暂停 |
+| ACC-15 | 已实现 | DOC_CURRENT | GO-UNIT; ORGANIZATION-LIFECYCLE; RBAC-AUTH | NOT_DEPLOYED | 创建由原子平台权限保护；操作者+幂等键冻结请求指纹并返回原组织，同键异请求冲突，名称唯一；成功的审计/Outbox 与创建同事务，字段/名称/幂等冲突及权限拒绝另写稳定失败审计；生产迁移待部署 |
+| ACC-16 | 已实现 | DOC_CURRENT | GO-UNIT; ORGANIZATION-LIFECYCLE; RBAC-AUTH | NOT_DEPLOYED | 支持名称/精确 ID、ACTIVE/DISABLED/DELETED 显式状态和更新时间+ID游标分页；默认不返回已删除组织，服务端平台读取权限过滤入口保持默认拒绝 |
+| ACC-17 | 已实现 | DOC_CURRENT | GO-UNIT; ORGANIZATION-LIFECYCLE | NOT_DEPLOYED | DISABLED→ACTIVE 前由 Billing 强校验生命周期投影和钱包可恢复性；成功时成员、用户/Session 授权版本、审计和唯一状态事件递增，重复启用无重复事件 |
+| ACC-18 | 已实现 | DOC_CURRENT | GO-UNIT; ORGANIZATION-LIFECYCLE | NOT_DEPLOYED | ACTIVE→DISABLED 前先在 Billing 冻结组织钱包，因而新购买、额度入账和 Hold 统一失败关闭；Account 同事务暂停成员、回退组织 Session、递增授权版本并写审计/Outbox |
+| ACC-20 | 已实现 | DOC_CURRENT | GO-UNIT; ORGANIZATION-LIFECYCLE | NOT_DEPLOYED | 仅停用组织可在 Account/Billing 全部预检清零后进入终态 DELETED；成员撤权、Session 回退、资料脱敏、审计/Outbox 与 Billing 钱包关闭均保留历史，重复删除返回成功 |
+| ACC-21 | 已实现 | DOC_CURRENT | GO-UNIT; ORGANIZATION-UNIT-LIFECYCLE; RBAC-AUTH | NOT_DEPLOYED | 显式目标组织及活动父节点校验、闭包树写入、操作者隔离幂等键与版本化请求指纹同事务保存；重放返回原节点，同键异请求冲突并写审计 |
+| ACC-23 | 已实现 | DOC_CURRENT | GO-UNIT; ORGANIZATION-UNIT-LIFECYCLE; DESKTOP-39; RBAC-AUTH | NOT_DEPLOYED | 显式编辑 UI 与原子权限保护的独立接口共同约束重命名；稳定命令键返回原结果，名称变化只递增节点/结构版本，不改变节点 ID、父子关系和历史审计 |
+| ACC-24 | 已实现 | DOC_CURRENT | GO-UNIT; ORGANIZATION-UNIT-LIFECYCLE; RBAC-AUTH | NOT_DEPLOYED | 移动以组织级 advisory lock 和 `expected_structure_version` 串行提交，拒绝跨组织、停用父节点、自身和后代成环；闭包关系与父节点在同一事务切换 |
+| ACC-25 | 已实现 | DOC_CURRENT | GO-UNIT; ORGANIZATION-UNIT-LIFECYCLE | NOT_DEPLOYED | 删除先使 Billing/Token 投影进入 DELETION_PENDING，阻止新授予/治理事实和节点 Token Account，再汇总子节点、成员、角色、审批、授予登记、Token 路由及未终态用量阻断；清零后只写 DELETED/删除时间并永久保留树、命令、审计和关联历史 |
+| ACC-27 | 已实现 | DOC_CURRENT | GO-UNIT; MEMBERSHIP-GOVERNANCE; RBAC-AUTH | NOT_DEPLOYED | 邀请接受和平台直接添加都校验组织/用户状态与原子权限；操作者隔离的幂等键冻结目标、角色和节点请求指纹，重复添加返回同一成员关系且不重复递增版本或发送事件 |
+| ACC-28 | 已实现 | DOC_CURRENT | GO-UNIT; MEMBERSHIP-GOVERNANCE; GLOBAL-CONTEXT; RBAC-AUTH | NOT_DEPLOYED | 移除在串行事务内幂等写 REVOKED、终止全部当前/未来角色、递增成员/用户/授权版本；若目标组织是用户级活动上下文则原子回退 PERSONAL 并递增 context_version，唯一 Outbox 后同步 Billing REVOKED 投影 |
 | ACC-31 | 已实现 | DOC_CURRENT | GO-UNIT; RBAC-AUTH; ROLE-BINDING-LIFECYCLE | NOT_DEPLOYED | 普通组织/节点角色按显式目标作用域校验 `org.roles.assign`，拒绝 OWNER、基础角色和平台角色；支持开始/到期时间及成员级稳定幂等键，重复请求返回原绑定 |
 | ACC-32 | 已实现 | DOC_CURRENT | GO-UNIT; ROLE-BINDING-LIFECYCLE | NOT_DEPLOYED | 单绑定撤销可重复调用并返回同一终态，OWNER/平台/基础角色拒绝走普通接口；事务内同步递增成员、用户、Session 与授权版本并发送变更事件 |
 | ACC-35 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; RBAC-AUTH | NOT_DEPLOYED | 组织管理路由显式携带 target organization_id，不切换活动上下文，并按目标组织、成员状态、原子权限码及组织/节点作用域默认拒绝 |
 | ACC-36 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 平台管理路由仅检查平台管理员身份，不读取或切换聊天计费活动上下文 |
 | ACC-37 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | usage_request 与 Hold 保存上下文、钱包、价格和路由等请求开始事实；缺完整授权、目录、协议和公式版本快照 |
-| ACC-38 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 组织停用和普通成员移除可回退对应 Session；平台管理端移除成员未回退，且当前上下文不是用户级全局值 |
-| ACC-39 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 部分 Account/Gateway 响应返回 membership_version；尚未由全部认证业务 API 返回 context_version 和 authorization_version |
+| ACC-38 | 已实现 | DOC_CURRENT | GO-UNIT; MEMBERSHIP-GOVERNANCE; GLOBAL-CONTEXT | NOT_DEPLOYED | 普通或平台入口移除成员、停用或删除组织时均在同一 Account 事务把命中的用户级活动上下文回退 PERSONAL 并递增 context_version；Session 兼容投影同时收敛 |
+| ACC-39 | 已实现 | DOC_CURRENT | GO-UNIT; RBAC-AUTH; GLOBAL-CONTEXT | NOT_DEPLOYED | Account 全部认证路由、Token 用户路由及跨服务平台授权响应使用标准版本头；组织路径返回目标 authorization_version，Portal 与桌面桥接不丢弃版本 |
 | ACC-40 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少持久化、幂等、可恢复且禁止跳阶段的注销 Saga |
 | ACC-41 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少注销静默期新业务冻结和修复动作白名单 |
 | ACC-42 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少待核对模型用量的注销阻断及平台承担安全终态 |
@@ -153,11 +160,11 @@
 | TOK-47 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少弃用宽限期、新会话/历史继续分离门禁、显式替代分支及下架在途请求处理 |
 | BILL-04 | 已实现 | AUDIT_HEAD | GO-UNIT; REGISTRATION-SAGA | NOT_DEPLOYED | Account 提交原子写入钱包任务与 Outbox，后台使用稳定键调用 Billing、退避重试并在成功后激活账号；bootstrap 不同步调用 Billing |
 | BILL-05 | 已实现 | AUDIT_HEAD | GO-UNIT; ENTITLEMENT-COMPONENTS | NOT_DEPLOYED | 权益组成表只允许 BASE/BONUS，商品入账按冻结商品快照拆分且舍入余数归 BONUS，不存在第三种积分类型 |
-| BILL-09 | 未实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | Hold 只按聚合权益包分配，没有按 BASE/BONUS 组成分配 |
-| BILL-10 | 未实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 无组成级批量授权及逐项部分成功契约 |
-| BILL-11 | 未实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 无组成级授予撤回与重建 |
-| BILL-12 | 未实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 无 `ACCOUNT_CLOSED` 专用回收和原组成恢复 |
-| BILL-13 | 未实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 无成员移除后的授予暂停/恢复状态 |
+| BILL-09 | 已实现 | DOC_CURRENT | GO-UNIT; ORGANIZATION-MEMBER-QUOTA | NOT_DEPLOYED | 组织用量 Hold 同时锁定成员授予与其精确权益包、BASE/BONUS 组成，不跨包或跨组成回退；结算和释放同步维护成员授予及组织组成桶 |
+| BILL-10 | 已实现 | DOC_CURRENT | GO-UNIT; ORGANIZATION-MEMBER-QUOTA | NOT_DEPLOYED | 批量授予为每一项派生稳定子幂等键并使用独立事务，返回逐项成功或稳定失败，不回滚其他项 |
+| BILL-11 | 已实现 | DOC_CURRENT | GO-UNIT; ORGANIZATION-MEMBER-QUOTA | NOT_DEPLOYED | 授予不提供覆盖编辑；普通撤回只回收无 Hold 占用的当前全部未消费额到原权益包原组成，已消费历史保留，变更额度需撤回可撤回部分后按新键重建 |
+| BILL-12 | 已实现 | DOC_CURRENT | GO-UNIT; ORGANIZATION-MEMBER-QUOTA | NOT_DEPLOYED | 普通撤回严格回到原权益包原组成并拒绝 `ACCOUNT_CLOSED`；注销后的专用全额回收属于 BILL-40，不可通过普通接口绕过 |
+| BILL-13 | 已实现 | DOC_CURRENT | GO-UNIT; ORGANIZATION-MEMBER-QUOTA | NOT_DEPLOYED | 成员移除以成员版本把 ACTIVE 授予转为 SUSPENDED 且不回池；同一用户仅能以更高成员版本重新加入并在未到期时恢复 |
 | BILL-16 | 已实现 | AUDIT_HEAD | GO-UNIT; ENTITLEMENT-COMPONENTS | NOT_DEPLOYED | Hold、结算和人工扣减按到期时间、BONUS/BASE、入账时间和稳定组件 ID 确定排序 |
 | BILL-20 | 未实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 只有固定三元组价格，没有版本化计量单位 |
 | BILL-23 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 公式引用单位与固定价格/模型级显式继承配置项的严格绑定待实现 |
@@ -171,8 +178,8 @@
 | BILL-34 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少可信实际生成量、客户端交付量和平台不可恢复交付故障之间的计费证据边界 |
 | BILL-35 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少取消期间 Hold 的派发前释放、派发后续租、期限收敛和晚到证据处理规则 |
 | BILL-36 | 已实现 | AUDIT_HEAD | GO-UNIT; ENTITLEMENT-COMPONENTS | NOT_DEPLOYED | 数据库按权益包和组成强制原始额等于可用、Hold、已用、有效/暂停授予、过期及撤销桶之和，包聚合仅由触发器投影 |
-| BILL-37 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少同权益包同组成可用余额上限及禁止跨包、跨组成、跨钱包超额授权的强约束 |
-| BILL-38 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少组成级锁或等价 CAS、请求指纹、并发分配和批量子幂等事务边界 |
+| BILL-37 | 已实现 | DOC_CURRENT | GO-UNIT; ORGANIZATION-MEMBER-QUOTA | NOT_DEPLOYED | 授予事务校验组织钱包、权益包和精确组成归属，只从该组成可用桶转入活动授予桶；数据库同时强制授予自身和组成总额守恒 |
+| BILL-38 | 已实现 | DOC_CURRENT | GO-UNIT; ORGANIZATION-MEMBER-QUOTA | NOT_DEPLOYED | 分配、撤回、成员 Hold、结算、释放和到期均锁定精确组成/授予事实；组织级幂等键保存版本化请求指纹，同键异请求稳定冲突，批量子项各自提交 |
 | BILL-39 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少账号注销后组织授予隔离、不自动回池、禁止恢复/普通撤回及未回收剩余量到期失效规则 |
 | BILL-40 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少账号去标识化后的授权管理员专用全额回收、资格校验、守恒事务、幂等边界和完整审计 |
 | BILL-41 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少模型覆盖优先、无覆盖才使用全局及同作用域缺失/歧义稳定失败的确定匹配器 |
@@ -301,13 +308,13 @@
 | ACC-12 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 成员关系独立存储；个人中心只显示当前用户关联组织。 |
 | ACC-13 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39; RBAC-AUTH | NOT_DEPLOYED | Account 持久化平台/组织角色、原子权限、组织/节点作用域和授权版本；服务端默认拒绝并按接口所需权限判定，客户端显示不作为授权依据 |
 | ACC-14 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 顶层组织创建位于平台管理 API/UI。 |
-| ACC-19 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 已有逻辑删除与审计，但删除前未跨 Billing/Token 核验余额、权益、Hold、支付、差异和待核对用量 |
+| ACC-19 | 已实现 | DOC_CURRENT | GO-UNIT; ORGANIZATION-LIFECYCLE | NOT_DEPLOYED | Account 核验停用状态、邀请和审批治理任务；Token 核验未终态用量；Billing 在串行事务中核验余额/预留、有效权益、Hold、支付、退款、对账差异、用量复核、财务调整及可扩展治理阻断登记，任一未收敛即返回结构化原因并保持停用 |
 | ACC-22 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 管理 UI 提供启动编辑动作，避免误改。 |
-| ACC-26 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 当前仅支持电子邮箱 + 一次性 Token 邀请；手机号/用户名邀请未实现 |
-| ACC-29 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 已有专用串行事务维持唯一 OWNER 并更新版本/审计；缺稳定幂等键和目标 Account 权限码 |
+| ACC-26 | 已实现 | DOC_CURRENT | GO-UNIT; MEMBERSHIP-GOVERNANCE | NOT_DEPLOYED | PHONE、USERNAME、LINK 使用统一持久实体并保留 EMAIL 兼容入口；目标只存摘要/提示，创建不探测用户存在，本人列表只按认证身份反向恢复；Token 或目标邀请 ID 均一次消费，接受时再次绑定当前稳定用户 ID，过期/撤销/接受历史永久保留 |
+| ACC-29 | 已实现 | DOC_CURRENT | GO-UNIT; MEMBERSHIP-GOVERNANCE; RBAC-AUTH | NOT_DEPLOYED | 用户入口强制 `org.owner.transfer`、平台入口强制专用平台权限；稳定命令指纹串行撤销旧 OWNER 并保留历史、建立新 OWNER、刷新双方版本/事件，延迟数据库约束保证每个有效组织提交时恰有一个当前所有者 |
 | ACC-30 | 已实现 | DOC_CURRENT | GO-UNIT; ROLE-BINDING-LIFECYCLE | NOT_DEPLOYED | 本人接口只按已认证主体返回自己的平台/组织绑定；组织与运营视图展示角色、作用域、起止时间、授权来源和生命周期状态，响应禁止缓存 |
 | ACC-33 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 个人中心按组织列表动态隐藏。 |
-| ACC-34 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 已有个人/组织活动上下文和版本字段，但按 OIDC Session 保存，不是用户级全局上下文，也无跨端同步 |
+| ACC-34 | 已实现 | DOC_CURRENT | GO-UNIT; GLOBAL-CONTEXT | NOT_DEPLOYED | `user_active_contexts` 以 user_id 唯一保存 PERSONAL/ORGANIZATION 与单调 context_version；切换以期望版本串行 CAS，最近有效 Session 仅用于迁移初值，所有端读取同一聚合 |
 | TOK-01 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 用户在桌面直接配置的本地模型或第三方云模型由本地模型系统管理，不携带账号平台身份、不使用平台钱包和 Token Gateway。 |
 | TOK-02 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 启用账号平台后，Rust 运行时以当前 Access Token 调用 Gateway。 |
 | TOK-03 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | `POST /v1/chat/completions` 支持 JSON 和 SSE；桌面原生流式路径使用该入口。 |
@@ -329,8 +336,8 @@
 | BILL-02 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | Journal Entry 与 Posting 平衡，不能直接覆盖余额。 |
 | BILL-03 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | `10,000 microcredits = 1 展示积分`；金额使用分。 |
 | BILL-06 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; ENTITLEMENT-COMPONENTS | NOT_DEPLOYED | 充值按支付订单和冻结商品快照创建独立权益包及 BASE/BONUS 组成，保存起止时间、原始额和各状态桶；支付流水细化由 PAY-11～PAY-14 继续扩展 |
-| BILL-07 | 未实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 企业管理员购买时明确受益组织；支付成功幂等创建组织权益包和组织钱包分录，付款人个人钱包不参与。 |
-| BILL-08 | 未实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 企业管理员从组织有效权益中给成员分配，员工无领取接口；分配、撤回、占用和消费均审计。 |
+| BILL-07 | 已实现 | DOC_CURRENT | GO-UNIT; ORGANIZATION-MEMBER-QUOTA | NOT_DEPLOYED | 购买命令明确保存付款申请人和受益组织；履约再次校验组织钱包归属并只向该钱包及组织权益包入账，个人钱包不参与。 |
+| BILL-08 | 已实现 | DOC_CURRENT | GO-UNIT; ORGANIZATION-MEMBER-QUOTA | NOT_DEPLOYED | 只有具有组织原子权限的管理员可从组织有效权益的精确组成授予成员；无成员自领接口，授予、撤回、暂停/恢复、Hold、释放和消费均保留不可变审计。 |
 | BILL-14 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; ENTITLEMENT-COMPONENTS | NOT_DEPLOYED | 权益 API 按组成返回总额、可用、预占、已用、过期、撤销和到期时间，并提供总可用及 BASE/BONUS 汇总 |
 | BILL-15 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | Hold 分配与结算关联具体权益包。 |
 | BILL-17 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; ENTITLEMENT-COMPONENTS | NOT_DEPLOYED | 每次正向人工调整创建独立 BONUS 权益包和组成，自入账起固定 30 天到期 |
@@ -362,15 +369,15 @@
 | PAY-34 | 未实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 每日获取 Provider 账单，对订单、支付流水、退款和 Billing 账本入账进行四方核对，生成可追踪差异。 |
 | PAY-36 | 未实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 每条差异必须包含分类、严重度、状态、责任人、修复动作、复核结果和审计；修复通过幂等命令写入，不允许直接改表。 |
 | UI-01 | 已实现 | AUDIT_HEAD | CODE-AUDIT; DESKTOP-39; CONTRACT-36 | NOT_DEPLOYED | 不跳外部浏览器；个人信息也在弹层中展示。 |
-| UI-03 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; DESKTOP-39; CONTRACT-36 | NOT_DEPLOYED | 组织页签按成员关系隐藏；当前身份模块只放在概览；移除普通用户 Token Account/供应商 Key 管理入口。 |
+| UI-03 | 已实现 | DOC_CURRENT | PERSONAL-CENTER-IA; GLOBAL-CONTEXT | NOT_DEPLOYED | 个人中心独立提供概览、额度、权益、用量和组织导航；无有效组织关系时隐藏组织入口，组织上下文不显示个人购买入口或个人权益，不提供普通用户 Token Account/供应商 Key 管理。 |
 | UI-04 | 已实现 | AUDIT_HEAD | CODE-AUDIT; DESKTOP-39; CONTRACT-36 | NOT_DEPLOYED | 模型准备、内部结算状态、供应商凭据等从普通用户视图移除。 |
 | UI-05 | 已实现 | AUDIT_HEAD | CODE-AUDIT; DESKTOP-UI; UI-I18N; CONTRACT-41 | NOT_DEPLOYED | 桌面个人中心提供用户名/手机号修改及未登录忘记密码入口，复用集中三语词条；资料提交要求重新认证，手机号和密码恢复要求专用短信挑战。 |
-| UI-06 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; DESKTOP-39; CONTRACT-36 | NOT_DEPLOYED | 个人上下文显示个人权益；组织上下文只显示当前成员被授予的组织额度，不同时展示其他上下文余额。 |
-| UI-07 | 未实现 | AUDIT_HEAD | CODE-AUDIT; DESKTOP-39; CONTRACT-36 | NOT_DEPLOYED | 桌面与 Web 展示同一个服务端活动上下文；收到更高上下文版本、窗口重新聚焦或切换成功时清空旧额度/权限缓存并刷新。 |
+| UI-06 | 已实现 | DOC_CURRENT | GLOBAL-CONTEXT; ENTITLEMENT-COMPONENTS | NOT_DEPLOYED | 个人中心所有余额、权益、订单和用量请求只按用户级活动上下文加载；个人上下文展示个人权益，组织上下文不混入个人权益明细。 |
+| UI-07 | 已实现 | DOC_CURRENT | GLOBAL-CONTEXT | NOT_DEPLOYED | 桌面与 Web 共用服务端活动上下文；客户端只接受递增版本，收到更高版本、窗口聚焦或切换成功即中止旧请求、清空上下文资源并重新读取。 |
 | UI-08 | 已实现 | AUDIT_HEAD | CODE-AUDIT; ENTITLEMENT-COMPONENTS | NOT_DEPLOYED | 桌面与 Portal 三语展示总可用、BASE/BONUS、来源、各组成余额、到期提醒及确定消费顺序，并明确 BONUS 零现金退款和普通退款关联撤销规则 |
 | UI-09 | 未实现 | AUDIT_HEAD | CODE-AUDIT; DESKTOP-39; CONTRACT-36 | NOT_DEPLOYED | 登录后的账号 Popover 增加入口按钮；使用专用 Tauri 命令打开受信 Portal URL，不复用任意外链接口。 |
 | UI-10 | 已实现 | AUDIT_HEAD | CODE-AUDIT; DESKTOP-39; CONTRACT-36 | NOT_DEPLOYED | Web 个人中心已提供个人权益充值入口；后续重构不得删除。 |
-| UI-11 | 未实现 | AUDIT_HEAD | CODE-AUDIT; DESKTOP-39; CONTRACT-36 | NOT_DEPLOYED | 具有组织采购权限的企业管理员可在显式目标组织管理页购买组织权益。 |
+| UI-11 | 已实现 | DOC_CURRENT | DESKTOP-39; ORGANIZATION-MEMBER-QUOTA | NOT_DEPLOYED | Web 组织页按 `org.entitlements.purchase` 显示购买入口，并按独立读取、授予和撤回权限展示精确成员/权益包/BASE-BONUS 组成操作；组织资源不回退个人权益。 |
 | UI-12 | 未实现 | AUDIT_HEAD | CODE-AUDIT; DESKTOP-39; CONTRACT-36 | NOT_DEPLOYED | 当前能力不足时显示禁用按钮；目标要求完全隐藏不可执行退款入口 |
 | ADM-01 | 部分实现 | DOC_CURRENT | GO-UNIT; SECURITY-RECOVERY | NOT_DEPLOYED | 离线 CLI 已幂等创建禁用 Identity 与 `BOOTSTRAP_PENDING` admin，支持终端无回显/受控 FD 直接设密及默认256 bit、43字符 Base64URL 一次性凭据；用途/代次校验值不可逆，默认15分钟/最长60分钟、5次锁定、恒定时间校验、重新签发淘汰旧代次、正式密码 Identity 边界、高权限策略、会话撤销、安全审计及失败补偿已实现。仍缺生产等价并发兑换、Keycloak/数据库故障和告警投递证据。 |
 | ADM-02 | 部分实现 | DOC_CURRENT | GO-UNIT; SECURITY-RECOVERY | NOT_DEPLOYED | 已有仅主机/集群运行且无 HTTP 路由的 Break-glass CLI，强制全部管理员失联确认、事故证据、工作负载身份、20字符以上原因和5–60分钟有效期，恢复 Identity/短时授权后写不可变审计并产生 CRITICAL 告警；最后管理员数据库门禁不可绕过。仍缺生产等价事故授权、告警接收和到期恢复演练。 |
@@ -388,7 +395,7 @@
 | NFR-05 | 部分实现 | DOC_CURRENT | CODE-AUDIT; GO-UNIT; REGISTRATION-SAGA; APPROVAL-COMMANDS; DESKTOP-39 | NOT_DEPLOYED | 账号、资金、Token、注册修复和审批生命周期已有审计；注销 Saga、Provider 事实修复等目标动作仍缺失 |
 | NFR-06 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 钱包、支付入账、Hold、默认路由、结算和事件消费有幂等基础；注册操作、结果重放、注销和多项修复缺完整指纹契约 |
 | NFR-07 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 三服务具备事务 Outbox/Inbox、至少一次 Relay、死信和人工重放；业务最终收敛依赖死信处置且多项 Saga 缺失 |
-| NFR-08 | 未实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 活动上下文按 OIDC Session 保存，未建立用户级全局 context_version、期望版本写入和跨端缓存失效 |
+| NFR-08 | 已实现 | DOC_CURRENT | GO-UNIT; GLOBAL-CONTEXT | NOT_DEPLOYED | 用户级 context_version 数据库单调保护，切换要求 expected_context_version；响应头跨 Account、Token、Portal 与桌面桥接传播，客户端只接受更高版本并刷新缓存 |
 | NFR-09 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 迁移按服务版本化且 up/down 成对并受合同检查；缺已执行迁移不可修改门禁及环境级迁移前后证明 |
 | NFR-10 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 已有备份恢复、切换回滚 runbook 和版本目录约定；无实际备份、恢复演练和部署验收证据 |
 | NFR-11 | 未实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 当前单机 Compose 不具备高可用；Helm 仅为未部署模板，不能证明多副本或故障转移 |
@@ -419,12 +426,12 @@
 
 | 变更编号 | target_requirement_id | 已确认需求 | 当前实现判断 | 目标验收摘要 |
 |---|---|---|---|---|
-| CR-01 | BILL-08–BILL-13 | 组织额度由企业管理员手动分配给成员，员工不可自主领取 | 未实现 | 组织钱包作为总额度池；分配只形成组织内成员额度，不转入个人钱包；调用同时占用成员额度和组织钱包 |
+| CR-01 | BILL-08–BILL-13 | 组织额度由企业管理员手动分配给成员，员工不可自主领取 | 已实现 | 组织钱包为总额度池；分配只形成绑定原包原组成的组织内成员额度，不转入个人钱包；组织调用同时占用成员授予和组织钱包组成余额 |
 | CR-02 | BILL-21–BILL-25 | 系统管理后台设置模型价格，支持统一价格或按时间段分段计价 | 部分实现、计量与匹配口径已由 CR-42、CR-57 细化 | 当前仅支持“某模型立即生效的新价格版本”；需增加全局默认、分时、未来生效、生命周期、显式继承、冲突校验和预览，并遵守 CR-57 的确定匹配与 Hold 快照规则 |
 | CR-03 | TOK-19, TOK-21, TOK-23, BILL-30 | 预占按照具体模型上下文动态计算 | 未实现 | 移除全局 128K 输入上限作为统一计费依据，改用模型上下文、请求输入和模型输出上限计算 |
 | CR-04 | ACC-34, UI-06 | 只能使用当前活动个人/组织上下文授予的额度，个人中心只展示该上下文额度 | 部分实现 | Gateway 已按活动上下文找钱包；需让所有额度/权益 API 和 UI 严格按活动上下文返回，组织场景只显示该成员被授予额度 |
 | CR-05 | ACC-06–ACC-09, UI-05 | 个人中心支持修改手机号、用户名和忘记密码 | 已实现 | Account 只编排不透明 Identity 端口；Keycloak 更新/重置/会话撤销和新华三重同步协议分别留在 Adapter/Worker。供应商中立 Mapping 由 APT-005 替换现有专用任务。 |
-| CR-06 | ACC-19 | 组织删除为逻辑删除；有余额、有效权益包或未结算 Hold 时禁止删除 | 部分实现 | 当前已逻辑删除，但缺少跨 Billing 的删除前置检查；需增加冻结、预检、幂等删除和审计 |
+| CR-06 | ACC-19 | 组织删除为逻辑删除；有余额、有效权益包或未结算 Hold 时禁止删除 | 已实现 | 组织必须先停用并冻结钱包；Account/Billing 预检任一阻断事实存在即返回结构化冲突，清零后仅写 DELETED、关闭钱包且保留账本、订单和审计 |
 | CR-07 | TOK-06, TOK-07, TOK-12, TOK-16, TOK-20 | 符合可用条件的模型都可供用户选择 | 已由 CR-35 细化状态语义 | 原记录把目录展示、上下文资格和请求预占混为一个可用条件；模型目录同步要求继续有效，状态划分以 CR-35 为准 |
 | CR-08 | BILL-14, BILL-17, BILL-16, UI-08 | 分别展示基础积分、赠送积分、到期顺序、即将到期提醒和多个权益包，同时展示可用总积分 | 已实现 | 组成级 API 与三语 UI 已展示 BASE/BONUS、总可用、来源、确定消费顺序和到期提醒；人工赠送为独立 30 天 BONUS |
 | CR-09 | SCOPE-04, SCOPE-05, TOK-15, TOK-35, TOK-36, TOK-37, NFR-20 | 删除旧模型路径及兼容代码，全量迁移到账号平台 + Token Gateway | 未实现 | 实现范围仅限品悟客户端；除删除功能开关、旧 `llmapi_hub` 身份/Token/模型回退和运行时双路径外，还缺少客户端数据迁移、凭据清理、三层门禁、非计费 readiness、升级矩阵及版本级回滚验收；TOK-37 服务端前置能力必须由独立任务先行完成 |
@@ -438,17 +445,17 @@
 | CR-17 | PAY-01–PAY-04, NFR-17 | 生产/非生产支付 Provider 与支付渠道能力隔离 | 部分实现、待重构 | 保留通用 `PaymentProvider` 端口，将 H3C Mall 与 Simulator 实现移出 Billing 业务包；远程 Compose 已隔离 Simulator 主进程，但测试数据库初始化/迁移仍在基础清单，启动和 Helm 仍有模拟器命名配置；需迁移为供应商中立配置并彻底排除生产测试依赖；前端按商品渠道和 Provider capabilities 渲染，多 Provider 使用独立商品映射 |
 | CR-18 | ADM-10, NFR-19 | 系统运行探针配置驱动 | 部分实现、待重构 | 系统状态页通过探针注册表声明服务名称、URL、协议和响应判定器；Portal 不使用 `if newapi` 等厂商分支。页面可以展示实际部署组件名称，但采集流程不能依赖固定厂商实现 |
 | CR-19 | PAY-12, PAY-14–PAY-15, PAY-18–PAY-20, PAY-23, PAY-25, PAY-28–PAY-31, PAY-33–PAY-36 | 支付按完整生命周期设计并允许 Provider 能力降级 | 部分实现、退款范围已由 CR-41 取代 | 原记录包含全额/部分退款；现行支付履约隔离、退款目标、金额和意图事务以 CR-41 及 PAY-24–PAY-31 为准，其他支付生命周期要求继续有效 |
-| CR-20 | BILL-07, PAY-22, PAY-23, UI-11 | 组织资金通过企业管理员在线购买组织权益入账 | 未实现 | 企业管理员在组织管理界面选择组织商品并在线支付；订单付款人与权益受益组织分离，成功后直接形成组织权益包和组织钱包账本，不经过个人钱包 |
+| CR-20 | BILL-07, PAY-22, PAY-23, UI-11 | 组织资金通过企业管理员在线购买组织权益入账 | 部分实现 | APT-017 已完成受益组织与付款申请人分离、组织钱包履约及权限化购买 UI；PAY-22/PAY-23 要求的独立付款人资格快照和完整支付证据仍由 APT-023 实现 |
 | CR-21 | SCOPE-01, SCOPE-02, TOK-15, TOK-01 | 不实现个人中心自有供应商 Key/自管 Token Account | 移除 | 本地应用直接配置的云端或本地模型完全绕过账号平台，继续由桌面模型配置管理；个人中心不提供供应商 Key、个人 Token Account、共享策略或路由管理 |
-| CR-22 | ACC-29 | 每个有效组织恰好一个所有者 | 待重构 | 所有权只能通过专用原子转让命令变更；普通管理员允许多人，不能用普通角色分配接口增删所有者 |
+| CR-22 | ACC-29 | 每个有效组织恰好一个所有者 | 已实现 | 所有权只能通过带稳定幂等指纹的专用原子转让命令变更；旧绑定只撤销不删除，延迟数据库约束在提交时强制每个有效组织恰有一个 OWNER，普通角色接口不能增删所有者 |
 | CR-23 | TOK-19, TOK-21, TOK-23, BILL-30 | 动态预占采用已确认的边界策略 | 部分由 CR-36 取代 | 无 Tokenizer 时安全裕量为 0、Hold 续租和追加预占继续有效；“未传最大输出按 1,000,000 Token”和固定 Token 预占公式由 CR-36 取代 |
 | CR-24 | TOK-06, TOK-07, TOK-12, TOK-16, TOK-20 | 只展示符合可用条件的模型 | 已由 CR-35 取代 | 原记录要求把上下文和路由资格作为目录展示前提；现行规则允许 CATALOG_VISIBLE 独立展示，并分别计算 CONTEXT_ELIGIBLE 与请求级 RESERVABLE |
 | CR-25 | BILL-16–BILL-17, BILL-19, BILL-28, PAY-24–PAY-31 | 权益退款、消费顺序和过期 Hold 采用确定规则 | 部分实现 | 已完成确定消费顺序、30 天人工 BONUS、过期 Hold 释放及迟到用量平台损失复核；普通/强制退款的目标支付流水锁定与组成撤销仍由 APT-021 实现 |
-| CR-26 | BILL-05, BILL-08–BILL-13 | 组织额度按权益包分配并保留成员占用 | 部分实现 | 已建立仅 BASE/BONUS 的组成事实与授予守恒桶；组织成员授予、批量分配、暂停/恢复、撤回重建及注销隔离仍由 APT-017/015 实现 |
-| CR-27 | ACC-34, ACC-35–ACC-39, UI-07 | 桌面与 Web 共享一个用户级活动上下文 | 待重构 | 活动上下文不再按 OIDC Session 独立保存；任一端切换后其他端自动同步，进行中的调用按开始快照结算；成员移除或组织停用自动回个人；所有业务 API 返回上下文版本 |
+| CR-26 | BILL-05, BILL-08–BILL-13 | 组织额度按权益包分配并保留成员占用 | 已实现 | 组织授予绑定精确权益包及 BASE/BONUS 组成，支持独立批量结果、成员移除暂停/高版本恢复、普通全额撤回重建和组织调用占用；注销专用隔离与回收继续由 BILL-39/BILL-40 独立追踪 |
+| CR-27 | ACC-34, ACC-35–ACC-39, UI-07 | 桌面与 Web 共享一个用户级活动上下文 | 已实现 | 用户级唯一聚合和 CAS 切换已替代 Session 所有权；跨端按版本/聚焦刷新，失效自动回个人，认证响应传播上下文及授权版本；进行中调用继续按既有请求开始快照结算 |
 | CR-28 | ADM-01–ADM-03, ADM-06 | 超级管理员初始化、恢复和授权生命周期 | 未实现、ADM-01 初始化凭据由 CR-58 取代 | 原记录使用一次性8位随机初始密码；现行首个管理员初始化改用交互式直接设密或高熵一次性引导凭据；Break-glass 仅处理全部管理员异常失联，不绕过最后一个有效超级管理员主动注销保护，临时授权和自动回收部分保持有效 |
 | CR-29 | ADM-07 | 审批允许角色兼任和交叉审批 | 已实现 | 同一用户可同时拥有计费运营和审批角色；服务端按稳定用户 ID 禁止自审，不同用户可交叉审批，强制审批命令只需一名独立审批人 |
-| CR-30 | ACC-26 | 组织邀请支持手机号、用户名和一次性链接 | 部分实现、待重构 | 三种方式都使用统一邀请实体、过期与一次性消费规则；邀请链接只保存摘要，手机号/用户名查询防枚举，接受时绑定当前已认证用户 |
+| CR-30 | ACC-26 | 组织邀请支持手机号、用户名和一次性链接 | 已实现 | 三种方式使用统一不可物理删除实体、过期与一次性消费规则；链接只保存 Token 摘要，手机号/用户名只保存目标摘要和提示，创建不探测目标，本人恢复查询不接收任意目标输入，接受时绑定当前已认证稳定用户 ID |
 | CR-31 | ACC-10, ACC-11 | 用户可主动注销并保留三年法定记录 | 未实现、由 CR-52 细化 | 有个人余额、未清应收、本人未完成订单、未结算 Hold 或尚未转让的组织所有权时禁止完成注销，其他资金/外部事实及自动清理门禁按 CR-52；未消费组织授予不阻止注销并按 CR-51 处理；注销后标识可复用，法定记录以不可反查业务身份保存 3 年 |
 | CR-32 | ACC-07, ACC-08, ACC-06 | 用户资料修改采用可恢复 Saga | 已实现 | `profile_change_requests` 保存旧值、新值、资料版本和各阶段时间；Identity 成功后只向前重试，Account CAS 后异步重置 Commerce 任务，失败退避或进入修复状态。 |
 | CR-34 | BILL-29–BILL-33, PAY-33 | 用量负余额与拒付应收分场景记账并按钱包上下文隔离冻结 | 未实现 | 用量超额结算按 BILL-29 双记钱包负余额与独立应收；拒付按原支付流水和权益包撤销可撤销 BASE/关联 BONUS，不从聚合钱包反推或冲销其他权益；不足现金本金形成订单级应收，后续现金充值 BASE 优先清偿；个人与组织债务只冻结各自上下文 |
@@ -466,7 +473,7 @@
 | CR-47 | REQ-ID-01–REQ-ID-03, CORE-01–CORE-07, SCOPE-01–SCOPE-05, ID-01–ID-16, ACC-01–ACC-39, TOK-01–TOK-37, BILL-01–BILL-33, PAY-01–PAY-36, UI-01–UI-12, ADM-01–ADM-32, NFR-01–NFR-25 | 删除退休需求并按依赖关系重排、重新编号全部目标能力 | 文档完成、实现状态保持原判断 | 删除编号稳定与禁止重排规则；移除目标基线中的退休能力占位；按基础能力、依赖顺序和领域相关性形成连续新编号，并同步全部文档和实现状态引用 |
 | CR-48 | TOK-29, TOK-38–TOK-41, BILL-34–BILL-35, UI-13 | 补齐用户取消、连接断开与模型计费收敛契约 | 未实现 | 取消意图、Provider 取消结果、服务端执行、客户端交付和计费结算分别保存；断线不取消，Provider 不支持取消时继续核对实际用量，按可信实际生成量计费并在取消期间安全续租、结算或超时释放 Hold |
 | CR-49 | PAY-17, PAY-19, PAY-35, PAY-37–PAY-40, ADM-33 | 72小时未收敛订单转人工审核并闭合无回调无账单 Provider 的晚到支付处理 | 未实现 | 前72小时查询计划不变；边界最后查询后创建带责任人和 SLA 的审核案件，前7天每日、此后每周人工查询；只有有限晚到窗口、长期历史查询和权威终态的 Provider 才能正式收款，并以最终成功查询作为未支付归档门禁 |
-| CR-50 | BILL-36–BILL-38 | 明确组织权益组成资金守恒、禁止超额授权及并发分配边界 | 部分实现 | 已建立组成级互斥桶和数据库守恒约束；组织授予的额度上限、组成锁/CAS、幂等指纹和并发分配仍由 APT-017 实现 |
+| CR-50 | BILL-36–BILL-38 | 明确组织权益组成资金守恒、禁止超额授权及并发分配边界 | 已实现 | 数据库守恒桶、组织/钱包/包/组成归属校验、精确组成与授予行锁、版本化请求指纹、同键异请求冲突及逐项子事务共同禁止超额和重复分配；生产等价并发压力仍待部署验证 |
 | CR-51 | ACC-10, ACC-11, BILL-12, BILL-13, BILL-36, BILL-39 | 注销用户的未消费组织授予终局占用至原到期日 | 未实现、由 CR-54 调整 | 原规则禁止任何回收；现行规则仍要求 `ACCOUNT_CLOSED` 授予不自动回池、不可恢复、消费或普通撤回，但允许按 CR-54 的独立专用命令主动回收 |
 | CR-52 | ACC-10–ACC-11, ACC-40–ACC-50, BILL-39, UI-14, ADM-34 | 用持久注销 Saga 区分资金阻断、系统自动清理和标识释放门禁 | 未实现 | 待核对用量、拒付、资金性差异、外部待确认关单及资金相关 Commerce 任务阻断注销；组织所有权及最后一个有效超级管理员角色须先交接，资料 Saga、其他角色、临时授权和邀请不要求用户处理但必须自动收敛；全部门禁通过且 Identity 不可认证后才能释放标识，迟到任务不得作用于新账号 |
 | CR-53 | ID-03, ID-14–ID-15, ID-17–ID-18, ACC-02, ACC-51–ACC-55, UI-15, ADM-35, NFR-04, NFR-06 | 闭合注册预检并发、唯一值预约、幂等、密码边界和孤儿 Identity 补偿 | 已实现 | 数据库唯一预约、稳定操作/密码指纹、脱敏查询、Identity 关联向前恢复及24小时证明门禁补偿已闭环；全域日志白名单与幂等治理仍由独立 NFR 任务追踪 |
@@ -570,26 +577,26 @@
 | ACC-12 | 一个用户可属于多个组织 | 已实现 | 成员关系独立存储；个人中心只显示当前用户关联组织。 |
 | ACC-13 | 角色系统按权限码和作用域管理 | 已实现 | Account 持久化并解析平台/组织角色、原子权限及组织/节点作用域，所有服务端授权默认拒绝。 |
 | ACC-14 | 个人用户不能创建顶层组织 | 已实现 | 顶层组织创建位于平台管理 API/UI。 |
-| ACC-15 | 创建顶层组织 | 部分实现 | 已有平台管理员创建接口/UI、字段校验、串行事务和审计/Outbox；缺目标 Account 平台权限与稳定幂等键。 |
-| ACC-16 | 搜索组织 | 部分实现 | 已有按名称或 ID 搜索及稳定更新时间排序；缺状态筛选、游标分页和 Account 平台权限模型。 |
-| ACC-17 | 启用组织 | 部分实现 | 已有 DISABLED→ACTIVE 幂等转换、成员/授权版本更新和审计；缺跨 Billing 恢复条件检查。 |
-| ACC-18 | 停用组织 | 部分实现 | 已有 ACTIVE→DISABLED、成员暂停、Session 回退和审计；未阻止 Billing 购买、分配和既有 Hold。 |
-| ACC-19 | 组织安全逻辑删除 | 部分实现 | 已使用 `DELETED` 状态并保留审计；需在删除前确认余额、有效权益包、未结算 Hold 均为零。 |
-| ACC-20 | 逻辑删除组织 | 部分实现 | 已有 DELETED 状态、成员撤销、Session 回退和资料脱敏；未执行 ACC-19 全量预检，重复删除返回未找到而非幂等原结果。 |
-| ACC-21 | 创建组织子节点 | 部分实现 | 已有显式目标组织、父节点状态校验、同组织闭包写入和审计；缺稳定幂等键。 |
+| ACC-15 | 创建顶层组织 | 已实现 | 平台权限、名称约束、稳定幂等请求指纹、审计和 Outbox 已形成原子创建闭环。 |
+| ACC-16 | 搜索组织 | 已实现 | 支持名称/精确 ID、显式状态、稳定复合游标和默认隐藏已删除组织。 |
+| ACC-17 | 启用组织 | 已实现 | Billing 恢复门禁、组织/成员/授权版本和幂等审计事件已闭环。 |
+| ACC-18 | 停用组织 | 已实现 | Billing 钱包先冻结，Account 再暂停成员并回退活动 Session；新购买、入账与 Hold 失败关闭。 |
+| ACC-19 | 组织安全逻辑删除 | 已实现 | Account 治理事实与 Billing 资金、权益、Hold、支付/退款/差异/用量事实执行跨域预检并返回结构化阻断原因。 |
+| ACC-20 | 逻辑删除组织 | 已实现 | 预检清零后写终态 DELETED、关闭组织钱包并保留财务/审计历史；重复调用幂等成功。 |
+| ACC-21 | 创建组织子节点 | 已实现 | 操作者、组织、命令类型和稳定幂等键冻结请求指纹；活动父节点、同组织闭包、结构版本和审计在同一串行事务提交，重放返回原结果。 |
 | ACC-22 | 组织名称和节点名称显式进入编辑态后修改 | 已实现 | 管理 UI 提供启动编辑动作，避免误改。 |
-| ACC-23 | 重命名组织节点 | 部分实现 | 已有独立重命名接口、显式编辑 UI、名称校验、节点 ID/层级保持和审计；服务端权限仍是迁移期角色模型。 |
-| ACC-24 | 调整组织节点父节点 | 部分实现 | 已有同组织移动、防自身/后代成环、串行事务和版本更新；缺稳定幂等键及独立结构版本契约。 |
-| ACC-25 | 删除组织节点 | 部分实现 | 已有叶节点检查和审计，但当前物理删除节点并删除成员/角色关联，未按目标对授予、路由和任务执行阻断后逻辑删除。 |
-| ACC-26 | 组织邀请 | 部分实现 | 当前支持电子邮箱和一次性邀请 Token，并有创建、接受、过期/撤销状态；手机号、用户名邀请及目标反枚举恢复契约未实现。 |
-| ACC-27 | 添加组织成员 | 部分实现 | 已有用户/组织状态、重复成员、角色边界、授权版本和 Outbox；重复有效成员返回冲突而非幂等原结果。 |
-| ACC-28 | 移除组织成员 | 部分实现 | 已有成员撤销、角色清理、授权版本和 Outbox；管理端路径未自动回退活动上下文，也未处理 BILL-13 授予暂停。 |
-| ACC-29 | 所有者安全转让 | 部分实现 | 已有专用串行事务维持唯一 OWNER 并更新版本/审计；缺稳定幂等键和目标 Account 权限码。 |
+| ACC-23 | 重命名组织节点 | 已实现 | 显式编辑 UI、原子目标权限、名称规则和幂等命令共同约束；成功只更新名称及节点/结构版本，节点 ID、父子关系和历史审计不变。 |
+| ACC-24 | 调整组织节点父节点 | 已实现 | `expected_structure_version`、组织串行锁和稳定请求指纹保证同组织原子移动；跨组织、停用父节点、自身及后代父级均拒绝。 |
+| ACC-25 | 删除组织节点 | 已实现 | Account/Billing/Token 先进入限制态并汇总成员、角色、子节点、授予登记、路由、用量和任务阻断；全部清零后仅写 DELETED，保留闭包树及历史，重试返回原结果。 |
+| ACC-26 | 组织邀请 | 已实现 | 手机号、用户名和一次性链接共用不可物理删除的邀请实体；创建不泄露目标存在，认证身份可反向恢复目标邀请，接受时绑定稳定用户且所有终态幂等保留。 |
+| ACC-27 | 添加组织成员 | 已实现 | 邀请接受与平台直接添加均校验目标和权限；稳定请求指纹使重复命令返回同一成员关系，只有真实状态变化才递增版本并发送事件。 |
+| ACC-28 | 移除组织成员 | 已实现 | 幂等撤销全部有效/未来角色，递增授权与 Session 版本并让所有相关上下文立即回退个人；Billing 成员投影同步进入 REVOKED，供授予暂停强制使用。 |
+| ACC-29 | 所有者安全转让 | 已实现 | `org.owner.transfer`/平台专用权限和稳定幂等键保护专用事务；旧 OWNER 只撤销不删除，新 OWNER 原子建立，延迟数据库约束禁止有效组织零个或多个所有者。 |
 | ACC-30 | 查看角色定义和用户关联角色 | 已实现 | 本人只看自身绑定；组织和运营视图完整展示角色作用域、开始/到期、来源和状态。 |
 | ACC-31 | 授予普通组织角色 | 已实现 | 普通组织/节点角色按授权作用域、起止时间和稳定幂等键创建，拒绝 OWNER、平台和基础角色。 |
 | ACC-32 | 撤销普通组织角色 | 已实现 | 支持单绑定幂等撤销，事务内刷新成员、Session 和授权版本并发送变更事件。 |
 | ACC-33 | 无组织用户不显示组织页签 | 已实现 | 个人中心按组织列表动态隐藏。 |
-| ACC-34 | 当前上下文按用户全局保存并跨端同步 | 部分实现 | 已有个人/组织活动上下文和版本字段，但按 OIDC Session 保存，不是用户级全局上下文，也无跨端同步。 |
+| ACC-34 | 当前上下文按用户全局保存并跨端同步 | 已实现 | 每个 user_id 只有一条活动上下文；期望版本 CAS 防止旧端覆盖新端，桌面与 Web 按响应版本和聚焦事件同步。 |
 | ACC-40 | 持久化注销 Saga | 未实现 | 当前没有独立注销聚合、阶段版本、幂等恢复、SLA 和 REPAIR_REQUIRED；现有注销无法证明跨 Identity、Account、Billing 与 Commerce 的崩溃恢复。 |
 | ACC-41 | 注销静默期业务冻结 | 未实现 | 当前没有主体生命周期版本及注销修复动作白名单，无法统一禁止新模型、Hold、订单、资料、成员和授权事实。 |
 | ACC-42 | 待核对模型用量阻断注销 | 未实现 | 当前注销预检只检查 Hold，未覆盖上游可能已派发、取消不确定、SETTLEMENT_PENDING、REVIEW 及以后仍可能追扣的用量状态。 |
@@ -659,8 +666,8 @@
 | BILL-02 | 余额以不可变平衡账本为准 | 已实现 | Journal Entry 与 Posting 平衡，不能直接覆盖余额。 |
 | BILL-03 | 积分使用整数最小单位 | 已实现 | `10,000 microcredits = 1 展示积分`；金额使用分。 |
 | BILL-06 | 充值形成有有效期的权益包 | 已实现 | 充值按支付订单和冻结商品快照创建独立权益包及 BASE/BONUS 组成，保存起止时间和组成余额。 |
-| BILL-07 | 组织权益在线购买入账 | 未实现 | 企业管理员购买时明确受益组织；支付成功幂等创建组织权益包和组织钱包分录，付款人个人钱包不参与。 |
-| BILL-08 | 组织成员额度手动分配 | 未实现 | 企业管理员从组织有效权益中给成员分配，员工无领取接口；分配、撤回、占用和消费均审计。 |
+| BILL-07 | 组织权益在线购买入账 | 已实现 | 订单保存付款申请人和受益组织，支付履约再次校验组织钱包归属并创建组织权益包及组成分录，个人钱包不参与。 |
+| BILL-08 | 组织成员额度手动分配 | 已实现 | 组织管理员按原子权限从精确包/组成给成员分配；无自领接口，分配、撤回、暂停/恢复、占用和消费均审计。 |
 | BILL-14 | 基础积分与赠送积分分项核算展示 | 已实现 | API 与三语 UI 分项返回并展示组成总额、可用、预占、已用、过期、撤销和到期时间。 |
 | BILL-15 | 消费按最早到期权益包优先 | 已实现 | Hold 分配与结算关联具体权益包。 |
 | BILL-17 | 人工赠送积分有效期 | 已实现 | 每次正向人工调整创建独立 BONUS 组成，自入账起 30 天到期。 |
@@ -678,8 +685,8 @@
 | BILL-34 | 模型计费使用可信实际生成量 | 未实现 | 当前未区分 Provider 实际生成量、Gateway 持久化序号和客户端确认序号，也没有平台不可恢复交付故障转损失复核的计费边界。 |
 | BILL-35 | 取消期间 Hold 生命周期 | 未实现 | 缺少派发前取消全释放、派发后继续续租、Provider 不支持取消时自然收敛、版本化核对期限及晚到用量不得重新扣用户的规则。 |
 | BILL-36 | 权益组成资金守恒 | 已实现 | 数据库按权益包/组成强制原始额在可用、Hold、已用、有效/暂停授予、过期和撤销桶间守恒，包汇总由触发器投影。 |
-| BILL-37 | 权益组成禁止超额授权 | 未实现 | 当前缺少只允许从同包同组成可用余额创建授予的数据库强约束，暂停授予和 Hold 可能无法证明不会被重复分配。 |
-| BILL-38 | 并发分配锁与幂等边界 | 未实现 | 当前未证明分配、撤回、Hold、结算、到期和退款共用组成级锁/CAS；缺少同键异请求冲突和多管理员竞争余额的并发测试。 |
+| BILL-37 | 权益组成禁止超额授权 | 已实现 | 授予只从同组织钱包、同包、同 BASE/BONUS 组成的可用桶转出；授予与组成均由数据库守恒约束保护。 |
+| BILL-38 | 并发分配锁与幂等边界 | 已实现 | 分配、撤回、成员 Hold、结算、释放和到期共用精确组成/授予行锁；同键异请求稳定冲突，批量逐项派生稳定子键并独立提交。 |
 | BILL-39 | 注销授予隔离至到期 | 未实现 | 当前没有区分普通成员移除的可恢复暂停与账号注销的 `ACCOUNT_CLOSED` 隔离暂停，也没有强制不自动回池、不可恢复/普通撤回、未回收部分到期失效及新用户 ID 不继承。 |
 | BILL-40 | 注销授予可选全额回收 | 未实现 | 当前没有账号 `ANONYMIZED` 后的专用授权回收命令，也没有对消费、Hold、待核对用量、资金冻结、全额边界、原组成守恒、幂等、批量部分成功与完整审计的强制校验。 |
 | BILL-41 | 模型覆盖价优先匹配 | 未实现 | 当前缺少按请求时间和价格作用域唯一选择模型覆盖、无覆盖才选全局的确定匹配器，也未统一 PRICE_MISSING/PRICE_AMBIGUOUS。 |
@@ -730,15 +737,15 @@
 | target_requirement_id | 需求 | 状态 | 当前实现/边界 |
 |---|---|---|---|
 | UI-01 | 桌面用户入口常显，未登录在弹层内登录 | 已实现 | 不跳外部浏览器；个人信息也在弹层中展示。 |
-| UI-03 | 个人中心提供概览、额度、用量和组织 | 部分实现 | 组织页签按成员关系隐藏；当前身份模块只放在概览；移除普通用户 Token Account/供应商 Key 管理入口。 |
+| UI-03 | 个人中心提供概览、额度、权益、用量和组织 | 已实现 | 概览、额度、权益、用量为独立导航；组织入口按有效成员关系显示，个人订单/发票和购买入口不会出现在组织上下文，普通用户视图不存在 Token Account 或供应商 Key 管理。 |
 | UI-04 | 普通用户界面不暴露内部结算/供应商运维信息 | 已实现 | 模型准备、内部结算状态、供应商凭据等从普通用户视图移除。 |
 | UI-05 | 账号资料与密码恢复 | 已实现 | 桌面 Popover 提供三语资料修改和密码恢复入口，并完成重新认证、短信、密码确认和稳定错误映射。 |
-| UI-06 | 个人中心只展示活动上下文额度 | 部分实现 | 个人上下文显示个人权益；组织上下文只显示当前成员被授予的组织额度，不同时展示其他上下文余额。 |
-| UI-07 | 跨端活动上下文同步 | 未实现 | 桌面与 Web 展示同一个服务端活动上下文；收到更高上下文版本、窗口重新聚焦或切换成功时清空旧额度/权限缓存并刷新。 |
+| UI-06 | 个人中心只展示活动上下文额度 | 已实现 | 上下文切换和跨端刷新会先清空旧余额、权益、订单与用量；个人/组织数据按新的服务端活动上下文重新加载。 |
+| UI-07 | 跨端活动上下文同步 | 已实现 | Web 响应头和桌面 Tauri 响应都传递 context_version；更高版本、聚焦及切换成功都会终止旧请求并刷新。 |
 | UI-08 | 权益包、到期与退款说明 | 已实现 | 桌面与 Portal 三语展示总可用、BASE/BONUS 分项、来源、消费顺序和到期提醒，并明确 BONUS 零现金退款及普通退款关联撤销。 |
 | UI-09 | 桌面跳转 Web 个人中心 | 未实现 | 登录后的账号 Popover 增加入口按钮；使用专用 Tauri 命令打开受信 Portal URL，不复用任意外链接口。 |
 | UI-10 | Web 个人充值入口 | 已实现 | Web 个人中心已提供个人权益充值入口；后续重构不得删除。 |
-| UI-11 | Web 组织购买入口 | 未实现 | 具有组织采购权限的企业管理员可在显式目标组织管理页购买组织权益。 |
+| UI-11 | Web 组织购买入口 | 已实现 | 具有组织采购权限的管理员可在显式活动组织页面购买组织权益；读取、授予与撤回入口分别按对应原子权限显示。 |
 | UI-12 | 支付能力降级展示 | 未实现 | 关单、退款、回调状态和账单能力按 Provider capabilities 展示；不支持退款时完全隐藏入口，不展示不可执行按钮诱导用户。 |
 | UI-13 | 模型停止与结算状态反馈 | 未实现 | 当前缺少停止接收、取消请求已受理、Provider 不支持取消、后台结束处理中、待核对和已结算的区分，也未提示取消生效前按实际用量计费。 |
 | UI-14 | 注销进度与阻断原因展示 | 未实现 | 当前没有持久注销状态页、脱敏阻断分类、用户恢复动作或“自动处理中”与“需要本人处理”的区分。 |
@@ -800,7 +807,7 @@
 | NFR-05 | 审计 | 账号、资金、Token、注册修复和审批生命周期已有审计；注销 Saga、Provider 事实修复等目标动作仍缺失。 |
 | NFR-06 | 幂等 | 钱包、支付入账、Hold、默认路由、结算和事件消费有幂等基础；注册操作、结果重放、注销和多项修复缺完整指纹契约。 |
 | NFR-07 | 最终一致性 | 三服务具备事务 Outbox/Inbox、至少一次 Relay、死信和人工重放；业务最终收敛依赖死信处置且多项 Saga 缺失。 |
-| NFR-08 | 全局上下文一致性 | 活动上下文按 OIDC Session 保存，未建立用户级全局 `context_version`、期望版本写入和跨端缓存失效。 |
+| NFR-08 | 全局上下文一致性 | 已实现用户级唯一上下文、数据库单调版本、期望版本 CAS、标准响应头和桌面/Web 缓存失效；生产多端并发仍待部署验证。 |
 | NFR-09 | 数据迁移 | 迁移按服务版本化且 up/down 成对并受合同检查；缺已执行迁移不可修改门禁及环境级迁移前后证明。 |
 | NFR-10 | 可恢复性 | 已有备份恢复、切换回滚 runbook 和版本目录约定；无实际备份、恢复演练和部署验收证据。 |
 | NFR-11 | 高可用 | 当前单机 Compose 不具备高可用；Helm 仅为未部署模板，不能证明多副本或故障转移。 |

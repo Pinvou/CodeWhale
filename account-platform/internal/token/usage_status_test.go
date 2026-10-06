@@ -24,7 +24,7 @@ func (r usageLookupRepository) GetUsage(context.Context, uuid.UUID) (UsageReques
 }
 
 func TestUsageStatusHTTPKeepsStorageFailureDistinctFromHiddenOrMissingUsage(t *testing.T) {
-	resolved := AuthorizationContext{UserID: uuid.New(), SessionID: "session", ContextType: "PERSONAL"}
+	resolved := AuthorizationContext{UserID: uuid.New(), SessionID: "session", ContextType: "PERSONAL", ContextVersion: 1, AuthorizationVersion: 1}
 	actual := int64(3)
 	usage := UsageRequest{ID: uuid.New(), UserID: resolved.UserID, SessionID: resolved.SessionID,
 		TokenAccountID: uuid.New(), WalletID: uuid.New(), Model: "model-test", Status: "COMMITTED",
@@ -102,7 +102,7 @@ func TestUsageStatusRequiresSameSessionAndActiveContext(t *testing.T) {
 	userID := uuid.New()
 	organizationID := uuid.New()
 	usage := UsageRequest{UserID: userID, SessionID: "session", OrganizationID: &organizationID}
-	context := AuthorizationContext{UserID: userID, SessionID: "session", ContextType: "ORGANIZATION", OrganizationID: &organizationID}
+	context := AuthorizationContext{UserID: userID, SessionID: "session", ContextType: "ORGANIZATION", ContextVersion: 1, AuthorizationVersion: 1, OrganizationID: &organizationID}
 	if !usageContextMatches(context, usage) {
 		t.Fatal("same session and organization should be authorized")
 	}

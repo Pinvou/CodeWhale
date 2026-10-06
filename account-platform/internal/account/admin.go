@@ -2,8 +2,11 @@ package account
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"slices"
 	"sort"
@@ -47,6 +50,25 @@ type AdminOrganization struct {
 	MemberCount int64     `json:"member_count"`
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
+}
+
+type AdminOrganizationFilter struct {
+	Search          string
+	Status          string
+	Limit           int
+	CursorUpdatedAt *time.Time
+	CursorID        *uuid.UUID
+}
+
+type AdminOrganizationPage struct {
+	Items      []AdminOrganization `json:"items"`
+	NextCursor *string             `json:"next_cursor"`
+}
+
+type AdminOrganizationState struct {
+	ID      uuid.UUID `json:"organization_id"`
+	Status  string    `json:"status"`
+	Version int64     `json:"version"`
 }
 
 type AdminRoleDefinition struct {
@@ -99,20 +121,25 @@ type adminRepository interface {
 	AdminUserMemberships(context.Context, uuid.UUID) ([]AdminUserMembership, error)
 	AdminSetUserStatus(context.Context, identity.Principal, uuid.UUID, string) error
 	AdminDeleteUser(context.Context, identity.Principal, uuid.UUID) error
-	AdminOrganizations(context.Context, string, int) ([]AdminOrganization, error)
-	AdminCreateOrganization(context.Context, identity.Principal, uuid.UUID, string) (Organization, error)
+	AdminOrganizations(context.Context, AdminOrganizationFilter) (AdminOrganizationPage, error)
+	AdminCreateOrganization(context.Context, identity.Principal, uuid.UUID, string, string) (Organization, error)
+	AdminRecordOrganizationCreationFailure(context.Context, identity.Principal, uuid.UUID, string, string) error
+	AdminOrganizationState(context.Context, uuid.UUID) (AdminOrganizationState, error)
+	AdminOrganizationDeletionBlockers(context.Context, uuid.UUID) ([]OrganizationLifecycleBlocker, error)
 	AdminRenameOrganization(context.Context, identity.Principal, uuid.UUID, string) error
 	AdminSetOrganizationStatus(context.Context, identity.Principal, uuid.UUID, string) error
 	AdminDeleteOrganization(context.Context, identity.Principal, uuid.UUID) error
-	AdminUnits(context.Context, uuid.UUID) ([]Unit, error)
+	AdminUnits(context.Context, uuid.UUID) (UnitTree, error)
+	AdminUnitState(context.Context, uuid.UUID, uuid.UUID) (UnitMutationResult, error)
 	AdminMembers(context.Context, uuid.UUID) ([]Member, error)
-	AdminAddMember(context.Context, identity.Principal, uuid.UUID, uuid.UUID, []string, []uuid.UUID) (Member, error)
+	AdminAddMember(context.Context, identity.Principal, uuid.UUID, uuid.UUID, []string, []uuid.UUID, string) (MembershipMutationResult, error)
 	AdminReplaceMemberRoles(context.Context, identity.Principal, uuid.UUID, uuid.UUID, []string, []uuid.UUID) (Member, error)
-	AdminRemoveMember(context.Context, identity.Principal, uuid.UUID, uuid.UUID) error
-	AdminTransferOwnership(context.Context, identity.Principal, uuid.UUID, uuid.UUID) error
-	AdminCreateUnit(context.Context, identity.Principal, uuid.UUID, *uuid.UUID, string) (Unit, error)
-	AdminRenameUnit(context.Context, identity.Principal, uuid.UUID, uuid.UUID, string) error
-	AdminDeleteUnit(context.Context, identity.Principal, uuid.UUID, uuid.UUID) error
+	AdminRemoveMember(context.Context, identity.Principal, uuid.UUID, uuid.UUID, string) (MembershipMutationResult, error)
+	AdminTransferOwnership(context.Context, identity.Principal, uuid.UUID, uuid.UUID, string) (OwnershipTransferResult, error)
+	AdminCreateUnit(context.Context, identity.Principal, uuid.UUID, *uuid.UUID, string, string) (UnitMutationResult, error)
+	AdminRenameUnit(context.Context, identity.Principal, uuid.UUID, uuid.UUID, string, string) (UnitMutationResult, error)
+	AdminUnitDeletionBlockers(context.Context, uuid.UUID, uuid.UUID) ([]OrganizationLifecycleBlocker, error)
+	AdminDeleteUnit(context.Context, identity.Principal, uuid.UUID, uuid.UUID, string) (UnitMutationResult, error)
 	AdminAuditLogs(context.Context, AdminAuditFilter) ([]AdminAuditLog, error)
 	AdminAuditLog(context.Context, uuid.UUID) (AdminAuditLog, error)
 }
@@ -134,6 +161,39 @@ func adminLimit(r *http.Request) int {
 		return 200
 	}
 	return limit
+}
+
+func parseAdminOrganizationFilter(r *http.Request) (AdminOrganizationFilter, error) {
+	filter := AdminOrganizationFilter{Search: strings.TrimSpace(r.URL.Query().Get("q")), Status: strings.ToUpper(strings.TrimSpace(r.URL.Query().Get("status"))), Limit: adminLimit(r)}
+	if filter.Status != "" && filter.Status != "ACTIVE" && filter.Status != "DISABLED" && filter.Status != "DELETED" {
+		return AdminOrganizationFilter{}, ErrConflict
+	}
+	cursor := strings.TrimSpace(r.URL.Query().Get("cursor"))
+	if cursor == "" {
+		return filter, nil
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(cursor)
+	if err != nil {
+		return AdminOrganizationFilter{}, err
+	}
+	var value struct {
+		UpdatedAt time.Time `json:"updated_at"`
+		ID        uuid.UUID `json:"organization_id"`
+	}
+	if err := json.Unmarshal(raw, &value); err != nil || value.UpdatedAt.IsZero() || value.ID == uuid.Nil {
+		return AdminOrganizationFilter{}, ErrConflict
+	}
+	value.UpdatedAt = value.UpdatedAt.UTC()
+	filter.CursorUpdatedAt, filter.CursorID = &value.UpdatedAt, &value.ID
+	return filter, nil
+}
+
+func encodeAdminOrganizationCursor(item AdminOrganization) (string, error) {
+	body, err := json.Marshal(map[string]any{"updated_at": item.UpdatedAt.UTC(), "organization_id": item.ID})
+	if err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(body), nil
 }
 
 func (s *Service) adminOverview(w http.ResponseWriter, r *http.Request) {
@@ -271,12 +331,17 @@ func (s *Service) adminOrganizations(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	items, err := repository.AdminOrganizations(r.Context(), strings.TrimSpace(r.URL.Query().Get("q")), adminLimit(r))
+	filter, err := parseAdminOrganizationFilter(r)
+	if err != nil {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_ORGANIZATION_FILTER", "organization filters are invalid", httpserver.RequestID(r.Context()))
+		return
+	}
+	page, err := repository.AdminOrganizations(r.Context(), filter)
 	if err != nil {
 		s.writeError(w, r, err)
 		return
 	}
-	api.WriteJSON(w, http.StatusOK, map[string]any{"items": items})
+	api.WriteJSON(w, http.StatusOK, page)
 }
 
 func (s *Service) adminCreateOrganization(w http.ResponseWriter, r *http.Request) {
@@ -285,19 +350,56 @@ func (s *Service) adminCreateOrganization(w http.ResponseWriter, r *http.Request
 		return
 	}
 	var body struct {
-		Name        string    `json:"name"`
-		OwnerUserID uuid.UUID `json:"owner_user_id"`
+		Name           string    `json:"name"`
+		OwnerUserID    uuid.UUID `json:"owner_user_id"`
+		IdempotencyKey string    `json:"idempotency_key"`
 	}
-	if err := api.DecodeJSON(w, r, &body); err != nil || body.OwnerUserID == uuid.Nil {
+	if err := api.DecodeJSON(w, r, &body); err != nil || body.OwnerUserID == uuid.Nil || strings.TrimSpace(body.Name) == "" {
+		_ = repository.AdminRecordOrganizationCreationFailure(r.Context(), mustPrincipal(r.Context()), body.OwnerUserID, body.Name, "INVALID_REQUEST")
 		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid administration request", httpserver.RequestID(r.Context()))
 		return
 	}
-	organization, err := repository.AdminCreateOrganization(r.Context(), mustPrincipal(r.Context()), body.OwnerUserID, body.Name)
+	idempotencyKey := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
+	if idempotencyKey == "" {
+		idempotencyKey = strings.TrimSpace(body.IdempotencyKey)
+	}
+	principal := mustPrincipal(r.Context())
+	if idempotencyKey == "" {
+		fallback := sha256.Sum256([]byte(principal.Issuer + "\x00" + principal.SessionID + "\x00" + body.OwnerUserID.String() + "\x00" + strings.TrimSpace(body.Name)))
+		idempotencyKey = fmt.Sprintf("portal-session:%x", fallback[:16])
+	}
+	if len(idempotencyKey) < 8 || len(idempotencyKey) > 120 {
+		_ = repository.AdminRecordOrganizationCreationFailure(r.Context(), principal, body.OwnerUserID, body.Name, "INVALID_IDEMPOTENCY_KEY")
+		api.WriteError(w, http.StatusBadRequest, "IDEMPOTENCY_KEY_REQUIRED", "an idempotency key between 8 and 120 characters is required", httpserver.RequestID(r.Context()))
+		return
+	}
+	organization, err := repository.AdminCreateOrganization(r.Context(), principal, body.OwnerUserID, body.Name, idempotencyKey)
 	if err != nil {
+		_ = repository.AdminRecordOrganizationCreationFailure(r.Context(), principal, body.OwnerUserID, body.Name, organizationCreationFailureCode(err))
 		s.writeError(w, r, err)
 		return
 	}
+	if len(s.organizationLifecycle) > 0 {
+		assessment, lifecycleErr := s.applyOrganizationLifecycleProjection(r.Context(), organization.ID, organization.Status, organization.Version)
+		if lifecycleErr != nil || !assessment.Ready {
+			api.WriteError(w, http.StatusServiceUnavailable, "ORGANIZATION_LIFECYCLE_UNAVAILABLE", "the organization was created but dependent lifecycle activation must be retried with the same idempotency key", httpserver.RequestID(r.Context()))
+			return
+		}
+	}
 	api.WriteJSON(w, http.StatusCreated, organization)
+}
+
+func organizationCreationFailureCode(err error) string {
+	switch {
+	case errors.Is(err, ErrNotFound):
+		return "OWNER_NOT_FOUND"
+	case errors.Is(err, ErrForbidden):
+		return "PERMISSION_DENIED"
+	case errors.Is(err, ErrConflict):
+		return "NAME_OR_IDEMPOTENCY_CONFLICT"
+	default:
+		return "INTERNAL_ERROR"
+	}
 }
 
 func (s *Service) adminRenameOrganization(w http.ResponseWriter, r *http.Request) {
@@ -332,12 +434,12 @@ func (s *Service) adminUnits(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	items, err := repository.AdminUnits(r.Context(), organizationID)
+	tree, err := repository.AdminUnits(r.Context(), organizationID)
 	if err != nil {
 		s.writeError(w, r, err)
 		return
 	}
-	api.WriteJSON(w, http.StatusOK, map[string]any{"items": items})
+	api.WriteJSON(w, http.StatusOK, tree)
 }
 
 func (s *Service) adminMembers(w http.ResponseWriter, r *http.Request) {
@@ -361,6 +463,7 @@ type adminMemberRolesBody struct {
 	UserID           uuid.UUID   `json:"user_id"`
 	Roles            []string    `json:"roles"`
 	UnitAdminUnitIDs []uuid.UUID `json:"unit_admin_unit_ids"`
+	IdempotencyKey   string      `json:"idempotency_key"`
 }
 
 func (s *Service) adminAddMember(w http.ResponseWriter, r *http.Request) {
@@ -381,12 +484,21 @@ func (s *Service) adminAddMember(w http.ResponseWriter, r *http.Request) {
 		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "user is required", httpserver.RequestID(r.Context()))
 		return
 	}
-	member, err := repository.AdminAddMember(r.Context(), mustPrincipal(r.Context()), organizationID, body.UserID, body.Roles, body.UnitAdminUnitIDs)
+	idempotencyKey := organizationUnitIdempotencyKey(r, body.IdempotencyKey, "admin-member-add:"+organizationID.String()+":"+body.UserID.String())
+	result, err := repository.AdminAddMember(r.Context(), mustPrincipal(r.Context()), organizationID, body.UserID, body.Roles, body.UnitAdminUnitIDs, idempotencyKey)
 	if err != nil {
 		s.writeError(w, r, err)
 		return
 	}
-	api.WriteJSON(w, http.StatusCreated, member)
+	if err := s.applyOrganizationMemberLifecycle(r.Context(), result, "ACTIVE"); err != nil {
+		api.WriteError(w, http.StatusServiceUnavailable, "ORGANIZATION_MEMBER_LIFECYCLE_UNAVAILABLE", "the member was added locally but grant activation must be retried with the same idempotency key", httpserver.RequestID(r.Context()))
+		return
+	}
+	status := http.StatusCreated
+	if result.Replayed {
+		status = http.StatusOK
+	}
+	api.WriteJSON(w, status, result)
 }
 
 func (s *Service) adminReplaceMemberRoles(w http.ResponseWriter, r *http.Request) {
@@ -428,11 +540,17 @@ func (s *Service) adminRemoveMember(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if err := repository.AdminRemoveMember(r.Context(), mustPrincipal(r.Context()), organizationID, userID); err != nil {
+	idempotencyKey := organizationUnitIdempotencyKey(r, r.URL.Query().Get("idempotency_key"), "admin-member-remove:"+organizationID.String()+":"+userID.String())
+	result, err := repository.AdminRemoveMember(r.Context(), mustPrincipal(r.Context()), organizationID, userID, idempotencyKey)
+	if err != nil {
 		s.writeError(w, r, err)
 		return
 	}
-	w.WriteHeader(http.StatusNoContent)
+	if err := s.applyOrganizationMemberLifecycle(r.Context(), result, "REVOKED"); err != nil {
+		api.WriteError(w, http.StatusServiceUnavailable, "ORGANIZATION_MEMBER_LIFECYCLE_UNAVAILABLE", "the membership was revoked locally but grant suspension must be retried with the same idempotency key", httpserver.RequestID(r.Context()))
+		return
+	}
+	api.WriteJSON(w, http.StatusOK, result)
 }
 
 func (s *Service) adminTransferOwnership(w http.ResponseWriter, r *http.Request) {
@@ -446,6 +564,7 @@ func (s *Service) adminTransferOwnership(w http.ResponseWriter, r *http.Request)
 	}
 	var body struct {
 		NewOwnerUserID uuid.UUID `json:"new_owner_user_id"`
+		IdempotencyKey string    `json:"idempotency_key"`
 	}
 	if err := api.DecodeJSON(w, r, &body); err != nil {
 		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid administration request", httpserver.RequestID(r.Context()))
@@ -455,11 +574,13 @@ func (s *Service) adminTransferOwnership(w http.ResponseWriter, r *http.Request)
 		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "new owner is required", httpserver.RequestID(r.Context()))
 		return
 	}
-	if err := repository.AdminTransferOwnership(r.Context(), mustPrincipal(r.Context()), organizationID, body.NewOwnerUserID); err != nil {
+	idempotencyKey := organizationUnitIdempotencyKey(r, body.IdempotencyKey, "admin-ownership-transfer:"+organizationID.String()+":"+body.NewOwnerUserID.String())
+	result, err := repository.AdminTransferOwnership(r.Context(), mustPrincipal(r.Context()), organizationID, body.NewOwnerUserID, idempotencyKey)
+	if err != nil {
 		s.writeError(w, r, err)
 		return
 	}
-	w.WriteHeader(http.StatusNoContent)
+	api.WriteJSON(w, http.StatusOK, result)
 }
 
 func (s *Service) adminCreateUnit(w http.ResponseWriter, r *http.Request) {
@@ -472,19 +593,33 @@ func (s *Service) adminCreateUnit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		Name     string     `json:"name"`
-		ParentID *uuid.UUID `json:"parent_id"`
+		Name           string     `json:"name"`
+		ParentID       *uuid.UUID `json:"parent_id"`
+		IdempotencyKey string     `json:"idempotency_key"`
 	}
 	if err := api.DecodeJSON(w, r, &body); err != nil {
 		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid administration request", httpserver.RequestID(r.Context()))
 		return
 	}
-	unit, err := repository.AdminCreateUnit(r.Context(), mustPrincipal(r.Context()), organizationID, body.ParentID, body.Name)
+	idempotencyKey := organizationUnitIdempotencyKey(r, body.IdempotencyKey, "admin-unit-create:"+organizationID.String()+":"+strings.TrimSpace(body.Name)+":"+fmt.Sprint(body.ParentID))
+	if !validOrganizationUnitIdempotencyKey(idempotencyKey) {
+		api.WriteError(w, http.StatusBadRequest, "IDEMPOTENCY_KEY_REQUIRED", "an idempotency key between 8 and 120 characters is required", httpserver.RequestID(r.Context()))
+		return
+	}
+	result, err := repository.AdminCreateUnit(r.Context(), mustPrincipal(r.Context()), organizationID, body.ParentID, body.Name, idempotencyKey)
 	if err != nil {
 		s.writeError(w, r, err)
 		return
 	}
-	api.WriteJSON(w, http.StatusCreated, unit)
+	if ready, err := s.synchronizeCreatedUnitLifecycle(r.Context(), organizationID, result.Unit.ID); err != nil || !ready {
+		api.WriteError(w, http.StatusServiceUnavailable, "ORGANIZATION_UNIT_LIFECYCLE_UNAVAILABLE", "the unit was created but dependent lifecycle activation must be retried with the same idempotency key", httpserver.RequestID(r.Context()))
+		return
+	}
+	status := http.StatusCreated
+	if result.Replayed {
+		status = http.StatusOK
+	}
+	api.WriteJSON(w, status, result)
 }
 
 func (s *Service) adminRenameUnit(w http.ResponseWriter, r *http.Request) {
@@ -501,17 +636,20 @@ func (s *Service) adminRenameUnit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		Name string `json:"name"`
+		Name           string `json:"name"`
+		IdempotencyKey string `json:"idempotency_key"`
 	}
 	if err := api.DecodeJSON(w, r, &body); err != nil {
 		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid administration request", httpserver.RequestID(r.Context()))
 		return
 	}
-	if err := repository.AdminRenameUnit(r.Context(), mustPrincipal(r.Context()), organizationID, unitID, body.Name); err != nil {
+	idempotencyKey := organizationUnitIdempotencyKey(r, body.IdempotencyKey, "admin-unit-rename:"+organizationID.String()+":"+unitID.String()+":"+strings.TrimSpace(body.Name))
+	result, err := repository.AdminRenameUnit(r.Context(), mustPrincipal(r.Context()), organizationID, unitID, body.Name, idempotencyKey)
+	if err != nil {
 		s.writeError(w, r, err)
 		return
 	}
-	w.WriteHeader(http.StatusNoContent)
+	api.WriteJSON(w, http.StatusOK, result)
 }
 
 func (s *Service) adminDeleteUnit(w http.ResponseWriter, r *http.Request) {
@@ -527,11 +665,52 @@ func (s *Service) adminDeleteUnit(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if err := repository.AdminDeleteUnit(r.Context(), mustPrincipal(r.Context()), organizationID, unitID); err != nil {
+	idempotencyKey := organizationUnitIdempotencyKey(r, r.URL.Query().Get("idempotency_key"), "admin-unit-delete:"+organizationID.String()+":"+unitID.String())
+	state, err := repository.AdminUnitState(r.Context(), organizationID, unitID)
+	if err != nil {
 		s.writeError(w, r, err)
 		return
 	}
-	w.WriteHeader(http.StatusNoContent)
+	if state.Unit.Status != "DELETED" {
+		blockers, err := repository.AdminUnitDeletionBlockers(r.Context(), organizationID, unitID)
+		if err != nil {
+			s.writeError(w, r, err)
+			return
+		}
+		if len(blockers) > 0 {
+			s.writeOrganizationUnitLifecycleFailure(w, r, OrganizationUnitDeletionAssessment{OrganizationID: organizationID, UnitID: unitID, Status: "DELETION_PENDING", StructureVersion: state.StructureVersion, Blockers: blockers})
+			return
+		}
+		assessment, err := s.applyOrganizationUnitLifecycle(r.Context(), organizationID, unitID, "DELETION_PENDING", state.StructureVersion)
+		if err != nil {
+			api.WriteError(w, http.StatusServiceUnavailable, "ORGANIZATION_UNIT_LIFECYCLE_UNAVAILABLE", "organization unit deletion facts could not be confirmed", httpserver.RequestID(r.Context()))
+			return
+		}
+		if !assessment.Ready {
+			s.writeOrganizationUnitLifecycleFailure(w, r, assessment)
+			return
+		}
+	}
+	result, err := repository.AdminDeleteUnit(r.Context(), mustPrincipal(r.Context()), organizationID, unitID, idempotencyKey)
+	if err != nil {
+		var blocked *OrganizationUnitBlockedError
+		if errors.As(err, &blocked) {
+			s.writeOrganizationUnitLifecycleFailure(w, r, OrganizationUnitDeletionAssessment{OrganizationID: organizationID, UnitID: unitID, Status: "DELETION_PENDING", StructureVersion: state.StructureVersion, Blockers: blocked.Blockers})
+			return
+		}
+		s.writeError(w, r, err)
+		return
+	}
+	assessment, err := s.applyOrganizationUnitLifecycle(r.Context(), organizationID, unitID, "DELETED", result.StructureVersion)
+	if err != nil || !assessment.Ready {
+		api.WriteError(w, http.StatusServiceUnavailable, "ORGANIZATION_UNIT_LIFECYCLE_UNAVAILABLE", "the unit was deleted locally but dependent lifecycle finalization must be retried with the same idempotency key", httpserver.RequestID(r.Context()))
+		return
+	}
+	api.WriteJSON(w, http.StatusOK, result)
+}
+
+func (s *Service) writeOrganizationUnitLifecycleFailure(w http.ResponseWriter, r *http.Request, assessment OrganizationUnitDeletionAssessment) {
+	api.WriteJSON(w, http.StatusConflict, api.Error{Code: "ORGANIZATION_UNIT_LIFECYCLE_BLOCKED", Message: "organization unit deletion is blocked by associated resources", RequestID: httpserver.RequestID(r.Context()), Details: map[string]any{"organization_id": assessment.OrganizationID, "unit_id": assessment.UnitID, "requested_status": assessment.Status, "structure_version": assessment.StructureVersion, "blockers": assessment.Blockers}})
 }
 
 func (s *Service) adminSetUserStatus(w http.ResponseWriter, r *http.Request) {
@@ -569,6 +748,30 @@ func (s *Service) adminSetStatus(w http.ResponseWriter, r *http.Request, resourc
 	if resource == "user" {
 		err = repository.AdminSetUserStatus(r.Context(), principal, resourceID, body.Status)
 	} else {
+		state, stateErr := repository.AdminOrganizationState(r.Context(), resourceID)
+		if stateErr != nil {
+			s.writeError(w, r, stateErr)
+			return
+		}
+		if state.Status == body.Status {
+			if len(s.organizationLifecycle) > 0 {
+				assessment, lifecycleErr := s.applyOrganizationLifecycleProjection(r.Context(), resourceID, body.Status, state.Version)
+				if lifecycleErr != nil || !assessment.Ready {
+					s.writeOrganizationLifecycleFailure(w, r, assessment, lifecycleErr)
+					return
+				}
+			}
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		nextVersion := state.Version + 1
+		if len(s.organizationLifecycle) > 0 {
+			assessment, lifecycleErr := s.applyOrganizationLifecycleProjection(r.Context(), resourceID, body.Status, nextVersion)
+			if lifecycleErr != nil || !assessment.Ready {
+				s.writeOrganizationLifecycleFailure(w, r, assessment, lifecycleErr)
+				return
+			}
+		}
 		err = repository.AdminSetOrganizationStatus(r.Context(), principal, resourceID, body.Status)
 	}
 	if err != nil {
@@ -600,6 +803,45 @@ func (s *Service) adminDelete(w http.ResponseWriter, r *http.Request, resource s
 	if resource == "user" {
 		err = repository.AdminDeleteUser(r.Context(), principal, resourceID)
 	} else {
+		state, stateErr := repository.AdminOrganizationState(r.Context(), resourceID)
+		if stateErr != nil {
+			s.writeError(w, r, stateErr)
+			return
+		}
+		if state.Status == "DELETED" {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		if state.Status != "DISABLED" {
+			s.writeOrganizationLifecycleFailure(w, r, OrganizationLifecycleAssessment{OrganizationID: resourceID, Status: "DELETED", AccountVersion: state.Version + 1, Ready: false, Blockers: []OrganizationLifecycleBlocker{{Code: "ORGANIZATION_NOT_DISABLED", Domain: "ACCOUNT", ResourceType: "organization", ResourceID: resourceID.String()}}}, nil)
+			return
+		}
+		blockers, blockerErr := repository.AdminOrganizationDeletionBlockers(r.Context(), resourceID)
+		if blockerErr != nil {
+			s.writeError(w, r, blockerErr)
+			return
+		}
+		if len(blockers) > 0 {
+			s.writeOrganizationLifecycleFailure(w, r, OrganizationLifecycleAssessment{OrganizationID: resourceID, Status: "DELETED", AccountVersion: state.Version + 1, Ready: false, Blockers: blockers}, nil)
+			return
+		}
+		if len(s.organizationLifecycle) > 0 {
+			currentAssessment, currentErr := s.applyOrganizationLifecycleProjection(r.Context(), resourceID, "DISABLED", state.Version)
+			if currentErr != nil || !currentAssessment.Ready {
+				s.writeOrganizationLifecycleFailure(w, r, currentAssessment, currentErr)
+				return
+			}
+			preflightAssessment, preflightErr := s.preflightOrganizationLifecycleProjection(r.Context(), resourceID, "DELETED", state.Version+1)
+			if preflightErr != nil || !preflightAssessment.Ready {
+				s.writeOrganizationLifecycleFailure(w, r, preflightAssessment, preflightErr)
+				return
+			}
+			assessment, lifecycleErr := s.applyOrganizationLifecycleProjection(r.Context(), resourceID, "DELETED", state.Version+1)
+			if lifecycleErr != nil || !assessment.Ready {
+				s.writeOrganizationLifecycleFailure(w, r, assessment, lifecycleErr)
+				return
+			}
+		}
 		err = repository.AdminDeleteOrganization(r.Context(), principal, resourceID)
 	}
 	if err != nil {
@@ -607,6 +849,14 @@ func (s *Service) adminDelete(w http.ResponseWriter, r *http.Request, resource s
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Service) writeOrganizationLifecycleFailure(w http.ResponseWriter, r *http.Request, assessment OrganizationLifecycleAssessment, err error) {
+	if err != nil {
+		api.WriteError(w, http.StatusServiceUnavailable, "ORGANIZATION_LIFECYCLE_UNAVAILABLE", "organization lifecycle facts could not be confirmed", httpserver.RequestID(r.Context()))
+		return
+	}
+	api.WriteJSON(w, http.StatusConflict, api.Error{Code: "ORGANIZATION_LIFECYCLE_BLOCKED", Message: "organization lifecycle is blocked by unconverged facts", RequestID: httpserver.RequestID(r.Context()), Details: map[string]any{"organization_id": assessment.OrganizationID, "requested_status": assessment.Status, "blockers": assessment.Blockers}})
 }
 
 func (s *Service) adminAuditLogs(w http.ResponseWriter, r *http.Request) {
@@ -740,40 +990,84 @@ ORDER BY lower(o.name),o.id`, userID)
 	return items, rows.Err()
 }
 
-func (r *PostgresRepository) AdminOrganizations(ctx context.Context, search string, limit int) ([]AdminOrganization, error) {
-	pattern := "%" + strings.ToLower(search) + "%"
+func (r *PostgresRepository) AdminOrganizations(ctx context.Context, filter AdminOrganizationFilter) (AdminOrganizationPage, error) {
+	search := strings.ToLower(strings.TrimSpace(filter.Search))
+	pattern := "%" + search + "%"
+	limit := filter.Limit
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
 	rows, err := r.pool.Query(ctx, `
 SELECT o.id,o.name,o.status,count(m.id) FILTER (WHERE m.status='ACTIVE'),o.created_at,o.updated_at
 FROM organizations o LEFT JOIN memberships m ON m.organization_id=o.id
-WHERE o.status<>'DELETED' AND ($1='' OR lower(o.name) LIKE $2 OR o.id::text=$1)
-GROUP BY o.id ORDER BY o.updated_at DESC,o.id LIMIT $3`, strings.ToLower(search), pattern, limit)
+WHERE ($1='' OR lower(o.name) LIKE $2 OR o.id::text=$1)
+  AND ($3='' AND o.status<>'DELETED' OR o.status=$3)
+  AND ($4::timestamptz IS NULL OR o.updated_at<$4 OR (o.updated_at=$4 AND o.id<$5::uuid))
+GROUP BY o.id ORDER BY o.updated_at DESC,o.id DESC LIMIT $6`, search, pattern, filter.Status, filter.CursorUpdatedAt, filter.CursorID, limit+1)
 	if err != nil {
-		return nil, err
+		return AdminOrganizationPage{}, err
 	}
 	defer rows.Close()
-	items := make([]AdminOrganization, 0)
+	items := make([]AdminOrganization, 0, limit+1)
 	for rows.Next() {
 		var item AdminOrganization
 		if err := rows.Scan(&item.ID, &item.Name, &item.Status, &item.MemberCount, &item.CreatedAt, &item.UpdatedAt); err != nil {
-			return nil, err
+			return AdminOrganizationPage{}, err
 		}
 		items = append(items, item)
 	}
-	return items, rows.Err()
+	if err := rows.Err(); err != nil {
+		return AdminOrganizationPage{}, err
+	}
+	page := AdminOrganizationPage{Items: items, NextCursor: nil}
+	if len(items) > limit {
+		cursor, err := encodeAdminOrganizationCursor(items[limit-1])
+		if err != nil {
+			return AdminOrganizationPage{}, err
+		}
+		page.Items = items[:limit]
+		page.NextCursor = &cursor
+	}
+	return page, nil
 }
 
-func (r *PostgresRepository) AdminCreateOrganization(ctx context.Context, principal identity.Principal, ownerUserID uuid.UUID, name string) (Organization, error) {
+func (r *PostgresRepository) AdminCreateOrganization(ctx context.Context, principal identity.Principal, ownerUserID uuid.UUID, name, idempotencyKey string) (Organization, error) {
 	name = strings.TrimSpace(name)
-	if ownerUserID == uuid.Nil || name == "" || len([]rune(name)) > 120 {
+	idempotencyKey = strings.TrimSpace(idempotencyKey)
+	if ownerUserID == uuid.Nil || name == "" || len([]rune(name)) > 120 || len(idempotencyKey) < 8 || len(idempotencyKey) > 120 {
 		return Organization{}, ErrConflict
 	}
-	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
+	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 	if err != nil {
 		return Organization{}, err
 	}
 	defer tx.Rollback(ctx)
 	actorID, err := adminActorID(ctx, tx, principal)
 	if err != nil {
+		return Organization{}, err
+	}
+	if actorID == nil {
+		return Organization{}, ErrForbidden
+	}
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, "organization-create:"+actorID.String()+":"+idempotencyKey); err != nil {
+		return Organization{}, err
+	}
+	requestHash := fmt.Sprintf("%x", sha256.Sum256([]byte(ownerUserID.String()+"\x00"+name)))
+	var existingID uuid.UUID
+	var existingHash string
+	err = tx.QueryRow(ctx, `SELECT organization_id,request_hash FROM organization_creation_requests WHERE actor_user_id=$1 AND idempotency_key=$2`, *actorID, idempotencyKey).Scan(&existingID, &existingHash)
+	if err == nil {
+		if existingHash != requestHash {
+			return Organization{}, ErrConflict
+		}
+		var existing Organization
+		if err := tx.QueryRow(ctx, `SELECT id,name,status,version FROM organizations WHERE id=$1`, existingID).Scan(&existing.ID, &existing.Name, &existing.Status, &existing.Version); err != nil {
+			return Organization{}, err
+		}
+		existing.Roles = []string{"OWNER"}
+		return existing, tx.Commit(ctx)
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
 		return Organization{}, err
 	}
 	var ownerStatus string
@@ -796,7 +1090,7 @@ func (r *PostgresRepository) AdminCreateOrganization(ctx context.Context, princi
 	if _, err := tx.Exec(ctx, `INSERT INTO memberships(id,organization_id,user_id,status,joined_at,updated_at) VALUES($1,$2,$3,'ACTIVE',$4,$4)`, membershipID, organization.ID, ownerUserID, now); err != nil {
 		return Organization{}, mapConstraintError(err)
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO role_bindings(id,membership_id,role,created_by,created_at,grant_source) VALUES($1,$2,'OWNER',$3,$4,'ORGANIZATION_CREATION')`, uuid.Must(uuid.NewV7()), membershipID, ownerUserID, now); err != nil {
+	if _, err := tx.Exec(ctx, `INSERT INTO role_bindings(id,membership_id,role,created_by,created_at,starts_at,grant_source) VALUES($1,$2,'OWNER',$3,$4,$4,'ORGANIZATION_CREATION')`, uuid.Must(uuid.NewV7()), membershipID, ownerUserID, now); err != nil {
 		return Organization{}, mapConstraintError(err)
 	}
 	if _, err := tx.Exec(ctx, `UPDATE users SET membership_version=membership_version+1,updated_at=$2 WHERE id=$1`, ownerUserID, now); err != nil {
@@ -811,7 +1105,62 @@ func (r *PostgresRepository) AdminCreateOrganization(ctx context.Context, princi
 	if err := appendMembershipChanged(ctx, tx, membershipID, organization.ID, ownerUserID, "ACTIVE", 1); err != nil {
 		return Organization{}, err
 	}
+	if _, err := tx.Exec(ctx, `INSERT INTO organization_creation_requests(actor_user_id,idempotency_key,request_hash,organization_id,created_at) VALUES($1,$2,$3,$4,$5)`, *actorID, idempotencyKey, requestHash, organization.ID, now); err != nil {
+		return Organization{}, mapConstraintError(err)
+	}
 	return organization, tx.Commit(ctx)
+}
+
+func (r *PostgresRepository) AdminOrganizationState(ctx context.Context, organizationID uuid.UUID) (AdminOrganizationState, error) {
+	var state AdminOrganizationState
+	err := r.pool.QueryRow(ctx, `SELECT id,status,version FROM organizations WHERE id=$1`, organizationID).Scan(&state.ID, &state.Status, &state.Version)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return AdminOrganizationState{}, ErrNotFound
+	}
+	return state, err
+}
+
+func (r *PostgresRepository) AdminRecordOrganizationCreationFailure(ctx context.Context, principal identity.Principal, ownerUserID uuid.UUID, name, reasonCode string) error {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	actorID, err := adminActorID(ctx, tx, principal)
+	if err != nil {
+		return err
+	}
+	if err := appendAdminAuditResult(ctx, tx, actorID, principal, nil, "admin.organization.create", "organization", "pending", "FAILED", map[string]any{"name": strings.TrimSpace(name), "owner_user_id": ownerUserID, "reason_code": strings.TrimSpace(reasonCode)}); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+func (r *PostgresRepository) AdminOrganizationDeletionBlockers(ctx context.Context, organizationID uuid.UUID) ([]OrganizationLifecycleBlocker, error) {
+	rows, err := r.pool.Query(ctx, `
+SELECT code,resource_type,resource_id FROM (
+  SELECT 'PENDING_INVITATION' code,'invitation' resource_type,id::text resource_id
+  FROM invitations WHERE organization_id=$1 AND status='PENDING' AND expires_at>now()
+  UNION ALL
+  SELECT 'PENDING_APPROVAL_REQUEST','approval_request',id::text
+  FROM approval_requests
+  WHERE target_resource_type='organization' AND target_resource_id=$1::text
+    AND status IN ('DRAFT','SUBMITTED','APPROVED','EXECUTING')
+) blockers ORDER BY code,resource_id`, organizationID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	blockers := make([]OrganizationLifecycleBlocker, 0)
+	for rows.Next() {
+		var blocker OrganizationLifecycleBlocker
+		blocker.Domain = "ACCOUNT"
+		if err := rows.Scan(&blocker.Code, &blocker.ResourceType, &blocker.ResourceID); err != nil {
+			return nil, err
+		}
+		blockers = append(blockers, blocker)
+	}
+	return blockers, rows.Err()
 }
 
 func (r *PostgresRepository) AdminRenameOrganization(ctx context.Context, principal identity.Principal, organizationID uuid.UUID, name string) error {
@@ -848,28 +1197,27 @@ func (r *PostgresRepository) AdminRenameOrganization(ctx context.Context, princi
 	return tx.Commit(ctx)
 }
 
-func (r *PostgresRepository) AdminUnits(ctx context.Context, organizationID uuid.UUID) ([]Unit, error) {
-	var exists bool
-	if err := r.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM organizations WHERE id=$1 AND status<>'DELETED')`, organizationID).Scan(&exists); err != nil {
-		return nil, err
-	}
-	if !exists {
-		return nil, ErrNotFound
+func (r *PostgresRepository) AdminUnits(ctx context.Context, organizationID uuid.UUID) (UnitTree, error) {
+	var structureVersion int64
+	if err := r.pool.QueryRow(ctx, `SELECT structure_version FROM organizations WHERE id=$1 AND status<>'DELETED'`, organizationID).Scan(&structureVersion); errors.Is(err, pgx.ErrNoRows) {
+		return UnitTree{}, ErrNotFound
+	} else if err != nil {
+		return UnitTree{}, err
 	}
 	rows, err := r.pool.Query(ctx, `SELECT id,organization_id,parent_id,name,status,version FROM organization_units WHERE organization_id=$1 ORDER BY created_at,id`, organizationID)
 	if err != nil {
-		return nil, err
+		return UnitTree{}, err
 	}
 	defer rows.Close()
 	items := make([]Unit, 0)
 	for rows.Next() {
 		var item Unit
 		if err := rows.Scan(&item.ID, &item.OrganizationID, &item.ParentID, &item.Name, &item.Status, &item.Version); err != nil {
-			return nil, err
+			return UnitTree{}, err
 		}
 		items = append(items, item)
 	}
-	return items, rows.Err()
+	return UnitTree{Items: items, StructureVersion: structureVersion}, rows.Err()
 }
 
 func (r *PostgresRepository) AdminMembers(ctx context.Context, organizationID uuid.UUID) ([]Member, error) {
@@ -953,12 +1301,12 @@ func replaceAdminMemberRoles(ctx context.Context, tx pgx.Tx, membershipID, userI
 		return 0, err
 	}
 	for _, role := range roles {
-		if _, err := tx.Exec(ctx, `INSERT INTO role_bindings(id,membership_id,role,created_by,created_at,grant_source) VALUES($1,$2,$3,$4,$5,'ADMIN')`, uuid.Must(uuid.NewV7()), membershipID, role, actorID, now); err != nil {
+		if _, err := tx.Exec(ctx, `INSERT INTO role_bindings(id,membership_id,role,created_by,created_at,starts_at,grant_source) VALUES($1,$2,$3,$4,$5,$5,'ADMIN')`, uuid.Must(uuid.NewV7()), membershipID, role, actorID, now); err != nil {
 			return 0, mapConstraintError(err)
 		}
 	}
 	for _, unitID := range unitAdminIDs {
-		if _, err := tx.Exec(ctx, `INSERT INTO role_bindings(id,membership_id,role,unit_id,created_by,created_at,grant_source) VALUES($1,$2,'UNIT_ADMIN',$3,$4,$5,'ADMIN')`, uuid.Must(uuid.NewV7()), membershipID, unitID, actorID, now); err != nil {
+		if _, err := tx.Exec(ctx, `INSERT INTO role_bindings(id,membership_id,role,unit_id,created_by,created_at,starts_at,grant_source) VALUES($1,$2,'UNIT_ADMIN',$3,$4,$5,$5,'ADMIN')`, uuid.Must(uuid.NewV7()), membershipID, unitID, actorID, now); err != nil {
 			return 0, mapConstraintError(err)
 		}
 	}
@@ -977,75 +1325,6 @@ func replaceAdminMemberRoles(ctx context.Context, tx pgx.Tx, membershipID, userI
 		return 0, err
 	}
 	return version, nil
-}
-
-func (r *PostgresRepository) AdminAddMember(ctx context.Context, principal identity.Principal, organizationID, userID uuid.UUID, roles []string, unitAdminIDs []uuid.UUID) (Member, error) {
-	roles, unitAdminIDs, err := normalizeAdminMemberRoles(roles, unitAdminIDs)
-	if err != nil {
-		return Member{}, err
-	}
-	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
-	if err != nil {
-		return Member{}, err
-	}
-	defer tx.Rollback(ctx)
-	actorID, err := adminActorID(ctx, tx, principal)
-	if err != nil {
-		return Member{}, err
-	}
-	var organizationStatus, userStatus string
-	if err := tx.QueryRow(ctx, `SELECT status FROM organizations WHERE id=$1 FOR UPDATE`, organizationID).Scan(&organizationStatus); errors.Is(err, pgx.ErrNoRows) || organizationStatus == "DELETED" {
-		return Member{}, ErrNotFound
-	} else if err != nil {
-		return Member{}, err
-	}
-	if err := tx.QueryRow(ctx, `SELECT status FROM users WHERE id=$1 FOR UPDATE`, userID).Scan(&userStatus); errors.Is(err, pgx.ErrNoRows) || userStatus == "DELETED" {
-		return Member{}, ErrNotFound
-	} else if err != nil {
-		return Member{}, err
-	}
-	if organizationStatus != "ACTIVE" || userStatus != "ACTIVE" {
-		return Member{}, ErrConflict
-	}
-	if err := validateAdminUnits(ctx, tx, organizationID, unitAdminIDs); err != nil {
-		return Member{}, err
-	}
-	var membershipID uuid.UUID
-	var status string
-	err = tx.QueryRow(ctx, `SELECT id,status FROM memberships WHERE organization_id=$1 AND user_id=$2 FOR UPDATE`, organizationID, userID).Scan(&membershipID, &status)
-	newMembership := errors.Is(err, pgx.ErrNoRows)
-	now := r.now()
-	if errors.Is(err, pgx.ErrNoRows) {
-		membershipID = uuid.Must(uuid.NewV7())
-		if _, err := tx.Exec(ctx, `INSERT INTO memberships(id,organization_id,user_id,status,joined_at,updated_at) VALUES($1,$2,$3,'ACTIVE',$4,$4)`, membershipID, organizationID, userID, now); err != nil {
-			return Member{}, mapConstraintError(err)
-		}
-	} else if err != nil {
-		return Member{}, err
-	} else if status == "ACTIVE" {
-		return Member{}, ErrConflict
-	} else if _, err := tx.Exec(ctx, `UPDATE memberships SET status='ACTIVE',updated_at=$2 WHERE id=$1`, membershipID, now); err != nil {
-		return Member{}, err
-	}
-	createdBy := userID
-	if actorID != nil {
-		createdBy = *actorID
-	}
-	version, err := replaceAdminMemberRoles(ctx, tx, membershipID, userID, createdBy, roles, unitAdminIDs, now, !newMembership)
-	if err != nil {
-		return Member{}, err
-	}
-	if err := appendAdminAudit(ctx, tx, actorID, principal, &organizationID, "admin.membership.add", "membership", membershipID.String(), map[string]any{"user_id": userID, "roles": roles, "unit_admin_unit_ids": unitAdminIDs}); err != nil {
-		return Member{}, err
-	}
-	if err := appendOutbox(ctx, tx, "account.membership.changed.v1", membershipID, version, map[string]any{"organization_id": organizationID, "user_id": userID, "membership_status": "ACTIVE", "membership_version": version}); err != nil {
-		return Member{}, err
-	}
-	member, err := getMember(ctx, tx, membershipID)
-	if err != nil {
-		return Member{}, err
-	}
-	return member, tx.Commit(ctx)
 }
 
 func (r *PostgresRepository) AdminReplaceMemberRoles(ctx context.Context, principal identity.Principal, organizationID, userID uuid.UUID, roles []string, unitAdminIDs []uuid.UUID) (Member, error) {
@@ -1091,332 +1370,6 @@ func (r *PostgresRepository) AdminReplaceMemberRoles(ctx context.Context, princi
 		return Member{}, err
 	}
 	return member, tx.Commit(ctx)
-}
-
-func (r *PostgresRepository) AdminRemoveMember(ctx context.Context, principal identity.Principal, organizationID, userID uuid.UUID) error {
-	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback(ctx)
-	actorID, err := adminActorID(ctx, tx, principal)
-	if err != nil {
-		return err
-	}
-	var membershipID uuid.UUID
-	var version int64
-	var owner bool
-	err = tx.QueryRow(ctx, `SELECT m.id,m.version,EXISTS(SELECT 1 FROM role_bindings rb WHERE rb.membership_id=m.id AND rb.role='OWNER' AND rb.revoked_at IS NULL AND rb.starts_at<=statement_timestamp() AND (rb.expires_at IS NULL OR rb.expires_at>statement_timestamp())) FROM memberships m WHERE m.organization_id=$1 AND m.user_id=$2 AND m.status='ACTIVE' FOR UPDATE`, organizationID, userID).Scan(&membershipID, &version, &owner)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return ErrNotFound
-	}
-	if err != nil {
-		return err
-	}
-	if owner {
-		return ErrLastOwner
-	}
-	now := r.now()
-	version++
-	if _, err := tx.Exec(ctx, `UPDATE role_bindings SET revoked_at=$2,revoked_by=$3 WHERE membership_id=$1 AND revoked_at IS NULL`, membershipID, now, actorID); err != nil {
-		return err
-	}
-	if _, err := tx.Exec(ctx, `DELETE FROM membership_units WHERE membership_id=$1`, membershipID); err != nil {
-		return err
-	}
-	if _, err := tx.Exec(ctx, `UPDATE memberships SET status='REVOKED',version=$2,updated_at=$3 WHERE id=$1`, membershipID, version, now); err != nil {
-		return err
-	}
-	if _, err := tx.Exec(ctx, `UPDATE users SET membership_version=membership_version+1,updated_at=$2 WHERE id=$1`, userID, now); err != nil {
-		return err
-	}
-	if _, err := tx.Exec(ctx, `UPDATE user_sessions SET membership_version=membership_version+1,last_seen_at=$2 WHERE user_id=$1`, userID, now); err != nil {
-		return err
-	}
-	if err := appendAdminAudit(ctx, tx, actorID, principal, &organizationID, "admin.membership.remove", "membership", membershipID.String(), map[string]any{"user_id": userID}); err != nil {
-		return err
-	}
-	if err := appendOutbox(ctx, tx, "account.membership.changed.v1", membershipID, version, map[string]any{"organization_id": organizationID, "user_id": userID, "membership_status": "REVOKED", "membership_version": version}); err != nil {
-		return err
-	}
-	return tx.Commit(ctx)
-}
-
-func (r *PostgresRepository) AdminTransferOwnership(ctx context.Context, principal identity.Principal, organizationID, targetUserID uuid.UUID) error {
-	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback(ctx)
-	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, organizationID.String()); err != nil {
-		return err
-	}
-	actorID, err := adminActorID(ctx, tx, principal)
-	if err != nil {
-		return err
-	}
-	var organizationStatus string
-	err = tx.QueryRow(ctx, `SELECT status FROM organizations WHERE id=$1 FOR UPDATE`, organizationID).Scan(&organizationStatus)
-	if errors.Is(err, pgx.ErrNoRows) || organizationStatus == "DELETED" {
-		return ErrNotFound
-	}
-	if err != nil {
-		return err
-	}
-	if organizationStatus != "ACTIVE" {
-		return ErrConflict
-	}
-	var targetMembership uuid.UUID
-	err = tx.QueryRow(ctx, `
-SELECT m.id FROM memberships m JOIN users u ON u.id=m.user_id
-WHERE m.organization_id=$1 AND m.user_id=$2 AND m.status='ACTIVE' AND u.status='ACTIVE'
-FOR UPDATE OF m,u`, organizationID, targetUserID).Scan(&targetMembership)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return ErrNotFound
-	}
-	if err != nil {
-		return err
-	}
-	rows, err := tx.Query(ctx, `
-SELECT m.id,m.user_id FROM memberships m JOIN role_bindings rb ON rb.membership_id=m.id
-WHERE m.organization_id=$1 AND m.status='ACTIVE' AND rb.role='OWNER' AND rb.revoked_at IS NULL AND rb.starts_at<=statement_timestamp() AND (rb.expires_at IS NULL OR rb.expires_at>statement_timestamp())
-FOR UPDATE OF m,rb`, organizationID)
-	if err != nil {
-		return err
-	}
-	ownerMemberships := make([]uuid.UUID, 0)
-	previousOwners := make([]uuid.UUID, 0)
-	for rows.Next() {
-		var membershipID, userID uuid.UUID
-		if err := rows.Scan(&membershipID, &userID); err != nil {
-			rows.Close()
-			return err
-		}
-		ownerMemberships = append(ownerMemberships, membershipID)
-		previousOwners = append(previousOwners, userID)
-	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
-		return err
-	}
-	rows.Close()
-	if len(previousOwners) == 1 && previousOwners[0] == targetUserID {
-		return tx.Commit(ctx)
-	}
-	createdBy := targetUserID
-	if actorID != nil {
-		createdBy = *actorID
-	}
-	now := r.now()
-	if _, err := tx.Exec(ctx, `UPDATE role_bindings rb SET revoked_at=$2,revoked_by=$3 FROM memberships m WHERE rb.membership_id=m.id AND m.organization_id=$1 AND rb.role='OWNER' AND rb.revoked_at IS NULL AND rb.starts_at<=statement_timestamp() AND (rb.expires_at IS NULL OR rb.expires_at>statement_timestamp())`, organizationID, now, createdBy); err != nil {
-		return err
-	}
-	if _, err := tx.Exec(ctx, `INSERT INTO role_bindings(id,membership_id,role,created_by,created_at,grant_source) VALUES($1,$2,'OWNER',$3,$4,'OWNERSHIP_TRANSFER')`, uuid.Must(uuid.NewV7()), targetMembership, createdBy, now); err != nil {
-		return mapConstraintError(err)
-	}
-	// A former owner remains a member when no other role survives the transfer.
-	if _, err := tx.Exec(ctx, `INSERT INTO role_bindings(id,membership_id,role,created_by,created_at) SELECT gen_random_uuid(),m.id,'MEMBER',$2,$3 FROM memberships m WHERE m.id=ANY($1) AND NOT EXISTS(SELECT 1 FROM role_bindings rb WHERE rb.membership_id=m.id AND rb.revoked_at IS NULL AND rb.starts_at<=statement_timestamp() AND (rb.expires_at IS NULL OR rb.expires_at>statement_timestamp()))`, ownerMemberships, createdBy, now); err != nil {
-		return err
-	}
-	affectedMemberships := append(ownerMemberships, targetMembership)
-	if _, err := updateAdminMemberships(ctx, tx, `UPDATE memberships SET version=version+1,updated_at=$2 WHERE id=ANY($1) RETURNING id,organization_id,user_id,status,version`, affectedMemberships, now); err != nil {
-		return err
-	}
-	affectedUsers := append(previousOwners, targetUserID)
-	if _, err := tx.Exec(ctx, `UPDATE users SET membership_version=membership_version+1,updated_at=$2 WHERE id=ANY($1)`, affectedUsers, now); err != nil {
-		return err
-	}
-	if _, err := tx.Exec(ctx, `UPDATE user_sessions SET membership_version=membership_version+1,last_seen_at=$2 WHERE user_id=ANY($1)`, affectedUsers, now); err != nil {
-		return err
-	}
-	if err := appendAdminAudit(ctx, tx, actorID, principal, &organizationID, "admin.organization.ownership.transfer", "organization", organizationID.String(), map[string]any{"previous_owner_user_ids": previousOwners, "new_owner_user_id": targetUserID}); err != nil {
-		return err
-	}
-	return tx.Commit(ctx)
-}
-
-func (r *PostgresRepository) AdminCreateUnit(ctx context.Context, principal identity.Principal, organizationID uuid.UUID, parentID *uuid.UUID, name string) (Unit, error) {
-	name = strings.TrimSpace(name)
-	if name == "" || len([]rune(name)) > 120 {
-		return Unit{}, ErrConflict
-	}
-	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
-	if err != nil {
-		return Unit{}, err
-	}
-	defer tx.Rollback(ctx)
-	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, organizationID.String()); err != nil {
-		return Unit{}, err
-	}
-	actorID, err := adminActorID(ctx, tx, principal)
-	if err != nil {
-		return Unit{}, err
-	}
-	var organizationStatus string
-	err = tx.QueryRow(ctx, `SELECT status FROM organizations WHERE id=$1 FOR UPDATE`, organizationID).Scan(&organizationStatus)
-	if errors.Is(err, pgx.ErrNoRows) || organizationStatus == "DELETED" {
-		return Unit{}, ErrNotFound
-	}
-	if err != nil {
-		return Unit{}, err
-	}
-	if organizationStatus != "ACTIVE" {
-		return Unit{}, ErrConflict
-	}
-	if parentID != nil {
-		var parentActive bool
-		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM organization_units WHERE organization_id=$1 AND id=$2 AND status='ACTIVE')`, organizationID, *parentID).Scan(&parentActive); err != nil {
-			return Unit{}, err
-		}
-		if !parentActive {
-			return Unit{}, ErrInvalidHierarchy
-		}
-	}
-	now := r.now()
-	unit := Unit{ID: uuid.Must(uuid.NewV7()), OrganizationID: organizationID, ParentID: parentID, Name: name, Status: "ACTIVE", Version: 1}
-	if _, err := tx.Exec(ctx, `INSERT INTO organization_units(id,organization_id,parent_id,name,status,created_at,updated_at) VALUES($1,$2,$3,$4,'ACTIVE',$5,$5)`, unit.ID, organizationID, parentID, name, now); err != nil {
-		return Unit{}, mapConstraintError(err)
-	}
-	if _, err := tx.Exec(ctx, `INSERT INTO organization_unit_closure(organization_id,ancestor_id,descendant_id,depth) VALUES($1,$2,$2,0)`, organizationID, unit.ID); err != nil {
-		return Unit{}, err
-	}
-	if parentID != nil {
-		if _, err := tx.Exec(ctx, `INSERT INTO organization_unit_closure(organization_id,ancestor_id,descendant_id,depth) SELECT organization_id,ancestor_id,$3,depth+1 FROM organization_unit_closure WHERE organization_id=$1 AND descendant_id=$2`, organizationID, *parentID, unit.ID); err != nil {
-			return Unit{}, err
-		}
-	}
-	if err := appendAdminAudit(ctx, tx, actorID, principal, &organizationID, "admin.organization_unit.create", "organization_unit", unit.ID.String(), map[string]any{"name": name, "parent_id": parentID}); err != nil {
-		return Unit{}, err
-	}
-	return unit, tx.Commit(ctx)
-}
-
-func (r *PostgresRepository) AdminRenameUnit(ctx context.Context, principal identity.Principal, organizationID, unitID uuid.UUID, name string) error {
-	name = strings.TrimSpace(name)
-	if name == "" || len([]rune(name)) > 120 {
-		return ErrConflict
-	}
-	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback(ctx)
-	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, organizationID.String()); err != nil {
-		return err
-	}
-	actorID, err := adminActorID(ctx, tx, principal)
-	if err != nil {
-		return err
-	}
-	var organizationStatus string
-	if err := tx.QueryRow(ctx, `SELECT status FROM organizations WHERE id=$1 FOR UPDATE`, organizationID).Scan(&organizationStatus); errors.Is(err, pgx.ErrNoRows) || organizationStatus == "DELETED" {
-		return ErrNotFound
-	} else if err != nil {
-		return err
-	}
-	var currentName, unitStatus string
-	err = tx.QueryRow(ctx, `SELECT name,status FROM organization_units WHERE organization_id=$1 AND id=$2 FOR UPDATE`, organizationID, unitID).Scan(&currentName, &unitStatus)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return ErrNotFound
-	}
-	if err != nil {
-		return err
-	}
-	if unitStatus != "ACTIVE" {
-		return ErrConflict
-	}
-	if currentName == name {
-		return tx.Commit(ctx)
-	}
-	if _, err := tx.Exec(ctx, `UPDATE organization_units SET name=$3,version=version+1,updated_at=$4 WHERE organization_id=$1 AND id=$2`, organizationID, unitID, name, r.now()); err != nil {
-		return mapConstraintError(err)
-	}
-	if err := appendAdminAudit(ctx, tx, actorID, principal, &organizationID, "admin.organization_unit.rename", "organization_unit", unitID.String(), map[string]any{"from": currentName, "to": name}); err != nil {
-		return err
-	}
-	return tx.Commit(ctx)
-}
-
-func (r *PostgresRepository) AdminDeleteUnit(ctx context.Context, principal identity.Principal, organizationID, unitID uuid.UUID) error {
-	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback(ctx)
-	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, organizationID.String()); err != nil {
-		return err
-	}
-	actorID, err := adminActorID(ctx, tx, principal)
-	if err != nil {
-		return err
-	}
-	var organizationStatus string
-	if err := tx.QueryRow(ctx, `SELECT status FROM organizations WHERE id=$1 FOR UPDATE`, organizationID).Scan(&organizationStatus); errors.Is(err, pgx.ErrNoRows) || organizationStatus == "DELETED" {
-		return ErrNotFound
-	} else if err != nil {
-		return err
-	}
-	var name, unitStatus string
-	err = tx.QueryRow(ctx, `SELECT name,status FROM organization_units WHERE organization_id=$1 AND id=$2 FOR UPDATE`, organizationID, unitID).Scan(&name, &unitStatus)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return ErrNotFound
-	}
-	if err != nil {
-		return err
-	}
-	if unitStatus != "ACTIVE" {
-		return ErrConflict
-	}
-	var hasChildren bool
-	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM organization_units WHERE organization_id=$1 AND parent_id=$2)`, organizationID, unitID).Scan(&hasChildren); err != nil {
-		return err
-	}
-	if hasChildren {
-		return ErrInvalidHierarchy
-	}
-	rows, err := tx.Query(ctx, `SELECT DISTINCT m.user_id FROM memberships m LEFT JOIN membership_units mu ON mu.membership_id=m.id LEFT JOIN role_bindings rb ON rb.membership_id=m.id WHERE m.organization_id=$1 AND (mu.unit_id=$2 OR rb.unit_id=$2)`, organizationID, unitID)
-	if err != nil {
-		return err
-	}
-	affectedUsers := make([]uuid.UUID, 0)
-	for rows.Next() {
-		var userID uuid.UUID
-		if err := rows.Scan(&userID); err != nil {
-			rows.Close()
-			return err
-		}
-		affectedUsers = append(affectedUsers, userID)
-	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
-		return err
-	}
-	rows.Close()
-	if _, err := tx.Exec(ctx, `DELETE FROM role_bindings WHERE unit_id=$1`, unitID); err != nil {
-		return err
-	}
-	if _, err := tx.Exec(ctx, `DELETE FROM membership_units WHERE unit_id=$1`, unitID); err != nil {
-		return err
-	}
-	if _, err := tx.Exec(ctx, `DELETE FROM organization_units WHERE organization_id=$1 AND id=$2`, organizationID, unitID); err != nil {
-		return mapConstraintError(err)
-	}
-	if len(affectedUsers) > 0 {
-		now := r.now()
-		if _, err := updateAdminMemberships(ctx, tx, `UPDATE memberships SET version=version+1,updated_at=$3 WHERE organization_id=$1 AND user_id=ANY($2) RETURNING id,organization_id,user_id,status,version`, organizationID, affectedUsers, now); err != nil {
-			return err
-		}
-		if _, err := tx.Exec(ctx, `UPDATE users SET membership_version=membership_version+1,updated_at=$2 WHERE id=ANY($1)`, affectedUsers, now); err != nil {
-			return err
-		}
-		if _, err := tx.Exec(ctx, `UPDATE user_sessions SET membership_version=membership_version+1,last_seen_at=$2 WHERE user_id=ANY($1)`, affectedUsers, now); err != nil {
-			return err
-		}
-	}
-	if err := appendAdminAudit(ctx, tx, actorID, principal, &organizationID, "admin.organization_unit.delete", "organization_unit", unitID.String(), map[string]any{"name": name}); err != nil {
-		return err
-	}
-	return tx.Commit(ctx)
 }
 
 const adminAuditSelect = `SELECT log.id,log.actor_user_id,actor.display_name,actor.email,log.active_organization_id,log.action,log.resource_type,log.resource_id,log.result,log.request_id,log.change_summary,log.occurred_at FROM audit_logs log LEFT JOIN users actor ON actor.id=log.actor_user_id`
@@ -1575,7 +1528,8 @@ func (r *PostgresRepository) AdminSetOrganizationStatus(ctx context.Context, pri
 		return err
 	}
 	var currentStatus string
-	err = tx.QueryRow(ctx, `SELECT status FROM organizations WHERE id=$1 FOR UPDATE`, organizationID).Scan(&currentStatus)
+	var currentVersion int64
+	err = tx.QueryRow(ctx, `SELECT status,version FROM organizations WHERE id=$1 FOR UPDATE`, organizationID).Scan(&currentStatus, &currentVersion)
 	if errors.Is(err, pgx.ErrNoRows) || currentStatus == "DELETED" {
 		return ErrNotFound
 	}
@@ -1604,11 +1558,17 @@ func (r *PostgresRepository) AdminSetOrganizationStatus(ctx context.Context, pri
 		return err
 	}
 	if status == "DISABLED" {
+		if _, err := tx.Exec(ctx, `UPDATE user_active_contexts SET context_type='PERSONAL',organization_id=NULL,context_version=context_version+1,updated_at=$2 WHERE organization_id=$1`, organizationID, now); err != nil {
+			return err
+		}
 		if _, err := tx.Exec(ctx, `UPDATE user_sessions SET active_context_type='PERSONAL',active_organization_id=NULL,membership_version=membership_version+1,last_seen_at=$2 WHERE active_organization_id=$1`, organizationID, now); err != nil {
 			return err
 		}
 	}
 	if err := appendAdminAudit(ctx, tx, actorID, principal, &organizationID, "admin.organization.status.update", "organization", organizationID.String(), map[string]any{"from": currentStatus, "to": status}); err != nil {
+		return err
+	}
+	if err := appendOutbox(ctx, tx, "account.organization.status-changed.v1", organizationID, currentVersion+1, map[string]any{"organization_id": organizationID, "from_status": currentStatus, "status": status, "version": currentVersion + 1}); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
@@ -1625,12 +1585,19 @@ func (r *PostgresRepository) AdminDeleteOrganization(ctx context.Context, princi
 		return err
 	}
 	var status string
-	err = tx.QueryRow(ctx, `SELECT status FROM organizations WHERE id=$1 FOR UPDATE`, organizationID).Scan(&status)
-	if errors.Is(err, pgx.ErrNoRows) || status == "DELETED" {
+	var currentVersion int64
+	err = tx.QueryRow(ctx, `SELECT status,version FROM organizations WHERE id=$1 FOR UPDATE`, organizationID).Scan(&status, &currentVersion)
+	if errors.Is(err, pgx.ErrNoRows) {
 		return ErrNotFound
 	}
 	if err != nil {
 		return err
+	}
+	if status == "DELETED" {
+		return tx.Commit(ctx)
+	}
+	if status != "DISABLED" {
+		return ErrConflict
 	}
 	now := r.now()
 	affectedUsers, err := updateAdminMemberships(ctx, tx, `UPDATE memberships SET status='REVOKED',version=version+1,updated_at=$2 WHERE organization_id=$1 AND status<>'REVOKED' RETURNING id,organization_id,user_id,status,version`, organizationID, now)
@@ -1643,16 +1610,22 @@ func (r *PostgresRepository) AdminDeleteOrganization(ctx context.Context, princi
 	if _, err := tx.Exec(ctx, `UPDATE user_sessions SET active_context_type='PERSONAL',active_organization_id=NULL,membership_version=membership_version+1,last_seen_at=$2 WHERE active_organization_id=$1`, organizationID, now); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(ctx, `UPDATE organization_units SET status='DISABLED',name='Deleted unit '||left(id::text,8),version=version+1,updated_at=$2 WHERE organization_id=$1`, organizationID, now); err != nil {
+	if _, err := tx.Exec(ctx, `UPDATE user_active_contexts SET context_type='PERSONAL',organization_id=NULL,context_version=context_version+1,updated_at=$2 WHERE organization_id=$1`, organizationID, now); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `UPDATE organization_units SET status='DISABLED',name='Deleted unit '||left(id::text,8),version=version+1,updated_at=$2 WHERE organization_id=$1 AND status<>'DELETED'`, organizationID, now); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(ctx, `UPDATE invitations SET status=CASE WHEN status='PENDING' THEN 'REVOKED' ELSE status END,email_normalized='deleted+'||left(id::text,8)||'@invalid.local',updated_at=$2 WHERE organization_id=$1`, organizationID, now); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(ctx, `UPDATE organizations SET status='DELETED',name='Deleted organization '||left(id::text,8),version=version+1,updated_at=$2 WHERE id=$1`, organizationID, now); err != nil {
+	if _, err := tx.Exec(ctx, `UPDATE organizations SET status='DELETED',name='Deleted organization '||left(id::text,8),version=version+1,deleted_at=$2,updated_at=$2 WHERE id=$1`, organizationID, now); err != nil {
 		return err
 	}
 	if err := appendAdminAudit(ctx, tx, actorID, principal, &organizationID, "admin.organization.delete", "organization", organizationID.String(), map[string]any{"from": status, "to": "DELETED"}); err != nil {
+		return err
+	}
+	if err := appendOutbox(ctx, tx, "account.organization.deleted.v1", organizationID, currentVersion+1, map[string]any{"organization_id": organizationID, "status": "DELETED", "version": currentVersion + 1}); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
@@ -1671,6 +1644,10 @@ func adminActorID(ctx context.Context, tx pgx.Tx, principal identity.Principal) 
 }
 
 func appendAdminAudit(ctx context.Context, tx pgx.Tx, actorID *uuid.UUID, principal identity.Principal, organizationID *uuid.UUID, action, resourceType, resourceID string, summary map[string]any) error {
+	return appendAdminAuditResult(ctx, tx, actorID, principal, organizationID, action, resourceType, resourceID, "SUCCEEDED", summary)
+}
+
+func appendAdminAuditResult(ctx context.Context, tx pgx.Tx, actorID *uuid.UUID, principal identity.Principal, organizationID *uuid.UUID, action, resourceType, resourceID, result string, summary map[string]any) error {
 	if summary == nil {
 		summary = map[string]any{}
 	}
@@ -1686,7 +1663,7 @@ func appendAdminAudit(ctx context.Context, tx pgx.Tx, actorID *uuid.UUID, princi
 	}
 	_, err = tx.Exec(ctx, `
 INSERT INTO audit_logs(id,actor_user_id,session_id,active_organization_id,action,resource_type,resource_id,result,request_id,trace_id,change_summary,occurred_at)
-VALUES($1,$2,$3,$4,$5,$6,$7,'SUCCEEDED',$8,$8,$9,now())`, uuid.Must(uuid.NewV7()), actorID, principal.SessionID, organizationID, action, resourceType, resourceID, requestID, body)
+VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$9,$10,now())`, uuid.Must(uuid.NewV7()), actorID, principal.SessionID, organizationID, action, resourceType, resourceID, result, requestID, body)
 	return err
 }
 

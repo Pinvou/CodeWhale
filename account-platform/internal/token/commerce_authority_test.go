@@ -3,12 +3,55 @@ package token
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync/atomic"
 	"testing"
+
+	"encoding/json"
+	"github.com/google/uuid"
 )
+
+func TestAccountContextRequiresPositiveAuthorityVersions(t *testing.T) {
+	for _, field := range []string{"context_version", "authorization_version"} {
+		for _, value := range []any{nil, float64(0), float64(-1), float64(7)} {
+			name := field + "-missing"
+			if value != nil {
+				name = field + "-" + fmt.Sprint(value)
+			}
+			t.Run(name, func(t *testing.T) {
+				body := map[string]any{"user_id": uuid.NewString(), "session_id": "owned-session", "context_type": "PERSONAL", "membership_version": 1, "context_version": 3, "authorization_version": 4}
+				if value == nil {
+					delete(body, field)
+				} else {
+					body[field] = value
+				}
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { json.NewEncoder(w).Encode(body) }))
+				defer server.Close()
+				resolver, err := NewHTTPContextResolver(server.URL)
+				if err != nil {
+					t.Fatal(err)
+				}
+				got, err := resolver.Resolve(context.Background(), "Bearer owned")
+				if value == float64(7) {
+					if err != nil {
+						t.Fatal("valid authority version rejected", err)
+					}
+					service := &Service{contexts: fixtureContexts{got}}
+					rec := httptest.NewRecorder()
+					_, ok := service.resolveContext(rec, httptest.NewRequest("GET", "/", nil))
+					if !ok || rec.Header().Get("X-"+strings.ReplaceAll(strings.Title(strings.ReplaceAll(field, "_", " ")), " ", "-")) != "7" {
+						t.Fatal("authority version was not preserved")
+					}
+				} else if err == nil {
+					t.Fatal("missing or nonpositive authority version accepted")
+				}
+			})
+		}
+	}
+}
 
 func TestCommerceCustomerAuthorityConsumesCompleteBoundedFacts(t *testing.T) {
 	for _, item := range []struct {

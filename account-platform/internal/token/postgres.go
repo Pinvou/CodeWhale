@@ -82,6 +82,7 @@ type Repository interface {
 	ListModelCandidates(context.Context, AuthorizationContext) ([]Candidate, error)
 	CredentialSecret(context.Context, uuid.UUID, uuid.UUID) (Credential, []byte, error)
 	ListUsageForContext(context.Context, AuthorizationContext, int, *UsageHistoryCursor) ([]UserUsageRecord, error)
+	ApplyOrganizationUnitLifecycle(context.Context, uuid.UUID, uuid.UUID, string, int64) (OrganizationUnitDeletionAssessment, error)
 	UsageStore
 	Ping(context.Context) error
 	Close()
@@ -112,6 +113,11 @@ func (r *PostgresRepository) BeginUsage(ctx context.Context, request UsageReques
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return UsageRequest{}, false, err
+	}
+	if request.OrganizationID != nil {
+		if err := lockActiveOrganization(ctx, tx, *request.OrganizationID); err != nil {
+			return UsageRequest{}, false, err
+		}
 	}
 	now := r.now()
 	request.Status, request.StartedAt = "CREATED", now
@@ -393,6 +399,24 @@ func (r *PostgresRepository) CreateAccount(ctx context.Context, request CreateAc
 		return TokenAccount{}, err
 	}
 	defer tx.Rollback(ctx)
+	if request.OwnerOrganization != nil {
+		if err := lockActiveOrganization(ctx, tx, *request.OwnerOrganization); err != nil {
+			return TokenAccount{}, err
+		}
+	}
+	if request.OwnerUnit != nil && request.OwnerOrganization != nil {
+		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, "organization-unit:"+request.OwnerOrganization.String()+":"+request.OwnerUnit.String()); err != nil {
+			return TokenAccount{}, err
+		}
+		var lifecycleStatus string
+		err := tx.QueryRow(ctx, `SELECT status FROM organization_unit_lifecycle_states WHERE organization_id=$1 AND unit_id=$2`, *request.OwnerOrganization, *request.OwnerUnit).Scan(&lifecycleStatus)
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return TokenAccount{}, err
+		}
+		if err == nil && lifecycleStatus != "ACTIVE" {
+			return TokenAccount{}, ErrForbidden
+		}
+	}
 	_, err = tx.Exec(ctx, `INSERT INTO token_accounts(id,owner_type,owner_id,owner_organization_id,owner_unit_id,wallet_id,name,status,default_priority,created_by,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,'ACTIVE',$8,$9,$10,$10)`, account.ID, account.OwnerType, account.OwnerID, account.OwnerOrganization, account.OwnerUnit, account.WalletID, account.Name, account.DefaultPriority, request.CreatedBy, now)
 	if err == nil {
 		_, err = tx.Exec(ctx, `INSERT INTO token_share_policies(token_account_id,scope,owner_organization_id,owner_unit_id,updated_at) VALUES($1,$2,$3,$4,$5)`, account.ID, account.ShareScope, account.OwnerOrganization, account.OwnerUnit, now)

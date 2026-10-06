@@ -92,7 +92,7 @@ func proxyFixture(t *testing.T, baseURL string) (*Service, *PostgresRepository, 
 		t.Fatal(err)
 	}
 	billing := &fixtureBilling{}
-	service := NewService(repo, fixtureContexts{AuthorizationContext{UserID: user, SessionID: "fixture-session", ContextType: "PERSONAL"}}, nil, nil, policy, billing, NewHTTPUpstreamClient(), 100)
+	service := NewService(repo, fixtureContexts{AuthorizationContext{UserID: user, SessionID: "fixture-session", ContextType: "PERSONAL", ContextVersion: 1, AuthorizationVersion: 1}}, nil, nil, policy, billing, NewHTTPUpstreamClient(), 100)
 	return service, repo, billing
 }
 
@@ -437,6 +437,28 @@ func TestAccountDirectoryUnitOwnership(t *testing.T) {
 
 type walletSpy struct{ calls int }
 
+type scopedOrganizationWallet struct{ organization, wallet uuid.UUID }
+
+func (f scopedOrganizationWallet) Ensure(_ context.Context, ownerType string, ownerID uuid.UUID) (uuid.UUID, error) {
+	if ownerType != "ORGANIZATION" || ownerID != f.organization {
+		return uuid.Nil, ErrForbidden
+	}
+	return f.wallet, nil
+}
+
+type scopedOrganizationBilling struct {
+	*fixtureBilling
+	OrganizationBillingClient
+	organization, member uuid.UUID
+}
+
+func (f scopedOrganizationBilling) ReserveMemberQuota(ctx context.Context, usage, wallet, org, member uuid.UUID, version, maximum int64, price uuid.UUID) (BillingHold, error) {
+	if org != f.organization || member != f.member || version != 1 {
+		return BillingHold{}, ErrForbidden
+	}
+	return f.fixtureBilling.Reserve(ctx, usage, wallet, maximum, price)
+}
+
 func (w *walletSpy) Ensure(context.Context, string, uuid.UUID) (uuid.UUID, error) {
 	w.calls++
 	return uuid.New(), nil
@@ -446,7 +468,7 @@ func TestForeignUnitCannotProvisionWallet(t *testing.T) {
 	organization, foreignUnit, user := uuid.New(), uuid.New(), uuid.New()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/v1/me/authorization-context" {
-			json.NewEncoder(w).Encode(map[string]any{"user_id": user, "session_id": "session", "context_type": "ORGANIZATION", "organization_id": organization, "roles": []string{"OWNER"}})
+			json.NewEncoder(w).Encode(map[string]any{"user_id": user, "session_id": "session", "context_type": "ORGANIZATION", "member_version": 1, "context_version": 1, "authorization_version": 1, "organization_id": organization, "roles": []string{"OWNER"}})
 			return
 		}
 		json.NewEncoder(w).Encode(map[string]any{"items": []any{}})
@@ -613,7 +635,7 @@ func TestPostgresInactiveUnitDoesNotBlockValidOrganizationRoute(t *testing.T) {
 	organization, unit, user := uuid.New(), uuid.New(), uuid.New()
 	accountServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/v1/me/authorization-context" {
-			json.NewEncoder(w).Encode(map[string]any{"user_id": user, "session_id": "org-session", "context_type": "ORGANIZATION", "organization_id": organization, "roles": []string{"MEMBER"}})
+			json.NewEncoder(w).Encode(map[string]any{"user_id": user, "session_id": "org-session", "context_type": "ORGANIZATION", "member_version": 1, "context_version": 1, "authorization_version": 1, "organization_id": organization, "roles": []string{"MEMBER"}})
 			return
 		}
 		json.NewEncoder(w).Encode(map[string]any{"items": []any{}})
@@ -633,6 +655,10 @@ func TestPostgresInactiveUnitDoesNotBlockValidOrganizationRoute(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	// This routing test controls the member quota/wallet authority seams. Real
+	// financial quota success and absence are covered by the dual-PG proxy test.
+	s.wallets = scopedOrganizationWallet{organization, orgAccount.WalletID}
+	s.billing = scopedOrganizationBilling{fixtureBilling: s.billing.(*fixtureBilling), organization: organization, member: user}
 	listRequest := httptest.NewRequest(http.MethodGet, "/v1/token-accounts/eligible?model=model-test", nil)
 	listRequest.Header.Set("Authorization", "Bearer caller")
 	list := httptest.NewRecorder()
@@ -724,7 +750,7 @@ func TestPostgresReviewConvergesAfterConfirmedBillingTerminal(t *testing.T) {
 
 func TestRechargeInvalidIdempotencyKeyReturnsClientErrorOverHTTP(t *testing.T) {
 	wallet := &walletSpy{}
-	s := NewService(nil, fixtureContexts{AuthorizationContext{UserID: uuid.New(), SessionID: "session", ContextType: "PERSONAL"}}, wallet, nil, ProviderURLPolicy{}, nil, nil, 100)
+	s := NewService(nil, fixtureContexts{AuthorizationContext{UserID: uuid.New(), SessionID: "session", ContextType: "PERSONAL", ContextVersion: 1, AuthorizationVersion: 1}}, wallet, nil, ProviderURLPolicy{}, nil, nil, 100)
 	server := httptest.NewServer(http.HandlerFunc(s.createRechargeOrder))
 	defer server.Close()
 	for name, key := range map[string]string{"too-few-characters": strings.Repeat("界", 15), "too-many-characters": strings.Repeat("a", 129), "invalid-utf8": strings.Repeat("a", 15) + string([]byte{0xff})} {

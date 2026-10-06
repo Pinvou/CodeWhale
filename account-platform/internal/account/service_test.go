@@ -20,6 +20,8 @@ type fakeRepository struct {
 	deny          bool
 	lookupResult  AdminUser
 	lookupErr     error
+	setExpected   int64
+	setContext    Context
 }
 
 func (f *fakeRepository) Bootstrap(context.Context, identity.Principal) (Me, bool, error) {
@@ -56,13 +58,18 @@ func (f *fakeRepository) LookupUserByCode(_ context.Context, _ identity.Principa
 func (*fakeRepository) ListOrganizations(context.Context, identity.Principal) ([]Organization, error) {
 	panic("not used")
 }
-func (*fakeRepository) SetActiveContext(context.Context, identity.Principal, *uuid.UUID) (Context, error) {
-	panic("not used")
+func (f *fakeRepository) SetActiveContext(_ context.Context, _ identity.Principal, organizationID *uuid.UUID, expected int64) (Context, error) {
+	f.setExpected = expected
+	f.setContext.OrganizationID = organizationID
+	return f.setContext, nil
 }
-func (*fakeRepository) ListUnits(context.Context, identity.Principal, uuid.UUID) ([]Unit, error) {
+func (*fakeRepository) ListUnits(context.Context, identity.Principal, uuid.UUID) (UnitTree, error) {
 	panic("not used")
 }
 func (*fakeRepository) ListMembers(context.Context, identity.Principal, uuid.UUID) ([]Member, error) {
+	panic("not used")
+}
+func (*fakeRepository) ListQuotaMembers(context.Context, identity.Principal, uuid.UUID) ([]QuotaMember, error) {
 	panic("not used")
 }
 func (*fakeRepository) ListMyRoleBindings(context.Context, identity.Principal) ([]RoleBinding, error) {
@@ -80,22 +87,28 @@ func (*fakeRepository) RevokeOrganizationRoleBinding(context.Context, identity.P
 func (*fakeRepository) ReplaceMemberRoles(context.Context, identity.Principal, uuid.UUID, uuid.UUID, []string) (Member, error) {
 	panic("not used")
 }
-func (*fakeRepository) CreateUnit(context.Context, identity.Principal, uuid.UUID, *uuid.UUID, string) (Unit, error) {
+func (*fakeRepository) CreateUnit(context.Context, identity.Principal, uuid.UUID, *uuid.UUID, string, string) (UnitMutationResult, error) {
 	panic("not used")
 }
-func (*fakeRepository) MoveUnit(context.Context, identity.Principal, uuid.UUID, uuid.UUID, *uuid.UUID, int64) (Unit, error) {
+func (*fakeRepository) MoveUnit(context.Context, identity.Principal, uuid.UUID, uuid.UUID, *uuid.UUID, int64, string) (UnitMutationResult, error) {
 	panic("not used")
 }
-func (*fakeRepository) CreateInvitation(context.Context, identity.Principal, uuid.UUID, string, []string, time.Time) (Invitation, error) {
+func (*fakeRepository) CreateInvitation(context.Context, identity.Principal, uuid.UUID, InvitationCreateRequest) (Invitation, error) {
 	panic("not used")
 }
-func (*fakeRepository) AcceptInvitation(context.Context, identity.Principal, string) (Organization, error) {
+func (*fakeRepository) ListMyInvitations(context.Context, identity.Principal) ([]Invitation, error) {
 	panic("not used")
 }
-func (*fakeRepository) RevokeMembership(context.Context, identity.Principal, uuid.UUID, uuid.UUID) error {
+func (*fakeRepository) RevokeInvitation(context.Context, identity.Principal, uuid.UUID, uuid.UUID) (Invitation, error) {
 	panic("not used")
 }
-func (*fakeRepository) TransferOwnership(context.Context, identity.Principal, uuid.UUID, uuid.UUID) error {
+func (*fakeRepository) AcceptInvitation(context.Context, identity.Principal, string, *uuid.UUID) (MembershipMutationResult, error) {
+	panic("not used")
+}
+func (*fakeRepository) RevokeMembership(context.Context, identity.Principal, uuid.UUID, uuid.UUID, string) (MembershipMutationResult, error) {
+	panic("not used")
+}
+func (*fakeRepository) TransferOwnership(context.Context, identity.Principal, uuid.UUID, uuid.UUID, string) (OwnershipTransferResult, error) {
 	panic("not used")
 }
 func (*fakeRepository) AdminOverview(context.Context) (AdminOverview, error) {
@@ -122,12 +135,21 @@ func (f *fakeRepository) AdminDeleteUser(_ context.Context, _ identity.Principal
 	f.adminCalls = append(f.adminCalls, "user:"+id.String()+":DELETE")
 	return nil
 }
-func (*fakeRepository) AdminOrganizations(context.Context, string, int) ([]AdminOrganization, error) {
-	return nil, nil
+func (*fakeRepository) AdminOrganizations(context.Context, AdminOrganizationFilter) (AdminOrganizationPage, error) {
+	return AdminOrganizationPage{Items: []AdminOrganization{}}, nil
 }
-func (f *fakeRepository) AdminCreateOrganization(_ context.Context, _ identity.Principal, ownerID uuid.UUID, name string) (Organization, error) {
+func (f *fakeRepository) AdminCreateOrganization(_ context.Context, _ identity.Principal, ownerID uuid.UUID, name, _ string) (Organization, error) {
 	f.adminCalls = append(f.adminCalls, "organization:create:"+ownerID.String()+":"+name)
 	return Organization{ID: uuid.Must(uuid.NewV7()), Name: name, Status: "ACTIVE", Version: 1}, nil
+}
+func (*fakeRepository) AdminRecordOrganizationCreationFailure(context.Context, identity.Principal, uuid.UUID, string, string) error {
+	return nil
+}
+func (f *fakeRepository) AdminOrganizationState(_ context.Context, id uuid.UUID) (AdminOrganizationState, error) {
+	return AdminOrganizationState{ID: id, Status: "DISABLED", Version: 1}, nil
+}
+func (*fakeRepository) AdminOrganizationDeletionBlockers(context.Context, uuid.UUID) ([]OrganizationLifecycleBlocker, error) {
+	return []OrganizationLifecycleBlocker{}, nil
 }
 func (f *fakeRepository) AdminRenameOrganization(_ context.Context, _ identity.Principal, id uuid.UUID, name string) error {
 	f.adminCalls = append(f.adminCalls, "organization:"+id.String()+":rename:"+name)
@@ -141,45 +163,51 @@ func (f *fakeRepository) AdminDeleteOrganization(_ context.Context, _ identity.P
 	f.adminCalls = append(f.adminCalls, "organization:"+id.String()+":DELETE")
 	return nil
 }
-func (f *fakeRepository) AdminUnits(_ context.Context, organizationID uuid.UUID) ([]Unit, error) {
+func (f *fakeRepository) AdminUnits(_ context.Context, organizationID uuid.UUID) (UnitTree, error) {
 	f.adminCalls = append(f.adminCalls, "organization:"+organizationID.String()+":units")
-	return []Unit{}, nil
+	return UnitTree{Items: []Unit{}, StructureVersion: 1}, nil
+}
+func (f *fakeRepository) AdminUnitState(_ context.Context, organizationID, unitID uuid.UUID) (UnitMutationResult, error) {
+	return UnitMutationResult{Unit: Unit{ID: unitID, OrganizationID: organizationID, Status: "DELETED", Version: 2}, StructureVersion: 2}, nil
 }
 func (f *fakeRepository) AdminMembers(_ context.Context, organizationID uuid.UUID) ([]Member, error) {
 	f.adminCalls = append(f.adminCalls, "organization:"+organizationID.String()+":members")
 	return []Member{}, nil
 }
-func (f *fakeRepository) AdminAddMember(_ context.Context, _ identity.Principal, organizationID, userID uuid.UUID, roles []string, unitIDs []uuid.UUID) (Member, error) {
+func (f *fakeRepository) AdminAddMember(_ context.Context, _ identity.Principal, organizationID, userID uuid.UUID, roles []string, unitIDs []uuid.UUID, _ string) (MembershipMutationResult, error) {
 	f.adminCalls = append(f.adminCalls, "organization:"+organizationID.String()+":member:add:"+userID.String())
-	return Member{UserID: userID, Roles: roles, UnitAdminIDs: unitIDs}, nil
+	return MembershipMutationResult{OrganizationID: organizationID, Member: Member{UserID: userID, Roles: roles, UnitAdminIDs: unitIDs}}, nil
 }
 func (f *fakeRepository) AdminReplaceMemberRoles(_ context.Context, _ identity.Principal, organizationID, userID uuid.UUID, roles []string, unitIDs []uuid.UUID) (Member, error) {
 	f.adminCalls = append(f.adminCalls, "organization:"+organizationID.String()+":member:roles:"+userID.String())
 	return Member{UserID: userID, Roles: roles, UnitAdminIDs: unitIDs}, nil
 }
-func (f *fakeRepository) AdminRemoveMember(_ context.Context, _ identity.Principal, organizationID, userID uuid.UUID) error {
+func (f *fakeRepository) AdminRemoveMember(_ context.Context, _ identity.Principal, organizationID, userID uuid.UUID, _ string) (MembershipMutationResult, error) {
 	f.adminCalls = append(f.adminCalls, "organization:"+organizationID.String()+":member:remove:"+userID.String())
-	return nil
+	return MembershipMutationResult{OrganizationID: organizationID, Member: Member{UserID: userID, Status: "REVOKED"}}, nil
 }
-func (f *fakeRepository) AdminTransferOwnership(_ context.Context, _ identity.Principal, organizationID, ownerID uuid.UUID) error {
+func (f *fakeRepository) AdminTransferOwnership(_ context.Context, _ identity.Principal, organizationID, ownerID uuid.UUID, _ string) (OwnershipTransferResult, error) {
 	f.adminCalls = append(f.adminCalls, "organization:"+organizationID.String()+":owner:"+ownerID.String())
-	return nil
+	return OwnershipTransferResult{OrganizationID: organizationID, NewOwnerID: ownerID}, nil
 }
-func (f *fakeRepository) AdminCreateUnit(_ context.Context, _ identity.Principal, organizationID uuid.UUID, parentID *uuid.UUID, name string) (Unit, error) {
+func (f *fakeRepository) AdminCreateUnit(_ context.Context, _ identity.Principal, organizationID uuid.UUID, parentID *uuid.UUID, name, _ string) (UnitMutationResult, error) {
 	parent := "root"
 	if parentID != nil {
 		parent = parentID.String()
 	}
 	f.adminCalls = append(f.adminCalls, "organization:"+organizationID.String()+":unit:create:"+parent+":"+name)
-	return Unit{ID: uuid.Must(uuid.NewV7()), OrganizationID: organizationID, ParentID: parentID, Name: name, Status: "ACTIVE", Version: 1}, nil
+	return UnitMutationResult{Unit: Unit{ID: uuid.Must(uuid.NewV7()), OrganizationID: organizationID, ParentID: parentID, Name: name, Status: "ACTIVE", Version: 1}, StructureVersion: 2}, nil
 }
-func (f *fakeRepository) AdminRenameUnit(_ context.Context, _ identity.Principal, organizationID, unitID uuid.UUID, name string) error {
+func (f *fakeRepository) AdminRenameUnit(_ context.Context, _ identity.Principal, organizationID, unitID uuid.UUID, name, _ string) (UnitMutationResult, error) {
 	f.adminCalls = append(f.adminCalls, "organization:"+organizationID.String()+":unit:"+unitID.String()+":rename:"+name)
-	return nil
+	return UnitMutationResult{Unit: Unit{ID: unitID, OrganizationID: organizationID, Name: name, Status: "ACTIVE", Version: 2}, StructureVersion: 2}, nil
 }
-func (f *fakeRepository) AdminDeleteUnit(_ context.Context, _ identity.Principal, organizationID, unitID uuid.UUID) error {
+func (*fakeRepository) AdminUnitDeletionBlockers(context.Context, uuid.UUID, uuid.UUID) ([]OrganizationLifecycleBlocker, error) {
+	return []OrganizationLifecycleBlocker{}, nil
+}
+func (f *fakeRepository) AdminDeleteUnit(_ context.Context, _ identity.Principal, organizationID, unitID uuid.UUID, _ string) (UnitMutationResult, error) {
 	f.adminCalls = append(f.adminCalls, "organization:"+organizationID.String()+":unit:"+unitID.String()+":DELETE")
-	return nil
+	return UnitMutationResult{Unit: Unit{ID: unitID, OrganizationID: organizationID, Status: "DELETED", Version: 2}, StructureVersion: 2}, nil
 }
 func (*fakeRepository) AdminAuditLogs(context.Context, AdminAuditFilter) ([]AdminAuditLog, error) {
 	return nil, nil
@@ -234,6 +262,25 @@ func TestBootstrapDoesNotReactivateDisabledUser(t *testing.T) {
 	}
 	if me.Status != "DISABLED" || wallets.calls != 0 || repository.activateCalls != 0 {
 		t.Fatalf("me=%+v wallet calls=%d activate calls=%d", me, wallets.calls, repository.activateCalls)
+	}
+}
+
+func TestActiveContextSwitchRequiresAndReturnsGlobalVersion(t *testing.T) {
+	organizationID := uuid.Must(uuid.NewV7())
+	repository := &fakeRepository{
+		me:         Me{UserID: uuid.Must(uuid.NewV7()), Status: "ACTIVE", ActiveContext: Context{Type: "PERSONAL", ContextVersion: 7, AuthorizationVersion: 2}},
+		setContext: Context{Type: "ORGANIZATION", MembershipVersion: 3, ContextVersion: 8, AuthorizationVersion: 4},
+	}
+	verify := func(context.Context, string) (identity.Principal, error) {
+		return identity.Principal{Issuer: "https://issuer.example", Subject: "user", SessionID: "session"}, nil
+	}
+	request := httptest.NewRequest(http.MethodPut, "/v1/me/active-context", strings.NewReader(`{"context_type":"ORGANIZATION","organization_id":"`+organizationID.String()+`","expected_context_version":7}`))
+	request.Header.Set("Authorization", "Bearer valid")
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	NewService(repository, &fakeWalletProvisioner{}).Handler(verify).ServeHTTP(response, request)
+	if response.Code != http.StatusOK || repository.setExpected != 7 || response.Header().Get("X-Context-Version") != "8" || !strings.Contains(response.Body.String(), `"context_version":8`) {
+		t.Fatalf("status=%d expected=%d headers=%v body=%s", response.Code, repository.setExpected, response.Header(), response.Body.String())
 	}
 }
 
@@ -317,6 +364,7 @@ func TestAdminLifecycleRoutesDispatchProtectedMutations(t *testing.T) {
 		request := httptest.NewRequest(test.method, test.path, strings.NewReader(test.body))
 		request.Header.Set("Authorization", "Bearer test-token")
 		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set("Idempotency-Key", "organization-test-key")
 		response := httptest.NewRecorder()
 		handler.ServeHTTP(response, request)
 		if response.Code != http.StatusNoContent {
@@ -348,15 +396,16 @@ func TestAdminOrganizationManagementRoutesCreateOrganizationsAndUnits(t *testing
 		{http.MethodPost, "/admin/v1/organizations", `{"name":"Example","owner_user_id":"` + ownerID.String() + `"}`, http.StatusCreated, "organization:create:" + ownerID.String() + ":Example"},
 		{http.MethodGet, "/admin/v1/organizations/" + organizationID.String() + "/units", "", http.StatusOK, "organization:" + organizationID.String() + ":units"},
 		{http.MethodGet, "/admin/v1/organizations/" + organizationID.String() + "/members", "", http.StatusOK, "organization:" + organizationID.String() + ":members"},
-		{http.MethodPost, "/admin/v1/organizations/" + organizationID.String() + "/ownership", `{"new_owner_user_id":"` + ownerID.String() + `"}`, http.StatusNoContent, "organization:" + organizationID.String() + ":owner:" + ownerID.String()},
+		{http.MethodPost, "/admin/v1/organizations/" + organizationID.String() + "/ownership", `{"new_owner_user_id":"` + ownerID.String() + `"}`, http.StatusOK, "organization:" + organizationID.String() + ":owner:" + ownerID.String()},
 		{http.MethodPost, "/admin/v1/organizations/" + organizationID.String() + "/units", `{"name":"Engineering","parent_id":"` + parentID.String() + `"}`, http.StatusCreated, "organization:" + organizationID.String() + ":unit:create:" + parentID.String() + ":Engineering"},
-		{http.MethodPatch, "/admin/v1/organizations/" + organizationID.String() + "/units/" + unitID.String(), `{"name":"Platform"}`, http.StatusNoContent, "organization:" + organizationID.String() + ":unit:" + unitID.String() + ":rename:Platform"},
-		{http.MethodDelete, "/admin/v1/organizations/" + organizationID.String() + "/units/" + unitID.String(), "", http.StatusNoContent, "organization:" + organizationID.String() + ":unit:" + unitID.String() + ":DELETE"},
+		{http.MethodPatch, "/admin/v1/organizations/" + organizationID.String() + "/units/" + unitID.String(), `{"name":"Platform"}`, http.StatusOK, "organization:" + organizationID.String() + ":unit:" + unitID.String() + ":rename:Platform"},
+		{http.MethodDelete, "/admin/v1/organizations/" + organizationID.String() + "/units/" + unitID.String(), "", http.StatusOK, "organization:" + organizationID.String() + ":unit:" + unitID.String() + ":DELETE"},
 	}
 	for _, test := range tests {
 		request := httptest.NewRequest(test.method, test.path, strings.NewReader(test.body))
 		request.Header.Set("Authorization", "Bearer test-token")
 		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set("Idempotency-Key", "organization-create-test")
 		response := httptest.NewRecorder()
 		handler.ServeHTTP(response, request)
 		if response.Code != test.status {
@@ -364,6 +413,30 @@ func TestAdminOrganizationManagementRoutesCreateOrganizationsAndUnits(t *testing
 		}
 		if got := repository.adminCalls[len(repository.adminCalls)-1]; got != test.want {
 			t.Fatalf("admin call=%q want=%q", got, test.want)
+		}
+	}
+}
+
+func TestAdminOrganizationFilterCursorRoundTrip(t *testing.T) {
+	item := AdminOrganization{ID: uuid.Must(uuid.NewV7()), UpdatedAt: time.Date(2026, time.August, 23, 12, 34, 56, 0, time.UTC)}
+	cursor, err := encodeAdminOrganizationCursor(item)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "/admin/v1/organizations?status=disabled&limit=25&cursor="+cursor, nil)
+	filter, err := parseAdminOrganizationFilter(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filter.Status != "DISABLED" || filter.Limit != 25 || filter.CursorID == nil || *filter.CursorID != item.ID || filter.CursorUpdatedAt == nil || !filter.CursorUpdatedAt.Equal(item.UpdatedAt) {
+		t.Fatalf("unexpected filter: %#v", filter)
+	}
+}
+
+func TestAdminOrganizationFilterRejectsUnknownStatusAndMalformedCursor(t *testing.T) {
+	for _, target := range []string{"/admin/v1/organizations?status=PAUSED", "/admin/v1/organizations?cursor=not-base64"} {
+		if _, err := parseAdminOrganizationFilter(httptest.NewRequest(http.MethodGet, target, nil)); err == nil {
+			t.Fatalf("expected invalid filter for %s", target)
 		}
 	}
 }

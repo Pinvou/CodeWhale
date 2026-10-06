@@ -22,7 +22,7 @@ func TestPostgresA04TokenUpgradePreservesExistingUsageAndRoutes(t *testing.T) {
 	defer connection.Conn().Close(ctx)
 	// Return only this owned schema to its A03 version with existing data, then
 	// execute the original A04 and A05 migrations through the production migration API.
-	for range 3 {
+	for range len(loaded) - 4 {
 		if err := migrations.DownOne(ctx, connection.Conn(), loaded); err != nil {
 			t.Fatal(err)
 		}

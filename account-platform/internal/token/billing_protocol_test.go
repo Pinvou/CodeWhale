@@ -1,8 +1,10 @@
 package token
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -12,6 +14,116 @@ import (
 
 	"github.com/google/uuid"
 )
+
+func TestOrganizationBillingResponsesRequireExactStatusAndCompleteJSON(t *testing.T) {
+	id := uuid.New()
+	methods := []struct {
+		name   string
+		status int
+		items  bool
+		call   func(*HTTPBillingClient) (json.RawMessage, error)
+	}{
+		{"products", 200, true, func(c *HTTPBillingClient) (json.RawMessage, error) {
+			return c.OrganizationProducts(context.Background(), id, id)
+		}},
+		{"packages", 200, true, func(c *HTTPBillingClient) (json.RawMessage, error) {
+			return c.OrganizationPackages(context.Background(), id, id)
+		}},
+		{"grants", 200, true, func(c *HTTPBillingClient) (json.RawMessage, error) {
+			return c.OrganizationQuotaGrants(context.Background(), id, nil)
+		}},
+		{"batch", 207, true, func(c *HTTPBillingClient) (json.RawMessage, error) {
+			return c.AllocateOrganizationQuotaBatch(context.Background(), id, id, json.RawMessage("[]"), "owned-logical-key")
+		}},
+		{"revoke", 200, false, func(c *HTTPBillingClient) (json.RawMessage, error) {
+			return c.RevokeOrganizationQuota(context.Background(), id, id, id, "owned reason", "owned-logical-key")
+		}},
+		{"create", 201, false, func(c *HTTPBillingClient) (json.RawMessage, error) {
+			return c.CreateOrganizationRechargeOrder(context.Background(), id, id, id, "PLAN", "ALIPAY", "", "NOT_CONFIGURED", "owned-logical-key")
+		}},
+	}
+	for _, method := range methods {
+		t.Run(method.name+"/redirect", func(t *testing.T) {
+			var hits atomic.Int32
+			target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				hits.Add(1)
+				w.WriteHeader(method.status)
+				w.Write([]byte(`{"items":[]}`))
+			}))
+			defer target.Close()
+			source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				http.Redirect(w, r, target.URL, http.StatusTemporaryRedirect)
+			}))
+			defer source.Close()
+			c, err := NewHTTPBillingClient(source.URL, "owned-service-key")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err = method.call(c); err == nil || hits.Load() != 0 {
+				t.Fatal("organization authority followed a redirect")
+			}
+		})
+		for _, input := range []struct {
+			name, body string
+			status     int
+			valid      bool
+		}{
+			{"valid", `{"items":[]}`, method.status, true}, {"unexpected-status", `{"items":[]}`, 202, false},
+			{"html", "<html>private</html>", method.status, false}, {"empty", "", method.status, false}, {"null", "null", method.status, false},
+			{"truncated", `{"items":`, method.status, false}, {"trailing", `{"items":[]} {}`, method.status, false},
+			{"oversized", `{"items":[]}` + strings.Repeat(" ", 2<<20), method.status, false},
+			{"missing-items", `{}`, method.status, !method.items}, {"invalid-items", `{"items":null}`, method.status, !method.items},
+			{"create-replay", `{"items":[]}`, 200, method.name == "create" || method.status == 200},
+		} {
+			t.Run(method.name+"/"+input.name, func(t *testing.T) {
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if r.Header.Get("Authorization") != "Bearer owned-service-key" {
+						t.Error("service authorization lost")
+					}
+					w.WriteHeader(input.status)
+					w.Write([]byte(input.body))
+				}))
+				defer server.Close()
+				c, err := NewHTTPBillingClient(server.URL, "owned-service-key")
+				if err != nil {
+					t.Fatal(err)
+				}
+				_, err = method.call(c)
+				if (err == nil) != input.valid {
+					t.Fatal("organization response acceptance mismatch")
+				}
+				if err != nil && strings.Contains(err.Error(), "private") {
+					t.Fatal("untrusted response echoed")
+				}
+			})
+		}
+	}
+}
+
+func TestOrganizationQuotaBatchPreservesExactIntegerAndLogicalKey(t *testing.T) {
+	actor, org := uuid.New(), uuid.New()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			CreatedBy uuid.UUID `json:"created_by"`
+			Items     []struct {
+				Amount int64 `json:"amount_microcredits"`
+			} `json:"items"`
+		}
+		if json.NewDecoder(r.Body).Decode(&body) != nil || body.CreatedBy != actor || len(body.Items) != 1 || body.Items[0].Amount != 9007199254740993 || r.Header.Get("Idempotency-Key") != "owned-exact-batch-key" {
+			t.Error("exact batch facts or key changed")
+		}
+		w.WriteHeader(207)
+		w.Write([]byte(`{"items":[]}`))
+	}))
+	defer server.Close()
+	c, err := NewHTTPBillingClient(server.URL, "owned-service-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = c.AllocateOrganizationQuotaBatch(context.Background(), org, actor, json.RawMessage(`[{"amount_microcredits":9007199254740993}]`), "owned-exact-batch-key"); err != nil {
+		t.Fatal(err)
+	}
+}
 
 // Controlled HTTP responses exercise the production client, not a live Billing service.
 func TestBillingHoldResponsesRequireAuthoritativeFacts(t *testing.T) {
@@ -228,5 +340,38 @@ func TestPostgresMalformedBillingReplyNeverCommitsTokenTerminal(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+type quotaReasonClient struct {
+	BillingClient
+	OrganizationBillingClient
+	calls int
+}
+
+func (c *quotaReasonClient) RevokeOrganizationQuota(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, string, string) (json.RawMessage, error) {
+	c.calls++
+	return json.RawMessage(`{}`), nil
+}
+func TestOrganizationQuotaRevokeReasonCharacterBoundary(t *testing.T) {
+	for _, count := range []int{500, 501} {
+		t.Run(fmt.Sprint(count), func(t *testing.T) {
+			org := uuid.New()
+			client := &quotaReasonClient{}
+			service := &Service{billing: client, contexts: quotaRouteContext{value: AuthorizationContext{UserID: uuid.New(), SessionID: "owned-session", ContextType: "ORGANIZATION", ContextVersion: 1, AuthorizationVersion: 1, OrganizationID: &org, Permissions: []string{"org.quota.revoke"}}}}
+			body, _ := json.Marshal(map[string]any{"reason": strings.Repeat("\u539f", count)})
+			request := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(body))
+			request.SetPathValue("organization_id", org.String())
+			request.SetPathValue("grant_id", uuid.NewString())
+			response := httptest.NewRecorder()
+			service.revokeOrganizationQuotaGrant(response, request)
+			want, calls := 200, 1
+			if count > 500 {
+				want, calls = 400, 0
+			}
+			if response.Code != want || client.calls != calls {
+				t.Fatalf("status=%d calls=%d", response.Code, client.calls)
+			}
+		})
 	}
 }

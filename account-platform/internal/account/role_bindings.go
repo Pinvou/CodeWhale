@@ -315,13 +315,18 @@ func roleBindingByID(ctx context.Context, database roleBindingQuerier, bindingID
 
 func bumpRoleBindingCacheVersions(ctx context.Context, tx pgx.Tx, membershipID, userID uuid.UUID, now time.Time) (int64, error) {
 	var version int64
-	if err := tx.QueryRow(ctx, `UPDATE memberships SET version=version+1,updated_at=$2 WHERE id=$1 RETURNING version`, membershipID, now).Scan(&version); err != nil {
+	var organizationID uuid.UUID
+	var status string
+	if err := tx.QueryRow(ctx, `UPDATE memberships SET version=version+1,updated_at=$2 WHERE id=$1 RETURNING organization_id,status,version`, membershipID, now).Scan(&organizationID, &status, &version); err != nil {
 		return 0, err
 	}
 	if _, err := tx.Exec(ctx, `UPDATE users SET membership_version=membership_version+1,updated_at=$2 WHERE id=$1`, userID, now); err != nil {
 		return 0, err
 	}
 	if _, err := tx.Exec(ctx, `UPDATE user_sessions SET membership_version=membership_version+1,last_seen_at=$2 WHERE user_id=$1`, userID, now); err != nil {
+		return 0, err
+	}
+	if err := appendMembershipChanged(ctx, tx, membershipID, organizationID, userID, status, version); err != nil {
 		return 0, err
 	}
 	return version, nil

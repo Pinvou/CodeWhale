@@ -83,7 +83,7 @@ func assertMembershipEventVersion(t *testing.T, repository *PostgresRepository, 
 func TestPostgresAdminCreationPublishesInitialOwnerMembership(t *testing.T) {
 	r := accountDatabase(t)
 	_, owner := accountUser(t, r)
-	organization, err := r.AdminCreateOrganization(context.Background(), fixturePlatformAdmin(t, r), owner.UserID, "admin-created organization")
+	organization, err := r.AdminCreateOrganization(context.Background(), fixturePlatformAdmin(t, r), owner.UserID, "admin-created organization", uuid.NewString())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -96,10 +96,10 @@ func TestPostgresAdminOwnershipTransferPreservesPreviousMemberAndEvents(t *testi
 	target, targetMe := accountUser(t, r)
 	organization := accountOrganization(t, r, owner)
 	accountInvitation(t, r, owner, target, organization.ID, []string{"MEMBER"})
-	if err := r.AdminTransferOwnership(context.Background(), fixturePlatformAdmin(t, r), organization.ID, targetMe.UserID); err != nil {
+	if _, err := r.AdminTransferOwnership(context.Background(), fixturePlatformAdmin(t, r), organization.ID, targetMe.UserID, uuid.NewString()); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := r.SetActiveContext(context.Background(), owner, &organization.ID); err != nil {
+	if _, err := r.SetActiveContext(context.Background(), owner, &organization.ID, accountContextVersion(t, r, owner)); err != nil {
 		t.Fatal(err)
 	}
 	resolved, err := r.ResolveAuthorizationContext(context.Background(), owner)
@@ -121,13 +121,16 @@ func TestPostgresAdminOrganizationStatusAndDeletionPublishEachMembershipVersion(
 		}
 		assertMembershipEventVersion(t, r, organization.ID, ownerMe.UserID, state.membership)
 	}
+	if err := r.AdminSetOrganizationStatus(context.Background(), admin, organization.ID, "DISABLED"); err != nil {
+		t.Fatal(err)
+	}
 	if err := r.AdminDeleteOrganization(context.Background(), admin, organization.ID); err != nil {
 		t.Fatal(err)
 	}
 	assertMembershipEventVersion(t, r, organization.ID, ownerMe.UserID, "REVOKED")
 }
 
-func TestPostgresAdminLeafDeletionClearsGrantsAndPublishesMemberVersion(t *testing.T) {
+func TestPostgresAdminLeafDeletionBlocksLiveGrantsAndRetainsHistory(t *testing.T) {
 	r := accountDatabase(t)
 	owner, _ := accountUser(t, r)
 	member, memberMe := accountUser(t, r)
@@ -135,13 +138,29 @@ func TestPostgresAdminLeafDeletionClearsGrantsAndPublishesMemberVersion(t *testi
 	accountInvitation(t, r, owner, member, organization.ID, []string{"MEMBER"})
 	unit := accountUnit(t, r, owner, organization.ID, nil, "leaf")
 	accountExec(t, r, `INSERT INTO membership_units(membership_id,unit_id,created_at) SELECT id,$1,now() FROM memberships WHERE organization_id=$2 AND user_id=$3`, unit.ID, organization.ID, memberMe.UserID)
-	if err := r.AdminDeleteUnit(context.Background(), fixturePlatformAdmin(t, r), organization.ID, unit.ID); err != nil {
-		t.Fatal(err)
+	admin := fixturePlatformAdmin(t, r)
+	key := uuid.NewString()
+	if _, err := r.AdminDeleteUnit(context.Background(), admin, organization.ID, unit.ID, key); err == nil {
+		t.Fatal("a unit with active member access was deleted")
 	}
 	assertMembershipEventVersion(t, r, organization.ID, memberMe.UserID, "ACTIVE")
 	var version int64
+	if err := r.pool.QueryRow(context.Background(), `SELECT version FROM memberships WHERE organization_id=$1 AND user_id=$2`, organization.ID, memberMe.UserID).Scan(&version); err != nil || version != 1 {
+		t.Fatal("blocked deletion changed the membership")
+	}
+	if _, err := r.AdminRemoveMember(context.Background(), admin, organization.ID, memberMe.UserID, uuid.NewString()); err != nil {
+		t.Fatal(err)
+	}
+	assertMembershipEventVersion(t, r, organization.ID, memberMe.UserID, "REVOKED")
+	deleted, err := r.AdminDeleteUnit(context.Background(), admin, organization.ID, unit.ID, key)
+	if err != nil || deleted.Unit.Status != "DELETED" {
+		t.Fatal("a unit could not be logically deleted after its access was explicitly revoked")
+	}
+	if replay, err := r.AdminDeleteUnit(context.Background(), admin, organization.ID, unit.ID, key); err != nil || !replay.Replayed || replay.Unit.Version != deleted.Unit.Version {
+		t.Fatal("unit deletion replay changed its history")
+	}
 	if err := r.pool.QueryRow(context.Background(), `SELECT version FROM memberships WHERE organization_id=$1 AND user_id=$2`, organization.ID, memberMe.UserID).Scan(&version); err != nil || version != 2 {
-		t.Fatal("removing a membership unit did not advance membership version")
+		t.Fatal("explicit membership revocation did not retain the advanced version")
 	}
 }
 
@@ -225,8 +244,12 @@ func TestPostgresHTTPAdminRejectsInvalidJSONWithoutMutation(t *testing.T) {
 		})
 	}
 	var auditAfter int
-	if err := repo.pool.QueryRow(context.Background(), "SELECT count(*) FROM audit_logs").Scan(&auditAfter); err != nil || auditAfter != auditBefore {
-		t.Fatal("invalid admin JSON mutated audit history")
+	if err := repo.pool.QueryRow(context.Background(), "SELECT count(*) FROM audit_logs").Scan(&auditAfter); err != nil || auditAfter != auditBefore+5 {
+		t.Fatal("invalid admin JSON changed history outside the five creation failure audits")
+	}
+	var creationFailures int
+	if err := repo.pool.QueryRow(context.Background(), `SELECT count(*) FROM audit_logs WHERE action='admin.organization.create' AND result='FAILED' AND resource_id='pending'`).Scan(&creationFailures); err != nil || creationFailures != 5 {
+		t.Fatal("invalid organization creation requests did not record only failed attempts")
 	}
 	var userStatus, orgStatus, unitStatus string
 	if err := repo.pool.QueryRow(context.Background(), "SELECT u.status,o.status,n.status FROM users u,organizations o,organization_units n WHERE u.id=$1 AND o.id=$2 AND n.id=$3", me.UserID, org.ID, unit.ID).Scan(&userStatus, &orgStatus, &unitStatus); err != nil || userStatus != "ACTIVE" || orgStatus != "ACTIVE" || unitStatus != "ACTIVE" {

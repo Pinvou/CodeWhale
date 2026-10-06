@@ -29,6 +29,14 @@ type contractRepository struct {
 	catalogUnavailable bool
 }
 
+// The profile UUID-validation probe crosses Account's context-header middleware.
+// Supply its read dependency without simulating profile persistence or a payment.
+type profileContractRepository struct{ account.Repository }
+
+func (profileContractRepository) GetMe(context.Context, identity.Principal) (account.Me, error) {
+	return account.Me{}, account.ErrNotFound
+}
+
 func (contractRepository) AdminOverview(context.Context) (token.AdminOverview, error) {
 	return token.AdminOverview{}, nil
 }
@@ -270,7 +278,7 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	me := account.Me{UserID: id, UserCode: account.FormatUserCode(userCode), Status: "ACTIVE", MobileVerified: false, CommerceCustomerStatus: "PENDING", ActiveContext: account.Context{Type: "PERSONAL", MembershipVersion: 1, ContextVersion: 1, AuthorizationVersion: 1}}
+	me := account.Me{UserID: id, UserCode: account.FormatUserCode(userCode), Status: "ACTIVE", MobileVerified: false, CommerceCustomerStatus: "PENDING", ActiveContext: account.Context{Type: "PERSONAL", MembershipVersion: 1, ContextVersion: 1, AuthorizationVersion: 1, Permissions: []string{}}}
 	validUntil := paidAt.Add(time.Hour)
 	plan := billing.EntitlementPackage{ID: id, UserID: &id, WalletID: id, PaymentOrderID: &id, SourceType: "PAYMENT", SourceReference: id.String(), ProductID: "PLAN_TRIAL", AmountFen: 9007199254740993, PointsTotal: 9007199254740993, PointsRemaining: 9007199254740993, CreditedAt: paidAt, ValidFrom: paidAt, ValidUntil: &validUntil, Status: "ACTIVE", Components: []billing.EntitlementComponent{{ID: id, ComponentType: "BASE", OriginalMicrocredits: 9007199254740993, AvailableMicrocredits: 9007199254740993, CreditedAt: paidAt, ExpiresAt: &validUntil, Status: "ACTIVE"}}}
 	history := billing.PaymentOrderHistoryItem{ID: id, PinvouOrderID: id, ProductID: "CNY_1", OrderType: "LEGACY", AmountFen: 9007199254740993, DisplayPoints: 9007199254740993, Channel: "ALIPAY", Status: "PAID", FulfillmentStatus: "CREDITED", ExpiresAt: paidAt.Add(time.Hour), CreatedAt: paidAt, InvoiceStatus: "NOT_SUPPORTED"}
@@ -291,7 +299,7 @@ func main() {
 		}
 		mobileErrors[route] = response.Body.Bytes()
 	}
-	profileHandler := httpserver.HandlerWithApplication(config.Config{ServiceName: "contract-profile"}, account.NewService(nil, nil).WithProfileChanges(&account.ProfileChangeService{}).Handler(func(context.Context, string) (identity.Principal, error) {
+	profileHandler := httpserver.HandlerWithApplication(config.Config{ServiceName: "contract-profile"}, account.NewService(profileContractRepository{}, nil).WithProfileChanges(&account.ProfileChangeService{}).Handler(func(context.Context, string) (identity.Principal, error) {
 		return identity.Principal{Issuer: "https://fixture-authority.invalid", Subject: "fixture-subject"}, nil
 	}), nil)
 	profileRequest := httptest.NewRequest(http.MethodGet, "/v1/me/profile-change-requests/not-a-uuid", nil)

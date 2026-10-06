@@ -25,15 +25,15 @@ func TestPostgresAdminScopedRolesPreserveOwnerAndTransactionalMembershipEvents(t
 	foreignUnit := accountUnit(t, repo, owner, otherOrg.ID, nil, "foreign scope")
 	ctx := context.Background()
 	admin := fixturePlatformAdmin(t, repo)
-	if _, err := repo.AdminAddMember(ctx, admin, org.ID, memberMe.UserID, nil, []uuid.UUID{foreignUnit.ID}); !errors.Is(err, ErrNotFound) {
+	if _, err := repo.AdminAddMember(ctx, admin, org.ID, memberMe.UserID, nil, []uuid.UUID{foreignUnit.ID}, uuid.NewString()); !errors.Is(err, ErrNotFound) {
 		t.Fatal("cross-organization unit role was accepted")
 	}
-	member, err := repo.AdminAddMember(ctx, admin, org.ID, memberMe.UserID, []string{"AUDITOR", "AUDITOR"}, []uuid.UUID{unit.ID, unit.ID})
-	if err != nil || !slices.Equal(member.Roles, []string{"AUDITOR", "MEMBER", "UNIT_ADMIN"}) || !slices.Equal(member.UnitAdminIDs, []uuid.UUID{unit.ID}) {
+	member, err := repo.AdminAddMember(ctx, admin, org.ID, memberMe.UserID, []string{"AUDITOR", "AUDITOR"}, []uuid.UUID{unit.ID, unit.ID}, uuid.NewString())
+	if err != nil || !slices.Equal(member.Member.Roles, []string{"AUDITOR", "MEMBER", "UNIT_ADMIN"}) || !slices.Equal(member.Member.UnitAdminIDs, []uuid.UUID{unit.ID}) {
 		t.Fatal("scoped roles were not normalized or persisted")
 	}
 	assertMembershipEventVersion(t, repo, org.ID, memberMe.UserID, "ACTIVE")
-	if member.Version != 1 {
+	if member.Member.Version != 1 {
 		t.Fatal("new administrator membership skipped its first event version")
 	}
 	request := httptest.NewRequest("GET", "/v1/organizations/"+org.ID.String()+"/members", nil)
@@ -61,22 +61,22 @@ func TestPostgresAdminScopedRolesPreserveOwnerAndTransactionalMembershipEvents(t
 	if _, err := repo.AdminReplaceMemberRoles(ctx, admin, org.ID, ownerMe.UserID, []string{"MEMBER"}, nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := repo.AdminRemoveMember(ctx, admin, org.ID, ownerMe.UserID); !errors.Is(err, ErrLastOwner) {
+	if _, err := repo.AdminRemoveMember(ctx, admin, org.ID, ownerMe.UserID, uuid.NewString()); !errors.Is(err, ErrLastOwner) {
 		t.Fatal("role replacement removed the protected owner")
 	}
 	if _, err := repo.AdminReplaceMemberRoles(ctx, admin, org.ID, memberMe.UserID, []string{"OWNER"}, nil); !errors.Is(err, ErrConflict) {
 		t.Fatal("roles endpoint granted ownership")
 	}
-	if err := repo.AdminRemoveMember(ctx, admin, org.ID, memberMe.UserID); err != nil {
+	if _, err := repo.AdminRemoveMember(ctx, admin, org.ID, memberMe.UserID, uuid.NewString()); err != nil {
 		t.Fatal(err)
 	}
 	assertMembershipEventVersion(t, repo, org.ID, memberMe.UserID, "REVOKED")
-	member, err = repo.AdminAddMember(ctx, admin, org.ID, memberMe.UserID, nil, nil)
-	if err != nil || !slices.Equal(member.Roles, []string{"MEMBER"}) || len(member.UnitAdminIDs) != 0 {
+	member, err = repo.AdminAddMember(ctx, admin, org.ID, memberMe.UserID, nil, nil, uuid.NewString())
+	if err != nil || !slices.Equal(member.Member.Roles, []string{"MEMBER"}) || len(member.Member.UnitAdminIDs) != 0 {
 		t.Fatal("re-adding a member revived revoked scoped privileges")
 	}
 	assertMembershipEventVersion(t, repo, org.ID, memberMe.UserID, "ACTIVE")
-	rows, err := repo.pool.Query(ctx, `SELECT aggregate_version FROM outbox_events WHERE aggregate_id=$1 AND event_type='account.membership.changed.v1' ORDER BY aggregate_version`, member.MembershipID)
+	rows, err := repo.pool.Query(ctx, `SELECT aggregate_version FROM outbox_events WHERE aggregate_id=$1 AND event_type='account.membership.changed.v1' ORDER BY aggregate_version`, member.Member.MembershipID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -103,7 +103,7 @@ func TestPostgresAdminScopedRolesPreserveOwnerAndTransactionalMembershipEvents(t
 		t.Fatal(err)
 	}
 	for _, item := range stored {
-		if item.UserID == memberMe.UserID && (item.Version != member.Version || !slices.Equal(item.Roles, member.Roles)) {
+		if item.UserID == memberMe.UserID && (item.Version != member.Member.Version || !slices.Equal(item.Roles, member.Member.Roles)) {
 			t.Fatal("failed event write changed authoritative membership roles")
 		}
 	}
@@ -119,14 +119,14 @@ func TestPostgresAdministratorMembershipLifecycleEventsApplyToInboxOnce(t *testi
 	_, user := accountUser(t, repo)
 	org := accountOrganization(t, repo, owner)
 	admin := fixturePlatformAdmin(t, repo)
-	member, err := repo.AdminAddMember(ctx, admin, org.ID, user.UserID, nil, nil)
+	member, err := repo.AdminAddMember(ctx, admin, org.ID, user.UserID, nil, nil, uuid.NewString())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := repo.AdminRemoveMember(ctx, admin, org.ID, user.UserID); err != nil {
+	if _, err := repo.AdminRemoveMember(ctx, admin, org.ID, user.UserID, uuid.NewString()); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := repo.AdminAddMember(ctx, admin, org.ID, user.UserID, nil, nil); err != nil {
+	if _, err := repo.AdminAddMember(ctx, admin, org.ID, user.UserID, nil, nil, uuid.NewString()); err != nil {
 		t.Fatal(err)
 	}
 	dsn, err := url.Parse(repo.pool.Config().ConnString())
@@ -141,7 +141,7 @@ func TestPostgresAdministratorMembershipLifecycleEventsApplyToInboxOnce(t *testi
 		t.Fatal(err)
 	}
 	defer inbox.Close()
-	rows, err := repo.pool.Query(ctx, `SELECT event_id,event_type,aggregate_id,aggregate_version,payload,trace_id,occurred_at FROM outbox_events WHERE aggregate_id=$1 ORDER BY aggregate_version`, member.MembershipID)
+	rows, err := repo.pool.Query(ctx, `SELECT event_id,event_type,aggregate_id,aggregate_version,payload,trace_id,occurred_at FROM outbox_events WHERE aggregate_id=$1 ORDER BY aggregate_version`, member.Member.MembershipID)
 	if err != nil {
 		t.Fatal(err)
 	}

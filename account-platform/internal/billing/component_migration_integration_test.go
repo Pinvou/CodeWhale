@@ -24,7 +24,10 @@ func TestPostgresComponentMigrationPreservesConsumedLegacyAndReviewHold(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	for range 2 {
+	for _, migration := range loaded {
+		if migration.Version <= 15 {
+			continue
+		}
 		err = migrations.DownOne(ctx, conn.Conn(), loaded)
 		migrations.Unlock(ctx, conn.Conn())
 		if err != nil {
@@ -111,7 +114,10 @@ func TestPostgresComponentMigrationPreservesConsumedLegacyAndReviewHold(t *testi
 		if up {
 			err = migrations.Up(ctx, c.Conn(), loaded)
 		} else {
-			for range 2 {
+			for _, migration := range loaded {
+				if migration.Version <= 15 {
+					continue
+				}
 				err = migrations.DownOne(ctx, c.Conn(), loaded)
 				migrations.Unlock(ctx, c.Conn())
 				if err != nil {

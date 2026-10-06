@@ -11,36 +11,42 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-func (r *PostgresRepository) ListUnits(ctx context.Context, principal identity.Principal, organizationID uuid.UUID) ([]Unit, error) {
+func (r *PostgresRepository) ListUnits(ctx context.Context, principal identity.Principal, organizationID uuid.UUID) (UnitTree, error) {
 	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
 	if err != nil {
-		return nil, err
+		return UnitTree{}, err
 	}
 	defer tx.Rollback(ctx)
 	actorID, err := activeUserID(ctx, tx, principal)
 	if err != nil {
-		return nil, err
+		return UnitTree{}, err
 	}
 	if err := requireOrganizationPermission(ctx, tx, actorID, organizationID, nil, PermissionOrganizationUnitsRead); err != nil {
-		return nil, err
+		return UnitTree{}, err
+	}
+	var structureVersion int64
+	if err := tx.QueryRow(ctx, `SELECT structure_version FROM organizations WHERE id=$1 AND status='ACTIVE'`, organizationID).Scan(&structureVersion); errors.Is(err, pgx.ErrNoRows) {
+		return UnitTree{}, ErrNotFound
+	} else if err != nil {
+		return UnitTree{}, err
 	}
 	rows, err := tx.Query(ctx, `SELECT id,organization_id,parent_id,name,status,version FROM organization_units WHERE organization_id=$1 AND status='ACTIVE' ORDER BY parent_id NULLS FIRST,name,id`, organizationID)
 	if err != nil {
-		return nil, err
+		return UnitTree{}, err
 	}
 	defer rows.Close()
 	items := make([]Unit, 0)
 	for rows.Next() {
 		var item Unit
 		if err := rows.Scan(&item.ID, &item.OrganizationID, &item.ParentID, &item.Name, &item.Status, &item.Version); err != nil {
-			return nil, err
+			return UnitTree{}, err
 		}
 		items = append(items, item)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, err
+		return UnitTree{}, err
 	}
-	return items, tx.Commit(ctx)
+	return UnitTree{Items: items, StructureVersion: structureVersion}, tx.Commit(ctx)
 }
 
 func (r *PostgresRepository) ListMembers(ctx context.Context, principal identity.Principal, organizationID uuid.UUID) ([]Member, error) {
@@ -82,6 +88,41 @@ ORDER BY COALESCE(u.display_name,u.email,u.id::text),u.id`, organizationID)
 	return items, tx.Commit(ctx)
 }
 
+func (r *PostgresRepository) ListQuotaMembers(ctx context.Context, principal identity.Principal, organizationID uuid.UUID) ([]QuotaMember, error) {
+	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+	actorID, err := activeUserID(ctx, tx, principal)
+	if err != nil {
+		return nil, err
+	}
+	if err := requireOrganizationPermission(ctx, tx, actorID, organizationID, nil, PermissionOrganizationQuotaAllocate); err != nil {
+		return nil, err
+	}
+	rows, err := tx.Query(ctx, `SELECT member.user_id,account_user.display_name,member.version
+FROM memberships member JOIN users account_user ON account_user.id=member.user_id
+WHERE member.organization_id=$1 AND member.status='ACTIVE' AND account_user.status='ACTIVE'
+ORDER BY COALESCE(account_user.display_name,account_user.id::text),account_user.id`, organizationID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := make([]QuotaMember, 0)
+	for rows.Next() {
+		var item QuotaMember
+		if err := rows.Scan(&item.UserID, &item.DisplayName, &item.Version); err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, tx.Commit(ctx)
+}
+
 func (r *PostgresRepository) ReplaceMemberRoles(ctx context.Context, principal identity.Principal, organizationID, targetUserID uuid.UUID, roles []string) (Member, error) {
 	roles, err := validateManagedRoles(roles)
 	if err != nil {
@@ -108,12 +149,15 @@ func (r *PostgresRepository) ReplaceMemberRoles(ctx context.Context, principal i
 	if err != nil {
 		return Member{}, err
 	}
+	if err := requireOrganizationMutationPermission(ctx, tx, actorID, organizationID, nil, PermissionOrganizationRolesAssign); err != nil {
+		return Member{}, err
+	}
 	now := r.now()
 	if _, err := tx.Exec(ctx, `UPDATE role_bindings SET revoked_at=$2,revoked_by=$3 WHERE membership_id=$1 AND role IN ('ORG_ADMIN','BILLING_ADMIN','MEMBER','AUDITOR') AND revoked_at IS NULL`, membershipID, now, actorID); err != nil {
 		return Member{}, err
 	}
 	for _, role := range roles {
-		if _, err := tx.Exec(ctx, `INSERT INTO role_bindings(id,membership_id,role,created_by,created_at,grant_source) VALUES($1,$2,$3,$4,$5,'ORGANIZATION_ADMIN')`, uuid.Must(uuid.NewV7()), membershipID, role, actorID, now); err != nil {
+		if _, err := tx.Exec(ctx, `INSERT INTO role_bindings(id,membership_id,role,created_by,created_at,starts_at,grant_source) VALUES($1,$2,$3,$4,$5,$5,'ORGANIZATION_ADMIN')`, uuid.Must(uuid.NewV7()), membershipID, role, actorID, now); err != nil {
 			return Member{}, err
 		}
 	}

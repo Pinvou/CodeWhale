@@ -24,10 +24,25 @@ func (r *PostgresRepository) ListPackages(ctx context.Context, userID, walletID 
 	if userID == uuid.Nil || walletID == uuid.Nil {
 		return nil, PackageSummary{}, ErrConflict
 	}
+	return r.listPackages(ctx, userID, walletID, limit, false)
+}
+
+func (r *PostgresRepository) ListOrganizationPackages(ctx context.Context, organizationID, walletID uuid.UUID, limit int) ([]EntitlementPackage, PackageSummary, error) {
+	wallet, err := r.GetWallet(ctx, walletID)
+	if err != nil {
+		return nil, PackageSummary{}, err
+	}
+	if organizationID == uuid.Nil || wallet.OwnerType != "ORGANIZATION" || wallet.OwnerID != organizationID {
+		return nil, PackageSummary{}, ErrConflict
+	}
+	return r.listPackages(ctx, uuid.Nil, walletID, limit, true)
+}
+
+func (r *PostgresRepository) listPackages(ctx context.Context, userID, walletID uuid.UUID, limit int, organization bool) ([]EntitlementPackage, PackageSummary, error) {
 	if limit < 1 || limit > 200 {
 		limit = 100
 	}
-	rows, err := r.pool.Query(ctx, `SELECT ep.id,ep.user_id,ep.wallet_id,ep.payment_order_id,COALESCE(po.merchant_order_no,''),ep.source_type,ep.source_reference,ep.product_id,ep.plan_name,ep.sku_code,ep.amount_fen,ep.points_total,ep.points_reserved,ep.points_used,ep.points_remaining,ep.points_expired,ep.points_revoked,ep.credited_at,ep.valid_from,ep.valid_until,ep.status FROM entitlement_packages ep LEFT JOIN payment_orders po ON po.id=ep.payment_order_id WHERE ep.wallet_id=$2 AND ep.user_id=$1 AND ep.valid_until IS NOT NULL AND ep.payment_order_id IS NOT NULL ORDER BY ep.credited_at DESC,ep.id DESC LIMIT $3`, userID, walletID, limit)
+	rows, err := r.pool.Query(ctx, `SELECT ep.id,ep.user_id,ep.wallet_id,ep.payment_order_id,COALESCE(po.merchant_order_no,''),ep.source_type,ep.source_reference,ep.product_id,ep.plan_name,ep.sku_code,ep.amount_fen,ep.points_total,ep.points_reserved,ep.points_used,ep.points_remaining,ep.points_expired,ep.points_revoked,ep.credited_at,ep.valid_from,ep.valid_until,ep.status FROM entitlement_packages ep LEFT JOIN payment_orders po ON po.id=ep.payment_order_id WHERE ep.wallet_id=$2 AND ($4 OR (NOT $4 AND ep.user_id=$1 AND ep.valid_until IS NOT NULL AND ep.payment_order_id IS NOT NULL)) ORDER BY ep.credited_at DESC,ep.id DESC LIMIT $3`, userID, walletID, limit, organization)
 	if err != nil {
 		return nil, PackageSummary{}, err
 	}
@@ -70,13 +85,13 @@ func (r *PostgresRepository) ListPackages(ctx context.Context, userID, walletID 
 	}
 	summary := PackageSummary{AvailableMicrocredits: "0", BaseAvailableMicrocredits: "0", BonusAvailableMicrocredits: "0", ReservedMicrocredits: "0", UsedMicrocredits: "0", NextExpiryMicrocredits: "0"}
 	var nextExpiry *time.Time
-	err = r.pool.QueryRow(ctx, `SELECT COALESCE(sum(component.available_microcredits),0),COALESCE(sum(component.available_microcredits) FILTER(WHERE component.component_type='BASE'),0),COALESCE(sum(component.available_microcredits) FILTER(WHERE component.component_type='BONUS'),0),COALESCE(sum(component.reserved_microcredits),0),COALESCE(sum(component.used_microcredits),0),count(DISTINCT package.id),min(component.expires_at) FILTER(WHERE component.available_microcredits>0) FROM entitlement_components component JOIN entitlement_packages package ON package.id=component.package_id WHERE package.wallet_id=$2 AND (package.user_id=$1 OR package.user_id IS NULL) AND component.status='ACTIVE' AND component.expires_at>$3`, userID, walletID, r.now()).Scan(&summary.AvailableMicrocredits, &summary.BaseAvailableMicrocredits, &summary.BonusAvailableMicrocredits, &summary.ReservedMicrocredits, &summary.UsedMicrocredits, &summary.ActivePackageCount, &nextExpiry)
+	err = r.pool.QueryRow(ctx, `SELECT COALESCE(sum(component.available_microcredits),0),COALESCE(sum(component.available_microcredits) FILTER(WHERE component.component_type='BASE'),0),COALESCE(sum(component.available_microcredits) FILTER(WHERE component.component_type='BONUS'),0),COALESCE(sum(component.reserved_microcredits),0),COALESCE(sum(component.used_microcredits),0),count(DISTINCT package.id),min(component.expires_at) FILTER(WHERE component.available_microcredits>0) FROM entitlement_components component JOIN entitlement_packages package ON package.id=component.package_id WHERE package.wallet_id=$2 AND ($4 OR package.user_id=$1 OR package.user_id IS NULL) AND component.status='ACTIVE' AND (component.expires_at>$3 OR ($4 AND component.expires_at IS NULL))`, userID, walletID, r.now(), organization).Scan(&summary.AvailableMicrocredits, &summary.BaseAvailableMicrocredits, &summary.BonusAvailableMicrocredits, &summary.ReservedMicrocredits, &summary.UsedMicrocredits, &summary.ActivePackageCount, &nextExpiry)
 	if err != nil {
 		return nil, PackageSummary{}, err
 	}
 	summary.NextExpiryAt = nextExpiry
 	if nextExpiry != nil {
-		if err := r.pool.QueryRow(ctx, `SELECT COALESCE(sum(component.available_microcredits),0) FROM entitlement_components component JOIN entitlement_packages package ON package.id=component.package_id WHERE package.wallet_id=$2 AND (package.user_id=$1 OR package.user_id IS NULL) AND component.status='ACTIVE' AND component.expires_at=$3`, userID, walletID, *nextExpiry).Scan(&summary.NextExpiryMicrocredits); err != nil {
+		if err := r.pool.QueryRow(ctx, `SELECT COALESCE(sum(component.available_microcredits),0) FROM entitlement_components component JOIN entitlement_packages package ON package.id=component.package_id WHERE package.wallet_id=$2 AND ($4 OR package.user_id=$1 OR package.user_id IS NULL) AND component.status='ACTIVE' AND component.expires_at=$3`, userID, walletID, *nextExpiry, organization).Scan(&summary.NextExpiryMicrocredits); err != nil {
 			return nil, PackageSummary{}, err
 		}
 	}
@@ -176,6 +191,9 @@ func (r *PostgresRepository) expireOnePackage(ctx context.Context) (bool, error)
 			}
 			if command.RowsAffected() != 1 {
 				return false, ErrConflict
+			}
+			if err := expireMemberQuotaGrantsForComponent(ctx, tx, component.id, now); err != nil {
+				return false, err
 			}
 			command, err = tx.Exec(ctx, `UPDATE entitlement_components SET available_microcredits=0,active_grant_microcredits=0,suspended_grant_microcredits=0,expired_microcredits=expired_microcredits+$2,status='EXPIRED',updated_at=$6 WHERE id=$1 AND available_microcredits=$3 AND active_grant_microcredits=$4 AND suspended_grant_microcredits=$5 AND reserved_microcredits=0`, component.id, expiring, component.available, component.active, component.suspended, now)
 			if err != nil {

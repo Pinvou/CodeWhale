@@ -38,7 +38,7 @@ func TestPostgresA04AccountUpgradePreservesExistingIdentityOrganizationAndEventG
 	if err != nil || stored.UserID != me.UserID || stored.Status != "ACTIVE" {
 		t.Fatal("A04 migration changed an existing identity")
 	}
-	if _, err := repo.SetActiveContext(ctx, principal, &organization.ID); err != nil {
+	if _, err := repo.SetActiveContext(ctx, principal, &organization.ID, accountContextVersion(t, repo, principal)); err != nil {
 		t.Fatal(err)
 	}
 	resolved, err := repo.ResolveAuthorizationContext(ctx, principal)

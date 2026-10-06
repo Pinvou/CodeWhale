@@ -245,7 +245,7 @@ func paymentFixture(t *testing.T) (*PaymentCoordinator, Wallet, uuid.UUID) {
 	t.Helper()
 	r, w := billingFixture(t)
 	p := &PaymentCoordinator{repository: r, provider: &recoverableProvider{}, now: r.now, merchantID: "pinvou-development", callbackURL: "https://billing.example/callback", secrets: map[string][]byte{"ALIPAY": []byte("test-only-notification-secret-32-chars")}}
-	return p, w, uuid.New()
+	return p, w, w.OwnerID
 }
 
 func TestPostgresPaymentCreateRecoversExternalOutcomeAndConcurrentReplay(t *testing.T) {

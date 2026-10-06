@@ -193,6 +193,15 @@ func (p *PaymentCoordinator) reserveRefund(ctx context.Context, orderID, request
 	if credits > lotRemaining-pendingCredits {
 		return Refund{}, false, ErrInsufficientBalance
 	}
+	// Member grants own capacity too. A provider refund must never reserve or
+	// return credits already assigned to a member, even though the lot still exists.
+	var unassigned int64
+	if err := tx.QueryRow(ctx, `SELECT available_microcredits FROM entitlement_components WHERE credit_lot_id=(SELECT id FROM credit_lots WHERE wallet_id=$1 AND source_reference=$2 AND refundable) FOR UPDATE`, order.WalletID, "recharge:"+order.ID.String()).Scan(&unassigned); err != nil {
+		return Refund{}, false, err
+	}
+	if credits > unassigned-pendingCredits {
+		return Refund{}, false, ErrInsufficientBalance
+	}
 	now := p.now()
 	refund = Refund{ID: uuid.Must(uuid.NewV7()), PaymentOrderID: orderID, RequesterID: requesterID, MerchantRefundNo: "pvr-" + uuid.Must(uuid.NewV7()).String(), AmountFen: amountFen, CreditMicrocredits: credits, Status: "REQUESTED", Reason: reason, CreatedAt: now, UpdatedAt: now}
 	command, err := tx.Exec(ctx, `UPDATE wallets SET reserved_microcredits=reserved_microcredits+$2,version=version+1,updated_at=$3 WHERE id=$1 AND posted_microcredits-reserved_microcredits >= $2`, order.WalletID, credits, now)
@@ -332,12 +341,12 @@ func refundMerchantOrder(ctx context.Context, database queryable, orderID uuid.U
 }
 
 func getPaymentOrderByID(ctx context.Context, database queryable, orderID uuid.UUID, lock bool) (PaymentOrder, error) {
-	query := `SELECT id,merchant_order_no,requester_id,wallet_id,product_id,channel,amount_fen,currency,credit_microcredits,status,fulfillment_status,COALESCE(payment_url,''),COALESCE(qr_data,''),channel_transaction_id,expires_at,paid_at,COALESCE(mobile_e164,''),COALESCE(provider_sku,'') FROM payment_orders WHERE id=$1`
+	query := `SELECT id,merchant_order_no,requester_id,beneficiary_organization_id,wallet_id,product_id,channel,amount_fen,currency,credit_microcredits,status,fulfillment_status,COALESCE(payment_url,''),COALESCE(qr_data,''),channel_transaction_id,expires_at,paid_at,COALESCE(mobile_e164,''),COALESCE(provider_sku,'') FROM payment_orders WHERE id=$1`
 	if lock {
 		query += ` FOR UPDATE`
 	}
 	var order PaymentOrder
-	err := database.QueryRow(ctx, query, orderID).Scan(&order.ID, &order.MerchantOrderNo, &order.RequesterID, &order.WalletID, &order.ProductID, &order.Channel, &order.AmountFen, &order.Currency, &order.CreditMicrocredits, &order.Status, &order.FulfillmentStatus, &order.PaymentURL, &order.QRData, &order.ChannelTransactionID, &order.ExpiresAt, &order.PaidAt, &order.Mobile, &order.ProviderSKU)
+	err := database.QueryRow(ctx, query, orderID).Scan(&order.ID, &order.MerchantOrderNo, &order.RequesterID, &order.BeneficiaryOrganizationID, &order.WalletID, &order.ProductID, &order.Channel, &order.AmountFen, &order.Currency, &order.CreditMicrocredits, &order.Status, &order.FulfillmentStatus, &order.PaymentURL, &order.QRData, &order.ChannelTransactionID, &order.ExpiresAt, &order.PaidAt, &order.Mobile, &order.ProviderSKU)
 	return order, err
 }
 

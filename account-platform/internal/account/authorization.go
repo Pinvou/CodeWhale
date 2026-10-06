@@ -37,6 +37,7 @@ const (
 	PermissionOrganizationMembersManage = "org.members.manage"
 	PermissionOrganizationRolesAssign   = "org.roles.assign"
 	PermissionOrganizationOwnerTransfer = "org.owner.transfer"
+	PermissionOrganizationQuotaAllocate = "org.quota.allocate"
 )
 
 type AuthorizationDecision struct {
@@ -70,7 +71,7 @@ func (r *PostgresRepository) Authorize(ctx context.Context, principal identity.P
 	decision.Permission = permission
 	decision.OrganizationID = organizationID
 	err := r.pool.QueryRow(ctx, `
-SELECT u.id, u.membership_version,
+SELECT u.id, active.context_version,
        COALESCE(av.version, 1),
        EXISTS(
          SELECT 1
@@ -95,6 +96,7 @@ SELECT u.id, u.membership_version,
        )
 FROM identities i
 JOIN users u ON u.id=i.user_id AND u.status='ACTIVE'
+JOIN user_active_contexts active ON active.user_id=u.id
 LEFT JOIN authorization_versions av ON av.user_id=u.id
   AND av.scope=CASE WHEN $4::uuid IS NULL THEN 'PLATFORM' ELSE 'ORGANIZATION' END
   AND av.scope_id=COALESCE($4::uuid, '00000000-0000-0000-0000-000000000000'::uuid)
@@ -105,6 +107,32 @@ WHERE i.issuer=$1 AND i.subject=$2`, principal.Issuer, principal.Subject, permis
 		return AuthorizationDecision{}, ErrForbidden
 	}
 	return decision, err
+}
+
+func (s *Service) contextVersionHeaders() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		principal, ok := identity.FromContext(c.Request.Context())
+		if !ok {
+			c.Next()
+			return
+		}
+		me, err := s.repository.GetMe(c.Request.Context(), principal)
+		if err == nil {
+			c.Header("X-Context-Version", stringInt64(me.ActiveContext.ContextVersion))
+			c.Header("X-Authorization-Version", stringInt64(me.ActiveContext.AuthorizationVersion))
+		}
+		if rawOrganizationID := c.Param("organization_id"); rawOrganizationID != "" {
+			if organizationID, parseErr := uuid.Parse(rawOrganizationID); parseErr == nil {
+				if repository, available := s.repository.(authorizationRepository); available {
+					decision, decisionErr := repository.Authorize(c.Request.Context(), principal, PermissionOrganizationProfileRead, &organizationID, nil)
+					if decisionErr == nil {
+						writeAuthorizationVersions(c.Writer.Header(), decision)
+					}
+				}
+			}
+		}
+		c.Next()
+	}
 }
 
 func (r *PostgresRepository) RoleDefinitions(ctx context.Context) ([]AdminRoleDefinition, error) {
@@ -140,6 +168,11 @@ func (s *Service) requirePermission(permission string) gin.HandlerFunc {
 		}
 		decision, err := repository.Authorize(c.Request.Context(), principal, permission, nil, nil)
 		if err != nil || !decision.Allowed {
+			if auditor, auditOK := s.repository.(interface {
+				RecordPermissionDenial(context.Context, identity.Principal, string, string) error
+			}); auditOK {
+				_ = auditor.RecordPermissionDenial(c.Request.Context(), principal, permission, c.Request.URL.Path)
+			}
 			api.WriteError(c.Writer, http.StatusForbidden, "PERMISSION_DENIED", "the requested permission is not granted", httpserver.RequestID(c.Request.Context()))
 			c.Abort()
 			return
@@ -147,6 +180,22 @@ func (s *Service) requirePermission(permission string) gin.HandlerFunc {
 		writeAuthorizationVersions(c.Writer.Header(), decision)
 		c.Next()
 	}
+}
+
+func (r *PostgresRepository) RecordPermissionDenial(ctx context.Context, principal identity.Principal, permission, resourcePath string) error {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	actorID, err := adminActorID(ctx, tx, principal)
+	if err != nil {
+		return err
+	}
+	if err := appendAdminAuditResult(ctx, tx, actorID, principal, nil, "authorization.permission.denied", "http_route", resourcePath, "DENIED", map[string]any{"permission": strings.TrimSpace(permission)}); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 func writeAuthorizationVersions(header http.Header, decision AuthorizationDecision) {
@@ -215,4 +264,43 @@ SELECT EXISTS(
 		return ErrForbidden
 	}
 	return nil
+}
+
+// Fence only a new mutation's final authority check. Production member/role
+// revocation locks the membership before updating its authorization projection.
+// A Serializable transaction with an older snapshot must conflict here rather
+// than authorize a write from stale role facts.
+func requireOrganizationMutationPermission(ctx context.Context, tx pgx.Tx, userID, organizationID uuid.UUID, unitID *uuid.UUID, permission string) error {
+	var membershipID uuid.UUID
+	err := tx.QueryRow(ctx, `SELECT id FROM memberships WHERE user_id=$1 AND organization_id=$2 AND status='ACTIVE' FOR SHARE`, userID, organizationID).Scan(&membershipID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrForbidden
+	}
+	if err != nil {
+		return err
+	}
+	rows, err := tx.Query(ctx, `SELECT ra.id FROM role_assignments ra
+JOIN role_permissions rp ON rp.role_code=ra.role_code AND rp.permission_code=$4
+WHERE ra.user_id=$1 AND ra.organization_id=$2 AND ra.revoked_at IS NULL
+AND ra.starts_at<=statement_timestamp() AND (ra.expires_at IS NULL OR ra.expires_at>statement_timestamp())
+AND (ra.unit_id IS NULL OR ($3::uuid IS NOT NULL AND EXISTS(
+ SELECT 1 FROM organization_unit_closure c WHERE c.organization_id=$2 AND c.ancestor_id=ra.unit_id AND c.descendant_id=$3
+))) ORDER BY ra.id FOR SHARE OF ra`, userID, organizationID, unitID, permission)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var bindingID uuid.UUID
+		if err := rows.Scan(&bindingID); err != nil {
+			rows.Close()
+			return err
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	// Lock acquisition can cross a scheduled boundary. Keep the existing final
+	// statement-time predicate after every authority lock is held.
+	return requireOrganizationPermission(ctx, tx, userID, organizationID, unitID, permission)
 }

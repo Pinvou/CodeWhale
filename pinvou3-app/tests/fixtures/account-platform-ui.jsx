@@ -22,6 +22,18 @@ const ids = {
   usage: '00000000-0000-4000-8000-000000000006',
 };
 let organizationId = '';
+let contextVersion = 1;
+let authorizationVersion = scenario?.endsWith('auth-scope') ? 100 : 1;
+let quotaAllowed = true;
+let nextResponseVersions;
+
+let quotaDispatches = 0;
+let unitDispatches = 0;
+let purchaseDispatches = 0;
+let revokeDispatches = 0;
+let revoked = false;
+const quotaGrant = item => ({grant_id:ids.order,organization_id:ids.organization,member_user_id:item.member_user_id,package_id:item.package_id,component_id:item.component_id,component_type:item.component_type,original_microcredits:String(item.amount_microcredits),available_microcredits:String(item.amount_microcredits),reserved_microcredits:'0',status:'ACTIVE'});
+const permissions = () => (scenario?.startsWith('a09-') || scenario === 'popover-auth-scope') ? ['org.members.read','org.wallet.read','org.entitlements.purchase','org.quota.read.all', ...(quotaAllowed ? ['org.quota.allocate','org.quota.revoke'] : [])] : ['org.members.read'];
 const createdTokens = [];
 let rotated = false;
 let balanceRequests = 0;
@@ -44,9 +56,13 @@ let adjustmentCreates = 0;
 let adjustmentRejected = false;
 const calls = [];
 const pending = new Map();
-const json = (body, status = 200) => new Response(JSON.stringify(body), {
-  status, headers: { 'Content-Type': 'application/json' },
-});
+const json = (body, status = 200) => {
+  const versions = nextResponseVersions || [contextVersion, authorizationVersion];
+  nextResponseVersions = undefined;
+  return new Response(JSON.stringify(body), {
+    status, headers: { 'Content-Type': 'application/json', 'X-Context-Version':String(versions[0]), 'X-Authorization-Version':String(versions[1]) },
+  });
+};
 const failed = (code, status) => json({ code, message: 'UNTRANSLATED_FIXTURE_ERROR' }, status);
 const wallet = (amount, organization = organizationId) => ({
   wallet_id: organization ? 'organization-wallet' : 'personal-wallet',
@@ -79,6 +95,7 @@ window.__accountReview = {
   ids, calls,
   titleCopy(scope, locale) { return dict[locale]?.[scope === "admin" ? "uiAdminPlatform" : "uiAccountPlatform"]?.title; },
   get pending() { return [...pending.keys()]; },
+  externalContext() { organizationId = organizationId ? '' : ids.organization; contextVersion += 1; window.dispatchEvent(new Event('focus')); },
   get copy() { return dict[language].uiAccountPlatform; },
   get adminCopy() { return dict[language].uiAdminPlatform; },
   settle(key, outcome) {
@@ -93,7 +110,8 @@ window.__accountReview = {
     else if (key === 'nativeRegister') item.resolve({ registration_operation_id:ids.user,user_id: ids.user, username: 'FixtureUser', status: 'PROVISIONING', password_preserved: true });
     else if (key === 'sms') item.resolve({ challenge_id: ids.usage, expires_at: new Date(Date.now() + 300000).toISOString(), retry_after_seconds: 60 });
     else if (key === 'registration') item.resolve({ registration_operation_id:ids.user,user_id: ids.user, username: 'FixtureUser', status: 'PROVISIONING' });
-    else if (key === 'bootstrap') item.resolve(json({ user_id: ids.user, display_name: 'Late account', active_context: { context_type: 'PERSONAL' } }));
+    else if (key === 'bootstrap') item.resolve(json({ user_id: ids.user, display_name: 'Late account', active_context: { context_type: organizationId ? 'ORGANIZATION' : 'PERSONAL', organization_id: organizationId || null, context_version: contextVersion, authorization_version: authorizationVersion, permissions: permissions() } }));
+    else if (key === 'quota') item.resolve(json({items:[{index:0,status:'SUCCEEDED',created:true,grant:quotaGrant(calls.findLast(call=>call.path.endsWith('/quota-grants:batch')).body.items[0])}]},207));
     else if (key === 'balance') item.resolve(json(wallet(3330000, '')));
     else if (key === 'rotation') { rotated = true; item.resolve(json({ credential_id: 'public-fixture-credential-v2', status: 'ACTIVE', version: 2 })); }
     else if (key === 'eligible') item.resolve(json({ items: [{
@@ -155,7 +173,7 @@ globalThis.fetch = async (input, options = {}) => {
   if (path === '/api/account/v1/account/bootstrap' && scenario === 'popover-stale-read') return defer('bootstrap');
   if (path === '/api/account/v1/account/bootstrap') return scenario === 'bootstrap-error'
     ? failed('UPSTREAM_UNAVAILABLE', 503)
-    : json({ user_id: ids.user, user_code:'USR-CONTROLLED',username:'FixtureUser',display_name: 'Fixture User', active_context: { context_type: 'PERSONAL' } });
+    : json({ user_id: ids.user, user_code:'USR-CONTROLLED',username:'FixtureUser',display_name: scenario === 'popover-auth-scope' ? `Authority ${authorizationVersion}` : 'Fixture User', active_context: { context_type: organizationId ? 'ORGANIZATION' : 'PERSONAL', organization_id: organizationId || null, context_version: contextVersion, authorization_version: authorizationVersion, permissions: permissions() } });
   if (path === '/api/account/v1/me/role-bindings') return scenario === 'a08-roles-403' ? failed('PERMISSION_DENIED',403) : json({items:[{binding_id:ids.usage,role_code:'MEMBER',scope:'ORG',organization_id:ids.organization,starts_at:'2026-10-01T00:00:00Z',expires_at:null,grant_source:'ACCOUNT',status:'ACTIVE'}]});
   if (path === '/api/account/v1/me/profile-change-requests' && method === 'POST') return scenario === 'a08-profile-recent' ? failed('RECENT_AUTHENTICATION_REQUIRED',403) : json({profile_change_request_id:ids.usage,field:body.field,new_value:body.value,status:'PENDING'});
   if (path === '/api/account/v1/auth/captcha/challenges') return json(challenge());
@@ -169,13 +187,52 @@ globalThis.fetch = async (input, options = {}) => {
   if (path === '/api/account/v1/me/organizations') return json({
     items: scenario === 'no-organization' ? [] : [{ organization_id: ids.organization, name: 'Fixture Organization' }],
   });
-  if (path === '/api/account/v1/sessions/current/active-context') {
+  if (path === '/api/account/v1/me/active-context' && method === 'PUT') {
+    if (body.expected_context_version !== contextVersion) return failed('ACCOUNT_CONFLICT', 409);
     organizationId = body.organization_id || '';
-    return json({ context_type: body.context_type, organization_id: organizationId || null });
+    contextVersion += 1;
+    if (scenario?.endsWith('auth-scope')) authorizationVersion = 1;
+    return json({ context_type: body.context_type, organization_id: organizationId || null, context_version: contextVersion, authorization_version: authorizationVersion, permissions: permissions() });
   }
   if (path === '/api/account/v1/organizations' && method === 'POST') {
     return failed(scenario === 'action-401' ? 'LOGIN_REQUIRED' : 'PERMISSION_DENIED',
       scenario === 'action-401' ? 401 : 403);
+  }
+  if (scenario?.startsWith('a09-unit-') && path.endsWith('/units') && method === 'POST') {
+    unitDispatches += 1;
+    if (unitDispatches === 1 && scenario === 'a09-unit-unknown') throw new Error('Controlled unit response lost');
+    const result = {unit:{unit_id:ids.usage,organization_id:ids.organization,name:body.name,parent_id:body.parent_id,status:unitDispatches===2?'DELETED':'ACTIVE',version:1},structure_version:2,replayed:unitDispatches===2};
+    if (unitDispatches === 1 && scenario === 'a09-unit-empty') return json({});
+    if (unitDispatches === 1 && scenario === 'a09-unit-wrong-org') result.unit.organization_id = ids.user;
+    if (unitDispatches === 1 && scenario === 'a09-unit-wrong-name') result.unit.name = 'Other unit';
+    return json(result,unitDispatches===2?200:201);
+  }
+  if (scenario?.startsWith('a09-') && path.endsWith('/quota-members')) return json({items:[{user_id:ids.user,display_name:'Quota Member',version:7}]});
+  if (scenario?.startsWith('a09-') && path.startsWith('/api/token/v1/organizations/')) {
+    if (path.endsWith('/recharge/products')) return json({catalog_version:'controlled-catalog',items:[{product_id:'PLAN_TRIAL',plan_name:'Organization Plan',amount_fen:100,display_points:100,validity_days:30,channels:['ALIPAY']}]});
+    if (path.endsWith('/entitlement-packages')) return json({summary:{available_microcredits:'90071992547409930000'},items:[{package_id:ids.usage,plan_name:'Organization Pool',components:[{component_id:ids.order,component_type:'BASE',status:'ACTIVE',available_microcredits:'90071992547409930000',expires_at:null}]}]});
+    if (path.endsWith('/quota-grants:batch')) {
+      quotaDispatches += 1;
+      if (scenario==='a09-quota-unknown' && quotaDispatches===1) throw new Error('Controlled missing response');
+      if (scenario==='a09-quota-late') return defer('quota');
+      let grant = quotaGrant(body.items[0]);
+      if (quotaDispatches === 1 && scenario === 'a09-quota-missing-grant') grant = undefined;
+      if (quotaDispatches === 1 && scenario === 'a09-quota-wrong-owner') grant.organization_id = ids.user;
+      if (quotaDispatches === 1 && scenario === 'a09-quota-wrong-amount') grant.original_microcredits = '2';
+      return json({items:[{index:0,status:scenario==='a09-quota-failed'?'FAILED':'SUCCEEDED',...(scenario==='a09-quota-failed'?{code:'PERMISSION_DENIED'}:{created:true,grant})}]},207);
+    }
+    if (path.endsWith('/quota-grants') && scenario === 'a09-quota-revoke-invalid') return json({items:revoked?[]:[quotaGrant({member_user_id:ids.user,package_id:ids.usage,component_id:ids.order,component_type:'BASE',amount_microcredits:10000})]});
+    if (path.endsWith('/quota-grants')) return json({items:[]});
+    if (path.endsWith('/revoke')) {
+      revokeDispatches += 1;
+      if (revokeDispatches === 1) return json({});
+      revoked = true;
+      return json({grant_id:ids.order,organization_id:ids.organization,status:'REVOKED',available_microcredits:'0',reserved_microcredits:'0'});
+    }
+    if (path.endsWith('/recharge/orders')) {
+      purchaseDispatches += 1;
+      return json({...order(),beneficiary_organization_id:scenario==='a09-purchase-invalid'&&purchaseDispatches===1?ids.user:ids.organization,product_id:body.product_id,channel:body.channel,merchant_order_no:'controlled-org-order'},201);
+    }
   }
   if (path.startsWith('/api/account/v1/organizations/') && method === 'POST') return failed(scenario === 'action-401' ? 'LOGIN_REQUIRED' : 'PERMISSION_DENIED', scenario === 'action-401' ? 401 : 403);
   if (path.startsWith('/api/account/v1/organizations/')) return json({ items: [] });
@@ -295,9 +352,17 @@ async function mount() {
         method: request.method, body: request.body === undefined ? undefined : JSON.stringify(request.body),
         headers: request.idempotencyKey ? { 'Idempotency-Key': request.idempotencyKey } : {},
       });
-      return { status: response.status, body: await response.json() };
+      return { status: response.status, body: await response.json(), contextVersion:Number(response.headers.get('X-Context-Version')), authorizationVersion:Number(response.headers.get('X-Authorization-Version')) };
     },
   }) : new AccountPlatformBffClient();
+  window.__accountReview.changeAuthorization = async (authorization, allowed) => {
+    authorizationVersion = authorization; quotaAllowed = allowed;
+    await client.organizations();
+  };
+  window.__accountReview.observeOtherScope = async () => {
+    nextResponseVersions = [contextVersion, 100];
+    await client.organizations();
+  };
   function PopoverFixture() {
     const [open, setOpen] = useState(true);
     const [locale, setLocale] = useState(language);

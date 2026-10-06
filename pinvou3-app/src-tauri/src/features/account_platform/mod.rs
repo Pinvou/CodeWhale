@@ -255,6 +255,21 @@ pub struct ApiRequest {
 pub struct ApiResponse {
     pub status: u16,
     pub body: Value,
+    pub context_version: Option<u64>,
+    pub authorization_version: Option<u64>,
+}
+
+pub(crate) fn active_context_change_requested(input: &ApiRequest) -> bool {
+    if input.area != "account" || input.method != "PUT" {
+        return false;
+    }
+    let Ok(parsed) = Url::parse(&format!("http://desktop.invalid{}", input.resource)) else {
+        return false;
+    };
+    parsed.host_str() == Some("desktop.invalid")
+        && parsed.fragment().is_none()
+        && parsed.path() == "/v1/me/active-context"
+        && route_allowed(&input.area, &Method::PUT, parsed.path(), parsed.query())
 }
 
 // Share the same canonical request fact between session clearing and EnginePool
@@ -293,6 +308,8 @@ pub struct AccountPlatformState {
     login_guard: Mutex<()>,
     refresh_guard: Mutex<()>,
     model_context_guard: Mutex<()>,
+    observed_context: std::sync::Mutex<(u64, u64, u64)>,
+    context_revision: AtomicU64,
     credentials: Arc<dyn DesktopCredentials>,
     session_epoch: AtomicU64,
     session_generation: AtomicU64,
@@ -318,6 +335,8 @@ impl AccountPlatformState {
             login_guard: Mutex::new(()),
             refresh_guard: Mutex::new(()),
             model_context_guard: Mutex::new(()),
+            observed_context: std::sync::Mutex::new((0, 0, 0)),
+            context_revision: AtomicU64::new(0),
             credentials: Arc::new(DefaultKeyringStore::new(
                 CredentialReference::for_account_platform_refresh_token().service,
             )),
@@ -333,6 +352,38 @@ impl AccountPlatformState {
             device_id: random_urlsafe(24),
             password_reset_memory: Mutex::new(None),
         })
+    }
+
+    pub(crate) fn context_revision(&self) -> u64 {
+        self.context_revision.load(Ordering::SeqCst)
+    }
+
+    fn observe_context_versions(&self, response: &ApiResponse, epoch: u64) {
+        let mut observed = self
+            .observed_context
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if self.session_epoch.load(Ordering::SeqCst) != epoch {
+            return;
+        }
+        if observed.0 != epoch {
+            *observed = (epoch, 0, 0);
+        }
+        let context = response.context_version.unwrap_or(0);
+        let authorization = response.authorization_version.unwrap_or(0);
+        // Authorization versions belong to this context's scope. Keep the pair
+        // under one lock so a late old-context response cannot replace its counter.
+        if context == 0 || context < observed.1 {
+            return;
+        }
+        if context > observed.1 {
+            observed.1 = context;
+            observed.2 = authorization;
+            self.context_revision.fetch_add(1, Ordering::SeqCst);
+        } else if authorization != 0 && authorization != observed.2 {
+            observed.2 = authorization;
+            self.context_revision.fetch_add(1, Ordering::SeqCst);
+        }
     }
 
     pub async fn status(&self) -> SessionStatus {
@@ -496,11 +547,8 @@ impl AccountPlatformState {
         // Serialize the canonical allowlisted route, including paths normalized
         // by Url, rather than relying on the caller's spelling of the resource.
         let _context = if account_area
-            && prepared.method == Method::POST
-            && prepared
-                .url
-                .path()
-                .ends_with("/v1/sessions/current/active-context")
+            && prepared.method == Method::PUT
+            && prepared.url.path().ends_with("/v1/me/active-context")
         {
             Some(self.model_context_guard.lock().await)
         } else {
@@ -521,6 +569,9 @@ impl AccountPlatformState {
         }
         let response = response_to_api(response).await?;
         self.require_session_epoch(epoch)?;
+        if response.status != 401 {
+            self.observe_context_versions(&response, epoch);
+        }
         if is_bootstrap && (200..300).contains(&response.status) {
             self.remember_account_identity(config, &token, bootstrap_user_id(&response.body)?)
                 .await?;
@@ -737,7 +788,7 @@ fn prepare_request(
 ) -> Result<PreparedRequest, String> {
     let method = Method::from_bytes(input.method.as_bytes())
         .map_err(|_| "account_platform_request_invalid: invalid method".to_string())?;
-    if !matches!(method, Method::GET | Method::POST) {
+    if !matches!(method, Method::GET | Method::POST | Method::PUT) {
         return Err("account_platform_request_denied: method is not allowlisted".to_string());
     }
     let parsed = Url::parse(&format!("http://desktop.invalid{}", input.resource))
@@ -784,10 +835,7 @@ fn prepare_request(
         }
     }
     if input.idempotency_key.is_some()
-        && !matches!(
-            parsed.path(),
-            "/v1/recharge/orders" | "/v1/chat/completions"
-        )
+        && !idempotency_key_allowed(&input.area, &method, parsed.path())
     {
         return Err(
             "account_platform_request_denied: idempotency key is not allowed for this route"
@@ -812,6 +860,25 @@ fn prepare_request(
     })
 }
 
+fn idempotency_key_allowed(area: &str, method: &Method, path: &str) -> bool {
+    if method != Method::POST {
+        return false;
+    }
+    let segments: Vec<_> = path.trim_matches('/').split('/').collect();
+    matches!(
+        (area, segments.as_slice()),
+        ("token", ["v1", "recharge", "orders"])
+            | ("token", ["v1", "chat", "completions"])
+            | ("account", ["v1", "organizations", _, "units"])
+            | ("token", ["v1", "organizations", _, "recharge", "orders"])
+            | ("token", ["v1", "organizations", _, "quota-grants:batch"])
+            | (
+                "token",
+                ["v1", "organizations", _, "quota-grants", _, "revoke"]
+            )
+    )
+}
+
 fn route_allowed(area: &str, method: &Method, path: &str, query: Option<&str>) -> bool {
     let segments: Vec<_> = path.trim_matches('/').split('/').collect();
     let safe_id = |value: &str| {
@@ -830,7 +897,7 @@ fn route_allowed(area: &str, method: &Method, path: &str, query: Option<&str>) -
         | ("account", &Method::POST, ["v1", "me", "profile-change-requests"], None)
         | ("account", &Method::GET, ["v1", "me", "organizations"], None)
         | ("account", &Method::GET, ["v1", "me", "role-bindings"], None)
-        | ("account", &Method::POST, ["v1", "sessions", "current", "active-context"], None)
+        | ("account", &Method::PUT, ["v1", "me", "active-context"], None)
         | ("token", &Method::GET, ["v1", "models"], None)
         | ("token", &Method::GET, ["v1", "recharge", "products"], None)
         | ("token", &Method::GET, ["v1", "recharge", "orders"], None)
@@ -865,6 +932,27 @@ fn route_allowed(area: &str, method: &Method, path: &str, query: Option<&str>) -
             ],
             None,
         ) => safe_id(id),
+        ("token", &Method::GET, ["v1", "organizations", id, "quota-grants"], None)
+        | ("token", &Method::GET, ["v1", "organizations", id, "entitlement-packages"], None)
+        | ("token", &Method::GET, ["v1", "organizations", id, "recharge", "products"], None)
+        | ("token", &Method::POST, ["v1", "organizations", id, "quota-grants:batch"], None)
+        | ("token", &Method::POST, ["v1", "organizations", id, "recharge", "orders"], None)
+        | ("account", &Method::GET, ["v1", "organizations", id, "quota-members"], None) => {
+            safe_id(id)
+        }
+        (
+            "token",
+            &Method::POST,
+            [
+                "v1",
+                "organizations",
+                id,
+                "quota-grants",
+                grant_id,
+                "revoke",
+            ],
+            None,
+        ) => safe_id(id) && safe_id(grant_id),
         ("account", &Method::GET, ["v1", "organizations", id, "units"], None)
         | ("account", &Method::POST, ["v1", "organizations", id, "units"], None)
         | ("account", &Method::GET, ["v1", "organizations", id, "members"], None)
@@ -885,6 +973,16 @@ fn route_allowed(area: &str, method: &Method, path: &str, query: Option<&str>) -
 
 async fn response_to_api(response: reqwest::Response) -> Result<ApiResponse, String> {
     let status = response.status().as_u16();
+    let version_header = |name| {
+        response
+            .headers()
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<u64>().ok())
+            .filter(|value| *value > 0)
+    };
+    let context_version = version_header("X-Context-Version");
+    let authorization_version = version_header("X-Authorization-Version");
     let bytes = read_bounded(response).await?;
     let body = if bytes.is_empty() {
         Value::Null
@@ -892,7 +990,12 @@ async fn response_to_api(response: reqwest::Response) -> Result<ApiResponse, Str
         serde_json::from_slice(&bytes)
             .map_err(|_| "account_platform_response_invalid: expected JSON response".to_string())?
     };
-    Ok(ApiResponse { status, body })
+    Ok(ApiResponse {
+        status,
+        body,
+        context_version,
+        authorization_version,
+    })
 }
 
 #[cfg(test)]

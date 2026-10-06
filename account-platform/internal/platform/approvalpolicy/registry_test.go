@@ -33,7 +33,7 @@ func TestOnlyImplementedFinancialExecutorsAcceptRequests(t *testing.T) {
 }
 
 func TestNormalRefundAndOrganizationDeleteAreAuditOnly(t *testing.T) {
-	for _, commandType := range []string{"BILLING_NORMAL_REFUND", "ACCOUNT_ORGANIZATION_DELETE"} {
+	for _, commandType := range []string{"BILLING_NORMAL_REFUND", "ACCOUNT_ORGANIZATION_DELETE", "BILLING_ORGANIZATION_UNIT_LIFECYCLE_APPLY", "TOKEN_ORGANIZATION_UNIT_LIFECYCLE_APPLY", "BILLING_ORGANIZATION_MEMBER_LIFECYCLE_APPLY"} {
 		policy, err := Lookup(commandType)
 		if err != nil || policy.Mode != AuditOnly {
 			t.Fatalf("unexpected normal-state policy for %s: %#v %v", commandType, policy, err)

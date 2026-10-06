@@ -2,6 +2,7 @@ package account
 
 import (
 	"context"
+	"github.com/google/uuid"
 	"testing"
 	"time"
 )
@@ -16,11 +17,11 @@ func TestPostgresHistoricalOwnerDoesNotBlockAdminMemberOrUserRemoval(t *testing.
 			admin := fixturePlatformAdmin(t, repo)
 			org := accountOrganization(t, repo, owner)
 			accountInvitation(t, repo, owner, member, org.ID, []string{"MEMBER"})
-			if err := repo.TransferOwnership(ctx, owner, org.ID, target.UserID); err != nil {
+			if _, err := repo.TransferOwnership(ctx, owner, org.ID, target.UserID, uuid.NewString()); err != nil {
 				t.Fatal(err)
 			}
 			if action == "remove-member" {
-				if err := repo.AdminRemoveMember(ctx, admin, org.ID, former.UserID); err != nil {
+				if _, err := repo.AdminRemoveMember(ctx, admin, org.ID, former.UserID, uuid.NewString()); err != nil {
 					t.Fatal("revoked historical owner blocked ordinary member removal")
 				}
 				accountInvitation(t, repo, member, owner, org.ID, []string{"MEMBER"})
@@ -31,7 +32,7 @@ func TestPostgresHistoricalOwnerDoesNotBlockAdminMemberOrUserRemoval(t *testing.
 			} else if err := repo.AdminDeleteUser(ctx, admin, former.UserID); err != nil {
 				t.Fatal("revoked historical owner blocked user deletion")
 			}
-			if err := repo.AdminRemoveMember(ctx, admin, org.ID, target.UserID); err == nil {
+			if _, err := repo.AdminRemoveMember(ctx, admin, org.ID, target.UserID, uuid.NewString()); err == nil {
 				t.Fatal("current owner protection was lost")
 			}
 		})
@@ -46,7 +47,7 @@ func TestPostgresAdminOwnershipTransferPreservesRevokedBinding(t *testing.T) {
 	admin := fixturePlatformAdmin(t, repo)
 	org := accountOrganization(t, repo, owner)
 	accountInvitation(t, repo, owner, member, org.ID, []string{"MEMBER"})
-	if err := repo.AdminTransferOwnership(ctx, admin, org.ID, target.UserID); err != nil {
+	if _, err := repo.AdminTransferOwnership(ctx, admin, org.ID, target.UserID, uuid.NewString()); err != nil {
 		t.Fatal(err)
 	}
 	var revoked *time.Time

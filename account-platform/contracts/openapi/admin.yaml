@@ -131,13 +131,25 @@ paths:
     get:
       operationId: listAdminOrganizations
       summary: List and search organizations
-      parameters: [{ $ref: "#/components/parameters/Search" }, { $ref: "#/components/parameters/Limit" }]
+      parameters:
+        - { $ref: "#/components/parameters/Search" }
+        - { $ref: "#/components/parameters/Limit" }
+        - { $ref: "#/components/parameters/Cursor" }
+        - name: status
+          in: query
+          schema: { type: string, enum: [ACTIVE, DISABLED, DELETED] }
       responses:
-        "200": { $ref: "#/components/responses/Collection" }
+        "200":
+          description: Stable organization page ordered by updated time and identifier
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AdminOrganizationPage" }
+        "400": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
     post:
       operationId: createAdminOrganization
       summary: Create an organization with an initial owner
+      parameters: [{ $ref: "#/components/parameters/IdempotencyKey" }]
       requestBody:
         required: true
         content:
@@ -153,19 +165,24 @@ paths:
         "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
   /account/admin/v1/organizations/{organization_id}/units:
     get:
       operationId: listAdminOrganizationUnits
       summary: List the complete organization unit hierarchy
       parameters: [{ $ref: "#/components/parameters/OrganizationID" }]
       responses:
-        "200": { $ref: "#/components/responses/Collection" }
+        "200":
+          description: Organization unit tree and its optimistic concurrency version
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OrganizationUnitTree" }
         "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
     post:
       operationId: createAdminOrganizationUnit
       summary: Create a root or child organization unit
-      parameters: [{ $ref: "#/components/parameters/OrganizationID" }]
+      parameters: [{ $ref: "#/components/parameters/OrganizationID" }, { $ref: "#/components/parameters/IdempotencyKey" }]
       requestBody:
         required: true
         content:
@@ -176,11 +193,17 @@ paths:
           description: Organization unit created
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/OrganizationUnit" }
+              schema: { $ref: "#/components/schemas/OrganizationUnitMutation" }
+        "200":
+          description: Existing result replayed for the same idempotency key
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OrganizationUnitMutation" }
         "400": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
   /account/admin/v1/organizations/{organization_id}/members:
     get:
       operationId: listAdminOrganizationMembers
@@ -193,28 +216,37 @@ paths:
     post:
       operationId: addAdminOrganizationMember
       summary: Add or reactivate a platform user as an organization member
-      parameters: [{ $ref: "#/components/parameters/OrganizationID" }]
+      parameters: [{ $ref: "#/components/parameters/OrganizationID" }, { $ref: "#/components/parameters/IdempotencyKey" }]
       requestBody:
         required: true
         content:
           application/json:
             schema: { $ref: "#/components/schemas/MemberRoleChange" }
       responses:
-        "201": { description: Member added }
+        "201":
+          description: Member added
+          content: { application/json: { schema: { $ref: "#/components/schemas/MembershipMutationResult" } } }
+        "200":
+          description: Existing membership result replayed
+          content: { application/json: { schema: { $ref: "#/components/schemas/MembershipMutationResult" } } }
         "400": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
   /account/admin/v1/organizations/{organization_id}/members/{user_id}:
     delete:
       operationId: removeAdminOrganizationMember
-      summary: Revoke a non-owner organization membership
-      parameters: [{ $ref: "#/components/parameters/OrganizationID" }, { $ref: "#/components/parameters/UserID" }]
+      summary: Idempotently revoke a non-owner membership, reset its active sessions, and suspend grants
+      parameters: [{ $ref: "#/components/parameters/OrganizationID" }, { $ref: "#/components/parameters/UserID" }, { $ref: "#/components/parameters/IdempotencyKey" }]
       responses:
-        "204": { description: Member removed }
+        "200":
+          description: Member removed or existing terminal result returned
+          content: { application/json: { schema: { $ref: "#/components/schemas/MembershipMutationResult" } } }
         "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
   /account/admin/v1/organizations/{organization_id}/members/{user_id}/roles:
     put:
       operationId: replaceAdminOrganizationMemberRoles
@@ -234,15 +266,17 @@ paths:
   /account/admin/v1/organizations/{organization_id}/ownership:
     post:
       operationId: transferAdminOrganizationOwnership
-      summary: Replace the organization owner with an active member
-      parameters: [{ $ref: "#/components/parameters/OrganizationID" }]
+      summary: Atomically and idempotently replace the unique organization owner with an active member
+      parameters: [{ $ref: "#/components/parameters/OrganizationID" }, { $ref: "#/components/parameters/IdempotencyKey" }]
       requestBody:
         required: true
         content:
           application/json:
             schema: { $ref: "#/components/schemas/OwnershipTransfer" }
       responses:
-        "204": { description: Organization ownership transferred }
+        "200":
+          description: Organization ownership transferred or existing result returned
+          content: { application/json: { schema: { $ref: "#/components/schemas/OwnershipTransferResult" } } }
         "400": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
@@ -251,27 +285,36 @@ paths:
     patch:
       operationId: renameAdminOrganizationUnit
       summary: Rename an organization unit
-      parameters: [{ $ref: "#/components/parameters/OrganizationID" }, { $ref: "#/components/parameters/UnitID" }]
+      parameters: [{ $ref: "#/components/parameters/OrganizationID" }, { $ref: "#/components/parameters/UnitID" }, { $ref: "#/components/parameters/IdempotencyKey" }]
       requestBody:
         required: true
         content:
           application/json:
-            schema: { $ref: "#/components/schemas/NameChange" }
+            schema: { $ref: "#/components/schemas/OrganizationUnitNameChange" }
       responses:
-        "204": { description: Organization unit renamed }
+        "200":
+          description: Organization unit renamed or idempotently replayed
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OrganizationUnitMutation" }
         "400": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
     delete:
       operationId: deleteAdminOrganizationUnit
-      summary: Delete a leaf organization unit and clear its assignments
-      parameters: [{ $ref: "#/components/parameters/OrganizationID" }, { $ref: "#/components/parameters/UnitID" }]
+      summary: Logically delete an unreferenced organization unit after cross-domain preflight
+      parameters: [{ $ref: "#/components/parameters/OrganizationID" }, { $ref: "#/components/parameters/UnitID" }, { $ref: "#/components/parameters/IdempotencyKey" }]
       responses:
-        "204": { description: Organization unit deleted }
+        "200":
+          description: Organization unit logically deleted or idempotently replayed
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OrganizationUnitMutation" }
         "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
         "422": { $ref: "#/components/responses/Error" }
   /account/admin/v1/organizations/{organization_id}/status:
     patch:
@@ -864,6 +907,14 @@ components:
       name: limit
       in: query
       schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+    Cursor:
+      name: cursor
+      in: query
+      schema: { type: string, minLength: 1, maxLength: 512 }
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      schema: { type: string, minLength: 8, maxLength: 120 }
     UserID:
       name: user_id
       in: path
@@ -1303,12 +1354,18 @@ components:
       properties:
         name: { type: string, minLength: 1, maxLength: 120 }
         owner_user_id: { type: string, format: uuid }
+        idempotency_key:
+          type: string
+          minLength: 8
+          maxLength: 120
+          description: Body fallback for clients that cannot set the Idempotency-Key header.
     OwnershipTransfer:
       type: object
       additionalProperties: false
       required: [new_owner_user_id]
       properties:
         new_owner_user_id: { type: string, format: uuid }
+        idempotency_key: { type: string, minLength: 8, maxLength: 120 }
     MemberRoleChange:
       type: object
       additionalProperties: false
@@ -1323,6 +1380,11 @@ components:
           type: array
           uniqueItems: true
           items: { type: string, format: uuid }
+        idempotency_key: { type: string, minLength: 8, maxLength: 120 }
+    MembershipMutationResult:
+      $ref: "account.yaml#/components/schemas/MembershipMutationResult"
+    OwnershipTransferResult:
+      $ref: "account.yaml#/components/schemas/OwnershipTransferResult"
     OrganizationUnitCreate:
       type: object
       additionalProperties: false
@@ -1333,6 +1395,21 @@ components:
           oneOf:
             - { type: string, format: uuid }
             - { type: "null" }
+        idempotency_key:
+          type: string
+          minLength: 8
+          maxLength: 120
+          description: Body fallback for clients that cannot set the Idempotency-Key header.
+    OrganizationUnitNameChange:
+      type: object
+      additionalProperties: false
+      required: [name]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 120 }
+        idempotency_key:
+          type: string
+          minLength: 8
+          maxLength: 120
     Organization:
       type: object
       additionalProperties: false
@@ -1340,11 +1417,33 @@ components:
       properties:
         organization_id: { type: string, format: uuid }
         name: { type: string }
-        status: { type: string, enum: [ACTIVE, DISABLED] }
+        status: { type: string, enum: [ACTIVE, DISABLED, DELETED] }
         version: { type: integer, format: int64, minimum: 1 }
         roles:
           type: array
           items: { type: string }
+    AdminOrganizationSummary:
+      type: object
+      additionalProperties: false
+      required: [organization_id, name, status, member_count, created_at, updated_at]
+      properties:
+        organization_id: { type: string, format: uuid }
+        name: { type: string }
+        status: { type: string, enum: [ACTIVE, DISABLED, DELETED] }
+        member_count: { type: integer, format: int64, minimum: 0 }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    AdminOrganizationPage:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          maxItems: 200
+          items: { $ref: "#/components/schemas/AdminOrganizationSummary" }
+        next_cursor:
+          type: [string, "null"]
     OrganizationUnit:
       type: object
       additionalProperties: false
@@ -1357,8 +1456,25 @@ components:
             - { type: string, format: uuid }
             - { type: "null" }
         name: { type: string }
-        status: { type: string, enum: [ACTIVE, DISABLED] }
+        status: { type: string, enum: [ACTIVE, DISABLED, DELETED] }
         version: { type: integer, format: int64, minimum: 1 }
+    OrganizationUnitMutation:
+      type: object
+      additionalProperties: false
+      required: [unit, structure_version, replayed]
+      properties:
+        unit: { $ref: "#/components/schemas/OrganizationUnit" }
+        structure_version: { type: integer, format: int64, minimum: 1 }
+        replayed: { type: boolean }
+    OrganizationUnitTree:
+      type: object
+      additionalProperties: false
+      required: [items, structure_version]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/OrganizationUnit" }
+        structure_version: { type: integer, format: int64, minimum: 1 }
     StatusChange:
       type: object
       additionalProperties: false

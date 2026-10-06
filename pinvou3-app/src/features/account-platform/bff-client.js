@@ -1,3 +1,5 @@
+import { createContextVersionTracker } from './context-version.js';
+
 const isObject = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 
 function requestFailed() {
@@ -34,21 +36,33 @@ export class AccountPlatformBffClient {
   constructor(baseURL = '') {
     this.baseURL = String(baseURL || '').replace(/\/$/, '');
     this.csrfToken = '';
+    this.contextVersions = createContextVersionTracker();
+  }
+
+  get contextVersion() { return this.contextVersions.contextVersion; }
+  onContextVersion(listener) { return this.contextVersions.subscribe(listener); }
+  observeContextVersion(value, authorization, epoch = this.contextVersions.epoch) {
+    this.contextVersions.observe(value, authorization, epoch);
   }
 
   async session(signal) {
+    const epoch = this.contextVersions.epoch;
     this.csrfToken = '';
     const response = await fetch(`${this.baseURL}/api/session`, { credentials: 'same-origin', cache: 'no-store', signal });
-    if (response.status === 401) { this.csrfToken = ''; return { authenticated: false }; }
+    if (epoch !== this.contextVersions.epoch) { await response.body?.cancel(); throw new DOMException('Account session changed', 'AbortError'); }
+    if (response.status === 401) { this.csrfToken = ''; this.contextVersions.reset(); return { authenticated: false }; }
     if (!response.ok) throw errorFromResponse(response, await readPayload(response));
     const payload = await readPayload(response, true);
+    if (epoch !== this.contextVersions.epoch) throw new DOMException('Account session changed', 'AbortError');
     if (typeof payload.authenticated !== 'boolean' ||
       (payload.authenticated && (typeof payload.csrf_token !== 'string' || !payload.csrf_token))) throw requestFailed();
     this.csrfToken = payload.authenticated ? payload.csrf_token : '';
+    if (!payload.authenticated) this.contextVersions.reset();
     return payload;
   }
 
   async request(area, resource, options = {}) {
+    const epoch = this.contextVersions.epoch;
     const method = options.method || 'GET';
     const headers = { Accept: 'application/json', ...(options.headers || {}) };
     if (method !== 'GET' && method !== 'HEAD') headers['X-CSRF-Token'] = this.csrfToken;
@@ -63,25 +77,37 @@ export class AccountPlatformBffClient {
     });
     if (response.status === 204) return null;
     const payload = await readPayload(response, response.ok);
+    if (!(area === 'account' && resource === '/v1/account/bootstrap') && response.status !== 401) this.observeContextVersion(response.headers.get('X-Context-Version'), response.headers.get('X-Authorization-Version'), epoch);
     if (!response.ok) {
-      if (response.status === 401) this.csrfToken = '';
+      if (response.status === 401 && epoch === this.contextVersions.epoch) { this.csrfToken = ''; this.contextVersions.reset(); }
       throw errorFromResponse(response, payload);
+    }
+    const isBootstrap = area === 'account' && resource === '/v1/account/bootstrap';
+    if (!isBootstrap || this.contextVersions.bindUser(payload.user_id, epoch)) {
+      this.observeContextVersion(response.headers.get('X-Context-Version'), response.headers.get('X-Authorization-Version'), isBootstrap ? this.contextVersions.epoch : epoch);
     }
     return payload;
   }
 
   bootstrap(signal) { return this.request('account', '/v1/account/bootstrap', { method: 'POST', body: {}, signal }); }
   organizations(signal) { return this.request('account', '/v1/me/organizations', { signal }); }
-  switchContext(contextType, organizationId, signal) {
-    return this.request('account', '/v1/sessions/current/active-context', { method: 'POST', body: { context_type: contextType, organization_id: organizationId || null }, signal });
+  switchContext(contextType, organizationId, expectedContextVersion, signal) {
+    return this.request('account', '/v1/me/active-context', { method: 'PUT', body: { context_type: contextType, organization_id: organizationId || null, expected_context_version: expectedContextVersion }, signal });
   }
   units(organizationId, signal) { return this.request('account', `/v1/organizations/${organizationId}/units`, { signal }); }
   members(organizationId, signal) { return this.request('account', `/v1/organizations/${organizationId}/members`, { signal }); }
-  createUnit(organizationId, name, parentId = null) { return this.request('account', `/v1/organizations/${organizationId}/units`, { method: 'POST', body: { name, parent_id: parentId } }); }
+  quotaMembers(organizationId, signal) { return this.request('account', `/v1/organizations/${organizationId}/quota-members`, { signal }); }
+  createUnit(organizationId, name, parentId = null, key) { return this.request('account', `/v1/organizations/${organizationId}/units`, { method: 'POST', headers:key ? {'Idempotency-Key':key} : {}, body: { name, parent_id: parentId } }); }
   invite(organizationId, email, roles) { return this.request('account', `/v1/organizations/${organizationId}/invitations`, { method: 'POST', body: { email, roles, expires_in_hours: 72 } }); }
   products(signal) { return this.request('token', '/v1/recharge/products', { signal }); }
   balance(signal) { return this.request('token', '/v1/me/balance?consistency=strong', { signal }); }
   createRecharge(productId, channel, key) { return this.request('token', '/v1/recharge/orders', { method: 'POST', headers: { 'Idempotency-Key': key }, body: { product_id: productId, channel } }); }
+  purchaseOrganizationEntitlements(organizationId, productId, channel, key) { return this.request('token', `/v1/organizations/${organizationId}/recharge/orders`, { method: 'POST', headers: { 'Idempotency-Key': key }, body: { product_id: productId, channel } }); }
+  organizationProducts(organizationId, signal) { return this.request('token', `/v1/organizations/${organizationId}/recharge/products`, { signal }); }
+  organizationEntitlementPackages(organizationId, signal) { return this.request('token', `/v1/organizations/${organizationId}/entitlement-packages`, { signal }); }
+  organizationQuotaGrants(organizationId, signal) { return this.request('token', `/v1/organizations/${organizationId}/quota-grants`, { signal }); }
+  allocateOrganizationQuota(organizationId, items, key) { return this.request('token', `/v1/organizations/${organizationId}/quota-grants:batch`, { method: 'POST', headers: { 'Idempotency-Key': key }, body: { items } }); }
+  revokeOrganizationQuota(organizationId, grantId, reason, key) { return this.request('token', `/v1/organizations/${organizationId}/quota-grants/${grantId}/revoke`, { method: 'POST', headers: { 'Idempotency-Key': key }, body: { reason } }); }
   recentRechargeOrder(signal) { return this.request('token', '/v1/recharge/orders/recent', { signal }); }
   rechargeOrders(signal) { return this.request('token', '/v1/recharge/orders', { signal }); }
   rechargeOrder(orderId, signal) { return this.request('token', `/v1/recharge/orders/${orderId}`, { signal }); }
@@ -106,6 +132,7 @@ export class AccountPlatformBffClient {
     const response = await fetch(`${this.baseURL}/api/logout`, { method: 'POST', headers: { 'X-CSRF-Token': this.csrfToken }, credentials: 'same-origin' });
     if (!response.ok) throw errorFromResponse(response, await readPayload(response));
     this.csrfToken = '';
+    this.contextVersions.reset();
   }
 }
 

@@ -39,12 +39,15 @@ test('actual mobile and commerce render preserves component-scoped supplier acce
   const object = (kind, suffix) => objects.find(item => item.kind === kind && item.metadata.name === `${name}-${suffix}`);
   const environment = (component) => Object.fromEntries(object('Deployment', component).spec.template.spec.containers[0].env.map(item => [item.name, item]));
   const account = environment('account-service');
+  const identity = environment('identity-service');
   const billing = environment('billing-service');
   const keycloak = environment('keycloak');
   assert.equal(account.MOBILE_AUTH_ENABLED.value, 'true');
   assert.equal(account.SMS_HTTP_ENDPOINT.value, 'https://sms.example.test/adapter');
   assert.equal(account.SMS_HTTP_SERVICE_TOKEN.valueFrom.secretKeyRef.key, 'sms-http-service-token');
-  assert.equal(account.KEYCLOAK_PROVISIONER_CLIENT_SECRET.valueFrom.secretKeyRef.key, 'keycloak-provisioner-client-secret');
+  assert.equal(account.IDENTITY_HTTP_URL.value, `http://${name}-identity-service:8080`);
+  assert.equal(account.KEYCLOAK_PROVISIONER_CLIENT_SECRET, undefined);
+  assert.equal(identity.KEYCLOAK_PROVISIONER_CLIENT_SECRET.valueFrom.secretKeyRef.key, 'keycloak-provisioner-client-secret');
   assert.equal(billing.BILLING_PAYMENT_PROVIDER.value, 'h3c_mall');
   assert.equal(billing.BILLING_ALLOW_TENTATIVE_PRICES.value, 'false');
   assert.equal(keycloak.PINVOU_SMS_VERIFY_URL.value, `http://${name}-account-service:8080/internal/v1/auth/sms/verify`);

@@ -327,6 +327,11 @@ func (s *Service) proxy(w http.ResponseWriter, r *http.Request, upstream *url.UR
 	}
 	w.Header().Set("Content-Type", response.Header.Get("Content-Type"))
 	w.Header().Set("Cache-Control", "no-store")
+	for _, name := range []string{"X-Context-Version", "X-Authorization-Version"} {
+		if value := response.Header.Get(name); value != "" {
+			w.Header().Set(name, value)
+		}
+	}
 	w.WriteHeader(response.StatusCode)
 	_, _ = w.Write(responseBody)
 }
@@ -596,6 +601,24 @@ func tokenPathAllowed(method, resource string) bool {
 			id, close := strings.CutSuffix(orderID, "/close")
 			return close && safeProxyPathID(id)
 		}
+	}
+	organizationParts := strings.Split(resource, "/")
+	if len(organizationParts) >= 5 && organizationParts[0] == "" && organizationParts[1] == "v1" && organizationParts[2] == "organizations" && safeProxyPathID(organizationParts[3]) {
+		if len(organizationParts) == 5 {
+			switch organizationParts[4] {
+			case "quota-grants", "entitlement-packages":
+				return method == http.MethodGet
+			case "quota-grants:batch":
+				return method == http.MethodPost
+			}
+		}
+		if len(organizationParts) == 6 && organizationParts[4] == "recharge" && organizationParts[5] == "products" {
+			return method == http.MethodGet
+		}
+		if len(organizationParts) == 6 && organizationParts[4] == "recharge" && organizationParts[5] == "orders" {
+			return method == http.MethodPost
+		}
+		return len(organizationParts) == 7 && organizationParts[4] == "quota-grants" && safeProxyPathID(organizationParts[5]) && organizationParts[6] == "revoke" && method == http.MethodPost
 	}
 	// Preserve the existing user/organization-owner management surface, without
 	// exposing Gateway administration, internal endpoints or model dispatch.

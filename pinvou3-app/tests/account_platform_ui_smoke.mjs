@@ -117,7 +117,7 @@ try {
   }
   for (const locale of ['zh', 'en', 'ja']) {
   await runCase('personal center has localized settled usage and no self-service organization creation in ' + locale, 'normal', async page => {
-    assert.equal(await page.$$eval('nav button', items => items.length), 9);
+    assert.equal(await page.$$eval('nav button', items => items.length), 10);
     assert.equal(await page.$$eval('main form', items => items.length), 0);
     await page.evaluate(() => Array.from(document.querySelectorAll('nav button')).find(el => el.textContent === window.__accountReview.copy.sections.usage).click());
     await page.waitForSelector('.ap-usage-row');
@@ -536,11 +536,11 @@ try {
   await runCase('users without organizations retain wallet, personal history and managed Tokens', 'no-organization', async page => {
     const labels = await page.$$eval('nav button', elements => elements.map(element => element.textContent));
     const copy = await page.evaluate(() => window.__accountReview.copy.sections);
-    assert.deepEqual(labels, [copy.overview, copy.wallet, copy.orders, copy.invoice, copy.usage, copy.tokens, copy.myRoles, copy.profile]);
+    assert.deepEqual(labels, [copy.overview, copy.credits, copy.entitlements, copy.orders, copy.invoice, copy.usage, copy.tokens, copy.myRoles, copy.profile]);
   });
   for (const locale of ['zh', 'en', 'ja']) {
     await runCase('personal plan/history keeps exact amounts and authority scope in ' + locale, 'entitlement-history', async page => {
-      await page.evaluate(() => Array.from(document.querySelectorAll('nav button')).find(element => element.textContent === window.__accountReview.copy.sections.wallet).click());
+      await page.evaluate(() => Array.from(document.querySelectorAll('nav button')).find(element => element.textContent === window.__accountReview.copy.sections.credits).click());
       await page.waitForSelector('.ap-entitlements .ap-trace-card');
       const text = await page.$eval('.ap-entitlements', element => element.textContent);
       assert.ok(text.includes('9,007,199,254,740,992'));
@@ -555,13 +555,13 @@ try {
       assert.equal(await page.evaluate(() => window.__accountReview.calls.filter(item => item.path === '/api/token/v1/me/entitlement-packages' || (item.path === '/api/token/v1/recharge/orders' && item.method === 'GET')).length), before);
       const labels = await page.$$eval('nav button', elements => elements.map(element => element.textContent));
       const copy = await page.evaluate(() => window.__accountReview.copy.sections);
-      assert.ok(labels.includes(copy.wallet)); assert.ok(labels.includes(copy.tokens));
+      assert.ok(labels.includes(copy.credits)); assert.ok(labels.includes(copy.entitlements)); assert.ok(labels.includes(copy.tokens));
       assert.equal(labels.includes(copy.orders) || labels.includes(copy.invoice), false);
     }, locale);
   }
   for (const scenario of ['qr-png', 'qr-invalid', 'qr-terminal']) {
     await runCase('personal wallet QR boundary ' + scenario, scenario, async page => {
-      await page.evaluate(() => Array.from(document.querySelectorAll('nav button')).find(element => element.textContent === window.__accountReview.copy.sections.wallet).click());
+      await page.evaluate(() => Array.from(document.querySelectorAll('nav button')).find(element => element.textContent === window.__accountReview.copy.sections.credits).click());
       await page.waitForSelector('.ap-payment');
       if (scenario === 'qr-png') {
         await page.waitForSelector('.ap-payment img');
@@ -592,7 +592,7 @@ try {
       assert.equal(await page.evaluate(()=>window.__accountReview.calls.filter(item=>item.path==='nativeLogin'||item.path==='nativeRegister').length),0);
     },locale);
     await runCase('component decimal strings and absent expiry remain exact in '+locale,'entitlement-history',async page=>{
-      await page.evaluate(()=>[...document.querySelectorAll('nav button')].find(el=>el.textContent===window.__accountReview.copy.sections.wallet).click());
+      await page.evaluate(()=>[...document.querySelectorAll('nav button')].find(el=>el.textContent===window.__accountReview.copy.sections.credits).click());
       await page.waitForSelector('.ap-entitlements .ap-trace-card .ap-card');
       const text=await page.$eval('.ap-entitlements .ap-trace-card .ap-card',el=>el.textContent);
       assert.ok(text.includes('9,007,199,254,740,993'));assert.ok(text.includes('9,007,199,254,740,992'));
@@ -775,6 +775,137 @@ try {
       const options=await page.$$eval('main form select option',items=>items.map(el=>el.value));
       assert.deepEqual(options,['PLATFORM_BILLING_OPERATOR','ORG_ADMIN']);
     },locale);
+  }
+  for (const locale of ['zh','en','ja']) {
+    await runCase('A09 organization pool, exact quota, 207 denial and payment QR in '+locale,'a09-quota-failed',async page=>{
+      await page.select('.ap-context-card select',await page.evaluate(()=>window.__accountReview.ids.organization));
+      await page.waitForFunction(()=>!document.querySelector('.ap-context-card select').disabled);
+      await page.evaluate(()=>[...document.querySelectorAll('nav button')].find(el=>el.textContent===window.__accountReview.copy.sections.entitlements).click());
+      await page.waitForSelector('.ap-entitlements-section form input');
+      await page.type('.ap-entitlements-section form input','12.345');
+      await page.click('.ap-entitlements-section form button');
+      await page.waitForSelector('main > [role="alert"]');
+      const dispatched=await page.evaluate(()=>window.__accountReview.calls.find(call=>call.path.endsWith('/quota-grants:batch')));
+      assert.equal(dispatched.body.items[0].amount_microcredits,123450);
+      assert.equal(dispatched.body.items[0].membership_version,7);
+      assert.equal(await page.$eval('.ap-entitlements-section form input',el=>el.value),'12.345');
+      assert.equal(await page.$eval('main > [role="alert"]',el=>el.textContent),await page.evaluate(()=>window.__accountReview.copy.permissionDenied));
+      await page.click('.ap-entitlements-section .ap-inline .ap-primary');
+      await page.waitForSelector('.ap-payment img',{timeout:5000});
+      const purchase=await page.evaluate(()=>window.__accountReview.calls.find(call=>call.path.endsWith('/organizations/'+window.__accountReview.ids.organization+'/recharge/orders')));
+      assert.deepEqual(purchase.body,{product_id:'PLAN_TRIAL',channel:'ALIPAY'});
+      assert.equal(await page.$eval('.ap-payment img',el=>el.src.startsWith('data:image/png;base64,')),true);
+      const paths=await page.evaluate(()=>window.__accountReview.calls.map(call=>call.path));
+      assert.ok(paths.includes('/api/token/v1/organizations/00000000-0000-4000-8000-000000000002/entitlement-packages'));
+    },locale);
+  }
+  await runCase('A09 unknown quota reply preserves exact key while completed fresh call gets new key','a09-quota-unknown',async page=>{
+    await page.select('.ap-context-card select',await page.evaluate(()=>window.__accountReview.ids.organization));
+    await page.waitForFunction(()=>!document.querySelector('.ap-context-card select').disabled);
+    await page.evaluate(()=>[...document.querySelectorAll('nav button')].find(el=>el.textContent===window.__accountReview.copy.sections.entitlements).click());
+    await page.waitForSelector('.ap-entitlements-section form input');await page.type('.ap-entitlements-section form input','1');
+    await page.click('.ap-entitlements-section form button');await page.waitForSelector('main > [role="alert"]');
+    assert.equal(await page.$eval('.ap-entitlements-section form input',el=>el.value),'1');
+    await page.click('.ap-entitlements-section form button');await page.waitForFunction(()=>document.querySelector('.ap-entitlements-section form input')?.value==='');
+    await page.type('.ap-entitlements-section form input','1');await page.click('.ap-entitlements-section form button');
+    await page.waitForFunction(()=>window.__accountReview.calls.filter(call=>call.path.endsWith('/quota-grants:batch')).length===3);
+    const writes=await page.evaluate(()=>window.__accountReview.calls.filter(call=>call.path.endsWith('/quota-grants:batch')));
+    assert.equal(writes[0].idempotencyKey,writes[1].idempotencyKey);assert.deepEqual(writes[0].body,writes[1].body);
+    assert.notEqual(writes[1].idempotencyKey,writes[2].idempotencyKey);
+  });
+  await runCase('A09 external global context refresh fences a late quota response','a09-quota-late',async page=>{
+    await page.select('.ap-context-card select',await page.evaluate(()=>window.__accountReview.ids.organization));
+    await page.waitForFunction(()=>!document.querySelector('.ap-context-card select').disabled);
+    await page.evaluate(()=>[...document.querySelectorAll('nav button')].find(el=>el.textContent===window.__accountReview.copy.sections.entitlements).click());
+    await page.waitForSelector('.ap-entitlements-section form input');await page.type('.ap-entitlements-section form input','1');await page.click('.ap-entitlements-section form button');
+    await waitPending(page,'quota');await page.evaluate(()=>window.__accountReview.externalContext());
+    await page.waitForSelector('.ap-resource-section.ap-context-personal');
+    await settle(page,'quota','success');
+    await page.waitForFunction(()=>![...document.querySelectorAll('main button')].some(el=>el.disabled));
+    assert.equal(await page.$$eval('.ap-entitlements-section form',els=>els.length),0);
+    assert.equal(await page.$$eval('main > [role="alert"]',els=>els.length),0);
+  });
+  await runCase('A09 popover observes same-context authorization decreases without refresh loops','popover-auth-scope',async page=>{
+    await page.waitForFunction(()=>document.body.textContent.includes('Authority 100'));
+    await page.evaluate(()=>window.__accountReview.changeAuthorization(2,true));
+    await page.waitForFunction(()=>document.body.textContent.includes('Authority 2'));
+    await page.evaluate(()=>window.__accountReview.changeAuthorization(1,true));
+    await page.waitForFunction(()=>document.body.textContent.includes('Authority 1'));
+    const before=await page.evaluate(()=>window.__accountReview.calls.filter(call=>call.path.endsWith('/bootstrap')).length);
+    await page.evaluate(()=>window.__accountReview.observeOtherScope());
+    await page.waitForFunction(before=>window.__accountReview.calls.filter(call=>call.path.endsWith('/bootstrap')).length>before,{},before);
+    await new Promise(resolve=>setTimeout(resolve,400));
+    const stable=await page.evaluate(()=>window.__accountReview.calls.filter(call=>call.path.endsWith('/bootstrap')).length);
+    await new Promise(resolve=>setTimeout(resolve,400));
+    assert.equal(await page.evaluate(()=>window.__accountReview.calls.filter(call=>call.path.endsWith('/bootstrap')).length),stable);
+    assert.ok(stable-before<=2);
+    assert.ok(await page.evaluate(()=>document.body.textContent.includes('Authority 1')));
+  });
+  await runCase('A09 per-scope authorization decrease refreshes controls and converges after an old-scope response','a09-auth-scope',async page=>{
+    await page.select('.ap-context-card select',await page.evaluate(()=>window.__accountReview.ids.organization));
+    await page.waitForFunction(()=>!document.querySelector('.ap-context-card select').disabled);
+    await page.evaluate(()=>[...document.querySelectorAll('nav button')].find(el=>el.textContent===window.__accountReview.copy.sections.entitlements).click());
+    await page.waitForSelector('.ap-entitlements-section form input');
+    await page.evaluate(()=>window.__accountReview.changeAuthorization(2,false));
+    await page.waitForFunction(()=>document.querySelectorAll('.ap-entitlements-section form').length===0);
+    await page.evaluate(()=>window.__accountReview.changeAuthorization(1,true));
+    await page.waitForSelector('.ap-entitlements-section form input');
+    const before=await page.evaluate(()=>window.__accountReview.calls.filter(call=>call.path.endsWith('/bootstrap')).length);
+    await page.evaluate(()=>window.__accountReview.observeOtherScope());
+    await page.waitForFunction(before=>window.__accountReview.calls.filter(call=>call.path.endsWith('/bootstrap')).length>before,{},before);
+    await new Promise(resolve=>setTimeout(resolve,400));
+    const stable=await page.evaluate(()=>window.__accountReview.calls.filter(call=>call.path.endsWith('/bootstrap')).length);
+    await new Promise(resolve=>setTimeout(resolve,400));
+    assert.equal(await page.evaluate(()=>window.__accountReview.calls.filter(call=>call.path.endsWith('/bootstrap')).length),stable);
+    assert.ok(stable-before<=2,'old-scope response must converge to active-scope authority');
+    assert.equal(await page.$$eval('.ap-entitlements-section form',els=>els.length),1);
+  });
+  await runCase('A09 unit unknown outcome preserves facts/key and a completed new creation gets a fresh key','a09-unit-unknown',async page=>{
+    await createUnit(page);await page.waitForSelector('main > [role="alert"]');
+    assert.equal(await page.$eval('main form input',el=>el.value),'Public fixture unit');
+    await page.click('main form button');await page.waitForFunction(()=>document.querySelector('main form input')?.value==='');
+    await page.type('main form input','Public fixture unit');await page.click('main form button');
+    await page.waitForFunction(()=>window.__accountReview.calls.filter(call=>call.path.endsWith('/units')&&call.method==='POST').length===3);
+    const writes=await page.evaluate(()=>window.__accountReview.calls.filter(call=>call.path.endsWith('/units')&&call.method==='POST'));
+    assert.equal(writes[0].idempotencyKey,writes[1].idempotencyKey);assert.deepEqual(writes[0].body,writes[1].body);
+    assert.notEqual(writes[1].idempotencyKey,writes[2].idempotencyKey);
+  });
+  for (const scenario of ['a09-quota-missing-grant','a09-quota-wrong-owner','a09-quota-wrong-amount']) {
+    await runCase('A09 malformed quota success retains exact operation '+scenario,scenario,async page=>{
+      await page.select('.ap-context-card select',await page.evaluate(()=>window.__accountReview.ids.organization));
+      await page.waitForFunction(()=>!document.querySelector('.ap-context-card select').disabled);
+      await page.evaluate(()=>[...document.querySelectorAll('nav button')].find(el=>el.textContent===window.__accountReview.copy.sections.entitlements).click());
+      await page.waitForSelector('.ap-entitlements-section form input');await page.type('.ap-entitlements-section form input','1');
+      await page.click('.ap-entitlements-section form button');await page.waitForSelector('main > [role="alert"]');
+      assert.equal(await page.$eval('.ap-entitlements-section form input',el=>el.value),'1');
+      await page.click('.ap-entitlements-section form button');await page.waitForFunction(()=>document.querySelector('.ap-entitlements-section form input')?.value==='');
+      const calls=await page.evaluate(()=>window.__accountReview.calls.filter(call=>call.path.endsWith('/quota-grants:batch')));
+      assert.equal(calls.length,2);assert.equal(calls[0].idempotencyKey,calls[1].idempotencyKey);assert.deepEqual(calls[0].body,calls[1].body);
+    });
+  }
+  for (const scenario of ['a09-purchase-invalid','a09-quota-revoke-invalid']) {
+    await runCase('A09 wrong purchase or unproven revocation retains exact operation '+scenario,scenario,async page=>{
+      await page.select('.ap-context-card select',await page.evaluate(()=>window.__accountReview.ids.organization));
+      await page.waitForFunction(()=>!document.querySelector('.ap-context-card select').disabled);
+      await page.evaluate(()=>[...document.querySelectorAll('nav button')].find(el=>el.textContent===window.__accountReview.copy.sections.entitlements).click());
+      const selector=scenario==='a09-purchase-invalid'?'.ap-entitlements-section .ap-inline .ap-primary':'.ap-entitlements-section .ap-trace-card button';
+      await page.waitForSelector(selector);await page.click(selector);await page.waitForSelector('main > [role="alert"]');
+      assert.equal(await page.$$eval('.ap-payment img',items=>items.length),0);
+      await page.click(selector);
+      if(scenario==='a09-purchase-invalid') await page.waitForSelector('.ap-payment img');
+      else await page.waitForFunction(()=>document.querySelectorAll('.ap-entitlements-section .ap-trace-card button').length===0);
+      const calls=await page.evaluate(suffix=>window.__accountReview.calls.filter(call=>call.method==='POST'&&call.path.endsWith(suffix)),scenario==='a09-purchase-invalid'?'/recharge/orders':'/revoke');
+      assert.equal(calls.length,2);assert.equal(calls[0].idempotencyKey,calls[1].idempotencyKey);assert.deepEqual(calls[0].body,calls[1].body);
+    });
+  }
+  for (const scenario of ['a09-unit-empty','a09-unit-wrong-org','a09-unit-wrong-name']) {
+    await runCase('A09 unproven unit receipt retains facts/key and accepts exact replay '+scenario,scenario,async page=>{
+      await createUnit(page);await page.waitForSelector('main > [role="alert"]');
+      assert.equal(await page.$eval('main form input',el=>el.value),'Public fixture unit');
+      await page.click('main form button');await page.waitForFunction(()=>document.querySelector('main form input')?.value==='');
+      const calls=await page.evaluate(()=>window.__accountReview.calls.filter(call=>call.method==='POST'&&call.path.endsWith('/units')));
+      assert.equal(calls.length,2);assert.equal(calls[0].idempotencyKey,calls[1].idempotencyKey);assert.deepEqual(calls[0].body,calls[1].body);
+    });
   }
   console.log(`Account UI: ${passed} PASS, ${failures.length} FAIL, 0 SKIP. Controlled API responses; real React/client/QR; not BFF/PG or Safari E2E.`);
   assert.equal(failures.length, 0, `Failing scenarios: ${failures.join(', ')}`);

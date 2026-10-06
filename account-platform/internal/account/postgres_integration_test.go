@@ -45,7 +45,11 @@ func accountUser(t *testing.T, repository *PostgresRepository) (identity.Princip
 
 func accountOrganization(t *testing.T, repository *PostgresRepository, principal identity.Principal) Organization {
 	t.Helper()
-	organization, err := repository.CreateOrganization(context.Background(), principal, "test organization")
+	owner, err := repository.GetMe(context.Background(), principal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	organization, err := repository.AdminCreateOrganization(context.Background(), fixturePlatformAdmin(t, repository), owner.UserID, "test organization "+uuid.NewString(), uuid.NewString())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -54,11 +58,11 @@ func accountOrganization(t *testing.T, repository *PostgresRepository, principal
 
 func accountInvitation(t *testing.T, repository *PostgresRepository, owner, member identity.Principal, organizationID uuid.UUID, roles []string) Invitation {
 	t.Helper()
-	invitation, err := repository.CreateInvitation(context.Background(), owner, organizationID, member.Email, roles, time.Now().Add(time.Hour))
+	invitation, err := repository.CreateInvitation(context.Background(), owner, organizationID, InvitationCreateRequest{TargetType: "EMAIL", Target: member.Email, Roles: roles, ExpiresInHours: 1, IdempotencyKey: uuid.NewString()})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := repository.AcceptInvitation(context.Background(), member, invitation.Token); err != nil {
+	if _, err := repository.AcceptInvitation(context.Background(), member, invitation.Token, nil); err != nil {
 		t.Fatal(err)
 	}
 	return invitation
@@ -66,11 +70,11 @@ func accountInvitation(t *testing.T, repository *PostgresRepository, owner, memb
 
 func accountUnit(t *testing.T, repository *PostgresRepository, owner identity.Principal, organizationID uuid.UUID, parent *uuid.UUID, name string) Unit {
 	t.Helper()
-	unit, err := repository.CreateUnit(context.Background(), owner, organizationID, parent, name)
+	unit, err := repository.CreateUnit(context.Background(), owner, organizationID, parent, name, uuid.NewString())
 	if err != nil {
 		t.Fatal(err)
 	}
-	return unit
+	return unit.Unit
 }
 
 func accountExec(t *testing.T, repository *PostgresRepository, sql string, arguments ...any) {
@@ -84,7 +88,7 @@ func TestPostgresBootstrapPreservesSessionContextAndRejectsSessionReuse(t *testi
 	repository := accountDatabase(t)
 	principal, me := accountUser(t, repository)
 	organization := accountOrganization(t, repository, principal)
-	selected, err := repository.SetActiveContext(context.Background(), principal, &organization.ID)
+	selected, err := repository.SetActiveContext(context.Background(), principal, &organization.ID, accountContextVersion(t, repository, principal))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -95,7 +99,7 @@ func TestPostgresBootstrapPreservesSessionContextAndRejectsSessionReuse(t *testi
 	otherSession := principal
 	otherSession.SessionID = uuid.NewString()
 	other, created, err := repository.Bootstrap(context.Background(), otherSession)
-	if err != nil || created || other.UserID != me.UserID || other.ActiveContext.Type != "PERSONAL" || other.ActiveContext.OrganizationID != nil {
+	if err != nil || created || other.UserID != me.UserID || other.ActiveContext.Type != "ORGANIZATION" || other.ActiveContext.OrganizationID == nil || *other.ActiveContext.OrganizationID != organization.ID {
 		t.Fatalf("new session=%+v created=%v error=%v", other, created, err)
 	}
 	intruder := principal
@@ -157,37 +161,37 @@ func TestPostgresMoveUnitChecksDestinationScopeAndActiveState(t *testing.T) {
 	grandchild := accountUnit(t, repository, owner, organization.ID, &child.ID, "grandchild")
 	accountExec(t, repository, `INSERT INTO role_bindings(id,membership_id,role,unit_id,created_by,created_at) SELECT $1,id,'UNIT_ADMIN',$2,$3,now() FROM memberships WHERE organization_id=$4 AND user_id=$3`, uuid.New(), root.ID, adminMe.UserID, organization.ID)
 	for _, target := range []*uuid.UUID{&sibling.ID, nil} {
-		if _, err := repository.MoveUnit(context.Background(), admin, organization.ID, child.ID, target, 1); !errors.Is(err, ErrForbidden) {
+		if _, err := repository.MoveUnit(context.Background(), admin, organization.ID, child.ID, target, accountStructureVersion(t, repository, organization.ID), uuid.NewString()); !errors.Is(err, ErrForbidden) {
 			t.Fatalf("out-of-scope move target=%v error=%v", target, err)
 		}
 	}
 	accountExec(t, repository, `UPDATE organization_units SET status='DISABLED' WHERE id=$1`, destination.ID)
-	if _, err := repository.MoveUnit(context.Background(), admin, organization.ID, child.ID, &destination.ID, 1); !errors.Is(err, ErrInvalidHierarchy) {
+	if _, err := repository.MoveUnit(context.Background(), admin, organization.ID, child.ID, &destination.ID, accountStructureVersion(t, repository, organization.ID), uuid.NewString()); !errors.Is(err, ErrInvalidHierarchy) {
 		t.Fatalf("disabled destination error=%v", err)
 	}
 	accountExec(t, repository, `UPDATE organization_units SET status='ACTIVE' WHERE id=$1`, destination.ID)
-	moved, err := repository.MoveUnit(context.Background(), admin, organization.ID, child.ID, &destination.ID, 1)
-	if err != nil || moved.Version != 2 || moved.ParentID == nil || *moved.ParentID != destination.ID {
+	moved, err := repository.MoveUnit(context.Background(), admin, organization.ID, child.ID, &destination.ID, accountStructureVersion(t, repository, organization.ID), uuid.NewString())
+	if err != nil || moved.Unit.Version != 2 || moved.Unit.ParentID == nil || *moved.Unit.ParentID != destination.ID {
 		t.Fatalf("authorized move=%+v error=%v", moved, err)
 	}
 	var depth int
 	if err := repository.pool.QueryRow(context.Background(), `SELECT depth FROM organization_unit_closure WHERE organization_id=$1 AND ancestor_id=$2 AND descendant_id=$3`, organization.ID, root.ID, grandchild.ID).Scan(&depth); err != nil || depth != 3 {
 		t.Fatalf("subtree closure depth=%d error=%v", depth, err)
 	}
-	if _, err := repository.MoveUnit(context.Background(), owner, organization.ID, destination.ID, &grandchild.ID, 1); !errors.Is(err, ErrInvalidHierarchy) {
+	if _, err := repository.MoveUnit(context.Background(), owner, organization.ID, destination.ID, &grandchild.ID, accountStructureVersion(t, repository, organization.ID), uuid.NewString()); !errors.Is(err, ErrInvalidHierarchy) {
 		t.Fatalf("cycle error=%v", err)
 	}
 	accountExec(t, repository, `UPDATE organization_units SET status='DISABLED' WHERE id=$1`, child.ID)
-	if _, err := repository.MoveUnit(context.Background(), owner, organization.ID, child.ID, nil, 2); !errors.Is(err, ErrInvalidHierarchy) {
+	if _, err := repository.MoveUnit(context.Background(), owner, organization.ID, child.ID, nil, accountStructureVersion(t, repository, organization.ID), uuid.NewString()); !errors.Is(err, ErrInvalidHierarchy) {
 		t.Fatalf("disabled source error=%v", err)
 	}
 	missing := uuid.New()
-	if _, err := repository.MoveUnit(context.Background(), owner, organization.ID, destination.ID, &missing, 1); !errors.Is(err, ErrInvalidHierarchy) {
+	if _, err := repository.MoveUnit(context.Background(), owner, organization.ID, destination.ID, &missing, accountStructureVersion(t, repository, organization.ID), uuid.NewString()); !errors.Is(err, ErrInvalidHierarchy) {
 		t.Fatalf("missing destination error=%v", err)
 	}
 	foreign := accountOrganization(t, repository, owner)
 	foreignUnit := accountUnit(t, repository, owner, foreign.ID, nil, "foreign")
-	if _, err := repository.MoveUnit(context.Background(), owner, organization.ID, destination.ID, &foreignUnit.ID, 1); !errors.Is(err, ErrInvalidHierarchy) {
+	if _, err := repository.MoveUnit(context.Background(), owner, organization.ID, destination.ID, &foreignUnit.ID, accountStructureVersion(t, repository, organization.ID), uuid.NewString()); !errors.Is(err, ErrInvalidHierarchy) {
 		t.Fatalf("foreign organization destination error=%v", err)
 	}
 }
@@ -198,14 +202,14 @@ func TestPostgresTransferOwnershipRetainsMembershipAndVersions(t *testing.T) {
 	target, targetMe := accountUser(t, repository)
 	organization := accountOrganization(t, repository, owner)
 	accountInvitation(t, repository, owner, target, organization.ID, []string{"MEMBER"})
-	if _, err := repository.SetActiveContext(context.Background(), owner, &organization.ID); err != nil {
+	if _, err := repository.SetActiveContext(context.Background(), owner, &organization.ID, accountContextVersion(t, repository, owner)); err != nil {
 		t.Fatal(err)
 	}
 	before, err := repository.ResolveAuthorizationContext(context.Background(), owner)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := repository.TransferOwnership(context.Background(), owner, organization.ID, targetMe.UserID); err != nil {
+	if _, err := repository.TransferOwnership(context.Background(), owner, organization.ID, targetMe.UserID, uuid.NewString()); err != nil {
 		t.Fatal(err)
 	}
 	organizations, err := repository.ListOrganizations(context.Background(), owner)
@@ -216,7 +220,7 @@ func TestPostgresTransferOwnershipRetainsMembershipAndVersions(t *testing.T) {
 	if err != nil || !slices.Equal(resolved.Roles, []string{"MEMBER"}) || resolved.MembershipVersion <= before.MembershipVersion {
 		t.Fatalf("previous owner context=%+v error=%v", resolved, err)
 	}
-	if err := repository.RevokeMembership(context.Background(), target, organization.ID, targetMe.UserID); !errors.Is(err, ErrLastOwner) {
+	if _, err := repository.RevokeMembership(context.Background(), target, organization.ID, targetMe.UserID, uuid.NewString()); !errors.Is(err, ErrLastOwner) {
 		t.Fatalf("last owner error=%v", err)
 	}
 	members, err := repository.ListMembers(context.Background(), target, organization.ID)
@@ -238,29 +242,29 @@ func TestPostgresReinvitationCannotRestoreRevokedGrants(t *testing.T) {
 	organization := accountOrganization(t, repository, owner)
 	invitation := accountInvitation(t, repository, owner, member, organization.ID, []string{"BILLING_ADMIN"})
 	unit := accountUnit(t, repository, owner, organization.ID, nil, "old scope")
-	// The original schema permits multiple owners. Revoking one and inviting
-	// them back as a member must not silently restore ownership either.
-	accountExec(t, repository, `INSERT INTO role_bindings(id,membership_id,role,created_by,created_at) SELECT $1,id,'OWNER',$2,now() FROM memberships WHERE organization_id=$3 AND user_id=$2`, uuid.New(), me.UserID, organization.ID)
+	// An inherited revoked ownership record must not become effective when
+	// this member rejoins. A09 rejects multiple effective owners.
+	accountExec(t, repository, `INSERT INTO role_bindings(id,membership_id,role,created_by,created_at,revoked_at) SELECT $1,id,'OWNER',$2,now(),now() FROM memberships WHERE organization_id=$3 AND user_id=$2`, uuid.New(), me.UserID, organization.ID)
 	accountExec(t, repository, `INSERT INTO role_bindings(id,membership_id,role,unit_id,created_by,created_at) SELECT $1,id,'UNIT_ADMIN',$2,$3,now() FROM memberships WHERE organization_id=$4 AND user_id=$3`, uuid.New(), unit.ID, me.UserID, organization.ID)
 	accountExec(t, repository, `INSERT INTO membership_units(membership_id,unit_id,created_at) SELECT id,$1,now() FROM memberships WHERE organization_id=$2 AND user_id=$3`, unit.ID, organization.ID, me.UserID)
-	if _, err := repository.SetActiveContext(context.Background(), member, &organization.ID); err != nil {
+	if _, err := repository.SetActiveContext(context.Background(), member, &organization.ID, accountContextVersion(t, repository, member)); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := repository.ReplaceMemberRoles(context.Background(), owner, organization.ID, me.UserID, []string{"BILLING_ADMIN"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := repository.RevokeMembership(context.Background(), owner, organization.ID, me.UserID); err != nil {
+	if _, err := repository.RevokeMembership(context.Background(), owner, organization.ID, me.UserID, uuid.NewString()); err != nil {
 		t.Fatal(err)
 	}
 	// Replaying an old accepted token must not change the revoked membership.
-	if _, err := repository.AcceptInvitation(context.Background(), member, invitation.Token); err != nil {
+	if _, err := repository.AcceptInvitation(context.Background(), member, invitation.Token, nil); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := repository.SetActiveContext(context.Background(), member, &organization.ID); !errors.Is(err, ErrForbidden) {
+	if _, err := repository.SetActiveContext(context.Background(), member, &organization.ID, accountContextVersion(t, repository, member)); !errors.Is(err, ErrForbidden) {
 		t.Fatalf("revoked membership reactivated by old token: %v", err)
 	}
 	accountInvitation(t, repository, owner, member, organization.ID, []string{"MEMBER"})
-	if _, err := repository.SetActiveContext(context.Background(), member, &organization.ID); err != nil {
+	if _, err := repository.SetActiveContext(context.Background(), member, &organization.ID, accountContextVersion(t, repository, member)); err != nil {
 		t.Fatal(err)
 	}
 	resolved, err := repository.ResolveAuthorizationContext(context.Background(), member)
@@ -285,15 +289,15 @@ func TestPostgresDisabledOrganizationFailsClosed(t *testing.T) {
 	member, me := accountUser(t, repository)
 	organization := accountOrganization(t, repository, owner)
 	invitation := accountInvitation(t, repository, owner, member, organization.ID, []string{"MEMBER"})
-	pending, err := repository.CreateInvitation(context.Background(), owner, organization.ID, member.Email, []string{"BILLING_ADMIN"}, time.Now().Add(time.Hour))
+	pending, err := repository.CreateInvitation(context.Background(), owner, organization.ID, InvitationCreateRequest{TargetType: "EMAIL", Target: member.Email, Roles: []string{"BILLING_ADMIN"}, ExpiresInHours: 1, IdempotencyKey: uuid.NewString()})
 	if err != nil {
 		t.Fatal(err)
 	}
 	unit := accountUnit(t, repository, owner, organization.ID, nil, "unit")
-	if _, err := repository.SetActiveContext(context.Background(), owner, &organization.ID); err != nil {
+	if _, err := repository.SetActiveContext(context.Background(), owner, &organization.ID, accountContextVersion(t, repository, owner)); err != nil {
 		t.Fatal(err)
 	}
-	accountExec(t, repository, `UPDATE organizations SET status='DISABLED' WHERE id=$1`, organization.ID)
+	accountExec(t, repository, `UPDATE organizations SET status='DISABLED',version=version+1 WHERE id=$1`, organization.ID)
 	checks := map[string]func() error{
 		"authorization": func() error {
 			_, err := repository.ResolveAuthorizationContext(context.Background(), owner)
@@ -305,19 +309,19 @@ func TestPostgresDisabledOrganizationFailsClosed(t *testing.T) {
 			return err
 		},
 		"create unit": func() error {
-			_, err := repository.CreateUnit(context.Background(), owner, organization.ID, nil, "new")
+			_, err := repository.CreateUnit(context.Background(), owner, organization.ID, nil, "new", uuid.NewString())
 			return err
 		},
 		"move unit": func() error {
-			_, err := repository.MoveUnit(context.Background(), owner, organization.ID, unit.ID, nil, 1)
+			_, err := repository.MoveUnit(context.Background(), owner, organization.ID, unit.ID, nil, accountStructureVersion(t, repository, organization.ID), uuid.NewString())
 			return err
 		},
 		"accept invitation": func() error {
-			_, err := repository.AcceptInvitation(context.Background(), member, invitation.Token)
+			_, err := repository.AcceptInvitation(context.Background(), member, invitation.Token, nil)
 			return err
 		},
 		"accept pending invitation": func() error {
-			_, err := repository.AcceptInvitation(context.Background(), member, pending.Token)
+			_, err := repository.AcceptInvitation(context.Background(), member, pending.Token, nil)
 			return err
 		},
 		"replace roles": func() error {
@@ -325,13 +329,15 @@ func TestPostgresDisabledOrganizationFailsClosed(t *testing.T) {
 			return err
 		},
 		"revoke membership": func() error {
-			return repository.RevokeMembership(context.Background(), owner, organization.ID, me.UserID)
+			_, err := repository.RevokeMembership(context.Background(), owner, organization.ID, me.UserID, uuid.NewString())
+			return err
 		},
 		"transfer ownership": func() error {
-			return repository.TransferOwnership(context.Background(), owner, organization.ID, me.UserID)
+			_, err := repository.TransferOwnership(context.Background(), owner, organization.ID, me.UserID, uuid.NewString())
+			return err
 		},
 		"set context": func() error {
-			_, err := repository.SetActiveContext(context.Background(), owner, &organization.ID)
+			_, err := repository.SetActiveContext(context.Background(), owner, &organization.ID, accountContextVersion(t, repository, owner))
 			return err
 		},
 	}
@@ -346,7 +352,7 @@ func TestPostgresDisabledOrganizationFailsClosed(t *testing.T) {
 	if err != nil || len(organizations) != 0 {
 		t.Fatalf("disabled organization listed: %+v error=%v", organizations, err)
 	}
-	if _, err := repository.SetActiveContext(context.Background(), owner, nil); err != nil {
+	if _, err := repository.SetActiveContext(context.Background(), owner, nil, accountContextVersion(t, repository, owner)); err != nil {
 		t.Fatal(err)
 	}
 	if resolved, err := repository.ResolveAuthorizationContext(context.Background(), owner); err != nil || resolved.ContextType != "PERSONAL" {

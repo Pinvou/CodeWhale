@@ -105,7 +105,15 @@ pub async fn account_platform_request(
 ) -> Result<ApiResponse, String> {
     let completes_profile =
         crate::features::account_platform::profile_completion_requested(&request);
+    let changes_context =
+        crate::features::account_platform::active_context_change_requested(&request);
+    let previous_context_revision = state.context_revision();
     let response = state.request(request).await?;
+    if (changes_context && (200..300).contains(&response.status))
+        || previous_context_revision != state.context_revision()
+    {
+        pool.mark_model_updated(BUILTIN_ACCOUNT_PLATFORM_MODEL_ID);
+    }
     if completes_profile
         && (200..300).contains(&response.status)
         && response
@@ -122,8 +130,14 @@ pub async fn account_platform_request(
 #[tauri::command]
 pub async fn account_platform_models(
     state: State<'_, AccountPlatformState>,
+    pool: State<'_, EnginePool>,
 ) -> Result<crate::features::account_platform::BuiltinModelsView, String> {
-    state.builtin_models().await
+    let previous_context_revision = state.context_revision();
+    let result = state.builtin_models().await;
+    if previous_context_revision != state.context_revision() {
+        pool.mark_model_updated(BUILTIN_ACCOUNT_PLATFORM_MODEL_ID);
+    }
+    result
 }
 
 #[tauri::command]
