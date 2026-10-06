@@ -770,9 +770,12 @@ impl CatalogCompiler {
 /// Normalization folds case in the scheme/host, trims trailing slashes, and
 /// drops a default-port suffix, so cosmetically different spellings of the same
 /// endpoint share a cache scope while genuinely different endpoints do not. The
-/// fingerprint is a SHA-256 digest. Secret-bearing URLs are mapped to one
-/// constant redacted input before hashing, so userinfo, query credentials, and
-/// fragments never enter the digest function at all.
+/// fingerprint is a SHA-256 digest. Userinfo, query credentials, and fragments
+/// never enter the digest function at all: a query or fragment glued onto the
+/// authority fingerprints the credential-free host (distinct hosts stay
+/// distinct), while scheme-less, non-http(s), and empty-authority inputs map to
+/// one constant redacted input — forms that never construct a client, so no
+/// captured state can carry their digest.
 #[must_use]
 pub fn base_url_fingerprint(base_url: &str) -> String {
     use sha2::Digest as _;
@@ -798,7 +801,21 @@ fn secret_free_fingerprint_input(base_url: &str) -> String {
         let authority_end = rest.find('/').unwrap_or(rest.len());
         let authority_with_userinfo = &rest[..authority_end];
         if authority_with_userinfo.contains(['?', '#']) {
-            return REDACTED.to_string();
+            // A query or fragment glued onto the authority is a malformed but
+            // constructible base URL (`https://gw.example?tenant=1`). The host
+            // still identifies the endpoint, so fingerprint the
+            // credential-free host: distinct hosts must not collapse into one
+            // shared digest, or captured opaque state could replay across
+            // them. The query/fragment never enters the digest.
+            let head = authority_with_userinfo
+                .split(['?', '#'])
+                .next()
+                .unwrap_or_default();
+            let authority = head.rsplit_once('@').map_or(head, |(_, host)| host);
+            if authority.is_empty() {
+                return REDACTED.to_string();
+            }
+            return normalize_base_url(&format!("{scheme}://{authority}"));
         }
         let authority = authority_with_userinfo
             .rsplit_once('@')
