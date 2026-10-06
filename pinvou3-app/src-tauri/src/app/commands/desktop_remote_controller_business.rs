@@ -696,15 +696,44 @@ impl ControlledSubmissionPort for DesktopControlledSubmitBackend {
     fn admit_and_dispatch(&self, prepared: PreparedControlledTask) -> UseCaseFuture<'_, Value> {
         Box::pin(async move {
             log_task_submit_boundary("controlled_submission_admission_entered");
-            super::desktop_remote_task::submit_prepared_local_bound_task(
-                &self.app,
-                &prepared.b_session_id,
-                &prepared.remote_ref,
-                &prepared.payload,
-                prepared.local_attachments.unwrap_or_default(),
+            dispatch_prepared_attachment_origin(
+                prepared,
+                |prepared| {
+                    super::desktop_remote_task::submit_prepared_bound_task(
+                        &self.app,
+                        &prepared.b_session_id,
+                        &prepared.remote_ref,
+                        &prepared.payload,
+                    )
+                },
+                |prepared, attachments| {
+                    super::desktop_remote_task::submit_prepared_local_bound_task(
+                        &self.app,
+                        &prepared.b_session_id,
+                        &prepared.remote_ref,
+                        &prepared.payload,
+                        attachments,
+                    )
+                },
             )
             .map_err(|code| submit_error(&code))
         })
+    }
+}
+
+/// Preserve the authoritative input origin through final admission. `None`
+/// means wire upload receipts; `Some`, including an empty vector, is B-local.
+fn dispatch_prepared_attachment_origin<T>(
+    mut prepared: PreparedControlledTask,
+    remote: impl FnOnce(&PreparedControlledTask) -> Result<T, String>,
+    local: impl FnOnce(
+        &PreparedControlledTask,
+        Vec<crate::features::files::file_ingest::PublishedAttachment>,
+    ) -> Result<T, String>,
+) -> Result<T, String> {
+    match prepared.local_attachments.take() {
+        None => remote(&prepared),
+        Some(attachments) => local(&prepared, attachments),
     }
 }
 
@@ -1332,6 +1361,95 @@ mod dev19_replay_tests {
         JournalKind, JournalSnapshot, RemoteJournal,
     };
     use serde_json::json;
+
+    #[test]
+    fn prepared_remote_input_consumes_real_completed_upload_and_local_empty_stays_local() {
+        use crate::features::remote_control::controller::transfer::{
+            core::TransferRegistry, limits::TransferLimits, staging::SessionIsolationStaging,
+            upload::AttachmentUploads,
+        };
+        use sha2::{Digest, Sha256};
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().to_path_buf();
+        let staging = Arc::new(SessionIsolationStaging::new(Arc::new(move |_| {
+            Ok(root.clone())
+        })));
+        let uploads = AttachmentUploads::new(
+            Arc::new(TransferRegistry::new(TransferLimits::default()).unwrap()),
+            staging,
+        );
+        let live = lease();
+        let bytes = b"actual completed wire attachment";
+        let begun = uploads
+            .begin(
+                TransferContext::new(&live, "session-1", "task-1", TransferDirection::Upload)
+                    .unwrap(),
+                TransferMetadata {
+                    file_name: "wire.txt".into(),
+                    mime_type: "text/plain".into(),
+                    total_bytes: bytes.len() as u64,
+                    sha256: Sha256::digest(bytes)
+                        .iter()
+                        .map(|byte| format!("{byte:02x}"))
+                        .collect(),
+                },
+                1_000,
+            )
+            .unwrap();
+        uploads
+            .accept_chunk(&begun.handle_id, 0, bytes, 1_100)
+            .unwrap();
+        let prepared = |local_attachments| PreparedControlledTask {
+            remote_ref: "ref-1".into(),
+            b_session_id: "session-1".into(),
+            task_id: "task-1".into(),
+            client_request_id: "request-1".into(),
+            input_digest: "digest-1".into(),
+            payload: json!({"input":{"attachment_ids":[begun.handle_id]}}),
+            local_attachments,
+        };
+        // These are the production port's actual Some/None dispatch semantics,
+        // with real upload receipt ownership and real anchored published bytes.
+        let attachments = dispatch_prepared_attachment_origin(
+            prepared(None),
+            |task| {
+                let ids = task.payload["input"]["attachment_ids"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|id| id.as_str().unwrap().to_owned())
+                    .collect::<Vec<_>>();
+                uploads.consume_completed(&ids, &live, &task.b_session_id, &task.task_id)
+            },
+            |_, _| panic!("wire attachments must not enter the B-local descriptor arm"),
+        )
+        .unwrap();
+        assert_eq!(attachments.len(), 1);
+        assert_eq!(attachments[0].handle_id, begun.handle_id);
+        assert_eq!(
+            attachments[0]
+                .read_owner
+                .as_ref()
+                .unwrap()
+                .read_bounded(bytes.len() as u64)
+                .unwrap(),
+            bytes
+        );
+        assert!(
+            uploads
+                .consume_completed(&[begun.handle_id.clone()], &live, "session-1", "task-1")
+                .is_err()
+        );
+        let local = dispatch_prepared_attachment_origin(
+            prepared(Some(Vec::new())),
+            |_| panic!("even empty B-local descriptors must not consume wire receipts"),
+            |_, attachments| Ok(attachments),
+        )
+        .unwrap();
+        assert!(local.is_empty());
+        drop(attachments);
+        uploads.cleanup_for_task("task-1");
+    }
 
     fn lease() -> LeaseContext {
         LeaseContext {

@@ -7,7 +7,10 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
 
 use parking_lot::Mutex;
 use sha2::{Digest, Sha256};
@@ -41,12 +44,16 @@ pub(crate) struct DesktopRemoteArtifactRuntime {
     downloads: ArtifactDownloads,
     tasks: Arc<RemoteTaskService>,
     captures: Mutex<HashMap<String, TaskArtifactCapture>>,
-    code_captures: Mutex<HashMap<String, CodeArtifactCapture>>,
+    code_captures: Mutex<HashMap<String, Arc<CodeArtifactCapture>>>,
     pending_code_artifacts: Mutex<HashMap<String, PendingCodeArtifacts>>,
     /// Serializes visible publication with connection teardown. A teardown
     /// that wins first removes the capture; one that runs second removes every
     /// entry published before it, so artifacts cannot resurrect afterwards.
     publication_lock: Mutex<()>,
+    // Invalidates scans started before teardown, including begin-capture.
+    publication_revision: AtomicU64,
+    #[cfg(test)]
+    before_code_publish: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 #[derive(Clone, Eq, PartialEq)]
@@ -75,28 +82,16 @@ struct PendingCodeArtifacts {
     events: Arc<dyn ControllerTaskEventSink>,
 }
 
-struct PendingArtifactStage<'a> {
-    runtime: &'a DesktopRemoteArtifactRuntime,
-    lease: LeaseContext,
-    session_id: String,
-    task_id: String,
+// An off-lock candidate owns only its own unique private copies. Never clear
+// the task-wide index here: a concurrent winner may already own that index.
+struct PendingArtifactStage {
     copied: Vec<PathBuf>,
     committed: bool,
 }
 
-impl<'a> PendingArtifactStage<'a> {
-    fn new(
-        runtime: &'a DesktopRemoteArtifactRuntime,
-        lease: &LeaseContext,
-        session_id: &str,
-        task_id: &str,
-        capacity: usize,
-    ) -> Self {
+impl PendingArtifactStage {
+    fn new(capacity: usize) -> Self {
         Self {
-            runtime,
-            lease: lease.clone(),
-            session_id: session_id.to_owned(),
-            task_id: task_id.to_owned(),
             copied: Vec::with_capacity(capacity),
             committed: false,
         }
@@ -108,16 +103,31 @@ impl<'a> PendingArtifactStage<'a> {
     }
 }
 
-impl Drop for PendingArtifactStage<'_> {
+impl Drop for PendingArtifactStage {
     fn drop(&mut self) {
         if self.committed {
             return;
         }
-        self.runtime
-            .downloads
-            .index()
-            .clear_task(&self.session_id, &self.task_id, &self.lease);
         remove_private_copies(&self.copied);
+    }
+}
+
+// Failure removes only this attempt's token, never a replacement capture.
+struct CodeCaptureAttempt<'a> {
+    runtime: &'a DesktopRemoteArtifactRuntime,
+    task_id: &'a str,
+    token: Arc<CodeArtifactCapture>,
+}
+
+impl Drop for CodeCaptureAttempt<'_> {
+    fn drop(&mut self) {
+        let mut captures = self.runtime.code_captures.lock();
+        if captures
+            .get(self.task_id)
+            .is_some_and(|current| Arc::ptr_eq(current, &self.token))
+        {
+            captures.remove(self.task_id);
+        }
     }
 }
 
@@ -130,6 +140,9 @@ impl DesktopRemoteArtifactRuntime {
             code_captures: Mutex::new(HashMap::new()),
             pending_code_artifacts: Mutex::new(HashMap::new()),
             publication_lock: Mutex::new(()),
+            publication_revision: AtomicU64::new(0),
+            #[cfg(test)]
+            before_code_publish: Mutex::new(None),
         })
     }
 
@@ -176,8 +189,14 @@ impl DesktopRemoteArtifactRuntime {
         session_id: &str,
         task_id: &str,
     ) -> Result<(), String> {
+        let revision = self.publication_revision.load(Ordering::Acquire);
         self.require_task_record(lease, session_id, task_id, false)?;
         let before = private_artifact_files(store, session_id)?;
+        let _publication = self.publication_lock.lock();
+        if revision == u64::MAX || self.publication_revision.load(Ordering::Acquire) != revision {
+            return Err("artifact_capture_binding_mismatch".to_owned());
+        }
+        self.require_task_record(lease, session_id, task_id, false)?;
         let mut captures = self.captures.lock();
         if let Some(existing) = captures.get(task_id) {
             if existing.session_id == session_id
@@ -374,6 +393,11 @@ impl DesktopRemoteArtifactRuntime {
 
     pub(crate) fn clear_connection(&self, connection_id: &str) {
         let _publication = self.publication_lock.lock();
+        let _ = self.publication_revision.fetch_update(
+            Ordering::AcqRel,
+            Ordering::Acquire,
+            |revision| Some(revision.saturating_add(1)),
+        );
         self.captures
             .lock()
             .retain(|_, capture| capture.lease.connection_id != connection_id);
@@ -395,6 +419,28 @@ impl DesktopRemoteArtifactRuntime {
             }
         }
         self.downloads.cleanup_for_connection(connection_id);
+    }
+
+    fn require_running_code_capture(
+        &self,
+        lease: &LeaseContext,
+        session_id: &str,
+        task_id: &str,
+    ) -> Result<(), String> {
+        let record = self
+            .tasks
+            .status(task_id)
+            .map_err(|error| error.code.to_owned())?;
+        if record.session_id != session_id
+            || record.lease != TaskLeaseBinding::from_context(lease)
+            || record.mode != TASK_MODE_CODE
+            || record.state != RemoteTaskState::Running
+            || record.cancel_requested
+            || record.outcome_unknown
+        {
+            return Err("artifact_capture_binding_mismatch".to_owned());
+        }
+        Ok(())
     }
 
     fn require_task_record(
@@ -437,6 +483,7 @@ impl RemoteCodeArtifactPort for DesktopRemoteArtifactRuntime {
         task_id: &str,
         workspace: &Path,
     ) -> Result<(), String> {
+        let revision = self.publication_revision.load(Ordering::Acquire);
         let record = self
             .tasks
             .status(task_id)
@@ -470,6 +517,14 @@ impl RemoteCodeArtifactPort for DesktopRemoteArtifactRuntime {
             return Err("artifact_workspace_unavailable".to_owned());
         }
         let before = project_artifact_files(&workspace_root)?;
+        let _publication = self.publication_lock.lock();
+        if revision == u64::MAX || self.publication_revision.load(Ordering::Acquire) != revision {
+            return Err("artifact_capture_binding_mismatch".to_owned());
+        }
+        self.require_running_code_capture(lease, session_id, task_id)?;
+        if self.pending_code_artifacts.lock().contains_key(task_id) {
+            return Err("artifact_capture_binding_mismatch".to_owned());
+        }
         let mut captures = self.code_captures.lock();
         if let Some(existing) = captures.get(task_id) {
             if existing.session_id == session_id
@@ -485,12 +540,12 @@ impl RemoteCodeArtifactPort for DesktopRemoteArtifactRuntime {
         }
         captures.insert(
             task_id.to_owned(),
-            CodeArtifactCapture {
+            Arc::new(CodeArtifactCapture {
                 session_id: session_id.to_owned(),
                 lease: TaskLeaseBinding::from_context(lease),
                 workspace_root,
                 before,
-            },
+            }),
         );
         Ok(())
     }
@@ -503,9 +558,10 @@ impl RemoteCodeArtifactPort for DesktopRemoteArtifactRuntime {
         events: Arc<dyn ControllerTaskEventSink>,
     ) -> Result<Vec<ArtifactDescriptor>, String> {
         let capture = {
-            let mut captures = self.code_captures.lock();
+            let captures = self.code_captures.lock();
             let capture = captures
-                .remove(task_id)
+                .get(task_id)
+                .cloned()
                 .ok_or_else(|| "artifact_capture_missing".to_owned())?;
             if capture.session_id != session_id
                 || capture.lease != TaskLeaseBinding::from_context(lease)
@@ -513,6 +569,11 @@ impl RemoteCodeArtifactPort for DesktopRemoteArtifactRuntime {
                 return Err("artifact_capture_binding_mismatch".to_owned());
             }
             capture
+        };
+        let _attempt = CodeCaptureAttempt {
+            runtime: self,
+            task_id,
+            token: Arc::clone(&capture),
         };
         let record = self
             .tasks
@@ -560,7 +621,8 @@ impl RemoteCodeArtifactPort for DesktopRemoteArtifactRuntime {
 
         let artifact_root = private_artifact_root(session_id)?;
         let mut registered = Vec::with_capacity(changed.len());
-        let mut stage = PendingArtifactStage::new(self, lease, session_id, task_id, changed.len());
+        let mut stage = PendingArtifactStage::new(changed.len());
+        let mut candidates = Vec::with_capacity(changed.len());
         for (relative, stamp) in changed {
             let result = (|| {
                 let source = current_root.join(&relative);
@@ -580,21 +642,59 @@ impl RemoteCodeArtifactPort for DesktopRemoteArtifactRuntime {
                     &stamp,
                 )?;
                 stage.copied.push(private_copy.clone());
-                index_pending_artifact(
-                    self,
-                    lease,
-                    session_id,
-                    task_id,
-                    &artifact_id,
-                    &display_name,
+                Ok::<_, String>((
+                    artifact_id,
+                    display_name,
                     mime_type,
-                    &stamp.sha256,
+                    stamp.sha256,
                     private_copy,
-                )
+                ))
             })();
             match result {
-                Ok(descriptor) => registered.push(descriptor),
+                Ok(candidate) => candidates.push(candidate),
                 Err(error) => return Err(error),
+            }
+        }
+        #[cfg(test)]
+        {
+            let hook = self.before_code_publish.lock().take();
+            if let Some(hook) = hook {
+                hook();
+            }
+        }
+        let _publication = self.publication_lock.lock();
+        self.require_running_code_capture(lease, session_id, task_id)?;
+        let mut captures = self.code_captures.lock();
+        if !captures
+            .get(task_id)
+            .is_some_and(|current| Arc::ptr_eq(current, &capture))
+            || self.pending_code_artifacts.lock().contains_key(task_id)
+        {
+            return Err("artifact_capture_binding_mismatch".to_owned());
+        }
+        // Exact token validation, index registration and pending ownership
+        // commit share teardown/terminal's publication lock.
+        captures.remove(task_id);
+        drop(captures);
+        for (artifact_id, display_name, mime_type, sha256, private_copy) in candidates {
+            match index_pending_artifact(
+                self,
+                lease,
+                session_id,
+                task_id,
+                &artifact_id,
+                &display_name,
+                mime_type,
+                &sha256,
+                private_copy,
+            ) {
+                Ok(descriptor) => registered.push(descriptor),
+                Err(error) => {
+                    self.downloads
+                        .index()
+                        .clear_task(session_id, task_id, lease);
+                    return Err(error);
+                }
             }
         }
         if !registered.is_empty() {
@@ -613,6 +713,7 @@ impl RemoteCodeArtifactPort for DesktopRemoteArtifactRuntime {
     }
 
     fn discard_code_capture(&self, lease: &LeaseContext, session_id: &str, task_id: &str) {
+        let _publication = self.publication_lock.lock();
         let binding = TaskLeaseBinding::from_context(lease);
         let mut captures = self.code_captures.lock();
         if captures
@@ -1135,10 +1236,20 @@ mod tests {
         }
     }
 
+    fn runtime_with_tasks(tasks: Arc<RemoteTaskService>) -> Arc<DesktopRemoteArtifactRuntime> {
+        DesktopRemoteArtifactRuntime::new(
+            ArtifactDownloads::new(
+                Arc::new(TransferRegistry::new(Default::default()).unwrap()),
+                Arc::new(ArtifactIndex::default()),
+            ),
+            tasks,
+        )
+    }
+
     fn runtime() -> Arc<DesktopRemoteArtifactRuntime> {
-        DesktopRemoteArtifactRuntime::with_default_registry(Arc::new(RemoteTaskService::new(
-            Arc::new(RemoteTaskLedger::in_memory()),
-        )))
+        runtime_with_tasks(Arc::new(RemoteTaskService::new(Arc::new(
+            RemoteTaskLedger::in_memory(),
+        ))))
     }
 
     struct ExistingSession(String);
@@ -1169,7 +1280,7 @@ mod tests {
                 &test_lease().remote_control_generation,
             )
             .unwrap();
-        let runtime = DesktopRemoteArtifactRuntime::with_default_registry(Arc::clone(&tasks));
+        let runtime = runtime_with_tasks(Arc::clone(&tasks));
         tasks.hooks().set_artifact_scope(runtime.clone());
         runtime
     }
@@ -1725,12 +1836,12 @@ mod tests {
             for index in 0..MAX_CODE_CAPTURES {
                 captures.insert(
                     format!("occupied-{index}"),
-                    CodeArtifactCapture {
+                    Arc::new(CodeArtifactCapture {
                         session_id: "session-capacity".to_owned(),
                         lease: binding.clone(),
                         workspace_root: root.clone(),
                         before: HashMap::new(),
-                    },
+                    }),
                 );
             }
         }
@@ -1747,6 +1858,92 @@ mod tests {
             "artifact_capture_capacity"
         );
         assert_eq!(runtime.code_captures.lock().len(), MAX_CODE_CAPTURES);
+    }
+
+    #[test]
+    fn off_lock_code_copy_cannot_resurrect_after_clear_or_erase_a_concurrent_winner() {
+        let _guard = crate::platform::paths::tests::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let previous = std::env::var_os("PINVOU3_HOME");
+        // SAFETY: the shared paths test lock serializes process env writes.
+        unsafe { std::env::set_var("PINVOU3_HOME", home.path()) };
+        let store = SessionStore::boot_at_test_dir(home.path()).unwrap();
+        for disconnect in [true, false] {
+            let project = tempfile::tempdir().unwrap();
+            let session_id = store
+                .create_new("model".into(), None, project.path().to_path_buf())
+                .unwrap()
+                .metadata
+                .id;
+            let runtime = bound_runtime(&session_id);
+            let task_id = if disconnect {
+                "task-copy-clear"
+            } else {
+                "task-copy-winner"
+            };
+            admit_running_code_task(&runtime, &session_id, task_id);
+            runtime
+                .begin_code_capture(&test_lease(), &session_id, task_id, project.path())
+                .unwrap();
+            let source = project.path().join("output.md");
+            std::fs::write(&source, b"real private code output").unwrap();
+            let copied = Arc::new(std::sync::Barrier::new(2));
+            let resume = Arc::new(std::sync::Barrier::new(2));
+            let copied_hook = Arc::clone(&copied);
+            let resume_hook = Arc::clone(&resume);
+            *runtime.before_code_publish.lock() = Some(Box::new(move || {
+                copied_hook.wait();
+                resume_hook.wait();
+            }));
+            let worker_runtime = Arc::clone(&runtime);
+            let worker_session = session_id.clone();
+            let worker = std::thread::spawn(move || {
+                worker_runtime.finish_code_capture(
+                    &test_lease(),
+                    &worker_session,
+                    task_id,
+                    null_events(),
+                )
+            });
+            copied.wait(); // actual copies exist, but no index ownership yet
+            assert_eq!(runtime.downloads.index().len(), 0);
+            if disconnect {
+                runtime.clear_connection(&test_lease().connection_id);
+            } else {
+                // A second attempt wins the SAME capture token. The losing
+                // candidate must clean only its own unique files, not this index.
+                assert_eq!(
+                    runtime
+                        .finish_code_capture(&test_lease(), &session_id, task_id, null_events())
+                        .unwrap()
+                        .len(),
+                    1
+                );
+            }
+            resume.wait();
+            assert_eq!(
+                worker.join().unwrap().unwrap_err(),
+                "artifact_capture_binding_mismatch"
+            );
+            assert!(runtime.code_captures.lock().is_empty());
+            let count = if disconnect { 0 } else { 1 };
+            assert_eq!(runtime.downloads.index().len(), count);
+            assert_eq!(runtime.pending_code_artifacts.lock().len(), count);
+            assert_eq!(
+                std::fs::read_dir(private_artifact_root(&session_id).unwrap())
+                    .unwrap()
+                    .count(),
+                count
+            );
+            assert_eq!(std::fs::read(&source).unwrap(), b"real private code output");
+            runtime.clear_connection(&test_lease().connection_id);
+        }
+        match previous {
+            Some(value) => unsafe { std::env::set_var("PINVOU3_HOME", value) },
+            None => unsafe { std::env::remove_var("PINVOU3_HOME") },
+        }
     }
 
     #[test]

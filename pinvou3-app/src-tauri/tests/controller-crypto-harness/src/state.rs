@@ -8,6 +8,12 @@ pub(crate) mod controlled;
 #[path = "../../../src/features/remote_control/controller/controlling.rs"]
 pub(crate) mod controlling;
 
+#[path = "../../../src/features/remote_control/controller/controlling_handshake.rs"]
+pub(crate) mod controlling_handshake;
+
+#[path = "../../../src/features/remote_control/controller/controlled_handshake.rs"]
+pub(crate) mod controlled_handshake;
+
 #[path = "../../../src/features/remote_control/controller/controlling_session.rs"]
 mod controlling_session;
 

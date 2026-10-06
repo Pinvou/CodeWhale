@@ -221,16 +221,57 @@ pub fn materialize_session_skills(
     materialize_skill_set(session_id, &enabled)
 }
 
-/// Freeze a remote turn to exactly the skills selected in its authenticated
-/// input. An empty selection deliberately produces an empty discovery root;
-/// unselected B skills are therefore unavailable to `load_skill` for this
-/// turn instead of merely being omitted from an audit field.
+/// A remote turn's immutable, uniquely owned discovery root. Ordinary B-local
+/// materialize/rewrite/self-heal writers never target this directory.
+#[derive(Debug, Default)]
+pub(crate) struct RemoteTurnOwner {
+    snapshot_claimed: std::sync::atomic::AtomicBool,
+}
+
+impl RemoteTurnOwner {
+    fn claim_snapshot(&self) -> Result<(), String> {
+        self.snapshot_claimed
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .map(|_| ())
+            .map_err(|_| "task_skill_snapshot_reused".to_owned())
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct RemoteTurnSkills {
+    directory: tempfile::TempDir,
+    owner: std::sync::Arc<RemoteTurnOwner>,
+}
+
+impl RemoteTurnSkills {
+    pub(crate) fn owner(&self) -> &std::sync::Arc<RemoteTurnOwner> {
+        &self.owner
+    }
+
+    pub(crate) fn path(&self) -> &Path {
+        self.directory.path()
+    }
+}
+
+/// Resolve the authenticated selection against B's enabled set and copy into
+/// a private root, including an empty directory for an empty selection. A
+/// cancelled spawn_blocking waiter cannot publish into shared session skills:
+/// when its result is dropped, only this attempt's owned directory is removed.
 pub(crate) fn materialize_remote_turn_skills(
     session_id: &str,
     scope: ConnectorScope,
     project_workspace: Option<&Path>,
     skill_ids: &[String],
-) -> Result<(), String> {
+    owner: std::sync::Arc<RemoteTurnOwner>,
+) -> Result<RemoteTurnSkills, String> {
+    crate::features::sessions::validate_session_id(session_id)
+        .map_err(|_| "task_session_invalid".to_owned())?;
+    owner.claim_snapshot()?;
     if skill_ids.len() > 32 {
         return Err("task_skills_invalid".to_owned());
     }
@@ -249,7 +290,20 @@ pub(crate) fn materialize_remote_turn_skills(
             .ok_or_else(|| "task_skill_not_authorized".to_owned())?;
         selected.push((skill_id.clone(), path));
     }
-    materialize_skill_set(session_id, &selected)
+    let shared = paths::session_skills_dir(session_id);
+    let parent = shared
+        .parent()
+        .ok_or_else(|| "task_session_invalid".to_owned())?;
+    std::fs::create_dir_all(parent).map_err(|_| "task_skill_unavailable".to_owned())?;
+    let directory = tempfile::Builder::new()
+        .prefix("remote-turn-skills-")
+        .tempdir_in(parent)
+        .map_err(|_| "task_skill_unavailable".to_owned())?;
+    for (name, source) in selected {
+        copy_skill_dir(&source, &directory.path().join(name))
+            .map_err(|_| "task_skill_unavailable".to_owned())?;
+    }
+    Ok(RemoteTurnSkills { directory, owner })
 }
 
 /// Plain-chat wrappers keep the assistant runtime independent of the
@@ -257,12 +311,9 @@ pub(crate) fn materialize_remote_turn_skills(
 pub(crate) fn materialize_plain_remote_turn_skills(
     session_id: &str,
     skill_ids: &[String],
-) -> Result<(), String> {
-    materialize_remote_turn_skills(session_id, ConnectorScope::Plain, None, skill_ids)
-}
-
-pub(crate) fn restore_plain_session_skills(session_id: &str) -> Result<(), String> {
-    materialize_session_skills(session_id, ConnectorScope::Plain, None)
+    owner: std::sync::Arc<RemoteTurnOwner>,
+) -> Result<RemoteTurnSkills, String> {
+    materialize_remote_turn_skills(session_id, ConnectorScope::Plain, None, skill_ids, owner)
 }
 
 /// Build the private prompt prefix used by ACP, whose protocol has no
@@ -872,14 +923,15 @@ mod tests {
         with_temp_home(|| {
             seed_sources();
             let sid = "remote-session-skills";
-            materialize_remote_turn_skills(
+            let selected = materialize_remote_turn_skills(
                 sid,
                 ConnectorScope::Plain,
                 None,
                 &["user-custom".to_owned(), "visualizer".to_owned()],
+                std::sync::Arc::new(RemoteTurnOwner::default()),
             )
             .unwrap();
-            let dir = paths::session_skills_dir(sid);
+            let dir = selected.path().to_owned();
             let names: HashSet<String> = std::fs::read_dir(&dir)
                 .unwrap()
                 .flatten()
@@ -902,6 +954,7 @@ mod tests {
                     ConnectorScope::Plain,
                     None,
                     &["not-authorized".to_owned()],
+                    std::sync::Arc::new(RemoteTurnOwner::default()),
                 )
                 .unwrap_err(),
                 "task_skill_not_authorized"
@@ -909,15 +962,155 @@ mod tests {
             assert!(dir.join("user-custom").is_dir());
             assert!(dir.join("visualizer").is_dir());
 
-            materialize_remote_turn_skills(sid, ConnectorScope::Plain, None, &[]).unwrap();
-            assert!(std::fs::read_dir(&dir).unwrap().next().is_none());
+            let empty = materialize_remote_turn_skills(
+                sid,
+                ConnectorScope::Plain,
+                None,
+                &[],
+                std::sync::Arc::new(RemoteTurnOwner::default()),
+            )
+            .unwrap();
+            assert!(std::fs::read_dir(empty.path()).unwrap().next().is_none());
+            assert!(
+                dir.join("user-custom").is_dir(),
+                "a newer empty snapshot must not replace its predecessor"
+            );
+            assert_ne!(dir, empty.path());
             materialize_session_skills(sid, ConnectorScope::Plain, None).unwrap();
             assert_eq!(
-                std::fs::read_dir(dir).unwrap().flatten().count(),
+                std::fs::read_dir(paths::session_skills_dir(sid))
+                    .unwrap()
+                    .flatten()
+                    .count(),
                 4,
                 "the next B-local turn regains B's full authoritative enabled set"
             );
+            let before = std::fs::read_to_string(dir.join("visualizer/SKILL.md")).unwrap();
+            rewrite_session_skills(sid, ConnectorScope::Plain, None);
+            let shared = paths::session_skills_dir(sid);
+            // Only this fixture's exact managed shared directory is removed.
+            std::fs::remove_dir_all(&shared).unwrap();
+            ensure_session_skills(sid, ConnectorScope::Plain, None);
+            assert!(shared.is_dir());
+            assert_eq!(
+                before,
+                std::fs::read_to_string(dir.join("visualizer/SKILL.md")).unwrap()
+            );
+            assert!(!dir.join("bundle-skill").exists());
+            assert!(std::fs::read_dir(empty.path()).unwrap().next().is_none());
+            let snapshot = std::sync::Arc::new(selected);
+            let clone = snapshot.clone();
+            drop(snapshot);
+            assert!(dir.is_dir());
+            drop(clone);
+            assert!(
+                !dir.exists(),
+                "last snapshot owner cleans only its private directory"
+            );
+            assert!(shared.is_dir());
+            assert!(empty.path().is_dir());
         });
+    }
+
+    #[test]
+    fn remote_snapshot_owner_is_one_shot_and_invalid_ids_fail_before_claim() {
+        with_temp_home(|| {
+            let owner = std::sync::Arc::new(RemoteTurnOwner::default());
+            for invalid in [
+                "",
+                ".",
+                "..",
+                "trailing.",
+                "trailing ",
+                "a/b",
+                "a\\b",
+                "a:b",
+            ] {
+                assert_eq!(
+                    materialize_plain_remote_turn_skills(invalid, &[], owner.clone()).unwrap_err(),
+                    "task_session_invalid"
+                );
+            }
+            let first =
+                materialize_plain_remote_turn_skills("snapshot-owner", &[], owner.clone()).unwrap();
+            assert_eq!(
+                materialize_plain_remote_turn_skills("snapshot-owner", &[], owner).unwrap_err(),
+                "task_skill_snapshot_reused"
+            );
+            assert!(first.path().is_dir());
+        });
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cancelled_blocking_snapshot_cannot_publish_over_a_newer_shared_root() {
+        let _env_lock = crate::platform::paths::tests::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        struct Restore(Option<std::ffi::OsString>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                // SAFETY: ENV_LOCK is held for the complete test.
+                unsafe {
+                    match &self.0 {
+                        Some(value) => std::env::set_var("PINVOU3_HOME", value),
+                        None => std::env::remove_var("PINVOU3_HOME"),
+                    }
+                }
+            }
+        }
+        let _restore = Restore(std::env::var_os("PINVOU3_HOME"));
+        // SAFETY: ENV_LOCK is held.
+        unsafe { std::env::set_var("PINVOU3_HOME", home.path()) };
+        let sid = "cancelled-snapshot";
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+        struct BlockingResult {
+            snapshot: Option<RemoteTurnSkills>,
+            done: Option<tokio::sync::oneshot::Sender<()>>,
+        }
+        impl Drop for BlockingResult {
+            fn drop(&mut self) {
+                drop(self.snapshot.take());
+                if let Some(done) = self.done.take() {
+                    let _ = done.send(());
+                }
+            }
+        }
+        let waiter = tokio::spawn(async move {
+            let result = tokio::task::spawn_blocking(move || {
+                let snapshot = materialize_plain_remote_turn_skills(
+                    sid,
+                    &[],
+                    std::sync::Arc::new(RemoteTurnOwner::default()),
+                )
+                .unwrap();
+                ready_tx.send(snapshot.path().to_path_buf()).unwrap();
+                release_rx.recv().unwrap();
+                // The blocking task completes AFTER its async waiter was
+                // cancelled. Tokio drops this undelivered owned result.
+                BlockingResult {
+                    snapshot: Some(snapshot),
+                    done: Some(done_tx),
+                }
+            })
+            .await;
+            drop(result.unwrap());
+        });
+        let private = ready_rx.await.unwrap();
+        waiter.abort();
+        assert!(waiter.await.unwrap_err().is_cancelled());
+        materialize_session_skills(sid, ConnectorScope::Plain, None).unwrap();
+        let shared = paths::session_skills_dir(sid);
+        std::fs::write(shared.join("newer-owner-marker"), "newer").unwrap();
+        release_tx.send(()).unwrap();
+        done_rx.await.unwrap();
+        assert!(!private.exists());
+        assert_eq!(
+            std::fs::read_to_string(shared.join("newer-owner-marker")).unwrap(),
+            "newer"
+        );
     }
 
     #[test]

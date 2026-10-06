@@ -734,7 +734,7 @@ fn fail_resume(
     operation: &ControllerOperation,
     sinks: &mut ControllingLaneSinks<'_>,
 ) {
-    if let Ok(status) = manager.fail_connection(operation.clone(), PEER_UNAVAILABLE_ERROR) {
+    if let Ok(status) = manager.fail_resume_connection(operation.clone(), PEER_UNAVAILABLE_ERROR) {
         (sinks.on_status)(&status);
     }
 }
@@ -4153,13 +4153,11 @@ mod tests {
         let parsed =
             super::super::protocol::parse_controller_pairing_transcript(&reserved.to_string())
                 .unwrap();
-        super::super::crypto::authenticate_relay_transcript(&trust, parsed).unwrap();
+        let install_context =
+            super::super::crypto::authenticate_relay_transcript(&trust, parsed).unwrap();
         let joined = super::super::controlling_handshake::validate_joined_lease(
             &startup["joined"],
-            reserved["pairing_id"].as_str().unwrap(),
-            reserved["reservation_id"].as_str().unwrap(),
-            reserved["relay_epoch"].as_str().unwrap(),
-            reserved["transcript_hash"].as_str().unwrap(),
+            &install_context,
         )
         .unwrap();
         let manager = ControllingDeviceManager::default();

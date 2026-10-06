@@ -1180,8 +1180,122 @@ fn entry_is_fresh(
     !requires_model_rebuild && entry_mcp_config_revision == current_mcp_config_revision
 }
 
-/// A session's resident entry in the pool: the engine + its own event
-/// forwarder task.
+#[cfg(test)]
+#[path = "engine_pool_remote_tests.rs"]
+mod remote_snapshot_tests;
+
+fn remote_owner_matches(
+    resident: Option<&Arc<super::skill_materialization::RemoteTurnOwner>>,
+    incoming: Option<&Arc<super::skill_materialization::RemoteTurnOwner>>,
+) -> bool {
+    match (resident, incoming) {
+        (None, None) => true,
+        (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+        _ => false,
+    }
+}
+
+/// Own an unpublished engine across the entries-lock await. Cancellation
+/// cannot detach a cold forwarder or strand its private discovery root.
+struct ColdEngineCustody {
+    resources: Option<(AppEngine, JoinHandle<()>)>,
+}
+
+impl ColdEngineCustody {
+    fn new(engine: AppEngine, forwarder: JoinHandle<()>) -> Self {
+        Self {
+            resources: Some((engine, forwarder)),
+        }
+    }
+
+    fn adopt(mut self) -> (AppEngine, JoinHandle<()>) {
+        self.resources
+            .take()
+            .expect("cold engine custody already adopted")
+    }
+}
+
+impl Drop for ColdEngineCustody {
+    fn drop(&mut self) {
+        let Some((engine, forwarder)) = self.resources.take() else {
+            return;
+        };
+        engine.cancel_current();
+        forwarder.abort();
+        let mut pending = Vec::new();
+        let mut blocked = false;
+        for op in EnginePool::shutdown_cancel_cascade_ops() {
+            if blocked {
+                pending.push(op);
+                continue;
+            }
+            match engine.handle.tx_op.try_send(op) {
+                Ok(()) => {}
+                Err(tokio::sync::mpsc::error::TrySendError::Full(op)) => {
+                    pending.push(op);
+                    blocked = true;
+                }
+                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => return,
+            }
+        }
+        if !pending.is_empty() {
+            // Same bounded FIFO fallback as ordinary reclaim; retains this
+            // engine/bridge only, never a pool gate or newer entry.
+            let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+                // Drop must never panic during shutdown/unwinding. Synchronous
+                // cancel/abort/try_send above are the no-runtime best effort.
+                return;
+            };
+            runtime.spawn(async move {
+                retry_shutdown_sends(
+                    |op| engine.handle.send(op),
+                    pending,
+                    RECLAIM_SHUTDOWN_RETRY_PATIENCE,
+                )
+                .await;
+            });
+        }
+    }
+}
+
+async fn publish_cold_entry<F>(
+    entries: &Mutex<HashMap<String, EngineEntry>>,
+    session_id: &str,
+    custody: ColdEngineCustody,
+    build: F,
+) -> AppEngine
+where
+    F: FnOnce(AppEngine, JoinHandle<()>) -> EngineEntry,
+{
+    let mut entries = entries.lock().await;
+    // Per-session runtime locking excludes replacements at publication. Keep
+    // custody armed if a future bypass violates that invariant.
+    assert!(
+        !entries.contains_key(session_id),
+        "cold publication would replace an owned entry"
+    );
+    let (engine, forwarder) = custody.adopt();
+    let result = engine.clone();
+    entries.insert(session_id.to_owned(), build(engine, forwarder));
+    result
+}
+
+fn take_remote_owned_entry(
+    entries: &mut HashMap<String, EngineEntry>,
+    session_id: &str,
+    owner: &Arc<super::skill_materialization::RemoteTurnOwner>,
+) -> Option<EngineEntry> {
+    if entries
+        .get(session_id)
+        .is_some_and(|entry| remote_owner_matches(entry.remote_owner.as_ref(), Some(owner)))
+    {
+        entries.remove(session_id)
+    } else {
+        None
+    }
+}
+
+/// A session's resident entry: engine plus its own event forwarder.
 struct EngineEntry {
     engine: AppEngine,
     /// This engine's event forwarder; aborted on evict so a zombie task does
@@ -1190,6 +1304,7 @@ struct EngineEntry {
     /// The runtime model, provider version, and local model revision actually
     /// used when this engine was created.
     runtime_model: PreparedRuntimeState,
+    remote_owner: Option<Arc<super::skill_materialization::RemoteTurnOwner>>,
     /// MCP config revision. Bumped after a background migration atomically
     /// updates mcp.json; the next engine fetch safely reclaims the old
     /// instance and lazily rebuilds, so new dependencies/startup parameters
@@ -1991,7 +2106,7 @@ impl EnginePool {
         let eval_model = self.eval_model_snapshots.for_session(session_id);
         #[cfg(not(any(feature = "benchmark-hooks", test)))]
         let eval_model = None;
-        self.get_or_spawn_with_policy(session_id, false, false, eval_model, None, None)
+        self.get_or_spawn_with_policy(session_id, false, false, eval_model, None, None, None)
             .await
     }
 
@@ -2006,6 +2121,7 @@ impl EnginePool {
         explicit_model_override: Option<SavedModel>,
         explicit_credential: Option<RuntimeModelCredential>,
         remote_bundle: Option<RemoteRuntimeModelBundle>,
+        remote_skills: Option<Arc<super::skill_materialization::RemoteTurnSkills>>,
     ) -> Result<AppEngine> {
         let acquisition_started = Instant::now();
         let runtime_lock_started = Instant::now();
@@ -2039,6 +2155,9 @@ impl EnginePool {
                     prepared.requires_rebuild_from(&entry.runtime_model),
                     entry.mcp_config_revision,
                     mcp_config_revision,
+                ) && remote_owner_matches(
+                    entry.remote_owner.as_ref(),
+                    remote_skills.as_ref().map(|skills| skills.owner()),
                 ) {
                     (Some(entry.engine.clone()), None)
                 } else {
@@ -2074,10 +2193,10 @@ impl EnginePool {
         }
         let reclaim_ms = elapsed_ms(reclaim_started);
 
-        let is_scheduled = self.store.scheduled_profile(session_id).is_some();
         let finalize_bridge_started = Instant::now();
-        let bridge =
+        let mut bridge =
             Self::finalize_runtime_bridge(bridge, &prepared.prepared, pins_scheduled_model).await;
+        bridge.remote_turn_skills = remote_skills.clone();
         let finalize_bridge_ms = elapsed_ms(finalize_bridge_started);
         let tool_setup_started = Instant::now();
         // The shell execution directory and the engine cwd share one source:
@@ -2107,7 +2226,7 @@ impl EnginePool {
         // exist before spawn, otherwise the first turn's prompt has no
         // `## Skills` block.
         let materialize_skills_started = Instant::now();
-        {
+        if remote_skills.is_none() {
             let sid = session_id.to_string();
             let scope = self.bridge.session_policy(&sid).mode();
             let project_workspace = self.project_workspace_for(&sid);
@@ -2137,6 +2256,13 @@ impl EnginePool {
             .fetch_add(1, Ordering::Relaxed)
             .saturating_add(1);
         let spawn_engine_started = Instant::now();
+        // Load before spawning: no fallible disk read may strand a cold engine.
+        let load_session_started = Instant::now();
+        let saved = self
+            .store
+            .load(session_id)
+            .with_context(|| format!("load session {session_id} before spawning its engine"))?;
+        let load_session_ms = elapsed_ms(load_session_started);
         let (engine, forwarder) = AppEngine::spawn_for_session(
             self.app.clone(),
             self.store.clone(),
@@ -2149,8 +2275,9 @@ impl EnginePool {
             shell_manager,
             turn_shell_tasks,
             steer_incarnation,
-        )
-        .await?;
+        )?;
+        let custody = ColdEngineCustody::new(engine, forwarder);
+        let engine = &custody.resources.as_ref().expect("owned cold engine").0;
         let spawn_engine_ms = elapsed_ms(spawn_engine_started);
 
         // Sync is mandatory even when messages is empty: SyncSession not only
@@ -2159,56 +2286,26 @@ impl EnginePool {
         // get the first turn's SessionUpdated rejected on an id mismatch,
         // ending with only the user message durable and the assistant reply
         // lost.
-        let load_session_started = Instant::now();
-        let loaded_session = self.store.load(session_id);
-        let load_session_ms = elapsed_ms(load_session_started);
         let sync_session_started = Instant::now();
-        match loaded_session {
-            Ok(saved) => {
-                if let Err(error) = engine
-                    .sync_session(session_id.to_string(), saved.messages)
-                    .await
-                {
-                    if is_scheduled {
-                        let _ = engine.handle.send(Op::Shutdown).await;
-                        forwarder.abort();
-                        return Err(error).with_context(|| {
-                            format!("sync scheduled session {session_id} before its first turn")
-                        });
-                    }
-                    eprintln!("[engine_pool] sync history for {session_id} failed: {error:?}");
-                } else {
-                    // The hydrated history is forwarder-sanitized: old
-                    // transcript rules can no longer match the new engine's
-                    // snapshot, so prune them to stop rules accumulating per
-                    // turn. The interactive path installs rules around spawn
-                    // (reserve already marked active); the retain predicate
-                    // guarantees the in-flight reservation's rule survives.
-                    turn_lifecycle.prune_stale_transcript_rules();
-                }
-            }
-            Err(error) => {
-                let _ = engine.handle.send(Op::Shutdown).await;
-                forwarder.abort();
-                return Err(error).with_context(|| {
-                    format!("load session {session_id} before spawning its engine")
-                });
-            }
-        }
+        engine
+            .try_sync_new_session(session_id.to_string(), saved.messages)
+            .with_context(|| format!("sync session {session_id} before publication"))?;
+        turn_lifecycle.prune_stale_transcript_rules();
         let sync_session_ms = elapsed_ms(sync_session_started);
 
-        self.entries.lock().await.insert(
-            session_id.to_string(),
+        let engine = publish_cold_entry(&self.entries, session_id, custody, |engine, forwarder| {
             EngineEntry {
-                engine: engine.clone(),
+                engine,
                 forwarder,
                 runtime_model: prepared,
+                remote_owner: remote_skills.as_ref().map(|skills| skills.owner().clone()),
                 mcp_config_revision,
                 spawned_at_ms,
                 steer_incarnation,
                 last_active_epoch_ms: AtomicU64::new(Self::now_epoch_ms()),
-            },
-        );
+            }
+        })
+        .await;
         crate::features::assistant::timing::record_engine_ready(
             session_id,
             crate::features::assistant::timing::EngineAcquireTiming {
@@ -2652,6 +2749,26 @@ impl EnginePool {
         }
     }
 
+    /// Old remote cleanup must neither evict a replacement nor invalidate a
+    /// newer reservation when its own attempt never reached publication.
+    pub(crate) async fn evict_remote_owner(
+        &self,
+        session_id: &str,
+        owner: &Arc<super::skill_materialization::RemoteTurnOwner>,
+    ) {
+        let turn_lock = self.turn_locks.for_session(session_id).await;
+        let _turn = turn_lock.lock().await;
+        let runtime_lock = self.runtime_model_locks.for_session(session_id).await;
+        let _runtime = runtime_lock.lock().await;
+        let entry = {
+            let mut entries = self.entries.lock().await;
+            take_remote_owned_entry(&mut entries, session_id, owner)
+        };
+        if let Some(entry) = entry {
+            self.reclaim_engine_entry(session_id, entry).await;
+        }
+    }
+
     async fn evict_locked(&self, session_id: &str) {
         let runtime_lock = self.runtime_model_locks.for_session(session_id).await;
         let _runtime = runtime_lock.lock().await;
@@ -3045,6 +3162,7 @@ impl EnginePool {
         content: String,
         skill_ids: Vec<String>,
         model_override: Option<RemoteRuntimeModelBundle>,
+        owner: Arc<super::skill_materialization::RemoteTurnOwner>,
         on_reserved: F,
     ) -> Result<()>
     where
@@ -3053,10 +3171,11 @@ impl EnginePool {
         let reservation = self.reserve_turn(session_id)?;
         on_reserved(reservation.generation());
         let skill_session_id = session_id.to_owned();
-        tokio::task::spawn_blocking(move || {
+        let skills = tokio::task::spawn_blocking(move || {
             crate::features::assistant::skill_materialization::materialize_plain_remote_turn_skills(
                 &skill_session_id,
                 &skill_ids,
+                owner,
             )
         })
         .await
@@ -3075,6 +3194,7 @@ impl EnginePool {
             true,
             None,
             model_override,
+            Some(Arc::new(skills)),
         )
         .await
     }
@@ -3089,6 +3209,7 @@ impl EnginePool {
         attachments: Vec<crate::features::files::file_ingest::IngestResult>,
         skill_ids: Vec<String>,
         model_override: Option<RemoteRuntimeModelBundle>,
+        owner: Arc<super::skill_materialization::RemoteTurnOwner>,
         on_reserved: F,
     ) -> Result<()>
     where
@@ -3106,6 +3227,7 @@ impl EnginePool {
                     content,
                     skill_ids,
                     model_override,
+                    owner,
                     on_reserved,
                 )
                 .await;
@@ -3113,10 +3235,11 @@ impl EnginePool {
         let reservation = self.reserve_turn(session_id)?;
         on_reserved(reservation.generation());
         let skill_session_id = session_id.to_owned();
-        tokio::task::spawn_blocking(move || {
+        let skills = tokio::task::spawn_blocking(move || {
             crate::features::assistant::skill_materialization::materialize_plain_remote_turn_skills(
                 &skill_session_id,
                 &skill_ids,
+                owner,
             )
         })
         .await
@@ -3174,6 +3297,7 @@ impl EnginePool {
             true,
             None,
             model_override,
+            Some(Arc::new(skills)),
         )
         .await
     }
@@ -3258,6 +3382,7 @@ impl EnginePool {
             false,
             None,
             None,
+            None,
         )
         .await
     }
@@ -3276,6 +3401,7 @@ impl EnginePool {
         require_remote_model_credentials: bool,
         model_override: Option<SavedModel>,
         remote_bundle: Option<RemoteRuntimeModelBundle>,
+        remote_skills: Option<Arc<super::skill_materialization::RemoteTurnSkills>>,
     ) -> Result<()> {
         let baseline_revision = reservation
             .base_transcript_revision()
@@ -3340,6 +3466,7 @@ impl EnginePool {
             model_override,
             explicit_credential,
             remote_bundle,
+            remote_skills,
         )
         .await?
         .send_reserved_user_message(
@@ -3437,7 +3564,7 @@ impl EnginePool {
             self.evict_locked(session_id).await;
             crate::features::assistant::timing::start_turn(session_id);
             let engine = match self
-                .get_or_spawn_with_policy(session_id, true, false, None, None, None)
+                .get_or_spawn_with_policy(session_id, true, false, None, None, None, None)
                 .await
             {
                 Ok(engine) => engine,
@@ -8182,6 +8309,7 @@ mod probed_facts_wiring_tests {
             session_model: Some(model),
             runtime_model_credential: None,
             runtime_model_credential_frozen: false,
+            remote_turn_skills: None,
             runtime_route_locked: false,
             runtime_vision_model: None,
             runtime_vision_credential: None,
