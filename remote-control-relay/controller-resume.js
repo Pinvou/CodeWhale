@@ -96,6 +96,15 @@ function zeroCandidate(state) {
   state.candidate?.tokenB?.fill(0);
 }
 
+// Flat strict-schema messages: canonicalize key order so equivalent JSON does
+// not retain secrets or depend on insertion order. At most eight accepted
+// role/type entries survive, for the single most recently completed attempt.
+function messageDigest(message) {
+  return crypto.createHash("sha256")
+    .update(JSON.stringify(Object.fromEntries(Object.keys(message).sort().map((key) => [key, message[key]]))))
+    .digest("hex");
+}
+
 export class ControllerResumeHooks {
   #clock; #random; #leaseManager; #states = new Map();
 
@@ -132,20 +141,60 @@ export class ControllerResumeHooks {
       fail("controller_resume_deadline_expired");
     }
 
+    const senderRole = message.sender_role ?? role;
+    const key = `${senderRole}:${message.type}`;
+    const retired = state.retired?.accepted.get(key);
+    if (state.retired && (message.activation_id === state.retired.activationId
+      || (message.type === "controller_resume_prepare" && message.request_id === retired?.requestId))) {
+      // Retired traffic has no cleanup authority over the new revision.
+      const validated = this.#validate(message, senderRole, lease);
+      if (role !== senderRole || !retired || retired.socketIdentity !== socketIdentity
+        || retired.digest !== messageDigest(validated) || lease.sockets[role] !== socketIdentity) {
+        fail("controller_resume_retired_retry_invalid");
+      }
+      return Object.freeze({ deliveries: Object.freeze([]) });
+    }
+
     try {
+      const accepted = state.accepted.get(key);
+      if (accepted) {
+        const validated = this.#validate(message, senderRole, lease);
+        if ((role !== senderRole && !(message.type === "controller_resume_prepare" && role === "unknown"))
+          || accepted.socketIdentity !== socketIdentity || accepted.digest !== messageDigest(validated)) {
+          fail("controller_resume_retry_conflict");
+        }
+        // A successfully accepted old phase cannot roll back a later phase or
+        // acquire cleanup authority just because its exact retry arrived late.
+        const retryPhases = {
+          controller_resume_prepare: ["awaiting_prepare", "prepared"],
+          encrypted_resume_confirm: ["provisional", "confirmed", "pending_liveness"],
+          controller_resume_activation_ack: ["confirmed", "pending_liveness", "liveness_confirmed"],
+          controller_post_activation_liveness: ["pending_liveness", "liveness_confirmed"],
+          controller_resume_ready_ack: ["liveness_confirmed"],
+        };
+        if (!retryPhases[message.type].includes(state.phase)) {
+          return Object.freeze({ deliveries: Object.freeze([]) });
+        }
+      }
+      let result;
       if (message.type === "controller_resume_prepare") {
-        return this.#prepare({ message, socketIdentity, role, lease, state });
+        result = this.#prepare({ message, socketIdentity, role, lease, state });
+      } else if (message.type === "encrypted_resume_confirm") {
+        result = this.#confirm({ message, socketIdentity, role, lease, state });
+      } else if (message.type === "controller_resume_activation_ack") {
+        result = this.#activate({ message, socketIdentity, role, lease, state });
+      } else if (message.type === "controller_post_activation_liveness") {
+        result = this.#postActivationLiveness({ message, socketIdentity, role, lease, state });
+      } else {
+        result = this.#ready({ message, socketIdentity, role, lease, state });
       }
-      if (message.type === "encrypted_resume_confirm") {
-        return this.#confirm({ message, socketIdentity, role, lease, state });
+      const digest = messageDigest(this.#validate(message, senderRole, lease));
+      const existing = state.accepted.get(key);
+      if (existing && (existing.socketIdentity !== socketIdentity || existing.digest !== digest)) {
+        fail("controller_resume_retry_conflict");
       }
-      if (message.type === "controller_resume_activation_ack") {
-        return this.#activate({ message, socketIdentity, role, lease, state });
-      }
-      if (message.type === "controller_post_activation_liveness") {
-        return this.#postActivationLiveness({ message, socketIdentity, role, lease, state });
-      }
-      return this.#ready({ message, socketIdentity, role, lease, state });
+      state.accepted.set(key, Object.freeze({ socketIdentity, digest, requestId: message.request_id }));
+      return result;
     } catch (error) {
       await this.#terminate(state, lease, "controller_resume_failed");
       throw error;
@@ -414,6 +463,8 @@ export class ControllerResumeHooks {
       },
     ), "relay", lease);
     state.phase = "committing";
+    let cleanupOwner = lease;
+    let cleanupSettled = false;
     return Object.freeze({
       deliveries: Object.freeze([delivery("A", resumedA), delivery("B", resumedB)]),
       commit: async () => {
@@ -422,6 +473,7 @@ export class ControllerResumeHooks {
         if (!this.#leaseManager) fail("controller_resume_manager_unavailable");
         const updated = this.#leaseManager.completeResume({
           controllerLeaseId: lease.controller_lease_id,
+          expectedLease: state.leaseOwner,
           activationId: state.activationId,
           sockets: {
             A: state.prepared.A.socketIdentity,
@@ -433,13 +485,30 @@ export class ControllerResumeHooks {
           tokenB: state.candidate.tokenB,
           resumeDeadlineMs: String(resumeDeadline),
         });
+        cleanupOwner = updated;
+        const retired = Object.freeze({ activationId: state.activationId, accepted: new Map(state.accepted) });
         zeroCandidate(state);
         // Retire all old per-attempt request IDs/ACKs, not just the tokens.
         // Otherwise a valid second cycle conflicts with the previous prepare.
         await this.onLeaseCreated(updated);
+        this.#states.get(updated.controller_lease_id).retired = retired;
         return Object.freeze({ lease: updated });
       },
-      abort: () => this.#terminate(state, lease, "controller_resume_failed"),
+      finalize: () => { cleanupSettled = true; },
+      abort: async () => {
+        if (cleanupSettled) return;
+        cleanupSettled = true;
+        try {
+          await this.#leaseManager.terminateLease({ controllerLeaseId: lease.controller_lease_id,
+            expectedLease: cleanupOwner, reason: "controller_resume_failed" });
+        } finally {
+          await this.onLeaseTerminated(lease, cleanupOwner);
+          if (this.#states.get(lease.controller_lease_id) === state) {
+            zeroCandidate(state);
+            this.#states.delete(lease.controller_lease_id);
+          }
+        }
+      },
     });
   }
 
@@ -454,7 +523,11 @@ export class ControllerResumeHooks {
       || lease.resume_token_a_sha256 === lease.resume_token_b_sha256) {
       fail("controller_resume_lease_invalid");
     }
+    if (this.#states.get(lease.controller_lease_id)?.leaseOwner === lease) {
+      return Object.freeze({ deliveries: Object.freeze([]) });
+    }
     this.#states.set(lease.controller_lease_id, {
+      leaseOwner: lease,
       lease: { ...lease },
       phase: "connected",
       // The wire deadline is a cycle identity, not a connected-phase timer.
@@ -468,6 +541,8 @@ export class ControllerResumeHooks {
       activationAck: null,
       postActivationLiveness: null,
       candidate: null,
+      accepted: new Map(),
+      retired: null,
     });
     return Object.freeze({ deliveries: Object.freeze([]) });
   }
@@ -498,8 +573,12 @@ export class ControllerResumeHooks {
     return Object.freeze({ retain_lease: true });
   }
 
-  async onLeaseTerminated({ controller_lease_id: controllerLeaseId } = {}) {
-    if (controllerLeaseId) this.#states.delete(controllerLeaseId);
+  async onLeaseTerminated({ controller_lease_id: controllerLeaseId } = {}, leaseOwner) {
+    const state = this.#states.get(controllerLeaseId);
+    if (state && (leaseOwner === undefined || state.leaseOwner === leaseOwner)) {
+      zeroCandidate(state);
+      this.#states.delete(controllerLeaseId);
+    }
   }
 
   isBusinessAllowed(controllerLeaseId) {
@@ -564,12 +643,13 @@ export class ControllerResumeHooks {
   async #terminate(state, lease, reason) {
     zeroCandidate(state);
     state.phase = "terminated";
-    if (this.#leaseManager) {
-      await this.#leaseManager.terminateLease({
+    try {
+      if (this.#leaseManager) await this.#leaseManager.terminateLease({
         controllerLeaseId: lease.controller_lease_id,
-        reason,
+        reason, expectedLease: state.leaseOwner,
       });
+    } finally {
+      if (this.#states.get(lease.controller_lease_id) === state) this.#states.delete(lease.controller_lease_id);
     }
-    this.#states.delete(lease.controller_lease_id);
   }
 }

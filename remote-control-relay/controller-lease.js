@@ -95,7 +95,7 @@ function socketsValue(sockets, roleValue) {
 
 export class ControllerLeaseManager {
   #pairings; #reservations; #relayEpoch; #signingKeyId; #sign; #resolveControlled;
-  #clock; #randomBytes; #audit; #onLeaseTerminated; #handshakes = new Map(); #leases = new Map();
+  #clock; #randomBytes; #audit; #onLeaseTerminated; #terminationObserver = null; #previousLeases = new Map(); #handshakes = new Map(); #leases = new Map();
   #pendingLeaseIds = new Set();
   // Preparation has its own map: published handshakes always have complete
   // transcript/socket/receipt state. Retries must never become cleanup owners.
@@ -517,6 +517,16 @@ export class ControllerLeaseManager {
     return this.#leases.get(controllerLeaseId) ?? null;
   }
 
+  // One lifetime-owned router, installed before any claim. Not an unbounded
+  // event emitter and not replaceable while old callbacks are in flight.
+  setTerminationObserver(observer) {
+    if (typeof observer !== "function" || this.#terminationObserver
+      || this.#leases.size || this.#handshakes.size || this.#claimFlights.size) {
+      fail("controller_termination_observer_invalid");
+    }
+    this.#terminationObserver = observer;
+  }
+
   verifyResumeToken({ controllerLeaseId, role: tokenRole, resumeTokenB64 } = {}) {
     controllerLeaseId = id(controllerLeaseId, "controller_lease_id");
     tokenRole = role(tokenRole);
@@ -545,6 +555,7 @@ export class ControllerLeaseManager {
 
   completeResume({
     controllerLeaseId,
+    expectedLease,
     activationId,
     sockets,
     livenessEpochA,
@@ -557,6 +568,7 @@ export class ControllerLeaseManager {
     activationId = id(activationId, "activation_id");
     const lease = this.#leases.get(controllerLeaseId);
     if (!lease) fail("controller_lease_not_found");
+    if (lease !== expectedLease) fail("controller_lease_owner_changed");
     if (!sockets || typeof sockets !== "object") fail("controller_resume_sockets_invalid");
     const socketA = id(socketsValue(sockets, "A"), "resume_socket_a");
     const socketB = id(socketsValue(sockets, "B"), "resume_socket_b");
@@ -600,6 +612,9 @@ export class ControllerLeaseManager {
         sockets: Object.freeze({ A: socketA, B: socketB }),
       });
       this.#leases.set(controllerLeaseId, updated);
+      // Only the immediate predecessor can still have a hook installation in
+      // flight. One entry per live lease, not an ever-growing resume history.
+      this.#previousLeases.set(controllerLeaseId, lease);
       this.#emit("controller_resume_completed");
       return updated;
     } finally {
@@ -608,21 +623,29 @@ export class ControllerLeaseManager {
     }
   }
 
-  async terminateLease({ controllerLeaseId, reason = "disconnected" } = {}) {
+  async terminateLease({ controllerLeaseId, reason = "disconnected", expectedLease } = {}) {
     controllerLeaseId = id(controllerLeaseId, "controller_lease_id");
     const lease = this.#leases.get(controllerLeaseId);
     if (!lease) return false;
+    if (expectedLease !== undefined && lease !== expectedLease) return false;
     this.#leases.delete(controllerLeaseId);
+    const previousLease = this.#previousLeases.get(controllerLeaseId);
+    this.#previousLeases.delete(controllerLeaseId);
     this.#reservations.releaseControllerLease({
       endpointId: lease.endpoint_id, controllerLeaseId,
     });
-    await this.#onLeaseTerminated({
+    const event = Object.freeze({
       endpoint_id: lease.endpoint_id,
       remote_control_generation: lease.remote_control_generation,
       controller_lease_id: lease.controller_lease_id,
       reason,
     });
+    const callbacks = [() => this.#onLeaseTerminated(event)];
+    if (this.#terminationObserver) callbacks.unshift(() => this.#terminationObserver(event, lease, previousLease));
+    const outcomes = await Promise.allSettled(callbacks.map((callback) => Promise.resolve().then(callback)));
     this.#emit("controller_lease_terminated");
+    const failures = outcomes.filter((outcome) => outcome.status === "rejected").map((outcome) => outcome.reason);
+    if (failures.length) throw new AggregateError(failures, "controller_lease_termination_callback_failed");
     return true;
   }
 

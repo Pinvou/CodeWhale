@@ -52,8 +52,8 @@ export class ControllerRouter {
     leaseManager,
     send,
     audit = () => {},
-    livenessHooks = new ControllerLivenessHooks(),
-    resumeHooks = new ControllerResumeHooks(),
+    livenessHooks = new ControllerLivenessHooks({ leaseManager }),
+    resumeHooks = new ControllerResumeHooks({ leaseManager }),
   } = {}) {
     if (!pairingRegistrationHandler || typeof pairingRegistrationHandler.register !== "function"
       || !leaseManager || typeof leaseManager.claimForDelivery !== "function"
@@ -65,6 +65,7 @@ export class ControllerRouter {
       || typeof leaseManager.isPendingHandshake !== "function"
       || typeof leaseManager.lease !== "function"
       || typeof leaseManager.terminateLease !== "function"
+      || typeof leaseManager.setTerminationObserver !== "function"
       || typeof send !== "function" || typeof audit !== "function") {
       fail("controller_router_config_invalid");
     }
@@ -81,6 +82,14 @@ export class ControllerRouter {
     this.#audit = audit;
     this.#livenessHooks = livenessHooks;
     this.#hooks = Object.freeze([livenessHooks, resumeHooks]);
+    this.#leases.setTerminationObserver(async (event, leaseOwner, previousOwner) => {
+      this.#clearAllLeaseLinks(leaseOwner);
+      const owners = previousOwner ? [leaseOwner, previousOwner] : [leaseOwner];
+      const outcomes = await Promise.allSettled(owners.flatMap((owner) => this.#hooks.map((hooks) =>
+        Promise.resolve().then(() => hooks.onLeaseTerminated(event, owner)))));
+      const failures = outcomes.filter((outcome) => outcome.status === "rejected").map((outcome) => outcome.reason);
+      if (failures.length) throw new AggregateError(failures, "controller_hook_termination_failed");
+    });
   }
 
   #emit(event) {
@@ -221,16 +230,14 @@ export class ControllerRouter {
         try { disconnect = validateControllerMessage(message, peer.role, lease); } catch (error) {
           fail("controller_disconnect_invalid", error);
         }
-        const counterpart = this.#counterpart(peer);
-        this.#deliver(counterpart, disconnect);
-        await this.#leases.terminateLease({
-          controllerLeaseId: lease.controller_lease_id,
-          reason: disconnect.reason,
-        });
-        peer.controllerLeaseId = null;
-        counterpart.controllerLeaseId = null;
-        peer.counterpart = null;
-        counterpart.counterpart = null;
+        try {
+          this.#deliver(this.#counterpart(peer), disconnect);
+        } finally {
+          // A valid owner's explicit disconnect is terminal even when its
+          // counterpart vanished or cannot receive the courtesy notification.
+          await this.#leases.terminateLease({ controllerLeaseId: lease.controller_lease_id,
+            reason: disconnect.reason, expectedLease: lease });
+        }
         this.#emit("controller_disconnected");
         return disconnect;
       }
@@ -252,14 +259,17 @@ export class ControllerRouter {
           if (committed?.lease) {
             await Promise.all(this.#hooks.map((candidate) => candidate.onLeaseCreated(committed.lease)));
           }
+          result?.finalize?.();
           return result ?? null;
         } catch (error) {
-          try {
-            await result?.abort?.();
-            await Promise.all(this.#hooks.map((candidate) => candidate.onLeaseTerminated({
-              controller_lease_id: lease.controller_lease_id,
-            })));
-          } catch { /* cleanup failure cannot resurrect an uncertain resume */ }
+          // Accepted hook results own this exact immutable lease revision.
+          // A rejected frame never reaches here, and delayed cleanup cannot
+          // terminate a subsequently committed revision with the same wire id.
+          try { await result?.abort?.(); } catch { /* authoritative fallback follows */ }
+          if (lease) await this.#leases.terminateLease({
+            controllerLeaseId: lease.controller_lease_id,
+            expectedLease: committed?.lease ?? lease, reason: "controller_resume_failed",
+          }).catch(() => {});
           throw error;
         }
       }
@@ -275,7 +285,7 @@ export class ControllerRouter {
       }); } catch { /* Error delivery cannot broaden or skip precise cleanup. */ }
       if (createdLease) {
         await this.#leases.terminateLease({ controllerLeaseId: createdLease.controller_lease_id,
-          reason: "handshake_failed" }).catch(() => {});
+          expectedLease: createdLease, reason: "handshake_failed" }).catch(() => {});
         this.#clearLeaseLinks(peer, createdLease.controller_lease_id);
       } else if (deliveryReservationId) {
         // Only a successfully accepted operation whose delivery/binding failed
@@ -341,6 +351,18 @@ export class ControllerRouter {
     if (peer.controllerLeaseId === leaseId) {
       peer.controllerLeaseId = null;
       peer.counterpart = null;
+    }
+  }
+
+  #clearAllLeaseLinks(leaseOwner) {
+    const leaseId = leaseOwner.controller_lease_id;
+    // The observer belongs to the removed revision, never a replacement.
+    if (this.#leases.lease(leaseId)) return;
+    for (const peer of this.#peers.values()) {
+      if (peer.controllerLeaseId !== leaseId) continue;
+      peer.controllerLeaseId = null;
+      peer.counterpart = null;
+      peer.pendingReservationId = null;
     }
   }
 
