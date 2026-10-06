@@ -254,6 +254,29 @@ cannot register a desktop or pair. Development TOFU may create an access-only
 record for a Web request, or both roles atomically for a desktop request; a
 pairing request can never invent a desktop digest from a single credential.
 
+`enrollment_registry_capacity_reached` identifies entry-count or shared byte-budget
+rejection, not an infrastructure outage. Capacity validation runs before durable
+writes: primary/backup bytes and revisions stay unchanged, and the store remains
+usable for smaller writes. Actual persistence failures still degrade the store
+and fail closed. Other typed registry validation errors retain their codes.
+Batch operation entry-count rejection retains its explicit
+`enrollment_capacity_reached` code; it is not an infrastructure outage either.
+
+Audit sources describe admission: explicit development enrollment records
+`development`, even with TOFU enabled; only automatic first-registration admission
+records `development_tofu`. Rotation and revocation preserve that source.
+Endpoint IDs are identifiers, not secrets: unknown, revoked and invalid-credential
+errors can reveal enrollment status. Official/self-hosted registration and
+development registration with TOFU disabled require an existing active enrollment
+and a valid credential. Only explicitly enabled non-production development TOFU
+may admit a first registration; callers must apply the protocol layer's rate
+limits before exposure.
+
+Recognized lock schemas with an unsupported positive version fail closed with
+`relay_state_lock_unsupported`, even with added fields or an apparently dead PID.
+They are never quarantined or stolen; use a compatible Relay version or an
+operator-controlled offline upgrade. Empty/truncated crash-lock recovery is unchanged.
+
 For `revoke`, the expected endpoint revision is syntax-checked for every call
 and compared before an active-to-revoked transition. An already revoked entry
 is a read-only idempotent result even if a retry supplies an old or future
