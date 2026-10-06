@@ -1976,8 +1976,13 @@ async fn workspace_and_automation_endpoints_work() -> Result<()> {
         .json()
         .await?;
     assert!(
-        runs.as_array().is_some_and(|items| !items.is_empty()),
-        "expected at least one run entry"
+        runs.as_array().is_some_and(|items| {
+            !items.is_empty()
+                && items
+                    .iter()
+                    .all(|run| matches!(run["status"].as_str(), Some("queued" | "running")))
+        }),
+        "the delete refusal requires a still-active persisted run"
     );
 
     // The run created above is still active, so deletion is refused and
@@ -2068,25 +2073,41 @@ async fn workspace_and_automation_endpoints_work() -> Result<()> {
         "a run-free deleted automation keeps an empty archive"
     );
 
-    // Seed one archived record for the deleted automation and read it back
-    // through the endpoint; the live listing must stay empty.
-    let seeded_id = Uuid::new_v4().to_string();
-    let seed_created = chrono::Utc::now() - chrono::Duration::hours(1);
-    let seed = serde_json::json!({
-        "id": seeded_id,
-        "automation_id": second_id,
-        "scheduled_for": seed_created,
-        "status": "completed",
-        "created_at": seed_created,
-        "started_at": seed_created,
-        "ended_at": seed_created,
-    });
+    // Seed archived records for the deleted automation and read them back
+    // through the endpoint; the live listing must stay empty. The file names
+    // deliberately reuse one fixed stamp regardless of created_at: archive
+    // ordering must come from the records, not the names.
     let seed_dir = root.join("automations").join("archive").join(&second_id);
-    fs::create_dir_all(&seed_dir)?;
-    fs::write(
-        seed_dir.join(format!("20260101T000000000Z-{seeded_id}.json")),
-        serde_json::to_string(&seed)?,
-    )?;
+    let seed_archive_record =
+        |run_id: String, ended_at: chrono::DateTime<chrono::Utc>| -> Result<()> {
+            let seed = serde_json::json!({
+                "id": run_id,
+                "automation_id": second_id,
+                "scheduled_for": ended_at,
+                "status": "completed",
+                "created_at": ended_at,
+                "started_at": ended_at,
+                "ended_at": ended_at,
+            });
+            fs::create_dir_all(&seed_dir)?;
+            fs::write(
+                seed_dir.join(format!("20260101T000000000Z-{run_id}.json")),
+                serde_json::to_string(&seed)?,
+            )?;
+            Ok(())
+        };
+    let newest_id = Uuid::new_v4().to_string();
+    let older_id = Uuid::new_v4().to_string();
+    seed_archive_record(
+        newest_id.clone(),
+        chrono::Utc::now() - chrono::Duration::hours(1),
+    )
+    .expect("seed newest archived record");
+    seed_archive_record(
+        older_id.clone(),
+        chrono::Utc::now() - chrono::Duration::hours(2),
+    )
+    .expect("seed older archived record");
     let archived: serde_json::Value = client
         .get(format!(
             "http://{addr}/v1/automations/{second_id}/runs?archived=true"
@@ -2098,11 +2119,48 @@ async fn workspace_and_automation_endpoints_work() -> Result<()> {
         .await?;
     assert_eq!(
         archived.as_array().map(Vec::len),
-        Some(1),
-        "the seeded archived record must round-trip"
+        Some(2),
+        "both seeded archived records must round-trip"
     );
-    assert_eq!(archived[0]["id"], seeded_id);
+    assert_eq!(archived[0]["id"], newest_id);
     assert_eq!(archived[0]["status"], "completed");
+    assert_eq!(
+        archived[1]["id"], older_id,
+        "the archived listing is newest-ended first over HTTP"
+    );
+
+    let limited: serde_json::Value = client
+        .get(format!(
+            "http://{addr}/v1/automations/{second_id}/runs?archived=true&limit=1"
+        ))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(
+        limited.as_array().map(Vec::len),
+        Some(1),
+        "limit must truncate the archived listing"
+    );
+    assert_eq!(
+        limited[0]["id"], newest_id,
+        "limit must keep the newest archived record"
+    );
+
+    let zero: serde_json::Value = client
+        .get(format!(
+            "http://{addr}/v1/automations/{second_id}/runs?archived=true&limit=0"
+        ))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert!(
+        zero.as_array().is_some_and(Vec::is_empty),
+        "limit=0 must produce an empty archived listing"
+    );
     let live_after_seed: serde_json::Value = client
         .get(format!("http://{addr}/v1/automations/{second_id}/runs"))
         .send()

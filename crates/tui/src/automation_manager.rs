@@ -2877,8 +2877,13 @@ mod tests {
         failed.error = Some("boom".to_string());
         failed.ended_at = Some(base - Duration::seconds(30));
         manager.save_run(&failed).expect("save run");
-        // A legacy-named live file must normalize to the sortable name.
-        let mut legacy = run_created_at(&created, base - Duration::minutes(4));
+        // A legacy-named live file must normalize to the sortable name. Its
+        // created_at is a fixed instant so the expected name below pins the
+        // `run_file_stamp` format itself, not just the helper's own output.
+        let legacy_created = DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
+            .expect("fixed instant")
+            .with_timezone(&Utc);
+        let mut legacy = run_created_at(&created, legacy_created);
         legacy.status = AutomationRunStatus::Completed;
         legacy.ended_at = Some(base - Duration::minutes(2));
         write_legacy_run_file(&manager, &legacy);
@@ -2931,11 +2936,24 @@ mod tests {
             .filter_map(Result::ok)
             .filter_map(|entry| entry.file_name().into_string().ok())
             .collect();
-        let expected_names: std::collections::BTreeSet<String> =
-            [&canceled, &failed, &completed, &legacy]
-                .into_iter()
-                .map(|run| format!("{}-{}.json", run_file_stamp(run.created_at), run.id))
-                .collect();
+        let expected_names: std::collections::BTreeSet<String> = [
+            format!(
+                "{}-{}.json",
+                run_file_stamp(canceled.created_at),
+                canceled.id
+            ),
+            format!("{}-{}.json", run_file_stamp(failed.created_at), failed.id),
+            format!(
+                "{}-{}.json",
+                run_file_stamp(completed.created_at),
+                completed.id
+            ),
+            // Hardcoded for the fixed-instant legacy fixture: this pins the
+            // stamp format itself, not the helper's own output.
+            format!("20260101T000000000Z-{}.json", legacy.id),
+        ]
+        .into_iter()
+        .collect();
         assert_eq!(
             archived_names, expected_names,
             "one sortable archive file per terminal run, stamped by created_at (legacy names normalized)"
@@ -3014,6 +3032,147 @@ mod tests {
         for kept in &saved_ids[..ARCHIVE_RETAINED_TERMINAL_RUNS] {
             assert!(retained.contains(kept.as_str()), "newer run was dropped");
         }
+    }
+
+    #[test]
+    fn delete_bounds_archive_leftovers_beyond_the_retention_limit() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let manager = AutomationManager::open(tempdir.path().to_path_buf()).expect("manager");
+        let automation = automation_record_with_settings(None, None, None, None);
+        manager.save_automation(&automation).expect("save");
+
+        // Leftovers of an interrupted earlier attempt: more than the budget
+        // already in the archive, all older than anything about to be
+        // archived from the live tree.
+        let old = DateTime::parse_from_rfc3339("2025-01-01T00:00:00Z")
+            .expect("fixed instant")
+            .with_timezone(&Utc);
+        let mut leftover_ids = Vec::new();
+        for i in 0..ARCHIVE_RETAINED_TERMINAL_RUNS + 2 {
+            let mut run = run_created_at(&automation, old + Duration::minutes(i as i64));
+            run.status = AutomationRunStatus::Completed;
+            run.ended_at = Some(run.created_at);
+            write_json_atomic(&manager.archive_run_path(&run).expect("archive path"), &run)
+                .expect("seed archive leftover");
+            leftover_ids.push(run.id);
+        }
+
+        // A live history newer than every leftover: oldest first, so the
+        // retained set is exactly the last `ARCHIVE_RETAINED_TERMINAL_RUNS`
+        // created.
+        let base = Utc::now();
+        let total = ARCHIVE_RETAINED_TERMINAL_RUNS + 5;
+        let mut saved_ids = Vec::new();
+        for i in 0..total {
+            let mut run = run_created_at(&automation, base - Duration::minutes((total - i) as i64));
+            run.status = AutomationRunStatus::Completed;
+            run.ended_at = Some(run.created_at);
+            manager.save_run(&run).expect("save run");
+            saved_ids.push(run.id);
+        }
+
+        manager.delete_automation(&automation.id).expect("delete");
+
+        let archived = manager
+            .list_archived_runs(&automation.id)
+            .expect("archived runs");
+        assert_eq!(
+            archived.len(),
+            ARCHIVE_RETAINED_TERMINAL_RUNS,
+            "the sweep must bound the archive back to the budget"
+        );
+        let archive_dir = tempdir.path().join("archive").join(&automation.id);
+        assert_eq!(
+            fs::read_dir(&archive_dir)
+                .expect("archive dir")
+                .filter_map(Result::ok)
+                .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "json"))
+                .count(),
+            ARCHIVE_RETAINED_TERMINAL_RUNS,
+            "no leftover record may remain on disk either"
+        );
+        let retained: std::collections::BTreeSet<&str> =
+            archived.iter().map(|r| r.id.as_str()).collect();
+        for leftover in &leftover_ids {
+            assert!(
+                !retained.contains(leftover.as_str()),
+                "an interrupted attempt's leftovers must be swept"
+            );
+        }
+        let expected: std::collections::BTreeSet<&str> = saved_ids
+            [total - ARCHIVE_RETAINED_TERMINAL_RUNS..]
+            .iter()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            retained, expected,
+            "exactly the newest live terminal runs survive the sweep"
+        );
+    }
+
+    #[test]
+    fn delete_fails_closed_on_unreadable_run_files() {
+        // A corrupt live run file fails the delete and changes nothing.
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let manager = AutomationManager::open(tempdir.path().to_path_buf()).expect("manager");
+        let automation = automation_record_with_settings(None, None, None, None);
+        manager.save_automation(&automation).expect("save");
+        let mut run = run_created_at(&automation, Utc::now());
+        run.status = AutomationRunStatus::Completed;
+        run.ended_at = Some(run.created_at);
+        manager.save_run(&run).expect("save run");
+        let runs_dir = manager.runs_dir_for(&automation.id).expect("runs dir");
+        fs::write(runs_dir.join("broken.json"), "{not json").expect("write corrupt file");
+
+        let err = manager
+            .delete_automation(&automation.id)
+            .expect_err("a corrupt live run file must fail the delete");
+        assert!(
+            err.to_string().contains("broken.json"),
+            "the error must name the offending file: {err}"
+        );
+        assert!(manager.get_automation(&automation.id).is_ok());
+        assert!(runs_dir.exists());
+        assert!(runs_dir.join("broken.json").exists());
+
+        // A newer-schema archive file fails the delete the same way: the
+        // archive is read with the same fail-closed contract as live runs.
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let manager = AutomationManager::open(tempdir.path().to_path_buf()).expect("manager");
+        let automation = automation_record_with_settings(None, None, None, None);
+        manager.save_automation(&automation).expect("save");
+        let mut run = run_created_at(&automation, Utc::now());
+        run.status = AutomationRunStatus::Completed;
+        run.ended_at = Some(run.created_at);
+        manager.save_run(&run).expect("save run");
+        let mut seeded = run_created_at(&automation, Utc::now() - Duration::hours(1));
+        seeded.status = AutomationRunStatus::Completed;
+        seeded.ended_at = Some(seeded.created_at);
+        let seed_path = manager.archive_run_path(&seeded).expect("archive path");
+        let mut value = serde_json::to_value(&seeded).expect("serialize seeded record");
+        value["schema_version"] = serde_json::json!(CURRENT_RUN_SCHEMA_VERSION + 1);
+        fs::create_dir_all(seed_path.parent().expect("archive parent")).expect("archive dir");
+        fs::write(
+            &seed_path,
+            serde_json::to_string(&value).expect("serialize schema bump"),
+        )
+        .expect("write newer-schema archive file");
+
+        let err = manager
+            .delete_automation(&automation.id)
+            .expect_err("a newer-schema archive file must fail the delete");
+        assert!(
+            err.to_string().contains("newer than supported"),
+            "the error must name the schema conflict: {err}"
+        );
+        assert!(manager.get_automation(&automation.id).is_ok());
+        assert!(
+            manager
+                .runs_dir_for(&automation.id)
+                .expect("runs dir")
+                .exists()
+        );
+        assert!(seed_path.exists());
     }
 
     #[test]
