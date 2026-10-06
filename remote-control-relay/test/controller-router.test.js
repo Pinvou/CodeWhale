@@ -30,13 +30,14 @@ function fixture() {
     }),
   };
   const leases = {
-    claim: async () => reserved,
+    claimForDelivery: async () => ({ message: reserved, owns_initial_delivery: true }),
     acceptCommitment: ({ message, role }) => ({ message, target_role: role === "A" ? "B" : "A" }),
     forwardFinished: ({ message, role }) => ({ message, target_role: role === "A" ? "B" : "A" }),
     acceptReceipt: async ({ role }) => role === "A" ? joined : null,
     lease: (leaseId) => leaseId === activeLease.controller_lease_id ? activeLease : null,
     terminateLease: async (input) => { terminated.push(input); return true; },
     abortHandshakesBySocket: async () => 0,
+    isPendingHandshake: () => true,
     abortBySocket: async (input) => {
       aborted.push(input);
       return { handshakes: 1, leases: 0 };

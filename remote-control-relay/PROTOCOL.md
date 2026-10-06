@@ -783,11 +783,22 @@ The pairing store uses exactly
 `23456789ABCDEFGHJKMNPQRSTUVWXYZ`, rejection sampling from the OS CSPRNG and at
 most 32 collision retries. It compares a candidate under every retained digest
 key. A code is quarantined for ten minutes after issue and at least two minutes
-after a terminal transition. Pairing IDs remain tombstoned permanently; expired
-code digests and registration results are compacted so an old digest key may be
-removed only after its last reference expires. Active claim records are memory
-only and are reconstructed from still-valid sealed registration rows after a
-Relay restart.
+after a terminal transition. Pairing tombstones are retained through
+`reuse_after_ms` and while a retained registration or live reservation references
+them; compaction then removes unreferenced rows, not merely their code digests.
+An old digest key may be removed only after its last reference expires. Library
+open can reconstruct still-valid pairing registrations; live Relay startup calls
+`invalidateForRelayRestart()` before serving requests, so pre-restart codes and
+memory-only claim/reservation/lease ownership do not resume across a restart.
+
+Stable claim retries on the same owner/code/public key/capabilities share one
+in-flight preparation, with a separate transport `request_id` on each response.
+Changed retry parameters and late/replayed handshake frames are rejected without
+canceling an incumbent handshake or established lease. Disconnect, timeout and
+failure to deliver an accepted handshake operation invalidate only its owned
+reservation; actual socket closure retains the explicit lease/resume-hook rules.
+Each asynchronous preparation/commit boundary rechecks ownership and deadlines;
+no callback may publish a reservation released during its await.
 
 `code_wrap_keypair` and `handshake_keypair` are distinct Rust types and are
 generated independently; their public-key wrapper types are also distinct, and
