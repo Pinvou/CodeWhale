@@ -11,10 +11,10 @@ pub(crate) mod controlling;
 #[path = "../../../src/features/remote_control/controller/permission.rs"]
 mod permission;
 
-// Only the narrow hook trait is doubled; permission authority and all its
-// tests are actual production code. This does not cover task-ledger wiring.
-mod task {
-    pub(crate) trait RemoteTaskPermissionScope: Send + Sync {
-        fn deny_pending_for_task(&self, task_id: &str) -> usize;
-    }
-}
+// Compile the real task producer and journal consumer together: a fabricated
+// event sequence cannot prove that production transitions reach the journal.
+#[path = "../../../src/features/remote_control/controller/task.rs"]
+pub(crate) mod task;
+
+#[path = "../../../src/features/remote_control/controller/journal.rs"]
+pub(crate) mod journal;

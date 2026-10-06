@@ -26,6 +26,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
 use async_trait::async_trait;
 use parking_lot::Mutex;
@@ -1178,6 +1179,7 @@ pub(crate) struct RemoteTaskEvent {
     pub(crate) task_id: String,
     pub(crate) session_id: String,
     pub(crate) status: String,
+    /// Publication identity, independent of the durable admission/order sequence.
     pub(crate) sequence: String,
     pub(crate) outcome_unknown: bool,
     pub(crate) terminal_reason: Option<String>,
@@ -1218,6 +1220,9 @@ pub(crate) struct RemoteTaskService {
     provisioner: Mutex<Option<Arc<dyn RemoteSessionProvisioner>>>,
     executors: Mutex<HashMap<String, Arc<dyn ControllerTaskExecutor>>>,
     hooks: RemoteTaskHooks,
+    // Publication identity is not the persistent admission/order sequence.
+    // A repeated waiting→running cycle needs new evidence even in the same ms.
+    event_sequence: AtomicU64,
 }
 
 impl RemoteTaskService {
@@ -1228,6 +1233,7 @@ impl RemoteTaskService {
             provisioner: Mutex::new(None),
             executors: Mutex::new(HashMap::new()),
             hooks: RemoteTaskHooks::default(),
+            event_sequence: AtomicU64::new(0),
         }
     }
 
@@ -1501,11 +1507,20 @@ impl RemoteTaskService {
     fn publish_with_reason(&self, record: &RemoteTaskRecord, reason: String) {
         let journal = self.hooks.journal.lock().clone();
         if let Some(journal) = journal {
+            let Ok(previous) = self.event_sequence.fetch_update(
+                AtomicOrdering::Relaxed,
+                AtomicOrdering::Relaxed,
+                |sequence| sequence.checked_add(1),
+            ) else {
+                // Never wrap and reuse a published identity.
+                eprintln!("[remote-control] task event sequence exhausted");
+                return;
+            };
             journal.publish_task_event(&RemoteTaskEvent {
                 task_id: record.task_id.clone(),
                 session_id: record.session_id.clone(),
                 status: record.wire_status().to_owned(),
-                sequence: record.sequence.to_string(),
+                sequence: (previous + 1).to_string(),
                 outcome_unknown: record.outcome_unknown,
                 terminal_reason: Some(bounded_reason_owned(reason)),
                 result_digest: record.result_digest.clone(),
@@ -2511,6 +2526,111 @@ mod tests {
             other => panic!("unexpected {other:?}"),
         }
         assert_eq!(executor.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn real_task_transitions_reach_journal_including_repeated_running_and_terminal() {
+        use super::super::journal::RemoteJournal;
+        struct PermissionRounds(std::sync::Weak<RemoteTaskService>);
+        #[async_trait]
+        impl ControllerTaskExecutor for PermissionRounds {
+            async fn execute(
+                &self,
+                _request: Value,
+                _events: Arc<dyn ControllerTaskEventSink>,
+                _cancel: CancellationToken,
+            ) -> std::result::Result<(), String> {
+                let service = self.0.upgrade().unwrap();
+                // Millisecond ties are valid: timestamps are not event IDs.
+                for _ in 0..2 {
+                    service
+                        .enter_waiting_permission("task-0001", 1_100)
+                        .unwrap();
+                    service.resume_running("task-0001", 1_100).unwrap();
+                }
+                Ok(())
+            }
+        }
+        let (service, _) = service(RecordingExecutor::ok());
+        let service = Arc::new(service);
+        let journal = Arc::new(RemoteJournal::new("journal-epoch-0001"));
+        service.hooks().set_journal(journal.clone());
+        service.register_executor(
+            TASK_MODE_CHAT,
+            Arc::new(PermissionRounds(Arc::downgrade(&service))),
+        );
+        let ticket = admitted(
+            &service,
+            &payload("session-0001", "task-0001", "client-0001", &digest(1)),
+            1_000,
+        );
+        let outcome = runtime()
+            .block_on(service.dispatch(ticket, Arc::new(NoopSink), CancellationToken::new(), 1_100))
+            .unwrap();
+        assert_eq!(outcome.state, RemoteTaskState::Succeeded);
+        let snapshot = journal.snapshot();
+        let statuses: Vec<_> = snapshot
+            .events
+            .iter()
+            .map(|event| event.payload["status"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            statuses,
+            [
+                "admitted",
+                "running",
+                "waiting_permission",
+                "running",
+                "waiting_permission",
+                "running",
+                "succeeded"
+            ]
+        );
+        assert_eq!(
+            snapshot.events.last().unwrap().terminal_status.as_deref(),
+            Some("succeeded")
+        );
+        let ids: HashSet<_> = snapshot
+            .events
+            .iter()
+            .map(|event| &event.event_id)
+            .collect();
+        assert_eq!(ids.len(), 7);
+        service
+            .complete("task-0001", RemoteTaskTerminal::Succeeded, None, 1_200)
+            .unwrap();
+        assert_eq!(
+            journal.snapshot().events.len(),
+            7,
+            "terminal replay stays idempotent"
+        );
+    }
+
+    #[test]
+    fn publication_sequence_exhaustion_never_wraps_or_reuses_evidence() {
+        let (service, hooks) = service(RecordingExecutor::ok());
+        service
+            .event_sequence
+            .store(u64::MAX - 1, AtomicOrdering::Relaxed);
+        let ticket = admitted(
+            &service,
+            &payload("session-0001", "task-0001", "client-0001", &digest(1)),
+            1_000,
+        );
+        assert_eq!(
+            hooks.events.lock().last().unwrap().sequence,
+            u64::MAX.to_string()
+        );
+        service.publish(&ticket.record);
+        assert_eq!(
+            service.event_sequence.load(AtomicOrdering::Relaxed),
+            u64::MAX
+        );
+        assert_eq!(
+            hooks.events.lock().len(),
+            1,
+            "overflow cannot replay an old identity"
+        );
     }
 
     #[test]

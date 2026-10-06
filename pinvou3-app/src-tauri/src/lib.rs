@@ -1206,15 +1206,21 @@ pub fn run() {
                             ledger,
                         );
                         handle.manage(desktop_task_runtime.ledger());
+                        let desktop_transfer_registry = std::sync::Arc::new(
+                            crate::features::remote_control::controller::transfer::TransferRegistry::default()
+                        );
                         let desktop_attachments =
                             commands::desktop_remote_attachment::DesktopRemoteAttachmentRuntime::from_session_store(
                                 store_for_engine.clone(),
                                 desktop_task_runtime.service(),
+                                desktop_transfer_registry.clone(),
                             );
                         let desktop_artifacts =
-                            commands::desktop_remote_artifact::DesktopRemoteArtifactRuntime::with_default_registry(
+                            commands::desktop_remote_artifact::DesktopRemoteArtifactRuntime::with_registry(
                                 desktop_task_runtime.service(),
+                                desktop_transfer_registry,
                             );
+                        handle.state::<ControlledDeviceManager>().register_cleanup_sink(desktop_attachments.cleanup_sink());
                         let history_path = crate::platform::paths::sessions_root()
                             .join("_remote_control_history.json");
                         let desktop_history =
@@ -1247,6 +1253,7 @@ pub fn run() {
                             );
                         }
                         handle.manage(desktop_task_runtime);
+                        commands::desktop_remote_attachment::DesktopRemoteAttachmentRuntime::start_reaper(&desktop_attachments);
                         handle.manage(desktop_attachments);
                         handle.manage(desktop_artifacts);
                         handle.manage(desktop_history);
@@ -1650,36 +1657,10 @@ pub fn run() {
             commands::desktop_remote_controller::desktop_remote_controller_create_history,
             commands::desktop_remote_controller::desktop_remote_controller_list_history,
             commands::desktop_remote_capabilities::desktop_remote_capabilities_snapshot,
-            commands::desktop_remote_task::desktop_remote_task_open_session,
-            commands::desktop_remote_task::desktop_remote_task_switch_session,
             commands::desktop_remote_task::desktop_remote_task_close_session,
-            commands::desktop_remote_task::desktop_remote_task_submit,
             commands::desktop_remote_task::desktop_remote_task_cancel,
             commands::desktop_remote_task::desktop_remote_task_status,
             commands::desktop_remote_task::desktop_remote_task_interrupt_all,
-            commands::desktop_remote_model::desktop_remote_model_list_exportable,
-            commands::desktop_remote_model::desktop_remote_model_install,
-            commands::desktop_remote_model::desktop_remote_model_release,
-            commands::desktop_remote_model::desktop_remote_model_active,
-            commands::desktop_remote_permission::desktop_remote_permission_request,
-            commands::desktop_remote_permission::desktop_remote_permission_decide,
-            commands::desktop_remote_permission::desktop_remote_permission_list,
-            commands::desktop_remote_permission::desktop_remote_permission_deny_task,
-            commands::desktop_remote_attachment::desktop_remote_attachment_begin,
-            commands::desktop_remote_attachment::desktop_remote_attachment_chunk,
-            commands::desktop_remote_attachment::desktop_remote_attachment_abort,
-            commands::desktop_remote_artifact::desktop_remote_artifact_index,
-            commands::desktop_remote_artifact::desktop_remote_artifact_preview,
-            commands::desktop_remote_artifact::desktop_remote_artifact_download_begin,
-            commands::desktop_remote_artifact::desktop_remote_artifact_download_chunk,
-            commands::desktop_remote_artifact::desktop_remote_artifact_download_abort,
-            commands::desktop_remote_history::desktop_remote_history_list,
-            commands::desktop_remote_history::desktop_remote_history_load,
-            commands::desktop_remote_history::desktop_remote_history_delete,
-            commands::desktop_remote_history::desktop_remote_history_create,
-            commands::desktop_remote_history::desktop_remote_history_mark_offline,
-            commands::desktop_remote_history::desktop_remote_history_apply_event,
-            commands::desktop_remote_history::desktop_remote_history_apply_snapshot,
             commands::desktop_remote_history::desktop_remote_journal_replay,
             commands::desktop_remote_history::desktop_remote_journal_snapshot,
             commands::desktop_remote_history::desktop_remote_journal_acknowledge,

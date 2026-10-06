@@ -359,7 +359,20 @@ impl RemoteTaskEventSink for RemoteJournal {
             "result_digest": event.result_digest,
             "sequence": event.sequence,
         });
-        let event_id = format!("task-{}:{}", event.task_id, event.sequence);
+        // Preserve idempotence of the same published event, without exceeding
+        // the event-id cap for a legal 128-character task id. The service's
+        // publication sequence changes for every transition, not just admit.
+        let mut identity = Sha256::new();
+        identity.update(b"pinvou-task-journal-event-v1\0");
+        identity.update(event.task_id.as_bytes());
+        identity.update([0]);
+        identity.update(event.sequence.as_bytes());
+        let digest = identity
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let event_id = format!("task-event-{digest}");
         let terminal = matches!(
             event.status.as_str(),
             "succeeded" | "failed" | "cancelled" | "interrupted" | "result_unknown"
@@ -512,6 +525,36 @@ mod tests {
 
     fn journal() -> RemoteJournal {
         RemoteJournal::new("epoch-1")
+    }
+
+    #[test]
+    fn task_event_identity_is_bounded_and_stable_for_retry() {
+        let journal = journal();
+        let mut event = RemoteTaskEvent {
+            task_id: "x".repeat(128),
+            session_id: "session-0001".into(),
+            status: "running".into(),
+            sequence: u64::MAX.to_string(),
+            outcome_unknown: false,
+            terminal_reason: None,
+            result_digest: None,
+        };
+        journal.publish_task_event(&event);
+        journal.publish_task_event(&event);
+        let first = journal.snapshot();
+        assert_eq!(first.events.len(), 1);
+        assert!(first.events[0].event_id.len() <= 128);
+        event.sequence = "next-publication".into();
+        event.status = "succeeded".into();
+        journal.publish_task_event(&event);
+        journal.publish_task_event(&event);
+        let snapshot = journal.snapshot();
+        assert_eq!(snapshot.events.len(), 2);
+        assert_ne!(snapshot.events[0].event_id, snapshot.events[1].event_id);
+        assert_eq!(
+            snapshot.events[1].terminal_status.as_deref(),
+            Some("succeeded")
+        );
     }
 
     #[test]

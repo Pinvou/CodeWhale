@@ -5,7 +5,14 @@
 //! isolation directory. It receives no host path and no file name from A beyond
 //! the bounded, slash-free metadata name.
 
+use base64::Engine as _;
+use std::collections::HashMap;
 use std::sync::Arc;
+
+use crate::features::remote_control::controller::controlled::{
+    ControlledCleanupScope, ControlledCleanupSink,
+};
+use parking_lot::Mutex;
 
 use super::core::{CompletedTransfer, TransferContext, TransferHandle, TransferMetadata};
 
@@ -41,6 +48,33 @@ pub(crate) trait UploadStaging: Send + Sync {
 pub(crate) struct AttachmentUploads {
     registry: Arc<super::core::TransferRegistry>,
     staging: Arc<dyn UploadStaging>,
+    // Live targets and revoked targets awaiting cleanup share a bounded slot
+    // ledger. Failed cleanup never loses its exact handle/context or admits an
+    // unbounded succession of new files.
+    targets: Mutex<HashMap<String, UploadTarget>>,
+}
+
+struct UploadTarget {
+    context: TransferContext,
+    cleanup_pending: bool,
+}
+
+/// Validate encoded and claimed sizes before the base64 decoder allocates.
+pub(crate) fn decode_upload_chunk(
+    encoded: &str,
+    claimed_bytes: u64,
+    limit: usize,
+) -> std::result::Result<Vec<u8>, String> {
+    if claimed_bytes == 0 || claimed_bytes > limit as u64 || encoded.len() > limit.div_ceil(3) * 4 {
+        return Err("transfer_chunk_size_invalid".into());
+    }
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(encoded.as_bytes())
+        .map_err(|_| "transfer_chunk_invalid".to_owned())?;
+    if bytes.len() as u64 != claimed_bytes {
+        return Err("transfer_chunk_invalid".into());
+    }
+    Ok(bytes)
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -66,11 +100,18 @@ pub(crate) enum UploadProgress {
 }
 
 impl AttachmentUploads {
+    pub(crate) fn chunk_bytes(&self) -> usize {
+        self.registry.limits().chunk_bytes
+    }
     pub(crate) fn new(
         registry: Arc<super::core::TransferRegistry>,
         staging: Arc<dyn UploadStaging>,
     ) -> Self {
-        Self { registry, staging }
+        Self {
+            registry,
+            staging,
+            targets: Mutex::new(HashMap::new()),
+        }
     }
 
     pub(crate) fn begin(
@@ -82,13 +123,24 @@ impl AttachmentUploads {
         if context.direction != super::core::TransferDirection::Upload {
             return Err("transfer_direction_mismatch".to_owned());
         }
+        let mut targets = self.targets.lock();
+        if targets.len() >= self.registry.limits().max_in_flight {
+            return Err("transfer_staging_capacity".into());
+        }
         let (handle, progress) = self
             .registry
             .begin(context.clone(), metadata.clone(), now_b)
             .map_err(|error| error.code.to_owned())?;
+        targets.insert(
+            handle.id().to_owned(),
+            UploadTarget {
+                context: context.clone(),
+                cleanup_pending: false,
+            },
+        );
         if let Err(error) = self.staging.begin(&handle, &context, &metadata) {
-            let _ = self.staging.abort(handle.id());
             self.registry.abort(&handle);
+            self.abort_target(&mut targets, handle.id());
             return Err(error);
         }
         Ok(UploadBegin {
@@ -106,6 +158,13 @@ impl AttachmentUploads {
         now_b: u64,
     ) -> std::result::Result<UploadProgress, String> {
         let handle = Self::handle(handle_id)?;
+        let mut targets = self.targets.lock();
+        if targets
+            .get(handle_id)
+            .is_none_or(|target| target.cleanup_pending)
+        {
+            return Err("transfer_unknown".into());
+        }
         let outcome = match self.registry.accept_chunk(
             &handle,
             super::core::TransferDirection::Upload,
@@ -118,8 +177,8 @@ impl AttachmentUploads {
                 // A rejected chunk is a protocol violation for this transfer
                 // (size, order, conflict or digest). Fail closed: drop both the
                 // staging target and the accounting entry so nothing lingers.
-                let _ = self.staging.abort(handle_id);
                 self.registry.abort(&handle);
+                self.abort_target(&mut targets, handle_id);
                 return Err(error.code.to_owned());
             }
         };
@@ -129,8 +188,8 @@ impl AttachmentUploads {
             });
         }
         if let Err(error) = self.staging.accept_chunk(&handle, chunk_index, bytes) {
-            let _ = self.staging.abort(handle_id);
             self.registry.abort(&handle);
+            self.abort_target(&mut targets, handle_id);
             return Err(error);
         }
         match outcome.completed {
@@ -142,9 +201,10 @@ impl AttachmentUploads {
                 let sha256 = completed.sha256.clone();
                 let bytes = completed.bytes;
                 if let Err(error) = self.staging.commit(&completed) {
-                    let _ = self.staging.abort(handle_id);
+                    self.abort_target(&mut targets, handle_id);
                     return Err(error);
                 }
+                targets.remove(handle_id);
                 Ok(UploadProgress::Completed { sha256, bytes })
             }
         }
@@ -154,20 +214,147 @@ impl AttachmentUploads {
         let Ok(handle) = Self::handle(handle_id) else {
             return false;
         };
-        let _ = self.staging.abort(handle_id);
-        self.registry.abort(&handle)
+        if handle.direction() != super::core::TransferDirection::Upload {
+            return false;
+        }
+        let mut targets = self.targets.lock();
+        let revoked = self.registry.abort(&handle);
+        self.abort_target(&mut targets, handle_id);
+        revoked
     }
 
     pub(crate) fn cleanup_for_task(&self, task_id: &str) -> usize {
-        self.registry.cleanup_for_task(task_id)
+        let mut targets = self.targets.lock();
+        let revoked = self.registry.take_for_task(task_id);
+        self.clean_revoked(&mut targets, &revoked);
+        self.retry_matching(&mut targets, |target| {
+            target.context.binding.task_id == task_id
+        });
+        revoked.len()
     }
 
     pub(crate) fn cleanup_for_connection(&self, connection_id: &str) -> usize {
-        self.registry.cleanup_for_connection(connection_id)
+        let mut targets = self.targets.lock();
+        let revoked = self.registry.take_for_connection(connection_id);
+        self.clean_revoked(&mut targets, &revoked);
+        self.retry_matching(&mut targets, |target| {
+            target.context.binding.connection_id == connection_id
+        });
+        revoked.len()
+    }
+
+    pub(crate) fn verify_binding(
+        &self,
+        handle_id: &str,
+        live: &super::super::protocol::LeaseContext,
+    ) -> std::result::Result<(), String> {
+        let handle = Self::handle(handle_id)?;
+        if handle.direction() != super::core::TransferDirection::Upload {
+            return Err("transfer_direction_mismatch".into());
+        }
+        self.registry
+            .verify_binding(&handle, live)
+            .map_err(|error| error.code.to_owned())
+    }
+
+    pub(crate) fn cleanup_for_generation(&self, generation: &str) -> usize {
+        let mut targets = self.targets.lock();
+        let revoked = self.registry.take_for_generation(generation);
+        self.clean_revoked(&mut targets, &revoked);
+        self.retry_matching(&mut targets, |target| {
+            target.context.binding.remote_control_generation == generation
+        });
+        revoked.len()
+    }
+
+    /// Called by the production periodic reaper even when no commands arrive.
+    /// Revokes both directions, then retries failed upload cleanup by exact ID.
+    pub(crate) fn reap(&self, now_b: u64) -> usize {
+        let mut targets = self.targets.lock();
+        let revoked = self.registry.take_expired(now_b);
+        self.clean_revoked(&mut targets, &revoked);
+        self.retry_matching(&mut targets, |_| true);
+        revoked.len()
+    }
+
+    pub(crate) fn start_reaper(
+        owner: &Arc<Self>,
+        clock: Arc<dyn Fn() -> u64 + Send + Sync>,
+    ) -> tokio::task::JoinHandle<()> {
+        let weak = Arc::downgrade(owner);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                interval.tick().await;
+                let Some(owner) = weak.upgrade() else {
+                    break;
+                };
+                let now = clock();
+                if tokio::task::spawn_blocking(move || owner.reap(now))
+                    .await
+                    .is_err()
+                {
+                    eprintln!("[remote-control] transfer_reaper_failed");
+                }
+            }
+        })
+    }
+
+    fn clean_revoked(
+        &self,
+        targets: &mut HashMap<String, UploadTarget>,
+        revoked: &[super::core::RevokedTransfer],
+    ) {
+        for entry in revoked {
+            if entry.handle.direction() == super::core::TransferDirection::Upload {
+                if let Some(target) = targets.get_mut(entry.handle.id()) {
+                    // A mismatch must never let stale revocation erase a new owner.
+                    if target.context == entry.context {
+                        target.cleanup_pending = true;
+                    }
+                }
+            }
+        }
+    }
+
+    fn retry_matching(
+        &self,
+        targets: &mut HashMap<String, UploadTarget>,
+        predicate: impl Fn(&UploadTarget) -> bool,
+    ) {
+        let ids: Vec<_> = targets
+            .iter()
+            .filter(|(_, target)| target.cleanup_pending && predicate(target))
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in ids {
+            self.abort_target(targets, &id);
+        }
+    }
+
+    fn abort_target(&self, targets: &mut HashMap<String, UploadTarget>, id: &str) {
+        let Some(target) = targets.get_mut(id) else {
+            return;
+        };
+        target.cleanup_pending = true;
+        match self.staging.abort(id) {
+            Ok(()) => {
+                targets.remove(id);
+            }
+            // Do not log platform error details, which could contain host paths.
+            Err(_) => eprintln!("[remote-control] transfer_staging_cleanup_failed: retry retained"),
+        }
     }
 
     fn handle(handle_id: &str) -> std::result::Result<super::core::TransferHandle, String> {
         TransferHandle::from_id(handle_id).ok_or_else(|| "transfer_unknown".to_owned())
+    }
+}
+
+impl ControlledCleanupSink for AttachmentUploads {
+    fn cleanup(&self, generation: &str, _scope: ControlledCleanupScope) {
+        self.cleanup_for_generation(generation);
     }
 }
 
@@ -193,6 +380,8 @@ mod tests {
         targets: Mutex<HashMap<String, Target>>,
         fail_allocation: bool,
         fail_on_chunk: bool,
+        fail_abort: std::sync::atomic::AtomicBool,
+        aborted: tokio::sync::Notify,
     }
 
     impl UploadStaging for RecordingStaging {
@@ -273,7 +462,11 @@ mod tests {
         }
 
         fn abort(&self, handle_id: &str) -> std::result::Result<(), String> {
+            if self.fail_abort.load(std::sync::atomic::Ordering::Relaxed) {
+                return Err("injected_cleanup_failure".into());
+            }
             self.targets.lock().unwrap().remove(handle_id);
+            self.aborted.notify_one();
             self.calls
                 .lock()
                 .unwrap()
@@ -317,6 +510,27 @@ mod tests {
             TransferDirection::Upload,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn oversized_base64_is_rejected_before_decoding_and_declared_size_is_exact() {
+        assert_eq!(
+            decode_upload_chunk(&"!".repeat(9), 4, 4).unwrap_err(),
+            "transfer_chunk_size_invalid"
+        );
+        assert_eq!(
+            decode_upload_chunk("YWJjZA==", 0, 4).unwrap_err(),
+            "transfer_chunk_size_invalid"
+        );
+        assert_eq!(
+            decode_upload_chunk("YWJjZA==", 5, 4).unwrap_err(),
+            "transfer_chunk_size_invalid"
+        );
+        assert_eq!(
+            decode_upload_chunk("YWJjZA==", 3, 4).unwrap_err(),
+            "transfer_chunk_invalid"
+        );
+        assert_eq!(decode_upload_chunk("YWJjZA==", 4, 4).unwrap(), b"abcd");
     }
 
     #[test]
@@ -437,21 +651,205 @@ mod tests {
 
     #[test]
     fn cleanup_by_task_and_connection_releases_every_transfer() {
-        let uploads = uploads(
-            Arc::new(RecordingStaging::default()),
-            TransferLimits::default(),
-        );
+        let staging = Arc::new(RecordingStaging::default());
+        let uploads = uploads(staging.clone(), TransferLimits::default());
         let data = b"abcdefgh".to_vec();
         uploads
             .begin(upload_context(), metadata_for(&data), 1_000)
             .unwrap();
         assert_eq!(uploads.cleanup_for_task("task-0001"), 1);
+        assert!(
+            staging.targets.lock().unwrap().is_empty(),
+            "task cleanup must remove staging"
+        );
         assert_eq!(uploads.cleanup_for_task("task-0001"), 0);
         uploads
             .begin(upload_context(), metadata_for(&data), 1_100)
             .unwrap();
         assert_eq!(uploads.cleanup_for_connection("connection-0001"), 1);
+        assert!(
+            staging.targets.lock().unwrap().is_empty(),
+            "connection cleanup must remove staging"
+        );
         assert_eq!(uploads.cleanup_for_connection("connection-0001"), 0);
+    }
+
+    #[test]
+    fn failed_staging_cleanup_retains_a_bounded_retry_and_does_not_touch_other_owner() {
+        use std::sync::atomic::Ordering;
+        let staging = Arc::new(RecordingStaging::default());
+        let uploads = uploads(
+            staging.clone(),
+            TransferLimits {
+                max_in_flight: 2,
+                ..TransferLimits::default()
+            },
+        );
+        let data = b"abcdefgh";
+        let first = uploads
+            .begin(upload_context(), metadata_for(data), 1_000)
+            .unwrap();
+        let mut other = upload_context();
+        other.binding.connection_id = "connection-other".into();
+        other.binding.remote_control_generation = "generation-other".into();
+        let second = uploads.begin(other, metadata_for(data), 1_000).unwrap();
+        staging.fail_abort.store(true, Ordering::Relaxed);
+        assert_eq!(uploads.cleanup_for_generation("generation-0001"), 1);
+        assert_eq!(uploads.registry.connection_bytes("connection-0001"), 0);
+        assert!(
+            uploads
+                .targets
+                .lock()
+                .get(&first.handle_id)
+                .unwrap()
+                .cleanup_pending
+        );
+        assert!(
+            uploads
+                .begin(upload_context(), metadata_for(data), 1_001)
+                .is_err(),
+            "pending cleanup occupies a bounded target slot"
+        );
+        assert!(
+            staging
+                .targets
+                .lock()
+                .unwrap()
+                .contains_key(&second.handle_id)
+        );
+        staging.fail_abort.store(false, Ordering::Relaxed);
+        uploads.reap(1_002);
+        assert!(
+            !staging
+                .targets
+                .lock()
+                .unwrap()
+                .contains_key(&first.handle_id)
+        );
+        assert!(
+            staging
+                .targets
+                .lock()
+                .unwrap()
+                .contains_key(&second.handle_id)
+        );
+        assert_eq!(uploads.targets.lock().len(), 1);
+        assert_eq!(uploads.cleanup_for_generation("generation-0001"), 0);
+        assert_eq!(uploads.registry.active_count(), 1);
+    }
+
+    #[test]
+    fn real_periodic_reaper_reclaims_stalled_upload_without_commands() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            tokio::time::pause();
+            let staging = Arc::new(RecordingStaging::default());
+            let uploads = Arc::new(uploads(
+                staging.clone(),
+                TransferLimits {
+                    ttl: std::time::Duration::from_millis(500),
+                    ..TransferLimits::default()
+                },
+            ));
+            let begin = uploads
+                .begin(upload_context(), metadata_for(b"stalled"), 1_000)
+                .unwrap();
+            let clock = Arc::new(AtomicU64::new(1_000));
+            let tick = Arc::new(tokio::sync::Notify::new());
+            let worker = AttachmentUploads::start_reaper(&uploads, {
+                let clock = clock.clone();
+                let tick = tick.clone();
+                Arc::new(move || {
+                    let now = clock.load(Ordering::Relaxed);
+                    tick.notify_one();
+                    now
+                })
+            });
+            tick.notified().await; // the initial tick is not yet expired
+            clock.store(2_000, Ordering::Relaxed);
+            tokio::time::advance(std::time::Duration::from_secs(1)).await;
+            staging.aborted.notified().await; // real interval + real cleanup, no command call
+            assert!(
+                !staging
+                    .targets
+                    .lock()
+                    .unwrap()
+                    .contains_key(&begin.handle_id)
+            );
+            assert_eq!(uploads.registry.active_count(), 0);
+            assert_eq!(uploads.registry.connection_bytes("connection-0001"), 0);
+            worker.abort();
+        });
+    }
+
+    #[test]
+    fn transfer_ports_reject_every_changed_lease_field_before_chunk_or_abort() {
+        use super::super::download::{ArtifactDownloads, ArtifactIndex, MemoryArtifactSource};
+        let registry = Arc::new(TransferRegistry::default());
+        let uploads =
+            AttachmentUploads::new(registry.clone(), Arc::new(RecordingStaging::default()));
+        let index = Arc::new(ArtifactIndex::default());
+        let data = b"abcdefgh";
+        index
+            .register(
+                "session-0001",
+                "artifact-0001",
+                "result.txt",
+                "text/plain",
+                &metadata_for(data).sha256,
+                Arc::new(MemoryArtifactSource::new(data.to_vec())),
+            )
+            .unwrap();
+        let downloads = ArtifactDownloads::new(registry.clone(), index);
+        let up = uploads
+            .begin(upload_context(), metadata_for(data), 1_000)
+            .unwrap();
+        let down = downloads
+            .begin(
+                &lease(),
+                "session-0001",
+                "task-0001",
+                "artifact-0001",
+                1_000,
+            )
+            .unwrap();
+        for field in 0..5 {
+            let mut stale = lease();
+            match field {
+                0 => stale.connection_id = "foreign".into(),
+                1 => stale.controller_lease_id = "foreign".into(),
+                2 => stale.lease_epoch = "2".into(),
+                3 => stale.relay_epoch = "foreign".into(),
+                _ => stale.remote_control_generation = "foreign".into(),
+            }
+            assert_eq!(
+                uploads.verify_binding(&up.handle_id, &stale).unwrap_err(),
+                "transfer_binding_stale"
+            );
+            assert_eq!(
+                downloads
+                    .verify_binding(&down.handle_id, &stale)
+                    .unwrap_err(),
+                "transfer_binding_stale"
+            );
+        }
+        assert_eq!(
+            registry.active_count(),
+            2,
+            "stale validation cannot revoke the rightful owner"
+        );
+        uploads.verify_binding(&up.handle_id, &lease()).unwrap();
+        downloads.verify_binding(&down.handle_id, &lease()).unwrap();
+        assert_eq!(
+            uploads.cleanup_for_task("task-0001"),
+            2,
+            "one lifecycle owner revokes both directions"
+        );
+        assert_eq!(registry.active_count(), 0);
     }
 
     #[test]

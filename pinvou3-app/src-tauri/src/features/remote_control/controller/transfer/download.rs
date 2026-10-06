@@ -116,11 +116,10 @@ impl DownloadSource for FileArtifactSource {
         }
         file.seek(SeekFrom::Start(offset))
             .map_err(|_| "artifact_unavailable".to_owned())?;
-        let mut buffer = vec![0u8; max_bytes];
-        let read = file
-            .read(&mut buffer)
+        let expected = (total - offset).min(max_bytes as u64) as usize;
+        let mut buffer = vec![0u8; expected];
+        file.read_exact(&mut buffer)
             .map_err(|_| "artifact_unavailable".to_owned())?;
-        buffer.truncate(read);
         Ok(Some(buffer))
     }
 }
@@ -200,7 +199,7 @@ impl ArtifactIndex {
             .filter(|ch| !matches!(ch, '/' | '\\') && !ch.is_control())
             .take(MAX_DISPLAY_CHARS)
             .collect();
-        if display_name.trim().is_empty() {
+        if display_name.trim().is_empty() || matches!(display_name.trim(), "." | "..") {
             return Err("artifact_name_invalid".to_owned());
         }
         if mime_type.len() > MAX_MIME_CHARS
@@ -423,9 +422,15 @@ impl ArtifactDownloads {
         chunk_index: u64,
         now_b: u64,
     ) -> Result<Option<DownloadChunk>, String> {
-        let source = self.index.source(session_id, artifact_id)?;
         let handle = super::core::TransferHandle::from_id(handle_id)
             .ok_or_else(|| "transfer_unknown".to_owned())?;
+        if handle.direction() != TransferDirection::Download {
+            return Err("transfer_direction_mismatch".into());
+        }
+        self.registry
+            .verify_session(&handle, session_id)
+            .map_err(|error| error.code.to_owned())?;
+        let source = self.index.source(session_id, artifact_id)?;
         let chunk_bytes = self.registry.limits().chunk_bytes;
         let bytes = source
             .read_chunk(chunk_index, chunk_bytes)
@@ -458,15 +463,32 @@ impl ArtifactDownloads {
         else {
             return false;
         };
-        self.registry.abort(&handle)
+        handle.direction() == TransferDirection::Download && self.registry.abort(&handle)
+    }
+
+    pub(crate) fn verify_binding(
+        &self,
+        handle_id: &str,
+        live: &LeaseContext,
+    ) -> Result<(), String> {
+        let handle = super::core::TransferHandle::from_id(handle_id)
+            .ok_or_else(|| "transfer_unknown".to_owned())?;
+        if handle.direction() != TransferDirection::Download {
+            return Err("transfer_direction_mismatch".into());
+        }
+        self.registry
+            .verify_binding(&handle, live)
+            .map_err(|error| error.code.to_owned())
     }
 
     pub(crate) fn cleanup_for_task(&self, task_id: &str) -> usize {
-        self.registry.cleanup_for_task(task_id)
+        self.registry.take_downloads_for_task(task_id).len()
     }
 
     pub(crate) fn cleanup_for_connection(&self, connection_id: &str) -> usize {
-        self.registry.cleanup_for_connection(connection_id)
+        self.registry
+            .take_downloads_for_connection(connection_id)
+            .len()
     }
 }
 
