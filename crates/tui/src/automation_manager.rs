@@ -6,10 +6,12 @@
 //!
 //! Deleting an automation keeps its terminal run history: terminal runs
 //! (completed, failed, canceled) are moved under `<root>/archive/<id>/` before
-//! the live paths are removed. The archive is bounded — it retains the most
-//! recent [`ARCHIVE_RETAINED_TERMINAL_RUNS`] terminal runs per automation and
-//! deletes older ones — and lives outside the `automations/`, `runs/`, and
-//! `triggers/` trees, so live listings and scheduler scans never see it.
+//! the live paths are removed. The archive is bounded per automation — it
+//! retains the most recent [`ARCHIVE_RETAINED_TERMINAL_RUNS`] terminal runs
+//! and deletes older ones — and lives outside the `automations/`, `runs/`, and
+//! `triggers/` trees, so live listings and scheduler scans never see it. The
+//! per-automation cap is the only bound: the archive root keeps one capped
+//! directory per deleted automation and is never compacted.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -1203,9 +1205,19 @@ impl AutomationManager {
     /// (completed, failed, canceled) are archived under
     /// `<root>/archive/<id>/` — bounded to the most recent
     /// [`ARCHIVE_RETAINED_TERMINAL_RUNS`] per automation — before the live
-    /// paths are removed. Deleting is refused while any run is still queued or
-    /// running, mirroring [`Self::delete_terminal_run`]: an in-flight task
-    /// must not lose its run record.
+    /// paths are removed. The archive root itself is never compacted: every
+    /// deleted automation keeps one capped directory.
+    ///
+    /// Deleting is refused while any *persisted* run is still queued or
+    /// running, mirroring [`Self::delete_terminal_run`]. A run whose enqueue
+    /// is still awaiting the task manager is not yet on disk, so deletion in
+    /// that in-flight window is not refused; the record is still persisted
+    /// afterward, outside the archive, as before this change.
+    ///
+    /// As with every read of run files, a corrupt or newer-schema file in the
+    /// live runs or the archive fails the delete until it is resolved
+    /// externally; a queued/running run whose task record is gone cannot be
+    /// settled by reconciliation and must also be cleaned up externally.
     pub fn delete_automation(&self, id: &str) -> Result<AutomationRecord> {
         let existing = self.get_automation(id)?;
         let runs = self.list_runs(id, None)?;
