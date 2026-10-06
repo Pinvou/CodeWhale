@@ -36,3 +36,24 @@ Tauri 命令按 `app/commands/<domain>.rs` 组织，`app/mod.rs` 与 `app/comman
 （`platform/connector_state.rs`、`platform/connector_skills.rs`）和路径安全策略
 （`platform/path_policy.rs`）属于跨功能基础设施，位于 `platform/`；内置资源 bundle
 的解包由 `features/runtime_bundle/` 承担。
+
+## 共享子进程的终止边界
+
+`platform::process::output_with_timeout_and_kill_tree` 在 Windows 上先以挂起状态
+启动根进程，加入独立 Job Object 后才恢复执行。超时或输出超限时显式终止 Job，
+覆盖经正常进程创建 API 派生、即使中间父进程已经退出的后代；这不是阻止进程借助
+系统服务或其他既有进程启动任务的安全沙箱。正常完成不启用 kill-on-close，保留
+启动器完成后继续运行的后代。普通 `output_with_timeout` 保持超时只终止根进程的
+既有契约；两者的输出超限均请求终止受管理进程树，输出上限仍为每路 4 MiB。
+
+Linux/macOS 继续直接终止独立进程组。Windows 的兼容
+`kill_process_tree(pid)` 仅对未受管理进程使用身份句柄和有界 `taskkill`，
+不能保证回收已经失去父链的后代。上述同步输出路径不借用这一兼容退路：
+Job 创建、加入或恢复失败均停止该次启动并返回错误，不静默降级。
+普通父 Job 支持嵌套启动；宿主处于带 UI 限制等不允许嵌套的 Job 时，加入失败即
+返回启动错误，该宿主环境不受此路径支持，不以绕过父 Job 或无托管启动作为回退。
+既有安装取消路径没有改为 Job Object，也没有新增长期闲置的 Tokio 启动接口。
+
+该实现影响 PDF/Office/邮件转换、连接器探测、代码检查点、Marketplace 依赖检查
+和监控命令等共享调用方；共享进程回归必须覆盖成功后代存活、超时孤儿后代退出、
+输出超限和有界回收。完整 Rust 门禁仍须在原生 Windows 与 Linux 上通过。
