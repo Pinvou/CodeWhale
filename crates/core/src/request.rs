@@ -139,7 +139,10 @@ pub struct OpaqueReasoningState {
     /// can move under a stable tag), and built-in tags keep replaying only
     /// while the requesting client still points at the provider's official
     /// endpoint — a re-pointed client has no proof of where an old state was
-    /// captured, so it fails closed too.
+    /// captured, so it fails closed too. A state carrying this field read by
+    /// a build older than the field drops it as unknown JSON, which restores
+    /// that build's pre-fingerprint gate for the session; `custom/<table>`
+    /// tags still drop there (the old gate never minted them).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub endpoint: Option<String>,
 }
