@@ -5,6 +5,7 @@ import test from "node:test";
 import { ControllerLeaseManager } from "../controller-lease.js";
 import { ControllerReservationManager, EndpointInteractionSlots } from "../controller-reservation.js";
 import { receiptCommitmentHex } from "../protocol-controller.js";
+import { ControllerRouter } from "../controller-router.js";
 
 const CAPABILITIES = ["pairing_v1", "encrypted_frames_v1", "finished_receipt_v1"];
 
@@ -13,7 +14,7 @@ function publicKey() {
     .subarray(-32).toString("base64");
 }
 
-function fixture({ clock = () => 1000, failConsume = false } = {}) {
+function fixture({ clock = () => 1000, failConsume = false, resolveControlled, signTranscript, consumeLease } = {}) {
   const pairing = Object.freeze({
     pairing_id: "pairing-0001",
     endpoint_id: "endpoint-0001",
@@ -28,6 +29,7 @@ function fixture({ clock = () => 1000, failConsume = false } = {}) {
     findActiveByCode: (code) => code === "2345678" ? pairing : null,
     consumeForControllerLease: async (value) => {
       if (failConsume) throw new Error("atomic commit failed");
+      if (consumeLease) await consumeLease();
       consumed.push(value);
       return value;
     },
@@ -43,12 +45,302 @@ function fixture({ clock = () => 1000, failConsume = false } = {}) {
     reservationManager: reservations,
     relayEpoch: "relay-epoch-0001",
     signingKeyId: "relay-signing-key-0001",
-    signTranscript: (preimage) => crypto.sign(null, preimage, signing.privateKey),
-    resolveControlledEndpoint: async (endpointId) => endpointId === pairing.endpoint_id
-      ? { socketIdentity: "socket-B" } : null,
+    signTranscript: (preimage) => signTranscript
+      ? signTranscript(preimage, signing.privateKey) : crypto.sign(null, preimage, signing.privateKey),
+    resolveControlledEndpoint: resolveControlled || (async (endpointId) => endpointId === pairing.endpoint_id
+      ? { socketIdentity: "socket-B" } : null),
     clock,
   });
   return { manager, pairings, reservations, slots, consumed, terminal, pairing };
+}
+
+for (const phase of ["resolve", "sign"]) {
+  test(`overlapping reservation/lease expiry cannot publish a claim during ${phase}`, async () => {
+    let now = 1000;
+    const entered = deferred();
+    const gate = deferred();
+    const { manager, reservations, slots, terminal } = fixture({ clock: () => now,
+      resolveControlled: async () => {
+        if (phase === "resolve") { entered.resolve(); await gate.promise; }
+        return { socketIdentity: "socket-B" };
+      },
+      signTranscript: async (preimage, key) => {
+        if (phase === "sign") { entered.resolve(); await gate.promise; }
+        return crypto.sign(null, preimage, key);
+      },
+    });
+    const settled = Promise.allSettled([start(manager)]);
+    await entered.promise;
+    now = 31_000;
+    await Promise.all([reservations.expire(), manager.expire()]);
+    gate.resolve();
+    const result = (await settled)[0];
+    assert.equal(result.status, "rejected");
+    assert.ok(!(result.reason instanceof AggregateError));
+    assert.equal(slots.read("endpoint-0001").owner, null);
+    assert.deepEqual(terminal, ["pairing-0001"]);
+  });
+}
+
+test("a stale first endpoint lookup cannot publish a handshake for disconnected B", async () => {
+  const entered = deferred();
+  const gate = deferred();
+  let online = true;
+  let calls = 0;
+  const { manager, slots, terminal } = fixture({ resolveControlled: async () => {
+    const result = online ? { socketIdentity: "socket-B" } : null;
+    calls += 1;
+    if (calls === 1) { entered.resolve(); await gate.promise; }
+    return result;
+  } });
+  const settled = Promise.allSettled([start(manager)]);
+  await entered.promise;
+  online = false;
+  await manager.abortBySocket({ socketIdentity: "socket-B" });
+  gate.resolve();
+  const result = (await settled)[0];
+  assert.equal(result.status, "rejected");
+  assert.equal(result.reason.code, "endpoint_offline");
+  assert.equal(slots.read("endpoint-0001").owner, null);
+  assert.deepEqual(terminal, ["pairing-0001"]);
+});
+
+test("expiry during atomic consume reports expiry, not a second-release AggregateError", async () => {
+  let now = 1000;
+  const entered = deferred();
+  const gate = deferred();
+  const { manager, reservations, slots, terminal } = fixture({ clock: () => now,
+    consumeLease: async () => { entered.resolve(); await gate.promise; } });
+  const reserved = await start(manager);
+  const secretA = crypto.randomBytes(32);
+  const secretB = crypto.randomBytes(32);
+  submitCommitmentsAndFinished(manager, reserved, secretA, secretB);
+  await manager.acceptReceipt({ message: receiptMessage(reserved, "A", secretA), role: "B", socketIdentity: "socket-B" });
+  const settled = Promise.allSettled([manager.acceptReceipt({ message: receiptMessage(reserved, "B", secretB),
+    role: "A", socketIdentity: "socket-A" })]);
+  await entered.promise;
+  now = 21_000;
+  await Promise.all([reservations.expire(), manager.expire()]);
+  gate.resolve();
+  const result = (await settled)[0];
+  assert.equal(result.status, "rejected");
+  assert.equal(result.reason.code, "controller_handshake_expired");
+  assert.equal(slots.read("endpoint-0001").owner, null);
+  assert.deepEqual(terminal, ["pairing-0001"]);
+});
+
+test("router capability-conflict retry and commitment replay preserve the incumbent handshake", async () => {
+  const entered = deferred();
+  const gate = deferred();
+  let router;
+  const { manager, terminal } = fixture({ resolveControlled: (endpoint) => router.resolveControlledEndpoint(endpoint),
+    signTranscript: async (preimage, key) => { entered.resolve(); await gate.promise; return crypto.sign(null, preimage, key); } });
+  router = new ControllerRouter({ pairingRegistrationHandler: { register: async () => {} }, leaseManager: manager,
+    send: () => true });
+  for (const role of ["A", "B"]) router.addSocket({ socketIdentity: `socket-${role}`, source: `source-${role}`, socket: {} });
+  router.authenticateControlled({ socketIdentity: "socket-B", endpointId: "endpoint-0001", authenticatedContext: {} });
+  const message = claimMessage();
+  const first = router.handle({ socketIdentity: "socket-A", message });
+  await entered.promise;
+  await assert.rejects(router.handle({ socketIdentity: "socket-A", message: { ...message,
+    request_id: "request-conflict", capabilities: ["pairing_v1", "finished_receipt_v1"] } }),
+  (error) => error.code === "controller_claim_conflict");
+  gate.resolve();
+  const reserved = await first;
+  const secret = crypto.randomBytes(32);
+  const commitment = commitmentMessage(reserved, "A", secret);
+  await router.handle({ socketIdentity: "socket-A", message: commitment });
+  await assert.rejects(router.handle({ socketIdentity: "socket-A", message: commitment }),
+    (error) => error.code === "receipt_commitment_replayed");
+  await router.handle({ socketIdentity: "socket-A", message: finishedMessage(reserved, "A") });
+  assert.deepEqual(terminal, []);
+});
+
+test("failed duplicate reserved delivery has no authority to abort the original handshake", async () => {
+  let router;
+  let rejectRetryDelivery = false;
+  const { manager, terminal } = fixture({ resolveControlled: (endpoint) => router.resolveControlledEndpoint(endpoint) });
+  router = new ControllerRouter({ pairingRegistrationHandler: { register: async () => {} }, leaseManager: manager,
+    send: (_socket, message) => !(rejectRetryDelivery && message.type === "controller_pairing_reserved") });
+  for (const role of ["A", "B"]) router.addSocket({ socketIdentity: `socket-${role}`, source: `source-${role}`, socket: {} });
+  router.authenticateControlled({ socketIdentity: "socket-B", endpointId: "endpoint-0001", authenticatedContext: {} });
+  const message = claimMessage();
+  const reserved = await router.handle({ socketIdentity: "socket-A", message });
+  rejectRetryDelivery = true;
+  // An identical transport ID is legal too; cleanup authority cannot be inferred
+  // from request_id differences or from successful claim() response alone.
+  await assert.rejects(router.handle({ socketIdentity: "socket-A", message }),
+    (error) => error.code === "endpoint_offline");
+  assert.deepEqual(terminal, []);
+  rejectRetryDelivery = false;
+  const secretA = crypto.randomBytes(32);
+  const secretB = crypto.randomBytes(32);
+  for (const [role, secret] of [["A", secretA], ["B", secretB]]) {
+    await router.handle({ socketIdentity: `socket-${role}`, message: commitmentMessage(reserved, role, secret) });
+    await router.handle({ socketIdentity: `socket-${role}`, message: finishedMessage(reserved, role) });
+  }
+  await router.handle({ socketIdentity: "socket-B", message: receiptMessage(reserved, "A", secretA) });
+  const committed = await router.handle({ socketIdentity: "socket-A", message: receiptMessage(reserved, "B", secretB) });
+  assert.equal(manager.lease(committed.lease.controller_lease_id), committed.lease);
+});
+
+function deferred() {
+  let resolve;
+  const promise = new Promise((done) => { resolve = done; });
+  return { promise, resolve };
+}
+
+for (const phase of ["resolve", "sign"]) {
+  test(`concurrent stable claim retries share one preparation during ${phase}`, async () => {
+    const entered = deferred();
+    const gate = deferred();
+    let signs = 0;
+    let lookups = 0;
+    const { manager, slots, terminal } = fixture({
+      resolveControlled: async () => {
+        lookups += 1;
+        if (phase === "resolve" && lookups === 1) { entered.resolve(); await gate.promise; }
+        return { socketIdentity: "socket-B" };
+      },
+      signTranscript: async (preimage, key) => {
+        signs += 1;
+        if (phase === "sign") { entered.resolve(); await gate.promise; }
+        return crypto.sign(null, preimage, key);
+      },
+    });
+    const message = claimMessage();
+    const first = manager.claim({ message, socketIdentity: "socket-A", source: "source-A" });
+    await entered.promise;
+    const retry = manager.claim({
+      message: { ...message, request_id: "request-retry" }, socketIdentity: "socket-A", source: "source-A",
+    });
+    // Attach rejection handlers before opening the deterministic async window.
+    const results = Promise.allSettled([first, retry]);
+    gate.resolve();
+    const settled = await results;
+    assert.deepEqual(settled.map((item) => item.status), ["fulfilled", "fulfilled"]);
+    assert.equal(settled[0].value.transcript_hash, settled[1].value.transcript_hash);
+    assert.equal(settled[1].value.request_id, "request-retry");
+    assert.equal(signs, 1);
+    assert.deepEqual(terminal, []);
+    assert.equal(slots.read("endpoint-0001").owner.kind, "desktop_reservation");
+  });
+
+  test(`disconnect cancels an unpublished claim during ${phase}`, async () => {
+    const entered = deferred();
+    const gate = deferred();
+    const { manager, slots, terminal } = fixture({
+      resolveControlled: async () => {
+        if (phase === "resolve") { entered.resolve(); await gate.promise; }
+        return { socketIdentity: "socket-B" };
+      },
+      signTranscript: async (preimage, key) => {
+        if (phase === "sign") { entered.resolve(); await gate.promise; }
+        return crypto.sign(null, preimage, key);
+      },
+    });
+    const operation = start(manager);
+    const settled = Promise.allSettled([operation]);
+    await entered.promise;
+    const aborted = await manager.abortBySocket({ socketIdentity: phase === "resolve" ? "socket-A" : "socket-B" });
+    gate.resolve();
+    assert.equal((await settled)[0].status, "rejected");
+    assert.equal(aborted.handshakes, 1);
+    assert.equal(slots.read("endpoint-0001").owner, null);
+    assert.deepEqual(terminal, ["pairing-0001"]);
+  });
+}
+
+test("router rejects late receipts and reclaims without terminating an established real lease", async () => {
+  let router;
+  const { manager, slots } = fixture({ resolveControlled: (endpoint) => router.resolveControlledEndpoint(endpoint) });
+  router = new ControllerRouter({
+    pairingRegistrationHandler: { register: async () => {} }, leaseManager: manager, send: () => true,
+  });
+  for (const role of ["A", "B"]) {
+    router.addSocket({ socketIdentity: `socket-${role}`, source: `source-${role}`, socket: {} });
+  }
+  router.authenticateControlled({ socketIdentity: "socket-B", endpointId: "endpoint-0001", authenticatedContext: {} });
+  const claim = claimMessage();
+  const reserved = await router.handle({ socketIdentity: "socket-A", message: claim });
+  const secretA = crypto.randomBytes(32);
+  const secretB = crypto.randomBytes(32);
+  for (const [role, secret] of [["A", secretA], ["B", secretB]]) {
+    await router.handle({ socketIdentity: `socket-${role}`, message: commitmentMessage(reserved, role, secret) });
+    await router.handle({ socketIdentity: `socket-${role}`, message: finishedMessage(reserved, role) });
+  }
+  await router.handle({ socketIdentity: "socket-B", message: receiptMessage(reserved, "A", secretA) });
+  const committed = await router.handle({ socketIdentity: "socket-A", message: receiptMessage(reserved, "B", secretB) });
+  const leaseId = committed.lease.controller_lease_id;
+  await assert.rejects(router.handle({ socketIdentity: "socket-A", message: receiptMessage(reserved, "B", secretB) }));
+  assert.equal(manager.lease(leaseId), committed.lease);
+  await assert.rejects(router.handle({ socketIdentity: "socket-A", message: claim }));
+  assert.equal(manager.lease(leaseId), committed.lease);
+  assert.equal(slots.read("endpoint-0001").owner.owner_id, leaseId);
+  assert.equal((await router.removeSocket("socket-A")).leases, 1);
+  assert.equal(manager.lease(leaseId), null);
+  router.addSocket({ socketIdentity: "socket-A-new", source: "source-new", socket: {} });
+  // The fixture supplies another active pairing: the still-connected B must
+  // not remain blocked by a dangling ID after the old lease was terminated.
+  const next = await router.handle({ socketIdentity: "socket-A-new",
+    message: claimMessage({ claim_request_id: "claim-after-close" }) });
+  assert.equal(next.type, "controller_pairing_reserved");
+});
+
+test("authenticated B closure cancels preparation before its first lookup returns", async () => {
+  const entered = deferred();
+  const gate = deferred();
+  let router;
+  let lookups = 0;
+  const { manager, slots, terminal } = fixture({ resolveControlled: async (endpoint) => {
+    const result = router.resolveControlledEndpoint(endpoint);
+    if (++lookups === 1) { entered.resolve(); await gate.promise; }
+    return result;
+  } });
+  router = new ControllerRouter({ pairingRegistrationHandler: { register: async () => {} }, leaseManager: manager, send: () => true });
+  for (const role of ["A", "B"]) router.addSocket({ socketIdentity: `socket-${role}`, source: `source-${role}`, socket: {} });
+  router.authenticateControlled({ socketIdentity: "socket-B", endpointId: "endpoint-0001", authenticatedContext: {} });
+  const settled = Promise.allSettled([router.handle({ socketIdentity: "socket-A", message: claimMessage() })]);
+  await entered.promise;
+  assert.equal((await router.removeSocket("socket-B")).handshakes, 1);
+  assert.equal(slots.read("endpoint-0001").owner, null);
+  gate.resolve();
+  assert.equal((await settled)[0].status, "rejected");
+  assert.deepEqual(terminal, ["pairing-0001"]);
+});
+
+for (const delivery of ["reserved", "joined"]) {
+  test(`failed ${delivery} delivery releases only its owned state and clears links`, async () => {
+    let router;
+    let failDelivery = true;
+    const { manager, slots, terminal } = fixture({ resolveControlled: (endpoint) => router.resolveControlledEndpoint(endpoint) });
+    router = new ControllerRouter({ pairingRegistrationHandler: { register: async () => {} }, leaseManager: manager,
+      send: (_socket, message) => !(failDelivery && message.type === `controller_${delivery === "reserved" ? "pairing_reserved" : "joined"}`) });
+    for (const role of ["A", "B"]) router.addSocket({ socketIdentity: `socket-${role}`, source: `source-${role}`, socket: {} });
+    router.authenticateControlled({ socketIdentity: "socket-B", endpointId: "endpoint-0001", authenticatedContext: {} });
+    if (delivery === "reserved") {
+      await assert.rejects(router.handle({ socketIdentity: "socket-A", message: claimMessage() }),
+        (error) => error.code === "endpoint_offline");
+      assert.deepEqual(terminal, ["pairing-0001"]);
+    } else {
+      const reserved = await router.handle({ socketIdentity: "socket-A", message: claimMessage() });
+      const secretA = crypto.randomBytes(32);
+      const secretB = crypto.randomBytes(32);
+      for (const [role, secret] of [["A", secretA], ["B", secretB]]) {
+        await router.handle({ socketIdentity: `socket-${role}`, message: commitmentMessage(reserved, role, secret) });
+        await router.handle({ socketIdentity: `socket-${role}`, message: finishedMessage(reserved, role) });
+      }
+      await router.handle({ socketIdentity: "socket-B", message: receiptMessage(reserved, "A", secretA) });
+      await assert.rejects(router.handle({ socketIdentity: "socket-A", message: receiptMessage(reserved, "B", secretB) }),
+        (error) => error.code === "endpoint_offline");
+    }
+    assert.equal(slots.read("endpoint-0001").owner, null);
+    // The fixture supplies a fresh pairing regardless of earlier terminal state.
+    // New admission succeeds only if stale peer links/lease IDs were cleared.
+    failDelivery = false;
+    const next = await router.handle({ socketIdentity: "socket-A", message: claimMessage({ claim_request_id: "claim-next" }) });
+    assert.equal(next.type, "controller_pairing_reserved");
+  });
 }
 
 function claimMessage(overrides = {}) {
