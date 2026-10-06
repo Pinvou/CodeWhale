@@ -340,6 +340,7 @@ DEV-02 + DEV-21 + DEV-22 + DEV-23 + DEV-24 ── DEV-25 公网交付 E2E
 - **不做**：不读写真实附件/成果，不实现预览，不注册前端 API；不修改现有 Web handle 的 wire 类型。
 - **句柄安全**：upload/download 使用各自前缀加随机 UUID v4，不使用进程序号；锁内最多尝试 4 次，冲突不覆盖既有传输，分配失败不占用预算。随机句柄不替代业务适配层的实时 lease/task/session 绑定校验，不保留未发布的旧计数句柄生成逻辑。
 - **预计文件**：实现 DEV-07 预留的 `controller/transfer/mod.rs`，新增 `core.rs`、`limits.rs`、`upload.rs`、`download.rs` 可编译扩展槽。本任务独占 `mod/core/limits`；DEV-17 只编辑 `upload.rs`，DEV-18 只编辑 `download.rs`，两者不得回改共享 core，接口不足须先单独修订 DEV-14 契约。
+- **上传端口身份**：registry 先生成方向明确的 `TransferHandle`；`UploadStaging.begin`、`accept_chunk` 必须携带同一句柄，`commit` 使用 `CompletedTransfer.handle_id`，`abort` 只清理对应目标并幂等。并发传输不得靠 chunk index 或文件名寻址；staging 分配失败须释放该 registry 句柄，已接受的重复块不得再次落盘。
 - **协议/数据**：所有 handle 绑定 connection/lease epoch/task/session 并区分 upload/download；块和总内存限制不宽于现有 Web transfer；每次传输最多接收 4096 个新块（相同块重试不计数），使用连续索引的 32 字节摘要保存重试证据，每次传输摘要缓冲最多 128 KiB、4 个并发传输最多 512 KiB；发送方须选择可在块数预算内完成的块长（32 MiB 文件至少 8 KiB，默认 256 KiB），若按配置最大块长仍无法在预算内完成，则在 begin 分配资源前拒绝。超出块数返回 `transfer_chunk_budget`，不改变进度或 TTL，业务适配层按其他拒绝块相同规则终止并清理；敏感文件元数据只进 E2E 帧。
 - **测试**：预算竞争、方向混用、跨 lease/task/session、块重复/乱序、摘要、取消/超时、清理幂等、Web handle 与 controller handle 类型隔离。
 - **验收**：upload/download 可仅新增各自模块实现而不修改共享 core；两方向并发共享连接预算且不能相互消费 handle。

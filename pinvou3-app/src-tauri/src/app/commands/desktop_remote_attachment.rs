@@ -20,7 +20,8 @@ use crate::features::remote_control::controller::controlled::ControlledDeviceMan
 use crate::features::remote_control::controller::task::RemoteTaskService;
 use crate::features::remote_control::controller::task::RemoteTaskTransferScope;
 use crate::features::remote_control::controller::transfer::core::{
-    CompletedTransfer, TransferContext, TransferDirection, TransferMetadata, TransferRegistry,
+    CompletedTransfer, TransferContext, TransferDirection, TransferHandle, TransferMetadata,
+    TransferRegistry,
 };
 use crate::features::remote_control::controller::transfer::limits::MAX_TRANSFER_BYTES;
 use crate::features::remote_control::controller::transfer::upload::{
@@ -89,10 +90,16 @@ impl SessionIsolationStaging {
 impl UploadStaging for SessionIsolationStaging {
     fn begin(
         &self,
-        handle_id: &str,
+        handle: &TransferHandle,
         context: &TransferContext,
         metadata: &TransferMetadata,
     ) -> Result<(), String> {
+        if handle.direction() != TransferDirection::Upload
+            || context.direction != TransferDirection::Upload
+        {
+            return Err("transfer_direction_mismatch".to_owned());
+        }
+        let handle_id = handle.id();
         Self::validate_handle(handle_id)?;
         let mut sessions = self.sessions.lock();
         if sessions.contains_key(handle_id) {
@@ -140,8 +147,17 @@ impl UploadStaging for SessionIsolationStaging {
         Ok(())
     }
 
-    fn accept_chunk(&self, handle_id: &str, _chunk_index: u64, bytes: &[u8]) -> Result<(), String> {
+    fn accept_chunk(
+        &self,
+        handle: &TransferHandle,
+        _chunk_index: u64,
+        bytes: &[u8],
+    ) -> Result<(), String> {
         use std::io::{Seek as _, Write as _};
+        if handle.direction() != TransferDirection::Upload {
+            return Err("transfer_direction_mismatch".to_owned());
+        }
+        let handle_id = handle.id();
         let mut sessions = self.sessions.lock();
         let entry = sessions
             .get_mut(handle_id)
@@ -435,6 +451,10 @@ mod tests {
     use crate::features::remote_control::controller::protocol::LeaseContext;
     use crate::features::remote_control::controller::task::RemoteTaskLedger;
 
+    fn upload_handle(id: &str) -> TransferHandle {
+        TransferHandle::from_id(id).expect("valid upload fixture handle")
+    }
+
     fn lease() -> LeaseContext {
         LeaseContext {
             connection_id: "connection-0001".into(),
@@ -475,7 +495,9 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let (stager, handle, context) = started_stager(directory.path(), b"part");
         stager.sessions.lock().get_mut(&handle).unwrap().file_name = "part.bin".into();
-        stager.accept_chunk(&handle, 0, b"part").unwrap();
+        stager
+            .accept_chunk(&upload_handle(&handle), 0, b"part")
+            .unwrap();
         stager
             .commit(&completion(handle.clone(), context, b"part"))
             .unwrap();
@@ -507,7 +529,9 @@ mod tests {
             TransferDirection::Upload,
         )
         .unwrap();
-        stager.begin(&handle, &context, &metadata(bytes)).unwrap();
+        stager
+            .begin(&upload_handle(&handle), &context, &metadata(bytes))
+            .unwrap();
         (stager, handle, context)
     }
 
@@ -535,13 +559,15 @@ mod tests {
         let mut handles = Vec::new();
         for _ in 0..MAX_STAGED_SESSIONS {
             let handle = format!("ctr-up-{}", uuid::Uuid::new_v4().simple());
-            stager.begin(&handle, &context, &metadata(b"x")).unwrap();
+            stager
+                .begin(&upload_handle(&handle), &context, &metadata(b"x"))
+                .unwrap();
             handles.push(handle);
         }
         let rejected = "ctr-up-capacity-rejected";
         assert_eq!(
             stager
-                .begin(rejected, &context, &metadata(b"x"))
+                .begin(&upload_handle(rejected), &context, &metadata(b"x"))
                 .unwrap_err(),
             "transfer_capacity"
         );
@@ -580,7 +606,11 @@ mod tests {
         .unwrap();
         assert!(
             stager
-                .begin("ctr-up-linked-directory", &context, &metadata(b"x"))
+                .begin(
+                    &upload_handle("ctr-up-linked-directory"),
+                    &context,
+                    &metadata(b"x")
+                )
                 .is_err()
         );
         assert!(stager.sessions.lock().is_empty());
@@ -608,7 +638,9 @@ mod tests {
             assert_eq!(std::fs::read(&outside).unwrap(), b"untouched");
             return;
         }
-        stager.accept_chunk(&handle, 0, b"new").unwrap();
+        stager
+            .accept_chunk(&upload_handle(&handle), 0, b"new")
+            .unwrap();
         assert_eq!(std::fs::read(&outside).unwrap(), b"untouched");
         assert!(
             stager.abort(&handle).is_err(),
@@ -637,7 +669,9 @@ mod tests {
             stager.abort(&handle).unwrap();
             return;
         }
-        stager.accept_chunk(&handle, 0, b"new").unwrap();
+        stager
+            .accept_chunk(&upload_handle(&handle), 0, b"new")
+            .unwrap();
         stager.commit(&completion(handle, context, b"new")).unwrap();
         assert_eq!(std::fs::read(&outside).unwrap(), b"untouched");
         assert_eq!(std::fs::read(&published).unwrap(), b"new");
@@ -663,7 +697,9 @@ mod tests {
             eprintln!("fixture unavailable: replacement parent link creation");
             return;
         }
-        stager.accept_chunk(&handle, 0, b"new").unwrap();
+        stager
+            .accept_chunk(&upload_handle(&handle), 0, b"new")
+            .unwrap();
         stager
             .commit(&completion(handle.clone(), context, b"new"))
             .unwrap();
@@ -688,7 +724,11 @@ mod tests {
         let (stager, handle, _) = started_stager(directory.path(), b"new");
         stager.sessions.lock().get_mut(&handle).unwrap().file =
             Some(std::fs::File::open(&outside).unwrap());
-        assert!(stager.accept_chunk(&handle, 0, b"new").is_err());
+        assert!(
+            stager
+                .accept_chunk(&upload_handle(&handle), 0, b"new")
+                .is_err()
+        );
         stager.abort(&handle).unwrap();
         assert_eq!(std::fs::read(&outside).unwrap(), b"untouched");
         assert!(stager.sessions.lock().is_empty());
@@ -699,7 +739,9 @@ mod tests {
             .join(&handle)
             .join("report.txt");
         std::fs::create_dir(&blocked).unwrap();
-        stager.accept_chunk(&handle, 0, b"new").unwrap();
+        stager
+            .accept_chunk(&upload_handle(&handle), 0, b"new")
+            .unwrap();
         assert!(
             stager
                 .commit(&completion(handle.clone(), context, b"new"))
@@ -722,7 +764,9 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         for wrong_length in [true, false] {
             let (stager, handle, context) = started_stager(directory.path(), b"new");
-            stager.accept_chunk(&handle, 0, b"new").unwrap();
+            stager
+                .accept_chunk(&upload_handle(&handle), 0, b"new")
+                .unwrap();
             let mut transfer = completion(handle.clone(), context, b"new");
             if wrong_length {
                 transfer.bytes += 1;
@@ -772,7 +816,9 @@ mod tests {
         }
         let published = parent.join("report.txt");
         std::fs::hard_link(&outside, &published).unwrap();
-        stager.accept_chunk(&handle, 0, b"new").unwrap();
+        stager
+            .accept_chunk(&upload_handle(&handle), 0, b"new")
+            .unwrap();
         assert_eq!(std::fs::read(&outside).unwrap(), b"untouched");
         stager.commit(&completion(handle, context, b"new")).unwrap();
         assert_eq!(std::fs::read(&outside).unwrap(), b"untouched");

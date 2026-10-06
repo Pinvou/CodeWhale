@@ -171,6 +171,9 @@ test("long-lived attestation survives more than 64 cycles without forgetting rec
     await value.hooks.handle({
       message: heartbeat("A", sequence), socket_identity: "socket-A", role: "A", lease,
     });
+    await value.hooks.handle({
+      message: heartbeat("B", sequence), socket_identity: "socket-B", role: "B", lease,
+    });
     const message = {
       ...challenge(`request-${sequence}`), challenge_id: `challenge-${sequence}`,
     };
