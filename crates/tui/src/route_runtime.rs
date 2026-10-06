@@ -380,8 +380,11 @@ pub(crate) fn resolve_route_candidate(
         context_window_override,
         None,
         // Config-free by contract: this wrapper's callers (unpinned child
-        // admission) consume only the wire model id and limits, never
-        // `candidate.protocol()`, so the static policy applies.
+        // admission, the fleet hermetic fallback) build no client from the
+        // candidate. The fallback renders `candidate.protocol()` as a display
+        // label only, and its `Custom` arm returns `None` above, so the
+        // static policy is display-correct there too — no wire-override table
+        // can reach a protocol-consuming consumer through this wrapper.
         None,
     )
     .map(|resolution| resolution.candidate)
@@ -475,7 +478,11 @@ pub(crate) fn resolve_route_candidate_with_context_metadata(
 /// `provider` names the pinned table), never the ambient selection — the two
 /// can name different tables on every thread/pin/restore path.
 pub(crate) fn custom_wire_override_for(config: &Config) -> Option<WireFormat> {
-    wire_dialect_override(config.provider_wire_dialect(ApiProvider::Custom))
+    // The scoped `provider` names the table this config resolves (the
+    // identity-scoped clone's table on pinned paths), so the unrecognized-
+    // dialect warning points at the right table.
+    let table = config.provider.as_deref().unwrap_or("custom");
+    wire_dialect_override(table, config.provider_wire_dialect(ApiProvider::Custom))
 }
 
 #[allow(clippy::too_many_arguments)]

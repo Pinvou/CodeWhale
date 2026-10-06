@@ -126,7 +126,7 @@ fn resolve_endpoint(
         // the handler's ChatCompletions-only guard rejects it (fail closed)
         // instead of forwarding to `{base}/chat/completions`.
         wire_override: (provider_kind == ProviderKind::Custom)
-            .then(|| wire_dialect_override(provider_cfg.wire.as_deref()))
+            .then(|| wire_dialect_override("custom", provider_cfg.wire.as_deref()))
             .flatten(),
     })?;
     let model = route.wire_model_id().as_str().to_string();

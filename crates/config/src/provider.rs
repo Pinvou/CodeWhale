@@ -1775,12 +1775,13 @@ pub fn wire_dialect_prefers_responses(wire: Option<&str>) -> bool {
 /// `chat` / absent / unrecognized values (the static descriptor policy
 /// applies). The resolver honors the override only for `ProviderKind::Custom`,
 /// and every other consumer gates the same way, so the warning below can only
-/// fire for a custom table. A non-empty unrecognized value is most likely a
-/// typo of the one string that switches the endpoint's protocol, so it is
-/// logged before degrading to the default policy — the parse stays total and
-/// forward-compatible.
+/// fire for a custom table — `table` names it in the log, since several
+/// tables can coexist and the typo must be locatable. A non-empty
+/// unrecognized value is most likely a typo of the one string that switches
+/// the endpoint's protocol, so it is logged before degrading to the default
+/// policy — the parse stays total and forward-compatible.
 #[must_use]
-pub fn wire_dialect_override(wire: Option<&str>) -> Option<WireFormat> {
+pub fn wire_dialect_override(table: &str, wire: Option<&str>) -> Option<WireFormat> {
     if wire_dialect_prefers_responses(wire) {
         Some(WireFormat::Responses)
     } else if wire_dialect_prefers_anthropic(wire) {
@@ -1793,6 +1794,7 @@ pub fn wire_dialect_override(wire: Option<&str>) -> Option<WireFormat> {
                 "chat" | "chat-completions" | "openai" | "openai-chat" | "openai-chat-completions"
             ) {
                 tracing::warn!(
+                    table = %table,
                     dialect = %raw,
                     "unrecognized custom-provider wire dialect; using the default Chat Completions policy"
                 );
@@ -1975,6 +1977,8 @@ pub fn provider_for_kind(kind: ProviderKind) -> &'static dyn Provider {
 mod tests {
     use super::*;
 
+    const TEST_TABLE: &str = "pinvou_responses";
+
     #[test]
     fn wire_dialect_override_parses_the_canonical_alias_sets() {
         // The exact alias sets are the cross-crate contract: the tui route
@@ -1991,7 +1995,7 @@ mod tests {
             "responses-compat",
         ] {
             assert_eq!(
-                wire_dialect_override(Some(dialect)),
+                wire_dialect_override(TEST_TABLE, Some(dialect)),
                 Some(WireFormat::Responses),
                 "{dialect} must parse as the Responses dialect"
             );
@@ -2005,7 +2009,7 @@ mod tests {
             "anthropic-compat",
         ] {
             assert_eq!(
-                wire_dialect_override(Some(dialect)),
+                wire_dialect_override(TEST_TABLE, Some(dialect)),
                 Some(WireFormat::AnthropicMessages),
                 "{dialect} must parse as the Anthropic Messages dialect"
             );
@@ -2015,32 +2019,32 @@ mod tests {
     #[test]
     fn wire_dialect_override_normalizes_case_whitespace_and_separators() {
         assert_eq!(
-            wire_dialect_override(Some("  Responses ")),
+            wire_dialect_override(TEST_TABLE, Some("  Responses ")),
             Some(WireFormat::Responses)
         );
         assert_eq!(
-            wire_dialect_override(Some("OPENAI_RESPONSES")),
+            wire_dialect_override(TEST_TABLE, Some("OPENAI_RESPONSES")),
             Some(WireFormat::Responses)
         );
         assert_eq!(
-            wire_dialect_override(Some("Anthropic Messages")),
+            wire_dialect_override(TEST_TABLE, Some("Anthropic Messages")),
             Some(WireFormat::AnthropicMessages)
         );
         assert_eq!(
-            wire_dialect_override(Some("anthropic-messages")),
+            wire_dialect_override(TEST_TABLE, Some("anthropic-messages")),
             Some(WireFormat::AnthropicMessages)
         );
         assert_eq!(
-            wire_dialect_override(Some("CLAUDE")),
+            wire_dialect_override(TEST_TABLE, Some("CLAUDE")),
             Some(WireFormat::AnthropicMessages)
         );
     }
 
     #[test]
     fn wire_dialect_override_defaults_chat_and_degrades_unknowns() {
-        assert_eq!(wire_dialect_override(None), None);
-        assert_eq!(wire_dialect_override(Some("")), None);
-        assert_eq!(wire_dialect_override(Some("   ")), None);
+        assert_eq!(wire_dialect_override(TEST_TABLE, None), None);
+        assert_eq!(wire_dialect_override(TEST_TABLE, Some("")), None);
+        assert_eq!(wire_dialect_override(TEST_TABLE, Some("   ")), None);
 
         // Recognized explicit-chat spellings degrade silently to the static
         // policy — they are deliberate, not typos.
@@ -2052,7 +2056,7 @@ mod tests {
             "openai-chat-completions",
         ] {
             assert_eq!(
-                wire_dialect_override(Some(dialect)),
+                wire_dialect_override(TEST_TABLE, Some(dialect)),
                 None,
                 "{dialect} must stay a silent no-preference value"
             );
@@ -2061,9 +2065,118 @@ mod tests {
         // A typo of the one string that switches the endpoint's protocol
         // degrades to the default Chat policy (the tui route layer pins the
         // same contract at the runtime candidate).
-        assert_eq!(wire_dialect_override(Some("respones")), None);
+        assert_eq!(wire_dialect_override(TEST_TABLE, Some("respones")), None);
         assert!(!wire_dialect_prefers_responses(Some("respones")));
         assert!(!wire_dialect_prefers_anthropic(Some("respones")));
+    }
+
+    #[test]
+    fn unrecognized_dialect_warns_once_and_names_the_table() {
+        // The degrade contract above pins the return value; this pins the
+        // diagnostic itself — exactly the unrecognized non-empty dialect
+        // warns, and the warning names the table so the typo is locatable
+        // among several named tables.
+        let captured = CapturedEvents::default();
+        tracing::subscriber::with_default(captured.clone(), || {
+            assert_eq!(
+                wire_dialect_override(TEST_TABLE, Some("respones")),
+                None,
+                "typo still degrades to the default policy"
+            );
+            assert_eq!(
+                wire_dialect_override(TEST_TABLE, Some("responses")),
+                Some(WireFormat::Responses),
+                "the recognized dialect still parses (silently)"
+            );
+            assert_eq!(wire_dialect_override(TEST_TABLE, None), None);
+            assert_eq!(wire_dialect_override(TEST_TABLE, Some("   ")), None);
+        });
+        let events = captured.events();
+        assert_eq!(
+            events.len(),
+            1,
+            "only the unrecognized non-empty dialect warns: {events:?}"
+        );
+        assert_eq!(events[0].table.as_deref(), Some(TEST_TABLE));
+        assert_eq!(events[0].dialect.as_deref(), Some("respones"));
+        assert!(
+            events[0].message.contains("unrecognized"),
+            "warning must describe the degrade: {:?}",
+            events[0].message
+        );
+    }
+
+    /// One captured `tracing` event, keeping only the fields the wire
+    /// dialect warning emits.
+    #[derive(Debug, Clone, Default)]
+    struct CapturedEvent {
+        message: String,
+        table: Option<String>,
+        dialect: Option<String>,
+    }
+
+    /// A minimal in-memory `tracing` subscriber so config-crate tests can
+    /// assert on their own diagnostics without a subscriber dependency.
+    /// Clones share the same buffer.
+    #[derive(Clone, Default)]
+    struct CapturedEvents(std::sync::Arc<std::sync::Mutex<Vec<CapturedEvent>>>);
+
+    impl CapturedEvents {
+        fn events(&self) -> Vec<CapturedEvent> {
+            self.0.lock().expect("event capture lock").clone()
+        }
+    }
+
+    impl tracing::Subscriber for CapturedEvents {
+        fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+            metadata.level() <= &tracing::Level::WARN
+        }
+
+        fn new_span(&self, _attributes: &tracing::span::Attributes<'_>) -> tracing::Id {
+            tracing::Id::from_u64(1)
+        }
+
+        fn record(&self, _span: &tracing::Id, _values: &tracing::span::Record<'_>) {}
+
+        fn event(&self, event: &tracing::Event<'_>) {
+            #[derive(Default)]
+            struct Visitor {
+                message: String,
+                table: Option<String>,
+                dialect: Option<String>,
+            }
+            impl tracing::field::Visit for Visitor {
+                fn record_debug(
+                    &mut self,
+                    field: &tracing::field::Field,
+                    value: &dyn std::fmt::Debug,
+                ) {
+                    match field.name() {
+                        "message" => self.message = format!("{value:?}"),
+                        "table" => self.table = Some(format!("{value:?}")),
+                        "dialect" => self.dialect = Some(format!("{value:?}")),
+                        _ => {}
+                    }
+                }
+            }
+
+            let mut visitor = Visitor::default();
+            event.record(&mut visitor);
+            self.0
+                .lock()
+                .expect("event capture lock")
+                .push(CapturedEvent {
+                    message: visitor.message,
+                    table: visitor.table,
+                    dialect: visitor.dialect,
+                });
+        }
+
+        fn enter(&self, _span: &tracing::Id) {}
+
+        fn exit(&self, _span: &tracing::Id) {}
+
+        fn record_follows_from(&self, _span: &tracing::Id, _follows: &tracing::Id) {}
     }
 
     #[test]

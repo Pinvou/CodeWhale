@@ -3383,6 +3383,10 @@ impl ConfigToml {
         // protocol, and endpoint come from a ReadyRouteCandidate. Auth/key
         // resolution above is unchanged. A resolver error keeps the existing
         // model string so this method stays total.
+        let custom_table_label = self
+            .named_custom_provider_id()
+            .unwrap_or("custom")
+            .to_string();
         let route = crate::route::RouteResolver::new()
             .resolve(&crate::route::RouteRequest {
                 explicit_provider: Some(provider),
@@ -3394,7 +3398,12 @@ impl ConfigToml {
                 // legacy); its dialect is the same fact the tui route layer
                 // threads, so this receipt cannot disagree with the turn.
                 wire_override: (provider == ProviderKind::Custom)
-                    .then(|| provider::wire_dialect_override(provider_cfg.wire.as_deref()))
+                    .then(|| {
+                        provider::wire_dialect_override(
+                            &custom_table_label,
+                            provider_cfg.wire.as_deref(),
+                        )
+                    })
                     .flatten(),
             })
             .ok();

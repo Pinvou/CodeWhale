@@ -405,11 +405,15 @@ pub(crate) fn route_is_valid_for_model(
         // describes. Identity-pinned tables are validated by the route
         // layer's identity-scoped resolution instead. Outcome-identical
         // today (Custom validation is protocol-independent), pinned against
-        // future drift.
+        // future drift. The ambient selection's name labels the dialect
+        // warning when the table's `wire` is a typo.
         wire_override: (kind == codewhale_config::ProviderKind::Custom)
             .then(|| {
                 configured.and_then(|entry| {
-                    codewhale_config::provider::wire_dialect_override(entry.wire.as_deref())
+                    codewhale_config::provider::wire_dialect_override(
+                        config.provider.as_deref().unwrap_or("custom"),
+                        entry.wire.as_deref(),
+                    )
                 })
             })
             .flatten(),
