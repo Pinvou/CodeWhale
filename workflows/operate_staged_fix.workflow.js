@@ -41,9 +41,8 @@ export default async function (args) {
     worktree: false,
     prompt: [
       "Read the implementer result and validate its reported path and diff summary.",
-      "Confirm the intended one-line clarification was made only in the isolated worktree.",
-      "Confirm the parent workspace remains unchanged until an explicit apply or merge.",
-      "Do not implement further edits. Return PASS/FAIL with evidence.",
+      "Your posture is read-only: no edit tools, and only the bounded read-only command subset.",
+      "Return PASS/FAIL with evidence: run read-only checks (git status, file reads) for each claim you rely on, and mark anything you did not verify as unverified rather than confirmed.",
       "",
       "implementer_result:",
       String(implement ?? "(missing)"),

@@ -172,7 +172,7 @@ Codewhale 没有恢复出厂设置命令，因此本文档也不会声称有。
 | `turns` | `crates/tui/src/tui/ui/event_loop.rs:1856`——`execute_turn_end_observer_hook` 的*调用者*。绝不在其内部：该函数的第一条语句是 `if !app.hooks.has_hooks_for_event(HookEvent::TurnEnd) { return Ok(()); }`（`crates/tui/src/tui/ui.rs:1035`），而自然的未来优化会把该检查提升到调用点，从而悄悄把所有没有 hooks 的用户的计数器归零。 |
 | `tool_calls` | `crates/tui/src/core/engine/tool_execution.rs:495`——与 surface 无关，exec 和 CLI 也会触发 |
 | `fleet_dispatch` | `crates/tui/src/fleet/manager.rs:374`——单一漏斗（`create_queued_run_with_descriptor`），`create_run` 和 `create_queued_run` 都落入其中；在任一调用方计数都会使普通的 `fleet run` 被重复计数。 |
-| `workflow_run` | 从 `parse_workflow_action`（`crates/tui/src/tools/workflow.rs:752-765`）返回的 **`WorkflowAction` 变体判别值**计数，绝不从 `input["action"]` 计数。`:775-779` 处的 JSON Schema 是发布*给模型*的——是声明，不是守卫；真正的解析还接受 `spawn\|wait\|list\|inspect\|stop\|abort`，其 `:761-763` 处的拒绝分支会原样嵌入模型字符串。 |
+| `workflow_run` | 从 `parse_workflow_action`（`crates/tui/src/tools/workflow/mod.rs:752-765`）返回的 **`WorkflowAction` 变体判别值**计数，绝不从 `input["action"]` 计数。`:775-779` 处的 JSON Schema 是发布*给模型*的——是声明，不是守卫；真正的解析还接受 `spawn\|wait\|list\|inspect\|stop\|abort`，其 `:761-763` 处的拒绝分支会原样嵌入模型字符串。 |
 | `subagent_spawn` | `crates/tui/src/tui/ui/apply.rs:32` |
 | `mcp_server_connected` | `crates/tui/src/mcp.rs:4254-4261` 快照中 `.connected` 的计数；绝不统计 `name`、`command_or_url` 或 `error`——服务器名是用户自选的，往往是内部基础设施 |
 | `memory_search` | `crates/tui/src/tools/native_memory.rs:60-61` 处的工具名，在 tool_execution 瓶颈点计数 |
