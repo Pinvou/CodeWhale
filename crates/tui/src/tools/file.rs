@@ -765,10 +765,11 @@ impl ReadFileTool {
         let first_display = start + 1;
         let mut output = if window.first_line_too_large {
             let size = selected.first().map_or(0, |line| line.len());
+            let budget = effective_read_max_bytes();
             format!(
-                "[Line {first_display} is {}, exceeds {} limit. Use bash: sed -n '{first_display}p' {path_str} | head -c {READ_MAX_BYTES}]",
+                "[Line {first_display} is {}, exceeds {} limit. Use bash: sed -n '{first_display}p' {path_str} | head -c {budget}]",
                 contract_format_size(size),
-                contract_format_size(READ_MAX_BYTES)
+                contract_format_size(budget)
             )
         } else {
             window.content
@@ -780,8 +781,9 @@ impl ReadFileTool {
             let next_offset = last_display + 1;
             if window.truncated_by_bytes {
                 output.push_str(&format!(
-                    "\n\n[Showing lines {first_display}-{last_display} of {} (50KB limit). Use offset={next_offset} to continue.]",
-                    all_lines.len()
+                    "\n\n[Showing lines {first_display}-{last_display} of {} ({} limit). Use offset={next_offset} to continue.]",
+                    all_lines.len(),
+                    contract_format_size(effective_read_max_bytes())
                 ));
             } else {
                 output.push_str(&format!(
