@@ -18,6 +18,8 @@ pub mod resolve;
 pub mod route;
 pub mod settings_schema;
 pub mod setup_state;
+#[cfg(test)]
+mod test_tracing;
 pub mod user_constitution;
 mod xai_credentials;
 pub use config_document::{
@@ -3383,10 +3385,21 @@ impl ConfigToml {
         // protocol, and endpoint come from a ReadyRouteCandidate. Auth/key
         // resolution above is unchanged. A resolver error keeps the existing
         // model string so this method stays total.
-        let custom_table_label = self
-            .named_custom_provider_id()
-            .unwrap_or("custom")
-            .to_string();
+        // The label must name the table `provider_cfg` above actually read:
+        // the named table only on the same Config-source condition that
+        // selected it, else the literal legacy table a CLI/env-forced Custom
+        // selection resolves — a typo warning that points at `relay_a` while
+        // the degraded dialect came from `[providers.custom]` would send the
+        // user to the wrong table.
+        let custom_table_label = if provider == ProviderKind::Custom
+            && matches!(provider_source, ProviderSource::Config)
+        {
+            self.named_custom_provider_id()
+                .unwrap_or("custom")
+                .to_string()
+        } else {
+            "custom".to_string()
+        };
         let route = crate::route::RouteResolver::new()
             .resolve(&crate::route::RouteRequest {
                 explicit_provider: Some(provider),

@@ -8820,6 +8820,64 @@ model = "gpt-6-sol"
     assert_eq!(chat.endpoint().endpoint_key, "chat");
 }
 
+/// The receipt's unrecognized-dialect warning must name the table the
+/// receipt actually read. A CLI/env-forced Custom selection resolves the
+/// literal legacy `[providers.custom]` table even while the config file
+/// selects a named table, so the label must not follow the named selection —
+/// a warning pointing at `relay_a` while the degraded dialect came from
+/// `[providers.custom]` would send the user to the wrong table. Deleting the
+/// Config-source condition on the label fails exactly this pin.
+#[test]
+fn cli_forced_custom_receipt_warns_against_the_table_it_reads() {
+    let _guard = env_lock();
+    let captured = crate::test_tracing::CapturedEvents::default();
+    let resolved = tracing::subscriber::with_default(captured.clone(), || {
+        let mut config: ConfigToml = toml::from_str(
+            r#"
+[providers.custom]
+wire = "respones"
+base_url = "https://legacy.example/v1"
+api_key = "legacy-key"
+model = "legacy-model"
+
+[providers.relay_a]
+kind = "openai-compatible"
+base_url = "https://relay-a.example/v1"
+api_key = "relay-key"
+model = "relay-model"
+"#,
+        )
+        .expect("two-table config parses");
+        config
+            .set_value("provider", "relay_a")
+            .expect("named selection resolves");
+        config.resolve_runtime_options(&CliRuntimeOverrides {
+            provider: Some(ProviderKind::Custom),
+            ..CliRuntimeOverrides::default()
+        })
+    });
+
+    // The receipt itself stays coherent: the forced selection reads the
+    // legacy table and degrades its typo to the static Chat policy.
+    let route = resolved.route.expect("legacy custom table resolves");
+    assert_eq!(
+        route.protocol(),
+        crate::provider::WireFormat::ChatCompletions
+    );
+
+    let events = captured.events();
+    assert_eq!(
+        events.len(),
+        1,
+        "exactly the unrecognized dialect warns: {events:?}"
+    );
+    assert_eq!(
+        events[0].field("table"),
+        Some("custom"),
+        "the warning must name the legacy table the receipt read, not the file's named selection: {events:?}"
+    );
+}
+
 /// #5441: the runtime receipt carries the same source the surfaces print.
 #[test]
 fn resolved_runtime_options_reports_telemetry_source() {
