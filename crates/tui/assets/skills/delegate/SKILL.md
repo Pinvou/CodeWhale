@@ -55,7 +55,7 @@ For code changes, give the child a precise write boundary and tell it not to rev
 }
 ```
 
-Use `fork_context: true` only when the child genuinely needs the current conversation prefix. Leave it omitted for fresh, narrower context.
+Keep each child's `prompt` self-contained: pass only the context that child needs rather than the whole conversation.
 
 ## Evaluate and Verify
 

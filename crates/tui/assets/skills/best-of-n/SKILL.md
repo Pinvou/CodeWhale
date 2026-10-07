@@ -35,7 +35,7 @@ the user has already chosen the approach.
 
 ## Generate Independently
 
-Start the candidates as parallel background `agent` workers and return agent_ids
+Start the candidates as parallel `agent` workers and return agent_ids
 immediately so the parent stays free. For proposals, reviews, or research, keep
 them read-only:
 
@@ -44,7 +44,7 @@ them read-only:
   "action": "start",
   "name": "candidate_1",
   "prompt": "Produce candidate 1 for the task below. Return the proposal, evidence, risks, and rubric self-score. Do not edit files.\n\n<TASK AND RUBRIC>",
-  "type": "general"
+  "type": "explore"
 }
 ```
 
