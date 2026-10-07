@@ -348,19 +348,17 @@ fn explicit_provider_credential_present(
             }))
 }
 
-/// Validate the configured provider/model/endpoint route without making a
-/// network request. This is shared by model inventory, `/model`, and Fleet so
-/// none of them can mark a route selectable when `/provider` would reject it.
-pub(crate) fn route_is_valid_for_model(
+/// The route request `route_is_valid_for_model` validates. Split out from the
+/// bool probe so the test suite can observe the wire threading directly:
+/// Custom validation is protocol-independent today, so deleting the
+/// `wire_override` plumb cannot change the resolution outcome — an
+/// observable request can.
+fn readiness_route_request(
     config: &crate::config::Config,
     provider: ApiProvider,
+    kind: codewhale_config::ProviderKind,
     model: Option<&str>,
-) -> bool {
-    let compatibility_kind =
-        (provider == ApiProvider::DeepseekCN).then_some(codewhale_config::ProviderKind::Deepseek);
-    let Some(kind) = provider.kind().or(compatibility_kind) else {
-        return true;
-    };
+) -> RouteRequest {
     let configured = config.provider_config_for(provider);
     let configured_model = model
         .map(str::trim)
@@ -376,7 +374,7 @@ pub(crate) fn route_is_valid_for_model(
     let active_model = (provider == config.api_provider())
         .then(|| config.default_model())
         .filter(|model| !model.trim().is_empty() && !model.eq_ignore_ascii_case("auto"));
-    let request = RouteRequest {
+    RouteRequest {
         explicit_provider: Some(kind),
         model_selector: configured_model.or(active_model).map(LogicalModelRef::from),
         saved_provider_model: None,
@@ -417,7 +415,23 @@ pub(crate) fn route_is_valid_for_model(
                 })
             })
             .flatten(),
+    }
+}
+
+/// Validate the configured provider/model/endpoint route without making a
+/// network request. This is shared by model inventory, `/model`, and Fleet so
+/// none of them can mark a route selectable when `/provider` would reject it.
+pub(crate) fn route_is_valid_for_model(
+    config: &crate::config::Config,
+    provider: ApiProvider,
+    model: Option<&str>,
+) -> bool {
+    let compatibility_kind =
+        (provider == ApiProvider::DeepseekCN).then_some(codewhale_config::ProviderKind::Deepseek);
+    let Some(kind) = provider.kind().or(compatibility_kind) else {
+        return true;
     };
+    let request = readiness_route_request(config, provider, kind, model);
     RouteResolver::new()
         .resolve(&request)
         .is_ok_and(|candidate| candidate.validation().ok)
@@ -784,6 +798,70 @@ mod tests {
             ApiProvider::Custom,
             Some("gpt-6-sol")
         ));
+    }
+
+    /// The readiness plumb must be observable, not just outcome-preserving:
+    /// Custom validation is protocol-independent, so the bool probe above
+    /// stays green even if the `wire_override` threading is deleted. This
+    /// pins the request readiness actually resolves — it must carry the
+    /// table's dialect and mint the same protocol the per-turn authority
+    /// binds for the same config. Deleting the threading in
+    /// `readiness_route_request` fails exactly this pin.
+    #[test]
+    fn readiness_threads_the_tables_wire_like_the_turn_path() {
+        let _lock = crate::test_support::lock_test_env();
+        let config = crate::test_support::custom_named_table_config(
+            "pinvou_responses",
+            Some("responses"),
+            "https://relay.example/v1",
+            "readiness-wire-test-key",
+            "gpt-6-sol",
+        );
+        let request = readiness_route_request(
+            &config,
+            ApiProvider::Custom,
+            codewhale_config::ProviderKind::Custom,
+            Some("gpt-6-sol"),
+        );
+        assert_eq!(
+            request.wire_override,
+            Some(codewhale_config::provider::WireFormat::Responses),
+            "readiness must read the table's dialect, not the static policy"
+        );
+        let candidate = RouteResolver::new()
+            .resolve(&request)
+            .expect("readiness request resolves");
+        let turn = crate::route_runtime::resolve_runtime_route(
+            &config,
+            ApiProvider::Custom,
+            Some("gpt-6-sol"),
+        )
+        .expect("turn route resolves");
+        assert!(
+            candidate.validation().ok,
+            "the wire threading must keep the table valid"
+        );
+        assert_eq!(
+            candidate.protocol(),
+            turn.candidate.protocol(),
+            "preflight cannot disagree with the per-turn client binding"
+        );
+
+        // A table without the dialect keeps the static-policy default.
+        let chat = crate::test_support::custom_named_table_config(
+            "pinvou_chat",
+            None,
+            "https://relay.example/v1",
+            "readiness-chat-test-key",
+            "vendor-model",
+        );
+        let request = readiness_route_request(
+            &chat,
+            ApiProvider::Custom,
+            codewhale_config::ProviderKind::Custom,
+            Some("vendor-model"),
+        );
+        assert_eq!(request.wire_override, None);
     }
 
     #[test]
