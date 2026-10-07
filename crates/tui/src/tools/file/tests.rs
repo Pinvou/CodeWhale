@@ -94,6 +94,89 @@ async fn contract_read_reports_huge_first_line_with_exact_bash_fallback() {
     );
 }
 
+#[tokio::test]
+async fn write_summary_counts_utf8_bytes_not_utf16_units() {
+    let temporary = tempfile::tempdir().expect("tempdir");
+    let context = ToolContext::new(temporary.path());
+    let result = WriteFileTool::execute_contract_write(
+        json!({"path": "cjk.txt", "content": "写"}),
+        &context,
+    )
+    .await
+    .expect("write result");
+    // `写` is 3 UTF-8 bytes but 1 UTF-16 code unit: the reported count must
+    // equal the bytes actually on disk.
+    assert!(
+        result
+            .content
+            .contains("Successfully wrote 3 bytes to cjk.txt"),
+        "{}",
+        result.content
+    );
+    assert_eq!(
+        std::fs::metadata(temporary.path().join("cjk.txt"))
+            .expect("written file")
+            .len(),
+        3
+    );
+}
+
+/// Under a non-KB-aligned custom budget the `read_file` window note floors
+/// to whole KB (60_000 → "58KB") while the `read` primitive's footers print
+/// the exact "58.6KB". Runs at the default budget would pass even if these
+/// values were re-hardcoded, so this test is what keeps the dynamic
+/// reporting honest. The workshop slot is a process global; CI's nextest
+/// isolates per test, and the slot is restored before any assertion so a
+/// panic here cannot poison sibling tests.
+#[tokio::test]
+async fn budget_limited_reads_report_the_effective_configured_budget() {
+    let temporary = tempfile::tempdir().expect("tempdir");
+    let many_lines: String = (0..200).map(|_| format!("{}\n", "x".repeat(500))).collect();
+    std::fs::write(temporary.path().join("many.txt"), many_lines).expect("fixture");
+    std::fs::write(temporary.path().join("wide.txt"), "y".repeat(60_001)).expect("fixture");
+    let windowed: String = (1..=200)
+        .map(|_| format!("{}\n", "z".repeat(400)))
+        .collect();
+    std::fs::write(temporary.path().join("windowed.txt"), windowed).expect("fixture");
+    let context = ToolContext::new(temporary.path());
+
+    crate::tools::large_output_router::WorkshopConfig::install_active(Some(
+        &crate::tools::large_output_router::WorkshopConfig {
+            read_result_max_bytes: Some(60_000),
+            ..crate::tools::large_output_router::WorkshopConfig::default()
+        },
+    ));
+    let ranged = ReadFileTool::execute_contract_read(json!({"path": "many.txt"}), &context)
+        .await
+        .expect("primitive read result");
+    let wide = ReadFileTool::execute_contract_read(json!({"path": "wide.txt"}), &context)
+        .await
+        .expect("primitive read result");
+    let windowed = ReadFileTool
+        .execute(json!({"path": "windowed.txt"}), &context)
+        .await
+        .expect("read_file window result");
+    crate::tools::large_output_router::WorkshopConfig::install_active(None);
+
+    assert!(
+        ranged.content.contains("(58.6KB limit)"),
+        "{}",
+        ranged.content
+    );
+    assert!(
+        wide.content
+            .contains("Line 1 is 58.6KB, exceeds 58.6KB limit"),
+        "{}",
+        wide.content
+    );
+    assert!(wide.content.contains("head -c 60000"), "{}", wide.content);
+    assert!(
+        windowed.content.contains("exceeded the 58KB read window"),
+        "{}",
+        windowed.content
+    );
+}
+
 /// The `read` primitive self-bounds its output to an explicit byte budget and
 /// ends budget-limited results with a resume footer. The context compactor's
 /// 12K hard limit used to re-truncate those already-bounded results,

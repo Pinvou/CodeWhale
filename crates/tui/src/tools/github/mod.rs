@@ -280,6 +280,36 @@ mod tests {
         );
     }
 
+    /// The condensation disclosure was rewritten three times inside this PR
+    /// (an "unless" phrasing and an uncorrected alias arm both regressed);
+    /// every read arm must keep stating it truthfully.
+    #[test]
+    fn read_arms_disclose_body_condensation() {
+        for (name, description) in [
+            ("read_only", GithubTool::read_only("github").description()),
+            ("default", GithubTool::new("github").description()),
+            (
+                "forced issue_context",
+                GithubTool::alias("github_issue_context", "issue_context").description(),
+            ),
+            (
+                "forced pr_context",
+                GithubTool::alias("github_pr_context", "pr_context").description(),
+            ),
+        ] {
+            assert!(
+                description.contains("~1200-char excerpt"),
+                "{name} arm must disclose the body condensation:\n{description}"
+            );
+        }
+        assert!(
+            GithubTool::alias("github_issue_context", "issue_context")
+                .description()
+                .contains("pass through verbatim"),
+            "forced issue_context arm must state what passes through verbatim"
+        );
+    }
+
     #[test]
     fn missing_close_evidence_refuses() {
         let input = json!({

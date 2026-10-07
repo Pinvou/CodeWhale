@@ -4,6 +4,7 @@ use std::fmt::Write as _;
 
 use crate::commands::traits::{CommandInfo, RegisterCommand};
 use crate::localization::MessageId;
+use crate::prompts::HANDOFF_RELATIVE_PATH;
 use crate::tui::app::{App, AppAction};
 
 use super::CommandResult;
@@ -39,7 +40,7 @@ pub fn relay(app: &mut App, arg: Option<&str>) -> CommandResult {
     let focus = arg.map(str::trim).filter(|value| !value.is_empty());
     let message = build_relay_instruction(app, focus);
     CommandResult::with_message_and_action(
-        "Preparing session relay at .codewhale/handoff.md...",
+        format!("Preparing session relay at {HANDOFF_RELATIVE_PATH}..."),
         AppAction::SendMessage(message),
     )
 }
@@ -51,7 +52,7 @@ fn build_relay_instruction(app: &App, focus: Option<&str>) -> String {
         "Create a compact session relay (接力) for a future Codewhale thread."
     );
     let _ = writeln!(out);
-    let _ = writeln!(out, "Write or update `.codewhale/handoff.md`.");
+    let _ = writeln!(out, "Write or update `{HANDOFF_RELATIVE_PATH}`.");
     let _ = writeln!(
         out,
         "Write the primary path so the next session loads it (a legacy `.deepseek/handoff.md` is only read as a fallback), and title the artifact `# Session relay`."

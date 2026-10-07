@@ -2875,8 +2875,8 @@ fn agent_description_explains_background_child_and_transcript_handle() {
              {description}"
         );
     }
-    // Headroom note: the description sits ~7 tokens (22 chars) under this
-    // cap at the round-4 tip (~3050 chars). Budget any reword against this
+    // Headroom note: the description sits 12 tokens (36 chars) under this
+    // cap at the round-5 tip (3036 chars). Budget any reword against this
     // limit instead of loosening the cap.
     assert!(
         estimate_tool_description_tokens_conservative(description) <= 1024,

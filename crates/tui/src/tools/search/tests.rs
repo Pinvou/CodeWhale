@@ -14,6 +14,15 @@ fn grep_description_matches_default_exclusion_behavior() {
 
     assert!(description.contains("skips common non-code directories"));
     assert!(!description.contains("respects `.gitignore`"));
+    // Every disclosure sentence below was added with the `truncated` fix;
+    // dropping any of them would re-hide the behavior it names.
+    assert!(description.contains("when the cap is reached `truncated` is true"));
+    assert!(
+        description
+            .contains("Files over 10MB and files containing invalid UTF-8 are skipped silently")
+    );
+    assert!(description.contains("after 30s"));
+    assert!(description.contains("replaces that default list entirely"));
 }
 
 /// Representative of the ~150 shared `optional_*` call sites outside the
