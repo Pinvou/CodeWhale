@@ -7,11 +7,12 @@ description: Scaffold a local Codewhale plugin bundle with a versioned manifest,
 
 Use this skill when a user wants a local Codewhale plugin bundle. The
 plugin loader is deliberately bounded: trusted and enabled bundles may add
-declarative Skills and MCP servers through the existing engines. Other
-component kinds are inventory-only. `plugin.json` is the native Agent
-Plugins manifest (`plugin.toml` is the legacy Codewhale format and stays
-readable); distribution goes through `/plugin marketplace add|install`, not
-a bundle-carried downloader.
+declarative Skills, MCP servers, Commands, Agent profiles, and Hooks
+through their existing engines. LSP servers, native extensions, filesystem
+roots, and lifecycle mutation stay inventory-only. `plugin.json` is the
+native Agent Plugins manifest (`plugin.toml` is the legacy Codewhale format
+and stays readable); distribution goes through `/plugin marketplace
+add|install`, not a bundle-carried downloader.
 
 ## Workflow
 
@@ -46,11 +47,11 @@ a bundle-carried downloader.
    tokens, and declare the exact normalized endpoint host set in
    `extensions["net.codewhale"].capabilities.network_hosts`. Never place
    credentials in the manifest.
-6. Declare commands, agents, hooks, LSP, native extensions, filesystem roots,
-   or lifecycle mutation only when inventorying future work. Codewhale shows
-   them as inactive and still activates reviewed Skills and MCP from the same
-   bundle. A bundle that only declares those unsupported surfaces cannot be
-   enabled.
+6. Declare commands, agents, or hooks only when the bundle genuinely needs
+   them — they activate with the rest of the bundle. Declare LSP servers,
+   native extensions, filesystem roots, or lifecycle mutation only when
+   inventorying future work: these show as inactive inventory next to the
+   components the bundle activates.
 7. Validate and review without executing bundle content:
    - `/plugin validate <plugin-name>`
    - `/plugin show <plugin-name>`
@@ -58,8 +59,8 @@ a bundle-carried downloader.
    - run the exact `/plugin trust ...` confirmation shown, then enable again
 8. Verify `/skills inspect` reports plugin provenance and `/plugin list`
    reports the expected trust and activation state. Trust stages the reviewed
-   content but does not activate it; enablement rebuilds the current
-   workspace's Skill/MCP catalogue immediately.
+   content but does not activate it; enablement reloads the workspace's
+   plugin-provided skills, commands, MCP servers, and hooks immediately.
 
 Every user and workspace bundle starts untrusted and disabled. A bundle
 must not carry its own downloader, updater, compatibility scan, executable
