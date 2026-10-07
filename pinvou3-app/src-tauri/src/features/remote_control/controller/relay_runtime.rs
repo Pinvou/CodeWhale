@@ -787,6 +787,25 @@ pub(crate) struct ControlledRelayWorker {
     /// Dropping the generation owner clears them; every hit is fingerprint-bound.
     action_results: std::sync::Arc<RemoteActionResultCache>,
     business_epoch: std::sync::Arc<AtomicU64>,
+    #[cfg(test)]
+    processed_frames: Option<tokio::sync::mpsc::Sender<Value>>,
+}
+
+/// Test-only completion observation: follows the exact production branch,
+/// including its continue/return paths, without injecting a routing shortcut.
+#[cfg(test)]
+struct ProcessedControllerFrame {
+    sink: Option<tokio::sync::mpsc::Sender<Value>>,
+    frame: Value,
+}
+
+#[cfg(test)]
+impl Drop for ProcessedControllerFrame {
+    fn drop(&mut self) {
+        if let Some(sink) = &self.sink {
+            let _ = sink.try_send(self.frame.clone());
+        }
+    }
 }
 
 /// Narrow port over the generation-bound Relay lane. Keeps the registration
@@ -1026,6 +1045,8 @@ impl ControlledRelayWorker {
             business,
             action_results: std::sync::Arc::new(RemoteActionResultCache::default()),
             business_epoch: std::sync::Arc::new(AtomicU64::new(0)),
+            #[cfg(test)]
+            processed_frames: None,
         };
         tauri::async_runtime::spawn(async move {
             let result = worker.register_pairing().await;
@@ -1180,6 +1201,11 @@ impl ControlledRelayWorker {
                 }
                 message = self.channel.recv() => {
                     let Some(message) = message else { break 'serve };
+                    #[cfg(test)]
+                    let _processed = ProcessedControllerFrame {
+                        sink: self.processed_frames.clone(),
+                        frame: message.clone(),
+                    };
                     if message.get("type").and_then(Value::as_str) == Some("desktop_controller_stop") {
                         break 'serve;
                     }
@@ -2273,7 +2299,9 @@ pub(crate) enum ControlledResumeOutcome {
 /// E2E-06：`desktop socket` 掉线后启动 B 端恢复：投影 reconnecting、取恢复材料，
 /// 并按冻结协议发出 `controller_resume_prepare`。任一步失败返回 false，调用方
 /// 必须结束本代通道。管理器内部的恢复失败会立即清理租约与本代凭证；构造或
-/// 入队等管理器外失败由已冻结的 watchdog 截止及独立每秒 reaper 有界收口，
+/// 入队等管理器外失败由已冻结的 watchdog 截止及命令层
+/// `desktop_remote_controlled::spawn_watchdog_reaper`（应用 setup 注册、独立每秒轮询）
+/// 有界收口；它独立于本 worker 的两秒 poll，不随本 worker 退出而停止。
 /// 不表示所有返回 false 的路径都已经完成清理，也不会因恢复而延长截止。
 pub(crate) fn begin_controlled_resume<P: ControlledRelayPort + ?Sized>(
     port: &P,
@@ -2698,6 +2726,11 @@ fn sanitize_error(value: &str) -> String {
         bounded
     }
 }
+
+// This integration uses the real Windows Wry host without creating windows;
+// unsupported desktop-control platforms do not run a simulated Wry adapter.
+#[cfg(test)]
+mod reader_resume_tests;
 
 #[cfg(test)]
 mod tests {

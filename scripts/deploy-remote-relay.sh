@@ -107,12 +107,7 @@ if [[ "${SKIP_WEB_BUILD:-0}" != "1" ]]; then
 else
   echo "使用已构建并验证的共享 WebUI 产物"
 fi
-test -f "$RELAY_DIR/web/dist/index.html"
-test -f "$RELAY_DIR/web/dist/platform/tauri/bridge.js"
-grep -Fq '<base href="/pinvou3/remote/">' "$RELAY_DIR/web/dist/index.html"
-# 当前 WebUI 由入口 JS 动态加载 bridge，index.html 不再内联该路径；改为校验
-# 「入口引用生产 base path 且 bridge 资源随包存在」，避免把构建方式变化误判成部署失败。
-grep -Fq '/pinvou3/remote/assets/' "$RELAY_DIR/web/dist/index.html"
+node "$RELAY_DIR/verify-web-dist.js" "$RELAY_DIR/web/dist" "$BASE_PATH"
 if [[ "${SKIP_LOCAL_TESTS:-0}" != "1" ]]; then
   (cd "$RELAY_DIR" && npm test)
 fi
@@ -169,6 +164,8 @@ rm -rf "$code_stage"
 mkdir -p "$code_stage"
 tar --no-same-owner --no-same-permissions -xzf "$code_tmp" -C "$code_stage"
 rm -f "$code_tmp"
+# 暂存验证使用本次上传的 ESM 声明，不依赖现役 package 或 Node 语法探测。
+cp "$package_tmp" "$code_stage/package.json"
 node --check "$code_stage/server.js"
 node --check "$code_stage/telemetry-service.js"
 node --check "$code_stage/behavior-telemetry-schema.js"
@@ -192,12 +189,7 @@ chown -R root:root "$web_stage"
 find "$web_stage" -type d -exec chmod 755 {} +
 find "$web_stage" -type f -exec chmod 644 {} +
 rm -f "$web_tmp"
-test -f "$web_stage/index.html"
-test -f "$web_stage/platform/tauri/bridge.js"
-grep -Fq '<base href="/pinvou3/remote/">' "$web_stage/index.html"
-# 当前 WebUI 由入口 JS 动态加载 bridge，index.html 不再内联该路径（2026-09-19 实测）；
-# 校验「入口引用生产 base path 且 bridge 资源随包存在」即可保持本意。
-grep -Fq '/pinvou3/remote/assets/' "$web_stage/index.html"
+node "$code_stage/verify-web-dist.js" "$web_stage" "/pinvou3/remote"
 mkdir -p "$backup"
 if [[ -f "$remote_dir/server.js" ]]; then cp -a "$remote_dir/server.js" "$backup/server.js"; else touch "$backup/no-server"; fi
 if [[ -d "$remote_dir/web/dist" ]]; then cp -a "$remote_dir/web/dist" "$backup/web-dist"; else touch "$backup/no-web-dist"; fi

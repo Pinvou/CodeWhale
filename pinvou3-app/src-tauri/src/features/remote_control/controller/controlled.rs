@@ -1135,6 +1135,24 @@ impl ControlledDeviceManager {
         resolve_workspace_locked(&inner, workspace_id)
     }
 
+    #[cfg(test)]
+    pub(crate) fn resume_phase_for_test(&self) -> Option<ResumePhase> {
+        self.inner
+            .lock()
+            .resume_gate
+            .as_ref()
+            .map(|gate| gate.phase())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn watchdog_deadline_for_test(&self) -> Option<u64> {
+        self.inner
+            .lock()
+            .watchdog
+            .as_ref()
+            .and_then(|watchdog| watchdog.deadline_b())
+    }
+
     pub(crate) fn status(&self) -> ControlledStatus {
         status_locked(&self.inner.lock())
     }
