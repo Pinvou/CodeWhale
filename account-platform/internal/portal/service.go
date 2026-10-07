@@ -32,6 +32,7 @@ type Config struct {
 	TokenURL                   *url.URL
 	AccountURL                 *url.URL
 	TokenGatewayURL            *url.URL
+	BillingURL                 *url.URL
 	ClientID                   string
 	HandoffClientID            string
 	HandoffClientSecret        string
@@ -79,7 +80,7 @@ func NewService(config Config, store Store) (*Service, error) {
 		return nil, errors.New("invalid portal configuration")
 	}
 	development := config.Environment == "development" || config.Environment == "test"
-	for _, endpoint := range []*url.URL{config.PublicURL, config.AuthorizationURL, config.TokenURL, config.AccountURL, config.TokenGatewayURL, config.IssuerURL, config.JWKSURL} {
+	for _, endpoint := range []*url.URL{config.PublicURL, config.AuthorizationURL, config.TokenURL, config.AccountURL, config.TokenGatewayURL, config.BillingURL, config.IssuerURL, config.JWKSURL} {
 		if endpoint == nil || endpoint.Hostname() == "" || (endpoint.Scheme != "https" && endpoint.Scheme != "http") || endpoint.User != nil || endpoint.RawQuery != "" || endpoint.ForceQuery || endpoint.Fragment != "" || endpoint.Opaque != "" {
 			return nil, errors.New("portal endpoints must be absolute HTTP(S) URLs without credentials, query or fragments")
 		}
@@ -144,6 +145,12 @@ func (s *Service) Handler(static http.Handler) http.Handler {
 	router.Any("/api/account/*resource", httpserver.AdaptFunc(s.proxyAccount))
 	router.Any("/api/token/*resource", httpserver.AdaptFunc(s.proxyToken))
 	router.Any("/api/admin/account/*resource", httpserver.AdaptFunc(s.proxyAdminAccount))
+	router.Any("/api/admin/billing/*resource", httpserver.AdaptFunc(s.proxyAdminBilling))
+	router.GET("/api/admin/approvals/capability", httpserver.AdaptFunc(s.adminApprovalCapability))
+	router.GET("/api/admin/approvals/directory", httpserver.AdaptFunc(s.adminApprovalDirectory))
+	router.GET("/api/admin/approvals/requests", httpserver.AdaptFunc(s.adminApprovalRequests))
+	router.POST("/api/admin/approvals/requests", httpserver.AdaptFunc(s.adminApprovalRequests))
+	router.Any("/api/admin/approvals/requests/*resource", httpserver.AdaptFunc(s.adminApprovalRequests))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Referrer-Policy", "no-referrer")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
@@ -308,7 +315,7 @@ func (s *Service) callback(w http.ResponseWriter, r *http.Request) {
 	now := s.now()
 	sessionID, sessionIDErr := randomToken(32)
 	csrfToken, csrfErr := randomToken(32)
-	session := Session{ID: sessionID, AccessToken: tokens.AccessToken, RefreshToken: tokens.RefreshToken, AccessExpiresAt: exchangeStartedAt.Add(time.Duration(tokens.ExpiresIn) * time.Second), RefreshExpiresAt: exchangeStartedAt.Add(time.Duration(tokens.RefreshExpiresIn) * time.Second), CSRFToken: csrfToken, CreatedAt: now, Subject: subject, Nonce: flow.Nonce}
+	session := Session{ApprovalV2Eligible: true, ID: sessionID, AccessToken: tokens.AccessToken, RefreshToken: tokens.RefreshToken, AccessExpiresAt: exchangeStartedAt.Add(time.Duration(tokens.ExpiresIn) * time.Second), RefreshExpiresAt: exchangeStartedAt.Add(time.Duration(tokens.RefreshExpiresIn) * time.Second), CSRFToken: csrfToken, CreatedAt: now, Subject: subject, Nonce: flow.Nonce}
 	session.LineageRoot = strings.TrimSpace(flow.LineageRoot)
 	if session.LineageRoot == "" && flow.PreviousSession != "" {
 		session.LineageRoot = flow.PreviousSession
@@ -711,7 +718,23 @@ func accountPathAllowed(method, resource string) bool {
 	return (len(parts) == 4 && method == http.MethodGet) || (len(parts) == 5 && parts[4] == "mobile-challenges" && method == http.MethodPost) || (len(parts) == 6 && parts[4] == "actions" && parts[5] == "complete" && method == http.MethodPost)
 }
 func tokenPathAllowed(method, resource string) bool {
-	return (method == http.MethodGet || method == http.MethodHead) && resource == "/v1/me/balance"
+	if method == http.MethodHead {
+		method = http.MethodGet
+	}
+	if method == http.MethodGet {
+		switch resource {
+		case "/v1/me/balance", "/v1/recharge/products", "/v1/payment-capabilities", "/v1/recharge/orders", "/v1/recharge/orders/recent", "/v1/me/entitlement-packages":
+			return true
+		}
+	}
+	if method == http.MethodPost && resource == "/v1/recharge/orders" {
+		return true
+	}
+	parts := strings.Split(strings.TrimPrefix(resource, "/"), "/")
+	if len(parts) < 4 || parts[0] != "v1" || parts[1] != "recharge" || parts[2] != "orders" || !pathUUID(parts[3]) {
+		return false
+	}
+	return method == http.MethodGet && len(parts) == 4 || method == http.MethodPost && len(parts) == 5 && (parts[4] == "close" || parts[4] == "payment-claims")
 }
 func accountAdminPathAllowed(method, resource string) bool {
 	if method == http.MethodHead {
@@ -809,6 +832,14 @@ func (s *Service) forward(w http.ResponseWriter, r *http.Request, upstream *url.
 			}
 			request.Header.Set("X-Pinvou-Client-Source", source)
 		}
+	}
+	if upstream == s.config.TokenGatewayURL && strings.HasPrefix(resource, "/v1/recharge/") {
+		source, valid := s.clientRiskSource(r)
+		if !valid {
+			api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST_SOURCE", "the request source is invalid", httpserver.RequestID(r.Context()))
+			return
+		}
+		request.Header.Set("X-Forwarded-For", source)
 	}
 	response, err := s.client.Do(request)
 	if err != nil {

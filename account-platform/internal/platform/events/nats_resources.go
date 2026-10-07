@@ -26,6 +26,7 @@ type NATSConfig struct {
 	CredentialsFile string
 	// RequireExplicitAuthentication forbids falling back to the process-wide
 	// generic relay identity. It is used by the dedicated authorization relay.
+	ApprovalConsumerResources     *ApprovalConsumerResourceBinding
 	RequireExplicitAuthentication bool
 }
 

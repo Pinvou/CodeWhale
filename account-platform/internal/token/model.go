@@ -14,6 +14,8 @@ var (
 
 type AuthorizationContext struct {
 	UserID               uuid.UUID
+	Mobile               *string
+	MobileVerified       bool
 	SessionID            string
 	ContextType          string
 	OrganizationID       *uuid.UUID

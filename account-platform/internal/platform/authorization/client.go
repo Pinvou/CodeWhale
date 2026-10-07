@@ -14,6 +14,7 @@ import (
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/api"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/humandelegation"
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/identity"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/observability"
@@ -24,6 +25,7 @@ import (
 
 type Client struct {
 	endpoint     *url.URL
+	delegations  *url.URL
 	serviceToken string
 	httpClient   *http.Client
 }
@@ -46,7 +48,9 @@ func NewClient(rawURL, serviceToken string) (*Client, error) {
 		return nil, errors.New("INTERNAL_SERVICE_TOKEN is required")
 	}
 	parsed.Path = strings.TrimRight(parsed.Path, "/") + "/internal/v1/authorization/check"
-	return &Client{endpoint: parsed, serviceToken: serviceToken, httpClient: observability.NewHTTPClient(3 * time.Second)}, nil
+	delegations := *parsed
+	delegations.Path = strings.TrimSuffix(parsed.Path, "/check") + "/human-delegations"
+	return &Client{endpoint: parsed, delegations: &delegations, serviceToken: serviceToken, httpClient: observability.NewHTTPClient(3 * time.Second)}, nil
 }
 
 func (c *Client) Allowed(ctx context.Context, principal identity.Principal, permission string) (bool, http.Header, error) {
@@ -300,3 +304,58 @@ func decodeDecision(reader io.Reader) (decision, error) {
 	}
 	return decision{Allowed: *wire.Allowed, UserID: wire.UserID, GrantedPermissions: wire.GrantedPermissions}, nil
 }
+
+type DelegationRequest struct {
+	Audience           string
+	Permission         string
+	OrganizationID     *uuid.UUID
+	UnitID             *uuid.UUID
+	TargetResourceType string
+	TargetResourceID   string
+	HTTPMethod         string
+	HTTPPath           string
+	RequestSHA256      string
+}
+
+func (c *Client) Delegate(ctx context.Context, principal identity.Principal, input DelegationRequest) (string, error) {
+	payload, err := json.Marshal(map[string]any{
+		"issuer": principal.Issuer, "subject": principal.Subject, "audience": input.Audience, "permission": input.Permission,
+		"target_organization_id": input.OrganizationID, "target_unit_id": input.UnitID, "target_resource_type": input.TargetResourceType,
+		"target_resource_id": input.TargetResourceID, "http_method": input.HTTPMethod, "http_path": input.HTTPPath, "request_sha256": input.RequestSHA256,
+	})
+	if err != nil {
+		return "", err
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, c.delegations.String(), bytes.NewReader(payload))
+	if err != nil {
+		return "", err
+	}
+	if err := serviceauth.SetAuthorization(request, c.serviceToken); err != nil {
+		return "", err
+	}
+	request.Header.Set("Content-Type", "application/json")
+	response, err := c.httpClient.Do(request)
+	if err != nil {
+		return "", err
+	}
+	defer response.Body.Close()
+	if response.StatusCode == http.StatusForbidden {
+		return "", ErrPermissionDenied
+	}
+	if response.StatusCode != http.StatusCreated {
+		return "", errors.New("account human delegation failed")
+	}
+	raw, err := io.ReadAll(io.LimitReader(response.Body, (64<<10)+1))
+	if err != nil || len(raw) > 64<<10 {
+		return "", errors.New("account human delegation response is invalid")
+	}
+	var result struct {
+		Delegation string `json:"delegation"`
+	}
+	if json.Unmarshal(raw, &result) != nil || strings.TrimSpace(result.Delegation) == "" {
+		return "", errors.New("account human delegation response is invalid")
+	}
+	return result.Delegation, nil
+}
+
+func RequestSHA256(body []byte) string { return humandelegation.RequestDigest(body) }

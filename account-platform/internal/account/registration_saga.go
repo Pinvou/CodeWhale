@@ -324,6 +324,9 @@ func (r *PostgresRepository) CommitRegistration(ctx context.Context, operationID
 	if err := r.ensureWalletProvisioningJob(ctx, tx, operation.CandidateUserID, &operation.ID, now); err != nil {
 		return RegistrationOperation{}, err
 	}
+	if err := enqueueCommerceCustomerSync(ctx, tx, "USER", operation.CandidateUserID, operation.Mobile, r.commerceProviderID, r.commerceAdapterVersion, "CUSTOMER_PROVISIONING", now); err != nil {
+		return RegistrationOperation{}, err
+	}
 	if err := appendAudit(ctx, tx, operation.CandidateUserID, "registration", nil, "account.mobile.register", "registration_operation", operation.ID.String(), "SUCCEEDED", map[string]any{"mobile_verified": true, "status": "PROVISIONING"}); err != nil {
 		return RegistrationOperation{}, err
 	}

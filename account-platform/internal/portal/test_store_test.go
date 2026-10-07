@@ -179,7 +179,7 @@ func testService(t *testing.T, store Store) *Service {
 		}
 		return parsed
 	}
-	service, err := NewService(Config{Environment: "test", IssuerURL: parse("https://identity.example"), JWKSURL: parse("https://identity.example/keys"), PublicURL: parse("https://portal.example"), AuthorizationURL: parse("https://identity.example/auth"), TokenURL: parse("https://identity.example/token"), ClientID: "portal", AccountURL: parse("https://account.example"), TokenGatewayURL: parse("https://token.example"), SecureCookies: true}, store)
+	service, err := NewService(Config{Environment: "test", IssuerURL: parse("https://identity.example"), JWKSURL: parse("https://identity.example/keys"), PublicURL: parse("https://portal.example"), AuthorizationURL: parse("https://identity.example/auth"), TokenURL: parse("https://identity.example/token"), ClientID: "portal", AccountURL: parse("https://account.example"), TokenGatewayURL: parse("https://token.example"), BillingURL: parse("https://billing.example"), SecureCookies: true}, store)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -91,7 +91,7 @@ func newSessionHandoffTestService(t *testing.T, refreshedUser string) (*Service,
 	publicURL, _ := url.Parse("http://127.0.0.1:8080")
 	service, err := NewService(Config{
 		Environment: "test", IssuerURL: accountURL, JWKSURL: accountURL, PublicURL: publicURL, AccountURL: accountURL,
-		TokenGatewayURL: accountURL, TokenURL: tokenURL, AuthorizationURL: tokenURL,
+		TokenGatewayURL: accountURL, BillingURL: accountURL, TokenURL: tokenURL, AuthorizationURL: tokenURL,
 		ClientID: "portal", HandoffClientID: "portal-handoff", HandoffClientSecret: "handoff-secret",
 		HandoffSubjectTokenEnabled: true, SessionHandoffTTL: 30 * time.Second,
 	}, store)

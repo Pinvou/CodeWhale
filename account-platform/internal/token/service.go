@@ -119,21 +119,33 @@ func (r *HTTPWalletResolver) Ensure(ctx context.Context, ownerType string, owner
 	return body.WalletID, nil
 }
 
-// This stage serves the real personal-wallet balance chain. Model, payment,
-// organizational and governance routes are introduced with their complete owner.
+// Personal finance exposes only the completed payment, wallet and entitlement
+// routes. Model calls and organization operations have separate owners.
 type Service struct {
-	contexts   ContextResolver
-	wallets    WalletResolver
-	billing    BillingClient
-	authorizer *authorization.Client
+	contexts          ContextResolver
+	wallets           WalletResolver
+	billing           BillingClient
+	commerceCustomers CommerceCustomerResolver
+	authorizer        *authorization.Client
 }
 
 type BillingClient interface {
 	Balance(context.Context, uuid.UUID) (json.RawMessage, error)
+	Products(context.Context) (json.RawMessage, error)
+	CreateRechargeOrder(context.Context, uuid.UUID, uuid.UUID, string, string, string, string, string) (json.RawMessage, error)
+	RechargeOrders(context.Context, uuid.UUID, uuid.UUID) (json.RawMessage, error)
+	RecentRechargeOrder(context.Context, uuid.UUID, uuid.UUID) (json.RawMessage, error)
+	RechargeOrder(context.Context, uuid.UUID, uuid.UUID) (json.RawMessage, error)
+	CloseRechargeOrder(context.Context, uuid.UUID, uuid.UUID) (json.RawMessage, error)
+	AddLatePaymentClaim(context.Context, uuid.UUID, uuid.UUID, string) (json.RawMessage, error)
 }
 
 func NewService(contexts ContextResolver, wallets WalletResolver, billing BillingClient) *Service {
-	return &Service{contexts: contexts, wallets: wallets, billing: billing}
+	service := &Service{contexts: contexts, wallets: wallets, billing: billing}
+	if resolver, ok := contexts.(CommerceCustomerResolver); ok {
+		service.commerceCustomers = resolver
+	}
+	return service
 }
 
 func (s *Service) Handler(verify identity.VerifyFunc) http.Handler {
@@ -141,6 +153,15 @@ func (s *Service) Handler(verify identity.VerifyFunc) http.Handler {
 	protected := router.Group("/v1")
 	protected.Use(identity.GinMiddleware(verify))
 	protected.GET("/me/balance", httpserver.AdaptFunc(s.getBalance))
+	protected.GET("/recharge/products", httpserver.AdaptFunc(s.rechargeProducts))
+	protected.GET("/payment-capabilities", httpserver.AdaptFunc(s.paymentCapabilities))
+	protected.POST("/recharge/orders", httpserver.AdaptFunc(s.createRechargeOrder))
+	protected.GET("/recharge/orders", httpserver.AdaptFunc(s.listRechargeOrders))
+	protected.GET("/recharge/orders/recent", httpserver.AdaptFunc(s.getRecentRechargeOrder))
+	protected.GET("/recharge/orders/:order_id", httpserver.AdaptFunc(s.getRechargeOrder))
+	protected.POST("/recharge/orders/:order_id/close", httpserver.AdaptFunc(s.closeRechargeOrder))
+	protected.POST("/recharge/orders/:order_id/payment-claims", httpserver.AdaptFunc(s.addLatePaymentClaim))
+	protected.GET("/me/entitlement-packages", httpserver.AdaptFunc(s.getEntitlementPackages))
 	return router
 }
 

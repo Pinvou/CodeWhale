@@ -1,10 +1,10 @@
 package token
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/serviceauth"
 	"io"
 
@@ -19,7 +19,7 @@ import (
 )
 
 func (c *HTTPBillingClient) Balance(ctx context.Context, walletID uuid.UUID) (json.RawMessage, error) {
-	payload, err := c.raw(ctx, http.MethodGet, "/internal/v1/wallets/"+walletID.String()+"/balance")
+	payload, err := c.raw(ctx, http.MethodGet, "/internal/v1/wallets/"+walletID.String()+"/balance", nil, "")
 	if err != nil {
 		return nil, err
 	}
@@ -43,28 +43,52 @@ func NewHTTPBillingClient(rawURL, serviceToken string) (*HTTPBillingClient, erro
 	return &HTTPBillingClient{baseURL: parsed, serviceToken: serviceToken, client: observability.NewHTTPClient(10 * time.Second)}, nil
 }
 
-func (c *HTTPBillingClient) raw(ctx context.Context, method, endpointPath string) (json.RawMessage, error) {
-	request, err := http.NewRequestWithContext(ctx, method, c.baseURL.String()+endpointPath, nil)
+func (c *HTTPBillingClient) raw(ctx context.Context, method, endpointPath string, input any, idempotencyKey string) (json.RawMessage, error) {
+	var reader io.Reader
+	if input != nil {
+		encoded, err := json.Marshal(input)
+		if err != nil {
+			return nil, err
+		}
+		reader = bytes.NewReader(encoded)
+	}
+	request, err := http.NewRequestWithContext(ctx, method, c.baseURL.String()+endpointPath, reader)
 	if err != nil {
 		return nil, err
 	}
 	if err := serviceauth.SetAuthorization(request, c.serviceToken); err != nil {
 		return nil, err
 	}
+	if input != nil {
+		request.Header.Set("Content-Type", "application/json")
+	}
+	if idempotencyKey != "" {
+		request.Header.Set("Idempotency-Key", idempotencyKey)
+	}
+	if source, ok := ctx.Value(paymentSourceContextKey{}).(string); ok && source != "" {
+		request.Header.Set("X-Pinvou-Client-Source", source)
+	}
 	response, err := c.client.Do(request)
 	if err != nil {
 		return nil, err
 	}
 	defer response.Body.Close()
-	if response.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("Billing balance returned HTTP %d", response.StatusCode)
-	}
+
 	body, err := io.ReadAll(io.LimitReader(response.Body, (2<<20)+1))
 	if err != nil {
 		return nil, err
 	}
 	if len(body) > 2<<20 || !json.Valid(body) {
 		return nil, errors.New("Billing balance response is invalid")
+	}
+	if response.StatusCode != http.StatusOK && !(method == http.MethodPost && response.StatusCode == http.StatusCreated) {
+		var problem struct {
+			Code string `json:"code"`
+		}
+		if json.Unmarshal(body, &problem) == nil && problem.Code == "COMMERCE_CUSTOMER_NOT_READY" {
+			return nil, ErrCommerceCustomerNotReady
+		}
+		return nil, &BillingHTTPError{Status: response.StatusCode, Code: problem.Code, RetryAfter: response.Header.Get("Retry-After")}
 	}
 	return json.RawMessage(body), nil
 }

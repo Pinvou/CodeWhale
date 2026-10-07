@@ -63,7 +63,7 @@ func oidcTestService(t *testing.T, store Store, tokenHandler http.Handler) (*Ser
 	t.Cleanup(keys.Close)
 	endpoint := httptest.NewServer(tokenHandler)
 	t.Cleanup(endpoint.Close)
-	service, err := NewService(Config{Environment: "test", PublicURL: parseTestURL(t, "https://portal.example"), IssuerURL: parseTestURL(t, "https://public-identity.example/realm"), JWKSURL: parseTestURL(t, keys.URL), AuthorizationURL: parseTestURL(t, "https://public-identity.example/auth"), TokenURL: parseTestURL(t, endpoint.URL), ClientID: "portal", AccountURL: parseTestURL(t, "https://account.example"), TokenGatewayURL: parseTestURL(t, "https://token.example"), SecureCookies: true}, store)
+	service, err := NewService(Config{Environment: "test", PublicURL: parseTestURL(t, "https://portal.example"), IssuerURL: parseTestURL(t, "https://public-identity.example/realm"), JWKSURL: parseTestURL(t, keys.URL), AuthorizationURL: parseTestURL(t, "https://public-identity.example/auth"), TokenURL: parseTestURL(t, endpoint.URL), ClientID: "portal", AccountURL: parseTestURL(t, "https://account.example"), TokenGatewayURL: parseTestURL(t, "https://token.example"), BillingURL: parseTestURL(t, "https://billing.example"), SecureCookies: true}, store)
 	if err != nil {
 		t.Fatal(err)
 	}

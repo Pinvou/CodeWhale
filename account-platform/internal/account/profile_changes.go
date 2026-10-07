@@ -883,6 +883,12 @@ func (r *PostgresRepository) CommitProfileChange(ctx context.Context, id uuid.UU
 		return ErrProfileChangeConflict
 	}
 
+	if c.Field == "MOBILE" {
+		if err := enqueueCommerceCustomerSync(ctx, tx, "USER", c.UserID, c.NewValue, r.commerceProviderID, r.commerceAdapterVersion, "PROFILE_SYNC", r.now()); err != nil {
+			return err
+		}
+	}
+
 	_, err = tx.Exec(ctx, `UPDATE profile_change_requests SET account_committed_at=$2,status='ACCOUNT_COMMITTED',version=version+1,updated_at=$2 WHERE id=$1`, id, r.now())
 	if err != nil {
 		return err

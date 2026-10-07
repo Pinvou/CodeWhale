@@ -2,6 +2,9 @@ import { requirePersonalAccount } from './personal-contract.js';
 import React, { useEffect, useRef, useState } from 'react';
 import { supportedLocales, localeNames } from '../../shared/supported-locales.js';
 import { SettingsWorkspace } from './SettingsWorkspace.jsx';
+import { RechargeProductWorkspace } from './RechargeProductWorkspace.jsx';
+import { AdminFinanceWorkspace } from './AdminFinanceWorkspace.jsx';
+import { financeCopy } from '../../shared/i18n.js';
 import { localizedAccountPlatformError } from './error-localization.js';
 import './admin-platform.css';
 
@@ -110,6 +113,8 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
     ['registration', 'platform.registrations.repair', copy.userManagement.registrationRepair],
     ['profile', 'platform.profile-changes.repair', copy.userManagement.profileRepair],
     ['settings', 'platform.sms-config.read', copy.settings.title],
+    ['finance', 'platform.billing.wallets.read', financeCopy[language].finance],
+    ['products', 'platform.products.read', financeCopy[language].productAdmin],
   ].filter(([, permission]) => permissions.includes(permission));
   const visibleSection = pages.some(([key]) => key === section) ? section : pages[0]?.[0];
   const logout = async () => {
@@ -123,7 +128,7 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
     {renderedState === 'loading' && <p role="status">{copy.loading}</p>}{error && <div role="alert">{error}<button onClick={load}>{copy.retry}</button></div>}
     {renderedState === 'guest' && <a href="/auth/login?return_to=%2Fadmin.html">{copy.login}</a>}
     {renderedState === 'ready' && <><nav>{pages.map(([key, , label]) => <button key={key} aria-pressed={visibleSection === key} onClick={() => setSection(key)}>{label}</button>)}</nav>{!pages.length && <p role="alert">{copy.permissionDenied}</p>}
-      <div key={authorization.user_id}>{visibleSection === 'users' && <Users client={client} copy={copy} canManage={permissions.includes('platform.users.status.manage')} />}{visibleSection === 'registration' && <RepairQueue client={client} copy={copy} />}{visibleSection === 'profile' && <RepairQueue key="profile" client={client} copy={copy} profile />}{visibleSection === 'settings' && <SettingsWorkspace client={client} copy={copy} language={language} onLanguageChange={onLanguageChange} permissions={permissions} />}</div>
+      <div key={authorization.user_id}>{visibleSection === 'products' && <RechargeProductWorkspace client={client} me={authorization} copy={financeCopy[language]} language={language} />}{visibleSection === 'finance' && <AdminFinanceWorkspace client={client} me={authorization} language={language} />}{visibleSection === 'users' && <Users client={client} copy={copy} canManage={permissions.includes('platform.users.status.manage')} />}{visibleSection === 'registration' && <RepairQueue client={client} copy={copy} />}{visibleSection === 'profile' && <RepairQueue key="profile" client={client} copy={copy} profile />}{visibleSection === 'settings' && <SettingsWorkspace client={client} copy={copy} language={language} onLanguageChange={onLanguageChange} permissions={permissions} />}</div>
     </>}
   </main>;
 }

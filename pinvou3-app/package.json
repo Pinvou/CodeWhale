@@ -152,7 +152,9 @@
     "test:markdown": "node tests/markdown_syntax_highlight.test.mjs && node tests/markdown_bridge_fallback_safety.test.mjs",
     "build:account-portal": "vite build --mode account-portal",
     "test:account-platform-personal": "node --test tests/account_platform_personal_f01.test.mjs tests/account_platform_session_binding.test.mjs tests/account_platform_host_f01.test.mjs",
-    "test:account-platform-personal-ui": "node tests/account_platform_f01_ui_smoke.mjs"
+    "test:account-platform-personal-ui": "node tests/account_platform_f01_ui_smoke.mjs",
+    "test:account-platform-finance": "node --test tests/account_platform_finance_f02.test.mjs",
+    "test:account-platform-finance-ui": "node tests/account_platform_f02_ui_smoke.mjs"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.5.10",

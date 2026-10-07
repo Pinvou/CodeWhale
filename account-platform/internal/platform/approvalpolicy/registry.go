@@ -91,11 +91,44 @@ func Require(commandType string, expected Mode) gin.HandlerFunc {
 func buildPolicies() map[string]Policy {
 	result := make(map[string]Policy)
 	for commandType, permission := range map[string]string{
-		"ACCOUNT_USER_STATUS_CHANGE":       "platform.users.status.manage",
-		"ACCOUNT_REGISTRATION_RETRY":       "platform.registrations.repair",
-		"ACCOUNT_REGISTRATION_COMPENSATE":  "platform.registrations.repair",
-		"ACCOUNT_PROFILE_CHANGE_RETRY":     "platform.profile-changes.repair",
-		"ACCOUNT_SMS_CONFIGURATION_UPDATE": "platform.sms-config.manage",
+		"APPROVAL_DRAFT_CREATE":                         "platform.billing.repairs.request",
+		"APPROVAL_DRAFT_UPDATE":                         "platform.billing.repairs.request",
+		"APPROVAL_REQUEST_SUBMIT":                       "platform.billing.repairs.request",
+		"APPROVAL_REQUEST_WITHDRAW":                     "platform.billing.repairs.request",
+		"APPROVAL_REQUEST_DECIDE":                       "platform.billing.repairs.approve",
+		"APPROVAL_EXECUTION_BEGIN":                      "internal.approval.execute",
+		"APPROVAL_EXECUTION_COMPLETE":                   "internal.approval.execute",
+		"BILLING_ADJUSTMENT_REJECT":                     "platform.billing.adjustments.approve",
+		"BILLING_ADJUSTMENT_REQUEST":                    "platform.billing.repairs.request",
+		"BILLING_CHARGEBACK_RECORD":                     "internal.billing.payment.reconcile",
+		"BILLING_FORCED_REFUND_RECORD":                  "internal.billing.payment.reconcile",
+		"BILLING_LATE_PAYMENT_ARCHIVE":                  "platform.billing.orders.sync",
+		"BILLING_LATE_PAYMENT_CLAIM":                    "platform.billing.orders.sync",
+		"BILLING_LATE_PAYMENT_QUERY":                    "platform.billing.orders.sync",
+		"BILLING_LATE_PAYMENT_SCHEDULE":                 "platform.billing.orders.sync",
+		"BILLING_NORMAL_REFUND":                         "platform.billing.repairs.request",
+		"BILLING_PAYMENT_ANOMALY_CLAIM":                 "platform.billing.orders.sync",
+		"BILLING_PAYMENT_ANOMALY_RESOLVE":               "platform.billing.repairs.request",
+		"BILLING_PAYMENT_ORDER_EVIDENCE_REPAIR":         "platform.billing.repairs.request",
+		"BILLING_PAYMENT_ORDER_SYNC":                    "platform.billing.orders.sync",
+		"BILLING_PROVIDER_BLIND_ESCALATE":               "platform.billing.orders.sync",
+		"BILLING_RECHARGE_PRODUCT_ADMISSION_REVOKE":     "platform.products.publish",
+		"BILLING_RECHARGE_PRODUCT_ADMISSION_VERIFY":     "platform.products.publish",
+		"BILLING_RECHARGE_PRODUCT_CREATE":               "platform.products.create",
+		"BILLING_RECHARGE_PRODUCT_DELETE":               "platform.products.delete",
+		"BILLING_RECHARGE_PRODUCT_DISPLAY_NAMES_UPDATE": "platform.products.publish",
+		"BILLING_RECHARGE_PRODUCT_DRAFT_UPDATE":         "platform.products.create",
+		"BILLING_RECHARGE_PRODUCT_PUBLISH":              "platform.products.publish",
+		"BILLING_RECHARGE_PRODUCT_UNPUBLISH":            "platform.products.unpublish",
+		"BILLING_PAYMENT_EXPIRY_RECONCILE":              "internal.billing.payment.reconcile",
+		"BILLING_ENTITLEMENT_PACKAGE_EXPIRE":            "internal.billing.entitlement.expire",
+		"BILLING_MANUAL_REVIEW_SLA_ESCALATE":            "internal.billing.manual-review.escalate",
+		"EVENT_OUTBOX_RELAY":                            "internal.events.relay",
+		"ACCOUNT_USER_STATUS_CHANGE":                    "platform.users.status.manage",
+		"ACCOUNT_REGISTRATION_RETRY":                    "platform.registrations.repair",
+		"ACCOUNT_REGISTRATION_COMPENSATE":               "platform.registrations.repair",
+		"ACCOUNT_PROFILE_CHANGE_RETRY":                  "platform.profile-changes.repair",
+		"ACCOUNT_SMS_CONFIGURATION_UPDATE":              "platform.sms-config.manage",
 	} {
 		result[commandType] = Policy{CommandType: commandType, PolicyVersion: Version, Mode: AuditOnly,
 			RequesterPermission: permission, RiskClass: "GOVERNANCE_OR_NORMAL_STATE_MACHINE",
@@ -103,5 +136,35 @@ func buildPolicies() map[string]Policy {
 			CriticalResourceFields: []string{"target_id", "request_fingerprint"},
 			ExpiresAfter:           24 * time.Hour, ExecutionWindow: 5 * time.Minute, ExecutorIdentity: "requesting-domain-service"}
 	}
+	result["WALLET_ADJUSTMENT"] = Policy{
+		CommandType: "WALLET_ADJUSTMENT", PolicyVersion: 1, Mode: ApprovalRequired,
+		RequesterPermission: "platform.billing.repairs.request", ApproverPermission: "platform.billing.repairs.approve",
+		RiskClass: "FINANCIAL_FACT_CHANGE", ApprovalCount: 1, SelfApprovalForbidden: true, SnapshotSchemaVersion: 1,
+		CriticalResourceFields: []string{"target_id", "resource_version", "financial_snapshot", "policy_version"},
+		ExpiresAfter:           24 * time.Hour, ExecutionWindow: 5 * time.Minute, ExecutorIdentity: "billing-command-executor",
+	}
+	result["PAYMENT_PROVIDER_RESUME"] = Policy{
+		CommandType: "PAYMENT_PROVIDER_RESUME", PolicyVersion: 2, Mode: ApprovalRequired,
+		RequesterPermission: "platform.billing.payment-controls.resume.request", ApproverPermission: "platform.billing.payment-controls.resume.approve",
+		RiskClass: "FINANCIAL_FACT_CHANGE", ApprovalCount: 1, SelfApprovalForbidden: true,
+		SnapshotSchemaVersion: 1, CriticalResourceFields: []string{"provider_id", "provider_version", "provider_control_version", "probe_order_id", "policy_version", "observation_high_watermark", "evaluation_high_watermark", "active_mapping_set_fingerprint"},
+		ExpiresAfter: 24 * time.Hour, ExecutionWindow: 5 * time.Minute, ExecutorIdentity: "billing-command-executor",
+	}
+	result["PAYMENT_PRODUCT_RESUME"] = Policy{
+		CommandType: "PAYMENT_PRODUCT_RESUME", PolicyVersion: Version, Mode: ApprovalRequired,
+		RequesterPermission: "platform.billing.payment-controls.resume.request", ApproverPermission: "platform.billing.payment-controls.resume.approve",
+		RiskClass: "FINANCIAL_FACT_CHANGE", ApprovalCount: 1, SelfApprovalForbidden: true,
+		SnapshotSchemaVersion: 1, CriticalResourceFields: []string{"provider_id", "provider_version", "product_id", "provider_control_version", "product_control_version", "catalog_item_id", "catalog_version", "admission_version", "mapping_id", "mapping_version", "probe_order_id", "policy_version", "observation_high_watermark", "evaluation_high_watermark"},
+		ExpiresAfter: 24 * time.Hour, ExecutionWindow: 5 * time.Minute, ExecutorIdentity: "billing-command-executor",
+	}
 	return result
+}
+
+// Executable is the installed, closed approval command set.
+func Executable(command string) bool {
+	switch strings.ToUpper(strings.TrimSpace(command)) {
+	case "WALLET_ADJUSTMENT", "PAYMENT_PROVIDER_RESUME", "PAYMENT_PRODUCT_RESUME":
+		return true
+	}
+	return false
 }

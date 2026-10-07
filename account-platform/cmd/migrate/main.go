@@ -12,7 +12,9 @@ import (
 	"time"
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/accountschema"
+	"github.com/Pinvou/pinvou3/account-platform/internal/billingschema"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/migrations"
+	"github.com/Pinvou/pinvou3/account-platform/internal/simulatorschema"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -84,10 +86,19 @@ func main() {
 		}
 	}
 
+	domain, err := migrationDomain(ctx, connection, loaded, *directory)
+	if err != nil {
+		log.Fatal("MIGRATION_DOMAIN_IDENTITY_INVALID")
+	}
+
 	switch *direction {
 	case "up":
-		if filepathBase(*directory) == "account" {
+		if domain == "account" {
 			err = accountschema.Up(ctx, connection, loaded)
+		} else if domain == "billing" {
+			err = billingschema.Up(ctx, connection, loaded)
+		} else if domain == "payment-simulator" {
+			err = simulatorschema.Up(ctx, connection, loaded)
 		} else {
 			err = migrations.Up(ctx, connection, loaded)
 		}
@@ -96,7 +107,7 @@ func main() {
 			verification, err = migrations.VerifyApplied(ctx, connection, loaded)
 			if err == nil {
 				evidence := migrationEvidence{
-					Event: "migration.post_verification", Domain: filepathBase(*directory),
+					Event: "migration.post_verification", Domain: domain,
 					BackupEvidenceID: backupID, BackupCompletedAt: backupCompletedAt, BackupSHA256: backupSHA256,
 					Verification: verification,
 				}
@@ -104,11 +115,15 @@ func main() {
 			}
 		}
 	case "down":
-		if filepathBase(*directory) == "account" {
+		if domain == "account" {
 			loaded, err = accountschema.Ordered(loaded)
-			if err != nil {
-				break
-			}
+		} else if domain == "billing" {
+			loaded, err = billingschema.Ordered(loaded)
+		} else if domain == "payment-simulator" {
+			loaded, err = simulatorschema.Ordered(loaded)
+		}
+		if err != nil {
+			break
 		}
 		err = migrations.DownOne(ctx, connection, loaded)
 	default:
@@ -117,6 +132,88 @@ func main() {
 	if err != nil {
 		log.Fatal("MIGRATION_EXECUTION_FAILED")
 	}
+}
+
+// Protected identities follow both their SQL package and installed ledger,
+// even when a deployment mounts them under a different directory name. The
+// same migration lock remains held through Up/Down; an unrelated custom
+// migration history still uses the original generic runner.
+func migrationDomain(ctx context.Context, connection *pgx.Conn, loaded []migrations.Migration, directory string) (string, error) {
+	if _, err := connection.Exec(ctx, `SELECT pg_advisory_lock(hashtext('pinvou_account_platform_migrations'))`); err != nil {
+		return "", err
+	}
+	domain := ""
+	observe := func(version int64, name, checksum string) error {
+		candidate := protectedMigrationDomain(version, name, checksum)
+		if candidate == "" {
+			return nil
+		}
+		if domain != "" && domain != candidate {
+			return fmt.Errorf("mixed protected migration domains")
+		}
+		domain = candidate
+		return nil
+	}
+	for _, migration := range loaded {
+		if err := observe(migration.Version, migration.Name, migration.Checksum); err != nil {
+			return "", err
+		}
+	}
+	var exists bool
+	if err := connection.QueryRow(ctx, `SELECT to_regclass('schema_migrations') IS NOT NULL`).Scan(&exists); err != nil {
+		return "", err
+	}
+	if exists {
+		rows, err := connection.Query(ctx, `SELECT version,name,checksum FROM schema_migrations`)
+		if err != nil {
+			return "", err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var version int64
+			var name, checksum string
+			if err := rows.Scan(&version, &name, &checksum); err != nil {
+				return "", err
+			}
+			if err := observe(version, name, checksum); err != nil {
+				return "", err
+			}
+		}
+		if err := rows.Err(); err != nil {
+			return "", err
+		}
+	}
+	base := filepathBase(directory)
+	if base == "account" || base == "billing" || base == "payment-simulator" {
+		if domain != "" && domain != base {
+			return "", fmt.Errorf("migration directory disagrees with protected identity")
+		}
+		return base, nil
+	}
+	if domain != "" {
+		return domain, nil
+	}
+	return base, nil
+}
+
+func protectedMigrationDomain(version int64, name, checksum string) string {
+	for _, identity := range []struct {
+		domain         string
+		version        int64
+		name, checksum string
+	}{
+		{"account", 900001, "first_delivery_permission_metadata", "b14cb9c2e538d20ec869458940d60867090549c027f439ed199d703ef3e7f45d"},
+		{"account", 900002, "approval_execution_frozen_facts", "019fd548cf79e833fd53ef60591a4f714a40268dceb8d1237c53e69b0162215a"},
+		{"billing", 900001, "outbox_publication_generation", "7e36e103ad25620dd7a882792fcd0d942f6208038aeaa966eb44b367cea27f05"},
+		{"billing", 900002, "payment_anomaly_resolution_intents", "68df09f526088b981c992d0c9912cab8f4ac2c6f5567fdb6351cfdc2b905d2a2"},
+		{"payment-simulator", 5, "mapped_order_facts", "c10369f3c1201aa37752d686645fac25c435b6e68daba401158f54090ae4e0bb"},
+		{"payment-simulator", 6, "merchant_customer_key", "a5629107cf1ba62324fb0fb9ea548037a291a327274ef35cdeafa69f4dc1e9dc"},
+	} {
+		if version == identity.version && (name == identity.name || checksum == identity.checksum) {
+			return identity.domain
+		}
+	}
+	return ""
 }
 
 func filepathBase(value string) string {

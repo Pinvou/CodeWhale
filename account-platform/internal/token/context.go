@@ -83,7 +83,7 @@ func (r *HTTPContextResolver) Resolve(ctx context.Context, authorization string)
 	if body.UserID == uuid.Nil || body.ContextType != "PERSONAL" || body.OrganizationID != nil || body.ContextVersion < 1 || body.AuthorizationVersion < 1 {
 		return AuthorizationContext{}, ErrForbidden
 	}
-	return AuthorizationContext{UserID: body.UserID, SessionID: body.SessionID, ContextType: body.ContextType, OrganizationID: body.OrganizationID, ContextVersion: body.ContextVersion, AuthorizationVersion: body.AuthorizationVersion, Roles: body.PersonalRoles, Permissions: body.PersonalPermissions}, nil
+	return AuthorizationContext{UserID: body.UserID, Mobile: body.Mobile, MobileVerified: body.MobileVerified, SessionID: body.SessionID, ContextType: body.ContextType, OrganizationID: body.OrganizationID, ContextVersion: body.ContextVersion, AuthorizationVersion: body.AuthorizationVersion, Roles: body.PersonalRoles, Permissions: body.PersonalPermissions}, nil
 }
 
 // Retain the reviewed A11 authority boundary: the complete body is bounded

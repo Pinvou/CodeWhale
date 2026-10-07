@@ -32,16 +32,17 @@ type Context struct {
 }
 
 type Me struct {
-	UserID              uuid.UUID `json:"user_id"`
-	UserCode            string    `json:"user_code"`
-	Status              string    `json:"status"`
-	Username            *string   `json:"username"`
-	DisplayName         *string   `json:"display_name"`
-	Mobile              *string   `json:"mobile,omitempty"`
-	MobileVerified      bool      `json:"mobile_verified"`
-	ActiveContext       Context   `json:"active_context"`
-	PersonalPermissions []string  `json:"personal_permissions"`
-	PlatformPermissions []string  `json:"platform_permissions"`
+	UserID                 uuid.UUID `json:"user_id"`
+	UserCode               string    `json:"user_code"`
+	Status                 string    `json:"status"`
+	Username               *string   `json:"username"`
+	DisplayName            *string   `json:"display_name"`
+	Mobile                 *string   `json:"mobile,omitempty"`
+	MobileVerified         bool      `json:"mobile_verified"`
+	CommerceCustomerStatus string    `json:"commerce_customer_status"`
+	ActiveContext          Context   `json:"active_context"`
+	PersonalPermissions    []string  `json:"personal_permissions"`
+	PlatformPermissions    []string  `json:"platform_permissions"`
 }
 
 type UnitAuthorizationBinding struct {

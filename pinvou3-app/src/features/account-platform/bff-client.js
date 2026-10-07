@@ -1,3 +1,4 @@
+import { parseFinanceJSON, requirePaymentOrder } from './finance-contract.js';
 import { requireSession, requireProfileChange } from './personal-contract.js';
 import { mergeObservedVersions } from './authorization-ui.js';
 import { secureRequestID } from './request-id.js';
@@ -85,7 +86,7 @@ export class AccountPlatformBffClient {
       this.observeContextVersion(response.headers.get('X-Context-Version'));
       this.observeAuthorizationVersions(response.headers);
       if (response.status === 204) return { response, payload: null };
-      return { response, payload: area === 'token' && resource.startsWith('/v1/me/balance') && response.ok ? parseBalanceJSON(await response.text()) : await response.json().catch(() => ({})) };
+      return { response, payload: area === 'token' && resource.startsWith('/v1/me/balance') && response.ok ? parseBalanceJSON(await response.text()) : area === 'token' && response.ok ? parseFinanceJSON(await response.text()) : await response.json().catch(() => ({})) };
     };
 
     let result = await send(this.csrfToken);
@@ -139,6 +140,27 @@ export class AccountPlatformBffClient {
     const result = await this.request('account', `/v1/me/profile-change-requests/${encodeURIComponent(requestId)}/actions/complete`, { method: 'POST', body: { code }, headers: { 'X-Device-ID': this.deviceID }, signal });
     return requireProfileChange(result, requestId);
   }
+
+  products(signal) { return this.request('token', '/v1/recharge/products', { signal }); }
+  paymentCapabilities(signal) { return this.request('token', '/v1/payment-capabilities', { signal }); }
+  rechargeOrders(signal) { return this.request('token', '/v1/recharge/orders', { signal }); }
+  recentRechargeOrder(signal) { return this.request('token', '/v1/recharge/orders/recent', { signal }); }
+  async rechargeOrder(orderID, signal) {
+    return requirePaymentOrder(await this.request('token', `/v1/recharge/orders/${encodeURIComponent(orderID)}`, { signal }), orderID);
+  }
+  async createRecharge(productID, channel, key, signal) {
+    return requirePaymentOrder(await this.request('token', '/v1/recharge/orders', {
+      method: 'POST', headers: { 'Idempotency-Key': key },
+      body: { product_id: productID, channel }, signal,
+    }));
+  }
+  async closeRechargeOrder(orderID, signal) {
+    return requirePaymentOrder(await this.request('token', `/v1/recharge/orders/${encodeURIComponent(orderID)}/close`, { method: 'POST', body: {}, signal }), orderID);
+  }
+  addPaymentClaim(orderID, reason, signal) {
+    return this.request('token', `/v1/recharge/orders/${encodeURIComponent(orderID)}/payment-claims`, { method: 'POST', body: { statement: reason }, signal });
+  }
+  entitlementPackages(signal) { return this.request('token', '/v1/me/entitlement-packages', { signal }); }
 
   balance(signal) {
     return this.request('token', '/v1/me/balance?consistency=strong', {
