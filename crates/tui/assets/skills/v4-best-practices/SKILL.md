@@ -1,6 +1,6 @@
 ---
 name: v4-best-practices
-description: Use when working with deepseek-v4-pro or deepseek-v4-flash in thinking mode on multi-step or plan-driven tasks. Provides rules to prevent stale references, unverified plan assumptions, and vague plan output.
+description: Use when working with DeepSeek V4-class models in thinking mode on multi-step or plan-driven tasks. Provides rules to prevent stale references, unverified plan assumptions, and vague plan output.
 ---
 
 # V4 Best Practices
@@ -11,7 +11,8 @@ specific, observable failure class.
 ## 1. Verify references before writing
 
 Before referencing a file path, function, or type in code or plan output,
-call `grep_files` or `read_file` to confirm it exists in the workspace.
+call `grep_files` (activate it with `tool_search` if it is not in your tool
+list) or the built-in `read` tool to confirm it exists in the workspace.
 
 ```
 # Bad:  edit_file path="src/config/loader.rs" (assumed from memory)
@@ -26,11 +27,11 @@ on hallucinated symbols.
 
 Before executing a plan that touches 3+ files, spawn a read-only verifier
 sub-agent (thinking off) to read the target files and confirm path/symbol
-assumptions still hold. Prefer operator `model_strength` routing over
-hardcoded model ids in the call:
+assumptions still hold. Keep the call provider-neutral: route models through
+operator `model_strength` configuration, not call fields.
 
 ```
-agent action="start" type="verifier" thinking="off"
+agent action="start" type="verifier"
   prompt: "Read these files and confirm: [list assumptions]. Report mismatches."
 ```
 

@@ -209,7 +209,7 @@ fn contributor_onboarding_ships_at_generation_8_and_keeps_its_refusals() {
     assert!(body.contains("Do not stash, discard, reset, or commit a dirty tree"));
     // The gate is quoted from CI rather than paraphrased, and the digest is
     // built from files rather than generated.
-    assert!(body.contains("cargo clippy --workspace --all-features --locked"));
+    assert!(body.contains("cargo clippy --workspace --all-targets --all-features --locked"));
     assert!(body.contains(".github/workflows/ci.yml"));
     assert!(body.contains("Do not call a model provider"));
     // Provider neutrality: the dogfood step sends nothing anywhere.
