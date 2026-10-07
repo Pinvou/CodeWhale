@@ -1846,34 +1846,16 @@ mod custom_wire_override_tests {
     use super::*;
     use crate::config::{ProviderConfig, ProvidersConfig};
 
-    fn custom_table_config(wire: Option<&str>, base_url: &str, model: &str) -> Config {
-        let mut custom = std::collections::HashMap::new();
-        custom.insert(
-            "pinvou_responses".to_string(),
-            ProviderConfig {
-                kind: Some("openai-compatible".to_string()),
-                base_url: Some(base_url.to_string()),
-                model: Some(model.to_string()),
-                api_key: Some("test-key".to_string()),
-                wire: wire.map(str::to_string),
-                ..ProviderConfig::default()
-            },
-        );
-        Config {
-            provider: Some("pinvou_responses".to_string()),
-            providers: Some(ProvidersConfig {
-                custom,
-                ..ProvidersConfig::default()
-            }),
-            ..Config::default()
-        }
-    }
-
     #[test]
     fn forkguard_named_table_wire_responses_reaches_the_runtime_candidate() {
         let _env_lock = crate::test_support::lock_test_env();
-        let config =
-            custom_table_config(Some("responses"), "https://api.openai.com/v1", "gpt-6-sol");
+        let config = crate::test_support::custom_named_table_config(
+            "pinvou_responses",
+            Some("responses"),
+            "https://api.openai.com/v1",
+            "test-key",
+            "gpt-6-sol",
+        );
         let route = resolve_runtime_route(&config, ApiProvider::Custom, Some("gpt-6-sol"))
             .expect("named table resolves");
         assert_eq!(
@@ -1892,9 +1874,11 @@ mod custom_wire_override_tests {
     #[test]
     fn forkguard_named_table_wire_anthropic_reaches_the_runtime_candidate() {
         let _env_lock = crate::test_support::lock_test_env();
-        let config = custom_table_config(
+        let config = crate::test_support::custom_named_table_config(
+            "pinvou_responses",
             Some("anthropic"),
             "https://relay.example.test/v1",
+            "test-key",
             "claude-sonnet",
         );
         let route = resolve_runtime_route(&config, ApiProvider::Custom, Some("claude-sonnet"))
@@ -1907,7 +1891,13 @@ mod custom_wire_override_tests {
     fn forkguard_named_table_without_wire_keeps_the_chat_default() {
         let _env_lock = crate::test_support::lock_test_env();
         for wire in [None, Some("chat")] {
-            let config = custom_table_config(wire, "https://relay.example.test/v1", "vendor-model");
+            let config = crate::test_support::custom_named_table_config(
+                "pinvou_responses",
+                wire,
+                "https://relay.example.test/v1",
+                "test-key",
+                "vendor-model",
+            );
             let route = resolve_runtime_route(&config, ApiProvider::Custom, Some("vendor-model"))
                 .expect("named table resolves");
             assert_eq!(
@@ -1925,9 +1915,11 @@ mod custom_wire_override_tests {
     #[test]
     fn forkguard_named_table_unrecognized_wire_keeps_the_chat_default() {
         let _env_lock = crate::test_support::lock_test_env();
-        let config = custom_table_config(
+        let config = crate::test_support::custom_named_table_config(
+            "pinvou_responses",
             Some("respones"),
             "https://relay.example.test/v1",
+            "test-key",
             "vendor-model",
         );
         assert_eq!(custom_wire_override_for(&config), None);

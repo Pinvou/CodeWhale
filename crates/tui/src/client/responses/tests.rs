@@ -1457,8 +1457,8 @@ fn responses_input_keeps_system_role_history_messages() {
 
 /// A `wire = "responses"` Custom table captures encrypted reasoning exactly
 /// like the Codex backend: the stream yields an opaque reasoning-state delta
-/// tagged with the Custom provider string, so the replay gate
-/// (`state.provider == provider.as_str()`) matches on the next turn
+/// tagged with the client's provider tag, so the replay gate
+/// (`state.provider == reasoning_provider_tag()`) matches on the next turn
 /// (Pinvou PR #625).
 #[tokio::test]
 async fn forkguard_custom_responses_stream_captures_encrypted_reasoning_as_opaque_state() {
@@ -2053,26 +2053,13 @@ async fn forkguard_custom_responses_captured_state_replays_on_the_next_turn() {
         .await;
 
     let _env_lock = crate::test_support::lock_test_env();
-    let config = Config {
-        provider: Some("pinvou_responses".to_string()),
-        providers: Some(ProvidersConfig {
-            custom: [(
-                "pinvou_responses".to_string(),
-                ProviderConfig {
-                    kind: Some("openai-compatible".to_string()),
-                    wire: Some("responses".to_string()),
-                    base_url: Some(format!("{}/v1", server.uri())),
-                    api_key: Some("custom-responses-key".to_string()),
-                    model: Some("gpt-6-sol".to_string()),
-                    ..ProviderConfig::default()
-                },
-            )]
-            .into_iter()
-            .collect(),
-            ..ProvidersConfig::default()
-        }),
-        ..Config::default()
-    };
+    let config = crate::test_support::custom_named_table_config(
+        "pinvou_responses",
+        Some("responses"),
+        &format!("{}/v1", server.uri()),
+        "custom-responses-key",
+        "gpt-6-sol",
+    );
     let route = crate::route_runtime::resolve_runtime_route(
         &config,
         ApiProvider::Custom,
