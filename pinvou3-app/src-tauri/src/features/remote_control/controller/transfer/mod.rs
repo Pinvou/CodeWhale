@@ -13,6 +13,7 @@
 pub(crate) mod core;
 pub(crate) mod download;
 pub(crate) mod limits;
+pub(crate) mod staging;
 pub(crate) mod upload;
 
 // Re-exported for DEV-17/DEV-18, which only add their own slot file.

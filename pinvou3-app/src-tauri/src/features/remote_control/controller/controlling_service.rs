@@ -619,7 +619,11 @@ async fn serve_controlling_lane_with_evidence_context(
             // 自己的 deadline 是权威，本地只保证不会无限等待）。
             _ = tokio::time::sleep_until(resume_deadline) => {
                 if manager.with_lane_owner(&operation, || business.clear()).is_err() { return; }
-                fail_resume(manager, &operation, sinks);
+                // The authenticated peer budget also expires while Connected.
+                // A resume-only closer rejects that phase and leaves a live lease.
+                if let Ok(status) = manager.fail_connection(operation.clone(), PEER_UNAVAILABLE_ERROR) {
+                    (sinks.on_status)(&status);
+                }
                 return;
             }
             event = lane.next_lane_event() => {
@@ -734,7 +738,7 @@ fn fail_resume(
     operation: &ControllerOperation,
     sinks: &mut ControllingLaneSinks<'_>,
 ) {
-    if let Ok(status) = manager.fail_connection(operation.clone(), PEER_UNAVAILABLE_ERROR) {
+    if let Ok(status) = manager.fail_resume_connection(operation.clone(), PEER_UNAVAILABLE_ERROR) {
         (sinks.on_status)(&status);
     }
 }
@@ -951,10 +955,14 @@ fn handle_resume_frame(
             let Ok(fingerprint) = business.resume_fingerprint(activation_id) else {
                 return ResumeOutcome::Failed;
             };
+            let Some(resume_request_id) = frame.get("request_id").and_then(Value::as_str) else {
+                return ResumeOutcome::Failed;
+            };
             if manager
                 .complete_resumed(
                     operation,
                     activation_id,
+                    resume_request_id,
                     now_b,
                     (liveness_epoch_a, liveness_epoch_b),
                     token,
@@ -2855,6 +2863,7 @@ mod tests {
                 json!({
                     "v": 1,
                     "type": "controller_resumed",
+                    "request_id": "request-resume-final-0001",
                     "activation_id": "activation-0001",
                     "liveness_epoch_a": "live-a-2",
                     "liveness_epoch_b": "live-b-2",
@@ -4149,13 +4158,11 @@ mod tests {
         let parsed =
             super::super::protocol::parse_controller_pairing_transcript(&reserved.to_string())
                 .unwrap();
-        super::super::crypto::authenticate_relay_transcript(&trust, parsed).unwrap();
+        let install_context =
+            super::super::crypto::authenticate_relay_transcript(&trust, parsed).unwrap();
         let joined = super::super::controlling_handshake::validate_joined_lease(
             &startup["joined"],
-            reserved["pairing_id"].as_str().unwrap(),
-            reserved["reservation_id"].as_str().unwrap(),
-            reserved["relay_epoch"].as_str().unwrap(),
-            reserved["transcript_hash"].as_str().unwrap(),
+            &install_context,
         )
         .unwrap();
         let manager = ControllingDeviceManager::default();
