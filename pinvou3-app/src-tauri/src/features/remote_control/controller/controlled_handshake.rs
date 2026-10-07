@@ -15,7 +15,8 @@ use super::crypto::{
     authenticate_relay_transcript,
 };
 use super::protocol::{
-    SenderRole, parse_controller_pairing_transcript, validate_controller_message_json,
+    LeaseInstallValidationContext, SenderRole, parse_controller_pairing_transcript,
+    validate_controller_message_json,
 };
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -50,6 +51,7 @@ pub(crate) struct ControlledHandshake {
     transcript_hash: [u8; 32],
     negotiated_capabilities: Vec<String>,
     binding: HandshakeBinding,
+    install_context: LeaseInstallValidationContext,
     finished_sender: Option<FinishedSender>,
     finished_receiver: Option<FinishedReceiver>,
     receipt: ReceiptSecret,
@@ -69,6 +71,13 @@ impl ControlledHandshake {
             .map_err(|_| ControlledHandshakeError::new("controller_transcript_invalid"))?;
         let context = authenticate_relay_transcript(trust, parsed)
             .map_err(|_| ControlledHandshakeError::new("controller_transcript_untrusted"))?;
+        let signed_local = decode_public_key(context.peer_handshake_public_key_b64())
+            .ok_or_else(|| ControlledHandshakeError::new("controller_transcript_invalid"))?;
+        if signed_local.to_bytes() != handshake.public_key().to_bytes() {
+            return Err(ControlledHandshakeError::new(
+                "controller_transcript_self_key_mismatch",
+            ));
+        }
         let transcript_hash = context
             .transcript_hash_bytes()
             .map_err(|_| ControlledHandshakeError::new("controller_transcript_invalid"))?;
@@ -102,6 +111,7 @@ impl ControlledHandshake {
             transcript_hash,
             negotiated_capabilities: context.negotiated_capabilities().to_vec(),
             binding,
+            install_context: context,
             finished_sender: Some(finished_sender),
             finished_receiver: Some(finished_receiver),
             receipt,
@@ -243,14 +253,8 @@ impl ControlledHandshake {
                 "controller_handshake_stage_invalid",
             ));
         }
-        let lease = validate_joined_lease(
-            message,
-            &self.pairing_id,
-            &self.reservation_id,
-            &self.relay_epoch,
-            &self.transcript_hash_hex,
-        )
-        .map_err(ControlledHandshakeError::new)?;
+        let lease = validate_joined_lease(message, &self.install_context)
+            .map_err(ControlledHandshakeError::new)?;
         self.stage = ControlledHandshakeStage::Joined;
         Ok(lease)
     }
@@ -449,6 +453,29 @@ mod tests {
         );
         let b_ack = b.accept_peer_finished(&a_finished).unwrap();
         assert_eq!(b.stage(), ControlledHandshakeStage::Acked);
+        let joined = json!({"v":1,"type":"controller_joined",
+            "request_id":reserved["request_id"],"pairing_id":reserved["pairing_id"],
+            "reservation_id":reserved["reservation_id"],"transcript_hash":reserved["transcript_hash"],
+            "controller_connection_identity":reserved["transcript"]["controller_connection_identity"],
+            "connection_id":"connection-0001","controller_lease_id":"lease-0001","lease_epoch":"1",
+            "relay_epoch":reserved["relay_epoch"],"remote_control_generation":reserved["remote_control_generation"],
+            "liveness_epoch_a":"liveness-a-0001","liveness_epoch_b":"liveness-b-0001",
+            "resume_token_b64":base64::engine::general_purpose::STANDARD.encode([7_u8;32]),
+            "resume_deadline_ms":"30000"});
+        for name in [
+            "request_id",
+            "controller_connection_identity",
+            "remote_control_generation",
+        ] {
+            let mut stale = joined.clone();
+            stale[name] = json!("different-valid-identity");
+            assert_eq!(
+                b.accept_joined(&stale).unwrap_err().code,
+                "controller_joined_binding_mismatch"
+            );
+            assert_eq!(b.stage(), ControlledHandshakeStage::Acked);
+        }
+        b.accept_joined(&joined).unwrap();
         assert!(b.take_session().is_ok());
         assert_eq!(b_ack["sender_role"], json!("A"));
         assert_eq!(a_ack["sender_role"], json!("B"));
