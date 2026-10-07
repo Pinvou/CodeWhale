@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import { execFileSync, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { test } from "node:test";
+import { test as nodeTest } from "node:test";
 
 const helper = fileURLToPath(new URL("../../scripts/windows-e2e-orchestrator-helpers.ps1", import.meta.url));
 const orchestrator = fileURLToPath(new URL("../../scripts/run-windows-remote-control-e2e.ps1", import.meta.url));
@@ -10,32 +10,60 @@ const guard = fileURLToPath(new URL("../../scripts/windows-e2e-process-guard.ps1
 const uiSmoke = fileURLToPath(new URL("../../pinvou3-app/scripts/remote-control-ui-smoke.mjs", import.meta.url));
 const pwsh = process.platform === "win32" ? "powershell.exe" : "pwsh";
 const quote = (value) => `'${value.replaceAll("'", "''")}'`;
+const psProbe = spawnSync(pwsh, ['-NoProfile', '-NonInteractive', '-Command', 'exit 0']);
+const test = (name, run) => nodeTest(name, {
+  skip: process.platform !== 'win32' && psProbe.error ? 'PowerShell unavailable; no production AST execution evidence' : false,
+}, run);
+// Load definitions from the production script without running its deployment.
+const productionAst = `$tokens=$null;$errors=$null;$ast=[Management.Automation.Language.Parser]::ParseFile(${quote(orchestrator)},[ref]$tokens,[ref]$errors);if($errors.Count){throw 'production-parse-failed'}; `;
+const productionFunctions = productionAst
+  + `foreach($name in @('Get-PinvouSha256Hex','Assert-PinvouJourneyElapsed','Assert-PinvouRouteStateBinding')){$definition=$ast.Find({param($n)$n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $name},$true);if(-not $definition){throw 'production-function-missing'};Invoke-Expression $definition.Extent.Text}; `;
+const productionStaging = productionAst
+  + `$assignment=$ast.Find({param($n)$n -is [Management.Automation.Language.AssignmentStatementAst] -and $n.Left.Extent.Text -eq '$RemoteCreateStaging'},$true);if(-not $assignment){throw 'production-staging-missing'};$create=[scriptblock]::Create($assignment.Right.Extent.Text.Trim().TrimStart('{').TrimEnd('}')); `;
+// Only remoting variable transport is adapted to local fixture bindings. The
+// actual cleanup branches, ordering and ownership checks are not duplicated.
+const productionCleanup = `$cleanupNode=@($ast.FindAll({param($n)$n -is [Management.Automation.Language.ScriptBlockExpressionAst] -and $n.Extent.Text.Contains('$remoteCleanupErrors =')},$true)|Sort-Object {$_.Extent.Text.Length})[0];if(-not $cleanupNode){throw 'production-cleanup-missing'};$cleanupText=$cleanupNode.Extent.Text;$cleanup=[scriptblock]::Create($cleanupText.Substring(1,$cleanupText.Length-2).Replace('$using:','$')); `;
 
-test("orchestrator helpers enforce measured elapsed time and route state binding", () => {
+test("production orchestrator functions enforce measured elapsed time and route state binding", () => {
   const digest = "a".repeat(64);
   const combined = crypto.createHash("sha256").update(JSON.stringify(["pinvou-gateway-state-v1", digest, digest])).digest("hex");
   assert.doesNotThrow(() => execFileSync(pwsh, ["-NoProfile", "-NonInteractive", "-Command",
-    `. ${quote(helper)}; Assert-PinvouJourneyElapsed 23900 24000; Assert-PinvouRouteStateBinding '${digest}' '${digest}' '${combined}' '${digest}' '${combined}' '${combined}'`], { stdio: "pipe" }));
-  const fast = spawnSync(pwsh, ["-NoProfile", "-NonInteractive", "-Command", `. ${quote(helper)}; Assert-PinvouJourneyElapsed 1000 23900`], { encoding: "utf8" });
+    `${productionFunctions} Assert-PinvouJourneyElapsed 23900 24000; Assert-PinvouRouteStateBinding '${digest}' '${digest}' '${combined}' '${digest}' '${combined}' '${combined}'`], { stdio: "pipe" }));
+  const fast = spawnSync(pwsh, ["-NoProfile", "-NonInteractive", "-Command", `${productionFunctions} Assert-PinvouJourneyElapsed 1000 23900`], { encoding: "utf8" });
   assert.notEqual(fast.status, 0); assert.match(`${fast.stdout}${fast.stderr}`, /e2e_monotonic_elapsed_mismatch/u);
+  const wrongRoute = spawnSync(pwsh, ['-NoProfile', '-NonInteractive', '-Command',
+    `${productionFunctions} Assert-PinvouRouteStateBinding '${digest}' '${digest}' '${digest}' '${digest}' '${combined}' '${combined}'`], { encoding: 'utf8' });
+  assert.notEqual(wrongRoute.status, 0);
+  assert.match(`${wrongRoute.stdout}${wrongRoute.stderr}`, /e2e_legacy_gateway_original_state_mismatch/u);
 });
 
 test("per-run staging is hash checked, collision-safe and ownership-bound on cleanup", () => {
   const nonce = "d".repeat(64);
-  const script = `. ${quote(helper)}; $base=Join-Path ([IO.Path]::GetTempPath()) ('pinvou-e2e-stage-'+[Guid]::NewGuid().ToString('N')); `
-    + `try { $s=New-PinvouRunStaging $base '${nonce}' ([DateTime]::UtcNow); if(-not [IO.Path]::IsPathRooted($s.root)){throw 'staging-contract'}; `
+  const script = `$ErrorActionPreference='Stop'; . ${quote(helper)}; ${productionStaging} ${productionCleanup} $base=Join-Path ([IO.Path]::GetTempPath()) ('pinvou-e2e-stage-'+[Guid]::NewGuid().ToString('N')); `
+    + `try { $s=& $create $base '${nonce}' ([DateTime]::UtcNow); if(-not [IO.Path]::IsPathRooted($s.root)){throw 'staging-contract'}; `
     + `$file=Join-Path $s.root 'probe.bin'; [IO.File]::WriteAllBytes($file,[byte[]](1,2,3)); $sha=(Get-FileHash $file -Algorithm SHA256).Hash.ToLowerInvariant(); `
-    + `Assert-PinvouStagedFiles @([pscustomobject]@{RelativePath='probe.bin';Sha256=$sha}); [void](Assert-PinvouTrustedStagedFile 'probe.bin' $sha); `
+    + `[void](Assert-PinvouTrustedStagedFile 'probe.bin' $sha); `
     + `[IO.File]::WriteAllBytes($file,[byte[]](4,5,6)); try {[void](Assert-PinvouTrustedStagedFile 'probe.bin' $sha); throw 'tamper-not-rejected'} catch {if($_.Exception.Message -eq 'tamper-not-rejected'){throw}}; `
-    + `try { New-PinvouRunStaging $base '${nonce}' ([DateTime]::UtcNow) | Out-Null; throw 'collision-not-rejected' } catch { if($_.Exception.Message -eq 'collision-not-rejected'){throw} }; `
-    + `Remove-PinvouRunStaging $base '${nonce}'; if(Test-Path $s.root){throw 'cleanup-incomplete'} } finally { if(Test-Path $base){Remove-Item $base -Recurse -Force} }`;
+    + `try { & $create $base '${nonce}' ([DateTime]::UtcNow) | Out-Null; throw 'collision-not-rejected' } catch { if($_.Exception.Message -notmatch 'e2e_staging_already_exists'){throw} }; `
+    + `$RemoteBase=$base;$RemoteRoot=$s.root;$runNonce='${nonce}';$cleanupLegacyOwned=$false; `
+    + `$markerPath=Join-Path $s.root '.pinvou-e2e-owner.json';$marker=Get-Content -Raw $markerPath;$wrong=$marker.Replace('${nonce}','${'e'.repeat(64)}');[IO.File]::WriteAllText($markerPath,$wrong); `
+    + `try{& $cleanup;throw 'owner-mismatch-accepted'}catch{if($_.Exception.Message -notmatch 'e2e_staging_cleanup_owner_mismatch'){throw}};if(-not(Test-Path $s.root)){throw 'foreign-owner-deleted'};[IO.File]::WriteAllText($markerPath,$marker); `
+    + `& $cleanup; if(Test-Path $s.root){throw 'cleanup-incomplete'} } finally { if(Test-Path $base){Remove-Item -LiteralPath $base -Recurse -Force} }`;
   assert.doesNotThrow(() => execFileSync(pwsh, ["-NoProfile", "-NonInteractive", "-Command", script], { stdio: "pipe" }));
 });
 
-test("cleanup helper continues after faults and reports their aggregate", () => {
+test("production cleanup continues after route and role faults and reports their aggregate", () => {
   const result = spawnSync(pwsh, ["-NoProfile", "-NonInteractive", "-Command",
-    `. ${quote(helper)}; $script:steps=''; Invoke-PinvouCleanupSteps @({$script:steps+='A';throw 'first'},{$script:steps+='B'},{$script:steps+='C';throw 'third'})`], { encoding: "utf8" });
-  assert.notEqual(result.status, 0); assert.match(`${result.stdout}${result.stderr}`, /step-0:first.*step-2:third/su);
+    `$ErrorActionPreference='Stop'; . ${quote(helper)}; ${productionStaging} ${productionCleanup} `
+    + `$base=Join-Path ([IO.Path]::GetTempPath()) ('pinvou-e2e-fault-'+[Guid]::NewGuid().ToString('N'));try{ `
+    + `$runNonce='${'d'.repeat(64)}';$s=& $create $base $runNonce ([DateTime]::UtcNow);$RemoteRoot=$s.root;$RemoteBase=$base;$cleanupLegacyOwned=$true;$cleanupLegacyPid=$null; `
+    + `$LegacyGatewayUrl='fixture';$cleanupRouteId='fixture';$cleanupOriginalStateDigest='fixture';$cleanupCanonicalInputDigest='fixture';$cleanupControlPlaneDigest='fixture';$actualHead='fixture'; `
+    + `[IO.File]::WriteAllText((Join-Path $s.root 'pinvou-e2e-driver.exe'),'fixture');$script:calls=@();function Invoke-PinvouTrustedGuard{param($FilePath,$Arguments);$script:calls+=@($Arguments[0]);$global:LASTEXITCODE=0;switch($Arguments[0]){ `
+    + `'legacy-deconfigure-gateway'{throw 'route-fixture-fault'} 'legacy-owned-pids'{[ordered]@{schema='pinvou-legacy-owned-processes';version=1;run_nonce=$runNonce;mock=$false;active=@();terminated=@()}|ConvertTo-Json -Compress} 'legacy-stop'{} 'stop-role'{throw 'role-fixture-fault'} default{throw 'unexpected-fixture-command'}}}; `
+    + `$message='';try{& $cleanup}catch{$message=$_.Exception.Message};if($message -notmatch 'route:route-fixture-fault.*role-process:role-fixture-fault'){throw 'faults-not-aggregated'};if(($script:calls -join ',') -ne 'legacy-deconfigure-gateway,legacy-owned-pids,legacy-stop,legacy-owned-pids,stop-role'){throw 'later-cleanup-skipped'};if(Test-Path $s.root){throw 'files-cleanup-skipped'};[Console]::Out.Write('production-cleanup-aggregate-pass') `
+    + `}finally{if(Test-Path -LiteralPath $base){Remove-Item -LiteralPath $base -Recurse -Force}}`], { encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout, 'production-cleanup-aggregate-pass');
 });
 
 test("legacy ownership registry is strict and recovers a lost response PID", () => {

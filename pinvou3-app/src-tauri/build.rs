@@ -1,6 +1,22 @@
 use std::path::{Path, PathBuf};
 
+#[path = "build_support/desktop_controller.rs"]
+mod desktop_controller;
+
 fn main() {
+    println!("cargo:rerun-if-env-changed=PINVOU_DESKTOP_CONTROLLER_ENABLED");
+    let profile = std::env::var("PROFILE").expect("Cargo must provide PROFILE");
+    let requested = std::env::var("PINVOU_DESKTOP_CONTROLLER_ENABLED");
+    let flag = match requested {
+        Ok(ref value) => desktop_controller::build_flag(&profile, Some(value)),
+        Err(std::env::VarError::NotPresent) => desktop_controller::build_flag(&profile, None),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            Err("desktop controller build flag is not Unicode")
+        }
+    }
+    .unwrap_or_else(|reason| panic!("{reason}"));
+    println!("cargo:rustc-env=PINVOU_DESKTOP_CONTROLLER_BUILD_ENABLED={flag}");
+
     // Bundle system prompt and security hook changes must invalidate the
     // extracted immutable bundle on existing installations.
     let mut hashed = Vec::new();

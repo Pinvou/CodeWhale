@@ -177,13 +177,49 @@ test("protocol documentation anchors match the executable registries and digests
   assert.match(artifactSection, /`body\.artifacts`[\s\S]*?`remote_action_result`/u);
   const artifactFields = artifactSection.match(/Each item is exactly `([^`]+)`/u)?.[1];
   assert.ok(artifactFields);
-  assert.deepEqual(artifactFields.split(',').map((field) => field.trim()),
+  const documentedArtifactFields = artifactFields.split(',').map((field) => field.trim());
+  assert.deepEqual(documentedArtifactFields,
     ['artifact_id', 'task_id', 'display_name', 'mime_type', 'total_bytes', 'sha256', 'preview_kind']);
+  const item = { artifact_id: 'artifact-1', task_id: 'task-1', display_name: 'report.txt',
+    mime_type: 'text/plain', total_bytes: '3', sha256: ZERO_HASH, preview_kind: 'text' };
+  const result = { ...validPayload('remote_action_result'), operation: 'artifact_index',
+    body: { artifacts: [item] } };
+  assert.deepEqual(Object.keys(item), documentedArtifactFields);
+  validateControllerPayload(result, 'B', LEASE);
+  for (const field of documentedArtifactFields) {
+    const missing = structuredClone(result);
+    delete missing.body.artifacts[0][field];
+    assertProtocolError('missing_field', () => validateControllerPayload(missing, 'B', LEASE), field);
+  }
   const previewKinds = artifactSection.match(/preview kinds are ([\s\S]*?)\. Subsequent/u)?.[1];
   assert.ok(previewKinds);
   assert.deepEqual(quoted(previewKinds), ['text', 'download_only', 'unsupported']);
+  for (const previewKind of quoted(previewKinds)) {
+    const variant = structuredClone(result);
+    variant.body.artifacts[0].preview_kind = previewKind;
+    validateControllerPayload(variant, 'B', LEASE);
+  }
   assert.match(artifactSection, /`remote_action_request`[\s\S]*?`artifact_id`[\s\S]*?`task_id`[\s\S]*?`transfer_id`/u);
   assert.doesNotMatch(artifactSection, /size_bytes|preview_mode|inline_text|inline_image/u);
+});
+
+test('artifact remote-action validator rejects legacy fields mixed into the current shape', () => {
+  const result = { ...validPayload('remote_action_result'), operation: 'artifact_index', body: {
+    artifacts: [{ artifact_id: 'artifact-1', task_id: 'task-1', display_name: 'report.txt',
+      mime_type: 'text/plain', total_bytes: '3', sha256: ZERO_HASH, preview_kind: 'text' }],
+  } };
+  validateControllerPayload(result, 'B', LEASE);
+  for (const [field, value] of [['size_bytes', '3'], ['preview_mode', 'inline_text'],
+    ['inline_text', 'old content'], ['inline_image', 'AQID']]) {
+    const mixed = structuredClone(result);
+    mixed.body.artifacts[0][field] = value;
+    assertProtocolError('unknown_field', () => validateControllerPayload(mixed, 'B', LEASE), field);
+  }
+  for (const previewKind of ['inline_text', 'inline_image']) {
+    const legacyEnum = structuredClone(result);
+    legacyEnum.body.artifacts[0].preview_kind = previewKind;
+    assertProtocolError('invalid_enum', () => validateControllerPayload(legacyEnum, 'B', LEASE), previewKind);
+  }
 });
 
 test("raw controller JSON rejects duplicate keys before object construction", () => {

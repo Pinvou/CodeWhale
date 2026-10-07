@@ -169,6 +169,15 @@ pub struct RelaySender {
 }
 
 impl RelaySender {
+    pub(crate) fn same_channel(&self, other: &Self) -> bool {
+        self.tx.same_channel(&other.tx)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_channel_owner() -> Self {
+        outbound_channel(1, 1024, 1024).0
+    }
+
     fn serialize_message(&self, value: Value) -> Result<SerializedFrame, RelayTrySendError> {
         let controller_v1 = value.get("v").and_then(Value::as_u64) == Some(1);
         if controller_v1 && self.socket_mode.load(Ordering::Acquire) == SOCKET_MODE_LEGACY_V2 {

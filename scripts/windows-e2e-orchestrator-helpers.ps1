@@ -7,25 +7,8 @@ function global:Get-PinvouSha256Hex {
     finally { $algorithm.Dispose() }
 }
 
-function Assert-PinvouJourneyElapsed {
-    param([long]$ObservedMilliseconds, [long]$TerminalElapsedMilliseconds, [long]$ToleranceMilliseconds = 1500)
-    if ($ObservedMilliseconds -le 0 -or $TerminalElapsedMilliseconds -le 0 -or [Math]::Abs($ObservedMilliseconds - $TerminalElapsedMilliseconds) -gt $ToleranceMilliseconds) { throw 'e2e_monotonic_elapsed_mismatch' }
-}
 
-function Assert-PinvouRouteStateBinding {
-    param([string]$CanonicalInputDigest, [string]$ControlPlaneBeforeDigest, [string]$ConfiguredDigest, [string]$RestoredControlPlaneDigest, [string]$RestoredOriginalDigest, [string]$RestoredStateDigest)
-    if ($CanonicalInputDigest -notmatch '^[a-f0-9]{64}$' -or $ControlPlaneBeforeDigest -notmatch '^[a-f0-9]{64}$') { throw 'e2e_legacy_gateway_original_state_mismatch' }
-    $payload = [Text.Encoding]::UTF8.GetBytes((@('pinvou-gateway-state-v1', $CanonicalInputDigest, $ControlPlaneBeforeDigest) | ConvertTo-Json -Compress))
-    $expected = Get-PinvouSha256Hex $payload
-    if ($ConfiguredDigest -ne $expected -or $RestoredControlPlaneDigest -ne $ControlPlaneBeforeDigest -or $RestoredOriginalDigest -ne $expected -or $RestoredStateDigest -ne $expected) { throw 'e2e_legacy_gateway_original_state_mismatch' }
-}
 
-function Invoke-PinvouCleanupSteps {
-    param([Parameter(Mandatory = $true)][scriptblock[]]$Actions)
-    $errors = [Collections.Generic.List[string]]::new()
-    for ($index = 0; $index -lt $Actions.Count; $index++) { try { & $Actions[$index] } catch { $errors.Add("step-$index`:$($_.Exception.Message)") } }
-    if ($errors.Count -gt 0) { throw ('e2e_cleanup_failed:' + ($errors -join '|')) }
-}
 
 function global:Assert-PinvouChildPath {
     param([string]$Root, [string]$Candidate, [string]$ErrorCode)
@@ -47,26 +30,6 @@ function global:Get-PinvouChildRelativePath {
     [Uri]::UnescapeDataString($relativeUri.ToString()).Replace('/', [IO.Path]::DirectorySeparatorChar)
 }
 
-function New-PinvouRunStaging {
-    param([Parameter(Mandatory = $true)][string]$BaseRoot, [Parameter(Mandatory = $true)][ValidatePattern('^[a-f0-9]{64}$')][string]$RunNonce, [Parameter(Mandatory = $true)][datetime]$StartedAtUtc)
-    $base = [IO.Path]::GetFullPath($BaseRoot).TrimEnd([IO.Path]::DirectorySeparatorChar)
-    if (-not (Test-Path -LiteralPath $base)) { New-Item -ItemType Directory -Path $base -ErrorAction Stop | Out-Null }
-    $baseItem = Get-Item -LiteralPath $base -Force -ErrorAction Stop
-    if (($baseItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'e2e_staging_base_reparse_point' }
-    $target = Assert-PinvouChildPath $base (Join-Path $base $RunNonce) 'e2e_staging_path_escape'
-    if (Test-Path -LiteralPath $target) { throw 'e2e_staging_already_exists' }
-    New-Item -ItemType Directory -Path $target -ErrorAction Stop | Out-Null
-    try {
-        $marker = [ordered]@{ schema = 'pinvou-e2e-staging'; version = 1; run_nonce = $RunNonce; started_at = $StartedAtUtc.ToUniversalTime().ToString('O') }
-        [IO.File]::WriteAllText((Join-Path $target '.pinvou-e2e-owner.json'), (($marker | ConvertTo-Json -Compress) + "`n"), [Text.UTF8Encoding]::new($false))
-        New-Item -ItemType Directory -Path (Join-Path $target 'output') -ErrorAction Stop | Out-Null
-        $global:PinvouE2ERunRoot = $target; $global:PinvouE2EOutput = Join-Path $target 'output'; $global:PinvouE2ERunNonce = $RunNonce
-        [pscustomobject]@{ root = $target; output = $global:PinvouE2EOutput }
-    } catch {
-        if (Test-Path -LiteralPath $target) { Remove-Item -LiteralPath $target -Recurse -Force -ErrorAction SilentlyContinue }
-        throw
-    }
-}
 
 function global:Assert-PinvouTrustedStagedFile {
     param([Parameter(Mandatory = $true)][string]$RelativePath, [Parameter(Mandatory = $true)][ValidatePattern('^[a-f0-9]{64}$')][string]$Sha256)
@@ -127,26 +90,4 @@ function global:Assert-PinvouLegacyOwnershipRegistry {
     }
     if ($null -ne $CallerObservedPid -and -not $seen.Contains($CallerObservedPid.Value)) { throw 'e2e_legacy_ownership_caller_pid_missing' }
     [pscustomobject]@{ active = @($Registry.active | ForEach-Object { [int]$_ }); terminated = @($Registry.terminated | ForEach-Object { [int]$_ }) }
-}
-
-function Assert-PinvouStagedFiles {
-    param([Parameter(Mandatory = $true)][object[]]$ExpectedFiles)
-    $seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
-    foreach ($expected in $ExpectedFiles) {
-        if (-not $seen.Add([string]$expected.RelativePath)) { throw 'e2e_staged_file_duplicate' }
-        [void](Assert-PinvouTrustedStagedFile ([string]$expected.RelativePath) ([string]$expected.Sha256))
-    }
-}
-
-function Remove-PinvouRunStaging {
-    param([Parameter(Mandatory = $true)][string]$BaseRoot, [Parameter(Mandatory = $true)][ValidatePattern('^[a-f0-9]{64}$')][string]$RunNonce)
-    $base = [IO.Path]::GetFullPath($BaseRoot).TrimEnd([IO.Path]::DirectorySeparatorChar)
-    $target = Assert-PinvouChildPath $base (Join-Path $base $RunNonce) 'e2e_staging_cleanup_boundary_invalid'
-    if (-not (Test-Path -LiteralPath $target)) { return }
-    $item = Get-Item -LiteralPath $target -Force -ErrorAction Stop
-    if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'e2e_staging_cleanup_reparse_point' }
-    $marker = Get-Content -LiteralPath (Join-Path $target '.pinvou-e2e-owner.json') -Raw -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json
-    if ($marker.schema -ne 'pinvou-e2e-staging' -or $marker.run_nonce -ne $RunNonce) { throw 'e2e_staging_cleanup_owner_mismatch' }
-    Remove-Item -LiteralPath $target -Recurse -Force -ErrorAction Stop
-    if (Test-Path -LiteralPath $target) { throw 'e2e_staging_cleanup_incomplete' }
 }
