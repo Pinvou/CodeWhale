@@ -9,6 +9,16 @@ import { ControllerRouter } from "../controller-router.js";
 
 const CAPABILITIES = ["pairing_v1", "encrypted_frames_v1", "finished_receipt_v1"];
 
+// These regressions isolate initial handshake/lease cleanup, including the
+// explicitly non-resumable socket-close branch. Stateful A06 liveness/resume
+// integration has its own real-hook suites; do not rely on changing defaults.
+function handshakeRouter(options) {
+  const hooks = () => ({ handles: () => false, handle: async () => {},
+    onLeaseCreated: async () => {}, onLeaseTerminated: async () => {},
+    onSocketClosed: async () => ({ retain_lease: false }), expire: async () => 0 });
+  return new ControllerRouter({ ...options, livenessHooks: hooks(), resumeHooks: hooks() });
+}
+
 function publicKey() {
   return crypto.generateKeyPairSync("x25519").publicKey.export({ type: "spki", format: "der" })
     .subarray(-32).toString("base64");
@@ -135,7 +145,7 @@ test("router capability-conflict retry and commitment replay preserve the incumb
   let router;
   const { manager, terminal } = fixture({ resolveControlled: (endpoint) => router.resolveControlledEndpoint(endpoint),
     signTranscript: async (preimage, key) => { entered.resolve(); await gate.promise; return crypto.sign(null, preimage, key); } });
-  router = new ControllerRouter({ pairingRegistrationHandler: { register: async () => {} }, leaseManager: manager,
+  router = handshakeRouter({ pairingRegistrationHandler: { register: async () => {} }, leaseManager: manager,
     send: () => true });
   for (const role of ["A", "B"]) router.addSocket({ socketIdentity: `socket-${role}`, source: `source-${role}`, socket: {} });
   router.authenticateControlled({ socketIdentity: "socket-B", endpointId: "endpoint-0001", authenticatedContext: {} });
@@ -160,7 +170,7 @@ test("failed duplicate reserved delivery has no authority to abort the original 
   let router;
   let rejectRetryDelivery = false;
   const { manager, terminal } = fixture({ resolveControlled: (endpoint) => router.resolveControlledEndpoint(endpoint) });
-  router = new ControllerRouter({ pairingRegistrationHandler: { register: async () => {} }, leaseManager: manager,
+  router = handshakeRouter({ pairingRegistrationHandler: { register: async () => {} }, leaseManager: manager,
     send: (_socket, message) => !(rejectRetryDelivery && message.type === "controller_pairing_reserved") });
   for (const role of ["A", "B"]) router.addSocket({ socketIdentity: `socket-${role}`, source: `source-${role}`, socket: {} });
   router.authenticateControlled({ socketIdentity: "socket-B", endpointId: "endpoint-0001", authenticatedContext: {} });
@@ -254,7 +264,7 @@ for (const phase of ["resolve", "sign"]) {
 test("router rejects late receipts and reclaims without terminating an established real lease", async () => {
   let router;
   const { manager, slots } = fixture({ resolveControlled: (endpoint) => router.resolveControlledEndpoint(endpoint) });
-  router = new ControllerRouter({
+  router = handshakeRouter({
     pairingRegistrationHandler: { register: async () => {} }, leaseManager: manager, send: () => true,
   });
   for (const role of ["A", "B"]) {
@@ -297,7 +307,7 @@ test("authenticated B closure cancels preparation before its first lookup return
     if (++lookups === 1) { entered.resolve(); await gate.promise; }
     return result;
   } });
-  router = new ControllerRouter({ pairingRegistrationHandler: { register: async () => {} }, leaseManager: manager, send: () => true });
+  router = handshakeRouter({ pairingRegistrationHandler: { register: async () => {} }, leaseManager: manager, send: () => true });
   for (const role of ["A", "B"]) router.addSocket({ socketIdentity: `socket-${role}`, source: `source-${role}`, socket: {} });
   router.authenticateControlled({ socketIdentity: "socket-B", endpointId: "endpoint-0001", authenticatedContext: {} });
   const settled = Promise.allSettled([router.handle({ socketIdentity: "socket-A", message: claimMessage() })]);
@@ -314,7 +324,7 @@ for (const delivery of ["reserved", "joined"]) {
     let router;
     let failDelivery = true;
     const { manager, slots, terminal } = fixture({ resolveControlled: (endpoint) => router.resolveControlledEndpoint(endpoint) });
-    router = new ControllerRouter({ pairingRegistrationHandler: { register: async () => {} }, leaseManager: manager,
+    router = handshakeRouter({ pairingRegistrationHandler: { register: async () => {} }, leaseManager: manager,
       send: (_socket, message) => !(failDelivery && message.type === `controller_${delivery === "reserved" ? "pairing_reserved" : "joined"}`) });
     for (const role of ["A", "B"]) router.addSocket({ socketIdentity: `socket-${role}`, source: `source-${role}`, socket: {} });
     router.authenticateControlled({ socketIdentity: "socket-B", endpointId: "endpoint-0001", authenticatedContext: {} });

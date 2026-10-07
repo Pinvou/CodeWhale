@@ -260,15 +260,10 @@ struct RegistryInner {
     task_transfers: HashMap<String, usize>,
 }
 
+#[derive(Default)]
 pub(crate) struct TransferRegistry {
     limits: TransferLimits,
     inner: Mutex<RegistryInner>,
-}
-
-impl Default for TransferRegistry {
-    fn default() -> Self {
-        Self::new(TransferLimits::default()).expect("default transfer limits are valid")
-    }
 }
 
 impl TransferRegistry {
@@ -637,6 +632,36 @@ mod tests {
     }
 
     #[test]
+    fn default_registry_has_valid_budgets_and_an_empty_ledger() {
+        let defaults = TransferLimits::default();
+        assert_eq!(defaults.narrow(), Some(defaults));
+        let registry = TransferRegistry::default();
+        let checked = TransferRegistry::new(defaults).unwrap();
+        assert_eq!(registry.limits(), checked.limits());
+        assert_eq!(registry.connection_bytes("connection-0001"), 0);
+        let inner = registry.inner.lock();
+        assert!(inner.transfers.is_empty());
+        assert!(inner.connection_bytes.is_empty());
+        assert!(inner.task_transfers.is_empty());
+
+        for invalid in [
+            TransferLimits {
+                chunk_bytes: 0,
+                ..defaults
+            },
+            TransferLimits {
+                max_transfer_bytes: defaults.max_transfer_bytes + 1,
+                ..defaults
+            },
+        ] {
+            assert_eq!(
+                TransferRegistry::new(invalid).err().unwrap().code,
+                "transfer_limits_invalid"
+            );
+        }
+    }
+
+    #[test]
     fn upload_and_download_share_one_connection_budget() {
         let registry = TransferRegistry::default();
         let lease = context("generation-0001");
@@ -745,7 +770,7 @@ mod tests {
             .unwrap();
         let snapshot = || {
             let inner = registry.inner.lock();
-            let state = inner.transfers.get(existing.id()).unwrap();
+            let state = &inner.transfers[existing.id()];
             (
                 state.context.clone(),
                 state.metadata.clone(),
@@ -912,7 +937,7 @@ mod tests {
         let progress = registry.progress(&handle).unwrap();
         let digest_before = {
             let inner = registry.inner.lock();
-            let state = inner.transfers.get(handle.id()).unwrap();
+            let state = &inner.transfers[handle.id()];
             assert_eq!(state.chunk_digests.len(), MAX_TRANSFER_CHUNKS);
             assert!(state.chunk_digests.capacity() <= MAX_TRANSFER_CHUNKS);
             assert_eq!(std::mem::size_of_val(&state.chunk_digests[0]), 32);
@@ -938,7 +963,7 @@ mod tests {
         );
         {
             let inner = registry.inner.lock();
-            let state = inner.transfers.get(handle.id()).unwrap();
+            let state = &inner.transfers[handle.id()];
             assert_eq!(state.chunk_digests.len(), MAX_TRANSFER_CHUNKS);
             assert_eq!(state.hasher.clone().finalize(), digest_before);
             assert_eq!(state.updated_at_ms, 1_100);
