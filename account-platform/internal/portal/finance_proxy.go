@@ -14,19 +14,19 @@ func (s *Service) proxyAdminBilling(w http.ResponseWriter, r *http.Request) {
 }
 
 // This stage exposes payment/entitlement operations and the three actual
-// governed commands. Reconciliation, usage repair and later governance paths
-// are not accepted, even when an upstream has storage for them.
+// governed commands, plus F03 reconciliation reads/imports/case commands.
+// Usage repair and later governance paths remain outside this stage.
 func billingAdminPathAllowed(method, resource string) bool {
 	if method == http.MethodHead {
 		method = http.MethodGet
 	}
 	if method == http.MethodGet {
 		switch resource {
-		case "/admin/v1/overview", "/admin/v1/finance-overviews/accounts", "/admin/v1/finance-overviews/payments", "/admin/v1/finance-overviews/products", "/admin/v1/wallets", "/admin/v1/receivables", "/admin/v1/recharge-products", "/admin/v1/recharge-product-create-options", "/admin/v1/payment-orders", "/admin/v1/refunds", "/admin/v1/payment-provider-controls", "/admin/v1/late-payment-reviews", "/admin/v1/payment-anomalies", "/admin/v1/adjustments":
+		case "/admin/v1/reconciliation-runs", "/admin/v1/reconciliation-cases", "/admin/v1/overview", "/admin/v1/finance-overviews/accounts", "/admin/v1/finance-overviews/payments", "/admin/v1/finance-overviews/products", "/admin/v1/wallets", "/admin/v1/receivables", "/admin/v1/recharge-products", "/admin/v1/recharge-product-create-options", "/admin/v1/payment-orders", "/admin/v1/refunds", "/admin/v1/payment-provider-controls", "/admin/v1/late-payment-reviews", "/admin/v1/payment-anomalies", "/admin/v1/adjustments":
 			return true
 		}
 	}
-	if method == http.MethodPost && (resource == "/admin/v1/recharge-products" || resource == "/admin/v1/adjustments") {
+	if method == http.MethodPost && (resource == "/admin/v1/reconciliation-runs" || resource == "/admin/v1/reconciliation-imports" || resource == "/admin/v1/recharge-products" || resource == "/admin/v1/adjustments") {
 		return true
 	}
 	parts := strings.Split(strings.TrimPrefix(resource, "/"), "/")
@@ -38,7 +38,7 @@ func billingAdminPathAllowed(method, resource string) bool {
 	}
 	if len(parts) == 5 {
 		if method == http.MethodGet {
-			return parts[2] == "wallets" && parts[4] == "ledger" || parts[2] == "receivables" && parts[4] == "allocations" || parts[2] == "recharge-products" && parts[4] == "admission-verifications"
+			return parts[2] == "reconciliation-runs" && parts[4] == "cases" || parts[2] == "wallets" && parts[4] == "ledger" || parts[2] == "receivables" && parts[4] == "allocations" || parts[2] == "recharge-products" && parts[4] == "admission-verifications"
 		}
 		if method == http.MethodPut {
 			return parts[2] == "recharge-products" && parts[4] == "draft"
@@ -47,6 +47,8 @@ func billingAdminPathAllowed(method, resource string) bool {
 			return false
 		}
 		switch parts[2] {
+		case "reconciliation-cases":
+			return parts[4] == "commands"
 		case "payment-orders":
 			return parts[4] == "sync" || parts[4] == "repair" || parts[4] == "refunds"
 		case "late-payment-reviews":

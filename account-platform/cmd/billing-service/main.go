@@ -47,7 +47,7 @@ func main() {
 	if strings.TrimSpace(credential) == "" {
 		log.Fatal("BILLING_SERVICE_IDENTITY_REQUIRED")
 	}
-	if err := approvalpolicy.ValidateAll(map[string]approvalpolicy.Mode{"BILLING_PAYMENT_EXPIRY_RECONCILE": approvalpolicy.AuditOnly, "BILLING_ENTITLEMENT_PACKAGE_EXPIRE": approvalpolicy.AuditOnly, "BILLING_MANUAL_REVIEW_SLA_ESCALATE": approvalpolicy.AuditOnly}); err != nil {
+	if err := approvalpolicy.ValidateAll(map[string]approvalpolicy.Mode{"BILLING_PAYMENT_EXPIRY_RECONCILE": approvalpolicy.AuditOnly, "BILLING_ENTITLEMENT_PACKAGE_EXPIRE": approvalpolicy.AuditOnly, "BILLING_MANUAL_REVIEW_SLA_ESCALATE": approvalpolicy.AuditOnly, "BILLING_DAILY_RECONCILIATION": approvalpolicy.AuditOnly}); err != nil {
 		log.Fatal("BILLING_COMMAND_POLICY_INVALID")
 	}
 	onCall, err := manualreview.ParseOnCallSchedule(os.Getenv("MANUAL_REVIEW_ON_CALL_USER_IDS"), strings.HasPrefix(strings.ToLower(cfg.Environment), "production"))
@@ -142,6 +142,9 @@ func main() {
 	go observability.RunBackground(ctx, "product-admission-verification", billing.NewProductAdmissionVerificationWorker(repository, payments.Capabilities(), 5*time.Second, admissionTTL).Run)
 	go observability.RunBackground(ctx, "manual-review-sla", billing.NewManualReviewSLAWorker(repository, time.Minute, onCall).Run)
 	go observability.RunBackground(ctx, "admin-pagination-cleanup", billing.NewAdminPaginationCleanupWorker(repository, time.Minute).Run)
+	if payments.Capabilities().BillSupported {
+		go observability.RunBackground(ctx, "daily-payment-reconciliation", billing.NewDailyPaymentReconciliationWorker(payments).Run)
+	}
 	handler := service.Handler(credential, verify)
 	ready := func(c context.Context) error {
 		if err := repository.Ping(c); err != nil {
