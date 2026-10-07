@@ -1410,6 +1410,12 @@ jobs:
         # Best effort: timeouts or failures only warn and never block (falls back to stock runner memory).
         run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup did not finish; continuing with stock runner memory"
 
+      # benchmark-hooks all-targets 编译会显著放大 target 目录;与 cli-test
+      # 同款磁盘清理,避免 clippy/check 阶段 No space left on device。
+      - name: Prepare Rust disk capacity
+        run: |
+          sudo env GITHUB_WORKSPACE="$GITHUB_WORKSPACE"             RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT"             python3 scripts/ci-rust-disk.py
+
       - name: 初始化公共底座 submodule
         run: git submodule update --init --recursive -- CodeWhale
 
