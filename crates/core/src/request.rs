@@ -142,7 +142,10 @@ pub struct OpaqueReasoningState {
     /// captured, so it fails closed too. A state carrying this field read by
     /// a build older than the field drops it as unknown JSON, which restores
     /// that build's pre-fingerprint gate for the session; `custom/<table>`
-    /// tags still drop there (the old gate never minted them).
+    /// tags still drop there (the old gate never minted them). The one
+    /// mixed-version corner: a bare-`custom`-tagged state minted by this
+    /// build replays on a pre-fingerprint build without an endpoint check,
+    /// because the old gate's equality matches the root tag.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub endpoint: Option<String>,
 }

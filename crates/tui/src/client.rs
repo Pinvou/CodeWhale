@@ -1189,6 +1189,12 @@ impl DeepSeekClient {
     /// `Config`: `ReadyRouteCandidate` is secret-free by design (it carries only
     /// an auth-source *class*), so the API key and provider are still read from
     /// `config`.
+    ///
+    /// `config` must be the same identity-scoped config the candidate was
+    /// resolved from: the reasoning-provider tag freezes `config`'s table
+    /// identity, so pairing a pinned candidate with an ambient config would
+    /// mint captured state under the wrong table tag (replay then fails
+    /// closed).
     pub fn from_candidate(config: &Config, candidate: &ReadyRouteCandidate) -> Result<Self> {
         Self::from_parts(
             candidate.endpoint().base_url.clone(),

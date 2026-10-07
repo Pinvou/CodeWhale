@@ -773,9 +773,11 @@ impl CatalogCompiler {
 /// fingerprint is a SHA-256 digest. Userinfo, query credentials, and fragments
 /// never enter the digest function at all: a query or fragment glued onto the
 /// authority fingerprints the credential-free host (distinct hosts stay
-/// distinct), while scheme-less, non-http(s), and empty-authority inputs map to
-/// one constant redacted input — forms that never construct a client, so no
-/// captured state can carry their digest.
+/// distinct), while non-http(s) schemes and empty or missing authorities map
+/// to one constant redacted input. Scheme-less inputs take the fall-through
+/// branch instead and fingerprint their credential-free authority and path.
+/// None of these forms ever constructs a client, so no captured state can
+/// carry their digest.
 #[must_use]
 pub fn base_url_fingerprint(base_url: &str) -> String {
     use sha2::Digest as _;
