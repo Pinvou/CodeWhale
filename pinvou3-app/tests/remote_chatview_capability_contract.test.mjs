@@ -293,3 +293,11 @@ test('remote event roles and hidden-detail safety copy exist in all three langua
   }
   assert.equal(dict.zh.remoteConversation.modelRequired, '模型不能为空');
 });
+
+test('device model source label is explicitly available in every supported language', () => {
+  for (const language of ['zh', 'en', 'ja']) {
+    assert.equal(typeof dict[language].controllerConnection.modelSourceDevice, 'string');
+    assert.ok(dict[language].controllerConnection.modelSourceDevice.trim());
+  }
+  assert.match(chat, /t\.controllerConnection\.modelSourceDevice/);
+});

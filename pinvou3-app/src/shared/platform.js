@@ -10,7 +10,7 @@ const DEFAULT_DESKTOP_CAPABILITIES = Object.freeze({
   localModelSetup: true,
   externalSystemOpen: true,
   webAccessAdmin: true,
-  // This capability is asserted only by the Windows backend at runtime.
+  // Fail closed until the Rust host's Windows capability has been projected.
   desktopRemoteControl: false,
   desktopNotifications: true,
   hostFilePicker: true,
@@ -53,9 +53,8 @@ export function can(capability) {
     if (!bridge?.available || typeof bridge.state?.getMany !== 'function') return false;
     try {
       const detected = bridge.state.getMany(['platform'])?.platformCapabilities;
-      return detected?.loaded === true
-        && detected.os === 'windows'
-        && detected.desktopRemoteControl === true;
+      return detected?.loaded === true && detected.os === 'windows' &&
+        detected.desktopRemoteControl === true;
     } catch {
       return false;
     }

@@ -2325,7 +2325,17 @@ fn validate_named_field(object: &Map<String, Value>, field: &str, value: &Value)
     } else if field == "relay_signature_b64" {
         validate_base64(value, field, 64, Some(64))?;
     } else if field == "chunk_b64" {
+        // Check the peer's declared bound before the first decoder allocation.
+        let claimed = object
+            .get("chunk_bytes")
+            .and_then(Value::as_str)
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|bytes| *bytes > 0 && *bytes <= MAX_TRANSFER_CHUNK_BYTES)
+            .ok_or_else(|| ControllerProtocolError::new("invalid_field", "chunk_bytes"))?;
         let length = validate_base64(value, field, MAX_TRANSFER_CHUNK_BYTES, None)?;
+        if length != claimed {
+            return Err(ControllerProtocolError::new("length_mismatch", field));
+        }
         validate_declared_length(object, "chunk_bytes", length, field)?;
     } else if field == "snapshot_b64" || field == "event_b64" {
         let length = validate_base64(value, field, MAX_DECRYPTED_PAYLOAD_BYTES, None)?;
@@ -2454,7 +2464,13 @@ fn validate_base64(value: &Value, field: &str, max: usize, exact: Option<usize>)
     let Some(encoded) = value.as_str() else {
         return Err(ControllerProtocolError::new("invalid_field", field));
     };
-    if encoded.is_empty() {
+    // Canonical padded base64 cannot exceed this bound for `max` bytes.
+    // Reject before decoding even when a containing envelope has its own limit.
+    let encoded_limit = max
+        .div_ceil(3)
+        .checked_mul(4)
+        .ok_or_else(|| ControllerProtocolError::new("invalid_field", field))?;
+    if encoded.is_empty() || encoded.len() > encoded_limit {
         return Err(ControllerProtocolError::new("invalid_field", field));
     }
     let decoded = base64::engine::general_purpose::STANDARD

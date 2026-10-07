@@ -673,7 +673,24 @@ test('bridge feature gates every desktop call behind the Windows capability', ()
   // Remote operations stay in the desktop namespace. B-local input may first
   // adopt an existing managed draft attachment after the same feature gate.
   const invokes = [...feature.matchAll(/invoke\("([^"]+)"/g)].map((match) => match[1]);
-  assert.ok(invokes.length > 20);
+  // Exact A08 contract: A mutations route through the authenticated action
+  // command; B-local projections/stops and A-local RemoteProxy history are distinct.
+  const expected = [
+    'adopt_draft_attachment', 'desktop_remote_action_a', 'desktop_remote_client_event',
+    'desktop_remote_controlled_capabilities_snapshot', 'desktop_remote_controlled_disconnect_now',
+    'desktop_remote_controlled_list_workspaces', 'desktop_remote_controlled_refresh',
+    'desktop_remote_controlled_start', 'desktop_remote_controlled_status', 'desktop_remote_controlled_stop',
+    'desktop_remote_controlled_task_send', 'desktop_remote_controlled_task_stop',
+    'desktop_remote_controller_capability_send', 'desktop_remote_controller_capability_snapshot',
+    'desktop_remote_controller_connect', 'desktop_remote_controller_disconnect', 'desktop_remote_controller_status',
+    'desktop_remote_endpoint_profiles', 'desktop_remote_model_list_exportable',
+    'desktop_remote_permission_deny_task', 'desktop_remote_permission_list_b',
+    'desktop_remote_proxy_history_delete', 'desktop_remote_proxy_history_list',
+    'desktop_remote_proxy_history_read', 'desktop_remote_proxy_open_live', 'desktop_remote_set_endpoint_profile',
+    'desktop_remote_task_abandon_prepared_a', 'desktop_remote_task_cancel_a',
+    'desktop_remote_task_commit_a', 'desktop_remote_task_reserve_a',
+  ];
+  assert.deepEqual([...new Set(invokes)].sort(), expected.sort());
   for (const command of invokes) {
     assert.ok(
       command.startsWith('desktop_remote_') || command === 'adopt_draft_attachment',

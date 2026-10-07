@@ -247,6 +247,14 @@ pub(crate) struct CompletedTransfer {
     pub(crate) bytes: u64,
 }
 
+/// Revocation evidence handed to the lifecycle owner before file cleanup.
+/// The exact typed handle/context must survive even if staging abort fails.
+#[derive(Debug, Clone)]
+pub(crate) struct RevokedTransfer {
+    pub(crate) handle: TransferHandle,
+    pub(crate) context: TransferContext,
+}
+
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub(crate) struct ChunkOutcome {
     pub(crate) received_bytes: u64,
@@ -543,6 +551,60 @@ impl TransferRegistry {
         Ok(())
     }
 
+    pub(crate) fn verify_session(&self, handle: &TransferHandle, session_id: &str) -> Result<()> {
+        let inner = self.inner.lock();
+        let state = inner
+            .transfers
+            .get(handle.id())
+            .ok_or_else(|| error("transfer_unknown"))?;
+        if state.context.binding.session_id != session_id {
+            return Err(error("transfer_binding_stale"));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn take_expired(&self, now_b: u64) -> Vec<RevokedTransfer> {
+        let ttl = self.limits.ttl.as_millis() as u64;
+        self.take_where(|state| now_b.saturating_sub(state.updated_at_ms) >= ttl)
+    }
+
+    pub(crate) fn take_expired_downloads(&self, now_b: u64) -> Vec<RevokedTransfer> {
+        let ttl = self.limits.ttl.as_millis() as u64;
+        self.take_where(|state| {
+            state.context.direction == TransferDirection::Download
+                && now_b.saturating_sub(state.updated_at_ms) >= ttl
+        })
+    }
+
+    pub(crate) fn take_for_task(&self, task_id: &str) -> Vec<RevokedTransfer> {
+        self.take_where(|state| state.context.binding.task_id == task_id)
+    }
+
+    pub(crate) fn take_for_connection(&self, connection_id: &str) -> Vec<RevokedTransfer> {
+        self.take_where(|state| state.context.binding.connection_id == connection_id)
+    }
+
+    pub(crate) fn take_for_generation(&self, generation: &str) -> Vec<RevokedTransfer> {
+        self.take_where(|state| state.context.binding.remote_control_generation == generation)
+    }
+
+    pub(crate) fn take_downloads_for_task(&self, task_id: &str) -> Vec<RevokedTransfer> {
+        self.take_where(|state| {
+            state.context.direction == TransferDirection::Download
+                && state.context.binding.task_id == task_id
+        })
+    }
+
+    pub(crate) fn take_downloads_for_connection(
+        &self,
+        connection_id: &str,
+    ) -> Vec<RevokedTransfer> {
+        self.take_where(|state| {
+            state.context.direction == TransferDirection::Download
+                && state.context.binding.connection_id == connection_id
+        })
+    }
+
     /// Drops every transfer that exceeded its TTL.
     pub(crate) fn expire(&self, now_b: u64) -> Vec<String> {
         let ttl = self.limits.ttl.as_millis() as u64;
@@ -589,6 +651,10 @@ impl TransferRegistry {
     }
 
     fn cleanup_where(&self, predicate: impl Fn(&TransferState) -> bool) -> usize {
+        self.take_where(predicate).len()
+    }
+
+    fn take_where(&self, predicate: impl Fn(&TransferState) -> bool) -> Vec<RevokedTransfer> {
         let mut inner = self.inner.lock();
         let ids: Vec<String> = inner
             .transfers
@@ -596,14 +662,22 @@ impl TransferRegistry {
             .filter(|(_, state)| predicate(state))
             .map(|(id, _)| id.clone())
             .collect();
+        let mut revoked = Vec::with_capacity(ids.len());
         for id in &ids {
             if let Some(state) = inner.transfers.remove(id) {
                 let connection = state.context.binding.connection_id.clone();
                 let task = state.context.binding.task_id.clone();
                 release_budget(&mut inner, &connection, state.metadata.total_bytes, &task);
+                revoked.push(RevokedTransfer {
+                    handle: TransferHandle {
+                        id: id.clone(),
+                        direction: state.context.direction,
+                    },
+                    context: state.context,
+                });
             }
         }
-        ids.len()
+        revoked
     }
 }
 

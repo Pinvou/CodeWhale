@@ -39,14 +39,17 @@ function fixture({ clock = Date.now, capabilities = ["encrypted_frames_v1", "tas
     }),
   };
   let leaseAlive = true;
+  let terminationObserver;
   const leases = {
-    claim: async () => reserved,
+    claimForDelivery: async () => ({ message: reserved, owns_initial_delivery: true }),
     acceptCommitment: ({ message, role }) => ({ message, target_role: role === "A" ? "B" : "A" }),
     forwardFinished: ({ message, role }) => ({ message, target_role: role === "A" ? "B" : "A" }),
     acceptReceipt: async ({ role }) => role === "A" ? joined : null,
     lease: (leaseId) => leaseAlive && leaseId === activeLease.controller_lease_id ? activeLease : null,
-    terminateLease: async (input) => { leaseAlive = false; terminated.push(input); return true; },
+    setTerminationObserver: (observer) => { terminationObserver = observer; },
+    terminateLease: async (input) => { leaseAlive = false; terminated.push(input); await terminationObserver({ controller_lease_id: activeLease.controller_lease_id, reason: input.reason }, activeLease); return true; },
     abortHandshakesBySocket: async () => 0,
+    isPendingHandshake: () => true,
     abortBySocket: async (input) => {
       leaseAlive = false;
       aborted.push(input);
@@ -213,7 +216,7 @@ test("router keeps registration on authenticated B and cleans up disconnected pe
 });
 
 test("explicit controller disconnect forwards once and terminates the shared lease", async () => {
-  const { router, sent, terminated, audits } = fixture();
+  const { router, sent, terminated, audits, activeLease, liveness, resume } = fixture();
   await router.handle({
     socketIdentity: "socket-A",
     message: { v: 1, type: "controller_pairing_claim", request_id: "request-claim-0001" },
@@ -242,7 +245,10 @@ test("explicit controller disconnect forwards once and terminates the shared lea
   assert.deepEqual(sent.get("socket-B").at(-1), disconnect);
   assert.deepEqual(terminated, [{
     controllerLeaseId: "controller-lease-0001", reason: "user_requested",
+    expectedLease: activeLease,
   }]);
+  assert.equal(liveness.resumeDeadline(activeLease), null);
+  assert.equal(resume.phase(activeLease.controller_lease_id), null);
   assert.deepEqual(audits, ["controller_joined"], "lease manager owns the sole terminal audit");
 });
 
@@ -250,7 +256,7 @@ test("closing an unauthenticated controller socket never fabricates a lease life
   const { router, audits, aborted } = fixture();
   await router.removeSocket("socket-A");
   assert.deepEqual(audits, []);
-  assert.deepEqual(aborted, [{ socketIdentity: "socket-A", reason: "owner_disconnected" }]);
+  assert.deepEqual(aborted, [{ socketIdentity: "socket-A", reason: "owner_disconnected", endpointId: undefined }]);
 });
 
 test("authenticated encrypted business frames are validated and forwarded both ways", async () => {
@@ -313,7 +319,11 @@ test("router collapses internal claim failures to a bounded public error", async
 // 的前提下注入」这一能力，并保证非法 hook 失败关闭。
 function leaseManagerStub() {
   return {
-    claim: async () => null,
+    claimForDelivery: async () => null,
+    isPendingHandshake: () => false,
+    setTerminationObserver: () => {},
+    verifyResumeToken: () => false,
+    completeResume: () => { throw new Error("no fixture lease"); },
     acceptCommitment: () => null,
     forwardFinished: () => null,
     acceptReceipt: async () => null,
