@@ -123,3 +123,41 @@ $production = @{}; foreach ($name in $names) { $production[$name] = [Environment
   assert.equal(projected.test.PINVOU_REMOTE_RELAY_SIGNING_PUBLIC_KEY_B64, "fixture-public-key");
   for (const value of Object.values(projected.production)) assert.equal(value, null);
 });
+
+test("actual selftest prepare preserves both HMACs and refuses lost or corrupt identity", {
+  skip: process.platform !== "win32" ? "requires Windows PowerShell" : false,
+}, (t) => {
+  const root = mkdtempSync(join(tmpdir(), "pinvou-selftest-hmac-contract-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  mkdirSync(join(root, "relay-state"));
+  const command = [
+    "$ErrorActionPreference='Stop'",
+    "$tokens=$null; $errors=$null",
+    "$ast=[Management.Automation.Language.Parser]::ParseFile($env:PINVOU_TEST_SELFTEST_PATH,[ref]$tokens,[ref]$errors)",
+    "if($errors.Count){throw 'parse failed'}",
+    "$defs=@($ast.EndBlock.Statements|Where-Object {$_ -is [Management.Automation.Language.FunctionDefinitionAst] -and $_.Name -eq 'Write-EnvFiles'})",
+    "if($defs.Count -ne 1){throw 'expected actual env generator'}",
+    ". ([scriptblock]::Create($defs[0].Extent.Text))",
+    "$KeyStore=$env:PINVOU_TEST_SELFTEST_ROOT; $Port=8787; $stateDir=Join-Path $KeyStore 'relay-state'",
+    "$key=[pscustomobject]@{signing_key_id='TEST_ONLY_ID';private_key_pkcs8_der_b64='TEST_ONLY_FAKE_PRIVATE_KEY';public_key_raw_b64='TEST_ONLY_FAKE_PUBLIC_KEY'}",
+    "$first=Write-EnvFiles -stateDir $stateDir -key $key",
+    "$before=Get-Content -Raw -Encoding UTF8 -LiteralPath $first.RelayEnvPath",
+    "$again=Write-EnvFiles -stateDir $stateDir -key $key",
+    "$same=$before -ceq (Get-Content -Raw -Encoding UTF8 -LiteralPath $again.RelayEnvPath)",
+    "Set-Content -LiteralPath $first.RelayEnvPath -Value 'TEST_ONLY_CORRUPT_IDENTITY' -Encoding UTF8",
+    "$invalid=$false; try{$null=Write-EnvFiles -stateDir $stateDir -key $key}catch{$invalid=$true}",
+    "$unchanged=(Get-Content -Raw -Encoding UTF8 -LiteralPath $first.RelayEnvPath).Trim() -eq 'TEST_ONLY_CORRUPT_IDENTITY'",
+    "Remove-Item -LiteralPath $first.RelayEnvPath",
+    "Set-Content -LiteralPath (Join-Path $stateDir 'controller-state.json.bak') -Value 'TEST_ONLY_STATE' -Encoding ASCII",
+    "$missing=$false; try{$null=Write-EnvFiles -stateDir $stateDir -key $key}catch{$missing=$true}",
+    "@{same=$same;invalid_refused=$invalid;invalid_unchanged=$unchanged;missing_refused=$missing;no_new_env=(-not (Test-Path -LiteralPath $first.RelayEnvPath))}|ConvertTo-Json -Compress",
+  ].join("\n");
+  const result = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", command], {
+    env: { ...process.env, PINVOU_TEST_SELFTEST_PATH: fileURLToPath(new URL("../../scripts/remote-control-local-selftest.ps1", import.meta.url)), PINVOU_TEST_SELFTEST_ROOT: root },
+    encoding: "utf8", timeout: 20_000,
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout.trim()), {
+    same: true, invalid_refused: true, invalid_unchanged: true, missing_refused: true, no_new_env: true,
+  });
+});

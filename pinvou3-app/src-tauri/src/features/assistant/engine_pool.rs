@@ -95,14 +95,12 @@ struct RuntimeModelOverrides {
 #[derive(Default)]
 struct RemoteTurnRuntimePolicy {
     require_model_credentials: bool,
-    skill_owner: Option<uuid::Uuid>,
 }
 
 impl RemoteTurnRuntimePolicy {
-    fn remote(skill_owner: uuid::Uuid) -> Self {
+    fn remote() -> Self {
         Self {
             require_model_credentials: true,
-            skill_owner: Some(skill_owner),
         }
     }
 }
@@ -970,11 +968,30 @@ pub struct CancelOutcome {
 ///   emitted before the cancel command returns, so a frontend listener always
 ///   misses it; the caller must therefore mark the result terminal=true so the
 ///   frontend skips the event wait).
+pub(super) fn request_turn_shell_cancel(
+    turn_shell_tasks: &SessionTurnShellTasks,
+    lifecycle: Option<&TurnLifecycle>,
+    session_id: &str,
+    requested_generation: Option<u64>,
+) -> Option<super::turn_shell_tasks::TurnShellCancellation> {
+    match requested_generation {
+        Some(generation) => lifecycle
+            .and_then(|lc| {
+                lc.with_active_generation(generation, || {
+                    turn_shell_tasks.request_cancel(session_id)
+                })
+            })
+            .flatten(),
+        None => turn_shell_tasks.request_cancel(session_id),
+    }
+}
+
 async fn cancel_turn_with_gates<G, E, EFut, X, F, FFut, C>(
     turn_locks: &SessionTurnLocks,
     turn_lifecycles: &SessionTurnLifecycles,
     turn_shell_tasks: &SessionTurnShellTasks,
     session_id: &str,
+    requested_generation: Option<u64>,
     steer_mode: deepseek_tui::core::engine::CancelMode,
     mut get_engine: E,
     mut cancel_current: X,
@@ -992,9 +1009,13 @@ where
     // Phase one: trigger the cancel_token first, lock-free — only cancel when
     // it is still the same turn as at initiation, otherwise we would hit the
     // new turn's live token that has since been reset_cancel_tokened.
-    let target = turn_lifecycles
-        .get(session_id)
-        .and_then(|lc| lc.current_turn_generation());
+    // Remote callers retain their reservation's epoch even after Drop/terminal.
+    // Never bind an old remote cancellation to the generation current NOW.
+    let target = requested_generation.or_else(|| {
+        turn_lifecycles
+            .get(session_id)
+            .and_then(|lc| lc.current_turn_generation())
+    });
     // Simplification ①: the upfront check can be omitted — get_engine has no
     // side effects, and the recheck after the await +
     // arm_pending_cancel_and_cancel's in-lock atomic check already close the
@@ -1057,7 +1078,7 @@ where
         // safe — it cannot hit the new turn's just-started sub-agents.
         // Idempotent: resending after phase 1 already enqueued is a no-op
         // (simplification ③, no cascade_queued flag needed).
-        if should_retry_cascade(lifecycle.as_deref()) {
+        if requested_generation.is_none() && should_retry_cascade(lifecycle.as_deref()) {
             if let Some(engine) = get_engine().await {
                 bounded_while_holding_turn_gate("cascade subagent cancel", cascade_cancel(&engine))
                     .await;
@@ -1071,7 +1092,12 @@ where
 
     // generation matches, the target turn is still the one from initiation:
     // clean up its shell tasks.
-    let shell_cancellation = turn_shell_tasks.request_cancel(session_id);
+    let shell_cancellation = request_turn_shell_cancel(
+        turn_shell_tasks,
+        lifecycle.as_deref(),
+        session_id,
+        requested_generation,
+    );
     // claim_unsubmitted atomically checks against the target epoch inside the
     // lifecycle state lock before claiming: between this line and the
     // generation recheck above another worker may already have ended the old
@@ -1128,7 +1154,9 @@ where
                             cascade_cancel(&engine),
                         )
                         .await;
-                    } else if should_retry_cascade(Some(lifecycle.as_ref())) {
+                    } else if requested_generation.is_none()
+                        && should_retry_cascade(Some(lifecycle.as_ref()))
+                    {
                         // G1 miss point: arm rejected = the turn switched
                         // after the recheck passed. If phase-1's best-effort
                         // try_send was not delivered (channel full) and the
@@ -1153,7 +1181,7 @@ where
                     // current sub-agents, an idle engine has no active sub-agents, and not
                     // sending is lossless (original behavior kept).
                 }
-            } else if should_retry_cascade(lifecycle.as_deref()) {
+            } else if requested_generation.is_none() && should_retry_cascade(lifecycle.as_deref()) {
                 // G1 miss point: the recheck after the get_engine await
                 // mismatches (T2 reserved during the await). If phase-1's
                 // try_send was not delivered and the new turn has not been
@@ -1195,8 +1223,122 @@ fn entry_is_fresh(
     !requires_model_rebuild && entry_mcp_config_revision == current_mcp_config_revision
 }
 
-/// A session's resident entry in the pool: the engine + its own event
-/// forwarder task.
+#[cfg(test)]
+#[path = "engine_pool_remote_tests.rs"]
+mod remote_snapshot_tests;
+
+fn remote_owner_matches(
+    resident: Option<&Arc<super::skill_materialization::RemoteTurnOwner>>,
+    incoming: Option<&Arc<super::skill_materialization::RemoteTurnOwner>>,
+) -> bool {
+    match (resident, incoming) {
+        (None, None) => true,
+        (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+        _ => false,
+    }
+}
+
+/// Own an unpublished engine across the entries-lock await. Cancellation
+/// cannot detach a cold forwarder or strand its private discovery root.
+struct ColdEngineCustody {
+    resources: Option<(AppEngine, JoinHandle<()>)>,
+}
+
+impl ColdEngineCustody {
+    fn new(engine: AppEngine, forwarder: JoinHandle<()>) -> Self {
+        Self {
+            resources: Some((engine, forwarder)),
+        }
+    }
+
+    fn adopt(mut self) -> (AppEngine, JoinHandle<()>) {
+        self.resources
+            .take()
+            .expect("cold engine custody already adopted")
+    }
+}
+
+impl Drop for ColdEngineCustody {
+    fn drop(&mut self) {
+        let Some((engine, forwarder)) = self.resources.take() else {
+            return;
+        };
+        engine.cancel_current();
+        forwarder.abort();
+        let mut pending = Vec::new();
+        let mut blocked = false;
+        for op in EnginePool::shutdown_cancel_cascade_ops() {
+            if blocked {
+                pending.push(op);
+                continue;
+            }
+            match engine.handle.tx_op.try_send(op) {
+                Ok(()) => {}
+                Err(tokio::sync::mpsc::error::TrySendError::Full(op)) => {
+                    pending.push(op);
+                    blocked = true;
+                }
+                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => return,
+            }
+        }
+        if !pending.is_empty() {
+            // Same bounded FIFO fallback as ordinary reclaim; retains this
+            // engine/bridge only, never a pool gate or newer entry.
+            let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+                // Drop must never panic during shutdown/unwinding. Synchronous
+                // cancel/abort/try_send above are the no-runtime best effort.
+                return;
+            };
+            runtime.spawn(async move {
+                retry_shutdown_sends(
+                    |op| engine.handle.send(op),
+                    pending,
+                    RECLAIM_SHUTDOWN_RETRY_PATIENCE,
+                )
+                .await;
+            });
+        }
+    }
+}
+
+async fn publish_cold_entry<F>(
+    entries: &Mutex<HashMap<String, EngineEntry>>,
+    session_id: &str,
+    custody: ColdEngineCustody,
+    build: F,
+) -> AppEngine
+where
+    F: FnOnce(AppEngine, JoinHandle<()>) -> EngineEntry,
+{
+    let mut entries = entries.lock().await;
+    // Per-session runtime locking excludes replacements at publication. Keep
+    // custody armed if a future bypass violates that invariant.
+    assert!(
+        !entries.contains_key(session_id),
+        "cold publication would replace an owned entry"
+    );
+    let (engine, forwarder) = custody.adopt();
+    let result = engine.clone();
+    entries.insert(session_id.to_owned(), build(engine, forwarder));
+    result
+}
+
+fn take_remote_owned_entry(
+    entries: &mut HashMap<String, EngineEntry>,
+    session_id: &str,
+    owner: &Arc<super::skill_materialization::RemoteTurnOwner>,
+) -> Option<EngineEntry> {
+    if entries
+        .get(session_id)
+        .is_some_and(|entry| remote_owner_matches(entry.remote_owner.as_ref(), Some(owner)))
+    {
+        entries.remove(session_id)
+    } else {
+        None
+    }
+}
+
+/// A session's resident entry: engine plus its own event forwarder.
 struct EngineEntry {
     engine: AppEngine,
     /// This engine's event forwarder; aborted on evict so a zombie task does
@@ -1205,6 +1347,7 @@ struct EngineEntry {
     /// The runtime model, provider version, and local model revision actually
     /// used when this engine was created.
     runtime_model: PreparedRuntimeState,
+    remote_owner: Option<Arc<super::skill_materialization::RemoteTurnOwner>>,
     /// MCP config revision. Bumped after a background migration atomically
     /// updates mcp.json; the next engine fetch safely reclaims the old
     /// instance and lazily rebuilds, so new dependencies/startup parameters
@@ -2013,6 +2156,7 @@ impl EnginePool {
             eval_model,
             None,
             None,
+            None,
         )
         .await
     }
@@ -2028,6 +2172,7 @@ impl EnginePool {
         explicit_model_override: Option<SavedModel>,
         explicit_credential: Option<RuntimeModelCredential>,
         remote_bundle: Option<RemoteRuntimeModelBundle>,
+        remote_skills: Option<Arc<super::skill_materialization::RemoteTurnSkills>>,
     ) -> Result<AppEngine> {
         let acquisition_started = Instant::now();
         let runtime_lock_started = Instant::now();
@@ -2061,6 +2206,9 @@ impl EnginePool {
                     prepared.requires_rebuild_from(&entry.runtime_model),
                     entry.mcp_config_revision,
                     mcp_config_revision,
+                ) && remote_owner_matches(
+                    entry.remote_owner.as_ref(),
+                    remote_skills.as_ref().map(|skills| skills.owner()),
                 ) {
                     (Some(entry.engine.clone()), None)
                 } else {
@@ -2070,10 +2218,7 @@ impl EnginePool {
                 (None, None)
             }
         };
-        if let Some(mut engine) = fresh_engine {
-            // The cheap handle clone belongs to this send, not to the cached
-            // engine's previous remote task owner. Local sends carry None.
-            engine.bridge.remote_skill_owner = remote_policy.skill_owner;
+        if let Some(engine) = fresh_engine {
             crate::features::assistant::timing::record_engine_ready(
                 session_id,
                 crate::features::assistant::timing::EngineAcquireTiming {
@@ -2099,11 +2244,10 @@ impl EnginePool {
         }
         let reclaim_ms = elapsed_ms(reclaim_started);
 
-        let is_scheduled = self.store.scheduled_profile(session_id).is_some();
         let finalize_bridge_started = Instant::now();
         let mut bridge =
             Self::finalize_runtime_bridge(bridge, &prepared.prepared, pins_scheduled_model).await;
-        bridge.remote_skill_owner = remote_policy.skill_owner;
+        bridge.remote_turn_skills = remote_skills.clone();
         let finalize_bridge_ms = elapsed_ms(finalize_bridge_started);
         let tool_setup_started = Instant::now();
         // The shell execution directory and the engine cwd share one source:
@@ -2135,16 +2279,15 @@ impl EnginePool {
         // exist before spawn, otherwise the first turn's prompt has no
         // `## Skills` block.
         let materialize_skills_started = Instant::now();
-        {
+        if remote_skills.is_none() {
             let sid = session_id.to_string();
             let scope = self.bridge.session_policy(&sid).mode();
             let project_workspace = self.project_workspace_for(&sid);
             tokio::task::spawn_blocking(move || {
-                crate::features::assistant::skill_materialization::prepare_engine_spawn_skills(
+                crate::features::assistant::skill_materialization::materialize_session_skills(
                     &sid,
                     scope,
                     project_workspace.as_deref(),
-                    remote_policy.skill_owner,
                 )
             })
             .await
@@ -2166,6 +2309,13 @@ impl EnginePool {
             .fetch_add(1, Ordering::Relaxed)
             .saturating_add(1);
         let spawn_engine_started = Instant::now();
+        // Load before spawning: no fallible disk read may strand a cold engine.
+        let load_session_started = Instant::now();
+        let saved = self
+            .store
+            .load(session_id)
+            .with_context(|| format!("load session {session_id} before spawning its engine"))?;
+        let load_session_ms = elapsed_ms(load_session_started);
         let (engine, forwarder) = AppEngine::spawn_for_session(
             self.app.clone(),
             self.store.clone(),
@@ -2178,8 +2328,9 @@ impl EnginePool {
             shell_manager,
             turn_shell_tasks,
             steer_incarnation,
-        )
-        .await?;
+        )?;
+        let custody = ColdEngineCustody::new(engine, forwarder);
+        let engine = &custody.resources.as_ref().expect("owned cold engine").0;
         let spawn_engine_ms = elapsed_ms(spawn_engine_started);
 
         // Sync is mandatory even when messages is empty: SyncSession not only
@@ -2188,56 +2339,26 @@ impl EnginePool {
         // get the first turn's SessionUpdated rejected on an id mismatch,
         // ending with only the user message durable and the assistant reply
         // lost.
-        let load_session_started = Instant::now();
-        let loaded_session = self.store.load(session_id);
-        let load_session_ms = elapsed_ms(load_session_started);
         let sync_session_started = Instant::now();
-        match loaded_session {
-            Ok(saved) => {
-                if let Err(error) = engine
-                    .sync_session(session_id.to_string(), saved.messages)
-                    .await
-                {
-                    if is_scheduled {
-                        let _ = engine.handle.send(Op::Shutdown).await;
-                        forwarder.abort();
-                        return Err(error).with_context(|| {
-                            format!("sync scheduled session {session_id} before its first turn")
-                        });
-                    }
-                    eprintln!("[engine_pool] sync history for {session_id} failed: {error:?}");
-                } else {
-                    // The hydrated history is forwarder-sanitized: old
-                    // transcript rules can no longer match the new engine's
-                    // snapshot, so prune them to stop rules accumulating per
-                    // turn. The interactive path installs rules around spawn
-                    // (reserve already marked active); the retain predicate
-                    // guarantees the in-flight reservation's rule survives.
-                    turn_lifecycle.prune_stale_transcript_rules();
-                }
-            }
-            Err(error) => {
-                let _ = engine.handle.send(Op::Shutdown).await;
-                forwarder.abort();
-                return Err(error).with_context(|| {
-                    format!("load session {session_id} before spawning its engine")
-                });
-            }
-        }
+        engine
+            .try_sync_new_session(session_id.to_string(), saved.messages)
+            .with_context(|| format!("sync session {session_id} before publication"))?;
+        turn_lifecycle.prune_stale_transcript_rules();
         let sync_session_ms = elapsed_ms(sync_session_started);
 
-        self.entries.lock().await.insert(
-            session_id.to_string(),
+        let engine = publish_cold_entry(&self.entries, session_id, custody, |engine, forwarder| {
             EngineEntry {
-                engine: engine.clone(),
+                engine,
                 forwarder,
                 runtime_model: prepared,
+                remote_owner: remote_skills.as_ref().map(|skills| skills.owner().clone()),
                 mcp_config_revision,
                 spawned_at_ms,
                 steer_incarnation,
                 last_active_epoch_ms: AtomicU64::new(Self::now_epoch_ms()),
-            },
-        );
+            }
+        })
+        .await;
         crate::features::assistant::timing::record_engine_ready(
             session_id,
             crate::features::assistant::timing::EngineAcquireTiming {
@@ -2681,6 +2802,26 @@ impl EnginePool {
         }
     }
 
+    /// Old remote cleanup must neither evict a replacement nor invalidate a
+    /// newer reservation when its own attempt never reached publication.
+    pub(crate) async fn evict_remote_owner(
+        &self,
+        session_id: &str,
+        owner: &Arc<super::skill_materialization::RemoteTurnOwner>,
+    ) {
+        let turn_lock = self.turn_locks.for_session(session_id).await;
+        let _turn = turn_lock.lock().await;
+        let runtime_lock = self.runtime_model_locks.for_session(session_id).await;
+        let _runtime = runtime_lock.lock().await;
+        let entry = {
+            let mut entries = self.entries.lock().await;
+            take_remote_owned_entry(&mut entries, session_id, owner)
+        };
+        if let Some(entry) = entry {
+            self.reclaim_engine_entry(session_id, entry).await;
+        }
+    }
+
     async fn evict_locked(&self, session_id: &str) {
         let runtime_lock = self.runtime_model_locks.for_session(session_id).await;
         let _runtime = runtime_lock.lock().await;
@@ -2889,11 +3030,7 @@ impl EnginePool {
         if enabled && !self.swarm_mode_available(session_id) {
             anyhow::bail!("当前会话不支持 Pinvou 蜂群模式");
         }
-        let _reservation =
-            super::skill_materialization::reserve_unfrozen_session_turn(session_id, || {
-                self.turn_lifecycles.for_session(session_id).reserve()
-            })
-            .map_err(anyhow::Error::msg)??;
+        let _reservation = self.turn_lifecycles.for_session(session_id).reserve()?;
         let turn_lock = self.turn_locks.for_session(session_id).await;
         let _turn = turn_lock.lock().await;
         self.store.set_multi_agent(session_id, enabled)?;
@@ -2922,11 +3059,7 @@ impl EnginePool {
         if _flag_guard.as_deref().is_some_and(|rewinding| *rewinding) {
             bail!("该会话绑定的项目目录正在回退/回滚，请稍后重试");
         }
-        let mut reservation =
-            super::skill_materialization::reserve_unfrozen_session_turn(session_id, || {
-                self.turn_lifecycles.for_session(session_id).reserve()
-            })
-            .map_err(anyhow::Error::msg)??;
+        let mut reservation = self.turn_lifecycles.for_session(session_id).reserve()?;
         let baseline = self.store.load(session_id)?;
         reservation.set_base_transcript_revision(transcript_revision(&baseline.messages)?);
         Ok(reservation)
@@ -2995,6 +3128,12 @@ impl EnginePool {
         self.turn_lifecycles
             .get(session_id)
             .is_some_and(|lifecycle| lifecycle.is_active())
+    }
+
+    pub(crate) fn is_turn_active_for_generation(&self, session_id: &str, generation: u64) -> bool {
+        self.turn_lifecycles
+            .get(session_id)
+            .is_some_and(|lifecycle| !lifecycle.is_reserve_gate_open_for(Some(generation)))
     }
 
     /// Product capability gate for Pinvou's multi-agent mode. This is shared
@@ -3082,15 +3221,15 @@ impl EnginePool {
         content: String,
         skill_ids: Vec<String>,
         model_override: Option<RemoteRuntimeModelBundle>,
-        skill_owner: uuid::Uuid,
+        owner: Arc<super::skill_materialization::RemoteTurnOwner>,
         reservation: TurnReservation,
     ) -> Result<()> {
         let skill_session_id = session_id.to_owned();
-        tokio::task::spawn_blocking(move || {
+        let skills = tokio::task::spawn_blocking(move || {
             crate::features::assistant::skill_materialization::materialize_plain_remote_turn_skills(
                 &skill_session_id,
                 &skill_ids,
-                skill_owner,
+                owner,
             )
         })
         .await
@@ -3106,9 +3245,10 @@ impl EnginePool {
             None,
             Vec::new(),
             reservation,
-            RemoteTurnRuntimePolicy::remote(skill_owner),
+            RemoteTurnRuntimePolicy::remote(),
             None,
             model_override,
+            Some(Arc::new(skills)),
         )
         .await
     }
@@ -3123,7 +3263,7 @@ impl EnginePool {
         attachments: Vec<crate::features::files::file_ingest::IngestResult>,
         skill_ids: Vec<String>,
         model_override: Option<RemoteRuntimeModelBundle>,
-        skill_owner: uuid::Uuid,
+        owner: Arc<super::skill_materialization::RemoteTurnOwner>,
         reservation: TurnReservation,
     ) -> Result<()> {
         use crate::features::assistant::attachments::{
@@ -3138,17 +3278,17 @@ impl EnginePool {
                     content,
                     skill_ids,
                     model_override,
-                    skill_owner,
+                    owner,
                     reservation,
                 )
                 .await;
         }
         let skill_session_id = session_id.to_owned();
-        tokio::task::spawn_blocking(move || {
+        let skills = tokio::task::spawn_blocking(move || {
             crate::features::assistant::skill_materialization::materialize_plain_remote_turn_skills(
                 &skill_session_id,
                 &skill_ids,
-                skill_owner,
+                owner,
             )
         })
         .await
@@ -3203,9 +3343,10 @@ impl EnginePool {
             None,
             Vec::new(),
             reservation,
-            RemoteTurnRuntimePolicy::remote(skill_owner),
+            RemoteTurnRuntimePolicy::remote(),
             None,
             model_override,
+            Some(Arc::new(skills)),
         )
         .await
     }
@@ -3290,6 +3431,7 @@ impl EnginePool {
             RemoteTurnRuntimePolicy::default(),
             None,
             None,
+            None,
         )
         .await
     }
@@ -3308,6 +3450,7 @@ impl EnginePool {
         remote_policy: RemoteTurnRuntimePolicy,
         model_override: Option<SavedModel>,
         remote_bundle: Option<RemoteRuntimeModelBundle>,
+        remote_skills: Option<Arc<super::skill_materialization::RemoteTurnSkills>>,
     ) -> Result<()> {
         let baseline_revision = reservation
             .base_transcript_revision()
@@ -3372,6 +3515,7 @@ impl EnginePool {
             model_override,
             explicit_credential,
             remote_bundle,
+            remote_skills,
         )
         .await?
         .send_reserved_user_message(
@@ -3469,7 +3613,7 @@ impl EnginePool {
             self.evict_locked(session_id).await;
             crate::features::assistant::timing::start_turn(session_id);
             let engine = match self
-                .get_or_spawn_with_policy(session_id, true, RemoteTurnRuntimePolicy::default(), None, None, None)
+                .get_or_spawn_with_policy(session_id, true, RemoteTurnRuntimePolicy::default(), None, None, None, None)
                 .await
             {
                 Ok(engine) => engine,
@@ -3568,6 +3712,25 @@ impl EnginePool {
     /// SteerDropped so the frontend removes the chip with a notice —
     /// preventing a "gone from the UI but alive in the engine" hang.
     pub async fn cancel(&self, session_id: &str, keep_inbox: bool) -> CancelOutcome {
+        self.cancel_with_generation(session_id, keep_inbox, None)
+            .await
+    }
+
+    pub(crate) async fn cancel_remote_turn(
+        &self,
+        session_id: &str,
+        generation: u64,
+    ) -> CancelOutcome {
+        self.cancel_with_generation(session_id, false, Some(generation))
+            .await
+    }
+
+    async fn cancel_with_generation(
+        &self,
+        session_id: &str,
+        keep_inbox: bool,
+        requested_generation: Option<u64>,
+    ) -> CancelOutcome {
         // r10 foundation: the steer disposition
         // (InterruptKeepInbox/StopDropInbox) and the cancel token are
         // published atomically by cancel_with_mode; a separate keepInbox
@@ -3602,6 +3765,7 @@ impl EnginePool {
             &self.turn_lifecycles,
             &self.turn_shell_tasks,
             session_id,
+            requested_generation,
             // steer_mode is passed to cancel_turn_with_gates as well: the
             // pending_cancel armed during the submit→TurnStarted window must
             // carry the same disposition mode so the forwarder replay cannot
@@ -6435,6 +6599,7 @@ mod scheduled_model_tests {
                 &lifecycles,
                 &shell_tasks,
                 sid,
+                None,
                 deepseek_tui::core::engine::CancelMode::StopDropInbox,
                 // get_engine: engine present (phase one and the phase-two
                 // recheck both return Some).
@@ -6546,6 +6711,7 @@ mod scheduled_model_tests {
                 &lifecycles,
                 &shell_tasks,
                 sid,
+                None,
                 deepseek_tui::core::engine::CancelMode::StopDropInbox,
                 move || {
                     let call = engine_calls.fetch_add(1, Ordering::AcqRel);
@@ -6764,6 +6930,7 @@ mod scheduled_model_tests {
             &lifecycles,
             &shell_tasks,
             sid,
+            None,
             deepseek_tui::core::engine::CancelMode::StopDropInbox,
             // get_engine: engine present.
             || async { Some(()) },
@@ -6829,6 +6996,7 @@ mod scheduled_model_tests {
                 &lifecycles,
                 &shell_tasks,
                 sid,
+                None,
                 deepseek_tui::core::engine::CancelMode::StopDropInbox,
                 // get_engine：engine 在场（阶段一与补发复查都返回 Some）。
                 || async { Some(()) },
@@ -6909,6 +7077,7 @@ mod scheduled_model_tests {
                 &lifecycles,
                 &shell_tasks,
                 sid,
+                None,
                 deepseek_tui::core::engine::CancelMode::StopDropInbox,
                 || async { Some(()) },
                 move |_engine: &(), _identity: Option<TurnIdentity>| {
@@ -6999,6 +7168,7 @@ mod scheduled_model_tests {
                 &lifecycles,
                 &shell_tasks,
                 sid,
+                None,
                 deepseek_tui::core::engine::CancelMode::StopDropInbox,
                 move || {
                     let entered = entered.clone();
@@ -7098,6 +7268,7 @@ mod scheduled_model_tests {
                 &lifecycles,
                 &shell_tasks,
                 sid,
+                None,
                 deepseek_tui::core::engine::CancelMode::StopDropInbox,
                 // engine absent → get_engine returns None → no cancel, take
                 // the claim_unsubmitted branch.
@@ -7169,6 +7340,7 @@ mod scheduled_model_tests {
             &lifecycles,
             &shell_tasks,
             sid,
+            None,
             deepseek_tui::core::engine::CancelMode::StopDropInbox,
             // engine absent → get_engine returns None → no cancel, take
             // claim_unsubmitted.
@@ -7259,6 +7431,7 @@ mod scheduled_model_tests {
                 &lifecycles,
                 &shell_tasks,
                 sid,
+                None,
                 deepseek_tui::core::engine::CancelMode::StopDropInbox,
                 // get_engine: the first call (phase one) notifies entered and
                 // then suspends (simulating handle_for's entries-lock await),
@@ -7357,6 +7530,7 @@ mod scheduled_model_tests {
             &lifecycles,
             &shell_tasks,
             sid,
+            None,
             deepseek_tui::core::engine::CancelMode::StopDropInbox,
             || async { Some(()) },
             move |_engine: &(), _identity: Option<TurnIdentity>| {
@@ -7452,6 +7626,7 @@ mod scheduled_model_tests {
             lifecycles,
             shell_tasks,
             sid,
+            None,
             deepseek_tui::core::engine::CancelMode::StopDropInbox,
             || async { Some(engine.clone()) },
             |engine, identity| {
@@ -7829,6 +8004,7 @@ mod scheduled_model_tests {
             &lifecycles,
             &shell_tasks,
             sid,
+            None,
             deepseek_tui::core::engine::CancelMode::StopDropInbox,
             || async { Some(engine.clone()) },
             move |engine: &Arc<FakeTurnSlotEngine>, identity: Option<TurnIdentity>| {
@@ -7903,6 +8079,7 @@ mod scheduled_model_tests {
             &lifecycles,
             &shell_tasks,
             sid,
+            None,
             deepseek_tui::core::engine::CancelMode::StopDropInbox,
             // get_engine: engine present.
             || async { Some(()) },
@@ -7962,6 +8139,7 @@ mod scheduled_model_tests {
                 &lifecycles,
                 &shell_tasks,
                 sid,
+                None,
                 deepseek_tui::core::engine::CancelMode::StopDropInbox,
                 || async { None::<()> },
                 |_engine: &(), _identity: Option<TurnIdentity>| {},
@@ -7996,6 +8174,7 @@ mod scheduled_model_tests {
                 &lifecycles,
                 &shell_tasks,
                 sid,
+                None,
                 deepseek_tui::core::engine::CancelMode::InterruptKeepInbox,
                 || async { None::<()> },
                 |_engine: &(), _identity: Option<TurnIdentity>| {},
@@ -8036,6 +8215,7 @@ mod scheduled_model_tests {
                 &lifecycles,
                 &shell_tasks,
                 sid,
+                None,
                 deepseek_tui::core::engine::CancelMode::StopDropInbox,
                 || async { Some(()) },
                 |_engine: &(), _identity: Option<TurnIdentity>| {},
@@ -8104,6 +8284,7 @@ mod scheduled_model_tests {
                 &lifecycles,
                 &shell_tasks,
                 sid,
+                None,
                 mode,
                 || async { Some(()) },
                 |_engine: &(), _identity: Option<TurnIdentity>| {},
@@ -8214,8 +8395,8 @@ mod probed_facts_wiring_tests {
             session_model: Some(model),
             runtime_model_credential: None,
             runtime_model_credential_frozen: false,
+            remote_turn_skills: None,
             runtime_route_locked: false,
-            remote_skill_owner: None,
             runtime_vision_model: None,
             runtime_vision_credential: None,
             session_affinity_key: None,
