@@ -1,13 +1,13 @@
 # Linux 本地语音识别搭建方案
 
-> **状态注记**：Linux 本地语音识别已内置进 main——应用内一键安装（`features/voice/platform/linux.rs` 的 `install_asr_runtime` 自动装 ffmpeg 并从 modelscope 下载模型）、引擎在打包期按架构构建并映射进包内 `runtime/asr/`（共享源码目录 `pinvou3-app/src-tauri/resources/platforms/linux/asr/` 只放 shim 与 license，映射由 `config/platforms/linux/*/tauri.conf.json` 声明，npm script `test:linux-asr-runtime` 覆盖）、转码与清洗已固化进 `features/voice/voice_asr.rs`。本文保留为手动搭建 / 开发调试（POC 过程）路径。
+> **状态注记**：Linux 本地语音识别已内置进 main（pinvou-agent#474，commit `40f27a543`）——应用内一键安装（`features/voice/platform/linux.rs` 的 `install_asr_runtime` 自动装 ffmpeg 并从 modelscope 下载模型）、引擎在打包期按架构映射进包内 `runtime/asr/`（共享源码目录 `pinvou3-app/src-tauri/resources/platforms/linux/asr/` 只放 shim 与 license，映射由 `config/platforms/linux/*/tauri.conf.json` 声明，npm script `test:linux-asr-runtime` 覆盖）、转码与清洗已固化进 `features/voice/voice_asr.rs`。本文保留为手动搭建 / 开发调试（POC 过程）路径。
 
 pinvou3 的语音输入原本是为 Windows 写的（bundle 的 `llama-funasr-sensevoice.exe`），
 迁到 Linux 没适配。本文记录 Linux 端打通的全过程 + 一键搭建脚本，并给出生产化建议。
 
 POC 已实测：x86 Linux CPU 上端到端跑通中文识别（录音 → 转码 → 识别 → 写入输入框）。
 
-## 一、三关（代码改动已进本分支）
+## 一、三关（代码改动已合入 main）
 
 Linux 上语音输入要过三关，前两关是代码、第三关是引擎：
 
@@ -22,7 +22,7 @@ Linux 上语音输入要过三关，前两关是代码、第三关是引擎：
 - 引擎源码：`github.com/lovemefan/SenseVoice.cpp`（llama.cpp 系，CPU 可跑；只 clone 一次构建，github 国内偶尔慢，可换镜像）
 - 模型：modelscope `lovemefan/SenseVoiceGGUF`（**国内直连，实测 3.4 MB/s**，174MB 约 1 分钟，支持断点续传）
 - 引擎二进制 `sense-voice-main` 仅 ~420KB；模型按量化档 174MB(q4_k) / 292MB(q8_0)
-- CLI：`sense-voice-main -m 模型.gguf 音频.wav -l auto -itn`
+- CLI：`sense-voice-main -m 模型.gguf 音频.wav -t 4 -l auto -itn`（`-t 4` 指定线程数，与 shim 实际调用一致；线程参数可选）
 
 `pinvou-asr`（团队中间层）期望的后端是 `-m -a --vad`，与 SenseVoice.cpp 的 `-m -f`
 **参数不同**（是两个引擎），所以这里走 **shim** 适配，而非直接让 pinvou-asr 调它。
@@ -42,15 +42,24 @@ scripts/asr/setup-sensevoice.sh q8_0       # 更准(292MB)
 GGML_CUDA=ON scripts/asr/setup-sensevoice.sh   # GB10 等带 GPU 开 CUDA 加速
 ```
 
-装到 `~/.pinvou3/asr/`（引擎 + 模型 + shim）。接入：
+装到 `~/.pinvou3/asr/`（引擎 + 模型 + shim）。接入（q4_k 默认档无需额外变量）：
 
 ```bash
 PINVOU3_ASR_CMD=~/.pinvou3/asr/pinvou3-asr-shim.py ./pinvou3-app/run-dev.sh
 ```
 
+若装的是 q8_0 档，shim 在 `SV_MODEL` 未设时默认找 q4_k 模型，接入时需补上模型路径：
+
+```bash
+PINVOU3_ASR_CMD=~/.pinvou3/asr/pinvou3-asr-shim.py SV_MODEL=~/.pinvou3/asr/sense-voice-small-q8_0.gguf ./pinvou3-app/run-dev.sh
+```
+
 点麦克风录音即可。诊断日志 `~/.pinvou3/asr/shim.log`。
 
 ## 四、体积与分发建议（不要全打进 .deb）
+
+> 注：本节是 2026-06 的分发权衡记录，已被 pinvou-agent#474 部分取代—— SenseVoice
+> 引擎现随应用包分发（release CI 构建，二进制不入 Git），模型仍按需下载。
 
 | 组件 | 体积 | 建议 |
 |---|---|---|
@@ -68,7 +77,7 @@ PINVOU3_ASR_CMD=~/.pinvou3/asr/pinvou3-asr-shim.py ./pinvou3-app/run-dev.sh
 
 ## 六、生产化待办
 
-- [ ] **按需下载器**：app 首次用语音时自动下引擎+模型到 `~/.pinvou3/asr/`（服务端托管对应架构二进制 + gguf），替代手动跑 setup。
-- [ ] **shim 逻辑固化**：把 ffmpeg 转码 + 标记清洗固化进 `pinvou-asr`（团队中间层），或让 pinvou3 后端直接支持 SenseVoice.cpp 接口，去掉 shim 这层。
+- [x] **按需下载器** —— 已完成（pinvou-agent#474）：应用内一键安装已实现（`features/voice/platform/linux.rs` 的 `install_asr_runtime` 自动装 ffmpeg，并从 modelscope 下载引擎配套模型到 `~/.pinvou3/asr/`），替代手动跑 setup。
+- [x] **shim 逻辑固化** —— 已完成（pinvou-agent#474）：ffmpeg 转码 + 标记清洗已固化进 Rust 后端（`features/voice/voice_asr.rs`），内置安装路径不再依赖 shim。
 - [ ] **精度**：q4_k 有个别同音字误差（达→打），生产用 q8。
-- [ ] ffmpeg 加入依赖体检 + deb recommends。
+- [x] **ffmpeg 加入依赖体检** —— 依赖体检已完成（#474，`features/dependencies/platform/linux_packages.rs`）；deb recommends 仍待跟进。

@@ -2,66 +2,199 @@
 
 ## Coverage contract
 
-`windows-rust-test` runs only on retained `main` pushes and ready high-risk or
-explicit `ci:full-rust` pull requests. It remains skipped for Merge Queue events,
-drafts, ordinary non-Rust pull requests, and documented low-risk Rust changes. The
-single required job is a two-leg matrix; `fail-fast` is disabled and both legs must
-pass:
+`windows-rust-test` is the required native-Windows **Rust** job (the required
+gate also has `windows-codex-runtime-test`, which is out of scope here). It is
+a two-leg matrix on `windows-latest` (`fail-fast: false`, `max-parallel: 2`);
+the required gate aggregates the matrix result, so both legs must pass:
 
-- `all-targets-check` runs `cargo check --all-targets --features dev-tools`.
-- `regression` links the `pinvou3_lib` unit-test executable, embeds the
-  Common-Controls v6 manifest, runs the PE import diagnostic, executes all six
-  existing Windows regression filters serially, and runs the CodeWhale PowerShell
-  regression filters (`forkguard_powershell`, `forkguard_windows_shell_text`) from
-  the dependency crate itself — parent application jobs do not execute a dependency
-  crate's lib tests. The step unsets `SHELL` so the Windows fallback to `pwsh.exe`
-  is deterministic, and each filter must match at least one test so a rename cannot
-  silently pass.
+- `all-targets-check` runs the metadata-only checks (steps 8-9 below).
+- `regression` links the `pinvou3_lib` test executable and runs everything
+  that needs it (steps 10-15 below).
 
-The matrix changes scheduling, not the set or failure semantics of checks. The
-Common-Controls manifest and import diagnostic remain attached to the exact test
-executable later used by the six regression filters.
+Routing is job level and identical for both legs. The job runs on every push
+to `main` (cumulative Windows coverage plus cache warm-up) and on ready,
+non-draft pull requests matching the `rust_full` or `cli_rust` paths filters,
+or `rust_code` plus the explicit `ci:full-rust` label. On top of that,
+trusted community backflow pull requests are classified from the actual
+base→head diff (`backflow_mode` in the `changes` job): `full` and
+`windows_full` run this job regardless of the path filters, `ordinary`
+backflows fall back to the same `rust_full`/`cli_rust`/label routing, and
+malformed or mixed classifications fail closed to `full`. Merge Queue does
+not repeat this native leg (Linux validates the combined tree) except when
+policy/API/diff resolution fails and the mode resolves to `full`; drafts,
+closed, and non-Rust pull requests are skipped. The matrix changes
+scheduling, not the set or failure semantics of the checks.
+
+`rust_full` fails closed: all of `pinvou3-app/src-tauri/**/*.rs` plus shared
+manifests (`Cargo.toml`, `Cargo.lock`, `deny.toml`, `build.rs`,
+`pinvou3-app/src-tauri/.cargo/**`, `pinvou3-app/src-tauri/rust-toolchain.toml`,
+the `CodeWhale` submodule, `.gitmodules`) trigger it, except the documented
+low-risk leaf features `feedback`, `personas`, and `pet` (their registration
+or app command surface still matches). `cli_rust` covers `pinvou-cli` Rust
+paths and keeps `feedback` and `personas` gated because the CLI path-depends
+on the app crate; only `pet` is exempt from both filters.
+
+## What the job runs
+
+The job shell is `bash`; five steps opt into `pwsh`. Steps 1-7 and the
+cache restore run on both legs; the leg of every later step is noted. In
+order:
+
+1. Checkout (`submodules: false`), then
+   `git submodule update --init --recursive -- CodeWhale`.
+2. `dtolnay/rust-toolchain@stable`, then `rustup default` aligned to whatever
+   the `rust-toolchain.toml` selects (same toolchain as local development).
+3. (`both legs`, `pwsh`) `dev profile 内存边界覆盖`: since the v0.9.12
+   upgrade, the dev profile's dependency-level `O2` makes rustc/LLVM exceed
+   the 16 GB hosted runner while compiling `codewhale-tui` (lib), and
+   tightening codegen-units instead pushed the compile past the job cap.
+   This job-only step appends a `[profile.dev.package.codewhale-tui]`
+   `opt-level = 0` override to `CARGO_HOME/config.toml` (package-level
+   profile overrides can only come from config, not an environment
+   variable) without touching the repository `Cargo.toml`; local and Linux
+   builds keep their dependency-level `O2`, and release artifacts are still
+   governed by the release profile.
+4. Compile `rustc-stack-wrapper.exe` (`rustc -O`) and export it as
+   `RUSTC_WRAPPER`: compile-time-only `RUST_MIN_STACK=16MiB`; the `.exe` form
+   avoids the cmd.exe 8191-character command-line limit (the wrapper is
+   referenced by absolute `${{ github.workspace }}` path so it resolves
+   independently of the step's working directory).
+   `AWS_LC_SYS_PREBUILT_NASM=1` substitutes for the NASM the runner lacks.
+5. (`both legs`) `Probe and export the Windows lld link flags`: compile a
+   hello-world with `-C linker-features=+lld` (falling back to the explicit
+   `-C linker=rust-lld -C linker-flavor=lld-link` pair), always with
+   `-C link-arg=/threads:1`, and export the working flags as `RUSTFLAGS` via
+   `GITHUB_ENV`, so an unsupported flag fails in seconds instead of hours
+   into the cold build. See the "Link memory on the hosted runner" section
+   for why lld is required.
+6. (`both legs`) `Windows Rust 缓存基线诊断`: print the
+   `WINDOWS_RUST_CACHE` marker (target presence plus fingerprint and
+   direct dependency-artifact counts, no recursive scan) so cold-cache
+   regressions are visible per leg without leaking cache contents.
+7. Cargo cache restore — see the "Cache" section.
+8. (`all-targets-check`) `cargo check --manifest-path
+   pinvou3-app/src-tauri/Cargo.toml --all-targets --features dev-tools`.
+9. (`all-targets-check`) `cargo check --manifest-path pinvou-cli/Cargo.toml --workspace
+   --all-targets --locked`: the CLI's Windows-only branches (exe/cmd
+   candidates, `cmd /D /S /C` shims, taskkill tree kill, `CREATE_NO_WINDOW`)
+   compile-check only on a Windows runner.
+10. (`regression`) Link check: `cargo test --manifest-path pinvou3-app/src-tauri/Cargo.toml
+    --lib --no-run --message-format=json`, capturing the `pinvou3_lib` test
+    executable as `PINVOU3_TEST_EXE`.
+11. (`regression`) Embed the Common-Controls v6 manifest (resource `#1`) with the Windows SDK
+    `mt.exe`: `muda` statically imports `TaskDialogIndirect`, which exists only
+    in the Common-Controls v6 side-by-side assembly, and Windows ignores a
+    side-by-side `<exe>.manifest` once `link.exe` embedded a default one.
+12. (`regression`) Run `python scripts/ci-windows-imports-diagnose.py` on `PINVOU3_TEST_EXE`
+    — a non-blocking PE import-table diagnostic (`continue-on-error`), after
+    step 11 so the embedded manifest exempts SxS DLLs such as `comctl32`.
+13. (`regression`) Run the CodeWhale PowerShell regression filters
+    (`forkguard_powershell` and `forkguard_windows_shell_text`) from the
+    dependency crate itself. The parent application jobs do not execute a
+    dependency crate's lib tests. The step unsets `SHELL` so the Windows
+    fallback to `pwsh.exe` is deterministic, and each filter must match at
+    least one test so a rename cannot silently pass.
+14. (`regression`) `Windows 静态更新契约`: `npm --prefix pinvou3-app run
+    test:windows-static-updater` against the runner's preinstalled Node
+    (dependency-free, so no `setup-node`/`npm ci`). The same contract also
+    has a dedicated fast job on the `windows_static_updater` path filter —
+    see the next section.
+15. (`regression`) `Windows 原子替换状态机回归`: run the patched application
+    binary directly — re-invoking `cargo test` could relink and drop the
+    embedded manifest — once per filter with `--test-threads=1`; each filter
+    must match at least one test (`running [1-9][0-9]* tests?`) so a renamed
+    test fails loudly:
+
+    - `platform::filesystem::tests::windows_`
+    - `platform::paths::tests::managed_python_`
+    - `artifact_read_recovers_an_occupied_1177_layout_after_release`
+    - `artifact_writes_never_expose_partial_utf8_to_concurrent_readers`
+    - `artifact_public_read_`
+    - `features::voice::platform::windows::tests::closed_temp_wav_can_be_reopened_when_asr_denies_write_sharing`
+    - `features::memory::tests::topic_migration_`
+    - `connector_introspection_guard_matches_complete_names_only`
+    - `features::projects::tests::`
+    - `features::sessions::`
+    - `run_with_timeout_reaps_and_stays_bounded`
+    - `reap_killed_child_`
+    - `features::browser::platform::windows::tests::`
+    - `features::updater::platform::windows::tests::`
+    - `features::monitor::platform::windows_cpu::tests::`
+    - `features::monitor::platform::windows_memory::tests::`
+    - `features::monitor::platform::windows_gpu::tests::`
+    - `features::remote_control::platform::windows::tests::`
+    - `features::computer_use::platform::windows::tests::`
+
+    The `features::sessions::` and `features::updater::platform::windows::tests::`
+    filters cover the atomic-replacement state machine that the static
+    updater exercises end to end; the `filesystem`/`artifact_*` filters cover
+    the same writer-side invariants at the unit level.
+
+## Related jobs that share this gate
+
+The `windows-rust-test` job is not the only native-Windows or routing entry
+in `pr-check.yml`; the doc covers the others so the routing stays
+understandable in one place:
+
+- `windows-static-updater-contract` (`windows_static_updater` filter): a
+  10-minute Windows job running the same `test:windows-static-updater`
+  contract when only the updater scripts/tests change, without paying for
+  the full Rust matrix.
+- `windows-rustup-repair-test` (`windows_rustup_repair` filter): installs
+  the pinned toolchain in an isolated directory, breaks it, and verifies
+  the download-source fallback and reinstall path
+  (`test:windows-rustup-repair`).
+- `windows-codex-runtime-test` (`windows_codex`/`acp_runtime` filters):
+  native verification of the browser-wrapper lifecycle, Node + ACP Bridge
+  preparation, and installer resources. Out of scope for this document.
+- `backflow-portability` (`backflow_infra` and the trusted-backflow
+  routing): runs the dependency-light backflow scheduling and cross-platform
+  contract tests on a Windows/macOS/Linux matrix, and reads back the
+  processing-platform provenance of the pull request. The `backflow_mode`
+  classification it feeds is what lets `windows-rust-test` skip mechanical
+  release-only backflows while failing closed on uncertain ones.
+- `team-relay-hub-test` (`team_relay_hub` filter): full Hub suite plus a
+  high-severity dependency audit against a Postgres 16 service container.
+- `relay-test` (`relay` filter): remote-control relay suite and deploy
+  script syntax checks on Linux.
 
 ## Why the legs are independent
 
-The default feature graph includes `local-embed`. `dev-tools` adds no dependency,
-but enables the `dump_system_prompt` binary and gives the package a distinct feature
-fingerprint. More importantly, `cargo check` produces metadata-only artifacts for
-the library, binaries, integration tests, and unit-test target; `cargo test --lib
---no-run` must still generate and link executable code for the default-feature
-library test harness. Running check first therefore does not turn the following
-test link into a metadata-only incremental operation, and the old job placed both
-compile graphs on one 47–78 minute critical path.
+The default feature graph includes `local-embed`; `dev-tools` adds no
+dependency but enables the `dump_system_prompt` binary and gives the package a
+distinct feature fingerprint. More importantly, `cargo check` produces
+metadata-only artifacts, while `cargo test --lib --no-run` must generate and
+link executable code for the default-feature test harness, so running the
+check first never turns the link into an incremental step. The serial job put
+both compile graphs on one critical path; the split makes the wall time the
+slower leg (`max(setup + checks, setup + link + regressions)`) instead of the
+sum. CodeWhale initialization stays on both legs because the application
+path-depends on its crates.
 
-CodeWhale initialization remains in both legs because the application has direct
-path dependencies on its crates. The old Node/npm setup originated when this job
-also ran JavaScript Tauri layout contracts. Those contracts now run elsewhere, and
-neither Rust build scripts nor the retained six filters consume the application
-`node_modules`, so the matrix does not install it.
+## Cache
 
-## Cache and diagnostics
-
-The single cache entry covers both target directories — the application workspace
-and the `CodeWhale` path dependency, whose required lib tests need their own target
-directory — under the existing `windows-rust-test` namespace, restored into isolated
-runner workspaces. Only the `regression` leg on `main` may save it, so the split adds
-neither a new namespace nor a second writer; the first `main` run after adding the
-`CodeWhale` workspace compiles it cold and adds roughly 0.8–2 GB compressed, while
-Cargo registry/target data remains under the existing 10 GB cache budget and
-eviction behavior. This keeps the experiment
-independent of an uncontrolled new cache while allowing both legs to reuse the same
-known snapshot. Restore misses and metadata time remain visible rollback signals.
-
-Each run emits only aggregate, non-sensitive diagnostics:
-
-- `WINDOWS_RUST_CACHE` records matrix phase, target presence, fingerprint-crate count,
-  and direct dependency-artifact count without recursively scanning the large tree.
-- `WINDOWS_RUST_TIMING` records phase, fixed step/filter identifier, elapsed seconds,
-  and exit status for CodeWhale initialization, Cargo work, the six-filter suite,
-  and the CodeWhale PowerShell regressions.
-
-No environment values, paths outside the workspace, command output credentials, or
-cache keys derived from secrets are printed.
+`Swatinem/rust-cache@v2` stores `pinvou3-app/src-tauri` and `CodeWhale` in one
+entry under shared key `windows-rust-test`. CodeWhale is a path dependency,
+not an application-workspace member, so its required lib tests need their own
+target directory; including that directory in the existing entry is the
+minimum cache shape for this coverage, not a second cache. The first `main`
+run after adding CodeWhale to the entry may compile it cold and is expected
+to add about 0.8–2GB compressed. Restore-key fallback then reuses the entry
+across lockfile changes. Both legs restore the same entry on their isolated
+runners, but
+`save-if` only allows the `regression` leg on `refs/heads/main` to write it
+(that leg owns the linked application and CodeWhale test artifacts), so the
+split adds neither a second writer nor a new namespace, pull requests never
+rewrite the entry, and usage stays within the repository-wide 10GB budget.
+The saved entry holds the regression leg's build artifacts, so much of the
+dependency graph stays warm for the `all-targets-check` leg; the application
+crate's own `--all-targets --features dev-tools` metadata is the part compiled
+cold on every run. That residual cost is visible in the timing lines below.
+`pinvou-cli` has no separate cache. Node/npm setup is absent —
+under the debug profile tauri's `generate_context!` uses `devUrl`, `dist/`
+is never packaged, and `build.rs` only depends on `tauri-build`/`cc` —
+saving 3-5 minutes per run; the regression leg's static-updater step uses
+the runner's preinstalled Node without installing anything.
 
 ## Link memory on the hosted runner
 
@@ -84,8 +217,9 @@ because no bitcode reaches the linker — it stays only pending a separately
 evaluated removal). Growing the hosted runner's pagefile is not an option: a
 pagefile change requires a reboot a CI job cannot perform,
 so peak link memory is cut below RAM instead. The linker-selection flags are
-probed per toolchain by the probe step, since the stable surface for picking
-lld has moved between releases.
+probed per toolchain by step 5, since the stable surface for picking lld has
+moved between releases. The step 3 `codewhale-tui` dev-profile override is
+the same memory discipline applied at compile time rather than link time.
 
 Peak memory is also cut before the link: both `rust-test` legs pin
 `codewhale-tui` back to dev-default opt-level 0 by appending a
@@ -104,18 +238,41 @@ The linux leg complements it with `CARGO_PROFILE_DEV_CODEGEN_UNITS=16`
 (the dev default of 256 codegen units expands the large test harness into
 too many ThinLTO inputs and amplifies the link peak).
 
-## Expected result and rollback
+## Duration, timeout, and failure diagnosis
 
-Previously the critical path was approximately `setup + check + link + tests`.
-After the split it is `max(setup + check, setup + link + tests)`. Based on the
-observed 47–78 minute baseline, the initial CI hypothesis is a 25–35% wall-clock
-reduction, approximately 31–59 minutes, without reducing coverage. This estimate is
-not a local benchmark: hosted-runner queueing, aws-lc-sys compilation, and cache
-availability can change it.
+Each run emits only aggregate, non-sensitive diagnostics:
 
-Compare at least three high-risk PR/main runs using the emitted phase timings. If
-the legs do not overlap or the check leg becomes the new slower path, revert
-the matrix scheduling while retaining the metrics. Do not recover time by removing
-a regression filter, skipping the manifest/import contract, changing failures to
-warnings, or enabling an additional large target cache beyond the single
-two-workspace entry documented above.
+- `WINDOWS_RUST_CACHE` records the matrix phase, target presence, the
+  fingerprint-crate count and the direct dependency-artifact count, without
+  recursively scanning the large target tree.
+- `WINDOWS_RUST_TIMING` records the phase, a fixed step or filter identifier,
+  the elapsed seconds and the exit status for CodeWhale initialization, the
+  two checks, the test link, the CodeWhale PowerShell regressions, each
+  regression filter and the whole filter suite.
+
+No environment values, credentials, or cache keys are printed. Compare at
+least three high-risk PR or `main` runs using these lines; if the legs do not
+overlap, or the check leg becomes the slower path, revert the matrix
+scheduling while keeping the metrics.
+
+Passing runs historically took 85-87 minutes; since 2026-09 several died at
+the previous 90-minute cap during the link step, and run 34802015051 was
+cancelled mid-build after PR #478 added the full `pinvou-cli` workspace
+compile, so the cap moved to 180. The 2026-10 stable rollover to 1.99.0 then
+invalidated the rust-cache key and the cold test-binary link OOM'd (see the
+previous section), killed at the 180-minute cap (run 36919362322) and then,
+after the cap moved to 240, at that cap too (run 36940184038) — the raise
+alone could not fix an out-of-memory link. `timeout-minutes` is therefore 240
+together with the link-memory recipe above, with headroom for one fully cold
+toolchain rollover per channel bump; the cap
+applies per leg, since either leg can still compile cold on a cache miss.
+
+On failure, read the import-diagnostic output (step 12) and the failing filter
+name (steps 13-15); cache restore misses stay visible rollback signals. Do not
+recover time by removing a regression filter, moving a step to the other leg
+without its prerequisites, skipping the manifest or import contract, changing
+failures to warnings, or adding another independent large target cache beyond
+the single two-workspace entry documented above.
+
+Source of truth: the `windows-rust-test` job in
+`.github/workflows/pr-check.yml`; on any mismatch the workflow wins.

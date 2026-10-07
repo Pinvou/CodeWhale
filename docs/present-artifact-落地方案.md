@@ -1,6 +1,7 @@
 # present_artifact 落地方案(pinvou3)
 
-> 状态:**已实现,待端到端验证(需 GUI+vLLM)** · 2026-06-02
+> 状态:**已实现,待端到端验证(需 GUI+vLLM)** · 2026-06-02（2026-09 补注：端到端链路已随后续附带功能的使用得到验证——召唤式评审已把本工具成品卡当作可用基础消费，见 `品悟v4-召唤式评审设计.md`；本状态行为写作时点原状）
+> 注:文中路径/行号为 2026-06 时点,仓库后经 `features/` 与 `platform/` 目录重组(现行位置如 `app/commands/artifacts.rs`、`platform/paths.rs`、`src/platform/tauri/bridge.js`)。重组之外还有两处**机制性**迁移:`resources/common/bundle/instructions.md` 已拆分为 `base.md` + `instructions-shared/work/code.md` 等分模式文件,且 present_artifact 的模型引导在 instructions 侧仅存于 `instructions-work.md`(仅 work 模式可见;内置技能 `visual-design` 的 SKILL.md 亦引导该工具,同受 work 模式门控);`src-tauri/src/bridge/bundle.rs` 及其 `DEFAULT_MCP_JSON` 字符串已删除,默认 MCP server 改由 `features/runtime_bundle/platform/extraction.rs` 在运行时 upsert 写入。
 > 已过:MCP server 协议单测 / cargo check / bundle 解包测试 / JS 语法 / 工具名格式代码核对。
 > 端到端(agent 真调用 → 弹卡 → 点击打开 → 切会话不丢)需在跑起来的 GUI 里走 §5。
 > 路线:**本地 MCP server(零 fork drift)** · 前端渲染成品卡 + 复用现成打开能力
@@ -22,6 +23,8 @@
 | 打开文件能力 | ✅ 全现成:`open_in_system`(图片/pdf)、`open_artifact_window`(html 独立窗,绕 snap 沙箱)、前端 `openArtifactExternal` | `commands.rs:532/559` |
 | 接 MCP server 的位置 | ✅ pinvou3 已有 `bundle/mcp.json`(默认空 `{"servers":{}}`),改它加 server 条目即可 | `bridge/bundle.rs:61/134` · `paths.rs:75` |
 
+> **时点附注(2026-09)**:底座已演进,上表第 4、5 行的机制已与现实现相悖——MCP 工具审批现由 CodeWhale `crates/tui/src/tools/registry.rs` 的 `approval_requirement()` 对非 read-helper 的 MCP 工具一律 `Required`,Yolo 下经 `auto_approve` 旁路放行(`pinvou3-app/src-tauri/src/features/assistant/platform/bridge.rs` 注释、底座 `turn_loop.rs::registered_tool_approval_required`);工具延迟加载现由 CodeWhale `crates/tui/src/core/engine/tool_catalog.rs::apply_mcp_tool_deferral` 除 always_load 外全量 defer,`present_artifact` 不在 `PINVOU3_ALWAYS_LOADED_TOOLS`(`pinvou3-app/src-tauri/src/features/assistant/tool_policy.rs`)。另有两点 2026-09 现状:第 7 行"默认空 `{"servers":{}}`"已不成立——默认 `mcp.json` 即内建 pinvou3 present_artifact server(运行时 upsert);前端产物卡已随 Vite 重组从 `src/index.html` 内联迁至 `src/features/tools/tool-common.jsx`,dispatcher 分支现居 `src/features/chat/ChatView.jsx`。且 code 模式经 `MODE_TABLE` 的 `unavailable_tools` 整体剔除 `mcp_pinvou3_present_artifact`(`session_policy.rs`),与引导仅存 work 模式相互印证。以上为 2026-09 现状,正文表格为 2026-06 时点结论。
+
 **结论**:工具本体走 MCP,fork drift = 0;后端(Rust)零改动;工作量集中在「一个 MCP server 脚本 + 前端卡片」。
 
 ---
@@ -32,7 +35,7 @@
 
 `pinvou3-app/src-tauri/resources/common/bundle/mcp-servers/present_artifact_server.py`(新建,~80 行)
 
-- 协议:stdio JSON-RPC(MCP `initialize` / `tools/list` / `tools/call`),只用 python stdlib,不引第三方 SDK → deb 分发只需 `python3`(对齐 memory:依赖型能力走 deb Depends)
+- 协议:stdio JSON-RPC(MCP `initialize` / `tools/list` / `tools/call`),只用 python stdlib,不引第三方 SDK → deb 分发只需 `python3`(打包约定:依赖型能力走 deb Depends)
 - 暴露一个工具 `present_artifact`,input schema:
   ```json
   {"path": "string(必填,绝对路径或相对 workspace)",
@@ -93,7 +96,7 @@ Pinvou 产出成品.html → 调 present_artifact{path,title}
 
 ## 3.5 自动续卡(2026-06-02 反馈修复)
 
-**问题**:第一次产出弹卡正常,第二次"迭代/重写"同一成品后**不弹卡**。根因实测(session `tuxlngzueyid0.json`):`write_file` 调 2 次,`present_artifact` 只调 1 次 —— **Qwen3.6 把第二次当"修 bug"没重新 present**,非前端 bug。依赖小模型主动调工具的固有弱点。
+**问题**:第一次产出弹卡正常,第二次"迭代/重写"同一成品后**不弹卡**。根因实测(某次实测 session):`write_file` 调 2 次,`present_artifact` 只调 1 次 —— **Qwen3.6 把第二次当"修 bug"没重新 present**,非前端 bug。依赖小模型主动调工具的固有弱点。
 
 **修复(确定性兜底,不赌模型遵循率)**:已 present 过的成品文件(按 basename 识别),后续 `write_file`/`append_file` 成功 → 前端**自动续弹一张新成品卡**(每次新卡,对齐 pinvou2),复用首次的 title/description/path。
 
@@ -107,7 +110,7 @@ Pinvou 产出成品.html → 调 present_artifact{path,title}
 - **依赖 Yolo 模式**:MCP 工具可见的前提是 pinvou3 GUI 跑 Yolo(当前如此)。若将来切非 Yolo(Plan/Agent),MCP 工具会被 defer,agent 看不到 → 那时需让 agent 先 tool_search,或改 `should_keep_mcp_tool_loaded`(那才动 fork)。**当前不是问题,但属于约束依赖,改运行模式时要回看这里。**
 - **v1 不做快照**:pinvou2 拷贝快照防"后续改同名文件污染历史卡"。pinvou3 产物在 session workspace、file_watcher 已追踪,覆盖风险低 → 先验证主链路,快照留 v2。
 - **工具名以实测为准**:底座 MCP adapter 透传的工具名(有无前缀)实施第一步实测确认,前端特判 + prompt 引导统一用实测名。
-- **markdown 在独立窗显纯文本**:同 pinvou2 v1 限制,要漂亮渲染留后续。
+- **markdown 在独立窗显纯文本**:同 pinvou2 v1 限制,要漂亮渲染留后续。(时点注:现行 `openArtifactExternal` 仅 html/htm 走应用内独立窗,markdown 已改走系统默认应用打开。)
 
 ---
 
