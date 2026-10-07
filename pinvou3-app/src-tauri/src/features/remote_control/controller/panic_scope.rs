@@ -97,6 +97,13 @@ mod tests {
     use std::future::poll_fn;
     use std::panic::{AssertUnwindSafe, catch_unwind};
 
+    fn test_filter(name: &str) -> String {
+        // libtest lists module paths without the crate-name prefix returned
+        // by module_path!, both in the product and in the standalone harness.
+        let (_, module) = module_path!().split_once("::").expect("test module path");
+        format!("{module}::{name}")
+    }
+
     #[test]
     fn panic_payload_is_redacted_in_real_stderr_and_other_panics_are_forwarded() {
         const CHILD: &str = "PINVOU_CONTROLLER_PANIC_SCOPE_CHILD";
@@ -163,12 +170,26 @@ mod tests {
             return;
         }
         let output = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "features::remote_control::controller::panic_scope::tests::panic_payload_is_redacted_in_real_stderr_and_other_panics_are_forwarded", "--nocapture"])
+            .args([
+                "--exact",
+                test_filter(
+                    "panic_payload_is_redacted_in_real_stderr_and_other_panics_are_forwarded",
+                )
+                .as_str(),
+                "--nocapture",
+            ])
             .env(CHILD, "1")
-            .output().unwrap();
+            .output()
+            .unwrap();
         assert!(
             output.status.success(),
             "isolated panic scope regression failed"
+        );
+        assert!(
+            String::from_utf8(output.stdout)
+                .unwrap()
+                .contains("1 passed"),
+            "isolated panic scope test matched zero cases"
         );
         let stderr = String::from_utf8(output.stderr).unwrap();
         assert!(
@@ -215,11 +236,24 @@ mod tests {
             return;
         }
         let output = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "features::remote_control::controller::panic_scope::tests::concurrent_application_hook_registration_keeps_every_handler", "--nocapture"])
-            .env(CHILD, "1").output().unwrap();
+            .args([
+                "--exact",
+                test_filter("concurrent_application_hook_registration_keeps_every_handler")
+                    .as_str(),
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
         assert!(
             output.status.success(),
             "concurrent application hook registration lost a handler"
+        );
+        assert!(
+            String::from_utf8(output.stdout)
+                .unwrap()
+                .contains("1 passed"),
+            "isolated hook chain test matched zero cases"
         );
     }
 
