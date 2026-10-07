@@ -1976,6 +1976,7 @@ pub fn provider_for_kind(kind: ProviderKind) -> &'static dyn Provider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_tracing::CapturedEvents;
 
     const TEST_TABLE: &str = "pinvou_responses";
 
@@ -2097,86 +2098,13 @@ mod tests {
             1,
             "only the unrecognized non-empty dialect warns: {events:?}"
         );
-        assert_eq!(events[0].table.as_deref(), Some(TEST_TABLE));
-        assert_eq!(events[0].dialect.as_deref(), Some("respones"));
+        assert_eq!(events[0].field("table"), Some(TEST_TABLE));
+        assert_eq!(events[0].field("dialect"), Some("respones"));
         assert!(
             events[0].message.contains("unrecognized"),
             "warning must describe the degrade: {:?}",
             events[0].message
         );
-    }
-
-    /// One captured `tracing` event, keeping only the fields the wire
-    /// dialect warning emits.
-    #[derive(Debug, Clone, Default)]
-    struct CapturedEvent {
-        message: String,
-        table: Option<String>,
-        dialect: Option<String>,
-    }
-
-    /// A minimal in-memory `tracing` subscriber so config-crate tests can
-    /// assert on their own diagnostics without a subscriber dependency.
-    /// Clones share the same buffer.
-    #[derive(Clone, Default)]
-    struct CapturedEvents(std::sync::Arc<std::sync::Mutex<Vec<CapturedEvent>>>);
-
-    impl CapturedEvents {
-        fn events(&self) -> Vec<CapturedEvent> {
-            self.0.lock().expect("event capture lock").clone()
-        }
-    }
-
-    impl tracing::Subscriber for CapturedEvents {
-        fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
-            metadata.level() <= &tracing::Level::WARN
-        }
-
-        fn new_span(&self, _attributes: &tracing::span::Attributes<'_>) -> tracing::Id {
-            tracing::Id::from_u64(1)
-        }
-
-        fn record(&self, _span: &tracing::Id, _values: &tracing::span::Record<'_>) {}
-
-        fn event(&self, event: &tracing::Event<'_>) {
-            #[derive(Default)]
-            struct Visitor {
-                message: String,
-                table: Option<String>,
-                dialect: Option<String>,
-            }
-            impl tracing::field::Visit for Visitor {
-                fn record_debug(
-                    &mut self,
-                    field: &tracing::field::Field,
-                    value: &dyn std::fmt::Debug,
-                ) {
-                    match field.name() {
-                        "message" => self.message = format!("{value:?}"),
-                        "table" => self.table = Some(format!("{value:?}")),
-                        "dialect" => self.dialect = Some(format!("{value:?}")),
-                        _ => {}
-                    }
-                }
-            }
-
-            let mut visitor = Visitor::default();
-            event.record(&mut visitor);
-            self.0
-                .lock()
-                .expect("event capture lock")
-                .push(CapturedEvent {
-                    message: visitor.message,
-                    table: visitor.table,
-                    dialect: visitor.dialect,
-                });
-        }
-
-        fn enter(&self, _span: &tracing::Id) {}
-
-        fn exit(&self, _span: &tracing::Id) {}
-
-        fn record_follows_from(&self, _span: &tracing::Id, _follows: &tracing::Id) {}
     }
 
     #[test]
