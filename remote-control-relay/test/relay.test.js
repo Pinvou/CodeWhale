@@ -204,7 +204,7 @@ async function stopRelay(child) {
   await waitForExit(child);
 }
 
-async function spawnRelay(env = {}, { preload } = {}) {
+async function spawnRelay(env = {}, { preload, ipc = false } = {}) {
   const isolatedPort = await getFreePort();
   const statePath = env.PINVOU_REMOTE_STATE_PATH
     || join(testRoot, `relay-state-${isolatedPort}-${Date.now()}-${Math.random().toString(16).slice(2)}.json`);
@@ -220,7 +220,7 @@ async function spawnRelay(env = {}, { preload } = {}) {
       PINVOU_REMOTE_STATE_PATH: statePath,
       ...env,
     },
-    stdio: ["ignore", "pipe", "pipe"],
+    stdio: ipc ? ["ignore", "pipe", "pipe", "ipc"] : ["ignore", "pipe", "pipe"],
   });
   await waitForOutput(child, /pinvou remote relay listening/,
     env.PINVOU_DESKTOP_CONTROLLER_ENABLED === "1" ? 60_000 : 5000);
@@ -251,6 +251,90 @@ function controllerEnvironment(name, overrides = {}) {
     ...overrides,
   };
 }
+
+function waitForRegistrationProbe(child, type, endpointId) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      child.off("message", onMessage);
+      reject(new Error(`timeout waiting for registration probe ${type}`));
+    }, 15_000);
+    const onMessage = (message) => {
+      if (message?.type !== type || (endpointId && message.endpointId !== endpointId)) return;
+      clearTimeout(timer);
+      child.off("message", onMessage);
+      resolve(message);
+    };
+    child.on("message", onMessage);
+  });
+}
+
+test("desktop authorization cannot attach one socket to two endpoints", async () => {
+  const isolated = await spawnRelay(controllerEnvironment("concurrent-registration"), {
+    preload: new URL("./fixtures/desktop-registration-barrier.js", import.meta.url).href, ipc: true,
+  });
+  let ws;
+  try {
+    ws = await openSocket(isolated.wsUrl);
+    const ids = ["endpoint-concurrent-first", "endpoint-concurrent-second"];
+    const ready = ids.map((id) => waitForRegistrationProbe(isolated.child, "authorization-ready", id));
+    for (const endpoint_id of ids) {
+      ws.send(JSON.stringify({ v: 2, type: "desktop_endpoint_register", endpoint_id,
+        access_token: "concurrent-registration-access-00000001",
+        desktop_secret: "concurrent-registration-secret-00000001" }));
+    }
+    await Promise.all(ready);
+    const finished = ids.map((id) => waitForRegistrationProbe(isolated.child, "authorization-finished", id));
+    const registered = [];
+    const errors = [];
+    ws.on("message", (data) => {
+      const message = JSON.parse(String(data));
+      if (message.type === "desktop_endpoint_registered") registered.push(message);
+      if (message.type === "error") errors.push(message);
+    });
+    const responses = Promise.all([
+      nextMessage(ws, "desktop_endpoint_registered", 15_000),
+      nextMessage(ws, "error", 15_000),
+    ]);
+    isolated.child.send({ type: "release-registration" });
+    await Promise.all([...finished, responses]);
+    const health = await (await fetch(`${isolated.httpUrl}/pinvou3/remote/healthz`)).json();
+    assert.equal(health.endpoint_count, 1, "a second pending authorization must not create an endpoint");
+    assert.equal(registered.length, 1);
+    assert.equal(errors.length, 1);
+    assert.equal(errors[0].code, "bad_desktop_endpoint_register");
+  } finally {
+    closeSocket(ws);
+    await stopRelay(isolated.child);
+  }
+});
+
+test("desktop authorization cannot attach a socket closed while authentication awaits", async () => {
+  const isolated = await spawnRelay(controllerEnvironment("closed-registration"), {
+    preload: new URL("./fixtures/desktop-registration-barrier.js", import.meta.url).href, ipc: true,
+  });
+  let ws;
+  try {
+    ws = await openSocket(isolated.wsUrl);
+    const endpointId = "endpoint-closed-authorization";
+    const ready = waitForRegistrationProbe(isolated.child, "authorization-ready", endpointId);
+    ws.send(JSON.stringify({ v: 2, type: "desktop_endpoint_register", endpoint_id: endpointId,
+      access_token: "closed-registration-access-00000000001",
+      desktop_secret: "closed-registration-secret-00000000001" }));
+    await ready;
+    const closed = waitForRegistrationProbe(isolated.child, "socket-closed");
+    ws.close();
+    await closed;
+    const finished = waitForRegistrationProbe(isolated.child, "authorization-finished", endpointId);
+    isolated.child.send({ type: "release-registration" });
+    await finished;
+    const health = await (await fetch(`${isolated.httpUrl}/pinvou3/remote/healthz`)).json();
+    assert.equal(health.endpoint_count, 0, "late authorization must not create an orphan endpoint");
+    assert.equal(health.ws_connection_count, 0);
+  } finally {
+    closeSocket(ws);
+    await stopRelay(isolated.child);
+  }
+});
 
 function nextMessageOneOf(ws, types, timeoutMs = 3000) {
   const accepted = new Set(types);
