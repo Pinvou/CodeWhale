@@ -15234,6 +15234,7 @@ async fn session_update_preserves_reasoning_tool_only_turn() {
                 state: None,
                 thinking: "Need a tool before answering.".to_string(),
                 redacted_data: None,
+                reasoning_details: None,
             },
             ContentBlock::ToolUse {
                 id: "tool-1".to_string(),

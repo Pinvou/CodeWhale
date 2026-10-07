@@ -791,6 +791,7 @@ mod tests {
                     state: None,
                     thinking: "let me think...".to_string(),
                     redacted_data: None,
+                    reasoning_details: None,
                 },
                 ContentBlock::Text {
                     text: "done".to_string(),

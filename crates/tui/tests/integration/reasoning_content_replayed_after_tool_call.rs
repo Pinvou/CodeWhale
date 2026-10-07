@@ -29,6 +29,7 @@ fn assistant_thinking_tool_call(
                 signature: None,
                 state: None,
                 redacted_data: None,
+                reasoning_details: None,
             },
             ContentBlock::ToolUse {
                 id: id.to_string(),

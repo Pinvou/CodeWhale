@@ -690,6 +690,10 @@ struct StreamOutcome {
     current_thinking: String,
     current_thinking_signature: Option<String>,
     current_thinking_state: Option<crate::models::OpaqueReasoningState>,
+    /// OpenRouter `reasoning_details` snapshot for the current thinking
+    /// block; the stream repeats the growing array, so only the last
+    /// snapshot per block is kept and replayed verbatim.
+    current_thinking_details: Option<Vec<serde_json::Value>>,
     /// Thinking blocks already terminated by a `content_block_stop`, in wire
     /// order. Adaptive/interleaved thinking emits several per assistant turn;
     /// Anthropic requires the whole sequence replayed unmodified, so finished
@@ -730,28 +734,37 @@ pub(super) fn preview_request_error_user_message(
 ///
 /// A block survives only if the provider actually emitted reasoning: readable
 /// text (minus the wire-only "(reasoning omitted)" placeholder), an Anthropic
-/// signature, or an encrypted Responses state. A signature-only block is real
+/// signature, an encrypted Responses state, or OpenRouter structured
+/// `reasoning_details`. A signature-only block is real
 /// content — newer Claude models ship `display: "omitted"` thinking (empty
 /// text plus the encrypted signature) — and dropping it would strip a block
-/// Anthropic requires back verbatim in tool-loop replays.
+/// Anthropic requires back verbatim in tool-loop replays. The same holds for
+/// an encrypted-only OpenRouter details array.
 fn flush_thinking_block(
     thinking: &mut String,
     signature: &mut Option<String>,
     state: &mut Option<crate::models::OpaqueReasoningState>,
+    details: &mut Option<Vec<serde_json::Value>>,
     completed: &mut Vec<ContentBlock>,
 ) {
     let placeholder_only = crate::client::is_reasoning_replay_placeholder(thinking);
-    if (!thinking.is_empty() && !placeholder_only) || signature.is_some() || state.is_some() {
+    if (!thinking.is_empty() && !placeholder_only)
+        || signature.is_some()
+        || state.is_some()
+        || details.is_some()
+    {
         completed.push(ContentBlock::Thinking {
             thinking: std::mem::take(thinking),
             signature: signature.take(),
             state: state.take(),
             redacted_data: None,
+            reasoning_details: details.take(),
         });
     }
     thinking.clear();
     *signature = None;
     *state = None;
+    *details = None;
 }
 
 fn approval_intent_summary(text: &str) -> Option<String> {
@@ -2170,6 +2183,7 @@ impl Engine {
                 current_thinking,
                 current_thinking_signature,
                 current_thinking_state,
+                current_thinking_details,
                 mut completed_thinking,
                 mut tool_uses,
                 usage,
@@ -2358,12 +2372,14 @@ impl Engine {
                         if (!current_thinking.is_empty() && !thinking_is_placeholder_only)
                             || current_thinking_state.is_some()
                             || current_thinking_signature.is_some()
+                            || current_thinking_details.is_some()
                         {
                             resume_blocks.push(ContentBlock::Thinking {
                                 thinking: current_thinking.clone(),
                                 signature: current_thinking_signature.clone(),
                                 state: current_thinking_state.clone(),
                                 redacted_data: None,
+                                reasoning_details: current_thinking_details.clone(),
                             });
                         }
                         if !current_text_visible.is_empty() {
@@ -2487,12 +2503,14 @@ impl Engine {
             if (!current_thinking.is_empty() && !thinking_is_placeholder_only)
                 || current_thinking_state.is_some()
                 || current_thinking_signature.is_some()
+                || current_thinking_details.is_some()
             {
                 content_blocks.push(ContentBlock::Thinking {
                     thinking: current_thinking.clone(),
                     signature: current_thinking_signature.clone(),
                     state: current_thinking_state.clone(),
                     redacted_data: None,
+                    reasoning_details: current_thinking_details.clone(),
                 });
             }
             let mut final_text = current_text_visible.clone();
@@ -5170,6 +5188,10 @@ impl Engine {
         // thinking block; must be replayed verbatim in tool loops.
         let mut current_thinking_signature: Option<String> = None;
         let mut current_thinking_state: Option<crate::models::OpaqueReasoningState> = None;
+        // OpenRouter structured reasoning entries for the current thinking
+        // block; each delta replaces the snapshot (the stream repeats the
+        // growing array) and the final one is replayed verbatim.
+        let mut current_thinking_details: Option<Vec<serde_json::Value>> = None;
         // Adaptive/interleaved thinking can emit more than one thinking block
         // per assistant turn. Anthropic requires the entire sequence of
         // thinking blocks to be replayed "complete and unmodified" and in the
@@ -5532,9 +5554,11 @@ impl Engine {
                             &mut current_thinking,
                             &mut current_thinking_signature,
                             &mut current_thinking_state,
+                            &mut current_thinking_details,
                             &mut completed_thinking,
                         );
                         current_thinking = thinking;
+                        current_thinking_details = None;
                         current_block_kind = Some(ContentBlockKind::Thinking);
                         let _ = self
                             .tx_event
@@ -5554,6 +5578,7 @@ impl Engine {
                             &mut current_thinking,
                             &mut current_thinking_signature,
                             &mut current_thinking_state,
+                            &mut current_thinking_details,
                             &mut completed_thinking,
                         );
                         completed_thinking.push(ContentBlock::Thinking {
@@ -5561,6 +5586,7 @@ impl Engine {
                             signature: None,
                             state: None,
                             redacted_data: Some(data),
+                            reasoning_details: None,
                         });
                         // Kind is cleared so the block's stop event needs no
                         // handling — it was parked above and has no deltas —
@@ -5672,6 +5698,12 @@ impl Engine {
                     Delta::ReasoningStateDelta { state } => {
                         current_thinking_state = Some(state);
                     }
+                    Delta::ReasoningDetailsDelta { details } => {
+                        // OpenRouter repeats the growing details array on
+                        // successive chunks; the last snapshot is the most
+                        // complete version and replaces any earlier one.
+                        current_thinking_details = Some(details);
+                    }
                     Delta::ToolThoughtSignatureDelta { signature } => {
                         // Google thought signature delivered on a continuation
                         // chunk of an already-started tool call. First one
@@ -5751,6 +5783,7 @@ impl Engine {
                                 &mut current_thinking,
                                 &mut current_thinking_signature,
                                 &mut current_thinking_state,
+                                &mut current_thinking_details,
                                 &mut completed_thinking,
                             );
                         }
@@ -5886,6 +5919,7 @@ impl Engine {
             current_thinking,
             current_thinking_signature,
             current_thinking_state,
+            current_thinking_details,
             completed_thinking,
             tool_uses,
             usage,
@@ -6975,6 +7009,9 @@ fn stream_event_has_actionable_content(event: &StreamEvent) -> bool {
             Delta::SignatureDelta { signature } => !signature.is_empty(),
             Delta::ToolThoughtSignatureDelta { signature } => !signature.is_empty(),
             Delta::ReasoningStateDelta { .. } => true,
+            // Structured OpenRouter reasoning is provider-owned content even
+            // when no readable text delta accompanies it.
+            Delta::ReasoningDetailsDelta { details } => !details.is_empty(),
         },
         StreamEvent::ToolProjectionWarning { .. }
         | StreamEvent::MessageStart { .. }

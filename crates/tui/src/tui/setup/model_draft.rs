@@ -411,6 +411,7 @@ mod tests {
                 signature: None,
                 state: None,
                 redacted_data: None,
+                reasoning_details: None,
             },
         );
         mock.push_message_response(response);

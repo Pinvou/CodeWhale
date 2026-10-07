@@ -27,6 +27,8 @@ fn decode_chunk_with_reasoning(json_text: &str, is_reasoning_model: bool) -> Vec
         &mut thinking_started,
         &mut tool_indices,
         &mut reasoning_detail_buffers,
+        &mut ReasoningDetailsBuffer::default(),
+        false,
         is_reasoning_model,
     )
 }
@@ -52,6 +54,8 @@ fn decode_chunks_with_style(
             &mut thinking_started,
             &mut tool_indices,
             &mut reasoning_detail_buffers,
+            &mut ReasoningDetailsBuffer::default(),
+            false,
             &mut inline_reasoning_tags,
             reasoning_stream_style,
         ));
@@ -112,6 +116,8 @@ fn decode_sse_byte_chunks(chunks: &[&[u8]]) -> Result<Vec<StreamEvent>, InvalidS
                 &mut self.thinking_started,
                 &mut self.tool_indices,
                 &mut self.reasoning_detail_buffers,
+                &mut ReasoningDetailsBuffer::default(),
+                false,
                 &mut self.inline_reasoning_tags,
                 ReasoningStreamStyle::SeparateField,
             ) {
@@ -312,6 +318,8 @@ fn decoder_streams_moonshot_multi_chunk_reasoning_as_thinking() {
             &mut thinking_started,
             &mut tool_indices,
             &mut reasoning_detail_buffers,
+            &mut ReasoningDetailsBuffer::default(),
+            false,
             is_reasoning,
         ));
     }
@@ -400,6 +408,8 @@ fn decoder_streams_minimax_reasoning_details_as_incremental_thinking() {
             &mut thinking_started,
             &mut tool_indices,
             &mut reasoning_detail_buffers,
+            &mut ReasoningDetailsBuffer::default(),
+            false,
             is_reasoning,
         ));
     }
@@ -472,6 +482,8 @@ fn modelstudio_streams_reasoning_content_as_thinking() {
                 &mut thinking_started,
                 &mut tool_indices,
                 &mut reasoning_detail_buffers,
+                &mut ReasoningDetailsBuffer::default(),
+                false,
                 &mut inline_reasoning_tags,
                 style,
             ));
@@ -545,6 +557,8 @@ fn decoder_does_not_render_reasoning_as_text_for_known_provider_models() {
         &mut thinking_started,
         &mut tool_indices,
         &mut reasoning_detail_buffers,
+        &mut ReasoningDetailsBuffer::default(),
+        false,
         is_reasoning_model,
     );
 
@@ -753,6 +767,8 @@ fn decoder_treats_done_frame_as_terminal() {
         &mut thinking_started,
         &mut tool_indices,
         &mut reasoning_detail_buffers,
+        &mut ReasoningDetailsBuffer::default(),
+        false,
         &mut inline_reasoning_tags,
         ReasoningStreamStyle::SeparateField,
     );
@@ -1495,4 +1511,120 @@ fn mistral_stream_blocks_are_decoded_only_by_the_mistral_style() {
             ..
         }
     )));
+}
+
+// === OpenRouter structured reasoning_details capture ========================
+
+/// Decode chunks with an explicit details-capture flag, mirroring the live
+/// loop's wiring (`capture_reasoning_details` is true on OpenRouter only).
+fn decode_chunks_capturing_details(chunks: &[Value], capture: bool) -> Vec<StreamEvent> {
+    let mut content_index = 0u32;
+    let mut text_started = false;
+    let mut thinking_started = false;
+    let mut tool_indices = std::collections::HashMap::new();
+    let mut reasoning_detail_buffers = std::collections::HashMap::new();
+    let mut reasoning_details_buffer = ReasoningDetailsBuffer::default();
+    let mut events = Vec::new();
+    for chunk in chunks {
+        events.extend(parse_sse_chunk(
+            chunk,
+            &mut content_index,
+            &mut text_started,
+            &mut thinking_started,
+            &mut tool_indices,
+            &mut reasoning_detail_buffers,
+            &mut reasoning_details_buffer,
+            capture,
+            true,
+        ));
+    }
+    events
+}
+
+fn details_delta_payloads(events: &[StreamEvent]) -> Vec<Vec<Value>> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            StreamEvent::ContentBlockDelta {
+                delta: Delta::ReasoningDetailsDelta { details },
+                ..
+            } => Some(details.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn openrouter_details_snapshots_merge_last_wins_in_first_seen_order() {
+    // OpenRouter repeats the growing array on each chunk: entry 0's text
+    // completes and entry 1 appears. The stored snapshot must hold the most
+    // complete version of each entry in first-seen order.
+    let chunks = vec![
+        serde_json::json!({
+            "choices": [{
+                "index": 0,
+                "delta": {
+                    "reasoning": "al",
+                    "reasoning_details": [
+                        { "type": "reasoning.text", "index": 0, "text": "al" }
+                    ]
+                }
+            }]
+        }),
+        serde_json::json!({
+            "choices": [{
+                "index": 0,
+                "delta": {
+                    "reasoning_details": [
+                        { "type": "reasoning.text", "index": 0, "text": "alpha" },
+                        { "type": "reasoning.encrypted", "index": 1, "data": "blob" }
+                    ]
+                }
+            }]
+        }),
+    ];
+    let events = decode_chunks_capturing_details(&chunks, true);
+    let snapshots = details_delta_payloads(&events);
+    assert_eq!(snapshots.len(), 2, "one snapshot per absorbing chunk");
+    assert_eq!(snapshots[0].len(), 1);
+    let last = snapshots.last().expect("final snapshot");
+    assert_eq!(last.len(), 2, "entry count grows with the array");
+    assert_eq!(last[0]["text"], "alpha", "last version of entry 0 wins");
+    assert_eq!(last[0]["type"], "reasoning.text", "first-seen order kept");
+    assert_eq!(last[1]["type"], "reasoning.encrypted");
+}
+
+#[test]
+fn openrouter_details_placeholder_entries_never_enter_the_snapshot() {
+    let chunks = vec![serde_json::json!({
+        "choices": [{
+            "index": 0,
+            "delta": {
+                "reasoning_details": [
+                    { "type": "reasoning.encrypted", "index": 0, "data": "[REDACTED]" }
+                ]
+            }
+        }]
+    })];
+    let events = decode_chunks_capturing_details(&chunks, true);
+    assert!(
+        details_delta_payloads(&events).is_empty(),
+        "a [REDACTED] payload cannot be replayed and must not be captured"
+    );
+}
+
+#[test]
+fn non_openrouter_routes_never_emit_details_deltas() {
+    let chunks = vec![serde_json::json!({
+        "choices": [{
+            "index": 0,
+            "delta": {
+                "reasoning_details": [
+                    { "type": "text", "text": "minimax trace" }
+                ]
+            }
+        }]
+    })];
+    let events = decode_chunks_capturing_details(&chunks, false);
+    assert!(details_delta_payloads(&events).is_empty());
 }

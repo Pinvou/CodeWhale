@@ -703,6 +703,7 @@ impl DeepSeekClient {
                             signature: None,
                             state: None,
                             redacted_data: None,
+                            reasoning_details: None,
                         },
                         // Redacted thinking does not occur on Responses
                         // routes (encrypted reasoning rides the reasoning
@@ -769,6 +770,10 @@ impl DeepSeekClient {
                             {
                                 *existing = Some(state);
                             }
+                        }
+                        Delta::ReasoningDetailsDelta { .. } => {
+                            // OpenRouter chat-route details never occur on
+                            // the Responses bridge.
                         }
                     }
                 }

@@ -1147,6 +1147,7 @@ mod tests {
                 state: None,
                 thinking: "skip".to_string(),
                 redacted_data: None,
+                reasoning_details: None,
             },
             ContentBlock::Text {
                 text: "second".to_string(),

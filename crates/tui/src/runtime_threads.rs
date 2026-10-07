@@ -8465,6 +8465,7 @@ impl RuntimeThreadManager {
                                 signature: None,
                                 state: None,
                                 redacted_data: None,
+                                reasoning_details: None,
                             });
                         }
                     }

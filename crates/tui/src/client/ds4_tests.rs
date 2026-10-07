@@ -1,5 +1,5 @@
 use super::DeepSeekClient;
-use super::chat::{parse_chat_message, parse_sse_chunk};
+use super::chat::{ReasoningDetailsBuffer, parse_chat_message, parse_sse_chunk};
 use crate::config::{Config, ProviderConfig, ProvidersConfig};
 use crate::models::Role;
 use crate::models::{ContentBlock, Delta, Message, MessageRequest, StreamEvent, Tool};
@@ -202,6 +202,8 @@ fn replay_placeholder_echo_is_dropped_from_ingest() {
                 &mut thinking_started,
                 &mut tool_indices,
                 &mut reasoning_detail_buffers,
+                &mut ReasoningDetailsBuffer::default(),
+                false,
                 true,
             )
         })
@@ -273,6 +275,8 @@ fn streaming_fixture_accepts_delayed_tool_arguments_and_usage_tail() {
                 &mut thinking_started,
                 &mut tool_indices,
                 &mut reasoning_detail_buffers,
+                &mut ReasoningDetailsBuffer::default(),
+                false,
                 false,
             )
         })

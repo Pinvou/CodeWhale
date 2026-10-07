@@ -77,6 +77,7 @@ fn codex_reasoning_block(model: &str) -> ContentBlock {
             endpoint: Some("fp-codex-endpoint".to_string()),
         }),
         redacted_data: None,
+        reasoning_details: None,
     }
 }
 
@@ -683,6 +684,7 @@ fn deepseek_flash_responses_body_uses_stateless_0731_contract() {
                 signature: None,
                 state: None,
                 redacted_data: None,
+                reasoning_details: None,
             }],
         },
     );
@@ -775,6 +777,7 @@ fn codex_replays_only_exact_model_opaque_reasoning_state() {
                     signature: None,
                     state: Some(state),
                     redacted_data: None,
+                    reasoning_details: None,
                 },
                 // Text pairs the reasoning item with its produced message so
                 // the sequence satisfies the immediate-following-item rule.
@@ -1928,6 +1931,7 @@ fn forkguard_custom_responses_replays_only_exact_model_opaque_reasoning_state() 
                     signature: None,
                     state: Some(state),
                     redacted_data: None,
+                    reasoning_details: None,
                 },
                 // Text pairs the reasoning item with its produced message
                 // so the sequence satisfies the immediate-following-item rule.
@@ -1997,6 +2001,7 @@ fn forkguard_custom_responses_replays_only_exact_model_opaque_reasoning_state() 
             endpoint: None,
         }),
         redacted_data: None,
+        reasoning_details: None,
     }];
     let legacy_state = build_responses_body_for_provider(
         &request,
@@ -2033,6 +2038,7 @@ fn forkguard_custom_responses_replays_only_exact_model_opaque_reasoning_state() 
             endpoint: None,
         }),
         redacted_data: None,
+        reasoning_details: None,
     }];
     let legacy_root = build_responses_body_for_provider(
         &request,
@@ -2060,6 +2066,7 @@ fn forkguard_custom_responses_replays_only_exact_model_opaque_reasoning_state() 
             endpoint: Some(MINTING_ENDPOINT_FP.to_string()),
         }),
         redacted_data: None,
+        reasoning_details: None,
     }];
     let switched_table = build_responses_body_for_provider(
         &request,
@@ -2097,6 +2104,7 @@ fn forkguard_custom_responses_replays_only_exact_model_opaque_reasoning_state() 
             endpoint: Some(MINTING_ENDPOINT_FP.to_string()),
         }),
         redacted_data: None,
+        reasoning_details: None,
     }];
     let codex_state_on_custom = build_responses_body_for_provider(
         &request,
@@ -2157,6 +2165,7 @@ fn forkguard_fixed_endpoint_legacy_state_without_fingerprint_keeps_replaying() {
                         endpoint: None,
                     }),
                     redacted_data: None,
+                    reasoning_details: None,
                 },
                 // Text pairs the reasoning item with its produced message
                 // so the sequence satisfies the immediate-following-item rule.
@@ -2213,6 +2222,7 @@ fn forkguard_repointed_builtin_legacy_state_without_fingerprint_fails_closed() {
                         endpoint: None,
                     }),
                     redacted_data: None,
+                    reasoning_details: None,
                 },
                 // Text pairs the reasoning item with its produced message
                 // so the sequence satisfies the immediate-following-item rule.
@@ -2270,6 +2280,7 @@ fn forkguard_replay_never_rides_a_route_that_omits_the_include() {
                     signature: None,
                     state: Some(state),
                     redacted_data: None,
+                    reasoning_details: None,
                 },
                 // Text pairs the reasoning item with its produced message
                 // so the sequence satisfies the immediate-following-item rule.
@@ -2379,6 +2390,7 @@ async fn forkguard_custom_responses_captured_state_replays_on_the_next_turn() {
                     signature: None,
                     state: Some(state),
                     redacted_data: None,
+                    reasoning_details: None,
                 },
                 // Text pairs the reasoning item with its produced message
                 // so the sequence satisfies the immediate-following-item rule.
@@ -2508,6 +2520,7 @@ async fn forkguard_capture_replay_drops_across_a_base_url_edit() {
                     signature: None,
                     state: Some(captured),
                     redacted_data: None,
+                    reasoning_details: None,
                 },
                 // Text pairs the reasoning item with its produced message
                 // so the sequence satisfies the immediate-following-item rule.

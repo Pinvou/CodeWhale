@@ -787,6 +787,15 @@ pub enum Delta {
     /// returns an encrypted item on the exact originating route.
     #[serde(rename = "reasoning_state_delta")]
     ReasoningStateDelta { state: OpaqueReasoningState },
+    /// OpenRouter `reasoning_details` snapshot for the current thinking
+    /// block, carried verbatim from the streamed `delta.reasoning_details`
+    /// entries. Each event replaces the previous snapshot; the last one
+    /// before the block closes is the most complete version OpenRouter sent
+    /// (their stream repeats the growing array). Entries whose encrypted
+    /// payload arrived as the `[REDACTED]` streaming placeholder never
+    /// enter the snapshot — they cannot be replayed.
+    #[serde(rename = "reasoning_details_delta")]
+    ReasoningDetailsDelta { details: Vec<serde_json::Value> },
 }
 
 #[allow(dead_code)]

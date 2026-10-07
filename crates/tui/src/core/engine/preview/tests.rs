@@ -369,6 +369,7 @@ fn context_pressure_delta_matches_clone_and_push_reference() {
             signature: None,
             state: None,
             redacted_data: None,
+            reasoning_details: None,
         }],
     });
     // Replayed-reasoning case (#perf-r5 fresh-eyes fix): an assistant message
@@ -384,6 +385,7 @@ fn context_pressure_delta_matches_clone_and_push_reference() {
                 signature: None,
                 state: None,
                 redacted_data: None,
+                reasoning_details: None,
             },
             ContentBlock::ToolUse {
                 id: "call_1".to_string(),
@@ -402,6 +404,7 @@ fn context_pressure_delta_matches_clone_and_push_reference() {
                 signature: None,
                 state: None,
                 redacted_data: None,
+                reasoning_details: None,
             },
             ContentBlock::ToolUse {
                 id: "call_2".to_string(),

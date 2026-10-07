@@ -1688,12 +1688,14 @@ mod tests {
                         signature: Some("sig-abc".to_string()),
                         state: None,
                         redacted_data: None,
+                        reasoning_details: None,
                     },
                     ContentBlock::Thinking {
                         thinking: "(reasoning omitted)".to_string(),
                         signature: None,
                         state: None,
                         redacted_data: None,
+                        reasoning_details: None,
                     },
                     ContentBlock::ToolUse {
                         id: "toolu_1".to_string(),
@@ -1754,6 +1756,7 @@ mod tests {
                         signature: None,
                         state: None,
                         redacted_data: Some("ENC_REDACTED_PAYLOAD".to_string()),
+                        reasoning_details: None,
                     },
                     ContentBlock::ToolUse {
                         id: "toolu_1".to_string(),
@@ -1806,6 +1809,7 @@ mod tests {
                         signature: Some("sig-omitted".to_string()),
                         state: None,
                         redacted_data: None,
+                        reasoning_details: None,
                     },
                     ContentBlock::ToolUse {
                         id: "toolu_1".to_string(),
@@ -1850,18 +1854,21 @@ mod tests {
                     signature: Some("sig-1".to_string()),
                     state: None,
                     redacted_data: None,
+                    reasoning_details: None,
                 },
                 ContentBlock::Thinking {
                     thinking: String::new(),
                     signature: None,
                     state: None,
                     redacted_data: Some("ENC_SECOND".to_string()),
+                    reasoning_details: None,
                 },
                 ContentBlock::Thinking {
                     thinking: "third block".to_string(),
                     signature: Some("sig-3".to_string()),
                     state: None,
                     redacted_data: None,
+                    reasoning_details: None,
                 },
                 ContentBlock::ToolUse {
                     id: "toolu_1".to_string(),
@@ -1904,6 +1911,7 @@ mod tests {
                         signature: Some("sig-old".to_string()),
                         state: None,
                         redacted_data: None,
+                        reasoning_details: None,
                     },
                     ContentBlock::Text {
                         text: "older answer".to_string(),
@@ -1926,6 +1934,7 @@ mod tests {
                         signature: Some("sig-current".to_string()),
                         state: None,
                         redacted_data: None,
+                        reasoning_details: None,
                     },
                     ContentBlock::ToolUse {
                         id: "toolu_1".to_string(),
@@ -1974,6 +1983,7 @@ mod tests {
                     signature: Some("sig-current".to_string()),
                     state: None,
                     redacted_data: None,
+                    reasoning_details: None,
                 },
                 ContentBlock::ToolUse {
                     id: "toolu_1".to_string(),
@@ -2004,6 +2014,7 @@ mod tests {
                     signature: Some("sig-current".to_string()),
                     state: None,
                     redacted_data: None,
+                    reasoning_details: None,
                 },
                 ContentBlock::ToolUse {
                     id: "toolu_1".to_string(),
@@ -2043,6 +2054,7 @@ mod tests {
                     signature: Some("sig-current".to_string()),
                     state: None,
                     redacted_data: None,
+                    reasoning_details: None,
                 },
                 ContentBlock::ToolUse {
                     id: "toolu_1".to_string(),
@@ -2075,6 +2087,7 @@ mod tests {
                     signature: None,
                     state: None,
                     redacted_data: Some("ENC_REDACTED".to_string()),
+                    reasoning_details: None,
                 },
                 ContentBlock::ToolUse {
                     id: "toolu_1".to_string(),

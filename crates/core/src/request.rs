@@ -185,6 +185,15 @@ pub enum ContentBlock {
         /// for every non-redacted block.
         #[serde(skip_serializing_if = "Option::is_none", default)]
         redacted_data: Option<String>,
+        /// OpenRouter `reasoning_details` entries (`reasoning.text`,
+        /// `reasoning.encrypted`, `reasoning.summary`), stored verbatim as
+        /// received. OpenRouter requires the entire sequence to be passed
+        /// back unmodified on later turns (tool-calling continuity), and the
+        /// encrypted form carries payloads that `reasoning_content` text
+        /// cannot. Captured only on OpenRouter routes and replayed only on
+        /// OpenRouter routes; every other dialect never emits the field.
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        reasoning_details: Option<Vec<serde_json::Value>>,
     },
     #[serde(rename = "tool_use")]
     ToolUse {
@@ -236,6 +245,7 @@ impl ContentBlock {
             signature: None,
             state: None,
             redacted_data: None,
+            reasoning_details: None,
         }
     }
 }
