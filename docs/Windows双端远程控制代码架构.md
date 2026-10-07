@@ -58,6 +58,8 @@ B 的 Rust 权威枚举以 `features/remote_control/controller/controlled.rs` �
 
 ## 1. 角色与边界
 
+> 历史快照：本节不是当前契约；以下相同提示适用于本节所有子节。
+
 | 名称 | 角色 | 核心职责 |
 |---|---|---|
 | A 端 / Controller / 主控端 | 发起控制的一端 | 输入连接码、建立租约、创建远程会话、发送任务、查看回传结果 |
@@ -78,6 +80,8 @@ B 的 Rust 权威枚举以 `features/remote_control/controller/controlled.rs` �
 - B 端 Session、Journal、任务准入和执行终态始终是唯一业务权威；A 的 `RemoteProxy` 只是已认证投影，不得进入 A 本机 EnginePool/AcpPool。
 
 ## 2. 总体组件关系
+
+> 历史快照：组件关系已被正文当前契约替代，不是待实现方案。
 
 ```mermaid
 flowchart LR
@@ -163,6 +167,8 @@ flowchart LR
 图中的用例编排是可复用、Tauri 无关的普通 Rust 边界，最终按职责位于所属 feature 的 `application` 子模块并显式导出；既有 Command 内 helper 只作为迁移兼容 shim，不得继续承载新增业务。边界的签名和实现均不导入或调用 Tauri API，宿主事件通过注入的 `AppEventBus` 等窄端口发布，也不是新 Runtime。`ControlledExecutionPort` 与 `RemoteSessionProjectionPort` 由远控 feature 定义、由 app 组合根注入实现；图中 A 的虚线是经端口发生的运行时回调，不代表 `features/remote_control → app/commands` 或 feature 之间的反向模块依赖。本设计不要求新增固定的 `features/conversation` 目录。
 
 ## 3. 当前代码分层
+
+> 历史快照：“当前”只指当时；旧文件/事件不可用作现行索引。
 
 ### 3.1 页面与交互层
 
@@ -328,6 +334,8 @@ Command 入口负责 Tauri 参数、返回值和事件适配，不应成为连�
 
 ## 4. 当前与目标状态所有权
 
+> 历史快照：RemoteHistoryStore 已删除，迁移设想废弃且不是技术债。
+
 | 状态 | 当前实现 | 目标权威所有者 | 前端表现/约束 |
 |---|---|---|---|
 | B 端连接生命周期 | `ControlledDeviceManager` | `ControlledDeviceManager` | `controlledDevice` |
@@ -348,6 +356,8 @@ Command 入口负责 Tauri 参数、返回值和事件适配，不应成为连�
 `RemoteProxy` 可持久化 A 本地 Session ID 与 opaque `remote_session_ref` 的历史来源映射，但这不是访问凭据。`remote_session_ref` 由 A 端可信 Rust 生成，B 在认证请求后幂等映射并确认。在原 resume 边界内恢复时仍需验证新的 transport 绑定；超出 resume 边界或重新配对后，A 必须重新打开会话并生成新引用，再绑定当前 connection/lease/generation，不得将磁盘上的旧引用直接用于变更操作。
 
 ## 5. 29 个 UI 子状态
+
+> 历史快照：29 状态及旧命名已过期；当前 Rust/DTO 合同见正文。
 
 29 个状态是设置页展示模型，由 B 端 12 个状态和 A 端 17 个状态组成。它们不是 29 个 Rust 协议状态。
 
@@ -434,6 +444,8 @@ failed
 - 其余状态直接来自 A 端 Rust 状态机。
 
 ## 6. 业务调用流程
+
+> 历史快照：旧入口与业务流程不代表当前接线或验收。
 
 ### 6.1 B 端开启远程控制
 
@@ -633,6 +645,8 @@ transport disconnected
 
 ## 7. 当前主要架构问题
 
+> 历史快照：本节问题是当时分析，不是当前未修缺陷清单。
+
 ### 7.1 A 端存在两套会话 UI
 
 当前同时存在：
@@ -689,6 +703,8 @@ transport disconnected
 B 端网络入站和 Tauri Command 都需要进入相同的 Session、turn 准入、附件、执行器和 Journal 链路，但 feature 不能反向依赖 `app/commands`。目标架构需要在职责所属 feature 的 `application` 子模块为共享流程暴露不导入或调用 Tauri API 的普通 Rust 用例边界，并由组合根向 `RemoteControl` 注入窄 `ControlledExecutionPort` 适配器；不强制新增统一 conversation feature，也不搬迁无关 Command。既有 Command helper 只能作为代理到该边界的迁移 shim，同时必须避免内部 invoke、跨 Command 调用和第二套执行逻辑。
 
 ## 8. 推荐目标分层
+
+> 历史快照：推荐仅属原设计，不能作为现行目录或待办。
 
 以下是目标结构建议，不代表当前目录已经完成迁移。
 
@@ -805,6 +821,8 @@ trait DesktopRelayPort {
 
 ## 9. 推荐迁移顺序
 
+> 历史快照：未发布桌面兼容/旧格式迁移计划已废弃，不实施、不留技术债；已发布 Web v2 门禁不变。
+
 ### 阶段一：固化现有行为
 
 - 固化 Tauri command 名称和参数；
@@ -853,6 +871,8 @@ trait DesktopRelayPort {
 
 ## 10. 关键约束
 
+> 历史快照：本节不新增当前契约；当前约束以正文与需求文档为准。
+
 - `SessionStore` 负责会话状态、持久化与投影；`EnginePool`、`AcpPool`、`RemoteControl` 分别参与本地 Engine、本地 ACP 和远程设备路径。各组件保持独立状态所有权，不引入持有会话或任务状态的统一 Conversation Runtime，也不要求三种后端能力实现统一接口。
 - A 端远程会话必须经 `SessionStore.RemoteProxy + RemoteControl` 编排，不得进入 A 本机 EnginePool/AcpPool。
 - A 只权威拥有本地 UI 元数据；远程正文、任务状态和终态只是经 B 已认证 Journal/快照对账的投影。
@@ -869,6 +889,8 @@ trait DesktopRelayPort {
 - 新增界面文案必须复用 `src/shared/i18n.js` 对应的中、英、日文资源。
 
 ## 11. 关键代码索引
+
+> 历史快照：含已删除旧模块，查当前代码须用正文“当前代码落位”。
 
 ### 前端
 
@@ -907,6 +929,8 @@ trait DesktopRelayPort {
 - `pinvou3-app/src-tauri/src/features/remote_control/manager/mod.rs`
 
 ## 12. 验证入口
+
+> 历史快照：旧测试/命令不代表当前 head 实跑，不能替代当前 PR 的明确验证记录。
 
 前端远程控制契约测试位于 `pinvou3-app/tests/`，重点包括：
 

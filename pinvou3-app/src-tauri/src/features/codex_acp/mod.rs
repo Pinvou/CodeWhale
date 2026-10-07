@@ -18,6 +18,7 @@ mod operation_gate;
 mod platform;
 mod providers;
 pub(crate) mod reader_window;
+mod remote_ownership;
 pub(crate) mod remote_turn;
 mod resource_ledger;
 mod runtime;
@@ -82,10 +83,10 @@ use lifecycle::{
     RuntimeCrashBudget, RuntimeLifecycle, RuntimeLookup, SpawnAdmission, resolve_runtime,
     runtime_is_stable,
 };
-use operation_gate::admit_prompt_turn;
 pub use providers::{
     AcpProvidersView, ImportResult, ProviderManager, ProviderRecord, ProviderWireApi,
 };
+use remote_ownership::{RemoteTurnRegistry, RuntimeIdentity};
 use resource_ledger::{AcpResourceLedger, RuntimeResourceRoot};
 use runtime::{
     MIN_CODEX_VERSION, ResolvedCodex, codex_version, probe_codex_runtime, version_at_least,
@@ -785,6 +786,7 @@ pub struct CodexAcpPendingElicitation {
 }
 
 struct PendingPermission {
+    callback_instance: Arc<()>,
     view: CodexAcpPendingPermission,
     option_ids: Vec<String>,
     option_kinds: HashMap<String, String>,
@@ -826,6 +828,7 @@ pub(crate) struct RemotePermissionProjection {
 }
 
 struct PendingElicitation {
+    callback_instance: Arc<()>,
     view: CodexAcpPendingElicitation,
     remote_owner: Option<RemotePermissionOwner>,
     activity: stall::ActivityClock,
@@ -860,16 +863,21 @@ async fn take_pending_permission(
 }
 
 /// Recheck the captured owner only after acquiring the pending-map lock.
-/// Owner release removes the owner before acquiring this lock, so a callback
+/// Owner release marks Closing before acquiring this lock, so a callback
 /// either participates in that cleanup or is immediately cancelled here.
 async fn insert_pending_permission(
     pending: &Mutex<HashMap<String, PendingPermission>>,
-    owners: &parking_lot::Mutex<HashMap<String, RemotePermissionOwner>>,
+    owners: &parking_lot::Mutex<RemoteTurnRegistry>,
+    identity: &Arc<RuntimeIdentity>,
     key: String,
     request: PendingPermission,
 ) -> bool {
     let mut pending = pending.lock().await;
-    if owners.lock().get(&request.view.session_id) != request.remote_owner.as_ref() {
+    let owners = owners.lock();
+    if !owners
+        .callback_owner(&request.view.session_id, identity)
+        .is_ok_and(|current| current.as_ref() == request.remote_owner.as_ref())
+    {
         let _ = request.response_tx.send(RequestPermissionResponse::new(
             RequestPermissionOutcome::Cancelled,
         ));
@@ -898,6 +906,7 @@ async fn take_pending_elicitation(
 }
 
 struct AcpSession {
+    identity: Arc<RuntimeIdentity>,
     connection: ConnectionTo<Agent>,
     acp_session_id: String,
     bridge: EventBridge,
@@ -1177,6 +1186,7 @@ impl AcpSession {
     }
 
     async fn shutdown(&self) {
+        self.identity.retired.store(true, Ordering::Release);
         self.lifecycle.begin_expected_shutdown();
         if let Some(tx) = self.shutdown_tx.lock().await.take() {
             let _ = tx.send(());
@@ -1284,17 +1294,17 @@ pub struct AcpPool {
     app: AppHandle,
     sessions: Arc<Mutex<HashMap<String, Arc<AcpSession>>>>,
     pending_permissions: Arc<Mutex<HashMap<String, PendingPermission>>>,
-    remote_permission_owners: Arc<parking_lot::Mutex<HashMap<String, RemotePermissionOwner>>>,
+    remote_permission_owners: Arc<parking_lot::Mutex<RemoteTurnRegistry>>,
     pending_elicitations: Arc<Mutex<HashMap<String, PendingElicitation>>>,
     agents: SessionAgentStore,
     config_defaults: AcpConfigDefaultsStore,
     acp_metadata_backends: Arc<parking_lot::RwLock<HashMap<String, AgentBackend>>>,
     session_store: SessionStore,
-    install_operations: InstallOperationStore,
-    /// 安装进程树注册表：取消时使用创建阶段持有的内核归属 guard 终止整树。
-    install_children: Arc<
-        parking_lot::Mutex<HashMap<AgentBackend, crate::platform::process::ManagedProcessTree>>,
-    >,
+    installing_agents: Arc<parking_lot::RwLock<HashSet<AgentBackend>>>,
+    /// 安装子进程 pid 注册表：取消安装时按 pid 杀进程树。
+    install_children: Arc<parking_lot::Mutex<HashMap<AgentBackend, u32>>>,
+    /// 取消标记：取消命令写入，安装等待侧在失败出口消费并以「安装已取消」收尾。
+    install_cancelled: Arc<parking_lot::Mutex<HashSet<AgentBackend>>>,
     login_states: Arc<parking_lot::RwLock<HashMap<AgentBackend, AgentLoginState>>>,
     login_inputs: Arc<Mutex<HashMap<AgentBackend, ChildStdin>>>,
     codex_upgrade_required: Arc<AtomicBool>,
@@ -1339,64 +1349,21 @@ impl Drop for IdleReaperGuard {
 /// 同一 Agent 的安装/升级互斥，不同 Agent 的状态与任务彼此隔离。
 /// guard 在外部命令完成后显式 drop，使随后返回的 status 已恢复 installing=false；
 /// 提前返回或 panic 时 Drop 仍会兜底清理。
-#[derive(Default)]
-struct InstallOperationState {
-    active: HashSet<AgentBackend>,
-    cancelled: HashSet<AgentBackend>,
-}
-
-impl InstallOperationState {
-    fn begin(&mut self, backend: AgentBackend) -> bool {
-        if !self.active.insert(backend) {
-            return false;
-        }
-        // This cleanup and publishing `active` share one lock. A cancellation
-        // that observes the new operation can only run after this point and
-        // therefore can never be mistaken for a stale marker and removed.
-        self.cancelled.remove(&backend);
-        true
-    }
-
-    fn request_cancel(&mut self, backend: AgentBackend) -> bool {
-        if !self.active.contains(&backend) {
-            return false;
-        }
-        self.cancelled.insert(backend);
-        true
-    }
-
-    fn is_active(&self, backend: AgentBackend) -> bool {
-        self.active.contains(&backend)
-    }
-
-    fn is_cancelled(&self, backend: AgentBackend) -> bool {
-        self.cancelled.contains(&backend)
-    }
-
-    fn take_cancelled(&mut self, backend: AgentBackend) -> bool {
-        self.cancelled.remove(&backend)
-    }
-
-    fn finish(&mut self, backend: AgentBackend) {
-        self.active.remove(&backend);
-        self.cancelled.remove(&backend);
-    }
-}
-
-type InstallOperationStore = Arc<parking_lot::Mutex<InstallOperationState>>;
-
 struct AgentInstallGuard {
-    operations: InstallOperationStore,
+    installing_agents: Arc<parking_lot::RwLock<HashSet<AgentBackend>>>,
     backend: AgentBackend,
 }
 
 impl AgentInstallGuard {
-    fn try_start(operations: &InstallOperationStore, backend: AgentBackend) -> Option<Self> {
-        if !operations.lock().begin(backend) {
+    fn try_start(
+        installing_agents: &Arc<parking_lot::RwLock<HashSet<AgentBackend>>>,
+        backend: AgentBackend,
+    ) -> Option<Self> {
+        if !installing_agents.write().insert(backend) {
             return None;
         }
         Some(Self {
-            operations: operations.clone(),
+            installing_agents: installing_agents.clone(),
             backend,
         })
     }
@@ -1404,28 +1371,26 @@ impl AgentInstallGuard {
 
 impl Drop for AgentInstallGuard {
     fn drop(&mut self) {
-        self.operations.lock().finish(self.backend);
+        self.installing_agents.write().remove(&self.backend);
     }
 }
 
-/// 安装进程树登记 guard：spawn 成功并建立平台归属后登记，drop 时（完成/失败/
-/// 超时/取消任意出口）统一注销。Windows 保存 Job Object，而非可复用的裸 PID。
+/// 安装子进程 pid 登记 guard：spawn 成功后登记，drop 时（完成/失败/超时/取消
+/// 任意出口）统一注销，避免残留 pid 在后续取消时误杀被系统复用的进程。
 struct InstallChildGuard {
-    install_children: Arc<
-        parking_lot::Mutex<HashMap<AgentBackend, crate::platform::process::ManagedProcessTree>>,
-    >,
+    install_children: Arc<parking_lot::Mutex<HashMap<AgentBackend, u32>>>,
     backend: AgentBackend,
 }
 
 impl InstallChildGuard {
     fn register(
-        install_children: &Arc<
-            parking_lot::Mutex<HashMap<AgentBackend, crate::platform::process::ManagedProcessTree>>,
-        >,
+        install_children: &Arc<parking_lot::Mutex<HashMap<AgentBackend, u32>>>,
         backend: AgentBackend,
-        process_tree: crate::platform::process::ManagedProcessTree,
+        pid: Option<u32>,
     ) -> Self {
-        install_children.lock().insert(backend, process_tree);
+        if let Some(pid) = pid {
+            install_children.lock().insert(backend, pid);
+        }
         Self {
             install_children: install_children.clone(),
             backend,
@@ -1630,14 +1595,17 @@ impl AcpPool {
             app,
             sessions: Arc::new(Mutex::new(HashMap::new())),
             pending_permissions: Arc::new(Mutex::new(HashMap::new())),
-            remote_permission_owners: Arc::new(parking_lot::Mutex::new(HashMap::new())),
+            remote_permission_owners: Arc::new(parking_lot::Mutex::new(
+                RemoteTurnRegistry::default(),
+            )),
             pending_elicitations: Arc::new(Mutex::new(HashMap::new())),
             agents,
             config_defaults,
             acp_metadata_backends: Arc::new(parking_lot::RwLock::new(acp_metadata_backends)),
             session_store,
-            install_operations: Arc::new(parking_lot::Mutex::new(InstallOperationState::default())),
+            installing_agents: Arc::new(parking_lot::RwLock::new(HashSet::new())),
             install_children: Arc::new(parking_lot::Mutex::new(HashMap::new())),
+            install_cancelled: Arc::new(parking_lot::Mutex::new(HashSet::new())),
             login_states: Arc::new(parking_lot::RwLock::new(HashMap::new())),
             login_inputs: Arc::new(Mutex::new(HashMap::new())),
             codex_upgrade_required: Arc::new(AtomicBool::new(false)),
@@ -1887,7 +1855,7 @@ impl AcpPool {
             .unwrap_or_default();
         if backend == AgentBackend::KimiAcp {
             let kimi = self.cli_probe_for(backend);
-            let installing = self.install_operations.lock().is_active(backend);
+            let installing = self.installing_agents.read().contains(&backend);
             let kimi_path = kimi
                 .as_ref()
                 .map(|cli| cli.path.to_string_lossy().into_owned());
@@ -2036,7 +2004,7 @@ impl AcpPool {
         };
         // 登录命令运行期间不要再启动同一 CLI 的 auth status。部分 CLI 会让两条
         // 命令争用凭证锁，原来的 750ms 状态轮询因此可能拖住 Tauri 的 IPC/UI。
-        let installing = self.install_operations.lock().is_active(backend);
+        let installing = self.installing_agents.read().contains(&backend);
         let authenticated = !login.in_progress
             && !installing
             && match backend {
@@ -2321,7 +2289,7 @@ impl AcpPool {
                 backend.display_name()
             );
         }
-        let Some(install_guard) = AgentInstallGuard::try_start(&self.install_operations, backend)
+        let Some(install_guard) = AgentInstallGuard::try_start(&self.installing_agents, backend)
         else {
             diagnostics::write(
                 &operation_id,
@@ -2330,7 +2298,8 @@ impl AcpPool {
             );
             bail!("{} 正在通过 Homebrew 安装，请稍候", backend.display_name());
         };
-        // try_start 在发布 active 的同一临界区清理旧取消标记；发布后的取消不会丢失。
+        // 清掉上一次安装可能残留的取消标记：本次失败语义只来自本次取消。
+        self.install_cancelled.lock().remove(&backend);
         diagnostics::write(
             &operation_id,
             "homebrew:start",
@@ -2356,7 +2325,7 @@ impl AcpPool {
                     backend,
                     &operation_id,
                     &self.install_children,
-                    &self.install_operations,
+                    &self.install_cancelled,
                     &args,
                     command,
                 )
@@ -2673,12 +2642,13 @@ impl AcpPool {
             diagnostics::write(&operation_id, "npm:unsupported", "result=rejected");
             bail!("{} 不支持 npm 全局升级", backend.display_name());
         }
-        let Some(install_guard) = AgentInstallGuard::try_start(&self.install_operations, backend)
+        let Some(install_guard) = AgentInstallGuard::try_start(&self.installing_agents, backend)
         else {
             diagnostics::write(&operation_id, "npm:already_installing", "result=rejected");
             bail!("{} 正在升级，请稍候", backend.display_name());
         };
-        // try_start 在发布 active 的同一临界区清理旧取消标记；发布后的取消不会丢失。
+        // 清掉上一次安装可能残留的取消标记：本次失败语义只来自本次取消。
+        self.install_cancelled.lock().remove(&backend);
         // Rename the old binary installed by the official script and move it
         // aside first: only when the script path is the currently resolved,
         // effective CLI is the new version npm installs into the global
@@ -2751,7 +2721,7 @@ impl AcpPool {
             backend,
             &operation_id,
             &self.install_children,
-            &self.install_operations,
+            &self.install_cancelled,
         )
         .await;
         if result.is_err() && !moved_backups.is_empty() {
@@ -2817,7 +2787,7 @@ impl AcpPool {
                 backend.display_name()
             );
         }
-        let Some(install_guard) = AgentInstallGuard::try_start(&self.install_operations, backend)
+        let Some(install_guard) = AgentInstallGuard::try_start(&self.installing_agents, backend)
         else {
             diagnostics::write(
                 &operation_id,
@@ -2826,7 +2796,8 @@ impl AcpPool {
             );
             bail!("{} 正在安装，请稍候", backend.display_name());
         };
-        // try_start 在发布 active 的同一临界区清理旧取消标记；发布后的取消不会丢失。
+        // 清掉上一次安装可能残留的取消标记：本次失败语义只来自本次取消。
+        self.install_cancelled.lock().remove(&backend);
         // 升级前把官方脚本目标路径的旧二进制改名移开：Claude 官方 install
         // 子命令检测到「已存在 native installation」时会跳过覆盖却仍输出成功
         // （假成功，实测）。移开后脚本走全新安装路径；脚本失败时恢复旧文件，
@@ -2869,7 +2840,7 @@ impl AcpPool {
             backend,
             &operation_id,
             &self.install_children,
-            &self.install_operations,
+            &self.install_cancelled,
         )
         .await;
         if result.is_err() && !moved_backups.is_empty() {
@@ -2923,24 +2894,19 @@ impl AcpPool {
         }
     }
 
-    /// 取消正在进行的 Agent CLI 安装：写入取消标记并终止登记的 managed tree。
+    /// 取消正在进行的 Agent CLI 安装：写入取消标记并按登记的 pid 杀进程树。
     /// 等待侧检测到取消标记后以「安装已取消」收尾，installing 随其出口恢复 false。
     pub async fn cancel_agent_install(&self, agent_id: &str) -> Result<CodexAcpStatus> {
         let backend = AgentBackend::parse(Some(agent_id))?;
         if !backend.is_acp() {
             bail!("Agent 不是 ACP 后端: {agent_id}");
         }
-        if !self.install_operations.lock().request_cancel(backend) {
+        if !self.installing_agents.read().contains(&backend) {
             bail!("{} 当前没有正在进行的安装", backend.display_name());
         }
-        let process_tree = self.install_children.lock().get(&backend).cloned();
-        if let Some(process_tree) = process_tree {
-            if let Err(error) = process_tree.terminate() {
-                eprintln!(
-                    "[pinvou3-app] failed to terminate {} install process tree: {error:#}",
-                    backend.display_name()
-                );
-            }
+        self.install_cancelled.lock().insert(backend);
+        if let Some(pid) = self.install_children.lock().get(&backend).copied() {
+            kill_install_process_tree(pid);
         }
         Ok(self.status_for_async(backend).await)
     }
@@ -3613,7 +3579,13 @@ impl AcpPool {
             &workspace_references,
             &runtime.prompt_capabilities,
         )?;
-        admit_prompt_turn(&runtime.busy, &runtime.configuring, session_id, || {
+        let flight = self.remote_permission_owners.lock().admit_local(
+            session_id,
+            &runtime.identity,
+            &runtime.busy,
+            &runtime.configuring,
+        )?;
+        operation_gate::finish_prompt_admission(&runtime.busy, session_id, || {
             self.session_store
                 .touch_activity(session_id)
                 .context("更新 ACP 会话最近活跃时间失败")
@@ -3631,6 +3603,7 @@ impl AcpPool {
         let pool = self.clone();
         let session_id = session_id.to_string();
         tokio::spawn(async move {
+            let _flight = flight;
             if runtime.prompt(turn_id, prepared.blocks).await {
                 pool.handle_outdated_codex_runtime(&session_id).await;
             }
@@ -3814,6 +3787,9 @@ impl AcpPool {
     async fn evict_if_idle(&self, session_id: &str) -> bool {
         let active_id = self.session_store.active_id();
         let Some(runtime) = take_session_if_still_idle(&self.sessions, session_id, |runtime| {
+            if self.remote_permission_owners.lock().has_custody(session_id) {
+                return false;
+            }
             should_reap_idle_session(
                 runtime.busy.load(Ordering::Acquire),
                 runtime.configuring.load(Ordering::Acquire),
@@ -3859,6 +3835,9 @@ impl AcpPool {
     /// and counts as done, so it is not misreported as post-busy.
     pub async fn evict_if_idle_for_rebind(&self, session_id: &str) -> bool {
         let taken = take_session_for_rebind(&self.sessions, session_id, |runtime| {
+            if self.remote_permission_owners.lock().has_custody(session_id) {
+                return false;
+            }
             rebind_evictable(
                 runtime.busy.load(Ordering::Acquire),
                 runtime.configuring.load(Ordering::Acquire),
@@ -4154,23 +4133,8 @@ impl AcpPool {
             .collect()
     }
 
-    /// Marks the one code turn whose ACP permission prompts are controlled by
-    /// A. A session cannot be borrowed by a second task or lease while the
-    /// first turn is alive.
-    pub(crate) fn claim_remote_permission_owner(&self, owner: RemotePermissionOwner) -> Result<()> {
-        let mut owners = self.remote_permission_owners.lock();
-        match owners.get(&owner.session_id) {
-            Some(current) if current != &owner => bail!("remote_permission_owner_conflict"),
-            Some(_) => Ok(()),
-            None => {
-                owners.insert(owner.session_id.clone(), owner);
-                Ok(())
-            }
-        }
-    }
-
     pub(crate) fn has_remote_permission_owner(&self, owner: &RemotePermissionOwner) -> bool {
-        self.remote_permission_owners.lock().get(&owner.session_id) == Some(owner)
+        self.remote_permission_owners.lock().active(owner)
     }
 
     /// Returns only ACP requests captured while this exact remote owner was
@@ -4208,7 +4172,7 @@ impl AcpPool {
     ) -> Result<crate::features::remote_control::controller::permission::PermissionView> {
         let mut pending = self.pending_permissions.lock().await;
         let owners = self.remote_permission_owners.lock();
-        if owners.get(&owner.session_id) != Some(owner) {
+        if !owners.active(owner) {
             bail!("remote_permission_binding_stale");
         }
         let request = pending
@@ -4221,16 +4185,14 @@ impl AcpPool {
         mint_pending_remote_permission(request, owner, callback_id, authority, ttl_ms)
     }
 
-    /// Terminal/cancel/disconnect cleanup. Removing the owner first closes the
-    /// admission gate; every still-pending ACP responder is then cancelled.
+    /// Keep Closing custody until exact responders and the captured connection
+    /// are retired. Never look up the emitting/cancelled runtime by session key.
     pub(crate) async fn release_remote_permission_owner(&self, owner: &RemotePermissionOwner) {
-        {
-            let mut owners = self.remote_permission_owners.lock();
-            if owners.get(&owner.session_id) != Some(owner) {
-                return;
-            }
-            owners.remove(&owner.session_id);
-        }
+        let closed = { self.remote_permission_owners.lock().close(owner) };
+        let Some((runtime, turn_id)) = closed else {
+            return;
+        };
+        runtime.identity.retired.store(true, Ordering::Release);
         let mut pending = self.pending_permissions.lock().await;
         let keys = pending
             .iter()
@@ -4247,32 +4209,48 @@ impl AcpPool {
             }
         }
         drop(pending);
-        if let Some(runtime) = self.sessions.lock().await.get(&owner.session_id).cloned() {
-            for tool_call_id in cancelled {
-                runtime.bridge.emit(
-                    "permission_resolved",
-                    json!({
-                        "toolCallId": tool_call_id,
-                        "outcome": "cancelled",
-                    }),
-                );
-            }
+        for tool_call_id in cancelled {
+            runtime.bridge.emit(
+                "permission_resolved",
+                json!({
+                    "toolCallId": tool_call_id,
+                    "outcome": "cancelled",
+                }),
+            );
         }
         let mut pending = self.pending_elicitations.lock().await;
         let cancelled = cancel_remote_owned_elicitations(&mut pending, owner);
         drop(pending);
-        if let Some(runtime) = self.sessions.lock().await.get(&owner.session_id).cloned() {
-            for elicitation_id in cancelled {
-                runtime.bridge.emit(
-                    "elicitation_resolved",
-                    json!({
-                        "elicitationId": elicitation_id,
-                        "action": "cancel",
-                        "reason": "remote_task_ended",
-                    }),
-                );
+        for elicitation_id in cancelled {
+            runtime.bridge.emit(
+                "elicitation_resolved",
+                json!({
+                    "elicitationId": elicitation_id,
+                    "action": "cancel",
+                    "reason": "remote_task_ended",
+                }),
+            );
+        }
+        if let Some(turn) = turn_id {
+            runtime.bridge.with_current_turn(&turn, || runtime.cancel());
+            runtime.settle_turn_once(&turn, "Interrupted", None, Some("remote_turn_retired"));
+        }
+        runtime.shutdown().await;
+        runtime.bridge.retire_journal();
+        // Keep Closing custody through shutdown and journal handoff. A second
+        // bridge cannot seed its sequence from the old buffered tail.
+        {
+            let mut sessions = self.sessions.lock().await;
+            if sessions
+                .get(&owner.session_id)
+                .is_some_and(|current| Arc::ptr_eq(current, &runtime))
+            {
+                sessions.remove(&owner.session_id);
             }
         }
+        self.remote_permission_owners
+            .lock()
+            .remove_exact(owner, &runtime.identity);
     }
 
     pub async fn pending_elicitations_for(
@@ -4331,14 +4309,12 @@ impl AcpPool {
         allow: bool,
     ) -> Result<()> {
         let mut pending = self.pending_permissions.lock().await;
-        let key = {
-            let owners = self.remote_permission_owners.lock();
-            if owners.get(&owner.session_id) != Some(owner) {
-                bail!("remote_permission_binding_stale");
-            }
-            remote_permission_response_key(&pending, owner, permission_request_id)
-                .context("remote_permission_binding_stale")?
-        };
+        let owners = self.remote_permission_owners.lock();
+        let (runtime, turn_id) = owners
+            .active_runtime(owner)
+            .context("remote_permission_binding_stale")?;
+        let key = remote_permission_response_key(&pending, owner, permission_request_id)
+            .context("remote_permission_binding_stale")?;
         let request = pending
             .remove(&key)
             .context("remote_permission_binding_stale")?;
@@ -4362,21 +4338,21 @@ impl AcpPool {
             bail!("remote_permission_allow_option_missing");
         };
         let tool_call_id = request.view.tool_call_id.clone();
-        request
-            .response_tx
-            .send(response)
+        runtime
+            .bridge
+            .with_current_turn(&turn_id, || request.response_tx.send(response))
+            .context("remote_permission_binding_stale")?
             .map_err(|_| anyhow::anyhow!("remote_permission_closed"))?;
+        drop(owners);
         drop(pending);
-        if let Some(runtime) = self.sessions.lock().await.get(&owner.session_id).cloned() {
-            runtime.bridge.emit(
-                "permission_resolved",
-                json!({
-                    "toolCallId": tool_call_id,
-                    "optionId": option_id,
-                    "outcome": outcome,
-                }),
-            );
-        }
+        runtime.bridge.emit(
+            "permission_resolved",
+            json!({
+                "toolCallId": tool_call_id,
+                "optionId": option_id,
+                "outcome": outcome,
+            }),
+        );
         Ok(())
     }
 
@@ -4503,6 +4479,9 @@ impl AcpPool {
         );
         let mut restarted_after_stall = false;
         let mut sessions = self.sessions.lock().await;
+        self.remote_permission_owners
+            .lock()
+            .check_runtime_access(session_id, sessions.get(session_id))?;
         match resolve_runtime(&mut sessions, session_id, |runtime| {
             runtime.lifecycle.is_running() && !runtime.restart_requested.load(Ordering::Acquire)
         }) {
@@ -4801,6 +4780,10 @@ impl AcpPool {
             });
         }
 
+        let identity = Arc::new(RuntimeIdentity::default());
+        let identity_for_permission = Arc::clone(&identity);
+        let identity_for_elicitation = Arc::clone(&identity);
+        let identity_for_notification = Arc::clone(&identity);
         let replay_suppressed = Arc::new(AtomicBool::new(false));
         let (ready_tx, ready_rx) = oneshot::channel();
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
@@ -4826,7 +4809,9 @@ impl AcpPool {
                 .builder()
                 .on_receive_notification(
                     async move |notification: SessionNotification, _cx| {
-                        if !replay_for_notification.load(Ordering::Acquire) {
+                        if !identity_for_notification.retired.load(Ordering::Acquire)
+                            && !replay_for_notification.load(Ordering::Acquire)
+                        {
                             bridge_for_notification.handle(notification);
                         }
                         Ok(())
@@ -4856,10 +4841,17 @@ impl AcpPool {
                                 ))
                             })
                             .collect::<HashMap<_, _>>();
-                        let remote_owner = remote_owners_for_permission
+                        let captured_owner = remote_owners_for_permission
                             .lock()
-                            .get(&pinvou_id_for_permission)
-                            .cloned();
+                            .callback_owner(&pinvou_id_for_permission, &identity_for_permission);
+                        let remote_owner = match captured_owner {
+                            Ok(owner) => owner,
+                            Err(_) => {
+                                return responder.respond(RequestPermissionResponse::new(
+                                    RequestPermissionOutcome::Cancelled,
+                                ));
+                            }
+                        };
                         let remote_request_id = remote_owner
                             .as_ref()
                             .map(|_| format!("permission-{}", uuid::Uuid::new_v4().simple()));
@@ -4872,11 +4864,14 @@ impl AcpPool {
                             request: request_value.clone(),
                         };
                         let (response_tx, response_rx) = oneshot::channel();
+                        let callback_instance = Arc::new(());
                         if !insert_pending_permission(
                             &pending_for_permission,
                             &remote_owners_for_permission,
+                            &identity_for_permission,
                             key.clone(),
                             PendingPermission {
+                                callback_instance: Arc::clone(&callback_instance),
                                 view,
                                 option_ids,
                                 option_kinds,
@@ -4906,7 +4901,15 @@ impl AcpPool {
                         let response = response_rx.await.unwrap_or_else(|_| {
                             RequestPermissionResponse::new(RequestPermissionOutcome::Cancelled)
                         });
-                        pending_for_permission.lock().await.remove(&key);
+                        {
+                            let mut pending = pending_for_permission.lock().await;
+                            remote_ownership::remove_callback(
+                                &mut pending,
+                                &key,
+                                &callback_instance,
+                                |request| &request.callback_instance,
+                            );
+                        }
                         // Exclude the entire human think-time interval from
                         // the stall clock. Without this reset, answering an
                         // old card can immediately cancel healthy follow-up
@@ -4918,10 +4921,17 @@ impl AcpPool {
                 )
                 .on_receive_request(
                     async move |request: CreateElicitationRequest, responder, _cx| {
-                        let remote_owner = remote_owners_for_elicitation
+                        let captured_owner = remote_owners_for_elicitation
                             .lock()
-                            .get(&pinvou_id_for_elicitation)
-                            .cloned();
+                            .callback_owner(&pinvou_id_for_elicitation, &identity_for_elicitation);
+                        let remote_owner = match captured_owner {
+                            Ok(owner) => owner,
+                            Err(_) => {
+                                return responder.respond(CreateElicitationResponse::new(
+                                    ElicitationAction::Cancel,
+                                ));
+                            }
+                        };
                         // Remote form elicitation has no authenticated A<->B
                         // action protocol yet. Fail closed *before* storing or
                         // emitting the request so the ACP call cannot hang and
@@ -4943,15 +4953,33 @@ impl AcpPool {
                             request: request_value.clone(),
                         };
                         let (response_tx, response_rx) = oneshot::channel();
-                        pending_for_elicitation.lock().await.insert(
-                            key.clone(),
-                            PendingElicitation {
-                                view,
-                                remote_owner,
-                                activity: bridge_for_elicitation.activity(),
-                                response_tx,
-                            },
-                        );
+                        let callback_instance = Arc::new(());
+                        let mut pending = pending_for_elicitation.lock().await;
+                        {
+                            let owners = remote_owners_for_elicitation.lock();
+                            if !owners
+                                .callback_owner(
+                                    &pinvou_id_for_elicitation,
+                                    &identity_for_elicitation,
+                                )
+                                .is_ok_and(|current| current.as_ref() == remote_owner.as_ref())
+                            {
+                                return responder.respond(CreateElicitationResponse::new(
+                                    ElicitationAction::Cancel,
+                                ));
+                            }
+                            pending.insert(
+                                key.clone(),
+                                PendingElicitation {
+                                    callback_instance: Arc::clone(&callback_instance),
+                                    view,
+                                    remote_owner,
+                                    activity: bridge_for_elicitation.activity(),
+                                    response_tx,
+                                },
+                            );
+                        }
+                        drop(pending);
                         bridge_for_elicitation.emit(
                             "elicitation_requested",
                             json!({
@@ -4972,7 +5000,15 @@ impl AcpPool {
                                 true,
                             ),
                         };
-                        pending_for_elicitation.lock().await.remove(&key);
+                        {
+                            let mut pending = pending_for_elicitation.lock().await;
+                            remote_ownership::remove_callback(
+                                &mut pending,
+                                &key,
+                                &callback_instance,
+                                |request| &request.callback_instance,
+                            );
+                        }
                         bridge_for_elicitation.note_agent_activity();
                         if cancelled_by_agent {
                             bridge_for_elicitation.emit(
@@ -5163,6 +5199,7 @@ impl AcpPool {
         let pending_permissions = self.pending_permissions.clone();
         let pending_elicitations = self.pending_elicitations.clone();
         Ok(AcpSession {
+            identity,
             connection,
             kimi_session_id: (backend == AgentBackend::KimiAcp).then(|| acp_session_id.clone()),
             acp_session_id,
@@ -6438,6 +6475,7 @@ mod tests {
         };
         let (response_tx, response_rx) = oneshot::channel();
         let mut request = PendingPermission {
+            callback_instance: Arc::new(()),
             view: CodexAcpPendingPermission {
                 session_id: owner.session_id.clone(),
                 tool_call_id: "tool-1".into(),
@@ -6692,6 +6730,7 @@ mod tests {
             let (response_tx, response_rx) = oneshot::channel();
             (
                 PendingElicitation {
+                    callback_instance: Arc::new(()),
                     view: CodexAcpPendingElicitation {
                         session_id: "session-remote".to_owned(),
                         elicitation_id: id.to_owned(),
@@ -6957,6 +6996,7 @@ mod tests {
         pending.lock().await.insert(
             key.clone(),
             PendingPermission {
+                callback_instance: Arc::new(()),
                 view: CodexAcpPendingPermission {
                     session_id: "session-1".to_string(),
                     tool_call_id: "tool-1".to_string(),
@@ -7012,12 +7052,14 @@ mod tests {
             },
         };
         let pending = Arc::new(Mutex::new(HashMap::new()));
-        let owners = Arc::new(parking_lot::Mutex::new(HashMap::from([(
-            owner.session_id.clone(),
+        let identity = Arc::new(RuntimeIdentity::default());
+        let owners = Arc::new(parking_lot::Mutex::new(RemoteTurnRegistry::test_reserved(
             owner.clone(),
-        )])));
+            &identity,
+        )));
         let (response_tx, response_rx) = oneshot::channel();
         let request = PendingPermission {
+            callback_instance: Arc::new(()),
             view: CodexAcpPendingPermission {
                 session_id: owner.session_id.clone(),
                 tool_call_id: "tool-1".into(),
@@ -7039,13 +7081,15 @@ mod tests {
         let insert = tokio::spawn({
             let pending = pending.clone();
             let owners = owners.clone();
+            let identity = Arc::clone(&identity);
             async move {
                 started_tx.send(()).unwrap();
-                insert_pending_permission(&pending, &owners, "key-1".into(), request).await
+                insert_pending_permission(&pending, &owners, &identity, "key-1".into(), request)
+                    .await
             }
         });
         started_rx.await.unwrap();
-        owners.lock().remove(&owner.session_id);
+        owners.lock().remove_exact(&owner, &identity);
         assert!(guard.is_empty());
         drop(guard);
         assert!(!insert.await.unwrap());

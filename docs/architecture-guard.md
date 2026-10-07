@@ -81,6 +81,15 @@ python scripts/architecture-guard.py
 
 ## 历史基线
 
+crate/layer root 的 use 别名按真实词法块隔离：块内 item use 不依赖声明顺序，
+普通块可继承所属模块的导入，子模块不能用裸名继承父模块导入；显式 self/super
+按模块解析。父、子、兄弟块同名别名互不覆盖；同一作用域冲突或别名循环按
+rust_crate_root_alias_ambiguous 失败关闭，不允许用后置测试模块隐去 feature → app 引用。
+根 extern crate self 别名单独作为 extern prelude 解析，不与普通 use 的可见性混用。
+具体模块/条目别名的成员引用由原始 import 记录依赖，不重复增加调用计数；
+cfg 选出的多个具体模块若属于同一门禁目的地（同一 layer/feature），仅按该目的地
+归类，不替代 Rust 编译器的名字解析或条件互斥检查。跨目的地冲突仍失败关闭。
+
 `scripts/architecture-baseline.json` 记录启用门禁时已经存在的架构债务。门禁不允许：
 
 - 在新文件或新依赖边中出现同类违规；

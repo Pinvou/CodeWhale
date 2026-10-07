@@ -25,6 +25,7 @@ fn remote_pending_identifier_contract_matches_controlled_task_protocol() {
         ("_leading".to_owned(), true),
         (".leading".to_owned(), true),
         (":leading".to_owned(), true),
+        ("mid-dle_under.dot:colon".to_owned(), true),
         ("a".repeat(128), true),
         (String::new(), false),
         ("bad space".to_owned(), false),
@@ -33,7 +34,9 @@ fn remote_pending_identifier_contract_matches_controlled_task_protocol() {
         ("bad/slash".to_owned(), false),
     ] {
         assert_eq!(valid_remote_identifier(&id), expected, "A: {id:?}");
-        for field in ["client_request_id", "task_id"] {
+        // session_id is a B wire identifier, not A's local_session_id;
+        // include it without conflating it with the local-session validator.
+        for field in ["client_request_id", "task_id", "session_id"] {
             let mut payload = serde_json::json!({
                 "connection_id": "connection-1",
                 "controller_lease_id": "lease-1",
