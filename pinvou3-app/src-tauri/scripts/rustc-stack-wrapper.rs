@@ -8,7 +8,9 @@
 //!
 //! 语义与 scripts/rustc-stack-wrapper(sh)一致:
 //!   - 未显式设置 RUST_MIN_STACK 时注入 16777216;
-//!   - 首参即编译器程序,转发整条命令行。
+//!   - 设置 RUSTC_WRAPPER_CHAIN 时把整条命令行(含 rustc 首参)转交给链上命令
+//!     (如 sccache),形成 cargo → 本 wrapper → sccache → rustc;否则直接转发
+//!     首参(编译器)。
 //!   - 只作用于编译期 rustc;cargo run / cargo test 目标进程不经过本 wrapper,
 //!     运行时默认线程栈语义(约 2 MiB)不变。
 
@@ -23,9 +25,20 @@ fn main() {
         std::process::exit(2);
     }
 
-    // 首参即编译器程序本身,其余为转发给它的参数。
-    let program = args.remove(0);
-    let rest = args;
+    // 链式 wrapper(如 sccache):设置 RUSTC_WRAPPER_CHAIN 时,首参仍是编译器,
+    // 整条命令行转交给链上命令;否则首参即编译器程序本身。
+    let chain = env::var_os("RUSTC_WRAPPER_CHAIN");
+    let has_chain = chain.as_ref().is_some_and(|c| !c.is_empty());
+
+    let program: OsString;
+    let rest: Vec<OsString>;
+    if has_chain {
+        program = chain.unwrap();
+        rest = args;
+    } else {
+        program = args.remove(0);
+        rest = args;
+    }
 
     let mut cmd = Command::new(&program);
     cmd.args(&rest);

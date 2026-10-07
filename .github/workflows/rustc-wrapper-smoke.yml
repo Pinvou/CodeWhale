@@ -209,7 +209,7 @@ jobs:
             rustc -O rustc-stack-wrapper.rs -o rustc-stack-wrapper.exe
             export RUSTC_WRAPPER="$tmp/rustc-stack-wrapper.exe"
           else
-            cp "$GITHUB_WORKSPACE/pinvou3-app/src-tauri/scripts/rustc-stack-wrapper" . 2>/dev/null || true
+            cp "$GITHUB_WORKSPACE/pinvou3-app/src-tauri/scripts/rustc-stack-wrapper" .
             chmod +x "$tmp/rustc-stack-wrapper" 2>/dev/null || true
             export RUSTC_WRAPPER="$tmp/rustc-stack-wrapper"
           fi
@@ -217,3 +217,28 @@ jobs:
           CARGO_TERM_COLOR=never cargo test 2>&1 | tee cargo-test.log
           grep -q "compiler_stack_contract" cargo-test.log
           grep -q "test result: ok" cargo-test.log
+
+      # 5) 链式 wrapper(RUSTC_WRAPPER_CHAIN):验证 wrapper 先注入 RUST_MIN_STACK、
+      #    再委托给链上命令执行。注意:sccache 等 client-server 型 wrapper 不会把
+      #    env 传给 server 派生的编译器,故 CI 的 rust-test / windows-rust-test 不接
+      #    sccache 链;此处用 `env` 这类直接 exec 的命令验证链机制本身。
+      - name: 链式 wrapper —— 委托链上命令且仍注入 16 MiB
+        shell: bash
+        run: |
+          set -euxo pipefail
+          tmp="$(mktemp -d)"
+          cd "$tmp"
+          cp "$GITHUB_WORKSPACE/pinvou3-app/src-tauri/scripts/rustc-stack-wrapper" . 2>/dev/null || true
+          cp "$GITHUB_WORKSPACE/pinvou3-app/src-tauri/scripts/rustc-stack-wrapper.rs" . 2>/dev/null || true
+          chmod +x rustc-stack-wrapper 2>/dev/null || true
+          unset RUST_MIN_STACK
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            rustc -O rustc-stack-wrapper.rs -o rustc-stack-wrapper.exe
+            out="$(RUSTC_WRAPPER_CHAIN=env ./rustc-stack-wrapper.exe env)"
+          else
+            # `env env`:链上命令 `env` 执行参数中的 `env`(无参),打印当前环境,
+            # 应包含经 wrapper 注入的 RUST_MIN_STACK=16777216。
+            out="$(RUSTC_WRAPPER_CHAIN=env ./rustc-stack-wrapper env)"
+          fi
+          # 命令替换(非管道)避免 grep -q 提前关闭管道导致 env SIGPIPE(同上)。
+          echo "$out" | grep -q "^RUST_MIN_STACK=16777216$"
