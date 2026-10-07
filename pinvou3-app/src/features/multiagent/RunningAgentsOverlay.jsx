@@ -12,6 +12,13 @@ import {
   statusPresentation,
 } from './overlay-model.mjs';
 import { useSubagentLedgerPoll } from './useSubagentLedgerPoll.js';
+import { resolveSubagentIdentity } from './subagent-conversation.mjs';
+
+// Same role localization as the transcript panel: built-in aliases fold back into roleCards copy; custom roles
+// are shown as-is, falling back to agentId when there is no role.
+const overlayRoleName = (entry, copy) => (copy.roleCards
+  && copy.roleCards[resolveSubagentIdentity(entry.role, null, entry.agentId, entry.agentType).roleKey])
+  || entry.role || entry.agentId;
 
 /**
  * Swarm running overlay (top-right, ADR-0006 swarm rework): shown while the
@@ -295,7 +302,7 @@ export const RunningAgentsOverlay = ({ sessionId, theme, t, swarmOn = false }) =
                     >
                       <span className={`inline-block h-1.5 w-1.5 shrink-0 rounded-full ${dotClass[status.dot]}`} />
                       <span className="min-w-0 flex-1 truncate font-medium">
-                        {entry.role || entry.agentId}
+                        {overlayRoleName(entry, copy)}
                       </span>
                       <span className={`shrink-0 truncate text-[10.5px] ${isDark ? 'text-[#9AA0A6]' : 'text-[#757575]'}`}>
                         {status.text}
@@ -320,7 +327,7 @@ export const RunningAgentsOverlay = ({ sessionId, theme, t, swarmOn = false }) =
                     >
                       <span className={`inline-block h-1.5 w-1.5 shrink-0 rounded-full ${dotClass[status.dot]}`} />
                       <span className="min-w-0 flex-1 truncate font-medium opacity-70">
-                        {entry.role || entry.agentId}
+                        {overlayRoleName(entry, copy)}
                       </span>
                       <span className={`shrink-0 text-[10.5px] ${
                         status.dot === 'failed'

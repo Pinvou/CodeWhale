@@ -414,9 +414,13 @@ const ToolOutput = ({ item, t }) => {
         const iconColor = isDone ? mutedColor : statusColor;
         return (
           <div className={expanded ? `rounded-[12px] overflow-hidden border border-black/5 dark:border-white/5` : ''}>
+            {/* biome-ignore lint/a11y/useSemanticElements: the tool card collapse header hosts a multi-child layout; a button would break existing styles */}
             <div
+              role="button"
+              tabIndex={0}
               className={`flex items-center gap-2 px-2 py-1 rounded-[8px] cursor-pointer hover:bg-[#E8EDF2] dark:hover:bg-[#282A2C]`}
               onClick={() => setExpanded(!expanded)}
+              onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); setExpanded(!expanded); } }}
             >
               <Wrench size={12} className={iconColor} />
               <span className={`text-[12px] ${mutedColor}`}>{item.name}</span>
@@ -436,9 +440,13 @@ const ToolOutput = ({ item, t }) => {
       // 有产出类：保留醒目卡片，标题行带摘要。
       return (
         <div className={`rounded-[16px] overflow-hidden border bg-[#F0F4F9] border-black/5 dark:bg-[#1E1F20] dark:border-white/5`}>
+          {/* biome-ignore lint/a11y/useSemanticElements: the tool card collapse header hosts a multi-child layout; a button would break existing styles */}
           <div
+            role="button"
+            tabIndex={0}
             className={`flex items-center gap-3 px-4 py-3 cursor-pointer hover:bg-[#E8EDF2] dark:hover:bg-[#282A2C]`}
             onClick={() => setExpanded(!expanded)}
+            onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); setExpanded(!expanded); } }}
           >
             <Wrench size={14} className={statusColor} />
             <span className={`text-[13px] font-medium text-[#1F1F1F] dark:text-[#E3E3E3]`}>

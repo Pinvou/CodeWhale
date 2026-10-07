@@ -1107,7 +1107,7 @@ Object.assign(dictEn.uiToolStore, {
   toolNames:{ feishu:'Feishu', wecom:'WeCom', dingtalk:'DingTalk', tmeet:'Tencent Meeting', ima:'Tencent ima' },
   connected:'Connected', installed:'Installed', builtin:'Built-in', internalDirect:'Direct intranet', keyRequired:'Key required', localLatency:'Local',
   cancel:'Cancel', ok:'Got it', newChat:'New Chat',
-  installHint:'New tools default to off — enable them in the composer tools list', removeHint:'Removed; new conversations will no longer load this tool', firstUseOnlineInstall:'The first connection downloads and verifies the official CLI',
+  installHint:'Tool switches are off by default; turn new tools on in the composer tools list to use them', removeHint:'Removed; new conversations will no longer load this tool', firstUseOnlineInstall:'The first connection downloads and verifies the official CLI',
   obsidianGuide:{
 not_installed:{ title:'Obsidian required', body:'"Obsidian Vault" works together with Obsidian. It is not installed yet—install Obsidian and create a vault to connect.', primary:'Download Obsidian', retry:'I have installed it—check again' },
 no_vault:{ title:'No vault yet', body:'Obsidian was detected, but no vault has been created yet. Create a vault in Obsidian, then connect.', primary:null, retry:'I have created one—check again' },
@@ -1119,7 +1119,7 @@ desktopHint:'Install Obsidian on the desktop and create a vault first, then chec
   connectBusy:name=>`${name} is still finishing the previous sign-in`,
   connectBusyHint:'It may complete on its own. Wait a few seconds, then press Connect again.',
   connectedBanner:name=>`${name} connected · tool switches default to off — enable it in the composer tools list`,
-  connectedBannerIma:'Tencent ima connected · tool switches default to off — enable it in the composer tools list',
+  connectedBannerIma:'Tencent ima connected · tool switches are off by default; enable it in the composer tools list',
   connectedTool:name=>`${name} connected`, disconnectedTool:name=>`${name} disconnected`,
   connectedQuoted:name=>`${name} connected`, installedQuoted:name=>`${name} installed`, uninstalledQuoted:name=>`${name} uninstalled`,
   uploadedSkill:'User-uploaded skill',

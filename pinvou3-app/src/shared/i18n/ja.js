@@ -1104,7 +1104,7 @@ Object.assign(dictJa.uiToolStore, {
   toolNames:{ feishu:'Feishu', wecom:'WeCom', dingtalk:'DingTalk', tmeet:'Tencent Meeting', ima:'Tencent ima' },
   connected:'接続済み', installed:'インストール済み', builtin:'内蔵', internalDirect:'社内ネットワーク直結', keyRequired:'キーが必要', localLatency:'ローカル',
   cancel:'キャンセル', ok:'了解', newChat:'新しいチャット',
-  installHint:'新しいツールは既定でオフ — インストール後に入力欄のツールリストでオンにしてください', removeHint:'削除しました。新しい会話ではこのツールは読み込まれません', firstUseOnlineInstall:'初回接続時に公式 CLI をダウンロードして検証します',
+  installHint:'ツールスイッチはデフォルトでオフです。新しいツールは入力欄のツールリストでオンにしてから利用してください', removeHint:'削除しました。新しい会話ではこのツールは読み込まれません', firstUseOnlineInstall:'初回接続時に公式 CLI をダウンロードして検証します',
   obsidianGuide:{
 not_installed:{ title:'Obsidian のインストールが必要です', body:'「Obsidian ナレッジベース」は Obsidian と併用します。まだインストールされていません。インストールして保管庫を作成すると接続できます。', primary:'Obsidian をダウンロード', retry:'インストールしました。再検出' },
 no_vault:{ title:'保管庫がまだありません', body:'Obsidian は検出されましたが、保管庫がまだ作成されていません。Obsidian で保管庫を作成してから接続してください。', primary:null, retry:'作成しました。再検出' },
@@ -1116,7 +1116,7 @@ desktopHint:'先にデスクトップで Obsidian をインストールして保
   connectBusy:name=>`${name} は前回のログインを処理中です`,
   connectBusyHint:'まもなく完了する場合があります。数秒待ってから再度「接続」を押してください。',
   connectedBanner:name=>`${name} に接続済み · ツールスイッチは既定でオフです。入力欄のツールリストでオンにできます`,
-  connectedBannerIma:'Tencent ima に接続済み · ツールスイッチは既定でオフです。入力欄のツールリストでオンにできます',
+  connectedBannerIma:'Tencent ima に接続済み · ツールスイッチはデフォルトでオフです。入力欄のツールリストでオンにできます',
   connectedTool:name=>`${name} に接続しました`, disconnectedTool:name=>`${name} から切断しました`,
   connectedQuoted:name=>`「${name}」に接続しました`, installedQuoted:name=>`「${name}」をインストールしました`, uninstalledQuoted:name=>`「${name}」をアンインストールしました`,
   uploadedSkill:'ユーザーがアップロードしたスキル',
