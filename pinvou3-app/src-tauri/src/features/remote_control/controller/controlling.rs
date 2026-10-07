@@ -411,6 +411,7 @@ impl ControllingDeviceManager {
         &self,
         operation: ControllerOperation,
         activation_id: &str,
+        resume_request_id: &str,
         now_b: u64,
         liveness_epochs: (&str, &str),
         resume_token: [u8; 32],
@@ -468,6 +469,7 @@ impl ControllingDeviceManager {
                             negotiated_capabilities: lease.negotiated_capabilities.clone(),
                         },
                         activation_id,
+                        resume_request_id,
                     )
                     .is_err()
             {
@@ -643,9 +645,44 @@ impl ControllingDeviceManager {
         operation: ControllerOperation,
         public_error_code: &'static str,
     ) -> Result<ControllingStatus> {
+        self.fail_connection_inner(operation, public_error_code, false)
+    }
+
+    pub(crate) fn fail_resume_connection(
+        &self,
+        operation: ControllerOperation,
+        public_error_code: &'static str,
+    ) -> Result<ControllingStatus> {
+        self.fail_connection_inner(operation, public_error_code, true)
+    }
+
+    fn fail_connection_inner(
+        &self,
+        operation: ControllerOperation,
+        public_error_code: &'static str,
+        resume_only: bool,
+    ) -> Result<ControllingStatus> {
         let code = normalize_public_error(public_error_code)?;
         let mut inner = self.inner.lock();
         ensure_operation(&inner, &operation)?;
+        if inner.phase == ControllingStatusKind::Error {
+            // An outer worker may repeat the exact already-committed failure.
+            // Preserve the terminal code/retired identity without any mutation.
+            return if inner.error_code == Some(code) {
+                Ok(status_locked(&inner))
+            } else {
+                Err(ControllingStateError::new("controller_phase_invalid"))
+            };
+        }
+        if resume_only && inner.phase != ControllingStatusKind::Reconnecting {
+            return Err(ControllingStateError::new("controller_phase_invalid"));
+        }
+        if matches!(
+            inner.phase,
+            ControllingStatusKind::Idle | ControllingStatusKind::Disconnected
+        ) {
+            return Err(ControllingStateError::new("controller_phase_invalid"));
+        }
         let retired = inner.lease.as_ref().map(|lease| lease.context.clone());
         clear_live_context(&mut inner);
         inner.phase = ControllingStatusKind::Error;
@@ -1580,6 +1617,7 @@ mod tests {
             .complete_resumed(
                 operation,
                 activation,
+                "request-resume-final",
                 7_000,
                 ("live:a-2", "live-b-2"),
                 [3; 32],
@@ -1652,6 +1690,7 @@ mod tests {
                     .complete_resumed(
                         operation,
                         activation,
+                        "request-resume-final",
                         12_000,
                         (epoch, "live-b-2"),
                         [3; 32],
@@ -1692,6 +1731,53 @@ mod tests {
 
     /// E2E-06：显式断开帧必须通过冻结校验（角色 A + encrypted_frames_v1），
     /// 且只在 connected 且有 transport 时尽力发送。
+    #[test]
+    fn late_resume_failure_cannot_replace_an_explicit_disconnect() {
+        let manager = ControllingDeviceManager::default();
+        let operation = manager.connect("2345678").unwrap();
+        manager.complete_reserved(operation.clone()).unwrap();
+        manager
+            .complete_connected(operation.clone(), lease())
+            .unwrap();
+        manager.mark_transport_disconnected(5_000, Some(30_000));
+        let disconnected = manager.disconnect();
+        assert!(
+            manager
+                .fail_connection(operation, "endpoint_offline")
+                .is_err()
+        );
+        assert_eq!(manager.status(), disconnected);
+        assert_eq!(manager.status().status, ControllingStatusKind::Disconnected);
+    }
+
+    #[test]
+    fn resume_failure_cannot_replace_an_active_connection_and_exact_terminal_retry_is_idempotent() {
+        let manager = ControllingDeviceManager::default();
+        let operation = manager.connect("2345678").unwrap();
+        manager.complete_reserved(operation.clone()).unwrap();
+        manager
+            .complete_connected(operation.clone(), lease())
+            .unwrap();
+        let connected = manager.status();
+        assert!(
+            manager
+                .fail_resume_connection(operation.clone(), "endpoint_offline")
+                .is_err()
+        );
+        assert_eq!(manager.status(), connected);
+        manager.mark_transport_disconnected(5_000, Some(30_000));
+        let failed = manager
+            .fail_resume_connection(operation.clone(), "endpoint_offline")
+            .unwrap();
+        assert_eq!(
+            manager
+                .fail_connection(operation, "endpoint_offline")
+                .unwrap(),
+            failed
+        );
+        assert_eq!(manager.status(), failed);
+    }
+
     #[test]
     fn explicit_disconnect_frame_is_frozen_and_lease_bound() {
         use super::super::protocol::{

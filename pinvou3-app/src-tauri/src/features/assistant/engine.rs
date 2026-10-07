@@ -655,6 +655,22 @@ impl TurnLifecycle {
         }
     }
 
+    /// Run a synchronous side effect only for this still-active generation.
+    /// The callback must not re-enter this lifecycle or await. Holding the
+    /// state lock prevents a forwarder-created successor between validation
+    /// and capturing the old turn's shell scope.
+    pub(crate) fn with_active_generation<T>(
+        &self,
+        generation: u64,
+        action: impl FnOnce() -> T,
+    ) -> Option<T> {
+        let state = self.state.lock();
+        if state.turn_epoch != generation || (!state.active && !state.terminal_closing) {
+            return None;
+        }
+        Some(action())
+    }
+
     /// 当前活动轮是否已提交（`SendMessage` 已入队 / `TurnStarted` 已抵达）。
     /// 供 cancel 阶段二在 generation mismatch（新轮已 reserve）时判断新轮是否
     /// 已经真正开始：仅 reserve 未 send 时，engine 里仍是旧轮遗留的子代理，
@@ -1612,7 +1628,7 @@ impl AppEngine {
     ///
     /// [`build_engine_config_for_session`]: crate::features::assistant::platform::bridge::Pinvou3Bridge::build_engine_config_for_session
     /// [`EnginePool`]: crate::features::assistant::engine_pool::EnginePool
-    pub(crate) async fn spawn_for_session(
+    pub(crate) fn spawn_for_session(
         app: AppHandle,
         store: SessionStore,
         bridge: Pinvou3Bridge,
@@ -2208,17 +2224,31 @@ impl AppEngine {
     /// 都是 disk-API-限制的副作用,现在彻底走掉。
     pub async fn sync_session(&self, session_id: String, messages: Vec<Message>) -> Result<()> {
         self.handle
-            .send(Op::SyncSession {
-                session_id: Some(session_id),
-                messages,
-                system_prompt: None,
-                system_prompt_override: false,
-                model: self.bridge.model(),
-                workspace: self.workspace.clone(),
-                mode: AppMode::Agent,
-            })
+            .send(self.sync_session_op(session_id, messages))
             .await?;
         Ok(())
+    }
+
+    /// Queue mandatory identity/history in a fresh mailbox before publication.
+    pub(crate) fn try_sync_new_session(
+        &self,
+        session_id: String,
+        messages: Vec<Message>,
+    ) -> Result<()> {
+        self.handle
+            .try_send(self.sync_session_op(session_id, messages))
+    }
+
+    fn sync_session_op(&self, session_id: String, messages: Vec<Message>) -> Op {
+        Op::SyncSession {
+            session_id: Some(session_id),
+            messages,
+            system_prompt: None,
+            system_prompt_override: false,
+            model: self.bridge.model(),
+            workspace: self.workspace.clone(),
+            mode: AppMode::Agent,
+        }
     }
 }
 
@@ -2715,6 +2745,28 @@ mod turn_lifecycle_tests {
 
         // 防 Drop 副作用。
         reservation2.mark_submitted(None);
+    }
+
+    #[test]
+    fn generation_guard_holds_state_lock_and_rejects_a_successor() {
+        let lifecycle = Arc::new(TurnLifecycle::default());
+        let old = lifecycle.reserve().unwrap();
+        let old_generation = old.generation();
+        assert_eq!(
+            lifecycle.with_active_generation(old_generation, || {
+                assert!(lifecycle.state.try_lock().is_none());
+                "captured under lock"
+            }),
+            Some("captured under lock")
+        );
+        drop(old);
+        let successor = lifecycle.reserve().unwrap();
+        assert!(
+            lifecycle
+                .with_active_generation(old_generation, || panic!("must not cancel new scope"))
+                .is_none()
+        );
+        assert!(successor.ensure_active().is_ok());
     }
 
     #[test]

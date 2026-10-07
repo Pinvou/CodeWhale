@@ -295,8 +295,11 @@ impl ControllerLivenessWatchdog {
         self.deadline_b
     }
 
-    /// E2E-06：是否应当向 Relay/对端索取存活证据——从未拿到证据、已进入
-    /// suspect，或距 deadline 只剩续期提前量时；healthy 且余量充足时不打扰。
+    /// E2E-06：无证据、证据已到期或接近 deadline 时索取存活证据；也会在
+    /// suspect 边界前提前索证，即使此时仍 healthy 且 deadline 余量充足。
+    /// 当前 15 秒 suspect 窗减去 12 秒提前量，在最后有效证据推进后 3 秒
+    /// 即满足条件；2 秒轮询通常在 3–5 秒触发，实际时机仍受调度及在途挑战影响。
+    /// 这会提前产生索证流量，但发起挑战本身绝不延长认证证据或冻结恢复截止。
     pub(crate) fn needs_evidence(&self, now_b: u64) -> bool {
         match self.deadline_b {
             None => true,
@@ -1192,8 +1195,8 @@ mod tests {
         assert!(build_controller_liveness(&lease, SenderRole::ControllerA, "live a", 1).is_err());
     }
 
-    /// E2E-06：B 端证据需求策略——没有证据、进入 suspect 或余量不足时为真；
-    /// healthy 且余量充足时为假。
+    /// E2E-06：B 端提前索证策略——刚收到证据时为假，3 秒后即使仍 healthy
+    /// 且 deadline 余量充足也为真；触发索证本身不推进证据截止。
     #[test]
     fn evidence_is_requested_only_when_the_budget_needs_it() {
         let mut watchdog = ControllerLivenessWatchdog::new("live-a-1").unwrap();

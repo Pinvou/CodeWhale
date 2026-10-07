@@ -2187,6 +2187,25 @@ mod tests {
             .unwrap();
         ensure_existing_chat_session(&store, &chat.metadata.id).unwrap();
 
+        // A's remote proxy must never reach this local Engine entry point.
+        let proxy = store
+            .test_commit_remote_proxy_open(
+                None,
+                &crate::features::sessions::remote_proxy::binding::LiveRemoteContext {
+                    peer_id: "peer-test".into(),
+                    resume_boundary_id: "boundary-test".into(),
+                    connection_id: "connection-test".into(),
+                    controller_lease_id: "lease-test".into(),
+                    lease_epoch: "1".into(),
+                    relay_epoch: "relay-test".into(),
+                    generation: "generation-test".into(),
+                    control_connected: true,
+                    encrypted_channel_connected: true,
+                },
+            )
+            .unwrap();
+        assert!(ensure_existing_chat_session(&store, &proxy.local_session_id).is_err());
+
         // A scheduled-run profile on the same id flips the kind: not chat.
         store.scheduled_profiles.write().insert(
             chat.metadata.id.clone(),

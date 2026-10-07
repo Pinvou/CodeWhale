@@ -1587,5 +1587,99 @@ class ArchitectureGuardRepositoryTests(unittest.TestCase):
         self.assertIn("rules", baseline)
         self.assertIn("rust_feature_cycles", baseline)
 
+
+class ArchitectureGuardAliasScopeTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.guard = load_guard_module()
+
+    def test_root_alias_lexical_scopes_preserve_dependency_ratchet(self):
+        samples = (
+            ("use crate as root; fn run(){root::app::commands::x();} "
+             "mod tests {use crate::platform as root;}", True),
+            ("use crate as root; fn run(){use crate::platform as root; root::os::x();} "
+             "fn sibling(){root::app::commands::x();}", True),
+            ("use crate as root; mod child {fn run(){root::app::commands::x();}}", False),
+            ("use crate as root; mod child {fn run(){super::root::app::commands::x();}}", True),
+            ("fn run(){root::app::commands::x(); use crate as root;}", True),
+            ("mod first {use crate as root; fn run(){root::app::commands::x();}} "
+             "mod second {use crate::platform as root; fn run(){root::os::x();}}", True),
+            ("use crate as root; fn outer(){ {use crate::platform as root; root::os::x();} "
+             "root::app::commands::x();}", True),
+        )
+        for source, expects_app in samples:
+            with self.subTest(source=source), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                target = root / "pinvou3-app/src-tauri/src/features/alpha/mod.rs"
+                target.parent.mkdir(parents=True)
+                target.write_text(source, encoding="utf-8")
+                rules, cycles = self.guard.scan_rust(root)
+                count = rules["rust_feature_depends_on_app"]["alpha->commands"]
+                self.assertEqual(expects_app, bool(count))
+                self.assertFalse(rules["rust_crate_root_alias_ambiguous"])
+                baseline = {"schema_version": 1, "rules": {name: {} for name in rules},
+                            "rust_feature_cycles": []}
+                current = {"schema_version": 1,
+                           "rules": {name: dict(value) for name, value in rules.items()},
+                           "rust_feature_cycles": cycles}
+                failures, _ = self.guard.compare(current, baseline)
+                if expects_app:
+                    self.assertTrue(any("rust_feature_depends_on_app" in item for item in failures))
+                else:
+                    self.assertFalse(any("rust_feature_depends_on_app" in item for item in failures))
+
+    def test_extern_self_prelude_is_distinct_from_ordinary_root_use(self):
+        samples = (
+            ("fn run(){own::app::commands::x();}", True),
+            ("use own::{app as host}; fn run(){host::commands::x();}", True),
+            ("use own::{self, app as host}; fn run(){host::commands::x();}", True),
+            ("use own; fn run(){own::app::commands::x();}", True),
+            ("use crate::platform as own; fn run(){own::os::x();}", False),
+            ("fn run(){use crate::platform as own; own::os::x();} "
+             "fn sibling(){own::app::commands::x();}", True),
+            ("fn run(){ordinary::app::commands::x();}", False),
+        )
+        for source, expects_app in samples:
+            with self.subTest(source=source), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                rust = root / "pinvou3-app/src-tauri/src"
+                target = rust / "features/alpha/mod.rs"
+                target.parent.mkdir(parents=True)
+                (rust / "lib.rs").write_text(
+                    "extern crate self as own; use crate as ordinary; mod features; mod app;\n",
+                    encoding="utf-8",
+                )
+                target.write_text(source, encoding="utf-8")
+                rules, cycles = self.guard.scan_rust(root)
+                self.assertEqual(expects_app, bool(rules["rust_feature_depends_on_app"]))
+                self.assertFalse(rules["rust_crate_root_alias_ambiguous"])
+                baseline = {"schema_version": 1, "rules": {name: {} for name in rules},
+                            "rust_feature_cycles": []}
+                current = {"schema_version": 1,
+                           "rules": {name: dict(value) for name, value in rules.items()},
+                           "rust_feature_cycles": cycles}
+                failures, _ = self.guard.compare(current, baseline)
+                self.assertEqual(expects_app, any("rust_feature_depends_on_app" in item for item in failures))
+
+    def test_root_alias_conflicts_and_cycles_fail_closed(self):
+        for source in (
+            "use crate as root; use crate::platform as root; fn f(){root::app::commands::x();}",
+            "use b as a; use a as b; fn f(){a::app::commands::x();}",
+        ):
+            with self.subTest(source=source), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                target = root / "pinvou3-app/src-tauri/src/features/alpha/mod.rs"
+                target.parent.mkdir(parents=True)
+                target.write_text(source, encoding="utf-8")
+                rules, cycles = self.guard.scan_rust(root)
+                self.assertTrue(rules["rust_crate_root_alias_ambiguous"])
+                baseline = {"schema_version": 1, "rules": {name: {} for name in rules},
+                            "rust_feature_cycles": []}
+                current = {"schema_version": 1,
+                           "rules": {name: dict(value) for name, value in rules.items()},
+                           "rust_feature_cycles": cycles}
+                failures, _ = self.guard.compare(current, baseline)
+                self.assertTrue(any("rust_crate_root_alias_ambiguous" in item for item in failures))
+
 if __name__ == "__main__":
     unittest.main()
