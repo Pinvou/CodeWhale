@@ -14,6 +14,7 @@ const SchemaVersion = 1
 
 const (
 	AuthorityBilling = "BILLING"
+	AuthorityToken   = "TOKEN"
 	StateAbsent      = "ABSENT"
 	StateObserved    = "EFFECT_OR_ATTEMPT_OBSERVED"
 )
@@ -41,6 +42,8 @@ func AuthorityForCommand(commandType string) (string, bool) {
 		switch descriptor.Workload {
 		case approvalconsumer.BillingWorkload:
 			return AuthorityBilling, true
+		case approvalconsumer.TokenWorkload:
+			return AuthorityToken, true
 		}
 	}
 	return "", false

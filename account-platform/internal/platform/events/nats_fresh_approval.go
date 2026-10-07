@@ -109,6 +109,17 @@ func InitializeFreshApprovalConsumers(ctx context.Context, rawURL string, cfg NA
 // CheckFreshApprovalConsumers re-reads every installed resource against an
 // independently trusted receipt. It grants no execution or mutating ACL.
 func CheckFreshApprovalConsumers(ctx context.Context, rawURL string, cfg NATSConfig, files ApprovalConsumerResourceFiles) (FreshApprovalControl, error) {
+	return checkFreshApprovalConsumers(ctx, rawURL, cfg, files, false)
+}
+
+// CheckCurrentApprovalConsumers is the explicit installed F04 resource check.
+// It preserves every Billing receipt/Q+1 check and additionally requires the
+// exact three Token resources. Legacy callers retain the F02-only boundary.
+func CheckCurrentApprovalConsumers(ctx context.Context, rawURL string, cfg NATSConfig, files ApprovalConsumerResourceFiles) (FreshApprovalControl, error) {
+	return checkFreshApprovalConsumers(ctx, rawURL, cfg, files, true)
+}
+
+func checkFreshApprovalConsumers(ctx context.Context, rawURL string, cfg NATSConfig, files ApprovalConsumerResourceFiles, tokenInstalled bool) (FreshApprovalControl, error) {
 	binding, err := files.Load(time.Now().UTC())
 	if err != nil {
 		return FreshApprovalControl{}, ErrNATSResources
@@ -149,6 +160,11 @@ func CheckFreshApprovalConsumers(ctx context.Context, rawURL string, cfg NATSCon
 	for _, d := range approvalconsumer.BillingCommands() {
 		allowed[d.Durable] = true
 	}
+	if tokenInstalled {
+		for _, d := range approvalconsumer.TokenCommands() {
+			allowed[d.Durable] = true
+		}
+	}
 	for name := range names.Name() {
 		if !allowed[name] {
 			return FreshApprovalControl{}, ErrNATSResources
@@ -162,6 +178,15 @@ func CheckFreshApprovalConsumers(ctx context.Context, rawURL string, cfg NATSCon
 		expected, e2 := authorizationConsumerConfig(d, binding.startSequences[d.Durable])
 		if e != nil || e2 != nil || !validAuthorizationConsumerConfig(consumer.CachedInfo().Config, expected) || consumer.CachedInfo().NumPending != 0 || consumer.CachedInfo().NumAckPending != 0 {
 			return FreshApprovalControl{}, ErrNATSResources
+		}
+	}
+	if tokenInstalled {
+		for _, d := range approvalconsumer.TokenCommands() {
+			consumer, e := stream.Consumer(ctx, d.Durable)
+			expected, e2 := authorizationConsumerConfig(d, 0)
+			if e != nil || e2 != nil || !validAuthorizationConsumerConfig(consumer.CachedInfo().Config, expected) || consumer.CachedInfo().NumPending != 0 || consumer.CachedInfo().NumAckPending != 0 {
+				return FreshApprovalControl{}, ErrNATSResources
+			}
 		}
 	}
 	return FreshApprovalControl{Version: version, ApprovalEpoch: epoch, RelayEpoch: relayEpoch}, nil

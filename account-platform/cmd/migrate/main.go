@@ -15,6 +15,7 @@ import (
 	"github.com/Pinvou/pinvou3/account-platform/internal/billingschema"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/migrations"
 	"github.com/Pinvou/pinvou3/account-platform/internal/simulatorschema"
+	"github.com/Pinvou/pinvou3/account-platform/internal/tokenschema"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -97,6 +98,8 @@ func main() {
 			err = accountschema.Up(ctx, connection, loaded)
 		} else if domain == "billing" {
 			err = billingschema.Up(ctx, connection, loaded)
+		} else if domain == "token" {
+			err = tokenschema.Up(ctx, connection, loaded)
 		} else if domain == "payment-simulator" {
 			err = simulatorschema.Up(ctx, connection, loaded)
 		} else {
@@ -119,6 +122,8 @@ func main() {
 			loaded, err = accountschema.Ordered(loaded)
 		} else if domain == "billing" {
 			loaded, err = billingschema.Ordered(loaded)
+		} else if domain == "token" {
+			loaded, err = tokenschema.Ordered(loaded)
 		} else if domain == "payment-simulator" {
 			loaded, err = simulatorschema.Ordered(loaded)
 		}
@@ -184,7 +189,7 @@ func migrationDomain(ctx context.Context, connection *pgx.Conn, loaded []migrati
 		}
 	}
 	base := filepathBase(directory)
-	if base == "account" || base == "billing" || base == "payment-simulator" {
+	if base == "account" || base == "billing" || base == "payment-simulator" || base == "token" {
 		if domain != "" && domain != base {
 			return "", fmt.Errorf("migration directory disagrees with protected identity")
 		}
@@ -202,6 +207,7 @@ func protectedMigrationDomain(version int64, name, checksum string) string {
 		version        int64
 		name, checksum string
 	}{
+		{"token", 31, "token_command_governance_activation", "d957f8cac9de3566b1e30ab286458f80e78acd2cc9d61917e3367a0c8280ee16"},
 		{"account", 900001, "first_delivery_permission_metadata", "b14cb9c2e538d20ec869458940d60867090549c027f439ed199d703ef3e7f45d"},
 		{"account", 900002, "approval_execution_frozen_facts", "019fd548cf79e833fd53ef60591a4f714a40268dceb8d1237c53e69b0162215a"},
 		{"billing", 900001, "outbox_publication_generation", "7e36e103ad25620dd7a882792fcd0d942f6208038aeaa966eb44b367cea27f05"},

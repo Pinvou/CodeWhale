@@ -23,16 +23,17 @@ import (
 var ErrWalletProvisioning = errors.New("personal wallet provisioning is incomplete")
 
 type Service struct {
-	repository       Repository
-	humanDelegations *humandelegation.Signer
-	recoveryResults  ApprovalRecoveryResultReader
-	recoveryEffects  approvaleffect.Reader
-	wallets          WalletProvisioner
-	mobileAuth       *MobileAuthService
-	profiles         *ProfileChangeService
-	serviceToken     string
-	now              func() time.Time
-	smsConfiguration *VersionedSMSProviderResolver
+	ownerCandidateCursorKey []byte
+	repository              Repository
+	humanDelegations        *humandelegation.Signer
+	recoveryResults         ApprovalRecoveryResultReader
+	recoveryEffects         approvaleffect.Reader
+	wallets                 WalletProvisioner
+	mobileAuth              *MobileAuthService
+	profiles                *ProfileChangeService
+	serviceToken            string
+	now                     func() time.Time
+	smsConfiguration        *VersionedSMSProviderResolver
 }
 
 func (s *Service) WithSMSConfiguration(configuration *VersionedSMSProviderResolver) *Service {
@@ -68,6 +69,8 @@ func (s *Service) Handler(verify identity.VerifyFunc) http.Handler {
 	router := httpserver.NewRouter()
 	internal := router.Group("/internal/v1")
 	internal.Use(serviceauth.GinMiddleware(s.serviceToken))
+	internal.POST("/token-owner-authority", serviceauth.Require("internal.token-owner-authority.read"), httpserver.AdaptFunc(s.internalTokenOwnerAuthority))
+	internal.GET("/token-owner-candidates", serviceauth.Require("internal.token-owner-candidates.read"), httpserver.AdaptFunc(s.internalTokenOwnerCandidates))
 	internal.POST("/authorization/check", serviceauth.Require("internal.authorization.check"), httpserver.AdaptFunc(s.checkPermission))
 	internal.POST("/authorization/human-delegations", serviceauth.Require("internal.authorization.delegate"), httpserver.AdaptFunc(s.createHumanDelegation))
 	internal.GET("/approval-recovery/plan", serviceauth.Require("internal.approval-recovery.plan"), httpserver.AdaptFunc(s.internalApprovalRecoveryPlan))
@@ -245,6 +248,9 @@ func (s *Service) writeError(w http.ResponseWriter, r *http.Request, err error) 
 		status, code, message = http.StatusConflict, "APPROVAL_SNAPSHOT_REJECTED", "the authoritative approval snapshot request was rejected"
 	case errors.Is(err, ErrApprovalCommandNotExecutable):
 		status, code, message = http.StatusConflict, "APPROVAL_COMMAND_NOT_EXECUTABLE", "approval command is not executable"
+	case errors.Is(err, ErrTokenGovernanceInactive):
+		w.Header().Set("Cache-Control", "no-store")
+		status, code, message = http.StatusServiceUnavailable, "TOKEN_COMMAND_GOVERNANCE_INACTIVE", "Token command governance is not active"
 	case errors.Is(err, ErrBillingGovernanceInactive):
 		status, code, message = http.StatusServiceUnavailable, "BILLING_COMMAND_GOVERNANCE_INACTIVE", "Billing command governance is not active"
 	case errors.Is(err, ErrApprovalConsumerBindingInvalid):
@@ -361,4 +367,9 @@ func (s *Service) getCommerceCustomerMapping(w http.ResponseWriter, r *http.Requ
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	api.WriteJSON(w, http.StatusOK, mapping)
+}
+
+func (s *Service) WithTokenOwnerCandidateCursorKey(key []byte) *Service {
+	s.ownerCandidateCursorKey = append([]byte{}, key...)
+	return s
 }

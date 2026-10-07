@@ -22,6 +22,10 @@ const intentVersion int64 = 900002
 const intentChecksum = "68df09f526088b981c992d0c9912cab8f4ac2c6f5567fdb6351cfdc2b905d2a2"
 const intentDownChecksum = "14f58e7592a5733d75ff248ace7d5fffbe289b0c728de2a20d3377e54fe91044"
 
+const pricingReceiptVersion int64 = 900004
+const pricingReceiptChecksum = "60cb8519502e377de242d858872366486083cdd9b501d80a60421d663c250b43"
+const pricingReceiptDownChecksum = "49843bf03fc3120f13798ff4b4296344ca9dd12a73544e0a041009f28172af6e"
+
 // Ordered installs the new forward-only fence immediately after original 006.
 // The migration engine checks each applied version, so later delivery of lower
 // numeric versions remains possible after the high-numbered fence is recorded.
@@ -29,6 +33,7 @@ const intentDownChecksum = "14f58e7592a5733d75ff248ace7d5fffbe289b0c728de2a20d33
 func Ordered(input []migrations.Migration) ([]migrations.Migration, error) {
 	var fence *migrations.Migration
 	var intent *migrations.Migration
+	var pricingReceipt *migrations.Migration
 	seen := make(map[int64]bool, len(input))
 	for _, migration := range input {
 		if seen[migration.Version] {
@@ -38,6 +43,10 @@ func Ordered(input []migrations.Migration) ([]migrations.Migration, error) {
 		if migration.Version == generationVersion {
 			copy := migration
 			fence = &copy
+		}
+		if migration.Version == pricingReceiptVersion {
+			copy := migration
+			pricingReceipt = &copy
 		}
 		if migration.Version == intentVersion {
 			copy := migration
@@ -56,6 +65,12 @@ func Ordered(input []migrations.Migration) ([]migrations.Migration, error) {
 	if intent != nil && (intent.Checksum != intentChecksum || sqlChecksum(intent.UpSQL) != intentChecksum || sqlChecksum(intent.DownSQL) != intentDownChecksum) {
 		return nil, errors.New("billing anomaly intents are not the frozen forward-only migration")
 	}
+	if seen[51] != (pricingReceipt != nil) {
+		return nil, errors.New("billing pricing delivery requires immutable operation receipts")
+	}
+	if pricingReceipt != nil && (!seen[22] || pricingReceipt.Checksum != pricingReceiptChecksum || sqlChecksum(pricingReceipt.UpSQL) != pricingReceiptChecksum || sqlChecksum(pricingReceipt.DownSQL) != pricingReceiptDownChecksum) {
+		return nil, errors.New("billing pricing receipt migration is not the frozen forward-only migration")
+	}
 	ordered := slices.Clone(input)
 	slices.SortFunc(ordered, func(a, b migrations.Migration) int {
 		if a.Version < b.Version {
@@ -68,12 +83,15 @@ func Ordered(input []migrations.Migration) ([]migrations.Migration, error) {
 	})
 	result := make([]migrations.Migration, 0, len(ordered))
 	for _, migration := range ordered {
-		if migration.Version == generationVersion || migration.Version == intentVersion {
+		if migration.Version == generationVersion || migration.Version == intentVersion || migration.Version == pricingReceiptVersion {
 			continue
 		}
 		result = append(result, migration)
 		if migration.Version == 6 {
 			result = append(result, *fence)
+		}
+		if migration.Version == 51 {
+			result = append(result, *pricingReceipt)
 		}
 		if migration.Version == 29 {
 			result = append(result, *intent)

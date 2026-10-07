@@ -67,6 +67,20 @@ if [ "$HANDOFF_ENABLED" = true ]; then
   fi
 fi
 
+# F04 credential entry is an explicitly installed, separate public online client.
+CREDENTIAL_URL=${CREDENTIAL_PORTAL_PUBLIC_URL:-}
+CREDENTIAL_CLIENT=${CREDENTIAL_OIDC_CLIENT_ID:-pinvou-credentials}
+if [ -n "$CREDENTIAL_URL" ]; then
+  CREDENTIAL_URL=${CREDENTIAL_URL%/}
+  case "$CREDENTIAL_CLIENT" in ''|*[!A-Za-z0-9._-]*) printf 'Credential client identifier is invalid\n' >&2; exit 1;; esac
+  for existing_client in "$DESKTOP_CLIENT" "$PORTAL_CLIENT" "$HANDOFF_CLIENT" "$PROVISIONER_CLIENT"; do
+    if [ "$CREDENTIAL_CLIENT" = "$existing_client" ]; then printf 'Credential entry requires its own client\n' >&2; exit 1; fi
+  done
+  # The independent credential server enforces exactly these production origins.
+  case "$CREDENTIAL_URL" in https://credentials.pinvou.com|https://credentials-uat.pinvou.com) ;; *) printf 'Credential public origin is not approved\n' >&2; exit 1;; esac
+  if [ "$CREDENTIAL_URL" = "$PORTAL_URL" ]; then printf 'Credential and Portal origins must differ\n' >&2; exit 1; fi
+fi
+
 if [ -n "${KEYCLOAK_ADMIN_TRUSTSTORE:-}" ]; then
   KEYCLOAK_ADMIN_TRUSTSTORE_PASSWORD=${KEYCLOAK_ADMIN_TRUSTSTORE_PASSWORD:-}
   if [ -z "$KEYCLOAK_ADMIN_TRUSTSTORE_PASSWORD" ] && [ -n "${KEYCLOAK_ADMIN_TRUSTSTORE_PASSWORD_FILE:-}" ]; then
@@ -353,6 +367,20 @@ JSON
   fi
   ensure_audience "$desktop_id" pinvou-portal-handoff-audience "$HANDOFF_CLIENT"
   ensure_audience "$handoff_id" pinvou-account-audience "$ACCOUNT_AUDIENCE"
+fi
+
+if [ -n "$CREDENTIAL_URL" ]; then
+  credential_id=$("$KCADM" get clients -r "$REALM" -q "clientId=$CREDENTIAL_CLIENT" --fields id,clientId --format csv --noquotes | find_id_by_name "$CREDENTIAL_CLIENT")
+  credential_json=$(cat <<JSON
+{"clientId":"$CREDENTIAL_CLIENT","enabled":true,"protocol":"openid-connect","publicClient":true,"standardFlowEnabled":true,"directAccessGrantsEnabled":false,"implicitFlowEnabled":false,"serviceAccountsEnabled":false,"redirectUris":["$CREDENTIAL_URL/oidc/callback"],"webOrigins":[],"attributes":{"pkce.code.challenge.method":"S256","standard.token.exchange.enabled":"false"},"defaultClientScopes":["basic","roles","profile"],"optionalClientScopes":[]}
+JSON
+)
+  if [ -z "$credential_id" ]; then
+    credential_id=$(printf '%s' "$credential_json" | "$KCADM" create clients -r "$REALM" -f - -i)
+  else
+    printf '%s' "$credential_json" | "$KCADM" update "clients/$credential_id" -r "$REALM" -f - >/dev/null
+  fi
+  ensure_audience "$credential_id" pinvou-credential-audience "$CREDENTIAL_CLIENT"
 fi
 
 printf 'Mobile authentication and Portal clients provisioned for realm %s\n' "$REALM"

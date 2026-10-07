@@ -62,6 +62,20 @@ func loadPortalConfig(environment string, getenv func(string) string) (portal.Co
 		}
 		*item.target = parsed
 	}
+	if raw := strings.TrimSpace(getenv("PORTAL_ADMIN_TOKEN_DETAILS_ENABLED")); raw != "" {
+		enabled, err := strconv.ParseBool(raw)
+		if err != nil {
+			return portal.Config{}, errors.New("PORTAL_ADMIN_TOKEN_DETAILS_ENABLED must be boolean")
+		}
+		cfg.AdminTokenDetailsEnabled = enabled
+	}
+	if raw := strings.TrimSpace(getenv("CREDENTIAL_PORTAL_PUBLIC_URL")); raw != "" {
+		parsed, err := url.Parse(raw)
+		if err != nil {
+			return portal.Config{}, errors.New("CREDENTIAL_PORTAL_PUBLIC_URL must be a valid URL")
+		}
+		cfg.CredentialOrigin = parsed
+	}
 	cfg.SecureCookies = cfg.PublicURL.Scheme == "https" || environment != "development" && environment != "test"
 	if raw := strings.TrimSpace(getenv("PORTAL_SESSION_HANDOFF")); raw != "" {
 		enabled, err := strconv.ParseBool(raw)

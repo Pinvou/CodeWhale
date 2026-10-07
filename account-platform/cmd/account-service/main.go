@@ -71,6 +71,13 @@ func main() {
 		log.Fatal("ACCOUNT_IDENTITY_AUTHORITY_INVALID")
 	}
 	service := account.NewService(repository, wallets).WithServiceToken(credential)
+	ownerCandidateCursorKey, decodeErr := base64.StdEncoding.Strict().DecodeString(strings.TrimSpace(os.Getenv("OWNER_CANDIDATE_CURSOR_HMAC_KEY_BASE64")))
+	if decodeErr != nil || len(ownerCandidateCursorKey) != 32 {
+		log.Fatal("ACCOUNT_OWNER_CURSOR_KEY_INVALID")
+	}
+	service.WithTokenOwnerCandidateCursorKey(ownerCandidateCursorKey)
+	clear(ownerCandidateCursorKey)
+
 	if err := configureApprovals(ctx, repository, service, credential, cfg.Environment); err != nil {
 		log.Fatal(err)
 	}

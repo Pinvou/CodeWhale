@@ -1,0 +1,57 @@
+package token
+
+import (
+	"context"
+
+	"encoding/json"
+	"errors"
+
+	"net/http"
+)
+
+type frozenUsageSnapshot struct {
+	WalletOwnerType   string          `json:"wallet_owner_type"`
+	ProviderID        string          `json:"provider_id"`
+	AdapterVersion    string          `json:"adapter_version"`
+	UpstreamModelRef  string          `json:"upstream_model_ref"`
+	ContextType       string          `json:"context_type"`
+	MembershipVersion int64           `json:"membership_version"`
+	MemberVersion     int64           `json:"member_version"`
+	MaximumOutput     int64           `json:"maximum_output_tokens"`
+	Stream            bool            `json:"stream"`
+	PricingSnapshot   json.RawMessage `json:"pricing_snapshot"`
+}
+
+func (s *Service) ensureUsageHold(ctx context.Context, usage UsageRequest, envelope DispatchEnvelope) (BillingHold, error) {
+	var snapshot frozenUsageSnapshot
+	if json.Unmarshal(usage.RequestSnapshot, &snapshot) != nil {
+		return BillingHold{}, ErrForbidden
+	}
+	pricingSnapshot, err := json.Marshal(envelope.Price)
+	if err != nil {
+		return BillingHold{}, err
+	}
+	pricing := HoldPricingContext{ModelID: usage.Model, ProtocolCode: "CHAT", FormulaVersionID: envelope.Price.FormulaVersionID, PricingSnapshot: pricingSnapshot, RequestSnapshot: usage.RequestSnapshot}
+	if snapshot.ContextType != "PERSONAL" || usage.OrganizationID != nil {
+		return BillingHold{}, ErrForbidden
+	}
+	if client, ok := s.billing.(SnapshotBillingClient); ok {
+		return client.ReservePriced(ctx, usage.ID, usage.WalletID, usage.MaximumMicrocredits, envelope.Price.ID, pricing)
+	}
+	return s.cancellationBilling.Reserve(ctx, usage.ID, usage.WalletID, usage.MaximumMicrocredits, envelope.Price.ID)
+}
+
+func definitiveBillingFailure(err error) bool {
+	var failure *BillingHTTPError
+	if !errors.As(err, &failure) {
+		return false
+	}
+	switch failure.Status {
+	case http.StatusConflict:
+		return failure.Code == "INSUFFICIENT_COMPONENT_CAPACITY"
+	case http.StatusBadRequest, http.StatusPaymentRequired, http.StatusForbidden, http.StatusNotFound, http.StatusUnprocessableEntity, http.StatusTooManyRequests:
+		return true
+	default:
+		return false
+	}
+}

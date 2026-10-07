@@ -13,9 +13,10 @@ import (
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/humandelegation"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/manualreview"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/observability"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/tokengovernance"
 )
 
-// Only the three installed Billing commands are wired. Missing independent
+// The three Billing and three Token approval commands are installed. Missing independent
 // writer availability closes APPROVE, while historical reads/rejection and
 // ordinary account operations remain available through the mature pool.
 func configureApprovals(ctx context.Context, repository *account.PostgresRepository, service *account.Service, credential, environment string) error {
@@ -30,16 +31,27 @@ func configureApprovals(ctx context.Context, repository *account.PostgresReposit
 		return errors.New("ACCOUNT_BILLING_ACTIVATION_CONFIGURATION_INVALID")
 	}
 	repository.WithBillingGovernanceActivation(activation)
-	proofs, err := account.NewHTTPApprovalProofSource(billingURL, credential)
+	tokenURL := os.Getenv("TOKEN_HTTP_URL")
+	tokenActivation, err := tokengovernance.NewClient(tokenURL, credential, os.Getenv("TOKEN_GOVERNANCE_POLICY_SET_DIGEST"), os.Getenv("TOKEN_GOVERNANCE_HANDLER_SET_DIGEST"))
+	if err != nil {
+		return errors.New("ACCOUNT_TOKEN_ACTIVATION_CONFIGURATION_INVALID")
+	}
+	repository.WithTokenGovernanceActivation(tokenActivation)
+	snapshots, err := account.NewHTTPApprovalSnapshotSource(tokenURL, credential)
+	if err != nil {
+		return errors.New("ACCOUNT_APPROVAL_SNAPSHOT_CONFIGURATION_INVALID")
+	}
+	repository.WithApprovalSnapshotSource(snapshots)
+	proofs, err := account.NewHTTPApprovalProofSourceWithToken(billingURL, tokenURL, credential)
 	if err != nil {
 		return errors.New("ACCOUNT_APPROVAL_PROOF_CONFIGURATION_INVALID")
 	}
 	repository.WithApprovalProofSource(proofs)
-	results, err := account.NewApprovalRecoveryResultClient(billingURL, credential)
+	results, err := account.NewApprovalRecoveryResultClientWithToken(billingURL, tokenURL, credential)
 	if err != nil {
 		return errors.New("ACCOUNT_APPROVAL_RECOVERY_CONFIGURATION_INVALID")
 	}
-	effects, err := approvaleffect.NewClient(billingURL, credential)
+	effects, err := approvaleffect.NewClientWithToken(billingURL, tokenURL, credential)
 	if err != nil {
 		return errors.New("ACCOUNT_APPROVAL_EFFECT_CONFIGURATION_INVALID")
 	}

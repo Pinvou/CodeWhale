@@ -135,22 +135,38 @@ func renderNATSAuthorizationWithConsumersAt(current, previous, manifest []byte, 
 	if json.Unmarshal(base, &rendered) != nil {
 		return result, ErrNATSResources
 	}
+	// Only the opt-in, digest-bound consumer renderer first installs Token's
+	// three command consumer identity. The legacy renderers and ordinary Token
+	// outbox identity remain unchanged and unissued.
+	permissionsRaw, err := json.Marshal(fixedNATSPermissions(approvalconsumer.TokenWorkload))
+	if err != nil {
+		return result, ErrNATSResources
+	}
+	rendered.Authorization.Users = append(rendered.Authorization.Users, struct {
+		NKey        string          `json:"nkey"`
+		Permissions json.RawMessage `json:"permissions"`
+	}{NKey: primary.keys[approvalconsumer.TokenWorkload], Permissions: permissionsRaw})
 	for index := range rendered.Authorization.Users {
 		user := &rendered.Authorization.Users[index]
-		for _, role := range []string{approvalconsumer.BillingWorkload} {
+		for _, role := range []string{approvalconsumer.BillingWorkload, approvalconsumer.TokenWorkload, "event-resource-operator"} {
 			if user.NKey != primary.keys[role] {
 				continue
 			}
 			permissions := fixedNATSPermissions(role)
 			for _, descriptor := range approvalconsumer.All() {
-				if descriptor.Workload != role {
+				if role != "event-resource-operator" && descriptor.Workload != role {
 					continue
 				}
-				for _, subject := range []string{
+				subjects := []string{
 					"$JS.API.CONSUMER.INFO." + platformStream + "." + descriptor.Durable,
 					"$JS.API.CONSUMER.MSG.NEXT." + platformStream + "." + descriptor.Durable,
 					"$JS.ACK." + platformStream + "." + descriptor.Durable + ".>",
-				} {
+				}
+				if role == "event-resource-operator" {
+					subjects = []string{"$JS.API.CONSUMER.INFO." + platformStream + "." + descriptor.Durable,
+						"$JS.API.CONSUMER.CREATE." + platformStream + "." + descriptor.Durable + "." + approvalconsumer.AuthorizationSubject}
+				}
+				for _, subject := range subjects {
 					if !slices.Contains(permissions.Publish, subject) {
 						permissions.Publish = append(permissions.Publish, subject)
 					}

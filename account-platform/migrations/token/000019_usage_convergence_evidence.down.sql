@@ -1,0 +1,4 @@
+DROP TRIGGER usage_convergence_evidence_immutable ON usage_convergence_evidence;
+DROP INDEX usage_convergence_evidence_timeline_idx;
+DROP TABLE usage_convergence_evidence;
+ALTER TABLE usage_replay_results DROP COLUMN evidence_payload_digest;

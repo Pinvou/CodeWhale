@@ -1,4 +1,4 @@
-import { parseFinanceJSON, encodeFinanceJSON, requireFinanceID, requirePaymentOrder } from './finance-contract.js';
+import { parseFinanceJSON, encodeFinanceJSON, requireFinanceID, requirePaymentOrder, integerMoney } from './finance-contract.js';
 import { requireSession } from './personal-contract.js';
 import { mergeObservedVersions } from './authorization-ui.js';
 import { secureRequestID } from './request-id.js';
@@ -61,6 +61,11 @@ function billingCollectionQuery(filters = {}, { keys = [], dateTimeKeys = [] } =
  const query = new URLSearchParams({ limit: String(filters.limit || 25) });
  for (const key of [...keys, ...dateTimeKeys, 'cursor']) if (filters[key]) query.set(key, filters[key]);
  return query;
+}
+function requireManagedPriceAck(value, expectedID = '') {
+  requireFinanceID(value?.price_version_id);
+  if (expectedID && value.price_version_id !== expectedID) throw new Error('INVALID_MUTATION_ACK');
+  return value;
 }
 export class AdminPlatformClient {
   constructor(baseURL = '') {
@@ -600,4 +605,264 @@ export class AdminPlatformClient {
     this.financeSessionEpoch++;
     return payload;
   }
+
+managedPrices(signal) {
+    return this.request('billing', '/admin/v1/pricing?limit=100', signal);
+  }
+
+managedPrice(priceVersionID, signal) {
+    return this.request('billing', `/admin/v1/pricing?price_version_id=${encodeURIComponent(priceVersionID)}`, signal);
+  }
+
+managedPriceSpace(input, signal) {
+    const query = new URLSearchParams({
+      limit: '200',
+      scope_type: input.scope_type,
+      protocol_code: input.protocol_code,
+      formula_version_id: input.formula_version_id,
+      credit_unit: input.credit_unit || 'MICROCREDIT',
+    });
+    if (input.scope_type === 'MODEL') query.set('scope_id', input.scope_id);
+    return this.request('billing', `/admin/v1/pricing?${query}`, signal);
+  }
+
+meteringUnits(signal) {
+    return this.request('billing', '/admin/v1/metering-units', signal);
+  }
+
+pricingProtocols(signal) {
+    return this.request('token', '/admin/v1/protocols', signal);
+  }
+
+async createMeteringUnit(input, idempotencyKey) {
+    const item = await this.mutate('billing', '/admin/v1/metering-units', 'POST', input, idempotencyKey, undefined, 201);
+    requireFinanceID(item?.unit_definition_id);
+    if (item.unit_code !== input.unit_code || integerMoney(item.minimum_precision) !== integerMoney(input.minimum_precision) || integerMoney(item.price_denominator) !== integerMoney(input.price_denominator) || item.rounding_rule !== input.rounding_rule) throw new Error('INVALID_MUTATION_ACK');
+    return item;
+  }
+
+async deactivateMeteringUnit(unitDefinitionID, idempotencyKey) {
+    const item = await this.mutate('billing', `/admin/v1/metering-units/${encodeURIComponent(unitDefinitionID)}/deactivate`, 'POST', {}, idempotencyKey, undefined, 200);
+    if (item?.unit_definition_id !== unitDefinitionID || item.status !== 'INACTIVE') throw new Error('INVALID_MUTATION_ACK');
+    return item;
+  }
+
+async createPriceDraft(input, idempotencyKey) {
+    const item = requireManagedPriceAck(await this.mutate('billing', '/admin/v1/pricing/drafts', 'POST', input, idempotencyKey, undefined, 201));
+    if (item.lifecycle_status !== 'DRAFT' || item.scope_type !== input.scope_type || String(item.scope_id || '') !== String(input.scope_id || '') || item.formula_version_id !== input.formula_version_id || item.protocol_code !== input.protocol_code) throw new Error('INVALID_MUTATION_ACK');
+    return item;
+  }
+
+async updatePriceDraft(priceVersionID, input, idempotencyKey) {
+    const item = requireManagedPriceAck(await this.mutate('billing', `/admin/v1/pricing/${encodeURIComponent(priceVersionID)}/draft`, 'PUT', input, idempotencyKey, undefined, 200), priceVersionID);
+    if (item.lifecycle_status !== 'DRAFT') throw new Error('INVALID_MUTATION_ACK');
+    return item;
+  }
+
+previewPrice(priceVersionID, signal) {
+    return this.request('billing', `/admin/v1/pricing/${encodeURIComponent(priceVersionID)}/preview`, signal);
+  }
+
+async publishPrice(priceVersionID, expectedETag, idempotencyKey) {
+    return requireManagedPriceAck(await this.mutate('billing', `/admin/v1/pricing/${encodeURIComponent(priceVersionID)}/publish`, 'POST', { expected_etag: expectedETag }, idempotencyKey, undefined, 200), priceVersionID);
+  }
+
+async transitionPrice(priceVersionID, input, idempotencyKey) {
+    return requireManagedPriceAck(await this.mutate('billing', `/admin/v1/pricing/${encodeURIComponent(priceVersionID)}/transition`, 'POST', input, idempotencyKey, undefined, 200), priceVersionID);
+  }
+
+tokenResourceReadiness(signal) {
+    return this.request('token', '/admin/v1/token-resources/readiness', signal);
+  }
+
+tokenAccounts(filtersOrSignal = {}, signal) {
+    if (isAbortSignal(filtersOrSignal)) {
+      return this.request('token', '/admin/v1/token-accounts?limit=100', filtersOrSignal);
+    }
+    const filters = filtersOrSignal;
+    const requestSignal = signal;
+    return this.request('token', `/admin/v1/token-accounts?${tokenAdminCollectionQuery('tokenAccounts', filters)}`, requestSignal);
+  }
+
+tokenAccount(tokenAccountID, signal) {
+    return this.request('token', `/admin/v1/token-accounts/${encodeURIComponent(tokenAccountID)}`, signal);
+  }
+
+tokenAccountSafeDetail(tokenAccountID, signal) {
+		return this.request('token', `/admin/v2/token-accounts/${encodeURIComponent(tokenAccountID)}`, signal);
+	}
+
+tokenAccountCredentials(tokenAccountID, filters = {}, signal) {
+		return this.request('token', `/admin/v1/token-accounts/${encodeURIComponent(tokenAccountID)}/credentials?${tokenAdminCollectionQuery('tokenCredentials', filters)}`, signal);
+	}
+
+tokenAccountRoutes(tokenAccountID, filters = {}, signal) {
+		return this.request('token', `/admin/v1/token-accounts/${encodeURIComponent(tokenAccountID)}/routes?${tokenAdminCollectionQuery('tokenRoutes', filters)}`, signal);
+	}
+
+createCredentialLaunch(tokenAccountID, action, input, idempotencyKey, signal) {
+		return this.mutate('token', `/admin/v1/token-accounts/${encodeURIComponent(tokenAccountID)}/credential-launches/${String(action).toLowerCase()}`, 'POST', input, idempotencyKey, signal);
+	}
+
+credentialIsolationResult(resultRef, signal) {
+		return this.request('token', `/admin/v1/credential-results/${encodeURIComponent(resultRef)}`, signal);
+	}
+
+revokeCredentialWindow(resultRef, reasonCode, signal) {
+		return this.mutate('token', `/admin/v1/credential-results/${encodeURIComponent(resultRef)}/revoke-window`, 'POST', { reason_code: reasonCode }, '', signal);
+	}
+
+tokenCredentialImpact(tokenAccountID, action, credentialID, signal) {
+    const query = new URLSearchParams({ action });
+    if (credentialID) query.set('credential_id', credentialID);
+    return this.request('token', `/admin/v1/token-accounts/${encodeURIComponent(tokenAccountID)}/impact/credential?${query}`, signal);
+  }
+
+catalogModels(filtersOrSignal = {}, signal) {
+    if (isAbortSignal(filtersOrSignal)) {
+      return this.request('token', '/admin/v1/models', filtersOrSignal);
+    }
+    const filters = filtersOrSignal;
+    const requestSignal = signal;
+    return this.request('token', `/admin/v1/models?${tokenAdminCollectionQuery('models', filters)}`, requestSignal);
+  }
+
+catalogModel(modelID, signal) {
+    return this.request('token', `/admin/v1/models/${encodeURIComponent(modelID)}`, signal);
+  }
+
+modelVersions(modelID, filters = {}, signal) {
+    return this.request('token', `/admin/v1/models/${encodeURIComponent(modelID)}/versions?${tokenAdminCollectionQuery('modelVersions', filters)}`, signal);
+  }
+
+modelLifecyclePlans(modelID, filters = {}, signal) {
+		return this.request('token', `/admin/v1/models/${encodeURIComponent(modelID)}/lifecycle-plans?${tokenAdminCollectionQuery('modelLifecyclePlans', filters)}`, signal);
+	}
+
+modelLifecyclePlan(modelID, planID, signal) {
+		return this.request('token', `/admin/v1/models/${encodeURIComponent(modelID)}/lifecycle-plans/${encodeURIComponent(planID)}`, signal);
+	}
+
+createModelLifecyclePlan(modelID, input, idempotencyKey, signal) {
+		return this.mutate('token', `/admin/v1/models/${encodeURIComponent(modelID)}/lifecycle-plans`, 'POST', input, idempotencyKey, signal);
+	}
+
+cancelModelLifecyclePlan(modelID, planID, input, idempotencyKey, signal) {
+		return this.mutate('token', `/admin/v1/models/${encodeURIComponent(modelID)}/lifecycle-plans/${encodeURIComponent(planID)}/cancel`, 'POST', input, idempotencyKey, signal);
+	}
+
+protocols(filters = {}, signal) {
+    return this.request('token', `/admin/v1/protocols?${tokenAdminCollectionQuery('protocols', filters)}`, signal);
+  }
+
+formulas(filters = {}, signal) {
+    return this.request('token', `/admin/v1/formulas?${tokenAdminCollectionQuery('formulas', filters)}`, signal);
+  }
+
+previewFormula(formulaVersionID, signal) {
+    return this.request('token', `/admin/v1/formulas/${encodeURIComponent(formulaVersionID)}/preview`, signal);
+  }
+
+tokenOwnerCandidates(filters = {}, signal) {
+    return this.request('token', `/admin/v1/owner-candidates?${tokenAdminCollectionQuery('ownerCandidates', filters)}`, signal);
+  }
+
+tokenResourceAudit(filters = {}, signal) {
+    return this.request('token', `/admin/v1/resource-audit?${tokenAdminCollectionQuery('resourceAudit', filters)}`, signal);
+  }
+
+modelPriceProjection(modelID, protocolCode, formulaVersionID, creditUnit = 'MICROCREDIT', signal) {
+    const query = new URLSearchParams({
+      protocol_code: String(protocolCode || ''),
+      formula_version_id: String(formulaVersionID || ''),
+      credit_unit: String(creditUnit || ''),
+    });
+    return this.request('billing', `/admin/v1/models/${encodeURIComponent(modelID)}/price-projection?${query}`, signal);
+  }
+
+modelLifecycleImpact(modelID, targetStatus, replacementModelID = '', signal, lifecyclePlanID = '') {
+    const query = new URLSearchParams({ target_status: targetStatus });
+    if (replacementModelID) query.set('replacement_model_id', replacementModelID);
+		if (lifecyclePlanID) query.set('lifecycle_plan_id', lifecyclePlanID);
+    return this.request('token', `/admin/v1/models/${encodeURIComponent(modelID)}/impact/lifecycle?${query}`, signal);
+  }
+
+catalogRollbackImpact(sourceCatalogVersion, signal) {
+    const query = new URLSearchParams({ source_catalog_version: String(sourceCatalogVersion) });
+    return this.request('token', `/admin/v1/model-catalog/impact/rollback?${query}`, signal);
+  }
+
+governedTokenCommandPrecheck(input, signal) {
+    return this.mutate('token', '/admin/v1/commands:precheck', 'POST', input, '', signal);
+  }
+
+createGovernedTokenCommand(input, idempotencyKey, signal) {
+    return this.mutate('token', '/admin/v1/commands', 'POST', input, idempotencyKey, signal);
+  }
+
+governedTokenCommandResult(commandReference, signal) {
+    return this.request('token', `/admin/v1/commands/${encodeURIComponent(commandReference)}`, signal);
+  }
+
+governedTokenCommandByIdempotencyKey(commandType, idempotencyKey, signal) {
+    const query = new URLSearchParams({ command_type: commandType });
+    return this.mutate('token', `/admin/v1/commands/by-idempotency-key?${query}`, 'GET', undefined, idempotencyKey, signal);
+  }
+
+createTokenAccountRecoveryAction(commandReference, input, idempotencyKey, signal) {
+    return this.mutate('token', `/admin/v1/commands/${encodeURIComponent(commandReference)}/recovery-actions`, 'POST', input, idempotencyKey, signal);
+  }
+
+tokenAccountRecoveryQueue(filters = {}, signal) {
+    return this.request('token', `/admin/v1/commands/recovery-queue?${tokenAdminCollectionQuery('accountRecovery', filters)}`, signal);
+  }
+
+tokenAccountRecoveryAction(commandReference, actionID, signal) {
+    return this.request('token', `/admin/v1/commands/${encodeURIComponent(commandReference)}/recovery-actions/${encodeURIComponent(actionID)}`, signal);
+  }
+
+tokenAccountRecoveryActionByIdempotencyKey(commandReference, idempotencyKey, signal) {
+    return this.mutate('token', `/admin/v1/commands/${encodeURIComponent(commandReference)}/recovery-actions/by-idempotency-key`, 'GET', undefined, idempotencyKey, signal);
+  }
+
+provisionings(filtersOrSignal = {}, signal) {
+    if (isAbortSignal(filtersOrSignal)) {
+      return this.request('token', '/admin/v1/provisionings?limit=100', filtersOrSignal);
+    }
+    const filters = filtersOrSignal;
+    const requestSignal = signal;
+    return this.request('token', `/admin/v1/provisionings?${tokenAdminCollectionQuery('provisionings', filters)}`, requestSignal);
+  }
+}
+
+const TOKEN_ADMIN_FILTERS = Object.freeze({
+  models: ['q', 'lifecycle_status', 'protocol_code', 'source_adapter', 'source_missing'],
+  protocols: ['q', 'status', 'protocol_code', 'published', 'created_from', 'created_to'],
+  formulas: ['q', 'status', 'protocol_definition_id', 'metering_unit_code', 'published', 'created_from', 'created_to'],
+  tokenAccounts: ['q', 'owner_type', 'owner_id', 'status', 'health_status', 'credential_status'],
+  accountRecovery: ['q'],
+  provisionings: ['q', 'status', 'model_id', 'token_account_id', 'scope_type', 'scope_id', 'sla_overdue'],
+  usage: ['q', 'execution_status', 'settlement_status', 'model', 'token_account_id', 'organization_id', 'started_from', 'started_to'],
+  reconciliation: ['q', 'status', 'severity', 'case_type', 'owner_id', 'sla_overdue'],
+  ownerCandidates: ['q', 'owner_type', 'status', 'organization_id'],
+  resourceAudit: ['resource_type', 'resource_id', 'action', 'actor_id', 'occurred_from', 'occurred_to'],
+  modelVersions: [],
+	modelLifecyclePlans: ['status', 'target_lifecycle'],
+  provisioningAttempts: ['status'],
+  usageEvidence: ['evidence_type'],
+	tokenCredentials: ['status'],
+	tokenRoutes: ['health_status'],
+});
+
+function tokenAdminCollectionQuery(source, filters = {}) {
+  const query = new URLSearchParams({ limit: '50' });
+  for (const key of [...(TOKEN_ADMIN_FILTERS[source] || []), 'cursor']) {
+    const value = String(filters[key] || '').trim();
+    if (value) query.set(key, value);
+  }
+  return query;
+}
+
+function isAbortSignal(value) {
+  return typeof globalThis.AbortSignal !== 'undefined' && value instanceof globalThis.AbortSignal;
 }

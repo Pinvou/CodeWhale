@@ -61,7 +61,9 @@ function Payments({ client, copy, language, permissions, owner }) {
   </section>;
 }
 
-function Approvals({ client, copy, permissions, owner }) {
+const defaultApprovalCommandTypes = Object.freeze(['WALLET_ADJUSTMENT', 'PAYMENT_PROVIDER_RESUME', 'PAYMENT_PRODUCT_RESUME']);
+
+export function Approvals({ client, copy, permissions, owner, commandTypes = defaultApprovalCommandTypes, initialRequestID = '' }) {
   const [items, setItems] = useState([]);
   const [page, setPage] = useState(null);
   const [cursor, setCursor] = useState('');
@@ -69,9 +71,13 @@ function Approvals({ client, copy, permissions, owner }) {
   const [detail, setDetail] = useState(null);
   const [reason, setReason] = useState('');
   const operation = useFinanceOperation(owner, copy, client, 'approvals');
-  const load = async (next = cursor) => { const value = await operation.read(() => client.governedApprovalRequests({ cursor: next })); if (value) { setPage(value); setCursor(next); setItems(requireFinanceCollection(value).filter(item => ['WALLET_ADJUSTMENT', 'PAYMENT_PROVIDER_RESUME', 'PAYMENT_PRODUCT_RESUME'].includes(item.command_type))); } };
-  useEffect(() => { void load(); }, [client, owner]); // eslint-disable-line react-hooks/exhaustive-deps
-  const open = async id => { const value = await operation.read(() => client.governedApprovalRequest(id)); if (value) { if (value.approval_request_id !== id) return; setDetail(value); } };
+  const load = async (next = cursor) => { const value = await operation.read(() => client.governedApprovalRequests({ cursor: next })); if (value) { setPage(value); setCursor(next); setItems(requireFinanceCollection(value).filter(item => commandTypes.includes(item.command_type))); } };
+  useEffect(() => {
+    let active = true;
+    void (async () => { await load(''); if (active && initialRequestID) await open(initialRequestID); })();
+    return () => { active = false; };
+  }, [client, owner, initialRequestID]); // eslint-disable-line react-hooks/exhaustive-deps
+  const open = async id => { const value = await operation.read(() => client.governedApprovalRequest(id)); if (value) { if (value.approval_request_id !== id || !commandTypes.includes(value.command_type)) return; setDetail(value); } };
   const act = async action => {
     let facts = operation.pendingFacts;
     if (!facts) {
@@ -79,8 +85,8 @@ function Approvals({ client, copy, permissions, owner }) {
       if (action === 'EDIT' && !draft) return;
       facts = { detail, action, reason, draft };
     }
-    const value = await operation.mutate(facts, async facts => {
-      if (facts.action === 'EDIT') await updateAndSubmitGovernedApproval(client, facts.detail, facts.draft);
+    const value = await operation.mutate(facts, async (facts, invocationKey) => {
+      if (facts.action === 'EDIT') await updateAndSubmitGovernedApproval(client, facts.detail, { ...facts.draft, idempotency_key: invocationKey });
       else if (facts.action === 'SUBMIT') await client.submitGovernedApprovalRequest(facts.detail.approval_request_id, facts.detail);
       else if (facts.action === 'WITHDRAW') await client.withdrawGovernedApprovalRequest(facts.detail.approval_request_id, facts.detail);
       else await client.decideGovernedApproval(facts.detail.approval_request_id, facts.detail, facts.action, facts.reason);
@@ -92,7 +98,7 @@ function Approvals({ client, copy, permissions, owner }) {
     <button disabled={operation.busy || operation.unknown || !previous.length} onClick={() => { const values = [...previous]; const value = values.pop(); setPrevious(values); void load(value); }}>{copy.previous}</button><button disabled={operation.busy || operation.unknown || !page?.next_cursor} onClick={() => { setPrevious(values => [...values, cursor]); void load(page.next_cursor); }}>{copy.next}</button>
     {detail && <article><h4>{detail.approval_request_id}</h4><p>{detail.command_type} / {detail.status} / {copy.version}: {detail.version}</p><p>{detail.reason}</p><h5>{copy.command}</h5><pre>{JSON.stringify(detail.command || {}, null, 2)}</pre>{detail.execution && <><h5>{copy.effects}</h5><p>{detail.execution.attempt_status} / {detail.execution.error_class} / {detail.execution.next_retry_at} / {detail.execution.execution_deadline}</p></>}<label>{copy.reason}<textarea disabled={operation.busy || operation.unknown} value={reason} onChange={event => setReason(event.target.value)} maxLength={2000} /></label>{['EDIT', 'SUBMIT', 'WITHDRAW', 'APPROVE', 'REJECT'].filter(action => detail.allowed_actions?.includes(action)).map(action => {
       const approver = action === 'APPROVE' || action === 'REJECT';
-      const allowed = approver ? permissions.includes(detail.command_type === 'WALLET_ADJUSTMENT' ? 'platform.billing.adjustments.approve' : 'platform.billing.payment-controls.resume.approve') : true;
+      const allowed = approver ? permissions.includes({ WALLET_ADJUSTMENT: 'platform.billing.adjustments.approve', PAYMENT_PROVIDER_RESUME: 'platform.billing.payment-controls.resume.approve', PAYMENT_PRODUCT_RESUME: 'platform.billing.payment-controls.resume.approve', TOKEN_MODEL_LIFECYCLE_CHANGE: 'platform.models.lifecycle.approve', TOKEN_MODEL_CATALOG_ROLLBACK: 'platform.models.catalog.rollback.approve', TOKEN_CREDENTIAL_REVOKE: 'platform.tokens.credentials.revoke.approve' }[detail.command_type]) : true;
       return allowed && <button key={action} disabled={operation.busy || operation.unknown || ((approver || action === 'EDIT') && reason.trim().length < 10)} onClick={() => void act(action)}>{copy[{ EDIT: 'editSubmit', SUBMIT: 'submit', WITHDRAW: 'withdraw', APPROVE: 'approve', REJECT: 'reject' }[action]]}</button>;
     })}</article>}
   </section>;

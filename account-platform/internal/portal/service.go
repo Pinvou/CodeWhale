@@ -24,6 +24,8 @@ import (
 )
 
 type Config struct {
+	AdminTokenDetailsEnabled   bool
+	CredentialOrigin           *url.URL
 	Environment                string
 	IssuerURL                  *url.URL
 	JWKSURL                    *url.URL
@@ -114,6 +116,14 @@ func NewService(config Config, store Store) (*Service, error) {
 	if strings.TrimSpace(config.PrivateCAFile) != "" && config.TokenURL.Scheme != "https" {
 		return nil, errors.New("portal private CA requires HTTPS token transport")
 	}
+	if config.AdminTokenDetailsEnabled {
+		if err := validateCredentialOrigin(config.CredentialOrigin, config.SecureCookies); err != nil {
+			return nil, err
+		}
+		if strings.EqualFold(config.PublicURL.Scheme+"://"+config.PublicURL.Host, credentialOriginProjection(config)) {
+			return nil, errors.New("credential origin must be isolated from the management portal origin")
+		}
+	}
 	client, err := newPortalHTTPClient(config.PrivateCAFile)
 	if err != nil {
 		return nil, err
@@ -140,12 +150,14 @@ func (s *Service) Handler(static http.Handler) http.Handler {
 		copy.URL = &u
 		static.ServeHTTP(w, copy)
 	}))
+	router.GET("/credential-handoff", httpserver.AdaptFunc(s.credentialHandoff))
 	router.GET("/api/session", httpserver.AdaptFunc(s.sessionStatus))
 	router.POST("/api/logout", httpserver.AdaptFunc(s.logout))
 	router.Any("/api/account/*resource", httpserver.AdaptFunc(s.proxyAccount))
 	router.Any("/api/token/*resource", httpserver.AdaptFunc(s.proxyToken))
 	router.Any("/api/admin/account/*resource", httpserver.AdaptFunc(s.proxyAdminAccount))
 	router.Any("/api/admin/billing/*resource", httpserver.AdaptFunc(s.proxyAdminBilling))
+	router.Any("/api/admin/token/*resource", httpserver.AdaptFunc(s.proxyAdminToken))
 	router.GET("/api/admin/approvals/capability", httpserver.AdaptFunc(s.adminApprovalCapability))
 	router.GET("/api/admin/approvals/directory", httpserver.AdaptFunc(s.adminApprovalDirectory))
 	router.GET("/api/admin/approvals/requests", httpserver.AdaptFunc(s.adminApprovalRequests))
@@ -167,7 +179,7 @@ func (s *Service) Handler(static http.Handler) http.Handler {
 		} else {
 			w.Header().Set("Cache-Control", "no-cache")
 		}
-		if strings.HasPrefix(r.URL.Path, "/api/") || strings.HasPrefix(r.URL.Path, "/auth/") || strings.HasPrefix(r.URL.Path, "/health/") || strings.HasPrefix(r.URL.Path, "/portal-session-handoff") || static == nil {
+		if strings.HasPrefix(r.URL.Path, "/api/") || strings.HasPrefix(r.URL.Path, "/auth/") || strings.HasPrefix(r.URL.Path, "/health/") || strings.HasPrefix(r.URL.Path, "/portal-session-handoff") || r.URL.Path == "/credential-handoff" || static == nil {
 			router.ServeHTTP(w, r)
 			return
 		}
@@ -355,7 +367,7 @@ func (s *Service) sessionStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.setSessionCookies(w, session)
-	api.WriteJSON(w, http.StatusOK, map[string]any{"authenticated": true, "csrf_token": session.CSRFToken})
+	api.WriteJSON(w, http.StatusOK, map[string]any{"authenticated": true, "csrf_token": session.CSRFToken, "credential_origin": credentialOriginProjection(s.config)})
 }
 func (s *Service) sessionLineageStatus(w http.ResponseWriter, r *http.Request) {
 	api.WriteJSON(w, http.StatusOK, map[string]any{"schema_version": 1, "capable": true, "enabled": true})

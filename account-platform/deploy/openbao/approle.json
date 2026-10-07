@@ -1,0 +1,11 @@
+{
+  "bind_secret_id": true,
+  "secret_id_ttl": 0,
+  "secret_id_num_uses": 0,
+  "token_type": "service",
+  "token_ttl": 300,
+  "token_max_ttl": 900,
+  "token_explicit_max_ttl": 900,
+  "token_no_default_policy": true,
+  "token_num_uses": 0
+}

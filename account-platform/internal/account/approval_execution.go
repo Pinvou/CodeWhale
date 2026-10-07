@@ -101,7 +101,8 @@ WHERE e.approval_request_id=$1 AND e.command_type=$2`, requestID, item.CommandTy
 	if item.Status != "APPROVED" && item.Status != "EXECUTION_FAILED" {
 		return ApprovalExecution{}, ErrConflict
 	}
-	if !sameJSONObject(observedVersions, item.CriticalResourceVersions) {
+	financialSnapshotChanged := approvalSnapshotCommand(item.CommandType) && !sameApprovalFinancialFacts(item.CommandType, observedFinancialSnapshot, item.FinancialSnapshot)
+	if !sameJSONObject(observedVersions, item.CriticalResourceVersions) || financialSnapshotChanged {
 		_, _ = tx.Exec(ctx, `UPDATE approval_requests SET status='INVALIDATED',invalidation_code='RESOURCE_VERSION_CHANGED',invalidation_details=$2,version=version+1,updated_at=$3 WHERE id=$1 AND status IN ('APPROVED','EXECUTION_FAILED')`, requestID, jsonOrDefault(observedVersions, `{}`), now)
 		_ = appendApprovalStateEvent(ctx, tx, requestID, item.Status, "INVALIDATED", "SERVICE", executorIdentity, "RESOURCE_VERSION_CHANGED", map[string]any{}, now)
 		if err := tx.Commit(ctx); err != nil {

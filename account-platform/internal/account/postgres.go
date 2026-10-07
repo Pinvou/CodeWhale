@@ -13,6 +13,7 @@ import (
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/events"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/identity"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/tokengovernance"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -25,7 +26,9 @@ type PostgresRepository struct {
 	commerceProviderID          string
 	commerceAdapterVersion      string
 	approvalProofSource         ApprovalProofSource
+	approvalSnapshots           ApprovalSnapshotSource
 	billingGovernanceActivation billinggovernance.Reader
+	tokenGovernanceActivation   tokengovernance.Reader
 	approvalPresenterReady      func(approvalpolicy.Policy) bool
 	approvalPagination          approvalPaginationRuntime
 	approvalPaginationMetrics   *ApprovalPaginationMetrics

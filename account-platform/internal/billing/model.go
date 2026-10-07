@@ -2,6 +2,7 @@ package billing
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"time"
 
@@ -144,7 +145,39 @@ type ManualAdjustment struct {
 	DecidedAt               *time.Time `json:"decided_at,omitempty"`
 }
 
+type PriceVersion struct {
+	ID                    uuid.UUID           `json:"price_version_id"`
+	Model                 string              `json:"model"`
+	InputPerMillion       int64               `json:"input_per_million"`
+	OutputPerMillion      int64               `json:"output_per_million"`
+	CachedInputPerMillion int64               `json:"cached_input_per_million"`
+	ScopeType             string              `json:"scope_type"`
+	ProtocolCode          string              `json:"protocol_code"`
+	FormulaVersionID      uuid.UUID           `json:"formula_version_id"`
+	FormulaSnapshot       json.RawMessage     `json:"formula_snapshot"`
+	CreditUnit            string              `json:"credit_unit"`
+	EffectiveFrom         time.Time           `json:"effective_from"`
+	EffectiveTo           *time.Time          `json:"effective_to,omitempty"`
+	ResolvedAt            time.Time           `json:"resolved_at"`
+	Units                 []ResolvedUnitPrice `json:"units"`
+}
+
+type ResolvedUnitPrice struct {
+	UnitCode             string    `json:"unit_code"`
+	UnitDefinitionID     uuid.UUID `json:"unit_definition_id"`
+	UnitVersion          int64     `json:"unit_version"`
+	MinimumPrecision     int64     `json:"minimum_precision"`
+	PriceDenominator     int64     `json:"price_denominator"`
+	RoundingRule         string    `json:"rounding_rule"`
+	ResolvedPrice        int64     `json:"resolved_price"`
+	ConfigurationType    string    `json:"configuration_type"`
+	PriceSourceScope     string    `json:"price_source_scope"`
+	SourcePriceVersionID uuid.UUID `json:"source_price_version_id"`
+}
+
 type Repository interface {
+	CurrentPrice(context.Context, string) (PriceVersion, error)
+	PriceByID(context.Context, uuid.UUID) (PriceVersion, error)
 	EnsureWallet(context.Context, string, uuid.UUID) (Wallet, bool, error)
 	GetWallet(context.Context, uuid.UUID) (Wallet, error)
 	ListProducts(context.Context, string, string) ([]Product, error)

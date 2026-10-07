@@ -1,0 +1,23 @@
+[
+  {
+    "subject": "__ACCOUNT_WORKLOAD_SUBJECT__",
+    "service": "account-service",
+    "permissions": [
+      "internal.authorization.check",
+      "internal.token.approval-effect.read",
+      "internal.token.approval-result.read",
+      "internal.token.approval-snapshot.read",
+      "internal.token.approval-proof.read"
+    ]
+  },
+  {
+    "subject": "__TOKEN_EXECUTOR_WORKLOAD_SUBJECT__",
+    "service": "token-command-executor",
+    "permissions": [
+      "internal.authorization.check",
+      "internal.token.model-lifecycle.execute",
+      "internal.token.catalog-rollback.execute",
+      "internal.token.credential-revoke.execute"
+    ]
+  }
+]

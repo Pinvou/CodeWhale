@@ -28,6 +28,7 @@ type Reader interface {
 
 type Client struct {
 	billingEndpoint *url.URL
+	tokenEndpoint   *url.URL
 	serviceToken    string
 	httpClient      *http.Client
 }
@@ -65,6 +66,9 @@ func (c *Client) Observe(ctx context.Context, requestID uuid.UUID, commandType, 
 		return Observation{}, ErrUnavailable
 	}
 	base := c.billingEndpoint
+	if authority == AuthorityToken {
+		base = c.tokenEndpoint
+	}
 	if base == nil {
 		return Observation{}, ErrUnavailable
 	}
@@ -144,4 +148,17 @@ func closedObservation(raw []byte) (map[string]json.RawMessage, error) {
 		}
 	}
 	return values, nil
+}
+
+func NewClientWithToken(billingURL, tokenURL, credential string) (*Client, error) {
+	c, err := NewClient(billingURL, credential)
+	if err != nil {
+		return nil, err
+	}
+	token, err := effectEndpoint(tokenURL)
+	if err != nil {
+		return nil, err
+	}
+	c.tokenEndpoint = token
+	return c, nil
 }

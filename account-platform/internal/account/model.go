@@ -87,3 +87,5 @@ type Repository interface {
 type WalletProvisioner interface {
 	EnsurePersonalWallet(context.Context, uuid.UUID) error
 }
+
+const PermissionPlatformTokenOwnerCandidatesRead = "platform.tokens.owner-candidates.read"

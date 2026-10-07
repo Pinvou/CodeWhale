@@ -5,8 +5,8 @@ import (
 	"strings"
 )
 
-func currentBillingApprovalCommand(command string) bool {
-	return command == "WALLET_ADJUSTMENT" || command == "PAYMENT_PROVIDER_RESUME" || command == "PAYMENT_PRODUCT_RESUME"
+func currentGovernedApprovalCommand(command string) bool {
+	return command == "WALLET_ADJUSTMENT" || command == "PAYMENT_PROVIDER_RESUME" || command == "PAYMENT_PRODUCT_RESUME" || command == "TOKEN_MODEL_LIFECYCLE_CHANGE" || command == "TOKEN_MODEL_CATALOG_ROLLBACK" || command == "TOKEN_CREDENTIAL_REVOKE"
 }
 
 func (s *Service) proxyAdminBilling(w http.ResponseWriter, r *http.Request) {
@@ -17,6 +17,9 @@ func (s *Service) proxyAdminBilling(w http.ResponseWriter, r *http.Request) {
 // governed commands, plus F03 reconciliation reads/imports/case commands.
 // Usage repair and later governance paths remain outside this stage.
 func billingAdminPathAllowed(method, resource string) bool {
+	if pricingAdminPathAllowed(method, resource) {
+		return true
+	}
 	if method == http.MethodHead {
 		method = http.MethodGet
 	}

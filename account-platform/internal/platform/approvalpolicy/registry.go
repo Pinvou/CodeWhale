@@ -126,6 +126,12 @@ func buildPolicies() map[string]Policy {
 		"BILLING_DAILY_RECONCILIATION":                  "internal.billing.payment.reconcile",
 		"BILLING_PAYMENT_EXPIRY_RECONCILE":              "internal.billing.payment.reconcile",
 		"BILLING_ENTITLEMENT_PACKAGE_EXPIRE":            "internal.billing.entitlement.expire",
+		"BILLING_PRICE_DRAFT_CREATE":                    "platform.pricing.manage",
+		"BILLING_PRICE_DRAFT_UPDATE":                    "platform.pricing.manage",
+		"BILLING_PRICE_PUBLISH":                         "platform.pricing.manage",
+		"BILLING_PRICE_TRANSITION":                      "platform.pricing.manage",
+		"BILLING_METERING_UNIT_CREATE":                  "platform.pricing.manage",
+		"BILLING_METERING_UNIT_DEACTIVATE":              "platform.pricing.manage",
 		"BILLING_MANUAL_REVIEW_SLA_ESCALATE":            "internal.billing.manual-review.escalate",
 		"EVENT_OUTBOX_RELAY":                            "internal.events.relay",
 		"ACCOUNT_USER_STATUS_CHANGE":                    "platform.users.status.manage",
@@ -161,13 +167,75 @@ func buildPolicies() map[string]Policy {
 		SnapshotSchemaVersion: 1, CriticalResourceFields: []string{"provider_id", "provider_version", "product_id", "provider_control_version", "product_control_version", "catalog_item_id", "catalog_version", "admission_version", "mapping_id", "mapping_version", "probe_order_id", "policy_version", "observation_high_watermark", "evaluation_high_watermark"},
 		ExpiresAfter: 24 * time.Hour, ExecutionWindow: 5 * time.Minute, ExecutorIdentity: "billing-command-executor",
 	}
+	addTokenGovernancePolicies(result)
 	return result
 }
 
 // Executable is the installed, closed approval command set.
 func Executable(command string) bool {
 	switch strings.ToUpper(strings.TrimSpace(command)) {
-	case "WALLET_ADJUSTMENT", "PAYMENT_PROVIDER_RESUME", "PAYMENT_PRODUCT_RESUME":
+	case "WALLET_ADJUSTMENT", "PAYMENT_PROVIDER_RESUME", "PAYMENT_PRODUCT_RESUME", "TOKEN_MODEL_LIFECYCLE_CHANGE", "TOKEN_MODEL_CATALOG_ROLLBACK", "TOKEN_CREDENTIAL_REVOKE":
+		return true
+	}
+	return false
+}
+
+func addTokenGovernancePolicies(result map[string]Policy) {
+	audit := func(commandType string, version int64, permission string, snapshotVersion int, fields ...string) {
+		result[commandType] = Policy{
+			CommandType: commandType, PolicyVersion: version, Mode: AuditOnly,
+			RequesterPermission: permission, RiskClass: "GOVERNANCE_OR_NORMAL_STATE_MACHINE",
+			ApprovalCount: 0, SelfApprovalForbidden: false, SnapshotSchemaVersion: snapshotVersion,
+			CriticalResourceFields: fields, ExpiresAfter: 24 * time.Hour,
+			ExecutionWindow: 5 * time.Minute, ExecutorIdentity: "requesting-domain-service",
+		}
+	}
+	// The installed eighteen management policies retain the immutable Account
+	// migration contracts. Usage reconciliation is installed with F05 execution.
+	audit("TOKEN_PROTOCOL_DRAFT_CREATE", 1, "platform.pricing.manage", 1, "protocol_code", "expected_protocol_head_version", "request_fingerprint")
+	audit("TOKEN_PROTOCOL_PUBLISH", 1, "platform.pricing.manage", 1, "protocol_definition_id", "expected_protocol_version", "draft_etag", "request_fingerprint")
+	audit("TOKEN_FORMULA_DRAFT_CREATE", 1, "platform.pricing.manage", 1, "protocol_definition_id", "expected_protocol_version", "expected_formula_head_version", "request_fingerprint")
+	audit("TOKEN_FORMULA_PUBLISH", 1, "platform.pricing.manage", 1, "formula_version_id", "expected_formula_version", "draft_etag", "request_fingerprint")
+
+	audit("TOKEN_MODEL_DRAFT_SAVE", 2, "platform.models.manage", 2, "model_id", "expected_catalog_version", "expected_draft_version", "precheck_fingerprint", "request_fingerprint")
+	audit("TOKEN_MODEL_PUBLISH", 2, "platform.models.manage", 2, "model_id", "expected_catalog_version", "expected_draft_version", "precheck_fingerprint", "request_fingerprint")
+	result["TOKEN_MODEL_LIFECYCLE_CHANGE"] = Policy{
+		CommandType: "TOKEN_MODEL_LIFECYCLE_CHANGE", PolicyVersion: 2, Mode: ApprovalRequired,
+		RequesterPermission: "platform.models.lifecycle.request", ApproverPermission: "platform.models.lifecycle.approve",
+		RiskClass: "GOVERNANCE_OR_NORMAL_STATE_MACHINE", ApprovalCount: 1, SelfApprovalForbidden: true,
+		SnapshotSchemaVersion: 2, CriticalResourceFields: []string{"model_id", "catalog_version", "current_lifecycle", "target_lifecycle", "lifecycle_plan_version", "effective_at", "existing_session_cutoff_at", "replacement_model_id", "billing_price_version", "route_set_fingerprint", "provisioning_set_fingerprint", "inflight_request_set_fingerprint", "policy_version"},
+		ExpiresAfter: 24 * time.Hour, ExecutionWindow: 5 * time.Minute, ExecutorIdentity: "token-command-executor",
+	}
+	audit("TOKEN_MODEL_CATALOG_SYNC", 2, "platform.models.sync", 2, "expected_catalog_version", "adapter_observed_version", "catalog_diff_fingerprint", "request_fingerprint")
+	result["TOKEN_MODEL_CATALOG_ROLLBACK"] = Policy{
+		CommandType: "TOKEN_MODEL_CATALOG_ROLLBACK", PolicyVersion: 2, Mode: ApprovalRequired,
+		RequesterPermission: "platform.models.catalog.rollback.request", ApproverPermission: "platform.models.catalog.rollback.approve",
+		RiskClass: "GOVERNANCE_OR_NORMAL_STATE_MACHINE", ApprovalCount: 1, SelfApprovalForbidden: true,
+		SnapshotSchemaVersion: 2, CriticalResourceFields: []string{"current_catalog_version", "source_catalog_version", "catalog_diff_fingerprint", "billing_price_version", "route_set_fingerprint", "provisioning_set_fingerprint", "inflight_request_set_fingerprint", "policy_version"},
+		ExpiresAfter: 24 * time.Hour, ExecutionWindow: 5 * time.Minute, ExecutorIdentity: "token-command-executor",
+	}
+	audit("TOKEN_ACCOUNT_CREATE", 3, "platform.tokens.manage", 3, "owner_type", "owner_id", "owner_authorization_version", "owner_version", "owner_identity_digest", "owner_account_count", "owner_account_cap", "owner_account_cap_policy_version", "creation_version", "precheck_fingerprint", "request_fingerprint")
+	audit("TOKEN_ACCOUNT_STATUS_CHANGE", 2, "platform.tokens.manage", 2, "token_account_id", "expected_account_version", "target_status", "precheck_fingerprint", "request_fingerprint")
+	audit("TOKEN_ROUTE_UPSERT", 3, "platform.tokens.manage", 3, "token_account_id", "expected_account_version", "expected_route_version", "model_id", "protocol_version_id", "precheck_fingerprint", "request_fingerprint")
+	audit("TOKEN_ROUTE_DELETE", 2, "platform.tokens.manage", 2, "token_account_id", "route_id", "expected_account_version", "expected_route_version", "precheck_fingerprint", "request_fingerprint")
+	audit("TOKEN_CREDENTIAL_ENROLL", 1, "platform.tokens.manage", 1, "token_account_id", "expected_account_version", "credential_slot_version", "launch_fingerprint")
+	audit("TOKEN_CREDENTIAL_ROTATE", 1, "platform.tokens.manage", 1, "token_account_id", "expected_account_version", "active_credential_version", "launch_fingerprint")
+	result["TOKEN_CREDENTIAL_REVOKE"] = Policy{
+		CommandType: "TOKEN_CREDENTIAL_REVOKE", PolicyVersion: 1, Mode: ApprovalRequired,
+		RequesterPermission: "platform.tokens.credentials.revoke.request", ApproverPermission: "platform.tokens.credentials.revoke.approve",
+		RiskClass: "GOVERNANCE_OR_NORMAL_STATE_MACHINE", ApprovalCount: 1, SelfApprovalForbidden: true,
+		SnapshotSchemaVersion: 1, CriticalResourceFields: []string{"token_account_id", "token_account_version", "credential_id", "credential_version", "credential_status", "credential_fingerprint", "active_route_set_fingerprint", "provisioning_lease_set_fingerprint", "inflight_request_set_fingerprint", "replacement_credential_version", "policy_version"},
+		ExpiresAfter: 24 * time.Hour, ExecutionWindow: 5 * time.Minute, ExecutorIdentity: "token-command-executor",
+	}
+	audit("TOKEN_CREDENTIAL_VALIDATE", 2, "platform.tokens.credentials.validate", 2, "token_account_id", "expected_account_version", "credential_id", "credential_version", "precheck_fingerprint", "request_fingerprint")
+	audit("TOKEN_ROUTE_PROVISIONING_REPAIR", 2, "platform.tokens.manage", 2, "provisioning_id", "expected_provisioning_version", "target_generation", "precheck_fingerprint", "request_fingerprint")
+}
+
+// TokenExecutableApproval is the delivered, finite Token approval family.
+// Account additionally requires the persistent current governance activation.
+func TokenExecutableApproval(commandType string) bool {
+	switch strings.ToUpper(strings.TrimSpace(commandType)) {
+	case "TOKEN_MODEL_LIFECYCLE_CHANGE", "TOKEN_MODEL_CATALOG_ROLLBACK", "TOKEN_CREDENTIAL_REVOKE":
 		return true
 	}
 	return false

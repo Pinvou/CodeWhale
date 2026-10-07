@@ -19,6 +19,15 @@ import (
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "token-consumers" {
+		raw, err := runTokenResources(os.Args[1:], os.Getenv)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "TOKEN_APPROVAL_RESOURCES_BLOCKED")
+			os.Exit(1)
+		}
+		fmt.Println(string(raw))
+		return
+	}
 	if len(os.Args) == 2 && os.Args[1] == "render" {
 		result, err := renderPublicResources(os.Getenv)
 		if err != nil {
@@ -76,7 +85,7 @@ func run(args []string, environment func(string) string) (account.AdminApprovalC
 		}
 	} else if step == account.FreshApprovalActivate || step == account.FreshApprovalResume {
 		callback = func(ctx context.Context, control account.AdminApprovalControl) (json.RawMessage, error) {
-			facts, err := events.CheckFreshApprovalConsumers(ctx, environment("NATS_URL"), cfg, files)
+			facts, err := events.CheckCurrentApprovalConsumers(ctx, environment("NATS_URL"), cfg, files)
 			if err != nil {
 				return nil, err
 			}

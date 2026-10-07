@@ -31,6 +31,16 @@ func (r *PostgresRepository) ConfirmOriginalApprovalSuccess(ctx context.Context,
 			return ErrApprovalRecoveryConfirmConflict
 		}
 		domainResult, ledgerReferences = result.DomainResult, result.LedgerReferences
+	} else if candidate.Workload == approvalconsumer.TokenWorkload {
+		if result.CommandReference == nil || *result.CommandReference == uuid.Nil || len(result.DomainResult) != 0 || len(result.LedgerReferences) != 0 {
+			return ErrApprovalRecoveryConfirmConflict
+		}
+		var err error
+		domainResult, err = json.Marshal(map[string]any{"command_reference": result.CommandReference, "status": "SUCCEEDED"})
+		if err != nil {
+			return ErrApprovalRecoveryConfirmConflict
+		}
+		ledgerReferences = json.RawMessage(`{}`)
 	} else {
 		return ErrApprovalRecoveryConfirmConflict
 	}
@@ -91,7 +101,8 @@ FROM approval_recovery_query_leases WHERE approval_request_id=$1 FOR UPDATE`, ca
 		return err
 	}
 	if delivery.ExecutionStatus == nil || *delivery.ExecutionStatus != executionStatus || delivery.DomainAttemptCount > 1 ||
-		(candidate.Workload == approvalconsumer.BillingWorkload && delivery.DomainAttemptCount != 1) {
+		(candidate.Workload == approvalconsumer.BillingWorkload && delivery.DomainAttemptCount != 1) ||
+		(candidate.Workload == approvalconsumer.TokenWorkload && delivery.DomainAttemptCount != 0) {
 		return ErrApprovalRecoveryConfirmConflict
 	}
 	// Row locks may wait beyond the query lease. Re-read the database's live

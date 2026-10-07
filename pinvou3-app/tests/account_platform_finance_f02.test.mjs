@@ -14,7 +14,8 @@ test('lost submitted approval ACK reuses creation identity and never adopts a di
   const creates = []; let submits = 0;
   const client = { governedApprovalRequests: async () => ({ items: [detail] }), createGovernedApprovalDraft: async value => { creates.push(value); return ID; }, governedApprovalRequest: async () => detail, submitGovernedApprovalRequest: async () => { submits++; } };
   assert.equal((await createAndSubmitFreshGovernedApproval(client, draft)).approval_request_id, ID);
-  assert.deepEqual(creates, [draft]); assert.equal(submits, 0);
+  // The active replay rechecks the original immutable intent with the same key.
+  assert.deepEqual(creates, [draft, draft]); assert.equal(submits, 0);
   client.createGovernedApprovalDraft = async () => { throw Object.assign(new Error('another invocation is blocked'), { status: 409 }); };
   await assert.rejects(createAndSubmitFreshGovernedApproval(client, { ...draft, idempotency_key: 'different-logical-key' }), error => error.status === 409);
 });

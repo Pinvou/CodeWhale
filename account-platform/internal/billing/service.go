@@ -25,17 +25,20 @@ import (
 )
 
 type Service struct {
-	repository           Repository
-	payments             *PaymentCoordinator
-	authorizer           *authorization.Client
-	approvalGate         ApprovalExecutionGate
-	callbackAuth         *paymentcallback.Authenticator
-	callbackProfiles     *paymentcallback.Profiles
-	humanDelegations     *humandelegation.Verifier
-	catalog              RechargeProductCatalogRepository
-	catalogCreateOptions RechargeProductCreateOptionsRepository
-	approvalEffects      ApprovalEffectReader
-	now                  func() time.Time
+	impactPricing               impactPriceRepository
+	modelPriceProjectionEnabled bool
+	modelPriceProjectionMetrics *modelPriceProjectionMetrics
+	repository                  Repository
+	payments                    *PaymentCoordinator
+	authorizer                  *authorization.Client
+	approvalGate                ApprovalExecutionGate
+	callbackAuth                *paymentcallback.Authenticator
+	callbackProfiles            *paymentcallback.Profiles
+	humanDelegations            *humandelegation.Verifier
+	catalog                     RechargeProductCatalogRepository
+	catalogCreateOptions        RechargeProductCreateOptionsRepository
+	approvalEffects             ApprovalEffectReader
+	now                         func() time.Time
 }
 
 func (s *Service) WithRechargeProductCatalog(catalog RechargeProductCatalogRepository) *Service {
@@ -45,9 +48,15 @@ func (s *Service) WithRechargeProductCatalog(catalog RechargeProductCatalogRepos
 }
 
 func NewService(repository Repository) *Service {
-	service := &Service{repository: repository, now: func() time.Time { return time.Now().UTC() }}
+	service := &Service{repository: repository, now: func() time.Time { return time.Now().UTC() }, modelPriceProjectionMetrics: newModelPriceProjectionMetrics()}
+	service.impactPricing, _ = repository.(impactPriceRepository)
 	service.approvalEffects, _ = repository.(ApprovalEffectReader)
 	return service
+}
+
+func (s *Service) WithImpactPriceRepository(repository impactPriceRepository) *Service {
+	s.impactPricing = repository
+	return s
 }
 
 func (s *Service) WithPayments(payments *PaymentCoordinator) *Service {
@@ -89,6 +98,15 @@ func (s *Service) Handler(serviceToken string, adminVerify ...identity.VerifyFun
 	protected.GET("/internal/v1/approval-recovery/results/:approval_request_id", serviceauth.Require("internal.billing.approval-result.read"), httpserver.AdaptFunc(s.billingApprovalRecoveryResult))
 	protected.POST("/internal/v1/wallets/ensure", serviceauth.Require("internal.billing.wallet.ensure"), httpserver.AdaptFunc(s.ensureWallet))
 	protected.GET("/internal/v1/wallets/:wallet_id/balance", serviceauth.Require("internal.billing.wallet.read"), httpserver.AdaptFunc(s.getBalance))
+	if _, supported := s.repository.(managementHoldRepository); supported {
+		protected.POST("/internal/v1/holds/reserve", serviceauth.Require("internal.billing.hold.reserve"), httpserver.AdaptFunc(s.reserve))
+		protected.POST("/internal/v1/holds/release", serviceauth.Require("internal.billing.hold.release"), httpserver.AdaptFunc(s.release))
+	}
+	protected.GET("/internal/v1/pricing/current", serviceauth.Require("internal.billing.pricing.read"), httpserver.AdaptFunc(s.currentPrice))
+	protected.GET("/internal/v1/pricing/:price_version_id", serviceauth.Require("internal.billing.pricing.read"), httpserver.AdaptFunc(s.priceByID))
+	protected.POST("/internal/v1/pricing/impact-coverage", serviceauth.Require("internal.billing.pricing.read"), httpserver.AdaptFunc(s.impactPriceCoverage))
+	protected.POST("/internal/v1/pricing/formula-bindings/validate", serviceauth.Require("internal.billing.pricing.read"), httpserver.AdaptFunc(s.validateFormulaDraftUnits))
+	protected.PUT("/internal/v1/pricing/formula-bindings/:formula_version_id", serviceauth.Require("internal.billing.pricing.bind"), httpserver.AdaptFunc(s.putFormulaBinding))
 	protected.GET("/internal/v1/entitlement-packages", serviceauth.Require("internal.billing.entitlement.read"), httpserver.AdaptFunc(s.listEntitlementPackages))
 	if s.catalog != nil {
 		protected.POST("/internal/v1/product-admission-verifications/:verification_id/complete", serviceauth.Require("internal.billing.product-admission.verify"), httpserver.AdaptFunc(s.completeProductAdmissionVerification))
@@ -192,6 +210,18 @@ func (s *Service) Handler(serviceToken string, adminVerify ...identity.VerifyFun
 		if s.catalog != nil {
 			admin.POST("/recharge-products/:catalog_item_id/display-names", s.authorizer.Require("platform.products.publish"), s.requireRecentProductAuthentication(), approvalpolicy.Require("BILLING_RECHARGE_PRODUCT_DISPLAY_NAMES_UPDATE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminUpdateRechargeProductDisplayNames))
 		}
+		admin.GET("/models/:model_id/price-projection", s.authorizer.Require("platform.pricing.read"), httpserver.AdaptFunc(s.adminModelPriceProjection))
+		admin.GET("/finance-overviews/pricing", s.authorizer.Require("platform.pricing.read"), httpserver.AdaptFunc(s.adminFinancePricingOverview))
+		admin.GET("/pricing-versions", s.authorizer.Require("platform.pricing.read"), httpserver.AdaptFunc(s.adminPriceVersions))
+		admin.POST("/pricing/drafts", s.authorizer.Require("platform.pricing.manage"), approvalpolicy.Require("BILLING_PRICE_DRAFT_CREATE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminCreatePriceDraftV2))
+		admin.GET("/pricing", s.authorizer.Require("platform.pricing.read"), httpserver.AdaptFunc(s.adminManagedPrices))
+		admin.PUT("/pricing/:price_version_id/draft", s.authorizer.Require("platform.pricing.manage"), approvalpolicy.Require("BILLING_PRICE_DRAFT_UPDATE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminUpdatePriceDraft))
+		admin.GET("/pricing/:price_version_id/preview", s.authorizer.Require("platform.pricing.read"), httpserver.AdaptFunc(s.adminPreviewPrice))
+		admin.POST("/pricing/:price_version_id/publish", s.authorizer.Require("platform.pricing.manage"), approvalpolicy.Require("BILLING_PRICE_PUBLISH", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminPublishPrice))
+		admin.POST("/pricing/:price_version_id/transition", s.authorizer.Require("platform.pricing.manage"), approvalpolicy.Require("BILLING_PRICE_TRANSITION", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminTransitionPrice))
+		admin.GET("/metering-units", s.authorizer.Require("platform.pricing.read"), httpserver.AdaptFunc(s.adminMeteringUnits))
+		admin.POST("/metering-units", s.authorizer.Require("platform.pricing.manage"), approvalpolicy.Require("BILLING_METERING_UNIT_CREATE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminCreateMeteringUnit))
+		admin.POST("/metering-units/:unit_definition_id/deactivate", s.authorizer.Require("platform.pricing.manage"), approvalpolicy.Require("BILLING_METERING_UNIT_DEACTIVATE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminDeactivateMeteringUnit))
 		admin.GET("/payment-orders", s.authorizer.Require("platform.billing.wallets.read"), httpserver.AdaptFunc(s.adminPaymentOrders))
 		admin.GET("/refunds", s.authorizer.Require("platform.billing.wallets.read"), httpserver.AdaptFunc(s.adminRefunds))
 		admin.GET("/payment-orders/:order_id", s.authorizer.Require("platform.billing.wallets.read"), httpserver.AdaptFunc(s.adminPaymentOrderDetail))

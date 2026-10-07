@@ -3,31 +3,67 @@ package approvalconsumer
 import "testing"
 
 func TestInstalledBillingConsumptionAndRecoveryFences(t *testing.T) {
-	all := All()
-	if len(all) != 3 || len(BillingCommands()) != 3 {
-		t.Fatal("consumer set expanded")
+	want := map[string]Descriptor{
+		"WALLET_ADJUSTMENT":            {CommandType: "WALLET_ADJUSTMENT", PolicyVersion: 1, ExecutorIdentity: BillingWorkload, Durable: "billing-wallet-adjustment-executor-p1-v1", Workload: BillingWorkload, StartSource: StartQuiescingHighWatermarkPlusOne},
+		"PAYMENT_PROVIDER_RESUME":      {CommandType: "PAYMENT_PROVIDER_RESUME", PolicyVersion: 2, ExecutorIdentity: BillingWorkload, Durable: "billing-payment-provider-resume-executor-p2-v1", Workload: BillingWorkload, StartSource: StartQuiescingHighWatermarkPlusOne},
+		"PAYMENT_PRODUCT_RESUME":       {CommandType: "PAYMENT_PRODUCT_RESUME", PolicyVersion: 1, ExecutorIdentity: BillingWorkload, Durable: "billing-payment-product-resume-executor-p1-v1", Workload: BillingWorkload, StartSource: StartQuiescingHighWatermarkPlusOne},
+		"TOKEN_MODEL_LIFECYCLE_CHANGE": {CommandType: "TOKEN_MODEL_LIFECYCLE_CHANGE", PolicyVersion: 2, ExecutorIdentity: TokenWorkload, Durable: "token-model-lifecycle-executor-v1", Workload: TokenWorkload, StartSource: StartExisting},
+		"TOKEN_MODEL_CATALOG_ROLLBACK": {CommandType: "TOKEN_MODEL_CATALOG_ROLLBACK", PolicyVersion: 2, ExecutorIdentity: TokenWorkload, Durable: "token-catalog-rollback-executor-v1", Workload: TokenWorkload, StartSource: StartExisting},
+		"TOKEN_CREDENTIAL_REVOKE":      {CommandType: "TOKEN_CREDENTIAL_REVOKE", PolicyVersion: 1, ExecutorIdentity: TokenWorkload, Durable: "token-credential-revoke-executor-v1", Workload: TokenWorkload, StartSource: StartExisting},
 	}
+	all := All()
+	if len(all) != len(want) || len(BillingCommands()) != 3 || len(TokenCommands()) != 3 {
+		t.Fatal("installed consumer set differs")
+	}
+	seen := make(map[string]bool)
 	for _, d := range all {
-		if d.Workload != BillingWorkload || d.StartSource != StartQuiescingHighWatermarkPlusOne || !Match(d, d.CommandType, d.PolicyVersion, d.ExecutorIdentity) || !MatchRoute(LegacyBilling(), d.CommandType, d.PolicyVersion, d.ExecutorIdentity) {
+		if expected, ok := want[d.CommandType]; !ok || expected != d || seen[d.CommandType] {
+			t.Fatalf("delivery contract differs: %s", d.CommandType)
+		}
+		seen[d.CommandType] = true
+		if !Match(d, d.CommandType, d.PolicyVersion, d.ExecutorIdentity) || !MatchRoute(d, d.CommandType, d.PolicyVersion, d.ExecutorIdentity) {
 			t.Fatal("registered delivery contract lost")
+		}
+		otherWorkload := TokenWorkload
+		if d.Workload == BillingWorkload {
+			if !MatchRoute(LegacyBilling(), d.CommandType, d.PolicyVersion, d.ExecutorIdentity) {
+				t.Fatal("legacy Billing routing lost")
+			}
+		} else {
+			otherWorkload = BillingWorkload
+			if MatchRoute(LegacyBilling(), d.CommandType, d.PolicyVersion, d.ExecutorIdentity) {
+				t.Fatal("legacy Billing route accepted Token authority")
+			}
 		}
 		forged := d
 		forged.PolicyVersion++
-		if Match(forged, forged.CommandType, forged.PolicyVersion, forged.ExecutorIdentity) || Match(d, d.CommandType, d.PolicyVersion, "token-command-executor") {
+		if Match(forged, forged.CommandType, forged.PolicyVersion, forged.ExecutorIdentity) || Match(d, d.CommandType, d.PolicyVersion, otherWorkload) {
 			t.Fatal("forged execution mapping accepted")
 		}
 		for _, code := range []string{"DOMAIN_REVISION_CHANGED", "DOMAIN_RESOURCE_NOT_FOUND", "DOMAIN_PRECONDITION_REJECTED", "transport_timeout", ""} {
-			a := ClassifyProofFailure(d.CommandType, d.PolicyVersion, code)
-			if !a.QueryOnly || a.Retryable || a.MaxDomainAttempts != 1 {
+			assessment := ClassifyProofFailure(d.CommandType, d.PolicyVersion, code)
+			if !assessment.QueryOnly || assessment.Retryable || assessment.MaxDomainAttempts != 1 {
 				t.Fatal("classification authorized another effect")
+			}
+		}
+	}
+	for _, group := range []struct {
+		items    []Descriptor
+		workload string
+	}{{BillingCommands(), BillingWorkload}, {TokenCommands(), TokenWorkload}} {
+		for _, d := range group.items {
+			if d != want[d.CommandType] || d.Workload != group.workload {
+				t.Fatal("workload subset differs")
 			}
 		}
 	}
 	if Match(LegacyBilling(), "WALLET_ADJUSTMENT", 1, BillingWorkload) {
 		t.Fatal("shared routing descriptor granted execution")
 	}
-	if _, ok := LookupDurable("token-command-executor-v1"); ok {
-		t.Fatal("future Token executor installed")
+	for _, durable := range []string{"token-command-executor-v1", "token-usage-reconciliation-executor-v1", "token-organization-executor-v1"} {
+		if _, ok := LookupDurable(durable); ok {
+			t.Fatalf("undelivered executor installed: %s", durable)
+		}
 	}
 	first := all[0]
 	all[0].Durable = "tampered"

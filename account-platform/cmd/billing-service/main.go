@@ -71,7 +71,11 @@ func main() {
 	if err != nil {
 		log.Fatal("BILLING_APPROVAL_GATE_CONFIGURATION_INVALID")
 	}
-	service := billing.NewService(repository).WithPayments(payments).WithRechargeProductCatalog(repository).WithAuthorizer(authorizer).WithApprovalExecutionGate(gate)
+	modelPriceProjectionEnabled, err := optionalBooleanEnvironment("BILLING_ADMIN_MODEL_PRICE_PROJECTION_ENABLED", false)
+	if err != nil {
+		log.Fatal("BILLING_MODEL_PRICE_PROJECTION_CONFIGURATION_INVALID")
+	}
+	service := billing.NewService(repository).WithPayments(payments).WithRechargeProductCatalog(repository).WithAuthorizer(authorizer).WithApprovalExecutionGate(gate).WithAdminModelPriceProjection(modelPriceProjectionEnabled)
 	keys, err := humandelegation.DecodeVerificationKeysJSON(os.Getenv("HUMAN_DELEGATION_VERIFICATION_KEYS_JSON"))
 	if err != nil {
 		log.Fatal("BILLING_HUMAN_DELEGATION_KEYS_INVALID")
@@ -156,7 +160,8 @@ func main() {
 		_, err := billingApprovalConsumerResources(time.Now().UTC())
 		return err
 	}
-	if err := httpserver.RunWithApplicationAndCollectors("billing-service", handler, ready, repository.AdminPaginationCollectors()...); err != nil {
+	collectors := append(repository.AdminPaginationCollectors(), service.AdminModelPriceProjectionCollectors()...)
+	if err := httpserver.RunWithApplicationAndCollectors("billing-service", handler, ready, collectors...); err != nil {
 		log.Fatal("BILLING_SERVER_FAILED")
 	}
 }
