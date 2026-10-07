@@ -56,8 +56,8 @@ merge, or release. Those stay with the maintainer.
    ```bash
    for N in 3101 3102 3103; do
      if gh issue edit "$N" --repo codewhale-hq/Codewhale \
-          --milestone "v0.8.61" >/dev/null 2>&1; then
-       echo "ok   #$N -> v0.8.61"
+          --milestone "<milestone-title>" >/dev/null 2>&1; then
+       echo "ok   #$N -> <milestone-title>"
      else
        echo "FAIL #$N (PR? closed? bad milestone title?)"
      fi

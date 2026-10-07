@@ -110,9 +110,10 @@ Only output English for:\n\
 - Code identifiers (variable names, function names, file paths)\n\
 - Technical terms that lack a standard translation in {target_language}\n\
 - Code blocks the user explicitly requests in English\n\n\
-This is a hard display requirement for this session: every turn is \
-translated for a {target_language}-reading audience, so English prose that \
-slips into your response may reach the user untranslated. \
+This is a hard display requirement for this session: predominantly-English \
+turns are machine-translated before display for a {target_language}-reading \
+audience, so English prose that slips into your response may reach the user \
+untranslated. \
 This overrides the ## Language rule for this session."
     )
 }
@@ -3347,6 +3348,15 @@ mod tests {
                 && LOCALE_PREAMBLE_ZH_HANS.contains("reasoning_content")
                 && LOCALE_CLOSER_ZH_HANS.contains("reasoning_content"),
             "language segment and locale bookends must keep the reasoning_content anchor"
+        );
+        assert!(
+            LANGUAGE_PROMPT.contains("precedence for the session language"),
+            "the language rule must keep its declared deference to native-script locale bookends"
+        );
+        assert!(
+            translation_output_instruction("zh-Hans")
+                .contains("predominantly-English turns are machine-translated"),
+            "the translation block must describe the detector-gated interception layer, not a guarantee"
         );
     }
 

@@ -2671,7 +2671,7 @@ impl ToolSpec for ListDirTool {
     }
 
     fn description(&self) -> &'static str {
-        "List entries in a workspace directory. The listing is capped at 500 entries: past the cap the response switches to an object with `entries`, `listed_entries`, `total_entries`, and `truncated`, so check `truncated` before treating the result as complete. For name or content search use `file_search` or `grep_files` instead."
+        "List entries in a workspace directory. The listing is capped at 500 entries: past the cap the response switches to an object with `entries`, `listed_entries`, `total_entries`, and `truncated`, so check `truncated` before treating the result as complete. For name or content search use `file_search` or `grep_files` instead (activate either with `tool_search` first if it is not in your tool list)."
     }
 
     fn input_schema(&self) -> Value {

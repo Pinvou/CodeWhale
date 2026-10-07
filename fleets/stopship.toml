@@ -8,8 +8,9 @@
 #   1. $CODEWHALE_HOME/fleets/stopship.toml
 #   2. <workspace>/fleets/stopship.toml  (this file)
 #
-# Values use the canonical Fleet role vocabulary (scout, builder, reviewer,
-# verifier, advisor); keys are the workflow's own step names.
+# Values are Fleet role tokens (scout, builder, reviewer, verifier, advisor —
+# legacy-alias spellings that resolve at the spawn boundary); keys are the
+# workflow's own step names.
 
 name = "stopship"
 description = "Read-only current release orchestration acceptance fleet"
