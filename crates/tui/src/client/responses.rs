@@ -813,6 +813,12 @@ pub(super) fn convert_messages_to_responses_input(
     let fingerprintless_replay_official = provider
         .kind()
         .is_some_and(|kind| provider_base_url_is_official(kind, current_base_url));
+    // Replay rides the same predicate that sends the `include`: a provider
+    // whose body omits `include: ["reasoning.encrypted_content"]` (DeepSeek's
+    // plain `reasoning_text`, Concentrate's documented-fields contract) must
+    // never receive an encrypted replay item either, so the replay gate
+    // cannot drift from the include gate.
+    let replays_encrypted_reasoning = responses_route_sends_encrypted_reasoning_include(provider);
     let mut items = Vec::new();
 
     for msg in &request.messages {
@@ -927,7 +933,8 @@ pub(super) fn convert_messages_to_responses_input(
                                     }
                                     Some(captured) => captured == reasoning_endpoint_fingerprint,
                                 };
-                                if state.provider == reasoning_provider_tag
+                                if replays_encrypted_reasoning
+                                    && state.provider == reasoning_provider_tag
                                     && state.api == "openai-responses"
                                     && state.model == request.model
                                     && endpoint_matches

@@ -1577,19 +1577,26 @@ async fn forkguard_custom_chat_stream_does_not_capture_encrypted_reasoning() {
         .await
         .unwrap();
     let mut captured = None;
+    let mut blocks_closed = 0;
     while let Some(event) = stream.next().await {
-        if let StreamEvent::ContentBlockDelta {
-            delta: Delta::ReasoningStateDelta { state },
-            ..
-        } = event.unwrap()
-        {
-            captured = Some(state);
+        match event.unwrap() {
+            StreamEvent::ContentBlockDelta {
+                delta: Delta::ReasoningStateDelta { state },
+                ..
+            } => captured = Some(state),
+            StreamEvent::ContentBlockStop { .. } => blocks_closed += 1,
+            _ => {}
         }
     }
     assert!(
         captured.is_none(),
         "a Chat-wire Custom table must not mint opaque reasoning state: {captured:?}"
     );
+    // The fixture carries exactly one reasoning item whose done event closes
+    // its block. Asserting the close proves the stream actually flowed
+    // through the parser, so the empty capture above is the transport-wire
+    // gate's doing — not a dead stream passing the test vacuously.
+    assert_eq!(blocks_closed, 1, "the reasoning block must still close");
 }
 
 /// A reasoning item without (or with an empty) `encrypted_content` must not
@@ -1972,6 +1979,54 @@ fn forkguard_repointed_builtin_legacy_state_without_fingerprint_fails_closed() {
     );
 }
 
+/// Replay rides the same predicate that sends the `include`: Concentrate's
+/// body deliberately omits `include: ["reasoning.encrypted_content"]`
+/// (documented fields only), so even a Concentrate-tagged encrypted state
+/// that matches tag, api, model, and endpoint must not be attached — the
+/// replay gate cannot drift from the include gate. Deleting the predicate
+/// half of the gate fails exactly this pin.
+#[test]
+fn forkguard_replay_never_rides_a_route_that_omits_the_include() {
+    const SENTINEL: &str = "readable private reasoning must not be replayed";
+    let state = OpaqueReasoningState {
+        provider: ApiProvider::Concentrate.as_str().to_string(),
+        api: "openai-responses".to_string(),
+        model: "gpt-5.5".to_string(),
+        id: Some("rs_concentrate".to_string()),
+        encrypted_content: "enc_concentrate_payload".to_string(),
+        endpoint: Some("fp-concentrate-endpoint".to_string()),
+    };
+    let mut request = minimal_responses_request();
+    request.messages.insert(
+        0,
+        Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::Thinking {
+                thinking: SENTINEL.to_string(),
+                signature: None,
+                state: Some(state),
+            }],
+        },
+    );
+    let body = build_responses_body_for_provider(
+        &request,
+        ApiProvider::Concentrate,
+        ApiProvider::Concentrate.as_str(),
+        "fp-concentrate-endpoint",
+        BODY_TEST_BASE_URL,
+    );
+    assert!(
+        !body.to_string().contains("enc_concentrate_payload"),
+        "a route that omits the include must not receive an encrypted replay item: {body}"
+    );
+    assert!(
+        body.get("input")
+            .and_then(Value::as_array)
+            .is_some_and(|items| items.iter().all(|item| item["type"] != "reasoning")),
+        "{body}"
+    );
+}
+
 /// Capture and replay must agree through the real per-turn client: the state
 /// captured off turn 1's stream, placed back into history the way the turn
 /// loop commits it (a Thinking block ahead of any tool call), reaches turn
@@ -2083,5 +2138,121 @@ async fn forkguard_custom_responses_captured_state_replays_on_the_next_turn() {
     assert_eq!(
         second.pointer("/input/0/id"),
         Some(&serde_json::json!("rs_custom"))
+    );
+}
+
+/// The headline replay bound must compose through real clients, not just the
+/// body builder: the state captured off a live stream at endpoint X has to be
+/// dropped by a client rebuilt — through the production
+/// `resolve_runtime_route` → `from_candidate` path — for the same table after
+/// its `base_url` was edited. The pure gate test above pins the comparison
+/// with hand-written fingerprints; this pins that the capture side and the
+/// replay side derive the same fingerprint from the same URL spelling rules,
+/// so someone normalizing the URL differently per side fails here.
+#[tokio::test]
+async fn forkguard_capture_replay_drops_across_a_base_url_edit() {
+    let server = MockServer::start().await;
+    let sse_body = concat!(
+        "data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"reasoning\",\"id\":\"rs_custom\"}}\n\n",
+        "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"reasoning\",\"id\":\"rs_custom\",\"summary\":[],\"encrypted_content\":\"enc_custom_state\"}}\n\n",
+        "data: [DONE]\n\n",
+    );
+    Mock::given(method("POST"))
+        .and(path("/v1/responses"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("Content-Type", "text/event-stream")
+                .set_body_string(sse_body),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let captured = {
+        let _env_lock = crate::test_support::lock_test_env();
+        let config = crate::test_support::custom_named_table_config(
+            "pinvou_responses",
+            Some("responses"),
+            &format!("{}/v1", server.uri()),
+            "custom-responses-key",
+            "gpt-6-sol",
+        );
+        let route = crate::route_runtime::resolve_runtime_route(
+            &config,
+            ApiProvider::Custom,
+            Some("gpt-6-sol"),
+        )
+        .expect("named table resolves");
+        let client = DeepSeekClient::from_candidate(&route.config, &route.candidate)
+            .expect("per-turn client builds");
+
+        let mut first = minimal_responses_request();
+        first.model = "gpt-6-sol".to_string();
+        let mut stream = client
+            .handle_responses_stream(
+                &client
+                    .prepare_outbound_request(first, true)
+                    .expect("first request prepares"),
+            )
+            .await
+            .unwrap();
+        let mut captured = None;
+        while let Some(event) = stream.next().await {
+            if let StreamEvent::ContentBlockDelta {
+                delta: Delta::ReasoningStateDelta { state },
+                ..
+            } = event.expect("capture-turn stream event")
+            {
+                captured = Some(state);
+            }
+        }
+        captured.expect("state captured at the original endpoint")
+    };
+
+    // Re-point the SAME table at a different endpoint and rebuild through the
+    // production path; the edited URL is never contacted (prepare only).
+    let _env_lock = crate::test_support::lock_test_env();
+    let repointed = crate::test_support::custom_named_table_config(
+        "pinvou_responses",
+        Some("responses"),
+        "https://repointed.example/v1",
+        "custom-responses-key",
+        "gpt-6-sol",
+    );
+    let route = crate::route_runtime::resolve_runtime_route(
+        &repointed,
+        ApiProvider::Custom,
+        Some("gpt-6-sol"),
+    )
+    .expect("repointed table resolves");
+    let client = DeepSeekClient::from_candidate(&route.config, &route.candidate)
+        .expect("per-turn client builds");
+
+    let mut follow_up = minimal_responses_request();
+    follow_up.model = "gpt-6-sol".to_string();
+    follow_up.messages.insert(
+        0,
+        Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::Thinking {
+                thinking: String::new(),
+                signature: None,
+                state: Some(captured),
+            }],
+        },
+    );
+    let prepared = client
+        .prepare_outbound_request(follow_up, true)
+        .expect("second request prepares");
+    let body = &prepared.body;
+    assert!(
+        !body.to_string().contains("enc_custom_state"),
+        "state captured at the old endpoint must not ride the re-pointed table: {body}"
+    );
+    assert!(
+        body.get("input")
+            .and_then(Value::as_array)
+            .is_some_and(|items| items.iter().all(|item| item["type"] != "reasoning")),
+        "{body}"
     );
 }
