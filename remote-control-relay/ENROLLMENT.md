@@ -54,6 +54,14 @@ owned inodes; cleanup failures remain attached to the original primary error.
 Failures after verified publication use the same owner-checked release and
 abandoned-owner recovery path as initialization failures.
 
+Calling `close()` synchronously closes read/write admission. A CAS already
+performing its durable writes finishes under the owner lock; queued and later
+CAS reject with `relay_state_unavailable` during closing and
+`relay_state_closed` after successful close. The captured queue drains before
+lock release; later queued rejections do not perform persistence. No durable
+replacement can overlap owner-lock removal. Concurrent close calls
+share the same release attempt.
+
 Lock unlink and directory sync retry bounded Windows sharing failures. `close()`
 does not report success until release completes. After an exhausted failure the
 object remains in a non-readable `closing` state and retains a process-local
@@ -174,6 +182,19 @@ Callers use:
 
 State CAS conflicts and endpoint revision conflicts are explicit.
 
+Digest-key rotation is not endpoint credential rotation. Replacing the deployment
+HMAC key (including replacing bytes under the same key ID) invalidates existing
+digests; the registry cannot recover them without the previous key. Existing
+endpoint IDs cannot be re-enrolled: active conflicting entries are rejected and
+revoked entries remain terminal. Do not change the HMAC key as routine maintenance.
+An intentional HMAC-key replacement requires re-enrollment of all affected
+clients with fresh endpoint IDs and new credentials through the authenticated
+admin flow, followed by new pairing and configuration on both peers. Revoke the
+old entries through the admin flow; never delete or hand-edit shared state or
+reset other namespaces/Legacy Web data. A new key ID must identify new key
+material. Before revocation or new enrollments, restoring the previous key and
+key ID restores authorization; it does not undo later registry transitions.
+
 `enrollment_registry_capacity_reached` identifies entry-count or shared byte-budget
 rejection, not an infrastructure outage. Capacity validation runs before durable
 writes: primary/backup bytes and revisions stay unchanged, and the store remains
@@ -193,7 +214,11 @@ limits before exposure.
 Recognized lock schemas with an unsupported positive version fail closed with
 `relay_state_lock_unsupported`, even with added fields or an apparently dead PID.
 They are never quarantined or stolen; use a compatible Relay version or an
-operator-controlled offline upgrade. Empty/truncated crash-lock recovery is unchanged.
+operator-controlled offline upgrade. Locks exceeding the 4096-byte read bound,
+invalid UTF-8 or a file/identity safety check fail with
+`relay_state_lock_unreadable`; other read errors also propagate without stealing
+the lock. These files are never quarantined or removed by recovery. Fully read
+empty/truncated UTF-8 crash-lock recovery is unchanged.
 
 For `revoke`, the expected endpoint revision is syntax-checked for every call
 and compared before an active-to-revoked transition. An already revoked entry
