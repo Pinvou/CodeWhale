@@ -15,20 +15,21 @@ call `grep_files` (activate it with `tool_search` if it is not in your tool
 list) or the built-in `read` tool to confirm it exists in the workspace.
 
 ```
-# Bad:  edit_file path="src/config/loader.rs" (assumed from memory)
+# Bad:  edit path="src/config/loader.rs" (assumed from memory)
 # Good: grep_files pattern="pub fn load_config" → confirms src/config/mod.rs:42
 #        then reference src/config/mod.rs:42
 ```
 
-Failure avoided: `edit_file` errors on non-existent paths; LSP diagnostics
+Failure avoided: writing against a path you never confirmed; LSP diagnostics
 on hallucinated symbols.
 
 ## 2. Spawn a verifier sub-agent before multi-file execution
 
-Before executing a plan that touches 3+ files, spawn a read-only verifier
-sub-agent (`type: "test"`) to read the target files and confirm path/symbol
-assumptions still hold. Keep the call provider-neutral: route models through
-the operator's `[subagents]` per-role configuration, not call fields.
+Before executing a plan that touches 3+ files, spawn a verifier sub-agent
+(`type: "test"` — it cannot edit the workspace) to read the target files and
+confirm path/symbol assumptions still hold. Keep the call provider-neutral:
+route models through the operator's `[subagents]` per-role configuration,
+not call fields.
 
 ```
 agent action="start" type="test"

@@ -32,8 +32,9 @@ Discovery paths, in precedence order:
 
 Use skills for model instructions, workflows, and lightweight conventions. Use
 MCP for live external APIs or durable tools. Use hooks for automatic local
-events. Use plugin folders only as packaging/scaffolding until a real plugin
-loader exists.
+events. Use plugin folders for versioned, trust-gated packaging — the plugin
+loader activates a bundle's Skills, MCP servers, Commands, Agents, and Hooks
+(see the plugin-creator skill).
 
 ## Minimum Shape
 

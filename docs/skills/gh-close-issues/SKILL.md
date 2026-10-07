@@ -70,8 +70,9 @@ If the fix is not on the branch yet, or only partially addresses the report,
    duplicates, point to the canonical issue instead of closing silently.
 
 6. **Preserve PR/harvest credit.** Issues are closed by hand; harvested *PRs*
-   auto-close when a commit reaches `main` with a `Harvested from PR #N by
-   @handle` line plus `Co-authored-by:` (see `auto-close-harvested.yml`). When
+   auto-close when a commit reaches `main` carrying a `Harvested from PR #N by
+   @handle` line — the workflow matches that line, and a `Co-authored-by:`
+   trailer is what preserves authorship (see `auto-close-harvested.yml`). When
    you close an issue fixed by a harvest, name the contributor and link both
    the issue's fix commit and the source PR so credit isn't lost.
 

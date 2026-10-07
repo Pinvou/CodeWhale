@@ -55,10 +55,11 @@ noise; concrete ones become fixes with credit.
    labels: `bug`, `enhancement`, `documentation`. Area labels e.g. `tui`,
    `tools`, `security`, `sandbox`, `context`, `subagents`, `responses-api`,
    `workflow-runtime`. Severity `release-blocker` only when it truly blocks the
-   next release. Discover the target milestone at runtime: pick the smallest
-   open version from
-   `gh api repos/codewhale-hq/Codewhale/milestones --jq '.[] | select(.state=="open") | .title'`,
-   and confirm with the maintainer if ambiguous.
+   next release. Discover the target milestone at runtime, never hardcode it:
+   list open milestones with their open-issue counts (command below), ignore
+   entries with zero open issues and non-version titles such as `Backlog`,
+   then treat the choice as a maintainer decision — propose the best-fit
+   version and confirm before filing.
    ```bash
    gh label list --repo codewhale-hq/Codewhale --limit 100
    gh api repos/codewhale-hq/Codewhale/milestones --jq '.[] | "\(.title)\topen:\(.open_issues)"'

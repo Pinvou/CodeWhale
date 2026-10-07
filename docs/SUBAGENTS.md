@@ -183,8 +183,9 @@ session projection and worker record. By default the branch is
 
 Isolation is not write authority. A prompt-only worker starts read-only.
 A writer narrows its scope with at least one normalized repo-relative
-`write_roots` entry (a file or a directory tree). Active overlapping shared
-claims fail before mutation; a real isolated worktree may proceed in parallel.
+`write_roots` entry (a file or a directory tree); without one it claims the
+parent workspace root. Active overlapping shared claims fail before mutation;
+a real isolated worktree may proceed in parallel.
 
 Optional fields:
 
