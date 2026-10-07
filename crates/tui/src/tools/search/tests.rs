@@ -378,6 +378,10 @@ async fn test_grep_files_streaming_stops_at_max_results() {
     // The walk stopped at the cap, so the caller must see the
     // truncation signal.
     assert_eq!(parsed["truncated"], json!(true));
+    // Pin the walk-stop itself: the budget filled inside the first file,
+    // so the second file must never be visited (removing the Stop would
+    // change only this counter).
+    assert_eq!(parsed["files_searched"].as_u64().unwrap(), 1);
 }
 
 #[tokio::test]
