@@ -79,7 +79,7 @@
 | E2E-01 | 1 | PASS | B 端 Relay 通道与短期码注册接线完成；审核中修复两处：`controller_endpoint_id` 由散文错误改为有界码 `desktop_relay_inactive`，注册等待循环抽出可测端口并补齐超时/断线/忽略 ack/拒绝四条用例。验证：`cargo test remote_control::` 252 通过；`desktop_remote_state.test.mjs` 9 通过；architecture-guard 通过。 |
 | E2E-02 | 1 | PASS | A 端 claim、安全握手、租约安装与 B 端对称接管全部接线完成（三步 6 个提交）；审核中每步各修复 1 处，正式审核再修复 1 处：测试构造入口收口、在途失败不覆盖已有状态（A/B 两侧）、claim 后立即清除连接码。验证：`cargo test remote_control::controller::` 193 通过 / 0 失败，`cargo test remote_control::` 282 通过 / 0 失败，architecture-guard 通过。细节见第 5.3 节。 |
 
-## 4. 已登记决策与本轮已知限制
+## 4. 历史阶段已登记决策与当时已知限制
 
 | 项 | 决策/状态 | 说明 |
 |---|---|---|
@@ -87,12 +87,12 @@
 | `serve()` 暂只保活通道 | 预期 | 握手与加密业务帧派发分别在 E2E-02 / E2E-04 安装到该服务循环；当前对未知消息只做丢弃，绝不转发到 legacy WebUI 事件流。 |
 | A 端 `device_display_name` 用有界占位 `remote-device` | 保守默认，登记 | 冻结协议 v1 的 `controller_joined` 不携带被控设备显示名（已核对 PROTOCOL.md 与 fixture）；首版用占位，真实来源需协议扩展或 E2E-03 的能力快照补充。 |
 | B 端 `controller_device_name` 留空 | 保守默认，登记 | 同上：`controller_pairing_register` / `controller_joined` 都不含主控设备名；留空让 E2E-07 的 UI 用 i18n 兜底文案（`deviceUnknown`）显示，不为数据层硬编码单语名称。RC-B-006「展示主控设备名称」需协议扩展后才能真正满足。 |
-| A 端不在 WebSocket 层声明 controller 子协议 | 保守默认，登记 | PROTOCOL.md:598 要求 controller-v1 客户端选择 `pinvou-desktop-controller-v1`，但 Relay（server.js:846 `noServer: true`，无 `handleProtocols`）不回投该头部，而客户端库（tungstenite 0.30 `handshake/client.rs:272`）在请求了子协议却未收到时必须失败关闭 —— 声明子协议会让 A 端完全无法连接。Relay 侧补齐子协议协商后再接入；当前 Relay 以 `v=1 + controller_*` 类型路由 controller lane（server.js:1182）。 |
+| A 端不在 WebSocket 层声明 controller 子协议 | 历史限制，已修复 | **已被后续波次修复**：当前客户端通过 `relay_client::controller_websocket_request` 声明 `pinvou-desktop-controller-v1`，Relay 通过 `server.js` 的 `handleProtocols` 显式协商；以下保留当时决策。PROTOCOL.md:598 要求 controller-v1 客户端选择 `pinvou-desktop-controller-v1`，但当时 Relay（server.js:846 `noServer: true`，无 `handleProtocols`）不回投该头部，而客户端库（tungstenite 0.30 `handshake/client.rs:272`）在请求了子协议却未收到时必须失败关闭 —— 声明子协议会让 A 端完全无法连接。当时决定待 Relay 侧补齐子协议协商后再接入；当时 Relay 以 `v=1 + controller_*` 类型路由 controller lane（server.js:1182）。 |
 | A 端不发送 `controller_capabilities` 首帧 | 保守默认，登记 | 同上：router 没有该类型的 handler（`controller-router.js` 只有 register/claim/handshake/disconnect 与 liveness/resume hooks），发送会收到 `controller_message_unsupported` 并打断握手；E2E-01 的 B 端同样未发送。Relay 补齐后两侧一并接入。 |
 | 握手期间 transport 断线 | 预期 | A 端把断线统一映射为 `endpoint_offline` 并失败关闭；transport 在断线时会作废已排队帧（`transport_epoch` 递增），因此不会用旧 claim 重连，重新 claim 属 E2E-06 的恢复链路。 |
 | 连接完成后断线只投影 `reconnecting` | 预期 | `serve_controlling_lane` 在断线时调用 `mark_transport_disconnected()` 保证界面不再声称 connected；自动 resume / liveness 属 E2E-06。 |
 | B 端信任根缺失在接管点失败关闭 | 保守默认，登记 | 为保持 E2E-01 的注册行为不变，B 在收到 `controller_pairing_reserved` 时才要求信任根（错误码 `relay_trust_unconfigured`）；A 端在 connect 前即失败关闭。 |
-| 命令层错误码未映射到 A 对话框文案 | 已知缺口（E2E-07） | `desktop_remote_controller_*` 现在返回有界错误码，但 `desktop-remote-control.js` 的 `controllerConnect` 未把 `Err(String)` 转成带 `code` 的错误，`connectionErrorKey` 只能拿到 undefined；B 面板与 A 壳层的状态名映射同样与后端枚举不一致（`ControlledDevicePanel.jsx:27-40` 期望 `registering`/`waiting_for_pairing`/`pairing_reserved`/`handshake_pending`，后端实际是 `reserving`/`waiting_connection`/`safety_handshake`），导致 B 面板回落到 statusIdle 且不显示连接码。E2E-07 统一修复并补行为测试。 |
+| 命令层错误码未映射到 A 对话框文案 | 历史缺口，已修复 | **已被后续波次修复**：当前 `controllerConnect` 用 `asBoundedError` 恢复 `error.code`；B 的 `ControlledStatusKind` 序列化名称与 `controlledDeviceUiState`/`ControlledDevicePanel` 的状态闭集一致。以下保留当时问题：`desktop_remote_controller_*` 当时返回有界错误码，但 `desktop-remote-control.js` 的 `controllerConnect` 未把 `Err(String)` 转成带 `code` 的错误，`connectionErrorKey` 只能拿到 undefined；B 面板与 A 壳层的状态名映射同样与后端枚举不一致（`ControlledDevicePanel.jsx:27-40` 期望 `registering`/`waiting_for_pairing`/`pairing_reserved`/`handshake_pending`，后端实际是 `reserving`/`waiting_connection`/`safety_handshake`），导致 B 面板回落到 statusIdle 且不显示连接码。当时计划由 E2E-07 统一修复并补行为测试。 |
 | 能力协商按交集收敛 | 依赖 E2E-04/E2E-06 处理 | `negotiateControllerCapabilities` 取「A 请求 ∩ B 注册」；B 目前只注册 `[pairing_v1, encrypted_frames_v1, finished_receipt_v1]`，A 声明 `pairing_v1/encrypted_frames_v1/finished_receipt_v1/role_liveness_v1/resume_v1`，因此 `role_liveness_v1`、`resume_v1`、`task_v1` 都未协商成功。E2E-02 只用到 `pairing_v1`（`controller_joined` 能力绑定）所以可跑通；E2E-04 发送业务帧前必须先在两侧声明 `task_v1`（本地运行时校验会以 `unsupported_capability` 拒绝 `task_submit` 等载荷），E2E-06 同理需要 `role_liveness_v1`/`resume_v1`。 |
 
 ## 5. E2E-02 实施状态与剩余步骤
