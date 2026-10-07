@@ -685,6 +685,18 @@ workflow({
                         && leaf.prompt.contains("nothing else"),
                     "the scout discovery must stay one bounded activation-plus-search round"
                 );
+                assert!(
+                    leaf.prompt.contains(
+                        "If `tool_search` does not surface `grep_files`, that is the one exception"
+                    ) && leaf
+                        .prompt
+                        .contains("name `grep_files activation` as MISSING")
+                        && leaf
+                            .prompt
+                            .contains("Otherwise response 3 must return the verdict"),
+                    "the scout BLOCK fallback must stay pinned: without it a failed \
+                     activation leaves no legal path to a fail-closed verdict"
+                );
                 assert_eq!(
                     leaf.file_scope
                         .iter()
