@@ -1406,6 +1406,10 @@ jobs:
         with:
           submodules: false
 
+      - name: Set up zram and swap
+        # Best effort: timeouts or failures only warn and never block (falls back to stock runner memory).
+        run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup did not finish; continuing with stock runner memory"
+
       - name: 初始化公共底座 submodule
         run: git submodule update --init --recursive -- CodeWhale
 
@@ -1862,7 +1866,7 @@ jobs:
       # 只有下方超出单进程内存预算的 behavior-telemetry 测试使用独立目标。
       - name: cargo test --lib --no-run（编译链接测试二进制）
         if: ${{ github.event_name != 'push' }}
-        run: /usr/bin/time -v cargo test --manifest-path pinvou3-app/src-tauri/Cargo.toml --no-default-features --lib --no-run
+        run: /usr/bin/time -v cargo test --manifest-path pinvou3-app/src-tauri/Cargo.toml --no-default-features --lib --locked --no-run
 
       - name: cargo test --lib（含 strict_mode 回归；真 bge-m3/vLLM 测试已 #[ignore]）
         if: ${{ github.event_name != 'push' }}
@@ -1870,7 +1874,7 @@ jobs:
           chrome="$(command -v google-chrome || command -v chromium || command -v chromium-browser)"
           export CHROME="$chrome"
           export PINVOU_REQUIRE_REMOTE_E2E=1
-          cargo test --manifest-path pinvou3-app/src-tauri/Cargo.toml --no-default-features --lib -- --test-threads=1
+          cargo test --manifest-path pinvou3-app/src-tauri/Cargo.toml --no-default-features --lib --locked -- --test-threads=1
 
       # The behavior-telemetry state-machine tests intentionally use a separate
       # harness. Linking their 2,300+ source lines into the already-large lib
@@ -1916,7 +1920,7 @@ jobs:
       # 故恢复只编译设计;不要在 push 上重新打开测试执行。
       - name: cargo test --lib --no-run (push main 仅编译暖 cache)
         if: ${{ github.event_name == 'push' }}
-        run: /usr/bin/time -v cargo test --manifest-path pinvou3-app/src-tauri/Cargo.toml --no-default-features --lib --no-run
+        run: /usr/bin/time -v cargo test --manifest-path pinvou3-app/src-tauri/Cargo.toml --no-default-features --lib --locked --no-run
 
   # pinvou-cli contract tests: since PR #478 the product CLI surface (~20k
   # lines + ~340 contract tests) has no other automated execution leg (the
@@ -3506,6 +3510,9 @@ jobs:
       # One npm invocation per step: a multi-command pwsh run block only
       # reports the last command's exit code, so a harness that dies before
       # its assertions would be masked by the next command's success.
+      - name: Windows runtime manifest 契约
+        run: npm --prefix pinvou3-app run test:windows-runtime-manifest
+
       - name: Windows runtime packaging contract
         run: npm --prefix pinvou3-app run test:windows-runtime
 
