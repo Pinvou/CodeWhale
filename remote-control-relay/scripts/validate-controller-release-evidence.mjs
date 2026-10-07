@@ -200,7 +200,7 @@ async function inspectArtifact(path, kind) {
 async function validateUiSmokeEvidence(root, artifacts, uiGateDigest, journeys) {
   const byDigest = new Map(artifacts.map((item) => [item.sha256, item]));
   const summaryArtifact = byDigest.get(uiGateDigest);
-  if (!summaryArtifact || summaryArtifact.kind !== "ui-smoke") fail("evidence_ui_smoke_invalid");
+  if (!summaryArtifact || summaryArtifact.kind !== "ui-smoke" || summaryArtifact.machine_role !== "orchestrator") fail("evidence_ui_smoke_invalid");
   let summary;
   try {
     summary = JSON.parse(await readFile(resolve(root, ...summaryArtifact.path.split("/")), "utf8"));
@@ -216,7 +216,8 @@ async function validateUiSmokeEvidence(root, artifacts, uiGateDigest, journeys) 
     phases.add(reference.phase);
     digest(reference.sha256);
     const artifactEntry = byDigest.get(reference.sha256);
-    if (!artifactEntry || artifactEntry.kind !== "ui-smoke" || reference.sha256 === uiGateDigest) fail("evidence_ui_smoke_invalid");
+    if (!artifactEntry || artifactEntry.kind !== "ui-smoke" || artifactEntry.machine_role !== reference.role
+      || reference.sha256 === uiGateDigest) fail("evidence_ui_smoke_invalid");
     let phaseEvidence;
     try {
       phaseEvidence = JSON.parse(await readFile(resolve(root, ...artifactEntry.path.split("/")), "utf8"));
@@ -587,14 +588,27 @@ export async function validateReleaseEvidence(document, {
   }
   for (const attestation of document.attestations) claimUniqueEvidence(attestation.provider_attestation_artifact_sha256);
   for (const item of document.journeys) {
+    const trace = artifacts.find((artifact) => artifact.sha256 === item.trace_sha256);
+    if (!trace || trace.kind !== "trace" || trace.machine_role !== "A") fail("evidence_journey_artifact_invalid");
     claimUniqueEvidence(item.trace_sha256);
-    for (const check of item.checks) claimUniqueEvidence(check.artifact_sha256);
+    for (const check of item.checks) {
+      const artifact = artifacts.find((entry) => entry.sha256 === check.artifact_sha256);
+      const role = item.id === "RC-E2E-008" && check.id === "controlled_attachment_received" ? "B" : "A";
+      if (!artifact || artifact.kind !== "check" || artifact.machine_role !== role) fail("evidence_journey_artifact_invalid");
+      claimUniqueEvidence(check.artifact_sha256);
+    }
   }
   exactObject(document.gates, REQUIRED_GATES, "evidence_gates_invalid");
   for (const gate of REQUIRED_GATES) {
     const value = exactObject(document.gates[gate], ["result", "artifact_sha256"], "evidence_gate_invalid");
     if (value.result !== "pass") fail("evidence_gate_not_passed");
     digest(value.artifact_sha256);
+    // Match the actual orchestrator producers: the four driver gates come
+    // from A; only the aggregate UI and flag-off suites come from orchestrator.
+    const artifact = artifacts.find((item) => item.sha256 === value.artifact_sha256);
+    const aggregate = gate === "ui_smoke" || gate === "feature_flag_off";
+    if (!artifact || artifact.machine_role !== (aggregate ? "orchestrator" : "A")
+      || artifact.kind !== (gate === "ui_smoke" ? "ui-smoke" : "check")) fail("evidence_gate_artifact_invalid");
     claimUniqueEvidence(value.artifact_sha256);
   }
   if (evidenceRoot) {

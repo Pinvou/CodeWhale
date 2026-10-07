@@ -14,6 +14,7 @@ jobs:
     runs-on: ${{ vars.PINVOU_WINDOWS_RELEASE_RUNNER || 'self-hosted' }}
     timeout-minutes: 90
     env:
+      PINVOU_DESKTOP_CONTROLLER_ENABLED: '1'
       AWS_LC_SYS_PREBUILT_NASM: '1'
       RUSTC_WRAPPER: ${{ github.workspace }}/pinvou3-app/src-tauri/scripts/rustc-stack-wrapper.exe
     steps:
@@ -46,11 +47,6 @@ jobs:
           npm run runtime:windows:init
           npm run runtime:windows:onnx-smoke
           node ../scripts/sync-version.mjs
-          $bge = 'src-tauri/resources/bge-m3'
-          New-Item -ItemType Directory -Path $bge -Force | Out-Null
-          foreach ($name in @('config.json', 'model.onnx', 'tokenizer.json', 'tokenizer_config.json', 'special_tokens_map.json')) {
-            [IO.File]::WriteAllBytes((Join-Path $bge $name), [byte[]]::new(0))
-          }
           npm run build:nsis
 
       - name: Resolve exactly one installer

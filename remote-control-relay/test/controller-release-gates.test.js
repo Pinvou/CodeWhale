@@ -69,7 +69,34 @@ test("release gate passes a purpose-specific environment and never forwards secr
   ]);
   for (const key of Object.keys(telemetry)) assert.doesNotMatch(key, /(?:PRIVATE_KEY|HMAC_KEY|PASSWORD)$/u);
   assert.deepEqual(buildReleaseSubprocessEnvironment(source, "test"), { PATH: "safe-path" });
+  const gateSource = read("scripts/controller-release-gate.mjs");
+  assert.doesNotMatch(gateSource, /Object\.fromEntries\(enabledEntries\)/u);
+  for (const purpose of ["telemetry", "rollback"]) {
+    assert.ok(gateSource.includes(`buildReleaseSubprocessEnvironment(env, "${purpose}")`));
+  }
   assert.throws(() => buildReleaseSubprocessEnvironment(source, "unknown"), /release_subprocess_environment_purpose_invalid/u);
+});
+
+test("sensitive Rust evidence names existing exact tests and rejects zero matches", () => {
+  for (const [module, name] of [
+    ["relay_runtime", "log_allowlist_rejects_identifier_shaped_values_and_secrets"],
+    ["relay_runtime", "real_remote_failure_projections_do_not_persist_any_sensitive_category"],
+    ["resume", "resume_debug_redacts_current_and_retired_material"],
+  ]) {
+    const source = read(`../pinvou3-app/src-tauri/src/features/remote_control/controller/${module}.rs`);
+    assert.match(source, /#\[cfg\(test\)\]\s*mod tests\s*\{/);
+    assert.match(source, new RegExp(`#\\[test\\]\\s*fn ${name}\\(`));
+    assert.ok(runbook.includes(`features::remote_control::controller::${module}::tests::${name} -- --exact --test-threads=1`));
+  }
+  assert.ok(!runbook.includes("cargo test ... controller::telemetry"));
+  assert.ok(runbook.includes("1 passed; 0 failed"));
+  assert.ok(runbook.includes("零匹配视为失败"));
+  assert.ok(runbook.includes("controller-sensitive-scan.test.js"));
+});
+
+test("the trusted-Relay residual risk stays declared", () => {
+  assert.ok(runbook.includes("不声称抵御恶意 Relay 的主动 MITM"));
+  assert.ok(runbook.includes("受信 Relay"));
 });
 
 test("release gate ignores PATH injection and requires the configured absolute gh path", async (t) => {
@@ -89,10 +116,11 @@ test("release gate ignores PATH injection and requires the configured absolute g
   assert.match(supplyChainSource, /isAbsolute\(ghBinary/u);
 });
 
-test("production preflight supports official/self-hosted, feature rollback, TOFU-off and telemetry protection", () => {
+test("production preflight requires implemented self-hosted claims, feature rollback, TOFU-off and telemetry protection", () => {
   const preflight = read("scripts/deploy-controller-preflight.mjs");
   assert.match(preflight, /NODE_ENV: "production"/u);
-  assert.match(preflight, /\["official", "self_hosted"\]/u);
+  assert.match(preflight, /PINVOU_REMOTE_ENROLLMENT_DEPLOYMENT: "self_hosted"/u);
+  assert.match(preflight, /official_controller_claim_dispatcher_unavailable/u);
   assert.match(preflight, /--expect-feature-off/u);
   assert.match(preflight, /PINVOU_REMOTE_ENROLLMENT_DEVELOPMENT_TOFU: "false"/u);
   assert.match(preflight, /PINVOU_TELEMETRY_ENROLLMENT_TOKEN/u);

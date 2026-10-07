@@ -77,18 +77,32 @@ pub(crate) fn supports_desktop_remote_control(os: &str) -> bool {
 
 /// One client-side release switch shared with the Relay deployment contract.
 ///
-/// Windows clients expose the feature by default. Operators can still set the
-/// variable to the exact string `0` to hide the UI and reject every command;
+/// Only build-qualified Windows clients expose the feature by default. A
+/// build-time `0` is immutable and cannot be reopened by a runtime variable.
+/// Operators can still set the variable to `0` to hide UI and reject commands;
 /// malformed values fail closed. The Relay keeps its separate deployment gate
 /// because enabling its controller runtime also requires enrollment secrets.
 /// Durable registry/tombstone data is not coupled to this switch.
 pub(crate) fn desktop_remote_control_enabled() -> bool {
-    desktop_remote_control_enabled_for(
+    desktop_remote_control_enabled_from_env(
         std::env::consts::OS,
-        std::env::var("PINVOU_DESKTOP_CONTROLLER_ENABLED")
-            .ok()
-            .as_deref(),
+        option_env!("PINVOU_DESKTOP_CONTROLLER_BUILD_ENABLED"),
+        std::env::var("PINVOU_DESKTOP_CONTROLLER_ENABLED"),
     )
+}
+
+fn desktop_remote_control_enabled_from_env(
+    os: &str,
+    build_flag: Option<&str>,
+    flag: Result<String, std::env::VarError>,
+) -> bool {
+    match flag {
+        Ok(value) => desktop_remote_control_enabled_for(os, build_flag, Some(&value)),
+        Err(std::env::VarError::NotPresent) => {
+            desktop_remote_control_enabled_for(os, build_flag, None)
+        }
+        Err(std::env::VarError::NotUnicode(_)) => false,
+    }
 }
 
 pub(crate) fn ensure_desktop_remote_control_enabled() -> Result<(), String> {
@@ -99,8 +113,14 @@ pub(crate) fn ensure_desktop_remote_control_enabled() -> Result<(), String> {
     }
 }
 
-fn desktop_remote_control_enabled_for(os: &str, flag: Option<&str>) -> bool {
-    supports_desktop_remote_control(os) && matches!(flag, None | Some("1"))
+fn desktop_remote_control_enabled_for(
+    os: &str,
+    build_flag: Option<&str>,
+    flag: Option<&str>,
+) -> bool {
+    supports_desktop_remote_control(os)
+        && build_flag == Some("1")
+        && matches!(flag, None | Some("1"))
 }
 
 pub(crate) const fn is_windows() -> bool {
@@ -178,20 +198,65 @@ mod tests {
 
     #[test]
     fn desktop_remote_control_is_default_on_and_windows_only() {
-        assert!(desktop_remote_control_enabled_for("windows", None));
-        assert!(desktop_remote_control_enabled_for("windows", Some("1")));
+        assert!(desktop_remote_control_enabled_for(
+            "windows",
+            Some("1"),
+            None
+        ));
+        assert!(desktop_remote_control_enabled_for(
+            "windows",
+            Some("1"),
+            Some("1")
+        ));
         for flag in [Some(""), Some("0"), Some("true"), Some("01")] {
-            assert!(!desktop_remote_control_enabled_for("windows", flag));
+            assert!(!desktop_remote_control_enabled_for(
+                "windows",
+                Some("1"),
+                flag
+            ));
         }
-        assert!(!desktop_remote_control_enabled_for("linux", None));
-        assert!(!desktop_remote_control_enabled_for("macos", None));
-        assert!(!desktop_remote_control_enabled_for("linux", Some("1")));
-        assert!(!desktop_remote_control_enabled_for("macos", Some("1")));
+        for os in ["linux", "macos"] {
+            assert!(!desktop_remote_control_enabled_for(os, Some("1"), None));
+            assert!(!desktop_remote_control_enabled_for(
+                os,
+                Some("1"),
+                Some("1")
+            ));
+        }
         if !desktop_remote_control_enabled() {
             assert_eq!(
                 ensure_desktop_remote_control_enabled().unwrap_err(),
                 "desktop_remote_control_unsupported"
             );
         }
+    }
+
+    #[test]
+    fn build_disabled_artifact_cannot_be_reenabled_at_runtime() {
+        for build_flag in [None, Some("0"), Some(""), Some("true")] {
+            for runtime_flag in [None, Some("1"), Some("0"), Some("true")] {
+                assert!(!desktop_remote_control_enabled_for(
+                    "windows",
+                    build_flag,
+                    runtime_flag
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn non_unicode_runtime_flag_is_not_an_absent_flag() {
+        assert!(desktop_remote_control_enabled_from_env(
+            "windows",
+            Some("1"),
+            Err(std::env::VarError::NotPresent),
+        ));
+        assert!(!desktop_remote_control_enabled_from_env(
+            "windows",
+            Some("1"),
+            Err(std::env::VarError::NotUnicode(std::ffi::OsString::from(
+                "invalid"
+            ))),
+        ));
     }
 }

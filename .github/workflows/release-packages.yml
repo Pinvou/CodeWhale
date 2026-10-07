@@ -117,6 +117,8 @@ on:
       - 'pinvou3-app/src-tauri/src/app/remote_projection_adapter.rs'
       - 'pinvou3-app/src-tauri/src/app/commands/remote_control.rs'
       - 'pinvou3-app/src-tauri/src/platform/capabilities.rs'
+      - 'pinvou3-app/src-tauri/build.rs'
+      - 'pinvou3-app/src-tauri/build_support/desktop_controller.rs'
       - 'pinvou3-app/src-tauri/capabilities/default.json'
       - 'pinvou3-app/tests/remote_*'
       - 'pinvou3-app/tests/desktop_remote_*'
@@ -210,6 +212,8 @@ on:
       - 'pinvou3-app/src-tauri/src/app/remote_projection_adapter.rs'
       - 'pinvou3-app/src-tauri/src/app/commands/remote_control.rs'
       - 'pinvou3-app/src-tauri/src/platform/capabilities.rs'
+      - 'pinvou3-app/src-tauri/build.rs'
+      - 'pinvou3-app/src-tauri/build_support/desktop_controller.rs'
       - 'pinvou3-app/src-tauri/capabilities/default.json'
       - 'pinvou3-app/tests/remote_*'
       - 'pinvou3-app/tests/desktop_remote_*'
@@ -352,6 +356,20 @@ jobs:
       PINVOU_REMOTE_TELEMETRY_ADMIN_TOKEN_FILE: ${{ vars.PINVOU_REMOTE_TELEMETRY_ADMIN_TOKEN_FILE }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Node.js（开启发布门禁）
+        if: env.PINVOU_DESKTOP_CONTROLLER_ENABLED == '1'
+        uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: 'npm'
+          cache-dependency-path: remote-control-relay/package-lock.json
+
+      - name: 安装 Relay 发布门禁依赖
+        if: env.PINVOU_DESKTOP_CONTROLLER_ENABLED == '1'
+        run: npm --prefix remote-control-relay ci --prefer-offline --no-audit --ignore-scripts
 
       - name: 锁定真实双机证据 run 与 artifact 身份
         id: remote-evidence-identity
@@ -810,6 +828,7 @@ jobs:
           done
 
       - name: 构建 nsis
+        if: env.PINVOU_DESKTOP_CONTROLLER_ENABLED != '1'
         working-directory: pinvou3-app
         # 此 workflow 只产出无签名 GitHub artifact；正式 WoSign 依赖本地 UKey
         # 与 gitignored secrets，不能在 GitHub-hosted runner 上调用。
@@ -833,6 +852,7 @@ jobs:
           $actual = (Get-FileHash -LiteralPath $qualified[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant()
           if ($actual -ne $env:PINVOU_RELEASE_INSTALLER_SHA256) { throw 'qualified_installer_digest_mismatch' }
           $destination = "pinvou3-app/src-tauri/target/release/bundle/nsis/pinvou3_$env:VERSION`_x64-setup.exe"
+          New-Item -ItemType Directory -Path (Split-Path -Parent $destination) -Force | Out-Null
           Copy-Item -LiteralPath $qualified[0].FullName -Destination $destination -Force -ErrorAction Stop
           if ((Get-FileHash -LiteralPath $destination -Algorithm SHA256).Hash.ToLowerInvariant() -ne $actual) { throw 'qualified_installer_copy_mismatch' }
 

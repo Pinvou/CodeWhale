@@ -1265,18 +1265,25 @@ pub fn run() {
                             ledger,
                         );
                         handle.manage(desktop_task_runtime.ledger());
+                        let desktop_transfer_registry = std::sync::Arc::new(
+                            crate::features::remote_control::controller::transfer::TransferRegistry::default()
+                        );
                         let desktop_attachments =
                             commands::desktop_remote_attachment::DesktopRemoteAttachmentRuntime::from_session_store(
                                 store_for_engine.clone(),
+                                desktop_task_runtime.service(),
+                                desktop_transfer_registry.clone(),
                             );
                         let desktop_artifacts =
-                            commands::desktop_remote_artifact::DesktopRemoteArtifactRuntime::with_default_registry(
+                            commands::desktop_remote_artifact::DesktopRemoteArtifactRuntime::with_registry(
                                 desktop_task_runtime.service(),
+                                desktop_transfer_registry,
                             );
                         desktop_task_runtime.set_code_artifact_port(desktop_artifacts.clone());
                         desktop_task_runtime
                             .hooks()
                             .set_artifact_scope(desktop_artifacts.clone());
+                        handle.state::<ControlledDeviceManager>().register_cleanup_sink(desktop_attachments.cleanup_sink());
                         let desktop_history =
                             commands::desktop_remote_journal::DesktopRemoteJournalRuntime::journal_only(
                                 format!("boot-{}", std::process::id()),
@@ -1306,6 +1313,7 @@ pub fn run() {
                             );
                         }
                         handle.manage(desktop_task_runtime);
+                        commands::desktop_remote_attachment::DesktopRemoteAttachmentRuntime::start_reaper(&desktop_attachments);
                         handle.manage(desktop_attachments);
                         handle.manage(desktop_artifacts);
                         handle.manage(desktop_history);
@@ -1764,9 +1772,6 @@ pub fn run() {
             commands::desktop_remote_proxy::desktop_remote_proxy_history_delete,
             commands::desktop_remote_proxy::desktop_remote_proxy_open_live,
             commands::desktop_remote_model::desktop_remote_model_list_exportable,
-            commands::desktop_remote_model::desktop_remote_model_install,
-            commands::desktop_remote_model::desktop_remote_model_release,
-            commands::desktop_remote_model::desktop_remote_model_active,
             commands::desktop_remote_permission::desktop_remote_permission_deny_task,
             commands::desktop_remote_permission::desktop_remote_permission_list_b,
             commands::remote_control::web_access_enable,

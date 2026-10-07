@@ -39,7 +39,7 @@
 #   SKIP_LOCAL_TESTS=1                   跳过本地 npm test(默认会跑)
 #   SKIP_WEB_BUILD=1                     使用已经构建并验证的 web/dist
 #   ENABLE_DESKTOP_CONTROLLER=1          同时启用 Windows 双端远控的 controller-v1 lane:
-#                                        部署时在 $TEST_DIR/controller.env(0600) 生成并复用
+#                                        部署时在 /var/lib/pinvou-remote-relay-test/identity/(0700) 生成并复用
 #                                        一套 enrollment/pairing HMAC 与 Relay 签名密钥，
 #                                        服务单元改用 EnvironmentFile 加载；脚本结束时打印
 #                                        客户端需要 pin 的签名公钥。默认 0 = 只服务 WebUI v2。
@@ -298,55 +298,131 @@ tar -xzf "$test_dir.staging.tar.gz" -C "$test_dir.extract"
 rm -f "$test_dir.staging.tar.gz"
 (cd "$test_dir.extract" && npm ci --omit=dev --no-audit --no-fund > /dev/null)
 (cd "$test_dir.extract" && node --input-type=module -e "await import('./telemetry-service.js')")
-# 整体替换:旧版保留为 .bak 供回滚。
-rm -rf "$test_dir.bak"
-[ ! -d "$test_dir" ] || mv "$test_dir" "$test_dir.bak"
-mv "$test_dir.extract" "$test_dir"
 mkdir -p /var/lib/pinvou-telemetry-test
-# ENABLE_DESKTOP_CONTROLLER=1:幂等生成/复用 controller 运行时环境(0600)。
-# 私钥只写入该环境文件,不进 unit、不进日志;公钥另存一份供调用方取回。
+# ENABLE_DESKTOP_CONTROLLER=1:身份与状态一样必须独立于整包替换目录。
+# 旧代码目录中的身份只作一次性运维迁移来源，不保留双轨配置或重新生成旧身份。
+controller_identity_dir=/var/lib/pinvou-remote-relay-test/identity
 if [ "$controller" = "1" ]; then
   # relay-state-store 要求专用目录 mode 0700 且属主为运行用户(relay_state_permissions_unsafe),
   # 且状态必须放在会被整体替换的代码目录之外,重新部署不会丢掉 tombstone/keyring 状态。
-  mkdir -p /var/lib/pinvou-remote-relay-test/state
-  chmod 700 /var/lib/pinvou-remote-relay-test /var/lib/pinvou-remote-relay-test/state
-  if [ ! -f "$test_dir/controller.env" ]; then
-    node -e "
-      const crypto = require('node:crypto');
-      const fs = require('node:fs');
-      const { privateKey, publicKey } = crypto.generateKeyPairSync('ed25519');
-      const pkcs8 = privateKey.export({ type: 'pkcs8', format: 'der' }).toString('base64');
-      const spki = publicKey.export({ type: 'spki', format: 'der' });
-      const raw = spki.subarray(spki.length - 32).toString('base64');
-      const hex = (n) => crypto.randomBytes(n).toString('hex');
-      const dir = process.argv[1];
-      const lines = [
-        'NODE_ENV=development',
-        'PINVOU_DESKTOP_CONTROLLER_ENABLED=1',
-        'PINVOU_REMOTE_ENROLLMENT_DEPLOYMENT=development',
-        'PINVOU_REMOTE_ENROLLMENT_DEVELOPMENT_TOFU=true',
-        'PINVOU_REMOTE_ENROLLMENT_HMAC_KEY_ID=relay-test-enrollment-hmac-1',
-        'PINVOU_REMOTE_ENROLLMENT_HMAC_KEY=' + hex(32),
-        'PINVOU_REMOTE_PAIRING_HMAC_KEY_ID=relay-test-pairing-hmac-1',
-        'PINVOU_REMOTE_PAIRING_HMAC_KEY=' + hex(32),
-        'PINVOU_REMOTE_CONTROLLER_STATE_PATH=/var/lib/pinvou-remote-relay-test/state/controller-state.json',
-        // legacy 状态文件不能位于 controller 状态目录内(loadEnrollmentRegistryConfig 会
-        // 以 legacy_state_path_inside_controller_directory 失败关闭),因此放在同级。
-        'PINVOU_REMOTE_STATE_PATH=/var/lib/pinvou-remote-relay-test/legacy-web-state.json',
-        'PINVOU_REMOTE_RELAY_SIGNING_KEY_ID=relay-test-key-1',
-        'PINVOU_REMOTE_RELAY_SIGNING_PRIVATE_KEY_B64=' + pkcs8,
-      ];
-      fs.writeFileSync(process.argv[2], lines.join('\n') + '\n', { mode: 0o600 });
-      fs.writeFileSync(process.argv[3], raw + '\n', { mode: 0o600 });
-    " "$test_dir" "$test_dir/controller.env" "$test_dir/controller-public-key.b64"
-    chmod 600 "$test_dir/controller.env" "$test_dir/controller-public-key.b64"
-  fi
+  node - "$controller_identity_dir" "$test_dir/controller.env" /var/lib/pinvou-remote-relay-test/state/controller-state.json <<'CONTROLLER_IDENTITY'
+const crypto = require('node:crypto');
+const fs = require('node:fs');
+const path = require('node:path');
+const [identityDir, legacyEnv, stateFile] = process.argv.slice(2);
+const fail = () => { throw new Error('test_controller_identity_invalid_or_missing'); };
+const stat = (file) => { try { return fs.lstatSync(file); } catch (e) { if (e.code === 'ENOENT') return null; throw e; } };
+const managedRoot = path.dirname(identityDir);
+const stateDir = path.dirname(stateFile);
+const privateDirs = new Set([managedRoot, identityDir, stateDir].map((dir) => path.resolve(dir)));
+const checkAncestors = (target) => {
+  for (let dir = path.dirname(path.resolve(target)); ; dir = path.dirname(dir)) {
+    const info = stat(dir);
+    if (info) {
+      if (!info.isDirectory() || info.isSymbolicLink()) fail();
+      if (process.platform !== 'win32') {
+        if (info.uid !== 0 && info.uid !== process.geteuid()) fail();
+        if (privateDirs.has(dir) && (info.uid !== process.geteuid() || (info.mode & 0o777) !== 0o700)) fail();
+      }
+    }
+    if (path.dirname(dir) === dir) break;
+  }
+};
+// Do not follow or chmod an unsafe existing root/state/identity ancestor.
+// Code-directory migration is read-only, but its ancestors must be genuine too.
+for (const target of [path.join(identityDir, 'controller.env'), stateFile, legacyEnv]) checkAncestors(target);
+fs.mkdirSync(managedRoot, { recursive: true, mode: 0o700 });
+fs.mkdirSync(stateDir, { recursive: true, mode: 0o700 });
+const readRegular = (file) => {
+  const info = stat(file);
+  if (!info?.isFile() || info.isSymbolicLink() || info.size > 16 * 1024) fail();
+  if (process.platform !== 'win32' && (info.uid !== process.geteuid() || (info.mode & 0o777) !== 0o600)) fail();
+  return fs.readFileSync(file, 'utf8');
+};
+const envPath = path.join(identityDir, 'controller.env');
+const publicPath = path.join(identityDir, 'controller-public-key.b64');
+const dirInfo = stat(identityDir);
+if (dirInfo && (!dirInfo.isDirectory() || dirInfo.isSymbolicLink())) fail();
+if (dirInfo && process.platform !== 'win32' && (dirInfo.uid !== process.geteuid() || (dirInfo.mode & 0o777) !== 0o700)) fail();
+fs.mkdirSync(identityDir, { recursive: true, mode: 0o700 });
+fs.chmodSync(identityDir, 0o700);
+let content;
+let createEnv = false;
+if (stat(envPath)) {
+  content = readRegular(envPath);
+} else if (stat(legacyEnv)) {
+  content = readRegular(legacyEnv);
+  createEnv = true;
+} else {
+  // Losing an existing store's HMAC/signing identity is not a fresh installation.
+  const stateDirInfo = stat(stateDir);
+  if (stateDirInfo && (!stateDirInfo.isDirectory() || stateDirInfo.isSymbolicLink())) fail();
+  // Primary loss is recoverable from backup/marker/other managed state; none
+  // of those traces is permission to mint a different deployment identity.
+  if (stat(stateFile) || stat(publicPath) || (stateDirInfo && fs.readdirSync(stateDir).length > 0)) fail();
+  const { privateKey } = crypto.generateKeyPairSync('ed25519');
+  content = [
+    'NODE_ENV=development',
+    'PINVOU_DESKTOP_CONTROLLER_ENABLED=1',
+    'PINVOU_REMOTE_ENROLLMENT_DEPLOYMENT=development',
+    'PINVOU_REMOTE_ENROLLMENT_DEVELOPMENT_TOFU=true',
+    'PINVOU_REMOTE_ENROLLMENT_HMAC_KEY_ID=relay-test-enrollment-hmac-1',
+    'PINVOU_REMOTE_ENROLLMENT_HMAC_KEY=' + crypto.randomBytes(32).toString('hex'),
+    'PINVOU_REMOTE_PAIRING_HMAC_KEY_ID=relay-test-pairing-hmac-1',
+    'PINVOU_REMOTE_PAIRING_HMAC_KEY=' + crypto.randomBytes(32).toString('hex'),
+    'PINVOU_REMOTE_CONTROLLER_STATE_PATH=/var/lib/pinvou-remote-relay-test/state/controller-state.json',
+    'PINVOU_REMOTE_STATE_PATH=/var/lib/pinvou-remote-relay-test/legacy-web-state.json',
+    'PINVOU_REMOTE_RELAY_SIGNING_KEY_ID=relay-test-key-1',
+    'PINVOU_REMOTE_RELAY_SIGNING_PRIVATE_KEY_B64=' + privateKey.export({ type: 'pkcs8', format: 'der' }).toString('base64'),
+    '',
+  ].join('\n');
+  createEnv = true;
+}
+const values = new Map();
+for (const line of content.split(/\r?\n/)) {
+  if (!line || line.startsWith('#')) continue;
+  const item = /^([A-Z0-9_]+)=([^\r\n]*)$/.exec(line);
+  if (!item || values.has(item[1])) fail();
+  values.set(item[1], item[2]);
+}
+for (const role of ['ENROLLMENT', 'PAIRING']) {
+  const id = values.get('PINVOU_REMOTE_' + role + '_HMAC_KEY_ID');
+  const key = values.get('PINVOU_REMOTE_' + role + '_HMAC_KEY');
+  if (!id || !/^[A-Za-z0-9][A-Za-z0-9._~-]{0,127}$/.test(id) || !key || key.length < 32) fail();
+}
+if (values.get('PINVOU_REMOTE_RELAY_SIGNING_KEY_ID') !== 'relay-test-key-1') fail();
+for (const [name, expected] of [
+  ['NODE_ENV', 'development'],
+  ['PINVOU_DESKTOP_CONTROLLER_ENABLED', '1'],
+  ['PINVOU_REMOTE_ENROLLMENT_DEPLOYMENT', 'development'],
+  ['PINVOU_REMOTE_ENROLLMENT_DEVELOPMENT_TOFU', 'true'],
+  ['PINVOU_REMOTE_CONTROLLER_STATE_PATH', '/var/lib/pinvou-remote-relay-test/state/controller-state.json'],
+  ['PINVOU_REMOTE_STATE_PATH', '/var/lib/pinvou-remote-relay-test/legacy-web-state.json'],
+]) { if (values.get(name) !== expected) fail(); }
+const encoded = values.get('PINVOU_REMOTE_RELAY_SIGNING_PRIVATE_KEY_B64');
+if (!encoded || Buffer.from(encoded, 'base64').toString('base64') !== encoded) fail();
+let privateKey;
+try { privateKey = crypto.createPrivateKey({ key: Buffer.from(encoded, 'base64'), format: 'der', type: 'pkcs8' }); } catch { fail(); }
+if (privateKey.asymmetricKeyType !== 'ed25519') fail();
+const spki = crypto.createPublicKey(privateKey).export({ type: 'spki', format: 'der' });
+const publicValue = spki.subarray(spki.length - 32).toString('base64') + '\n';
+if (stat(publicPath) && readRegular(publicPath) !== publicValue) fail();
+// Exclusive, complete writes: a retry derives a missing public file from the
+// persisted private key; malformed/conflicting identity never rotates silently.
+if (createEnv) fs.writeFileSync(envPath, content, { flag: 'wx', mode: 0o600 });
+if (!stat(publicPath)) fs.writeFileSync(publicPath, publicValue, { flag: 'wx', mode: 0o600 });
+fs.chmodSync(envPath, 0o600);
+fs.chmodSync(publicPath, 0o600);
+CONTROLLER_IDENTITY
 fi
+# 身份验证失败时不得触碰现役代码；验证成功后才整体替换，旧版供回滚。
+rm -rf "$test_dir.bak"
+[ ! -d "$test_dir" ] || mv "$test_dir" "$test_dir.bak"
+mv "$test_dir.extract" "$test_dir"
 controller_unit_line=""
 if [ "$controller" = "1" ]; then
-  # 用 "-" 前缀声明为可选:回滚到不含 controller.env 的旧版本时,服务仍能启动(退化为 v2-only),
-  # 不会因 systemd 加载环境文件失败而崩溃重启(2026-09-19 实测踩坑)。
-  controller_unit_line="EnvironmentFile=-$test_dir/controller.env"
+  # Controller 模式必须有已验证的持久身份；不能静默退化为裸 v2。
+  controller_unit_line="EnvironmentFile=$controller_identity_dir/controller.env"
 fi
 cp -a "/etc/systemd/system/$service" "/etc/systemd/system/$service.bak" 2>/dev/null || true
 cat > "/etc/systemd/system/$service" <<EOF
@@ -676,9 +752,9 @@ echo "桌面端指向测试端点:"
 echo "  PINVOU_REMOTE_PUBLIC_URL=\"$PUBLIC_URL\" PINVOU_REMOTE_RELAY_WS_URL=\"wss://pinvou.com$BASE_PATH/ws\" pinvou3-tauri"
 if [ "$ENABLE_DESKTOP_CONTROLLER" = "1" ]; then
   STAGE="读取 controller 公钥"
-  controller_public_key="$(relay_ssh "cat '$TEST_DIR/controller-public-key.b64'" | tr -d '\r\n')"
+  controller_public_key="$(relay_ssh "cat '/var/lib/pinvou-remote-relay-test/identity/controller-public-key.b64'" | tr -d '\r\n')"
   if [ -z "$controller_public_key" ]; then
-    echo "✗ 未取到 controller 签名公钥($TEST_DIR/controller-public-key.b64),无法为客户端提供信任根" >&2
+    echo "✗ 未取到持久 controller 签名公钥，无法为客户端提供信任根" >&2
     exit 1
   fi
   echo "Windows 双端远控(controller-v1)已启用:"

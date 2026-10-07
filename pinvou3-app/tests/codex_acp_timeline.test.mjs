@@ -640,16 +640,65 @@ try {
   const loginMod = readFileSync(path.join(root, 'src-tauri', 'src', 'features', 'codex_acp', 'login.rs'), 'utf8');
   const introspectMod = readFileSync(path.join(root, 'src-tauri', 'src', 'features', 'codex_acp', 'introspect.rs'), 'utf8');
   const operationGate = readFileSync(path.join(root, 'src-tauri', 'src', 'features', 'codex_acp', 'operation_gate.rs'), 'utf8');
-  // PR #339 round 9 folds the activity persistence into `admit_prompt_turn`
-  // (operation_gate.rs) so a touch failure cannot leak a registered timing
-  // turn; the touch itself still runs inside `AcpPool::send_message`, before
-  // the timing registration and the spawned prompt task.
-  assert.ok(/self\.session_store\s+\.touch_activity\(session_id\)/.test(runtime)
-    && /admit_prompt_turn\(&runtime\.busy, &runtime\.configuring, session_id, \|\|/s.test(runtime)
-    && operationGate.includes('fn admit_prompt_turn')
-    && /if let Err\(error\) = touch_activity\(\) \{\s*busy\.store\(false, Ordering::Release\);/s.test(operationGate)
-    && /touch_activity\(\)[\s\S]*timing::start_turn\(session_id\)/.test(operationGate),
-    'an accepted ACP turn must persist the session activity timestamp before it starts');
+  const remoteOwnership = readFileSync(path.join(root, 'src-tauri', 'src', 'features', 'codex_acp', 'remote_ownership.rs'), 'utf8');
+  // Local admission now also checks remote custody and retains a PromptFlight.
+  // Pin the actual production chain, not the former all-in-one helper: activity
+  // persistence must still precede timing registration, the turn and its task.
+  const localSubmit = runtime.slice(
+    runtime.indexOf('pub(crate) async fn send_message_with_display_content('),
+    runtime.indexOf('async fn handle_outdated_codex_runtime('),
+  );
+  const localAdmission = remoteOwnership.slice(
+    remoteOwnership.indexOf('pub(super) fn admit_local('),
+    remoteOwnership.indexOf('fn reserve('),
+  );
+  const finishAdmission = operationGate.slice(
+    operationGate.indexOf('pub(super) fn finish_prompt_admission('),
+    operationGate.indexOf('enum SessionConfigChange'),
+  );
+  const assertActivityAdmission = (submit, admission, finish) => {
+    const admissionIndex = submit.indexOf('.admit_local(');
+    const finishIndex = submit.indexOf('operation_gate::finish_prompt_admission(');
+    const touchIndex = submit.indexOf('.touch_activity(session_id)');
+    const turnIndex = submit.indexOf('.begin_turn(');
+    const spawnIndex = submit.indexOf('tokio::spawn(');
+    assert.ok(admissionIndex >= 0 && admissionIndex < finishIndex
+      && finishIndex < touchIndex && touchIndex < turnIndex && turnIndex < spawnIndex,
+    'the actual local submit must admit, persist activity, begin its turn and only then spawn');
+    assert.ok(finish.indexOf('touch_activity()') >= 0
+      && finish.indexOf('touch_activity()') < finish.indexOf('timing::start_turn(session_id)'),
+    'activity persistence failure must never follow premature timing registration');
+    assert.match(admission,
+      /operation_gate::begin_prompt\(busy, configuring\)\?;\s*Ok\(PromptFlight::new\(identity\)\)/,
+      'local custody admission must reserve busy before retaining the real prompt flight');
+    assert.match(submit,
+      /let flight = self\.remote_permission_owners\.lock\(\)\.admit_local\([\s\S]*?\)\?;\s*operation_gate::finish_prompt_admission\(&runtime\.busy, session_id, \|\| \{\s*self\.session_store\s+\.touch_activity\(session_id\)[\s\S]*?\}\)\?;[\s\S]*?\.begin_turn\([\s\S]*?tokio::spawn\(async move \{\s*let _flight = flight;/,
+      'the actual local submit must persist activity after admission and before beginning/spawning the owned turn');
+    assert.match(finish,
+      /if let Err\(error\) = touch_activity\(\) \{\s*busy\.store\(false, Ordering::Release\);\s*return Err\(error\);\s*\}\s*crate::features::assistant::timing::start_turn\(session_id\);/,
+      'activity persistence failure must release busy without registering timing');
+  };
+  assertActivityAdmission(localSubmit, localAdmission, finishAdmission);
+  // Guard the contract test itself against accidentally accepting the key
+  // regressions while updating source layout in future refactors.
+  assert.throws(() => assertActivityAdmission(
+    localSubmit.replace('.touch_activity(session_id)', '.touch_activity_skipped(session_id)'),
+    localAdmission, finishAdmission,
+  ), /actual local submit/);
+  assert.throws(() => assertActivityAdmission(
+    localSubmit, localAdmission,
+    finishAdmission.replace('busy.store(false, Ordering::Release);', ''),
+  ), /persistence failure/);
+  assert.throws(() => assertActivityAdmission(
+    localSubmit, localAdmission,
+    finishAdmission.replace('if let Err(error) = touch_activity()',
+      'crate::features::assistant::timing::start_turn(session_id); if let Err(error) = touch_activity()'),
+  ), /persistence failure/);
+  assert.throws(() => assertActivityAdmission(
+    localSubmit.replace('let flight = self.remote_permission_owners',
+      'tokio::spawn(async {}); let flight = self.remote_permission_owners'),
+    localAdmission, finishAdmission,
+  ), /actual local submit/);
   assert.ok(runtime.includes('interrupt_orphaned_turns("application_restarted")')
     && runtime.includes('cancel_without_active_prompt')
     && runtime.includes('runtime.busy.load(Ordering::Acquire)'),
