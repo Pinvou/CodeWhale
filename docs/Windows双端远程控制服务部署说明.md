@@ -2,6 +2,7 @@
 
 > 适用范围：`remote-control-relay`（公网 Relay + enrollment gateway）。
 > 关联：`remote-control-relay/ENROLLMENT.md`（enrollment 单一真相源）、`remote-control-relay/.env.enrollment.example`、`remote-control-relay/nginx-enrollment-gateway.conf`、`Windows双端远程控制发布与回滚.md`。
+> 命令与脚本路径以仓库根目录为当前目录。历史部署记录不是当前发布验收或永久安全豁免。
 
 ## 1. 本机部署（自测用，已完成）
 
@@ -36,14 +37,18 @@ PINVOU_REMOTE_RUNTIME_RELAY_WS_URL = ws://127.0.0.1:8787/pinvou3/remote/ws
 
 **边界声明**：该实例是 `PINVOU_REMOTE_ENROLLMENT_DEPLOYMENT=development` + `DEVELOPMENT_TOFU=true`，只允许在本机自测使用；`ENROLLMENT.md` 明确要求 TOFU 仅在 development 且 `NODE_ENV≠production` 时可用，**不得作为生产或对外服务**。
 
+当前自测脚本直接启动并记录 Node 服务进程（PID + 启动时间），停止时还验证 Node 路径及绝对脚本命令行，不再启动包装进程或按端口强杀。旧 PID 文件、复用 PID、无法证明属主或被无关服务占用的端口均不会被停止；旧手工启动的服务需操作者自行确认后处理。标准错误单独记录到同一自测目录的 `relay.stderr.log`，上表旧 PID 仅为历史记录。
+
+重复 Prepare/EnvOnly 会复用两组 HMAC 及签名身份；存在状态、Relay 环境或客户端公钥投影而原身份丢失时拒绝重建。既有签名 JSON 在覆盖环境前校验完整字段、标准 base64、Ed25519 私钥与派生公钥一致性；验证材料只走本地子进程 stdin，不进入命令行或输出。坏身份需恢复原文件，不能用新建密钥或删状态代替。
+
 ## 2. 生产部署（需目标主机与运维输入）
 
 ### 2.1 组件与顺序
 
 1. **Relay 本体**：`node server.js`（`PORT` 默认 8787，`PINVOU_REMOTE_HOST` 决定监听地址）。
-2. **enrollment 门禁**：Relay 监听必须位于 loopback（字面 IPv4/IPv6，`localhost` 不算），由 `scripts/enrollment-gateway-server.js` 作为唯一入口；公网路由使用 `nginx-enrollment-gateway.conf`。
-3. **注册库**：`enrollment-registry.js` 读取 `PINVOU_REMOTE_CONTROLLER_STATE_PATH`（不得与 legacy `PINVOU_REMOTE_STATE_PATH` 同路径）；迁移与覆盖率用 `scripts/enrollment-migrate.js` dry-run 取证（要求 100%）。
-4. **验收预检**：对每个公网入口运行 `scripts/enrollment-gateway-preflight.js`（校验健康标记、WebSocket upgrade 标记、匿名注册拒绝、Relay URL 为字面 loopback、OS 监听检查无通配绑定）。
+2. **enrollment 门禁**：Relay 监听必须位于 loopback（字面 IPv4/IPv6，`localhost` 不算），由 `remote-control-relay/scripts/enrollment-gateway-server.js` 作为唯一入口；公网路由使用 `remote-control-relay/nginx-enrollment-gateway.conf`。
+3. **注册库**：`enrollment-registry.js` 读取 `PINVOU_REMOTE_CONTROLLER_STATE_PATH`（不得与 legacy `PINVOU_REMOTE_STATE_PATH` 同路径）；迁移与覆盖率用 `remote-control-relay/scripts/enrollment-migrate.js` dry-run 取证（要求 100%）。
+4. **验收预检**：对每个公网入口运行 `remote-control-relay/scripts/enrollment-gateway-preflight.js`（校验健康标记、WebSocket upgrade 标记、匿名注册拒绝、Relay URL 为字面 loopback、OS 监听检查无通配绑定）。
 5. **回滚检查**：`scripts/check-enrollment-gated-v2-rollback.mjs` 退出码为 0 才允许启动旧 v2 二进制；裸 v2 回滚一律拒绝。
 6. **运行加固**：`10-hardening.conf` 作为服务单元加固基线；服务账号只读仓库、只写状态目录。
 
@@ -95,10 +100,12 @@ Windows 双端远控的 controller-v1 lane 部署到云端测试端点。生产 
 | 实例 | `pinvou-remote-relay-test.service`，`/opt/pinvou-remote-relay-test`，端口 8788 |
 | 状态 | `active`；`curl http://127.0.0.1:8788/pinvou3/remote-test/healthz` → **200** |
 | 协议 | 启动日志：`pinvou remote relay listening on http://0.0.0.0:8788 (protocol=v2+controller-v1, …)` |
-| controller 环境 | `/opt/pinvou-remote-relay-test/controller.env`（0600，`EnvironmentFile=-` 加载）：`development` + `TOFU`、enrollment/pairing HMAC、`PINVOU_REMOTE_RELAY_SIGNING_KEY_ID=relay-test-key-1` |
+| controller 环境 | 历史位置为代码目录；现由部署脚本存入 `/var/lib/pinvou-remote-relay-test/identity/controller.env`（0600，目录 0700，必需的 `EnvironmentFile=`），重部署保留 Ed25519 与两组 HMAC 身份；旧文件先验证并一次性迁移，损坏/缺失身份且存在状态时失败关闭，不静默换钥 |
 | 状态目录 | `/var/lib/pinvou-remote-relay-test/state`（0700，位于代码目录之外，重新部署不丢 tombstone/keyring） |
 | 客户端信任根 | `PINVOU_REMOTE_RELAY_SIGNING_KEY_ID=relay-test-key-1`、`PINVOU_REMOTE_RELAY_SIGNING_PUBLIC_KEY_B64=otRocTSuXfkyfUKA6Gx71zvxII60UdxGK5h/dJ8aOIg=` |
 | 客户端入口 | `PINVOU_REMOTE_PUBLIC_URL=https://pinvou.com/pinvou3/remote-test`、`PINVOU_REMOTE_RELAY_WS_URL=wss://pinvou.com/pinvou3/remote-test/ws`（**公网路由尚未生效**，见 4.2） |
+
+首次空安装可生成全新身份，但新公钥不会自动等于客户端内置 test pin，必须取回脚本输出的公钥并显式配置同一 key ID/public key 后才演练。已有安装只验证复用或一次性迁移旧身份；不能通过删除状态/身份来修复信任根失配，也不能随代码回滚回收持久身份目录。
 
 ### 4.2 代理侧（已完成，用 SSH 跳板写入）
 
