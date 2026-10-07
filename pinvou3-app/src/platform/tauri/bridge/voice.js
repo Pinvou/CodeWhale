@@ -59,7 +59,13 @@
       session.draftEpoch = Number(state.draftEpoch || 0);
     }
     for (var entry of voiceOperations) {
-      if (entry[1].telemetryTerminal) voiceOperations.delete(entry[0]);
+      var item = entry[1];
+      // Terminal entries are done; a dismissed entry stays adoptable for a
+      // manual retry until the next recording starts, then it is swept —
+      // a never-sent dismissal must not leak its audio chunks forever.
+      if (item.telemetryTerminal || (item.dismissed && !item.pendingSubmission)) {
+        voiceOperations.delete(entry[0]);
+      }
     }
     voiceOperations.set(session.operationId, session);
   }
@@ -110,6 +116,21 @@
     return true;
   }
 
+  // Re-entering a departed draft hands its retained text back under a new
+  // draft epoch (enterDraft increments unconditionally). Once the text is
+  // visibly back in the composer the operation follows it: a manual retry
+  // keeps the voice association instead of being orphaned in the dead
+  // recording-time epoch (unadoptable, and unreachable by the keyed abandon).
+  // Restricted to unsubmitted draft operations (no session binding, chat
+  // kind), mirroring the rollback rebind; terminal operations never rebind.
+  function rebindVoiceOperationToDraft(operationId, toEpoch) {
+    var operation = voiceOperations.get(operationId);
+    if (!operation || operation.telemetryTerminal || operation.pendingSubmission
+      || operation.sessionId || operation.ownerKind !== "chat") return false;
+    operation.draftEpoch = Number(toEpoch);
+    return true;
+  }
+
   function completeVoiceSubmission(operationId, sessionId, accepted) {
     var operation = voiceOperations.get(operationId);
     if (!operation || operation.telemetryTerminal) return;
@@ -144,6 +165,12 @@
     if (activeVoiceInput && !activeVoiceInput.voiceResultReady) {
       clearVoiceInput();
       return;
+    }
+    // Mark the dismissal so the next recording start can sweep a never-sent
+    // dismissal; until then the operation stays adoptable by a manual send.
+    var operation = voiceOperations.get((state.voiceInput || {}).operationId);
+    if (operation && !operation.telemetryTerminal && !operation.pendingSubmission) {
+      operation.dismissed = true;
     }
     setVoiceInputStatus("idle", { message: "", operationId: null });
   }
@@ -1362,6 +1389,7 @@
       hasVoiceSubmissionPending: hasVoiceSubmissionPending,
       voiceOperationSessionId: voiceOperationSessionId,
       rebindVoiceDraftAfterRollback: rebindVoiceDraftAfterRollback,
+      rebindVoiceOperationToDraft: rebindVoiceOperationToDraft,
       beginVoiceSubmission: beginVoiceSubmission,
       completeVoiceSubmission: completeVoiceSubmission,
       dismissVoiceInput: dismissVoiceInput,

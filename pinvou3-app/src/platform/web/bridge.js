@@ -3158,7 +3158,20 @@
   // 永远不会堆积没用过的空「新对话」(ChatGPT/Claude 式 lazy session)。
   function enterDraft() {
     state.chatItems.forEach(function (item) {
-      if (item && item.clientMessageId) delete firstTurnSubmissions[item.clientMessageId];
+      if (item && item.clientMessageId) {
+        const submission = firstTurnSubmissions[item.clientMessageId];
+        // A submission still in flight settles its own operation from the RPC
+        // outcome; closing it here would mark a message that is about to be
+        // delivered as cancelled. Finished submissions (rejected or parked on
+        // an unknown outcome) are closed: the record is discarded, so a
+        // parked operation could never reconcile and would stay unadoptable
+        // and unsweepable until the page closes.
+        if (submission && submission.voiceOperationId && !submission.inFlight) {
+          completeVoiceSubmission(submission.voiceOperationId, null, false);
+          abandonVoiceResult(submission.voiceOperationId);
+        }
+        delete firstTurnSubmissions[item.clientMessageId];
+      }
     });
     sessionSwitchRequestToken += 1; // 新建/返回草稿会话使任何仍在等待的 load_session 结果失效
     state.scheduledRunContext = null;
@@ -5977,11 +5990,18 @@
   }
   var pendingTaskDraftRecovery = null;
   function getComposerDraft() {
-    if (pendingTaskDraftRecovery && pendingTaskDraftRecovery.epoch !== Number(state.draftEpoch || 0)) {
-      pendingTaskDraftRecovery = null;
-    }
+    // Consumed once on returning to the draft, never while an unrelated
+    // session is open. No epoch gate: re-entering the draft always allocates
+    // a new epoch (enterDraft increments unconditionally), so an epoch match
+    // could never fire and the retained text would be silently dropped.
     if (pendingTaskDraftRecovery && !state.activeSessionId) {
       state.composerDraft = [state.composerDraft, pendingTaskDraftRecovery.text].filter(Boolean).join("\n");
+      // The text is visibly back in the live draft: the voice association
+      // follows it, or a manual retry would be orphaned in the dead
+      // recording-time epoch.
+      if (pendingTaskDraftRecovery.operationId) {
+        rebindVoiceOperationToDraft(pendingTaskDraftRecovery.operationId, state.draftEpoch);
+      }
       pendingTaskDraftRecovery = null;
     }
     return String(state.composerDraft || "");
@@ -6015,7 +6035,15 @@
     } else if (Number(state.draftEpoch || 0) === owner.draftEpoch) {
       var retained = pendingTaskDraftRecovery && pendingTaskDraftRecovery.epoch === owner.draftEpoch
         ? pendingTaskDraftRecovery.text : "";
-      pendingTaskDraftRecovery = { epoch: owner.draftEpoch, text: [retained, text].filter(Boolean).join("\n") };
+      var retainedOperationId = pendingTaskDraftRecovery && pendingTaskDraftRecovery.epoch === owner.draftEpoch
+        ? pendingTaskDraftRecovery.operationId : null;
+      pendingTaskDraftRecovery = {
+        epoch: owner.draftEpoch,
+        text: [retained, text].filter(Boolean).join("\n"),
+        // The newest operation wins: the rebind on draft return adopts the
+        // most recent stranded send (one operation per manual send).
+        operationId: owner.operationId || retainedOperationId || null,
+      };
     } else {
       return false;
     }
@@ -6597,11 +6625,23 @@
       cancelPendingStreamNotify(sid);
       var didRun = false;
       var wasBackground = sid !== state.activeSessionId;
-      runSyncOnSession(sid, function () {
-        didRun = true;
-        immediateNotify();
-      });
-      if (didRun && wasBackground) immediateNotify();
+      // A throwing subscriber must not escape as an unhandled rAF/timer
+      // error (the synchronous first-delta path keeps the dispatch-loop
+      // throw semantics). runSyncOnSession's finally restores the working
+      // set before the error lands here.
+      try {
+        runSyncOnSession(sid, function () {
+          didRun = true;
+          immediateNotify();
+        });
+      } catch (error) {
+        console.error("[chat] coalesced stream notify failed", error);
+      }
+      // runSyncOnSession suppresses callbacks while a background working set
+      // is installed. Refresh the visible session list after it restores.
+      if (didRun && wasBackground) {
+        try { immediateNotify(); } catch (error) { console.error("[chat] coalesced stream notify failed", error); }
+      }
     }
     if (typeof window.requestAnimationFrame === "function") {
       pending.frame = window.requestAnimationFrame(publish);
@@ -10010,7 +10050,13 @@
       session.draftEpoch = Number(state.draftEpoch || 0);
     }
     for (var entry of voiceOperations) {
-      if (entry[1].telemetryTerminal) voiceOperations.delete(entry[0]);
+      var item = entry[1];
+      // Terminal entries are done; a dismissed entry stays adoptable for a
+      // manual retry until the next recording starts, then it is swept —
+      // a never-sent dismissal must not leak its audio chunks forever.
+      if (item.telemetryTerminal || (item.dismissed && !item.pendingSubmission)) {
+        voiceOperations.delete(entry[0]);
+      }
     }
     voiceOperations.set(session.operationId, session);
   }
@@ -10079,12 +10125,33 @@
     }
   }
 
+  // Re-entering a departed draft hands its retained text back under a new
+  // draft epoch (enterDraft increments unconditionally). Once the text is
+  // visibly back in the composer the operation follows it: a manual retry
+  // keeps the voice association instead of being orphaned in the dead
+  // recording-time epoch. Restricted to unsubmitted draft operations (no
+  // session binding, chat kind), mirroring the desktop lane's rollback and
+  // draft-return rebinds; terminal operations never rebind.
+  function rebindVoiceOperationToDraft(operationId, toEpoch) {
+    var operation = voiceOperations.get(operationId);
+    if (!operation || operation.telemetryTerminal || operation.pendingSubmission
+      || operation.sessionId || operation.ownerKind !== "chat") return false;
+    operation.draftEpoch = Number(toEpoch);
+    return true;
+  }
+
   function dismissVoiceInput() {
     // Applying an edit or dismissing a finished notice retains the draft's provenance.
     // An in-flight recording is still an explicit cancellation.
     if (activeVoiceInput && !activeVoiceInput.voiceResultReady) {
       clearVoiceInput();
       return;
+    }
+    // Mark the dismissal so the next recording start can sweep a never-sent
+    // dismissal; until then the operation stays adoptable by a manual send.
+    var operation = voiceOperations.get((state.voiceInput || {}).operationId);
+    if (operation && !operation.telemetryTerminal && !operation.pendingSubmission) {
+      operation.dismissed = true;
     }
     setVoiceInputStatus("idle", { message: "", operationId: null });
   }

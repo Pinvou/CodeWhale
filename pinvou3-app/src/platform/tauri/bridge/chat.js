@@ -42,11 +42,18 @@
   // activeSessionId 变化后主动读取目标 working set 的草稿。
   var pendingTaskDraftRecovery = null;
   function getComposerDraft() {
-    if (pendingTaskDraftRecovery && pendingTaskDraftRecovery.epoch !== Number(state.draftEpoch || 0)) {
-      pendingTaskDraftRecovery = null;
-    }
+    // Consumed once on returning to the draft, never while an unrelated
+    // session is open. No epoch gate: re-entering the draft always allocates
+    // a new epoch (enterDraft increments unconditionally), so an epoch match
+    // could never fire and the retained text would be silently dropped.
     if (pendingTaskDraftRecovery && !state.activeSessionId) {
       state.composerDraft = [state.composerDraft, pendingTaskDraftRecovery.text].filter(Boolean).join("\n");
+      // The text is visibly back in the live draft: the voice association
+      // follows it, or a manual retry would be orphaned in the dead
+      // recording-time epoch.
+      if (pendingTaskDraftRecovery.operationId) {
+        voice().rebindVoiceOperationToDraft(pendingTaskDraftRecovery.operationId, state.draftEpoch);
+      }
       pendingTaskDraftRecovery = null;
     }
     return String(state.composerDraft || "");
@@ -1034,7 +1041,15 @@
       // Retain one departed draft in memory, never in the unrelated active session.
       var retained = pendingTaskDraftRecovery && pendingTaskDraftRecovery.epoch === owner.draftEpoch
         ? pendingTaskDraftRecovery.text : "";
-      pendingTaskDraftRecovery = { epoch: owner.draftEpoch, text: [retained, text].filter(Boolean).join("\n") };
+      var retainedOperationId = pendingTaskDraftRecovery && pendingTaskDraftRecovery.epoch === owner.draftEpoch
+        ? pendingTaskDraftRecovery.operationId : null;
+      pendingTaskDraftRecovery = {
+        epoch: owner.draftEpoch,
+        text: [retained, text].filter(Boolean).join("\n"),
+        // The newest operation wins: the rebind on draft return adopts the
+        // most recent stranded send (one operation per manual send).
+        operationId: owner.operationId || retainedOperationId || null,
+      };
     } else {
       return false;
     }

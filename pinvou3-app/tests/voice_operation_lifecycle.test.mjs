@@ -28,6 +28,7 @@ function harness(source) {
     rememberVoiceOperation, getVoiceOperationId, beginVoiceSubmission,
     completeVoiceSubmission, trackVoiceTerminal, dismissVoiceInput, voiceOperationSessionId,
     ...(typeof rebindVoiceDraftAfterRollback === 'function' ? { rebindVoiceDraftAfterRollback } : {}),
+    ...(typeof rebindVoiceOperationToDraft === 'function' ? { rebindVoiceOperationToDraft } : {}),
   };`, context);
   const operation = (id, ownerKind = 'chat', sessionId = null) => {
     const value = { operationId: id, ownerKind, sessionId, telemetrySessionId: sessionId || 'draft-session',
@@ -552,7 +553,12 @@ for (const lane of ['desktop', 'web']) {
           h.state.draftEpoch += 1;
           h.state.activeSessionId = null;
           h.state.composerDraft = 'fresh draft';
-          assert.equal(ctx.getComposerDraft(), 'fresh draft', 'new epoch cannot inherit retained text');
+          // No epoch gate: re-entering the draft always allocates a new epoch
+          // (enterDraft increments unconditionally), so the slot hands its
+          // retained text back on the next draft return — the one chance
+          // before it would otherwise be silently dropped.
+          assert.equal(ctx.getComposerDraft(), 'fresh draft\nstale draft');
+          assert.equal(ctx.getComposerDraft(), 'fresh draft\nstale draft', 'recovery is once-only');
           assert.equal(h.api.getVoiceOperationId(null, 'chat'), null, 'new epoch cannot inherit retained voice provenance');
         }
         assert.equal(accepted, 0, 'rejected/restored task must not clear the restored draft or claim success');

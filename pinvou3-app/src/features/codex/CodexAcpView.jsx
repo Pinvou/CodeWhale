@@ -96,6 +96,7 @@ import {
   ConversationTimeline,
 } from '../conversation/ConversationTimeline.jsx';
 import { useConversationSecondClock } from '../../hooks/useConversationSecondClock.js';
+import { shouldVirtualizeConversationTurns } from '../conversation/conversation-virtualization.js';
 import {
   measureConversationScrollGeometry,
   startConversationBottomFollower,
@@ -535,6 +536,10 @@ const NATIVE_CHAT_EVENTS = [
   'chat:user_input_required',
   'chat:plan_snapshot',
   'chat:plan_ready',
+  // discard_plan 后端广播（多端/远端 discard 回声）：把匹配的 active 方案卡幂等
+  // 冻结为 discarded。处理逻辑在 code-native-lane.js（applyNativeChatEvent 的
+  // chat:plan_resolved 分支，与 bridge chat-events.js plan_resolved 对齐）。
+  'chat:plan_resolved',
   'chat:transient_error',
   'chat:done',
 ];
@@ -2362,7 +2367,9 @@ export function CodexAcpView({
     nativeVoice.cancelVoice();
   }
   function handleNativeVoiceClose() {
-    nativeVoice.closeVoice();
+    // Dismiss without ending the unsent operation (an in-flight recording
+    // still cancels); closeVoice would abandon it.
+    nativeVoice.dismissVoice();
   }
 
   // 离开代码页（切模式/视图，组件卸载）时可靠取消进行中的语音输入：
@@ -2730,7 +2737,11 @@ export function CodexAcpView({
     if (!element) return;
     autoScrollRef.current = true;
     setShowScrollBottom(false);
-    element.scrollTo({ top: element.scrollHeight, behavior: 'smooth' });
+    // Smooth gliding through a virtualized document mounts and unmounts
+    // rows for its whole duration while estimates go stale; jump instead
+    // (same decision as the overflowAnchor gate below).
+    const virtualized = shouldVirtualizeConversationTurns(visibleTurns.length, scroller);
+    element.scrollTo({ top: element.scrollHeight, behavior: virtualized ? 'auto' : 'smooth' });
   }
 
   function beginRuntimeOperation(agentId, operation) {
@@ -3532,7 +3543,7 @@ export function CodexAcpView({
 
         <div className="flex-1 min-h-0 flex">
         <div className="relative min-w-0 flex-1 min-h-0 flex flex-col">
-        <div ref={scroller} className="flex-1 min-h-0 overflow-y-auto custom-scrollbar" style={{ overflowAnchor: 'none' }}>
+        <div ref={scroller} className="flex-1 min-h-0 overflow-y-auto custom-scrollbar" style={{ overflowAnchor: shouldVirtualizeConversationTurns(visibleTurns.length, scroller) ? 'none' : undefined }}>
           {/* relative: the AuxQuoteSelection chip is absolutely positioned inside this column, clamped to its rect. */}
           <div ref={conversationContentRef} className="relative w-full max-w-[920px] min-h-full mx-auto px-6 py-6 flex flex-col gap-7">
             {workspaceUnavailable ? (
