@@ -850,7 +850,7 @@ impl ToolSpec for ReadFileTool {
                 },
                 "max_lines": {
                     "type": "integer",
-                    "description": "Maximum lines to return (default 500, max 500; a 16KB byte budget applies regardless). Aliases: `limit`, `n_lines`"
+                    "description": "Maximum lines to return (default 500, max 500; the byte budget defaults to 16KB). Aliases: `limit`, `n_lines`"
                 },
                 "pages": {
                     "type": "string",

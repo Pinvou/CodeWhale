@@ -129,7 +129,7 @@ impl ToolSpec for GithubTool {
     fn description(&self) -> &'static str {
         match self.forced_action {
             Some("issue_context") => {
-                "Read GitHub issue context using gh. Read-only: body/comments/labels/state are summarized and large bodies become task artifacts when a durable task is active."
+                "Read GitHub issue context using gh. Read-only: bodies over ~4KB are condensed to a ~1200-char excerpt (the full text is written to a task artifact only when a durable task is active); comments, labels, and state pass through verbatim."
             }
             Some("pr_context") => {
                 "Read GitHub PR context using gh: body/comments/reviews/check status/files and optional diff artifact. Read-only; no push/merge/close."
@@ -147,7 +147,7 @@ impl ToolSpec for GithubTool {
                 "Read GitHub issue/PR context using gh. Actions: \"issue_context\" and \"pr_context\". Bodies over ~4KB are condensed to a ~1200-char excerpt (the full text is written to a task artifact only when a durable task is active); smaller bodies, comments, labels, and state pass through verbatim."
             }
             _ => {
-                "Read and guardedly mutate GitHub issues/PRs using gh. Actions: \"issue_context\", \"pr_context\" (read-only; bodies over ~4KB are condensed to a ~1200-char excerpt unless a durable task captures the full text as an artifact), \"comment\" (approval; evidence-backed), \"close_issue\", \"close_pr\" (approval; only with structured acceptance evidence — never close merely because the agent is stopping; rejected when the worktree is dirty unless allow_dirty=true). No push/merge."
+                "Read and guardedly mutate GitHub issues/PRs using gh. Actions: \"issue_context\", \"pr_context\" (read-only; bodies over ~4KB are condensed to a ~1200-char excerpt (a durable task additionally captures the full text as an artifact)), \"comment\" (approval; evidence-backed), \"close_issue\", \"close_pr\" (approval; only with structured acceptance evidence — never close merely because the agent is stopping; rejected when the worktree is dirty unless allow_dirty=true). No push/merge."
             }
         }
     }
