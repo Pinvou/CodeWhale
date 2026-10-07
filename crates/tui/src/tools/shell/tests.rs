@@ -411,7 +411,8 @@ fn forkguard_shell_catalog_guidance_matches_execution() {
     let readonly = BashTool::read_only("Bash");
     // Forkguard: the read-only description must match execution — argv for
     // single commands, and the shell only for the explicitly disclosed
-    // pipeline exception (pipefail).
+    // pipeline exception, whose pipefail prefix is conditional on the
+    // detected shell actually supporting it.
     assert!(
         readonly
             .description()
@@ -420,8 +421,9 @@ fn forkguard_shell_catalog_guidance_matches_execution() {
     assert!(
         readonly
             .description()
-            .contains("runs through the shell with pipefail")
+            .contains("runs through the detected shell")
     );
+    assert!(readonly.description().contains("set -o pipefail"));
     assert!(
         !readonly
             .input_schema()

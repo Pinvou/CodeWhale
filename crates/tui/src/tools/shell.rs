@@ -4699,7 +4699,7 @@ impl ToolSpec for BashTool {
 
     fn description(&self) -> &'static str {
         if self.read_only {
-            "Inspect the workspace with the bounded read-only command subset. Single commands run directly as argv; a pipeline (`a | b`) is the one exception and runs through the shell with pipefail. Only action=run plus command, cwd, and timeout_ms are accepted."
+            "Inspect the workspace with the bounded read-only command subset. Single commands run directly as argv; a pipeline (`a | b`) is the one exception and runs through the detected shell with a `set -o pipefail` prefix (bash-like shells honor it; shells without pipefail may reject the prefix outright). Only action=run plus command, cwd, and timeout_ms are accepted."
         } else {
             guidance::description()
         }
