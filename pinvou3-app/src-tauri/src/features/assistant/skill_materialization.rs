@@ -21,10 +21,6 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
-
-use parking_lot::Mutex;
-use uuid::Uuid;
 
 use crate::features::marketplace::ConnectorScope;
 use crate::platform::paths;
@@ -36,84 +32,6 @@ use crate::platform::paths;
 // 持久化层在 `features/marketplace/skill_scope.rs`（与连接器开关同领域、避免
 // connectors → assistant 依赖环），这里 re-export 保持调用路径不变。
 pub use crate::features::marketplace::skill_scope::*;
-
-#[derive(Default)]
-struct RemoteSkillState {
-    owner: Option<Uuid>,
-    prepared: bool,
-    abandoned: bool,
-}
-
-fn remote_skill_states() -> &'static Mutex<HashMap<String, RemoteSkillState>> {
-    static STATES: OnceLock<Mutex<HashMap<String, RemoteSkillState>>> = OnceLock::new();
-    STATES.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-/// Keep the local turn gate closed until remote cleanup removes its freeze.
-/// The callback must only occupy the lifecycle slot, never perform IO or await.
-pub(crate) fn reserve_unfrozen_session_turn<T>(
-    session_id: &str,
-    reserve: impl FnOnce() -> T,
-) -> Result<T, String> {
-    let states = remote_skill_states().lock();
-    if states.contains_key(session_id) {
-        return Err("task_skills_busy".to_owned());
-    }
-    Ok(reserve())
-}
-
-/// Held by the remote turn adapter through the authoritative terminal. Every
-/// materialization entry serializes against this owner; UI refreshes cannot
-/// widen the accepted selection. Aborted futures leave a dirty, least-privilege
-/// directory. An abandoned submitted turn must not regain wider authority;
-/// ordinary refresh/heal cannot clear that fail-closed state.
-pub(crate) struct RemoteSkillFreezeGuard {
-    session_id: String,
-    owner: Uuid,
-}
-
-impl RemoteSkillFreezeGuard {
-    pub(crate) fn acquire(session_id: &str) -> Result<Self, String> {
-        let mut states = remote_skill_states().lock();
-        if states.contains_key(session_id) {
-            return Err("task_skills_busy".to_owned());
-        }
-        let owner = Uuid::new_v4();
-        states.insert(
-            session_id.to_owned(),
-            RemoteSkillState {
-                owner: Some(owner),
-                prepared: false,
-                abandoned: false,
-            },
-        );
-        Ok(Self {
-            session_id: session_id.to_owned(),
-            owner,
-        })
-    }
-
-    pub(crate) fn owner(&self) -> Uuid {
-        self.owner
-    }
-}
-
-impl Drop for RemoteSkillFreezeGuard {
-    fn drop(&mut self) {
-        let mut states = remote_skill_states().lock();
-        if let Some(state) = states.get_mut(&self.session_id)
-            && state.owner == Some(self.owner)
-        {
-            // A dropped submitted future may leave its engine running. Do not
-            // allow refresh/local self-heal/a successor to expand its authority.
-            if state.prepared {
-                state.abandoned = true;
-            } else {
-                states.remove(&self.session_id);
-            }
-        }
-    }
-}
 
 // ---------------------------------------------------------------------------
 // 组合目录物化
@@ -299,56 +217,62 @@ pub fn materialize_session_skills(
     scope: ConnectorScope,
     project_workspace: Option<&Path>,
 ) -> Result<(), String> {
-    let mut states = remote_skill_states().lock();
-    if states.contains_key(session_id) {
-        return Err("task_skills_busy".to_owned());
-    }
     let enabled = enabled_skills_for(scope, project_workspace);
     materialize_skill_set(session_id, &enabled)?;
-    states.remove(session_id);
     Ok(())
 }
 
-/// A remote caller has already materialized its authenticated selection while
-/// holding the turn reservation. Cold spawn and model rebuild must not replace
-/// that directory with B's full enabled set. Missing preparation fails closed.
-pub(crate) fn prepare_engine_spawn_skills(
-    session_id: &str,
-    scope: ConnectorScope,
-    project_workspace: Option<&Path>,
-    remote_owner: Option<Uuid>,
-) -> Result<(), String> {
-    if let Some(owner) = remote_owner {
-        let states = remote_skill_states().lock();
-        if !states
-            .get(session_id)
-            .is_some_and(|state| state.owner == Some(owner) && !state.abandoned && state.prepared)
-            || !paths::session_skills_dir(session_id).is_dir()
-        {
-            return Err("task_skill_unavailable".to_owned());
-        }
-        Ok(())
-    } else {
-        materialize_session_skills(session_id, scope, project_workspace)
+/// A remote turn's immutable, uniquely owned discovery root. Ordinary B-local
+/// materialize/rewrite/self-heal writers never target this directory.
+#[derive(Debug, Default)]
+pub(crate) struct RemoteTurnOwner {
+    snapshot_claimed: std::sync::atomic::AtomicBool,
+}
+
+impl RemoteTurnOwner {
+    fn claim_snapshot(&self) -> Result<(), String> {
+        self.snapshot_claimed
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .map(|_| ())
+            .map_err(|_| "task_skill_snapshot_reused".to_owned())
     }
 }
 
-/// Freeze a remote turn to exactly the skills selected in its authenticated
-/// input. An empty selection deliberately produces an empty discovery root;
-/// unselected B skills are therefore unavailable to `load_skill` for this
-/// turn instead of merely being omitted from an audit field.
+#[derive(Debug)]
+pub(crate) struct RemoteTurnSkills {
+    directory: tempfile::TempDir,
+    owner: std::sync::Arc<RemoteTurnOwner>,
+}
+
+impl RemoteTurnSkills {
+    pub(crate) fn owner(&self) -> &std::sync::Arc<RemoteTurnOwner> {
+        &self.owner
+    }
+
+    pub(crate) fn path(&self) -> &Path {
+        self.directory.path()
+    }
+}
+
+/// Resolve the authenticated selection against B's enabled set and copy into
+/// a private root, including an empty directory for an empty selection. A
+/// cancelled spawn_blocking waiter cannot publish into shared session skills:
+/// when its result is dropped, only this attempt's owned directory is removed.
 pub(crate) fn materialize_remote_turn_skills(
     session_id: &str,
     scope: ConnectorScope,
     project_workspace: Option<&Path>,
     skill_ids: &[String],
-    owner: Uuid,
-) -> Result<(), String> {
-    let mut states = remote_skill_states().lock();
-    let state = states
-        .get_mut(session_id)
-        .filter(|state| state.owner == Some(owner) && !state.abandoned)
-        .ok_or_else(|| "task_skill_freeze_required".to_owned())?;
+    owner: std::sync::Arc<RemoteTurnOwner>,
+) -> Result<RemoteTurnSkills, String> {
+    crate::features::sessions::validate_session_id(session_id)
+        .map_err(|_| "task_session_invalid".to_owned())?;
+    owner.claim_snapshot()?;
     if skill_ids.len() > 32 {
         return Err("task_skills_invalid".to_owned());
     }
@@ -367,9 +291,20 @@ pub(crate) fn materialize_remote_turn_skills(
             .ok_or_else(|| "task_skill_not_authorized".to_owned())?;
         selected.push((skill_id.clone(), path));
     }
-    materialize_skill_set(session_id, &selected)?;
-    state.prepared = true;
-    Ok(())
+    let shared = paths::session_skills_dir(session_id);
+    let parent = shared
+        .parent()
+        .ok_or_else(|| "task_session_invalid".to_owned())?;
+    std::fs::create_dir_all(parent).map_err(|_| "task_skill_unavailable".to_owned())?;
+    let directory = tempfile::Builder::new()
+        .prefix("remote-turn-skills-")
+        .tempdir_in(parent)
+        .map_err(|_| "task_skill_unavailable".to_owned())?;
+    for (name, source) in selected {
+        copy_skill_dir(&source, &directory.path().join(name))
+            .map_err(|_| "task_skill_unavailable".to_owned())?;
+    }
+    Ok(RemoteTurnSkills { directory, owner })
 }
 
 /// Plain-chat wrappers keep the assistant runtime independent of the
@@ -377,23 +312,9 @@ pub(crate) fn materialize_remote_turn_skills(
 pub(crate) fn materialize_plain_remote_turn_skills(
     session_id: &str,
     skill_ids: &[String],
-    owner: Uuid,
-) -> Result<(), String> {
+    owner: std::sync::Arc<RemoteTurnOwner>,
+) -> Result<RemoteTurnSkills, String> {
     materialize_remote_turn_skills(session_id, ConnectorScope::Plain, None, skill_ids, owner)
-}
-
-pub(crate) fn restore_plain_session_skills(session_id: &str, owner: Uuid) -> Result<(), String> {
-    let mut states = remote_skill_states().lock();
-    if !states
-        .get(session_id)
-        .is_some_and(|state| state.owner == Some(owner) && !state.abandoned)
-    {
-        return Err("task_skill_owner_stale".to_owned());
-    }
-    let enabled = enabled_skills_for(ConnectorScope::Plain, None);
-    materialize_skill_set(session_id, &enabled)?;
-    states.remove(session_id);
-    Ok(())
 }
 
 /// Build the private prompt prefix used by ACP, whose protocol has no
@@ -488,10 +409,6 @@ pub fn rewrite_session_skills(
     scope: ConnectorScope,
     project_workspace: Option<&Path>,
 ) {
-    let states = remote_skill_states().lock();
-    if states.contains_key(session_id) {
-        return;
-    }
     let target = paths::session_skills_dir(session_id);
     let enabled: HashMap<String, PathBuf> = enabled_skills_for(scope, project_workspace)
         .into_iter()
@@ -535,27 +452,18 @@ pub fn ensure_session_skills(
     session_id: &str,
     scope: ConnectorScope,
     project_workspace: Option<&Path>,
-    remote_owner: Option<Uuid>,
-) -> Result<(), String> {
-    let states = remote_skill_states().lock();
-    let target_exists = paths::session_skills_dir(session_id).is_dir();
-    if let Some(state) = states.get(session_id) {
-        return if !state.abandoned && state.owner == remote_owner && state.prepared && target_exists
-        {
-            Ok(())
-        } else {
-            Err("task_skill_unavailable".to_owned())
-        };
-    } else if !target_exists {
-        materialize_skill_set(session_id, &enabled_skills_for(scope, project_workspace))?;
+) {
+    if !paths::session_skills_dir(session_id).is_dir() {
+        if let Err(e) = materialize_session_skills(session_id, scope, project_workspace) {
+            eprintln!("[skill-scope] self-heal {session_id} failed: {e}");
+        }
     }
-    Ok(())
 }
 
 #[cfg(test)]
-pub(super) fn ensure_plain_session_skills_for_test(session_id: &str) -> Result<(), String> {
+pub(super) fn ensure_plain_session_skills_for_test(session_id: &str) {
     // Keep scope selection in this adapter, including cross-runtime regressions.
-    ensure_session_skills(session_id, ConnectorScope::Plain, None, None)
+    ensure_session_skills(session_id, ConnectorScope::Plain, None)
 }
 
 /// 判定（策略用）：该会话组合目录是否为空（目录不存在或无数）。code 会话据此
@@ -835,25 +743,6 @@ mod tests {
     }
 
     #[test]
-    fn unfrozen_turn_reservation_keeps_state_lock_through_slot_occupation() {
-        let sid = format!("skill-reserve-gate-{}", Uuid::new_v4());
-        reserve_unfrozen_session_turn(&sid, || {
-            assert!(
-                remote_skill_states().try_lock().is_none(),
-                "checking freeze and occupying a turn must be one critical section"
-            );
-        })
-        .unwrap();
-        let guard = RemoteSkillFreezeGuard::acquire(&sid).unwrap();
-        let mut called = false;
-        assert!(reserve_unfrozen_session_turn(&sid, || called = true).is_err());
-        assert!(!called, "busy refusal cannot occupy any lifecycle slot");
-        drop(guard);
-        reserve_unfrozen_session_turn(&sid, || called = true).unwrap();
-        assert!(called);
-    }
-
-    #[test]
     fn enabled_skills_respect_first_wins_and_scope_disabled() {
         with_temp_home(|| {
             seed_sources();
@@ -935,7 +824,7 @@ mod tests {
 
             // 自愈：手动删目录 → ensure 重建
             std::fs::remove_dir_all(&dir).unwrap();
-            ensure_session_skills(sid, ConnectorScope::Plain, None, None).unwrap();
+            ensure_session_skills(sid, ConnectorScope::Plain, None);
             assert!(dir.is_dir(), "自愈应重建组合目录");
             assert!(session_skills_is_empty(sid));
         });
@@ -1041,16 +930,15 @@ mod tests {
         with_temp_home(|| {
             seed_sources();
             let sid = "remote-session-skills";
-            let guard = RemoteSkillFreezeGuard::acquire(sid).unwrap();
-            materialize_remote_turn_skills(
+            let selected = materialize_remote_turn_skills(
                 sid,
                 ConnectorScope::Plain,
                 None,
                 &["user-custom".to_owned(), "visualizer".to_owned()],
-                guard.owner(),
+                std::sync::Arc::new(RemoteTurnOwner::default()),
             )
             .unwrap();
-            let dir = paths::session_skills_dir(sid);
+            let dir = selected.path().to_owned();
             let names: HashSet<String> = std::fs::read_dir(&dir)
                 .unwrap()
                 .flatten()
@@ -1073,7 +961,7 @@ mod tests {
                     ConnectorScope::Plain,
                     None,
                     &["not-authorized".to_owned()],
-                    guard.owner(),
+                    std::sync::Arc::new(RemoteTurnOwner::default()),
                 )
                 .unwrap_err(),
                 "task_skill_not_authorized"
@@ -1081,134 +969,100 @@ mod tests {
             assert!(dir.join("user-custom").is_dir());
             assert!(dir.join("visualizer").is_dir());
 
-            materialize_remote_turn_skills(sid, ConnectorScope::Plain, None, &[], guard.owner())
-                .unwrap();
-            assert!(std::fs::read_dir(&dir).unwrap().next().is_none());
-            restore_plain_session_skills(sid, guard.owner()).unwrap();
-            assert_eq!(
-                std::fs::read_dir(dir).unwrap().flatten().count(),
-                4,
-                "the next B-local turn regains B's full authoritative enabled set"
-            );
-        });
-    }
-
-    #[test]
-    fn remote_freeze_blocks_refresh_self_heal_local_send_and_stale_owners() {
-        with_temp_home(|| {
-            seed_sources();
-            let sid = "remote-freeze-lifecycle";
-            let guard = RemoteSkillFreezeGuard::acquire(sid).unwrap();
-            let owner = guard.owner();
-            materialize_plain_remote_turn_skills(sid, &["user-custom".to_owned()], owner).unwrap();
-            for _ in 0..3 {
-                rewrite_session_skills(sid, ConnectorScope::Plain, None);
-                assert!(materialize_session_skills(sid, ConnectorScope::Plain, None).is_err());
-                ensure_session_skills(sid, ConnectorScope::Plain, None, Some(owner)).unwrap();
-                assert_eq!(
-                    std::fs::read_dir(paths::session_skills_dir(sid))
-                        .unwrap()
-                        .count(),
-                    1
-                );
-            }
+            let empty = materialize_remote_turn_skills(
+                sid,
+                ConnectorScope::Plain,
+                None,
+                &[],
+                std::sync::Arc::new(RemoteTurnOwner::default()),
+            )
+            .unwrap();
+            assert!(std::fs::read_dir(empty.path()).unwrap().next().is_none());
             assert!(
-                ensure_session_skills(sid, ConnectorScope::Plain, None, None).is_err(),
-                "a local send cannot inherit the remote task's narrower set before restore"
+                dir.join("user-custom").is_dir(),
+                "a newer empty snapshot must not replace its predecessor"
             );
-            assert!(RemoteSkillFreezeGuard::acquire(sid).is_err());
-            let stale = Uuid::new_v4();
-            assert!(restore_plain_session_skills(sid, stale).is_err());
-            assert!(materialize_plain_remote_turn_skills(sid, &[], stale).is_err());
-            let target = paths::session_skills_dir(sid);
-            std::fs::remove_dir_all(&target).unwrap();
-            assert!(ensure_session_skills(sid, ConnectorScope::Plain, None, Some(owner)).is_err());
-            rewrite_session_skills(sid, ConnectorScope::Plain, None);
-            assert!(
-                !target.exists(),
-                "missing frozen directory cannot heal to B's full set"
-            );
-            materialize_plain_remote_turn_skills(sid, &[], owner).unwrap();
-            restore_plain_session_skills(sid, owner).unwrap();
-            ensure_session_skills(sid, ConnectorScope::Plain, None, None).unwrap();
-            assert_eq!(std::fs::read_dir(&target).unwrap().count(), 4);
-            let successor = RemoteSkillFreezeGuard::acquire(sid).unwrap();
-            materialize_plain_remote_turn_skills(sid, &[], successor.owner()).unwrap();
-            drop(guard);
-            assert!(
-                prepare_engine_spawn_skills(
-                    sid,
-                    ConnectorScope::Plain,
-                    None,
-                    Some(successor.owner())
-                )
-                .is_ok(),
-                "stale Drop cannot retire the successor's freeze"
-            );
-            restore_plain_session_skills(sid, successor.owner()).unwrap();
-        });
-    }
-
-    #[test]
-    fn abandoned_prepared_turn_stays_frozen_and_late_materialization_cannot_take_over() {
-        with_temp_home(|| {
-            seed_sources();
-            let sid = "remote-abandoned-freeze";
-            let guard = RemoteSkillFreezeGuard::acquire(sid).unwrap();
-            let owner = guard.owner();
-            materialize_plain_remote_turn_skills(sid, &[], owner).unwrap();
-            drop(guard);
-            rewrite_session_skills(sid, ConnectorScope::Plain, None);
-            assert!(materialize_session_skills(sid, ConnectorScope::Plain, None).is_err());
-            assert!(ensure_session_skills(sid, ConnectorScope::Plain, None, None).is_err());
-            assert!(RemoteSkillFreezeGuard::acquire(sid).is_err());
-            assert!(restore_plain_session_skills(sid, owner).is_err());
-            assert!(
-                materialize_plain_remote_turn_skills(sid, &["user-custom".to_owned()], owner)
-                    .is_err()
-            );
+            assert_ne!(dir, empty.path());
+            materialize_session_skills(sid, ConnectorScope::Plain, None).unwrap();
             assert_eq!(
                 std::fs::read_dir(paths::session_skills_dir(sid))
                     .unwrap()
+                    .flatten()
                     .count(),
-                0
+                4,
+                "the next B-local turn regains B's full authoritative enabled set"
             );
-            // Test-only isolated process-state disposal, not a production heal.
-            remote_skill_states().lock().remove(sid);
-
-            let unprepared = RemoteSkillFreezeGuard::acquire(sid).unwrap();
-            let old_owner = unprepared.owner();
-            drop(unprepared);
-            let successor = RemoteSkillFreezeGuard::acquire(sid).unwrap();
+            let before = std::fs::read_to_string(dir.join("visualizer/SKILL.md")).unwrap();
+            rewrite_session_skills(sid, ConnectorScope::Plain, None);
+            let shared = paths::session_skills_dir(sid);
+            // Only this fixture's exact managed shared directory is removed.
+            std::fs::remove_dir_all(&shared).unwrap();
+            ensure_session_skills(sid, ConnectorScope::Plain, None);
+            assert!(shared.is_dir());
+            assert_eq!(
+                before,
+                std::fs::read_to_string(dir.join("visualizer/SKILL.md")).unwrap()
+            );
+            assert!(!dir.join("bundle-skill").exists());
+            assert!(std::fs::read_dir(empty.path()).unwrap().next().is_none());
+            let snapshot = std::sync::Arc::new(selected);
+            let clone = snapshot.clone();
+            drop(snapshot);
+            assert!(dir.is_dir());
+            drop(clone);
             assert!(
-                materialize_plain_remote_turn_skills(sid, &["user-custom".to_owned()], old_owner)
-                    .is_err(),
-                "a cancelled spawn_blocking worker cannot materialize under its successor"
+                !dir.exists(),
+                "last snapshot owner cleans only its private directory"
             );
-            materialize_plain_remote_turn_skills(sid, &[], successor.owner()).unwrap();
-            restore_plain_session_skills(sid, successor.owner()).unwrap();
+            assert!(shared.is_dir());
+            assert!(empty.path().is_dir());
         });
     }
 
     #[test]
-    fn remote_restore_uses_latest_b_toggle_install_and_uninstall_state() {
+    fn remote_snapshot_owner_is_one_shot_and_invalid_ids_fail_before_claim() {
+        with_temp_home(|| {
+            let owner = std::sync::Arc::new(RemoteTurnOwner::default());
+            for invalid in [
+                "",
+                ".",
+                "..",
+                "trailing.",
+                "trailing ",
+                "a/b",
+                "a\\b",
+                "a:b",
+            ] {
+                assert_eq!(
+                    materialize_plain_remote_turn_skills(invalid, &[], owner.clone()).unwrap_err(),
+                    "task_session_invalid"
+                );
+            }
+            let first =
+                materialize_plain_remote_turn_skills("snapshot-owner", &[], owner.clone()).unwrap();
+            assert_eq!(
+                materialize_plain_remote_turn_skills("snapshot-owner", &[], owner).unwrap_err(),
+                "task_skill_snapshot_reused"
+            );
+            assert!(first.path().is_dir());
+        });
+    }
+
+    #[test]
+    fn private_remote_selection_survives_latest_b_toggle_install_and_uninstall() {
         with_temp_home(|| {
             seed_sources();
             let sid = "remote-latest-b-skills";
-            let guard = RemoteSkillFreezeGuard::acquire(sid).unwrap();
-            materialize_plain_remote_turn_skills(sid, &["user-custom".to_owned()], guard.owner())
-                .unwrap();
+            let snapshot = materialize_plain_remote_turn_skills(
+                sid,
+                &["user-custom".to_owned()],
+                std::sync::Arc::new(RemoteTurnOwner::default()),
+            )
+            .unwrap();
             save_disabled_skills_for(ConnectorScope::Plain, &["visualizer".to_owned()]).unwrap();
             write_skill(&paths::user_skills_dir(), "newly-installed", "new skill");
             std::fs::remove_dir_all(paths::bundle_skills_dir().join("ima-skills")).unwrap();
             rewrite_session_skills(sid, ConnectorScope::Plain, None);
-            assert_eq!(
-                std::fs::read_dir(paths::session_skills_dir(sid))
-                    .unwrap()
-                    .count(),
-                1
-            );
-            restore_plain_session_skills(sid, guard.owner()).unwrap();
             let names: HashSet<_> = std::fs::read_dir(paths::session_skills_dir(sid))
                 .unwrap()
                 .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
@@ -1221,51 +1075,84 @@ mod tests {
                     "newly-installed".to_owned(),
                 ])
             );
+            let frozen: Vec<_> = std::fs::read_dir(snapshot.path())
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .collect();
+            assert_eq!(frozen, vec![std::ffi::OsString::from("user-custom")]);
         });
     }
 
-    #[test]
-    fn frozen_remote_selection_survives_cold_spawn_and_model_rebuild() {
-        with_temp_home(|| {
-            seed_sources();
-            let sid = "remote-cold-spawn";
-            for selection in [vec!["user-custom".to_owned()], Vec::new()] {
-                let guard = RemoteSkillFreezeGuard::acquire(sid).unwrap();
-                materialize_plain_remote_turn_skills(sid, &selection, guard.owner()).unwrap();
-                // Same production preparation runs for cold spawn and rebuild.
-                for _ in 0..2 {
-                    prepare_engine_spawn_skills(
-                        sid,
-                        ConnectorScope::Plain,
-                        None,
-                        Some(guard.owner()),
-                    )
-                    .unwrap();
-                    let names: HashSet<_> = std::fs::read_dir(paths::session_skills_dir(sid))
-                        .unwrap()
-                        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
-                        .collect();
-                    assert_eq!(names, selection.iter().cloned().collect());
+    #[tokio::test(flavor = "current_thread")]
+    async fn cancelled_blocking_snapshot_cannot_publish_over_a_newer_shared_root() {
+        let _env_lock = crate::platform::paths::tests::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        struct Restore(Option<std::ffi::OsString>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                // SAFETY: ENV_LOCK is held for the complete test.
+                unsafe {
+                    match &self.0 {
+                        Some(value) => std::env::set_var("PINVOU3_HOME", value),
+                        None => std::env::remove_var("PINVOU3_HOME"),
+                    }
                 }
-                restore_plain_session_skills(sid, guard.owner()).unwrap();
-                prepare_engine_spawn_skills(sid, ConnectorScope::Plain, None, None).unwrap();
-                assert_eq!(
-                    std::fs::read_dir(paths::session_skills_dir(sid))
-                        .unwrap()
-                        .count(),
-                    4
-                );
             }
-            assert_eq!(
-                prepare_engine_spawn_skills(
-                    "not-prepared",
-                    ConnectorScope::Plain,
-                    None,
-                    Some(Uuid::new_v4())
-                ),
-                Err("task_skill_unavailable".to_owned())
-            );
+        }
+        let _restore = Restore(std::env::var_os("PINVOU3_HOME"));
+        // SAFETY: ENV_LOCK is held.
+        unsafe { std::env::set_var("PINVOU3_HOME", home.path()) };
+        let sid = "cancelled-snapshot";
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+        struct BlockingResult {
+            snapshot: Option<RemoteTurnSkills>,
+            done: Option<tokio::sync::oneshot::Sender<()>>,
+        }
+        impl Drop for BlockingResult {
+            fn drop(&mut self) {
+                drop(self.snapshot.take());
+                if let Some(done) = self.done.take() {
+                    let _ = done.send(());
+                }
+            }
+        }
+        let waiter = tokio::spawn(async move {
+            let result = tokio::task::spawn_blocking(move || {
+                let snapshot = materialize_plain_remote_turn_skills(
+                    sid,
+                    &[],
+                    std::sync::Arc::new(RemoteTurnOwner::default()),
+                )
+                .unwrap();
+                ready_tx.send(snapshot.path().to_path_buf()).unwrap();
+                release_rx.recv().unwrap();
+                // The blocking task completes AFTER its async waiter was
+                // cancelled. Tokio drops this undelivered owned result.
+                BlockingResult {
+                    snapshot: Some(snapshot),
+                    done: Some(done_tx),
+                }
+            })
+            .await;
+            drop(result.unwrap());
         });
+        let private = ready_rx.await.unwrap();
+        waiter.abort();
+        assert!(waiter.await.unwrap_err().is_cancelled());
+        materialize_session_skills(sid, ConnectorScope::Plain, None).unwrap();
+        let shared = paths::session_skills_dir(sid);
+        std::fs::write(shared.join("newer-owner-marker"), "newer").unwrap();
+        release_tx.send(()).unwrap();
+        done_rx.await.unwrap();
+        assert!(!private.exists());
+        assert_eq!(
+            std::fs::read_to_string(shared.join("newer-owner-marker")).unwrap(),
+            "newer"
+        );
     }
 
     #[test]

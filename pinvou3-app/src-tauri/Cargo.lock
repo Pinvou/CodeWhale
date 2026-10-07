@@ -27,6 +27,7 @@ dependencies = [
  "cfg-if",
  "cipher",
  "cpufeatures 0.2.17",
+ "zeroize",
 ]
 
 [[package]]
@@ -41,6 +42,7 @@ dependencies = [
  "ctr",
  "ghash",
  "subtle",
+ "zeroize",
 ]
 
 [[package]]
@@ -6607,6 +6609,7 @@ dependencies = [
 name = "pinvou3-tauri"
 version = "0.10.6"
 dependencies = [
+ "aes",
  "aes-gcm",
  "age",
  "agent-backend-api",

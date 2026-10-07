@@ -313,6 +313,17 @@ export class ControllerReservationManager {
     return reservation;
   }
 
+  // A read-only ownership check for async claim/commit boundaries. A completed
+  // release is distinct from a reservation owned by another socket.
+  reservationForOwner({ reservationId, socketIdentity } = {}) {
+    reservationId = identifier(reservationId, "reservation_id");
+    socketIdentity = identifier(socketIdentity, "socket_identity");
+    const reservation = this.#reservations.get(reservationId);
+    if (!reservation) return null;
+    if (reservation.owner_socket_identity !== socketIdentity) fail("reservation_owner_invalid");
+    return reservation;
+  }
+
   async release({ reservationId, socketIdentity, reason = "failed" } = {}) {
     let reservation = this.#owned(reservationId, socketIdentity);
     if (!RELEASE_REASONS.has(reason)) fail("reservation_release_reason_invalid");
