@@ -96,13 +96,13 @@ Codewhale 没有恢复出厂设置命令，因此本文档也不会声称有。
 | `notice_version` | `u32` | `crates/telemetry/src/event.rs` 中的政策常量 | 固定为 `5`；表明默认开启、可退出的政策版本，不是用户同意记录。 |
 | `sent_at` | RFC3339 | `chrono::Utc::now()` | 秒级精度。仅按**批次**——事件本身完全不携带时间戳。 |
 | `install_id` | uuid v4 | `crates/telemetry/src/envelope.rs` | 随机、绝不派生，每 90 天轮换。见上文"数据存放位置"。 |
-| `app_version` | string | `env!("CARGO_PKG_VERSION")`，即 `crates/telemetry/src/lib.rs:112` 处 | 必须匹配 `^\d+\.\d+\.\d+(-[0-9A-Za-z.]+)?$`。 |
+| `app_version` | string | `env!("CARGO_PKG_VERSION")`，即 `crates/telemetry/src/lib.rs:120` 处 | 必须匹配 `^\d+\.\d+\.\d+(-[0-9A-Za-z.]+)?$`。 |
 | `git_sha` | string \| null | `option_env!("CODEWHALE_RELEASE_BUILD_SHA")`——一个**新的** rustc-env | 前 12 个十六进制字符。仅当 `codewhale_build_support::release_build_sha` 在构建环境中看到 `DEEPSEEK_BUILD_SHA` 或 `GITHUB_SHA` 时才发送，即仅对发布 CI 构建。对所有本地构建的二进制无条件为 `null`，且不做任何形式的运行时查找。**绝不**是 `CODEWHALE_BUILD_COMMIT`——那会回退到 `git_commit`，是构建者的私有 HEAD。**绝不**是 `Thread.git_sha`（`crates/state/src/lib.rs:93`）——那是用户工作区的提交，是一条红线，只隔一个名字。 |
 | `surface` | enum | 由发出批次的客户端明确设置 | `tui \| exec \| cli \| app-server \| mcp-server \| serve \| website \| web-app \| desktop \| control-plane`。运行时复用现有计数器；允许某界面不代表其客户端已部署。 |
-| `os` | enum | `std::env::consts::OS`，即 `crates/cli/src/update.rs:41` 处 | allowlist：`linux \| macos \| windows \| freebsd \| android \| other`。 |
+| `os` | enum | `std::env::consts::OS`，即 `crates/cli/src/update.rs:56` 处 | allowlist：`linux \| macos \| windows \| freebsd \| android \| other`。 |
 | `arch` | enum | `std::env::consts::ARCH` | `x86_64 \| aarch64 \| other`。 |
 | `libc` | enum | `cfg!(target_env)`——**编译期** | `gnu \| musl \| none`。运行时检测会读取发行版厂商字符串；编译期免费且不泄露任何内容。 |
-| `tty` | bool | `std::io::IsTerminal`，即 `crates/telemetry/src/envelope.rs:196` 处 | `stdin().is_terminal() && stdout().is_terminal()`。 |
+| `tty` | bool | `std::io::IsTerminal`，即 `crates/telemetry/src/envelope.rs:195` 处 | `stdin().is_terminal() && stdout().is_terminal()`。 |
 | `events` | array | 被排空的缓冲区 | 每个元素都只能是下面六种事件之一，没有其他。每批次上限为 200 个事件或 64 KiB；超出任一上限的批次会把剩余部分留到下一次 flush。 |
 
 **`os_major` 不会被收集。** 读取它需要两个平台上的不安全 FFI 外加第三个平台上的文件解析器，而这正是那个以"小到足以审计"为全部价值的 crate——而 `os`、`arch`、`libc` 是免费的，并且能回答平台问题。如果存储的数据将来显示 OS 版本切分正是分诊所缺的，可以重新考虑；光凭直觉不是那样的证据。
@@ -132,7 +132,7 @@ Codewhale 没有恢复出厂设置命令，因此本文档也不会声称有。
 { "event": "session_start", "source": "interactive" }
 ```
 
-`source` 是 `SessionSource`（`crates/state/src/lib.rs:34-41`），由 `session_source_to_str`（`:1909-1917`）字符串化：`interactive | resume | fork | api | unknown`。
+`source` 是 `SessionSource`（`crates/state/src/lib.rs:34-41`），由 `session_source_to_str`（`:1917-1925`）字符串化：`interactive | resume | fork | api | unknown`。
 
 ### 事件：session_end
 
@@ -157,13 +157,13 @@ Codewhale 没有恢复出厂设置命令，因此本文档也不会声称有。
 
 **`counters` 和 `errors` 是 `#[derive(Serialize)]` 的具名 `u32` 字段结构体，不是映射。** 每个字段都会被序列化，包括零值。键集合由编译器封闭：新增计数器需要编辑 `crates/telemetry/src/event.rs`，文档匹配测试就在那里。
 
-**`duration_bucket`** ——来自 `app.session_started_at`（`crates/tui/src/tui/app.rs:1889`）的 `chrono` 差值。半开区间，单位秒：`lt_1m`（`d < 60`）、`1m_10m`（`60 ≤ d < 600`）、`10m_60m`（`600 ≤ d < 3600`）、`gt_60m`（`d ≥ 3600`）。
+**`duration_bucket`** ——来自 `app.session_started_at`（`crates/tui/src/tui/app.rs:2284`）的 `chrono` 差值。半开区间，单位秒：`lt_1m`（`d < 60`）、`1m_10m`（`60 ≤ d < 600`）、`10m_60m`（`600 ≤ d < 3600`）、`gt_60m`（`d ≥ 3600`）。
 
-**`exit_class`** —— `clean | signal | panic | error`。**来自显式的 `AtomicU8`，绝不来自退出码。** `RunTerminationReason::Canceled` 映射到退出码 130（`crates/tui/src/core/runtime_contract/termination.rs:53`），与信号任务使用同一个值（`crates/tui/src/lib.rs:682`，128+SIGINT），因此基于退出码的推导会把每次 Esc 取消的回合都报成信号。这个 atomic 由 panic hook（`crates/tui/src/lib.rs:1582`）、信号任务（`:678-696`，在 `std::process::exit` 之前）以及干净路径上的 `RunTerminationReason::is_success()`（`crates/tui/src/core/runtime_contract/termination.rs:44-46`）设置——其他情况为 `error`。**不要**使用 `exec_failure_exit_code`（`crates/tui/src/lib.rs:10432`）：它只知道 `{75, 1}`，会把需要审批的退出码（3）报成普通失败。
+**`exit_class`** —— `clean | signal | panic | error`。**来自显式的 `AtomicU8`，绝不来自退出码。** `RunTerminationReason::Canceled` 映射到退出码 130（`crates/tui/src/core/runtime_contract/termination.rs:53`），与信号任务使用同一个值（`crates/tui/src/lib.rs:768`，128+SIGINT），因此基于退出码的推导会把每次 Esc 取消的回合都报成信号。这个 atomic 由 panic hook（`crates/tui/src/lib.rs:1763`）、信号任务（`:847-850`，在 `std::process::exit` 之前）以及干净路径上的 `RunTerminationReason::is_success()`（`crates/tui/src/core/runtime_contract/termination.rs:44-46`）设置——其他情况为 `error`。**不要**使用 `exec_failure_exit_code`（`crates/tui/src/lib.rs:11710`）：它只知道 `{75, 1}`，会把需要审批的退出码（3）报成普通失败。
 
 **`cold_start_bucket`** ——来自 `startup_trace::elapsed_ms()`，它直接读取 `PROCESS_START`，并且独立于启动摘要的缓冲区清空（`crates/tui/src/startup_trace.rs:39-45`）。边界：`lt_250`、`250_1000`、`1000_3000`、`gte_3000`。非 TUI surface 上缺席。
 
-**`providers`** ——`ProviderKind::as_str()`（`crates/config/src/provider_kind.rs:295`，来自封闭枚举的 `&'static str`；`Custom` 产生字面量 `"custom"`）的排序、去重数组。**API 按值接收 `ProviderKind`，绝不接收 `&str`。** 不要调用 `ProviderKind::parse` 或 `parse_config_identity`（`:300`、`:330`）——那些用于配置表解析。**不要读取** `provider_identity_for_persistence()`（`crates/tui/src/tui/app.rs:5049`）、`provider_id_for_persistence()`（`:5058`）、`ExecStreamMeta.provider_id`（`crates/tui/src/lib.rs:10220`）或 `PlannedTurnRoute.effective_provider_label`（`crates/tui/src/turn_route_plan.rs:189-193`）——当路由是 Custom 时，这四个都会返回客户自己的 `[providers.<name>]` 表键。这是该功能最可能的泄露点：它离天然接缝只差一个字段，而且 `/status` 已经会打印它（`crates/tui/src/commands/groups/config/status.rs:24-28`）。**任何 provider 都绝不发送 model id**——`crates/tui/src/safe_label.rs:11-15` 记录了一个事实：model id 可以是路径、URL 或本身就是凭据的部署 id。
+**`providers`** ——`ProviderKind::as_str()`（`crates/config/src/provider_kind.rs:313`，来自封闭枚举的 `&'static str`；`Custom` 产生字面量 `"custom"`）的排序、去重数组。**API 按值接收 `ProviderKind`，绝不接收 `&str`。** 不要调用 `ProviderKind::parse` 或 `parse_config_identity`（`:318`、`:349`）——那些用于配置表解析。**不要读取** `provider_identity_for_persistence()`（`crates/tui/src/tui/app.rs:5905`）、`provider_id_for_persistence()`（`:5914`）、`ExecStreamMeta.provider_id`（`crates/tui/src/lib.rs:11498`）或 `PlannedTurnRoute.effective_provider_label`（`crates/tui/src/turn_route_plan.rs:189-193`）——当路由是 Custom 时，这四个都会返回客户自己的 `[providers.<name>]` 表键。这是该功能最可能的泄露点：它离天然接缝只差一个字段，而且 `/status` 已经会打印它（`crates/tui/src/commands/groups/config/status.rs:24-28`）。**任何 provider 都绝不发送 model id**——`crates/tui/src/safe_label.rs:11-15` 记录了一个事实：model id 可以是路径、URL 或本身就是凭据的部署 id。
 
 **`counters`** ——封闭字段集。每次递增都发生在**调用点**，绝不在条件进入的处理器内部：
 
@@ -171,41 +171,41 @@ Codewhale 没有恢复出厂设置命令，因此本文档也不会声称有。
 |---|---|
 | `turns` | `crates/tui/src/tui/ui/event_loop.rs:2529`——`execute_turn_end_observer_hook` 的*调用者*。绝不在其内部：该函数的第一条语句是 `if !app.hooks.has_hooks_for_event(HookEvent::TurnEnd) { return Ok(()); }`（`crates/tui/src/tui/ui/observer_hooks.rs:107`），而自然的未来优化会把该检查提升到调用点，从而悄悄把所有没有 hooks 的用户的计数器归零。 |
 | `tool_calls` | `crates/tui/src/core/engine/tool_execution.rs:632`——与 surface 无关，exec 和 CLI 也会触发 |
-| `fleet_dispatch` | `crates/tui/src/fleet/manager.rs:374`——单一漏斗（`create_queued_run_with_descriptor`），`create_run` 和 `create_queued_run` 都落入其中；在任一调用方计数都会使普通的 `fleet run` 被重复计数。 |
+| `fleet_dispatch` | `crates/tui/src/fleet/manager.rs:392`——单一漏斗（`create_queued_run_with_descriptor`），`create_run` 和 `create_queued_run` 都落入其中；在任一调用方计数都会使普通的 `fleet run` 被重复计数。 |
 | `workflow_run` | 从 `parse_workflow_action`（`crates/tui/src/tools/workflow/mod.rs:952-965`）返回的 **`WorkflowAction` 变体判别值**计数，绝不从 `input["action"]` 计数。`:989` 处的 JSON Schema 是发布*给模型*的——是声明，不是守卫；真正的解析还接受 `spawn\|wait\|list\|inspect\|stop\|abort`，其 `:961-963` 处的拒绝分支会原样嵌入模型字符串。 |
 | `subagent_spawn` | `crates/tui/src/tui/ui/apply.rs:36` |
-| `mcp_server_connected` | `crates/tui/src/mcp.rs:5449-5452` 快照中 `.connected` 的计数；绝不统计 `name`、`command_or_url` 或 `error`——服务器名是用户自选的，往往是内部基础设施 |
+| `mcp_server_connected` | `crates/tui/src/mcp.rs:5449-5454` 快照中 `.connected` 的计数；绝不统计 `name`、`command_or_url` 或 `error`——服务器名是用户自选的，往往是内部基础设施 |
 | `memory_search` | `crates/tui/src/tools/native_memory.rs:60-61` 处的工具名，在 tool_execution 瓶颈点计数 |
 | `approval_modal_shown` | `crates/tui/src/tui/ui/event_loop.rs:3294`（`Event::ApprovalRequired` 的消费者，`crates/tui/src/core/events.rs:502`） |
-| `approval_auto_allowed` | `crates/tui/src/core/engine.rs:8203`。只计数。绝不统计 `matched_rule`、`reason()`、命令或 argv——`auto_allow` 模式是用户编写的命令字符串（`crates/tui/src/command_safety.rs:35/309`） |
-| `command_palette_open` | `crates/tui/src/tui/ui/event_loop.rs:3941` 和 `crates/tui/src/tui/mouse_ui.rs:1346` |
+| `approval_auto_allowed` | `crates/tui/src/core/engine.rs:8203`。只计数。绝不统计 `matched_rule`、`reason()`、命令或 argv——`auto_allow` 模式是用户编写的命令字符串（`crates/tui/src/command_safety.rs:35/308`） |
+| `command_palette_open` | `crates/tui/src/tui/ui/event_loop.rs:4952` 和 `crates/tui/src/tui/mouse_ui.rs:1599` |
 
 **`errors`** ——封闭字段集。每个值都是**变体判别值**，绝不是 `err.to_string()`：
 
 | 字段 | 来源锚点 |
 |---|---|
 | `auth_preflight_failed` | `CredentialReadiness`（`crates/workflow/src/fleet_preflight.rs:37-58`）/ `ProviderAuthClass`（`crates/tui/src/provider_readiness.rs:32`）的判别值。只取判别值——`Missing { detail }` 携带自由文本 |
-| `provider_http_4xx` | `status.as_u16() / 100 == 4`，在 `crates/tui/src/client/chat.rs:595` 和 `:673` 处、**在** `bail!` **之前**捕获。每字段一行，因为文档匹配测试会逐字段读取此表 |
+| `provider_http_4xx` | `status.as_u16() / 100 == 4`，在 `crates/tui/src/client/chat.rs:1242` 和 `:1331` 处、**在** `bail!` **之前**捕获。每字段一行，因为文档匹配测试会逐字段读取此表 |
 | `provider_http_5xx` | `status.as_u16() / 100 == 5`，同样的捕获点 |
-| `tool_denied_by_policy` | `crates/tui/src/core/engine/tool_execution.rs:512-531` 处 8 变体匹配的 `permission_denied` 分支 |
+| `tool_denied_by_policy` | `crates/tui/src/core/engine/tool_execution.rs:653-662` 处 8 变体匹配的 `permission_denied` 分支 |
 | `tool_timeout` | 同一匹配的 `timeout` 分支 |
-| `network_error` | `retry_reason_label_and_human()` 的 `&'static str` 一半，`crates/tui/src/client.rs:2659` |
+| `network_error` | `retry_reason_label_and_human()` 的 `&'static str` 一半，`crates/tui/src/client.rs:3174` |
 
 为什么只要判别值：`ToolError::PathEscape` 的 `Display` *就是*一个绝对路径（`crates/tools/src/lib.rs:61`）；`fim.rs:48-50` 的 `Display` *就是*模型发出的字面源码片段；`secrets/src/lib.rs:50` 的 `Display` 携带密钥库的绝对路径；每个 `LlmError` 变体都原样携带 provider 的原始 HTTP 主体（`crates/tui/src/llm_client/mod.rs:327`），而内容过滤器的 400 通常会回显提示词。
 
-**`turn_wall`** ——按会话的计数直方图，绝不是按回合的事件。`lt_5s`、`5_30s`、`30_120s`、`gte_120s`。来源 `crates/tui/src/tui/ui/event_loop.rs:1857`，那里已经手握 `duration`。
+**`turn_wall`** ——按会话的计数直方图，绝不是按回合的事件。`lt_5s`、`5_30s`、`30_120s`、`gte_120s`。来源 `crates/tui/src/tui/ui/event_loop.rs:2526`，那里已经手握 `duration`。
 
 ### 事件：panic
 
 由 panic hook **同步**追加，因为 `session_end` 可能永远写不出来。
 
 ```jsonc
-{ "event": "panic", "site": "crates/tui/src/lib.rs:1582:5" }
+{ "event": "panic", "site": "crates/tui/src/lib.rs:1763:5" }
 ```
 
-`site` 来自 `panic_info.location()`（`crates/tui/src/lib.rs:1597-1600`）或 `Location::caller()`（`crates/tui/src/utils.rs:523`）。**allowlist 缩减，不是可选的：** 仅当 `file()` 以 `crates/` 开头时才原样发送；否则发送字面量 `"<dep>"`。必须匹配 `^crates/[A-Za-z0-9_/.-]+\.rs:\d+:\d+$` 或 `^<dep>$`。本仓库没有 `--remap-path-prefix`（没有 `.cargo/config.toml`；`Cargo.toml:69-74` 只设置 `lto`/`strip`/`codegen-units`），因此注册表依赖内部的 panic 会得到 `/Users/<builder>/.cargo/registry/src/…/ratatui-0.29.0/src/…`——**构建机器的用户名**，从每个用户的二进制里发送出去。
+`site` 来自 `panic_info.location()`（`crates/tui/src/lib.rs:1795-1799`）或 `Location::caller()`（`crates/tui/src/utils.rs:683`）。**allowlist 缩减，不是可选的：** 仅当 `file()` 以 `crates/` 开头时才原样发送；否则发送字面量 `"<dep>"`。必须匹配 `^crates/[A-Za-z0-9_/.-]+\.rs:\d+:\d+$` 或 `^<dep>$`。本仓库没有 `--remap-path-prefix`（没有 `.cargo/config.toml`；`Cargo.toml:69-74` 只设置 `lto`/`strip`/`codegen-units`），因此注册表依赖内部的 panic 会得到 `/Users/<builder>/.cargo/registry/src/…/ratatui-0.29.0/src/…`——**构建机器的用户名**，从每个用户的二进制里发送出去。
 
-**panic 消息绝不发送。** `crates/tui/src/lib.rs:1590-1596` 处的 hook 从 payload 构建 `msg`；遥测绝不能读取它。切片（slicing）panic 会嵌入正在被切片的整个字符串，而本代码库在几十处切片用户和模型文本。
+**panic 消息绝不发送。** `crates/tui/src/lib.rs:1771-1778` 处的 hook 从 payload 构建 `msg`；遥测绝不能读取它。切片（slicing）panic 会嵌入正在被切片的整个字符串，而本代码库在几十处切片用户和模型文本。
 
 ### 事件：product_usage
 
