@@ -293,8 +293,19 @@ fn controller_relay_message(value: &Value) -> bool {
                 | "finished_receipt_ack"
                 | "encrypted_handshake_finished"
                 | "encrypted_controller_liveness_a"
+                | "encrypted_resume_confirm"
                 | "encrypted_frame"
         )
+}
+
+fn controller_peer_message(value: &Value) -> bool {
+    controller_relay_message(value)
+        && (value
+            .get("endpoint_id")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .is_empty()
+            || value.get("type").and_then(Value::as_str) != Some("desktop_endpoint_registered"))
 }
 
 // Error payloads carry no connection authority. A v2 rejection can omit the
@@ -2277,10 +2288,7 @@ impl RemoteControlManager {
         // desktop socket is already authenticated and the router binds it to an
         // endpoint. Route those frames only to the controller lane instead of
         // misclassifying them as legacy broadcast messages.
-        if controller_relay_message(&value)
-            && (endpoint_id.is_empty()
-                || value.get("type").and_then(Value::as_str) != Some("desktop_endpoint_registered"))
-        {
+        if controller_peer_message(&value) {
             if value.get("type").and_then(Value::as_str) == Some("encrypted_frame")
                 && value.get("payload_kind").and_then(Value::as_str) == Some("task_submit")
             {
@@ -3392,6 +3400,7 @@ mod tests {
             "desktop_relay_connection",
             "controller_joined",
             "encrypted_controller_liveness_a",
+            "encrypted_resume_confirm",
             "encrypted_frame",
         ] {
             assert!(
@@ -3409,6 +3418,35 @@ mod tests {
                 "{kind} 不得进入控制通道"
             );
         }
+    }
+
+    #[test]
+    fn bare_resume_confirm_routes_to_controller_before_legacy_endpoint_check() {
+        use crate::features::remote_control::controller::protocol::{
+            SenderRole, validate_controller_message_json,
+        };
+        use base64::Engine as _;
+        let confirm = json!({
+            "v":1, "type":"encrypted_resume_confirm", "request_id":"request-0001",
+            "connection_id":"connection-0001", "controller_lease_id":"lease-0001",
+            "lease_epoch":"1", "relay_epoch":"relay-0001",
+            "remote_control_generation":"generation-0001", "activation_id":"activation-0001",
+            "sender_role":"A", "ciphertext_b64":base64::engine::general_purpose::STANDARD.encode([7;32]),
+            "ciphertext_bytes":"32"
+        });
+        assert!(
+            validate_controller_message_json(&confirm.to_string(), SenderRole::ControllerA).is_ok()
+        );
+        assert!(confirm.get("endpoint_id").is_none());
+        assert_ne!(confirm["type"], "encrypted_frame");
+        // This is the production branch executed before is_current_endpoint("").
+        assert!(controller_peer_message(&confirm));
+        assert!(!controller_peer_message(
+            &json!({"v":2,"type":"rpc_request"})
+        ));
+        assert!(!controller_peer_message(&json!({
+            "type":"desktop_endpoint_registered", "endpoint_id":"endpoint-0001"
+        })));
     }
 
     /// 内置端点 profile：地址与信任根随包分发，用户不需要再配置环境变量。
