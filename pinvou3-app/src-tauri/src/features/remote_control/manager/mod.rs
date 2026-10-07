@@ -1082,6 +1082,25 @@ impl RemoteControlManager {
         self.clear_controller_channel(generation);
     }
 
+    /// Stop only a test-owned loopback connection, without durable revocation
+    /// or a detached retry against a production profile. The regular start,
+    /// reader, routing and controller channel remain the production path.
+    #[cfg(test)]
+    pub(crate) fn shutdown_loopback_test_endpoint(&self) {
+        let endpoint = {
+            let mut inner = self.inner.lock();
+            if let Some(endpoint) = inner.endpoint.as_ref() {
+                let url = reqwest::Url::parse(&endpoint.config.relay_url).unwrap();
+                assert_eq!(url.scheme(), "ws");
+                assert_eq!(url.host_str(), Some("127.0.0.1"));
+            }
+            inner.endpoint.take()
+        };
+        if let Some(endpoint) = endpoint {
+            let _ = endpoint.sender.try_send(RelayOutbound::Shutdown);
+        }
+    }
+
     fn clear_controller_channel(&self, generation: &str) {
         let mut inner = self.inner.lock();
         if inner

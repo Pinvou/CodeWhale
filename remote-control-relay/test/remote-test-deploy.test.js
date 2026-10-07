@@ -20,6 +20,47 @@ function validate(overrides = {}) {
   });
 }
 
+test("remote-test public verification accepts current assets and rejects incomplete deployments", () => {
+  const source = readFileSync(deployScript, "utf8");
+  const check = source.match(/^public_verify\(\) \{[^]*?^\}/m);
+  assert.ok(check, "execute the actual verification function, not a reimplementation");
+  const bash = process.platform === "win32" ? "C:/Program Files/Git/bin/bash.exe" : "bash";
+  assert.ok(process.platform !== "win32" || existsSync(bash), "Git Bash is required");
+  const validPage = '<title>PINVOU 智能助手</title><script type="module" src="/test/remote/assets/index-fixture.js"></script>';
+  const cases = [
+    { name: "current hashed Web assets without bridge", page: validPage, pass: true },
+    { name: "obsolete bridge only", page: '<title>PINVOU 智能助手</title><script src="/test/remote/platform/tauri/bridge.js"></script>' },
+    { name: "wrong base", page: validPage.replace("/test/remote/assets/", "/other/assets/") },
+    { name: "wrong page", page: validPage.replace("PINVOU 智能助手", "unrelated") },
+    { name: "unhealthy test endpoint", page: validPage, health: '{"ok":false,"room_count":0}' },
+    { name: "missing room count", page: validPage, health: '{"ok":true}' },
+    { name: "unhealthy production endpoint", page: validPage, production: '{"ok":false}' },
+    { name: "failed Web request", page: validPage, pageExit: "22" },
+  ];
+  // Only this extracted function runs. All curl calls are intercepted in-process;
+  // no deployment, SSH, network request, or rollback command is executed.
+  const script = 'set -euo pipefail\nBASE_PATH="/test/remote"\nPUBLIC_URL="https://test.invalid/test/remote"\n'
+    + 'curl() { case "${@: -1}" in\n'
+    + '"$PUBLIC_URL/healthz") printf "%s" "$FIXTURE_HEALTH" ;;\n'
+    + '"$PUBLIC_URL/r/deploy-check") [ "$FIXTURE_PAGE_EXIT" = "0" ] || return "$FIXTURE_PAGE_EXIT"; printf "%s" "$FIXTURE_PAGE" ;;\n'
+    + '"https://pinvou.com/pinvou3/remote/healthz") printf "%s" "$FIXTURE_PRODUCTION" ;;\n'
+    + '*) return 99 ;;\nesac; }\n' + check[0] + '\npublic_verify\n';
+  for (const fixture of cases) {
+    const result = spawnSync(bash, ["-c", script], {
+      cwd: repoRoot,
+      env: { ...process.env, FIXTURE_PAGE: fixture.page,
+        FIXTURE_HEALTH: fixture.health ?? '{"ok":true,"room_count":0}',
+        FIXTURE_PRODUCTION: fixture.production ?? '{"ok":true}',
+        FIXTURE_PAGE_EXIT: fixture.pageExit ?? "0" },
+      encoding: "utf8",
+      timeout: 10_000,
+    });
+    assert.equal(result.error, undefined, `${fixture.name}: ${result.error}`);
+    assert.notEqual(result.signal, "SIGTERM", `${fixture.name}: timed out`);
+    assert.equal(result.status, fixture.pass ? 0 : 1, `${fixture.name}: ${result.stderr}`);
+  }
+});
+
 test("remote-test deploy validation accepts the registered safe layout", posixOnly, () => {
   const syntax = spawnSync("bash", ["-n", deployScript], { encoding: "utf8" });
   assert.equal(syntax.status, 0, syntax.stderr);
@@ -31,8 +72,8 @@ test("remote-test deploy validation accepts the registered safe layout", posixOn
 test("remote-test deploy builds and uploads the shared WebUI dist", () => {
   const source = readFileSync(deployScript, "utf8");
   assert.match(source, /PINVOU_REMOTE_PUBLIC_BASE_PATH="\$BASE_PATH" npm run build:web/);
-  assert.match(source, /grep -Fq "\$BASE_PATH\/" "\$RELAY_DIR\/web\/dist\/index\.html"/);
-  assert.match(source, /test -f "\$RELAY_DIR\/web\/dist\/platform\/tauri\/bridge\.js"/);
+  assert.match(source, /node "\$RELAY_DIR\/verify-web-dist\.js" "\$RELAY_DIR\/web\/dist" "\$BASE_PATH"/);
+  assert.doesNotMatch(source, /test -f [^\n]*platform\/tauri\/bridge\.js/);
   assert.match(source, /package-lock\.json web\/dist web\/stats\.html/);
   assert.match(source, /relay_js_files="\$\(cd "\$RELAY_DIR" && ls \*\.js\)"/);
   assert.match(source, /\$relay_js_files package\.json package-lock\.json web\/dist web\/stats\.html/);

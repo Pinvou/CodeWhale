@@ -30,7 +30,9 @@ const CONTROL_QUEUE_CAPACITY: usize = 64;
 const BUSINESS_QUEUE_CAPACITY: usize = 256;
 const TOTAL_OUTBOUND_BYTE_BUDGET: usize = 8 * 1024 * 1024;
 const CONTROL_RESERVED_BYTES: usize = 128 * 1024;
-const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(20);
+// Two unanswered transport heartbeat windows must leave time inside the
+// independent 30s authenticated-evidence budget. Pongs never extend it.
+const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 const MAX_CONTROLLER_INBOUND_TEXT_BYTES: usize = if MAX_ENCRYPTED_WIRE_BYTES < MAX_RELAY_FRAME_BYTES
 {
     MAX_ENCRYPTED_WIRE_BYTES
@@ -771,7 +773,17 @@ async fn run_transport(
     config: ControllerTransportConfig,
     sink: Arc<dyn ControllerEventSink>,
     sender: ControllerTransportSender,
+    receiver: ControllerTransportReceiver,
+) {
+    run_transport_with_heartbeat(config, sink, sender, receiver, HEARTBEAT_INTERVAL).await;
+}
+
+async fn run_transport_with_heartbeat(
+    config: ControllerTransportConfig,
+    sink: Arc<dyn ControllerEventSink>,
+    sender: ControllerTransportSender,
     mut receiver: ControllerTransportReceiver,
+    heartbeat_period: Duration,
 ) {
     let mut reconnect = ReconnectBackoff::default();
     loop {
@@ -807,21 +819,25 @@ async fn run_transport(
             }
         };
         let (mut write, mut read) = socket.split();
-        reconnect.reset();
         sink.emit(ControllerTransportEvent::Connected {
             remote_control_generation: config.generation(),
             lease_epoch: current_lease_epoch(&sender),
         });
 
-        let mut heartbeat = tokio::time::interval(HEARTBEAT_INTERVAL);
+        let mut last_inbound = tokio::time::Instant::now();
+        let mut heartbeat = tokio::time::interval(heartbeat_period);
         heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         heartbeat.tick().await;
         let disconnected = loop {
             tokio::select! {
                 biased;
                 _ = sender.shutdown.cancelled() => {
-                    let _ = write.send(Message::Close(None)).await;
+                    // Close is best effort too: a dead peer must not hang shutdown.
+                    let _ = tokio::time::timeout(heartbeat_period, write.send(Message::Close(None))).await;
                     return;
+                }
+                _ = tokio::time::sleep_until(last_inbound + heartbeat_period * 2) => {
+                    break "Relay inbound silence deadline expired".to_owned();
                 }
                 frame = receiver.recv_prioritized() => {
                     let Some(frame) = frame else { return; };
@@ -831,6 +847,8 @@ async fn run_transport(
                     let result = tokio::select! {
                         biased;
                         _ = sender.shutdown.cancelled() => return,
+                        _ = tokio::time::sleep_until(last_inbound + heartbeat_period * 2) =>
+                            break "Relay inbound silence deadline expired".to_owned(),
                         result = write.send(Message::Text(frame.text().to_owned().into())) => result,
                     };
                     match result {
@@ -860,6 +878,7 @@ async fn run_transport(
                     let Some(message) = message else {
                         break "Relay connection closed".to_string();
                     };
+                    last_inbound = tokio::time::Instant::now();
                     match message {
                         Ok(Message::Text(text)) => {
                             if text.len() > MAX_CONTROLLER_INBOUND_TEXT_BYTES {
@@ -867,10 +886,23 @@ async fn run_transport(
                                     "Relay frame exceeds {MAX_CONTROLLER_INBOUND_TEXT_BYTES} bytes"
                                 );
                             }
-                            dispatch_inbound(&config, &sender, sink.as_ref(), text.as_str());
+                            // A bare successful handshake (or error reply) is
+                            // not admission. Repeated accept/close retains the
+                            // exponential backoff; only a current valid frame
+                            // accepted by the existing filter resets it.
+                            if dispatch_inbound(&config, &sender, sink.as_ref(), text.as_str()) {
+                                reconnect.reset();
+                            }
                         }
                         Ok(Message::Ping(payload)) => {
-                            if let Err(error) = write.send(Message::Pong(payload)).await {
+                            let result = tokio::select! {
+                                biased;
+                                _ = sender.shutdown.cancelled() => return,
+                                _ = tokio::time::sleep_until(last_inbound + heartbeat_period * 2) =>
+                                    break "Relay inbound silence deadline expired".to_owned(),
+                                result = write.send(Message::Pong(payload)) => result,
+                            };
+                            if let Err(error) = result {
                                 break format!("send Relay pong: {error}");
                             }
                         }
@@ -889,7 +921,14 @@ async fn run_transport(
                 }
                 _ = heartbeat.tick() => {
                     let payload = config.clock.now_millis().to_be_bytes().to_vec();
-                    if let Err(error) = write.send(Message::Ping(payload.into())).await {
+                    let result = tokio::select! {
+                        biased;
+                        _ = sender.shutdown.cancelled() => return,
+                        _ = tokio::time::sleep_until(last_inbound + heartbeat_period * 2) =>
+                            break "Relay inbound silence deadline expired".to_owned(),
+                        result = write.send(Message::Ping(payload.into())) => result,
+                    };
+                    if let Err(error) = result {
                         break format!("send Relay heartbeat: {error}");
                     }
                 }
@@ -974,16 +1013,16 @@ fn dispatch_inbound(
     sender: &ControllerTransportSender,
     sink: &dyn ControllerEventSink,
     text: &str,
-) {
+) -> bool {
     if sender.is_stopped() {
-        return;
+        return false;
     }
     let inbound_epoch = sender.transport_epoch.load(Ordering::Acquire);
     let Ok(shape) = serde_json::from_str::<Value>(text) else {
-        return;
+        return false;
     };
     if !generation_admits(&config.generation(), &shape) {
-        return;
+        return false;
     }
     let kind = shape.get("type").and_then(Value::as_str);
     let priority = if kind == Some("encrypted_frame") {
@@ -999,7 +1038,7 @@ fn dispatch_inbound(
     };
     let validated = if priority == FramePriority::Business {
         let Some(lease) = lease.as_ref() else {
-            return;
+            return false;
         };
         let context = RuntimeValidationContext {
             lease: Some(lease.context.clone()),
@@ -1018,10 +1057,10 @@ fn dispatch_inbound(
                 super::resume::resume_frame_matches_lease(&saved.context, &shape)
             }));
     if !validated || !context_matches {
-        return;
+        return false;
     }
     if kind == Some("controller_resumed") && !sender.record_resume_install(&shape, inbound_epoch) {
-        return;
+        return false;
     }
     sink.emit(ControllerTransportEvent::Frame {
         priority,
@@ -1032,6 +1071,7 @@ fn dispatch_inbound(
             .map(|value| value.context.lease_epoch.clone()),
         json: text.to_owned(),
     });
+    kind != Some("error")
 }
 
 /// 未绑定 generation 的 transport（A 端 claim 之前）只按类型准入，绑定之后
@@ -2122,6 +2162,150 @@ mod tests {
             );
             Ok(response)
         }
+    }
+
+    #[test]
+    fn only_positive_current_admission_is_a_backoff_reset_signal() {
+        let config = ControllerTransportConfig::new(
+            "ws://127.0.0.1:1",
+            ControllerRole::ControlledB,
+            "generation-0001",
+        );
+        let (sender, _) = transport_channels(
+            ControllerRole::ControlledB,
+            "generation-0001",
+            2,
+            2,
+            8192,
+            1024,
+        );
+        let sink = |_| {};
+        assert!(!dispatch_inbound(&config, &sender, &sink, "invalid JSON"));
+        let error = json!({ "v": 1, "type": "error", "request_id": "request-0001",
+            "code": "controller_busy", "message": "busy" });
+        validate_controller_message_json(&error.to_string(), SenderRole::Relay).unwrap();
+        assert!(!dispatch_inbound(
+            &config,
+            &sender,
+            &sink,
+            &error.to_string()
+        ));
+        let mut invalid = control("request-0002");
+        invalid["unknown"] = json!(true);
+        assert!(!dispatch_inbound(
+            &config,
+            &sender,
+            &sink,
+            &invalid.to_string()
+        ));
+        assert!(dispatch_inbound(
+            &config,
+            &sender,
+            &sink,
+            &control("request-0003").to_string()
+        ));
+        sender.stop();
+        assert!(!dispatch_inbound(
+            &config,
+            &sender,
+            &sink,
+            &control("request-0004").to_string()
+        ));
+    }
+
+    #[tokio::test]
+    async fn repeated_websocket_accept_close_keeps_exponential_backoff() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let mut server = tokio::spawn(async move {
+            let mut accepted = Vec::new();
+            for _ in 0..3 {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut socket = accept_hdr_async(stream, ControllerSubprotocolCallback)
+                    .await
+                    .unwrap();
+                accepted.push(Instant::now());
+                // A transport pong is life, but never controller admission.
+                socket.send(Message::Pong(Vec::new().into())).await.unwrap();
+                socket.send(Message::Close(None)).await.unwrap();
+            }
+            accepted
+        });
+        let sender = spawn_controller_transport(
+            ControllerTransportConfig::new(url, ControllerRole::ControllerA, "generation-0001"),
+            Arc::new(|_| {}),
+        );
+        let result = tokio::time::timeout(Duration::from_secs(8), &mut server).await;
+        sender.stop();
+        server.abort();
+        let accepted = result.expect("three bounded attempts").unwrap();
+        // Second failure is attempt 2: base500 *2 *jitter[.8,1.2].
+        assert!(
+            accepted[2].duration_since(accepted[1]) >= Duration::from_millis(790),
+            "bare accept/close must not continually reset to the 400-600ms first delay"
+        );
+    }
+
+    #[tokio::test]
+    async fn silent_open_websocket_clears_installed_lease_before_reconnecting() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let _socket = accept_hdr_async(stream, ControllerSubprotocolCallback)
+                .await
+                .unwrap();
+            // Keep TCP open without reading/writing WS frames; no automatic pong.
+            std::future::pending::<()>().await;
+        });
+        let config =
+            ControllerTransportConfig::new(url, ControllerRole::ControllerA, "generation-0001");
+        let (sender, receiver) = transport_channels_shared(
+            config.role,
+            config.remote_control_generation.clone(),
+            2,
+            2,
+            8192,
+            1024,
+        );
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let task_sender = sender.clone();
+        let worker = tokio::spawn(async move {
+            run_transport_with_heartbeat(
+                config,
+                Arc::new(move |event| {
+                    let _ = tx.send(event);
+                }),
+                task_sender,
+                receiver,
+                Duration::from_millis(20),
+            )
+            .await;
+        });
+        let result = tokio::time::timeout(Duration::from_secs(2), async {
+            while !matches!(
+                rx.recv().await.unwrap(),
+                ControllerTransportEvent::Connected { .. }
+            ) {}
+            sender
+                .install_authenticated_lease(lease("7", "generation-0001"))
+                .unwrap();
+            loop {
+                if let ControllerTransportEvent::Disconnected { error, .. } =
+                    rx.recv().await.unwrap()
+                {
+                    assert!(error.contains("inbound silence deadline"));
+                    assert!(sender.authenticated_lease().is_none());
+                    assert!(sender.resume_lease.read().is_some());
+                    break;
+                }
+            }
+        })
+        .await;
+        sender.stop();
+        server.abort();
+        worker.abort();
+        result.expect("silent but open socket must trigger the actual disconnect path");
     }
 
     #[tokio::test]

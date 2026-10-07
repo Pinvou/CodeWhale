@@ -257,9 +257,7 @@ if [[ "${SKIP_WEB_BUILD:-0}" != "1" ]]; then
 else
   echo "使用已构建并验证的共享 WebUI 产物"
 fi
-test -f "$RELAY_DIR/web/dist/index.html"
-test -f "$RELAY_DIR/web/dist/platform/tauri/bridge.js"
-grep -Fq "$BASE_PATH/" "$RELAY_DIR/web/dist/index.html"
+node "$RELAY_DIR/verify-web-dist.js" "$RELAY_DIR/web/dist" "$BASE_PATH"
 if [[ "${SKIP_LOCAL_TESTS:-0}" != "1" ]]; then
   (cd "$RELAY_DIR" && npm test)
 fi
@@ -706,8 +704,9 @@ public_verify() {
   health="$(curl -fsS --max-time 10 "$PUBLIC_URL/healthz")" || return 1
   echo "$health" | node -e 'const h=JSON.parse(require("fs").readFileSync(0,"utf8")); if(!h.ok||!("room_count" in h)) process.exit(1)' || return 1
   page="$(curl -fsSL --max-time 10 "$PUBLIC_URL/r/deploy-check")" || return 1
+  # Web 构建移除 Tauri 内联脚本；与生产校验一致，检查当前 base 的构建资源。
   [[ "$page" == *'<title>PINVOU 智能助手'* \
-    && "$page" == *"$BASE_PATH/platform/tauri/bridge.js"* ]] || return 1
+    && "$page" == *"$BASE_PATH/assets/"* ]] || return 1
   prod_health="$(curl -fsS --max-time 10 "https://pinvou.com/pinvou3/remote/healthz")" || return 1
   echo "$prod_health" | node -e 'const h=JSON.parse(require("fs").readFileSync(0,"utf8")); if(!h.ok) process.exit(1)' || return 1
 }

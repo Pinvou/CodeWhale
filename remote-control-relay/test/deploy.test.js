@@ -78,7 +78,8 @@ async function pathExists(path) {
 async function ensureMinimalWebDist(t) {
   const dist = join(repoRoot, "remote-control-relay", "web", "dist");
   const index = join(dist, "index.html");
-  const bridge = join(dist, "platform", "tauri", "bridge.js");
+  const app = join(dist, "assets", "app.js");
+  const startup = join(dist, "startup", "fixture.js");
   const distExisted = await pathExists(dist);
   const createdFiles = [];
 
@@ -86,15 +87,19 @@ async function ensureMinimalWebDist(t) {
   if (!(await pathExists(index))) {
     await writeFile(index, [
       "<!doctype html>",
+      '<title>PINVOU 智能助手</title>',
       '<base href="/pinvou3/remote/">',
+      '<script src="/pinvou3/remote/startup/fixture.js"></script>',
       '<script type="module" src="/pinvou3/remote/assets/app.js"></script>',
     ].join("\n"));
     createdFiles.push(index);
   }
-  if (!(await pathExists(bridge))) {
-    await mkdir(dirname(bridge), { recursive: true });
-    await writeFile(bridge, "");
-    createdFiles.push(bridge);
+  if (createdFiles.includes(index)) {
+    for (const asset of [app, startup]) {
+      await mkdir(dirname(asset), { recursive: true });
+      await writeFile(asset, "/* isolated deployment fixture */");
+      createdFiles.push(asset);
+    }
   }
 
   t.after(async () => {
