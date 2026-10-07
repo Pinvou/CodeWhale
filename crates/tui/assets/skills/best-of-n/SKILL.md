@@ -63,9 +63,9 @@ the structured candidate contract (candidate id, hypothesis, paths, commands,
 self-verdict, risks, and artifact references). A self-verdict is evidence to
 inspect, not a hard-gate result.
 
-Optional diversity: route the candidates through operator `model_strength`
-configuration when the project has multiple capable routes; `model` is not a
-call field.
+Optional diversity: route the candidates through the operator's `[subagents]`
+per-role model configuration when the project has multiple capable routes;
+`model` is not a call field.
 
 ## Judge Once
 

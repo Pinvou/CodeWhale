@@ -32,14 +32,14 @@ Do not delegate tiny one-step tasks, ambiguous product decisions, destructive op
 
 Use `agent` for a focused child run. Launch independent children together so they can run in parallel.
 
-Children inherit the active model by default, including `type: "scout"`; prefer provider-neutral routing (operator `model_strength` configuration) over hardcoded model ids in prompts or Fleet config:
+Children inherit the active model by default, including `type: "explore"`; prefer provider-neutral routing (the operator's `[subagents]` per-role model configuration) over hardcoded model ids in prompts or Fleet config:
 
 ```json
 {
   "action": "start",
   "name": "config_audit",
   "prompt": "Inspect crates/tui/src/config.rs and crates/tui/src/settings.rs for duplicate model-default logic. Return file/line findings only; do not edit files.",
-  "type": "scout"
+  "type": "explore"
 }
 ```
 
@@ -50,7 +50,7 @@ For code changes, give the child a precise write boundary and tell it not to rev
   "action": "start",
   "name": "docs_patch",
   "prompt": "Update only docs/configuration.md to document the new [statusline] keys. Match the surrounding style. Do not edit other files.",
-  "type": "builder",
+  "type": "implement",
   "write_roots": ["docs/configuration.md"]
 }
 ```

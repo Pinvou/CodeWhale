@@ -26,12 +26,12 @@ on hallucinated symbols.
 ## 2. Spawn a verifier sub-agent before multi-file execution
 
 Before executing a plan that touches 3+ files, spawn a read-only verifier
-sub-agent (thinking off) to read the target files and confirm path/symbol
+sub-agent (`type: "test"`) to read the target files and confirm path/symbol
 assumptions still hold. Keep the call provider-neutral: route models through
-operator `model_strength` configuration, not call fields.
+the operator's `[subagents]` per-role configuration, not call fields.
 
 ```
-agent action="start" type="verifier"
+agent action="start" type="test"
   prompt: "Read these files and confirm: [list assumptions]. Report mismatches."
 ```
 
