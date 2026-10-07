@@ -619,7 +619,14 @@ async fn serve_controlling_lane_with_evidence_context(
             // 自己的 deadline 是权威，本地只保证不会无限等待）。
             _ = tokio::time::sleep_until(resume_deadline) => {
                 if manager.with_lane_owner(&operation, || business.clear()).is_err() { return; }
-                fail_resume(manager, &operation, sinks);
+                // Connected B-evidence expiry is not a failed resume. Keep
+                // late resume failures fenced to Reconnecting, but retire
+                // this still-owned connected lane when its finite budget ends.
+                if resume.is_active() {
+                    fail_resume(manager, &operation, sinks);
+                } else if let Ok(status) = manager.fail_connection(operation.clone(), PEER_UNAVAILABLE_ERROR) {
+                    (sinks.on_status)(&status);
+                }
                 return;
             }
             event = lane.next_lane_event() => {
@@ -2859,6 +2866,7 @@ mod tests {
                 json!({
                     "v": 1,
                     "type": "controller_resumed",
+                    "request_id": "request-resume-completed-0001",
                     "activation_id": "activation-0001",
                     "liveness_epoch_a": "live-a-2",
                     "liveness_epoch_b": "live-b-2",

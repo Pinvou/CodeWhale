@@ -355,3 +355,75 @@ async fn old_remote_cleanup_cannot_take_new_owner_or_invalidate_its_reservation(
     removed.forwarder.abort();
     finished.await.unwrap();
 }
+
+#[tokio::test]
+async fn fixed_remote_cancel_never_targets_a_successor_generation() {
+    // Exercise the actual cancellation helper at all three lookup boundaries,
+    // including a successor that exists BEFORE remote cancellation is invoked.
+    for switch_at in 0..=2 {
+        let locks = SessionTurnLocks::default();
+        let lifecycles = SessionTurnLifecycles::default();
+        let shell_tasks = SessionTurnShellTasks::default();
+        let sid = "fixed-remote-cancel";
+        let lifecycle = lifecycles.for_session(sid);
+        let old = lifecycle.reserve().unwrap();
+        let generation = old.generation();
+        let successor = Arc::new(std::sync::Mutex::new(None));
+        if switch_at == 0 {
+            assert!(lifecycle.finish_unsubmitted_once());
+            *successor.lock().unwrap() = Some(lifecycle.reserve().unwrap());
+        }
+        let lookups = std::sync::atomic::AtomicUsize::new(0);
+        let cancels = std::sync::atomic::AtomicUsize::new(0);
+        let cascades = std::sync::atomic::AtomicUsize::new(0);
+        let claims = std::sync::atomic::AtomicUsize::new(0);
+        let result = cancel_turn_with_gates(
+            &locks,
+            &lifecycles,
+            &shell_tasks,
+            sid,
+            Some(generation),
+            deepseek_tui::core::engine::CancelMode::StopDropInbox,
+            || {
+                let lookup = lookups.fetch_add(1, Ordering::SeqCst) + 1;
+                let lifecycle = lifecycle.clone();
+                let successor = successor.clone();
+                async move {
+                    // The lifecycle changes during the awaited engine lookup.
+                    if lookup == switch_at {
+                        assert!(lifecycle.finish_unsubmitted_once());
+                        *successor.lock().unwrap() = Some(lifecycle.reserve().unwrap());
+                    }
+                    if switch_at == 2 && lookup == 1 {
+                        None
+                    } else {
+                        Some(())
+                    }
+                }
+            },
+            |_: &(), _| {
+                cancels.fetch_add(1, Ordering::SeqCst);
+            },
+            |_: &()| {
+                cascades.fetch_add(1, Ordering::SeqCst);
+                std::future::ready(())
+            },
+            |_, target| {
+                assert_eq!(target, generation);
+                claims.fetch_add(1, Ordering::SeqCst);
+                // Keep the old turn alive to exercise phase two's await.
+                false
+            },
+        )
+        .await;
+        assert_eq!(result, (Some(generation), false));
+        assert_eq!(cancels.load(Ordering::SeqCst), 0, "boundary {switch_at}");
+        assert_eq!(cascades.load(Ordering::SeqCst), 0, "boundary {switch_at}");
+        assert_eq!(claims.load(Ordering::SeqCst), usize::from(switch_at == 2));
+        let successor = successor.lock().unwrap().take().unwrap();
+        assert_ne!(successor.generation(), generation);
+        assert!(successor.ensure_active().is_ok());
+        drop(old);
+        assert!(successor.ensure_active().is_ok());
+    }
+}

@@ -655,6 +655,22 @@ impl TurnLifecycle {
         }
     }
 
+    /// Run a synchronous side effect only for this still-active generation.
+    /// The callback must not re-enter this lifecycle or await. Holding the
+    /// state lock prevents a forwarder-created successor between validation
+    /// and capturing the old turn's shell scope.
+    pub(crate) fn with_active_generation<T>(
+        &self,
+        generation: u64,
+        action: impl FnOnce() -> T,
+    ) -> Option<T> {
+        let state = self.state.lock();
+        if state.turn_epoch != generation || (!state.active && !state.terminal_closing) {
+            return None;
+        }
+        Some(action())
+    }
+
     /// 当前活动轮是否已提交（`SendMessage` 已入队 / `TurnStarted` 已抵达）。
     /// 供 cancel 阶段二在 generation mismatch（新轮已 reserve）时判断新轮是否
     /// 已经真正开始：仅 reserve 未 send 时，engine 里仍是旧轮遗留的子代理，
@@ -2729,6 +2745,28 @@ mod turn_lifecycle_tests {
 
         // 防 Drop 副作用。
         reservation2.mark_submitted(None);
+    }
+
+    #[test]
+    fn generation_guard_holds_state_lock_and_rejects_a_successor() {
+        let lifecycle = Arc::new(TurnLifecycle::default());
+        let old = lifecycle.reserve().unwrap();
+        let old_generation = old.generation();
+        assert_eq!(
+            lifecycle.with_active_generation(old_generation, || {
+                assert!(lifecycle.state.try_lock().is_none());
+                "captured under lock"
+            }),
+            Some("captured under lock")
+        );
+        drop(old);
+        let successor = lifecycle.reserve().unwrap();
+        assert!(
+            lifecycle
+                .with_active_generation(old_generation, || panic!("must not cancel new scope"))
+                .is_none()
+        );
+        assert!(successor.ensure_active().is_ok());
     }
 
     #[test]

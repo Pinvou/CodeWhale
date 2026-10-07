@@ -4,6 +4,7 @@
 //! 任务接纳、任务取消）在这里落到既有的命令层实现上：三条路径都复用
 //! `desktop_remote_task` / `desktop_remote_capabilities` 的同一套逻辑，避免
 //! 「命令入口」与「wire 入口」两份实现漂移。
+// architecture-guard: allow-target-cfg -- Tests of anchored private publication require Windows sharing leases; unsupported hosts get a separate fail-closed test, while runtime OS selection stays in platform::filesystem.
 
 use crate::features::codex_acp::{AcpPool, RemotePermissionOwner};
 use serde_json::{Value, json};
@@ -1362,6 +1363,65 @@ mod dev19_replay_tests {
     };
     use serde_json::json;
 
+    #[test]
+    fn prepared_local_empty_input_does_not_consume_wire_receipts() {
+        let prepared = PreparedControlledTask {
+            remote_ref: "ref-1".into(),
+            b_session_id: "session-1".into(),
+            task_id: "task-1".into(),
+            client_request_id: "request-1".into(),
+            input_digest: "digest-1".into(),
+            payload: json!({"input":{"attachment_ids":["not-a-local-receipt"]}}),
+            local_attachments: Some(Vec::new()),
+        };
+        let local = dispatch_prepared_attachment_origin(
+            prepared,
+            |_| panic!("empty B-local descriptors must not consume remote receipts"),
+            |_, attachments| Ok(attachments),
+        )
+        .unwrap();
+        assert!(local.is_empty());
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn prepared_remote_input_rejects_unsupported_private_publication_without_accounting() {
+        use crate::features::remote_control::controller::transfer::{
+            core::TransferRegistry, staging::SessionIsolationStaging, upload::AttachmentUploads,
+        };
+        assert!(!crate::platform::filesystem::supports_private_read_path_publication());
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().to_path_buf();
+        let registry = Arc::new(TransferRegistry::default());
+        let uploads = AttachmentUploads::new(
+            registry.clone(),
+            Arc::new(SessionIsolationStaging::new(Arc::new(move |_| {
+                Ok(root.clone())
+            }))),
+        );
+        let live = lease();
+        assert_eq!(
+            uploads
+                .begin(
+                    TransferContext::new(&live, "session-1", "task-1", TransferDirection::Upload)
+                        .unwrap(),
+                    TransferMetadata {
+                        file_name: "wire.txt".into(),
+                        mime_type: "text/plain".into(),
+                        total_bytes: 1,
+                        sha256: "00".repeat(32),
+                    },
+                    1_000,
+                )
+                .err()
+                .expect("unsupported publication must fail closed"),
+            "unsupported"
+        );
+        assert_eq!(registry.connection_bytes(&live.connection_id), 0);
+        assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 0);
+    }
+
+    #[cfg(windows)]
     #[test]
     fn prepared_remote_input_consumes_real_completed_upload_and_local_empty_stays_local() {
         use crate::features::remote_control::controller::transfer::{
