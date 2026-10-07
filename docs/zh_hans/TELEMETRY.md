@@ -79,7 +79,7 @@ Codewhale 没有恢复出厂设置命令，因此本文档也不会声称有。
   "notice_version": 5,
   "sent_at":     "2026-08-03T18:04:11Z",   // RFC3339 UTC，秒级精度
   "install_id":  "3f2a…",                  // uuid v4，每 90 天轮换
-  "app_version": "0.9.4",
+  "app_version": "0.9.12",
   "git_sha":     null,                     // 仅发布 CI 构建为非 null
   "surface":     "tui",
   "os":          "macos",
@@ -97,7 +97,7 @@ Codewhale 没有恢复出厂设置命令，因此本文档也不会声称有。
 | `sent_at` | RFC3339 | `chrono::Utc::now()` | 秒级精度。仅按**批次**——事件本身完全不携带时间戳。 |
 | `install_id` | uuid v4 | `crates/telemetry/src/envelope.rs` | 随机、绝不派生，每 90 天轮换。见上文"数据存放位置"。 |
 | `app_version` | string | `env!("CARGO_PKG_VERSION")`，即 `crates/telemetry/src/lib.rs:120` 处 | 必须匹配 `^\d+\.\d+\.\d+(-[0-9A-Za-z.]+)?$`。 |
-| `git_sha` | string \| null | `option_env!("CODEWHALE_RELEASE_BUILD_SHA")`——一个**新的** rustc-env | 前 12 个十六进制字符。仅当 `codewhale_build_support::release_build_sha` 在构建环境中看到 `DEEPSEEK_BUILD_SHA` 或 `GITHUB_SHA` 时才发送，即仅对发布 CI 构建。对所有本地构建的二进制无条件为 `null`，且不做任何形式的运行时查找。**绝不**是 `CODEWHALE_BUILD_COMMIT`——那会回退到 `git_commit`，是构建者的私有 HEAD。**绝不**是 `Thread.git_sha`（`crates/state/src/lib.rs:93`）——那是用户工作区的提交，是一条红线，只隔一个名字。 |
+| `git_sha` | string \| null | `option_env!("CODEWHALE_RELEASE_BUILD_SHA")`——一个**新的** rustc-env | 前 12 个十六进制字符。仅当 `codewhale_build_support::release_build_sha` 在 `CODEWHALE_BUILD_SHA`、旧名 `DEEPSEEK_BUILD_SHA` 或 `GITHUB_SHA`（按此优先顺序）中看到有效完整 SHA 时才发送。对所有未打戳的构建无条件为 `null`，且不做任何形式的运行时查找。**绝不**是 `CODEWHALE_BUILD_COMMIT`——那会回退到 `git_commit`，是构建者的私有 HEAD。**绝不**是 `Thread.git_sha`（`crates/state/src/lib.rs:93`）——那是用户工作区的提交，是一条红线，只隔一个名字。 |
 | `surface` | enum | 由发出批次的客户端明确设置 | `tui \| exec \| cli \| app-server \| mcp-server \| serve \| website \| web-app \| desktop \| control-plane`。运行时复用现有计数器；允许某界面不代表其客户端已部署。 |
 | `os` | enum | `std::env::consts::OS`，即 `crates/cli/src/update.rs:56` 处 | allowlist：`linux \| macos \| windows \| freebsd \| android \| other`。 |
 | `arch` | enum | `std::env::consts::ARCH` | `x86_64 \| aarch64 \| other`。 |
@@ -159,7 +159,7 @@ Codewhale 没有恢复出厂设置命令，因此本文档也不会声称有。
 
 **`duration_bucket`** ——来自 `app.session_started_at`（`crates/tui/src/tui/app.rs:2284`）的 `chrono` 差值。半开区间，单位秒：`lt_1m`（`d < 60`）、`1m_10m`（`60 ≤ d < 600`）、`10m_60m`（`600 ≤ d < 3600`）、`gt_60m`（`d ≥ 3600`）。
 
-**`exit_class`** —— `clean | signal | panic | error`。**来自显式的 `AtomicU8`，绝不来自退出码。** `RunTerminationReason::Canceled` 映射到退出码 130（`crates/tui/src/core/runtime_contract/termination.rs:53`），与信号任务使用同一个值（`crates/tui/src/lib.rs:768`，128+SIGINT），因此基于退出码的推导会把每次 Esc 取消的回合都报成信号。这个 atomic 由 panic hook（`crates/tui/src/lib.rs:1763`）、信号任务（`:847-850`，在 `std::process::exit` 之前）以及干净路径上的 `RunTerminationReason::is_success()`（`crates/tui/src/core/runtime_contract/termination.rs:44-46`）设置——其他情况为 `error`。**不要**使用 `exec_failure_exit_code`（`crates/tui/src/lib.rs:11710`）：它只知道 `{75, 1}`，会把需要审批的退出码（3）报成普通失败。
+**`exit_class`** —— `clean | signal | panic | error`。**来自显式的 `AtomicU8`，绝不来自退出码。** `RunTerminationReason::Canceled` 映射到退出码 130（`crates/tui/src/core/runtime_contract/termination.rs:53`），与信号任务使用同一个值（`crates/tui/src/lib.rs:881`，128+SIGINT），因此基于退出码的推导会把每次 Esc 取消的回合都报成信号。这个 atomic 由 panic hook（`crates/tui/src/lib.rs:1763`）、信号任务（`:847-850`，在 `std::process::exit` 之前）以及干净路径上的 `RunTerminationReason::is_success()`（`crates/tui/src/core/runtime_contract/termination.rs:43-45`）设置——其他情况为 `error`。**不要**使用 `exec_failure_exit_code`（`crates/tui/src/lib.rs:11710`）：它只知道 `{75, 1}`，会把需要审批的退出码（3）报成普通失败。
 
 **`cold_start_bucket`** ——来自 `startup_trace::elapsed_ms()`，它直接读取 `PROCESS_START`，并且独立于启动摘要的缓冲区清空（`crates/tui/src/startup_trace.rs:39-45`）。边界：`lt_250`、`250_1000`、`1000_3000`、`gte_3000`。非 TUI surface 上缺席。
 
@@ -191,7 +191,7 @@ Codewhale 没有恢复出厂设置命令，因此本文档也不会声称有。
 | `tool_timeout` | 同一匹配的 `timeout` 分支 |
 | `network_error` | `retry_reason_label_and_human()` 的 `&'static str` 一半，`crates/tui/src/client.rs:3174` |
 
-为什么只要判别值：`ToolError::PathEscape` 的 `Display` *就是*一个绝对路径（`crates/tools/src/lib.rs:61`）；`fim.rs:48-50` 的 `Display` *就是*模型发出的字面源码片段；`secrets/src/lib.rs:50` 的 `Display` 携带密钥库的绝对路径；每个 `LlmError` 变体都原样携带 provider 的原始 HTTP 主体（`crates/tui/src/llm_client/mod.rs:327`），而内容过滤器的 400 通常会回显提示词。
+为什么只要判别值：`ToolError::PathEscape` 的 `Display` *就是*一个绝对路径（`crates/tools/src/lib.rs:61`）；`fim.rs:51-55` 的 `Display` *就是*模型发出的字面源码片段；`crates/secrets/src/lib.rs:59` 的 `Display` 携带密钥库的绝对路径；每个 `LlmError` 变体都原样携带 provider 的原始 HTTP 主体（`crates/tui/src/llm_client/mod.rs:342`），而内容过滤器的 400 通常会回显提示词。
 
 **`turn_wall`** ——按会话的计数直方图，绝不是按回合的事件。`lt_5s`、`5_30s`、`30_120s`、`gte_120s`。来源 `crates/tui/src/tui/ui/event_loop.rs:2526`，那里已经手握 `duration`。
 
@@ -203,9 +203,9 @@ Codewhale 没有恢复出厂设置命令，因此本文档也不会声称有。
 { "event": "panic", "site": "crates/tui/src/lib.rs:1763:5" }
 ```
 
-`site` 来自 `panic_info.location()`（`crates/tui/src/lib.rs:1795-1799`）或 `Location::caller()`（`crates/tui/src/utils.rs:683`）。**allowlist 缩减，不是可选的：** 仅当 `file()` 以 `crates/` 开头时才原样发送；否则发送字面量 `"<dep>"`。必须匹配 `^crates/[A-Za-z0-9_/.-]+\.rs:\d+:\d+$` 或 `^<dep>$`。本仓库没有 `--remap-path-prefix`（没有 `.cargo/config.toml`；`Cargo.toml:69-74` 只设置 `lto`/`strip`/`codegen-units`），因此注册表依赖内部的 panic 会得到 `/Users/<builder>/.cargo/registry/src/…/ratatui-0.29.0/src/…`——**构建机器的用户名**，从每个用户的二进制里发送出去。
+`site` 来自 `panic_info.location()`（`crates/tui/src/lib.rs:1795-1799`）或 `Location::caller()`（`crates/tui/src/utils.rs:683`）。**allowlist 缩减，不是可选的：** 仅当 `file()` 以 `crates/` 开头时才原样发送；否则发送字面量 `"<dep>"`。必须匹配 `^crates/[A-Za-z0-9_/.-]+\.rs:\d+:\d+$` 或 `^<dep>$`。本仓库没有 `--remap-path-prefix`（没有 `.cargo/config.toml`；`Cargo.toml:93-96` 只设置 `lto`/`strip`/`codegen-units`），因此注册表依赖内部的 panic 会得到 `/Users/<builder>/.cargo/registry/src/…/ratatui-0.29.0/src/…`——**构建机器的用户名**，从每个用户的二进制里发送出去。
 
-**panic 消息绝不发送。** `crates/tui/src/lib.rs:1771-1778` 处的 hook 从 payload 构建 `msg`；遥测绝不能读取它。切片（slicing）panic 会嵌入正在被切片的整个字符串，而本代码库在几十处切片用户和模型文本。
+**panic 消息绝不发送。** `crates/tui/src/lib.rs:1771-1777` 处的 hook 从 payload 构建 `msg`；遥测绝不能读取它。切片（slicing）panic 会嵌入正在被切片的整个字符串，而本代码库在几十处切片用户和模型文本。
 
 ### 事件：product_usage
 
@@ -298,6 +298,6 @@ CF_ACCOUNT_ID=... CF_API_TOKEN=... npm run report:active-installs
 
 提示词；补全；工具参数；diff；补丁；文件内容；文件名；绝对或相对路径；git remote；仓库名；分支名；工作区提交 SHA；记忆条目；聊天历史；API 密钥、token、cookie 或 `Authorization` 头（包括任何断言密钥存在的布尔值）；任何种类的 model id；自定义 provider 表名；MCP 服务器名、命令或 URL；审批规则文本；错误消息主体；panic 消息文本；按事件的时间戳；按键；剪贴板；截图；麦克风；摄像头；位置；以及任何第三方广告或分析 SDK——运行时二进制中没有，也不得添加。
 
-给实现者的两个具名陷阱。`crates/state/src/lib.rs` 在线程表上持久化 `git_sha`、`git_branch`、`git_origin_url`、`cwd` 和 `path`（`:93, :399, :653`）：一个接受 `Thread` 或 `ThreadMeta` 并 `derive(Serialize)` 的 payload 构建器一行就违反契约。**绝不在现有状态类型上派生 `Serialize`**——从零开始、用显式字段构建每个遥测结构体。而 `crates/core/src/lib.rs:1389-1398` 是整棵树中 `telemetry` 一词与 `prompt`、`base_url`、`has_api_key` 同处一个 JSON 对象的唯一位置。它是某人会复制的那一个对象。不要复制。
+给实现者的两个具名陷阱。`crates/state/src/lib.rs` 在线程表上持久化 `git_sha`、`git_branch`、`git_origin_url`、`cwd` 和 `path`（`:93, :399, :653`）：一个接受 `Thread` 或 `ThreadMeta` 并 `derive(Serialize)` 的 payload 构建器一行就违反契约。**绝不在现有状态类型上派生 `Serialize`**——从零开始、用显式字段构建每个遥测结构体。而 doctor 报告里的 `telemetry` 块（`crates/tui/src/lib.rs:6782`）正是那种会被照抄的形状：一个由运行时配置值拼装出来的 JSON 对象。当 payload 需要遥测状态时，从零开始、用显式字段构建结构体——绝不序列化报告或配置对象。
 
 ---
