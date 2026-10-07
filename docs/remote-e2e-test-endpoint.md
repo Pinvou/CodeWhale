@@ -133,9 +133,10 @@ pinvou3-tauri
   `npm --prefix pinvou3-app run test:webui` 构建并在桌面/手机视口执行。
 - v2 Relay 与部署契约：`relay.test.js`、`deploy.test.js`、`remote-test-deploy.test.js`；退役的
   v1 jsdom 页面测试只由 `npm run test:legacy-v1-ui` 显式运行，不进入 v2 默认门禁。
-- desktop 回路 e2e：`pinvou3-app/.../remote_control/manager.rs` 的 `e2e_tests` 模块——
-  子进程起真实 node relay + 真实 `relay_client`（WS）+ `RemoteControlManager::new_headless()`，
-  tokio-tungstenite 扮演 mobile。缺 node / relay node_modules 时自动跳过，CI 安全。
+- 旧 desktop 回路 e2e 条目引用的 `new_headless()` / `e2e_tests` 已不在当前源码中，
+  不能作为当前真实 Node Relay + mobile 回路的测试或 CI 执行证据。
+- 当前 Windows B 端恢复接线回归位于 `pinvou3-app/src-tauri/src/features/remote_control/controller/relay_runtime/reader_resume_tests.rs` 的 `real_reader_manager_worker_resume_round_trip()`：
+  走真实 WebSocket reader、manager 与 worker，但 Relay 是本地协议模拟端；不替代 Web v2 mobile、真实三角色或双 Windows 验收。
 
 ## 运维注意事项（踩坑记录）
 
