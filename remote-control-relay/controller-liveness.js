@@ -134,13 +134,17 @@ function consumeChallenge(state, message, now) {
 }
 
 export class ControllerLivenessHooks {
-  #clock; #states = new Map(); #signing;
+  #clock; #states = new Map(); #signing; #leaseManager;
 
   constructor(options = {}) {
     if (typeof options.clock !== "function" && options.clock !== undefined) {
       fail("controller_liveness_clock_invalid");
     }
     this.#clock = options.clock ?? Date.now;
+    if (options.leaseManager != null && typeof options.leaseManager.terminateLease !== "function") {
+      fail("controller_liveness_config_invalid");
+    }
+    this.#leaseManager = options.leaseManager ?? null;
     this.#signing = signingConfiguration(options);
   }
 
@@ -306,12 +310,17 @@ export class ControllerLivenessHooks {
       || typeof context.liveness_epoch_b !== "string") {
       fail("controller_liveness_lease_invalid");
     }
-    this.#states.set(context.controller_lease_id, newState(context, now));
+    if (this.#states.get(context.controller_lease_id)?.leaseOwner === lease) {
+      return Object.freeze({ deliveries: Object.freeze([]) });
+    }
+    this.#states.set(context.controller_lease_id, { ...newState(context, now), leaseOwner: lease });
     return Object.freeze({ deliveries: Object.freeze([]) });
   }
 
   async onSocketClosed({ lease } = {}) {
-    if (lease?.controller_lease_id) this.#states.delete(lease.controller_lease_id);
+    if (lease?.controller_lease_id && this.#states.get(lease.controller_lease_id)?.leaseOwner === lease) {
+      this.#states.delete(lease.controller_lease_id);
+    }
     return Object.freeze({ retain_lease: false });
   }
 
@@ -328,18 +337,24 @@ export class ControllerLivenessHooks {
     return deadline;
   }
 
-  async onLeaseTerminated({ controller_lease_id: controllerLeaseId } = {}) {
-    if (controllerLeaseId) this.#states.delete(controllerLeaseId);
+  async onLeaseTerminated({ controller_lease_id: controllerLeaseId } = {}, leaseOwner) {
+    const state = this.#states.get(controllerLeaseId);
+    if (state && (leaseOwner === undefined || state.leaseOwner === leaseOwner)) this.#states.delete(controllerLeaseId);
   }
 
   async expire() {
     const now = integer(this.#clock(), "now");
     let expired = 0;
     for (const [controllerLeaseId, state] of this.#states) {
-      const latestLiveness = Math.max(state.last_liveness_a.at, state.last_liveness_b.at);
-      const deadline = latestLiveness + TOTAL_BUDGET_MS;
+      const deadline = Math.min(state.last_liveness_a.at, state.last_liveness_b.at) + TOTAL_BUDGET_MS;
       if (now >= deadline) {
-        this.#states.delete(controllerLeaseId);
+        try {
+          if (this.#leaseManager) await this.#leaseManager.terminateLease({
+            controllerLeaseId, expectedLease: state.leaseOwner, reason: "controller_liveness_expired",
+          });
+        } finally {
+          if (this.#states.get(controllerLeaseId) === state) this.#states.delete(controllerLeaseId);
+        }
         expired += 1;
       } else {
         pruneChallenges(state, now);

@@ -15,11 +15,23 @@
 | 前端与桥 | `npm --prefix pinvou3-app test`、`npm --prefix pinvou3-app run build:ui`、`npm --prefix pinvou3-app run test:webui` | WebUI v2 行为与旧 fixture 不回归 |
 | 架构守卫 | `python scripts/architecture-guard.py` | 依赖方向与平台边界 |
 | 发布门槛清单 | `node --test remote-control-relay/test/controller-release-gates.test.js` | 本文件的必备章节、回滚约束与残余风险 |
-| 泄露扫描 | `cargo test ... controller::telemetry`、`node --test remote-control-relay/test/controller-telemetry.test.js` | 受控枚举与哨兵扫描 |
+| 泄露扫描 | 下述三个真实 Rust 用例、`node --test remote-control-relay/test/controller-sensitive-scan.test.js remote-control-relay/test/controller-telemetry.test.js` | 真实错误投影、Debug 脱敏、受控枚举与哨兵扫描；零匹配视为失败 |
+
+### 1.1 泄露扫描的非空执行证据
+
+已删除的 Rust `controller::telemetry` 不再是验证入口。以下每条必须实际报告 `1 passed; 0 failed`，不能仅用 cargo 退出码 0 或 `0 tests` 作为通过证据：
+
+```bash
+cargo test --manifest-path pinvou3-app/src-tauri/Cargo.toml features::remote_control::controller::relay_runtime::tests::log_allowlist_rejects_identifier_shaped_values_and_secrets -- --exact --test-threads=1
+cargo test --manifest-path pinvou3-app/src-tauri/Cargo.toml features::remote_control::controller::relay_runtime::tests::real_remote_failure_projections_do_not_persist_any_sensitive_category -- --exact --test-threads=1
+cargo test --manifest-path pinvou3-app/src-tauri/Cargo.toml features::remote_control::controller::resume::tests::resume_debug_redacts_current_and_retired_material -- --exact --test-threads=1
+```
+
+发布门槛测试校验这些入口与现有 Rust 源码一致；这项静态合同不能代替上述实际执行，也不能代替真实双机证据。
 
 ## 2. 灰度步骤
 
-1. **Registry 覆盖率**：先统计已迁移 endpoint 比例（`scripts/enrollment-migrate.js` 的 dry-run 输出）。未达到 100% 之前不开启公网强制门禁。
+1. **Registry 覆盖率**：在仓库根目录运行 `remote-control-relay/scripts/enrollment-migrate.js` 的 dry-run，统计已迁移 endpoint 比例。未达到 100% 之前不开启公网强制门禁。
 2. **打开桌面控制能力开关**：只打开 `desktop_remote_control` 能力，不动 enrollment registry、pairing tombstone 与 digest keyring。
 3. **自托管升级说明**：自托管 Relay 必须先升级到 registry-aware 版本，或在所有入口前挂 enrollment gateway（无旁路）。
 4. **容量与限流**：确认连接码领取、claim、握手速率限制与告警阈值生效；观察爆破告警与容量水位。
@@ -81,7 +93,7 @@
 |---|---|
 | A 端临时模型、代码模式、附件与成果导出 | UI 按首版开关隐藏；能力未声明时不暴露入口 |
 | 远程普通会话的工具审批 | 未闭环前禁用工具，B 侧不出现 Allow 入口 |
-| Relay 未协商 WS 子协议、无 `controller_capabilities` handler | A 端不声明 `pinvou-desktop-controller-v1` 子协议、不发该首帧（否则握手会被 `controller_message_unsupported` 打断）；Relay 补齐后两侧一并接入 |
+| 历史登记：Relay WS 子协议与 `controller_capabilities` 首帧 | **子协议限制已被后续实现取代（superseded）**：当前 A 端通过 `relay_client::controller_websocket_request` 声明 `pinvou-desktop-controller-v1`，Relay 通过 `remote-control-relay/server.js` 的 `handleProtocols` 协商。独立 `controller_capabilities` handler 仍未接入，当前能力通过 register/claim 与 `controller_joined` 协商；不再以本历史行声称当前客户端不声明子协议，也不将其视为发布验收。 |
 
 ### 7.3 后续排期（不阻断首版灰度）
 
@@ -95,7 +107,9 @@
 | `DesktopControlledCleanup` 适配器测试 | 仓库无 `mock_app` 先例，当前由 manager 侧三条路径用例覆盖触发面，Tauri 级测试列入后续 |
 | remote_control 之外的既有失败 | 全量 `cargo test --lib` 有 6～8 条与本功能无关的既有失败（进程树终止超时、marketplace 工具缺失等），属环境限制，已在任务文档登记 |
 
-## 8. 生产 controller lane 启用记录（2026-09-19，含已接受的安全降级）
+## 8. 生产 controller lane 启用历史记录（2026-09-19，不是当前安全豁免）
+
+本节只保留当次操作与证据；不为当前公网服务、新部署或重部署授权 development/TOFU。历史降级没有可沿用的永久豁免：在下次新/重部署或正式发布之前（以先发生者为截止），必须取得端点清单、100% registry 迁移与全入口网关预检证据，使用 official/self_hosted 并关闭 TOFU。未完成则阻断，不以本次文档修订宣称已执行迁移或修改线上配置。
 
 ### 8.1 变更内容
 
@@ -106,8 +120,8 @@
 ### 8.2 为什么启用 TOFU（已接受的安全降级）
 
 - 生产状态文件只有 `version` 与 `revoked_endpoints`，**没有端点清单**：存量端点只存在于内存，无法做「registry 覆盖率 100%」的迁移。
-- 一旦启用 controller runtime，v2 的 `desktop_endpoint_register` 也会先过 registry（`server.js:886`）；在 `official` 且无 TOFU 的模式下，全部存量端点重连会被 `enrollment_required` 拒绝。
-- 因此经用户确认，**生产采用 `development + TOFU`**：未登记客户端可自助注册。这是明确的安全降级，必须在发布说明中披露；正式发布前应补齐端点清单与 registry 迁移，然后关闭 TOFU。
+- 当时启用 controller runtime 后，v2 的 `desktop_endpoint_register` 也会先过 registry（`remote-control-relay/server.js` 的注册分派）；在 `official` 且无 TOFU 的模式下，未登记存量端点重连会被 `enrollment_required` 拒绝。
+- 因此当次经用户确认采用 `development + TOFU`，未登记客户端可自助注册。这是历史安全降级，不是当前部署方案；仅限本节当次记录，后续迁移/关闭截止见第 8 节开头，仍需实际取证。
 
 ### 8.3 信任根（公钥随包内置，私钥只在部署环境）
 
@@ -119,6 +133,8 @@
 | 私钥 | 仅 `/etc/pinvou-remote-relay-controller.env`（0600），不入库、不入日志；轮换时需同步更新内置公钥并随客户端发版 |
 
 ### 8.4 备份与回滚
+
+以下为历史操作记录，不是当前可直接执行的回滚方案。当前回滚必须先按第 2 节证明 enrollment gateway 不可旁路并通过 `scripts/check-enrollment-gated-v2-rollback.mjs`；不能用关闭 controller lane、旧裸 v2 或 TOFU 作为绕过门禁的替代。
 
 - 全量备份：`/root/pinvou-prod-backups/pinvou-remote-relay-20260919T134907Z.tgz`（代码 + unit + drop-ins，314 MB）。
 - 部署时快照：`/opt/pinvou-remote-relay/backups/20260919-224624`（旧代码/旧 web/dist/旧 package 文件，脚本自动写入）。
