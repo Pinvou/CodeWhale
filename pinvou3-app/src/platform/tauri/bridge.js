@@ -81,6 +81,10 @@
         { loaded: true, desktopRemoteControl: detected && detected.os === "windows" && detected.desktopRemoteControlSupported === true }
       );
     } catch (error) {
+      state.platformCapabilities = Object.assign({}, state.platformCapabilities, {
+        loaded: false,
+        desktopRemoteControl: false,
+      });
       console.warn("[platform] capability detection failed", error);
       state.platformCapabilities = Object.assign({}, state.platformCapabilities, { loaded: false, desktopRemoteControl: false });
     }
@@ -1713,7 +1717,8 @@
     var fields = STATE_SLICE_FIELDS[domain];
     if (!fields) throw new Error("Unknown Tauri bridge state slice: " + domain);
     var slice = {};
-    for (var i = 0; i < fields.length; i++) slice[fields[i]] = state[fields[i]];
+    var source = domain === "desktopRemoteControl" ? state.desktopRemoteControl : state;
+    for (var i = 0; i < fields.length; i++) slice[fields[i]] = source && source[fields[i]];
     if (typeof structuredClone === "function") {
       try { return structuredClone(slice); } catch (_) {} // safari14-ok: typeof-guarded with JSON fallback
     }
@@ -1819,8 +1824,9 @@
     var cached = subscriptionSliceCache[domain];
     if (cached && cached.revision === subscriptionSliceRevision) return cached.snapshot;
     var current = {};
+    var source = domain === "desktopRemoteControl" ? state.desktopRemoteControl : state;
     for (var i = 0; i < fields.length; i++) {
-      current[fields[i]] = state[fields[i]];
+      current[fields[i]] = source && source[fields[i]];
     }
     var snapshot = subscriptionStateValue(current, cached && cached.snapshot);
     subscriptionSliceCache[domain] = { revision: subscriptionSliceRevision, snapshot: snapshot };

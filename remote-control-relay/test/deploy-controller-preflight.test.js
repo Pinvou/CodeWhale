@@ -1,9 +1,13 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { chmod, lstat, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   parseControllerEnvironment,
   validateControllerEnvironment,
   validateControllerEnvironmentMetadata,
+  validateControllerStateDirectories,
 } from "../scripts/deploy-controller-preflight.mjs";
 import { validateControllerRouteSmokeResponse } from "../scripts/controller-route-smoke.mjs";
 import { loadEnrollmentRegistryConfig } from "../enrollment-registry.js";
@@ -155,9 +159,85 @@ test("production controller environment rejects links, loose modes, and non-root
     /controller_env_owner_invalid/u,
   );
   assert.throws(
+    () => validateControllerEnvironmentMetadata({ ...valid, gid: 1000 }),
+    /controller_env_owner_invalid/u,
+  );
+  assert.throws(
+    () => validateControllerEnvironmentMetadata({ ...valid, isFile: false }),
+    /controller_env_file_type_invalid/u,
+  );
+  assert.throws(
     () => validateControllerEnvironmentMetadata({ ...valid, resolvedPath: "/tmp/controller.env" }),
     /controller_env_path_invalid/u,
   );
+});
+
+async function directoryFixture(t) {
+  const root = await mkdtemp(join(await realpath(tmpdir()), "pinvou-production-state-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  return root;
+}
+
+test("state preflight does not create absent directories", async (t) => {
+  const root = await directoryFixture(t);
+  const missing = join(root, "missing");
+  await validateControllerStateDirectories([{ path: missing, privateDirectory: true }]);
+  await assert.rejects(lstat(missing), { code: "ENOENT" });
+});
+
+test("state preflight rejects real file and linked root/state before touching targets", async (t) => {
+  const root = await directoryFixture(t);
+  const target = join(root, "unrelated");
+  await mkdir(target, { mode: 0o755 });
+  const before = await lstat(target);
+  for (const name of ["managed-root", "state"]) {
+    const link = join(root, name);
+    await symlink(target, link, process.platform === "win32" ? "junction" : "dir");
+    await assert.rejects(validateControllerStateDirectories([{ path: link, privateDirectory: true }]),
+      /controller_state_directory_type_invalid/u);
+    const after = await lstat(target);
+    assert.equal(after.mode, before.mode);
+    assert.equal(after.uid, before.uid);
+    assert.equal(after.gid, before.gid);
+  }
+  const file = join(root, "file");
+  await writeFile(file, "unchanged");
+  await assert.rejects(validateControllerStateDirectories([{ path: file, privateDirectory: true }]),
+    /controller_state_directory_type_invalid/u);
+  assert.equal(await readFile(file, "utf8"), "unchanged");
+});
+
+test("state preflight enforces real POSIX owners and private/ancestor modes", {
+  skip: process.platform === "win32" ? "requires POSIX uid/gid and modes" : false,
+}, async (t) => {
+  const root = await directoryFixture(t);
+  const owners = { expectedUid: process.getuid(), expectedGid: process.getgid() };
+  const directories = [{ path: root, privateDirectory: true }];
+  await chmod(root, 0o700);
+  await validateControllerStateDirectories(directories, owners);
+  await assert.rejects(validateControllerStateDirectories(directories, { ...owners, expectedUid: owners.expectedUid + 1 }),
+    /controller_state_directory_owner_invalid/u);
+  await assert.rejects(validateControllerStateDirectories(directories, { ...owners, expectedGid: owners.expectedGid + 1 }),
+    /controller_state_directory_owner_invalid/u);
+  await chmod(root, 0o755);
+  await assert.rejects(validateControllerStateDirectories(directories, owners),
+    /controller_state_directory_permissions_invalid/u);
+  await validateControllerStateDirectories([{ path: root, privateDirectory: false }], owners);
+  await chmod(root, 0o777);
+  await assert.rejects(validateControllerStateDirectories([{ path: root, privateDirectory: false }], owners),
+    /controller_state_directory_permissions_invalid/u);
+  assert.equal((await lstat(root)).mode & 0o777, 0o777, "preflight must not chmod unsafe directories");
+});
+
+test("production CLI checks every fixed state ancestor before install mutates it", async () => {
+  const source = await readFile(new URL("../scripts/deploy-controller-preflight.mjs", import.meta.url), "utf8");
+  for (const path of ["/", "/var", "/var/lib", "/var/lib/pinvou-remote-relay", "/var/lib/pinvou-remote-relay/state"]) {
+    assert.ok(source.includes(`{ path: "${path}", privateDirectory:`));
+  }
+  assert.match(source, /validateControllerEnvironmentFile\(process\.argv\[2\] \|\| "", \{ expectedFeatureFlag \}\)\s*\.then\(\(\) => validateControllerStateDirectories\(\)\)/u);
+  const deploy = await readFile(new URL("../../scripts/deploy-remote-relay.sh", import.meta.url), "utf8");
+  assert.ok(deploy.indexOf('node "$code_stage/scripts/deploy-controller-preflight.mjs" "$controller_env"')
+    < deploy.indexOf('install -d -o root -g root -m 700 "$controller_state_root"'));
 });
 
 test("controller route smoke requires a bounded v1 router response", () => {

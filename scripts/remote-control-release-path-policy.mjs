@@ -22,6 +22,8 @@ export const REMOTE_CONTROL_RELEASE_EXACT_PATHS = Object.freeze([
   "pinvou3-app/src-tauri/src/app/commands/remote_control.rs",
   "pinvou3-app/src-tauri/src/features/behavior_telemetry/remote_control.rs",
   "pinvou3-app/src-tauri/src/platform/capabilities.rs",
+  "pinvou3-app/src-tauri/build.rs",
+  "pinvou3-app/src-tauri/build_support/desktop_controller.rs",
   "scripts/check-enrollment-gated-v2-rollback.mjs",
   "scripts/create-installer-spdx.mjs",
   "scripts/remote-control-release-path-policy.mjs",

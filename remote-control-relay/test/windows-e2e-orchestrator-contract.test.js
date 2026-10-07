@@ -63,7 +63,7 @@ test("RC-E2E-011 uses the deadline observation and measured monotonic duration",
   assert.match(orchestrator, /--deadline-observation-base64/u);
   assert.match(orchestrator, /Assert-PinvouJourneyElapsed/u);
   assert.match(orchestrator, /terminal_elapsed_ms/u);
-  assert.match(helper, /Math\]::Abs\(\$ObservedMilliseconds - \$TerminalElapsedMilliseconds\)/u);
+  assert.match(orchestrator, /Math\]::Abs\(\$ObservedMilliseconds - \$TerminalElapsedMilliseconds\)/u);
   assert.doesNotMatch(orchestrator, /ElapsedMilliseconds\s*-le\s*30000/u);
 });
 

@@ -3080,6 +3080,93 @@ mod tests {
     }
 
     #[test]
+    fn real_service_transitions_keep_durable_identity_and_only_one_terminal_journal() {
+        struct Capture {
+            journal: Arc<super::super::journal::RemoteJournal>,
+            events: Mutex<Vec<RemoteTaskEvent>>,
+        }
+        impl RemoteTaskEventSink for Capture {
+            fn publish_task_event(&self, event: &RemoteTaskEvent) {
+                self.events.lock().push(event.clone());
+                self.journal.publish_task_event(event);
+            }
+        }
+        struct WaitingExecutor {
+            started: tokio::sync::Notify,
+            done: tokio::sync::Notify,
+        }
+        #[async_trait]
+        impl ControllerTaskExecutor for WaitingExecutor {
+            async fn execute(
+                &self,
+                _request: Value,
+                _events: Arc<dyn ControllerTaskEventSink>,
+                _cancel: CancellationToken,
+            ) -> std::result::Result<(), String> {
+                self.started.notify_one();
+                self.done.notified().await;
+                Ok(())
+            }
+        }
+        runtime().block_on(async {
+            let executor = Arc::new(WaitingExecutor {
+                started: tokio::sync::Notify::new(),
+                done: tokio::sync::Notify::new(),
+            });
+            let service = Arc::new(RemoteTaskService::new(Arc::new(
+                RemoteTaskLedger::in_memory(),
+            )));
+            service.register_executor(TASK_MODE_CHAT, executor.clone());
+            let capture = Arc::new(Capture {
+                journal: Arc::new(super::super::journal::RemoteJournal::new("journal-epoch-1")),
+                events: Mutex::new(Vec::new()),
+            });
+            service.hooks().set_journal(capture.clone());
+            let body = payload("session-0001", "task-0001", "request-0001", &digest(1));
+            let ticket = admitted(&service, &body, 1_000);
+            let worker = {
+                let service = service.clone();
+                tokio::spawn(async move {
+                    service
+                        .dispatch(ticket, Arc::new(NoopSink), CancellationToken::new(), 1_100)
+                        .await
+                })
+            };
+            executor.started.notified().await;
+            let waiting = service
+                .enter_waiting_permission("task-0001", 1_200)
+                .unwrap();
+            assert_eq!(waiting.transition_sequence, 3);
+            let running = service.resume_running("task-0001", 1_300).unwrap();
+            assert_eq!(running.transition_sequence, 4);
+            assert_eq!(capture.journal.len_for("session-0001"), 0);
+            executor.done.notify_one();
+            let terminal = worker.await.unwrap().unwrap();
+            assert_eq!(terminal.transition_sequence, 5);
+            assert_eq!(
+                terminal.sequence, 1,
+                "durable admission order does not become a publication counter"
+            );
+            let events = capture.events.lock().clone();
+            assert_eq!(
+                events
+                    .iter()
+                    .map(|event| event.transition_sequence)
+                    .collect::<Vec<_>>(),
+                vec![1, 2, 3, 4, 5]
+            );
+            assert!(events.iter().all(|event| event.sequence == "1"));
+            let snapshot = capture.journal.snapshot_for("session-0001").unwrap();
+            assert_eq!(snapshot.events.len(), 1);
+            let event_id = snapshot.events[0].event_id.clone();
+            capture.journal.publish_task_event(events.last().unwrap());
+            let retry = capture.journal.snapshot_for("session-0001").unwrap();
+            assert_eq!(retry.events.len(), 1);
+            assert_eq!(retry.events[0].event_id, event_id);
+        });
+    }
+
+    #[test]
     fn executor_failure_emits_one_error_before_task_completion() {
         let (service, hooks) = service(RecordingExecutor::failing());
         let body = payload("session-0001", "task-0001", "request-0001", &digest(1));
