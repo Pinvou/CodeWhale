@@ -391,19 +391,16 @@ impl PermissionAuthority {
             return Err(error("permission_retention_capacity"));
         }
         let id = binding.permission_request_id.clone();
-        pending.insert(
-            id.clone(),
-            PendingPermission {
-                binding,
-                request,
-                state: PermissionState::Pending,
-                decision: None,
-                dispatch_state: DispatchState::NotDispatched,
-                resolved_at_ms: None,
-                resolved_reason: None,
-            },
-        );
-        Ok(Self::view_locked(pending.get(&id).expect("just inserted")))
+        let inserted = pending.entry(id).insert_entry(PendingPermission {
+            binding,
+            request,
+            state: PermissionState::Pending,
+            decision: None,
+            dispatch_state: DispatchState::NotDispatched,
+            resolved_at_ms: None,
+            resolved_reason: None,
+        });
+        Ok(Self::view_locked(inserted.get()))
     }
 
     /// First effective A decision wins. B and local callers are rejected, and a
@@ -772,6 +769,20 @@ mod tests {
             PermissionAuthority::with_clock(Arc::new(move || observed.load(Ordering::SeqCst))),
             clock,
         )
+    }
+
+    #[test]
+    fn returned_permission_view_matches_the_committed_pending_entry() {
+        let (authority, _) = clocked(1_000);
+        let view = authority
+            .request(&lease(), "task-0001", request(61_000), 1_000)
+            .unwrap();
+        assert_eq!(view.state, "pending");
+        assert_eq!(view.decision, None);
+        assert_eq!(view.dispatch_state, "not_dispatched");
+        assert_eq!(view.task_id, "task-0001");
+        assert_eq!(view, authority.view(&view.permission_request_id).unwrap());
+        assert_eq!(authority.pending_for_task("task-0001"), vec![view]);
     }
 
     #[test]
