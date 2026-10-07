@@ -980,6 +980,10 @@ mod tests {
     fn remote_turn_materializes_only_the_frozen_authorized_selection() {
         with_temp_home("pinvou3-skillscope", || {
             seed_sources();
+            // A fresh home is default-all-off per scope (round-31 M8); enable
+            // the whole Plain scope so the frozen-selection assertion below is
+            // driven by the authorized list, not by the default-deny baseline.
+            save_disabled_bundles_for(ConnectorScope::Plain, &[]).unwrap();
             let sid = "remote-session-skills";
             let selected = materialize_remote_turn_skills(
                 sid,

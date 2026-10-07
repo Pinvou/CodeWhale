@@ -4,8 +4,6 @@ use super::core::{
     CompletedTransfer, TransferContext, TransferDirection, TransferHandle, TransferMetadata,
 };
 use super::limits::MAX_TRANSFER_BYTES;
-#[cfg(all(test, windows))]
-use super::upload::AttachmentUploads;
 use super::upload::UploadStaging;
 use crate::platform::filesystem::{
     PrivateFileDirectory, PrivatePublicationCleanup, PublishedPrivateFile,
@@ -331,6 +329,7 @@ impl UploadStaging for SessionIsolationStaging {
 
 #[cfg(all(test, windows))]
 mod tests {
+    use super::super::upload::AttachmentUploads;
     use super::*;
     use crate::features::remote_control::controller::protocol::LeaseContext;
     use crate::features::remote_control::controller::transfer::TransferDirection;
