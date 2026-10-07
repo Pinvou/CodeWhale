@@ -273,16 +273,19 @@ fn controller_relay_message(value: &Value) -> bool {
         .get("type")
         .and_then(Value::as_str)
         .unwrap_or_default();
+    if kind == "error" {
+        return crate::features::remote_control::controller::protocol::validate_controller_message_json(
+            &value.to_string(),
+            crate::features::remote_control::controller::protocol::SenderRole::Relay,
+        ).is_ok();
+    }
     matches!(
         kind,
         // `desktop_pairing_registered` 是 controller-v1 注册的结果帧：它既不叫
         // `controller_*` 也不在握手/业务列表里，之前被这条过滤挡在控制通道之外，
         // 导致 B worker 永远等不到回包（30 秒超时），而 relay 其实已生成连接码
         // （2026-09-20 实测：relay registrations=2 而客户端报 pairing_registration_timeout）。
-        "desktop_endpoint_registered"
-            | "desktop_pairing_registered"
-            | "desktop_relay_connection"
-            | "error"
+        "desktop_endpoint_registered" | "desktop_pairing_registered" | "desktop_relay_connection"
     ) || kind.starts_with("controller_")
         || matches!(
             kind,
@@ -292,6 +295,35 @@ fn controller_relay_message(value: &Value) -> bool {
                 | "encrypted_controller_liveness_a"
                 | "encrypted_frame"
         )
+}
+
+// Error payloads carry no connection authority. A v2 rejection can omit the
+// endpoint ID during registration, so the locally owned reader is mandatory.
+fn owned_legacy_relay_error(
+    value: &Value,
+    endpoint_id: &str,
+    current: &RelaySender,
+    reader: &RelaySender,
+) -> Option<String> {
+    if !current.same_channel(reader)
+        || value.get("v").and_then(Value::as_u64) != Some(2)
+        || value.get("type").and_then(Value::as_str) != Some("error")
+    {
+        return None;
+    }
+    if let Some(id) = value.get("endpoint_id") {
+        if id.as_str() != Some(endpoint_id) {
+            return None;
+        }
+    }
+    let message = value
+        .get("message")
+        .or_else(|| value.get("code"))?
+        .as_str()?;
+    if message.is_empty() || message.len() > 512 {
+        return None;
+    }
+    Some(message.to_owned())
 }
 
 #[derive(Clone)]
@@ -2121,6 +2153,7 @@ impl RemoteControlManager {
         let rpc_ledger = load_or_initialize_rpc_ledger(&config.endpoint_id)?;
         let url = public_url(&config);
         let (sender, mut receiver) = relay_client::spawn(config.clone());
+        let reader_owner = sender.clone();
         {
             let mut inner = self.inner.lock();
             inner.idle_error = None;
@@ -2148,7 +2181,7 @@ impl RemoteControlManager {
             while let Some(inbound) = receiver.recv().await {
                 match inbound {
                     RelayInbound::Message(text) => match serde_json::from_str::<Value>(&text) {
-                        Ok(value) => manager.handle_relay_message(value),
+                        Ok(value) => manager.handle_relay_message(value, &reader_owner),
                         Err(_) => {
                             crate::features::remote_control::controller::relay_runtime::log_controlled_event(
                                 "relay_message_rejected",
@@ -2205,7 +2238,37 @@ impl RemoteControlManager {
         }
     }
 
-    fn handle_relay_message(&self, value: Value) {
+    fn handle_relay_message(&self, value: Value, reader_owner: &RelaySender) {
+        if value.get("type").and_then(Value::as_str) == Some("error") {
+            let accepted = {
+                let mut inner = self.inner.lock();
+                let Some(endpoint) = inner.endpoint.as_mut() else {
+                    return;
+                };
+                if !endpoint.sender.same_channel(reader_owner) {
+                    return;
+                }
+                if let Some(error) = owned_legacy_relay_error(
+                    &value,
+                    &endpoint.config.endpoint_id,
+                    &endpoint.sender,
+                    reader_owner,
+                ) {
+                    endpoint.status = WebAccessStatusKind::Error;
+                    endpoint.last_error = Some(error);
+                    true
+                } else {
+                    false
+                }
+            };
+            if accepted {
+                self.emit_status();
+            } else if controller_relay_message(&value) {
+                // v1 consumers additionally require their locally pending IDs.
+                self.forward_controller_relay_message(&value);
+            }
+            return;
+        }
         let endpoint_id = value
             .get("endpoint_id")
             .and_then(Value::as_str)
@@ -2247,14 +2310,6 @@ impl RemoteControlManager {
             "client_ready" => self.synchronize_client_from_value(&value),
             "desktop_endpoint_revoked" => self.handle_revoked(endpoint_id),
             "desktop_endpoint_replaced" => self.handle_replaced(endpoint_id),
-            "error" => {
-                let error = value
-                    .get("message")
-                    .and_then(Value::as_str)
-                    .unwrap_or("relay rejected Web access request")
-                    .to_string();
-                self.set_endpoint_error(error);
-            }
             _ => {}
         }
     }
@@ -3233,6 +3288,48 @@ mod tests {
     }
 
     #[test]
+    fn errors_follow_protocol_family_and_locally_owned_reader_not_claimed_endpoint() {
+        let current = RelaySender::test_channel_owner();
+        let same = current.clone();
+        let retired = RelaySender::test_channel_owner();
+        let legacy = json!({"v":2,"type":"error","code":"endpoint_not_found","message":"endpoint unavailable"});
+        assert_eq!(
+            owned_legacy_relay_error(&legacy, TEST_ENDPOINT_ID, &current, &same).as_deref(),
+            Some("endpoint unavailable")
+        );
+        assert!(!controller_relay_message(&legacy));
+        assert!(owned_legacy_relay_error(&legacy, TEST_ENDPOINT_ID, &current, &retired).is_none());
+        let mut forged_endpoint = legacy.clone();
+        forged_endpoint["endpoint_id"] = json!(TEST_ENDPOINT_ID);
+        assert!(
+            owned_legacy_relay_error(&forged_endpoint, TEST_ENDPOINT_ID, &current, &retired)
+                .is_none()
+        );
+        forged_endpoint["endpoint_id"] = json!("ep_other");
+        assert!(
+            owned_legacy_relay_error(&forged_endpoint, TEST_ENDPOINT_ID, &current, &same).is_none()
+        );
+        forged_endpoint["endpoint_id"] = json!(23);
+        assert!(
+            owned_legacy_relay_error(&forged_endpoint, TEST_ENDPOINT_ID, &current, &same).is_none()
+        );
+        let controller = json!({"v":1,"type":"error","request_id":"request-owned-0001",
+            "code":"pairing_code_invalid","message":"pairing unavailable"});
+        assert!(controller_relay_message(&controller));
+        assert!(owned_legacy_relay_error(&controller, TEST_ENDPOINT_ID, &current, &same).is_none());
+        for malformed in [
+            json!({"v":1,"type":"error","message":"missing request"}),
+            json!({"v":3,"type":"error","message":"unknown"}),
+            json!({"type":"error","message":"unversioned"}),
+        ] {
+            assert!(!controller_relay_message(&malformed));
+            assert!(
+                owned_legacy_relay_error(&malformed, TEST_ENDPOINT_ID, &current, &same).is_none()
+            );
+        }
+    }
+
+    #[test]
     fn replay_skips_unsubscribed_events_without_creating_sequence_gaps() {
         let mut stream = StreamState::new();
         record_stream_event(&mut stream, "session:deleted", json!({ "id": "one" }));
@@ -3293,7 +3390,6 @@ mod tests {
             "desktop_pairing_registered",
             "desktop_endpoint_registered",
             "desktop_relay_connection",
-            "error",
             "controller_joined",
             "encrypted_controller_liveness_a",
             "encrypted_frame",
@@ -3303,6 +3399,10 @@ mod tests {
                 "{kind} 必须转发给控制通道"
             );
         }
+        assert!(controller_relay_message(&json!({
+            "v":1,"type":"error","request_id":"request-0001",
+            "code":"pairing_code_invalid","message":"pairing unavailable"
+        })));
         for kind in ["web_client_joined", "desktop_endpoint_replaced"] {
             assert!(
                 !controller_relay_message(&serde_json::json!({ "type": kind })),
