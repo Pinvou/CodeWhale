@@ -126,7 +126,6 @@ fn every_provider_kind_resolves_the_auto_selector() {
             saved_provider_model: None,
             base_url_override: None,
             limit_overrides: Vec::new(),
-
             wire_override: None,
         };
         let candidate = resolver

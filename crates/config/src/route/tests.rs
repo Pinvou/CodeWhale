@@ -432,7 +432,6 @@ fn resolver_routes_only_official_deepseek_flash_over_responses() {
             saved_provider_model: None,
             base_url_override: Some("https://compatible.example/v1".to_string()),
             limit_overrides: Vec::new(),
-
             wire_override: None,
         })
         .expect("custom compatible Flash route remains pass-through");
@@ -458,7 +457,6 @@ fn resolver_routes_deepseek_vision_exp_over_chat_with_image_input() {
                 saved_provider_model: None,
                 base_url_override: base_url_override.map(str::to_string),
                 limit_overrides: Vec::new(),
-
                 wire_override: None,
             })
             .expect("experimental vision route resolves");
@@ -498,7 +496,6 @@ fn resolver_keeps_custom_deepseek_same_name_capabilities_unverified() {
             saved_provider_model: None,
             base_url_override: Some("https://deepseek-proxy.example.test/v1".to_string()),
             limit_overrides: Vec::new(),
-
             wire_override: None,
         })
         .expect("same-name custom proxy route resolves");
@@ -782,7 +779,6 @@ fn resolver_direct_owned_row_match_survives_casing_mismatch() {
         saved_provider_model: None,
         base_url_override: Some("https://compatible.example.test/v1".to_string()),
         limit_overrides: Vec::new(),
-
         wire_override: None,
     };
     let out = r
@@ -850,7 +846,6 @@ fn resolver_custom_endpoint_allows_namespaced_selector_for_strict_provider() {
         saved_provider_model: None,
         base_url_override: Some("https://example.local/v1".to_string()),
         limit_overrides: Vec::new(),
-
         wire_override: None,
     };
     let out = r
@@ -875,7 +870,6 @@ fn resolver_treats_every_official_deepseek_endpoint_as_strict_direct() {
             saved_provider_model: None,
             base_url_override: Some(base_url.to_string()),
             limit_overrides: Vec::new(),
-
             wire_override: None,
         };
         assert!(
@@ -897,7 +891,6 @@ fn resolver_does_not_trust_deepseek_hostname_substrings() {
         saved_provider_model: None,
         base_url_override: Some("https://api.deepseek.com.evil.example/v1".to_string()),
         limit_overrides: Vec::new(),
-
         wire_override: None,
     };
     let route = resolver
@@ -918,7 +911,6 @@ fn resolver_explicit_custom_with_base_url_override_passes_model_through_verbatim
         saved_provider_model: None,
         base_url_override: Some("https://api.example.com/v1".to_string()),
         limit_overrides: Vec::new(),
-
         wire_override: None,
     };
     let out = r
@@ -1071,7 +1063,6 @@ fn together_custom_endpoint_preserves_its_explicit_model_id() {
             saved_provider_model: None,
             base_url_override: Some("http://127.0.0.1:8000/v1".to_string()),
             limit_overrides: Vec::new(),
-
             wire_override: None,
         })
         .expect("custom Together-compatible endpoint should resolve");
@@ -1108,7 +1099,6 @@ fn openrouter_custom_endpoint_preserves_qwen37_alias() {
             saved_provider_model: None,
             base_url_override: Some("https://gateway.example.test/v1".to_string()),
             limit_overrides: Vec::new(),
-
             wire_override: None,
         })
         .expect("custom OpenRouter-compatible endpoint should resolve");
@@ -1165,7 +1155,6 @@ fn opencode_go_resolver_rejects_messages_models_even_on_custom_base_urls() {
                     saved_provider_model: None,
                     base_url_override,
                     limit_overrides: Vec::new(),
-
                     wire_override: None,
                 };
                 assert!(
@@ -1251,7 +1240,6 @@ fn opencode_zen_resolver_fails_closed_for_unproven_protocols() {
                 saved_provider_model: None,
                 base_url_override,
                 limit_overrides: Vec::new(),
-
                 wire_override: None,
             };
             assert!(
@@ -1309,7 +1297,6 @@ fn resolver_empty_saved_provider_model_is_empty_model_error() {
         saved_provider_model: Some(WireModelId::from("")),
         base_url_override: None,
         limit_overrides: Vec::new(),
-
         wire_override: None,
     };
     assert!(matches!(r.resolve(&request), Err(RouteError::EmptyModel)));
@@ -1506,7 +1493,6 @@ fn provider_native_web_search_requires_exact_direct_endpoint_offering() {
             saved_provider_model: None,
             base_url_override: Some("https://gateway.example.test/v1".to_string()),
             limit_overrides: Vec::new(),
-
             wire_override: None,
         })
         .expect("custom compatible endpoint resolves");
@@ -1549,7 +1535,6 @@ fn mimo_native_search_is_exact_to_documented_chat_models() {
             saved_provider_model: None,
             base_url_override: Some("https://compatible.example.test/v1".to_string()),
             limit_overrides: Vec::new(),
-
             wire_override: None,
         })
         .expect("custom MiMo-compatible route resolves");
@@ -1575,7 +1560,6 @@ fn zai_native_search_requires_exact_general_api_product() {
                 saved_provider_model: None,
                 base_url_override: Some(base_url.to_string()),
                 limit_overrides: Vec::new(),
-
                 wire_override: None,
             })
             .expect("general API route resolves");
@@ -1598,7 +1582,6 @@ fn zai_native_search_requires_exact_general_api_product() {
                 saved_provider_model: None,
                 base_url_override: Some(base_url.to_string()),
                 limit_overrides: Vec::new(),
-
                 wire_override: None,
             })
             .expect("adjacent route resolves");
@@ -1649,7 +1632,6 @@ fn qwen_native_search_is_exact_to_token_plan_responses_routes() {
                 saved_provider_model: None,
                 base_url_override: Some(base_url.to_string()),
                 limit_overrides: Vec::new(),
-
                 wire_override: None,
             })
             .expect("alternate product route resolves");
@@ -1680,7 +1662,6 @@ fn moonshot_native_search_requires_exact_product_model_pair() {
                 saved_provider_model: None,
                 base_url_override: Some(base_url.to_string()),
                 limit_overrides: Vec::new(),
-
                 wire_override: None,
             })
             .expect("documented Moonshot/Kimi route resolves");
@@ -1704,7 +1685,6 @@ fn moonshot_native_search_requires_exact_product_model_pair() {
                 saved_provider_model: None,
                 base_url_override: Some(base_url.to_string()),
                 limit_overrides: Vec::new(),
-
                 wire_override: None,
             })
             .expect("adjacent Moonshot/Kimi route resolves");
@@ -1748,7 +1728,6 @@ fn custom_endpoint_does_not_inherit_first_party_pricing() {
             saved_provider_model: None,
             base_url_override: Some("https://deepseek-proxy.example.test/v1".to_string()),
             limit_overrides: Vec::new(),
-
             wire_override: None,
         })
         .expect("same-name custom proxy route resolves");
