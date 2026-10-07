@@ -61,15 +61,13 @@ Fleet 角色是面向用户的委派工作词汇：父代理通过 `agent` 启�
 
 对于并行的编辑通道，用 `worktree: true` 发起子代理。Codewhale 为那个子代理创建一个全新的 git worktree 和分支，从隔离的检出中运行子代理，并在返回的会话投影和 worker 记录中报告得到的 workspace/分支。默认分支是 `codex/agent-<name>-<id>`，检出位于父仓库旁边、`.codewhale-worktrees/` 之下，因此父检出保持干净。
 
-隔离不是写入权限。纯提示词的 worker 以只读开始。写入者还要声明 `write_authority: "workspace_write"` 或 `"worktree_write"`，以及至少一个规范化的仓库相对 `write_roots`、`exact_files` 或 `coordination_contracts` 值。活跃的重叠共享声明会在变更前失败；真正隔离的 worktree 可以并行进行。
+隔离不是写入权限。纯提示词的 worker 以只读开始。写入者用至少一个规范化的仓库相对 `write_roots` 条目（文件或目录树）来收窄自己的写入范围。活跃的重叠共享声明会在变更前失败；真正隔离的 worktree 可以并行进行。
 
 可选字段：
 
 - `worktree_branch`：要创建的确切分支。
 - `worktree_base`：要从中开分支的 git ref；默认为 `HEAD`。
 - `worktree_path`：确切的检出路径。相对路径留在默认的兄弟目录 `.codewhale-worktrees/` 根下。
-
-不要组合 `cwd` 与 `worktree`；`cwd` 仍是针对父工作区内已经存在的目录的手动逃生舱。
 
 ## 委派简报
 

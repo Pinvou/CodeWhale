@@ -67,9 +67,9 @@ noise; concrete ones become fixes with credit.
    `--milestone` and repeatable `--label` take live names verbatim:
    ```bash
    gh issue create --repo codewhale-hq/Codewhale \
-     --title "v0.8.62: Isolate provider/model selection per TUI session" \
+     --title "<X.Y.Z>: Isolate provider/model selection per TUI session" \
      --label bug --label tui --label reliability \
-     --milestone "v0.8.62" \
+     --milestone "<milestone-title-from-step-5>" \
      --body-file -   # then paste/heredoc the sectioned body
    ```
 7. **Cross-link after filing.** Add `Related: #N` comments on the issues/PRs/

@@ -280,11 +280,11 @@ The workhorse. Everything a session accumulated ships here, once.
 | `tool_calls` | `crates/tui/src/core/engine/tool_execution.rs:632` — surface-agnostic, fires for exec and CLI too |
 | `fleet_dispatch` | `crates/tui/src/fleet/manager.rs:374` — the single funnel (`create_queued_run_with_descriptor`) that `create_run` and `create_queued_run` both land in; counting at either caller would double-count a plain `fleet run`. |
 | `workflow_run` | counted from the **`WorkflowAction` variant discriminant** returned by `parse_workflow_action` (`crates/tui/src/tools/workflow/mod.rs:952-965`), never from `input["action"]`. The JSON Schema at `:989` is what is published *to the model* — a declaration, not a guard; the real parse also accepts `spawn\|wait\|list\|inspect\|stop\|abort`, and its reject arm at `:961-963` embeds the model string verbatim. |
-| `subagent_spawn` | `crates/tui/src/tui/ui/apply.rs:32` |
+| `subagent_spawn` | `crates/tui/src/tui/ui/apply.rs:36` |
 | `mcp_server_connected` | count of `.connected` in the snapshot at `crates/tui/src/mcp.rs:5449-5452`; never `name`, `command_or_url`, or `error` — server names are user-chosen and routinely internal infra |
 | `memory_search` | tool name at `crates/tui/src/tools/native_memory.rs:60-61`, counted at the tool_execution choke point |
-| `approval_modal_shown` | `crates/tui/src/tui/ui/event_loop.rs:2372` (consumer of `Event::ApprovalRequired`, `crates/tui/src/core/events.rs:444`) |
-| `approval_auto_allowed` | `crates/tui/src/core/engine.rs:5714`. Count only. Never `matched_rule`, `reason()`, the command, or argv — `auto_allow` patterns are user-authored command strings (`crates/tui/src/command_safety.rs:35/309`) |
+| `approval_modal_shown` | `crates/tui/src/tui/ui/event_loop.rs:3294` (consumer of `Event::ApprovalRequired`, `crates/tui/src/core/events.rs:502`) |
+| `approval_auto_allowed` | `crates/tui/src/core/engine.rs:8203`. Count only. Never `matched_rule`, `reason()`, the command, or argv — `auto_allow` patterns are user-authored command strings (`crates/tui/src/command_safety.rs:35/309`) |
 | `command_palette_open` | `crates/tui/src/tui/ui/event_loop.rs:3941` and `crates/tui/src/tui/mouse_ui.rs:1346` |
 
 **`errors`** — closed field set. Every value is a **variant discriminant**, never `err.to_string()`:

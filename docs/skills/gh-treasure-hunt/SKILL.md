@@ -99,6 +99,6 @@ Write `treasure.md`:
 - count of NEW contributors this list would land;
 - drafted public closures/thanks, held until authority allows posting.
 
-Write it outside the repo (e.g. `/tmp`) or delete it after use — the loop
-doctrine is not to leave worktree dirt.
+Write it outside the repo (e.g. `/tmp`) or delete it after use — do not leave
+worktree dirt.
 
