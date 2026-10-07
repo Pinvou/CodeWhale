@@ -8516,7 +8516,7 @@ impl ToolSpec for AgentTool {
                 "write_roots": {
                     "type": "array",
                     "items": { "type": "string" },
-                    "description": "Repo-relative paths (files or directory trees) a write-capable agent may mutate. On action=start: the scope this child claims, defaulting to the parent workspace ('.') when omitted. On action=claim: the trees to add to your own enforced scope, which you must do before mutating anything outside it. Paths outside the parent workspace are refused."
+                    "description": "Repo-relative paths (files or directory trees) a write-capable agent may mutate. On action=start: the scope this child claims, defaulting to the parent workspace ('.') when omitted. On action=claim: the paths to add to your own enforced scope, which you must do before mutating anything outside it. Paths outside the parent workspace are refused."
                 },
                 "resume_from": {
                     "type": "string",

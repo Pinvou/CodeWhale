@@ -608,6 +608,9 @@ fn codewhale_sends_session_relay_instruction_focused_on(
     };
 
     assert!(message.contains("Write or update `.codewhale/handoff.md`."));
+    // The fallback qualifier is the split-brain guard: without it the model
+    // may "keep the existing" legacy path, which a primary artifact shadows.
+    assert!(message.contains("a legacy `.deepseek/handoff.md` is only read as a fallback"));
     assert!(message.contains("# Session relay"));
     assert!(message.contains("## Verification"));
     assert!(

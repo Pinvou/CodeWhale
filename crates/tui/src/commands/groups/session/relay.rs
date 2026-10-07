@@ -4,7 +4,7 @@ use std::fmt::Write as _;
 
 use crate::commands::traits::{CommandInfo, RegisterCommand};
 use crate::localization::MessageId;
-use crate::prompts::HANDOFF_RELATIVE_PATH;
+use crate::prompts::{HANDOFF_RELATIVE_PATH, LEGACY_HANDOFF_RELATIVE_PATH};
 use crate::tui::app::{App, AppAction};
 
 use super::CommandResult;
@@ -55,7 +55,7 @@ fn build_relay_instruction(app: &App, focus: Option<&str>) -> String {
     let _ = writeln!(out, "Write or update `{HANDOFF_RELATIVE_PATH}`.");
     let _ = writeln!(
         out,
-        "Write the primary path so the next session loads it (a legacy `.deepseek/handoff.md` is only read as a fallback), and title the artifact `# Session relay`."
+        "Write the primary path so the next session loads it (a legacy `{LEGACY_HANDOFF_RELATIVE_PATH}` is only read as a fallback), and title the artifact `# Session relay`."
     );
     let _ = writeln!(out);
     let _ = writeln!(out, "Use this relay structure:");

@@ -82,8 +82,10 @@ impl Default for PromptSessionContext<'_> {
 /// it back on startup and prepends it to the system prompt so a fresh agent
 /// doesn't have to re-discover open blockers from scratch.
 pub const HANDOFF_RELATIVE_PATH: &str = ".codewhale/handoff.md";
-/// Legacy handoff path for reading from existing installs.
-const LEGACY_HANDOFF_RELATIVE_PATH: &str = ".deepseek/handoff.md";
+/// Legacy handoff path for reading from existing installs. `pub(crate)` so
+/// command surfaces that teach the fallback name it from the same constant
+/// instead of restating the literal beside it.
+pub(crate) const LEGACY_HANDOFF_RELATIVE_PATH: &str = ".deepseek/handoff.md";
 
 /// Per-file size cap for `instructions = [...]` entries (#454). Mirrors
 /// the existing project-context cap in `project_context::load_context_file`
@@ -3114,6 +3116,29 @@ mod tests {
     }
 
     #[test]
+    fn whitespace_only_primary_does_not_fall_back_to_legacy_handoff() {
+        // The loader decides by `primary.exists()`, so a whitespace-only
+        // primary yields an empty body and no block — the legacy file is not
+        // re-read. The handoff skill's "when no primary file exists" clause
+        // and /relay's write-the-primary guarantee rest on this exact shape.
+        let tmp = tempdir().expect("tempdir");
+        let primary = tmp.path().join(".codewhale");
+        std::fs::create_dir_all(&primary).unwrap();
+        std::fs::write(primary.join("handoff.md"), "   \n\n  ").unwrap();
+        let legacy = tmp.path().join(".deepseek");
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::write(
+            legacy.join("handoff.md"),
+            "# Session relay\n\nlegacy relay marker\n",
+        )
+        .unwrap();
+        let prompt =
+            system_prompt_flat_text(&system_prompt_for_mode_with_context(tmp.path(), None));
+        assert!(!prompt.contains(HANDOFF_BLOCK_MARKER));
+        assert!(!prompt.contains("legacy relay marker"));
+    }
+
+    #[test]
     fn compose_prompt_includes_all_layers() {
         let prompt = compose_prompt_with_approval_model_and_shell(Personality::Calm, "codewhale");
         // Base layer — balanced Constitution; procedural recipes stay out.
@@ -3381,12 +3406,18 @@ mod tests {
         );
         assert!(
             LANGUAGE_PROMPT.contains("precedence for the session language"),
-            "the language rule must keep its declared deference to native-script locale bookends"
+            "the language rule must keep its declared deference to locale bookends"
         );
         assert!(
             translation_output_instruction("zh-Hans")
                 .contains("predominantly-English turns are machine-translated"),
             "the translation block must describe the detector-gated interception layer, not a guarantee"
+        );
+        assert!(
+            translation_output_instruction("zh-Hans")
+                .contains("This overrides the ## Language rule"),
+            "the translation block must keep its explicit precedence over the language rule; \
+             without it the locale bookends and the language rule contradict each other again"
         );
     }
 

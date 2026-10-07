@@ -136,7 +136,7 @@ non-English files, localized READMEs, issues, docs, or tool output does not
 switch the reply language.
 
 If this prompt also carries a locale preamble or closer — a session-language
-requirement block in the locale's own script — that locale requirement takes
+requirement block in the locale's own language — that locale requirement takes
 precedence for the session language; this rule then governs only the cases the
 locale block does not cover.
 

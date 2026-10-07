@@ -125,11 +125,14 @@ async fn write_summary_counts_utf8_bytes_not_utf16_units() {
 /// to whole KB (60_000 → "58KB") while the `read` primitive's footers print
 /// the exact "58.6KB". Runs at the default budget would pass even if these
 /// values were re-hardcoded, so this test is what keeps the dynamic
-/// reporting honest. The workshop slot is a process global; CI's nextest
-/// isolates per test, and the slot is restored before any assertion so a
-/// panic here cannot poison sibling tests.
+/// reporting honest. The workshop slot is a process global; the guard holds
+/// the install serially against sibling installers and no assertion runs
+/// before the slot is restored, so neither a concurrent plain-`cargo test`
+/// run nor a panic here can poison sibling tests (CI's nextest isolates
+/// per process anyway).
 #[tokio::test]
 async fn budget_limited_reads_report_the_effective_configured_budget() {
+    let _guard = crate::tools::large_output_router::active_workshop_test_guard();
     let temporary = tempfile::tempdir().expect("tempdir");
     let many_lines: String = (0..200).map(|_| format!("{}\n", "x".repeat(500))).collect();
     std::fs::write(temporary.path().join("many.txt"), many_lines).expect("fixture");
@@ -146,17 +149,22 @@ async fn budget_limited_reads_report_the_effective_configured_budget() {
             ..crate::tools::large_output_router::WorkshopConfig::default()
         },
     ));
-    let ranged = ReadFileTool::execute_contract_read(json!({"path": "many.txt"}), &context)
-        .await
-        .expect("primitive read result");
-    let wide = ReadFileTool::execute_contract_read(json!({"path": "wide.txt"}), &context)
-        .await
-        .expect("primitive read result");
-    let windowed = ReadFileTool
-        .execute(json!({"path": "windowed.txt"}), &context)
-        .await
-        .expect("read_file window result");
+    // Collect results without asserting so the restore below runs even when
+    // a read fails; the expects move behind the restore.
+    let (ranged, wide, windowed) = async {
+        let ranged =
+            ReadFileTool::execute_contract_read(json!({"path": "many.txt"}), &context).await;
+        let wide = ReadFileTool::execute_contract_read(json!({"path": "wide.txt"}), &context).await;
+        let windowed = ReadFileTool
+            .execute(json!({"path": "windowed.txt"}), &context)
+            .await;
+        (ranged, wide, windowed)
+    }
+    .await;
     crate::tools::large_output_router::WorkshopConfig::install_active(None);
+    let ranged = ranged.expect("primitive read result");
+    let wide = wide.expect("primitive read result");
+    let windowed = windowed.expect("read_file window result");
 
     assert!(
         ranged.content.contains("(58.6KB limit)"),
