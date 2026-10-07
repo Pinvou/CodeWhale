@@ -15,3 +15,11 @@
 普通 relay 的真实 TLS/NATS/PG 用例需要显式 `PINVOU_TEST_NATS_SERVER_BINARY` 与 `PINVOU_TEST_EVENTS_DATABASE_URL`；测试仅启动独有 loopback NATS、生成临时测试密钥并创建独有数据库 schema，结束后核对自身进程、监听器和 schema 已清理。它验证实际 broker ACK、SQL 标记和同代次去重，不等同生产部署或完整 E2E 验收。
 
 密码和真实密钥仅由保管人在受控本机终端输入，不能通过 Agent 或聊天提供。PKI/NKey 的 READY 标记只描述生成制品；解封成功只描述 KMS 状态，均不代表业务部署或发布完成。
+
+## 支付阶段的个人客户同步
+
+支付阶段随客户同步入口安装原 Account `000015_commerce_customer_mapping` 迁移，保留原 SQL 与校验和。它将旧 `mall_user_sync_jobs` 的客户和重试事实转入映射、任务和脱敏证据表；公开 migrator 安装的是同一组文件，不能通过测试夹具补表替代。已有数据库会按未应用版本补装 015，而非只依据最大版本跳过它。
+
+`account-service` 启动时核查并补齐当前供应商映射；注册和手机号修改也使用同一持久任务。配置了供应商适配器时，客户同步 worker 按 ACTIVE 用户、供应商/适配器、映射版本和当前有效租约确认或重试。停用期间同代迟到结果不写 READY，任务保留为 RETRY，启用后重新调用供应商；旧代和 DETACHED 结果不能恢复任务。完成与重试在取得映射及任务锁后核对领取次数和数据库时间，过期或已重领的 worker 不得写映射或证据。尚未交付不可逆注销时，原 015 的任务生命周期版本为 1，代码不依赖未来 `users.subject_lifecycle_version` 列；注销功能首次交付时须同时恢复其用户生命周期栅栏，不能直接沿用本阶段投影。
+
+实际 public-schema 回归覆盖 Bootstrap、Account 侧钱包确认、GetMe、启动映射补齐和 Claim/Retry/Complete，以及停用/启用恢复、旧映射代次、DETACHED、任务过期重领和有数据的晚装迁移。该验证不等同 Billing HTTP、实际供应商或完整 E2E 验收。
