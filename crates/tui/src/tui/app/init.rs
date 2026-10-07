@@ -402,10 +402,15 @@ impl App {
                     Some(configured_route_base_url.clone()),
                     active_context_window_override,
                     None,
-                    // The ambient table's dialect — the same table
-                    // `configured_route_base_url` above resolves.
+                    // The launch identity's dialect — `effective_auth_config`
+                    // is scoped to the same identity that resolved
+                    // `configured_route_base_url` above, which is not always
+                    // the ambient selection: `settings.default_provider` can
+                    // re-point the launch at a different custom table.
                     (provider == ApiProvider::Custom)
-                        .then(|| crate::route_runtime::custom_wire_override_for(config))
+                        .then(|| {
+                            crate::route_runtime::custom_wire_override_for(&effective_auth_config)
+                        })
                         .flatten(),
                 )
                 .map(|resolution| {
