@@ -82,7 +82,7 @@ cargo test --manifest-path pinvou3-app/src-tauri/Cargo.toml features::remote_con
 | 项 | 现状 | 需要的证据 |
 |---|---|---|
 | 真实双机 E2E 旅程（本文件第 3 节 21 条） | 未执行（环境受限：需要两台隔离 Windows 设备与生产等价 TLS/网关） | 每条旅程的可复现 trace（不含敏感正文），重点 9～10/11～13/16/19～21 |
-| 三个 UI 面浏览器冒烟（B 面板、A 连接壳、远程会话窗口） | 未执行；当前证据为源码契约（`remote_control_ui_closure` 等 36 条）与 `vite build` | 真实渲染/交互记录：键盘可达性、焦点、aria-live、倒计时节流 |
+| 三个 UI 面浏览器冒烟（B 面板、A 连接壳、远程会话窗口） | 当时未执行；当时证据为源码契约（`remote_control_ui_closure` 等，历史计数 36 条）与 `vite build`，不代表当前测试数量 | 真实渲染/交互记录：键盘可达性、焦点、aria-live、倒计时节流 |
 | 真机断线恢复演练（E2E-06 出口的 30 秒预算） | 未执行；当前证据为同进程双端恢复序列用例 | 单边断网/Relay 重启下 resume 完成或失败关闭的 trace，确认无半恢复状态 |
 
 ### 7.2 已隐藏（首版不暴露，开关之外无半通路）
