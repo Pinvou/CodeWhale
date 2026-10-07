@@ -1,4 +1,5 @@
 export const desktopBridgeApi = {
+  accountPlatform: ['session', 'openPortal', 'login', 'createSliderCaptcha', 'precheckMobileRegistration', 'sendSms', 'registerMobile', 'registrationStatus', 'loginSms', 'resetPassword', 'logout', 'request'],
   lifecycle: ['init'],
   state: ['get', 'getMany', 'subscribe', 'subscribeMany'],
   platform: ['loadPlatformCapabilities', 'refreshConnectorAuthGates'],
@@ -70,7 +71,7 @@ export const desktopOnlyBridgeApi = {
 // 整域桌面专属：Web 端连域都不存在（区别于 platform 这类"空域仍在"）。
 // 后端 remote_control 漏斗另有权威封禁。projects 是本地会话归档分组
 // （~/.pinvou3/projects/projects.json），Web 端没有对应后端。
-export const desktopOnlyBridgeDomains = ['multiAgent', 'projects'];
+export const desktopOnlyBridgeDomains = ['multiAgent', 'projects', 'accountPlatform'];
 
 export function expectedWebBridgeApi() {
   return Object.fromEntries(

@@ -2869,9 +2869,12 @@
     return initPromise;
   }
 
+  const accountPlatformFeature = installBridgeFeature("account-platform", { invoke });
+
   // ── Expose API ───────────────────────────────────────────────────
   window.TauriBridge = {
     available: true,
+    accountPlatform: accountPlatformFeature,
     lifecycle: { init: init },
     state: {
       get: snapshotStateSlice,

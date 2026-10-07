@@ -1,0 +1,170 @@
+package account
+
+import (
+	"context"
+	"log/slog"
+	"time"
+
+	"github.com/google/uuid"
+)
+
+type WalletProvisioningJob struct {
+	UserID                  uuid.UUID
+	RegistrationOperationID *uuid.UUID
+	PolicyVersion           string
+	SLAExpiresAt            time.Time
+	Attempts                int
+}
+
+type WalletProvisioningRepository interface {
+	LeaseWalletProvisioningJobs(context.Context, int, time.Duration) ([]WalletProvisioningJob, error)
+	CompleteWalletProvisioning(context.Context, uuid.UUID) error
+	FailWalletProvisioning(context.Context, uuid.UUID, string) error
+}
+
+type WalletProvisioningWorker struct {
+	repository WalletProvisioningRepository
+	wallets    WalletProvisioner
+	interval   time.Duration
+}
+
+func NewWalletProvisioningWorker(repository WalletProvisioningRepository, wallets WalletProvisioner, interval time.Duration) *WalletProvisioningWorker {
+	return &WalletProvisioningWorker{repository: repository, wallets: wallets, interval: interval}
+}
+
+func (w *WalletProvisioningWorker) Run(ctx context.Context) {
+	if w == nil || w.repository == nil || w.wallets == nil {
+		return
+	}
+	if w.interval <= 0 {
+		w.interval = 5 * time.Second
+	}
+	ticker := time.NewTicker(w.interval)
+	defer ticker.Stop()
+	for {
+		if err := w.RunOnce(ctx); err != nil && ctx.Err() == nil {
+			slog.ErrorContext(ctx, "wallet provisioning cycle failed", "error", err)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+func (w *WalletProvisioningWorker) RunOnce(ctx context.Context) error {
+	jobs, err := w.repository.LeaseWalletProvisioningJobs(ctx, 20, 30*time.Second)
+	if err != nil {
+		return err
+	}
+	for _, job := range jobs {
+		provisionErr := w.wallets.EnsurePersonalWallet(ctx, job.UserID)
+		if provisionErr != nil {
+			if failErr := w.repository.FailWalletProvisioning(context.WithoutCancel(ctx), job.UserID, "BILLING_UNAVAILABLE"); failErr != nil {
+				return failErr
+			}
+			continue
+		}
+		if err := w.repository.CompleteWalletProvisioning(ctx, job.UserID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (r *PostgresRepository) LeaseWalletProvisioningJobs(ctx context.Context, limit int, lease time.Duration) ([]WalletProvisioningJob, error) {
+	if limit < 1 || limit > 100 {
+		limit = 20
+	}
+	rows, err := r.pool.Query(ctx, `
+WITH candidates AS (
+ SELECT user_id FROM wallet_provisioning_jobs
+ WHERE (status IN ('PENDING','RETRY') AND next_attempt_at<=$1) OR (status='LEASED' AND lease_until<=$1)
+ ORDER BY next_attempt_at,created_at FOR UPDATE SKIP LOCKED LIMIT $2
+)
+UPDATE wallet_provisioning_jobs j SET status='LEASED',lease_until=$1+$3::interval,updated_at=$1
+FROM candidates c WHERE j.user_id=c.user_id
+RETURNING j.user_id,j.registration_operation_id,j.policy_version,j.sla_expires_at,j.attempts`, r.now(), limit, lease.String())
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	jobs := make([]WalletProvisioningJob, 0, limit)
+	for rows.Next() {
+		var job WalletProvisioningJob
+		if err := rows.Scan(&job.UserID, &job.RegistrationOperationID, &job.PolicyVersion, &job.SLAExpiresAt, &job.Attempts); err != nil {
+			return nil, err
+		}
+		jobs = append(jobs, job)
+	}
+	return jobs, rows.Err()
+}
+
+func (r *PostgresRepository) CompleteWalletProvisioning(ctx context.Context, userID uuid.UUID) error {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	var operationID *uuid.UUID
+	if err := tx.QueryRow(ctx, `SELECT registration_operation_id FROM wallet_provisioning_jobs WHERE user_id=$1 AND status='LEASED' FOR UPDATE`, userID).Scan(&operationID); err != nil {
+		return err
+	}
+	now := r.now()
+	if _, err := tx.Exec(ctx, `UPDATE users SET status='ACTIVE',version=version+1,updated_at=$2 WHERE id=$1 AND status IN ('PROVISIONING','REPAIR_REQUIRED')`, userID, now); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `UPDATE wallet_provisioning_jobs SET status='COMPLETED',lease_until=NULL,completed_at=$2,last_error_code=NULL,updated_at=$2 WHERE user_id=$1`, userID, now); err != nil {
+		return err
+	}
+	if operationID != nil {
+		if _, err := tx.Exec(ctx, `UPDATE registration_operations SET status='ACTIVE',next_retry_at=$2,last_error_code=NULL,version=version+1,updated_at=$2 WHERE id=$1 AND committed_user_id=$3`, *operationID, now, userID); err != nil {
+			return err
+		}
+	}
+	if err := appendOutbox(ctx, tx, "account.wallet.provisioning.completed.v1", userID, 2, map[string]any{"user_id": userID}); err != nil {
+		return err
+	}
+	if err := appendAudit(ctx, tx, userID, "wallet-provisioning", nil, "account.wallet.provision", "user", userID.String(), "SUCCEEDED", map[string]any{"status": "ACTIVE"}); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+func (r *PostgresRepository) FailWalletProvisioning(ctx context.Context, userID uuid.UUID, code string) error {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	var operationID *uuid.UUID
+	var slaExpiresAt time.Time
+	var attempts int
+	if err := tx.QueryRow(ctx, `SELECT registration_operation_id,sla_expires_at,attempts FROM wallet_provisioning_jobs WHERE user_id=$1 AND status='LEASED' FOR UPDATE`, userID).Scan(&operationID, &slaExpiresAt, &attempts); err != nil {
+		return err
+	}
+	now := r.now()
+	status, nextAttempt := "RETRY", now.Add(registrationRetryDelay(attempts))
+	if !slaExpiresAt.After(now) {
+		status, nextAttempt = "REPAIR_REQUIRED", now
+		if _, err := tx.Exec(ctx, `UPDATE users SET status='REPAIR_REQUIRED',version=version+1,updated_at=$2 WHERE id=$1 AND status='PROVISIONING'`, userID, now); err != nil {
+			return err
+		}
+		if operationID != nil {
+			if _, err := tx.Exec(ctx, `UPDATE registration_operations SET status='REPAIR_REQUIRED',next_retry_at=$2,last_error_code=$3,version=version+1,updated_at=$2 WHERE id=$1 AND committed_user_id=$4`, *operationID, now, code, userID); err != nil {
+				return err
+			}
+		}
+	}
+	_, err = tx.Exec(ctx, `UPDATE wallet_provisioning_jobs SET status=$2,attempts=attempts+1,next_attempt_at=$3,lease_until=NULL,last_error_code=$4,updated_at=$5 WHERE user_id=$1`, userID, status, nextAttempt, code, now)
+	if err != nil {
+		return err
+	}
+	if status == "REPAIR_REQUIRED" {
+		if err := appendAudit(ctx, tx, userID, "wallet-provisioning", nil, "account.wallet.provision", "user", userID.String(), "FAILED", map[string]any{"status": status, "reason": code}); err != nil {
+			return err
+		}
+	}
+	return tx.Commit(ctx)
+}

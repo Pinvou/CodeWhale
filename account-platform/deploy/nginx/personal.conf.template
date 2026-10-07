@@ -1,0 +1,69 @@
+# Render public host and private Keycloak DNS origin from verified site metadata.
+# Keep the rendered file private; do not render secret env files or request logs.
+worker_processes 1;
+pid /tmp/nginx.pid;
+error_log /dev/null crit;
+events { worker_connections 1024; }
+http {
+    access_log off;
+    client_body_temp_path /tmp/client_body;
+    proxy_temp_path /tmp/proxy;
+    server_tokens off;
+    server {
+        listen 8443 ssl;
+        server_name __PUBLIC_HOST__;
+        ssl_certificate /run/pinvou/public-tls/server.crt;
+        ssl_certificate_key /run/pinvou/public-tls/server.key;
+        ssl_protocols TLSv1.2 TLSv1.3;
+        client_max_body_size 2m;
+        proxy_http_version 1.1;
+        proxy_set_header Host $http_host;
+        proxy_set_header X-Forwarded-Host $http_host;
+        proxy_set_header X-Forwarded-Port __PUBLIC_TLS_PORT__;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Pinvou-Client-Source $remote_addr;
+        proxy_buffering off;
+        proxy_ssl_verify on;
+        proxy_ssl_trusted_certificate /run/pinvou/trust/ca.crt;
+        proxy_ssl_server_name on;
+        proxy_connect_timeout 3s;
+        proxy_read_timeout 30s;
+        proxy_send_timeout 30s;
+        location = /account/internal { return 404; }
+        location ^~ /account/internal/ { return 404; }
+        location = /account/admin { return 404; }
+        location ^~ /account/admin/ { return 404; }
+        location = /token/admin { return 404; }
+        location ^~ /token/admin/ { return 404; }
+        location = /token/internal { return 404; }
+        location ^~ /identity/internal/ { return 404; }
+        location ^~ /token/internal/ { return 404; }
+        location ^~ /internal/ { return 404; }
+        location ^~ /admin/ { return 404; }
+        # Token admission must run before forwarding a user token grant.
+        location = /realms/pinvou/protocol/openid-connect/token {
+            proxy_pass http://identity-service:8080;
+        }
+        # Only realm and static-theme public paths reach Keycloak. Its admin
+        # API and management listener are never exposed by this edge.
+        location /realms/pinvou/ { proxy_pass https://__KEYCLOAK_ORIGIN__; }
+        location /realms/ { return 404; }
+        location /resources/ { proxy_pass https://__KEYCLOAK_ORIGIN__; }
+        location /account/ {
+            rewrite ^/account/(.*)$ /$1 break;
+            proxy_pass http://account-service:8080;
+        }
+        location = /identity/v1/registration/password-prechecks {
+            rewrite ^/identity/(.*)$ /$1 break;
+            proxy_pass http://identity-service:8080;
+        }
+        location /identity/ { return 404; }
+        location /token/ {
+            rewrite ^/token/(.*)$ /$1 break;
+            proxy_pass http://token-gateway:8080;
+        }
+        location / { proxy_pass http://token-portal:8080; }
+    }
+}

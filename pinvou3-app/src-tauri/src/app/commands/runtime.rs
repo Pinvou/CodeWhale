@@ -49,6 +49,7 @@ pub async fn cancel_generation(
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct PlatformCapabilities {
+    pub account_platform_supported: bool,
     pub os: &'static str,
     pub show_megacube_site: bool,
     pub show_super_permission_settings: bool,
@@ -83,6 +84,8 @@ impl PlatformCapabilities {
             && capabilities.browser_agent_automation
             && browser_runtime_ready;
         Self {
+            account_platform_supported: crate::features::account_platform::account_platform_enabled(
+            ),
             os: capabilities.os,
             show_megacube_site: capabilities.show_megacube_site,
             show_super_permission_settings: capabilities.show_super_permission_settings,

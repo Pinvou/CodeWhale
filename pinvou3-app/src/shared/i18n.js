@@ -94,3 +94,6 @@ export function createLatestLanguageGate(ensure = ensureLanguage) {
 }
 
 export { dict, LANG_TO_TAG, TAG_TO_LANG, languageFromLocaleTags, initialSystemLanguage, SEARCH_KEY_PROVIDERS };
+
+export { accountPlatformCopy } from './account-platform-i18n.js';
+export { adminPlatformCopy } from './admin-platform-i18n.js';

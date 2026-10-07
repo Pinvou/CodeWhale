@@ -1,0 +1,172 @@
+import { requireSession, requireProfileChange } from './personal-contract.js';
+import { mergeObservedVersions } from './authorization-ui.js';
+import { secureRequestID } from './request-id.js';
+import { parseBalanceJSON } from './balance-view.js';
+function errorFromResponse(response, payload) {
+  const error = new Error(payload && payload.message ? payload.message : `HTTP ${response.status}`);
+  error.code = payload && payload.code ? payload.code : 'REQUEST_FAILED';
+  error.status = response.status;
+  return error;
+}
+
+export class AccountPlatformBffClient {
+  constructor(baseURL = '') {
+    this.baseURL = String(baseURL || '').replace(/\/$/, '');
+    this.csrfToken = '';
+    this.deviceID = secureRequestID();
+    this.contextVersion = 0;
+    this.contextVersionListeners = new Set();
+    this.authorizationVersions = {};
+    this.authorizationVersionListeners = new Set();
+  }
+
+  onContextVersion(listener) {
+    this.contextVersionListeners.add(listener);
+    return () => this.contextVersionListeners.delete(listener);
+  }
+
+  onAuthorizationVersion(listener) {
+    this.authorizationVersionListeners.add(listener);
+    return () => this.authorizationVersionListeners.delete(listener);
+  }
+
+  observeContextVersion(value) {
+    const version = Number(value || 0);
+    if (!Number.isSafeInteger(version) || version <= this.contextVersion) return;
+    this.contextVersion = version;
+    for (const listener of this.contextVersionListeners) listener(version);
+  }
+
+  observeAuthorizationVersions(headers) {
+    const observed = {
+      context_version: headers.get('X-Context-Version'),
+      personal_authorization_version: headers.get('X-Personal-Authorization-Version'),
+      platform_authorization_version: headers.get('X-Platform-Authorization-Version'),
+      organization_authorization_version: headers.get('X-Organization-Authorization-Version'),
+    };
+    const next = mergeObservedVersions(this.authorizationVersions, observed);
+    if (JSON.stringify(next) === JSON.stringify(this.authorizationVersions)) return;
+    this.authorizationVersions = next;
+    for (const listener of this.authorizationVersionListeners) listener({ ...next });
+  }
+
+  async session(signal) {
+    const response = await fetch(`${this.baseURL}/api/session`, {
+      credentials: 'same-origin',
+      cache: 'no-store',
+      signal,
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (response.status === 401) { this.csrfToken = ''; return { authenticated: false }; }
+    if (!response.ok) throw errorFromResponse(response, payload);
+    requireSession(payload);
+    this.csrfToken = payload.csrf_token || '';
+    return requireSession(payload);
+  }
+
+  async request(area, resource, options = {}) {
+    const method = options.method || 'GET';
+    const mutation = method !== 'GET' && method !== 'HEAD';
+    // The BFF preserves CSRF across ordinary refreshes. A different token is a
+    // different browser login; an old operation must not follow that login.
+    const binding = this.csrfToken;
+    const send = async (csrfToken) => {
+      const headers = { Accept: 'application/json', ...(options.headers || {}) };
+      if (mutation) headers['X-CSRF-Token'] = csrfToken;
+      if (options.body !== undefined) headers['Content-Type'] = 'application/json';
+      const response = await fetch(`${this.baseURL}/api/${area}${resource}`, {
+        method,
+        headers,
+        body: options.body === undefined ? undefined : JSON.stringify(options.body),
+        credentials: 'same-origin',
+        cache: 'no-store',
+        signal: options.signal,
+      });
+      this.observeContextVersion(response.headers.get('X-Context-Version'));
+      this.observeAuthorizationVersions(response.headers);
+      if (response.status === 204) return { response, payload: null };
+      return { response, payload: area === 'token' && resource.startsWith('/v1/me/balance') && response.ok ? parseBalanceJSON(await response.text()) : await response.json().catch(() => ({})) };
+    };
+
+    let result = await send(this.csrfToken);
+    if (mutation && result.response.status === 403 && result.payload?.code === 'CSRF_REJECTED') {
+      const session = await this.session(options.signal);
+      if (session.authenticated && binding && session.csrf_token === binding) result = await send(binding);
+    }
+    if (!result.response.ok) throw errorFromResponse(result.response, result.payload);
+    return result.payload;
+  }
+
+  bootstrap(signal) {
+    return this.request('account', '/v1/account/bootstrap', {
+      method: 'POST',
+      body: {},
+      signal,
+    });
+  }
+
+  reauthenticate(returnTo = '/?section=accountSettings') {
+    globalThis.location.assign(`${this.baseURL}/auth/login?reauthenticate=1&return_to=${encodeURIComponent(returnTo)}`);
+  }
+
+  async createProfileChange(field, value, signal) {
+    const result = await this.request('account', '/v1/me/profile-change-requests', {
+      method: 'POST',
+      body: { field, value },
+      signal,
+    });
+    return requireProfileChange(result, '', field);
+  }
+
+  createProfileSliderCaptcha(mobile, signal) {
+    return this.request('account', '/v1/auth/captcha/challenges', {
+      method: 'POST',
+      body: { mobile, purpose: 'PROFILE_MOBILE' },
+      signal,
+    });
+  }
+
+  sendProfileMobileChallenge(requestId, captchaId, captchaOffset, signal) {
+    return this.request('account', `/v1/me/profile-change-requests/${encodeURIComponent(requestId)}/mobile-challenges`, {
+      method: 'POST',
+      body: { captcha_id: captchaId, captcha_offset: captchaOffset },
+      headers: { 'X-Device-ID': this.deviceID },
+      signal,
+    });
+  }
+
+  async completeProfileChange(requestId, code = '', signal) {
+    const result = await this.request('account', `/v1/me/profile-change-requests/${encodeURIComponent(requestId)}/actions/complete`, { method: 'POST', body: { code }, headers: { 'X-Device-ID': this.deviceID }, signal });
+    return requireProfileChange(result, requestId);
+  }
+
+  balance(signal) {
+    return this.request('token', '/v1/me/balance?consistency=strong', {
+      signal,
+    });
+  }
+
+  async logout() {
+    const binding = this.csrfToken;
+    const send = async (csrfToken) => {
+      const response = await fetch(`${this.baseURL}/api/logout`, {
+        method: 'POST',
+        headers: { 'X-CSRF-Token': csrfToken },
+        credentials: 'same-origin',
+      });
+      return { response, payload: response.status === 204 ? null : await response.json().catch(() => ({})) };
+    };
+    let { response, payload } = await send(this.csrfToken);
+    if (response.status === 403 && payload?.code === 'CSRF_REJECTED') {
+      const session = await this.session();
+      if (!session.authenticated) {
+        this.csrfToken = '';
+        return null;
+      }
+      if (session.authenticated && binding && session.csrf_token === binding) ({ response, payload } = await send(binding));
+    }
+    if (!response.ok) throw errorFromResponse(response, payload);
+    this.csrfToken = '';
+    return payload;
+  }
+}
