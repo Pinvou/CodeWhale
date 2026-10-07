@@ -8503,7 +8503,7 @@ impl ToolSpec for AgentTool {
                 },
                 "profile": {
                     "type": "string",
-                    "description": "Optional Fleet selector. Use a role from action=roster or an exact prompt-only profile id explicitly presented by the embedding host; unknown and ambient saved-profile values are refused. The resolved role supplies the child's posture. Model-facing calls have no per-call model override (stored/legacy calls only)."
+                    "description": "Optional Fleet selector. Use a role from action=roster or an exact prompt-only profile id explicitly presented by the embedding host; unknown and ambient saved-profile values are refused. The resolved role supplies the child's posture. No per-call model override is advertised on this surface (parse-accepted for compat callers)."
                 },
                 "profile_query": {
                     "type": "string",
