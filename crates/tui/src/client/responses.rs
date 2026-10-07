@@ -831,10 +831,17 @@ fn message_has_tool_calls(msg: &crate::models::Message) -> bool {
 }
 
 /// Whether any thinking block of this message replays its encrypted
-/// reasoning on this route: same provider, same Responses API, same model.
+/// reasoning on this request: same endpoint-scoped provider tag, same
+/// Responses api shape, same model, and the endpoint rules (fingerprint
+/// match, or the fingerprint-less official-endpoint credit). This is exactly
+/// the reattach gate inside [`convert_messages_to_responses_input`], kept in
+/// one place so the chain-drop gate can never disagree with the gate that
+/// actually reattaches the item.
 fn message_has_replayable_reasoning(
     msg: &crate::models::Message,
-    provider: &ApiProvider,
+    reasoning_provider_tag: &str,
+    reasoning_endpoint_fingerprint: &str,
+    fingerprintless_replay_official: bool,
     model: &str,
 ) -> bool {
     msg.content.iter().any(|block| {
@@ -844,9 +851,16 @@ fn message_has_replayable_reasoning(
                 state: Some(state),
                 redacted_data: None,
                 ..
-            } if state.provider == provider.as_str()
+            } if state.provider == reasoning_provider_tag
                 && state.api == "openai-responses"
                 && state.model == model
+                && match &state.endpoint {
+                    None => {
+                        !is_custom_reasoning_tag(&state.provider)
+                            && fingerprintless_replay_official
+                    }
+                    Some(captured) => captured == reasoning_endpoint_fingerprint,
+                }
         )
     })
 }
@@ -860,9 +874,9 @@ fn message_has_replayable_reasoning(
 /// immediately preceded by the encrypted `reasoning` item that produced it,
 /// and every `reasoning` item must be immediately followed by its produced
 /// item. When a message's reasoning is unusable on this route (captured on a
-/// different model or provider, or by a build that did not capture it), its
-/// whole tool chain — reasoning, function calls, and their outputs — is
-/// dropped instead of shipping a request the API rejects outright.
+/// different model, provider identity, or by a build that did not capture
+/// it), its whole tool chain — reasoning, function calls, and their outputs —
+/// is dropped instead of shipping a request the API rejects outright.
 pub(super) fn convert_messages_to_responses_input(
     request: &MessageRequest,
     provider: ApiProvider,
@@ -887,8 +901,12 @@ pub(super) fn convert_messages_to_responses_input(
     // never receive an encrypted replay item either, so the replay gate
     // cannot drift from the include gate.
     let replays_encrypted_reasoning = responses_route_sends_encrypted_reasoning_include(provider);
+    // Hoisted: the reasoning-capability lookup lowercases and consults the
+    // catalog, and the loop would otherwise repeat it per assistant message.
+    let reasoning_capable_model = crate::models::model_supports_reasoning(&request.model);
     let mut items = Vec::new();
     let mut orphaned_call_ids: HashSet<String> = HashSet::new();
+    let mut dropped_chains: usize = 0;
 
     for msg in &request.messages {
         // Channel selection lives in the shared placement table; this adapter
@@ -953,23 +971,30 @@ pub(super) fn convert_messages_to_responses_input(
                 // instead; the tool outputs are filtered out of the following
                 // user/tool messages via `orphaned_call_ids`. Models that
                 // never reason legitimately emit bare calls, so the gate only
-                // applies to reasoning-capable request models.
+                // applies to reasoning-capable request models — and only on
+                // routes that capture at all: a route whose requests carry no
+                // `include` can never satisfy the replay check, so gating
+                // there would erase history the route itself accepts.
                 let mut chain_dropped = false;
-                if !is_deepseek
-                    && crate::models::model_supports_reasoning(&request.model)
+                if replays_encrypted_reasoning
+                    && reasoning_capable_model
                     && message_has_tool_calls(msg)
-                    && !message_has_replayable_reasoning(msg, &provider, &request.model)
+                    && !message_has_replayable_reasoning(
+                        msg,
+                        reasoning_provider_tag,
+                        reasoning_endpoint_fingerprint,
+                        fingerprintless_replay_official,
+                        &request.model,
+                    )
                 {
                     chain_dropped = true;
+                    dropped_chains += 1;
                     for block in &msg.content {
                         if let ContentBlock::ToolUse { id, .. } = block {
                             let (call_id, _item_id) = parse_tool_use_id(id);
                             orphaned_call_ids.insert(call_id);
                         }
                     }
-                    logging::warn(
-                        "Responses replay dropped an assistant tool chain whose encrypted reasoning is unavailable for this route/model (captured on a different model or provider, or by an older build); its tool calls and outputs are omitted to keep the request valid",
-                    );
                 }
                 for block in &msg.content {
                     match block {
@@ -1138,6 +1163,16 @@ pub(super) fn convert_messages_to_responses_input(
         }
     }
 
+    if dropped_chains > 0 {
+        // One summary per request instead of one line per affected message:
+        // stale history re-fires the condition on every subsequent request
+        // until compaction retires the turns, and per-message warns would
+        // spam verbose logs for a single root cause.
+        logging::warn(format!(
+            "Responses replay dropped {dropped_chains} assistant tool chain(s) whose encrypted reasoning is unavailable for this route/model/identity (captured on a different model, provider identity, or by an older build); their tool calls and outputs are omitted to keep the request valid"
+        ));
+    }
+
     if !is_deepseek {
         // A `reasoning` item must be immediately followed by the item it
         // produced (its function_call, or the assistant message for text
@@ -1146,6 +1181,7 @@ pub(super) fn convert_messages_to_responses_input(
         // fail with "was provided without its required following item", so
         // it is dropped here.
         let mut keep = vec![true; items.len()];
+        let mut dropped_orphans: usize = 0;
         for (index, item) in items.iter().enumerate() {
             if item.get("type").and_then(Value::as_str) != Some("reasoning") {
                 continue;
@@ -1157,17 +1193,19 @@ pub(super) fn convert_messages_to_responses_input(
             });
             if !followed_by_produced_item {
                 keep[index] = false;
+                dropped_orphans += 1;
             }
         }
         let mut paired = Vec::with_capacity(items.len());
         for (index, item) in items.into_iter().enumerate() {
             if keep[index] {
                 paired.push(item);
-            } else {
-                logging::warn(
-                    "Responses replay dropped an orphaned reasoning item with no following output item",
-                );
             }
+        }
+        if dropped_orphans > 0 {
+            logging::warn(format!(
+                "Responses replay dropped {dropped_orphans} orphaned reasoning item(s) with no following output item"
+            ));
         }
         items = paired;
     }

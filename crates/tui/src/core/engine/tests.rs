@@ -14972,10 +14972,14 @@ fn sandbox_policy_for_turn_returns_correct_default_policy_per_mode() {
 }
 
 /// Serves one multi-block thinking + tool-use turn, then a plain closing
-/// turn, capturing every outgoing request.
+/// turn, capturing every outgoing request. `trailing_signature_only` swaps
+/// the first stream for one where the signature-only block never receives a
+/// stop event and only the tool use follows it — the success-path persist
+/// guard is then the only thing that can keep the block.
 struct MultiThinkingStreamClient {
     requests: std::sync::Mutex<Vec<crate::models::MessageRequest>>,
     calls: std::sync::atomic::AtomicUsize,
+    trailing_signature_only: bool,
 }
 
 #[async_trait::async_trait]
@@ -15008,7 +15012,53 @@ impl crate::core::model_client::ModelClient for MultiThinkingStreamClient {
             .expect("multi-thinking request lock")
             .push(request);
         use crate::models::{ContentBlockStart, Delta, MessageDelta, StreamEvent};
-        let events: Vec<StreamEvent> = if call == 1 {
+        let trailing = self.trailing_signature_only;
+        let events: Vec<StreamEvent> = if trailing && call == 1 {
+            // One signature-only thinking block whose stop event never
+            // arrives, directly followed by the tool use: no flush runs
+            // before the stream ends, so only the success-path persist
+            // guard can park the block.
+            vec![
+                crate::llm_client::mock::canned::message_start("msg_trailing"),
+                StreamEvent::ContentBlockStart {
+                    index: 0,
+                    content_block: ContentBlockStart::Thinking {
+                        thinking: String::new(),
+                    },
+                },
+                StreamEvent::ContentBlockDelta {
+                    index: 0,
+                    delta: Delta::SignatureDelta {
+                        signature: "sig-trailing".to_string(),
+                    },
+                },
+                StreamEvent::ContentBlockStart {
+                    index: 1,
+                    content_block: ContentBlockStart::ToolUse {
+                        id: "toolu_multi".to_string(),
+                        name: "read_file".to_string(),
+                        input: json!({}),
+                        caller: None,
+                        thought_signature: None,
+                    },
+                },
+                StreamEvent::ContentBlockDelta {
+                    index: 1,
+                    delta: Delta::InputJsonDelta {
+                        partial_json: r#"{"path":"a.txt"}"#.to_string(),
+                    },
+                },
+                StreamEvent::ContentBlockStop { index: 1 },
+                StreamEvent::MessageDelta {
+                    delta: MessageDelta {
+                        stop_reason: Some("tool_use".to_string()),
+                        stop_sequence: None,
+                    },
+                    usage: None,
+                },
+                StreamEvent::MessageStop,
+            ]
+        } else if call == 1 {
             vec![
                 crate::llm_client::mock::canned::message_start("msg_multi"),
                 // Block 0: readable thinking with a signature.
@@ -15102,6 +15152,57 @@ impl crate::core::model_client::ModelClient for MultiThinkingStreamClient {
 /// the follow-up request.
 #[tokio::test]
 async fn multi_block_and_redacted_thinking_persist_into_followup_requests() {
+    let requests = run_multi_thinking_turn(false).await;
+    assert_followup_carries_full_thinking_sequence(&requests);
+}
+
+/// The success-path persist guard duplicates the signature-only clause for a
+/// trailing block whose stop event never arrives (the stopped path is pinned
+/// by the multi-block test above). Without that duplicated arm, an
+/// omitted-display block in a stop-less stream would vanish from the
+/// follow-up request and Anthropic would 400 on the bare `tool_use` replay.
+#[tokio::test]
+async fn signature_only_block_survives_a_stream_that_skips_its_stop_event() {
+    let requests = run_multi_thinking_turn(true).await;
+    assert!(requests.len() >= 2, "expected a follow-up request");
+    let followup = &requests[1];
+    let assistant = followup
+        .messages
+        .iter()
+        .rev()
+        .find(|message| message.role == Role::Assistant)
+        .expect("follow-up request must contain the prior assistant turn");
+    let mut blocks = assistant.content.iter();
+    match (blocks.next(), blocks.next(), blocks.next()) {
+        (
+            Some(ContentBlock::Thinking {
+                thinking,
+                signature,
+                state: None,
+                redacted_data: None,
+                ..
+            }),
+            Some(ContentBlock::ToolUse { .. }),
+            None,
+        ) => {
+            assert!(thinking.is_empty(), "omitted-display text stays empty");
+            assert_eq!(
+                signature.as_deref(),
+                Some("sig-trailing"),
+                "the trailing stop-less signature-only block must persist"
+            );
+        }
+        other => panic!("unexpected follow-up assistant blocks: {other:?}"),
+    }
+}
+
+/// Drive a two-request turn whose first stream carries the full thinking
+/// sequence (readable+signed, signature-only, redacted, tool use), capturing
+/// every outgoing request. `trailing_signature_only` swaps the first stream
+/// for the stop-less trailing-block shape.
+async fn run_multi_thinking_turn(
+    trailing_signature_only: bool,
+) -> Vec<crate::models::MessageRequest> {
     let config = Config {
         provider: Some("custom-a".to_string()),
         providers: Some(crate::config::ProvidersConfig {
@@ -15128,6 +15229,7 @@ async fn multi_block_and_redacted_thinking_persist_into_followup_requests() {
     let client = std::sync::Arc::new(MultiThinkingStreamClient {
         requests: std::sync::Mutex::new(Vec::new()),
         calls: std::sync::atomic::AtomicUsize::new(0),
+        trailing_signature_only,
     });
     let shared: crate::core::model_client::SharedModelClient = client.clone();
     let (engine, handle) = Engine::new_with_model_client(engine_config, &config, shared);
@@ -15176,7 +15278,10 @@ async fn multi_block_and_redacted_thinking_persist_into_followup_requests() {
     }
     assert!(completed, "turn did not complete");
 
-    let requests = client.requests.lock().expect("request lock").clone();
+    client.requests.lock().expect("request lock").clone()
+}
+
+fn assert_followup_carries_full_thinking_sequence(requests: &[crate::models::MessageRequest]) {
     assert!(requests.len() >= 2, "expected a follow-up request");
     let followup = &requests[1];
     let assistant = followup

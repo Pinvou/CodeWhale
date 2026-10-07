@@ -739,7 +739,13 @@ pub enum ContentBlockStart {
     /// reasoning, and dropping it makes the next tool-loop request fail with
     /// "Expected `thinking` or `redacted_thinking`, but found `tool_use`".
     #[serde(rename = "redacted_thinking")]
-    RedactedThinking { data: String },
+    RedactedThinking {
+        /// Defaulted so a contract-violating start event without `data`
+        /// still decodes (empty payload + capture warn) instead of failing
+        /// the whole event and silently losing the turn.
+        #[serde(default)]
+        data: String,
+    },
     #[serde(rename = "tool_use")]
     ToolUse {
         id: String,

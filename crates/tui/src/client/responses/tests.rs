@@ -1401,6 +1401,167 @@ fn responses_input_includes_user_role_tool_results() {
 }
 
 #[test]
+fn concentrate_route_keeps_tool_chains() {
+    // The Concentrate route never captures encrypted reasoning (no
+    // `store:false`, no `include`), so nothing can ever satisfy the replay
+    // check on it. Its tool chains must therefore bypass the chain-drop
+    // gate: gating them erased every prior tool call and result from the
+    // second turn onward, on a route that ships bare calls against
+    // server-side state and worked.
+    let request = MessageRequest {
+        model: "deepseek-v4-pro".to_string(),
+        messages: vec![
+            Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::ToolUse {
+                    id: "call_abc|fc_123".to_string(),
+                    name: "checklist_write".to_string(),
+                    input: json!({"items": []}),
+                    caller: None,
+                    thought_signature: None,
+                }],
+            },
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: "call_abc|fc_123".to_string(),
+                    content: "<6 items>".to_string(),
+                    is_error: None,
+                    content_blocks: None,
+                }],
+            },
+        ],
+        max_tokens: 128,
+        system: None,
+        tools: None,
+        tool_choice: None,
+        metadata: None,
+        thinking: None,
+        reasoning_effort: None,
+        stream: None,
+        temperature: None,
+        top_p: None,
+    };
+
+    let input = convert_messages_to_responses_input(
+        &request,
+        ApiProvider::Concentrate,
+        ApiProvider::Concentrate.as_str(),
+        "fp-concentrate-endpoint",
+        BODY_TEST_BASE_URL,
+    );
+    let types: Vec<&str> = input
+        .iter()
+        .filter_map(|item| item["type"].as_str())
+        .collect();
+    assert_eq!(
+        types,
+        vec!["function_call", "function_call_output"],
+        "Concentrate must keep its tool history: {types:?}"
+    );
+}
+
+#[test]
+fn custom_provider_replay_scopes_to_the_exact_identity() {
+    // Encrypted reasoning captured by one custom Responses gateway must not
+    // replay on another: the generic `custom` kind is shared by every
+    // user-defined endpoint, so the endpoint-scoped tag plus the endpoint
+    // fingerprint gate the pairing (a failover between gateways would
+    // otherwise ship payloads the new gateway cannot decrypt — an
+    // unretryable 400). This pins the chain-drop side of that gate: when no
+    // state replays, the whole tool chain leaves the wire with it.
+    const GATEWAY_A: &str = "custom/gateway-a";
+    const GATEWAY_A_FP: &str = "fp-gateway-a-endpoint";
+    let request_captured_on = |fingerprint: Option<&str>| MessageRequest {
+        model: "gpt-5.5".to_string(),
+        messages: vec![
+            Message {
+                role: Role::Assistant,
+                content: vec![
+                    ContentBlock::Thinking {
+                        thinking: String::new(),
+                        signature: None,
+                        state: Some(OpaqueReasoningState {
+                            provider: GATEWAY_A.to_string(),
+                            api: "openai-responses".to_string(),
+                            model: "gpt-5.5".to_string(),
+                            id: None,
+                            encrypted_content: "enc_custom".to_string(),
+                            endpoint: fingerprint.map(str::to_string),
+                        }),
+                        redacted_data: None,
+                        reasoning_details: None,
+                    },
+                    ContentBlock::ToolUse {
+                        id: "call_abc|fc_123".to_string(),
+                        name: "checklist_write".to_string(),
+                        input: json!({"items": []}),
+                        caller: None,
+                        thought_signature: None,
+                    },
+                ],
+            },
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: "call_abc|fc_123".to_string(),
+                    content: "<6 items>".to_string(),
+                    is_error: None,
+                    content_blocks: None,
+                }],
+            },
+        ],
+        max_tokens: 128,
+        system: None,
+        tools: None,
+        tool_choice: None,
+        metadata: None,
+        thinking: None,
+        reasoning_effort: None,
+        stream: None,
+        temperature: None,
+        top_p: None,
+    };
+
+    // Same gateway (tag and fingerprint): the chain replays intact.
+    let same = convert_messages_to_responses_input(
+        &request_captured_on(Some(GATEWAY_A_FP)),
+        ApiProvider::Custom,
+        GATEWAY_A,
+        GATEWAY_A_FP,
+        BODY_TEST_BASE_URL,
+    );
+    let same_types: Vec<&str> = same
+        .iter()
+        .filter_map(|item| item["type"].as_str())
+        .collect();
+    assert_eq!(
+        same_types,
+        vec!["reasoning", "function_call", "function_call_output"],
+        "same-identity custom gateway must replay the chain: {same_types:?}"
+    );
+
+    // A failover to a different endpoint under the same table (the URL was
+    // re-pointed): the fingerprint mismatch drops the whole chain fail-closed
+    // instead of shipping encrypted content the new endpoint cannot decrypt.
+    let switched = convert_messages_to_responses_input(
+        &request_captured_on(Some(GATEWAY_A_FP)),
+        ApiProvider::Custom,
+        GATEWAY_A,
+        "fp-gateway-b-endpoint",
+        BODY_TEST_BASE_URL,
+    );
+    let switched_types: Vec<&str> = switched
+        .iter()
+        .filter_map(|item| item["type"].as_str())
+        .collect();
+    assert!(
+        !switched_types.contains(&"function_call") && !switched_types.contains(&"reasoning"),
+        "cross-endpoint custom failover must not replay foreign encrypted content: {switched_types:?}"
+    );
+}
+
+#[test]
 fn responses_input_encodes_tool_call_names() {
     let request = MessageRequest {
         model: "gpt-5.5".to_string(),

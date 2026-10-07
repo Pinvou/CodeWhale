@@ -749,7 +749,7 @@ fn flush_thinking_block(
 ) {
     let placeholder_only = crate::client::is_reasoning_replay_placeholder(thinking);
     if (!thinking.is_empty() && !placeholder_only)
-        || signature.is_some()
+        || signature_carries_content(signature.as_deref())
         || state.is_some()
         || details.is_some()
     {
@@ -765,6 +765,14 @@ fn flush_thinking_block(
     *signature = None;
     *state = None;
     *details = None;
+}
+
+/// A signature only counts as block content when it is non-empty: a provider
+/// streaming a bare empty `signature_delta` must not mint a signature-only
+/// (`display: "omitted"`) thinking block out of nothing and replay
+/// `{"signature": ""}` back to the API.
+fn signature_carries_content(signature: Option<&str>) -> bool {
+    signature.is_some_and(|signature| !signature.is_empty())
 }
 
 fn approval_intent_summary(text: &str) -> Option<String> {
@@ -2371,7 +2379,7 @@ impl Engine {
                             crate::client::is_reasoning_replay_placeholder(&current_thinking);
                         if (!current_thinking.is_empty() && !thinking_is_placeholder_only)
                             || current_thinking_state.is_some()
-                            || current_thinking_signature.is_some()
+                            || signature_carries_content(current_thinking_signature.as_deref())
                             || current_thinking_details.is_some()
                         {
                             resume_blocks.push(ContentBlock::Thinking {
@@ -2502,7 +2510,7 @@ impl Engine {
                 crate::client::is_reasoning_replay_placeholder(&current_thinking);
             if (!current_thinking.is_empty() && !thinking_is_placeholder_only)
                 || current_thinking_state.is_some()
-                || current_thinking_signature.is_some()
+                || signature_carries_content(current_thinking_signature.as_deref())
                 || current_thinking_details.is_some()
             {
                 content_blocks.push(ContentBlock::Thinking {
@@ -5574,6 +5582,16 @@ impl Engine {
                         // start and must be replayed byte-exact, so park it
                         // immediately. No UI events: there is no readable
                         // content to stream.
+                        stream_content_bytes = stream_content_bytes.saturating_add(data.len());
+                        if data.is_empty() {
+                            // With serde's default this can only come from a
+                            // contract-violating block (missing `data`). It
+                            // still parks so the failure surfaces at replay
+                            // with a diagnosable shape.
+                            crate::logging::warn(
+                                "Captured a redacted thinking block with an empty payload; it will replay verbatim and the API may reject the request",
+                            );
+                        }
                         flush_thinking_block(
                             &mut current_thinking,
                             &mut current_thinking_signature,
@@ -7096,6 +7114,51 @@ mod tests {
     use std::path::PathBuf;
     use std::time::Duration;
     use tempfile::tempdir;
+
+    #[test]
+    fn flush_keeps_signature_only_blocks_but_not_empty_signature_mints() {
+        // A display:"omitted" block (empty text, real signature) is real
+        // content and must park; a bare empty `signature_delta` must not
+        // mint one — replaying {"signature": ""} would only earn a 400.
+        let mut completed = Vec::new();
+        flush_thinking_block(
+            &mut String::new(),
+            &mut Some("sig-real".to_string()),
+            &mut None,
+            &mut None,
+            &mut completed,
+        );
+        assert_eq!(completed.len(), 1);
+        match &completed[0] {
+            ContentBlock::Thinking { signature, .. } => {
+                assert_eq!(signature.as_deref(), Some("sig-real"));
+            }
+            other => panic!("expected a thinking block: {other:?}"),
+        }
+
+        completed.clear();
+        flush_thinking_block(
+            &mut String::new(),
+            &mut Some(String::new()),
+            &mut None,
+            &mut None,
+            &mut completed,
+        );
+        assert!(
+            completed.is_empty(),
+            "an empty-signature-only block must not persist: {completed:?}"
+        );
+
+        completed.clear();
+        flush_thinking_block(
+            &mut "readable reasoning".to_string(),
+            &mut Some(String::new()),
+            &mut None,
+            &mut None,
+            &mut completed,
+        );
+        assert_eq!(completed.len(), 1, "readable text persists regardless");
+    }
 
     /// A 1x1 PNG, kept as bytes so the tool-result image tests need no
     /// checked-in fixture file.

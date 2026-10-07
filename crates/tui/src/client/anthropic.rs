@@ -218,11 +218,14 @@ impl DeepSeekClient {
         {
             strip_thinking_from_final_tool_turn(messages);
         }
-        // Redacted thinking payloads can only be decrypted by the platform
-        // that minted them (first-party API, Bedrock, Vertex). Anthropic-
-        // dialect gateways that merely speak the protocol would reject the
-        // unknown block type, so those routes drop the block instead of
-        // shipping a request they cannot validate.
+        // Redacted thinking payloads are encrypted by Anthropic's first-party
+        // API and decrypt server-side there, so pass-through hosts cannot
+        // validate them — but neither can we tell a terminating gateway from
+        // a forwarding proxy. Withholding on every non-native host is the
+        // conservative call: a terminating gateway would reject the unknown
+        // block type outright, while a forwarding proxy loses the block's
+        // continuity (a redacted-only current tool turn can still 400 there).
+        // Native `*.anthropic.com` routes keep the payload byte-exact.
         if !is_native_anthropic_base_url(&self.base_url)
             && let Some(messages) = body.get_mut("messages").and_then(Value::as_array_mut)
         {
@@ -492,14 +495,22 @@ impl DeepSeekClient {
 /// unknown block type would fail the whole response decode and lose the turn
 /// — including the tool calls. Streaming responses carry the same blocks as
 /// typed `ContentBlockStart::RedactedThinking` events and need no shim.
+/// A block whose `data` is missing or not a string violates the contract;
+/// it is still rewritten (with an empty payload) so the turn decodes and the
+/// failure surfaces at replay with a diagnosable shape instead of as a
+/// whole-response decode error.
 fn normalize_redacted_thinking_blocks(value: &mut Value) {
     let Some(content) = value.get_mut("content").and_then(Value::as_array_mut) else {
         return;
     };
     for block in content.iter_mut() {
-        if block.get("type").and_then(Value::as_str) == Some("redacted_thinking")
-            && let Some(data) = block.get("data").and_then(Value::as_str)
-        {
+        if block.get("type").and_then(Value::as_str) == Some("redacted_thinking") {
+            let data = block.get("data").and_then(Value::as_str).unwrap_or("");
+            if data.is_empty() {
+                logging::warn(
+                    "Response carried a redacted thinking block with a missing or non-string payload; capturing it with an empty payload",
+                );
+            }
             *block = json!({
                 "type": "thinking",
                 "thinking": "",
@@ -511,18 +522,21 @@ fn normalize_redacted_thinking_blocks(value: &mut Value) {
 
 /// Models that run adaptive thinking when the `thinking` field is omitted.
 ///
-/// The 2026 thinking docs are explicit that for the Claude 5 generation and
-/// the Fable/Mythos lines, omitting `thinking` is NOT "disabled" — the model
-/// runs adaptive thinking — so replayed signed thinking blocks stay valid.
-/// For every older model an omitted field means thinking is off, and the API
-/// rejects thinking content in the current tool-use turn once thinking is
-/// disabled, so those turns need their thinking blocks stripped.
+/// The docs are explicit that adaptive thinking is on by default only for the
+/// Claude 5 generation ("Adaptive thinking is on by default on Claude Sonnet 5
+/// and Claude Opus 5" — AWS Bedrock adaptive-thinking page) and that the
+/// Fable/Mythos lines are adaptive-only, so omitting `thinking` is NOT
+/// "disabled" there and replayed signed thinking blocks stay valid. Older
+/// models treat omission as thinking off — the migration guide states
+/// "Adaptive thinking is off by default on Claude Opus 4.7: requests with no
+/// thinking field run without thinking, matching Opus 4.6 behavior" — and the
+/// API rejects thinking content in the current tool-use turn once thinking is
+/// disabled, so those turns (Opus 4.7/4.8 included) need their thinking
+/// blocks stripped.
 fn anthropic_omitted_thinking_defaults_to_adaptive(model: &str) -> bool {
     let model = model.to_ascii_lowercase();
     model.contains("fable")
         || model.contains("mythos")
-        || model.contains("opus-4-7")
-        || model.contains("opus-4-8")
         || ["opus-5", "sonnet-5", "haiku-5"]
             .iter()
             .any(|family| model.contains(family))
@@ -2071,6 +2085,89 @@ mod tests {
         let assistant = &body["messages"][0]["content"];
         assert_eq!(assistant.as_array().map(Vec::len), Some(1));
         assert_eq!(assistant[0]["type"].as_str(), Some("tool_use"));
+    }
+
+    #[test]
+    fn disabled_thinking_strips_on_opus_4_7_and_4_8() {
+        // Adaptive thinking is off by default on Opus 4.7/4.8 ("requests with
+        // no thinking field run without thinking, matching Opus 4.6
+        // behavior" — model migration guide), so omission there must strip
+        // the current tool turn exactly like an explicit off. These models
+        // previously sat on the adaptive-on-omission list and the strip
+        // never fired, bricking the tool loop with a deterministic 400.
+        for model in ["claude-opus-4-7", "claude-opus-4-8"] {
+            let client = test_client();
+            let mut request = request_with(model, Some("off"), None, None);
+            request.messages = vec![Message {
+                role: Role::Assistant,
+                content: vec![
+                    ContentBlock::Thinking {
+                        thinking: "current tool turn reasoning".to_string(),
+                        signature: Some("sig-current".to_string()),
+                        state: None,
+                        redacted_data: None,
+                        reasoning_details: None,
+                    },
+                    ContentBlock::ToolUse {
+                        id: "toolu_1".to_string(),
+                        name: "read_file".to_string(),
+                        input: json!({}),
+                        caller: None,
+                        thought_signature: None,
+                    },
+                ],
+            }];
+
+            let body = client.build_anthropic_body(&request, true);
+            let assistant = &body["messages"][0]["content"];
+            assert_eq!(
+                assistant.as_array().map(Vec::len),
+                Some(1),
+                "{model}: thinking must be stripped from the final tool turn: {body}"
+            );
+            assert_eq!(assistant[0]["type"].as_str(), Some("tool_use"));
+        }
+    }
+
+    #[test]
+    fn sse_redacted_content_block_start_decodes_through_the_stream_decoder() {
+        // The exact event whose decode used to drop the turn's block: a
+        // `redacted_thinking` content_block_start through the SSE decoder.
+        // The contract-violating no-data form must still decode (empty
+        // payload + capture warn) instead of failing the event and silently
+        // losing the block.
+        use crate::models::ContentBlockStart;
+
+        let decode = |line: &str| {
+            convert_anthropic_sse_data(line)
+                .expect("content_block_start must be recognized")
+                .expect("decode must succeed")
+        };
+
+        let event = decode(
+            r#"{"type":"content_block_start","index":1,"content_block":{"type":"redacted_thinking","data":"ENC"}}"#,
+        );
+        match event {
+            StreamEvent::ContentBlockStart {
+                index,
+                content_block: ContentBlockStart::RedactedThinking { data },
+            } => {
+                assert_eq!(index, 1);
+                assert_eq!(data, "ENC");
+            }
+            other => panic!("unexpected event for redacted start: {other:?}"),
+        }
+
+        let malformed = decode(
+            r#"{"type":"content_block_start","index":2,"content_block":{"type":"redacted_thinking"}}"#,
+        );
+        match malformed {
+            StreamEvent::ContentBlockStart {
+                content_block: ContentBlockStart::RedactedThinking { data },
+                ..
+            } => assert_eq!(data, "", "missing data must default to an empty payload"),
+            other => panic!("unexpected event for malformed redacted start: {other:?}"),
+        }
     }
 
     #[test]

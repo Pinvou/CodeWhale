@@ -4198,7 +4198,12 @@ fn parse_sse_data_frame(
 
 /// Parse a single SSE chunk from the Chat Completions streaming API into
 /// our internal `StreamEvent` representation.
+///
+/// The parameters are the per-stream parse threads themselves (`&mut` state
+/// plus two route flags); threading them through a struct would only move
+/// the same count behind a field access, so the lint is allowed explicitly.
 #[cfg(test)]
+#[allow(clippy::too_many_arguments)]
 pub(super) fn parse_sse_chunk(
     chunk: &Value,
     content_index: &mut u32,
@@ -4424,6 +4429,13 @@ fn parse_sse_chunk_with_reasoning_style(
                             // the rest of the non-start fields. The official
                             // compat route also signs the chunk-level
                             // `delta.extra_content` on the pre-tool text part.
+                            // Known limit: that chunk-level form is only read
+                            // when the same delta also carries the `tool_calls`
+                            // entry. A signature emitted exclusively on an
+                            // earlier text-only chunk is not buffered here —
+                            // the validator then fails closed with its
+                            // diagnostic instead of replaying a call Google
+                            // would reject unsigned.
                             if let Some(signature) = tool_call_thought_signature(tc, delta)
                                 .filter(|value| !value.is_empty())
                             {
