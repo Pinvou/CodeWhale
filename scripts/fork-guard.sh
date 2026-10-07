@@ -162,6 +162,7 @@ fingerprints=(
   "T2|notify 配置方法合同钉               |CodeWhale/crates/tui/src/tui/notifications.rs|fn settings_installs_configured_method_from_config"
   "T2|shell 指引与执行同一 dispatcher    |CodeWhale/crates/tui/src/tools/shell/guidance.rs|pub(super) fn runtime_command_guidance()"
   "T2|指引对齐 catalog 一致性回归        |CodeWhale/crates/tui/src/tools/shell/tests.rs|fn forkguard_shell_catalog_guidance_matches_execution"
+  "T2|computer-use zoom 子栅格换算       |CodeWhale/plugins/computer-use/src/raster.mjs|export function zoomChildRaster(prev, region)"
 
   "T3|静态 prompt composer              |CodeWhale/crates/tui/src/prompts.rs|pub fn set_static_prompt_composer_override("
   "T3|ambient project authority 密封     |CodeWhale/crates/tui/src/project_context.rs|forkguard_runtime_loader_ignores_ambient_project_authority"
@@ -223,6 +224,18 @@ fingerprints=(
   "T6|限流 AIMD 治理器                   |CodeWhale/crates/tui/src/tools/subagent/governor.rs|pub(crate) struct RateLimitGovernor"
   "T6|fleet 治理器接线全部 spawn 路径    |CodeWhale/crates/tui/src/tools/subagent/mod.rs|runtime.governor = Some(Arc::clone(&self.governor));"
   "T6|限流时间自愈行为回归               |CodeWhale/crates/tui/src/tools/subagent/governor.rs|fn forkguard_rate_limit_governor_pauses_and_time_recovers_after_window_drains"
+  "T6|取消授权重派与陈旧等待者回归       |CodeWhale/crates/tui/src/tools/subagent/governor.rs|fn forkguard_dynamic_gate_redispatches_grant_of_cancelled_waiter"
+
+  "T7|Compaction tool boundary regression|CodeWhale/crates/tui/src/runtime_handoff.rs|fn forkguard_compaction_topology_preserves_tool_round_boundary"
+  "T7|Compaction paired chat wire regression|CodeWhale/crates/tui/src/client/chat.rs|fn forkguard_compaction_tool_round_has_valid_chat_wire_roles"
+  "T7|Compaction topology round regression|CodeWhale/crates/tui/src/compaction/last_round.rs|fn forkguard_mid_round_topology_is_not_a_user_turn_on_recompaction"
+  "T7|Compaction later-turn survival regression|CodeWhale/crates/tui/src/compaction/last_round.rs|fn forkguard_recompaction_keeps_turns_after_the_previous_summary"
+  "T7|Compaction pasted-header provenance regression|CodeWhale/crates/tui/src/client/chat.rs|fn forkguard_full_summary_header_pasted_after_tool_result_is_not_relocated"
+  "T7|Restored completion boundary regression|CodeWhale/crates/tui/src/client/chat.rs|fn restored_completion_does_not_join_an_ordinary_user_turn"
+  "T7|Restored pre-fix session wire regression|CodeWhale/crates/tui/src/client/chat.rs|fn forkguard_restored_pre_fix_session_has_valid_chat_wire_roles"
+  "T7|Restore-tier quoted-header deletion regression|CodeWhale/crates/tui/src/compaction.rs|fn restore_keeps_a_user_turn_that_quotes_the_summary_header"
+  "T7|Pre-provenance carrier restore regression|CodeWhale/crates/tui/src/compaction.rs|fn restore_replaces_a_pre_provenance_carrier"
+  "T7|Checkpoint edit-target exclusion regression|CodeWhale/crates/tui/src/runtime_handoff.rs|fn compaction_checkpoint_is_never_the_edit_target"
 
   "T8|roster 宿主 profiles 列表上限      |CodeWhale/crates/tui/src/tools/subagent/mod.rs|const ROSTER_HOST_PROFILE_LIMIT: usize = 48"
   "T8|roster 载荷携带 host_profiles 键  |CodeWhale/crates/tui/src/tools/subagent/mod.rs|\"host_profiles_truncated\": host_profiles_truncated,"

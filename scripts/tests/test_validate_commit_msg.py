@@ -97,7 +97,12 @@ class ValidateCommitRangeTests(unittest.TestCase):
         ) + "\x1e"
 
     def test_range_grandfathers_legacy_history_and_skips_merge_subject(self) -> None:
-        with patch.object(validate_commit_msg, "git") as git_mock:
+        with (
+            patch.object(
+                validate_commit_msg, "git_commit_exists", side_effect=[True, True]
+            ),
+            patch.object(validate_commit_msg, "git") as git_mock,
+        ):
             git_mock.return_value = self.commit_record(
                 "0123456789abcdef",
                 "parent-one parent-two",
@@ -116,8 +121,61 @@ class ValidateCommitRangeTests(unittest.TestCase):
             validate_commit_msg.LEGACY_HISTORY_CUTOFF,
         )
 
+    def test_range_skips_cutoff_exclusion_when_cutoff_missing(self) -> None:
+        with (
+            patch.object(
+                validate_commit_msg, "git_commit_exists", side_effect=[True, False]
+            ),
+            patch.object(validate_commit_msg, "git") as git_mock,
+        ):
+            git_mock.return_value = self.commit_record(
+                "0123456789abcdef",
+                "parent",
+                "Test User",
+                "test@example.com",
+                "fix: 修复提交门禁范围\n\nSigned-off-by: Test User <test@example.com>",
+            )
+
+            self.assertEqual(validate_commit_msg.validate_range("base", "head"), [])
+
+        git_mock.assert_called_once_with(
+            "log",
+            "--format=%H%x00%P%x00%an%x00%ae%x00%B%x1e",
+            "base..head",
+        )
+
+    def test_missing_base_validates_head_alone_in_shallow_clone(self) -> None:
+        with (
+            patch.object(
+                validate_commit_msg, "git_commit_exists", side_effect=[False, False]
+            ),
+            patch.object(validate_commit_msg, "git") as git_mock,
+        ):
+            git_mock.return_value = self.commit_record(
+                "0123456789abcdef",
+                "parent",
+                "Test User",
+                "test@example.com",
+                "fix: 修复提交门禁范围\n\nSigned-off-by: Test User <test@example.com>",
+            )
+
+            self.assertEqual(
+                validate_commit_msg.validate_range("missing-base", "head"), []
+            )
+
+        git_mock.assert_called_once_with(
+            "log",
+            "--format=%H%x00%P%x00%an%x00%ae%x00%B%x1e",
+            "head",
+        )
+
     def test_range_still_rejects_new_nonconforming_commit(self) -> None:
-        with patch.object(validate_commit_msg, "git") as git_mock:
+        with (
+            patch.object(
+                validate_commit_msg, "git_commit_exists", side_effect=[True, True]
+            ),
+            patch.object(validate_commit_msg, "git") as git_mock,
+        ):
             git_mock.return_value = self.commit_record(
                 "fedcba9876543210",
                 "parent",
@@ -132,7 +190,12 @@ class ValidateCommitRangeTests(unittest.TestCase):
         self.assertIn("description must use Chinese", errors[0])
 
     def test_range_rejects_missing_signoff(self) -> None:
-        with patch.object(validate_commit_msg, "git") as git_mock:
+        with (
+            patch.object(
+                validate_commit_msg, "git_commit_exists", side_effect=[True, True]
+            ),
+            patch.object(validate_commit_msg, "git") as git_mock,
+        ):
             git_mock.return_value = self.commit_record(
                 "fedcba9876543210",
                 "parent",
@@ -147,7 +210,12 @@ class ValidateCommitRangeTests(unittest.TestCase):
         self.assertIn("missing Signed-off-by", errors[0])
 
     def test_range_rejects_signoff_from_another_identity(self) -> None:
-        with patch.object(validate_commit_msg, "git") as git_mock:
+        with (
+            patch.object(
+                validate_commit_msg, "git_commit_exists", side_effect=[True, True]
+            ),
+            patch.object(validate_commit_msg, "git") as git_mock,
+        ):
             git_mock.return_value = self.commit_record(
                 "fedcba9876543210",
                 "parent",
@@ -163,7 +231,12 @@ class ValidateCommitRangeTests(unittest.TestCase):
         self.assertIn("must match commit author", errors[0])
 
     def test_range_accepts_rewritten_squash_author_when_enabled(self) -> None:
-        with patch.object(validate_commit_msg, "git") as git_mock:
+        with (
+            patch.object(
+                validate_commit_msg, "git_commit_exists", side_effect=[True, True]
+            ),
+            patch.object(validate_commit_msg, "git") as git_mock,
+        ):
             git_mock.return_value = self.commit_record(
                 "fedcba9876543210",
                 "parent",
@@ -182,7 +255,12 @@ class ValidateCommitRangeTests(unittest.TestCase):
         self.assertEqual(errors, [])
 
     def test_range_still_requires_signoff_when_author_matching_is_disabled(self) -> None:
-        with patch.object(validate_commit_msg, "git") as git_mock:
+        with (
+            patch.object(
+                validate_commit_msg, "git_commit_exists", side_effect=[True, True]
+            ),
+            patch.object(validate_commit_msg, "git") as git_mock,
+        ):
             git_mock.return_value = self.commit_record(
                 "fedcba9876543210",
                 "parent",
@@ -201,7 +279,12 @@ class ValidateCommitRangeTests(unittest.TestCase):
         self.assertIn("missing Signed-off-by", errors[0])
 
     def test_range_exempts_trusted_dependabot_identity(self) -> None:
-        with patch.object(validate_commit_msg, "git") as git_mock:
+        with (
+            patch.object(
+                validate_commit_msg, "git_commit_exists", side_effect=[True, True]
+            ),
+            patch.object(validate_commit_msg, "git") as git_mock,
+        ):
             git_mock.return_value = self.commit_record(
                 "fedcba9876543210",
                 "parent",

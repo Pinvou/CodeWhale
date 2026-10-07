@@ -117,7 +117,7 @@ def validate_text(raw: str, label: str) -> list[str]:
     if not CJK_RE.search(semantic_desc):
         errors.append(f"{label}: description must use Chinese")
 
-    if semantic_desc[-1] in FORBIDDEN_ENDING_PUNCTUATION:
+    if semantic_desc and semantic_desc[-1] in FORBIDDEN_ENDING_PUNCTUATION:
         errors.append(f"{label}: description must not end with punctuation")
 
     if normalized_desc in PROHIBITED_DESCRIPTIONS:
@@ -165,6 +165,18 @@ def git(*args: str) -> str:
     return subprocess.check_output(("git", *args), text=True, encoding="utf-8").strip()
 
 
+def git_commit_exists(revision: str) -> bool:
+    return (
+        subprocess.run(
+            ("git", "cat-file", "-e", f"{revision}^{{commit}}"),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        ).returncode
+        == 0
+    )
+
+
 def validate_file(path: Path, *, require_signoff: bool = True) -> list[str]:
     raw = path.read_text(encoding="utf-8")
     errors = validate_text(raw, str(path))
@@ -179,13 +191,18 @@ def validate_range(
     *,
     require_matching_signoff: bool = True,
 ) -> list[str]:
-    commit_log = git(
+    # Shallow clones may not have the base or the legacy cutoff object; fall
+    # back to validating `head` alone and skip the cutoff exclusion rather
+    # than letting `git log` fail on a missing revision.
+    revision = f"{base}..{head}" if git_commit_exists(base) else head
+    log_args = [
         "log",
         "--format=%H%x00%P%x00%an%x00%ae%x00%B%x1e",
-        f"{base}..{head}",
-        "--not",
-        LEGACY_HISTORY_CUTOFF,
-    )
+        revision,
+    ]
+    if git_commit_exists(LEGACY_HISTORY_CUTOFF):
+        log_args.extend(("--not", LEGACY_HISTORY_CUTOFF))
+    commit_log = git(*log_args)
     errors: list[str] = []
 
     for record in commit_log.split("\x1e"):
