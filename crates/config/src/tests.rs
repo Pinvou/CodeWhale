@@ -8864,16 +8864,23 @@ model = "relay-model"
         crate::provider::WireFormat::ChatCompletions
     );
 
-    let events = captured.events();
+    // Filter to the dialect warning itself: the resolution's ambient-env
+    // readers may legitimately warn about junk exported into this shell, and
+    // the pin is about the dialect event, not about a clean environment.
+    let dialect_warnings: Vec<_> = captured
+        .events()
+        .into_iter()
+        .filter(|event| event.message.contains("wire dialect"))
+        .collect();
     assert_eq!(
-        events.len(),
+        dialect_warnings.len(),
         1,
-        "exactly the unrecognized dialect warns: {events:?}"
+        "exactly the unrecognized dialect warns: {dialect_warnings:?}"
     );
     assert_eq!(
-        events[0].field("table"),
+        dialect_warnings[0].field("table"),
         Some("custom"),
-        "the warning must name the legacy table the receipt read, not the file's named selection: {events:?}"
+        "the warning must name the legacy table the receipt read, not the file's named selection: {dialect_warnings:?}"
     );
 }
 
