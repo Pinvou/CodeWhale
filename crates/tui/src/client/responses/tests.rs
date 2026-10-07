@@ -1,5 +1,6 @@
 use super::*;
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -56,6 +57,26 @@ impl Respond for AlwaysError {
     fn respond(&self, _request: &Request) -> ResponseTemplate {
         self.attempts.fetch_add(1, Ordering::SeqCst);
         ResponseTemplate::new(self.status).set_body_string(self.body)
+    }
+}
+
+/// A thinking block carrying encrypted reasoning that is replayable on the
+/// Codex route for `model`. Required ahead of any `ToolUse` block in a test
+/// history: a reasoning-capable model's bare function_call is chain-dropped
+/// by the pairing guard.
+fn codex_reasoning_block(model: &str) -> ContentBlock {
+    ContentBlock::Thinking {
+        thinking: String::new(),
+        signature: None,
+        state: Some(OpaqueReasoningState {
+            provider: ApiProvider::OpenaiCodex.as_str().to_string(),
+            api: "openai-responses".to_string(),
+            model: model.to_string(),
+            id: None,
+            encrypted_content: "enc_test_payload".to_string(),
+            endpoint: Some("fp-codex-endpoint".to_string()),
+        }),
+        redacted_data: None,
     }
 }
 
@@ -661,6 +682,7 @@ fn deepseek_flash_responses_body_uses_stateless_0731_contract() {
                 thinking: "preserve this tool-loop reasoning".to_string(),
                 signature: None,
                 state: None,
+                redacted_data: None,
             }],
         },
     );
@@ -747,11 +769,20 @@ fn codex_replays_only_exact_model_opaque_reasoning_state() {
         0,
         Message {
             role: Role::Assistant,
-            content: vec![ContentBlock::Thinking {
-                thinking: SENTINEL.to_string(),
-                signature: None,
-                state: Some(state),
-            }],
+            content: vec![
+                ContentBlock::Thinking {
+                    thinking: SENTINEL.to_string(),
+                    signature: None,
+                    state: Some(state),
+                    redacted_data: None,
+                },
+                // Text pairs the reasoning item with its produced message so
+                // the sequence satisfies the immediate-following-item rule.
+                ContentBlock::Text {
+                    text: "done".to_string(),
+                    cache_control: None,
+                },
+            ],
         },
     );
 
@@ -771,7 +802,14 @@ fn codex_replays_only_exact_model_opaque_reasoning_state() {
         exact.pointer("/input/0/encrypted_content"),
         Some(&json!("enc_opaque_payload"))
     );
+    assert_eq!(exact.pointer("/input/1/type"), Some(&json!("message")));
+    assert_eq!(exact.pointer("/input/1/role"), Some(&json!("assistant")));
 
+    // A mid-session model switch invalidates the encrypted state. The
+    // reasoning item is dropped — and a tool call that was to follow it
+    // would be chain-dropped with it, because shipping the bare
+    // function_call is an automatic 400 ("was provided without its required
+    // 'reasoning' item").
     request.model = "gpt-5.6".to_string();
     let switched_model = build_responses_body_for_provider(
         &request,
@@ -801,6 +839,113 @@ fn codex_replays_only_exact_model_opaque_reasoning_state() {
     assert!(
         !switched_wire.contains("enc_opaque_payload"),
         "{switched_provider}"
+    );
+}
+
+/// A tool chain whose reasoning was captured on another model must lose the
+/// reasoning item, the function calls, AND their outputs together — replaying
+/// the calls alone is the "function_call provided without its required
+/// 'reasoning' item" 400 that previously bricked cross-model resumes.
+#[test]
+fn codex_chain_drops_tool_calls_whose_reasoning_is_not_replayable() {
+    let mut request = minimal_responses_request();
+    request.messages = vec![
+        Message {
+            role: Role::Assistant,
+            content: vec![
+                // Captured on gpt-5.5 but replayed on gpt-5.6: unusable.
+                codex_reasoning_block("gpt-5.5"),
+                ContentBlock::ToolUse {
+                    id: "call_orphan|fc_old".to_string(),
+                    name: "read".to_string(),
+                    input: json!({"path": "x"}),
+                    caller: None,
+                    thought_signature: None,
+                },
+            ],
+        },
+        Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "call_orphan|fc_old".to_string(),
+                content: "stale output".to_string(),
+                is_error: None,
+                content_blocks: None,
+            }],
+        },
+        // The same orphaned call can also surface as a `tool`-role history
+        // message (imported/legacy transcript shape); its output must be
+        // filtered too.
+        Message {
+            role: Role::Unrecognized("tool".to_string()),
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "call_orphan|fc_old".to_string(),
+                content: "stale output via tool role".to_string(),
+                is_error: None,
+                content_blocks: None,
+            }],
+        },
+        Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: "continue".to_string(),
+                cache_control: None,
+            }],
+        },
+    ];
+    request.model = "gpt-5.6".to_string();
+
+    let body = build_responses_body_for_provider(
+        &request,
+        ApiProvider::OpenaiCodex,
+        ApiProvider::OpenaiCodex.as_str(),
+        "fp-codex-endpoint",
+        BODY_TEST_BASE_URL,
+    );
+    let input = body["input"].as_array().expect("input items");
+    assert!(
+        input.iter().all(|item| {
+            !matches!(
+                item["type"].as_str(),
+                Some("reasoning") | Some("function_call") | Some("function_call_output")
+            )
+        }),
+        "orphaned chain must be dropped whole: {body}"
+    );
+    assert!(
+        input
+            .iter()
+            .any(|item| item["type"] == "message" && item["role"] == "user"),
+        "the plain user turn must survive: {body}"
+    );
+}
+
+/// Reasoning items with no following output (an interrupted reasoning-only
+/// turn, or reasoning chased away from its produced item) are rejected with
+/// "was provided without its required following item" and must be dropped.
+#[test]
+fn codex_drops_orphaned_reasoning_items_without_a_following_output() {
+    let mut request = minimal_responses_request();
+    request.messages.insert(
+        0,
+        Message {
+            role: Role::Assistant,
+            // Reasoning-only turn: interrupted before any output.
+            content: vec![codex_reasoning_block("gpt-5.5")],
+        },
+    );
+
+    let body = build_responses_body_for_provider(
+        &request,
+        ApiProvider::OpenaiCodex,
+        ApiProvider::OpenaiCodex.as_str(),
+        "fp-codex-endpoint",
+        BODY_TEST_BASE_URL,
+    );
+    let input = body["input"].as_array().expect("input items");
+    assert!(
+        input.iter().all(|item| item["type"] != "reasoning"),
+        "trailing bare reasoning must be dropped: {body}"
     );
 }
 
@@ -862,6 +1007,79 @@ async fn codex_stream_captures_encrypted_reasoning_as_opaque_state() {
         )),
         "the captured state is bound to the capturing endpoint"
     );
+}
+
+/// Every Responses route requests `include: ["reasoning.encrypted_content"]`,
+/// so every one of them must capture the encrypted item — not just Codex.
+/// A non-Codex route that dropped the item shipped bare function calls that
+/// OpenAI rejects with "provided without its required 'reasoning' item".
+#[tokio::test]
+async fn non_codex_responses_route_captures_encrypted_reasoning() {
+    let server = MockServer::start().await;
+    let sse_body = concat!(
+        "data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"reasoning\",\"id\":\"rs_9\"}}\n\n",
+        "data: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"visible summary\"}\n\n",
+        "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"reasoning\",\"id\":\"rs_9\",\"summary\":[],\"encrypted_content\":\"enc_custom\"}}\n\n",
+        "data: [DONE]\n\n",
+    );
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("Content-Type", "text/event-stream")
+                .set_body_string(sse_body),
+        )
+        .mount(&server)
+        .await;
+
+    let config = Config {
+        provider: Some("custom-a".to_string()),
+        providers: Some(ProvidersConfig {
+            custom: HashMap::from([(
+                "custom-a".to_string(),
+                ProviderConfig {
+                    kind: Some("openai-compatible".to_string()),
+                    base_url: Some(format!("{}/v1", server.uri())),
+                    model: Some("gpt-5.5".to_string()),
+                    api_key: Some("custom-test-key".to_string()),
+                    wire: Some("responses".to_string()),
+                    ..ProviderConfig::default()
+                },
+            )]),
+            ..ProvidersConfig::default()
+        }),
+        ..Config::default()
+    };
+    let client = {
+        let _env_lock = crate::test_support::lock_test_env();
+        DeepSeekClient::new(&config).unwrap()
+    };
+    let mut stream = client
+        .handle_responses_stream(
+            &client
+                .prepare_outbound_request(minimal_responses_request(), true)
+                .expect("responses request prepares"),
+        )
+        .await
+        .unwrap();
+    let mut captured = None;
+    while let Some(event) = stream.next().await {
+        if let StreamEvent::ContentBlockDelta {
+            delta: Delta::ReasoningStateDelta { state },
+            ..
+        } = event.unwrap()
+        {
+            captured = Some(state);
+        }
+    }
+
+    let state = captured
+        .expect("non-Codex Responses routes must capture encrypted reasoning for replay pairing");
+    // The endpoint-scoped Custom tag (not the generic kind) pairs the
+    // captured payload with the gateway that minted it.
+    assert_eq!(state.provider, "custom/custom-a");
+    assert_ne!(state.provider, client.api_provider.as_str());
+    assert_eq!(state.model, "gpt-5.5");
+    assert_eq!(state.encrypted_content, "enc_custom");
 }
 
 #[test]
@@ -1126,13 +1344,19 @@ fn responses_input_includes_user_role_tool_results() {
         messages: vec![
             Message {
                 role: Role::Assistant,
-                content: vec![ContentBlock::ToolUse {
-                    id: "call_abc|fc_123".to_string(),
-                    name: "checklist_write".to_string(),
-                    input: json!({"items": []}),
-                    caller: None,
-                    thought_signature: None,
-                }],
+                content: vec![
+                    // The reasoning item must pair with the tool call: a
+                    // reasoning-capable model's bare function_call is
+                    // rejected by the API.
+                    codex_reasoning_block("gpt-5.5"),
+                    ContentBlock::ToolUse {
+                        id: "call_abc|fc_123".to_string(),
+                        name: "checklist_write".to_string(),
+                        input: json!({"items": []}),
+                        caller: None,
+                        thought_signature: None,
+                    },
+                ],
             },
             Message {
                 role: Role::User,
@@ -1164,12 +1388,13 @@ fn responses_input_includes_user_role_tool_results() {
         OFFICIAL_CODEX_BASE_URL,
     );
 
-    assert_eq!(input[0]["type"], "function_call");
-    assert_eq!(input[0]["call_id"], "call_abc");
-    assert_eq!(input[0]["name"], "checklist_write");
-    assert_eq!(input[1]["type"], "function_call_output");
+    assert_eq!(input[0]["type"], "reasoning");
+    assert_eq!(input[1]["type"], "function_call");
     assert_eq!(input[1]["call_id"], "call_abc");
-    assert_eq!(input[1]["output"], "<6 items>");
+    assert_eq!(input[1]["name"], "checklist_write");
+    assert_eq!(input[2]["type"], "function_call_output");
+    assert_eq!(input[2]["call_id"], "call_abc");
+    assert_eq!(input[2]["output"], "<6 items>");
 }
 
 #[test]
@@ -1178,13 +1403,16 @@ fn responses_input_encodes_tool_call_names() {
         model: "gpt-5.5".to_string(),
         messages: vec![Message {
             role: Role::Assistant,
-            content: vec![ContentBlock::ToolUse {
-                id: "call_abc|fc_123".to_string(),
-                name: "web.run".to_string(),
-                input: json!({}),
-                caller: None,
-                thought_signature: None,
-            }],
+            content: vec![
+                codex_reasoning_block("gpt-5.5"),
+                ContentBlock::ToolUse {
+                    id: "call_abc|fc_123".to_string(),
+                    name: "web.run".to_string(),
+                    input: json!({}),
+                    caller: None,
+                    thought_signature: None,
+                },
+            ],
         }],
         max_tokens: 128,
         system: None,
@@ -1206,8 +1434,9 @@ fn responses_input_encodes_tool_call_names() {
         OFFICIAL_CODEX_BASE_URL,
     );
 
-    assert_eq!(input[0]["type"], "function_call");
-    assert_eq!(input[0]["name"], to_api_tool_name("web.run"));
+    assert_eq!(input[0]["type"], "reasoning");
+    assert_eq!(input[1]["type"], "function_call");
+    assert_eq!(input[1]["name"], to_api_tool_name("web.run"));
 }
 
 #[test]
@@ -1366,13 +1595,16 @@ fn tool_result_image_becomes_native_function_output_content() {
     request.messages = vec![
         Message {
             role: Role::Assistant,
-            content: vec![ContentBlock::ToolUse {
-                id: "call_image_1".to_string(),
-                name: "read".to_string(),
-                input: serde_json::json!({"path": "shot.png"}),
-                caller: None,
-                thought_signature: None,
-            }],
+            content: vec![
+                codex_reasoning_block("gpt-5.5"),
+                ContentBlock::ToolUse {
+                    id: "call_image_1".to_string(),
+                    name: "read".to_string(),
+                    input: serde_json::json!({"path": "shot.png"}),
+                    caller: None,
+                    thought_signature: None,
+                },
+            ],
         },
         Message {
             role: Role::User,
@@ -1690,11 +1922,20 @@ fn forkguard_custom_responses_replays_only_exact_model_opaque_reasoning_state() 
         0,
         Message {
             role: Role::Assistant,
-            content: vec![ContentBlock::Thinking {
-                thinking: SENTINEL.to_string(),
-                signature: None,
-                state: Some(state),
-            }],
+            content: vec![
+                ContentBlock::Thinking {
+                    thinking: SENTINEL.to_string(),
+                    signature: None,
+                    state: Some(state),
+                    redacted_data: None,
+                },
+                // Text pairs the reasoning item with its produced message
+                // so the sequence satisfies the immediate-following-item rule.
+                ContentBlock::Text {
+                    text: "Done.".to_string(),
+                    cache_control: None,
+                },
+            ],
         },
     );
 
@@ -1755,6 +1996,7 @@ fn forkguard_custom_responses_replays_only_exact_model_opaque_reasoning_state() 
             encrypted_content: "enc_legacy_payload".to_string(),
             endpoint: None,
         }),
+        redacted_data: None,
     }];
     let legacy_state = build_responses_body_for_provider(
         &request,
@@ -1790,6 +2032,7 @@ fn forkguard_custom_responses_replays_only_exact_model_opaque_reasoning_state() 
             encrypted_content: "enc_legacy_root_payload".to_string(),
             endpoint: None,
         }),
+        redacted_data: None,
     }];
     let legacy_root = build_responses_body_for_provider(
         &request,
@@ -1816,6 +2059,7 @@ fn forkguard_custom_responses_replays_only_exact_model_opaque_reasoning_state() 
             encrypted_content: "enc_custom_payload".to_string(),
             endpoint: Some(MINTING_ENDPOINT_FP.to_string()),
         }),
+        redacted_data: None,
     }];
     let switched_table = build_responses_body_for_provider(
         &request,
@@ -1852,6 +2096,7 @@ fn forkguard_custom_responses_replays_only_exact_model_opaque_reasoning_state() 
             encrypted_content: "enc_codex_payload".to_string(),
             endpoint: Some(MINTING_ENDPOINT_FP.to_string()),
         }),
+        redacted_data: None,
     }];
     let codex_state_on_custom = build_responses_body_for_provider(
         &request,
@@ -1899,18 +2144,27 @@ fn forkguard_fixed_endpoint_legacy_state_without_fingerprint_keeps_replaying() {
         0,
         Message {
             role: Role::Assistant,
-            content: vec![ContentBlock::Thinking {
-                thinking: SENTINEL.to_string(),
-                signature: None,
-                state: Some(OpaqueReasoningState {
-                    provider: ApiProvider::OpenaiCodex.as_str().to_string(),
-                    api: "openai-responses".to_string(),
-                    model: request.model.clone(),
-                    id: Some("rs_legacy_codex".to_string()),
-                    encrypted_content: "enc_legacy_codex_payload".to_string(),
-                    endpoint: None,
-                }),
-            }],
+            content: vec![
+                ContentBlock::Thinking {
+                    thinking: SENTINEL.to_string(),
+                    signature: None,
+                    state: Some(OpaqueReasoningState {
+                        provider: ApiProvider::OpenaiCodex.as_str().to_string(),
+                        api: "openai-responses".to_string(),
+                        model: request.model.clone(),
+                        id: Some("rs_legacy_codex".to_string()),
+                        encrypted_content: "enc_legacy_codex_payload".to_string(),
+                        endpoint: None,
+                    }),
+                    redacted_data: None,
+                },
+                // Text pairs the reasoning item with its produced message
+                // so the sequence satisfies the immediate-following-item rule.
+                ContentBlock::Text {
+                    text: "Done.".to_string(),
+                    cache_control: None,
+                },
+            ],
         },
     );
     let body = build_responses_body_for_provider(
@@ -1946,18 +2200,27 @@ fn forkguard_repointed_builtin_legacy_state_without_fingerprint_fails_closed() {
         0,
         Message {
             role: Role::Assistant,
-            content: vec![ContentBlock::Thinking {
-                thinking: SENTINEL.to_string(),
-                signature: None,
-                state: Some(OpaqueReasoningState {
-                    provider: ApiProvider::OpenaiCodex.as_str().to_string(),
-                    api: "openai-responses".to_string(),
-                    model: request.model.clone(),
-                    id: Some("rs_legacy_codex".to_string()),
-                    encrypted_content: "enc_legacy_codex_payload".to_string(),
-                    endpoint: None,
-                }),
-            }],
+            content: vec![
+                ContentBlock::Thinking {
+                    thinking: SENTINEL.to_string(),
+                    signature: None,
+                    state: Some(OpaqueReasoningState {
+                        provider: ApiProvider::OpenaiCodex.as_str().to_string(),
+                        api: "openai-responses".to_string(),
+                        model: request.model.clone(),
+                        id: Some("rs_legacy_codex".to_string()),
+                        encrypted_content: "enc_legacy_codex_payload".to_string(),
+                        endpoint: None,
+                    }),
+                    redacted_data: None,
+                },
+                // Text pairs the reasoning item with its produced message
+                // so the sequence satisfies the immediate-following-item rule.
+                ContentBlock::Text {
+                    text: "Done.".to_string(),
+                    cache_control: None,
+                },
+            ],
         },
     );
     let body = build_responses_body_for_provider(
@@ -2001,11 +2264,20 @@ fn forkguard_replay_never_rides_a_route_that_omits_the_include() {
         0,
         Message {
             role: Role::Assistant,
-            content: vec![ContentBlock::Thinking {
-                thinking: SENTINEL.to_string(),
-                signature: None,
-                state: Some(state),
-            }],
+            content: vec![
+                ContentBlock::Thinking {
+                    thinking: SENTINEL.to_string(),
+                    signature: None,
+                    state: Some(state),
+                    redacted_data: None,
+                },
+                // Text pairs the reasoning item with its produced message
+                // so the sequence satisfies the immediate-following-item rule.
+                ContentBlock::Text {
+                    text: "Done.".to_string(),
+                    cache_control: None,
+                },
+            ],
         },
     );
     let body = build_responses_body_for_provider(
@@ -2101,11 +2373,20 @@ async fn forkguard_custom_responses_captured_state_replays_on_the_next_turn() {
         0,
         Message {
             role: Role::Assistant,
-            content: vec![ContentBlock::Thinking {
-                thinking: String::new(),
-                signature: None,
-                state: Some(state),
-            }],
+            content: vec![
+                ContentBlock::Thinking {
+                    thinking: String::new(),
+                    signature: None,
+                    state: Some(state),
+                    redacted_data: None,
+                },
+                // Text pairs the reasoning item with its produced message
+                // so the sequence satisfies the immediate-following-item rule.
+                ContentBlock::Text {
+                    text: "Done.".to_string(),
+                    cache_control: None,
+                },
+            ],
         },
     );
     let prepared = client
@@ -2221,11 +2502,20 @@ async fn forkguard_capture_replay_drops_across_a_base_url_edit() {
         0,
         Message {
             role: Role::Assistant,
-            content: vec![ContentBlock::Thinking {
-                thinking: String::new(),
-                signature: None,
-                state: Some(captured),
-            }],
+            content: vec![
+                ContentBlock::Thinking {
+                    thinking: String::new(),
+                    signature: None,
+                    state: Some(captured),
+                    redacted_data: None,
+                },
+                // Text pairs the reasoning item with its produced message
+                // so the sequence satisfies the immediate-following-item rule.
+                ContentBlock::Text {
+                    text: "Done.".to_string(),
+                    cache_control: None,
+                },
+            ],
         },
     );
     let prepared = client

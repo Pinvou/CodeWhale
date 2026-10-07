@@ -157,6 +157,12 @@ impl DeepSeekClient {
             .reasoning_effort
             .as_deref()
             .map(|raw| raw.trim().to_ascii_lowercase());
+        // True when the wire carries thinking disabled (explicit
+        // `{"type":"disabled"}`, or omitted on a model that treats omission
+        // as off). Anthropic rejects thinking content in the current
+        // tool-use turn in that state, so the final tool turn gets its
+        // thinking blocks stripped below.
+        let mut thinking_disabled_on_wire = false;
         match effort.as_deref() {
             _ if is_minimax_provider && !is_minimax => {}
             Some("off" | "disabled" | "none" | "false")
@@ -170,6 +176,7 @@ impl DeepSeekClient {
                 // — pinned by modelstudio_messages_body_requests_thinking_
                 // with_budget. Re-checked 2026-08-04.
                 body["thinking"] = json!({ "type": "disabled" });
+                thinking_disabled_on_wire = true;
             }
             Some("off" | "disabled" | "none" | "false") => {}
             Some(level) if thinking_capable && supports_adaptive => {
@@ -194,6 +201,38 @@ impl DeepSeekClient {
                 }
             }
             _ => {}
+        }
+        // Every arm that leaves the request without a `thinking` field means
+        // thinking is off on the wire — explicit off above, a budget that
+        // could not be formed (max_tokens too small), or a non-thinking
+        // model. On models where omission means adaptive-on the blocks stay;
+        // everywhere else the current tool turn must lose them or the API
+        // rejects the request outright.
+        if body.get("thinking").is_none()
+            && !anthropic_omitted_thinking_defaults_to_adaptive(&model)
+        {
+            thinking_disabled_on_wire = true;
+        }
+        if thinking_disabled_on_wire
+            && let Some(messages) = body.get_mut("messages").and_then(Value::as_array_mut)
+        {
+            strip_thinking_from_final_tool_turn(messages);
+        }
+        // Redacted thinking payloads can only be decrypted by the platform
+        // that minted them (first-party API, Bedrock, Vertex). Anthropic-
+        // dialect gateways that merely speak the protocol would reject the
+        // unknown block type, so those routes drop the block instead of
+        // shipping a request they cannot validate.
+        if !is_native_anthropic_base_url(&self.base_url)
+            && let Some(messages) = body.get_mut("messages").and_then(Value::as_array_mut)
+        {
+            for message in messages.iter_mut() {
+                if let Some(blocks) = message.get_mut("content").and_then(Value::as_array_mut) {
+                    blocks.retain(|block| {
+                        block.get("type").and_then(Value::as_str) != Some("redacted_thinking")
+                    });
+                }
+            }
         }
 
         // Sampling parameters: Claude 4.7+ rejects temperature/top_p
@@ -441,8 +480,86 @@ impl DeepSeekClient {
         if let Some(usage) = value.get_mut("usage") {
             *usage = json!(parse_anthropic_usage(usage));
         }
+        normalize_redacted_thinking_blocks(&mut value);
         serde_json::from_value(value).context("Failed to decode Anthropic Messages response")
     }
+}
+
+/// Rewrite non-stream `redacted_thinking` content blocks into the
+/// provider-neutral shape (`Thinking` with `redacted_data`) before decoding.
+///
+/// The provider-neutral content model has no `redacted_thinking` tag, so an
+/// unknown block type would fail the whole response decode and lose the turn
+/// — including the tool calls. Streaming responses carry the same blocks as
+/// typed `ContentBlockStart::RedactedThinking` events and need no shim.
+fn normalize_redacted_thinking_blocks(value: &mut Value) {
+    let Some(content) = value.get_mut("content").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for block in content.iter_mut() {
+        if block.get("type").and_then(Value::as_str) == Some("redacted_thinking")
+            && let Some(data) = block.get("data").and_then(Value::as_str)
+        {
+            *block = json!({
+                "type": "thinking",
+                "thinking": "",
+                "redacted_data": data,
+            });
+        }
+    }
+}
+
+/// Models that run adaptive thinking when the `thinking` field is omitted.
+///
+/// The 2026 thinking docs are explicit that for the Claude 5 generation and
+/// the Fable/Mythos lines, omitting `thinking` is NOT "disabled" — the model
+/// runs adaptive thinking — so replayed signed thinking blocks stay valid.
+/// For every older model an omitted field means thinking is off, and the API
+/// rejects thinking content in the current tool-use turn once thinking is
+/// disabled, so those turns need their thinking blocks stripped.
+fn anthropic_omitted_thinking_defaults_to_adaptive(model: &str) -> bool {
+    let model = model.to_ascii_lowercase();
+    model.contains("fable")
+        || model.contains("mythos")
+        || model.contains("opus-4-7")
+        || model.contains("opus-4-8")
+        || ["opus-5", "sonnet-5", "haiku-5"]
+            .iter()
+            .any(|family| model.contains(family))
+}
+
+/// Remove thinking blocks from the final assistant message of a tool turn.
+///
+/// Anthropic fails the request when thinking content appears in the current
+/// tool-use turn while thinking is disabled; in every other position
+/// replayed thinking content is simply ignored, so only the tool turn is
+/// rewritten and cache-relevant history bytes stay untouched.
+fn strip_thinking_from_final_tool_turn(messages: &mut [Value]) {
+    let Some(last_assistant) = messages
+        .iter_mut()
+        .rev()
+        .find(|message| message.get("role").and_then(Value::as_str) == Some("assistant"))
+    else {
+        return;
+    };
+    let Some(blocks) = last_assistant
+        .get_mut("content")
+        .and_then(Value::as_array_mut)
+    else {
+        return;
+    };
+    let has_tool_use = blocks
+        .iter()
+        .any(|block| block.get("type").and_then(Value::as_str) == Some("tool_use"));
+    if !has_tool_use {
+        return;
+    }
+    blocks.retain(|block| {
+        !matches!(
+            block.get("type").and_then(Value::as_str),
+            Some("thinking") | Some("redacted_thinking")
+        )
+    });
 }
 
 /// Build the `/v1/messages` endpoint URL, tolerating base URLs that already
@@ -699,12 +816,26 @@ fn content_block_to_anthropic(block: &ContentBlock) -> Option<Value> {
         ContentBlock::Thinking {
             thinking,
             signature,
+            redacted_data,
             ..
         } => {
+            // A redacted thinking block is provider-encrypted content with no
+            // readable text: replay it byte-exact so the API can decrypt it,
+            // exactly like a signed block. Anthropic requires the complete
+            // unmodified block in tool loops and decrypts it to restore the
+            // turn's reasoning.
+            if let Some(data) = redacted_data {
+                return Some(json!({
+                    "type": "redacted_thinking",
+                    "data": data,
+                }));
+            }
             // Anthropic rejects unsigned thinking blocks on replay (and the
             // DeepSeek-era "(reasoning omitted)" placeholders mean nothing to
             // it), so only signed blocks are replayed — verbatim, signature
-            // included.
+            // included. An empty text with a signature is real content:
+            // newer Claude models ship `display: "omitted"` thinking, where
+            // the signature carries the encrypted full thinking.
             signature.as_ref().map(|signature| {
                 json!({
                     "type": "thinking",
@@ -1556,11 +1687,13 @@ mod tests {
                         thinking: "signed reasoning".to_string(),
                         signature: Some("sig-abc".to_string()),
                         state: None,
+                        redacted_data: None,
                     },
                     ContentBlock::Thinking {
                         thinking: "(reasoning omitted)".to_string(),
                         signature: None,
                         state: None,
+                        redacted_data: None,
                     },
                     ContentBlock::ToolUse {
                         id: "toolu_1".to_string(),
@@ -1599,6 +1732,417 @@ mod tests {
             body["messages"][2]["content"][0]["type"].as_str(),
             Some("tool_result")
         );
+    }
+
+    #[test]
+    fn body_replays_redacted_thinking_blocks_byte_exact() {
+        let client = test_client();
+        let mut request = request_with("claude-sonnet-4-6", None, None, None);
+        request.messages = vec![
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text {
+                    text: "do the thing".to_string(),
+                    cache_control: None,
+                }],
+            },
+            Message {
+                role: Role::Assistant,
+                content: vec![
+                    ContentBlock::Thinking {
+                        thinking: String::new(),
+                        signature: None,
+                        state: None,
+                        redacted_data: Some("ENC_REDACTED_PAYLOAD".to_string()),
+                    },
+                    ContentBlock::ToolUse {
+                        id: "toolu_1".to_string(),
+                        name: "read_file".to_string(),
+                        input: json!({"path": "a.txt"}),
+                        caller: None,
+                        thought_signature: None,
+                    },
+                ],
+            },
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: "toolu_1".to_string(),
+                    content: "contents".to_string(),
+                    is_error: None,
+                    content_blocks: None,
+                }],
+            },
+        ];
+
+        let body = client.build_anthropic_body(&request, true);
+        let assistant = &body["messages"][1]["content"];
+        assert_eq!(assistant.as_array().map(Vec::len), Some(2));
+        assert_eq!(assistant[0]["type"].as_str(), Some("redacted_thinking"));
+        assert_eq!(assistant[0]["data"].as_str(), Some("ENC_REDACTED_PAYLOAD"));
+        assert_eq!(assistant[1]["type"].as_str(), Some("tool_use"));
+    }
+
+    #[test]
+    fn body_replays_signature_only_omitted_display_thinking() {
+        // Claude 4.6+ ships `display: "omitted"` thinking: empty text with
+        // the encrypted signature. Dropping it would strip the block
+        // Anthropic requires back in tool loops.
+        let client = test_client();
+        let mut request = request_with("claude-sonnet-4-6", None, None, None);
+        request.messages = vec![
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text {
+                    text: "do the thing".to_string(),
+                    cache_control: None,
+                }],
+            },
+            Message {
+                role: Role::Assistant,
+                content: vec![
+                    ContentBlock::Thinking {
+                        thinking: String::new(),
+                        signature: Some("sig-omitted".to_string()),
+                        state: None,
+                        redacted_data: None,
+                    },
+                    ContentBlock::ToolUse {
+                        id: "toolu_1".to_string(),
+                        name: "read_file".to_string(),
+                        input: json!({}),
+                        caller: None,
+                        thought_signature: None,
+                    },
+                ],
+            },
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: "toolu_1".to_string(),
+                    content: "contents".to_string(),
+                    is_error: None,
+                    content_blocks: None,
+                }],
+            },
+        ];
+
+        let body = client.build_anthropic_body(&request, true);
+        let assistant = &body["messages"][1]["content"];
+        assert_eq!(assistant.as_array().map(Vec::len), Some(2));
+        assert_eq!(assistant[0]["type"].as_str(), Some("thinking"));
+        assert_eq!(assistant[0]["thinking"].as_str(), Some(""));
+        assert_eq!(assistant[0]["signature"].as_str(), Some("sig-omitted"));
+    }
+
+    #[test]
+    fn body_preserves_multi_block_thinking_sequence_in_wire_order() {
+        // Adaptive/interleaved thinking emits several thinking blocks per
+        // assistant turn; the API requires the entire sequence replayed
+        // unmodified and in order.
+        let client = test_client();
+        let mut request = request_with("claude-sonnet-4-6", None, None, None);
+        request.messages = vec![Message {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::Thinking {
+                    thinking: "first block".to_string(),
+                    signature: Some("sig-1".to_string()),
+                    state: None,
+                    redacted_data: None,
+                },
+                ContentBlock::Thinking {
+                    thinking: String::new(),
+                    signature: None,
+                    state: None,
+                    redacted_data: Some("ENC_SECOND".to_string()),
+                },
+                ContentBlock::Thinking {
+                    thinking: "third block".to_string(),
+                    signature: Some("sig-3".to_string()),
+                    state: None,
+                    redacted_data: None,
+                },
+                ContentBlock::ToolUse {
+                    id: "toolu_1".to_string(),
+                    name: "read_file".to_string(),
+                    input: json!({}),
+                    caller: None,
+                    thought_signature: None,
+                },
+            ],
+        }];
+
+        let body = client.build_anthropic_body(&request, true);
+        let assistant = &body["messages"][0]["content"];
+        let types: Vec<&str> = assistant
+            .as_array()
+            .expect("content array")
+            .iter()
+            .map(|block| block["type"].as_str().expect("block type"))
+            .collect();
+        assert_eq!(
+            types,
+            vec!["thinking", "redacted_thinking", "thinking", "tool_use"],
+            "wire order must match the captured sequence: {assistant}"
+        );
+        assert_eq!(assistant[0]["signature"].as_str(), Some("sig-1"));
+        assert_eq!(assistant[1]["data"].as_str(), Some("ENC_SECOND"));
+        assert_eq!(assistant[2]["signature"].as_str(), Some("sig-3"));
+    }
+
+    #[test]
+    fn disabled_thinking_strips_thinking_from_the_final_tool_turn() {
+        let client = test_client();
+        let mut request = request_with("claude-sonnet-4-5", Some("off"), None, None);
+        request.messages = vec![
+            Message {
+                role: Role::Assistant,
+                content: vec![
+                    ContentBlock::Thinking {
+                        thinking: "older turn reasoning".to_string(),
+                        signature: Some("sig-old".to_string()),
+                        state: None,
+                        redacted_data: None,
+                    },
+                    ContentBlock::Text {
+                        text: "older answer".to_string(),
+                        cache_control: None,
+                    },
+                ],
+            },
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text {
+                    text: "continue with tools".to_string(),
+                    cache_control: None,
+                }],
+            },
+            Message {
+                role: Role::Assistant,
+                content: vec![
+                    ContentBlock::Thinking {
+                        thinking: "current tool turn reasoning".to_string(),
+                        signature: Some("sig-current".to_string()),
+                        state: None,
+                        redacted_data: None,
+                    },
+                    ContentBlock::ToolUse {
+                        id: "toolu_1".to_string(),
+                        name: "read_file".to_string(),
+                        input: json!({}),
+                        caller: None,
+                        thought_signature: None,
+                    },
+                ],
+            },
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: "toolu_1".to_string(),
+                    content: "contents".to_string(),
+                    is_error: None,
+                    content_blocks: None,
+                }],
+            },
+        ];
+
+        let body = client.build_anthropic_body(&request, true);
+        // Thinking is disabled on the wire (omitted param on a pre-5 model):
+        // the current tool-use turn must lose its thinking block, older
+        // positions are server-ignored and stay untouched.
+        assert!(body.get("thinking").is_none(), "{body}");
+        let older = &body["messages"][0]["content"];
+        assert_eq!(older[0]["type"].as_str(), Some("thinking"));
+        let current = &body["messages"][2]["content"];
+        assert_eq!(current.as_array().map(Vec::len), Some(1));
+        assert_eq!(current[0]["type"].as_str(), Some("tool_use"));
+    }
+
+    #[test]
+    fn disabled_thinking_keeps_blocks_on_adaptive_by_default_models() {
+        // Claude 5 generation runs adaptive thinking when the `thinking`
+        // field is omitted, so replayed thinking stays valid and must not be
+        // stripped from the final tool turn.
+        let client = test_client();
+        let mut request = request_with("claude-sonnet-5", Some("off"), None, None);
+        request.messages = vec![Message {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::Thinking {
+                    thinking: "current tool turn reasoning".to_string(),
+                    signature: Some("sig-current".to_string()),
+                    state: None,
+                    redacted_data: None,
+                },
+                ContentBlock::ToolUse {
+                    id: "toolu_1".to_string(),
+                    name: "read_file".to_string(),
+                    input: json!({}),
+                    caller: None,
+                    thought_signature: None,
+                },
+            ],
+        }];
+
+        let body = client.build_anthropic_body(&request, true);
+        let assistant = &body["messages"][0]["content"];
+        assert_eq!(assistant.as_array().map(Vec::len), Some(2));
+        assert_eq!(assistant[0]["type"].as_str(), Some("thinking"));
+    }
+
+    #[test]
+    fn enabled_thinking_never_strips_the_final_tool_turn() {
+        let client = test_client();
+        let mut request = request_with("claude-sonnet-4-6", Some("high"), None, None);
+        request.max_tokens = 8_192;
+        request.messages = vec![Message {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::Thinking {
+                    thinking: "current tool turn reasoning".to_string(),
+                    signature: Some("sig-current".to_string()),
+                    state: None,
+                    redacted_data: None,
+                },
+                ContentBlock::ToolUse {
+                    id: "toolu_1".to_string(),
+                    name: "read_file".to_string(),
+                    input: json!({}),
+                    caller: None,
+                    thought_signature: None,
+                },
+            ],
+        }];
+
+        let body = client.build_anthropic_body(&request, true);
+        assert_eq!(
+            body.pointer("/thinking/type").and_then(Value::as_str),
+            Some("adaptive"),
+            "native routes run thinking on for a real effort tier: {body}"
+        );
+        let assistant = &body["messages"][0]["content"];
+        assert_eq!(assistant.as_array().map(Vec::len), Some(2));
+        assert_eq!(assistant[0]["type"].as_str(), Some("thinking"));
+    }
+
+    #[test]
+    fn unformable_thinking_budget_counts_as_disabled_and_strips() {
+        // On a gateway without adaptive support, a max_tokens too small for
+        // the minimum budget leaves the request without a `thinking` field —
+        // thinking is off on the wire, so the current tool turn must lose
+        // its thinking block exactly like an explicit off.
+        let client = anthropic_test_client(Some("https://gateway.example.com/anthropic"));
+        let mut request = request_with("claude-sonnet-4-6", Some("high"), None, None);
+        request.max_tokens = 1_024;
+        request.messages = vec![Message {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::Thinking {
+                    thinking: "current tool turn reasoning".to_string(),
+                    signature: Some("sig-current".to_string()),
+                    state: None,
+                    redacted_data: None,
+                },
+                ContentBlock::ToolUse {
+                    id: "toolu_1".to_string(),
+                    name: "read_file".to_string(),
+                    input: json!({}),
+                    caller: None,
+                    thought_signature: None,
+                },
+            ],
+        }];
+
+        let body = client.build_anthropic_body(&request, true);
+        assert!(body.get("thinking").is_none(), "{body}");
+        let assistant = &body["messages"][0]["content"];
+        assert_eq!(assistant.as_array().map(Vec::len), Some(1));
+        assert_eq!(assistant[0]["type"].as_str(), Some("tool_use"));
+    }
+
+    #[test]
+    fn non_native_gateways_never_receive_redacted_thinking_blocks() {
+        // Redacted payloads can only be decrypted by the platform that minted
+        // them; a Messages-compatible gateway would reject the unknown type.
+        let client = anthropic_test_client(Some("https://gateway.example.com/anthropic"));
+        let mut request = request_with("claude-sonnet-4-6", None, None, None);
+        request.messages = vec![Message {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::Thinking {
+                    thinking: String::new(),
+                    signature: None,
+                    state: None,
+                    redacted_data: Some("ENC_REDACTED".to_string()),
+                },
+                ContentBlock::ToolUse {
+                    id: "toolu_1".to_string(),
+                    name: "read_file".to_string(),
+                    input: json!({}),
+                    caller: None,
+                    thought_signature: None,
+                },
+            ],
+        }];
+
+        let body = client.build_anthropic_body(&request, true);
+        let wire = body.to_string();
+        assert!(
+            !wire.contains("redacted_thinking") && !wire.contains("ENC_REDACTED"),
+            "non-native gateway must not receive redacted blocks: {body}"
+        );
+        let assistant = &body["messages"][0]["content"];
+        assert_eq!(assistant.as_array().map(Vec::len), Some(1));
+
+        // First-party Anthropic keeps the block: it can decrypt it.
+        let native = test_client().build_anthropic_body(&request, true);
+        assert!(
+            native.to_string().contains("ENC_REDACTED"),
+            "first-party route must replay redacted blocks: {native}"
+        );
+    }
+
+    #[test]
+    fn non_stream_redacted_thinking_blocks_decode_into_redacted_data() {
+        let payload = json!({
+            "id": "msg_1",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-sonnet-4-6",
+            "content": [
+                { "type": "redacted_thinking", "data": "ENC_FROM_API" },
+                { "type": "text", "text": "answer" }
+            ],
+            "stop_reason": "end_turn",
+            "stop_sequence": null,
+            "usage": {
+                "input_tokens": 1,
+                "output_tokens": 1
+            }
+        });
+
+        // An unknown block tag used to fail the whole response decode; the
+        // shim must rewrite it into the provider-neutral shape instead.
+        let mut value = payload;
+        if let Some(usage) = value.get_mut("usage") {
+            *usage = json!(parse_anthropic_usage(usage));
+        }
+        normalize_redacted_thinking_blocks(&mut value);
+        let response: MessageResponse = serde_json::from_value(value)
+            .expect("redacted_thinking must not fail the response decode");
+        assert_eq!(response.content.len(), 2);
+        match &response.content[0] {
+            ContentBlock::Thinking {
+                thinking,
+                redacted_data,
+                ..
+            } => {
+                assert_eq!(redacted_data.as_deref(), Some("ENC_FROM_API"));
+                assert!(thinking.is_empty());
+            }
+            other => panic!("expected thinking block, got {other:?}"),
+        }
     }
 
     #[test]

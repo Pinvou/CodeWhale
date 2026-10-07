@@ -95,6 +95,7 @@ pub(crate) fn push_assistant_message(
             thinking,
             signature: None,
             state: None,
+            redacted_data: None,
         });
     }
     if !text.is_empty() {

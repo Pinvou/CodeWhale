@@ -11,6 +11,7 @@ use anyhow::{Context, Result};
 use codewhale_config::provider::WireFormat;
 use codewhale_config::provider_base_url_is_official;
 use serde_json::{Value, json};
+use std::collections::HashSet;
 
 use crate::config::ApiProvider;
 use crate::llm_client::StreamEventBox;
@@ -569,27 +570,41 @@ impl DeepSeekClient {
                                         (reasoning_origin.as_ref(), event.get("item"))
                                         && item.get("type").and_then(Value::as_str)
                                             == Some("reasoning")
-                                        && let Some(encrypted_content) = item
+                                    {
+                                        match item
                                             .get("encrypted_content")
                                             .and_then(Value::as_str)
                                             .filter(|value| !value.is_empty())
-                                    {
-                                        yield Ok(StreamEvent::ContentBlockDelta {
-                                            index: idx,
-                                            delta: Delta::ReasoningStateDelta {
-                                                state: OpaqueReasoningState {
-                                                    provider: provider.clone(),
-                                                    api: "openai-responses".to_string(),
-                                                    model: model.clone(),
-                                                    id: item
-                                                        .get("id")
-                                                        .and_then(Value::as_str)
-                                                        .map(str::to_string),
-                                                    encrypted_content: encrypted_content.to_string(),
-                                                    endpoint: Some(endpoint.clone()),
-                                                },
-                                            },
-                                        });
+                                        {
+                                            Some(encrypted_content) => {
+                                                yield Ok(StreamEvent::ContentBlockDelta {
+                                                    index: idx,
+                                                    delta: Delta::ReasoningStateDelta {
+                                                        state: OpaqueReasoningState {
+                                                            provider: provider.clone(),
+                                                            api: "openai-responses".to_string(),
+                                                            model: model.clone(),
+                                                            id: item
+                                                                .get("id")
+                                                                .and_then(Value::as_str)
+                                                                .map(str::to_string),
+                                                            encrypted_content:
+                                                                encrypted_content.to_string(),
+                                                            endpoint: Some(endpoint.clone()),
+                                                        },
+                                                    },
+                                                });
+                                            }
+                                            None => {
+                                                // With `store:false` this item
+                                                // cannot be replayed; its
+                                                // paired tool calls would be
+                                                // rejected on the next request.
+                                                logging::warn(
+                                                    "Responses reasoning item completed without encrypted_content; replay will omit it and its paired tool calls may be rejected by the provider",
+                                                );
+                                            }
+                                        }
                                     }
                                     yield Ok(StreamEvent::ContentBlockStop { index: idx });
                                     current_block_index = None;
@@ -687,7 +702,15 @@ impl DeepSeekClient {
                             thinking,
                             signature: None,
                             state: None,
+                            redacted_data: None,
                         },
+                        // Redacted thinking does not occur on Responses
+                        // routes (encrypted reasoning rides the reasoning
+                        // item's `encrypted_content` instead); keep the
+                        // match total without inventing a block shape.
+                        ContentBlockStart::RedactedThinking { .. } => {
+                            continue;
+                        }
                         ContentBlockStart::ToolUse {
                             id,
                             name,
@@ -734,6 +757,10 @@ impl DeepSeekClient {
                         Delta::SignatureDelta { .. } => {
                             // Anthropic-native signature deltas never occur on
                             // the Responses bridge (#3014).
+                        }
+                        Delta::ToolThoughtSignatureDelta { .. } => {
+                            // Google compat-route signatures never occur on
+                            // the Responses bridge.
                         }
                         Delta::ReasoningStateDelta { state } => {
                             if let Some(ContentBlock::Thinking {
@@ -791,10 +818,46 @@ pub(super) fn responses_tool_output(content: &str, content_blocks: Option<&[Valu
     json!(output)
 }
 
+/// Whether an assistant message carries tool calls.
+fn message_has_tool_calls(msg: &crate::models::Message) -> bool {
+    msg.content
+        .iter()
+        .any(|block| matches!(block, ContentBlock::ToolUse { .. }))
+}
+
+/// Whether any thinking block of this message replays its encrypted
+/// reasoning on this route: same provider, same Responses API, same model.
+fn message_has_replayable_reasoning(
+    msg: &crate::models::Message,
+    provider: &ApiProvider,
+    model: &str,
+) -> bool {
+    msg.content.iter().any(|block| {
+        matches!(
+            block,
+            ContentBlock::Thinking {
+                state: Some(state),
+                redacted_data: None,
+                ..
+            } if state.provider == provider.as_str()
+                && state.api == "openai-responses"
+                && state.model == model
+        )
+    })
+}
+
 /// Convert Codewhale messages to Responses API input items.
 ///
 /// `reasoning_provider_tag` scopes opaque-reasoning replay to the endpoint
 /// that minted the state; see [`build_responses_body_for_provider`].
+///
+/// Pairing integrity: with `store:false`, every `function_call` item must be
+/// immediately preceded by the encrypted `reasoning` item that produced it,
+/// and every `reasoning` item must be immediately followed by its produced
+/// item. When a message's reasoning is unusable on this route (captured on a
+/// different model or provider, or by a build that did not capture it), its
+/// whole tool chain — reasoning, function calls, and their outputs — is
+/// dropped instead of shipping a request the API rejects outright.
 pub(super) fn convert_messages_to_responses_input(
     request: &MessageRequest,
     provider: ApiProvider,
@@ -820,6 +883,7 @@ pub(super) fn convert_messages_to_responses_input(
     // cannot drift from the include gate.
     let replays_encrypted_reasoning = responses_route_sends_encrypted_reasoning_include(provider);
     let mut items = Vec::new();
+    let mut orphaned_call_ids: HashSet<String> = HashSet::new();
 
     for msg in &request.messages {
         // Channel selection lives in the shared placement table; this adapter
@@ -857,6 +921,9 @@ pub(super) fn convert_messages_to_responses_input(
                                 content_items = Vec::new();
                             }
                             let (call_id, _item_id) = parse_tool_use_id(tool_use_id);
+                            if orphaned_call_ids.contains(&call_id) {
+                                continue;
+                            }
                             items.push(json!({
                                 "type": "function_call_output",
                                 "call_id": call_id,
@@ -875,6 +942,30 @@ pub(super) fn convert_messages_to_responses_input(
                 }
             }
             RolePlacement::Assistant | RolePlacement::InterruptedAssistant => {
+                // Tool calls whose producing reasoning is not replayable on
+                // this route would ship as orphaned `function_call` items —
+                // an automatic 400 on reasoning models. Drop the whole chain
+                // instead; the tool outputs are filtered out of the following
+                // user/tool messages via `orphaned_call_ids`. Models that
+                // never reason legitimately emit bare calls, so the gate only
+                // applies to reasoning-capable request models.
+                let mut chain_dropped = false;
+                if !is_deepseek
+                    && crate::models::model_supports_reasoning(&request.model)
+                    && message_has_tool_calls(msg)
+                    && !message_has_replayable_reasoning(msg, &provider, &request.model)
+                {
+                    chain_dropped = true;
+                    for block in &msg.content {
+                        if let ContentBlock::ToolUse { id, .. } = block {
+                            let (call_id, _item_id) = parse_tool_use_id(id);
+                            orphaned_call_ids.insert(call_id);
+                        }
+                    }
+                    logging::warn(
+                        "Responses replay dropped an assistant tool chain whose encrypted reasoning is unavailable for this route/model (captured on a different model or provider, or by an older build); its tool calls and outputs are omitted to keep the request valid",
+                    );
+                }
                 for block in &msg.content {
                     match block {
                         ContentBlock::Text { text, .. } => {
@@ -899,6 +990,9 @@ pub(super) fn convert_messages_to_responses_input(
                         ContentBlock::ToolUse {
                             id, name, input, ..
                         } => {
+                            if chain_dropped {
+                                continue;
+                            }
                             let (call_id, _item_id) = parse_tool_use_id(id);
                             items.push(json!({
                                 "type": "function_call",
@@ -908,8 +1002,17 @@ pub(super) fn convert_messages_to_responses_input(
                             }));
                         }
                         ContentBlock::Thinking {
-                            thinking, state, ..
+                            thinking,
+                            state,
+                            redacted_data,
+                            ..
                         } => {
+                            if chain_dropped || redacted_data.is_some() {
+                                // Redacted Anthropic payloads have no
+                                // Responses representation; skip rather than
+                                // emit an empty reasoning item.
+                                continue;
+                            }
                             if let Some(state) = state {
                                 // Endpoint-scoped replay: the tag must match
                                 // the endpoint this request is bound to
@@ -980,6 +1083,12 @@ pub(super) fn convert_messages_to_responses_input(
                             } = block
                             {
                                 let (call_id, _item_id) = parse_tool_use_id(tool_use_id);
+                                if orphaned_call_ids.contains(&call_id) {
+                                    // The call was chain-dropped with its
+                                    // reasoning; shipping the bare output is
+                                    // another pairing 400.
+                                    continue;
+                                }
                                 items.push(json!({
                                     "type": "function_call_output",
                                     "call_id": call_id,
@@ -1022,6 +1131,40 @@ pub(super) fn convert_messages_to_responses_input(
             // keeping this arm empty is fail-closed defense in depth.
             RolePlacement::Rejected => {}
         }
+    }
+
+    if !is_deepseek {
+        // A `reasoning` item must be immediately followed by the item it
+        // produced (its function_call, or the assistant message for text
+        // output). An orphaned reasoning item — in practice a turn that was
+        // interrupted before producing any output — makes the whole request
+        // fail with "was provided without its required following item", so
+        // it is dropped here.
+        let mut keep = vec![true; items.len()];
+        for (index, item) in items.iter().enumerate() {
+            if item.get("type").and_then(Value::as_str) != Some("reasoning") {
+                continue;
+            }
+            let followed_by_produced_item = items.get(index + 1).is_some_and(|next| {
+                next.get("type").and_then(Value::as_str) == Some("function_call")
+                    || (next.get("type").and_then(Value::as_str) == Some("message")
+                        && next.get("role").and_then(Value::as_str) == Some("assistant"))
+            });
+            if !followed_by_produced_item {
+                keep[index] = false;
+            }
+        }
+        let mut paired = Vec::with_capacity(items.len());
+        for (index, item) in items.into_iter().enumerate() {
+            if keep[index] {
+                paired.push(item);
+            } else {
+                logging::warn(
+                    "Responses replay dropped an orphaned reasoning item with no following output item",
+                );
+            }
+        }
+        items = paired;
     }
 
     items

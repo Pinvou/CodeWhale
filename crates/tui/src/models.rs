@@ -732,6 +732,14 @@ pub enum ContentBlockStart {
     Text { text: String },
     #[serde(rename = "thinking")]
     Thinking { thinking: String },
+    /// Anthropic `redacted_thinking`: the provider withheld the whole block
+    /// for safety and replaced it with an encrypted payload that arrives
+    /// complete on the start event (no deltas). It must be captured and
+    /// replayed byte-exact — the API decrypts it to restore the turn's
+    /// reasoning, and dropping it makes the next tool-loop request fail with
+    /// "Expected `thinking` or `redacted_thinking`, but found `tool_use`".
+    #[serde(rename = "redacted_thinking")]
+    RedactedThinking { data: String },
     #[serde(rename = "tool_use")]
     ToolUse {
         id: String,
@@ -768,6 +776,13 @@ pub enum Delta {
     /// of a thinking block on the native Messages stream.
     #[serde(rename = "signature_delta")]
     SignatureDelta { signature: String },
+    /// Google thought signature that arrived on a continuation chunk of an
+    /// already-started tool call (`delta.tool_calls[].extra_content.google.
+    /// thought_signature`). Gemini 3 signs the first function-call part of a
+    /// step, and some gateways split the signed chunk from the chunk that
+    /// opens the tool call, so the signature must attach after start.
+    #[serde(rename = "tool_thought_signature_delta")]
+    ToolThoughtSignatureDelta { signature: String },
     /// Opaque Responses reasoning continuity, attached only when the provider
     /// returns an encrypted item on the exact originating route.
     #[serde(rename = "reasoning_state_delta")]
@@ -787,6 +802,24 @@ mod tests {
     use super::*;
     use std::any::TypeId;
     use std::collections::BTreeMap;
+
+    #[test]
+    fn redacted_thinking_stream_start_decodes_with_its_payload() {
+        // A safeguard-triggered redacted block arrives complete on the start
+        // event. Before the variant existed this line failed the whole SSE
+        // event decode and lost the turn.
+        let block: ContentBlockStart = serde_json::from_value(serde_json::json!({
+            "type": "redacted_thinking",
+            "data": "ENC_REDACTED_PAYLOAD",
+        }))
+        .expect("redacted_thinking must decode");
+        match block {
+            ContentBlockStart::RedactedThinking { data } => {
+                assert_eq!(data, "ENC_REDACTED_PAYLOAD");
+            }
+            other => panic!("expected RedactedThinking, got {other:?}"),
+        }
+    }
 
     #[test]
     fn output_limit_stop_reason_accepts_provider_aliases_only() {

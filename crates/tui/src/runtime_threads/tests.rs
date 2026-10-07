@@ -4684,6 +4684,7 @@ async fn seed_thread_keeps_tool_results_on_preceding_turn() -> Result<()> {
                     thinking: "need a tool".to_string(),
                     signature: Some("sig-1".to_string()),
                     state: None,
+                    redacted_data: None,
                 },
                 ContentBlock::ToolUse {
                     id: "tool-1".to_string(),
@@ -4811,6 +4812,7 @@ async fn seeded_session_records_carry_a_total_order() -> Result<()> {
                     thinking: "consider".to_string(),
                     signature: None,
                     state: None,
+                    redacted_data: None,
                 },
                 ContentBlock::ToolUse {
                     id: "tool-1".to_string(),

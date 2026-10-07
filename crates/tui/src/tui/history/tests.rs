@@ -1915,11 +1915,13 @@ fn restored_history_drops_the_wire_reasoning_placeholder() {
                 thinking: "(reasoning omitted)".to_string(),
                 signature: None,
                 state: None,
+                redacted_data: None,
             },
             ContentBlock::Thinking {
                 thinking: "Actual model reasoning".to_string(),
                 signature: None,
                 state: None,
+                redacted_data: None,
             },
         ],
     };

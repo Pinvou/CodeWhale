@@ -1285,6 +1285,7 @@ mod tests {
                         thinking: "private chain of thought".to_string(),
                         signature: Some("signature-secret".to_string()),
                         state: None,
+                        redacted_data: None,
                     },
                     ContentBlock::ToolUse {
                         id: "call-7".to_string(),

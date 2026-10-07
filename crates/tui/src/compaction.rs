@@ -2610,6 +2610,7 @@ mod tests {
                         signature: None,
                         state: None,
                         thinking: thinking.clone(),
+                        redacted_data: None,
                     },
                     ContentBlock::ToolUse {
                         id: "tool-1".to_string(),

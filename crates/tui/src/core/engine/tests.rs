@@ -14971,6 +14971,258 @@ fn sandbox_policy_for_turn_returns_correct_default_policy_per_mode() {
     ));
 }
 
+/// Serves one multi-block thinking + tool-use turn, then a plain closing
+/// turn, capturing every outgoing request.
+struct MultiThinkingStreamClient {
+    requests: std::sync::Mutex<Vec<crate::models::MessageRequest>>,
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl crate::core::model_client::ModelClient for MultiThinkingStreamClient {
+    fn provider_name(&self) -> &str {
+        "anthropic-dialect-test"
+    }
+
+    fn model(&self) -> &str {
+        "claude-sonnet-4-6"
+    }
+
+    async fn create_message(
+        &self,
+        _request: crate::models::MessageRequest,
+    ) -> anyhow::Result<crate::models::MessageResponse> {
+        anyhow::bail!("multi-thinking regression uses the streaming model boundary")
+    }
+
+    async fn create_message_stream(
+        &self,
+        request: crate::models::MessageRequest,
+    ) -> anyhow::Result<crate::llm_client::StreamEventBox> {
+        let call = self
+            .calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            .saturating_add(1);
+        self.requests
+            .lock()
+            .expect("multi-thinking request lock")
+            .push(request);
+        use crate::models::{ContentBlockStart, Delta, MessageDelta, StreamEvent};
+        let events: Vec<StreamEvent> = if call == 1 {
+            vec![
+                crate::llm_client::mock::canned::message_start("msg_multi"),
+                // Block 0: readable thinking with a signature.
+                StreamEvent::ContentBlockStart {
+                    index: 0,
+                    content_block: ContentBlockStart::Thinking {
+                        thinking: "first block".to_string(),
+                    },
+                },
+                StreamEvent::ContentBlockDelta {
+                    index: 0,
+                    delta: Delta::ThinkingDelta {
+                        thinking: " continued".to_string(),
+                    },
+                },
+                StreamEvent::ContentBlockDelta {
+                    index: 0,
+                    delta: Delta::SignatureDelta {
+                        signature: "sig-1".to_string(),
+                    },
+                },
+                StreamEvent::ContentBlockStop { index: 0 },
+                // Block 1: `display: "omitted"` shape — empty text, real
+                // signature.
+                StreamEvent::ContentBlockStart {
+                    index: 1,
+                    content_block: ContentBlockStart::Thinking {
+                        thinking: String::new(),
+                    },
+                },
+                StreamEvent::ContentBlockDelta {
+                    index: 1,
+                    delta: Delta::SignatureDelta {
+                        signature: "sig-2".to_string(),
+                    },
+                },
+                StreamEvent::ContentBlockStop { index: 1 },
+                // Block 2: redacted thinking, complete at start.
+                StreamEvent::ContentBlockStart {
+                    index: 2,
+                    content_block: ContentBlockStart::RedactedThinking {
+                        data: "ENC_REDACTED_1".to_string(),
+                    },
+                },
+                StreamEvent::ContentBlockStop { index: 2 },
+                // Tool use closes the turn.
+                StreamEvent::ContentBlockStart {
+                    index: 3,
+                    content_block: ContentBlockStart::ToolUse {
+                        id: "toolu_multi".to_string(),
+                        name: "read_file".to_string(),
+                        input: json!({}),
+                        caller: None,
+                        thought_signature: None,
+                    },
+                },
+                StreamEvent::ContentBlockDelta {
+                    index: 3,
+                    delta: Delta::InputJsonDelta {
+                        partial_json: r#"{"path":"a.txt"}"#.to_string(),
+                    },
+                },
+                StreamEvent::ContentBlockStop { index: 3 },
+                StreamEvent::MessageDelta {
+                    delta: MessageDelta {
+                        stop_reason: Some("tool_use".to_string()),
+                        stop_sequence: None,
+                    },
+                    usage: None,
+                },
+                StreamEvent::MessageStop,
+            ]
+        } else {
+            if call > 2 {
+                anyhow::bail!("unexpected multi-thinking request #{call}");
+            }
+            crate::llm_client::mock::canned::simple_text_turn("done")
+        };
+        let events = events.into_iter().map(Ok);
+        Ok(Box::pin(futures_util::stream::iter(events)))
+    }
+
+    async fn health_check(&self) -> anyhow::Result<bool> {
+        Ok(true)
+    }
+}
+
+/// Adaptive/interleaved thinking emits several thinking blocks per assistant
+/// turn, and Anthropic requires the entire sequence — readable, signature-only
+/// (`display: "omitted"`), and redacted — replayed unmodified and in order on
+/// the follow-up request.
+#[tokio::test]
+async fn multi_block_and_redacted_thinking_persist_into_followup_requests() {
+    let config = Config {
+        provider: Some("custom-a".to_string()),
+        providers: Some(crate::config::ProvidersConfig {
+            custom: HashMap::from([(
+                "custom-a".to_string(),
+                crate::config::ProviderConfig {
+                    kind: Some("openai-compatible".to_string()),
+                    base_url: Some("http://127.0.0.1:18191/v1".to_string()),
+                    model: Some("claude-sonnet-4-6".to_string()),
+                    api_key: Some("local-test-key".to_string()),
+                    ..crate::config::ProviderConfig::default()
+                },
+            )]),
+            ..crate::config::ProvidersConfig::default()
+        }),
+        ..Config::default()
+    };
+    let engine_config = EngineConfig {
+        max_steps: 2,
+        snapshots_enabled: false,
+        terminal_chrome_enabled: false,
+        ..EngineConfig::default()
+    };
+    let client = std::sync::Arc::new(MultiThinkingStreamClient {
+        requests: std::sync::Mutex::new(Vec::new()),
+        calls: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let shared: crate::core::model_client::SharedModelClient = client.clone();
+    let (engine, handle) = Engine::new_with_model_client(engine_config, &config, shared);
+    let _run = tokio::spawn(engine.run());
+
+    handle
+        .send(Op::SendMessage {
+            content: "inspect the file".to_string(),
+            mode: AppMode::Agent,
+            route: resolved_route_for_test(&config, "claude-sonnet-4-6"),
+            compaction: Box::new(CompactionConfig::default()),
+            goal_objective: None,
+            goal_token_budget: None,
+            goal_status: crate::tools::goal::GoalStatus::Active,
+            reasoning_effort: None,
+            reasoning_effort_auto: false,
+            auto_model: false,
+            allow_shell: false,
+            trust_mode: false,
+            auto_approve: false,
+            approval_mode: crate::tui::approval::ApprovalMode::Suggest,
+            translation_enabled: false,
+            allowed_tools: None,
+            dynamic_tools: Vec::new(),
+            hook_executor: None,
+            verbosity: None,
+            provenance: UserInputProvenance::ExternalUser,
+            turn_tool_security: None,
+            submission_id: None,
+        })
+        .await
+        .expect("send op");
+
+    // Wait for the turn to complete.
+    let mut completed = false;
+    for _ in 0..200 {
+        {
+            let mut rx = handle.rx_event.write().await;
+            if let Ok(Some(Event::TurnComplete { .. })) =
+                tokio::time::timeout(Duration::from_millis(200), rx.recv()).await
+            {
+                completed = true;
+                break;
+            }
+        }
+    }
+    assert!(completed, "turn did not complete");
+
+    let requests = client.requests.lock().expect("request lock").clone();
+    assert!(requests.len() >= 2, "expected a follow-up request");
+    let followup = &requests[1];
+    let assistant = followup
+        .messages
+        .iter()
+        .rev()
+        .find(|message| message.role == Role::Assistant)
+        .expect("follow-up request must contain the prior assistant turn");
+    let mut blocks = assistant.content.iter();
+    match (
+        blocks.next(),
+        blocks.next(),
+        blocks.next(),
+        blocks.next(),
+        blocks.next(),
+    ) {
+        (
+            Some(ContentBlock::Thinking {
+                thinking,
+                signature,
+                redacted_data: None,
+                ..
+            }),
+            Some(ContentBlock::Thinking {
+                thinking: empty,
+                signature: sig2,
+                redacted_data: None,
+                ..
+            }),
+            Some(ContentBlock::Thinking {
+                redacted_data: Some(data),
+                ..
+            }),
+            Some(ContentBlock::ToolUse { .. }),
+            None,
+        ) => {
+            assert_eq!(thinking, "first block continued");
+            assert_eq!(signature.as_deref(), Some("sig-1"));
+            assert!(empty.is_empty(), "omitted-display text stays empty");
+            assert_eq!(sig2.as_deref(), Some("sig-2"));
+            assert_eq!(data, "ENC_REDACTED_1");
+        }
+        other => panic!("unexpected follow-up assistant blocks: {other:?}"),
+    }
+}
+
 #[tokio::test]
 async fn session_update_preserves_reasoning_tool_only_turn() {
     let (mut engine, handle) = Engine::new(EngineConfig::default(), &Config::default());
@@ -14981,6 +15233,7 @@ async fn session_update_preserves_reasoning_tool_only_turn() {
                 signature: None,
                 state: None,
                 thinking: "Need a tool before answering.".to_string(),
+                redacted_data: None,
             },
             ContentBlock::ToolUse {
                 id: "tool-1".to_string(),

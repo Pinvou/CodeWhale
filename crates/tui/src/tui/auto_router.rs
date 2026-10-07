@@ -142,6 +142,7 @@ mod tests {
                         signature: None,
                         state: None,
                         thinking: "The user seems to be asking me to classify myself.".to_string(),
+                        redacted_data: None,
                     },
                     ContentBlock::Text {
                         text: "Visible assistant answer.".to_string(),

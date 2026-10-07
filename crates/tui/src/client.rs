@@ -5936,6 +5936,7 @@ mod tests {
                         thinking: "Inspect the saved tool state".to_string(),
                         signature: None,
                         state: None,
+                        redacted_data: None,
                     },
                     ContentBlock::ToolUse {
                         id: "call-k3-replay".to_string(),
@@ -7162,13 +7163,34 @@ mod tests {
             messages: vec![
                 Message {
                     role: Role::Assistant,
-                    content: vec![ContentBlock::ToolUse {
-                        id: "call-secret-test".to_string(),
-                        name: "read_file".to_string(),
-                        input: json!({"path": "config.toml"}),
-                        caller: None,
-                        thought_signature: None,
-                    }],
+                    content: vec![
+                        // A reasoning-capable model's bare function_call is
+                        // chain-dropped on the Responses route; pair the call
+                        // with replayable state (the test helper builds the
+                        // Responses body as OpenaiCodex) so the tool result —
+                        // and its redaction marker — reaches all three
+                        // protocol bodies.
+                        ContentBlock::Thinking {
+                            thinking: String::new(),
+                            signature: None,
+                            state: Some(crate::models::OpaqueReasoningState {
+                                provider: "openai-codex".to_string(),
+                                api: "openai-responses".to_string(),
+                                model: "glm-5.2".to_string(),
+                                id: None,
+                                encrypted_content: "enc-secret-fixture".to_string(),
+                                endpoint: Some("fp-codex-endpoint".to_string()),
+                            }),
+                            redacted_data: None,
+                        },
+                        ContentBlock::ToolUse {
+                            id: "call-secret-test".to_string(),
+                            name: "read_file".to_string(),
+                            input: json!({"path": "config.toml"}),
+                            caller: None,
+                            thought_signature: None,
+                        },
+                    ],
                 },
                 Message {
                     role: Role::User,
@@ -8934,6 +8956,7 @@ mod tests {
                     signature: None,
                     state: None,
                     thinking: "plan".to_string(),
+                    redacted_data: None,
                 },
                 ContentBlock::Text {
                     text: "done".to_string(),
@@ -8974,6 +8997,7 @@ mod tests {
                         signature: None,
                         state: None,
                         thinking: "plan".to_string(),
+                        redacted_data: None,
                     },
                     ContentBlock::Text {
                         text: "done".to_string(),
@@ -9025,6 +9049,7 @@ mod tests {
                         signature: None,
                         state: None,
                         thinking: "Need to call a tool".to_string(),
+                        redacted_data: None,
                     },
                     ContentBlock::ToolUse {
                         id: "tool-1".to_string(),
@@ -9079,6 +9104,7 @@ mod tests {
                         signature: None,
                         state: None,
                         thinking: "Need to call a tool".to_string(),
+                        redacted_data: None,
                     },
                     ContentBlock::ToolUse {
                         id: "tool-1".to_string(),
@@ -9152,6 +9178,7 @@ mod tests {
                         signature: None,
                         state: None,
                         thinking: "Internal explanation plan".to_string(),
+                        redacted_data: None,
                     },
                     ContentBlock::Text {
                         text: "Final answer".to_string(),
@@ -9197,6 +9224,7 @@ mod tests {
                     signature: None,
                     state: None,
                     thinking: "I should explain step by step.".to_string(),
+                    redacted_data: None,
                 },
                 ContentBlock::Text {
                     text: "Here is the explanation.".to_string(),
@@ -10354,6 +10382,7 @@ mod tests {
                     signature: None,
                     state: None,
                     thinking: "plan".to_string(),
+                    redacted_data: None,
                 }],
             };
             let out = build_chat_messages(None, &[message], "some-non-deepseek-model");
@@ -10503,6 +10532,7 @@ mod tests {
                         signature: None,
                         state: None,
                         thinking: "Need to inspect the directory".to_string(),
+                        redacted_data: None,
                     },
                     ContentBlock::ToolUse {
                         id: "tool-1".to_string(),
@@ -10546,6 +10576,7 @@ mod tests {
                         signature: None,
                         state: None,
                         thinking: "Need to search".to_string(),
+                        redacted_data: None,
                     },
                     ContentBlock::ToolUse {
                         id: "tool-1".to_string(),
@@ -10639,6 +10670,7 @@ mod tests {
                         signature: None,
                         state: None,
                         thinking: "Need to list files".to_string(),
+                        redacted_data: None,
                     },
                     ContentBlock::ToolUse {
                         id: "tool-ok".to_string(),

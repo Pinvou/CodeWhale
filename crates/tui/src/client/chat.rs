@@ -680,6 +680,14 @@ fn apply_google_thinking_level(
 /// tool calls without the thought signatures Google's thinking models
 /// require. The error names the model and tells the operator how to
 /// recover instead of letting Google reject or corrupt the tool loop.
+///
+/// Scope mirrors Google's own validation: only the current turn (messages
+/// after the last user message) is checked, and within it only the first
+/// tool call of each assistant step must carry a signature — Gemini 3 signs
+/// only the first function-call part of a step, so demanding signatures on
+/// parallel calls 2..n would block valid turns. Older turns are not
+/// validated: Google accepts them without signatures, and compaction or
+/// pre-capture sessions must not brick new requests.
 fn validate_google_thought_signature_replay(
     provider: ApiProvider,
     base_url: &str,
@@ -691,24 +699,29 @@ fn validate_google_thought_signature_replay(
     {
         return Ok(());
     }
-    for message in messages {
+    let current_turn_start = messages
+        .iter()
+        .rposition(|message| message.get("role").and_then(Value::as_str) == Some("user"))
+        .map_or(0, |index| index + 1);
+    for message in &messages[current_turn_start..] {
         let Some(tool_calls) = message.get("tool_calls").and_then(Value::as_array) else {
             continue;
         };
-        for call in tool_calls {
-            let missing = call
-                .pointer("/extra_content/google/thought_signature")
-                .and_then(Value::as_str)
-                .is_none();
-            if missing {
-                let id = call.get("id").and_then(Value::as_str).unwrap_or("?");
-                anyhow::bail!(
-                    "Gemini model `{model}` requires a thought signature to replay tool call \
-                     `{id}`, but none was captured (the turn predates signature capture, or \
-                     the provider omitted it). Start a new session before using tools on \
-                     this route."
-                );
-            }
+        let Some(first_call) = tool_calls.first() else {
+            continue;
+        };
+        let missing = first_call
+            .pointer("/extra_content/google/thought_signature")
+            .and_then(Value::as_str)
+            .is_none();
+        if missing {
+            let id = first_call.get("id").and_then(Value::as_str).unwrap_or("?");
+            anyhow::bail!(
+                "Gemini model `{model}` requires a thought signature to replay tool call \
+                 `{id}`, but none was captured (the turn predates signature capture, or \
+                 the provider omitted it). Start a new session before using tools on \
+                 this route."
+            );
         }
     }
     Ok(())
@@ -734,6 +747,21 @@ fn strip_google_tool_call_extra_content(messages: &mut [Value]) {
             }
         }
     }
+}
+
+/// Thought signature for one streaming tool-call entry: the per-call
+/// `tool_calls[].extra_content.google.thought_signature`, falling back to the
+/// chunk-level `delta.extra_content.google.thought_signature` (the official
+/// compat route signs the pre-tool text part there).
+fn tool_call_thought_signature<'a>(tool_call: &'a Value, delta: &'a Value) -> Option<&'a str> {
+    tool_call
+        .pointer("/extra_content/google/thought_signature")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            delta
+                .pointer("/extra_content/google/thought_signature")
+                .and_then(Value::as_str)
+        })
 }
 
 fn mistral_model_has_adjustable_reasoning(model: &str) -> bool {
@@ -3521,6 +3549,14 @@ fn reasoning_stream_style_for_route(
             "Ignoring unrecognized reasoning_stream_style `{configured}`; expected separate_field, inline_tags, or none"
         ));
     }
+    // Google's official OpenAI-compat route returns reasoning summaries in
+    // `delta.reasoning_content` (the non-streaming decoder already promotes
+    // the same field to a Thinking block), so stream parity applies here.
+    // Scoping to the exact official host keeps the generic-proxy fallback —
+    // render reasoning_content as answer text — for unknown gateways.
+    if is_exact_google_chat_route(provider, base_url) {
+        return ReasoningStreamStyle::SeparateField;
+    }
     if is_reasoning_model_for_stream_on_route(provider, base_url, model) {
         ReasoningStreamStyle::SeparateField
     } else {
@@ -3690,6 +3726,7 @@ fn parse_chat_message_for_route(
         content_blocks.push(ContentBlock::Thinking {
             signature: None,
             state: None,
+            redacted_data: None,
             thinking: reasoning.to_string(),
         });
     }
@@ -3702,6 +3739,7 @@ fn parse_chat_message_for_route(
         content_blocks.push(ContentBlock::Thinking {
             signature: None,
             state: None,
+            redacted_data: None,
             thinking,
         });
     }
@@ -4174,7 +4212,27 @@ fn parse_sse_chunk_with_reasoning_style(
                 for tc in tool_calls {
                     let tc_index = tc.get("index").and_then(Value::as_u64).unwrap_or(0) as u32;
                     let tool_block_index = match tool_indices.entry(tc_index) {
-                        std::collections::hash_map::Entry::Occupied(entry) => *entry.get(),
+                        std::collections::hash_map::Entry::Occupied(entry) => {
+                            let block_index = *entry.get();
+                            // A thought signature can arrive on a continuation
+                            // chunk of the same tool call (some gateways split
+                            // the signed chunk from the one that opens the
+                            // call); capture it instead of dropping it with
+                            // the rest of the non-start fields. The official
+                            // compat route also signs the chunk-level
+                            // `delta.extra_content` on the pre-tool text part.
+                            if let Some(signature) = tool_call_thought_signature(tc, delta)
+                                .filter(|value| !value.is_empty())
+                            {
+                                events.push(StreamEvent::ContentBlockDelta {
+                                    index: block_index,
+                                    delta: Delta::ToolThoughtSignatureDelta {
+                                        signature: signature.to_string(),
+                                    },
+                                });
+                            }
+                            block_index
+                        }
                         std::collections::hash_map::Entry::Vacant(entry) => {
                             // Close text block if transitioning to tool use
                             if *text_started {
@@ -4224,10 +4282,8 @@ fn parse_sse_chunk_with_reasoning_style(
                                 })
                             });
 
-                            let thought_signature = tc
-                                .pointer("/extra_content/google/thought_signature")
-                                .and_then(Value::as_str)
-                                .map(str::to_string);
+                            let thought_signature =
+                                tool_call_thought_signature(tc, delta).map(str::to_string);
                             events.push(StreamEvent::ContentBlockStart {
                                 index: block_index,
                                 content_block: ContentBlockStart::ToolUse {
@@ -4610,6 +4666,7 @@ mod minimax_reasoning_replay_tests {
                         thinking: "Inspect tool state".to_string(),
                         signature: None,
                         state: None,
+                        redacted_data: None,
                     },
                     ContentBlock::Text {
                         text: "Done.".to_string(),
@@ -4709,6 +4766,7 @@ mod minimax_reasoning_replay_tests {
                         thinking: "stale thinking from the prior turn".to_string(),
                         signature: None,
                         state: None,
+                        redacted_data: None,
                     },
                     ContentBlock::Text {
                         text: "I'll read the widget first.".to_string(),
@@ -7539,6 +7597,7 @@ mod mistral_reasoning_tests {
                                 .to_string(),
                             signature: None,
                             state: None,
+                            redacted_data: None,
                         },
                         ContentBlock::Text {
                             text: "I will inspect it now.".to_string(),
@@ -8120,6 +8179,179 @@ mod google_thought_signature_tests {
     }
 
     #[test]
+    fn google_parallel_calls_require_only_the_first_signature() {
+        // Gemini 3 signs only the first function-call part of a step, so a
+        // valid parallel-call turn must not be blocked for missing
+        // signatures on calls 2..n.
+        let request = MessageRequest {
+            model: "gemini-3.1-pro-preview".to_string(),
+            messages: vec![
+                Message {
+                    role: Role::User,
+                    content: vec![ContentBlock::Text {
+                        text: "Read both.".to_string(),
+                        cache_control: None,
+                    }],
+                },
+                Message {
+                    role: Role::Assistant,
+                    content: vec![
+                        ContentBlock::ToolUse {
+                            id: "call-g-1".to_string(),
+                            name: "read".to_string(),
+                            input: json!({"path": "a.toml"}),
+                            caller: None,
+                            thought_signature: Some("SIG-first".to_string()),
+                        },
+                        ContentBlock::ToolUse {
+                            id: "call-g-2".to_string(),
+                            name: "read".to_string(),
+                            input: json!({"path": "b.toml"}),
+                            caller: None,
+                            thought_signature: None,
+                        },
+                    ],
+                },
+                Message {
+                    role: Role::User,
+                    content: vec![
+                        ContentBlock::ToolResult {
+                            tool_use_id: "call-g-1".to_string(),
+                            content: "a".to_string(),
+                            is_error: None,
+                            content_blocks: None,
+                        },
+                        ContentBlock::ToolResult {
+                            tool_use_id: "call-g-2".to_string(),
+                            content: "b".to_string(),
+                            is_error: None,
+                            content_blocks: None,
+                        },
+                    ],
+                },
+            ],
+            max_tokens: 64,
+            system: None,
+            tools: None,
+            tool_choice: None,
+            metadata: None,
+            thinking: None,
+            reasoning_effort: Some("high".to_string()),
+            stream: None,
+            temperature: None,
+            top_p: None,
+        };
+
+        let body = build_chat_wire_body(
+            &request,
+            ApiProvider::Google,
+            DEFAULT_GOOGLE_BASE_URL,
+            false,
+        )
+        .expect("parallel calls with only the first signed must pass validation");
+        let assistant = body.body["messages"]
+            .as_array()
+            .expect("messages")
+            .iter()
+            .find(|m| m.get("role") == Some(&json!("assistant")))
+            .expect("assistant message");
+        let calls = assistant["tool_calls"].as_array().expect("tool calls");
+        assert_eq!(calls.len(), 2);
+        assert_eq!(
+            calls[0]
+                .pointer("/extra_content/google/thought_signature")
+                .and_then(Value::as_str),
+            Some("SIG-first")
+        );
+        assert!(
+            calls[1].get("extra_content").is_none(),
+            "unsigned parallel call must not gain invented metadata: {calls:?}"
+        );
+    }
+
+    #[test]
+    fn google_older_turns_without_signatures_are_not_validated() {
+        // Google enforces signatures only on the current turn; a session
+        // that predates signature capture (or lost them to compaction) must
+        // not be bricked for old turns once the fresh turn is signed.
+        let request = MessageRequest {
+            model: "gemini-3.1-pro-preview".to_string(),
+            messages: vec![
+                Message {
+                    role: Role::User,
+                    content: vec![ContentBlock::Text {
+                        text: "first request".to_string(),
+                        cache_control: None,
+                    }],
+                },
+                Message {
+                    role: Role::Assistant,
+                    content: vec![ContentBlock::ToolUse {
+                        id: "call-g-old".to_string(),
+                        name: "read".to_string(),
+                        input: json!({}),
+                        caller: None,
+                        thought_signature: None,
+                    }],
+                },
+                Message {
+                    role: Role::User,
+                    content: vec![ContentBlock::ToolResult {
+                        tool_use_id: "call-g-old".to_string(),
+                        content: "old output".to_string(),
+                        is_error: None,
+                        content_blocks: None,
+                    }],
+                },
+                Message {
+                    role: Role::User,
+                    content: vec![ContentBlock::Text {
+                        text: "next request".to_string(),
+                        cache_control: None,
+                    }],
+                },
+                Message {
+                    role: Role::Assistant,
+                    content: vec![ContentBlock::ToolUse {
+                        id: "call-g-new".to_string(),
+                        name: "read".to_string(),
+                        input: json!({}),
+                        caller: None,
+                        thought_signature: Some("SIG-new".to_string()),
+                    }],
+                },
+                Message {
+                    role: Role::User,
+                    content: vec![ContentBlock::ToolResult {
+                        tool_use_id: "call-g-new".to_string(),
+                        content: "new output".to_string(),
+                        is_error: None,
+                        content_blocks: None,
+                    }],
+                },
+            ],
+            max_tokens: 64,
+            system: None,
+            tools: None,
+            tool_choice: None,
+            metadata: None,
+            thinking: None,
+            reasoning_effort: Some("high".to_string()),
+            stream: None,
+            temperature: None,
+            top_p: None,
+        };
+
+        build_chat_wire_body(
+            &request,
+            ApiProvider::Google,
+            DEFAULT_GOOGLE_BASE_URL,
+            false,
+        )
+        .expect("signed current turn must pass even with unsigned older turns");
+    }
+
+    #[test]
     fn google_signature_captured_from_non_streaming_tool_call() {
         let payload = json!({
             "id": "resp-1",
@@ -8200,5 +8432,228 @@ mod google_thought_signature_tests {
             _ => None,
         });
         assert_eq!(signature.as_deref(), Some("SIG-delta"));
+    }
+
+    #[test]
+    fn google_signature_captured_from_continuation_chunk() {
+        // Some gateways split the signed chunk from the one that opens the
+        // tool call; the signature must attach to the already-started block
+        // instead of being dropped with the rest of the non-start fields.
+        let opening_chunk = json!({
+            "choices": [{
+                "index": 0,
+                "delta": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "id": "call-g-8",
+                        "type": "function",
+                        "function": { "name": "read", "arguments": "{" }
+                    }]
+                }
+            }]
+        });
+        let continuation_chunk = json!({
+            "choices": [{
+                "index": 0,
+                "delta": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "function": { "arguments": "}" },
+                        "extra_content": {
+                            "google": { "thought_signature": "SIG-late" }
+                        }
+                    }]
+                }
+            }]
+        });
+        let mut content_index = 0u32;
+        let mut text_started = false;
+        let mut thinking_started = false;
+        let mut tool_indices = std::collections::HashMap::new();
+        let mut reasoning_buffers = std::collections::HashMap::new();
+        let mut inline_tags = InlineReasoningTagState::default();
+        let style = ReasoningStreamStyle::None;
+        let _ = parse_sse_chunk_with_reasoning_style(
+            &opening_chunk,
+            &mut content_index,
+            &mut text_started,
+            &mut thinking_started,
+            &mut tool_indices,
+            &mut reasoning_buffers,
+            &mut inline_tags,
+            style,
+        );
+        let events = parse_sse_chunk_with_reasoning_style(
+            &continuation_chunk,
+            &mut content_index,
+            &mut text_started,
+            &mut thinking_started,
+            &mut tool_indices,
+            &mut reasoning_buffers,
+            &mut inline_tags,
+            style,
+        );
+        let signature = events.iter().find_map(|event| match event {
+            StreamEvent::ContentBlockDelta {
+                delta: Delta::ToolThoughtSignatureDelta { signature },
+                ..
+            } => Some(signature.clone()),
+            _ => None,
+        });
+        assert_eq!(
+            signature.as_deref(),
+            Some("SIG-late"),
+            "continuation-chunk signature must be captured: {events:?}"
+        );
+    }
+
+    #[test]
+    fn google_chunk_level_extra_content_signature_is_captured() {
+        // The official compat route sometimes signs the chunk itself
+        // (`delta.extra_content`) rather than the tool_calls entry; that form
+        // must reach the tool call too, or the current-turn validator would
+        // fail a turn Google actually signed.
+        let opening_chunk = json!({
+            "choices": [{
+                "index": 0,
+                "delta": {
+                    "extra_content": {
+                        "google": { "thought_signature": "SIG-chunk-level" }
+                    },
+                    "tool_calls": [{
+                        "index": 0,
+                        "id": "call-g-9",
+                        "type": "function",
+                        "function": { "name": "read", "arguments": "{}" }
+                    }]
+                }
+            }]
+        });
+        let mut content_index = 0u32;
+        let mut text_started = false;
+        let mut thinking_started = false;
+        let mut tool_indices = std::collections::HashMap::new();
+        let mut reasoning_buffers = std::collections::HashMap::new();
+        let mut inline_tags = InlineReasoningTagState::default();
+        let events = parse_sse_chunk_with_reasoning_style(
+            &opening_chunk,
+            &mut content_index,
+            &mut text_started,
+            &mut thinking_started,
+            &mut tool_indices,
+            &mut reasoning_buffers,
+            &mut inline_tags,
+            ReasoningStreamStyle::None,
+        );
+        let signature = events.iter().find_map(|event| match event {
+            StreamEvent::ContentBlockStart {
+                content_block:
+                    ContentBlockStart::ToolUse {
+                        thought_signature, ..
+                    },
+                ..
+            } => thought_signature.clone(),
+            _ => None,
+        });
+        assert_eq!(
+            signature.as_deref(),
+            Some("SIG-chunk-level"),
+            "chunk-level extra_content signature must be captured: {events:?}"
+        );
+    }
+
+    #[test]
+    fn google_route_defaults_to_separate_field_stream_style_and_config_still_wins() {
+        // Stream parity with the non-streaming decoder: on the exact official
+        // route, `delta.reasoning_content` is a Thinking block, not answer
+        // text. An explicit reasoning_stream_style must still override it,
+        // and unknown gateways keep the render-as-text fallback.
+        assert_eq!(
+            reasoning_stream_style_for_route(
+                ApiProvider::Google,
+                DEFAULT_GOOGLE_BASE_URL,
+                "gemini-3.1-pro-preview",
+                None,
+            ),
+            ReasoningStreamStyle::SeparateField,
+            "exact Google route must default to SeparateField"
+        );
+        assert_eq!(
+            reasoning_stream_style_for_route(
+                ApiProvider::Google,
+                DEFAULT_GOOGLE_BASE_URL,
+                "gemini-3.1-pro-preview",
+                Some("none"),
+            ),
+            ReasoningStreamStyle::None,
+            "explicit configuration must override the Google default"
+        );
+        assert_eq!(
+            reasoning_stream_style_for_route(
+                ApiProvider::Google,
+                "https://gateway.example.com/v1",
+                "gemini-3.1-pro-preview",
+                None,
+            ),
+            ReasoningStreamStyle::None,
+            "unknown gateways keep the generic fallback"
+        );
+    }
+
+    #[test]
+    fn google_stream_reasoning_content_becomes_thinking_not_answer_text() {
+        let chunk = json!({
+            "choices": [{
+                "index": 0,
+                "delta": {
+                    "reasoning_content": "weighing the two files",
+                    "content": "The answer is"
+                }
+            }]
+        });
+        let mut content_index = 0u32;
+        let mut text_started = false;
+        let mut thinking_started = false;
+        let mut tool_indices = std::collections::HashMap::new();
+        let mut reasoning_buffers = std::collections::HashMap::new();
+        let mut inline_tags = InlineReasoningTagState::default();
+        let events = parse_sse_chunk_with_reasoning_style(
+            &chunk,
+            &mut content_index,
+            &mut text_started,
+            &mut thinking_started,
+            &mut tool_indices,
+            &mut reasoning_buffers,
+            &mut inline_tags,
+            reasoning_stream_style_for_route(
+                ApiProvider::Google,
+                DEFAULT_GOOGLE_BASE_URL,
+                "gemini-3.1-pro-preview",
+                None,
+            ),
+        );
+        let thinking = events.iter().any(|event| {
+            matches!(
+                event,
+                StreamEvent::ContentBlockDelta {
+                    delta: Delta::ThinkingDelta { .. },
+                    ..
+                }
+            )
+        });
+        let leaked_to_text = events.iter().any(|event| {
+            matches!(
+                event,
+                StreamEvent::ContentBlockDelta {
+                    delta: Delta::TextDelta { text },
+                    ..
+                } if text.contains("weighing the two files")
+            )
+        });
+        assert!(thinking, "reasoning_content must stream as thinking");
+        assert!(
+            !leaked_to_text,
+            "reasoning_content must not leak into answer text: {events:?}"
+        );
     }
 }

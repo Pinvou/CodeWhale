@@ -864,7 +864,19 @@ pub fn estimate_message_chars(messages: &[Message]) -> usize {
         for block in &msg.content {
             match block {
                 ContentBlock::Text { text, .. } => total += text.len(),
-                ContentBlock::Thinking { thinking, .. } => total += thinking.len(),
+                // Signature-only (`display: "omitted"`) and redacted blocks
+                // still ride the wire on replay, so their bytes count even
+                // when the readable text is empty.
+                ContentBlock::Thinking {
+                    thinking,
+                    redacted_data,
+                    ..
+                } => {
+                    total += thinking.len();
+                    if let Some(data) = redacted_data {
+                        total += data.len();
+                    }
+                }
                 ContentBlock::ToolUse { input, .. } => {
                     let mut cw = CountingWriter::new();
                     let _ = serde_json::to_writer(&mut cw, input);

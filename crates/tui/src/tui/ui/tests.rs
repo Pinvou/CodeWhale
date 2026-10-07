@@ -5292,6 +5292,7 @@ fn restored_reasoning_and_answer_clear_prior_fold_ownership() {
                     .join("\n"),
                 signature: None,
                 state: None,
+                redacted_data: None,
             },
             crate::models::ContentBlock::Text {
                 text: "restored final answer".to_string(),

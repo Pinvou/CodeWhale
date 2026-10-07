@@ -1146,6 +1146,7 @@ mod tests {
                 signature: None,
                 state: None,
                 thinking: "skip".to_string(),
+                redacted_data: None,
             },
             ContentBlock::Text {
                 text: "second".to_string(),
