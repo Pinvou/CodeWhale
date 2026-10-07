@@ -1009,7 +1009,6 @@ async function registerDesktop(ws, msg) {
   endpoint.desktop_offline_since = null;
   authenticateSocket(ws, "desktop", endpointId);
   if (controllerRuntime && ws.protocol === CONTROLLER_SUBPROTOCOL) {
-    ws.controllerEnrollmentCredential = desktopSecret;
     controllerRuntime.router.authenticateControlled({
       socketIdentity: ws.controllerSocketIdentity,
       endpointId,
@@ -1203,7 +1202,6 @@ wss.on("connection", (ws, req) => {
   ws.policyClosing = false;
   ws.revokePending = false;
   ws.controllerAuthenticated = false;
-  ws.controllerEnrollmentCredential = null;
   ws.controllerSocketIdentity = `socket-${crypto.randomBytes(18).toString("base64url")}`;
   if (ws.protocol === CONTROLLER_SUBPROTOCOL) {
     try {
@@ -1338,7 +1336,6 @@ wss.on("connection", (ws, req) => {
   ws.on("close", () => {
     clearTimeout(ws.authTimer);
     ws.authTimer = null;
-    ws.controllerEnrollmentCredential = null;
     if (controllerRuntime && ws.protocol === CONTROLLER_SUBPROTOCOL) {
       void controllerRuntime.router.removeSocket(ws.controllerSocketIdentity).catch(() => {});
     }

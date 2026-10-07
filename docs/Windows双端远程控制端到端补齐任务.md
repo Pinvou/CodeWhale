@@ -85,7 +85,7 @@
 | E2E-07 | 1 | PASS | 双端 UI 闭环与能力降级完成：B 面板状态映射/连接码/主控设备名三语回落、A 会话窗口自动开会话与加密请求能力快照、发送取消走加密派发、transcript 渲染、A 端命令错误码回传、错误码与刷新状态三语文案（`8510525b`）。验证：6 个前端契约 36 通过 / 0 失败；`build:ui` 通过；`lint:ui` 0 error。发布 blocker：三面 UI 浏览器冒烟未执行（环境受限，已登记）。细节见第 10.3 节。 |
 | E2E-08 | 1 | PASS | 集成回归与发布审核完成：完整旅程集成测试（`5a246985`）、门禁全套复跑与敏感信息扫描、发布缺口按「本轮 blocker / 已隐藏 / 后续排期」分类落进 `Windows双端远程控制发布与回滚.md` 第 7 节（`be913049`）。验证：Relay 58+25、前端 36、Rust `remote_control::` 323 / `controller::` 229、`build:ui`、`lint:ui`、architecture-guard、release-gates 6 条全部通过。发布 blocker：真实双机 21 条旅程与真机断线恢复演练未执行（环境受限，已登记）。细节见第 11.1 节。 |
 
-## 4. 已登记决策与本轮已知限制
+## 4. 历史阶段已登记决策与当时已知限制
 
 | 项 | 决策/状态 | 说明 |
 |---|---|---|
@@ -93,16 +93,16 @@
 | `serve()` 暂只保活通道 | 预期 | 握手与加密业务帧派发分别在 E2E-02 / E2E-04 安装到该服务循环；当前对未知消息只做丢弃，绝不转发到 legacy WebUI 事件流。 |
 | A 端 `device_display_name` 用有界占位 `remote-device` | 保守默认，登记 | 冻结协议 v1 的 `controller_joined` 不携带被控设备显示名（已核对 PROTOCOL.md 与 fixture）；首版用占位，真实来源需协议扩展或 E2E-03 的能力快照补充。 |
 | B 端 `controller_device_name` 留空 | 保守默认，登记 | 同上：`controller_pairing_register` / `controller_joined` 都不含主控设备名；留空让 E2E-07 的 UI 用 i18n 兜底文案（`deviceUnknown`）显示，不为数据层硬编码单语名称。RC-B-006「展示主控设备名称」需协议扩展后才能真正满足。 |
-| A 端不在 WebSocket 层声明 controller 子协议 | 保守默认，登记 | PROTOCOL.md:598 要求 controller-v1 客户端选择 `pinvou-desktop-controller-v1`，但 Relay（server.js:846 `noServer: true`，无 `handleProtocols`）不回投该头部，而客户端库（tungstenite 0.30 `handshake/client.rs:272`）在请求了子协议却未收到时必须失败关闭 —— 声明子协议会让 A 端完全无法连接。Relay 侧补齐子协议协商后再接入；当前 Relay 以 `v=1 + controller_*` 类型路由 controller lane（server.js:1182）。 |
+| A 端不在 WebSocket 层声明 controller 子协议 | 历史限制，已修复 | **已被后续波次修复**：当前客户端通过 `relay_client::controller_websocket_request` 声明 `pinvou-desktop-controller-v1`，Relay 通过 `remote-control-relay/server.js` 的 `handleProtocols` 显式协商；以下保留当时决策。PROTOCOL.md:598 要求 controller-v1 客户端选择 `pinvou-desktop-controller-v1`，但当时 Relay（remote-control-relay/server.js 的历史配置 `noServer: true`，无 `handleProtocols`）不回投该头部，而客户端库（tungstenite 0.30 `handshake/client.rs 的历史子协议校验`）在请求了子协议却未收到时必须失败关闭 —— 声明子协议会让 A 端完全无法连接。当时决定待 Relay 侧补齐子协议协商后再接入；当时 Relay 以 `v=1 + controller_*` 类型路由 controller lane（remote-control-relay/server.js 的历史 controller 路由）。 |
 | A 端不发送 `controller_capabilities` 首帧 | 保守默认，登记 | 同上：router 没有该类型的 handler（`controller-router.js` 只有 register/claim/handshake/disconnect 与 liveness/resume hooks），发送会收到 `controller_message_unsupported` 并打断握手；E2E-01 的 B 端同样未发送。Relay 补齐后两侧一并接入。 |
 | 握手期间 transport 断线 | 预期 | A 端把断线统一映射为 `endpoint_offline` 并失败关闭；transport 在断线时会作废已排队帧（`transport_epoch` 递增），因此不会用旧 claim 重连，重新 claim 属 E2E-06 的恢复链路。 |
 | 连接完成后断线只投影 `reconnecting` | 预期 | `serve_controlling_lane` 在断线时调用 `mark_transport_disconnected()` 保证界面不再声称 connected；自动 resume / liveness 属 E2E-06。 |
 | B 端信任根缺失在接管点失败关闭 | 保守默认，登记 | 为保持 E2E-01 的注册行为不变，B 在收到 `controller_pairing_reserved` 时才要求信任根（错误码 `relay_trust_unconfigured`）；A 端在 connect 前即失败关闭。 |
-| 命令层错误码未映射到 A 对话框文案 | 已知缺口（E2E-07） | `desktop_remote_controller_*` 现在返回有界错误码，但 `desktop-remote-control.js` 的 `controllerConnect` 未把 `Err(String)` 转成带 `code` 的错误，`connectionErrorKey` 只能拿到 undefined；B 面板与 A 壳层的状态名映射同样与后端枚举不一致（`ControlledDevicePanel.jsx:27-40` 期望 `registering`/`waiting_for_pairing`/`pairing_reserved`/`handshake_pending`，后端实际是 `reserving`/`waiting_connection`/`safety_handshake`），导致 B 面板回落到 statusIdle 且不显示连接码。E2E-07 统一修复并补行为测试。 |
+| 命令层错误码未映射到 A 对话框文案 | 历史缺口，已修复 | **已被后续波次修复**：当前 `controllerConnect` 用 `asBoundedError` 恢复 `error.code`；B 的 `ControlledStatusKind` 序列化名称与 `controlledDeviceUiState`/`ControlledDevicePanel` 的状态闭集一致。以下保留当时问题：`desktop_remote_controller_*` 当时返回有界错误码，但 `desktop-remote-control.js` 的 `controllerConnect` 未把 `Err(String)` 转成带 `code` 的错误，`connectionErrorKey` 只能拿到 undefined；B 面板与 A 壳层的状态名映射同样与后端枚举不一致（`ControlledDevicePanel.jsx 的历史状态映射` 期望 `registering`/`waiting_for_pairing`/`pairing_reserved`/`handshake_pending`，后端实际是 `reserving`/`waiting_connection`/`safety_handshake`），导致 B 面板回落到 statusIdle 且不显示连接码。当时计划由 E2E-07 统一修复并补行为测试。 |
 | 能力协商按交集收敛 | 依赖 E2E-04/E2E-06 处理 | `negotiateControllerCapabilities` 取「A 请求 ∩ B 注册」；B 目前只注册 `[pairing_v1, encrypted_frames_v1, finished_receipt_v1]`，A 声明 `pairing_v1/encrypted_frames_v1/finished_receipt_v1/role_liveness_v1/resume_v1`，因此 `role_liveness_v1`、`resume_v1`、`task_v1` 都未协商成功。E2E-02 只用到 `pairing_v1`（`controller_joined` 能力绑定）所以可跑通；E2E-04 发送业务帧前必须先在两侧声明 `task_v1`（本地运行时校验会以 `unsupported_capability` 拒绝 `task_submit` 等载荷），E2E-06 同理需要 `role_liveness_v1`/`resume_v1`。 |
 | A 端会话 id 由本端生成 | E2E-03 决策 | 冻结协议没有「创建会话」帧：`task_submit.session_id` 必须由发起方提供。E2E-03 由 A 生成 `session-<uuid>` 作为该远程会话在 wire 上的 id（UI 持有的「远程 sessionId」即此值），`session_ref` 只用于本地索引；B 的派发层（E2E-04）需据此绑定/创建权威会话（B 侧 `RemoteSessionMap` 支持 ref→权威 id 映射），并能把权威 id 回传（`task_status`/`session_snapshot` 都带 `session_id`）。 |
 | 任务意图重试必须复用 client_request_id | 依赖 E2E-04 | `desktop_remote_controller_task_intent` 每次调用生成新的 `task_id`/`client_request_id`（一次用户提交 = 一个新意图）；断线重试/恢复时必须复用已返回的 id（B 侧 `task_id + client_request_id` 幂等），E2E-04 接线时不要把重试当成新意图。 |
-| A 会话视图发送路径仍走旧 JS 拼装 | 已知缺口（E2E-07） | `RemoteConversationView.jsx:55-62` 仍在 JS 拼一个 camelCase 伪 payload 并调用 B 侧 `desktop_remote_task_submit`（DEV-22 遗留，必然被冻结校验拒绝）。E2E-03 只提供了 A 专用构造路径与状态位；E2E-07 收敛 UI 时把发送/取消改为 `controllerTaskIntent`/`controllerTaskCancelIntent` 并接 E2E-04 的加密派发。 |
+| A 会话视图发送路径仍走旧 JS 拼装 | 已知缺口（E2E-07） | `历史 RemoteConversationView.jsx 的发送路径` 仍在 JS 拼一个 camelCase 伪 payload 并调用 B 侧 `desktop_remote_task_submit`（DEV-22 遗留，必然被冻结校验拒绝）。E2E-03 只提供了 A 专用构造路径与状态位；E2E-07 收敛 UI 时把发送/取消改为 `controllerTaskIntent`/`controllerTaskCancelIntent` 并接 E2E-04 的加密派发。 |
 | A 端历史与远程会话尚未关联 | 依赖 E2E-05 | `desktop_remote_controller_create_history` 的 `b_session_reference` 目前由前端传入；E2E-03 的 `session_ref`/`session_id` 是它的自然来源，E2E-05 写 A 独立历史时统一关联。 |
 | B 端取消不校验跨 lease 任务 | 依赖 E2E-06 | `cancel_decrypted_task` 只校验帧的租约与任务存在性；旧 lease 遗留任务的清理由 E2E-06（B stop/刷新的任务与凭证清理）负责，`ControllerTaskEventSink` 级别的权限不再扩张。 |
 | 能力快照按 `known_revision` 复用 | E2E-04 决策 | B 收到 `capability_snapshot_request` 时，若本地已有同一 revision 且未过期的快照则直接复用（A 端同 revision 幂等接受），否则重建并把 revision 加一；避免每次请求都抬 revision。 |
@@ -371,7 +371,7 @@ E2E-04（加密业务帧双向派发）。开工前需先读第 4 节与本节�
 - **下一步动作**：把 `ControlledCleanupSink` 接到生产注册表（任务/权限/传输/临时模型），确保
   `stop`/`refresh`/远端断开三条路径都清理远端任务与凭证；核对 `terminate_local`、`disconnect_now`、`accept_remote_disconnect`
   与 `fail_operation` 各自触发的清理范围，并补一条三种路径都触发清理的用例。之后进入 E2E-06 正式审核。
-- **（历史记录）B 端恢复循环当时的接线要点**：在 `ControlledRelayWorker::serve`（`relay_runtime.rs:345`）的 joined 分支接恢复：
+- **（历史记录）B 端恢复循环当时的接线要点**：在 `ControlledRelayWorker::serve`（`controller/relay_runtime.rs` 中的 `ControlledRelayWorker::serve`）的 joined 分支接恢复：
   用 `desktop_relay_connection{connected:false}` 触发 `mark_transport_disconnected(now_b)` + `begin_resume` + 发
   `controller_resume_prepare`；按 §12.1 的相位映射处理 provisional / encrypted_resume_confirm /
   activation_pending / post_activation_liveness_confirmed / controller_resumed，完成后 `activate` 业务通道；
@@ -380,11 +380,11 @@ E2E-04（加密业务帧双向派发）。开工前需先读第 4 节与本节�
   测试建议：把这段逻辑抽成 `relay_runtime` 内的纯函数（输入端口 + manager + lanes + 帧字符串），用 `FakePort` 驱动整条
   序列，再让 `serve` 调它。
 - **B 端断线信号（已确认，无需再侦察）**：`RemoteControlManager::handle_connection`
-  （`manager/mod.rs:2114`）在 socket 状态变化时先 `forward_controller_relay_message` 投递
+  （`manager/mod.rs` 中的 `handle_connection`）在 socket 状态变化时先 `forward_controller_relay_message` 投递
   `{"type":"desktop_relay_connection","endpoint_id":…,"connected":false,"error":…}`，再更新 endpoint 状态；
   worker 的 joined 分支目前忽略该帧。B 的通道本身不会关闭（持久 endpoint socket），因此**必须**用这个事件进入恢复，
   不能等 `recv()` 返回 `None`。
-- **B 端出站**：worker 已有 `self.channel.try_send(Value)`（`relay_runtime.rs:322` 走 `send_controller_message`），
+- **B 端出站**：worker 已有 `self.channel.try_send(Value)`（`manager/mod.rs` 中的 `send_controller_message`），
   恢复帧直接走它即可；`build_controller_resume_prepare`/`build_controller_resume_ready_ack`（`resume.rs`）自带冻结校验，
   确认帧由 `ControlledLaneState::seal_resume_confirm`（`encrypted_lane.rs`）产出，因此 B 端**不需要**新增敏感队列入口
   （A 端当初需要是因为它走 WS transport 的通用队列）。
@@ -393,7 +393,7 @@ E2E-04（加密业务帧双向派发）。开工前需先读第 4 节与本节�
   `controller_resume_activation_ack` 时 `acknowledge_activation` → 收到 `controller_resume_activation_pending` 后发
   `controller_post_activation_liveness` 时 `send_post_activation_liveness(epoch_b)`（epoch 必须与旧值不同）→ 收到
   `controller_post_activation_liveness_confirmed` 后发 `controller_resume_ready_ack` 时 `acknowledge_ready` →
-  收到 `controller_resumed` 后 `accept_resumed` 并重建 gate/watchdog（`controlled.rs:609` 已有目标状态形状）。
+  收到 `controller_resumed` 后 `accept_resumed` 并重建 gate/watchdog（`controller/controlled.rs` 中的 `complete_resumed` 已有目标状态形状）。
 
 ### 12.2 实现地图
 
@@ -407,7 +407,7 @@ E2E-04（加密业务帧双向派发）。开工前需先读第 4 节与本节�
 | 恢复状态机/构造 | `controller/resume.rs`（`ControllerResumeGate`、`build_controller_resume_*`、`new_resume_challenge`） |
 | 冻结协议 | `remote-control-relay/PROTOCOL.md`、`protocol-controller.js`、`fixture/controller-protocol-v1.json`、`controller/resume.rs` 的 schema 自检 |
 | Relay 恢复驱动 | `remote-control-relay/controller-resume.js`、`controller-router.js`（hooks）、`controller-lease.js:completeResume` |
-| B 端断线来源 | `manager/mod.rs:2114 handle_connection` → `desktop_relay_connection` 帧 |
+| B 端断线来源 | `manager/mod.rs` 中的 `handle_connection` → `desktop_relay_connection` 帧 |
 | 测试夹具 | `controller/test_support.rs`（`pairing_fixture`/`paired_session_keys`/`lease_context`/`signed_reservation`） |
 
 ### 12.3 每步固定验证命令（改动范围决定取哪几条）
@@ -499,8 +499,8 @@ node --test pinvou3-app/tests/<相关契约>.test.mjs
   `endpoint_offline` 收尾；B 端界面报错，B 端日志为
   `[controlled] stage=handshake_failed detail=controller_handshake_rejected`。
 - **根因**：Relay router 契约会把**发送方自己的** `finished_receipt_commit` **原样回投**给发送方
-  （`remote-control-relay/test/controller-router.test.js:84-86` 明确断言 socket-A 与 socket-B 都收到该帧；
-  `controller-router.js:170-176` 先投发送方再投对端）。两端此前都把该类型的入站帧当作对端 commitment 处理，
+  （`remote-control-relay/test/controller-router.test.js` 的 `finished_receipt_commit` 回投断言明确要求 socket-A 与 socket-B 都收到该帧；
+  `remote-control-relay/controller-router.js` 的 `handle()` 先投发送方再投对端）。两端此前都把该类型的入站帧当作对端 commitment 处理，
   于是 `sender_role` 与本端不符 → B 端在发出自己的 commit 后立刻收到回投并 `controller_handshake_rejected`
   结束整条通道，A 端随后因对端离线收到 `endpoint_offline`。E2E-02 此后一直只有单测（无 Relay 回投），
   真机首跑才暴露。
@@ -516,10 +516,11 @@ node --test pinvou3-app/tests/<相关契约>.test.mjs
 
 - **现象**：自帧回投修复后 A 端推进到 `safety_handshake`，随即失败，界面提示
   「对方返回的数据无法识别，请重试；若持续出现请检查双方版本」（= `<code>invalid_message</code>`）。
-- **根因**：Relay 的收据校验要求 `finished_receipt_ack` 携带 **`sender_role` 那一方**（即刚收到
-  对端 Finished、因此解开对端 receipt 的一侧）的 receipt secret：`controller-lease.js:312-337`
+- **根因**：Relay 的收据校验要求 `finished_receipt_ack` 携带 **原 Finished 发送方**（帧中的
+  `sender_role`）生成的 receipt secret；ACK 提交方是 `receiver_role`，即收到 Finished 并解开对端 receipt 的一侧。
+  `remote-control-relay/controller-lease.js` 的 `acceptReceipt()`
   先按 `sender_role` 取对端先前的 commitment，再用帧里的 secret 重算比对；契约样例见
-  `remote-control-relay/test/controller-handshake.test.js:153-158`（A 的 receipt 由 B 提交、B 的
+  `remote-control-relay/test/controller-handshake.test.js` 的 `receiptMessage()` 及其调用用例（A 的 receipt 由 B 提交、B 的
   receipt 由 A 提交）。两端实现却都回传了**本端** receipt，于是 Relay 报 `finished_receipt_invalid`；
   该码不在端上公共错误闭集内，被兜底成 `invalid_message`，界面文案因此指向「数据无法识别」。
 - **修复**：两端 `accept_peer_finished` 改为回传刚从对端 Finished 解开的 `peer_receipt`；同步修正
@@ -559,9 +560,18 @@ node --test pinvou3-app/tests/<相关契约>.test.mjs
   `node --test tests/ui_language_coverage.test.mjs` 通过；`npm run build:ui` 通过；`npm run lint:ui` 0 error；
   `python scripts/architecture-guard.py` 通过。
 
+### 13.11 启动与注册失败的代际隔离复核（2026-10-07）
+
+- 启动入口直接保留 `desktop_remote_controlled.rs` 的 `desktop_remote_controlled_start()` 中 `manager.start` 返回的 operation，
+  不在另一把锁下重新读取当前代。并发停止并重启后，旧命令的失败只能按原 operation 被拒绝，不覆盖新代。
+- `relay_runtime.rs` 的 `finish_controlled_registration()` 仅让成功注册进入服务循环；失败时先按原代收口，
+  再 drop worker 释放其 generation-bound channel，最后完成命令结果。已停止的旧代即使迟到建通道且注册失败，也不进入未 joined 的长期接收循环。
+- 回归实际执行生产 manager/启动失败 helper，以及生产注册完成分派 helper 的成功/失败分支；oneshot 唤醒探针验证释放先于失败回复。
+  入口绑定同时有源码接线断言。它们不是完整 Tauri/worker/TCP 端到端运行，真实宿主与并发交错覆盖仍按对应 Issue 验收。
+
 全量 `cargo test` 一次编译约 1.5–5 分钟：同一模块的多处改动应攒成一次编译，任务边界才跑全量回归。
 
-### 13.11 A/B 双向输入统一进入 B 权威 Session（2026-09-22）
+### 13.12 A/B 双向输入统一进入 B 权威 Session（2026-09-22，历史补录）
 
 - **需求结论**：连接和能力准备完成后，A、B 两端输入框都必须向同一个 B 权威 Session 提交任务；B 端不得沿用普通本地聊天发送链路，否则会形成 UI 看似同屏、实际上下文分叉的第二条 Session。
 - **会话准备**：`capability_snapshot_request.session_id` 继续表示 A 的稳定会话引用。B 在生成或复用能力快照时先通过幂等临界区创建/查找权威 Session，再把 `sessionRef + sessionId + remote_control_generation` 投影给 B UI，因此 B 可以成为首个发言方，重试也不会重复建 Session。

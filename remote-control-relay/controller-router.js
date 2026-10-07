@@ -92,22 +92,21 @@ export class ControllerRouter {
     leaseManager,
     send,
     audit = () => {},
-    livenessHooks = new ControllerLivenessHooks(),
-    resumeHooks = new ControllerResumeHooks(),
-    // DEV-06 审核修复：hook 槽必须能在不修改 server.js/router 的前提下扩展。
-    // 后续任务（例如 liveness/resume 之外的 hook）通过该数组注入即可，
-    // router 与 server 的构造代码保持不变。
+    livenessHooks = new ControllerLivenessHooks({ leaseManager }),
+    resumeHooks = new ControllerResumeHooks({ leaseManager }),
     additionalHooks = [],
   } = {}) {
     if (!pairingRegistrationHandler || typeof pairingRegistrationHandler.register !== "function"
-      || !leaseManager || typeof leaseManager.claim !== "function"
+      || !leaseManager || typeof leaseManager.claimForDelivery !== "function"
       || typeof leaseManager.acceptCommitment !== "function"
       || typeof leaseManager.forwardFinished !== "function"
       || typeof leaseManager.acceptReceipt !== "function"
       || typeof leaseManager.abortBySocket !== "function"
       || typeof leaseManager.abortHandshakesBySocket !== "function"
+      || typeof leaseManager.isPendingHandshake !== "function"
       || typeof leaseManager.lease !== "function"
       || typeof leaseManager.terminateLease !== "function"
+      || typeof leaseManager.setTerminationObserver !== "function"
       || typeof send !== "function" || typeof audit !== "function") {
       fail("controller_router_config_invalid");
     }
@@ -126,6 +125,14 @@ export class ControllerRouter {
     this.#audit = audit;
     this.#livenessHooks = livenessHooks;
     this.#hooks = Object.freeze(hooksList);
+    this.#leases.setTerminationObserver(async (event, leaseOwner, previousOwner) => {
+      this.#clearAllLeaseLinks(leaseOwner);
+      const owners = previousOwner ? [leaseOwner, previousOwner] : [leaseOwner];
+      const outcomes = await Promise.allSettled(owners.flatMap((owner) => this.#hooks.map((hooks) =>
+        Promise.resolve().then(() => hooks.onLeaseTerminated(event, owner)))));
+      const failures = outcomes.filter((outcome) => outcome.status === "rejected").map((outcome) => outcome.reason);
+      if (failures.length) throw new AggregateError(failures, "controller_hook_termination_failed");
+    });
   }
 
   #emit(event) {
@@ -145,6 +152,7 @@ export class ControllerRouter {
     this.#peers.set(socketIdentity, {
       socketIdentity, source, socket, role: "unknown", endpointId: null,
       authenticatedContext: null, counterpart: null, controllerLeaseId: null,
+      pendingReservationId: null,
     });
   }
 
@@ -181,6 +189,8 @@ export class ControllerRouter {
     if (!peer) fail("controller_socket_invalid");
     const requestId = typeof message?.request_id === "string" && ID.test(message.request_id)
       ? message.request_id : "request-invalid";
+    let deliveryReservationId = null;
+    let createdLease = null;
     try {
       if (message?.type === "desktop_pairing_register") {
         if (peer.role !== "B") fail("controller_role_invalid");
@@ -191,15 +201,25 @@ export class ControllerRouter {
       }
       if (message?.type === "controller_pairing_claim") {
         if (peer.role !== "unknown" && peer.role !== "A") fail("controller_role_invalid");
-        const reserved = await this.#leases.claim({
+        if (peer.controllerLeaseId && this.#leases.lease(peer.controllerLeaseId)) fail("controller_busy");
+        const delivery = await this.#leases.claimForDelivery({
           message, socketIdentity, source: peer.source,
         });
+        const reserved = delivery.message;
+        deliveryReservationId = delivery.owns_initial_delivery ? reserved.reservation_id : null;
         const controlledIdentity = this.#controlled.get(reserved.transcript.endpoint_id);
         const controlled = controlledIdentity ? this.#peers.get(controlledIdentity) : null;
-        if (!controlled || controlled.role !== "B") fail("endpoint_offline");
+        if (this.#peers.get(socketIdentity) !== peer || !controlled || controlled.role !== "B"
+          || !this.#leases.isPendingHandshake({ reservationId: reserved.reservation_id,
+            socketIdentity, controlledSocketIdentity: controlledIdentity })) fail("endpoint_offline");
+        if ((peer.pendingReservationId && peer.pendingReservationId !== reserved.reservation_id)
+          || (controlled.pendingReservationId && controlled.pendingReservationId !== reserved.reservation_id)
+          || (controlled.controllerLeaseId && this.#leases.lease(controlled.controllerLeaseId))) fail("controller_busy");
         peer.role = "A";
         peer.counterpart = controlledIdentity;
         controlled.counterpart = socketIdentity;
+        peer.pendingReservationId = reserved.reservation_id;
+        controlled.pendingReservationId = reserved.reservation_id;
         this.#deliver(peer, reserved);
         this.#deliver(controlled, reserved);
         return reserved;
@@ -212,6 +232,7 @@ export class ControllerRouter {
           const routed = this.#leases.acceptCommitment({
             message, role: peer.role, socketIdentity,
           });
+          deliveryReservationId = message.reservation_id;
           this.#deliver(peer, routed.message);
           this.#deliver(this.#counterpart(peer), routed.message);
           return routed.message;
@@ -220,6 +241,7 @@ export class ControllerRouter {
           const routed = this.#leases.forwardFinished({
             message, role: peer.role, socketIdentity,
           });
+          deliveryReservationId = message.reservation_id;
           this.#deliver(this.#counterpart(peer), routed.message);
           return routed.message;
         }
@@ -227,11 +249,14 @@ export class ControllerRouter {
           message, role: peer.role, socketIdentity,
         });
         if (!committed) return null;
+        createdLease = committed.lease;
         const counterpart = this.#counterpart(peer);
         const peerMessage = committed.messages[peer.role];
         const counterpartMessage = committed.messages[counterpart.role];
         peer.controllerLeaseId = committed.lease.controller_lease_id;
         counterpart.controllerLeaseId = committed.lease.controller_lease_id;
+        peer.pendingReservationId = null;
+        counterpart.pendingReservationId = null;
         await Promise.all(this.#hooks.map((hooks) => hooks.onLeaseCreated(committed.lease)));
         this.#deliver(peer, peerMessage);
         this.#deliver(counterpart, counterpartMessage);
@@ -248,16 +273,14 @@ export class ControllerRouter {
         try { disconnect = validateControllerMessage(message, peer.role, lease); } catch (error) {
           fail("controller_disconnect_invalid", error);
         }
-        const counterpart = this.#counterpart(peer);
-        this.#deliver(counterpart, disconnect);
-        await this.#leases.terminateLease({
-          controllerLeaseId: lease.controller_lease_id,
-          reason: disconnect.reason,
-        });
-        peer.controllerLeaseId = null;
-        counterpart.controllerLeaseId = null;
-        peer.counterpart = null;
-        counterpart.counterpart = null;
+        try {
+          this.#deliver(this.#counterpart(peer), disconnect);
+        } finally {
+          // A valid owner's explicit disconnect is terminal even when its
+          // counterpart vanished or cannot receive the courtesy notification.
+          await this.#leases.terminateLease({ controllerLeaseId: lease.controller_lease_id,
+            reason: disconnect.reason, expectedLease: lease });
+        }
         return disconnect;
       }
       if (message?.type === "encrypted_frame") {
@@ -318,16 +341,19 @@ export class ControllerRouter {
           if (committed?.lease) {
             await Promise.all(this.#hooks.map((candidate) => candidate.onLeaseCreated(committed.lease)));
           }
+          result?.finalize?.();
           if (LIVENESS_TYPES.has(message?.type)) this.#emit("liveness_forwarded");
           if (RESUME_TYPES.has(message?.type)) this.#emit("resume_forwarded");
           return result ?? null;
         } catch (error) {
-          try {
-            await result?.abort?.();
-            await Promise.all(this.#hooks.map((candidate) => candidate.onLeaseTerminated({
-              controller_lease_id: lease.controller_lease_id,
-            })));
-          } catch { /* cleanup failure cannot resurrect an uncertain resume */ }
+          // Accepted hook results own this exact immutable lease revision.
+          // A rejected frame never reaches here, and delayed cleanup cannot
+          // terminate a subsequently committed revision with the same wire id.
+          try { await result?.abort?.(); } catch { /* authoritative fallback follows */ }
+          if (lease) await this.#leases.terminateLease({
+            controllerLeaseId: lease.controller_lease_id,
+            expectedLease: committed?.lease ?? lease, reason: "controller_resume_failed",
+          }).catch(() => {});
           throw error;
         }
       }
@@ -346,16 +372,24 @@ export class ControllerRouter {
         if (auditEvent) this.#emit(auditEvent);
       }
       const code = publicError(error);
-      this.#send(peer.socket, {
+      try { this.#send(peer.socket, {
         v: CONTROLLER_PROTOCOL_VERSION,
         type: "error",
         request_id: requestId,
         code,
         message: errorMessage(code),
-      });
-      if (message?.type === "controller_pairing_claim" || HANDSHAKE_TYPES.has(message?.type)) {
-        await this.#leases.abortBySocket({ socketIdentity, reason: "handshake_failed" })
+      }); } catch { /* Error delivery cannot broaden or skip precise cleanup. */ }
+      if (createdLease) {
+        await this.#leases.terminateLease({ controllerLeaseId: createdLease.controller_lease_id,
+          expectedLease: createdLease, reason: "handshake_failed" }).catch(() => {});
+        this.#clearLeaseLinks(peer, createdLease.controller_lease_id);
+      } else if (deliveryReservationId) {
+        // Only a successfully accepted operation whose delivery/binding failed
+        // owns cleanup. Rejected retries/replays have no cleanup authority.
+        await this.#leases.abortHandshakesBySocket({ socketIdentity,
+          reservationId: deliveryReservationId, reason: "handshake_failed" })
           .catch(() => {});
+        this.#clearPendingLinks(peer, deliveryReservationId);
       }
       throw error;
     }
@@ -393,6 +427,41 @@ export class ControllerRouter {
     }
   }
 
+  #clearPendingLinks(peer, reservationId) {
+    if (peer.pendingReservationId !== reservationId) return;
+    const counterpart = this.#peers.get(peer.counterpart);
+    if (counterpart?.pendingReservationId === reservationId && counterpart.counterpart === peer.socketIdentity) {
+      counterpart.pendingReservationId = null;
+      counterpart.counterpart = null;
+    }
+    peer.pendingReservationId = null;
+    peer.counterpart = null;
+  }
+
+  #clearLeaseLinks(peer, leaseId) {
+    const counterpart = this.#peers.get(peer.counterpart);
+    if (counterpart?.controllerLeaseId === leaseId) {
+      counterpart.controllerLeaseId = null;
+      counterpart.counterpart = null;
+    }
+    if (peer.controllerLeaseId === leaseId) {
+      peer.controllerLeaseId = null;
+      peer.counterpart = null;
+    }
+  }
+
+  #clearAllLeaseLinks(leaseOwner) {
+    const leaseId = leaseOwner.controller_lease_id;
+    // The observer belongs to the removed revision, never a replacement.
+    if (this.#leases.lease(leaseId)) return;
+    for (const peer of this.#peers.values()) {
+      if (peer.controllerLeaseId !== leaseId) continue;
+      peer.controllerLeaseId = null;
+      peer.counterpart = null;
+      peer.pendingReservationId = null;
+    }
+  }
+
   async removeSocket(socketIdentity) {
     socketIdentity = id(socketIdentity, "socket_identity");
     const peer = this.#peers.get(socketIdentity);
@@ -414,14 +483,26 @@ export class ControllerRouter {
       this.#controlled.delete(peer.endpointId);
     }
     const counterpart = peer.counterpart ? this.#peers.get(peer.counterpart) : null;
-    if (counterpart?.counterpart === socketIdentity) counterpart.counterpart = null;
+    if (counterpart?.counterpart === socketIdentity) {
+      counterpart.counterpart = null;
+      counterpart.pendingReservationId = null;
+    }
     if (hookResults.some((result) => result?.retain_lease === true)) {
       const handshakes = await this.#leases.abortHandshakesBySocket({
-        socketIdentity, reason: "owner_disconnected",
+        socketIdentity, reason: "owner_disconnected", endpointId: peer.role === "B" ? peer.endpointId : undefined,
       });
       return Object.freeze({ handshakes, leases: 0 });
     }
-    return this.#leases.abortBySocket({ socketIdentity, reason: "owner_disconnected" });
+    // B's authenticated endpoint also identifies preparations suspended before
+    // their first resolver returned a socket identity. Never take this from a frame.
+    try {
+      return await this.#leases.abortBySocket({ socketIdentity, reason: "owner_disconnected",
+        endpointId: peer.role === "B" ? peer.endpointId : undefined });
+    } finally {
+      if (lease && !this.#leases.lease(lease.controller_lease_id)) {
+        this.#clearLeaseLinks(peer, lease.controller_lease_id);
+      }
+    }
   }
 
   async expire() {
@@ -434,6 +515,13 @@ export class ControllerRouter {
         ? "liveness_expired"
         : (hooks instanceof ControllerResumeHooks ? "resume_expired" : null);
       for (let index = 0; event && index < count; index += 1) this.#emit(event);
+    }
+    for (const peer of this.#peers.values()) {
+      if (peer.role !== "A" || !peer.pendingReservationId) continue;
+      if (!this.#leases.isPendingHandshake({ reservationId: peer.pendingReservationId,
+        socketIdentity: peer.socketIdentity, controlledSocketIdentity: peer.counterpart })) {
+        this.#clearPendingLinks(peer, peer.pendingReservationId);
+      }
     }
     return results.reduce((sum, result) => sum + result.count, 0);
   }

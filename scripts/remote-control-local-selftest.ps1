@@ -40,6 +40,7 @@ $repoRoot = Split-Path -Parent $PSScriptRoot
 $relayDir = Join-Path $repoRoot 'remote-control-relay'
 $pidFile = Join-Path $KeyStore 'relay.pid'
 $logFile = Join-Path $KeyStore 'relay.log'
+$errorLogFile = Join-Path $KeyStore 'relay.stderr.log'
 $keyFile = Join-Path $KeyStore 'relay-signing-key.json'
 
 function Write-Section([string]$text) {
@@ -64,8 +65,22 @@ function Initialize-KeyStore {
 }
 
 function New-OrLoadSigningKey([string]$stateDir) {
+    $readValidatedKey = {
+        # Validate the same in-memory snapshot later parsed by PowerShell. Key
+        # material travels only over child stdin, never argv/stdout or logs.
+        $raw = Get-Content -LiteralPath $keyFile -Raw -Encoding UTF8
+        $validator = Join-Path $relayDir 'scripts/check-local-signing-key.cjs'
+        $raw | & $NodeExe $validator | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw '自测签名身份无效；拒绝覆盖既有环境文件。' }
+        return $raw | ConvertFrom-Json
+    }
     if (Test-Path -LiteralPath $keyFile) {
-        return Get-Content -LiteralPath $keyFile -Raw | ConvertFrom-Json
+        return (& $readValidatedKey)
+    }
+    if ((Test-Path -LiteralPath (Join-Path $KeyStore 'relay.env.ps1')) -or
+        (Test-Path -LiteralPath (Join-Path $KeyStore 'client.env.ps1')) -or
+        @(Get-ChildItem -LiteralPath $stateDir -Force -ErrorAction Stop).Count -gt 0) {
+        throw '自测身份或状态已存在但签名密钥缺失；请恢复原密钥，不能重新生成。'
     }
     # Ed25519：私钥导出为 PKCS#8 DER（Relay 期望的格式），公钥取 SPKI DER 末 32 字节
     # （客户端 pin 的 raw ed25519 公钥），并立刻做一次签名/验签自检。
@@ -100,14 +115,39 @@ console.log(JSON.stringify({ ok: true, key_id: keyId }));
     $keyId = 'selftest-relay-key-1'
     & $NodeExe $generatorPath $keyFile $keyId | Out-Null
     if ($LASTEXITCODE -ne 0) { throw '生成 Relay 签名密钥失败。' }
-    return Get-Content -LiteralPath $keyFile -Raw | ConvertFrom-Json
+    return (& $readValidatedKey)
 }
 
 function Write-EnvFiles {
     param([string]$stateDir, [object]$key)
 
-    $enrollmentHmac = -join ((48..57) + (65..90) + (97..122) | Get-Random -Count 48 | ForEach-Object { [char]$_ })
-    $pairingHmac = -join ((48..57) + (65..90) + (97..122) | Get-Random -Count 48 | ForEach-Object { [char]$_ })
+    $relayEnvPath = Join-Path $KeyStore 'relay.env.ps1'
+    if (Test-Path -LiteralPath $relayEnvPath) {
+        # Parse only our two literal values; never execute an old env file to
+        # recover identity, and never rotate an existing state store's HMACs.
+        $saved = Get-Content -LiteralPath $relayEnvPath -Raw -Encoding UTF8
+        $enrollment = [regex]::Matches($saved, '(?m)^\$env:PINVOU_REMOTE_ENROLLMENT_HMAC_KEY = ''([A-Za-z0-9]{32,128})''\r?$')
+        $pairing = [regex]::Matches($saved, '(?m)^\$env:PINVOU_REMOTE_PAIRING_HMAC_KEY = ''([A-Za-z0-9]{32,128})''\r?$')
+        $enrollmentId = [regex]::Matches($saved, '(?m)^\$env:PINVOU_REMOTE_ENROLLMENT_HMAC_KEY_ID = ''selftest-enrollment-hmac-1''\r?$')
+        $pairingId = [regex]::Matches($saved, '(?m)^\$env:PINVOU_REMOTE_PAIRING_HMAC_KEY_ID = ''selftest-pairing-hmac-1''\r?$')
+        if ($enrollment.Count -ne 1 -or $pairing.Count -ne 1 -or $enrollmentId.Count -ne 1 -or $pairingId.Count -ne 1) {
+            throw '自测 HMAC 身份文件无效；拒绝替换既有身份。'
+        }
+        $enrollmentHmac = $enrollment[0].Groups[1].Value
+        $pairingHmac = $pairing[0].Groups[1].Value
+    } else {
+        if (@(Get-ChildItem -LiteralPath $stateDir -Force -ErrorAction Stop).Count -gt 0) {
+            throw '自测状态已存在但 HMAC 身份缺失；请恢复原身份，不能重新生成。'
+        }
+        $newHmac = {
+            $bytes = New-Object byte[] 32
+            $rng = [Security.Cryptography.RandomNumberGenerator]::Create()
+            try { $rng.GetBytes($bytes); return (-join ($bytes | ForEach-Object { $_.ToString('x2') })) }
+            finally { $rng.Dispose() }
+        }
+        $enrollmentHmac = & $newHmac
+        $pairingHmac = & $newHmac
+    }
     $wsUrl = "ws://127.0.0.1:$Port/pinvou3/remote/ws"
     $controllerState = Join-Path $stateDir 'controller-state.json'
     # legacy 文件必须在 controller 状态目录之外，否则 enrollment 配置失败关闭。
@@ -129,7 +169,6 @@ function Write-EnvFiles {
         "`$env:PINVOU_REMOTE_RELAY_SIGNING_KEY_ID = '$($key.signing_key_id)'"
         "`$env:PINVOU_REMOTE_RELAY_SIGNING_PRIVATE_KEY_B64 = '$($key.private_key_pkcs8_der_b64)'"
     ) -join "`n"
-    $relayEnvPath = Join-Path $KeyStore 'relay.env.ps1'
     Set-Content -LiteralPath $relayEnvPath -Value $relayEnv -Encoding UTF8
 
     $clientEnv = @(
@@ -152,9 +191,28 @@ function Write-EnvFiles {
 
 function Get-RelayProcess {
     if (-not (Test-Path -LiteralPath $pidFile)) { return $null }
-    $relayPid = (Get-Content -LiteralPath $pidFile -Raw).Trim()
-    if (-not $relayPid) { return $null }
-    return Get-Process -Id ([int]$relayPid) -ErrorAction SilentlyContinue
+    try {
+        # A PID or a listening port alone is not ownership: both can be reused.
+        # Unknown/old records fail closed; never stop a process based on the port.
+        $record = Get-Content -LiteralPath $pidFile -Raw | ConvertFrom-Json
+        if ($record.version -ne 1 -or $record.process_id -le 0 -or
+            $record.process_id -gt [int]::MaxValue -or -not $record.started_at_ticks) { return $null }
+        $process = Get-Process -Id ([int]$record.process_id) -ErrorAction Stop
+        # Pin the real OS handle before checking time/path. Merely reading those
+        # properties does not cache a handle, and InputObject alone cannot fence PID reuse.
+        $handle = $process.Handle
+        if (-not $handle -or $handle -eq [IntPtr]::Zero) { return $null }
+        if ($process.StartTime.ToUniversalTime().Ticks.ToString() -cne $record.started_at_ticks) { return $null }
+        $nodePath = [IO.Path]::GetFullPath((Get-Command $NodeExe -CommandType Application -ErrorAction Stop).Source)
+        if (-not [string]::Equals($process.Path, $nodePath, [StringComparison]::OrdinalIgnoreCase)) { return $null }
+        $script = [IO.Path]::GetFullPath((Join-Path $relayDir 'server.js'))
+        $details = Get-CimInstance Win32_Process -Filter ('ProcessId=' + $process.Id) -ErrorAction Stop
+        # Start-LocalRelay launches only this absolute script, not a shell wrapper.
+        $exe = [regex]::Escape($nodePath)
+        $entry = [regex]::Escape($script)
+        if (-not $details -or $details.CommandLine -notmatch ('^(?:"' + $exe + '"|' + $exe + ')\s+"' + $entry + '"\s*$')) { return $null }
+        return $process
+    } catch { return $null }
 }
 
 function Test-LocalPort([int]$localPort) {
@@ -186,11 +244,17 @@ function Start-LocalRelay([string]$relayEnvPath) {
     }
     $script = Join-Path $relayDir 'server.js'
     if (-not (Test-Path -LiteralPath $script)) { throw "未找到 $script" }
-    $command = "& '$relayEnvPath'; & '$NodeExe' '$script' *>> '$logFile'"
-    $process = Start-Process -FilePath 'powershell' -WindowStyle Hidden -PassThru -ArgumentList @(
-        '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', $command
-    )
-    Set-Content -LiteralPath $pidFile -Value $process.Id -Encoding ASCII
+    if (Get-PortOwner -localPort $Port) { throw '目标端口已被占用；拒绝启动或停止未证明归属的进程。' }
+    $script = [IO.Path]::GetFullPath($script)
+    $nodePath = (Get-Command $NodeExe -CommandType Application -ErrorAction Stop).Source
+    . $relayEnvPath
+    $process = Start-Process -FilePath $nodePath -WorkingDirectory $relayDir -WindowStyle Hidden -PassThru `
+        -ArgumentList ('"' + $script + '"') -RedirectStandardOutput $logFile -RedirectStandardError $errorLogFile
+    [pscustomobject]@{
+        version = 1
+        process_id = $process.Id
+        started_at_ticks = $process.StartTime.ToUniversalTime().Ticks.ToString()
+    } | ConvertTo-Json -Compress | Set-Content -LiteralPath $pidFile -Encoding ASCII
     Start-Sleep -Seconds 3
     $running = Get-RelayProcess
     if (-not $running) {
@@ -208,16 +272,11 @@ function Start-LocalRelay([string]$relayEnvPath) {
 function Stop-LocalRelay {
     $process = Get-RelayProcess
     if (-not $process) {
-        Write-Host '未发现由本脚本启动的 Relay 进程。'
+        Write-Host '未发现可验证归属的 Relay 进程；不会按端口或失效 PID 强杀。'
     } else {
-        Stop-Process -Id $process.Id -Force
-        Write-Host "已停止 Relay 包装进程（PID $($process.Id)）。"
-    }
-    # node 是包装进程的子进程，父进程退出后仍可能持有端口：按端口回收。
-    $owner = Get-PortOwner -localPort $Port
-    if ($owner) {
-        Stop-Process -Id $owner.Id -Force
-        Write-Host "已停止 Relay 服务进程（PID $($owner.Id)）。"
+        # Use the verified process object (including its opened handle), not a new PID lookup.
+        Stop-Process -InputObject $process -Force
+        Write-Host "已停止本脚本记录并验证的 Relay 服务进程（PID $($process.Id)）。"
     }
     Remove-Item -LiteralPath $pidFile -Force -ErrorAction SilentlyContinue
 }

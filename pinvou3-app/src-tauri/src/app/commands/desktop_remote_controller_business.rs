@@ -36,7 +36,9 @@ use crate::features::remote_control::controller::task::{
 use crate::features::remote_control::controller::transfer::core::{
     TransferContext, TransferDirection, TransferMetadata,
 };
-use crate::features::remote_control::controller::transfer::upload::UploadProgress;
+use crate::features::remote_control::controller::transfer::upload::{
+    UploadProgress, decode_upload_chunk,
+};
 use crate::features::sessions::application::ports::{UseCaseError, UseCaseFuture};
 use crate::features::sessions::application::submit_controlled::{
     ControlledInput, ControlledSubmission, ControlledSubmissionPort, ControlledSubmissionResult,
@@ -719,7 +721,8 @@ impl ControlledSubmissionPort for DesktopControlledSubmitBackend {
     }
 }
 
-/// Keep the attachment origin intact at the actual desktop admission boundary.
+/// Preserve the authoritative input origin through final admission. `None`
+/// means wire upload receipts; `Some`, including an empty vector, is B-local.
 fn route_prepared_controlled_task<T>(
     mut prepared: PreparedControlledTask,
     remote: impl FnOnce(&PreparedControlledTask) -> Result<T, String>,
@@ -993,12 +996,9 @@ impl DesktopControlledBusiness {
                         if operation == "attachment_abort" {
                             return Ok(json!({"aborted": runtime.uploads().abort(field("transfer_id")?)}));
                         }
-                        let bytes = base64::engine::general_purpose::STANDARD
-                            .decode(field("chunk_b64")?)
-                            .map_err(|_| "transfer_chunk_invalid".to_owned())?;
-                        if bytes.len() as u64 != number("chunk_bytes")? {
-                            return Err("transfer_chunk_invalid".to_owned());
-                        }
+                        let bytes = decode_upload_chunk(
+                            field("chunk_b64")?, number("chunk_bytes")?, runtime.uploads().chunk_bytes(),
+                        )?;
                         let progress = runtime.uploads().accept_chunk(
                             field("transfer_id")?, number("chunk_index")?,
                             &bytes, now,
@@ -1361,6 +1361,168 @@ mod dev19_replay_tests {
         JournalKind, JournalSnapshot, RemoteJournal,
     };
     use serde_json::json;
+
+    #[test]
+    fn prepared_remote_input_consumes_real_completed_upload_and_local_empty_stays_local() {
+        use crate::features::remote_control::controller::transfer::{
+            core::TransferRegistry, limits::TransferLimits, staging::SessionIsolationStaging,
+            upload::AttachmentUploads,
+        };
+        use sha2::{Digest, Sha256};
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().to_path_buf();
+        let staging = Arc::new(SessionIsolationStaging::new(Arc::new(move |_| {
+            Ok(root.clone())
+        })));
+        let uploads = AttachmentUploads::new(
+            Arc::new(TransferRegistry::new(TransferLimits::default()).unwrap()),
+            staging,
+        );
+        let live = lease();
+        let bytes = b"actual completed wire attachment";
+        let begun = uploads
+            .begin(
+                TransferContext::new(&live, "session-1", "task-1", TransferDirection::Upload)
+                    .unwrap(),
+                TransferMetadata {
+                    file_name: "wire.txt".into(),
+                    mime_type: "text/plain".into(),
+                    total_bytes: bytes.len() as u64,
+                    sha256: Sha256::digest(bytes)
+                        .iter()
+                        .map(|byte| format!("{byte:02x}"))
+                        .collect(),
+                },
+                1_000,
+            )
+            .unwrap();
+        uploads
+            .accept_chunk(&begun.handle_id, 0, bytes, 1_100)
+            .unwrap();
+        let prepared = |local_attachments| PreparedControlledTask {
+            remote_ref: "ref-1".into(),
+            b_session_id: "session-1".into(),
+            task_id: "task-1".into(),
+            client_request_id: "request-1".into(),
+            input_digest: "digest-1".into(),
+            payload: json!({"input":{"attachment_ids":[begun.handle_id]}}),
+            local_attachments,
+        };
+        // These are the production port's actual Some/None dispatch semantics,
+        // with real upload receipt ownership and real anchored published bytes.
+        let attachments = route_prepared_controlled_task(
+            prepared(None),
+            |task| {
+                let ids = task.payload["input"]["attachment_ids"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|id| id.as_str().unwrap().to_owned())
+                    .collect::<Vec<_>>();
+                uploads.consume_completed(&ids, &live, &task.b_session_id, &task.task_id)
+            },
+            |_, _| panic!("wire attachments must not enter the B-local descriptor arm"),
+        )
+        .unwrap();
+        assert_eq!(attachments.len(), 1);
+        assert_eq!(attachments[0].handle_id, begun.handle_id);
+        assert_eq!(
+            attachments[0]
+                .read_owner
+                .as_ref()
+                .unwrap()
+                .read_bounded(bytes.len() as u64)
+                .unwrap(),
+            bytes
+        );
+        assert!(
+            uploads
+                .consume_completed(&[begun.handle_id.clone()], &live, "session-1", "task-1")
+                .is_err()
+        );
+        let local = route_prepared_controlled_task(
+            prepared(Some(Vec::new())),
+            |_| panic!("even empty B-local descriptors must not consume wire receipts"),
+            |_, attachments| Ok(attachments),
+        )
+        .unwrap();
+        assert!(local.is_empty());
+        drop(attachments);
+        uploads.cleanup_for_task("task-1");
+    }
+
+    #[test]
+    fn remote_admission_source_consumes_a_completed_receipt_exactly_once() {
+        use crate::features::remote_control::controller::transfer::{
+            core::TransferRegistry, limits::TransferLimits, staging::SessionIsolationStaging,
+            upload::AttachmentUploads,
+        };
+        use sha2::{Digest, Sha256};
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().to_path_buf();
+        let staging = Arc::new(SessionIsolationStaging::new(Arc::new(move |_| {
+            Ok(root.clone())
+        })));
+        let uploads = AttachmentUploads::new(
+            Arc::new(TransferRegistry::new(TransferLimits::default()).unwrap()),
+            staging,
+        );
+        let live = lease();
+        let bytes = b"actual completed wire attachment";
+        let begun = uploads
+            .begin(
+                TransferContext::new(&live, "session-1", "task-1", TransferDirection::Upload)
+                    .unwrap(),
+                TransferMetadata {
+                    file_name: "wire.txt".into(),
+                    mime_type: "text/plain".into(),
+                    total_bytes: bytes.len() as u64,
+                    sha256: Sha256::digest(bytes)
+                        .iter()
+                        .map(|byte| format!("{byte:02x}"))
+                        .collect(),
+                },
+                1_000,
+            )
+            .unwrap();
+        uploads
+            .accept_chunk(&begun.handle_id, 0, bytes, 1_100)
+            .unwrap();
+        use crate::features::sessions::application::submit_controlled::resolve_controlled_attachments;
+        let ids = vec![begun.handle_id];
+        assert_eq!(
+            resolve_controlled_attachments(&ids, Some(Vec::new()), || {
+                panic!("local mismatch must not consume an A upload")
+            })
+            .unwrap_err(),
+            "task_attachments_invalid"
+        );
+        let attachments = resolve_controlled_attachments(&ids, None, || {
+            uploads.consume_completed(&ids, &live, "session-1", "task-1")
+        })
+        .unwrap();
+        assert_eq!(attachments.len(), 1);
+        assert_eq!(attachments[0].handle_id, ids[0]);
+        assert_eq!(attachments[0].bytes, bytes.len() as u64);
+        assert_eq!(
+            attachments[0]
+                .read_owner
+                .as_ref()
+                .unwrap()
+                .read_bounded(bytes.len() as u64)
+                .unwrap(),
+            bytes
+        );
+        assert_eq!(
+            resolve_controlled_attachments(&ids, None, || {
+                uploads.consume_completed(&ids, &live, "session-1", "task-1")
+            })
+            .unwrap_err(),
+            "transfer_binding_stale"
+        );
+        drop(attachments);
+        uploads.cleanup_for_task("task-1");
+    }
 
     fn lease() -> LeaseContext {
         LeaseContext {
