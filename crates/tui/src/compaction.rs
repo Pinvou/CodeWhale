@@ -354,9 +354,33 @@ pub(crate) fn estimate_tokens_for_message(message: &Message, include_thinking: b
         .iter()
         .map(|c| match c {
             ContentBlock::Text { text, .. } => text.len() / 4,
-            // Historical reasoning blocks are UI/session metadata for DeepSeek.
-            // Only current-turn tool-call reasoning is sent back to the API.
-            ContentBlock::Thinking { thinking, .. } if include_thinking => thinking.len() / 4,
+            ContentBlock::Thinking {
+                thinking,
+                signature,
+                state,
+                redacted_data,
+                reasoning_details,
+            } if include_thinking => {
+                // Every byte of a stored thinking block is replay-shaped
+                // input under at least one provider's contract: the readable
+                // text (Anthropic replays it on all prior turns, DeepSeek on
+                // tool-call turns), the Anthropic signature and redacted
+                // payload, the Responses `encrypted_content`, and OpenRouter
+                // `reasoning_details` entries all go back verbatim. Counting
+                // all of it errs high on providers that drop a subset, which
+                // compacts slightly early rather than overflowing.
+                let bytes = thinking.len()
+                    + signature.as_deref().map_or(0, str::len)
+                    + state.as_ref().map_or(0, |s| s.encrypted_content.len())
+                    + redacted_data.as_deref().map_or(0, str::len)
+                    + reasoning_details.as_ref().map_or(0, |details| {
+                        details
+                            .iter()
+                            .map(|entry| entry.to_string().len())
+                            .sum::<usize>()
+                    });
+                bytes / 4
+            }
             ContentBlock::Thinking { .. } => 0,
             ContentBlock::ToolUse { input, .. } => serde_json::to_string(input)
                 .map(|s| s.len() / 4)
@@ -396,12 +420,15 @@ pub(crate) fn estimate_tokens_for_message(message: &Message, include_thinking: b
 const IMAGE_TOKEN_ESTIMATE: usize = 1000;
 
 pub fn estimate_tokens(messages: &[Message]) -> usize {
-    // Rough estimate: ~4 chars per token. DeepSeek thinking-mode rule: any
-    // assistant message with tool_calls keeps its reasoning_content forever
-    // (replayed in all subsequent requests). Final text-only answers drop it.
+    // Rough estimate: ~4 chars per token. Thinking blocks count on every
+    // assistant message: the preserved-thinking replay contracts (Anthropic
+    // signed/redacted blocks on all prior turns, Responses reasoning items
+    // with their function-call chain, OpenRouter reasoning_details, DeepSeek
+    // tool-call turns) send stored reasoning back on later requests, so a
+    // tool-call-only rule undercounts the budget and compacts too late.
     messages
         .iter()
-        .map(|message| estimate_tokens_for_message(message, message_has_tool_use(message)))
+        .map(|message| estimate_tokens_for_message(message, true))
         .sum()
 }
 
@@ -1592,6 +1619,7 @@ mod quota_tests;
 #[cfg(test)]
 mod tests {
     use crate::models::{ImageUrlContent, Message};
+    use codewhale_core::request::OpaqueReasoningState;
 
     #[test]
     fn inline_image_estimates_nonzero_tokens() {
@@ -2666,6 +2694,173 @@ mod tests {
         assert!(estimate_tokens(&current_messages) > lower_bound);
         assert!(estimate_tokens(&completed_messages) > lower_bound);
         assert!(estimate_tokens(&historical_messages) > lower_bound);
+    }
+
+    #[test]
+    fn estimate_tokens_counts_thinking_on_text_only_assistant_turns() {
+        // Preserved-thinking replay is no longer a DeepSeek tool-round rule:
+        // Anthropic Messages replays signed thinking on every prior assistant
+        // turn, text-only ones included. A tool-call-only rule would count
+        // this message at 0 and compact too late.
+        let thinking = "reasoning ".repeat(800);
+        let messages = vec![
+            Message {
+                role: Role::Assistant,
+                content: vec![
+                    ContentBlock::Thinking {
+                        thinking: thinking.clone(),
+                        signature: None,
+                        state: None,
+                        redacted_data: None,
+                        reasoning_details: None,
+                    },
+                    ContentBlock::Text {
+                        text: "Answer.".to_string(),
+                        cache_control: None,
+                    },
+                ],
+            },
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text {
+                    text: "Next.".to_string(),
+                    cache_control: None,
+                }],
+            },
+        ];
+        let lower_bound = thinking.len() / 5;
+        assert!(
+            estimate_tokens(&messages) > lower_bound,
+            "thinking on a text-only assistant turn must count toward the estimate"
+        );
+    }
+
+    #[test]
+    fn estimate_tokens_counts_opaque_thinking_payloads() {
+        // Signature, redacted payload, Responses encrypted state, and
+        // OpenRouter reasoning_details entries are all replayed verbatim;
+        // counting only the readable text would estimate them at 0.
+        let base = estimate_tokens_for_message(
+            &Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::Thinking {
+                    thinking: String::new(),
+                    signature: None,
+                    state: None,
+                    redacted_data: None,
+                    reasoning_details: None,
+                }],
+            },
+            true,
+        );
+        assert_eq!(base, 0, "an empty block must still estimate to 0");
+
+        let payload = "x".repeat(400);
+        let with_signature = estimate_tokens_for_message(
+            &Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::Thinking {
+                    thinking: String::new(),
+                    signature: Some(payload.clone()),
+                    state: None,
+                    redacted_data: None,
+                    reasoning_details: None,
+                }],
+            },
+            true,
+        );
+        assert!(
+            with_signature >= payload.len() / 5,
+            "signature bytes are replayed and must count"
+        );
+
+        let with_redacted = estimate_tokens_for_message(
+            &Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::Thinking {
+                    thinking: String::new(),
+                    signature: None,
+                    state: None,
+                    redacted_data: Some(payload.clone()),
+                    reasoning_details: None,
+                }],
+            },
+            true,
+        );
+        assert!(
+            with_redacted >= payload.len() / 5,
+            "redacted_thinking data is replayed byte-exact and must count"
+        );
+
+        let with_state = estimate_tokens_for_message(
+            &Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::Thinking {
+                    thinking: String::new(),
+                    signature: None,
+                    state: Some(OpaqueReasoningState {
+                        provider: "openai".to_string(),
+                        api: "responses".to_string(),
+                        model: "gpt-test".to_string(),
+                        id: None,
+                        encrypted_content: payload.clone(),
+                        endpoint: None,
+                    }),
+                    redacted_data: None,
+                    reasoning_details: None,
+                }],
+            },
+            true,
+        );
+        assert!(
+            with_state >= payload.len() / 5,
+            "Responses encrypted_content is replayed and must count"
+        );
+
+        let details_entry = serde_json::json!({
+            "type": "reasoning.encrypted",
+            "format": "openai-responses-v1",
+            "data": payload,
+        });
+        let with_details = estimate_tokens_for_message(
+            &Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::Thinking {
+                    thinking: String::new(),
+                    signature: None,
+                    state: None,
+                    redacted_data: None,
+                    reasoning_details: Some(vec![details_entry.clone()]),
+                }],
+            },
+            true,
+        );
+        assert!(
+            with_details >= details_entry.to_string().len() / 5,
+            "OpenRouter reasoning_details entries are replayed and must count"
+        );
+    }
+
+    #[test]
+    fn estimate_tokens_still_skips_thinking_when_opted_out() {
+        // The include_thinking=false contract (used to isolate non-reasoning
+        // content, e.g. the inline-image floor check) must keep ignoring
+        // thinking blocks entirely.
+        let msg = Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::Thinking {
+                thinking: "reasoning ".repeat(800),
+                signature: None,
+                state: None,
+                redacted_data: None,
+                reasoning_details: None,
+            }],
+        };
+        assert_eq!(
+            estimate_tokens_for_message(&msg, false),
+            0,
+            "opted-out estimates must not count thinking bytes"
+        );
     }
 
     #[test]
