@@ -9,8 +9,8 @@
 #   2. <workspace>/fleets/stopship.toml  (this file)
 #
 # Values are Fleet role tokens (scout, builder, reviewer, verifier, advisor —
-# legacy-alias spellings that resolve at the spawn boundary); keys are the
-# workflow's own step names.
+# all resolve at the spawn boundary; scout/builder/verifier ride legacy
+# aliases); keys are the workflow's own step names.
 
 name = "stopship"
 description = "Read-only current release orchestration acceptance fleet"
