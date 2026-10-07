@@ -112,7 +112,7 @@ func main() {
 		}
 		defer stopConsumer()
 	}
-	stopRefund, err := broker.ConsumeUntilResolved(ctx, "billing-refund-commands-v1", "billing.refund.requested.v1", billing.NewRefundCommandConsumer(payments).Handle)
+	stopRefund, err := broker.ConsumeUntilResolved(ctx, "billing-refund-executor-v1", "billing.refund.requested.v1", billing.NewRefundCommandConsumer(payments).Handle)
 	if err != nil {
 		log.Fatal("BILLING_REFUND_CONSUMER_UNAVAILABLE")
 	}
