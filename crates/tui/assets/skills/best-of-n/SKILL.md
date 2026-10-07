@@ -67,8 +67,8 @@ inspect, not a hard-gate result.
 
 Optional diversity: candidates sharing one `type` resolve the same single
 `[subagents]` per-role model route, so get spread from prompt angles (or
-distinct roles), not from per-candidate model choices; `model` is not a call
-field.
+distinct roles), not from per-candidate model choices; `model` is not
+advertised on this call surface.
 
 ## Judge Once
 

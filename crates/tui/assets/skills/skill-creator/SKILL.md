@@ -25,10 +25,12 @@ Discovery paths, in precedence order:
 - `<workspace>/.claude/skills`
 - `<workspace>/.cursor/skills`
 - `<workspace>/.codewhale/skills`
+- `<workspace>/.codex/skills` (audit-compatible only; not runtime-active)
 - `~/.agents/skills`
 - `~/.claude/skills`
 - `~/.codewhale/skills`
 - `~/.deepseek/skills` (legacy fallback)
+- `~/.codex/skills` (audit-compatible only; not runtime-active)
 
 Use skills for model instructions, workflows, and lightweight conventions. Use
 MCP for live external APIs or durable tools. Use hooks for automatic local

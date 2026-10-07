@@ -35,8 +35,9 @@ noise; concrete ones become fixes with credit.
    gh pr list --repo codewhale-hq/Codewhale --state all --search "keyword" --limit 20
    ```
 3. **Write a title that names the gap**, not the vibe. Match the house pattern
-   `vX.Y.Z: <imperative gap>`, e.g. `v0.8.62: Isolate provider/model selection
-   per TUI session and make route changes atomic`. Good: a maintainer knows the
+   `vX.Y.Z: <imperative gap>`, e.g. `vX.Y.Z: Isolate provider/model selection
+   per TUI session and make route changes atomic` (take the version from the
+   live milestone set, not from this example). Good: a maintainer knows the
    fix from the title alone.
 4. **Write the body in sections** (skip none that apply):
    - **Why this matters** — who it affects (multi-terminal QA, Fleet workers,

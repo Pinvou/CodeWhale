@@ -49,9 +49,9 @@ For code changes, give the child a precise write boundary and tell it not to rev
 {
   "action": "start",
   "name": "docs_patch",
-  "prompt": "Update only docs/configuration.md to document the new [statusline] keys. Match the surrounding style. Do not edit other files.",
+  "prompt": "Update only docs/CONFIGURATION.md to document the new [tui] keys. Match the surrounding style. Do not edit other files.",
   "type": "implement",
-  "write_roots": ["docs/configuration.md"]
+  "write_roots": ["docs/CONFIGURATION.md"]
 }
 ```
 
@@ -85,5 +85,5 @@ Fix the settings bug.
 Strong prompt:
 
 ```text
-Own only crates/tui/src/settings.rs and its tests. Preserve existing config key names. Add a regression test showing that provider-specific API key changes do not restart DeepSeek onboarding. Return the changed paths and test command output.
+Own only crates/tui/src/settings.rs and its tests. Preserve existing config key names. Add a regression test showing that provider-specific API key changes do not restart onboarding. Return the changed paths and test command output.
 ```

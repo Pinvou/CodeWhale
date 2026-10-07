@@ -17,9 +17,10 @@ This is read-and-recommend. You do NOT merge, close, tag, or publish. You surfac
 
 ## Workflow
 
-1. **Inventory the queue.** One call, structured:
+1. **Inventory the queue.** One call, structured (set an explicit `--limit`;
+   without one `gh pr list` stops at 30 and silently hides older entries):
    ```
-   gh pr list --repo codewhale-hq/Codewhale --state open \
+   gh pr list --repo codewhale-hq/Codewhale --state open --limit 200 \
      --json number,title,author,headRefName,baseRefName,isDraft,mergeStateStatus,statusCheckRollup
    ```
    Note `mergeStateStatus` (CLEAN / BLOCKED / DIRTY / UNKNOWN) but treat it as a hint only — it is computed against `main`, and the real landing target is usually a different branch.
