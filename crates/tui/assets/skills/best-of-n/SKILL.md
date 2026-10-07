@@ -56,16 +56,19 @@ When candidates must implement code, give each one:
 
 - `type: "implement"`
 - `worktree: true`
-- disjoint `write_roots` so parallel builders claim separate scope
+- the same bounded `write_roots` when the task names target paths — worktree
+  isolation is what keeps parallel builders from colliding, and candidates
+  must all be able to reach the task's files
 
 Never run parallel writers in the parent checkout. Each builder must return
 the structured candidate contract (candidate id, hypothesis, paths, commands,
 self-verdict, risks, and artifact references). A self-verdict is evidence to
 inspect, not a hard-gate result.
 
-Optional diversity: route the candidates through the operator's `[subagents]`
-per-role model configuration when the project has multiple capable routes;
-`model` is not a call field.
+Optional diversity: candidates sharing one `type` resolve the same single
+`[subagents]` per-role model route, so get spread from prompt angles (or
+distinct roles), not from per-candidate model choices; `model` is not a call
+field.
 
 ## Judge Once
 

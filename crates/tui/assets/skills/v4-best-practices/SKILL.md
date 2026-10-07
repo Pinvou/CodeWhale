@@ -1,6 +1,6 @@
 ---
 name: v4-best-practices
-description: Use when working with DeepSeek V4-class models in thinking mode on multi-step or plan-driven tasks. Provides rules to prevent stale references, unverified plan assumptions, and vague plan output.
+description: Use when working with deepseek-v4-pro or deepseek-v4-flash in thinking mode on multi-step or plan-driven tasks. Provides rules to prevent stale references, unverified plan assumptions, and vague plan output.
 ---
 
 # V4 Best Practices
@@ -11,28 +11,25 @@ specific, observable failure class.
 ## 1. Verify references before writing
 
 Before referencing a file path, function, or type in code or plan output,
-call `grep_files` (activate it with `tool_search` if it is not in your tool
-list) or the built-in `read` tool to confirm it exists in the workspace.
+call `grep_files` or `read_file` to confirm it exists in the workspace.
 
 ```
-# Bad:  edit path="src/config/loader.rs" (assumed from memory)
+# Bad:  edit_file path="src/config/loader.rs" (assumed from memory)
 # Good: grep_files pattern="pub fn load_config" → confirms src/config/mod.rs:42
 #        then reference src/config/mod.rs:42
 ```
 
-Failure avoided: writing against a path you never confirmed; LSP diagnostics
+Failure avoided: `edit_file` errors on non-existent paths; LSP diagnostics
 on hallucinated symbols.
 
 ## 2. Spawn a verifier sub-agent before multi-file execution
 
-Before executing a plan that touches 3+ files, spawn a verifier sub-agent
-(`type: "test"` — it cannot edit the workspace) to read the target files and
-confirm path/symbol assumptions still hold. Keep the call provider-neutral:
-route models through the operator's `[subagents]` per-role configuration,
-not call fields.
+Before executing a plan that touches 3+ files, spawn a `deepseek-v4-flash`
+sub-agent (thinking off) to read the target files and confirm path/symbol
+assumptions still hold.
 
 ```
-agent action="start" type="test"
+agent type="verifier" model="deepseek-v4-flash"
   prompt: "Read these files and confirm: [list assumptions]. Report mismatches."
 ```
 
