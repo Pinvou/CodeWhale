@@ -2336,6 +2336,7 @@ Object.assign(dictEn.controlledDevice, {
 });
 
 dictEn["controllerConnection"] = {
+  modelSourceDevice: "Device models",
   entry: "Connect a remote device",
   title: "Connect a remote device",
   desc: "Type the 7-character code the other device is showing. No extra confirmation is needed.",

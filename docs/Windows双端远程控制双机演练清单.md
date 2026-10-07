@@ -7,7 +7,7 @@
 
 | 项 | 要求 |
 |---|---|
-| 部署 | 生产等价环境的 Relay（TLS 终止 + 网关）已就绪；registry 覆盖率 100%（`scripts/enrollment-migrate.js` dry-run 输出为证据）；enrollment gateway 已挂在所有入口前且不可旁路 |
+| 部署 | 生产等价环境的 Relay（TLS 终止 + 网关）已就绪；registry 覆盖率 100%（仓库根目录下 `remote-control-relay/scripts/enrollment-migrate.js` dry-run 输出为证据）；enrollment gateway 已挂在所有入口前且不可旁路 |
 | 密钥 | Relay 侧 `PINVOU_REMOTE_RELAY_SIGNING_KEY_ID` / `..._PRIVATE_KEY_B64` 与两端客户端 pin 的 `..._PUBLIC_KEY_B64` 是同一对密钥；两端都设 `PINVOU_REMOTE_RELAY_SIGNING_KEY_ID`（缺失即 `relay_trust_unconfigured` 失败关闭） |
 | 私钥纪律 | 私钥只存在于 Relay 部署环境；不得写入仓库、日志、工单或 trace |
 | 机器 | 两台隔离 Windows 设备（A 主控端 / B 被控端），可独立断网；建议都开启系统时钟同步 |

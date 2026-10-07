@@ -297,65 +297,6 @@ pub async fn desktop_remote_model_list_exportable(
         .collect())
 }
 
-#[tauri::command]
-pub fn desktop_remote_model_install(
-    package: Value,
-    task_id: String,
-    controlled: State<'_, ControlledDeviceManager>,
-    store: State<'_, SharedTemporaryModelStore>,
-) -> Result<Value, String> {
-    crate::platform::capabilities::ensure_desktop_remote_control_enabled()?;
-    if !controlled.is_supported() {
-        return Err(UNSUPPORTED.to_owned());
-    }
-    let live = controlled
-        .live_lease()
-        .map_err(|error| error.code.to_owned())?;
-    let package = TemporaryModelPackageV1::from_wire_value(&package)
-        .map_err(|error| error.code.to_owned())?;
-    store
-        .install(package, &live, &task_id, monotonic_millis())
-        .map_err(|error| error.code.to_owned())?;
-    store
-        .redacted_route(&task_id, &live)
-        .map_err(|error| error.code.to_owned())
-}
-
-#[tauri::command]
-pub fn desktop_remote_model_release(
-    task_id: String,
-    controlled: State<'_, ControlledDeviceManager>,
-    store: State<'_, SharedTemporaryModelStore>,
-) -> Result<bool, String> {
-    crate::platform::capabilities::ensure_desktop_remote_control_enabled()?;
-    if !controlled.is_supported() {
-        return Err(UNSUPPORTED.to_owned());
-    }
-    Ok(store.clear_task(&task_id))
-}
-
-#[tauri::command]
-pub fn desktop_remote_model_active(
-    controlled: State<'_, ControlledDeviceManager>,
-    store: State<'_, SharedTemporaryModelStore>,
-) -> Result<Option<String>, String> {
-    crate::platform::capabilities::ensure_desktop_remote_control_enabled()?;
-    if !controlled.is_supported() {
-        return Err(UNSUPPORTED.to_owned());
-    }
-    Ok(store.active_task())
-}
-
-fn monotonic_millis() -> u64 {
-    use std::sync::OnceLock;
-    use std::time::Instant;
-    static ORIGIN: OnceLock<Instant> = OnceLock::new();
-    let origin = ORIGIN.get_or_init(Instant::now);
-    u64::try_from(origin.elapsed().as_millis()).unwrap_or(u64::MAX)
-}
-
-/// Shared state builder for DEV-20: the store doubles as the DEV-13 model
-/// cleanup hook.
 pub(crate) fn shared_model_store() -> SharedTemporaryModelStore {
     Arc::new(TemporaryModelStore::default())
 }

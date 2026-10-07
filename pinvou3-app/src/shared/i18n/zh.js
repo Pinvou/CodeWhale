@@ -2320,6 +2320,7 @@ Object.assign(dictZh.controlledDevice, {
 });
 
 dictZh["controllerConnection"] = {
+  modelSourceDevice: "设备模型",
   entry: "连接远程设备",
   title: "连接远程设备",
   desc: "输入对方设备当前显示的 7 位连接码即可连接，无需对方再次确认。",

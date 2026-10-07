@@ -22,7 +22,6 @@ pub(crate) enum ControlledInput {
     Local(LocalControlledInput),
 }
 
-#[derive(Debug)]
 pub(crate) struct RemoteControlledInput {
     pub(crate) remote_ref: String,
     pub(crate) generation: String,
@@ -33,6 +32,16 @@ pub(crate) struct RemoteControlledInput {
     pub(crate) client_request_id: String,
     pub(crate) input_digest: String,
     pub(crate) payload: Value,
+}
+
+impl std::fmt::Debug for RemoteControlledInput {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RemoteControlledInput")
+            .field("task_id", &self.task_id)
+            .field("payload", &"[REDACTED]")
+            .finish_non_exhaustive()
+    }
 }
 
 pub(crate) struct LocalControlledInput {
@@ -362,6 +371,30 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn remote_input_debug_never_formats_credentials_or_private_content() {
+        let input = RemoteControlledInput {
+            remote_ref: "ref-test".into(),
+            generation: "generation-test".into(),
+            title: "private-title-sentinel".into(),
+            code_mode: false,
+            task_id: "task-test".into(),
+            client_request_id: "request-test".into(),
+            input_digest: "digest-test".into(),
+            payload: json!({"temporary_model_package":{"secret":"non-secret-redaction-sentinel"},
+                "input":{"text":"private-prompt-sentinel"}}),
+        };
+        let output = format!("{input:?}");
+        assert!(output.contains("[REDACTED]"));
+        for sentinel in [
+            "non-secret-redaction-sentinel",
+            "private-title-sentinel",
+            "private-prompt-sentinel",
+        ] {
+            assert!(!output.contains(sentinel));
+        }
+    }
 
     #[derive(Default)]
     struct FakeDev13Adapter {

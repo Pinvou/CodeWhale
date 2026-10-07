@@ -30,6 +30,14 @@ const EXACT_VALUES = Object.freeze({
   PINVOU_REMOTE_STATE_PATH: "/opt/pinvou-remote-relay/data/relay-state.json",
 });
 
+const STATE_DIRECTORIES = Object.freeze([
+  { path: "/", privateDirectory: false },
+  { path: "/var", privateDirectory: false },
+  { path: "/var/lib", privateDirectory: false },
+  { path: "/var/lib/pinvou-remote-relay", privateDirectory: true },
+  { path: "/var/lib/pinvou-remote-relay/state", privateDirectory: true },
+]);
+
 function fail(code) {
   const error = new Error(code);
   error.code = code;
@@ -129,9 +137,38 @@ export async function validateControllerEnvironmentFile(
   validateControllerEnvironment(parseControllerEnvironment(source));
 }
 
+// Check every ancestor before install -d can follow links or change ownership.
+// Absent managed directories may be created only after this read-only preflight.
+export async function validateControllerStateDirectories(
+  directories = STATE_DIRECTORIES,
+  { expectedUid = 0, expectedGid = 0 } = {},
+) {
+  for (const { path, privateDirectory } of directories) {
+    let metadata;
+    try {
+      metadata = await lstat(path);
+    } catch (error) {
+      if (error.code === "ENOENT") continue;
+      fail("controller_state_directory_read_failed");
+    }
+    if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
+      fail("controller_state_directory_type_invalid");
+    }
+    if (metadata.uid !== expectedUid || metadata.gid !== expectedGid) {
+      fail("controller_state_directory_owner_invalid");
+    }
+    const mode = metadata.mode & 0o777;
+    if ((mode & 0o022) !== 0 || (privateDirectory && mode !== 0o700)) {
+      fail("controller_state_directory_permissions_invalid");
+    }
+    if (await realpath(path) !== path) fail("controller_state_directory_path_invalid");
+  }
+}
+
 const invokedPath = process.argv[1] ? resolve(process.argv[1]) : null;
 if (invokedPath === fileURLToPath(import.meta.url)) {
   validateControllerEnvironmentFile(process.argv[2] || "")
+    .then(() => validateControllerStateDirectories())
     .catch((error) => {
       // Never print file contents or variable values: this file contains production secrets.
       console.error(error?.code || "controller_env_preflight_failed");

@@ -1027,11 +1027,31 @@ impl ControlledDeviceManager {
     }
 
     pub(crate) fn poll_watchdog(&self, now_b: u64) -> ControlledStatus {
+        self.poll_watchdog_inner(None, now_b)
+            .expect("an unfenced watchdog poll has no stale operation")
+    }
+
+    pub(crate) fn poll_watchdog_for(
+        &self,
+        operation: &ControlledOperation,
+        now_b: u64,
+    ) -> Result<ControlledStatus> {
+        self.poll_watchdog_inner(Some(operation), now_b)
+    }
+
+    fn poll_watchdog_inner(
+        &self,
+        operation: Option<&ControlledOperation>,
+        now_b: u64,
+    ) -> Result<ControlledStatus> {
         let generation;
         let expired;
         let status;
         {
             let mut inner = self.inner.lock();
+            if let Some(operation) = operation {
+                ensure_operation(&inner, operation)?;
+            }
             let retired_generation = inner.generation.clone();
             generation = retired_generation.clone().unwrap_or_default();
             inner.last_observed_now_b = inner.last_observed_now_b.max(now_b);
@@ -1066,7 +1086,7 @@ impl ControlledDeviceManager {
         if expired {
             self.notify_cleanup(&generation);
         }
-        status
+        Ok(status)
     }
 
     pub(crate) fn workspaces(&self) -> Vec<ControlledWorkspaceInfo> {
@@ -2484,12 +2504,32 @@ mod tests {
                 1_000,
             )
             .unwrap();
-        let stopped = manager.stop();
+        let stopping = manager.begin_stop();
+        let cleanup_after_stop = cleanup.0.load(Ordering::SeqCst);
+        assert_eq!(
+            manager
+                .fail_operation(operation.clone(), "desktop_remote_late_failure".into())
+                .unwrap_err()
+                .code,
+            "desktop_remote_stale_result"
+        );
+        assert_eq!(manager.status(), stopping);
+        assert_eq!(cleanup.0.load(Ordering::SeqCst), cleanup_after_stop);
+        let stopped = manager.finish_stop();
         assert_eq!(stopped.status, ControlledStatusKind::Stopped);
         assert_eq!(stopped.pairing_code, None);
         assert_eq!(stopped.generation, Some(operation.generation.clone()));
         assert_eq!(manager.status().generation, stopped.generation);
         assert!(manager.inner.lock().generation.is_none());
+        assert_eq!(cleanup.0.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            manager
+                .fail_operation(operation.clone(), "desktop_remote_late_failure".into())
+                .unwrap_err()
+                .code,
+            "desktop_remote_stale_result"
+        );
+        assert_eq!(manager.status(), stopped);
         assert_eq!(cleanup.0.load(Ordering::SeqCst), 1);
 
         let second = manager.start(Some("B"), Vec::new()).unwrap();
@@ -2500,8 +2540,43 @@ mod tests {
             .unwrap();
         let disconnected = manager.disconnect_now();
         assert_eq!(disconnected.status, ControlledStatusKind::Stopped);
-        assert_eq!(disconnected.generation, Some(second.generation));
+        assert_eq!(disconnected.generation, Some(second.generation.clone()));
         assert_eq!(cleanup.0.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            manager
+                .fail_operation(second, "desktop_remote_late_failure".into())
+                .unwrap_err()
+                .code,
+            "desktop_remote_stale_result"
+        );
+        assert_eq!(manager.status(), disconnected);
+        assert_eq!(cleanup.0.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn stale_worker_poll_cannot_expire_or_observe_a_replacement_operation() {
+        let manager = ControlledDeviceManager::default();
+        let old = manager.start(None, Vec::new()).unwrap();
+        manager.stop();
+        let current = manager.start(None, Vec::new()).unwrap();
+        register(&manager, &current);
+        enter_handshake(&manager, &current);
+        manager
+            .complete_connected(current.clone(), lease(&current.generation))
+            .unwrap();
+        let before = manager.status();
+        assert_eq!(
+            manager.poll_watchdog_for(&old, u64::MAX).unwrap_err().code,
+            "desktop_remote_stale_result"
+        );
+        assert_eq!(manager.status(), before);
+        let expired = manager.poll_watchdog_for(&current, u64::MAX).unwrap();
+        assert_eq!(expired.kind(), ControlledStatusKind::Error);
+        assert_eq!(
+            expired.error_code.as_deref(),
+            Some("desktop_remote_watchdog_expired")
+        );
+        assert!(manager.live_lease().is_err());
     }
 
     #[test]
