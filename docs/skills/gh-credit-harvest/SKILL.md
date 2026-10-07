@@ -55,7 +55,7 @@ this skill lands a credited commit and posts thanks; the workflow closes the PR.
 7. Post a brief, warm, specific thank-you on the PR — name what the change fixed, no drama. Leave the PR open; the workflow closes it with credit when the commit lands on `main`:
    ```bash
    gh pr comment <N> --repo codewhale-hq/Codewhale \
-     --body "Thank you @<handle> — clean fix for <the specific bug>. Harvested into the v0.8.61 lane with your authorship preserved; it'll auto-close with credit once it reaches main."
+     --body "Thank you @<handle> — clean fix for <the specific bug>. Harvested into the current release lane with your authorship preserved; it'll auto-close with credit once it reaches main."
    ```
 
 Grounded example: PR #3221 by @hongchen1993 (honour `DEEPSEEK_BASE_URL`/`DEEPSEEK_MODEL` in exec) cherry-picks cleanly, so its author is preserved with no manual trailers; a focused `cargo test -p` on the touched crate is enough to land it green.

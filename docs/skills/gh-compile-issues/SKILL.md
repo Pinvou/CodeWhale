@@ -89,7 +89,7 @@ If triage finds an issue already fixed by harvested community work, preserve the
 contributor in the eventual closure. Cherry-pick keeps the original author;
 otherwise the landing commit carries `Co-authored-by: Name <email>` and
 `Harvested from PR #N by @handle` so the `auto-close-harvested.yml` workflow
-closes the issue with credit. Credit the reporter and any commenter whose
+closes the harvested PR with credit. Credit the reporter and any commenter whose
 repro/log/analysis shaped the verdict. Any public thanks or closure note is
 drafted, held, and posted only with maintainer approval — and is always positive
 and specific.
