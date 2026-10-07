@@ -1229,9 +1229,10 @@ fn render_line_window(
     }
     output.push_str("</file>");
 
-    // The file tool self-bounds at 50 KiB and carries its own continuation
-    // contract (`next_start_line`), so the large-output spillover envelope
-    // must never re-wrap a read result with a second, weaker truncation.
+    // The file tool self-bounds its window to the visible-bytes budget and
+    // carries its own continuation contract (`next_start_line`), so the
+    // large-output spillover envelope must never re-wrap a read result with
+    // a second, weaker truncation.
     // `read_budget_bytes` names the byte size this rendered result was
     // self-bounded to (the visible-bytes budget bounds the window; the
     // `<file>` wrapper and resume footer ride on top of it) so the context

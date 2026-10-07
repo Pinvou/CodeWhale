@@ -3065,6 +3065,36 @@ mod tests {
     }
 
     #[test]
+    fn handoff_primary_shadows_legacy_fallback_when_both_exist() {
+        let tmp = tempdir().expect("tempdir");
+        let workspace = tmp.path();
+        for dir in [".codewhale", ".deepseek"] {
+            std::fs::create_dir_all(workspace.join(dir)).unwrap();
+        }
+        std::fs::write(
+            workspace.join(".codewhale/handoff.md"),
+            "# Session relay\n\nprimary relay marker\n",
+        )
+        .unwrap();
+        std::fs::write(
+            workspace.join(".deepseek/handoff.md"),
+            "# Session relay\n\nlegacy relay marker\n",
+        )
+        .unwrap();
+
+        let prompt = system_prompt_flat_text(&system_prompt_for_mode_with_context(workspace, None));
+
+        assert!(prompt.contains(HANDOFF_BLOCK_MARKER));
+        // /relay's "write the primary path" guarantee and the handoff skill's
+        // "only way to guarantee a fresh relay wins" clause rest on the
+        // loader checking the primary path first when both files exist.
+        assert!(prompt.contains("relay artifact at `.codewhale/handoff.md`"));
+        assert!(prompt.contains("primary relay marker"));
+        assert!(!prompt.contains("relay artifact at `.deepseek/handoff.md`"));
+        assert!(!prompt.contains("legacy relay marker"));
+    }
+
+    #[test]
     fn missing_handoff_does_not_inject_block() {
         let tmp = tempdir().expect("tempdir");
         let prompt =

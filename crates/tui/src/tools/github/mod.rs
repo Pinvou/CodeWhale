@@ -132,7 +132,7 @@ impl ToolSpec for GithubTool {
                 "Read GitHub issue context using gh. Read-only: bodies over ~4KB are condensed to a ~1200-char excerpt (the full text is written to a task artifact only when a durable task is active); comments, labels, and state pass through verbatim."
             }
             Some("pr_context") => {
-                "Read GitHub PR context using gh: body/comments/reviews/check status/files and optional diff artifact. Read-only; no push/merge/close."
+                "Read GitHub PR context using gh: body/comments/reviews/check status/files and optional diff artifact. The body is condensed like issue bodies when large (~4KB to a ~1200-char excerpt, full text to a task artifact only when a durable task is active). Read-only; no push/merge/close."
             }
             Some("comment") => {
                 "Post an evidence-backed GitHub issue/PR comment with gh. Requires approval. Use blocker comments for partial work; do not claim closure without evidence."
