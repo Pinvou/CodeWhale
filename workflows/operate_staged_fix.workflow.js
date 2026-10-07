@@ -41,8 +41,8 @@ export default async function (args) {
     worktree: false,
     prompt: [
       "Read the implementer result and validate its reported path and diff summary.",
-      "Your posture is read-only: no edit tools, and only the bounded read-only command subset.",
-      "Return PASS/FAIL with evidence: run read-only checks (git status, file reads) for each claim you rely on, and mark anything you did not verify as unverified rather than confirmed.",
+      "Your posture is read-only: no edit tools and no shell (the verifier role denies bash; only the bounded verification runner may be granted).",
+      "Return PASS/FAIL with evidence: read the reported files yourself for each claim you rely on, and mark anything you did not verify as unverified rather than confirmed.",
       "",
       "implementer_result:",
       String(implement ?? "(missing)"),
