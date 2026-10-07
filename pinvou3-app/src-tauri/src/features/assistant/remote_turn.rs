@@ -6,6 +6,8 @@
 //! defaults a local turn uses.
 
 use std::sync::Arc;
+
+use super::skill_materialization::RemoteTurnOwner;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -38,11 +40,10 @@ use crate::features::remote_control::controller::temporary_model::SharedTemporar
 
 use super::engine::TurnReservation;
 use super::engine_pool::{EnginePool, RemoteRuntimeModelBundle};
-use super::skill_materialization::RemoteSkillFreezeGuard;
 
 pub(crate) struct RemoteChatReservation {
     turn: Option<TurnReservation>,
-    skills: RemoteSkillFreezeGuard,
+    generation: u64,
 }
 
 impl RemoteChatReservation {
@@ -55,13 +56,14 @@ fn reserve_remote_chat_turn(
     session_id: &str,
     reserve: impl FnOnce() -> std::result::Result<TurnReservation, String>,
 ) -> std::result::Result<RemoteChatReservation, String> {
-    // Acquire the real turn gate first: a local reservation must never be
-    // poisoned or cancelled merely because a remote freeze was attempted.
+    crate::features::sessions::validate_session_id(session_id)
+        .map_err(|_| "task_session_invalid".to_owned())?;
+    // Occupy the real turn gate before any model, Skills or attachment work.
     let turn = reserve()?;
-    let skills = RemoteSkillFreezeGuard::acquire(session_id)?;
+    let generation = turn.generation();
     Ok(RemoteChatReservation {
         turn: Some(turn),
-        skills,
+        generation,
     })
 }
 
@@ -96,6 +98,7 @@ pub(crate) trait RemoteChatEnginePort: Send + Sync {
         content: String,
         skill_ids: Vec<String>,
         relay: Option<&TurnEventRelayHandle>,
+        owner: Arc<RemoteTurnOwner>,
         reserved: &mut Option<RemoteChatReservation>,
     ) -> std::result::Result<(), String>;
 
@@ -109,6 +112,7 @@ pub(crate) trait RemoteChatEnginePort: Send + Sync {
         skill_ids: Vec<String>,
         attachments: Vec<PublishedAttachment>,
         relay: Option<&TurnEventRelayHandle>,
+        owner: Arc<RemoteTurnOwner>,
         reserved: &mut Option<RemoteChatReservation>,
     ) -> std::result::Result<(), String> {
         if !attachments.is_empty() {
@@ -122,12 +126,13 @@ pub(crate) trait RemoteChatEnginePort: Send + Sync {
             content,
             skill_ids,
             relay,
+            owner,
             reserved,
         )
         .await
     }
 
-    fn is_turn_active(&self, session_id: &str) -> bool;
+    fn is_turn_active(&self, session_id: &str, generation: Option<u64>) -> bool;
 
     /// Only the authoritative terminal for this reservation can complete a
     /// remote task. An inactive engine is not proof of success.
@@ -137,15 +142,9 @@ pub(crate) trait RemoteChatEnginePort: Send + Sync {
         relay: Option<&TurnEventRelayHandle>,
     ) -> Option<std::result::Result<(), String>>;
 
-    async fn cancel_turn(&self, session_id: &str);
+    async fn cancel_turn(&self, session_id: &str, generation: Option<u64>);
 
-    async fn release_task_model(&self, session_id: &str, model_source: &str);
-
-    async fn restore_session_skills(
-        &self,
-        session_id: &str,
-        relay: Option<&TurnEventRelayHandle>,
-    ) -> std::result::Result<(), String>;
+    async fn release_task_model(&self, session_id: &str, owner: &Arc<RemoteTurnOwner>);
 
     fn start_turn_relay(
         &self,
@@ -259,7 +258,6 @@ pub(crate) struct TurnEventRelayHandle {
     events: Arc<dyn ControllerTaskEventSink>,
     session_id: String,
     task_id: String,
-    skill_owner: Option<uuid::Uuid>,
 }
 
 impl TurnEventRelayHandle {
@@ -436,7 +434,8 @@ impl RemoteChatEnginePort for EnginePoolChatEngine {
         lease: &LeaseContext,
         content: String,
         skill_ids: Vec<String>,
-        relay: Option<&TurnEventRelayHandle>,
+        _relay: Option<&TurnEventRelayHandle>,
+        owner: Arc<RemoteTurnOwner>,
         reserved: &mut Option<RemoteChatReservation>,
     ) -> std::result::Result<(), String> {
         let model_override = match model_source {
@@ -460,9 +459,7 @@ impl RemoteChatEnginePort for EnginePoolChatEngine {
                 content,
                 skill_ids,
                 model_override,
-                relay
-                    .and_then(|relay| relay.skill_owner)
-                    .ok_or_else(|| "task_skill_freeze_required".to_owned())?,
+                owner,
                 reserved
                     .as_mut()
                     .and_then(RemoteChatReservation::take_turn)
@@ -482,6 +479,7 @@ impl RemoteChatEnginePort for EnginePoolChatEngine {
         skill_ids: Vec<String>,
         attachments: Vec<PublishedAttachment>,
         relay: Option<&TurnEventRelayHandle>,
+        owner: Arc<RemoteTurnOwner>,
         reserved: &mut Option<RemoteChatReservation>,
     ) -> std::result::Result<(), String> {
         if attachments.is_empty() {
@@ -494,6 +492,7 @@ impl RemoteChatEnginePort for EnginePoolChatEngine {
                     content,
                     skill_ids,
                     relay,
+                    owner,
                     reserved,
                 )
                 .await;
@@ -534,9 +533,7 @@ impl RemoteChatEnginePort for EnginePoolChatEngine {
                 ingested,
                 skill_ids,
                 model_override,
-                relay
-                    .and_then(|relay| relay.skill_owner)
-                    .ok_or_else(|| "task_skill_freeze_required".to_owned())?,
+                owner,
                 reserved
                     .as_mut()
                     .and_then(RemoteChatReservation::take_turn)
@@ -546,8 +543,11 @@ impl RemoteChatEnginePort for EnginePoolChatEngine {
             .map_err(|error| remote_engine_error_code(&error).to_owned())
     }
 
-    fn is_turn_active(&self, session_id: &str) -> bool {
-        self.pool.is_turn_active(session_id)
+    fn is_turn_active(&self, session_id: &str, generation: Option<u64>) -> bool {
+        generation.is_some_and(|generation| {
+            self.pool
+                .is_turn_active_for_generation(session_id, generation)
+        })
     }
 
     fn terminal_result(
@@ -561,40 +561,22 @@ impl RemoteChatEnginePort for EnginePoolChatEngine {
         }
     }
 
-    async fn cancel_turn(&self, session_id: &str) {
-        let _ = self.pool.cancel(session_id, false).await;
-        // Cancelling only queues interruption. Do not restore a broader skill
-        // set while the cancelled engine is still draining tools/provider IO.
+    async fn cancel_turn(&self, session_id: &str, generation: Option<u64>) {
+        let Some(generation) = generation else { return };
+        let _ = self.pool.cancel_remote_turn(session_id, generation).await;
+        // Wait only for this fixed generation, never a newer local reservation.
         let started = Instant::now();
-        while self.pool.is_turn_active(session_id) && started.elapsed() < BUSY_GRACE {
+        while self
+            .pool
+            .is_turn_active_for_generation(session_id, generation)
+            && started.elapsed() < BUSY_GRACE
+        {
             tokio::time::sleep(POLL_INTERVAL).await;
         }
     }
 
-    async fn release_task_model(&self, session_id: &str, model_source: &str) {
-        if model_source == TASK_MODEL_SOURCE_TEMPORARY {
-            self.pool.evict(session_id).await;
-        }
-    }
-
-    async fn restore_session_skills(
-        &self,
-        session_id: &str,
-        relay: Option<&TurnEventRelayHandle>,
-    ) -> std::result::Result<(), String> {
-        if self.pool.is_turn_active(session_id) {
-            return Err("task_skill_restore_failed".to_owned());
-        }
-        let owner = relay
-            .and_then(|relay| relay.skill_owner)
-            .ok_or_else(|| "task_skill_freeze_required".to_owned())?;
-        let session_id = session_id.to_owned();
-        tokio::task::spawn_blocking(move || {
-            super::skill_materialization::restore_plain_session_skills(&session_id, owner)
-        })
-        .await
-        .map_err(|_| "task_skill_restore_failed".to_owned())?
-        .map_err(|_| "task_skill_restore_failed".to_owned())
+    async fn release_task_model(&self, session_id: &str, owner: &Arc<RemoteTurnOwner>) {
+        self.pool.evict_remote_owner(session_id, owner).await;
     }
 
     fn start_turn_relay(
@@ -822,7 +804,6 @@ impl RemoteChatEnginePort for EnginePoolChatEngine {
             events,
             session_id: session_id.to_owned(),
             task_id: task_id.to_owned(),
-            skill_owner: None,
         })
     }
 }
@@ -841,24 +822,25 @@ impl EnginePoolChatTurnPort {
         session_id: &str,
         cancel: &CancellationToken,
         relay: Option<&TurnEventRelayHandle>,
+        generation: Option<u64>,
     ) -> std::result::Result<(), String> {
         let mut inactive_since = None;
         loop {
             if cancel.is_cancelled() {
-                self.engine.cancel_turn(session_id).await;
+                self.engine.cancel_turn(session_id, generation).await;
                 return Err(TASK_CANCELLED_CODE.to_owned());
             }
             if let Some(result) = self.engine.terminal_result(session_id, relay) {
                 return result;
             }
-            if self.engine.is_turn_active(session_id) {
+            if self.engine.is_turn_active(session_id, generation) {
                 inactive_since = None;
             } else if inactive_since.get_or_insert_with(Instant::now).elapsed() >= BUSY_GRACE {
                 return Err("task_turn_terminal_missing".to_owned());
             }
             tokio::select! {
                 _ = cancel.cancelled() => {
-                    self.engine.cancel_turn(session_id).await;
+                    self.engine.cancel_turn(session_id, generation).await;
                     return Err(TASK_CANCELLED_CODE.to_owned());
                 }
                 _ = tokio::time::sleep(POLL_INTERVAL) => {}
@@ -912,11 +894,12 @@ impl RemoteChatTurnPort for EnginePoolChatTurnPort {
             .iter()
             .filter_map(|attachment| attachment.read_owner.clone())
             .collect();
+        let owner = Arc::new(RemoteTurnOwner::default());
         let mut reserved = self.engine.reserve_remote_turn(session_id)?;
+        let generation = reserved.as_ref().map(|reserved| reserved.generation);
         let mut turn_relay = self.engine.start_turn_relay(session_id, task_id, events);
         if let Some(relay) = turn_relay.as_mut() {
             if let Some(reserved) = reserved.as_ref() {
-                relay.skill_owner = Some(reserved.skills.owner());
                 if let Some(turn) = reserved.turn.as_ref() {
                     relay.arm(turn.generation());
                 }
@@ -926,7 +909,7 @@ impl RemoteChatTurnPort for EnginePoolChatTurnPort {
             tokio::select! {
                 biased;
                 _ = cancel.cancelled() => {
-                    self.engine.cancel_turn(session_id).await;
+                    self.engine.cancel_turn(session_id, generation).await;
                     return Err(TASK_CANCELLED_CODE.to_owned());
                 }
                 result = self.engine.send_user_message_with_attachments(
@@ -938,10 +921,11 @@ impl RemoteChatTurnPort for EnginePoolChatTurnPort {
                     skill_ids,
                     attachments,
                     turn_relay.as_ref(),
+                    owner.clone(),
                     &mut reserved,
                 ) => result?,
             }
-            self.wait_for_terminal(session_id, &cancel, turn_relay.as_ref())
+            self.wait_for_terminal(session_id, &cancel, turn_relay.as_ref(), generation)
                 .await?;
             Ok(())
         }
@@ -952,24 +936,11 @@ impl RemoteChatTurnPort for EnginePoolChatTurnPort {
         if let Some(relay) = turn_relay.as_mut() {
             relay.finish();
         }
-        // EnginePool entries retain their prepared runtime credential. A
-        // task-scoped A credential must evict the engine while the skill freeze
-        // still rejects local sends. Unfreezing first would allow a new local
-        // turn that this old task's eviction could then cancel.
-        self.engine
-            .release_task_model(session_id, model_source)
-            .await;
-        // Restore B's latest authoritative set only after task-owned eviction
-        // completes, and before releasing the shared remote task lock.
-        let restore_result = self
-            .engine
-            .restore_session_skills(session_id, turn_relay.as_ref())
-            .await;
-        match (result, restore_result) {
-            (Ok(()), Ok(())) => Ok(None),
-            (Ok(()), Err(error)) => Err(error),
-            (Err(error), _) => Err(error),
-        }
+        // All remote model sources own a private skills root. Retire only this
+        // attempt's entry before releasing credentials; never rewrite shared B
+        // skills here, especially when a replacement already owns the session.
+        self.engine.release_task_model(session_id, &owner).await;
+        result.map(|()| None)
     }
 }
 
@@ -1001,36 +972,26 @@ mod tests {
         };
         let local = lifecycle.reserve().unwrap();
         assert!(reserve_remote_chat_turn(&sid, reserve).is_err());
-        // The rejected remote request must not poison the local session's skills.
-        drop(RemoteSkillFreezeGuard::acquire(&sid).unwrap());
         assert!(local.ensure_active().is_ok());
         drop(local);
 
-        let occupied = RemoteSkillFreezeGuard::acquire(&sid).unwrap();
-        assert!(reserve_remote_chat_turn(&sid, reserve).is_err());
-        // Failed skill acquisition releases its already-acquired real turn gate.
-        drop(lifecycle.reserve().unwrap());
-        drop(occupied);
-
         let mut remote = reserve_remote_chat_turn(&sid, reserve).unwrap();
-        let generation = remote.turn.as_ref().unwrap().generation();
+        let generation = remote.generation;
         let turn = remote.take_turn().unwrap();
         assert_eq!(turn.generation(), generation);
         assert!(remote.take_turn().is_none());
+        assert_eq!(
+            remote.generation, generation,
+            "cancel identity survives take_turn"
+        );
         drop(turn);
-        assert!(
-            super::super::skill_materialization::reserve_unfrozen_session_turn(&sid, || {
-                lifecycle.reserve()
-            })
-            .is_err(),
-            "local sends and reconfiguration cannot occupy the terminal-to-restore window"
-        );
-        assert!(
-            RemoteSkillFreezeGuard::acquire(&sid).is_err(),
-            "terminal turn gate release does not release skill ownership before restore"
-        );
+        let successor = lifecycle.reserve().unwrap();
+        assert_ne!(successor.generation(), remote.generation);
         drop(remote);
-        drop(RemoteSkillFreezeGuard::acquire(&sid).unwrap());
+        assert!(
+            successor.ensure_active().is_ok(),
+            "old reservation Drop cannot retire its successor"
+        );
     }
 
     struct EnvRestore(Vec<(&'static str, Option<std::ffi::OsString>)>);
@@ -1163,6 +1124,7 @@ mod tests {
             _content: String,
             _skill_ids: Vec<String>,
             _relay: Option<&TurnEventRelayHandle>,
+            _owner: Arc<RemoteTurnOwner>,
             _reserved: &mut Option<RemoteChatReservation>,
         ) -> std::result::Result<(), String> {
             let reservation = self
@@ -1221,7 +1183,7 @@ mod tests {
             Ok(())
         }
 
-        fn is_turn_active(&self, _session_id: &str) -> bool {
+        fn is_turn_active(&self, _session_id: &str, _generation: Option<u64>) -> bool {
             self.active.swap(false, Ordering::SeqCst)
         }
 
@@ -1233,17 +1195,9 @@ mod tests {
             (!self.active.load(Ordering::SeqCst)).then_some(Ok(()))
         }
 
-        async fn cancel_turn(&self, _session_id: &str) {}
+        async fn cancel_turn(&self, _session_id: &str, _generation: Option<u64>) {}
 
-        async fn release_task_model(&self, _session_id: &str, _model_source: &str) {}
-
-        async fn restore_session_skills(
-            &self,
-            _session_id: &str,
-            _relay: Option<&TurnEventRelayHandle>,
-        ) -> std::result::Result<(), String> {
-            Ok(())
-        }
+        async fn release_task_model(&self, _session_id: &str, _owner: &Arc<RemoteTurnOwner>) {}
     }
 
     fn remote_task_payload(task_id: &str, client_request_id: &str) -> Value {
@@ -1354,7 +1308,7 @@ mod tests {
         terminal_outcome: Option<std::result::Result<(), String>>,
         missing_terminal: bool,
         real_lifecycle: Option<Arc<TurnLifecycle>>,
-        skill_owner: Mutex<Option<uuid::Uuid>>,
+        private_skills: Mutex<Option<Arc<super::super::skill_materialization::RemoteTurnSkills>>>,
         eviction_started: Option<Arc<tokio::sync::Notify>>,
         eviction_release: Option<Arc<tokio::sync::Notify>>,
     }
@@ -1412,16 +1366,17 @@ mod tests {
             content: String,
             _skill_ids: Vec<String>,
             _relay: Option<&TurnEventRelayHandle>,
+            _owner: Arc<RemoteTurnOwner>,
             reserved: &mut Option<RemoteChatReservation>,
         ) -> std::result::Result<(), String> {
             if let Some(reserved) = reserved.as_mut() {
-                let owner = reserved.skills.owner();
-                super::super::skill_materialization::materialize_plain_remote_turn_skills(
-                    _session_id,
-                    &[],
-                    owner,
-                )?;
-                *self.skill_owner.lock().unwrap() = Some(owner);
+                let skills =
+                    super::super::skill_materialization::materialize_plain_remote_turn_skills(
+                        _session_id,
+                        &[],
+                        _owner,
+                    )?;
+                *self.private_skills.lock().unwrap() = Some(Arc::new(skills));
                 drop(reserved.take_turn().expect("single reserved turn"));
             }
             if let Some(started) = self.send_started.as_ref() {
@@ -1436,8 +1391,14 @@ mod tests {
             Ok(())
         }
 
-        fn is_turn_active(&self, _session_id: &str) -> bool {
+        fn is_turn_active(&self, _session_id: &str, generation: Option<u64>) -> bool {
             self.assert_attachment_lease();
+            if let Some(lifecycle) = &self.real_lifecycle {
+                self.flips.fetch_add(1, Ordering::SeqCst);
+                return generation.is_some_and(|generation| {
+                    !lifecycle.is_reserve_gate_open_for(Some(generation))
+                });
+            }
             // The first observation reports busy, the second one completes the
             // turn so the adapter can prove it waits for a real transition.
             if !self.completes_after_first_poll {
@@ -1460,37 +1421,21 @@ mod tests {
                 .then(|| self.terminal_outcome.clone().unwrap_or(Ok(())))
         }
 
-        async fn cancel_turn(&self, session_id: &str) {
+        async fn cancel_turn(&self, session_id: &str, _generation: Option<u64>) {
             self.assert_attachment_lease();
             self.cancelled.lock().unwrap().push(session_id.to_owned());
         }
 
-        async fn release_task_model(&self, session_id: &str, model_source: &str) {
+        async fn release_task_model(&self, session_id: &str, _owner: &Arc<RemoteTurnOwner>) {
             self.assert_attachment_lease();
-            if model_source == TASK_MODEL_SOURCE_TEMPORARY {
-                if let Some(started) = &self.eviction_started {
-                    started.notify_one();
-                }
-                if let Some(release) = &self.eviction_release {
-                    release.notified().await;
-                }
-                self.released.lock().unwrap().push(session_id.to_owned());
+            if let Some(started) = &self.eviction_started {
+                started.notify_one();
             }
-        }
-
-        async fn restore_session_skills(
-            &self,
-            _session_id: &str,
-            _relay: Option<&TurnEventRelayHandle>,
-        ) -> std::result::Result<(), String> {
-            self.assert_attachment_lease();
-            if let Some(owner) = *self.skill_owner.lock().unwrap() {
-                super::super::skill_materialization::restore_plain_session_skills(
-                    _session_id,
-                    owner,
-                )?;
+            if let Some(release) = &self.eviction_release {
+                release.notified().await;
             }
-            Ok(())
+            self.released.lock().unwrap().push(session_id.to_owned());
+            self.private_skills.lock().unwrap().take();
         }
 
         async fn send_user_message_with_attachments(
@@ -1503,11 +1448,15 @@ mod tests {
             skill_ids: Vec<String>,
             attachments: Vec<PublishedAttachment>,
             relay: Option<&TurnEventRelayHandle>,
+            owner: Arc<RemoteTurnOwner>,
             reserved: &mut Option<RemoteChatReservation>,
         ) -> std::result::Result<(), String> {
             if self.protected_attachment.is_none() && !attachments.is_empty() {
                 return Err("task_attachments_unavailable".to_owned());
             }
+            // Observe ownership at submission and at exact-owner teardown.
+            // Failed submission has no busy polling or shared-Skills restore.
+            self.assert_attachment_lease();
             let result = self
                 .send_user_message(
                     session_id,
@@ -1517,6 +1466,7 @@ mod tests {
                     content,
                     skill_ids,
                     relay,
+                    owner,
                     reserved,
                 )
                 .await;
@@ -1604,7 +1554,12 @@ mod tests {
                 "submission_failed" => assert_eq!(result.unwrap_err(), "task_engine_unavailable"),
                 _ => assert_eq!(result.unwrap_err(), TASK_CANCELLED_CODE),
             }
-            assert!(fake.lease_checks.load(Ordering::SeqCst) >= 2);
+            assert!(fake.lease_checks.load(Ordering::SeqCst) >= 2, "{outcome}");
+            assert_eq!(
+                *fake.released.lock().unwrap(),
+                vec!["session-0001".to_owned()],
+                "{outcome}: attachment remains protected through exact-owner teardown"
+            );
             assert!(
                 !path.exists(),
                 "cleanup waits for the turn port's last owner"
@@ -1865,81 +1820,106 @@ mod tests {
     }
 
     #[test]
-    fn temporary_engine_eviction_finishes_before_skill_unfreeze() {
+    fn old_remote_cleanup_preserves_new_local_reservation_and_shared_skills() {
         let _guard = crate::platform::paths::tests::ENV_LOCK
             .lock()
             .unwrap_or_else(|p| p.into_inner());
-        let (_bridge, _home, _env) = isolated_remote_bridge();
+        let (_bridge, home, _env) = isolated_remote_bridge();
         runtime().block_on(async {
-            let started = Arc::new(tokio::sync::Notify::new());
-            let release = Arc::new(tokio::sync::Notify::new());
-            let lifecycle = Arc::new(TurnLifecycle::default());
-            let engine = Arc::new(FakeEngine {
-                completes_after_first_poll: true,
-                real_lifecycle: Some(lifecycle.clone()),
-                eviction_started: Some(started.clone()),
-                eviction_release: Some(release.clone()),
-                ..FakeEngine::default()
-            });
-            let task = tokio::spawn(async move {
-                EnginePoolChatTurnPort::new(engine)
-                    .run_chat_turn(
-                        "eviction-before-unfreeze",
-                        "task-0001",
-                        TASK_MODEL_SOURCE_TEMPORARY,
-                        &lease(),
-                        "hello".to_owned(),
-                        vec![],
-                        events(),
-                        CancellationToken::new(),
-                    )
+            for source in [TASK_MODEL_SOURCE_TEMPORARY, TASK_MODEL_SOURCE_CONTROLLED] {
+                let sid = "remote-cleanup-replacement";
+                let started = Arc::new(tokio::sync::Notify::new());
+                let release = Arc::new(tokio::sync::Notify::new());
+                let lifecycle = Arc::new(TurnLifecycle::default());
+                let engine = Arc::new(FakeEngine {
+                    completes_after_first_poll: true,
+                    real_lifecycle: Some(lifecycle.clone()),
+                    eviction_started: Some(started.clone()),
+                    eviction_release: Some(release.clone()),
+                    ..FakeEngine::default()
+                });
+                let old = engine.clone();
+                let task = tokio::spawn(async move {
+                    EnginePoolChatTurnPort::new(old)
+                        .run_chat_turn(
+                            sid,
+                            "task-0001",
+                            source,
+                            &lease(),
+                            "hello".to_owned(),
+                            vec![],
+                            events(),
+                            CancellationToken::new(),
+                        )
+                        .await
+                });
+                tokio::time::timeout(Duration::from_secs(2), started.notified())
                     .await
-            });
-            tokio::time::timeout(Duration::from_secs(2), started.notified())
-                .await
-                .unwrap();
-            // The real terminal turn gate is open, but old task cleanup still
-            // owns the skill freeze. A local send must remain fail-closed.
-            assert!(
-                super::super::skill_materialization::reserve_unfrozen_session_turn(
-                    "eviction-before-unfreeze",
-                    || lifecycle.reserve(),
-                )
-                .is_err()
-            );
-            assert!(
+                    .unwrap();
+                let private = engine
+                    .private_skills
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .unwrap()
+                    .path()
+                    .to_owned();
+                assert!(private.starts_with(&home));
+                assert!(private.is_dir());
+                let successor = lifecycle.reserve().unwrap();
                 super::super::skill_materialization::ensure_session_skills(
-                    "eviction-before-unfreeze",
+                    sid,
                     crate::features::marketplace::ConnectorScope::Plain,
                     None,
-                    None,
-                )
-                .is_err()
-            );
-            release.notify_one();
-            assert!(
-                tokio::time::timeout(Duration::from_secs(2), task)
-                    .await
-                    .unwrap()
-                    .unwrap()
-                    .is_ok()
-            );
-            super::super::skill_materialization::ensure_session_skills(
-                "eviction-before-unfreeze",
-                crate::features::marketplace::ConnectorScope::Plain,
-                None,
-                None,
-            )
-            .unwrap();
-            drop(
-                super::super::skill_materialization::reserve_unfrozen_session_turn(
-                    "eviction-before-unfreeze",
-                    || lifecycle.reserve(),
-                )
-                .unwrap()
-                .unwrap(),
-            );
+                );
+                let shared = crate::platform::paths::session_skills_dir(sid);
+                std::fs::write(shared.join("new-local-marker"), b"new local").unwrap();
+                assert!(std::fs::read_dir(&private).unwrap().next().is_none());
+                release.notify_one();
+                assert!(
+                    tokio::time::timeout(Duration::from_secs(2), task)
+                        .await
+                        .unwrap()
+                        .unwrap()
+                        .is_ok()
+                );
+                assert!(successor.ensure_active().is_ok());
+                assert_eq!(
+                    std::fs::read(shared.join("new-local-marker")).unwrap(),
+                    b"new local"
+                );
+                assert!(!private.exists());
+                assert_eq!(*engine.released.lock().unwrap(), vec![sid.to_owned()]);
+            }
         });
+    }
+
+    #[tokio::test]
+    async fn successor_activity_cannot_extend_old_remote_terminal_budget() {
+        let lifecycle = Arc::new(TurnLifecycle::default());
+        let old = lifecycle.reserve().unwrap();
+        let generation = old.generation();
+        drop(old);
+        let successor = lifecycle.reserve().unwrap();
+        let engine = Arc::new(FakeEngine {
+            missing_terminal: true,
+            real_lifecycle: Some(lifecycle),
+            ..FakeEngine::default()
+        });
+        let port = EnginePoolChatTurnPort::new(engine);
+        let result = tokio::time::timeout(
+            BUSY_GRACE + Duration::from_secs(2),
+            port.wait_for_terminal(
+                "session-0001",
+                &CancellationToken::new(),
+                None,
+                Some(generation),
+            ),
+        )
+        .await
+        .expect("new local activity must not renew old terminal budget");
+        assert_eq!(result.unwrap_err(), "task_turn_terminal_missing");
+        assert!(successor.ensure_active().is_ok());
     }
 
     #[test]

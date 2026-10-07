@@ -15,7 +15,19 @@
 | 前端与桥 | `npm --prefix pinvou3-app test`、`npm --prefix pinvou3-app run build:ui`、`npm --prefix pinvou3-app run test:webui` | WebUI v2 行为与旧 fixture 不回归 |
 | 架构守卫 | `python scripts/architecture-guard.py` | 依赖方向与平台边界 |
 | 发布门槛清单 | `node --test remote-control-relay/test/controller-release-gates.test.js` | 本文件的必备章节、回滚约束与残余风险 |
-| 泄露扫描 | `cargo test ... controller::telemetry`、`node --test remote-control-relay/test/controller-telemetry.test.js` | 受控枚举与哨兵扫描 |
+| 泄露扫描 | 下述三个真实 Rust 用例、`node --test remote-control-relay/test/controller-sensitive-scan.test.js remote-control-relay/test/controller-telemetry.test.js` | 真实错误投影、Debug 脱敏、受控枚举与哨兵扫描；零匹配视为失败 |
+
+### 1.1 泄露扫描的非空执行证据
+
+已删除的 Rust `controller::telemetry` 不再是验证入口。以下每条必须实际报告 `1 passed; 0 failed`，不能仅用 cargo 退出码 0 或 `0 tests` 作为通过证据：
+
+```bash
+cargo test --manifest-path pinvou3-app/src-tauri/Cargo.toml features::remote_control::controller::relay_runtime::tests::log_allowlist_rejects_identifier_shaped_values_and_secrets -- --exact --test-threads=1
+cargo test --manifest-path pinvou3-app/src-tauri/Cargo.toml features::remote_control::controller::relay_runtime::tests::real_remote_failure_projections_do_not_persist_any_sensitive_category -- --exact --test-threads=1
+cargo test --manifest-path pinvou3-app/src-tauri/Cargo.toml features::remote_control::controller::resume::tests::resume_debug_redacts_current_and_retired_material -- --exact --test-threads=1
+```
+
+发布门槛测试校验这些入口与现有 Rust 源码一致；这项静态合同不能代替上述实际执行，也不能代替真实双机证据。
 
 ## 2. 灰度步骤
 
@@ -79,7 +91,7 @@
 |---|---|
 | A 端临时模型、代码模式、附件与成果导出 | UI 按首版开关隐藏；能力未声明时不暴露入口 |
 | 远程普通会话的工具审批 | 未闭环前禁用工具，B 侧不出现 Allow 入口 |
-| Relay 未协商 WS 子协议、无 `controller_capabilities` handler | A 端不声明 `pinvou-desktop-controller-v1` 子协议、不发该首帧（否则握手会被 `controller_message_unsupported` 打断）；Relay 补齐后两侧一并接入 |
+| 历史登记：Relay WS 子协议与 `controller_capabilities` 首帧 | **子协议限制已被后续实现取代（superseded）**：当前 A 端通过 `relay_client::controller_websocket_request` 声明 `pinvou-desktop-controller-v1`，Relay 通过 `remote-control-relay/server.js` 的 `handleProtocols` 协商。独立 `controller_capabilities` handler 仍未接入，当前能力通过 register/claim 与 `controller_joined` 协商；不再以本历史行声称当前客户端不声明子协议，也不将其视为发布验收。 |
 
 ### 7.3 后续排期（不阻断首版灰度）
 
