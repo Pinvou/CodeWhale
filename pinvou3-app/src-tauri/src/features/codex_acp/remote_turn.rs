@@ -123,9 +123,13 @@ impl AcpTurnEventRelay {
         app: &tauri::AppHandle,
         session_id: &str,
         task_id: &str,
+        turn_id: &str,
         events: Arc<dyn ControllerTaskEventSink>,
     ) -> Self {
-        let state = Arc::new(Mutex::new(AcpTurnRelayState::default()));
+        let state = Arc::new(Mutex::new(AcpTurnRelayState {
+            turn_id: Some(turn_id.to_owned()),
+            ..AcpTurnRelayState::default()
+        }));
         let listener_state = Arc::clone(&state);
         let listener_events = Arc::clone(&events);
         let expected_session = session_id.to_owned();
@@ -169,7 +173,7 @@ impl AcpTurnEventRelay {
         let (assistant_tail, reasoning_tail, terminal) = {
             let mut state = self.state.lock();
             if state.stopped {
-                return state.terminal.as_ref().and_then(acp_terminal_error);
+                return acp_terminal_result(state.terminal.as_ref());
             }
             state.stopped = true;
             (
@@ -194,7 +198,7 @@ impl AcpTurnEventRelay {
                 json!({ "text": assistant_tail }),
             );
         }
-        terminal.as_ref().and_then(acp_terminal_error)
+        acp_terminal_result(terminal.as_ref())
     }
 }
 
@@ -212,6 +216,13 @@ fn acp_terminal_error((status, _message): &(String, Option<String>)) -> Option<S
         "refused" => Some("task_turn_refused".to_owned()),
         _ => Some("task_engine_failed".to_owned()),
     }
+}
+
+fn acp_terminal_result(terminal: Option<&(String, Option<String>)>) -> Option<String> {
+    terminal.map_or_else(
+        || Some("task_terminal_unavailable".to_owned()),
+        acp_terminal_error,
+    )
 }
 
 #[cfg(test)]
@@ -249,13 +260,6 @@ fn project_acp_event(
     envelope: &super::AcpEventEnvelope,
 ) -> Vec<(JournalKind, Value)> {
     if state.stopped || envelope.seq <= state.last_seq {
-        return Vec::new();
-    }
-    if envelope.event.event_type == "turn_started" {
-        if state.turn_id.is_none() {
-            state.turn_id.clone_from(&envelope.turn_id);
-            state.last_seq = envelope.seq;
-        }
         return Vec::new();
     }
     if envelope.turn_id.as_deref() != state.turn_id.as_deref() || state.turn_id.is_none() {
@@ -608,6 +612,9 @@ impl RemoteCodeTurnPort for AcpPoolCodeTurnPort {
         {
             return Err("task_binding_stale".to_owned());
         }
+        if cancel.is_cancelled() {
+            return Err(TASK_CANCELLED_CODE.to_owned());
+        }
         let authorized_path = self
             .app
             .state::<crate::features::remote_control::controller::controlled::ControlledDeviceManager>()
@@ -627,6 +634,18 @@ impl RemoteCodeTurnPort for AcpPoolCodeTurnPort {
             .read()
             .clone()
             .ok_or_else(|| "artifact_capture_unavailable".to_owned())?;
+        let owner = RemotePermissionOwner {
+            session_id: session_id.to_owned(),
+            task_id: task_id.to_owned(),
+            lease: lease.clone(),
+        };
+        // Reserve the actual idle runtime before expensive preflight. This is
+        // not yet a permission owner; Drop rolls back every failure/yield path.
+        let mut reservation = self
+            .pool
+            .reserve_remote_turn(owner.clone())
+            .await
+            .map_err(|_| "task_session_backend_unavailable".to_owned())?;
         let private_skill_prompt =
             crate::features::assistant::skill_materialization::remote_turn_skill_prompt(
                 crate::features::marketplace::ConnectorScope::Code,
@@ -665,72 +684,65 @@ impl RemoteCodeTurnPort for AcpPoolCodeTurnPort {
             .await
             .map_err(|_| "task_attachment_unavailable".to_owned())??
         };
-        let owner = RemotePermissionOwner {
-            session_id: session_id.to_owned(),
-            task_id: task_id.to_owned(),
-            lease: lease.clone(),
-        };
-        self.pool
-            .claim_remote_permission_owner(owner.clone())
-            .map_err(|_| "remote_permission_owner_conflict".to_owned())?;
+        if cancel.is_cancelled() {
+            return Err(TASK_CANCELLED_CODE.to_owned());
+        }
         // Inventory starts only after every fallible preflight that does not
         // need a capture (skills, attachment ingestion, permission ownership)
         // has succeeded. From here onward Drop guarantees capture cleanup.
-        let _capture = match CodeCaptureGuard::begin(
+        let _capture = CodeCaptureGuard::begin(
             Arc::clone(&artifact_port),
             lease,
             session_id,
             task_id,
             &authorized_path,
-        ) {
-            Ok(capture) => capture,
-            Err(error) => {
-                self.pool.release_remote_permission_owner(&owner).await;
-                return Err(error);
-            }
-        };
+        )?;
 
         // Subscribe before prompt submission so the authoritative journal
         // cannot miss the first real ACP turn event.
-        let mut turn_relay =
-            AcpTurnEventRelay::start(&self.app, session_id, task_id, Arc::clone(&events));
+        let mut turn_relay = AcpTurnEventRelay::start(
+            &self.app,
+            session_id,
+            task_id,
+            reservation.turn_id(),
+            Arc::clone(&events),
+        );
 
         let mut result = async {
-            self.pool
-                .send_message_with_display_content(
-                    session_id,
-                    actual_content,
-                    content,
-                    attachments,
-                    Vec::new(),
-                )
-                .await
-                .map_err(|_| "task_engine_unavailable".to_owned())?;
+            reservation
+                .submit(&actual_content, &content, &attachments, &cancel)
+                .map_err(|_| {
+                    if cancel.is_cancelled() {
+                        TASK_CANCELLED_CODE.to_owned()
+                    } else {
+                        "task_engine_unavailable".to_owned()
+                    }
+                })?;
 
             // The ACP prompt is submitted in the background, so wait for the busy
             // transition before trusting a "not busy" observation.
-            let mut observed_busy = false;
             let mut registered = HashMap::new();
             let mut resolved = HashSet::new();
-            let started = Instant::now();
+            let mut missing_terminal_since = None;
             loop {
                 if cancel.is_cancelled() {
-                    self.pool.cancel(session_id).await;
+                    self.pool.cancel_remote_turn(&owner).await;
                     return Err(TASK_CANCELLED_CODE.to_owned());
                 }
                 self.sync_remote_permissions(&owner, &mut registered, &mut resolved, &events)
                     .await?;
-                let busy = self.pool.is_session_busy(session_id).await;
-                if busy {
-                    observed_busy = true;
-                } else if observed_busy {
+                if turn_relay.state.lock().terminal.is_some() {
                     return Ok(());
-                } else if started.elapsed() >= BUSY_GRACE {
-                    return Err("task_turn_not_started".to_owned());
+                }
+                if !reservation.is_active() {
+                    let since = missing_terminal_since.get_or_insert_with(Instant::now);
+                    if since.elapsed() >= BUSY_GRACE {
+                        return Err("task_terminal_unavailable".to_owned());
+                    }
                 }
                 tokio::select! {
                     _ = cancel.cancelled() => {
-                        self.pool.cancel(session_id).await;
+                        self.pool.cancel_remote_turn(&owner).await;
                         return Err(TASK_CANCELLED_CODE.to_owned());
                     }
                     _ = tokio::time::sleep(POLL_INTERVAL) => {}
@@ -773,7 +785,7 @@ impl RemoteCodeTurnPort for AcpPoolCodeTurnPort {
                 );
             }
         }
-        self.pool.release_remote_permission_owner(&owner).await;
+        reservation.release().await;
         result
     }
 }
@@ -899,7 +911,10 @@ mod tests {
 
     #[test]
     fn acp_projection_uses_real_order_and_never_exports_raw_tool_fields() {
-        let mut state = AcpTurnRelayState::default();
+        let mut state = AcpTurnRelayState {
+            turn_id: Some("turn-1".into()),
+            ..AcpTurnRelayState::default()
+        };
         assert!(
             project_acp_event(
                 &mut state,
@@ -966,7 +981,10 @@ mod tests {
 
     #[test]
     fn acp_terminal_status_drives_the_remote_task_outcome() {
-        let mut state = AcpTurnRelayState::default();
+        let mut state = AcpTurnRelayState {
+            turn_id: Some("turn-1".into()),
+            ..AcpTurnRelayState::default()
+        };
         project_acp_event(
             &mut state,
             &envelope(1, "turn-1", "turn_started", json!({})),
@@ -984,6 +1002,56 @@ mod tests {
             state.terminal.as_ref().and_then(acp_terminal_error),
             Some("task_turn_refused".to_owned())
         );
+    }
+
+    #[test]
+    fn relay_never_claims_a_foreign_first_start_and_requires_authoritative_terminal() {
+        let mut state = AcpTurnRelayState {
+            turn_id: Some("remote-turn-owned".into()),
+            ..AcpTurnRelayState::default()
+        };
+        project_acp_event(
+            &mut state,
+            &envelope(100, "local-old", "turn_started", json!({})),
+        );
+        project_acp_event(
+            &mut state,
+            &envelope(
+                101,
+                "local-old",
+                "turn_completed",
+                json!({"status":"Completed"}),
+            ),
+        );
+        assert_eq!(state.turn_id.as_deref(), Some("remote-turn-owned"));
+        assert_eq!(
+            state.last_seq, 0,
+            "foreign sequence must not suppress actual runtime events"
+        );
+        assert_eq!(
+            acp_terminal_result(state.terminal.as_ref()),
+            Some("task_terminal_unavailable".into())
+        );
+        project_acp_event(
+            &mut state,
+            &envelope(1, "remote-turn-owned", "turn_started", json!({})),
+        );
+        project_acp_event(
+            &mut state,
+            &envelope(
+                2,
+                "remote-turn-owned",
+                "turn_completed",
+                json!({"status":"Completed"}),
+            ),
+        );
+        assert_eq!(acp_terminal_result(state.terminal.as_ref()), None);
+        let mut unbound = AcpTurnRelayState::default();
+        project_acp_event(
+            &mut unbound,
+            &envelope(1, "local-old", "turn_started", json!({})),
+        );
+        assert!(unbound.turn_id.is_none(), "no auto-claim fallback");
     }
 
     #[test]

@@ -122,9 +122,9 @@ impl DownloadSource for FileArtifactSource {
         }
         file.seek(SeekFrom::Start(offset))
             .map_err(|_| "artifact_unavailable".to_owned())?;
-        let mut buffer = Vec::with_capacity(max_bytes);
-        file.take(max_bytes as u64)
-            .read_to_end(&mut buffer)
+        let expected = (total - offset).min(max_bytes as u64) as usize;
+        let mut buffer = vec![0u8; expected];
+        file.read_exact(&mut buffer)
             .map_err(|_| "artifact_unavailable".to_owned())?;
         Ok(Some(buffer))
     }
@@ -271,7 +271,7 @@ impl ArtifactIndex {
             .filter(|ch| !matches!(ch, '/' | '\\') && !ch.is_control())
             .take(MAX_DISPLAY_CHARS)
             .collect();
-        if display_name.trim().is_empty() {
+        if display_name.trim().is_empty() || matches!(display_name.trim(), "." | "..") {
             return Err("artifact_name_invalid".to_owned());
         }
         if mime_type.len() > MAX_MIME_CHARS
@@ -778,6 +778,9 @@ impl ArtifactDownloads {
     ) -> Result<Option<DownloadChunk>, String> {
         let handle = super::core::TransferHandle::from_id(handle_id)
             .ok_or_else(|| "transfer_unknown".to_owned())?;
+        if handle.direction() != TransferDirection::Download {
+            return Err("transfer_direction_mismatch".into());
+        }
         let chunk_bytes = self.registry.limits().chunk_bytes;
         let bytes = match source.read_chunk(chunk_index, chunk_bytes) {
             Ok(Some(bytes)) => bytes,
@@ -813,29 +816,50 @@ impl ArtifactDownloads {
         else {
             return false;
         };
-        self.registry.abort(&handle)
+        handle.direction() == TransferDirection::Download && self.registry.abort(&handle)
+    }
+
+    pub(crate) fn verify_binding(
+        &self,
+        handle_id: &str,
+        live: &LeaseContext,
+    ) -> Result<(), String> {
+        let handle = super::core::TransferHandle::from_id(handle_id)
+            .ok_or_else(|| "transfer_unknown".to_owned())?;
+        if handle.direction() != TransferDirection::Download {
+            return Err("transfer_direction_mismatch".into());
+        }
+        self.registry
+            .verify_binding(&handle, live)
+            .map_err(|error| error.code.to_owned())
     }
 
     pub(crate) fn cleanup_for_task(&self, task_id: &str) -> usize {
         self.active
             .lock()
             .retain(|_, binding| binding.task_id != task_id);
-        self.registry.cleanup_for_task(task_id)
+        self.registry.take_downloads_for_task(task_id).len()
     }
 
     pub(crate) fn cleanup_for_connection(&self, connection_id: &str) -> usize {
         self.active
             .lock()
             .retain(|_, binding| binding.lease.connection_id != connection_id);
-        let cleaned = self.registry.cleanup_for_connection(connection_id);
+        let cleaned = self
+            .registry
+            .take_downloads_for_connection(connection_id)
+            .len();
         self.index.clear_connection(connection_id);
         cleaned
     }
 
     /// DEV-18 审核修复：未完成下载同样受 TTL 约束（RC-F-003 的下载侧）。
     pub(crate) fn expire(&self, now_b: u64) -> usize {
-        let expired = self.registry.expire(now_b);
-        self.active.lock().retain(|id, _| !expired.contains(id));
+        let expired = self.registry.take_expired_downloads(now_b);
+        self.active.lock().retain(|id, _| {
+            super::core::TransferHandle::from_id(id)
+                .is_some_and(|handle| self.registry.progress(&handle).is_ok())
+        });
         expired.len()
     }
 }
