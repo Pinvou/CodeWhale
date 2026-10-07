@@ -111,8 +111,8 @@ Only output English for:\n\
 - Technical terms that lack a standard translation in {target_language}\n\
 - Code blocks the user explicitly requests in English\n\n\
 This is a hard display requirement for this session: every turn is \
-translated for a {target_language}-reading audience, so English prose in your \
-response will reach the user untranslated. \
+translated for a {target_language}-reading audience, so English prose that \
+slips into your response may reach the user untranslated. \
 This overrides the ## Language rule for this session."
     )
 }
