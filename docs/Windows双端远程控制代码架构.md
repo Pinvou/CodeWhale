@@ -10,7 +10,7 @@
 
 - B 的 `SessionStore`、任务准入、执行及 Journal 是业务事实源。A 的 `SessionStore.RemoteProxy` 保存本地 UI 元数据、有限 pending/outbox 与已认证历史投影，不是第二个业务权威。
 - A 的远程输入按 `prepare → persist → dispatch` 执行；持久化失败禁止发送。已认证的 B 结果、Journal 或快照在精确会话与租约绑定内对账，不能用前端投影覆盖 B。
-- B 本地输入和 A 网络输入复用同一权威 Session、turn 准入与执行链路。远控 feature 定义窄端口，app 组合根注入适配，禁止反向依赖 Tauri Command。
+- B 本地输入和 A 网络输入复用同一权威 Session、turn 准入与执行链路。远控 feature 定义窄端口，app 组合根注入适配，禁止反向依赖 Tauri Command 入口；这不表示 feature 内没有当前已使用的 Tauri 运行时类型。
 - `SessionStore`、`EnginePool`、`AcpPool` 与 `RemoteControl` 保持并列；RemoteProxy 不进入 A 本机 EnginePool/AcpPool，也不新增持有第二套状态的统一 Runtime。
 - `ChatView.jsx` 是远程会话正文的唯一界面。`RemoteConnectionShell.jsx` 仅负责连接；已删除 `RemoteConversationView.jsx`、独立 `RemoteHistoryStore` 及第二份会话正文供数链路。
 - 断线首次发生时冻结最后有效认证存活证据的恢复截止时间，恢复过程中不得延长；恢复未完成时禁止业务帧，失败、停止和租约变化进入统一清理。
@@ -24,7 +24,7 @@
 |---|---|
 | `features/remote-control/RemoteControlSettingsPage.jsx`、`ControlledDevicePanel.jsx`、`RemoteControllerPanel.jsx`、`RemoteConnectForm.jsx` | 设置页角色页签、连接意图与状态展示 |
 | `features/chat/ChatView.jsx` | 统一会话正文、输入与远程任务操作 |
-| `features/remote-control/remote-control-state.js` | 认证绑定、状态投影和迟到事件过滤，不持有第二份正文 |
+| `features/remote-control/remote-control-state.js` | 认证绑定、状态投影和迟到事件过滤，可持有认证正文投影，但不是第二个正文权威 |
 | `platform/tauri/bridge/desktop-remote-control.js` | 窄 IPC 及事件接线，消费已加载且显式为 true 的语义能力 |
 | `app/commands/desktop_remote_proxy.rs` | RemoteProxy 打开及统一历史入口 |
 | `app/commands/desktop_remote_action.rs`、`desktop_remote_capability.rs` | 当前租约内的远程意图和能力入口 |
@@ -888,10 +888,10 @@ trait DesktopRelayPort {
 
 - `pinvou3-app/src-tauri/src/app/commands/desktop_remote_controlled.rs`
 - `pinvou3-app/src-tauri/src/app/commands/desktop_remote_controller.rs`
-- `pinvou3-app/src-tauri/src/app/commands/desktop_remote_controller_session.rs`
+- `pinvou3-app/src-tauri/src/app/commands/desktop_remote_controller_session.rs`（已删除，历史条目）
 - `pinvou3-app/src-tauri/src/app/commands/desktop_remote_controller_business.rs`
 - `pinvou3-app/src-tauri/src/app/commands/desktop_remote_task.rs`
-- `pinvou3-app/src-tauri/src/app/commands/desktop_remote_history.rs`
+- `pinvou3-app/src-tauri/src/app/commands/desktop_remote_history.rs`（已删除，历史条目）
 
 ### Rust 领域与基础设施
 

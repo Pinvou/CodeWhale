@@ -24,11 +24,13 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 pub(crate) use super::transfer::upload::PublishedAttachment;
 use async_trait::async_trait;
+use futures_util::FutureExt;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -2327,6 +2329,49 @@ impl RemoteTaskService {
         now_b: u64,
     ) -> Result<RemoteTaskRecord> {
         let task_id = ticket.record.task_id.clone();
+        // Covers future construction/polling, event sinks and running-state
+        // publication, not just executor return values. Never persist the
+        // panic payload. A normal error/terminal/cancel keeps its old path.
+        match AssertUnwindSafe(super::panic_scope::future(self.dispatch_inner(
+            ticket,
+            attachments,
+            events,
+            cancel,
+            now_b,
+        )))
+        .catch_unwind()
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => {
+                let token = self.cancel_tokens.lock().remove(&task_id);
+                if let Some(token) = token {
+                    token.cancel();
+                }
+                if let Ok(record) = self.ledger.record(&task_id) {
+                    if record.is_terminal() {
+                        return Ok(record);
+                    }
+                }
+                self.finish(
+                    &task_id,
+                    RemoteTaskTerminal::Failed,
+                    Some("task_dispatch_panicked".to_owned()),
+                    now_b,
+                )
+            }
+        }
+    }
+
+    async fn dispatch_inner(
+        &self,
+        ticket: RemoteTaskTicket,
+        attachments: Vec<PublishedAttachment>,
+        events: Arc<dyn ControllerTaskEventSink>,
+        cancel: CancellationToken,
+        now_b: u64,
+    ) -> Result<RemoteTaskRecord> {
+        let task_id = ticket.record.task_id.clone();
         let requested = ticket.input.get("attachment_ids").and_then(Value::as_array);
         let exact = requested.is_some_and(|ids| {
             ids.len() == attachments.len()
@@ -2448,7 +2493,7 @@ impl RemoteTaskService {
             Ok(record) => record,
             Err(error) => {
                 if let Some(scope) = self.hooks.artifact.lock().clone() {
-                    scope.discard_task_artifacts(task_id);
+                    contain_cleanup_panic(|| scope.discard_task_artifacts(task_id));
                 }
                 return Err(error);
             }
@@ -2651,7 +2696,7 @@ impl RemoteTaskService {
             Ok(record) => record,
             Err(error) => {
                 if let Some(scope) = self.hooks.artifact.lock().clone() {
-                    scope.discard_task_artifacts(task_id);
+                    contain_cleanup_panic(|| scope.discard_task_artifacts(task_id));
                 }
                 return Err(error);
             }
@@ -2682,22 +2727,28 @@ impl RemoteTaskService {
 
     fn cleanup(&self, record: &RemoteTaskRecord, reason: String) {
         if let Some(scope) = self.hooks.artifact.lock().clone() {
-            if record.state == RemoteTaskState::Succeeded && !record.outcome_unknown {
-                scope.commit_task_artifacts(record);
-            } else {
-                scope.discard_task_artifacts(&record.task_id);
-            }
+            contain_cleanup_panic(|| {
+                if record.state == RemoteTaskState::Succeeded && !record.outcome_unknown {
+                    scope.commit_task_artifacts(record);
+                } else {
+                    scope.discard_task_artifacts(&record.task_id);
+                }
+            });
         }
         if let Some(scope) = self.hooks.model.lock().clone() {
-            scope.release_task_credentials(&record.task_id);
+            contain_cleanup_panic(|| scope.release_task_credentials(&record.task_id));
         }
         if let Some(scope) = self.hooks.permission.lock().clone() {
-            scope.deny_pending_for_task(&record.task_id);
+            contain_cleanup_panic(|| {
+                scope.deny_pending_for_task(&record.task_id);
+            });
         }
         if let Some(scope) = self.hooks.transfer.lock().clone() {
-            scope.abort_transfers_for_task(&record.task_id);
+            contain_cleanup_panic(|| {
+                scope.abort_transfers_for_task(&record.task_id);
+            });
         }
-        self.publish_with_reason(record, reason);
+        contain_cleanup_panic(|| self.publish_with_reason(record, reason));
     }
 
     fn publish(&self, record: &RemoteTaskRecord) {
@@ -2726,6 +2777,15 @@ impl RemoteTaskService {
                 result_digest: record.result_digest.clone(),
             });
         }
+    }
+}
+
+// The authoritative terminal/turn-lock commit precedes external cleanup.
+// One faulty port must not prevent the remaining independent ports running.
+// Catching a callback is not proof that that callback released its resources.
+fn contain_cleanup_panic(action: impl FnOnce()) {
+    if catch_unwind(AssertUnwindSafe(|| super::panic_scope::run(action))).is_err() {
+        eprintln!("[remote-control] task_cleanup_hook_panicked");
     }
 }
 
@@ -3164,6 +3224,186 @@ mod tests {
             assert_eq!(retry.events.len(), 1);
             assert_eq!(retry.events[0].event_id, event_id);
         });
+    }
+
+    #[test]
+    fn dispatch_panic_reaches_terminal_and_releases_turn_and_tokens() {
+        struct PanicExecutor(bool);
+        #[async_trait]
+        impl ControllerTaskExecutor for PanicExecutor {
+            async fn execute(
+                &self,
+                _request: Value,
+                events: Arc<dyn ControllerTaskEventSink>,
+                _cancel: CancellationToken,
+            ) -> std::result::Result<(), String> {
+                tokio::task::yield_now().await;
+                if self.0 {
+                    events.emit(json!({ "type": "test-event" }));
+                }
+                panic!("test executor panic");
+            }
+        }
+        struct PanicSink;
+        impl ControllerTaskEventSink for PanicSink {
+            fn emit(&self, _event: Value) {
+                panic!("test event bridge panic");
+            }
+        }
+        struct PanicRunningJournal(Mutex<Vec<String>>);
+        impl RemoteTaskEventSink for PanicRunningJournal {
+            fn publish_task_event(&self, event: &RemoteTaskEvent) {
+                if event.status == TASK_STATUS_RUNNING {
+                    panic!("test journal panic");
+                }
+                self.0.lock().push(event.status.clone());
+            }
+        }
+        for origin in 0..3 {
+            let (service, hooks) = service(RecordingExecutor::ok());
+            let body = payload("session-0001", "task-0001", "request-0001", &digest(1));
+            let ticket = admitted(&service, &body, 1_000);
+            service.register_executor(TASK_MODE_CHAT, Arc::new(PanicExecutor(origin == 1)));
+            let journal = Arc::new(PanicRunningJournal(Mutex::new(Vec::new())));
+            if origin == 2 {
+                service.hooks().set_journal(journal.clone());
+            }
+            let sink: Arc<dyn ControllerTaskEventSink> = if origin == 1 {
+                Arc::new(PanicSink)
+            } else {
+                Arc::new(NoopSink)
+            };
+            let cancel = CancellationToken::new();
+            let record = runtime()
+                .block_on(service.dispatch(ticket, sink, cancel.clone(), 1_100))
+                .unwrap();
+            assert_eq!(record.state, RemoteTaskState::Failed);
+            assert_eq!(
+                record.terminal_reason.as_deref(),
+                Some("task_dispatch_panicked")
+            );
+            assert!(cancel.is_cancelled());
+            assert!(service.cancel_tokens.lock().is_empty());
+            assert_eq!(hooks.model.load(Ordering::SeqCst), 1);
+            assert_eq!(hooks.permission.load(Ordering::SeqCst), 1);
+            assert_eq!(hooks.transfer.load(Ordering::SeqCst), 1);
+            if origin == 2 {
+                assert_eq!(journal.0.lock().as_slice(), &[TASK_STATUS_FAILED]);
+            }
+            let retry = service
+                .submit(&context("generation-0001"), &body, 1_200)
+                .unwrap();
+            assert!(matches!(retry, AdmissionOutcome::Replay(existing) if existing.is_terminal()));
+            // The same session is no longer stuck busy after a panic.
+            admitted(
+                &service,
+                &payload("session-0001", "task-0002", "request-0002", &digest(2)),
+                1_300,
+            );
+        }
+    }
+
+    #[test]
+    fn dispatch_panic_after_cancel_or_disconnect_preserves_the_committed_terminal() {
+        struct PanicAfterSignal(Arc<tokio::sync::Notify>);
+        #[async_trait]
+        impl ControllerTaskExecutor for PanicAfterSignal {
+            async fn execute(
+                &self,
+                _request: Value,
+                _events: Arc<dyn ControllerTaskEventSink>,
+                cancel: CancellationToken,
+            ) -> std::result::Result<(), String> {
+                self.0.notify_one();
+                cancel.cancelled().await;
+                panic!("test panic after terminal signal");
+            }
+        }
+        for disconnect in [false, true] {
+            let (service, hooks) = service(RecordingExecutor::ok());
+            let service = Arc::new(service);
+            let entered = Arc::new(tokio::sync::Notify::new());
+            service.register_executor(TASK_MODE_CHAT, Arc::new(PanicAfterSignal(entered.clone())));
+            let ticket = admitted(
+                &service,
+                &payload("session-0001", "task-0001", "request-0001", &digest(1)),
+                1_000,
+            );
+            runtime().block_on(async {
+                let dispatched = service.clone();
+                let worker = tokio::spawn(async move {
+                    dispatched
+                        .dispatch(ticket, Arc::new(NoopSink), CancellationToken::new(), 1_100)
+                        .await
+                });
+                entered.notified().await;
+                let expected = if disconnect {
+                    service.interrupt_generation("generation-0001", "test_disconnect", 1_200);
+                    RemoteTaskState::Interrupted
+                } else {
+                    // Simulate another owner having already committed the
+                    // executor-confirmed cancellation before the late panic.
+                    let token = service
+                        .cancel_tokens
+                        .lock()
+                        .get("task-0001")
+                        .unwrap()
+                        .clone();
+                    service
+                        .complete("task-0001", RemoteTaskTerminal::Cancelled, None, 1_200)
+                        .unwrap();
+                    token.cancel();
+                    RemoteTaskState::Cancelled
+                };
+                let record = tokio::time::timeout(std::time::Duration::from_secs(2), worker)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(record.state, expected);
+                assert_eq!(service.status("task-0001").unwrap().state, expected);
+                assert!(service.cancel_tokens.lock().is_empty());
+                assert_eq!(hooks.model.load(Ordering::SeqCst), 1);
+                assert_eq!(hooks.permission.load(Ordering::SeqCst), 1);
+                assert_eq!(hooks.transfer.load(Ordering::SeqCst), 1);
+            });
+        }
+    }
+
+    #[test]
+    fn cleanup_panic_does_not_skip_other_ports_or_change_committed_terminal() {
+        struct PanicModel(AtomicUsize);
+        impl RemoteTaskModelScope for PanicModel {
+            fn release_task_credentials(&self, _task_id: &str) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                panic!("test cleanup panic");
+            }
+        }
+        let (service, hooks) = service(RecordingExecutor::ok());
+        let model = Arc::new(PanicModel(AtomicUsize::new(0)));
+        service.hooks().set_model_scope(model.clone());
+        let ticket = admitted(
+            &service,
+            &payload("session-0001", "task-0001", "request-0001", &digest(1)),
+            1_000,
+        );
+        let record = runtime()
+            .block_on(service.dispatch(ticket, Arc::new(NoopSink), CancellationToken::new(), 1_100))
+            .unwrap();
+        assert_eq!(record.state, RemoteTaskState::Succeeded);
+        assert_eq!(model.0.load(Ordering::SeqCst), 1);
+        assert_eq!(hooks.permission.load(Ordering::SeqCst), 1);
+        assert_eq!(hooks.transfer.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            hooks.events.lock().last().unwrap().status,
+            TASK_STATUS_SUCCEEDED
+        );
+        assert!(service.cancel_tokens.lock().is_empty());
+        admitted(
+            &service,
+            &payload("session-0001", "task-0002", "request-0002", &digest(2)),
+            1_300,
+        );
     }
 
     #[test]
