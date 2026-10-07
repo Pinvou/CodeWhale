@@ -2,9 +2,9 @@
 
 > 文档状态：需求确认稿
 >
-> 文档版本：1.13
+> 文档版本：1.11
 >
-> 更新日期：2026-10-01
+> 更新日期：2026-10-07
 >
 > 适用范围：Pinvou Agent Windows 桌面端、Remote Control Relay、模型与任务执行链路
 >
@@ -20,12 +20,18 @@
 | 1.5 | 2026-09-15 | 增加 A→B 端到端加密 liveness 主路径，并以保守跨时钟公式约束 Relay attestation 的 30 秒总预算 |
 | 1.6 | 2026-09-22 | 明确 A、B 均可向同一个 B 权威 Session 输入消息，并统一任务接纳、执行状态、journal 投影和精确会话关联 |
 | 1.7 | 2026-09-23 | 固化临时模型规范数字编码、视觉兜底注入、任务接纳与凭据安装原子性、HTTPS/DNS 预校验、客户端能力兼容及最终出站目标未固定的已知风险 |
-| 1.8 | 2026-09-26 | 引入统一 ConversationRuntime，会话 UI 与应用层通过同一运行时端口选择本地或远程执行；明确远程运行时是加密代理、B 端保持 Session 与执行权威，并补充迁移、测试和完成定义 |
-| 1.9 | 2026-09-26 | 取消 ConversationRuntime/LocalRuntime/RemoteRuntime 分层，改为薄 Tauri Command 委托无状态用例编排，由后者直接协调 SessionStore、EnginePool、AcpPool 与 RemoteControl；明确 A 以 SessionStore 保存 RemoteProxy 会话和已认证投影，B 保持唯一权威 Session |
-| 1.10 | 2026-09-26 | 澄清 SessionStore 与三种后端能力的职责层次：SessionStore 负责会话状态和投影，EnginePool、AcpPool、RemoteControl 分别参与三种后端路径；保持现有调用链、状态权威和无统一 Runtime 的约束不变 |
-| 1.11 | 2026-09-27 | 将固定新增 features/conversation 物理层的要求弱化为可复用、Tauri 无关的用例边界；共享业务流程按职责落入所属 feature 的 application 子模块，既有 Command helper 仅作为迁移兼容，同时保持网络入口不调用 Command、无第二状态所有者和行为复用约束 |
-| 1.12 | 2026-09-27 | 明确 Windows 双端远程控制尚未发布：不迁移实验期旧远程历史，不保留旧 desktop Command/Bridge/UI 兼容代理；首次发布直接以 `SessionStore.RemoteProxy` 和统一 `ChatView` 为唯一数据与界面链路 |
-| 1.13 | 2026-10-01 | 记录 Finished receipt 固定向量勘误，澄清 reservation 原子提升、模块落位与模型路由判别符，并登记生产容量定标门禁 |
+| 1.8 | 2026-10-01 | 记录 Finished receipt 固定向量勘误，澄清 reservation 原子提升、模块落位与模型路由判别符，并登记生产容量定标门禁 |
+| 1.9 | 2026-10-07 | 补录 2026-09-26 架构收口：不引入统一 Runtime，薄用例协调并列组件，RemoteProxy 保存 A 投影，B 保持唯一权威；统一废弃未发布桌面旧格式迁移/兼容窗口，已发布 Web v2 迁移不变 |
+| 1.10 | 2026-10-07 | 补录 A20 的 feature application 用例边界、宿主投影端口和架构门禁；保持 SessionStore 状态/投影职责与三种后端能力的独立所有权，不恢复未发布旧接口或迁移窗口 |
+| 1.11 | 2026-10-07 | 追加 A22 当前命令/事件、统一 ChatView 与 RemoteProxy 单一供数说明；补明废弃实验文件不能重新成为数据源，保留既有原子持久化、崩溃恢复与已发布 Web v2 约束 |
+
+以上版本 1.6～1.8 合并原开发记录与前序勘误：前序文档中 2026-10-01 的“1.6”勘误现列为 1.8，内容仍保留。1.6/1.7 为对应功能的历史补录，不代表 A18 部署波次新增这些实现或取得当前测试/发布证据。
+
+A19 原草稿把前序 1.8 勘误重编号为 1.10，并用 1.8/1.9 回填运行时设计过程；这些草稿编号现废弃。保留已审 A18 的版本条目，只追加本次 1.9；曾提出的 ConversationRuntime 与兼容迁移计划不是现行需求或后续技术债。
+
+A20 原草稿中的 1.10/1.11/1.12 编号现废弃：职责与用例边界说明并入本次 1.10，Finished receipt 勘误仍保留为已审 1.8；原提交历史不改写。
+
+A22 原草稿把前序 Finished receipt 勘误从 1.12 再编号为 1.13，并回填 1.12；这些草稿编号现废弃。沿用已审 1.8～1.10 原条目，仅追加本次 1.11；该桌面功能尚未发布，这些编号不是已发布版本，原提交历史仍保留。
 
 ## 1. 背景
 
@@ -429,19 +435,19 @@ React UI / ChatView
 | RC-T-022 | 远程连接控制面必须与会话投影分离。只有连接与加密业务通道均为 `Connected` 时，`RemoteProxy` 才允许提交、取消、审批、上传等变更操作；离线时只能查看 `SessionStore` 中已认证的只读投影，不得发送业务帧。关闭 ChatView 不得隐式断开租约 | P0 |
 | RC-T-023 | 可共享的校验、准入、附件准备、任务提交与失败收口必须通过所属 feature `application` 子模块显式导出的普通 Rust、Tauri 无关用例边界供本地 Command 和 B 受控入口复用。`features/remote_control` 必须分别定义 B 入站的 `ControlledExecutionPort` 和 A 已认证入站事件的 `RemoteSessionProjectionPort`；二者由 `lib.rs` 组合根注入无持久状态的实现或适配器，再委托相应用例边界和 `AppEventBus` 等宿主窄端口。禁止 `features/remote_control → app/commands`、Tauri 入口或 Tauri 事件 API 的反向依赖，也不得内部调用 `#[tauri::command]`。任务来源、权限权威、协议/租约字段、`task_id`、输入摘要、临时模型包和加密材料均由可信 Rust 后端生成或派生 | P0 |
 | RC-T-024 | 事件必须按类型使用带类型的公共 envelope：所有会话事件携带接收端本地 Session ID；A 的 `RemoteProxy` 会话事件额外携带可校验的 `remote_session_ref` 和 live connection/lease/generation；B 的受控会话事件携带 B 权威 Session ID 及适用的 lease/generation；纯连接事件只要求该类型的 connection/lease/generation，不伪造 Session 引用。task ID、journal epoch/sequence 和 capability revision 按类型定义必填字段与迟到过滤规则；必填绑定缺失、不匹配或迟到事件不得更新状态或当前 UI | P0 |
-| RC-T-025 | 未发布旧远程 Command、Bridge API、独立历史与状态别名不留兼容代理或迁移窗口；只保留唯一薄用例链路和 `SessionStore.RemoteProxy` 供数，同一操作不得双写、重复执行或产生两个状态所有者 | P0 |
+| RC-T-025 | 本桌面功能尚未发布，旧远程 Command、Bridge API、状态别名和独立历史格式直接移除，不提供兼容代理、旧格式迁移、双写或稳定版本保留窗口；唯一薄用例链路与 `SessionStore.RemoteProxy` 供数必须通过调用方扫描和回归，禁止重复执行或两个状态所有者。已发布 Legacy Web v2 不适用此豁免 | P0 |
 | RC-T-026 | A 发送远程任务必须执行 `prepare → persist → dispatch`：可信 Rust 先生成稳定 `client_request_id`、`task_id`、输入摘要和覆盖所有非敏感语义参数的规范请求指纹，再将同一组标识与不含凭证的有界 pending/outbox 原子写入 `SessionStore.RemoteProxy`，持久化成功后才允许 `RemoteControl` 发送。只有 A 原进程存活、仍在原 resume 边界且恢复同一 live binding 时，才允许使用原 ID 和完全相同的规范请求向 B 幂等账本重试或通过 Journal/快照对账；同 ID 任一语义参数不同必须明确冲突。A 进程重启后只能从本地恢复 `outcome_unknown`，在 controller v1 未定义“新配对重新附着旧 B Session/账本”协议前，禁止自动发送、查询或对账旧请求。临时模型 Key 等不可持久负载在 dispatch 前丢失时，只有后端可证明从未尝试 dispatch 才能放弃原 pending，并由用户以新 ID 发起新请求；若是否发送不可确定，则必须保持 `outcome_unknown` | P0 |
 
 任务幂等与终态证明使用独立、有界、原子持久化的 B 台账，不代替 `SessionStore` 会话正文。B 启动必须先验证台账并原子关闭全部重启遗留任务，之后才能公开远控运行时；已派发且无法确认结果时只报告 `result_unknown`，不得重派。坏文件或恢复写入失败必须禁用该远控域并明确诊断，不得以空内存台账继续执行，也不得阻止已发布的 Legacy Web 恢复。旧租约标识只用于终态审计，不恢复配对、有效租约、密钥或令牌。
 
 #### 普通远程回合的执行边界
 
-- 普通 chat 必须先获得 B 的真实回合预留，再冻结本次经认证的 `skill_ids`；空选择对应空技能目录。冷启动、模型重建、技能开关/安装/卸载刷新及目录自愈均不得扩大在途选择。本地发送在冻结至收尾期间明确拒绝，不借用远程技能集。
+- 普通 chat 必须先获得 B 的真实回合预留，再将本次经认证的 `skill_ids` 物化为回合专属私有快照；空选择对应空技能目录。冷启动、模型重建、技能开关/安装/卸载刷新及目录自愈均不得扩大在途选择；私有根缺失时失败关闭，不回退共享目录。真实回合预留占用期间本地发送明确拒绝；原回合终态释放预留后，本地新回合可正常预留，使用自己的共享技能目录，不借用远程快照或受共享技能冻结阻塞；实际发送仍遵循既有 turn/runtime gate 与引擎重建顺序。
 - 完成证明来自对应 Session 和回合 generation 的权威 `chat:done`；引擎不忙本身不证明成功，失败/取消不得投影为成功。监听须在提交前绑定，缺失终态只能报告有界错误。
-- 正常成功、失败和取消收尾须先证明引擎已停止，完成任务临时模型引擎回收，再按精确技能 owner 恢复 B 最新启用集合。旧 worker、旧 owner 或重复收尾不得修改新回合。
+- 正常成功、失败和取消收尾按精确回合 owner 回收远程引擎条目；私有快照由 Bridge/Engine 的 Arc 所有权保持，最后一个所有者释放后回收，不写回或恢复 B 的共享技能目录。旧 worker、旧 owner 或重复收尾不得修改新回合；远程取消及终态等待绑定原预留 generation，不能取消后继预留的 shell scope 或用新本地回合活动延长旧任务的终态等待。
 - A 远程附件由绑定完整租约、Session、任务的 B 上传 receipt 消费，不能混同 B 本地附件描述符；取消映射校验遵循会话意图锁在连接 owner 锁之前的顺序。B 的远控只读视图和凭据门控只作用于当前受控 Session，不作用于其他本地会话。
 
-当前实现边界：已物化回合的异步 future 非正常丢弃时，技能冻结保持失败关闭，不能自动恢复更广权限；该 Session 当前需重启进程恢复。捕获 panic、证明停止及精确 owner 有界收尾仍由 #1400 跟进，此段不宣称异常恢复或真实双 Windows 发布验收已完成。
+当前实现边界：私有快照不使用共享技能冻结或恢复协议。未发布的冷启动资源由 custody 保持，已发布快照由实际 Bridge/Engine 所有权保持；这不等于 OS 只读权限、真实 provider/core 已停止或异常清理有界的证明。捕获 panic、证明停止及精确 owner 有界收尾仍由 #1400 跟进；底座自主继发轮的子代理级联取消仍有 #254 所述边界，此段不宣称该边界、异常恢复或真实双 Windows 发布验收已完成。
 
 ### 7.6 模型选择与临时凭证
 
@@ -1077,10 +1083,12 @@ A 禁止持久化：
 12. enrollment 发布回滚只关闭桌面双端配对能力和强制入口，不回退/删除已迁移 registry、码隔离 tombstone 或旧 endpoint 凭证；最低回滚版本必须原生支持 registry 门禁。若目标旧二进制不支持，必须先部署读取同一 registry、覆盖所有公网入口且不可旁路的 enrollment gateway，再允许切流。
 13. 回滚演练必须使用真实旧 Relay 二进制和旧 Web fixture，证明 gateway 拒绝未 enrolled 首次注册、允许已 enrolled endpoint 重注册、保留原 Web 分享链接和审计结果；gateway/registry 不可用、存在直连旁路或旧二进制无法置于门禁后方时，自动化必须拒绝回滚。禁止裸 v2 回滚。
 14. 本地普通与 ACP 的既有行为保持不变；A 远程会话通过版本化 `SessionStore.RemoteProxy + RemoteControl` 薄用例编排，不同时替换无关本地会话或 controller v1 协议。
-15. 本桌面功能尚未发布，旧远程 Command/Bridge、独立历史格式、状态别名及第二套 UI 直接退役；不提供迁移、兼容读取、双写、稳定版本保留窗口或兼容空槽。旧设计中的迁移计划已废弃，不作为后续技术债。
-16. 统一 `ChatView` 的正文由 SessionStore 单一供数；A 只保存已认证 B 投影与有界 pending/outbox，不能成为第二权威。
-17. 发布前覆盖本地普通、ACP、远程 B 模型、A 临时模型及断线恢复；删除旧入口不能省略调用方扫描与相关回归，但不因未发布旧格式额外保留兼容窗口。
-18. 首次发布的全新安装与包含废弃实验文件的升级目录均只注册和使用 `SessionStore.RemoteProxy`；不读取、迁移、改写或重新暴露旧 `RemoteHistoryStore` 文件，不为它添加 sidecar、供数指针或 migration revision。功能开关回退只能关闭新入口，不能恢复旧源。
+15. 本桌面功能尚未发布，旧远程 Command、事件名和旧 Bridge API 直接移除，不保留兼容代理；当前消费者只使用唯一窄接口与薄用例链路，必须有调用方扫描和回归证据。
+16. 旧 `RemoteHistoryStore` 格式不提供迁移或兼容读取；历史 schema/migration revision、源记录转换与迁移恢复计划已废弃，不实施、不作为后续技术债。当前 `SessionStore.RemoteProxy` 仍须遵守已认证投影、字段级权限和有界持久化合同。
+17. 当前远程正文只由 `SessionStore.RemoteProxy` 供数，不实施旧历史基线构建、high-water cursor 补齐或新旧供数指针切换；任何时刻禁止双写、两个业务数据源或重复执行。当前 outbox/投影的原子持久化、幂等与崩溃恢复必须独立验收，不因废弃旧格式迁移而免除。
+18. 功能开关不能恢复已删除的旧远控存储、UI 或 Command；不保留旧源只读恢复窗口或稳定版本兼容期。已发布 Web v2、endpoint/registry 迁移与安全回滚仍按第 5.4 节及本节前述要求执行，不得删除其数据或绕过 enrollment。
+19. 统一 `ChatView` 上线前必须覆盖本地普通对话、本地 ACP 代码会话、远程 B 模型、远程 A 临时模型以及连接中断恢复；清理第二套远程正文 UI、旧入口和旧数据源须通过调用方扫描和回归证明无残余消费者/双写，不为未发布旧桌面接口保留版本兼容窗口。
+20. 首次发布的全新安装与包含废弃实验文件的升级目录均只注册和使用 `SessionStore.RemoteProxy`；不读取、迁移、改写或重新暴露旧 `RemoteHistoryStore` 文件，不为它添加 sidecar、供数指针或 migration revision。功能开关回退只能关闭新入口，不能恢复旧源。
 
 ## 16. 埋点与审计边界
 
@@ -1181,9 +1189,9 @@ A 禁止持久化：
 - 新建远程会话、绑定 opaque `remote_session_ref`、离线打开 `RemoteProxy` 投影、pending 对账及伪造、篡改、跨会话、跨租约和跨 generation 引用的拒绝；
 - `prepare → persist → dispatch` 的全部故障点：prepare 后未持久化不发送，原进程内持久化后未 dispatch 可使用原 ID 恢复，同一 live binding 中发送后未 ACK 保持 outcome_unknown 并以完整规范指纹校验同参重试，ACK/Journal 后未更新投影可重放对账；A 进程重启只恢复本地 outcome_unknown 且不产生任何网络帧，重新配对后旧 ID/ref 不得自动附着或重发；
 - `ControlledExecutionPort` 与 `RemoteSessionProjectionPort` 的注入、错误映射和单次调用；架构守卫必须枚举 `features/*/application/**/*.rs`，拒绝其中导入或调用 Tauri API，并拒绝 `features/remote_control` 引用 `app/commands`、Tauri Command/事件符号或新增 feature 依赖环；
-- 当前 `RemoteProxy` schema revision、稳定去重键、同键冲突失败关闭、部分记录及重复投影；覆盖持久化前后崩溃重启和 pending 对账，并验证旧远程历史格式明确 unsupported、不恢复旧源、不建立迁移或双写路径；
+- 当前 `SessionStore.RemoteProxy` 投影与 outbox 的原子持久化、稳定去重键、同键冲突失败关闭、部分记录、重复事件及写入前/后崩溃重启；不测试废弃的旧格式迁移或旧源保留；
 - 普通本地任务、B 本地受控任务和 A 远程任务的可信来源派生与权限权威隔离；公共事件 envelope 各事件类型的必填字段、无占位字段和迟到过滤；
-- 调用方扫描与入口回归确认未发布旧远程 API 已删除、无兼容代理；当前应用用例只调用一次，不产生重复任务、双写或第二状态所有者；
+- 已删除旧远程 API 无残余调用方，当前窄接口只调用一次薄用例链路，不产生双写、重复任务或第二状态所有者；
 - Relay CSPRNG 连接码生成、规范化、精确 31 字符表、`31^7` 空间、全局摘要原子占用、32 次强制碰撞耗尽和过期；
 - 注册请求同 ID 同参数幂等、同 ID 异参数拒绝、密封展示码重放，以及 B 侧不存在生成路径；
 - 配对记录摘要、reservation owner、10/20 秒超时、失败自动申请新码、原子消费/建租约和撤销；
@@ -1207,10 +1215,10 @@ A 禁止持久化：
 
 - 三类编排分别覆盖 `SessionStore + EnginePool`、`SessionStore + AcpPool` 和 `SessionStore(RemoteProxy) + RemoteControl` 的打开会话、能力、提交、取消、权限、附件、成果、历史和事件；A 远程分支不得触发本机 EnginePool/AcpPool，B 端只产生一个权威 Session；
 - 本地 Tauri Command 与 B 网络入口在同等输入下均通过所属 feature `application` 子模块显式导出的同一 Tauri 无关用例边界完成校验、准入和提交，每个请求只调用一次；不要求统一 conversation feature，网络入口不得经 Tauri invoke/Command 绕行。A 已认证入站事件经 `RemoteSessionProjectionPort` 只投影一次，并通过注入的宿主事件端口通知 UI，不形成 `remote_control → app` 依赖；
-- 当前 UI、Command、进程重启与离线只读路径均只消费 `SessionStore.RemoteProxy`；旧 `RemoteHistoryStore` 及其适配器没有消费者，不提供旧源回读、迁移或功能开关回退；
+- 当前 `SessionStore.RemoteProxy` 持久化中断/重启和 UI 功能开关变化均只有一个供数源和一条写路径，旧存储/适配器已删除且不能被功能开关恢复；不实施旧格式迁移；
 - A 本地 Session ID、`remote_session_ref` 与任务来源绑定覆盖伪造、篡改、跨 session kind、跨 session、跨 connection/lease/generation 重放；B 的普通本地任务与受控任务选择正确权限权威，任何前端声明或切换来源均被拒绝；
 - 断线状态可打开只读远程历史投影且不要求恢复 live binding；在该上下文提交、取消、审批、上传或发送任何业务帧均被拒绝；
-- 会话类型切换、连接 generation 变化及迟到/重复已认证事件并发时，验证无串会话、无双写、无重复副作用；调用未发布旧入口或使用旧引用必须明确失败关闭，不能代理到当前链路；
+- 会话类型切换、连接 generation 变化、当前请求重试和迟到/重复事件并发时，验证无串会话、无双写、无重复副作用，并扫描确认旧兼容入口不存在；
 - A、B、Relay 三方真实 WebSocket 配对；
 - 官方 enrollment 的既有 endpoint 原 socket 认领、未迁移提示/恢复、ID/token/Web 链接保留、冲突时重新分享；自托管 dry-run/批量 allowlist/re-enroll；未 enrolled/已撤销 endpoint 拒绝、生产禁用 TOFU；使用真实旧 Relay 二进制加前置 gateway 演练允许已 enrolled 重注册、拒绝匿名首次注册和所有直连旁路，预检失败时回滚被拒绝；
 - 两个 A 并发 claim 同一码、owner 断线、预留超时、唯一 commitment 测试向量、顺序错误、Finished 损坏/单方/重放、receipt secret 损坏/单方/角色互换/重放、握手超时及 B 自动申请新码；
@@ -1256,10 +1264,10 @@ A 禁止持久化：
 21. 轮换 digest key 后强制 CSPRNG 产生一个只在旧 key tombstone 中命中的码，验证新 key 下仍判碰撞；再演练真实旧 Relay 置于 enrollment gateway 后的安全回滚和裸 v2 回滚拒绝。
 22. 注入直接 E2E liveness RTT=5000 ms，以及 attestation `observed_age_ms=5000`、请求 RTT=5000 ms，验证候选剩余分别为 24000/19000 ms，并从对应 A liveness 观察点断言总存活均不超过 30000 ms。
 23. 在同一安装包中依次创建本机普通会话、本机 ACP 会话和远程 `RemoteProxy` 会话，验证它们共用 ChatView，但分别路由到 `SessionStore + EnginePool`、`SessionStore + AcpPool` 和 `SessionStore + RemoteControl`；切换、关闭和恢复后消息、权限、附件、成果及历史均不串线。
-24. 通过调用方扫描和真实用户旅程确认未发布旧远程正文入口、旧 Command 与旧远程历史存储均已退役；只存在当前薄用例与 `SessionStore.RemoteProxy` 链路，不提供兼容窗口、迁移代理或双写。
+24. 对旧远程正文入口、旧 Command 和独立旧历史存储执行删除验收，通过调用方扫描和真实用户旅程证明只剩唯一薄用例链路与 `SessionStore.RemoteProxy` 投影，不存在兼容代理、残余入口或双写；已发布 Web v2 回归单独保留。
 25. A 断线并结束恢复窗口后，在统一 ChatView 中打开 `SessionStore` 中已认证的 `RemoteProxy` 投影；验证历史可读、界面明确为离线副本，发送、取消、审批和上传均失败关闭且不会产生网络业务帧。
 26. 分别注入组件故障与进程重启：在 A 原进程、原 resume 边界和同一 live binding 内制造 persist/dispatch/ACK 结果丢失，验证只用原 ID 与完整规范指纹幂等重试/对账，同 ID 异参拒绝且副作用只执行一次；强制终止并重启 A 后，验证只恢复本地 `outcome_unknown`、不发送或查询旧请求，重新配对也不使用旧 ID/ref 自动附着 B。
-27. 使用当前 `RemoteProxy` fixture 覆盖部分记录、重复事件、人工同键冲突及持久化前后中断重启，验证幂等投影、冲突失败关闭和唯一供数；旧 `RemoteHistoryStore` fixture 明确 unsupported，不导入、不迁移、不回退旧 UI/Command。
+27. 使用当前 `SessionStore.RemoteProxy` fixture 验证部分投影、重复事件、同键异参冲突与持久化中断重启：只恢复已认证只读投影及本地 `outcome_unknown`，不得自动重派、串租约或恢复旧入口；不要求已删除旧历史格式的迁移 fixture。
 
 ### 18.4 必跑回归入口
 
@@ -1315,9 +1323,9 @@ python scripts/architecture-guard.py
 - 固化 `SessionStore` 的会话状态职责，以及 `EnginePool`、`AcpPool`、`RemoteControl` 分别参与三种后端路径的职责，不引入 `ConversationRuntime` 或其本地/远程实现，也不要求三种后端能力实现统一接口；
 - 在保持现有 Tauri Command 名称、参数和已验证行为兼容的前提下，为本地 Command 与 B 受控入口需要共享的流程，在职责所属 feature 的 `application` 子模块提供显式导出的普通 Rust、Tauri 无关用例边界；只提取最小必要逻辑，不强制新增 `features/conversation` 或迁移无关 Command，既有 Command helper 仅作为代理到该边界的迁移 shim 并在消费者迁移完成后删除；
 - 为 `SessionStore` 增加版本化 `RemoteProxy` 会话，完成 A 本地 Session ID、opaque `remote_session_ref` 和 connection/lease/generation 的可信绑定；
-- 将 A 已认证远程事件直接投影到 `SessionStore.RemoteProxy`，实现 pending 对账、离线只读和禁止本机 Engine/ACP 执行的不变式；不导入未发布的旧历史格式；
+- 将 A 已认证远程事件保存到唯一 `SessionStore.RemoteProxy` 投影，实现 pending 对账、离线只读和禁止本机 Engine/ACP 执行的不变式；不实施旧历史格式迁移；
 - 统一 `ChatView`、权限、附件、成果和历史交互，但由 Rust 按会话类型选择 `SessionStore + EnginePool`、`SessionStore + AcpPool` 或 `SessionStore + RemoteControl`；
-- 直接删除未发布旧 Bridge/Command、重复远程正文 UI 和旧历史存储及其消费者，只保留当前单路用例与 `SessionStore.RemoteProxy`；不提供兼容代理、迁移窗口或双写；
+- 直接删除未发布旧 Bridge/Command/独立历史存储和重复远程正文 UI，完成消费者改用窄接口及无残余调用方/双写验收，不保留兼容代理或迁移窗口；
 - 完成会话状态与后端能力编排、双设备、断线恢复和既有 WebUI v2 回归。
 
 完成标准：普通本地、ACP 和远程会话复用同一 ChatView 与应用层用例；A 远程任务不进入 A 本机执行底座，B 仍是唯一执行与 Session 权威；未发布旧远控入口已删除，无兼容代理、迁移窗口、双写或第二套远程聊天正文业务链路。
@@ -1366,7 +1374,7 @@ python scripts/architecture-guard.py
 | 双端历史不一致 | 用户误判任务状态 | B 权威 Session、事件序号、journal 和快照恢复 |
 | `RemoteProxy` 与 B 权威 Session 边界模糊 | A 的 pending/离线投影被误当成执行终态，或远程请求误入 A 本机底座 | `SessionKind::RemoteProxy` 不变式、禁止本机 Engine/ACP、B 权威 Journal 对账和离线只读测试 |
 | 前端伪造远程引用或任务来源 | 跨会话/租约路由、审批权威绕过 | Rust 校验 A 本地 Session ID 与 opaque `remote_session_ref`/connection/lease/generation 绑定，后端派生任务来源与权限权威，拒绝篡改和跨绑定重放 |
-| 远程链路出现第二供数源 | 重复任务、重复工具副作用或两个状态所有者 | 未发布旧入口直接退役、单路用例与 SessionStore RemoteProxy、幂等请求 ID 和调用方扫描，不留兼容代理 |
+| 旧远程入口残留或多个供数链路 | 重复任务、重复工具副作用或两个状态所有者 | 删除未发布旧入口、唯一薄用例链路与 RemoteProxy 供数、幂等请求 ID、调用方扫描及回归；不保留兼容代理 |
 | 统一 ChatView 导致本地会话回归 | 普通对话或 ACP 功能受损 | 先固定 `SessionStore + EnginePool/AcpPool` 行为基线，再接入 `RemoteProxy + RemoteControl` 编排并执行全量本地回归 |
 | 完整能力范围过大 | 首次交付周期和回归风险 | 按安全基座、基础任务、完整能力、生产加固分阶段交付 |
 
@@ -1417,4 +1425,4 @@ python scripts/architecture-guard.py
 8. 文档、协议、测试矩阵和实现保持一致，不以占位代码、假数据或仅 happy path 作为完成状态。
 9. 官方与自托管生产环境均启用正式 desktop endpoint enrollment/allowlist，未 enrolled 首次注册和生产 TOFU 被验证为失败关闭。
 10. 既有 endpoint 迁移、旧 Web 链接、安全回滚下限、tombstone 多 key 轮换、Finished receipt 固定向量、A→B 加密 liveness、保守 30 秒公式、角色隔离、provisional/pending-liveness resume 和 B 黑洞 watchdog 均通过确定性故障注入与真实客户端 fixture 验收。
-11. 普通本地、ACP 与远程会话通过统一 ChatView 和薄用例编排完成验收，分别使用 `SessionStore + EnginePool`、`SessionStore + AcpPool` 和 `SessionStore(RemoteProxy) + RemoteControl`；A 远程任务不进入 A 本机 EnginePool/AcpPool，B 保持唯一权威 Session。未发布旧远控入口、旧历史存储和第二套正文 UI 直接退役；所有阶段都不保留它们的兼容代理、迁移窗口或双写。
+11. 普通本地、ACP 与远程会话通过统一 ChatView 和薄用例编排完成验收，分别使用 `SessionStore + EnginePool`、`SessionStore + AcpPool` 和 `SessionStore(RemoteProxy) + RemoteControl`；A 远程任务不进入 A 本机 EnginePool/AcpPool，B 保持唯一权威 Session；未发布旧正文 UI、Command/Bridge、独立历史存储与状态别名均已删除，不实施兼容代理、旧格式迁移、双写或保留窗口，已发布 Web v2 回归和安全迁移不变。

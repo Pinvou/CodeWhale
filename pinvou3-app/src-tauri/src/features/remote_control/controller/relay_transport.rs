@@ -243,21 +243,38 @@ struct QueuedFrame {
     priority: FramePriority,
     transport_epoch: u64,
     lease_context: Option<LeaseContext>,
+    resume_only: bool,
     payload: WirePayload,
     _total_permit: OwnedSemaphorePermit,
     _business_permit: Option<OwnedSemaphorePermit>,
+}
+
+struct ResumeInstallAuthority {
+    activation_id: String,
+    request_id: String,
+    role: ControllerRole,
+    transport_epoch: u64,
+    context: LeaseContext,
+}
+
+fn is_resume_inbound(kind: Option<&str>) -> bool {
+    matches!(
+        kind,
+        Some(
+            "controller_resume_provisional"
+                | "encrypted_resume_confirm"
+                | "controller_resume_activation_pending"
+                | "controller_post_activation_liveness_confirmed"
+                | "controller_resume_ready_ack"
+                | "controller_resumed"
+        )
+    )
 }
 
 impl QueuedFrame {
     fn text(&self) -> &str {
         self.payload.as_str()
     }
-}
-
-struct ResumeInstallAuthority {
-    activation_id: String,
-    transport_epoch: u64,
-    context: LeaseContext,
 }
 
 #[derive(Clone)]
@@ -329,6 +346,7 @@ impl ControllerTransportSender {
         &self,
         lease: AuthenticatedLease,
         activation_id: &str,
+        request_id: &str,
     ) -> Result<(), ControllerSendError> {
         let bound = self.generation();
         if bound.is_empty() || lease.context.remote_control_generation != bound {
@@ -345,11 +363,13 @@ impl ControllerTransportSender {
         if current.is_some()
             || !saved
                 .as_ref()
-                .is_some_and(|previous| previous.context == lease.context)
+                .is_some_and(|old| old.context == lease.context)
             || !authority.as_ref().is_some_and(|proof| {
-                proof.activation_id == activation_id
+                proof.context == lease.context
+                    && proof.activation_id == activation_id
+                    && proof.request_id == request_id
+                    && proof.role == self.role
                     && proof.transport_epoch == self.transport_epoch.load(Ordering::Acquire)
-                    && proof.context == lease.context
             })
         {
             return Err(ControllerSendError::Unauthenticated);
@@ -366,21 +386,26 @@ impl ControllerTransportSender {
         if self.is_stopped()
             || current.is_some()
             || inbound_epoch != self.transport_epoch.load(Ordering::Acquire)
+            || !saved
+                .as_ref()
+                .is_some_and(|lease| inbound_context_matches(frame, Some(lease)))
         {
-            return false;
-        }
-        let Some(saved) = saved.as_ref() else {
-            return false;
-        };
-        if !super::resume::resume_frame_matches_lease(&saved.context, frame) {
             return false;
         }
         let Some(activation_id) = frame.get("activation_id").and_then(Value::as_str) else {
             return false;
         };
+        let Some(request_id) = frame.get("request_id").and_then(Value::as_str) else {
+            return false;
+        };
+        let Some(saved) = saved.as_ref() else {
+            return false;
+        };
         *self.resume_install.write() = Some(ResumeInstallAuthority {
             activation_id: activation_id.to_owned(),
             transport_epoch: inbound_epoch,
+            request_id: request_id.to_owned(),
+            role: self.role,
             context: saved.context.clone(),
         });
         true
@@ -471,6 +496,7 @@ impl ControllerTransportSender {
             WirePayload::Plain(text),
             Some(lease_context),
             flushed,
+            false,
         )
     }
 
@@ -493,11 +519,8 @@ impl ControllerTransportSender {
     }
 
     /// Resume starts without an installed runtime lease. Only its explicit
-    /// handshake frames may bypass lease admission; the resume state machine
-    /// remains responsible for binding the old context and token to the peer.
-    ///
-    /// E2E-06：`controller_resume_ready_ack` 是同一族里的第三个出站帧
-    /// （B 由 Relay 驱动确认，A 需要独立 ack 才能让 Relay 提交轮换）。
+    /// handshake frames use the frozen recovery binding, never runtime authority.
+    /// The resume state machine additionally binds the token and activation.
     pub(crate) fn try_send_sensitive_resume_control<T: Serialize>(
         &self,
         value: &T,
@@ -512,12 +535,29 @@ impl ControllerTransportSender {
             Some(
                 "controller_resume_prepare"
                     | "encrypted_resume_confirm"
+                    | "controller_resume_activation_ack"
+                    | "controller_post_activation_liveness"
                     | "controller_resume_ready_ack"
             )
         ) {
             return Err(ControllerSendError::InvalidFrame("message.type".into()));
         }
-        self.try_enqueue(FramePriority::Control, WirePayload::Sensitive(text), None)
+        let current = self.lease.read();
+        let saved = self.resume_lease.read();
+        if current.is_some() {
+            return Err(ControllerSendError::Unauthenticated);
+        }
+        let lease = saved.as_ref().ok_or(ControllerSendError::Unauthenticated)?;
+        if !inbound_context_matches(&validated, Some(lease)) {
+            return Err(ControllerSendError::InvalidFrame("lease_context".into()));
+        }
+        self.try_enqueue_with_receipt(
+            FramePriority::Control,
+            WirePayload::Sensitive(text),
+            Some(lease.context.clone()),
+            None,
+            true,
+        )
     }
 
     pub(crate) fn try_send_business<T: Serialize>(
@@ -571,7 +611,7 @@ impl ControllerTransportSender {
         payload: WirePayload,
         lease_context: Option<LeaseContext>,
     ) -> Result<(), ControllerSendError> {
-        self.try_enqueue_with_receipt(priority, payload, lease_context, None)
+        self.try_enqueue_with_receipt(priority, payload, lease_context, None, false)
     }
 
     fn try_enqueue_with_receipt(
@@ -580,6 +620,7 @@ impl ControllerTransportSender {
         payload: WirePayload,
         lease_context: Option<LeaseContext>,
         flushed: Option<tokio::sync::oneshot::Sender<()>>,
+        resume_only: bool,
     ) -> Result<(), ControllerSendError> {
         if self.shutdown.is_cancelled() {
             return Err(ControllerSendError::Closed);
@@ -614,6 +655,7 @@ impl ControllerTransportSender {
             priority,
             transport_epoch: self.transport_epoch.load(Ordering::Acquire),
             lease_context,
+            resume_only,
             payload,
             _total_permit: total_permit,
             _business_permit: business_permit,
@@ -878,6 +920,15 @@ fn frame_is_current(sender: &ControllerTransportSender, frame: &QueuedFrame) -> 
         return false;
     }
     frame.lease_context.as_ref().is_none_or(|expected| {
+        if frame.resume_only {
+            let current = sender.lease.read();
+            return current.is_none()
+                && sender
+                    .resume_lease
+                    .read()
+                    .as_ref()
+                    .is_some_and(|actual| &actual.context == expected);
+        }
         sender
             .lease
             .read()
@@ -924,6 +975,9 @@ fn dispatch_inbound(
     sink: &dyn ControllerEventSink,
     text: &str,
 ) {
+    if sender.is_stopped() {
+        return;
+    }
     let inbound_epoch = sender.transport_epoch.load(Ordering::Acquire);
     let Ok(shape) = serde_json::from_str::<Value>(text) else {
         return;
@@ -938,6 +992,11 @@ fn dispatch_inbound(
         FramePriority::Control
     };
     let lease = sender.lease.read().clone();
+    let resume_lease = if lease.is_none() && is_resume_inbound(kind) {
+        sender.resume_lease.read().clone()
+    } else {
+        None
+    };
     let validated = if priority == FramePriority::Business {
         let Some(lease) = lease.as_ref() else {
             return;
@@ -961,10 +1020,7 @@ fn dispatch_inbound(
     if !validated || !context_matches {
         return;
     }
-    if kind == Some("controller_resumed")
-        && config.role == ControllerRole::ControllerA
-        && !sender.record_resume_install(&shape, inbound_epoch)
-    {
+    if kind == Some("controller_resumed") && !sender.record_resume_install(&shape, inbound_epoch) {
         return;
     }
     sink.emit(ControllerTransportEvent::Frame {
@@ -972,6 +1028,7 @@ fn dispatch_inbound(
         remote_control_generation: config.generation(),
         lease_epoch: lease
             .as_ref()
+            .or(resume_lease.as_ref())
             .map(|value| value.context.lease_epoch.clone()),
         json: text.to_owned(),
     });
@@ -1003,7 +1060,7 @@ fn is_inbound_resume_frame(kind: Option<&str>, role: ControllerRole) -> bool {
             Some("controller_post_activation_liveness_confirmed"),
             ControllerRole::ControllerA
         ) | (
-            Some("controller_post_activation_liveness"),
+            Some("controller_post_activation_liveness" | "controller_resume_ready_ack"),
             ControllerRole::ControlledB
         )
     )
@@ -1021,6 +1078,15 @@ fn inbound_context_matches(value: &Value, lease: Option<&AuthenticatedLease>) ->
         return false;
     };
     let context = &lease.context;
+    if value.get("type").and_then(Value::as_str) == Some("encrypted_controller_liveness_a") {
+        return [
+            ("connection_id", context.connection_id.as_str()),
+            ("controller_lease_id", context.controller_lease_id.as_str()),
+            ("lease_epoch", context.lease_epoch.as_str()),
+        ]
+        .into_iter()
+        .all(|(field, expected)| value.get(field).and_then(Value::as_str) == Some(expected));
+    }
     [
         ("connection_id", context.connection_id.as_str()),
         ("controller_lease_id", context.controller_lease_id.as_str()),
@@ -1147,24 +1213,39 @@ mod tests {
                 "final must really pass RX admission"
             );
             assert_eq!(
-                sender
-                    .install_authenticated_lease_after_resume(expected.clone(), "activation-other"),
+                sender.install_authenticated_lease_after_resume(
+                    expected.clone(),
+                    "activation-other",
+                    "request-resume-final"
+                ),
                 Err(ControllerSendError::Unauthenticated)
             );
             if lose_socket {
                 emit_disconnected(&config, &sender, &sink, "closed".into());
                 assert_eq!(
-                    sender.install_authenticated_lease_after_resume(expected, "activation-0001"),
+                    sender.install_authenticated_lease_after_resume(
+                        expected,
+                        "activation-0001",
+                        "request-resume-final"
+                    ),
                     Err(ControllerSendError::Unauthenticated)
                 );
                 assert!(sender.authenticated_lease().is_none());
             } else {
                 sender
-                    .install_authenticated_lease_after_resume(expected.clone(), "activation-0001")
+                    .install_authenticated_lease_after_resume(
+                        expected.clone(),
+                        "activation-0001",
+                        "request-resume-final",
+                    )
                     .unwrap();
                 assert!(sender.authenticated_lease().is_some());
                 assert_eq!(
-                    sender.install_authenticated_lease_after_resume(expected, "activation-0001"),
+                    sender.install_authenticated_lease_after_resume(
+                        expected,
+                        "activation-0001",
+                        "request-resume-final"
+                    ),
                     Err(ControllerSendError::Unauthenticated)
                 );
             }
@@ -1283,6 +1364,7 @@ mod tests {
             let result = manager.complete_resumed(
                 operation,
                 activation,
+                "request-resume-final",
                 8_000,
                 ("live-a-2", "live-b-2"),
                 [3; 32],
@@ -1715,6 +1797,280 @@ mod tests {
         assert!(!inbound_context_matches(&stale_generation, Some(&current)));
         stale_generation["lease_epoch"] = json!("7");
         assert!(inbound_context_matches(&stale_generation, Some(&current)));
+    }
+
+    #[test]
+    fn direct_encrypted_liveness_uses_its_frozen_three_field_context() {
+        let (sender, _receiver) = transport_channels(
+            ControllerRole::ControlledB,
+            "generation-0001",
+            8,
+            2,
+            8192,
+            1024,
+        );
+        sender
+            .install_authenticated_lease(lease("7", "generation-0001"))
+            .unwrap();
+        let config = ControllerTransportConfig::new(
+            "wss://example.test/ws",
+            ControllerRole::ControlledB,
+            "generation-0001",
+        );
+        let events = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let sink_events = events.clone();
+        let sink = move |event| sink_events.lock().push(event);
+        let frame = json!({
+            "v": 1, "type": "encrypted_controller_liveness_a",
+            "connection_id": "connection-0001", "controller_lease_id": "lease-0001",
+            "lease_epoch": "7", "ciphertext_b64": "AQID", "ciphertext_bytes": "3"
+        });
+        dispatch_inbound(&config, &sender, &sink, &frame.to_string());
+        assert_eq!(events.lock().len(), 1);
+        for field in ["connection_id", "controller_lease_id", "lease_epoch"] {
+            let mut wrong = frame.clone();
+            wrong[field] = json!("wrong-0001");
+            dispatch_inbound(&config, &sender, &sink, &wrong.to_string());
+        }
+        assert_eq!(events.lock().len(), 1);
+        let mut extra = frame.clone();
+        extra["relay_epoch"] = json!("relay-epoch-0001");
+        dispatch_inbound(&config, &sender, &sink, &extra.to_string());
+        assert_eq!(events.lock().len(), 1);
+        let full = resume_control("controller_resume_provisional");
+        for field in [
+            "connection_id",
+            "controller_lease_id",
+            "lease_epoch",
+            "relay_epoch",
+            "remote_control_generation",
+        ] {
+            let mut incomplete = full.clone();
+            incomplete.as_object_mut().unwrap().remove(field);
+            dispatch_inbound(&config, &sender, &sink, &incomplete.to_string());
+        }
+        assert_eq!(events.lock().len(), 1);
+    }
+
+    fn resume_control(kind: &str) -> Value {
+        let mut frame = json!({
+            "v": 1, "type": kind, "request_id": "request-resume-0001",
+            "connection_id": "connection-0001", "controller_lease_id": "lease-0001",
+            "lease_epoch": "7", "relay_epoch": "relay-epoch-0001",
+            "remote_control_generation": "generation-0001", "activation_id": "activation-0001"
+        });
+        match kind {
+            "controller_resume_activation_ack"
+            | "controller_resume_provisional"
+            | "controller_resume_activation_pending" => {
+                frame["original_deadline_ms"] = json!("31000");
+            }
+            "controller_post_activation_liveness"
+            | "controller_post_activation_liveness_confirmed"
+            | "controller_resume_ready_ack" => {
+                frame["liveness_epoch_b"] = json!("liveness-b-new-0001");
+                frame["heartbeat_sequence_b"] = json!("1");
+                if kind == "controller_resume_ready_ack" {
+                    frame["sender_role"] = json!("B");
+                }
+            }
+            "encrypted_resume_confirm" => {
+                frame["sender_role"] = json!("A");
+                frame["ciphertext_b64"] = json!("AQID");
+                frame["ciphertext_bytes"] = json!("3");
+            }
+            "controller_resumed" => {
+                frame["liveness_epoch_a"] = json!("liveness-a-new-0001");
+                frame["liveness_epoch_b"] = json!("liveness-b-new-0001");
+                frame["new_resume_token_b64"] =
+                    json!("AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=");
+                frame["resume_deadline_ms"] = json!("35000");
+            }
+            _ => panic!("test frame kind"),
+        }
+        frame
+    }
+
+    #[test]
+    fn disconnected_transport_admits_only_context_bound_resume_controls() {
+        let (sender, mut receiver) = transport_channels(
+            ControllerRole::ControlledB,
+            "generation-0001",
+            8,
+            2,
+            8192,
+            1024,
+        );
+        let config = ControllerTransportConfig::new(
+            "wss://example.test/ws",
+            ControllerRole::ControlledB,
+            "generation-0001",
+        );
+        let ack = resume_control("controller_resume_activation_ack");
+        assert!(sender.try_send_sensitive_resume_control(&ack).is_err());
+        sender
+            .install_authenticated_lease(lease("7", "generation-0001"))
+            .unwrap();
+        emit_disconnected(&config, &sender, &|_| {}, "lost".into());
+        emit_disconnected(&config, &sender, &|_| {}, "retry-lost".into());
+        assert!(sender.authenticated_lease().is_none());
+        for kind in [
+            "controller_resume_activation_ack",
+            "controller_post_activation_liveness",
+            "controller_resume_ready_ack",
+        ] {
+            sender
+                .try_send_sensitive_resume_control(&resume_control(kind))
+                .unwrap();
+            let queued = receiver.control_rx.try_recv().unwrap();
+            assert!(frame_is_current(&sender, &queued));
+            assert!(format!("{queued:?}").contains("[REDACTED]"));
+        }
+        let events = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let sink_events = events.clone();
+        let sink = move |event| sink_events.lock().push(event);
+        for kind in [
+            "controller_resume_provisional",
+            "controller_resume_activation_pending",
+            "controller_resume_ready_ack",
+            "encrypted_resume_confirm",
+            "controller_resumed",
+        ] {
+            let mut incoming = resume_control(kind);
+            if kind == "controller_resume_ready_ack" {
+                incoming["sender_role"] = json!("A");
+            }
+            dispatch_inbound(&config, &sender, &sink, &incoming.to_string());
+        }
+        assert_eq!(events.lock().len(), 5);
+        dispatch_inbound(
+            &config,
+            &sender,
+            &sink,
+            &resume_control("controller_post_activation_liveness_confirmed").to_string(),
+        );
+        assert_eq!(
+            events.lock().len(),
+            5,
+            "A-only liveness confirmation is rejected by B"
+        );
+        let mut wrong = ack.clone();
+        wrong["lease_epoch"] = json!("6");
+        assert!(sender.try_send_sensitive_resume_control(&wrong).is_err());
+        let mut wrong_inbound = resume_control("controller_resume_provisional");
+        wrong_inbound["controller_lease_id"] = json!("lease-wrong-0001");
+        dispatch_inbound(&config, &sender, &sink, &wrong_inbound.to_string());
+        assert_eq!(events.lock().len(), 5);
+        assert_eq!(
+            sender.try_send_business(&control("request-business")),
+            Err(ControllerSendError::Unauthenticated)
+        );
+        assert!(sender.try_send_authenticated_control(&ack).is_err());
+        sender.try_send_sensitive_resume_control(&ack).unwrap();
+        let queued = receiver.control_rx.try_recv().unwrap();
+        sender
+            .install_authenticated_lease(lease("7", "generation-0001"))
+            .unwrap();
+        assert!(!frame_is_current(&sender, &queued));
+        assert!(sender.try_send_sensitive_resume_control(&ack).is_err());
+        sender.stop();
+        dispatch_inbound(
+            &config,
+            &sender,
+            &sink,
+            &resume_control("controller_resumed").to_string(),
+        );
+        assert_eq!(events.lock().len(), 5);
+    }
+
+    #[test]
+    fn resume_final_authority_is_one_shot_and_bound_to_socket_epoch_and_request() {
+        let (sender, _receiver) = transport_channels(
+            ControllerRole::ControlledB,
+            "generation-0001",
+            8,
+            2,
+            8192,
+            1024,
+        );
+        let config = ControllerTransportConfig::new(
+            "wss://example.test/ws",
+            ControllerRole::ControlledB,
+            "generation-0001",
+        );
+        let current = lease("7", "generation-0001");
+        let final_frame = resume_control("controller_resumed");
+        sender.install_authenticated_lease(current.clone()).unwrap();
+        emit_disconnected(&config, &sender, &|_| {}, "lost".into());
+        dispatch_inbound(&config, &sender, &|_| {}, &final_frame.to_string());
+        assert!(
+            sender
+                .install_authenticated_lease_after_resume(
+                    current.clone(),
+                    "wrong-activation",
+                    "request-resume-0001"
+                )
+                .is_err()
+        );
+        assert!(
+            sender
+                .install_authenticated_lease_after_resume(
+                    current.clone(),
+                    "activation-0001",
+                    "wrong-request"
+                )
+                .is_err()
+        );
+        emit_disconnected(&config, &sender, &|_| {}, "lost-again".into());
+        assert!(
+            sender
+                .install_authenticated_lease_after_resume(
+                    current.clone(),
+                    "activation-0001",
+                    "request-resume-0001"
+                )
+                .is_err()
+        );
+        assert!(!sender.record_resume_install(&final_frame, 1));
+        dispatch_inbound(&config, &sender, &|_| {}, &final_frame.to_string());
+        sender
+            .install_authenticated_lease_after_resume(
+                current.clone(),
+                "activation-0001",
+                "request-resume-0001",
+            )
+            .unwrap();
+        assert!(
+            sender
+                .install_authenticated_lease_after_resume(
+                    current.clone(),
+                    "activation-0001",
+                    "request-resume-0001"
+                )
+                .is_err()
+        );
+        assert_eq!(sender.authenticated_lease(), Some(current.clone()));
+        emit_disconnected(&config, &sender, &|_| {}, "third-loss".into());
+        dispatch_inbound(&config, &sender, &|_| {}, &final_frame.to_string());
+        sender.clear_authenticated_lease();
+        assert!(
+            sender
+                .install_authenticated_lease_after_resume(
+                    current.clone(),
+                    "activation-0001",
+                    "request-resume-0001"
+                )
+                .is_err()
+        );
+        sender.stop();
+        assert_eq!(
+            sender.install_authenticated_lease_after_resume(
+                current,
+                "activation-0001",
+                "request-resume-0001"
+            ),
+            Err(ControllerSendError::Closed)
+        );
     }
 
     struct FakeClock(AtomicU64);

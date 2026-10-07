@@ -270,7 +270,10 @@ pub struct Pinvou3Bridge {
     /// also records an intentional absence, preventing engine construction
     /// from consulting mutable process or credential-store state again.
     pub(crate) runtime_model_credential_frozen: bool,
-    pub(crate) remote_skill_owner: Option<uuid::Uuid>,
+    /// A remote turn owns an isolated discovery root. Every bridge/engine clone
+    /// retains it; local materialization must never widen this root.
+    pub(crate) remote_turn_skills:
+        Option<Arc<super::super::skill_materialization::RemoteTurnSkills>>,
     /// The app has supplied a complete task-scoped route. Process-wide model
     /// environment variables and discovery probes must not rewrite it.
     pub runtime_route_locked: bool,
@@ -501,7 +504,7 @@ impl Pinvou3Bridge {
             session_model: None,
             runtime_model_credential: None,
             runtime_model_credential_frozen: false,
-            remote_skill_owner: None,
+            remote_turn_skills: None,
             runtime_route_locked: false,
             runtime_vision_model: None,
             runtime_vision_credential: None,
@@ -2052,7 +2055,10 @@ impl Pinvou3Bridge {
             mcp_config_path: self.bundle.work_mode_mcp_config_path(),
             mcp_oauth_callback_port,
             mcp_oauth_callback_url,
-            skills_dir: self.bundle.skills_dir.clone(),
+            skills_dir: self.remote_turn_skills.as_ref().map_or_else(
+                || self.bundle.skills_dir.clone(),
+                |skills| skills.path().to_path_buf(),
+            ),
             explicit_skills_root_only: true,
             plugin_registry: None,
             instructions: self.instructions(),
@@ -2328,16 +2334,15 @@ impl Pinvou3Bridge {
         cfg.session_id = Some(session_id.to_string());
         cfg.subagent_state_root = Some(roots.ledger);
         cfg.instructions = self.session_instructions(session_id);
-        // The skill discovery root points at the composed directory per
-        // session (skill dual-scope governance: directory content = the
-        // enabled skill set of that session's scope). Pre-spawn
-        // materialization is EnginePool's job; only the path is injected
-        // here. When the directory does not exist the foundation's
-        // `insert_configured_skills_dir` skips it (empty discovery set → the
-        // `## Skills` block is not rendered), and the send path's self-heal
-        // (`ensure_session_skills`) guarantees the directory is rebuilt
-        // before the next materialization opportunity.
-        cfg.skills_dir = crate::platform::paths::session_skills_dir(session_id);
+        // Local engines discover the session's composed enabled set and may
+        // self-heal it. Remote engines discover only the owned selection copied
+        // before spawn; neither local writers nor remote self-heal may replace
+        // it with the shared enabled set. explicit_skills_root_only keeps
+        // foundation workspace discovery from widening either configured root.
+        cfg.skills_dir = self.remote_turn_skills.as_ref().map_or_else(
+            || crate::platform::paths::session_skills_dir(session_id),
+            |skills| skills.path().to_path_buf(),
+        );
         // CLI hard-deny (the execpolicy channel of the scope gate): spawn-time
         // injection initial value; the hot refresh after a toggle goes through
         // EnginePool::refresh_permission_rulesets — both share this one
@@ -3038,6 +3043,12 @@ impl Pinvou3Bridge {
     }
 
     fn ensure_session_skills_for_send(&self, session_id: &str) -> Result<()> {
+        if let Some(skills) = &self.remote_turn_skills {
+            // Missing private snapshots fail closed, never self-heal from B's
+            // shared (potentially broader) enabled set.
+            anyhow::ensure!(skills.path().is_dir(), "task_skill_unavailable");
+            return Ok(());
+        }
         // Send-path self-healing (skill dual-scope governance §2.3.3): rebuild the
         // composed directory from the current mode scope when missing (a microsecond
         // stat) so a manual deletion is not silently lost; no full comparison every
@@ -3051,9 +3062,8 @@ impl Pinvou3Bridge {
             session_id,
             self.session_policy(session_id).mode(),
             bound_workspace.as_deref(),
-            self.remote_skill_owner,
-        )
-        .map_err(anyhow::Error::msg)
+        );
+        Ok(())
     }
 
     fn build_send_message_op_with_hooks(
@@ -3391,8 +3401,8 @@ impl Pinvou3Bridge {
             session_model,
             runtime_model_credential: None,
             runtime_model_credential_frozen: false,
-            remote_skill_owner: None,
             runtime_route_locked: false,
+            remote_turn_skills: None,
             runtime_vision_model: None,
             runtime_vision_credential: None,
             session_affinity_key: None,
@@ -3479,9 +3489,9 @@ mod tests {
             session_model: None,
             runtime_model_credential: None,
             runtime_model_credential_frozen: false,
-            remote_skill_owner: None,
             runtime_route_locked: false,
             runtime_vision_model: None,
+            remote_turn_skills: None,
             runtime_vision_credential: None,
             session_affinity_key: None,
             probed_context_tokens: None,
