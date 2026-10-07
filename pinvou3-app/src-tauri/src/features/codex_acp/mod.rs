@@ -1274,11 +1274,11 @@ pub struct AcpPool {
     config_defaults: AcpConfigDefaultsStore,
     acp_metadata_backends: Arc<parking_lot::RwLock<HashMap<String, AgentBackend>>>,
     session_store: SessionStore,
-    installing_agents: Arc<parking_lot::RwLock<HashSet<AgentBackend>>>,
-    /// 安装子进程 pid 注册表：取消安装时按 pid 杀进程树。
-    install_children: Arc<parking_lot::Mutex<HashMap<AgentBackend, u32>>>,
-    /// 取消标记：取消命令写入，安装等待侧在失败出口消费并以「安装已取消」收尾。
-    install_cancelled: Arc<parking_lot::Mutex<HashSet<AgentBackend>>>,
+    install_operations: InstallOperationStore,
+    /// 安装进程树注册表：取消时使用创建阶段持有的内核归属 guard 终止整树。
+    install_children: Arc<
+        parking_lot::Mutex<HashMap<AgentBackend, crate::platform::process::ManagedProcessTree>>,
+    >,
     login_states: Arc<parking_lot::RwLock<HashMap<AgentBackend, AgentLoginState>>>,
     login_inputs: Arc<Mutex<HashMap<AgentBackend, ChildStdin>>>,
     codex_upgrade_required: Arc<AtomicBool>,
@@ -1323,21 +1323,96 @@ impl Drop for IdleReaperGuard {
 /// 同一 Agent 的安装/升级互斥，不同 Agent 的状态与任务彼此隔离。
 /// guard 在外部命令完成后显式 drop，使随后返回的 status 已恢复 installing=false；
 /// 提前返回或 panic 时 Drop 仍会兜底清理。
+#[derive(Default)]
+struct InstallOperationState {
+    active: HashSet<AgentBackend>,
+    cancelled: HashSet<AgentBackend>,
+}
+
+impl InstallOperationState {
+    fn begin(&mut self, backend: AgentBackend) -> bool {
+        if !self.active.insert(backend) {
+            return false;
+        }
+        // This cleanup and publishing `active` share one lock. A cancellation
+        // that observes the new operation can only run after this point and
+        // therefore can never be mistaken for a stale marker and removed.
+        self.cancelled.remove(&backend);
+        true
+    }
+
+    fn request_cancel(&mut self, backend: AgentBackend) -> bool {
+        if !self.active.contains(&backend) {
+            return false;
+        }
+        self.cancelled.insert(backend);
+        true
+    }
+
+    fn is_active(&self, backend: AgentBackend) -> bool {
+        self.active.contains(&backend)
+    }
+
+    fn is_cancelled(&self, backend: AgentBackend) -> bool {
+        self.cancelled.contains(&backend)
+    }
+
+    fn take_cancelled(&mut self, backend: AgentBackend) -> bool {
+        self.cancelled.remove(&backend)
+    }
+
+    fn finish(&mut self, backend: AgentBackend) {
+        self.active.remove(&backend);
+        self.cancelled.remove(&backend);
+    }
+}
+
+type InstallOperationStore = Arc<parking_lot::Mutex<InstallOperationState>>;
+
+/// Mark cancellation and capture the exact currently owned tree under one
+/// operation lock. The tree is terminated after both locks are released, so a
+/// completed operation/new start cannot redirect a late cancel to the new tree.
+fn capture_cancelled_install_tree(
+    operations: &InstallOperationStore,
+    children: &Arc<
+        parking_lot::Mutex<HashMap<AgentBackend, crate::platform::process::ManagedProcessTree>>,
+    >,
+    backend: AgentBackend,
+) -> Result<Option<crate::platform::process::ManagedProcessTree>> {
+    capture_cancelled_install_tree_at_boundary(operations, children, backend, || {})
+}
+
+fn capture_cancelled_install_tree_at_boundary(
+    operations: &InstallOperationStore,
+    children: &Arc<
+        parking_lot::Mutex<HashMap<AgentBackend, crate::platform::process::ManagedProcessTree>>,
+    >,
+    backend: AgentBackend,
+    before_tree_capture: impl FnOnce(),
+) -> Result<Option<crate::platform::process::ManagedProcessTree>> {
+    let mut state = operations.lock();
+    if !state.request_cancel(backend) {
+        bail!("{} 当前没有正在进行的安装", backend.display_name());
+    }
+    // Sole nested lock order: operations -> children. Registration and child
+    // cleanup take only children; operation start/finish take only operations.
+    before_tree_capture();
+    let tree = children.lock().get(&backend).cloned();
+    Ok(tree)
+}
+
 struct AgentInstallGuard {
-    installing_agents: Arc<parking_lot::RwLock<HashSet<AgentBackend>>>,
+    operations: InstallOperationStore,
     backend: AgentBackend,
 }
 
 impl AgentInstallGuard {
-    fn try_start(
-        installing_agents: &Arc<parking_lot::RwLock<HashSet<AgentBackend>>>,
-        backend: AgentBackend,
-    ) -> Option<Self> {
-        if !installing_agents.write().insert(backend) {
+    fn try_start(operations: &InstallOperationStore, backend: AgentBackend) -> Option<Self> {
+        if !operations.lock().begin(backend) {
             return None;
         }
         Some(Self {
-            installing_agents: installing_agents.clone(),
+            operations: operations.clone(),
             backend,
         })
     }
@@ -1345,36 +1420,56 @@ impl AgentInstallGuard {
 
 impl Drop for AgentInstallGuard {
     fn drop(&mut self) {
-        self.installing_agents.write().remove(&self.backend);
+        self.operations.lock().finish(self.backend);
     }
 }
 
-/// 安装子进程 pid 登记 guard：spawn 成功后登记，drop 时（完成/失败/超时/取消
-/// 任意出口）统一注销，避免残留 pid 在后续取消时误杀被系统复用的进程。
+/// 安装进程树登记 guard：spawn 成功并建立平台归属后登记，drop 时（完成/失败/
+/// 超时/取消任意出口）统一注销；只有明确成功才解除异常回收。Windows 保存 Job
+/// Object，而非可复用的裸 PID。
 struct InstallChildGuard {
-    install_children: Arc<parking_lot::Mutex<HashMap<AgentBackend, u32>>>,
+    install_children: Arc<
+        parking_lot::Mutex<HashMap<AgentBackend, crate::platform::process::ManagedProcessTree>>,
+    >,
     backend: AgentBackend,
+    process_tree: crate::platform::process::ManagedProcessTree,
+    armed: bool,
 }
 
 impl InstallChildGuard {
     fn register(
-        install_children: &Arc<parking_lot::Mutex<HashMap<AgentBackend, u32>>>,
+        install_children: &Arc<
+            parking_lot::Mutex<HashMap<AgentBackend, crate::platform::process::ManagedProcessTree>>,
+        >,
         backend: AgentBackend,
-        pid: Option<u32>,
+        process_tree: crate::platform::process::ManagedProcessTree,
     ) -> Self {
-        if let Some(pid) = pid {
-            install_children.lock().insert(backend, pid);
-        }
+        install_children
+            .lock()
+            .insert(backend, process_tree.clone());
         Self {
             install_children: install_children.clone(),
             backend,
+            process_tree,
+            armed: true,
         }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
     }
 }
 
 impl Drop for InstallChildGuard {
     fn drop(&mut self) {
         self.install_children.lock().remove(&self.backend);
+        // The own tree survives unregistering. Future abort, panic and every
+        // unsuccessful exit reclaim descendants outside the registry lock.
+        if self.armed {
+            if let Err(error) = self.process_tree.terminate() {
+                eprintln!("[pinvou3-app] failed to reclaim aborted install tree: {error:#}");
+            }
+        }
     }
 }
 
@@ -1574,9 +1669,8 @@ impl AcpPool {
             config_defaults,
             acp_metadata_backends: Arc::new(parking_lot::RwLock::new(acp_metadata_backends)),
             session_store,
-            installing_agents: Arc::new(parking_lot::RwLock::new(HashSet::new())),
+            install_operations: Arc::new(parking_lot::Mutex::new(InstallOperationState::default())),
             install_children: Arc::new(parking_lot::Mutex::new(HashMap::new())),
-            install_cancelled: Arc::new(parking_lot::Mutex::new(HashSet::new())),
             login_states: Arc::new(parking_lot::RwLock::new(HashMap::new())),
             login_inputs: Arc::new(Mutex::new(HashMap::new())),
             codex_upgrade_required: Arc::new(AtomicBool::new(false)),
@@ -1874,7 +1968,7 @@ impl AcpPool {
             .unwrap_or_default();
         if backend == AgentBackend::KimiAcp {
             let kimi = self.cli_probe_for(backend);
-            let installing = self.installing_agents.read().contains(&backend);
+            let installing = self.install_operations.lock().is_active(backend);
             let kimi_path = kimi
                 .as_ref()
                 .map(|cli| cli.path.to_string_lossy().into_owned());
@@ -2023,7 +2117,7 @@ impl AcpPool {
         };
         // 登录命令运行期间不要再启动同一 CLI 的 auth status。部分 CLI 会让两条
         // 命令争用凭证锁，原来的 750ms 状态轮询因此可能拖住 Tauri 的 IPC/UI。
-        let installing = self.installing_agents.read().contains(&backend);
+        let installing = self.install_operations.lock().is_active(backend);
         let authenticated = !login.in_progress
             && !installing
             && match backend {
@@ -2308,7 +2402,7 @@ impl AcpPool {
                 backend.display_name()
             );
         }
-        let Some(install_guard) = AgentInstallGuard::try_start(&self.installing_agents, backend)
+        let Some(install_guard) = AgentInstallGuard::try_start(&self.install_operations, backend)
         else {
             diagnostics::write(
                 &operation_id,
@@ -2317,15 +2411,14 @@ impl AcpPool {
             );
             bail!("{} 正在通过 Homebrew 安装，请稍候", backend.display_name());
         };
-        // 清掉上一次安装可能残留的取消标记：本次失败语义只来自本次取消。
-        self.install_cancelled.lock().remove(&backend);
+        // try_start 在发布 active 的同一临界区清理旧取消标记；发布后的取消不会丢失。
         diagnostics::write(
             &operation_id,
             "homebrew:start",
             format!("agent={}", backend.agent_id().unwrap_or("unknown")),
         );
         // The brew list probe is a blocking subprocess, so keep spawn_blocking; the subprocess execution
-        // skeleton (register pid / cancel recheck / streaming output / 600s timeout / cancel rewrite) is
+        // skeleton (register tree / cancel recheck / streaming output / 600s timeout / cancel rewrite) is
         // install.rs's run_managed_install, which run_brew_install shares with the script/npm channels.
         // brew previously had no timeout, and a hang would hold the install mutex guard forever.
         let result = match tokio::task::spawn_blocking(move || {
@@ -2344,7 +2437,7 @@ impl AcpPool {
                     backend,
                     &operation_id,
                     &self.install_children,
-                    &self.install_cancelled,
+                    &self.install_operations,
                     &args,
                     command,
                 )
@@ -2661,13 +2754,12 @@ impl AcpPool {
             diagnostics::write(&operation_id, "npm:unsupported", "result=rejected");
             bail!("{} 不支持 npm 全局升级", backend.display_name());
         }
-        let Some(install_guard) = AgentInstallGuard::try_start(&self.installing_agents, backend)
+        let Some(install_guard) = AgentInstallGuard::try_start(&self.install_operations, backend)
         else {
             diagnostics::write(&operation_id, "npm:already_installing", "result=rejected");
             bail!("{} 正在升级，请稍候", backend.display_name());
         };
-        // 清掉上一次安装可能残留的取消标记：本次失败语义只来自本次取消。
-        self.install_cancelled.lock().remove(&backend);
+        // try_start 在发布 active 的同一临界区清理旧取消标记；发布后的取消不会丢失。
         // Rename the old binary installed by the official script and move it
         // aside first: only when the script path is the currently resolved,
         // effective CLI is the new version npm installs into the global
@@ -2740,7 +2832,7 @@ impl AcpPool {
             backend,
             &operation_id,
             &self.install_children,
-            &self.install_cancelled,
+            &self.install_operations,
         )
         .await;
         if result.is_err() && !moved_backups.is_empty() {
@@ -2806,7 +2898,7 @@ impl AcpPool {
                 backend.display_name()
             );
         }
-        let Some(install_guard) = AgentInstallGuard::try_start(&self.installing_agents, backend)
+        let Some(install_guard) = AgentInstallGuard::try_start(&self.install_operations, backend)
         else {
             diagnostics::write(
                 &operation_id,
@@ -2815,8 +2907,7 @@ impl AcpPool {
             );
             bail!("{} 正在安装，请稍候", backend.display_name());
         };
-        // 清掉上一次安装可能残留的取消标记：本次失败语义只来自本次取消。
-        self.install_cancelled.lock().remove(&backend);
+        // try_start 在发布 active 的同一临界区清理旧取消标记；发布后的取消不会丢失。
         // 升级前把官方脚本目标路径的旧二进制改名移开：Claude 官方 install
         // 子命令检测到「已存在 native installation」时会跳过覆盖却仍输出成功
         // （假成功，实测）。移开后脚本走全新安装路径；脚本失败时恢复旧文件，
@@ -2859,7 +2950,7 @@ impl AcpPool {
             backend,
             &operation_id,
             &self.install_children,
-            &self.install_cancelled,
+            &self.install_operations,
         )
         .await;
         if result.is_err() && !moved_backups.is_empty() {
@@ -2913,19 +3004,25 @@ impl AcpPool {
         }
     }
 
-    /// 取消正在进行的 Agent CLI 安装：写入取消标记并按登记的 pid 杀进程树。
+    /// 取消正在进行的 Agent CLI 安装：写入取消标记并终止登记的 managed tree。
     /// 等待侧检测到取消标记后以「安装已取消」收尾，installing 随其出口恢复 false。
     pub async fn cancel_agent_install(&self, agent_id: &str) -> Result<CodexAcpStatus> {
         let backend = AgentBackend::parse(Some(agent_id))?;
         if !backend.is_acp() {
             bail!("Agent 不是 ACP 后端: {agent_id}");
         }
-        if !self.installing_agents.read().contains(&backend) {
-            bail!("{} 当前没有正在进行的安装", backend.display_name());
-        }
-        self.install_cancelled.lock().insert(backend);
-        if let Some(pid) = self.install_children.lock().get(&backend).copied() {
-            kill_install_process_tree(pid);
+        let process_tree = capture_cancelled_install_tree(
+            &self.install_operations,
+            &self.install_children,
+            backend,
+        )?;
+        if let Some(process_tree) = process_tree {
+            if let Err(error) = process_tree.terminate() {
+                eprintln!(
+                    "[pinvou3-app] failed to terminate {} install process tree: {error:#}",
+                    backend.display_name()
+                );
+            }
         }
         Ok(self.status_for_async(backend).await)
     }

@@ -435,11 +435,12 @@ pub(crate) fn std_process_group_leader(command: &mut Command) {
 ///
 /// On Windows the job intentionally does not use KILL_ON_JOB_CLOSE: successful
 /// launchers may return while a descendant continues. Explicit termination is
-/// reserved for timeout or output overflow in the synchronous capture path. On Unix the
+/// reserved for timeout, output overflow or cancellation. On Unix the
 /// existing process-group id remains the ownership token.
-struct ManagedProcessTree {
+#[derive(Clone)]
+pub(crate) struct ManagedProcessTree {
     #[cfg(windows)]
-    job: WindowsJobObject,
+    job: std::sync::Arc<WindowsJobObject>,
     #[cfg(not(windows))]
     pid: u32,
 }
@@ -482,7 +483,7 @@ fn spawn_managed_windows(
     activate: impl FnOnce(&WindowsJobObject, u32) -> std::io::Result<()>,
 ) -> std::io::Result<(std::process::Child, ManagedProcessTree)> {
     prepare_windows_managed_std_command(&mut command);
-    let job = WindowsJobObject::create()?;
+    let job = std::sync::Arc::new(WindowsJobObject::create()?);
     let mut child = command.spawn()?;
     if let Err(error) = activate(&job, child.id()) {
         let _ = job.terminate();
@@ -496,10 +497,63 @@ fn spawn_managed_windows(
     Ok((child, ManagedProcessTree { job }))
 }
 
+/// Start an async subprocess in an owned tree before it can spawn descendants.
+/// Failure to activate the suspended Windows child is fail-closed with bounded
+/// reaping; normal completion does not implicitly kill surviving descendants.
+pub(crate) async fn spawn_managed_tokio(
+    mut command: tokio::process::Command,
+) -> std::io::Result<(tokio::process::Child, ManagedProcessTree)> {
+    command.kill_on_drop(true);
+    #[cfg(windows)]
+    {
+        spawn_managed_windows_tokio(command, WindowsJobObject::assign_and_resume).await
+    }
+    #[cfg(not(windows))]
+    {
+        tokio_process_group_leader(&mut command);
+        let child = command.spawn()?;
+        let pid = child
+            .id()
+            .ok_or_else(|| std::io::Error::other("spawned child has no process id"))?;
+        Ok((child, ManagedProcessTree { pid }))
+    }
+}
+
+#[cfg(windows)]
+async fn spawn_managed_windows_tokio(
+    mut command: tokio::process::Command,
+    activate: impl FnOnce(&WindowsJobObject, u32) -> std::io::Result<()>,
+) -> std::io::Result<(tokio::process::Child, ManagedProcessTree)> {
+    use windows_sys::Win32::System::Threading::{
+        CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW, CREATE_SUSPENDED,
+    };
+    command.kill_on_drop(true);
+    command.creation_flags(CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP | CREATE_SUSPENDED);
+    let job = std::sync::Arc::new(WindowsJobObject::create()?);
+    let mut child = command.spawn()?;
+    let activation = child
+        .id()
+        .ok_or_else(|| std::io::Error::other("spawned child has no process id"))
+        .and_then(|pid| activate(&job, pid));
+    if let Err(error) = activation {
+        let _ = job.terminate();
+        let _ = child.start_kill();
+        let reap = tokio::time::timeout(REAP_GRACE, child.wait()).await;
+        let note = match reap {
+            Ok(Ok(_)) => String::new(),
+            Ok(Err(reap_error)) => format!("; child reap failed: {reap_error}"),
+            Err(_) => "; child reap timed out".to_owned(),
+        };
+        return Err(std::io::Error::new(error.kind(), format!("{error}{note}")));
+    }
+    Ok((child, ManagedProcessTree { job }))
+}
+
 #[cfg(windows)]
 struct WindowsJobObject {
-    // This private owner closes the unnamed job exactly once.
-    handle: windows_sys::Win32::Foundation::HANDLE,
+    // Kernel handles are valid across threads; Arc retains this owner until
+    // the last installer/canceller finishes. Drop closes the handle once.
+    handle: usize,
 }
 
 #[cfg(windows)]
@@ -513,11 +567,13 @@ impl WindowsJobObject {
         if handle.is_null() {
             return Err(std::io::Error::last_os_error());
         }
-        Ok(Self { handle })
+        Ok(Self {
+            handle: handle as usize,
+        })
     }
 
     fn raw(&self) -> windows_sys::Win32::Foundation::HANDLE {
-        self.handle
+        self.handle as windows_sys::Win32::Foundation::HANDLE
     }
 
     fn assign_and_resume(&self, pid: u32) -> std::io::Result<()> {
@@ -841,7 +897,7 @@ pub(crate) fn hide_tokio_console(command: &mut tokio::process::Command) {
 pub(crate) fn hide_tokio_console(_command: &mut tokio::process::Command) {}
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::io::Write as _;
 
@@ -918,6 +974,60 @@ mod tests {
             .args(["--exact", OUTPUT_FIXTURE_TEST, "--nocapture"])
             .env(OUTPUT_FIXTURE_ENV, mode);
         command
+    }
+
+    /// Test-only native identity probes for consumer lifecycle regressions.
+    /// All Windows details stay in the platform adapter, not in ACP tests.
+    pub(crate) struct BoundFixtureProcess {
+        #[cfg(windows)]
+        identity: WindowsProcessHandle,
+    }
+
+    impl BoundFixtureProcess {
+        pub(crate) fn supported() -> bool {
+            cfg!(windows)
+        }
+
+        pub(crate) fn bind(pid: u32) -> std::io::Result<Option<Self>> {
+            #[cfg(windows)]
+            {
+                Ok(WindowsProcessHandle::open(pid)?.map(|identity| Self { identity }))
+            }
+            #[cfg(not(windows))]
+            {
+                let _ = pid;
+                Ok(None)
+            }
+        }
+
+        pub(crate) fn exited(&self, timeout: Duration) -> bool {
+            #[cfg(windows)]
+            {
+                use windows_sys::Win32::Foundation::WAIT_OBJECT_0;
+                use windows_sys::Win32::System::Threading::WaitForSingleObject;
+                // SAFETY: the bound identity owns the live handle for the whole probe.
+                unsafe {
+                    WaitForSingleObject(
+                        self.identity.handle,
+                        timeout.as_millis().min(u32::MAX as u128) as u32,
+                    ) == WAIT_OBJECT_0
+                }
+            }
+            #[cfg(not(windows))]
+            {
+                let _ = timeout;
+                false
+            }
+        }
+    }
+
+    pub(crate) fn consumer_orphan_fixture(mode: &str, marker: &Path) -> tokio::process::Command {
+        let mut command = output_fixture_command(mode);
+        command
+            .env(OUTPUT_FIXTURE_MARKER_ENV, marker)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        tokio::process::Command::from(command)
     }
 
     fn fixture_marker(extension: &str) -> Option<std::path::PathBuf> {
@@ -1055,6 +1165,32 @@ mod tests {
                     "running",
                     DESCENDANT_STARTUP_HANDSHAKE
                 ));
+                std::thread::sleep(Duration::from_secs(60));
+            }
+            Ok("consumer_success_root") => {
+                let _descendant = output_fixture_command("consumer_success_descendant")
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .spawn()
+                    .unwrap();
+                assert!(wait_for_fixture_marker(
+                    "running",
+                    DESCENDANT_STARTUP_HANDSHAKE
+                ));
+            }
+            Ok("consumer_success_descendant") => {
+                std::fs::write(
+                    fixture_marker("pid").unwrap(),
+                    std::process::id().to_string(),
+                )
+                .unwrap();
+                std::fs::write(fixture_marker("running").unwrap(), b"running").unwrap();
+                assert!(wait_for_fixture_marker(
+                    "identity-bound",
+                    DESCENDANT_STARTUP_HANDSHAKE
+                ));
+                // The consumer pins identity before asserting normal survival;
+                // its explicit cleanup normally ends this bounded fallback.
                 std::thread::sleep(Duration::from_secs(60));
             }
             Ok("descendant_success") => {
@@ -1286,6 +1422,89 @@ mod tests {
             std::thread::sleep(Duration::from_millis(25));
         }
         path.exists()
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn async_managed_spawn_failures_reap_suspended_children_without_running() {
+        let _fixture_lock = lock_process_fixture();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        for assign_first in [false, true] {
+            let temporary = tempfile::tempdir().unwrap();
+            let marker = temporary.path().join("async-never-resumed");
+            let mut command = output_fixture_command("descendant_success");
+            command.env(OUTPUT_FIXTURE_MARKER_ENV, &marker);
+            let mut identity = None;
+            let started = Instant::now();
+            let result = runtime.block_on(spawn_managed_windows_tokio(
+                tokio::process::Command::from(command),
+                |job, pid| {
+                    identity = WindowsProcessHandle::open(pid)?;
+                    if assign_first {
+                        job.assign(pid)?;
+                    }
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        "injected activation failure",
+                    ))
+                },
+            ));
+            assert!(result.is_err());
+            assert_windows_process_exited(&identity.unwrap(), Duration::from_secs(3));
+            assert!(!marker.with_extension("running").exists());
+            assert!(started.elapsed() < Duration::from_secs(5));
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn async_managed_cancel_kills_orphaned_descendants() {
+        let _fixture_lock = lock_process_fixture();
+        let temporary = tempfile::tempdir().unwrap();
+        let marker = temporary.path().join("async-orphan");
+        let pid_file = marker.with_extension("pid");
+        let bound = marker.with_extension("identity-bound");
+        let exited = marker.with_extension("intermediary-exited");
+        let mut command = output_fixture_command("descendant_wait");
+        command.env(OUTPUT_FIXTURE_MARKER_ENV, &marker);
+        let waiter = std::thread::spawn(move || {
+            assert!(wait_for_path(&pid_file, DESCENDANT_STARTUP_HANDSHAKE));
+            let pid = std::fs::read_to_string(pid_file)
+                .unwrap()
+                .trim()
+                .parse()
+                .unwrap();
+            let identity = WindowsProcessHandle::open(pid).unwrap().unwrap();
+            std::fs::write(&bound, b"bound").unwrap();
+            assert_windows_process_exited(&identity, Duration::from_secs(35));
+        });
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let (mut child, tree) = spawn_managed_tokio(tokio::process::Command::from(command))
+                .await
+                .unwrap();
+            assert!(wait_for_path(&exited, DESCENDANT_STARTUP_HANDSHAKE));
+            assert!(wait_for_path(
+                &marker.with_extension("identity-bound"),
+                DESCENDANT_STARTUP_HANDSHAKE
+            ));
+            let canceller = tree.clone();
+            drop(tree);
+            canceller.terminate().unwrap();
+            let status = tokio::time::timeout(Duration::from_secs(5), child.wait())
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(!status.success());
+        });
+        waiter.join().unwrap();
+        assert!(!marker.with_extension("finished").exists());
     }
 
     #[test]
