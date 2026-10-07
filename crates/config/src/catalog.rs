@@ -776,8 +776,9 @@ impl CatalogCompiler {
 /// distinct), while non-http(s) schemes and empty or missing authorities map
 /// to one constant redacted input. Scheme-less inputs take the fall-through
 /// branch instead and fingerprint their credential-free authority and path.
-/// None of these forms ever constructs a client, so no captured state can
-/// carry their digest.
+/// Unlike the constant's inputs, the glued-query form does construct a client
+/// and can carry captured state — which is why it fingerprints its host
+/// rather than collapsing onto the shared constant.
 #[must_use]
 pub fn base_url_fingerprint(base_url: &str) -> String {
     use sha2::Digest as _;
