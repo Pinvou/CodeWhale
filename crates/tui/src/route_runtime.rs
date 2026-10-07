@@ -1871,6 +1871,7 @@ mod custom_wire_override_tests {
 
     #[test]
     fn forkguard_named_table_wire_responses_reaches_the_runtime_candidate() {
+        let _env_lock = crate::test_support::lock_test_env();
         let config =
             custom_table_config(Some("responses"), "https://api.openai.com/v1", "gpt-6-sol");
         let route = resolve_runtime_route(&config, ApiProvider::Custom, Some("gpt-6-sol"))
@@ -1890,6 +1891,7 @@ mod custom_wire_override_tests {
 
     #[test]
     fn forkguard_named_table_wire_anthropic_reaches_the_runtime_candidate() {
+        let _env_lock = crate::test_support::lock_test_env();
         let config = custom_table_config(
             Some("anthropic"),
             "https://relay.example.test/v1",
@@ -1903,6 +1905,7 @@ mod custom_wire_override_tests {
 
     #[test]
     fn forkguard_named_table_without_wire_keeps_the_chat_default() {
+        let _env_lock = crate::test_support::lock_test_env();
         for wire in [None, Some("chat")] {
             let config = custom_table_config(wire, "https://relay.example.test/v1", "vendor-model");
             let route = resolve_runtime_route(&config, ApiProvider::Custom, Some("vendor-model"))
@@ -1921,6 +1924,7 @@ mod custom_wire_override_tests {
     /// parser stays deliberate.
     #[test]
     fn forkguard_named_table_unrecognized_wire_keeps_the_chat_default() {
+        let _env_lock = crate::test_support::lock_test_env();
         let config = custom_table_config(
             Some("respones"),
             "https://relay.example.test/v1",
@@ -1974,6 +1978,7 @@ mod custom_wire_override_tests {
     /// Chat Completions — the exact mis-route this feature fixes.
     #[test]
     fn forkguard_identity_pinned_route_reads_the_pinned_tables_wire() {
+        let _env_lock = crate::test_support::lock_test_env();
         let config = two_table_config(
             ("ambient_chat", None),
             ("pinned_responses", Some("responses")),
@@ -2003,6 +2008,7 @@ mod custom_wire_override_tests {
     /// static-policy base for every multi-table setup.
     #[test]
     fn forkguard_ambient_wire_override_does_not_leak_onto_pinned_chat_tables() {
+        let _env_lock = crate::test_support::lock_test_env();
         let config = two_table_config(
             ("ambient_responses", Some("responses")),
             ("pinned_chat", None),
