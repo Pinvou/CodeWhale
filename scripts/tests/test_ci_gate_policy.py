@@ -2819,7 +2819,7 @@ class CiGatePolicyTests(unittest.TestCase):
         # by GATE_JOB_LEVEL_IFS["rust-test"]; the asserts below keep the
         # step-level pins that `if:` cannot cover.
         self.assertIn(
-            "cargo test --manifest-path pinvou3-app/src-tauri/Cargo.toml --no-default-features --lib -- --test-threads=1",
+            "cargo test --manifest-path pinvou3-app/src-tauri/Cargo.toml --no-default-features --lib --locked -- --test-threads=1",
             rust_test,
         )
         # push(main) 只编译暖 cache,不执行测试:MQ 已对同一组合树跑过全量测试;
