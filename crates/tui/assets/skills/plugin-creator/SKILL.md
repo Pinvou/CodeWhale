@@ -19,28 +19,32 @@ a bundle-carried downloader.
    - User bundle: `~/.codewhale/plugins/<plugin-name>/`
    - Workspace bundle: `<workspace>/.codewhale/plugins/<plugin-name>/`
 2. Normalize the bundle name to lowercase hyphen-case.
-3. Create `plugin.toml`:
+3. Create `plugin.json` (the native Agent Plugins manifest):
 
-```toml
-schema_version = 1
-
-[plugin]
-name = "my-plugin"
-version = "0.1.0"
-description = "What this bundle provides"
-
-[skills]
-path = "skills"
+```json
+{
+  "$schema": "https://agent-plugins.org/schemas/plugin.json",
+  "name": "my-plugin",
+  "version": "0.1.0",
+  "description": "What this bundle provides",
+  "extensions": {
+    "net.codewhale": {
+      "skills": { "path": "skills" }
+    }
+  }
+}
 ```
 
 4. Put each Skill under `skills/<skill-name>/SKILL.md`. Codewhale exposes it
    as `my-plugin:<skill-name>`, never as an unqualified command.
-5. Add `[mcp_servers.<name>]` only when the bundle needs an existing MCP
-   engine. Keep stdio commands and paths inside the bundle. Map local
-   environment values only as exact `${SOURCE_ENV}` references. For remote MCP,
-   use HTTPS (or loopback HTTP), forbid URL user information/query/fragment,
-   use only environment-backed headers or bearer tokens, and declare the exact
-   normalized endpoint host set in `[capabilities].network_hosts`. Never place
+5. Add a sibling `mcp.json` (`mcpServers` envelope — see
+   `plugins/computer-use/mcp.json` in the engine tree) only when the bundle
+   needs an existing MCP engine. Keep stdio commands and paths inside the
+   bundle. Map local environment values only as exact `${SOURCE_ENV}`
+   references. For remote MCP, use HTTPS (or loopback HTTP), forbid URL user
+   information/query/fragment, use only environment-backed headers or bearer
+   tokens, and declare the exact normalized endpoint host set in
+   `extensions["net.codewhale"].capabilities.network_hosts`. Never place
    credentials in the manifest.
 6. Declare commands, agents, hooks, LSP, native extensions, filesystem roots,
    or lifecycle mutation only when inventorying future work. Codewhale shows
