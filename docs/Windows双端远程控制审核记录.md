@@ -5,6 +5,15 @@
 > 用途：记录 DEV-01 起逐任务「独立审核 → 修复 → 复审」的过程与证据。
 > 规则：审核结论必须以当前代码与真实测试输出为据；每条审核发现独立提交修复；审核者认为通过后该任务才算完成。
 
+## A09 本轮行为边界（2026-10-07）
+
+- 任务 dispatch 的 executor、事件 sink 与 Running 发布发生 unwind panic 时，注销并取消该任务 token，提交明确失败终态并释放 turn；已由取消或断线提交的终态不被覆盖。各独立 cleanup port 分别隔离 panic，不承诺抛错的 port 已完成资源释放；持久化持续失败仍由 Issue #1476 跟踪，不伪造成功。
+- panic hook 仅在远控 Future 的每次 poll、析构与同步 cleanup 的线程局部作用域中隐藏 payload；挂起后恢复原作用域，其他线程及其他功能的 panic 继续交给原 hook。应用的远控与 computer-use 首次注册共用 core 串行链式入口，避免并发 take/set 丢掉另一方 hook；computer-use 原有 worker 脱敏语义不变。不临时交换全局 hook，不把敏感正文写入任务账本；第三方自行替换全局 hook 不在此保证内。进程 abort 不属于 unwind 恢复保证。
+- controller WebSocket 每 5 秒发送 transport Ping，连续两个周期无入站响应即拆除当前安装租约并退避重连；发送阻塞也受同一静默截止时间约束，关闭 Close 写为单周期内尽力完成。原始连接成功、Pong 或错误帧不归零重连退避，只有通过当前角色、代际及租约准入的非错误业务控制帧才归零。transport Pong 不更新认证存活证据或恢复预算。
+- 恢复窗口忽略仍在线一端合法的旧周期 `controller_liveness`：验证当前 socket、完整 lease context、角色、epoch 和非零 sequence，但不重建 liveness 状态、不发送误导性恢复错误、不延长首次冻结截止时间。非法帧仍拒绝。原审核所称“该错误必然立即终结 Relay lease”不符合当前调用边界；实际风险是 A 将并发错误当作恢复失败。
+- 能力显示名按冻结协议统一为 128 个 Unicode 字符；本地工具/技能描述仅截断展示投影，不更改 opaque ID、授权或原始名称。覆盖 128/129/160/161 和多字节边界。
+- 此记录描述实现边界，实际测试与独立审核结论在固定提交的 PR 回复中补充；不是发布验收。旧审核记录与原提交历史保留。
+
 ## 1. DEV-01：生产 desktop endpoint enrollment registry
 
 审核轮次 1（审核提交 4239bb19 与修复 a7c5b07b、fd3115ab、520167d6、a3c11bb4）
