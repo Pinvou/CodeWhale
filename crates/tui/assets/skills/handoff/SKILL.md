@@ -61,11 +61,11 @@ Invocation: `model+user`
    `crates/tui/src/prompts.rs`; see `load_handoff_block` in the same file).
    On the next session's first turn it is injected as the
    "## Previous Session Relay" block, naming the path it actually read. A
-   legacy `.deepseek/handoff.md` is still read as a fallback, but writing the
-   primary path is the only way to guarantee a fresh relay wins once a
-   `.codewhale/handoff.md` exists. A handoff written anywhere else is never
-   picked up,
-   so the next session starts cold no matter how good the note is.
+   legacy `.deepseek/handoff.md` is still read as a fallback when no primary
+   file exists, but writing the primary path is the only way to guarantee a
+   fresh relay wins once a `.codewhale/handoff.md` exists. A handoff written
+   anywhere else is never picked up, so the next session starts cold no
+   matter how good the note is.
 
    Optionally also write a human-discoverable copy:
    - If the workspace has an ops/notes convention (e.g. `codewhale-ops/notes/`

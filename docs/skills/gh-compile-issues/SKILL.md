@@ -17,16 +17,17 @@ maintainer approval.
 - Repo root: the local CodeWhale checkout (run `git rev-parse --show-toplevel`).
 - GitHub repo: `codewhale-hq/Codewhale`
 - Required GitHub CLI: `gh`
-- An issue set: explicit numbers, or a milestone (e.g. `v0.8.62`).
+- An issue set: explicit numbers, or a milestone (`<milestone-title>`).
 
 ## Workflow
 
 1. Resolve the set. For a milestone, list it first; never trust the title line
-   (a `v0.8.62: ...` title says nothing about whether code already covers it).
+   (a `<milestone-title>: ...` title says nothing about whether code already
+   covers it).
 
    ```bash
    gh issue list --repo codewhale-hq/Codewhale --state open \
-     --milestone "v0.8.62" --limit 300 --json number,title,labels,milestone
+     --milestone "<milestone-title>" --limit 300 --json number,title,labels,milestone
    ```
 
 2. For each issue, fetch the full record (title, body, labels, comments).

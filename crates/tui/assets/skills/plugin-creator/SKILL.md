@@ -11,8 +11,8 @@ declarative Skills, MCP servers, Commands, Agent profiles, and Hooks
 through their existing engines. LSP servers, native extensions, filesystem
 roots, and lifecycle mutation stay inventory-only. `plugin.json` is the
 native Agent Plugins manifest (`plugin.toml` is the legacy Codewhale format
-and stays readable); distribution goes through `/plugin marketplace
-add|install`, not a bundle-carried downloader.
+and stays readable); distribution goes through
+`/plugin marketplace add|install`, not a bundle-carried downloader.
 
 ## Workflow
 
@@ -65,5 +65,5 @@ add|install`, not a bundle-carried downloader.
 Every user and workspace bundle starts untrusted and disabled. A bundle
 must not carry its own downloader, updater, compatibility scan, executable
 extension runtime, or automatic trust flow — discovery and installation are
-the engine's job (`/plugin marketplace ...`, `/plugin install|update|
-uninstall`), and trust stays a user decision.
+the engine's job (`/plugin marketplace ...`, `/plugin install|update|uninstall`),
+and trust stays a user decision.

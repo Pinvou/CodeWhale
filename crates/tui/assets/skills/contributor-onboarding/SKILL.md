@@ -92,7 +92,10 @@ cargo test --workspace --all-features --locked --doc
 
 These are copied from `.github/workflows/ci.yml`. If that file changes, this
 list is stale — read the workflow and say so rather than running a command CI
-no longer uses.
+no longer uses. CI also exports `RUST_MIN_STACK=16777216` for the test jobs;
+the default stack aborts a few suite tests with signal 6 (see
+`.config/nextest.toml`), so export it before running the gate instead of
+attributing those aborts to the change under test.
 
 Known suite papercut: `run_verifiers_background_*` is flaky under full-suite
 parallelism and passes in isolation. Attribute it to the known flake, not to

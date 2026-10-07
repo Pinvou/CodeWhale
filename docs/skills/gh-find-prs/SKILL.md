@@ -26,7 +26,7 @@ This is read-and-recommend. You do NOT merge, close, tag, or publish. You surfac
 
 2. **Identify the real landing branch.** The release head is frequently local-only:
    ```
-   git branch --list 'codex/v0.8*' 'codex/v0.9*'
+   git branch --list 'codex/*v0.*'
    git log --oneline -1 <release-branch>
    ```
    Use that ref, not `main`, for every mergeability test below.
@@ -39,7 +39,7 @@ This is read-and-recommend. You do NOT merge, close, tag, or publish. You surfac
    ```
    Read the diff. A "fix(exec): ..." can be a no-op or a regression; a "chore" can be the real fix. Judge the change, the tests it adds, and any review comments.
 
-4. **Decode check failures — distinguish trivial from real.** In `statusCheckRollup`, find each `conclusion: FAILURE` and read its job. Codewhale's CI jobs are `Lint`, `Test (ubuntu-latest|macos-latest|windows-latest)`, `Version drift`, `gate` (Contribution gate), `npm wrapper smoke`, `Mobile runtime smoke`, `Documentation`, `GitGuardian Security Checks`.
+4. **Decode check failures — distinguish trivial from real.** In `statusCheckRollup`, find each `conclusion: FAILURE` and read its job. Common Codewhale CI checks include `Lint`, `Test (ubuntu-latest|macos-latest|windows-latest)`, `Version drift`, `Contribution intake` (the pr-gate workflow), `npm wrapper smoke`, `Mobile runtime smoke`, and `Documentation`; the full set lives in `.github/workflows/`.
    - A `Lint` failure that is only `cargo fmt` drift is trivial — harvestable, fix on landing with `cargo fmt --all`.
    - A failing `Test (...)` or `clippy` under Lint is real — read the log before trusting it.
    - `Version drift` failing on a community PR is expected (they bumped, or didn't); not a blocker for harvest.
