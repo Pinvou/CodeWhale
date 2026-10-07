@@ -909,6 +909,14 @@ async function registerDesktop(ws, msg) {
     }
   }
 
+  // Authentication may yield: another registration can claim this socket, or
+  // its close handler can run, before the validated credentials return.
+  if (!socketOpen(ws)) return;
+  if (ws.role !== "unknown") {
+    rejectSocket(ws, "bad_desktop_endpoint_register", "bad desktop endpoint registration");
+    return;
+  }
+
   pruneExpiredEndpoints();
   if (revokedEndpoints.has(endpointId)) {
     rejectSocket(ws, "endpoint_revoked", "endpoint was permanently revoked");

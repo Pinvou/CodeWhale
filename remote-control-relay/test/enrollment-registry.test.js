@@ -510,6 +510,54 @@ test("a registry opened without the persisted digest key fails closed", async (t
   }), "credential_key_unavailable");
 });
 
+test("HMAC replacement requires fresh endpoint IDs, while key rollback alone preserves authorization", async (t) => {
+  for (const keyId of ["replacement-key", "test-key-1"]) {
+    await t.test(keyId, async () => {
+      const { statePath, store, registry: original } = await openRegistry(t);
+      await original.enroll({
+        endpointId: "endpoint-old-key", credential: FIRST_CREDENTIAL, desktopCredential: SECOND_CREDENTIAL,
+      });
+      const primary = await fs.readFile(statePath);
+      const backup = await fs.readFile(`${statePath}.bak`);
+      const replacement = EnrollmentRegistry.open({
+        stateStore: store,
+        config: configForState(statePath, {
+          PINVOU_REMOTE_ENROLLMENT_HMAC_KEY_ID: keyId,
+          PINVOU_REMOTE_ENROLLMENT_HMAC_KEY: "replacement-hmac-key-material-at-least-32-bytes",
+        }),
+      });
+      await rejectsCode(replacement.authorizeWebRegistration({
+        endpointId: "endpoint-old-key", accessToken: FIRST_CREDENTIAL,
+      }), keyId === "test-key-1" ? "invalid_enrollment_credential" : "credential_key_unavailable");
+      await rejectsCode(replacement.authorizeDesktopRegistration({
+        endpointId: "endpoint-old-key", accessToken: FIRST_CREDENTIAL, desktopSecret: SECOND_CREDENTIAL,
+      }), keyId === "test-key-1" ? "invalid_enrollment_credential" : "credential_key_unavailable");
+      await rejectsCode(replacement.enroll({
+        endpointId: "endpoint-old-key", credential: SECOND_CREDENTIAL,
+      }), "endpoint_already_enrolled");
+      await rejectsCode(replacement.rotateAccessCredential({
+        endpointId: "endpoint-old-key", currentCredential: FIRST_CREDENTIAL,
+        newCredential: SECOND_CREDENTIAL, expectedEndpointRevision: "1",
+      }), keyId === "test-key-1" ? "invalid_enrollment_credential" : "credential_key_unavailable");
+      assert.deepEqual(await fs.readFile(statePath), primary);
+      assert.deepEqual(await fs.readFile(`${statePath}.bak`), backup);
+      assert.equal((await original.authorizeWebRegistration({
+        endpointId: "endpoint-old-key", accessToken: FIRST_CREDENTIAL,
+      })).status, "active");
+      await replacement.revoke({ endpointId: "endpoint-old-key", expectedEndpointRevision: "1" });
+      await rejectsCode(replacement.enroll({
+        endpointId: "endpoint-old-key", credential: SECOND_CREDENTIAL,
+      }), "endpoint_revoked");
+      await replacement.enroll({
+        endpointId: "endpoint-new-key", credential: SECOND_CREDENTIAL, desktopCredential: FIRST_CREDENTIAL,
+      });
+      assert.equal((await replacement.authorizeDesktopRegistration({
+        endpointId: "endpoint-new-key", accessToken: SECOND_CREDENTIAL, desktopSecret: FIRST_CREDENTIAL,
+      })).status, "active");
+    });
+  }
+});
+
 test("endpoint and namespace revisions reject stale concurrent mutations", async (t) => {
   const { registry } = await openRegistry(t);
   await registry.enroll({ endpointId: "endpoint-cas", credential: FIRST_CREDENTIAL });
@@ -1030,6 +1078,99 @@ test("Windows never repairs an existing caller-created directory ACL", {
     verifyAncestors: async () => {},
   }), "relay_state_acl_unverified");
   assert.equal(protectionCalls, 0);
+});
+
+test("close synchronously fences queued and later CAS while draining the active durable write", async (t) => {
+  const statePath = await temporaryState(t);
+  let armed = false;
+  let lockReleased = false;
+  let durableWrites = 0;
+  let enter;
+  let release;
+  const entered = new Promise((resolve) => { enter = resolve; });
+  const blocked = new Promise((resolve) => { release = resolve; });
+  const injectedFs = {
+    ...fs,
+    async rename(source, target) {
+      if (armed && (target === statePath || target === `${statePath}.bak`)) {
+        assert.equal(lockReleased, false, "no durable replacement after releasing the owner lock");
+        durableWrites += 1;
+        if (durableWrites === 1) {
+          enter();
+          await blocked;
+        }
+      }
+      return fs.rename(source, target);
+    },
+    async rm(target, options) {
+      if (armed && target === lockPath(statePath)) {
+        assert.equal(durableWrites, 2, "only the already active CAS reaches both durable copies");
+        lockReleased = true;
+      }
+      return fs.rm(target, options);
+    },
+  };
+  const store = await openStateStore(statePath, { fs: injectedFs });
+  resourcesFor(t).stores.push(store);
+  armed = true;
+  const active = store.compareAndSwap("shutdown", "0", { value: "active" });
+  await entered;
+  const queued = rejectsCode(store.compareAndSwap("queued", "0", { value: "queued" }),
+    "relay_state_unavailable");
+  const closing = store.close();
+  const concurrentClose = store.close();
+  const late = rejectsCode(store.compareAndSwap("late", "0", { value: "late" }),
+    "relay_state_unavailable");
+  try {
+    assert.throws(() => store.readNamespace("shutdown"),
+      (error) => error?.code === "relay_state_unavailable");
+    assert.equal(lockReleased, false);
+  } finally {
+    release();
+    await Promise.all([active, queued, late, closing, concurrentClose]);
+  }
+  assert.equal(durableWrites, 2);
+  assert.equal(lockReleased, true);
+  await rejectsCode(store.compareAndSwap("closed", "0", { value: "closed" }), "relay_state_closed");
+  const reopened = await openStateStore(statePath);
+  resourcesFor(t).stores.push(reopened);
+  assert.deepEqual(reopened.readNamespace("shutdown").value, { value: "active" });
+  assert.equal(reopened.readNamespace("queued").value, null);
+  assert.equal(reopened.readNamespace("late").value, null);
+});
+
+test("oversized and invalid UTF-8 owner locks are never stolen before parsing", async (t) => {
+  const statePath = await temporaryState(t);
+  const store = await openStateStore(statePath);
+  await store.close();
+  const primary = await fs.readFile(statePath);
+  const backup = await fs.readFile(`${statePath}.bak`);
+  const cases = [
+    Buffer.from(JSON.stringify({ ...lockRecord({ pid: 2147483647 }), version: 2,
+      future_field: "x".repeat(4096) })),
+    Buffer.from("x".repeat(4097)),
+    Buffer.from([0xff, 0xfe]),
+  ];
+  for (const contents of cases) {
+    await fs.writeFile(lockPath(statePath), contents, { mode: 0o600 });
+    const identity = await fs.stat(lockPath(statePath), { bigint: true });
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      await rejectsCode(openStateStore(statePath, { sleep: async () => {},
+        processIdentity: async (pid) => pid === process.pid ? `test-process:${pid}` : null })
+        .then((unexpected) => {
+          resourcesFor(t).stores.push(unexpected);
+          return unexpected;
+        }),
+        "relay_state_lock_unreadable");
+      assert.deepEqual(await fs.readFile(lockPath(statePath)), contents);
+      assert.equal((await fs.stat(lockPath(statePath), { bigint: true })).ino, identity.ino);
+      assert.deepEqual(await fs.readFile(statePath), primary);
+      assert.deepEqual(await fs.readFile(`${statePath}.bak`), backup);
+      assert.equal((await fs.readdir(path.dirname(statePath)))
+        .some((name) => name.includes(".stale.")), false);
+    }
+    await fs.unlink(lockPath(statePath));
+  }
 });
 
 test("live process lock prevents a second writer and is released on close", async (t) => {
