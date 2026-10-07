@@ -207,6 +207,12 @@ fn resolve_credentials_for_identity(
     // Completions shape, and a hard-coded Chat body must never reach a route
     // the turn itself runs on another protocol.
     if resolved.candidate.protocol() != WireFormat::ChatCompletions {
+        debug!(
+            provider = ?provider,
+            identity = %provider_identity,
+            protocol = ?resolved.candidate.protocol(),
+            "prompt suggestion skipped: the resolved route does not speak Chat Completions"
+        );
         return None;
     }
     // This helper intentionally sends the ordinary Chat Completions shape.
@@ -240,7 +246,11 @@ fn resolve_credentials_for_identity(
 ///
 /// Unsupported providers — Anthropic Messages, Responses, and any other
 /// non-Chat-Completions wire — return `None`, and no credential material
-/// of any provider is inspected on this path at all.
+/// of any provider is inspected on this path at all. The gate is the static
+/// default wire only: a named Custom table's `wire` dialect is applied later,
+/// in `resolve_credentials_for_identity`, so an authority may be captured
+/// here for a table whose resolved route ends up on another protocol (and is
+/// then never dispatched).
 #[must_use]
 pub fn capture_route_authority(route: &TurnRoute) -> Option<SuggestionRouteAuthority> {
     if !route_is_supported_suggestion_provider(route.provider) {
