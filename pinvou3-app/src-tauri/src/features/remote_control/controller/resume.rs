@@ -49,10 +49,19 @@ impl std::error::Error for ResumeStateError {}
 
 type Result<T> = std::result::Result<T, ResumeStateError>;
 
-#[derive(Debug)]
 struct ResumeMaterial {
     token: Zeroizing<[u8; RESUME_TOKEN_BYTES]>,
     key_fingerprint: [u8; FINGERPRINT_BYTES],
+}
+
+impl std::fmt::Debug for ResumeMaterial {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ResumeMaterial")
+            .field("token", &"[REDACTED]")
+            .field("key_fingerprint", &"[REDACTED]")
+            .finish()
+    }
 }
 
 #[derive(Debug)]
@@ -400,6 +409,39 @@ mod tests {
             .unwrap();
         assert!(watchdog.shorten_deadline(deadline));
         watchdog
+    }
+
+    #[test]
+    fn resume_material_debug_redacts_current_and_retired_secrets() {
+        let mut gate = ControllerResumeGate::new(
+            ControllerRole::ControlledB,
+            lease(),
+            [0xa5; 32],
+            [0xb6; 32],
+            30_000,
+        );
+        gate.retired = Some(ResumeMaterial {
+            token: Zeroizing::new([0xc7; 32]),
+            key_fingerprint: [0xd8; 32],
+        });
+        let material_debug = format!("{:?}", gate.current);
+        assert_eq!(
+            material_debug,
+            "ResumeMaterial { token: \"[REDACTED]\", key_fingerprint: \"[REDACTED]\" }"
+        );
+        let gate_debug = format!("{gate:?}");
+        assert_eq!(gate_debug.matches("[REDACTED]").count(), 4);
+        for bytes in [[0xa5_u8; 32], [0xb6; 32], [0xc7; 32], [0xd8; 32]] {
+            assert!(!gate_debug.contains(&format!("{bytes:?}")));
+        }
+        assert!(
+            gate.token_matches(ControllerRole::ControlledB, &[0xa5; 32])
+                .unwrap()
+        );
+        assert!(
+            gate.key_fingerprint_matches(ControllerRole::ControlledB, &[0xb6; 32])
+                .unwrap()
+        );
     }
 
     #[test]
