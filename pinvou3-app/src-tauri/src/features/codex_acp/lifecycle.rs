@@ -368,7 +368,7 @@ mod tests {
             .is_none()
         );
         assert!(!global_error.get());
-        assert!(Arc::ptr_eq(sessions.get("session").unwrap(), &new));
+        assert!(Arc::ptr_eq(&sessions["session"], &new));
         assert!(
             take_owned_runtime(
                 &mut sessions,
@@ -454,7 +454,7 @@ mod tests {
             remove_owned_callback(&mut pending, "same-key", |item| Arc::ptr_eq(item, &old))
                 .is_none()
         );
-        assert!(Arc::ptr_eq(pending.get("same-key").unwrap(), &new));
+        assert!(Arc::ptr_eq(&pending["same-key"], &new));
         assert!(
             remove_owned_callback(&mut pending, "same-key", |item| Arc::ptr_eq(item, &new))
                 .is_some()
@@ -491,7 +491,7 @@ mod tests {
             || resolved.set(resolved.get() + 1)
         ));
         assert_eq!(resolved.get(), 0);
-        assert!(Arc::ptr_eq(pending.get("same-key").unwrap(), &new));
+        assert!(Arc::ptr_eq(&pending["same-key"], &new));
         assert!(finish_owned_callback(
             &mut pending,
             "same-key",

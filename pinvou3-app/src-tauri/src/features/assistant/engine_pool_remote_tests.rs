@@ -6,6 +6,216 @@ use super::super::skill_materialization::{
 };
 use super::*;
 
+struct JointRuntimeProvider;
+#[async_trait::async_trait]
+impl RuntimeModelProvider for JointRuntimeProvider {
+    fn credential_mode(&self, _: &SavedModel, _: bool) -> ModelCredentialMode {
+        ModelCredentialMode::BackendManaged
+    }
+    async fn prepare(&self, request: RuntimeModelRequest) -> Result<PreparedRuntimeModel> {
+        Ok(PreparedRuntimeModel {
+            model: request.model,
+            credential: Some(RuntimeModelCredential::api_key("fixture-b-local-key")?),
+            revision: None,
+        })
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn remote_send_joint_preparation_and_reserved_dispatch_freeze_credentials_and_force_tools() {
+    let _lock = crate::platform::paths::tests::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let home = TestHome::new();
+    let store = SessionStore::boot().unwrap();
+    for temporary in [false, true] {
+        for (session_id, persona, caller) in [
+            ("remote-plain", false, false),
+            ("remote-persona", true, false),
+            ("remote-caller", false, true),
+            ("aux-remote-joint", false, false),
+        ] {
+            let mut model = SavedModel::builtin_llmapi();
+            model.preset = crate::platform::prefs::ModelPreset::Deepseek;
+            model.id = "fixture-task-model".into();
+            model.model = "fixture-task-wire".into();
+            model.base_url = "https://example.invalid/v1".into();
+            model.api_key = "fixture-task-key".into();
+            let bundle = temporary.then(|| RemoteRuntimeModelBundle::new(model, None).unwrap());
+            let owner = Arc::new(RemoteTurnOwner::default());
+            let options = prepare_remote_send(session_id, vec![], bundle, owner.clone())
+                .await
+                .unwrap();
+            let root = options.skills.as_ref().unwrap().path().to_owned();
+            assert!(root.starts_with(home.directory.path()));
+            assert!(Arc::ptr_eq(
+                options.skills.as_ref().unwrap().owner(),
+                &owner
+            ));
+            let lifecycle = Arc::new(TurnLifecycle::default());
+            let reservation = lifecycle.reserve().unwrap();
+            let observed = Arc::new(SyncMutex::new(None));
+            let observed_acquire = observed.clone();
+            let store_ref = &store;
+            let home_ref = &home;
+            let root_ref = &root;
+            let lifecycle_for_engine = lifecycle.clone();
+            let expected_key = if temporary {
+                "fixture-task-key"
+            } else {
+                "fixture-b-local-key"
+            };
+            submit_prepared_turn(
+                session_id,
+                ReservedTurnSubmission {
+                    content: "joint probe".into(),
+                    mode: AppMode::Agent,
+                    persona_conversational: persona,
+                    caller_restrict: caller,
+                    persona_reminder: Some("fixture persona reminder".into()),
+                    expert_snapshot: None,
+                    expert_candidates: vec![],
+                    reservation,
+                },
+                options,
+                |options| async move {
+                    let credentials =
+                        crate::platform::credential_store::MemoryCredentialStore::default();
+                    let (bridge, prepared, pins) = EnginePool::prepare_runtime_model_with(
+                        store_ref,
+                        &JointRuntimeProvider,
+                        &credentials,
+                        Pinvou3Bridge::test_fixture(Some(SavedModel::builtin_llmapi())),
+                        session_id,
+                        false,
+                        RuntimeModelOverrides {
+                            freeze_remote_credentials: options.policy.require_model_credentials,
+                            explicit_model: options.model,
+                            explicit_credential: options.credential,
+                            remote_bundle: options.bundle,
+                        },
+                    )
+                    .await?;
+                    let wire_model = prepared.model.model.clone();
+                    let mut bridge =
+                        EnginePool::finalize_runtime_bridge(bridge, &prepared, pins).await;
+                    bridge.workspace = home_ref.directory.path().to_owned();
+                    bridge.remote_turn_skills = options.skills;
+                    assert!(
+                        bridge.runtime_model_credential_frozen,
+                        "the actual remote preparation must freeze credentials"
+                    );
+                    assert_eq!(bridge.runtime_route_locked, temporary);
+                    assert_eq!(bridge.session_affinity_key.as_deref(), Some(session_id));
+                    // SAFETY: ENV_LOCK covers this complete fixture, and TestHome restores it.
+                    unsafe {
+                        std::env::set_var("DEEPSEEK_API_KEY", "fixture-late-env-key");
+                    }
+                    assert_eq!(
+                        bridge.build_dt_config().api_key.as_deref(),
+                        Some(expected_key)
+                    );
+                    assert_eq!(
+                        bridge
+                            .build_engine_config_for_session_roots(
+                                session_id,
+                                crate::features::sessions::session_roots_for(session_id, None)
+                            )
+                            .skills_dir,
+                        *root_ref
+                    );
+                    let mut engine = AppEngine::spawn_headless(bridge).await?;
+                    engine.handle.send(Op::Shutdown).await?;
+                    let (sender, receiver) = tokio::sync::mpsc::channel(8);
+                    engine.handle.tx_op = sender;
+                    engine.bind_test_session(session_id, lifecycle_for_engine);
+                    *observed_acquire.lock() = Some((receiver, wire_model));
+                    Ok(engine)
+                },
+            )
+            .await
+            .unwrap();
+            let (mut receiver, wire_model) = observed.lock().take().unwrap();
+            let op = receiver.recv().await.unwrap();
+            let Op::SendMessage {
+                allowed_tools,
+                content,
+                route,
+                ..
+            } = op
+            else {
+                panic!("joint helper must dispatch a reserved SendMessage");
+            };
+            let aux = crate::features::sessions::is_aux_session_id(session_id);
+            if persona || caller || aux {
+                assert_eq!(allowed_tools, Some(vec![]), "{session_id}");
+            } else {
+                assert!(
+                    !allowed_tools.unwrap().is_empty(),
+                    "ordinary remote turns retain tools"
+                );
+            }
+            assert!(content.contains("fixture persona reminder"));
+            assert_eq!(content.contains(AUX_ZERO_TOOL_REMINDER), aux);
+            assert_eq!(route.model(), wire_model);
+            assert!(
+                lifecycle.reserve().is_err(),
+                "the real reserved send commits the turn"
+            );
+            drop(receiver);
+            assert!(
+                !root.exists(),
+                "the exact acquired engine owns the private skills root"
+            );
+        }
+    }
+}
+
+#[test]
+fn remote_send_entries_use_the_joint_production_helpers() {
+    let source = include_str!("engine_pool.rs");
+    for (start, end) in [
+        (
+            "pub(crate) async fn send_remote_user_message(",
+            "pub(crate) async fn send_remote_user_message_with_attachments(",
+        ),
+        (
+            "pub(crate) async fn send_remote_user_message_with_attachments(",
+            "pub(crate) async fn send_eval_user_message(",
+        ),
+    ] {
+        let entry = source
+            .split_once(start)
+            .unwrap()
+            .1
+            .split_once(end)
+            .unwrap()
+            .0;
+        assert!(
+            entry.contains("prepare_remote_send(session_id, skill_ids, model_override, owner)")
+        );
+        assert!(!entry.contains("RemoteTurnRuntimePolicy::default()"));
+        assert!(!entry.contains("RemoteTurnRuntimePolicy::remote()"));
+    }
+    let shared = source
+        .split_once("async fn send_reserved_user_message_with_model_override(")
+        .unwrap()
+        .1
+        .split_once("pub(crate) async fn run_scheduled_turn<")
+        .unwrap()
+        .0;
+    assert!(shared.contains("submit_prepared_turn("));
+    assert!(shared.contains("options.policy"));
+    assert!(shared.contains("options.bundle"));
+    assert!(shared.contains("options.skills"));
+}
+
+#[test]
+fn missing_cold_custody_returns_a_fixed_error_without_panicking() {
+    let result = ColdEngineCustody { resources: None }.adopt();
+    assert!(matches!(result, Err(error) if error.to_string() == "task_engine_custody_missing"));
+}
+
 struct TestHome {
     previous: Vec<(&'static str, Option<std::ffi::OsString>)>,
     directory: tempfile::TempDir,
@@ -182,6 +392,68 @@ async fn cancelled_cold_publication_queues_sync_then_reclaims_without_an_entry()
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn cold_publication_conflict_preserves_resident_and_reclaims_only_new_custody() {
+    let _lock = crate::platform::paths::tests::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let home = TestHome::new();
+    let resident_skills = home.snapshot();
+    let resident_owner = resident_skills.owner().clone();
+    let resident_root = resident_skills.path().to_owned();
+    let (resident, mut resident_ops) = home.engine(resident_skills).await;
+    let resident_sender = resident.handle.tx_op.clone();
+    let (resident_forwarder, mut resident_finished) = forwarder();
+    let incoming_skills = home.snapshot();
+    let incoming_owner = incoming_skills.owner().clone();
+    let incoming_root = incoming_skills.path().to_owned();
+    assert_ne!(resident_root, incoming_root);
+    let (incoming, mut incoming_ops) = home.engine(incoming_skills).await;
+    let (incoming_forwarder, incoming_finished) = forwarder();
+    let entries = Mutex::new(HashMap::from([(
+        "remote-custody".into(),
+        entry(resident, resident_forwarder, resident_owner.clone()),
+    )]));
+    let result = publish_cold_entry(
+        &entries,
+        "remote-custody",
+        ColdEngineCustody::new(incoming, incoming_forwarder),
+        |engine, forwarder| entry(engine, forwarder, incoming_owner),
+    )
+    .await;
+    assert!(
+        matches!(result, Err(error) if error.to_string() == "task_engine_publication_conflict")
+    );
+    incoming_finished.await.unwrap();
+    assert_shutdown(&mut incoming_ops).await;
+    assert!(!incoming_root.exists());
+    assert!(resident_root.is_dir());
+    {
+        let entries = entries.lock().await;
+        assert_eq!(entries.len(), 1);
+        let resident = &entries["remote-custody"];
+        assert!(resident.engine.handle.tx_op.same_channel(&resident_sender));
+        assert!(Arc::ptr_eq(
+            resident.remote_owner.as_ref().unwrap(),
+            &resident_owner
+        ));
+    }
+    tokio::task::yield_now().await;
+    assert_eq!(
+        resident_finished.try_recv(),
+        Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+    );
+    assert!(
+        resident_ops.try_recv().is_err(),
+        "no cancellation reached the resident"
+    );
+    let resident = entries.lock().await.remove("remote-custody").unwrap();
+    drop(ColdEngineCustody::new(resident.engine, resident.forwarder));
+    resident_finished.await.unwrap();
+    assert_shutdown(&mut resident_ops).await;
+    assert!(!resident_root.exists());
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn failed_cold_sync_closes_forwarder_without_publishing_or_widening() {
     let _lock = crate::platform::paths::tests::ENV_LOCK
         .lock()
@@ -284,7 +556,8 @@ async fn cancelled_send_after_publication_keeps_root_until_exact_owner_cleanup()
         ColdEngineCustody::new(engine, forwarder),
         |engine, forwarder| entry(engine, forwarder, owner.clone()),
     )
-    .await;
+    .await
+    .unwrap();
     // The seam's mailbox is full: exercise the real reserved-send cancellation
     // suspension point without letting a model operation reach a provider.
     for _ in 0..8 {

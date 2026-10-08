@@ -1627,8 +1627,128 @@ fn anthropic_messages_request(
 #[cfg(test)]
 pub(crate) mod models_mock {
     use std::collections::HashMap;
-    use std::net::TcpListener;
+    use std::net::{TcpListener, TcpStream};
     use std::sync::{Arc, Mutex};
+
+    /// The probe POST body may arrive separately from its headers. Closing
+    /// with unread bytes can reset the socket and discard the mock response.
+    /// This test-only server accepts bounded, Content-Length framed requests.
+    fn read_request(stream: &mut TcpStream) -> std::io::Result<Vec<u8>> {
+        read_request_before(
+            stream,
+            std::time::Instant::now() + std::time::Duration::from_secs(2),
+        )
+    }
+
+    fn read_request_before(
+        stream: &mut TcpStream,
+        deadline: std::time::Instant,
+    ) -> std::io::Result<Vec<u8>> {
+        use std::io::{Error, ErrorKind, Read};
+        const MAX_REQUEST_BYTES: usize = 64 * 1024;
+        let mut read = |chunk: &mut [u8]| {
+            let remaining = deadline
+                .checked_duration_since(std::time::Instant::now())
+                .filter(|duration| !duration.is_zero())
+                .ok_or_else(|| Error::from(ErrorKind::TimedOut))?;
+            stream.set_read_timeout(Some(remaining))?;
+            stream.read(chunk)
+        };
+        let mut buf = Vec::new();
+        let mut chunk = [0u8; 1024];
+        let header_end = loop {
+            let available = MAX_REQUEST_BYTES - buf.len();
+            if available == 0 {
+                return Err(Error::from(ErrorKind::InvalidData));
+            }
+            let amount = available.min(chunk.len());
+            let n = read(&mut chunk[..amount])?;
+            if n == 0 {
+                return Err(Error::from(ErrorKind::UnexpectedEof));
+            }
+            buf.extend_from_slice(&chunk[..n]);
+            if let Some(end) = buf.windows(4).position(|window| window == b"\r\n\r\n") {
+                break end + 4;
+            }
+        };
+        let headers = std::str::from_utf8(&buf[..header_end])
+            .map_err(|_| Error::from(ErrorKind::InvalidData))?;
+        let content_length = headers
+            .lines()
+            .filter_map(|line| line.split_once(':'))
+            .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+            .map(|(_, value)| value.trim().parse::<usize>())
+            .transpose()
+            .map_err(|_| Error::from(ErrorKind::InvalidData))?
+            .unwrap_or(0);
+        let total = header_end
+            .checked_add(content_length)
+            .filter(|size| *size <= MAX_REQUEST_BYTES)
+            .ok_or_else(|| Error::from(ErrorKind::InvalidData))?;
+        while buf.len() < total {
+            let amount = (total - buf.len()).min(chunk.len());
+            let n = read(&mut chunk[..amount])?;
+            if n == 0 {
+                return Err(Error::from(ErrorKind::UnexpectedEof));
+            }
+            buf.extend_from_slice(&chunk[..n]);
+        }
+        buf.truncate(total);
+        Ok(buf)
+    }
+
+    #[test]
+    fn request_reader_rejects_truncation_invalid_lengths_and_expired_budget() {
+        use std::io::{ErrorKind, Write};
+        use std::net::Shutdown;
+
+        for (request, expected) in [
+            (
+                b"POST /api/show HTTP/1.1\r\n".as_slice(),
+                ErrorKind::UnexpectedEof,
+            ),
+            (
+                b"POST /api/show HTTP/1.1\r\nContent-Length: invalid\r\n\r\n".as_slice(),
+                ErrorKind::InvalidData,
+            ),
+            (
+                b"POST /api/show HTTP/1.1\r\nContent-Length: 65536\r\n\r\n".as_slice(),
+                ErrorKind::InvalidData,
+            ),
+            (
+                b"POST /api/show HTTP/1.1\r\nContent-Length: 3\r\n\r\nab".as_slice(),
+                ErrorKind::UnexpectedEof,
+            ),
+        ] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+            let (mut server, _) = listener.accept().unwrap();
+            client.write_all(request).unwrap();
+            client.shutdown(Shutdown::Write).unwrap();
+            assert_eq!(read_request(&mut server).unwrap_err().kind(), expected);
+        }
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (mut server, _) = listener.accept().unwrap();
+        client
+            .write_all(b"POST /api/show HTTP/1.1\r\nContent-Length: 1\r\n\r\n")
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(50);
+        assert!(matches!(
+            read_request_before(&mut server, deadline)
+                .unwrap_err()
+                .kind(),
+            ErrorKind::WouldBlock | ErrorKind::TimedOut
+        ));
+        assert_eq!(
+            read_request_before(&mut server, deadline)
+                .unwrap_err()
+                .kind(),
+            ErrorKind::TimedOut,
+            "the same request budget must not restart after a read timeout"
+        );
+    }
 
     pub(crate) struct ModelsMock {
         pub base_url: String,
@@ -1657,6 +1777,42 @@ pub(crate) mod models_mock {
         }
     }
 
+    #[test]
+    fn delayed_post_body_is_consumed_before_response() {
+        use std::io::{Read, Write};
+        use std::net::TcpStream;
+
+        let mock = spawn(&[("/api/show", 200, r#"{"parameters":"num_ctx 4096"}"#.into())]);
+        let mut stream = TcpStream::connect(mock.base_url.trim_start_matches("http://")).unwrap();
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_millis(200)))
+            .unwrap();
+        let body = br#"{"model":"my-model"}"#;
+        write!(
+            stream,
+            "POST /api/show HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n",
+            body.len()
+        )
+        .unwrap();
+        let mut byte = [0];
+        let early_read = stream.read(&mut byte);
+        assert!(
+            matches!(early_read, Err(ref error) if matches!(
+                error.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+            )),
+            "the mock must not respond or close before the POST body arrives: {early_read:?}"
+        );
+        stream.write_all(body).unwrap();
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
+        assert!(response.ends_with(r#"{"parameters":"num_ctx 4096"}"#));
+        assert_eq!(mock.hits_for("/api/show"), 1);
+    }
+
     pub(crate) fn spawn(routes: &[(&str, u16, String)]) -> ModelsMock {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock listener");
         let addr = listener.local_addr().expect("mock listener addr");
@@ -1675,20 +1831,9 @@ pub(crate) mod models_mock {
             // bounds thread leaks.
             for stream in listener.incoming().take(32) {
                 let Ok(mut stream) = stream else { continue };
-                let mut buf = Vec::new();
-                let mut chunk = [0u8; 1024];
-                loop {
-                    let Ok(n) = std::io::Read::read(&mut stream, &mut chunk) else {
-                        break;
-                    };
-                    if n == 0 {
-                        break;
-                    }
-                    buf.extend_from_slice(&chunk[..n]);
-                    if buf.windows(4).any(|window| window == b"\r\n\r\n") {
-                        break;
-                    }
-                }
+                let Ok(buf) = read_request(&mut stream) else {
+                    continue;
+                };
                 let request = String::from_utf8_lossy(&buf);
                 let path = request
                     .split_whitespace()

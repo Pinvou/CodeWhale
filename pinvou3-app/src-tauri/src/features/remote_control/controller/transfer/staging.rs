@@ -117,12 +117,14 @@ impl SessionIsolationStaging {
                 rejected_publication: None,
             },
         );
-        let entry = sessions.get_mut(handle_id).expect("target just reserved");
+        let entry = sessions
+            .get_mut(handle_id)
+            .ok_or_else(|| "transfer_staging_failed".to_owned())?;
         entry.file = Some(
             entry
                 .directory
                 .as_ref()
-                .expect("directory just reserved")
+                .ok_or_else(|| "transfer_staging_failed".to_owned())?
                 .create_delete_on_close_file(&entry.staging_name)
                 .map_err(|_| "transfer_staging_failed".to_owned())?,
         );

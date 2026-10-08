@@ -1842,6 +1842,12 @@ impl AppEngine {
         })
     }
 
+    #[cfg(test)]
+    pub(crate) fn bind_test_session(&mut self, session_id: &str, lifecycle: Arc<TurnLifecycle>) {
+        self.session_id = session_id.to_owned();
+        self.turn_lifecycle = lifecycle;
+    }
+
     /// Turn submission for headless harnesses (L1 integration harness, live
     /// tests). Mirrors the production path: reserve the turn slot first, then
     /// submit through `Self::send_reserved_user_message`, the same shape as

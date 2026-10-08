@@ -105,6 +105,86 @@ impl RemoteTurnRuntimePolicy {
     }
 }
 
+// Private, owned preparation: credentials and skill bindings never enter Debug.
+struct TurnRuntimeOptions {
+    policy: RemoteTurnRuntimePolicy,
+    model: Option<SavedModel>,
+    credential: Option<RuntimeModelCredential>,
+    bundle: Option<RemoteRuntimeModelBundle>,
+    skills: Option<Arc<super::skill_materialization::RemoteTurnSkills>>,
+}
+
+async fn prepare_remote_send(
+    session_id: &str,
+    skill_ids: Vec<String>,
+    bundle: Option<RemoteRuntimeModelBundle>,
+    owner: Arc<super::skill_materialization::RemoteTurnOwner>,
+) -> Result<TurnRuntimeOptions> {
+    let skill_session_id = session_id.to_owned();
+    let skills = tokio::task::spawn_blocking(move || {
+        super::skill_materialization::materialize_plain_remote_turn_skills(
+            &skill_session_id,
+            &skill_ids,
+            owner,
+        )
+    })
+    .await
+    .map_err(|_| anyhow::anyhow!("task_skill_unavailable"))?
+    .map_err(anyhow::Error::msg)?;
+    Ok(TurnRuntimeOptions {
+        policy: RemoteTurnRuntimePolicy::remote(),
+        model: None,
+        credential: None,
+        bundle,
+        skills: Some(Arc::new(skills)),
+    })
+}
+
+struct ReservedTurnSubmission {
+    content: String,
+    mode: AppMode,
+    persona_conversational: bool,
+    caller_restrict: bool,
+    persona_reminder: Option<String>,
+    expert_snapshot: Option<Arc<ExpertRosterSnapshot>>,
+    expert_candidates: Vec<String>,
+    reservation: TurnReservation,
+}
+
+/// The actual joint acquire -> policy token -> reserved engine-send path.
+/// Pool locks and transcript admission stay at the caller; tests substitute
+/// only acquisition, not the credential preparation or final send policy.
+async fn submit_prepared_turn<F, Fut>(
+    session_id: &str,
+    submission: ReservedTurnSubmission,
+    options: TurnRuntimeOptions,
+    acquire: F,
+) -> Result<()>
+where
+    F: FnOnce(TurnRuntimeOptions) -> Fut,
+    Fut: Future<Output = Result<AppEngine>>,
+{
+    let engine = acquire(options).await?;
+    forward_forced_turn_restrict(
+        session_id,
+        submission.persona_conversational,
+        submission.caller_restrict,
+        submission.persona_reminder,
+        |restrict_tools, reminder| {
+            engine.send_reserved_user_message(
+                submission.content,
+                submission.mode,
+                reminder,
+                restrict_tools,
+                submission.expert_snapshot,
+                submission.expert_candidates,
+                submission.reservation,
+            )
+        },
+    )
+    .await
+}
+
 impl RemoteRuntimeModelBundle {
     pub(crate) fn new(mut primary: SavedModel, mut vision: Option<SavedModel>) -> Result<Self> {
         let primary_credential = RuntimeModelCredential::api_key(primary.api_key.clone())?;
@@ -1468,10 +1548,8 @@ impl ColdEngineCustody {
         }
     }
 
-    fn adopt(mut self) -> (AppEngine, JoinHandle<()>) {
-        self.resources
-            .take()
-            .expect("cold engine custody already adopted")
+    fn adopt(mut self) -> Result<(AppEngine, JoinHandle<()>)> {
+        self.resources.take().context("task_engine_custody_missing")
     }
 }
 
@@ -1523,21 +1601,20 @@ async fn publish_cold_entry<F>(
     session_id: &str,
     custody: ColdEngineCustody,
     build: F,
-) -> AppEngine
+) -> Result<AppEngine>
 where
     F: FnOnce(AppEngine, JoinHandle<()>) -> EngineEntry,
 {
     let mut entries = entries.lock().await;
     // Per-session runtime locking excludes replacements at publication. Keep
     // custody armed if a future bypass violates that invariant.
-    assert!(
-        !entries.contains_key(session_id),
-        "cold publication would replace an owned entry"
-    );
-    let (engine, forwarder) = custody.adopt();
+    if entries.contains_key(session_id) {
+        bail!("task_engine_publication_conflict");
+    }
+    let (engine, forwarder) = custody.adopt()?;
     let result = engine.clone();
     entries.insert(session_id.to_owned(), build(engine, forwarder));
-    result
+    Ok(result)
 }
 
 fn take_remote_owned_entry(
@@ -2858,7 +2935,11 @@ impl EnginePool {
             steer_incarnation,
         )?;
         let custody = ColdEngineCustody::new(engine, forwarder);
-        let engine = &custody.resources.as_ref().expect("owned cold engine").0;
+        let engine = &custody
+            .resources
+            .as_ref()
+            .context("task_engine_custody_missing")?
+            .0;
         let spawn_engine_ms = elapsed_ms(spawn_engine_started);
 
         // Sync is mandatory even when messages is empty: SyncSession not only
@@ -2887,7 +2968,7 @@ impl EnginePool {
                 last_active_epoch_ms: AtomicU64::new(Self::now_epoch_ms()),
             }
         })
-        .await;
+        .await?;
         crate::features::assistant::timing::record_engine_ready(
             session_id,
             crate::features::assistant::timing::EngineAcquireTiming {
@@ -3849,17 +3930,7 @@ impl EnginePool {
         owner: Arc<super::skill_materialization::RemoteTurnOwner>,
         reservation: TurnReservation,
     ) -> Result<()> {
-        let skill_session_id = session_id.to_owned();
-        let skills = tokio::task::spawn_blocking(move || {
-            crate::features::assistant::skill_materialization::materialize_plain_remote_turn_skills(
-                &skill_session_id,
-                &skill_ids,
-                owner,
-            )
-        })
-        .await
-        .map_err(|_| anyhow::anyhow!("task_skill_unavailable"))?
-        .map_err(anyhow::Error::msg)?;
+        let prepared = prepare_remote_send(session_id, skill_ids, model_override, owner).await?;
         let display_message = user_display_message(content.clone());
         self.send_reserved_user_message_with_model_override(
             session_id,
@@ -3870,10 +3941,10 @@ impl EnginePool {
             None,
             Vec::new(),
             reservation,
-            RemoteTurnRuntimePolicy::remote(),
+            prepared.policy,
             None,
-            model_override,
-            Some(Arc::new(skills)),
+            prepared.bundle,
+            prepared.skills,
         )
         .await
     }
@@ -3908,21 +3979,11 @@ impl EnginePool {
                 )
                 .await;
         }
-        let skill_session_id = session_id.to_owned();
-        let skills = tokio::task::spawn_blocking(move || {
-            crate::features::assistant::skill_materialization::materialize_plain_remote_turn_skills(
-                &skill_session_id,
-                &skill_ids,
-                owner,
-            )
-        })
-        .await
-        .map_err(|_| anyhow::anyhow!("task_skill_unavailable"))?
-        .map_err(anyhow::Error::msg)?;
+        let prepared = prepare_remote_send(session_id, skill_ids, model_override, owner).await?;
         let roots = self.store.session_roots(session_id)?;
         let has_images = attachments.iter().any(|item| item.kind == "image");
         let image_mode = if has_images {
-            match model_override.as_ref() {
+            match prepared.bundle.as_ref() {
                 Some(bundle) => bundle.image_input_mode(),
                 None => self.fresh_bridge_for(session_id).await?.image_input_mode(),
             }
@@ -3968,10 +4029,10 @@ impl EnginePool {
             None,
             Vec::new(),
             reservation,
-            RemoteTurnRuntimePolicy::remote(),
+            prepared.policy,
             None,
-            model_override,
-            Some(Arc::new(skills)),
+            prepared.bundle,
+            prepared.skills,
         )
         .await
     }
@@ -4131,31 +4192,34 @@ impl EnginePool {
             .as_ref()
             .map(|model| RuntimeModelCredential::api_key(model.api_key.clone()))
             .transpose()?;
-        let engine = self
-            .get_or_spawn_with_policy(
-                session_id,
-                false,
-                remote_policy,
-                model_override,
-                explicit_credential,
-                remote_bundle,
-                remote_skills,
-            )
-            .await?;
-        forward_forced_turn_restrict(
+        submit_prepared_turn(
             session_id,
-            persona_conversational,
-            restrict_tools_for_turn,
-            persona_reminder,
-            |restrict_tools, reminder| {
-                engine.send_reserved_user_message(
-                    content,
-                    mode,
-                    reminder,
-                    restrict_tools,
-                    expert_snapshot,
-                    expert_candidates,
-                    reservation,
+            ReservedTurnSubmission {
+                content,
+                mode,
+                persona_conversational,
+                caller_restrict: restrict_tools_for_turn,
+                persona_reminder,
+                expert_snapshot,
+                expert_candidates,
+                reservation,
+            },
+            TurnRuntimeOptions {
+                policy: remote_policy,
+                model: model_override,
+                credential: explicit_credential,
+                bundle: remote_bundle,
+                skills: remote_skills,
+            },
+            |options| {
+                self.get_or_spawn_with_policy(
+                    session_id,
+                    false,
+                    options.policy,
+                    options.model,
+                    options.credential,
+                    options.bundle,
+                    options.skills,
                 )
             },
         )

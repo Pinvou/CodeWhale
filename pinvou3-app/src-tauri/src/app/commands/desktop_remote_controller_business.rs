@@ -1499,7 +1499,12 @@ mod dev19_replay_tests {
         );
         assert!(
             uploads
-                .consume_completed(&[begun.handle_id.clone()], &live, "session-1", "task-1")
+                .consume_completed(
+                    std::slice::from_ref(&begun.handle_id),
+                    &live,
+                    "session-1",
+                    "task-1"
+                )
                 .is_err()
         );
         let local = dispatch_prepared_attachment_origin(
