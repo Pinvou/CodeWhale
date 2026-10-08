@@ -12,6 +12,40 @@ import {
 } from '../src/features/tools/connector-ui-state.js';
 
 const source = relative => readFileSync(new URL(`../src/${relative}`, import.meta.url), 'utf8');
+// Shape pins must not match text inside comments: a guard commented out in
+// the source would otherwise still satisfy every anchor. Round-23 should-fix
+// 2 dropped full-line `//` comments (live-verified — commenting out the
+// send-registry delete left this suite green); round-24 minor-1 closes the
+// two remaining holes at this single strip point, both live-verified against
+// that same delete: wrapping it in `/* … */`, and hiding it as a trailing
+// `//` comment behind live code. Block-comment contents are blanked with
+// newlines preserved (a multi-line comment cannot fuse its neighbours into
+// an anchor match) and `//` comment tails are dropped per line. For POSITIVE
+// pins over-stripping can only fail loudly, never satisfy one; the same does
+// NOT hold for negative pins (round-26 minor M9): stripping inside a future
+// string or template literal containing `/*` could silently satisfy a
+// doesNotMatch anchor, so every negative pin below runs against the RAW
+// text (a pattern absent in the raw text is absent in the strip too).
+const stripComments = text => text
+  .replace(/\/\*[\s\S]*?\*\//g, comment => comment.replace(/[^\n]/g, ''))
+  .split('\n')
+  .map(line => line.replace(/\/\/.*$/, ''))
+  .join('\n');
+
+// The remaining source-consumption pins in this file are i18n coverage only
+// (which components consume which dictionary namespaces, plus zh-literal
+// leakage). The AuxChatPanel async-state-machine pins that used to live here
+// were replaced by executing controller tests in aux_chat_controller.test.mjs
+// (round-30 B1), and the remaining JSX shape pins moved to
+// aux_chat_panel_contract.test.mjs — this file is i18n-only again.
+const auxChatPanel = stripComments(source('features/aux-chat/AuxChatPanel.jsx'));
+const chat = stripComments(source('features/chat/ChatView.jsx'));
+const conversation = stripComments(source('features/conversation/ConversationTimeline.jsx'));
+const codex = stripComments(source('features/codex/CodexAcpView.jsx'));
+// Raw twins for the negative pins (round-26 minor M9, see the stripComments
+// header): doesNotMatch anchors must see comments and string contents too.
+const chatRaw = source('features/chat/ChatView.jsx');
+const conversationRaw = source('features/conversation/ConversationTimeline.jsx');
 const tauriSource = relative => readFileSync(new URL(`../src-tauri/src/${relative}`, import.meta.url), 'utf8');
 const isRecord = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 
@@ -60,9 +94,38 @@ for (const language of ['zh', 'en', 'ja']) {
     'uiTeamRelay',
     'uiTeamRelayAccess',
     'uiBuiltinPlugins',
+    'uiAuxChat',
   ]) {
     assert.ok(dict[language][section], `${language}.${section} must exist`);
   }
+  // All 23 uiAuxChat keys are pinned (round-14 minor-3: the list previously
+  // covered 13, so sendingHint/bindingHint and the six quote* keys could be
+  // deleted from every dictionary with the suite green — and quoteChipCount's
+  // absence renders `undefined` at runtime; round-30 D5 added quoteDuplicate
+  // for the exact-duplicate notice; M6 removed discardStuck with the stuck
+  // family it described — the atomic reset cannot get stuck that way;
+  // round-35 MAJOR-3: newTopicConfirmShort (the visible armed label, whose
+  // absence would render `undefined` on the destructive confirm) joined the
+  // list the round after it shipped — count and list now agree again).
+  for (const key of [
+    'openLabel', 'panelTitle', 'landingHint', 'emptyState', 'inputPlaceholder',
+    'send', 'busyHint', 'bindingHint', 'sendingHint', 'newTopic', 'newTopicConfirm',
+    'newTopicConfirmShort',
+    'sendFailed', 'ensureFailed', 'discardFailed', 'close',
+    'quoteAction', 'quoteChipCount', 'quoteRemove',
+    'quoteLimitSingle', 'quoteLimitCount', 'quoteLimitTotal', 'quoteDuplicate',
+  ]) {
+    assert.ok(dict[language].uiAuxChat[key], `${language}.uiAuxChat.${key} must exist`);
+  }
+  // Count guard (round-36 minor 9): the pin above lists 23 keys but cannot
+  // see additions — a 24th key added to all three dictionaries passes the
+  // existence loop silently and drifts the parity surface. Any key change
+  // must update this count with the list in the same commit.
+  assert.equal(
+    Object.keys(dict[language].uiAuxChat).length,
+    23,
+    `${language}.uiAuxChat must hold exactly the 23 pinned keys`,
+  );
   assert.ok(dict[language].uiSettings.providers, `${language}.uiSettings.providers must exist`);
   for (const key of [
     'addProvider', 'switch', 'official', 'current', 'export', 'import',
@@ -310,7 +373,6 @@ assert.match(settings, /item\.title \|\| presetProviderLabel\(p, t\)/);
 assert.doesNotMatch(settings, />添加搜索源</);
 const generalSettings = settings.slice(settings.indexOf('const renderGeneral'), settings.indexOf('const renderModels'));
 assert.ok(generalSettings.indexOf('<TeamRelayAccessSettings') > generalSettings.indexOf('<PetSettingsSection'));
-const chat = source('features/chat/ChatView.jsx');
 assert.match(chat, /const chatCopy = t\.uiChat/);
 assert.match(chat, /chatCopy\.asrDownloadTitle/);
 assert.match(chat, /chatCopy\.memoryMeta/);
@@ -319,15 +381,17 @@ assert.match(chat, /chatViewCopy\.placeholderSceneAdjust/);
 assert.match(chat, /chatViewCopy\.placeholderSceneDataViz/);
 assert.match(chat, /chatViewCopy\.placeholderScenePoster/);
 assert.match(chat, /chatViewCopy\.placeholderScenePpt/);
-assert.doesNotMatch(chat, /designGeneralPlaceholder/);
 assert.match(chat, /outgoing \|\| t\.uiChatScenes\.attachmentPrompt/);
-assert.doesNotMatch(chat, /outgoing \|\| '请根据附件内容继续处理。'/);
-assert.doesNotMatch(chat, /label:\s*'个人工作台'/);
-assert.doesNotMatch(chat, /label:\s*'公文写作'/);
-assert.doesNotMatch(chat, /label:\s*'数据可视化'/);
-assert.doesNotMatch(chat, /`取消\$\{scene\.label\}`/);
-assert.doesNotMatch(chat, /:\s*'描述你想生成或调整的内容'/);
-assert.doesNotMatch(chat, />下载语音识别模型</);
+assert.doesNotMatch(chatRaw, /outgoing \|\| '请根据附件内容继续处理。'/);
+assert.doesNotMatch(chatRaw, /designGeneralPlaceholder/);
+assert.doesNotMatch(chatRaw, /label:\s*'个人工作台'/);
+assert.doesNotMatch(chatRaw, /label:\s*'公文写作'/);
+assert.doesNotMatch(chatRaw, /label:\s*'数据可视化'/);
+assert.doesNotMatch(chatRaw, /`取消\$\{scene\.label\}`/);
+assert.doesNotMatch(chatRaw, /:\s*'描述你想生成或调整的内容'/);
+assert.doesNotMatch(chatRaw, />下载语音识别模型</);
+assert.match(auxChatPanel, /const copy = t\.uiAuxChat/);
+assert.match(auxChatPanel, /copy=\{conversationCopy\}/);
 const tauriSettingsBridge = source('platform/tauri/bridge/settings.js');
 assert.match(tauriSettingsBridge, /root\.PinvouTauriBridgeStrings/);
 
@@ -423,10 +487,8 @@ for (const connector of ['wecom.rs', 'tmeet.rs']) {
   assert.match(tauriSource(`features/connectors/${connector}`), /"code": "auth_failed"/);
 }
 assert.match(source('features/pet/PetSettingsSection.jsx'), /t\.uiPetSettings/);
-const conversation = source('features/conversation/ConversationTimeline.jsx');
 assert.match(conversation, /conversationCopy\(copy\)/);
-assert.doesNotMatch(conversation, />等待授权</);
-const codex = source('features/codex/CodexAcpView.jsx');
+assert.doesNotMatch(conversationRaw, />等待授权</);
 assert.match(codex, /const codexCopy = t\.uiCodex/);
 assert.match(codex, /copy=\{t\.uiConversation\}/);
 assert.match(codex, /copy=\{t\.uiCodexWorkspace\}/);
@@ -480,7 +542,7 @@ for (const language of ['zh', 'en', 'ja']) {
 // cli_data_access_disabled is dingtalk's org-level CLI block: only an org
 // admin can fix it, so the copy carries the remediation instead of the
 // generic retry advice.
-const connectorErrorCodes = ['runtime_prepare_failed', 'cli_install_failed', 'auth_start_failed', 'registration_failed', 'auth_failed', 'skills_enable_failed', 'cli_data_access_disabled', 'unknown'];
+const connectorErrorCodes = ['runtime_prepare_failed', 'cli_install_failed', 'auth_start_failed', 'registration_failed', 'auth_failed', 'skills_enable_failed', 'cli_data_access_disabled', 'consent_persist_failed', 'unknown'];
 for (const language of ['zh', 'en', 'ja']) {
   for (const code of connectorErrorCodes) {
     const copy = dict[language].uiToolStore.connectorErrors[code];
@@ -492,6 +554,20 @@ for (const language of ['zh', 'en', 'ja']) {
   for (const retired of ['connFailed', 'dingtalkSkillsFailed', 'tmeetAuthIncomplete']) {
     assert.equal(dict[language].uiToolStore[retired], undefined, `${language}.uiToolStore.${retired} is replaced by connectorErrors`);
   }
+  // Round-37 F1 (review #455): presence guards for the keys whose deletion
+  // previously failed nothing — dropping one from a locale must fail now.
+  for (const key of ['installedReady', 'welcomeOptInFailed']) {
+    assert.equal(typeof dict[language].uiChat[key], 'string', `${language}.uiChat.${key} must exist and not be empty`);
+    assert.ok(dict[language].uiChat[key].length > 0, `${language}.uiChat.${key} must not be empty`);
+  }
+  for (const key of ['switchedOffPacks', 'notAppliedPacks']) {
+    assert.equal(typeof dict[language].uiChatScenes[key], 'function', `${language}.uiChatScenes.${key} must exist`);
+  }
+  assert.equal(
+    typeof dict[language].uiToolStore.connectorErrors.consent_persist_failed,
+    'string',
+    `${language}.uiToolStore.connectorErrors.consent_persist_failed must exist and not be empty`
+  );
 }
 // The render lookup must resolve own keys only: `constructor`/`toString` pass the
 // snake_case code pattern but would resolve to Object.prototype functions.

@@ -619,9 +619,12 @@ async fn serve_controlling_lane_with_evidence_context(
             // 自己的 deadline 是权威，本地只保证不会无限等待）。
             _ = tokio::time::sleep_until(resume_deadline) => {
                 if manager.with_lane_owner(&operation, || business.clear()).is_err() { return; }
-                // The authenticated peer budget also expires while Connected.
-                // A resume-only closer rejects that phase and leaves a live lease.
-                if let Ok(status) = manager.fail_connection(operation.clone(), PEER_UNAVAILABLE_ERROR) {
+                // Connected B-evidence expiry is not a failed resume. Keep
+                // late resume failures fenced to Reconnecting, but retire
+                // this still-owned connected lane when its finite budget ends.
+                if resume.is_active() {
+                    fail_resume(manager, &operation, sinks);
+                } else if let Ok(status) = manager.fail_connection(operation.clone(), PEER_UNAVAILABLE_ERROR) {
                     (sinks.on_status)(&status);
                 }
                 return;

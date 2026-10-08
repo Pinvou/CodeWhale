@@ -1,8 +1,7 @@
 //! B-local remote task status and stop commands, plus private task owners.
 //!
-//! A07 deliberately exposes no renderer task/session admission. A08 must
-//! authenticate the sender and full binding before connecting the private
-//! engine/session kernels; a renderer-supplied payload cannot assert A's role.
+//! A08 accepts only authenticated full bindings or B-local semantic intents;
+//! renderer JSON cannot assert A's role. Legacy A07 raw entry points stay closed.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -881,22 +880,20 @@ pub fn desktop_remote_controlled_task_stop(
         .map_err(|error| error.code.to_owned())?
         .map_err(|error| error.code.to_owned())?;
     service.finish_cancel_outcome(&outcome);
-    let (record, status) = match &outcome {
+    let record = match &outcome {
         CancelOutcome::CancelledBeforeDispatch(record) | CancelOutcome::AlreadyTerminal(record) => {
-            (record, record.wire_status())
+            record
         }
-        CancelOutcome::CancellationRequested(record) => (record, "cancel_requested"),
+        CancelOutcome::CancellationRequested(record) => record,
     };
     let model_source = RemoteTaskModelSource::from_record(record)
         .ok_or_else(|| "task_model_source_invalid".to_owned())?;
-    let projection = serde_json::json!({
-        "taskId": record.task_id,
-        "sessionId": record.session_id,
-        "generation": record.lease.remote_control_generation,
-        "modelSource": model_source.as_str(),
-        "status": status,
-        "cancelRequested": record.cancel_requested,
-    });
+    let mut projection = service
+        .status_view_payload(&task_id)
+        .map_err(|error| error.code.to_owned())?;
+    projection["generation"] = json!(record.lease.remote_control_generation);
+    projection["modelSource"] = json!(model_source.as_str());
+    projection["cancelRequested"] = json!(record.cancel_requested);
     if matches!(outcome, CancelOutcome::CancellationRequested(_)) {
         let _ = app.emit(TASK_STATUS_EVENT, &projection);
     }
@@ -1048,6 +1045,8 @@ fn admit_and_dispatch(
 ) -> Result<Value, String> {
     let request =
         RemoteTaskRequest::from_payload(validated).map_err(|error| error.code.to_owned())?;
+    let budget =
+        crate::features::remote_control::controller::turn_budget::TurnBudget::from_environment()?;
     let skill_ids = request.skill_ids().map_err(|error| error.code.to_owned())?;
     let mode = request.mode.clone();
     let model_source = validated
@@ -1089,6 +1088,27 @@ fn admit_and_dispatch(
         .state::<Arc<DesktopRemoteTaskRuntime>>()
         .authorizations();
     let install = |ticket: &RemoteTaskTicket| {
+        if local_attachments.is_none() {
+            let ids = ticket
+                .input
+                .get("attachment_ids")
+                .and_then(Value::as_array)
+                .ok_or("task_attachments_invalid")?
+                .iter()
+                .map(|id| id.as_str().map(str::to_owned))
+                .collect::<Option<Vec<_>>>()
+                .ok_or("task_attachments_invalid")?;
+            app.state::<Arc<super::desktop_remote_attachment::DesktopRemoteAttachmentRuntime>>()
+                .uploads()
+                .claim_for_admission(
+                    &ids,
+                    lease,
+                    session_id,
+                    &ticket.record.task_id,
+                    ticket.record.sequence,
+                )
+                .map_err(|_| "task_attachments_invalid")?;
+        }
         if let Some(package) = temporary_package {
             models
                 .install(package, lease, &ticket.record.task_id, now_b)
@@ -1119,9 +1139,18 @@ fn admit_and_dispatch(
                     now_b,
                 )
                 .map_err(|error| error.code.to_owned())?;
-            let prepared = service
+            let selected_skill_names = capabilities.skills_for_task(
+                &request.capability_revision, lease, &mode, &skill_ids, now_b,
+            ).map_err(|error| error.code.to_owned())?;
+            let mut prepared = service
                 .prepare_bound_admission(lease, validated, now_b, expected_remote_ref, install)
                 .map_err(|error| error.code.to_owned())?;
+            if let crate::features::remote_control::controller::task::PreparedTaskAdmission::Accepted(
+                AdmissionOutcome::Admitted(ticket),
+            ) = &mut prepared {
+                ticket.execution_skill_names = Some(selected_skill_names);
+                ticket.execution_budget = Some(budget);
+            }
             drop(capability_admission);
             Ok::<_, String>(prepared)
         })
@@ -1135,6 +1164,7 @@ fn admit_and_dispatch(
             .map_err(|error| error.code.to_owned()),
         AdmissionOutcome::Admitted(ticket) => {
             let task_id = ticket.record.task_id.clone();
+            let task_sequence = ticket.record.sequence;
             // Once the ledger has admitted a task, every synchronous failure
             // must first publish a durable terminal and release transfer/model
             // hooks. Never use `?` to escape this branch with a live turn lock.
@@ -1161,11 +1191,12 @@ fn admit_and_dispatch(
                             if current != lease {
                                 return Err("task_generation_stale".to_owned());
                             }
-                            uploads.uploads().consume_completed(
+                            uploads.uploads().consume_for_admission(
                                 &attachment_ids,
                                 current,
                                 session_id,
                                 &task_id,
+                                task_sequence,
                             )
                         })
                         .map_err(|_| "task_generation_stale".to_owned())?
@@ -1204,7 +1235,14 @@ fn admit_and_dispatch(
                 let capture_private_artifacts = ticket.record.mode == TASK_MODE_CHAT;
                 if capture_private_artifacts {
                     artifact_runtime
-                        .begin_task_capture(&session_store, lease, &task_session_id, &task_id)
+                        .begin_task_capture(
+                            &session_store,
+                            lease,
+                            &task_session_id,
+                            &task_id,
+                            task_sequence,
+                            &|| budget.checkpoint(&CancellationToken::new()),
+                        )
                         .map_err(|_| "artifact_capture_failed")?;
                 }
                 Ok((
@@ -1233,7 +1271,12 @@ fn admit_and_dispatch(
                 Ok(ready) => ready,
                 Err(reason) => {
                     service
-                        .fail_admitted(&task_id, reason, controlled_monotonic_millis())
+                        .fail_admitted(
+                            &task_id,
+                            task_sequence,
+                            reason,
+                            controlled_monotonic_millis(),
+                        )
                         .map_err(|error| error.code.to_owned())?;
                     return service
                         .status_payload(&task_id)
@@ -1265,7 +1308,8 @@ fn admit_and_dispatch(
             }
             let events: Arc<dyn ControllerTaskEventSink> =
                 Arc::new(TaskEventBridge { app: app.clone() });
-            let artifact_events = Arc::clone(&events);
+            let artifact_events =
+                service.events_for_record(&ticket.record, Arc::clone(&events), Some(budget));
             let artifact_store = session_store.clone();
             let artifact_lease = lease.clone();
             let artifact_session_id = task_session_id.clone();
@@ -1348,13 +1392,15 @@ fn admit_and_dispatch(
                         &artifact_lease,
                         &artifact_session_id,
                         &artifact_task_id,
+                        task_sequence,
+                        &|| budget.checkpoint(&CancellationToken::new()),
                     ) {
                         Ok(descriptors) => {
                             for descriptor in descriptors {
-                                artifact_events.emit_journal(
-                                    crate::features::remote_control::controller::journal::JournalKind::Artifact,
+                                artifact_events.emit_committed_artifact(
+                                    task_sequence,
                                     &artifact_session_id,
-                                    Some(&artifact_task_id),
+                                    &artifact_task_id,
                                     json!({
                                         "artifact_id": descriptor.artifact_id,
                                         "display_name": descriptor.display_name,
@@ -1416,13 +1462,10 @@ fn cancel_and_project(
     let payload = service
         .status_payload(task_id)
         .map_err(|error| error.code.to_owned())?;
-    if let CancelOutcome::CancellationRequested(_) = outcome {
-        let _ = app.emit(
-            TASK_STATUS_EVENT,
-            serde_json::json!({ "task_id": task_id, "status": "cancel_requested" }),
-        );
-    }
-    let _ = app.emit(TASK_EVENT, &payload);
+    let projection = service
+        .status_view_payload(task_id)
+        .map_err(|error| error.code.to_owned())?;
+    let _ = app.emit(TASK_EVENT, &projection);
     Ok(payload)
 }
 
@@ -2271,7 +2314,7 @@ mod tests {
         let ledger = admission.find(".prepare_bound_admission(").unwrap();
         let release = admission.find("drop(capability_admission)").unwrap();
         let finalize = admission.find(".finish_bound_admission(").unwrap();
-        let attachment_consume = admission.find("consume_completed(").unwrap();
+        let attachment_consume = admission.find("consume_for_admission(").unwrap();
         assert!(
             owner < pin
                 && pin < ledger
@@ -2753,6 +2796,76 @@ mod tests {
             service.status("task-admission").unwrap().wire_status(),
             "interrupted"
         );
+    }
+
+    #[test]
+    fn admission_under_real_owner_does_not_wait_for_cleanup_journal_gate() {
+        use crate::features::remote_control::controller::task::{
+            RemoteTaskEvent, RemoteTaskEventSink, RemoteTaskTerminal,
+        };
+        use std::sync::mpsc;
+        use std::time::Duration;
+        struct Journal {
+            manager: Arc<ControlledDeviceManager>,
+            entered: mpsc::Sender<()>,
+        }
+        impl RemoteTaskEventSink for Journal {
+            fn publish_task_event(&self, _: &RemoteTaskEvent) {
+                self.entered.send(()).unwrap();
+                self.manager.with_local_cancel_lease(|_| ()).unwrap();
+            }
+        }
+        let (manager, service, context, payload) = task_admission_fixture();
+        let prepared = service
+            .prepare_bound_admission(&context, &payload, 3_500, Some("a-ref-admission"), |_| {
+                Ok(())
+            })
+            .unwrap();
+        service.finish_bound_admission(prepared).unwrap();
+        let (entered_tx, entered_rx) = mpsc::channel();
+        service.hooks().set_journal(Arc::new(Journal {
+            manager: manager.clone(),
+            entered: entered_tx,
+        }));
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let (result_tx, result_rx) = mpsc::channel();
+        let admission_service = service.clone();
+        let owner = std::thread::spawn(move || {
+            let result = manager
+                .with_current_business_lease(&context, || {
+                    ready_tx.send(()).unwrap();
+                    entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                    admission_service
+                        .prepare_bound_admission(
+                            &context,
+                            &payload,
+                            3_600,
+                            Some("a-ref-admission"),
+                            |_| Ok(()),
+                        )
+                        .err()
+                        .map(|error| error.code)
+                })
+                .unwrap();
+            result_tx.send(result).unwrap();
+        });
+        ready_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let (done_tx, done_rx) = mpsc::channel();
+        let cleanup = std::thread::spawn(move || {
+            service
+                .complete("task-admission", RemoteTaskTerminal::Failed, None, 3_601)
+                .unwrap();
+            done_tx.send(()).unwrap();
+        });
+        // A blocking admission mutation fails this bounded assertion instead
+        // of hanging the coordinator (detached test-owned threads on failure).
+        assert_eq!(
+            result_rx.recv_timeout(Duration::from_secs(5)).unwrap(),
+            Some("task_cleanup_busy")
+        );
+        done_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        owner.join().unwrap();
+        cleanup.join().unwrap();
     }
 
     #[test]
