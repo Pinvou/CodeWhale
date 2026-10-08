@@ -154,6 +154,10 @@ func (r *PostgresRepository) CompleteWalletProvisioning(ctx context.Context, job
 	if err := appendAudit(ctx, tx, userID, "wallet-provisioning", nil, "account.wallet.provision", "user", userID.String(), "SUCCEEDED", map[string]any{"status": "ACTIVE"}); err != nil {
 		return err
 	}
+	// Later statement lock waits must not let an expired claim commit durable changes.
+	if !job.LeaseUntil.After(r.now()) {
+		return ErrConflict
+	}
 	return tx.Commit(ctx)
 }
 
@@ -197,6 +201,10 @@ func (r *PostgresRepository) FailWalletProvisioning(ctx context.Context, job Wal
 		if err := appendAudit(ctx, tx, userID, "wallet-provisioning", nil, "account.wallet.provision", "user", userID.String(), "FAILED", map[string]any{"status": status, "reason": code}); err != nil {
 			return err
 		}
+	}
+	// Later statement lock waits must not let an expired claim commit durable changes.
+	if !job.LeaseUntil.After(r.now()) {
+		return ErrConflict
 	}
 	return tx.Commit(ctx)
 }
