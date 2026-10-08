@@ -65,7 +65,7 @@ pub(crate) fn write_json_pretty(path: &Path, value: &serde_json::Value) -> Resul
             .map_err(|e| format!("创建 {} 失败: {e}", parent.display()))?;
     }
     let json = serde_json::to_string_pretty(value).map_err(|e| e.to_string())?;
-    deepseek_tui::utils::write_atomic(path, json.as_bytes())
+    crate::platform::filesystem::atomic_write_private(path, json.as_bytes())
         .map_err(|e| format!("写入 {} 失败: {e}", path.display()))
 }
 
