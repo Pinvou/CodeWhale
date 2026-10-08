@@ -219,16 +219,26 @@
               "type": "string",
               "enum": [
                 "TOKEN_ACCOUNT_CREATE",
+                "TOKEN_ACCOUNT_STATUS_CHANGE",
+                "TOKEN_PROTOCOL_DRAFT_CREATE",
+                "TOKEN_PROTOCOL_PUBLISH",
+                "TOKEN_FORMULA_DRAFT_CREATE",
+                "TOKEN_FORMULA_PUBLISH",
+                "TOKEN_MODEL_DRAFT_SAVE",
+                "TOKEN_MODEL_PUBLISH",
+                "TOKEN_MODEL_CATALOG_SYNC",
                 "TOKEN_ROUTE_UPSERT",
-                "TOKEN_ROUTE_DELETE"
+                "TOKEN_ROUTE_DELETE",
+                "TOKEN_CREDENTIAL_VALIDATE",
+                "TOKEN_ROUTE_PROVISIONING_REPAIR"
               ]
             },
-            "description": "Current supported immutable key lookup command; this endpoint does not enumerate all management commands."
+            "description": "Currently registered COMMAND transport only; APPROVED and ISOLATED commands are excluded. Lookup is read-only and scoped to current permissions, actor, command type and the original stable key."
           }
         ],
         "responses": {
           "200": {
-            "description": "Current JSON response; authorization, concurrency and governance failures are not success.",
+            "description": "Actor-scoped immutable command receipt, including pending or unknown status. Cache-Control: no-store; lookup does not execute the command or contact its provider.",
             "content": {
               "application/json": {
                 "schema": {

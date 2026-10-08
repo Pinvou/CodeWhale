@@ -33,6 +33,7 @@ const safeNoWrite = new Set([
   '409:TOKEN_ACCOUNT_CAP_REACHED', '503:TOKEN_ACCOUNT_POLICY_UNAVAILABLE', '503:TOKEN_ACCOUNT_POLICY_CONFIG_MISMATCH',
   '412:DRAFT_ETAG_MISMATCH', '422:COMMAND_PRECHECK_FAILED', '422:TOKEN_ROUTE_REFERENCE_INVALID',
   '503:TOKEN_COMMAND_GOVERNANCE_INACTIVE', '503:IMPACT_PRECHECK_DISABLED',
+  '503:CREDENTIAL_REQUEST_DEADLINE_EXCEEDED',
 ]);
 
 const protocolFormulaSafeNoWrite = new Set([
@@ -205,7 +206,8 @@ export function validGovernedTokenCommandResult(value, expected) {
   const completed = value.completed_at != null && validDateTime(value.completed_at);
   const stableError = value.stable_error_code != null
     && /^[A-Z][A-Z0-9_]{0,119}$/.test(String(value.stable_error_code))
-    && !/(TOKEN|KEY|SECRET|PASSWORD|CREDENTIAL)/.test(String(value.stable_error_code));
+    && (value.stable_error_code === 'CREDENTIAL_PROBE_OUTCOME_UNKNOWN'
+      || !/(TOKEN|KEY|SECRET|PASSWORD|CREDENTIAL)/.test(String(value.stable_error_code)));
   if (value.completed_at != null && !completed) return false;
   if (value.stable_error_code != null && !stableError) return false;
   const recoveryFields = ['recovery_state', 'recovery_diagnostic_code', 'recovery_epoch'].some((field) => Object.prototype.hasOwnProperty.call(value, field));

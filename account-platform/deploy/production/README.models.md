@@ -10,6 +10,8 @@ Token 单独数据库和五个部署角色使用 `token-release-prepare` 明确 
 
 然后运行 `token-migrate`，由普通 token_migrator 执行当前发布目录的真实 Up。迁移 wrapper 验证当前稀疏 ledger 与原 SQL 校验和，拒绝超前、部分和降级集合；不能手工补业务表，也不能加载未来匿名化迁移。既有数据库必须走所交付 release-prepare/governance 的离线预检与发行流程，不将首次空库 bootstrap 用作升级或清历史。
 
+本轮 Token 900001 前向硬化收回 Gateway 对审计、业务对象及迁移 ledger 的所有权，补齐不可变语句边界。已安装库在离线预检后，由独立数据库 operator 先执行 `token-storage-hardening-bootstrap.sql` 验证并建立单向 schema owner 到 Gateway 的角色关系，再由普通 migrator 执行 Up；初次空库使用更新后的 `token-database-bootstrap.sql`。该关系只允许 owner 执行原 runtime 所有对象的安全所有权迁移，Gateway 不获得 owner 或政策 deployer 身份；不修改业务资金数据、角色密码或历史 SQL 校验和。不能跳过 bootstrap 使用 runtime 或 superuser 代跑普通迁移，不能用数据库 Down 撤回审计保护。
+
 使用 `token-policy-bootstrap` 提供明确上限、expected version、审计 reason 和稳定 idempotency key；默认不臆造生产配额。Account 和 Token 使用独立核验的当前 PolicySetDigest 与十八项 TokenCommandHandlerDigest。`token-governance` 的 prepare/activate/safe 必须遵循实际命令校验及冻结证据、quiescence 和 CAS；不能因进程 ready 自动激活。后续第十九项用量策略改变集合时必须重新发行并验证，不能把旧 ACTIVE digest 沿用为新集合。
 
 ## KMS、凭据和隔离入口

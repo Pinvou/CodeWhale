@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sort"
 	"strconv"
 	"strings"
@@ -1113,8 +1114,24 @@ func (s *CatalogSynchronizer) Run(ctx context.Context) {
 			return
 		case <-ticker.C:
 			timeout, cancel := context.WithTimeout(ctx, 30*time.Second)
-			_, _, _ = s.Sync(timeout)
+			_ = s.runOnce(timeout)
 			cancel()
 		}
 	}
+}
+
+// Retry on the next bounded cycle without serializing provider diagnostics or
+// credentials. Catalog lifecycle decisions are independent of this diagnostic.
+func (s *CatalogSynchronizer) runOnce(ctx context.Context) error {
+	_, _, err := s.Sync(ctx)
+	if err != nil && !errors.Is(err, context.Canceled) {
+		code := "CATALOG_SYNC_FAILED"
+		if errors.Is(err, context.DeadlineExceeded) {
+			code = "CATALOG_SYNC_TIMEOUT"
+		} else if errors.Is(err, ErrCatalogVersionConflict) {
+			code = "CATALOG_SYNC_VERSION_CONFLICT"
+		}
+		slog.ErrorContext(ctx, "model catalog synchronization failed", "error_code", code, "component", "model-catalog-sync", "stage", "retry_pending")
+	}
+	return err
 }

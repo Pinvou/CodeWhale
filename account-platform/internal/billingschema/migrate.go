@@ -22,7 +22,9 @@ const intentVersion int64 = 900002
 const intentChecksum = "68df09f526088b981c992d0c9912cab8f4ac2c6f5567fdb6351cfdc2b905d2a2"
 const intentDownChecksum = "14f58e7592a5733d75ff248ace7d5fffbe289b0c728de2a20d3377e54fe91044"
 
-const pricingReceiptVersion int64 = 900004
+// F02 already owns 900004 for refund dispatch. Keep the draft pricing SQL bytes
+// frozen while giving this F04 receipt its distinct forward identity.
+const pricingReceiptVersion int64 = 900008
 const pricingReceiptChecksum = "60cb8519502e377de242d858872366486083cdd9b501d80a60421d663c250b43"
 const pricingReceiptDownChecksum = "49843bf03fc3120f13798ff4b4296344ca9dd12a73544e0a041009f28172af6e"
 

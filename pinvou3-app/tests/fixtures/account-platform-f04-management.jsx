@@ -6,6 +6,9 @@ import { AdminManagementWorkspace } from '../../src/features/account-platform/Ad
 import { AdminPlatformClient } from '../../src/features/account-platform/admin-client.js';
 import { adminPlatformCopy, tokenManagementCopy } from '../../src/shared/i18n.js';
 import { parseFinanceJSON } from '../../src/features/account-platform/finance-contract.js';
+import { AdminHighRiskActionDialog } from '../../src/features/account-platform/AdminHighRiskActionDialog.jsx';
+import { AdminTokenAccountDetailWorkspace } from '../../src/features/account-platform/AdminTokenAccountDetailWorkspace.jsx';
+import { requireGovernedTokenCommandResult } from '../../src/features/account-platform/admin-high-risk-action-state.js';
 const id = '11111111-1111-4111-8111-111111111111';
 const other = '22222222-2222-4222-8222-222222222222';
 const root = createRoot(document.querySelector('#root'));
@@ -21,6 +24,13 @@ const approval = () => ({ approval_request_id:id,command_type:'TOKEN_MODEL_LIFEC
 globalThis.fetch = async (target,options={}) => {
  const url=new URL(target,globalThis.location.href);const path=url.pathname;const method=options.method||'GET';
  control.calls.push({path,method,body:options.body,key:options.headers?.['Idempotency-Key']});
+ if(path.endsWith('/commands') || path.endsWith('/commands/by-idempotency-key')) {
+  if(method==='POST'&&control.expiredEntryOnce){control.expiredEntryOnce=false;return json({code:'CREDENTIAL_REQUEST_DEADLINE_EXCEEDED',request_id:id},503);}
+  const type=control.commandType||'TOKEN_CREDENTIAL_VALIDATE';
+  const receipt={command_reference:id,command_type:type,policy_version:1,actor_user_id:id,actor_permission:'platform.tokens.credentials.validate',authorization_version:1,idempotency_fingerprint:'a'.repeat(64),target_resource_type:type==='TOKEN_MODEL_CATALOG_SYNC'?'MODEL_CATALOG':type==='TOKEN_MODEL_PUBLISH'?'MODEL':'PROVIDER_CREDENTIAL',target_resource_id:type==='TOKEN_MODEL_CATALOG_SYNC'?'CURRENT':id,status:type==='TOKEN_CREDENTIAL_VALIDATE'?'FAILED':'SUCCEEDED',redacted_result:{},stable_error_code:type==='TOKEN_CREDENTIAL_VALIDATE'?'CREDENTIAL_PROBE_OUTCOME_UNKNOWN':null,approval_request_id:null,audit_request_id:id,created_at:'2026-10-08T00:00:00Z',completed_at:'2026-10-08T00:00:01Z'};
+  if(method==='POST'&&control.unknownOnce){control.unknownOnce=false;throw new TypeError('controlled lost receipt');}
+  return json(receipt);
+ }
  if(path.endsWith('/api/admin/approvals/capability'))return json({session_approval_wire_version:2,control:{version:1,epoch:1,authorization_relay_epoch:1}});
  if(path.endsWith('/api/admin/approvals/requests')&&method==='GET')return json({items:[approval()]});
  if(path.endsWith(`/api/admin/approvals/requests/${id}`)){if(method==='PUT'){control.approvalVersion++;return json(null,204);}return json(approval());}
@@ -49,9 +59,14 @@ globalThis.fetch = async (target,options={}) => {
  if(control.delayOnce){control.delayOnce=false;return new Promise(resolve=>{control.release=()=>resolve(json(item,status));});}
  return json(item,status);
 };
+const credentialClient={ tokenAccountSafeDetail:async()=>({token_account_id:id,name:'Controlled account',status:'ACTIVE',owner_type:'USER',owner_id:id,share_scope:'PRIVATE',account_version:1,active_credential_count:0,route_count:0,updated_at:'2026-10-08T00:00:00Z'}),tokenAccountCredentials:async()=>({items:[],has_more:false}) };
+function ControlledCommand({copy}) {
+ const type=control.commandType||'TOKEN_CREDENTIAL_VALIDATE';const expected={commandType:type,targetResourceType:type==='TOKEN_MODEL_CATALOG_SYNC'?'MODEL_CATALOG':type==='TOKEN_MODEL_PUBLISH'?'MODEL':'PROVIDER_CREDENTIAL',targetResourceID:type==='TOKEN_MODEL_CATALOG_SYNC'?'CURRENT':id};
+ return <AdminHighRiskActionDialog key={type} copy={copy} action={{key:'controlled-command',impactAction:type,title:copy.validateCredential}} target={{label:'Controlled source'}} impactRequired={false} initialReason="Controlled verification reason" onClose={()=>{control.closed=true;root.render(<p>Controlled dialog closed</p>);}} execute={async(payload,key,signal)=>requireGovernedTokenCommandResult(await client.createGovernedTokenCommand({command_type:type,reason:payload.reason},key,signal),expected)} recoverByIdempotencyKey={async(key,signal)=>requireGovernedTokenCommandResult(await client.governedTokenCommandByIdempotencyKey(type,key,signal),expected)} />;
+}
 function render(){
  const shared=tokenManagementCopy[control.language];const copy={...adminPlatformCopy[control.language],modelToken:shared.modelToken,billing:{pricingLifecycle:shared.pricingLifecycle}};
  const permissions=['platform.pricing.read','platform.models.read','platform.models.lifecycle.request',...(control.canManage?['platform.pricing.manage']:[])];
- root.render(control.surface==='pricing'?<PricingLifecycleWorkspace key={`${control.owner}:${client.financeSessionEpoch}`} {...{client,copy,permissions}} owner={control.owner}/>:<AdminManagementWorkspace key={`${control.owner}:${client.financeSessionEpoch}`} {...{client,copy,permissions}} owner={control.owner} language={control.language} credentialOrigin="https://credentials-uat.pinvou.com"/>);
+ root.render(control.surface==='command'?<ControlledCommand copy={shared.modelToken}/>:control.surface==='credentials'?<AdminTokenAccountDetailWorkspace accountID={id} client={credentialClient} copy={shared.modelToken} permissions={[]} routeVersion={0} onRouteChange={()=>{}} onQueryChange={()=>{}} cursorHistory={{current:{}}} actionsEnabled={false}/>:control.surface==='pricing'?<PricingLifecycleWorkspace key={`${control.owner}:${client.financeSessionEpoch}`} {...{client,copy,permissions}} owner={control.owner}/>:<AdminManagementWorkspace key={`${control.owner}:${client.financeSessionEpoch}`} {...{client,copy,permissions}} owner={control.owner} language={control.language} credentialOrigin="https://credentials-uat.pinvou.com"/>);
 }
-control.render=render;control.labels=()=>tokenManagementCopy[control.language].pricingLifecycle;control.price=price;window.f04=control;render();
+control.expiredEntryLabel=()=>tokenManagementCopy[control.language].modelToken.commandErrors.CREDENTIAL_REQUEST_DEADLINE_EXCEEDED;control.credentialProbeLabel=()=>tokenManagementCopy[control.language].modelToken.commandErrors.CREDENTIAL_PROBE_OUTCOME_UNKNOWN;control.render=render;control.labels=()=>tokenManagementCopy[control.language].pricingLifecycle;control.price=price;window.f04=control;render();

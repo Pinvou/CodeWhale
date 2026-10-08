@@ -208,6 +208,8 @@ func (s *Service) activeWallet(ctx context.Context, resolved AuthorizationContex
 func (s *Service) writeError(w http.ResponseWriter, r *http.Request, err error) {
 	status, code, message := http.StatusInternalServerError, "INTERNAL_ERROR", "the token request could not be completed"
 	switch {
+	case errors.Is(err, ErrNotFound):
+		status, code, message = http.StatusNotFound, "TOKEN_NOT_FOUND", "the token resource was not found"
 	case errors.Is(err, ErrForbidden):
 		status, code, message = http.StatusForbidden, "TOKEN_FORBIDDEN", "the token action is not permitted"
 	case errors.Is(err, ErrAccountProvisioning):

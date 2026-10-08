@@ -90,7 +90,7 @@ const bash = process.platform === "win32" && existsSync("C:/Program Files/Git/bi
 
 test("Account Platform changes cannot bypass the Go gate at any PR or queue stage", () => {
   const paths = filterPaths(workflow, "account_platform");
-  for (const path of ["account-platform/**", "scripts/account-platform*", ".github/workflows/pr-check.yml", "scripts/tests/pr-check-routing.test.mjs"]) {
+  for (const path of ["account-platform/**", "scripts/account-platform*", "scripts/check-token-management-authorization-coverage.mjs", ".github/workflows/pr-check.yml", "scripts/tests/pr-check-routing.test.mjs"]) {
     assert.ok(paths.includes(path), `Go routing must cover ${path}`);
   }
   assert.match(workflow, /account_platform: \$\{\{ steps\.filter\.outputs\.account_platform \}\}/);
@@ -100,6 +100,7 @@ test("Account Platform changes cannot bypass the Go gate at any PR or queue stag
   assert.match(job, /go-version-file: account-platform\/go\.mod/);
   assert.match(job, /GOTOOLCHAIN: local/);
   assert.match(job, /CGO_ENABLED: "1"/);
+  assert.match(job, /run: node scripts\/check-token-management-authorization-coverage\.mjs/);
   assert.doesNotMatch(job, /secrets\.|services:|continue-on-error:/);
 });
 

@@ -68,6 +68,27 @@ try{
    await page.waitForFunction(index => [...document.querySelectorAll('.adm-pricing-workspace > .adm-finance-subpanel > .adm-table-wrap')][index].scrollLeft > 0, {}, index);
   }
  });
+ for(const language of ['zh','en','ja']) await caseRun(`${language}: actual credential page has a named heading and safety explanation`,async()=>{
+  await fresh();await page.evaluate(language=>{window.history.replaceState({},'',`${location.pathname}?token_detail_tab=credentials`);window.f04.language=language;window.f04.surface='credentials';window.f04.render();},language);
+  await page.waitForSelector('#token-credentials-heading');
+  assert.ok(await page.$eval('#token-credentials-heading',el=>el.textContent.trim().length>0));
+  assert.ok(await page.$eval('#token-credentials-heading',el=>el.closest('section').querySelector('.adm-source-lead').textContent.trim().length>0));
+ });
+ for(const type of ['TOKEN_CREDENTIAL_VALIDATE','TOKEN_MODEL_PUBLISH','TOKEN_MODEL_CATALOG_SYNC']) await caseRun(`${type}: lost ACK recovers original key without another write and allows closing terminal receipt`,async()=>{
+  await fresh();await page.evaluate(type=>{window.f04.surface='command';window.f04.commandType=type;window.f04.unknownOnce=true;window.f04.render();},type);await page.waitForSelector('.adm-high-risk-dialog');await submit('.adm-high-risk-dialog');
+  await page.waitForSelector('.adm-command-unknown');assert.ok(await page.$eval('.adm-high-risk-dialog header button',el=>el.disabled));
+  await submit('.adm-high-risk-dialog');await page.waitForFunction(()=>!document.querySelector('.adm-high-risk-dialog header button').disabled);
+  assert.ok(await page.evaluate(()=>{const calls=window.f04.calls.filter(c=>c.path.includes('/commands'));return calls.filter(c=>c.method==='POST').length===1&&calls.filter(c=>c.method==='GET').length===1&&calls[0].key===calls[1].key;}));
+  if(type==='TOKEN_CREDENTIAL_VALIDATE') assert.ok(await page.evaluate(()=>document.body.textContent.includes(window.f04.credentialProbeLabel())));
+  await page.$eval('.adm-high-risk-dialog header button',button=>button.click());await page.waitForFunction(()=>window.f04.closed===true);
+ });
+ await caseRun('Known entry expiry permits closing without treating an arbitrary timeout as safe',async()=>{
+  await fresh();await page.evaluate(()=>{window.f04.surface='command';window.f04.commandType='TOKEN_CREDENTIAL_VALIDATE';window.f04.expiredEntryOnce=true;window.f04.render();});await page.waitForSelector('.adm-high-risk-dialog');await submit('.adm-high-risk-dialog');
+  await page.waitForFunction(()=>document.body.textContent.includes(window.f04.expiredEntryLabel()));
+  assert.equal(await page.$('.adm-command-unknown'),null);assert.equal(await page.$eval('.adm-high-risk-dialog header button',el=>el.disabled),false);
+  assert.equal(await page.evaluate(()=>window.f04.calls.filter(c=>c.path.endsWith('/commands')&&c.method==='POST').length),1);
+  await page.$eval('.adm-high-risk-dialog header button',button=>button.click());await page.waitForFunction(()=>window.f04.closed===true);
+ });
  console.log(`RESULT ${passed} PASS 0 FAIL 0 SKIP`);
 }catch(error){console.error(`FAIL after ${passed} PASS: ${error.stack}`);if(page)console.error(JSON.stringify(await page.evaluate(()=>({text:document.body.textContent.slice(0,1200),paths:window.f04?.calls.map(c=>c.path)})).catch(()=>({}))));process.exitCode=1;}
 finally{if(browser)await browser.close();if(vite)await vite.close();if(fs.existsSync(profile)){assert.equal(fs.realpathSync(profile),ownedProfile);assert.equal(path.dirname(ownedProfile),fs.realpathSync(os.tmpdir()));assert.ok(path.basename(ownedProfile).startsWith('pinvou-f04-management-'));fs.rmSync(ownedProfile,{recursive:true});}}

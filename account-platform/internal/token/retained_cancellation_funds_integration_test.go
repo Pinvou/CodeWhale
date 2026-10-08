@@ -109,7 +109,7 @@ func retainedManagementTokenRepository(t *testing.T) (*PostgresRepository, conte
 	// The existing production database initializer installs this trusted
 	// extension as the bootstrap administrator before handing schema authority
 	// to the dedicated non-owner runtime and migrator roles.
-	if _, err = owner.Exec(ctx, `CREATE EXTENSION IF NOT EXISTS pgcrypto; ALTER SCHEMA public OWNER TO token_schema_owner; GRANT USAGE,CREATE ON SCHEMA public TO token_gateway`); err != nil {
+	if _, err = owner.Exec(ctx, `GRANT token_gateway TO token_schema_owner WITH INHERIT TRUE,SET TRUE; CREATE EXTENSION IF NOT EXISTS pgcrypto; ALTER SCHEMA public OWNER TO token_schema_owner; GRANT USAGE,CREATE ON SCHEMA public TO token_gateway`); err != nil {
 		owner.Close(context.Background())
 		t.Fatal(err)
 	}
@@ -133,7 +133,7 @@ func retainedManagementTokenRepository(t *testing.T) (*PostgresRepository, conte
 		t.Fatal(err)
 	}
 	verification, err := migrations.VerifyApplied(ctx, connection, loaded)
-	if err != nil || verification.AppliedCount != 28 {
+	if err != nil || verification.AppliedCount != 29 {
 		t.Fatalf("public migration verification: %+v err=%v", verification, err)
 	}
 	migrations.Unlock(ctx, connection)

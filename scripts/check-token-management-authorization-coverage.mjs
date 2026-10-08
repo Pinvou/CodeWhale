@@ -139,6 +139,10 @@ export function checkCoverage({ routeSource, specSource, handlerSource, credenti
     if (route.handler === 'adminCancelLifecyclePlan') assert.deepEqual(Object.keys(op.responses).sort(), ['200', 'default']);
     if (route.handler === 'adminTokenAccountRecoveryAction') assert.deepEqual(Object.keys(op.responses).sort(), ['200', '202', 'default']);
     if (route.handler === 'adminRevokeCredentialLaunch') assert.deepEqual(Object.keys(op.responses).sort(), ['204', 'default']);
+    if (route.handler === 'adminTokenCommandByIdempotencyKey') {
+      const lookup = op.parameters.find((p) => p.in === 'query' && p.name === 'command_type');
+      assert.deepEqual(sorted(lookup.schema.enum), sorted(commands.filter((c) => c.transport === 'COMMAND').map((c) => c.command)), 'key recovery command enum drift');
+    }
   }
   assert.deepEqual(management.components.schemas.TokenCommandEnvelope.properties.command_type.enum.sort(), commands.map((c) => c.command).sort(), 'command enum drift');
   assert.deepEqual(management.components.schemas.TokenCommandPrecheckRequest.properties.command_type.enum.sort(), commands.filter((c) => c.transport === 'COMMAND').map((c) => c.command).sort(), 'direct precheck command enum drift');
