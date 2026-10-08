@@ -2,7 +2,7 @@
 import { constants as fsConstants } from "node:fs";
 import { lstat, open, rename, rm } from "node:fs/promises";
 import { dirname, join, parse, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { isDirectCliEntry } from "../cli-entrypoint.js";
 import { loadEnrollmentRegistryConfig, EnrollmentRegistry } from "../enrollment-registry.js";
 import {
   protectWindowsPath,
@@ -78,6 +78,14 @@ async function secureReadJson(path) {
   } finally {
     await handle.close();
   }
+}
+
+export async function readEnrollmentInventory(path) {
+  const document = await secureReadJson(resolve(path));
+  exactDocument(document, ["schema", "version", "endpoint_ids"], "inventory_document_invalid");
+  if (document.schema !== "pinvou-legacy-endpoint-inventory" || document.version !== 1
+    || !Array.isArray(document.endpoint_ids)) throw cliError("inventory_document_invalid");
+  return document;
 }
 
 async function verifyPrivateAncestors(path) {
@@ -167,11 +175,7 @@ export async function main(argv = process.argv.slice(2), env = process.env, io =
     let result;
     if (args.mode === "coverage") {
       if (!args.input || args.output) throw cliError("coverage_arguments_invalid");
-      const document = await secureReadJson(args.input);
-      exactDocument(document, ["schema", "version", "endpoint_ids"], "inventory_document_invalid");
-      if (document?.schema !== "pinvou-legacy-endpoint-inventory" || document?.version !== 1) {
-        throw cliError("inventory_document_invalid");
-      }
+      const document = await readEnrollmentInventory(args.input);
       const handler = new EnrollmentMigrationHandler({ registry });
       result = { ok: true, ...handler.coverage(document.endpoint_ids) };
     } else if (args.mode === "backup") {
@@ -218,6 +222,6 @@ export async function main(argv = process.argv.slice(2), env = process.env, io =
   }
 }
 
-if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) {
+if (isDirectCliEntry(import.meta.url)) {
   process.exitCode = await main();
 }

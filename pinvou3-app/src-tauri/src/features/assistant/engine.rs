@@ -344,6 +344,15 @@ impl TurnReservation {
             .ensure_reservation_active(self.reservation_id)
     }
 
+    /// Capture this reservation's epoch, not whichever turn is active later.
+    pub(crate) fn generation(&self) -> Result<u64> {
+        let state = self.lifecycle.state.lock();
+        if !state.active || state.active_reservation_id != Some(self.reservation_id) {
+            anyhow::bail!("turn reservation is no longer active");
+        }
+        Ok(state.turn_epoch)
+    }
+
     fn prepare_actual_user_content(&self, actual_user_content: String) -> Result<()> {
         let Some(transcript) = self.transcript.as_ref() else {
             return Ok(());
@@ -515,6 +524,19 @@ pub(crate) fn dispatch_turn_bound_cancel<E: TurnBoundCancelOps + ?Sized>(
     }
 }
 
+/// A remote deadline is not the user's session-wide Stop action. Never latch
+/// a disposition on an unobserved/replaced slot, or cancel unrelated children.
+/// The foundation settles the exact cancelled turn's owned child mailbox.
+pub(crate) fn dispatch_remote_turn_cancel<E: TurnBoundCancelOps + ?Sized>(
+    engine: &E,
+    identity: Option<&TurnIdentity>,
+    mode: deepseek_tui::core::engine::CancelMode,
+) {
+    if let TurnBoundCancelAction::BoundTurn(turn_id) = turn_bound_cancel_action(identity) {
+        engine.cancel_bound_turn(&turn_id, mode);
+    }
+}
+
 /// Session-scoped turn state shared by the command path and the event
 /// forwarder. Every terminal path competes here, so the frontend receives
 /// exactly one `chat:done` for a submitted turn.
@@ -643,6 +665,20 @@ impl TurnLifecycle {
         let state = self.state.lock();
         if state.active || state.terminal_closing {
             Some(state.turn_epoch)
+        } else {
+            None
+        }
+    }
+
+    /// Side effects for a remote cancellation must share the epoch check's lock.
+    pub(crate) fn with_active_generation<T>(
+        &self,
+        generation: u64,
+        action: impl FnOnce() -> T,
+    ) -> Option<T> {
+        let state = self.state.lock();
+        if state.turn_epoch == generation && (state.active || state.terminal_closing) {
+            Some(action())
         } else {
             None
         }
