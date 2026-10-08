@@ -1018,6 +1018,12 @@ try {
     [...new Set(listedEvents)].sort(),
     'every applyNativeChatEvent branch needs a NATIVE_CHAT_EVENTS entry (and vice versa)',
   );
+  // 集合对拍前的去重会掩盖重复项：清单重复一项 = Promise.all 重复订阅
+  // 同一事件（同卡片双投递），分支重复则同一事件双处理。两侧各自不得重复。
+  assert.equal(new Set(listedEvents).size, listedEvents.length,
+    'NATIVE_CHAT_EVENTS must not carry a duplicate entry (a duplicate double-subscribes the event)');
+  assert.equal(new Set(handledEvents).size, handledEvents.length,
+    'applyNativeChatEvent must not carry a duplicate chat:* branch');
 
   console.log('code_native_lane.test.mjs: all assertions passed');
 } finally {

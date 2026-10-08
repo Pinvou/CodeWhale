@@ -1951,4 +1951,23 @@ pub(crate) mod tests {
         );
         std::thread::sleep(Duration::from_millis(100));
     }
+
+    /// kill_note_suffix is the platform-independent half of the tree-kill
+    /// error folding: empty on success, and a failure that names the request
+    /// (the capture-limit paths otherwise claim a termination that did not
+    /// happen). Pure function, so both branches run on every platform —
+    /// unlike the runtime-Windows taskkill branch it annotates.
+    #[test]
+    fn kill_note_suffix_is_empty_on_success_and_names_the_failure() {
+        assert_eq!(kill_note_suffix(Ok(())), "");
+        let note = kill_note_suffix(Err(std::io::Error::other("taskkill budget overrun")));
+        assert!(
+            note.starts_with("; kill tree request failed: "),
+            "the note must read as an appended failure clause, got: {note}"
+        );
+        assert!(
+            note.contains("taskkill budget overrun"),
+            "the note must carry the underlying error, got: {note}"
+        );
+    }
 }

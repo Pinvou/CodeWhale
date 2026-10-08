@@ -694,3 +694,55 @@ for (const [lane, source] of Object.entries(sources)) {
     assert.equal(h.api.getVoiceOperationId(null, 'chat'), 'voiceop-next', 'the next recording start sweeps the never-sent dismissal');
   });
 }
+
+// ── Web enterDraft 收尾（移植上游真切片执行用例）：已完成的首轮提交在
+// enterDraft 时就地关闭并丢弃记录，避免搁浅操作永远不可认领/清扫；
+// 仍在途的提交留给自己的 RPC 结算（在此关闭会把即将送达的消息标成取消）──
+test('web: enterDraft closes the operation of a finished first-turn submission and leaves an in-flight one to its RPC', () => {
+  const webSource = sources.web;
+  const start = webSource.indexOf('  function enterDraft() {');
+  const end = webSource.indexOf('  async function createNewSession()', start);
+  assert.ok(start >= 0 && end > start, 'web bridge must keep the enterDraft function');
+  const state = {
+    chatItems: [{ clientMessageId: 'c-finished' }, { clientMessageId: 'c-inflight' }, { clientMessageId: 'c-novoice' }],
+    activeSessionId: 'web-session',
+    messages: [{ id: 'm1' }],
+    draftEpoch: 4,
+    composerDraft: '',
+    scheduledRunContext: null,
+    scheduledTaskPendingGuide: null,
+    modeState: null,
+  };
+  const sandbox = { console, Math, Date, Promise, Object, Array, JSON, String, Number, Boolean };
+  vm.createContext(sandbox);
+  sandbox.state = state;
+  sandbox.notify = () => {};
+  const calls = { complete: [], abandoned: [] };
+  sandbox.firstTurnSubmissions = Object.create(null);
+  sandbox.firstTurnSubmissions['c-finished'] = { voiceOperationId: 'voiceop-finished', inFlight: false };
+  sandbox.firstTurnSubmissions['c-inflight'] = { voiceOperationId: 'voiceop-inflight', inFlight: true };
+  sandbox.sessionSwitchRequestToken = 0;
+  sandbox.completeVoiceSubmission = (operationId, sessionId, accepted) => calls.complete.push({ operationId, sessionId, accepted });
+  sandbox.abandonVoiceResult = (operationId) => calls.abandoned.push(operationId);
+  sandbox.saveWorkingSetTo = () => {};
+  sandbox.loadWorkingSetFrom = () => {};
+  sandbox.freshBuffer = () => ({});
+  sandbox.getBuffer = () => ({});
+  sandbox.currentDraftModeState = () => 'chat';
+  vm.runInContext(`${webSource.slice(start, end)}\nthis.enterDraft = enterDraft;`, sandbox);
+  sandbox.enterDraft();
+  assert.deepEqual(
+    calls.complete,
+    [{ operationId: 'voiceop-finished', sessionId: null, accepted: false }],
+    "a finished submission's voice operation is un-parked and closed",
+  );
+  assert.deepEqual(calls.abandoned, ['voiceop-finished'], 'the closed operation is abandoned outright');
+  assert.equal('c-finished' in sandbox.firstTurnSubmissions, false, 'the submission record is discarded');
+  assert.equal('c-inflight' in sandbox.firstTurnSubmissions, false, 'the in-flight record is discarded too');
+  assert.equal(
+    calls.complete.some((call) => call.operationId === 'voiceop-inflight'),
+    false,
+    'an in-flight submission is left to its own RPC settlement (closing it here would mark a delivered message cancelled)',
+  );
+  assert.equal(state.draftEpoch, 5, 'enterDraft still advances the draft epoch');
+});
