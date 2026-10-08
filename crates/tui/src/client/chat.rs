@@ -2870,7 +2870,7 @@ fn build_chat_messages_with_reasoning(
                 && wire_reasoning_details.is_none()
             {
                 logging::warn(
-                    "Substituting placeholder reasoning_content for DeepSeek tool-call assistant message",
+                    "Substituting placeholder reasoning_content for a tool-call assistant message on a reasoning-replay route",
                 );
                 reasoning_content = String::from(REASONING_REPLAY_PLACEHOLDER);
                 has_reasoning = true;
@@ -3790,7 +3790,11 @@ fn replayable_reasoning_details(details: &[Value]) -> Vec<Value> {
 /// Accumulates OpenRouter `reasoning_details` entries across stream chunks.
 /// OpenRouter repeats the growing array on successive chunks (the same
 /// cumulative-snapshot shape MiniMax uses), so entries are keyed by `index`
-/// when present, else by `type`, and the last version of each key wins.
+/// when present, else by their position in the incoming array — stable under
+/// the cumulative-snapshot protocol, where a `type` key would collide (two
+/// same-type entries in one array would merge and lose one) and a running
+/// position counter would re-key every reappearance of an entry. The last
+/// version of each key wins.
 #[derive(Default)]
 pub(super) struct ReasoningDetailsBuffer {
     order: Vec<String>,
@@ -3801,18 +3805,15 @@ impl ReasoningDetailsBuffer {
     /// Absorb one chunk's entries; returns true when the snapshot changed.
     fn absorb(&mut self, details: &[Value]) -> bool {
         let mut changed = false;
-        for entry in replayable_reasoning_details(details) {
+        for (position, entry) in replayable_reasoning_details(details)
+            .into_iter()
+            .enumerate()
+        {
             let key = entry
                 .get("index")
                 .and_then(Value::as_u64)
                 .map(|index| index.to_string())
-                .or_else(|| {
-                    entry
-                        .get("type")
-                        .and_then(Value::as_str)
-                        .map(str::to_string)
-                })
-                .unwrap_or_else(|| format!("_pos{}", self.order.len()));
+                .unwrap_or_else(|| format!("_arr{position}"));
             if !self.order.contains(&key) {
                 self.order.push(key.clone());
                 changed = true;
@@ -3961,9 +3962,13 @@ fn parse_chat_message_for_route(
                     })
             });
 
+            // An empty string is no signature; storing Some("") would both
+            // replay `extra_content.google.thought_signature: ""` and block a
+            // real signature captured later for the same call.
             let thought_signature = call
                 .pointer("/extra_content/google/thought_signature")
                 .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
                 .map(str::to_string);
             content_blocks.push(ContentBlock::ToolUse {
                 id,
@@ -4497,8 +4502,14 @@ fn parse_sse_chunk_with_reasoning_style(
                                 })
                             });
 
-                            let thought_signature =
-                                tool_call_thought_signature(tc, delta).map(str::to_string);
+                            // Mirror the continuation-chunk path: an empty
+                            // string is no signature. Storing Some("") here
+                            // would win the engine's first-capture-wins race
+                            // and drop the real signature when it arrives on
+                            // a later chunk of the same tool call.
+                            let thought_signature = tool_call_thought_signature(tc, delta)
+                                .filter(|value| !value.is_empty())
+                                .map(str::to_string);
                             events.push(StreamEvent::ContentBlockStart {
                                 index: block_index,
                                 content_block: ContentBlockStart::ToolUse {
@@ -9028,6 +9039,139 @@ mod google_thought_signature_tests {
             signature.as_deref(),
             Some("SIG-chunk-level"),
             "chunk-level extra_content signature must be captured: {events:?}"
+        );
+    }
+
+    #[test]
+    fn google_empty_signature_on_the_opening_chunk_never_blocks_the_real_one() {
+        // A gateway that emits `"thought_signature": ""` on the chunk
+        // opening the tool call must not win the engine's first-capture-wins
+        // race: storing Some("") would drop the real signature arriving on
+        // the continuation chunk and replay an empty string instead.
+        let opening_chunk = json!({
+            "choices": [{
+                "index": 0,
+                "delta": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "id": "call-g-10",
+                        "type": "function",
+                        "function": { "name": "read", "arguments": "{" },
+                        "extra_content": {
+                            "google": { "thought_signature": "" }
+                        }
+                    }]
+                }
+            }]
+        });
+        let continuation_chunk = json!({
+            "choices": [{
+                "index": 0,
+                "delta": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "function": { "arguments": "}" },
+                        "extra_content": {
+                            "google": { "thought_signature": "SIG-real" }
+                        }
+                    }]
+                }
+            }]
+        });
+        let mut content_index = 0u32;
+        let mut text_started = false;
+        let mut thinking_started = false;
+        let mut tool_indices = std::collections::HashMap::new();
+        let mut reasoning_buffers = std::collections::HashMap::new();
+        let mut inline_tags = InlineReasoningTagState::default();
+        let style = ReasoningStreamStyle::None;
+        let opening_events = parse_sse_chunk_with_reasoning_style(
+            &opening_chunk,
+            &mut content_index,
+            &mut text_started,
+            &mut thinking_started,
+            &mut tool_indices,
+            &mut reasoning_buffers,
+            &mut ReasoningDetailsBuffer::default(),
+            false,
+            &mut inline_tags,
+            style,
+        );
+        let opening_signature = opening_events.iter().find_map(|event| match event {
+            StreamEvent::ContentBlockStart {
+                content_block:
+                    ContentBlockStart::ToolUse {
+                        thought_signature, ..
+                    },
+                ..
+            } => thought_signature.clone(),
+            _ => None,
+        });
+        assert_eq!(
+            opening_signature.as_deref(),
+            None,
+            "an empty opening signature must be stored as absent: {opening_events:?}"
+        );
+        let continuation_events = parse_sse_chunk_with_reasoning_style(
+            &continuation_chunk,
+            &mut content_index,
+            &mut text_started,
+            &mut thinking_started,
+            &mut tool_indices,
+            &mut reasoning_buffers,
+            &mut ReasoningDetailsBuffer::default(),
+            false,
+            &mut inline_tags,
+            style,
+        );
+        let real_signature = continuation_events.iter().find_map(|event| match event {
+            StreamEvent::ContentBlockDelta {
+                delta: Delta::ToolThoughtSignatureDelta { signature },
+                ..
+            } => Some(signature.clone()),
+            _ => None,
+        });
+        assert_eq!(
+            real_signature.as_deref(),
+            Some("SIG-real"),
+            "the real continuation signature must still attach: {continuation_events:?}"
+        );
+    }
+
+    #[test]
+    fn google_nonstream_empty_signature_stays_absent() {
+        // Non-stream mirror of the empty-signature rule: `""` is no
+        // signature, so the ToolUse block must carry None rather than an
+        // empty string that would replay as `thought_signature: ""`.
+        let payload = json!({
+            "id": "chatcmpl-g-empty",
+            "model": "gemini-3.1-pro-preview",
+            "choices": [{
+                "finish_reason": "tool_calls",
+                "message": {"role": "assistant", "content": null, "tool_calls": [{
+                    "id": "call-g-11",
+                    "type": "function",
+                    "function": { "name": "read", "arguments": "{}" },
+                    "extra_content": {
+                        "google": { "thought_signature": "" }
+                    }
+                }]}
+            }]
+        });
+        let message =
+            parse_chat_message_for_route(&payload, ApiProvider::Google, DEFAULT_GOOGLE_BASE_URL)
+                .expect("Google payload parses");
+        let signature = message.content.iter().find_map(|block| match block {
+            ContentBlock::ToolUse {
+                thought_signature, ..
+            } => thought_signature.clone(),
+            _ => None,
+        });
+        assert_eq!(
+            signature.as_deref(),
+            None,
+            "an empty non-stream signature must stay absent: {:?}",
+            message.content
         );
     }
 

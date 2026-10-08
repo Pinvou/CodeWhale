@@ -1614,6 +1614,48 @@ fn openrouter_details_placeholder_entries_never_enter_the_snapshot() {
 }
 
 #[test]
+fn openrouter_details_without_index_key_by_array_position() {
+    // Entries without an `index` are keyed by their position in the
+    // incoming cumulative array. A `type` key would merge two same-type
+    // entries into one (losing the other), and a running counter would
+    // re-key every reappearance of an entry and grow the snapshot.
+    let chunks = vec![
+        serde_json::json!({
+            "choices": [{
+                "index": 0,
+                "delta": {
+                    "reasoning_details": [
+                        { "type": "reasoning.text", "text": "one" },
+                        { "type": "reasoning.text", "text": "two" }
+                    ]
+                }
+            }]
+        }),
+        serde_json::json!({
+            "choices": [{
+                "index": 0,
+                "delta": {
+                    "reasoning_details": [
+                        { "type": "reasoning.text", "text": "one" },
+                        { "type": "reasoning.text", "text": "two!" }
+                    ]
+                }
+            }]
+        }),
+    ];
+    let events = decode_chunks_capturing_details(&chunks, true);
+    let snapshots = details_delta_payloads(&events);
+    assert_eq!(snapshots.len(), 2, "one snapshot per absorbing chunk");
+    let last = snapshots.last().expect("final snapshot");
+    assert_eq!(last.len(), 2, "both index-less entries survive");
+    assert_eq!(last[0]["text"], "one");
+    assert_eq!(
+        last[1]["text"], "two!",
+        "last version of the second entry wins"
+    );
+}
+
+#[test]
 fn non_openrouter_routes_never_emit_details_deltas() {
     let chunks = vec![serde_json::json!({
         "choices": [{
