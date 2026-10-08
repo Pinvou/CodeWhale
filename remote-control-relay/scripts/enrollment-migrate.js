@@ -2,7 +2,7 @@
 import { constants as fsConstants } from "node:fs";
 import { lstat, open, rename, rm } from "node:fs/promises";
 import { dirname, join, parse, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { isDirectCliEntry } from "../cli-entrypoint.js";
 import { loadEnrollmentRegistryConfig, EnrollmentRegistry } from "../enrollment-registry.js";
 import {
   protectWindowsPath,
@@ -222,6 +222,6 @@ export async function main(argv = process.argv.slice(2), env = process.env, io =
   }
 }
 
-if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) {
+if (isDirectCliEntry(import.meta.url)) {
   process.exitCode = await main();
 }

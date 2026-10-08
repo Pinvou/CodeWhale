@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { requestEnrollmentCoverage } from "../remote-control-relay/enrollment-coverage-control.js";
+import { isDirectCliEntry } from "../remote-control-relay/cli-entrypoint.js";
 import { readEnrollmentInventory } from "../remote-control-relay/scripts/enrollment-migrate.js";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -93,7 +94,7 @@ export async function checkLegacyRollback(env = process.env, preflight = (instan
   };
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+if (isDirectCliEntry(import.meta.url)) {
   checkLegacyRollback()
     .then((result) => process.stdout.write(`${JSON.stringify(result)}\n`))
     .catch((error) => {
