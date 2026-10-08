@@ -26,7 +26,10 @@ func (r *PostgresRepository) RequestCancellation(ctx context.Context, usageID, u
 	} else if err != nil {
 		return CancellationResult{}, false, err
 	}
-	if usage.UserID != userID {
+	// Personal cancellation is scoped to the persisted resource, under the
+	// same row lock that serializes dispatch. A personal permission never
+	// authorizes cancellation of an organization invocation.
+	if usage.UserID != userID || usage.OrganizationID != nil {
 		return CancellationResult{}, false, ErrNotFound
 	}
 	var storedFingerprint string

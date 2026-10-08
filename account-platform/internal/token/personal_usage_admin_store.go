@@ -109,6 +109,17 @@ func redactAdminUsageDetail(item AdminUsageRequest) AdminUsageDetail {
 	}
 }
 
+func redactAdminUsageSummary(item AdminUsageRequest) AdminUsageSummary {
+	return AdminUsageSummary{ID: item.ID, OrganizationID: item.OrganizationID,
+		TokenAccountID: item.TokenAccountID, Model: item.Model, ModelID: item.ModelID,
+		CatalogVersion: item.CatalogVersion, ExecutionStatus: item.ExecutionStatus,
+		DeliveryStatus: item.DeliveryStatus, CancelStatus: item.CancelStatus,
+		SettlementStatus: item.SettlementStatus, MaximumMicrocredits: item.MaximumMicrocredits,
+		ActualMicrocredits: item.ActualMicrocredits, ErrorClass: item.ErrorClass,
+		ReconciliationAttempts: item.ReconciliationAttempts, ReconciliationStopped: item.ReconciliationStoppedAt,
+		StartedAt: item.StartedAt, UpdatedAt: item.UpdatedAt}
+}
+
 func adminUsageQuery() string {
 	return `SELECT request.id,request.user_id,request.session_id,request.organization_id,request.token_account_id,
 request.credential_id,request.wallet_id,request.price_version_id,request.hold_id,COALESCE(request.model_snapshot->>'display_name',request.model),request.model_id,request.catalog_version,request.model_capability_version_id,request.protocol_definition_id,request.route_generation,request.status,request.request_fingerprint,

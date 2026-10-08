@@ -609,6 +609,17 @@
     {
       "source": "account-platform/internal/token/personal_execution_routes.go",
       "receiver": "protected",
+      "method": "GET",
+      "path": "/usage-requests/by-idempotency-key",
+      "scope": "personal",
+      "strategy": "domain.personal-permission-and-subject-owned-cancellation",
+      "permissions": [
+        "personal.usage.cancel"
+      ]
+    },
+    {
+      "source": "account-platform/internal/token/personal_execution_routes.go",
+      "receiver": "protected",
       "method": "POST",
       "path": "/usage-requests/:usage_request_id/cancel",
       "scope": "personal",
@@ -876,8 +887,13 @@
     },
     {
       "source": "account-platform/cmd/billing-service/main.go",
-      "name": "personal-hold-expiry",
-      "permission": "internal.job.personal-hold-expiry"
+      "name": "expired-hold-recovery",
+      "permission": "internal.job.expired-hold-recovery"
+    },
+    {
+      "source": "account-platform/cmd/account-service/main.go",
+      "name": "mobile-retention",
+      "permission": "internal.job.mobile-retention"
     },
     {
       "source": "account-platform/cmd/token-gateway/personal_execution.go",
@@ -1028,6 +1044,11 @@
       "name": "approval-resources",
       "source": "account-platform/cmd/approval-resources/main.go",
       "strategy": "workload.bounded-provisioned-approval-resource-administration"
+    },
+    {
+      "name": "newapi-tls",
+      "source": "account-platform/cmd/newapi-tls/main.go",
+      "strategy": "workload.isolated-newapi-tls-proxy-host"
     }
   ]
 }

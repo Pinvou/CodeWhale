@@ -1185,8 +1185,8 @@ assert.equal(
 // third-party failures must retain the original provider's remediation.
 const managedState = {
   activeModelId: 'custom-openai',
-  currentSessionModelId: 'builtin_llmapi',
-  savedModels: [{ id: 'builtin_llmapi', kind: 'builtin_llmapi' }],
+  currentSessionModelId: 'builtin_account_platform',
+  savedModels: [{ id: 'builtin_account_platform', kind: 'builtin_account_platform' }],
 };
 assert.match(
   read('src', 'features', 'codex', 'CodexAcpView.jsx'),
@@ -1218,7 +1218,7 @@ for (const [language, actionable, accessTitle, capacityTitle] of [
   assert.doesNotMatch(historical.message, /管理员|administrator|管理者/);
 }
 const customSessionCard = modelErrors.build('SSE stream request failed: HTTP 401 invalid API key', {
-  language: 'en', modelServiceState: { activeModelId: 'builtin_llmapi', currentSessionModelId: 'custom' },
+  language: 'en', modelServiceState: { activeModelId: 'builtin_account_platform', currentSessionModelId: 'custom' },
 });
 assert.match(customSessionCard.message, /API key/i, 'custom session takes precedence over the managed default');
 for (const error of ['TeamRelay HTTP 403 forbidden', 'H3C EIP HTTP 500 internal server error']) {
@@ -1231,10 +1231,10 @@ try {
   const { projectDeepSeekConversation } = await import('../src/features/conversation/deepseek-conversation.js');
   const { createNativeLane, appendLocalUserMessage, applyNativeChatEvent, projectNativeLane, nativeModelServiceContext } =
     await import('../src/features/codex/code-native-lane.js');
-  const catalog = [{ id: 'custom', name: 'Custom service' }, { id: 'builtin_llmapi', kind: 'builtin_llmapi' }];
+  const catalog = [{ id: 'custom', name: 'Custom service' }, { id: 'builtin_account_platform', kind: 'builtin_account_platform' }];
   for (const [chatModel, nativeModel, managed] of [
-    ['builtin_llmapi', 'custom', false],
-    ['custom', 'builtin_llmapi', true],
+    ['builtin_account_platform', 'custom', false],
+    ['custom', 'builtin_account_platform', true],
   ]) {
     const chatState = { currentSessionModelId: chatModel, activeModelId: chatModel, savedModels: catalog };
     const context = nativeModelServiceContext('native', 'native', nativeModel, chatState.savedModels);
@@ -1245,9 +1245,9 @@ try {
     assert.equal(/API key/.test(card.message), !managed);
     assert.deepEqual(Object.keys(context).sort(), ['currentSessionModelId', 'savedModels']);
   }
-  assert.equal(nativeModelServiceContext('next-native', 'previous-native', 'builtin_llmapi', catalog), null);
+  assert.equal(nativeModelServiceContext('next-native', 'previous-native', 'builtin_account_platform', catalog), null);
   assert.equal(nativeModelServiceContext('native', 'native', null, catalog), null);
-  assert.equal(nativeModelServiceContext(null, null, 'builtin_llmapi', catalog), null);
+  assert.equal(nativeModelServiceContext(null, null, 'builtin_account_platform', catalog), null);
   assert.match(read('src', 'features', 'codex', 'CodexAcpView.jsx'),
     /nativeModelServiceContext\(activeId, nativeControlsOwner, nativeControls\.modelId, nativeSavedModels\)/);
   assert.doesNotMatch(read('src', 'features', 'codex', 'CodexAcpView.jsx'), /modelServiceState: bs,/,

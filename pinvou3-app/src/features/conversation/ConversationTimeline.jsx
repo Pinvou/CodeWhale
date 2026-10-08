@@ -889,14 +889,16 @@ function ConversationTurnView({
   // field, so this stays dead code for them.
   const userQuotes = Array.isArray(turn.userQuotes) ? turn.userQuotes : [];
   const assistantAvailable = assistantResponseAvailable(turn);
-  const walletInsufficient = turn.userError?.kind === 'wallet_insufficient' && turn.userError?.contextType === 'PERSONAL';
+  const walletInsufficient = turn.userError?.kind === 'wallet_insufficient';
+  const organizationInsufficient = walletInsufficient && turn.userError?.contextType === 'ORGANIZATION';
+  const memberQuotaInsufficient = organizationInsufficient && turn.userError?.errorCode === 'MEMBER_QUOTA_INSUFFICIENT';
   const walletTurnCompleted = walletInsufficient && turn.userError?.turnOutcome === 'COMPLETED';
   const rechargeTarget = walletRechargeTarget(turn.userError);
   const userErrorTitle = walletInsufficient
-    ? (walletTurnCompleted ? c.walletInsufficientCompletedTitle : c.walletInsufficientTitle)
+    ? (organizationInsufficient ? (memberQuotaInsufficient ? c.memberQuotaInsufficientTitle : c.organizationWalletInsufficientTitle) : (walletTurnCompleted ? c.walletInsufficientCompletedTitle : c.walletInsufficientTitle))
     : turn.userError?.title;
   const userErrorMessage = walletInsufficient
-    ? (walletTurnCompleted ? c.walletInsufficientCompletedMessage : c.walletInsufficientMessage)
+    ? (organizationInsufficient ? (walletTurnCompleted ? c.organizationInsufficientCompletedMessage : (memberQuotaInsufficient ? c.memberQuotaInsufficientMessage : c.organizationWalletInsufficientMessage)) : (walletTurnCompleted ? c.walletInsufficientCompletedMessage : c.walletInsufficientMessage))
     : turn.userError?.message;
   // Footer/visibility: a turn with no assistant content must not render an
   // avatar-only row. Live repro: a steered message sandwiched between two

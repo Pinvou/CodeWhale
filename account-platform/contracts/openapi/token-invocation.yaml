@@ -185,6 +185,39 @@
         }
       }
     },
+    "/v1/usage-requests/by-idempotency-key": {
+      "get": {
+        "operationId": "token_getPersonalUsageByIdempotencyKey",
+        "x-go-handler": "getPersonalUsageByIdempotencyKey",
+        "x-service": "token",
+        "x-permission": "personal.usage.cancel",
+        "description": "Read-only recovery using the original invocation key. Persisted owner must match and organization must be null. Current context selection and login session do not authorize organization resources. A missing receipt never proves no effect or authorizes a new invocation.",
+        "security": [{ "UserBearer": [] }],
+        "parameters": [{
+          "name": "Idempotency-Key", "in": "header", "required": true,
+          "schema": { "type": "string", "minLength": 16, "maxLength": 128 }
+        }],
+        "responses": {
+          "200": {
+            "description": "The original personal usage identity and current durable states; no dispatch, cancellation write or funds release.",
+            "headers": { "Cache-Control": { "schema": { "type": "string", "const": "no-store" } } },
+            "content": { "application/json": { "schema": {
+              "type": "object", "additionalProperties": false,
+              "required": ["usage_request_id", "execution_status", "delivery_status", "cancel_status", "settlement_status"],
+              "properties": {
+                "usage_request_id": { "type": "string", "format": "uuid" },
+                "execution_status": { "type": "string" },
+                "delivery_status": { "type": "string" },
+                "cancel_status": { "type": "string" },
+                "settlement_status": { "type": "string" }
+              }
+            } } }
+          },
+          "404": { "description": "No readable personal receipt found. The original outcome remains unknown; do not infer no effect or redispatch." },
+          "default": { "description": "Authorization, invalid-key or temporary failure; never a no-effect receipt." }
+        }
+      }
+    },
     "/v1/usage-requests/{usage_request_id}": {
       "get": {
         "operationId": "token_getUsageRequest",
