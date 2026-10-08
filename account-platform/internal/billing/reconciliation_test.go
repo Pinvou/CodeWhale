@@ -6,28 +6,6 @@ import (
 	"time"
 )
 
-func TestCompareReconciliationFindsRequiredDifferenceClasses(t *testing.T) {
-	paidAt := time.Date(2026, 8, 12, 1, 0, 0, 0, time.UTC)
-	internalA := PaymentOrder{ID: uuid.Must(uuid.NewV7()), MerchantOrderNo: "internal-only", AmountFen: 100, Currency: "CNY"}
-	internalB := PaymentOrder{ID: uuid.Must(uuid.NewV7()), MerchantOrderNo: "amount-mismatch", AmountFen: 100, Currency: "CNY"}
-	provider := []ProviderBillEntry{
-		{MerchantOrderNo: "provider-only", ChannelTransactionID: "tx-1", AmountFen: 100, Currency: "CNY", PaidAt: paidAt},
-		{MerchantOrderNo: "amount-mismatch", ChannelTransactionID: "tx-2", AmountFen: 101, Currency: "CNY", PaidAt: paidAt},
-		{MerchantOrderNo: "duplicate-a", ChannelTransactionID: "tx-duplicate", AmountFen: 100, Currency: "CNY", PaidAt: paidAt},
-		{MerchantOrderNo: "duplicate-b", ChannelTransactionID: "tx-duplicate", AmountFen: 100, Currency: "CNY", PaidAt: paidAt},
-	}
-	differences := CompareReconciliation(provider, []PaymentOrder{internalA, internalB})
-	counts := map[string]int{}
-	for _, difference := range differences {
-		counts[difference.CaseType]++
-	}
-	for _, kind := range []string{"PROVIDER_PAID_INTERNAL_MISSING", "INTERNAL_PAID_PROVIDER_MISSING", "AMOUNT_MISMATCH", "DUPLICATE_TRANSACTION"} {
-		if counts[kind] == 0 {
-			t.Fatalf("missing reconciliation case %s: %#v", kind, counts)
-		}
-	}
-}
-
 func TestCompareFourWayReconciliationIncludesRefundAndLedgerDifferences(t *testing.T) {
 	orderID := uuid.Must(uuid.NewV7())
 	provider := []ProviderBillEntry{
@@ -37,7 +15,7 @@ func TestCompareFourWayReconciliationIncludesRefundAndLedgerDifferences(t *testi
 	internal := []ReconciliationInternalFact{
 		{EntryType: "PAYMENT", ProviderReferenceID: "payment-1", MerchantOrderNo: "order-1", PaymentOrderID: orderID, AmountFen: 100, Currency: "CNY", LedgerPresent: false},
 		{EntryType: "REFUND", ProviderReferenceID: "refund-1", MerchantOrderNo: "order-1", PaymentOrderID: orderID, AmountFen: 40, Currency: "CNY", LedgerPresent: true},
-		{EntryType: "CHARGEBACK", ProviderReferenceID: "chargeback-1", MerchantOrderNo: "order-1", PaymentOrderID: orderID, AmountFen: 100, Currency: "CNY", LedgerPresent: true},
+		{EntryType: "CHARGEBACK", ProviderReferenceID: "chargeback-1", EventDateVerified: true, MerchantOrderNo: "order-1", PaymentOrderID: orderID, AmountFen: 100, Currency: "CNY", LedgerPresent: true},
 	}
 	differences := CompareFourWayReconciliation(provider, internal)
 	counts := map[string]int{}
@@ -78,7 +56,7 @@ func TestF03FourWayMerchantOwnership(t *testing.T) {
 	for _, entry := range []string{"PAYMENT", "REFUND", "CHARGEBACK"} {
 		t.Run(entry, func(t *testing.T) {
 			row := ProviderBillEntry{EntryType: entry, ProviderReferenceID: "controlled-reference", ChannelTransactionID: "controlled-reference", MerchantOrderNo: "other-order", AmountFen: 100, Currency: "CNY", Status: "SUCCESS"}
-			fact := ReconciliationInternalFact{EntryType: entry, ProviderReferenceID: "controlled-reference", MerchantOrderNo: "actual-order", AmountFen: 100, Currency: "CNY", LedgerPresent: true}
+			fact := ReconciliationInternalFact{EntryType: entry, EventDateVerified: true, ProviderReferenceID: "controlled-reference", MerchantOrderNo: "actual-order", AmountFen: 100, Currency: "CNY", LedgerPresent: true}
 			prefix := map[string]string{"PAYMENT": "PAID", "REFUND": "REFUND", "CHARGEBACK": "CHARGEBACK"}[entry]
 			counts := map[string]int{}
 			for _, difference := range CompareFourWayReconciliation([]ProviderBillEntry{row}, []ReconciliationInternalFact{fact}) {

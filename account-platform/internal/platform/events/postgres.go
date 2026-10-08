@@ -82,35 +82,30 @@ func (store *PostgresStore) Stats(ctx context.Context) (OutboxStats, error) {
 	return stats, err
 }
 
-func (store *PostgresStore) Claim(ctx context.Context, workerID string, limit int, lease time.Duration) ([]Event, error) {
-	if strings.TrimSpace(workerID) == "" || limit < 1 || limit > 1000 || lease <= 0 {
+func (store *PostgresStore) Claim(ctx context.Context, workerID string, limit int, lease time.Duration, allowedSubjects []string) ([]Event, error) {
+	if strings.TrimSpace(workerID) == "" || limit < 1 || limit > 1000 || lease <= 0 || !validSubjectScope(allowedSubjects) {
 		return nil, errors.New("event outbox claim parameters are invalid")
 	}
+	exact, prefixes := []string{}, []string{}
+	for _, subject := range allowedSubjects {
+		if strings.HasSuffix(subject, ".>") {
+			prefixes = append(prefixes, strings.TrimSuffix(subject, ">"))
+		} else {
+			exact = append(exact, subject)
+		}
+	}
+	// Scope and partition exclusion both apply before acquiring any lease.
+	// Prefix equality uses left/length rather than LIKE so _ and % are literal.
 	query := `
 WITH candidates AS (
     SELECT event_id FROM outbox_events
     WHERE published_at IS NULL AND dead_lettered_at IS NULL AND next_attempt_at <= now()
       AND (locked_until IS NULL OR locked_until < now())
-    ORDER BY occurred_at, event_id
-    FOR UPDATE SKIP LOCKED
-    LIMIT $1
-)
-UPDATE outbox_events event
-SET locked_by=$2, locked_until=now() + ($3 * interval '1 second')
-FROM candidates
-WHERE event.event_id=candidates.event_id
-RETURNING event.event_id,event.event_type,event.aggregate_id,event.aggregate_version,event.payload,event.trace_id,event.occurred_at,event.attempts,event.publication_generation,event.locked_until`
-	var rows pgx.Rows
-	var err error
-	if len(store.excludedEventTypes) == 0 {
-		rows, err = store.pool.Query(ctx, query, limit, workerID, max(1, int(lease.Seconds())))
-	} else {
-		query = `
-WITH candidates AS (
-    SELECT event_id FROM outbox_events
-    WHERE published_at IS NULL AND dead_lettered_at IS NULL AND next_attempt_at <= now()
-      AND (locked_until IS NULL OR locked_until < now())
       AND NOT(event_type=ANY($4::text[]))
+      AND (event_type=ANY($5::text[]) OR EXISTS (
+          SELECT 1 FROM unnest($6::text[]) AS scope(prefix)
+          WHERE left(event_type,length(scope.prefix))=scope.prefix
+      ))
     ORDER BY occurred_at, event_id
     FOR UPDATE SKIP LOCKED
     LIMIT $1
@@ -120,8 +115,11 @@ SET locked_by=$2, locked_until=now() + ($3 * interval '1 second')
 FROM candidates
 WHERE event.event_id=candidates.event_id
 RETURNING event.event_id,event.event_type,event.aggregate_id,event.aggregate_version,event.payload,event.trace_id,event.occurred_at,event.attempts,event.publication_generation,event.locked_until`
-		rows, err = store.pool.Query(ctx, query, limit, workerID, max(1, int(lease.Seconds())), store.excludedEventTypes)
+	excluded := store.excludedEventTypes
+	if excluded == nil {
+		excluded = []string{}
 	}
+	rows, err := store.pool.Query(ctx, query, limit, workerID, max(1, int(lease.Seconds())), excluded, exact, prefixes)
 	if err != nil {
 		return nil, err
 	}

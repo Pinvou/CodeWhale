@@ -1,35 +1,47 @@
 openapi: 3.1.0
-info: {title: Billing four-way reconciliation, version: 1.0.0}
+info:
+  title: Billing four-way reconciliation
+  version: 1.1.0
+  description: Draft contract revision adds dedicated financial permissions and nullable completed_at for unfinished list entries. Clients must accept null on RUNNING or FAILED batches. Synchronous success still requires COMPLETED.
 paths:
   /admin/v1/reconciliation-runs:
     get:
-      x-permission: platform.usage.read
+      x-permission: platform.billing.reconciliation.read
       responses: {'200': {description: Snapshot page, content: {application/json: {schema: {$ref: '#/components/schemas/RunPage'}}}}}
     post:
-      x-permission: platform.usage.reconcile.retry
+      x-permission: platform.billing.reconciliation.run
       x-command-type: BILLING_RECONCILIATION_RUN
+      x-command-policy-version: 2
       requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/RunRequest'}}}}
-      responses: {'200': {description: Completed actual provider bill run, content: {application/json: {schema: {$ref: '#/components/schemas/Run'}}}}}
+      responses:
+        '200': {description: Completed actual provider bill run, content: {application/json: {schema: {$ref: '#/components/schemas/Run'}}}}
+        '503': {description: Durable run outcome requires refreshing batches; no completed success is asserted, content: {application/json: {schema: {$ref: '#/components/schemas/UnknownRunError'}}}}
   /admin/v1/reconciliation-imports:
     post:
-      x-permission: platform.usage.reconcile.retry
+      x-permission: platform.billing.reconciliation.run
       x-command-type: BILLING_PROVIDER_BILL_IMPORT
+      x-max-request-bytes: 67108864
+      x-command-policy-version: 2
       requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/ImportRequest'}}}}
-      responses: {'201': {description: Import or identical provider/date/digest replay, content: {application/json: {schema: {$ref: '#/components/schemas/Run'}}}}}
+      responses:
+        '201': {description: Completed import or identical provider/date/digest replay, content: {application/json: {schema: {$ref: '#/components/schemas/Run'}}}}
+        '413': {description: Request exceeds the dedicated 64 MiB import limit}
+        '503': {description: Durable run outcome requires refreshing batches; retry identical facts to resume, content: {application/json: {schema: {$ref: '#/components/schemas/UnknownRunError'}}}}
   /admin/v1/reconciliation-cases:
     get:
-      x-permission: platform.usage.read
+      x-permission: platform.billing.reconciliation.read
       responses: {'200': {description: Snapshot page, content: {application/json: {schema: {$ref: '#/components/schemas/CasePage'}}}}}
   /admin/v1/reconciliation-runs/{run_id}/cases:
     parameters: [{name: run_id, in: path, required: true, schema: {type: string, format: uuid}}]
     get:
-      x-permission: platform.usage.read
+      x-permission: platform.billing.reconciliation.read
       responses: {'200': {description: Cases scoped to actual run, content: {application/json: {schema: {$ref: '#/components/schemas/CasePage'}}}}}
   /admin/v1/reconciliation-cases/{case_id}/commands:
     parameters: [{name: case_id, in: path, required: true, schema: {type: string, format: uuid}}]
     post:
-      x-permission: platform.usage.reconcile.retry
+      x-permission: platform.billing.reconciliation.manage
       x-command-type: BILLING_RECONCILIATION_CASE_UPDATE
+      x-command-policy-version: 2
       parameters: [{name: Idempotency-Key, in: header, required: true, schema: {type: string, minLength: 8, maxLength: 120}}]
       requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/CaseCommand'}}}}
       responses: {'200': {description: Frozen invocation receipt for exact actor and facts, content: {application/json: {schema: {$ref: '#/components/schemas/Case'}}}}}
@@ -37,9 +49,22 @@ paths:
     post:
       x-permission: internal.billing.reconciliation.run
       requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/RunRequest'}}}}
-      responses: {'200': {description: Completed actual provider bill run, content: {application/json: {schema: {$ref: '#/components/schemas/Run'}}}}}
+      responses:
+        '200': {description: Completed actual provider bill run, content: {application/json: {schema: {$ref: '#/components/schemas/Run'}}}}
+        '503': {description: Durable run outcome requires refreshing batches; no completed success is asserted, content: {application/json: {schema: {$ref: '#/components/schemas/UnknownRunError'}}}}
 components:
   schemas:
+    UnknownRunError:
+      type: object
+      required: [code]
+      properties:
+        code: {type: string, const: COMMAND_RESULT_UNKNOWN}
+        message: {type: string}
+        request_id: {type: string}
+        details:
+          type: object
+          properties:
+            reconciliation_run_id: {type: string, format: uuid}
     RunRequest:
       type: object
       additionalProperties: false
@@ -61,13 +86,13 @@ components:
       required: [merchant_order_no, channel_transaction_id, channel, amount_fen, currency, status, paid_at]
       properties:
         entry_type: {type: string, enum: [PAYMENT, REFUND, CHARGEBACK]}
-        provider_reference_id: {type: string}
-        merchant_order_no: {type: string, minLength: 1}
-        channel_transaction_id: {type: string}
+        provider_reference_id: {type: string, maxLength: 256, x-max-utf8-bytes: 256}
+        merchant_order_no: {type: string, minLength: 1, maxLength: 256, x-max-utf8-bytes: 256}
+        channel_transaction_id: {type: string, maxLength: 256, x-max-utf8-bytes: 256}
         channel: {type: string, enum: [WECHAT, ALIPAY, UNIONPAY]}
         amount_fen: {type: integer, minimum: 1, maximum: 9223372036854775807}
-        currency: {type: string, minLength: 1}
-        status: {type: string}
+        currency: {type: string, minLength: 1, maxLength: 16, x-max-utf8-bytes: 16}
+        status: {type: string, maxLength: 64, x-max-utf8-bytes: 64}
         paid_at: {type: string, format: date-time}
     Run:
       type: object
@@ -86,7 +111,7 @@ components:
         provider_row_count: {type: integer, minimum: 0}
         case_count: {type: integer, minimum: 0}
         started_at: {type: string, format: date-time}
-        completed_at: {type: string, format: date-time}
+        completed_at: {type: [string, 'null'], format: date-time}
     CaseCommand:
       type: object
       additionalProperties: false
@@ -106,7 +131,9 @@ components:
         reconciliation_run_id: {type: string, format: uuid}
         payment_order_id: {type: string, format: uuid}
         merchant_order_no: {type: string}
-        case_type: {type: string}
+        case_type:
+          type: string
+          description: REFUND_DATE_UNVERIFIED and CHARGEBACK_DATE_UNVERIFIED request manual occurrence-date verification when trusted supplier date evidence is absent; they do not assert missing funds or trigger financial disposal.
         status: {type: string, enum: [OPEN, IN_REVIEW, RESOLVED, IGNORED]}
         severity: {type: string, enum: [P0, P1, P2]}
         owner_id: {type: string, format: uuid}

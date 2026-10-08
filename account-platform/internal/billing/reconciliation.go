@@ -16,15 +16,21 @@ import (
 )
 
 type ReconciliationDifference struct {
-	MerchantOrderNo  string
-	PaymentOrderID   *uuid.UUID
-	CaseType         string
-	Severity         string
-	Provider         *ProviderBillEntry
-	Internal         *PaymentOrder
-	InternalSnapshot json.RawMessage
-	RefundSnapshot   json.RawMessage
-	LedgerSnapshot   json.RawMessage
+	MerchantOrderNo    string
+	PaymentOrderID     *uuid.UUID
+	CaseType           string
+	Severity           string
+	Provider           *ProviderBillEntry
+	Internal           *PaymentOrder
+	InternalSnapshot   json.RawMessage
+	RefundSnapshot     json.RawMessage
+	LedgerSnapshot     json.RawMessage
+	IntegrityDigest    string
+	InternalEntryType  string
+	InternalReference  string
+	InternalAmountFen  int64
+	InternalCurrency   string
+	InternalDateDigest string
 }
 
 type ReconciliationRun struct {
@@ -40,45 +46,7 @@ type ReconciliationRun struct {
 	ProviderRowCount int        `json:"provider_row_count"`
 	CaseCount        int        `json:"case_count"`
 	StartedAt        time.Time  `json:"started_at"`
-	CompletedAt      time.Time  `json:"completed_at"`
-}
-
-func CompareReconciliation(provider []ProviderBillEntry, internal []PaymentOrder) []ReconciliationDifference {
-	providerByMerchant := make(map[string]ProviderBillEntry, len(provider))
-	transactionOwners := make(map[string]string, len(provider))
-	differences := make([]ReconciliationDifference, 0)
-	for i := range provider {
-		item := provider[i]
-		if owner, exists := transactionOwners[item.ChannelTransactionID]; exists && owner != item.MerchantOrderNo {
-			copy := item
-			differences = append(differences, ReconciliationDifference{MerchantOrderNo: item.MerchantOrderNo, CaseType: "DUPLICATE_TRANSACTION", Provider: &copy})
-		} else {
-			transactionOwners[item.ChannelTransactionID] = item.MerchantOrderNo
-		}
-		providerByMerchant[item.MerchantOrderNo] = item
-	}
-	internalByMerchant := make(map[string]PaymentOrder, len(internal))
-	for i := range internal {
-		item := internal[i]
-		internalByMerchant[item.MerchantOrderNo] = item
-		providerItem, exists := providerByMerchant[item.MerchantOrderNo]
-		if !exists {
-			copy := item
-			differences = append(differences, ReconciliationDifference{MerchantOrderNo: item.MerchantOrderNo, PaymentOrderID: &copy.ID, CaseType: "INTERNAL_PAID_PROVIDER_MISSING", Internal: &copy})
-			continue
-		}
-		if providerItem.AmountFen != item.AmountFen || providerItem.Currency != item.Currency {
-			providerCopy, internalCopy := providerItem, item
-			differences = append(differences, ReconciliationDifference{MerchantOrderNo: item.MerchantOrderNo, PaymentOrderID: &internalCopy.ID, CaseType: "AMOUNT_MISMATCH", Provider: &providerCopy, Internal: &internalCopy})
-		}
-	}
-	for merchant, item := range providerByMerchant {
-		if _, exists := internalByMerchant[merchant]; !exists {
-			copy := item
-			differences = append(differences, ReconciliationDifference{MerchantOrderNo: merchant, CaseType: "PROVIDER_PAID_INTERNAL_MISSING", Provider: &copy})
-		}
-	}
-	return differences
+	CompletedAt      *time.Time `json:"completed_at"`
 }
 
 func (p *PaymentCoordinator) RunReconciliation(ctx context.Context, channel string, businessDate time.Time) (ReconciliationRun, error) {
@@ -136,134 +104,7 @@ func (p *PaymentCoordinator) ImportProviderBill(ctx context.Context, actorID uui
 }
 
 func (p *PaymentCoordinator) persistReconciliation(ctx context.Context, channel string, date time.Time, providerRows []ProviderBillEntry, sourceMode string, importActorID *uuid.UUID) (ReconciliationRun, error) {
-	var importDigest string
-	isFileImport := sourceMode == "FILE_IMPORT"
-	if isFileImport {
-		encoded, marshalErr := json.Marshal(providerRows)
-		if marshalErr != nil {
-			return ReconciliationRun{}, marshalErr
-		}
-		digest := sha256.Sum256(encoded)
-		importDigest = hex.EncodeToString(digest[:])
-	}
-	// Query the supplier before opening the financial transaction. Bill rows do
-	// not carry customer/SKU authority, so internal order fields cannot fill it.
-	confirmed, err := p.confirmBillPaymentFacts(ctx, providerRows)
-	if err != nil {
-		return ReconciliationRun{}, err
-	}
-	tx, err := p.repository.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
-	if err != nil {
-		return ReconciliationRun{}, err
-	}
-	defer tx.Rollback(ctx)
-	lockKey := p.Capabilities().ProviderID + ":" + p.Capabilities().Version + ":" + channel + ":" + date.Format("2006-01-02") + ":" + sourceMode + ":" + importDigest
-	if err := lockTransactionKey(ctx, tx, "payment-reconciliation", lockKey); err != nil {
-		return ReconciliationRun{}, err
-	}
-	if isFileImport {
-		var existing ReconciliationRun
-		err := tx.QueryRow(ctx, `SELECT run.id,run.provider_id,run.provider_version,run.channel,run.business_date::text,run.source_mode,run.requested_by,run.input_digest,run.status,run.provider_row_count,run.case_count,run.started_at,run.completed_at FROM provider_bill_imports import JOIN reconciliation_runs run ON run.id=import.reconciliation_run_id WHERE import.provider_id=$1 AND import.provider_version=$2 AND import.channel=$3 AND import.business_date=$4 AND import.payload_digest=$5`, p.Capabilities().ProviderID, p.Capabilities().Version, channel, date, importDigest).Scan(&existing.ID, &existing.ProviderID, &existing.ProviderVersion, &existing.Channel, &existing.BusinessDate, &existing.SourceMode, &existing.RequestedBy, &existing.InputDigest, &existing.Status, &existing.ProviderRowCount, &existing.CaseCount, &existing.StartedAt, &existing.CompletedAt)
-		if err == nil {
-			existing.StartedAt = existing.StartedAt.UTC()
-			existing.CompletedAt = existing.CompletedAt.UTC()
-			return existing, tx.Commit(ctx)
-		}
-		if !errors.Is(err, pgx.ErrNoRows) {
-			return ReconciliationRun{}, err
-		}
-	}
-	if sourceMode == "SCHEDULED_API" {
-		var existing ReconciliationRun
-		err := tx.QueryRow(ctx, `SELECT id,provider_id,provider_version,channel,business_date::text,source_mode,requested_by,input_digest,status,provider_row_count,case_count,started_at,completed_at FROM reconciliation_runs WHERE provider_id=$1 AND provider_version=$2 AND channel=$3 AND business_date=$4 AND source_mode='SCHEDULED_API'`, p.Capabilities().ProviderID, p.Capabilities().Version, channel, date).Scan(&existing.ID, &existing.ProviderID, &existing.ProviderVersion, &existing.Channel, &existing.BusinessDate, &existing.SourceMode, &existing.RequestedBy, &existing.InputDigest, &existing.Status, &existing.ProviderRowCount, &existing.CaseCount, &existing.StartedAt, &existing.CompletedAt)
-		if err == nil {
-			existing.StartedAt = existing.StartedAt.UTC()
-			existing.CompletedAt = existing.CompletedAt.UTC()
-			return existing, tx.Commit(ctx)
-		}
-		if !errors.Is(err, pgx.ErrNoRows) {
-			return ReconciliationRun{}, err
-		}
-	}
-	// PostgreSQL persists microsecond UTC precision; return the same receipt
-	// timestamp on the first response and a later durable replay.
-	now := p.now().UTC().Truncate(time.Microsecond)
-	for _, row := range providerRows {
-		if err := p.mergeProviderBillEvidenceWithinTransaction(ctx, tx, row, confirmed[billPaymentKey(row)], now); err != nil {
-			return ReconciliationRun{}, err
-		}
-	}
-	start, end := reconciliationBusinessDateRange(date)
-	internalFacts, err := p.listFourWayReconciliationFacts(ctx, tx, channel, start, end)
-	if err != nil {
-		return ReconciliationRun{}, err
-	}
-	differences := CompareFourWayReconciliation(providerRows, internalFacts)
-	run := ReconciliationRun{ID: uuid.Must(uuid.NewV7()), ProviderID: p.Capabilities().ProviderID, ProviderVersion: p.Capabilities().Version, Channel: channel, BusinessDate: date.Format("2006-01-02"), SourceMode: sourceMode, RequestedBy: importActorID, Status: "COMPLETED", ProviderRowCount: len(providerRows), CaseCount: len(differences), StartedAt: now, CompletedAt: now}
-	if importDigest != "" {
-		run.InputDigest = &importDigest
-	}
-	_, err = tx.Exec(ctx, `INSERT INTO reconciliation_runs(id,provider_id,provider_version,channel,business_date,source_mode,requested_by,input_digest,status,provider_row_count,case_count,started_at,completed_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,'COMPLETED',$9,$10,$11,$11)`, run.ID, run.ProviderID, run.ProviderVersion, channel, date, sourceMode, importActorID, run.InputDigest, len(providerRows), len(differences), now)
-	if err != nil {
-		return ReconciliationRun{}, err
-	}
-	for index, row := range providerRows {
-		rawSnapshot, marshalErr := json.Marshal(row)
-		if marshalErr != nil {
-			return ReconciliationRun{}, marshalErr
-		}
-		_, err = tx.Exec(ctx, `INSERT INTO reconciliation_provider_rows(reconciliation_run_id,row_number,entry_type,provider_reference_id,channel_transaction_id,merchant_order_no,channel,amount_fen,currency,status,paid_at,raw_snapshot,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`, run.ID, index+1, normalizedBillEntryType(row), billReference(row), row.ChannelTransactionID, row.MerchantOrderNo, channel, row.AmountFen, row.Currency, row.Status, row.PaidAt, rawSnapshot, now)
-		if err != nil {
-			return ReconciliationRun{}, err
-		}
-	}
-	if isFileImport {
-		importID := uuid.Must(uuid.NewV7())
-		_, err = tx.Exec(ctx, `INSERT INTO provider_bill_imports(id,provider_id,provider_version,channel,business_date,payload_digest,row_count,actor_id,reconciliation_run_id,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`, importID, p.Capabilities().ProviderID, p.Capabilities().Version, channel, date, importDigest, len(providerRows), *importActorID, run.ID, now)
-		if err != nil {
-			return ReconciliationRun{}, err
-		}
-		for index, row := range providerRows {
-			_, err = tx.Exec(ctx, `INSERT INTO provider_bill_import_rows(import_id,row_number,merchant_order_no,provider_transaction_id,amount_fen,currency,status,paid_at,entry_type,provider_reference_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT(import_id,row_number) DO NOTHING`, importID, index+1, row.MerchantOrderNo, row.ChannelTransactionID, row.AmountFen, row.Currency, row.Status, row.PaidAt, normalizedBillEntryType(row), billReference(row))
-			if err != nil {
-				return ReconciliationRun{}, err
-			}
-		}
-	}
-	for _, difference := range differences {
-		providerJSON := json.RawMessage(`{}`)
-		if difference.Provider != nil {
-			providerJSON, _ = json.Marshal(difference.Provider)
-		}
-		internalJSON := difference.InternalSnapshot
-		if len(internalJSON) == 0 {
-			internalJSON = json.RawMessage(`{}`)
-			if difference.Internal != nil {
-				internalJSON, _ = json.Marshal(difference.Internal)
-			}
-		}
-		refundJSON := difference.RefundSnapshot
-		if len(refundJSON) == 0 {
-			refundJSON = json.RawMessage(`{}`)
-		}
-		ledgerJSON := difference.LedgerSnapshot
-		if len(ledgerJSON) == 0 {
-			ledgerJSON = json.RawMessage(`{}`)
-		}
-		caseID := uuid.Must(uuid.NewV7())
-		claim, response, mitigation, resolution := paymentAnomalyDeadlines(now, difference.Severity)
-		_, err = tx.Exec(ctx, `INSERT INTO manual_review_cases(id,domain,case_type,resource_type,resource_id,severity,status,created_at,claim_due_at,first_response_due_at,mitigation_due_at,resolution_due_at,updated_at) VALUES($1,'BILLING','RECONCILIATION_DIFFERENCE','RECONCILIATION_CASE',$1,$2,'OPEN',$3,$4,$5,$6,$7,$3)`, caseID, difference.Severity, now, claim, response, mitigation, resolution)
-		if err == nil {
-			_, err = tx.Exec(ctx, `INSERT INTO reconciliation_cases(id,reconciliation_run_id,payment_order_id,merchant_order_no,case_type,status,severity,provider_snapshot,internal_snapshot,refund_snapshot,ledger_snapshot,manual_review_case_id,created_at,updated_at) VALUES($1,$2,$3,$4,$5,'OPEN',$6,$7,$8,$9,$10,$1,$11,$11)`, caseID, run.ID, difference.PaymentOrderID, difference.MerchantOrderNo, difference.CaseType, difference.Severity, providerJSON, internalJSON, refundJSON, ledgerJSON, now)
-		}
-		if err == nil {
-			err = appendManualReviewEvent(ctx, tx, caseID, "CREATED", importActorID, map[string]any{"case_type": difference.CaseType, "reconciliation_run_id": run.ID}, now)
-		}
-		if err != nil {
-			return ReconciliationRun{}, err
-		}
-	}
-	return run, tx.Commit(ctx)
+	return p.runReconciliationPipeline(ctx, channel, date, providerRows, sourceMode, importActorID)
 }
 
 func (p *PaymentCoordinator) mergeProviderBillEvidenceWithinTransaction(ctx context.Context, tx pgx.Tx, row ProviderBillEntry, confirmed *ProviderOrder, receivedAt time.Time) error {
@@ -330,6 +171,13 @@ type ReconciliationInternalFact struct {
 	RefundSnapshot      json.RawMessage
 	LedgerSnapshot      json.RawMessage
 	LedgerPresent       bool
+	LedgerValid         bool
+	IntegrityCaseType   string
+	IntegrityDigest     string
+	EventDateVerified   bool
+	EventDateConflict   bool
+	EventDateDigest     string
+	EventDateSnapshot   json.RawMessage
 }
 
 func normalizedBillEntryType(item ProviderBillEntry) string {
@@ -400,6 +248,9 @@ func CompareFourWayReconciliation(provider []ProviderBillEntry, internal []Recon
 		caseTypePrefix := map[string]string{"PAYMENT": "PAID", "REFUND": "REFUND", "CHARGEBACK": "CHARGEBACK"}[fact.EntryType]
 		if !exists || providerItem.MerchantOrderNo != fact.MerchantOrderNo {
 			caseType := "INTERNAL_" + caseTypePrefix + "_PROVIDER_MISSING"
+			if fact.EntryType != "PAYMENT" && !fact.EventDateVerified {
+				caseType = fact.EntryType + "_DATE_UNVERIFIED"
+			}
 			differences = append(differences, differenceFromFact(fact, caseType, "P1", nil))
 		} else if providerItem.AmountFen != fact.AmountFen || !strings.EqualFold(providerItem.Currency, fact.Currency) {
 			caseType := "AMOUNT_MISMATCH"
@@ -408,6 +259,12 @@ func CompareFourWayReconciliation(provider []ProviderBillEntry, internal []Recon
 			}
 			copy := providerItem
 			differences = append(differences, differenceFromFact(fact, caseType, "P0", &copy))
+		}
+		if fact.EventDateConflict {
+			differences = append(differences, differenceFromFact(fact, fact.EntryType+"_DATE_UNVERIFIED", "P1", nil))
+		}
+		if fact.IntegrityCaseType != "" {
+			differences = append(differences, differenceFromFact(fact, fact.IntegrityCaseType, "P0", nil))
 		}
 		if !fact.LedgerPresent {
 			caseType := map[string]string{"PAYMENT": "PAYMENT_LEDGER_MISSING", "REFUND": "REFUND_LEDGER_MISSING", "CHARGEBACK": "CHARGEBACK_LEDGER_MISSING"}[fact.EntryType]
@@ -428,7 +285,7 @@ func CompareFourWayReconciliation(provider []ProviderBillEntry, internal []Recon
 
 func differenceFromFact(fact ReconciliationInternalFact, caseType, severity string, provider *ProviderBillEntry) ReconciliationDifference {
 	orderID := fact.PaymentOrderID
-	return ReconciliationDifference{MerchantOrderNo: fact.MerchantOrderNo, PaymentOrderID: &orderID, CaseType: caseType, Severity: severity, Provider: provider, InternalSnapshot: fact.InternalSnapshot, RefundSnapshot: fact.RefundSnapshot, LedgerSnapshot: fact.LedgerSnapshot}
+	return ReconciliationDifference{MerchantOrderNo: fact.MerchantOrderNo, PaymentOrderID: &orderID, CaseType: caseType, Severity: severity, Provider: provider, InternalSnapshot: fact.InternalSnapshot, RefundSnapshot: fact.RefundSnapshot, LedgerSnapshot: fact.LedgerSnapshot, IntegrityDigest: fact.IntegrityDigest, InternalEntryType: fact.EntryType, InternalReference: fact.ProviderReferenceID, InternalAmountFen: fact.AmountFen, InternalCurrency: fact.Currency, InternalDateDigest: fact.EventDateDigest}
 }
 
 type reconciliationQuerier interface {
@@ -436,6 +293,15 @@ type reconciliationQuerier interface {
 }
 
 func (p *PaymentCoordinator) listFourWayReconciliationFacts(ctx context.Context, querier reconciliationQuerier, channel string, start, end time.Time) ([]ReconciliationInternalFact, error) {
+	return listFourWayFactsForProvider(ctx, querier, channel, start, end, p.Capabilities().ProviderID, p.Capabilities().Version)
+}
+
+func listFourWayFactsForProvider(ctx context.Context, querier reconciliationQuerier, channel string, start, end time.Time, providerID, providerVersion string, externalRows ...[]ProviderBillEntry) ([]ReconciliationInternalFact, error) {
+	var supplied []ProviderBillEntry
+	if len(externalRows) > 0 {
+		supplied = externalRows[0]
+	}
+	references := reconciliationReversalReferences(supplied)
 	rows, err := querier.Query(ctx, `
 SELECT 'PAYMENT',transaction.provider_transaction_id,payment.merchant_order_no,payment.id,transaction.amount_fen,transaction.currency,
        jsonb_build_object('payment_order',to_jsonb(payment),'payment_transaction',to_jsonb(transaction)),NULL,
@@ -447,20 +313,20 @@ SELECT 'REFUND',refund.channel_refund_id,payment.merchant_order_no,payment.id,re
        jsonb_build_object('payment_order_id',payment.id,'payment_transaction_id',refund.payment_transaction_id),to_jsonb(refund),
        COALESCE((SELECT jsonb_agg(to_jsonb(entry) ORDER BY entry.created_at,entry.id) FROM journal_entries entry WHERE entry.business_reference='refund:'||refund.id::text),'[]'::jsonb)
 FROM refunds refund JOIN payment_orders payment ON payment.id=refund.payment_order_id
-WHERE payment.channel=$1 AND refund.updated_at>=$2 AND refund.updated_at<$3 AND refund.status='SUCCEEDED' AND refund.channel_refund_id IS NOT NULL AND payment.provider_id=$4 AND payment.provider_version=$5
+WHERE payment.channel=$1 AND ((refund.updated_at>=$2 AND refund.updated_at<$3) OR (refund.channel_refund_id,payment.merchant_order_no) IN (SELECT reference,merchant FROM jsonb_to_recordset($6::jsonb) AS supplied(reference text,merchant text,kind text) WHERE kind='REFUND')) AND refund.status='SUCCEEDED' AND refund.channel_refund_id IS NOT NULL AND payment.provider_id=$4 AND payment.provider_version=$5
 UNION ALL
 SELECT 'REFUND',forced.provider_refund_id,payment.merchant_order_no,payment.id,forced.amount_fen,payment.currency,
        jsonb_build_object('payment_order_id',payment.id,'payment_transaction_id',forced.payment_transaction_id),to_jsonb(forced),
        COALESCE((SELECT jsonb_agg(to_jsonb(entry) ORDER BY entry.created_at,entry.id) FROM journal_entries entry WHERE entry.business_reference='forced-refund:'||forced.id::text),'[]'::jsonb)
 FROM forced_refund_cases forced JOIN payment_orders payment ON payment.id=forced.payment_order_id
-WHERE payment.channel=$1 AND forced.resolved_at>=$2 AND forced.resolved_at<$3 AND forced.resolution_code='CONFIRM_FORCED_REFUND' AND payment.provider_id=$4 AND payment.provider_version=$5
+WHERE payment.channel=$1 AND ((forced.resolved_at>=$2 AND forced.resolved_at<$3) OR (forced.provider_refund_id,payment.merchant_order_no) IN (SELECT reference,merchant FROM jsonb_to_recordset($6::jsonb) AS supplied(reference text,merchant text,kind text) WHERE kind='REFUND')) AND forced.resolution_code='CONFIRM_FORCED_REFUND' AND payment.provider_id=$4 AND payment.provider_version=$5
 UNION ALL
 SELECT 'CHARGEBACK',chargeback.provider_chargeback_id,payment.merchant_order_no,payment.id,transaction.amount_fen,transaction.currency,
        jsonb_build_object('payment_order_id',payment.id,'payment_transaction_id',chargeback.payment_transaction_id),to_jsonb(chargeback),
        COALESCE((SELECT jsonb_agg(to_jsonb(entry) ORDER BY entry.created_at,entry.id) FROM journal_entries entry WHERE entry.business_reference='payment-transaction:'||chargeback.payment_transaction_id::text||':chargeback:'||chargeback.provider_chargeback_id),'[]'::jsonb)
 FROM chargeback_cases chargeback JOIN payment_orders payment ON payment.id=chargeback.payment_order_id JOIN payment_transactions transaction ON transaction.id=chargeback.payment_transaction_id
-WHERE payment.channel=$1 AND chargeback.resolved_at>=$2 AND chargeback.resolved_at<$3 AND chargeback.status='CONFIRMED' AND transaction.provider_id=$4 AND transaction.provider_version=$5
-ORDER BY 1,2`, channel, start, end, p.Capabilities().ProviderID, p.Capabilities().Version)
+WHERE payment.channel=$1 AND ((chargeback.resolved_at>=$2 AND chargeback.resolved_at<$3) OR (chargeback.provider_chargeback_id,payment.merchant_order_no) IN (SELECT reference,merchant FROM jsonb_to_recordset($6::jsonb) AS supplied(reference text,merchant text,kind text) WHERE kind='CHARGEBACK')) AND chargeback.status='CONFIRMED' AND transaction.provider_id=$4 AND transaction.provider_version=$5
+ORDER BY 1,2`, channel, start, end, providerID, providerVersion, references)
 	if err != nil {
 		return nil, err
 	}
@@ -474,7 +340,11 @@ ORDER BY 1,2`, channel, start, end, p.Capabilities().ProviderID, p.Capabilities(
 		fact.LedgerPresent = len(fact.LedgerSnapshot) > 0 && string(fact.LedgerSnapshot) != "[]"
 		facts = append(facts, fact)
 	}
-	return facts, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	rows.Close()
+	return classifyReversalEventDates(ctx, querier, facts, channel, start, end, providerID, providerVersion, supplied)
 }
 
 func (p *PaymentCoordinator) listPaidOrders(ctx context.Context, channel string, start, end time.Time) ([]PaymentOrder, error) {
@@ -499,15 +369,23 @@ type scheduledPaymentReconciler interface {
 	RunScheduledReconciliation(context.Context, string, time.Time) (ReconciliationRun, error)
 }
 
+const (
+	reconciliationRecoveryInterval    = time.Minute
+	reconciliationObservationInterval = time.Hour
+	reconciliationLookbackDays        = 7
+	reconciliationRecoverySlice       = 10 * time.Second
+)
+
 type DailyPaymentReconciliationWorker struct {
-	payments scheduledPaymentReconciler
-	logger   *slog.Logger
-	now      func() time.Time
-	interval time.Duration
+	payments        scheduledPaymentReconciler
+	logger          *slog.Logger
+	now             func() time.Time
+	interval        time.Duration
+	lastScheduledAt time.Time
 }
 
 func NewDailyPaymentReconciliationWorker(payments scheduledPaymentReconciler) *DailyPaymentReconciliationWorker {
-	return &DailyPaymentReconciliationWorker{payments: payments, logger: slog.Default(), now: time.Now, interval: time.Hour}
+	return &DailyPaymentReconciliationWorker{payments: payments, logger: slog.Default(), now: time.Now, interval: reconciliationRecoveryInterval}
 }
 
 func reconciliationBusinessDate(now time.Time) time.Time {
@@ -541,13 +419,28 @@ func (w *DailyPaymentReconciliationWorker) Run(ctx context.Context) {
 }
 
 func (w *DailyPaymentReconciliationWorker) runOnce(ctx context.Context) {
+	if recovery, ok := w.payments.(interface{ recoverReconciliationRuns(context.Context) error }); ok {
+		if err := recovery.recoverReconciliationRuns(ctx); err != nil {
+			w.logger.Error("reconciliation recovery deferred", "code", "RECOVERY_REQUIRED")
+		}
+	}
 	if w.payments == nil || !w.payments.Capabilities().BillSupported {
 		return
 	}
-	date := reconciliationBusinessDate(w.now())
-	for _, channel := range w.payments.Capabilities().Channels {
-		if _, err := w.payments.RunScheduledReconciliation(ctx, channel, date); err != nil {
-			w.logger.Error("scheduled payment reconciliation failed", "channel", channel, "business_date", date.Format("2006-01-02"), "error", safePaymentReconciliationError(err))
+	now := w.now()
+	if !w.lastScheduledAt.IsZero() && now.Sub(w.lastScheduledAt) < reconciliationObservationInterval {
+		return
+	}
+	w.lastScheduledAt = now
+	for lookback := 0; lookback < reconciliationLookbackDays; lookback++ {
+		date := reconciliationBusinessDate(now).AddDate(0, 0, -lookback)
+		for _, channel := range w.payments.Capabilities().Channels {
+			if ctx.Err() != nil {
+				return
+			}
+			if _, err := w.payments.RunScheduledReconciliation(ctx, channel, date); err != nil {
+				w.logger.Error("scheduled payment reconciliation failed", "channel", channel, "business_date", date.Format("2006-01-02"), "error", safePaymentReconciliationError(err))
+			}
 		}
 	}
 }
@@ -599,7 +492,7 @@ func (p *PaymentCoordinator) confirmBillPaymentFacts(ctx context.Context, rows [
 		}
 		fact, err := providerCall(ctx, p, "ORDER_QUERY", order.Channel, false, providerCallScope(order), func() (ProviderOrder, error) { return p.provider.Get(ctx, order.MerchantOrderNo) })
 		if err != nil {
-			continue
+			return nil, errors.Join(ErrPaymentProvider, err)
 		}
 		if providerBillMatchesQuery(row, fact) && providerMatchesOrder(fact, order) {
 			confirmed[key] = &fact

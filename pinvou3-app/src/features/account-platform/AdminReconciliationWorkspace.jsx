@@ -1,7 +1,8 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { reconciliationCopy } from '../../shared/i18n.js';
 import { requireFinanceCollection, requireFinanceID } from './finance-contract.js';
-import { RECONCILIATION_ACTIONS, reconciliationCommand, reconciliationDayRange, reconciliationImportItems, requireReconciliationDate } from './reconciliation-contract.js';
+import { RECONCILIATION_ACTIONS, reconciliationCommand, reconciliationDayRange, reconciliationImportItems, reconciliationCaseLabel, requireReconciliationDate } from './reconciliation-contract.js';
+import { loadFinancePage } from './admin-finance-pagination.js';
 import { useFinanceOperation } from './useFinanceOperation.js';
 
 function today() {
@@ -27,7 +28,7 @@ function CaseActions({ client, item, owner, copy, canWrite, onChanged }) {
   const disabled = !canWrite || op.busy || op.unknown;
   const labels = ['claim', 'assign', 'setRepair', 'resolve', 'ignore', 'reopen'];
   return <section className="adm-panel">
-    <h3>{item.merchant_order_no} · {item.case_type}</h3><p>{copy.status}: {item.status}</p>
+    <h3>{item.merchant_order_no} · {reconciliationCaseLabel(item.case_type, copy)}</h3><p>{copy.status}: {item.status}</p>
     <details><summary>{copy.snapshots}</summary>{['provider_snapshot', 'internal_snapshot', 'refund_snapshot', 'ledger_snapshot'].map(key => <pre key={key}>{JSON.stringify(item[key] || {}, null, 2)}</pre>)}</details>
     {canWrite && <><label>{copy.action}<select disabled={disabled} value={action} onChange={event => setAction(event.target.value)}>{RECONCILIATION_ACTIONS.map((value, index) => <option key={value} value={value}>{copy[labels[index]]}</option>)}</select></label>
       {action === 'ASSIGN' && <label>{copy.owner}<input disabled={disabled} value={fields.owner} onChange={update('owner')} /></label>}
@@ -41,14 +42,19 @@ function CaseActions({ client, item, owner, copy, canWrite, onChanged }) {
 
 function Workspace({ client, me, copy }) {
   const owner = `${me.user_id}:${me.platform_authorization_version || me.active_context?.platform_authorization_version || 0}`;
-  const canWrite = (me.platform_permissions || []).includes('platform.usage.reconcile.retry');
-  const op = useFinanceOperation(owner, { ...copy, permissions: copy.permission }, client, 'reconciliation-list');
+  const permissions = me.platform_permissions || [];
+  const canRun = permissions.includes('platform.billing.reconciliation.run');
+  const canWrite = permissions.includes('platform.billing.reconciliation.manage');
   const [tab, setTab] = useState('runs');
   const [channel, setChannel] = useState('WECHAT');
   const [date, setDate] = useState(today);
   const [bill, setBill] = useState('[]');
   const [runID, setRunID] = useState('');
   const [status, setStatus] = useState('');
+  const filterKey = JSON.stringify([tab, channel, date, runID, status]);
+  const op = useFinanceOperation(owner, { ...copy, permissions: copy.permission }, client, `reconciliation-list:${filterKey}`);
+  const currentFilter = useRef(filterKey);
+  currentFilter.current = filterKey;
   const [page, setPage] = useState(null);
   const [cursor, setCursor] = useState('');
   const [history, setHistory] = useState([]);
@@ -66,15 +72,17 @@ function Workspace({ client, me, copy }) {
     try {
       if (tab === 'cases' && runID) requireFinanceID(runID);
       const range = tab === 'runs' ? reconciliationDayRange(date) : null;
-      const value = await op.read(() => tab === 'runs' ? client.reconciliationRuns({ channel, ...range, cursor: next }) : client.reconciliationCases({ run_id: runID, status, cursor: next }));
-      if (value) {
+      const query = tab === 'runs' ? { channel, ...range, cursor: next } : { run_id: runID, status, cursor: next };
+      const result = await op.read(() => loadFinancePage(query, filters => tab === 'runs' ? client.reconciliationRuns(filters) : client.reconciliationCases(filters), () => { if (currentFilter.current === filterKey) { setHistory([]); setCursor(''); } }), error => error.status === 403 ? 'permissions' : error.status === 400 ? 'sourceChanged' : 'unavailable');
+      if (result && currentFilter.current === filterKey) {
+        const value = result.value;
         requireFinanceCollection(value);
         value.items.forEach(item => requireFinanceID(tab === 'runs' ? item.reconciliation_run_id : item.case_id));
-        setPage({ ...value, tab }); setCursor(next);
+        setPage({ ...value, tab, filterKey }); setCursor(result.query.cursor);
       }
     } catch { setInvalid(true); }
   };
-  useEffect(() => { setPage(null); setSelected(null); setHistory([]); void load(''); }, [tab]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { setPage(null); setSelected(null); setHistory([]); setCursor(''); void load(''); }, [tab, channel, date, runID, status]); // eslint-disable-line react-hooks/exhaustive-deps
   const write = async imported => {
     const epoch = generation.current;
     setInvalid(false); setWriteError(''); setWriteNotice(''); setWriting(true);
@@ -89,15 +97,15 @@ function Workspace({ client, me, copy }) {
     } finally { if (epoch === generation.current) setWriting(false); }
   };
   const busy = op.busy || writing;
-  const visiblePage = page?.tab === tab ? page : null;
+  const visiblePage = page?.filterKey === filterKey ? page : null;
   return <section className="adm-panel"><h2>{copy.title}</h2>
     <nav>{['runs', 'cases'].map(value => <button key={value} disabled={busy} aria-pressed={tab === value} onClick={() => setTab(value)}>{copy[value]}</button>)}</nav>
     {tab === 'runs' ? <><label>{copy.channel}<select disabled={busy} value={channel} onChange={event => setChannel(event.target.value)}>{['WECHAT', 'ALIPAY', 'UNIONPAY'].map(value => <option key={value}>{value}</option>)}</select></label><label>{copy.businessDate}<input type="date" disabled={busy} value={date} onChange={event => setDate(event.target.value)} /></label>
-      {canWrite && <><button disabled={busy} onClick={() => void write(false)}>{copy.run}</button><label>{copy.importedItems}<textarea disabled={busy} value={bill} onChange={event => setBill(event.target.value)} /></label><button disabled={busy} onClick={() => void write(true)}>{copy.import}</button></>}
+      {canRun && <><button disabled={busy} onClick={() => void write(false)}>{copy.run}</button><label>{copy.importedItems}<textarea disabled={busy} value={bill} onChange={event => setBill(event.target.value)} /></label><button disabled={busy} onClick={() => void write(true)}>{copy.import}</button></>}
     </> : <><label>{copy.runs}<input disabled={busy} value={runID} onChange={event => setRunID(event.target.value)} /></label><label>{copy.status}<select disabled={busy} value={status} onChange={event => setStatus(event.target.value)}><option value="">{copy.all}</option>{['OPEN', 'IN_REVIEW', 'RESOLVED', 'IGNORED'].map(value => <option key={value}>{value}</option>)}</select></label></>}
     <button disabled={busy} onClick={() => { setHistory([]); void load(''); }}>{copy.refresh}</button>
     {(invalid || op.error || writeError) && <p role="alert">{invalid ? copy.invalid : op.error || writeError}</p>}{writeNotice && <p role="status">{writeNotice}</p>}{busy && <p role="status">{copy.loading}</p>}
-    {visiblePage && <table><thead><tr><th>{tab === 'runs' ? copy.businessDate : copy.merchant}</th><th>{copy.status}</th><th>{tab === 'runs' ? copy.count : copy.caseType}</th><th>{copy.action}</th></tr></thead><tbody>{visiblePage.items.map(item => <tr key={tab === 'runs' ? item.reconciliation_run_id : item.case_id}><td>{tab === 'runs' ? item.business_date : item.merchant_order_no}</td><td>{item.status}</td><td>{tab === 'runs' ? item.case_count : item.case_type}</td><td><button disabled={busy} onClick={() => { if (tab === 'runs') { setRunID(item.reconciliation_run_id); setTab('cases'); } else setSelected(item); }}>{copy.cases}</button></td></tr>)}</tbody></table>}
+    {visiblePage && <table><thead><tr><th>{tab === 'runs' ? copy.businessDate : copy.merchant}</th><th>{copy.status}</th><th>{tab === 'runs' ? copy.count : copy.caseType}</th>{tab === 'runs' && <><th>{copy.rows}</th><th>{copy.source}</th></>}<th>{copy.action}</th></tr></thead><tbody>{visiblePage.items.map(item => <tr key={tab === 'runs' ? item.reconciliation_run_id : item.case_id}><td>{tab === 'runs' ? item.business_date : item.merchant_order_no}</td><td>{item.status}</td><td>{tab === 'runs' ? item.case_count : reconciliationCaseLabel(item.case_type, copy)}</td>{tab === 'runs' && <><td>{item.provider_row_count}</td><td>{item.source_mode}</td></>}<td><button disabled={busy} onClick={() => { if (tab === 'runs') { setRunID(item.reconciliation_run_id); setTab('cases'); } else setSelected(item); }}>{copy.cases}</button></td></tr>)}</tbody></table>}
     {visiblePage?.items.length === 0 && <p>{copy.empty}</p>}
     <nav><button disabled={busy || !history.length} onClick={() => { const values = [...history]; const next = values.pop(); setHistory(values); void load(next); }}>{copy.previous}</button><button disabled={busy || !visiblePage?.next_cursor} onClick={() => { setHistory(values => [...values, cursor]); void load(visiblePage.next_cursor); }}>{copy.next}</button></nav>
     {selected && <CaseActions key={selected.case_id} client={client} item={selected} owner={owner} copy={copy} canWrite={canWrite} onChanged={item => { setSelected(item); setPage(current => current && ({ ...current, items: current.items.map(value => value.case_id === item.case_id ? item : value) })); }} />}

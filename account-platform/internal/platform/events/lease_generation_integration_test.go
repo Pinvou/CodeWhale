@@ -84,7 +84,7 @@ func TestPostgresOrdinaryDeliveryLeaseAndGeneration(t *testing.T) {
 		if err := tx.Commit(ctx); err != nil {
 			t.Fatal(err)
 		}
-		claimed, err := store.Claim(ctx, "same-worker", 1, time.Second)
+		claimed, err := store.Claim(ctx, "same-worker", 1, time.Second, []string{"account.>", "fixture.>"})
 		if err != nil || len(claimed) != 1 {
 			t.Fatalf("claim=%v err=%v", claimed, err)
 		}
@@ -124,7 +124,7 @@ func TestPostgresOrdinaryDeliveryLeaseAndGeneration(t *testing.T) {
 			if after := snapshot(event.ID); after != before {
 				t.Fatal("rejected expired acknowledgement changed persisted facts")
 			}
-			reclaimed, err := store.Claim(ctx, "same-worker", 1, time.Minute)
+			reclaimed, err := store.Claim(ctx, "same-worker", 1, time.Minute, []string{"account.>", "fixture.>"})
 			if err != nil || len(reclaimed) != 1 {
 				t.Fatalf("reclaim=%v err=%v", reclaimed, err)
 			}
@@ -158,7 +158,7 @@ func TestPostgresOrdinaryDeliveryLeaseAndGeneration(t *testing.T) {
 		if err := store.MarkFailed(ctx, "same-worker", event, time.Now(), "fixture-failure"); err != nil {
 			t.Fatal(err)
 		}
-		claimed, err := store.Claim(ctx, "same-worker", 1, time.Minute)
+		claimed, err := store.Claim(ctx, "same-worker", 1, time.Minute, []string{"account.>", "fixture.>"})
 		if err != nil || len(claimed) != 1 {
 			t.Fatalf("retry=%v err=%v", claimed, err)
 		}
@@ -174,7 +174,7 @@ func TestPostgresOrdinaryDeliveryLeaseAndGeneration(t *testing.T) {
 	})
 	t.Run("invalid-claim-is-error-not-panic", func(t *testing.T) {
 		for _, limit := range []int{-1, 0, 1001} {
-			if _, err := store.Claim(ctx, "same-worker", limit, time.Minute); err == nil {
+			if _, err := store.Claim(ctx, "same-worker", limit, time.Minute, []string{"account.>"}); err == nil {
 				t.Errorf("accepted limit %d", limit)
 			}
 		}
@@ -194,7 +194,7 @@ func TestPostgresOrdinaryDeliveryLeaseAndGeneration(t *testing.T) {
 			t.Fatal(err)
 		}
 		partition := &PostgresStore{pool: pool, excludedEventTypes: []string{"fixture.excluded"}}
-		claimed, err := partition.Claim(ctx, "partition-worker", 10, time.Minute)
+		claimed, err := partition.Claim(ctx, "partition-worker", 10, time.Minute, []string{"fixture.>"})
 		if err != nil || len(claimed) != 1 || claimed[0].Type != "fixture.included" || claimed[0].PublicationGeneration != 0 || claimed[0].LeaseUntil.IsZero() {
 			t.Fatalf("partition claim=%v err=%v", claimed, err)
 		}
@@ -215,6 +215,50 @@ func TestPostgresOrdinaryDeliveryLeaseAndGeneration(t *testing.T) {
 		// the excluded fixture must add no pending record to this partition.
 		if err != nil || stats.Pending != 1 || stats.DeadLettered != 1 {
 			t.Fatalf("partition stats=%+v err=%v", stats, err)
+		}
+	})
+	t.Run("scope-prefilter-is-literal-and-nonmutating", func(t *testing.T) {
+		ids := map[string]uuid.UUID{}
+		var idsTemp uuid.UUID
+		for _, kind := range []string{"account_.foo", "account_.excluded", "account%.foo", "accountx.foo", "billing.foo"} {
+			tx, err := pool.Begin(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err = AppendOutbox(ctx, tx, kind, uuid.New(), 1, map[string]any{"fixture": true}); err != nil {
+				_ = tx.Rollback(ctx)
+				t.Fatal(err)
+			}
+			if err = tx.QueryRow(ctx, `SELECT event_id FROM outbox_events WHERE event_type=$1`, kind).Scan(&idsTemp); err != nil {
+				_ = tx.Rollback(ctx)
+				t.Fatal(err)
+			}
+			ids[kind] = idsTemp
+			if err = tx.Commit(ctx); err != nil {
+				t.Fatal(err)
+			}
+		}
+		before := map[string]string{}
+		for kind, id := range ids {
+			before[kind] = snapshot(id)
+		}
+		partition := &PostgresStore{pool: pool, excludedEventTypes: []string{"account_.excluded"}}
+		for _, scope := range []string{"account_.>", "account%.>", "accountx.foo"} {
+			claimed, err := partition.Claim(ctx, "scope-worker", 20, time.Minute, []string{scope})
+			if err != nil || len(claimed) != 1 || !subjectAllowed([]string{scope}, claimed[0].Type) {
+				t.Fatalf("scope=%s claimed=%v err=%v", scope, claimed, err)
+			}
+			if err = partition.MarkPublished(ctx, "scope-worker", claimed[0]); err != nil {
+				t.Fatal(err)
+			}
+		}
+		for _, kind := range []string{"account_.excluded", "billing.foo"} {
+			if snapshot(ids[kind]) != before[kind] {
+				t.Fatalf("out-of-scope/excluded %s changed", kind)
+			}
+		}
+		if _, err := partition.Claim(ctx, "scope-worker", 20, time.Minute, nil); err == nil {
+			t.Fatal("empty scope accepted")
 		}
 	})
 	t.Run("inbox-effect-dedup-and-version-gap-rollback", func(t *testing.T) {

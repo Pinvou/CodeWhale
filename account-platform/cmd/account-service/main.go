@@ -37,6 +37,7 @@ func main() {
 		log.Fatal("ACCOUNT_DATABASE_UNAVAILABLE")
 	}
 	defer repository.Close()
+	go observability.RunBackground(ctx, "mobile-retention", account.NewMobileRetentionWorker(repository, time.Hour).Run)
 	walletPolicyVersion := strings.TrimSpace(os.Getenv("WALLET_PROVISIONING_POLICY_VERSION"))
 	if walletPolicyVersion == "" {
 		walletPolicyVersion = "wallet-provisioning-v1"
@@ -171,7 +172,11 @@ func main() {
 		}
 	}
 
-	if err := httpserver.RunWithApplicationAndCollectors("account-service", repository.WithApprovalWriterReadiness(service.Handler(verify)), repository.Ping, repository.ApprovalPaginationCollectors()...); err != nil {
+	handler, err := account.NewTrustedSourceHandler(service.Handler(verify), os.Getenv("ACCOUNT_TRUSTED_SOURCE_PEER_IPS"))
+	if err != nil {
+		log.Fatal("ACCOUNT_TRUSTED_SOURCE_CONFIGURATION_INVALID")
+	}
+	if err := httpserver.RunWithApplicationAndCollectors("account-service", repository.WithApprovalWriterReadiness(handler), repository.Ping, repository.ApprovalPaginationCollectors()...); err != nil {
 		log.Fatal("ACCOUNT_HTTP_SERVER_FAILED")
 	}
 }

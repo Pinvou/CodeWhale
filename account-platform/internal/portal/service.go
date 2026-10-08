@@ -807,8 +807,15 @@ func (s *Service) proxy(w http.ResponseWriter, r *http.Request, upstream *url.UR
 	s.forward(w, r, upstream, resource, session, true)
 }
 func (s *Service) forward(w http.ResponseWriter, r *http.Request, upstream *url.URL, resource string, session Session, authenticated bool) {
-	body, err := io.ReadAll(io.LimitReader(r.Body, (4<<20)+1))
-	if err != nil || len(body) > 4<<20 {
+	limit := int64(4 << 20)
+	if authenticated && upstream == s.config.BillingURL && r.Method == http.MethodPost && resource == "/admin/v1/reconciliation-imports" {
+		if !s.allowReconciliationImport(w, r, session) {
+			return
+		}
+		limit = reconciliationImportBodyLimit
+	}
+	body, err := io.ReadAll(io.LimitReader(r.Body, limit+1))
+	if err != nil || int64(len(body)) > limit {
 		api.WriteError(w, http.StatusRequestEntityTooLarge, "INVALID_REQUEST", "the request body is invalid or too large", httpserver.RequestID(r.Context()))
 		return
 	}

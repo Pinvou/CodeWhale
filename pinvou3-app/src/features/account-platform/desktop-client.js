@@ -3,6 +3,7 @@ import { requireSession, requireProfileChange } from './personal-contract.js';
 import { parseBalanceJSON } from './balance-view.js';
 import { mergeObservedVersions } from './authorization-ui.js';
 import { LANG_TO_TAG } from '../../shared/i18n.js';
+import { normalizeAccountAuthError, responseRetryAfter } from './auth-error.js';
 function abortError() {
   const error = new Error('The operation was aborted');
   error.name = 'AbortError';
@@ -13,6 +14,7 @@ function responseError(response) {
   const error = new Error(payload.message || `HTTP ${response?.status || 500}`);
   error.code = payload.code || 'REQUEST_FAILED';
   error.status = response?.status || 500;
+  error.retryAfterSeconds = responseRetryAfter(payload, response?.retryAfterSeconds);
   return error;
 }
 
@@ -147,7 +149,9 @@ export class AccountPlatformDesktopClient {
 
   async call(action, signal) {
     if (signal?.aborted) throw abortError();
-    const value = await action();
+    let value;
+    try { value = await action(); }
+    catch (reason) { throw normalizeAccountAuthError(reason); }
     if (signal?.aborted) throw abortError();
     return value;
   }

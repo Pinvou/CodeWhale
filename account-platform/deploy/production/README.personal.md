@@ -48,7 +48,11 @@ Keycloak 用当前同源 SPI/theme 镜像和 `keycloak-personal.conf.template` �
 
 本阶段用户 realm 固定为 `pinvou`，与 Identity 的实际 token proxy 路由一致；其他 realm 不经公开入口暴露。用验证后的 public host 和私有 Keycloak DNS origin 渲染 `nginx/personal.conf.template` 到专属文件。启动前运行 NGINX 的配置检查，拒绝任何未替换标记。模板不公开 Keycloak 管理 API、业务 `/internal`、Account/Token 的直接 `/admin` 或 Billing；个人管理仍只经 Portal 已实现的受控 BFF 与真实权限执行。实际 token grant 经 Identity 风险准入，其他 user realm/theme 请求才到 Keycloak。模板关闭请求日志，避免 callback query、授权凭证和手机号进入日志。
 
+模板使用 Docker 内置 DNS `127.0.0.11` 每 10 秒更新业务上游地址，容器重建后无需重启入口。`__KEYCLOAK_ORIGIN__` 必须是私有 DNS 名称及可选端口，不包含 scheme、路径或 IP 字面量；模板将 DNS 名称用于 HTTPS SNI 和证书名称核验，并保留真实请求路径。发布验证应重建一个隔离业务容器，验证 DNS 更新后请求恢复且 TLS 错误仍失败关闭。
+
 入口必须固定在 `PERSONAL_EDGE_BACKEND_IP`，该地址与私有网络的实际分配相符。NGINX 强制将 `X-Pinvou-Client-Source` 和 `X-Forwarded-For` 设置为实际连接地址，不追加或相信浏览器输入。Portal 的 `PORTAL_TRUSTED_PROXY_IPS` 只接受这一个显式入口身份；非受信任连接仍按实际 peer 处理。Identity 固定在 `PERSONAL_IDENTITY_BACKEND_IP`，两者都须在既有私有网络 IPAM 中独立校验且不能相同。Identity 公共 token grant 只能由入口访问，入口覆盖单值 XFF；其上游仅转发已准入的单值 source。Keycloak 只信任准确 edge 与准确 Identity 两个 peer 的 forwarded headers，不加 CIDR 或全部信任；生产 token proxy 单值 XFF 接线须随这项配置独立验证。不能以任意 XFF、整个公开地址网段或可绕过的业务宿主端口代替这条信任边界。
+
+Account 的 `ACCOUNT_TRUSTED_SOURCE_PEER_IPS` 只包含固定入口、Portal 和 Keycloak 的准确 peer IP；未配置时忽略所有来源头，采用直连地址。生产模板新增 `PERSONAL_PORTAL_BACKEND_IP` 与 `PERSONAL_KEYCLOAK_BACKEND_IP`，应与 edge、Identity 地址一并在既有 IPAM 核验且互不相同。将 Keycloak overlay 与站点配置组合时保持其既有必要网络并接入同一 `PERSONAL_BACKEND_NETWORK`，不要用动态 DNS 解析结果或整个 CIDR 作为可信来源。可信 peer 也只能传递一个合法 IP 来源头；部署验证须确认任意非可信 peer 伪造此头不改变风险计数来源。
 
 ## Redis 与普通事件资源
 

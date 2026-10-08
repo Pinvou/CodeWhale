@@ -7,6 +7,14 @@ import { AccountPlatformDesktopClient } from '../src/features/account-platform/d
 import { loadFinancePage } from '../src/features/account-platform/admin-finance-pagination.js';
 import { walletReplacementEligible, walletAdjustmentApprovalDraft, currentPendingAdjustment } from '../src/features/account-platform/admin-finance.js';
 import { createAndSubmitFreshGovernedApproval } from '../src/features/account-platform/admin-governed-approval-workflow.js';
+import { paymentAnomalyResolutions } from '../src/features/account-platform/payment-anomaly-resolutions.js';
+
+test('unsupported anomaly types fail closed and callers cannot change other case choices', () => {
+  for (const type of [undefined, 'UNKNOWN', 'toString', '__proto__', 'constructor']) assert.deepEqual(paymentAnomalyResolutions(type), []);
+  const choices = paymentAnomalyResolutions('ILLEGAL_TRANSITION');
+  choices.push('CONFIRM_PAYMENT');
+  assert.deepEqual(paymentAnomalyResolutions('ILLEGAL_TRANSITION'), ['CONFIRM_PROVIDER_FAILED', 'ESCALATE_FINANCIAL_REPAIR']);
+});
 
 const ID = '11111111-1111-4111-8111-111111111111';
 const orderText = `{"order_id":"${ID}","amount_fen":9007199254740993,"status":"PENDING","close_status":"OPEN"}`;
@@ -31,6 +39,20 @@ test('personal nested financial JSON retains source int64 digits', () => {
   assert.throws(() => integerMoney(Number.MAX_SAFE_INTEGER + 1));
   assert.throws(() => integerMoney('1e3'));
 });
+test('reconciliation order-binding evidence preserves int64 through the actual admin client', async t => {
+  const previous = globalThis.fetch; t.after(() => { globalThis.fetch = previous; });
+  const binding = '"amount_fen":9007199254740993,"credit_microcredits":9223372036854775807,"base_points":9007199254740993,"bonus_points":0';
+  const body = `{"items":[{"internal_snapshot":{"order_binding":{${binding}}}}],"next_cursor":null}`;
+  globalThis.fetch = async () => new Response(body, { status: 200 });
+  const client = new AdminPlatformClient({ baseURL: 'https://controlled.example' });
+  const parsed = parseFinanceJSON(body);
+  assert.equal(parsed.items[0].internal_snapshot.order_binding.amount_fen, '9007199254740993');
+  assert.equal(integerMoney(parsed.items[0].internal_snapshot.order_binding.credit_microcredits), 9223372036854775807n);
+  assert.equal(integerMoney(parsed.items[0].internal_snapshot.order_binding.base_points), 9007199254740993n);
+  const actual = await client.reconciliationCases();
+  assert.deepEqual(actual.items[0].internal_snapshot, parsed.items[0].internal_snapshot);
+});
+
 test('payment links reject credentials, script schemes and nonlocal plaintext', () => {
   for (const value of ['javascript:alert(1)', 'https://user:pass@payments.example/', 'http://payments.example/', 'https://payments.example/#fragment']) assert.equal(safePaymentURL(value), '');
   assert.equal(safePaymentURL('https://payments.example/pay'), 'https://payments.example/pay');

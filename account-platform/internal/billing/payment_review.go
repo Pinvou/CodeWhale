@@ -2,6 +2,8 @@ package billing
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"strings"
@@ -12,9 +14,10 @@ import (
 )
 
 func (p *PaymentCoordinator) RepairReviewedOrder(ctx context.Context, orderID, actorID uuid.UUID, reason string) (PaymentOrder, error) {
-	if !p.Capabilities().ManualRepairSupported || !p.Capabilities().OrderQuerySupported {
-		return PaymentOrder{}, payment.ErrUnsupported
-	}
+	return p.repairReviewedOrder(ctx, orderID, actorID, reason, uuid.Nil, "")
+}
+
+func (p *PaymentCoordinator) repairReviewedOrder(ctx context.Context, orderID, actorID uuid.UUID, reason string, caseID uuid.UUID, commandKey string) (PaymentOrder, error) {
 	reason = strings.TrimSpace(reason)
 	if actorID == uuid.Nil || reason == "" || len(reason) > 500 {
 		return PaymentOrder{}, ErrConflict
@@ -25,6 +28,32 @@ func (p *PaymentCoordinator) RepairReviewedOrder(ctx context.Context, orderID, a
 	}
 	if err != nil {
 		return PaymentOrder{}, err
+	}
+	// Bind the positive repair receipt to this immutable anomaly command. An
+	// unrelated historical repair of the same order cannot authorize completion.
+	receiptKey := caseID.String() + ":" + commandKey
+	digest := sha256.Sum256([]byte(orderID.String() + "|" + actorID.String() + "|" + reason))
+	requestHash := hex.EncodeToString(digest[:])
+	if caseID != uuid.Nil {
+		var savedHash string
+		var body []byte
+		err := p.repository.pool.QueryRow(ctx, `SELECT request_hash,response_body FROM idempotency_records WHERE scope='payment.anomaly-repair' AND idempotency_key=$1`, receiptKey).Scan(&savedHash, &body)
+		if err == nil {
+			var result PaymentOrder
+			if savedHash != requestHash || json.Unmarshal(body, &result) != nil || result.ID != orderID {
+				return PaymentOrder{}, ErrConflict
+			}
+			return result, nil
+		}
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return PaymentOrder{}, err
+		}
+	}
+	if !p.Capabilities().ManualRepairSupported || !p.Capabilities().OrderQuerySupported {
+		return PaymentOrder{}, payment.ErrUnsupported
+	}
+	if p.Capabilities().ProviderID != order.ProviderID || p.Capabilities().Version != order.ProviderVersion {
+		return PaymentOrder{}, ErrConflict
 	}
 	if order.Status != "MANUAL_REVIEW" || order.FulfillmentStatus != "MANUAL_REVIEW" {
 		return PaymentOrder{}, ErrConflict
@@ -79,6 +108,15 @@ func (p *PaymentCoordinator) RepairReviewedOrder(ctx context.Context, orderID, a
 	}
 	if _, err := tx.Exec(ctx, `INSERT INTO payment_order_repairs(id,payment_order_id,payment_transaction_id,payment_evidence_id,actor_id,reason,provider_snapshot,entitlement_package_id,points_awarded,wallet_balance_before,wallet_balance_after,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) ON CONFLICT (payment_transaction_id) DO NOTHING`, uuid.Must(uuid.NewV7()), order.ID, transactionID, evidenceID, actorID, reason, snapshot, packageID, order.CreditMicrocredits, balanceBefore, balanceAfter, now); err != nil {
 		return PaymentOrder{}, err
+	}
+	if caseID != uuid.Nil {
+		body, err := json.Marshal(order)
+		if err != nil {
+			return PaymentOrder{}, err
+		}
+		if _, err = tx.Exec(ctx, `INSERT INTO idempotency_records(scope,idempotency_key,request_hash,response_status,response_body,created_at,expires_at) VALUES('payment.anomaly-repair',$1,$2,200,$3,$4,$4::timestamptz+interval '100 years')`, receiptKey, requestHash, body, now); err != nil {
+			return PaymentOrder{}, err
+		}
 	}
 	return order, tx.Commit(ctx)
 }

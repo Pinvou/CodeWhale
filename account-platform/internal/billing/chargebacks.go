@@ -141,7 +141,7 @@ func (r *PostgresRepository) ApplyConfirmedChargeback(ctx context.Context, evide
 	if err != nil {
 		return ChargebackCase{}, err
 	}
-	if !found || existing.ProviderChargebackID != providerChargebackID || existing.Status == "DISMISSED" {
+	if !found || existing.ProviderChargebackID != providerChargebackID || existing.Status != "REVIEW_REQUIRED" && existing.Status != "CONFIRMED" {
 		return ChargebackCase{}, ErrConflict
 	}
 	if existing.Status == "CONFIRMED" {
@@ -166,6 +166,16 @@ func (r *PostgresRepository) ApplyConfirmedChargeback(ctx context.Context, evide
 	}
 	if err := lockPaymentSourcePackage(ctx, tx, packageID, transactionID, orderID, walletID); err != nil {
 		return ChargebackCase{}, err
+	}
+	var lockedCase ChargebackCase
+	if err := tx.QueryRow(ctx, chargebackCaseSelect+` WHERE id=$1 FOR UPDATE`, existing.ID).Scan(chargebackCaseScanTargets(&lockedCase)...); err != nil {
+		return ChargebackCase{}, err
+	}
+	if lockedCase.ProviderChargebackID != providerChargebackID || lockedCase.Status != "REVIEW_REQUIRED" && lockedCase.Status != "CONFIRMED" {
+		return ChargebackCase{}, ErrConflict
+	}
+	if lockedCase.Status == "CONFIRMED" {
+		return lockedCase, tx.Commit(ctx)
 	}
 
 	type componentState struct {

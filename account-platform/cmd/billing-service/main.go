@@ -146,7 +146,7 @@ func main() {
 	go observability.RunBackground(ctx, "product-admission-verification", billing.NewProductAdmissionVerificationWorker(repository, payments.Capabilities(), 5*time.Second, admissionTTL).Run)
 	go observability.RunBackground(ctx, "manual-review-sla", billing.NewManualReviewSLAWorker(repository, time.Minute, onCall).Run)
 	go observability.RunBackground(ctx, "admin-pagination-cleanup", billing.NewAdminPaginationCleanupWorker(repository, time.Minute).Run)
-	if payments.Capabilities().BillSupported {
+	if payments.Capabilities().BillSupported || payments.Capabilities().BillFileImportSupported {
 		go observability.RunBackground(ctx, "daily-payment-reconciliation", billing.NewDailyPaymentReconciliationWorker(payments).Run)
 	}
 	handler := service.Handler(credential, verify)

@@ -17,12 +17,19 @@ type memoryStore struct {
 	published    []uuid.UUID
 	failed       []uuid.UUID
 	deadLettered []uuid.UUID
+	claimScopes  [][]string
+	failAck      bool
 }
 
-func (store *memoryStore) Claim(context.Context, string, int, time.Duration) ([]Event, error) {
+func (store *memoryStore) Claim(_ context.Context, _ string, _ int, _ time.Duration, scope []string) ([]Event, error) {
+	store.claimScopes = append(store.claimScopes, append([]string(nil), scope...))
 	return store.events, nil
 }
 func (store *memoryStore) MarkPublished(_ context.Context, _ string, event Event) error {
+	if store.failAck {
+		store.failAck = false
+		return errors.New("acknowledgement connection lost")
+	}
 	store.published = append(store.published, event.ID)
 	return nil
 }
@@ -57,7 +64,7 @@ func testEvent(attempts int) Event {
 func TestRelayPublishesEnvelopeAndAcknowledgesOutbox(t *testing.T) {
 	store := &memoryStore{events: []Event{testEvent(0)}}
 	broker := &memoryBroker{}
-	result, err := (Relay{Store: store, Broker: broker, WorkerID: "worker-1"}).RunOnce(context.Background())
+	result, err := (Relay{Store: store, Broker: broker, WorkerID: "worker-1", AllowedSubjects: []string{"account.>"}}).RunOnce(context.Background())
 	if err != nil || result.Published != 1 || len(store.published) != 1 || broker.published[0] != store.events[0].Type {
 		t.Fatalf("unexpected relay result: %#v, %v", result, err)
 	}
@@ -75,7 +82,7 @@ func TestDeliveryErrorsNeverPersistOriginalMessage(t *testing.T) {
 
 func TestRelayRetriesWithoutDroppingOutboxEvent(t *testing.T) {
 	store := &memoryStore{events: []Event{testEvent(0)}}
-	result, err := (Relay{Store: store, Broker: &memoryBroker{failPrimary: true}, WorkerID: "worker-1"}).RunOnce(context.Background())
+	result, err := (Relay{Store: store, Broker: &memoryBroker{failPrimary: true}, WorkerID: "worker-1", AllowedSubjects: []string{"account.>"}}).RunOnce(context.Background())
 	if err != nil || result.Failed != 1 || len(store.failed) != 1 || len(store.published) != 0 {
 		t.Fatalf("unexpected retry result: %#v, %v", result, err)
 	}
@@ -84,21 +91,38 @@ func TestRelayRetriesWithoutDroppingOutboxEvent(t *testing.T) {
 func TestRelayMovesExhaustedEventToDeadLetterStream(t *testing.T) {
 	store := &memoryStore{events: []Event{testEvent(11)}}
 	broker := &memoryBroker{failPrimary: true}
-	result, err := (Relay{Store: store, Broker: broker, WorkerID: "worker-1", MaxAttempts: 12}).RunOnce(context.Background())
+	result, err := (Relay{Store: store, Broker: broker, WorkerID: "worker-1", AllowedSubjects: []string{"account.>"}, MaxAttempts: 12}).RunOnce(context.Background())
 	if err != nil || result.DeadLettered != 1 || len(store.deadLettered) != 1 || broker.published[1] != "account-platform.dead-letter.account.membership.changed.v1" {
 		t.Fatalf("unexpected dead-letter result: %#v, %v, %#v", result, err, broker.published)
 	}
 }
 
 func TestRelayRejectsSubjectOutsideSourcePermission(t *testing.T) {
-	store := &memoryStore{events: []Event{{ID: uuid.New(), Type: "billing.refund.requested.v1", AggregateID: uuid.New(), AggregateVersion: 1, TraceID: "trace", Payload: []byte(`{}`)}}}
+	store := &memoryStore{events: []Event{testEvent(0), {ID: uuid.New(), Type: "billing.refund.requested.v1", AggregateID: uuid.New(), AggregateVersion: 1, TraceID: "trace", Payload: []byte(`{}`), Attempts: 11}}}
 	broker := &memoryBroker{}
 	result, err := (Relay{Store: store, Broker: broker, WorkerID: "account-relay", AllowedSubjects: []string{"account.>"}}).RunOnce(context.Background())
-	if err != nil {
-		t.Fatal(err)
+	if err == nil {
+		t.Fatal("store scope violation must fail the relay")
 	}
-	if result.Published != 0 || result.Failed != 1 || len(broker.published) != 0 {
+	if result.Published != 0 || result.Failed != 0 || result.DeadLettered != 0 || len(broker.published) != 0 || len(store.failed) != 0 || len(store.deadLettered) != 0 {
 		t.Fatalf("cross-domain subject escaped relay: %#v %#v", result, broker.published)
+	}
+}
+
+func TestRelayRequiresValidScopeBeforeClaim(t *testing.T) {
+	for _, scope := range [][]string{nil, {}, {""}, {">"}, {"account.*"}, {"account.>.bad"}, {"account..>"}, {"account.> "}, {"account.\nchanged"}} {
+		store := &memoryStore{}
+		_, err := (Relay{Store: store, Broker: &memoryBroker{}, WorkerID: "worker", AllowedSubjects: scope}).RunOnce(context.Background())
+		if err == nil || len(store.claimScopes) != 0 {
+			t.Fatalf("invalid scope %q reached store: %v", scope, err)
+		}
+	}
+	for _, scope := range [][]string{{"account.>"}, {"account.membership.changed.v1"}} {
+		store := &memoryStore{events: []Event{testEvent(0)}}
+		_, err := (Relay{Store: store, Broker: &memoryBroker{}, WorkerID: "worker", AllowedSubjects: scope}).RunOnce(context.Background())
+		if err != nil || len(store.claimScopes) != 1 || len(store.claimScopes[0]) != 1 || store.claimScopes[0][0] != scope[0] {
+			t.Fatalf("scope %q was not passed to claim: %v", scope, err)
+		}
 	}
 }
 

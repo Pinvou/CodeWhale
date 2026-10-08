@@ -161,7 +161,7 @@ INSERT INTO payment_anomaly_resolution_intents(payment_anomaly_case_id,actor_id,
 			t.Fatal(err)
 		}
 		defer store.Close()
-		claimed, err := store.Claim(ctx, "owned-stage-relay", 1, time.Minute)
+		claimed, err := store.Claim(ctx, "owned-stage-relay", 1, time.Minute, []string{"fixture.retained.v1"})
 		if err != nil || len(claimed) != 1 {
 			t.Fatalf("actual relay claim: count=%d error=%v", len(claimed), err)
 		}
@@ -267,7 +267,7 @@ func newStageFixture(t *testing.T, ctx context.Context, raw string) *stageFixtur
 			t.Fatal("exclusive actor creation rejected")
 		}
 	}
-	if _, err := tx.Exec(ctx, `GRANT account_service,account_approval_control_owner TO account_migrator; GRANT account_approval_authorization_owner TO account_migrator WITH INHERIT FALSE,SET TRUE,ADMIN TRUE; GRANT billing_service,billing_schema_owner TO billing_migrator`); err != nil {
+	if _, err := tx.Exec(ctx, `GRANT account_service,account_approval_control_owner TO account_migrator; GRANT account_approval_authorization_owner TO account_migrator WITH INHERIT FALSE,SET TRUE,ADMIN TRUE; GRANT billing_service,billing_schema_owner TO billing_migrator; GRANT billing_service TO billing_schema_owner WITH INHERIT TRUE,SET TRUE`); err != nil {
 		t.Fatal(err)
 	}
 	if err := tx.Commit(ctx); err != nil {
