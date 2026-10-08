@@ -28,18 +28,18 @@ func (f *fakeWalletProvisioner) EnsurePersonalWallet(context.Context, uuid.UUID)
 func (f *walletProvisioningRepositoryFake) LeaseWalletProvisioningJobs(context.Context, int, time.Duration) ([]WalletProvisioningJob, error) {
 	return f.jobs, nil
 }
-func (f *walletProvisioningRepositoryFake) CompleteWalletProvisioning(_ context.Context, userID uuid.UUID) error {
-	f.completed = userID
+func (f *walletProvisioningRepositoryFake) CompleteWalletProvisioning(_ context.Context, job WalletProvisioningJob) error {
+	f.completed = job.UserID
 	return nil
 }
-func (f *walletProvisioningRepositoryFake) FailWalletProvisioning(_ context.Context, userID uuid.UUID, _ string) error {
-	f.failed = userID
+func (f *walletProvisioningRepositoryFake) FailWalletProvisioning(_ context.Context, job WalletProvisioningJob, _ string) error {
+	f.failed = job.UserID
 	return nil
 }
 
 func TestWalletProvisioningWorkerConvergesWithoutRegistrationRequest(t *testing.T) {
 	userID := uuid.New()
-	repository := &walletProvisioningRepositoryFake{jobs: []WalletProvisioningJob{{UserID: userID}}}
+	repository := &walletProvisioningRepositoryFake{jobs: []WalletProvisioningJob{{UserID: userID, LeaseUntil: time.Now().Add(time.Minute)}}}
 	wallets := &fakeWalletProvisioner{}
 	worker := NewWalletProvisioningWorker(repository, wallets, time.Second)
 	if err := worker.RunOnce(context.Background()); err != nil {
@@ -52,7 +52,7 @@ func TestWalletProvisioningWorkerConvergesWithoutRegistrationRequest(t *testing.
 
 func TestWalletProvisioningWorkerPersistsFailureForRetry(t *testing.T) {
 	userID := uuid.New()
-	repository := &walletProvisioningRepositoryFake{jobs: []WalletProvisioningJob{{UserID: userID}}}
+	repository := &walletProvisioningRepositoryFake{jobs: []WalletProvisioningJob{{UserID: userID, LeaseUntil: time.Now().Add(time.Minute)}}}
 	wallets := &fakeWalletProvisioner{err: errors.New("billing unavailable")}
 	if err := NewWalletProvisioningWorker(repository, wallets, time.Second).RunOnce(context.Background()); err != nil {
 		t.Fatal(err)
