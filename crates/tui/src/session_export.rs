@@ -445,20 +445,44 @@ fn collect_artifact_files(artifacts_dir: &Path) -> io::Result<Vec<(String, PathB
 /// but alias content from anywhere on the filesystem into it; the link count
 /// is the only tell.
 #[cfg(unix)]
-fn has_single_link(metadata: &fs::Metadata) -> bool {
+fn has_single_link(_path: &Path, metadata: &fs::Metadata) -> bool {
     use std::os::unix::fs::MetadataExt;
     metadata.nlink() == 1
 }
 
-/// NTFS hard links expose the count through the Windows metadata extension.
+/// NTFS hard links expose the count through the handle information. The
+/// `number_of_links` metadata extension is still unstable (`windows_by_handle`),
+/// so read the count through the stable Win32 call on an opened handle — the
+/// same mechanism as the Runtime store identity check. A member that cannot be
+/// opened or queried counts as single-linked: the archive writer opens it again
+/// for streaming, and that read surfaces any real problem loudly.
 #[cfg(windows)]
-fn has_single_link(metadata: &fs::Metadata) -> bool {
-    use std::os::windows::fs::MetadataExt;
-    metadata.number_of_links() == 1
+fn has_single_link(path: &Path, _metadata: &fs::Metadata) -> bool {
+    use std::os::windows::fs::OpenOptionsExt as _;
+    use std::os::windows::io::AsRawHandle as _;
+    use windows_sys::Win32::Storage::FileSystem::{
+        BY_HANDLE_FILE_INFORMATION, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        GetFileInformationByHandle,
+    };
+
+    let file = match fs::OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .open(path)
+    {
+        Ok(file) => file,
+        Err(_) => return true,
+    };
+    let mut info = BY_HANDLE_FILE_INFORMATION::default();
+    // SAFETY: the handle and writable output remain valid for the call.
+    if unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut info) } == 0 {
+        return true;
+    }
+    info.nNumberOfLinks == 1
 }
 
 #[cfg(not(any(unix, windows)))]
-fn has_single_link(_: &fs::Metadata) -> bool {
+fn has_single_link(_path: &Path, _metadata: &fs::Metadata) -> bool {
     // No portable link-count API on this target; the root-level probes and
     // the member symlink skip still confine links there.
     true
@@ -485,7 +509,7 @@ fn collect_artifact_files_recursive(
         if file_type.is_dir() {
             collect_artifact_files_recursive(&path, &member, files)?;
         } else if file_type.is_file() {
-            if !has_single_link(&entry.metadata()?) {
+            if !has_single_link(&path, &entry.metadata()?) {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
                     format!(
