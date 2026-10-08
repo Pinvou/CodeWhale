@@ -2319,10 +2319,16 @@ impl Engine {
             // appends a synthetic user message to the persisted
             // conversation — the retried request is the persisted
             // conversation re-issued, nothing else.
+            // `completed_thinking` is part of the "something" too: a block
+            // already flushed at its stop event is received content, and
+            // silently re-running the request would double-bill for it. A
+            // stream that died after completing thinking must surface its
+            // error like any other post-content death.
             let stream_died_with_nothing = stream_errors > 0
                 && tool_uses.is_empty()
                 && current_text_visible.trim().is_empty()
                 && current_thinking.trim().is_empty()
+                && completed_thinking.is_empty()
                 && !pending_message_complete;
             let pending_resume = match pending_resume {
                 Some(resume) => Some(resume),
@@ -2629,9 +2635,16 @@ impl Engine {
                     block,
                     ContentBlock::Thinking {
                         thinking,
+                        signature,
                         state,
+                        redacted_data,
+                        reasoning_details,
                         ..
-                    } if !thinking.trim().is_empty() || state.is_some()
+                    } if !thinking.trim().is_empty()
+                        || signature_carries_content(signature.as_deref())
+                        || state.is_some()
+                        || redacted_data.is_some()
+                        || reasoning_details.is_some()
                 )
             });
 
