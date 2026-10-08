@@ -45,6 +45,10 @@ class PublicSubmoduleVerifierTests(unittest.TestCase):
                       shift 2
                     fi
 
+                    if [[ "$PINVOU_FAKE_GIT_SCENARIO" == "snapshot_ambient_askpass" && ( "${{1:-}}" == "ls-remote" || "${{1:-}}" == "fetch" ) ]]; then
+                      if [[ -n "${{GIT_ASKPASS:-}}" || -n "${{SSH_ASKPASS:-}}" ]]; then exit 128; fi
+                    fi
+
                     case "${{1:-}}" in
                       config)
                         key="${{5:-}}"
@@ -150,6 +154,9 @@ class PublicSubmoduleVerifierTests(unittest.TestCase):
             else:
                 env["PATH"] = f"{bin_dir}:{env['PATH']}"
                 command = [BASH, str(verifier), *arguments]
+            if scenario == "snapshot_ambient_askpass":
+                env["GIT_ASKPASS"] = "unused-test-credential-helper"
+                env["SSH_ASKPASS"] = "unused-test-credential-helper"
             env["PINVOU_FAKE_GIT_SCENARIO"] = scenario
             env["PINVOU_FAKE_GIT_STATE"] = str(state_file)
             result = subprocess.run(
@@ -221,6 +228,10 @@ class PublicSubmoduleVerifierTests(unittest.TestCase):
         result, _ = self._run("snapshot_advanced", ("--registered-snapshot",))
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("冻结审核校验通过", result.stdout)
+
+    def test_public_operations_ignore_ambient_askpass(self):
+        result, _ = self._run("snapshot_ambient_askpass", ("--registered-snapshot",))
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_snapshot_rejects_unregistered_or_unproven_public_history(self):
         for scenario in ["snapshot_unregistered", "snapshot_candidate", "snapshot_wrong_history", "snapshot_noncommit", "snapshot_fetched_tag_drift", "snapshot_transport"]:

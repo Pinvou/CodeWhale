@@ -560,8 +560,8 @@ jobs:
         run: python3 scripts/check-doc-anchors.py
 
       - name: 公开底座 gitlink 可达性
-        # Fail closed: gitlink 必须等于公开维护分支头；过渡期（fork-policy 第 0 节豁免）
-        # 内不可变 tag 钉在其收口 commit，rN 收口后恢复三方相等。
+        # 过渡期验证精确登记的 gitlink 位于公开维护历史，且不可变 tag 仍钉在收口 commit。
+        # 默认发布校验仍要求维护头一致；rN 收口后两种模式均恢复三方相等。
         run: ./scripts/verify-public-submodule.sh --registered-snapshot
 
       - name: 初始化公共底座 submodule

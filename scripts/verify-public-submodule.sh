@@ -19,6 +19,14 @@ TRANSITION_BASELINE="61cb769be5b33abc64f64da4272f5b39a8b6c1fd"
 MAX_ATTEMPTS=3
 registered_snapshot=false
 
+public_git() {
+  env -u GIT_CONFIG_PARAMETERS -u GIT_DIR -u GIT_WORK_TREE -u GIT_COMMON_DIR \
+    -u GIT_ASKPASS -u SSH_ASKPASS -u GIT_OBJECT_DIRECTORY -u GIT_ALTERNATE_OBJECT_DIRECTORIES \
+    GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
+    GIT_CONFIG_COUNT=0 GIT_TERMINAL_PROMPT=0 \
+    git -c credential.helper= -c core.askPass= -c http.extraHeader= "$@"
+}
+
 if [[ $# -eq 1 && "$1" == "--registered-snapshot" ]]; then
   registered_snapshot=true
 elif [[ $# -ne 0 ]]; then
@@ -57,7 +65,7 @@ fi
 remote_refs=""
 for attempt in $(seq 1 "$MAX_ATTEMPTS"); do
   if remote_refs="$(
-    git ls-remote "$PINVOU_CODEWHALE_URL" \
+    public_git ls-remote "$PINVOU_CODEWHALE_URL" \
       "refs/heads/${PINVOU_CODEWHALE_BRANCH}" \
       "refs/tags/${PINVOU_CODEWHALE_TAG}" \
       "refs/tags/${PINVOU_CODEWHALE_TAG}^{}" \
@@ -118,13 +126,6 @@ if [[ -n "$TRANSITION_BASELINE" ]]; then
     trap 'rm -rf -- "$temporary_repository"' EXIT
     # No caller credentials, global URL rewrites, or ambient repository objects
     # can make a private/unpublished commit pass this public-history check.
-    public_git() {
-      env -u GIT_CONFIG_PARAMETERS -u GIT_DIR -u GIT_WORK_TREE -u GIT_COMMON_DIR \
-        -u GIT_OBJECT_DIRECTORY -u GIT_ALTERNATE_OBJECT_DIRECTORIES \
-        GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
-        GIT_CONFIG_COUNT=0 GIT_TERMINAL_PROMPT=0 \
-        git -c credential.helper= -c core.askPass= -c http.extraHeader= "$@"
-    }
     public_git init --bare "$temporary_repository" >/dev/null 2>&1
     fetched=false
     for attempt in $(seq 1 "$MAX_ATTEMPTS"); do
