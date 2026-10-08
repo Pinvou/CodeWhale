@@ -243,14 +243,14 @@ fn output_with_timeout_inner(
     let started = Instant::now();
     let status = loop {
         if capture_limit_exceeded(&stdout_file) || capture_limit_exceeded(&stderr_file) {
-            let _ = managed_tree.terminate();
+            let kill_note = kill_note_suffix(managed_tree.terminate());
             let _ = child.kill();
             let reap_note = reap_note_suffix(reap_killed_child(&mut child, REAP_GRACE));
             let stdout = read_capture(&mut stdout_file);
             let stderr = read_capture(&mut stderr_file);
             let detail = subprocess_output_detail(&stdout, &stderr);
             return Err(format!(
-                "{program} output exceeded {MAX_CAPTURE_BYTES} bytes; subprocess tree termination requested: {detail}{reap_note}"
+                "{program} output exceeded {MAX_CAPTURE_BYTES} bytes; subprocess tree termination requested: {detail}{reap_note}{kill_note}"
             ));
         }
         match child.try_wait() {
@@ -259,28 +259,32 @@ fn output_with_timeout_inner(
                 std::thread::sleep(Duration::from_millis(50));
             }
             Ok(None) => {
-                if kill_tree_on_timeout {
-                    let _ = managed_tree.terminate();
-                }
+                let kill_note = if kill_tree_on_timeout {
+                    kill_note_suffix(managed_tree.terminate())
+                } else {
+                    String::new()
+                };
                 let _ = child.kill();
                 let reap_note = reap_note_suffix(reap_killed_child(&mut child, REAP_GRACE));
                 let stdout = read_capture(&mut stdout_file);
                 let stderr = read_capture(&mut stderr_file);
                 let detail = subprocess_output_detail(&stdout, &stderr);
                 return Err(format!(
-                    "{program} timed out after {}s: {detail}{reap_note}",
+                    "{program} timed out after {}s: {detail}{reap_note}{kill_note}",
                     timeout.as_secs()
                 ));
             }
             Err(error) => {
-                if kill_tree_on_timeout {
-                    let _ = managed_tree.terminate();
-                }
+                let kill_note = if kill_tree_on_timeout {
+                    kill_note_suffix(managed_tree.terminate())
+                } else {
+                    String::new()
+                };
                 let _ = child.kill();
                 // 等待错误本身已是调用方的诊断信息,回收结果按既有惯例丢弃;
                 // 有界回收保证这条路径同样不越过自身的时间预算。
                 let _ = reap_killed_child(&mut child, REAP_GRACE);
-                return Err(format!("{program} wait error: {error}"));
+                return Err(format!("{program} wait error: {error}{kill_note}"));
             }
         }
     };
@@ -289,12 +293,12 @@ fn output_with_timeout_inner(
     // and `try_wait()`. Re-check after completion so overflow is never reported
     // as a silently truncated success.
     if capture_limit_exceeded(&stdout_file) || capture_limit_exceeded(&stderr_file) {
-        let _ = managed_tree.terminate();
+        let kill_note = kill_note_suffix(managed_tree.terminate());
         let stdout = read_capture(&mut stdout_file);
         let stderr = read_capture(&mut stderr_file);
         let detail = subprocess_output_detail(&stdout, &stderr);
         return Err(format!(
-            "{program} output exceeded {MAX_CAPTURE_BYTES} bytes; subprocess tree termination requested: {detail}"
+            "{program} output exceeded {MAX_CAPTURE_BYTES} bytes; subprocess tree termination requested: {detail}{kill_note}"
         ));
     }
 
@@ -352,6 +356,18 @@ fn reap_note_suffix(reap: Reap) -> String {
         }
         Reap::Failed(error) => format!("; reaping the child failed: {error}"),
     }
+}
+
+/// Renders a failed tree-kill request as an error-message suffix; an empty
+/// string when the request succeeded. A failed request must reach the
+/// caller's error message: the termination note would otherwise claim a
+/// tree termination that did not happen (the Windows taskkill helper can
+/// overrun its own budget and give up).
+fn kill_note_suffix(result: std::io::Result<()>) -> String {
+    result
+        .err()
+        .map(|error| format!("; kill tree request failed: {error}"))
+        .unwrap_or_default()
 }
 
 fn capture_limit_exceeded(file: &std::fs::File) -> bool {
