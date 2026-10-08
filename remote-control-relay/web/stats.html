@@ -132,7 +132,7 @@
 <script>
   const $=id=>document.getElementById(id),nf=new Intl.NumberFormat('zh-CN'),DAY_MS=24*60*60*1000,STATS_TIMEZONE_OFFSET_MS=8*60*60*1000;
   const behaviorOverviewSections=['summary','activation','voice','errors','versions'];
-  const state={role:null,overview:null,devices:[],behavior:null,behaviorErrors:{},behaviorSectionReports:{activation:null,voice:null,errors:null,versions:null},toolCalls:null,toolInstalls:null,scenes:null,models:null,commercial:null,range:30,behaviorRanges:{summary:'30',activation:'30',voice:'30',errors:'30',toolCalls:'30',toolInstalls:'30',scenes:'30',models:'30',versions:'30'},view:'devices',status:'all',platform:'all',query:'',deviceSort:'turns_7d',deviceSortDirection:'desc',timer:null};
+  const state={role:null,overview:null,devices:[],behavior:null,behaviorErrors:{},behaviorRequestVersions:{},behaviorRangeRequests:{},dataRefreshVersion:0,behaviorSectionReports:{activation:null,voice:null,errors:null,versions:null},toolCalls:null,toolInstalls:null,scenes:null,models:null,commercial:null,range:30,behaviorRanges:{summary:'30',activation:'30',voice:'30',errors:'30',toolCalls:'30',toolInstalls:'30',scenes:'30',models:'30',versions:'30'},view:'devices',status:'all',platform:'all',query:'',deviceSort:'turns_7d',deviceSortDirection:'desc',timer:null};
   const escapeHtml=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const platform=value=>({linux:'Linux',windows:'Windows',macos:'macOS'}[String(value||'').toLowerCase()]||value||'—');
   const dateTime=value=>value?new Date(value).toLocaleString('zh-CN',{hour12:false,year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}):'—';
@@ -213,7 +213,12 @@
   function syncBehaviorRangeControls(section){document.querySelectorAll(`.behavior-range[data-behavior-section="${section}"] button`).forEach(button=>{const active=button.dataset.range===state.behaviorRanges[section];button.classList.toggle('active',active);button.setAttribute('aria-pressed',String(active))})}
   function setBehaviorRangeBusy(section,busy){document.querySelectorAll(`.behavior-range[data-behavior-section="${section}"]`).forEach(control=>{control.setAttribute('aria-busy',String(busy));control.querySelectorAll('button').forEach(button=>button.disabled=busy)})}
   function verifyBehaviorRange(value,range){if(value?.range!==range)throw new Error('behavior_range_mismatch');return value}
+  // Full refreshes and range switches share one request order per section.
+  function beginBehaviorRequest(section){return state.behaviorRequestVersions[section]=(state.behaviorRequestVersions[section]||0)+1}
+  function isCurrentBehaviorRequest(section,version){return state.behaviorRequestVersions[section]===version}
   async function refreshBehaviorSection(section,range){
+    const version=beginBehaviorRequest(section);
+    state.behaviorRangeRequests[section]=version;
     try{
       let value;
       if(behaviorOverviewSections.includes(section))value=await api(`behavior/overview?range=${range}`);
@@ -222,12 +227,14 @@
       else if(section==='scenes')value=await api(`behavior/scenes?range=${range}`);
       else if(section==='models')value=await api(`behavior/models?range=${range}`);
       else throw new Error('unknown_behavior_section');
+      if(!isCurrentBehaviorRequest(section,version))return;
       verifyBehaviorRange(value,range);storeBehaviorReport(section,value);state.behaviorRanges[section]=range;syncBehaviorRangeControls(section);renderBehavior();
-    }catch(error){if(error.message==='unauthorized'){showLogin();throw error}state.behaviorErrors[section]=true;renderBehaviorErrors();throw error}
+    }catch(error){if(!isCurrentBehaviorRequest(section,version))return;if(error.message==='unauthorized'){showLogin();throw error}state.behaviorErrors[section]=true;renderBehaviorErrors();throw error}
+    finally{if(state.behaviorRangeRequests[section]===version)delete state.behaviorRangeRequests[section]}
   }
   async function refreshBehavior(){
     const requestedRanges={...state.behaviorRanges},overviewRanges=[...new Set(behaviorOverviewSections.map(section=>requestedRanges[section]))];
-    const requests=overviewRanges.map(range=>({range,sections:behaviorOverviewSections.filter(section=>requestedRanges[section]===range),path:`behavior/overview?range=${range}`}));
+    let requests=overviewRanges.map(range=>({range,sections:behaviorOverviewSections.filter(section=>requestedRanges[section]===range),path:`behavior/overview?range=${range}`}));
     requests.push(
       {range:requestedRanges.toolCalls,sections:['toolCalls'],path:`behavior/tools?range=${requestedRanges.toolCalls}&type=call`},
       {range:requestedRanges.toolInstalls,sections:['toolInstalls'],path:`behavior/tools?range=${requestedRanges.toolInstalls}&type=install`},
@@ -235,14 +242,36 @@
       {range:requestedRanges.models,sections:['models'],path:`behavior/models?range=${requestedRanges.models}`},
       {range:requestedRanges.summary,sections:['commercial'],path:`commercial/overview?range=${requestedRanges.summary}`},
     );
+    // A background/full refresh must not cancel a pending user range switch.
+    requests=requests.map(request=>({...request,sections:request.sections.filter(section=>!state.behaviorRangeRequests[section])})).filter(request=>request.sections.length);
+    for(const request of requests)request.versions=Object.fromEntries(request.sections.map(section=>[section,beginBehaviorRequest(section)]));
+    const currentSections=request=>request.sections.filter(section=>isCurrentBehaviorRequest(section,request.versions[section])&&(section==='commercial'?state.behaviorRanges.summary:state.behaviorRanges[section])===request.range);
     const results=await Promise.allSettled(requests.map(async request=>{const value=await api(request.path);return request.sections[0]==='commercial'?value:verifyBehaviorRange(value,request.range)}));
-    const unauthorized=results.find(result=>result.status==='rejected'&&result.reason?.message==='unauthorized');
+    const unauthorized=results.find((result,index)=>result.status==='rejected'&&result.reason?.message==='unauthorized'&&currentSections(requests[index]).length);
     if(unauthorized)throw unauthorized.reason;
-    results.forEach((result,index)=>{const request=requests[index];for(const section of request.sections){const currentRange=section==='commercial'?state.behaviorRanges.summary:state.behaviorRanges[section];if(currentRange!==request.range)continue;if(result.status==='fulfilled')storeBehaviorReport(section,result.value);else state.behaviorErrors[section]=true}});
+    results.forEach((result,index)=>{for(const section of currentSections(requests[index])){if(result.status==='fulfilled')storeBehaviorReport(section,result.value);else state.behaviorErrors[section]=true}});
     Object.keys(state.behaviorRanges).forEach(syncBehaviorRangeControls);renderBehavior();renderCommercial();
     return !Object.keys(state.behaviorErrors).length;
   }
-  async function refreshData(manual=false){try{const session=await api('session');state.role=session.role;if(state.role==='behavior_analyst'){state.view='behavior';$('loginLayer').classList.add('hidden');renderPageTabs();await refreshBehavior();$('time').textContent=new Date(state.behavior?.generated_at||Date.now()).toLocaleTimeString('zh-CN',{hour12:false})}else{const[overview,devices]=await Promise.all([api('overview'),api('devices')]);state.overview=overview;state.devices=devices.devices||[];$('loginLayer').classList.add('hidden');renderPageTabs();renderMetrics();renderDevices();await refreshBehavior()}if(manual){$('refreshButton').textContent=Object.keys(state.behaviorErrors).length?'↻ 部分失败，重试':'✓ 已更新';if(!Object.keys(state.behaviorErrors).length)setTimeout(()=>$('refreshButton').textContent='↻ 刷新',1200)}}catch(error){if(error.message==='unauthorized')showLogin();else{$('time').textContent=error.message==='forbidden'?'当前角色无权访问':'刷新失败';if(manual)$('refreshButton').textContent='↻ 重试'}}}
+  async function refreshData(manual=false){
+    const version=++state.dataRefreshVersion,isCurrent=()=>state.dataRefreshVersion===version;
+    try{
+      const session=await api('session');
+      if(!isCurrent())return;
+      state.role=session.role;
+      if(state.role==='behavior_analyst'){
+        state.view='behavior';$('loginLayer').classList.add('hidden');renderPageTabs();await refreshBehavior();
+        if(!isCurrent())return;
+        $('time').textContent=new Date(state.behavior?.generated_at||Date.now()).toLocaleTimeString('zh-CN',{hour12:false});
+      }else{
+        const[overview,devices]=await Promise.all([api('overview'),api('devices')]);
+        if(!isCurrent())return;
+        state.overview=overview;state.devices=devices.devices||[];$('loginLayer').classList.add('hidden');renderPageTabs();renderMetrics();renderDevices();await refreshBehavior();
+        if(!isCurrent())return;
+      }
+      if(manual){$('refreshButton').textContent=Object.keys(state.behaviorErrors).length?'↻ 部分失败，重试':'✓ 已更新';if(!Object.keys(state.behaviorErrors).length)setTimeout(()=>{if(isCurrent())$('refreshButton').textContent='↻ 刷新'},1200)}
+    }catch(error){if(!isCurrent())return;if(error.message==='unauthorized')showLogin();else{$('time').textContent=error.message==='forbidden'?'当前角色无权访问':'刷新失败';if(manual)$('refreshButton').textContent='↻ 重试'}}
+  }
   document.querySelectorAll('.seg button[data-days]').forEach(button=>button.addEventListener('click',()=>{document.querySelectorAll('.seg button[data-days]').forEach(item=>item.classList.remove('active'));button.classList.add('active');state.range=Number(button.dataset.days);renderTrend()}));
   document.querySelectorAll('.page-tab').forEach(button=>button.addEventListener('click',()=>{state.view=button.dataset.view;renderPageTabs()}));
   document.querySelectorAll('.behavior-range button').forEach(button=>button.addEventListener('click',async()=>{const section=button.closest('.behavior-range').dataset.behaviorSection,range=button.dataset.range;if(state.behaviorRanges[section]===range)return;setBehaviorRangeBusy(section,true);try{await refreshBehaviorSection(section,range)}catch{syncBehaviorRangeControls(section)}finally{setBehaviorRangeBusy(section,false)}}));
