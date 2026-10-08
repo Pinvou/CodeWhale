@@ -643,6 +643,13 @@ fn is_exact_google_chat_route(provider: ApiProvider, base_url: &str) -> bool {
 fn google_model_requires_thought_signatures(model: &str) -> bool {
     let model = model.trim().to_ascii_lowercase();
     if model.starts_with("gemini-3") {
+        // Image-output variants stay gated. Vertex's thought-signatures page
+        // relaxes Gemini 3 Pro Image ("doesn't return a 400 error if a
+        // thought signature isn't returned"), but Vertex is a different
+        // product: this route is the Gemini API, whose Gemini 3 guide keeps
+        // image generation/editing under strict validation — "Missing
+        // signatures will result in a 400 error", the same tier as function
+        // calling. Re-checked 2026-10-12.
         return true;
     }
     if model.starts_with("gemini-2.5-pro") {
@@ -8041,6 +8048,38 @@ mod google_thought_signature_tests {
             false,
         )
         .expect("flash-lite replay must not require a signature");
+    }
+
+    #[test]
+    fn google_image_variants_stay_fail_closed_on_missing_signatures() {
+        // The Gemini API — this route's product — keeps image
+        // generation/editing under strict thought-signature validation,
+        // like function calling. Vertex's page relaxes Gemini 3 Pro
+        // Image, but that relaxation governs Vertex's endpoint family,
+        // not generativelanguage.googleapis.com, so the image variants
+        // must fail closed exactly like the text models. Re-checked
+        // 2026-10-12.
+        for model in [
+            "gemini-3-pro-image",
+            "gemini-3-pro-image-preview",
+            "gemini-3.1-flash-image",
+            "gemini-3.1-flash-lite-image",
+        ] {
+            let mut request = google_request_with_signed_tool(None);
+            request.model = model.to_string();
+            let error = build_chat_wire_body(
+                &request,
+                ApiProvider::Google,
+                DEFAULT_GOOGLE_BASE_URL,
+                false,
+            )
+            .err()
+            .unwrap_or_else(|| panic!("{model} must still require a signature"));
+            assert!(
+                error.to_string().contains("thought signature"),
+                "{model} error must name the missing signature: {error}"
+            );
+        }
     }
 
     #[test]
