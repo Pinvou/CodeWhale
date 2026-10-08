@@ -18,13 +18,14 @@ pub(crate) const MAX_TRANSFER_CHUNK_BYTES: usize = 256 * 1024;
 pub(crate) const MAX_TASK_INPUT_TEXT_BYTES: usize = 64 * 1024;
 const MAX_TEMPORARY_MODEL_PACKAGE_BYTES: usize = 64 * 1024;
 const MAX_ID_CHARS: usize = 128;
+const SEALED_CODE_V1_BYTES: usize = 68;
 const MAX_TASK_REFERENCES: usize = 32;
 const MAX_DESCRIPTORS: usize = 256;
 const MAX_ARTIFACTS: usize = 256;
 const MAX_ENCRYPTED_WIRE_BYTES: usize =
     MAX_ENCRYPTED_FRAME_BYTES.div_ceil(3) * 4 + MAX_CONTROL_MESSAGE_BYTES;
 const CONTROLLER_CONTRACT_SHA256: &str =
-    "bb1e1aebb62fb797155eed4e656cd55c41ef6a1fe278a9fe85be0991409afd70";
+    "ad4dd926f97c376419d33589e8147f533e7cbb55c3430a00d3b0c5e306349aac";
 
 pub(crate) const CONTROLLER_CAPABILITIES: &[&str] = &[
     "pairing_v1",
@@ -214,7 +215,7 @@ pub(crate) struct ControllerProtocolError {
 }
 
 impl ControllerProtocolError {
-    fn new(code: &'static str, field: impl Into<String>) -> Self {
+    pub(super) fn new(code: &'static str, field: impl Into<String>) -> Self {
         Self {
             code,
             field: field.into(),
@@ -230,7 +231,7 @@ impl fmt::Display for ControllerProtocolError {
 
 impl std::error::Error for ControllerProtocolError {}
 
-type Result<T> = std::result::Result<T, ControllerProtocolError>;
+pub(super) type Result<T> = std::result::Result<T, ControllerProtocolError>;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum SequenceDisposition {
@@ -1432,6 +1433,14 @@ pub(crate) fn validate_controller_message_json_in_context(
         return Err(ControllerProtocolError::new("message_too_large", "json"));
     }
     validate_object(object, kind, &schema, sender_role, "message")?;
+    if kind == "desktop_pairing_register"
+        && object.get("code_wrap_public_key_b64") == object.get("handshake_public_key_b64")
+    {
+        return Err(ControllerProtocolError::new(
+            "invalid_field",
+            "message.key_purpose_reuse",
+        ));
+    }
     if kind == "controller_pairing_reserved" {
         validate_reserved_transcript(object)?;
     }
@@ -1515,19 +1524,6 @@ pub(crate) struct LeaseInstallValidationContext {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct VerifiedTranscript {
-    request_id: String,
-    expected_pairing_id: String,
-    reservation_id: String,
-    remote_control_generation: String,
-    relay_epoch: String,
-    transcript_hash: String,
-    expected_controller_connection_identity: String,
-    negotiated_capabilities: Vec<String>,
-    capability_hash: String,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ParsedTranscript {
     request_id: String,
     expected_pairing_id: String,
@@ -1544,50 +1540,56 @@ pub(crate) struct ParsedTranscript {
     relay_signature: Vec<u8>,
 }
 
-/// Sealed authentication boundary. DEV-00 deliberately ships no implementation:
-/// DEV-05 must add the enrollment-backed authenticator inside this module before
-/// any production caller can obtain a `VerifiedTranscript`.
-#[allow(dead_code)]
-pub(crate) mod transcript_authentication {
-    use super::{ParsedTranscript, Result, VerifiedTranscript};
-
-    mod private {
-        pub trait Sealed {}
-    }
-
-    pub(crate) trait TranscriptAuthenticator: private::Sealed {
-        fn authenticate(&self, parsed: ParsedTranscript) -> Result<VerifiedTranscript>;
-    }
+pub(crate) struct ParsedTranscriptParts {
+    pub(crate) request_id: String,
+    pub(crate) expected_pairing_id: String,
+    pub(crate) reservation_id: String,
+    pub(crate) remote_control_generation: String,
+    pub(crate) relay_epoch: String,
+    pub(crate) transcript_hash: String,
+    pub(crate) expected_controller_connection_identity: String,
+    pub(crate) negotiated_capabilities: Vec<String>,
+    pub(crate) capability_hash: String,
+    pub(crate) relay_signing_key_id: String,
+    pub(crate) signature_algorithm: String,
+    pub(crate) signature_preimage: Vec<u8>,
+    pub(crate) relay_signature: Vec<u8>,
 }
 
-#[cfg(test)]
-fn verified_transcript_for_test(parsed: ParsedTranscript) -> VerifiedTranscript {
-    VerifiedTranscript {
-        request_id: parsed.request_id,
-        expected_pairing_id: parsed.expected_pairing_id,
-        reservation_id: parsed.reservation_id,
-        remote_control_generation: parsed.remote_control_generation,
-        relay_epoch: parsed.relay_epoch,
-        transcript_hash: parsed.transcript_hash,
-        expected_controller_connection_identity: parsed.expected_controller_connection_identity,
-        negotiated_capabilities: parsed.negotiated_capabilities,
-        capability_hash: parsed.capability_hash,
+impl ParsedTranscript {
+    pub(crate) fn into_parts(self) -> ParsedTranscriptParts {
+        ParsedTranscriptParts {
+            request_id: self.request_id,
+            expected_pairing_id: self.expected_pairing_id,
+            reservation_id: self.reservation_id,
+            remote_control_generation: self.remote_control_generation,
+            relay_epoch: self.relay_epoch,
+            transcript_hash: self.transcript_hash,
+            expected_controller_connection_identity: self.expected_controller_connection_identity,
+            negotiated_capabilities: self.negotiated_capabilities,
+            capability_hash: self.capability_hash,
+            relay_signing_key_id: self.relay_signing_key_id,
+            signature_algorithm: self.signature_algorithm,
+            signature_preimage: self.signature_preimage,
+            relay_signature: self.relay_signature,
+        }
     }
 }
 
 impl LeaseInstallValidationContext {
-    pub(crate) fn new(verified: VerifiedTranscript) -> Self {
+    pub(crate) fn new(verified: super::crypto::VerifiedTranscript) -> Self {
         Self {
-            request_id: verified.request_id,
-            expected_pairing_id: verified.expected_pairing_id,
-            reservation_id: verified.reservation_id,
-            remote_control_generation: verified.remote_control_generation,
-            relay_epoch: verified.relay_epoch,
-            transcript_hash: verified.transcript_hash,
+            request_id: verified.request_id().to_owned(),
+            expected_pairing_id: verified.expected_pairing_id().to_owned(),
+            reservation_id: verified.reservation_id().to_owned(),
+            remote_control_generation: verified.remote_control_generation().to_owned(),
+            relay_epoch: verified.relay_epoch().to_owned(),
+            transcript_hash: verified.transcript_hash().to_owned(),
             expected_controller_connection_identity: verified
-                .expected_controller_connection_identity,
-            negotiated_capabilities: verified.negotiated_capabilities,
-            capability_hash: verified.capability_hash,
+                .expected_controller_connection_identity()
+                .to_owned(),
+            negotiated_capabilities: verified.negotiated_capabilities().to_vec(),
+            capability_hash: verified.capability_hash().to_owned(),
         }
     }
 }
@@ -2135,6 +2137,13 @@ fn validate_named_field(object: &Map<String, Value>, field: &str, value: &Value)
         bounded_text(value, field, 255)?;
     } else if ["message", "preview", "target_scope"].contains(&field) {
         bounded_text(value, field, if field == "message" { 256 } else { 4096 })?;
+    } else if field == "sealed_code_b64" {
+        validate_base64(
+            value,
+            field,
+            SEALED_CODE_V1_BYTES,
+            Some(SEALED_CODE_V1_BYTES),
+        )?;
     } else if field.ends_with("_public_key_b64") {
         validate_base64(value, field, 256, Some(32))?;
     } else if field == "challenge_b64" || field == "transport_challenge_b64" || field == "nonce_b64"
@@ -3755,6 +3764,25 @@ mod tests {
     }
 
     fn rust_contract_manifest() -> Value {
+        let crypto_contract = json!({
+            "key_agreement":"x25519",
+            "key_derivation":"hkdf-sha256",
+            "aead":"aes-256-gcm",
+            "relay_signature":"ed25519",
+            "receipt_secret_bytes":32,
+            "replay_window_bits":64,
+            "key_domains":["code-wrap","finished/A","finished/B","business/A-to-B","business/B-to-A","resume"],
+            "relay_crypto_scope":"receipt-commitment-and-sealed-code-fixture-validation-only",
+            "sealed_code_v1":"version-u8|relay-x25519-public-32|nonce-12|ciphertext-7|tag-16",
+            "sealed_code_json_encoding":"canonical-base64-of-68-wire-bytes",
+            "sealed_code_kdf_fields":["registration_request_id","pairing_id","remote_control_generation","relay_epoch","expires_at_ms"],
+            "sealed_code_aad_fields":["registration_request_id","pairing_id","remote_control_generation","relay_epoch","expires_at_ms"],
+            "sealed_code_sealer":"one-shot-relay-x25519-keypair-and-os-csprng-nonce",
+            "session_key_split":"consume-once-role-bound-send-receive",
+            "send_sequence_exhaustion":"u64-max-terminal",
+            "x25519_peer_check":"was-contributory-before-export",
+            "transcript_authenticator":"single-concrete-private-constructor-ring-ed25519"
+        });
         json!({
             "protocol_version": CONTROLLER_PROTOCOL_VERSION,
             "subprotocol": "pinvou-desktop-controller-v1",
@@ -3766,7 +3794,9 @@ mod tests {
                 "max_transfer_chunk_bytes": MAX_TRANSFER_CHUNK_BYTES,
                 "max_task_input_text_bytes": MAX_TASK_INPUT_TEXT_BYTES,
                 "max_temporary_model_package_bytes": MAX_TEMPORARY_MODEL_PACKAGE_BYTES,
-                "max_id_chars": MAX_ID_CHARS
+                "max_id_chars": MAX_ID_CHARS,
+                "sealed_code_v1_bytes": SEALED_CODE_V1_BYTES,
+                "max_sensitive_string_bytes": super::super::crypto::MAX_SENSITIVE_STRING_BYTES
             },
             "capabilities": CONTROLLER_CAPABILITIES,
             "message_types": CONTROLLER_MESSAGE_TYPES,
@@ -3800,7 +3830,8 @@ mod tests {
             "liveness_sequence_policy":{"heartbeat":{"lower":"replay","equal":"same_sequence_tighten","greater":"advance"},"attestation":{"lower":"replay","equal":"replay","greater":"advance"}},
             "validation_modes":{"shape_only":"schema-role-lease-shape-without-capability-state","runtime":"negotiated-capabilities-required-for-state-machine-messages","lease_install":"trusted-handshake-bindings-produce-new-lease","registration":"independent-generation-registration-idempotency-context"},
             "runtime_capability_context":{"order":"bytewise-strict-ascending","invalid_error":{"code":"unsupported_capability","field":"negotiated_capabilities"}},
-            "verified_transcript":{"parsed_constructor":"strict-envelope-canonical-preimage-and-hash-only-not-authenticated","production_authenticator":"none-in-dev00-sealed-for-dev05","lease_install_derivation":"opaque-authenticated-transcript-only","activation_owner":"DEV-05"}
+            "verified_transcript":{"parsed_constructor":"strict-envelope-canonical-preimage-and-hash-only-not-authenticated","production_authenticator":"typed-enrollment-ed25519-ring","lease_install_derivation":"opaque-authenticated-transcript-only","activation_owner":"DEV-05"},
+            "crypto_contract": crypto_contract
         })
     }
 
@@ -4376,10 +4407,21 @@ mod tests {
         );
         assert_eq!(parsed.relay_signature.len(), 64);
 
-        // This conversion exists only under cfg(test). Production has no
-        // authenticator and therefore no path to construct this token.
-        let verified = verified_transcript_for_test(parsed.clone());
-        let install_context = LeaseInstallValidationContext::new(verified);
+        let relay_public_key: [u8; 32] = base64::engine::general_purpose::STANDARD
+            .decode(
+                fixture["transcript_vector"]["public_key_b64"]
+                    .as_str()
+                    .unwrap(),
+            )
+            .unwrap()
+            .try_into()
+            .unwrap();
+        let install_context = super::super::crypto::authenticate_transcript_for_test(
+            parsed.clone(),
+            "relay-key-test-1",
+            relay_public_key,
+        )
+        .unwrap();
         let result = validate_controller_lease_install_message_json(
             &serde_json::to_string(&vector["message"]).unwrap(),
             RELAY,

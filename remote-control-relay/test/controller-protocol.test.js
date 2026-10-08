@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { createHash, createPublicKey, verify } from "node:crypto";
+import { createDecipheriv, createHash, createPrivateKey, createPublicKey, diffieHellman, hkdfSync, verify } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import * as controllerProtocol from "../protocol-controller.js";
@@ -20,11 +20,14 @@ import {
   MAX_DECRYPTED_PAYLOAD_BYTES,
   MAX_ENCRYPTED_FRAME_BYTES,
   MAX_TASK_INPUT_TEXT_BYTES,
+  SEALED_CODE_V1_BYTES,
   CONTROLLER_SENSITIVE_FIELDS,
   applyLivenessDeadline,
   buildDirectLivenessAad,
   buildLivenessAttestationPreimage,
   buildPairingTranscriptPreimage,
+  buildReceiptCommitmentPreimage,
+  buildSealedCodeAad,
   canonicalControllerContractHash,
   classifyLivenessAttestation,
   classifyMonotonicSequence,
@@ -33,6 +36,8 @@ import {
   controllerLogProjection,
   negotiateControllerCapabilities,
   parseControllerPairingTranscript,
+  parseSealedCodeV1,
+  receiptCommitmentHex,
   validateControllerBaseUrl,
   validateControllerLivenessPayload,
   validateControllerLeaseInstallMessage,
@@ -41,6 +46,7 @@ import {
   validateControllerRegistrationMessage,
   validateControllerRuntimeMessage,
   validateControllerRuntimePayload,
+  verifyReceiptCommitment,
 } from "../protocol-controller.js";
 
 const fixtureUrl = new URL("./fixtures/controller-protocol-v1.json", import.meta.url);
@@ -73,6 +79,11 @@ function lp(value) {
 function fixturePublicKey(rawBase64) {
   const prefix = Buffer.from("302a300506032b6570032100", "hex");
   return createPublicKey({ key: Buffer.concat([prefix, Buffer.from(rawBase64, "base64")]), format: "der", type: "spki" });
+}
+
+function fixtureX25519PrivateKey(rawHex) {
+  const prefix = Buffer.from("302e020100300506032b656e04220420", "hex");
+  return createPrivateKey({ key: Buffer.concat([prefix, Buffer.from(rawHex, "hex")]), format: "der", type: "pkcs8" });
 }
 
 function validMessage(type, role = fixture.message_role_matrix[type][0]) {
@@ -386,9 +397,80 @@ test("controller_joined has no DEV-00 production path from untrusted data to a l
 
 test("finished receipt commitment is built independently from fields", () => {
   const vector = fixture.receipt_commitment_vector;
-  const preimage = Buffer.concat([Buffer.from("pinvou-finished-receipt-commit-v1", "ascii"), lp(vector.relay_epoch), lp(vector.pairing_id), lp(vector.reservation_id), lp(vector.transcript_hash), lp(vector.sender_role), lp(Buffer.from(vector.secret_hex, "hex"))]);
+  const binding = {
+    relay_epoch: vector.relay_epoch,
+    pairing_id: vector.pairing_id,
+    reservation_id: vector.reservation_id,
+    transcript_hash: vector.transcript_hash,
+    sender_role: vector.sender_role,
+  };
+  const secret = Buffer.from(vector.secret_hex, "hex");
+  const preimage = buildReceiptCommitmentPreimage(binding, secret);
   assert.equal(preimage.toString("hex"), vector.preimage_hex);
-  assert.equal(createHash("sha256").update(preimage).digest("hex"), vector.commitment_hex);
+  assert.equal(receiptCommitmentHex(binding, secret), vector.commitment_hex);
+  assert.equal(verifyReceiptCommitment(binding, secret, vector.commitment_hex), true);
+  assert.equal(verifyReceiptCommitment({ ...binding, sender_role: "B" }, secret, vector.commitment_hex), false);
+  assert.equal(verifyReceiptCommitment(binding, Buffer.alloc(32, 7), vector.commitment_hex), false);
+  assertProtocolError("invalid_field", () => buildReceiptCommitmentPreimage(binding, Buffer.alloc(31)));
+  assertProtocolError("invalid_field", () => verifyReceiptCommitment(binding, secret, "00"));
+});
+
+test("sealed_code_v1 is independently reconstructed and decrypted by Node crypto", () => {
+  const vector = fixture.sealed_code_vector;
+  const parsed = parseSealedCodeV1(vector.sealed_code_b64);
+  assert.equal(SEALED_CODE_V1_BYTES, 68);
+  assert.equal(parsed.version, vector.version);
+  assert.equal(parsed.relay_ephemeral_public_key.toString("hex"), vector.relay_public_hex);
+  assert.equal(parsed.nonce.toString("hex"), vector.nonce_hex);
+  assert.equal(parsed.ciphertext_and_tag.toString("hex"), vector.ciphertext_hex);
+
+  const receiverPrivate = fixtureX25519PrivateKey(vector.receiver_private_hex);
+  const relayPublicPrefix = Buffer.from("302a300506032b656e032100", "hex");
+  const relayPublic = createPublicKey({
+    key: Buffer.concat([relayPublicPrefix, parsed.relay_ephemeral_public_key]),
+    format: "der",
+    type: "spki",
+  });
+  const shared = diffieHellman({ privateKey: receiverPrivate, publicKey: relayPublic });
+  assert.equal(shared.toString("hex"), vector.shared_secret_hex);
+  const aad = buildSealedCodeAad(vector.binding);
+  assert.equal(aad.toString("hex"), vector.aad_hex);
+  const info = Buffer.concat([
+    Buffer.from("pinvou-code-wrap-key-v1", "ascii"),
+    ...[
+      vector.binding.registration_request_id,
+      vector.binding.pairing_id,
+      vector.binding.remote_control_generation,
+      vector.binding.relay_epoch,
+      vector.binding.expires_at_ms,
+    ].map(lp),
+  ]);
+  const key = Buffer.from(hkdfSync("sha256", shared, Buffer.from("pinvou-code-wrap-salt-v1", "ascii"), info, 32));
+  assert.equal(key.toString("hex"), vector.derived_key_hex);
+  const decrypt = (candidate, candidateAad = aad) => {
+    const ciphertext = candidate.ciphertext_and_tag.subarray(0, -16);
+    const tag = candidate.ciphertext_and_tag.subarray(-16);
+    const decipher = createDecipheriv("aes-256-gcm", key, candidate.nonce);
+    decipher.setAAD(candidateAad);
+    decipher.setAuthTag(tag);
+    return Buffer.concat([decipher.update(ciphertext), decipher.final()]);
+  };
+  assert.equal(decrypt(parsed).toString("utf8"), vector.pairing_code);
+
+  const reusedNonceEnvelope = Buffer.from(vector.sealed_code_b64, "base64");
+  reusedNonceEnvelope[45] ^= 1;
+  const sameKeyAndNonceDifferentCiphertext = parseSealedCodeV1(reusedNonceEnvelope.toString("base64"));
+  assert.deepEqual(sameKeyAndNonceDifferentCiphertext.nonce, parsed.nonce);
+  assert.throws(() => decrypt(sameKeyAndNonceDifferentCiphertext));
+  const changedNonce = { ...parsed, nonce: Buffer.from(parsed.nonce) };
+  changedNonce.nonce[0] ^= 1;
+  assert.throws(() => decrypt(changedNonce));
+  assert.throws(() => decrypt(parsed, buildSealedCodeAad({ ...vector.binding, pairing_id: "pairing-other" })));
+
+  const tampered = Buffer.from(vector.sealed_code_b64, "base64");
+  tampered[0] = 2;
+  assertProtocolError("unsupported_version", () => parseSealedCodeV1(tampered.toString("base64")));
+  assertProtocolError("invalid_field", () => parseSealedCodeV1(Buffer.alloc(67).toString("base64")));
 });
 
 test("direct A-to-B liveness exposes routing only and binds strict inner data via AAD", () => {
