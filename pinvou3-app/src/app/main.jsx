@@ -26,7 +26,7 @@ import { ProjectGroupHeader } from '../features/projects/ProjectGroupHeader.jsx'
 import { classifyRebindError, mergeRebindCarryoverIds } from '../features/projects/rebindErrors.js';
 import { runSessionBatch } from '../shared/session-management.js';
 import { isLlmApiAccountVisible } from '../shared/model-options.js';
-const LazyAccountPlatformPopover = lazy(() => import('../features/account-platform/AccountPlatformPopover.jsx').then(module => ({ default: module.AccountPlatformPopover })));
+const LazyAccountPlatformPopover = lazy(() => VIEW_LOADERS.accountPlatformPopover().then(module => ({ default: module.AccountPlatformPopover })));
 import { AccountPlatformDesktopClient } from '../features/account-platform/desktop-client.js';
 import { can, isWeb } from '../shared/platform.js';
 import { errorCode, localizedErrorMessage } from '../shared/user-facing-error.js';

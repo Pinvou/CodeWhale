@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { requireFinanceCollection } from './finance-contract.js';
+import { loadFinancePage } from './admin-finance-pagination.js';
 import { useFinanceOperation } from './useFinanceOperation.js';
 
 export function AdminPaymentReviewQueue({ client, copy, me, anomaly = false }) {
@@ -17,8 +18,8 @@ export function AdminPaymentReviewQueue({ client, copy, me, anomaly = false }) {
   const canQuery = permissions.includes('platform.billing.orders.sync');
   const canRepair = permissions.includes('platform.billing.repairs.request');
   const load = async (next = cursor) => {
-    const value = await operation.read(() => anomaly ? client.paymentAnomalies({ status, cursor: next }) : client.latePaymentReviews({ status, cursor: next }));
-    if (value) { requireFinanceCollection(value); setPage(value); setCursor(next); }
+    const result = await operation.read(() => loadFinancePage({ status, cursor: next }, filters => anomaly ? client.paymentAnomalies(filters) : client.latePaymentReviews(filters), () => { setCursor(''); setPrevious([]); }));
+    if (result) { setPage(result.value); setCursor(result.query.cursor); }
   };
   useEffect(() => { void load(''); }, [client, owner, anomaly]); // eslint-disable-line react-hooks/exhaustive-deps
   const open = async id => {

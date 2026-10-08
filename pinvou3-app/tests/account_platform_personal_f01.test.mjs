@@ -88,6 +88,36 @@ test('admin retries consume exact 202 resource receipts and compensation 204', a
     await assert.rejects(client.retryRegistration(id), /INVALID_MUTATION_ACK/);
   } finally { globalThis.fetch = previous; }
 });
+
+test('admin mutation transport preserves configured verbs, JSON, CSRF and request identity', async () => {
+  const previous = globalThis.fetch; const calls = [];
+  globalThis.fetch = async (url, options) => {
+    calls.push({ url, options });
+    if (url.endsWith('/status') || url.endsWith('/compensate')) return json(null, 204);
+    if (url.endsWith('/actions/retry')) return json({ registration_operation_id: id, status: 'IDENTITY_CREATING' }, 202);
+    return json({ configured: true });
+  };
+  try {
+    const client = new AdminPlatformClient('/portal'); client.csrfToken = 'bound-csrf';
+    const controller = new AbortController(), input = { enabled: false, sender: 'controlled' };
+    assert.deepEqual(await client.updateSMSConfiguration(input, 'sms-operation-key', controller.signal), { configured: true });
+    await client.setUserStatus(id, 'DISABLED');
+    await client.retryRegistration(id);
+    await client.compensateRegistration(id);
+    assert.deepEqual(calls.map(call => call.options.method), ['PUT', 'PATCH', 'POST', 'POST']);
+    assert.equal(calls[0].options.body, JSON.stringify(input));
+    assert.equal(calls[1].options.body, JSON.stringify({ status: 'DISABLED' }));
+    assert.equal(calls[2].options.body, undefined); assert.equal(calls[3].options.body, undefined);
+    assert.equal(calls[0].options.headers['Idempotency-Key'], 'sms-operation-key');
+    assert.equal(calls[0].options.signal, controller.signal);
+    for (const call of calls) {
+      assert.ok(call.url.startsWith('/portal/api/admin/account/admin/v1/'));
+      assert.equal(call.options.headers['X-CSRF-Token'], 'bound-csrf');
+      assert.equal(call.options.headers['Content-Type'], 'application/json');
+      assert.equal(call.options.credentials, 'same-origin'); assert.equal(call.options.cache, 'no-store');
+    }
+  } finally { globalThis.fetch = previous; }
+});
 test('handoff clears ticket/locale from history before its only request', async () => {
   const events = []; const ticket = 'one-time-control-ticket';
   const taken = takePortalSessionHandoffTicket(`https://portal.example/portal-session-handoff.html?locale=ja#ticket=${ticket}`, (_state, _title, path) => events.push(['clear', path]));

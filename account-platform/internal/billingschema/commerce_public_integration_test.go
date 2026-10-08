@@ -60,7 +60,7 @@ func TestF02PublicCommerceCustomerLifecycle(t *testing.T) {
 		}
 		// This is the Account-side receipt of the wallet provisioner, not a
 		// claim that a Billing HTTP request or provider was executed here.
-		if e = r.CompleteWalletProvisioning(ctx, me.UserID); e != nil {
+		if e = r.CompleteWalletProvisioning(ctx, jobs[0]); e != nil {
 			t.Fatal(e)
 		}
 		me, e = r.GetMe(ctx, principal)
@@ -127,10 +127,11 @@ func TestF02PublicCommerceCustomerLifecycle(t *testing.T) {
 		if e != nil {
 			t.Fatal(e)
 		}
-		if _, e = r.LeaseWalletProvisioningJobs(ctx, 20, time.Minute); e != nil {
-			t.Fatal(e)
+		walletJobs, e := r.LeaseWalletProvisioningJobs(ctx, 20, time.Minute)
+		if e != nil || len(walletJobs) != 1 || walletJobs[0].UserID != u.UserID {
+			t.Fatal("actual wallet job not leased for current user", e)
 		}
-		if e = r.CompleteWalletProvisioning(ctx, u.UserID); e != nil {
+		if e = r.CompleteWalletProvisioning(ctx, walletJobs[0]); e != nil {
 			t.Fatal(e)
 		}
 		if _, e = c.Exec(ctx, `UPDATE users SET mobile_e164='+8613800001235',mobile_verified_at=now() WHERE id=$1`, u.UserID); e != nil {
@@ -214,10 +215,11 @@ func TestF02PublicCommerceCustomerLifecycle(t *testing.T) {
 		if e != nil {
 			t.Fatal(e)
 		}
-		if _, e = r.LeaseWalletProvisioningJobs(ctx, 20, time.Minute); e != nil {
-			t.Fatal(e)
+		walletJobs, e := r.LeaseWalletProvisioningJobs(ctx, 20, time.Minute)
+		if e != nil || len(walletJobs) != 1 || walletJobs[0].UserID != u.UserID {
+			t.Fatal("actual wallet job not leased for current user", e)
 		}
-		if e = r.CompleteWalletProvisioning(ctx, u.UserID); e != nil {
+		if e = r.CompleteWalletProvisioning(ctx, walletJobs[0]); e != nil {
 			t.Fatal(e)
 		}
 		if _, e = c.Exec(ctx, `UPDATE users SET mobile_e164='+8613800001236',mobile_verified_at=now() WHERE id=$1`, u.UserID); e != nil {
@@ -276,10 +278,11 @@ func TestF02PublicCommerceCustomerLifecycle(t *testing.T) {
 		if e != nil {
 			t.Fatal(e)
 		}
-		if _, e = r.LeaseWalletProvisioningJobs(ctx, 20, time.Minute); e != nil {
-			t.Fatal(e)
+		walletJobs, e := r.LeaseWalletProvisioningJobs(ctx, 20, time.Minute)
+		if e != nil || len(walletJobs) != 1 || walletJobs[0].UserID != u.UserID {
+			t.Fatal("actual wallet job not leased for current user", e)
 		}
-		if e = r.CompleteWalletProvisioning(ctx, u.UserID); e != nil {
+		if e = r.CompleteWalletProvisioning(ctx, walletJobs[0]); e != nil {
 			t.Fatal(e)
 		}
 		if _, e = c.Exec(ctx, `UPDATE users SET mobile_e164='+8613800001237',mobile_verified_at=now() WHERE id=$1`, u.UserID); e != nil {
@@ -320,10 +323,11 @@ func TestF02PublicCommerceCustomerLifecycle(t *testing.T) {
 				if e != nil {
 					t.Fatal(e)
 				}
-				if _, e = r.LeaseWalletProvisioningJobs(ctx, 20, time.Minute); e != nil {
-					t.Fatal(e)
+				walletJobs, e := r.LeaseWalletProvisioningJobs(ctx, 20, time.Minute)
+				if e != nil || len(walletJobs) != 1 || walletJobs[0].UserID != u.UserID {
+					t.Fatal("actual wallet job not leased for current user", e)
 				}
-				if e = r.CompleteWalletProvisioning(ctx, u.UserID); e != nil {
+				if e = r.CompleteWalletProvisioning(ctx, walletJobs[0]); e != nil {
 					t.Fatal(e)
 				}
 				mobile := "+8613800001238"
@@ -414,10 +418,11 @@ func TestF02CommerceLeaseExpiresWhileWaitingForMappingLock(t *testing.T) {
 			if e != nil {
 				t.Fatal(e)
 			}
-			if _, e = r.LeaseWalletProvisioningJobs(ctx, 20, time.Minute); e != nil {
-				t.Fatal(e)
+			walletJobs, e := r.LeaseWalletProvisioningJobs(ctx, 20, time.Minute)
+			if e != nil || len(walletJobs) != 1 || walletJobs[0].UserID != u.UserID {
+				t.Fatal("actual wallet job not leased for current user", e)
 			}
-			if e = r.CompleteWalletProvisioning(ctx, u.UserID); e != nil {
+			if e = r.CompleteWalletProvisioning(ctx, walletJobs[0]); e != nil {
 				t.Fatal(e)
 			}
 			mobile := []string{"+8613800001240", "+8613800001241"}[index]
