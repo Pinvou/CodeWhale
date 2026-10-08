@@ -225,7 +225,7 @@ func TestPersonalWalletRequiresCompleteMatchingActiveACK(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			repo := &walletProvisioningRepositoryFake{jobs: []WalletProvisioningJob{{UserID: userID}}}
+			repo := &walletProvisioningRepositoryFake{jobs: []WalletProvisioningJob{{UserID: userID, LeaseUntil: time.Now().Add(time.Minute)}}}
 			err = NewWalletProvisioningWorker(repo, wallets, time.Second).RunOnce(context.Background())
 			if err != nil {
 				t.Fatal(err)

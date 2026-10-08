@@ -23,3 +23,12 @@ func TestDevelopmentTracingMayBeDisabled(t *testing.T) {
 		t.Fatalf("disabled development tracing failed: %v", err)
 	}
 }
+
+func TestProductionVariantCannotDisableTracingOrUsePlaintext(t *testing.T) {
+	for _, endpoint := range []string{"", "http://collector:4318"} {
+		t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", endpoint)
+		if _, err := SetupTracing(context.Background(), Config{Service: "test", Environment: " Production-Canary "}); err == nil {
+			t.Fatal("production variant bypassed tracing security gate")
+		}
+	}
+}

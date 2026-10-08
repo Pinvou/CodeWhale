@@ -48,25 +48,27 @@ func (metrics *httpMetrics) middleware(next http.Handler, logger *slog.Logger) h
 		metrics.inFlight.Inc()
 		defer metrics.inFlight.Dec()
 		wrapped := &metricResponseWriter{ResponseWriter: w, status: http.StatusOK}
+		defer func() {
+			route := r.Pattern
+			if route == "" {
+				route = "unmatched"
+			}
+			status := strconv.Itoa(wrapped.status)
+			method := metricMethod(r.Method)
+			requestCounter := metrics.requests.WithLabelValues(method, route, status)
+			durationObserver := metrics.duration.WithLabelValues(method, route)
+			elapsed := time.Since(start)
+			traceID := TraceID(r.Context())
+			if traceID != "" {
+				requestCounter.(prometheus.ExemplarAdder).AddWithExemplar(1, prometheus.Labels{"trace_id": traceID})
+				durationObserver.(prometheus.ExemplarObserver).ObserveWithExemplar(elapsed.Seconds(), prometheus.Labels{"trace_id": traceID})
+			} else {
+				requestCounter.Inc()
+				durationObserver.Observe(elapsed.Seconds())
+			}
+			logger.InfoContext(r.Context(), "http request completed", "method", r.Method, "route", route, "status", wrapped.status, "duration_ms", elapsed.Milliseconds())
+		}()
 		next.ServeHTTP(wrapped, r)
-		route := r.Pattern
-		if route == "" {
-			route = "unmatched"
-		}
-		status := strconv.Itoa(wrapped.status)
-		method := metricMethod(r.Method)
-		requestCounter := metrics.requests.WithLabelValues(method, route, status)
-		durationObserver := metrics.duration.WithLabelValues(method, route)
-		elapsed := time.Since(start)
-		traceID := TraceID(r.Context())
-		if traceID != "" {
-			requestCounter.(prometheus.ExemplarAdder).AddWithExemplar(1, prometheus.Labels{"trace_id": traceID})
-			durationObserver.(prometheus.ExemplarObserver).ObserveWithExemplar(elapsed.Seconds(), prometheus.Labels{"trace_id": traceID})
-		} else {
-			requestCounter.Inc()
-			durationObserver.Observe(elapsed.Seconds())
-		}
-		logger.InfoContext(r.Context(), "http request completed", "method", r.Method, "route", route, "status", wrapped.status, "duration_ms", elapsed.Milliseconds())
 	})
 }
 

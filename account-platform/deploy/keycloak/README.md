@@ -21,6 +21,14 @@ own desktop client and set `PINVOU_OIDC_CLIENT_ID` to that exact client ID
 image after Keycloak is available. The script creates or updates the flows,
 profile attribute permissions, audience mappers and the clients below.
 
+The script also applies and reads back the realm security baseline: brute-force
+protection with temporary lockouts, a 600-second access-token lifetime, refresh
+token rotation with zero reuse, and user/admin event retention for 30 days.
+Admin event details remain disabled to avoid recording sensitive request bodies.
+A failed readback stops provisioning; importing a development realm is not a
+production hardening check. Existing sessions and real refresh/logout behavior
+must still be verified before releasing the updated realm.
+
 | Variable | Meaning |
 | --- | --- |
 | `KEYCLOAK_REALM` | Realm to update, default `pinvou` |

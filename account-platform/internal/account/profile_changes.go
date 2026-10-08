@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sort"
 	"strings"
 	"time"
@@ -267,7 +268,7 @@ func (s *ProfileChangeService) resume(ctx context.Context, change ProfileChange)
 			err = s.identities.UpdateMobile(ctx, change.IdentitySubject, change.ID, change.FenceVersion, change.NewValue)
 		}
 		if err != nil {
-			_ = s.store.ScheduleProfileChangeRetry(context.WithoutCancel(ctx), change.ID, "IDENTITY_UPDATE_UNAVAILABLE")
+			recordProfileRecoveryFailure(ctx, "PROFILE_RETRY_SCHEDULE_FAILED", s.store.ScheduleProfileChangeRetry(context.WithoutCancel(ctx), change.ID, "IDENTITY_UPDATE_UNAVAILABLE"))
 			return change, err
 		}
 		if err := s.store.MarkProfileIdentityUpdated(ctx, change.ID); err != nil {
@@ -277,14 +278,14 @@ func (s *ProfileChangeService) resume(ctx context.Context, change ProfileChange)
 	}
 	if change.AccountCommittedAt == nil {
 		if err := s.store.CommitProfileChange(ctx, change.ID); err != nil {
-			_ = s.store.ScheduleProfileChangeRetry(context.WithoutCancel(ctx), change.ID, "ACCOUNT_COMMIT_FAILED")
+			recordProfileRecoveryFailure(ctx, "PROFILE_RETRY_SCHEDULE_FAILED", s.store.ScheduleProfileChangeRetry(context.WithoutCancel(ctx), change.ID, "ACCOUNT_COMMIT_FAILED"))
 			return change, err
 		}
 		change.AccountCommittedAt = ptrTime(s.now())
 	}
 	if change.SessionsRevokedAt == nil {
 		if err := s.identities.RevokeSessions(ctx, change.IdentitySubject); err != nil {
-			_ = s.store.ScheduleProfileChangeRetry(context.WithoutCancel(ctx), change.ID, "SESSION_REVOCATION_FAILED")
+			recordProfileRecoveryFailure(ctx, "PROFILE_RETRY_SCHEDULE_FAILED", s.store.ScheduleProfileChangeRetry(context.WithoutCancel(ctx), change.ID, "SESSION_REVOCATION_FAILED"))
 			return change, err
 		}
 		if err := s.store.MarkProfileSessionsRevoked(ctx, change.ID); err != nil {
@@ -358,33 +359,33 @@ func (s *ProfileChangeService) resumePasswordReset(ctx context.Context, operatio
 		}
 		if err := s.identities.ResetPassword(ctx, operation.IdentitySubject, operation.ID, operation.FenceVersion, operation.Mobile, operation.PasswordHandle, operation.PasswordPolicyVersion); err != nil {
 			if errors.Is(err, ErrPasswordReferenceInvalid) || errors.Is(err, ErrPasswordReferenceConflict) || errors.Is(err, ErrPasswordInvalid) || errors.Is(err, ErrPasswordEdgeSpace) {
-				_ = s.store.FailPasswordReset(context.WithoutCancel(ctx), operation.ID, passwordResetErrorCode(err))
+				recordProfileRecoveryFailure(ctx, "PASSWORD_RESET_FAILURE_CHECKPOINT_FAILED", s.store.FailPasswordReset(context.WithoutCancel(ctx), operation.ID, passwordResetErrorCode(err)))
 			} else {
 				if revokeErr := s.revokePasswordSessionsAfterUncertainWrite(ctx, operation); revokeErr != nil {
-					_ = s.store.SchedulePasswordResetRetry(context.WithoutCancel(ctx), operation.ID, "IDENTITY_RESET_UNCERTAIN_SESSION_REVOCATION_FAILED")
+					recordProfileRecoveryFailure(ctx, "PROFILE_RETRY_SCHEDULE_FAILED", s.store.SchedulePasswordResetRetry(context.WithoutCancel(ctx), operation.ID, "IDENTITY_RESET_UNCERTAIN_SESSION_REVOCATION_FAILED"))
 					return errors.Join(err, revokeErr)
 				}
-				_ = s.store.SchedulePasswordResetRetry(context.WithoutCancel(ctx), operation.ID, "IDENTITY_RESET_UNCERTAIN")
+				recordProfileRecoveryFailure(ctx, "PROFILE_RETRY_SCHEDULE_FAILED", s.store.SchedulePasswordResetRetry(context.WithoutCancel(ctx), operation.ID, "IDENTITY_RESET_UNCERTAIN"))
 			}
 			return err
 		}
 		if err := s.store.MarkPasswordUpdated(ctx, operation.ID); err != nil {
 			if revokeErr := s.revokePasswordSessionsAfterUncertainWrite(ctx, operation); revokeErr != nil {
-				_ = s.store.SchedulePasswordResetRetry(context.WithoutCancel(ctx), operation.ID, "PASSWORD_UPDATE_CHECKPOINT_AND_SESSION_REVOCATION_FAILED")
+				recordProfileRecoveryFailure(ctx, "PROFILE_RETRY_SCHEDULE_FAILED", s.store.SchedulePasswordResetRetry(context.WithoutCancel(ctx), operation.ID, "PASSWORD_UPDATE_CHECKPOINT_AND_SESSION_REVOCATION_FAILED"))
 				return errors.Join(err, revokeErr)
 			}
-			_ = s.store.SchedulePasswordResetRetry(context.WithoutCancel(ctx), operation.ID, "PASSWORD_UPDATE_CHECKPOINT_FAILED")
+			recordProfileRecoveryFailure(ctx, "PROFILE_RETRY_SCHEDULE_FAILED", s.store.SchedulePasswordResetRetry(context.WithoutCancel(ctx), operation.ID, "PASSWORD_UPDATE_CHECKPOINT_FAILED"))
 			return err
 		}
 		operation.PasswordUpdatedAt = ptrTime(s.now())
 	}
 	if operation.SessionsRevokedAt == nil {
 		if err := s.identities.RevokeSessions(ctx, operation.IdentitySubject); err != nil {
-			_ = s.store.SchedulePasswordResetRetry(context.WithoutCancel(ctx), operation.ID, "SESSION_REVOCATION_FAILED")
+			recordProfileRecoveryFailure(ctx, "PROFILE_RETRY_SCHEDULE_FAILED", s.store.SchedulePasswordResetRetry(context.WithoutCancel(ctx), operation.ID, "SESSION_REVOCATION_FAILED"))
 			return err
 		}
 		if err := s.store.MarkPasswordSessionsRevoked(ctx, operation.ID); err != nil {
-			_ = s.store.SchedulePasswordResetRetry(context.WithoutCancel(ctx), operation.ID, "SESSION_REVOCATION_CHECKPOINT_FAILED")
+			recordProfileRecoveryFailure(ctx, "PROFILE_RETRY_SCHEDULE_FAILED", s.store.SchedulePasswordResetRetry(context.WithoutCancel(ctx), operation.ID, "SESSION_REVOCATION_CHECKPOINT_FAILED"))
 			return err
 		}
 	}
@@ -408,7 +409,7 @@ func (s *ProfileChangeService) recoverUncertainPasswordReset(ctx context.Context
 		code = "PASSWORD_WRITE_UNCERTAIN"
 	}
 	if err := s.revokePasswordSessionsAfterUncertainWrite(ctx, operation); err != nil {
-		_ = s.store.SchedulePasswordResetRetry(context.WithoutCancel(ctx), operation.ID, code+"_SESSION_REVOCATION_FAILED")
+		recordProfileRecoveryFailure(ctx, "PROFILE_RETRY_SCHEDULE_FAILED", s.store.SchedulePasswordResetRetry(context.WithoutCancel(ctx), operation.ID, code+"_SESSION_REVOCATION_FAILED"))
 		return err
 	}
 	if err := s.store.RequirePasswordResetRepair(context.WithoutCancel(ctx), operation.ID, code); err != nil {
@@ -458,18 +459,44 @@ func NewProfileChangeWorker(service *ProfileChangeService, interval time.Duratio
 	}
 	return &ProfileChangeWorker{service: service, interval: interval}
 }
+
+// RunOnce exposes background storage and resume failures to supervision without
+// skipping the independent password-reset recovery when profile recovery fails.
+func (w *ProfileChangeWorker) RunOnce(ctx context.Context) error {
+	var failures []error
+	change, err := w.service.store.ClaimProfileChange(ctx)
+	if err != nil {
+		failures = append(failures, err)
+	} else if change != nil {
+		if _, err := w.service.resume(ctx, *change); err != nil {
+			failures = append(failures, err)
+		}
+	}
+	reset, err := w.service.store.ClaimPasswordReset(ctx)
+	if err != nil {
+		failures = append(failures, err)
+	} else if reset != nil {
+		if err := w.service.resumePasswordReset(ctx, *reset); err != nil {
+			failures = append(failures, err)
+		}
+	}
+	return errors.Join(failures...)
+}
+
+func recordProfileRecoveryFailure(ctx context.Context, code string, err error) {
+	if err != nil && ctx.Err() == nil {
+		slog.ErrorContext(ctx, "profile recovery operation failed", "error_code", code)
+	}
+}
+
 func (w *ProfileChangeWorker) Run(ctx context.Context) {
 	ticker := time.NewTicker(w.interval)
 	defer ticker.Stop()
 	for {
-		change, _ := w.service.store.ClaimProfileChange(ctx)
-		if change != nil {
-			_, _ = w.service.resume(ctx, *change)
+		if ctx.Err() != nil {
+			return
 		}
-		reset, _ := w.service.store.ClaimPasswordReset(ctx)
-		if reset != nil {
-			_ = w.service.resumePasswordReset(ctx, *reset)
-		}
+		recordProfileRecoveryFailure(ctx, "PROFILE_RECOVERY_FAILED", w.RunOnce(ctx))
 		select {
 		case <-ctx.Done():
 			return
@@ -477,7 +504,6 @@ func (w *ProfileChangeWorker) Run(ctx context.Context) {
 		}
 	}
 }
-
 func ptrTime(value time.Time) *time.Time { return &value }
 
 func (r *PostgresRepository) CreateProfileChange(ctx context.Context, principal identity.Principal, field, value string) (ProfileChange, error) {

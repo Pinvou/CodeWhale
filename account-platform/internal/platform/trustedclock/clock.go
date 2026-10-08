@@ -1,6 +1,7 @@
 package trustedclock
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"errors"
@@ -115,12 +116,22 @@ func sampleNTP(ctx context.Context, source string) (time.Duration, error) {
 	request := make([]byte, 48)
 	request[0] = 0x23
 	started := time.Now().UTC()
+	binary.BigEndian.PutUint32(request[40:44], uint32(started.Unix()+ntpEpochOffset))
+	binary.BigEndian.PutUint32(request[44:48], uint32((uint64(started.Nanosecond())<<32)/uint64(time.Second)))
 	if _, err := connection.Write(request); err != nil {
 		return 0, err
 	}
-	response := make([]byte, 48)
-	if _, err := connection.Read(response); err != nil {
+	response := make([]byte, 512)
+	n, err := connection.Read(response)
+	if err != nil {
 		return 0, err
+	}
+	if n < 48 || response[0]>>6 == 3 || response[0]&7 != 4 ||
+		((response[0]>>3)&7 != 3 && (response[0]>>3)&7 != 4) ||
+		response[1] == 0 || response[1] > 15 ||
+		!bytes.Equal(response[24:32], request[40:48]) ||
+		binary.BigEndian.Uint64(response[32:40]) == 0 || binary.BigEndian.Uint64(response[40:48]) == 0 {
+		return 0, errors.New("trusted time source returned an invalid or unsynchronized NTP response")
 	}
 	finished := time.Now().UTC()
 	seconds := binary.BigEndian.Uint32(response[40:44])

@@ -12,6 +12,11 @@ import (
 
 const defaultShutdownTimeout = 10 * time.Second
 
+// IsProduction keeps security gates consistent for production environment variants.
+func IsProduction(environment string) bool {
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(environment)), "production")
+}
+
 type Config struct {
 	ServiceName        string
 	Environment        string
@@ -67,7 +72,7 @@ func Load(serviceName string) (Config, error) {
 		rateLimitBurst = parsed
 	}
 	timeSources := splitUnique(os.Getenv("TRUSTED_TIME_SOURCES"))
-	if strings.HasPrefix(strings.ToLower(environment), "production") && len(timeSources) < 3 {
+	if IsProduction(environment) && len(timeSources) < 3 {
 		return Config{}, errors.New("TRUSTED_TIME_SOURCES requires at least three independent sources in production")
 	}
 
