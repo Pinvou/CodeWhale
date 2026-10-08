@@ -2,10 +2,12 @@ package account
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 )
 
 type WalletProvisioningJob struct {
@@ -14,12 +16,13 @@ type WalletProvisioningJob struct {
 	PolicyVersion           string
 	SLAExpiresAt            time.Time
 	Attempts                int
+	LeaseUntil              time.Time
 }
 
 type WalletProvisioningRepository interface {
 	LeaseWalletProvisioningJobs(context.Context, int, time.Duration) ([]WalletProvisioningJob, error)
-	CompleteWalletProvisioning(context.Context, uuid.UUID) error
-	FailWalletProvisioning(context.Context, uuid.UUID, string) error
+	CompleteWalletProvisioning(context.Context, WalletProvisioningJob) error
+	FailWalletProvisioning(context.Context, WalletProvisioningJob, string) error
 }
 
 type WalletProvisioningWorker struct {
@@ -43,7 +46,7 @@ func (w *WalletProvisioningWorker) Run(ctx context.Context) {
 	defer ticker.Stop()
 	for {
 		if err := w.RunOnce(ctx); err != nil && ctx.Err() == nil {
-			slog.ErrorContext(ctx, "wallet provisioning cycle failed", "error", err)
+			slog.ErrorContext(ctx, "wallet provisioning cycle failed")
 		}
 		select {
 		case <-ctx.Done():
@@ -59,14 +62,22 @@ func (w *WalletProvisioningWorker) RunOnce(ctx context.Context) error {
 		return err
 	}
 	for _, job := range jobs {
-		provisionErr := w.wallets.EnsurePersonalWallet(ctx, job.UserID)
-		if provisionErr != nil {
-			if failErr := w.repository.FailWalletProvisioning(context.WithoutCancel(ctx), job.UserID, "BILLING_UNAVAILABLE"); failErr != nil {
+		if !job.LeaseUntil.After(time.Now()) {
+			continue
+		}
+		itemCtx, cancel := context.WithDeadline(ctx, job.LeaseUntil)
+		walletErr := w.wallets.EnsurePersonalWallet(itemCtx, job.UserID)
+		cancel()
+		if walletErr != nil {
+			cleanupCtx, cleanupCancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
+			failErr := w.repository.FailWalletProvisioning(cleanupCtx, job, "BILLING_UNAVAILABLE")
+			cleanupCancel()
+			if failErr != nil && !errors.Is(failErr, ErrConflict) {
 				return failErr
 			}
 			continue
 		}
-		if err := w.repository.CompleteWalletProvisioning(ctx, job.UserID); err != nil {
+		if err := w.repository.CompleteWalletProvisioning(ctx, job); err != nil && !errors.Is(err, ErrConflict) {
 			return err
 		}
 	}
@@ -83,9 +94,9 @@ WITH candidates AS (
  WHERE (status IN ('PENDING','RETRY') AND next_attempt_at<=$1) OR (status='LEASED' AND lease_until<=$1)
  ORDER BY next_attempt_at,created_at FOR UPDATE SKIP LOCKED LIMIT $2
 )
-UPDATE wallet_provisioning_jobs j SET status='LEASED',lease_until=$1+$3::interval,updated_at=$1
+UPDATE wallet_provisioning_jobs j SET status='LEASED',attempts=attempts+1,lease_until=$1::timestamptz+$3::interval,updated_at=$1
 FROM candidates c WHERE j.user_id=c.user_id
-RETURNING j.user_id,j.registration_operation_id,j.policy_version,j.sla_expires_at,j.attempts`, r.now(), limit, lease.String())
+RETURNING j.user_id,j.registration_operation_id,j.policy_version,j.sla_expires_at,j.attempts,j.lease_until`, r.now(), limit, lease.String())
 	if err != nil {
 		return nil, err
 	}
@@ -93,7 +104,7 @@ RETURNING j.user_id,j.registration_operation_id,j.policy_version,j.sla_expires_a
 	jobs := make([]WalletProvisioningJob, 0, limit)
 	for rows.Next() {
 		var job WalletProvisioningJob
-		if err := rows.Scan(&job.UserID, &job.RegistrationOperationID, &job.PolicyVersion, &job.SLAExpiresAt, &job.Attempts); err != nil {
+		if err := rows.Scan(&job.UserID, &job.RegistrationOperationID, &job.PolicyVersion, &job.SLAExpiresAt, &job.Attempts, &job.LeaseUntil); err != nil {
 			return nil, err
 		}
 		jobs = append(jobs, job)
@@ -101,17 +112,31 @@ RETURNING j.user_id,j.registration_operation_id,j.policy_version,j.sla_expires_a
 	return jobs, rows.Err()
 }
 
-func (r *PostgresRepository) CompleteWalletProvisioning(ctx context.Context, userID uuid.UUID) error {
+func (r *PostgresRepository) CompleteWalletProvisioning(ctx context.Context, job WalletProvisioningJob) error {
+	userID := job.UserID
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback(ctx)
 	var operationID *uuid.UUID
-	if err := tx.QueryRow(ctx, `SELECT registration_operation_id FROM wallet_provisioning_jobs WHERE user_id=$1 AND status='LEASED' FOR UPDATE`, userID).Scan(&operationID); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT registration_operation_id FROM wallet_provisioning_jobs WHERE user_id=$1 AND status='LEASED' AND attempts=$2 AND lease_until=$3 AND lease_until>$4 FOR UPDATE`, userID, job.Attempts, job.LeaseUntil, r.now()).Scan(&operationID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrConflict
+		}
 		return err
 	}
 	now := r.now()
+	var userStatus string
+	if err := tx.QueryRow(ctx, `SELECT status FROM users WHERE id=$1 FOR UPDATE`, userID).Scan(&userStatus); err != nil {
+		return err
+	}
+	if !job.LeaseUntil.After(r.now()) {
+		return ErrConflict
+	}
+	if userStatus != "PROVISIONING" && userStatus != "REPAIR_REQUIRED" && userStatus != "ACTIVE" {
+		return ErrConflict
+	}
 	if _, err := tx.Exec(ctx, `UPDATE users SET status='ACTIVE',version=version+1,updated_at=$2 WHERE id=$1 AND status IN ('PROVISIONING','REPAIR_REQUIRED')`, userID, now); err != nil {
 		return err
 	}
@@ -132,7 +157,8 @@ func (r *PostgresRepository) CompleteWalletProvisioning(ctx context.Context, use
 	return tx.Commit(ctx)
 }
 
-func (r *PostgresRepository) FailWalletProvisioning(ctx context.Context, userID uuid.UUID, code string) error {
+func (r *PostgresRepository) FailWalletProvisioning(ctx context.Context, job WalletProvisioningJob, code string) error {
+	userID := job.UserID
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
 		return err
@@ -141,10 +167,16 @@ func (r *PostgresRepository) FailWalletProvisioning(ctx context.Context, userID 
 	var operationID *uuid.UUID
 	var slaExpiresAt time.Time
 	var attempts int
-	if err := tx.QueryRow(ctx, `SELECT registration_operation_id,sla_expires_at,attempts FROM wallet_provisioning_jobs WHERE user_id=$1 AND status='LEASED' FOR UPDATE`, userID).Scan(&operationID, &slaExpiresAt, &attempts); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT registration_operation_id,sla_expires_at,attempts FROM wallet_provisioning_jobs WHERE user_id=$1 AND status='LEASED' AND attempts=$2 AND lease_until=$3 AND lease_until>$4 FOR UPDATE`, userID, job.Attempts, job.LeaseUntil, r.now()).Scan(&operationID, &slaExpiresAt, &attempts); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrConflict
+		}
 		return err
 	}
 	now := r.now()
+	if !job.LeaseUntil.After(now) {
+		return ErrConflict
+	}
 	status, nextAttempt := "RETRY", now.Add(registrationRetryDelay(attempts))
 	if !slaExpiresAt.After(now) {
 		status, nextAttempt = "REPAIR_REQUIRED", now
@@ -157,7 +189,7 @@ func (r *PostgresRepository) FailWalletProvisioning(ctx context.Context, userID 
 			}
 		}
 	}
-	_, err = tx.Exec(ctx, `UPDATE wallet_provisioning_jobs SET status=$2,attempts=attempts+1,next_attempt_at=$3,lease_until=NULL,last_error_code=$4,updated_at=$5 WHERE user_id=$1`, userID, status, nextAttempt, code, now)
+	_, err = tx.Exec(ctx, `UPDATE wallet_provisioning_jobs SET status=$2,next_attempt_at=$3,lease_until=NULL,last_error_code=$4,updated_at=$5 WHERE user_id=$1`, userID, status, nextAttempt, code, now)
 	if err != nil {
 		return err
 	}
