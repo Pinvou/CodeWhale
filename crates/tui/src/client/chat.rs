@@ -643,7 +643,11 @@ fn is_exact_google_chat_route(provider: ApiProvider, base_url: &str) -> bool {
 fn google_model_requires_thought_signatures(model: &str) -> bool {
     let model = model.trim().to_ascii_lowercase();
     if model.starts_with("gemini-3") {
-        return true;
+        // Image-output variants don't enforce signatures (Google:
+        // "Gemini 3 Pro Image doesn't return a 400 error if a thought
+        // signature isn't returned"), so failing them closed would block
+        // valid unsigned turns.
+        return !model.contains("image");
     }
     if model.starts_with("gemini-2.5-pro") {
         return true;
@@ -3305,15 +3309,20 @@ fn log_thinking_mode_violations(body: &Value) {
 
 fn requires_reasoning_content(model: &str) -> bool {
     let lower = model.to_lowercase();
-    // V4-family direct model IDs.
+    // V4-family direct model IDs (the version spelling `deepseek-v4.1-flash`
+    // lands here via the `deepseek-v4` substring).
     lower.contains("deepseek-v4")
-        // Public DeepSeek API aliases routed server-side to the V4 family.
-        // `deepseek-chat` resolves to `deepseek-v4-flash` and `deepseek-reasoner`
-        // resolves to `deepseek-v4-pro`; both have thinking mode enabled by
-        // default, so any assistant message carrying tool_calls must replay
-        // `reasoning_content` on subsequent turns or the API returns 400.
+        // Public API aliases. The quick-start's current model name is
+        // `deepseek-flash` (MODEL VERSION DeepSeek-V4.1-Flash);
+        // `deepseek-chat` / `deepseek-reasoner` were fully retired after
+        // 2026-07-24 but stay gated for as long as a route still accepts
+        // them. The family runs with thinking enabled by default, and
+        // DeepSeek documents that when a request carries `tools`, the
+        // `reasoning_content` of all previous assistant turns must be
+        // passed back fully or the API returns 400. Re-checked 2026-10-08.
         || lower.starts_with("deepseek-chat")
         || lower.starts_with("deepseek-reasoner")
+        || lower.starts_with("deepseek-flash")
         || has_deepseek_r_series_marker(&lower)
 }
 
@@ -4867,9 +4876,13 @@ mod alias_thinking_detection_tests {
         // Documented public aliases.
         assert!(requires_reasoning_content("deepseek-chat"));
         assert!(requires_reasoning_content("deepseek-reasoner"));
+        // The quick-start's current model name (MODEL VERSION
+        // DeepSeek-V4.1-Flash).
+        assert!(requires_reasoning_content("deepseek-flash"));
         // Case-insensitive: users sometimes copy/paste with capitalisation.
         assert!(requires_reasoning_content("DeepSeek-Chat"));
         assert!(requires_reasoning_content("DEEPSEEK-REASONER"));
+        assert!(requires_reasoning_content("DeepSeek-Flash"));
     }
 
     #[test]
@@ -4898,6 +4911,30 @@ mod alias_thinking_detection_tests {
         // server-side, so they must continue to require reasoning_content.
         assert!(requires_reasoning_content("deepseek-chat:free"));
         assert!(requires_reasoning_content("deepseek-reasoner-2025-05"));
+        assert!(requires_reasoning_content("deepseek-flash:free"));
+    }
+
+    #[test]
+    fn deepseek_flash_replays_and_streams_reasoning_like_the_family() {
+        // The quick-start's current model name must behave like the retired
+        // aliases end to end: replay policy on, stream classification on,
+        // and the standard separate-field reasoning stream.
+        let base = crate::config::DEFAULT_DEEPSEEK_BASE_URL;
+        assert!(should_replay_reasoning_content_for_provider_on_route(
+            ApiProvider::Deepseek,
+            base,
+            "deepseek-flash",
+            None,
+        ));
+        assert!(is_reasoning_model_for_stream_on_route(
+            ApiProvider::Deepseek,
+            base,
+            "deepseek-flash",
+        ));
+        assert_eq!(
+            reasoning_stream_style_for_route(ApiProvider::Deepseek, base, "deepseek-flash", None,),
+            ReasoningStreamStyle::SeparateField
+        );
     }
 
     #[test]
@@ -8041,6 +8078,40 @@ mod google_thought_signature_tests {
             false,
         )
         .expect("flash-lite replay must not require a signature");
+    }
+
+    #[test]
+    fn google_image_variants_do_not_fail_closed_on_missing_signatures() {
+        // Google: "Gemini 3 Pro Image doesn't return a 400 error if a
+        // thought signature isn't returned", so demanding signatures there
+        // would block valid unsigned turns with a local diagnostic. Pinned
+        // on the live GA ids (`gemini-3-pro-image` "Nano Banana Pro" and the
+        // `gemini-3.1-flash-lite-image` line), not the shut-down `-preview`
+        // spelling.
+        for model in ["gemini-3-pro-image", "gemini-3.1-flash-lite-image"] {
+            let mut request = google_request_with_signed_tool(None);
+            request.model = model.to_string();
+            build_chat_wire_body(
+                &request,
+                ApiProvider::Google,
+                DEFAULT_GOOGLE_BASE_URL,
+                false,
+            )
+            .unwrap_or_else(|error| panic!("{model} must not require a signature: {error}"));
+        }
+
+        // Text Gemini 3 models keep the fail-closed contract.
+        let request = google_request_with_signed_tool(None);
+        assert!(
+            build_chat_wire_body(
+                &request,
+                ApiProvider::Google,
+                DEFAULT_GOOGLE_BASE_URL,
+                false
+            )
+            .is_err(),
+            "text Gemini 3 replay must still require a signature"
+        );
     }
 
     #[test]

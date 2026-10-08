@@ -566,11 +566,25 @@ fn assistant_tool_use_ids(message: &Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// Models that reject `temperature` / `top_p` outright (Claude 4.7+).
+/// Models that reject non-default `temperature` / `top_p` outright (every
+/// model released after Opus 4.6). The Messages API reference states those
+/// models "do not support" setting `temperature` / `top_p` beyond their
+/// backwards-compatible defaults (`temperature: 1.0`, `top_p >= 0.99`), and
+/// the migration guides restate it per family: "Setting `temperature`,
+/// `top_p`, or `top_k` to any non-default value on Claude Opus 4.7 and
+/// later models, including Claude Opus 5.5, returns a 400 error". That
+/// covers the Claude 5 generation (`claude-opus-5(-5)`, `claude-sonnet-5(-5)`)
+/// and Haiku 5.5 (which admits only its defaults — `temperature: 1`, a lone
+/// `top_p: 0.99`; `top_p: 1`, any `top_k`, or both params together 400),
+/// besides the Fable/Mythos lines. Dropping the params entirely is always
+/// safe; sending a forbidden one bricks the request. Re-checked 2026-10-08.
 fn anthropic_model_rejects_sampling(model: &str) -> bool {
     let lower = model.to_ascii_lowercase();
     lower.contains("opus-4-7")
         || lower.contains("opus-4-8")
+        || ["opus-5", "sonnet-5", "haiku-5"]
+            .iter()
+            .any(|family| lower.contains(family))
         || lower.contains("fable")
         || lower.contains("mythos")
 }
@@ -1046,6 +1060,53 @@ mod tests {
             ..Default::default()
         };
         DeepSeekClient::new(&config).expect("Model Studio Messages client constructs")
+    }
+
+    #[test]
+    fn sampling_params_dropped_for_every_model_from_opus_4_7_on() {
+        // The sampling restriction blankets every model released after
+        // Opus 4.6; sending temperature/top_p to any of these would brick
+        // the request, so the body must omit them. The datestamped spelling
+        // pins the substring match against snapshot suffixes.
+        for model in [
+            "claude-opus-4-7",
+            "claude-opus-4-8",
+            "claude-opus-5",
+            "claude-opus-5-5",
+            "claude-opus-5-20260101",
+            "claude-sonnet-5",
+            "claude-sonnet-5-5",
+            "claude-haiku-5-5",
+            "claude-fable-5",
+            "claude-mythos-5",
+        ] {
+            let client = test_client();
+            let request = request_with(model, None, Some(0.7), Some(0.9));
+            let body = client.build_anthropic_body(&request, true);
+            assert!(
+                body.get("temperature").is_none() && body.get("top_p").is_none(),
+                "{model} must not receive sampling params: {body}"
+            );
+        }
+
+        // Older models keep their sampling params (temperature wins when
+        // both are set). The pre-4.7 generations stay ungated, so a future
+        // over-broad arm like `contains("opus-4-")` cannot slip through.
+        for model in ["claude-sonnet-4-6", "claude-opus-4-6", "claude-haiku-4-5"] {
+            let client = test_client();
+            let request = request_with(model, None, Some(0.7), Some(0.9));
+            let body = client.build_anthropic_body(&request, true);
+            let sent = body["temperature"].as_f64().expect("temperature kept");
+            assert!(
+                (sent - 0.7).abs() < 1e-3,
+                "older models keep temperature: {body}"
+            );
+        }
+        let client = test_client();
+        let request = request_with("claude-sonnet-4-6", None, None, Some(0.9));
+        let body = client.build_anthropic_body(&request, true);
+        let sent = body["top_p"].as_f64().expect("top_p kept");
+        assert!((sent - 0.9).abs() < 1e-3, "older models keep top_p: {body}");
     }
 
     #[test]
