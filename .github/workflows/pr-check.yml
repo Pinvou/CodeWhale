@@ -1414,7 +1414,9 @@ jobs:
       # 同款磁盘清理,避免 clippy/check 阶段 No space left on device。
       - name: Prepare Rust disk capacity
         run: |
-          sudo env GITHUB_WORKSPACE="$GITHUB_WORKSPACE"             RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT"             python3 scripts/ci-rust-disk.py
+          sudo env GITHUB_WORKSPACE="$GITHUB_WORKSPACE" \
+            RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" \
+            python3 scripts/ci-rust-disk.py
 
       - name: 初始化公共底座 submodule
         run: git submodule update --init --recursive -- CodeWhale
@@ -1874,6 +1876,16 @@ jobs:
         if: ${{ github.event_name != 'push' }}
         run: /usr/bin/time -v cargo test --manifest-path pinvou3-app/src-tauri/Cargo.toml --no-default-features --lib --locked --no-run
 
+      # Test registry guard: a duplicated #[test] registers one case twice and
+      # swallows the adjacent case's attributes (happened twice on upstream PR
+      # #455, rounds 26/28), and raw run totals cannot catch the pair because
+      # the inflation and the deflation cancel. Reuses the previous step's
+      # build artifacts (same manifest/feature set, done in seconds): assert
+      # no duplicated registration paths + every consent-critical pin present.
+      - name: test-registry guard (duplicates + required pins)
+        if: ${{ github.event_name != 'push' }}
+        run: python3 scripts/test-registry-guard.py
+
       - name: cargo test --lib（含 strict_mode 回归；真 bge-m3/vLLM 测试已 #[ignore]）
         if: ${{ github.event_name != 'push' }}
         run: |
@@ -1908,6 +1920,7 @@ jobs:
             --no-default-features \
             --test behavior_telemetry \
             --features behavior-telemetry-test \
+            --locked \
             -- --test-threads=1
 
       - name: Native and Relay diagnostic redaction parity

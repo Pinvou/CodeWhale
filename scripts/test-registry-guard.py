@@ -67,14 +67,21 @@ REQUIRED_PINS = [
 
 
 def list_tests():
+    # Must mirror the CI rust-test leg's feature set exactly (`cargo test
+    # --lib --no-default-features --locked` in pr-check.yml): the leg builds
+    # that configuration right before this guard runs, so matching it reuses
+    # the just-built artifacts instead of recompiling the whole lib. Upstream
+    # lists default features + benchmark-hooks because its own legs build
+    # that way; this fork's memory-constrained leg does not, and no
+    # REQUIRED_PIN is feature-gated (two are #[cfg(unix)]-gated, which is
+    # expected to resolve on the Linux CI where this guard is wired).
     cmd = [
         "cargo",
         "test",
         "--manifest-path",
         MANIFEST,
         "--lib",
-        "--features",
-        "benchmark-hooks",
+        "--no-default-features",
         "--locked",
         "--",
         "--list",
