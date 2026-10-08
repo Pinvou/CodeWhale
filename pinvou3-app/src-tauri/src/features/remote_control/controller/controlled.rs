@@ -1026,9 +1026,8 @@ impl ControlledDeviceManager {
         )
     }
 
-    pub(crate) fn poll_watchdog(&self, now_b: u64) -> ControlledStatus {
+    pub(crate) fn poll_watchdog(&self, now_b: u64) -> Result<ControlledStatus> {
         self.poll_watchdog_inner(None, now_b)
-            .expect("an unfenced watchdog poll has no stale operation")
     }
 
     pub(crate) fn poll_watchdog_for(
@@ -2144,7 +2143,7 @@ mod tests {
             .accept_direct_liveness(&direct_liveness(&operation.generation), 2_000)
             .unwrap();
         assert_eq!(
-            manager.poll_watchdog(17_000).status,
+            manager.poll_watchdog(17_000).unwrap().status,
             ControlledStatusKind::Reconnecting
         );
         let mut proof: serde_json::Value =
@@ -2188,7 +2187,7 @@ mod tests {
         manager.mark_transport_disconnected(25_000);
         assert_eq!(manager.status().watchdog_deadline_b, Some(46_000));
         assert_eq!(
-            manager.poll_watchdog(46_000).status,
+            manager.poll_watchdog(46_000).unwrap().status,
             ControlledStatusKind::Error
         );
     }
@@ -2420,10 +2419,10 @@ mod tests {
         assert!(manager.status().watchdog_deadline_b.is_some());
         assert!(!manager.status().watchdog_suspect);
         assert_eq!(
-            manager.poll_watchdog(17_000).status,
+            manager.poll_watchdog(17_000).unwrap().status,
             ControlledStatusKind::Reconnecting
         );
-        let status = manager.poll_watchdog(31_000);
+        let status = manager.poll_watchdog(31_000).unwrap();
         assert_eq!(
             status.generation.as_deref(),
             Some(operation.generation.as_str())
@@ -2455,7 +2454,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            manager.poll_watchdog(17_000).status,
+            manager.poll_watchdog(17_000).unwrap().status,
             ControlledStatusKind::Reconnecting
         );
         manager

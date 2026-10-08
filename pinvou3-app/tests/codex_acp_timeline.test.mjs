@@ -645,8 +645,8 @@ try {
   // Pin the actual production chain, not the former all-in-one helper: activity
   // persistence must still precede timing registration, the turn and its task.
   const localSubmit = runtime.slice(
-    runtime.indexOf('pub(crate) async fn send_message_with_display_content('),
-    runtime.indexOf('async fn handle_outdated_codex_runtime('),
+    runtime.indexOf('async fn send_message_with_display_content_owner('),
+    runtime.indexOf('async fn finish_remote_retirement('),
   );
   const localAdmission = remoteOwnership.slice(
     remoteOwnership.indexOf('pub(super) fn admit_local('),
@@ -657,12 +657,15 @@ try {
     operationGate.indexOf('enum SessionConfigChange'),
   );
   const assertActivityAdmission = (submit, admission, finish) => {
+    const ownersIndex = submit.indexOf('let owners = self.remote_permission_owners.lock();');
+    const fenceIndex = submit.indexOf('.with_active_runtime(');
     const admissionIndex = submit.indexOf('.admit_local(');
     const finishIndex = submit.indexOf('operation_gate::finish_prompt_admission(');
     const touchIndex = submit.indexOf('.touch_activity(session_id)');
-    const turnIndex = submit.indexOf('.begin_turn(');
+    const turnIndex = submit.indexOf('.begin_turn_bound(');
     const spawnIndex = submit.indexOf('tokio::spawn(');
-    assert.ok(admissionIndex >= 0 && admissionIndex < finishIndex
+    assert.ok(ownersIndex >= 0 && ownersIndex < fenceIndex && fenceIndex < admissionIndex
+      && admissionIndex < finishIndex
       && finishIndex < touchIndex && touchIndex < turnIndex && turnIndex < spawnIndex,
     'the actual local submit must admit, persist activity, begin its turn and only then spawn');
     assert.ok(finish.indexOf('touch_activity()') >= 0
@@ -672,7 +675,7 @@ try {
       /operation_gate::begin_prompt\(busy, configuring\)\?;\s*Ok\(PromptFlight::new\(identity\)\)/,
       'local custody admission must reserve busy before retaining the real prompt flight');
     assert.match(submit,
-      /let flight = self\.remote_permission_owners\.lock\(\)\.admit_local\([\s\S]*?\)\?;\s*operation_gate::finish_prompt_admission\(&runtime\.busy, session_id, \|\| \{\s*self\.session_store\s+\.touch_activity\(session_id\)[\s\S]*?\}\)\?;[\s\S]*?\.begin_turn\([\s\S]*?tokio::spawn\(async move \{\s*let _flight = flight;/,
+      /let owners = self\.remote_permission_owners\.lock\(\);[\s\S]*?\.with_active_runtime\([\s\S]*?let flight = owners\.admit_local\([\s\S]*?\)\?;\s*operation_gate::finish_prompt_admission\(&runtime\.busy, session_id, \|\| \{\s*self\.session_store\s+\.touch_activity\(session_id\)[\s\S]*?\}\)\?;[\s\S]*?\.begin_turn_bound\([\s\S]*?drop\(owners\);[\s\S]*?tokio::spawn\(async move \{\s*let _flight = flight;/,
       'the actual local submit must persist activity after admission and before beginning/spawning the owned turn');
     assert.match(finish,
       /if let Err\(error\) = touch_activity\(\) \{\s*busy\.store\(false, Ordering::Release\);\s*return Err\(error\);\s*\}\s*crate::features::assistant::timing::start_turn\(session_id\);/,
@@ -695,9 +698,16 @@ try {
       'crate::features::assistant::timing::start_turn(session_id); if let Err(error) = touch_activity()'),
   ), /persistence failure/);
   assert.throws(() => assertActivityAdmission(
-    localSubmit.replace('let flight = self.remote_permission_owners',
-      'tokio::spawn(async {}); let flight = self.remote_permission_owners'),
+    localSubmit.replace('let flight = owners.admit_local',
+      'tokio::spawn(async {}); let flight = owners.admit_local'),
     localAdmission, finishAdmission,
+  ), /actual local submit/);
+  assert.throws(() => assertActivityAdmission(
+    localSubmit.replace('.with_active_runtime(', '.with_active_runtime_skipped('),
+    localAdmission, finishAdmission,
+  ), /actual local submit/);
+  assert.throws(() => assertActivityAdmission(
+    localSubmit.replace('drop(owners);', ''), localAdmission, finishAdmission,
   ), /actual local submit/);
   assert.ok(runtime.includes('interrupt_orphaned_turns("application_restarted")')
     && runtime.includes('cancel_without_active_prompt')
@@ -733,6 +743,7 @@ try {
     'utf8',
   );
   const codexWorkspace = readFileSync(path.join(root, 'src', 'features', 'codex', 'CodexWorkspacePanel.jsx'), 'utf8');
+  const auxChatPanelView = readFileSync(path.join(root, 'src', 'features', 'aux-chat', 'AuxChatPanel.jsx'), 'utf8');
   const runtimeStatus = readFileSync(path.join(root, 'src', 'features', 'codex', 'runtimeStatus.js'), 'utf8');
   const resizableSidePanel = readFileSync(path.join(root, 'src', 'components', 'layout', 'ResizableSidePanel.jsx'), 'utf8');
   const rightDock = readFileSync(path.join(root, 'src', 'components', 'layout', 'RightDock.jsx'), 'utf8');
@@ -996,8 +1007,29 @@ try {
   'Codex workspace and subagent panels must remain mounted independently and delegate visibility to Right Dock');
   assert.ok(codexView.includes('if (workspaceOpen && workspaceDockActive)')
     && codexView.includes('setWorkspaceDockActivation(value => value + 1)')
-    && codexView.includes('[subagentPanel, workspaceDockActivation, workspaceOpen]'),
+    && codexView.includes('[auxChatPanel, subagentPanel, workspaceDockActivation, workspaceOpen]'),
   'an already-open hidden workspace must reactivate without remounting and preserve conversation scroll');
+  const openAuxChatStart = codexView.indexOf('const openAuxChatPanel');
+  const openAuxChatEnd = codexView.indexOf('const closeAuxChatPanel');
+  // Anchor-resolution guard (round-32 review minor 17, same vacuous-slice
+  // class right_dock_occlusion_gate pins): a renamed anchor would make
+  // indexOf return -1 and the slice run to near-EOF.
+  assert.ok(
+    openAuxChatStart >= 0 && openAuxChatEnd > openAuxChatStart,
+    'open/close aux-chat anchors must resolve (a vacuous slice would pass on unrelated copies)',
+  );
+  const openAuxChatBlock = codexView.slice(openAuxChatStart, openAuxChatEnd);
+  assert.ok(codexView.includes("import { AuxChatPanel } from '../aux-chat/AuxChatPanel.jsx';")
+    && codexView.includes('{auxChatPanel && activeSession && isNativeAgent && bridge.available && bridge.auxChat && (')
+    && !codexView.includes('{auxChatPanel && activeSession && (')
+    && codexView.includes('activeSession && isNativeAgent && bridge.available && bridge.auxChat ? activeSession.id : null')
+    && codexView.includes('activationKey={auxChatPanel.openTick}')
+    && codexView.includes('onActiveChange={setAuxChatDockActive}')
+    && openAuxChatBlock.includes('rememberScrollBeforeRightPanelChange()')
+    && codexView.includes('auxChatPanel && auxChatDockActive')
+    && auxChatPanelView.includes('panelId="aux-chat"')
+    && auxChatPanelView.includes('onActiveChange={onActiveChange}'),
+  'the code-mode aux chat must reuse the shared Right Dock panel, remember scroll on open, keep its entry highlight tied to real dock visibility, and gate the panel mount and the quote selection on isNativeAgent like the entry button (external-ACP tasks must never reach the aux session)');
 
   let codexDockState = createRightDockState();
   codexDockState = activateRightDockPanel(codexDockState, 'codex-workspace');

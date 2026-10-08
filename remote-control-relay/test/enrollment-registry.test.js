@@ -113,6 +113,31 @@ async function rejectsCode(promise, code) {
   await assert.rejects(promise, (error) => error?.code === code);
 }
 
+test("identifier contract: registry preserves wire colon and released Web endpoint identities", async (t) => {
+  const { registry } = await openRegistry(t);
+  for (const endpointId of ["endpoint:0001", "_old", "-old"]) {
+    await registry.enroll({ endpointId, credential: FIRST_CREDENTIAL, desktopCredential: SECOND_CREDENTIAL });
+    assert.equal((await registry.authorizeWebRegistration({ endpointId, accessToken: FIRST_CREDENTIAL })).endpoint_id, endpointId);
+    assert.equal((await registry.authorizeDesktopRegistration({ endpointId, accessToken: FIRST_CREDENTIAL,
+      desktopSecret: SECOND_CREDENTIAL })).endpoint_id, endpointId);
+    if (endpointId.startsWith("_") || endpointId.startsWith("-")) {
+      await rejectsCode(registry.authorizePairingRegistration({ endpointId, desktopSecret: SECOND_CREDENTIAL }), "endpoint_id_invalid");
+    }
+  }
+  await rejectsCode(registry.enroll({ endpointId: "endpoint~invalid", credential: FIRST_CREDENTIAL }), "endpoint_id_invalid");
+});
+
+test("identifier contract: administrative request IDs accept colon and keep exact replay identity", async (t) => {
+  const { registry } = await openRegistry(t, { env: { PINVOU_REMOTE_ENROLLMENT_DEPLOYMENT: "self_hosted" } });
+  const request = { requestId: "migration:request:0001", operations: [{ operation: "allowlist",
+    endpoint_id: "legacy-endpoint", credential: FIRST_CREDENTIAL }] };
+  const first = await registry.executeMigrationRequest(request);
+  const snapshot = registry.exportSnapshot();
+  assert.deepEqual(await registry.executeMigrationRequest(request), first);
+  assert.deepEqual(registry.exportSnapshot(), snapshot);
+  await rejectsCode(registry.executeMigrationRequest({ ...request, requestId: "migration~request~0001" }), "migration_request_id_invalid");
+});
+
 function lockPath(statePath) {
   return `${statePath}.lock`;
 }
@@ -289,7 +314,7 @@ test("public enrollment bounds and repeated enrollment reject without mutating s
   await registry.enroll({ endpointId: "bounds", credential: "x".repeat(32) });
   const before = store.readNamespace(ENROLLMENT_NAMESPACE);
   const primary = await fs.readFile(statePath);
-  for (const endpointId of ["", "_bad", "a".repeat(129), "a/b", "端点"]) {
+  for (const endpointId of ["", ".bad", "a".repeat(129), "a/b", "a~bad", "端点"]) {
     await rejectsCode(registry.enroll({ endpointId, credential: FIRST_CREDENTIAL }), "endpoint_id_invalid");
   }
   for (const credential of [null, "x".repeat(31), "x".repeat(4097), "x".repeat(32) + "\ud800"]) {
@@ -1771,12 +1796,12 @@ test("registry and migration ledgers use locale-independent identifier ordering"
       { operation: "allowlist", endpoint_id: "a", credential: FIRST_CREDENTIAL },
       { operation: "allowlist", endpoint_id: "B", credential: SECOND_CREDENTIAL },
       { operation: "allowlist", endpoint_id: "0", credential: THIRD_CREDENTIAL },
-      { operation: "allowlist", endpoint_id: "A._~-", credential: `${FIRST_CREDENTIAL}-mixed` },
+      { operation: "allowlist", endpoint_id: "A._:-", credential: `${FIRST_CREDENTIAL}-mixed` },
     ],
   });
   assert.deepEqual(
     registry.exportSnapshot().registry.entries.map((entry) => entry.endpoint_id),
-    ["0", "A._~-", "B", "a"],
+    ["0", "A._:-", "B", "a"],
   );
 
   await registry.executeMigrationRequest({

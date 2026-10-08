@@ -27,6 +27,7 @@ function connected(connectionId = 'connection-1', leaseEpoch = '2') {
 
 function makeBridge(responses = {}) {
   const callbacks = new Map();
+  const calls = [];
   const host = { window: {} };
   vm.createContext(host);
   vm.runInContext(fs.readFileSync(logicPath, 'utf8'), host);
@@ -40,12 +41,14 @@ function makeBridge(responses = {}) {
       callbacks.set(name, callback);
       return Promise.resolve(() => callbacks.delete(name));
     },
-    invoke(name) {
+    invoke(name, args) {
+      calls.push({ name, args: JSON.parse(JSON.stringify(args)) });
       return Promise.resolve(typeof responses[name] === 'function' ? responses[name]() : responses[name]);
     },
   });
   return {
     bridge,
+    calls,
     get state() { return state.desktopRemoteControl; },
     emit(name, payload) {
       assert.ok(callbacks.has(name), `missing subscription: ${name}`);
@@ -141,7 +144,6 @@ test('real controlled bridge projects and clears the controller device name', as
   assert.equal(host.state.controlledDevice.controllerDeviceName, null);
   assert.equal(host.state.controlledDevice.pairingCode, null);
 });
-
 test('shared Rust fixtures project device names, errors, lease and pairing expiry', () => {
   let state = logic.applyControllerStatus(logic.createState(), fixtures.controllerConnected);
   assert.equal(state.controllerConnection.connectionId, 'connection-0001');
@@ -513,6 +515,38 @@ test('B-side task projection keeps locally visible prompt text across status cha
   });
   assert.equal(state.controlledTasks[0].status, 'running');
   assert.equal(state.controlledTasks[0].text, 'inspect the repository');
+});
+
+test('real Rust local status fixtures preserve B cancellation across late events', async () => {
+  const host = makeBridge({
+    desktop_remote_controlled_start: fixtures.controlledWaiting,
+    desktop_remote_controlled_task_stop: fixtures.taskCancelRequested,
+  });
+  await host.bridge.controlledStart('Studio PC', []);
+  host.emit('desktop-remote-controlled-status', { ...fixtures.controlledWaiting, status: 'connected' });
+  host.emit('desktop-remote-controlled-session', {
+    sessionId: fixtures.taskStatus.sessionId, sessionRef: 'remote-ref-0001',
+    generation: fixtures.taskStatus.remoteControlGeneration, lane: 'chat',
+  });
+  host.emit('desktop-remote-task-status', fixtures.taskStatus);
+  assert.equal(host.state.controlledTasks[0].status, 'admitted');
+  for (const replacement of [
+    { sessionId: 'foreign-session' }, { generation: 'foreign-generation' },
+  ]) {
+    const before = host.state;
+    host.emit('desktop-remote-task-event', { ...fixtures.taskCancelRequested, ...replacement });
+    assert.equal(host.state, before);
+  }
+  await host.bridge.controlledStopTask('task-0001');
+  assert.equal(host.state.controlledTasks[0].status, 'cancel_requested');
+  for (const status of ['running', 'waiting_permission', 'admitted']) {
+    host.emit('desktop-remote-task-event', { ...fixtures.taskStatus, status });
+    assert.equal(host.state.controlledTasks[0].status, 'cancel_requested');
+  }
+  host.emit('desktop-remote-task-event', { ...fixtures.taskStatus, status: 'cancelled' });
+  host.emit('desktop-remote-task-status', fixtures.taskCancelRequested);
+  assert.equal(host.state.controlledTasks[0].status, 'cancelled');
+  host.bridge.stop();
 });
 
 test('B-side projections reject stale sessions and reset with the controlled generation', () => {

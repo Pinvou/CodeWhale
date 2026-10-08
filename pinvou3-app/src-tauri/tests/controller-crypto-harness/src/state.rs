@@ -31,3 +31,8 @@ pub(crate) mod task;
 pub(crate) mod journal;
 
 pub(crate) use crate::transfer;
+#[path = "../../../src/features/remote_control/controller/capabilities.rs"]
+pub(crate) mod capabilities;
+
+#[path = "../../../src/features/remote_control/controller/turn_budget.rs"]
+pub(crate) mod turn_budget;
