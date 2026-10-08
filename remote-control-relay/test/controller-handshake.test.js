@@ -14,7 +14,8 @@ function publicKey() {
     .subarray(-32).toString("base64");
 }
 
-function fixture({ clock = () => 1000, failConsume = false, resolveControlled, signTranscript, consumeLease } = {}) {
+function fixture({ clock = () => 1000, failConsume = false, resolveControlled, signTranscript, consumeLease,
+  relayEpoch = "relay-epoch-0001", signingKeyId = "relay-signing-key-0001" } = {}) {
   const pairing = Object.freeze({
     pairing_id: "pairing-0001",
     endpoint_id: "endpoint-0001",
@@ -43,8 +44,8 @@ function fixture({ clock = () => 1000, failConsume = false, resolveControlled, s
   const manager = new ControllerLeaseManager({
     pairingStore: pairings,
     reservationManager: reservations,
-    relayEpoch: "relay-epoch-0001",
-    signingKeyId: "relay-signing-key-0001",
+    relayEpoch,
+    signingKeyId,
     signTranscript: (preimage) => signTranscript
       ? signTranscript(preimage, signing.privateKey) : crypto.sign(null, preimage, signing.privateKey),
     resolveControlledEndpoint: resolveControlled || (async (endpointId) => endpointId === pairing.endpoint_id
@@ -53,6 +54,14 @@ function fixture({ clock = () => 1000, failConsume = false, resolveControlled, s
   });
   return { manager, pairings, reservations, slots, consumed, terminal, pairing };
 }
+
+test("identifier contract: lease publishes schema-valid colon epochs and signing key IDs", async () => {
+  const { manager } = fixture({ relayEpoch: "relay:epoch:0001", signingKeyId: "relay:signing:0001" });
+  const result = await start(manager);
+  assert.equal(result.transcript.relay_epoch, "relay:epoch:0001");
+  assert.equal(result.relay_signing_key_id, "relay:signing:0001");
+  assert.throws(() => fixture({ signingKeyId: "relay~signing" }), { code: "controller_lease_config_invalid" });
+});
 
 for (const phase of ["resolve", "sign"]) {
   test(`overlapping reservation/lease expiry cannot publish a claim during ${phase}`, async () => {

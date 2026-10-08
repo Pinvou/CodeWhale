@@ -65,6 +65,23 @@ function fixture() {
   return { router, sent, aborted, terminated };
 }
 
+test("identifier contract: router accepts wire colon socket and endpoint IDs", () => {
+  const { router } = fixture();
+  router.addSocket({ socketIdentity: "socket:B", source: "198.51.100.3", socket: {} });
+  router.authenticateControlled({ socketIdentity: "socket:B", endpointId: "endpoint:0001", authenticatedContext: {} });
+  assert.deepEqual(router.resolveControlledEndpoint("endpoint:0001"), { socketIdentity: "socket:B" });
+  assert.throws(() => router.addSocket({ socketIdentity: "socket~C", source: "source-C", socket: {} }),
+    { code: "socket_identity_invalid" });
+});
+
+test("identifier contract: controlled Web endpoint mapping preserves released legacy identities", () => {
+  const { router } = fixture();
+  for (const endpointId of ["_old", "-old"]) {
+    router.authenticateControlled({ socketIdentity: "socket-B", endpointId, authenticatedContext: {} });
+    assert.deepEqual(router.resolveControlledEndpoint(endpointId), { socketIdentity: "socket-B" });
+  }
+});
+
 test("router delivers reservation, handshake frames and role-specific joined results", async () => {
   const { router, sent } = fixture();
   await router.handle({

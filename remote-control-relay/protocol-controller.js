@@ -1,5 +1,6 @@
 import { Buffer } from "node:buffer";
 import { createHash, timingSafeEqual } from "node:crypto";
+import { isControllerIdentifier } from "./identifier-contract.js";
 
 export const CONTROLLER_PROTOCOL_VERSION = 1;
 export const CONTROLLER_SUBPROTOCOL = "pinvou-desktop-controller-v1";
@@ -67,7 +68,6 @@ export const CONTROLLER_SENSITIVE_FIELDS = Object.freeze([
   "result_digest", "temporary_model_package",
 ]);
 
-const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
 const HEX_64 = /^[0-9a-f]{64}$/u;
 const DECIMAL_U64 = /^(?:0|[1-9][0-9]{0,19})$/u;
 const PAIRING_CODE = /^[23456789ABCDEFGHJKMNPQRSTUVWXYZ]{7}$/u;
@@ -244,7 +244,7 @@ function text(value, field, maxCharacters, maxBytes = maxCharacters * 4, min = 1
   return value;
 }
 
-function identifier(value, field) { if (typeof value !== "string" || !ID.test(value)) fail("invalid_field", field); }
+function identifier(value, field) { if (!isControllerIdentifier(value)) fail("invalid_field", field); }
 
 function decimal(value, field, max = U64_MAX) {
   if (typeof value !== "string" || !DECIMAL_U64.test(value)) fail("invalid_field", field);
@@ -481,7 +481,7 @@ function requireNegotiatedCapabilities(runtimeContext) {
 function validateRuntimeCapabilities(capabilities) {
   if (!Array.isArray(capabilities) || capabilities.length > CONTROLLER_CAPABILITIES.length) fail("unsupported_capability", "negotiated_capabilities");
   for (const [index, capability] of capabilities.entries()) {
-    if (typeof capability !== "string" || !ID.test(capability) || !CONTROLLER_CAPABILITIES.includes(capability)) fail("unsupported_capability", "negotiated_capabilities");
+    if (!isControllerIdentifier(capability) || !CONTROLLER_CAPABILITIES.includes(capability)) fail("unsupported_capability", "negotiated_capabilities");
     if (index > 0 && capabilities[index - 1] >= capability) fail("unsupported_capability", "negotiated_capabilities");
   }
 }
@@ -1076,7 +1076,7 @@ export function controllerLogProjection(input) {
   const safe = {};
   if (object.v === CONTROLLER_PROTOCOL_VERSION) safe.v = object.v;
   if (CONTROLLER_MESSAGE_TYPES.includes(object.type)) safe.type = object.type;
-  if (typeof object.request_id === "string" && ID.test(object.request_id)) safe.request_id = object.request_id;
+  if (isControllerIdentifier(object.request_id)) safe.request_id = object.request_id;
   if (["A", "B"].includes(object.sender_role)) safe.sender_role = object.sender_role;
   if (CONTROLLER_ERROR_CODES.includes(object.code)) safe.code = object.code;
   return safe;
