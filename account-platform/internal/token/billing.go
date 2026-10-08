@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/authorization"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/identity"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/serviceauth"
 	"io"
 
@@ -23,7 +25,7 @@ func (c *HTTPBillingClient) Balance(ctx context.Context, walletID uuid.UUID) (js
 	if err != nil {
 		return nil, err
 	}
-	if _, err := validateWalletFacts(payload, walletID, uuid.Nil, true); err != nil {
+	if _, err := validateWalletOwnerFacts(payload, walletID, uuid.Nil, "", true); err != nil {
 		return nil, err
 	}
 	return payload, nil
@@ -33,6 +35,12 @@ type HTTPBillingClient struct {
 	baseURL      *url.URL
 	serviceToken string
 	client       *http.Client
+	delegator    *authorization.Client
+}
+
+func (c *HTTPBillingClient) WithHumanDelegations(delegator *authorization.Client) *HTTPBillingClient {
+	c.delegator = delegator
+	return c
 }
 
 func NewHTTPBillingClient(rawURL, serviceToken string) (*HTTPBillingClient, error) {
@@ -44,9 +52,19 @@ func NewHTTPBillingClient(rawURL, serviceToken string) (*HTTPBillingClient, erro
 }
 
 func (c *HTTPBillingClient) raw(ctx context.Context, method, endpointPath string, input any, idempotencyKey string) (json.RawMessage, error) {
+	return c.rawWithDelegation(ctx, method, endpointPath, input, idempotencyKey, nil)
+}
+
+func (c *HTTPBillingClient) rawDelegated(ctx context.Context, method, endpointPath string, input any, idempotencyKey string, delegation authorization.DelegationRequest) (json.RawMessage, error) {
+	return c.rawWithDelegation(ctx, method, endpointPath, input, idempotencyKey, &delegation)
+}
+
+func (c *HTTPBillingClient) rawWithDelegation(ctx context.Context, method, endpointPath string, input any, idempotencyKey string, delegation *authorization.DelegationRequest) (json.RawMessage, error) {
 	var reader io.Reader
+	var encoded []byte
 	if input != nil {
-		encoded, err := json.Marshal(input)
+		var err error
+		encoded, err = json.Marshal(input)
 		if err != nil {
 			return nil, err
 		}
@@ -61,6 +79,18 @@ func (c *HTTPBillingClient) raw(ctx context.Context, method, endpointPath string
 	}
 	if input != nil {
 		request.Header.Set("Content-Type", "application/json")
+	}
+	if delegation != nil {
+		principal, ok := identity.FromContext(ctx)
+		if !ok || c.delegator == nil || input == nil {
+			return nil, errors.New("human delegation is unavailable")
+		}
+		delegation.RequestSHA256 = authorization.RequestSHA256(encoded)
+		token, err := c.delegator.Delegate(ctx, principal, *delegation)
+		if err != nil {
+			return nil, err
+		}
+		request.Header.Set("X-Pinvou-Human-Delegation", token)
 	}
 	if idempotencyKey != "" {
 		request.Header.Set("Idempotency-Key", idempotencyKey)
@@ -81,7 +111,8 @@ func (c *HTTPBillingClient) raw(ctx context.Context, method, endpointPath string
 	if len(body) > 2<<20 || !json.Valid(body) {
 		return nil, errors.New("Billing balance response is invalid")
 	}
-	if response.StatusCode != http.StatusOK && !(method == http.MethodPost && response.StatusCode == http.StatusCreated) {
+	batch := method == http.MethodPost && strings.HasSuffix(endpointPath, "/quota-grants:batch") && strings.HasPrefix(endpointPath, "/internal/v1/organizations/")
+	if response.StatusCode != http.StatusOK && !(method == http.MethodPost && response.StatusCode == http.StatusCreated) && !(batch && response.StatusCode == http.StatusMultiStatus) {
 		var problem struct {
 			Code string `json:"code"`
 		}
@@ -105,12 +136,16 @@ type walletFacts struct {
 }
 
 func (facts walletFacts) validIdentity() bool {
-	return facts.WalletID != uuid.Nil && facts.OwnerType == "PERSONAL" && facts.OwnerID != uuid.Nil && facts.Version > 0 && (facts.Status == "ACTIVE" || facts.Status == "FROZEN" || facts.Status == "CLOSED")
+	return facts.WalletID != uuid.Nil && (facts.OwnerType == "PERSONAL" || facts.OwnerType == "ORGANIZATION" || facts.OwnerType == "ORG_UNIT") && facts.OwnerID != uuid.Nil && facts.Version > 0 && (facts.Status == "ACTIVE" || facts.Status == "FROZEN" || facts.Status == "CLOSED")
 }
 
 func validateWalletFacts(payload []byte, walletID, ownerID uuid.UUID, requireBalance bool) (walletFacts, error) {
+	return validateWalletOwnerFacts(payload, walletID, ownerID, "PERSONAL", requireBalance)
+}
+
+func validateWalletOwnerFacts(payload []byte, walletID, ownerID uuid.UUID, ownerType string, requireBalance bool) (walletFacts, error) {
 	var facts walletFacts
-	if err := json.Unmarshal(payload, &facts); err != nil || walletID == uuid.Nil || !facts.validIdentity() || facts.WalletID != walletID || (ownerID != uuid.Nil && facts.OwnerID != ownerID) || (requireBalance && facts.AvailableMicrocredits == nil) {
+	if err := json.Unmarshal(payload, &facts); err != nil || walletID == uuid.Nil || !facts.validIdentity() || facts.WalletID != walletID || (ownerID != uuid.Nil && facts.OwnerID != ownerID) || (ownerType != "" && facts.OwnerType != ownerType) || (requireBalance && facts.AvailableMicrocredits == nil) {
 		return walletFacts{}, errors.New("Billing returned invalid wallet authority facts")
 	}
 	return facts, nil

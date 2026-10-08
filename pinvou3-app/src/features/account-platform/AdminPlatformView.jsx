@@ -1,4 +1,5 @@
 import { AdminManagementWorkspace } from './AdminManagementWorkspace.jsx';
+import { OrganizationAdminWorkspace } from './OrganizationAdminWorkspace.jsx';
 import { requirePersonalAccount } from './personal-contract.js';
 import React, { useEffect, useRef, useState } from 'react';
 import { supportedLocales, localeNames } from '../../shared/supported-locales.js';
@@ -6,7 +7,7 @@ import { SettingsWorkspace } from './SettingsWorkspace.jsx';
 import { RechargeProductWorkspace } from './RechargeProductWorkspace.jsx';
 import { AdminFinanceWorkspace } from './AdminFinanceWorkspace.jsx';
 import { AdminReconciliationWorkspace } from './AdminReconciliationWorkspace.jsx';
-import { financeCopy, reconciliationCopy, tokenManagementCopy } from '../../shared/i18n.js';
+import { financeCopy, reconciliationCopy, tokenManagementCopy, organizationCopy } from '../../shared/i18n.js';
 import { localizedAccountPlatformError } from './error-localization.js';
 import './admin-platform.css';
 
@@ -120,6 +121,7 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
     ['finance', 'platform.billing.wallets.read', financeCopy[language].finance],
     ['products', 'platform.products.read', financeCopy[language].productAdmin],
     ['reconciliation', 'platform.usage.read', reconciliationCopy[language].title],
+    ['organizations', 'platform.organizations.read', organizationCopy[language].title],
     ['management', ['platform.models.read', 'platform.tokens.read', 'platform.pricing.read', 'platform.usage.read', 'platform.models.lifecycle.request', 'platform.models.lifecycle.approve', 'platform.models.catalog.rollback.request', 'platform.models.catalog.rollback.approve', 'platform.tokens.credentials.revoke.request', 'platform.tokens.credentials.revoke.approve'].find(permission => permissions.includes(permission)), tokenManagementCopy[language].title],
   ].filter(([, permission]) => permissions.includes(permission));
   const visibleSection = pages.some(([key]) => key === section) ? section : pages[0]?.[0];
@@ -134,7 +136,7 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
     {renderedState === 'loading' && <p role="status">{copy.loading}</p>}{error && <div role="alert">{error}<button onClick={load}>{copy.retry}</button></div>}
     {renderedState === 'guest' && <a href="/auth/login?return_to=%2Fadmin.html">{copy.login}</a>}
     {renderedState === 'ready' && <><nav>{pages.map(([key, , label]) => <button key={key} aria-pressed={visibleSection === key} onClick={() => setSection(key)}>{label}</button>)}</nav>{!pages.length && <p role="alert">{copy.permissionDenied}</p>}
-      <div key={authorization.user_id}>{visibleSection === 'management' && <AdminManagementWorkspace client={client} copy={copy} language={language} permissions={permissions} owner={authorization.user_id} credentialOrigin={credentialOrigin} />}{visibleSection === 'reconciliation' && <AdminReconciliationWorkspace client={client} me={authorization} language={language} />}{visibleSection === 'products' && <RechargeProductWorkspace client={client} me={authorization} copy={financeCopy[language]} language={language} />}{visibleSection === 'finance' && <AdminFinanceWorkspace client={client} me={authorization} language={language} />}{visibleSection === 'users' && <Users client={client} copy={copy} canManage={permissions.includes('platform.users.status.manage')} />}{visibleSection === 'registration' && <RepairQueue client={client} copy={copy} />}{visibleSection === 'profile' && <RepairQueue key="profile" client={client} copy={copy} profile />}{visibleSection === 'settings' && <SettingsWorkspace client={client} copy={copy} language={language} onLanguageChange={onLanguageChange} permissions={permissions} />}</div>
+      <div key={authorization.user_id}>{visibleSection === 'organizations' && <OrganizationAdminWorkspace client={client} me={authorization} language={language} />}{visibleSection === 'management' && <AdminManagementWorkspace client={client} copy={copy} language={language} permissions={permissions} owner={authorization.user_id} credentialOrigin={credentialOrigin} />}{visibleSection === 'reconciliation' && <AdminReconciliationWorkspace client={client} me={authorization} language={language} />}{visibleSection === 'products' && <RechargeProductWorkspace client={client} me={authorization} copy={financeCopy[language]} language={language} />}{visibleSection === 'finance' && <AdminFinanceWorkspace client={client} me={authorization} language={language} />}{visibleSection === 'users' && <Users client={client} copy={copy} canManage={permissions.includes('platform.users.status.manage')} />}{visibleSection === 'registration' && <RepairQueue client={client} copy={copy} />}{visibleSection === 'profile' && <RepairQueue key="profile" client={client} copy={copy} profile />}{visibleSection === 'settings' && <SettingsWorkspace client={client} copy={copy} language={language} onLanguageChange={onLanguageChange} permissions={permissions} />}</div>
     </>}
   </main>;
 }

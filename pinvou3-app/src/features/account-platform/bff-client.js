@@ -1,4 +1,4 @@
-import { parseFinanceJSON, requirePaymentOrder } from './finance-contract.js';
+import { parseFinanceJSON, requirePaymentOrder, encodeFinanceJSON } from './finance-contract.js';
 import { requireSession, requireProfileChange } from './personal-contract.js';
 import { mergeObservedVersions } from './authorization-ui.js';
 import { secureRequestID } from './request-id.js';
@@ -14,6 +14,7 @@ export class AccountPlatformBffClient {
   constructor(baseURL = '') {
     this.baseURL = String(baseURL || '').replace(/\/$/, '');
     this.csrfToken = '';
+    this.financeSessionEpoch = 0;
     this.deviceID = secureRequestID();
     this.contextVersion = 0;
     this.contextVersionListeners = new Set();
@@ -58,9 +59,10 @@ export class AccountPlatformBffClient {
       signal,
     });
     const payload = await response.json().catch(() => ({}));
-    if (response.status === 401) { this.csrfToken = ''; return { authenticated: false }; }
+    if (response.status === 401) { if (this.csrfToken) this.financeSessionEpoch++; this.csrfToken = ''; return { authenticated: false }; }
     if (!response.ok) throw errorFromResponse(response, payload);
     requireSession(payload);
+    if (this.csrfToken !== payload.csrf_token) this.financeSessionEpoch++;
     this.csrfToken = payload.csrf_token || '';
     return requireSession(payload);
   }
@@ -78,7 +80,7 @@ export class AccountPlatformBffClient {
       const response = await fetch(`${this.baseURL}/api/${area}${resource}`, {
         method,
         headers,
-        body: options.body === undefined ? undefined : JSON.stringify(options.body),
+        body: options.body === undefined ? undefined : area === 'token' && resource.endsWith('/quota-grants:batch') ? encodeFinanceJSON(options.body) : JSON.stringify(options.body),
         credentials: 'same-origin',
         cache: 'no-store',
         signal: options.signal,
@@ -95,6 +97,7 @@ export class AccountPlatformBffClient {
       if (session.authenticated && binding && session.csrf_token === binding) result = await send(binding);
     }
     if (!result.response.ok) throw errorFromResponse(result.response, result.payload);
+    if (options.expectedStatus && !options.expectedStatus.includes(result.response.status)) { const error = new Error('UNKNOWN_ORGANIZATION_ACK'); error.code = 'COMMAND_RESULT_UNKNOWN'; throw error; }
     return result.payload;
   }
 
@@ -188,6 +191,7 @@ export class AccountPlatformBffClient {
       if (session.authenticated && binding && session.csrf_token === binding) ({ response, payload } = await send(binding));
     }
     if (!response.ok) throw errorFromResponse(response, payload);
+    this.financeSessionEpoch++;
     this.csrfToken = '';
     return payload;
   }

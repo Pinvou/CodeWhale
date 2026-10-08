@@ -241,6 +241,7 @@ func main() {
 	if err != nil {
 		log.Fatal("TOKEN_PROVIDER_VALIDATION_TRUST_CONFIGURATION_FAILED")
 	}
+	billingClient.WithHumanDelegations(authorizer)
 	service := token.NewManagementService(repository, contexts, wallets, validator, providerURLPolicy, billingClient, gatewayAdapter).WithDefaultRoutes(defaultRoutes).WithCatalogSynchronizer(catalogSync).WithAuthorizer(authorizer).WithOwnerCandidateDirectory(ownerCandidates).WithAdminProxyHMACKey(paginationKey).WithImpactPrechecks(impactPrechecksEnabled, repository, billingClient).WithAdminOperationsOverview(operationsOverviewEnabled).WithAdminPageOverviews(pageOverviewsEnabled).WithCredentialIsolation(credentialIsolationEnabled).WithApprovedTokenCommandExecutor(token.NewPostgresApprovedCredentialExecutor(repository))
 	service.WithTokenCommandGovernanceActivation(governance).WithTokenAccountProvisioning(wallets, ownerAuthority)
 	if err := installPersonalExecution(workerContext, service, repository, billingClient, gatewayAdapter, defaultRoutes, providerURLPolicy, cfg.Environment, serviceCredential); err != nil {

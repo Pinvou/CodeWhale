@@ -24,6 +24,7 @@ export class AccountPlatformDesktopClient {
   constructor(transport) {
     if (!transport) throw new Error('Account Platform desktop bridge is unavailable');
     this.transport = transport;
+    this.financeSessionEpoch = 0;
     this.contextVersion = 0;
     this.contextVersionListeners = new Set();
     this.authorizationVersions = {};
@@ -79,8 +80,10 @@ export class AccountPlatformDesktopClient {
   branchReplacementSession(input, signal) {
     return this.call(() => this.transport.branchReplacementSession(input), signal);
   }
-  login(account, password, signal) {
-    return this.call(() => this.transport.login({ account, password }), signal);
+  async login(account, password, signal) {
+    const value = await this.call(() => this.transport.login({ account, password }), signal);
+    this.financeSessionEpoch++;
+    return value;
   }
 
   createSliderCaptcha(mobile, purpose, signal) {
@@ -153,8 +156,10 @@ export class AccountPlatformDesktopClient {
     );
   }
 
-  logout(signal) {
-    return this.call(() => this.transport.logout(), signal);
+  async logout(signal) {
+    const value = await this.call(() => this.transport.logout(), signal);
+    this.financeSessionEpoch++;
+    return value;
   }
 
   async call(action, signal) {
@@ -179,6 +184,7 @@ export class AccountPlatformDesktopClient {
     this.observeContextVersion(response.contextVersion);
     this.observeAuthorizationVersions(response);
     if (response.status < 200 || response.status >= 300) throw responseError(response);
+    if (options.expectedStatus && !options.expectedStatus.includes(response.status)) { const error = new Error('UNKNOWN_ORGANIZATION_ACK'); error.code = 'COMMAND_RESULT_UNKNOWN'; throw error; }
     if (area === 'token' && resource.startsWith('/v1/me/balance')) {
       if (typeof response.bodyText === 'string') return parseBalanceJSON(response.bodyText);
       for (const field of ['available_microcredits', 'reserved_microcredits']) {

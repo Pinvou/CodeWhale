@@ -121,6 +121,11 @@ func main() {
 		log.Fatal("BILLING_REFUND_CONSUMER_UNAVAILABLE")
 	}
 	defer stopRefund()
+	stopMembership, err := broker.ConsumeUntilResolved(ctx, "billing-member-lifecycle-v1", "account.membership.changed.v1", billing.NewMemberLifecycleConsumer(repository).Handle)
+	if err != nil {
+		log.Fatal("BILLING_MEMBERSHIP_CONSUMER_UNAVAILABLE")
+	}
+	defer stopMembership()
 	interval := 15 * time.Second
 	if raw := strings.TrimSpace(os.Getenv("BILLING_PAYMENT_EXPIRY_INTERVAL_SECONDS")); raw != "" {
 		seconds, e := strconv.Atoi(raw)

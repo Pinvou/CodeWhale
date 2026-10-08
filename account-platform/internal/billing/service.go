@@ -96,6 +96,7 @@ func (s *Service) Handler(serviceToken string, adminVerify ...identity.VerifyFun
 	protected.POST("/internal/v1/approval-command-proofs", serviceauth.Require("internal.billing.approval-proof.read"), httpserver.AdaptFunc(s.internalBillingApprovalProof))
 	protected.GET("/internal/v1/approval-effects/:approval_request_id", serviceauth.Require("internal.billing.approval-effect.read"), httpserver.AdaptFunc(s.approvalEffectObservation))
 	protected.GET("/internal/v1/approval-recovery/results/:approval_request_id", serviceauth.Require("internal.billing.approval-result.read"), httpserver.AdaptFunc(s.billingApprovalRecoveryResult))
+	s.registerOrganizationRoutes(protected)
 	protected.POST("/internal/v1/wallets/ensure", serviceauth.Require("internal.billing.wallet.ensure"), httpserver.AdaptFunc(s.ensureWallet))
 	protected.GET("/internal/v1/wallets/:wallet_id/balance", serviceauth.Require("internal.billing.wallet.read"), httpserver.AdaptFunc(s.getBalance))
 	if _, supported := s.repository.(managementHoldRepository); supported {

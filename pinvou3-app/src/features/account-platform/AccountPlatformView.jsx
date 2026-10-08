@@ -1,5 +1,7 @@
 import { PersonalFinanceWorkspace } from './PersonalFinanceWorkspace.jsx';
 import { PersonalUsageWorkspace } from './PersonalUsageWorkspace.jsx';
+import { OrganizationDirectory } from './OrganizationDirectory.jsx';
+import { OrganizationWorkspace } from './OrganizationWorkspace.jsx';
 import { requirePersonalAccount } from './personal-contract.js';
 import React, { useEffect, useRef, useState } from 'react';
 import { supportedLocales, localeNames } from '../../shared/supported-locales.js';
@@ -32,7 +34,7 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
     if (generation !== epoch.current) return;
     setMe(profile); setProfileOwner(client);
     setAuth('ready');
-    if (!hasPermission(profile, 'personal.billing.read')) return profile;
+    if (profile.active_context?.context_type === 'ORGANIZATION' || !hasPermission(profile, 'personal.billing.read')) return profile;
     try {
       const result = await client.balance(signal);
       if (generation === epoch.current) setBalance(result);
@@ -93,9 +95,12 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
     {error && <div className="ap-alert error" role="alert">{error}</div>}
     {notice && <div className="ap-alert" role="status">{notice}</div>}
     <section><h2>{accountDisplayLabel(me, copy.user)}</h2><dl><dt>{copy.username}</dt><dd>{me.username || '—'}</dd><dt>{copy.mobile}</dt><dd>{me.mobile || '—'}</dd><dt>{copy.accountStatus}</dt><dd>{me.status}</dd></dl></section>
+    <OrganizationDirectory key={`${me.user_id}:${client.financeSessionEpoch || 0}`} client={client} me={me} language={language} onChanged={() => refresh(false)} />
+    {me.active_context?.context_type === 'ORGANIZATION' ? <OrganizationWorkspace key={`${me.user_id}:${me.active_context.organization_id}:${me.active_context.context_version}`} client={client} me={me} language={language} onChanged={() => refresh(false)} /> : <>
     {hasPermission(me, 'personal.billing.read') && <section className="ap-balance-hero"><span>{copy.availableCredits}</span><strong>{formatBalance(balance?.available_microcredits, language)}</strong><small>{copy.reservedCredits}: {formatBalance(balance?.reserved_microcredits, language)}</small></section>}
     <PersonalFinanceWorkspace key={me.user_id} client={client} me={me} language={language} />
     <PersonalUsageWorkspace key={me.user_id} client={client} me={me} language={language} />
+    </>}
     {hasPermission(me, 'personal.profile.update') && (portal ? <ProfileSettings key={me.user_id} copy={copy} me={me} client={client} onError={reason => { if (renderedEpoch === epoch.current) setError(localizedAccountPlatformError(copy, reason)); }} onChanged={result => changed(result, renderedEpoch)} onRecovering={() => { if (renderedEpoch === epoch.current) setNotice(copy.profileChangeRecovering); }} /> : <button onClick={() => client.openPortal(language).catch(reason => { if (renderedEpoch === epoch.current) setError(localizedAccountPlatformError(copy, reason)); })}>{copy.profileSettings}</button>)}
     {portal && hasPermission(me, 'personal.security.manage') && <a href="/auth/login?reauthenticate=1&return_to=%2F">{copy.reauthenticate}</a>}
     {portal && me.platform_permissions?.some(permission => permission.startsWith('platform.')) && <a href="/admin.html">{copy.adminCenter}</a>}

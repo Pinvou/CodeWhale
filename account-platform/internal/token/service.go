@@ -116,7 +116,7 @@ func (r *HTTPWalletResolver) Ensure(ctx context.Context, ownerType string, owner
 		return uuid.Nil, fmt.Errorf("Billing wallet provisioning returned HTTP %d", response.StatusCode)
 	}
 	var body walletFacts
-	if err := decodeAccountAuthority(response.Body, 1<<20, &body); err != nil || ownerType != "PERSONAL" || ownerID == uuid.Nil || !body.validIdentity() || body.OwnerID != ownerID {
+	if err := decodeAccountAuthority(response.Body, 1<<20, &body); err != nil || ownerID == uuid.Nil || !body.validIdentity() || body.OwnerType != ownerType || body.OwnerID != ownerID {
 		return uuid.Nil, errors.New("Billing returned an invalid wallet")
 	}
 	return body.WalletID, nil
@@ -203,16 +203,23 @@ func (s *Service) Handler(verify identity.VerifyFunc) http.Handler {
 	protected.POST("/recharge/orders/:order_id/close", httpserver.AdaptFunc(s.closeRechargeOrder))
 	protected.POST("/recharge/orders/:order_id/payment-claims", httpserver.AdaptFunc(s.addLatePaymentClaim))
 	protected.GET("/me/entitlement-packages", httpserver.AdaptFunc(s.getEntitlementPackages))
+	s.registerOrganizationFinanceRoutes(protected)
 	s.registerPersonalExecutionRoutes(router, protected)
 	s.registerManagementRoutes(router, protected)
 	return TokenCredentialDeadlineMiddleware(router)
 }
 
 func (s *Service) activeWallet(ctx context.Context, resolved AuthorizationContext) (uuid.UUID, error) {
-	if resolved.ContextType != "PERSONAL" || resolved.OrganizationID != nil || resolved.UserID == uuid.Nil {
+	if resolved.UserID == uuid.Nil {
 		return uuid.Nil, ErrForbidden
 	}
-	return s.wallets.Ensure(ctx, "PERSONAL", resolved.UserID)
+	if resolved.ContextType == "PERSONAL" && resolved.OrganizationID == nil {
+		return s.wallets.Ensure(ctx, "PERSONAL", resolved.UserID)
+	}
+	if resolved.ContextType == "ORGANIZATION" && resolved.OrganizationID != nil && *resolved.OrganizationID != uuid.Nil {
+		return s.wallets.Ensure(ctx, "ORGANIZATION", *resolved.OrganizationID)
+	}
+	return uuid.Nil, ErrForbidden
 }
 
 func (s *Service) writeError(w http.ResponseWriter, r *http.Request, err error) {

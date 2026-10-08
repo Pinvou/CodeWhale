@@ -91,6 +91,21 @@ func Require(commandType string, expected Mode) gin.HandlerFunc {
 func buildPolicies() map[string]Policy {
 	result := make(map[string]Policy)
 	for commandType, permission := range map[string]string{
+		"BILLING_ORGANIZATION_LIFECYCLE_APPLY":          "internal.billing.organization.lifecycle",
+		"BILLING_ORGANIZATION_MEMBER_LIFECYCLE_APPLY":   "internal.billing.organization-member.lifecycle",
+		"BILLING_ORGANIZATION_UNIT_LIFECYCLE_APPLY":     "internal.billing.organization-unit.lifecycle",
+		"ACCOUNT_MEMBER_ADD":                            "platform.organizations.members.manage",
+		"ACCOUNT_MEMBER_REMOVE":                         "platform.organizations.members.manage",
+		"ACCOUNT_MEMBER_ROLES_REPLACE":                  "platform.organizations.members.manage",
+		"ACCOUNT_ORGANIZATION_CREATE":                   "platform.organizations.create",
+		"ACCOUNT_ORGANIZATION_DELETE":                   "platform.organizations.delete",
+		"ACCOUNT_ORGANIZATION_RENAME":                   "platform.organizations.profile.manage",
+		"ACCOUNT_ORGANIZATION_STATUS_CHANGE":            "platform.organizations.status.manage",
+		"ACCOUNT_OWNERSHIP_TRANSFER":                    "platform.organizations.owner.transfer",
+		"ACCOUNT_UNIT_CREATE":                           "platform.organizations.units.manage",
+		"ACCOUNT_UNIT_DELETE":                           "platform.organizations.units.manage",
+		"ACCOUNT_UNIT_MOVE":                             "platform.organizations.units.manage",
+		"ACCOUNT_UNIT_RENAME":                           "platform.organizations.units.manage",
 		"APPROVAL_DRAFT_CREATE":                         "platform.billing.repairs.request",
 		"APPROVAL_DRAFT_UPDATE":                         "platform.billing.repairs.request",
 		"APPROVAL_REQUEST_SUBMIT":                       "platform.billing.repairs.request",
@@ -228,6 +243,7 @@ func addTokenGovernancePolicies(result map[string]Policy) {
 		ExpiresAfter: 24 * time.Hour, ExecutionWindow: 5 * time.Minute, ExecutorIdentity: "token-command-executor",
 	}
 	audit("TOKEN_CREDENTIAL_VALIDATE", 2, "platform.tokens.credentials.validate", 2, "token_account_id", "expected_account_version", "credential_id", "credential_version", "precheck_fingerprint", "request_fingerprint")
+	audit("TOKEN_ORGANIZATION_MODEL_POLICY_UPDATE", 1, "org.models.manage", 1, "target_id", "request_fingerprint")
 	audit("TOKEN_USAGE_RECONCILIATION_RETRY", 2, "platform.usage.reconcile.retry", 2, "usage_request_id", "expected_usage_version", "evidence_high_watermark", "precheck_fingerprint", "request_fingerprint")
 	audit("TOKEN_ROUTE_PROVISIONING_REPAIR", 2, "platform.tokens.manage", 2, "provisioning_id", "expected_provisioning_version", "target_generation", "precheck_fingerprint", "request_fingerprint")
 }

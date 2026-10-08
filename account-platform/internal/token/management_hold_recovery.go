@@ -36,6 +36,16 @@ func (s *Service) ensureUsageHold(ctx context.Context, usage UsageRequest, envel
 		return BillingHold{}, err
 	}
 	pricing := HoldPricingContext{ModelID: usage.Model, ProtocolCode: "CHAT", FormulaVersionID: envelope.Price.FormulaVersionID, PricingSnapshot: pricingSnapshot, RequestSnapshot: usage.RequestSnapshot}
+	if snapshot.ContextType == "ORGANIZATION" {
+		if usage.OrganizationID == nil || snapshot.OrganizationID == nil || *usage.OrganizationID != *snapshot.OrganizationID || snapshot.OrganizationMembershipVersion == nil || *snapshot.OrganizationMembershipVersion < 1 {
+			return BillingHold{}, ErrForbidden
+		}
+		client, ok := s.billing.(SnapshotOrganizationBillingClient)
+		if !ok {
+			return BillingHold{}, ErrForbidden
+		}
+		return client.ReserveMemberQuotaPriced(ctx, usage.ID, usage.WalletID, *usage.OrganizationID, usage.UserID, *snapshot.OrganizationMembershipVersion, usage.MaximumMicrocredits, envelope.Price.ID, pricing)
+	}
 	if snapshot.ContextType != "PERSONAL" || usage.OrganizationID != nil {
 		return BillingHold{}, ErrForbidden
 	}

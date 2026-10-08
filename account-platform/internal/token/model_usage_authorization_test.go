@@ -27,6 +27,7 @@ func newModelUsageAuthorizationService(t *testing.T, resolved AuthorizationConte
 
 func TestModelAndUsageRoutesUseContextSpecificAtomicPermissions(t *testing.T) {
 	userID, organizationID := uuid.New(), uuid.New()
+	membershipVersion := int64(7)
 	tests := []struct {
 		name             string
 		context          AuthorizationContext
@@ -38,13 +39,14 @@ func TestModelAndUsageRoutesUseContextSpecificAtomicPermissions(t *testing.T) {
 		deniedContext    bool
 	}{
 		{name: "personal protocols", context: AuthorizationContext{UserID: userID, ContextType: "PERSONAL"}, method: http.MethodGet, path: "/v1/model-protocols", permission: "personal.models.read"},
-		{name: "organization protocols not yet delivered", context: AuthorizationContext{UserID: userID, ContextType: "ORGANIZATION", OrganizationID: &organizationID}, method: http.MethodGet, path: "/v1/model-protocols", deniedContext: true},
+		{name: "organization protocols", context: AuthorizationContext{UserID: userID, ContextType: "ORGANIZATION", OrganizationID: &organizationID, OrganizationMembershipVersion: &membershipVersion}, method: http.MethodGet, path: "/v1/model-protocols", permission: "org.models.read", organizationGate: true},
 		{name: "personal invocation", context: AuthorizationContext{UserID: userID, ContextType: "PERSONAL"}, method: http.MethodPost, path: "/v1/chat/completions", body: `{}`, permission: "personal.model.invoke"},
-		{name: "organization invocation not yet delivered", context: AuthorizationContext{UserID: userID, ContextType: "ORGANIZATION", OrganizationID: &organizationID}, method: http.MethodPost, path: "/v1/chat/completions", body: `{}`, deniedContext: true},
+		{name: "organization invocation", context: AuthorizationContext{UserID: userID, ContextType: "ORGANIZATION", OrganizationID: &organizationID, OrganizationMembershipVersion: &membershipVersion}, method: http.MethodPost, path: "/v1/chat/completions", body: `{}`, permission: "org.model.invoke", organizationGate: true},
 		{name: "personal usage list", context: AuthorizationContext{UserID: userID, ContextType: "PERSONAL"}, method: http.MethodGet, path: "/v1/me/usage-requests?cursor=invalid", permission: "personal.usage.read"},
-		{name: "organization usage list not yet delivered", context: AuthorizationContext{UserID: userID, ContextType: "ORGANIZATION", OrganizationID: &organizationID}, method: http.MethodGet, path: "/v1/me/usage-requests?cursor=invalid", deniedContext: true},
+		{name: "organization usage list", context: AuthorizationContext{UserID: userID, ContextType: "ORGANIZATION", OrganizationID: &organizationID, OrganizationMembershipVersion: &membershipVersion}, method: http.MethodGet, path: "/v1/me/usage-requests?cursor=invalid", permission: "org.usage.read.self", organizationGate: true},
 		{name: "personal usage turn projection", context: AuthorizationContext{UserID: userID, ContextType: "PERSONAL"}, method: http.MethodGet, path: "/v1/me/usage-turns", permission: "personal.usage.read"},
-		{name: "organization usage turn projection not yet delivered", context: AuthorizationContext{UserID: userID, ContextType: "ORGANIZATION", OrganizationID: &organizationID}, method: http.MethodGet, path: "/v1/me/usage-turns", deniedContext: true},
+		{name: "organization usage turn projection", context: AuthorizationContext{UserID: userID, ContextType: "ORGANIZATION", OrganizationID: &organizationID, OrganizationMembershipVersion: &membershipVersion}, method: http.MethodGet, path: "/v1/me/usage-turns", permission: "org.usage.read.self", organizationGate: true},
+		{name: "organization missing local membership version", context: AuthorizationContext{UserID: userID, ContextType: "ORGANIZATION", OrganizationID: &organizationID, MembershipVersion: 99}, method: http.MethodGet, path: "/v1/me/usage-turns", deniedContext: true},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

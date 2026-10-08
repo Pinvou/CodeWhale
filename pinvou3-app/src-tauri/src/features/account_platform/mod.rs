@@ -8,6 +8,7 @@
 pub(crate) mod client_migration;
 mod model_proxy;
 mod platform;
+mod organization_routes;
 pub(crate) mod runtime_model;
 
 use std::sync::Arc;
@@ -1624,7 +1625,7 @@ fn bootstrap_user_id(body: &Value) -> Result<String, String> {
 
 fn prepare_request(
     config: &AccountPlatformConfig,
-    input: ApiRequest,
+    mut input: ApiRequest,
 ) -> Result<PreparedRequest, String> {
     let method = Method::from_bytes(input.method.as_bytes())
         .map_err(|_| "account_platform_request_invalid: invalid method".to_string())?;
@@ -1648,6 +1649,8 @@ fn prepare_request(
     if method == Method::GET && input.body.is_some() {
         return Err("account_platform_request_invalid: GET body is not allowed".to_string());
     }
+    organization_routes::exact_body(&input.area, parsed.path(), &mut input.body)?;
+    let organization_key = organization_routes::keyed(&input.area, &method, parsed.path());
     let requires_key = input.area == "token"
         && method == Method::POST
         && (parsed.path() == "/v1/recharge/orders"
@@ -1658,7 +1661,8 @@ fn prepare_request(
             if requires_key
                 && (16..=128).contains(&key.len())
                 && key.bytes().all(|c| c.is_ascii_graphic()) => {}
-        None if !requires_key => {}
+        Some(key) if organization_key && organization_routes::valid_key(&input.area, key) => {}
+        None if !requires_key && !organization_key => {}
         _ => {
             return Err(
                 "account_platform_request_denied: invalid idempotency key for route".to_string(),
@@ -1686,6 +1690,7 @@ fn prepare_request(
 }
 
 fn route_allowed(area: &str, method: &Method, path: &str, query: Option<&str>) -> bool {
+    if organization_routes::allowed(area, method, path, query) { return true; }
     if area == "token" {
         if path == "/v1/me/balance" {
             return *method == Method::GET && matches!(query, None | Some("consistency=strong"));
@@ -1836,6 +1841,7 @@ async fn bounded_response_bytes(mut response: reqwest::Response) -> Result<Vec<u
 
 async fn response_to_api(response: reqwest::Response) -> Result<ApiResponse, String> {
     let balance_response = response.url().path().ends_with("/v1/me/balance")
+        || response.url().path().starts_with("/v1/organizations/")
         || response.url().path().contains("/v1/recharge/")
         || response
             .url()
@@ -2288,7 +2294,6 @@ mod tests {
             );
         }
         for path in [
-            "/v1/me/organizations",
             "/v1/sessions/current/active-context",
             "/admin/v1/users",
             "/v1/me/account-closure",

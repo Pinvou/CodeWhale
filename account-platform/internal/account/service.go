@@ -23,19 +23,22 @@ import (
 var ErrWalletProvisioning = errors.New("personal wallet provisioning is incomplete")
 
 type Service struct {
-	serviceVersion          string
-	clientContractVersion   string
-	ownerCandidateCursorKey []byte
-	repository              Repository
-	humanDelegations        *humandelegation.Signer
-	recoveryResults         ApprovalRecoveryResultReader
-	recoveryEffects         approvaleffect.Reader
-	wallets                 WalletProvisioner
-	mobileAuth              *MobileAuthService
-	profiles                *ProfileChangeService
-	serviceToken            string
-	now                     func() time.Time
-	smsConfiguration        *VersionedSMSProviderResolver
+	organizationLifecycle       []OrganizationLifecycleClient
+	organizationUnitLifecycle   []OrganizationUnitLifecycleClient
+	organizationMemberLifecycle []OrganizationMemberLifecycleClient
+	serviceVersion              string
+	clientContractVersion       string
+	ownerCandidateCursorKey     []byte
+	repository                  Repository
+	humanDelegations            *humandelegation.Signer
+	recoveryResults             ApprovalRecoveryResultReader
+	recoveryEffects             approvaleffect.Reader
+	wallets                     WalletProvisioner
+	mobileAuth                  *MobileAuthService
+	profiles                    *ProfileChangeService
+	serviceToken                string
+	now                         func() time.Time
+	smsConfiguration            *VersionedSMSProviderResolver
 }
 
 func (s *Service) WithSMSConfiguration(configuration *VersionedSMSProviderResolver) *Service {
@@ -144,6 +147,7 @@ func (s *Service) Handler(verify identity.VerifyFunc) http.Handler {
 	adminV2.POST("/approval-requests/:approval_request_id/actions/submit", approvalpolicy.Require("APPROVAL_REQUEST_SUBMIT", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminSubmitApprovalRequestV2))
 	adminV2.POST("/approval-requests/:approval_request_id/actions/withdraw", approvalpolicy.Require("APPROVAL_REQUEST_WITHDRAW", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminWithdrawApprovalRequestV2))
 	adminV2.POST("/approval-requests/:approval_request_id/actions/decide", approvalpolicy.Require("APPROVAL_REQUEST_DECIDE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminDecideApprovalRequestV2))
+	s.registerOrganizationRoutes(protected, admin)
 	return router
 }
 
@@ -194,6 +198,12 @@ func (s *Service) writeError(w http.ResponseWriter, r *http.Request, err error) 
 		status, code, message = http.StatusForbidden, "ACCOUNT_FORBIDDEN", "the account action is not permitted"
 	case errors.Is(err, ErrConflict):
 		status, code, message = http.StatusConflict, "ACCOUNT_CONFLICT", "the account resource changed or conflicts with existing data"
+	case errors.Is(err, ErrLastOwner):
+		status, code, message = http.StatusConflict, "LAST_OWNER_REQUIRED", "the organization must retain at least one owner"
+	case errors.Is(err, ErrInvalidHierarchy):
+		status, code, message = http.StatusUnprocessableEntity, "ORG_UNIT_HIERARCHY_INVALID", "the requested organization hierarchy is invalid"
+	case errors.Is(err, ErrInvitationExpired):
+		status, code, message = http.StatusGone, "INVITATION_EXPIRED", "the invitation has expired"
 	case errors.Is(err, ErrLastActiveSuperAdmin):
 		status, code, message = http.StatusConflict, "LAST_ACTIVE_SUPER_ADMIN", "another active user must become super administrator first"
 	case errors.Is(err, ErrAccountProvisioning):
@@ -370,6 +380,21 @@ func (s *Service) getCommerceCustomerMapping(w http.ResponseWriter, r *http.Requ
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	api.WriteJSON(w, http.StatusOK, mapping)
+}
+
+func (s *Service) WithOrganizationLifecycle(clients ...OrganizationLifecycleClient) *Service {
+	s.organizationLifecycle = append([]OrganizationLifecycleClient(nil), clients...)
+	return s
+}
+
+func (s *Service) WithOrganizationUnitLifecycle(clients ...OrganizationUnitLifecycleClient) *Service {
+	s.organizationUnitLifecycle = append([]OrganizationUnitLifecycleClient(nil), clients...)
+	return s
+}
+
+func (s *Service) WithOrganizationMemberLifecycle(clients ...OrganizationMemberLifecycleClient) *Service {
+	s.organizationMemberLifecycle = append([]OrganizationMemberLifecycleClient(nil), clients...)
+	return s
 }
 
 func (s *Service) WithTokenOwnerCandidateCursorKey(key []byte) *Service {
