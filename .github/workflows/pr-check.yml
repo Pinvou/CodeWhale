@@ -21,7 +21,7 @@ name: PR Check
 # - cli-test: pinvou-cli workspace contract suite (fmt + all-target tests),
 #   triggered by cli_rust/rust_full changes; follows the rust-test push and
 #   cache policies (memory setup, --no-run on push, ~/.cargo-only cache).
-# - rust-lint:Draft 只跑 fmt；Ready/Queue/main 跑 clippy；cargo-deny 仅在依赖
+# - rust-lint:Draft 跑 fmt 和有界 controller 安全回归；Ready/Queue/main 跑 clippy；cargo-deny 仅在依赖
 #   或策略路径变化时追加，三项均无 continue-on-error。
 #   与 rust-test 并行,各自独立 cache。clippy 规则见 Cargo.toml [lints] 表:
 #   只启用实测零欠账的 lint(deny),有欠账的 lint/group 显式 allow,
@@ -976,7 +976,7 @@ jobs:
     # 缓存命中时(如 community-603 19m35s / community-602 25m36s)不受影响。
     timeout-minutes: 60
     env:
-      # Draft 只跑无系统依赖的 fmt 快检；Ready PR、Queue 与 main 跑 clippy。
+      # Draft 跑无系统依赖的 fmt 和有界 controller 回归；Ready PR、Queue 与 main 跑 clippy。
       RUN_HEAVY_RUST_CHECKS: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
       # clippy 编译依赖(codewhale-tui)时同样可能触发 rustc/LLVM 栈溢出
       # (v0.9.5 升级后 O2 同源风险)。正式入口按平台注入 RUSTC_WRAPPER
@@ -1014,6 +1014,13 @@ jobs:
       - name: cargo fmt --check (硬门禁)
         working-directory: pinvou3-app/src-tauri
         run: cargo fmt -- --check
+
+      # Compile the real authentication/watchdog/local state modules on Drafts
+      # too. This small harness is not a replacement for the Ready full-product
+      # compile or native transport gates.
+      - name: Controller authentication and local safety regression
+        working-directory: pinvou3-app/src-tauri
+        run: cargo test --locked --manifest-path tests/controller-crypto-harness/Cargo.toml
 
       # clippy 需要 Tauri/WebKit 系统库；Draft 不安装，避免每次 push 消耗 ~70s。
       - name: 装 Tauri + pinvou3 Linux 系统依赖

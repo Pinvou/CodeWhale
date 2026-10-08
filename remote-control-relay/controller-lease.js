@@ -6,6 +6,7 @@ import {
   buildPairingTranscriptPreimage,
   controllerCapabilityHash,
   negotiateControllerCapabilities,
+  isValidControllerIdentifier,
   validateControllerMessage,
   verifyReceiptCommitment,
 } from "./protocol-controller.js";
@@ -75,9 +76,26 @@ function receiptSecret(value) {
   return bytes;
 }
 
+function resumeToken(value) {
+  if (typeof value !== "string" || value.length !== 44) fail("resume_token_invalid");
+  const bytes = Buffer.from(value, "base64");
+  if (bytes.length !== 32 || bytes.toString("base64") !== value) fail("resume_token_invalid");
+  return bytes;
+}
+
+function resumeEpoch(value, label) {
+  if (!isValidControllerIdentifier(value)) fail(`${label}_invalid`);
+  return value;
+}
+
+function socketsValue(sockets, roleValue) {
+  if (!Object.hasOwn(sockets, roleValue)) fail("controller_resume_sockets_invalid");
+  return sockets[roleValue];
+}
+
 export class ControllerLeaseManager {
   #pairings; #reservations; #relayEpoch; #signingKeyId; #sign; #resolveControlled;
-  #clock; #randomBytes; #audit; #onLeaseTerminated; #handshakes = new Map(); #leases = new Map();
+  #clock; #randomBytes; #audit; #onLeaseTerminated; #terminationObserver = null; #previousLeases = new Map(); #handshakes = new Map(); #leases = new Map();
   #pendingLeaseIds = new Set();
   // Preparation has its own map: published handshakes always have complete
   // transcript/socket/receipt state. Retries must never become cleanup owners.
@@ -499,21 +517,135 @@ export class ControllerLeaseManager {
     return this.#leases.get(controllerLeaseId) ?? null;
   }
 
-  async terminateLease({ controllerLeaseId, reason = "disconnected" } = {}) {
+  // One lifetime-owned router, installed before any claim. Not an unbounded
+  // event emitter and not replaceable while old callbacks are in flight.
+  setTerminationObserver(observer) {
+    if (typeof observer !== "function" || this.#terminationObserver
+      || this.#leases.size || this.#handshakes.size || this.#claimFlights.size) {
+      fail("controller_termination_observer_invalid");
+    }
+    this.#terminationObserver = observer;
+  }
+
+  verifyResumeToken({ controllerLeaseId, role: tokenRole, resumeTokenB64 } = {}) {
+    controllerLeaseId = id(controllerLeaseId, "controller_lease_id");
+    tokenRole = role(tokenRole);
+    const lease = this.#leases.get(controllerLeaseId);
+    if (!lease) fail("controller_lease_not_found");
+    const token = resumeToken(resumeTokenB64);
+    try {
+      const actual = Buffer.from(tokenDigest({
+        role: tokenRole,
+        relay_epoch: lease.relay_epoch,
+        connection_id: lease.connection_id,
+        controller_lease_id: lease.controller_lease_id,
+        lease_epoch: lease.lease_epoch,
+        remote_control_generation: lease.remote_control_generation,
+      }, token), "ascii");
+      const expected = Buffer.from(
+        lease[`resume_token_${tokenRole.toLowerCase()}_sha256`],
+        "ascii",
+      );
+      if (!crypto.timingSafeEqual(actual, expected)) fail("resume_token_invalid");
+    } finally {
+      token.fill(0);
+    }
+    return Object.freeze({ lease, role: tokenRole });
+  }
+
+  completeResume({
+    controllerLeaseId,
+    expectedLease,
+    activationId,
+    sockets,
+    livenessEpochA,
+    livenessEpochB,
+    tokenA,
+    tokenB,
+    resumeDeadlineMs,
+  } = {}) {
+    controllerLeaseId = id(controllerLeaseId, "controller_lease_id");
+    activationId = id(activationId, "activation_id");
+    const lease = this.#leases.get(controllerLeaseId);
+    if (!lease) fail("controller_lease_not_found");
+    if (lease !== expectedLease) fail("controller_lease_owner_changed");
+    if (!sockets || typeof sockets !== "object") fail("controller_resume_sockets_invalid");
+    const socketA = id(socketsValue(sockets, "A"), "resume_socket_a");
+    const socketB = id(socketsValue(sockets, "B"), "resume_socket_b");
+    if (socketA === socketB) fail("controller_resume_sockets_invalid");
+    livenessEpochA = resumeEpoch(livenessEpochA, "liveness_epoch_a");
+    livenessEpochB = resumeEpoch(livenessEpochB, "liveness_epoch_b");
+    if (livenessEpochA === livenessEpochB
+      || livenessEpochA === lease.liveness_epoch_a
+      || livenessEpochB === lease.liveness_epoch_b) fail("liveness_epoch_invalid");
+    const nextTokenA = resumeToken(tokenA?.toString("base64"));
+    const nextTokenB = resumeToken(tokenB?.toString("base64"));
+    try {
+      if (nextTokenA.equals(nextTokenB)) fail("resume_token_invalid");
+      const timestamp = this.#now(RESUME_BUDGET_MS);
+      const resumeDeadline = resumeDeadlineMs ?? String(timestamp + RESUME_BUDGET_MS);
+      if (!/^(0|[1-9][0-9]*)$/u.test(resumeDeadline)
+        || !Number.isSafeInteger(Number(resumeDeadline))
+        || Number(resumeDeadline) <= timestamp
+        || Number(resumeDeadline) > timestamp + RESUME_BUDGET_MS) fail("controller_resume_deadline_invalid");
+      const tokenADigest = tokenDigest({
+        role: "A", relay_epoch: lease.relay_epoch, connection_id: lease.connection_id,
+        controller_lease_id: lease.controller_lease_id, lease_epoch: lease.lease_epoch,
+        remote_control_generation: lease.remote_control_generation,
+      }, nextTokenA);
+      const tokenBDigest = tokenDigest({
+        role: "B", relay_epoch: lease.relay_epoch, connection_id: lease.connection_id,
+        controller_lease_id: lease.controller_lease_id, lease_epoch: lease.lease_epoch,
+        remote_control_generation: lease.remote_control_generation,
+      }, nextTokenB);
+      if (tokenADigest === lease.resume_token_a_sha256
+        || tokenBDigest === lease.resume_token_b_sha256) {
+        fail("resume_token_invalid");
+      }
+      const updated = Object.freeze({
+        ...lease,
+        liveness_epoch_a: livenessEpochA,
+        liveness_epoch_b: livenessEpochB,
+        resume_token_a_sha256: tokenADigest,
+        resume_token_b_sha256: tokenBDigest,
+        resume_deadline_ms: resumeDeadline,
+        sockets: Object.freeze({ A: socketA, B: socketB }),
+      });
+      this.#leases.set(controllerLeaseId, updated);
+      // Only the immediate predecessor can still have a hook installation in
+      // flight. One entry per live lease, not an ever-growing resume history.
+      this.#previousLeases.set(controllerLeaseId, lease);
+      this.#emit("controller_resume_completed");
+      return updated;
+    } finally {
+      nextTokenA.fill(0);
+      nextTokenB.fill(0);
+    }
+  }
+
+  async terminateLease({ controllerLeaseId, reason = "disconnected", expectedLease } = {}) {
     controllerLeaseId = id(controllerLeaseId, "controller_lease_id");
     const lease = this.#leases.get(controllerLeaseId);
     if (!lease) return false;
+    if (expectedLease !== undefined && lease !== expectedLease) return false;
     this.#leases.delete(controllerLeaseId);
+    const previousLease = this.#previousLeases.get(controllerLeaseId);
+    this.#previousLeases.delete(controllerLeaseId);
     this.#reservations.releaseControllerLease({
       endpointId: lease.endpoint_id, controllerLeaseId,
     });
-    await this.#onLeaseTerminated({
+    const event = Object.freeze({
       endpoint_id: lease.endpoint_id,
       remote_control_generation: lease.remote_control_generation,
       controller_lease_id: lease.controller_lease_id,
       reason,
     });
+    const callbacks = [() => this.#onLeaseTerminated(event)];
+    if (this.#terminationObserver) callbacks.unshift(() => this.#terminationObserver(event, lease, previousLease));
+    const outcomes = await Promise.allSettled(callbacks.map((callback) => Promise.resolve().then(callback)));
     this.#emit("controller_lease_terminated");
+    const failures = outcomes.filter((outcome) => outcome.status === "rejected").map((outcome) => outcome.reason);
+    if (failures.length) throw new AggregateError(failures, "controller_lease_termination_callback_failed");
     return true;
   }
 

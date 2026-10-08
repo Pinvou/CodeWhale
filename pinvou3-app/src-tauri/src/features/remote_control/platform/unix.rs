@@ -32,6 +32,18 @@ pub(super) fn host_file_roots() -> Vec<(String, PathBuf)> {
     Vec::new()
 }
 
+pub(super) fn desktop_control_supported() -> bool {
+    false
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn unix_does_not_claim_desktop_control_support() {
+        assert!(!super::desktop_control_supported());
+    }
+}
+
 pub(super) fn workspace_identity(path: &Path) -> std::io::Result<WorkspaceIdentity> {
     use std::os::unix::fs::MetadataExt as _;
 

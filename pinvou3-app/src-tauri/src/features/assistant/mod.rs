@@ -12,6 +12,7 @@ pub(crate) mod pending_user_input;
 pub mod platform;
 #[cfg(any(feature = "benchmark-hooks", test))]
 pub(crate) mod product_runtime;
+pub(crate) mod remote_turn;
 pub(crate) mod runtime_model;
 pub(crate) mod safety_deny_rules;
 pub mod session_policy;

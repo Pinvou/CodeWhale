@@ -116,7 +116,7 @@ function validMessage(type, role = fixture.message_role_matrix[type][0]) {
     case "controller_post_activation_liveness":
     case "controller_post_activation_liveness_confirmed": return { ...common, ...request, ...activation, liveness_epoch_b: "live-b-2", heartbeat_sequence_b: "1" };
     case "controller_resume_ready_ack": return { ...common, ...request, ...activation, sender_role: role, liveness_epoch_b: "live-b-2", heartbeat_sequence_b: "1" };
-    case "controller_resumed": return { ...common, ...request, ...activation, liveness_epoch_a: "live-a-2", liveness_epoch_b: "live-b-2", new_resume_token_b64: "AQID" };
+    case "controller_resumed": return { ...common, ...request, ...activation, liveness_epoch_a: "live-a-2", liveness_epoch_b: "live-b-2", new_resume_token_b64: "AQID", resume_deadline_ms: "60000" };
     case "encrypted_frame": return { ...common, ...LEASE, frame_sequence: "1", direction: role === "A" ? "a_to_b" : "b_to_a", payload_kind: role === "A" ? "task_submit" : "task_status", ciphertext_b64: "AQID", ciphertext_bytes: "3" };
     case "controller_disconnect": return { ...common, ...request, ...LEASE, sender_role: role, reason: "local_stop" };
     case "error": return { ...common, ...request, code: "pairing_code_invalid", message: "连接码无效或已失效" };
@@ -160,6 +160,15 @@ test("controller v1 fixture freezes registries and contract hash", () => {
   const changedFixture = structuredClone(fixture);
   changedFixture.legacy_web_v2.web_client_join.after_seq = 8;
   assert.notEqual(canonicalControllerContractHash(changedFixture), CONTROLLER_CONTRACT_SHA256);
+});
+
+test("protocol document freezes the executable contract digest", async () => {
+  const document = await readFile(new URL("../PROTOCOL.md", import.meta.url), "utf8");
+  const digests = [...document.matchAll(/The contract digest is\s+`([a-f0-9]{64})`/gu)];
+  assert.equal(digests.length, 1, "document must declare exactly one contract digest");
+  assert.equal(digests[0][1], CONTROLLER_CONTRACT_SHA256);
+  assert.equal(digests[0][1], canonicalControllerContractHash(fixture));
+  assert.equal(digests[0][1], fixture.contract.sha256);
 });
 
 test("every outer message has an exhaustive transport-role matrix", () => {

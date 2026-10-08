@@ -22,10 +22,10 @@ const SEALED_CODE_V1_BYTES: usize = 68;
 const MAX_TASK_REFERENCES: usize = 32;
 const MAX_DESCRIPTORS: usize = 256;
 const MAX_ARTIFACTS: usize = 256;
-const MAX_ENCRYPTED_WIRE_BYTES: usize =
+pub(crate) const MAX_ENCRYPTED_WIRE_BYTES: usize =
     MAX_ENCRYPTED_FRAME_BYTES.div_ceil(3) * 4 + MAX_CONTROL_MESSAGE_BYTES;
 const CONTROLLER_CONTRACT_SHA256: &str =
-    "ad4dd926f97c376419d33589e8147f533e7cbb55c3430a00d3b0c5e306349aac";
+    "d844a4f207645c4d40d443529b9c982492898c7ae30a810448e3ae46e894df5b";
 
 pub(crate) const CONTROLLER_CAPABILITIES: &[&str] = &[
     "pairing_v1",
@@ -1030,6 +1030,7 @@ fn message_schema(kind: &str) -> Option<Schema> {
                 "liveness_epoch_a",
                 "liveness_epoch_b",
                 "new_resume_token_b64",
+                "resume_deadline_ms",
             ],
             optional: &[],
             roles: &[RELAY],
@@ -2194,16 +2195,22 @@ fn validate_identifier(value: &Value, field: &str) -> Result<()> {
     let Some(text) = value.as_str() else {
         return Err(ControllerProtocolError::new("invalid_field", field));
     };
-    let valid = !text.is_empty()
+    if !is_valid_identifier(text) {
+        return Err(ControllerProtocolError::new("invalid_field", field));
+    }
+    Ok(())
+}
+
+/// 冻结协议标识符语法：首字符为 ASCII 字母数字，其后只允许字母数字与
+/// `._:-`，长度不超过 `MAX_ID_CHARS`。E2E-02 的 `bind_generation` 与运行时
+/// generation 门共用同一份规则，避免出现只在一侧收紧的语法。
+pub(crate) fn is_valid_identifier(text: &str) -> bool {
+    !text.is_empty()
         && text.len() <= MAX_ID_CHARS
         && text.as_bytes()[0].is_ascii_alphanumeric()
         && text
             .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || b"._:-".contains(&byte));
-    if !valid {
-        return Err(ControllerProtocolError::new("invalid_field", field));
-    }
-    Ok(())
+            .all(|byte| byte.is_ascii_alphanumeric() || b"._:-".contains(&byte))
 }
 
 fn validate_uint(value: &Value, field: &str, max: u64) -> Result<()> {
@@ -3408,6 +3415,36 @@ pub(crate) fn build_liveness_attestation_preimage(message: &Value) -> Result<Vec
         length_prefix_text(&mut output, object_string(object, field, "attestation")?);
     }
     Ok(output)
+}
+
+/// Parsed signing material is not authenticated evidence. Only the enrolled
+/// Relay trust verifier may authorize it before a watchdog state transition.
+pub(crate) struct ParsedLivenessAttestation {
+    pub(crate) relay_signing_key_id: String,
+    pub(crate) signature_algorithm: String,
+    pub(crate) signature_preimage: Vec<u8>,
+    pub(crate) relay_signature: Vec<u8>,
+}
+
+pub(crate) fn parse_liveness_attestation(input: &str) -> Result<ParsedLivenessAttestation> {
+    let value = validate_controller_message_json(input, RELAY)?;
+    let message = as_object(&value, "attestation")?;
+    let signature_preimage = build_liveness_attestation_preimage(&value)?;
+    let relay_signature = base64::engine::general_purpose::STANDARD
+        .decode(object_string(
+            message,
+            "relay_signature_b64",
+            "attestation",
+        )?)
+        .map_err(|_| ControllerProtocolError::new("invalid_field", "relay_signature_b64"))?;
+    Ok(ParsedLivenessAttestation {
+        relay_signing_key_id: object_string(message, "relay_signing_key_id", "attestation")?
+            .to_owned(),
+        signature_algorithm: object_string(message, "signature_algorithm", "attestation")?
+            .to_owned(),
+        signature_preimage,
+        relay_signature,
+    })
 }
 
 pub(crate) fn validate_liveness_attestation_message_json(
