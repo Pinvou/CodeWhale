@@ -16,3 +16,15 @@
 
 状态：最终独立复审通过，确认问题均已修复；提交后推送 F00、回复并请求原审核人重审，待当前提交 CI 验证后向 F01 普通 merge 传播。
 补充 CI 验证：ab81a6087 的 Account Platform Linux race/vet 已通过；其余适用检查除 Hub 依赖审计均通过。Hub 当前锁定 Sharp 0.35.4 命中公开 GHSA-wq5f-xc86-pv6w，补丁升级至 0.35.5，锁文件同步更新；npm ci、55 项 Hub 测试（含独立临时 PostgreSQL E2E）及零漏洞 audit 通过。独立复审确认改动仅涉及 Sharp 依赖闭包。
+
+## F01 / PR #1528
+
+F00修复通过普通merge引入：96899c70及6077d33fc。F00当前head16184c38d的required-gate已通过，外部重审已申请、尚待回复。两份原审核逐项核实：钱包ACK测试fixture零租约确实造成16项失败；Rust handoff ticket字符边界、未认证入口限流、全类审计DELETE保护、登录错误/冷却信息、生产Keycloak硬化、NGINX动态DNS、Account可信来源及LEASED索引缺口均真实存在。
+
+原评语修正：Account当前问题是无条件信任来源头而可伪造桶，Portal已有受信peer配置；非security审计UPDATE旧触发器返回OLD导致无声取消，DELETE可绕过；付费SMS已有多维额度，公开入口缺限流及图片可逆映射仍需修；Portal ticket消费端也仅验证长度。删除用户代码无注册路由，未证实可达安全问题。
+
+确认的非阻塞后台错误诊断和记录清理登记 [Issue #1560](https://github.com/Pinvou/pinvou3/issues/1560)。用户明确批准保留24小时验证码、90天短信验证/发送，保留所有业务引用与活动/不确定投递；新增分批清理及前向索引迁移。
+
+验证进展：钱包ACK及过期租约回归通过；Node相关测试、真实浏览器20项、UI build/lint、架构守卫通过。public limiter真实隔离PG并发、重启、共享来源、TTL、随机键基数测试及独立复审通过；事件Claim范围/字面前缀/租约测试通过；部署配置Go来源边界与3项真实脚本mock/结构契约通过且独立代码复审通过。清理5项真实PG子测试通过，覆盖所有业务引用、未来投递租约、89/91天与24小时边界、501条分批和锁行跳过，独立复审通过；主模块全量test/vet通过。官方Windows nginx 1.30.5隔离 nginx -t通过，未启动服务；真实容器DNS重建和Keycloak realm行为未运行验证，不能将mock或syntax检查作为部署验收。Rust完整app lib实际MSVC链接成功，并执行account_platform模块27项测试全部通过、无跳过；仅命令行临时将CodeWhale TUI测试编译opt-level设0，未修改Cargo配置或gitlink。
+
+状态：确认问题修复完成、独立代码复审及本轮适用本地验证通过；推送后回复两位原审核人并申请重审，当前head CI通过后向F02普通merge传播。真实外部服务与组合部署验收仍保持原先披露的延期范围。

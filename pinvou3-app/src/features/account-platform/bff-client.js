@@ -2,10 +2,12 @@ import { requireSession, requireProfileChange } from './personal-contract.js';
 import { mergeObservedVersions } from './authorization-ui.js';
 import { secureRequestID } from './request-id.js';
 import { parseBalanceJSON } from './balance-view.js';
+import { responseRetryAfter } from './auth-error.js';
 function errorFromResponse(response, payload) {
   const error = new Error(payload && payload.message ? payload.message : `HTTP ${response.status}`);
   error.code = payload && payload.code ? payload.code : 'REQUEST_FAILED';
   error.status = response.status;
+  error.retryAfterSeconds = responseRetryAfter(payload, response.headers.get('Retry-After'));
   return error;
 }
 

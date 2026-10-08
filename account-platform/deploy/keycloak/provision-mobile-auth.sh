@@ -147,6 +147,60 @@ done
   -s registrationAllowed=false -s resetPasswordAllowed=false -s rememberMe=true -s loginTheme=pinvou \
   -s internationalizationEnabled=true -s 'supportedLocales=["zh-CN","en","ja"]' -s defaultLocale=zh-CN >/dev/null
 
+# BEGIN PINVOU_REALM_HARDENING
+# Apply to the existing production realm, not only to the development import.
+# Read back each non-secret field; a partial or ignored update fails closed.
+"$KCADM" update "realms/$REALM" \
+  -s bruteForceProtected=true -s permanentLockout=false -s failureFactor=10 \
+  -s maxFailureWaitSeconds=900 -s minimumQuickLoginWaitSeconds=60 \
+  -s waitIncrementSeconds=60 -s quickLoginCheckMilliSeconds=1000 -s maxDeltaTimeSeconds=43200 \
+  -s accessTokenLifespan=600 -s revokeRefreshToken=true -s refreshTokenMaxReuse=0 >/dev/null
+"$KCADM" update events/config -r "$REALM" \
+  -s eventsEnabled=true -s eventsExpiration=2592000 -s adminEventsEnabled=true \
+  -s 'enabledEventTypes=["LOGIN","LOGIN_ERROR","LOGOUT","REGISTER","REGISTER_ERROR","UPDATE_PASSWORD","UPDATE_PASSWORD_ERROR","REFRESH_TOKEN","REFRESH_TOKEN_ERROR"]' \
+  -s adminEventsDetailsEnabled=false >/dev/null
+require_realm_setting() {
+  resource=$1
+  field=$2
+  expected=$3
+  if [ "$resource" = "realms/$REALM" ]; then
+    readback=$("$KCADM" get "$resource" --fields "$field" --format csv --noquotes) || {
+      printf 'Keycloak hardening readback unavailable for %s\n' "$field" >&2; exit 1;
+    }
+  else
+    readback=$("$KCADM" get "$resource" -r "$REALM" --fields "$field" --format csv --noquotes) || {
+      printf 'Keycloak hardening readback unavailable for %s\n' "$field" >&2; exit 1;
+    }
+  fi
+  actual=''
+  while IFS= read -r line; do actual=$line; done <<PINVOU_READBACK
+$readback
+PINVOU_READBACK
+  if [ "$actual" != "$expected" ]; then
+    printf 'Keycloak hardening readback failed for %s\n' "$field" >&2
+    exit 1
+  fi
+}
+for setting in bruteForceProtected:true permanentLockout:false failureFactor:10 \
+  maxFailureWaitSeconds:900 minimumQuickLoginWaitSeconds:60 waitIncrementSeconds:60 \
+  quickLoginCheckMilliSeconds:1000 maxDeltaTimeSeconds:43200 accessTokenLifespan:600 \
+  revokeRefreshToken:true refreshTokenMaxReuse:0; do
+  require_realm_setting "realms/$REALM" "${setting%%:*}" "${setting#*:}"
+done
+for setting in eventsEnabled:true eventsExpiration:2592000 adminEventsEnabled:true adminEventsDetailsEnabled:false; do
+  require_realm_setting events/config "${setting%%:*}" "${setting#*:}"
+done
+event_types=$("$KCADM" get events/config -r "$REALM" --fields enabledEventTypes) || {
+  printf 'Keycloak audit event types readback unavailable\n' >&2; exit 1;
+}
+for event_type in LOGIN LOGIN_ERROR LOGOUT REGISTER REGISTER_ERROR UPDATE_PASSWORD UPDATE_PASSWORD_ERROR REFRESH_TOKEN REFRESH_TOKEN_ERROR; do
+  case "$event_types" in
+    *\""$event_type"\"*) ;;
+    *) printf 'Keycloak required audit event missing: %s\n' "$event_type" >&2; exit 1;;
+  esac
+done
+# END PINVOU_REALM_HARDENING
+
 # Mobile-only accounts do not have email or legal-name fields at registration
 # time. Keep those standard attributes available for later profile editing, but
 # do not let Keycloak's VERIFY_PROFILE trigger block password or SMS grants.
