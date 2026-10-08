@@ -43,7 +43,6 @@ test('formatBytes：按 1024 进位，B 取整、其余保留一位小数', () =
   assert.equal(formatBytes(1024 ** 3 * 1.5), '1.5GB');
   assert.equal(formatBytes(null), '0B');
 });
-
 test('parseProgressLine：识别进度行，并把已下载夹到总量以内', () => {
   assert.deepEqual(parseProgressLine('LMM_PROGRESS_BYTES=100/200'), { done: 100, total: 200 });
   // 真机上出现过「51.0GB / 30.6GB」：并发下载留下的孤儿临时块被重复统计了
