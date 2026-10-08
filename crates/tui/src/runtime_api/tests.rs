@@ -1873,7 +1873,11 @@ async fn thread_summary_includes_workspace_branch_metadata() -> Result<()> {
 
 #[tokio::test]
 async fn workspace_and_automation_endpoints_work() -> Result<()> {
-    let Some((addr, _runtime_threads, handle)) = spawn_test_server().await? else {
+    let root_guard = tempfile::tempdir().context("temporary root")?;
+    let root = root_guard.path().to_path_buf();
+    let Some((addr, _runtime_threads, handle)) =
+        spawn_test_server_with_root(root.clone(), root.join("sessions")).await?
+    else {
         return Ok(());
     };
     let client = crate::tls::reqwest_client();
@@ -1972,24 +1976,202 @@ async fn workspace_and_automation_endpoints_work() -> Result<()> {
         .json()
         .await?;
     assert!(
-        runs.as_array().is_some_and(|items| !items.is_empty()),
-        "expected at least one run entry"
+        runs.as_array().is_some_and(|items| {
+            !items.is_empty()
+                && items
+                    .iter()
+                    .all(|run| matches!(run["status"].as_str(), Some("queued" | "running")))
+        }),
+        "the delete refusal requires a still-active persisted run"
     );
 
-    let _deleted: serde_json::Value = client
+    // The run created above is still active, so deletion is refused and
+    // leaves the automation and its runs untouched.
+    let refused = client
         .delete(format!("http://{addr}/v1/automations/{automation_id}"))
+        .send()
+        .await?;
+    assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
+    assert!(
+        refused.text().await?.contains("Refusing to delete"),
+        "the refusal must name its reason"
+    );
+    let kept: serde_json::Value = client
+        .get(format!("http://{addr}/v1/automations/{automation_id}"))
         .send()
         .await?
         .error_for_status()?
         .json()
         .await?;
+    assert_eq!(kept["id"], automation_id);
+    let kept_runs: serde_json::Value = client
+        .get(format!("http://{addr}/v1/automations/{automation_id}/runs"))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(
+        kept_runs.as_array().map(Vec::len),
+        Some(1),
+        "the refused delete must leave the active run in place"
+    );
+    // A live automation has no archive yet, so the archived listing is empty.
+    let not_archived: serde_json::Value = client
+        .get(format!(
+            "http://{addr}/v1/automations/{automation_id}/runs?archived=true"
+        ))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert!(not_archived.as_array().is_some_and(Vec::is_empty));
 
+    // An automation with no runs deletes, and its archived listing is served.
+    let second: serde_json::Value = client
+        .post(format!("http://{addr}/v1/automations"))
+        .json(&json!({
+            "name": "Smoke automation two",
+            "prompt": "automation smoke test two",
+            "rrule": "FREQ=HOURLY;INTERVAL=2",
+            "status": "active"
+        }))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let second_id = second["id"]
+        .as_str()
+        .context("missing automation id")?
+        .to_string();
+    let _second_deleted: serde_json::Value = client
+        .delete(format!("http://{addr}/v1/automations/{second_id}"))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
     let missing_status = client
-        .get(format!("http://{addr}/v1/automations/{automation_id}"))
+        .get(format!("http://{addr}/v1/automations/{second_id}"))
         .send()
         .await?
         .status();
     assert_eq!(missing_status, StatusCode::NOT_FOUND);
+    let archived_empty: serde_json::Value = client
+        .get(format!(
+            "http://{addr}/v1/automations/{second_id}/runs?archived=true"
+        ))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert!(
+        archived_empty.as_array().is_some_and(Vec::is_empty),
+        "a run-free deleted automation keeps an empty archive"
+    );
+
+    // Seed archived records for the deleted automation and read them back
+    // through the endpoint; the live listing must stay empty. The file names
+    // deliberately reuse one fixed stamp regardless of created_at: archive
+    // ordering must come from the records, not the names.
+    let seed_dir = root.join("automations").join("archive").join(&second_id);
+    let seed_archive_record =
+        |run_id: String, ended_at: chrono::DateTime<chrono::Utc>| -> Result<()> {
+            let seed = serde_json::json!({
+                "id": run_id,
+                "automation_id": second_id,
+                "scheduled_for": ended_at,
+                "status": "completed",
+                "created_at": ended_at,
+                "started_at": ended_at,
+                "ended_at": ended_at,
+            });
+            fs::create_dir_all(&seed_dir)?;
+            fs::write(
+                seed_dir.join(format!("20260101T000000000Z-{run_id}.json")),
+                serde_json::to_string(&seed)?,
+            )?;
+            Ok(())
+        };
+    let newest_id = Uuid::new_v4().to_string();
+    let older_id = Uuid::new_v4().to_string();
+    seed_archive_record(
+        newest_id.clone(),
+        chrono::Utc::now() - chrono::Duration::hours(1),
+    )
+    .expect("seed newest archived record");
+    seed_archive_record(
+        older_id.clone(),
+        chrono::Utc::now() - chrono::Duration::hours(2),
+    )
+    .expect("seed older archived record");
+    let archived: serde_json::Value = client
+        .get(format!(
+            "http://{addr}/v1/automations/{second_id}/runs?archived=true"
+        ))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(
+        archived.as_array().map(Vec::len),
+        Some(2),
+        "both seeded archived records must round-trip"
+    );
+    assert_eq!(archived[0]["id"], newest_id);
+    assert_eq!(archived[0]["status"], "completed");
+    assert_eq!(
+        archived[1]["id"], older_id,
+        "the archived listing is newest-ended first over HTTP"
+    );
+
+    let limited: serde_json::Value = client
+        .get(format!(
+            "http://{addr}/v1/automations/{second_id}/runs?archived=true&limit=1"
+        ))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(
+        limited.as_array().map(Vec::len),
+        Some(1),
+        "limit must truncate the archived listing"
+    );
+    assert_eq!(
+        limited[0]["id"], newest_id,
+        "limit must keep the newest archived record"
+    );
+
+    let zero: serde_json::Value = client
+        .get(format!(
+            "http://{addr}/v1/automations/{second_id}/runs?archived=true&limit=0"
+        ))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert!(
+        zero.as_array().is_some_and(Vec::is_empty),
+        "limit=0 must produce an empty archived listing"
+    );
+    let live_after_seed: serde_json::Value = client
+        .get(format!("http://{addr}/v1/automations/{second_id}/runs"))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert!(
+        live_after_seed.as_array().is_some_and(Vec::is_empty),
+        "archived records must not re-enter the live listing"
+    );
 
     handle.abort();
     Ok(())

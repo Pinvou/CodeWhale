@@ -809,11 +809,19 @@ returns `404` before any git command runs.
 - `POST /v1/automations/{id}/run`
 - `POST /v1/automations/{id}/pause`
 - `POST /v1/automations/{id}/resume`
-- `GET /v1/automations/{id}/runs?limit=20`
+- `GET /v1/automations/{id}/runs?limit=20&archived=false`
 
 Create and update requests accept an optional `model`. When present, each
 scheduled or manually triggered run uses that model; omitting it keeps the
 runtime's default task model.
+
+`archived=true` on the runs listing returns the archived terminal history
+instead of live runs. Deleting an automation archives up to 50 of its terminal
+runs (completed, failed, canceled), and the archive is served newest first by
+`ended_at` (falling back to `created_at`), honoring `limit`; a live automation
+and a run-free deleted automation both list an empty archive. `DELETE
+/v1/automations/{id}` is refused with `400` while any persisted run of the
+automation is still queued or running. Added in #85.
 
 **Operate** (always-on named operation; same `OperateRecord` as CWC
 `20de981` / PR #284)

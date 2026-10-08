@@ -3,6 +3,15 @@
 //! Automations are local-first recurring jobs that enqueue standard background
 //! tasks. This module stores automation definitions and run history under
 //! `~/.codewhale/automations` (or `DEEPSEEK_AUTOMATIONS_DIR` override).
+//!
+//! Deleting an automation keeps its terminal run history: terminal runs
+//! (completed, failed, canceled) are moved under `<root>/archive/<id>/` before
+//! the live paths are removed. The archive is bounded per automation — it
+//! retains the most recent [`ARCHIVE_RETAINED_TERMINAL_RUNS`] terminal runs
+//! and deletes older ones — and lives outside the `automations/`, `runs/`, and
+//! `triggers/` trees, so live listings and scheduler scans never see it. The
+//! per-automation cap is the only bound: the archive root keeps one capped
+//! directory per deleted automation and is never compacted.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -35,6 +44,10 @@ const DEFAULT_AUTOMATION_ALLOW_SHELL: bool = false;
 const DEFAULT_AUTOMATION_TRUST_MODE: bool = false;
 const DEFAULT_AUTOMATION_AUTO_APPROVE: bool = false;
 const AUTOMATION_MISFIRE_GRACE_SECS: i64 = 60;
+/// Terminal runs retained in `<root>/archive/<automation_id>/` when an
+/// automation is deleted; older archived runs are removed (newest-first by
+/// `ended_at`, falling back to `created_at`).
+const ARCHIVE_RETAINED_TERMINAL_RUNS: usize = 50;
 const DEFAULT_AUTOMATION_DELIVERY_MODE: AutomationDeliveryMode = AutomationDeliveryMode::Task;
 pub const AUTOMATION_WATCHER_NO_REPORT_SENTINEL: &str = "NOTHING_TO_REPORT";
 const MAX_HOURLY_SEARCH_STEPS: usize = 24 * 21;
@@ -913,6 +926,7 @@ pub struct AutomationManager {
     automations_dir: PathBuf,
     runs_dir: PathBuf,
     triggers_dir: PathBuf,
+    archive_dir: PathBuf,
 }
 
 impl AutomationManager {
@@ -920,16 +934,20 @@ impl AutomationManager {
         let automations_dir = root.join("automations");
         let runs_dir = root.join("runs");
         let triggers_dir = root.join("triggers");
+        let archive_dir = root.join("archive");
         fs::create_dir_all(&automations_dir)
             .with_context(|| format!("Failed to create {}", automations_dir.display()))?;
         fs::create_dir_all(&runs_dir)
             .with_context(|| format!("Failed to create {}", runs_dir.display()))?;
         fs::create_dir_all(&triggers_dir)
             .with_context(|| format!("Failed to create {}", triggers_dir.display()))?;
+        fs::create_dir_all(&archive_dir)
+            .with_context(|| format!("Failed to create {}", archive_dir.display()))?;
         Ok(Self {
             automations_dir,
             runs_dir,
             triggers_dir,
+            archive_dir,
         })
     }
 
@@ -971,6 +989,24 @@ impl AutomationManager {
         Ok(self
             .runs_dir_for(automation_id)?
             .join(format!("{run_id}.json")))
+    }
+
+    /// Terminal-run archive for one automation. Lives beside — never inside —
+    /// the live `runs/` tree so `list_runs` and scheduler scans cannot see it.
+    fn archive_dir_for(&self, automation_id: &str) -> Result<PathBuf> {
+        ensure_safe_storage_id("automation id", automation_id)?;
+        Ok(self.archive_dir.join(automation_id))
+    }
+
+    /// Archived run file name: the same sortable `{stamp}-{run_id}.json` shape
+    /// as live runs, so legacy-named runs are normalized when archived.
+    fn archive_run_path(&self, run: &AutomationRunRecord) -> Result<PathBuf> {
+        ensure_safe_storage_id("run id", &run.id)?;
+        Ok(self.archive_dir_for(&run.automation_id)?.join(format!(
+            "{}-{}.json",
+            run_file_stamp(run.created_at),
+            run.id
+        )))
     }
 
     pub fn create_automation(&self, req: CreateAutomationRequest) -> Result<AutomationRecord> {
@@ -1165,8 +1201,63 @@ impl AutomationManager {
         )
     }
 
+    /// Delete an automation, keeping its terminal run history. Terminal runs
+    /// (completed, failed, canceled) are archived under
+    /// `<root>/archive/<id>/` — bounded to the most recent
+    /// [`ARCHIVE_RETAINED_TERMINAL_RUNS`] per automation — before the live
+    /// paths are removed. The archive root itself is never compacted: every
+    /// deleted automation keeps one capped directory.
+    ///
+    /// Deleting is refused while any *persisted* run is still queued or
+    /// running, mirroring [`Self::delete_terminal_run`]. A run whose enqueue
+    /// is still awaiting the task manager is not yet on disk, so deletion in
+    /// that in-flight window is not refused; the record is still persisted
+    /// afterward, outside the archive, as before this change.
+    ///
+    /// As with every read of run files, a corrupt or newer-schema file in the
+    /// live runs or the archive fails the delete until it is resolved
+    /// externally; a queued/running run whose task record is gone cannot be
+    /// settled by reconciliation and must also be cleaned up externally.
     pub fn delete_automation(&self, id: &str) -> Result<AutomationRecord> {
         let existing = self.get_automation(id)?;
+        let runs = self.list_runs(id, None)?;
+        if let Some(active) = runs.iter().find(|run| {
+            matches!(
+                run.status,
+                AutomationRunStatus::Queued | AutomationRunStatus::Running
+            )
+        }) {
+            bail!(
+                "Refusing to delete automation {id}: run {} is still active",
+                active.id
+            );
+        }
+
+        // Archive before removing the live paths: `write_json_atomic` lands
+        // each record in the archive first (rename-atomic, not fsynced), so a
+        // process crash mid-delete leaves the history intact. A crash after
+        // the automation file is gone but before the live tree is dropped
+        // leaves that tree orphaned — invisible to listings and the scheduler
+        // (nothing reads it), but not cleaned up until it is removed by hand.
+        // Only the retained slice is written; the retention sweep below still
+        // bounds any leftovers from an interrupted earlier attempt.
+        let mut terminal: Vec<AutomationRunRecord> = runs
+            .into_iter()
+            .filter(|run| {
+                matches!(
+                    run.status,
+                    AutomationRunStatus::Completed
+                        | AutomationRunStatus::Failed
+                        | AutomationRunStatus::Canceled
+                )
+            })
+            .collect();
+        terminal.sort_by_key(|run| std::cmp::Reverse(run.ended_at.unwrap_or(run.created_at)));
+        for run in terminal.iter().take(ARCHIVE_RETAINED_TERMINAL_RUNS) {
+            write_json_atomic(&self.archive_run_path(run)?, run)?;
+        }
+        self.enforce_archive_retention(id)?;
+
         let path = self.automation_path(id)?;
         fs::remove_file(&path)
             .with_context(|| format!("Failed to delete automation {}", path.display()))?;
@@ -1179,6 +1270,53 @@ impl AutomationManager {
         }
 
         Ok(existing)
+    }
+
+    /// Terminal runs archived for a deleted automation (see
+    /// [`Self::delete_automation`]), newest-first by `ended_at` (falling back
+    /// to `created_at`).
+    pub fn list_archived_runs(&self, automation_id: &str) -> Result<Vec<AutomationRunRecord>> {
+        Ok(self
+            .read_archive_entries(automation_id)?
+            .into_iter()
+            .map(|(_, run)| run)
+            .collect())
+    }
+
+    /// Archived runs paired with their file paths, newest-first by `ended_at`
+    /// (falling back to `created_at`).
+    fn read_archive_entries(
+        &self,
+        automation_id: &str,
+    ) -> Result<Vec<(PathBuf, AutomationRunRecord)>> {
+        let dir = self.archive_dir_for(automation_id)?;
+        if !dir.exists() {
+            return Ok(Vec::new());
+        }
+        let mut entries = Vec::new();
+        for entry in
+            fs::read_dir(&dir).with_context(|| format!("Failed to read {}", dir.display()))?
+        {
+            let path = entry?.path();
+            if path.extension().is_none_or(|ext| ext != "json") {
+                continue;
+            }
+            let run = read_run_file(&path)?;
+            entries.push((path, run));
+        }
+        entries.sort_by_key(|(_, run)| std::cmp::Reverse(run.ended_at.unwrap_or(run.created_at)));
+        Ok(entries)
+    }
+
+    /// Drop archived terminal runs beyond the per-automation retention budget,
+    /// keeping the most recent [`ARCHIVE_RETAINED_TERMINAL_RUNS`].
+    fn enforce_archive_retention(&self, automation_id: &str) -> Result<()> {
+        let entries = self.read_archive_entries(automation_id)?;
+        for (path, _) in entries.into_iter().skip(ARCHIVE_RETAINED_TERMINAL_RUNS) {
+            fs::remove_file(&path)
+                .with_context(|| format!("Failed to delete archived run {}", path.display()))?;
+        }
+        Ok(())
     }
 
     pub fn list_runs(
@@ -2701,7 +2839,7 @@ mod tests {
     }
 
     #[test]
-    fn deletes_automation_and_runs() {
+    fn delete_archives_terminal_runs_and_drops_live_paths() {
         let tempdir = tempfile::tempdir().expect("tempdir");
         let manager = AutomationManager::open(tempdir.path().to_path_buf()).expect("manager");
 
@@ -2723,21 +2861,32 @@ mod tests {
             })
             .expect("create");
 
-        let run = AutomationRunRecord {
-            schema_version: CURRENT_RUN_SCHEMA_VERSION,
-            id: Uuid::new_v4().to_string(),
-            automation_id: created.id.clone(),
-            scheduled_for: Utc::now(),
-            status: AutomationRunStatus::Queued,
-            created_at: Utc::now(),
-            started_at: None,
-            ended_at: None,
-            task_id: None,
-            thread_id: None,
-            turn_id: None,
-            error: None,
-        };
-        manager.save_run(&run).expect("save run");
+        let base = Utc::now();
+        // Created earliest of the fixture but ended latest, so the archived
+        // order can only be explained by the `ended_at` recency key.
+        let mut canceled = run_created_at(&created, base - Duration::minutes(3));
+        canceled.status = AutomationRunStatus::Canceled;
+        canceled.ended_at = Some(base);
+        manager.save_run(&canceled).expect("save run");
+        let mut completed = run_created_at(&created, base - Duration::minutes(2));
+        completed.status = AutomationRunStatus::Completed;
+        completed.ended_at = Some(base - Duration::minutes(1));
+        manager.save_run(&completed).expect("save run");
+        let mut failed = run_created_at(&created, base - Duration::minutes(1));
+        failed.status = AutomationRunStatus::Failed;
+        failed.error = Some("boom".to_string());
+        failed.ended_at = Some(base - Duration::seconds(30));
+        manager.save_run(&failed).expect("save run");
+        // A legacy-named live file must normalize to the sortable name. Its
+        // created_at is a fixed instant so the expected name below pins the
+        // `run_file_stamp` format itself, not just the helper's own output.
+        let legacy_created = DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
+            .expect("fixed instant")
+            .with_timezone(&Utc);
+        let mut legacy = run_created_at(&created, legacy_created);
+        legacy.status = AutomationRunStatus::Completed;
+        legacy.ended_at = Some(base - Duration::minutes(2));
+        write_legacy_run_file(&manager, &legacy);
         assert!(
             manager
                 .runs_dir_for(&created.id)
@@ -2755,6 +2904,326 @@ mod tests {
                 .runs_dir_for(&created.id)
                 .expect("runs dir")
                 .exists()
+        );
+        assert!(
+            manager
+                .list_runs(&created.id, None)
+                .expect("list runs")
+                .is_empty()
+        );
+
+        let archived = manager
+            .list_archived_runs(&created.id)
+            .expect("archived runs");
+        assert_eq!(
+            archived.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+            vec![
+                canceled.id.as_str(),
+                failed.id.as_str(),
+                completed.id.as_str(),
+                legacy.id.as_str(),
+            ],
+            "archive keeps every terminal run, newest-ended first"
+        );
+        assert_eq!(archived[0].status, AutomationRunStatus::Canceled);
+        assert_eq!(archived[1].status, AutomationRunStatus::Failed);
+        assert_eq!(archived[1].error.as_deref(), Some("boom"));
+        assert_eq!(archived[2].status, AutomationRunStatus::Completed);
+        assert_eq!(archived[3].status, AutomationRunStatus::Completed);
+        let archive_dir = tempdir.path().join("archive").join(&created.id);
+        let archived_names: std::collections::BTreeSet<String> = fs::read_dir(&archive_dir)
+            .expect("archive dir")
+            .filter_map(Result::ok)
+            .filter_map(|entry| entry.file_name().into_string().ok())
+            .collect();
+        let expected_names: std::collections::BTreeSet<String> = [
+            format!(
+                "{}-{}.json",
+                run_file_stamp(canceled.created_at),
+                canceled.id
+            ),
+            format!("{}-{}.json", run_file_stamp(failed.created_at), failed.id),
+            format!(
+                "{}-{}.json",
+                run_file_stamp(completed.created_at),
+                completed.id
+            ),
+            // Hardcoded for the fixed-instant legacy fixture: this pins the
+            // stamp format itself, not the helper's own output.
+            format!("20260101T000000000Z-{}.json", legacy.id),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(
+            archived_names, expected_names,
+            "one sortable archive file per terminal run, stamped by created_at (legacy names normalized)"
+        );
+    }
+
+    #[test]
+    fn delete_refuses_automation_with_active_run() {
+        for status in [AutomationRunStatus::Queued, AutomationRunStatus::Running] {
+            let tempdir = tempfile::tempdir().expect("tempdir");
+            let manager = AutomationManager::open(tempdir.path().to_path_buf()).expect("manager");
+            let automation = automation_record_with_settings(None, None, None, None);
+            manager.save_automation(&automation).expect("save");
+            let mut run = queued_run_for(&automation);
+            run.status = status;
+            manager.save_run(&run).expect("save active run");
+
+            let err = manager
+                .delete_automation(&automation.id)
+                .expect_err("delete must refuse while a run is active");
+            assert!(err.to_string().contains("Refusing to delete"));
+
+            assert!(manager.get_automation(&automation.id).is_ok());
+            assert!(
+                manager
+                    .list_runs(&automation.id, None)
+                    .expect("live runs")
+                    .iter()
+                    .any(|candidate| candidate.id == run.id && candidate.status == status),
+                "the refused delete must leave the active run untouched"
+            );
+            assert!(
+                manager
+                    .list_archived_runs(&automation.id)
+                    .expect("archive")
+                    .is_empty()
+            );
+        }
+    }
+
+    #[test]
+    fn delete_caps_archived_terminal_runs_at_retention_limit() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let manager = AutomationManager::open(tempdir.path().to_path_buf()).expect("manager");
+        let automation = automation_record_with_settings(None, None, None, None);
+        manager.save_automation(&automation).expect("save");
+
+        let base = Utc::now();
+        let total = ARCHIVE_RETAINED_TERMINAL_RUNS + 5;
+        let mut saved_ids = Vec::new();
+        for i in 0..total {
+            let mut run = run_created_at(&automation, base - Duration::minutes(i as i64));
+            run.status = AutomationRunStatus::Completed;
+            run.ended_at = Some(base - Duration::minutes(i as i64));
+            manager.save_run(&run).expect("save run");
+            saved_ids.push(run.id);
+        }
+
+        manager.delete_automation(&automation.id).expect("delete");
+
+        let archived = manager
+            .list_archived_runs(&automation.id)
+            .expect("archived runs");
+        assert_eq!(
+            archived.len(),
+            ARCHIVE_RETAINED_TERMINAL_RUNS,
+            "archive keeps only the retention budget"
+        );
+        let retained: std::collections::BTreeSet<&str> =
+            archived.iter().map(|r| r.id.as_str()).collect();
+        // `saved_ids` is newest-first (i counts minutes into the past); the
+        // `total - budget` oldest, at the tail, were dropped.
+        for dropped in &saved_ids[ARCHIVE_RETAINED_TERMINAL_RUNS..] {
+            assert!(!retained.contains(dropped.as_str()), "oldest run survived");
+        }
+        for kept in &saved_ids[..ARCHIVE_RETAINED_TERMINAL_RUNS] {
+            assert!(retained.contains(kept.as_str()), "newer run was dropped");
+        }
+    }
+
+    #[test]
+    fn delete_bounds_archive_leftovers_beyond_the_retention_limit() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let manager = AutomationManager::open(tempdir.path().to_path_buf()).expect("manager");
+        let automation = automation_record_with_settings(None, None, None, None);
+        manager.save_automation(&automation).expect("save");
+
+        // Leftovers of an interrupted earlier attempt: more than the budget
+        // already in the archive, all older than anything about to be
+        // archived from the live tree.
+        let old = DateTime::parse_from_rfc3339("2025-01-01T00:00:00Z")
+            .expect("fixed instant")
+            .with_timezone(&Utc);
+        let mut leftover_ids = Vec::new();
+        for i in 0..ARCHIVE_RETAINED_TERMINAL_RUNS + 2 {
+            let mut run = run_created_at(&automation, old + Duration::minutes(i as i64));
+            run.status = AutomationRunStatus::Completed;
+            run.ended_at = Some(run.created_at);
+            write_json_atomic(&manager.archive_run_path(&run).expect("archive path"), &run)
+                .expect("seed archive leftover");
+            leftover_ids.push(run.id);
+        }
+
+        // A live history newer than every leftover: oldest first, so the
+        // retained set is exactly the last `ARCHIVE_RETAINED_TERMINAL_RUNS`
+        // created.
+        let base = Utc::now();
+        let total = ARCHIVE_RETAINED_TERMINAL_RUNS + 5;
+        let mut saved_ids = Vec::new();
+        for i in 0..total {
+            let mut run = run_created_at(&automation, base - Duration::minutes((total - i) as i64));
+            run.status = AutomationRunStatus::Completed;
+            run.ended_at = Some(run.created_at);
+            manager.save_run(&run).expect("save run");
+            saved_ids.push(run.id);
+        }
+
+        manager.delete_automation(&automation.id).expect("delete");
+
+        let archived = manager
+            .list_archived_runs(&automation.id)
+            .expect("archived runs");
+        assert_eq!(
+            archived.len(),
+            ARCHIVE_RETAINED_TERMINAL_RUNS,
+            "the sweep must bound the archive back to the budget"
+        );
+        let archive_dir = tempdir.path().join("archive").join(&automation.id);
+        assert_eq!(
+            fs::read_dir(&archive_dir)
+                .expect("archive dir")
+                .filter_map(Result::ok)
+                .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "json"))
+                .count(),
+            ARCHIVE_RETAINED_TERMINAL_RUNS,
+            "no leftover record may remain on disk either"
+        );
+        let retained: std::collections::BTreeSet<&str> =
+            archived.iter().map(|r| r.id.as_str()).collect();
+        for leftover in &leftover_ids {
+            assert!(
+                !retained.contains(leftover.as_str()),
+                "an interrupted attempt's leftovers must be swept"
+            );
+        }
+        let expected: std::collections::BTreeSet<&str> = saved_ids
+            [total - ARCHIVE_RETAINED_TERMINAL_RUNS..]
+            .iter()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            retained, expected,
+            "exactly the newest live terminal runs survive the sweep"
+        );
+    }
+
+    #[test]
+    fn delete_fails_closed_on_unreadable_run_files() {
+        // A corrupt live run file fails the delete and changes nothing.
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let manager = AutomationManager::open(tempdir.path().to_path_buf()).expect("manager");
+        let automation = automation_record_with_settings(None, None, None, None);
+        manager.save_automation(&automation).expect("save");
+        let mut run = run_created_at(&automation, Utc::now());
+        run.status = AutomationRunStatus::Completed;
+        run.ended_at = Some(run.created_at);
+        manager.save_run(&run).expect("save run");
+        let runs_dir = manager.runs_dir_for(&automation.id).expect("runs dir");
+        fs::write(runs_dir.join("broken.json"), "{not json").expect("write corrupt file");
+
+        let err = manager
+            .delete_automation(&automation.id)
+            .expect_err("a corrupt live run file must fail the delete");
+        assert!(
+            err.to_string().contains("broken.json"),
+            "the error must name the offending file: {err}"
+        );
+        assert!(manager.get_automation(&automation.id).is_ok());
+        assert!(runs_dir.exists());
+        assert!(runs_dir.join("broken.json").exists());
+
+        // A newer-schema archive file fails the delete the same way: the
+        // archive is read with the same fail-closed contract as live runs.
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let manager = AutomationManager::open(tempdir.path().to_path_buf()).expect("manager");
+        let automation = automation_record_with_settings(None, None, None, None);
+        manager.save_automation(&automation).expect("save");
+        let mut run = run_created_at(&automation, Utc::now());
+        run.status = AutomationRunStatus::Completed;
+        run.ended_at = Some(run.created_at);
+        manager.save_run(&run).expect("save run");
+        let mut seeded = run_created_at(&automation, Utc::now() - Duration::hours(1));
+        seeded.status = AutomationRunStatus::Completed;
+        seeded.ended_at = Some(seeded.created_at);
+        let seed_path = manager.archive_run_path(&seeded).expect("archive path");
+        let mut value = serde_json::to_value(&seeded).expect("serialize seeded record");
+        value["schema_version"] = serde_json::json!(CURRENT_RUN_SCHEMA_VERSION + 1);
+        fs::create_dir_all(seed_path.parent().expect("archive parent")).expect("archive dir");
+        fs::write(
+            &seed_path,
+            serde_json::to_string(&value).expect("serialize schema bump"),
+        )
+        .expect("write newer-schema archive file");
+
+        let err = manager
+            .delete_automation(&automation.id)
+            .expect_err("a newer-schema archive file must fail the delete");
+        assert!(
+            err.to_string().contains("newer than supported"),
+            "the error must name the schema conflict: {err}"
+        );
+        assert!(manager.get_automation(&automation.id).is_ok());
+        assert!(
+            manager
+                .runs_dir_for(&automation.id)
+                .expect("runs dir")
+                .exists()
+        );
+        assert!(seed_path.exists());
+    }
+
+    #[test]
+    fn scheduler_scan_ignores_archived_runs_after_delete() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let manager = AutomationManager::open(tempdir.path().to_path_buf()).expect("manager");
+        let mut automation = automation_record_with_settings(None, None, None, None);
+        // Due, but inside the recurring misfire grace so the slot is
+        // deliverable rather than skipped.
+        automation.next_run_at = Some(Utc::now() - Duration::seconds(10));
+        manager.save_automation(&automation).expect("save");
+        let mut run = run_created_at(&automation, Utc::now());
+        run.status = AutomationRunStatus::Completed;
+        run.ended_at = Some(Utc::now());
+        manager.save_run(&run).expect("save run");
+
+        // The due definition is collected before deletion and must not come
+        // back from the archive afterwards.
+        let due_before = manager
+            .collect_due_runs(Utc::now())
+            .expect("scheduler scan");
+        assert!(
+            due_before
+                .iter()
+                .any(|(record, _)| record.id == automation.id),
+            "the fixture automation is due before deletion"
+        );
+
+        manager.delete_automation(&automation.id).expect("delete");
+        assert!(tempdir.path().join("archive").join(&automation.id).exists());
+
+        let due = manager
+            .collect_due_runs(Utc::now())
+            .expect("scheduler scan");
+        assert!(
+            due.iter().all(|(record, _)| record.id != automation.id),
+            "the deleted automation must not come back due"
+        );
+        assert!(
+            manager
+                .list_runs(&automation.id, None)
+                .expect("live runs")
+                .is_empty(),
+            "archived runs must not re-enter the live runs tree"
+        );
+        assert_eq!(
+            manager
+                .list_archived_runs(&automation.id)
+                .expect("archived runs")
+                .len(),
+            1
         );
     }
 
