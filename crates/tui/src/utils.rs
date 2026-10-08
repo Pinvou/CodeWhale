@@ -892,10 +892,18 @@ pub fn estimate_message_chars(messages: &[Message]) -> usize {
                             .sum::<usize>();
                     }
                 }
-                ContentBlock::ToolUse { input, .. } => {
+                // Google's thought_signature rides every replayed tool call
+                // on the exact Google route; the token estimator counts it,
+                // so the char estimator must too.
+                ContentBlock::ToolUse {
+                    input,
+                    thought_signature,
+                    ..
+                } => {
                     let mut cw = CountingWriter::new();
                     let _ = serde_json::to_writer(&mut cw, input);
                     total += cw.count();
+                    total += thought_signature.as_deref().map_or(0, str::len);
                 }
                 ContentBlock::ToolResult { content, .. } => total += content.len(),
                 ContentBlock::ServerToolUse { .. }
@@ -960,6 +968,33 @@ mod tests {
         assert!(
             estimate_message_chars(std::slice::from_ref(&message)) >= "SIG-BYTES".len(),
             "signature-only blocks must not score zero"
+        );
+    }
+
+    #[test]
+    fn estimate_message_chars_counts_google_thought_signatures() {
+        use super::estimate_message_chars;
+        use crate::models::{ContentBlock, Message, Role};
+        // The thought_signature replays verbatim on every tool call of the
+        // exact Google route and the compaction estimator counts it; the
+        // char estimator must not score it zero.
+        let tool_use = |thought_signature: Option<String>| Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::ToolUse {
+                id: "call-1".to_string(),
+                name: "read".to_string(),
+                input: serde_json::json!({}),
+                caller: None,
+                thought_signature,
+            }],
+        };
+        let with_signature =
+            estimate_message_chars(std::slice::from_ref(&tool_use(Some("THOUGHT-SIG".into()))));
+        let bare = estimate_message_chars(std::slice::from_ref(&tool_use(None)));
+        assert_eq!(
+            with_signature - bare,
+            "THOUGHT-SIG".len(),
+            "thought_signature bytes must count toward the estimate"
         );
     }
 

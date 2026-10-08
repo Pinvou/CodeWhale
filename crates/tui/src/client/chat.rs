@@ -710,9 +710,14 @@ fn validate_google_thought_signature_replay(
         let Some(first_call) = tool_calls.first() else {
             continue;
         };
+        // An empty string is no signature: capture filters it since this
+        // series, but sessions saved by older builds can still carry
+        // `Some("")` — treat it as missing so the replay fails here with
+        // the diagnostic instead of at Google with a raw 400.
         let missing = first_call
             .pointer("/extra_content/google/thought_signature")
             .and_then(Value::as_str)
+            .filter(|signature| !signature.is_empty())
             .is_none();
         if missing {
             let id = first_call.get("id").and_then(Value::as_str).unwrap_or("?");
@@ -3640,8 +3645,11 @@ fn reasoning_stream_style_for_route(
     // Google's official OpenAI-compat route returns reasoning summaries in
     // `delta.reasoning_content` (the non-streaming decoder already promotes
     // the same field to a Thinking block), so stream parity applies here.
-    // Scoping to the exact official host keeps the generic-proxy fallback —
-    // render reasoning_content as answer text — for unknown gateways.
+    // Not spelled out in Google's current official pages — best-effort
+    // interpretation of an, if present, `reasoning_content` field, so the
+    // risk is only how a summary renders, never what is sent. Scoping to
+    // the exact official host keeps the generic-proxy fallback — render
+    // reasoning_content as answer text — for unknown gateways.
     if is_exact_google_chat_route(provider, base_url) {
         return ReasoningStreamStyle::SeparateField;
     }
@@ -4488,7 +4496,11 @@ fn parse_sse_chunk_with_reasoning_style(
                             // call); capture it instead of dropping it with
                             // the rest of the non-start fields. The official
                             // compat route also signs the chunk-level
-                            // `delta.extra_content` on the pre-tool text part.
+                            // `delta.extra_content` on the pre-tool text part
+                            // (observed shapes; Google's current docs no
+                            // longer spell out the streaming placement —
+                            // their thought-signature page is a stub — so
+                            // treat both forms as best-effort).
                             // Known limit: that chunk-level form is only read
                             // when the same delta also carries the `tool_calls`
                             // entry. A signature emitted exclusively on an
@@ -8793,6 +8805,73 @@ mod google_thought_signature_tests {
         assert!(
             calls[1].get("extra_content").is_none(),
             "unsigned parallel call must not gain invented metadata: {calls:?}"
+        );
+    }
+
+    #[test]
+    fn google_legacy_empty_signature_is_treated_as_missing() {
+        // Capture has filtered empty-string signatures since the
+        // preserved-thinking series, but sessions saved by older builds can
+        // still carry `Some("")` on the first call of the current turn.
+        // Validation must treat that as missing so the turn fails with the
+        // actionable diagnostic instead of at Google with a raw 400.
+        let request = MessageRequest {
+            model: "gemini-3.1-pro-preview".to_string(),
+            messages: vec![
+                Message {
+                    role: Role::User,
+                    content: vec![ContentBlock::Text {
+                        text: "Read it.".to_string(),
+                        cache_control: None,
+                    }],
+                },
+                Message {
+                    role: Role::Assistant,
+                    content: vec![ContentBlock::ToolUse {
+                        id: "call-g-empty".to_string(),
+                        name: "read".to_string(),
+                        input: json!({"path": "a.toml"}),
+                        caller: None,
+                        thought_signature: Some(String::new()),
+                    }],
+                },
+                Message {
+                    role: Role::User,
+                    content: vec![ContentBlock::ToolResult {
+                        tool_use_id: "call-g-empty".to_string(),
+                        content: "a".to_string(),
+                        is_error: None,
+                        content_blocks: None,
+                    }],
+                },
+            ],
+            max_tokens: 64,
+            system: None,
+            tools: None,
+            tool_choice: None,
+            metadata: None,
+            thinking: None,
+            reasoning_effort: Some("high".to_string()),
+            stream: None,
+            temperature: None,
+            top_p: None,
+        };
+
+        let error = match build_chat_wire_body(
+            &request,
+            ApiProvider::Google,
+            DEFAULT_GOOGLE_BASE_URL,
+            false,
+        ) {
+            Ok(body) => panic!(
+                "an empty-string signature is no signature; body built: {}",
+                body.body
+            ),
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains("call-g-empty"),
+            "the diagnostic must name the unsigned call: {error}"
         );
     }
 

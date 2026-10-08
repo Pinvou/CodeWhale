@@ -7755,6 +7755,50 @@ mod tests {
         assert!(stream_event_has_actionable_content(
             &canned::tool_use_block_start(0, "call-1", "read_file")
         ));
+
+        // The preserved-thinking variants: a redacted block is provider-
+        // owned content the moment it arrives, an empty signature/details
+        // fragment carries nothing, and a non-empty one is real content.
+        assert!(stream_event_has_actionable_content(
+            &StreamEvent::ContentBlockStart {
+                index: 0,
+                content_block: crate::models::ContentBlockStart::RedactedThinking {
+                    data: "ENC".to_string(),
+                },
+            }
+        ));
+        assert!(!stream_event_has_actionable_content(
+            &StreamEvent::ContentBlockDelta {
+                index: 0,
+                delta: crate::models::Delta::ToolThoughtSignatureDelta {
+                    signature: String::new(),
+                },
+            }
+        ));
+        assert!(stream_event_has_actionable_content(
+            &StreamEvent::ContentBlockDelta {
+                index: 0,
+                delta: crate::models::Delta::ToolThoughtSignatureDelta {
+                    signature: "SIG".to_string(),
+                },
+            }
+        ));
+        assert!(!stream_event_has_actionable_content(
+            &StreamEvent::ContentBlockDelta {
+                index: 0,
+                delta: crate::models::Delta::ReasoningDetailsDelta {
+                    details: Vec::new()
+                },
+            }
+        ));
+        assert!(stream_event_has_actionable_content(
+            &StreamEvent::ContentBlockDelta {
+                index: 0,
+                delta: crate::models::Delta::ReasoningDetailsDelta {
+                    details: vec![serde_json::json!({"type": "reasoning.encrypted"})],
+                },
+            }
+        ));
     }
 
     /// Regression test for the OpenAI streaming batch tool_calls bug.

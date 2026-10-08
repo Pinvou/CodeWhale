@@ -443,13 +443,6 @@ pub fn estimate_tokens(messages: &[Message]) -> usize {
         .sum()
 }
 
-pub(crate) fn message_has_tool_use(message: &Message) -> bool {
-    message
-        .content
-        .iter()
-        .any(|block| matches!(block, ContentBlock::ToolUse { .. }))
-}
-
 pub(crate) fn estimate_text_tokens_conservative(text: &str) -> usize {
     text.chars().count().div_ceil(3)
 }

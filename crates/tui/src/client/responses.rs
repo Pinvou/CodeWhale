@@ -874,14 +874,17 @@ fn message_has_replayable_reasoning(
 ///
 /// `reasoning_provider_tag` scopes opaque-reasoning replay to the endpoint
 /// that minted the state; see [`build_responses_body_for_provider`].
-///
-/// Pairing integrity: with `store:false`, every `function_call` item must be
-/// immediately preceded by the encrypted `reasoning` item that produced it,
-/// and every `reasoning` item must be immediately followed by its produced
-/// item. When a message's reasoning is unusable on this route (captured on a
-/// different model, provider identity, or by a build that did not capture
-/// it), its whole tool chain — reasoning, function calls, and their outputs —
-/// is dropped instead of shipping a request the API rejects outright.
+/// Pairing integrity: with `store:false`, a `function_call` item needs the
+/// encrypted `reasoning` item that produced it replayed ahead of it, and a
+/// `reasoning` item needs the item(s) it produced to follow it — the docs'
+/// rule is completeness plus original positions ("all items between the last
+/// user message and your function call output are passed into the next
+/// response untouched"), and the API rejects a reasoning item whose
+/// following item is missing. When a message's reasoning is unusable on
+/// this route (captured on a different model, endpoint tag or fingerprint,
+/// or by a build that did not capture it), its whole tool chain — reasoning,
+/// function calls, and their outputs — is dropped instead of shipping a
+/// request the API rejects outright.
 pub(super) fn convert_messages_to_responses_input(
     request: &MessageRequest,
     provider: ApiProvider,
@@ -1174,17 +1177,18 @@ pub(super) fn convert_messages_to_responses_input(
         // until compaction retires the turns, and per-message warns would
         // spam verbose logs for a single root cause.
         logging::warn(format!(
-            "Responses replay dropped {dropped_chains} assistant tool chain(s) whose encrypted reasoning is unavailable for this route/model/identity (captured on a different model, provider identity, or by an older build); their tool calls and outputs are omitted to keep the request valid"
+            "Responses replay dropped {dropped_chains} assistant tool chain(s) whose encrypted reasoning is unavailable for this route/model/endpoint (captured on a different model, endpoint tag or fingerprint, or by an older build); their tool calls and outputs are omitted to keep the request valid"
         ));
     }
 
     if !is_deepseek {
-        // A `reasoning` item must be immediately followed by the item it
-        // produced (its function_call, or the assistant message for text
-        // output). An orphaned reasoning item — in practice a turn that was
-        // interrupted before producing any output — makes the whole request
-        // fail with "was provided without its required following item", so
-        // it is dropped here.
+        // A `reasoning` item needs the item it produced to follow it (its
+        // function_call, or the assistant message for text output) — the
+        // pairing validator rejects a reasoning item whose following item is
+        // missing ("was provided without its required following item"). An
+        // orphaned reasoning item — in practice a turn that was interrupted
+        // before producing any output — is dropped here rather than shipped
+        // to fail the whole request.
         let mut keep = vec![true; items.len()];
         let mut dropped_orphans: usize = 0;
         for (index, item) in items.iter().enumerate() {

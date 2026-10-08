@@ -14972,14 +14972,23 @@ fn sandbox_policy_for_turn_returns_correct_default_policy_per_mode() {
 }
 
 /// Serves one multi-block thinking + tool-use turn, then a plain closing
-/// turn, capturing every outgoing request. `trailing_signature_only` swaps
-/// the first stream for one where the signature-only block never receives a
-/// stop event and only the tool use follows it — the success-path persist
-/// guard is then the only thing that can keep the block.
+/// turn, capturing every outgoing request. The shape swaps the first stream:
+/// `TrailingSignatureOnly` never sends the signature-only block's stop event
+/// and only the tool use follows it — the success-path persist guard is then
+/// the only thing that can keep the block; `StoplessFirstBlock` drops the
+/// FIRST block's stop event, so the second thinking block's start is the
+/// only thing that can flush it (the start-arm flush guard).
 struct MultiThinkingStreamClient {
     requests: std::sync::Mutex<Vec<crate::models::MessageRequest>>,
     calls: std::sync::atomic::AtomicUsize,
-    trailing_signature_only: bool,
+    shape: MultiThinkingStreamShape,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MultiThinkingStreamShape {
+    Full,
+    TrailingSignatureOnly,
+    StoplessFirstBlock,
 }
 
 #[async_trait::async_trait]
@@ -15012,8 +15021,8 @@ impl crate::core::model_client::ModelClient for MultiThinkingStreamClient {
             .expect("multi-thinking request lock")
             .push(request);
         use crate::models::{ContentBlockStart, Delta, MessageDelta, StreamEvent};
-        let trailing = self.trailing_signature_only;
-        let events: Vec<StreamEvent> = if trailing && call == 1 {
+        use MultiThinkingStreamShape as Shape;
+        let events: Vec<StreamEvent> = if call == 1 && self.shape == Shape::TrailingSignatureOnly {
             // One signature-only thinking block whose stop event never
             // arrives, directly followed by the tool use: no flush runs
             // before the stream ends, so only the success-path persist
@@ -15137,6 +15146,18 @@ impl crate::core::model_client::ModelClient for MultiThinkingStreamClient {
             }
             crate::llm_client::mock::canned::simple_text_turn("done")
         };
+        // The stop-less-first-block shape deletes ONLY the first thinking
+        // block's stop event: the second thinking block's start event is
+        // then the only thing that can flush the first block, pinning the
+        // start-arm flush guard.
+        let events: Vec<StreamEvent> = if self.shape == Shape::StoplessFirstBlock {
+            events
+                .into_iter()
+                .filter(|event| !matches!(event, StreamEvent::ContentBlockStop { index: 0 }))
+                .collect()
+        } else {
+            events
+        };
         let events = events.into_iter().map(Ok);
         Ok(Box::pin(futures_util::stream::iter(events)))
     }
@@ -15152,7 +15173,7 @@ impl crate::core::model_client::ModelClient for MultiThinkingStreamClient {
 /// the follow-up request.
 #[tokio::test]
 async fn multi_block_and_redacted_thinking_persist_into_followup_requests() {
-    let requests = run_multi_thinking_turn(false).await;
+    let requests = run_multi_thinking_turn(MultiThinkingStreamShape::Full).await;
     assert_followup_carries_full_thinking_sequence(&requests);
 }
 
@@ -15163,7 +15184,7 @@ async fn multi_block_and_redacted_thinking_persist_into_followup_requests() {
 /// follow-up request and Anthropic would 400 on the bare `tool_use` replay.
 #[tokio::test]
 async fn signature_only_block_survives_a_stream_that_skips_its_stop_event() {
-    let requests = run_multi_thinking_turn(true).await;
+    let requests = run_multi_thinking_turn(MultiThinkingStreamShape::TrailingSignatureOnly).await;
     assert!(requests.len() >= 2, "expected a follow-up request");
     let followup = &requests[1];
     let assistant = followup
@@ -15196,12 +15217,23 @@ async fn signature_only_block_survives_a_stream_that_skips_its_stop_event() {
     }
 }
 
+/// The start-arm flush guard: a thinking block whose stop event never
+/// arrives must still be parked when the NEXT thinking block starts, ahead
+/// of the new block. Without that flush, the first block's deltas would be
+/// silently overwritten by the second block and the replayed sequence would
+/// be truncated.
+#[tokio::test]
+async fn stopless_first_block_survives_the_next_thinking_start() {
+    let requests = run_multi_thinking_turn(MultiThinkingStreamShape::StoplessFirstBlock).await;
+    assert_followup_carries_full_thinking_sequence(&requests);
+}
+
 /// Drive a two-request turn whose first stream carries the full thinking
 /// sequence (readable+signed, signature-only, redacted, tool use), capturing
-/// every outgoing request. `trailing_signature_only` swaps the first stream
-/// for the stop-less trailing-block shape.
+/// every outgoing request. `shape` swaps the first stream per the client's
+/// contract.
 async fn run_multi_thinking_turn(
-    trailing_signature_only: bool,
+    shape: MultiThinkingStreamShape,
 ) -> Vec<crate::models::MessageRequest> {
     let config = Config {
         provider: Some("custom-a".to_string()),
@@ -15229,7 +15261,7 @@ async fn run_multi_thinking_turn(
     let client = std::sync::Arc::new(MultiThinkingStreamClient {
         requests: std::sync::Mutex::new(Vec::new()),
         calls: std::sync::atomic::AtomicUsize::new(0),
-        trailing_signature_only,
+        shape,
     });
     let shared: crate::core::model_client::SharedModelClient = client.clone();
     let (engine, handle) = Engine::new_with_model_client(engine_config, &config, shared);

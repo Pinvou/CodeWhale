@@ -159,9 +159,12 @@ impl DeepSeekClient {
             .map(|raw| raw.trim().to_ascii_lowercase());
         // True when the wire carries thinking disabled (explicit
         // `{"type":"disabled"}`, or omitted on a model that treats omission
-        // as off). Anthropic rejects thinking content in the current
-        // tool-use turn in that state, so the final tool turn gets its
-        // thinking blocks stripped below.
+        // as off). The first-party API degrades that conflict gracefully —
+        // it silently strips the current turn's thinking and keeps thinking
+        // off for the request, without an error — so stripping below mirrors
+        // the documented server-side behavior, keeps the older prefix
+        // byte-stable for cache, and defends gateways that may reject the
+        // conflict outright instead of degrading.
         let mut thinking_disabled_on_wire = false;
         match effort.as_deref() {
             _ if is_minimax_provider && !is_minimax => {}
@@ -206,8 +209,10 @@ impl DeepSeekClient {
         // thinking is off on the wire — explicit off above, a budget that
         // could not be formed (max_tokens too small), or a non-thinking
         // model. On models where omission means adaptive-on the blocks stay;
-        // everywhere else the current tool turn must lose them or the API
-        // rejects the request outright.
+        // everywhere else the current tool turn is stripped so the wire
+        // matches what a request that never carried thinking would look
+        // like: the API strips that thinking server-side anyway, and strict
+        // gateways may reject it instead of degrading.
         if body.get("thinking").is_none()
             && !anthropic_omitted_thinking_defaults_to_adaptive(&model)
         {
@@ -218,24 +223,37 @@ impl DeepSeekClient {
         {
             strip_thinking_from_final_tool_turn(messages);
         }
-        // Redacted thinking payloads are encrypted by Anthropic's first-party
-        // API and decrypt server-side there, so pass-through hosts cannot
-        // validate them — but neither can we tell a terminating gateway from
-        // a forwarding proxy. Withholding on every non-native host is the
-        // conservative call: a terminating gateway would reject the unknown
-        // block type outright, while a forwarding proxy loses the block's
-        // continuity (a redacted-only current tool turn can still 400 there).
-        // Native `*.anthropic.com` routes keep the payload byte-exact.
+        // Anthropic documents `redacted_thinking.data` as opaque encrypted
+        // content to pass back unchanged and says nothing about third-party
+        // gateways understanding the block type, and we cannot tell a
+        // terminating gateway from a forwarding proxy to the first-party
+        // API (which would handle the block). Withholding on every
+        // non-native host is the conservative call: a strict terminating
+        // gateway would reject the unknown block type outright, while a
+        // forwarding proxy only loses the block's continuity (a
+        // redacted-only current tool turn can still 400 there). Native
+        // `*.anthropic.com` routes keep the payload byte-exact.
         if !is_native_anthropic_base_url(&self.base_url)
             && let Some(messages) = body.get_mut("messages").and_then(Value::as_array_mut)
         {
-            for message in messages.iter_mut() {
-                if let Some(blocks) = message.get_mut("content").and_then(Value::as_array_mut) {
-                    blocks.retain(|block| {
-                        block.get("type").and_then(Value::as_str) != Some("redacted_thinking")
-                    });
-                }
-            }
+            messages.retain_mut(|message| {
+                let is_assistant = message.get("role").and_then(Value::as_str) == Some("assistant");
+                let Some(blocks) = message.get_mut("content").and_then(Value::as_array_mut) else {
+                    return true;
+                };
+                blocks.retain(|block| {
+                    block.get("type").and_then(Value::as_str) != Some("redacted_thinking")
+                });
+                // A message that only carried redacted blocks would
+                // otherwise go out with an empty `content: []`, which
+                // Messages-compatible endpoints reject — the same
+                // every-retry 400 this withhold exists to prevent. Dropping
+                // the message is safe: a redacted-only assistant turn
+                // carries no `tool_use`, so no `tool_result` can dangle.
+                // Reachable only from foreign/imported sessions; the live
+                // engine never persists a reasoning-only turn.
+                !(is_assistant && blocks.is_empty())
+            });
         }
 
         // Sampling parameters: Claude 4.7+ rejects temperature/top_p
@@ -533,9 +551,11 @@ fn normalize_redacted_thinking_blocks(value: &mut Value) {
 /// "Adaptive thinking is off by default on Claude Opus 4.7: requests with no
 /// thinking field run without thinking, matching Opus 4.6 behavior" and, for
 /// the successor, "like Opus 4.7, a request with no `thinking` field runs
-/// without thinking" — and the API rejects thinking content in the current
-/// tool-use turn once thinking is disabled, so those turns (Opus 4.7/4.8
-/// included) need their thinking blocks stripped.
+/// without thinking" — and on those turns replayed thinking in the current
+/// tool-use turn is thinking-after-disable: the first-party API strips it
+/// server-side without an error, and strict gateways may reject it instead,
+/// so those turns (Opus 4.7/4.8 included) shed the blocks here and the wire
+/// stays byte-identical to a request that never carried them.
 fn anthropic_omitted_thinking_defaults_to_adaptive(model: &str) -> bool {
     let model = model.to_ascii_lowercase();
     model.contains("fable")
@@ -547,10 +567,14 @@ fn anthropic_omitted_thinking_defaults_to_adaptive(model: &str) -> bool {
 
 /// Remove thinking blocks from the final assistant message of a tool turn.
 ///
-/// Anthropic fails the request when thinking content appears in the current
-/// tool-use turn while thinking is disabled; in every other position
-/// replayed thinking content is simply ignored, so only the tool turn is
-/// rewritten and cache-relevant history bytes stay untouched.
+/// With thinking disabled on the wire, thinking content in the current
+/// tool-use turn is a conflict: the first-party API silently strips it and
+/// keeps thinking off (documented graceful degradation, no error), while
+/// strict gateways may reject the request outright. Stripping here yields
+/// the same wire as the server-side strip would, before a gateway can see
+/// it. In every other position replayed thinking content is simply ignored,
+/// so only the tool turn is rewritten and cache-relevant history bytes stay
+/// untouched.
 fn strip_thinking_from_final_tool_turn(messages: &mut [Value]) {
     let Some(last_assistant) = messages
         .iter_mut()
@@ -2097,7 +2121,10 @@ mod tests {
         // behavior" — model migration guide), so omission there must strip
         // the current tool turn exactly like an explicit off. These models
         // previously sat on the adaptive-on-omission list and the strip
-        // never fired, bricking the tool loop with a deterministic 400.
+        // never fired, so replayed signed thinking rode into a request whose
+        // wire runs without thinking — the first-party API silently strips
+        // it (thinking-after-disable degrades gracefully), but strict
+        // gateways may reject the conflict outright.
         for model in ["claude-opus-4-7", "claude-opus-4-8"] {
             let client = test_client();
             let mut request = request_with(model, Some("off"), None, None);
@@ -2175,8 +2202,9 @@ mod tests {
 
     #[test]
     fn non_native_gateways_never_receive_redacted_thinking_blocks() {
-        // Redacted payloads can only be decrypted by the platform that minted
-        // them; a Messages-compatible gateway would reject the unknown type.
+        // Conservative withholding: the docs promise nothing about
+        // third-party gateways understanding `redacted_thinking`, and a
+        // strict Messages-compatible gateway would reject the unknown type.
         let client = anthropic_test_client(Some("https://gateway.example.com/anthropic"));
         let mut request = request_with("claude-sonnet-4-6", None, None, None);
         request.messages = vec![Message {
@@ -2213,6 +2241,66 @@ mod tests {
         assert!(
             native.to_string().contains("ENC_REDACTED"),
             "first-party route must replay redacted blocks: {native}"
+        );
+    }
+
+    #[test]
+    fn gateway_withhold_drops_messages_that_only_carried_redacted_blocks() {
+        // A redacted-only assistant message (reachable from foreign or
+        // imported sessions; the live engine never persists a reasoning-only
+        // turn) must not go out as `content: []` after the withhold — that
+        // is exactly the every-retry 400 this withhold exists to prevent.
+        // Dropping the message is safe: no `tool_use` means no dangling
+        // `tool_result`.
+        let client = anthropic_test_client(Some("https://gateway.example.com/anthropic"));
+        let mut request = request_with("claude-sonnet-4-6", None, None, None);
+        request.messages = vec![
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text {
+                    text: "do the thing".to_string(),
+                    cache_control: None,
+                }],
+            },
+            Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::Thinking {
+                    thinking: String::new(),
+                    signature: None,
+                    state: None,
+                    redacted_data: Some("ENC_REDACTED_ONLY".to_string()),
+                    reasoning_details: None,
+                }],
+            },
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text {
+                    text: "continue".to_string(),
+                    cache_control: None,
+                }],
+            },
+        ];
+
+        let body = client.build_anthropic_body(&request, true);
+        let messages = body["messages"].as_array().expect("messages array");
+        assert_eq!(
+            messages.len(),
+            2,
+            "the redacted-only assistant message must be dropped, not emptied: {body}"
+        );
+        assert_eq!(messages[0]["role"].as_str(), Some("user"));
+        assert_eq!(messages[1]["role"].as_str(), Some("user"));
+        assert!(
+            !body.to_string().contains("ENC_REDACTED_ONLY"),
+            "the payload must stay withheld: {body}"
+        );
+
+        // First-party Anthropic keeps the message and its block.
+        let native = test_client().build_anthropic_body(&request, true);
+        assert_eq!(
+            native["messages"].as_array().map(Vec::len),
+            Some(3),
+            "native routes keep the redacted-only turn: {native}"
         );
     }
 
