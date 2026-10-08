@@ -87,7 +87,6 @@ test('回灌态（error 为 null + errorKey 有值 + 还在跑）不能崩，红
   // 副标题被红字顶掉是对的（一张卡只有一行说明位），这里顺手钉住「不是两行都出」。
   assert.doesNotMatch(html, /正在执行…/, '红字和普通副标题同时出现了');
 });
-
 test('作答没送达时同样不能崩：输入框还在，红字也在', () => {
   const html = render(
     task({
