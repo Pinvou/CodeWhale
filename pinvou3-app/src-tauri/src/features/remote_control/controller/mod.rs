@@ -1,4 +1,5 @@
 pub(crate) mod capabilities;
+pub(crate) mod clock;
 pub(crate) mod controlled;
 pub(crate) mod controlling;
 pub(crate) mod crypto;

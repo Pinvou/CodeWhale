@@ -8,8 +8,6 @@
 //! authenticated Rust transport and then apply A's complete lease binding.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::OnceLock;
-use std::time::Instant;
 
 use tauri::State;
 
@@ -21,18 +19,13 @@ use crate::features::remote_control::controller::capabilities::{
     CapabilityDescriptor, CapabilityError, CapabilitySnapshot, CapabilitySnapshotManager,
     CapabilitySource,
 };
+pub(crate) use crate::features::remote_control::controller::clock::monotonic_millis;
 use crate::features::remote_control::controller::controlled::ControlledDeviceManager;
 
 const UNSUPPORTED: &str = "desktop_remote_control_unsupported";
 
 fn capability_error(error: CapabilityError) -> String {
     error.code.to_owned()
-}
-
-fn monotonic_millis() -> u64 {
-    static ORIGIN: OnceLock<Instant> = OnceLock::new();
-    let origin = ORIGIN.get_or_init(Instant::now);
-    u64::try_from(origin.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
 fn descriptor(id: impl Into<String>, display_name: impl Into<String>) -> CapabilityDescriptor {
@@ -116,6 +109,28 @@ pub async fn desktop_remote_capabilities_snapshot(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn command_initialization_order_cannot_create_a_second_clock() {
+        use super::super::{desktop_remote_controlled, desktop_remote_task};
+        for clocks in [
+            [
+                monotonic_millis as fn() -> u64,
+                desktop_remote_task::monotonic_millis as fn() -> u64,
+            ],
+            [
+                desktop_remote_task::monotonic_millis as fn() -> u64,
+                monotonic_millis as fn() -> u64,
+            ],
+        ] {
+            assert!(std::ptr::fn_addr_eq(clocks[0], clocks[1]));
+            assert!(std::ptr::fn_addr_eq(
+                clocks[0],
+                desktop_remote_controlled::monotonic_millis as fn() -> u64
+            ));
+            assert!(clocks[0]() <= clocks[1]());
+        }
+    }
 
     #[test]
     fn descriptor_projection_trims_display_text_and_keeps_ids_opaque() {

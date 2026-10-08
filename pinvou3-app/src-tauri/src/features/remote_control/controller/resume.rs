@@ -230,6 +230,25 @@ impl ControllerResumeGate {
         Ok(())
     }
 
+    /// A observes B's post-activation proof; B may observe the same confirmation
+    /// after sending it. Neither path changes the frozen deadline.
+    pub(crate) fn accept_post_activation_liveness_confirmed(
+        &mut self,
+        activation_id: &str,
+        now_b: u64,
+        watchdog_deadline_b: Option<u64>,
+    ) -> Result<()> {
+        match self.phase {
+            ResumePhase::ActivationPending | ResumePhase::PostActivationLiveness => {
+                self.expect_phase(self.phase, now_b, watchdog_deadline_b)?;
+                self.require_activation(activation_id)?;
+                self.phase = ResumePhase::PostActivationLiveness;
+                Ok(())
+            }
+            _ => self.terminate("controller_resume_phase_invalid"),
+        }
+    }
+
     /// Consume the old role material only with a complete, role-addressed
     /// final result. The new token and transport fingerprint become the only
     /// accepted values afterward.

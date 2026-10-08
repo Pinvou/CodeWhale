@@ -4,13 +4,11 @@
 //! the feature state machine and emit only its allowlisted, generation-bearing
 //! projection; no pairing, lease, token, key, or host-path value is persisted.
 
-use std::sync::OnceLock;
-use std::time::Instant;
-
 use serde::Deserialize;
 use tauri::{AppHandle, Emitter, State};
 
 use crate::features::files::file_ingest::validate_browsable_path;
+pub(crate) use crate::features::remote_control::controller::clock::monotonic_millis;
 use crate::features::remote_control::controller::controlled::{
     ControlledDeviceManager, ControlledStateError, ControlledStatus, ControlledWorkspaceInfo,
     WorkspaceAuthorizationRequest,
@@ -37,12 +35,6 @@ fn ensure_supported(manager: &ControlledDeviceManager) -> Result<(), String> {
     } else {
         Err(UNSUPPORTED.to_owned())
     }
-}
-
-fn monotonic_millis() -> u64 {
-    static ORIGIN: OnceLock<Instant> = OnceLock::new();
-    let origin = ORIGIN.get_or_init(Instant::now);
-    u64::try_from(origin.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
 fn workspace_request(

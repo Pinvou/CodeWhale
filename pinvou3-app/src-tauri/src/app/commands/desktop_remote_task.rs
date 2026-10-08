@@ -5,7 +5,6 @@
 //! engine/session kernels; a renderer-supplied payload cannot assert A's role.
 
 use std::sync::Arc;
-use std::time::Instant;
 
 use serde_json::Value;
 use tauri::{AppHandle, Emitter, State};
@@ -14,6 +13,7 @@ use crate::features::assistant::engine_pool::EnginePool;
 use crate::features::assistant::remote_turn::{EnginePoolChatEngine, EnginePoolChatTurnPort};
 use crate::features::codex_acp::AcpPool;
 use crate::features::codex_acp::remote_turn::{AcpPoolCodeTurnPort, RemoteWorkspaceAuthorizations};
+pub(crate) use crate::features::remote_control::controller::clock::monotonic_millis;
 use crate::features::remote_control::controller::controlled::ControlledDeviceManager;
 use crate::features::remote_control::controller::task::{
     ChatTurnExecutor, CodeTurnExecutor, ControllerTaskEventSink, RemoteSessionProvisioner,
@@ -25,13 +25,6 @@ use crate::features::sessions::SessionStore;
 const UNSUPPORTED: &str = "desktop_remote_control_unsupported";
 const TASK_EVENT: &str = "desktop-remote-task-status";
 const TASK_STATUS_EVENT: &str = "desktop-remote-task-event";
-
-fn monotonic_millis() -> u64 {
-    use std::sync::OnceLock;
-    static ORIGIN: OnceLock<Instant> = OnceLock::new();
-    let origin = ORIGIN.get_or_init(Instant::now);
-    u64::try_from(origin.elapsed().as_millis()).unwrap_or(u64::MAX)
-}
 
 /// Creates B-authoritative sessions for remote tasks. Only the local session
 /// identity, title and mode lane are persisted; nothing about A crosses this
