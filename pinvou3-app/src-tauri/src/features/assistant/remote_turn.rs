@@ -66,6 +66,9 @@ fn reserve_remote_chat_turn(
         generation,
     })
 }
+use crate::features::remote_control::controller::turn_budget::{
+    CANCEL_SETTLE_BUDGET, TURN_TIMEOUT_CODE, TurnBudget,
+};
 
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 const BUSY_GRACE: Duration = Duration::from_secs(5);
@@ -849,6 +852,97 @@ impl EnginePoolChatTurnPort {
     }
 }
 
+impl EnginePoolChatTurnPort {
+    async fn run_chat_turn_with_attachments_budget(
+        &self,
+        session_id: &str,
+        task_id: &str,
+        model_source: &str,
+        lease: &LeaseContext,
+        content: String,
+        skill_ids: Vec<String>,
+        attachments: Vec<PublishedAttachment>,
+        events: Arc<dyn ControllerTaskEventSink>,
+        cancel: CancellationToken,
+        budget: TurnBudget,
+    ) -> std::result::Result<Option<String>, String> {
+        if cancel.is_cancelled() {
+            return Err(TASK_CANCELLED_CODE.to_owned());
+        }
+        // Submission only queues the engine turn. Receipt revocation during
+        // disconnect must not release paths still used by later tool reads.
+        let _attachment_read_owners: Vec<_> = attachments
+            .iter()
+            .filter_map(|attachment| attachment.read_owner.clone())
+            .collect();
+        let owner = Arc::new(RemoteTurnOwner::default());
+        let mut reserved = self.engine.reserve_remote_turn(session_id)?;
+        let generation = reserved.as_ref().map(|reserved| reserved.generation);
+        let mut turn_relay = self.engine.start_turn_relay(session_id, task_id, events);
+        if let Some(relay) = turn_relay.as_mut() {
+            if let Some(reserved) = reserved.as_ref() {
+                if let Some(turn) = reserved.turn.as_ref() {
+                    relay.arm(turn.generation());
+                }
+            }
+        }
+        let result = budget
+            .run(&cancel, async {
+                tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => {
+                        return Err(TASK_CANCELLED_CODE.to_owned());
+                    }
+                    result = self.engine.send_user_message_with_attachments(
+                        session_id,
+                        task_id,
+                        model_source,
+                        lease,
+                        content,
+                        skill_ids,
+                        attachments,
+                        turn_relay.as_ref(),
+                        owner.clone(),
+                        &mut reserved,
+                    ) => result?,
+                }
+                self.wait_for_terminal(session_id, &cancel, turn_relay.as_ref(), generation)
+                    .await?;
+                Ok(())
+            })
+            .await;
+        if matches!(
+            result.as_ref().err().map(String::as_str),
+            Some(TASK_CANCELLED_CODE | TURN_TIMEOUT_CODE)
+        ) {
+            let _ = tokio::time::timeout(
+                CANCEL_SETTLE_BUDGET,
+                self.engine.cancel_turn(session_id, generation),
+            )
+            .await;
+        }
+        // Flush the last redaction-safe token before the task terminal event.
+        // Assistant content is journaled from real `chat:delta` callbacks,
+        // never synthesized as one final response here.
+        if let Some(relay) = turn_relay.as_mut() {
+            relay.finish();
+        }
+        // All remote model sources own a private skills root. Retire only this
+        // attempt's entry before releasing credentials; never rewrite shared B
+        // skills here, especially when a replacement already owns the session.
+        let engine = self.engine.clone();
+        let session_id = session_id.to_owned();
+        crate::features::remote_control::controller::turn_budget::settle_owned(async move {
+            engine.release_task_model(&session_id, &owner).await;
+        })
+        .await;
+        if result.is_ok() {
+            budget.checkpoint(&cancel)?;
+        }
+        result.map(|()| None)
+    }
+}
+
 #[async_trait]
 impl RemoteChatTurnPort for EnginePoolChatTurnPort {
     async fn run_chat_turn(
@@ -888,59 +982,20 @@ impl RemoteChatTurnPort for EnginePoolChatTurnPort {
         events: Arc<dyn ControllerTaskEventSink>,
         cancel: CancellationToken,
     ) -> std::result::Result<Option<String>, String> {
-        // Submission only queues the engine turn. Receipt revocation during
-        // disconnect must not release paths still used by later tool reads.
-        let _attachment_read_owners: Vec<_> = attachments
-            .iter()
-            .filter_map(|attachment| attachment.read_owner.clone())
-            .collect();
-        let owner = Arc::new(RemoteTurnOwner::default());
-        let mut reserved = self.engine.reserve_remote_turn(session_id)?;
-        let generation = reserved.as_ref().map(|reserved| reserved.generation);
-        let mut turn_relay = self.engine.start_turn_relay(session_id, task_id, events);
-        if let Some(relay) = turn_relay.as_mut() {
-            if let Some(reserved) = reserved.as_ref() {
-                if let Some(turn) = reserved.turn.as_ref() {
-                    relay.arm(turn.generation());
-                }
-            }
-        }
-        let result = async {
-            tokio::select! {
-                biased;
-                _ = cancel.cancelled() => {
-                    self.engine.cancel_turn(session_id, generation).await;
-                    return Err(TASK_CANCELLED_CODE.to_owned());
-                }
-                result = self.engine.send_user_message_with_attachments(
-                    session_id,
-                    task_id,
-                    model_source,
-                    lease,
-                    content,
-                    skill_ids,
-                    attachments,
-                    turn_relay.as_ref(),
-                    owner.clone(),
-                    &mut reserved,
-                ) => result?,
-            }
-            self.wait_for_terminal(session_id, &cancel, turn_relay.as_ref(), generation)
-                .await?;
-            Ok(())
-        }
-        .await;
-        // Flush the last redaction-safe token before the task terminal event.
-        // Assistant content is journaled from real `chat:delta` callbacks,
-        // never synthesized as one final response here.
-        if let Some(relay) = turn_relay.as_mut() {
-            relay.finish();
-        }
-        // All remote model sources own a private skills root. Retire only this
-        // attempt's entry before releasing credentials; never rewrite shared B
-        // skills here, especially when a replacement already owns the session.
-        self.engine.release_task_model(session_id, &owner).await;
-        result.map(|()| None)
+        let budget = TurnBudget::current_or_new()?;
+        self.run_chat_turn_with_attachments_budget(
+            session_id,
+            task_id,
+            model_source,
+            lease,
+            content,
+            skill_ids,
+            attachments,
+            events,
+            cancel,
+            budget,
+        )
+        .await
     }
 }
 
@@ -1356,7 +1411,6 @@ mod tests {
                 })
                 .transpose()
         }
-
         async fn send_user_message(
             &self,
             _session_id: &str,
@@ -1554,12 +1608,18 @@ mod tests {
                 "submission_failed" => assert_eq!(result.unwrap_err(), "task_engine_unavailable"),
                 _ => assert_eq!(result.unwrap_err(), TASK_CANCELLED_CODE),
             }
-            assert!(fake.lease_checks.load(Ordering::SeqCst) >= 2, "{outcome}");
-            assert_eq!(
-                *fake.released.lock().unwrap(),
-                vec!["session-0001".to_owned()],
-                "{outcome}: attachment remains protected through exact-owner teardown"
-            );
+            if outcome == "cancel_before_send" {
+                assert_eq!(fake.lease_checks.load(Ordering::SeqCst), 0);
+                assert!(fake.sent.lock().unwrap().is_empty());
+                assert!(fake.released.lock().unwrap().is_empty());
+            } else {
+                assert!(fake.lease_checks.load(Ordering::SeqCst) >= 2, "{outcome}");
+                assert_eq!(
+                    *fake.released.lock().unwrap(),
+                    vec!["session-0001".to_owned()],
+                    "{outcome}: attachment remains protected through exact-owner teardown"
+                );
+            }
             assert!(
                 !path.exists(),
                 "cleanup waits for the turn port's last owner"
@@ -2116,6 +2176,54 @@ mod tests {
             [TASK_MODEL_SOURCE_TEMPORARY]
         );
         assert_eq!(fake.released.lock().unwrap().as_slice(), ["session-0001"]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn busy_remote_chat_uses_one_frozen_submission_and_terminal_budget() {
+        let fake = FakeEngine::always_busy();
+        let port = EnginePoolChatTurnPort::new(fake.clone());
+        let result = port
+            .run_chat_turn_with_attachments_budget(
+                "session-0001",
+                "task-0001",
+                TASK_MODEL_SOURCE_CONTROLLED,
+                &lease(),
+                "hello".into(),
+                Vec::new(),
+                Vec::new(),
+                events(),
+                CancellationToken::new(),
+                TurnBudget::for_test(Duration::from_secs(1800)),
+            )
+            .await;
+        assert_eq!(result.unwrap_err(), TURN_TIMEOUT_CODE);
+        assert_eq!(fake.sent.lock().unwrap().as_slice(), ["hello"]);
+        assert_eq!(fake.cancelled.lock().unwrap().as_slice(), ["session-0001"]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn precancelled_remote_chat_never_reserves_or_submits() {
+        let fake = FakeEngine::always_busy();
+        let port = EnginePoolChatTurnPort::new(fake.clone());
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let result = port
+            .run_chat_turn_with_attachments_budget(
+                "session-0001",
+                "task-0001",
+                TASK_MODEL_SOURCE_CONTROLLED,
+                &lease(),
+                "hello".into(),
+                Vec::new(),
+                Vec::new(),
+                events(),
+                cancel,
+                TurnBudget::for_test(Duration::from_secs(1)),
+            )
+            .await;
+        assert_eq!(result.unwrap_err(), TASK_CANCELLED_CODE);
+        assert!(fake.sent.lock().unwrap().is_empty());
+        assert!(fake.cancelled.lock().unwrap().is_empty());
     }
 
     #[test]

@@ -47,6 +47,14 @@ fn skill_source_dirs() -> Vec<PathBuf> {
     let mut dirs = vec![paths::user_skills_dir()];
     if let Ok(rd) = std::fs::read_dir(paths::bundles_root()) {
         for entry in rd.flatten() {
+            // Round-24 minor 3: import staging (`<id>.tmp`) and landing
+            // backup (`<id>.old`) dirs are not packs — admitting their skills
+            // under the suffix owner id would render ungated content into
+            // initialized scopes during the import window.
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.ends_with(".tmp") || name.ends_with(".old") {
+                continue;
+            }
             let skills = entry.path().join("skills");
             if skills.is_dir() {
                 dirs.push(skills);
@@ -150,9 +158,13 @@ fn collect_source_skills(
 /// 禁用集的技能**目录名**（execpolicy 硬拦截与物化排除共用口径）。
 ///
 /// scope 收敛后：单一禁用集是**包 id**（`disabled_bundles.json`），companion 联动
-/// 不再借道 `companion_skills` 跨查询——包模型（`bundle::skill_owner_package`）按
-/// 条件认领把 companion 技能归属到其 MCP/CLI 包（所属包已装才归包，否则归技能
-/// 自身；与迁移层同口径，见 skill_marketplace），禁用包即排除其全部技能目录。
+/// no longer routes through `companion_skills` cross-queries — disabled/hidden
+/// entries are normalized via `to_package_id` on both write and read (the
+/// gating mapping `bundle::skill_gating_owner` since R17-MAJOR1: conditional
+/// claim plus physical-layout fallback; an undeclared nested skill must
+/// resolve to its physical owner pack, else it enters every scope with zero
+/// consent and no row to turn it off). A disabled pack excludes its full
+/// skill-dir set.
 /// 因此这里枚举所有技能来源目录，凡属主包在禁用集内的目录名纳入排除集。
 pub(crate) fn disabled_skill_names_for(scope: ConnectorScope) -> HashSet<String> {
     // 不可用集 = 开关关(disabled) + 不可见(hidden)：两套门控对物化/execpolicy 都是排除。
@@ -161,6 +173,16 @@ pub(crate) fn disabled_skill_names_for(scope: ConnectorScope) -> HashSet<String>
             .into_iter()
             .collect();
     let mut names: HashSet<String> = HashSet::new();
+    // Round-24 MAJOR 3: nothing can be excluded against an empty deny set —
+    // skip the per-entry owner resolution entirely (this runs ~2x per session
+    // spawn and per toggle/hot-refresh).
+    if disabled_packages.is_empty() {
+        return names;
+    }
+    // Round-24 MAJOR 3: one manifest walk for the whole pass —
+    // `skill_gating_owner` parses every manifest under bundles_root per call,
+    // so the per-entry resolution was O(dirs × packs) per invocation.
+    let tools = crate::features::marketplace::MarketplaceManager::new().available_tools();
     for src in skill_source_dirs() {
         let Ok(rd) = std::fs::read_dir(&src) else {
             continue;
@@ -172,7 +194,8 @@ pub(crate) fn disabled_skill_names_for(scope: ConnectorScope) -> HashSet<String>
             let Some(name) = entry.file_name().to_str().map(str::to_string) else {
                 continue;
             };
-            let owner = crate::features::marketplace::bundle::skill_owner_package(&name);
+            let owner =
+                crate::features::marketplace::bundle::skill_gating_owner_with(&tools, &name);
             if disabled_packages.contains(&owner) {
                 names.insert(name);
             }
@@ -473,28 +496,11 @@ pub fn session_skills_is_empty(session_id: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// 把 PINVOU3_HOME 指到干净临时目录跑闭包，跑完恢复并清理。
-    /// 借 `platform::paths::tests::ENV_LOCK` 与其它 mutate PINVOU3_HOME 的测试串行。
-    fn with_temp_home<F: FnOnce()>(f: F) {
-        let _g = crate::platform::paths::tests::ENV_LOCK
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
-        let dir = std::env::temp_dir().join(format!("pinvou3-skillscope-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let prev = std::env::var("PINVOU3_HOME").ok();
-        // SAFETY: holding platform::paths::tests::ENV_LOCK; env writes serialized in-process.
-        unsafe { std::env::set_var("PINVOU3_HOME", &dir) };
-        f();
-        match prev {
-            // SAFETY: holding platform::paths::tests::ENV_LOCK; env writes serialized in-process.
-            Some(v) => unsafe { std::env::set_var("PINVOU3_HOME", v) },
-            // SAFETY: holding platform::paths::tests::ENV_LOCK; env writes serialized in-process.
-            None => unsafe { std::env::remove_var("PINVOU3_HOME") },
-        }
-        let _ = std::fs::remove_dir_all(&dir);
-    }
+    use crate::features::marketplace::scope::{
+        save_disabled_bundles_for, set_project_skills_enabled,
+    };
+    use crate::platform::test_support::with_temp_home;
+    use std::sync::Arc;
 
     fn write_skill(root: &Path, name: &str, content: &str) {
         let dir = root.join(name);
@@ -522,7 +528,7 @@ mod tests {
     /// `## Skills` 隐藏"这条链路（过滤职责现由组合目录计算承担）。
     #[test]
     fn companion_skill_excluded_when_connector_disabled() {
-        with_temp_home(|| {
+        with_temp_home("pinvou3-skillscope", || {
             write_tool_manifest(
                 "gongwen",
                 r#"{"id":"gongwen","name":"公文写作","description":"d","version":"1.0.0","icon":"file-text","category":"办公","mcp_tools":["mcp_gongwen_make_gongwen"],"command":"python","args":["server.py"],"companion_skills":["government-writing"]}"#,
@@ -570,7 +576,12 @@ mod tests {
     /// 直接并入排除集的回归都会让本测试变红。
     #[test]
     fn standalone_companion_named_skill_survives_uninstalled_connector() {
-        with_temp_home(|| {
+        with_temp_home("pinvou3-skillscope", || {
+            // With every mode DenyAll a fresh home is default-all-off; this
+            // test pins the conditional-claim shape (a companion whose
+            // connector is not installed stays a standalone pure-skill pack),
+            // so plain is explicitly initialized to all-on.
+            save_disabled_bundles_for(ConnectorScope::Plain, &[]).unwrap();
             write_tool_manifest(
                 "gongwen",
                 r#"{"id":"gongwen","name":"公文写作","description":"d","version":"1.0.0","icon":"file-text","category":"办公","mcp_tools":["mcp_gongwen_make_gongwen"],"command":"python","args":["server.py"],"companion_skills":["government-writing"]}"#,
@@ -588,6 +599,7 @@ mod tests {
             assert!(
                 crate::features::marketplace::MarketplaceManager::new()
                     .unavailable_companion_skills()
+                    .unwrap()
                     .contains(&"government-writing".to_string())
             );
 
@@ -604,7 +616,7 @@ mod tests {
     /// 开回来 → 恢复。
     #[test]
     fn cli_connector_companion_skills_excluded_when_disabled() {
-        with_temp_home(|| {
+        with_temp_home("pinvou3-skillscope", || {
             for name in crate::features::marketplace::bundle::LARK_SKILL_DIRS {
                 write_skill(&paths::bundle_skills_dir(), name, "# Lark\n");
             }
@@ -629,14 +641,53 @@ mod tests {
         });
     }
 
-    /// code scope 未初始化「默认全禁」覆盖 CLI 连接器技能：lark-* 不注册在
-    /// 技能市场清单（连接门控直接解包），仍被 code 默认禁用兜住；plain 不受影响。
+    /// With neither plain nor code scope initialized, the deny-all default
+    /// (the every-mode DenyAll convergence) covers CLI connector skills too:
+    /// lark-* are not registered in the skill-marketplace listing (the
+    /// connection gate unpacks them directly) yet are still held by the
+    /// default-disable fallback; explicitly initializing the scope restores them.
     #[test]
-    fn code_scope_default_disables_cli_connector_skills() {
-        with_temp_home(|| {
+    fn uninitialized_scopes_default_disable_cli_connector_skills() {
+        with_temp_home("pinvou3-skillscope", || {
             for name in crate::features::marketplace::bundle::LARK_SKILL_DIRS {
                 write_skill(&paths::bundle_skills_dir(), name, "# Lark\n");
             }
+
+            for scope in [ConnectorScope::Code, ConnectorScope::Plain] {
+                let enabled = enabled_skills_for(scope, None);
+                assert!(
+                    !enabled.iter().any(|(n, _)| n.starts_with("lark-")),
+                    "lark-* skills must be fully denied by default while {scope:?} is uninitialized"
+                );
+            }
+            // plain explicitly initialized to all-on → lark-* restored.
+            save_disabled_bundles_for(ConnectorScope::Plain, &[]).unwrap();
+            let enabled_plain = enabled_skills_for(ConnectorScope::Plain, None);
+            assert_eq!(
+                enabled_plain
+                    .iter()
+                    .filter(|(n, _)| n.starts_with("lark-"))
+                    .count(),
+                crate::features::marketplace::bundle::LARK_SKILL_DIRS.len(),
+                "the plain scope must be unaffected"
+            );
+        });
+    }
+
+    /// Main's #563 test, adapted to the DenyAll default (round-17 merge): the
+    /// code scope uninitialized disables the CLI connector skills; plain
+    /// admits them once the user opts in (empty disable list). On the
+    /// pre-DenyAll tree plain needed no opt-in; here the contrast is
+    /// explicit-opt-in vs default-off.
+    #[test]
+    fn code_scope_default_disables_cli_connector_skills() {
+        with_temp_home("pinvou3-skillscope", || {
+            for name in crate::features::marketplace::bundle::LARK_SKILL_DIRS {
+                write_skill(&paths::bundle_skills_dir(), name, "# Lark\n");
+            }
+            // The user opts plain in (empty disable list); code stays
+            // uninitialized (DenyAll default).
+            save_disabled_bundles_for(ConnectorScope::Plain, &[]).unwrap();
 
             let enabled = enabled_skills_for(ConnectorScope::Code, None);
             assert!(
@@ -650,7 +701,7 @@ mod tests {
                     .filter(|(n, _)| n.starts_with("lark-"))
                     .count(),
                 crate::features::marketplace::bundle::LARK_SKILL_DIRS.len(),
-                "plain scope 不应受影响"
+                "all lark-* skills must be included once plain is explicitly enabled"
             );
         });
     }
@@ -660,7 +711,7 @@ mod tests {
     /// （不再借道连接器文件的 skill: 前缀）。
     #[test]
     fn disabling_direct_skill_id_hides_skill() {
-        with_temp_home(|| {
+        with_temp_home("pinvou3-skillscope", || {
             crate::features::marketplace::skill_marketplace::SkillMarketplaceManager::new()
                 .install("visualizer")
                 .unwrap();
@@ -687,7 +738,7 @@ mod tests {
     /// 语义相反，是 scope 收敛（todo A 节）的既定行为变更。
     #[test]
     fn disabling_package_hides_same_named_skill_unified() {
-        with_temp_home(|| {
+        with_temp_home("pinvou3-skillscope", || {
             write_tool_manifest(
                 "weather",
                 r#"{"id":"weather","name":"天气","description":"d","version":"1.0.0","icon":"cloud","category":"查询","mcp_tools":["mcp_weather_query"],"command":"python","args":["server.py"]}"#,
@@ -738,8 +789,12 @@ mod tests {
 
     #[test]
     fn enabled_skills_respect_first_wins_and_scope_disabled() {
-        with_temp_home(|| {
+        with_temp_home("pinvou3-skillscope", || {
             seed_sources();
+            // With every mode DenyAll a fresh home is default-all-off; this
+            // test focuses on first-wins and switch semantics, so plain is
+            // explicitly initialized to all-on.
+            save_disabled_bundles_for(ConnectorScope::Plain, &[]).unwrap();
             // 默认（无禁用）：user 覆盖 bundle 同名 + 手放技能入集
             let enabled = enabled_skills_for(ConnectorScope::Plain, None);
             let names: HashSet<&str> = enabled.iter().map(|(n, _)| n.as_str()).collect();
@@ -765,8 +820,12 @@ mod tests {
 
     #[test]
     fn materialize_then_rewrite_is_idempotent() {
-        with_temp_home(|| {
+        with_temp_home("pinvou3-skillscope", || {
             seed_sources();
+            // With every mode DenyAll a fresh home is default-all-off; this
+            // test focuses on materialization idempotence, so plain is
+            // explicitly initialized to all-on.
+            save_disabled_bundles_for(ConnectorScope::Plain, &[]).unwrap();
             let sid = "session-test-1";
             materialize_session_skills(sid, ConnectorScope::Plain, None).unwrap();
             let dir = paths::session_skills_dir(sid);
@@ -801,7 +860,7 @@ mod tests {
 
     #[test]
     fn empty_scope_leaves_empty_dir_and_is_empty_detection() {
-        with_temp_home(|| {
+        with_temp_home("pinvou3-skillscope", || {
             // 干净的 home（无任何技能来源）→ 全禁场景等价：组合目录为空目录
             let sid = "session-test-2";
             materialize_session_skills(sid, ConnectorScope::Plain, None).unwrap();
@@ -826,7 +885,7 @@ mod tests {
 
     #[test]
     fn project_skills_follow_gate_and_priority() {
-        with_temp_home(|| {
+        with_temp_home("pinvou3-skillscope", || {
             // bundle 基线：市场装 visualizer
             let bundle = paths::bundle_skills_dir();
             std::fs::create_dir_all(&bundle).unwrap();
@@ -921,8 +980,12 @@ mod tests {
 
     #[test]
     fn remote_turn_materializes_only_the_frozen_authorized_selection() {
-        with_temp_home(|| {
+        with_temp_home("pinvou3-skillscope", || {
             seed_sources();
+            // A fresh home is default-all-off per scope (round-31 M8); enable
+            // the whole Plain scope so the frozen-selection assertion below is
+            // driven by the authorized list, not by the default-deny baseline.
+            save_disabled_bundles_for(ConnectorScope::Plain, &[]).unwrap();
             let sid = "remote-session-skills";
             let selected = materialize_remote_turn_skills(
                 sid,
@@ -1014,8 +1077,114 @@ mod tests {
     }
 
     #[test]
+    fn unicode_remote_selection_reaches_real_chat_and_acp_skill_consumers() {
+        use crate::features::remote_control::controller::capabilities::{
+            CapabilityDescriptor, CapabilitySnapshotManager, CapabilitySource, opaque_skill_id,
+        };
+        use crate::features::remote_control::controller::controlled::ControlledWorkspaceInfo;
+        use crate::features::remote_control::controller::protocol::LeaseContext;
+        with_temp_home("pinvou3-unicode-remote-skills", || {
+            let name = "我的技能";
+            write_skill(&paths::bundle_skills_dir(), name, "中文正文：仅选中技能");
+            std::fs::write(
+                paths::bundle_skills_dir()
+                    .join(name)
+                    .join(".installed-from"),
+                "upload:skill.zip",
+            )
+            .unwrap();
+            save_disabled_bundles_for(ConnectorScope::Plain, &[]).unwrap();
+            save_disabled_bundles_for(ConnectorScope::Code, &[]).unwrap();
+            let lease = LeaseContext {
+                connection_id: "connection-1".into(),
+                controller_lease_id: "lease-1".into(),
+                lease_epoch: "1".into(),
+                relay_epoch: "relay-1".into(),
+                remote_control_generation: "generation-1".into(),
+            };
+            let descriptors = vec![CapabilityDescriptor {
+                id: name.into(),
+                display_name: "中文技能".into(),
+            }];
+            let capabilities = CapabilitySnapshotManager::default();
+            capabilities
+                .build(
+                    lease.clone(),
+                    CapabilitySource {
+                        code_agent_ready: true,
+                        tools: vec![],
+                        plain_skills: descriptors.clone(),
+                        code_skills: descriptors,
+                        workspaces: vec![ControlledWorkspaceInfo {
+                            workspace_id: "workspace-1".into(),
+                            display_name: "Project".into(),
+                            code_allowed: true,
+                        }],
+                    },
+                    1_000,
+                )
+                .unwrap();
+            let ids = vec![opaque_skill_id(name)];
+            let chat_names = capabilities
+                .skills_for_task("1", &lease, "chat", &ids, 2_000)
+                .unwrap();
+            let code_names = capabilities
+                .skills_for_task("1", &lease, "code", &ids, 2_000)
+                .unwrap();
+            // Refresh and expiry invalidate further admission, not the exact
+            // selection already captured for these admitted turns.
+            capabilities
+                .build(lease.clone(), CapabilitySource::default(), 40_000)
+                .unwrap();
+            assert!(
+                capabilities
+                    .skills_for_task("1", &lease, "chat", &ids, 50_000)
+                    .is_err()
+            );
+            let skills = materialize_plain_remote_turn_skills(
+                "remote-unicode-skills",
+                &chat_names,
+                Arc::new(RemoteTurnOwner::default()),
+            )
+            .unwrap();
+            assert!(
+                std::fs::read_to_string(skills.path().join(name).join("SKILL.md"))
+                    .unwrap()
+                    .contains("中文正文")
+            );
+            let prompt = remote_turn_skill_prompt(ConnectorScope::Code, None, &code_names).unwrap();
+            assert!(prompt.contains("中文正文"));
+            assert!(
+                !prompt.contains(&ids[0]),
+                "opaque wire IDs are not filesystem identities"
+            );
+            save_disabled_bundles_for(ConnectorScope::Code, &[name.into()]).unwrap();
+            assert_eq!(
+                remote_turn_skill_prompt(ConnectorScope::Code, None, &code_names).unwrap_err(),
+                "task_skill_not_authorized"
+            );
+            save_disabled_bundles_for(ConnectorScope::Plain, &[name.into()]).unwrap();
+            assert_eq!(
+                materialize_plain_remote_turn_skills(
+                    "remote-unicode-disabled",
+                    &chat_names,
+                    Arc::new(RemoteTurnOwner::default()),
+                )
+                .unwrap_err(),
+                "task_skill_not_authorized"
+            );
+            save_disabled_bundles_for(ConnectorScope::Code, &[]).unwrap();
+            std::fs::remove_dir_all(paths::bundle_skills_dir().join(name)).unwrap();
+            assert_eq!(
+                remote_turn_skill_prompt(ConnectorScope::Code, None, &code_names).unwrap_err(),
+                "task_skill_not_authorized"
+            );
+        });
+    }
+
+    #[test]
     fn remote_snapshot_owner_is_one_shot_and_invalid_ids_fail_before_claim() {
-        with_temp_home(|| {
+        with_temp_home("pinvou3-skillscope", || {
             let owner = std::sync::Arc::new(RemoteTurnOwner::default());
             for invalid in [
                 "",
@@ -1044,7 +1213,7 @@ mod tests {
 
     #[test]
     fn private_remote_selection_survives_latest_b_toggle_install_and_uninstall() {
-        with_temp_home(|| {
+        with_temp_home("remote-latest-b-skills", || {
             seed_sources();
             let sid = "remote-latest-b-skills";
             let snapshot = materialize_plain_remote_turn_skills(
@@ -1151,7 +1320,7 @@ mod tests {
 
     #[test]
     fn code_remote_prompt_contains_only_selected_authorized_skill_bodies() {
-        with_temp_home(|| {
+        with_temp_home("pinvou3-skillscope", || {
             seed_sources();
             save_disabled_skills_for(ConnectorScope::Code, &[]).unwrap();
             let prompt =
@@ -1186,9 +1355,40 @@ mod tests {
         // 等式两侧都是 PINVOU3_HOME 的派生值:并行测试翻 home 时两次读取可能落进
         // 不同快照,等式随机打红(2026-09-16 高负载下偶现)——锁 ENV_LOCK 钉干净
         // home,两次读取串行且确定。
-        with_temp_home(|| {
+        with_temp_home("pinvou3-skillscope", || {
             let dir = paths::session_skills_dir("abc-123");
             assert_eq!(dir, paths::sessions_root().join("abc-123").join("skills"));
+        });
+    }
+
+    /// Round-29 m3 (review #455): the staging exclusion in
+    /// `skill_source_dirs` (round-24 minor 3) is consent-load-bearing —
+    /// pin it. Import staging (`<id>.tmp`) and landing-backup (`<id>.old`)
+    /// dirs are not packs; admitting their skills would render ungated
+    /// content into initialized scopes under a suffix owner id during the
+    /// import window. Only a real pack's skills dir is a source.
+    #[test]
+    fn staging_residue_dirs_are_not_skill_sources() {
+        with_temp_home("pinvou3-skillscope", || {
+            let bundles = paths::bundles_root();
+            for residue in ["stage-pack.tmp", "stage-pack.old"] {
+                let dir = bundles.join(residue).join("skills").join("leak");
+                std::fs::create_dir_all(&dir).unwrap();
+                std::fs::write(dir.join("SKILL.md"), "---\nname: leak\n---\n").unwrap();
+            }
+            let real = bundles.join("real-pack").join("skills");
+            std::fs::create_dir_all(&real).unwrap();
+
+            let dirs = skill_source_dirs();
+            assert!(
+                !dirs.iter().any(|d| d.to_string_lossy().contains(".tmp")
+                    || d.to_string_lossy().contains(".old")),
+                "staging residue must not become a skill source: {dirs:?}"
+            );
+            assert!(
+                dirs.iter().any(|d| d == &real),
+                "the real pack's skills dir stays a source: {dirs:?}"
+            );
         });
     }
 }

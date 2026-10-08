@@ -4,8 +4,6 @@ use super::core::{
     CompletedTransfer, TransferContext, TransferDirection, TransferHandle, TransferMetadata,
 };
 use super::limits::MAX_TRANSFER_BYTES;
-#[cfg(test)]
-use super::upload::AttachmentUploads;
 use super::upload::UploadStaging;
 use crate::platform::filesystem::{
     PrivateFileDirectory, PrivatePublicationCleanup, PublishedPrivateFile,
@@ -119,12 +117,14 @@ impl SessionIsolationStaging {
                 rejected_publication: None,
             },
         );
-        let entry = sessions.get_mut(handle_id).expect("target just reserved");
+        let entry = sessions
+            .get_mut(handle_id)
+            .ok_or_else(|| "transfer_staging_failed".to_owned())?;
         entry.file = Some(
             entry
                 .directory
                 .as_ref()
-                .expect("directory just reserved")
+                .ok_or_else(|| "transfer_staging_failed".to_owned())?
                 .create_delete_on_close_file(&entry.staging_name)
                 .map_err(|_| "transfer_staging_failed".to_owned())?,
         );
@@ -331,6 +331,7 @@ impl UploadStaging for SessionIsolationStaging {
 
 #[cfg(all(test, windows))]
 mod tests {
+    use super::super::upload::AttachmentUploads;
     use super::*;
     use crate::features::remote_control::controller::protocol::LeaseContext;
     use crate::features::remote_control::controller::transfer::TransferDirection;

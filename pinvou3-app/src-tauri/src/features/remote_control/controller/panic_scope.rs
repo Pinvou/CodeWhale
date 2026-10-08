@@ -59,19 +59,23 @@ impl<F: Future> Future for GuardedFuture<F> {
 
     fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
-        let result = run(|| {
-            this.inner
-                .as_mut()
-                .expect("controller future polled after completion")
-                .as_mut()
-                .poll(context)
-        });
+        // A completed wrapper is fused: never poll/drop its old inner again.
+        let Some(inner) = this.inner.as_mut() else {
+            return Poll::Pending;
+        };
+        let result = run(|| inner.as_mut().poll(context));
         if result.is_ready() {
             // Destructor panics are part of a completed dispatch and must reach
             // its outer catch_unwind, with the same payload redaction.
             run(|| drop(this.inner.take()));
         }
         result
+    }
+}
+
+impl<F: Future> futures_util::future::FusedFuture for GuardedFuture<F> {
+    fn is_terminated(&self) -> bool {
+        self.inner.is_none()
     }
 }
 
@@ -268,6 +272,23 @@ mod tests {
         assert!(guarded.as_mut().poll(&mut context).is_pending());
         assert_eq!(REDACT_DEPTH.with(Cell::get), 0);
         drop(guarded);
+        assert_eq!(REDACT_DEPTH.with(Cell::get), 0);
+    }
+
+    #[test]
+    fn completed_poll_is_fused_without_repolling_or_leaking_the_redaction_scope() {
+        use futures_util::future::FusedFuture;
+        let polls = Cell::new(0);
+        let mut guarded = Box::pin(future(poll_fn(|_| {
+            polls.set(polls.get() + 1);
+            Poll::Ready(42)
+        })));
+        let mut context = Context::from_waker(futures_util::task::noop_waker_ref());
+        assert!(!guarded.is_terminated());
+        assert_eq!(guarded.as_mut().poll(&mut context), Poll::Ready(42));
+        assert!(guarded.is_terminated());
+        assert!(guarded.as_mut().poll(&mut context).is_pending());
+        assert_eq!(polls.get(), 1);
         assert_eq!(REDACT_DEPTH.with(Cell::get), 0);
     }
 }
