@@ -11,3 +11,5 @@ Billing 必须使用独立数据库，不能与其他应用共享 public schema�
 日期 CHECK 会拒绝已有无效 entitlement 有效期并回滚，操作员须调查事实，不能自动扩期或删除记录。900004 将旧退款非终态标记为 RESULT_UNKNOWN；无供应商终态证据不重发、不释放冻结。900005 为回调通知新增 provider_id/provider_version，旧行保持 NULL，不猜测或回填验签来源；缺少来源的待处理通知保留事实并拒绝资金处置，须独立人工对账。通知验签来源、冻结订单来源和当前适配器身份必须一致才允许继续。三项硬化均为 forward-only；回退应用版本须先核实权限和 SQL 兼容，不得恢复 runtime owner。
 
 隔离 PostgreSQL 回归覆盖历史状态与证据保留、新写拒绝、runtime DML 与禁止 DDL、生命周期 EXECUTE、未来增量和失败回滚。测试仅使用专属 UUID 数据库，不代表真实供应商或生产部署验收。
+
+已冻结的 Account 000050 down 与 Billing 900002 up 原文件带末尾空行，不能为格式门禁重写其历史 checksum。`.gitattributes` 仅对这两个精确路径豁免 `blank-at-eof`；其他空白问题及新迁移仍受原检查，迁移内容与校验值保持不变。
