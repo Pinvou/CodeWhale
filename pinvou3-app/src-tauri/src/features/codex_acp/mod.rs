@@ -167,17 +167,24 @@ fn should_reap_idle_session(
 /// 在同一把 sessions 锁内按现值复核回收条件，满足才 remove 并返回；不满足
 /// （快照后到达的 send_message 已置 busy / 刷新活动，或会话正被打开）返回
 /// `None`，调用方不得回收。复核与移除原子完成，消除快照→回收的 TOCTOU。
-async fn take_session_if_still_idle<T>(
+trait PoolOwnedRuntime {
+    fn finalize_pending_retirement(&self);
+}
+
+async fn take_session_if_still_idle<T: PoolOwnedRuntime>(
     sessions: &Mutex<HashMap<String, T>>,
     session_id: &str,
     is_still_idle: impl Fn(&T) -> bool,
 ) -> Option<T> {
     let mut sessions = sessions.lock().await;
     let entry = sessions.get(session_id)?;
+    entry.finalize_pending_retirement();
     if !is_still_idle(entry) {
         return None;
     }
-    sessions.remove(session_id)
+    lifecycle::take_finalized_runtime(&mut sessions, session_id, |runtime| {
+        runtime.finalize_pending_retirement()
+    })
 }
 
 /// Minimum idle time before a rebind may reclaim a resident ACP runtime.
@@ -289,14 +296,8 @@ const REBIND_ACP_LOCK_TIMEOUT: std::time::Duration = std::time::Duration::from_s
 /// The claim itself is performed by the caller because it also emits the
 /// timeline event. A losing path must not close timing or release `busy`: a
 /// newer turn may already own both session-level slots.
-fn finalize_claimed_turn(busy: &AtomicBool, claimed: bool, close_timing: impl FnOnce()) -> bool {
-    if !claimed {
-        return false;
-    }
-    close_timing();
-    busy.store(false, Ordering::Release);
-    true
-}
+#[cfg(test)]
+use lifecycle::finalize_claimed_turn;
 
 /// A delayed stop fallback may act only on the exact turn and runtime that
 /// were active when Stop was pressed. The sessions lock is held by the caller
@@ -338,7 +339,7 @@ enum RebindEvictTake<T> {
 /// the snapshot (busy set) or that is mid config-sync is kept untouched and
 /// reported by the command layer as post-busy — an in-flight prompt is never
 /// killed as a rebind side effect.
-async fn take_session_for_rebind<T>(
+async fn take_session_for_rebind<T: PoolOwnedRuntime>(
     sessions: &Mutex<HashMap<String, T>>,
     session_id: &str,
     is_rebind_evictable: impl Fn(&T) -> bool,
@@ -354,12 +355,14 @@ async fn take_session_for_rebind<T>(
     let Some(entry) = sessions.get(session_id) else {
         return RebindEvictTake::NoRuntime;
     };
+    entry.finalize_pending_retirement();
     if !is_rebind_evictable(entry) {
         return RebindEvictTake::Busy;
     }
-    sessions
-        .remove(session_id)
-        .map_or(RebindEvictTake::NoRuntime, RebindEvictTake::Reclaimed)
+    lifecycle::take_finalized_runtime(&mut sessions, session_id, |runtime| {
+        runtime.finalize_pending_retirement()
+    })
+    .map_or(RebindEvictTake::NoRuntime, RebindEvictTake::Reclaimed)
 }
 
 /// The fence decision of [`AcpPool::rebind_blocking_sessions`], extracted as
@@ -842,12 +845,16 @@ struct PendingPermission {
     option_ids: Vec<String>,
     activity: stall::ActivityClock,
     response_tx: oneshot::Sender<RequestPermissionResponse>,
+    bridge: Option<EventBridge>,
+    callback: Arc<()>,
 }
 
 struct PendingElicitation {
     view: CodexAcpPendingElicitation,
     activity: stall::ActivityClock,
     response_tx: oneshot::Sender<CreateElicitationResponse>,
+    bridge: Option<EventBridge>,
+    callback: Arc<()>,
 }
 
 async fn take_pending_permission(
@@ -928,9 +935,52 @@ struct AcpSession {
     /// Turns awaiting the Stop grace period. Deduplicate per turn so an older
     /// poller cannot prevent the next turn from installing its own fallback.
     cancel_settle_turns: parking_lot::Mutex<HashSet<String>>,
+    remote_retirement: parking_lot::Mutex<Option<(String, String)>>,
+}
+
+impl PoolOwnedRuntime for Arc<AcpSession> {
+    fn finalize_pending_retirement(&self) {
+        self.finish_remote_retirement();
+    }
 }
 
 impl AcpSession {
+    fn seal_remote_turn(&self, turn_id: &str, reason: &str) -> bool {
+        self.bridge.retire_current_turn(turn_id, || {
+            *self.remote_retirement.lock() = Some((turn_id.to_owned(), reason.to_owned()));
+            self.lifecycle.begin_expected_shutdown();
+            self.lifecycle.mark_connection_closed();
+            self.restart_requested.store(true, Ordering::Release);
+        })
+    }
+
+    /// Only the pool's registered-instance owner may close shared timing and
+    /// append the terminal event, before replacement initialization.
+    fn finish_remote_retirement(&self) {
+        if let Some((turn_id, reason)) = self.remote_retirement.lock().take() {
+            self.bridge.finish_retired_turn(&turn_id, &reason);
+            crate::features::assistant::timing::finish_turn(
+                self.bridge.pinvou_session_id(),
+                "Interrupted",
+                None,
+            );
+            self.busy.store(false, Ordering::Release);
+        }
+    }
+
+    fn reclaim_before_async_cleanup(&self) {
+        self.bridge.reclaim_runtime(|turn_id| {
+            if let Some(turn_id) = turn_id {
+                *self.remote_retirement.lock() = Some((turn_id, "runtime_reclaimed".to_owned()));
+            }
+            self.lifecycle.begin_expected_shutdown();
+            self.lifecycle.mark_connection_closed();
+            self.restart_requested.store(true, Ordering::Release);
+        });
+        self.finish_remote_retirement();
+        self.bridge.flush_journal();
+    }
+
     async fn set_mode(&self, mode_id: &str) -> Result<()> {
         set_session_mode(
             &self.connection,
@@ -993,8 +1043,19 @@ impl AcpSession {
             }
             Err(error) => {
                 let message = format!("ACP Agent: {error}");
-                let claimed = self.settle_turn_once(&turn_id, "Failed", Some(&message), None);
-                claimed && codex_upgrade_required(&message)
+                if codex_upgrade_required(&message) {
+                    return self.bridge.close_runtime_if(|| {
+                        if !self.settle_turn_once(&turn_id, "Failed", Some(&message), None) {
+                            return false;
+                        }
+                        self.lifecycle.begin_expected_shutdown();
+                        self.lifecycle.mark_connection_closed();
+                        self.restart_requested.store(true, Ordering::Release);
+                        true
+                    });
+                }
+                self.settle_turn_once(&turn_id, "Failed", Some(&message), None);
+                false
             }
         }
     }
@@ -1012,13 +1073,20 @@ impl AcpSession {
         error: Option<&str>,
         recovery_reason: Option<&str>,
     ) -> bool {
-        let claimed = self
-            .bridge
-            .finish_turn_once(turn_id, status, error, recovery_reason);
-        let session_id = self.bridge_session_id();
-        finalize_claimed_turn(&self.busy, claimed, || {
-            crate::features::assistant::timing::finish_turn(&session_id, status, error);
-        })
+        self.bridge.settle_runtime_turn(
+            &self.busy,
+            || {
+                self.bridge
+                    .finish_turn_once(turn_id, status, error, recovery_reason)
+            },
+            || {
+                crate::features::assistant::timing::finish_turn(
+                    self.bridge.pinvou_session_id(),
+                    status,
+                    error,
+                )
+            },
+        )
     }
 
     /// Wait for `session/prompt` and guard against an agent that never responds.
@@ -3017,9 +3085,10 @@ impl AcpPool {
             session_ids
                 .iter()
                 .filter_map(|session_id| {
-                    sessions
-                        .remove(session_id)
-                        .map(|runtime| (session_id.clone(), runtime))
+                    lifecycle::take_finalized_runtime(&mut sessions, session_id, |runtime| {
+                        runtime.finish_remote_retirement()
+                    })
+                    .map(|runtime| (session_id.clone(), runtime))
                 })
                 .collect::<Vec<_>>()
         };
@@ -3563,6 +3632,20 @@ impl AcpPool {
         attachments: Vec<crate::features::files::file_ingest::IngestResult>,
         workspace_references: Vec<String>,
     ) -> Result<()> {
+        self.send_message_with_owner(session_id, content, attachments, workspace_references)
+            .await
+            .map(|_| ())
+    }
+
+    /// Retain the exact runtime AND turn identity at admission, before any
+    /// detached prompt can finish or a replacement runtime can be installed.
+    async fn send_message_with_owner(
+        &self,
+        session_id: &str,
+        content: String,
+        attachments: Vec<crate::features::files::file_ingest::IngestResult>,
+        workspace_references: Vec<String>,
+    ) -> Result<remote_turn::OwnedAcpTurn> {
         let workspace = self.execution_workspace(session_id)?;
         let workspace_references =
             workspace::resolve_workspace_references(&workspace, &workspace_references)?;
@@ -3579,32 +3662,81 @@ impl AcpPool {
             &workspace_references,
             &runtime.prompt_capabilities,
         )?;
-        admit_prompt_turn(&runtime.busy, &runtime.configuring, session_id, || {
-            self.session_store
-                .touch_activity(session_id)
-                .context("更新 ACP 会话最近活跃时间失败")
-        })?;
-        // Register the exact turn before yielding or exposing the admitted
-        // request to Stop. `busy == true` therefore always has a turn id that
-        // the cancel fallback can bind to instead of guessing at fire time.
         let turn_id = runtime
             .bridge
-            .begin_turn(&content, &prepared.display_attachments);
-        // Start silence measurement when the prompt is sent. Agent activity and
-        // host delivery of card answers or cancellation can reset it afterward.
-        stall::mark_activity(&runtime.activity);
+            .with_active_runtime(|| -> Result<String> {
+                if !runtime.lifecycle.is_running()
+                    || runtime.restart_requested.load(Ordering::Acquire)
+                {
+                    bail!("ACP runtime 已退休，请重试新实例");
+                }
+                admit_prompt_turn(&runtime.busy, &runtime.configuring, session_id, || {
+                    self.session_store
+                        .touch_activity(session_id)
+                        .context("更新 ACP 会话最近活跃时间失败")
+                })?;
+                // Register the exact turn before yielding or exposing the admitted
+                // request to Stop. `busy == true` therefore always has a turn id that
+                // the cancel fallback can bind to instead of guessing at fire time.
+                let turn_id = runtime
+                    .bridge
+                    .begin_turn(&content, &prepared.display_attachments);
+                // Start silence measurement when the prompt is sent. Agent activity and
+                // host delivery of card answers or cancellation can reset it afterward.
+                stall::mark_activity(&runtime.activity);
+                Ok(turn_id)
+            })
+            .context("ACP runtime 已退休，请重试新实例")??;
         drop(_admission);
+        let owned = remote_turn::OwnedAcpTurn::new(runtime.clone(), turn_id.clone());
         let pool = self.clone();
-        let session_id = session_id.to_string();
         tokio::spawn(async move {
-            if runtime.prompt(turn_id, prepared.blocks).await {
-                pool.handle_outdated_codex_runtime(&session_id).await;
+            if runtime.clone().prompt(turn_id, prepared.blocks).await {
+                pool.handle_outdated_codex_runtime(runtime).await;
             }
         });
-        Ok(())
+        Ok(owned)
     }
 
-    async fn handle_outdated_codex_runtime(&self, session_id: &str) {
+    async fn retire_remote_turn(&self, runtime: Arc<AcpSession>, turn_id: &str, reason: &str) {
+        // No await before fencing. A stale turn on a reused Arc is a no-op.
+        if !runtime.seal_remote_turn(turn_id, reason) {
+            return;
+        }
+        let captured = runtime.clone();
+        tokio::spawn(async move {
+            captured.shutdown().await;
+        });
+        let sessions = self.sessions.lock().await;
+        let session_id = runtime.bridge.pinvou_session_id();
+        if sessions
+            .get(session_id)
+            .is_some_and(|current| Arc::ptr_eq(current, &runtime))
+        {
+            runtime.finish_remote_retirement();
+            // Keep the sealed entry until get_or_spawn atomically reclaims it.
+            // Its dead-path cleanup shares this lock and cannot seed before flush.
+        } else {
+            // A newer entry owns session-level state. Never publish/close its
+            // timeline or timing through this old captured runtime.
+            runtime.remote_retirement.lock().take();
+        }
+        drop(sessions);
+        self.cancel_pending_permissions_for_runtime(&runtime).await;
+        self.cancel_pending_elicitations_for_runtime(&runtime).await;
+    }
+
+    async fn handle_outdated_codex_runtime(&self, captured: Arc<AcpSession>) {
+        let session_id = captured.bridge.pinvou_session_id();
+        let mut sessions = self.sessions.lock().await;
+        let Some(runtime) = lifecycle::take_owned_runtime(
+            &mut sessions,
+            session_id,
+            |current| Arc::ptr_eq(current, &captured),
+            |current| current.reclaim_before_async_cleanup(),
+        ) else {
+            return;
+        };
         let operation_id = diagnostics::operation_id("runtime-upgrade");
         let current = self.runtime_probe.read().codex.clone();
         diagnostics::write(
@@ -3622,7 +3754,7 @@ impl AcpPool {
                     .unwrap_or("none")
             ),
         );
-        self.evict(session_id).await;
+        self.acp_metadata_backends.write().remove(session_id);
         self.codex_upgrade_required.store(true, Ordering::Release);
         // 下一次状态读取需要补充真实安装来源以选择正确升级路径；正常首屏不为
         // 这个低频分支预付 npm/brew 探测成本。
@@ -3642,6 +3774,10 @@ impl AcpPool {
             "upgrade_required:user_confirmation_needed",
             "official_upgrade_required",
         );
+        drop(sessions);
+        self.cancel_pending_permissions_for_runtime(&runtime).await;
+        self.cancel_pending_elicitations_for_runtime(&runtime).await;
+        runtime.shutdown().await;
     }
 
     pub async fn cancel(&self, session_id: &str) {
@@ -3764,7 +3900,13 @@ impl AcpPool {
         // probes) self-heal on the next list(); idle eviction goes through
         // `evict_if_idle`, never through this path, so its map entries stay.
         self.acp_metadata_backends.write().remove(session_id);
-        if let Some(runtime) = self.sessions.lock().await.remove(session_id) {
+        let runtime = {
+            let mut sessions = self.sessions.lock().await;
+            lifecycle::take_finalized_runtime(&mut sessions, session_id, |runtime| {
+                runtime.finish_remote_retirement()
+            })
+        };
+        if let Some(runtime) = runtime {
             runtime.shutdown().await;
         }
     }
@@ -3990,7 +4132,14 @@ impl AcpPool {
     pub async fn shutdown_all(&self) {
         let runtimes: Vec<Arc<AcpSession>> = {
             let mut sessions = self.sessions.lock().await;
-            sessions.drain().map(|(_, runtime)| runtime).collect()
+            let ids = sessions.keys().cloned().collect::<Vec<_>>();
+            ids.iter()
+                .filter_map(|id| {
+                    lifecycle::take_finalized_runtime(&mut sessions, id, |runtime| {
+                        runtime.finish_remote_retirement()
+                    })
+                })
+                .collect()
         };
         for runtime in runtimes {
             runtime.shutdown().await;
@@ -4157,21 +4306,24 @@ impl AcpPool {
         let response = RequestPermissionResponse::new(RequestPermissionOutcome::Selected(
             SelectedPermissionOutcome::new(option_id.to_string()),
         ));
-        request
-            .response_tx
-            .send(response)
-            .map_err(|_| anyhow::anyhow!("Codex ACP 权限请求已关闭"))?;
-        if let Some(runtime) = self.sessions.lock().await.get(session_id).cloned() {
-            runtime.bridge.emit(
-                "permission_resolved",
-                json!({
-                    "toolCallId": tool_call_id,
-                    "optionId": option_id,
-                    "outcome": "selected",
-                }),
-            );
-        }
-        Ok(())
+        let bridge = request.bridge.clone().context("Codex ACP 权限请求已关闭")?;
+        bridge
+            .with_active_runtime(|| -> Result<()> {
+                request
+                    .response_tx
+                    .send(response)
+                    .map_err(|_| anyhow::anyhow!("Codex ACP 权限请求已关闭"))?;
+                bridge.emit(
+                    "permission_resolved",
+                    json!({
+                        "toolCallId": tool_call_id,
+                        "optionId": option_id,
+                        "outcome": "selected",
+                    }),
+                );
+                Ok(())
+            })
+            .context("Codex ACP 权限请求已关闭")?
     }
 
     pub async fn respond_elicitation(
@@ -4194,20 +4346,55 @@ impl AcpPool {
         };
         let key = elicitation_key(session_id, elicitation_id);
         let request = take_pending_elicitation(self.pending_elicitations.as_ref(), &key).await?;
-        request
-            .response_tx
-            .send(response)
-            .map_err(|_| anyhow::anyhow!("Codex ACP 输入请求已关闭"))?;
-        if let Some(runtime) = self.sessions.lock().await.get(session_id).cloned() {
-            runtime.bridge.emit(
-                "elicitation_resolved",
-                json!({
-                    "elicitationId": elicitation_id,
-                    "action": action,
-                }),
-            );
+        let bridge = request.bridge.clone().context("Codex ACP 输入请求已关闭")?;
+        bridge
+            .with_active_runtime(|| -> Result<()> {
+                request
+                    .response_tx
+                    .send(response)
+                    .map_err(|_| anyhow::anyhow!("Codex ACP 输入请求已关闭"))?;
+                bridge.emit(
+                    "elicitation_resolved",
+                    json!({
+                        "elicitationId": elicitation_id,
+                        "action": action,
+                    }),
+                );
+                Ok(())
+            })
+            .context("Codex ACP 输入请求已关闭")?
+    }
+
+    async fn cancel_pending_permissions_for_runtime(&self, runtime: &AcpSession) {
+        let mut pending = self.pending_permissions.lock().await;
+        let keys = pending
+            .iter()
+            .filter(|(_, request)| Arc::ptr_eq(&request.activity, &runtime.activity))
+            .map(|(key, _)| key.clone())
+            .collect::<Vec<_>>();
+        for key in keys {
+            if let Some(request) = pending.remove(&key) {
+                let _ = request.response_tx.send(RequestPermissionResponse::new(
+                    RequestPermissionOutcome::Cancelled,
+                ));
+            }
         }
-        Ok(())
+    }
+
+    async fn cancel_pending_elicitations_for_runtime(&self, runtime: &AcpSession) {
+        let mut pending = self.pending_elicitations.lock().await;
+        let keys = pending
+            .iter()
+            .filter(|(_, request)| Arc::ptr_eq(&request.activity, &runtime.activity))
+            .map(|(key, _)| key.clone())
+            .collect::<Vec<_>>();
+        for key in keys {
+            if let Some(request) = pending.remove(&key) {
+                let _ = request
+                    .response_tx
+                    .send(CreateElicitationResponse::new(ElicitationAction::Cancel));
+            }
+        }
     }
 
     async fn cancel_pending_permissions(&self, session_id: &str) {
@@ -4229,7 +4416,11 @@ impl AcpPool {
         let mut pending = self.pending_permissions.lock().await;
         let keys = pending
             .iter()
-            .filter(|(_, request)| request.view.session_id == session_id)
+            .filter(|(_, request)| {
+                request.view.session_id == session_id
+                    && bridge
+                        .is_none_or(|bridge| Arc::ptr_eq(&request.activity, &bridge.activity()))
+            })
             .map(|(key, _)| key.clone())
             .collect::<Vec<_>>();
         let mut cancelled = Vec::new();
@@ -4275,7 +4466,11 @@ impl AcpPool {
         let mut pending = self.pending_elicitations.lock().await;
         let keys = pending
             .iter()
-            .filter(|(_, request)| request.view.session_id == session_id)
+            .filter(|(_, request)| {
+                request.view.session_id == session_id
+                    && bridge
+                        .is_none_or(|bridge| Arc::ptr_eq(&request.activity, &bridge.activity()))
+            })
             .map(|(key, _)| key.clone())
             .collect::<Vec<_>>();
         let mut cancelled = Vec::new();
@@ -4332,13 +4527,17 @@ impl AcpPool {
                 return Ok(runtime);
             }
             RuntimeLookup::Dead(runtime) => {
+                let was_running = runtime.lifecycle.is_running();
+                // Finalize before the first await: dropping this cleanup cannot
+                // leave an open old bridge writing into a replacement's tail.
+                runtime.reclaim_before_async_cleanup();
+                let captured = runtime.clone();
+                tokio::spawn(async move { captured.shutdown().await });
                 // Resolve cards from either the stalled or exited generation
                 // before the replacement watchdog observes shared pending maps.
-                self.cancel_pending_permissions_with_bridge(session_id, Some(&runtime.bridge))
-                    .await;
-                self.cancel_pending_elicitations_with_bridge(session_id, Some(&runtime.bridge))
-                    .await;
-                if runtime.lifecycle.is_running() {
+                self.cancel_pending_permissions_for_runtime(&runtime).await;
+                self.cancel_pending_elicitations_for_runtime(&runtime).await;
+                if was_running {
                     // Repeated stalls in one window request replacement. The first
                     // stall remains conservative because long work can look wedged.
                     runtime.shutdown().await;
@@ -4656,28 +4855,47 @@ impl AcpPool {
                             request: request_value.clone(),
                         };
                         let (response_tx, response_rx) = oneshot::channel();
-                        pending_for_permission.lock().await.insert(
-                            key.clone(),
-                            PendingPermission {
-                                view,
-                                option_ids,
-                                activity: bridge_for_permission.activity(),
-                                response_tx,
-                            },
-                        );
-                        bridge_for_permission.emit(
-                            "permission_requested",
-                            json!({
-                                "toolCallId": tool_call_id,
-                                "request": request_value,
-                            }),
-                        );
-                        // A permission request is agent activity and resets the silence window.
-                        bridge_for_permission.note_agent_activity();
+                        let callback = Arc::new(());
+                        let admitted = {
+                            let mut pending = pending_for_permission.lock().await;
+                            bridge_for_permission
+                                .with_active_runtime(|| {
+                                    pending.insert(
+                                        key.clone(),
+                                        PendingPermission {
+                                            view,
+                                            option_ids,
+                                            activity: bridge_for_permission.activity(),
+                                            response_tx,
+                                            bridge: Some(bridge_for_permission.clone()),
+                                            callback: callback.clone(),
+                                        },
+                                    );
+                                    bridge_for_permission.emit(
+                                        "permission_requested",
+                                        json!({
+                                            "toolCallId": tool_call_id,
+                                            "request": request_value,
+                                        }),
+                                    );
+                                    // A permission request is agent activity and resets the silence window.
+                                    bridge_for_permission.note_agent_activity();
+                                })
+                                .is_some()
+                        };
+                        if !admitted {
+                            return responder.respond(RequestPermissionResponse::new(
+                                RequestPermissionOutcome::Cancelled,
+                            ));
+                        }
                         let response = response_rx.await.unwrap_or_else(|_| {
                             RequestPermissionResponse::new(RequestPermissionOutcome::Cancelled)
                         });
-                        pending_for_permission.lock().await.remove(&key);
+                        lifecycle::remove_owned_callback(
+                            &mut *pending_for_permission.lock().await,
+                            &key,
+                            |request| Arc::ptr_eq(&request.callback, &callback),
+                        );
                         // Exclude the entire human think-time interval from
                         // the stall clock. Without this reset, answering an
                         // old card can immediately cancel healthy follow-up
@@ -4700,22 +4918,37 @@ impl AcpPool {
                             request: request_value.clone(),
                         };
                         let (response_tx, response_rx) = oneshot::channel();
-                        pending_for_elicitation.lock().await.insert(
-                            key.clone(),
-                            PendingElicitation {
-                                view,
-                                activity: bridge_for_elicitation.activity(),
-                                response_tx,
-                            },
-                        );
-                        bridge_for_elicitation.emit(
-                            "elicitation_requested",
-                            json!({
-                                "elicitationId": elicitation_id,
-                                "request": request_value,
-                            }),
-                        );
-                        bridge_for_elicitation.note_agent_activity();
+                        let callback = Arc::new(());
+                        let admitted = {
+                            let mut pending = pending_for_elicitation.lock().await;
+                            bridge_for_elicitation
+                                .with_active_runtime(|| {
+                                    pending.insert(
+                                        key.clone(),
+                                        PendingElicitation {
+                                            view,
+                                            activity: bridge_for_elicitation.activity(),
+                                            response_tx,
+                                            bridge: Some(bridge_for_elicitation.clone()),
+                                            callback: callback.clone(),
+                                        },
+                                    );
+                                    bridge_for_elicitation.emit(
+                                        "elicitation_requested",
+                                        json!({
+                                            "elicitationId": elicitation_id,
+                                            "request": request_value,
+                                        }),
+                                    );
+                                    bridge_for_elicitation.note_agent_activity();
+                                })
+                                .is_some()
+                        };
+                        if !admitted {
+                            return responder.respond(CreateElicitationResponse::new(
+                                ElicitationAction::Cancel,
+                            ));
+                        }
                         let (response, cancelled_by_agent) = tokio::select! {
                             response = response_rx => (
                                 response.unwrap_or_else(|_| {
@@ -4728,18 +4961,24 @@ impl AcpPool {
                                 true,
                             ),
                         };
-                        pending_for_elicitation.lock().await.remove(&key);
-                        bridge_for_elicitation.note_agent_activity();
-                        if cancelled_by_agent {
-                            bridge_for_elicitation.emit(
-                                "elicitation_resolved",
-                                json!({
-                                    "elicitationId": elicitation_id,
-                                    "action": "cancel",
-                                    "reason": "agent_cancelled",
-                                }),
-                            );
-                        }
+                        lifecycle::finish_owned_callback(
+                            &mut *pending_for_elicitation.lock().await,
+                            &key,
+                            |request| Arc::ptr_eq(&request.callback, &callback),
+                            || {
+                                bridge_for_elicitation.note_agent_activity();
+                                if cancelled_by_agent {
+                                    bridge_for_elicitation.emit(
+                                        "elicitation_resolved",
+                                        json!({
+                                            "elicitationId": elicitation_id,
+                                            "action": "cancel",
+                                            "reason": "agent_cancelled",
+                                        }),
+                                    );
+                                }
+                            },
+                        );
                         responder.respond(response)
                     },
                     agent_client_protocol::on_receive_request!(),
@@ -4944,6 +5183,7 @@ impl AcpPool {
             restart_requested: AtomicBool::new(false),
             resumed_session,
             cancel_settle_turns: parking_lot::Mutex::new(HashSet::new()),
+            remote_retirement: parking_lot::Mutex::new(None),
         })
     }
 
@@ -5463,6 +5703,65 @@ mod tests {
         }
     }
 
+    impl super::PoolOwnedRuntime for FakeIdleEntry {
+        fn finalize_pending_retirement(&self) {}
+    }
+
+    struct PendingRetirementProbe {
+        pending: AtomicBool,
+        busy: AtomicBool,
+        terminal_and_flush: AtomicUsize,
+    }
+
+    impl super::PoolOwnedRuntime for Arc<PendingRetirementProbe> {
+        fn finalize_pending_retirement(&self) {
+            if self.pending.swap(false, Ordering::AcqRel) {
+                self.terminal_and_flush.fetch_add(1, Ordering::AcqRel);
+                self.busy.store(false, Ordering::Release);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn remote_dropped_cleanup_is_finalized_by_actual_idle_and_rebind_take() {
+        for rebind in [false, true] {
+            let old = Arc::new(PendingRetirementProbe {
+                pending: AtomicBool::new(true),
+                busy: AtomicBool::new(true),
+                terminal_and_flush: AtomicUsize::new(0),
+            });
+            let sessions = Mutex::new(HashMap::from([("old".to_string(), old.clone())]));
+            let taken = if rebind {
+                match take_session_for_rebind(&sessions, "old", |runtime| {
+                    !runtime.busy.load(Ordering::Acquire)
+                })
+                .await
+                {
+                    RebindEvictTake::Reclaimed(runtime) => Some(runtime),
+                    _ => None,
+                }
+            } else {
+                take_session_if_still_idle(&sessions, "old", |runtime| {
+                    !runtime.busy.load(Ordering::Acquire)
+                })
+                .await
+            };
+            assert!(Arc::ptr_eq(&taken.unwrap(), &old));
+            assert!(sessions.lock().await.is_empty());
+            assert_eq!(old.terminal_and_flush.load(Ordering::Acquire), 1);
+            super::PoolOwnedRuntime::finalize_pending_retirement(&old);
+            assert_eq!(old.terminal_and_flush.load(Ordering::Acquire), 1);
+            // Replacement can seed only after the one terminal+flush above.
+            let new = Arc::new(PendingRetirementProbe {
+                pending: AtomicBool::new(false),
+                busy: AtomicBool::new(true),
+                terminal_and_flush: AtomicUsize::new(0),
+            });
+            sessions.lock().await.insert("old".into(), new.clone());
+            assert!(new.busy.load(Ordering::Acquire));
+        }
+    }
+
     #[tokio::test]
     async fn idle_reap_skips_session_with_activity_after_snapshot() {
         // PR #318 审阅时序的确定性回归：reap 快照判空闲后、evict 的 remove +
@@ -5527,6 +5826,10 @@ mod tests {
         configuring: AtomicBool,
         prompt_pending: AtomicUsize,
         last_activity: parking_lot::Mutex<Instant>,
+    }
+
+    impl super::PoolOwnedRuntime for FakeRebindEntry {
+        fn finalize_pending_retirement(&self) {}
     }
 
     impl FakeRebindEntry {
@@ -6368,6 +6671,8 @@ mod tests {
                 option_ids: vec!["allow".to_string()],
                 activity: activity.clone(),
                 response_tx,
+                bridge: None,
+                callback: Arc::new(()),
             },
         );
 

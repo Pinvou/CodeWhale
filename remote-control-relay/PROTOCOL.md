@@ -569,7 +569,7 @@ text “连接码无效或已失效”. A legacy conflict remains exactly
 plus close code `1008`.
 
 The contract digest is
-`bb1e1aebb62fb797155eed4e656cd55c41ef6a1fe278a9fe85be0991409afd70`.
+`d844a4f207645c4d40d443529b9c982492898c7ae30a810448e3ae46e894df5b`.
 It is SHA-256 over canonical JSON (object keys recursively sorted, array order
 preserved, compact JSON scalars) of `{contract,fixture}`. `contract` is the
 executable manifest containing every schema required/optional field, role
@@ -994,3 +994,52 @@ public or private key material, enrollment proofs, credential references,
 tasks, prompts, tool arguments/results, filenames, attachment/artifact bytes,
 snapshots or journal contents. Validation errors identify only the bounded field
 name, not its supplied value.
+
+## B-local turn budget and capability identities
+
+The remote chat and ACP adapters share one total deadline, starting before
+admission/submission and including the subsequent busy wait. The B process
+reads `PINVOU_REMOTE_TASK_TURN_TIMEOUT_SECS`: absent means 1800 seconds (30
+minutes), and an explicit value must be decimal digits in 1..86400. Invalid or
+non-Unicode configuration rejects admission with
+`task_turn_timeout_config_invalid`. A cannot set or extend this budget through
+the wire protocol. Progress, busy observations and retries do not refresh it.
+Expiry reports `task_turn_timeout`, not successful completion.
+
+Chat cleanup targets the captured reservation generation and, where observed,
+the exact foundation turn identity. It never uses the session-wide subagent
+cancel operation or latches a stop disposition on an unobserved/replaced slot;
+the foundation's existing cancelled-turn mailbox settlement owns that turn's
+children. Local user Stop retains its existing session-wide semantics.
+
+ACP cleanup seals only the captured runtime and turn: subsequent admissions,
+notifications, permission/elicitation insertion, answers and event publication
+on that instance are rejected. The pool finalizes and flushes its old terminal
+under the instance-identity check before a replacement bridge initializes its
+journal sequence. Termination uses the captured runtime, never a fresh lookup
+by session ID. Same-key card callbacks use one-shot identities, so a late old
+callback cannot delete a new request. A stale turn on a reused live instance
+cannot retire its successor. Terminal claim, shared timing finalization and
+busy release share the same instance fence. An upgrade-required terminal also
+seals admission atomically; its delayed handler can remove only the captured
+registered runtime and cannot publish upgrade errors for a replacement.
+Dead-instance reclamation seals and flushes before its first asynchronous
+cleanup, so abandoning cleanup cannot leave an open old event bridge.
+Asynchronous cleanup awaits have a five-second
+bound, without changing the original deadline. This does not preempt a
+synchronously executing host I/O operation or lock wait. Captured ACP shutdown
+continues independently, and a sealed entry is never
+reopened when cleanup is cancelled. This is an asynchronous total budget, not
+a hard real-time preemption guarantee for synchronous host I/O: overdue Ready
+results are rejected when control returns.
+
+Capability publication converts each local Skill directory identity into a
+stable opaque ASCII `skill-` plus SHA-256 ID, with a versioned domain and
+length-prefixed exact UTF-8 source identity. Display names remain Unicode; no
+source path or Skill body is exported. B publishes the private source/mode
+mapping atomically with the snapshot revision and resolves task selections
+against that exact revision, lease, expiry and mode, then checks the live
+enabled local Skills. Foreign/raw IDs, duplicates and scope mismatches fail
+closed. This wave covers publication and command admission, not the later
+execution-specific selected-Skill materialization/wiring; it does not claim a
+real-provider end-to-end selected-Skill run.

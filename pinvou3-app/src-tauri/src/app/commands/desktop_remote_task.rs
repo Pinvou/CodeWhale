@@ -14,8 +14,10 @@ use tokio_util::sync::CancellationToken;
 
 use crate::features::assistant::engine_pool::EnginePool;
 use crate::features::assistant::remote_turn::{EnginePoolChatEngine, EnginePoolChatTurnPort};
+use crate::features::assistant::skill_materialization::enabled_skills_for;
 use crate::features::codex_acp::AcpPool;
 use crate::features::codex_acp::remote_turn::{AcpPoolCodeTurnPort, RemoteWorkspaceAuthorizations};
+use crate::features::marketplace::ConnectorScope;
 use crate::features::remote_control::controller::capabilities::CapabilitySnapshotManager;
 use crate::features::remote_control::controller::controlled::ControlledDeviceManager;
 use crate::features::remote_control::controller::protocol::{
@@ -288,6 +290,41 @@ pub fn desktop_remote_task_submit(
         .and_then(Value::as_str)
         .ok_or_else(|| "task_request_invalid".to_owned())?
         .to_owned();
+    let revision = validated
+        .get("capability_revision")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "task_request_invalid".to_owned())?;
+    let skill_ids: Vec<String> = validated
+        .get("input")
+        .and_then(|input| input.get("skill_ids"))
+        .and_then(Value::as_array)
+        .ok_or_else(|| "task_skill_invalid".to_owned())?
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .map(str::to_owned)
+                .ok_or_else(|| "task_skill_invalid".to_owned())
+        })
+        .collect::<Result<_, _>>()?;
+    let skill_names = capabilities
+        .skills_for_task(revision, &lease, &mode, &skill_ids, now_b)
+        .map_err(|error| error.code.to_owned())?;
+    let scope = match mode.as_str() {
+        TASK_MODE_CHAT => ConnectorScope::Plain,
+        TASK_MODE_CODE => ConnectorScope::Code,
+        _ => return Err("task_mode_mismatch".to_owned()),
+    };
+    // Resolve only against B's own source set, and check live enablement again.
+    // A never supplies a directory name or path. DEV-20/remote runtime wiring
+    // remains responsible for task-scoped materialization at execution time.
+    let enabled = enabled_skills_for(scope, None);
+    if skill_names
+        .iter()
+        .any(|name| !enabled.iter().any(|(candidate, _)| candidate == name))
+    {
+        return Err("task_skill_not_enabled".to_owned());
+    }
     if mode == TASK_MODE_CODE {
         let workspace_id = validated
             .get("input")
@@ -295,10 +332,6 @@ pub fn desktop_remote_task_submit(
             .and_then(Value::as_str)
             .ok_or_else(|| "task_workspace_required".to_owned())?
             .to_owned();
-        let revision = validated
-            .get("capability_revision")
-            .and_then(Value::as_str)
-            .ok_or_else(|| "task_request_invalid".to_owned())?;
         // The snapshot is a hint; admitting the task still rechecks the live B
         // policy through the bounded ACP authorization registry below.
         capabilities

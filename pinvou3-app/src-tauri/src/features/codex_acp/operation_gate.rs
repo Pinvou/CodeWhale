@@ -1,6 +1,6 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use serde_json::json;
 
 use super::{AcpPool, AcpSession, CodexAcpSessionInfo, events::patch_acp_state};
@@ -164,25 +164,32 @@ impl AcpPool {
         change: SessionConfigChange<'_>,
     ) -> Result<CodexAcpSessionInfo> {
         let runtime = self.get_or_spawn(session_id).await?;
-        let _configuration =
-            begin_configuration(&runtime.busy, &runtime.configuring, change.busy_error())?;
+        let _configuration = runtime
+            .bridge
+            .with_active_runtime(|| {
+                begin_configuration(&runtime.busy, &runtime.configuring, change.busy_error())
+            })
+            .context("ACP runtime 已退休，请重试新实例")??;
         let config_id = change.config_id();
         let value_id = change.value_id();
         if let Err(error) = change.apply(&runtime).await {
             return Err(error);
         }
-        self.remember_config_choice(session_id, config_id, value_id);
-        runtime.bridge.emit(
-            "config_change_applied",
-            json!({ "configId": config_id, "valueId": value_id }),
-        );
-        let info = runtime.info(
-            &self.agents,
-            self.pending_permissions_for(session_id).await,
-            self.pending_elicitations_for(session_id).await,
-        );
-        patch_acp_state(session_id, json!({ "session": &info }))?;
-        Ok(info)
+        let pending_permissions = self.pending_permissions_for(session_id).await;
+        let pending_elicitations = self.pending_elicitations_for(session_id).await;
+        runtime
+            .bridge
+            .with_active_runtime(|| -> Result<CodexAcpSessionInfo> {
+                self.remember_config_choice(session_id, config_id, value_id);
+                runtime.bridge.emit(
+                    "config_change_applied",
+                    json!({ "configId": config_id, "valueId": value_id }),
+                );
+                let info = runtime.info(&self.agents, pending_permissions, pending_elicitations);
+                patch_acp_state(session_id, json!({ "session": &info }))?;
+                Ok(info)
+            })
+            .context("ACP runtime 已退休，请重试新实例")?
     }
 
     pub async fn set_model(&self, session_id: &str, model_id: &str) -> Result<CodexAcpSessionInfo> {
