@@ -133,7 +133,7 @@ func TestUsageCommandLookupThroughCurrentHandler(t *testing.T) {
 			{"permission-denied", "denied", input.IdempotencyKey, "TOKEN_USAGE_RECONCILIATION_RETRY", 403},
 			{"missing-original-key", "actor", uuid.NewString(), "TOKEN_USAGE_RECONCILIATION_RETRY", 404},
 			{"short-key", "actor", "short", "TOKEN_USAGE_RECONCILIATION_RETRY", 400},
-			{"future-runtime-denied", "actor", input.IdempotencyKey, "TOKEN_ROUTE_PROVISIONING_REPAIR", 400},
+			{"future-runtime-denied", "actor", input.IdempotencyKey, "TOKEN_USAGE_FUTURE_RUNTIME", 400},
 			{"unknown-command-denied", "actor", input.IdempotencyKey, "TOKEN_FUTURE_UNKNOWN", 400},
 		} {
 			t.Run(check.name, func(t *testing.T) {
