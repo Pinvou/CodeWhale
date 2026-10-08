@@ -536,6 +536,7 @@ try {
   assert.ok(!chatView.includes('sessionAgentBackend'), 'DeepSeek ChatView must not branch on Codex state');
 
   const main = readFileSync(path.join(root, 'src', 'app', 'main.jsx'), 'utf8');
+  const sessionListPipeline = readFileSync(path.join(root, 'src', 'shared', 'session-list-pipeline.js'), 'utf8');
   const detachedShell = readFileSync(path.join(root, 'src', 'app', 'DetachedShell.jsx'), 'utf8');
   const lazyCodexView = readFileSync(
     path.join(root, 'src', 'features', 'codex', 'LazyCodexAcpView.jsx'),
@@ -588,7 +589,8 @@ try {
     'an accepted ACP turn must refresh the shared recent-session list while it is still running',
   );
   assert.ok(main.includes("{ id: 'code', label: t.sidebarTaskFilterCodeSessions }")
-    && main.includes("if (taskListFilter === 'code') return chat.taskKind === 'codex';")
+    && sessionListPipeline.includes("if (tabId === 'code') return sessions.filter((chat) => chat.taskKind === 'codex');")
+    && main.includes('filterSessionsByTab(allSidebarTasks, taskListFilter)')
     && i18n.includes("sidebarTaskFilterCodeSessions: '代码会话'")
     && i18n.includes("sidebarTaskFilterCodeSessions: 'Code sessions'")
     && i18n.includes("sidebarTaskFilterCodeSessions: 'コードセッション'")
