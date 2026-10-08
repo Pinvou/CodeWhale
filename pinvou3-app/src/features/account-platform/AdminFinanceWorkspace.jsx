@@ -3,8 +3,10 @@ import { financeCopy } from '../../shared/i18n.js';
 import { formatBalance } from './balance-view.js';
 import { formatFen, integerMoney, requireFinanceCollection, requireFinanceID, wholeRefundTargets } from './finance-contract.js';
 import { useFinanceOperation } from './useFinanceOperation.js';
-import { walletAdjustmentApprovalDraft, buildPaymentControlApprovalDraft, currentApprovalEditDraft } from './admin-finance.js';
+import { walletAdjustmentApprovalDraft, buildPaymentControlApprovalDraft, currentApprovalEditDraft, adjustmentApprovalAction, latestApprovalByTarget, currentPendingAdjustment, walletReplacementEligible } from './admin-finance.js';
 import { createAndSubmitFreshGovernedApproval, updateAndSubmitGovernedApproval } from './admin-governed-approval-workflow.js';
+import { loadFinancePage } from './admin-finance-pagination.js';
+import { secureRequestID } from './request-id.js';
 import { AdminPaymentReviewQueue } from './AdminPaymentReviewQueue.jsx';
 
 function Feedback({ operation, copy }) {
@@ -24,10 +26,10 @@ function Payments({ client, copy, language, permissions, owner }) {
   const operation = useFinanceOperation(owner, copy, client, 'payments');
   const load = async (next = cursor) => {
     const result = await operation.read(async () => {
-      const [orders, overview] = await Promise.all([client.paymentOrders({ q: query, cursor: next }), client.request('billing', '/admin/v1/overview')]);
-      requireFinanceCollection(orders); return { orders, enabled: overview?.payment_capabilities?.normal_refund_creation_enabled === true };
+      const [orders, overview] = await Promise.all([loadFinancePage({ q: query, cursor: next }, filters => client.paymentOrders(filters), () => { setCursor(''); setPrevious([]); }), client.request('billing', '/admin/v1/overview')]);
+      return { orders: orders.value, cursor: orders.query.cursor, enabled: overview?.payment_capabilities?.normal_refund_creation_enabled === true };
     });
-    if (result) { setPage(result.orders); setCursor(next); setRefundEnabled(result.enabled); }
+    if (result) { setPage(result.orders); setCursor(result.cursor); setRefundEnabled(result.enabled); }
   };
   useEffect(() => { void load(''); return () => {}; }, [client, owner]); // eslint-disable-line react-hooks/exhaustive-deps
   const open = async id => {
@@ -61,7 +63,7 @@ function Payments({ client, copy, language, permissions, owner }) {
   </section>;
 }
 
-function Approvals({ client, copy, permissions, owner }) {
+function Approvals({ client, copy, permissions, owner, requestID }) {
   const [items, setItems] = useState([]);
   const [page, setPage] = useState(null);
   const [cursor, setCursor] = useState('');
@@ -69,8 +71,8 @@ function Approvals({ client, copy, permissions, owner }) {
   const [detail, setDetail] = useState(null);
   const [reason, setReason] = useState('');
   const operation = useFinanceOperation(owner, copy, client, 'approvals');
-  const load = async (next = cursor) => { const value = await operation.read(() => client.governedApprovalRequests({ cursor: next })); if (value) { setPage(value); setCursor(next); setItems(requireFinanceCollection(value).filter(item => ['WALLET_ADJUSTMENT', 'PAYMENT_PROVIDER_RESUME', 'PAYMENT_PRODUCT_RESUME'].includes(item.command_type))); } };
-  useEffect(() => { void load(); }, [client, owner]); // eslint-disable-line react-hooks/exhaustive-deps
+  const load = async (next = cursor) => { const result = await operation.read(() => loadFinancePage({ cursor: next }, filters => client.governedApprovalRequests(filters), () => { setCursor(''); setPrevious([]); })); if (result) { const value = result.value; setPage(value); setCursor(result.query.cursor); setItems(requireFinanceCollection(value).filter(item => ['WALLET_ADJUSTMENT', 'PAYMENT_PROVIDER_RESUME', 'PAYMENT_PRODUCT_RESUME'].includes(item.command_type))); } };
+  useEffect(() => { void (async () => { await load(''); if (requestID) await open(requestID); })(); }, [client, owner, requestID]); // eslint-disable-line react-hooks/exhaustive-deps
   const open = async id => { const value = await operation.read(() => client.governedApprovalRequest(id)); if (value) { if (value.approval_request_id !== id) return; setDetail(value); } };
   const act = async action => {
     let facts = operation.pendingFacts;
@@ -98,7 +100,7 @@ function Approvals({ client, copy, permissions, owner }) {
   </section>;
 }
 
-function Wallets({ client, copy, language, permissions, owner }) {
+function Wallets({ client, copy, language, permissions, owner, requesterID, onViewApproval }) {
   const [page, setPage] = useState(null);
   const [cursor, setCursor] = useState('');
   const [previous, setPrevious] = useState([]);
@@ -106,23 +108,75 @@ function Wallets({ client, copy, language, permissions, owner }) {
   const [delta, setDelta] = useState('');
   const [reason, setReason] = useState('');
   const [ledger, setLedger] = useState(null);
+  const [adjustments, setAdjustments] = useState(null);
+  const [adjustmentCursor, setAdjustmentCursor] = useState('');
+  const [adjustmentPrevious, setAdjustmentPrevious] = useState([]);
+  const [selected, setSelected] = useState(null);
+  const [replacement, setReplacement] = useState(null);
   const operation = useFinanceOperation(owner, copy, client, 'wallets');
-  const load = async (next = cursor) => { const value = await operation.read(() => client.wallets({ cursor: next })); if (value) { requireFinanceCollection(value); setPage(value); setCursor(next); } };
-  useEffect(() => { void load(''); }, [client, owner]); // eslint-disable-line react-hooks/exhaustive-deps
+  const canRequest = permissions.includes('platform.billing.repairs.request');
+  const loadAdjustments = async (next = adjustmentCursor) => {
+    const result = await operation.read(() => loadFinancePage({ cursor: next, status: 'PENDING_APPROVAL' }, filters => client.adjustments(filters), () => { setAdjustmentCursor(''); setAdjustmentPrevious([]); }));
+    if (result) { setAdjustments(result.value); setAdjustmentCursor(result.query.cursor); setSelected(null); }
+  };
+  const load = async (next = cursor) => {
+    const result = await operation.read(() => loadFinancePage({ cursor: next }, filters => client.wallets(filters), () => { setCursor(''); setPrevious([]); }));
+    if (result) { setPage(result.value); setCursor(result.query.cursor); }
+  };
+  useEffect(() => { void (async () => { await load(''); await loadAdjustments(''); })(); }, [client, owner]); // eslint-disable-line react-hooks/exhaustive-deps
+  const inspect = async item => {
+    const result = await operation.read(async () => {
+      const history = await client.governedApprovalRequests({ command_type: 'WALLET_ADJUSTMENT', target: item.adjustment_id, limit: 200 });
+      if (history?.has_more || history?.next_cursor || !Array.isArray(history?.items) || history.items.length >= 200) throw new Error('APPROVAL_HISTORY_INCOMPLETE');
+      const summary = latestApprovalByTarget(requireFinanceCollection(history)).get(item.adjustment_id);
+      const approval = summary ? await client.governedApprovalRequest(summary.approval_request_id) : null;
+      if (approval && (approval.approval_request_id !== summary.approval_request_id || approval.command_type !== 'WALLET_ADJUSTMENT' || approval.target?.resource_type !== 'MANUAL_ADJUSTMENT' || approval.target?.resource_id !== item.adjustment_id || approval.command?.adjustment_id !== item.adjustment_id || approval.command?.wallet_id !== item.wallet_id)) throw new Error('INVALID_FINANCE_ACK');
+      return { item, approval };
+    });
+    if (result) setSelected(result);
+  };
   const adjust = async () => {
-    const facts = operation.pendingFacts || { walletID, delta, reason: reason.trim() };
-    if (!facts.walletID || facts.reason.length < 10) return;
-    const value = await operation.mutate(facts, async (facts, key) => {
+    const facts = operation.pendingFacts || { action: 'create', walletID, delta, reason: reason.trim(), replacement };
+    if (facts.action === 'create' && (!facts.walletID || facts.reason.length < 10)) return;
+    const value = await operation.mutate(facts, async (facts, operationKey) => {
+      if (facts.action === 'resume') {
+        const fresh = await currentPendingAdjustment(client, facts.item, requesterID);
+        // Fresh history is checked again by the workflow before its write.
+        return createAndSubmitFreshGovernedApproval(client, walletAdjustmentApprovalDraft(fresh, fresh.reason, fresh.request_idempotency_key));
+      }
+      const key = facts.replacement?.key || operationKey;
+      if (facts.replacement && (facts.walletID !== facts.replacement.walletID || !walletReplacementEligible(await client.governedApprovalRequest(facts.replacement.requestID), facts.replacement.adjustmentID, facts.walletID, requesterID))) {
+        throw Object.assign(new Error('old adjustment approval changed'), { status: 409 });
+      }
       const item = await client.createAdjustment({ wallet_id: requireFinanceID(facts.walletID), amount_microcredits: facts.delta, reason: facts.reason, idempotency_key: key });
-      if (item.wallet_id !== facts.walletID || String(item.amount_microcredits) !== facts.delta || item.request_idempotency_key !== key) throw new Error('INVALID_FINANCE_ACK');
+      if (item.wallet_id !== facts.walletID || integerMoney(item.amount_microcredits) !== integerMoney(facts.delta) || item.requested_by !== requesterID || item.request_idempotency_key !== key || item.reason !== facts.reason || item.status !== 'PENDING_APPROVAL' || !Number.isSafeInteger(item.version) || item.version < 1) throw new Error('INVALID_FINANCE_ACK');
+      requireFinanceID(item.adjustment_id);
       return createAndSubmitFreshGovernedApproval(client, walletAdjustmentApprovalDraft(item, facts.reason, key));
     });
-    if (value) await load();
+    if (value) { setReplacement(null); setWalletID(''); setDelta(''); setReason(''); await load(); await loadAdjustments(); }
   };
-  return <section><h3>{copy.wallet}</h3><button disabled={operation.busy} onClick={() => void load()}>{copy.refresh}</button><Feedback operation={operation} copy={copy} />{operation.unknown && <button disabled={operation.busy} onClick={() => void adjust()}>{copy.retry}</button>}{page && <table><thead><tr><th>{copy.wallet}</th><th>{copy.total}</th><th>{copy.remaining}</th><th>{copy.status}</th></tr></thead><tbody>{page.items.map(item => <tr key={item.wallet_id}><td><button disabled={operation.busy || operation.unknown} onClick={async () => { setWalletID(item.wallet_id); if (permissions.includes('platform.billing.ledger.read')) { const value = await operation.read(() => client.walletLedger(item.wallet_id)); if (value) setLedger(value); } }}>{item.wallet_id}</button></td><td>{formatBalance(item.posted_microcredits, language)}</td><td>{formatBalance(item.available_microcredits, language)}</td><td>{item.status} / {item.financial_status}</td></tr>)}</tbody></table>}
+  const resume = () => {
+    if (!selected || adjustmentApprovalAction(selected.item, selected.approval, { canRequest: canRequest && selected.item.requested_by === requesterID }) !== 'resume') return;
+    void operation.mutate({ action: 'resume', item: selected.item }, async facts => {
+      const fresh = await currentPendingAdjustment(client, facts.item, requesterID);
+      return createAndSubmitFreshGovernedApproval(client, walletAdjustmentApprovalDraft(fresh, fresh.reason, fresh.request_idempotency_key));
+    }).then(async value => { if (value) await loadAdjustments(); });
+  };
+  const beginReplacement = () => {
+    if (!selected || !canRequest || !walletReplacementEligible(selected.approval, selected.item.adjustment_id, selected.item.wallet_id, requesterID)) return;
+    setReplacement({ requestID: selected.approval.approval_request_id, adjustmentID: selected.item.adjustment_id, walletID: selected.item.wallet_id, key: `replacement:${selected.approval.approval_request_id}:${secureRequestID()}` });
+    setWalletID(selected.item.wallet_id); setDelta(''); setReason('');
+  };
+  const resumeAvailable = selected && adjustmentApprovalAction(selected.item, selected.approval, { canRequest: canRequest && selected.item.requested_by === requesterID }) === 'resume';
+  return <section><h3>{copy.wallet}</h3><button disabled={operation.busy || operation.unknown} onClick={async () => { await load(); await loadAdjustments(); }}>{copy.refresh}</button><Feedback operation={operation} copy={copy} />{operation.unknown && <button disabled={operation.busy} onClick={() => void adjust()}>{copy.retry}</button>}{page && <table><thead><tr><th>{copy.wallet}</th><th>{copy.total}</th><th>{copy.remaining}</th><th>{copy.status}</th></tr></thead><tbody>{page.items.map(item => <tr key={item.wallet_id}><td><button disabled={operation.busy || operation.unknown || Boolean(replacement)} onClick={async () => { setWalletID(item.wallet_id); if (permissions.includes('platform.billing.ledger.read')) { const value = await operation.read(() => client.walletLedger(item.wallet_id)); if (value) setLedger(value); } }}>{item.wallet_id}</button></td><td>{formatBalance(item.posted_microcredits, language)}</td><td>{formatBalance(item.available_microcredits, language)}</td><td>{item.status} / {item.financial_status}</td></tr>)}</tbody></table>}
     <button disabled={operation.busy || operation.unknown || !previous.length} onClick={() => { const values = [...previous]; const value = values.pop(); setPrevious(values); void load(value); }}>{copy.previous}</button><button disabled={operation.busy || operation.unknown || !page?.next_cursor} onClick={() => { setPrevious(values => [...values, cursor]); void load(page.next_cursor); }}>{copy.next}</button>
     {ledger && <ul>{requireFinanceCollection(ledger).map(item => <li key={item.posting_id}>{item.journal_entry_id} / {item.created_at}</li>)}</ul>}
-    {permissions.includes('platform.billing.repairs.request') && <form onSubmit={event => { event.preventDefault(); void adjust(); }}><label>{copy.wallet}<input disabled={operation.busy || operation.unknown} value={walletID} onChange={event => setWalletID(event.target.value)} /></label><label>{copy.delta}<input disabled={operation.busy || operation.unknown} value={delta} onChange={event => setDelta(event.target.value)} pattern="-?(0|[1-9][0-9]*)" /></label><label>{copy.reason}<textarea disabled={operation.busy || operation.unknown} value={reason} onChange={event => setReason(event.target.value)} /></label><button disabled={operation.busy || operation.unknown || !walletID || !delta || reason.trim().length < 10}>{operation.unknown ? copy.retry : copy.draft}</button></form>}
+    <section data-finance-adjustments><h4>{copy.adjustment}</h4>{adjustments && <table><thead><tr><th>{copy.wallet}</th><th>{copy.delta}</th><th>{copy.status}</th><th>{copy.details}</th></tr></thead><tbody>{adjustments.items.map(item => <tr key={item.adjustment_id}><td>{item.wallet_id}</td><td>{formatBalance(item.amount_microcredits, language)}</td><td>{item.status}<br />{item.request_idempotency_key}</td><td><button disabled={operation.busy || operation.unknown} onClick={() => void inspect(item)}>{copy.details}</button></td></tr>)}</tbody></table>}
+      <button disabled={operation.busy || operation.unknown || !adjustmentPrevious.length} onClick={() => { const values = [...adjustmentPrevious]; const value = values.pop(); setAdjustmentPrevious(values); void loadAdjustments(value); }}>{copy.previous}</button><button disabled={operation.busy || operation.unknown || !adjustments?.next_cursor} onClick={() => { setAdjustmentPrevious(values => [...values, adjustmentCursor]); void loadAdjustments(adjustments.next_cursor); }}>{copy.next}</button>
+      {selected && <article><h4>{selected.item.adjustment_id}</h4><p>{selected.item.reason}</p>{selected.approval && <><p>{copy.approvals}: {selected.approval.approval_request_id} / {selected.approval.status}</p><button disabled={operation.busy || operation.unknown} onClick={() => onViewApproval(selected.approval.approval_request_id)}>{copy.details}</button></>}{resumeAvailable && <button disabled={operation.busy || operation.unknown} onClick={resume}>{copy.submit}</button>}{canRequest && walletReplacementEligible(selected.approval, selected.item.adjustment_id, selected.item.wallet_id, requesterID) && <button disabled={operation.busy || operation.unknown} onClick={beginReplacement}>{copy.newInvocation}</button>}</article>}
+    </section>
+    {replacement && <p>{copy.approvals}: {replacement.requestID} / {copy.wallet}: {replacement.walletID}</p>}
+    {canRequest && <form onSubmit={event => { event.preventDefault(); void adjust(); }}><label>{copy.wallet}<input disabled={operation.busy || operation.unknown} readOnly={Boolean(replacement)} value={walletID} onChange={event => setWalletID(event.target.value)} /></label><label>{copy.delta}<input disabled={operation.busy || operation.unknown} value={delta} onChange={event => setDelta(event.target.value)} pattern="-?(0|[1-9][0-9]*)" /></label><label>{copy.reason}<textarea disabled={operation.busy || operation.unknown} maxLength={2000} value={reason} onChange={event => setReason(event.target.value)} /></label><button disabled={operation.busy || operation.unknown || !walletID || !delta || reason.trim().length < 10}>{operation.unknown ? copy.retry : copy.draft}</button></form>}
   </section>;
 }
 
@@ -150,6 +204,7 @@ export function AdminFinanceWorkspace({ client, me, language }) {
   const permissions = me.platform_permissions || [];
   const owner = `${me.user_id}:${me.platform_authorization_version || me.active_context?.platform_authorization_version || 0}`;
   const [tab, setTab] = useState('orders');
+  const [approvalID, setApprovalID] = useState('');
   const tabs = [['orders', copy.orders], ['wallets', copy.wallet], ['controls', copy.providerControls], ['approvals', copy.approvals], ['late', copy.sla], ['anomalies', copy.resolve]];
-  return <section className="adm-panel"><h2>{copy.finance}</h2><nav>{tabs.map(([key, label]) => <button key={key} aria-pressed={tab === key} onClick={() => setTab(key)}>{label}</button>)}</nav><div key={`${owner}:${tab}`}>{tab === 'late' && <AdminPaymentReviewQueue {...{ client, copy, me }} />}{tab === 'anomalies' && <AdminPaymentReviewQueue {...{ client, copy, me }} anomaly />}{tab === 'orders' && <Payments {...{ client, copy, language, permissions, owner }} />}{tab === 'wallets' && <Wallets {...{ client, copy, language, permissions, owner }} />}{tab === 'controls' && <ProviderControls {...{ client, copy, permissions, owner }} />}{tab === 'approvals' && <Approvals {...{ client, copy, permissions, owner }} />}</div></section>;
+  return <section className="adm-panel"><h2>{copy.finance}</h2><nav>{tabs.map(([key, label]) => <button key={key} aria-pressed={tab === key} onClick={() => setTab(key)}>{label}</button>)}</nav><div key={`${owner}:${tab}`}>{tab === 'late' && <AdminPaymentReviewQueue {...{ client, copy, me }} />}{tab === 'anomalies' && <AdminPaymentReviewQueue {...{ client, copy, me }} anomaly />}{tab === 'orders' && <Payments {...{ client, copy, language, permissions, owner }} />}{tab === 'wallets' && <Wallets {...{ client, copy, language, permissions, owner }} requesterID={me.user_id} onViewApproval={id => { setApprovalID(id); setTab('approvals'); }} />}{tab === 'controls' && <ProviderControls {...{ client, copy, permissions, owner }} />}{tab === 'approvals' && <Approvals {...{ client, copy, permissions, owner }} requestID={approvalID} />}</div></section>;
 }

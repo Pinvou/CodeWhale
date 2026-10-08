@@ -1,4 +1,3 @@
-import { createAndSubmitGovernedApproval, submitExistingGovernedApproval, supersedesEligibleApproval, updateAndSubmitGovernedApproval } from './admin-governed-approval-workflow.js';
 import { integerMoney, requireFinanceCollection } from './finance-contract.js';
 
 const approvalIDPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -33,21 +32,6 @@ export function walletAdjustmentApprovalDraft(item, reason, requestKey) {
     financial_snapshot: { wallet_id: item.wallet_id, delta_microcredits: item.amount_microcredits },
     ...(supersedesID ? { supersedes_request_id: supersedesID } : {}),
   };
-}
-
-export async function editWalletAdjustmentApproval(client, item, approval, reason) {
-  const trimmed = String(reason || '').trim();
-  if (!approval || approval.status !== 'DRAFT' || trimmed.length < 10 || trimmed.length > 2000) {
-    throw Object.assign(new Error('adjustment approval is not editable'), { code: 'APPROVAL_DRAFT_NOT_EDITABLE' });
-  }
-  const page = await client.adjustments({ wallet_id: item.wallet_id, status: 'PENDING_APPROVAL', limit: 200 });
-  const fresh = (page?.items || []).find((value) => value.adjustment_id === item.adjustment_id);
-  if (!fresh || fresh.status !== 'PENDING_APPROVAL' || fresh.wallet_id !== item.wallet_id ||
-    !Number.isSafeInteger(fresh.version) || fresh.version < 1 || !fresh.request_idempotency_key) {
-    throw Object.assign(new Error('adjustment facts are no longer editable'), { code: 'ADJUSTMENT_FACTS_CHANGED' });
-  }
-  return updateAndSubmitGovernedApproval(client, approval,
-    walletAdjustmentApprovalDraft(fresh, trimmed, fresh.request_idempotency_key));
 }
 
 export function adjustmentApprovalAction(adjustment, approval, { canRequest = false, canApprove = false } = {}) {
@@ -93,16 +77,6 @@ export async function currentApprovalEditDraft(client, detail, reason) {
   return draft;
 }
 
-export function paymentControlApprovalAction(approval, { canRequest = false } = {}) {
-  if (!approval) return canRequest ? 'create' : 'none';
-  // List summaries intentionally omit actions. The write path re-reads the detail before submission.
-  if (approval.status === 'DRAFT' && canRequest) return 'submit';
-  if (['DRAFT', 'SUBMITTED', 'APPROVED', 'EXECUTING'].includes(approval.status)) return 'view';
-  if (approval.status === 'EXECUTION_FAILED') return 'view';
-  if (['REJECTED', 'WITHDRAWN', 'EXPIRED', 'INVALIDATED', 'EXECUTED'].includes(approval.status)) return canRequest ? 'create' : 'view';
-  return 'view';
-}
-
 export function latestApprovalByTarget(items = []) {
   const byTarget = new Map();
   // The Account list is ordered newest first; never let older history replace its current row.
@@ -113,95 +87,17 @@ export function latestApprovalByTarget(items = []) {
   return byTarget;
 }
 
-export function paymentControlSupersedesRequest(page, commandType, targetID) {
-  return supersedesEligibleApproval(page, commandType, targetID);
-}
-
-export async function submitPaymentControlApproval(client, draftInput, existingApproval = null) {
-  if (existingApproval) return submitExistingGovernedApproval(client, existingApproval);
-  if (!draftInput) throw Object.assign(new Error('approval draft is unavailable'), { code: 'INVALID_APPROVAL_REQUEST' });
-  return createAndSubmitGovernedApproval(client, draftInput);
-}
-
-export function updateFinanceTabState(current, surface, tab, patch) {
-  return {
-    ...(current || {}),
-    financeTabStates: {
-      ...(current?.financeTabStates || {}),
-      [surface]: {
-        ...(current?.financeTabStates?.[surface] || {}),
-        [tab]: {
-          ...(current?.financeTabStates?.[surface]?.[tab] || {}),
-          ...patch,
-        },
-      },
-    },
-  };
-}
-
-export function readFinanceTabQuery(current, surface, tab, fallback = {}) {
-  const cached = current?.financeTabStates?.[surface]?.[tab]?.query;
-  return { ...(cached || fallback) };
-}
-
-export function financeTabShouldLoad(state = {}, desiredQuery = null) {
-  if (state.loading) return false;
-  if (!state.attempted) return true;
-  if (!desiredQuery) return false;
-  const requestedQuery = state.requestedQuery || state.query || null;
-  return JSON.stringify(requestedQuery) !== JSON.stringify(desiredQuery);
-}
-
-export function resetFinanceSurfaceLoading(current, surface) {
-  const surfaceStates = current?.financeTabStates?.[surface] || {};
-  const nextSurfaceStates = Object.fromEntries(Object.entries(surfaceStates).map(([tab, state]) => [
-    tab,
-    state.loading ? { ...state, loading: false, attempted: Boolean(state.loaded) } : state,
-  ]));
-  const next = {
-    ...(current || {}),
-    financeTabStates: {
-      ...(current?.financeTabStates || {}),
-      [surface]: nextSurfaceStates,
-    },
-  };
-  if (surface === 'payments' && next.paymentCapabilityState?.loading) {
-    next.paymentCapabilityState = { ...next.paymentCapabilityState, loading: false, attempted: false, loaded: false };
-    next.paymentCapabilities = null;
+// Resume the exact committed adjustment, never create a second adjustment
+// merely because its Account approval has not been acknowledged yet.
+export async function currentPendingAdjustment(client, item, requesterID) {
+  const page = await client.adjustments({ wallet_id: item.wallet_id, status: 'PENDING_APPROVAL', requested_by: requesterID, limit: 200 });
+  if (page?.has_more || page?.next_cursor || !Array.isArray(page?.items) || page.items.length >= 200) throw new Error('ADJUSTMENT_FACTS_UNAVAILABLE');
+  const fresh = requireFinanceCollection(page).find(value => value.adjustment_id === item.adjustment_id);
+  if (!fresh || fresh.status !== 'PENDING_APPROVAL' || fresh.wallet_id !== item.wallet_id ||
+    fresh.requested_by !== requesterID || fresh.request_idempotency_key !== item.request_idempotency_key ||
+    integerMoney(fresh.amount_microcredits) !== integerMoney(item.amount_microcredits) || fresh.reason !== item.reason ||
+    !Number.isSafeInteger(fresh.version) || fresh.version < 1 || !fresh.request_idempotency_key || String(fresh.reason || '').trim().length < 10) {
+    throw Object.assign(new Error('adjustment facts changed'), { status: 409 });
   }
-  return next;
-}
-
-export function updatePaymentCapabilityState(current, statePatch, capabilities = current?.paymentCapabilities ?? null) {
-  return {
-    ...(current || {}),
-    paymentCapabilities: capabilities,
-    paymentCapabilityState: {
-      ...(current?.paymentCapabilityState || {}),
-      ...statePatch,
-    },
-  };
-}
-
-export function createFinanceTabRequestTracker() {
-  const generations = new Map();
-  return {
-    begin(key) {
-      const generation = (generations.get(key) || 0) + 1;
-      generations.set(key, generation);
-      return generation;
-    },
-    isCurrent(key, generation) {
-      return generations.get(key) === generation;
-    },
-    invalidate(key) {
-      generations.set(key, (generations.get(key) || 0) + 1);
-    },
-    invalidatePrefix(prefix) {
-      for (const key of generations.keys()) if (key.startsWith(prefix)) this.invalidate(key);
-    },
-    invalidateAll() {
-      for (const key of generations.keys()) this.invalidate(key);
-    },
-  };
+  return fresh;
 }

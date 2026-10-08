@@ -3,7 +3,7 @@ import { financeCopy } from '../../shared/i18n.js';
 import { hasPermission } from './authorization-ui.js';
 import { formatBalance } from './balance-view.js';
 import { formatFen, requireFinanceCollection, requireFinanceID, requirePaymentOrder, integerMoney, safePaymentURL, safePaymentQR } from './finance-contract.js';
-import { paymentOrderHistory, effectivePaymentChannel, isPayablePaymentOrder, orderSummaryStatus } from './order-view.js';
+import { paymentOrderHistory, effectivePaymentChannel, isPayablePaymentOrder, orderSummaryStatus, orderHistoryTimestamp, paymentOrderRemainingSeconds, paymentScanPrompt, orderDurationDays } from './order-view.js';
 import { localizedProductDisplayName } from './localized-product-display-name.js';
 import { secureRequestID } from './request-id.js';
 
@@ -87,6 +87,8 @@ export function PersonalFinanceWorkspace({ client, me, language }) {
   const payable = isPayablePaymentOrder(order, now);
   const paymentURL = payable ? safePaymentURL(order?.payment_url) : '';
   const paymentQR = payable ? safePaymentQR(order?.qr_data) : '';
+  const remainingSeconds = paymentOrderRemainingSeconds(order, now);
+  const duration = orderDurationDays(order);
   if (!hasPermission(me, 'personal.billing.read')) return null;
   return <section className="ap-finance" aria-label={copy.title}>
     <header><h2>{copy.title}</h2><button disabled={busy} onClick={() => void run(async () => {})}>{copy.refresh}</button></header>
@@ -106,12 +108,13 @@ export function PersonalFinanceWorkspace({ client, me, language }) {
       </form>}
       <h3>{copy.orders}</h3>
       {data.orders.length === 0 && <p>{copy.empty}</p>}
-      <table><thead><tr><th>{copy.product}</th><th>{copy.amount}</th><th>{copy.status}</th><th>{copy.history}</th></tr></thead><tbody>{paymentOrderHistory(data.orders).map(item => <tr key={item.order_id}>
-        <td>{localizedProductDisplayName(item, language, 'product_id')}</td><td>{formatFen(item.amount_fen, language)}</td><td>{orderSummaryStatus(item)}</td><td><button disabled={busy} onClick={() => void selectOrder(requireFinanceID(item.order_id))}>{copy.details}</button></td>
+      <table><thead><tr><th>{copy.product}</th><th>{copy.amount}</th><th>{copy.status}</th><th>{copy.paidAt}</th><th>{copy.history}</th></tr></thead><tbody>{paymentOrderHistory(data.orders).map(item => <tr key={item.order_id}>
+        <td>{localizedProductDisplayName(item, language, 'product_id')}</td><td>{formatFen(item.amount_fen, language)}</td><td>{orderSummaryStatus(item)}</td><td>{orderHistoryTimestamp(item) || '—'}</td><td><button disabled={busy} onClick={() => void selectOrder(requireFinanceID(item.order_id))}>{copy.details}</button></td>
       </tr>)}</tbody></table>
-      {order && <article><h3>{copy.history}</h3><dl><dt>{copy.orderID}</dt><dd>{order.order_id}</dd><dt>{copy.amount}</dt><dd>{formatFen(order.amount_fen, language)}</dd><dt>{copy.status}</dt><dd>{orderSummaryStatus(order)}</dd><dt>{copy.expires}</dt><dd>{order.expires_at}</dd></dl>
+      {order && <article><h3>{copy.history}</h3><dl><dt>{copy.orderID}</dt><dd>{order.order_id}</dd><dt>{copy.amount}</dt><dd>{formatFen(order.amount_fen, language)}</dd><dt>{copy.status}</dt><dd>{orderSummaryStatus(order)}</dd><dt>{copy.expires}</dt><dd>{order.expires_at}</dd>{duration !== null && <><dt>{copy.validityDays}</dt><dd>{copy.durationDays(duration)}</dd></>}</dl>
+        {payable && <p>{copy.countdown(remainingSeconds)}</p>}
         {paymentURL && <a href={paymentURL} target="_blank" rel="noopener noreferrer">{copy.pay}</a>}
-        {paymentQR && <img src={paymentQR} alt={copy.providerQR} width="240" height="240" />}
+        {paymentQR && <><img src={paymentQR} alt={copy.providerQR} width="240" height="240" /><p>{paymentScanPrompt(copy, order.qr_scan_apps)}</p></>}
         <button disabled={busy} onClick={() => void query()}>{copy.query}</button>
         {payable && <button disabled={busy} onClick={() => void close()}>{copy.close}</button>}
         {['MANUAL_REVIEW', 'CLOSED', 'FAILED'].includes(order.status) && <form onSubmit={event => { event.preventDefault(); void claim(); }}><label>{copy.statement}<textarea value={statement} maxLength={2000} onChange={event => setStatement(event.target.value)} /></label><button disabled={busy || !statement.trim()}>{copy.claim}</button></form>}
