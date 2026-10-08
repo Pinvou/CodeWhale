@@ -73,6 +73,7 @@ import {
 } from '../platform/tauri/client.js';
 import { listAcpSessions } from '../features/codex/acpClient.js';
 import { revealStartupWindow } from '../platform/tauri/startup-window.js';
+import { commitPendingUpdateReady } from '../platform/tauri/update-readiness.js';
 
 // 定时任务创建与运行链路已恢复，展示入口并允许自动跳转。
 const SCHEDULED_TASKS_ENTRY_ENABLED = true;
@@ -444,6 +445,10 @@ const NAV_PREFETCH = {
           window.__PINVOU_STARTUP__.mark('react:startup_window_revealed');
           window.__PINVOU_STARTUP__.flush();
         });
+        // File replacement alone does not prove the new application can render.
+        // Queue this best-effort commit after the existing window-reveal command
+        // so update bookkeeping cannot delay Linux's first visible frame.
+        void commitPendingUpdateReady();
       }, []);
       useEffect(() => {
         window.__PINVOU_STARTUP__.mark('react:first_effect');
