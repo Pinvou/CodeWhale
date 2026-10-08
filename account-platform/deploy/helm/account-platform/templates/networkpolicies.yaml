@@ -1,0 +1,113 @@
+{{- if .Values.networkPolicy.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: {{ include "pinvou.fullname" . }}-default-deny }
+spec:
+  podSelector:
+    matchLabels: {{ include "pinvou.selector" . | nindent 6 }}
+  policyTypes: [Ingress, Egress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: {{ include "pinvou.fullname" . }}-allow-dns }
+spec:
+  podSelector:
+    matchLabels: {{ include "pinvou.selector" . | nindent 6 }}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: kube-system } }
+      ports: [{ protocol: UDP, port: 53 }, { protocol: TCP, port: 53 }]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: {{ include "pinvou.fullname" . }}-portal }
+spec:
+  podSelector:
+    matchLabels: {{ include "pinvou.selector" . | nindent 6 }}
+    matchExpressions: [{ key: app.kubernetes.io/component, operator: In, values: [token-portal, keycloak, identity-service] }]
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - namespaceSelector: {{ toYaml .Values.networkPolicy.ingressNamespaceSelector | nindent 12 }}
+          podSelector: {{ toYaml .Values.networkPolicy.ingressPodSelector | nindent 12 }}
+      ports: [{ protocol: TCP, port: 8080 }]
+  egress:
+    - to:
+        - podSelector: { matchExpressions: [{ key: app.kubernetes.io/component, operator: In, values: [account-service, token-gateway, redis, keycloak] }] }
+      ports: [{ protocol: TCP, port: 8080 }, { protocol: TCP, port: 6379 }]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: {{ include "pinvou.fullname" . }}-metrics }
+spec:
+  podSelector:
+    matchLabels: {{ include "pinvou.selector" . | nindent 6 }}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector: {{ toYaml .Values.networkPolicy.metricsNamespaceSelector | nindent 12 }}
+          podSelector: {{ toYaml .Values.networkPolicy.metricsPodSelector | nindent 12 }}
+      ports: [{ protocol: TCP, port: 9090 }]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: {{ include "pinvou.fullname" . }}-internal-and-approved-egress }
+spec:
+  podSelector:
+    matchLabels: {{ include "pinvou.selector" . | nindent 6 }}
+    matchExpressions:
+      - { key: pinvou.io/newapi-data-plane, operator: DoesNotExist }
+      - { key: pinvou.io/restricted-token-control, operator: DoesNotExist }
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: {{ include "pinvou.selector" . | nindent 14 }}
+  egress:
+    - to:
+        - podSelector:
+            matchLabels: {{ include "pinvou.selector" . | nindent 14 }}
+    - to:
+        - podSelector: { matchLabels: { pinvou.io/newapi-data-plane: "true" } }
+      ports: [{ protocol: TCP, port: 8080 }, { protocol: TCP, port: 443 }]
+    {{- range $cidr := .Values.external.postgresCidrs }}
+    - to: [{ ipBlock: { cidr: {{ $cidr | quote }} } }]
+      ports: [{ protocol: TCP, port: 5432 }]
+    {{- end }}
+    {{- range $cidr := concat .Values.external.paymentProviderCidrs .Values.external.secretProviderCidrs .Values.external.modelProviderCidrs .Values.external.telemetryCollectorCidrs }}
+    - to: [{ ipBlock: { cidr: {{ $cidr | quote }} } }]
+      ports: [{ protocol: TCP, port: 443 }]
+    {{- end }}
+    {{- range $cidr := .Values.external.timeSourceCidrs }}
+    - to: [{ ipBlock: { cidr: {{ $cidr | quote }} } }]
+      ports: [{ protocol: UDP, port: 123 }]
+    {{- end }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: {{ include "pinvou.fullname" . }}-newapi-data-plane }
+spec:
+  podSelector: { matchLabels: { pinvou.io/newapi-data-plane: "true" } }
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - podSelector: { matchLabels: { app.kubernetes.io/name: {{ include "pinvou.name" . }}, app.kubernetes.io/instance: {{ .Release.Name }}, app.kubernetes.io/component: token-gateway } }
+        {{- if .Values.tokenCredentialPortal.enabled }}
+        - podSelector: { matchLabels: { app.kubernetes.io/name: {{ include "pinvou.name" . }}, app.kubernetes.io/instance: {{ .Release.Name }}, app.kubernetes.io/component: token-credential-portal } }
+        {{- end }}
+      ports: [{ protocol: TCP, port: 8080 }]
+  egress:
+    - to:
+        - podSelector: { matchLabels: { app.kubernetes.io/name: {{ include "pinvou.name" . }}, app.kubernetes.io/instance: {{ .Release.Name }}, app.kubernetes.io/component: redis } }
+      ports: [{ protocol: TCP, port: 6379 }]
+    {{- range $cidr := .Values.external.postgresCidrs }}
+    - to: [{ ipBlock: { cidr: {{ $cidr | quote }} } }]
+      ports: [{ protocol: TCP, port: 5432 }]
+    {{- end }}
+    {{- range $cidr := .Values.external.modelProviderCidrs }}
+    - to: [{ ipBlock: { cidr: {{ $cidr | quote }} } }]
+      ports: [{ protocol: TCP, port: 443 }]
+    {{- end }}
+{{- end }}

@@ -1,0 +1,29 @@
+# Public rendering fixture only; not an approved deployable environment.
+public:
+  portalUrl: https://account-uat.pinvou.com
+nats:
+  enabled: false
+dependencies:
+  natsUrl: tls://nats.example.invalid:4222
+tokenGateway:
+  runtimeSecret: fixture-token-gateway-release
+  secretProvider: remote
+tokenCredentialPortal:
+  enabled: true
+  runtimeSecret: fixture-token-credential-release
+  publicUrl: https://credentials-uat.pinvou.com
+  oidcAuthorizationUrl: https://accounts.example.invalid/realms/pinvou/protocol/openid-connect/auth
+  oidcTokenUrl: https://accounts.example.invalid/realms/pinvou/protocol/openid-connect/token
+  oidcJwksUrl: https://accounts.example.invalid/realms/pinvou/protocol/openid-connect/certs
+  oidcClientId: pinvou-credential-fixture
+  oidcAudience: pinvou-credential-fixture
+  egressCidrs: [192.0.2.10/32]
+tokenCommandExecutor:
+  enabled: true
+  runtimeSecret: fixture-token-executor-nats
+  natsCidrs: [192.0.2.30/32]
+tokenGovernanceCheck:
+  enabled: true
+  operationsSecret: fixture-token-governance-operations
+external:
+  postgresCidrs: [192.0.2.20/32]

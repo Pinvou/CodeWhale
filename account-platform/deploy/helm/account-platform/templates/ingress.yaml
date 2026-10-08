@@ -1,0 +1,104 @@
+{{- if .Values.ingress.enabled }}
+{{- if ne .Values.ingress.className "nginx" }}
+{{- fail "ingress.className must be nginx when ingress is enabled because Keycloak rolling sessions require ingress-nginx cookie affinity" }}
+{{- end }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "pinvou.fullname" . }}
+  labels: {{ include "pinvou.labels" . | nindent 4 }}
+spec:
+  {{- with .Values.ingress.className }}ingressClassName: {{ . }}{{- end }}
+  {{- with .Values.ingress.tlsSecretName }}
+  tls:
+    - secretName: {{ . }}
+      hosts: [{{ $.Values.ingress.portalHost | quote }}, {{ $.Values.ingress.keycloakHost | quote }}, {{ $.Values.ingress.identityHost | quote }}]
+  {{- end }}
+  rules:
+    - host: {{ .Values.ingress.portalHost | quote }}
+      http:
+        paths:
+          - path: /api/v1/payment-callback/token
+            pathType: Exact
+            backend: { service: { name: {{ include "pinvou.fullname" . }}-billing-service, port: { number: 8080 } } }
+          - path: /api/v1/payment-callbacks
+            pathType: Exact
+            backend: { service: { name: {{ include "pinvou.fullname" . }}-billing-service, port: { number: 8080 } } }
+          - path: /
+            pathType: Prefix
+            backend: { service: { name: {{ include "pinvou.fullname" . }}-token-portal, port: { number: 8080 } } }
+    - host: {{ .Values.ingress.keycloakHost | quote }}
+      http:
+        paths:
+          - path: /realms/pinvou/protocol/openid-connect/token
+            pathType: Exact
+            backend: { service: { name: {{ include "pinvou.fullname" . }}-identity-service, port: { number: 8080 } } }
+    - host: {{ .Values.ingress.identityHost | quote }}
+      http:
+        paths:
+          - path: /v1/registration/password-prechecks
+            pathType: Exact
+            backend: { service: { name: {{ include "pinvou.fullname" . }}-identity-service, port: { number: 8080 } } }
+---
+# Keycloak login HTML and its immutable theme assets must remain on the same
+# ready pod throughout a rolling update. Keep affinity scoped to these paths;
+# the Identity token proxy and other hosts deliberately stay on the shared
+# ingress above.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "pinvou.fullname" . }}-keycloak-session
+  labels: {{ include "pinvou.labels" . | nindent 4 }}
+  annotations:
+    nginx.ingress.kubernetes.io/affinity: "cookie"
+    nginx.ingress.kubernetes.io/affinity-mode: "persistent"
+    nginx.ingress.kubernetes.io/session-cookie-name: "pinvou-keycloak-route"
+    nginx.ingress.kubernetes.io/session-cookie-path: "/"
+    nginx.ingress.kubernetes.io/session-cookie-samesite: "Lax"
+    nginx.ingress.kubernetes.io/session-cookie-secure: "true"
+    nginx.ingress.kubernetes.io/session-cookie-change-on-failure: "true"
+spec:
+  {{- with .Values.ingress.className }}ingressClassName: {{ . }}{{- end }}
+  {{- with .Values.ingress.tlsSecretName }}
+  tls:
+    - secretName: {{ . }}
+      hosts: [{{ $.Values.ingress.keycloakHost | quote }}]
+  {{- end }}
+  rules:
+    - host: {{ .Values.ingress.keycloakHost | quote }}
+      http:
+        paths:
+          - path: /realms
+            pathType: Prefix
+            backend: { service: { name: {{ include "pinvou.fullname" . }}-keycloak, port: { number: 8080 } } }
+          - path: /resources
+            pathType: Prefix
+            backend: { service: { name: {{ include "pinvou.fullname" . }}-keycloak, port: { number: 8080 } } }
+---
+# Token administration has a dedicated ingress so its bounded pagination
+# transport ceiling cannot alter payment callbacks, Keycloak, Identity, or the
+# rest of Portal. Portal applies the exact 14/7/9-second per-request deadline.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "pinvou.fullname" . }}-token-admin
+  labels: {{ include "pinvou.labels" . | nindent 4 }}
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-connect-timeout: "2"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: {{ .Values.ingress.tokenAdminMaxTimeoutSeconds | quote }}
+    nginx.ingress.kubernetes.io/proxy-send-timeout: {{ .Values.ingress.tokenAdminMaxTimeoutSeconds | quote }}
+spec:
+  {{- with .Values.ingress.className }}ingressClassName: {{ . }}{{- end }}
+  {{- with .Values.ingress.tlsSecretName }}
+  tls:
+    - secretName: {{ . }}
+      hosts: [{{ $.Values.ingress.portalHost | quote }}]
+  {{- end }}
+  rules:
+    - host: {{ .Values.ingress.portalHost | quote }}
+      http:
+        paths:
+          - path: {{ .Values.ingress.tokenAdminPath }}
+            pathType: Prefix
+            backend: { service: { name: {{ include "pinvou.fullname" . }}-token-portal, port: { number: 8080 } } }
+{{- end }}

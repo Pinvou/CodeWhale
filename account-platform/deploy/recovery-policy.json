@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "objectives": {
+    "rpo_seconds": { "financial": 60, "configuration": 300 },
+    "rto_seconds": { "core": 3600, "noncritical": 14400 }
+  },
+  "backups": {
+    "continuous_wal": true,
+    "incremental_interval_hours": 24,
+    "full_interval_days": 7,
+    "pre_migration_snapshot": true,
+    "transport_encryption_minimum": "TLS1.2",
+    "at_rest_encryption_minimum": "AES-256",
+    "key_separation": true,
+    "immutable_offsite_copy": true,
+    "daily_retention_days": 35,
+    "monthly_retention_months": 13
+  },
+  "exercises": {
+    "monthly_sample_days": 35,
+    "quarterly_end_to_end_days": 100,
+    "annual_loss_days": 400,
+    "failed_exercise_owner_hours": 24,
+    "remediation_retest_days": 30
+  },
+  "retention": [
+    { "classification": "payment_evidence", "retention_days": 1095, "deletion_sla_days": 30, "legal_hold_supported": true },
+    { "classification": "ledger", "retention_days": 1095, "deletion_sla_days": 30, "legal_hold_supported": true },
+    { "classification": "audit", "retention_days": 1095, "deletion_sla_days": 30, "legal_hold_supported": true },
+    { "classification": "billing_usage", "retention_days": 1095, "deletion_sla_days": 30, "legal_hold_supported": true },
+    { "classification": "ordinary_runtime_logs", "retention_days": 90, "deletion_sla_days": 30, "legal_hold_supported": true }
+  ]
+}

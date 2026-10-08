@@ -1,0 +1,103 @@
+{{- $root := . -}}
+{{- $fullname := include "pinvou.fullname" . -}}
+{{- range $source := list "account" "billing" "token" }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $fullname }}-{{ $source }}-event-relay
+  labels:
+    {{- include "pinvou.labels" $root | nindent 4 }}
+    app.kubernetes.io/component: {{ $source }}-event-relay
+spec:
+  selector:
+    {{- include "pinvou.selector" $root | nindent 4 }}
+    app.kubernetes.io/component: {{ $source }}-event-relay
+  ports: [{ name: metrics, port: 9090, targetPort: metrics }]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $fullname }}-{{ $source }}-event-relay
+  labels:
+    {{- include "pinvou.labels" $root | nindent 4 }}
+    app.kubernetes.io/component: {{ $source }}-event-relay
+spec:
+  replicas: {{ $root.Values.replicas.eventRelay }}
+  strategy: { type: RollingUpdate, rollingUpdate: { maxUnavailable: 0, maxSurge: 1 } }
+  selector:
+    matchLabels:
+      {{- include "pinvou.selector" $root | nindent 6 }}
+      app.kubernetes.io/component: {{ $source }}-event-relay
+  template:
+    metadata:
+      annotations: { prometheus.io/scrape: "true", prometheus.io/path: "/metrics", prometheus.io/port: "9090" }
+      labels:
+        {{- include "pinvou.selector" $root | nindent 8 }}
+        app.kubernetes.io/component: {{ $source }}-event-relay
+    spec:
+      serviceAccountName: {{ $fullname }}-{{ $source }}-event-relay
+      automountServiceAccountToken: false
+      {{- include "pinvou.availabilityPodSpec" (dict "root" $root "component" (printf "%s-event-relay" $source)) | nindent 6 }}
+      securityContext: { runAsNonRoot: true, seccompProfile: { type: RuntimeDefault } }
+      containers:
+        - name: event-relay
+          image: "{{ $root.Values.images.eventRelay.repository }}:{{ $root.Values.images.eventRelay.tag }}"
+          imagePullPolicy: {{ $root.Values.images.eventRelay.pullPolicy }}
+          ports: [{ name: metrics, containerPort: 9090 }]
+          securityContext: { allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: { drop: ["ALL"] } }
+          resources: {{ toYaml $root.Values.resources | nindent 12 }}
+          env:
+            - { name: APP_ENV, value: {{ $root.Values.global.environment | quote }} }
+            - { name: OTEL_EXPORTER_OTLP_ENDPOINT, value: {{ $root.Values.observability.otlpEndpoint | quote }} }
+            - { name: EVENT_SOURCE, value: {{ $source | quote }} }
+            - name: DATABASE_URL
+              valueFrom: { secretKeyRef: { name: {{ if and (eq $source "token") $root.Values.tokenGateway.runtimeSecret }}{{ $root.Values.tokenGateway.runtimeSecret }}{{ else }}{{ $root.Values.global.runtimeSecret }}{{ end }}, key: {{ if and (eq $source "token") $root.Values.tokenGateway.runtimeSecret }}token-gateway-database-url{{ else }}{{ printf "%s-service-database-url" $source }}{{ end }} } }
+            - { name: NATS_URL, value: {{ include "pinvou.natsUrl" $root | quote }} }
+            - { name: NATS_CREDENTIALS_FILE, value: {{ printf "/var/run/secrets/pinvou/nats/%s.creds" $source | quote }} }
+            {{- if eq $source "account" }}
+            - name: APPROVAL_RELAY_DATABASE_URL
+              valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: account-approval-relay-database-url } }
+            - { name: APPROVAL_RELAY_NATS_CREDENTIALS_FILE, value: "/var/run/secrets/pinvou/approval-nats/account-approval-relay.creds" }
+            - { name: APPROVAL_RELAY_NATS_CURRENT_PUBLIC_KEYS_FILE, value: "/var/run/public/pinvou/nats-authorization/current-v2.json" }
+            - name: APPROVAL_RELAY_NATS_CURRENT_PUBLIC_KEYS_SHA256
+              valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: account-approval-relay-nats-current-public-keys-sha256 } }
+            {{- if $root.Values.approvalRelay.previousV1Enabled }}
+            - { name: APPROVAL_RELAY_NATS_PREVIOUS_PUBLIC_KEYS_FILE, value: "/var/run/public/pinvou/nats-authorization/previous-v1.json" }
+            - name: APPROVAL_RELAY_NATS_PREVIOUS_PUBLIC_KEYS_SHA256
+              valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: account-approval-relay-nats-previous-public-keys-sha256 } }
+            {{- end }}
+            {{- end }}
+          readinessProbe: { httpGet: { path: /health/ready, port: metrics }, periodSeconds: 10, timeoutSeconds: 3 }
+          livenessProbe: { httpGet: { path: /health/live, port: metrics }, periodSeconds: 20, timeoutSeconds: 3 }
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+            - { name: nats-credentials, mountPath: /var/run/secrets/pinvou/nats, readOnly: true }
+            {{- if eq $source "account" }}
+            - { name: approval-nats-credentials, mountPath: /var/run/secrets/pinvou/approval-nats, readOnly: true }
+            # subPath produces a real bind-mounted file at the checked path;
+            # the default ConfigMap ..data symlink layout is deliberately not
+            # accepted by the runtime artifact verifier. Rotation requires a
+            # controlled Pod restart.
+            - { name: approval-nats-public-artifacts, mountPath: /var/run/public/pinvou/nats-authorization/current-v2.json, subPath: current-v2.json, readOnly: true }
+            {{- if $root.Values.approvalRelay.previousV1Enabled }}
+            - { name: approval-nats-public-artifacts, mountPath: /var/run/public/pinvou/nats-authorization/previous-v1.json, subPath: previous-v1.json, readOnly: true }
+            {{- end }}
+            {{- end }}
+      volumes:
+        - { name: tmp, emptyDir: { sizeLimit: 16Mi } }
+        - name: nats-credentials
+          secret: { secretName: {{ $root.Values.global.runtimeSecret }}, items: [{ key: {{ printf "%s-event-relay.creds" $source }}, path: {{ printf "%s.creds" $source }} }] }
+        {{- if eq $source "account" }}
+        - name: approval-nats-credentials
+          secret: { secretName: {{ $root.Values.global.runtimeSecret }}, items: [{ key: account-approval-relay.creds, path: account-approval-relay.creds }] }
+        - name: approval-nats-public-artifacts
+          configMap:
+            name: {{ $root.Values.approvalRelay.natsPublicArtifactConfigMap }}
+            items:
+              - { key: current-v2.json, path: current-v2.json }
+              {{- if $root.Values.approvalRelay.previousV1Enabled }}
+              - { key: previous-v1.json, path: previous-v1.json }
+              {{- end }}
+        {{- end }}
+{{- end }}

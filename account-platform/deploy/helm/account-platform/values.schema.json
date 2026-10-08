@@ -1,0 +1,408 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "required": ["global", "compatibility", "externalSecrets", "images", "replicas", "availability", "dependencies", "newApi", "oidc", "workloadIdentity", "public", "observability", "security", "sms", "account", "billing", "tokenGateway", "tokenAccountPolicyBootstrap", "external", "ingress", "keycloak", "redis", "nats", "networkPolicy", "tokenCredentialPortal", "tokenCommandExecutor", "tokenGovernanceCheck", "portal"],
+  "properties": {
+    "nativeKms": {
+      "type": "object", "additionalProperties": false,
+      "required": ["endpoint", "port", "caConfigMap", "gatewayBootstrapSecret", "credentialBootstrapSecret", "cidrs"],
+      "properties": {
+        "endpoint": { "type": "string", "pattern": "^(https://[^\\s/?#@]+/?|)$" },
+        "port": { "type": "integer", "enum": [443, 8200] },
+        "caConfigMap": { "$ref": "#/definitions/kmsResourceName" },
+        "gatewayBootstrapSecret": { "$ref": "#/definitions/kmsResourceName" },
+        "credentialBootstrapSecret": { "$ref": "#/definitions/kmsResourceName" },
+        "cidrs": { "type": "array", "uniqueItems": true, "items": { "type": "string", "pattern": "^((25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\\.){3}(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])/32$" } }
+      }
+    },
+    "tokenCredentialPortal": {"type":"object","additionalProperties":false,"required":["enabled","replicas","runtimeSecret","publicUrl","oidcAuthorizationUrl","oidcTokenUrl","oidcClientId","oidcAudience","egressCidrs","oidcJwksUrl"],"properties":{"enabled":{"type":"boolean"},"replicas":{"type":"integer","minimum":1},"runtimeSecret":{"type":"string","maxLength":253,"pattern":"^([a-z0-9]([-a-z0-9.]*[a-z0-9])?)?$"},"publicUrl":{"type":"string","pattern":"^(https://[^\\s]+)?$"},"oidcAuthorizationUrl":{"type":"string","pattern":"^(https://[^\\s]+)?$"},"oidcTokenUrl":{"type":"string","pattern":"^(https://[^\\s]+)?$"},"oidcClientId":{"type":"string"},"oidcAudience":{"type":"string"},"egressCidrs":{"type":"array","uniqueItems":true,"items":{"type":"string","minLength":3,"not":{"enum":["0.0.0.0/0","::/0"]}}},"oidcJwksUrl":{"type":"string","pattern":"^(https://[^\\s]+)?$"}}},
+    "tokenCommandExecutor": {"type":"object","additionalProperties":false,"required":["enabled","replicas","runtimeSecret","natsCidrs","workloadJwksCidrs"],"properties":{"enabled":{"type":"boolean"},"replicas":{"type":"integer","minimum":1},"runtimeSecret":{"type":"string","maxLength":253,"pattern":"^([a-z0-9]([-a-z0-9.]*[a-z0-9])?)?$"},"natsCidrs":{"type":"array","uniqueItems":true,"items":{"type":"string","minLength":3,"not":{"enum":["0.0.0.0/0","::/0"]}}},"workloadJwksCidrs":{"type":"array","uniqueItems":true,"items":{"type":"string","minLength":3,"not":{"enum":["0.0.0.0/0","::/0"]}}}}},
+    "tokenGovernanceCheck": {"type":"object","additionalProperties":false,"required":["enabled","operationsSecret"],"properties":{"enabled":{"type":"boolean"},"operationsSecret":{"type":"string","maxLength":253,"pattern":"^([a-z0-9]([-a-z0-9.]*[a-z0-9])?)?$"}}},
+    "portal": {"type":"object","additionalProperties":false,"required":["sessionLineageLogoutEnabled","adminModelTokenIAEnabled","adminTokenResourceFormsEnabled","adminModelOperationsDetailsEnabled","adminModelDetailsEnabled","adminTokenDetailsEnabled","adminModelPricingEditEnabled","adminModelOperationsOverviewEnabled","adminModelTokenPageOverviewsEnabled","adminModelTokenActionsEnabled"],"properties":{"sessionLineageLogoutEnabled":{"type":"boolean"},"adminModelTokenIAEnabled":{"type":"boolean"},"adminTokenResourceFormsEnabled":{"type":"boolean"},"adminModelOperationsDetailsEnabled":{"type":"boolean"},"adminModelDetailsEnabled":{"type":"boolean"},"adminTokenDetailsEnabled":{"type":"boolean"},"adminModelPricingEditEnabled":{"type":"boolean"},"adminModelOperationsOverviewEnabled":{"type":"boolean"},"adminModelTokenPageOverviewsEnabled":{"type":"boolean"},"adminModelTokenActionsEnabled":{"type":"boolean"}}},
+    "global": {
+      "type": "object",
+      "required": ["environment", "runtimeSecret", "trustedTimeSources", "manualReviewOnCallUserIds"],
+      "properties": {
+        "environment": { "enum": ["development", "test", "staging", "production-new"] },
+        "runtimeSecret": { "type": "string", "minLength": 1 },
+        "trustedTimeSources": { "type": "array", "minItems": 3, "uniqueItems": true, "items": { "type": "string", "minLength": 3 } },
+        "manualReviewOnCallUserIds": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string", "format": "uuid" } }
+      }
+    },
+    "images": {
+      "type": "object",
+      "required": ["accountService", "identityService", "billingService", "tokenGateway", "tokenPortal", "eventRelay", "migrate", "newApi", "keycloak", "redis", "nats"],
+      "additionalProperties": false,
+      "properties": {
+        "accountService": { "$ref": "#/definitions/image" },
+        "identityService": { "$ref": "#/definitions/image" },
+        "billingService": { "$ref": "#/definitions/image" },
+        "tokenGateway": { "$ref": "#/definitions/image" },
+        "tokenPortal": { "$ref": "#/definitions/image" },
+        "tokenCredentialPortal": { "$ref": "#/definitions/image" },
+        "tokenCommandExecutor": { "$ref": "#/definitions/image" },
+        "tokenGovernance": { "$ref": "#/definitions/image" },
+        "eventRelay": { "$ref": "#/definitions/image" },
+        "migrate": { "$ref": "#/definitions/image" },
+        "newApi": { "$ref": "#/definitions/imageWithDigest" },
+        "keycloak": { "$ref": "#/definitions/image" },
+        "redis": { "$ref": "#/definitions/image" },
+        "nats": { "$ref": "#/definitions/image" }
+      }
+    },
+    "newApi": {
+      "type": "object",
+      "required": ["enabled", "serviceName", "replicas", "nodeType", "trustedProxies"],
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "serviceName": { "type": "string", "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$", "maxLength": 63 },
+        "replicas": { "type": "integer", "minimum": 1, "maximum": 10 },
+        "nodeType": { "enum": ["master", "slave"] },
+        "trustedProxies": { "type": "string", "minLength": 1 }
+      }
+    },
+    "oidc": {
+      "type": "object",
+      "required": ["issuer", "jwksUrl", "tokenUrl", "audience", "portalClientId", "portalHandoffClientId"],
+      "properties": {
+        "issuer": { "type": "string", "format": "uri" },
+        "jwksUrl": { "type": "string" },
+        "tokenUrl": { "type": "string" },
+        "audience": { "type": "string", "minLength": 1 },
+        "portalClientId": { "type": "string", "minLength": 1 },
+        "portalHandoffClientId": { "type": "string", "minLength": 1, "not": { "const": "pinvou-token-portal" } }
+      }
+    },
+    "public": {
+      "type": "object",
+      "required": ["portalUrl", "paymentCallbackUrl"],
+      "properties": {
+        "portalUrl": { "type": "string", "format": "uri" },
+        "paymentCallbackUrl": { "type": "string", "format": "uri" }
+      }
+    },
+    "observability": {
+      "type": "object",
+      "required": ["otlpEndpoint", "prometheusRulesEnabled"],
+      "properties": { "otlpEndpoint": { "type": "string" }, "prometheusRulesEnabled": { "type": "boolean" } }
+    },
+    "security": {
+      "type": "object",
+      "required": ["rateLimitRPS", "rateLimitBurst", "authRiskEnabled"],
+      "properties": {
+        "rateLimitRPS": { "type": "number", "exclusiveMinimum": 0, "maximum": 100000 },
+        "rateLimitBurst": { "type": "integer", "minimum": 1, "maximum": 1000000 },
+        "authRiskEnabled": { "type": "boolean" }
+      }
+    },
+    "workloadIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["issuer", "jwksUrl", "audience", "tokenExpirationSeconds"],
+      "properties": {
+        "issuer": { "type": "string", "pattern": "^https://" },
+        "jwksUrl": { "type": "string", "pattern": "^https://" },
+        "audience": { "type": "string", "minLength": 1 },
+        "tokenExpirationSeconds": { "type": "integer", "minimum": 300, "maximum": 900 }
+      }
+    },
+    "compatibility": {
+      "type": "object",
+      "required": ["contractVersion", "upgradeUrl", "releases"],
+      "additionalProperties": false,
+      "properties": {
+        "contractVersion": { "type": "string", "minLength": 1 },
+        "upgradeUrl": { "type": "string", "pattern": "^https://" },
+        "releases": {
+          "type": "array",
+          "minItems": 3,
+          "items": {
+            "type": "object",
+            "required": ["version", "released_at"],
+            "properties": {
+              "version": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$" },
+              "released_at": { "type": "string", "format": "date-time" },
+              "deprecation_notice_at": { "type": "string", "format": "date-time" },
+              "sunset_at": { "type": "string", "format": "date-time" },
+              "security_exception": { "type": "boolean" },
+              "exception_approval_id": { "type": "string" }
+            }
+          }
+        }
+      }
+    },
+    "replicas": {
+      "type": "object",
+      "required": ["accountService", "identityService", "billingService", "tokenGateway", "tokenPortal", "eventRelay"],
+      "additionalProperties": false,
+      "properties": {
+        "accountService": { "type": "integer", "minimum": 1, "maximum": 100 },
+        "identityService": { "type": "integer", "minimum": 1, "maximum": 10 },
+        "billingService": { "type": "integer", "minimum": 1, "maximum": 100 },
+        "tokenGateway": { "type": "integer", "minimum": 1, "maximum": 100 },
+        "tokenPortal": { "type": "integer", "minimum": 1, "maximum": 100 },
+        "eventRelay": { "type": "integer", "minimum": 1, "maximum": 100 }
+      }
+    },
+    "availability": {
+      "type": "object",
+      "required": ["enabled", "topologyKey", "hostnameTopologyKey", "terminationGracePeriodSeconds"],
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "topologyKey": { "type": "string", "minLength": 1 },
+        "hostnameTopologyKey": { "type": "string", "minLength": 1 },
+        "terminationGracePeriodSeconds": { "type": "integer", "minimum": 30, "maximum": 600 }
+      }
+    },
+    "dependencies": {
+      "type": "object",
+      "required": ["redisUrl", "newApiRedisUrl", "natsUrl", "natsMonitorUrl"],
+      "additionalProperties": false,
+      "properties": {
+        "redisUrl": { "type": "string" },
+        "newApiRedisUrl": { "type": "string" },
+        "natsUrl": { "type": "string" },
+        "natsMonitorUrl": { "type": "string" }
+      }
+    },
+    "externalSecrets": {
+      "type": "object",
+      "required": ["enabled", "secretStoreKind", "secretStoreName", "remoteKey", "refreshInterval"],
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "secretStoreKind": { "enum": ["SecretStore", "ClusterSecretStore"] },
+        "secretStoreName": { "type": "string" },
+        "remoteKey": { "type": "string" },
+        "refreshInterval": { "type": "string", "pattern": "^[1-9][0-9]*[smh]$" }
+      }
+    },
+    "sms": {
+      "type": "object",
+      "required": ["enabled", "provider", "aliyunEndpoint", "httpEndpoint"],
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "provider": { "enum": ["aliyun-managed", "http-generated"] },
+        "aliyunEndpoint": { "type": "string", "format": "uri" },
+        "httpEndpoint": { "type": "string" }
+      }
+    },
+    "account": {
+      "type": "object",
+        "required": ["walletProvisioningPolicyVersion", "walletProvisioningSlaMinutes", "commerceProviderId", "commerceAdapterVersion", "commerceAdapterBaseUrl"],
+      "additionalProperties": false,
+      "properties": {
+        "walletProvisioningPolicyVersion": { "type": "string", "minLength": 1, "maxLength": 64 },
+          "walletProvisioningSlaMinutes": { "type": "integer", "minimum": 1, "maximum": 1440 },
+          "commerceProviderId": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,79}$" },
+          "commerceAdapterVersion": { "type": "string", "minLength": 1, "maxLength": 80 },
+          "commerceAdapterBaseUrl": {
+            "type": "string",
+            "anyOf": [
+              { "maxLength": 0 },
+              { "format": "uri", "pattern": "^https://" }
+            ]
+          }
+      }
+    },
+    "billing": {
+      "type": "object",
+      "required": ["paymentProvider", "allowTentativePrices", "testAdmissionEvidenceTtl", "normalRefundCreationEnabled", "paymentExpiryIntervalSeconds", "paymentCallbackTokenKeyId", "paymentCallbackTokenTtlSeconds"],
+      "additionalProperties": false,
+      "properties": {
+        "paymentProvider": { "type": "string", "minLength": 1 },
+        "adminModelPriceProjectionEnabled": { "type": "boolean" },
+        "allowTentativePrices": { "type": "boolean" },
+        "testAdmissionEvidenceTtl": { "type": "string", "pattern": "^[0-9]+h$" },
+        "normalRefundCreationEnabled": { "type": "boolean" },
+        "paymentExpiryIntervalSeconds": { "type": "integer", "minimum": 1, "maximum": 300 },
+        "paymentCallbackTokenKeyId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "paymentCallbackTokenTtlSeconds": { "type": "integer", "minimum": 60, "maximum": 900 }
+      }
+    },
+    "tokenGateway": {
+      "type": "object",
+	  "required": ["adminPaginationEnabled", "gatewayAdapter", "secretProvider", "secretKeyId", "secretRotationIntervalSeconds", "secretRotationBatchSize", "providerAllowedHosts", "maxInputTokens", "modelCatalogDefaultContextTokens", "modelCatalogDefaultMaxOutputTokens", "modelCatalogSyncMinutes", "clientContractVersion", "minimumClientVersion", "maximumClientVersion", "readinessAttestationKeyId", "readinessAttestationTtlSeconds"],
+      "properties": {
+		"adminPaginationEnabled": { "type": "boolean" },
+        "runtimeSecret": { "type": "string" },
+        "impactPrechecksEnabled": { "type": "boolean" },
+        "credentialIsolationEnabled": { "type": "boolean" },
+        "adminOperationsOverviewEnabled": { "type": "boolean" },
+        "adminPageOverviewsEnabled": { "type": "boolean" },
+        "gatewayAdapter": { "enum": ["NEW_API", "OPENAI_COMPATIBLE"] },
+        "secretProvider": { "enum": ["local", "remote", "vault-transit"] },
+        "secretKeyId": { "type": "string" },
+        "secretRotationIntervalSeconds": { "type": "integer", "minimum": 60, "maximum": 86400 },
+        "secretRotationBatchSize": { "type": "integer", "minimum": 1, "maximum": 1000 },
+        "providerAllowedHosts": { "type": "array", "uniqueItems": true, "items": { "type": "string", "minLength": 1 } },
+        "maxInputTokens": { "type": "integer", "minimum": 1 },
+        "modelCatalogDefaultContextTokens": { "type": "integer", "minimum": 1 },
+        "modelCatalogDefaultMaxOutputTokens": { "type": "integer", "minimum": 0 },
+        "modelCatalogSyncMinutes": { "type": "integer", "minimum": 1, "maximum": 1440 },
+        "clientContractVersion": { "type": "string", "minLength": 1 },
+        "minimumClientVersion": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+" },
+        "maximumClientVersion": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+" },
+        "readinessAttestationKeyId": { "type": "string", "minLength": 1 },
+        "readinessAttestationTtlSeconds": { "type": "integer", "minimum": 60, "maximum": 900 }
+      }
+    },
+    "tokenAccountPolicyBootstrap": {
+      "type": "object",
+      "required": ["enabled"],
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" }
+      }
+    },
+    "external": {
+      "type": "object",
+      "required": ["postgresCidrs", "paymentProviderCidrs", "secretProviderCidrs", "modelProviderCidrs", "telemetryCollectorCidrs", "timeSourceCidrs"],
+      "properties": {
+        "postgresCidrs": { "$ref": "#/definitions/cidrs" },
+        "paymentProviderCidrs": { "$ref": "#/definitions/cidrs" },
+        "secretProviderCidrs": { "$ref": "#/definitions/cidrs" },
+        "modelProviderCidrs": { "$ref": "#/definitions/cidrs" },
+        "telemetryCollectorCidrs": { "$ref": "#/definitions/cidrs" },
+        "timeSourceCidrs": { "$ref": "#/definitions/cidrs" }
+      }
+    },
+	"ingress": { "type": "object", "required": ["enabled", "className", "portalHost", "keycloakHost", "identityHost", "tlsSecretName", "tokenAdminMaxTimeoutSeconds", "tokenAdminPath"], "properties": { "enabled": { "type": "boolean" }, "className": { "type": "string", "enum": ["", "nginx"] }, "portalHost": { "type": "string", "minLength": 1 }, "keycloakHost": { "type": "string", "minLength": 1 }, "identityHost": { "type": "string", "minLength": 1 }, "tlsSecretName": { "type": "string" }, "tokenAdminMaxTimeoutSeconds": { "type": "integer", "const": 14 }, "tokenAdminPath": { "type": "string", "const": "/api/admin/token" } } },
+    "keycloak": {
+      "type": "object",
+      "required": ["hostname", "adminHostname", "realmUpgradeEnabled", "oidcClientId"],
+      "properties": {
+        "hostname": { "type": "string", "format": "uri" },
+        "adminHostname": { "type": "string", "format": "uri" },
+        "realmUpgradeEnabled": { "type": "boolean" },
+        "oidcClientId": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{2,63}$" }
+      }
+    },
+    "redis": { "type": "object", "required": ["enabled", "storage"], "properties": { "enabled": { "type": "boolean" }, "storage": { "type": "string", "minLength": 1 } } },
+    "nats": { "type": "object", "required": ["enabled", "storage"], "properties": { "enabled": { "type": "boolean" }, "storage": { "type": "string", "minLength": 1 } } },
+    "networkPolicy": { "type": "object", "required": ["enabled"], "properties": { "enabled": { "type": "boolean" } } }
+  },
+  "definitions": {
+    "kmsResourceName": { "type": "string", "maxLength": 253, "pattern": "^([a-z0-9]([-a-z0-9.]*[a-z0-9])?)?$" },
+    "image": {
+      "type": "object",
+      "required": ["repository", "tag", "pullPolicy"],
+      "properties": {
+        "repository": { "type": "string", "minLength": 1 },
+        "tag": { "type": "string", "minLength": 1 },
+        "pullPolicy": { "enum": ["Always", "IfNotPresent", "Never"] }
+      }
+    },
+    "imageWithDigest": {
+      "type": "object",
+      "required": ["repository", "tag", "digest", "pullPolicy"],
+      "additionalProperties": false,
+      "properties": {
+        "repository": { "type": "string", "minLength": 1 },
+        "tag": { "type": "string", "minLength": 1, "not": { "enum": ["latest", "dev", "release-required"] } },
+        "digest": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+        "pullPolicy": { "enum": ["Always", "IfNotPresent", "Never"] }
+      }
+    },
+    "cidrs": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "allOf": [
+          { "pattern": "^.+/.+$" },
+          { "not": { "enum": ["0.0.0.0/0", "::/0"] } }
+        ]
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "tokenGateway": { "type": "object", "properties": { "secretProvider": { "const": "vault-transit" } }, "required": ["secretProvider"] } }, "required": ["tokenGateway"] },
+      "then": {
+        "required": ["nativeKms"],
+        "properties": {
+          "nativeKms": { "type": "object", "properties": { "endpoint": { "type": "string", "minLength": 1 }, "caConfigMap": { "type": "string", "minLength": 1 }, "gatewayBootstrapSecret": { "type": "string", "minLength": 1 }, "cidrs": { "type": "array", "minItems": 1 } } },
+          "tokenGateway": { "type": "object", "properties": { "secretKeyId": { "type": "string", "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$" } } },
+          "networkPolicy": { "type": "object", "properties": { "enabled": { "const": true } } }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "global": { "type": "object", "properties": { "environment": { "const": "production-new" } } } } },
+      "then": {
+        "properties": {
+          "tokenGateway": {
+            "type": "object",
+            "properties": {
+              "secretProvider": { "enum": ["remote", "vault-transit"] },
+              "secretKeyId": { "type": "string", "minLength": 1 },
+              "providerAllowedHosts": { "type": "array", "minItems": 1 }
+            }
+          },
+          "externalSecrets": {
+            "type": "object",
+            "properties": {
+              "enabled": { "const": true },
+              "secretStoreName": { "type": "string", "minLength": 1 },
+              "remoteKey": { "type": "string", "minLength": 1 }
+            }
+          },
+          "availability": { "type": "object", "properties": { "enabled": { "const": true } } },
+          "security": { "type": "object", "properties": { "authRiskEnabled": { "const": true } } },
+		  "sms": { "type": "object", "properties": { "enabled": { "const": true } } },
+          "dependencies": {
+            "type": "object",
+            "properties": {
+              "redisUrl": { "type": "string", "pattern": "^rediss://" },
+              "newApiRedisUrl": { "type": "string", "pattern": "^rediss://" },
+              "natsUrl": { "type": "string", "pattern": "^tls://" },
+              "natsMonitorUrl": { "type": "string", "pattern": "^https://" }
+            }
+          },
+          "replicas": {
+            "type": "object",
+            "properties": {
+              "accountService": { "type": "integer", "minimum": 2 },
+              "billingService": { "type": "integer", "minimum": 2 },
+              "tokenGateway": { "type": "integer", "minimum": 2 },
+              "tokenPortal": { "type": "integer", "minimum": 2 },
+              "eventRelay": { "type": "integer", "minimum": 2 }
+            }
+          },
+          "redis": { "type": "object", "properties": { "enabled": { "const": false } } },
+          "nats": { "type": "object", "properties": { "enabled": { "const": false } } },
+          "newApi": { "type": "object", "properties": { "enabled": { "const": true }, "replicas": { "type": "integer", "minimum": 2 } } },
+          "billing": { "type": "object", "properties": { "paymentProvider": { "const": "h3c_mall" }, "allowTentativePrices": { "const": false }, "normalRefundCreationEnabled": { "const": false } } },
+          "images": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "object",
+              "properties": { "tag": { "type": "string", "not": { "enum": ["latest", "dev", "release-required"] } } }
+            }
+          },
+          "external": {
+            "type": "object",
+            "properties": {
+              "postgresCidrs": { "type": "array", "minItems": 1 },
+              "paymentProviderCidrs": { "type": "array", "minItems": 1 },
+              "timeSourceCidrs": { "type": "array", "minItems": 1 },
+              "secretProviderCidrs": { "type": "array", "minItems": 1 },
+              "modelProviderCidrs": { "type": "array", "minItems": 1 },
+              "telemetryCollectorCidrs": { "type": "array", "minItems": 1 }
+            }
+          },
+          "observability": { "type": "object", "properties": { "otlpEndpoint": { "type": "string", "pattern": "^https://" }, "prometheusRulesEnabled": { "const": true } } },
+          "oidc": { "type": "object", "properties": { "issuer": { "type": "string", "pattern": "^https://" } } },
+          "public": { "type": "object", "properties": { "portalUrl": { "type": "string", "pattern": "^https://" }, "paymentCallbackUrl": { "type": "string", "pattern": "^https://" } } },
+          "keycloak": { "type": "object", "properties": { "hostname": { "type": "string", "pattern": "^https://" }, "replicas": { "type": "integer", "minimum": 2 }, "realmUpgradeEnabled": { "const": true }, "oidcClientId": { "const": "pinvou-desktop" } } },
+          "ingress": { "type": "object", "properties": { "enabled": { "type": "boolean", "const": true }, "tlsSecretName": { "type": "string", "minLength": 1 } } },
+          "networkPolicy": { "type": "object", "properties": { "enabled": { "type": "boolean", "const": true } } }
+        }
+      }
+    }
+  ]
+}

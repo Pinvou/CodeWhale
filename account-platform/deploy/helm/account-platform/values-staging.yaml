@@ -1,0 +1,58 @@
+global:
+  environment: staging
+  runtimeSecret: pinvou-account-platform-staging
+  trustedTimeSources: [time.cloudflare.com:123, pool.ntp.org:123, ntp.aliyun.com:123, time1.cloud.tencent.com:123, time.windows.com:123]
+
+externalSecrets:
+  enabled: true
+  secretStoreKind: ClusterSecretStore
+  secretStoreName: pinvou-staging-vault
+  remoteKey: pinvou/staging/account-platform
+  refreshInterval: 5m
+
+replicas:
+  accountService: 1
+  identityService: 1
+  billingService: 1
+  tokenGateway: 1
+  tokenPortal: 1
+
+oidc:
+  issuer: https://accounts.staging.example.com/realms/pinvou
+  audience: pinvou-desktop-staging
+  portalClientId: pinvou-token-portal-staging
+
+public:
+  portalUrl: https://tokens.staging.example.com
+  paymentCallbackUrl: https://billing.staging.example.com/internal/payment/notifications
+
+observability:
+  otlpEndpoint: https://otel.staging.example.com
+  prometheusRulesEnabled: true
+
+tokenGateway:
+  secretProvider: remote
+  secretKeyId: staging-account-token-v1
+  secretRotationIntervalSeconds: 300
+  secretRotationBatchSize: 100
+  providerAllowedHosts: [newapi]
+
+external:
+  postgresCidrs: [10.120.0.0/24]
+  paymentProviderCidrs: [10.121.0.0/24]
+  secretProviderCidrs: [10.122.0.0/24]
+  modelProviderCidrs: [10.123.0.0/24]
+  telemetryCollectorCidrs: [10.124.0.0/24]
+  timeSourceCidrs: [10.125.0.0/24]
+
+ingress:
+  enabled: true
+  className: nginx
+  portalHost: tokens.staging.example.com
+  keycloakHost: accounts.staging.example.com
+  identityHost: identity.staging.example.com
+  tlsSecretName: pinvou-account-platform-staging-tls
+
+keycloak:
+  hostname: https://accounts.staging.example.com
+  adminHostname: http://127.0.0.1:18081

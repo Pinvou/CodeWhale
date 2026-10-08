@@ -1,0 +1,729 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://pinvou.com/contracts/model-token-release-plan.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "candidate",
+    "environment",
+    "app_env",
+    "release_reference",
+    "approval_reference",
+    "operator_reference",
+    "activation",
+    "gates",
+    "runtime_roles",
+    "operations",
+    "credential_origin",
+    "legacy_links",
+    "stages"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "candidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "commit",
+        "image_sha256",
+        "config_sha256",
+        "migration_manifest_sha256",
+        "policy_set_digest",
+        "handler_set_digest"
+      ],
+      "properties": {
+        "commit": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{40}$"
+        },
+        "image_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "config_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "migration_manifest_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "policy_set_digest": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "handler_set_digest": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        }
+      }
+    },
+    "environment": {
+      "enum": [
+        "CLOUD_UAT",
+        "PRODUCTION"
+      ]
+    },
+    "app_env": {
+      "enum": [
+        "staging",
+        "production",
+        "production-new"
+      ]
+    },
+    "release_reference": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    },
+    "approval_reference": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    },
+    "operator_reference": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    },
+    "activation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "epoch",
+        "installed_policy_set_digest",
+        "installed_handler_set_digest"
+      ],
+      "properties": {
+        "state": {
+          "enum": [
+            "NOT_INSTALLED",
+            "PRE_ACTIVATION",
+            "ACTIVE",
+            "SAFE_ROLLBACK"
+          ]
+        },
+        "epoch": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "installed_policy_set_digest": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "installed_handler_set_digest": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "gates": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "TOKEN_ADMIN_PAGINATION_ENABLED",
+        "TOKEN_ADMIN_IMPACT_PRECHECKS_ENABLED",
+        "PORTAL_ADMIN_MODEL_TOKEN_IA_ENABLED",
+        "PORTAL_ADMIN_TOKEN_RESOURCE_FORMS_ENABLED",
+        "PORTAL_ADMIN_MODEL_OPERATIONS_DETAILS_ENABLED",
+        "PORTAL_ADMIN_MODEL_TOKEN_ACTIONS_ENABLED",
+        "PORTAL_ADMIN_MODEL_DETAILS_ENABLED",
+        "PORTAL_ADMIN_TOKEN_DETAILS_ENABLED",
+        "TOKEN_CREDENTIAL_ISOLATION_ENABLED",
+        "BILLING_ADMIN_MODEL_PRICE_PROJECTION_ENABLED",
+        "PORTAL_ADMIN_MODEL_PRICING_EDIT_ENABLED",
+        "TOKEN_ADMIN_OPERATIONS_OVERVIEW_ENABLED",
+        "PORTAL_ADMIN_MODEL_OPERATIONS_OVERVIEW_ENABLED",
+        "TOKEN_ADMIN_PAGE_OVERVIEWS_ENABLED",
+        "PORTAL_ADMIN_MODEL_TOKEN_PAGE_OVERVIEWS_ENABLED"
+      ],
+      "properties": {
+        "TOKEN_ADMIN_PAGINATION_ENABLED": {
+          "type": "boolean"
+        },
+        "TOKEN_ADMIN_IMPACT_PRECHECKS_ENABLED": {
+          "type": "boolean"
+        },
+        "PORTAL_ADMIN_MODEL_TOKEN_IA_ENABLED": {
+          "type": "boolean"
+        },
+        "PORTAL_ADMIN_TOKEN_RESOURCE_FORMS_ENABLED": {
+          "type": "boolean"
+        },
+        "PORTAL_ADMIN_MODEL_OPERATIONS_DETAILS_ENABLED": {
+          "type": "boolean"
+        },
+        "PORTAL_ADMIN_MODEL_TOKEN_ACTIONS_ENABLED": {
+          "type": "boolean"
+        },
+        "PORTAL_ADMIN_MODEL_DETAILS_ENABLED": {
+          "type": "boolean"
+        },
+        "PORTAL_ADMIN_TOKEN_DETAILS_ENABLED": {
+          "type": "boolean"
+        },
+        "TOKEN_CREDENTIAL_ISOLATION_ENABLED": {
+          "type": "boolean"
+        },
+        "BILLING_ADMIN_MODEL_PRICE_PROJECTION_ENABLED": {
+          "type": "boolean"
+        },
+        "PORTAL_ADMIN_MODEL_PRICING_EDIT_ENABLED": {
+          "type": "boolean"
+        },
+        "TOKEN_ADMIN_OPERATIONS_OVERVIEW_ENABLED": {
+          "type": "boolean"
+        },
+        "PORTAL_ADMIN_MODEL_OPERATIONS_OVERVIEW_ENABLED": {
+          "type": "boolean"
+        },
+        "TOKEN_ADMIN_PAGE_OVERVIEWS_ENABLED": {
+          "type": "boolean"
+        },
+        "PORTAL_ADMIN_MODEL_TOKEN_PAGE_OVERVIEWS_ENABLED": {
+          "type": "boolean"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "PORTAL_ADMIN_MODEL_TOKEN_IA_ENABLED": {
+                "const": true
+              }
+            },
+            "required": [
+              "PORTAL_ADMIN_MODEL_TOKEN_IA_ENABLED"
+            ]
+          },
+          "then": {
+            "properties": {
+              "TOKEN_ADMIN_PAGINATION_ENABLED": {
+                "const": true
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "PORTAL_ADMIN_TOKEN_RESOURCE_FORMS_ENABLED": {
+                "const": true
+              }
+            },
+            "required": [
+              "PORTAL_ADMIN_TOKEN_RESOURCE_FORMS_ENABLED"
+            ]
+          },
+          "then": {
+            "properties": {
+              "PORTAL_ADMIN_MODEL_TOKEN_IA_ENABLED": {
+                "const": true
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "PORTAL_ADMIN_MODEL_OPERATIONS_DETAILS_ENABLED": {
+                "const": true
+              }
+            },
+            "required": [
+              "PORTAL_ADMIN_MODEL_OPERATIONS_DETAILS_ENABLED"
+            ]
+          },
+          "then": {
+            "properties": {
+              "PORTAL_ADMIN_MODEL_TOKEN_IA_ENABLED": {
+                "const": true
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "PORTAL_ADMIN_MODEL_TOKEN_ACTIONS_ENABLED": {
+                "const": true
+              }
+            },
+            "required": [
+              "PORTAL_ADMIN_MODEL_TOKEN_ACTIONS_ENABLED"
+            ]
+          },
+          "then": {
+            "properties": {
+              "PORTAL_ADMIN_MODEL_TOKEN_IA_ENABLED": {
+                "const": true
+              },
+              "TOKEN_ADMIN_IMPACT_PRECHECKS_ENABLED": {
+                "const": true
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "PORTAL_ADMIN_MODEL_DETAILS_ENABLED": {
+                "const": true
+              }
+            },
+            "required": [
+              "PORTAL_ADMIN_MODEL_DETAILS_ENABLED"
+            ]
+          },
+          "then": {
+            "properties": {
+              "PORTAL_ADMIN_MODEL_TOKEN_IA_ENABLED": {
+                "const": true
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "PORTAL_ADMIN_TOKEN_DETAILS_ENABLED": {
+                "const": true
+              }
+            },
+            "required": [
+              "PORTAL_ADMIN_TOKEN_DETAILS_ENABLED"
+            ]
+          },
+          "then": {
+            "properties": {
+              "PORTAL_ADMIN_MODEL_TOKEN_IA_ENABLED": {
+                "const": true
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "TOKEN_CREDENTIAL_ISOLATION_ENABLED": {
+                "const": true
+              }
+            },
+            "required": [
+              "TOKEN_CREDENTIAL_ISOLATION_ENABLED"
+            ]
+          },
+          "then": {
+            "properties": {
+              "PORTAL_ADMIN_TOKEN_DETAILS_ENABLED": {
+                "const": true
+              },
+              "PORTAL_ADMIN_MODEL_TOKEN_ACTIONS_ENABLED": {
+                "const": true
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "PORTAL_ADMIN_MODEL_PRICING_EDIT_ENABLED": {
+                "const": true
+              }
+            },
+            "required": [
+              "PORTAL_ADMIN_MODEL_PRICING_EDIT_ENABLED"
+            ]
+          },
+          "then": {
+            "properties": {
+              "PORTAL_ADMIN_MODEL_DETAILS_ENABLED": {
+                "const": true
+              },
+              "BILLING_ADMIN_MODEL_PRICE_PROJECTION_ENABLED": {
+                "const": true
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "PORTAL_ADMIN_MODEL_OPERATIONS_OVERVIEW_ENABLED": {
+                "const": true
+              }
+            },
+            "required": [
+              "PORTAL_ADMIN_MODEL_OPERATIONS_OVERVIEW_ENABLED"
+            ]
+          },
+          "then": {
+            "properties": {
+              "PORTAL_ADMIN_MODEL_TOKEN_IA_ENABLED": {
+                "const": true
+              },
+              "PORTAL_ADMIN_MODEL_OPERATIONS_DETAILS_ENABLED": {
+                "const": true
+              },
+              "PORTAL_ADMIN_MODEL_DETAILS_ENABLED": {
+                "const": true
+              },
+              "TOKEN_ADMIN_OPERATIONS_OVERVIEW_ENABLED": {
+                "const": true
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "PORTAL_ADMIN_MODEL_TOKEN_PAGE_OVERVIEWS_ENABLED": {
+                "const": true
+              }
+            },
+            "required": [
+              "PORTAL_ADMIN_MODEL_TOKEN_PAGE_OVERVIEWS_ENABLED"
+            ]
+          },
+          "then": {
+            "properties": {
+              "PORTAL_ADMIN_MODEL_TOKEN_IA_ENABLED": {
+                "const": true
+              },
+              "TOKEN_ADMIN_PAGE_OVERVIEWS_ENABLED": {
+                "const": true
+              }
+            }
+          }
+        }
+      ]
+    },
+    "runtime_roles": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "gateway",
+        "credential_portal",
+        "permission_group",
+        "retired_roles"
+      ],
+      "properties": {
+        "gateway": {
+          "type": "string",
+          "pattern": "^[a-z_][a-z0-9_]{0,62}$"
+        },
+        "credential_portal": {
+          "type": "string",
+          "pattern": "^[a-z_][a-z0-9_]{0,62}$"
+        },
+        "permission_group": {
+          "const": "token_gateway"
+        },
+        "retired_roles": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z_][a-z0-9_]{0,62}$"
+          }
+        }
+      }
+    },
+    "operations": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "token_migrator",
+        "account_policy_role",
+        "account_policy_lock",
+        "role_evidence_reference"
+      ],
+      "properties": {
+        "token_migrator": {
+          "type": "string",
+          "pattern": "^[a-z_][a-z0-9_]{0,62}$"
+        },
+        "account_policy_role": {
+          "type": "string",
+          "pattern": "^[a-z_][a-z0-9_]{0,62}$"
+        },
+        "account_policy_lock": {
+          "const": "SHARE_NOWAIT"
+        },
+        "role_evidence_reference": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        }
+      }
+    },
+    "credential_origin": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "legacy_links": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ga_at",
+        "ga_version",
+        "minimum_days",
+        "minimum_stable_versions"
+      ],
+      "properties": {
+        "ga_at": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "date-time"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "ga_version": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "minimum_days": {
+          "const": 90
+        },
+        "minimum_stable_versions": {
+          "const": 2
+        }
+      }
+    },
+    "stages": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 3,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "stage",
+          "cohort",
+          "traffic_percent",
+          "observation_seconds",
+          "minimum_samples",
+          "insufficient_samples",
+          "approval_reference",
+          "thresholds"
+        ],
+        "properties": {
+          "stage": {
+            "enum": [
+              "INTERNAL",
+              "LIMITED",
+              "FULL"
+            ]
+          },
+          "cohort": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+          },
+          "traffic_percent": {
+            "type": "number",
+            "exclusiveMinimum": 0,
+            "maximum": 100
+          },
+          "observation_seconds": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 2147483647
+          },
+          "minimum_samples": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "insufficient_samples": {
+            "const": "PAUSE"
+          },
+          "approval_reference": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+          },
+          "thresholds": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "unauthorized_effects",
+              "error_rate",
+              "latency_p95_ms",
+              "queue_depth",
+              "capacity_utilization",
+              "resource_recovery_failures"
+            ],
+            "properties": {
+              "unauthorized_effects": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "advance_max",
+                  "pause_above",
+                  "slo_reference"
+                ],
+                "properties": {
+                  "advance_max": {
+                    "type": "number",
+                    "minimum": 0
+                  },
+                  "pause_above": {
+                    "type": "number",
+                    "minimum": 0
+                  },
+                  "slo_reference": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+                  }
+                }
+              },
+              "error_rate": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "advance_max",
+                  "pause_above",
+                  "slo_reference"
+                ],
+                "properties": {
+                  "advance_max": {
+                    "type": "number",
+                    "minimum": 0
+                  },
+                  "pause_above": {
+                    "type": "number",
+                    "minimum": 0
+                  },
+                  "slo_reference": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+                  }
+                }
+              },
+              "latency_p95_ms": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "advance_max",
+                  "pause_above",
+                  "slo_reference"
+                ],
+                "properties": {
+                  "advance_max": {
+                    "type": "number",
+                    "minimum": 0
+                  },
+                  "pause_above": {
+                    "type": "number",
+                    "minimum": 0
+                  },
+                  "slo_reference": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+                  }
+                }
+              },
+              "queue_depth": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "advance_max",
+                  "pause_above",
+                  "slo_reference"
+                ],
+                "properties": {
+                  "advance_max": {
+                    "type": "number",
+                    "minimum": 0
+                  },
+                  "pause_above": {
+                    "type": "number",
+                    "minimum": 0
+                  },
+                  "slo_reference": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+                  }
+                }
+              },
+              "capacity_utilization": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "advance_max",
+                  "pause_above",
+                  "slo_reference"
+                ],
+                "properties": {
+                  "advance_max": {
+                    "type": "number",
+                    "minimum": 0
+                  },
+                  "pause_above": {
+                    "type": "number",
+                    "minimum": 0
+                  },
+                  "slo_reference": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+                  }
+                }
+              },
+              "resource_recovery_failures": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "advance_max",
+                  "pause_above",
+                  "slo_reference"
+                ],
+                "properties": {
+                  "advance_max": {
+                    "type": "number",
+                    "minimum": 0
+                  },
+                  "pause_above": {
+                    "type": "number",
+                    "minimum": 0
+                  },
+                  "slo_reference": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

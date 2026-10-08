@@ -1,0 +1,80 @@
+{{- if .Values.observability.prometheusRulesEnabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "pinvou.fullname" . }}
+  labels: {{ include "pinvou.labels" . | nindent 4 }}
+spec:
+  groups:
+    - name: account-platform.availability
+      rules:
+        - alert: PinvouAccountPlatformHighErrorRate
+          expr: sum by(service) (rate(pinvou_http_requests_total{status=~"5.."}[5m])) / clamp_min(sum by(service) (rate(pinvou_http_requests_total[5m])), 0.001) > 0.05
+          for: 10m
+          labels: { severity: p1 }
+          annotations: { summary: "Account Platform HTTP 5xx rate exceeds 5%" }
+        - alert: PinvouAccountPlatformSlowRequests
+          expr: histogram_quantile(0.95, sum by(service,le) (rate(pinvou_http_request_duration_seconds_bucket[5m]))) > 1
+          for: 10m
+          labels: { severity: p1 }
+          annotations: { summary: "Account Platform HTTP p95 exceeds one second" }
+    - name: account-platform.events
+      rules:
+        - alert: PinvouAccountPlatformEventRelayMissing
+          expr: count(pinvou_outbox_pending_events) < 3
+          for: 5m
+          labels: { severity: p1 }
+          annotations: { summary: "One or more Account Platform event relays are not being scraped" }
+        - alert: PinvouAccountPlatformOutboxBacklog
+          expr: pinvou_outbox_oldest_pending_age_seconds > 300 or pinvou_outbox_pending_events > 1000
+          for: 5m
+          labels: { severity: p1 }
+          annotations: { summary: "Account Platform Outbox is not converging" }
+        - alert: PinvouAccountPlatformDeadLetter
+          expr: pinvou_outbox_dead_lettered_events > 0
+          for: 1m
+          labels: { severity: p1 }
+          annotations: { summary: "Account Platform has dead-lettered domain events" }
+    - name: account-platform.admin-pagination
+      rules:
+        - alert: PinvouAdminPaginationMemberWatermarkWarning
+          expr: sum(max by (resource) (pinvou_admin_pagination_snapshot_members)) >= 14000000
+          for: 5m
+          labels: { severity: p2 }
+          annotations: { summary: "Billing admin pagination members reached 70% capacity" }
+        - alert: PinvouAdminPaginationMemberWatermarkCritical
+          expr: sum(max by (resource) (pinvou_admin_pagination_snapshot_members)) >= 17000000
+          for: 2m
+          labels: { severity: p1 }
+          annotations: { summary: "Billing admin pagination members reached 85% capacity" }
+        - alert: PinvouAdminPaginationStorageWatermarkWarning
+          expr: max(pinvou_admin_pagination_storage_bytes) >= 6012954214
+          for: 5m
+          labels: { severity: p2 }
+          annotations: { summary: "Billing admin pagination storage reached 70% capacity" }
+        - alert: PinvouAdminPaginationStorageWatermarkCritical
+          expr: max(pinvou_admin_pagination_storage_bytes) >= 7301444403
+          for: 2m
+          labels: { severity: p1 }
+          annotations: { summary: "Billing admin pagination storage reached 85% capacity" }
+        - alert: PinvouAdminPaginationCleanupBacklog
+          expr: max(pinvou_admin_pagination_cleanup_oldest_age_seconds) > 300
+          for: 2m
+          labels: { severity: p1 }
+          annotations: { summary: "Billing admin pagination cleanup is more than five minutes behind" }
+        - alert: PinvouAccountApprovalPaginationCapacityWarning
+          expr: pinvou_account_approval_pagination_capacity_level{level="warning"} == 1
+          for: 5m
+          labels: { severity: p2 }
+          annotations: { summary: "Account approval pagination reached a 70% capacity watermark" }
+        - alert: PinvouAccountApprovalPaginationCapacityCritical
+          expr: pinvou_account_approval_pagination_capacity_level{level="critical"} == 1
+          for: 2m
+          labels: { severity: p1 }
+          annotations: { summary: "Account approval pagination reached an 85% capacity watermark" }
+        - alert: PinvouAccountApprovalPaginationCleanupBacklog
+          expr: pinvou_account_approval_pagination_cleanup_lag_seconds > 300
+          for: 2m
+          labels: { severity: p1 }
+          annotations: { summary: "Account approval pagination cleanup is more than five minutes behind" }
+{{- end }}

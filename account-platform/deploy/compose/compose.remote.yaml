@@ -1,0 +1,47 @@
+services:
+  keycloak:
+    environment:
+      KC_HOSTNAME: ${PUBLIC_BASE_URL:?set PUBLIC_BASE_URL}
+      PINVOU_OIDC_ISSUER: ${PUBLIC_BASE_URL:?set PUBLIC_BASE_URL}/realms/pinvou
+      KC_HOSTNAME_ADMIN: ${KEYCLOAK_ADMIN_BASE_URL:-http://127.0.0.1:18081}
+      KC_HOSTNAME_BACKCHANNEL_DYNAMIC: "true"
+      KC_PROXY_HEADERS: xforwarded
+
+  postgres:
+    environment:
+      ENABLE_PAYMENT_SIMULATOR_DB: "false"
+
+  account-service:
+    environment:
+      OIDC_ISSUER: ${PUBLIC_BASE_URL:?set PUBLIC_BASE_URL}/realms/pinvou
+      MOBILE_AUTH_ENABLED: "true"
+
+  identity-service:
+    environment:
+      MOBILE_AUTH_ENABLED: "true"
+
+  billing-service:
+    environment:
+      OIDC_ISSUER: ${PUBLIC_BASE_URL:?set PUBLIC_BASE_URL}/realms/pinvou
+      BILLING_PAYMENT_PROVIDER: h3c_mall
+      BILLING_ALLOW_TENTATIVE_PRICES: "true"
+      BILLING_TEST_ADMISSION_EVIDENCE_TTL: ${BILLING_TEST_ADMISSION_EVIDENCE_TTL:-720h}
+      BILLING_NORMAL_REFUND_CREATION_ENABLED: "false"
+
+  token-gateway:
+    environment:
+      OIDC_ISSUER: ${PUBLIC_BASE_URL:?set PUBLIC_BASE_URL}/realms/pinvou
+
+  token-portal:
+    environment:
+      PORTAL_PUBLIC_URL: ${PORTAL_PUBLIC_URL:?set PORTAL_PUBLIC_URL}
+      PORTAL_OIDC_AUTHORIZATION_URL: ${PUBLIC_BASE_URL:?set PUBLIC_BASE_URL}/realms/pinvou/protocol/openid-connect/auth
+      SYSTEM_PROBES_JSON: '[{"key":"portal","kind":"local"},{"key":"account","kind":"http","url":"http://account-service:8080/health/ready"},{"key":"billing","kind":"http","url":"http://billing-service:8080/health/ready"},{"key":"token-gateway","kind":"http","url":"http://token-gateway:8080/health/ready"},{"key":"identity-provider","kind":"http","url":"http://keycloak:8080/realms/pinvou/.well-known/openid-configuration"},{"key":"model-gateway","kind":"http","url":"${MODEL_GATEWAY_STATUS_URL:-http://newapi:3000/api/status}","json_boolean_field":"success"},{"key":"event-bus","kind":"http","url":"http://nats:8222/healthz"},{"key":"account-event-relay","kind":"relay","url":"http://account-event-relay:9090"},{"key":"billing-event-relay","kind":"relay","url":"http://billing-event-relay:9090"},{"key":"token-event-relay","kind":"relay","url":"http://token-event-relay:9090"}]'
+
+  payment-simulator:
+    profiles: [development-simulator]
+    environment:
+      PAYMENT_SIM_PUBLIC_URL: ${PUBLIC_BASE_URL:?set PUBLIC_BASE_URL}
+
+  payment-simulator-migrate:
+    profiles: [development-simulator]

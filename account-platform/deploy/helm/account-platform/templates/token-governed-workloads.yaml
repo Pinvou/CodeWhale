@@ -1,0 +1,178 @@
+{{- $root := . -}}
+{{- $fullname := include "pinvou.fullname" . -}}
+{{- $apps := list
+  (dict "name" "token-credential-portal" "settings" .Values.tokenCredentialPortal "image" .Values.images.tokenCredentialPortal)
+  (dict "name" "token-command-executor" "settings" .Values.tokenCommandExecutor "image" .Values.images.tokenCommandExecutor)
+-}}
+{{- range $app := $apps }}
+{{- if $app.settings.enabled }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $fullname }}-{{ $app.name }}
+  labels:
+    {{- include "pinvou.labels" $root | nindent 4 }}
+    app.kubernetes.io/component: {{ $app.name }}
+spec:
+  replicas: {{ $app.settings.replicas }}
+  # Writer generations are fenced before rollout; no old/new identity overlap.
+  strategy: { type: Recreate }
+  selector:
+    matchLabels:
+      {{- include "pinvou.selector" $root | nindent 6 }}
+      app.kubernetes.io/component: {{ $app.name }}
+  template:
+    metadata:
+      annotations: { prometheus.io/scrape: "true", prometheus.io/path: "/metrics", prometheus.io/port: "9090" }
+      labels:
+        {{- include "pinvou.selector" $root | nindent 8 }}
+        app.kubernetes.io/component: {{ $app.name }}
+        pinvou.io/restricted-token-control: "true"
+    spec:
+      serviceAccountName: {{ $fullname }}-{{ $app.name }}
+      automountServiceAccountToken: false
+      {{- include "pinvou.availabilityPodSpec" (dict "root" $root "component" $app.name) | nindent 6 }}
+      {{- with $root.Values.global.imagePullSecrets }}
+      imagePullSecrets: {{ toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if and (eq $app.name "token-credential-portal") (eq $root.Values.tokenGateway.secretProvider "vault-transit") }}
+      securityContext: { runAsNonRoot: true, runAsUser: 65532, runAsGroup: 65532, fsGroup: 65532, seccompProfile: { type: RuntimeDefault } }
+      {{- else }}
+      securityContext: { runAsNonRoot: true, seccompProfile: { type: RuntimeDefault } }
+      {{- end }}
+      containers:
+        - name: {{ $app.name }}
+          image: "{{ $app.image.repository }}:{{ $app.image.tag }}"
+          imagePullPolicy: {{ $app.image.pullPolicy }}
+          ports: [{ name: http, containerPort: 8080 }, { name: metrics, containerPort: 9090 }]
+          securityContext: { allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: { drop: ["ALL"] } }
+          resources: {{ toYaml $root.Values.resources | nindent 12 }}
+          env:
+            - { name: APP_ENV, value: {{ $root.Values.global.environment | quote }} }
+            - { name: PORT, value: "8080" }
+            - { name: METRICS_ADDRESS, value: ":9090" }
+            - { name: TRUSTED_TIME_SOURCES, value: {{ join "," $root.Values.global.trustedTimeSources | quote }} }
+            - { name: OTEL_EXPORTER_OTLP_ENDPOINT, value: {{ $root.Values.observability.otlpEndpoint | quote }} }
+            - { name: ACCOUNT_HTTP_URL, value: {{ printf "http://%s-account-service:8080" $fullname | quote }} }
+            - { name: WORKLOAD_IDENTITY_TOKEN_FILE, value: /var/run/secrets/pinvou/workload/token }
+            {{- if eq $app.name "token-command-executor" }}
+            - { name: TOKEN_GATEWAY_HTTP_URL, value: {{ printf "http://%s-token-gateway:8080" $fullname | quote }} }
+            - { name: NATS_URL, value: {{ include "pinvou.natsUrl" $root | quote }} }
+            - { name: NATS_CREDENTIALS_FILE, value: /var/run/secrets/pinvou/nats/token-command-executor.creds }
+            {{- else }}
+            - name: DATABASE_URL
+              valueFrom: { secretKeyRef: { name: {{ $app.settings.runtimeSecret }}, key: database-url } }
+            - { name: TOKEN_SECRET_PROVIDER, value: {{ $root.Values.tokenGateway.secretProvider | quote }} }
+            - { name: TOKEN_SECRET_KEY_ID, value: {{ $root.Values.tokenGateway.secretKeyId | quote }} }
+            {{- if eq $root.Values.tokenGateway.secretProvider "vault-transit" }}
+            {{- include "pinvou.nativeKmsEnv" $root | nindent 12 }}
+            {{- else }}
+            {{- range $item := list (dict "env" "TOKEN_SECRET_PROVIDER_URL" "key" "secret-provider-url") (dict "env" "TOKEN_SECRET_PROVIDER_TOKEN" "key" "secret-provider-token") }}
+            - name: {{ $item.env }}
+              valueFrom: { secretKeyRef: { name: {{ $app.settings.runtimeSecret }}, key: {{ $item.key }} } }
+            {{- end }}
+            {{- end }}
+            - { name: TOKEN_PROVIDER_ALLOWED_HOSTS, value: {{ join "," $root.Values.tokenGateway.providerAllowedHosts | quote }} }
+            - { name: PORTAL_PUBLIC_URL, value: {{ $root.Values.public.portalUrl | quote }} }
+            - { name: CREDENTIAL_PORTAL_PUBLIC_URL, value: {{ $app.settings.publicUrl | quote }} }
+            - { name: OIDC_ISSUER, value: {{ $root.Values.oidc.issuer | quote }} }
+            - { name: OIDC_JWKS_URL, value: {{ $app.settings.oidcJwksUrl | quote }} }
+            - { name: CREDENTIAL_OIDC_AUTHORIZATION_URL, value: {{ $app.settings.oidcAuthorizationUrl | quote }} }
+            - { name: CREDENTIAL_OIDC_TOKEN_URL, value: {{ $app.settings.oidcTokenUrl | quote }} }
+            - { name: CREDENTIAL_OIDC_CLIENT_ID, value: {{ $app.settings.oidcClientId | quote }} }
+            - { name: CREDENTIAL_OIDC_AUDIENCE, value: {{ $app.settings.oidcAudience | quote }} }
+            - { name: PINVOU_API_CONTRACT_VERSION, value: {{ $root.Values.compatibility.contractVersion | quote }} }
+            - { name: PINVOU_CLIENT_UPGRADE_URL, value: {{ $root.Values.compatibility.upgradeUrl | quote }} }
+            - { name: PINVOU_CLIENT_RELEASE_MANIFEST, value: {{ toJson $root.Values.compatibility.releases | quote }} }
+            {{- end }}
+          readinessProbe: { httpGet: { path: /health/ready, port: http }, periodSeconds: 5, timeoutSeconds: 3 }
+          livenessProbe: { httpGet: { path: /health/live, port: http }, periodSeconds: 20, timeoutSeconds: 3 }
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+            {{- if and (eq $app.name "token-credential-portal") (eq $root.Values.tokenGateway.secretProvider "vault-transit") }}
+            {{- include "pinvou.nativeKmsMounts" $root | nindent 12 }}
+            {{- end }}
+            - { name: workload-identity, mountPath: /var/run/secrets/pinvou/workload, readOnly: true }
+            {{- if eq $app.name "token-command-executor" }}
+            - { name: nats-credentials, mountPath: /var/run/secrets/pinvou/nats, readOnly: true }
+            {{- end }}
+        {{- if and (eq $app.name "token-credential-portal") (eq $root.Values.tokenGateway.secretProvider "vault-transit") }}
+        {{- include "pinvou.nativeKmsAgent" $root | nindent 8 }}
+        {{- end }}
+      volumes:
+        {{- if and (eq $app.name "token-credential-portal") (eq $root.Values.tokenGateway.secretProvider "vault-transit") }}
+        {{- include "pinvou.nativeKmsVolumes" (dict "root" $root "component" $app.name) | nindent 8 }}
+        {{- end }}
+        - { name: tmp, emptyDir: { sizeLimit: 16Mi } }
+        - name: workload-identity
+          projected:
+            sources:
+              - serviceAccountToken: { path: token, audience: {{ $root.Values.workloadIdentity.audience | quote }}, expirationSeconds: {{ $root.Values.workloadIdentity.tokenExpirationSeconds }} }
+        {{- if eq $app.name "token-command-executor" }}
+        - name: nats-credentials
+          secret: { secretName: {{ $app.settings.runtimeSecret }}, items: [{ key: token-command-executor.creds, path: token-command-executor.creds }] }
+        {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $fullname }}-{{ $app.name }}
+spec:
+  selector:
+    {{- include "pinvou.selector" $root | nindent 4 }}
+    app.kubernetes.io/component: {{ $app.name }}
+  ports: [{ name: http, port: 8080, targetPort: http }]
+{{- if $root.Values.availability.enabled }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata: { name: {{ $fullname }}-{{ $app.name }} }
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      {{- include "pinvou.selector" $root | nindent 6 }}
+      app.kubernetes.io/component: {{ $app.name }}
+{{- end }}
+{{- end }}
+{{- end }}
+
+{{- if .Values.tokenGovernanceCheck.enabled }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ $fullname }}-token-governance-check-{{ .Release.Revision }}
+spec:
+  suspend: true
+  backoffLimit: 0
+  activeDeadlineSeconds: 45
+  template:
+    metadata:
+      labels:
+        {{- include "pinvou.selector" . | nindent 8 }}
+        app.kubernetes.io/component: token-governance-check
+        pinvou.io/restricted-token-control: "true"
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      serviceAccountName: {{ $fullname }}-token-governance-check
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets: {{ toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext: { runAsNonRoot: true, seccompProfile: { type: RuntimeDefault } }
+      containers:
+        - name: governance-check
+          image: "{{ .Values.images.tokenGovernance.repository }}:{{ .Values.images.tokenGovernance.tag }}"
+          imagePullPolicy: {{ .Values.images.tokenGovernance.pullPolicy }}
+          command: ["/service"]
+          args: []
+          securityContext: { allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: { drop: ["ALL"] } }
+          resources: {{ toYaml .Values.resources | nindent 12 }}
+          env:
+            - name: TOKEN_MIGRATOR_DATABASE_URL
+              valueFrom: { secretKeyRef: { name: {{ .Values.tokenGovernanceCheck.operationsSecret }}, key: token-migrator-database-url } }
+            - name: ACCOUNT_POLICY_DATABASE_URL
+              valueFrom: { secretKeyRef: { name: {{ .Values.tokenGovernanceCheck.operationsSecret }}, key: account-policy-database-url } }
+{{- end }}

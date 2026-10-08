@@ -1,0 +1,326 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://pinvou.com/contracts/model-token-evidence-report.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "candidate",
+    "environment",
+    "kind",
+    "status",
+    "started_at",
+    "ended_at",
+    "executor_reference",
+    "reviewer_reference",
+    "approval_reference",
+    "validation_level",
+    "exit_code",
+    "artifacts",
+    "cases",
+    "observation",
+    "legacy_links"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "candidate": {
+      "$ref": "https://pinvou.com/contracts/model-token-release-evidence.schema.json#/properties/candidate"
+    },
+    "environment": {
+      "enum": [
+        "CLOUD_UAT",
+        "PRODUCTION"
+      ]
+    },
+    "kind": {
+      "enum": [
+        "GATE_MATRIX",
+        "CURSOR_ISOLATION",
+        "LEGACY_LINKS",
+        "AUTHORIZATION",
+        "THREE_SERVICE_COMMANDS",
+        "WORKER_READINESS_SAFE",
+        "NATS_CONSUMERS",
+        "GOVERNANCE_POLICY_HANDLER",
+        "WRITER_FENCE",
+        "ACCOUNT_POLICY_LOCK",
+        "CAP_BOOTSTRAP",
+        "DEADLINES_CAPACITY",
+        "DUAL_ORIGIN_BROWSER",
+        "PROXY_LOG_SAFETY",
+        "WORKLOAD_ROTATION",
+        "SAFE_ROLLBACK",
+        "OBSERVATION"
+      ]
+    },
+    "status": {
+      "enum": [
+        "PASS",
+        "FAIL"
+      ]
+    },
+    "started_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "ended_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "executor_reference": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    },
+    "reviewer_reference": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    },
+    "approval_reference": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    },
+    "validation_level": {
+      "enum": [
+        "TARGET_ENVIRONMENT",
+        "LOCAL_FIXTURE",
+        "VALIDATED_HTTPS_REPLAY"
+      ]
+    },
+    "exit_code": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "artifacts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "path",
+          "sha256"
+        ],
+        "properties": {
+          "path": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]+(?:/[A-Za-z0-9_-]+)*\\.(?:json|ndjson|txt)$"
+          },
+          "sha256": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          }
+        }
+      },
+      "minItems": 1,
+      "maxItems": 128,
+      "uniqueItems": true
+    },
+    "cases": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "status",
+          "artifact_paths"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+          },
+          "status": {
+            "enum": [
+              "PASS",
+              "FAIL",
+              "SKIP"
+            ]
+          },
+          "artifact_paths": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_-]+(?:/[A-Za-z0-9_-]+)*\\.(?:json|ndjson|txt)$"
+            },
+            "minItems": 1,
+            "maxItems": 128,
+            "uniqueItems": true
+          }
+        }
+      },
+      "minItems": 1,
+      "maxItems": 256,
+      "uniqueItems": true
+    },
+    "observation": {
+      "anyOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "stages"
+          ],
+          "properties": {
+            "stages": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "stage",
+                  "cohort",
+                  "traffic_percent",
+                  "approval_reference",
+                  "started_at",
+                  "ended_at",
+                  "samples",
+                  "metrics"
+                ],
+                "properties": {
+                  "stage": {
+                    "enum": [
+                      "INTERNAL",
+                      "LIMITED",
+                      "FULL"
+                    ]
+                  },
+                  "cohort": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+                  },
+                  "traffic_percent": {
+                    "type": "number",
+                    "exclusiveMinimum": 0,
+                    "maximum": 100
+                  },
+                  "approval_reference": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+                  },
+                  "started_at": {
+                    "type": "string",
+                    "format": "date-time"
+                  },
+                  "ended_at": {
+                    "type": "string",
+                    "format": "date-time"
+                  },
+                  "samples": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "metrics": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "unauthorized_effects",
+                      "error_rate",
+                      "latency_p95_ms",
+                      "queue_depth",
+                      "capacity_utilization",
+                      "resource_recovery_failures"
+                    ],
+                    "properties": {
+                      "unauthorized_effects": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 9007199254740991
+                      },
+                      "error_rate": {
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": 1
+                      },
+                      "latency_p95_ms": {
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": 9007199254740991
+                      },
+                      "queue_depth": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 9007199254740991
+                      },
+                      "capacity_utilization": {
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": 1
+                      },
+                      "resource_recovery_failures": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 9007199254740991
+                      }
+                    }
+                  }
+                }
+              },
+              "minItems": 1,
+              "maxItems": 3,
+              "uniqueItems": true
+            }
+          }
+        }
+      ]
+    },
+    "legacy_links": {
+      "anyOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "compatibility_retained",
+            "stable_releases"
+          ],
+          "properties": {
+            "compatibility_retained": {
+              "type": "boolean"
+            },
+            "stable_releases": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "version",
+                  "released_at",
+                  "environment",
+                  "channel"
+                ],
+                "properties": {
+                  "version": {
+                    "type": "string",
+                    "pattern": "^(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)$"
+                  },
+                  "released_at": {
+                    "type": "string",
+                    "format": "date-time"
+                  },
+                  "environment": {
+                    "const": "PRODUCTION"
+                  },
+                  "channel": {
+                    "const": "STABLE"
+                  }
+                }
+              },
+              "minItems": 0,
+              "maxItems": 100,
+              "uniqueItems": true
+            }
+          }
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,256 @@
+global:
+  environment: staging
+  runtimeSecret: pinvou-account-platform-runtime
+  imagePullSecrets: []
+  podLabels: {}
+  trustedTimeSources: [time.cloudflare.com:123, pool.ntp.org:123, ntp.aliyun.com:123, time1.cloud.tencent.com:123, time.windows.com:123]
+  manualReviewOnCallUserIds: ["00000000-0000-0000-0000-000000000101", "00000000-0000-0000-0000-000000000102"]
+
+approvalRelay:
+  # Public JSON only. Never point this at the Secret containing NKey seeds or
+  # credentials. Trusted SHA-256 values stay in global.runtimeSecret.
+  natsPublicArtifactConfigMap: pinvou-account-platform-nats-public-artifacts
+  previousV1Enabled: false
+
+compatibility:
+  contractVersion: account-platform-v1
+  upgradeUrl: https://github.com/Pinvou/pinvou3/releases/latest
+  releases:
+    - { version: 0.8.0, released_at: "2026-08-01T00:00:00Z" }
+    - { version: 0.7.0, released_at: "2026-06-01T00:00:00Z", deprecation_notice_at: "2026-08-31T00:00:00Z", sunset_at: "2026-10-30T00:00:00Z" }
+    - { version: 0.6.0, released_at: "2026-03-01T00:00:00Z", deprecation_notice_at: "2026-07-03T00:00:00Z", sunset_at: "2026-09-01T00:00:00Z" }
+
+externalSecrets:
+  enabled: false
+  secretStoreKind: ClusterSecretStore
+  secretStoreName: ""
+  remoteKey: ""
+  refreshInterval: 5m
+
+images:
+  accountService: { repository: pinvou/account-service, tag: dev, pullPolicy: IfNotPresent }
+  identityService: { repository: pinvou/identity-service, tag: dev, pullPolicy: IfNotPresent }
+  billingService: { repository: pinvou/billing-service, tag: dev, pullPolicy: IfNotPresent }
+  tokenGateway: { repository: pinvou/token-gateway, tag: dev, pullPolicy: IfNotPresent }
+  tokenPortal: { repository: pinvou/token-portal, tag: dev, pullPolicy: IfNotPresent }
+  tokenCredentialPortal: { repository: pinvou/token-credential-portal, tag: dev, pullPolicy: IfNotPresent }
+  tokenCommandExecutor: { repository: pinvou/token-command-executor, tag: dev, pullPolicy: IfNotPresent }
+  tokenGovernance: { repository: pinvou/token-governance, tag: dev, pullPolicy: IfNotPresent }
+  eventRelay: { repository: pinvou/account-platform-event-relay, tag: dev, pullPolicy: IfNotPresent }
+  migrate: { repository: pinvou/account-platform-migrate, tag: dev, pullPolicy: IfNotPresent }
+  newApi: { repository: calciumion/new-api, tag: v1.0.0-rc.26, digest: sha256:7b82c866e9c0fb02faca7d5068e9d1261e47edf52462d63d9db7b614e7f1027d, pullPolicy: IfNotPresent }
+  # This image is built from deploy/keycloak/Dockerfile. The upstream image
+  # alone does not contain the identity-security SPI or realm upgrade script.
+  keycloak: { repository: pinvou/account-platform-keycloak, tag: dev, pullPolicy: IfNotPresent }
+  redis: { repository: redis, tag: "8.2-alpine", pullPolicy: IfNotPresent }
+  nats: { repository: nats, tag: "2.11-alpine", pullPolicy: IfNotPresent }
+
+portal:
+  # Phase 2 only: keep false during the capable-binary rollout, then enable in
+  # a separate rollout after every Portal replica reports the new version.
+  sessionLineageLogoutEnabled: false
+  adminModelTokenIAEnabled: false
+  adminTokenResourceFormsEnabled: false
+  adminModelOperationsDetailsEnabled: false
+  adminModelDetailsEnabled: false
+  adminTokenDetailsEnabled: false
+  adminModelPricingEditEnabled: false
+  adminModelOperationsOverviewEnabled: false
+  adminModelTokenPageOverviewsEnabled: false
+  adminModelTokenActionsEnabled: false
+
+replicas:
+  accountService: 2
+  identityService: 1
+  billingService: 2
+  tokenGateway: 2
+  tokenPortal: 2
+  eventRelay: 1
+
+availability:
+  enabled: false
+  topologyKey: topology.kubernetes.io/zone
+  hostnameTopologyKey: kubernetes.io/hostname
+  terminationGracePeriodSeconds: 60
+
+dependencies:
+  redisUrl: ""
+  newApiRedisUrl: ""
+  natsUrl: ""
+  natsMonitorUrl: ""
+
+newApi:
+  enabled: true
+  serviceName: newapi
+  replicas: 1
+  nodeType: master
+  trustedProxies: none
+
+oidc:
+  issuer: https://accounts.example.invalid/realms/pinvou
+  jwksUrl: ""
+  tokenUrl: ""
+  audience: pinvou-desktop
+  portalClientId: pinvou-token-portal
+  portalHandoffClientId: pinvou-token-portal-handoff
+
+public:
+  portalUrl: https://tokens.example.invalid
+  paymentCallbackUrl: https://billing.example.invalid/internal/payment/notifications
+
+observability:
+  otlpEndpoint: ""
+  prometheusRulesEnabled: false
+
+security:
+  rateLimitRPS: 100
+  rateLimitBurst: 200
+  authRiskEnabled: false
+
+workloadIdentity:
+  issuer: https://kubernetes.default.svc
+  jwksUrl: https://kubernetes.default.svc/openid/v1/jwks
+  audience: pinvou-account-platform-internal
+  tokenExpirationSeconds: 600
+
+sms:
+  enabled: false
+  provider: aliyun-managed
+  aliyunEndpoint: https://dypnsapi.aliyuncs.com
+  httpEndpoint: ""
+
+account:
+  walletProvisioningPolicyVersion: wallet-provisioning-v1
+  walletProvisioningSlaMinutes: 15
+  commerceProviderId: h3c_mall
+  commerceAdapterVersion: h3c-mall-v1
+  commerceAdapterBaseUrl: ""
+
+billing:
+  adminModelPriceProjectionEnabled: false
+  paymentProvider: h3c_mall
+  allowTentativePrices: false
+  testAdmissionEvidenceTtl: 720h
+  normalRefundCreationEnabled: false
+  paymentExpiryIntervalSeconds: 15
+  paymentCallbackTokenKeyId: payment-callback-v1
+  paymentCallbackTokenTtlSeconds: 300
+
+nativeKms:
+  # Used only with tokenGateway.secretProvider=vault-transit. No identities are created.
+  endpoint: ""
+  port: 8200
+  caConfigMap: ""
+  gatewayBootstrapSecret: ""
+  credentialBootstrapSecret: ""
+  cidrs: []
+
+tokenGateway:
+  # Set a release-scoped Secret before enabling governed workloads; never reuse retired login.
+  runtimeSecret: ""
+  credentialIsolationEnabled: false
+  adminOperationsOverviewEnabled: false
+  adminPageOverviewsEnabled: false
+  adminPaginationEnabled: false
+  impactPrechecksEnabled: false
+  gatewayAdapter: NEW_API
+  secretProvider: remote
+  secretKeyId: ""
+  secretRotationIntervalSeconds: 300
+  secretRotationBatchSize: 100
+  providerAllowedHosts: []
+  maxInputTokens: 128000
+  modelCatalogDefaultContextTokens: 128000
+  modelCatalogDefaultMaxOutputTokens: 4096
+  modelCatalogSyncMinutes: 15
+  defaultProvider: new-api
+  defaultProviderBaseUrl: http://newapi:8080
+  defaultProviderModels: [deepseek-flash]
+  defaultRoutePriority: 10
+  reconciliationNewApiBaseUrl: http://newapi:8080
+  reconciliationIntervalSeconds: 15
+  clientContractVersion: client-readiness-v1
+  minimumClientVersion: 0.6.0
+  maximumClientVersion: 0.8.0
+  readinessAttestationKeyId: pinvou-client-readiness-v1
+  readinessAttestationTtlSeconds: 600
+
+tokenCredentialPortal:
+  enabled: false
+  replicas: 2
+  runtimeSecret: ""
+  publicUrl: ""
+  oidcAuthorizationUrl: ""
+  oidcTokenUrl: ""
+  oidcJwksUrl: ""
+  oidcClientId: ""
+  oidcAudience: ""
+  # Exact HTTPS dependency CIDRs, not 0.0.0.0/0; no model/payment-wide egress reuse.
+  egressCidrs: []
+
+tokenCommandExecutor:
+  enabled: false
+  replicas: 2
+  runtimeSecret: ""
+  # External NATS and workload JWKS endpoints when not in-cluster.
+  natsCidrs: []
+  workloadJwksCidrs: []
+
+tokenGovernanceCheck:
+  enabled: false
+  # Explicitly created suspended, read-only Job. No hook and no --apply setting.
+  operationsSecret: ""
+
+tokenAccountPolicyBootstrap:
+  enabled: false
+
+external:
+  postgresCidrs: []
+  paymentProviderCidrs: []
+  secretProviderCidrs: []
+  modelProviderCidrs: []
+  telemetryCollectorCidrs: []
+  timeSourceCidrs: []
+
+ingress:
+  enabled: false
+  className: ""
+  portalHost: tokens.example.invalid
+  keycloakHost: accounts.example.invalid
+  identityHost: identity.example.invalid
+  tlsSecretName: ""
+  # External ingress is a 14s transport ceiling. Portal applies the exact
+  # class-specific 14/7/9s absolute deadline without resetting it.
+  tokenAdminMaxTimeoutSeconds: 14
+  tokenAdminPath: /api/admin/token
+
+keycloak:
+  enabled: true
+  hostname: https://accounts.example.invalid
+  adminHostname: http://127.0.0.1:18081
+  replicas: 2
+  realmUpgradeEnabled: false
+  oidcClientId: pinvou-desktop-dev
+
+redis:
+  enabled: true
+  storage: 2Gi
+
+nats:
+  enabled: true
+  storage: 10Gi
+
+networkPolicy:
+  enabled: true
+  ingressNamespaceSelector:
+    matchLabels: { kubernetes.io/metadata.name: ingress-nginx }
+  ingressPodSelector:
+    matchLabels: { app.kubernetes.io/name: ingress-nginx }
+  metricsNamespaceSelector:
+    matchLabels: { kubernetes.io/metadata.name: monitoring }
+  metricsPodSelector:
+    matchLabels: { app.kubernetes.io/name: prometheus }
+
+resources:
+  requests: { cpu: 100m, memory: 128Mi }
+  limits: { cpu: "1", memory: 512Mi }

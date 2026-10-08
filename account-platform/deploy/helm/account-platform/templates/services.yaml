@@ -1,0 +1,42 @@
+{{- $root := . -}}
+{{- range $component := list "account-service" "identity-service" "billing-service" "token-gateway" "token-portal" "keycloak" }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "pinvou.fullname" $root }}-{{ $component }}
+  labels:
+    {{- include "pinvou.labels" $root | nindent 4 }}
+    app.kubernetes.io/component: {{ $component }}
+spec:
+  selector:
+    {{- include "pinvou.selector" $root | nindent 4 }}
+    app.kubernetes.io/component: {{ $component }}
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+{{- end }}
+{{- range $component := list "redis" "nats" }}
+{{- if (index (index $root.Values $component) "enabled") }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "pinvou.fullname" $root }}-{{ $component }}
+  labels:
+    {{- include "pinvou.labels" $root | nindent 4 }}
+    app.kubernetes.io/component: {{ $component }}
+spec:
+  selector:
+    {{- include "pinvou.selector" $root | nindent 4 }}
+    app.kubernetes.io/component: {{ $component }}
+  ports:
+    - name: {{ if eq $component "redis" }}redis{{ else }}client{{ end }}
+      port: {{ if eq $component "redis" }}6379{{ else }}4222{{ end }}
+      targetPort: {{ if eq $component "redis" }}redis{{ else }}client{{ end }}
+    {{- if eq $component "nats" }}
+    - { name: monitor, port: 8222, targetPort: monitor }
+    {{- end }}
+{{- end }}
+{{- end }}

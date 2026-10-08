@@ -1,0 +1,312 @@
+{{- $root := . -}}
+{{- $fullname := include "pinvou.fullname" . -}}
+{{- $jwksURL := .Values.oidc.jwksUrl -}}
+{{- $oidcTokenURL := .Values.oidc.tokenUrl -}}
+{{- if .Values.keycloak.enabled -}}
+{{- $jwksURL = printf "http://%s-keycloak:8080/realms/pinvou/protocol/openid-connect/certs" $fullname -}}
+{{- $oidcTokenURL = printf "http://%s-keycloak:8080/realms/pinvou/protocol/openid-connect/token" $fullname -}}
+{{- end -}}
+{{- $apps := list
+  (dict "name" "account-service" "image" .Values.images.accountService "replicas" .Values.replicas.accountService)
+  (dict "name" "identity-service" "image" .Values.images.identityService "replicas" .Values.replicas.identityService)
+  (dict "name" "billing-service" "image" .Values.images.billingService "replicas" .Values.replicas.billingService)
+  (dict "name" "token-gateway" "image" .Values.images.tokenGateway "replicas" .Values.replicas.tokenGateway)
+  (dict "name" "token-portal" "image" .Values.images.tokenPortal "replicas" .Values.replicas.tokenPortal)
+-}}
+{{- range $app := $apps }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $fullname }}-{{ $app.name }}
+  labels:
+    {{- include "pinvou.labels" $root | nindent 4 }}
+    app.kubernetes.io/component: {{ $app.name }}
+spec:
+  replicas: {{ $app.replicas }}
+  strategy: { type: RollingUpdate, rollingUpdate: { maxUnavailable: 0, maxSurge: 1 } }
+  selector:
+    matchLabels:
+      {{- include "pinvou.selector" $root | nindent 6 }}
+      app.kubernetes.io/component: {{ $app.name }}
+  template:
+    metadata:
+      annotations: { prometheus.io/scrape: "true", prometheus.io/path: "/metrics", prometheus.io/port: "9090" }
+      labels:
+        {{- include "pinvou.selector" $root | nindent 8 }}
+        app.kubernetes.io/component: {{ $app.name }}
+        {{- with $root.Values.global.podLabels }}{{ toYaml . | nindent 8 }}{{- end }}
+    spec:
+      serviceAccountName: {{ $fullname }}-{{ $app.name }}
+      automountServiceAccountToken: false
+      {{- include "pinvou.availabilityPodSpec" (dict "root" $root "component" $app.name) | nindent 6 }}
+      {{- with $root.Values.global.imagePullSecrets }}
+      imagePullSecrets: {{ toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if and (eq $app.name "token-gateway") (eq $root.Values.tokenGateway.secretProvider "vault-transit") }}
+      securityContext: { runAsNonRoot: true, runAsUser: 65532, runAsGroup: 65532, fsGroup: 65532, seccompProfile: { type: RuntimeDefault } }
+      {{- else }}
+      securityContext: { runAsNonRoot: true, seccompProfile: { type: RuntimeDefault } }
+      {{- end }}
+      containers:
+        - name: {{ $app.name }}
+          image: "{{ $app.image.repository }}:{{ $app.image.tag }}"
+          imagePullPolicy: {{ $app.image.pullPolicy }}
+          ports: [{ name: http, containerPort: 8080 }, { name: metrics, containerPort: 9090 }]
+          securityContext: { allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: { drop: ["ALL"] } }
+          resources: {{ toYaml $root.Values.resources | nindent 12 }}
+          env:
+            - { name: APP_ENV, value: {{ $root.Values.global.environment | quote }} }
+            - { name: PORT, value: "8080" }
+            - { name: METRICS_ADDRESS, value: ":9090" }
+            - { name: RATE_LIMIT_RPS, value: {{ $root.Values.security.rateLimitRPS | quote }} }
+            - { name: RATE_LIMIT_BURST, value: {{ $root.Values.security.rateLimitBurst | quote }} }
+            - { name: TRUSTED_TIME_SOURCES, value: {{ join "," $root.Values.global.trustedTimeSources | quote }} }
+            {{- if ne $app.name "identity-service" }}
+            - { name: PINVOU_API_CONTRACT_VERSION, value: {{ $root.Values.compatibility.contractVersion | quote }} }
+            - { name: PINVOU_CLIENT_UPGRADE_URL, value: {{ $root.Values.compatibility.upgradeUrl | quote }} }
+            - { name: PINVOU_CLIENT_RELEASE_MANIFEST, value: {{ toJson $root.Values.compatibility.releases | quote }} }
+            {{- end }}
+            - { name: OTEL_EXPORTER_OTLP_ENDPOINT, value: {{ $root.Values.observability.otlpEndpoint | quote }} }
+            {{- if or (eq $app.name "account-service") (eq $app.name "billing-service") (eq $app.name "token-gateway") }}
+            - name: DATABASE_URL
+              valueFrom: { secretKeyRef: { name: {{ if eq $app.name "token-gateway" }}{{ default $root.Values.global.runtimeSecret $root.Values.tokenGateway.runtimeSecret }}{{ else }}{{ $root.Values.global.runtimeSecret }}{{ end }}, key: {{ $app.name }}-database-url } }
+            - { name: MANUAL_REVIEW_ON_CALL_USER_IDS, value: {{ join "," $root.Values.global.manualReviewOnCallUserIds | quote }} }
+            {{- end }}
+            {{- if eq $app.name "account-service" }}
+            - name: APPROVAL_WRITER_DATABASE_URL
+              valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: account-approval-writer-database-url, optional: true } }
+            {{- end }}
+            {{- if or (eq $app.name "account-service") (eq $app.name "billing-service") (eq $app.name "token-gateway") }}
+            - { name: OIDC_ISSUER, value: {{ $root.Values.oidc.issuer | quote }} }
+            - { name: OIDC_JWKS_URL, value: {{ $jwksURL | quote }} }
+            - { name: OIDC_AUDIENCE, value: {{ $root.Values.oidc.audience | quote }} }
+            {{- end }}
+            {{- if ne $app.name "token-portal" }}
+            - { name: WORKLOAD_IDENTITY_TOKEN_FILE, value: /var/run/secrets/pinvou/workload/token }
+            - { name: WORKLOAD_IDENTITY_ISSUER, value: {{ $root.Values.workloadIdentity.issuer | quote }} }
+            - { name: WORKLOAD_IDENTITY_JWKS_URL, value: {{ $root.Values.workloadIdentity.jwksUrl | quote }} }
+            - { name: WORKLOAD_IDENTITY_AUDIENCE, value: {{ $root.Values.workloadIdentity.audience | quote }} }
+            {{- if eq $app.name "account-service" }}
+            - name: WORKLOAD_IDENTITY_RULES_JSON
+              value: {{ toJson (list (dict "subject" (printf "system:serviceaccount:%s:%s-billing-service" $root.Release.Namespace $fullname) "service" "billing-service" "permissions" (list "internal.authorization.check" "internal.approval-authorization.consume" "internal.approval-execution.begin" "internal.approval-execution.complete" "internal.account-closure-state.read" "internal.registration-bonus-eligibility.read")) (dict "subject" (printf "system:serviceaccount:%s:%s-token-gateway" $root.Release.Namespace $fullname) "service" "token-gateway" "permissions" (list "internal.authorization.check" "internal.authorization.delegate" "internal.client-compatibility.read" "internal.token-owner-candidates.read" "internal.account.token-owner-authority.check")) (dict "subject" (printf "system:serviceaccount:%s:%s-token-command-executor" $root.Release.Namespace $fullname) "service" "token-command-executor" "permissions" (list "internal.authorization.check" "internal.approval-authorization.consume" "internal.approval-execution.begin" "internal.approval-execution.complete")) (dict "subject" (printf "system:serviceaccount:%s:%s-account-approval-recovery" $root.Release.Namespace $fullname) "service" "account-approval-recovery" "permissions" (list "internal.approval-recovery.plan" "internal.approval-recovery.confirm" "internal.approval-recovery.zero-effect")) (dict "subject" (printf "system:serviceaccount:%s:%s-token-credential-portal" $root.Release.Namespace $fullname) "service" "token-credential-portal" "permissions" (list "internal.authorization.check")) (dict "subject" (printf "system:serviceaccount:%s:%s-keycloak" $root.Release.Namespace $fullname) "service" "keycloak-mobile-authenticator" "permissions" (list "internal.auth.sms.verify" "internal.authorization.check"))) | quote }}
+            {{- else if eq $app.name "identity-service" }}
+            - name: WORKLOAD_IDENTITY_RULES_JSON
+              value: {{ toJson (list (dict "subject" (printf "system:serviceaccount:%s:%s-account-service" $root.Release.Namespace $fullname) "service" "account-service" "permissions" (list "internal.identity.password-reference.validate" "internal.identity.user.create" "internal.identity.registration.read" "internal.identity.user.disable" "internal.identity.username.update" "internal.identity.mobile.update" "internal.identity.password.reset" "internal.identity.sessions.revoke" "internal.identity.user.delete"))) | quote }}
+            {{- else if eq $app.name "billing-service" }}
+            - name: WORKLOAD_IDENTITY_RULES_JSON
+              value: {{ toJson (list (dict "subject" (printf "system:serviceaccount:%s:%s-account-service" $root.Release.Namespace $fullname) "service" "account-service" "permissions" (list "internal.billing.wallet.ensure" "internal.billing.registration-bonus.provision" "internal.billing.account-closure-assessment.read" "internal.billing.account-closure-grants.isolate" "internal.billing.organization.lifecycle" "internal.billing.organization-unit.lifecycle" "internal.billing.organization-member.lifecycle" "internal.billing.approval-activation.read" "internal.billing.approval-proof.read" "internal.billing.approval-effect.read" "internal.billing.approval-result.read")) (dict "subject" (printf "system:serviceaccount:%s:%s-account-approval-recovery" $root.Release.Namespace $fullname) "service" "account-approval-recovery" "permissions" (list "internal.billing.approval-effect.read" "internal.billing.approval-result.read")) (dict "subject" (printf "system:serviceaccount:%s:%s-token-gateway" $root.Release.Namespace $fullname) "service" "token-gateway" "permissions" (list "internal.billing.wallet.ensure" "internal.billing.wallet.read" "internal.billing.entitlement.read" "internal.billing.hold.reserve" "internal.billing.hold.extend" "internal.billing.hold.commit" "internal.billing.hold.release" "internal.billing.account-closed-grant.reclaim" "internal.billing.pricing.read" "internal.billing.pricing.bind" "internal.billing.quota.read" "internal.billing.quota.allocate" "internal.billing.quota.revoke" "internal.billing.product.read" "internal.billing.payment-capability.read" "internal.billing.recharge-order.create" "internal.billing.recharge-order.read" "internal.billing.recharge-order.close" "internal.billing.payment-claim.create" "internal.billing.token-account-wallet-provision.execute" "internal.billing.token-account-wallet-provision.read"))) | quote }}
+            {{- else if eq $app.name "token-gateway" }}
+            - { name: TOKEN_ADMIN_PAGINATION_ENABLED, value: {{ $root.Values.tokenGateway.adminPaginationEnabled | quote }} }
+            - { name: TOKEN_ADMIN_IMPACT_PRECHECKS_ENABLED, value: {{ $root.Values.tokenGateway.impactPrechecksEnabled | quote }} }
+            - { name: TOKEN_ADMIN_OPERATIONS_OVERVIEW_ENABLED, value: {{ $root.Values.tokenGateway.adminOperationsOverviewEnabled | quote }} }
+            - { name: TOKEN_ADMIN_PAGE_OVERVIEWS_ENABLED, value: {{ $root.Values.tokenGateway.adminPageOverviewsEnabled | quote }} }
+            - { name: TOKEN_CREDENTIAL_ISOLATION_ENABLED, value: {{ $root.Values.tokenGateway.credentialIsolationEnabled | quote }} }
+            - { name: CREDENTIAL_PORTAL_PUBLIC_URL, value: {{ $root.Values.tokenCredentialPortal.publicUrl | quote }} }
+            - name: TOKEN_ADMIN_PAGINATION_CURSOR_HMAC_KEY_BASE64
+              valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: token-admin-pagination-cursor-hmac-key-base64, optional: true } }
+            - name: WORKLOAD_IDENTITY_RULES_JSON
+              value: {{ toJson (list (dict "subject" (printf "system:serviceaccount:%s:%s-account-service" $root.Release.Namespace $fullname) "service" "account-service" "permissions" (list "internal.token.organization.lifecycle" "internal.token.organization-unit.lifecycle" "internal.token.replay.delete" "internal.token.account-closure-assessment.read" "internal.token.approval-snapshot.read" "internal.token.approval-proof.read" "internal.token.approval-effect.read" "internal.token.approval-result.read" "internal.authorization.check")) (dict "subject" (printf "system:serviceaccount:%s:%s-account-approval-recovery" $root.Release.Namespace $fullname) "service" "account-approval-recovery" "permissions" (list "internal.token.approval-effect.read" "internal.token.approval-result.read")) (dict "subject" (printf "system:serviceaccount:%s:%s-token-command-executor" $root.Release.Namespace $fullname) "service" "token-command-executor" "permissions" (list "internal.token.model-lifecycle.execute" "internal.token.catalog-rollback.execute" "internal.token.credential-revoke.execute" "internal.authorization.check"))) | quote }}
+            {{- end }}
+            {{- end }}
+            {{- if or (eq $app.name "account-service") (eq $app.name "billing-service") (eq $app.name "token-gateway") }}
+            - { name: NATS_URL, value: {{ include "pinvou.natsUrl" $root | quote }} }
+            {{- end }}
+            {{- if eq $app.name "billing-service" }}
+            - { name: NATS_CREDENTIALS_FILE, value: /var/run/secrets/pinvou/nats/billing-command-executor.creds }
+            {{- else if and (or $root.Values.tokenCredentialPortal.enabled $root.Values.tokenCommandExecutor.enabled) (or (eq $app.name "account-service") (eq $app.name "token-gateway")) }}
+            - { name: NATS_CREDENTIALS_FILE, value: {{ printf "/var/run/secrets/pinvou/nats/%s.creds" $app.name | quote }} }
+            {{- end }}
+            {{- if eq $app.name "account-service" }}
+            - { name: ACCOUNT_SERVICE_VERSION, value: {{ $root.Chart.AppVersion | quote }} }
+            - { name: ACCOUNT_CLIENT_CONTRACT_VERSION, value: "account-client-v1" }
+            - { name: BILLING_HTTP_URL, value: {{ printf "http://%s-billing-service:8080" $fullname | quote }} }
+            - { name: TOKEN_GATEWAY_HTTP_URL, value: {{ printf "http://%s-token-gateway:8080" $fullname | quote }} }
+            - { name: IDENTITY_HTTP_URL, value: {{ printf "http://%s-identity-service:8080" $fullname | quote }} }
+            - { name: MOBILE_AUTH_ENABLED, value: {{ $root.Values.sms.enabled | quote }} }
+            - { name: SMS_PROVIDER, value: {{ $root.Values.sms.provider | quote }} }
+            - { name: ALIYUN_SMS_ENDPOINT, value: {{ $root.Values.sms.aliyunEndpoint | quote }} }
+            - { name: SMS_HTTP_ENDPOINT, value: {{ $root.Values.sms.httpEndpoint | quote }} }
+            - { name: WALLET_PROVISIONING_POLICY_VERSION, value: {{ $root.Values.account.walletProvisioningPolicyVersion | quote }} }
+            - { name: WALLET_PROVISIONING_SLA_MINUTES, value: {{ $root.Values.account.walletProvisioningSlaMinutes | quote }} }
+            - { name: COMMERCE_PROVIDER_ID, value: {{ $root.Values.account.commerceProviderId | quote }} }
+            - { name: COMMERCE_ADAPTER_VERSION, value: {{ $root.Values.account.commerceAdapterVersion | quote }} }
+            - { name: H3C_MALL_BASE_URL, value: {{ $root.Values.account.commerceAdapterBaseUrl | quote }} }
+            {{- range $item := list (dict "env" "H3C_MALL_APP_KEY" "key" "h3c-mall-app-key") (dict "env" "H3C_MALL_APP_SECRET" "key" "h3c-mall-app-secret") }}
+            - name: {{ $item.env }}
+              valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: {{ $item.key }}, optional: true } }
+            {{- end }}
+            {{- range $item := list (dict "env" "ALIYUN_SMS_ACCESS_KEY_ID" "key" "aliyun-sms-access-key-id") (dict "env" "ALIYUN_SMS_ACCESS_KEY_SECRET" "key" "aliyun-sms-access-key-secret") (dict "env" "ALIYUN_SMS_SIGN_NAME" "key" "aliyun-sms-sign-name") (dict "env" "ALIYUN_SMS_REGISTER_TEMPLATE" "key" "aliyun-sms-register-template") (dict "env" "ALIYUN_SMS_LOGIN_TEMPLATE" "key" "aliyun-sms-login-template") (dict "env" "SMS_VERIFICATION_HMAC_KEY_BASE64" "key" "sms-verification-hmac-key-base64") (dict "env" "SMS_HTTP_BEARER_TOKEN" "key" "sms-http-bearer-token") }}
+            - name: {{ $item.env }}
+              valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: {{ $item.key }}, optional: true } }
+            {{- end }}
+            - name: REGISTRATION_QUERY_HMAC_KEY_BASE64
+              valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: registration-query-hmac-key-base64, optional: true } }
+            - { name: REGISTRATION_BONUS_FINGERPRINT_KEY_ID, value: "registration-bonus-v1" }
+            - name: REGISTRATION_BONUS_FINGERPRINT_HMAC_KEY_BASE64
+              valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: registration-bonus-fingerprint-hmac-key-base64, optional: {{ not $root.Values.sms.enabled }} } }
+            - name: AUDIT_EXPORT_MASTER_KEY_BASE64
+              valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: audit-export-master-key-base64 } }
+            - name: HUMAN_DELEGATION_SIGNING_KEY_ID
+              valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: human-delegation-signing-key-id } }
+            - name: HUMAN_DELEGATION_SIGNING_KEY_BASE64URL
+              valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: human-delegation-signing-key-base64url } }
+            - name: OWNER_CANDIDATE_CURSOR_HMAC_KEY_BASE64
+              valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: owner-candidate-cursor-hmac-key-base64 } }
+            {{- else if eq $app.name "identity-service" }}
+            - { name: MOBILE_AUTH_ENABLED, value: {{ $root.Values.sms.enabled | quote }} }
+            - { name: KEYCLOAK_ADMIN_API_URL, value: {{ printf "http://%s-keycloak:8080" $fullname | quote }} }
+            - { name: KEYCLOAK_PROVISIONER_TOKEN_URL, value: {{ $oidcTokenURL | quote }} }
+            - { name: KEYCLOAK_REALM, value: "pinvou" }
+            - name: KEYCLOAK_PROVISIONER_CLIENT_ID
+              valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: keycloak-provisioner-client-id } }
+            - name: KEYCLOAK_PROVISIONER_CLIENT_SECRET
+              valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: keycloak-provisioner-client-secret } }
+            - name: IDENTITY_PASSWORD_HMAC_KEY_BASE64
+              valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: identity-password-hmac-key-base64, optional: true } }
+            {{- if $root.Values.security.authRiskEnabled }}
+            - { name: AUTH_RISK_REDIS_URL, value: {{ include "pinvou.redisUrl" $root | quote }} }
+            - name: AUTH_RISK_HMAC_KEY_BASE64
+              valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: auth-risk-hmac-key-base64 } }
+            {{- end }}
+            {{- else if eq $app.name "billing-service" }}
+            - { name: ACCOUNT_HTTP_URL, value: {{ printf "http://%s-account-service:8080" $fullname | quote }} }
+            - name: HUMAN_DELEGATION_VERIFICATION_KEYS_JSON
+              valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: human-delegation-verification-keys-json } }
+            - { name: BILLING_PAYMENT_PROVIDER, value: {{ $root.Values.billing.paymentProvider | quote }} }
+            - { name: BILLING_ADMIN_MODEL_PRICE_PROJECTION_ENABLED, value: {{ $root.Values.billing.adminModelPriceProjectionEnabled | quote }} }
+            - { name: BILLING_ALLOW_TENTATIVE_PRICES, value: {{ $root.Values.billing.allowTentativePrices | quote }} }
+            - { name: BILLING_TEST_ADMISSION_EVIDENCE_TTL, value: {{ $root.Values.billing.testAdmissionEvidenceTtl | quote }} }
+            - { name: BILLING_NORMAL_REFUND_CREATION_ENABLED, value: {{ $root.Values.billing.normalRefundCreationEnabled | quote }} }
+            - { name: H3C_MALL_BASE_URL, value: {{ $root.Values.account.commerceAdapterBaseUrl | quote }} }
+            {{- range $item := list (dict "env" "H3C_MALL_APP_KEY" "key" "h3c-mall-app-key") (dict "env" "H3C_MALL_APP_SECRET" "key" "h3c-mall-app-secret") }}
+            - name: {{ $item.env }}
+              valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: {{ $item.key }} } }
+            {{- end }}
+            - { name: BILLING_PAYMENT_CALLBACK_URL, value: {{ $root.Values.public.paymentCallbackUrl | quote }} }
+            - { name: BILLING_PAYMENT_EXPIRY_INTERVAL_SECONDS, value: {{ $root.Values.billing.paymentExpiryIntervalSeconds | quote }} }
+            - { name: PAYMENT_CALLBACK_TOKEN_KEY_ID, value: {{ $root.Values.billing.paymentCallbackTokenKeyId | quote }} }
+            - { name: PAYMENT_CALLBACK_TOKEN_TTL_SECONDS, value: {{ $root.Values.billing.paymentCallbackTokenTtlSeconds | quote }} }
+            - name: PAYMENT_MERCHANT_ID
+              valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: payment-merchant-id } }
+            - name: PAYMENT_CALLBACK_CLIENT_ID
+              valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: payment-callback-client-id } }
+            - name: PAYMENT_CALLBACK_CLIENT_SECRET
+              valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: payment-callback-client-secret } }
+            - name: PAYMENT_CALLBACK_TOKEN_SIGNING_KEY_BASE64
+              valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: payment-callback-token-signing-key-base64 } }
+            {{- range $channel := list "UNIONPAY" "ALIPAY" "WECHAT" }}
+            - name: PAYMENT_NOTIFICATION_HMAC_{{ $channel }}
+              valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: {{ printf "payment-hmac-%s" ($channel | lower) }}, optional: true } }
+            {{- end }}
+            {{- else if eq $app.name "token-gateway" }}
+            - { name: ACCOUNT_HTTP_URL, value: {{ printf "http://%s-account-service:8080" $fullname | quote }} }
+            - { name: BILLING_HTTP_URL, value: {{ printf "http://%s-billing-service:8080" $fullname | quote }} }
+            - { name: TOKEN_SECRET_PROVIDER, value: {{ $root.Values.tokenGateway.secretProvider | quote }} }
+            - { name: TOKEN_SECRET_KEY_ID, value: {{ $root.Values.tokenGateway.secretKeyId | quote }} }
+            - { name: TOKEN_SECRET_ROTATION_INTERVAL_SECONDS, value: {{ $root.Values.tokenGateway.secretRotationIntervalSeconds | quote }} }
+            - { name: TOKEN_SECRET_ROTATION_BATCH_SIZE, value: {{ $root.Values.tokenGateway.secretRotationBatchSize | quote }} }
+            {{- if eq $root.Values.tokenGateway.secretProvider "vault-transit" }}
+            {{- include "pinvou.nativeKmsEnv" $root | nindent 12 }}
+            {{- else }}
+            - name: TOKEN_SECRET_PROVIDER_URL
+              valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: token-secret-provider-url } }
+            - name: TOKEN_SECRET_PROVIDER_TOKEN
+              valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: token-secret-provider-token } }
+            {{- end }}
+            - { name: TOKEN_PROVIDER_ALLOWED_HOSTS, value: {{ join "," $root.Values.tokenGateway.providerAllowedHosts | quote }} }
+            - { name: TOKEN_GATEWAY_MAX_INPUT_TOKENS, value: {{ $root.Values.tokenGateway.maxInputTokens | quote }} }
+            - { name: TOKEN_MODEL_CATALOG_DEFAULT_CONTEXT_TOKENS, value: {{ $root.Values.tokenGateway.modelCatalogDefaultContextTokens | quote }} }
+            - { name: TOKEN_MODEL_CATALOG_DEFAULT_MAX_OUTPUT_TOKENS, value: {{ $root.Values.tokenGateway.modelCatalogDefaultMaxOutputTokens | quote }} }
+            - { name: TOKEN_MODEL_CATALOG_SYNC_MINUTES, value: {{ $root.Values.tokenGateway.modelCatalogSyncMinutes | quote }} }
+            - { name: TOKEN_DEFAULT_PROVIDER, value: {{ $root.Values.tokenGateway.defaultProvider | quote }} }
+            - { name: TOKEN_GATEWAY_ADAPTER, value: {{ $root.Values.tokenGateway.gatewayAdapter | quote }} }
+            - { name: TOKEN_DEFAULT_PROVIDER_BASE_URL, value: {{ $root.Values.tokenGateway.defaultProviderBaseUrl | quote }} }
+            - { name: TOKEN_DEFAULT_PROVIDER_MODELS, value: {{ join "," $root.Values.tokenGateway.defaultProviderModels | quote }} }
+            - { name: TOKEN_DEFAULT_ROUTE_PRIORITY, value: {{ $root.Values.tokenGateway.defaultRoutePriority | quote }} }
+            - name: TOKEN_DEFAULT_PROVIDER_API_KEY
+              valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: token-default-provider-api-key } }
+            - { name: TOKEN_RECONCILIATION_NEWAPI_BASE_URL, value: {{ $root.Values.tokenGateway.reconciliationNewApiBaseUrl | quote }} }
+            - name: TOKEN_RECONCILIATION_NEWAPI_ADMIN_TOKEN
+              valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: token-reconciliation-newapi-admin-token } }
+            - name: TOKEN_RECONCILIATION_NEWAPI_ADMIN_USER_ID
+              valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: token-reconciliation-newapi-admin-user-id } }
+            - { name: TOKEN_RECONCILIATION_INTERVAL_SECONDS, value: {{ $root.Values.tokenGateway.reconciliationIntervalSeconds | quote }} }
+            - { name: TOKEN_SERVICE_VERSION, value: {{ $root.Chart.AppVersion | quote }} }
+            - { name: TOKEN_CLIENT_CONTRACT_VERSION, value: {{ $root.Values.tokenGateway.clientContractVersion | quote }} }
+            - { name: TOKEN_MINIMUM_CLIENT_VERSION, value: {{ $root.Values.tokenGateway.minimumClientVersion | quote }} }
+            - { name: TOKEN_MAXIMUM_CLIENT_VERSION, value: {{ $root.Values.tokenGateway.maximumClientVersion | quote }} }
+            - { name: CLIENT_READINESS_ATTESTATION_KEY_ID, value: {{ $root.Values.tokenGateway.readinessAttestationKeyId | quote }} }
+            - { name: CLIENT_READINESS_ATTESTATION_TTL_SECONDS, value: {{ $root.Values.tokenGateway.readinessAttestationTtlSeconds | quote }} }
+            - name: CLIENT_READINESS_ATTESTATION_PRIVATE_KEY_BASE64
+              valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: client-readiness-attestation-private-key-base64 } }
+            {{- else if eq $app.name "token-portal" }}
+            - { name: TOKEN_ADMIN_INGRESS_MAX_TIMEOUT_SECONDS, value: {{ $root.Values.ingress.tokenAdminMaxTimeoutSeconds | quote }} }
+            - { name: PORTAL_ADMIN_MODEL_TOKEN_IA_ENABLED, value: {{ $root.Values.portal.adminModelTokenIAEnabled | quote }} }
+            - { name: PORTAL_SESSION_LINEAGE_LOGOUT_ENABLED, value: {{ $root.Values.portal.sessionLineageLogoutEnabled | quote }} }
+            - { name: PORTAL_ADMIN_TOKEN_RESOURCE_FORMS_ENABLED, value: {{ $root.Values.portal.adminTokenResourceFormsEnabled | quote }} }
+            - { name: PORTAL_ADMIN_MODEL_OPERATIONS_DETAILS_ENABLED, value: {{ $root.Values.portal.adminModelOperationsDetailsEnabled | quote }} }
+            - { name: PORTAL_ADMIN_MODEL_DETAILS_ENABLED, value: {{ $root.Values.portal.adminModelDetailsEnabled | quote }} }
+            - { name: PORTAL_ADMIN_TOKEN_DETAILS_ENABLED, value: {{ $root.Values.portal.adminTokenDetailsEnabled | quote }} }
+            - { name: PORTAL_ADMIN_MODEL_PRICING_EDIT_ENABLED, value: {{ $root.Values.portal.adminModelPricingEditEnabled | quote }} }
+            - { name: PORTAL_ADMIN_MODEL_OPERATIONS_OVERVIEW_ENABLED, value: {{ $root.Values.portal.adminModelOperationsOverviewEnabled | quote }} }
+            - { name: PORTAL_ADMIN_MODEL_TOKEN_PAGE_OVERVIEWS_ENABLED, value: {{ $root.Values.portal.adminModelTokenPageOverviewsEnabled | quote }} }
+            - { name: PORTAL_ADMIN_MODEL_TOKEN_ACTIONS_ENABLED, value: {{ $root.Values.portal.adminModelTokenActionsEnabled | quote }} }
+            - name: TOKEN_ADMIN_PAGINATION_CURSOR_HMAC_KEY_BASE64
+              valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: token-admin-pagination-cursor-hmac-key-base64, optional: true } }
+            - { name: REDIS_URL, value: {{ include "pinvou.redisUrl" $root | quote }} }
+            - { name: PORTAL_PUBLIC_URL, value: {{ $root.Values.public.portalUrl | quote }} }
+            - { name: PORTAL_OIDC_AUTHORIZATION_URL, value: {{ printf "%s/realms/pinvou/protocol/openid-connect/auth" $root.Values.keycloak.hostname | quote }} }
+            - { name: PORTAL_OIDC_TOKEN_URL, value: {{ $oidcTokenURL | quote }} }
+            - { name: PORTAL_OIDC_CLIENT_ID, value: {{ $root.Values.oidc.portalClientId | quote }} }
+            - { name: PORTAL_HANDOFF_OIDC_CLIENT_ID, value: {{ $root.Values.oidc.portalHandoffClientId | quote }} }
+            - { name: PORTAL_HANDOFF_OIDC_CLIENT_SECRET_FILE, value: /var/run/secrets/pinvou/portal-handoff/client-secret }
+            - { name: PORTAL_SESSION_HANDOFF, value: "true" }
+            - { name: ACCOUNT_HTTP_URL, value: {{ printf "http://%s-account-service:8080" $fullname | quote }} }
+            - { name: BILLING_HTTP_URL, value: {{ printf "http://%s-billing-service:8080" $fullname | quote }} }
+            - { name: TOKEN_GATEWAY_HTTP_URL, value: {{ printf "http://%s-token-gateway:8080" $fullname | quote }} }
+            - name: SYSTEM_PROBES_JSON
+              value: {{ printf `[{"key":"portal","kind":"local"},{"key":"account","kind":"http","url":"http://%s-account-service:8080/health/ready"},{"key":"billing","kind":"http","url":"http://%s-billing-service:8080/health/ready"},{"key":"token-gateway","kind":"http","url":"http://%s-token-gateway:8080/health/ready"},{"key":"identity-provider","kind":"http","url":"http://%s-keycloak:8080/realms/pinvou/.well-known/openid-configuration"},{"key":"model-gateway","kind":"http","url":"http://%s-newapi:8080/api/status","json_boolean_field":"success"},{"key":"event-bus","kind":"http","url":%s},{"key":"account-event-relay","kind":"relay","url":"http://%s-account-event-relay:9090"},{"key":"billing-event-relay","kind":"relay","url":"http://%s-billing-event-relay:9090"},{"key":"token-event-relay","kind":"relay","url":"http://%s-token-event-relay:9090"}]` $fullname $fullname $fullname $fullname $fullname (include "pinvou.natsMonitorUrl" $root | quote) $fullname $fullname $fullname | quote }}
+            {{- end }}
+          readinessProbe: { httpGet: { path: /health/ready, port: http }, periodSeconds: 10, timeoutSeconds: 3 }
+          livenessProbe: { httpGet: { path: /health/live, port: http }, periodSeconds: 20, timeoutSeconds: 3 }
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+            {{- if and (eq $app.name "token-gateway") (eq $root.Values.tokenGateway.secretProvider "vault-transit") }}
+            {{- include "pinvou.nativeKmsMounts" $root | nindent 12 }}
+            {{- end }}
+            {{- if ne $app.name "token-portal" }}
+            - { name: workload-identity, mountPath: /var/run/secrets/pinvou/workload, readOnly: true }
+            {{- else }}
+            - { name: portal-handoff-oidc, mountPath: /var/run/secrets/pinvou/portal-handoff, readOnly: true }
+            {{- end }}
+            {{- if or (eq $app.name "billing-service") (and (or $root.Values.tokenCredentialPortal.enabled $root.Values.tokenCommandExecutor.enabled) (or (eq $app.name "account-service") (eq $app.name "token-gateway"))) }}
+            - { name: nats-credentials, mountPath: /var/run/secrets/pinvou/nats, readOnly: true }
+            {{- end }}
+        {{- if and (eq $app.name "token-gateway") (eq $root.Values.tokenGateway.secretProvider "vault-transit") }}
+        {{- include "pinvou.nativeKmsAgent" $root | nindent 8 }}
+        {{- end }}
+      volumes:
+        {{- if and (eq $app.name "token-gateway") (eq $root.Values.tokenGateway.secretProvider "vault-transit") }}
+        {{- include "pinvou.nativeKmsVolumes" (dict "root" $root "component" $app.name) | nindent 8 }}
+        {{- end }}
+        - { name: tmp, emptyDir: { sizeLimit: 16Mi } }
+        {{- if ne $app.name "token-portal" }}
+        - name: workload-identity
+          projected:
+            sources:
+              - serviceAccountToken: { path: token, audience: {{ $root.Values.workloadIdentity.audience | quote }}, expirationSeconds: {{ $root.Values.workloadIdentity.tokenExpirationSeconds }} }
+        {{- else }}
+        - name: portal-handoff-oidc
+          secret:
+            secretName: {{ $root.Values.global.runtimeSecret }}
+            items: [{ key: portal-handoff-oidc-client-secret, path: client-secret }]
+        {{- end }}
+        {{- if eq $app.name "billing-service" }}
+        - name: nats-credentials
+          secret: { secretName: {{ $root.Values.global.runtimeSecret }}, items: [{ key: billing-command-executor.creds, path: billing-command-executor.creds }] }
+        {{- else if and (or $root.Values.tokenCredentialPortal.enabled $root.Values.tokenCommandExecutor.enabled) (or (eq $app.name "account-service") (eq $app.name "token-gateway")) }}
+        - name: nats-credentials
+          secret: { secretName: {{ if eq $app.name "token-gateway" }}{{ default $root.Values.global.runtimeSecret $root.Values.tokenGateway.runtimeSecret }}{{ else }}{{ $root.Values.global.runtimeSecret }}{{ end }}, items: [{ key: {{ printf "%s.creds" $app.name }}, path: {{ printf "%s.creds" $app.name }} }] }
+        {{- end }}
+{{- end }}
