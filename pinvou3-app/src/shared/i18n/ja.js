@@ -1115,7 +1115,7 @@ desktopHint:'先にデスクトップで Obsidian をインストールして保
   connectFailed:name=>`${name} の接続に失敗しました`, connectTitle:name=>`${name} に接続`,
   connectBusy:name=>`${name} は前回のログインを処理中です`,
   connectBusyHint:'まもなく完了する場合があります。数秒待ってから再度「接続」を押してください。',
-  connectedBanner:name=>`${name} に接続済み · ツールスイッチは既定でオフです。入力欄のツールリストでオンにできます`,
+  connectedBanner:name=>`${name} に接続済み · ツールスイッチはデフォルトでオフです。入力欄のツールリストでオンにできます`,
   connectedBannerIma:'Tencent ima に接続済み · ツールスイッチはデフォルトでオフです。入力欄のツールリストでオンにできます',
   connectedTool:name=>`${name} に接続しました`, disconnectedTool:name=>`${name} から切断しました`,
   connectedQuoted:name=>`「${name}」に接続しました`, installedQuoted:name=>`「${name}」をインストールしました`, uninstalledQuoted:name=>`「${name}」をアンインストールしました`,

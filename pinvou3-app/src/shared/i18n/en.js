@@ -1118,7 +1118,7 @@ desktopHint:'Install Obsidian on the desktop and create a vault first, then chec
   connectFailed:name=>`${name} connection failed`, connectTitle:name=>`Connect ${name}`,
   connectBusy:name=>`${name} is still finishing the previous sign-in`,
   connectBusyHint:'It may complete on its own. Wait a few seconds, then press Connect again.',
-  connectedBanner:name=>`${name} connected · tool switches default to off — enable it in the composer tools list`,
+  connectedBanner:name=>`${name} connected · tool switches are off by default; enable it in the composer tools list`,
   connectedBannerIma:'Tencent ima connected · tool switches are off by default; enable it in the composer tools list',
   connectedTool:name=>`${name} connected`, disconnectedTool:name=>`${name} disconnected`,
   connectedQuoted:name=>`${name} connected`, installedQuoted:name=>`${name} installed`, uninstalledQuoted:name=>`${name} uninstalled`,
