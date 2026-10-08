@@ -26,6 +26,10 @@ CREDENTIAL_PORTAL_PUBLIC_URL 只能为已允许的独立 credentials HTTPS origi
 
 Gateway 私有 env file 除其 receiver rules 外须提供 Token DATABASE_URL、独立分页/管理代理 HMAC、实际 default provider/adapter/base URL/API key/models 配置；credential Portal 的 DSN、receiver rules、workload JWT 和 KMS token 分别独立。TOKEN_PROVIDER_ALLOWED_HOSTS 是准确的受控供应商 DNS allowlist，TOKEN_PROVIDER_CA_FILE 用完整可验证 CA；发现或验密不接受截断、多 JSON、缺失目录事实。默认供应商凭据只放受控私有 env file，不进入 Compose 公共模板或日志。
 
+## NewAPI 受控 TLS
+
+首次使用 NewAPI 发现或验密时，按 [NewAPI 受控 TLS 入口](README.newapi.md) 投放 `newapi.yaml.template` 的同 Pod Deployment、仅 8443 Service 和最小 CIDR NetworkPolicy，使用同源码 `SERVICE=newapi-tls` 镜像及当前 infrastructure PKI 的 `newapi/server.crt`、`server.key`/combined CA。共享 Compose backend 的 HTTP 容器不能替代该隔离；普通外部 HTTPS origin 沿现 allowlist/CA 合同继续支持。
+
 ## 审批资源和 workload 身份
 
 当前 workload realm emitter 发行原五个身份以及 credential Portal、Token executor 两个独立身份。七个 agent 的 bootstrap、sink 与应用挂载一一对应；receiver rules 使用所交付 Account/Billing/Token 三份有限模板。Credential Portal 只拥有 check，executor 只拥有 execution begin/complete 与 authorization consume，不能借 Portal/Gateway 私密身份执行审批。
