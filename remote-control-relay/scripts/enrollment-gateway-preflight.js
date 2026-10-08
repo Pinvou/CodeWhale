@@ -10,6 +10,7 @@ export async function main(env = process.env, io = console) {
       publicEntrypoints,
       legacyRelayUrl: env.PINVOU_REMOTE_LEGACY_RELAY_URL,
       legacyRelayBindHost: env.PINVOU_REMOTE_LEGACY_RELAY_BIND_HOST,
+      expectedGatewayInstance: env.PINVOU_REMOTE_EXPECTED_GATEWAY_INSTANCE,
     });
     io.log(JSON.stringify({ ok: true, ...result }));
     return 0;

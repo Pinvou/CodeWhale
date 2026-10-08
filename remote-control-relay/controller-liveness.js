@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { isControllerIdentifier } from "./identifier-contract.js";
 
 import {
   CONTROLLER_PROTOCOL_VERSION,
@@ -16,7 +17,6 @@ const TOTAL_BUDGET_MS = 30_000;
 const MAX_ATTESTATION_AGE_MS = 5_000;
 const MAX_PENDING_CHALLENGES = 8;
 const MAX_USED_CHALLENGES = 64;
-const KEY_ID = /^[A-Za-z0-9][A-Za-z0-9._~-]{0,127}$/u;
 
 export class ControllerLivenessHookError extends Error {
   constructor(code) {
@@ -55,7 +55,7 @@ function signingConfiguration({ signingKeyId, signingPrivateKeyB64, signingPriva
   if (!signingPrivateKey && !encodedKey && typeof sign !== "function") {
     return { signingKeyId: "", signAttestation: null };
   }
-  if (!KEY_ID.test(keyId)) fail("controller_liveness_signing_key_invalid");
+  if (!isControllerIdentifier(keyId)) fail("controller_liveness_signing_key_invalid");
   if (typeof sign !== "function" && typeof sign !== "undefined") {
     fail("controller_liveness_signing_key_invalid");
   }
@@ -248,7 +248,7 @@ export class ControllerLivenessHooks {
   async onLeaseCreated(lease) {
     const now = integer(this.#clock(), "now");
     const context = leaseContext(lease);
-    if (!KEY_ID.test(context.controller_lease_id ?? "")
+    if (!isControllerIdentifier(context.controller_lease_id)
       || typeof context.liveness_epoch_a !== "string"
       || typeof context.liveness_epoch_b !== "string") {
       fail("controller_liveness_lease_invalid");

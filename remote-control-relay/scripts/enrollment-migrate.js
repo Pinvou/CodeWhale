@@ -80,6 +80,14 @@ async function secureReadJson(path) {
   }
 }
 
+export async function readEnrollmentInventory(path) {
+  const document = await secureReadJson(resolve(path));
+  exactDocument(document, ["schema", "version", "endpoint_ids"], "inventory_document_invalid");
+  if (document.schema !== "pinvou-legacy-endpoint-inventory" || document.version !== 1
+    || !Array.isArray(document.endpoint_ids)) throw cliError("inventory_document_invalid");
+  return document;
+}
+
 async function verifyPrivateAncestors(path) {
   const absolute = resolve(path);
   const root = parse(absolute).root;
@@ -167,11 +175,7 @@ export async function main(argv = process.argv.slice(2), env = process.env, io =
     let result;
     if (args.mode === "coverage") {
       if (!args.input || args.output) throw cliError("coverage_arguments_invalid");
-      const document = await secureReadJson(args.input);
-      exactDocument(document, ["schema", "version", "endpoint_ids"], "inventory_document_invalid");
-      if (document?.schema !== "pinvou-legacy-endpoint-inventory" || document?.version !== 1) {
-        throw cliError("inventory_document_invalid");
-      }
+      const document = await readEnrollmentInventory(args.input);
       const handler = new EnrollmentMigrationHandler({ registry });
       result = { ok: true, ...handler.coverage(document.endpoint_ids) };
     } else if (args.mode === "backup") {
