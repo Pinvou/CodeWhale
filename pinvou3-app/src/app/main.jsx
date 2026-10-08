@@ -29,10 +29,7 @@ import { isLlmApiAccountVisible } from '../shared/model-options.js';
 import { can, isWeb } from '../shared/platform.js';
 import { errorCode, localizedErrorMessage } from '../shared/user-facing-error.js';
 import { installGlobalMarkdownRenderer } from '../shared/markdown-renderer.js';
-import {
-  acquireNativeSurfaceTransitionHide,
-  BrowserView,
-} from '../features/browser/BrowserView.jsx';
+import { acquireNativeSurfaceTransitionHide } from '../features/browser/native-surface-coordinator.js';
 import {
   createNativeSurfaceTransitionGate,
   settleBrowserUiPublicationAfterCommit,
@@ -106,6 +103,7 @@ const LazySettingsView = lazy(() => VIEW_LOADERS.settings().then(m => ({ default
 const LazyToolStoreView = lazy(() => VIEW_LOADERS.toolStore().then(m => ({ default: m.ToolStoreView })));
 const LazyCardPoolView = lazy(() => VIEW_LOADERS.cardpool().then(m => ({ default: m.CardPoolView })));
 const LazyScheduledTasksView = lazy(() => VIEW_LOADERS.scheduled().then(m => ({ default: m.ScheduledTasksView })));
+const LazyBrowserView = lazy(() => VIEW_LOADERS.browser().then(m => ({ default: m.BrowserView })));
 const LazyKnowledgeView = lazy(() => VIEW_LOADERS.knowledge().then(m => ({ default: m.KnowledgeView })));
 const LazyModelStoreView = lazy(() => VIEW_LOADERS.modelStore().then(m => ({ default: m.ModelStoreView })));
 const LazyMonitorView = lazy(() => VIEW_LOADERS.monitor().then(m => ({ default: m.MonitorView })));
@@ -4565,7 +4563,7 @@ const NAV_PREFETCH = {
             )}
             {teamRelayAvailable && currentView === 'teamRelay' && <LazyTeamRelayView theme={activeTheme} t={t} onThemeChange={handleSetTheme} onUseAgent={handleTeamRelayUseAgent} onLoadCodeAgents={loadTeamRelayCodeAgents} />}
             {isCompactShell && browserActive && currentView === 'browser' && (
-              <BrowserView
+              <LazyBrowserView
                 key={browserViewSessionId}
                 theme={activeTheme}
                 t={t}
@@ -4756,7 +4754,7 @@ const NAV_PREFETCH = {
                 </div>
                 <div className="min-h-0 flex-1">
                   {browserActive ? (
-                    <BrowserView
+                    <LazyBrowserView
                       key={browserViewSessionId}
                       theme={activeTheme}
                       t={t}
