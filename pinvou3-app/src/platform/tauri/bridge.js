@@ -3127,7 +3127,6 @@
       controllerStatus: desktopRemoteControlFeature.controllerStatus,
       controllerListHistory: desktopRemoteControlFeature.controllerListHistory,
       controllerCreateHistory: desktopRemoteControlFeature.controllerCreateHistory,
-      capabilitiesSnapshot: desktopRemoteControlFeature.capabilitiesSnapshot,
       cancelRemoteTask: desktopRemoteControlFeature.cancelRemoteTask,
       remoteTaskStatus: desktopRemoteControlFeature.remoteTaskStatus,
       journalReplay: desktopRemoteControlFeature.journalReplay,

@@ -296,6 +296,11 @@
     if (connection.connectionId && payload.connectionId && String(payload.connectionId) !== String(connection.connectionId)) {
       return state;
     }
+    // The local status DTO carries the whole binding. Legacy internal task
+    // events remain unbound until A08; do not claim that they are wire authority.
+    if (["controllerLeaseId", "leaseEpoch", "relayEpoch", "remoteControlGeneration"].some(function (key) {
+      return payload[key] !== undefined && String(payload[key]) !== String(connection[key]);
+    })) return state;
     var tasks = (state.tasks || []).slice();
     var index = -1;
     for (var i = 0; i < tasks.length; i += 1) {
@@ -305,6 +310,8 @@
       }
     }
     if (index >= 0 && TASK_TERMINAL[tasks[index].status]) return state;
+    if (index >= 0 && tasks[index].status === "cancel_requested" &&
+        status !== "cancel_requested" && !TASK_TERMINAL[status]) return state;
     var entry = {
       taskId: taskId,
       sessionId: payload.sessionId ? String(payload.sessionId) : (index >= 0 ? tasks[index].sessionId : null),

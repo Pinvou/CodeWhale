@@ -16,9 +16,9 @@ use crate::features::codex_acp::AcpPool;
 use crate::features::codex_acp::remote_turn::{AcpPoolCodeTurnPort, RemoteWorkspaceAuthorizations};
 use crate::features::remote_control::controller::controlled::ControlledDeviceManager;
 use crate::features::remote_control::controller::task::{
-    CancelOutcome, ChatTurnExecutor, CodeTurnExecutor, ControllerTaskEventSink,
-    RemoteSessionProvisioner, RemoteTaskEvent, RemoteTaskEventSink, RemoteTaskHooks,
-    RemoteTaskLedger, RemoteTaskService, TASK_MODE_CHAT, TASK_MODE_CODE,
+    ChatTurnExecutor, CodeTurnExecutor, ControllerTaskEventSink, RemoteSessionProvisioner,
+    RemoteTaskEvent, RemoteTaskEventSink, RemoteTaskHooks, RemoteTaskLedger, RemoteTaskService,
+    TASK_MODE_CHAT, TASK_MODE_CODE,
 };
 use crate::features::sessions::SessionStore;
 
@@ -205,18 +205,12 @@ pub fn desktop_remote_task_cancel(
 ) -> Result<Value, String> {
     ensure_supported(&controlled)?;
     let service = runtime.service();
-    let outcome = service
+    service
         .cancel(&task_id, monotonic_millis())
         .map_err(|error| error.code.to_owned())?;
     let payload = service
-        .status_payload(&task_id)
+        .status_view_payload(&task_id)
         .map_err(|error| error.code.to_owned())?;
-    if let CancelOutcome::CancellationRequested(_) = outcome {
-        let _ = app.emit(
-            TASK_STATUS_EVENT,
-            serde_json::json!({ "task_id": task_id, "status": "cancel_requested" }),
-        );
-    }
     let _ = app.emit(TASK_EVENT, &payload);
     Ok(payload)
 }
@@ -230,7 +224,7 @@ pub fn desktop_remote_task_status(
     ensure_supported(&controlled)?;
     runtime
         .service()
-        .status_payload(&task_id)
+        .status_view_payload(&task_id)
         .map_err(|error| error.code.to_owned())
 }
 

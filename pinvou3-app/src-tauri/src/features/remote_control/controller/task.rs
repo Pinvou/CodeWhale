@@ -372,6 +372,16 @@ impl RemoteTaskRecord {
             self.state.wire_status()
         }
     }
+
+    /// Local cancellation acknowledgement is monotonic until a proven terminal.
+    /// It does not change the frozen business task_status enumeration.
+    fn view_status(&self) -> &'static str {
+        if self.cancel_requested && !self.is_terminal() {
+            "cancel_requested"
+        } else {
+            self.wire_status()
+        }
+    }
 }
 
 /// Durable ledger sink. `persist` runs inside the ledger critical section and
@@ -465,6 +475,9 @@ struct LedgerInner {
     turn_locks: HashMap<String, String>,
     order: Vec<String>,
     sequence: u64,
+    // Process-local evidence of durable boot closure, consumed after hooks attach.
+    // Never persisted or inferred from historical terminal records.
+    pending_recovery: Vec<RemoteTaskRecord>,
 }
 
 pub(crate) struct RemoteTaskTicket {
@@ -548,6 +561,20 @@ impl RemoteTaskLedger {
             }
             recovered.turn_locks.clear();
             self.persist_inner(&recovered)?;
+            recovered.pending_recovery = recovered
+                .tasks
+                .values()
+                .filter(|record| {
+                    inner
+                        .tasks
+                        .get(&record.task_id)
+                        .is_some_and(|old| !old.is_terminal())
+                })
+                .cloned()
+                .collect();
+            recovered
+                .pending_recovery
+                .sort_by_key(|record| record.sequence);
             *inner = recovered;
         }
         Ok(())
@@ -822,7 +849,7 @@ impl RemoteTaskLedger {
     pub(crate) fn recover_after_restart(&self, now_b: u64) -> Vec<RemoteTaskRecord> {
         let mut inner = self.inner.lock();
         let ids = self.non_terminal_ids(&inner, |_| true);
-        let mut recovered = Vec::new();
+        let mut recovered = std::mem::take(&mut inner.pending_recovery);
         for id in ids {
             let Some(previous) = inner.tasks.get(&id).cloned() else {
                 continue;
@@ -1451,6 +1478,25 @@ impl RemoteTaskService {
         Ok(payload)
     }
 
+    /// B-local IPC projection, deliberately distinct from the frozen wire DTO.
+    /// Polling and cancellation use exactly the same shape as the local event.
+    pub(crate) fn status_view_payload(&self, task_id: &str) -> Result<Value> {
+        let record = self.ledger.record(task_id)?;
+        Ok(json!({
+            "taskId": record.task_id,
+            "sessionId": record.session_id,
+            "status": record.view_status(),
+            "connectionId": record.lease.connection_id,
+            "controllerLeaseId": record.lease.controller_lease_id,
+            "leaseEpoch": record.lease.lease_epoch,
+            "relayEpoch": record.lease.relay_epoch,
+            "remoteControlGeneration": record.lease.remote_control_generation,
+            "outcomeUnknown": record.outcome_unknown,
+            "terminalReason": record.terminal_reason,
+            "resultDigest": record.result_digest,
+        }))
+    }
+
     fn finish(
         &self,
         task_id: &str,
@@ -1519,7 +1565,7 @@ impl RemoteTaskService {
             journal.publish_task_event(&RemoteTaskEvent {
                 task_id: record.task_id.clone(),
                 session_id: record.session_id.clone(),
-                status: record.wire_status().to_owned(),
+                status: record.view_status().to_owned(),
                 sequence: (previous + 1).to_string(),
                 outcome_unknown: record.outcome_unknown,
                 terminal_reason: Some(bounded_reason_owned(reason)),
@@ -2607,6 +2653,91 @@ mod tests {
     }
 
     #[test]
+    fn durable_open_recovery_is_published_once_after_the_real_journal_is_attached() {
+        use super::super::journal::RemoteJournal;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("task-ledger.json");
+        let ledger = RemoteTaskLedger::new(Arc::new(JsonTaskLedgerStore::new(path.clone())));
+        for (index, dispatched) in [(1, false), (2, true), (3, false)] {
+            let task = format!("task-{index}");
+            ledger
+                .admit(
+                    &context("generation-0001"),
+                    &request(&payload(
+                        &format!("session-{index}"),
+                        &task,
+                        &format!("client-{index}"),
+                        &digest(1),
+                    )),
+                    100,
+                )
+                .unwrap();
+            if dispatched {
+                ledger.begin_dispatch(&task, 110).unwrap();
+            }
+            if index == 3 {
+                ledger
+                    .complete(&task, RemoteTaskTerminal::Succeeded, None, 120)
+                    .unwrap();
+            }
+        }
+        drop(ledger);
+        let ledger = Arc::new(RemoteTaskLedger::open_recovered(path.clone(), 200).unwrap());
+        let persisted = JsonTaskLedgerStore::load(&path).unwrap();
+        assert!(persisted.iter().all(RemoteTaskRecord::is_terminal));
+        let service = RemoteTaskService::new(ledger);
+        let journal = Arc::new(RemoteJournal::new("new-boot"));
+        service.hooks().set_journal(journal.clone());
+        let recovered = service.recover_after_restart(300);
+        assert_eq!(
+            recovered.len(),
+            2,
+            "durable close must retain unpublished recovery evidence"
+        );
+        assert!(recovered.iter().all(|record| record.updated_at_ms == 200));
+        assert!(
+            recovered
+                .iter()
+                .find(|record| record.task_id == "task-2")
+                .unwrap()
+                .outcome_unknown
+        );
+        assert!(
+            !recovered
+                .iter()
+                .find(|record| record.task_id == "task-1")
+                .unwrap()
+                .outcome_unknown
+        );
+        let snapshot = journal.snapshot();
+        assert_eq!(snapshot.events.len(), 2);
+        assert_eq!(
+            snapshot
+                .events
+                .iter()
+                .map(|event| event.terminal_status.as_deref().unwrap())
+                .collect::<Vec<_>>(),
+            ["interrupted", "result_unknown"]
+        );
+        assert!(
+            snapshot
+                .events
+                .iter()
+                .all(|event| event.payload["terminal_reason"] == json!("process_restart"))
+        );
+        assert!(service.recover_after_restart(400).is_empty());
+        assert_eq!(journal.snapshot().events.len(), 2);
+        assert_eq!(JsonTaskLedgerStore::load(&path).unwrap(), persisted);
+        let next_boot = RemoteTaskService::new(Arc::new(
+            RemoteTaskLedger::open_recovered(path, 500).unwrap(),
+        ));
+        assert!(
+            next_boot.recover_after_restart(600).is_empty(),
+            "historical terminals are not replayed as fresh recovery"
+        );
+    }
+
+    #[test]
     fn publication_sequence_exhaustion_never_wraps_or_reuses_evidence() {
         let (service, hooks) = service(RecordingExecutor::ok());
         service
@@ -2705,6 +2836,77 @@ mod tests {
             Some("session-0001".to_owned())
         );
         assert!(!service.is_remote_session("session-0001"));
+    }
+
+    #[test]
+    fn local_status_projection_matches_rust_js_shared_fixtures_and_never_changes_wire() {
+        let (service, _) = service(RecordingExecutor::ok());
+        let _ticket = admitted(
+            &service,
+            &payload("session-0001", "task-0001", "client-0001", &digest(1)),
+            100,
+        );
+        let fixtures: Value = serde_json::from_str(include_str!(
+            "../../../../../tests/fixtures/desktop_remote_status.json"
+        ))
+        .unwrap();
+        assert_eq!(
+            service.status_view_payload("task-0001").unwrap(),
+            fixtures["taskStatus"]
+        );
+        service.ledger.begin_dispatch("task-0001", 110).unwrap();
+        service.cancel("task-0001", 120).unwrap();
+        assert_eq!(
+            service.status_view_payload("task-0001").unwrap(),
+            fixtures["taskCancelRequested"]
+        );
+        let wire = service.status_payload("task-0001").unwrap();
+        assert_eq!(wire["task_status"], json!("running"));
+        assert!(wire.get("taskId").is_none());
+        let encoded = serde_json::to_string(&wire).unwrap();
+        crate::features::remote_control::controller::protocol::validate_controller_payload_json(
+            &encoded,
+            SenderRole::ControlledB,
+        )
+        .unwrap();
+        service
+            .complete("task-0001", RemoteTaskTerminal::Cancelled, None, 130)
+            .unwrap();
+        let terminal = service.status_view_payload("task-0001").unwrap();
+        assert_eq!(terminal["status"], json!("cancelled"));
+        assert_eq!(terminal["terminalReason"], json!("cancelled"));
+    }
+
+    #[test]
+    fn cancelled_local_task_publications_do_not_resume_ordinary_status() {
+        let (service, hooks) = service(RecordingExecutor::ok());
+        let _ticket = admitted(
+            &service,
+            &payload("session-0001", "task-0001", "client-0001", &digest(1)),
+            100,
+        );
+        service.ledger.begin_dispatch("task-0001", 110).unwrap();
+        service.cancel("task-0001", 120).unwrap();
+        service.enter_waiting_permission("task-0001", 130).unwrap();
+        service.resume_running("task-0001", 140).unwrap();
+        let events = hooks.events.lock();
+        assert_eq!(
+            events
+                .iter()
+                .skip(1)
+                .map(|event| event.status.as_str())
+                .collect::<Vec<_>>(),
+            ["cancel_requested", "cancel_requested", "cancel_requested"]
+        );
+        assert_eq!(
+            service.status_view_payload("task-0001").unwrap()["status"],
+            json!("cancel_requested")
+        );
+        drop(events);
+        service
+            .complete("task-0001", RemoteTaskTerminal::Cancelled, None, 150)
+            .unwrap();
+        assert_eq!(hooks.events.lock().last().unwrap().status, "cancelled");
     }
 
     #[test]

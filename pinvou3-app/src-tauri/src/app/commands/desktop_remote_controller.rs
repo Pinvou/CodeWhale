@@ -16,7 +16,7 @@ const STATUS_EVENT: &str = "desktop-remote-controller-status";
 const UNSUPPORTED: &str = "desktop_remote_control_unsupported";
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RemoteHistoryCreateRequest {
     title: String,
     b_session_reference: Option<String>,
@@ -102,6 +102,53 @@ pub fn desktop_remote_controller_list_history(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn controller_create_history_accepts_the_shared_real_ipc_envelope() {
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Args {
+            request: super::RemoteHistoryCreateRequest,
+        }
+        let fixtures: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../tests/fixtures/desktop_remote_status.json"
+        ))
+        .unwrap();
+        let args: Args = serde_json::from_value(fixtures["historyCreateArgs"].clone()).unwrap();
+        assert_eq!(args.request.title, "Report");
+        assert_eq!(
+            args.request.b_session_reference.as_deref(),
+            Some("session-0001")
+        );
+        assert!(
+            serde_json::from_value::<Args>(serde_json::json!({
+                "title": "Report", "deviceDisplayName": "Studio PC", "sessionRef": "session-0001"
+            }))
+            .is_err()
+        );
+        for value in [
+            serde_json::json!({"request": {}}),
+            serde_json::json!({"request": {"title": 1}}),
+        ] {
+            assert!(serde_json::from_value::<Args>(value).is_err());
+        }
+        let optional: Args = serde_json::from_value(serde_json::json!({
+            "request": {"title": "Report", "bSessionReference": null}
+        }))
+        .unwrap();
+        assert!(optional.request.b_session_reference.is_none());
+        let manager = super::ControllingDeviceManager::default();
+        for title in ["", " ", &"x".repeat(121)] {
+            assert_eq!(
+                manager.create_history(title, None).unwrap_err().code,
+                "history_title_invalid"
+            );
+        }
+        assert_eq!(
+            manager.create_history("Report", Some("")).unwrap_err().code,
+            "history_reference_invalid"
+        );
+    }
+
     #[test]
     fn controller_command_surface_is_stable_and_contains_no_code_storage() {
         assert_eq!(super::STATUS_EVENT, "desktop-remote-controller-status");

@@ -21,7 +21,7 @@ export const desktopBridgeApi = {
   // Windows 双端远程控制（B 被控端 / A 主控端）。与 webAccess 完全不同域：
   // 只暴露 opaque ID、状态投影与任务编排，模型凭证、路径和密钥都留在 Rust。
   desktopRemoteControl: [
-    'cancelRemoteTask', 'capabilitiesSnapshot', 'controlledAuthorizeWorkspace', 'controlledDisconnectNow',
+    'cancelRemoteTask', 'controlledAuthorizeWorkspace', 'controlledDisconnectNow',
     'controlledListWorkspaces', 'controlledRefresh', 'controlledStart', 'controlledStatus', 'controlledStop',
     'controllerConnect', 'controllerCreateHistory', 'controllerDisconnect', 'controllerListHistory', 'controllerStatus',
     // A07 has no authenticated model/permission/history/task/transfer ingress yet.

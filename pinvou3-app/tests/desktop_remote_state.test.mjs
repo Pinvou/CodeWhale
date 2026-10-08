@@ -27,6 +27,7 @@ function connected(connectionId = 'connection-1', leaseEpoch = '2') {
 
 function makeBridge(responses = {}) {
   const callbacks = new Map();
+  const calls = [];
   const host = { window: {} };
   vm.createContext(host);
   vm.runInContext(fs.readFileSync(logicPath, 'utf8'), host);
@@ -40,12 +41,14 @@ function makeBridge(responses = {}) {
       callbacks.set(name, callback);
       return Promise.resolve(() => callbacks.delete(name));
     },
-    invoke(name) {
+    invoke(name, args) {
+      calls.push({ name, args: JSON.parse(JSON.stringify(args)) });
       return Promise.resolve(typeof responses[name] === 'function' ? responses[name]() : responses[name]);
     },
   });
   return {
     bridge,
+    calls,
     get state() { return state.desktopRemoteControl; },
     emit(name, payload) {
       assert.ok(callbacks.has(name), `missing subscription: ${name}`);
@@ -53,6 +56,42 @@ function makeBridge(responses = {}) {
     },
   };
 }
+
+test('A-local history creation matches the real Rust request envelope', async () => {
+  const host = makeBridge();
+  await host.bridge.controllerCreateHistory('Report', 'session-0001');
+  assert.deepEqual(host.calls.at(-1), {
+    name: 'desktop_remote_controller_create_history',
+    args: fixtures.historyCreateArgs,
+  });
+});
+
+test('real Rust local task status and cancellation fixtures reach the reducer without losing binding', async () => {
+  const host = makeBridge({
+    desktop_remote_controller_connect: fixtures.controllerConnected,
+    desktop_remote_task_cancel: fixtures.taskCancelRequested,
+  });
+  await host.bridge.controllerConnect('2345678');
+  host.emit('desktop-remote-task-status', fixtures.taskStatus);
+  assert.equal(host.state.tasks[0].status, 'admitted');
+  for (const key of ['connectionId', 'controllerLeaseId', 'leaseEpoch', 'relayEpoch', 'remoteControlGeneration']) {
+    const before = host.state;
+    host.emit('desktop-remote-task-status', { ...fixtures.taskCancelRequested, [key]: 'foreign' });
+    assert.equal(host.state, before, `replaced ${key} is ignored`);
+  }
+  host.emit('desktop-remote-task-status', fixtures.taskCancelRequested);
+  assert.equal(host.state.tasks[0].status, 'cancel_requested');
+  await host.bridge.cancelRemoteTask('task-0001');
+  assert.equal(host.state.tasks[0].status, 'cancel_requested');
+  for (const status of ['admitted', 'running', 'waiting_permission']) {
+    host.emit('desktop-remote-task-event', { ...fixtures.taskStatus, status });
+    assert.equal(host.state.tasks[0].status, 'cancel_requested', `late ${status} never revokes confirmed cancellation`);
+  }
+  host.emit('desktop-remote-task-event', { ...fixtures.taskStatus, status: 'cancelled' });
+  host.emit('desktop-remote-task-status', fixtures.taskCancelRequested);
+  assert.equal(host.state.tasks[0].status, 'cancelled', 'late cancellation acknowledgement never regresses terminal');
+  host.bridge.stop();
+});
 
 test('shared Rust fixtures project device names, errors, lease and pairing expiry', () => {
   let state = logic.applyControllerStatus(logic.createState(), fixtures.controllerConnected);
@@ -341,7 +380,7 @@ test('bridge feature gates every desktop call behind the Windows capability', ()
     'controlled_start', 'controlled_refresh', 'controlled_stop', 'controlled_disconnect_now',
     'controlled_status', 'controlled_list_workspaces', 'controlled_authorize_workspace',
     'controller_connect', 'controller_disconnect', 'controller_status',
-    'controller_list_history', 'controller_create_history', 'capabilities_snapshot',
+    'controller_list_history', 'controller_create_history',
     'task_cancel', 'task_status', 'journal_replay', 'journal_snapshot', 'journal_acknowledge',
   ].map(name => `desktop_remote_${name}`);
   assert.deepEqual([...new Set(invokes)].sort(), expected.sort());

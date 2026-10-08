@@ -85,7 +85,7 @@ test('real getMany and subscribeMany expose the nested remote-control domain', a
 
 test('unfinished sensitive renderer entries remain unregistered until authenticated wiring', () => {
   const h = host();
-  for (const name of ['listExportableModels', 'permissionList', 'permissionDecide', 'permissionDenyTask',
+  for (const name of ['capabilitiesSnapshot', 'listExportableModels', 'permissionList', 'permissionDecide', 'permissionDenyTask',
     'historyList', 'historyLoad', 'historyDelete', 'historyMarkOffline',
     'artifactDownloadAbort', 'artifactDownloadBegin', 'artifactDownloadChunk', 'artifactIndex', 'artifactPreview',
     'attachmentAbort', 'attachmentBegin', 'attachmentChunk',

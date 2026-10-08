@@ -1,4 +1,19 @@
 {
+  "historyCreateArgs": {
+    "request": { "title": "Report", "bSessionReference": "session-0001" }
+  },
+  "taskStatus": {
+    "taskId": "task-0001", "sessionId": "session-0001", "status": "admitted",
+    "connectionId": "connection-0001", "controllerLeaseId": "lease-0001", "leaseEpoch": "1",
+    "relayEpoch": "relay-epoch-0001", "remoteControlGeneration": "generation-0001",
+    "outcomeUnknown": false, "terminalReason": null, "resultDigest": null
+  },
+  "taskCancelRequested": {
+    "taskId": "task-0001", "sessionId": "session-0001", "status": "cancel_requested",
+    "connectionId": "connection-0001", "controllerLeaseId": "lease-0001", "leaseEpoch": "1",
+    "relayEpoch": "relay-epoch-0001", "remoteControlGeneration": "generation-0001",
+    "outcomeUnknown": false, "terminalReason": null, "resultDigest": null
+  },
   "controllerConnected": {
     "status": "connected",
     "claimRequestId": "claim-0001",

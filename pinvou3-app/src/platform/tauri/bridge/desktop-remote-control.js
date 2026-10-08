@@ -7,8 +7,8 @@
  * is gated by the intent sequence and generation/lease epoch held in
  * `features/remote-control/remote-control-state.js`.
  *
- * A07 exposes lifecycle/capability/status and B-local stop adapters. Model export,
- * permission decisions and history mutation are deliberately absent from the
+ * A07 exposes lifecycle/status, A-local in-memory history and B-local stop adapters. Model export,
+ * permission decisions and authenticated B-history mutation are absent from the
  * renderer surface until A08 binds them to authenticated Rust transport.
  * Transfer inputs also stay closed until a bounded task/receipt consumer owns
  * completed files; a successful staging write alone is not task delivery.
@@ -210,23 +210,10 @@
       });
     }
 
-    function controllerCreateHistory(title, deviceDisplayName, sessionRef) {
+    function controllerCreateHistory(title, bSessionReference) {
       ensureAvailable();
       return invoke("desktop_remote_controller_create_history", {
-        title: title,
-        deviceDisplayName: deviceDisplayName,
-        sessionRef: sessionRef,
-      });
-    }
-
-    function capabilitiesSnapshot() {
-      ensureAvailable();
-      return invoke("desktop_remote_capabilities_snapshot", {}).then(function (snapshot) {
-        var before = current();
-        var after = logic.applyCapabilities(before, snapshot);
-        if (after === before) return null;
-        publish(after);
-        return snapshot;
+        request: { title: title, bSessionReference: bSessionReference || null },
       });
     }
 
@@ -286,7 +273,6 @@
       controllerStatus: controllerStatus,
       controllerListHistory: controllerListHistory,
       controllerCreateHistory: controllerCreateHistory,
-      capabilitiesSnapshot: capabilitiesSnapshot,
       cancelRemoteTask: cancelRemoteTask,
       remoteTaskStatus: remoteTaskStatus,
       journalReplay: journalReplay,
