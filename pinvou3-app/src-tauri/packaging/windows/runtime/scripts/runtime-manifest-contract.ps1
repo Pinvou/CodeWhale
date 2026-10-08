@@ -1,3 +1,9 @@
+# Windows runtime manifest contract library (schema 2 stagedFiles exactness +
+# canonical relative paths). Currently exercised only by
+# test-runtime-manifest-contract.ps1 via `npm run test:windows-runtime-manifest`
+# (wired into pr-check's windows-codex-runtime-test job). Production staging
+# validation still lives in resolve-runtime.ps1's own checks; wiring this
+# contract into that flow is an upstream-parity follow-up.
 $ErrorActionPreference = "Stop"
 
 function Get-CanonicalWindowsRuntimeManifestPath {
