@@ -64,6 +64,7 @@ function extractCalls(source, callee, normalize = true) {
 const protocolSources = {
   orchestration: ['bridge.js'],
   artifacts: ['bridge/artifact-tracker.js', 'bridge/artifacts.js'],
+  auxChat: ['bridge/aux-chat.js'],
   chat: ['bridge/chat.js', 'bridge/chat-events.js', 'bridge/terminal.js'],
   dependencies: ['bridge/dependencies.js'],
   interaction: ['bridge/interaction.js'],
@@ -84,8 +85,24 @@ const protocolSources = {
 };
 
 const expectedProtocolHashes = {
+  // Aux-chat domain debut (community #433 backflow): three commands —
+  // get_or_create_aux_session / discard_aux_session / reset_aux_session —
+  // plus the desktop send dispatch chat(restrictTools:true); buffer loading
+  // reuses the ensureSessionBufferLoaded injected by the sessions domain (the
+  // load_session hash is accounted in the sessions domain).
+  // Upstream's hash covered the M7 thin wrapper over the shared
+  // PinvouBridgeShared cluster; Official has no shared-cluster mechanism, so
+  // the domain bodies live in this module and the hash was recomputed for the
+  // self-contained Official-lane file.
+  auxChat: '822fb84758b20d045f2fc34673e88c0f9e7aa2acb48e420c0a8b0cdafd93c37a',
   multiAgent: '6896409bb406f1ba54ca496dd78c04549cc78ff5490ae771d9cf60586368a8a8',
-  orchestration: '3dfae00b063d45f76e93c4fb8770c746c2b49e8a25a1e37f80767f08c7051724',
+  // Recomputed for the rebind wave (community #463): bridge.js's wholesale
+  // artifact save now rewrites SavedSession.artifacts[].storage_path along
+  // the workspace_rebound mark's segment chain (rebaseArtifactPathsForRebind,
+  // consumed from the artifact-tracker feature); same command surface, no new
+  // invoke or listen entries (the extractor scans raw source, so body/comment
+  // text is part of the digest).
+  orchestration: 'b1e333b75636a9d048f88b2d2abbde0c17046c9116f93ff23125e6a41f4ad586',
   // Recomputed for artifact export telemetry after a successful external open;
   // attribution is now isolated to the explicitly targeted session.
   // Recomputed again for the Linux clipboard-image paste fallback (community
@@ -93,7 +110,13 @@ const expectedProtocolHashes = {
   // wrapping the paste_clipboard_image command (the native layer reads the
   // WebKitGTK-invisible clipboard image and saves it server-side; web lane
   // intentionally has no such backend).
-  artifacts: 'bb1974a6cff526075dc98813ee75dd7253ec970203ef59cb133d2c443ec5ed71',
+  // Recomputed for the rebind wave (community #463): artifact-tracker.js
+  // gains the rebind mark helpers (sessionRecentlyRebound /
+  // rebaseArtifactPathsForRebind / pathIsRebindStale) and the reconcile's
+  // stale-absolute heal arm + rebasing save — same command surface, no new
+  // invoke or listen entries (the extractor scans raw source, so
+  // body/comment text is part of the digest).
+  artifacts: '4d30777de23d38d7d48a1c9cbbb693877b248874ab5076d63e32fa6764406abb',
 // New domain: computer-use consent commands/events (desktop-only; the web
   // RPC allowlist excludes them, same policy as browser:*).
   // Recomputed when the 30s deny-suppression cooldown was removed: a deny now
@@ -163,7 +186,12 @@ const expectedProtocolHashes = {
   scheduled: '6492813eabb2472f892cb4b199a27b09d78355f56fc3aff24b8409af236799b6',
   // Recomputed for the combined session archive and #445 workspace binding
   // surfaces while retaining Official's materialization behavior.
-  sessions: '24c9d103bfa90094b02200441222d387d86131836d0c7029d96c5ec28d071ddc',
+  // Recomputed for the rebind wave (community #463): the session:list_changed
+  // listener stamps the workspace_rebound mark (applyWorkspaceReboundMark)
+  // and burst-coalesces the history refresh (round-20 R3); same two commands,
+  // no new invoke or listen entries (the extractor scans raw source, so
+  // body/comment text is part of the digest).
+  sessions: 'ffa253ca04a11fc8e93863e2f9b844376fd75b6d0cc815fe299144578f20f7e0',
   // Recomputed for the builtin feature toggle hook: settings.js gains the
   // list_builtin_features / set_builtin_feature_enabled invoke wrappers (the
   // session-mention feature gate reads the list; the setter is the contract

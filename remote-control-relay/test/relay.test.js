@@ -252,6 +252,23 @@ function controllerEnvironment(name, overrides = {}) {
   };
 }
 
+test("identifier contract: real Relay accepts colon signing IDs and preserves legacy leading-ID Web v2", { timeout: 90_000 }, async (t) => {
+  const isolated = await spawnRelay(controllerEnvironment("identifier-contract", {
+    PINVOU_REMOTE_RELAY_SIGNING_KEY_ID: "relay:signing:0001",
+  }));
+  t.after(() => stopRelay(isolated.child));
+  for (const endpointId of ["_old", "-old"]) {
+    const accessToken = `legacy-access-${endpointId}-credential-0000000000000001`;
+    const desktopSecret = `legacy-desktop-${endpointId}-credential-000000000000001`;
+    const desktop = await registerDesktop(endpointId, accessToken, desktopSecret, isolated.wsUrl);
+    t.after(() => closeSocket(desktop.ws));
+    const web = await joinWeb(endpointId, accessToken, {}, isolated.wsUrl);
+    t.after(() => closeSocket(web.ws));
+    assert.equal(web.joined.endpoint_id, endpointId);
+    assert.equal(web.joined.desktop_connected, true);
+  }
+});
+
 function waitForRegistrationProbe(child, type, endpointId) {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {

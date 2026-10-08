@@ -1,7 +1,7 @@
 //! Upload host composition: session root injection and shared lifecycle owner.
 // architecture-guard: allow-target-cfg -- Windows-only regression verifies mandatory sharing leases during real file ingestion; production OS selection remains in platform::filesystem.
 use crate::features::remote_control::controller::task::{
-    RemoteTaskService, RemoteTaskTransferScope,
+    RemoteTaskRecord, RemoteTaskService, RemoteTaskTransferScope,
 };
 use crate::features::remote_control::controller::transfer::core::TransferRegistry;
 use crate::features::remote_control::controller::transfer::staging::SessionIsolationStaging;
@@ -73,9 +73,16 @@ impl DesktopRemoteTransferScope {
 }
 
 impl RemoteTaskTransferScope for DesktopRemoteTransferScope {
-    fn abort_transfers_for_task(&self, task_id: &str) -> usize {
-        self.attachments.uploads_cleanup_for_task(task_id)
-            + self.artifacts.downloads().cleanup_for_task(task_id)
+    fn abort_transfers_for_task(&self, record: &RemoteTaskRecord) -> usize {
+        let uploads = self
+            .attachments
+            .uploads()
+            .cleanup_for_admission(record.sequence);
+        let downloads = self
+            .artifacts
+            .downloads()
+            .cleanup_for_admission(record.sequence);
+        uploads + downloads
     }
 }
 

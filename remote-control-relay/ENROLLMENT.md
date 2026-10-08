@@ -9,6 +9,15 @@ is not a production enrollment flow and must not be advertised as one.
 
 ## Deployment configuration
 
+Desktop/controller identifiers use the frozen wire grammar: 1–128 ASCII
+characters, an alphanumeric first character, then alphanumerics or `._:-`.
+Tilde is not accepted. Existing Web v2 endpoint IDs keep their released
+`[A-Za-z0-9_-]{4,128}` grammar, including leading `_` or `-`; registry and
+legacy gateway lookup preserve those exact IDs without normalization. New
+desktop pairing cannot use a legacy-only endpoint ID. Administrator migration
+request IDs use the desktop character set with their own 8–128 length bound.
+Credential/HMAC digest and official proof-key grammars are separate and unchanged.
+
 Set these variables before opening the registry:
 
 | Variable | Meaning |
@@ -396,13 +405,49 @@ anonymous active-denial probe is not rejected, the Relay URL is not literal
 loopback, or OS listener inspection finds a wildcard/non-loopback bind. A bare
 v2 rollback is never a safe fallback.
 `scripts/check-enrollment-gated-v2-rollback.mjs` combines the private endpoint
-inventory coverage report and gateway check; deployment automation must require
-its zero exit status before starting an old v2 binary. Coverage must have a
+inventory coverage report and gateway check. Stage the legacy binary on its
+private literal-loopback listener behind the already running gateway first:
+the preflight inspects an actual OS listener, not a proposed configuration.
+Deployment automation must require the check's zero exit status before declaring
+rollback traffic ready; a bare public v2 listener is never permitted. The check
+does not stop, restart or otherwise manage deployment services. Coverage must have a
 positive integer total, all entries migrated, no unmigrated entries and exactly
 100 percent coverage; an empty inventory is not evidence of safe rollback.
+The rollback checker, migration CLI and gateway preflight compare canonical
+filesystem entry paths, so invoking them through a directory symlink or Windows
+junction still executes the checks. Importing them as libraries does not execute
+the CLI. This does not relax private inventory/state-path or permission checks.
 The gateway holds the controller-state writer lock. During rollback, stop the
 controller dispatcher before opening that gateway; two independent processes
 must not open the same store as concurrent writers.
+
+For this online gate, explicitly configure the same gateway process and checker
+with `PINVOU_REMOTE_GATEWAY_CONTROL_HOST` (`127.0.0.1` or `::1`),
+`PINVOU_REMOTE_GATEWAY_CONTROL_PORT` (1024–65535, separate from the public
+gateway listener), and `PINVOU_REMOTE_GATEWAY_CONTROL_KEY` (32–4096 UTF-8 bytes).
+Use a new random secret from a protected deployment environment/secret manager,
+distinct from the enrollment and pairing HMAC keys. Never commit or log it.
+All three unset leaves this management listener disabled; incomplete configuration
+fails startup and the online checker fails closed without it. Do not forward
+this private management port through nginx or expose it publicly.
+
+The live lock-owning gateway reads its actual enrollment registry; no second
+store open, unlocked replica or bypass of the writer lock is used. Requests and
+responses carry domain-separated HMACs, fresh nonces, a 15-second clock window,
+an opaque store/configuration binding and bounded messages. Only aggregate
+coverage and revisions are returned, not endpoint IDs or credentials. Each public
+health/WS probe must identify this same gateway instance. The instance marker
+detects routing mistakes in the trusted deployment perimeter; it is not a
+cryptographic attestation against a malicious reverse proxy.
+
+After all public probes, the checker requests a fresh authenticated coverage
+snapshot. A changed owner/store binding, incomplete final coverage or any changed
+enrollment namespace revision fails the check; unrelated namespace writes do not
+invalidate it. A zero exit is point-in-time evidence, not a reusable approval:
+rerun after registry, deployment configuration or routing changes. Keep the
+gateway in the traffic path for ongoing authorization. Offline migration CLI
+`--coverage` remains a maintenance tool for a stopped store owner; it is not
+invoked by this online gate. Operators remain responsible for service sequencing.
 The preflight checks the health marker, WebSocket upgrade marker and an
 anonymous registration denial on every declared public route. The declared
 bind host remains a required assertion, but does not replace OS listener
