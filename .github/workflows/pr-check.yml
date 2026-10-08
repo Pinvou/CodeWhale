@@ -562,7 +562,7 @@ jobs:
       - name: 公开底座 gitlink 可达性
         # Fail closed: gitlink 必须等于公开维护分支头；过渡期（fork-policy 第 0 节豁免）
         # 内不可变 tag 钉在其收口 commit，rN 收口后恢复三方相等。
-        run: ./scripts/verify-public-submodule.sh
+        run: ./scripts/verify-public-submodule.sh --registered-snapshot
 
       - name: 初始化公共底座 submodule
         run: git submodule update --init --recursive -- CodeWhale
