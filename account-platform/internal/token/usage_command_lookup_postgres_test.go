@@ -164,7 +164,7 @@ func TestUsageCommandLookupThroughCurrentHandler(t *testing.T) {
 
 }
 
-// Existing route/account reads retain their authentication boundary. Future
+// Installed command reads retain their authentication boundary. Unknown
 // runtime families must not become reachable through the current usage lookup.
 func TestCurrentCommandKeyLookupDispatchBoundaries(t *testing.T) {
 	service := &Service{authorizer: &authorization.Client{}}
@@ -176,7 +176,7 @@ func TestCurrentCommandKeyLookupDispatchBoundaries(t *testing.T) {
 		{"TOKEN_ROUTE_UPSERT", http.StatusUnauthorized},
 		{"TOKEN_ROUTE_DELETE", http.StatusUnauthorized},
 		{"TOKEN_ACCOUNT_CREATE", http.StatusUnauthorized},
-		{"TOKEN_ROUTE_PROVISIONING_REPAIR", http.StatusBadRequest},
+		{"TOKEN_ROUTE_PROVISIONING_REPAIR", http.StatusUnauthorized},
 		{"TOKEN_FUTURE_UNKNOWN", http.StatusBadRequest},
 	} {
 		t.Run(entry.command, func(t *testing.T) {

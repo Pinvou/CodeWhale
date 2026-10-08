@@ -1,6 +1,8 @@
 import React, { useEffect, useState } from 'react';
 import { requireFinanceCollection } from './finance-contract.js';
+import { loadFinancePage } from './admin-finance-pagination.js';
 import { useFinanceOperation } from './useFinanceOperation.js';
+import { paymentAnomalyResolutions } from './payment-anomaly-resolutions.js';
 
 export function AdminPaymentReviewQueue({ client, copy, me, anomaly = false }) {
   const [page, setPage] = useState(null);
@@ -17,8 +19,8 @@ export function AdminPaymentReviewQueue({ client, copy, me, anomaly = false }) {
   const canQuery = permissions.includes('platform.billing.orders.sync');
   const canRepair = permissions.includes('platform.billing.repairs.request');
   const load = async (next = cursor) => {
-    const value = await operation.read(() => anomaly ? client.paymentAnomalies({ status, cursor: next }) : client.latePaymentReviews({ status, cursor: next }));
-    if (value) { requireFinanceCollection(value); setPage(value); setCursor(next); }
+    const result = await operation.read(() => loadFinancePage({ status, cursor: next }, filters => anomaly ? client.paymentAnomalies(filters) : client.latePaymentReviews(filters), () => { setCursor(''); setPrevious([]); }));
+    if (result) { setPage(result.value); setCursor(result.query.cursor); }
   };
   useEffect(() => { void load(''); }, [client, owner, anomaly]); // eslint-disable-line react-hooks/exhaustive-deps
   const open = async id => {
@@ -38,7 +40,7 @@ export function AdminPaymentReviewQueue({ client, copy, me, anomaly = false }) {
   };
   const act = async action => {
     const facts = operation.pendingFacts || { action, id: detail?.case?.case_id, reason: reason.trim(), resolution, nextReview };
-    if (!facts.id || (!operation.unknown && !globalThis.confirm(copy.confirmAction))) return;
+    if (!facts.id || (!operation.pendingFacts && action === 'resolve' && !paymentAnomalyResolutions(detail?.case?.anomaly_type).includes(resolution)) || (!operation.unknown && !globalThis.confirm(copy.confirmAction))) return;
     const value = await operation.mutate(facts, async (current, key) => {
       const receipt = await execute(current, key);
       if ((receipt?.case_id || receipt?.case?.case_id) !== current.id) throw new Error('INVALID_FINANCE_ACK');
@@ -51,9 +53,7 @@ export function AdminPaymentReviewQueue({ client, copy, me, anomaly = false }) {
   const statuses = anomaly ? ['OPEN', 'RESOLVED'] : ['REVIEW_REQUIRED_LATE_PAYMENT', 'PROVIDER_BLIND', 'ARCHIVED_CONFIRMED_UNPAID', 'RESOLVED_PAID'];
   const active = item && (anomaly ? item.status === 'OPEN' : ['REVIEW_REQUIRED_LATE_PAYMENT', 'PROVIDER_BLIND'].includes(item.review_status));
   const owned = item?.owner_id === me.user_id;
-  const resolutions = item?.anomaly_type === 'CHARGEBACK' ? ['CONFIRM_CHARGEBACK', 'DISMISS', 'ESCALATE_FINANCIAL_REPAIR']
-    : item?.anomaly_type === 'FORCED_REFUND' ? ['CONFIRM_FORCED_REFUND', 'DISMISS', 'ESCALATE_FINANCIAL_REPAIR']
-      : ['CONFIRM_PAYMENT', 'CONFIRM_PROVIDER_FAILED', 'DISMISS', 'ESCALATE_FINANCIAL_REPAIR'];
+  const resolutions = paymentAnomalyResolutions(item?.anomaly_type);
   return <section><h3>{anomaly ? copy.resolve : copy.sla}</h3><form onSubmit={event => { event.preventDefault(); setPrevious([]); void load(''); }}><label>{copy.status}<select value={status} onChange={event => setStatus(event.target.value)}><option value="">{copy.more}</option>{statuses.map(value => <option key={value} value={value}>{value}</option>)}</select></label><button disabled={operation.busy}>{copy.refresh}</button></form>
     {operation.busy && <p role="status">{copy.loading}</p>}{operation.error && <p role="alert">{operation.error}</p>}{operation.message && <p role="status">{operation.message}</p>}
     {operation.unknown && <button disabled={operation.busy} onClick={() => void act('')}>{copy.retry}</button>}
@@ -63,7 +63,7 @@ export function AdminPaymentReviewQueue({ client, copy, me, anomaly = false }) {
       <label>{copy.reason}<textarea disabled={operation.busy || operation.unknown} maxLength={2000} value={reason} onChange={event => setReason(event.target.value)} /></label>
       {canQuery && active && !owned && <button disabled={operation.busy || operation.unknown} onClick={() => void act('claim')}>{copy.claimCase}</button>}
       {owned && active && !anomaly && canQuery && <><button disabled={operation.busy || operation.unknown} onClick={() => void act('query')}>{copy.query}</button><label>{copy.nextReview}<input type="datetime-local" value={nextReview} onChange={event => setNextReview(event.target.value)} /></label><button disabled={operation.busy || operation.unknown || !nextReview || !reason.trim()} onClick={() => void act('schedule')}>{copy.schedule}</button><button disabled={operation.busy || operation.unknown || item.review_status !== 'REVIEW_REQUIRED_LATE_PAYMENT'} onClick={() => void act('archive')}>{copy.archive}</button><button disabled={operation.busy || operation.unknown || reason.trim().length < 10} onClick={() => void act('provider-blind')}>{copy.escalate}</button></>}
-      {owned && active && anomaly && canRepair && <><label>{copy.resolution}<select value={resolution} onChange={event => setResolution(event.target.value)}><option value="">{copy.resolution}</option>{resolutions.map(value => <option key={value} value={value}>{value}</option>)}</select></label><button disabled={operation.busy || operation.unknown || !resolution || reason.trim().length < 10} onClick={() => void act('resolve')}>{copy.resolve}</button></>}
+      {owned && active && anomaly && canRepair && <><label>{copy.resolution}<select value={resolution} onChange={event => setResolution(event.target.value)}><option value="">{copy.resolution}</option>{resolutions.map(value => <option key={value} value={value}>{copy.resolutions[value]}</option>)}</select></label>{resolution === 'RECONCILE_REFUND' && <p>{copy.refundReconcileHelp}</p>}<button disabled={operation.busy || operation.unknown || !resolutions.includes(resolution) || reason.trim().length < 10} onClick={() => void act('resolve')}>{copy.resolve}</button></>}
       <ul>{(detail.events || []).map(value => <li key={value.event_id || value.id}>{value.event_type} / {value.created_at}</li>)}</ul>
     </article>}
   </section>;

@@ -162,14 +162,15 @@ export class AdminPlatformClient {
       'X-CSRF-Token': this.csrfToken,
     };
     if (idempotencyKey) headers['Idempotency-Key'] = idempotencyKey;
-    const response = await fetch(`${this.baseURL}/api/admin/${area}${resource}`, {
+    const options = {
       method,
       headers,
       credentials: 'same-origin',
       cache: 'no-store',
       body: body === undefined ? undefined : codec ? codec.encode(body) : area === 'billing' ? encodeFinanceJSON(body) : JSON.stringify(body),
       signal,
-    });
+    };
+    const response = await fetch(`${this.baseURL}/api/admin/${area}${resource}`, options);
     this.observeAuthorizationVersions(response.headers);
     const payload = response.status === 204 ? null : response.ok && codec ? codec.decode(await response.text()) : area === 'billing' && response.ok ? parseFinanceJSON(await response.text()) : await response.json().catch(() => ({}));
     if (!response.ok) throw errorFromResponse(response, payload);

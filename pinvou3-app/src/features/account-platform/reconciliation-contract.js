@@ -1,6 +1,9 @@
-import { parseFinanceJSON, requireFinanceID } from './finance-contract.js';
+import { encodeFinanceJSON, parseFinanceJSON, requireFinanceID } from './finance-contract.js';
 
 export const RECONCILIATION_ACTIONS = ['CLAIM', 'ASSIGN', 'SET_REPAIR_ACTION', 'RESOLVE', 'IGNORE', 'REOPEN'];
+export function reconciliationCaseLabel(caseType, copy) {
+  return copy.caseTypes?.[caseType] || caseType;
+}
 export function requireReconciliationDate(value) {
   const date = new Date(`${value}T00:00:00Z`);
   if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value) || !Number.isFinite(date.getTime()) || date.toISOString().slice(0, 10) !== value) throw new Error('INVALID_RECONCILIATION_INPUT');
@@ -21,8 +24,16 @@ export function requireReconciliationRun(item, facts) {
   return item;
 }
 export function reconciliationImportItems(text) {
+  if (typeof text !== 'string' || new TextEncoder().encode(text).length > (64 << 20) - 1024) throw new Error('INVALID_RECONCILIATION_INPUT');
   const items = parseFinanceJSON(text);
-  if (!Array.isArray(items) || items.length === 0 || items.length > 10000) throw new Error('INVALID_RECONCILIATION_INPUT');
+  if (!Array.isArray(items) || items.length === 0 || items.length > 100000) throw new Error('INVALID_RECONCILIATION_INPUT');
+  for (const item of items) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) throw new Error('INVALID_RECONCILIATION_INPUT');
+    for (const [key, limit] of Object.entries({ merchant_order_no: 256, provider_reference_id: 256, channel_transaction_id: 256, status: 64, currency: 16 })) {
+      if (item[key] !== undefined && (typeof item[key] !== 'string' || new TextEncoder().encode(item[key]).length > limit)) throw new Error('INVALID_RECONCILIATION_INPUT');
+    }
+  }
+  if (new TextEncoder().encode(encodeFinanceJSON(items)).length > (64 << 20) - 1024) throw new Error('INVALID_RECONCILIATION_INPUT');
   return items;
 }
 export function reconciliationCommand(action, fields) {

@@ -119,7 +119,7 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
     ['settings', 'platform.sms-config.read', copy.settings.title],
     ['finance', 'platform.billing.wallets.read', financeCopy[language].finance],
     ['products', 'platform.products.read', financeCopy[language].productAdmin],
-    ['reconciliation', 'platform.usage.read', reconciliationCopy[language].title],
+    ['reconciliation', 'platform.billing.reconciliation.read', reconciliationCopy[language].title],
     ['management', ['platform.models.read', 'platform.tokens.read', 'platform.pricing.read', 'platform.usage.read', 'platform.models.lifecycle.request', 'platform.models.lifecycle.approve', 'platform.models.catalog.rollback.request', 'platform.models.catalog.rollback.approve', 'platform.tokens.credentials.revoke.request', 'platform.tokens.credentials.revoke.approve'].find(permission => permissions.includes(permission)), tokenManagementCopy[language].title],
   ].filter(([, permission]) => permissions.includes(permission));
   const visibleSection = pages.some(([key]) => key === section) ? section : pages[0]?.[0];

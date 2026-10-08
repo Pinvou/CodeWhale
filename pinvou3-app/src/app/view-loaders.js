@@ -15,6 +15,7 @@ export const VIEW_LOADERS = {
   monitor: () => import('../features/monitor/MonitorView.jsx'),
   search: () => import('../features/search/SearchView.jsx'),
   teamRelay: () => import('../features/team-relay/TeamRelayView.jsx'),
+  accountPlatformPopover: () => import('../features/account-platform/AccountPlatformPopover.jsx'),
   searchOverlay: () => import('../features/search/SearchOverlay.jsx'),
   moveToProjectDialog: () => import('../features/projects/MoveToProjectDialog.jsx'),
   rebindFolderDialog: () => import('../features/projects/RebindFolderDialog.jsx'),

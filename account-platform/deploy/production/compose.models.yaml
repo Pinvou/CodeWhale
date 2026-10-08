@@ -66,6 +66,7 @@ services:
   billing-service:
     environment:
       BILLING_ADMIN_MODEL_PRICE_PROJECTION_ENABLED: "true"
+      TOKEN_HOLD_EXPIRY_URL: ${TOKEN_HOLD_EXPIRY_URL:?set verified HTTPS Token internal endpoint for expiry recovery}
   token-portal:
     environment:
       TOKEN_GATEWAY_HTTP_URL: http://token-gateway:8080

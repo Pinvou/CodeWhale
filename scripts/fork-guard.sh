@@ -28,7 +28,7 @@ fail=0
 bold "── 第 0 层：v0.9.12 clean re-fork 拓扑（r1 tag 之后 36 个登记提交，A04 本地补丁尚未推送）──"
 actual_head="$(git -C "$CODEWHALE" rev-parse HEAD 2>/dev/null || true)"
 if [[ "$actual_head" == "$EXPECTED_HEAD" ]]; then
-  green "  ✓ CodeWhale gitlink 指向登记 head ${EXPECTED_HEAD}（本地已审补丁；公开维护头仍为 44921cf02）"
+  green "  ✓ CodeWhale gitlink 指向登记 head ${EXPECTED_HEAD}（本地登记匹配；CI 另核公开维护历史）"
 else
   red "  ✗ CodeWhale HEAD 为 ${actual_head:-<unreadable>}，登记 head 为 $EXPECTED_HEAD"
   fail=1

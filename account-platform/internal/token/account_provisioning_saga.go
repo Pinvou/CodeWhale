@@ -655,7 +655,12 @@ func (s *Service) recheckRecoveryOperator(ctx context.Context, operator tokenAcc
 }
 
 func (s *Service) adminTokenCommandByIdempotencyKey(w http.ResponseWriter, r *http.Request) {
-	if isRouteGovernedCommand(r.URL.Query().Get("command_type")) || r.URL.Query().Get("command_type") == "TOKEN_USAGE_RECONCILIATION_RETRY" {
+	w.Header().Set("Cache-Control", "no-store")
+	commandType := r.URL.Query().Get("command_type")
+	// Only commands using the installed command transport produce these receipts.
+	// Reuse its current authorization and actor/type/key-scoped read path; a
+	// recovery lookup never repeats a provider call or requires a new precheck.
+	if handler, installed := tokenGovernanceHandlers[commandType]; installed && handler.transport == "COMMAND" && commandType != "TOKEN_ACCOUNT_CREATE" {
 		s.adminRouteCommandByIdempotencyKey(w, r)
 		return
 	}
@@ -673,7 +678,11 @@ func (s *Service) adminTokenCommandByIdempotencyKey(w http.ResponseWriter, r *ht
 		return
 	}
 	d := sha256.Sum256([]byte(key))
-	repository, _ := s.repository.(*PostgresRepository)
+	repository, available := s.repository.(*PostgresRepository)
+	if !available || repository == nil {
+		api.WriteError(w, http.StatusServiceUnavailable, "COMMAND_RESULT_UNAVAILABLE", "command result is unavailable", httpserver.RequestID(r.Context()))
+		return
+	}
 	item, err := repository.tokenCommandByScopedKey(r.Context(), actor, "TOKEN_ACCOUNT_CREATE", hex.EncodeToString(d[:]))
 	if errors.Is(err, ErrNotFound) {
 		api.WriteError(w, http.StatusNotFound, "NOT_FOUND", "the command result was not found", httpserver.RequestID(r.Context()))
@@ -683,6 +692,7 @@ func (s *Service) adminTokenCommandByIdempotencyKey(w http.ResponseWriter, r *ht
 		api.WriteError(w, http.StatusServiceUnavailable, "COMMAND_RESULT_UNAVAILABLE", "command result is unavailable", httpserver.RequestID(r.Context()))
 		return
 	}
+	w.Header().Set("Cache-Control", "no-store")
 	api.WriteJSON(w, http.StatusOK, item)
 }
 func (r *PostgresRepository) tokenCommandByScopedKey(ctx context.Context, actor uuid.UUID, commandType, keyDigest string) (TokenCommandResult, error) {

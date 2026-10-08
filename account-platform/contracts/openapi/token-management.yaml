@@ -219,16 +219,27 @@
               "type": "string",
               "enum": [
                 "TOKEN_ACCOUNT_CREATE",
+                "TOKEN_ACCOUNT_STATUS_CHANGE",
+                "TOKEN_PROTOCOL_DRAFT_CREATE",
+                "TOKEN_PROTOCOL_PUBLISH",
+                "TOKEN_FORMULA_DRAFT_CREATE",
+                "TOKEN_FORMULA_PUBLISH",
+                "TOKEN_MODEL_DRAFT_SAVE",
+                "TOKEN_MODEL_PUBLISH",
+                "TOKEN_MODEL_CATALOG_SYNC",
                 "TOKEN_ROUTE_UPSERT",
-                "TOKEN_ROUTE_DELETE"
+                "TOKEN_ROUTE_DELETE",
+                "TOKEN_CREDENTIAL_VALIDATE",
+                "TOKEN_ROUTE_PROVISIONING_REPAIR",
+                "TOKEN_USAGE_RECONCILIATION_RETRY"
               ]
             },
-            "description": "Current supported immutable key lookup command; this endpoint does not enumerate all management commands."
+            "description": "Currently registered COMMAND transport only; APPROVED and ISOLATED commands are excluded. Lookup is read-only and scoped to current permissions, actor, command type and the original stable key."
           }
         ],
         "responses": {
           "200": {
-            "description": "Current JSON response; authorization, concurrency and governance failures are not success.",
+            "description": "Actor-scoped immutable command receipt, including pending or unknown status. Cache-Control: no-store; lookup does not execute the command or contact its provider.",
             "content": {
               "application/json": {
                 "schema": {
@@ -498,6 +509,7 @@
       "get": {
         "operationId": "get__admin_v1_models",
         "summary": "adminCatalogModels",
+        "description": "Source availability is independent of lifecycle. Missing source disables resolution without automatically deprecating the model or changing cutoff times; lifecycle changes require the existing approved plan.",
         "x-go-handler": "adminCatalogModels",
         "x-authority": {
           "kind": "bearer",
@@ -540,6 +552,7 @@
       "get": {
         "operationId": "get__admin_v1_models__model_id_",
         "summary": "adminModelDetail",
+        "description": "Source recovery does not undo an approved lifecycle change. Source availability and lifecycle are reported independently.",
         "x-go-handler": "adminModelDetail",
         "x-authority": {
           "kind": "bearer",
@@ -3863,6 +3876,59 @@
         },
         "x-governance-gates": []
       }
+    },
+    "/internal/v1/holds/expiry-proof": {
+      "post": {
+        "operationId": "post_internal_v1_holds_expiry_proof",
+        "summary": "expiredHoldProof",
+        "description": "Billing workload only. Locks the real usage dispatch fence, verifies canonical reservation identity, persists cancellation, then uses the existing release/confirmation workflow. Only a locally confirmed cancellation returns success. Timeouts or unknown results require manual review; Billing rereads its own RELEASED hold before completing recovery.",
+        "x-go-handler": "expiredHoldProof",
+        "x-authority": {
+          "kind": "workload",
+          "all": [
+            "internal.token.hold-expiry.prove"
+          ]
+        },
+        "x-governance-gates": [],
+        "security": [
+          {
+            "WorkloadBearer": []
+          }
+        ],
+        "parameters": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExpiredHoldIdentity"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Durable cancellation and local confirmation receipt; receiver also verifies service=billing-service.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExpiredHoldReceipt"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "No proof of safe release; stable error envelope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -5489,6 +5555,85 @@
           }
         },
         "additionalProperties": false
+      },
+      "ExpiredHoldIdentity": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "usage_request_id",
+          "hold_id",
+          "wallet_id",
+          "max_microcredits",
+          "expires_at"
+        ],
+        "properties": {
+          "usage_request_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "hold_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "wallet_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "max_microcredits": {
+            "type": "string",
+            "pattern": "^[0-9]+$",
+            "description": "Exact nonnegative int64 microcredits encoded as a decimal string."
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "ExpiredHoldReceipt": {
+        "type": "object",
+        "required": [
+          "usage_request_id",
+          "hold_id",
+          "wallet_id",
+          "max_microcredits",
+          "expires_at",
+          "proof_id",
+          "status"
+        ],
+        "properties": {
+          "usage_request_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "hold_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "wallet_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "max_microcredits": {
+            "type": "string",
+            "pattern": "^[0-9]+$",
+            "description": "Exact nonnegative int64 microcredits encoded as a decimal string."
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "proof_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "LOCAL_CONFIRMED"
+            ]
+          }
+        }
       }
     }
   },

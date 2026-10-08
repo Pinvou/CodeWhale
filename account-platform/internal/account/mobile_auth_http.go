@@ -24,7 +24,8 @@ func (s *Service) precheckMobileRegistration(w http.ResponseWriter, r *http.Requ
 		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid mobile registration precheck request", httpserver.RequestID(r.Context()))
 		return
 	}
-	username, err := s.mobileAuth.PrecheckRegistration(r.Context(), body.Username, body.Mobile, body.PasswordHandle, body.PasswordPolicyVersion)
+	ctx := withAuthRisk(r.Context(), requestSource(r), r.Header.Get("X-Device-ID"))
+	username, err := s.mobileAuth.PrecheckRegistration(ctx, body.Username, body.Mobile, body.PasswordHandle, body.PasswordPolicyVersion)
 	if err != nil {
 		s.writeMobileAuthError(w, r, err)
 		return
@@ -41,7 +42,8 @@ func (s *Service) createSliderCaptcha(w http.ResponseWriter, r *http.Request) {
 		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid slider verification request", httpserver.RequestID(r.Context()))
 		return
 	}
-	challenge, err := s.mobileAuth.CreateSliderCaptcha(r.Context(), body.Mobile, SMSPurpose(strings.ToUpper(string(body.Purpose))))
+	ctx := withAuthRisk(r.Context(), requestSource(r), r.Header.Get("X-Device-ID"))
+	challenge, err := s.mobileAuth.CreateSliderCaptcha(ctx, body.Mobile, SMSPurpose(strings.ToUpper(string(body.Purpose))))
 	if err != nil {
 		s.writeMobileAuthError(w, r, err)
 		return

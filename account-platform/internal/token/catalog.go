@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sort"
 	"strconv"
 	"strings"
@@ -844,12 +845,8 @@ func (r *PostgresRepository) syncCatalogTx(ctx context.Context, tx pgx.Tx, provi
 				missingSince = &value
 			}
 			mutation := mutationFromCatalog(item, false, missingSince, confirmations)
-			if confirmations >= 2 && item.LifecycleStatus == "PUBLISHED" {
-				mutation.lifecycle = "DEPRECATED"
-				mutation.deprecationEffectiveAt = &now
-				mutation.newSessionCutoffAt = &now
-				mutation.continuationCutoffAt = &now
-			}
+			// Adapter absence is an observation, not lifecycle approval. Keep the
+			// source unavailable without changing approved lifecycle or cutoffs.
 			mutations = append(mutations, mutation)
 		}
 		if err := rows.Err(); err != nil {
@@ -880,8 +877,8 @@ func (r *PostgresRepository) syncCatalogTx(ctx context.Context, tx pgx.Tx, provi
 			return 0, false, err
 		}
 		action := "MODEL_SOURCE_SYNCHRONIZED"
-		if mutation.lifecycle == "DEPRECATED" {
-			action = "MODEL_SOURCE_MISSING_DEPRECATED"
+		if !mutation.sourceAvailable {
+			action = "MODEL_SOURCE_MISSING_OBSERVED"
 		}
 		if err := appendCatalogAudit(ctx, tx, actor, action, &mutation.modelID, nil, &mutation.lifecycle, version, "adapter catalog synchronization", map[string]any{"source_available": mutation.sourceAvailable, "missing_confirmations": mutation.missingConfirmations}); err != nil {
 			return 0, false, err
@@ -1113,8 +1110,24 @@ func (s *CatalogSynchronizer) Run(ctx context.Context) {
 			return
 		case <-ticker.C:
 			timeout, cancel := context.WithTimeout(ctx, 30*time.Second)
-			_, _, _ = s.Sync(timeout)
+			_ = s.runOnce(timeout)
 			cancel()
 		}
 	}
+}
+
+// Retry on the next bounded cycle without serializing provider diagnostics or
+// credentials. Catalog lifecycle decisions are independent of this diagnostic.
+func (s *CatalogSynchronizer) runOnce(ctx context.Context) error {
+	_, _, err := s.Sync(ctx)
+	if err != nil && !errors.Is(err, context.Canceled) {
+		code := "CATALOG_SYNC_FAILED"
+		if errors.Is(err, context.DeadlineExceeded) {
+			code = "CATALOG_SYNC_TIMEOUT"
+		} else if errors.Is(err, ErrCatalogVersionConflict) {
+			code = "CATALOG_SYNC_VERSION_CONFLICT"
+		}
+		slog.ErrorContext(ctx, "model catalog synchronization failed", "error_code", code, "component", "model-catalog-sync", "stage", "retry_pending")
+	}
+	return err
 }

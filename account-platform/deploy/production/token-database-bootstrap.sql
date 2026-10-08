@@ -33,6 +33,10 @@ BEGIN
     END IF;
 END $$;
 
+-- The independent owner can transfer runtime-owned objects. Authority is
+-- deliberately one-way: runtime never inherits or SETs either trusted owner.
+GRANT token_gateway TO token_schema_owner WITH INHERIT TRUE,SET TRUE;
+
 -- The release migrator must observe cross-session quiescence during the
 -- offline governance switch. This does not grant runtime database CREATE.
 GRANT pg_read_all_stats TO token_migrator;

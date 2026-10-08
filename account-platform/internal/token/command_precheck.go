@@ -1001,6 +1001,12 @@ func tokenCommandExpectedVersionsMatch(actual json.RawMessage, expected json.Raw
 	}
 	delete(got, "precheck_fingerprint")
 	delete(got, "request_fingerprint")
+	// Compare financial/version facts independently of transport proof metadata.
+	// The caller separately compares the authoritative top-level precheck hash,
+	// which binds the canonical request and complete server snapshot. Credential
+	// prechecks include proof metadata in both snapshots.
+	delete(want, "precheck_fingerprint")
+	delete(want, "request_fingerprint")
 	return commandJSONValuesEqual(got, want)
 }
 

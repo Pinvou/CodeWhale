@@ -32,6 +32,11 @@ type Migration struct {
 // complete transaction back before the ledger can advance. Both hooks start as
 // the original migration role; elevated hooks must select authority explicitly.
 type UpHooks struct {
+	// ApplySQL may execute a checksum-pinned compatibility representation without
+	// changing the immutable source or the checksum recorded in the ledger.
+	ApplySQL func(context.Context, pgx.Tx, Migration) error
+	// LedgerRole separates migration history writes from runtime DML authority.
+	LedgerRole  string
 	BeforeApply func(context.Context, pgx.Tx, Migration) error
 	AfterApply  func(context.Context, pgx.Tx, Migration) error
 }
@@ -129,7 +134,11 @@ func UpWithHooks(ctx context.Context, connection *pgx.Conn, migrations []Migrati
 			err = setMigrationRole(ctx, tx, role)
 		}
 		if err == nil {
-			_, err = tx.Exec(ctx, migration.UpSQL)
+			if hooks.ApplySQL != nil {
+				err = hooks.ApplySQL(ctx, tx, migration)
+			} else {
+				_, err = tx.Exec(ctx, migration.UpSQL)
+			}
 		}
 		// Migration SQL may legitimately end under a trusted owner. Hooks are
 		// always entered as the original ledger/migration role; a hook that needs
@@ -144,11 +153,17 @@ func UpWithHooks(ctx context.Context, connection *pgx.Conn, migrations []Migrati
 		if err == nil {
 			err = setMigrationRole(ctx, tx, role)
 		}
+		if err == nil && hooks.LedgerRole != "" {
+			err = setMigrationRole(ctx, tx, hooks.LedgerRole)
+		}
 		if err == nil {
 			_, err = tx.Exec(ctx,
 				`INSERT INTO schema_migrations(version, name, checksum) VALUES ($1, $2, $3)`,
 				migration.Version, migration.Name, migration.Checksum,
 			)
+		}
+		if err == nil && hooks.LedgerRole != "" {
+			err = setMigrationRole(ctx, tx, role)
 		}
 		if err != nil {
 			_ = tx.Rollback(ctx)

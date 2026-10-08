@@ -11,6 +11,7 @@
 - 升级前公开回退点是不可变 tag `pinvou-v0.9.5-r13`，head `f853f8f1566c57e6be40d5439a222a932aa79ef5`；同 SHA 的本地 branch `backup/pre-v0.9.12-sync` 只作便利引用。
 - r1 已成为可消费的受保护基线；rN 收口时父仓 gitlink、维护分支和不可变 tag 指向同一 commit。
 - 过渡期豁免（2026-09-11 起）：两次 rN 收口之间，父仓 gitlink 可沿 `pinvou3-clean` 领先不可变 tag 前进；期间 `scripts/verify-public-submodule.sh` 断言 gitlink 等于公开维护分支头、不可变 tag 仍钉在其收口 commit，rN 收口时在合并头切新不可变 tag 并恢复三方相等。
+- 持续 PR 审核的 CI 使用 `--registered-snapshot`：过渡期允许维护分支在已审核 pin 之后继续前进，但父仓 gitlink 必须精确匹配本树 `fork-guard.sh` 的登记 head，并通过无凭证独立临时仓库证明固定 tag 是 pin 的祖先、pin 位于公开维护分支历史。仅公开可 fetch 的未合入候选、错误登记、移动 tag、分叉或不能证明的历史均拒绝；不自动升级 gitlink。默认不带参数的发布校验仍要求实时维护头一致，rN 闭合状态在任何模式下都要求三方相等。该历史证明不代替服务器分支保护配置的核验。
 - `.gitmodules` 不配置浮动 `branch`；发布后父仓 gitlink、维护分支和不可变标签必须指向同一 commit。
 - 当前维护 4 个长期主题、3 个追加减量主题与 1 个已合入维护分支的主题：
 

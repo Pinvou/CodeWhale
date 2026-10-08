@@ -1,5 +1,10 @@
 [
   {
+    "subject": "__BILLING_WORKLOAD_SUBJECT__",
+    "service": "billing-service",
+    "permissions": ["internal.token.hold-expiry.prove"]
+  },
+  {
     "subject": "__ACCOUNT_WORKLOAD_SUBJECT__",
     "service": "account-service",
     "permissions": [

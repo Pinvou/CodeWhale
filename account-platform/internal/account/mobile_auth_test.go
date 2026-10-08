@@ -81,26 +81,33 @@ func TestNormalizeRegistrationUsername(t *testing.T) {
 }
 
 type mobileAuthRepositoryFake struct {
-	deliveryMu         sync.Mutex
-	deliveryDone       chan struct{}
-	deliveryOnce       sync.Once
-	mobileExists       bool
-	securityAllowed    bool
-	securityErr        error
-	identitySubject    string
-	identityErr        error
-	usernameExists     bool
-	challenge          SMSChallenge
-	challengeSent      bool
-	challengeFailed    bool
-	readyErr           error
-	consumeVerified    bool
-	registeredUsername string
-	registeredMobile   string
-	captchaConsumed    bool
-	sliderChallenge    SliderCaptcha
-	captchaErr         error
-	operation          RegistrationOperation
+	publicAdmissionErr    error
+	publicAdmissionSource string
+	deliveryMu            sync.Mutex
+	deliveryDone          chan struct{}
+	deliveryOnce          sync.Once
+	mobileExists          bool
+	securityAllowed       bool
+	securityErr           error
+	identitySubject       string
+	identityErr           error
+	usernameExists        bool
+	challenge             SMSChallenge
+	challengeSent         bool
+	challengeFailed       bool
+	readyErr              error
+	consumeVerified       bool
+	registeredUsername    string
+	registeredMobile      string
+	captchaConsumed       bool
+	sliderChallenge       SliderCaptcha
+	captchaErr            error
+	operation             RegistrationOperation
+}
+
+func (f *mobileAuthRepositoryFake) AdmitPublicMobileRequest(_ context.Context, _, _, source string) error {
+	f.publicAdmissionSource = source
+	return f.publicAdmissionErr
 }
 
 func (f *mobileAuthRepositoryFake) MobileExists(context.Context, string) (bool, error) {

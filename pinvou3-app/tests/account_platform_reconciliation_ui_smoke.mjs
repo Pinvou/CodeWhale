@@ -24,12 +24,35 @@ try {
   const selectCase = async () => { await click('cases'); await page.waitForFunction(() => document.querySelector('tbody')?.textContent.includes('controlled-merchant')); await page.evaluate(() => document.querySelector('tbody button').click()); await page.waitForSelector('details'); };
   const caseRun = async (name, action) => { await action(); assert.deepEqual(errors, []); passed++; console.log(`PASS ${name}`); };
   for (const language of ['zh', 'en', 'ja']) {
+    await caseRun(`${language}: missing supplier occurrence dates remain explicit manual review cases`, async () => {
+      await fresh(language); await page.evaluate(() => { window.f03.caseType = 'REFUND_DATE_UNVERIFIED'; }); await selectCase();
+      assert.ok(await page.evaluate(() => document.querySelector('tbody').textContent.includes(window.f03.copy().caseTypes.REFUND_DATE_UNVERIFIED) && document.querySelector('section section h3').textContent.includes(window.f03.copy().caseTypes.REFUND_DATE_UNVERIFIED)));
+      await fresh(language); await page.evaluate(() => { window.f03.caseType = 'CHARGEBACK_DATE_UNVERIFIED'; }); await selectCase();
+      assert.ok(await page.evaluate(() => document.querySelector('tbody').textContent.includes(window.f03.copy().caseTypes.CHARGEBACK_DATE_UNVERIFIED)));
+    });
+    await caseRun(`${language}: financial read errors keep permission and input attribution`, async () => {
+      await fresh(language);
+      for (const [status, key] of [[403, 'permission'], [400, 'sourceChanged']]) {
+        await page.evaluate(status => { window.f03.readStatus = status; }, status);
+        await click('refresh'); await page.waitForSelector('[role=alert]');
+        assert.equal(await page.$eval('[role=alert]', el => el.textContent), await page.evaluate(key => window.f03.copy()[key], key));
+      }
+    });
     await caseRun(`${language}: read-only differences retain exact financial facts`, async () => {
       await fresh(language); await page.evaluate(() => { window.f03.readonly = true; window.f03.switchIdentity(); }); await page.waitForSelector('tbody tr'); await selectCase();
       assert.ok(await page.evaluate(() => document.querySelector('details').textContent.includes('9007199254740993')));
       assert.equal(await page.evaluate(() => [...document.querySelectorAll('button')].some(value => [window.f03.copy().submit, window.f03.copy().run, window.f03.copy().import].includes(value.textContent))), false);
     });
   }
+  await caseRun('Changing filters retires the old cursor and RUNNING null completion remains visible', async () => {
+    await fresh('en'); await page.evaluate(() => { window.f03.paginated = true; window.f03.running = true; }); await click('refresh');
+    await page.waitForFunction(() => document.querySelector('tbody')?.textContent.includes('RUNNING')); await click('next');
+    await page.waitForFunction(() => window.f03.calls.some(call => call.url.includes('cursor=controlled-page-2')));
+    await page.waitForFunction(() => [...document.querySelectorAll('button')].every(button => button.textContent !== window.f03.copy().refresh || !button.disabled));
+    await page.select('select', 'ALIPAY');
+    await page.waitForFunction(() => window.f03.calls.some(call => call.url.includes('channel=ALIPAY')));
+    assert.ok(await page.evaluate(() => window.f03.calls.filter(call => call.url.includes('channel=ALIPAY')).every(call => !call.url.includes('controlled-page-2'))));
+  });
   for (const language of ['zh', 'en', 'ja']) {
     await caseRun(`${language}: daily runs use half-open dates and manual unknown results require reading batches`, async () => {
       await fresh(language);

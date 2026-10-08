@@ -71,6 +71,10 @@ func adminSubject(r *http.Request) uuid.UUID {
 }
 
 func writeAdminQueryError(w http.ResponseWriter, r *http.Request, err error) {
+	if errors.Is(err, ErrNotFound) {
+		api.WriteError(w, http.StatusNotFound, "TOKEN_NOT_FOUND", "the token resource was not found", httpserver.RequestID(r.Context()))
+		return
+	}
 	var rateError adminQueryRateLimitError
 	if errors.As(err, &rateError) {
 		w.Header().Set("Retry-After", strconv.Itoa(rateError.RetryAfter))

@@ -41,6 +41,24 @@ try {
   await caseRun('SMS unknown ACK keeps the original key and body across language change', async () => { await fresh('admin'); await clickText(await page.evaluate(() => globalThis.f01.copy().admin.settings.title)); await page.waitForSelector('textarea'); await page.type('textarea', 'controlled correction reason'); await page.evaluate(() => { globalThis.f01.smsFail = true; }); await page.click('button[type=submit]'); await page.waitForFunction(() => globalThis.f01.smsCalls.length === 1); await page.waitForSelector('[role=alert]'); await page.select('.adm-shell > header select', 'ja'); await page.evaluate(() => { globalThis.f01.smsFail = false; }); await page.click('button[type=submit]'); await page.waitForFunction(() => globalThis.f01.smsCalls.length === 2); assert(await page.evaluate(() => globalThis.f01.smsCalls[0].key === globalThis.f01.smsCalls[1].key && JSON.stringify(globalThis.f01.smsCalls[0].command) === JSON.stringify(globalThis.f01.smsCalls[1].command)), 'lost ACK changed immutable facts'); await waitText(await page.evaluate(() => globalThis.f01.copy().admin.settings.sms.saved)); });
   await caseRun('all three languages display real personal labels', async () => { await fresh(); for (const language of ['ja', 'zh', 'en']) { await page.select('header select', language); await waitText(await page.evaluate(() => globalThis.f01.copy().account.profileSettings)); } });
   const desktopGuest = async () => { await fresh(); await page.evaluate(() => { globalThis.f01.authenticated = false; globalThis.f01.render('desktop'); }); await page.waitForSelector('.ap-login input[autocomplete=username]'); };
+  await caseRun('desktop rejected password displays its localized reason without provider text', async () => {
+    await desktopGuest();
+    await page.evaluate(() => { globalThis.f01.loginError = 'oidc_credentials_invalid: SYNTHETIC_PROVIDER_DETAIL'; });
+    await page.type('input[autocomplete=username]', 'controluser'); await page.type('input[type=password]', 'ControlPassword9');
+    await page.click('form button:not([type=button])');
+    await waitText(await page.evaluate(() => globalThis.f01.copy().account.errors.oidc_credentials_invalid));
+    assert(await page.evaluate(() => !document.body.textContent.includes('SYNTHETIC_PROVIDER_DETAIL')), 'provider detail was exposed');
+  });
+  await caseRun('desktop SMS rate limit displays localized error and disables sending during cooldown', async () => {
+    await desktopGuest();
+    await clickText(await page.evaluate(() => globalThis.f01.copy().account.authModes.sms));
+    await page.type('input[autocomplete=tel-national]', '13800000000');
+    await page.evaluate(() => { globalThis.f01.smsError = 'mobile_auth_failed: SMS_RATE_LIMITED:120'; });
+    await clickText(await page.evaluate(() => globalThis.f01.copy().account.sendCode)); await page.waitForSelector('[role=dialog]');
+    await clickText(await page.evaluate(() => globalThis.f01.copy().account.captchaConfirm));
+    await waitText(await page.evaluate(() => globalThis.f01.copy().account.smsRateLimited));
+    assert(await page.evaluate(() => [...document.querySelectorAll('.ap-login button')].some(button => button.disabled && /1\d\d/.test(button.textContent))), 'SMS rate limit did not disable its resend button');
+  });
   const fillRegistration = async () => {
     await clickText(await page.evaluate(() => globalThis.f01.copy().account.register));
     await page.type('input[autocomplete=username]', 'controluser'); await page.type('input[autocomplete=tel-national]', '13800000000');

@@ -1,5 +1,3 @@
-import { localizedProductDisplayName } from './localized-product-display-name.js';
-
 function timestamp(value) {
   const parsed = new Date(value || '').getTime();
   return Number.isFinite(parsed) ? parsed : 0;
@@ -18,21 +16,8 @@ export function isPayablePaymentOrder(item, now = Date.now()) {
   return ['CREATED', 'PENDING'].includes(item?.status) && item?.close_status === 'OPEN' && timestamp(item?.expires_at) > now;
 }
 
-export function payablePaymentOrders(orders = [], now = Date.now()) {
-  return orders
-    .filter((item) => isPayablePaymentOrder(item, now))
-    .sort((left, right) => timestamp(right?.created_at) - timestamp(left?.created_at) || String(right?.order_id || '').localeCompare(String(left?.order_id || '')));
-}
-
 export function paymentOrderRemainingSeconds(item, now = Date.now()) {
   return Math.max(0, Math.ceil((timestamp(item?.expires_at) - now) / 1000));
-}
-
-/** @param {unknown} channels */
-export function hasSelectablePaymentChannels(channels = []) {
-  if (!Array.isArray(channels)) return false;
-  const uniqueChannels = new Set(channels.map((channel) => String(channel || '').trim().toUpperCase()).filter(Boolean));
-  return uniqueChannels.size > 1;
 }
 
 /**
@@ -75,13 +60,4 @@ export function orderDurationDays(item) {
   const validUntil = timestamp(item?.valid_until);
   if (!creditedAt || !validUntil || validUntil <= creditedAt) return null;
   return Math.max(1, Math.round((validUntil - creditedAt) / 86_400_000));
-}
-
-export function compactOrderID(value) {
-  const text = String(value || '');
-  return text.length > 14 ? `${text.slice(0, 8)}…` : text || '—';
-}
-
-export function paymentOrderDisplayName(item, language) {
-  return localizedProductDisplayName(item, language, 'product_id');
 }

@@ -1,0 +1,118 @@
+# Replace every __MARKER__ with separately reviewed public deployment facts.
+# Secret values stay in pre-provisioned Secrets; this file contains only refs.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: newapi
+  namespace: __NAMESPACE__
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {pinvou.io/newapi-data-plane: "true"}
+  template:
+    metadata:
+      labels: {pinvou.io/newapi-data-plane: "true"}
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: new-api
+          image: calciumion/new-api:v1.0.0-rc.11@sha256:bd30213d808857bb569ef47d3c9209d061a66ea089c2472ef46ce51e75517f19
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
+          env:
+            - {name: PORT, value: "8080"}
+            - {name: TZ, value: Asia/Shanghai}
+            - {name: GIN_MODE, value: release}
+            - {name: NODE_TYPE, value: master}
+            - {name: TRUSTED_PROXIES, value: none}
+            - {name: BATCH_UPDATE_ENABLED, value: "true"}
+            - {name: ERROR_LOG_ENABLED, value: "true"}
+            - {name: STREAMING_TIMEOUT, value: "300"}
+            - name: SQL_DSN
+              valueFrom: {secretKeyRef: {name: __NEWAPI_RUNTIME_SECRET__, key: SQL_DSN}}
+            - name: REDIS_CONN_STRING
+              valueFrom: {secretKeyRef: {name: __NEWAPI_RUNTIME_SECRET__, key: REDIS_CONN_STRING}}
+            - name: SESSION_SECRET
+              valueFrom: {secretKeyRef: {name: __NEWAPI_RUNTIME_SECRET__, key: SESSION_SECRET}}
+            - name: CRYPTO_SECRET
+              valueFrom: {secretKeyRef: {name: __NEWAPI_RUNTIME_SECRET__, key: CRYPTO_SECRET}}
+          volumeMounts:
+            - {name: data, mountPath: /data}
+            - {name: tmp, mountPath: /tmp}
+          readinessProbe:
+            httpGet: {path: /api/status, port: 8080, scheme: HTTP}
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: {path: /api/status, port: 8080, scheme: HTTP}
+            initialDelaySeconds: 5
+            periodSeconds: 10
+        - name: newapi-tls
+          image: "__NEWAPI_TLS_IMAGE_AT_DIGEST__"
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
+          ports: [{name: https, containerPort: 8443}]
+          env:
+            - {name: NEWAPI_TLS_CERT_FILE, value: /run/pinvou/newapi-tls/server.crt}
+            - {name: NEWAPI_TLS_KEY_FILE, value: /run/pinvou/newapi-tls/server.key}
+          volumeMounts:
+            - {name: newapi-tls, mountPath: /run/pinvou/newapi-tls, readOnly: true}
+          readinessProbe:
+            httpGet: {path: /health/ready, port: https, scheme: HTTPS}
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: {path: /health/live, port: https, scheme: HTTPS}
+            initialDelaySeconds: 5
+            periodSeconds: 10
+      volumes:
+        - name: newapi-tls
+          secret:
+            secretName: __NEWAPI_TLS_SECRET__
+            defaultMode: 288
+            items:
+              - {key: server.crt, path: server.crt}
+              - {key: server.key, path: server.key}
+        - {name: data, emptyDir: {sizeLimit: 256Mi}}
+        - {name: tmp, emptyDir: {sizeLimit: 16Mi}}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: newapi, namespace: __NAMESPACE__}
+spec:
+  type: ClusterIP
+  selector: {pinvou.io/newapi-data-plane: "true"}
+  ports: [{name: https, port: 8443, targetPort: https, protocol: TCP}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: newapi-data-plane, namespace: __NAMESPACE__}
+spec:
+  podSelector: {matchLabels: {pinvou.io/newapi-data-plane: "true"}}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - {ipBlock: {cidr: "__TOKEN_GATEWAY_CIDR__"}}
+        - {ipBlock: {cidr: "__CREDENTIAL_PORTAL_CIDR__"}}
+      ports: [{protocol: TCP, port: 8443}]
+  egress:
+    - to:
+        - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: kube-system}}
+          podSelector: {matchLabels: {k8s-app: kube-dns}}
+      ports: [{protocol: UDP, port: 53}, {protocol: TCP, port: 53}]
+    - to: [{ipBlock: {cidr: "__POSTGRES_CIDR__"}}]
+      ports: [{protocol: TCP, port: 5432}]
+    - to: [{ipBlock: {cidr: "__NEWAPI_REDIS_CIDR__"}}]
+      ports: [{protocol: TCP, port: 6379}]
+    - to: [{ipBlock: {cidr: "__MODEL_PROVIDER_CIDR__"}}]
+      ports: [{protocol: TCP, port: 443}]

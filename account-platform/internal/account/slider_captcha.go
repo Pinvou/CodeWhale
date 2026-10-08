@@ -45,6 +45,9 @@ type SliderCaptchaResponse struct {
 }
 
 func (s *MobileAuthService) CreateSliderCaptcha(ctx context.Context, rawMobile string, purpose SMSPurpose) (SliderCaptchaResponse, error) {
+	if err := s.repository.AdmitPublicMobileRequest(ctx, "CAPTCHA", rawMobile, authRiskFromContext(ctx).source); err != nil {
+		return SliderCaptchaResponse{}, err
+	}
 	mobile, err := NormalizeMainlandMobile(rawMobile)
 	if err != nil || purpose != SMSPurposeRegister && purpose != SMSPurposeLogin && purpose != SMSPurposeProfileMobile && purpose != SMSPurposePasswordReset {
 		return SliderCaptchaResponse{}, ErrMobileInvalid
@@ -161,16 +164,19 @@ func secureRandomInt(minimum, maximum int) (int, error) {
 
 func renderSliderCaptcha(targetX, pieceY int) ([]byte, []byte, error) {
 	background := image.NewRGBA(image.Rect(0, 0, sliderCaptchaWidth, sliderCaptchaHeight))
-	seed, err := secureRandomInt(0, 255)
-	if err != nil {
+	// Per-pixel random texture avoids a coordinate-encoded gradient. Hole and
+	// piece rendering use independent bytes, never a reversible colour mapping.
+	texture := make([]byte, sliderCaptchaWidth*sliderCaptchaHeight*3)
+	if _, err := rand.Read(texture); err != nil {
 		return nil, nil, err
 	}
 	for y := 0; y < sliderCaptchaHeight; y++ {
 		for x := 0; x < sliderCaptchaWidth; x++ {
+			index := (y*sliderCaptchaWidth + x) * 3
 			background.SetRGBA(x, y, color.RGBA{
-				R: uint8(42 + (x+seed)%92),
-				G: uint8(105 + (y*2+seed)%105),
-				B: uint8(128 + (x+y+seed)%92),
+				R: 60 + texture[index]%100,
+				G: 100 + texture[index+1]%100,
+				B: 110 + texture[index+2]%100,
 				A: 255,
 			})
 		}
@@ -189,17 +195,22 @@ func renderSliderCaptcha(targetX, pieceY int) ([]byte, []byte, error) {
 		paintCircle(background, centerX, centerY, radius, uint8(tint))
 	}
 	piece := image.NewRGBA(image.Rect(0, 0, sliderCaptchaPieceSize, sliderCaptchaPieceSize))
+	noise := make([]byte, sliderCaptchaPieceSize*sliderCaptchaPieceSize*6)
+	if _, err := rand.Read(noise); err != nil {
+		return nil, nil, err
+	}
 	for y := 0; y < sliderCaptchaPieceSize; y++ {
 		for x := 0; x < sliderCaptchaPieceSize; x++ {
 			if !sliderPieceMask(x, y) {
 				continue
 			}
 			original := background.RGBAAt(targetX+x, pieceY+y)
-			piece.SetRGBA(x, y, original)
+			index := (y*sliderCaptchaPieceSize + x) * 6
+			piece.SetRGBA(x, y, color.RGBA{R: captchaTint(original.R, noise[index]), G: captchaTint(original.G, noise[index+1]), B: captchaTint(original.B, noise[index+2]), A: 255})
 			background.SetRGBA(targetX+x, pieceY+y, color.RGBA{
-				R: uint8(int(original.R) / 3),
-				G: uint8(int(original.G) / 3),
-				B: uint8(int(original.B) / 3),
+				R: 25 + noise[index+3]%30,
+				G: 30 + noise[index+4]%30,
+				B: 35 + noise[index+5]%30,
 				A: 255,
 			})
 		}
@@ -212,6 +223,10 @@ func renderSliderCaptcha(targetX, pieceY int) ([]byte, []byte, error) {
 		return nil, nil, fmt.Errorf("encode captcha piece: %w", err)
 	}
 	return backgroundBuffer.Bytes(), pieceBuffer.Bytes(), nil
+}
+
+func captchaTint(value, noise uint8) uint8 {
+	return uint8(min(255, max(0, int(value)-5+int(noise%11))))
 }
 
 func sliderPieceMask(x, y int) bool {

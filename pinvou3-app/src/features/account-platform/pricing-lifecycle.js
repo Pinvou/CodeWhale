@@ -121,57 +121,6 @@ export function buildPriceDraftInput(form, formula, currentSpaceETag = 1) {
   };
 }
 
-function comparableUnits(units = []) {
-  return [...units].map((unit) => ({
-    unit_definition_id: unit.unit_definition_id,
-    config_type: unit.config_type,
-    fixed_price_per_denominator: unit.fixed_price_per_denominator == null ? null : integerMoney(unit.fixed_price_per_denominator).toString(),
-  })).sort((left, right) => left.unit_definition_id.localeCompare(right.unit_definition_id));
-}
-
-export function priceDraftMatchesInput(item, input) {
-  if (!item || !input) return false;
-  return item.lifecycle_status === 'DRAFT'
-    && item.scope_type === input.scope_type
-    && String(item.scope_id || '') === String(input.scope_id || '')
-    && item.protocol_code === input.protocol_code
-    && item.formula_version_id === input.formula_version_id
-    && item.credit_unit === input.credit_unit
-    && new Date(item.effective_from).getTime() === new Date(input.effective_from).getTime()
-    && new Date(item.effective_to || 0).getTime() === new Date(input.effective_to || 0).getTime()
-    && JSON.stringify(comparableUnits(item.units)) === JSON.stringify(comparableUnits(input.units));
-}
-
-export function meteringUnitMatchesInput(item, input) {
-  return Boolean(item && input)
-    && item.unit_code === input.unit_code
-    && integerMoney(item.minimum_precision) === integerMoney(input.minimum_precision)
-    && integerMoney(item.price_denominator) === integerMoney(input.price_denominator)
-    && item.rounding_rule === input.rounding_rule;
-}
-
-export function unknownMutationResolution(unknown, payload) {
-  if (!unknown) return { confirmed: false, retrySafe: false };
-  if (unknown.kind === 'UNIT_CREATE') {
-    const confirmed = (payload.items || []).some((item) => !unknown.beforeIDs.includes(item.unit_definition_id) && meteringUnitMatchesInput(item, unknown.input));
-    return { confirmed, retrySafe: false };
-  }
-  if (unknown.kind === 'UNIT_DEACTIVATE') {
-    const item = (payload.items || []).find((candidate) => candidate.unit_definition_id === unknown.targetID);
-    const confirmed = Boolean(item && item.status !== 'ACTIVE');
-    return { confirmed, retrySafe: false };
-  }
-  if (unknown.kind === 'DRAFT_CREATE') {
-    const confirmed = (payload.items || []).some((item) => !unknown.beforeIDs.includes(item.price_version_id) && priceDraftMatchesInput(item, unknown.input));
-    return { confirmed, retrySafe: false };
-  }
-  if (unknown.kind === 'DRAFT_UPDATE') {
-    const confirmed = priceDraftMatchesInput(payload.item, unknown.input);
-    return { confirmed, retrySafe: false };
-  }
-  return { confirmed: false, retrySafe: false };
-}
-
 export function priceTransitionModes(item) {
   if (item?.derived_status !== 'ACTIVE') return [];
   return item.scope_type === 'MODEL' ? ['FALLBACK_GLOBAL', 'CONTINUATION', 'BLOCK'] : ['CONTINUATION'];

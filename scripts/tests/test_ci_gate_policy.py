@@ -143,12 +143,12 @@ class CiGatePolicyTests(unittest.TestCase):
                 f"发布流程仍引用已退役网页模板: {retired_reference}",
             )
 
-    def test_pr_submodule_verifier_strictly_matches_the_published_tag(self):
+    def test_pr_verifier_checks_registered_history_and_keeps_release_closure(self):
         verifier = PUBLIC_SUBMODULE_VERIFIER.read_text(encoding="utf-8")
         verifier_gate = self.pr_workflow.split(
             "- name: 公开底座 gitlink 可达性", maxsplit=1
         )[1].split("- name: 初始化公共底座 submodule", maxsplit=1)[0]
-        self.assertIn("./scripts/verify-public-submodule.sh", verifier_gate)
+        self.assertIn("./scripts/verify-public-submodule.sh --registered-snapshot", verifier_gate)
         self.assertNotIn("--allow-registered-candidate", verifier_gate)
         self.assertNotIn("LOCAL_SECURITY_HEAD", verifier)
         self.assertIn('[[ "$tag_target" != "$gitlink" ]]', verifier)

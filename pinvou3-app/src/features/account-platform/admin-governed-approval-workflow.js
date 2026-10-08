@@ -126,38 +126,6 @@ export async function createAndSubmitFreshGovernedApproval(client, draft, signal
     ? { ...draft, supersedes_request_id: supersedesID } : draft, signal, expectedReference);
 }
 
-export async function submitExistingGovernedApproval(client, existing, signal) {
-  const requestID = existing?.approval_request_id;
-  const draft = {
-    command_type: existing?.command_type,
-    target_resource_type: existing?.target?.resource_type || existing?.target_resource_type,
-    target_resource_id: existing?.target?.resource_id || existing?.target_resource_id,
-    reason: existing?.reason, normalized_command: existing?.normalized_command,
-    critical_resource_versions: existing?.critical_resource_versions,
-    financial_snapshot: existing?.financial_snapshot,
-  };
-  if (typeof requestID !== 'string' || !draft.command_type || !draft.target_resource_type || !draft.target_resource_id) {
-    throw Object.assign(new Error('approval reference is incomplete'), { code: 'INVALID_APPROVAL_RESPONSE' });
-  }
-  try {
-    const current = requireDetail(await client.governedApprovalRequest(requestID, signal), requestID, draft);
-    if (activeStatuses.has(current.status)) return current;
-    if (current.status !== 'DRAFT' || !current.allowed_actions.includes('SUBMIT')) {
-      throw Object.assign(new Error('approval draft requires business review before submission'),
-        { status: 202, code: 'COMMAND_RESULT_UNKNOWN' });
-    }
-    await client.submitGovernedApprovalRequest(requestID, current, signal);
-    const submitted = requireDetail(await client.governedApprovalRequest(requestID, signal), requestID, draft);
-    if (!activeStatuses.has(submitted.status)) {
-      throw Object.assign(new Error('approval submit result remains unconfirmed'),
-        { status: 202, code: 'COMMAND_RESULT_UNKNOWN' });
-    }
-    return submitted;
-  } catch (error) {
-    throw withReference(error, requestID);
-  }
-}
-
 export async function updateAndSubmitGovernedApproval(client, existing, draft, signal) {
   const requestID = existing?.approval_request_id;
   if (typeof requestID !== 'string' || !requestID || !draft?.command_type || !draft?.target_resource_type ||

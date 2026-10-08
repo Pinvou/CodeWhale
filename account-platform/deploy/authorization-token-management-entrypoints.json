@@ -821,6 +821,18 @@
       "gates": [
         "ACTIVE"
       ]
+    },
+    {
+      "method": "post",
+      "path": "/internal/v1/holds/expiry-proof",
+      "handler": "expiredHoldProof",
+      "authority": {
+        "kind": "workload",
+        "all": [
+          "internal.token.hold-expiry.prove"
+        ]
+      },
+      "gates": []
     }
   ],
   "commands": [
