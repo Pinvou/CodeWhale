@@ -697,6 +697,12 @@ impl ProviderDashboardRow {
                 .flatten(),
             config.context_window_for_provider_config(provider),
             None,
+            // The dialect of the same table that supplied the base URL above
+            // (this row's scoped config), so the row's supported-protocol
+            // display matches what a turn on this row would bind.
+            (provider == ApiProvider::Custom)
+                .then(|| crate::route_runtime::custom_wire_override_for(config))
+                .flatten(),
         );
         let (
             base_url,
@@ -7008,6 +7014,35 @@ mod tests {
         assert_eq!(row.supported_protocols, vec!["anthropic".to_string()]);
         assert_eq!(row.catalog_status, ProviderCatalogStatus::Bundled);
         assert!(row.available_model_count >= 3);
+    }
+
+    #[test]
+    fn provider_dashboard_row_surfaces_the_wire_tables_protocol() {
+        // Round-3 of #79 shipped exactly this class of bug: the picker row
+        // resolved through the config-free wrapper and showed `chat` for a
+        // `wire = "responses"` table. Pin the named-table row to the same
+        // wire-true protocol the turn path mints.
+        let _lock = crate::test_support::lock_test_env();
+        let config = crate::test_support::custom_named_table_config(
+            "pinvou_responses",
+            Some("responses"),
+            "https://picker.example/v1",
+            "picker-key",
+            "gpt-6-sol",
+        );
+        let row = ProviderDashboardRow::from_custom_config_with_runtime_status(
+            "pinvou_responses",
+            ApiProvider::Custom,
+            &config,
+            None,
+        );
+
+        assert_eq!(row.provider_id, "pinvou_responses");
+        assert_eq!(
+            row.supported_protocols,
+            vec!["responses".to_string()],
+            "the row must show the table's wire, not the static Chat default"
+        );
     }
 
     #[test]

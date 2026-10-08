@@ -14,6 +14,7 @@ use tracing::debug;
 use crate::config::{ApiProvider, Config};
 use crate::core::events::TurnRoute;
 use crate::route_receipt::{TurnRouteReceipt, endpoint_identity};
+use codewhale_config::provider::WireFormat;
 
 /// The exact route authority a turn was launched against.
 ///
@@ -149,11 +150,13 @@ impl fmt::Debug for SuggestionLaunch {
     }
 }
 
-/// Whether a provider speaks the ordinary OpenAI-compatible
+/// Whether a provider can ever carry the ordinary OpenAI-compatible
 /// `/chat/completions` shape [`generate_suggestion`] hardcodes.
 ///
-/// Gate on wire protocol, not a vendor enum: Anthropic Messages and the
-/// OpenAI Responses API are different request shapes and stay out.
+/// Static pre-filter only: it reads the provider's default wire and cannot
+/// see a named Custom table's `wire` dialect, so a Custom provider passes it
+/// here and [`resolve_credentials_for_identity`] applies the authoritative
+/// gate on the resolved route candidate's protocol.
 #[must_use]
 pub fn route_is_supported_suggestion_provider(provider: ApiProvider) -> bool {
     crate::client::provider_speaks_chat_completions(provider)
@@ -164,8 +167,10 @@ pub fn route_is_supported_suggestion_provider(provider: ApiProvider) -> bool {
 /// The identity is revalidated against live config and then scoped with
 /// `resolve_runtime_route_for_identity`, so the key and endpoint come from that
 /// route's own configuration rather than from whichever provider happens to be
-/// selected now. An identity that no longer resolves, or that now resolves to a
-/// different provider kind, yields `None`.
+/// selected now. An identity that no longer resolves, that now resolves to a
+/// different provider kind, or whose resolved candidate no longer speaks Chat
+/// Completions (a named table's `wire` dialect — invisible to the static
+/// provider gate) yields `None`.
 ///
 /// The returned `base_url` is the **resolved route candidate's** endpoint, not
 /// `Config::deepseek_base_url()`. Those two are not the same string: the config
@@ -193,6 +198,21 @@ fn resolve_credentials_for_identity(
         crate::route_runtime::resolve_runtime_route_for_identity(config, &identity, Some(model))
             .ok()?;
     if resolved.identity.provider != provider {
+        return None;
+    }
+    // The route candidate is the authority on this identity's wire. The
+    // static provider gate above cannot see a named table's `wire` dialect,
+    // so a `wire = "responses"` / `"anthropic"` Custom table passes it and
+    // must be stopped here: this helper only speaks the ordinary Chat
+    // Completions shape, and a hard-coded Chat body must never reach a route
+    // the turn itself runs on another protocol.
+    if resolved.candidate.protocol() != WireFormat::ChatCompletions {
+        debug!(
+            provider = ?provider,
+            identity = %provider_identity,
+            protocol = ?resolved.candidate.protocol(),
+            "prompt suggestion skipped: the resolved route does not speak Chat Completions"
+        );
         return None;
     }
     // This helper intentionally sends the ordinary Chat Completions shape.
@@ -226,7 +246,11 @@ fn resolve_credentials_for_identity(
 ///
 /// Unsupported providers — Anthropic Messages, Responses, and any other
 /// non-Chat-Completions wire — return `None`, and no credential material
-/// of any provider is inspected on this path at all.
+/// of any provider is inspected on this path at all. The gate is the static
+/// default wire only: a named Custom table's `wire` dialect is applied later,
+/// in `resolve_credentials_for_identity`, so an authority may be captured
+/// here for a table whose resolved route ends up on another protocol (and is
+/// then never dispatched).
 #[must_use]
 pub fn capture_route_authority(route: &TurnRoute) -> Option<SuggestionRouteAuthority> {
     if !route_is_supported_suggestion_provider(route.provider) {
@@ -1741,5 +1765,52 @@ mod tests {
             plan_suggestion_launch_with_config(&config, true, true, 4, Some(snapshot)).is_none(),
             "an absent turn endpoint must fail closed"
         );
+    }
+
+    /// A named table's `wire` dialect is invisible to the static provider
+    /// gate (Custom's default wire is Chat), so the authoritative protocol
+    /// gate must live on the resolved route candidate: a `wire = "responses"`
+    /// table serves its turns on `/responses` and must never receive this
+    /// helper's hard-coded Chat body, while the same table without the
+    /// override keeps resolving suggestion credentials.
+    #[test]
+    fn forkguard_wire_responses_table_gets_no_suggestion_chat_body() {
+        let _env_lock = crate::test_support::lock_test_env();
+        let responses_config = crate::test_support::custom_named_table_config(
+            "pinvou_responses",
+            Some("responses"),
+            "https://relay.example/v1",
+            "custom-responses-key",
+            "gpt-6-sol",
+        );
+        assert!(
+            resolve_credentials_for_identity(
+                &responses_config,
+                ApiProvider::Custom,
+                "pinvou_responses",
+                "gpt-6-sol",
+            )
+            .is_none(),
+            "a wire=responses table must not receive the Chat Completions suggestion body"
+        );
+
+        // Control: the same table on its legacy Chat wire still resolves, so
+        // the gate above (not the identity resolution) is what failed closed.
+        let chat_config = crate::test_support::custom_named_table_config(
+            "pinvou_chat",
+            None,
+            "https://relay.example/v1",
+            "custom-chat-key",
+            "vendor-model",
+        );
+        let credentials = resolve_credentials_for_identity(
+            &chat_config,
+            ApiProvider::Custom,
+            "pinvou_chat",
+            "vendor-model",
+        )
+        .expect("a plain Chat table still resolves suggestion credentials");
+        assert_eq!(credentials.base_url, "https://relay.example/v1");
+        assert_eq!(credentials.api_key, "custom-chat-key");
     }
 }
