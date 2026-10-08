@@ -43,6 +43,10 @@ pub use models::*;
 #[cfg(test)]
 pub(crate) use codewhale_config::API_KEYRING_SENTINEL;
 pub(crate) use codewhale_config::{ConfigApiKeyValueKind, classify_config_api_key_value};
+// The per-config `wire` dialect parse is owned by the config crate next to the
+// `ProviderConfigToml::wire` field it reads; local copies would let an alias
+// added there silently miss the ambient wire/capability readers.
+use codewhale_config::provider::{wire_dialect_prefers_anthropic, wire_dialect_prefers_responses};
 
 pub const DEFAULT_ZAI_PROVIDER_MAX_CONCURRENCY: usize = 3;
 pub const MAX_PROVIDER_REQUEST_CONCURRENCY: usize = 64;
@@ -676,7 +680,7 @@ pub fn provider_capability_with_wire(
     // Custom wire overrides must be checked before the generic fallback so
     // `[providers.<name>] wire = "responses"` / `"anthropic"` is honored.
     if provider == ApiProvider::Custom {
-        if wire_config_prefers_anthropic(wire) {
+        if wire_dialect_prefers_anthropic(wire) {
             return ProviderCapability {
                 provider,
                 resolved_model: resolved_model.to_string(),
@@ -689,7 +693,7 @@ pub fn provider_capability_with_wire(
                 alias_deprecation: None,
             };
         }
-        if wire_config_prefers_responses(wire) {
+        if wire_dialect_prefers_responses(wire) {
             return ProviderCapability {
                 provider,
                 resolved_model: resolved_model.to_string(),
@@ -9702,40 +9706,6 @@ fn xiaomi_mimo_env_api_key_for_runtime(
     xiaomi_mimo_env_var(TOKEN_PLAN_ENV_VARS).or_else(|| xiaomi_mimo_env_var(STANDARD_ENV_VARS))
 }
 
-fn wire_config_prefers_anthropic(wire: Option<&str>) -> bool {
-    let Some(raw) = wire.map(str::trim).filter(|value| !value.is_empty()) else {
-        return false;
-    };
-    let normalized = raw.to_ascii_lowercase().replace(['_', ' '], "-");
-    matches!(
-        normalized.as_str(),
-        "anthropic"
-            | "anthropic-messages"
-            | "messages"
-            | "claude"
-            | "anthropic-compatible"
-            | "anthropic-compat"
-    )
-}
-
-fn wire_config_prefers_responses(wire: Option<&str>) -> bool {
-    let Some(raw) = wire.map(str::trim).filter(|value| !value.is_empty()) else {
-        return false;
-    };
-    let normalized = raw.to_ascii_lowercase().replace(['_', ' '], "-");
-    matches!(
-        normalized.as_str(),
-        "responses"
-            | "responses-api"
-            | "openai-responses"
-            | "openai-responses-api"
-            | "response"
-            | "response-api"
-            | "openai-responses-compat"
-            | "responses-compat"
-    )
-}
-
 fn modelstudio_mode_is_coding_plan(provider: ApiProvider, mode: Option<&str>) -> bool {
     if matches!(
         provider,
@@ -9766,7 +9736,7 @@ fn resolve_modelstudio_base_url_for_tui(
     let anthropic = matches!(
         provider,
         ApiProvider::ModelstudioTokenPlanAnthropic | ApiProvider::ModelstudioCodingPlanAnthropic
-    ) || wire_config_prefers_anthropic(wire);
+    ) || wire_dialect_prefers_anthropic(wire);
     match (coding, anthropic) {
         (true, true) => MODELSTUDIO_CODING_PLAN_ANTHROPIC_BASE_URL.to_string(),
         (true, false) => DEFAULT_MODELSTUDIO_CODING_PLAN_BASE_URL.to_string(),
@@ -9783,7 +9753,7 @@ fn resolve_minimax_base_url_for_tui(
     if let Some(url) = configured.filter(|value| !value.trim().is_empty()) {
         return url;
     }
-    if matches!(provider, ApiProvider::MinimaxAnthropic) || wire_config_prefers_anthropic(wire) {
+    if matches!(provider, ApiProvider::MinimaxAnthropic) || wire_dialect_prefers_anthropic(wire) {
         DEFAULT_MINIMAX_ANTHROPIC_BASE_URL.to_string()
     } else {
         DEFAULT_MINIMAX_BASE_URL.to_string()
@@ -9798,7 +9768,7 @@ fn resolve_deepseek_base_url_for_tui(
     if let Some(url) = configured.filter(|value| !value.trim().is_empty()) {
         return url;
     }
-    if matches!(provider, ApiProvider::DeepseekAnthropic) || wire_config_prefers_anthropic(wire) {
+    if matches!(provider, ApiProvider::DeepseekAnthropic) || wire_dialect_prefers_anthropic(wire) {
         DEFAULT_DEEPSEEK_ANTHROPIC_BASE_URL.to_string()
     } else {
         DEFAULT_DEEPSEEK_BASE_URL.to_string()

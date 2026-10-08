@@ -358,6 +358,43 @@ fn fingerprint_never_hashes_secret_bearing_url_text() {
 }
 
 #[test]
+fn fingerprint_of_an_authority_glued_query_is_the_host_not_one_constant() {
+    // `https://gw.example?tenant=1` glues the query onto the authority. That
+    // branch used to return one shared redacted constant, so two distinct
+    // hosts shared a single fingerprint — one replay scope for captured
+    // opaque reasoning state across genuinely different endpoints. Distinct
+    // hosts must stay distinct.
+    let host_a = base_url_fingerprint("https://gw-a.example?tenant=1");
+    assert_ne!(
+        host_a,
+        base_url_fingerprint("https://gw-b.example?tenant=2"),
+        "distinct hosts must not share a fingerprint"
+    );
+    // Same host, different glued query: one endpoint scope. The query is
+    // credential-bearing text and never enters the digest, so it must not
+    // split the scope either.
+    assert_eq!(
+        host_a,
+        base_url_fingerprint("https://gw-a.example?other=2"),
+        "a glued query must not change the host's fingerprint"
+    );
+    // The host fingerprint agrees with the ordinary spelling of the same
+    // endpoint, and userinfo strips exactly like the path branch.
+    assert_eq!(host_a, base_url_fingerprint("https://gw-a.example"));
+    assert_eq!(
+        host_a,
+        base_url_fingerprint("https://user:secret@gw-a.example?tenant=1"),
+        "userinfo on a glued-query URL must not influence the digest"
+    );
+    // A fragment glued onto the authority behaves the same way.
+    assert_eq!(
+        host_a,
+        base_url_fingerprint("https://gw-a.example#frag"),
+        "a glued fragment must not change the host's fingerprint"
+    );
+}
+
+#[test]
 fn fingerprint_strips_userinfo_from_a_scheme_less_base_url() {
     // A base_url typed without a scheme took the fall-through branch, which
     // only split off `?`/`#` — so `user:pass@host` went into SHA-256 verbatim,
