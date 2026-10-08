@@ -1401,6 +1401,48 @@ fn responses_input_includes_user_role_tool_results() {
 }
 
 #[test]
+fn responses_include_and_store_stay_in_lockstep_with_the_capture_set() {
+    // `store:false`, `include`, and encrypted-reasoning capture must all key
+    // off the same route set (`responses_route_sends_encrypted_reasoning_include`): a route
+    // that requests the include but cannot capture ships reasoning items it
+    // never stores, and a route that captures without requesting the include
+    // loses them. The DeepSeek-CN arm is spelled out because it is the
+    // sibling route most easily forgotten when the set is edited.
+    for (provider, captures) in [
+        (ApiProvider::OpenaiCodex, true),
+        (ApiProvider::OpencodeZen, true),
+        (ApiProvider::Custom, true),
+        (ApiProvider::Deepseek, false),
+        (ApiProvider::DeepseekCN, false),
+        (ApiProvider::Concentrate, false),
+    ] {
+        let request = minimal_responses_request();
+        let body = build_responses_body_for_provider(
+            &request,
+            provider,
+            provider.as_str(),
+            "fp-lockstep-endpoint",
+            BODY_TEST_BASE_URL,
+        );
+        assert_eq!(
+            body.get("include").is_some(),
+            captures,
+            "include lockstep failed for {provider:?}: {body}"
+        );
+        assert_eq!(
+            body.get("store").is_some(),
+            captures,
+            "store lockstep failed for {provider:?}: {body}"
+        );
+        assert_eq!(
+            responses_route_sends_encrypted_reasoning_include(provider),
+            captures,
+            "the capture predicate must agree with the wire for {provider:?}"
+        );
+    }
+}
+
+#[test]
 fn concentrate_route_keeps_tool_chains() {
     // The Concentrate route never captures encrypted reasoning (no
     // `store:false`, no `include`), so nothing can ever satisfy the replay

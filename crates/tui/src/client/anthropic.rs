@@ -524,15 +524,18 @@ fn normalize_redacted_thinking_blocks(value: &mut Value) {
 ///
 /// The docs are explicit that adaptive thinking is on by default only for the
 /// Claude 5 generation ("Adaptive thinking is on by default on Claude Sonnet 5
-/// and Claude Opus 5" — AWS Bedrock adaptive-thinking page) and that the
-/// Fable/Mythos lines are adaptive-only, so omitting `thinking` is NOT
+/// and Claude Opus 5" — AWS Bedrock adaptive-thinking page; same page:
+/// "Claude Haiku 5.5 uses adaptive thinking by default", so the Haiku 5.x
+/// line belongs here too) and that the Fable/Mythos lines are adaptive-only
+/// (explicit disabled thinking 400s there), so omitting `thinking` is NOT
 /// "disabled" there and replayed signed thinking blocks stay valid. Older
 /// models treat omission as thinking off — the migration guide states
 /// "Adaptive thinking is off by default on Claude Opus 4.7: requests with no
-/// thinking field run without thinking, matching Opus 4.6 behavior" — and the
-/// API rejects thinking content in the current tool-use turn once thinking is
-/// disabled, so those turns (Opus 4.7/4.8 included) need their thinking
-/// blocks stripped.
+/// thinking field run without thinking, matching Opus 4.6 behavior" and, for
+/// the successor, "like Opus 4.7, a request with no `thinking` field runs
+/// without thinking" — and the API rejects thinking content in the current
+/// tool-use turn once thinking is disabled, so those turns (Opus 4.7/4.8
+/// included) need their thinking blocks stripped.
 fn anthropic_omitted_thinking_defaults_to_adaptive(model: &str) -> bool {
     let model = model.to_ascii_lowercase();
     model.contains("fable")

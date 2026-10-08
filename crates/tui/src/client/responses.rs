@@ -118,7 +118,12 @@ pub(super) fn build_responses_body_for_provider(
         "model": model,
         "stream": true,
     });
-    if !is_deepseek && !is_concentrate {
+    // One shared route set decides `store:false`, `include`, and capture —
+    // see `responses_route_sends_encrypted_reasoning_include`. Keeping all
+    // three on the same predicate is what makes capture symmetric with the
+    // request.
+    let captures_reasoning = responses_route_sends_encrypted_reasoning_include(provider);
+    if captures_reasoning {
         body["store"] = json!(false);
     }
     // Every Responses route receives the same resolved request envelope as
