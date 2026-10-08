@@ -17,8 +17,17 @@
 //! - `container.json` — the portable [`SessionImportContainer`] for
 //!   version-tolerant resume across schema changes.
 //! - `artifacts/<...>` — the session-owned artifact directory, when present
-//!   and not excluded. Only regular files are archived; symlinks are skipped
-//!   so an export cannot read outside the session directory through a link.
+//!   and not excluded. Only regular single-link files are archived:
+//!   symlinked entries are skipped, a linked artifacts root is rejected at
+//!   resolution time, and a hard-linked member fails the export, so a
+//!   planted link can neither redirect the walk nor alias outside content
+//!   in. An `output` inside the session store is rejected as well, so an
+//!   export cannot clobber the records it reads. Residual: neither the
+//!   walk nor the final write is race-confined (std has no `openat2`
+//!   equivalent), so a writer inside the session store can still swap
+//!   path components mid-export, and a writer able to swap a component
+//!   of the output's parent between the confinement checks and the
+//!   rename can still land the archive inside the store.
 //! - `manifest.json` — archive format version, generator version, export
 //!   timestamp, session metadata, and the index of the preceding members.
 //!   Written last so its index covers everything above it.
@@ -123,17 +132,23 @@ struct ArchiveManifest {
 /// `session` is typically loaded with
 /// [`SessionManager::load_session_snapshot`](crate::session_manager::SessionManager::load_session_snapshot)
 /// so the archive reflects the durable record without applying resume-time
-/// repair. `artifacts_dir` is the session's `artifacts/` directory
-/// (see [`session_artifacts_dir`]); pass `None` (or clear
-/// [`SessionArchiveOptions::include_artifacts`]) to export the transcript
-/// only.
+/// repair. `sessions_dir` is the trusted store the session belongs to: when
+/// given, the artifacts directory is resolved and confined through
+/// [`session_artifacts_dir`], and an `output` inside the store is rejected —
+/// records live at `<store>/<id>.json` and an export must never clobber
+/// them. Pass `None` to export the transcript only, without store checks.
+/// Clearing [`SessionArchiveOptions::include_artifacts`] skips the
+/// artifacts walk but *keeps* the store checks — the store is still
+/// resolved and an in-store `output` is still rejected — and the session
+/// id is then not re-validated (that check runs on the artifacts
+/// resolution path).
 ///
 /// The archive is streamed to a sibling temporary file and renamed into
 /// place, so a failed export never leaves a truncated archive at `output`.
 /// An existing `output` is replaced.
 pub fn write_session_archive(
     session: &SavedSession,
-    artifacts_dir: Option<&Path>,
+    sessions_dir: Option<&Path>,
     output: &Path,
     options: SessionArchiveOptions,
 ) -> io::Result<SessionArchiveSummary> {
@@ -148,16 +163,71 @@ pub fn write_session_archive(
     }
     let session_json = session_json(session)?;
     let container_json = container_json(session)?;
-    let artifact_files = match (options.include_artifacts, artifacts_dir) {
-        (true, Some(dir)) => collect_artifact_files(dir)?,
-        _ => Vec::new(),
-    };
 
     let parent = output
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
         .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+    let root = sessions_dir
+        .map(Path::canonicalize)
+        .transpose()
+        .map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!("cannot resolve the session store for export: {error}"),
+            )
+        })?;
+    if let Some(root) = &root {
+        // Confine before creating anything: a mistyped in-store `--output`
+        // must not leave fresh directories next to the session records it
+        // would have clobbered. `parent` itself may not exist yet, so the
+        // pre-creation check proves containment on the nearest existing
+        // ancestor; after `create_dir_all`, the canonicalized `parent` is
+        // re-checked below, which also covers symlinked components created
+        // in between.
+        let existing = existing_ancestor_of(&parent).map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!(
+                    "cannot resolve export output directory {}: {error}",
+                    parent.display()
+                ),
+            )
+        })?;
+        if existing.starts_with(root) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "export output must be outside the session store",
+            ));
+        }
+    }
     fs::create_dir_all(&parent)?;
+    if let Some(root) = &root {
+        let output_parent = parent.canonicalize().map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!(
+                    "cannot resolve export output directory {}: {error}",
+                    parent.display()
+                ),
+            )
+        })?;
+        if output_parent.starts_with(root) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "export output must be outside the session store",
+            ));
+        }
+    }
+
+    let artifact_files = match (options.include_artifacts, root.as_deref()) {
+        (true, Some(root)) => match session_artifacts_dir(root, &session.metadata.id)? {
+            Some(dir) => collect_artifact_files(&dir)?,
+            None => Vec::new(),
+        },
+        _ => Vec::new(),
+    };
+
     let temp = tempfile::Builder::new()
         .prefix(".codewhale-session-export-")
         .tempfile_in(&parent)?;
@@ -220,19 +290,124 @@ pub fn write_session_archive(
     Ok(summary)
 }
 
+/// Nearest existing ancestor of `path`, canonicalized: lets the in-store
+/// output rejection run before `create_dir_all` so a rejected export
+/// mutates nothing. A relative path whose every component is new resolves
+/// against the process CWD, mirroring what `create_dir_all` would use.
+fn existing_ancestor_of(path: &Path) -> io::Result<PathBuf> {
+    let mut candidate = path.to_path_buf();
+    loop {
+        match candidate.canonicalize() {
+            Ok(resolved) => return Ok(resolved),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                if !candidate.pop() {
+                    return Path::new(".").canonicalize().map_err(|_| error);
+                }
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
 /// Directory holding this session's artifacts, when it exists. `session_id`
-/// is re-checked against path traversal here because this helper is also the
-/// boundary for callers that build the path from user-supplied ids.
-pub fn session_artifacts_dir(sessions_dir: &Path, session_id: &str) -> Option<PathBuf> {
+/// is re-checked here because this helper is also the boundary for callers
+/// that build the path from user-supplied ids; invalid ids are a loud
+/// `InvalidInput` like upstream, not a silent transcript-only export.
+pub fn session_artifacts_dir(sessions_dir: &Path, session_id: &str) -> io::Result<Option<PathBuf>> {
     if session_id.is_empty()
         || session_id == "."
         || session_id == ".."
         || session_id.contains(['/', '\\'])
     {
-        return None;
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("invalid session id {session_id:?}"),
+        ));
     }
-    let dir = sessions_dir.join(session_id).join(ARTIFACTS_DIR_NAME);
-    dir.is_dir().then_some(dir)
+    let session_dir = sessions_dir.join(session_id);
+    let dir = session_dir.join(ARTIFACTS_DIR_NAME);
+    // Detect a link at either level before following it: `is_dir` and
+    // `read_dir` would happily walk the link target, and the member-level
+    // symlink skip cannot see a redirected containing directory. Every
+    // linked root is rejected — even one resolving inside the store — so
+    // cross-session redirection fails too. Only genuine absence counts as
+    // "no link": a permission or I/O error folded into `false` would let an
+    // unreadable store silently degrade a full-fidelity export to
+    // transcript-only, so any other probe error fails loudly.
+    for candidate in [&session_dir, &dir] {
+        match fs::symlink_metadata(candidate) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "{} is a symlink; refusing to follow links under the session store {}",
+                        candidate.display(),
+                        sessions_dir.display()
+                    ),
+                ));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(io::Error::new(
+                    error.kind(),
+                    format!(
+                        "cannot inspect {} under the session store {}: {error}",
+                        candidate.display(),
+                        sessions_dir.display()
+                    ),
+                ));
+            }
+        }
+    }
+    let meta = match fs::metadata(&dir) {
+        Ok(meta) => meta,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(io::Error::new(
+                error.kind(),
+                format!("cannot inspect {}: {error}", dir.display()),
+            ));
+        }
+    };
+    if !meta.is_dir() {
+        return Ok(None);
+    }
+    // Backstop for link chains the per-component probe cannot see (Windows
+    // reparse points on toolchains where they are not `is_symlink`, swaps
+    // between the probes): resolve both ends and require the artifacts root
+    // to stay inside the store.
+    let canonical = dir.canonicalize().map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!(
+                "cannot resolve artifact directory {}: {error}",
+                dir.display()
+            ),
+        )
+    })?;
+    let root = sessions_dir.canonicalize().map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!(
+                "cannot resolve session store {}: {error}",
+                sessions_dir.display()
+            ),
+        )
+    })?;
+    if !canonical.starts_with(&root) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "artifact directory {} resolves outside the session store {}",
+                dir.display(),
+                root.display()
+            ),
+        ));
+    }
+    // Hand back the canonical path that was validated so the walk cannot
+    // re-resolve a swapped prefix.
+    Ok(Some(canonical))
 }
 
 /// Default archive file name for a session:
@@ -256,14 +431,37 @@ fn container_json(session: &SavedSession) -> io::Result<String> {
 }
 
 /// Collect regular artifact files as `(archive member name, source path)`,
-/// sorted by member name for deterministic archives. Symlinks and other
-/// non-regular entries are skipped so an export cannot reach outside the
-/// session directory through a link.
+/// sorted by member name for deterministic archives. Symlinked and other
+/// non-regular entries are skipped; containing-directory confinement is
+/// enforced by [`session_artifacts_dir`].
 fn collect_artifact_files(artifacts_dir: &Path) -> io::Result<Vec<(String, PathBuf)>> {
     let mut files = Vec::new();
     collect_artifact_files_recursive(artifacts_dir, "", &mut files)?;
     files.sort_by(|left, right| left.0.cmp(&right.0));
     Ok(files)
+}
+
+/// Hard links are indistinguishable from regular files to a directory walk
+/// but alias content from anywhere on the filesystem into it; the link count
+/// is the only tell.
+#[cfg(unix)]
+fn has_single_link(metadata: &fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    metadata.nlink() == 1
+}
+
+/// NTFS hard links expose the count through the Windows metadata extension.
+#[cfg(windows)]
+fn has_single_link(metadata: &fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    metadata.number_of_links() == 1
+}
+
+#[cfg(not(any(unix, windows)))]
+fn has_single_link(_: &fs::Metadata) -> bool {
+    // No portable link-count API on this target; the root-level probes and
+    // the member symlink skip still confine links there.
+    true
 }
 
 fn collect_artifact_files_recursive(
@@ -287,6 +485,14 @@ fn collect_artifact_files_recursive(
         if file_type.is_dir() {
             collect_artifact_files_recursive(&path, &member, files)?;
         } else if file_type.is_file() {
+            if !has_single_link(&entry.metadata()?) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "artifact member {member} is a hard link; exports only archive single-link files"
+                    ),
+                ));
+            }
             files.push((member, path));
         }
     }
@@ -534,18 +740,27 @@ mod tests {
             .join(ARTIFACTS_DIR_NAME);
         fs::create_dir_all(&artifacts_dir).expect("artifacts dir");
         fs::write(artifacts_dir.join("art_call-1.txt"), b"artifact body").expect("artifact");
-        assert!(
-            session_artifacts_dir(&sessions_dir, &session.metadata.id).is_some(),
-            "artifacts dir is discovered for a valid session id"
+        let resolved = session_artifacts_dir(&sessions_dir, &session.metadata.id)
+            .expect("valid root resolves")
+            .expect("artifacts dir is discovered for a valid session id");
+        // The resolver hands back the canonical path it validated, so the
+        // walk cannot re-resolve a different (swapped) prefix.
+        assert_eq!(
+            resolved,
+            fs::canonicalize(&artifacts_dir).expect("canonicalize artifacts"),
+            "resolver returns the canonical path it validated"
         );
+        let error = session_artifacts_dir(&sessions_dir, "../escape")
+            .expect_err("traversal ids are rejected, not silently skipped");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
         assert!(
-            session_artifacts_dir(&sessions_dir, "../escape").is_none(),
-            "path traversal ids never resolve to an artifacts dir"
+            error.to_string().contains("invalid session id"),
+            "error must name the invalid id: {error}"
         );
 
         let with_artifacts = write_session_archive(
             &session,
-            Some(&artifacts_dir),
+            Some(&sessions_dir),
             &dir.path().join("full.tar.xz"),
             SessionArchiveOptions::default(),
         )
@@ -569,7 +784,7 @@ mod tests {
 
         let transcript_only = write_session_archive(
             &session,
-            Some(&artifacts_dir),
+            Some(&sessions_dir),
             &dir.path().join("lean.tar.xz"),
             SessionArchiveOptions {
                 include_artifacts: false,
@@ -584,6 +799,233 @@ mod tests {
                 .iter()
                 .any(|member| member.name.starts_with(ARTIFACTS_DIR_NAME))
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn forkguard_session_archive_rejects_artifact_root_symlink() {
+        // A symlinked artifacts root would redirect the whole archive walk
+        // outside the session store; the confinement check must reject it
+        // loudly instead of silently archiving someone else's directory.
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sessions_dir = dir.path().join("sessions");
+        let outside = dir.path().join("outside");
+        fs::create_dir_all(&outside).expect("outside dir");
+        fs::write(outside.join("secret.txt"), b"not session data").expect("outside file");
+        let session = fixture_session();
+        fs::create_dir_all(sessions_dir.join(&session.metadata.id)).expect("session dir");
+        symlink(
+            &outside,
+            sessions_dir
+                .join(&session.metadata.id)
+                .join(ARTIFACTS_DIR_NAME),
+        )
+        .expect("link the artifacts root");
+
+        let error = session_artifacts_dir(&sessions_dir, &session.metadata.id)
+            .expect_err("a symlinked artifacts root must be rejected");
+        assert!(
+            error.to_string().contains("is a symlink"),
+            "error must name the linked root: {error}"
+        );
+
+        // A symlinked session directory (one level up) is the same escape.
+        let second = fixture_session();
+        fs::create_dir_all(&sessions_dir).expect("sessions root");
+        symlink(&outside, sessions_dir.join(&second.metadata.id)).expect("link the session dir");
+        let error = session_artifacts_dir(&sessions_dir, &second.metadata.id)
+            .expect_err("a symlinked session directory must be rejected");
+        assert!(
+            error.to_string().contains("is a symlink"),
+            "error must name the linked root: {error}"
+        );
+
+        // A link resolving INSIDE the store is rejected too: pointing one
+        // session's artifacts root at another session's artifacts must not
+        // export that session's tree under the wrong id.
+        let third = fixture_session();
+        let other_artifacts = sessions_dir
+            .join(&third.metadata.id)
+            .join(ARTIFACTS_DIR_NAME);
+        fs::create_dir_all(&other_artifacts).expect("other session artifacts");
+        fs::write(other_artifacts.join("foreign.txt"), b"other session").expect("foreign file");
+        let fourth = fixture_session();
+        fs::create_dir_all(sessions_dir.join(&fourth.metadata.id)).expect("session dir");
+        symlink(
+            &other_artifacts,
+            sessions_dir
+                .join(&fourth.metadata.id)
+                .join(ARTIFACTS_DIR_NAME),
+        )
+        .expect("link into another session");
+        let error = session_artifacts_dir(&sessions_dir, &fourth.metadata.id)
+            .expect_err("a cross-session artifacts link must be rejected");
+        assert!(
+            error.to_string().contains("is a symlink"),
+            "error must name the linked root: {error}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn forkguard_session_archive_probe_errors_fail_loud() {
+        // An unsearchable session directory makes the artifacts-root probe
+        // fail with EACCES. Folding that probe error into "no link" and
+        // then into `is_dir() == false` returns Ok(None) and silently
+        // degrades a full-fidelity export to transcript-only; only genuine
+        // absence may map to Ok(None).
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sessions_dir = dir.path().join("sessions");
+        let session = fixture_session();
+        let session_dir = sessions_dir.join(&session.metadata.id);
+        fs::create_dir_all(&session_dir).expect("session dir");
+        fs::set_permissions(&session_dir, fs::Permissions::from_mode(0o600))
+            .expect("strip search permission from the session dir");
+        // Skip where permission bits are not enforced (e.g. running as
+        // root): lstat of a child then misses instead of EACCES, so the
+        // path under test is unreachable rather than fixed there.
+        if fs::symlink_metadata(session_dir.join("probe")).is_ok() {
+            fs::set_permissions(&session_dir, fs::Permissions::from_mode(0o755))
+                .expect("restore session dir permissions");
+            return;
+        }
+
+        let result = session_artifacts_dir(&sessions_dir, &session.metadata.id);
+        fs::set_permissions(&session_dir, fs::Permissions::from_mode(0o755))
+            .expect("restore session dir permissions");
+        let error =
+            result.expect_err("an unsearchable session dir must fail loudly, not return Ok(None)");
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert!(
+            error.to_string().contains("cannot inspect"),
+            "probe errors must name the path they could not inspect: {error}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn forkguard_session_archive_rejects_artifact_hard_link() {
+        // A hard link aliases outside content into the walk with no symlink
+        // anywhere for the root probe to see; the walker must fail the export
+        // instead of archiving another inode's bytes under a benign member
+        // name (upstream rejects multi-link files for exactly this reason).
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sessions_dir = dir.path().join("sessions");
+        let outside = dir.path().join("outside");
+        fs::create_dir_all(&outside).expect("outside dir");
+        fs::write(outside.join("secret.txt"), b"not session data").expect("outside file");
+        let session = fixture_session();
+        let artifacts_dir = sessions_dir
+            .join(&session.metadata.id)
+            .join(ARTIFACTS_DIR_NAME);
+        fs::create_dir_all(&artifacts_dir).expect("artifacts dir");
+        fs::write(artifacts_dir.join("plain.txt"), b"session data").expect("plain file");
+        fs::hard_link(
+            outside.join("secret.txt"),
+            artifacts_dir.join("innocent.txt"),
+        )
+        .expect("hard link");
+
+        let error = write_session_archive(
+            &session,
+            Some(&sessions_dir),
+            &dir.path().join("out.tar.xz"),
+            SessionArchiveOptions::default(),
+        )
+        .expect_err("a hard-linked member must fail the export");
+        assert!(
+            error.to_string().contains("hard link"),
+            "error must name the hard link: {error}"
+        );
+
+        // Control: the same tree without the link exports cleanly.
+        fs::remove_file(artifacts_dir.join("innocent.txt")).expect("remove the link");
+        let summary = write_session_archive(
+            &session,
+            Some(&sessions_dir),
+            &dir.path().join("out.tar.xz"),
+            SessionArchiveOptions::default(),
+        )
+        .expect("a clean tree exports");
+        assert!(summary.includes_artifacts);
+    }
+
+    #[test]
+    fn forkguard_session_archive_rejects_output_inside_store() {
+        // Session records live at <store>/<id>.json, so an export written
+        // inside the store (e.g. a mistyped --output with --force) would
+        // clobber a live record; the writer rejects in-store outputs the way
+        // upstream does instead of trusting each caller to check.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sessions_dir = dir.path().join("sessions");
+        let session = fixture_session();
+        let artifacts_dir = sessions_dir
+            .join(&session.metadata.id)
+            .join(ARTIFACTS_DIR_NAME);
+        fs::create_dir_all(&artifacts_dir).expect("artifacts dir");
+        fs::write(artifacts_dir.join("art.txt"), b"artifact body").expect("artifact");
+
+        let error = write_session_archive(
+            &session,
+            Some(&sessions_dir),
+            &sessions_dir.join("inside.tar.xz"),
+            SessionArchiveOptions::default(),
+        )
+        .expect_err("an output inside the store must be rejected");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(
+            error.to_string().contains("outside the session store"),
+            "error must name the confinement failure: {error}"
+        );
+        assert!(
+            !sessions_dir.join("inside.tar.xz").exists(),
+            "a rejected export must not write anything"
+        );
+        // The rejection must precede store mutation entirely: an output
+        // path whose parent does not exist yet must not leave fresh
+        // directories behind either.
+        let nested = sessions_dir.join("a").join("b").join("inside.tar.xz");
+        let error = write_session_archive(
+            &session,
+            Some(&sessions_dir),
+            &nested,
+            SessionArchiveOptions::default(),
+        )
+        .expect_err("a nested in-store output must be rejected");
+        assert!(
+            error.to_string().contains("outside the session store"),
+            "error must name the confinement failure: {error}"
+        );
+        assert!(
+            !sessions_dir.join("a").exists(),
+            "a rejected export must not create directories in the store"
+        );
+
+        // The pre-creation ancestor check must not false-reject a fresh
+        // output directory outside the store: create_dir_all still runs
+        // for it.
+        let fresh = dir.path().join("fresh").join("nested").join("out.tar.xz");
+        write_session_archive(
+            &session,
+            Some(&sessions_dir),
+            &fresh,
+            SessionArchiveOptions::default(),
+        )
+        .expect("a fresh nested output directory outside the store works");
+        assert!(fresh.exists());
+
+        let summary = write_session_archive(
+            &session,
+            Some(&sessions_dir),
+            &dir.path().join("outside.tar.xz"),
+            SessionArchiveOptions::default(),
+        )
+        .expect("an output outside the store is fine");
+        assert!(summary.includes_artifacts);
     }
 
     #[test]
