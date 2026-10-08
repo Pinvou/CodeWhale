@@ -373,3 +373,65 @@ func TestRetainedWalletCompletionFencesAfterLockWait(t *testing.T) {
 		})
 	}
 }
+
+func TestRetainedWalletExpiredFailureUserLock(t *testing.T) {
+	fixture := retainedWalletFenceActors(t)
+	repo := fixture.repository(t)
+	ctx, cancel := context.WithTimeout(fixture.ctx, 15*time.Second)
+	defer cancel()
+	var clock atomic.Int64
+	base := time.Now().UTC().Truncate(time.Microsecond)
+	clock.Store(base.UnixNano())
+	repo.now = func() time.Time { return time.Unix(0, clock.Load()).UTC() }
+	id := retainedWalletProvisioningUser(t, repo)
+	if _, err := repo.pool.Exec(ctx, `UPDATE wallet_provisioning_jobs SET sla_expires_at=$2 WHERE user_id=$1`, id, base.Add(-time.Second)); err != nil {
+		t.Fatal("setup already elapsed SLA")
+	}
+	jobs, err := repo.LeaseWalletProvisioningJobs(ctx, 1, 30*time.Second)
+	if err != nil || len(jobs) != 1 {
+		t.Fatal("real live claim missing")
+	}
+	job := jobs[0]
+	before := retainedWalletFenceSnapshot(t, repo, id)
+	blocker, err := repo.pool.Begin(ctx)
+	if err != nil {
+		t.Fatal("begin blocker")
+	}
+	defer blocker.Rollback(context.Background())
+	var blockerPID int
+	if err = blocker.QueryRow(ctx, `SELECT pg_backend_pid()`).Scan(&blockerPID); err != nil {
+		t.Fatal("blocker pid")
+	}
+	if _, err = blocker.Exec(ctx, `SELECT 1 FROM users WHERE id=$1 FOR UPDATE`, id); err != nil {
+		t.Fatal("lock user")
+	}
+	finished := make(chan error, 1)
+	go func() { finished <- repo.FailWalletProvisioning(ctx, job, "BILLING_UNAVAILABLE") }()
+	waited := false
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if err = fixture.admin.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=$1 AND application_name=$2 AND $3=ANY(pg_blocking_pids(pid)) AND query LIKE '%UPDATE users%')`, repo.pool.Config().ConnConfig.Database, repo.pool.Config().ConnConfig.RuntimeParams["application_name"], blockerPID).Scan(&waited); err != nil {
+			t.Fatal("observe exact production user wait")
+		}
+		if waited {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !waited {
+		t.Fatal("Fail never reached actual SLA user-row wait")
+	}
+	clock.Store(base.Add(31 * time.Second).UnixNano())
+	if err = blocker.Commit(ctx); err != nil {
+		t.Fatal("release pure row lock")
+	}
+	select {
+	case err = <-finished:
+	case <-ctx.Done():
+		t.Fatal("bounded failure stalled")
+	}
+	unchanged := retainedWalletFenceSnapshot(t, repo, id) == before
+	if !errors.Is(err, ErrConflict) || !unchanged {
+		t.Fatalf("expired failure after actual user wait: error=%T unchanged=%t", err, unchanged)
+	}
+}

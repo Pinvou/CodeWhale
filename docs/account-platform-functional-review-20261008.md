@@ -1,0 +1,48 @@
+# Account Platform 功能波次审核记录
+
+按 F00 至 F18 顺序核实、修复、独立复审，并仅通过普通 merge 向相邻下一波次传播。确认存在的非阻塞问题也登记 Issue；未证实的建议记录依据。
+
+## F00 / PR #1527
+
+审核来源： https://github.com/Pinvou/pinvou3/pull/1527#pullrequestreview-5453328209
+
+确认并修复的阻塞问题：半开熔断器业务拒绝耗尽探测额度；Relay 未在 Claim 前限制 subject，可能处理其他领域事件；Account Platform 缺少 Go CI 门禁。Relay 存储接口增加明确 subject 范围，后续波次的存储实现须同步适配。
+
+确认的非阻塞问题逐项登记在 [Issue #1559](https://github.com/Pinvou/pinvou3/issues/1559)：时钟初始化与生产判定、HTTP panic/流式响应边界、认证初始化诊断、NTP 校验、后台 panic 脱敏、KMS 间接依赖标记、并发和流式回归覆盖。
+
+未确认的缺陷：Gin 已安全记录异常，nil writer 避免输出原始 panic；普通重试不递增 PublicationGeneration，人工 retained replay 有意递增；QUIC/Mongo 是 Gin 的真实传递依赖；CA helper 复用和外部 recipient 指纹为维护/威胁模型建议，未证明约定内安全漏洞。
+
+验证记录：主模块全部 13 个包 test 和 vet 通过；嵌套 KMS 模块 test 和 vet 通过；新增 HTTP 与熔断器回归通过；CI 路由 11 项通过；CI policy 35 项通过；actionlint 与架构守卫通过；diff whitespace 检查通过。Windows 无 CGO 编译器，race 由新增 Linux CI 验证，不计作本地已通过。
+
+状态：最终独立复审通过，确认问题均已修复；提交后推送 F00、回复并请求原审核人重审，待当前提交 CI 验证后向 F01 普通 merge 传播。
+补充 CI 验证：ab81a6087 的 Account Platform Linux race/vet 已通过；其余适用检查除 Hub 依赖审计均通过。Hub 当前锁定 Sharp 0.35.4 命中公开 GHSA-wq5f-xc86-pv6w，补丁升级至 0.35.5，锁文件同步更新；npm ci、55 项 Hub 测试（含独立临时 PostgreSQL E2E）及零漏洞 audit 通过。独立复审确认改动仅涉及 Sharp 依赖闭包。
+
+## F01 / PR #1528
+
+F00修复通过普通merge引入：96899c70及6077d33fc。F00当前head16184c38d的required-gate已通过，外部重审已申请、尚待回复。两份原审核逐项核实：钱包ACK测试fixture零租约确实造成16项失败；Rust handoff ticket字符边界、未认证入口限流、全类审计DELETE保护、登录错误/冷却信息、生产Keycloak硬化、NGINX动态DNS、Account可信来源及LEASED索引缺口均真实存在。
+
+原评语修正：Account当前问题是无条件信任来源头而可伪造桶，Portal已有受信peer配置；非security审计UPDATE旧触发器返回OLD导致无声取消，DELETE可绕过；付费SMS已有多维额度，公开入口缺限流及图片可逆映射仍需修；Portal ticket消费端也仅验证长度。删除用户代码无注册路由，未证实可达安全问题。
+
+确认的非阻塞后台错误诊断和记录清理登记 [Issue #1560](https://github.com/Pinvou/pinvou3/issues/1560)。用户明确批准保留24小时验证码、90天短信验证/发送，保留所有业务引用与活动/不确定投递；新增分批清理及前向索引迁移。
+
+验证进展：钱包ACK及过期租约回归通过；Node相关测试、真实浏览器20项、UI build/lint、架构守卫通过。public limiter真实隔离PG并发、重启、共享来源、TTL、随机键基数测试及独立复审通过；事件Claim范围/字面前缀/租约测试通过；部署配置Go来源边界与3项真实脚本mock/结构契约通过且独立代码复审通过。清理5项真实PG子测试通过，覆盖所有业务引用、未来投递租约、89/91天与24小时边界、501条分批和锁行跳过，独立复审通过；主模块全量test/vet通过。官方Windows nginx 1.30.5隔离 nginx -t通过，未启动服务；真实容器DNS重建和Keycloak realm行为未运行验证，不能将mock或syntax检查作为部署验收。Rust完整app lib实际MSVC链接成功，并执行account_platform模块27项测试全部通过、无跳过；仅命令行临时将CodeWhale TUI测试编译opt-level设0，未修改Cargo配置或gitlink。
+
+状态：确认问题修复完成、独立代码复审及本轮适用本地验证通过；提交 `542d03fd9c` 已推送，回复两位原审核人并申请重审，当前提交全部适用 CI 和 required-gate 通过，已向 F02 普通 merge 传播。外部重审仍待回复；真实外部服务与组合部署验收保持原先披露的延期范围。
+
+## F02 / PR #1529
+
+F01 修复提交 `542d03fd9c` 的所有适用 CI 与 required-gate 已通过，通过普通 merge `e67adbed0` 传入 F02，保留原波次提交。Account 启动冲突同时保留可信来源边界、审批 readiness 与分页 metrics。继承测试中 commerce mapping 与审批列表已由 F02 启用，改为验证未登录请求返回 401，其余未启用入口仍验证 404；Account 全量测试通过。
+
+两份原审核的资金、商品发布、支付修复回执、日期约束、追加不可变边界、锁序及未知结果恢复问题均已核实。原评语称创建前崩溃为 RESULT_UNKNOWN 不准确，实际初始为 NOT_STARTED；没有发现 usage LEASED 表，不新增不存在领域的索引。确认的非阻塞项目与旧拒付人工核实记录在 [Issue #1565](https://github.com/Pinvou/pinvou3/issues/1565)。
+
+用户明确要求旧 RESOLVED 拒付保留原状态与证据，禁止自动资金处置，等待人工核实。迁移使用严格校验原 SQL SHA 与指定约束文本的兼容执行，不修改原 SQL 文件或历史 checksum；存在旧记录时状态约束暂为 NOT VALID，新写仍必须满足约束。人工核实及后续验证保持开放，不因本轮代码通过而关闭。
+
+已取得的验证：界面 30 项真实浏览器测试与 Node 13 项通过，三语、build/lint、架构检查通过；真实隔离 PostgreSQL 退款测试通过，涵盖 SUCCESS/FAILED/PENDING、终态重放仅一条 REFUND journal、失败恢复 package、强制退款围栏，以及渠道身份/版本变更零外呼。数据库 owner/旧记录/增量迁移测试通过，验证 runtime 无所有权及 CREATE/TRUNCATE/停用触发器/DROP/伪造 ledger/SET owner 能力，后继低编号迁移可执行且收回权限。
+
+最终验证：当前代码主模块全部 test/vet 与架构检查通过；HTTP 受理意图后 503/COMMAND_RESULT_UNKNOWN、换键 409、原键完成 200 回归通过。真实 PG 金融核心组 183.223 秒通过，无跳过，包含实际同键创建与崩溃恢复、支付修复金融提交后案件回执故障恢复、退款取消释放共同门闩、回调钱包先于订单的锁等待、终态不回退、金融与管理暂停分离。额外退款号/金额/空成功标识三项真实 PG 60.676 秒通过，缺证据保留金额与人工复核且释放活动查询租约。
+
+提交前同类复审追加修复通知来源丢失：入队时保存受信任渠道身份及版本，处理和重复 ID 均核对来源，不能使用正文自报值。900005 不给旧通知回填来源；缺来源的待处理事实进入人工复核，终态回执保持只读。真实 PG 新增组 26.484 秒通过，无跳过，涵盖不同渠道/版本、另一渠道入队后切回原渠道、旧待处理与终态、匹配来源入账仅一次，以及实际 HTTP simulator 验签正例；900005 独立增量与权限收回 4.896 秒通过。受影响包 test/vet、架构检查再次通过。
+
+状态：金融、SQL、界面分别经非作者独立复审通过，本轮已确认阻塞问题已修复；随后提交推送 F02，回复原审核人并申请重审，当前提交 CI 通过后才向 F03 普通 merge 传播。外部审核批准尚未取得，生产部署、真实供应商和完整 E2E 未验收；完整机器可读 API 与旧 RESOLVED 人工核实在 Issue #1565 保持开放。
+
+首个修复提交 `3288de915` 已推送并回复两位原审核人、申请重审。CI 暴露 F02 新增两个 Billing 回调代理仍用静态 DNS，继承部署测试按 F01 的 7 条目标断言；改为两条无 URI 后缀的动态代理并验证实际 9 条目标，部署 3 项测试与官方 nginx 1.30.5 隔离 `-t` 通过。累计差异空白检查同时发现两份冻结 SQL 原有末尾空行和普通 JS 尾空行；普通 JS 修正，SQL 保原字节及 checksum，仅两条精确 `.gitattributes` 路径豁免 `blank-at-eof`，其他空白及新迁移检查保持。基线累计 diff 检查通过，增量独立复审通过；CI 重跑前不向 F03 传播。

@@ -7,6 +7,14 @@ import { AccountPlatformDesktopClient } from '../src/features/account-platform/d
 import { loadFinancePage } from '../src/features/account-platform/admin-finance-pagination.js';
 import { walletReplacementEligible, walletAdjustmentApprovalDraft, currentPendingAdjustment } from '../src/features/account-platform/admin-finance.js';
 import { createAndSubmitFreshGovernedApproval } from '../src/features/account-platform/admin-governed-approval-workflow.js';
+import { paymentAnomalyResolutions } from '../src/features/account-platform/payment-anomaly-resolutions.js';
+
+test('unsupported anomaly types fail closed and callers cannot change other case choices', () => {
+  for (const type of [undefined, 'UNKNOWN', 'toString', '__proto__', 'constructor']) assert.deepEqual(paymentAnomalyResolutions(type), []);
+  const choices = paymentAnomalyResolutions('ILLEGAL_TRANSITION');
+  choices.push('CONFIRM_PAYMENT');
+  assert.deepEqual(paymentAnomalyResolutions('ILLEGAL_TRANSITION'), ['CONFIRM_PROVIDER_FAILED', 'ESCALATE_FINANCIAL_REPAIR']);
+});
 
 const ID = '11111111-1111-4111-8111-111111111111';
 const orderText = `{"order_id":"${ID}","amount_fen":9007199254740993,"status":"PENDING","close_status":"OPEN"}`;

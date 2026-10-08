@@ -327,6 +327,10 @@ func validPaymentAnomalyResolution(anomalyType, resolution, financialStatus stri
 		return anomalyType == "FORCED_REFUND" && financialStatus == "APPLIED"
 	case "CONFIRM_PAYMENT":
 		return (anomalyType == "DUPLICATE_PAYMENT" || anomalyType == "LATE_PAYMENT_CONFLICT") && financialStatus == "APPLIED"
+	case "CONFIRM_PROVIDER_FAILED":
+		return anomalyType == "ILLEGAL_TRANSITION" && financialStatus == "NONE"
+	case "RECONCILE_REFUND":
+		return anomalyType == "REFUND_FAILURE" && financialStatus == "APPLIED"
 	case "DISMISS":
 		return financialStatus == "NONE" && (anomalyType == "CHARGEBACK" || anomalyType == "FORCED_REFUND" || anomalyType == "PAYMENT_FACT_CONFLICT" || anomalyType == "REFUND_FAILURE")
 	default:
@@ -366,11 +370,24 @@ func restoreDismissedPaymentAnomalyEntitlements(ctx context.Context, tx pgx.Tx, 
 		return nil
 	}
 	var pending bool
-	if err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM chargeback_cases WHERE entitlement_package_id=$1 AND status='REVIEW_REQUIRED') OR EXISTS(SELECT 1 FROM forced_refund_cases WHERE entitlement_package_id=$1 AND status='REVIEW_REQUIRED') OR EXISTS(SELECT 1 FROM refunds WHERE entitlement_package_id=$1 AND status IN ('REQUESTED','MANUAL_REVIEW')) OR EXISTS(SELECT 1 FROM member_quota_grants WHERE package_id=$1)`, packageID).Scan(&pending); err != nil {
+	if err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM chargeback_cases WHERE entitlement_package_id=$1 AND status IN ('REVIEW_REQUIRED','RESOLVED')) OR EXISTS(SELECT 1 FROM forced_refund_cases WHERE entitlement_package_id=$1 AND status='REVIEW_REQUIRED') OR EXISTS(SELECT 1 FROM refunds WHERE entitlement_package_id=$1 AND status IN ('REQUESTED','MANUAL_REVIEW'))`, packageID).Scan(&pending); err != nil {
 		return err
 	}
 	if pending {
 		return nil
+	}
+	// Restore only the financial-review suspensions. Administrative suspension,
+	// expiry and revocation remain intact, and no credit is minted or extended.
+	if _, err = tx.Exec(ctx, `WITH restored AS (
+ UPDATE member_quota_grants member_grant SET status='ACTIVE',suspension_reason=NULL,allocation_version=allocation_version+1,updated_at=$2
+ FROM entitlement_components component
+ WHERE member_grant.package_id=$1 AND member_grant.status='SUSPENDED' AND member_grant.suspension_reason IN ('CHARGEBACK_REVIEW','FORCED_REFUND_REVIEW') AND member_grant.expires_at>$2
+ AND component.id=member_grant.component_id AND component.status='FROZEN' AND component.expires_at>$2
+ RETURNING member_grant.component_id,member_grant.available_microcredits
+), totals AS (SELECT component_id,sum(available_microcredits)::bigint amount FROM restored GROUP BY component_id)
+ UPDATE entitlement_components component SET active_grant_microcredits=component.active_grant_microcredits+totals.amount,suspended_grant_microcredits=component.suspended_grant_microcredits-totals.amount,updated_at=$2
+ FROM totals WHERE component.id=totals.component_id`, packageID, now); err != nil {
+		return err
 	}
 	// Clearing a disproved financial fence does not issue or extend rights.
 	// Time-expired rights remain unusable and can enter the ordinary expiry worker;

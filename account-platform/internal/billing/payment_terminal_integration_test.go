@@ -157,5 +157,5 @@ func (p *retainedCreateRaceProvider) Create(ctx context.Context, input payment.O
 	if applied.Status != "PAID" || applied.FulfillmentStatus != "CREDITED" {
 		return ProviderOrder{}, errors.New("controlled successful query did not credit")
 	}
-	return ProviderOrder{MerchantOrderNo: input.MerchantOrderNo, Status: "PENDING", PaymentURL: "https://provider.invalid/pay"}, nil
+	return ProviderOrder{MerchantOrderNo: input.MerchantOrderNo, Channel: input.Channel, AmountFen: input.AmountFen, Currency: input.Currency, ExternalCustomerKey: input.MerchantCustomerKey, ExternalSKU: input.ExternalSKU, Status: "PENDING", PaymentURL: "https://provider.invalid/pay"}, nil
 }

@@ -91,7 +91,9 @@ func (b *Breaker) Record(key string, outcome Outcome) {
 	now := b.now()
 	item := b.item(key)
 	if !item.openUntil.IsZero() && !now.Before(item.openUntil) {
-		if outcome == Success {
+		// A definite business rejection also proves the provider responded.
+		// It must complete the probe rather than exhaust its admission budget.
+		if outcome == Success || outcome == BusinessRejection {
 			item.halfOpenSuccesses++
 			if item.halfOpenSuccesses >= 3 {
 				*item = circuit{}

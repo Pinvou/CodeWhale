@@ -18,7 +18,8 @@ type Broker interface {
 }
 
 type OutboxStore interface {
-	Claim(context.Context, string, int, time.Duration) ([]Event, error)
+	// Claim must filter allowed subjects before taking any delivery lease.
+	Claim(context.Context, string, int, time.Duration, []string) ([]Event, error)
 	MarkPublished(context.Context, string, Event) error
 	MarkFailed(context.Context, string, Event, time.Time, string) error
 	MarkDeadLettered(context.Context, string, Event, string) error
@@ -46,6 +47,9 @@ func (relay Relay) RunOnce(ctx context.Context) (RelayResult, error) {
 	if relay.Store == nil || relay.Broker == nil || relay.WorkerID == "" {
 		return RelayResult{}, errors.New("event relay is not configured")
 	}
+	if !validSubjectScope(relay.AllowedSubjects) {
+		return RelayResult{}, errors.New("event relay subject scope is invalid")
+	}
 	if relay.BatchSize < 1 || relay.BatchSize > 1000 {
 		relay.BatchSize = 100
 	}
@@ -58,18 +62,22 @@ func (relay Relay) RunOnce(ctx context.Context) (RelayResult, error) {
 	if relay.Now == nil {
 		relay.Now = func() time.Time { return time.Now().UTC() }
 	}
-	events, err := relay.Store.Claim(ctx, relay.WorkerID, relay.BatchSize, relay.Lease)
+	events, err := relay.Store.Claim(ctx, relay.WorkerID, relay.BatchSize, relay.Lease, append([]string(nil), relay.AllowedSubjects...))
 	result := RelayResult{Claimed: len(events)}
 	if err != nil {
 		return result, err
+	}
+	// A store violating the claim contract is a configuration failure. Check
+	// the whole batch before publishing or changing any event's retry state.
+	for _, event := range events {
+		if !subjectAllowed(relay.AllowedSubjects, event.Type) {
+			return result, errors.New("event store claimed a subject outside the relay scope")
+		}
 	}
 	for _, event := range events {
 		eventContext := observability.ContextForTrace(ctx, event.ID.String(), event.TraceID)
 		eventContext, span := observability.StartSpan(eventContext, "event.relay.publish")
 		body, marshalErr := event.Marshal()
-		if marshalErr == nil && !subjectAllowed(relay.AllowedSubjects, event.Type) {
-			marshalErr = errors.New("event subject is not permitted for this relay")
-		}
 		if marshalErr == nil {
 			marshalErr = relay.Broker.Publish(eventContext, event.Type, body, publicationID(event))
 		}
@@ -114,9 +122,6 @@ func publicationID(event Event) string {
 }
 
 func subjectAllowed(patterns []string, subject string) bool {
-	if len(patterns) == 0 {
-		return true
-	}
 	for _, pattern := range patterns {
 		pattern = strings.TrimSpace(pattern)
 		if pattern == subject || (strings.HasSuffix(pattern, ".>") && strings.HasPrefix(subject, strings.TrimSuffix(pattern, ">"))) {
@@ -124,6 +129,26 @@ func subjectAllowed(patterns []string, subject string) bool {
 		}
 	}
 	return false
+}
+
+// The store and relay share a narrow grammar: exact subjects or one terminal
+// .> subtree. No implicit all-domain scope or single-token wildcards.
+func validSubjectScope(patterns []string) bool {
+	if len(patterns) == 0 || len(patterns) > 64 {
+		return false
+	}
+	for _, pattern := range patterns {
+		if pattern != strings.TrimSpace(pattern) || len(pattern) > 160 {
+			return false
+		}
+		literal := strings.TrimSuffix(pattern, ".>")
+		for _, part := range strings.Split(literal, ".") {
+			if part == "" || strings.ContainsAny(part, "*>/ \t\r\n") {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func retryDelay(attempt int) time.Duration {

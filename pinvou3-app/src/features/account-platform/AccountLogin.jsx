@@ -56,7 +56,17 @@ export function AccountLogin({ client, copy, onAuthenticated }) {
     try { await action(current); }
     catch (reason) {
       if (current()) {
-        setError(localizedAccountPlatformError(copy, reason));
+        setError(localizedAccountPlatformError(copy, reason, {
+          USERNAME_INVALID: copy.usernameInvalid,
+          USERNAME_ALREADY_REGISTERED: copy.usernameAlreadyRegistered,
+          MOBILE_INVALID: copy.mobileInvalid,
+          MOBILE_ALREADY_REGISTERED: copy.mobileAlreadyRegistered,
+          CAPTCHA_INVALID: copy.captchaInvalid,
+          SMS_RATE_LIMITED: copy.smsRateLimited,
+          SMS_UNAVAILABLE: copy.smsUnavailable,
+          SMS_CODE_INVALID: copy.mobileAuthFailed,
+          MOBILE_AUTH_FAILED: copy.mobileAuthFailed,
+        }));
         if (Number.isFinite(reason?.retryAfterSeconds) && reason.retryAfterSeconds > 0) setCooldown(Math.ceil(reason.retryAfterSeconds));
       }
     } finally { if (current()) setBusy(false); }

@@ -61,3 +61,16 @@ func TestWalletProvisioningWorkerPersistsFailureForRetry(t *testing.T) {
 		t.Fatalf("completed=%s failed=%s", repository.completed, repository.failed)
 	}
 }
+
+func TestWalletProvisioningWorkerDoesNotCallProviderWithExpiredLease(t *testing.T) {
+	for _, until := range []time.Time{{}, time.Now().Add(-time.Minute)} {
+		repository := &walletProvisioningRepositoryFake{jobs: []WalletProvisioningJob{{UserID: uuid.New(), LeaseUntil: until}}}
+		wallets := &fakeWalletProvisioner{}
+		if err := NewWalletProvisioningWorker(repository, wallets, time.Second).RunOnce(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		if wallets.calls != 0 || repository.completed != uuid.Nil || repository.failed != uuid.Nil {
+			t.Fatal("expired lease attempted a wallet operation or acknowledged a successor's job")
+		}
+	}
+}

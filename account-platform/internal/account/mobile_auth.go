@@ -89,6 +89,7 @@ type RegistrationResult struct {
 }
 
 type MobileAuthRepository interface {
+	AdmitPublicMobileRequest(context.Context, string, string, string) error
 	MobileExists(context.Context, string) (bool, error)
 	MobileIdentitySubject(context.Context, string, string) (string, error)
 	AuthorizeMobilePersonalSecurity(context.Context, string, string) (bool, error)
@@ -178,6 +179,13 @@ func NormalizeRegistrationUsername(value string) (string, error) {
 }
 
 func (s *MobileAuthService) PrecheckRegistration(ctx context.Context, rawUsername, rawMobile, passwordHandle, passwordPolicyVersion string) (string, error) {
+	if err := s.repository.AdmitPublicMobileRequest(ctx, "PRECHECK", rawMobile, authRiskFromContext(ctx).source); err != nil {
+		return "", err
+	}
+	return s.precheckRegistration(ctx, rawUsername, rawMobile, passwordHandle, passwordPolicyVersion)
+}
+
+func (s *MobileAuthService) precheckRegistration(ctx context.Context, rawUsername, rawMobile, passwordHandle, passwordPolicyVersion string) (string, error) {
 	username, err := NormalizeRegistrationUsername(rawUsername)
 	if err != nil {
 		return "", err
@@ -220,7 +228,7 @@ func (s *MobileAuthService) Send(ctx context.Context, rawUsername, rawMobile, pa
 	}
 	username := ""
 	if purpose == SMSPurposeRegister {
-		if username, err = s.PrecheckRegistration(ctx, rawUsername, mobile, passwordHandle, passwordPolicyVersion); err != nil {
+		if username, err = s.precheckRegistration(ctx, rawUsername, mobile, passwordHandle, passwordPolicyVersion); err != nil {
 			return SMSChallenge{}, err
 		}
 	}

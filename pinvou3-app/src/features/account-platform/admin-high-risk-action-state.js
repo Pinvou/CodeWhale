@@ -19,4 +19,3 @@ export function validApprovalRequest(value, expected, statuses) {
     && highRiskPayloadKey(value.critical_resource_versions) === highRiskPayloadKey(expected.critical_resource_versions)
     && highRiskPayloadKey(value.financial_snapshot) === highRiskPayloadKey(expected.financial_snapshot);
 }
-
