@@ -444,6 +444,12 @@ mod tests {
         // grace still works) but stops retaining bytes past the cap, and
         // the captured tail says so. The cap is 16 MiB; sending the cap
         // plus overruns proves both the boundary and the drop.
+        //
+        // Named imports, not the unix-gated `use super::*`: the test is
+        // platform-independent (tokio duplex) and must compile — and run —
+        // on Windows too.
+        use super::{DRAIN_CAP_TRUNCATED_NOTE, DRAIN_CAPTURE_CAP, drain_pipe};
+        use std::sync::{Arc, Mutex};
         use tokio::io::AsyncWriteExt;
 
         let (mut writer, reader) = tokio::io::duplex(64 * 1024);
