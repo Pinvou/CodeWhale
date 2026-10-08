@@ -506,7 +506,14 @@ function enforceLazyChunks() {
 // 2026-10-08 516_000 → 486_000: tool marketplace metadata and its post-install
 // welcome card moved out of the startup graph. Measured desktop 481,359 B and
 // web 483,649 B; 486_000 keeps ~2.3 kB headroom over the larger web entry.
-export const MAIN_ENTRY_BUDGET_BYTES = 486_000;
+// 2026-10-08 486_000 → 496_000 (open-source parity backflow rebased onto the
+// lazy marketplace base): the backflow batch adds ~9.6 kB to the entry
+// (#607 conversation virtualization refinements, the voice draft-recovery
+// lifecycle, the shared session-list pipeline, tool-card keyboard access and
+// overlay role cards riding main). Measured desktop 490,984 B and web
+// 493,288 B; 496_000 keeps ~2.7 kB headroom over the larger web entry; the
+// next entry feature again needs a deliberate bump with fresh measurements.
+export const MAIN_ENTRY_BUDGET_BYTES = 496_000;
 
 export function assertMainEntryBudget(bundle, budgetBytes = MAIN_ENTRY_BUDGET_BYTES) {
   const mainEntry = Object.values(bundle).find(output => (
