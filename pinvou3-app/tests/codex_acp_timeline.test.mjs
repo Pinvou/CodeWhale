@@ -908,6 +908,21 @@ try {
     && codexView.includes('onMeasured: () => {')
     && codexView.includes('lastScrollHeightRef.current = scrollElement.scrollHeight'),
   'Codex streaming must retain bottom following across content shrink and asynchronous layout changes');
+  // 虚拟化门控（#607 精修 ③④）：虚拟化下原生锚定与虚拟izer补偿双重作用会打架、
+  // 平滑回底会拖着估高抖动，两视图都必须按同一 shouldVirtualizeConversationTurns
+  // 决策切 overflowAnchor 与回底 behavior。
+  const timelineSource = readFileSync(path.join(root, 'src', 'features', 'conversation', 'ConversationTimeline.jsx'), 'utf8');
+  assert.ok(chatView.includes("behavior: virtualized ? 'auto' : 'smooth'")
+    && chatView.includes("overflowAnchor: shouldVirtualizeConversationTurns(conversationProjection.turns.length, scrollRef) ? 'none' : undefined"),
+  'ChatView 回底平滑度与原生锚定必须按虚拟化门控');
+  assert.ok(codexView.includes("behavior: virtualized ? 'auto' : 'smooth'")
+    && codexView.includes("overflowAnchor: shouldVirtualizeConversationTurns(visibleTurns.length, scroller) ? 'none' : undefined"),
+  'CodexAcpView 回底平滑度与原生锚定必须按虚拟化门控');
+  // 虚拟化精修 ①②：跨阈值重挂保滚动位置 + 切会话清 size cache。
+  assert.ok(timelineSource.includes('initialOffset: () => getScrollElement()?.scrollTop ?? 0')
+    && timelineSource.includes('virtualizer.measure()')
+    && timelineSource.includes('[conversationKey, virtualizer]'),
+  'ConversationTimeline 必须保留 initialOffset 惰性读取与切会话 measure() 清 cache');
   assert.ok(!codexView.includes('<JsonBlock'), 'raw ACP JSON must not leak into normal command UI');
   assert.ok(codexView.includes('await submitAcpPrompt({')
     && codexView.includes('attachments: readyAttachments.map(attachment => attachment.result)')

@@ -1001,6 +1001,24 @@ try {
   assert.equal(happyCard.state, 'done');
   assert.equal(happyCard.success, true, 'the sweep must not downgrade an already-settled tool');
 
+  // 订阅清单不变量：NATIVE_CHAT_EVENTS 必须与 applyNativeChatEvent 的每个
+  // chat:* 分支一一对应。清单缺一项 = 后端广播永远到不了已存在的 handler
+  // （chat:plan_resolved 曾因这一半接线静默失联：handler、后端广播、单测全在，
+  // 唯独清单缺项）。
+  const laneSource = readFileSync(path.join(root, 'src', 'features', 'codex', 'code-native-lane.js'), 'utf8');
+  const acpViewSource = readFileSync(path.join(root, 'src', 'features', 'codex', 'CodexAcpView.jsx'), 'utf8');
+  const handledEvents = [...laneSource.matchAll(/case '(chat:[a-z_]+)':/g)].map(match => match[1]);
+  const listStart = acpViewSource.indexOf('const NATIVE_CHAT_EVENTS = [');
+  const listEnd = acpViewSource.indexOf('];', listStart);
+  assert.ok(listStart >= 0 && listEnd > listStart, 'NATIVE_CHAT_EVENTS must stay declared in CodexAcpView');
+  const listedEvents = [...acpViewSource.slice(listStart, listEnd).matchAll(/'(chat:[a-z_]+)'/g)].map(match => match[1]);
+  assert.ok(handledEvents.length >= 20, 'the native lane must keep handling the full chat event set');
+  assert.deepEqual(
+    [...new Set(handledEvents)].sort(),
+    [...new Set(listedEvents)].sort(),
+    'every applyNativeChatEvent branch needs a NATIVE_CHAT_EVENTS entry (and vice versa)',
+  );
+
   console.log('code_native_lane.test.mjs: all assertions passed');
 } finally {
   rmSync(temp, { recursive: true, force: true });
